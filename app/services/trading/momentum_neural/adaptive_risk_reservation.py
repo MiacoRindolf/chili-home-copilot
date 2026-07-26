@@ -4311,6 +4311,50 @@ class AdaptiveRiskReservationStore:
             ),
         )
 
+    def load_existing_alpaca_paper_reservation(
+        self,
+        request: AdaptiveRiskReservationRequest,
+        *,
+        session: Session | None = None,
+    ) -> AdaptiveReservationDecision | None:
+        """Load one already-committed PAPER reservation without creating risk.
+
+        A captured Alpaca PAPER reservation can be created only by
+        ``reserve(..., locked_alpaca_paper_bundle=...)`` inside the atomic
+        admission transaction.  Broker recovery and lifecycle synchronization
+        run after that transaction has committed, so they no longer possess the
+        process-private lock capability.  This existing-only lookup verifies the
+        immutable request binding and returns durable truth without consulting a
+        clock, resolver, account snapshot, or current risk ledger.
+        """
+
+        if request.inputs.execution_surface != "alpaca_paper":
+            raise AdaptiveRiskContractError(
+                "existing Alpaca PAPER reservation lookup received a different "
+                "execution surface"
+            )
+        with self._transaction(session) as owned:
+            existing = owned.scalar(
+                select(AdaptiveRiskDecisionPacket)
+                .where(
+                    AdaptiveRiskDecisionPacket.account_scope
+                    == request.account_scope
+                )
+                .where(
+                    AdaptiveRiskDecisionPacket.client_order_id
+                    == request.client_order_id
+                )
+                .with_for_update()
+            )
+            if existing is None:
+                return None
+            self._verify_retry(existing, request)
+            return self._decision_from_row(
+                owned,
+                existing,
+                idempotent_retry=True,
+            )
+
     @staticmethod
     def _append_reservation_event(
         session: Session,

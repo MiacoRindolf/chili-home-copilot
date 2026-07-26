@@ -3788,7 +3788,7 @@ def _tick_break_tape_ok(
       executed tape ⇒ don't chase the tick (the caller falls through to its completed-bar
       + volume path, so a dead tape degrades to bar entries instead of going dark)."""
     try:
-        if not bool(getattr(settings, "chili_momentum_tick_break_tape_confirm_enabled", False)):
+        if not bool(getattr(settings, "chili_momentum_tick_break_tape_confirm_enabled", True)):
             return True, {"reason": "confirm_disabled"}
         ok, dbg = tape_confirms_hold(symbol, db=db, settings=settings, l2_as_of=l2_as_of)
         if ok:
@@ -4769,7 +4769,7 @@ def flush_dip_buy_confirmation(
         # pullback_volume_spike_multiple (no new number) with the ORB bar-path tail(21)
         # fallback. FAIL-OPEN when the ratio is uncomputable (thin data never blocks —
         # the stated ORB convention). Kill-switch flag OFF ⇒ skipped ⇒ byte-identical.
-        if bool(getattr(settings, "chili_momentum_flush_dip_volume_gate_enabled", False)):
+        if bool(getattr(settings, "chili_momentum_flush_dip_volume_gate_enabled", True)):
             try:
                 _fd_vol_mult = float(getattr(
                     settings, "chili_momentum_pullback_volume_spike_multiple", 1.5) or 1.5)
@@ -4916,7 +4916,7 @@ def vwap_reclaim_confirmation(
         # low. Legacy reclaim-bar-low behind the ross_stop_alignment kill-switch (OFF ->
         # byte-identical). The 0<stop<level guard holds: level=bar high >= close > vwap.
         level = float(high.iloc[cur])
-        if bool(getattr(settings, "chili_momentum_ross_stop_alignment_enabled", False)):
+        if bool(getattr(settings, "chili_momentum_ross_stop_alignment_enabled", True)):
             stop = float(vwap_cur)
             debug["stop_model"] = "loss_of_vwap"
         else:
@@ -5165,7 +5165,7 @@ def wick_reclaim_confirmation(
         # reclaim bar IS the flush bar this is a no-op (never looser than legacy). Legacy
         # flush-low behind the ross_stop_alignment kill-switch (OFF -> byte-identical).
         level = wick_high
-        if bool(getattr(settings, "chili_momentum_ross_stop_alignment_enabled", False)):
+        if bool(getattr(settings, "chili_momentum_ross_stop_alignment_enabled", True)):
             stop = max(float(flush_low), float(low.iloc[cur]))
             debug["stop_model"] = "reclaim_bar_low"
         else:
@@ -5465,7 +5465,7 @@ def ross_abcd_confirmation(
         # falls through to the completed-bar + volume-spike path below.
         if live_price is not None and float(live_price) > 0 and float(live_price) > level:
             _confirm_on = bool(getattr(
-                settings, "chili_momentum_tick_break_tape_confirm_enabled", False))
+                settings, "chili_momentum_tick_break_tape_confirm_enabled", True))
             if not _confirm_on:
                 # kill-switch OFF -> exact legacy naked-tick behavior (byte-identical)
                 debug["tick_break"] = True
@@ -6549,7 +6549,7 @@ def sub_vwap_trap_entry(
     with NO side effects; fail-OPEN on any error."""
     debug: dict[str, Any] = {"entry_interval": entry_interval, "pattern": "sub_vwap_trap"}
     try:
-        if not bool(getattr(settings, "chili_momentum_sub_vwap_trap_entry_enabled", False)):
+        if not bool(getattr(settings, "chili_momentum_sub_vwap_trap_entry_enabled", True)):
             return False, "sub_vwap_trap_disabled", debug
         if df is None or getattr(df, "empty", True) or len(df) < 10:
             return False, "sub_vwap_trap_insufficient_bars", debug
@@ -7281,7 +7281,7 @@ def inverse_head_shoulders_confirmation(
         # right shoulder has already failed the structure. Legacy head-low behind the
         # ross_stop_alignment kill-switch (OFF -> byte-identical).
         level = neckline
-        if bool(getattr(settings, "chili_momentum_ross_stop_alignment_enabled", False)):
+        if bool(getattr(settings, "chili_momentum_ross_stop_alignment_enabled", True)):
             stop = rs_l
             debug["stop_model"] = "right_shoulder_low"
         else:
@@ -9754,7 +9754,7 @@ def opening_range_breakout_confirmation(
             # the completed-bar + volume-spike path below (dead tape degrades to bar
             # entries instead of going dark).
             _confirm_on = bool(getattr(
-                settings, "chili_momentum_tick_break_tape_confirm_enabled", False))
+                settings, "chili_momentum_tick_break_tape_confirm_enabled", True))
             if _confirm_on:
                 _tape_ok, _tape_dbg = _tick_break_tape_ok(
                     symbol, db=db, settings=settings, l2_as_of=l2_as_of)

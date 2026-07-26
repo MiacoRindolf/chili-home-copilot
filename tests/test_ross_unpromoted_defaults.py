@@ -1,17 +1,14 @@
-"""Default containment for unpromoted Ross-parity experiments.
-
-Mechanism tests may opt individual candidates in explicitly.  Missing or
-unprojected settings must preserve the previously deployed behavior until a
-sealed paired OOS result earns promotion.
-"""
+"""Operator-approved default-ON momentum levers and exact kill switches."""
 from __future__ import annotations
 
+import ast
 import inspect
+from pathlib import Path
 
 from app.config import Settings
 
 
-_UNPROMOTED_DEFAULTS = (
+_USER_APPROVED_DEFAULT_ON = (
     "chili_momentum_sub_vwap_trap_entry_enabled",
     "chili_momentum_bail_on_no_confirmation_enabled",
     "chili_momentum_catalyst_arb_flat_gate_enabled",
@@ -24,12 +21,12 @@ _UNPROMOTED_DEFAULTS = (
 )
 
 
-def test_unpromoted_candidates_are_opt_in():
-    for name in _UNPROMOTED_DEFAULTS:
-        assert Settings.model_fields[name].default is False, name
+def test_user_approved_momentum_levers_default_on():
+    for name in _USER_APPROVED_DEFAULT_ON:
+        assert Settings.model_fields[name].default is True, name
 
 
-def test_missing_setting_fallbacks_do_not_silently_promote_candidates():
+def test_missing_setting_fallbacks_preserve_default_on_doctrine():
     from app.services.trading.momentum_neural import (
         entry_gates,
         live_runner,
@@ -49,9 +46,45 @@ def test_missing_setting_fallbacks_do_not_silently_promote_candidates():
         "chili_momentum_orb_ihs_structural_stop_enabled": (live_runner,),
         "chili_momentum_fresh_ignition_reentry_bypass_enabled": (live_runner,),
     }
-    assert set(owners) == set(_UNPROMOTED_DEFAULTS)
+    assert set(owners) == set(_USER_APPROVED_DEFAULT_ON)
     for name, modules in owners.items():
         for module in modules:
             source = inspect.getsource(module)
-            assert f'getattr(settings, "{name}", True)' not in source
-            assert f'getattr(_settings, "{name}", True)' not in source
+            defaults = [
+                call.args[2].value
+                for call in ast.walk(ast.parse(source))
+                if isinstance(call, ast.Call)
+                and isinstance(call.func, ast.Name)
+                and call.func.id == "getattr"
+                and len(call.args) >= 3
+                and isinstance(call.args[1], ast.Constant)
+                and call.args[1].value == name
+                and isinstance(call.args[2], ast.Constant)
+            ]
+            assert defaults, (name, module.__name__)
+            assert set(defaults) == {True}, (name, module.__name__, defaults)
+
+
+def test_legacy_ab_tool_uses_an_explicit_off_baseline() -> None:
+    source = (
+        Path(__file__).resolve().parents[1] / "scripts" / "replay_ab_dark_flags.py"
+    ).read_text(encoding="utf-8")
+    assignments = [
+        node
+        for node in ast.walk(ast.parse(source))
+        if isinstance(node, ast.Assign)
+        and any(
+            isinstance(target, ast.Name) and target.id == "ARMS"
+            for target in node.targets
+        )
+    ]
+    assert len(assignments) == 1
+    arms = ast.literal_eval(assignments[0].value)
+    assert arms["base"] == {
+        "chili_momentum_sub_vwap_trap_entry_enabled": False,
+        "chili_momentum_bail_on_no_confirmation_enabled": False,
+    }
+    assert arms["both"] == {
+        "chili_momentum_sub_vwap_trap_entry_enabled": True,
+        "chili_momentum_bail_on_no_confirmation_enabled": True,
+    }

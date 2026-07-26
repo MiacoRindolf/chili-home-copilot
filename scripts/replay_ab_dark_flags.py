@@ -1,9 +1,12 @@
-"""DARK-FLAG A/B — the REAL live FSM (tick_live_session) driven across a recorded tape
-window, with the two remaining default-OFF flags flipped per arm:
-  ARM=base : origin/main defaults (inv-H&S + bottom-reversal already ON on main)
-  ARM=trap : + chili_momentum_sub_vwap_trap_entry_enabled=True
-  ARM=bail : + chili_momentum_bail_on_no_confirmation_enabled=True
-  ARM=both : + both
+"""Explicit OFF-vs-ON A/B of the real live FSM across a recorded tape window.
+
+The two levers are default-ON in production.  This diagnostic therefore uses
+an explicit both-OFF baseline and never treats an empty/default mapping as the
+baseline:
+  ARM=base : both explicit OFF
+  ARM=trap : trap ON, bailout OFF
+  ARM=bail : trap OFF, bailout ON
+  ARM=both : both ON (the production default)
 Derived from replay_window.py (all 9 replay gotchas retained). READ-ONLY on chili; the
 throwaway sim DB comes from TEST_DATABASE_URL (use chili_replay2_test — NOT chili_test,
 pytest truncates it). SYMBOL/WIN_START/WIN_END/OHLCV_START env-parameterized as before.
@@ -622,12 +625,26 @@ def main():
     print(f"  grid_steps(after {GRID_STEP_S}s downsample)={len(grid)}")
     if not grid:
         print("NO GRID — tape missing. Abort."); return
+    # Both levers are default-ON in production.  An A/B baseline therefore
+    # MUST state the two OFF values explicitly; an empty mapping is the live
+    # treatment and would make every arm economically identical.
     ARMS = {
-        "base": {},
-        "trap": {"chili_momentum_sub_vwap_trap_entry_enabled": True},
-        "bail": {"chili_momentum_bail_on_no_confirmation_enabled": True},
-        "both": {"chili_momentum_sub_vwap_trap_entry_enabled": True,
-                 "chili_momentum_bail_on_no_confirmation_enabled": True},
+        "base": {
+            "chili_momentum_sub_vwap_trap_entry_enabled": False,
+            "chili_momentum_bail_on_no_confirmation_enabled": False,
+        },
+        "trap": {
+            "chili_momentum_sub_vwap_trap_entry_enabled": True,
+            "chili_momentum_bail_on_no_confirmation_enabled": False,
+        },
+        "bail": {
+            "chili_momentum_sub_vwap_trap_entry_enabled": False,
+            "chili_momentum_bail_on_no_confirmation_enabled": True,
+        },
+        "both": {
+            "chili_momentum_sub_vwap_trap_entry_enabled": True,
+            "chili_momentum_bail_on_no_confirmation_enabled": True,
+        },
     }
     arm_name = os.environ.get("ARM", "base").strip().lower()
     if arm_name not in ARMS:

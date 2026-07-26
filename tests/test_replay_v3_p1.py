@@ -138,6 +138,15 @@ def _grid_with_entry_then_stop(symbol: str) -> list[rv3.RecordedNbboTick]:
 @pytest.fixture
 def _enable_runner(monkeypatch):
     monkeypatch.setattr(settings, "chili_momentum_live_runner_enabled", True)
+    # P1 is the legacy economic-seed diagnostic.  Ortex v2 has its own sealed
+    # replay/PAPER parity suites, so use its public kill switch here instead of
+    # fabricating provider authority in a test of a different boundary.
+    monkeypatch.setattr(
+        settings,
+        "chili_momentum_squeeze_fuel_tilt_enabled",
+        False,
+        raising=False,
+    )
     # Venue-connectivity preflight is always-false in the test env (no creds); force connected
     # so the tick reaches the FSM logic (the #565 preflight has its own test).
     monkeypatch.setattr(lr, "_venue_broker_connected", lambda ef: True)

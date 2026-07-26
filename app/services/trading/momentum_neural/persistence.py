@@ -577,6 +577,33 @@ def persist_neural_momentum_tick(
     ensure_momentum_strategy_variants(db)
 
     exec_json = features.to_public_dict()
+
+    def _row_execution_readiness(symbol: str) -> dict[str, Any]:
+        """Persist only this row's scanner member, not the whole field N times."""
+
+        row_json = dict(exec_json)
+        extra = row_json.get("extra")
+        if not isinstance(extra, dict):
+            return row_json
+        row_extra = dict(extra)
+        signals = row_extra.get("ross_signals")
+        if isinstance(signals, dict):
+            current = next(
+                (
+                    value
+                    for raw_symbol, value in signals.items()
+                    if str(raw_symbol or "").strip().upper()
+                    == str(symbol or "").strip().upper()
+                ),
+                None,
+            )
+            row_extra["ross_signals"] = (
+                {str(symbol or "").strip().upper(): dict(current)}
+                if isinstance(current, dict)
+                else {}
+            )
+        row_json["extra"] = row_extra
+        return row_json
     now = observed_at or datetime.utcnow()
     if now.tzinfo is not None:
         now = now.astimezone(timezone.utc).replace(tzinfo=None)
@@ -616,6 +643,7 @@ def persist_neural_momentum_tick(
             "extreme_vol_risk_bounded": bool(row.get("extreme_vol_risk_bounded", False)),
         }
         evidence_window: dict[str, Any] = {"note": "phase2_placeholder"}
+        row_exec_json = _row_execution_readiness(symbol)
 
         stmt = pg_insert(MomentumSymbolViability).values(
             symbol=symbol,
@@ -626,7 +654,7 @@ def persist_neural_momentum_tick(
             live_eligible=bool(row.get("live_eligible", False)),
             freshness_ts=now,
             regime_snapshot_json=dict(regime_snapshot),
-            execution_readiness_json=dict(exec_json),
+            execution_readiness_json=row_exec_json,
             explain_json=explain,
             evidence_window_json=evidence_window,
             source_node_id=source_node_id,
@@ -643,7 +671,7 @@ def persist_neural_momentum_tick(
                 "live_eligible": bool(row.get("live_eligible", False)),
                 "freshness_ts": now,
                 "regime_snapshot_json": dict(regime_snapshot),
-                "execution_readiness_json": dict(exec_json),
+                "execution_readiness_json": row_exec_json,
                 "explain_json": explain,
                 "evidence_window_json": evidence_window,
                 "source_node_id": source_node_id,

@@ -89,6 +89,17 @@ SCANNER_SNAPSHOT_PROVIDER = "massive_rest_scanner"
 SCANNER_SNAPSHOT_PROVIDER_OPERATION = "get_full_market_snapshot"
 SCANNER_SNAPSHOT_PROVIDER_MIN_CACHE_TTL_SECONDS = 60.0
 SCANNER_SNAPSHOT_PROVIDER_MAX_CACHE_TTL_SECONDS = 1_800.0
+ORTEX_SELECTION_SNAPSHOT_SCHEMA_VERSION = "chili.ortex-selection-snapshot.v1"
+ORTEX_SELECTION_CAPTURE_QUERY_SCHEMA_VERSION = (
+    "chili.ortex-selection-capture-query.v1"
+)
+ORTEX_SQUEEZE_FUEL_BATCH_SCHEMA_VERSION = (
+    "chili.ortex.squeeze-fuel-batch.v1"
+)
+ORTEX_SQUEEZE_FUEL_BATCH_REF_SCHEMA_VERSION = (
+    "chili.ortex.squeeze-fuel-batch-ref.v1"
+)
+ORTEX_SNAPSHOT_PROVIDER = "ortex_api_v1"
 _FIRST_DIP_TAPE_PURPOSE_DETECTOR = "detector"
 _FIRST_DIP_TAPE_PURPOSE_PRE_RESERVATION = "pre_reservation"
 _FIRST_DIP_TAPE_PURPOSES = frozenset(
@@ -98,6 +109,7 @@ _FIRST_DIP_TAPE_PURPOSES = frozenset(
     }
 )
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
+_ORTEX_BATCH_SYMBOL_RE = re.compile(r"^[A-Z][A-Z0-9.-]{0,35}$")
 _PRODUCER_ID_RE = re.compile(r"^[a-z0-9][a-z0-9_.-]{0,127}$")
 _LIFECYCLE_REASON_RE = re.compile(r"^[a-z0-9][a-z0-9_.-]{0,127}$")
 
@@ -2710,6 +2722,1394 @@ class CaptureScannerSnapshot:
             share_volume=resolved["share_volume"],
             dollar_volume=resolved["dollar_volume"],
         )
+
+
+def _ortex_optional_number(
+    value: Any,
+    field_name: str,
+    *,
+    minimum: float | None = None,
+    maximum: float | None = None,
+) -> float | None:
+    if value is None:
+        return None
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise CaptureContractError(f"{field_name} must be a finite number or null")
+    parsed = float(value)
+    if not math.isfinite(parsed):
+        raise CaptureContractError(f"{field_name} must be a finite number or null")
+    if minimum is not None and parsed < minimum:
+        raise CaptureContractError(f"{field_name} is below its minimum")
+    if maximum is not None and parsed > maximum:
+        raise CaptureContractError(f"{field_name} is above its maximum")
+    return parsed
+
+
+_ORTEX_SQUEEZE_BATCH_FIELDS = {
+    "schema_version",
+    "decision_at",
+    "complete",
+    "quota_policy_sha256",
+    "selected_symbols",
+    "members",
+    "members_sha256",
+    "batch_sha256",
+}
+_ORTEX_SQUEEZE_BATCH_REF_FIELDS = {
+    "schema_version",
+    "batch_sha256",
+    "decision_at",
+    "complete",
+    "quota_policy_sha256",
+    "members_sha256",
+}
+_ORTEX_SQUEEZE_BATCH_MEMBER_FIELDS = {
+    "symbol",
+    "ortex_selection_reference",
+    "squeeze_fuel_pct",
+    "squeeze_fuel_rank_pct",
+}
+_ORTEX_SELECTION_REFERENCE_FIELDS = {
+    "schema",
+    "version",
+    "outcome_capture_sha256",
+    "kind",
+    "symbol",
+    "requested_exchange",
+    "resolved_exchange",
+    "short_interest_pct",
+    "cost_to_borrow",
+    "utilization",
+    "is_easy_to_borrow",
+    "provider_event_at",
+    "effective_at",
+    "received_at",
+    "available_at",
+    "detail_code",
+    "quota_policy_sha256",
+    "cache_origin_sha256",
+    "cache_origin_received_at",
+    "cache_origin_available_at",
+    "endpoint_refs",
+    "selection_reference_sha256",
+}
+_ORTEX_SELECTION_ENDPOINT_REFERENCE_FIELDS = {
+    "dataset",
+    "kind",
+    "exchange",
+    "attempt_id",
+    "request_sha256",
+    "raw_response_sha256",
+    "endpoint_capture_sha256",
+    "selected_row_sha256",
+    "http_status",
+    "provider_event_at",
+    "effective_at",
+    "received_at",
+    "available_at",
+    "value",
+}
+_ORTEX_SELECTION_ENDPOINT_DATASETS = {
+    "cost_to_borrow",
+    "short_interest",
+}
+_ORTEX_NOT_PROVIDER_CALLED_DETAILS = {
+    "outside_top_n",
+    "non_equity",
+}
+
+
+def _ortex_exact_sha256(value: Any, field_name: str) -> str:
+    if not isinstance(value, str) or _SHA256_RE.fullmatch(value) is None:
+        raise CaptureContractError(
+            f"{field_name} must be an exact lowercase SHA256"
+        )
+    return value
+
+
+def _ortex_decision_clock(value: Any, field_name: str) -> datetime:
+    parsed = _parse_utc(value, field_name)
+    if not isinstance(value, str) or value != parsed.isoformat():
+        raise CaptureContractError(
+            f"{field_name} must be canonical +00:00 UTC"
+        )
+    return parsed
+
+
+def _ortex_reference_clock(
+    value: Any,
+    field_name: str,
+    *,
+    optional: bool = False,
+) -> datetime | None:
+    if value is None and optional:
+        return None
+    parsed = _parse_utc(value, field_name)
+    canonical = parsed.isoformat(timespec="microseconds").replace(
+        "+00:00",
+        "Z",
+    )
+    if value != canonical:
+        raise CaptureContractError(
+            f"{field_name} must be canonical microsecond UTC"
+        )
+    return parsed
+
+
+def validate_ortex_selection_endpoint_discovery_chain(
+    endpoint_refs: Sequence[Mapping[str, Any]],
+    *,
+    symbol: str,
+    aggregate_kind: str,
+    requested_exchange: str | None,
+    resolved_exchange: str | None,
+    expected_quota_policy_sha256: str,
+) -> None:
+    """Validate the exact SI-discovery -> CTB transport grammar.
+
+    Ortex exchange discovery is causal, not lexicographic: short-interest is
+    attempted in the sealed policy's exchange order until one authoritative
+    result proves the exchange.  Only then may one cost-to-borrow request run,
+    on that same exchange, as the terminal attempt.  The compact reference
+    preserves that producer order.
+    """
+
+    try:
+        from .short_mechanics import OrtexOutcomeKind, ortex_public_policy
+
+        policy = ortex_public_policy()
+        typed_aggregate_kind = OrtexOutcomeKind(aggregate_kind)
+    except (ImportError, KeyError, TypeError, ValueError) as exc:
+        raise CaptureContractError(
+            "Ortex endpoint discovery policy is unavailable"
+        ) from exc
+    if sha256_json(policy) != expected_quota_policy_sha256:
+        raise CaptureContractError(
+            "Ortex endpoint discovery policy hash mismatch"
+        )
+    raw_discovery_order = policy.get("discovery_exchanges")
+    if (
+        not isinstance(raw_discovery_order, list)
+        or not raw_discovery_order
+        or any(
+            not isinstance(exchange, str)
+            or not exchange
+            or exchange != exchange.strip().lower()
+            for exchange in raw_discovery_order
+        )
+    ):
+        raise CaptureContractError(
+            "Ortex endpoint discovery exchange policy is invalid"
+        )
+    discovery_order = tuple(raw_discovery_order)
+    if len(set(discovery_order)) != len(discovery_order):
+        raise CaptureContractError(
+            "Ortex endpoint discovery exchanges are not unique"
+        )
+    for field_name, exchange in (
+        ("requested_exchange", requested_exchange),
+        ("resolved_exchange", resolved_exchange),
+    ):
+        if exchange is not None and (
+            not isinstance(exchange, str)
+            or exchange not in discovery_order
+        ):
+            raise CaptureContractError(
+                f"Ortex endpoint discovery {field_name} is invalid"
+            )
+
+    seen_pairs: set[tuple[str, str]] = set()
+    seen_attempt_ids: set[str] = set()
+    next_discovery_index = 0
+    proof_exchange: str | None = None
+    ctb_seen = False
+    prior_available_at: datetime | None = None
+    last_exchange: str | None = None
+    authoritative_kinds = {
+        OrtexOutcomeKind.SUCCESS,
+        OrtexOutcomeKind.AUTHORITATIVE_EMPTY,
+    }
+    for index, raw_endpoint in enumerate(endpoint_refs):
+        if not isinstance(raw_endpoint, Mapping):
+            raise CaptureContractError(
+                "Ortex endpoint discovery member is invalid"
+            )
+        endpoint = dict(raw_endpoint)
+        dataset = str(endpoint.get("dataset") or "")
+        exchange = str(endpoint.get("exchange") or "")
+        if dataset not in _ORTEX_SELECTION_ENDPOINT_DATASETS:
+            raise CaptureContractError(
+                "Ortex endpoint discovery dataset is invalid"
+            )
+        if exchange not in discovery_order:
+            raise CaptureContractError(
+                "Ortex endpoint discovery exchange is invalid"
+            )
+        pair = (exchange, dataset)
+        if pair in seen_pairs:
+            raise CaptureContractError(
+                "Ortex endpoint discovery repeats exchange/dataset"
+            )
+        seen_pairs.add(pair)
+        attempt_id = str(endpoint.get("attempt_id") or "")
+        if attempt_id in seen_attempt_ids:
+            raise CaptureContractError(
+                "Ortex endpoint discovery repeats attempt identity"
+            )
+        seen_attempt_ids.add(attempt_id)
+        try:
+            endpoint_kind = OrtexOutcomeKind(
+                str(endpoint.get("kind") or "")
+            )
+        except ValueError as exc:
+            raise CaptureContractError(
+                "Ortex endpoint discovery outcome kind is invalid"
+            ) from exc
+
+        received_at = _ortex_reference_clock(
+            endpoint.get("received_at"),
+            "Ortex endpoint discovery received_at",
+        )
+        available_at = _ortex_reference_clock(
+            endpoint.get("available_at"),
+            "Ortex endpoint discovery available_at",
+        )
+        assert received_at is not None and available_at is not None
+        if received_at > available_at or (
+            prior_available_at is not None
+            and received_at < prior_available_at
+        ):
+            raise CaptureContractError(
+                "Ortex endpoint discovery clocks are out of order"
+            )
+        prior_available_at = available_at
+
+        suffix = (
+            "short_interest"
+            if dataset == "short_interest"
+            else "ctb/all"
+        )
+        path = f"/stock/{exchange}/{symbol}/{suffix}"
+        query_sha256 = sha256_json(
+            {
+                "provider": "ortex",
+                "dataset": dataset,
+                "symbol": symbol,
+                "exchange": exchange,
+                "path": path,
+            }
+        )
+        expected_request_sha256 = sha256_json(
+            {
+                "method": "GET",
+                "origin": policy.get("origin"),
+                "api_prefix": policy.get("api_prefix"),
+                "query_sha256": query_sha256,
+                "quota_policy_sha256": expected_quota_policy_sha256,
+            }
+        )
+        if endpoint.get("request_sha256") != expected_request_sha256:
+            raise CaptureContractError(
+                "Ortex endpoint discovery request hash drift"
+            )
+
+        if dataset == "short_interest":
+            if ctb_seen or proof_exchange is not None:
+                raise CaptureContractError(
+                    "Ortex endpoint discovery has SI after exchange proof"
+                )
+            if requested_exchange is not None:
+                if index != 0 or exchange != requested_exchange:
+                    raise CaptureContractError(
+                        "Ortex endpoint discovery violates requested exchange"
+                    )
+            else:
+                if (
+                    next_discovery_index >= len(discovery_order)
+                    or exchange
+                    != discovery_order[next_discovery_index]
+                ):
+                    raise CaptureContractError(
+                        "Ortex endpoint discovery exchange order is invalid"
+                    )
+                next_discovery_index += 1
+            if endpoint_kind in authoritative_kinds:
+                proof_exchange = exchange
+            elif (
+                endpoint_kind
+                is not OrtexOutcomeKind.UNSUPPORTED_SYMBOL_OR_EXCHANGE
+                and index != len(endpoint_refs) - 1
+            ):
+                raise CaptureContractError(
+                    "Ortex endpoint discovery continued after unavailable SI"
+                )
+        else:
+            if (
+                proof_exchange is None
+                or ctb_seen
+                or exchange != proof_exchange
+                or index != len(endpoint_refs) - 1
+            ):
+                raise CaptureContractError(
+                    "Ortex CTB was not terminal after same-exchange SI proof"
+                )
+            ctb_seen = True
+        last_exchange = exchange
+
+    if typed_aggregate_kind in authoritative_kinds and (
+        proof_exchange is None or not ctb_seen
+    ):
+        raise CaptureContractError(
+            "Ortex authoritative aggregate lacks SI proof and terminal CTB"
+        )
+    if proof_exchange is not None:
+        if resolved_exchange != proof_exchange:
+            raise CaptureContractError(
+                "Ortex resolved exchange differs from SI proof"
+            )
+    elif resolved_exchange is not None and resolved_exchange != last_exchange:
+        raise CaptureContractError(
+            "Ortex unresolved exchange differs from terminal SI attempt"
+        )
+    if (
+        requested_exchange is not None
+        and resolved_exchange is not None
+        and requested_exchange != resolved_exchange
+    ):
+        raise CaptureContractError(
+            "Ortex requested/resolved exchange mismatch"
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class ValidatedOrtexSqueezeFuelBatchReference:
+    payload: Mapping[str, Any]
+    batch_sha256: str
+    decision_at: datetime
+    complete: bool
+    quota_policy_sha256: str
+    members_sha256: str
+
+
+@dataclass(frozen=True, slots=True)
+class ValidatedOrtexSqueezeFuelBatchManifest:
+    payload: Mapping[str, Any]
+    batch_sha256: str
+    decision_at: datetime
+    complete: bool
+    quota_policy_sha256: str
+    members_sha256: str
+    selected_symbols: tuple[str, ...]
+    signal_by_symbol: Mapping[str, Any]
+    oldest_source_received_at: datetime
+    latest_source_available_at: datetime
+
+
+def validate_ortex_squeeze_fuel_batch_reference(
+    raw: Mapping[str, Any],
+    *,
+    read_at: datetime,
+    expected_quota_policy_sha256: str,
+) -> ValidatedOrtexSqueezeFuelBatchReference:
+    """Validate the compact viability-row pointer to one hub manifest."""
+
+    if not isinstance(raw, Mapping) or set(raw) != (
+        _ORTEX_SQUEEZE_BATCH_REF_FIELDS
+    ):
+        raise CaptureContractError(
+            "Ortex squeeze batch reference fields do not match schema"
+        )
+    if (
+        raw.get("schema_version")
+        != ORTEX_SQUEEZE_FUEL_BATCH_REF_SCHEMA_VERSION
+    ):
+        raise CaptureContractError(
+            "Ortex squeeze batch reference schema is unsupported"
+        )
+    batch_sha256 = _ortex_exact_sha256(
+        raw.get("batch_sha256"),
+        "Ortex squeeze batch reference batch_sha256",
+    )
+    members_sha256 = _ortex_exact_sha256(
+        raw.get("members_sha256"),
+        "Ortex squeeze batch reference members_sha256",
+    )
+    policy_sha256 = _ortex_exact_sha256(
+        raw.get("quota_policy_sha256"),
+        "Ortex squeeze batch reference quota_policy_sha256",
+    )
+    if policy_sha256 != expected_quota_policy_sha256:
+        raise CaptureContractError(
+            "Ortex squeeze batch reference policy mismatch"
+        )
+    decision_at = _ortex_decision_clock(
+        raw.get("decision_at"),
+        "Ortex squeeze batch reference decision_at",
+    )
+    if decision_at > _utc(read_at, "Ortex squeeze batch reference read_at"):
+        raise CaptureContractError(
+            "Ortex squeeze batch reference decision clock is from the future"
+        )
+    complete = raw.get("complete")
+    if type(complete) is not bool:
+        raise CaptureContractError(
+            "Ortex squeeze batch reference complete must be bool"
+        )
+    return ValidatedOrtexSqueezeFuelBatchReference(
+        payload=_freeze_canonical_json(raw),
+        batch_sha256=batch_sha256,
+        decision_at=decision_at,
+        complete=complete,
+        quota_policy_sha256=policy_sha256,
+        members_sha256=members_sha256,
+    )
+
+
+def _validate_ortex_selection_reference(
+    raw: Any,
+    *,
+    expected_symbol: str,
+    expected_quota_policy_sha256: str,
+    read_at: datetime,
+    freshness_ttl_seconds: float,
+) -> tuple[Mapping[str, Any], str, datetime, datetime, float | None]:
+    if not isinstance(raw, Mapping) or set(raw) != (
+        _ORTEX_SELECTION_REFERENCE_FIELDS
+    ):
+        raise CaptureContractError(
+            "Ortex selection reference fields do not match schema"
+        )
+    reference = dict(raw)
+    if (
+        reference.get("schema") != "chili.ortex.selection-reference.v1"
+        or reference.get("version") != 1
+        or reference.get("symbol") != expected_symbol
+    ):
+        raise CaptureContractError("Ortex selection reference identity mismatch")
+    claimed_reference_sha256 = _ortex_exact_sha256(
+        reference.get("selection_reference_sha256"),
+        "Ortex selection reference selection_reference_sha256",
+    )
+    unsigned = dict(reference)
+    unsigned.pop("selection_reference_sha256", None)
+    if sha256_json(unsigned) != claimed_reference_sha256:
+        raise CaptureContractError(
+            "Ortex selection reference content hash mismatch"
+        )
+    _ortex_exact_sha256(
+        reference.get("outcome_capture_sha256"),
+        "Ortex selection reference outcome_capture_sha256",
+    )
+    policy_sha256 = _ortex_exact_sha256(
+        reference.get("quota_policy_sha256"),
+        "Ortex selection reference quota_policy_sha256",
+    )
+    if policy_sha256 != expected_quota_policy_sha256:
+        raise CaptureContractError("Ortex selection reference policy mismatch")
+
+    try:
+        from .short_mechanics import OrtexOutcomeKind
+
+        kind = OrtexOutcomeKind(str(reference.get("kind") or "")).value
+    except (ImportError, ValueError) as exc:
+        raise CaptureContractError(
+            "Ortex selection reference outcome kind is invalid"
+        ) from exc
+    detail_code = str(reference.get("detail_code") or "").strip()
+    if not detail_code or detail_code != reference.get("detail_code"):
+        raise CaptureContractError(
+            "Ortex selection reference detail code is invalid"
+        )
+    if (kind == "NOT_APPLICABLE") != (
+        detail_code in _ORTEX_NOT_PROVIDER_CALLED_DETAILS
+    ):
+        raise CaptureContractError(
+            "Ortex selection reference provider-call semantics mismatch"
+        )
+
+    received_at = _ortex_reference_clock(
+        reference.get("received_at"),
+        "Ortex selection reference received_at",
+    )
+    available_at = _ortex_reference_clock(
+        reference.get("available_at"),
+        "Ortex selection reference available_at",
+    )
+    assert received_at is not None and available_at is not None
+    provider_event_at = _ortex_reference_clock(
+        reference.get("provider_event_at"),
+        "Ortex selection reference provider_event_at",
+        optional=True,
+    )
+    effective_at = _ortex_reference_clock(
+        reference.get("effective_at"),
+        "Ortex selection reference effective_at",
+        optional=True,
+    )
+    if (
+        received_at > available_at
+        or available_at > read_at
+        or (
+            provider_event_at is not None
+            and provider_event_at > available_at
+        )
+        or effective_at is not None
+        and effective_at > available_at
+    ):
+        raise CaptureContractError(
+            "Ortex selection reference carries a future/reversed clock"
+        )
+
+    cache_values = (
+        reference.get("cache_origin_sha256"),
+        reference.get("cache_origin_received_at"),
+        reference.get("cache_origin_available_at"),
+    )
+    if any(value is not None for value in cache_values) != all(
+        value is not None for value in cache_values
+    ):
+        raise CaptureContractError(
+            "Ortex selection reference cache provenance is incomplete"
+        )
+    if all(value is not None for value in cache_values):
+        _ortex_exact_sha256(
+            cache_values[0],
+            "Ortex selection reference cache_origin_sha256",
+        )
+        source_received_at = _ortex_reference_clock(
+            cache_values[1],
+            "Ortex selection reference cache_origin_received_at",
+        )
+        source_available_at = _ortex_reference_clock(
+            cache_values[2],
+            "Ortex selection reference cache_origin_available_at",
+        )
+        assert (
+            source_received_at is not None
+            and source_available_at is not None
+        )
+    else:
+        source_received_at = received_at
+        source_available_at = available_at
+    if (
+        source_received_at > source_available_at
+        or source_available_at > available_at
+    ):
+        raise CaptureContractError(
+            "Ortex selection reference source clocks are reversed"
+        )
+    source_age = (read_at - source_received_at).total_seconds()
+    if source_age < 0.0:
+        raise CaptureContractError(
+            "Ortex selection reference source clock is from the future"
+        )
+    if source_age > freshness_ttl_seconds:
+        raise CaptureContractError("Ortex selection reference is stale")
+
+    endpoint_refs = reference.get("endpoint_refs")
+    if not isinstance(endpoint_refs, list):
+        raise CaptureContractError(
+            "Ortex selection endpoint references must be an array"
+        )
+    attempt_ids: set[str] = set()
+    for raw_endpoint in endpoint_refs:
+        if not isinstance(raw_endpoint, Mapping) or set(raw_endpoint) != (
+            _ORTEX_SELECTION_ENDPOINT_REFERENCE_FIELDS
+        ):
+            raise CaptureContractError(
+                "Ortex selection endpoint reference fields do not match schema"
+            )
+        endpoint = dict(raw_endpoint)
+        dataset = str(endpoint.get("dataset") or "")
+        if dataset not in _ORTEX_SELECTION_ENDPOINT_DATASETS:
+            raise CaptureContractError(
+                "Ortex selection endpoint reference dataset is invalid"
+            )
+        try:
+            attempt_id = str(uuid.UUID(str(endpoint.get("attempt_id") or "")))
+        except ValueError as exc:
+            raise CaptureContractError(
+                "Ortex selection endpoint attempt_id is invalid"
+            ) from exc
+        if (
+            endpoint.get("attempt_id") != attempt_id
+            or attempt_id in attempt_ids
+        ):
+            raise CaptureContractError(
+                "Ortex selection endpoint attempt_id is not canonical/unique"
+            )
+        attempt_ids.add(attempt_id)
+        try:
+            from .short_mechanics import OrtexOutcomeKind
+
+            OrtexOutcomeKind(str(endpoint.get("kind") or ""))
+        except (ImportError, ValueError) as exc:
+            raise CaptureContractError(
+                "Ortex selection endpoint outcome kind is invalid"
+            ) from exc
+        exchange = str(endpoint.get("exchange") or "")
+        if not exchange or exchange != exchange.strip().lower():
+            raise CaptureContractError(
+                "Ortex selection endpoint exchange is invalid"
+            )
+        for field_name in ("request_sha256", "endpoint_capture_sha256"):
+            _ortex_exact_sha256(
+                endpoint.get(field_name),
+                f"Ortex selection endpoint {field_name}",
+            )
+        for field_name in (
+            "raw_response_sha256",
+            "selected_row_sha256",
+        ):
+            value = endpoint.get(field_name)
+            if value is not None:
+                _ortex_exact_sha256(
+                    value,
+                    f"Ortex selection endpoint {field_name}",
+                )
+        status = endpoint.get("http_status")
+        if status is not None and (
+            isinstance(status, bool) or not isinstance(status, int)
+        ):
+            raise CaptureContractError(
+                "Ortex selection endpoint http_status is invalid"
+            )
+        _ortex_optional_number(
+            endpoint.get("value"),
+            "Ortex selection endpoint value",
+            minimum=0.0,
+        )
+        endpoint_received_at = _ortex_reference_clock(
+            endpoint.get("received_at"),
+            "Ortex selection endpoint received_at",
+        )
+        endpoint_available_at = _ortex_reference_clock(
+            endpoint.get("available_at"),
+            "Ortex selection endpoint available_at",
+        )
+        assert (
+            endpoint_received_at is not None
+            and endpoint_available_at is not None
+        )
+        endpoint_provider_event_at = _ortex_reference_clock(
+            endpoint.get("provider_event_at"),
+            "Ortex selection endpoint provider_event_at",
+            optional=True,
+        )
+        endpoint_effective_at = _ortex_reference_clock(
+            endpoint.get("effective_at"),
+            "Ortex selection endpoint effective_at",
+            optional=True,
+        )
+        if (
+            endpoint_received_at > endpoint_available_at
+            or endpoint_available_at > available_at
+            or (
+                endpoint_provider_event_at is not None
+                and endpoint_provider_event_at > endpoint_available_at
+            )
+            or (
+                endpoint_effective_at is not None
+                and endpoint_effective_at > endpoint_available_at
+            )
+        ):
+            raise CaptureContractError(
+                "Ortex selection endpoint carries a future/reversed clock"
+            )
+    validate_ortex_selection_endpoint_discovery_chain(
+        endpoint_refs,
+        symbol=expected_symbol,
+        aggregate_kind=kind,
+        requested_exchange=reference.get("requested_exchange"),
+        resolved_exchange=reference.get("resolved_exchange"),
+        expected_quota_policy_sha256=policy_sha256,
+    )
+
+    for field_name in (
+        "short_interest_pct",
+        "cost_to_borrow",
+        "utilization",
+    ):
+        _ortex_optional_number(
+            reference.get(field_name),
+            f"Ortex selection reference {field_name}",
+            minimum=0.0,
+        )
+    easy_to_borrow = reference.get("is_easy_to_borrow")
+    if easy_to_borrow is not None and type(easy_to_borrow) is not bool:
+        raise CaptureContractError(
+            "Ortex selection reference is_easy_to_borrow is invalid"
+        )
+    if kind == "NOT_APPLICABLE" and (
+        endpoint_refs
+        or any(
+            reference.get(field_name) is not None
+            for field_name in (
+                "short_interest_pct",
+                "cost_to_borrow",
+                "utilization",
+                "is_easy_to_borrow",
+            )
+        )
+    ):
+        raise CaptureContractError(
+            "Ortex not-applicable reference carries provider economics"
+        )
+
+    derived_score: float | None = None
+    if kind == "SUCCESS":
+        if not endpoint_refs:
+            raise CaptureContractError(
+                "Ortex successful reference has no endpoint evidence"
+            )
+        from .ross_momentum import squeeze_fuel_signal
+
+        derived_score = squeeze_fuel_signal(
+            reference.get("short_interest_pct"),
+            reference.get("cost_to_borrow"),
+            utilization=reference.get("utilization"),
+            is_easy_to_borrow=reference.get("is_easy_to_borrow"),
+        ).squeeze_pct
+        if derived_score is None:
+            raise CaptureContractError(
+                "Ortex successful reference has no derived squeeze score"
+            )
+    return (
+        _freeze_canonical_json(reference),
+        kind,
+        source_received_at,
+        source_available_at,
+        None if derived_score is None else float(derived_score),
+    )
+
+
+def validate_ortex_squeeze_fuel_batch_manifest(
+    raw: Mapping[str, Any],
+    *,
+    read_at: datetime,
+    expected_quota_policy_sha256: str,
+    freshness_ttl_seconds: float,
+) -> ValidatedOrtexSqueezeFuelBatchManifest:
+    """Validate one exact full pre-chunk Ortex selection manifest."""
+
+    if not isinstance(raw, Mapping) or set(raw) != (
+        _ORTEX_SQUEEZE_BATCH_FIELDS
+    ):
+        raise CaptureContractError(
+            "Ortex squeeze batch manifest fields do not match schema"
+        )
+    if (
+        raw.get("schema_version")
+        != ORTEX_SQUEEZE_FUEL_BATCH_SCHEMA_VERSION
+    ):
+        raise CaptureContractError(
+            "Ortex squeeze batch manifest schema is unsupported"
+        )
+    observed_at = _utc(read_at, "Ortex squeeze batch manifest read_at")
+    if (
+        isinstance(freshness_ttl_seconds, bool)
+        or not isinstance(freshness_ttl_seconds, (int, float))
+        or not math.isfinite(float(freshness_ttl_seconds))
+        or not 60.0
+        <= float(freshness_ttl_seconds)
+        <= 7.0 * 24.0 * 60.0 * 60.0
+    ):
+        raise CaptureContractError(
+            "Ortex squeeze batch freshness policy is invalid"
+        )
+    freshness_ttl = float(freshness_ttl_seconds)
+    policy_sha256 = _ortex_exact_sha256(
+        raw.get("quota_policy_sha256"),
+        "Ortex squeeze batch quota_policy_sha256",
+    )
+    if policy_sha256 != expected_quota_policy_sha256:
+        raise CaptureContractError("Ortex squeeze batch policy mismatch")
+    decision_at = _ortex_decision_clock(
+        raw.get("decision_at"),
+        "Ortex squeeze batch decision_at",
+    )
+    if decision_at > observed_at:
+        raise CaptureContractError(
+            "Ortex squeeze batch decision clock is from the future"
+        )
+    complete = raw.get("complete")
+    if type(complete) is not bool:
+        raise CaptureContractError(
+            "Ortex squeeze batch complete must be bool"
+        )
+    members = raw.get("members")
+    if not isinstance(members, list) or not members:
+        raise CaptureContractError(
+            "Ortex squeeze batch members must be a nonempty array"
+        )
+    members_sha256 = _ortex_exact_sha256(
+        raw.get("members_sha256"),
+        "Ortex squeeze batch members_sha256",
+    )
+    if members_sha256 != sha256_json(members):
+        raise CaptureContractError(
+            "Ortex squeeze batch members content hash mismatch"
+        )
+    batch_sha256 = _ortex_exact_sha256(
+        raw.get("batch_sha256"),
+        "Ortex squeeze batch batch_sha256",
+    )
+    unsigned = dict(raw)
+    unsigned.pop("batch_sha256", None)
+    if batch_sha256 != sha256_json(unsigned):
+        raise CaptureContractError(
+            "Ortex squeeze batch manifest content hash mismatch"
+        )
+
+    selected_raw = raw.get("selected_symbols")
+    if not isinstance(selected_raw, list):
+        raise CaptureContractError(
+            "Ortex squeeze batch selected_symbols must be an array"
+        )
+    selected_symbols: list[str] = []
+    for raw_symbol in selected_raw:
+        symbol = str(raw_symbol or "").strip().upper()
+        if (
+            raw_symbol != symbol
+            or _ORTEX_BATCH_SYMBOL_RE.fullmatch(symbol) is None
+        ):
+            raise CaptureContractError(
+                "Ortex squeeze batch selected symbol is invalid"
+            )
+        selected_symbols.append(symbol)
+    if selected_symbols != sorted(set(selected_symbols)):
+        raise CaptureContractError(
+            "Ortex squeeze batch selected symbols are not sorted/unique"
+        )
+
+    signal_by_symbol: dict[str, Any] = {}
+    provider_called_symbols: list[str] = []
+    parsed_rows: list[dict[str, Any]] = []
+    prior_symbol = ""
+    for raw_member in members:
+        if not isinstance(raw_member, Mapping) or set(raw_member) != (
+            _ORTEX_SQUEEZE_BATCH_MEMBER_FIELDS
+        ):
+            raise CaptureContractError(
+                "Ortex squeeze batch member fields do not match schema"
+            )
+        member = dict(raw_member)
+        symbol = str(member.get("symbol") or "").strip().upper()
+        if (
+            member.get("symbol") != symbol
+            or _ORTEX_BATCH_SYMBOL_RE.fullmatch(symbol) is None
+            or symbol <= prior_symbol
+        ):
+            raise CaptureContractError(
+                "Ortex squeeze batch members are not symbol-sorted/unique"
+            )
+        prior_symbol = symbol
+        (
+            reference,
+            kind,
+            source_received_at,
+            source_available_at,
+            derived_score,
+        ) = _validate_ortex_selection_reference(
+            member.get("ortex_selection_reference"),
+            expected_symbol=symbol,
+            expected_quota_policy_sha256=policy_sha256,
+            read_at=observed_at,
+            freshness_ttl_seconds=freshness_ttl,
+        )
+        squeeze_fuel_pct = _ortex_optional_number(
+            member.get("squeeze_fuel_pct"),
+            "Ortex squeeze batch member squeeze_fuel_pct",
+            minimum=0.0,
+            maximum=1.0,
+        )
+        rank_pct = _ortex_optional_number(
+            member.get("squeeze_fuel_rank_pct"),
+            "Ortex squeeze batch member squeeze_fuel_rank_pct",
+            minimum=0.0,
+            maximum=1.0,
+        )
+        if (squeeze_fuel_pct is None) != (rank_pct is None):
+            raise CaptureContractError(
+                "Ortex squeeze batch member score/rank completeness mismatch"
+            )
+        if kind == "SUCCESS":
+            if complete and squeeze_fuel_pct != derived_score:
+                raise CaptureContractError(
+                    "Ortex squeeze batch score differs from selection evidence"
+                )
+        elif squeeze_fuel_pct is not None or rank_pct is not None:
+            raise CaptureContractError(
+                "Ortex neutral/unavailable member carries economic values"
+            )
+        if not complete and (
+            squeeze_fuel_pct is not None or rank_pct is not None
+        ):
+            raise CaptureContractError(
+                "Ortex incomplete batch carries economic values"
+            )
+        detail_code = str(reference.get("detail_code") or "")
+        if detail_code not in _ORTEX_NOT_PROVIDER_CALLED_DETAILS:
+            provider_called_symbols.append(symbol)
+        signal = {
+            "ortex_selection_reference": reference,
+            "squeeze_fuel_pct": squeeze_fuel_pct,
+            "squeeze_fuel_rank_pct": rank_pct,
+        }
+        signal_by_symbol[symbol] = signal
+        parsed_rows.append(
+            {
+                "symbol": symbol,
+                "kind": kind,
+                "squeeze_fuel_pct": squeeze_fuel_pct,
+                "rank_pct": rank_pct,
+                "source_received_at": source_received_at,
+                "source_available_at": source_available_at,
+            }
+        )
+    if selected_symbols != provider_called_symbols:
+        raise CaptureContractError(
+            "Ortex squeeze batch selected/provider-call membership mismatch"
+        )
+    if complete:
+        usable_kinds = {
+            "SUCCESS",
+            "AUTHORITATIVE_EMPTY",
+            "NOT_APPLICABLE",
+            "UNSUPPORTED_SYMBOL_OR_EXCHANGE",
+        }
+        if any(row["kind"] not in usable_kinds for row in parsed_rows):
+            raise CaptureContractError(
+                "Ortex complete batch contains an unavailable outcome"
+            )
+        scores = sorted(
+            float(row["squeeze_fuel_pct"])
+            for row in parsed_rows
+            if row["squeeze_fuel_pct"] is not None
+        )
+        for row in parsed_rows:
+            score = row["squeeze_fuel_pct"]
+            expected_rank = (
+                None
+                if score is None
+                else round(
+                    sum(value <= float(score) for value in scores)
+                    / len(scores),
+                    4,
+                )
+            )
+            if row["rank_pct"] != expected_rank:
+                raise CaptureContractError(
+                    "Ortex squeeze batch rank differs from field distribution"
+                )
+    oldest_source_received_at = min(
+        row["source_received_at"] for row in parsed_rows
+    )
+    latest_source_available_at = max(
+        row["source_available_at"] for row in parsed_rows
+    )
+    return ValidatedOrtexSqueezeFuelBatchManifest(
+        payload=_freeze_canonical_json(raw),
+        batch_sha256=batch_sha256,
+        decision_at=decision_at,
+        complete=complete,
+        quota_policy_sha256=policy_sha256,
+        members_sha256=members_sha256,
+        selected_symbols=tuple(selected_symbols),
+        signal_by_symbol=_freeze_canonical_json(signal_by_symbol),
+        oldest_source_received_at=oldest_source_received_at,
+        latest_source_available_at=latest_source_available_at,
+    )
+
+
+def bind_ortex_squeeze_fuel_batch_reference(
+    reference: ValidatedOrtexSqueezeFuelBatchReference,
+    manifest: ValidatedOrtexSqueezeFuelBatchManifest,
+) -> ValidatedOrtexSqueezeFuelBatchManifest:
+    """Bind a compact row pointer to the exact validated hub manifest."""
+
+    if not isinstance(
+        reference,
+        ValidatedOrtexSqueezeFuelBatchReference,
+    ) or not isinstance(
+        manifest,
+        ValidatedOrtexSqueezeFuelBatchManifest,
+    ):
+        raise CaptureContractError(
+            "Ortex squeeze batch binding uses unvalidated material"
+        )
+    comparisons = {
+        "batch_sha256": (
+            reference.batch_sha256,
+            manifest.batch_sha256,
+        ),
+        "decision_at": (
+            reference.payload.get("decision_at"),
+            manifest.payload.get("decision_at"),
+        ),
+        "complete": (reference.complete, manifest.complete),
+        "quota_policy_sha256": (
+            reference.quota_policy_sha256,
+            manifest.quota_policy_sha256,
+        ),
+        "members_sha256": (
+            reference.members_sha256,
+            manifest.members_sha256,
+        ),
+    }
+    mismatched = [
+        field_name
+        for field_name, (left, right) in comparisons.items()
+        if left != right
+    ]
+    if mismatched:
+        raise CaptureContractError(
+            "Ortex squeeze batch compact/full binding mismatch:"
+            + ",".join(mismatched)
+        )
+    return manifest
+
+
+@dataclass(frozen=True)
+class CaptureOrtexSelectionSnapshot:
+    """Self-contained Ortex batch selected by one exact decision receipt."""
+
+    payload: Mapping[str, Any]
+    current_member: Mapping[str, Any]
+    symbol: str
+    short_mechanics_sha256: str
+    batch_members_sha256: str
+    rank_pct: float | None
+    complete: bool
+    outcome: str
+    origin: str
+    requested_at: datetime
+    returned_at: datetime
+    source_received_at: datetime
+    source_available_at: datetime
+    provider_event_at: datetime | None
+    provider_dataset_effective_at: datetime | None
+    success_cache_ttl_seconds: float
+
+    @classmethod
+    def from_dict(
+        cls,
+        raw: Mapping[str, Any],
+        *,
+        expected_symbol: str | None = None,
+        expected_rank_pct: float | None = None,
+    ) -> "CaptureOrtexSelectionSnapshot":
+        expected = {"schema_version", "members", "members_sha256", "complete"}
+        if not isinstance(raw, Mapping) or set(raw) != expected:
+            raise CaptureContractError(
+                "Ortex selection batch fields do not match schema"
+            )
+        if raw.get("schema_version") != ORTEX_SELECTION_SNAPSHOT_SCHEMA_VERSION:
+            raise CaptureContractError("Ortex selection batch schema is unsupported")
+        if expected_symbol is None:
+            raise CaptureContractError("Ortex ranked symbol is required")
+        symbol = str(expected_symbol or "").strip().upper()
+        if not symbol or "-USD" in symbol or "/" in symbol:
+            raise CaptureContractError("Ortex ranked symbol is invalid")
+        members = raw.get("members")
+        if not isinstance(members, list):
+            raise CaptureContractError("Ortex selection members must be an array")
+        if raw.get("members_sha256") != sha256_json(members):
+            raise CaptureContractError("Ortex selection members content hash mismatch")
+        complete = raw.get("complete")
+        if type(complete) is not bool:
+            raise CaptureContractError("Ortex selection completeness is invalid")
+
+        parsed_members: list[dict[str, Any]] = []
+        for member in members:
+            if not isinstance(member, Mapping) or set(member) != {
+                "symbol",
+                "short_mechanics",
+                "short_mechanics_sha256",
+                "squeeze_fuel_pct",
+                "rank_pct",
+            }:
+                raise CaptureContractError(
+                    "Ortex selection member fields do not match schema"
+                )
+            member_symbol = str(member.get("symbol") or "").strip().upper()
+            if not member_symbol or member_symbol != member.get("symbol"):
+                raise CaptureContractError("Ortex selection member symbol is invalid")
+            mechanics = member.get("short_mechanics")
+            if not isinstance(mechanics, Mapping):
+                raise CaptureContractError("Ortex mechanics capture is malformed")
+            mechanics_sha256 = _require_sha256(
+                str(member.get("short_mechanics_sha256") or ""),
+                "Ortex short_mechanics_sha256",
+            )
+            if mechanics_sha256 != sha256_json(mechanics):
+                raise CaptureContractError(
+                    "Ortex short-mechanics content hash mismatch"
+                )
+            try:
+                from .short_mechanics import OrtexShortMechanicsOutcome
+
+                mechanics_outcome = (
+                    OrtexShortMechanicsOutcome.from_capture_dict(mechanics)
+                )
+            except (ImportError, TypeError, ValueError) as exc:
+                raise CaptureContractError(
+                    "Ortex short-mechanics capture is invalid"
+                ) from exc
+            if mechanics_outcome.symbol != member_symbol:
+                raise CaptureContractError(
+                    "Ortex member/outcome symbol mismatch"
+                )
+            member_returned_at = mechanics_outcome.available_at
+            member_source_received_at = (
+                mechanics_outcome.cache_origin_received_at
+                or mechanics_outcome.received_at
+            )
+            member_source_available_at = (
+                mechanics_outcome.cache_origin_available_at
+                or mechanics_outcome.available_at
+            )
+            if (
+                member_source_received_at > member_source_available_at
+                or member_source_available_at > member_returned_at
+                or (
+                    mechanics_outcome.provider_event_at is not None
+                    and mechanics_outcome.provider_event_at
+                    > member_returned_at
+                )
+                or (
+                    mechanics_outcome.effective_at is not None
+                    and mechanics_outcome.effective_at > member_returned_at
+                )
+            ):
+                raise CaptureContractError(
+                    "Ortex member carries a future source/provider clock"
+                )
+            policy = mechanics.get("policy")
+            if not isinstance(policy, Mapping):
+                raise CaptureContractError("Ortex public policy is malformed")
+            ttl_raw = policy.get("success_cache_ttl_seconds")
+            if type(policy.get("monthly_limit")) is not int or (
+                policy["monthly_limit"] != 1_000
+            ):
+                raise CaptureContractError(
+                    "Ortex public policy is not bound to the 1,000-request plan"
+                )
+            if type(ttl_raw) is not int or not 60 <= ttl_raw <= 7 * 24 * 60 * 60:
+                raise CaptureContractError(
+                    "Ortex success-cache TTL is outside sealed policy bounds"
+                )
+            from .ross_momentum import squeeze_fuel_signal
+
+            derived_score = squeeze_fuel_signal(
+                mechanics_outcome.short_interest_pct,
+                mechanics_outcome.cost_to_borrow,
+                utilization=mechanics_outcome.utilization,
+                is_easy_to_borrow=mechanics_outcome.is_easy_to_borrow,
+            ).squeeze_pct
+            supplied_score = _ortex_optional_number(
+                member.get("squeeze_fuel_pct"),
+                "Ortex member squeeze_fuel_pct",
+                minimum=0.0,
+                maximum=1.0,
+            )
+            supplied_rank = _ortex_optional_number(
+                member.get("rank_pct"),
+                "Ortex member rank_pct",
+                minimum=0.0,
+                maximum=1.0,
+            )
+            if derived_score != supplied_score:
+                raise CaptureContractError(
+                    "Ortex member squeeze score differs from raw mechanics"
+                )
+            parsed_members.append(
+                {
+                    "symbol": member_symbol,
+                    "raw": member,
+                    "mechanics": mechanics,
+                    "mechanics_outcome": mechanics_outcome,
+                    "short_mechanics_sha256": mechanics_sha256,
+                    "squeeze_fuel_pct": supplied_score,
+                    "rank_pct": supplied_rank,
+                    "success_cache_ttl_seconds": float(ttl_raw),
+                    "quota_policy_sha256": (
+                        mechanics_outcome.quota_policy_sha256
+                    ),
+                    "requested_at": mechanics_outcome.received_at,
+                    "returned_at": member_returned_at,
+                    "source_received_at": member_source_received_at,
+                    "source_available_at": member_source_available_at,
+                }
+            )
+        member_symbols = [row["symbol"] for row in parsed_members]
+        if member_symbols != sorted(member_symbols) or len(member_symbols) != len(
+            set(member_symbols)
+        ):
+            raise CaptureContractError(
+                "Ortex selection members are not uniquely symbol-sorted"
+            )
+        current = next(
+            (row for row in parsed_members if row["symbol"] == symbol),
+            None,
+        )
+        if current is None:
+            raise CaptureContractError("Ortex ranked member is missing")
+        usable_kinds = {
+            "SUCCESS",
+            "AUTHORITATIVE_EMPTY",
+            "NOT_APPLICABLE",
+            "UNSUPPORTED_SYMBOL_OR_EXCHANGE",
+        }
+        if complete and any(
+            row["mechanics_outcome"].kind.value not in usable_kinds
+            for row in parsed_members
+        ):
+            raise CaptureContractError(
+                "Ortex complete batch contains an unavailable outcome"
+            )
+        if not complete and any(
+            row["rank_pct"] is not None for row in parsed_members
+        ):
+            raise CaptureContractError(
+                "Ortex incomplete batch cannot influence persisted rank"
+            )
+        score_values = sorted(
+            float(row["squeeze_fuel_pct"])
+            for row in parsed_members
+            if row["squeeze_fuel_pct"] is not None
+        )
+        if complete:
+            for row in parsed_members:
+                score = row["squeeze_fuel_pct"]
+                expected_rank = (
+                    None
+                    if score is None
+                    else round(
+                        sum(value <= float(score) for value in score_values)
+                        / len(score_values),
+                        4,
+                    )
+                )
+                if row["rank_pct"] != expected_rank:
+                    raise CaptureContractError(
+                        "Ortex rank differs from the sealed batch distribution"
+                    )
+        policy_hashes = {
+            row["quota_policy_sha256"] for row in parsed_members
+        }
+        cache_ttls = {
+            row["success_cache_ttl_seconds"] for row in parsed_members
+        }
+        if len(policy_hashes) != 1 or len(cache_ttls) != 1:
+            raise CaptureContractError(
+                "Ortex selection members use different sealed policies"
+            )
+        rank_pct = current["rank_pct"]
+        if expected_rank_pct is not None and rank_pct != float(expected_rank_pct):
+            raise CaptureContractError(
+                "Ortex rank differs from persisted selection input"
+            )
+
+        mechanics_outcome = current["mechanics_outcome"]
+        rank_contributors = [
+            row
+            for row in parsed_members
+            if row["squeeze_fuel_pct"] is not None
+        ]
+        freshness_members = rank_contributors or parsed_members
+        requested_at = min(row["requested_at"] for row in parsed_members)
+        returned_at = max(row["returned_at"] for row in parsed_members)
+        source_received_at = min(
+            row["source_received_at"] for row in freshness_members
+        )
+        source_available_at = max(
+            row["source_available_at"] for row in freshness_members
+        )
+        origin = (
+            "cache"
+            if mechanics_outcome.cache_origin_sha256 is not None
+            else ("network" if mechanics_outcome.endpoints else "policy")
+        )
+        return cls(
+            payload=_freeze_canonical_json(raw),
+            current_member=_freeze_canonical_json(current["raw"]),
+            symbol=symbol,
+            short_mechanics_sha256=current["short_mechanics_sha256"],
+            batch_members_sha256=str(raw["members_sha256"]),
+            rank_pct=rank_pct,
+            complete=bool(complete),
+            outcome=mechanics_outcome.kind.value,
+            origin=origin,
+            requested_at=requested_at,
+            returned_at=returned_at,
+            source_received_at=source_received_at,
+            source_available_at=source_available_at,
+            provider_event_at=mechanics_outcome.provider_event_at,
+            provider_dataset_effective_at=mechanics_outcome.effective_at,
+            success_cache_ttl_seconds=next(iter(cache_ttls)),
+        )
+
+    def capture_query(self) -> Mapping[str, Any]:
+        return _freeze_canonical_json(
+            {
+                "schema_version": ORTEX_SELECTION_CAPTURE_QUERY_SCHEMA_VERSION,
+                "ranked_symbol": self.symbol,
+                "batch_members_sha256": self.batch_members_sha256,
+            }
+        )
+
+    @property
+    def market_reference_at(self) -> datetime:
+        return (
+            self.provider_dataset_effective_at
+            or self.provider_event_at
+            or self.source_received_at
+        )
+
+    @classmethod
+    def from_event(cls, event: CaptureEvent) -> "CaptureOrtexSelectionSnapshot":
+        if not isinstance(event, CaptureEvent):
+            raise CaptureContractError("Ortex snapshot event is malformed")
+        if event.stream is not CaptureStream.ORTEX_SNAPSHOT:
+            raise CaptureContractError("Ortex snapshot uses the wrong stream")
+        if event.provider != ORTEX_SNAPSHOT_PROVIDER:
+            raise CaptureContractError("Ortex snapshot provider is unsupported")
+        typed = cls.from_dict(
+            resolve_capture_source_payload(event).payload,
+            expected_symbol=event.symbol,
+        )
+        query = typed.capture_query()
+        if event.query != query or event.query_sha256 != sha256_json(query):
+            raise CaptureContractError("Ortex snapshot query binding mismatch")
+        if event.clocks.received_at != typed.source_received_at:
+            raise CaptureContractError(
+                "Ortex source received_at was restamped"
+            )
+        if event.clocks.available_at != typed.returned_at:
+            raise CaptureContractError(
+                "Ortex capture availability differs from observation return"
+            )
+        if event.clocks.market_reference_at != typed.market_reference_at:
+            raise CaptureContractError(
+                "Ortex provider reference clock was restamped"
+            )
+        return typed
+
+
+def validate_ortex_selection_batch(
+    batch: Mapping[str, Any],
+    *,
+    ranked_symbol: str,
+    expected_rank_pct: float | None = None,
+) -> CaptureOrtexSelectionSnapshot:
+    """Reparse raw outcomes and rederive the current member's exact rank."""
+
+    return CaptureOrtexSelectionSnapshot.from_dict(
+        batch,
+        expected_symbol=str(ranked_symbol or "").strip().upper(),
+        expected_rank_pct=expected_rank_pct,
+    )
 
 
 @dataclass(frozen=True)
@@ -8766,6 +10166,12 @@ def _coverage_source_clock(
         if reference_required is None
         else reference_required
     )
+    if stream is CaptureStream.ORTEX_SNAPSHOT:
+        # Ortex's SI/CTB dataset clock can legitimately be days old because
+        # those rows publish daily. Freshness is instead measured from the
+        # original endpoint observation. A later cache read may advance
+        # available_at, but it must never rejuvenate the provider fact.
+        return ref.received_at
     if exact:
         return ref.provider_event_at
     if reference:

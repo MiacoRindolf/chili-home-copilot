@@ -7,10 +7,12 @@ import hashlib
 import inspect
 import json
 import uuid
+from zoneinfo import ZoneInfo
 
 import pytest
 
 from app.models.trading import (
+    AdaptiveRiskDecisionPacket,
     AlpacaPaperCycleSettlement,
     AlpacaPaperFillActivity,
     AlpacaPaperFillObservationActivity,
@@ -25,6 +27,7 @@ from app.services.trading.momentum_neural.adaptive_risk_policy import (
 )
 from app.services.trading.momentum_neural.adaptive_risk_reservation import (
     AlpacaPaperBrokerAccountFacts,
+    AdaptiveReservationIdempotencyConflict,
     AdaptiveRiskReservationRequest,
     AdaptiveRiskReservationStore,
     ImmutableAccountRiskSnapshot,
@@ -103,7 +106,14 @@ def _policy() -> AdaptiveRiskPolicy:
     )
 
 
-def _request_for_bundle(bundle, *, decision_id: str) -> AdaptiveRiskReservationRequest:
+def _request_for_bundle(
+    bundle,
+    *,
+    decision_id: str,
+    symbol: str = "VEEE",
+    correlation_cluster: str = "equity:momentum",
+    setup_family: str = "primary_entry",
+) -> AdaptiveRiskReservationRequest:
     at = bundle.decision_as_of
     ledger = bundle.locked_risk_snapshot
     evidence = {
@@ -148,7 +158,7 @@ def _request_for_bundle(bundle, *, decision_id: str) -> AdaptiveRiskReservationR
         execution_family="alpaca_spot",
         venue="alpaca",
         broker_environment="paper",
-        symbol="VEEE",
+        symbol=symbol,
         side="long",
         as_of=at,
         account_identity_sha256=account.account_identity_sha256,
@@ -199,7 +209,7 @@ def _request_for_bundle(bundle, *, decision_id: str) -> AdaptiveRiskReservationR
         average_daily_volume_shares=5_000_000,
         recent_volume_shares=500_000,
         executable_depth_shares=100_000,
-        correlation_cluster_id="equity:momentum",
+        correlation_cluster_id=correlation_cluster,
         evidence=evidence,
     )
     return AdaptiveRiskReservationRequest(
@@ -207,12 +217,26 @@ def _request_for_bundle(bundle, *, decision_id: str) -> AdaptiveRiskReservationR
         inputs=inputs,
         account_snapshot=account,
         account_scope="alpaca:paper",
-        setup_family="primary_entry",
-        correlation_cluster="equity:momentum",
+        setup_family=setup_family,
+        correlation_cluster=correlation_cluster,
         client_order_id=decision_id,
         entry_limit_price=5.0,
         broker_account_evidence=bundle.account_evidence,
         settled_daily_pnl_evidence=bundle.daily_pnl_evidence,
+        opportunity_key=(
+            {
+                "account_scope": "alpaca:paper",
+                "symbol": symbol,
+                "trading_date": bundle.decision_as_of.astimezone(
+                    ZoneInfo("America/New_York")
+                )
+                .date()
+                .isoformat(),
+                "setup_family": setup_family,
+            }
+            if setup_family == "first_dip_reclaim"
+            else None
+        ),
     )
 
 
@@ -703,6 +727,58 @@ def test_locked_bundle_is_required_and_consumed_in_same_transaction(db) -> None:
                 prepared_resolution=resolution,
                 prepared_decision_packet=resolution.to_decision_packet(),
             )
+
+
+def test_post_commit_recovery_loads_only_the_exact_precommitted_reservation(
+    db,
+) -> None:
+    store = AdaptiveRiskReservationStore(db.get_bind())
+    decision_id = f"decision-locked-recovery-{uuid.uuid4().hex}"
+    with db.begin():
+        bundle = store.lock_alpaca_paper_admission_bundle(
+            broker_account_facts=_broker_facts(decision_id=decision_id),
+            symbol="VEEE",
+            correlation_cluster="equity:momentum",
+            session=db,
+        )
+        request = _request_for_bundle(bundle, decision_id=decision_id)
+        resolution = resolve_adaptive_risk(request.policy, request.inputs)
+        committed = store.reserve(
+            request,
+            session=db,
+            locked_alpaca_paper_bundle=bundle,
+            prepared_resolution=resolution,
+            prepared_decision_packet=resolution.to_decision_packet(),
+        )
+        assert committed.admission_accepted is True
+        assert committed.reservation_id is not None
+
+    loaded = store.load_existing_alpaca_paper_reservation(request)
+    assert loaded is not None
+    assert loaded.admission_accepted is True
+    assert loaded.idempotent_retry is True
+    assert loaded.reservation_id == committed.reservation_id
+    assert loaded.decision_packet_sha256 == committed.decision_packet_sha256
+
+    row_count = db.query(AdaptiveRiskDecisionPacket).count()
+    missing_inputs = replace(
+        request.inputs,
+        decision_id=f"{decision_id}-missing",
+    )
+    missing = replace(
+        request,
+        inputs=missing_inputs,
+        client_order_id=f"{decision_id}-missing",
+    )
+    assert store.load_existing_alpaca_paper_reservation(missing) is None
+    assert db.query(AdaptiveRiskDecisionPacket).count() == row_count
+
+    changed = replace(request, entry_limit_price=5.01)
+    with pytest.raises(
+        AdaptiveReservationIdempotencyConflict,
+        match="client_order_id retry changed immutable fields",
+    ):
+        store.load_existing_alpaca_paper_reservation(changed)
 
 
 def test_locked_bundle_expiry_is_checked_when_reservation_consumes_it(

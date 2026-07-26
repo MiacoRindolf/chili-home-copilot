@@ -27,6 +27,7 @@ from scripts.captured_alpaca_paper_service import (
     _build_policy_authority,
     _build_service_composition,
     _build_startup_evidence,
+    _captured_paper_ortex_public_policy,
     _close_composition,
     _execute_no_order_smoke,
     _issue_post_smoke_refreshed_readiness,
@@ -66,6 +67,32 @@ def _canonical(value: object) -> str:
         separators=(",", ":"),
         allow_nan=False,
     )
+
+
+def test_service_composition_binds_default_on_and_explicit_off_ortex_policy() -> None:
+    policy = MappingProxyType(
+        {
+            "schema_version": "chili.ortex-public-policy.v2",
+            "policy_sha256": SHA_A,
+        }
+    )
+    calls: list[str] = []
+    source_module = SimpleNamespace(
+        ortex_public_policy=lambda: calls.append("policy") or policy
+    )
+
+    assert _captured_paper_ortex_public_policy(
+        SimpleNamespace(chili_momentum_squeeze_fuel_tilt_enabled=True),
+        source_module,
+    ) is policy
+    assert calls == ["policy"]
+
+    calls.clear()
+    assert _captured_paper_ortex_public_policy(
+        SimpleNamespace(chili_momentum_squeeze_fuel_tilt_enabled=False),
+        source_module,
+    ) is None
+    assert calls == []
 
 
 class _PaperAdapter:

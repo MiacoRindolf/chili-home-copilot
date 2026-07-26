@@ -38,6 +38,169 @@ class WatchlistItem(Base):
     added_at: datetime = Column(DateTime, default=datetime.utcnow, nullable=False)
 
 
+class MomentumOrtexRequestAttempt(Base):
+    """Durable Ortex transport authority and restart-safe response evidence."""
+
+    __tablename__ = "momentum_ortex_request_attempts"
+    __table_args__ = (
+        UniqueConstraint(
+            "plan_scope",
+            "bundle_sha256",
+            "bundle_index",
+            name="uq_ortex_attempt_bundle_index",
+        ),
+        CheckConstraint(
+            "plan_scope = 'ortex:trader-1000:v1'",
+            name="ck_ortex_attempt_plan_scope",
+        ),
+        CheckConstraint(
+            "status IN ('reserved', 'transport_committed', 'completed', 'refunded')",
+            name="ck_ortex_attempt_status",
+        ),
+        CheckConstraint(
+            "provider_outcome IS NULL OR provider_outcome IN "
+            "('success', 'authoritative_empty', 'not_found', 'auth_error', "
+            "'rate_limited', 'transient_http', 'timeout', 'malformed', "
+            "'permanent_error')",
+            name="ck_ortex_attempt_outcome",
+        ),
+        CheckConstraint(
+            "bundle_index BETWEEN 0 AND 1 "
+            "AND transient_streak >= 0 "
+            "AND monthly_limit BETWEEN 1 AND 1000 "
+            "AND quota_used_after BETWEEN 1 AND monthly_limit "
+            "AND extract(day FROM month_start) = 1 "
+            "AND month_start = date_trunc("
+            "'month', reserved_at AT TIME ZONE 'UTC')::date "
+            "AND lease_expires_at > reserved_at",
+            name="ck_ortex_attempt_bounds",
+        ),
+        CheckConstraint(
+            "(status = 'reserved' AND transport_started_at IS NULL "
+            " AND completed_at IS NULL AND refunded_at IS NULL "
+            " AND provider_outcome IS NULL) OR "
+            "(status = 'transport_committed' AND transport_started_at IS NOT NULL "
+            " AND completed_at IS NULL AND refunded_at IS NULL "
+            " AND provider_outcome IS NULL) OR "
+            "(status = 'completed' AND transport_started_at IS NOT NULL "
+            " AND completed_at IS NOT NULL AND refunded_at IS NULL "
+            " AND provider_outcome IS NOT NULL) OR "
+            "(status = 'refunded' AND transport_started_at IS NULL "
+            " AND completed_at IS NULL AND refunded_at IS NOT NULL "
+            " AND provider_outcome IS NULL)",
+            name="ck_ortex_attempt_phase",
+        ),
+        CheckConstraint(
+            "(raw_response_body_b64 IS NULL AND response_sha256 IS NULL) OR "
+            "(raw_response_body_b64 IS NOT NULL "
+            " AND response_sha256 ~ '^[0-9a-f]{64}$')",
+            name="ck_ortex_attempt_response_binding",
+        ),
+        CheckConstraint(
+            "bundle_sha256 ~ '^[0-9a-f]{64}$' "
+            "AND request_sha256 ~ '^[0-9a-f]{64}$' "
+            "AND provider = 'ortex' "
+            "AND endpoint LIKE '/api/v1/%' "
+            "AND endpoint NOT LIKE '%?%' "
+            "AND (http_status IS NULL OR http_status BETWEEN 100 AND 599)",
+            name="ck_ortex_attempt_identity",
+        ),
+        CheckConstraint(
+            "(transport_started_at IS NULL "
+            " OR transport_started_at >= reserved_at) "
+            "AND (completed_at IS NULL "
+            " OR completed_at >= transport_started_at) "
+            "AND (refunded_at IS NULL OR refunded_at >= reserved_at) "
+            "AND (received_at IS NULL OR available_at IS NULL "
+            " OR received_at <= available_at)",
+            name="ck_ortex_attempt_clock_order",
+        ),
+        CheckConstraint(
+            "backoff_until IS NULL OR provider_outcome IN "
+            "('rate_limited', 'transient_http', 'timeout')",
+            name="ck_ortex_attempt_backoff_outcome",
+        ),
+        CheckConstraint(
+            "status <> 'completed' OR provider_outcome NOT IN "
+            "('success', 'authoritative_empty') OR "
+            "(raw_response_body_b64 IS NOT NULL "
+            " AND response_sha256 ~ '^[0-9a-f]{64}$' "
+            " AND received_at IS NOT NULL "
+            " AND available_at IS NOT NULL "
+            " AND received_at <= available_at "
+            " AND (provider_outcome = 'authoritative_empty' "
+            "      OR provider_event_at IS NOT NULL "
+            "      OR effective_at IS NOT NULL))",
+            name="ck_ortex_attempt_completion_evidence",
+        ),
+        Index(
+            "ix_ortex_attempt_month_status",
+            "plan_scope",
+            "month_start",
+            "status",
+        ),
+        Index(
+            "ix_ortex_attempt_request_completed",
+            "plan_scope",
+            "request_sha256",
+            "completed_at",
+        ),
+        Index(
+            "ix_ortex_attempt_transport_started",
+            "plan_scope",
+            "transport_started_at",
+        ),
+        Index(
+            "ix_ortex_attempt_backoff",
+            "plan_scope",
+            "backoff_until",
+        ),
+    )
+
+    attempt_id = Column(UUID(as_uuid=True), primary_key=True)
+    plan_scope: str = Column(String(48), nullable=False)
+    month_start: date = Column(Date, nullable=False)
+    bundle_sha256: str = Column(String(64), nullable=False)
+    bundle_index: int = Column(SmallInteger, nullable=False)
+    owner_token: str = Column(String(96), nullable=False)
+    request_sha256: str = Column(String(64), nullable=False)
+    provider: str = Column(String(24), nullable=False, server_default=text("'ortex'"))
+    endpoint: str = Column(String(256), nullable=False)
+    symbol: str = Column(String(36), nullable=False)
+    status: str = Column(String(24), nullable=False)
+    monthly_limit: int = Column(Integer, nullable=False)
+    quota_used_after: int = Column(Integer, nullable=False)
+    reserved_at: datetime = Column(DateTime(timezone=True), nullable=False)
+    lease_expires_at: datetime = Column(DateTime(timezone=True), nullable=False)
+    transport_started_at: Optional[datetime] = Column(
+        DateTime(timezone=True), nullable=True
+    )
+    completed_at: Optional[datetime] = Column(DateTime(timezone=True), nullable=True)
+    refunded_at: Optional[datetime] = Column(DateTime(timezone=True), nullable=True)
+    provider_outcome: Optional[str] = Column(String(32), nullable=True)
+    http_status: Optional[int] = Column(Integer, nullable=True)
+    backoff_until: Optional[datetime] = Column(DateTime(timezone=True), nullable=True)
+    transient_streak: int = Column(Integer, nullable=False, server_default=text("0"))
+    raw_response_body_b64: Optional[str] = Column(Text, nullable=True)
+    response_sha256: Optional[str] = Column(String(64), nullable=True)
+    provider_event_at: Optional[datetime] = Column(
+        DateTime(timezone=True), nullable=True
+    )
+    effective_at: Optional[datetime] = Column(DateTime(timezone=True), nullable=True)
+    received_at: Optional[datetime] = Column(DateTime(timezone=True), nullable=True)
+    available_at: Optional[datetime] = Column(DateTime(timezone=True), nullable=True)
+    created_at: datetime = Column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=text("clock_timestamp()"),
+    )
+    updated_at: datetime = Column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=text("clock_timestamp()"),
+    )
+
+
 class BrokerSymbolActionClaim(Base):
     """ORM registration for the migration-316 broker ownership primitive.
 

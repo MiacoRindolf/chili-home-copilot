@@ -178,7 +178,15 @@ def _seed_authority(
     viability_age_seconds: float = 0.02,
     viability_scope: str = "symbol",
 ):
-    decision_at = datetime.now(UTC).replace(microsecond=123456)
+    # Real-PostgreSQL authority windows must share the same clock as the SQL
+    # CAS predicates they exercise.  A host-clock seed can already be stale
+    # when the database clock is ahead, making rollback tests fail before
+    # their injected boundary is reached.
+    decision_at = db.execute(text("SELECT clock_timestamp()")).scalar_one()
+    if decision_at.tzinfo is None:
+        decision_at = decision_at.replace(tzinfo=UTC)
+    else:
+        decision_at = decision_at.astimezone(UTC)
     user = models.User(name=f"captured-preowner-{_digest(symbol)[:12]}")
     db.add(user)
     db.flush()

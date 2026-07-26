@@ -24,7 +24,7 @@ def test_restored_default_is_on():
         is True
     )
     assert (
-        'getattr(settings, "chili_momentum_fresh_ignition_reentry_bypass_enabled", False)'
+        'getattr(settings, "chili_momentum_fresh_ignition_reentry_bypass_enabled", True)'
         in _runner_src()
     )
 

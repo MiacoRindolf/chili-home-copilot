@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import copy
+import hashlib
+import json
 import logging
 import math
 import time
@@ -23,7 +26,15 @@ from .context import build_momentum_regime_context
 
 from .evolution import record_evolution_trace
 from .features import ExecutionReadinessFeatures
-from .replay_capture_contract import CaptureMicrostructureOperation
+from .replay_capture_contract import (
+    CaptureContractError,
+    CaptureMicrostructureOperation,
+    ORTEX_SQUEEZE_FUEL_BATCH_REF_SCHEMA_VERSION,
+    ORTEX_SQUEEZE_FUEL_BATCH_SCHEMA_VERSION,
+    bind_ortex_squeeze_fuel_batch_reference,
+    validate_ortex_squeeze_fuel_batch_manifest,
+    validate_ortex_squeeze_fuel_batch_reference,
+)
 from .replay_errors import (
     ReplayDecisionLocalMicrostructureCoverageUnavailableError,
     ReplayInputContractError,
@@ -39,6 +50,29 @@ HUB_NODE_ID = "nm_momentum_crypto_intel"
 VIABILITY_NODE_ID = "nm_momentum_viability_pool"
 
 _log = logging.getLogger(__name__)
+
+ORTEX_SQUEEZE_BATCH_STATUS_KEY = "ortex_squeeze_fuel_batch"
+_ORTEX_SQUEEZE_BATCH_SCHEMA = ORTEX_SQUEEZE_FUEL_BATCH_SCHEMA_VERSION
+_ORTEX_SQUEEZE_BATCH_REF_SCHEMA = (
+    ORTEX_SQUEEZE_FUEL_BATCH_REF_SCHEMA_VERSION
+)
+_ORTEX_SQUEEZE_BATCH_REF_FIELDS = {
+    "schema_version",
+    "batch_sha256",
+    "decision_at",
+    "complete",
+    "quota_policy_sha256",
+    "members_sha256",
+}
+_ORTEX_DERIVED_SIGNAL_KEYS = (
+    "squeeze_fuel_pct",
+    "squeeze_fuel_rank_pct",
+    "short_interest_pct",
+    "cost_to_borrow",
+    "utilization",
+    "is_easy_to_borrow",
+    "ortex_selection_reference",
+)
 
 
 @runtime_checkable
@@ -1353,7 +1387,7 @@ def _attach_arb_flat_catalysts(meta: dict[str, Any]) -> None:
     if not bool(
         getattr(settings, "chili_momentum_catalyst_grade_gate_enabled", True)
     ) or not bool(
-        getattr(settings, "chili_momentum_catalyst_arb_flat_gate_enabled", False)
+        getattr(settings, "chili_momentum_catalyst_arb_flat_gate_enabled", True)
     ):
         return
 
@@ -1362,6 +1396,593 @@ def _attach_arb_flat_catalysts(meta: dict[str, Any]) -> None:
     symbols = arb_flat_catalyst_symbols() or set()
     if symbols:
         meta["arb_flat_catalyst_symbols"] = sorted(symbols)
+
+
+def _canonical_json_sha256(value: object) -> str:
+    return hashlib.sha256(
+        json.dumps(
+            value,
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=True,
+            allow_nan=False,
+        ).encode("utf-8")
+    ).hexdigest()
+
+
+def _sanitize_ortex_signal_values(
+    ross_signals: Mapping[str, Any],
+) -> None:
+    """Remove every prior Ortex-derived value from a decision-local copy."""
+
+    for signal in ross_signals.values():
+        if not isinstance(signal, dict):
+            continue
+        for key in _ORTEX_DERIVED_SIGNAL_KEYS:
+            signal.pop(key, None)
+
+
+def _selection_reference_is_valid(
+    reference: object,
+    *,
+    expected_symbol: str,
+) -> bool:
+    if not isinstance(reference, dict):
+        return False
+    claimed = reference.get("selection_reference_sha256")
+    if not isinstance(claimed, str) or len(claimed) != 64:
+        return False
+    unsigned = dict(reference)
+    unsigned.pop("selection_reference_sha256", None)
+    return (
+        reference.get("schema") == "chili.ortex.selection-reference.v1"
+        and reference.get("version") == 1
+        and str(reference.get("symbol") or "").strip().upper()
+        == expected_symbol
+        and _canonical_json_sha256(unsigned) == claimed
+    )
+
+
+def _make_ortex_batch_status(
+    *,
+    decision_at: datetime,
+    policy_sha256: str,
+    field_symbols: list[str],
+    selected_symbols: set[str],
+    ross_signals: Mapping[str, Any],
+    complete: bool,
+) -> dict[str, Any]:
+    members: list[dict[str, Any]] = []
+    for symbol in field_symbols:
+        signal = ross_signals.get(symbol)
+        reference = (
+            signal.get("ortex_selection_reference")
+            if isinstance(signal, dict)
+            else None
+        )
+        squeeze = (
+            signal.get("squeeze_fuel_pct")
+            if isinstance(signal, dict)
+            else None
+        )
+        rank = (
+            signal.get("squeeze_fuel_rank_pct")
+            if isinstance(signal, dict)
+            else None
+        )
+        members.append(
+            {
+                "symbol": symbol,
+                "ortex_selection_reference": copy.deepcopy(reference),
+                "squeeze_fuel_pct": (
+                    None if squeeze is None else float(squeeze)
+                ),
+                "squeeze_fuel_rank_pct": (
+                    None if rank is None else float(rank)
+                ),
+            }
+        )
+    observed_at = (
+        decision_at.replace(tzinfo=timezone.utc)
+        if decision_at.tzinfo is None
+        else decision_at.astimezone(timezone.utc)
+    )
+    value: dict[str, Any] = {
+        "schema_version": _ORTEX_SQUEEZE_BATCH_SCHEMA,
+        "decision_at": observed_at.isoformat(),
+        "complete": bool(complete),
+        "quota_policy_sha256": policy_sha256,
+        "selected_symbols": sorted(selected_symbols),
+        "members": members,
+        "members_sha256": _canonical_json_sha256(members),
+    }
+    value["batch_sha256"] = _canonical_json_sha256(value)
+    return value
+
+
+def _ortex_batch_reference(status: Mapping[str, Any]) -> dict[str, Any]:
+    """Compact row pointer to the one full manifest stored on the hub."""
+
+    return {
+        "schema_version": _ORTEX_SQUEEZE_BATCH_REF_SCHEMA,
+        "batch_sha256": status.get("batch_sha256"),
+        "decision_at": status.get("decision_at"),
+        "complete": status.get("complete"),
+        "quota_policy_sha256": status.get("quota_policy_sha256"),
+        "members_sha256": status.get("members_sha256"),
+    }
+
+
+def resolve_ortex_batch_manifest_from_hub(
+    db: Session,
+    *,
+    batch_reference: object,
+) -> tuple[dict[str, Any] | None, str | None]:
+    """Resolve the current live-cache manifest without creating hub state.
+
+    Captured PAPER expands and fsyncs the manifest into its append-only
+    ``ORTEX_SNAPSHOT`` event before a decision may act. The hub is therefore a
+    same-transaction live cache, not historical replay authority.
+    """
+
+    if (
+        not isinstance(batch_reference, dict)
+        or set(batch_reference) != _ORTEX_SQUEEZE_BATCH_REF_FIELDS
+        or batch_reference.get("schema_version")
+        != _ORTEX_SQUEEZE_BATCH_REF_SCHEMA
+    ):
+        return None, "ortex_batch_reference_invalid"
+    try:
+        from ....models.trading import BrainNodeState
+
+        hub = (
+            db.query(BrainNodeState)
+            .populate_existing()
+            .filter(BrainNodeState.node_id == HUB_NODE_ID)
+            .one_or_none()
+        )
+    except Exception:
+        return None, "ortex_batch_manifest_read_unavailable"
+    local_state = (
+        hub.local_state
+        if hub is not None and isinstance(hub.local_state, dict)
+        else {}
+    )
+    manifest = local_state.get(ORTEX_SQUEEZE_BATCH_STATUS_KEY)
+    if not isinstance(manifest, dict):
+        return None, "ortex_batch_manifest_missing"
+    for key in (
+        "batch_sha256",
+        "decision_at",
+        "complete",
+        "quota_policy_sha256",
+        "members_sha256",
+    ):
+        if batch_reference.get(key) != manifest.get(key):
+            return None, "ortex_batch_manifest_reference_mismatch"
+    return copy.deepcopy(manifest), None
+
+
+def _validate_ortex_batch_status(
+    status: object,
+    *,
+    ross_signals: Mapping[str, Any] | None = None,
+    required_symbol: str | None = None,
+    require_complete: bool = True,
+    read_at: datetime | None = None,
+) -> tuple[bool, str]:
+    """Validate a full field manifest through the shared capture contract."""
+
+    if not isinstance(status, Mapping):
+        return False, "ortex_batch_status_missing"
+    try:
+        from .short_mechanics import ortex_public_policy_sha256
+
+        observed_at = read_at or _tape_asof_default(None)
+        if observed_at.tzinfo is None:
+            observed_at = observed_at.replace(tzinfo=timezone.utc)
+        else:
+            observed_at = observed_at.astimezone(timezone.utc)
+        validated = validate_ortex_squeeze_fuel_batch_manifest(
+            status,
+            read_at=observed_at,
+            expected_quota_policy_sha256=ortex_public_policy_sha256(),
+            freshness_ttl_seconds=float(
+                getattr(
+                    settings,
+                    "chili_ortex_success_cache_ttl_seconds",
+                    86_400,
+                )
+            ),
+        )
+    except CaptureContractError:
+        return False, "ortex_batch_manifest_invalid"
+    except Exception:
+        return False, "ortex_batch_manifest_validation_unavailable"
+    if require_complete and not validated.complete:
+        return False, "ortex_batch_coverage_unavailable"
+
+    symbol = str(required_symbol or "").strip().upper()
+    if symbol and symbol not in validated.signal_by_symbol:
+        return False, "ortex_batch_symbol_reference_missing"
+    if ross_signals is not None:
+        for raw_symbol, signal in ross_signals.items():
+            if not isinstance(signal, Mapping):
+                continue
+            current_symbol = str(raw_symbol or "").strip().upper()
+            expected = validated.signal_by_symbol.get(current_symbol)
+            if not isinstance(expected, Mapping):
+                return False, "ortex_batch_signal_outside_field"
+            if (
+                signal.get("ortex_selection_reference")
+                != expected.get("ortex_selection_reference")
+            ):
+                return False, "ortex_batch_signal_reference_mismatch"
+            if (
+                signal.get("squeeze_fuel_pct")
+                != expected.get("squeeze_fuel_pct")
+                or signal.get("squeeze_fuel_rank_pct")
+                != expected.get("squeeze_fuel_rank_pct")
+            ):
+                return False, "ortex_batch_signal_economics_mismatch"
+    return True, "complete"
+
+
+def ortex_batch_readiness_reason(
+    execution_readiness: object,
+    *,
+    symbol: str,
+    manifest: Mapping[str, Any] | None,
+    read_at: datetime,
+) -> str | None:
+    """Return a typed decision-local blocker for an enabled Ortex policy."""
+
+    if not isinstance(execution_readiness, dict):
+        return "ortex_execution_readiness_unavailable"
+    extra = execution_readiness.get("extra")
+    if not isinstance(extra, dict):
+        return "ortex_execution_readiness_extra_unavailable"
+    ross_signals = extra.get("ross_signals")
+    normalized_symbol = str(symbol or "").strip().upper()
+    current_signal = (
+        next(
+            (
+                value
+                for raw_symbol, value in ross_signals.items()
+                if str(raw_symbol or "").strip().upper()
+                == normalized_symbol
+            ),
+            None,
+        )
+        if isinstance(ross_signals, dict)
+        else None
+    )
+    if not isinstance(current_signal, dict):
+        return "ortex_row_signal_projection_missing"
+    if current_signal.get("selection_input_coverage_unavailable") is True:
+        return "selection_input_coverage_unavailable"
+    try:
+        from .short_mechanics import ortex_public_policy_sha256
+
+        policy_sha256 = ortex_public_policy_sha256()
+        reference = validate_ortex_squeeze_fuel_batch_reference(
+            extra.get(ORTEX_SQUEEZE_BATCH_STATUS_KEY),
+            read_at=read_at,
+            expected_quota_policy_sha256=policy_sha256,
+        )
+        if not reference.complete:
+            return "ortex_batch_coverage_unavailable"
+        if not isinstance(manifest, Mapping):
+            return "ortex_batch_manifest_missing"
+        validated_manifest = validate_ortex_squeeze_fuel_batch_manifest(
+            manifest,
+            read_at=read_at,
+            expected_quota_policy_sha256=policy_sha256,
+            freshness_ttl_seconds=float(
+                getattr(
+                    settings,
+                    "chili_ortex_success_cache_ttl_seconds",
+                    86_400,
+                )
+            ),
+        )
+        bound = bind_ortex_squeeze_fuel_batch_reference(
+            reference,
+            validated_manifest,
+        )
+    except CaptureContractError:
+        return "ortex_batch_reference_or_manifest_invalid"
+    except Exception:
+        return "ortex_batch_readiness_validation_unavailable"
+    expected = bound.signal_by_symbol.get(normalized_symbol)
+    if not isinstance(expected, Mapping):
+        return "ortex_batch_symbol_reference_missing"
+    if (
+        current_signal.get("ortex_selection_reference")
+        != expected.get("ortex_selection_reference")
+    ):
+        return "ortex_batch_signal_reference_mismatch"
+    if (
+        current_signal.get("squeeze_fuel_pct")
+        != expected.get("squeeze_fuel_pct")
+        or current_signal.get("squeeze_fuel_rank_pct")
+        != expected.get("squeeze_fuel_rank_pct")
+    ):
+        return "ortex_batch_signal_economics_mismatch"
+    return None
+
+
+def _apply_ortex_squeeze_fuel_batch(
+    db: Session,
+    *,
+    ross_signals: dict[str, Any],
+    weights: Mapping[str, float],
+    decision_at: datetime,
+    batch_status_out: dict[str, Any] | None = None,
+) -> dict[str, float]:
+    """Apply one all-or-nothing, content-addressable Ortex ranking batch.
+
+    Every signal receives a compact typed reference while the feature is ON.
+    Only a fully authoritative batch may add the squeeze pillar or expose a
+    score/rank to sizing and exits. This prevents one successful endpoint
+    beside one timeout/auth/quota failure from becoming a partial economic
+    input. Captured PAPER expands the compact references to raw sealed evidence
+    later, inside its repeatable-read transaction.
+    """
+
+    from sqlalchemy.orm import sessionmaker
+
+    from .ortex_quota import OrtexQuotaAuthority
+    from .ross_momentum import (
+        ROSS_SQUEEZE_FUEL_PILLAR_WEIGHT,
+        _percentile_rank,
+        below_explosive_floor,
+        score_universe,
+        squeeze_fuel_signal,
+    )
+    from .short_mechanics import (
+        OrtexOutcomeKind,
+        OrtexShortMechanicsOutcome,
+        get_short_mechanics_outcome,
+        ortex_public_policy,
+        ortex_public_policy_sha256,
+        ortex_quota_authority,
+    )
+
+    policy = ortex_public_policy()
+    policy_sha256 = ortex_public_policy_sha256()
+    observed_at = (
+        decision_at.replace(tzinfo=timezone.utc)
+        if decision_at.tzinfo is None
+        else decision_at.astimezone(timezone.utc)
+    )
+    batch_decision_at = observed_at
+    top_n = int(
+        getattr(settings, "chili_momentum_squeeze_fuel_top_n", 12) or 0
+    )
+    signal_by_symbol: dict[str, dict[str, Any]] = {}
+    for raw_symbol, signal in ross_signals.items():
+        if not isinstance(signal, dict):
+            continue
+        symbol = str(raw_symbol or "").strip().upper()
+        if not symbol or symbol in signal_by_symbol:
+            raise ValueError("Ortex batch symbols are empty or non-unique")
+        signal_by_symbol[symbol] = signal
+    field_symbols = sorted(signal_by_symbol)
+
+    # This must precede ranking and every provider/quota operation. A failed
+    # batch may never leave values inherited from a prior mutable scanner row.
+    _sanitize_ortex_signal_values(signal_by_symbol)
+
+    prelim = score_universe(signal_by_symbol, weights=weights)
+    candidates = [
+        symbol
+        for symbol, signal in signal_by_symbol.items()
+        if isinstance(signal, dict)
+        and not symbol.endswith("-USD")
+        and not below_explosive_floor(signal)
+    ]
+    candidates.sort(
+        key=lambda symbol: (
+            -(
+                prelim[symbol].score
+                if symbol in prelim
+                else next(
+                    (
+                        result.score
+                        for raw_key, result in prelim.items()
+                        if str(raw_key).strip().upper() == symbol
+                    ),
+                    0.0,
+                )
+            ),
+            symbol,
+        )
+    )
+    selected = {
+        str(symbol).upper() for symbol in candidates[: max(0, top_n)]
+    }
+
+    def _publish(*, complete: bool) -> None:
+        if batch_status_out is None:
+            return
+        batch_status_out.clear()
+        batch_status_out.update(
+            _make_ortex_batch_status(
+                decision_at=batch_decision_at,
+                policy_sha256=policy_sha256,
+                field_symbols=field_symbols,
+                selected_symbols=selected,
+                ross_signals=signal_by_symbol,
+                complete=complete,
+            )
+        )
+
+    if not field_symbols:
+        _publish(complete=False)
+        return dict(weights)
+
+    authority = OrtexQuotaAuthority(
+        sessionmaker(bind=db.get_bind(), expire_on_commit=False),
+        monthly_limit=int(policy["monthly_limit"]),
+        request_interval_seconds=float(policy["request_interval_seconds"]),
+        reservation_lease_seconds=float(policy["quota_lease_seconds"]),
+        transient_backoff_base_seconds=float(policy["backoff_base_seconds"]),
+        transient_backoff_max_seconds=float(policy["backoff_max_seconds"]),
+        month_boundary_guard_seconds=float(
+            policy["month_boundary_guard_seconds"]
+        ),
+        response_max_bytes=int(policy["max_response_bytes"]),
+    )
+    outcomes: dict[str, OrtexShortMechanicsOutcome] = {}
+    with ortex_quota_authority(authority):
+        for symbol, signal in sorted(signal_by_symbol.items()):
+            if symbol.endswith("-USD"):
+                outcome = OrtexShortMechanicsOutcome.not_applicable(
+                    symbol=symbol,
+                    reason="non_equity",
+                    observed_at=observed_at,
+                    policy_sha256=policy_sha256,
+                    policy=policy,
+                )
+            elif symbol not in selected:
+                outcome = OrtexShortMechanicsOutcome.not_applicable(
+                    symbol=symbol,
+                    reason="outside_top_n",
+                    observed_at=observed_at,
+                    policy_sha256=policy_sha256,
+                    policy=policy,
+                )
+            else:
+                # No unsealed exchange guess: the provider performs bounded,
+                # typed discovery and captures every attempted endpoint.
+                outcome = get_short_mechanics_outcome(symbol)
+            outcomes[symbol] = outcome
+            signal["ortex_selection_reference"] = (
+                outcome.to_selection_reference_dict()
+            )
+
+    available_clocks = [
+        clock
+        for outcome in outcomes.values()
+        for clock in (
+            outcome.available_at,
+            outcome.cache_origin_available_at,
+        )
+        if isinstance(clock, datetime)
+    ]
+    if available_clocks:
+        batch_decision_at = max(
+            [observed_at]
+            + [
+                clock.replace(tzinfo=timezone.utc)
+                if clock.tzinfo is None
+                else clock.astimezone(timezone.utc)
+                for clock in available_clocks
+            ]
+        )
+
+    authoritative_neutral = {
+        OrtexOutcomeKind.AUTHORITATIVE_EMPTY,
+        OrtexOutcomeKind.NOT_APPLICABLE,
+        OrtexOutcomeKind.UNSUPPORTED_SYMBOL_OR_EXCHANGE,
+    }
+    if any(
+        outcome.kind is not OrtexOutcomeKind.SUCCESS
+        and outcome.kind not in authoritative_neutral
+        for outcome in outcomes.values()
+    ):
+        _publish(complete=False)
+        return dict(weights)
+
+    successful_scores: dict[str, float] = {}
+    successful_signals: dict[str, Any] = {}
+    for symbol, outcome in outcomes.items():
+        if outcome.kind is not OrtexOutcomeKind.SUCCESS:
+            continue
+        squeeze = squeeze_fuel_signal(
+            outcome.short_interest_pct,
+            outcome.cost_to_borrow,
+            utilization=outcome.utilization,
+            is_easy_to_borrow=outcome.is_easy_to_borrow,
+        )
+        if squeeze.squeeze_pct is None:
+            # A typed SUCCESS without a reproducible economic score is a
+            # contract failure. Leave economic keys absent so captured PAPER
+            # grades this decision unavailable rather than using a subset.
+            _publish(complete=False)
+            return dict(weights)
+        successful_signals[symbol] = squeeze
+        successful_scores[symbol] = float(squeeze.squeeze_pct)
+
+    if not successful_scores:
+        _publish(complete=True)
+        return dict(weights)
+    ordered_scores = sorted(successful_scores.values())
+    for symbol, score in successful_scores.items():
+        signal = signal_by_symbol[symbol]
+        squeeze = successful_signals[symbol]
+        outcome = outcomes[symbol]
+        signal["squeeze_fuel_pct"] = squeeze.squeeze_pct
+        signal["short_interest_pct"] = squeeze.short_interest_pct
+        signal["cost_to_borrow"] = squeeze.cost_to_borrow
+        signal["utilization"] = outcome.utilization
+        signal["is_easy_to_borrow"] = squeeze.is_easy_to_borrow
+        signal["squeeze_fuel_rank_pct"] = round(
+            _percentile_rank(score, ordered_scores),
+            4,
+        )
+    updated = dict(weights)
+    updated["squeeze_fuel"] = ROSS_SQUEEZE_FUEL_PILLAR_WEIGHT
+    _publish(complete=True)
+    return updated
+
+
+def prepare_ortex_squeeze_fuel_field(
+    db: Session,
+    *,
+    ross_signals: Mapping[str, Any],
+    weights: Mapping[str, float],
+    decision_at: datetime,
+) -> tuple[dict[str, Any], dict[str, float], dict[str, Any] | None]:
+    """Prepare one immutable decision-local field before scheduler chunking."""
+
+    prepared: dict[str, Any] = {
+        str(symbol or "").strip().upper(): copy.deepcopy(signal)
+        for symbol, signal in ross_signals.items()
+        if str(symbol or "").strip()
+    }
+    _sanitize_ortex_signal_values(prepared)
+    if not bool(
+        getattr(settings, "chili_momentum_squeeze_fuel_tilt_enabled", True)
+    ):
+        return prepared, dict(weights), None
+
+    status: dict[str, Any] = {}
+    try:
+        updated = _apply_ortex_squeeze_fuel_batch(
+            db,
+            ross_signals=prepared,
+            weights=weights,
+            decision_at=decision_at,
+            batch_status_out=status,
+        )
+    except Exception:
+        from .short_mechanics import (
+            ortex_public_policy_sha256,
+        )
+
+        _sanitize_ortex_signal_values(prepared)
+        status = _make_ortex_batch_status(
+            decision_at=decision_at,
+            policy_sha256=ortex_public_policy_sha256(),
+            field_symbols=sorted(prepared),
+            selected_symbols=set(),
+            ross_signals=prepared,
+            complete=False,
+        )
+        updated = dict(weights)
+    return prepared, updated, status
 
 
 def run_momentum_neural_tick(
@@ -1375,9 +1996,57 @@ def run_momentum_neural_tick(
     """Compute regime + family viability; persist on hub and viability pool nodes."""
     _ = graph_version
     meta = dict(meta or {})
+    raw_ross_signals = meta.get("ross_signals")
+    if isinstance(raw_ross_signals, dict):
+        # Scheduler snapshots are intentionally reused across ticks. Never
+        # mutate their nested values while enriching one decision.
+        meta["ross_signals"] = copy.deepcopy(raw_ross_signals)
+    squeeze_enabled = bool(
+        getattr(settings, "chili_momentum_squeeze_fuel_tilt_enabled", True)
+    )
+    prepared_ortex_status = meta.get(ORTEX_SQUEEZE_BATCH_STATUS_KEY)
+    if not squeeze_enabled:
+        if isinstance(meta.get("ross_signals"), dict):
+            _sanitize_ortex_signal_values(meta["ross_signals"])
+        meta.pop(ORTEX_SQUEEZE_BATCH_STATUS_KEY, None)
+        prepared_ortex_status = None
+    elif prepared_ortex_status is not None:
+        prepared_ok, prepared_reason = _validate_ortex_batch_status(
+            prepared_ortex_status,
+            ross_signals=(
+                meta.get("ross_signals")
+                if isinstance(meta.get("ross_signals"), dict)
+                else None
+            ),
+            require_complete=False,
+        )
+        if not prepared_ok:
+            raise ReplayPipelineInputUnavailableError(prepared_reason)
+    elif isinstance(meta.get("ross_signals"), dict):
+        # Clear inherited values before Hurst, provider, or any other fallible
+        # feature work. A later failure can therefore persist only an explicit
+        # unavailable batch, never stale economics.
+        _sanitize_ortex_signal_values(meta["ross_signals"])
     decision_at = _tape_asof_default(decision_as_of_utc)
     if decision_at.tzinfo is not None:
         decision_at = decision_at.astimezone(timezone.utc).replace(tzinfo=None)
+    if isinstance(prepared_ortex_status, Mapping):
+        try:
+            _ortex_available_at = datetime.fromisoformat(
+                str(prepared_ortex_status["decision_at"]).replace(
+                    "Z",
+                    "+00:00",
+                )
+            )
+            if _ortex_available_at.tzinfo is not None:
+                _ortex_available_at = _ortex_available_at.astimezone(
+                    timezone.utc
+                ).replace(tzinfo=None)
+            decision_at = max(decision_at, _ortex_available_at)
+        except (KeyError, TypeError, ValueError):
+            raise ReplayPipelineInputUnavailableError(
+                "ortex_batch_decision_clock_invalid"
+            )
     if _replay_clock_is_bound():
         raise ReplayPipelineInputUnavailableError(
             "replay selection_pipeline inputs are unavailable: "
@@ -1703,92 +2372,59 @@ def run_momentum_neural_tick(
                             _sig["intraday_rvol_source"] = "float_rotation_premarket"
                     except Exception:
                         continue
-            # SQUEEZE-FUEL TILT (off => byte-identical): Ross SS101 #2 — a heavily-shorted,
-            # hard/expensive-to-borrow float = trapped sellers covering INTO the pop (the
-            # rocket fuel behind the 100-1000% low-float verticals); free shares / easy-to-
-            # borrow names get a small DE-RATE (shorts press the pop). CREDIT-FRUGAL: the
-            # Ortex fetch is gated to the TOP-N explosive low-float candidates that already
-            # pass the Ross screen (ranked by the CURRENT weight-set, NOT-below-floor), so the
-            # Trader plan (1,000 credits/mo, 1 req/s) lasts; each result is cached 12h. Stamp
-            # squeeze_fuel_pct onto those EQUITY signals + FOLD the squeeze_fuel pillar onto the
-            # ACTIVE weight-set (composable). RE-RANK only; never a veto. Equity-only (crypto has
-            # no borrow data). Flag default-ON ("no dark flags").
+            # SQUEEZE-FUEL TILT: default-ON by explicit operator doctrine. A
+            # durable calendar-month authority admits a bounded top-N batch
+            # under the 1,000-request Ortex plan. Every member receives typed,
+            # compact provenance, but an incomplete endpoint/provider/quota
+            # batch contributes ZERO economic values. Captured PAPER expands
+            # those refs to exact raw response bytes and fails the individual
+            # decision closed when coverage is unavailable. The env kill-switch
+            # bypasses this helper entirely and preserves byte-identical parity.
             if bool(getattr(settings, "chili_momentum_squeeze_fuel_tilt_enabled", True)):
-                try:
-                    from .ross_momentum import (
-                        ROSS_SQUEEZE_FUEL_PILLAR_WEIGHT,
-                        below_explosive_floor as _sf_below_floor,
-                        score_universe as _sf_prelim_rank,
-                        squeeze_fuel_signal as _squeeze_fuel_signal,
-                    )
-                    from .short_mechanics import get_short_mechanics as _get_short_mech
-
-                    _top_n = int(getattr(settings, "chili_momentum_squeeze_fuel_top_n", 12) or 0)
-                    if _top_n > 0:
-                        # Preliminary rank with the CURRENT weights to pick the top-N explosive
-                        # low-float EQUITY candidates that ALSO clear the explosive floor — the
-                        # only names worth a credit. Crypto / below-floor names are excluded.
-                        _prelim = _sf_prelim_rank(_ross_signals, weights=_weights)
-                        _cands = [
-                            s for s in _ross_signals
-                            if isinstance(_ross_signals.get(s), dict)
-                            and not str(s).upper().endswith("-USD")
-                            and not _sf_below_floor(_ross_signals[s])
-                        ]
-                        _cands.sort(
-                            key=lambda s: (_prelim[s].score if s in _prelim else 0.0),
-                            reverse=True,
+                if prepared_ortex_status is not None:
+                    if bool(prepared_ortex_status.get("complete")) and any(
+                        isinstance(member, dict)
+                        and member.get("squeeze_fuel_pct") is not None
+                        for member in (
+                            prepared_ortex_status.get("members") or []
                         )
-                        _n_sf = 0
-                        for _sym in _cands[:_top_n]:
-                            _sig = _ross_signals.get(_sym)
-                            if not isinstance(_sig, dict):
-                                continue
-                            try:
-                                _mech = _get_short_mech(_sym)
-                                if not _mech:
-                                    continue  # fail-open: no data => omit the pillar for this name
-                                _sf = _squeeze_fuel_signal(
-                                    _mech.get("short_interest_pct"),
-                                    _mech.get("cost_to_borrow"),
-                                    utilization=_mech.get("utilization"),
-                                    is_easy_to_borrow=_mech.get("is_easy_to_borrow"),
-                                )
-                                if _sf.squeeze_pct is not None:
-                                    _sig["squeeze_fuel_pct"] = _sf.squeeze_pct
-                                    _sig["short_interest_pct"] = _sf.short_interest_pct
-                                    _sig["cost_to_borrow"] = _sf.cost_to_borrow
-                                    _sig["is_easy_to_borrow"] = _sf.is_easy_to_borrow
-                                    _n_sf += 1
-                            except Exception:
-                                continue
-                        if _n_sf > 0:
-                            _weights = dict(_weights)
-                            _weights["squeeze_fuel"] = ROSS_SQUEEZE_FUEL_PILLAR_WEIGHT
-                            # P4 DEEPENING: stamp the WITHIN-BATCH PERCENTILE of each name's OWN
-                            # raw squeeze_fuel_pct so the downstream entry size-up + exit band-widen
-                            # levers (squeeze_entry_size_multiplier / squeeze_exit_band_widen) have a
-                            # no-magic, batch-adaptive axis (the live bar floats with the batch). This
-                            # rank rides through ross_signals -> execution_readiness_json.extra exactly
-                            # like the raw sub-score. Equity-only (only -USD-excluded names were fetched).
-                            try:
-                                from .ross_momentum import _percentile_rank as _sf_pctl
-                                _sf_vals = sorted(
-                                    float(_ross_signals[_s]["squeeze_fuel_pct"])
-                                    for _s in _ross_signals
-                                    if isinstance(_ross_signals.get(_s), dict)
-                                    and _ross_signals[_s].get("squeeze_fuel_pct") is not None
-                                )
-                                for _s in _ross_signals:
-                                    _ss = _ross_signals.get(_s)
-                                    if isinstance(_ss, dict) and _ss.get("squeeze_fuel_pct") is not None:
-                                        _ss["squeeze_fuel_rank_pct"] = round(
-                                            _sf_pctl(float(_ss["squeeze_fuel_pct"]), _sf_vals), 4
-                                        )
-                            except Exception:
-                                pass
-                except Exception:
-                    pass
+                    ):
+                        from .ross_momentum import (
+                            ROSS_SQUEEZE_FUEL_PILLAR_WEIGHT,
+                        )
+
+                        _weights = dict(_weights)
+                        _weights["squeeze_fuel"] = (
+                            ROSS_SQUEEZE_FUEL_PILLAR_WEIGHT
+                        )
+                else:
+                    (
+                        _prepared_signals,
+                        _weights,
+                        _built_status,
+                    ) = prepare_ortex_squeeze_fuel_field(
+                        db,
+                        ross_signals=_ross_signals,
+                        weights=_weights,
+                        decision_at=decision_at,
+                    )
+                    _ross_signals = _prepared_signals
+                    meta["ross_signals"] = _prepared_signals
+                    if _built_status is not None:
+                        meta[ORTEX_SQUEEZE_BATCH_STATUS_KEY] = _built_status
+                        _ortex_available_at = datetime.fromisoformat(
+                            str(_built_status["decision_at"]).replace(
+                                "Z",
+                                "+00:00",
+                            )
+                        )
+                        if _ortex_available_at.tzinfo is not None:
+                            _ortex_available_at = (
+                                _ortex_available_at.astimezone(
+                                    timezone.utc
+                                ).replace(tzinfo=None)
+                            )
+                        decision_at = max(decision_at, _ortex_available_at)
             # NEWS-CATALYST TILT (default OFF => byte-identical): the 🔥 pillar Ross weights
             # heavily on his scanner — the 4th Ross pillar that was a STUB until now. Map each
             # symbol's REAL Polygon/Benzinga catalyst GRADE (the strong/weak/fake/all sets the
@@ -2495,7 +3131,13 @@ def run_momentum_neural_tick(
         atr_pct=meta.get("atr_pct"),
         meta=ctx_meta,
     )
-    feats = ExecutionReadinessFeatures.from_meta(meta)
+    persisted_meta = dict(meta)
+    full_ortex_batch_status = meta.get(ORTEX_SQUEEZE_BATCH_STATUS_KEY)
+    if isinstance(full_ortex_batch_status, Mapping):
+        persisted_meta[ORTEX_SQUEEZE_BATCH_STATUS_KEY] = (
+            _ortex_batch_reference(full_ortex_batch_status)
+        )
+    feats = ExecutionReadinessFeatures.from_meta(persisted_meta)
 
     rows: list[dict[str, Any]] = []
     for sym in symbols:
@@ -2562,6 +3204,10 @@ def run_momentum_neural_tick(
         "symbols_evaluated": symbols,
         "top_preview": rows[:8],
     }
+    if isinstance(full_ortex_batch_status, Mapping):
+        hub_payload[ORTEX_SQUEEZE_BATCH_STATUS_KEY] = copy.deepcopy(
+            dict(full_ortex_batch_status)
+        )
     viability_payload = {
         "momentum_neural_version": 1,
         "last_tick_utc": now,

@@ -4,6 +4,7 @@ from dataclasses import replace
 from datetime import timedelta
 import json
 import socket
+from types import SimpleNamespace
 import uuid
 
 import pytest
@@ -58,6 +59,10 @@ from app.services.trading.momentum_neural.replay_capture_contract import (
 from app.services.trading.momentum_neural.replay_capture_runtime import (
     BoundedCaptureIngress,
     CaptureProducerLifecycleRuntime,
+)
+from app.services.trading.momentum_neural.risk_policy import (
+    persisted_catalyst_news_grade_rank,
+    sealed_readiness_conviction_adjustment,
 )
 from tests.test_replay_capture_producer_lifecycle import (
     BASE,
@@ -365,7 +370,7 @@ def _empty_ledger(
 
 def _factory_and_boundary(
     *,
-    execution_surface: str = "alpaca_paper",
+    execution_surface: str = "replay",
     setup_family: str = "primary_entry",
     provider: str = "alpaca_market_data_paper",
     bbo_stream: CaptureStream = CaptureStream.ALPACA_NBBO_QUOTE,
@@ -374,6 +379,7 @@ def _factory_and_boundary(
     account_query_overrides: dict | None = None,
     account_snapshot_overrides: dict | None = None,
     pending_buying_power_impact_usd: float = 0.0,
+    economics_override: CapturedAdaptiveRiskEconomicInputs | None = None,
 ):
     decision_id = "chili-captured-generic-entry-1"
     (
@@ -414,17 +420,21 @@ def _factory_and_boundary(
         observed_at=decision_at - timedelta(microseconds=100),
         pending_buying_power_impact_usd=pending_buying_power_impact_usd,
     )
-    economics = CapturedAdaptiveRiskEconomicInputs(
-        structural_stop=4.80,
-        entry_slippage_bps=5.0,
-        exit_slippage_bps=5.0,
-        fees_per_share_usd=0.005,
-        setup_quality=0.80,
-        realized_volatility_fraction=0.05,
-        average_daily_volume_shares=5_000_000.0,
-        recent_volume_shares=500_000.0,
-        executable_depth_shares=100_000.0,
-        candidate_buying_power_impact_per_share_usd=5.00,
+    economics = (
+        economics_override
+        if economics_override is not None
+        else CapturedAdaptiveRiskEconomicInputs(
+            structural_stop=4.80,
+            entry_slippage_bps=5.0,
+            exit_slippage_bps=5.0,
+            fees_per_share_usd=0.005,
+            setup_quality=0.80,
+            realized_volatility_fraction=0.05,
+            average_daily_volume_shares=5_000_000.0,
+            recent_volume_shares=500_000.0,
+            executable_depth_shares=100_000.0,
+            candidate_buying_power_impact_per_share_usd=5.00,
+        )
     )
     fact_payloads = captured_adaptive_risk_fact_payloads(identity, economics)
 
@@ -484,6 +494,291 @@ def _factory_and_boundary(
     return factory, boundary
 
 
+def _conviction_settings(**overrides: object) -> SimpleNamespace:
+    values: dict[str, object] = {
+        "chili_momentum_squeeze_fuel_tilt_enabled": True,
+        "chili_momentum_squeeze_fuel_top_n": 12,
+        "chili_momentum_squeeze_entry_sizeup_enabled": True,
+        "chili_momentum_squeeze_entry_top_pctl": 0.80,
+        "chili_momentum_squeeze_entry_max_mult": 1.50,
+        "chili_momentum_kelly_conviction_enabled": True,
+        "chili_momentum_kelly_conviction_max_multiplier": 1.50,
+        "chili_momentum_kelly_conviction_gain": 1.0,
+        "chili_momentum_kelly_conviction_w_squeeze": 0.4,
+        "chili_momentum_kelly_conviction_w_ofi": 0.4,
+        "chili_momentum_kelly_conviction_w_news": 0.2,
+        "chili_momentum_fake_catalyst_guard_enabled": True,
+    }
+    values.update(overrides)
+    return SimpleNamespace(**values)
+
+
+def _adjusted_economics(
+    *,
+    settings_obj: object,
+    squeeze_rank_pct: float | None = 1.0,
+    squeeze_fuel_pct: float | None = 0.95,
+    ofi: float | None = 1.0,
+    config_provenance_sha256: str | None = None,
+    strong_symbols: object = ("VEEE",),
+    weak_symbols: object = (),
+    fake_symbols: object = (),
+) -> CapturedAdaptiveRiskEconomicInputs:
+    adjusted, audit = sealed_readiness_conviction_adjustment(
+        base_setup_quality=0.60,
+        symbol="VEEE",
+        squeeze_rank_pct=squeeze_rank_pct,
+        squeeze_fuel_pct=squeeze_fuel_pct,
+        ofi=ofi,
+        strong_symbols=strong_symbols,
+        weak_symbols=weak_symbols,
+        fake_symbols=fake_symbols,
+        settings_obj=settings_obj,
+        config_provenance_sha256=(
+            _identity().config_sha256
+            if config_provenance_sha256 is None
+            else config_provenance_sha256
+        ),
+        selection_payload_sha256="b" * 64,
+    )
+    return CapturedAdaptiveRiskEconomicInputs(
+        structural_stop=4.80,
+        entry_slippage_bps=5.0,
+        exit_slippage_bps=5.0,
+        fees_per_share_usd=0.005,
+        setup_quality=0.60,
+        realized_volatility_fraction=0.05,
+        average_daily_volume_shares=5_000_000.0,
+        recent_volume_shares=500_000.0,
+        executable_depth_shares=100_000.0,
+        candidate_buying_power_impact_per_share_usd=5.00,
+        effective_setup_quality=adjusted,
+        setup_quality_adjustment_audit=audit,
+    )
+
+
+def test_sealed_conviction_changes_shared_adaptive_quantity_without_fetch(
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr(
+        socket,
+        "create_connection",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("network fallback attempted")
+        ),
+    )
+    neutral_economics = _adjusted_economics(
+        settings_obj=_conviction_settings(
+            chili_momentum_squeeze_fuel_tilt_enabled=False,
+        )
+    )
+    boosted_economics = _adjusted_economics(
+        settings_obj=_conviction_settings()
+    )
+    neutral_factory, neutral_boundary = _factory_and_boundary(
+        execution_surface="replay",
+        economics_override=neutral_economics,
+    )
+    boosted_factory, boosted_boundary = _factory_and_boundary(
+        execution_surface="replay",
+        economics_override=boosted_economics,
+    )
+
+    neutral = neutral_factory.build(neutral_boundary).source
+    boosted = boosted_factory.build(boosted_boundary).source
+    neutral_resolution = resolve_adaptive_risk(
+        neutral.policy,
+        neutral.inputs,
+    )
+    boosted_resolution = resolve_adaptive_risk(
+        boosted.policy,
+        boosted.inputs,
+    )
+
+    assert neutral.inputs.setup_quality == 0.60
+    assert boosted.inputs.setup_quality == 1.0
+    assert boosted_resolution.quantity_shares > neutral_resolution.quantity_shares
+    setup_payload = captured_adaptive_risk_fact_payloads(
+        boosted_boundary.identity,
+        boosted_economics,
+    )["setup_quality"]
+    assert setup_payload["base_setup_quality"] == 0.60
+    assert setup_payload["setup_quality"] == 1.0
+    assert setup_payload["conviction_adjustment"]["audit_sha256"]
+    assert neutral_economics.setup_quality_adjustment_audit is None
+    assert captured_adaptive_risk_fact_payloads(
+        neutral_boundary.identity,
+        neutral_economics,
+    )["setup_quality"] == {
+        "schema_version": "chili.captured-adaptive-risk-fact.v1",
+        "decision_id": neutral_boundary.identity.decision_id,
+        "symbol": neutral_boundary.identity.symbol,
+        "setup_family": neutral_boundary.identity.setup_family,
+        "fact": "setup_quality",
+        "setup_quality": 0.60,
+    }
+
+
+@pytest.mark.parametrize(
+    ("weak_symbols", "fake_symbols", "fake_guard_enabled"),
+    (
+        (("VEEE",), (), True),
+        ((), ("VEEE",), True),
+    ),
+)
+def test_sealed_conviction_catalyst_dominance_suppresses_boost(
+    weak_symbols: object,
+    fake_symbols: object,
+    fake_guard_enabled: bool,
+) -> None:
+    economics = _adjusted_economics(
+        settings_obj=_conviction_settings(
+            chili_momentum_fake_catalyst_guard_enabled=fake_guard_enabled,
+        ),
+        weak_symbols=weak_symbols,
+        fake_symbols=fake_symbols,
+    )
+
+    assert economics.effective_setup_quality == economics.setup_quality
+    audit = economics.setup_quality_adjustment_audit
+    assert audit["catalyst_dominance"]["news_grade_rank"] == 0
+    assert audit["entry_adjustment"]["multiplier"] == 1.0
+    assert audit["kelly_adjustment"]["multiplier"] == 1.0
+
+
+def test_sealed_conviction_fake_guard_off_restores_strong_grade() -> None:
+    economics = _adjusted_economics(
+        settings_obj=_conviction_settings(
+            chili_momentum_fake_catalyst_guard_enabled=False,
+        ),
+        fake_symbols=("VEEE",),
+    )
+
+    assert economics.effective_setup_quality > economics.setup_quality
+    assert (
+        economics.setup_quality_adjustment_audit["catalyst_dominance"][
+            "news_grade_rank"
+        ]
+        == 3
+    )
+
+
+@pytest.mark.parametrize(
+    ("weak_symbols", "fake_symbols", "fake_guard_enabled", "expected_rank"),
+    (
+        ((), (), True, 3),
+        (("VEEE",), (), True, 0),
+        ((), ("VEEE",), True, 0),
+        ((), ("VEEE",), False, 3),
+        (("VEEE",), ("VEEE",), False, 0),
+    ),
+)
+def test_persisted_catalyst_dominance_is_shared_with_live_sizing(
+    weak_symbols: object,
+    fake_symbols: object,
+    fake_guard_enabled: bool,
+    expected_rank: int,
+) -> None:
+    assert (
+        persisted_catalyst_news_grade_rank(
+            symbol="VEEE",
+            strong_symbols=("VEEE",),
+            weak_symbols=weak_symbols,
+            fake_symbols=fake_symbols,
+            fake_guard_enabled=fake_guard_enabled,
+        )
+        == expected_rank
+    )
+
+
+@pytest.mark.parametrize(
+    ("overrides", "neutral_lever", "other_lever_armed"),
+    (
+        (
+            {"chili_momentum_squeeze_entry_sizeup_enabled": False},
+            "entry_adjustment",
+            "kelly_adjustment",
+        ),
+        (
+            {"chili_momentum_kelly_conviction_enabled": False},
+            "kelly_adjustment",
+            "entry_adjustment",
+        ),
+    ),
+)
+def test_sealed_conviction_per_lever_kill_switch_is_independent(
+    overrides: dict[str, object],
+    neutral_lever: str,
+    other_lever_armed: str,
+) -> None:
+    economics = _adjusted_economics(
+        settings_obj=_conviction_settings(**overrides),
+    )
+    audit = economics.setup_quality_adjustment_audit
+
+    assert audit[neutral_lever]["multiplier"] == 1.0
+    assert audit[neutral_lever]["armed"] is False
+    assert audit[other_lever_armed]["multiplier"] > 1.0
+    assert audit[other_lever_armed]["armed"] is True
+
+
+def test_sealed_conviction_both_entry_flags_off_is_base_quality() -> None:
+    economics = _adjusted_economics(
+        settings_obj=_conviction_settings(
+            chili_momentum_squeeze_entry_sizeup_enabled=False,
+            chili_momentum_kelly_conviction_enabled=False,
+        ),
+    )
+
+    assert economics.effective_setup_quality == economics.setup_quality
+    assert economics.setup_quality_adjustment_audit is None
+
+
+def test_sealed_conviction_kelly_uses_raw_fuel_not_batch_rank() -> None:
+    low_fuel = _adjusted_economics(
+        settings_obj=_conviction_settings(
+            chili_momentum_squeeze_entry_sizeup_enabled=False,
+        ),
+        squeeze_rank_pct=1.0,
+        squeeze_fuel_pct=0.40,
+    )
+    high_fuel = _adjusted_economics(
+        settings_obj=_conviction_settings(
+            chili_momentum_squeeze_entry_sizeup_enabled=False,
+        ),
+        squeeze_rank_pct=0.10,
+        squeeze_fuel_pct=0.95,
+    )
+
+    assert low_fuel.effective_setup_quality == low_fuel.setup_quality
+    assert (
+        low_fuel.setup_quality_adjustment_audit["kelly_adjustment"]["armed"]
+        is False
+    )
+    assert high_fuel.effective_setup_quality > high_fuel.setup_quality
+    assert (
+        high_fuel.setup_quality_adjustment_audit["kelly_adjustment"]["armed"]
+        is True
+    )
+
+
+def test_sealed_conviction_config_is_bound_to_active_attestation() -> None:
+    economics = _adjusted_economics(
+        settings_obj=_conviction_settings(),
+        config_provenance_sha256="f" * 64,
+    )
+    factory, boundary = _factory_and_boundary(
+        execution_surface="replay",
+        economics_override=economics,
+    )
+
+    with pytest.raises(
+        CapturedAdaptiveRiskCoverageUnavailable,
+        match="setup_quality_adjustment_decision_binding_mismatch",
+    ):
+        factory.build(boundary)
+
+
 @pytest.mark.parametrize(
     "setup_family",
     ("primary_entry", "cup_and_handle", "wick_reclaim", "momentum_pullback"),
@@ -498,16 +793,13 @@ def test_generic_captured_factory_reaches_normal_adaptive_request_path(
         material.source,
         client_order_id=boundary.identity.decision_id,
         entry_limit_price=material.source.inputs.ask,
-        active_capture_attestation=material.active_capture_attestation,
     )
 
     assert built.request.setup_family == setup_family
-    assert built.request.inputs.execution_surface == "alpaca_paper"
+    assert built.request.inputs.execution_surface == "replay"
     assert built.resolution.valid is True
     assert built.resolution.quantity_shares > 0
-    assert built.trusted_capture_attestation_sha256 == (
-        boundary.active_capture_attestation.attestation_sha256
-    )
+    assert built.trusted_capture_attestation_sha256 is None
 
 
 def test_real_flat_alpaca_paper_account_receipt_is_the_only_accepted_shape() -> None:
@@ -642,24 +934,39 @@ def test_pending_buying_power_without_reflection_receipt_is_coverage_unavailable
 
 
 def test_replay_and_paper_share_byte_identical_economic_policy_and_resolution() -> None:
-    factory, paper_boundary = _factory_and_boundary()
-    paper = factory.build(paper_boundary).source
-    replay_boundary = replace(
-        paper_boundary,
-        identity=replace(paper_boundary.identity, execution_surface="replay"),
-    )
+    factory, replay_boundary = _factory_and_boundary()
     replay = factory.build(replay_boundary).source
+    paper_inputs = replace(
+        replay.inputs,
+        execution_surface="alpaca_paper",
+    )
 
-    paper_resolution = resolve_adaptive_risk(paper.policy, paper.inputs)
+    paper_resolution = resolve_adaptive_risk(replay.policy, paper_inputs)
     replay_resolution = resolve_adaptive_risk(replay.policy, replay.inputs)
 
-    assert paper.policy.policy_sha256 == replay.policy.policy_sha256
-    assert paper.inputs.economic_input_sha256 == replay.inputs.economic_input_sha256
+    assert paper_inputs.economic_input_sha256 == replay.inputs.economic_input_sha256
     assert (
         paper_resolution.economic_resolution_sha256
         == replay_resolution.economic_resolution_sha256
     )
     assert paper_resolution.quantity_shares == replay_resolution.quantity_shares
+
+
+def test_alpaca_paper_factory_fails_closed_without_locked_admission_bundle() -> None:
+    factory, replay_boundary = _factory_and_boundary()
+    paper_boundary = replace(
+        replay_boundary,
+        identity=replace(
+            replay_boundary.identity,
+            execution_surface="alpaca_paper",
+        ),
+    )
+
+    with pytest.raises(
+        CapturedAdaptiveRiskCoverageUnavailable,
+        match="locked_alpaca_paper_admission_unavailable",
+    ):
+        factory.build(paper_boundary)
 
 
 def test_factory_has_no_network_or_current_db_fallback(monkeypatch) -> None:
