@@ -243,3 +243,33 @@ negative controls. Promotion requires paired walk-forward/OOS improvement in
 net P&L/R/expectancy/profit factor or MFE capture without a material
 distribution-derived worsening in drawdown/loss containment. Absolute peaks,
 winner-only windows, and threshold grids remain prohibited.
+
+## Integrated containment checkpoint — 18:10 PT
+
+The draft containment branch is now reconciled with PR #939's captured
+selection/viability architecture:
+
+- integrated head:
+  `14b62018357f9eab84ca77265578c72df6c79e7f`;
+- PR #937 is mergeable and remains DRAFT/unmerged;
+- the arb child flag is now part of the content-addressed viability settings
+  projection as an exact boolean with default `False`;
+- arb precedence and its exact negative delta are resolved before capture;
+  the pure explicit scorer consumes the captured value and performs no
+  current-settings, classifier, DB, logging, or runtime import access; and
+- all four frozen captured-viability oracle roots were intentionally updated
+  together after an independent recomputation.
+
+Validation on the integrated bytes:
+
+- focused 11-file containment/captured-parity roster: 154 passed;
+- captured-viability/purity/arb slice: 55 passed;
+- real-PostgreSQL selection-producer transaction witness: 1 passed;
+- real captured service-selection lifecycle witness: 1 passed;
+- `py_compile` and `git diff --check`: PASS; and
+- independent deep review: P0=0, P1=0, P2=0.
+
+No deployment, Task Scheduler change, container restart, broker/provider
+request, order action, or live-cash authority was performed. The running
+Claude scheduler and A86 Monday authorities remain pinned to unquarantined
+`8cdc4c2` and therefore remain unacceptable for activation as-is.
