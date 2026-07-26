@@ -59,7 +59,7 @@ _ORTEX_KEY_HEADER = "Ortex-Api-Key"
 # the RESULT (incl. None misses, with a shorter negative TTL) so a fail-open symbol does
 # not re-burn a request every tick.
 _CACHE_TTL_SECONDS = 12 * 3600.0       # 12h: daily short data barely moves intraday
-_NEG_CACHE_TTL_SECONDS = 30 * 60.0     # 30m: don't hammer a failing/no-data symbol
+_NEG_CACHE_TTL_SECONDS = 12 * 3600.0   # 12h (2026-07-26 burn guard): daily rows - a no-data symbol today stays no-data today; 30m re-probes burned credits
 _MAX_CACHE = 512                       # hard cap; LRU-ish prune of expired then oldest
 _cache: dict[str, tuple[float, dict | None]] = {}
 _cache_lock = threading.Lock()
@@ -127,9 +127,50 @@ def _exchange_for(symbol: str) -> str | None:
     return "nasdaq"
 
 
+def _daily_budget_remaining() -> bool:
+    """CREDIT-BURN GUARD (2026-07-26): process-wide daily HTTP budget for Ortex.
+
+    Ortex plans meter API credits; a pathological loop (or a no-data storm) must
+    never exhaust the account's credits in a day. ONE documented setting
+    (``chili_ortex_daily_fetch_budget``, default 300 — ~12 symbols x 2 endpoints
+    x ~12 refreshes with headroom; 0 = unlimited). Budget exhausted => the fetch
+    degrades to the exact no-data semantics the chain already treats as neutral
+    (fail-open None), and one WARNING marks the day. UTC-day keyed; resets at
+    midnight; thread-safe under the same request lock discipline."""
+    global _budget_day, _budget_used
+    try:
+        budget = int(getattr(settings, "chili_ortex_daily_fetch_budget", 300) or 0)
+    except (TypeError, ValueError):
+        budget = 300
+    if budget <= 0:
+        return True  # 0/unset = unlimited (guard off)
+    day = time.strftime("%Y-%m-%d", time.gmtime())
+    with _budget_lock:
+        if day != _budget_day:
+            _budget_day = day
+            _budget_used = 0
+        if _budget_used >= budget:
+            if _budget_used == budget:  # log the crossing exactly once
+                _budget_used += 1
+                logger.warning(
+                    "[short_mechanics] Ortex daily fetch budget (%d) exhausted — "
+                    "further fetches fail-open to no-data until UTC midnight", budget
+                )
+            return False
+        _budget_used += 1
+        return True
+
+
+_budget_day: str = ""
+_budget_used: int = 0
+_budget_lock = threading.Lock()
+
+
 def _rate_limited_get_json(path: str, key: str) -> dict | None:
     """Serialised, rate-limited GET that returns parsed JSON or None (fail-open)."""
     global _last_req_ts
+    if not _daily_budget_remaining():
+        return None  # budget exhausted -> no HTTP, no-data semantics
     url = _ORTEX_BASE + path
     req = urllib.request.Request(url, headers={_ORTEX_KEY_HEADER: key})
     with _req_lock:
