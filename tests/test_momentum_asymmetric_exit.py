@@ -19,14 +19,22 @@ the upside. These tests cover:
 from __future__ import annotations
 
 import math
+import uuid
 from datetime import datetime, timezone
+from types import SimpleNamespace
 
 import pytest
 from sqlalchemy.orm import Session
 
 from app.config import settings
 from app.models.core import User
-from app.models.trading import MomentumSymbolViability
+from app.models.trading import (
+    MomentumSymbolViability,
+    TradingAutomationEvent,
+    TradingAutomationSimulatedFill,
+    TradingDecisionPacket,
+    TradingDeploymentState,
+)
 from app.services.trading.momentum_neural import paper_execution as pe
 from app.services.trading.momentum_neural.persistence import create_trading_automation_session, variant_for_id
 from app.services.trading.momentum_neural.risk_policy import RISK_SNAPSHOT_KEY
@@ -269,6 +277,35 @@ def _le(sess) -> dict:
     return (sess.risk_snapshot_json or {}).get("momentum_live_execution") or {}
 
 
+def _seed_packet(db: Session, *, user_id: int, symbol: str, mode: str) -> TradingDecisionPacket:
+    packet = TradingDecisionPacket(
+        user_id=user_id,
+        chosen_ticker=symbol,
+        decision_type="trade",
+        execution_mode=mode,
+        deployment_stage="paper",
+        source_surface="autopilot",
+        outcome_status="pending",
+        shadow_advisory_only=False,
+    )
+    db.add(packet)
+    db.flush()
+    return packet
+
+
+def _deployment_state(
+    db: Session, *, scope_type: str, scope_key: str
+) -> TradingDeploymentState:
+    return (
+        db.query(TradingDeploymentState)
+        .filter(
+            TradingDeploymentState.scope_type == scope_type,
+            TradingDeploymentState.scope_key == scope_key,
+        )
+        .one()
+    )
+
+
 # ---------------------------------------------------------------------------
 # 3. Live integration: scale-out -> breakeven -> runner -> trail captures tail
 # ---------------------------------------------------------------------------
@@ -494,3 +531,505 @@ def test_paper_first_target_scales_out_moves_to_breakeven_and_runner_captures_up
     # THE THESIS: beat the flat 2:1 exit (sell 100% at target = 4.0).
     assert total_realized > (104.0 - 100.0) * 1.0
     assert pe_state["last_exit_reason"] == "trail_stop"
+
+
+def _assert_full_cycle_learning(
+    db: Session,
+    *,
+    packet: TradingDecisionPacket,
+    session_id: int,
+    variant_id: int,
+    mode: str,
+    expected_pnl: float,
+) -> None:
+    db.refresh(packet)
+    assert packet.research_vs_live_context_json["realized_pnl_usd"] == pytest.approx(
+        expected_pnl
+    )
+    session_state = _deployment_state(
+        db,
+        scope_type="automation_session",
+        scope_key=f"session:{session_id}",
+    )
+    variant_state = _deployment_state(
+        db,
+        scope_type="strategy_variant",
+        scope_key=f"variant:{variant_id}",
+    )
+    count_attr = "live_trade_count" if mode == "live" else "paper_trade_count"
+    assert getattr(session_state, count_attr) == 1
+    assert session_state.rolling_expectancy_net == pytest.approx(expected_pnl)
+    assert getattr(variant_state, count_attr) == 1
+    assert variant_state.rolling_expectancy_net == pytest.approx(expected_pnl)
+
+
+def _assert_cycle_learning_gap(
+    db: Session,
+    *,
+    packet: TradingDecisionPacket,
+    session_id: int,
+    event_type: str,
+    expected_reason: str,
+) -> None:
+    db.refresh(packet)
+    assert "realized_pnl_usd" not in dict(
+        packet.research_vs_live_context_json or {}
+    )
+    assert (
+        db.query(TradingDeploymentState)
+        .filter(
+            TradingDeploymentState.scope_key == f"session:{session_id}"
+        )
+        .count()
+        == 0
+    )
+    gap = (
+        db.query(TradingAutomationEvent)
+        .filter(
+            TradingAutomationEvent.session_id == session_id,
+            TradingAutomationEvent.event_type == event_type,
+        )
+        .one()
+    )
+    assert gap.payload_json["reason_code"] == expected_reason
+
+
+def _paper_fill(
+    sess,
+    packet: TradingDecisionPacket,
+    *,
+    fill_type: str,
+    quantity: float,
+    price: float,
+    after: str,
+    pnl_usd: float | None = None,
+    fees_usd: float | None = None,
+    reason: str,
+) -> TradingAutomationSimulatedFill:
+    return TradingAutomationSimulatedFill(
+        session_id=int(sess.id),
+        symbol=sess.symbol,
+        lane="simulation",
+        side="long",
+        action="enter_long" if fill_type == "entry" else "exit_long",
+        fill_type=fill_type,
+        quantity=quantity,
+        price=price,
+        reference_price=price,
+        fees_usd=fees_usd,
+        pnl_usd=pnl_usd,
+        position_state_before="flat" if fill_type == "entry" else "long",
+        position_state_after=after,
+        reason=reason,
+        marker_json={"entry": 100.0},
+        decision_packet_id=int(packet.id),
+    )
+
+
+def test_live_scale_out_learning_uses_partial_plus_runner_pnl(
+    monkeypatch, db: Session
+) -> None:
+    import app.services.trading.momentum_neural.live_runner as lr
+
+    monkeypatch.setattr(settings, "brain_enable_deployment_ladder", True)
+    vid, _ = _seed_live_eligible_row(db, symbol="LRN-USD")
+    uid = _uid(db, "live-learning")
+    packet = _seed_packet(db, user_id=uid, symbol="LRN-USD", mode="live")
+    opened = datetime.now(timezone.utc).isoformat()
+    snapshot = _live_pos_snapshot(opened)
+    le = snapshot["momentum_live_execution"]
+    le["entry_decision_packet_id"] = int(packet.id)
+    le["realized_pnl_usd"] = 6.25
+    le["position"]["quantity"] = 0.5
+    le["position"]["partial_taken"] = True
+    le["position"]["trade_realized_usd"] = 6.25
+    sess = create_trading_automation_session(
+        db,
+        user_id=uid,
+        symbol="LRN-USD",
+        variant_id=vid,
+        mode="live",
+        state="live_trailing",
+        risk_snapshot_json=snapshot,
+        correlation_id="c-learning-live",
+    )
+    db.flush()
+
+    final_runner_pnl = lr._complete_confirmed_live_exit(
+        db,
+        sess,
+        le=le,
+        quantity=0.5,
+        entry_price=100.0,
+        fill_price=98.0,
+        reason="trail_stop",
+        slip_bps=0.0,
+    )
+    db.flush()
+
+    assert final_runner_pnl == pytest.approx(-1.0)
+    assert float(le["realized_pnl_usd"]) == pytest.approx(5.25)
+    assert le["g4_prior_trade"]["was_loss"] is False
+    assert le["post_exit_excursion_pending"]["realized_pnl"] == pytest.approx(
+        5.25
+    )
+    _assert_full_cycle_learning(
+        db,
+        packet=packet,
+        session_id=int(sess.id),
+        variant_id=int(sess.variant_id),
+        mode="live",
+        expected_pnl=5.25,
+    )
+
+
+def test_captured_alpaca_learning_uses_verified_settlement_pnl_without_broker_io(
+    monkeypatch, db: Session
+) -> None:
+    import app.services.trading.momentum_neural.live_runner as lr
+
+    monkeypatch.setattr(settings, "brain_enable_deployment_ladder", True)
+    vid, _ = _seed_live_eligible_row(db, symbol="CAPT")
+    uid = _uid(db, "captured-learning")
+    packet = _seed_packet(db, user_id=uid, symbol="CAPT", mode="live")
+    snapshot = _live_pos_snapshot(datetime.now(timezone.utc).isoformat())
+    le = snapshot["momentum_live_execution"]
+    le["entry_decision_packet_id"] = int(packet.id)
+    le[lr.KEY_ADAPTIVE_RISK_RESERVATION_REQUEST] = {"sealed": True}
+    le[lr.KEY_ADAPTIVE_ALPACA_LIFECYCLE] = {
+        "reservation_id": str(uuid.uuid4())
+    }
+    le["position"]["quantity"] = 0.5
+    le["position"]["partial_taken"] = True
+    le["position"]["trade_realized_usd"] = 2.25
+    le["realized_pnl_usd"] = 2.25
+    sess = create_trading_automation_session(
+        db,
+        user_id=uid,
+        venue="alpaca",
+        execution_family="alpaca_spot",
+        symbol="CAPT",
+        variant_id=vid,
+        mode="live",
+        state="live_trailing",
+        risk_snapshot_json=snapshot,
+        correlation_id="c-learning-captured",
+    )
+    packet.automation_session_id = int(sess.id)
+    closed_state = SimpleNamespace(state="closed")
+
+    class _Store:
+        def __init__(self) -> None:
+            self.reads = 0
+
+        def read_state(self, *_args, **_kwargs):
+            self.reads += 1
+            return closed_state
+
+    store = _Store()
+    settlement_row = SimpleNamespace(
+        settlement_sha256="a" * 64,
+        net_realized_pnl_usd=9.75,
+    )
+    settlement_calls: list[uuid.UUID] = []
+    monkeypatch.setattr(
+        lr, "load_adaptive_risk_reservation_request", lambda _payload: object()
+    )
+    monkeypatch.setattr(
+        lr, "_adaptive_risk_store_for_session", lambda _sess: store
+    )
+    monkeypatch.setattr(
+        lr, "_adaptive_alpaca_refresh_binding", lambda *_args, **_kwargs: None
+    )
+    monkeypatch.setattr(
+        lr,
+        "_settle_adaptive_alpaca_cycle_if_complete",
+        lambda _sess, _le, *, reservation_id: (
+            settlement_calls.append(reservation_id)
+            or {
+                "ok": True,
+                "settlement": SimpleNamespace(row=settlement_row),
+            }
+        ),
+    )
+
+    terminal_leg_pnl = lr._complete_confirmed_live_exit(
+        db,
+        sess,
+        le=le,
+        quantity=0.5,
+        entry_price=100.0,
+        fill_price=108.0,
+        reason="trail_stop",
+        slip_bps=0.0,
+        adapter=object(),
+    )
+    db.flush()
+
+    assert terminal_leg_pnl == pytest.approx(4.0)
+    assert store.reads == 2
+    assert len(settlement_calls) == 1
+    assert le["realized_pnl_usd"] == pytest.approx(9.75)
+    assert le["alpaca_settled_session_pnl_usd"] == pytest.approx(9.75)
+    assert (
+        le["post_exit_excursion_pending"]["realized_pnl"]
+        == pytest.approx(9.75)
+    )
+    assert (
+        le["post_exit_excursion_pending"]["settlement_sha256"]
+        == "a" * 64
+    )
+    _assert_full_cycle_learning(
+        db,
+        packet=packet,
+        session_id=int(sess.id),
+        variant_id=int(sess.variant_id),
+        mode="live",
+        expected_pnl=9.75,
+    )
+    session_state = _deployment_state(
+        db,
+        scope_type="automation_session",
+        scope_key=f"session:{int(sess.id)}",
+    )
+    assert session_state.stage_metrics_json["session_pnl_last_usd"] == pytest.approx(
+        9.75
+    )
+
+
+@pytest.mark.parametrize("bad_partial_pnl", [None, "not-a-number", math.nan])
+def test_live_partial_learning_gap_never_fabricates_zero_accumulator(
+    monkeypatch, db: Session, bad_partial_pnl
+) -> None:
+    import app.services.trading.momentum_neural.live_runner as lr
+
+    monkeypatch.setattr(settings, "brain_enable_deployment_ladder", True)
+    vid, _ = _seed_live_eligible_row(db, symbol="LGAP-USD")
+    uid = _uid(db, f"live-gap-{bad_partial_pnl!s}")
+    packet = _seed_packet(db, user_id=uid, symbol="LGAP-USD", mode="live")
+    snapshot = _live_pos_snapshot(datetime.now(timezone.utc).isoformat())
+    le = snapshot["momentum_live_execution"]
+    le["entry_decision_packet_id"] = int(packet.id)
+    le["position"]["quantity"] = 0.5
+    le["position"]["partial_taken"] = True
+    sess = create_trading_automation_session(
+        db,
+        user_id=uid,
+        symbol="LGAP-USD",
+        variant_id=vid,
+        mode="live",
+        state="live_trailing",
+        risk_snapshot_json=snapshot,
+        correlation_id=f"c-learning-gap-{uid}",
+    )
+    packet.automation_session_id = int(sess.id)
+    if bad_partial_pnl is not None:
+        # Inject after the durable JSON snapshot is flushed. PostgreSQL rejects
+        # NaN JSON outright; this exercises a corrupt/malformed in-memory state.
+        le["position"]["trade_realized_usd"] = bad_partial_pnl
+
+    terminal_leg_pnl = lr._complete_confirmed_live_exit(
+        db,
+        sess,
+        le=le,
+        quantity=0.5,
+        entry_price=100.0,
+        fill_price=108.0,
+        reason="trail_stop",
+        slip_bps=0.0,
+    )
+    db.flush()
+
+    assert terminal_leg_pnl == pytest.approx(4.0)
+    assert le["position"] is None
+    _assert_cycle_learning_gap(
+        db,
+        packet=packet,
+        session_id=int(sess.id),
+        event_type="live_cycle_learning_gap",
+        expected_reason="live_partial_cycle_pnl_unavailable",
+    )
+
+
+@pytest.mark.parametrize(
+    ("malformation", "expected_reason"),
+    [
+        (None, None),
+        ("wrong_order", "paper_cycle_state_chain_mismatch"),
+        ("unexpected_fill", "paper_cycle_fill_contract_mismatch"),
+        (
+            "duplicate_terminal",
+            "paper_cycle_terminal_exit_count_mismatch",
+        ),
+        ("quantity_mismatch", "paper_cycle_exit_quantity_mismatch"),
+        ("invalid_state_chain", "paper_cycle_state_chain_mismatch"),
+        ("packet_binding", "paper_cycle_packet_binding_mismatch"),
+    ],
+)
+def test_paper_scale_out_learning_uses_complete_packet_keyed_cycle(
+    monkeypatch, db: Session, malformation: str | None, expected_reason: str | None
+) -> None:
+    import app.services.trading.momentum_neural.paper_runner as prun
+
+    monkeypatch.setattr(settings, "brain_enable_deployment_ladder", True)
+    vid, _ = _seed_live_eligible_row(db, symbol="PLRN-USD")
+    uid = _uid(db, "paper-learning")
+    packet = _seed_packet(db, user_id=uid, symbol="PLRN-USD", mode="paper")
+    pe_state = {
+        "last_entry_decision_packet_id": int(packet.id),
+        "realized_pnl_usd": 1.0,
+    }
+    sess = create_trading_automation_session(
+        db,
+        user_id=uid,
+        symbol="PLRN-USD",
+        variant_id=vid,
+        mode="paper",
+        state="exited",
+        risk_snapshot_json={"momentum_paper_execution": pe_state},
+        correlation_id="c-learning-paper",
+    )
+    packet.automation_session_id = int(sess.id)
+    rows = [
+        _paper_fill(
+            sess,
+            packet,
+            fill_type="entry",
+            quantity=1.0,
+            price=100.0,
+            after="long",
+            reason="entry",
+        ),
+        _paper_fill(
+            sess,
+            packet,
+            fill_type="exit",
+            quantity=0.25,
+            price=104.5,
+            pnl_usd=1.0,
+            fees_usd=0.125,
+            after="long",
+            reason="scale_out_target_1",
+        ),
+        _paper_fill(
+            sess,
+            packet,
+            fill_type="exit",
+            quantity=0.25,
+            price=105.0,
+            pnl_usd=1.125,
+            fees_usd=0.125,
+            after="long",
+            reason="scale_out_target_2",
+        ),
+        _paper_fill(
+            sess,
+            packet,
+            fill_type="exit",
+            quantity=0.5,
+            price=98.0,
+            pnl_usd=-1.125,
+            fees_usd=0.125,
+            after="flat",
+            reason="trail_stop",
+        ),
+    ]
+    if malformation == "wrong_order":
+        rows[2], rows[3] = rows[3], rows[2]
+    elif malformation == "unexpected_fill":
+        rows[1].fill_type = "cancel"
+        rows[1].action = "cancel"
+    elif malformation == "duplicate_terminal":
+        rows[1].position_state_after = "flat"
+    elif malformation == "quantity_mismatch":
+        rows[3].quantity = 0.4
+    elif malformation == "invalid_state_chain":
+        rows[1].position_state_before = "flat"
+    elif malformation == "packet_binding":
+        packet.execution_mode = "live"
+    db.add_all(rows)
+    db.flush()
+
+    prun._finalize_paper_decision_after_exit(
+        db,
+        sess,
+        pe=pe_state,
+        realized_pnl_usd=-1.125,
+        slip_bps=0.0,
+    )
+    db.flush()
+
+    if malformation is not None:
+        _assert_cycle_learning_gap(
+            db,
+            packet=packet,
+            session_id=int(sess.id),
+            event_type="paper_cycle_learning_gap",
+            expected_reason=str(expected_reason),
+        )
+        return
+
+    _assert_full_cycle_learning(
+        db,
+        packet=packet,
+        session_id=int(sess.id),
+        variant_id=int(sess.variant_id),
+        mode="paper",
+        expected_pnl=1.0,
+    )
+
+
+def test_paper_learning_gap_never_falls_back_to_terminal_tranche(
+    monkeypatch, db: Session
+) -> None:
+    import app.services.trading.momentum_neural.paper_runner as prun
+
+    monkeypatch.setattr(settings, "brain_enable_deployment_ladder", True)
+    vid, _ = _seed_live_eligible_row(db, symbol="GAP-USD")
+    uid = _uid(db, "paper-gap")
+    packet = _seed_packet(db, user_id=uid, symbol="GAP-USD", mode="paper")
+    pe_state = {
+        "last_entry_decision_packet_id": int(packet.id),
+        "realized_pnl_usd": 4.0,
+    }
+    sess = create_trading_automation_session(
+        db,
+        user_id=uid,
+        symbol="GAP-USD",
+        variant_id=vid,
+        mode="paper",
+        state="exited",
+        risk_snapshot_json={"momentum_paper_execution": pe_state},
+        correlation_id="c-learning-gap",
+    )
+    packet.automation_session_id = int(sess.id)
+    db.add(
+        _paper_fill(
+            sess,
+            packet,
+            fill_type="exit",
+            quantity=0.5,
+            price=108.0,
+            pnl_usd=4.0,
+            after="flat",
+            reason="trail_stop",
+        )
+    )
+    db.flush()
+
+    prun._finalize_paper_decision_after_exit(
+        db,
+        sess,
+        pe=pe_state,
+        realized_pnl_usd=4.0,
+        slip_bps=0.0,
+    )
+    db.flush()
+
+    _assert_cycle_learning_gap(
+        db,
+        packet=packet,
+        session_id=int(sess.id),
+        event_type="paper_cycle_learning_gap",
+        expected_reason="paper_cycle_entry_count_mismatch",
+    )
