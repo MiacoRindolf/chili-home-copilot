@@ -1,0 +1,167 @@
+{
+  "schema_version": "chili.parallel-claude-status-crosscheck.v1",
+  "observed_at_utc": "2026-07-26T02:45:08.3573102Z",
+  "classification": "READ_ONLY_COORDINATION_EVIDENCE",
+  "claude_task": {
+    "title": "Chat agent analysis para sa CHILI",
+    "model": "claude-fable-5",
+    "effort": "xhigh",
+    "cwd": "D:/dev/chili-home-copilot",
+    "completed_turns": 333,
+    "archived": false,
+    "last_activity_at_epoch_ms": 1785033673729,
+    "cli_session_id": "c351e179-04b0-43c7-af93-9ec2fc82c4b6",
+    "session_metadata_sha256": "a91ec21eb8c47269421c959a2d83cd3a6dd46b5ea18e585b56102d909c0f1bb3",
+    "task_file_count": 20,
+    "task_hash_ledger_sha256": "419f41f2de87dc156fd4e59203e3f3c84cf7d5872688edf30a81c182912928e2",
+    "task_status_counts": {
+      "completed": 18,
+      "pending": 2
+    },
+    "pending_tasks": [
+      {
+        "id": 5,
+        "subject": "Verify ACTIVE criteria post-activation",
+        "meaning": "The fake-money Alpaca PAPER service has not been proven ACTIVE."
+      },
+      {
+        "id": 11,
+        "subject": "Commit STARTED-window fix, rebuild authority, run clean ActivatePaper (market hours)",
+        "meaning": "The clean market-hours activation remains unfinished."
+      }
+    ]
+  },
+  "github_crosscheck": {
+    "origin_main": "32f9074f0586b0e238cc5e1070e64d7b0e4f5bb6",
+    "merged_strategy_prs": [
+      {
+        "pr": 928,
+        "title": "default-ON sub-VWAP trap + breakout-or-bailout",
+        "changed_files": 2,
+        "ci": "FAILURE"
+      },
+      {
+        "pr": 929,
+        "title": "catalyst re-sign and arb-flat class",
+        "changed_files": 5,
+        "ci": "FAILURE"
+      },
+      {
+        "pr": 930,
+        "title": "FLAGS_JSON replay driver hook",
+        "changed_files": 1,
+        "ci": "FAILURE"
+      },
+      {
+        "pr": 931,
+        "title": "ORB/ABCD tape confirmation",
+        "changed_files": 3,
+        "ci": "FAILURE"
+      },
+      {
+        "pr": 932,
+        "title": "float gate on final ranked universe",
+        "changed_files": 3,
+        "ci": "FAILURE"
+      },
+      {
+        "pr": 933,
+        "title": "flush-dip relative-volume gate",
+        "changed_files": 4,
+        "ci": "FAILURE"
+      },
+      {
+        "pr": 934,
+        "title": "three Ross stop-alignment changes",
+        "changed_files": 4,
+        "ci": "FAILURE"
+      },
+      {
+        "pr": 935,
+        "title": "structural-stop consumption for ORB and inverse H&S",
+        "changed_files": 3,
+        "ci": "FAILURE"
+      },
+      {
+        "pr": 936,
+        "title": "fresh-ignition re-entry cap exemption",
+        "changed_files": 4,
+        "ci": "FAILURE"
+      }
+    ],
+    "captured_paper_union": {
+      "pr": 939,
+      "state": "MERGED",
+      "merge_commit": "32f9074f0586b0e238cc5e1070e64d7b0e4f5bb6",
+      "changed_files": 83,
+      "additions": 57250,
+      "deletions": 2628,
+      "ci": "CANCELLED",
+      "qualification": "This merged the captured-paper activation branch and PRs 928-936 into main without a terminal green repository CI check."
+    },
+    "quarantine_pr": {
+      "pr": 937,
+      "state": "OPEN_DRAFT",
+      "head": "14b62018357f9eab84ca77265578c72df6c79e7f",
+      "changed_files": 17,
+      "full_ci": "CANCELLED_AFTER_356_FAILED_14221_PASSED_33_SKIPPED_76_ERRORS",
+      "changed_test_files": "123/123 PASS",
+      "merged": false
+    },
+    "cycle_expectancy_pr": {
+      "pr": 940,
+      "state": "OPEN_DRAFT",
+      "head": "76fe5cdbdc156297f0a26d8eb5587c644f856284",
+      "base": "codex/quarantine-unproven-pr936-20260725",
+      "merged": false,
+      "local_validation": "20/20 focused+adjacent PostgreSQL PASS; independent P0/P1 clean",
+      "ci_at_observation": "IN_PROGRESS"
+    }
+  },
+  "host_crosscheck": {
+    "captured_paper_branch": "codex/captured-paper-takeover",
+    "captured_paper_branch_head": "8cdc4c2609d595f06ff26d59f8d196ecc96af0fb",
+    "captured_alpaca_paper_task_present": false,
+    "captured_alpaca_paper_service_present": false,
+    "a86_tasks": [
+      {
+        "name": "CHILI-Captured-PAPER-A86-Premarket-Backup",
+        "state": "Ready",
+        "enabled": true
+      },
+      {
+        "name": "CHILI-Captured-PAPER-A86-Premarket-Retry",
+        "state": "Ready",
+        "enabled": true
+      }
+    ],
+    "a86_script": {
+      "path": "C:/chili-paper/a86-premarket/activate-paper-premarket.ps1",
+      "sha256": "08f1e36cb8330f8365aff414423a89576604d13b349a9f791eb66d4de806784f",
+      "qualification": "Locally modified operator material; not accepted as sealed profitability or activation evidence."
+    },
+    "legacy_iqfeed_host_processes": {
+      "trade_bridge": "RUNNING",
+      "depth_bridge": "RUNNING"
+    },
+    "host_mutation_by_this_crosscheck": false
+  },
+  "verdict": {
+    "parallel_claude_finished": false,
+    "paper_active": false,
+    "ross_profitability_or_parity_established": false,
+    "merged_strategy_changes_safe_to_accept_as_proven": false,
+    "reason": "The task itself retains two activation-critical pending items, all nine strategy PRs were merged with a failing CI check, and the 83-file union PR was merged with CI cancelled. Local/narrow replay claims do not replace sealed executable OOS evidence.",
+    "containment": [
+      "Do not merge draft quarantine PR 937 until its attributable/full-suite failures are resolved.",
+      "Do not merge or deploy draft cycle-expectancy PR 940; it remains isolated and dependent on the quarantine branch.",
+      "Do not use the non-causal CLRO rows or current diagnostic replay harnesses for profitability certification.",
+      "Do not mutate A86 tasks/operator state from the weekend research lane."
+    ]
+  },
+  "related_evidence": {
+    "incident": "artifacts/parallel_claude_incident_20260725.json",
+    "cycle_expectancy_audit": "artifacts/cycle_expectancy_feedback_audit_20260725.json",
+    "exit_replay_freeze": "artifacts/exit_candidate_replay_command_freeze_20260725.json"
+  }
+}
