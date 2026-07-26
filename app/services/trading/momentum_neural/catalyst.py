@@ -399,14 +399,6 @@ _WEAK_CATALYST_KEYWORDS = (
     "compliance with", "notice of delisting", "delisting", "bankrupt", "chapter 11",
     "default", "restatement", "securities fraud", "class action", "investigation",
     "subpoena", "private placement", "warrant exercise", "shelf registration",
-    # SEC dilution-filing forms (Ross SS101: a secondary/shelf prices the stock DOWN
-    # toward the offering — a long-side fade, not a catalyst). COLLISION-SAFE forms
-    # only: bare "s-1"/"s-3"/"f-1" are substrings of ordinary words ("class-1",
-    # "phase-1") because this classifier is a lowercase substring match; the "form"-
-    # prefixed / "registration"-suffixed variants and the "424b" prospectus stem
-    # (covers 424B1..B5) are unambiguous in real headline text.
-    "form s-1", "s-1 registration", "form s-3", "s-3 registration",
-    "form f-1", "f-1 registration", "424b",
 )
 
 # Reverse-split + private-placement headline markers — the SUBSET of the weak list whose SIGN
@@ -672,10 +664,10 @@ _STRONG_CATALYST_KEYWORDS = (
     "phase 3", "phase iii", "phase 2", "phase ii", "topline results", "primary endpoint",
     "met its primary", "positive results", "trial results", "clinical trial",
     "partnership", "strategic partnership", "collaboration agreement", "definitive agreement",
-    "merger", "acquisition", "to acquire",
+    "merger", "acquisition", "to acquire", "to be acquired", "buyout", "takeover",
     "awarded contract", "wins contract", "contract award", "government contract",
     "defense contract", "purchase order", "letter of intent", "joint venture",
-    "record revenue", "raises guidance", "beats", "earnings beat",
+    "record revenue", "raises guidance", "beats", "earnings beat", "tender offer",
 )
 
 # ── ARB-FLAT catalysts (Ross SS101 news lesson): a CONFIRMED buyout/takeover of the

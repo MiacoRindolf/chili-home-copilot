@@ -19501,7 +19501,7 @@ def structural_trigger_reasons() -> tuple[str, ...]:
     as a structural trigger for the leader/chase bypasses). ALL consumption sites read this
     accessor so the ``chili_momentum_orb_ihs_structural_stop_enabled`` flag stays consistent
     across stop-stash + bypass semantics. Flag OFF -> the legacy base tuple, byte-identical."""
-    if bool(getattr(settings, "chili_momentum_orb_ihs_structural_stop_enabled", True)):
+    if bool(getattr(settings, "chili_momentum_orb_ihs_structural_stop_enabled", False)):
         return STRUCTURAL_TRIGGER_REASONS + ORB_IHS_STRUCTURAL_TRIGGER_REASONS
     return STRUCTURAL_TRIGGER_REASONS
 

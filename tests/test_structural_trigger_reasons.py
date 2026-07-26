@@ -10,8 +10,10 @@ detectors to the legacy ATR-stop behavior.
 """
 from __future__ import annotations
 
+from types import SimpleNamespace
 from unittest.mock import patch
 
+from app.config import Settings
 from app.services.trading.momentum_neural.live_runner import (
     ORB_IHS_STRUCTURAL_TRIGGER_REASONS,
     STRUCTURAL_TRIGGER_REASONS,
@@ -46,6 +48,39 @@ def test_flag_off_is_legacy_base_tuple():
     assert got == STRUCTURAL_TRIGGER_REASONS
     for r in ORB_IHS_STRUCTURAL_TRIGGER_REASONS:
         assert r not in got
+
+
+def test_unpromoted_structural_candidates_default_and_fallback_off():
+    assert (
+        Settings.model_fields[
+            "chili_momentum_orb_ihs_structural_stop_enabled"
+        ].default
+        is False
+    )
+    assert (
+        Settings.model_fields["chili_momentum_ross_stop_alignment_enabled"].default
+        is False
+    )
+
+    # A partial/mock settings projection must not silently enable the wider
+    # structural/chase path.
+    with patch(f"{_LR}.settings", new=SimpleNamespace()):
+        assert structural_trigger_reasons() == STRUCTURAL_TRIGGER_REASONS
+
+
+def test_ross_stop_alignment_missing_setting_fallback_is_off():
+    import inspect
+
+    from app.services.trading.momentum_neural import entry_gates
+
+    src = inspect.getsource(entry_gates)
+    assert src.count(
+        'getattr(settings, "chili_momentum_ross_stop_alignment_enabled", False)'
+    ) == 3
+    assert (
+        'getattr(settings, "chili_momentum_ross_stop_alignment_enabled", True)'
+        not in src
+    )
 
 
 def test_base_tuple_unchanged_by_this_pr():

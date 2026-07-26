@@ -842,7 +842,7 @@ def build_equity_universe(
     # downstream viability gate is the fail-closed backstop) and on exhausted budget.
     # Reference = profile override else the ONE shared viability ceiling (no 2nd number).
     _float_gate_on = bool(
-        getattr(_settings, "chili_momentum_universe_float_gate_enabled", True)
+        getattr(_settings, "chili_momentum_universe_float_gate_enabled", False)
     ) if _settings else False
     _float_max: float | None = None
     _float_budget = 0

@@ -746,6 +746,16 @@ def score_viability(
             _weak_g = _meta2.get("weak_catalyst_symbols")
             _strong_g = _meta2.get("strong_catalyst_symbols")
             _fake_g = _meta2.get("fake_catalyst_symbols")
+            _arb_g = _meta2.get("arb_flat_catalyst_symbols")
+            _arb_match = bool(
+                getattr(
+                    settings,
+                    "chili_momentum_catalyst_arb_flat_gate_enabled",
+                    False,
+                )
+                and _arb_g
+                and symbol.upper() in {str(s).upper() for s in _arb_g}
+            )
             # Ross-batch2 QUCY-vs-ILLR: {ticker: action/dollar delta} refines the STRONG boost
             # (completed-action/big-dollar +, tentative/pursuit -). Absent/flag-OFF -> None ->
             # byte-identical strong boost.
@@ -756,7 +766,21 @@ def score_viability(
                 _grade_delta = catalyst_grade_selection_delta(
                     symbol,
                     weak_symbols=set(_weak_g) if _weak_g else None,
-                    strong_symbols=set(_strong_g) if _strong_g else None,
+                    # When the explicit arb candidate is enabled, its target-side
+                    # veto owns precedence.  Do not first boost the same symbol as
+                    # a legacy strong M&A headline and emit contradictory warnings.
+                    strong_symbols=(
+                        {
+                            str(s)
+                            for s in _strong_g
+                            if not (
+                                _arb_match
+                                and str(s).upper() == symbol.upper()
+                            )
+                        }
+                        if _strong_g
+                        else None
+                    ),
                     fake_symbols=set(_fake_g) if _fake_g else None,
                     action_deltas=dict(_action_g) if isinstance(_action_g, dict) and _action_g else None,
                 )
@@ -777,16 +801,14 @@ def score_viability(
             # positive). Distinct class from weak so the reverse-split / private-
             # placement sign-refinements and the fake-catalyst set (all weak-keyed)
             # never touch it. Flag OFF -> skipped -> byte-identical.
-            if bool(getattr(settings, "chili_momentum_catalyst_arb_flat_gate_enabled", True)):
-                _arb_g = _meta2.get("arb_flat_catalyst_symbols")
-                if _arb_g and symbol.upper() in {str(s).upper() for s in _arb_g}:
-                    from .catalyst import _catalyst_tilt
+            if _arb_match:
+                from .catalyst import _catalyst_tilt
 
-                    base -= abs(float(_catalyst_tilt()))
-                    live_eligible = False
-                    warnings.append(
-                        "Arb-flat catalyst (confirmed buyout target — price pinned at deal)"
-                    )
+                base -= abs(float(_catalyst_tilt()))
+                live_eligible = False
+                warnings.append(
+                    "Arb-flat catalyst (confirmed buyout target — price pinned at deal)"
+                )
     except (TypeError, ValueError, AttributeError):
         pass
 
