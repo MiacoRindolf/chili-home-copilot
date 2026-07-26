@@ -227,11 +227,15 @@ def main() -> int:
             key = f"{w['symbol']}|{w['day']}|base"
             if key in done:
                 continue
-            # Recalibrated 2026-07-26 mid-batch: TNMG (709k ticks) blew the old flat 3900s
-            # cap at est 0.0028s/tick — real dense-window rate is ~0.0055s/tick. The cap now
-            # scales with the estimate (absolute ceiling 9000s so one monster can never eat
-            # the night).
-            est = max(int(w.get("est_runtime_s") or 1800), 600 + int(w["ticks"] * 0.0055))
+            # Recalibrated 2026-07-26 mid-batch, twice: normal-density windows (nbbo << ticks,
+            # massive_snapshot cadence) run ~0.0025s/tick (QTTB 824s/378k, CLRO 36min/860k);
+            # 1:1-density windows (06-29/06-30 bridge sourcing, nbbo ~= ticks) run >0.008s/tick
+            # (TNMG >3900s/709k, UPC >9000s/1.09M — both timed out) because the sink tape the
+            # FSM reads per tick is ~2x rows. Estimate by density; the 9000s ceiling stays so
+            # one monster can never eat the night (the 1:1 giants are a dedicated-night job).
+            dense = int(w.get("nbbo") or 0) >= 0.5 * max(1, int(w["ticks"]))
+            est = max(int(w.get("est_runtime_s") or 1800),
+                      600 + int(w["ticks"] * (0.0075 if dense else 0.0025)))
             remaining = (stop_at - datetime.now()).total_seconds()
             if 1.25 * est + 120 > remaining:
                 print(f"[batch] DEADLINE — {key} needs ~{est}s, only {remaining:.0f}s left; "
