@@ -3,6 +3,7 @@ from __future__ import annotations
 import ast
 from dataclasses import replace
 import hashlib
+import importlib.util
 import json
 import os
 from pathlib import Path
@@ -57,6 +58,10 @@ ORTEX_STRATEGY_POLICY = {
     "CHILI_MOMENTUM_FRESH_IGNITION_REENTRY_BYPASS_ENABLED": "true",
     "CHILI_MOMENTUM_UNIVERSE_FLOAT_GATE_ENABLED": "true",
 }
+WINDOWS_DACL_API_AVAILABLE = os.name == "nt" and all(
+    importlib.util.find_spec(module_name) is not None
+    for module_name in ("ntsecuritycon", "win32api", "win32con", "win32security")
+)
 
 
 def _source_text(*, data_feed: str = "iex", extra: str = "") -> str:
@@ -166,6 +171,10 @@ def test_exact_projection_excludes_live_flags_magic_caps_test_db_and_unknowns(
     assert list(output.parent.glob(".*.pending")) == []
 
 
+@pytest.mark.skipif(
+    not WINDOWS_DACL_API_AVAILABLE,
+    reason="captured PAPER env publication requires the Windows DACL API",
+)
 def test_exact_projection_carries_hash_bound_public_ortex_policy(
     tmp_path: Path,
 ) -> None:
@@ -201,6 +210,10 @@ def test_exact_projection_carries_hash_bound_public_ortex_policy(
     assert all(value not in rendered_receipt for value in SECRET_VALUES)
 
 
+@pytest.mark.skipif(
+    not WINDOWS_DACL_API_AVAILABLE,
+    reason="captured PAPER env publication requires the Windows DACL API",
+)
 def test_default_on_ortex_requires_credential_but_explicit_off_may_omit_it(
     tmp_path: Path,
 ) -> None:
@@ -233,6 +246,10 @@ def test_default_on_ortex_requires_credential_but_explicit_off_may_omit_it(
     assert receipt.output_sha256 == hashlib.sha256(output.read_bytes()).hexdigest()
 
 
+@pytest.mark.skipif(
+    not WINDOWS_DACL_API_AVAILABLE,
+    reason="captured PAPER env publication requires the Windows DACL API",
+)
 def test_strategy_kill_switch_survives_builder_parse_and_projection_hash(
     tmp_path: Path,
 ) -> None:
@@ -314,6 +331,10 @@ def test_strategy_kill_switch_survives_builder_parse_and_projection_hash(
     assert enabled_parsed["CHILI_MOMENTUM_SQUEEZE_FUEL_TILT_ENABLED"] == "true"
 
 
+@pytest.mark.skipif(
+    not WINDOWS_DACL_API_AVAILABLE,
+    reason="captured PAPER env publication requires the Windows DACL API",
+)
 def test_all_nine_operator_kill_switches_round_trip_false(
     tmp_path: Path,
 ) -> None:

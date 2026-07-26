@@ -1526,6 +1526,12 @@ def test_live_tick_adaptive_packet_treats_legacy_abstain_as_audit_only(
     monkeypatch.setattr(settings, "chili_momentum_live_runner_enabled", True)
     monkeypatch.setattr(settings, "brain_enable_decision_ledger", True)
     monkeypatch.setattr(settings, "brain_decision_packet_required_for_runners", True)
+    monkeypatch.setattr(
+        settings,
+        "chili_momentum_squeeze_fuel_tilt_enabled",
+        False,
+        raising=False,
+    )
 
     import app.services.trading.momentum_neural.live_runner as live_runner_mod
 
@@ -1684,6 +1690,12 @@ def test_live_tick_without_adaptive_packet_preserves_legacy_abstain_veto(
 ):
     monkeypatch.setattr(settings, "chili_momentum_live_runner_enabled", True)
     monkeypatch.setattr(settings, "brain_enable_decision_ledger", True)
+    monkeypatch.setattr(
+        settings,
+        "chili_momentum_squeeze_fuel_tilt_enabled",
+        False,
+        raising=False,
+    )
 
     import app.services.trading.momentum_neural.live_runner as live_runner_mod
 

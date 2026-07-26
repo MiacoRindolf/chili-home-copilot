@@ -640,9 +640,13 @@ def _assert_real_db_failure_after_claim_cas_rolls_back_to_preowner(
     def fail_event(*args, **kwargs):
         raise RuntimeError("injected_after_claim_cas")
 
-    monkeypatch.setattr(promotion, "TradingAutomationEvent", fail_event)
-    with pytest.raises(RuntimeError, match="injected_after_claim_cas"):
-        _promote(material, preowner)
+    # Keep the injected event failure scoped to this scenario.  The shared
+    # authority fixture now derives its decision clock from PostgreSQL, so the
+    # real SQL CAS and post-lock clock verification remain exercised here.
+    with monkeypatch.context() as patcher:
+        patcher.setattr(promotion, "TradingAutomationEvent", fail_event)
+        with pytest.raises(RuntimeError, match="injected_after_claim_cas"):
+            _promote(material, preowner)
 
     db.rollback()
     session = db.get(TradingAutomationSession, preowner.session_id)

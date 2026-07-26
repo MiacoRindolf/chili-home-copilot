@@ -56,7 +56,10 @@ def _plsm_shape(*, start: str = "2026-07-13 12:00:00+00:00") -> pd.DataFrame:
         (8.60, 8.70, 8.40, 8.50, 310_000),
         (8.50, 8.60, 8.30, 8.45, 300_000),
         (8.45, 8.50, 7.70, 8.35, 600_000),
-        (8.35, 8.55, 8.20, 8.50, 300_000),
+        # The reclaim/curl is a real volume-confirmed candidate.  This suite
+        # exercises the intended default-ON policy; low-volume rejection has
+        # its own focused coverage in test_flush_dip_volume_gate.py.
+        (8.35, 8.55, 8.20, 8.50, 600_000),
     ]
     idx = pd.date_range(start=start, periods=len(rows), freq="1min")
     opn, high, low, close, volume = zip(*rows)
