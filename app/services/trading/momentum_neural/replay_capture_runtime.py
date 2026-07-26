@@ -3596,7 +3596,12 @@ class CaptureProducerLifecycleRuntime:
         self._receipt_event_owner: dict[str, str] = {}
         self._read_evidence_by_id: dict[str, ActiveCaptureReadEvidence] = {}
         self._first_dip_tape_by_id: dict[str, FirstDipTapeReceiptEvidence] = {}
-        self._accepted_first_dip_detector_refs: dict[str, object] = {}
+        # Capture retains evidence per decision, not per daily opportunity.
+        # Durable adaptive reservation remains the once-per-day consumer.
+        self._accepted_first_dip_detector_refs_by_sha256: dict[str, object] = {}
+        self._accepted_first_dip_detector_ref_sha256_by_decision_id: dict[
+            str, str
+        ] = {}
         self._decision_ids: set[str] = set()
         self._decision_events: dict[str, CaptureEvent] = {}
         self._decision_outputs: dict[str, CaptureDecisionOutput] = {}
@@ -4232,6 +4237,14 @@ class CaptureProducerLifecycleRuntime:
             ) from exc
 
         with self._lock:
+            rejected_output = self._decision_outputs.get(reference.decision_id)
+            if (
+                rejected_output is not None
+                and rejected_output.action is CaptureDecisionAction.REJECT
+            ):
+                raise CaptureContractError(
+                    "first-dip detector decision is already terminal"
+                )
             if (
                 reference.authority_source != "captured_db_paper"
                 or reference.run_id != self.identity.run_id
@@ -4291,15 +4304,37 @@ class CaptureProducerLifecycleRuntime:
                 raise CaptureContractError(
                     "accepted first-dip detector receipt inventory is mismatched"
                 )
-            existing = self._accepted_first_dip_detector_refs.get(opportunity)
-            if existing is not None and sha256_json(existing.to_dict()) != sha256_json(
-                reference.to_dict()
+            reference_sha256 = sha256_json(reference.to_dict())
+            existing_sha256 = (
+                self._accepted_first_dip_detector_ref_sha256_by_decision_id
+                .get(reference.decision_id)
+            )
+            if (
+                existing_sha256 is not None
+                and existing_sha256 != reference_sha256
             ):
                 raise CaptureContractError(
-                    "first-dip opportunity already has a different detector receipt"
+                    "first-dip decision already has a different detector receipt"
                 )
-            self._accepted_first_dip_detector_refs[opportunity] = reference
-            return sha256_json(reference.to_dict())
+            existing_reference = (
+                self._accepted_first_dip_detector_refs_by_sha256.get(
+                    reference_sha256
+                )
+            )
+            if (
+                existing_reference is not None
+                and existing_reference.to_dict() != reference.to_dict()
+            ):
+                raise CaptureContractError(
+                    "first-dip detector receipt hash collision"
+                )
+            self._accepted_first_dip_detector_refs_by_sha256[
+                reference_sha256
+            ] = reference
+            self._accepted_first_dip_detector_ref_sha256_by_decision_id[
+                reference.decision_id
+            ] = reference_sha256
+            return reference_sha256
 
     def attest_first_dip_pre_reservation_input_prefix(
         self,
@@ -4336,7 +4371,15 @@ class CaptureProducerLifecycleRuntime:
             )
         opportunity = opportunity_key.key_sha256
         with self._lock:
-            reference = self._accepted_first_dip_detector_refs.get(opportunity)
+            reference_sha256 = (
+                self._accepted_first_dip_detector_ref_sha256_by_decision_id
+                .get(request.inputs.decision_id)
+            )
+            reference = (
+                self._accepted_first_dip_detector_refs_by_sha256.get(
+                    str(reference_sha256 or "")
+                )
+            )
             read = self._read_evidence_by_id.get(
                 str(first_dip_tape_read_id or "").strip()
             )
@@ -4346,6 +4389,14 @@ class CaptureProducerLifecycleRuntime:
             if reference is None:
                 raise CaptureContractError(
                     "first-dip final boundary lacks an accepted detector receipt"
+                )
+            rejected_output = self._decision_outputs.get(reference.decision_id)
+            if (
+                rejected_output is not None
+                and rejected_output.action is CaptureDecisionAction.REJECT
+            ):
+                raise CaptureContractError(
+                    "first-dip detector decision is already terminal"
                 )
             if read is None:
                 raise CaptureContractError(
@@ -4366,6 +4417,7 @@ class CaptureProducerLifecycleRuntime:
                 != self.identity.config_sha256
                 or request.inputs.feature_flags_sha256
                 != self.identity.feature_flags_sha256
+                or reference.decision_id != request.inputs.decision_id
                 or detector_input is None
                 or detector_input.input_prefix_root_sha256
                 != request.inputs.capture_prefix_root_sha256
@@ -4379,7 +4431,7 @@ class CaptureProducerLifecycleRuntime:
                     "first-dip final boundary escaped detector/request capture identity"
                 )
             final_binding = _FirstDipFinalInputBinding(
-                prior_detector_reference_sha256=sha256_json(reference.to_dict()),
+                prior_detector_reference_sha256=str(reference_sha256),
                 adaptive_request_sha256=request.request_sha256,
                 opportunity_key_sha256=opportunity,
                 _verification_token=_FIRST_DIP_FINAL_INPUT_BINDING_TOKEN,
@@ -4409,13 +4461,31 @@ class CaptureProducerLifecycleRuntime:
             prior_reference = None
             if str(purpose or "").strip().lower() == "pre_reservation":
                 opportunity = proof.first_dip_opportunity_key_sha256
-                prior_reference = self._accepted_first_dip_detector_refs.get(
-                    str(opportunity or "")
+                prior_reference_sha256 = (
+                    proof.first_dip_prior_detector_reference_sha256
+                )
+                prior_reference = (
+                    self._accepted_first_dip_detector_refs_by_sha256.get(
+                        str(prior_reference_sha256 or "")
+                    )
+                )
+                rejected_output = (
+                    self._decision_outputs.get(prior_reference.decision_id)
+                    if prior_reference is not None
+                    else None
                 )
                 if (
+                    rejected_output is not None
+                    and rejected_output.action is CaptureDecisionAction.REJECT
+                ):
+                    raise CaptureContractError(
+                        "first-dip detector decision is already terminal"
+                    )
+                if (
                     prior_reference is None
-                    or proof.first_dip_prior_detector_reference_sha256
+                    or prior_reference_sha256
                     != sha256_json(prior_reference.to_dict())
+                    or prior_reference.opportunity_key_sha256 != opportunity
                 ):
                     raise CaptureContractError(
                         "captured first-dip final proof lacks retained detector lineage"
