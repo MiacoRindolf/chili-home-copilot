@@ -98,6 +98,7 @@ _BOOLEAN_SETTING_FIELDS = frozenset(
         "chili_momentum_a_setup_quality_floor_enabled",
         "chili_momentum_no_signal_derank_enabled",
         "chili_momentum_catalyst_grade_gate_enabled",
+        "chili_momentum_catalyst_arb_flat_gate_enabled",
         "chili_momentum_dilution_history_derate_enabled",
         "chili_momentum_theme_sympathy_enabled",
         "chili_momentum_thick_tape_veto_enabled",

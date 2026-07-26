@@ -10,11 +10,16 @@ completed-bar + volume path (degrades to bar entries instead of going dark).
 """
 from __future__ import annotations
 
+from datetime import datetime, timezone
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import pandas as pd
 import pytest
 
+from app.services.trading.momentum_neural.captured_paper_selection import (
+    captured_paper_candidate_generation_sha256,
+)
 from app.services.trading.momentum_neural.entry_gates import (
     _tick_break_tape_ok,
     opening_range_breakout_confirmation,
@@ -25,7 +30,35 @@ _GATES = "app.services.trading.momentum_neural.entry_gates"
 _PROFILE = "app.services.trading.momentum_neural.market_profile"
 
 
+def _fixed_candidate_generation(
+    *,
+    debug: dict,
+    reason: str,
+    setup_family: str,
+) -> str:
+    return captured_paper_candidate_generation_sha256(
+        session_id=1,
+        symbol="TEST",
+        execution_family="alpaca_spot",
+        entry_place_count=1,
+        client_order_id="cid-test",
+        setup_family=setup_family,
+        structural_stop_price=float(debug["pullback_low"]),
+        trigger_reason=reason,
+        trigger_debug=debug,
+        confirmed_arm_marker={"marker": "fixed"},
+        viability_updated_at=datetime(2026, 7, 25, tzinfo=timezone.utc),
+        viability_score="0.5",
+        viability_payload_sha256="0" * 64,
+        execution_readiness_sha256="1" * 64,
+    )
+
+
 # ── helper matrix ────────────────────────────────────────────────────────────
+
+def _enabled_settings() -> SimpleNamespace:
+    return SimpleNamespace(chili_momentum_tick_break_tape_confirm_enabled=True)
+
 
 def test_helper_flag_off_is_open():
     with patch(f"{_GATES}.settings") as ms:
@@ -35,9 +68,22 @@ def test_helper_flag_off_is_open():
     assert dbg["reason"] == "confirm_disabled"
 
 
+def test_helper_missing_flag_is_open_without_tape_read():
+    tape = MagicMock()
+    with patch(f"{_GATES}.tape_confirms_hold", tape):
+        ok, dbg = _tick_break_tape_ok(
+            "TEST", db=MagicMock(), settings=SimpleNamespace()
+        )
+    assert ok is True
+    assert dbg["reason"] == "confirm_disabled"
+    tape.assert_not_called()
+
+
 def test_helper_tape_confirmed_is_open():
     with patch(f"{_GATES}.tape_confirms_hold", return_value=(True, {"reason": "tape_hold_confirmed"})):
-        ok, dbg = _tick_break_tape_ok("TEST", db=MagicMock())
+        ok, dbg = _tick_break_tape_ok(
+            "TEST", db=MagicMock(), settings=_enabled_settings()
+        )
     assert ok is True
     assert dbg["reason"] == "tape_hold_confirmed"
 
@@ -46,7 +92,9 @@ def test_helper_tape_gate_rollback_is_open():
     # pattern_tape_gate rolled back -> its documented dark state governs the 12 legacy
     # triggers ONLY; ORB/ABCD must not newly darken -> fail-OPEN with the explicit reason
     with patch(f"{_GATES}.tape_confirms_hold", return_value=(False, {"reason": "tape_hold_disabled"})):
-        ok, dbg = _tick_break_tape_ok("TEST", db=MagicMock())
+        ok, dbg = _tick_break_tape_ok(
+            "TEST", db=MagicMock(), settings=_enabled_settings()
+        )
     assert ok is True
     assert dbg["reason"] == "tape_gate_rolled_back_fail_open"
 
@@ -54,14 +102,18 @@ def test_helper_tape_gate_rollback_is_open():
 @pytest.mark.parametrize("reason", ["tape_hold_no_data", "tape_hold_not_confirmed", "tape_hold_error"])
 def test_helper_genuine_tape_fail_is_closed(reason):
     with patch(f"{_GATES}.tape_confirms_hold", return_value=(False, {"reason": reason})):
-        ok, dbg = _tick_break_tape_ok("TEST", db=MagicMock())
+        ok, dbg = _tick_break_tape_ok(
+            "TEST", db=MagicMock(), settings=_enabled_settings()
+        )
     assert ok is False
     assert dbg["reason"] == reason
 
 
 def test_helper_exception_is_closed():
     with patch(f"{_GATES}.tape_confirms_hold", side_effect=RuntimeError("boom")):
-        ok, dbg = _tick_break_tape_ok("TEST", db=MagicMock())
+        ok, dbg = _tick_break_tape_ok(
+            "TEST", db=MagicMock(), settings=_enabled_settings()
+        )
     assert ok is False
     assert dbg["reason"] == "tick_break_tape_error"
 
@@ -173,15 +225,42 @@ class TestOrbTickBreakTape:
         df = _orb_df()
         lvl = _orb_level(df)
         with patch(f"{_GATES}.settings") as ms, _OrbPassGuards(), \
-                patch(f"{_GATES}.tape_confirms_hold", return_value=(False, {"reason": "tape_hold_no_data"})):
+                patch(f"{_GATES}.tape_confirms_hold", return_value=(False, {"reason": "tape_hold_no_data"})) as tape:
             _orb_settings(ms)
             ms.chili_momentum_tick_break_tape_confirm_enabled = False
             ok, reason, dbg = opening_range_breakout_confirmation(
                 df, entry_interval="5m", symbol="TEST", db=MagicMock(), live_price=lvl + 0.02,
             )
+        tape.assert_not_called()
         assert ok is True, f"flag OFF must preserve legacy naked tick fire, got {reason}"
         assert reason == "orb_break_tick_ok"
-        assert dbg["tape_reason"] == "confirm_disabled"
+        assert "tape_reason" not in dbg
+        assert _fixed_candidate_generation(
+            debug=dbg,
+            reason=reason,
+            setup_family="opening_range_breakout",
+        ) == "e5d32cdd6a0473641fb7850e9836a8cbd83c4cee1685ded25c9f543e6871c39b"
+
+    def test_missing_flag_preserves_naked_tick_fire_and_payload(self):
+        df = _orb_df()
+        lvl = _orb_level(df)
+        ms = SimpleNamespace()
+        _orb_settings(ms)
+        delattr(ms, "chili_momentum_tick_break_tape_confirm_enabled")
+        with patch(f"{_GATES}.settings", ms), _OrbPassGuards(), \
+                patch(f"{_GATES}.tape_confirms_hold", return_value=(False, {"reason": "tape_hold_no_data"})) as tape:
+            ok, reason, dbg = opening_range_breakout_confirmation(
+                df, entry_interval="5m", symbol="TEST", db=MagicMock(), live_price=lvl + 0.02,
+            )
+        tape.assert_not_called()
+        assert ok is True
+        assert reason == "orb_break_tick_ok"
+        assert "tape_reason" not in dbg
+        assert _fixed_candidate_generation(
+            debug=dbg,
+            reason=reason,
+            setup_family="opening_range_breakout",
+        ) == "e5d32cdd6a0473641fb7850e9836a8cbd83c4cee1685ded25c9f543e6871c39b"
 
 
 # ── ABCD detector integration ────────────────────────────────────────────────
@@ -227,7 +306,10 @@ def _abcd_ctx(ms):
 class TestAbcdTickBreakTape:
     def _run(self, ms, live_price, tape_ret, thrust_ok=True, confirm_on=True):
         _abcd_ctx(ms)
-        ms.chili_momentum_tick_break_tape_confirm_enabled = confirm_on
+        if confirm_on is None:
+            delattr(ms, "chili_momentum_tick_break_tape_confirm_enabled")
+        else:
+            ms.chili_momentum_tick_break_tape_confirm_enabled = confirm_on
         with patch(f"{_GATES}._batch_c_atr_pct", return_value=(0.02, 0.20)), \
                 patch(f"{_GATES}._swing_pivots", return_value=_abcd_pivots()), \
                 patch(f"{_GATES}._collapse_cap", return_value=0.90), \
@@ -274,4 +356,27 @@ class TestAbcdTickBreakTape:
                                         confirm_on=False)
         assert ok is True, f"flag OFF must preserve legacy tick fire, got {reason}"
         assert reason == "abcd_break_tick_ok"
-        assert dbg["tape_reason"] == "confirm_disabled"
+        assert "tape_reason" not in dbg
+        assert _fixed_candidate_generation(
+            debug=dbg,
+            reason=reason,
+            setup_family="ross_abcd",
+        ) == "876bb2540ca05779eb8c2a3af3d02dfc583f083c8b065944d5a700806f53491f"
+
+    def test_missing_flag_preserves_naked_tick_fire(self):
+        ms = SimpleNamespace()
+        ok, reason, dbg = self._run(
+            ms,
+            live_price=10.15,
+            tape_ret=(False, {"reason": "tape_hold_no_data"}),
+            thrust_ok=False,
+            confirm_on=None,
+        )
+        assert ok is True
+        assert reason == "abcd_break_tick_ok"
+        assert "tape_reason" not in dbg
+        assert _fixed_candidate_generation(
+            debug=dbg,
+            reason=reason,
+            setup_family="ross_abcd",
+        ) == "876bb2540ca05779eb8c2a3af3d02dfc583f083c8b065944d5a700806f53491f"

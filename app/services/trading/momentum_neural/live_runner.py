@@ -20539,7 +20539,7 @@ def structural_trigger_reasons() -> tuple[str, ...]:
     as a structural trigger for the leader/chase bypasses). ALL consumption sites read this
     accessor so the ``chili_momentum_orb_ihs_structural_stop_enabled`` flag stays consistent
     across stop-stash + bypass semantics. Flag OFF -> the legacy base tuple, byte-identical."""
-    if bool(getattr(settings, "chili_momentum_orb_ihs_structural_stop_enabled", True)):
+    if bool(getattr(settings, "chili_momentum_orb_ihs_structural_stop_enabled", False)):
         return STRUCTURAL_TRIGGER_REASONS + ORB_IHS_STRUCTURAL_TRIGGER_REASONS
     return STRUCTURAL_TRIGGER_REASONS
 
@@ -38595,22 +38595,14 @@ def tick_live_session(
                         "[momentum_live] g4 leader-exempt read failed (fail-closed)",
                         exc_info=True,
                     )
-            # Ross-parity L5 / GAP-B (2026-07-25): FRESH-IGNITION exemption — a NON-leader
-            # symbol whose tape is actively igniting at the cap edge must not terminalize
-            # with its next leg ahead (the leader exemption above already covers the #1;
-            # this covers the fresh igniter that hasn't taken the crown yet — the
-            # ross-parity study's re-entry conversion lever). Fresh ignition = buyers
-            # lifting NOW (tape_confirms_hold: signed accel>0 + tick-rate floor, fail-
-            # CLOSED) OR membership in the running-up burst map (>=3%/5min). Bounded:
-            # at most chili_momentum_max_ignition_exemptions grants per session (default
-            # 1 — one extra cycle per ignition episode; max_stopout_reentries stays the
-            # base cap). The grant only recycles to WATCHING — the actual re-entry still
-            # passes the existing G4 escalated confirmation (structural trigger + tape),
-            # the same quality-raise contract the leader exemption uses. FAIL-CLOSED:
-            # any read error => no exemption => terminalize exactly as today.
+            # Experimental Ross-parity L5 / GAP-B fresh-ignition exemption. Promotion
+            # evidence is not yet available, so the real Settings default and this
+            # defensive fallback are both OFF. When explicitly enabled, both the
+            # executed-tape confirmer and the sustained running-up burst must be present.
+            # Any read error remains fail-closed and terminalizes through the base path.
             if (
                 not _re_ok
-                and bool(getattr(settings, "chili_momentum_fresh_ignition_reentry_bypass_enabled", True))
+                and bool(getattr(settings, "chili_momentum_fresh_ignition_reentry_bypass_enabled", False))
             ):
                 _ign_dbg: dict = {}
                 try:
@@ -38621,13 +38613,10 @@ def tick_live_session(
                     _ign_ok = False
                     if _ign_used < _ign_max:
                         _ign_sym = str(sess.symbol or "").strip().upper()
-                        # AND-composition (validated 2026-07-25): the replay A/B showed the
-                        # instant-accel leg alone grants on NOISE (a momentary lift on a
-                        # fade/chop day: CLRO −0.97 / QTTB −2.93 per granted cycle). A REAL
-                        # ignition must show BOTH: buyers lifting at this instant (leg 1,
-                        # fail-closed) AND a sustained >=3%/5min burst (leg 2, the running-up
-                        # map) — the JEM-class re-ignition signature. Either leg absent =>
-                        # no grant.
+                        # Experimental AND composition: the earlier OR form added one
+                        # losing cycle in each diagnostic window. Requiring both legs
+                        # removed those known grants, but has not earned positive/OOS or
+                        # sealed capture evidence. Either leg absent => no grant.
                         # leg 1: executed-tape confirmer (module-attr call so the replay
                         # driver's sim-clock patch of signed_tape_accel_features applies)
                         from . import entry_gates as _ign_eg

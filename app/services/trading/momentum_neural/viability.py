@@ -50,6 +50,7 @@ class ViabilitySettingsProjection:
     chili_momentum_no_signal_derank_enabled: Any
     chili_momentum_no_signal_derank_fraction: Any
     chili_momentum_catalyst_grade_gate_enabled: Any
+    chili_momentum_catalyst_arb_flat_gate_enabled: Any
     chili_momentum_dilution_history_derate_enabled: Any
     chili_momentum_theme_sympathy_enabled: Any
     chili_momentum_thick_tape_veto_enabled: Any
@@ -80,6 +81,7 @@ class ViabilitySettingsProjection:
             "chili_momentum_no_signal_derank_enabled": False,
             "chili_momentum_no_signal_derank_fraction": 1.0,
             "chili_momentum_catalyst_grade_gate_enabled": True,
+            "chili_momentum_catalyst_arb_flat_gate_enabled": False,
             "chili_momentum_dilution_history_derate_enabled": True,
             "chili_momentum_theme_sympathy_enabled": True,
             "chili_momentum_thick_tape_veto_enabled": True,
@@ -392,8 +394,21 @@ def _resolve_viability_external_inputs(
             weak = meta.get("weak_catalyst_symbols")
             strong = meta.get("strong_catalyst_symbols")
             fake = meta.get("fake_catalyst_symbols")
+            arb = meta.get("arb_flat_catalyst_symbols")
             actions = meta.get("catalyst_action_deltas")
-            if weak or strong or fake:
+            arb_match = bool(
+                settings_projection.chili_momentum_catalyst_arb_flat_gate_enabled
+                and arb
+                and symbol.upper() in {str(item).upper() for item in arb}
+            )
+            if arb_match:
+                # Resolve the policy delta outside the pure scorer so captured
+                # PAPER/replay binds the exact value and never imports current
+                # runtime policy while scoring.
+                from .catalyst import _catalyst_tilt
+
+                catalyst_grade_delta = -abs(float(_catalyst_tilt()))
+            elif weak or strong or fake:
                 from .catalyst import catalyst_grade_selection_delta
 
                 catalyst_grade_delta = float(
@@ -1135,12 +1150,28 @@ def score_viability_explicit(
             _weak_g = _meta2.get("weak_catalyst_symbols")
             _strong_g = _meta2.get("strong_catalyst_symbols")
             _fake_g = _meta2.get("fake_catalyst_symbols")
+            _arb_g = _meta2.get("arb_flat_catalyst_symbols")
+            _arb_match = bool(
+                getattr(
+                    settings,
+                    "chili_momentum_catalyst_arb_flat_gate_enabled",
+                    False,
+                )
+                and _arb_g
+                and symbol.upper() in {str(s).upper() for s in _arb_g}
+            )
             # Ross-batch2 QUCY-vs-ILLR: {ticker: action/dollar delta} refines the STRONG boost
             # (completed-action/big-dollar +, tentative/pursuit -). Absent/flag-OFF -> None ->
             # byte-identical strong boost.
             _action_g = _meta2.get("catalyst_action_deltas")
-            if _weak_g or _strong_g or _fake_g:
-                _grade_delta = external.catalyst_grade_delta
+            _grade_delta = external.catalyst_grade_delta
+            if _arb_match:
+                base += _grade_delta
+                live_eligible = False
+                warnings.append(
+                    "Arb-flat catalyst (confirmed buyout target â€” price pinned at deal)"
+                )
+            elif _weak_g or _strong_g or _fake_g:
                 if _grade_delta < 0:
                     base += _grade_delta
                     live_eligible = False
@@ -1150,24 +1181,6 @@ def score_viability_explicit(
                 elif _grade_delta > 0:
                     base += _grade_delta
                     warnings.append("Strong catalyst (FDA/M&A/contract) — Ross-style")
-            # ARB-FLAT gate (Ross SS101): a CONFIRMED buyout TARGET trades pinned at the
-            # deal price — no intraday long opportunity; any residual gap is merger-arb
-            # with deal-break tail risk. PRECEDENCE: beats strong (a headline matching
-            # both "definitive agreement" and "to be acquired" is FLAT — apply the
-            # negative tilt and drop live eligibility even if the grade delta above was
-            # positive). Distinct class from weak so the reverse-split / private-
-            # placement sign-refinements and the fake-catalyst set (all weak-keyed)
-            # never touch it. Flag OFF -> skipped -> byte-identical.
-            if bool(getattr(settings, "chili_momentum_catalyst_arb_flat_gate_enabled", True)):
-                _arb_g = _meta2.get("arb_flat_catalyst_symbols")
-                if _arb_g and symbol.upper() in {str(s).upper() for s in _arb_g}:
-                    from .catalyst import _catalyst_tilt
-
-                    base -= abs(float(_catalyst_tilt()))
-                    live_eligible = False
-                    warnings.append(
-                        "Arb-flat catalyst (confirmed buyout target — price pinned at deal)"
-                    )
     except (TypeError, ValueError, AttributeError):
         pass
 

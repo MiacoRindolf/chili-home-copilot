@@ -39,6 +39,9 @@ from unittest.mock import MagicMock, patch
 import pandas as pd
 import pytest
 
+from app.services.trading.momentum_neural.captured_paper_selection import (
+    captured_paper_candidate_generation_sha256,
+)
 from app.services.trading.momentum_neural.entry_gates import (
     absorption_snap_entry,
     bottom_reversal_confirmation,
@@ -59,6 +62,31 @@ _GATES = "app.services.trading.momentum_neural.entry_gates"
 _ROSS = "app.services.trading.momentum_neural.ross_momentum"
 _CANDLES = "app.services.trading.momentum_neural.candles"
 _PIPELINE = "app.services.trading.momentum_neural.pipeline"
+
+
+def _fixed_candidate_generation(
+    *,
+    debug: dict,
+    stop: float,
+    reason: str,
+    setup_family: str,
+) -> str:
+    return captured_paper_candidate_generation_sha256(
+        session_id=1,
+        symbol="TEST",
+        execution_family="alpaca_spot",
+        entry_place_count=1,
+        client_order_id="cid-test",
+        setup_family=setup_family,
+        structural_stop_price=stop,
+        trigger_reason=reason,
+        trigger_debug=debug,
+        confirmed_arm_marker={"marker": "fixed"},
+        viability_updated_at=datetime(2026, 7, 25, tzinfo=timezone.utc),
+        viability_score="0.5",
+        viability_payload_sha256="0" * 64,
+        execution_readiness_sha256="1" * 64,
+    )
 
 
 def _rows(bars):
@@ -231,7 +259,13 @@ class TestVwapReclaimMockFire:
             ok, reason, dbg = vwap_reclaim_confirmation(df, entry_interval="5m", symbol="TEST")
         assert ok is True
         assert dbg["pullback_low"] == pytest.approx(9.42, abs=1e-6)
-        assert dbg["stop_model"] == "reclaim_bar_low"
+        assert "stop_model" not in dbg
+        assert _fixed_candidate_generation(
+            debug=dbg,
+            stop=dbg["pullback_low"],
+            reason=reason,
+            setup_family="vwap_reclaim",
+        ) == "b7a5e7ef1e167464607f53b692ff9e7d7c3fe9edc529235bed3fcfa67e91a09d"
 
     def test_negative_low_volume_no_fire(self):
         """The reclaim happens but WITHOUT the volume spike (a drift back over VWAP, not a
@@ -729,7 +763,13 @@ class TestInverseHeadShouldersMockFire:
             )
         assert ok is True
         assert dbg["pullback_low"] == pytest.approx(8.50, abs=1e-6)
-        assert dbg["stop_model"] == "head_low"
+        assert "stop_model" not in dbg
+        assert _fixed_candidate_generation(
+            debug=dbg,
+            stop=dbg["pullback_low"],
+            reason=reason,
+            setup_family="inverse_head_shoulders",
+        ) == "afff9dc938e73308af551b0660dda5945f211d89f4aa69c1e7dc649111d1ef7c"
 
     def test_negative_extended_no_fire(self):
         """The NOT-PARABOLIC extension guard trips (the neckline break is excessively extended
@@ -820,7 +860,13 @@ class TestWickReclaimMockFire:
             ok, reason, dbg = wick_reclaim_confirmation(df, entry_interval="5m", symbol="TEST")
         assert ok is True
         assert dbg["pullback_low"] == pytest.approx(9.80, abs=1e-6)
-        assert dbg["stop_model"] == "flush_low"
+        assert "stop_model" not in dbg
+        assert _fixed_candidate_generation(
+            debug=dbg,
+            stop=dbg["pullback_low"],
+            reason=reason,
+            setup_family="wick_reclaim",
+        ) == "7ef82e4150d6b684dc769d11e17ec251ff444714de72dccad20d7a784058488d"
 
     def test_negative_cold_tape_no_fire(self):
         """The MANDATORY hot-tape gate fails (cold tape: low RVOL + low ATR%) -> the trigger

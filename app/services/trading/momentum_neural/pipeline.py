@@ -1348,6 +1348,22 @@ def maybe_run_momentum_neural_tick(
     )
 
 
+def _attach_arb_flat_catalysts(meta: dict[str, Any]) -> None:
+    """Attach the experimental arb-flat set only when its parent can consume it."""
+    if not bool(
+        getattr(settings, "chili_momentum_catalyst_grade_gate_enabled", True)
+    ) or not bool(
+        getattr(settings, "chili_momentum_catalyst_arb_flat_gate_enabled", False)
+    ):
+        return
+
+    from .catalyst import arb_flat_catalyst_symbols
+
+    symbols = arb_flat_catalyst_symbols() or set()
+    if symbols:
+        meta["arb_flat_catalyst_symbols"] = sorted(symbols)
+
+
 def run_momentum_neural_tick(
     db: Session,
     *,
@@ -2349,12 +2365,7 @@ def run_momentum_neural_tick(
     # consumer (score_viability) applies a negative tilt + live-ineligible with
     # precedence OVER strong. Same once-per-pass best-effort fetch; fail-open no-op.
     try:
-        if bool(getattr(settings, "chili_momentum_catalyst_arb_flat_gate_enabled", True)):
-            from .catalyst import arb_flat_catalyst_symbols
-
-            _arb_flat = arb_flat_catalyst_symbols() or set()
-            if _arb_flat:
-                meta["arb_flat_catalyst_symbols"] = sorted(_arb_flat)
+        _attach_arb_flat_catalysts(meta)
     except Exception:
         _log.debug("[pipeline] arb-flat catalyst fetch failed", exc_info=True)
 
@@ -2465,6 +2476,7 @@ def run_momentum_neural_tick(
             "catalyst_symbols",
             "weak_catalyst_symbols",
             "strong_catalyst_symbols",
+            "arb_flat_catalyst_symbols",
             "fake_catalyst_symbols",
             "catalyst_action_deltas",
             "sympathy_symbols",
