@@ -35,7 +35,7 @@ import re
 import subprocess
 import sys
 import time
-from datetime import datetime
+from datetime import datetime, timezone
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 if SCRIPT_DIR not in sys.path:
@@ -68,6 +68,13 @@ RESULT_STATUSES = {
     "mine_error",
     "coverage_unavailable",
 }
+SINK_FILL_EVENT_TYPES = (
+    "live_entry_filled",
+    "live_exit_filled",
+    # Historical diagnostic rows used this pre-canonical alias. Retaining it
+    # here does not authorize positional entry/exit matching downstream.
+    "live_exit_fill",
+)
 SAFE_PARENT_ENV_KEYS = {
     "COMSPEC",
     "CONDA_PREFIX",
@@ -481,6 +488,112 @@ def parse_driver_stdout(out: str) -> tuple[str, dict]:
     return "ok", parsed
 
 
+def normalize_sink_fill_event(ts, event_type: str, payload) -> dict:
+    """Normalize known FSM fill payload fields without inventing cycle lineage."""
+
+    body = payload if isinstance(payload, dict) else {}
+
+    def positive_number(key):
+        value = body.get(key)
+        if isinstance(value, bool) or value in (None, ""):
+            return None
+        try:
+            parsed = float(value)
+        except (TypeError, ValueError, OverflowError):
+            return None
+        return parsed if math.isfinite(parsed) and parsed > 0.0 else None
+
+    def text_value(key):
+        value = body.get(key)
+        return value.strip() if isinstance(value, str) and value.strip() else None
+
+    def aware_utc(key):
+        raw = text_value(key)
+        if raw is None:
+            return None
+        try:
+            parsed = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+        except ValueError:
+            return None
+        if parsed.tzinfo is None:
+            return None
+        return parsed.astimezone(timezone.utc)
+
+    if event_type == "live_entry_filled":
+        quantity = positive_number("filled_size")
+        price = positive_number("avg")
+        identity = text_value("order_id")
+        trigger_reason = text_value("trigger_reason") or text_value("entry_reason")
+        exit_reason, contract = None, "canonical_entry"
+    elif event_type == "live_exit_filled":
+        quantity = positive_number("quantity")
+        price = positive_number("fill_price")
+        identity = text_value("order_id")
+        trigger_reason = None
+        exit_reason = text_value("exit_reason") or text_value("reason")
+        contract = "canonical_exit"
+    elif event_type == "live_exit_fill":
+        quantity = price = identity = trigger_reason = None
+        exit_reason = text_value("exit_reason") or text_value("reason")
+        contract = "legacy_exit_alias"
+    else:
+        raise ValueError(f"unsupported sink fill event {event_type!r}")
+
+    # Only the orphan-reconcile producer currently emits a self-contained
+    # broker-fill clock contract. Normal FSM ``ts`` is a processing wall clock.
+    source_event_id = body.get("source_event_id")
+    entry_fill_at = aware_utc("entry_filled_at_utc")
+    fill_at = aware_utc("filled_at_utc")
+    if not (
+        contract == "canonical_exit"
+        and isinstance(source_event_id, int)
+        and not isinstance(source_event_id, bool)
+        and source_event_id > 0
+        and entry_fill_at is not None
+        and fill_at is not None
+        and fill_at >= entry_fill_at
+        and quantity is not None
+        and price is not None
+        and identity is not None
+    ):
+        provider_or_broker_fill_at = None
+    else:
+        provider_or_broker_fill_at = (
+            fill_at.isoformat().replace("+00:00", "Z")
+        )
+
+    missing = [
+        name
+        for name, value in (
+            ("quantity", quantity),
+            ("price", price),
+            ("identity", identity),
+            ("fill_clock", provider_or_broker_fill_at),
+        )
+        if value is None
+    ]
+    reason = (
+        f"{contract}_{'_'.join(missing)}_unavailable"
+        if missing
+        else "immutable_entry_exit_cycle_lineage_unavailable"
+    )
+    if contract == "legacy_exit_alias":
+        reason = f"legacy_exit_alias_diagnostic_only:{reason}"
+
+    return {
+        "ts": ts,
+        "event_type": event_type,
+        "qty": quantity,
+        "px": price,
+        "fill_identity": identity,
+        "trigger_reason": trigger_reason,
+        "exit_reason": exit_reason,
+        "provider_or_broker_fill_at": provider_or_broker_fill_at,
+        "coverage_status": "COVERAGE_UNAVAILABLE",
+        "coverage_reason": reason,
+    }
+
+
 def mine_sink(
     sink_url: str,
     expected: DatabaseIdentity,
@@ -569,30 +682,20 @@ def mine_sink(
             GROUP BY 1 ORDER BY 2 DESC LIMIT 10
         """, (sid,))
         out["top_rejects"] = [[r[0], int(r[1])] for r in cur.fetchall()]
-        # fill events carry broker-time timestamps for within-trade MFE downstream
+        # ``ts`` is normally the sink processing wall clock, not broker/event
+        # time. Only an explicit, validated payload fill clock is retained as
+        # such, and cycle lineage remains unavailable without a shared ID.
         execute(
             cur,
             "SELECT ts::text, event_type, payload_json "
             "FROM trading_automation_events "
-            "WHERE session_id = %s AND event_type IN "
-            "('live_entry_filled','live_exit_fill') ORDER BY id ASC",
-            (sid,),
+            "WHERE session_id = %s AND event_type = ANY(%s) ORDER BY id ASC",
+            (sid, list(SINK_FILL_EVENT_TYPES)),
         )
-        fills = []
-        for ts, et, payload in cur.fetchall():
-            p = payload if isinstance(payload, dict) else {}
-            fills.append({"ts": ts, "event_type": et,
-                          "qty": p.get("qty") or p.get("quantity"),
-                          "px": p.get("fill_price") or p.get("price") or p.get("avg_price"),
-                          "fill_identity": (
-                              p.get("provider_fill_id")
-                              or p.get("fill_id")
-                              or p.get("broker_order_id")
-                              or p.get("client_order_id")
-                          ),
-                          "trigger_reason": p.get("trigger_reason") or p.get("entry_reason"),
-                          "exit_reason": p.get("exit_reason") or p.get("reason")})
-        out["fill_events"] = fills
+        out["fill_events"] = [
+            normalize_sink_fill_event(ts, event_type, payload)
+            for ts, event_type, payload in cur.fetchall()
+        ]
     except Exception as exc:  # mining failure must never kill the batch
         out["mine_error"] = f"{type(exc).__name__}: {exc}"
     finally:
