@@ -395,6 +395,7 @@ def test_host_binds_before_lanes_and_stops_joins_unbinds_then_drains(monkeypatch
     host._trade_bound = False
     host._depth_bound = False
     host._captured_paper_runner_symbols = set()
+    host._captured_paper_admission_symbols = set()
     host._macro_feature_caches = {}
     host._provider_supervisor = None
     host._provider_join_timeout_seconds = 20.0

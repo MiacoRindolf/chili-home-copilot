@@ -702,13 +702,18 @@ def test_unified_host_rejects_loaded_bridge_hash_mismatch_before_threads(
     composition.close()
 
 
-def test_unified_host_launch_validation_binds_exact_launcher_and_python(tmp_path):
+def test_unified_host_launch_validation_binds_exact_launcher_and_python(
+    tmp_path, monkeypatch
+):
     bundle = _make_bundle(tmp_path)
     launcher = REPO / "scripts" / "start-iqfeed-capture-host.ps1"
+    python_fixture = tmp_path / "python-host-fixture.exe"
+    python_fixture.write_bytes(b"fixture executable identity")
+    monkeypatch.setattr(capture_host.sys, "executable", str(python_fixture))
     report = capture_host.validate_iqfeed_capture_host_launch(
         launcher_path=launcher,
         launcher_sha256=_sha(launcher),
-        python_executable=sys.executable,
+        python_executable=python_fixture,
         manifest_path=bundle.manifest_path,
         manifest_sha256=bundle.manifest_sha256,
         allowed_read_roots=(bundle.read_root, REPO),
@@ -719,13 +724,42 @@ def test_unified_host_launch_validation_binds_exact_launcher_and_python(tmp_path
     )
     assert report["verdict"] == "IQFEED_CAPTURE_HOST_LAUNCH_VALIDATED_INERT"
     assert report["launcher"]["path"] == str(launcher.resolve())
-    assert report["python_executable"] == str(Path(sys.executable).resolve())
+    assert report["python_executable"] == str(python_fixture.resolve())
     assert report["activation_authorized"] is False
     assert report["provider_sockets_started"] is False
     assert report["database_or_broker_started"] is False
     assert report["paper_live_execution_enabled"] is False
     assert report["task_or_service_mutated"] is False
     assert len(report["launch_validation_sha256"]) == 64
+
+
+def test_unified_host_launch_validation_rejects_reparse_python(
+    tmp_path, monkeypatch
+):
+    bundle = _make_bundle(tmp_path)
+    launcher = REPO / "scripts" / "start-iqfeed-capture-host.ps1"
+    python_target = tmp_path / "python-host-target.exe"
+    python_target.write_bytes(b"fixture executable identity")
+    python_link = tmp_path / "python-host-link.exe"
+    try:
+        python_link.symlink_to(python_target)
+    except OSError:
+        pytest.skip("local policy does not permit creating a symlink")
+    monkeypatch.setattr(capture_host.sys, "executable", str(python_target))
+
+    with pytest.raises(CaptureContractError, match="reparse point"):
+        capture_host.validate_iqfeed_capture_host_launch(
+            launcher_path=launcher,
+            launcher_sha256=_sha(launcher),
+            python_executable=python_link,
+            manifest_path=bundle.manifest_path,
+            manifest_sha256=bundle.manifest_sha256,
+            allowed_read_roots=(bundle.read_root, REPO),
+            allowed_write_roots=(bundle.write_root,),
+            wall_clock=lambda: NOW,
+            host_fingerprint_provider=lambda: HOST_FINGERPRINT,
+            local_drive_check=lambda _path: True,
+        )
 
 
 def test_unified_host_launch_validation_rejects_launcher_hash_forgery(tmp_path):
