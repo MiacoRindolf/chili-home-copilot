@@ -1406,6 +1406,50 @@ def _settle_adaptive_alpaca_cycle_if_complete(
         return pending
 
 
+def _alpaca_cycle_accounting_projection(
+    settlement: dict[str, Any] | None,
+) -> dict[str, Any]:
+    """Expose only the verified append-only settlement row to outcome learning."""
+
+    if not isinstance(settlement, dict) or not settlement.get("ok"):
+        return {
+            "accounting_ready": False,
+            "accounting_block_reason": (
+                (settlement or {}).get("reason")
+                if isinstance(settlement, dict)
+                else None
+            )
+            or "alpaca_typed_settlement_projection_unavailable",
+        }
+    settled = settlement.get("settlement")
+    row = getattr(settled, "row", None)
+    settlement_sha256 = str(
+        getattr(row, "settlement_sha256", "") or ""
+    ).strip().lower()
+    try:
+        net_realized_pnl_usd = float(
+            getattr(row, "net_realized_pnl_usd", None)
+        )
+    except (TypeError, ValueError):
+        net_realized_pnl_usd = math.nan
+    if (
+        not math.isfinite(net_realized_pnl_usd)
+        or len(settlement_sha256) != 64
+        or any(char not in "0123456789abcdef" for char in settlement_sha256)
+    ):
+        return {
+            "accounting_ready": False,
+            "accounting_block_reason": (
+                "alpaca_typed_settlement_projection_invalid"
+            ),
+        }
+    return {
+        "accounting_ready": True,
+        "accounting_net_realized_pnl_usd": net_realized_pnl_usd,
+        "accounting_settlement_sha256": settlement_sha256,
+    }
+
+
 def _sync_adaptive_alpaca_order_lifecycle(
     sess: Any,
     le: dict[str, Any],
@@ -2071,9 +2115,36 @@ def _sync_adaptive_alpaca_position_lifecycle(
         store = _adaptive_risk_store_for_session(sess)
         reservation_id = uuid.UUID(str(binding["reservation_id"]))
         state = store.read_state(reservation_id)
-        if state.state in {"released", "closed"}:
+        if state.state == "released":
             _adaptive_alpaca_refresh_binding(sess, le, state=state)
-            return {"ok": True, "state": state}
+            return {
+                "ok": True,
+                "state": state,
+                "accounting_ready": False,
+                "accounting_block_reason": (
+                    "alpaca_released_reservation_has_no_cycle_settlement"
+                ),
+            }
+        if state.state == "closed":
+            settlement = _settle_adaptive_alpaca_cycle_if_complete(
+                sess, le, reservation_id=reservation_id
+            )
+            owner = object_session(sess)
+            if settlement.get("ok") and owner is not None:
+                state = store.read_state(reservation_id, session=owner)
+                _adaptive_alpaca_refresh_binding(sess, le, state=state)
+            return {
+                "ok": bool(settlement.get("ok")),
+                "state": state,
+                "settlement": settlement,
+                "error": (
+                    None
+                    if settlement.get("ok")
+                    else settlement.get("reason")
+                    or "alpaca_cycle_settlement_pending"
+                ),
+                **_alpaca_cycle_accounting_projection(settlement),
+            }
         if state.state == "flat_pending_settlement":
             settlement = _capture_and_settle_flat_adaptive_alpaca_cycle(
                 sess,
@@ -2097,6 +2168,7 @@ def _sync_adaptive_alpaca_position_lifecycle(
                     else settlement.get("reason")
                     or "alpaca_cycle_settlement_pending"
                 ),
+                **_alpaca_cycle_accounting_projection(settlement),
             }
         quantity_reader = getattr(adapter, "get_position_quantity", None)
         if not callable(quantity_reader):
@@ -2217,6 +2289,7 @@ def _sync_adaptive_alpaca_position_lifecycle(
                 state = store.read_state(reservation_id, session=owner)
                 _adaptive_alpaca_refresh_binding(sess, le, state=state)
         exposure_quarantined = state.state == "exposure_quarantined"
+        accounting = _alpaca_cycle_accounting_projection(settlement)
         return {
             "ok": True,
             "state": state,
@@ -2228,6 +2301,7 @@ def _sync_adaptive_alpaca_position_lifecycle(
             ),
             "exposure_quarantined": exposure_quarantined,
             "adaptive_risk_reconciliation_required": exposure_quarantined,
+            **accounting,
         }
     except (
         AdaptiveRiskContractError,
@@ -6293,6 +6367,7 @@ def _finalize_live_decision_after_exit(
     le: dict[str, Any],
     realized_pnl_usd: float,
     slip_bps: float,
+    cumulative_session_pnl_usd: float | None = None,
 ) -> None:
     pid = le.get("entry_decision_packet_id")
     if not pid:
@@ -6314,7 +6389,7 @@ def _finalize_live_decision_after_exit(
             slippage_bps=slip_bps,
             missed_fill=False,
             partial_fill=False,
-            cumulative_session_pnl_usd=float(le.get("realized_pnl_usd") or 0.0),
+            cumulative_session_pnl_usd=cumulative_session_pnl_usd,
         )
     except Exception:
         _log.debug("live decision packet finalize skipped session=%s", sess.id, exc_info=True)
@@ -16036,6 +16111,9 @@ def _complete_confirmed_live_exit(
     sell_result: dict[str, Any] | None = None,
     adapter: Any | None = None,
 ) -> float:
+    _authoritative_cycle_pnl: float | None = None
+    _authoritative_settlement_sha256: str | None = None
+    _session_realized_before_exit = _float_or_none(le.get("realized_pnl_usd"))
     if (
         normalize_execution_family(sess.execution_family)
         in ALPACA_EXECUTION_FAMILIES
@@ -16065,6 +16143,26 @@ def _complete_confirmed_live_exit(
                     or "alpaca_typed_settlement_projection_unavailable"
                 )
             )
+        _authoritative_cycle_pnl = _float_or_none(
+            adaptive_position.get("accounting_net_realized_pnl_usd")
+        )
+        if _authoritative_cycle_pnl is None:
+            raise AdaptiveRiskContractError(
+                "alpaca_typed_settlement_projection_invalid"
+            )
+        _authoritative_settlement_sha256 = str(
+            adaptive_position.get("accounting_settlement_sha256") or ""
+        ).strip().lower()
+        if (
+            len(_authoritative_settlement_sha256) != 64
+            or any(
+                char not in "0123456789abcdef"
+                for char in _authoritative_settlement_sha256
+            )
+        ):
+            raise AdaptiveRiskContractError(
+                "alpaca_typed_settlement_projection_invalid"
+            )
     pnl_gross = (float(fill_price) - float(entry_price)) * float(quantity)
     notional_basis = abs(float(entry_price) * float(quantity))
     # Fee truth (2026-06-13): net the broker-reported commissions out of the
@@ -16078,7 +16176,16 @@ def _complete_confirmed_live_exit(
     fees_usd = max(0.0, _exit_fee) + max(0.0, _entry_fee)
     pnl = pnl_gross - fees_usd
     le["fees_usd_total"] = float(le.get("fees_usd_total") or 0.0) + fees_usd
-    le["realized_pnl_usd"] = float(le.get("realized_pnl_usd") or 0.0) + pnl
+    _local_session_pnl_after_exit = float(
+        _session_realized_before_exit or 0.0
+    ) + pnl
+    if _authoritative_cycle_pnl is None:
+        le["realized_pnl_usd"] = _local_session_pnl_after_exit
+    else:
+        le["alpaca_terminal_leg_pnl_diagnostic"] = {
+            "realized_pnl_usd": float(pnl),
+            "settlement_sha256": _authoritative_settlement_sha256,
+        }
     le["last_exit_price"] = float(fill_price)
     le["last_exit_entry_price"] = float(entry_price)
     le["last_exit_quantity"] = float(quantity)
@@ -16119,13 +16226,97 @@ def _complete_confirmed_live_exit(
         pnl_gross_usd=pnl_gross,
         raw={"slip_bps": slip_bps, "fees_usd": fees_usd, "reconciled": (_bt is None)},
     )
-    _finalize_live_decision_after_exit(db, sess, le=le, realized_pnl_usd=pnl, slip_bps=slip_bps)
+    _exit_pos = le.get("position") if isinstance(le.get("position"), dict) else {}
+    # Deployment expectancy and the packet outcome are one record per completed
+    # trade, not one record per exit leg. Captured Alpaca PAPER is sourced only
+    # from its verified append-only cycle settlement. Other live families use
+    # the persisted scale-out accumulator, but never turn a missing/malformed
+    # partial accumulator into a fabricated zero.
+    _partial_taken = bool(_exit_pos.get("partial_taken"))
+    _partial_pnl = _float_or_none(_exit_pos.get("trade_realized_usd"))
+    _cumulative_session_pnl_for_learning: float | None
+    if _authoritative_cycle_pnl is not None:
+        _whole_trade_pnl: float | None = _authoritative_cycle_pnl
+        _prior_settled_session_pnl = _float_or_none(
+            le.get("alpaca_settled_session_pnl_usd")
+        )
+        if _prior_settled_session_pnl is None:
+            _current_cycle_local_before = (
+                _partial_pnl if _partial_taken else 0.0
+            )
+            if (
+                _session_realized_before_exit is None
+                and not _partial_taken
+                and "realized_pnl_usd" not in le
+            ):
+                _prior_settled_session_pnl = 0.0
+            elif (
+                _session_realized_before_exit is not None
+                and _current_cycle_local_before is not None
+                and math.isclose(
+                    _session_realized_before_exit,
+                    _current_cycle_local_before,
+                    rel_tol=1e-9,
+                    abs_tol=1e-8,
+                )
+            ):
+                _prior_settled_session_pnl = 0.0
+        if _prior_settled_session_pnl is None:
+            _cumulative_session_pnl_for_learning = None
+            le["alpaca_settled_session_pnl_gap"] = {
+                "reason_code": (
+                    "alpaca_prior_settled_session_pnl_unavailable"
+                ),
+                "settlement_sha256": _authoritative_settlement_sha256,
+            }
+            _emit(
+                db,
+                sess,
+                "live_cycle_learning_gap",
+                dict(le["alpaca_settled_session_pnl_gap"]),
+            )
+        else:
+            _cumulative_session_pnl_for_learning = (
+                _prior_settled_session_pnl + _authoritative_cycle_pnl
+            )
+            le["alpaca_settled_session_pnl_usd"] = (
+                _cumulative_session_pnl_for_learning
+            )
+            le["realized_pnl_usd"] = (
+                _cumulative_session_pnl_for_learning
+            )
+            le.pop("alpaca_settled_session_pnl_gap", None)
+    elif _partial_taken and _partial_pnl is None:
+        _whole_trade_pnl = None
+        _cumulative_session_pnl_for_learning = None
+        _emit(
+            db,
+            sess,
+            "live_cycle_learning_gap",
+            {
+                "reason_code": "live_partial_cycle_pnl_unavailable",
+                "terminal_leg_pnl_usd": float(pnl),
+            },
+        )
+    else:
+        _whole_trade_pnl = float(_partial_pnl or 0.0) + float(pnl)
+        _cumulative_session_pnl_for_learning = _local_session_pnl_after_exit
+    if _whole_trade_pnl is not None:
+        _finalize_live_decision_after_exit(
+            db,
+            sess,
+            le=le,
+            realized_pnl_usd=_whole_trade_pnl,
+            slip_bps=slip_bps,
+            cumulative_session_pnl_usd=(
+                _cumulative_session_pnl_for_learning
+            ),
+        )
     le["last_exit_reason"] = reason
     # Shake-out learning: stash the inputs (incl. the REAL momentum stop/target,
     # still on the position here) so a deferred job can judge whether the thesis
     # worked AFTER we exited — was the stop too tight? — instead of the learner
     # seeing a shallow loss. (post_exit_excursion.py; docs/DESIGN/MOMENTUM_LANE.md)
-    _exit_pos = le.get("position") if isinstance(le.get("position"), dict) else {}
     # G4 P2: persist the CLOSED trade's reference levels for the same-symbol re-entry
     # escalation (kept across recycle — NOT in _RECYCLE_ENTRY_STATE_KEYS; overwritten
     # on the next real exit). risk_dist prefers the frozen entry sizing stop_distance
@@ -16137,34 +16328,51 @@ def _complete_confirmed_live_exit(
         _g4_rd = _float_or_none(_g4_es.get("stop_distance"))
         if _g4_rd is None or _g4_rd <= 0:
             _g4_rd = abs(float(entry_price) - float(fill_price)) or None
+        if _whole_trade_pnl is None:
+            raise ValueError("full-cycle P&L is unavailable")
         # was_loss reflects the WHOLE TRADE net (banked partials/scale-outs + this final
         # tranche), NOT the final tranche alone — else a scaled WINNER whose runner trails
         # out below the avg entry (green trade, red final tranche) would be tagged a loss
         # and its next legitimate re-entry wrongly blocked by the anti-chase gate. For a
         # non-scaled trade trade_realized_usd is absent (0) ⇒ identical to bool(pnl<=0).
-        _g4_trade_net = (_float_or_none(_exit_pos.get("trade_realized_usd")) or 0.0) + float(pnl)
         le["g4_prior_trade"] = {
             "exit_price": float(fill_price),
             "high_water_mark": _float_or_none(_exit_pos.get("high_water_mark")),
             "risk_dist": _g4_rd,
-            "was_loss": bool(_g4_trade_net <= 0),
+            "was_loss": bool(_whole_trade_pnl <= 0),
             "exit_reason": reason,
         }
     except Exception:
         pass
-    le["post_exit_excursion_pending"] = {
-        "symbol": sess.symbol,
-        "entry_price": float(entry_price),
-        "exit_price": float(fill_price),
-        "original_stop": _exit_pos.get("stop_price"),
-        "original_target": _exit_pos.get("target_price"),
-        "side_long": True,
-        "exit_reason": reason,
-        "realized_pnl": pnl,
-        "exit_time_utc": _utcnow().isoformat(),
-        "horizon_seconds": int(getattr(settings, "chili_momentum_post_exit_horizon_seconds", 1800) or 1800),
-        "state": "pending",
-    }
+    if _whole_trade_pnl is not None:
+        le["post_exit_excursion_pending"] = {
+            "symbol": sess.symbol,
+            "entry_price": float(entry_price),
+            "exit_price": float(fill_price),
+            "original_stop": _exit_pos.get("stop_price"),
+            "original_target": _exit_pos.get("target_price"),
+            "side_long": True,
+            "exit_reason": reason,
+            "realized_pnl": _whole_trade_pnl,
+            "realized_pnl_scope": (
+                "verified_alpaca_cycle_settlement"
+                if _authoritative_cycle_pnl is not None
+                else "complete_local_cycle"
+            ),
+            "settlement_sha256": _authoritative_settlement_sha256,
+            "exit_time_utc": _utcnow().isoformat(),
+            "horizon_seconds": int(
+                getattr(
+                    settings,
+                    "chili_momentum_post_exit_horizon_seconds",
+                    1800,
+                )
+                or 1800
+            ),
+            "state": "pending",
+        }
+    else:
+        le.pop("post_exit_excursion_pending", None)
     le["position"] = None
     le.pop("pending_exit_reason", None)
     le.pop("pending_exit_quantity", None)

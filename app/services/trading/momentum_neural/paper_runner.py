@@ -28,6 +28,7 @@ from ....models.trading import (
     MomentumStrategyVariant,
     TradingAutomationSession,
     TradingAutomationSimulatedFill,
+    TradingDecisionPacket,
 )
 from ..execution_family_registry import normalize_execution_family, momentum_runner_supports_execution_family
 from .persistence import (
@@ -2047,6 +2048,100 @@ def _record_paper_exit_basis(
     pe["last_exit_reason"] = reason
 
 
+def _complete_paper_cycle_pnl(
+    db: Session,
+    *,
+    sess: TradingAutomationSession,
+    decision_packet_id: int,
+) -> tuple[float | None, str | None]:
+    """Return packet-keyed full-cycle P&L only from a complete canonical fill set."""
+
+    packet = db.get(TradingDecisionPacket, int(decision_packet_id))
+    if (
+        packet is None
+        or int(packet.automation_session_id or 0) != int(sess.id)
+        or packet.user_id != sess.user_id
+        or str(packet.chosen_ticker or "").strip().upper()
+        != str(sess.symbol or "").strip().upper()
+        or str(packet.execution_mode or "").strip().lower() != "paper"
+        or str(packet.decision_type or "").strip().lower() != "trade"
+    ):
+        return None, "paper_cycle_packet_binding_mismatch"
+    rows = (
+        db.query(TradingAutomationSimulatedFill)
+        .filter(
+            TradingAutomationSimulatedFill.session_id == int(sess.id),
+            TradingAutomationSimulatedFill.decision_packet_id
+            == int(decision_packet_id),
+        )
+        .order_by(TradingAutomationSimulatedFill.id.asc())
+        .all()
+    )
+    if any(
+        str(row.symbol or "").strip().upper()
+        != str(sess.symbol or "").strip().upper()
+        or str(row.lane or "").strip().lower() != "simulation"
+        or str(row.side or "").strip().lower() != "long"
+        or (
+            str(row.fill_type or "").strip().lower(),
+            str(row.action or "").strip().lower(),
+        )
+        not in {("entry", "enter_long"), ("exit", "exit_long")}
+        for row in rows
+    ):
+        return None, "paper_cycle_fill_contract_mismatch"
+    entries = [row for row in rows if row.fill_type == "entry"]
+    exits = [row for row in rows if row.fill_type == "exit"]
+    terminal_exits = [
+        row for row in exits if row.position_state_after == "flat"
+    ]
+    if len(entries) != 1:
+        return None, "paper_cycle_entry_count_mismatch"
+    if len(terminal_exits) != 1:
+        return None, "paper_cycle_terminal_exit_count_mismatch"
+    if (
+        not rows
+        or rows[0] is not entries[0]
+        or rows[-1] is not terminal_exits[0]
+        or entries[0].position_state_before != "flat"
+        or entries[0].position_state_after != "long"
+        or any(
+            row.position_state_before != "long"
+            or (
+                row.position_state_after
+                != ("flat" if row is terminal_exits[0] else "long")
+            )
+            for row in exits
+        )
+    ):
+        return None, "paper_cycle_state_chain_mismatch"
+    try:
+        entry_quantity = float(entries[0].quantity)
+        exit_quantities = [float(row.quantity) for row in exits]
+        exit_pnls = [float(row.pnl_usd) for row in exits]
+    except (TypeError, ValueError):
+        return None, "paper_cycle_economic_value_unavailable"
+    if (
+        not math.isfinite(entry_quantity)
+        or entry_quantity <= 0
+        or not exits
+        or any(
+            not math.isfinite(quantity) or quantity <= 0
+            for quantity in exit_quantities
+        )
+        or any(not math.isfinite(pnl) for pnl in exit_pnls)
+    ):
+        return None, "paper_cycle_economic_value_invalid"
+    if not math.isclose(
+        sum(exit_quantities),
+        entry_quantity,
+        rel_tol=1e-9,
+        abs_tol=1e-8,
+    ):
+        return None, "paper_cycle_exit_quantity_mismatch"
+    return float(sum(exit_pnls)), None
+
+
 def _finalize_paper_decision_after_exit(
     db: Session,
     sess: TradingAutomationSession,
@@ -2059,10 +2154,27 @@ def _finalize_paper_decision_after_exit(
     if not pid:
         return
     try:
+        cycle_pnl, gap_reason = _complete_paper_cycle_pnl(
+            db,
+            sess=sess,
+            decision_packet_id=int(pid),
+        )
+        if cycle_pnl is None:
+            _emit(
+                db,
+                sess,
+                "paper_cycle_learning_gap",
+                {
+                    "reason_code": gap_reason,
+                    "decision_packet_id": int(pid),
+                    "terminal_leg_pnl_usd": float(realized_pnl_usd),
+                },
+            )
+            return
         finalize_packet_after_simulated_exit(
             db,
             packet_id=int(pid),
-            realized_pnl_usd=realized_pnl_usd,
+            realized_pnl_usd=cycle_pnl,
             slippage_bps=slip_bps,
         )
         record_trade_outcome_metrics(
@@ -2071,7 +2183,7 @@ def _finalize_paper_decision_after_exit(
             variant_id=int(sess.variant_id),
             user_id=sess.user_id,
             mode="paper",
-            realized_pnl_usd=realized_pnl_usd,
+            realized_pnl_usd=cycle_pnl,
             slippage_bps=slip_bps,
             missed_fill=False,
             partial_fill=False,
