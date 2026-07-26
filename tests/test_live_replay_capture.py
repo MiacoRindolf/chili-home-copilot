@@ -1378,7 +1378,13 @@ def test_supervised_iqfeed_promotion_registers_from_exact_print_and_gaps_prior_q
     assert next_quote.event is not None
     assert next_quote.event.provider == "iqfeed"
 
-    service.abort_symbol("VEEE", reason="external_promotion_test_complete")
+    with pytest.raises(
+        CaptureContractError,
+        match="external producers must quiesce and close themselves",
+    ):
+        service.release_and_seal("VEEE")
+    assert admission.coordinator.state is CaptureSessionState.ABORTED
+    assert service.health()["running_symbols"] == ()
 
 
 def test_process_service_routes_upstream_queue_gap_into_hot_promotion(
