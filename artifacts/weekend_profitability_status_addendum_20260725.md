@@ -156,3 +156,90 @@ session still requires a fresh bound sample.
 
 Ross evidence remains exactly:
 `0 CERTIFIABLE / 4 DIAGNOSTIC_ONLY / 2 UNAVAILABLE / 6 UNRESOLVED`.
+
+## Post-checkpoint correction — 17:06 PT
+
+The statement above that Claude stopped after PR #936 is now superseded.
+Claude resumed the same local session and:
+
+- merged documentation PR #938;
+- merged PR #939 at merge commit
+  `32f9074f0586b0e238cc5e1070e64d7b0e4f5bb6`;
+- moved the captured-PAPER worktree to clean commit
+  `8cdc4c2609d595f06ff26d59f8d196ecc96af0fb`, whose ancestry includes
+  PRs #928–#938;
+- re-pinned the two enabled A86 one-shot tasks to that commit for Monday
+  04:15 PT and 05:00 PT;
+- built image `chili-app:main-8cdc4c2`, digest
+  `sha256:1ec15f3b6a950ab9a9a43f7c59f0a02624295943c52140a4dc039a4c18e04b34`;
+  and
+- replaced the scheduler with that image at 17:06 PT, preserving the prior
+  scheduler as stopped rollback container
+  `chili-clean-recovery-scheduler-pre-union-20260725`.
+
+The new scheduler is not the captured Alpaca order service, and the host has
+no `CHILI-Captured-Alpaca-PAPER` task or captured-PAPER service process.
+Therefore this audit found no Alpaca PAPER activation or activation order.
+However, the scheduler is actively publishing current viability under the
+unquarantined defaults. Its own log recorded the default-on float experiment
+dropping 51 candidates. Data produced after the swap is consequently not a
+clean control for those experiments.
+
+The A86 activation path and image are **NOT ACCEPTABLE AS-IS**. Their pinned
+commit defaults nine unpromoted strategy candidates ON, including provider/
+current-DB reads not bound to the captured-PAPER executed-read inventory.
+No Task Scheduler, container, or process mutation was performed by this
+audit; re-pin/rollback requires a separately reviewed operational action.
+
+## Consolidated containment checkpoint
+
+The quarantine draft is now broader than the original ignition-only commit:
+
+- branch: `codex/quarantine-unproven-pr936-20260725`
+- commit: `e96970aeeaf099abb0e61b413f9320aa77e063d8`
+- draft PR: `https://github.com/MiacoRindolf/chili-home-copilot/pull/937`
+
+It restores all nine candidates to explicit opt-in, restores exact default-off
+detector payload identity, prevents added provider/tape/float/volume reads
+while disabled, and preserves explicit experiment paths. The frozen focused
+roster is 168/168 green; compile and diff checks pass; independent final
+review found no blocker. The draft is not merged or deployed.
+
+Two attempts to fetch/reconcile the draft against the very large new PR #939
+base timed out in local Git negotiation; the abandoned read-only fetch
+processes were terminated. The draft remains intentionally unmerged rather
+than hiding that integration state.
+
+## Fresh causal-data recheck
+
+A bounded, transaction-read-only recheck after the scheduler swap still found
+no replay-grade window:
+
+- newest 10,000 `iqfeed_trade_ticks`: 0 provider-event clocks, 0 received
+  clocks, 0 available clocks, 0 bridge-run IDs, 0 connection generations,
+  0 frame sequences, and 0 frame hashes;
+- newest 10,000 `momentum_nbbo_spread_tape`: the same all-zero provenance
+  result; and
+- captured selection frontiers/events/route states: 0/0/0 rows.
+
+The broad date aggregation was canceled after an indexed-count plan did not
+finish within the bounded timeout; the conclusions above use primary-key
+bounded latest-row reads only.
+
+## Frozen profitability protocol
+
+No third hypothesis is authorized. Once a fully sealed equity session exists,
+evaluate only:
+
+1. **strength scale-out plus structural runner** — a mechanical first scale
+   into executable strength, with the remainder governed by the existing
+   structural exit state; and
+2. **observable deterioration exit** — failed-bid/reclaim plus lower-high and
+   liquidity/tape-collapse evidence available to the FSM at event time.
+
+Both candidates must use identical sealed inputs, executable ask-entry and
+bid-exit prices, fees/slippage, bounded latency, full losers, and non-Ross
+negative controls. Promotion requires paired walk-forward/OOS improvement in
+net P&L/R/expectancy/profit factor or MFE capture without a material
+distribution-derived worsening in drawdown/loss containment. Absolute peaks,
+winner-only windows, and threshold grids remain prohibited.
