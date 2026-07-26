@@ -227,13 +227,17 @@ def main() -> int:
             key = f"{w['symbol']}|{w['day']}|base"
             if key in done:
                 continue
-            est = int(w.get("est_runtime_s") or 1800)
+            # Recalibrated 2026-07-26 mid-batch: TNMG (709k ticks) blew the old flat 3900s
+            # cap at est 0.0028s/tick — real dense-window rate is ~0.0055s/tick. The cap now
+            # scales with the estimate (absolute ceiling 9000s so one monster can never eat
+            # the night).
+            est = max(int(w.get("est_runtime_s") or 1800), 600 + int(w["ticks"] * 0.0055))
             remaining = (stop_at - datetime.now()).total_seconds()
             if 1.25 * est + 120 > remaining:
                 print(f"[batch] DEADLINE — {key} needs ~{est}s, only {remaining:.0f}s left; "
                       f"stopping clean", flush=True)
                 break
-            timeout = min(3900, max(60, int(remaining - 120)))
+            timeout = int(min(1.5 * est + 900, 9000, max(60, remaining - 120)))
             env = dict(os.environ)
             env.pop("FLAGS_JSON", None)
             env.update({"SYMBOL": w["symbol"], "ARM": "base",
