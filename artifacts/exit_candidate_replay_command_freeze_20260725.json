@@ -1,0 +1,136 @@
+{
+  "schema_version": "chili.exit-candidate-replay-command-freeze.v1",
+  "generated_at_utc": "2026-07-26T02:39:29.6661855Z",
+  "audit_head": "9938a33a6cf971ecba39dfcf97b68a9d3c62cd98",
+  "execution": {
+    "replay_run": false,
+    "database_contact": false,
+    "network_contact": false,
+    "provider_contact": false,
+    "broker_contact": false,
+    "host_or_task_mutation": false
+  },
+  "ross_evidence_baseline": {
+    "CERTIFIABLE": 0,
+    "DIAGNOSTIC_ONLY": 4,
+    "UNAVAILABLE": 2,
+    "UNRESOLVED": 6,
+    "profitability_or_parity_established": false
+  },
+  "candidate_limit": 2,
+  "candidates": [
+    {
+      "id": "strength_scale_out_structural_runner",
+      "status": "COVERAGE_UNAVAILABLE",
+      "typed_blockers": [
+        "SEALED_REPLAY_CLI_UNAVAILABLE",
+        "CANDIDATE_1_MODEL_UNAVAILABLE",
+        "PRODUCTION_EXIT_PARITY_FALSE"
+      ]
+    },
+    {
+      "id": "observable_deterioration_exit",
+      "mechanics": [
+        "failed_bid_or_reclaim",
+        "lower_high",
+        "liquidity_or_tape_collapse"
+      ],
+      "status": "COVERAGE_UNAVAILABLE",
+      "typed_blockers": [
+        "SEALED_REPLAY_CLI_UNAVAILABLE",
+        "CANDIDATE_2_MODEL_UNAVAILABLE",
+        "EXACT_EVENT_INPUT_UNAVAILABLE"
+      ]
+    }
+  ],
+  "coverage_blockers": [
+    "Latest capture inventory has zero new replay-grade exact-clock/executable windows.",
+    "Historical inventory has 0/12 causally complete cycles.",
+    "No sealed event objects are available to bind as candidate market input.",
+    "No complete provider_event_at/received_at/available_at, release/run identity, sequence/hash continuity, and executable warmup-to-exit coverage exists.",
+    "IQFeed Q/reference rows with null provider event clocks cannot be authoritative exact-print execution evidence."
+  ],
+  "diagnostic_surfaces": [
+    {
+      "path": "scripts/run_counterfactual_replay_v3.py",
+      "sha256": "4a3c260fb75ea6f0483d2886dd121f271feed9b6d3a7f2aeb3b9a1f49c5e895f",
+      "status": "SYNTAX_ONLY_NOT_CANDIDATE_AUTHORITY",
+      "parser_valid_template": [
+        "Set-Location D:\\dev\\chili-weekend-audit-20260725",
+        "python -B scripts\\run_counterfactual_replay_v3.py --since \"<WARMUP_START_UTC>\" --until \"<WINDOW_END_UTC>\" --eval-since \"<ENTRY_EVAL_START_UTC>\" --symbols <SYMBOLS...> --bar-seconds 60 --bar-eval-stride 1 --max-trades-per-symbol 3 --require-causal-provenance --require-certified-source --exit-model adaptive --require-opportunity-labels --require-pnl-minmax-labels"
+      ],
+      "disqualifiers": [
+        "does not execute the production live_runner exit FSM",
+        "exits the whole quantity once",
+        "has neither approved candidate model",
+        "does not model fees, slippage, or bounded order latency",
+        "records production_exit_parity=false",
+        "can substitute trade price when executable bid/ask is missing",
+        "reads mutable DB tape instead of a content-addressed capture input"
+      ]
+    },
+    {
+      "path": "scripts/replay_v3_fsm_window.py",
+      "sha256": "40a6e48b1aca3cbd442bb3f22ad3959f522dd40e24821cf428c3d916c5ef5c4f",
+      "status": "SYNTAX_ONLY_NOT_CANDIDATE_AUTHORITY",
+      "environment_interface": {
+        "PYTHONPATH": ".",
+        "DATABASE_URL": "<READ_SOURCE_DB_URL>",
+        "TEST_DATABASE_URL": "<DISPOSABLE_DATABASE_ENDING_IN__test>",
+        "CHILI_PYTEST": "1",
+        "SYMBOL": "<SYMBOL>",
+        "WIN_START": "<UTC_NAIVE_START>",
+        "WIN_END": "<UTC_NAIVE_END>",
+        "OHLCV_START": "<UTC_NAIVE_WARMUP_START>",
+        "TICK_STRIDE": "<DECLARED_STRIDE>",
+        "GRID_STEP_S": "<DECLARED_GRID_SECONDS>",
+        "FULL_MIRROR": "<0_OR_1>",
+        "ARM": "<on|off|both>"
+      },
+      "invocation": "python -B scripts\\replay_v3_fsm_window.py",
+      "disqualifiers": [
+        "reads mutable source DB rows and writes/cleans a test DB",
+        "forces operational gates and monkeypatches provider/runtime behavior",
+        "uses wall freshness",
+        "has no content-addressed input/config/candidate-variant binding",
+        "ARM toggles G4 and not either approved exit candidate"
+      ]
+    }
+  ],
+  "sealed_api_observation": {
+    "surface": "ReplayV3Driver.from_sealed_inputs(...)",
+    "status": "PYTHON_API_ONLY_NO_EXISTING_CANDIDATE_CLI",
+    "required_missing_binding": [
+      "verified content-addressed capture",
+      "coverage request and grade",
+      "exact config and code build",
+      "candidate variant",
+      "paired baseline/candidate scoreboard"
+    ],
+    "decision": "Do not create a new replay subsystem during this frozen weekend lane."
+  },
+  "code_sha256": {
+    "app/services/trading/momentum_neural/counterfactual_replay.py": "dd99b1be2e475babb5c9623f9a54b67e7a641e3afa9d587f970f0429d796351c",
+    "app/services/trading/momentum_neural/replay_v3.py": "4356dd9b42056eedbd1e7b884f1eb4818af6a73a60e10b82ccc45d63cd519bd4",
+    "app/services/trading/momentum_neural/live_runner.py": "391f5e8630721085d1e95954405d3986f78ce82a653f106da890b430d25d9540",
+    "app/services/trading/momentum_neural/paper_execution.py": "9d01d8a8f4102eb6e01bbabab6e3073c55de7d78e3fbd08666ae58a45b2c75d9",
+    "app/config.py": "d38cb98ac09ad985daa7d413d6fac712b3dfa0f58bda7fe9fbbe700af33a49a7",
+    "app/services/trading/momentum_neural/replay_capture_contract.py": "aab04202249000ba7679d8dc190cf23cb2760c58e1ef2e2e64c447c114dc37d2",
+    "app/services/trading/momentum_neural/replay_capture_runtime.py": "09e4f2d66b1e890ab29651ebe1fe923953a47b374621bd601dd6f2d19856caf7",
+    "app/services/trading/momentum_neural/paired_oos_scoreboard.py": "bdc5da933a416933274e4e8bd199f7abc5054ac6104bae0512aac7c37971bddc"
+  },
+  "evidence_sha256": {
+    "artifacts/weekend_capture_coverage_20260725.json": "105d0d4a67a18524d9569f4ca742f9025f7270984d9ad240450e8c8087a43dcc",
+    "D:/dev/chili-home-copilot-weekend-profitability/artifacts/weekend-profitability-20260718/dataset_coverage_manifest.json": "94bb88926da13581463a45f7de9c88958614947131313662323f38be0cff61ca",
+    "D:/dev/chili-home-copilot-weekend-profitability/artifacts/weekend-profitability-20260718/excluded_row_ledger.json": "9b795a16993d5ca51555f5b23cd725a2cf2b86f86d8f4bb1885aecc02bc71d55",
+    "D:/dev/chili-home-copilot-weekend-profitability/artifacts/weekend-profitability-20260718/historical_causal_window_inventory.json": "c45e1846e02241a3b4b02719be9649b68646a67b604250473442cda7b768a481",
+    "D:/dev/chili-home-copilot-weekend-profitability/artifacts/weekend-profitability-20260718/baseline_exit_scoreboard.json": "5753bf5b53286cccb6d8c988b3c72fe920ad33e4ef81e48a135027bdaa949f46",
+    "D:/dev/chili-home-copilot-weekend-profitability/artifacts/weekend-profitability-20260718/candidate_exit_scoreboard.json": "db6aa8b9833d9e81e6072083fab5473c88174013abd4322646086db79c405273",
+    "tests/fixtures/ross_replay/small_account_challenge_manifest.json": "ad532a7aa02b78a3b1fb521bf5d7d341b27410617ccd0fade867871bce21bfbf"
+  },
+  "verdict": {
+    "candidate_replay_permitted_now": false,
+    "reason": "Running either existing diagnostic harness would answer a materially different hypothesis and could create false Ross-profitability evidence.",
+    "next_eligible_input": "A sealed complete market session with exact executable event clocks and production-FSM replay/paper parity."
+  }
+}
