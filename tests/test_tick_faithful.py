@@ -398,13 +398,17 @@ def test_micropull_thin_tape_cannot_arm_junk_break(db: Session):
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# (5) FULL-PIPELINE determinism — the as-of ranker re-screens deterministically.
-# We exercise the rank helper through a constructed Tape so it doesn't need the
-# OHLCV feed; an empty tape returns [] (safe), and a seeded mover ranks.
+# (5) FULL-PIPELINE coverage integrity — no unsealed selection fallback.
+# The legacy ranker has no sealed historical selection inputs, so it must stop
+# before current tape or provider reads.
 # ─────────────────────────────────────────────────────────────────────────────
-def test_full_pipeline_run_is_deterministic_and_safe_on_empty(db: Session):
-    """run_replay(armed_source='full_pipeline') runs and is deterministic. With no
-    tape for the date it returns the no_tape result (no crash, no fabricated trades)."""
+def test_full_pipeline_run_fails_closed_before_current_tape_lookup(db: Session):
+    """Legacy full-pipeline replay cannot use current selection/tape state.
+
+    The coverage verdict is deterministic and precedes even an empty-date tape
+    lookup, so an apparently harmless no-tape probe cannot become a current-DB
+    fallback.
+    """
     from app.services.trading.momentum_neural.replay_v2 import run_replay
 
     _ensure_table(db)
@@ -412,6 +416,9 @@ def test_full_pipeline_run_is_deterministic_and_safe_on_empty(db: Session):
     r1 = run_replay("1990-01-02", persist=False, armed_source="full_pipeline")
     r2 = run_replay("1990-01-02", persist=False, armed_source="full_pipeline")
     assert r1["armed_source"] == "full_pipeline"
-    assert r1["error"] == "no_tape_for_date"
+    assert r1["coverage_grade"] == "COVERAGE_UNAVAILABLE"
+    assert r1["error"] == "historical_float_reference_coverage_unavailable"
+    assert r1["coverage_provenance"]["current_db_fallback_allowed"] is False
+    assert r1["coverage_provenance"]["current_provider_fallback_allowed"] is False
     assert r1["trades"] == [] and r2["trades"] == []
     assert r1["candidates"] == r2["candidates"] == 0

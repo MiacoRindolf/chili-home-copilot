@@ -974,11 +974,6 @@ def run_replay(date: str, *, persist: bool = True, armed_source: str = "live") -
     """Run the high-fidelity replay for ``date`` (YYYY-MM-DD). Returns the structured
     result dict; persists it to REPLAY_RESULTS_DIR/<date>.json when ``persist``."""
     started = datetime.now(timezone.utc)
-    tape = Tape(date)
-    syms = tape.symbols()
-    # STEP 2 prints-based fill model: bulk-load the day's TRADE PRINTS once (twin of Tape over
-    # iqfeed_trade_ticks) only when the flag is on. OFF ⇒ None ⇒ the entry seam keeps the EXACT
-    # quote fill (byte-identical). REPLAY-ONLY.
     result: dict = {
         "date": date,
         "engine": "v2",
@@ -986,9 +981,9 @@ def run_replay(date: str, *, persist: bool = True, armed_source: str = "live") -
         "entry_interval": ENTRY_INTERVAL,
         "bar_interval_min": ENTRY_BAR_MIN,
         "ran_at_utc": started.isoformat(),
-        "tape_symbols": len(syms),
-        "halt_windows": sum(len(v) for v in tape.halts.values()),
-        "halted_symbols": sum(1 for v in tape.halts.values() if v),
+        "tape_symbols": 0,
+        "halt_windows": 0,
+        "halted_symbols": 0,
         "trades": [],
         "total_usd": 0.0,
         "wins": 0,
@@ -997,11 +992,6 @@ def run_replay(date: str, *, persist: bool = True, armed_source: str = "live") -
         "candidates": 0,
         "error": None,
     }
-    if not syms:
-        result["error"] = "no_tape_for_date"
-        if persist:
-            _persist(result)
-        return result
     if armed_source == "full_pipeline":
         float_gate_enabled = bool(
             getattr(
@@ -1028,6 +1018,19 @@ def run_replay(date: str, *, persist: bool = True, armed_source: str = "live") -
         if persist:
             _persist(result)
         return result
+    tape = Tape(date)
+    syms = tape.symbols()
+    result["tape_symbols"] = len(syms)
+    result["halt_windows"] = sum(len(v) for v in tape.halts.values())
+    result["halted_symbols"] = sum(1 for v in tape.halts.values() if v)
+    if not syms:
+        result["error"] = "no_tape_for_date"
+        if persist:
+            _persist(result)
+        return result
+    # STEP 2 prints-based fill model: bulk-load the day's TRADE PRINTS once (twin of Tape over
+    # iqfeed_trade_ticks) only when the flag is on. OFF ⇒ None ⇒ the entry seam keeps the EXACT
+    # quote fill (byte-identical). REPLAY-ONLY.
     trade_tape = TradeTape(date) if REPLAY_PRINTS_FILL else None
 
     # REPLAY->LIVE SIZING PARITY (operator "walang mintis", 2026-06-23): size off the SAME

@@ -56,16 +56,15 @@ def test_full_pipeline_reference_gap_is_terminal_before_current_lookups(
 ):
     from app.services.trading.momentum_neural import replay_v2 as rv
 
-    class RecordedTape:
-        halts = {}
-
-        def __init__(self, date):
-            assert date == "2026-07-24"
-
-        def symbols(self):
-            return ["AAA"]
-
-    monkeypatch.setattr(rv, "Tape", RecordedTape)
+    monkeypatch.setattr(
+        rv,
+        "Tape",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError(
+                "coverage-unavailable replay must not read the current tape DB"
+            )
+        ),
+    )
     monkeypatch.setattr(rv, "REPLAY_PRINTS_FILL", True)
     monkeypatch.setattr(
         rv.settings,
@@ -110,5 +109,6 @@ def test_full_pipeline_reference_gap_is_terminal_before_current_lookups(
         "current_db_fallback_allowed": False,
         "current_provider_fallback_allowed": False,
     }
+    assert result["tape_symbols"] == 0
     assert result["trades"] == []
     assert result["total_usd"] == 0.0
