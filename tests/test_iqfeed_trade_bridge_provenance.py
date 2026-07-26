@@ -748,6 +748,35 @@ def test_migration_334_owns_host_bridge_schema_idempotently(db):
         _migration_334_iqfeed_host_bridge_schema_ownership(connection)
 
 
+def test_migration_349_is_append_only_and_prefers_exact_update_identity():
+    from app import migrations
+
+    body = _migration_source_body(
+        "_migration_349_iqfeed_availability_incident_quarantine"
+    )
+    upper = body.upper()
+
+    assert "TICK.XMIN::TEXT AS UPDATE_XID" in upper
+    assert "HAVING COUNT(*) = 176" in upper
+    assert "POSTGRES_XMIN_EXACT_176" in upper
+    assert "CONSERVATIVE_BRIDGE_RUN_WINDOW" in upper
+    assert "CONSERVATIVE_INCIDENT_WINDOW_NO_RETAINED_IDENTITY" in upper
+    assert "REQUIRE_AVAILABLE_EQUALS_OBSERVED" in upper
+    assert "BEFORE UPDATE OR DELETE OR TRUNCATE" in upper
+    assert "FROM IQFEED_TRADE_TICKS AS TICK" in upper
+    assert "INSERT INTO IQFEED_AVAILABILITY_QUARANTINES" in upper
+    assert (
+        "349_iqfeed_availability_incident_quarantine"
+        in migrations.RETIRED_MIGRATIONS
+    )
+    assert "349_iqfeed_availability_incident_quarantine" not in {
+        version_id for version_id, _function in migrations.MIGRATIONS
+    }
+    assert migrations.MIGRATIONS[-1][0].startswith("348_")
+    with pytest.raises(RuntimeError, match="migration 349 is parked"):
+        migrations._migration_349_iqfeed_availability_incident_quarantine(None)
+
+
 def test_trade_bridge_startup_schema_gate_is_read_only_and_current(db):
     bridge._verify_bridge_schema()
     source = bridge.Path(bridge.__file__).read_text(encoding="utf-8")

@@ -82,7 +82,9 @@ from .captured_alpaca_paper_adapter import (
 )
 from .alpaca_fill_activity import (
     AlpacaFillActivityError,
+    LEGACY_POST_SETTLEMENT_FILL_CONTRADICTION_SCHEMA_VERSION,
     POST_SETTLEMENT_FILL_CONTRADICTION_DURABILITY_KIND,
+    POST_SETTLEMENT_FILL_CONTRADICTION_SCHEMA_VERSION,
     verify_alpaca_paper_fill_activity_row,
     verify_alpaca_paper_post_settlement_fill_contradiction_row,
     verify_alpaca_paper_terminal_fill_observation_receipt,
@@ -166,6 +168,18 @@ _DB_PAPER_FILL_TABLE = "trading_automation_simulated_fills"
 _ALPACA_PAPER_FILL_TABLE = "alpaca_paper_fill_activities"
 _ALPACA_POST_SETTLEMENT_FILL_TABLE = (
     "alpaca_paper_post_settlement_fill_contradictions"
+)
+ALPACA_EXIT_OWNER_RECEIPT_SCHEMA_VERSION = (
+    "chili.alpaca-exit-owner-receipt.v1"
+)
+_ALPACA_EXIT_OWNER_OID_EVENT_TYPES = frozenset(
+    {"alpaca_exit_owner_submitted", "alpaca_exit_owner_reconciled"}
+)
+_ALPACA_EXIT_OWNER_NO_OID_EVENT_TYPES = frozenset(
+    {
+        "alpaca_exit_owner_submit_indeterminate",
+        "alpaca_exit_owner_proven_no_transport",
+    }
 )
 _RISK_LEDGER_AGGREGATE_FIELDS = frozenset(
     {
@@ -1088,6 +1102,219 @@ def load_adaptive_risk_reservation_request(
             "adaptive risk reservation request failed canonical recomputation"
         )
     return validate_adaptive_risk_reservation_request(request)
+
+
+@dataclass(frozen=True)
+class AdaptiveExitOwnerTransportBinding:
+    """Exact PAPER sell-to-close authority shared by claim and risk ledgers."""
+
+    reservation_id: uuid.UUID
+    expected_account_id: str
+    account_identity_sha256: str
+    decision_packet_sha256: str
+    symbol: str
+    entry_client_order_id: str
+    exit_client_order_id: str
+    order_request: Mapping[str, Any]
+    transport_claim_token: str
+    transport_owner_session_id: int
+    transport_owner_generation: int
+    transport_owner_kind: str
+    transport_lease_id: str
+    transport_runtime_generation: str
+    transport_connection_generation: str
+    account_scope: str = "alpaca:paper"
+    broker_environment: str = "paper"
+    execution_family: str = "alpaca_spot"
+
+    def __post_init__(self) -> None:
+        try:
+            reservation_id = uuid.UUID(str(self.reservation_id))
+        except (TypeError, ValueError, AttributeError) as exc:
+            raise AdaptiveRiskContractError(
+                "exit-owner reservation_id is invalid"
+            ) from exc
+        object.__setattr__(self, "reservation_id", reservation_id)
+        for field_name in (
+            "expected_account_id",
+            "decision_packet_sha256",
+            "entry_client_order_id",
+            "exit_client_order_id",
+            "transport_claim_token",
+            "transport_lease_id",
+            "transport_runtime_generation",
+            "transport_connection_generation",
+        ):
+            object.__setattr__(
+                self,
+                field_name,
+                _norm(getattr(self, field_name), f"exit_owner.{field_name}"),
+            )
+        object.__setattr__(
+            self,
+            "symbol",
+            _norm(self.symbol, "exit_owner.symbol", upper=True),
+        )
+        object.__setattr__(
+            self,
+            "transport_owner_kind",
+            _norm(
+                self.transport_owner_kind,
+                "exit_owner.transport_owner_kind",
+                lower=True,
+            ),
+        )
+        object.__setattr__(
+            self,
+            "account_scope",
+            _norm(self.account_scope, "exit_owner.account_scope", lower=True),
+        )
+        object.__setattr__(
+            self,
+            "broker_environment",
+            _norm(
+                self.broker_environment,
+                "exit_owner.broker_environment",
+                lower=True,
+            ),
+        )
+        object.__setattr__(
+            self,
+            "execution_family",
+            _norm(
+                self.execution_family,
+                "exit_owner.execution_family",
+                lower=True,
+            ),
+        )
+        identity_sha = str(self.account_identity_sha256 or "").strip().lower()
+        decision_sha = str(self.decision_packet_sha256 or "").strip().lower()
+        if not _sha(identity_sha) or not _sha(decision_sha):
+            raise AdaptiveRiskContractError(
+                "exit-owner account and decision identities must be SHA-256"
+            )
+        object.__setattr__(self, "account_identity_sha256", identity_sha)
+        object.__setattr__(self, "decision_packet_sha256", decision_sha)
+        for field_name in (
+            "transport_owner_session_id",
+            "transport_owner_generation",
+        ):
+            value = getattr(self, field_name)
+            if isinstance(value, bool):
+                raise AdaptiveRiskContractError(
+                    f"exit_owner.{field_name} must be a positive integer"
+                )
+            try:
+                normalized = int(value)
+            except (TypeError, ValueError) as exc:
+                raise AdaptiveRiskContractError(
+                    f"exit_owner.{field_name} must be a positive integer"
+                ) from exc
+            if normalized <= 0 or normalized != value:
+                raise AdaptiveRiskContractError(
+                    f"exit_owner.{field_name} must be a positive integer"
+                )
+            object.__setattr__(self, field_name, normalized)
+        if (
+            self.account_scope != "alpaca:paper"
+            or self.broker_environment != "paper"
+            or self.execution_family != "alpaca_spot"
+            or self.transport_owner_kind
+            not in {"ordinary_exit", "emergency_exit", "deadman"}
+            or self.entry_client_order_id == self.exit_client_order_id
+        ):
+            raise AdaptiveRiskContractError(
+                "exit-owner binding is outside the PAPER sell-to-close contract"
+            )
+        if not isinstance(self.order_request, Mapping):
+            raise AdaptiveRiskContractError("exit-owner order_request is required")
+        request = _json_safe(dict(self.order_request))
+        try:
+            close_quantity = Decimal(str(request.get("base_size")))
+        except (InvalidOperation, TypeError, ValueError) as exc:
+            raise AdaptiveRiskContractError(
+                "exit-owner order_request base_size is invalid"
+            ) from exc
+        if not (
+            str(request.get("account_scope") or "").strip().lower()
+            == self.account_scope
+            and str(request.get("alpaca_account_id") or "").strip()
+            == self.expected_account_id
+            and str(request.get("product_id") or "").strip().upper()
+            == self.symbol
+            and str(request.get("client_order_id") or "").strip()
+            == self.exit_client_order_id
+            and str(request.get("side") or "").strip().lower() == "sell"
+            and str(request.get("position_intent") or "").strip().lower()
+            == "sell_to_close"
+            and close_quantity.is_finite()
+            and close_quantity > 0
+        ):
+            raise AdaptiveRiskContractError(
+                "exit-owner order_request does not match its immutable binding"
+            )
+        object.__setattr__(self, "order_request", request)
+
+    @property
+    def request_canonical_json(self) -> str:
+        return _canonical_json(self.order_request).decode("utf-8")
+
+    @property
+    def request_sha256(self) -> str:
+        return hashlib.sha256(
+            self.request_canonical_json.encode("utf-8")
+        ).hexdigest()
+
+    def event_details(self, *, available_at: datetime) -> dict[str, Any]:
+        return {
+            "owner_receipt_schema_version": (
+                ALPACA_EXIT_OWNER_RECEIPT_SCHEMA_VERSION
+            ),
+            "account_scope": self.account_scope,
+            "expected_account_id": self.expected_account_id,
+            "account_identity_sha256": self.account_identity_sha256,
+            "broker_environment": self.broker_environment,
+            "execution_family": self.execution_family,
+            "transport_connection_generation": (
+                self.transport_connection_generation
+            ),
+            "decision_packet_sha256": self.decision_packet_sha256,
+            "symbol": self.symbol,
+            "entry_client_order_id": self.entry_client_order_id,
+            "exit_client_order_id": self.exit_client_order_id,
+            "request_canonical_json": self.request_canonical_json,
+            "request_sha256": self.request_sha256,
+            "transport_claim_token": self.transport_claim_token,
+            "transport_owner_session_id": self.transport_owner_session_id,
+            "transport_owner_generation": self.transport_owner_generation,
+            "transport_owner_kind": self.transport_owner_kind,
+            "transport_lease_id": self.transport_lease_id,
+            "transport_runtime_generation": self.transport_runtime_generation,
+            "available_at": _iso(available_at),
+        }
+
+
+@dataclass(frozen=True)
+class AdaptiveExitOwnerReceipt:
+    """Verified immutable OID-bearing exit owner fact."""
+
+    receipt_sha256: str
+    event_type: str
+    reservation_id: uuid.UUID
+    sequence: int
+    transport_started_event_sha256: str
+    binding: AdaptiveExitOwnerTransportBinding
+    provider_order_id: str
+    provider_client_order_id: str
+    provider_status: str
+    provider_cumulative_quantity: int
+    observer_claim_token: str
+    observer_session_id: int
+    observer_generation: int
+    observer_runtime_generation: str
+    observer_connection_generation: str
+    effective_at: datetime
+    available_at: datetime
 
 
 @dataclass(frozen=True)
@@ -2353,6 +2580,7 @@ class AdaptiveReservationState:
     planned_quantity_shares: int
     cumulative_filled_quantity_shares: int
     open_quantity_shares: int
+    post_settlement_net_position_quantity_shares: int | None
     pending_structural_risk_usd: Decimal
     pending_gross_notional_usd: Decimal
     pending_buying_power_impact_usd: Decimal
@@ -4092,7 +4320,8 @@ class AdaptiveRiskReservationStore:
         effective_at: datetime,
         details: Mapping[str, Any],
         broker_event_id: str | None = None,
-    ) -> None:
+        flush_event_before_head: bool = False,
+    ) -> str:
         sequence = int(reservation.event_sequence) + 1
         event_details = dict(details)
         if reservation.opportunity_claim_id is None:
@@ -4137,20 +4366,1174 @@ class AdaptiveRiskReservationStore:
             "details": event_details,
         }
         event_sha = _sha256_json(payload)
-        session.add(
-            AdaptiveRiskReservationEvent(
-                reservation_id=reservation.reservation_id,
-                sequence=sequence,
-                event_type=event_type,
-                previous_event_sha256=reservation.last_event_sha256,
-                event_sha256=event_sha,
-                broker_event_id=broker_event_id,
-                payload_json=_json_safe(payload),
-                effective_at=effective_at,
-            )
+        event_row = AdaptiveRiskReservationEvent(
+            reservation_id=reservation.reservation_id,
+            sequence=sequence,
+            event_type=event_type,
+            previous_event_sha256=reservation.last_event_sha256,
+            event_sha256=event_sha,
+            broker_event_id=broker_event_id,
+            payload_json=_json_safe(payload),
+            effective_at=effective_at,
         )
+        session.add(event_row)
+        if flush_event_before_head:
+            session.flush([event_row])
         reservation.event_sequence = sequence
         reservation.last_event_sha256 = event_sha
+        return event_sha
+
+    @staticmethod
+    def _exit_owner_event_broker_id(
+        *,
+        reservation_id: uuid.UUID,
+        event_type: str,
+        effective_at: datetime,
+        details: Mapping[str, Any],
+    ) -> str:
+        digest = _sha256_json(
+            {
+                "reservation_id": str(reservation_id),
+                "event_type": event_type,
+                "effective_at": _iso(effective_at),
+                "details": dict(details),
+            }
+        )
+        return f"alpaca-exit-owner:{event_type}:{digest}"
+
+    @staticmethod
+    def _verify_exit_owner_event_row(
+        row: AdaptiveRiskReservationEvent,
+        *,
+        reservation_id: uuid.UUID,
+        event_type: str,
+        broker_event_id: str,
+        effective_at: datetime,
+        expected_details: Mapping[str, Any],
+    ) -> str:
+        payload = row.payload_json
+        if not isinstance(payload, Mapping):
+            raise AdaptiveReservationStateConflict(
+                "exit-owner receipt payload is malformed"
+            )
+        stored_sha = str(row.event_sha256 or "").strip().lower()
+        if not _sha(stored_sha) or _sha256_json(payload) != stored_sha:
+            raise AdaptiveReservationStateConflict(
+                "exit-owner receipt content hash changed"
+            )
+        if not (
+            row.reservation_id == reservation_id
+            and row.event_type == event_type
+            and row.broker_event_id == broker_event_id
+            and _utc(row.effective_at, "exit_owner.effective_at") == effective_at
+            and payload.get("event_type") == event_type
+            and payload.get("reservation_id") == str(reservation_id)
+            and payload.get("details") == _json_safe(dict(expected_details))
+        ):
+            raise AdaptiveReservationStateConflict(
+                "exit-owner receipt idempotency identity changed"
+            )
+        return stored_sha
+
+    @staticmethod
+    def _lock_exit_owner_reservation(
+        session: Session,
+        binding: AdaptiveExitOwnerTransportBinding,
+    ) -> AdaptiveRiskReservation:
+        acquire_adaptive_risk_account_locks(
+            session,
+            account_scope=binding.account_scope,
+        )
+        reservation = session.scalar(
+            select(AdaptiveRiskReservation)
+            .where(
+                AdaptiveRiskReservation.reservation_id
+                == binding.reservation_id
+            )
+            .with_for_update()
+        )
+        if reservation is None:
+            raise AdaptiveReservationStateConflict(
+                "exit-owner reservation does not exist"
+            )
+        packet = session.get(
+            AdaptiveRiskDecisionPacket,
+            reservation.decision_packet_sha256,
+        )
+        if packet is None or not (
+            reservation.account_scope == binding.account_scope
+            and reservation.symbol.upper() == binding.symbol
+            and reservation.decision_packet_sha256
+            == binding.decision_packet_sha256
+            and packet.account_scope == binding.account_scope
+            and packet.symbol.upper() == binding.symbol
+            and packet.client_order_id == binding.entry_client_order_id
+            and packet.account_identity_sha256
+            == binding.account_identity_sha256
+            and packet.execution_family == binding.execution_family
+            and packet.broker_environment == binding.broker_environment
+        ):
+            raise AdaptiveReservationStateConflict(
+                "exit-owner binding differs from reservation decision authority"
+            )
+        return reservation
+
+    @staticmethod
+    def _lock_post_settlement_projection_reservation(
+        session: Session,
+        reservation_id: uuid.UUID,
+    ) -> AdaptiveRiskReservation:
+        """Take A1/A2 -> settlement-head -> reservation for late-fill projection."""
+
+        initial = session.get(AdaptiveRiskReservation, reservation_id)
+        if initial is None:
+            raise AdaptiveReservationStateConflict("reservation does not exist")
+        packet = session.get(
+            AdaptiveRiskDecisionPacket,
+            initial.decision_packet_sha256,
+        )
+        if packet is None:
+            raise AdaptiveReservationStateConflict(
+                "post-settlement decision packet is missing"
+            )
+        account_scope = str(initial.account_scope)
+        account_identity_sha256 = str(packet.account_identity_sha256)
+        decision_packet_sha256 = str(initial.decision_packet_sha256)
+        acquire_adaptive_risk_account_locks(
+            session,
+            account_scope=account_scope,
+        )
+        settlement_head = session.scalar(
+            select(AlpacaPaperAccountSettlementHead)
+            .where(
+                AlpacaPaperAccountSettlementHead.account_scope == account_scope,
+                AlpacaPaperAccountSettlementHead.account_identity_sha256
+                == account_identity_sha256,
+            )
+            .with_for_update()
+        )
+        if settlement_head is None:
+            raise AdaptiveReservationStateConflict(
+                "post-settlement account head is missing"
+            )
+        try:
+            verify_settlement_head_content(settlement_head)
+        except AlpacaCycleSettlementIntegrityError as exc:
+            raise AdaptiveReservationStateConflict(
+                "post-settlement account head failed verification"
+            ) from exc
+        session.expire(initial)
+        reservation = session.scalar(
+            select(AdaptiveRiskReservation)
+            .where(AdaptiveRiskReservation.reservation_id == reservation_id)
+            .with_for_update()
+        )
+        if reservation is None or not (
+            reservation.account_scope == account_scope
+            and reservation.decision_packet_sha256 == decision_packet_sha256
+        ):
+            raise AdaptiveReservationStateConflict(
+                "post-settlement reservation identity changed"
+            )
+        return reservation
+
+    @staticmethod
+    def _exit_owner_details(
+        reservation: AdaptiveRiskReservation,
+        binding: AdaptiveExitOwnerTransportBinding,
+        *,
+        available_at: datetime,
+    ) -> dict[str, Any]:
+        details = binding.event_details(available_at=available_at)
+        if reservation.opportunity_claim_id is None:
+            details["opportunity_status"] = "not_applicable"
+        return details
+
+    def append_exit_owner_transport_started(
+        self,
+        binding: AdaptiveExitOwnerTransportBinding,
+        *,
+        effective_at: datetime,
+        available_at: datetime,
+        session: Session | None = None,
+    ) -> str:
+        """Append the one durable pre-I/O permit for an exact exit request."""
+
+        if type(binding) is not AdaptiveExitOwnerTransportBinding:
+            raise AdaptiveRiskContractError(
+                "exit-owner transport binding is missing"
+            )
+        effective = _utc(effective_at, "exit_owner.effective_at")
+        available = _utc(available_at, "exit_owner.available_at")
+        if available < effective:
+            raise AdaptiveRiskContractError(
+                "exit-owner available_at precedes effective_at"
+            )
+        with self._transaction(session) as owned:
+            reservation = self._lock_exit_owner_reservation(owned, binding)
+            details = self._exit_owner_details(
+                reservation,
+                binding,
+                available_at=available,
+            )
+            event_type = "alpaca_exit_owner_transport_started"
+            broker_event_id = self._exit_owner_event_broker_id(
+                reservation_id=binding.reservation_id,
+                event_type=event_type,
+                effective_at=effective,
+                details=details,
+            )
+            existing = owned.scalar(
+                select(AdaptiveRiskReservationEvent).where(
+                    AdaptiveRiskReservationEvent.reservation_id
+                    == binding.reservation_id,
+                    AdaptiveRiskReservationEvent.broker_event_id
+                    == broker_event_id,
+                )
+            )
+            if existing is not None:
+                return self._verify_exit_owner_event_row(
+                    existing,
+                    reservation_id=binding.reservation_id,
+                    event_type=event_type,
+                    broker_event_id=broker_event_id,
+                    effective_at=effective,
+                    expected_details=details,
+                )
+            signed_net = reservation.post_settlement_net_position_quantity_shares
+            maximum_close_quantity = Decimal(
+                int(reservation.open_quantity_shares)
+            )
+            if signed_net is not None and int(signed_net) > 0:
+                maximum_close_quantity = min(
+                    maximum_close_quantity,
+                    Decimal(int(signed_net)),
+                )
+            requested_close_quantity = Decimal(
+                str(binding.order_request["base_size"])
+            )
+            if (
+                reservation.state
+                not in {"partially_filled", "filled", "exposure_quarantined"}
+                or int(reservation.open_quantity_shares) <= 0
+                or (signed_net is not None and int(signed_net) <= 0)
+                or requested_close_quantity > maximum_close_quantity
+            ):
+                raise AdaptiveReservationStateConflict(
+                    "exit-owner transport exceeds locked positive long exposure"
+                )
+            event_sha = self._append_reservation_event(
+                owned,
+                reservation,
+                event_type=event_type,
+                effective_at=effective,
+                details=details,
+                broker_event_id=broker_event_id,
+                flush_event_before_head=True,
+            )
+            reservation.version = int(reservation.version) + 1
+            reservation.updated_at = max(
+                _utc(reservation.updated_at, "reservation.updated_at"),
+                effective,
+            )
+            return event_sha
+
+    def append_exit_owner_transport_outcome(
+        self,
+        binding: AdaptiveExitOwnerTransportBinding,
+        *,
+        event_type: str,
+        transport_started_event_sha256: str,
+        effective_at: datetime,
+        available_at: datetime,
+        observer_claim_token: str,
+        observer_session_id: int,
+        observer_generation: int,
+        observer_runtime_generation: str,
+        observer_connection_generation: str,
+        provider_order_id: str | None = None,
+        provider_status: str | None = None,
+        provider_cumulative_quantity: int | None = None,
+        session: Session | None = None,
+    ) -> str:
+        """Append an exact submitted/reconciled or non-authoritative outcome."""
+
+        if type(binding) is not AdaptiveExitOwnerTransportBinding:
+            raise AdaptiveRiskContractError(
+                "exit-owner transport binding is missing"
+            )
+        normalized_type = _norm(event_type, "exit_owner.event_type", lower=True)
+        if normalized_type not in (
+            _ALPACA_EXIT_OWNER_OID_EVENT_TYPES
+            | _ALPACA_EXIT_OWNER_NO_OID_EVENT_TYPES
+        ):
+            raise AdaptiveRiskContractError(
+                "unsupported exit-owner outcome event_type"
+            )
+        started_sha = str(transport_started_event_sha256 or "").strip().lower()
+        if not _sha(started_sha):
+            raise AdaptiveRiskContractError(
+                "transport_started_event_sha256 must be SHA-256"
+            )
+        effective = _utc(effective_at, "exit_owner.effective_at")
+        available = _utc(available_at, "exit_owner.available_at")
+        if available < effective:
+            raise AdaptiveRiskContractError(
+                "exit-owner available_at precedes effective_at"
+            )
+        observer_token = _norm(
+            observer_claim_token,
+            "exit_owner.observer_claim_token",
+        )
+        observer_runtime = _norm(
+            observer_runtime_generation,
+            "exit_owner.observer_runtime_generation",
+        )
+        observer_connection = _norm(
+            observer_connection_generation,
+            "exit_owner.observer_connection_generation",
+        )
+        observer_values: dict[str, int] = {}
+        for name, value in (
+            ("observer_session_id", observer_session_id),
+            ("observer_generation", observer_generation),
+        ):
+            if isinstance(value, bool):
+                raise AdaptiveRiskContractError(
+                    f"exit_owner.{name} must be a positive integer"
+                )
+            try:
+                normalized = int(value)
+            except (TypeError, ValueError) as exc:
+                raise AdaptiveRiskContractError(
+                    f"exit_owner.{name} must be a positive integer"
+                ) from exc
+            if normalized <= 0 or normalized != value:
+                raise AdaptiveRiskContractError(
+                    f"exit_owner.{name} must be a positive integer"
+                )
+            observer_values[name] = normalized
+        provider_oid = str(provider_order_id or "").strip() or None
+        provider_state = str(provider_status or "").strip().lower() or None
+        if normalized_type in _ALPACA_EXIT_OWNER_OID_EVENT_TYPES:
+            if not provider_oid or not provider_state:
+                raise AdaptiveRiskContractError(
+                    "OID-bearing exit-owner outcome is incomplete"
+                )
+            if isinstance(provider_cumulative_quantity, bool):
+                raise AdaptiveRiskContractError(
+                    "provider cumulative quantity must be non-negative"
+                )
+            try:
+                provider_cumulative = int(provider_cumulative_quantity)
+            except (TypeError, ValueError) as exc:
+                raise AdaptiveRiskContractError(
+                    "provider cumulative quantity must be non-negative"
+                ) from exc
+            if (
+                provider_cumulative < 0
+                or provider_cumulative != provider_cumulative_quantity
+            ):
+                raise AdaptiveRiskContractError(
+                    "provider cumulative quantity must be non-negative"
+                )
+        else:
+            if (
+                provider_oid is not None
+                or provider_status is not None
+                or provider_cumulative_quantity is not None
+            ):
+                raise AdaptiveRiskContractError(
+                    "non-authoritative exit-owner outcome cannot claim provider truth"
+                )
+            provider_cumulative = None
+        with self._transaction(session) as owned:
+            reservation = self._lock_exit_owner_reservation(owned, binding)
+            started_row = owned.scalar(
+                select(AdaptiveRiskReservationEvent).where(
+                    AdaptiveRiskReservationEvent.reservation_id
+                    == binding.reservation_id,
+                    AdaptiveRiskReservationEvent.event_sha256 == started_sha,
+                    AdaptiveRiskReservationEvent.event_type
+                    == "alpaca_exit_owner_transport_started",
+                )
+            )
+            if started_row is None:
+                raise AdaptiveReservationStateConflict(
+                    "exit-owner transport-started receipt is missing"
+                )
+            started_payload = started_row.payload_json
+            stored_started_details = (
+                started_payload.get("details")
+                if isinstance(started_payload, Mapping)
+                else None
+            )
+            if not isinstance(stored_started_details, Mapping):
+                raise AdaptiveReservationStateConflict(
+                    "exit-owner transport-started payload is malformed"
+                )
+            started_effective = _utc(
+                started_row.effective_at,
+                "exit_owner.started_effective_at",
+            )
+            started_available = _parse_utc(
+                stored_started_details.get("available_at"),
+                "exit_owner.started_available_at",
+            )
+            if effective < started_effective or available < started_available:
+                raise AdaptiveReservationStateConflict(
+                    "exit-owner outcome precedes its transport-started receipt"
+                )
+            started_details = binding.event_details(
+                available_at=started_available
+            )
+            if reservation.opportunity_claim_id is None:
+                started_details["opportunity_status"] = "not_applicable"
+            expected_started_broker_event_id = (
+                self._exit_owner_event_broker_id(
+                    reservation_id=binding.reservation_id,
+                    event_type="alpaca_exit_owner_transport_started",
+                    effective_at=started_effective,
+                    details=started_details,
+                )
+            )
+            self._verify_exit_owner_event_row(
+                started_row,
+                reservation_id=binding.reservation_id,
+                event_type="alpaca_exit_owner_transport_started",
+                broker_event_id=expected_started_broker_event_id,
+                effective_at=started_effective,
+                expected_details=started_details,
+            )
+            details = self._exit_owner_details(
+                reservation,
+                binding,
+                available_at=available,
+            )
+            details.update(
+                {
+                    "transport_started_event_sha256": started_sha,
+                    "observer_claim_token": observer_token,
+                    "observer_session_id": observer_values[
+                        "observer_session_id"
+                    ],
+                    "observer_generation": observer_values[
+                        "observer_generation"
+                    ],
+                    "observer_runtime_generation": observer_runtime,
+                    "observer_connection_generation": observer_connection,
+                }
+            )
+            if normalized_type in _ALPACA_EXIT_OWNER_OID_EVENT_TYPES:
+                details.update(
+                    {
+                        "provider_order_id": provider_oid,
+                        "provider_client_order_id": (
+                            binding.exit_client_order_id
+                        ),
+                        "provider_status": provider_state,
+                        "provider_cumulative_quantity": provider_cumulative,
+                    }
+                )
+            broker_event_id = self._exit_owner_event_broker_id(
+                reservation_id=binding.reservation_id,
+                event_type=normalized_type,
+                effective_at=effective,
+                details=details,
+            )
+            existing = owned.scalar(
+                select(AdaptiveRiskReservationEvent).where(
+                    AdaptiveRiskReservationEvent.reservation_id
+                    == binding.reservation_id,
+                    AdaptiveRiskReservationEvent.broker_event_id
+                    == broker_event_id,
+                )
+            )
+            if existing is not None:
+                return self._verify_exit_owner_event_row(
+                    existing,
+                    reservation_id=binding.reservation_id,
+                    event_type=normalized_type,
+                    broker_event_id=broker_event_id,
+                    effective_at=effective,
+                    expected_details=details,
+                )
+            event_sha = self._append_reservation_event(
+                owned,
+                reservation,
+                event_type=normalized_type,
+                effective_at=effective,
+                details=details,
+                broker_event_id=broker_event_id,
+                flush_event_before_head=True,
+            )
+            reservation.version = int(reservation.version) + 1
+            reservation.updated_at = max(
+                _utc(reservation.updated_at, "reservation.updated_at"),
+                effective,
+            )
+            return event_sha
+
+    def load_exit_owner_receipt(
+        self,
+        receipt_sha256: str,
+        *,
+        reservation_id: uuid.UUID,
+        for_projection: bool = False,
+        session: Session | None = None,
+    ) -> AdaptiveExitOwnerReceipt:
+        """Load and independently re-hash one submitted/reconciled receipt."""
+
+        receipt_sha = str(receipt_sha256 or "").strip().lower()
+        if not _sha(receipt_sha):
+            raise AdaptiveRiskContractError(
+                "exit-owner receipt_sha256 must be SHA-256"
+            )
+        try:
+            expected_reservation_id = uuid.UUID(str(reservation_id))
+        except (TypeError, ValueError, AttributeError) as exc:
+            raise AdaptiveRiskContractError(
+                "exit-owner reservation_id is invalid"
+            ) from exc
+        with self._transaction(session) as owned:
+            discovered = owned.scalar(
+                select(AdaptiveRiskReservationEvent).where(
+                    AdaptiveRiskReservationEvent.event_sha256 == receipt_sha,
+                    AdaptiveRiskReservationEvent.reservation_id
+                    == expected_reservation_id,
+                )
+            )
+            if discovered is None or discovered.event_type not in (
+                _ALPACA_EXIT_OWNER_OID_EVENT_TYPES
+            ):
+                raise AdaptiveReservationStateConflict(
+                    "OID-bearing exit-owner receipt is missing"
+                )
+            payload = discovered.payload_json
+            details = (
+                payload.get("details")
+                if isinstance(payload, Mapping)
+                else None
+            )
+            if not isinstance(details, Mapping):
+                raise AdaptiveReservationStateConflict(
+                    "exit-owner receipt payload is malformed"
+                )
+            request_json = details.get("request_canonical_json")
+            if not isinstance(request_json, str):
+                raise AdaptiveReservationStateConflict(
+                    "exit-owner request canonical JSON is missing"
+                )
+            try:
+                order_request = json.loads(request_json)
+            except (TypeError, ValueError) as exc:
+                raise AdaptiveReservationStateConflict(
+                    "exit-owner request canonical JSON is invalid"
+                ) from exc
+            if (
+                not isinstance(order_request, Mapping)
+                or _canonical_json(order_request).decode("utf-8")
+                != request_json
+                or hashlib.sha256(request_json.encode("utf-8")).hexdigest()
+                != details.get("request_sha256")
+            ):
+                raise AdaptiveReservationStateConflict(
+                    "exit-owner request canonical hash changed"
+                )
+            try:
+                binding = AdaptiveExitOwnerTransportBinding(
+                    reservation_id=expected_reservation_id,
+                    expected_account_id=details.get("expected_account_id"),
+                    account_identity_sha256=details.get(
+                        "account_identity_sha256"
+                    ),
+                    decision_packet_sha256=details.get(
+                        "decision_packet_sha256"
+                    ),
+                    symbol=details.get("symbol"),
+                    entry_client_order_id=details.get(
+                        "entry_client_order_id"
+                    ),
+                    exit_client_order_id=details.get("exit_client_order_id"),
+                    order_request=order_request,
+                    transport_claim_token=details.get(
+                        "transport_claim_token"
+                    ),
+                    transport_owner_session_id=details.get(
+                        "transport_owner_session_id"
+                    ),
+                    transport_owner_generation=details.get(
+                        "transport_owner_generation"
+                    ),
+                    transport_owner_kind=details.get(
+                        "transport_owner_kind"
+                    ),
+                    transport_lease_id=details.get("transport_lease_id"),
+                    transport_runtime_generation=details.get(
+                        "transport_runtime_generation"
+                    ),
+                    transport_connection_generation=details.get(
+                        "transport_connection_generation"
+                    ),
+                    account_scope=details.get("account_scope"),
+                    broker_environment=details.get("broker_environment"),
+                    execution_family=details.get("execution_family"),
+                )
+            except AdaptiveRiskContractError as exc:
+                raise AdaptiveReservationStateConflict(
+                    "exit-owner receipt binding is invalid"
+                ) from exc
+            if for_projection:
+                reservation = self._lock_post_settlement_projection_reservation(
+                    owned,
+                    binding.reservation_id,
+                )
+                packet = owned.get(
+                    AdaptiveRiskDecisionPacket,
+                    reservation.decision_packet_sha256,
+                )
+                if packet is None or not (
+                    reservation.account_scope == binding.account_scope
+                    and reservation.symbol.upper() == binding.symbol
+                    and reservation.decision_packet_sha256
+                    == binding.decision_packet_sha256
+                    and packet.account_scope == binding.account_scope
+                    and packet.symbol.upper() == binding.symbol
+                    and packet.client_order_id == binding.entry_client_order_id
+                    and packet.account_identity_sha256
+                    == binding.account_identity_sha256
+                    and packet.execution_family == binding.execution_family
+                    and packet.broker_environment == binding.broker_environment
+                ):
+                    raise AdaptiveReservationStateConflict(
+                        "exit-owner binding differs from projection authority"
+                    )
+            else:
+                reservation = self._lock_exit_owner_reservation(owned, binding)
+            receipt_row = owned.scalar(
+                select(AdaptiveRiskReservationEvent).where(
+                    AdaptiveRiskReservationEvent.event_sha256 == receipt_sha,
+                    AdaptiveRiskReservationEvent.reservation_id
+                    == expected_reservation_id,
+                )
+            )
+            if receipt_row is None:
+                raise AdaptiveReservationStateConflict(
+                    "exit-owner receipt disappeared after authority lock"
+                )
+            effective = _utc(
+                receipt_row.effective_at,
+                "exit_owner.receipt_effective_at",
+            )
+            available = _parse_utc(
+                details.get("available_at"),
+                "exit_owner.receipt_available_at",
+            )
+            started_sha = str(
+                details.get("transport_started_event_sha256") or ""
+            ).strip().lower()
+            if not _sha(started_sha):
+                raise AdaptiveReservationStateConflict(
+                    "exit-owner receipt lacks a started ancestor"
+                )
+            started_row = owned.scalar(
+                select(AdaptiveRiskReservationEvent).where(
+                    AdaptiveRiskReservationEvent.event_sha256 == started_sha,
+                    AdaptiveRiskReservationEvent.reservation_id
+                    == expected_reservation_id,
+                    AdaptiveRiskReservationEvent.event_type
+                    == "alpaca_exit_owner_transport_started",
+                )
+            )
+            if started_row is None:
+                raise AdaptiveReservationStateConflict(
+                    "exit-owner started ancestor is missing"
+                )
+            started_payload = started_row.payload_json
+            started_stored_details = (
+                started_payload.get("details")
+                if isinstance(started_payload, Mapping)
+                else None
+            )
+            if not isinstance(started_stored_details, Mapping):
+                raise AdaptiveReservationStateConflict(
+                    "exit-owner started ancestor is malformed"
+                )
+            started_effective = _utc(
+                started_row.effective_at,
+                "exit_owner.started_effective_at",
+            )
+            started_available = _parse_utc(
+                started_stored_details.get("available_at"),
+                "exit_owner.started_available_at",
+            )
+            started_expected_details = binding.event_details(
+                available_at=started_available
+            )
+            if reservation.opportunity_claim_id is None:
+                started_expected_details["opportunity_status"] = (
+                    "not_applicable"
+                )
+            self._verify_exit_owner_event_row(
+                started_row,
+                reservation_id=expected_reservation_id,
+                event_type="alpaca_exit_owner_transport_started",
+                broker_event_id=self._exit_owner_event_broker_id(
+                    reservation_id=expected_reservation_id,
+                    event_type="alpaca_exit_owner_transport_started",
+                    effective_at=started_effective,
+                    details=started_expected_details,
+                ),
+                effective_at=started_effective,
+                expected_details=started_expected_details,
+            )
+            cursor = receipt_row
+            witnessed_started = False
+            remaining = int(receipt_row.sequence) + 1
+            while remaining > 0:
+                if cursor.event_sha256 == started_sha:
+                    witnessed_started = True
+                    break
+                previous_sha = str(cursor.previous_event_sha256 or "")
+                if not _sha(previous_sha):
+                    break
+                prior = owned.scalar(
+                    select(AdaptiveRiskReservationEvent).where(
+                        AdaptiveRiskReservationEvent.event_sha256
+                        == previous_sha,
+                        AdaptiveRiskReservationEvent.reservation_id
+                        == expected_reservation_id,
+                    )
+                )
+                if prior is None or int(prior.sequence) != int(cursor.sequence) - 1:
+                    break
+                cursor = prior
+                remaining -= 1
+            if not witnessed_started:
+                raise AdaptiveReservationStateConflict(
+                    "exit-owner receipt is not descended from its started event"
+                )
+            provider_order_id = _norm(
+                details.get("provider_order_id"),
+                "exit_owner.provider_order_id",
+            )
+            provider_client_order_id = _norm(
+                details.get("provider_client_order_id"),
+                "exit_owner.provider_client_order_id",
+            )
+            provider_status = _norm(
+                details.get("provider_status"),
+                "exit_owner.provider_status",
+                lower=True,
+            )
+            try:
+                cumulative = int(details.get("provider_cumulative_quantity"))
+                observer_session_id = int(details.get("observer_session_id"))
+                observer_generation = int(details.get("observer_generation"))
+            except (TypeError, ValueError) as exc:
+                raise AdaptiveReservationStateConflict(
+                    "exit-owner receipt numeric authority is invalid"
+                ) from exc
+            if (
+                cumulative < 0
+                or cumulative != details.get("provider_cumulative_quantity")
+                or observer_session_id <= 0
+                or observer_generation <= 0
+                or provider_client_order_id != binding.exit_client_order_id
+                or effective < started_effective
+                or available < started_available
+            ):
+                raise AdaptiveReservationStateConflict(
+                    "exit-owner receipt authority is inconsistent"
+                )
+            expected_details = self._exit_owner_details(
+                reservation,
+                binding,
+                available_at=available,
+            )
+            expected_details.update(
+                {
+                    "transport_started_event_sha256": started_sha,
+                    "observer_claim_token": _norm(
+                        details.get("observer_claim_token"),
+                        "exit_owner.observer_claim_token",
+                    ),
+                    "observer_session_id": observer_session_id,
+                    "observer_generation": observer_generation,
+                    "observer_runtime_generation": _norm(
+                        details.get("observer_runtime_generation"),
+                        "exit_owner.observer_runtime_generation",
+                    ),
+                    "observer_connection_generation": _norm(
+                        details.get("observer_connection_generation"),
+                        "exit_owner.observer_connection_generation",
+                    ),
+                    "provider_order_id": provider_order_id,
+                    "provider_client_order_id": provider_client_order_id,
+                    "provider_status": provider_status,
+                    "provider_cumulative_quantity": cumulative,
+                }
+            )
+            broker_event_id = self._exit_owner_event_broker_id(
+                reservation_id=expected_reservation_id,
+                event_type=receipt_row.event_type,
+                effective_at=effective,
+                details=expected_details,
+            )
+            verified_sha = self._verify_exit_owner_event_row(
+                receipt_row,
+                reservation_id=expected_reservation_id,
+                event_type=receipt_row.event_type,
+                broker_event_id=broker_event_id,
+                effective_at=effective,
+                expected_details=expected_details,
+            )
+            return AdaptiveExitOwnerReceipt(
+                receipt_sha256=verified_sha,
+                event_type=receipt_row.event_type,
+                reservation_id=expected_reservation_id,
+                sequence=int(receipt_row.sequence),
+                transport_started_event_sha256=started_sha,
+                binding=binding,
+                provider_order_id=provider_order_id,
+                provider_client_order_id=provider_client_order_id,
+                provider_status=provider_status,
+                provider_cumulative_quantity=cumulative,
+                observer_claim_token=expected_details[
+                    "observer_claim_token"
+                ],
+                observer_session_id=observer_session_id,
+                observer_generation=observer_generation,
+                observer_runtime_generation=expected_details[
+                    "observer_runtime_generation"
+                ],
+                observer_connection_generation=expected_details[
+                    "observer_connection_generation"
+                ],
+                effective_at=effective,
+                available_at=available,
+            )
+
+    def verify_exit_owner_proven_no_transport_receipt(
+        self,
+        receipt_sha256: str,
+        *,
+        binding: AdaptiveExitOwnerTransportBinding,
+        transport_started_event_sha256: str,
+        observer_claim_token: str,
+        observer_session_id: int,
+        observer_generation: int,
+        observer_runtime_generation: str,
+        observer_connection_generation: str,
+        session: Session | None = None,
+    ) -> str:
+        """Re-hash the exact claim-bound proof that no broker POST occurred."""
+
+        receipt_sha = str(receipt_sha256 or "").strip().lower()
+        started_sha = str(transport_started_event_sha256 or "").strip().lower()
+        if type(binding) is not AdaptiveExitOwnerTransportBinding:
+            raise AdaptiveRiskContractError(
+                "exit-owner no-transport binding is missing"
+            )
+        if not _sha(receipt_sha) or not _sha(started_sha):
+            raise AdaptiveRiskContractError(
+                "exit-owner no-transport receipt SHA is invalid"
+            )
+        observer_token = _norm(
+            observer_claim_token,
+            "exit_owner.observer_claim_token",
+        )
+        observer_runtime = _norm(
+            observer_runtime_generation,
+            "exit_owner.observer_runtime_generation",
+        )
+        observer_connection = _norm(
+            observer_connection_generation,
+            "exit_owner.observer_connection_generation",
+        )
+        try:
+            observer_session = int(observer_session_id)
+            observer_owner_generation = int(observer_generation)
+        except (TypeError, ValueError) as exc:
+            raise AdaptiveRiskContractError(
+                "exit-owner no-transport observer is invalid"
+            ) from exc
+        if (
+            isinstance(observer_session_id, bool)
+            or isinstance(observer_generation, bool)
+            or observer_session <= 0
+            or observer_owner_generation <= 0
+            or observer_session != observer_session_id
+            or observer_owner_generation != observer_generation
+        ):
+            raise AdaptiveRiskContractError(
+                "exit-owner no-transport observer is invalid"
+            )
+        with self._transaction(session) as owned:
+            reservation = self._lock_exit_owner_reservation(owned, binding)
+            receipt_row = owned.scalar(
+                select(AdaptiveRiskReservationEvent).where(
+                    AdaptiveRiskReservationEvent.event_sha256 == receipt_sha,
+                    AdaptiveRiskReservationEvent.reservation_id
+                    == binding.reservation_id,
+                    AdaptiveRiskReservationEvent.event_type
+                    == "alpaca_exit_owner_proven_no_transport",
+                )
+            )
+            started_row = owned.scalar(
+                select(AdaptiveRiskReservationEvent).where(
+                    AdaptiveRiskReservationEvent.event_sha256 == started_sha,
+                    AdaptiveRiskReservationEvent.reservation_id
+                    == binding.reservation_id,
+                    AdaptiveRiskReservationEvent.event_type
+                    == "alpaca_exit_owner_transport_started",
+                )
+            )
+            if receipt_row is None or started_row is None:
+                raise AdaptiveReservationStateConflict(
+                    "exit-owner no-transport receipt ancestry is missing"
+                )
+            started_payload = started_row.payload_json
+            started_details = (
+                started_payload.get("details")
+                if isinstance(started_payload, Mapping)
+                else None
+            )
+            receipt_payload = receipt_row.payload_json
+            receipt_details = (
+                receipt_payload.get("details")
+                if isinstance(receipt_payload, Mapping)
+                else None
+            )
+            if not isinstance(started_details, Mapping) or not isinstance(
+                receipt_details, Mapping
+            ):
+                raise AdaptiveReservationStateConflict(
+                    "exit-owner no-transport receipt payload is malformed"
+                )
+            started_effective = _utc(
+                started_row.effective_at,
+                "exit_owner.started_effective_at",
+            )
+            started_available = _parse_utc(
+                started_details.get("available_at"),
+                "exit_owner.started_available_at",
+            )
+            expected_started_details = binding.event_details(
+                available_at=started_available
+            )
+            if reservation.opportunity_claim_id is None:
+                expected_started_details["opportunity_status"] = (
+                    "not_applicable"
+                )
+            verified_started_sha = self._verify_exit_owner_event_row(
+                started_row,
+                reservation_id=binding.reservation_id,
+                event_type="alpaca_exit_owner_transport_started",
+                broker_event_id=self._exit_owner_event_broker_id(
+                    reservation_id=binding.reservation_id,
+                    event_type="alpaca_exit_owner_transport_started",
+                    effective_at=started_effective,
+                    details=expected_started_details,
+                ),
+                effective_at=started_effective,
+                expected_details=expected_started_details,
+            )
+            effective = _utc(
+                receipt_row.effective_at,
+                "exit_owner.receipt_effective_at",
+            )
+            available = _parse_utc(
+                receipt_details.get("available_at"),
+                "exit_owner.receipt_available_at",
+            )
+            expected_details = self._exit_owner_details(
+                reservation,
+                binding,
+                available_at=available,
+            )
+            expected_details.update(
+                {
+                    "transport_started_event_sha256": verified_started_sha,
+                    "observer_claim_token": observer_token,
+                    "observer_session_id": observer_session,
+                    "observer_generation": observer_owner_generation,
+                    "observer_runtime_generation": observer_runtime,
+                    "observer_connection_generation": observer_connection,
+                }
+            )
+            if not (
+                effective >= started_effective
+                and available >= started_available
+                and receipt_row.previous_event_sha256 == verified_started_sha
+                and int(receipt_row.sequence) == int(started_row.sequence) + 1
+                and reservation.last_event_sha256 == receipt_sha
+                and int(reservation.event_sequence) == int(receipt_row.sequence)
+            ):
+                raise AdaptiveReservationStateConflict(
+                    "exit-owner no-transport receipt lineage changed"
+                )
+            return self._verify_exit_owner_event_row(
+                receipt_row,
+                reservation_id=binding.reservation_id,
+                event_type="alpaca_exit_owner_proven_no_transport",
+                broker_event_id=self._exit_owner_event_broker_id(
+                    reservation_id=binding.reservation_id,
+                    event_type="alpaca_exit_owner_proven_no_transport",
+                    effective_at=effective,
+                    details=expected_details,
+                ),
+                effective_at=effective,
+                expected_details=expected_details,
+            )
+
+    def load_latest_exit_owner_receipt_for_order(
+        self,
+        *,
+        reservation_id: uuid.UUID,
+        provider_order_id: str,
+        provider_client_order_id: str,
+        expected_account_id: str,
+        expected_observer_claim_token: str,
+        expected_observer_session_id: int,
+        expected_observer_generation: int,
+        expected_observer_runtime_generation: str,
+        expected_observer_connection_generation: str,
+        expected_cumulative_quantity: int,
+        session: Session | None = None,
+    ) -> AdaptiveExitOwnerReceipt:
+        """Resolve one order only from its verified immutable owner lineage."""
+
+        try:
+            expected_reservation_id = uuid.UUID(str(reservation_id))
+        except (TypeError, ValueError, AttributeError) as exc:
+            raise AdaptiveRiskContractError(
+                "exit-owner reservation_id is invalid"
+            ) from exc
+        oid = _norm(provider_order_id, "exit_owner.provider_order_id")
+        cid = _norm(
+            provider_client_order_id,
+            "exit_owner.provider_client_order_id",
+        )
+        account_id = _norm(
+            expected_account_id,
+            "exit_owner.expected_account_id",
+        )
+        observer_claim = _norm(
+            expected_observer_claim_token,
+            "exit_owner.expected_observer_claim_token",
+        )
+        observer_runtime = _norm(
+            expected_observer_runtime_generation,
+            "exit_owner.expected_observer_runtime_generation",
+        )
+        observer_connection = _norm(
+            expected_observer_connection_generation,
+            "exit_owner.expected_observer_connection_generation",
+        )
+        observer_values: dict[str, int] = {}
+        for field_name, value in (
+            ("session_id", expected_observer_session_id),
+            ("generation", expected_observer_generation),
+            ("cumulative_quantity", expected_cumulative_quantity),
+        ):
+            if isinstance(value, bool):
+                raise AdaptiveRiskContractError(
+                    f"exit-owner expected observer {field_name} is invalid"
+                )
+            try:
+                normalized = int(value)
+            except (TypeError, ValueError) as exc:
+                raise AdaptiveRiskContractError(
+                    f"exit-owner expected observer {field_name} is invalid"
+                ) from exc
+            if normalized != value or (
+                field_name != "cumulative_quantity" and normalized <= 0
+            ) or (field_name == "cumulative_quantity" and normalized < 0):
+                raise AdaptiveRiskContractError(
+                    f"exit-owner expected observer {field_name} is invalid"
+                )
+            observer_values[field_name] = normalized
+
+        with self._transaction(session) as owned:
+            rows = list(
+                owned.scalars(
+                    select(AdaptiveRiskReservationEvent)
+                    .where(
+                        AdaptiveRiskReservationEvent.reservation_id
+                        == expected_reservation_id,
+                        AdaptiveRiskReservationEvent.event_type.in_(
+                            _ALPACA_EXIT_OWNER_OID_EVENT_TYPES
+                        ),
+                    )
+                    .order_by(AdaptiveRiskReservationEvent.sequence)
+                )
+            )
+            receipts: list[AdaptiveExitOwnerReceipt] = []
+            for row in rows:
+                receipt = self.load_exit_owner_receipt(
+                    row.event_sha256,
+                    reservation_id=expected_reservation_id,
+                    session=owned,
+                )
+                if (
+                    receipt.provider_client_order_id == cid
+                    and receipt.provider_order_id != oid
+                ) or (
+                    receipt.provider_order_id == oid
+                    and receipt.provider_client_order_id != cid
+                ):
+                    raise AdaptiveReservationStateConflict(
+                        "exit-owner OID/CID lineage is ambiguous"
+                    )
+                if (
+                    receipt.provider_order_id == oid
+                    and receipt.provider_client_order_id == cid
+                ):
+                    receipts.append(receipt)
+            if not receipts:
+                raise AdaptiveReservationStateConflict(
+                    "exact exit-owner order receipt is missing"
+                )
+            first = receipts[0]
+            prior_sequence = -1
+            prior_cumulative = -1
+            for receipt in receipts:
+                if not (
+                    receipt.binding == first.binding
+                    and receipt.transport_started_event_sha256
+                    == first.transport_started_event_sha256
+                    and receipt.binding.expected_account_id == account_id
+                    and receipt.sequence > prior_sequence
+                    and receipt.provider_cumulative_quantity
+                    >= prior_cumulative
+                ):
+                    raise AdaptiveReservationStateConflict(
+                        "exit-owner order lineage changed or regressed"
+                    )
+                prior_sequence = receipt.sequence
+                prior_cumulative = receipt.provider_cumulative_quantity
+            latest = receipts[-1]
+            if not (
+                max(
+                    receipt.provider_cumulative_quantity
+                    for receipt in receipts
+                )
+                == observer_values["cumulative_quantity"]
+                == latest.provider_cumulative_quantity
+                and latest.observer_claim_token == observer_claim
+                and latest.observer_session_id
+                == observer_values["session_id"]
+                and latest.observer_generation
+                == observer_values["generation"]
+                and latest.observer_runtime_generation == observer_runtime
+                and latest.observer_connection_generation
+                == observer_connection
+            ):
+                raise AdaptiveReservationStateConflict(
+                    "latest exit-owner observer authority changed"
+                )
+            return latest
 
     @staticmethod
     def _append_opportunity_event(
@@ -5047,6 +6430,12 @@ class AdaptiveRiskReservationStore:
                 reservation.cumulative_filled_quantity_shares
             ),
             open_quantity_shares=int(reservation.open_quantity_shares),
+            post_settlement_net_position_quantity_shares=(
+                int(reservation.post_settlement_net_position_quantity_shares)
+                if reservation.post_settlement_net_position_quantity_shares
+                is not None
+                else None
+            ),
             pending_structural_risk_usd=Decimal(
                 reservation.pending_structural_risk_usd
             ),
@@ -6750,6 +8139,10 @@ class AdaptiveRiskReservationStore:
                 "contradiction_sha256 must be SHA-256"
             )
         with self._transaction(session) as session:
+            reservation = self._lock_post_settlement_projection_reservation(
+                session,
+                reservation_id,
+            )
             row = session.scalar(
                 select(AlpacaPaperPostSettlementFillContradiction)
                 .where(
@@ -6772,52 +8165,330 @@ class AdaptiveRiskReservationStore:
                 raise AdaptiveReservationStateConflict(
                     "post-settlement fill projection requires a terminal row"
                 )
-            cumulative_decimal = _exact_nonnegative_decimal(
-                row.broker_observed_cumulative_quantity,
-                "post_settlement_fill.broker_observed_cumulative_quantity",
+
+            def integral(value: Any, field_name: str) -> int:
+                try:
+                    decimal_value = Decimal(value)
+                except (InvalidOperation, TypeError, ValueError) as exc:
+                    raise AdaptiveReservationStateConflict(
+                        f"{field_name} is not an exact integer"
+                    ) from exc
+                if (
+                    not decimal_value.is_finite()
+                    or decimal_value < 0
+                    or decimal_value != decimal_value.to_integral_value()
+                ):
+                    raise AdaptiveReservationStateConflict(
+                        f"{field_name} is not an exact nonnegative integer"
+                    )
+                return int(decimal_value)
+
+            schema_version = str(row.contradiction_schema_version)
+            projected_open = integral(
+                row.projected_open_quantity_shares,
+                "post_settlement_fill.projected_open_quantity_shares",
             )
-            if cumulative_decimal != cumulative_decimal.to_integral_value():
-                raise AdaptiveReservationStateConflict(
-                    "post-settlement fill cumulative quantity is fractional"
+            if schema_version == (
+                LEGACY_POST_SETTLEMENT_FILL_CONTRADICTION_SCHEMA_VERSION
+            ):
+                expected_cumulative = integral(
+                    row.broker_observed_cumulative_quantity,
+                    "post_settlement_fill.broker_observed_cumulative_quantity",
                 )
-            reservation = self._reservation_for_transition(
+                expected_signed_net: int | None = None
+            elif schema_version == POST_SETTLEMENT_FILL_CONTRADICTION_SCHEMA_VERSION:
+                prior_cumulative = integral(
+                    row.projection_prior_cumulative_quantity,
+                    "post_settlement_fill.projection_prior_cumulative_quantity",
+                )
+                positive_delta = integral(
+                    row.projection_positive_fill_delta,
+                    "post_settlement_fill.projection_positive_fill_delta",
+                )
+                expected_cumulative = prior_cumulative + (
+                    positive_delta if row.side == "buy" else 0
+                )
+                try:
+                    expected_signed_net = int(
+                        row.projected_net_position_quantity_shares
+                    )
+                except (TypeError, ValueError) as exc:
+                    raise AdaptiveReservationStateConflict(
+                        "post-settlement signed net is missing"
+                    ) from exc
+                if projected_open != abs(expected_signed_net):
+                    raise AdaptiveReservationStateConflict(
+                        "post-settlement signed/open projections disagree"
+                    )
+            else:
+                raise AdaptiveReservationStateConflict(
+                    "post-settlement contradiction schema is unsupported"
+                )
+
+            expected_open_risk = Decimal(row.projected_open_structural_risk_usd)
+            expected_open_gross = Decimal(row.projected_open_gross_notional_usd)
+            expected_open_bp = Decimal(
+                row.projected_open_buying_power_impact_usd
+            )
+            observed_at = _utc(
+                row.provider_transaction_at,
+                "post_settlement_fill.provider_transaction_at",
+            )
+            available_at = _utc(
+                row.provider_available_at,
+                "post_settlement_fill.provider_available_at",
+            )
+            event_at = _utc(
+                row.query_available_at,
+                "post_settlement_fill.query_available_at",
+            )
+            if event_at < available_at:
+                raise AdaptiveReservationStateConflict(
+                    "post-settlement query authority precedes the fill"
+                )
+            event_type = "post_settlement_fill_quarantine_projected"
+            broker_event_id = f"alpaca-post-settlement-fill:{source_sha}"
+            details = {
+                "contradiction_schema_version": schema_version,
+                "contradiction_sha256": source_sha,
+                "batch_content_sha256": row.batch_content_sha256,
+                "side": row.side,
+                "order_role": row.order_role,
+                "provider_order_id": row.provider_order_id,
+                "provider_client_order_id": row.provider_client_order_id,
+                "exit_owner_receipt_sha256": row.exit_owner_receipt_sha256,
+                "source_state": row.source_state,
+                "result_state": "exposure_quarantined",
+                "projected_cumulative_filled_quantity_shares": (
+                    expected_cumulative
+                ),
+                "projected_net_position_quantity_shares": expected_signed_net,
+                "projected_open_quantity_shares": projected_open,
+                "projected_open_structural_risk_usd": expected_open_risk,
+                "projected_open_gross_notional_usd": expected_open_gross,
+                "projected_open_buying_power_impact_usd": expected_open_bp,
+            }
+            persisted_expected_details = dict(details)
+            if reservation.opportunity_claim_id is None:
+                persisted_expected_details["opportunity_status"] = (
+                    "not_applicable"
+                )
+            if schema_version == (
+                LEGACY_POST_SETTLEMENT_FILL_CONTRADICTION_SCHEMA_VERSION
+            ):
+                planned_quantity = int(reservation.planned_quantity_shares)
+                if planned_quantity <= 0:
+                    raise AdaptiveReservationStateConflict(
+                        "legacy post-settlement planned quantity is invalid"
+                    )
+                pending_quantity = max(
+                    0,
+                    planned_quantity - expected_cumulative,
+                )
+
+                def legacy_pending(planned_value: Any) -> Decimal:
+                    return (
+                        Decimal(planned_value)
+                        / Decimal(planned_quantity)
+                        * Decimal(pending_quantity)
+                    ).quantize(_MONEY_QUANTUM, rounding=ROUND_HALF_EVEN)
+
+                expected_pending_risk = legacy_pending(
+                    reservation.planned_structural_risk_usd
+                )
+                expected_pending_gross = legacy_pending(
+                    reservation.planned_gross_notional_usd
+                )
+                expected_pending_bp = legacy_pending(
+                    reservation.planned_buying_power_impact_usd
+                )
+            else:
+                expected_pending_risk = Decimal("0")
+                expected_pending_gross = Decimal("0")
+                expected_pending_bp = Decimal("0")
+            existing_event = self._existing_broker_event(
                 session,
                 reservation_id,
+                broker_event_id,
             )
-            cumulative = int(cumulative_decimal)
-            evidence = DurableOrderLifecycleEvidence(
-                event_kind="cumulative_fill",
-                durability_kind=(
-                    POST_SETTLEMENT_FILL_CONTRADICTION_DURABILITY_KIND
-                ),
-                provider_event_id=(
-                    f"alpaca-post-settlement-fill:{row.contradiction_sha256}"
-                ),
-                broker_source="alpaca",
-                connection_generation=row.broker_connection_generation,
-                account_scope=row.account_scope,
-                execution_family=row.execution_family,
-                broker_environment=row.broker_environment,
-                account_identity_sha256=row.account_identity_sha256,
-                client_order_id=row.expected_client_order_id,
-                broker_order_id=row.broker_order_id,
-                observed_at=row.provider_transaction_at,
-                available_at=row.provider_available_at,
-                event_content_sha256=row.contradiction_sha256,
-                cumulative_filled_quantity=cumulative,
-                source_record_table=_ALPACA_POST_SETTLEMENT_FILL_TABLE,
-                source_record_id=row.contradiction_sha256,
-                order_status=(
-                    "filled"
-                    if cumulative >= int(reservation.planned_quantity_shares)
-                    else "partially_filled"
-                ),
+            exact_projection = bool(
+                reservation.state == "exposure_quarantined"
+                and int(reservation.cumulative_filled_quantity_shares)
+                == expected_cumulative
+                and reservation.post_settlement_net_position_quantity_shares
+                == expected_signed_net
+                and int(reservation.open_quantity_shares) == projected_open
+                and Decimal(reservation.pending_structural_risk_usd)
+                == expected_pending_risk
+                and Decimal(reservation.pending_gross_notional_usd)
+                == expected_pending_gross
+                and Decimal(reservation.pending_buying_power_impact_usd)
+                == expected_pending_bp
+                and Decimal(reservation.open_structural_risk_usd)
+                == expected_open_risk
+                and Decimal(reservation.open_gross_notional_usd)
+                == expected_open_gross
+                and Decimal(reservation.open_buying_power_impact_usd)
+                == expected_open_bp
+                and reservation.last_source_event_content_sha256 == source_sha
+                and _utc(
+                    reservation.last_broker_observed_at,
+                    "reservation.last_broker_observed_at",
+                )
+                == observed_at
+                and _utc(
+                    reservation.last_broker_available_at,
+                    "reservation.last_broker_available_at",
+                )
+                == available_at
             )
-            return self.apply_cumulative_fill(
-                reservation_id,
-                evidence=evidence,
-                session=session,
+            if existing_event is not None or exact_projection:
+                payload = (
+                    existing_event.payload_json
+                    if existing_event is not None
+                    else None
+                )
+                persisted_details = (
+                    payload.get("details")
+                    if isinstance(payload, Mapping)
+                    else None
+                )
+                persisted_lifecycle = (
+                    persisted_details.get("lifecycle_evidence")
+                    if isinstance(persisted_details, Mapping)
+                    else None
+                )
+                legacy_v1_replay = bool(
+                    schema_version
+                    == LEGACY_POST_SETTLEMENT_FILL_CONTRADICTION_SCHEMA_VERSION
+                    and exact_projection
+                    and existing_event is not None
+                    and existing_event.event_type
+                    in {
+                        "late_cumulative_fill_quarantined",
+                        "quarantined_cumulative_fill_advanced",
+                    }
+                    and isinstance(payload, Mapping)
+                    and _sha256_json(payload) == existing_event.event_sha256
+                    and existing_event.broker_event_id == broker_event_id
+                    and isinstance(persisted_lifecycle, Mapping)
+                    and persisted_lifecycle.get("event_kind")
+                    == "cumulative_fill"
+                    and persisted_lifecycle.get("durability_kind")
+                    == POST_SETTLEMENT_FILL_CONTRADICTION_DURABILITY_KIND
+                    and persisted_lifecycle.get("provider_event_id")
+                    == broker_event_id
+                    and persisted_lifecycle.get("event_content_sha256")
+                    == source_sha
+                    and persisted_lifecycle.get("source_record_table")
+                    == _ALPACA_POST_SETTLEMENT_FILL_TABLE
+                    and persisted_lifecycle.get("source_record_id") == source_sha
+                    and str(
+                        persisted_lifecycle.get("cumulative_filled_quantity")
+                    ).strip().isdigit()
+                    and int(
+                        persisted_lifecycle.get("cumulative_filled_quantity")
+                    )
+                    == expected_cumulative
+                )
+                if legacy_v1_replay:
+                    opportunity = self._opportunity_for_transition(
+                        session,
+                        reservation,
+                    )
+                    return self._state_snapshot(reservation, opportunity)
+                if not (
+                    exact_projection
+                    and existing_event is not None
+                    and isinstance(payload, Mapping)
+                    and _sha256_json(payload) == existing_event.event_sha256
+                    and existing_event.event_type == event_type
+                    and _utc(existing_event.effective_at, "event.effective_at")
+                    == event_at
+                    and payload.get("details")
+                    == _json_safe(persisted_expected_details)
+                ):
+                    raise AdaptiveReservationIdempotencyConflict(
+                        "post-settlement projection/event identity changed"
+                    )
+                opportunity = self._opportunity_for_transition(
+                    session,
+                    reservation,
+                )
+                return self._state_snapshot(reservation, opportunity)
+
+            # Owner reconciliation and a retained fill writer share the same
+            # account/reservation lock order but can observe independent event
+            # clocks.  A later DB lock winner may therefore carry an earlier
+            # provider event without being stale.  The exact source-state,
+            # cumulative base, availability watermark and immutable event
+            # identity below remain the authority; never move the mutable
+            # processing watermark backward merely because event time differs.
+            prior_updated_at = (
+                _utc(reservation.updated_at, "reservation.updated_at")
+                if reservation.updated_at is not None
+                else None
             )
+
+            if reservation.state != row.source_state:
+                raise AdaptiveReservationStateConflict(
+                    "post-settlement source state changed before projection"
+                )
+            if reservation.last_broker_available_at is not None and available_at < _utc(
+                reservation.last_broker_available_at,
+                "reservation.last_broker_available_at",
+            ):
+                raise AdaptiveReservationStateConflict(
+                    "post-settlement broker availability regressed"
+                )
+            if schema_version == POST_SETTLEMENT_FILL_CONTRADICTION_SCHEMA_VERSION:
+                prior_cumulative = integral(
+                    row.projection_prior_cumulative_quantity,
+                    "post_settlement_fill.projection_prior_cumulative_quantity",
+                )
+                if prior_cumulative != int(
+                    reservation.cumulative_filled_quantity_shares
+                ):
+                    raise AdaptiveReservationStateConflict(
+                        "post-settlement cumulative projection base changed"
+                    )
+
+            source_state = str(reservation.state)
+            reservation.state = "exposure_quarantined"
+            reservation.cumulative_filled_quantity_shares = expected_cumulative
+            reservation.post_settlement_net_position_quantity_shares = (
+                expected_signed_net
+            )
+            reservation.open_quantity_shares = projected_open
+            reservation.pending_structural_risk_usd = Decimal("0")
+            reservation.pending_gross_notional_usd = Decimal("0")
+            reservation.pending_buying_power_impact_usd = Decimal("0")
+            reservation.open_structural_risk_usd = expected_open_risk
+            reservation.open_gross_notional_usd = expected_open_gross
+            reservation.open_buying_power_impact_usd = expected_open_bp
+            reservation.last_broker_observed_at = observed_at
+            reservation.last_broker_available_at = available_at
+            reservation.last_source_event_content_sha256 = source_sha
+            if source_state != "exposure_quarantined":
+                reservation.lifecycle_contradiction_source_state = source_state
+                reservation.lifecycle_contradiction_at = available_at
+                reservation.lifecycle_contradiction_evidence_sha256 = source_sha
+            reservation.updated_at = (
+                event_at
+                if prior_updated_at is None
+                else max(prior_updated_at, event_at)
+            )
+            reservation.version = int(reservation.version) + 1
+            self._append_reservation_event(
+                session,
+                reservation,
+                event_type=event_type,
+                effective_at=event_at,
+                broker_event_id=broker_event_id,
+                details=details,
+            )
+            opportunity = self._opportunity_for_transition(session, reservation)
+            return self._state_snapshot(reservation, opportunity)
 
     def lock_reservation(
         self,

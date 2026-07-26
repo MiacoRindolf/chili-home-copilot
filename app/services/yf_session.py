@@ -32,11 +32,16 @@ Layered design:
 from __future__ import annotations
 
 import collections
+import copy
+from dataclasses import dataclass
+from datetime import datetime, timezone
+from enum import Enum
 import logging
+import math
 import os
 import threading
 import time
-from typing import Any
+from typing import Any, Mapping
 
 import requests
 import yfinance as yf
@@ -44,6 +49,152 @@ import yfinance as yf
 from .socket_budget import mount_bounded_http_adapters
 
 logger = logging.getLogger(__name__)
+
+
+UTC = timezone.utc
+FUNDAMENTALS_RECEIPT_SCHEMA_VERSION = "chili.yfinance-fundamentals-receipt.v1"
+
+
+class FundamentalsReceiptStatus(str, Enum):
+    """Semantic evidence state of one fundamentals lookup."""
+
+    FRESH_DATA = "FRESH_DATA"
+    AUTHORITATIVE_EMPTY = "AUTHORITATIVE_EMPTY"
+    AMBIGUOUS_EMPTY = "AMBIGUOUS_EMPTY"
+    STALE = "STALE"
+    UNAVAILABLE = "UNAVAILABLE"
+
+
+class FundamentalsProviderState(str, Enum):
+    AVAILABLE = "AVAILABLE"
+    CIRCUIT_OPEN = "CIRCUIT_OPEN"
+    ERROR = "ERROR"
+    UNAVAILABLE = "UNAVAILABLE"
+
+
+class FundamentalsReceiptOrigin(str, Enum):
+    NETWORK = "NETWORK"
+    CACHE = "CACHE"
+    NONE = "NONE"
+
+
+@dataclass(frozen=True, slots=True)
+class FundamentalsReceipt:
+    """Typed, provenance-bearing result for exclusion classification.
+
+    A legacy ``dict | None`` result collapses a provider outage, an open
+    circuit, a stale cache row, and a genuine no-record response into the same
+    value.  This receipt preserves those distinctions so order-capable callers
+    can fail only the affected decision closed.
+    """
+
+    symbol: str
+    status: FundamentalsReceiptStatus
+    provider_state: FundamentalsProviderState
+    origin: FundamentalsReceiptOrigin
+    observed_at: datetime
+    data: Mapping[str, Any] | None = None
+    cache_age_seconds: float | None = None
+    cache_ttl_seconds: float = 0.0
+    reason: str | None = None
+
+    def __post_init__(self) -> None:
+        symbol = str(self.symbol or "").strip().upper()
+        if not symbol or symbol != self.symbol:
+            raise ValueError("fundamentals receipt symbol must be canonical")
+        try:
+            status = (
+                self.status
+                if isinstance(self.status, FundamentalsReceiptStatus)
+                else FundamentalsReceiptStatus(str(self.status))
+            )
+            provider_state = (
+                self.provider_state
+                if isinstance(self.provider_state, FundamentalsProviderState)
+                else FundamentalsProviderState(str(self.provider_state))
+            )
+            origin = (
+                self.origin
+                if isinstance(self.origin, FundamentalsReceiptOrigin)
+                else FundamentalsReceiptOrigin(str(self.origin))
+            )
+        except ValueError as exc:
+            raise ValueError("fundamentals receipt enum is invalid") from exc
+        object.__setattr__(self, "status", status)
+        object.__setattr__(self, "provider_state", provider_state)
+        object.__setattr__(self, "origin", origin)
+        observed = self.observed_at
+        if not isinstance(observed, datetime) or observed.tzinfo is None:
+            raise ValueError("fundamentals receipt clock must be timezone-aware")
+        try:
+            if observed.utcoffset() is None:
+                raise ValueError("fundamentals receipt clock must be timezone-aware")
+        except Exception as exc:
+            raise ValueError("fundamentals receipt clock is invalid") from exc
+        object.__setattr__(self, "observed_at", observed.astimezone(UTC))
+        ttl = float(self.cache_ttl_seconds)
+        if not math.isfinite(ttl) or ttl <= 0.0:
+            raise ValueError("fundamentals receipt TTL must be finite and positive")
+        object.__setattr__(self, "cache_ttl_seconds", ttl)
+        age = self.cache_age_seconds
+        if age is not None:
+            age = float(age)
+            if not math.isfinite(age) or age < 0.0:
+                raise ValueError("fundamentals receipt cache age is invalid")
+            object.__setattr__(self, "cache_age_seconds", age)
+        if origin is FundamentalsReceiptOrigin.CACHE and age is None:
+            raise ValueError("cached fundamentals receipt requires cache age")
+        if origin is not FundamentalsReceiptOrigin.CACHE and age is not None:
+            raise ValueError("non-cache fundamentals receipt cannot claim cache age")
+        payload = None if self.data is None else copy.deepcopy(dict(self.data))
+        if status is FundamentalsReceiptStatus.FRESH_DATA:
+            if not isinstance(payload, dict):
+                raise ValueError("fresh fundamentals receipt requires data")
+            short_name = payload.get("short_name")
+            if not isinstance(short_name, str) or not short_name.strip():
+                raise ValueError("fresh fundamentals receipt requires short_name")
+            if origin is FundamentalsReceiptOrigin.CACHE and age is not None and age > ttl:
+                raise ValueError("fresh fundamentals receipt cannot be stale")
+        elif status is FundamentalsReceiptStatus.STALE:
+            if origin is not FundamentalsReceiptOrigin.CACHE or age is None or age <= ttl:
+                raise ValueError("stale fundamentals receipt requires expired cache data")
+        elif payload is not None:
+            raise ValueError("unavailable fundamentals receipt cannot contain data")
+        object.__setattr__(self, "data", payload)
+        reason = None if self.reason is None else str(self.reason).strip()
+        if status is not FundamentalsReceiptStatus.FRESH_DATA and not reason:
+            raise ValueError("non-data fundamentals receipt requires a reason")
+        object.__setattr__(self, "reason", reason or None)
+
+    @property
+    def classification_usable(self) -> bool:
+        return (
+            self.status is FundamentalsReceiptStatus.FRESH_DATA
+            and self.provider_state is FundamentalsProviderState.AVAILABLE
+            and self.data is not None
+            and (
+                self.origin is not FundamentalsReceiptOrigin.CACHE
+                or (
+                    self.cache_age_seconds is not None
+                    and self.cache_age_seconds <= self.cache_ttl_seconds
+                )
+            )
+        )
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "schema_version": FUNDAMENTALS_RECEIPT_SCHEMA_VERSION,
+            "symbol": self.symbol,
+            "status": self.status.value,
+            "provider_state": self.provider_state.value,
+            "origin": self.origin.value,
+            "observed_at": self.observed_at.isoformat().replace("+00:00", "Z"),
+            "data": None if self.data is None else copy.deepcopy(dict(self.data)),
+            "cache_age_seconds": self.cache_age_seconds,
+            "cache_ttl_seconds": self.cache_ttl_seconds,
+            "reason": self.reason,
+            "classification_usable": self.classification_usable,
+        }
 
 
 def _env_float(name: str, default: float, *, minimum: float | None = None) -> float:
@@ -420,6 +571,9 @@ def _cache_get(key: str) -> Any | None:
         ts, val = entry
         if time.time() - ts > _get_ttl(key):
             del _cache[key]
+            metadata = globals().get("_fundamentals_cache_metadata")
+            if isinstance(metadata, dict):
+                metadata.pop(key, None)
             return None
         return val
 
@@ -437,6 +591,9 @@ def _cache_set(key: str, val: Any) -> None:
 def _cache_pop(key: str) -> None:
     with _cache_lock:
         _cache.pop(key, None)
+        metadata = globals().get("_fundamentals_cache_metadata")
+        if isinstance(metadata, dict):
+            metadata.pop(key, None)
 
 
 def _get_ttl(key: str) -> float:
@@ -1000,7 +1157,344 @@ def batch_download(
 _FUND_EMPTY = "__no_fundamentals__"
 
 
-def get_fundamentals(symbol: str) -> dict[str, Any] | None:
+@dataclass(frozen=True, slots=True)
+class _FundamentalsCacheMetadata:
+    cache_timestamp: float
+    status: FundamentalsReceiptStatus
+    provider_state: FundamentalsProviderState
+    cache_ttl_seconds: float
+    reason: str | None
+
+
+_fundamentals_cache_metadata: dict[str, _FundamentalsCacheMetadata] = {}
+
+
+def _set_fundamentals_cache(
+    cache_key: str,
+    value: Mapping[str, Any] | str,
+    *,
+    status: FundamentalsReceiptStatus,
+    provider_state: FundamentalsProviderState,
+    cache_ttl_seconds: float,
+    reason: str | None,
+) -> None:
+    """Atomically bind legacy cache bytes to their typed provenance."""
+
+    now_epoch = time.time()
+    with _cache_lock:
+        if len(_cache) > _MAX_CACHE_SIZE:
+            cutoff = now_epoch - 60
+            expired = [key for key, (ts, _) in _cache.items() if ts < cutoff]
+            for key in expired:
+                _cache.pop(key, None)
+                _fundamentals_cache_metadata.pop(key, None)
+        _cache[cache_key] = (now_epoch, copy.deepcopy(value))
+        _fundamentals_cache_metadata[cache_key] = _FundamentalsCacheMetadata(
+            cache_timestamp=now_epoch,
+            status=status,
+            provider_state=provider_state,
+            cache_ttl_seconds=float(cache_ttl_seconds),
+            reason=reason,
+        )
+
+
+def _probe_fundamentals_cache(
+    cache_key: str,
+) -> tuple[float, Any, _FundamentalsCacheMetadata | None] | None:
+    """Return cache age/value/metadata without erasing stale evidence."""
+
+    now_epoch = time.time()
+    with _cache_lock:
+        entry = _cache.get(cache_key)
+        if entry is None:
+            return None
+        cache_timestamp, value = entry
+        metadata = _fundamentals_cache_metadata.get(cache_key)
+        if metadata is not None and metadata.cache_timestamp != cache_timestamp:
+            metadata = None
+        age = max(0.0, now_epoch - cache_timestamp)
+        return age, copy.deepcopy(value), metadata
+
+
+def _fundamentals_result(info: Mapping[str, Any]) -> dict[str, Any]:
+    return {
+        "short_name": info.get("shortName"),
+        "sector": info.get("sector"),
+        "industry": info.get("industry"),
+        "country": info.get("country"),
+        "market_cap": _safe_float(info.get("marketCap")),
+        "market_cap_fmt": _fmt_large(_safe_float(info.get("marketCap"))),
+        "pe_trailing": _safe_float(info.get("trailingPE")),
+        "pe_forward": _safe_float(info.get("forwardPE")),
+        "eps_trailing": _safe_float(info.get("trailingEps")),
+        "eps_forward": _safe_float(info.get("forwardEps")),
+        "price_to_sales": _safe_float(info.get("priceToSalesTrailing12Months")),
+        "price_to_book": _safe_float(info.get("priceToBook")),
+        "ev_to_ebitda": _safe_float(info.get("enterpriseToEbitda")),
+        "peg_ratio": _safe_float(info.get("pegRatio")),
+        "revenue": _safe_float(info.get("totalRevenue")),
+        "revenue_fmt": _fmt_large(_safe_float(info.get("totalRevenue"))),
+        "revenue_growth": _safe_float(info.get("revenueGrowth")),
+        "earnings_growth": _safe_float(info.get("earningsGrowth")),
+        "gross_margins": _safe_float(info.get("grossMargins")),
+        "operating_margins": _safe_float(info.get("operatingMargins")),
+        "profit_margins": _safe_float(info.get("profitMargins")),
+        "return_on_equity": _safe_float(info.get("returnOnEquity")),
+        "free_cash_flow": _safe_float(info.get("freeCashflow")),
+        "free_cash_flow_fmt": _fmt_large(_safe_float(info.get("freeCashflow"))),
+        "total_debt": _safe_float(info.get("totalDebt")),
+        "total_debt_fmt": _fmt_large(_safe_float(info.get("totalDebt"))),
+        "debt_to_equity": _safe_float(info.get("debtToEquity")),
+        "dividend_yield": _safe_float(info.get("dividendYield")),
+    }
+
+
+def _receipt_from_cache(
+    symbol: str,
+    *,
+    age: float,
+    value: Any,
+    metadata: _FundamentalsCacheMetadata | None,
+) -> FundamentalsReceipt:
+    observed_at = datetime.now(UTC)
+    effective_ttl = (
+        metadata.cache_ttl_seconds
+        if metadata is not None
+        else float(_TTL_FUNDAMENTALS)
+    )
+    if age > effective_ttl:
+        return FundamentalsReceipt(
+            symbol=symbol,
+            status=FundamentalsReceiptStatus.STALE,
+            provider_state=(
+                metadata.provider_state
+                if metadata is not None
+                else FundamentalsProviderState.UNAVAILABLE
+            ),
+            origin=FundamentalsReceiptOrigin.CACHE,
+            observed_at=observed_at,
+            data=(value if isinstance(value, Mapping) else None),
+            cache_age_seconds=age,
+            cache_ttl_seconds=effective_ttl,
+            reason="fundamentals_cache_stale",
+        )
+    if (
+        isinstance(value, Mapping)
+        and isinstance(value.get("short_name"), str)
+        and str(value.get("short_name")).strip()
+    ):
+        return FundamentalsReceipt(
+            symbol=symbol,
+            status=FundamentalsReceiptStatus.FRESH_DATA,
+            provider_state=FundamentalsProviderState.AVAILABLE,
+            origin=FundamentalsReceiptOrigin.CACHE,
+            observed_at=observed_at,
+            data=value,
+            cache_age_seconds=age,
+            cache_ttl_seconds=effective_ttl,
+        )
+    if isinstance(value, Mapping):
+        return FundamentalsReceipt(
+            symbol=symbol,
+            status=FundamentalsReceiptStatus.AMBIGUOUS_EMPTY,
+            provider_state=FundamentalsProviderState.UNAVAILABLE,
+            origin=FundamentalsReceiptOrigin.CACHE,
+            observed_at=observed_at,
+            cache_age_seconds=age,
+            cache_ttl_seconds=effective_ttl,
+            reason="cached_fundamentals_name_missing",
+        )
+    if value != _FUND_EMPTY or metadata is None:
+        return FundamentalsReceipt(
+            symbol=symbol,
+            status=FundamentalsReceiptStatus.AMBIGUOUS_EMPTY,
+            provider_state=FundamentalsProviderState.UNAVAILABLE,
+            origin=FundamentalsReceiptOrigin.CACHE,
+            observed_at=observed_at,
+            cache_age_seconds=age,
+            cache_ttl_seconds=effective_ttl,
+            reason="legacy_empty_cache_provenance_unavailable",
+        )
+    return FundamentalsReceipt(
+        symbol=symbol,
+        status=metadata.status,
+        provider_state=metadata.provider_state,
+        origin=FundamentalsReceiptOrigin.CACHE,
+        observed_at=observed_at,
+        cache_age_seconds=age,
+        cache_ttl_seconds=effective_ttl,
+        reason=metadata.reason or "fundamentals_unavailable",
+    )
+
+
+def get_fundamentals_receipt(symbol: str) -> FundamentalsReceipt:
+    """Return typed evidence without collapsing provider failure to empty."""
+
+    normalized = str(symbol or "").strip().upper()
+    if not normalized:
+        return FundamentalsReceipt(
+            symbol="UNKNOWN",
+            status=FundamentalsReceiptStatus.UNAVAILABLE,
+            provider_state=FundamentalsProviderState.UNAVAILABLE,
+            origin=FundamentalsReceiptOrigin.NONE,
+            observed_at=datetime.now(UTC),
+            cache_ttl_seconds=float(_TTL_FUNDAMENTALS),
+            reason="fundamentals_symbol_invalid",
+        )
+    cache_key = f"fund:{normalized}"
+    cached = _probe_fundamentals_cache(cache_key)
+    stale_receipt: FundamentalsReceipt | None = None
+    if cached is not None:
+        age, value, metadata = cached
+        receipt = _receipt_from_cache(
+            normalized,
+            age=age,
+            value=value,
+            metadata=metadata,
+        )
+        if receipt.status is not FundamentalsReceiptStatus.STALE:
+            return receipt
+        stale_receipt = receipt
+
+    if _breaker_should_short_circuit():
+        if stale_receipt is not None:
+            return FundamentalsReceipt(
+                symbol=normalized,
+                status=FundamentalsReceiptStatus.STALE,
+                provider_state=FundamentalsProviderState.CIRCUIT_OPEN,
+                origin=FundamentalsReceiptOrigin.CACHE,
+                observed_at=datetime.now(UTC),
+                data=stale_receipt.data,
+                cache_age_seconds=stale_receipt.cache_age_seconds,
+                cache_ttl_seconds=stale_receipt.cache_ttl_seconds,
+                reason="fundamentals_circuit_open_with_stale_cache",
+            )
+        return FundamentalsReceipt(
+            symbol=normalized,
+            status=FundamentalsReceiptStatus.UNAVAILABLE,
+            provider_state=FundamentalsProviderState.CIRCUIT_OPEN,
+            origin=FundamentalsReceiptOrigin.NONE,
+            observed_at=datetime.now(UTC),
+            cache_ttl_seconds=float(_BREAKER_HALF_OPEN_TTL_S),
+            reason="fundamentals_circuit_open",
+        )
+
+    acquire()
+    try:
+        ticker = yf.Ticker(normalized, session=_SHARED_SESSION)
+        info = ticker.info
+        if not isinstance(info, Mapping) or not info:
+            reason = "fundamentals_provider_empty_response"
+            _set_fundamentals_cache(
+                cache_key,
+                _FUND_EMPTY,
+                status=FundamentalsReceiptStatus.AMBIGUOUS_EMPTY,
+                provider_state=FundamentalsProviderState.UNAVAILABLE,
+                cache_ttl_seconds=float(_TTL_QUOTE_MISS),
+                reason=reason,
+            )
+            _breaker_on_failure()
+            return FundamentalsReceipt(
+                symbol=normalized,
+                status=FundamentalsReceiptStatus.AMBIGUOUS_EMPTY,
+                provider_state=FundamentalsProviderState.UNAVAILABLE,
+                origin=FundamentalsReceiptOrigin.NETWORK,
+                observed_at=datetime.now(UTC),
+                cache_ttl_seconds=float(_TTL_QUOTE_MISS),
+                reason=reason,
+            )
+        if not isinstance(info.get("shortName"), str) or not str(
+            info.get("shortName")
+        ).strip():
+            reason = "fundamentals_name_missing"
+            _set_fundamentals_cache(
+                cache_key,
+                _FUND_EMPTY,
+                status=FundamentalsReceiptStatus.AMBIGUOUS_EMPTY,
+                provider_state=FundamentalsProviderState.AVAILABLE,
+                cache_ttl_seconds=float(_TTL_QUOTE_MISS),
+                reason=reason,
+            )
+            _breaker_on_failure()
+            return FundamentalsReceipt(
+                symbol=normalized,
+                status=FundamentalsReceiptStatus.AMBIGUOUS_EMPTY,
+                provider_state=FundamentalsProviderState.AVAILABLE,
+                origin=FundamentalsReceiptOrigin.NETWORK,
+                observed_at=datetime.now(UTC),
+                cache_ttl_seconds=float(_TTL_QUOTE_MISS),
+                reason=reason,
+            )
+        result = _fundamentals_result(info)
+    except Exception as exc:
+        authoritative_empty = _looks_like_yf_no_data_error(exc)
+        status = (
+            FundamentalsReceiptStatus.AUTHORITATIVE_EMPTY
+            if authoritative_empty
+            else FundamentalsReceiptStatus.UNAVAILABLE
+        )
+        provider_state = (
+            FundamentalsProviderState.AVAILABLE
+            if authoritative_empty
+            else FundamentalsProviderState.ERROR
+        )
+        reason = (
+            "fundamentals_authoritative_no_record"
+            if authoritative_empty
+            else "fundamentals_provider_error"
+        )
+        logger.warning("[yf_session] fundamentals(%s) failed: %s", normalized, exc)
+        _set_fundamentals_cache(
+            cache_key,
+            _FUND_EMPTY,
+            status=status,
+            provider_state=provider_state,
+            cache_ttl_seconds=(
+                float(_TTL_FUNDAMENTALS)
+                if authoritative_empty
+                else float(_TTL_QUOTE_MISS)
+            ),
+            reason=reason,
+        )
+        if authoritative_empty:
+            _breaker_on_success()
+        else:
+            _breaker_on_failure()
+        return FundamentalsReceipt(
+            symbol=normalized,
+            status=status,
+            provider_state=provider_state,
+            origin=FundamentalsReceiptOrigin.NETWORK,
+            observed_at=datetime.now(UTC),
+            cache_ttl_seconds=(
+                float(_TTL_FUNDAMENTALS)
+                if authoritative_empty
+                else float(_TTL_QUOTE_MISS)
+            ),
+            reason=reason,
+        )
+
+    _set_fundamentals_cache(
+        cache_key,
+        result,
+        status=FundamentalsReceiptStatus.FRESH_DATA,
+        provider_state=FundamentalsProviderState.AVAILABLE,
+        cache_ttl_seconds=float(_TTL_FUNDAMENTALS),
+        reason=None,
+    )
+    _breaker_on_success()
+    return FundamentalsReceipt(
+        symbol=normalized,
+        status=FundamentalsReceiptStatus.FRESH_DATA,
+        provider_state=FundamentalsProviderState.AVAILABLE,
+        origin=FundamentalsReceiptOrigin.NETWORK,
+        observed_at=datetime.now(UTC),
+        data=result,
+        cache_ttl_seconds=float(_TTL_FUNDAMENTALS),
+    )
+
+
+def _get_fundamentals_legacy(symbol: str) -> dict[str, Any] | None:
     """Rate-limited + cached wrapper for fundamental data via ``yf.Ticker(symbol).info``.
 
     Returns a normalized dict with valuation, growth, profitability, and financial
@@ -1071,6 +1565,15 @@ def get_fundamentals(symbol: str) -> dict[str, Any] | None:
     _cache_set(cache_key, result)
     _breaker_on_success()
     return result
+
+
+def get_fundamentals(symbol: str) -> dict[str, Any] | None:
+    """Backward-compatible value-only view of the typed receipt API."""
+
+    receipt = get_fundamentals_receipt(symbol)
+    if not receipt.classification_usable or receipt.data is None:
+        return None
+    return copy.deepcopy(dict(receipt.data))
 
 
 def get_ticker_info(symbol: str) -> dict[str, Any] | None:

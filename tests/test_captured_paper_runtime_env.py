@@ -55,6 +55,9 @@ def test_installs_equity_only_candidate_and_excludes_every_live_credential(
         "CHILI_ALPACA_LIVE_API_KEY": "parent-live",
         "APCA_API_KEY_ID": "parent-sdk-live",
         "COINBASE_API_KEY": "parent-cash",
+        "CHILI_KILL_SWITCH_DB_POLL_ENABLED": "false",
+        "CHILI_KILL_SWITCH_DB_POLL_INTERVAL_S": "60",
+        "CHILI_KILL_SWITCH_DB_FAIL_CLOSED": "false",
         "UNRELATED": "preserved",
     }
     receipt = install_captured_paper_runtime_environment(
@@ -88,6 +91,9 @@ def test_installs_equity_only_candidate_and_excludes_every_live_credential(
     assert target["CHILI_MOMENTUM_SHORT_LANE_ENABLED"] == "false"
     assert target["CHILI_ALPACA_QUOTES_VIA_IQFEED"] == "false"
     assert target["CHILI_EQUITY_EXECUTION_RAIL"] == "alpaca"
+    assert target["CHILI_KILL_SWITCH_DB_POLL_ENABLED"] == "true"
+    assert target["CHILI_KILL_SWITCH_DB_POLL_INTERVAL_S"] == "0"
+    assert target["CHILI_KILL_SWITCH_DB_FAIL_CLOSED"] == "true"
     assert target["CHILI_AUTOTRADER_USER_ID"] == "7"
     assert target["UNRELATED"] == "preserved"
     assert "CHILI_ALPACA_LIVE_API_KEY" not in target
@@ -283,6 +289,9 @@ def test_parsed_settings_projection_rechecks_every_execution_boundary(
         "chili_alpaca_expected_account_id": ACCOUNT_ID,
         "chili_alpaca_quotes_via_iqfeed": False,
         "chili_equity_execution_rail": "alpaca",
+        "chili_kill_switch_db_poll_enabled": True,
+        "chili_kill_switch_db_poll_interval_s": 0.0,
+        "chili_kill_switch_db_fail_closed": True,
         "chili_momentum_equity_execution_via_alpaca_paper": True,
         "chili_momentum_crypto_execution_via_alpaca_paper": False,
         "chili_momentum_auto_arm_crypto_only": False,
@@ -366,11 +375,17 @@ def test_parsed_settings_projection_rechecks_every_execution_boundary(
     assert projection["captured_paper_config_isolated"] is True
     assert projection["settings"]["chili_autopilot_price_bus_enabled"] is True
     assert projection["settings"]["chili_autotrader_user_id"] == 7
+    assert projection["settings"]["chili_kill_switch_db_poll_enabled"] is True
+    assert projection["settings"]["chili_kill_switch_db_poll_interval_s"] == 0.0
+    assert projection["settings"]["chili_kill_switch_db_fail_closed"] is True
     assert (
         projection["settings"]["chili_iqfeed_l1_authoritative_bridge_build"]
         == IQFEED_BUILD
     )
     assert projection["captured_paper_operational_policy"] == {
+        "chili_kill_switch_db_fail_closed": True,
+        "chili_kill_switch_db_poll_enabled": True,
+        "chili_kill_switch_db_poll_interval_s": 0.0,
         "chili_momentum_captured_paper_action_claim_lease_seconds": 30,
         "chili_momentum_captured_paper_extended_hours": True,
         "chili_momentum_captured_paper_outbox_max_attempts": 3,
@@ -394,6 +409,27 @@ def test_parsed_settings_projection_rechecks_every_execution_boundary(
 
     values["chili_momentum_auto_arm_equity_only"] = True
     values["chili_equity_execution_rail"] = "alpaca"
+    values["chili_kill_switch_db_poll_enabled"] = False
+    with pytest.raises(CapturedPaperRuntimeEnvError, match="activation posture"):
+        validate_installed_captured_paper_settings(
+            SimpleNamespace(**values), receipt, environ=target
+        )
+
+    values["chili_kill_switch_db_poll_enabled"] = True
+    values["chili_kill_switch_db_poll_interval_s"] = 60.0
+    with pytest.raises(CapturedPaperRuntimeEnvError, match="activation posture"):
+        validate_installed_captured_paper_settings(
+            SimpleNamespace(**values), receipt, environ=target
+        )
+
+    values["chili_kill_switch_db_poll_interval_s"] = 0.0
+    values["chili_kill_switch_db_fail_closed"] = False
+    with pytest.raises(CapturedPaperRuntimeEnvError, match="activation posture"):
+        validate_installed_captured_paper_settings(
+            SimpleNamespace(**values), receipt, environ=target
+        )
+
+    values["chili_kill_switch_db_fail_closed"] = True
     target["IQFEED_NOTIFY_ENABLED"] = "0"
     with pytest.raises(CapturedPaperRuntimeEnvError, match="notify admission is disabled"):
         validate_installed_captured_paper_settings(

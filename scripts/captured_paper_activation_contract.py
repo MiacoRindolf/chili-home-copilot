@@ -59,7 +59,7 @@ _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 _REPARSE_ATTRIBUTE = int(getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400))
 _MAX_MANIFEST_BYTES = 4 * 1024 * 1024
 _MAX_ARTIFACT_BYTES = 64 * 1024 * 1024
-_MAX_MANIFEST_AGE_SECONDS = 15 * 60
+_MAX_MANIFEST_AGE_SECONDS = 20 * 60
 _MAX_FUTURE_SKEW_SECONDS = 5
 _DEPENDENCY_ROLE_PREFIX = "local_dependency:"
 
@@ -138,10 +138,17 @@ _REQUIRED_CODE_ROLES = frozenset(
         "captured_paper_production_provider",
         "captured_paper_restart_inventory",
         "captured_paper_selection",
+        "captured_paper_selection_frontier_model",
+        "captured_paper_selection_producer",
+        "captured_paper_selection_queue",
+        "captured_paper_selection_runtime",
+        "captured_paper_selection_source",
         "captured_paper_service_fence",
         "captured_paper_service_supervisor",
         "captured_paper_transport",
         "captured_paper_transport_worker",
+        "captured_paper_variant_binding",
+        "captured_viability_adapter",
         "entry_gates",
         "execution_family_registry",
         "first_dip_tape_decision",
@@ -156,11 +163,13 @@ _REQUIRED_CODE_ROLES = frozenset(
         "live_replay_capture",
         "live_runner",
         "live_runner_loop",
+        "momentum_viability",
         "replay_capture_contract",
         "replay_capture_runtime",
         "readiness_evidence",
         "runtime_environment",
         "trading_models",
+        "yf_session",
     }
 )
 
@@ -469,17 +478,19 @@ _RECEIPT_MAX_AGE_SECONDS: Mapping[str, int] = MappingProxyType(
         # re-checks the kill switch at its own boot.  The class must cover
         # receipt capture (mid-probe-battery) through the LAST consumer
         # (launcher ValidateOnly / ActivatePaper re-walk the full roster):
-        # measured ~8-10 minutes end-to-end, so 5 minutes still starved the
-        # tail.  10 minutes covers it; unbounded operator waits are meant to
-        # fail closed — receipt staleness IS the fence.
-        "runtime_settings": 10 * 60,
+        # measured ~8-12 minutes from the shared preactivation capture clock
+        # through service startup.  A34 proved that 10 minutes starves both
+        # lifecycle_preflight and runtime_settings, which share observed_at.
+        # Their bounded 20-minute windows match database/capture.  Unbounded
+        # operator waits still fail closed — receipt staleness IS the fence.
+        "runtime_settings": 20 * 60,
         "broker_account": 10 * 60,
-        "database_schema": 10 * 60,
-        "capture_host_smoke": 10 * 60,
+        "database_schema": 20 * 60,
+        "capture_host_smoke": 20 * 60,
         "focused_regressions": 60 * 60,
-        "lifecycle_preflight": 10 * 60,
+        "lifecycle_preflight": 20 * 60,
         "kill_switch": 10 * 60,
-        "no_order_smoke": 10 * 60,
+        "no_order_smoke": 20 * 60,
         "rollback_snapshot": 60 * 60,
     }
 )

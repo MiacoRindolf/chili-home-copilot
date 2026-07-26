@@ -1,9 +1,10 @@
 """Bounded capture-only IQFeed preactivation smoke.
 
 This module deliberately stops at the capture boundary.  It revalidates the
-hash-bound IQFeed bootstrap, constructs the real bounded L1/L2 ingress graph,
-binds the exact candidate bridge modules, runs their supervised provider lanes
-for one bounded observation, and tears everything down before returning.
+hash-bound IQFeed bootstrap and constructs the real bounded ingress graph.  A
+full capture certification binds both L1/L2 provider lanes; the exact-print
+preselection mode binds only L1 so unavailable depth is handled later by the
+decision that needs it.  Every active lane is torn down before returning.
 
 It does not import the captured-PAPER dispatcher, live runner loop, broker
 adapter, order transport, or activation finalizer.  Importing this module is
@@ -15,7 +16,7 @@ from __future__ import annotations
 
 import argparse
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, time as datetime_time, timezone
 import hashlib
 import json
 import math
@@ -27,6 +28,7 @@ import time
 from types import MappingProxyType
 from typing import Any, Callable, Mapping, Protocol, Sequence
 import uuid
+from zoneinfo import ZoneInfo
 
 # Direct ``python scripts/...`` execution otherwise exposes only ``scripts/``.
 # Add this file's fixed repository root; no caller-selected import path is used.
@@ -35,7 +37,11 @@ if _REPO_ROOT not in sys.path:
     sys.path.insert(0, _REPO_ROOT)
 
 UTC = timezone.utc
+_EQUITY_SESSION_TIMEZONE = ZoneInfo("America/New_York")
 CAPTURE_ONLY_SMOKE_SCHEMA_VERSION = "chili.iqfeed-capture-only-smoke.v1"
+L1_EXACT_PRINT_PRESELECTION_SMOKE_SCHEMA_VERSION = (
+    "chili.iqfeed-l1-exact-print-preselection-smoke.v1"
+)
 CAPTURE_ONLY_SMOKE_ERROR_SCHEMA_VERSION = (
     "chili.iqfeed-capture-only-smoke-error.v1"
 )
@@ -68,6 +74,18 @@ def _utc(value: datetime, field: str) -> datetime:
 
 def _iso(value: datetime) -> str:
     return _utc(value, "timestamp").isoformat()
+
+
+def equity_extended_session_is_open(value: datetime) -> bool:
+    """Return whether US-equity premarket/regular/after-hours tape is open."""
+
+    eastern = _utc(value, "equity session clock").astimezone(
+        _EQUITY_SESSION_TIMEZONE
+    )
+    return (
+        eastern.weekday() < 5
+        and datetime_time(4, 0) <= eastern.time() < datetime_time(20, 0)
+    )
 
 
 def _sha(value: Any, field: str) -> str:
@@ -404,6 +422,8 @@ class CaptureOnlySmokeConfiguration:
     capture_health_authority: CaptureOnlyHealthAuthority
     trade_forced_symbols: tuple[str, ...]
     depth_forced_symbols: tuple[str, ...]
+    l1_only_exact_print_preselection: bool = False
+    activation_only_allow_closed_session_without_exact_print: bool = False
     readiness_timeout_seconds: float = 15.0
     observation_timeout_seconds: float = 30.0
     join_timeout_seconds: float = 20.0
@@ -446,11 +466,30 @@ class CaptureOnlySmokeConfiguration:
             "trade_forced_symbols",
             _normalized_symbols(self.trade_forced_symbols, "trade symbols"),
         )
-        object.__setattr__(
-            self,
-            "depth_forced_symbols",
-            _normalized_symbols(self.depth_forced_symbols, "depth symbols"),
-        )
+        if type(self.l1_only_exact_print_preselection) is not bool:
+            raise CaptureOnlySmokeError(
+                "BRIDGE_ROSTER_INVALID", "L1-only preselection mode is malformed"
+            )
+        if type(
+            self.activation_only_allow_closed_session_without_exact_print
+        ) is not bool:
+            raise CaptureOnlySmokeError(
+                "BRIDGE_ROSTER_INVALID",
+                "closed-session activation-only mode is malformed",
+            )
+        if self.l1_only_exact_print_preselection:
+            if tuple(self.depth_forced_symbols):
+                raise CaptureOnlySmokeError(
+                    "BRIDGE_ROSTER_INVALID",
+                    "L1-only preselection cannot require depth symbols",
+                )
+            object.__setattr__(self, "depth_forced_symbols", ())
+        else:
+            object.__setattr__(
+                self,
+                "depth_forced_symbols",
+                _normalized_symbols(self.depth_forced_symbols, "depth symbols"),
+            )
         for field in (
             "readiness_timeout_seconds",
             "observation_timeout_seconds",
@@ -458,7 +497,15 @@ class CaptureOnlySmokeConfiguration:
             "reconnect_wait_seconds",
         ):
             object.__setattr__(self, field, _positive_seconds(getattr(self, field), field))
-        if (self.trade_bridge is None) != (self.depth_bridge is None):
+        if self.l1_only_exact_print_preselection and self.depth_bridge is not None:
+            raise CaptureOnlySmokeError(
+                "BRIDGE_ROSTER_INVALID",
+                "L1-only preselection cannot construct a depth bridge",
+            )
+        if (
+            not self.l1_only_exact_print_preselection
+            and (self.trade_bridge is None) != (self.depth_bridge is None)
+        ):
             raise CaptureOnlySmokeError(
                 "BRIDGE_ROSTER_INVALID", "L1 and L2 bridges must be supplied together"
             )
@@ -507,10 +554,19 @@ class CaptureOnlySmokeEvidence:
 
 
 class _CaptureOnlyProviderSupervisor:
-    """Two-lane, one-shot provider supervisor with a shared stop boundary."""
+    """One-shot provider supervisor with a shared stop boundary.
 
-    def __init__(self, *, trade_bridge: Any, depth_bridge: Any) -> None:
-        self._bridges = {"trade": trade_bridge, "depth": depth_bridge}
+    Normal capture certification owns both provider lanes.  Exact-print
+    preselection deliberately owns only the trade lane: depth availability is
+    a decision-local coverage question and cannot become a global PAPER-start
+    prerequisite.
+    """
+
+    def __init__(self, *, trade_bridge: Any, depth_bridge: Any | None) -> None:
+        self._bridges = {"trade": trade_bridge}
+        if depth_bridge is not None:
+            self._bridges["depth"] = depth_bridge
+        self._lanes = tuple(self._bridges)
         for lane, bridge in self._bridges.items():
             if not callable(getattr(bridge, "run_supervised", None)):
                 raise CaptureOnlySmokeError(
@@ -572,10 +628,9 @@ class _CaptureOnlyProviderSupervisor:
                     "PROVIDER_SUPERVISOR_REUSED", "provider supervisor is one-shot"
                 )
             self._state = "starting"
-            for lane, symbols in (
-                ("trade", trade_symbols),
-                ("depth", depth_symbols),
-            ):
+            rosters = {"trade": trade_symbols, "depth": depth_symbols}
+            for lane in self._lanes:
+                symbols = rosters[lane]
                 self._threads[lane] = threading.Thread(
                     target=self._run,
                     args=(lane, symbols, reconnect),
@@ -583,7 +638,7 @@ class _CaptureOnlyProviderSupervisor:
                     daemon=False,
                 )
             try:
-                for lane in ("trade", "depth"):
+                for lane in self._lanes:
                     self._threads[lane].start()
             except BaseException as exc:
                 self._fail("thread_start", exc)
@@ -601,7 +656,7 @@ class _CaptureOnlyProviderSupervisor:
         if not self._failures:
             self._fail("readiness", TimeoutError("provider readiness deadline expired"))
         raise CaptureOnlySmokeError(
-            "PROVIDER_NOT_READY", "both provider lanes did not become ready"
+            "PROVIDER_NOT_READY", "required provider lanes did not become ready"
         )
 
     def close(self, *, join_timeout_seconds: float) -> Mapping[str, Any]:
@@ -614,7 +669,7 @@ class _CaptureOnlyProviderSupervisor:
             if self._state != "failed":
                 self._state = "stopping"
         deadline = time.monotonic() + timeout
-        for lane in ("trade", "depth"):
+        for lane in self._lanes:
             thread = self._threads.get(lane)
             if thread is not None and thread.ident is not None:
                 thread.join(timeout=max(0.0, deadline - time.monotonic()))
@@ -651,7 +706,7 @@ class _CaptureOnlyProviderSupervisor:
                     "socket_connected": self._connected[lane].is_set(),
                     "ready": self._ready[lane].is_set(),
                 }
-                for lane in ("trade", "depth")
+                for lane in self._lanes
             }
             return MappingProxyType(
                 {
@@ -675,7 +730,8 @@ class _CaptureOnlyHost:
         composition: Any,
         *,
         trade_bridge: Any,
-        depth_bridge: Any,
+        depth_bridge: Any | None,
+        l1_only_exact_print_preselection: bool = False,
     ) -> None:
         from scripts.iqfeed_capture_bootstrap import (
             IqfeedCaptureIngressComposition,
@@ -693,16 +749,31 @@ class _CaptureOnlyHost:
         self.composition = composition
         self.trade_bridge = trade_bridge
         self.depth_bridge = depth_bridge
+        self.l1_only_exact_print_preselection = bool(
+            l1_only_exact_print_preselection
+        )
+        if self.l1_only_exact_print_preselection != (depth_bridge is None):
+            raise CaptureOnlySmokeError(
+                "BRIDGE_ROSTER_INVALID", "capture host provider scope is inconsistent"
+            )
         self._bound = {"trade": False, "depth": False}
         self._supervisor: _CaptureOnlyProviderSupervisor | None = None
 
     def bind(self) -> None:
         try:
-            self.composition.start_ingress()
+            if self.l1_only_exact_print_preselection:
+                # Do not start the L2 handoff or provider.  Exact-print symbol
+                # selection consumes only the L1 pretrigger ring; later
+                # decisions that require L2 must establish their own complete
+                # coverage receipt or fail that decision closed.
+                self.composition.l1_handoff.start()
+            else:
+                self.composition.start_ingress()
             self.trade_bridge.bind_capture_handoff(self.composition.l1_handoff)
             self._bound["trade"] = True
-            self.depth_bridge.bind_capture_handoff(self.composition.l2_handoff)
-            self._bound["depth"] = True
+            if self.depth_bridge is not None:
+                self.depth_bridge.bind_capture_handoff(self.composition.l2_handoff)
+                self._bound["depth"] = True
         except BaseException as exc:
             try:
                 self.close(join_timeout_seconds=1.0)
@@ -720,7 +791,10 @@ class _CaptureOnlyHost:
         trade_symbols: tuple[str, ...],
         depth_symbols: tuple[str, ...],
     ) -> Mapping[str, Any]:
-        if not all(self._bound.values()) or self._supervisor is not None:
+        required_bound = self._bound["trade"] and (
+            self.l1_only_exact_print_preselection or self._bound["depth"]
+        )
+        if not required_bound or self._supervisor is not None:
             raise CaptureOnlySmokeError(
                 "CAPTURE_HOST_STATE_INVALID", "provider start requires one exact binding"
             )
@@ -746,16 +820,26 @@ class _CaptureOnlyHost:
             except BaseException as exc:
                 failures.append(exc)
         if not failures:
-            for lane, bridge, handoff in (
-                ("depth", self.depth_bridge, self.composition.l2_handoff),
-                ("trade", self.trade_bridge, self.composition.l1_handoff),
-            ):
+            bridge_rows = [
+                ("trade", self.trade_bridge, self.composition.l1_handoff)
+            ]
+            if self.depth_bridge is not None:
+                bridge_rows.insert(
+                    0, ("depth", self.depth_bridge, self.composition.l2_handoff)
+                )
+            for lane, bridge, handoff in bridge_rows:
                 if self._bound[lane]:
                     try:
                         bridge.unbind_capture_handoff(handoff)
                         self._bound[lane] = False
                     except BaseException as exc:
                         failures.append(exc)
+        if not failures and self.l1_only_exact_print_preselection:
+            try:
+                if self.composition.l1_handoff.health().get("started") is True:
+                    self.composition.l1_handoff.close()
+            except BaseException as exc:
+                failures.append(exc)
         composition_health: Mapping[str, Any] | None = None
         if not failures:
             try:
@@ -778,13 +862,19 @@ class _CaptureOnlyHost:
         )
 
 
-def _resolve_bridges(configuration: CaptureOnlySmokeConfiguration) -> tuple[Any, Any]:
+def _resolve_bridges(
+    configuration: CaptureOnlySmokeConfiguration,
+) -> tuple[Any, Any | None]:
     if configuration.trade_bridge is not None:
         return configuration.trade_bridge, configuration.depth_bridge
     # Lazy by design: importing this module does not create even the bridges'
     # inert SQLAlchemy engine objects.  A trusted operational call explicitly
     # crosses this boundary only after the bootstrap and pressure inputs exist.
-    from scripts import iqfeed_depth_bridge, iqfeed_trade_bridge
+    from scripts import iqfeed_trade_bridge
+
+    if configuration.l1_only_exact_print_preselection:
+        return iqfeed_trade_bridge, None
+    from scripts import iqfeed_depth_bridge
 
     return iqfeed_trade_bridge, iqfeed_depth_bridge
 
@@ -821,10 +911,14 @@ def _verify_bridge_api_and_source(
 
 def _handoff_capture_health(
     composition: Any,
+    *,
+    include_depth: bool = True,
 ) -> Mapping[str, Any]:
     l1 = composition.l1_handoff.health()
-    l2 = composition.l2_handoff.health()
-    for lane, health in (("l1", l1), ("l2", l2)):
+    lanes = [("l1", l1)]
+    if include_depth:
+        lanes.append(("l2", composition.l2_handoff.health()))
+    for lane, health in lanes:
         if (
             health.get("started") is not True
             or health.get("accepting") is not True
@@ -841,7 +935,7 @@ def _handoff_capture_health(
             )
     dropped = sum(
         _count(health.get(field), f"{lane} {field}")
-        for lane, health in (("l1", l1), ("l2", l2))
+        for lane, health in lanes
         for field in (
             "queue_overflow_lost",
             "byte_overflow_lost",
@@ -850,7 +944,7 @@ def _handoff_capture_health(
     )
     overflow = sum(
         _count(health.get(field, 0), f"{lane} {field}")
-        for lane, health in (("l1", l1), ("l2", l2))
+        for lane, health in lanes
         for field in ("queue_overflow_incidents", "byte_overflow_incidents")
     )
     return MappingProxyType(
@@ -913,10 +1007,20 @@ def _validated_capture_observation(
     exact_count = _count(value.exact_print_event_count, "exact print events")
     _sha(value.capture_store_probe_sha256, "capture store probe")
     _sha(value.exact_print_inventory_sha256, "exact print inventory")
-    if exact_count <= 0 or exact_at is None or not started_at <= exact_at <= observed_at:
+    closed_session_activation_only = bool(
+        configuration.activation_only_allow_closed_session_without_exact_print
+        and not equity_extended_session_is_open(observed_now)
+    )
+    if exact_count <= 0:
+        if exact_at is not None or not closed_session_activation_only:
+            raise CaptureOnlySmokeError(
+                "EXACT_PRINT_UNAVAILABLE",
+                "current smoke lacks a provider-clocked exact print accepted during its window",
+            )
+    elif exact_at is None or not started_at <= exact_at <= observed_at:
         raise CaptureOnlySmokeError(
             "EXACT_PRINT_UNAVAILABLE",
-            "current smoke lacks a provider-clocked exact print accepted during its window",
+            "current smoke exact-print clock is unavailable or outside its window",
         )
     if (
         Path(value.capture_store_root).resolve()
@@ -925,8 +1029,11 @@ def _validated_capture_observation(
         != configuration.preflight.resource_binding.binding_sha256
         or _sha(value.l1_bridge_source_sha256, "capture health L1 source")
         != l1_source_sha256
-        or _sha(value.l2_bridge_source_sha256, "capture health L2 source")
-        != l2_source_sha256
+        or (
+            not configuration.l1_only_exact_print_preselection
+            and _sha(value.l2_bridge_source_sha256, "capture health L2 source")
+            != l2_source_sha256
+        )
         or value.capture_store_writable is not True
         or _count(value.dropped_event_count, "capture dropped events") != 0
         or _count(value.overflow_count, "capture overflows") != 0
@@ -973,11 +1080,16 @@ def run_capture_only_preactivation_smoke(
         role="iqfeed_trade_bridge",
         preflight=preflight,
     )
-    l2_source_sha256 = _verify_bridge_api_and_source(
-        depth_bridge,
-        role="iqfeed_depth_bridge",
-        preflight=preflight,
+    l2_source_sha256 = _sha(
+        preflight.source_hashes["iqfeed_depth_bridge"],
+        "iqfeed_depth_bridge source",
     )
+    if depth_bridge is not None:
+        l2_source_sha256 = _verify_bridge_api_and_source(
+            depth_bridge,
+            role="iqfeed_depth_bridge",
+            preflight=preflight,
+        )
     try:
         composition = factory(
             preflight,
@@ -1008,6 +1120,9 @@ def run_capture_only_preactivation_smoke(
         composition,
         trade_bridge=trade_bridge,
         depth_bridge=depth_bridge,
+        l1_only_exact_print_preselection=(
+            configuration.l1_only_exact_print_preselection
+        ),
     )
     running_provider: Mapping[str, Any] | None = None
     captured: CaptureOnlyHealthObservation | None = None
@@ -1062,7 +1177,10 @@ def run_capture_only_preactivation_smoke(
                 raise CaptureOnlySmokeError(
                     "PROVIDER_HEALTH_UNAVAILABLE", "provider readiness was lost during smoke"
                 )
-            handoff_health = _handoff_capture_health(composition)
+            handoff_health = _handoff_capture_health(
+                composition,
+                include_depth=not configuration.l1_only_exact_print_preselection,
+            )
             if any(handoff_health.values()):
                 raise CaptureOnlySmokeError(
                     "CAPTURE_LOSS_OBSERVED", "bounded handoff recorded loss or overflow"
@@ -1134,6 +1252,13 @@ def run_capture_only_preactivation_smoke(
         role: _sha(preflight.source_hashes[role], f"{role} source")
         for role in _REQUIRED_CAPTURE_SOURCE_ROLES
     }
+    l1_only = configuration.l1_only_exact_print_preselection
+    depth_lane = closed_provider.get("lanes", {}).get("depth")
+    if l1_only and depth_lane is not None:
+        raise CaptureOnlySmokeError(
+            "CAPTURE_TEARDOWN_UNPROVEN",
+            "L1-only preselection unexpectedly constructed a depth provider",
+        )
     return CaptureOnlySmokeEvidence(
         bootstrap_manifest_sha256=_sha(
             preflight.manifest_sha256, "bootstrap manifest"
@@ -1143,7 +1268,16 @@ def run_capture_only_preactivation_smoke(
         host_binding=MappingProxyType(
             {
                 "trade_bridge_bound": True,
-                "depth_bridge_bound": True,
+                "depth_bridge_bound": not l1_only,
+                **(
+                    {
+                        "provider_scope": "l1_exact_print_preselection",
+                        "l2_snapshot_completion_required": False,
+                        "l2_decision_coverage_policy": "decision_local_fail_closed",
+                    }
+                    if l1_only
+                    else {}
+                ),
                 "execution_surface": "capture_only",
                 "dispatcher_constructed": False,
                 "live_runner_loop_constructed": False,
@@ -1164,14 +1298,22 @@ def run_capture_only_preactivation_smoke(
             {
                 "observed_at": _iso(captured.observed_at),
                 "socket_readable": True,
-                "exact_print_clock_observed": True,
+                "exact_print_clock_observed": captured.exact_print_event_count > 0,
                 "exact_print_event_count": captured.exact_print_event_count,
                 "exact_print_inventory_sha256": (
                     captured.exact_print_inventory_sha256
                 ),
-                "last_exact_print_available_at": _iso(
-                    captured.last_exact_print_available_at
+                "last_exact_print_available_at": (
+                    None
+                    if captured.last_exact_print_available_at is None
+                    else _iso(captured.last_exact_print_available_at)
                 ),
+                "activation_only_closed_session_without_exact_print": bool(
+                    captured.exact_print_event_count == 0
+                    and configuration.activation_only_allow_closed_session_without_exact_print
+                    and not equity_extended_session_is_open(completed_at)
+                ),
+                **({"depth_provider_started": False} if l1_only else {}),
             }
         ),
         started_at=started_at,
@@ -1184,10 +1326,23 @@ def run_capture_only_preactivation_smoke(
                 ],
                 "depth_thread_alive": closed_provider["lanes"]["depth"][
                     "thread_alive"
-                ],
+                ] if depth_lane is not None else False,
                 "bridges_unbound": True,
                 "orders_submitted": False,
+                **(
+                    {
+                        "l2_opportunity_consumed": False,
+                        "l2_risk_reserved": False,
+                    }
+                    if l1_only
+                    else {}
+                ),
             }
+        ),
+        schema_version=(
+            L1_EXACT_PRINT_PRESELECTION_SMOKE_SCHEMA_VERSION
+            if l1_only
+            else CAPTURE_ONLY_SMOKE_SCHEMA_VERSION
         ),
     )
 

@@ -81,6 +81,28 @@ except ModuleNotFoundError:  # direct ``python scripts/...`` host invocation
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 log = logging.getLogger("iqfeed_bridge")
 
+
+def _capture_bc(step: str) -> None:
+    """Fsync a supervised-lane flight-recorder line to the captured-paper
+    breadcrumb file. STRICTLY env-gated: a no-op in the standalone production
+    bridge (env absent). Bare try/except + pure syscalls so it survives any
+    lane death; the LAST line on disk names the exact sub-step reached."""
+    try:
+        path = os.environ.get("CHILI_CAPTURED_PAPER_BREADCRUMB_PATH")
+        if not path:
+            return
+        line = f"{time.time()} pid={os.getpid()} lane[depth] {step}\n".encode(
+            "utf-8", "replace"
+        )
+        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
+        try:
+            os.write(fd, line)
+            os.fsync(fd)
+        finally:
+            os.close(fd)
+    except Exception:
+        pass
+
 HOST, PORT = "127.0.0.1", 9200
 DB_URL = os.environ.get("DATABASE_URL", "postgresql://chili:chili@localhost:5433/chili")
 SNAP_INTERVAL_S = 2.0     # per-symbol snapshot write cadence
@@ -1505,6 +1527,7 @@ def _run_connection(
             connection_generation=connection_generation,
             active=True,
         )
+        _capture_bc("socket connected; boundary recorded (real handoff)")
         _send("S,SET PROTOCOL,6.2")
         log.info(
             "connected to IQConnect %s:%s (protocol 6.2) run=%s generation=%d",
@@ -1520,10 +1543,13 @@ def _run_connection(
             name=f"iqfeed-depth-reader-g{connection_generation}",
         )
         reader_thread.start()
+        _capture_bc("reader started")
         if supervisor_stop_event is not None and supervisor_stop_event.is_set():
             return
         if not reader_thread.is_alive() or stop_event.is_set():
+            _capture_bc("reader died before readiness")
             raise RuntimeError("IQFeed L2 reader stopped before readiness")
+        _capture_bc("READY")
         if ready_event is not None:
             ready_event.set()
         writer(forced, deadline)
@@ -1607,7 +1633,9 @@ def run_supervised(
     if stop_event.is_set():
         return
     _require_supervised_capture_posture()
+    _capture_bc("posture ok; BEGIN schema gate")
     _verify_depth_schema()
+    _capture_bc("schema gate ok")
     if schema_ready_event is not None:
         schema_ready_event.set()
     try:
@@ -1623,15 +1651,21 @@ def run_supervised(
             except _DepthReaderQuiescenceError:
                 raise
             except SubscriptionConnectionIndeterminate as exc:
+                _capture_bc(
+                    "exc SubscriptionConnectionIndeterminate: "
+                    + str(exc)[:140]
+                )
                 _log_subscription_gaps((exc.gap,))
                 log.warning(
                     "supervised IQFeed L2 subscription state indeterminate; "
                     "reconnecting"
                 )
             except Exception as exc:
+                _capture_bc(f"exc {type(exc).__name__}: {str(exc)[:140]}")
                 log.warning("supervised IQFeed L2 bridge error: %s", exc)
             if stop_event.is_set():
                 break
+            _capture_bc(f"reconnecting in {reconnect_wait:.1f}s")
             log.info(
                 "supervised IQFeed L2 reconnecting in %.3fs",
                 reconnect_wait,

@@ -168,6 +168,11 @@ class CaptureStream(str, Enum):
     SCANNER_SNAPSHOT = "scanner_snapshot"
     CATALYST_NEWS = "catalyst_news"
     ADMISSION_ELIGIBILITY = "admission_eligibility"
+    # A derived, fully serialized viability input handed from the capture-owned
+    # source worker to the broker-incapable captured PAPER selection producer.
+    # Keep this separate from ADMISSION_ELIGIBILITY: that stream is the live
+    # Alpaca product-eligibility read consumed by the FSM itself.
+    CAPTURED_VIABILITY_INPUT = "captured_viability_input"
     HALT_LULD_STATE = "halt_luld_state"
     SSR_STATE = "ssr_state"
     MARKET_SESSION_STATE = "market_session_state"
@@ -313,6 +318,13 @@ STREAM_POLICIES: dict[CaptureStream, StreamPolicy] = {
     ),
     CaptureStream.ADMISSION_ELIGIBILITY: _policy(
         CaptureStream.ADMISSION_ELIGIBILITY,
+        CoverageMode.DERIVED,
+        CaptureTier.ALWAYS,
+        reference=True,
+        dedup=True,
+    ),
+    CaptureStream.CAPTURED_VIABILITY_INPUT: _policy(
+        CaptureStream.CAPTURED_VIABILITY_INPUT,
         CoverageMode.DERIVED,
         CaptureTier.ALWAYS,
         reference=True,
@@ -2802,6 +2814,63 @@ class CaptureEventRef:
             provider_event_at=event.clocks.provider_event_at,
             market_reference_at=event.clocks.market_reference_at,
         )
+
+    @classmethod
+    def from_dict(cls, raw: Mapping[str, Any]) -> "CaptureEventRef":
+        """Reconstruct one exact event reference from its canonical encoding."""
+
+        if not isinstance(raw, Mapping):
+            raise CaptureContractError("event_ref must be an object")
+        expected = {
+            "identity_sha256",
+            "event_sha256",
+            "sequence",
+            "stream",
+            "received_at",
+            "available_at",
+            "payload_sha256",
+            "query_sha256",
+            "provider",
+            "symbol",
+            "provider_event_at",
+            "market_reference_at",
+        }
+        if set(raw) != expected:
+            raise CaptureContractError("event_ref fields do not match schema")
+        try:
+            row = cls(
+                identity_sha256=raw.get("identity_sha256"),
+                event_sha256=raw.get("event_sha256"),
+                sequence=raw.get("sequence"),
+                stream=raw.get("stream"),
+                received_at=_parse_utc(raw.get("received_at"), "event_ref.received_at"),
+                available_at=_parse_utc(raw.get("available_at"), "event_ref.available_at"),
+                payload_sha256=raw.get("payload_sha256"),
+                query_sha256=raw.get("query_sha256"),
+                provider=raw.get("provider"),
+                symbol=raw.get("symbol"),
+                provider_event_at=(
+                    _parse_utc(
+                        raw.get("provider_event_at"),
+                        "event_ref.provider_event_at",
+                    )
+                    if raw.get("provider_event_at") is not None
+                    else None
+                ),
+                market_reference_at=(
+                    _parse_utc(
+                        raw.get("market_reference_at"),
+                        "event_ref.market_reference_at",
+                    )
+                    if raw.get("market_reference_at") is not None
+                    else None
+                ),
+            )
+        except (TypeError, ValueError) as exc:
+            raise CaptureContractError("event_ref is malformed") from exc
+        if raw != row.to_dict():
+            raise CaptureContractError("event_ref encoding is not canonical")
+        return row
 
     def to_dict(self) -> dict[str, Any]:
         return {

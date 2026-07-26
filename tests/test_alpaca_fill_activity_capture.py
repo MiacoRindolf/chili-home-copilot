@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import ast
+from copy import copy
 from dataclasses import FrozenInstanceError, replace
 from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
@@ -22,11 +23,13 @@ from app.models.trading import (
     AdaptiveRiskDecisionPacket,
     AdaptiveRiskReservation,
     AdaptiveRiskReservationEvent,
+    AlpacaPaperAccountSettlementHead,
     AlpacaPaperFillActivity,
     AlpacaPaperFillObservationActivity,
     AlpacaPaperFillObservationPage,
     AlpacaPaperFillPageObject,
     AlpacaPaperFillQueryObservation,
+    AlpacaPaperPostSettlementFillContradiction,
 )
 from app.services.trading.momentum_neural import alpaca_fill_activity as capture_module
 from app.services.trading.momentum_neural.alpaca_fill_activity import (
@@ -43,21 +46,33 @@ from app.services.trading.momentum_neural.alpaca_fill_activity import (
     prepare_alpaca_paper_fill_activity,
     prepare_verified_alpaca_paper_fill_activity,
     publish_prepared_alpaca_paper_entry_fill_batch,
+    publish_prepared_alpaca_paper_post_settlement_fill_batch,
+    read_verified_alpaca_paper_exit_fill_batch,
     read_verified_alpaca_paper_fill_batch,
     verify_alpaca_paper_entry_fill_handoff,
     verify_alpaca_paper_fill_activity_chain,
     verify_alpaca_paper_fill_activity_row,
 )
 from app.services.trading.momentum_neural.adaptive_risk_reservation import (
+    AdaptiveExitOwnerReceipt,
+    AdaptiveExitOwnerTransportBinding,
     AdaptiveReservationStateConflict,
     AdaptiveRiskReservationStore,
     DurableOrderLifecycleEvidence,
 )
 from app.services.trading.momentum_neural.alpaca_cycle_settlement import (
+    new_zero_settlement_head,
     settle_flat_alpaca_paper_cycle,
 )
 from app.services.trading.momentum_neural.alpaca_paper_identity import (
     alpaca_paper_account_identity_sha256,
+)
+from app.services.trading.momentum_neural.alpaca_orphan_claims import (
+    acquire_action_claim,
+    advance_owner_transport,
+    lease_owner_transport,
+    read_action_claim,
+    resolve_owner_transport_terminal,
 )
 from app.services.trading.venue import alpaca_spot
 from app.services.trading.venue.alpaca_spot import AlpacaSpotAdapter
@@ -1298,105 +1313,147 @@ def _partial_verified_entry_batch(monkeypatch) -> PreparedAlpacaPaperFillBatch:
     )
 
 
-def _verified_exit_batch(monkeypatch) -> PreparedAlpacaPaperFillBatch:
-    cycle = _verified_cycle()
-    exit_order_id = "alpaca-exit-order-7"
-    exit_cid = "chili-cycle-exit-7"
-    activity = _verified_activity(
-        activity_id="verified-exit-1",
-        transaction_time="2026-07-15T13:05:00Z",
-        quantity="4.0000000000",
-        cumulative_quantity="4.0000000000",
-        leaves_quantity="0.0000000000",
-        trade_type="fill",
-        order_id=exit_order_id,
-    )
-    activity["side"] = "sell"
-    activity["price"] = "3.0000000000"
+def _verified_exit_batch(
+    monkeypatch,
+    receipt: AdaptiveExitOwnerReceipt,
+    *,
+    quantities: tuple[int, ...] = (4,),
+    order_quantity: int = 10,
+    first_activity_number: int = 1,
+    transaction_second_start: int | None = None,
+) -> PreparedAlpacaPaperFillBatch:
+    cumulative = 0
+    activities: list[dict] = []
+    for offset, quantity in enumerate(quantities):
+        cumulative += quantity
+        transaction_second = (
+            first_activity_number + offset
+            if transaction_second_start is None
+            else transaction_second_start + offset
+        )
+        activity = _verified_activity(
+            activity_id=f"verified-exit-{first_activity_number + offset}",
+            transaction_time=(
+                f"2026-07-15T13:05:{transaction_second:02d}Z"
+            ),
+            quantity=f"{quantity}.0000000000",
+            cumulative_quantity=f"{cumulative}.0000000000",
+            leaves_quantity=f"{order_quantity - cumulative}.0000000000",
+            trade_type=(
+                "fill" if cumulative == order_quantity else "partial_fill"
+            ),
+            order_id=receipt.provider_order_id,
+        )
+        activity["side"] = "sell"
+        activity["price"] = "3.0000000000"
+        activities.append(activity)
     raw_fixture = _verified_raw_batch(
-        activities=[activity],
-        order_id=exit_order_id,
-        client_order_id=exit_cid,
+        activities=activities,
+        order_id=receipt.provider_order_id,
+        client_order_id=receipt.provider_client_order_id,
     )
     raw_fixture["provider_order"].update(
         {
             "side": "sell",
-            "qty": "4.0000000000",
-            "filled_qty": "4.0000000000",
+            "qty": f"{order_quantity}.0000000000",
+            "filled_qty": f"{cumulative}.0000000000",
+            "status": (
+                "filled" if cumulative == order_quantity else "partially_filled"
+            ),
         }
     )
     adapter, _calls = _verified_adapter(raw_fixture, monkeypatch)
-    read_binding = capture_module._fill_read_binding(
-        cycle,
-        provider_order_id=exit_order_id,
-        expected_client_order_id=exit_cid,
-        order_role="exit",
-    )
-    raw = AlpacaSpotAdapter.get_paper_fill_activity_batch(
+    return read_verified_alpaca_paper_exit_fill_batch(
         adapter,
-        exit_order_id,
-        read_binding=read_binding,
+        cycle=_verified_cycle(),
+        exit_owner_receipt=receipt,
     )
-    assert raw["readable"] is True
-    envelope = raw["activities"][0]
-    prepared = prepare_verified_alpaca_paper_fill_activity(
-        cycle,
-        provider_activity=envelope["provider_activity"],
-        provider_order=raw["provider_order"],
-        authoritative_provider_account_id=VERIFIED_ACCOUNT_ID,
-        received_at=raw["received_at"],
-        available_at=raw["available_at"],
-        expected_exit_client_order_id=exit_cid,
-        fee_usd=envelope["fee_usd"],
-        fee_evidence=envelope["fee_evidence"],
-    )
-    provider_order_json, provider_order_sha = (
-        capture_module._canonical_json_text(
-            raw["provider_order"],
-            "provider_order",
+
+
+def _verified_entry_batch(
+    monkeypatch,
+    *,
+    quantities: tuple[int, ...],
+    order_quantity: int = 10,
+) -> PreparedAlpacaPaperFillBatch:
+    cumulative = 0
+    activities: list[dict] = []
+    for offset, quantity in enumerate(quantities):
+        cumulative += quantity
+        activities.append(
+            _verified_activity(
+                activity_id=(
+                    "verified-partial-1"
+                    if offset == 0
+                    else f"verified-entry-late-{offset + 1}"
+                ),
+                transaction_time=f"2026-07-15T13:00:{offset:02d}Z",
+                quantity=f"{quantity}.0000000000",
+                cumulative_quantity=f"{cumulative}.0000000000",
+                leaves_quantity=f"{order_quantity - cumulative}.0000000000",
+                trade_type=(
+                    "fill" if cumulative == order_quantity else "partial_fill"
+                ),
+            )
         )
+    raw = _verified_raw_batch(activities=activities)
+    raw["provider_order"].update(
+        {
+            "qty": f"{order_quantity}.0000000000",
+            "filled_qty": f"{cumulative}.0000000000",
+            "status": (
+                "filled" if cumulative == order_quantity else "partially_filled"
+            ),
+        }
     )
-    provisional = PreparedAlpacaPaperFillBatch(
-        batch_schema_version=capture_module.PREPARED_FILL_BATCH_SCHEMA_VERSION,
-        cycle=cycle,
+    adapter, _calls = _verified_adapter(raw, monkeypatch)
+    return read_verified_alpaca_paper_fill_batch(
+        adapter,
+        cycle=_verified_cycle(),
+        provider_order_id="alpaca-entry-order-7",
+        expected_client_order_id="chili-cycle-entry-7",
+    )
+
+
+def _historical_verified_exit_batch(monkeypatch) -> PreparedAlpacaPaperFillBatch:
+    """Build a complete pre-354 observation without retaining an owner event."""
+
+    cycle = _verified_cycle()
+    exit_order_id = "alpaca-historical-exit-order-7"
+    exit_cid = "chili-historical-exit-7"
+    binding = _exit_owner_binding(
+        cycle,
+        exit_client_order_id=exit_cid,
+        order_quantity=4,
+        generation=99,
+    )
+    observed_at = datetime(2026, 7, 15, 13, 3, 59, tzinfo=UTC)
+    unretained_receipt = AdaptiveExitOwnerReceipt(
+        receipt_sha256=_hash("pre-354-owner-not-retained"),
+        event_type="alpaca_exit_owner_submitted",
+        reservation_id=cycle.reservation_id,
+        sequence=1,
+        transport_started_event_sha256=_hash("pre-354-start-not-retained"),
+        binding=binding,
         provider_order_id=exit_order_id,
-        expected_client_order_id=exit_cid,
-        order_role="exit",
-        query_after=capture_module._provider_time(
-            raw["query_after"],
-            "query_after",
-        ),
-        query_until=capture_module._provider_time(
-            raw["query_until"],
-            "query_until",
-        ),
-        received_at=raw["received_at"],
-        available_at=raw["available_at"],
-        expires_at=raw["expires_at"],
-        broker_environment=raw["broker_environment"],
-        asset_class=raw["asset_class"],
-        provider_account_id_sha256=cycle.account_identity_sha256,
-        adapter_connection_generation=raw[
-            "adapter_connection_generation"
-        ],
-        adapter_build_sha256=raw["adapter_build_sha256"],
-        provider_order_payload_canonical_json=provider_order_json,
-        provider_order_payload_sha256=provider_order_sha,
-        query_receipt_canonical_json=raw[
-            "query_receipt_canonical_json"
-        ],
-        query_receipt_sha256=raw["query_receipt_sha256"],
-        read_binding_canonical_json=raw[
-            "read_binding_canonical_json"
-        ],
-        read_binding_sha256=raw["read_binding_sha256"],
-        activities=(prepared,),
-        batch_content_sha256="0" * 64,
-        read_capability=raw["_capture_capability"],
+        provider_client_order_id=exit_cid,
+        provider_status="accepted",
+        provider_cumulative_quantity=0,
+        observer_claim_token=binding.transport_claim_token,
+        observer_session_id=binding.transport_owner_session_id,
+        observer_generation=binding.transport_owner_generation,
+        observer_runtime_generation=binding.transport_runtime_generation,
+        observer_connection_generation=binding.transport_connection_generation,
+        effective_at=observed_at,
+        available_at=observed_at,
     )
-    return replace(
-        provisional,
-        batch_content_sha256=provisional.computed_batch_content_sha256(),
+    return _verified_exit_batch(
+        monkeypatch,
+        unretained_receipt,
+        quantities=(4,),
+        order_quantity=4,
+        first_activity_number=4,
+        transaction_second_start=0,
     )
 
 
@@ -1654,6 +1711,1190 @@ def _terminal_entry_or_position_evidence(
         order_status=order_status,
         remaining_open_quantity=remaining_open_quantity,
     )
+
+
+def _exit_owner_binding(
+    cycle: AlpacaPaperFillCycleBinding,
+    *,
+    exit_client_order_id: str = "chili-cycle-exit-7",
+    order_quantity: int = 10,
+    generation: int = 1,
+) -> AdaptiveExitOwnerTransportBinding:
+    return AdaptiveExitOwnerTransportBinding(
+        reservation_id=cycle.reservation_id,
+        expected_account_id=VERIFIED_ACCOUNT_ID,
+        account_identity_sha256=cycle.account_identity_sha256,
+        decision_packet_sha256=cycle.decision_packet_sha256,
+        symbol=cycle.symbol,
+        entry_client_order_id=cycle.cycle_client_order_id,
+        exit_client_order_id=exit_client_order_id,
+        order_request={
+            "account_scope": "alpaca:paper",
+            "alpaca_account_id": VERIFIED_ACCOUNT_ID,
+            "base_size": str(order_quantity),
+            "client_order_id": exit_client_order_id,
+            "order_type": "market",
+            "position_intent": "sell_to_close",
+            "product_id": cycle.symbol,
+            "side": "sell",
+            "time_in_force": "day",
+        },
+        transport_claim_token="exit-owner-claim-1",
+        transport_owner_session_id=7001,
+        transport_owner_generation=generation,
+        transport_owner_kind="ordinary_exit",
+        transport_lease_id=f"exit-owner-lease-{generation}",
+        transport_runtime_generation=f"paper-runtime-{generation}",
+        transport_connection_generation=f"paper-connection-{generation}",
+    )
+
+
+def _append_exit_owner_receipt(
+    db,
+    store: AdaptiveRiskReservationStore,
+    cycle: AlpacaPaperFillCycleBinding,
+    *,
+    provider_order_id: str = "alpaca-exit-order-7",
+    exit_client_order_id: str = "chili-cycle-exit-7",
+    order_quantity: int = 10,
+    generation: int = 1,
+) -> AdaptiveExitOwnerReceipt:
+    if db.get(
+        AlpacaPaperAccountSettlementHead,
+        (cycle.account_scope, cycle.account_identity_sha256),
+    ) is None:
+        db.add(
+            new_zero_settlement_head(
+                account_identity_sha256=cycle.account_identity_sha256
+            )
+        )
+        db.flush()
+    binding = _exit_owner_binding(
+        cycle,
+        exit_client_order_id=exit_client_order_id,
+        order_quantity=order_quantity,
+        generation=generation,
+    )
+    started_at = datetime.now(UTC)
+    claim_context = {
+        "symbol": binding.symbol,
+        "claim_token": binding.transport_claim_token,
+        "owner_session_id": binding.transport_owner_session_id,
+        "account_scope": binding.account_scope,
+        "alpaca_account_id": binding.expected_account_id,
+    }
+    acquired = acquire_action_claim(
+        db,
+        symbol=binding.symbol,
+        action="entry",
+        claim_token=binding.transport_claim_token,
+        owner_session_id=binding.transport_owner_session_id,
+        client_order_id=binding.entry_client_order_id,
+        metadata={
+            "alpaca_account_id": binding.expected_account_id,
+            "order_request": {
+                "alpaca_account_id": binding.expected_account_id,
+                "client_order_id": binding.entry_client_order_id,
+                "product_id": binding.symbol,
+                "side": "buy",
+            },
+        },
+        account_scope=binding.account_scope,
+    )
+    assert acquired["ok"] is True
+    leased = lease_owner_transport(
+        db,
+        **claim_context,
+        transport_kind=binding.transport_owner_kind,
+        client_order_id=binding.exit_client_order_id,
+        order_request=dict(binding.order_request),
+        lease_token=binding.transport_lease_id,
+        exit_owner_store=store,
+        exit_owner_binding=binding,
+        exit_owner_effective_at=started_at,
+        exit_owner_available_at=started_at,
+    )
+    assert leased["ok"] is True
+    # Production commits the transport-start marker before any broker I/O.
+    # This fixture may be nested inside a larger rollback-only migration test,
+    # so force just that deferred invariant now and defer subsequent events.
+    db.execute(text(
+        "SET CONSTRAINTS trg_adaptive_exit_owner_event_head IMMEDIATE"
+    ))
+    db.execute(text(
+        "SET CONSTRAINTS trg_adaptive_exit_owner_event_head DEFERRED"
+    ))
+    outcome_at = started_at + timedelta(milliseconds=1)
+    assert advance_owner_transport(
+        db,
+        **claim_context,
+        client_order_id=binding.exit_client_order_id,
+        lease_token=binding.transport_lease_id,
+        phase="submitted",
+        broker_order_id=provider_order_id,
+        metadata={"provider_status": "accepted"},
+        exit_owner_store=store,
+        exit_owner_effective_at=outcome_at,
+        exit_owner_available_at=outcome_at,
+        provider_status="accepted",
+        provider_cumulative_quantity=0,
+        observer_claim_token=binding.transport_claim_token,
+        observer_session_id=binding.transport_owner_session_id,
+        observer_generation=binding.transport_owner_generation,
+        observer_runtime_generation=binding.transport_runtime_generation,
+        observer_connection_generation=binding.transport_connection_generation,
+    ) is True
+    readable, claim = read_action_claim(
+        db,
+        symbol=binding.symbol,
+        account_scope=binding.account_scope,
+    )
+    assert readable and claim is not None
+    receipt_sha = claim["metadata"]["owner_transport"][
+        "exit_owner_last_event_sha256"
+    ]
+    return store.load_exit_owner_receipt(
+        receipt_sha,
+        reservation_id=cycle.reservation_id,
+        session=db,
+    )
+
+
+def _prepare_settled_partial_cycle_with_owner(
+    db,
+    monkeypatch,
+    *,
+    include_replacement_owner: bool = False,
+):
+    initial_batch = _partial_verified_entry_batch(monkeypatch)
+    store = AdaptiveRiskReservationStore(engine)
+    with db.begin():
+        reservation, _packet = _persist_cycle_rows(db, initial_batch.cycle)
+        _reset_for_entry_fill(reservation)
+        db.flush()
+        publish_prepared_alpaca_paper_entry_fill_batch(db, initial_batch)
+        store.finalize_filled_entry_remainder(
+            reservation.reservation_id,
+            evidence=_terminal_entry_or_position_evidence(
+                initial_batch,
+                event_at=db.execute(text("SELECT clock_timestamp()")).scalar_one(),
+                event_kind="filled_entry_terminal",
+                order_status="canceled",
+                cumulative=4,
+                label="partial-entry-canceled-v2",
+            ),
+            session=db,
+        )
+        owner_receipt = _append_exit_owner_receipt(
+            db,
+            store,
+            initial_batch.cycle,
+            order_quantity=4,
+        )
+
+    first_recorded_exit = 1 if include_replacement_owner else 2
+    initial_exit_batch = _verified_exit_batch(
+        monkeypatch,
+        owner_receipt,
+        quantities=(first_recorded_exit,),
+        order_quantity=4,
+    )
+    with db.begin():
+        append_prepared_alpaca_paper_fill_batch(db, initial_exit_batch)
+        terminal_at = datetime.now(UTC)
+        initial_binding = owner_receipt.binding
+        assert resolve_owner_transport_terminal(
+            db,
+            symbol=initial_binding.symbol,
+            claim_token=initial_binding.transport_claim_token,
+            owner_session_id=initial_binding.transport_owner_session_id,
+            client_order_id=initial_binding.exit_client_order_id,
+            broker_order_id=owner_receipt.provider_order_id,
+            broker_order_status="canceled",
+            filled_size=first_recorded_exit,
+            remaining_quantity=4 - first_recorded_exit,
+            account_scope=initial_binding.account_scope,
+            alpaca_account_id=initial_binding.expected_account_id,
+            exit_owner_store=store,
+            exit_owner_effective_at=terminal_at,
+            exit_owner_available_at=terminal_at,
+            observer_claim_token=initial_binding.transport_claim_token,
+            observer_session_id=initial_binding.transport_owner_session_id,
+            observer_generation=initial_binding.transport_owner_generation,
+            observer_runtime_generation=(
+                initial_binding.transport_runtime_generation
+            ),
+            observer_connection_generation=(
+                initial_binding.transport_connection_generation
+            ),
+        ) is True
+        # Model a legitimate cancel/replace ladder: every request is bounded by
+        # the then-known remainder.  A later page may still reveal a fill from a
+        # canceled predecessor, which is the signed-quarantine case under test.
+        db.execute(text(
+            "SET CONSTRAINTS trg_adaptive_exit_owner_event_head IMMEDIATE"
+        ))
+        db.execute(text(
+            "SET CONSTRAINTS trg_adaptive_exit_owner_event_head DEFERRED"
+        ))
+        replacement_receipt = _append_exit_owner_receipt(
+            db,
+            store,
+            initial_batch.cycle,
+            provider_order_id="alpaca-exit-order-replacement-7",
+            exit_client_order_id="chili-cycle-exit-replacement-7",
+            order_quantity=4 - first_recorded_exit,
+            generation=2,
+        )
+        replacement_recorded_exit = (
+            0 if include_replacement_owner else 4 - first_recorded_exit
+        )
+        if replacement_recorded_exit:
+            replacement_batch = _verified_exit_batch(
+                monkeypatch,
+                replacement_receipt,
+                quantities=(replacement_recorded_exit,),
+                order_quantity=4 - first_recorded_exit,
+                first_activity_number=11,
+                transaction_second_start=0,
+            )
+            append_prepared_alpaca_paper_fill_batch(db, replacement_batch)
+        if include_replacement_owner:
+            # The provider acknowledgement is a distinct production commit
+            # before a later terminal reconciliation observes cancellation.
+            db.execute(text(
+                "SET CONSTRAINTS trg_adaptive_exit_owner_event_head IMMEDIATE"
+            ))
+            db.execute(text(
+                "SET CONSTRAINTS trg_adaptive_exit_owner_event_head DEFERRED"
+            ))
+            replacement_binding = replacement_receipt.binding
+            replacement_terminal_at = max(
+                datetime.now(UTC),
+                replacement_receipt.available_at,
+            ) + timedelta(milliseconds=1)
+            assert resolve_owner_transport_terminal(
+                db,
+                symbol=replacement_binding.symbol,
+                claim_token=replacement_binding.transport_claim_token,
+                owner_session_id=(
+                    replacement_binding.transport_owner_session_id
+                ),
+                client_order_id=replacement_binding.exit_client_order_id,
+                broker_order_id=replacement_receipt.provider_order_id,
+                broker_order_status="canceled",
+                filled_size=replacement_recorded_exit,
+                remaining_quantity=(
+                    4 - first_recorded_exit - replacement_recorded_exit
+                ),
+                account_scope=replacement_binding.account_scope,
+                alpaca_account_id=replacement_binding.expected_account_id,
+                exit_owner_store=store,
+                exit_owner_effective_at=replacement_terminal_at,
+                exit_owner_available_at=replacement_terminal_at,
+                observer_claim_token=(
+                    replacement_binding.transport_claim_token
+                ),
+                observer_session_id=(
+                    replacement_binding.transport_owner_session_id
+                ),
+                observer_generation=(
+                    replacement_binding.transport_owner_generation
+                ),
+                observer_runtime_generation=(
+                    replacement_binding.transport_runtime_generation
+                ),
+                observer_connection_generation=(
+                    replacement_binding.transport_connection_generation
+                ),
+            ) is True
+    with db.begin():
+        if include_replacement_owner:
+            final_receipt = _append_exit_owner_receipt(
+                db,
+                store,
+                initial_batch.cycle,
+                provider_order_id="alpaca-exit-order-final-7",
+                exit_client_order_id="chili-cycle-exit-final-7",
+                order_quantity=3,
+                generation=3,
+            )
+            final_batch = _verified_exit_batch(
+                monkeypatch,
+                final_receipt,
+                quantities=(3,),
+                order_quantity=3,
+                first_activity_number=21,
+                transaction_second_start=3,
+            )
+            append_prepared_alpaca_paper_fill_batch(db, final_batch)
+        store.close_open_exposure(
+            initial_batch.cycle.reservation_id,
+            evidence=_terminal_entry_or_position_evidence(
+                initial_batch,
+                event_at=db.execute(text("SELECT clock_timestamp()")).scalar_one(),
+                event_kind="position_flat",
+                order_status="flat",
+                cumulative=4,
+                remaining_open_quantity=0,
+                label="position-flat-before-v2-contradiction",
+            ),
+            session=db,
+        )
+        settled = settle_flat_alpaca_paper_cycle(
+            db,
+            reservation_id=initial_batch.cycle.reservation_id,
+        )
+        settlement_sha = settled.row.settlement_sha256
+        settled_pnl = Decimal(settled.row.net_realized_pnl_usd)
+        settled_fill_hashes = tuple(
+            db.scalars(
+                select(AlpacaPaperFillActivity.event_sha256)
+                .where(
+                    AlpacaPaperFillActivity.reservation_id
+                    == initial_batch.cycle.reservation_id
+                )
+                .order_by(AlpacaPaperFillActivity.sequence)
+            )
+        )
+    return {
+        "cycle": initial_batch.cycle,
+        "entry_batch": initial_batch,
+        "owner_receipt": owner_receipt,
+        "replacement_receipt": replacement_receipt,
+        "settlement_sha256": settlement_sha,
+        "settled_pnl": settled_pnl,
+        "settled_fill_hashes": settled_fill_hashes,
+    }
+
+
+def _prepare_historical_settled_cycle_without_owner(db, monkeypatch):
+    """Create the exact pre-354 settled shape without reserved owner events."""
+
+    initial_batch = _partial_verified_entry_batch(monkeypatch)
+    historical_exit = _historical_verified_exit_batch(monkeypatch)
+    store = AdaptiveRiskReservationStore(engine)
+    with db.begin():
+        reservation, _packet = _persist_cycle_rows(db, initial_batch.cycle)
+        _reset_for_entry_fill(reservation)
+        db.flush()
+        publish_prepared_alpaca_paper_entry_fill_batch(db, initial_batch)
+        store.finalize_filled_entry_remainder(
+            reservation.reservation_id,
+            evidence=_terminal_entry_or_position_evidence(
+                initial_batch,
+                event_at=db.execute(text("SELECT clock_timestamp()")).scalar_one(),
+                event_kind="filled_entry_terminal",
+                order_status="canceled",
+                cumulative=4,
+                label="historical-partial-entry-canceled",
+            ),
+            session=db,
+        )
+        append_prepared_alpaca_paper_fill_batch(db, historical_exit)
+        store.close_open_exposure(
+            reservation.reservation_id,
+            evidence=_terminal_entry_or_position_evidence(
+                initial_batch,
+                event_at=db.execute(text("SELECT clock_timestamp()")).scalar_one(),
+                event_kind="position_flat",
+                order_status="flat",
+                cumulative=4,
+                remaining_open_quantity=0,
+                label="historical-position-flat",
+            ),
+            session=db,
+        )
+        settled = settle_flat_alpaca_paper_cycle(
+            db,
+            reservation_id=reservation.reservation_id,
+        )
+        settlement_sha256 = settled.row.settlement_sha256
+        db.flush()
+        before = {
+            field_name: getattr(reservation, field_name)
+            for field_name in (
+                "state",
+                "cumulative_filled_quantity_shares",
+                "open_quantity_shares",
+                "pending_structural_risk_usd",
+                "pending_gross_notional_usd",
+                "pending_buying_power_impact_usd",
+                "open_structural_risk_usd",
+                "open_gross_notional_usd",
+                "open_buying_power_impact_usd",
+                "last_broker_observed_at",
+                "last_broker_available_at",
+                "last_source_event_content_sha256",
+                "event_sequence",
+                "last_event_sha256",
+                "version",
+                "updated_at",
+                "lifecycle_contradiction_source_state",
+                "lifecycle_contradiction_at",
+                "lifecycle_contradiction_evidence_sha256",
+            )
+        }
+    return {
+        "cycle": initial_batch.cycle,
+        "entry_batch": initial_batch,
+        "settlement_sha256": settlement_sha256,
+        "reservation_before_projection": before,
+    }
+
+
+def _migration_354_physical_fingerprint(conn) -> str:
+    """Hash the exact migration-owned catalog objects for reapply tests."""
+
+    names = (
+        "ck_adaptive_risk_reservation_quantities",
+        "ck_adaptive_risk_reservation_contradiction",
+        "fk_alpaca_ps_fill_exit_owner_receipt",
+        "uq_alpaca_ps_fill_batch_ordinal",
+        "ck_alpaca_post_settlement_fill_schema",
+        "ck_alpaca_post_settlement_fill_scope",
+        "ck_alpaca_post_settlement_fill_lineage",
+        "ck_alpaca_post_settlement_fill_values",
+        "ck_alpaca_post_settlement_fill_clocks",
+        "ck_alpaca_post_settlement_fill_fee",
+        "ck_alpaca_post_settlement_fill_hashes",
+    )
+    catalog: list[tuple[str, ...]] = []
+    catalog.extend(
+        ("column", str(row[0]), str(row[1]), str(row[2]), str(row[3]))
+        for row in conn.execute(
+            text(
+                "SELECT table_name, column_name, data_type, "
+                "       COALESCE(character_maximum_length::text, '') "
+                "FROM information_schema.columns "
+                "WHERE table_schema = current_schema() "
+                "AND ((table_name = 'adaptive_risk_reservations' "
+                "      AND column_name = "
+                "          'post_settlement_net_position_quantity_shares') "
+                " OR (table_name = "
+                "      'alpaca_paper_post_settlement_fill_contradictions' "
+                "     AND column_name = ANY(:columns))) "
+                "ORDER BY table_name, column_name"
+            ),
+            {
+                "columns": [
+                    "exit_owner_receipt_sha256",
+                    "provider_client_order_id",
+                    "projection_prior_net_position_quantity_shares",
+                    "projected_net_position_quantity_shares",
+                ]
+            },
+        )
+    )
+    catalog.extend(
+        ("constraint", str(row[0]), " ".join(str(row[1]).split()))
+        for row in conn.execute(
+            text(
+                "SELECT constraint_row.conname, "
+                "       pg_get_constraintdef(constraint_row.oid) "
+                "FROM pg_constraint AS constraint_row "
+                "JOIN pg_class AS table_row "
+                "  ON table_row.oid = constraint_row.conrelid "
+                "JOIN pg_namespace AS namespace "
+                "  ON namespace.oid = table_row.relnamespace "
+                "WHERE namespace.nspname = current_schema() "
+                "AND constraint_row.conname = ANY(:names) "
+                "ORDER BY conname"
+            ),
+            {"names": list(names)},
+        )
+    )
+    catalog.extend(
+        ("trigger", str(row[0]), " ".join(str(row[1]).split()))
+        for row in conn.execute(
+            text(
+                "SELECT tgname, pg_get_triggerdef(oid) FROM pg_trigger "
+                "WHERE NOT tgisinternal AND (tgname LIKE "
+                "'trg_adaptive_exit_owner_%' OR tgname = "
+                "'trg_adaptive_reservation_event_head' OR tgname = "
+                "'trg_adaptive_risk_reservation_events_append_only' OR "
+                "tgname = "
+                "'trg_adaptive_risk_reservation_events_no_truncate' OR "
+                "tgname LIKE 'trg_alpaca_post_settlement_%' OR tgname = "
+                "'trg_alpaca_reservation_settlement_state') "
+                "ORDER BY tgname"
+            )
+        )
+    )
+    catalog.extend(
+        ("index", str(row[0]), " ".join(str(row[1]).split()))
+        for row in conn.execute(
+            text(
+                "SELECT index_relation.relname, "
+                "       pg_get_indexdef(index_relation.oid) "
+                "FROM pg_class AS index_relation "
+                "JOIN pg_namespace AS namespace "
+                "  ON namespace.oid = index_relation.relnamespace "
+                "WHERE namespace.nspname = current_schema() "
+                "AND index_relation.relname = "
+                "    'ix_alpaca_ps_fill_order_sequence'"
+            )
+        )
+    )
+    catalog.extend(
+        (
+            "function",
+            str(row[0]),
+            str(row[1]),
+            " ".join(str(row[2]).split()),
+        )
+        for row in conn.execute(
+            text(
+                "SELECT function_row.proname, "
+                "       pg_get_function_identity_arguments(function_row.oid), "
+                "       pg_get_functiondef(function_row.oid) "
+                "FROM pg_proc AS function_row "
+                "JOIN pg_namespace AS namespace "
+                "  ON namespace.oid = function_row.pronamespace "
+                "WHERE namespace.nspname = current_schema() "
+                "AND function_row.proname = ANY(:names) "
+                "ORDER BY function_row.proname, "
+                "         pg_get_function_identity_arguments(function_row.oid)"
+            ),
+            {
+                "names": [
+                    "chili_reject_adaptive_append_only_mutation",
+                    "chili_guard_adaptive_exit_owner_event_insert",
+                    "chili_require_adaptive_exit_owner_event_head",
+                    "chili_require_adaptive_reservation_event_head",
+                    "chili_guard_alpaca_reservation_settlement_state",
+                    "chili_guard_alpaca_post_settlement_fill_insert",
+                    "chili_require_alpaca_post_settlement_fill_projection",
+                    "chili_require_alpaca_post_settlement_batch_complete",
+                    "chili_reject_alpaca_post_settlement_fill_mutation",
+                ]
+            },
+        )
+    )
+    return hashlib.sha256(repr(catalog).encode("utf-8")).hexdigest()
+
+
+def _migration_354_retained_data_fingerprint(conn, reservation_id: uuid.UUID) -> str:
+    """Hash row bytes/identities that historical repair must never rewrite."""
+
+    retained = tuple(
+        tuple(row)
+        for row in conn.execute(
+            text(
+                "SELECT ctid::text, xmin::text, to_jsonb(row_data)::text "
+                "FROM alpaca_paper_post_settlement_fill_contradictions "
+                "AS row_data WHERE reservation_id = :reservation_id "
+                "ORDER BY contradiction_sequence"
+            ),
+            {"reservation_id": reservation_id},
+        )
+    )
+    reservation = conn.execute(
+        text(
+            "SELECT ctid::text, xmin::text, to_jsonb(row_data)::text "
+            "FROM adaptive_risk_reservations AS row_data "
+            "WHERE reservation_id = :reservation_id"
+        ),
+        {"reservation_id": reservation_id},
+    ).one()
+    return hashlib.sha256(
+        repr((retained, tuple(reservation))).encode("utf-8")
+    ).hexdigest()
+
+
+def test_migration_354_upgrades_retained_v1_preserves_row_identity_and_bridges_first_v2_sell(
+    db,
+    monkeypatch,
+) -> None:
+    historical = _prepare_historical_settled_cycle_without_owner(db, monkeypatch)
+    late_buy = _verified_entry_batch(
+        monkeypatch,
+        quantities=(4, 2),
+        order_quantity=10,
+    )
+    with db.begin():
+        created = publish_prepared_alpaca_paper_entry_fill_batch(db, late_buy)
+        db.execute(text("SET CONSTRAINTS ALL IMMEDIATE"))
+        assert len(created.contradiction_sha256s) == 1
+        v2_sha = created.contradiction_sha256s[0]
+
+    with engine.connect() as conn:
+        transaction = conn.begin()
+        historical_db = Session(bind=conn, expire_on_commit=False)
+        try:
+            row = historical_db.get(
+                AlpacaPaperPostSettlementFillContradiction,
+                v2_sha,
+            )
+            assert row is not None
+            v1_values = {
+                field_name: getattr(row, field_name)
+                for field_name in (
+                    capture_module._POST_SETTLEMENT_CONTRADICTION_BODY_FIELDS
+                )
+            }
+            v1_values["contradiction_schema_version"] = (
+                capture_module.LEGACY_POST_SETTLEMENT_FILL_CONTRADICTION_SCHEMA_VERSION
+            )
+            v1_body = capture_module._post_settlement_contradiction_content_body(
+                v1_values
+            )
+            v1_json, v1_sha = capture_module._canonical_json_text(
+                v1_body,
+                "retained_v1_post_settlement_fill_contradiction",
+            )
+
+            # Recreate the exact historical v1 lifecycle shape.  This is test
+            # downgrade scaffolding only; all DDL and data changes roll back.
+            for table_name, trigger_name in (
+                (
+                    "alpaca_paper_post_settlement_fill_contradictions",
+                    "trg_alpaca_post_settlement_fill_immutable",
+                ),
+                (
+                    "adaptive_risk_reservation_events",
+                    "trg_adaptive_risk_reservation_events_append_only",
+                ),
+                (
+                    "adaptive_risk_reservations",
+                    "trg_adaptive_reservation_event_head",
+                ),
+                (
+                    "adaptive_risk_reservations",
+                    "trg_alpaca_post_settlement_fill_projection",
+                ),
+                (
+                    "adaptive_risk_reservations",
+                    "trg_alpaca_reservation_settlement_state",
+                ),
+            ):
+                conn.execute(text(
+                    f'DROP TRIGGER IF EXISTS "{trigger_name}" '
+                    f'ON "{table_name}"'
+                ))
+            conn.execute(
+                text(
+                    "DELETE FROM adaptive_risk_reservation_events "
+                    "WHERE reservation_id = :reservation_id "
+                    "AND broker_event_id = :broker_event_id"
+                ),
+                {
+                    "reservation_id": historical["cycle"].reservation_id,
+                    "broker_event_id": f"alpaca-post-settlement-fill:{v2_sha}",
+                },
+            )
+            conn.execute(
+                text(
+                    "UPDATE alpaca_paper_post_settlement_fill_contradictions "
+                    "SET contradiction_sha256 = :v1_sha, "
+                    "contradiction_schema_version = :v1_schema, "
+                    "contradiction_content_canonical_json = :v1_json, "
+                    "contradiction_content_sha256 = :v1_sha, "
+                    "exit_owner_receipt_sha256 = NULL, "
+                    "provider_client_order_id = NULL, "
+                    "projection_prior_net_position_quantity_shares = NULL, "
+                    "projected_net_position_quantity_shares = NULL "
+                    "WHERE contradiction_sha256 = :v2_sha"
+                ),
+                {
+                    "v1_sha": v1_sha,
+                    "v1_schema": (
+                        capture_module.LEGACY_POST_SETTLEMENT_FILL_CONTRADICTION_SCHEMA_VERSION
+                    ),
+                    "v1_json": v1_json,
+                    "v2_sha": v2_sha,
+                },
+            )
+            before = historical["reservation_before_projection"]
+            conn.execute(
+                text(
+                    "UPDATE adaptive_risk_reservations SET "
+                    "state = :state, "
+                    "cumulative_filled_quantity_shares = :cumulative, "
+                    "open_quantity_shares = :open_quantity, "
+                    "post_settlement_net_position_quantity_shares = NULL, "
+                    "pending_structural_risk_usd = :pending_risk, "
+                    "pending_gross_notional_usd = :pending_gross, "
+                    "pending_buying_power_impact_usd = :pending_bp, "
+                    "open_structural_risk_usd = :open_risk, "
+                    "open_gross_notional_usd = :open_gross, "
+                    "open_buying_power_impact_usd = :open_bp, "
+                    "last_broker_observed_at = :observed_at, "
+                    "last_broker_available_at = :available_at, "
+                    "last_source_event_content_sha256 = :source_sha, "
+                    "event_sequence = :event_sequence, "
+                    "last_event_sha256 = :event_sha, version = :version, "
+                    "updated_at = :updated_at, "
+                    "lifecycle_contradiction_source_state = :contradiction_state, "
+                    "lifecycle_contradiction_at = :contradiction_at, "
+                    "lifecycle_contradiction_evidence_sha256 = "
+                    ":contradiction_sha "
+                    "WHERE reservation_id = :reservation_id"
+                ),
+                {
+                    "reservation_id": historical["cycle"].reservation_id,
+                    "state": before["state"],
+                    "cumulative": before["cumulative_filled_quantity_shares"],
+                    "open_quantity": before["open_quantity_shares"],
+                    "pending_risk": before["pending_structural_risk_usd"],
+                    "pending_gross": before["pending_gross_notional_usd"],
+                    "pending_bp": before["pending_buying_power_impact_usd"],
+                    "open_risk": before["open_structural_risk_usd"],
+                    "open_gross": before["open_gross_notional_usd"],
+                    "open_bp": before["open_buying_power_impact_usd"],
+                    "observed_at": before["last_broker_observed_at"],
+                    "available_at": before["last_broker_available_at"],
+                    "source_sha": before["last_source_event_content_sha256"],
+                    "event_sequence": before["event_sequence"],
+                    "event_sha": before["last_event_sha256"],
+                    "version": before["version"],
+                    "updated_at": before["updated_at"],
+                    "contradiction_state": before[
+                        "lifecycle_contradiction_source_state"
+                    ],
+                    "contradiction_at": before["lifecycle_contradiction_at"],
+                    "contradiction_sha": before[
+                        "lifecycle_contradiction_evidence_sha256"
+                    ],
+                },
+            )
+            historical_db.expire_all()
+            legacy_row = historical_db.get(
+                AlpacaPaperPostSettlementFillContradiction,
+                v1_sha,
+            )
+            assert legacy_row is not None
+            capture_module.verify_alpaca_paper_post_settlement_fill_contradiction_row(
+                legacy_row
+            )
+            store = AdaptiveRiskReservationStore(engine)
+            legacy_state = store.apply_cumulative_fill(
+                historical["cycle"].reservation_id,
+                evidence=DurableOrderLifecycleEvidence(
+                    event_kind="cumulative_fill",
+                    durability_kind=(
+                        capture_module.POST_SETTLEMENT_FILL_CONTRADICTION_DURABILITY_KIND
+                    ),
+                    provider_event_id=(
+                        f"alpaca-post-settlement-fill:{v1_sha}"
+                    ),
+                    broker_source="alpaca",
+                    connection_generation=legacy_row.broker_connection_generation,
+                    account_scope=legacy_row.account_scope,
+                    execution_family=legacy_row.execution_family,
+                    broker_environment=legacy_row.broker_environment,
+                    account_identity_sha256=legacy_row.account_identity_sha256,
+                    client_order_id=legacy_row.expected_client_order_id,
+                    broker_order_id=legacy_row.broker_order_id,
+                    observed_at=legacy_row.provider_transaction_at,
+                    available_at=legacy_row.provider_available_at,
+                    event_content_sha256=v1_sha,
+                    cumulative_filled_quantity=int(
+                        legacy_row.broker_observed_cumulative_quantity
+                    ),
+                    source_record_table=(
+                        "alpaca_paper_post_settlement_fill_contradictions"
+                    ),
+                    source_record_id=v1_sha,
+                    order_status="partially_filled",
+                ),
+                session=historical_db,
+            )
+            historical_db.flush()
+            assert legacy_state.post_settlement_net_position_quantity_shares is None
+            assert legacy_state.open_quantity_shares == 2
+            frozen_row = conn.execute(
+                text(
+                    "SELECT ctid::text, xmin::text, contradiction_sha256, "
+                    "contradiction_content_canonical_json, "
+                    "contradiction_content_sha256, created_at "
+                    "FROM alpaca_paper_post_settlement_fill_contradictions "
+                    "WHERE contradiction_sha256 = :v1_sha"
+                ),
+                {"v1_sha": v1_sha},
+            ).one()
+
+            conn.execute(text(
+                "DROP TRIGGER IF EXISTS "
+                "trg_adaptive_exit_owner_event_insert "
+                "ON adaptive_risk_reservation_events"
+            ))
+            conn.execute(text(
+                "ALTER TABLE adaptive_risk_reservations DROP COLUMN "
+                "post_settlement_net_position_quantity_shares CASCADE"
+            ))
+            conn.execute(text(
+                "ALTER TABLE alpaca_paper_post_settlement_fill_contradictions "
+                "DROP COLUMN exit_owner_receipt_sha256 CASCADE, "
+                "DROP COLUMN provider_client_order_id CASCADE, "
+                "DROP COLUMN projection_prior_net_position_quantity_shares "
+                "CASCADE, DROP COLUMN "
+                "projected_net_position_quantity_shares CASCADE"
+            ))
+            migrations._install_and_verify_migration_354_contract(
+                conn,
+                allow_registered_repair=False,
+            )
+            assert conn.execute(
+                text(
+                    "SELECT ctid::text, xmin::text, contradiction_sha256, "
+                    "contradiction_content_canonical_json, "
+                    "contradiction_content_sha256, created_at "
+                    "FROM alpaca_paper_post_settlement_fill_contradictions "
+                    "WHERE contradiction_sha256 = :v1_sha"
+                ),
+                {"v1_sha": v1_sha},
+            ).one() == frozen_row
+
+            historical_db.expunge_all()
+            retained = historical_db.get(
+                AlpacaPaperPostSettlementFillContradiction,
+                v1_sha,
+            )
+            assert retained is not None
+            capture_module.verify_alpaca_paper_post_settlement_fill_contradiction_row(
+                retained
+            )
+            replayed_v1 = store.apply_post_settlement_fill_contradiction(
+                historical["cycle"].reservation_id,
+                contradiction_sha256=v1_sha,
+                session=historical_db,
+            )
+            assert replayed_v1.post_settlement_net_position_quantity_shares is None
+            assert replayed_v1.open_quantity_shares == 2
+
+            owner = _append_exit_owner_receipt(
+                historical_db,
+                store,
+                historical["cycle"],
+                provider_order_id="alpaca-first-v2-sell-after-v1",
+                exit_client_order_id="chili-first-v2-sell-after-v1",
+                order_quantity=2,
+                generation=9,
+            )
+            first_v2_sell = _verified_exit_batch(
+                monkeypatch,
+                owner,
+                quantities=(1,),
+                order_quantity=2,
+                first_activity_number=41,
+            )
+            bridged = publish_prepared_alpaca_paper_post_settlement_fill_batch(
+                historical_db,
+                first_v2_sell,
+            )
+            conn.execute(text("SET CONSTRAINTS ALL IMMEDIATE"))
+            terminal = historical_db.get(
+                AlpacaPaperPostSettlementFillContradiction,
+                bridged.contradiction_sha256s[-1],
+            )
+            assert terminal.projection_prior_net_position_quantity_shares == 2
+            assert terminal.projected_net_position_quantity_shares == 1
+            assert terminal.prior_recorded_cumulative_quantity == 0
+            assert bridged.reservation_state.cumulative_filled_quantity_shares == 6
+            assert bridged.reservation_state.open_quantity_shares == 1
+        finally:
+            historical_db.close()
+            transaction.rollback()
+
+
+def test_migration_354_partial_schema_is_completed_or_rejected_before_mutation(
+    db,
+) -> None:
+    with db.begin():
+        reservation, _packet = _persist_cycle_rows(db, _verified_cycle())
+        reservation_id = reservation.reservation_id
+
+    # A correctly named marker is not authority when another required object
+    # is missing.  The current-contract branch verifies and never self-attests.
+    with engine.connect() as conn:
+        transaction = conn.begin()
+        try:
+            conn.execute(text(
+                "ALTER TABLE alpaca_paper_post_settlement_fill_contradictions "
+                "DROP CONSTRAINT ck_alpaca_post_settlement_fill_values"
+            ))
+            conn.execute(text(
+                "DROP TRIGGER trg_adaptive_exit_owner_event_insert "
+                "ON adaptive_risk_reservation_events"
+            ))
+            conn.execute(text(
+                "CREATE TRIGGER trg_adaptive_exit_owner_event_insert "
+                "BEFORE INSERT ON adaptive_risk_reservation_events "
+                "FOR EACH ROW EXECUTE FUNCTION "
+                "chili_guard_adaptive_exit_owner_event_insert()"
+            ))
+            with pytest.raises(
+                RuntimeError,
+                match="constraints missing/misbound",
+            ):
+                migrations._install_and_verify_migration_354_contract(
+                    conn,
+                    allow_registered_repair=False,
+                )
+            assert conn.execute(text(
+                "SELECT count(*) FROM pg_constraint WHERE conname = "
+                "'ck_alpaca_post_settlement_fill_values'"
+            )).scalar_one() == 0
+        finally:
+            transaction.rollback()
+
+    # A wrong physical type fails before the installer can add or replace any
+    # other member of the contract.
+    with engine.connect() as conn:
+        transaction = conn.begin()
+        try:
+            conn.execute(text(
+                "ALTER TABLE alpaca_paper_post_settlement_fill_contradictions "
+                "DROP COLUMN projected_net_position_quantity_shares CASCADE"
+            ))
+            conn.execute(text(
+                "ALTER TABLE alpaca_paper_post_settlement_fill_contradictions "
+                "ADD COLUMN projected_net_position_quantity_shares TEXT NULL"
+            ))
+            before_columns = migrations._columns(
+                conn,
+                "alpaca_paper_post_settlement_fill_contradictions",
+            )
+            with pytest.raises(
+                RuntimeError,
+                match="partial column contract differs",
+            ):
+                migrations._install_and_verify_migration_354_contract(
+                    conn,
+                    allow_registered_repair=False,
+                )
+            assert migrations._columns(
+                conn,
+                "alpaca_paper_post_settlement_fill_contradictions",
+            ) == before_columns
+        finally:
+            transaction.rollback()
+
+    # A compatible partial schema is still untrusted once any retained new
+    # field is populated; no missing column may be added before adjudication.
+    with engine.connect() as conn:
+        transaction = conn.begin()
+        try:
+            conn.execute(text(
+                "DROP TRIGGER trg_adaptive_exit_owner_event_insert "
+                "ON adaptive_risk_reservation_events"
+            ))
+            conn.execute(text(
+                "ALTER TABLE alpaca_paper_post_settlement_fill_contradictions "
+                "DROP COLUMN projected_net_position_quantity_shares CASCADE"
+            ))
+            conn.execute(text(
+                "ALTER TABLE adaptive_risk_reservations "
+                "DROP CONSTRAINT ck_adaptive_risk_reservation_quantities, "
+                "DROP CONSTRAINT ck_adaptive_risk_reservation_contradiction"
+            ))
+            conn.execute(text(
+                "ALTER TABLE adaptive_risk_reservations DISABLE TRIGGER USER"
+            ))
+            conn.execute(
+                text(
+                    "UPDATE adaptive_risk_reservations SET "
+                    "post_settlement_net_position_quantity_shares = 1 "
+                    "WHERE reservation_id = :reservation_id"
+                ),
+                {"reservation_id": reservation_id},
+            )
+            with pytest.raises(
+                RuntimeError,
+                match="non-null pre-contract state",
+            ):
+                migrations._install_and_verify_migration_354_contract(
+                    conn,
+                    allow_registered_repair=False,
+                )
+            assert "projected_net_position_quantity_shares" not in (
+                migrations._columns(
+                    conn,
+                    "alpaca_paper_post_settlement_fill_contradictions",
+                )
+            )
+        finally:
+            transaction.rollback()
+
+    # A reserved-prefix event is likewise quarantined before any partial DDL.
+    with engine.connect() as conn:
+        transaction = conn.begin()
+        try:
+            conn.execute(text(
+                "DROP TRIGGER trg_adaptive_exit_owner_event_insert "
+                "ON adaptive_risk_reservation_events"
+            ))
+            conn.execute(text(
+                "ALTER TABLE alpaca_paper_post_settlement_fill_contradictions "
+                "DROP COLUMN projected_net_position_quantity_shares CASCADE"
+            ))
+            conn.execute(
+                text(
+                    "INSERT INTO adaptive_risk_reservation_events "
+                    "(reservation_id, sequence, event_type, "
+                    " previous_event_sha256, event_sha256, broker_event_id, "
+                    " payload_json, effective_at) VALUES "
+                    "(:reservation_id, 1, 'alpaca_exit_owner_spoofed', "
+                    " NULL, :event_sha256, NULL, '{}'::jsonb, "
+                    " clock_timestamp())"
+                ),
+                {
+                    "reservation_id": reservation_id,
+                    "event_sha256": _hash("spoofed-owner-namespace"),
+                },
+            )
+            with pytest.raises(
+                RuntimeError,
+                match="reserved owner-event namespace is not empty",
+            ):
+                migrations._install_and_verify_migration_354_contract(
+                    conn,
+                    allow_registered_repair=False,
+                )
+            assert "projected_net_position_quantity_shares" not in (
+                migrations._columns(
+                    conn,
+                    "alpaca_paper_post_settlement_fill_contradictions",
+                )
+            )
+        finally:
+            transaction.rollback()
+
+    # Exact nullable/NULL partial additions are the sole completion case.
+    with engine.connect() as conn:
+        transaction = conn.begin()
+        try:
+            conn.execute(text(
+                "DROP TRIGGER trg_adaptive_exit_owner_event_insert "
+                "ON adaptive_risk_reservation_events"
+            ))
+            conn.execute(text(
+                "ALTER TABLE alpaca_paper_post_settlement_fill_contradictions "
+                "DROP COLUMN provider_client_order_id CASCADE, "
+                "DROP COLUMN projected_net_position_quantity_shares CASCADE"
+            ))
+            migrations._install_and_verify_migration_354_contract(
+                conn,
+                allow_registered_repair=False,
+            )
+            migrations._verify_migration_354_physical_contract(conn)
+            assert set(
+                migrations._MIGRATION_354_COLUMN_CONTRACT[
+                    "alpaca_paper_post_settlement_fill_contradictions"
+                ]
+            ) <= migrations._columns(
+                conn,
+                "alpaca_paper_post_settlement_fill_contradictions",
+            )
+        finally:
+            transaction.rollback()
+
+
+def test_migration_354_survives_legacy_repair_reapply(
+    db,
+    monkeypatch,
+) -> None:
+    frozen = _prepare_settled_partial_cycle_with_owner(db, monkeypatch)
+    late_sell = _verified_exit_batch(
+        monkeypatch,
+        frozen["owner_receipt"],
+        quantities=(2, 2),
+        order_quantity=4,
+    )
+    with db.begin():
+        publication = publish_prepared_alpaca_paper_post_settlement_fill_batch(
+            db,
+            late_sell,
+        )
+        db.execute(text("SET CONSTRAINTS ALL IMMEDIATE"))
+        retained_hashes = tuple(publication.contradiction_sha256s)
+        assert publication.reservation_state.post_settlement_net_position_quantity_shares == -2
+
+    repair_functions = (
+        migrations._migration_323_adaptive_db_paper_atomic_lifecycle,
+        migrations._migration_335_adaptive_late_fill_exposure_quarantine,
+        migrations._migration_343_alpaca_post_settlement_fill_contradictions,
+    )
+    with engine.connect() as conn:
+        migrations._verify_migration_354_physical_contract(conn)
+        expected_fingerprint = _migration_354_physical_fingerprint(conn)
+        expected_data_fingerprint = _migration_354_retained_data_fingerprint(
+            conn,
+            frozen["cycle"].reservation_id,
+        )
+        for repair in repair_functions:
+            repair(conn)
+            migrations._verify_migration_354_physical_contract(conn)
+            assert (
+                _migration_354_physical_fingerprint(conn)
+                == expected_fingerprint
+            ), repair.__name__
+            assert _migration_354_retained_data_fingerprint(
+                conn,
+                frozen["cycle"].reservation_id,
+            ) == expected_data_fingerprint
+            actual_hashes = tuple(
+                conn.execute(
+                    text(
+                        "SELECT contradiction_sha256 FROM "
+                        "alpaca_paper_post_settlement_fill_contradictions "
+                        "WHERE reservation_id = :reservation_id "
+                        "ORDER BY contradiction_sequence"
+                    ),
+                    {"reservation_id": frozen["cycle"].reservation_id},
+                ).scalars()
+            )
+            assert actual_hashes == retained_hashes
+
+    # The signed-zero projection is still v2 authority.  A legacy repair may
+    # not coerce it back to the old unsigned/open-quantity interpretation.
+    late_buy = _verified_entry_batch(
+        monkeypatch,
+        quantities=(4, 2),
+        order_quantity=10,
+    )
+    with db.begin():
+        zeroed = publish_prepared_alpaca_paper_entry_fill_batch(db, late_buy)
+        db.execute(text("SET CONSTRAINTS ALL IMMEDIATE"))
+        assert zeroed.reservation_state.post_settlement_net_position_quantity_shares == 0
+        assert zeroed.reservation_state.open_quantity_shares == 0
+    with engine.connect() as conn:
+        expected_zero_fingerprint = _migration_354_retained_data_fingerprint(
+            conn,
+            frozen["cycle"].reservation_id,
+        )
+        migrations._migration_343_alpaca_post_settlement_fill_contradictions(conn)
+        migrations._verify_migration_354_physical_contract(conn)
+        assert _migration_354_retained_data_fingerprint(
+            conn,
+            frozen["cycle"].reservation_id,
+        ) == expected_zero_fingerprint
+        assert conn.execute(
+            text(
+                "SELECT post_settlement_net_position_quantity_shares "
+                "FROM adaptive_risk_reservations "
+                "WHERE reservation_id = :reservation_id"
+            ),
+            {"reservation_id": frozen["cycle"].reservation_id},
+        ).scalar_one() == 0
+
+    # A registered/current database may be repaired; a registered database
+    # with a missing column must hard-fail rather than infer a partial install.
+    with engine.connect() as conn:
+        transaction = conn.begin()
+        try:
+            conn.execute(text(
+                "ALTER TABLE alpaca_paper_post_settlement_fill_contradictions "
+                "DROP COLUMN projected_net_position_quantity_shares CASCADE"
+            ))
+            with pytest.raises(
+                RuntimeError,
+                match="registered migration 354 column contract is incomplete",
+            ):
+                migrations._reassert_354_if_present(conn)
+        finally:
+            transaction.rollback()
 
 
 def test_entry_fill_publication_is_atomic_and_replay_idempotent(
@@ -2035,160 +3276,321 @@ def test_late_fill_after_release_is_durably_quarantined_and_idempotent(
         )
 
 
-def test_post_settlement_fill_uses_separate_ledger_and_replays_proof(
+def test_post_settlement_late_sell_binds_oid_owner_and_projects_signed_exposure_without_rewriting_settlement(
     db,
     monkeypatch,
 ) -> None:
-    initial_batch = _partial_verified_entry_batch(monkeypatch)
-    exit_batch = _verified_exit_batch(monkeypatch)
+    frozen = _prepare_settled_partial_cycle_with_owner(db, monkeypatch)
+    late_batch = _verified_exit_batch(
+        monkeypatch,
+        frozen["owner_receipt"],
+        quantities=(2, 2),
+        order_quantity=4,
+    )
 
     with db.begin():
-        reservation, _packet = _persist_cycle_rows(db, initial_batch.cycle)
-        _reset_for_entry_fill(reservation)
-        db.flush()
-        initial = publish_prepared_alpaca_paper_entry_fill_batch(
+        published = publish_prepared_alpaca_paper_post_settlement_fill_batch(
             db,
-            initial_batch,
+            late_batch,
         )
-        assert initial.reservation_state.state == "partially_filled"
-        store = AdaptiveRiskReservationStore(engine)
-        finalized = store.finalize_filled_entry_remainder(
-            reservation.reservation_id,
-            evidence=_terminal_entry_or_position_evidence(
-                initial_batch,
-                event_at=db.execute(
-                    text("SELECT clock_timestamp()")
-                ).scalar_one(),
-                event_kind="filled_entry_terminal",
-                order_status="canceled",
-                cumulative=4,
-                label="partial-entry-canceled",
-            ),
-            session=db,
+        db.execute(text("SET CONSTRAINTS ALL IMMEDIATE"))
+        assert published.handoff_proof is None
+        assert len(published.contradiction_sha256s) == 1
+        assert published.reservation_state.state == "exposure_quarantined"
+        assert published.reservation_state.cumulative_filled_quantity_shares == 4
+        assert (
+            published.reservation_state.post_settlement_net_position_quantity_shares
+            == -2
         )
-        assert finalized.state == "filled"
-        captured_exit = append_prepared_alpaca_paper_fill_batch(
-            db,
-            exit_batch,
+        assert published.reservation_state.open_quantity_shares == 2
+        assert published.reservation_state.open_structural_risk_usd == Decimal("1")
+        row = db.get(
+            AlpacaPaperPostSettlementFillContradiction,
+            published.contradiction_sha256s[0],
         )
-        assert captured_exit.created_count == 1
-        flat = store.close_open_exposure(
-            reservation.reservation_id,
-            evidence=_terminal_entry_or_position_evidence(
-                initial_batch,
-                event_at=db.execute(
-                    text("SELECT clock_timestamp()")
-                ).scalar_one(),
-                event_kind="position_flat",
-                order_status="flat",
-                cumulative=4,
-                remaining_open_quantity=0,
-                label="position-flat-after-exit",
-            ),
-            session=db,
+        assert row.side == "sell"
+        assert row.order_role == "exit"
+        assert row.exit_owner_receipt_sha256 == (
+            frozen["owner_receipt"].receipt_sha256
         )
-        assert flat.state == "flat_pending_settlement"
-        settled = settle_flat_alpaca_paper_cycle(
-            db,
-            reservation_id=reservation.reservation_id,
+        assert row.provider_client_order_id == (
+            frozen["owner_receipt"].provider_client_order_id
         )
-        assert settled.created is True
-        settlement_sha = settled.row.settlement_sha256
-        settled_net = Decimal(settled.row.net_realized_pnl_usd)
-        settled_fill_hashes = tuple(
-            db.scalars(
-                select(AlpacaPaperFillActivity.event_sha256)
-                .where(
-                    AlpacaPaperFillActivity.reservation_id
-                    == reservation.reservation_id
-                )
-                .order_by(AlpacaPaperFillActivity.sequence)
+        aliased_cid = copy(row)
+        aliased_cid.provider_client_order_id = row.expected_client_order_id
+        with pytest.raises(
+            capture_module.AlpacaFillActivityCorruption,
+            match="role authority changed",
+        ):
+            capture_module.verify_alpaca_paper_post_settlement_fill_contradiction_row(
+                aliased_cid
             )
-        )
-        assert len(settled_fill_hashes) == 2
-        reservation_id = reservation.reservation_id
+        assert row.prior_recorded_cumulative_quantity == Decimal("2")
+        assert row.broker_observed_cumulative_quantity == Decimal("4")
+        assert row.projection_prior_net_position_quantity_shares == 0
+        assert row.projected_net_position_quantity_shares == -2
 
-    with db.begin():
-        reservation = db.get(
-            AdaptiveRiskReservation,
-            reservation_id,
-            with_for_update=True,
-        )
         settlement = db.get(
             capture_module.AlpacaPaperCycleSettlement,
-            settlement_sha,
-            with_for_update=True,
+            frozen["settlement_sha256"],
         )
-        assert reservation is not None
-        assert settlement is not None
-        last_observed_before_late = reservation.last_broker_observed_at
-        last_available_before_late = reservation.last_broker_available_at
-        # A post-settlement contradiction is discovered by a fresh broker read.
-        # Its immutable execution time may precede settlement, while its
-        # available-at clock must advance when the late fact is learned.
-        late_batch = _two_fill_verified_batch(monkeypatch)
-        late = publish_prepared_alpaca_paper_entry_fill_batch(db, late_batch)
-        assert late.capture is None
-        assert late.publication_kind == "post_settlement_contradiction"
-        assert late.settlement_sha256 == settlement_sha
-        assert len(late.contradiction_sha256s) == 1
-        assert late.handoff_proof is not None
-        assert late.handoff_proof.publication_kind == (
-            "post_settlement_contradiction"
-        )
-        assert late.reservation_state.state == "exposure_quarantined"
-        assert late.reservation_state.cumulative_filled_quantity_shares == 10
-        assert late.reservation_state.open_quantity_shares == 6
-        assert late.reservation_state.open_structural_risk_usd == Decimal("3")
-        assert late.reservation_state.open_gross_notional_usd == Decimal("15")
-        assert (
-            late.reservation_state.open_buying_power_impact_usd
-            == Decimal("15")
-        )
-        assert late.handoff_proof.observed_at < last_observed_before_late
-        assert (
-            reservation.last_broker_observed_at
-            == late.handoff_proof.observed_at
-        )
-        assert late.handoff_proof.available_at >= last_available_before_late
-        assert (
-            reservation.last_broker_available_at
-            == late.handoff_proof.available_at
-        )
-        assert (
-            verify_alpaca_paper_entry_fill_handoff(
-                db,
-                late.handoff_proof,
-            )
-            == late.handoff_proof
-        )
-        assert Decimal(settlement.net_realized_pnl_usd) == settled_net
-        assert settlement.settlement_sha256 == settlement_sha
+        assert Decimal(settlement.net_realized_pnl_usd) == frozen["settled_pnl"]
         assert tuple(
             db.scalars(
                 select(AlpacaPaperFillActivity.event_sha256)
                 .where(
                     AlpacaPaperFillActivity.reservation_id
-                    == reservation.reservation_id
+                    == frozen["cycle"].reservation_id
                 )
                 .order_by(AlpacaPaperFillActivity.sequence)
             )
-        ) == settled_fill_hashes
+        ) == frozen["settled_fill_hashes"]
 
-        replayed = publish_prepared_alpaca_paper_entry_fill_batch(
+        replayed = publish_prepared_alpaca_paper_post_settlement_fill_batch(
             db,
             late_batch,
         )
         assert replayed.contradiction_sha256s == ()
-        assert replayed.handoff_proof == late.handoff_proof
-        assert replayed.reservation_state == late.reservation_state
-        assert (
-            db.scalar(
-                select(func.count()).select_from(
-                    capture_module.AlpacaPaperPostSettlementFillContradiction
+        assert replayed.reservation_state == published.reservation_state
+        assert db.scalar(
+            select(func.count()).select_from(
+                AlpacaPaperPostSettlementFillContradiction
+            )
+        ) == 1
+
+
+def test_post_settlement_late_buy_and_sell_return_signed_net_to_zero_with_exact_costs(
+    db,
+    monkeypatch,
+) -> None:
+    frozen = _prepare_settled_partial_cycle_with_owner(db, monkeypatch)
+    late_sell = _verified_exit_batch(
+        monkeypatch,
+        frozen["owner_receipt"],
+        quantities=(2, 2),
+        order_quantity=4,
+    )
+    late_buy = _verified_entry_batch(
+        monkeypatch,
+        quantities=(4, 2),
+        order_quantity=10,
+    )
+
+    with db.begin():
+        sold = publish_prepared_alpaca_paper_post_settlement_fill_batch(
+            db,
+            late_sell,
+        )
+        db.execute(text("SET CONSTRAINTS ALL IMMEDIATE"))
+        assert sold.reservation_state.post_settlement_net_position_quantity_shares == -2
+
+    with db.begin():
+        bought = publish_prepared_alpaca_paper_entry_fill_batch(db, late_buy)
+        db.execute(text("SET CONSTRAINTS ALL IMMEDIATE"))
+        assert bought.reservation_state.cumulative_filled_quantity_shares == 6
+        assert bought.reservation_state.post_settlement_net_position_quantity_shares == 0
+        assert bought.reservation_state.open_quantity_shares == 0
+        assert bought.reservation_state.open_structural_risk_usd == 0
+        assert bought.reservation_state.open_gross_notional_usd == 0
+        assert bought.reservation_state.open_buying_power_impact_usd == 0
+        rows = list(
+            db.scalars(
+                select(AlpacaPaperPostSettlementFillContradiction)
+                .order_by(
+                    AlpacaPaperPostSettlementFillContradiction.contradiction_sequence
                 )
             )
-            == 1
+        )
+        assert [row.side for row in rows] == ["sell", "buy"]
+        assert [Decimal(row.fee_usd) for row in rows] == [Decimal("0"), Decimal("0")]
+        assert rows[1].previous_contradiction_sha256 == rows[0].contradiction_sha256
+        assert rows[1].projection_prior_net_position_quantity_shares == -2
+        assert rows[1].projected_net_position_quantity_shares == 0
+        assert bought.handoff_proof is None
+        replayed = publish_prepared_alpaca_paper_entry_fill_batch(db, late_buy)
+        assert replayed.contradiction_sha256s == ()
+        assert replayed.handoff_proof is None
+        settlement = db.get(
+            capture_module.AlpacaPaperCycleSettlement,
+            frozen["settlement_sha256"],
+        )
+        assert Decimal(settlement.net_realized_pnl_usd) == frozen["settled_pnl"]
+
+
+def test_post_settlement_replacement_owners_use_order_local_cumulative_and_available_lineage(
+    db,
+    monkeypatch,
+) -> None:
+    frozen = _prepare_settled_partial_cycle_with_owner(
+        db,
+        monkeypatch,
+        include_replacement_owner=True,
+    )
+    first_batch = _verified_exit_batch(
+        monkeypatch,
+        frozen["owner_receipt"],
+        quantities=(1, 2),
+        order_quantity=4,
+    )
+    with db.begin():
+        first = publish_prepared_alpaca_paper_post_settlement_fill_batch(
+            db,
+            first_batch,
+        )
+        db.execute(text("SET CONSTRAINTS ALL IMMEDIATE"))
+        assert first.reservation_state.post_settlement_net_position_quantity_shares == -2
+
+    replacement_receipt = frozen["replacement_receipt"]
+    assert replacement_receipt is not None
+    replacement_batch = _verified_exit_batch(
+        monkeypatch,
+        replacement_receipt,
+        quantities=(1,),
+        order_quantity=3,
+        first_activity_number=11,
+        transaction_second_start=0,
+    )
+
+    with db.begin():
+        second = publish_prepared_alpaca_paper_post_settlement_fill_batch(
+            db,
+            replacement_batch,
+        )
+        db.execute(text("SET CONSTRAINTS ALL IMMEDIATE"))
+        assert second.reservation_state.post_settlement_net_position_quantity_shares == -3
+        rows = list(
+            db.scalars(
+                select(AlpacaPaperPostSettlementFillContradiction)
+                .order_by(
+                    AlpacaPaperPostSettlementFillContradiction.contradiction_sequence
+                )
+            )
+        )
+        assert len(rows) == 2
+        assert rows[0].prior_recorded_cumulative_quantity == Decimal("1")
+        assert rows[0].broker_observed_cumulative_quantity == Decimal("3")
+        assert rows[1].provider_order_id == replacement_receipt.provider_order_id
+        assert rows[1].prior_recorded_cumulative_quantity == Decimal("0")
+        assert rows[1].broker_observed_cumulative_quantity == Decimal("1")
+        assert rows[1].provider_transaction_at < rows[0].provider_transaction_at
+        assert rows[1].provider_available_at >= rows[0].provider_available_at
+        assert rows[1].previous_contradiction_sha256 == rows[0].contradiction_sha256
+
+
+def test_post_settlement_sell_batch_is_all_or_none_idempotent_and_owner_fail_closed(
+    db,
+    monkeypatch,
+) -> None:
+    frozen = _prepare_settled_partial_cycle_with_owner(db, monkeypatch)
+    batch = _verified_exit_batch(
+        monkeypatch,
+        frozen["owner_receipt"],
+        quantities=(2, 1, 1),
+        order_quantity=4,
+    )
+    original_apply = AdaptiveRiskReservationStore.apply_post_settlement_fill_contradiction
+
+    def fail_projection(*_args, **_kwargs):
+        raise AdaptiveReservationStateConflict("injected signed projection failure")
+
+    with db.begin():
+        monkeypatch.setattr(
+            AdaptiveRiskReservationStore,
+            "apply_post_settlement_fill_contradiction",
+            fail_projection,
+        )
+        with pytest.raises(
+            AdaptiveReservationStateConflict,
+            match="injected signed projection failure",
+        ):
+            publish_prepared_alpaca_paper_post_settlement_fill_batch(db, batch)
+        assert db.scalar(
+            select(func.count()).select_from(
+                AlpacaPaperPostSettlementFillContradiction
+            )
+        ) == 0
+
+        monkeypatch.setattr(
+            AdaptiveRiskReservationStore,
+            "apply_post_settlement_fill_contradiction",
+            original_apply,
+        )
+        published = publish_prepared_alpaca_paper_post_settlement_fill_batch(
+            db,
+            batch,
+        )
+        db.execute(text("SET CONSTRAINTS ALL IMMEDIATE"))
+        assert len(published.contradiction_sha256s) == 2
+        replayed = publish_prepared_alpaca_paper_post_settlement_fill_batch(
+            db,
+            batch,
+        )
+        assert replayed.contradiction_sha256s == ()
+        assert db.scalar(
+            select(func.count()).select_from(
+                AlpacaPaperPostSettlementFillContradiction
+            )
+        ) == 2
+
+    original_load = AdaptiveRiskReservationStore.load_exit_owner_receipt
+
+    def fail_owner(*_args, **_kwargs):
+        raise AdaptiveReservationStateConflict("injected owner receipt failure")
+
+    with db.begin():
+        reservation = db.scalar(
+            select(AdaptiveRiskReservation)
+            .where(
+                AdaptiveRiskReservation.reservation_id
+                == batch.cycle.reservation_id
+            )
+            .with_for_update()
+        )
+        assert reservation is not None
+        packet = db.get(
+            AdaptiveRiskDecisionPacket,
+            reservation.decision_packet_sha256,
+        )
+        settlement = db.scalar(
+            select(capture_module.AlpacaPaperCycleSettlement)
+            .where(
+                capture_module.AlpacaPaperCycleSettlement.reservation_id
+                == reservation.reservation_id
+            )
+            .with_for_update()
+        )
+        assert packet is not None and settlement is not None
+        monkeypatch.setattr(
+            AdaptiveRiskReservationStore,
+            "load_exit_owner_receipt",
+            fail_owner,
+        )
+        with pytest.raises(
+            AlpacaFillActivityConflict,
+            match="lacks its prelocked owner receipt",
+        ):
+            capture_module._publish_post_settlement_fill_contradictions(
+                db,
+                batch,
+                reservation=reservation,
+                packet=packet,
+                settlement=settlement,
+                exit_owner_receipt=None,
+            )
+        with pytest.raises(
+            AdaptiveReservationStateConflict,
+            match="injected owner receipt failure",
+        ):
+            publish_prepared_alpaca_paper_post_settlement_fill_batch(db, batch)
+        assert db.scalar(
+            select(func.count()).select_from(
+                AlpacaPaperPostSettlementFillContradiction
+            )
+        ) == 2
+        monkeypatch.setattr(
+            AdaptiveRiskReservationStore,
+            "load_exit_owner_receipt",
+            original_load,
         )
 
 

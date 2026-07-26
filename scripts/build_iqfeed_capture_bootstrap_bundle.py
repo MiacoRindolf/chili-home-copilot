@@ -44,13 +44,21 @@ _MAX_REQUEST_BYTES = 4 * 1024 * 1024
 _MAX_REQUEST_AGE_SECONDS = 60.0
 _MAX_ACCOUNT_SNAPSHOT_AGE_SECONDS = 30.0
 # Startup evidence is a process-instance/bundle-identity record, not broker
-# truth: the operator flow stages dependencies and runs its long-TTL probe
-# authorities (focused shard, rollback baseline, lifecycle) for several
-# minutes before the capture smoke consumes this bundle, so reusing the 30s
-# account-snapshot window made every real end-to-end run fail closed with
-# STALE_EVIDENCE. Account freshness at order time is enforced separately by
-# the 30s broker_account probe and the transport-boundary re-reads.
-_MAX_STARTUP_EVIDENCE_AGE_SECONDS = 900.0
+# truth.  The operator chain has an exact 30-minute timeout and deliberately
+# completes preselection plus its fixed regression/migration/lifecycle gates
+# before the capture smoke consumes this bundle.  Bound startup identity to
+# that same outer timeout so a valid chain cannot outlive it, while the fresh
+# broker-account probe and transport-boundary re-reads continue to own account
+# and order-time freshness.
+# 2026-07-23 (a77 finding): the full ActivatePaper chain (61-test roster +
+# rehearsal + smoke + finalize + cutover to service boot) measures 21-32 min
+# live depending on host load, so the prior 30-min window made slow-but-valid
+# chains fail STALE_EVIDENCE at the service's bootstrap preflight by ~1 min
+# (a74=21min passed, a76=29min passed, a77=31min rejected).  This evidence is
+# infrastructure startup proof, not market data -- account/order freshness is
+# owned by the fresh broker probes and the tape gates.  60 min = ~2x the
+# worst observed chain duration.
+_MAX_STARTUP_EVIDENCE_AGE_SECONDS = 60 * 60.0
 _MAX_FUTURE_SKEW_SECONDS = 5.0
 _MAX_PROJECTION_DEPTH = 16
 _MAX_PROJECTION_ITEMS = 10_000
@@ -449,9 +457,16 @@ def _safe_account_risk_snapshot(value: Any) -> Mapping[str, Any]:
             raise IqfeedCaptureBootstrapBundleError(
                 f"account_risk_snapshot.{field} is not finite"
             )
-        if field in {"equity", "last_equity"} and parsed <= 0:
+        if field == "equity" and parsed <= 0:
             raise IqfeedCaptureBootstrapBundleError(
                 f"account_risk_snapshot.{field} must be positive"
+            )
+        # 2026-07-23: Alpaca resets paper `last_equity` to 0 at the trading-day
+        # boundary, so zero is a valid healthy state (informational prior-close
+        # equity, not a safety gate) -- matched with the operator-chain posture.
+        if field == "last_equity" and parsed < 0:
+            raise IqfeedCaptureBootstrapBundleError(
+                "account_risk_snapshot.last_equity must be nonnegative"
             )
         if field == "buying_power" and parsed < 0:
             raise IqfeedCaptureBootstrapBundleError(

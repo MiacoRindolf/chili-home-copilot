@@ -52,6 +52,9 @@ _EXACT_ALLOWED = frozenset(
         "CHILI_AUTOPILOT_PRICE_BUS_ENABLED",
         "CHILI_CAPTURED_PAPER_CONFIG_ISOLATED",
         "CHILI_EQUITY_EXECUTION_RAIL",
+        "CHILI_KILL_SWITCH_DB_FAIL_CLOSED",
+        "CHILI_KILL_SWITCH_DB_POLL_ENABLED",
+        "CHILI_KILL_SWITCH_DB_POLL_INTERVAL_S",
     }
 )
 _ALLOWED_PREFIXES = (
@@ -77,6 +80,9 @@ _REQUIRED_SECRET_KEYS = frozenset(
 )
 
 _CAPTURED_PAPER_OPERATIONAL_SETTING_NAMES = (
+    "chili_kill_switch_db_fail_closed",
+    "chili_kill_switch_db_poll_enabled",
+    "chili_kill_switch_db_poll_interval_s",
     "chili_momentum_captured_paper_action_claim_lease_seconds",
     "chili_momentum_captured_paper_outbox_max_attempts",
     "chili_momentum_captured_paper_outbox_max_reconciliation_attempts",
@@ -361,6 +367,14 @@ def _runtime_overrides(
             "CHILI_CAPTURED_PAPER_CONFIG_ISOLATED": "true",
             "CHILI_ALPACA_QUOTES_VIA_IQFEED": "false",
             "CHILI_EQUITY_EXECUTION_RAIL": "alpaca",
+            # Cross-process kill-switch truth is an operational safety
+            # invariant, not a parent-shell preference.  Force every PAPER
+            # decision to refresh durable state and fail closed when that read
+            # is unavailable; the effective values are content-addressed in
+            # the runtime-environment and parsed-settings receipts below.
+            "CHILI_KILL_SWITCH_DB_POLL_ENABLED": "true",
+            "CHILI_KILL_SWITCH_DB_POLL_INTERVAL_S": "0",
+            "CHILI_KILL_SWITCH_DB_FAIL_CLOSED": "true",
             "CHILI_MOMENTUM_EQUITY_EXECUTION_VIA_ALPACA_PAPER": "true",
             "CHILI_MOMENTUM_CRYPTO_EXECUTION_VIA_ALPACA_PAPER": "false",
             "CHILI_MOMENTUM_AUTO_ARM_CRYPTO_ONLY": "false",
@@ -436,6 +450,9 @@ def validate_installed_captured_paper_settings(
         "chili_alpaca_expected_account_id": receipt.expected_account_id,
         "chili_alpaca_quotes_via_iqfeed": False,
         "chili_equity_execution_rail": "alpaca",
+        "chili_kill_switch_db_poll_enabled": True,
+        "chili_kill_switch_db_poll_interval_s": 0.0,
+        "chili_kill_switch_db_fail_closed": True,
         "chili_momentum_equity_execution_via_alpaca_paper": True,
         "chili_momentum_crypto_execution_via_alpaca_paper": False,
         "chili_momentum_auto_arm_crypto_only": False,

@@ -6,6 +6,15 @@ from dataclasses import dataclass
 from typing import Iterator
 
 
+CAPTURED_PAPER_VARIANT_KEY_PREFIX = "captured_paper:"
+
+
+def is_generic_visible_variant_key(value: object) -> bool:
+    """Reserved PAPER clones are reachable only through exact receipt IDs."""
+
+    return not str(value or "").startswith(CAPTURED_PAPER_VARIANT_KEY_PREFIX)
+
+
 @dataclass(frozen=True)
 class MomentumStrategyFamily:
     family_id: str
