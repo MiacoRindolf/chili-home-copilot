@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import contextlib
 import contextvars
+import hashlib
+import json
 import logging
 import math
 import statistics
@@ -24,6 +26,9 @@ logger = logging.getLogger(__name__)
 POLICY_VERSION = 1
 RISK_SNAPSHOT_KEY = "momentum_risk"
 POLICY_SNAPSHOT_KEY = "momentum_risk_policy_summary"
+SEALED_READINESS_CONVICTION_SCHEMA_VERSION = (
+    "chili.sealed-readiness-conviction-adjustment.v1"
+)
 
 _REPLAY_RISK_NOW: contextvars.ContextVar[Optional[datetime]] = (
     contextvars.ContextVar("_chili_replay_risk_now", default=None)
@@ -2936,6 +2941,393 @@ def _kelly_fraction_from_conviction(conviction: float) -> float:
         return 0.0
     p = max(0.0, min(1.0, p))
     return 0.5 * max(0.0, 2.0 * p - 1.0)
+
+
+def _persisted_catalyst_symbols(value: Any) -> set[str]:
+    if value is None:
+        return set()
+    if not isinstance(value, (list, tuple, set, frozenset)):
+        raise ValueError("persisted catalyst membership is invalid")
+    normalized: set[str] = set()
+    for item in value:
+        if not isinstance(item, str) or not item.strip():
+            raise ValueError("persisted catalyst membership is invalid")
+        normalized.add(item.strip().upper())
+    return normalized
+
+
+def persisted_catalyst_news_grade_rank(
+    *,
+    symbol: str,
+    strong_symbols: Any,
+    weak_symbols: Any,
+    fake_symbols: Any,
+    fake_guard_enabled: bool,
+) -> int:
+    """Resolve catalyst dominance solely from one persisted selection packet.
+
+    Weak membership always dominates strong. Fake membership dominates strong
+    only while the persisted fake-catalyst guard is enabled. The function is
+    deliberately pure so ordinary LIVE and captured PAPER/replay cannot observe
+    different catalyst caches for the same decision.
+    """
+
+    if type(fake_guard_enabled) is not bool:
+        raise ValueError("persisted fake-catalyst guard is invalid")
+    normalized_symbol = str(symbol or "").strip().upper()
+    if not normalized_symbol:
+        raise ValueError("persisted catalyst symbol is invalid")
+    strong = _persisted_catalyst_symbols(strong_symbols)
+    weak = _persisted_catalyst_symbols(weak_symbols)
+    fake = _persisted_catalyst_symbols(fake_symbols)
+    return int(
+        normalized_symbol in strong
+        and normalized_symbol not in weak
+        and not (
+            normalized_symbol in fake
+            and fake_guard_enabled
+        )
+    ) * 3
+
+
+def sealed_readiness_conviction_adjustment(
+    *,
+    base_setup_quality: float,
+    symbol: str,
+    squeeze_rank_pct: float | None,
+    squeeze_fuel_pct: float | None,
+    ofi: float | None,
+    strong_symbols: Any,
+    weak_symbols: Any,
+    fake_symbols: Any,
+    settings_obj: Any,
+    config_provenance_sha256: str,
+    selection_payload_sha256: str,
+) -> tuple[float, dict[str, Any] | None]:
+    """Adjust captured adaptive quality from one sealed selection snapshot.
+
+    This is the shared PAPER/replay economics seam for the existing squeeze
+    entry and Kelly-conviction levers.  It performs no provider, catalyst-cache,
+    database, or wall-clock read.  Every economic input is an explicit value
+    from the already content-addressed selection packet, and every setting that
+    can alter an active result is copied into the returned audit.  When the
+    master/top-N gate is off, or both downstream levers are off, it returns the
+    base quality with no audit so the legacy fact payload stays byte-identical.
+
+    Weak catalyst membership always dominates strong.  Fake membership
+    dominates strong only while the persisted fake-catalyst guard is enabled,
+    matching the canonical catalyst grade.  Missing evidence is neutral:
+    effective quality remains the durable base quality.
+    """
+
+    def finite(
+        value: Any,
+        *,
+        minimum: float | None = None,
+        maximum: float | None = None,
+        required: bool = True,
+    ) -> float | None:
+        if value is None:
+            if not required:
+                return None
+            raise ValueError("sealed conviction numeric input is invalid")
+        if isinstance(value, bool):
+            raise ValueError("sealed conviction numeric input is invalid")
+        try:
+            normalized = float(value)
+        except (TypeError, ValueError, OverflowError) as exc:
+            raise ValueError("sealed conviction numeric input is invalid") from exc
+        if not math.isfinite(normalized):
+            raise ValueError("sealed conviction numeric input is invalid")
+        if minimum is not None and normalized < minimum:
+            raise ValueError("sealed conviction numeric input is below its bound")
+        if maximum is not None and normalized > maximum:
+            raise ValueError("sealed conviction numeric input is above its bound")
+        return normalized
+
+    def setting(name: str) -> Any:
+        if isinstance(settings_obj, dict):
+            if name not in settings_obj:
+                raise ValueError(f"sealed conviction setting missing:{name}")
+            return settings_obj[name]
+        if settings_obj is None or not hasattr(settings_obj, name):
+            raise ValueError(f"sealed conviction setting missing:{name}")
+        return getattr(settings_obj, name)
+
+    def boolean_setting(name: str) -> bool:
+        value = setting(name)
+        if type(value) is not bool:
+            raise ValueError(f"sealed conviction setting invalid:{name}")
+        return value
+
+    def policy_float(
+        name: str,
+        *,
+        minimum: float,
+        maximum: float | None = None,
+    ) -> float:
+        value = finite(
+            setting(name),
+            minimum=minimum,
+            maximum=maximum,
+        )
+        assert value is not None
+        return value
+
+    def exact_sha(value: Any, field: str) -> str:
+        normalized = str(value or "").strip().lower()
+        if len(normalized) != 64 or any(
+            character not in "0123456789abcdef" for character in normalized
+        ):
+            raise ValueError(f"sealed conviction {field} is invalid")
+        return normalized
+
+    base = finite(base_setup_quality, minimum=0.0, maximum=1.0)
+    assert base is not None
+    sym = str(symbol or "").strip().upper()
+    if not sym:
+        raise ValueError("sealed conviction symbol is invalid")
+    config_sha256 = exact_sha(config_provenance_sha256, "config provenance")
+    selection_sha256 = exact_sha(selection_payload_sha256, "selection payload")
+
+    policy = {
+        "squeeze_fuel_tilt_enabled": boolean_setting(
+            "chili_momentum_squeeze_fuel_tilt_enabled"
+        ),
+        "squeeze_fuel_top_n": int(
+            policy_float(
+                "chili_momentum_squeeze_fuel_top_n",
+                minimum=0.0,
+                maximum=60.0,
+            )
+        ),
+        "squeeze_entry_sizeup_enabled": boolean_setting(
+            "chili_momentum_squeeze_entry_sizeup_enabled"
+        ),
+        "squeeze_entry_top_pctl": policy_float(
+            "chili_momentum_squeeze_entry_top_pctl",
+            minimum=0.0,
+            maximum=0.999,
+        ),
+        "squeeze_entry_max_mult": policy_float(
+            "chili_momentum_squeeze_entry_max_mult",
+            minimum=1.0,
+            maximum=3.0,
+        ),
+        "kelly_conviction_enabled": boolean_setting(
+            "chili_momentum_kelly_conviction_enabled"
+        ),
+        "kelly_conviction_max_multiplier": policy_float(
+            "chili_momentum_kelly_conviction_max_multiplier",
+            minimum=1.0,
+            maximum=2.0,
+        ),
+        "kelly_conviction_gain": policy_float(
+            "chili_momentum_kelly_conviction_gain",
+            minimum=0.0,
+            maximum=5.0,
+        ),
+        "kelly_conviction_w_squeeze": policy_float(
+            "chili_momentum_kelly_conviction_w_squeeze",
+            minimum=0.0,
+            maximum=1.0,
+        ),
+        "kelly_conviction_w_ofi": policy_float(
+            "chili_momentum_kelly_conviction_w_ofi",
+            minimum=0.0,
+            maximum=1.0,
+        ),
+        "kelly_conviction_w_news": policy_float(
+            "chili_momentum_kelly_conviction_w_news",
+            minimum=0.0,
+            maximum=1.0,
+        ),
+        "fake_catalyst_guard_enabled": boolean_setting(
+            "chili_momentum_fake_catalyst_guard_enabled"
+        ),
+    }
+    if (
+        isinstance(setting("chili_momentum_squeeze_fuel_top_n"), bool)
+        or float(policy["squeeze_fuel_top_n"])
+        != float(setting("chili_momentum_squeeze_fuel_top_n"))
+    ):
+        raise ValueError("sealed conviction squeeze top-N setting is not an integer")
+
+    master_enabled = bool(policy["squeeze_fuel_tilt_enabled"]) and (
+        int(policy["squeeze_fuel_top_n"]) > 0
+    )
+    policy_active = master_enabled and (
+        bool(policy["squeeze_entry_sizeup_enabled"])
+        or bool(policy["kelly_conviction_enabled"])
+    )
+    if not policy_active:
+        return base, None
+
+    rank = finite(
+        squeeze_rank_pct,
+        minimum=0.0,
+        maximum=1.0,
+        required=False,
+    )
+    fuel = finite(
+        squeeze_fuel_pct,
+        minimum=0.0,
+        maximum=1.0,
+        required=False,
+    )
+    persisted_ofi = finite(
+        ofi,
+        minimum=-1.0,
+        maximum=1.0,
+        required=False,
+    )
+    news_grade_rank = persisted_catalyst_news_grade_rank(
+        symbol=sym,
+        strong_symbols=strong_symbols,
+        weak_symbols=weak_symbols,
+        fake_symbols=fake_symbols,
+        fake_guard_enabled=bool(policy["fake_catalyst_guard_enabled"]),
+    )
+    strong_member = sym in _persisted_catalyst_symbols(strong_symbols)
+    weak_member = sym in _persisted_catalyst_symbols(weak_symbols)
+    fake_member = sym in _persisted_catalyst_symbols(fake_symbols)
+
+    evidence_complete = (
+        rank is not None
+        and fuel is not None
+        and persisted_ofi is not None
+    )
+    entry_enabled = (
+        master_enabled
+        and bool(policy["squeeze_entry_sizeup_enabled"])
+        and evidence_complete
+        and news_grade_rank > 0
+        and persisted_ofi is not None
+        and persisted_ofi > 0.0
+        and rank is not None
+        and rank >= float(policy["squeeze_entry_top_pctl"])
+    )
+    entry_multiplier = 1.0
+    if entry_enabled and rank is not None:
+        floor = float(policy["squeeze_entry_top_pctl"])
+        cap = float(policy["squeeze_entry_max_mult"])
+        fraction = max(0.0, min(1.0, (rank - floor) / (1.0 - floor)))
+        entry_multiplier = 1.0 + (cap - 1.0) * fraction
+
+    kelly_enabled = (
+        master_enabled
+        and bool(policy["kelly_conviction_enabled"])
+        and evidence_complete
+        and news_grade_rank > 0
+        and fuel is not None
+        and fuel > 0.5
+        and persisted_ofi is not None
+        and persisted_ofi > 0.0
+    )
+    conviction = 0.0
+    half_kelly = 0.0
+    kelly_multiplier = 1.0
+    if kelly_enabled and fuel is not None and persisted_ofi is not None:
+        weights = (
+            float(policy["kelly_conviction_w_squeeze"]),
+            float(policy["kelly_conviction_w_ofi"]),
+            float(policy["kelly_conviction_w_news"]),
+        )
+        weight_sum = math.fsum(weights)
+        if weight_sum > 0.0:
+            squeeze_lift = max(0.0, min(1.0, (fuel - 0.5) / 0.5))
+            ofi_lift = max(0.0, min(1.0, persisted_ofi))
+            conviction = max(
+                0.0,
+                min(
+                    1.0,
+                    (
+                        weights[0] * squeeze_lift
+                        + weights[1] * ofi_lift
+                        + weights[2]
+                    )
+                    / weight_sum,
+                ),
+            )
+            half_kelly = _kelly_fraction_from_conviction(conviction)
+            kelly_multiplier = min(
+                float(policy["kelly_conviction_max_multiplier"]),
+                1.0
+                + float(policy["kelly_conviction_gain"]) * half_kelly,
+            )
+
+    combined_multiplier = entry_multiplier * kelly_multiplier
+    adjusted = max(0.0, min(1.0, base * combined_multiplier))
+    policy_sha256 = hashlib.sha256(
+        json.dumps(
+            policy,
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=False,
+            allow_nan=False,
+        ).encode("utf-8")
+    ).hexdigest()
+    audit: dict[str, Any] = {
+        "schema_version": SEALED_READINESS_CONVICTION_SCHEMA_VERSION,
+        "config_provenance_sha256": config_sha256,
+        "selection_payload_sha256": selection_sha256,
+        "policy": policy,
+        "policy_sha256": policy_sha256,
+        "policy_active": True,
+        "symbol": sym,
+        "base_setup_quality": base,
+        "adjusted_setup_quality": adjusted,
+        "combined_multiplier": combined_multiplier,
+        "selection_inputs": {
+            "squeeze_rank_pct": rank,
+            "squeeze_fuel_pct": fuel,
+            "ofi": persisted_ofi,
+        },
+        "catalyst_dominance": {
+            "strong_member": strong_member,
+            "weak_member": weak_member,
+            "fake_member": fake_member,
+            "fake_guard_enabled": bool(
+                policy["fake_catalyst_guard_enabled"]
+            ),
+            "news_grade_rank": news_grade_rank,
+        },
+        "entry_adjustment": {
+            "enabled": bool(policy["squeeze_entry_sizeup_enabled"]),
+            "armed": entry_enabled,
+            "multiplier": entry_multiplier,
+        },
+        "kelly_adjustment": {
+            "enabled": bool(policy["kelly_conviction_enabled"]),
+            "armed": kelly_enabled,
+            "conviction": conviction,
+            "half_kelly_fraction": half_kelly,
+            "multiplier": kelly_multiplier,
+        },
+        "reason": (
+            "adjusted"
+            if adjusted > base
+            else (
+                "master_disabled"
+                if not master_enabled
+                else (
+                    "selection_evidence_incomplete"
+                    if not evidence_complete
+                    else "confluence_not_armed"
+                )
+            )
+        ),
+    }
+    audit["audit_sha256"] = hashlib.sha256(
+        json.dumps(
+            audit,
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=False,
+            allow_nan=False,
+        ).encode("utf-8")
+    ).hexdigest()
+    return adjusted, audit
 
 
 def triple_confluence_kelly_multiplier(

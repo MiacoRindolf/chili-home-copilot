@@ -79,6 +79,7 @@ from .replay_errors import (
     ReplayOhlcvInputUnavailableError,
     ReplayScannerSnapshotUnavailableError,
 )
+from .risk_policy import sealed_readiness_conviction_adjustment
 from ..venue.alpaca_spot import quantize_alpaca_equity_limit_price
 from ..venue.protocol import FreshnessMeta, NormalizedProduct
 
@@ -140,6 +141,56 @@ _CANDIDATE_FACT_READ_KEYS = MappingProxyType(
 
 def _unavailable(reason: str) -> None:
     raise CapturedPaperProductionMaterialUnavailable(reason)
+
+
+def _persisted_selection_conviction_inputs(
+    candidate: CapturedPaperDurableCandidateSnapshot,
+) -> dict[str, Any]:
+    """Read conviction inputs only from the hash-bound viability snapshot."""
+
+    readiness = candidate.viability_payload.get("execution_readiness_json")
+    if not isinstance(readiness, Mapping):
+        _unavailable("production_selection_readiness_unavailable")
+    extra = readiness.get("extra")
+    extra = extra if isinstance(extra, Mapping) else {}
+    roots = (extra, readiness)
+    signal: Mapping[str, Any] = {}
+    for root in roots:
+        signals = root.get("ross_signals")
+        if not isinstance(signals, Mapping):
+            continue
+        for key in (
+            candidate.symbol,
+            candidate.symbol.lower(),
+            candidate.symbol.upper(),
+        ):
+            value = signals.get(key)
+            if isinstance(value, Mapping):
+                signal = value
+                break
+        if signal:
+            break
+
+    def first_value(name: str) -> Any:
+        for source in (readiness, extra, signal):
+            if name in source:
+                return source.get(name)
+        return None
+
+    def catalyst_members(name: str) -> Any:
+        for root in roots:
+            if name in root:
+                return root.get(name)
+        return ()
+
+    return {
+        "squeeze_rank_pct": signal.get("squeeze_fuel_rank_pct"),
+        "squeeze_fuel_pct": signal.get("squeeze_fuel_pct"),
+        "ofi": first_value("ofi"),
+        "strong_symbols": catalyst_members("strong_catalyst_symbols"),
+        "weak_symbols": catalyst_members("weak_catalyst_symbols"),
+        "fake_symbols": catalyst_members("fake_catalyst_symbols"),
+    }
 
 
 def _utc(value: Any, field_name: str) -> datetime:
@@ -443,6 +494,7 @@ class _CapturedPaperCoordinatorObservedInputs:
         wall_clock: Callable[[], datetime],
         context_max_age_seconds: float,
         first_dip_detector_policy: FirstDipTapePolicy,
+        conviction_settings: Any | None = None,
     ) -> None:
         if not callable(wall_clock):
             raise TypeError("captured PAPER wall clock must be callable")
@@ -454,6 +506,7 @@ class _CapturedPaperCoordinatorObservedInputs:
             "production_context_max_age",
         )
         self._first_dip_detector_policy = first_dip_detector_policy
+        self._conviction_settings = conviction_settings
 
     def _now(self) -> datetime:
         return _utc(self._wall_clock(), "production_observed")
@@ -983,6 +1036,8 @@ class _CapturedPaperCoordinatorObservedInputs:
         bbo_read: CapturedReadResult,
         ohlcv_read: CapturedReadResult,
         scanner_read: CapturedReadResult,
+        *,
+        conviction_settings: Any | None = None,
     ) -> tuple[CapturedAdaptiveRiskEconomicInputs, str]:
         """Derive the PAPER economic vector from exact captured inputs.
 
@@ -1311,6 +1366,25 @@ class _CapturedPaperCoordinatorObservedInputs:
             current_half_spread_bps = (
                 (ask - bid) / ((ask + bid) / 2.0) * 5_000.0
             )
+            effective_setup_quality = candidate.viability_score
+            setup_quality_audit = None
+            if conviction_settings is not None:
+                conviction_inputs = _persisted_selection_conviction_inputs(
+                    candidate
+                )
+                (
+                    effective_setup_quality,
+                    setup_quality_audit,
+                ) = sealed_readiness_conviction_adjustment(
+                    base_setup_quality=candidate.viability_score,
+                    symbol=candidate.symbol,
+                    settings_obj=conviction_settings,
+                    config_provenance_sha256=request.config_sha256,
+                    selection_payload_sha256=(
+                        candidate.viability_payload_sha256
+                    ),
+                    **conviction_inputs,
+                )
             result = CapturedAdaptiveRiskEconomicInputs(
                 structural_stop=candidate.structural_stop_price,
                 entry_slippage_bps=current_half_spread_bps,
@@ -1325,6 +1399,8 @@ class _CapturedPaperCoordinatorObservedInputs:
                     float(quantize_alpaca_equity_limit_price(ask, "buy")),
                     float(scanner.price),
                 ),
+                effective_setup_quality=effective_setup_quality,
+                setup_quality_adjustment_audit=setup_quality_audit,
             )
         except (CaptureContractError, KeyError, TypeError, ValueError) as exc:
             raise CapturedPaperProductionMaterialUnavailable(
@@ -1411,6 +1487,7 @@ class _CapturedPaperCoordinatorObservedInputs:
             bbo_read,
             existing[CaptureStream.PROVIDER_OHLCV.value],
             existing[CaptureStream.SCANNER_SNAPSHOT.value],
+            conviction_settings=self._conviction_settings,
         )
         audit = None
         final_provider = None
@@ -1449,12 +1526,18 @@ class _CapturedPaperCoordinatorObservedInputs:
                 symbol=request.symbol,
                 decision_id=candidate.client_order_id,
             )
+        fact_read_keys = dict(_CANDIDATE_FACT_READ_KEYS)
+        if economics.setup_quality_adjustment_audit is not None:
+            fact_read_keys["setup_quality"] = (
+                *fact_read_keys["setup_quality"],
+                CaptureStream.CONFIG_SNAPSHOT.value,
+            )
         return CapturedPaperCandidateObservedMaterial(
             reads=specs,
             existing_reads=existing,
             existing_read_max_age_seconds=ages,
             economics=economics,
-            fact_read_keys=_CANDIDATE_FACT_READ_KEYS,
+            fact_read_keys=fact_read_keys,
             correlation_cluster=cluster,
             setup_read_key="candidate_snapshot",
             first_dip_tape_key=tape_key,
@@ -1897,7 +1980,11 @@ class CapturedPaperCaptureBackedSupplementProviders:
         streams = sorted({event.stream.value for event in events})
         derivation = {
             "structural_stop": "durable-fsm-structural-stop.v1",
-            "setup_quality": "durable-viability-score.v1",
+            "setup_quality": (
+                "durable-viability-score+sealed-readiness-conviction.v2"
+                if CaptureStream.CONFIG_SNAPSHOT.value in keys
+                else "durable-viability-score.v1"
+            ),
             "volatility": "canonical-15m-true-range-mean-14.v1",
             "liquidity": (
                 "paper-bbo-scanner-complete-regular-session-volume.v1"
@@ -2468,6 +2555,7 @@ def build_capture_backed_paper_service_material_factory(
     quote_max_age_seconds: float,
     account_max_age_seconds: float,
     context_max_age_seconds: float,
+    conviction_settings: Any | None = None,
 ) -> CapturedPaperProductionMaterialFactory:
     """Build the callback-free capture-backed Alpaca PAPER factory.
 
@@ -2480,6 +2568,7 @@ def build_capture_backed_paper_service_material_factory(
         wall_clock=wall_clock,
         context_max_age_seconds=context_max_age_seconds,
         first_dip_detector_policy=first_dip_detector_policy,
+        conviction_settings=conviction_settings,
     )
     supplements = CapturedPaperCaptureBackedSupplementProviders(
         candidate_inputs=observed.candidate,
@@ -2545,6 +2634,7 @@ def build_live_fsm_captured_paper_service_material_factory(
         quote_max_age_seconds=quote_max_age_seconds,
         account_max_age_seconds=account_max_age_seconds,
         context_max_age_seconds=context_max_age_seconds,
+        conviction_settings=settings,
     )
 
 

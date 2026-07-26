@@ -5855,6 +5855,19 @@ def _resource_derived_runtime_capacity(prepared: _PreparedCapturedPaperCapture) 
     return value
 
 
+def _captured_paper_ortex_public_policy(
+    settings: Any,
+    selection_source_module: ModuleType,
+) -> Mapping[str, Any] | None:
+    """Bind the default-ON policy, with explicit OFF as the only bypass."""
+
+    if not bool(
+        getattr(settings, "chili_momentum_squeeze_fuel_tilt_enabled", True)
+    ):
+        return None
+    return selection_source_module.ortex_public_policy()
+
+
 def _assemble_service_composition(
     *,
     verified: activation_contract.VerifiedCapturedPaperActivation,
@@ -6229,6 +6242,10 @@ def _assemble_service_composition(
             candidate_code_build_sha256=verified.code_build_sha256,
             adaptive_policy_snapshot=adaptive_policy_snapshot,
             code_build_payload=code_build_payload,
+            ortex_public_policy=_captured_paper_ortex_public_policy(
+                settings,
+                selection_source_module,
+            ),
             fundamentals_reader=yf_session_module.get_fundamentals_receipt,
             context_max_age_seconds=handoff_ttl_seconds,
             tenbeat_entry_tilt_weight=(

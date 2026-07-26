@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 from contextlib import contextmanager, nullcontext
+from dataclasses import replace
 from datetime import date, datetime, timedelta, timezone
 import hashlib
 import inspect
 import time
+from types import SimpleNamespace
 import uuid
 
 import pandas as pd
@@ -335,6 +337,7 @@ def test_public_builder_has_no_fact_callback_or_variadic_injection_surface() -> 
         "quote_max_age_seconds",
         "account_max_age_seconds",
         "context_max_age_seconds",
+        "conviction_settings",
     )
     assert all(
         parameter.kind is not inspect.Parameter.VAR_KEYWORD
@@ -344,6 +347,7 @@ def test_public_builder_has_no_fact_callback_or_variadic_injection_surface() -> 
     assert "_CapturedPaperCoordinatorObservedInputs(" in source
     assert "candidate_inputs=observed.candidate" in source
     assert "observation_inputs=observed.observation" in source
+    assert "conviction_settings=conviction_settings" in source
     compatibility = inspect.signature(
         build_live_fsm_captured_paper_service_material_factory
     )
@@ -362,6 +366,10 @@ def test_public_builder_has_no_fact_callback_or_variadic_injection_surface() -> 
         parameter.kind is not inspect.Parameter.VAR_KEYWORD
         for parameter in compatibility.parameters.values()
     )
+    compatibility_source = inspect.getsource(
+        build_live_fsm_captured_paper_service_material_factory
+    )
+    assert "conviction_settings=settings" in compatibility_source
 
 
 def test_market_session_capture_does_not_consult_process_global_tradeability_cache() -> None:
@@ -772,6 +780,28 @@ def test_adaptive_economics_are_derived_from_exact_bbo_ohlcv_and_scanner(
     )
     request = _request(coordinator)
     candidate = _candidate(request)
+    readiness = {
+        "ofi": 1.0,
+        "extra": {
+            "ross_signals": {
+                request.symbol: {
+                    "squeeze_fuel_pct": 0.95,
+                    "squeeze_fuel_rank_pct": 1.0,
+                }
+            },
+            "strong_catalyst_symbols": [request.symbol],
+            "weak_catalyst_symbols": [],
+            "fake_catalyst_symbols": [],
+        },
+    }
+    viability_payload = dict(candidate.viability_payload)
+    viability_payload["execution_readiness_json"] = readiness
+    candidate = replace(
+        candidate,
+        viability_payload=viability_payload,
+        viability_payload_sha256=sha256_json(viability_payload),
+        execution_readiness_sha256=sha256_json(readiness),
+    )
     decision_id = candidate.client_order_id
     decision_at = CAPTURE_BASE + timedelta(seconds=10)
     wall.set(decision_at)
@@ -926,6 +956,20 @@ def test_adaptive_economics_are_derived_from_exact_bbo_ohlcv_and_scanner(
         bbo,
         ohlcv_bridge.captured_reads[0],
         scanner_bridge.captured_reads[0],
+        conviction_settings=SimpleNamespace(
+            chili_momentum_squeeze_fuel_tilt_enabled=True,
+            chili_momentum_squeeze_fuel_top_n=12,
+            chili_momentum_squeeze_entry_sizeup_enabled=True,
+            chili_momentum_squeeze_entry_top_pctl=0.80,
+            chili_momentum_squeeze_entry_max_mult=1.50,
+            chili_momentum_kelly_conviction_enabled=True,
+            chili_momentum_kelly_conviction_max_multiplier=1.50,
+            chili_momentum_kelly_conviction_gain=1.0,
+            chili_momentum_kelly_conviction_w_squeeze=0.4,
+            chili_momentum_kelly_conviction_w_ofi=0.4,
+            chili_momentum_kelly_conviction_w_news=0.2,
+            chili_momentum_fake_catalyst_guard_enabled=True,
+        ),
     )
     half_spread_bps = (3.00 - 2.98) / ((3.00 + 2.98) / 2.0) * 5_000.0
     assert economics.entry_slippage_bps == pytest.approx(half_spread_bps)
@@ -935,6 +979,14 @@ def test_adaptive_economics_are_derived_from_exact_bbo_ohlcv_and_scanner(
     assert economics.recent_volume_shares == 600_000.0
     assert economics.average_daily_volume_shares == pytest.approx(143_000.0)
     assert economics.candidate_buying_power_impact_per_share_usd == 3.00
+    assert economics.setup_quality == candidate.viability_score
+    assert economics.effective_setup_quality == 1.0
+    quality_audit = economics.setup_quality_adjustment_audit
+    assert quality_audit["config_provenance_sha256"] == request.config_sha256
+    assert quality_audit["selection_payload_sha256"] == (
+        candidate.viability_payload_sha256
+    )
+    assert quality_audit["catalyst_dominance"]["news_grade_rank"] == 3
     assert 0.0 < economics.realized_volatility_fraction < 0.20
     assert cluster == "equity:smallcap-momentum"
     scanner_receipt = scanner_bridge.captured_reads[0].receipt

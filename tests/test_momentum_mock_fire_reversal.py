@@ -341,6 +341,21 @@ class _SubVwapPassGuards:
 
 
 class TestSubVwapTrapMockFire:
+    def test_explicit_off_kill_switch_is_a_no_op(self):
+        df = _sub_vwap_trap_df()
+        with patch(f"{_GATES}.settings") as ms, _SubVwapPassGuards():
+            _sub_vwap_settings(ms)
+            ms.chili_momentum_sub_vwap_trap_entry_enabled = False
+            ok, reason, dbg = sub_vwap_trap_entry(
+                df, entry_interval="5m", symbol="TEST", db=MagicMock(),
+            )
+        assert ok is False
+        assert reason == "sub_vwap_trap_disabled"
+        assert dbg == {
+            "entry_interval": "5m",
+            "pattern": "sub_vwap_trap",
+        }
+
     def test_positive_clean_sub_vwap_trap_fires(self):
         """A sharp undercut-and-reclaim trap with all chase-guards passing -> FIRES
         ``sub_vwap_trap``; stop = trap low, entry = reclaim-bar high."""
