@@ -1,0 +1,93 @@
+{
+  "schema_version": "chili.golden-backup-preservation.v1",
+  "created_at_utc": "2026-07-26T01:30:02.4241705Z",
+  "status": "PRESERVATION_ONLY_NOT_CERTIFICATION",
+  "audit_branch": {
+    "worktree": "D:\\dev\\chili-weekend-audit-20260725",
+    "branch": "codex/weekend-firstdip-veto-reuse-20260725",
+    "base_head_before_manifest": "07043c88cea825edd5d5147d34f2b39d88107a75"
+  },
+  "source_backup": {
+    "path": "D:\\CHILI-Docker\\backup\\chili_20260725_0330.dump",
+    "bytes": 7383402709,
+    "last_write_time_utc": "2026-07-25T11:48:41Z",
+    "sha256": "f6fb54d46a8f5d0212ea78fff6db1826fa7e26571c2d7fb59c309fa1a59f487c",
+    "backup_script_path": "D:\\dev\\chili-home-copilot\\scripts\\backup_chili_db.ps1",
+    "backup_script_sha256": "8de48585f745990eda76e28ad6046ae4888bfc9afae282bfd4c9512bfaab8b87"
+  },
+  "preserved_copy": {
+    "path": "D:\\CHILI-Docker\\backup\\golden\\chili_golden_20260725_0330_f6fb54d46a8f.dump",
+    "mechanism": "NTFS_HARDLINK",
+    "bytes": 7383402709,
+    "sha256": "f6fb54d46a8f5d0212ea78fff6db1826fa7e26571c2d7fb59c309fa1a59f487c",
+    "verified_hardlink_names": [
+      "\\CHILI-Docker\\backup\\chili_20260725_0330.dump",
+      "\\CHILI-Docker\\backup\\golden\\chili_golden_20260725_0330_f6fb54d46a8f.dump"
+    ],
+    "retention_reason": "The golden path is outside the backup script's rotating top-level dump set. Deleting the rotating source name will not delete the hard-linked archive bytes while this link remains."
+  },
+  "archive_validation": {
+    "verified_at_utc": "2026-07-26T01:30:02.4241705Z",
+    "tool_image": "postgres:16-alpine",
+    "network_mode": "none",
+    "operation": "pg_restore -l against a read-only bind mount",
+    "toc_entry_count": 3650,
+    "required_objects": [
+      {
+        "table": "public.iqfeed_trade_ticks",
+        "table_definition_present": true,
+        "table_data_present": true,
+        "table_data_toc_id": 8919
+      },
+      {
+        "table": "public.momentum_nbbo_spread_tape",
+        "table_definition_present": true,
+        "table_data_present": true,
+        "table_data_toc_id": 8909
+      }
+    ]
+  },
+  "preservation_scope": {
+    "purpose": "Retain the current full database bytes so useful historical market and decision windows are not lost to normal raw-data retention while the weekend evidence audit proceeds.",
+    "candidate_exit_hypothesis_limit": 2,
+    "frozen_candidates": [
+      "strength scale-out plus structural runner",
+      "observable deterioration exit using failed-bid/reclaim, lower-high, and liquidity/tape collapse"
+    ],
+    "required_experiment_semantics": [
+      "identical sealed inputs for baseline and candidate",
+      "executable ask entry and bid exit",
+      "fees, slippage, and bounded latency",
+      "walk-forward or out-of-sample evaluation",
+      "include losers and non-Ross negative controls",
+      "no hindsight peak exit"
+    ]
+  },
+  "evidence_limits": {
+    "this_manifest_does_not_prove": [
+      "continuous or causal provider-event coverage for any trade window",
+      "executable ask-entry or bid-exit evidence",
+      "Ross parity or CHILI profitability",
+      "correctness of historically clock-mutated IQFeed rows",
+      "PAPER or live readiness"
+    ],
+    "historically_clock_mutated_rows": "EXCLUDED_FROM_CAUSAL_OR_CERTIFICATION_EVIDENCE",
+    "missing_coverage_policy": "COVERAGE_UNAVAILABLE_FAIL_CLOSED",
+    "ross_baseline": {
+      "CERTIFIABLE": 0,
+      "DIAGNOSTIC_ONLY": 4,
+      "UNAVAILABLE": 2,
+      "UNRESOLVED": 6
+    }
+  },
+  "side_effects": {
+    "production_database_mutated": false,
+    "services_or_scheduled_tasks_changed": false,
+    "provider_or_broker_contacted": false,
+    "orders_placed_cancelled_or_replaced": false,
+    "filesystem_changes": [
+      "Created one NTFS hardlink under D:\\CHILI-Docker\\backup\\golden",
+      "Created this audit manifest and its SHA-256 sidecar"
+    ]
+  }
+}
