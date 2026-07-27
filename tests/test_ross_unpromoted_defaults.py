@@ -65,7 +65,7 @@ def test_missing_setting_fallbacks_preserve_default_on_doctrine():
             assert set(defaults) == {True}, (name, module.__name__, defaults)
 
 
-def test_legacy_ab_tool_uses_an_explicit_off_baseline() -> None:
+def test_replay_ab_tool_uses_the_complete_closed_operator_policy() -> None:
     source = (
         Path(__file__).resolve().parents[1] / "scripts" / "replay_ab_dark_flags.py"
     ).read_text(encoding="utf-8")
@@ -74,17 +74,14 @@ def test_legacy_ab_tool_uses_an_explicit_off_baseline() -> None:
         for node in ast.walk(ast.parse(source))
         if isinstance(node, ast.Assign)
         and any(
-            isinstance(target, ast.Name) and target.id == "ARMS"
+            isinstance(target, ast.Name)
+            and target.id == "APPROVED_STRATEGY_FLAGS_BY_SLUG"
             for target in node.targets
         )
     ]
     assert len(assignments) == 1
-    arms = ast.literal_eval(assignments[0].value)
-    assert arms["base"] == {
-        "chili_momentum_sub_vwap_trap_entry_enabled": False,
-        "chili_momentum_bail_on_no_confirmation_enabled": False,
-    }
-    assert arms["both"] == {
-        "chili_momentum_sub_vwap_trap_entry_enabled": True,
-        "chili_momentum_bail_on_no_confirmation_enabled": True,
-    }
+    pairs = tuple(ast.literal_eval(assignments[0].value))
+    assert len(pairs) == 9
+    assert {flag for _, flag in pairs} == set(_USER_APPROVED_DEFAULT_ON)
+    assert "arbitrary FLAGS_JSON is forbidden in sealed replay" in source
+    assert "type(value) is not bool" in source

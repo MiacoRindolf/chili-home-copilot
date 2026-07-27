@@ -8,7 +8,7 @@ record per window. Results are diagnostic only.
 
     python scripts/replay_benchmark_batch.py \
         --manifest D:/CHILI-Docker/chili-data/replay_batch/window_manifest.json \
-        --out-dir  D:/CHILI-Docker/chili-data/replay_batch \
+        --out-dir  D:/CHILI-Docker/chili-data/replay_batch_policy_v3 \
         --source-database-url postgresql://.../sealed_source \
         --sink-database-url postgresql://.../disposable_test \
         --confirm-test-sink-reset RESET_DISPOSABLE_REPLAY_TEST_SINK \
@@ -55,11 +55,65 @@ DRIVER = os.path.join(BUILD, "scripts", "replay_ab_dark_flags.py")
 DERIVER = os.path.join(BUILD, "scripts", "derive_replay_windows.py")
 RECEIPT_HELPER = os.path.join(BUILD, "scripts", "diagnostic_replay_db.py")
 
-SUMMARY_RE = re.compile(r"\[ARM=(\w+)\]\s+(\S+)\s+PnL\s+([+-]?[\d.]+)\s+entries=(\d+)\s+exits=(\d+)")
-FILL_RE = re.compile(r"^\s*(BUY|SELL)\s+([\d.]+)\s+@\s+\$?([\d.]+)")
+_DECIMAL_PATTERN = r"(?:\d+(?:\.\d+)?|\.\d+)"
+SUMMARY_RE = re.compile(
+    r"\[ARM=([a-z0-9_.-]+)\]\s+(\S+)\s+PnL\s+"
+    rf"([+-]?{_DECIMAL_PATTERN})\s+entries=(\d+)\s+exits=(\d+)"
+)
+POLICY_ATTESTATION_RE = re.compile(
+    r"^\[STRATEGY_POLICY=([a-z0-9_.-]+)\]\s+sha256=([0-9a-f]{64})$"
+)
+FILL_RE = re.compile(
+    rf"^\s*(BUY|SELL)\s+({_DECIMAL_PATTERN})\s+@\s+\$?"
+    rf"({_DECIMAL_PATTERN})"
+)
 FINAL_RE = re.compile(r"final_state=(\S+)")
 TEST_SINK_CONFIRMATION = "RESET_DISPOSABLE_REPLAY_TEST_SINK"
-DEFAULT_ARM = "both"
+STRATEGY_POLICY_SCHEMA = "chili.replay-resolved-strategy-policy.v1"
+APPROVED_STRATEGY_FLAGS_BY_SLUG = (
+    (
+        "universe-float",
+        "chili_momentum_universe_float_gate_enabled",
+    ),
+    (
+        "orb-ihs-stop",
+        "chili_momentum_orb_ihs_structural_stop_enabled",
+    ),
+    (
+        "ross-stop",
+        "chili_momentum_ross_stop_alignment_enabled",
+    ),
+    (
+        "flush-dip-volume",
+        "chili_momentum_flush_dip_volume_gate_enabled",
+    ),
+    (
+        "tick-break-tape",
+        "chili_momentum_tick_break_tape_confirm_enabled",
+    ),
+    (
+        "catalyst-arb-flat",
+        "chili_momentum_catalyst_arb_flat_gate_enabled",
+    ),
+    (
+        "bail-no-confirm",
+        "chili_momentum_bail_on_no_confirmation_enabled",
+    ),
+    (
+        "fresh-ignition-reentry",
+        "chili_momentum_fresh_ignition_reentry_bypass_enabled",
+    ),
+    (
+        "sub-vwap-trap",
+        "chili_momentum_sub_vwap_trap_entry_enabled",
+    ),
+)
+DEFAULT_ARM = "intended"
+STRATEGY_ARM_CHOICES = (
+    "base",
+    "intended",
+    *(f"intended-minus-{slug}" for slug, _ in APPROVED_STRATEGY_FLAGS_BY_SLUG),
+)
 RESULT_STATUSES = {
     "ok",
     "error",
@@ -110,6 +164,161 @@ WHERE symbol = %(s)s AND observed_at >= %(a)s AND observed_at < %(b)s AND price 
 """
 
 
+def resolve_strategy_policy(arm: str) -> dict:
+    """Return the complete closed nine-flag vector for one named replay arm."""
+
+    flags = {
+        flag: arm != "base"
+        for _, flag in APPROVED_STRATEGY_FLAGS_BY_SLUG
+    }
+    if arm == "base":
+        pass
+    elif arm == "intended":
+        pass
+    elif arm.startswith("intended-minus-"):
+        slug = arm.removeprefix("intended-minus-")
+        matches = [
+            flag
+            for candidate_slug, flag in APPROVED_STRATEGY_FLAGS_BY_SLUG
+            if candidate_slug == slug
+        ]
+        if len(matches) != 1:
+            raise ValueError(f"unknown strategy policy arm {arm!r}")
+        flags[matches[0]] = False
+    else:
+        raise ValueError(f"unknown strategy policy arm {arm!r}")
+    return {
+        "schema": STRATEGY_POLICY_SCHEMA,
+        "label": arm,
+        "flags": flags,
+    }
+
+
+def strategy_policy_sha256(policy: dict) -> str:
+    """Hash only an exact canonical policy document."""
+
+    if type(policy) is not dict or set(policy) != {"schema", "label", "flags"}:
+        raise ValueError("strategy policy must be an exact object")
+    if type(policy.get("schema")) is not str or type(policy.get("label")) is not str:
+        raise ValueError("strategy policy schema and label must be strings")
+    flags = policy.get("flags")
+    expected_flag_names = {
+        flag for _, flag in APPROVED_STRATEGY_FLAGS_BY_SLUG
+    }
+    if (
+        type(flags) is not dict
+        or set(flags) != expected_flag_names
+        or any(type(value) is not bool for value in flags.values())
+    ):
+        raise ValueError("strategy policy flags must be the exact boolean vector")
+    expected = resolve_strategy_policy(policy["label"])
+    if policy != expected:
+        raise ValueError("strategy policy is not the canonical closed vector")
+    return hashlib.sha256(
+        json.dumps(
+            policy,
+            sort_keys=True,
+            separators=(",", ":"),
+            allow_nan=False,
+        ).encode("utf-8")
+    ).hexdigest()
+
+
+def result_key(
+    symbol: str,
+    day: str,
+    policy_label: str,
+    policy_sha256: str,
+) -> str:
+    if (
+        re.fullmatch(r"[A-Z0-9][A-Z0-9.-]{0,15}", symbol) is None
+        or re.fullmatch(r"\d{4}-\d{2}-\d{2}", day) is None
+        or policy_label not in STRATEGY_ARM_CHOICES
+        or re.fullmatch(r"[0-9a-f]{64}", policy_sha256) is None
+    ):
+        raise ValueError("invalid result-key component")
+    try:
+        canonical_day = datetime.strptime(day, "%Y-%m-%d").date().isoformat()
+    except ValueError as exc:
+        raise ValueError("result key day is not a calendar date") from exc
+    if canonical_day != day:
+        raise ValueError("result key day is not canonical")
+    expected_policy_sha256 = strategy_policy_sha256(
+        resolve_strategy_policy(policy_label)
+    )
+    if policy_sha256 != expected_policy_sha256:
+        raise ValueError("result key policy label/hash mismatch")
+    return f"{symbol}|{day}|{policy_label}|{policy_sha256}"
+
+
+def canonical_result_log_name(
+    symbol: str,
+    day: str,
+    policy_label: str,
+    policy_sha256: str,
+) -> str:
+    result_key(symbol, day, policy_label, policy_sha256)
+    return f"{symbol}_{day}_{policy_label}_{policy_sha256}.log"
+
+
+def validate_resumed_run_meta(
+    existing_meta: dict,
+    candidate_meta: dict,
+    *,
+    expected_policy_sha256: str,
+) -> dict:
+    if type(existing_meta) is not dict:
+        raise ValueError("resumed run metadata must be an exact object")
+    existing_policy_sha256 = strategy_policy_sha256(
+        existing_meta.get("resolved_strategy_policy")
+    )
+    existing_run_payload = {
+        key: value
+        for key, value in existing_meta.items()
+        if key not in {"run_identity_sha256", "started_at", "stop_at"}
+    }
+    existing_run_identity_sha256 = hashlib.sha256(
+        json.dumps(
+            existing_run_payload,
+            sort_keys=True,
+            separators=(",", ":"),
+            allow_nan=False,
+        ).encode("utf-8")
+    ).hexdigest()
+    if (
+        existing_meta.get("schema") != "chili.golden_replay_run_meta.v3"
+        or existing_policy_sha256 != expected_policy_sha256
+        or existing_meta.get("resolved_strategy_policy_sha256")
+        != expected_policy_sha256
+        or existing_meta.get("run_identity_sha256")
+        != existing_run_identity_sha256
+    ):
+        raise ValueError("resumed run metadata authority is invalid")
+    candidate_identity = {
+        key: value
+        for key, value in candidate_meta.items()
+        if key not in {"started_at", "stop_at"}
+    }
+    existing_identity = {
+        key: value
+        for key, value in existing_meta.items()
+        if key not in {"started_at", "stop_at"}
+    }
+    if json.dumps(
+        candidate_identity,
+        sort_keys=True,
+        separators=(",", ":"),
+        allow_nan=False,
+    ) != json.dumps(
+        existing_identity,
+        sort_keys=True,
+        separators=(",", ":"),
+        allow_nan=False,
+    ):
+        raise ValueError("resumed run metadata drifted")
+    return existing_meta
+
+
 def guard_postgres_url(
     url: str, *, role: str
 ) -> tuple[str, str, DatabaseIdentity]:
@@ -134,6 +343,18 @@ def confined_child_path(root: str, name: str) -> str:
     if os.path.commonpath([root_abs, path]) != root_abs:
         raise ValueError("path escapes the configured artifact root")
     return path
+
+
+def v3_results_path(out_dir: str, override: str | None = None) -> str:
+    expected = confined_child_path(
+        os.path.abspath(out_dir),
+        "results.jsonl",
+    )
+    if override is not None and os.path.abspath(override) != expected:
+        raise ValueError(
+            "v3 results must be <out-dir>/results.jsonl so logs stay bound"
+        )
+    return expected
 
 
 def cache_receipt(cache_dir: str, window: dict) -> dict | None:
@@ -468,24 +689,131 @@ def _parse_finite_float(value: str) -> float:
     return parsed
 
 
-def parse_driver_stdout(out: str) -> tuple[str, dict]:
-    parsed: dict = {"fills": [], "final_state": None}
-    for line in out.splitlines():
-        m = FILL_RE.match(line)
-        if m:
-            parsed["fills"].append({"side": m.group(1).lower(),
-                                    "qty": float(m.group(2)), "px": float(m.group(3))})
-        fm = FINAL_RE.search(line)
-        if fm:
-            parsed["final_state"] = fm.group(1)
-    sm = None
-    for m in SUMMARY_RE.finditer(out):
-        sm = m  # last summary line wins (matches the weekend-script convention)
-    if sm is None:
+def parse_driver_stdout(
+    out: str,
+    *,
+    expected_symbol: str,
+    expected_arm: str,
+    expected_policy_sha256: str,
+) -> tuple[str, dict]:
+    parsed: dict = {
+        "fills": [],
+        "final_state": None,
+        "final_state_attestation_count": 0,
+        "strategy_policy_label": None,
+        "strategy_policy_sha256": None,
+        "strategy_policy_attestation_count": 0,
+    }
+    try:
+        canonical_expected_policy_sha256 = strategy_policy_sha256(
+            resolve_strategy_policy(expected_arm)
+        )
+    except ValueError:
         return "parse_fail", parsed
-    parsed.update({"arm": sm.group(1), "pnl": float(sm.group(3)),
-                   "entries": int(sm.group(4)), "exits": int(sm.group(5))})
+    if expected_policy_sha256 != canonical_expected_policy_sha256:
+        return "parse_fail", parsed
+    for line in out.splitlines():
+        m = FILL_RE.fullmatch(line.strip())
+        if m:
+            try:
+                qty = _parse_finite_float(m.group(2))
+                px = _parse_finite_float(m.group(3))
+            except ValueError:
+                return "parse_fail", parsed
+            if qty <= 0.0 or px <= 0.0:
+                return "parse_fail", parsed
+            parsed["fills"].append(
+                {
+                    "side": m.group(1).lower(),
+                    "qty": qty,
+                    "px": px,
+                }
+            )
+        for fm in FINAL_RE.finditer(line):
+            parsed["final_state_attestation_count"] += 1
+            parsed["final_state"] = fm.group(1)
+        pm = POLICY_ATTESTATION_RE.match(line.strip())
+        if pm:
+            parsed["strategy_policy_attestation_count"] += 1
+            observed = (pm.group(1), pm.group(2))
+            previous = (
+                parsed["strategy_policy_label"],
+                parsed["strategy_policy_sha256"],
+            )
+            if previous != (None, None) and previous != observed:
+                return "parse_fail", parsed
+            (
+                parsed["strategy_policy_label"],
+                parsed["strategy_policy_sha256"],
+            ) = observed
+    summaries = [
+        match
+        for line in out.splitlines()
+        if (match := SUMMARY_RE.fullmatch(line.strip())) is not None
+    ]
+    if len(summaries) != 1:
+        return "parse_fail", parsed
+    summary = summaries[0]
+    try:
+        pnl = _parse_finite_float(summary.group(3))
+        entries = int(summary.group(4))
+        exits = int(summary.group(5))
+    except (ValueError, OverflowError):
+        return "parse_fail", parsed
+    parsed.update(
+        {
+            "arm": summary.group(1),
+            "symbol": summary.group(2),
+            "pnl": pnl,
+            "entries": entries,
+            "exits": exits,
+        }
+    )
+    if (
+        parsed["symbol"] != expected_symbol
+        or parsed["arm"] != expected_arm
+        or parsed["strategy_policy_label"] != expected_arm
+        or parsed["strategy_policy_sha256"] != expected_policy_sha256
+        or parsed["strategy_policy_attestation_count"] != 1
+        or parsed["final_state_attestation_count"] != 1
+        or sum(fill["side"] == "buy" for fill in parsed["fills"])
+        != parsed["entries"]
+        or sum(fill["side"] == "sell" for fill in parsed["fills"])
+        != parsed["exits"]
+    ):
+        return "parse_fail", parsed
     return "ok", parsed
+
+
+def normalize_child_strategy_policy_attestation(
+    parsed: dict,
+    *,
+    expected_arm: str,
+    expected_policy_sha256: str,
+) -> tuple[str | None, str | None, int]:
+    """Retain only an exact child attestation; the hash-bound log keeps rejects."""
+
+    observed = (
+        parsed.get("strategy_policy_label"),
+        parsed.get("strategy_policy_sha256"),
+        parsed.get("strategy_policy_attestation_count"),
+    )
+    expected = (expected_arm, expected_policy_sha256, 1)
+    return expected if observed == expected else (None, None, 0)
+
+
+def replay_fill_inventory_is_flat(fills: list[dict]) -> bool:
+    bought = sum(
+        float(fill["qty"])
+        for fill in fills
+        if fill.get("side") == "buy"
+    )
+    sold = sum(
+        float(fill["qty"])
+        for fill in fills
+        if fill.get("side") == "sell"
+    )
+    return math.isclose(bought, sold, rel_tol=0.0, abs_tol=1e-9)
 
 
 def normalize_sink_fill_event(ts, event_type: str, payload) -> dict:
@@ -708,8 +1036,22 @@ def mine_sink(
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("--manifest", required=True)
-    ap.add_argument("--out-dir", default="D:/CHILI-Docker/chili-data/replay_batch")
-    ap.add_argument("--results", default=None, help="results JSONL (default <out-dir>/results.jsonl)")
+    ap.add_argument(
+        "--out-dir",
+        required=True,
+        help=(
+            "explicit fresh or matching-v3 artifact root; legacy v1/v2 roots "
+            "are intentionally refused rather than migrated"
+        ),
+    )
+    ap.add_argument(
+        "--results",
+        default=None,
+        help=(
+            "optional compatibility spelling; if supplied it must equal "
+            "<out-dir>/results.jsonl"
+        ),
+    )
     ap.add_argument(
         "--source-database-url",
         required=True,
@@ -740,9 +1082,12 @@ def main() -> int:
     )
     ap.add_argument(
         "--arm",
-        choices=("base", "trap", "bail", "both"),
+        choices=STRATEGY_ARM_CHOICES,
         default=DEFAULT_ARM,
-        help="A/B arm; defaults to both intended default-ON levers",
+        help=(
+            "complete nine-flag policy arm; defaults to the intended all-ON "
+            "operator policy, with one-flag kill-switch arms available"
+        ),
     )
     ap.add_argument("--equity", required=True, type=float)
     ap.add_argument("--risk-fraction", required=True, type=float)
@@ -756,6 +1101,14 @@ def main() -> int:
     ap.add_argument("--only", default=None,
                     help="comma list of SYMBOL|YYYY-MM-DD keys — run just these (smoke)")
     args = ap.parse_args()
+
+    try:
+        resolved_strategy_policy = resolve_strategy_policy(args.arm)
+        resolved_strategy_policy_sha256 = strategy_policy_sha256(
+            resolved_strategy_policy
+        )
+    except ValueError as exc:
+        raise SystemExit(f"[batch] REFUSING strategy policy: {exc}") from exc
 
     if args.confirm_test_sink_reset != TEST_SINK_CONFIRMATION:
         raise SystemExit("[batch] REFUSING disposable sink mutation without exact confirmation")
@@ -833,7 +1186,11 @@ def main() -> int:
             raise SystemExit(f"[batch] COVERAGE_UNAVAILABLE: {exc}") from exc
         if receipt is not None:
             cache_receipts[f"{window['symbol']}|{window['day']}"] = receipt
-    results_path = args.results or os.path.join(args.out_dir, "results.jsonl")
+    args.out_dir = os.path.abspath(args.out_dir)
+    try:
+        results_path = v3_results_path(args.out_dir, args.results)
+    except ValueError as exc:
+        raise SystemExit(f"[batch] REFUSING artifact root: {exc}") from exc
     logs_dir = os.path.join(args.out_dir, "logs")
     meta_path = os.path.join(args.out_dir, "meta.json")
     if os.path.exists(results_path) and not os.path.exists(meta_path):
@@ -870,12 +1227,21 @@ def main() -> int:
         RECEIPT_HELPER: current_receipt_helper_sha256,
     }
     selected_window_keys = [
-        f"{window['symbol']}|{window['day']}|{args.arm}"
+        result_key(
+            window["symbol"],
+            window["day"],
+            args.arm,
+            resolved_strategy_policy_sha256,
+        )
         for window in specs
     ]
     selected_window_receipts = {
-        f"{window['symbol']}|{window['day']}|{args.arm}":
-            window["source_content_receipt_sha256"]
+        result_key(
+            window["symbol"],
+            window["day"],
+            args.arm,
+            resolved_strategy_policy_sha256,
+        ): window["source_content_receipt_sha256"]
         for window in specs
     }
     selected_window_set_sha256 = hashlib.sha256(
@@ -889,8 +1255,11 @@ def main() -> int:
             allow_nan=False,
         ).encode("utf-8")
     ).hexdigest()
-    meta = {"schema": "chili.golden_replay_run_meta.v2", "build_sha": build_sha,
+    meta = {"schema": "chili.golden_replay_run_meta.v3", "build_sha": build_sha,
             "driver": os.path.relpath(DRIVER, BUILD), "golden": True, "arm": args.arm,
+            "resolved_strategy_policy": resolved_strategy_policy,
+            "resolved_strategy_policy_sha256":
+                resolved_strategy_policy_sha256,
             "driver_sha256": driver_sha256,
             "batch_sha256": batch_sha256,
             "generator_sha256": current_generator_sha256,
@@ -947,7 +1316,12 @@ def main() -> int:
         ).encode("utf-8")
     ).hexdigest()
     spec_by_result_key = {
-        f"{window['symbol']}|{window['day']}|{args.arm}": window
+        result_key(
+            window["symbol"],
+            window["day"],
+            args.arm,
+            resolved_strategy_policy_sha256,
+        ): window
         for window in specs
     }
     seen_prior_keys: set[str] = set()
@@ -955,12 +1329,30 @@ def main() -> int:
         key = rec.get("key")
         prior_window = spec_by_result_key.get(key)
         expected_log = (
-            f"logs/{prior_window['symbol']}_{prior_window['day']}_{args.arm}.log"
+            "logs/"
+            + canonical_result_log_name(
+                prior_window["symbol"],
+                prior_window["day"],
+                args.arm,
+                resolved_strategy_policy_sha256,
+            )
             if prior_window is not None
             else None
         )
+        try:
+            prior_policy_sha256 = strategy_policy_sha256(
+                rec.get("resolved_strategy_policy")
+            )
+        except ValueError as exc:
+            raise SystemExit(
+                "[batch] REFUSING invalid prior strategy policy at line "
+                f"{line_no}: {exc}"
+            ) from exc
+        child_attestation_count = rec.get(
+            "child_strategy_policy_attestation_count"
+        )
         if (
-            rec.get("schema") != "chili.golden_replay_window_result.v2"
+            rec.get("schema") != "chili.golden_replay_window_result.v3"
             or not isinstance(key, str)
             or not key
             or prior_window is None
@@ -974,6 +1366,33 @@ def main() -> int:
             or rec.get("manifest_sha256") != manifest_sha256
             or rec.get("run_identity_sha256")
             != meta["run_identity_sha256"]
+            or rec.get("resolved_strategy_policy")
+            != resolved_strategy_policy
+            or prior_policy_sha256 != resolved_strategy_policy_sha256
+            or rec.get("resolved_strategy_policy_sha256")
+            != resolved_strategy_policy_sha256
+            or type(child_attestation_count) is not int
+            or child_attestation_count not in {0, 1}
+            or (
+                (
+                    rec.get("child_strategy_policy_label"),
+                    rec.get("child_strategy_policy_sha256"),
+                    child_attestation_count,
+                )
+                not in {
+                    (None, None, 0),
+                    (args.arm, resolved_strategy_policy_sha256, 1),
+                }
+            )
+            or (
+                rec.get("status") == "ok"
+                and (
+                    rec.get("child_strategy_policy_label") != args.arm
+                    or rec.get("child_strategy_policy_sha256")
+                    != resolved_strategy_policy_sha256
+                    or child_attestation_count != 1
+                )
+            )
             or rec.get("source_content_receipt_sha256")
             != prior_window["source_content_receipt_sha256"]
             or rec.get("arm") != args.arm
@@ -984,6 +1403,15 @@ def main() -> int:
             or rec.get("ross_grade_credit_allowed") is not False
             or rec.get("paper_policy_parity") is not False
             or rec.get("fees_slippage_complete") is not False
+            or type(rec.get("prepend")) is not bool
+            or (
+                rec.get("status") == "ok"
+                and any(
+                    type(rec.get(field)) is not int
+                    or rec.get(field) < 0
+                    for field in ("entries", "exits")
+                )
+            )
             or key in seen_prior_keys
             or any(
                 rec.get(field) != prior_window.get(field)
@@ -1040,19 +1468,16 @@ def main() -> int:
                 parse_constant=_reject_nonfinite,
                 parse_float=_parse_finite_float,
             )
-        candidate_identity = {
-            k: v
-            for k, v in meta.items()
-            if k not in {"started_at", "stop_at"}
-        }
-        existing_identity = {
-            k: v
-            for k, v in existing_meta.items()
-            if k not in {"started_at", "stop_at"}
-        }
-        if candidate_identity != existing_identity:
-            raise SystemExit("[batch] REFUSING resume with drifted run metadata")
-        meta = existing_meta
+        try:
+            meta = validate_resumed_run_meta(
+                existing_meta,
+                meta,
+                expected_policy_sha256=resolved_strategy_policy_sha256,
+            )
+        except ValueError as exc:
+            raise SystemExit(
+                f"[batch] REFUSING resume metadata: {exc}"
+            ) from exc
     else:
         with open(meta_path, "x", encoding="utf-8") as f:
             json.dump(meta, f, indent=1, allow_nan=False)
@@ -1080,10 +1505,20 @@ def main() -> int:
     ran = 0
     try:
         for w in specs:
-            key = f"{w['symbol']}|{w['day']}|{args.arm}"
+            key = result_key(
+                w["symbol"],
+                w["day"],
+                args.arm,
+                resolved_strategy_policy_sha256,
+            )
             if key in done:
                 continue
-            log_name = f"{w['symbol']}_{w['day']}_{args.arm}.log"
+            log_name = canonical_result_log_name(
+                w["symbol"],
+                w["day"],
+                args.arm,
+                resolved_strategy_policy_sha256,
+            )
             log_path = confined_child_path(logs_dir, log_name)
             if os.path.exists(log_path):
                 raise SystemExit(
@@ -1137,6 +1572,15 @@ def main() -> int:
             env = isolated_child_env()
             prepend_receipt = cache_receipts.get(f"{w['symbol']}|{w['day']}")
             env.update({"SYMBOL": w["symbol"], "ARM": args.arm,
+                        "CHILI_REPLAY_RESOLVED_STRATEGY_POLICY_JSON":
+                            json.dumps(
+                                resolved_strategy_policy,
+                                sort_keys=True,
+                                separators=(",", ":"),
+                                allow_nan=False,
+                            ),
+                        "CHILI_REPLAY_RESOLVED_STRATEGY_POLICY_SHA256":
+                            resolved_strategy_policy_sha256,
                         "WIN_START": w["win_start"], "WIN_END": w["win_end"],
                         "OHLCV_START": w["ohlcv_start"], "GOLDEN": "1",
                         "PREPEND_OHLCV": "1" if w.get("prepend") else "0",
@@ -1184,15 +1628,36 @@ def main() -> int:
             log_sha256 = file_sha256(log_path)
             log_size = os.path.getsize(log_path)
             if status == "ok":
-                pstatus, parsed = parse_driver_stdout(stdout)
+                pstatus, parsed = parse_driver_stdout(
+                    stdout,
+                    expected_symbol=w["symbol"],
+                    expected_arm=args.arm,
+                    expected_policy_sha256=resolved_strategy_policy_sha256,
+                )
                 if exit_code != 0:
                     status = "error"
                 elif pstatus != "ok":
                     status = "parse_fail"
                     parsed = parsed or {}
+                elif not replay_fill_inventory_is_flat(parsed["fills"]):
+                    status = "coverage_unavailable"
             else:
-                _, parsed = parse_driver_stdout(stdout)
-            rec = {"schema": "chili.golden_replay_window_result.v2", "key": key,
+                _, parsed = parse_driver_stdout(
+                    stdout,
+                    expected_symbol=w["symbol"],
+                    expected_arm=args.arm,
+                    expected_policy_sha256=resolved_strategy_policy_sha256,
+                )
+            (
+                child_policy_label,
+                child_policy_sha256,
+                child_policy_attestation_count,
+            ) = normalize_child_strategy_policy_attestation(
+                parsed,
+                expected_arm=args.arm,
+                expected_policy_sha256=resolved_strategy_policy_sha256,
+            )
+            rec = {"schema": "chili.golden_replay_window_result.v3", "key": key,
                    "symbol": w["symbol"], "day": w["day"], "class": w["class"],
                    "tier": w["tier"], "win_start": w["win_start"], "win_end": w["win_end"],
                    "ohlcv_start": w["ohlcv_start"], "window_source": w["window_source"],
@@ -1205,6 +1670,15 @@ def main() -> int:
                        current_receipt_helper_sha256,
                    "manifest_sha256": manifest_sha256,
                    "run_identity_sha256": meta["run_identity_sha256"],
+                   "resolved_strategy_policy": resolved_strategy_policy,
+                   "resolved_strategy_policy_sha256":
+                       resolved_strategy_policy_sha256,
+                   "child_strategy_policy_label":
+                       child_policy_label,
+                   "child_strategy_policy_sha256":
+                       child_policy_sha256,
+                   "child_strategy_policy_attestation_count":
+                       child_policy_attestation_count,
                    "source_content_receipt_sha256":
                        w["source_content_receipt_sha256"],
                    "source_content_receipt_pre_sha256":

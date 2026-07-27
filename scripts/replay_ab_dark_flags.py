@@ -1,24 +1,21 @@
-"""Explicit OFF-vs-ON A/B of the real live FSM across a recorded tape window.
+"""Hash-bound policy A/B of the real live FSM across a recorded tape window.
 
-The two levers are default-ON in production.  This diagnostic therefore uses
-an explicit both-OFF baseline and never treats an empty/default mapping as the
-baseline:
-  ARM=base : both explicit OFF
-  ARM=trap : trap ON, bailout OFF
-  ARM=bail : trap OFF, bailout ON
-  ARM=both : both ON (the production default)
+The operator-approved strategy policy has nine default-ON levers. Authoritative
+batch invocations must provide the complete closed vector, its canonical hash,
+and a matching named arm. Empty/default mappings and arbitrary ``FLAGS_JSON``
+overrides are forbidden.
 Derived from replay_window.py (all 9 replay gotchas retained). The archive source is
 explicit and read-only; the throwaway sink comes from TEST_DATABASE_URL and must end
 in ``_test``. SYMBOL/WIN_START/WIN_END/OHLCV_START are explicit inputs.
 
 Direct invocation is fail-closed: GOLDEN=1, isolated config/launcher markers,
 explicit source/sink/equity/risk/execution-family values, and the exact disposable
-sink confirmation are required before any app module imports. ARM defaults to
-``both`` (the intended default-ON policy), never the both-OFF experiment.
+sink confirmation are required before any app module imports.
 """
 from __future__ import annotations
 
 import hashlib
+import json
 import os
 import subprocess
 import sys
@@ -32,6 +29,146 @@ from diagnostic_replay_db import (  # noqa: E402
     guarded_database_identity,
     verify_connected_endpoint,
 )
+
+STRATEGY_POLICY_SCHEMA = "chili.replay-resolved-strategy-policy.v1"
+APPROVED_STRATEGY_FLAGS_BY_SLUG = (
+    (
+        "universe-float",
+        "chili_momentum_universe_float_gate_enabled",
+    ),
+    (
+        "orb-ihs-stop",
+        "chili_momentum_orb_ihs_structural_stop_enabled",
+    ),
+    (
+        "ross-stop",
+        "chili_momentum_ross_stop_alignment_enabled",
+    ),
+    (
+        "flush-dip-volume",
+        "chili_momentum_flush_dip_volume_gate_enabled",
+    ),
+    (
+        "tick-break-tape",
+        "chili_momentum_tick_break_tape_confirm_enabled",
+    ),
+    (
+        "catalyst-arb-flat",
+        "chili_momentum_catalyst_arb_flat_gate_enabled",
+    ),
+    (
+        "bail-no-confirm",
+        "chili_momentum_bail_on_no_confirmation_enabled",
+    ),
+    (
+        "fresh-ignition-reentry",
+        "chili_momentum_fresh_ignition_reentry_bypass_enabled",
+    ),
+    (
+        "sub-vwap-trap",
+        "chili_momentum_sub_vwap_trap_entry_enabled",
+    ),
+)
+
+
+def _resolve_strategy_policy(label: str) -> dict:
+    flags = {
+        flag: label != "base"
+        for _, flag in APPROVED_STRATEGY_FLAGS_BY_SLUG
+    }
+    if label == "base":
+        pass
+    elif label == "intended":
+        pass
+    elif label.startswith("intended-minus-"):
+        slug = label.removeprefix("intended-minus-")
+        matches = [
+            flag
+            for candidate_slug, flag in APPROVED_STRATEGY_FLAGS_BY_SLUG
+            if candidate_slug == slug
+        ]
+        if len(matches) != 1:
+            raise RuntimeError("unknown resolved strategy policy label")
+        flags[matches[0]] = False
+    else:
+        raise RuntimeError("unknown resolved strategy policy label")
+    return {
+        "schema": STRATEGY_POLICY_SCHEMA,
+        "label": label,
+        "flags": flags,
+    }
+
+
+def _reject_duplicate_policy_keys(pairs):
+    out = {}
+    for key, value in pairs:
+        if key in out:
+            raise RuntimeError("duplicate resolved strategy policy key")
+        out[key] = value
+    return out
+
+
+def _reject_nonfinite_policy_value(value: str):
+    raise RuntimeError(f"non-finite strategy policy value {value}")
+
+
+def _load_resolved_strategy_policy() -> tuple[dict, str]:
+    raw = str(
+        os.environ.get("CHILI_REPLAY_RESOLVED_STRATEGY_POLICY_JSON") or ""
+    ).strip()
+    expected_sha256 = str(
+        os.environ.get("CHILI_REPLAY_RESOLVED_STRATEGY_POLICY_SHA256") or ""
+    ).strip()
+    if (
+        not raw
+        or len(expected_sha256) != 64
+        or any(ch not in "0123456789abcdef" for ch in expected_sha256)
+    ):
+        raise RuntimeError("exact resolved strategy policy authority is required")
+    if str(os.environ.get("FLAGS_JSON") or "").strip():
+        raise RuntimeError("arbitrary FLAGS_JSON is forbidden in sealed replay")
+    try:
+        policy = json.loads(
+            raw,
+            object_pairs_hook=_reject_duplicate_policy_keys,
+            parse_constant=_reject_nonfinite_policy_value,
+        )
+    except (TypeError, ValueError, json.JSONDecodeError) as exc:
+        raise RuntimeError("resolved strategy policy is not strict JSON") from exc
+    if type(policy) is not dict or set(policy) != {"schema", "label", "flags"}:
+        raise RuntimeError("resolved strategy policy must be an exact object")
+    if type(policy.get("schema")) is not str or type(policy.get("label")) is not str:
+        raise RuntimeError(
+            "resolved strategy policy schema and label must be strings"
+        )
+    flags = policy.get("flags")
+    expected_flag_names = {
+        flag for _, flag in APPROVED_STRATEGY_FLAGS_BY_SLUG
+    }
+    if (
+        type(flags) is not dict
+        or set(flags) != expected_flag_names
+        or any(type(value) is not bool for value in flags.values())
+    ):
+        raise RuntimeError(
+            "resolved strategy policy flags must be the exact boolean vector"
+        )
+    expected = _resolve_strategy_policy(policy["label"])
+    if policy != expected:
+        raise RuntimeError("resolved strategy policy is not the closed vector")
+    canonical = json.dumps(
+        policy,
+        sort_keys=True,
+        separators=(",", ":"),
+        allow_nan=False,
+    )
+    actual_sha256 = hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+    if actual_sha256 != expected_sha256:
+        raise RuntimeError("resolved strategy policy hash mismatch")
+    if str(os.environ.get("ARM") or "").strip() != policy["label"]:
+        raise RuntimeError("ARM does not match resolved strategy policy")
+    return policy, actual_sha256
+
 
 PROD = str(os.environ.get("REPLAY_SOURCE_DATABASE_URL") or "").strip()
 SIM = str(os.environ.get("TEST_DATABASE_URL") or "").strip()
@@ -134,6 +271,11 @@ _dirty_build = subprocess.run(
 ).stdout
 if _actual_build_sha != _expected_build_sha or _dirty_build.strip():
     raise RuntimeError("replay driver requires the exact clean build authority")
+
+(
+    _RESOLVED_STRATEGY_POLICY,
+    _RESOLVED_STRATEGY_POLICY_SHA256,
+) = _load_resolved_strategy_policy()
 
 import pandas as pd
 from sqlalchemy import create_engine, text
@@ -756,42 +898,12 @@ def main():
     print(f"  grid_steps(after {GRID_STEP_S}s downsample)={len(grid)}")
     if not grid:
         print("NO GRID — tape missing. Abort."); return
-    # Both levers are default-ON in production.  An A/B baseline therefore
-    # MUST state the two OFF values explicitly; an empty mapping is the live
-    # treatment and would make every arm economically identical.
-    ARMS = {
-        "base": {
-            "chili_momentum_sub_vwap_trap_entry_enabled": False,
-            "chili_momentum_bail_on_no_confirmation_enabled": False,
-        },
-        "trap": {
-            "chili_momentum_sub_vwap_trap_entry_enabled": True,
-            "chili_momentum_bail_on_no_confirmation_enabled": False,
-        },
-        "bail": {
-            "chili_momentum_sub_vwap_trap_entry_enabled": False,
-            "chili_momentum_bail_on_no_confirmation_enabled": True,
-        },
-        "both": {
-            "chili_momentum_sub_vwap_trap_entry_enabled": True,
-            "chili_momentum_bail_on_no_confirmation_enabled": True,
-        },
-    }
-    arm_name = os.environ.get("ARM", "both").strip().lower()
-    if arm_name not in ARMS:
-        print(f"UNKNOWN ARM {arm_name!r}; pick one of {sorted(ARMS)}"); return
-    flags = dict(ARMS[arm_name])
-    # FLAGS_JSON (2026-07-25): arbitrary settings overrides merged OVER the arm's
-    # flags — makes every weekend A/B a pure-env matter (no per-PR driver edits).
-    # Example: FLAGS_JSON={"chili_momentum_ross_stop_alignment_enabled": false}
-    # for a parity arm proving a lever's kill-switch restores baseline behavior.
-    _fj = os.environ.get("FLAGS_JSON", "").strip()
-    if _fj:
-        import json as _json
-        _overrides = _json.loads(_fj)
-        if not isinstance(_overrides, dict):
-            print(f"FLAGS_JSON must be a JSON object, got {type(_overrides).__name__}"); return
-        flags.update(_overrides)
+    arm_name = _RESOLVED_STRATEGY_POLICY["label"]
+    flags = dict(_RESOLVED_STRATEGY_POLICY["flags"])
+    print(
+        f"[STRATEGY_POLICY={arm_name}] "
+        f"sha256={_RESOLVED_STRATEGY_POLICY_SHA256}"
+    )
     print(f"  merged_flags={flags}")
     res = run_arm(f"{SYMBOL}-{arm_name}", grid, ticks, flags)
     print(f"\n[ARM={arm_name}] {SYMBOL} PnL {res[0]:+.2f} entries={res[1]} exits={res[2]}")

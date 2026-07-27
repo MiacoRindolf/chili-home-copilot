@@ -1,6 +1,7 @@
 """Pure safety tests for the diagnostic golden replay library tooling."""
 from __future__ import annotations
 
+import ast
 import hashlib
 import importlib.util
 import json
@@ -76,7 +77,307 @@ def _manifest():
 
 
 def test_batch_defaults_to_intended_default_on_arm():
-    assert batch.DEFAULT_ARM == "both"
+    assert batch.DEFAULT_ARM == "intended"
+
+
+def _literal_assignment(relative: str, name: str):
+    tree = ast.parse((ROOT / relative).read_text(encoding="utf-8"))
+    for node in tree.body:
+        if not isinstance(node, ast.Assign):
+            continue
+        if any(isinstance(target, ast.Name) and target.id == name for target in node.targets):
+            return ast.literal_eval(node.value)
+    raise AssertionError(f"{relative} does not define literal {name}")
+
+
+def test_resolved_strategy_policy_binds_all_nine_operator_flags():
+    pairs = batch.APPROVED_STRATEGY_FLAGS_BY_SLUG
+    assert len(pairs) == 9
+    assert len({slug for slug, _ in pairs}) == 9
+    assert len({flag for _, flag in pairs}) == 9
+
+    intended = batch.resolve_strategy_policy("intended")
+    baseline = batch.resolve_strategy_policy("base")
+    assert intended["schema"] == batch.STRATEGY_POLICY_SCHEMA
+    assert intended["label"] == "intended"
+    assert intended["flags"] == {flag: True for _, flag in pairs}
+    assert baseline["flags"] == {flag: False for _, flag in pairs}
+    assert (
+        batch.strategy_policy_sha256(intended)
+        != batch.strategy_policy_sha256(baseline)
+    )
+
+    hashes = {batch.strategy_policy_sha256(intended)}
+    for slug, flag in pairs:
+        arm = f"intended-minus-{slug}"
+        doc = batch.resolve_strategy_policy(arm)
+        assert doc["label"] == arm
+        assert doc["flags"][flag] is False
+        assert sum(value is False for value in doc["flags"].values()) == 1
+        hashes.add(batch.strategy_policy_sha256(doc))
+    assert len(hashes) == 10
+
+
+@pytest.mark.parametrize(
+    ("arm", "replacement"),
+    (
+        ("intended", 1),
+        ("intended", 1.0),
+        ("base", 0),
+        ("base", 0.0),
+    ),
+)
+def test_strategy_policy_rejects_numeric_boolean_aliases(arm, replacement):
+    policy = batch.resolve_strategy_policy(arm)
+    first_flag = batch.APPROVED_STRATEGY_FLAGS_BY_SLUG[0][1]
+    policy["flags"][first_flag] = replacement
+    with pytest.raises(ValueError, match="exact boolean vector"):
+        batch.strategy_policy_sha256(policy)
+
+
+def test_driver_and_batch_use_the_same_closed_strategy_policy_allowlist():
+    driver_pairs = _literal_assignment(
+        "scripts/replay_ab_dark_flags.py",
+        "APPROVED_STRATEGY_FLAGS_BY_SLUG",
+    )
+    assert tuple(driver_pairs) == batch.APPROVED_STRATEGY_FLAGS_BY_SLUG
+
+
+def test_strategy_policy_hash_is_part_of_every_result_key():
+    intended = batch.resolve_strategy_policy("intended")
+    baseline = batch.resolve_strategy_policy("base")
+    intended_hash = batch.strategy_policy_sha256(intended)
+    baseline_hash = batch.strategy_policy_sha256(baseline)
+    intended_key = batch.result_key(
+        "AAA",
+        "2026-07-07",
+        intended["label"],
+        intended_hash,
+    )
+    baseline_key = batch.result_key(
+        "AAA",
+        "2026-07-07",
+        baseline["label"],
+        baseline_hash,
+    )
+    assert intended_hash in intended_key
+    assert baseline_hash in baseline_key
+    assert intended_key != baseline_key
+    with pytest.raises(ValueError, match="label/hash mismatch"):
+        batch.result_key(
+            "AAA",
+            "2026-07-07",
+            intended["label"],
+            baseline_hash,
+        )
+    with pytest.raises(ValueError, match="calendar date"):
+        batch.result_key(
+            "AAA",
+            "2026-99-99",
+            intended["label"],
+            intended_hash,
+        )
+
+
+def test_resumed_run_meta_rehashes_policy_and_run_identity_strictly():
+    policy = batch.resolve_strategy_policy("intended")
+    policy_sha256 = batch.strategy_policy_sha256(policy)
+    candidate = {
+        "schema": "chili.golden_replay_run_meta.v3",
+        "arm": "intended",
+        "resolved_strategy_policy": policy,
+        "resolved_strategy_policy_sha256": policy_sha256,
+        "build_sha": "b" * 40,
+        "started_at": "2026-07-26T12:00:00",
+        "stop_at": "2026-07-26T18:00:00",
+    }
+    run_payload = {
+        key: value
+        for key, value in candidate.items()
+        if key not in {"run_identity_sha256", "started_at", "stop_at"}
+    }
+    candidate["run_identity_sha256"] = hashlib.sha256(
+        json.dumps(
+            run_payload,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    ).hexdigest()
+    existing = json.loads(json.dumps(candidate))
+    existing["started_at"] = "2026-07-26T11:59:59"
+    assert batch.validate_resumed_run_meta(
+        existing,
+        candidate,
+        expected_policy_sha256=policy_sha256,
+    ) == existing
+
+    numeric_policy = json.loads(json.dumps(existing))
+    first_flag = batch.APPROVED_STRATEGY_FLAGS_BY_SLUG[0][1]
+    numeric_policy["resolved_strategy_policy"]["flags"][first_flag] = 1
+    with pytest.raises(ValueError, match="exact boolean vector"):
+        batch.validate_resumed_run_meta(
+            numeric_policy,
+            candidate,
+            expected_policy_sha256=policy_sha256,
+        )
+
+    stale_identity = json.loads(json.dumps(existing))
+    stale_identity["build_sha"] = "c" * 40
+    with pytest.raises(ValueError, match="authority is invalid"):
+        batch.validate_resumed_run_meta(
+            stale_identity,
+            candidate,
+            expected_policy_sha256=policy_sha256,
+        )
+
+    legacy_meta = json.loads(json.dumps(existing))
+    legacy_meta["schema"] = "chili.golden_replay_run_meta.v2"
+    with pytest.raises(ValueError, match="authority is invalid"):
+        batch.validate_resumed_run_meta(
+            legacy_meta,
+            candidate,
+            expected_policy_sha256=policy_sha256,
+        )
+
+
+def test_driver_stdout_policy_attestation_is_exact_and_conflict_detected():
+    policy = batch.resolve_strategy_policy("intended")
+    policy_sha256 = batch.strategy_policy_sha256(policy)
+
+    parse = lambda out: batch.parse_driver_stdout(  # noqa: E731
+        out,
+        expected_symbol="AAA",
+        expected_arm="intended",
+        expected_policy_sha256=policy_sha256,
+    )
+
+    def output(*, policy_lines=None, summary=None, fills=None, states=None):
+        return "\n".join(
+            [
+                *(
+                    policy_lines
+                    if policy_lines is not None
+                    else [
+                        f"[STRATEGY_POLICY=intended] sha256={policy_sha256}"
+                    ]
+                ),
+                *(states if states is not None else ["final_state=flat"]),
+                *(fills if fills is not None else ["BUY 1 @ 5.00", "SELL 1 @ 6.00"]),
+                summary
+                or "[ARM=intended] AAA PnL +12.34 entries=1 exits=1",
+            ]
+        )
+
+    status, parsed = parse(output())
+    assert status == "ok"
+    assert parsed["strategy_policy_label"] == "intended"
+    assert parsed["strategy_policy_sha256"] == policy_sha256
+
+    status, _ = parse(output(policy_lines=[]))
+    assert status == "parse_fail"
+
+    status, _ = parse(
+        output(summary="[ARM=base] AAA PnL +12.34 entries=1 exits=1")
+    )
+    assert status == "parse_fail"
+
+    status, _ = parse(output(summary="[ARM=intended] WRONG PnL +12.34 entries=1 exits=1"))
+    assert status == "parse_fail"
+
+    status, _ = parse(
+        output(
+            summary="\n".join(
+                [
+                    "[ARM=intended] AAA PnL +12.34 entries=1 exits=1",
+                    "[ARM=intended] AAA PnL +99.99 entries=1 exits=1",
+                ]
+            )
+        )
+    )
+    assert status == "parse_fail"
+
+    status, _ = parse(
+        output(
+            policy_lines=[
+                f"[STRATEGY_POLICY=intended] sha256={policy_sha256}",
+                f"[STRATEGY_POLICY=intended] sha256={policy_sha256}",
+            ]
+        )
+    )
+    assert status == "parse_fail"
+
+    status, _ = parse(
+        output(
+            policy_lines=[
+                f"[STRATEGY_POLICY=intended] sha256={policy_sha256}",
+                f"[STRATEGY_POLICY=base] sha256={'0' * 64}",
+            ]
+        )
+    )
+    assert status == "parse_fail"
+
+    status, _ = parse(
+        output(
+            fills=["BUY 1 @ 5.00"],
+            summary="[ARM=intended] AAA PnL +12.34 entries=1 exits=1",
+        )
+    )
+    assert status == "parse_fail"
+
+    open_status, open_parsed = parse(
+        output(
+            fills=["BUY 1 @ 5.00"],
+            summary="[ARM=intended] AAA PnL -5.00 entries=1 exits=0",
+        )
+    )
+    assert open_status == "ok"
+    assert batch.replay_fill_inventory_is_flat(open_parsed["fills"]) is False
+
+    for malformed_output in (
+        output(
+            fills=["BUY . @ 5.00"],
+            summary="[ARM=intended] AAA PnL -5.00 entries=1 exits=0",
+        ),
+        output(
+            fills=["BUY 0 @ 5.00"],
+            summary="[ARM=intended] AAA PnL +0.00 entries=1 exits=0",
+        ),
+        output(
+            fills=[f"BUY {'9' * 400} @ 5.00"],
+            summary="[ARM=intended] AAA PnL +0.00 entries=1 exits=0",
+        ),
+        output(
+            summary="[ARM=intended] AAA PnL . entries=1 exits=1",
+        ),
+    ):
+        malformed_status, _ = parse(malformed_output)
+        assert malformed_status == "parse_fail"
+
+    status, _ = parse(output(states=[]))
+    assert status == "parse_fail"
+
+    status, _ = parse(
+        output(states=["final_state=entered", "final_state=flat"])
+    )
+    assert status == "parse_fail"
+
+    forged_expected_status, _ = batch.parse_driver_stdout(
+        output(),
+        expected_symbol="AAA",
+        expected_arm="intended",
+        expected_policy_sha256="0" * 64,
+    )
+    assert forged_expected_status == "parse_fail"
+
+    assert batch.normalize_child_strategy_policy_attestation(
+        {
+            "strategy_policy_label": "intended",
+            "strategy_policy_sha256": policy_sha256,
+            "strategy_policy_attestation_count": 2,
+        },
+        expected_arm="intended",
+        expected_policy_sha256=policy_sha256,
+    ) == (None, None, 0)
 
 
 def test_sink_fill_normalization_uses_canonical_fsm_event_payloads():
@@ -407,6 +708,14 @@ def test_content_receipt_is_query_contract_and_content_bound():
 def test_confined_paths_reject_traversal(tmp_path):
     with pytest.raises(ValueError, match="escapes"):
         batch.confined_child_path(str(tmp_path), "../outside.log")
+    expected = str((tmp_path / "results.jsonl").resolve())
+    assert batch.v3_results_path(str(tmp_path)) == expected
+    assert batch.v3_results_path(str(tmp_path), expected) == expected
+    with pytest.raises(ValueError, match="results must be"):
+        batch.v3_results_path(
+            str(tmp_path),
+            str(tmp_path / "elsewhere" / "results.jsonl"),
+        )
 
 
 def test_driver_rejects_secret_before_app_import_or_database_connect():
