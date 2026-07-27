@@ -105,6 +105,26 @@ def test_verdict_mapping_operator_tier():
     assert [w["manifest_id"] for w in manifest_only] == ["d"]
 
 
+def test_crossref_window_not_covered():
+    # Ross premarket window (08:05-08:20 ET = 12:05-12:20 UTC) vs replay 13:00-16:00 UTC
+    manifest = {"windows": [
+        {"manifest_id": "x", "symbol": "PLSM", "date": "2026-07-13",
+         "expected_action": "trade", "ross_action": "trade",
+         "window_et": "~08:05-08:20", "ross_net_usd": 2363.44,
+         "pnl_confidence": "stated_verbatim"},
+    ]}
+    records = [{"key": "PLSM|2026-07-13|base", "symbol": "PLSM", "day": "2026-07-13",
+                "pnl": 0.0, "win_start": "2026-07-13T13:00:00",
+                "win_end": "2026-07-13T16:00:00"}]
+    matched, _ = rs.ross_crossref(manifest, records, {"PLSM|2026-07-13|base": []})
+    assert matched[0]["grade"] == "window_not_covered"
+    assert matched[0]["credit"] is None
+    # overlapping window keeps normal grading
+    manifest["windows"][0]["window_et"] = "~09:30-10:00"  # 13:30-14:00 UTC — overlaps
+    matched2, _ = rs.ross_crossref(manifest, records, {"PLSM|2026-07-13|base": []})
+    assert matched2[0]["grade"] == "missed_profitable_setup"
+
+
 def test_family_buckets():
     assert rs._family("micro_pullback_break_tick") == "micro_pullback"
     assert rs._family("orb_break_tick_ok") == "orb/raw_break"

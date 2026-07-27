@@ -270,6 +270,23 @@ def _family(reason: str | None) -> str:
     return "other" if r else "unknown"
 
 
+def _ross_window_utc(w: dict) -> tuple[datetime, datetime] | None:
+    """Parse manifest window_et '~HH:MM-HH:MM' (ET, EDT=UTC-4 sa July windows) -> UTC bounds."""
+    raw = str(w.get("window_et") or "").strip().lstrip("~")
+    if "-" not in raw:
+        return None
+    try:
+        a, b = raw.split("-", 1)
+        ha, ma = a.strip().split(":")
+        hb, mb = b.strip().split(":")
+        day = datetime.fromisoformat(w["date"])
+        t0 = day.replace(hour=int(ha), minute=int(ma)) + timedelta(hours=4)
+        t1 = day.replace(hour=int(hb), minute=int(mb)) + timedelta(hours=4)
+        return (t0, t1) if t1 > t0 else None
+    except (ValueError, KeyError, TypeError):
+        return None
+
+
 def ross_crossref(manifest: dict | None, records: list[dict],
                   trades_by_key: dict[str, list[dict]]) -> tuple[list[dict], list[dict]]:
     if not manifest:
@@ -281,6 +298,23 @@ def ross_crossref(manifest: dict | None, records: list[dict],
         if rec is None:
             manifest_only.append(w)
             continue
+        # Honest coverage label: kapag ang Ross window ay ganap na LABAS sa replayed
+        # window, hindi ito "missed" — hindi lang ito sakop ng replay (hal. Ross premarket
+        # 08:05 ET vs canonical 09:00-12:00 ET window).
+        rw = _ross_window_utc(w)
+        if rw is not None:
+            r0 = _parse_ts(rec.get("win_start"))
+            r1 = _parse_ts(rec.get("win_end"))
+            if r0 is not None and r1 is not None and (rw[1] <= r0 or rw[0] >= r1):
+                matched.append({"manifest_id": w.get("manifest_id"), "symbol": w["symbol"],
+                                "date": w.get("date"), "window_et": w.get("window_et"),
+                                "account": w.get("account"), "ross_action": w.get("ross_action"),
+                                "ross_net_usd": w.get("ross_net_usd"),
+                                "pnl_confidence": w.get("pnl_confidence"),
+                                "chili_pnl": None, "chili_entries": 0,
+                                "grade": "window_not_covered", "credit": None,
+                                "verdict": "∅", "reason": "Ross window outside the replayed window"})
+                continue
         trades = trades_by_key.get(rec["key"], [])
         actual = "trade" if trades else "miss"
         agg = round(sum(t["pnl_usd"] for t in trades), 2)
