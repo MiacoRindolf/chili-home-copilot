@@ -3058,6 +3058,18 @@ class BoundedCaptureIngress:
             self._submitted += 1
             self._record_submission_sequence(event.sequence)
             reason = str(attempt.rejection_reason)
+            if reason == "capture_ingress_closed" and self._writer_failure_count:
+                # The writer already terminally failed and released every
+                # queued/inflight shared reservation.  A gap appended here
+                # could never be drained by that dead writer and would make
+                # physical quiescence (and therefore strategy rollback)
+                # impossible.  Retain the attempted post-close loss in the
+                # ordinary counters while the pre-existing writer failure
+                # permanently forbids a clean seal/certification claim.
+                self._post_close_submissions += 1
+                self._dropped += 1
+                self._condition.notify_all()
+                return
             if reason == "capture_ingress_closed":
                 self._post_close_submissions += 1
             if "write_bandwidth" in reason:
@@ -11675,6 +11687,7 @@ class CaptureWriterWorker:
             else 0.0
         )
         return {
+            "has_started": self._has_started,
             "writer_alive": bool(thread and thread.is_alive()),
             "stopped_cleanly": bool(
                 self._stopped_cleanly and self.ingress.clean_close_eligible

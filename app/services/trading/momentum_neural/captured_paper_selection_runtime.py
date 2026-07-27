@@ -1110,9 +1110,46 @@ class CapturedPaperSelectionLifecycleWorker:
             queue.get("poisoned") or queue.get("poison_reason")
         )
 
+    @staticmethod
+    def _exact_writer_failure_reason(
+        queue_health: Mapping[str, Any],
+        writer_health: Mapping[str, Any] | None = None,
+    ) -> str | None:
+        candidates: list[Mapping[str, Any]] = []
+        queue_ingress = queue_health.get("ingress")
+        if isinstance(queue_ingress, Mapping):
+            candidates.append(queue_ingress)
+        writer = (
+            writer_health.get("writer")
+            if isinstance(writer_health, Mapping)
+            else None
+        )
+        if isinstance(writer, Mapping):
+            writer_ingress = writer.get("ingress")
+            if isinstance(writer_ingress, Mapping):
+                candidates.append(writer_ingress)
+            if writer.get("last_error"):
+                return str(writer["last_error"])
+        for ingress in candidates:
+            if ingress.get("writer_failure_count"):
+                return str(
+                    ingress.get("writer_failure_reason")
+                    or "writer failure reason unavailable"
+                )
+        return None
+
     def _assert_runtime_health(self) -> None:
         queue_health = self._publisher_health()
         writer_health = self._writer_health()
+        writer_reason = self._exact_writer_failure_reason(
+            queue_health,
+            writer_health,
+        )
+        if writer_reason is not None:
+            _reject(
+                "QUEUE_WRITER_FAILED",
+                f"selection writer reported a fatal condition ({writer_reason})",
+            )
         if self._queue_health_is_fatal(queue_health):
             _reject("QUEUE_POISONED", "selection queue is poisoned or overflowed")
         if self._writer_health_is_fatal(writer_health):
@@ -1269,9 +1306,27 @@ class CapturedPaperSelectionLifecycleWorker:
                     before_ingress_admission=before_ingress_admission,
                 )
                 if getattr(receipt, "accepted", None) is not True:
+                    publisher_health = _health_mapping(
+                        publisher.health(),
+                        "queue publisher",
+                    )
+                    writer_reason = self._exact_writer_failure_reason(
+                        publisher_health
+                    )
+                    if writer_reason is not None:
+                        _reject(
+                            "QUEUE_WRITER_FAILED",
+                            "selection writer failed before bounded ingress "
+                            f"admission ({writer_reason})",
+                        )
+                    poison_reason = str(
+                        publisher_health.get("poison_reason")
+                        or "queue ingress rejection reason unavailable"
+                    )
                     _reject(
                         "QUEUE_INGRESS_REJECTED",
-                        "selection occurrence was rejected by bounded ingress",
+                        "selection occurrence was rejected by bounded ingress "
+                        f"({poison_reason})",
                     )
                 published += 1
                 event_at = occurrence.bundle.event_at

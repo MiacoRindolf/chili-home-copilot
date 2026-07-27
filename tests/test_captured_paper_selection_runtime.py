@@ -221,12 +221,16 @@ class _FakeIngress:
             else runtime.shared_admission_budget.pressure_controller
         )
         self.dropped = 0
+        self.writer_failure_count = 0
+        self.writer_failure_reason: str | None = None
+        self.post_close_submissions = 0
 
     def health(self) -> dict[str, object]:
         return {
-            "writer_failure_count": 0,
+            "writer_failure_count": self.writer_failure_count,
+            "writer_failure_reason": self.writer_failure_reason,
             "dropped": self.dropped,
-            "post_close_submissions": 0,
+            "post_close_submissions": self.post_close_submissions,
         }
 
 
@@ -405,7 +409,7 @@ class _FakeWriter:
         return {
             "queue": self.publisher.health(),
             "writer": {
-                "last_error": None,
+                "last_error": self.publisher.ingress.writer_failure_reason,
                 "writer_alive": self.started and not self.closed,
                 "ingress": self.publisher.ingress.health(),
             },
@@ -1292,6 +1296,88 @@ def test_missing_durable_ack_never_installs_reader_and_application_remains_rollb
     assert receipt["variant_application_sha256"] == (
         harness.setup.application.application_sha256
     )
+
+
+def test_writer_failure_reason_survives_startup_and_quiesced_rollback(
+    tmp_path: Path,
+) -> None:
+    harness = _Harness(tmp_path)
+    original_factory = harness.worker.component_factory
+    injected_reason = "OSError: injected commit publication failure"
+
+    def failing_factory(*args: object, **kwargs: object):
+        components = original_factory(*args, **kwargs)
+        assert harness.publisher is not None
+
+        def reject_after_writer_failure(**_publish_kwargs: object):
+            publisher = harness.publisher
+            assert publisher is not None
+            publisher.ingress.writer_failure_count = 1
+            publisher.ingress.writer_failure_reason = injected_reason
+            publisher.ingress.post_close_submissions = 1
+            publisher.reserved_sequence = None
+            publisher.poisoned = True
+            publisher.poison_reason = (
+                "queue_ingress_rejected:capture_ingress_closed"
+            )
+            return SimpleNamespace(accepted=False)
+
+        harness.publisher.publish_bundle = reject_after_writer_failure
+        return components
+
+    harness.worker.component_factory = failing_factory
+    with pytest.raises(CapturedPaperSelectionRuntimeError) as failure:
+        harness.worker.start()
+
+    assert failure.value.code == "QUEUE_WRITER_FAILED"
+    assert injected_reason in str(failure.value)
+    assert harness.reader.health()["installed"] is False
+    assert harness.writer is not None and harness.writer.closed is True
+    health = harness.worker.health()
+    assert health["fatal"] is True
+    assert health["quiesced"] is True
+    receipt = harness.worker.rollback_after_quiesce()
+    assert receipt["application_outcome"] == "rolled_back"
+    assert receipt["paper_order_submission_authorized"] is False
+    assert receipt["live_cash_authorized"] is False
+    assert harness.rollback_calls == 1
+
+
+def test_writer_failure_after_last_accept_survives_durability_wait(
+    tmp_path: Path,
+) -> None:
+    harness = _Harness(tmp_path, auto_durable=False)
+    original_factory = harness.worker.component_factory
+    injected_reason = "OSError: injected post-accept fsync failure"
+
+    def failing_factory(*args: object, **kwargs: object):
+        components = original_factory(*args, **kwargs)
+        assert harness.publisher is not None
+        original_publish = harness.publisher.publish_bundle
+
+        def accept_then_fail(**publish_kwargs: object):
+            receipt = original_publish(**publish_kwargs)
+            publisher = harness.publisher
+            assert publisher is not None
+            publisher.ingress.writer_failure_count = 1
+            publisher.ingress.writer_failure_reason = injected_reason
+            return receipt
+
+        harness.publisher.publish_bundle = accept_then_fail
+        return components
+
+    harness.worker.component_factory = failing_factory
+    with pytest.raises(CapturedPaperSelectionRuntimeError) as failure:
+        harness.worker.start()
+
+    assert failure.value.code == "QUEUE_WRITER_FAILED"
+    assert injected_reason in str(failure.value)
+    assert harness.reader.health()["installed"] is False
+    assert harness.worker.health()["quiesced"] is True
+    receipt = harness.worker.rollback_after_quiesce()
+    assert receipt["application_outcome"] == "rolled_back"
+    assert receipt["paper_order_submission_authorized"] is False
+    assert receipt["live_cash_authorized"] is False
 
 
 def test_queue_overflow_health_is_terminal_and_revokes_reader(tmp_path: Path) -> None:

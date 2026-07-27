@@ -1433,9 +1433,18 @@ class CapturedPaperSelectionQueueWriter:
             self.publisher.poison("queue_shutdown_with_outstanding_reservation")
         stopped = self.stop(timeout_seconds=timeout_seconds)
         worker_health = self._worker.health()
-        if not worker_health["writer_alive"] and self._worker.ingress.drained:
+        physically_quiesced_after_failure = bool(
+            worker_health.get("has_started")
+            and not worker_health["writer_alive"]
+            and worker_health.get("last_error")
+            and self._worker.ingress.drained
+        )
+        if (
+            not worker_health["writer_alive"]
+            and self._worker.ingress.drained
+        ):
             self.publisher.writer_lease.release()
-        return stopped
+        return bool(stopped or physically_quiesced_after_failure)
 
     def health(self) -> dict[str, Any]:
         return {

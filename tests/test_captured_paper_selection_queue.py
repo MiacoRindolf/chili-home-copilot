@@ -922,6 +922,82 @@ def test_visible_commit_is_ignored_until_post_fsync_gate_acknowledges_it(
     harness.manager.close()
 
 
+def test_writer_failure_before_third_commit_is_quiescent_but_never_clean(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    harness = _harness(tmp_path)
+    original_prepare = harness.publisher._prepare_commit
+    injected_reason = "injected third commit durable publication failure"
+
+    def fail_third_commit(**kwargs):
+        if harness.publisher.health().commit_count == 2:
+            raise OSError(injected_reason)
+        return original_prepare(**kwargs)
+
+    monkeypatch.setattr(
+        harness.publisher,
+        "_prepare_commit",
+        fail_third_commit,
+    )
+    harness.writer.start()
+
+    def publish_sequence(sequence: int, *, retained: bool = False):
+        bundle, scoring, events, selection, identity = _source_bundle(
+            source_sequence=sequence
+        )
+        assert selection == harness.selection
+        assert identity == harness.queue_identity
+        assert harness.publisher.reserve_sequence() == sequence
+        kwargs = {}
+        if retained:
+            kwargs["before_ingress_admission"] = (
+                lambda _event, _size, _reason: None
+            )
+        return harness.publisher.publish_bundle(
+            bundle=bundle,
+            scoring_authority=scoring,
+            evaluation_at=bundle.read_at,
+            source_events=events,
+            **kwargs,
+        )
+
+    for sequence in (1, 2):
+        assert publish_sequence(sequence).accepted is True
+        deadline = time.monotonic() + 5.0
+        while harness.publisher.health().durable_through < sequence:
+            assert time.monotonic() < deadline
+            time.sleep(0.001)
+
+    assert publish_sequence(3).accepted is True
+    deadline = time.monotonic() + 5.0
+    while harness.writer.health()["writer"]["last_error"] is None:
+        assert time.monotonic() < deadline
+        time.sleep(0.001)
+
+    rejected = publish_sequence(4, retained=True)
+    assert rejected.accepted is False
+    failed = harness.writer.health()
+    ingress = failed["writer"]["ingress"]
+    assert injected_reason in str(failed["writer"]["last_error"])
+    assert injected_reason in str(ingress["writer_failure_reason"])
+    assert ingress["writer_failure_count"] == 1
+    assert ingress["pending_gap_keys"] == 0
+    assert ingress["pending_retained_admissions"] == 0
+    assert harness.publisher.ingress.drained is True
+
+    # Physical shutdown and lease release permit strategy rollback, but the
+    # capture remains permanently dirty and can never claim a clean seal.
+    assert harness.writer.close(timeout_seconds=5) is True
+    assert harness.publisher.writer_lease.health()["released"] is True
+    terminal = failed["writer"]["ingress"]
+    assert terminal["clean_close_eligible"] is False
+    assert failed["writer"]["stopped_cleanly"] is False
+    with pytest.raises(Exception, match="clean, error-free shutdown"):
+        harness.writer.worker.seal_run(harness.queue_identity)
+    harness.manager.close()
+
+
 def test_exact_source_event_mismatch_poison_is_durable_and_fail_closed(tmp_path) -> None:
     harness = _harness(tmp_path)
     assert harness.publisher.reserve_sequence() == 1
