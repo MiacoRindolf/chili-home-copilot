@@ -708,11 +708,14 @@ def test_live_certification_symbol_uses_current_exact_prints_and_delay_zero(
     assert checked == ["STALE", "VIVS"]
     assert engine.disposed is True
     query, parameters = engine.executions[-1]
+    assert "WITH recent_tail AS MATERIALIZED" in query
+    assert "ORDER BY id DESC LIMIT :tail_rows" in query
     assert "received_at >= :started_at" in query
     assert "received_at <= :completed_at" in query
     assert "bridge_run_id = :bridge_run_id" in query
     assert "provider_trade_reference_at = provider_event_at" in query
     assert parameters == {
+        "tail_rows": chain._PRESELECTION_SEED_TAIL_ROWS,
         "started_at": NOW,
         "completed_at": NOW,
         "timestamp_basis": "iqfeed_selected_trade_date_timems_exact",

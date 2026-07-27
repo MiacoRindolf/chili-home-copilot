@@ -881,8 +881,15 @@ def _select_live_certification_symbol(
                 connection.execute(text("SET TRANSACTION READ ONLY"))
                 rows = connection.execute(
                     text(
-                        "SELECT symbol, count(*) AS n "
+                        "WITH recent_tail AS MATERIALIZED ("
+                        "SELECT symbol, received_at, available_at, "
+                        "provider_event_at, provider_trade_reference_at, "
+                        "timestamp_basis, bridge_version, bridge_run_id, "
+                        "message_type, source_frame_sha256 "
                         "FROM iqfeed_trade_ticks "
+                        "ORDER BY id DESC LIMIT :tail_rows"
+                        ") SELECT symbol, count(*) AS n "
+                        "FROM recent_tail "
                         "WHERE received_at >= :started_at "
                         "AND received_at <= :completed_at "
                         "AND available_at IS NOT NULL "
@@ -896,6 +903,7 @@ def _select_live_certification_symbol(
                         "GROUP BY symbol ORDER BY n DESC, symbol ASC LIMIT 40"
                     ),
                     {
+                        "tail_rows": _PRESELECTION_SEED_TAIL_ROWS,
                         "started_at": started_at.astimezone(UTC),
                         "completed_at": preselection.completed_at.astimezone(UTC),
                         "timestamp_basis": preselection.timestamp_basis,
