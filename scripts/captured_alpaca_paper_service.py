@@ -285,6 +285,30 @@ class _CapturedPaperPressureFeedWorker:
                 )
 
     def health(self) -> Mapping[str, Any]:
+        try:
+            pressure = dict(self._controller.health())
+            active_reasons = pressure.get("active_reasons")
+            pre_authority_ready = bool(
+                pressure.get("required_full_fidelity_admissible") is True
+                and pressure.get("pressure_state") == "normal"
+                and pressure.get("rejection_reason") is None
+                and isinstance(active_reasons, (list, tuple))
+                and not active_reasons
+                and pressure.get("entry_streak") == 0
+                and isinstance(pressure.get("sample_count"), int)
+                and not isinstance(pressure.get("sample_count"), bool)
+                and pressure["sample_count"] > 0
+            )
+            pressure_state = pressure.get("pressure_state")
+            pressure_rejection_reason = pressure.get("rejection_reason")
+            pressure_sample_age_seconds = pressure.get("sample_age_seconds")
+        except Exception as exc:
+            pre_authority_ready = False
+            pressure_state = "health_unavailable"
+            pressure_rejection_reason = (
+                f"pressure_controller_health_unavailable:{type(exc).__name__}"
+            )
+            pressure_sample_age_seconds = None
         with self._state_lock:
             thread = self._thread
             running = bool(
@@ -297,6 +321,14 @@ class _CapturedPaperPressureFeedWorker:
                 "fatal_reason": self._fatal_reason,
                 "samples_fed": self._samples_fed,
                 "interval_seconds": self._interval,
+                # ``running`` deliberately remains a thread-liveness signal so
+                # a pressured feed can stay alive and produce recovery samples.
+                # The supervisor separately requires this exact controller
+                # readiness immediately before consuming order authority.
+                "pre_authority_ready": pre_authority_ready,
+                "pressure_state": pressure_state,
+                "pressure_rejection_reason": pressure_rejection_reason,
+                "pressure_sample_age_seconds": pressure_sample_age_seconds,
             }
 
 
@@ -6527,6 +6559,11 @@ def _assemble_service_composition(
             # (480s pair) with margin, so the startup receipt is still written
             # before the host gives up.
             initial_snapshot_warmup_seconds=360.0,
+            # The same 360s initial-cycle deadline above is shared by pressure
+            # admission and source warmup.  Selection derives the controller
+            # from its validated ingress graph; no caller-supplied verdict can
+            # bypass the measured fail-closed policy.
+            wait_for_initial_pressure=True,
             monotonic_clock=monotonic_clock,
         )
     )

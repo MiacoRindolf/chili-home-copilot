@@ -486,6 +486,80 @@ def test_selection_prime_precedes_fresh_authority_and_order_workers():
     ]
 
 
+def test_pre_authority_health_loss_stops_before_order_authority_consumption():
+    events = []
+    pressure = _Worker("pressure", events)
+
+    class _SelectionThatObservesPressureDeath(_Worker):
+        def start(self):
+            super().start()
+            pressure.running = False
+            pressure.fatal = True
+
+    selection = _SelectionThatObservesPressureDeath("selection", events)
+    transport = _Worker("transport", events)
+    supervisor, host, live = _supervisor(
+        events,
+        pre_authority_workers=(
+            ("pressure", pressure),
+            ("selection", selection),
+        ),
+        workers=(("transport", transport),),
+    )
+
+    with pytest.raises(
+        CapturedPaperServiceSupervisorError,
+        match="pressure_pre_authority_health_lost",
+    ):
+        supervisor.start_active(start_authority=_active_authority(events))
+
+    assert "active_authority_consume" not in events
+    assert "transport_start" not in events
+    assert "live_start" not in events
+    assert live["running"] is False
+    assert host.running is False
+    assert pressure.running is False
+    assert selection.running is False
+
+
+def test_alive_but_stale_pre_authority_worker_blocks_order_authority():
+    events = []
+
+    class _AliveButStalePressure(_Worker):
+        def health(self):
+            return {
+                **super().health(),
+                # The first check occurs immediately after start and allows the
+                # feed to remain alive while selection waits.  The final
+                # pre-authority check must consume this explicit readiness bit.
+                "pre_authority_ready": "selection_start" not in events,
+            }
+
+    pressure = _AliveButStalePressure("pressure", events)
+    selection = _Worker("selection", events)
+    transport = _Worker("transport", events)
+    supervisor, host, live = _supervisor(
+        events,
+        pre_authority_workers=(
+            ("pressure", pressure),
+            ("selection", selection),
+        ),
+        workers=(("transport", transport),),
+    )
+
+    with pytest.raises(
+        CapturedPaperServiceSupervisorError,
+        match="pressure_pre_authority_health_lost",
+    ):
+        supervisor.start_active(start_authority=_active_authority(events))
+
+    assert "active_authority_consume" not in events
+    assert "transport_start" not in events
+    assert "live_start" not in events
+    assert live["running"] is False
+    assert host.running is False
+
+
 def test_post_quiesce_deactivation_runs_after_every_owner_and_before_fence_release():
     events = []
     selection = _Worker("selection", events)

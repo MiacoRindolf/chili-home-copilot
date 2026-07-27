@@ -68,6 +68,58 @@ def _canonical(value: object) -> str:
     )
 
 
+def test_pressure_feed_reports_alive_but_stale_as_not_pre_authority_ready() -> None:
+    class _Controller:
+        def __init__(self) -> None:
+            self.value = {
+                "required_full_fidelity_admissible": True,
+                "pressure_state": "normal",
+                "rejection_reason": None,
+                "active_reasons": (),
+                "entry_streak": 0,
+                "sample_count": 1,
+                "sample_age_seconds": 0.01,
+            }
+
+        def observe(self, _sample: object) -> None:
+            return None
+
+        def health(self) -> dict[str, object]:
+            return dict(self.value)
+
+    controller = _Controller()
+    worker = service_module._CapturedPaperPressureFeedWorker(
+        pressure_controller=controller,
+        sampler=object,
+        interval_seconds=60.0,
+    )
+    worker.start()
+    try:
+        clean = worker.health()
+        assert clean["running"] is True
+        assert clean["pre_authority_ready"] is True
+
+        controller.value.update(
+            {
+                "required_full_fidelity_admissible": False,
+                "pressure_state": "stale_fail_closed",
+                "rejection_reason": (
+                    "capture_resource_pressure_sample_stale"
+                ),
+                "sample_age_seconds": 6.0,
+            }
+        )
+        stale = worker.health()
+        assert stale["running"] is True
+        assert stale["fatal"] is False
+        assert stale["pre_authority_ready"] is False
+        assert stale["pressure_rejection_reason"] == (
+            "capture_resource_pressure_sample_stale"
+        )
+    finally:
+        worker.close(join_timeout_seconds=1.0)
+
+
 class _PaperAdapter:
     broker_environment = "paper"
 
@@ -3422,6 +3474,7 @@ def test_composition_uses_measured_capacity_and_one_exact_adapter_generation(
     assert selection_kwargs["assert_service_fence_held"].__self__ is instances[
         "service_fence"
     ][0]
+    assert selection_kwargs["wait_for_initial_pressure"] is True
     supervisor_kwargs = calls["supervisor"][0][1]
     fenced_prestart = supervisor_kwargs["fenced_prestart_revalidate"]()
     fenced_body = dict(fenced_prestart)

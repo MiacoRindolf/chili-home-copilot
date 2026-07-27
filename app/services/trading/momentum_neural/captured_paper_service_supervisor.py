@@ -561,6 +561,26 @@ class CapturedPaperServiceSupervisor:
                         f"captured_paper_{managed.name}_pre_authority_start_unconfirmed"
                     )
                 self._service_fence.assert_held()
+            # A preceding pre-authority worker can fail while a later worker is
+            # completing its bounded prime.  Re-prove the whole broker-incapable
+            # graph immediately before consuming the short-lived order
+            # authority; a dead pressure feed must never be masked by its last
+            # still-fresh controller sample.
+            for managed in self._started_pre_authority_workers:
+                self._service_fence.assert_held()
+                worker_health = _health_mapping(managed.worker.health())
+                if (
+                    worker_health.get("ever_started") is not True
+                    or worker_health.get("running") is not True
+                    or worker_health.get("fatal") is True
+                    or (
+                        "pre_authority_ready" in worker_health
+                        and worker_health.get("pre_authority_ready") is not True
+                    )
+                ):
+                    raise CapturedPaperServiceSupervisorError(
+                        f"captured_paper_{managed.name}_pre_authority_health_lost"
+                    )
             # This intentionally runs *after* provider startup and runtime
             # registration *and* broker-incapable selection priming.  Those
             # bounded operations may consume meaningful wall time, so authority

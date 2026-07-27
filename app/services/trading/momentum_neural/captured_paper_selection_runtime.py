@@ -582,6 +582,7 @@ class CapturedPaperSelectionLifecycleWorker:
         durable_timeout_seconds: float = 15.0,
         producer_timeout_seconds: float = 15.0,
         initial_snapshot_warmup_seconds: float = 0.0,
+        wait_for_initial_pressure: bool = False,
         monotonic_clock: Callable[[], float] = time.monotonic,
         thread_factory: Callable[..., threading.Thread] = threading.Thread,
     ) -> None:
@@ -624,6 +625,12 @@ class CapturedPaperSelectionLifecycleWorker:
         self.initial_snapshot_warmup_seconds = _nonnegative_seconds(
             initial_snapshot_warmup_seconds, "initial_snapshot_warmup_seconds"
         )
+        if type(wait_for_initial_pressure) is not bool:
+            _reject(
+                "CONTRACT_INVALID",
+                "wait_for_initial_pressure must be an exact boolean",
+            )
+        self.wait_for_initial_pressure = wait_for_initial_pressure
         self.monotonic_clock = monotonic_clock
         self.thread_factory = thread_factory
 
@@ -828,6 +835,176 @@ class CapturedPaperSelectionLifecycleWorker:
             authority=authority,
         )
 
+    def _initial_pressure_controller(
+        self,
+        components: CapturedPaperSelectionRuntimeComponents,
+    ) -> Any:
+        try:
+            ingress = components.publisher.ingress
+            runtime = self.shared_capture_runtime
+            shared_admission = runtime.shared_admission_budget
+            ingress_controller = ingress.pressure_controller
+            shared_controller = shared_admission.pressure_controller
+            binding = runtime.resource_binding
+            binding_ok = (
+                ingress.resource_binding is binding
+                and shared_admission.resource_binding is binding
+                and ingress_controller is shared_controller
+                and ingress_controller is not None
+                and ingress_controller.binding is binding
+            )
+        except Exception:
+            binding_ok = False
+            ingress_controller = None
+        if not binding_ok:
+            _reject(
+                "INITIAL_INGRESS_PRESSURE_BINDING_INVALID",
+                "initial pressure gate is not bound to the exact shared ingress controller",
+            )
+        return ingress_controller
+
+    def _initial_pressure_status(
+        self,
+        components: CapturedPaperSelectionRuntimeComponents,
+    ) -> tuple[bool, str, float]:
+        controller = self._initial_pressure_controller(components)
+        health = _health_mapping(
+            controller.health(), "initial ingress pressure controller"
+        )
+        binding = self.shared_capture_runtime.resource_binding
+        try:
+            expected_hashes = dict(binding.hashes)
+            observed_hashes = dict(health["resource_hashes"])
+            admissible = health["required_full_fidelity_admissible"]
+            pressure_state = health["pressure_state"]
+            rejection_reason = health["rejection_reason"]
+            active_reasons = tuple(health["active_reasons"])
+            entry_streak = health["entry_streak"]
+            sample_count = health["sample_count"]
+            last_sample_sha256 = health["last_sample_sha256"]
+            sample_age = health["sample_age_seconds"]
+            max_sample_age = float(
+                controller.binding.policy.pressure_sample_max_age_seconds
+            )
+        except (KeyError, TypeError, ValueError) as exc:
+            raise CapturedPaperSelectionRuntimeError(
+                "INITIAL_INGRESS_PRESSURE_HEALTH_INVALID",
+                "initial pressure health is incomplete or malformed",
+            ) from exc
+        if (
+            observed_hashes != expected_hashes
+            or type(admissible) is not bool
+            or not isinstance(pressure_state, str)
+            or (
+                rejection_reason is not None
+                and not isinstance(rejection_reason, str)
+            )
+            or isinstance(health["active_reasons"], (str, bytes))
+            or isinstance(entry_streak, bool)
+            or not isinstance(entry_streak, int)
+            or entry_streak < 0
+            or isinstance(sample_count, bool)
+            or not isinstance(sample_count, int)
+            or sample_count < 0
+            or not math.isfinite(max_sample_age)
+            or max_sample_age <= 0.0
+        ):
+            _reject(
+                "INITIAL_INGRESS_PRESSURE_HEALTH_INVALID",
+                "initial pressure health differs from its sealed resource binding",
+            )
+        sample_is_fresh = False
+        if last_sample_sha256 is not None or sample_age is not None:
+            try:
+                _sha(last_sample_sha256, "initial pressure sample SHA-256")
+                resolved_age = float(sample_age)
+            except (TypeError, ValueError) as exc:
+                raise CapturedPaperSelectionRuntimeError(
+                    "INITIAL_INGRESS_PRESSURE_HEALTH_INVALID",
+                    "initial pressure sample freshness is malformed",
+                ) from exc
+            if not math.isfinite(resolved_age) or resolved_age < 0.0:
+                _reject(
+                    "INITIAL_INGRESS_PRESSURE_HEALTH_INVALID",
+                    "initial pressure sample age is invalid",
+                )
+            sample_is_fresh = (
+                sample_count > 0 and resolved_age <= max_sample_age
+            )
+        clean = bool(
+            admissible
+            and pressure_state == "normal"
+            and rejection_reason is None
+            and not active_reasons
+            and entry_streak == 0
+            and sample_is_fresh
+        )
+        detail = (
+            "admissible"
+            if clean
+            else str(
+                rejection_reason
+                or (
+                    f"pressure_state={pressure_state},"
+                    f"entry_streak={entry_streak},"
+                    f"active_reasons={','.join(str(item) for item in active_reasons) or 'none'},"
+                    f"sample_fresh={str(sample_is_fresh).lower()}"
+                )
+            )
+        )
+        return clean, detail, max_sample_age
+
+    def _wait_for_initial_pressure(
+        self,
+        components: CapturedPaperSelectionRuntimeComponents,
+        *,
+        deadline: float,
+    ) -> None:
+        if not self.wait_for_initial_pressure:
+            return
+        while True:
+            self._assert_fence()
+            clean, detail, max_sample_age = self._initial_pressure_status(
+                components
+            )
+            now = float(self.monotonic_clock())
+            if (
+                self._stop_event.is_set()
+                or not math.isfinite(now)
+                or now >= deadline
+            ):
+                _reject(
+                    "INITIAL_INGRESS_PRESSURE_UNAVAILABLE",
+                    "initial selection ingress did not become clean before "
+                    f"its shared startup deadline ({detail})",
+                )
+            if clean:
+                return
+            self._stop_event.wait(
+                min(
+                    _INITIAL_SNAPSHOT_WARMUP_POLL_SECONDS,
+                    max_sample_age / 2.0,
+                    max(0.0, deadline - now),
+                )
+            )
+
+    def _assert_initial_pressure_clean(
+        self,
+        components: CapturedPaperSelectionRuntimeComponents,
+        *,
+        phase: str,
+    ) -> None:
+        if not self.wait_for_initial_pressure:
+            return
+        clean, detail, _max_sample_age = self._initial_pressure_status(
+            components
+        )
+        if not clean:
+            _reject(
+                "INITIAL_INGRESS_PRESSURE_UNAVAILABLE",
+                f"initial selection pressure returned {phase} ({detail})",
+            )
+
     def _publisher_health(self) -> dict[str, Any]:
         components = self._components
         if components is None:
@@ -893,13 +1070,29 @@ class CapturedPaperSelectionLifecycleWorker:
             # this ambiguity rather than pretending a poison receipt was durable.
             pass
 
-    def _capture_source_once(self, *, require_snapshot: bool) -> int:
+    def _capture_source_once(
+        self,
+        *,
+        require_snapshot: bool,
+        initial_cycle_deadline: float | None = None,
+    ) -> int:
         components = self._components
         if components is None:
             _reject("LIFECYCLE_INVALID", "selection components are unavailable")
         source = components.source
         publisher = components.publisher
         self._assert_fence()
+        if require_snapshot:
+            if initial_cycle_deadline is None:
+                self._assert_initial_pressure_clean(
+                    components,
+                    phase="before source ownership",
+                )
+            else:
+                self._wait_for_initial_pressure(
+                    components,
+                    deadline=initial_cycle_deadline,
+                )
         try:
             snapshots = source.read_snapshot()
         except CapturedPaperSelectionSourceUnavailable:
@@ -936,12 +1129,45 @@ class CapturedPaperSelectionLifecycleWorker:
                         "shutdown interrupted an owned source snapshot batch",
                     )
                 self._assert_fence()
+                if require_snapshot:
+                    if initial_cycle_deadline is None:
+                        self._assert_initial_pressure_clean(
+                            components,
+                            phase=(
+                                "after source ownership and before sequence "
+                                "reservation"
+                            ),
+                        )
+                    else:
+                        # Keep the already-owned immutable snapshot in memory
+                        # while admission recovers.  Waiting before every
+                        # reservation prevents one large source batch from
+                        # crossing a pressure transition and poisoning the
+                        # activation after a partial publish.
+                        self._wait_for_initial_pressure(
+                            components,
+                            deadline=initial_cycle_deadline,
+                        )
                 sequence = publisher.reserve_sequence()
                 occurrence = source.build_occurrence(
                     snapshot,
                     source_sequence=sequence,
                 )
                 self._assert_fence()
+                if require_snapshot:
+                    if initial_cycle_deadline is None:
+                        self._assert_initial_pressure_clean(
+                            components,
+                            phase="after occurrence build and before publish",
+                        )
+                    else:
+                        # Recheck after potentially non-trivial occurrence
+                        # construction.  The ingress remains the final atomic
+                        # fail-closed authority at submit time.
+                        self._wait_for_initial_pressure(
+                            components,
+                            deadline=initial_cycle_deadline,
+                        )
                 receipt = publisher.publish_bundle(
                     bundle=occurrence.bundle,
                     scoring_authority=occurrence.scoring_authority,
@@ -968,8 +1194,14 @@ class CapturedPaperSelectionLifecycleWorker:
             self._occurrences_published += published
         return published
 
-    def _wait_for_durable_frontier(self) -> int:
+    def _wait_for_durable_frontier(
+        self,
+        *,
+        initial_cycle_deadline: float | None = None,
+    ) -> int:
         deadline = float(self.monotonic_clock()) + self.durable_timeout_seconds
+        if initial_cycle_deadline is not None:
+            deadline = min(deadline, initial_cycle_deadline)
         while True:
             self._assert_fence()
             self._assert_runtime_health()
@@ -987,11 +1219,18 @@ class CapturedPaperSelectionLifecycleWorker:
                 )
             self._stop_event.wait(min(0.01, max(0.0, deadline - now)))
 
-    def _drain_producer_to(self, target_sequence: int) -> Any:
+    def _drain_producer_to(
+        self,
+        target_sequence: int,
+        *,
+        initial_cycle_deadline: float | None = None,
+    ) -> Any:
         components = self._components
         if components is None:
             _reject("LIFECYCLE_INVALID", "selection producer is unavailable")
         deadline = float(self.monotonic_clock()) + self.producer_timeout_seconds
+        if initial_cycle_deadline is not None:
+            deadline = min(deadline, initial_cycle_deadline)
         while True:
             self._assert_fence()
             result = components.producer.tick()
@@ -1030,7 +1269,11 @@ class CapturedPaperSelectionLifecycleWorker:
                 )
             self._stop_event.wait(min(0.01, max(0.0, deadline - now)))
 
-    def _run_initial_cycle_with_warmup(self) -> None:
+    def _run_initial_cycle_with_warmup(
+        self,
+        *,
+        deadline: float | None = None,
+    ) -> None:
         """Run the fenced-start's first cycle, tolerating a transiently empty source.
 
         The only retryable condition is ``CapturedPaperSelectionSourceUnavailable``
@@ -1045,12 +1288,27 @@ class CapturedPaperSelectionLifecycleWorker:
         if self.initial_snapshot_warmup_seconds <= 0.0:
             self._run_cycle(initial=True)
             return
-        deadline = (
-            float(self.monotonic_clock()) + self.initial_snapshot_warmup_seconds
-        )
+        if deadline is None:
+            deadline = (
+                float(self.monotonic_clock())
+                + self.initial_snapshot_warmup_seconds
+            )
         while True:
+            components = self._components
+            if components is None:
+                _reject(
+                    "LIFECYCLE_INVALID",
+                    "selection components are unavailable during initial warmup",
+                )
+            self._wait_for_initial_pressure(
+                components,
+                deadline=deadline,
+            )
             try:
-                self._run_cycle(initial=True)
+                self._run_cycle(
+                    initial=True,
+                    initial_cycle_deadline=deadline,
+                )
                 return
             except CapturedPaperSelectionSourceUnavailable:
                 now = float(self.monotonic_clock())
@@ -1069,16 +1327,29 @@ class CapturedPaperSelectionLifecycleWorker:
                     )
                 )
 
-    def _run_cycle(self, *, initial: bool) -> None:
+    def _run_cycle(
+        self,
+        *,
+        initial: bool,
+        initial_cycle_deadline: float | None = None,
+    ) -> None:
         self._assert_fence()
-        published = self._capture_source_once(require_snapshot=initial)
-        target = self._wait_for_durable_frontier()
+        published = self._capture_source_once(
+            require_snapshot=initial,
+            initial_cycle_deadline=initial_cycle_deadline,
+        )
+        target = self._wait_for_durable_frontier(
+            initial_cycle_deadline=initial_cycle_deadline,
+        )
         if initial and target <= 0:
             _reject(
                 "DURABLE_FRONTIER_EMPTY",
                 "initial selection frontier has no durable occurrence",
             )
-        self._drain_producer_to(target)
+        self._drain_producer_to(
+            target,
+            initial_cycle_deadline=initial_cycle_deadline,
+        )
         self._assert_runtime_health()
         reader_health = self.deferred_reader.health()
         if not initial and reader_health["suspended"] and published > 0:
@@ -1254,6 +1525,7 @@ class CapturedPaperSelectionLifecycleWorker:
                 self._application_outcome = "applied"
                 self._assert_fence()
                 startup_cleanup = CapturedPaperSelectionStartupCleanup()
+                initial_cycle_deadline: float | None = None
                 try:
                     components = self.component_factory(
                         setup,
@@ -1273,6 +1545,21 @@ class CapturedPaperSelectionLifecycleWorker:
                     # lease/writer without relying on generic quiesce logic to
                     # understand an untrusted partial object.
                     self._validate_components(setup, components)
+                    if self.wait_for_initial_pressure:
+                        started_at = float(self.monotonic_clock())
+                        if not math.isfinite(started_at):
+                            _reject(
+                                "INITIAL_INGRESS_PRESSURE_HEALTH_INVALID",
+                                "initial pressure deadline clock is non-finite",
+                            )
+                        initial_cycle_deadline = (
+                            started_at
+                            + self.initial_snapshot_warmup_seconds
+                        )
+                        self._wait_for_initial_pressure(
+                            components,
+                            deadline=initial_cycle_deadline,
+                        )
                 except BaseException as factory_exc:
                     cleanup_errors = startup_cleanup.cleanup()
                     if cleanup_errors:
@@ -1286,7 +1573,9 @@ class CapturedPaperSelectionLifecycleWorker:
                 self._assert_fence()
                 components.writer.start()
                 self._writer_started = True
-                self._run_initial_cycle_with_warmup()
+                self._run_initial_cycle_with_warmup(
+                    deadline=initial_cycle_deadline,
+                )
                 self._assert_fence()
                 self.deferred_reader.install(
                     components.initial_reader,

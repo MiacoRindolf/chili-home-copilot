@@ -200,6 +200,11 @@ class _FakeIngress:
     def __init__(self, runtime: "_FakeSharedRuntime") -> None:
         self.resource_binding = runtime.resource_binding
         self.shared_admission_budget = runtime.shared_admission_budget
+        self.pressure_controller = (
+            runtime.ingress_pressure_controller_override
+            if runtime.ingress_pressure_controller_override is not None
+            else runtime.shared_admission_budget.pressure_controller
+        )
         self.dropped = 0
 
     def health(self) -> dict[str, object]:
@@ -225,10 +230,61 @@ class _FakeSharedRuntime:
         self.max_writer_threads = max_writer_threads
         self.resource_binding = SimpleNamespace(
             binding_sha256=RESOURCE_SHA,
+            hashes={"resource_binding_sha256": RESOURCE_SHA},
+            policy=SimpleNamespace(pressure_sample_max_age_seconds=0.05),
             budget=SimpleNamespace(derived_hot_symbol_capacity=9),
         )
-        self.shared_admission_budget = object()
+        self.shared_admission_budget = SimpleNamespace(
+            resource_binding=self.resource_binding,
+            pressure_controller=None,
+        )
+        self.ingress_pressure_controller_override = None
         self.store = SimpleNamespace(root=root)
+
+
+class _FakePressureController:
+    def __init__(
+        self,
+        binding: object,
+        *,
+        health_sequence: list[dict[str, object]],
+        log: list[str],
+    ) -> None:
+        assert health_sequence
+        self.binding = binding
+        self._health_sequence = [dict(item) for item in health_sequence]
+        self._log = log
+        self.health_calls = 0
+
+    def health(self) -> dict[str, object]:
+        self._log.append("pressure_health")
+        index = min(self.health_calls, len(self._health_sequence) - 1)
+        self.health_calls += 1
+        return dict(self._health_sequence[index])
+
+
+def _pressure_health(
+    *,
+    clean: bool,
+    resource_hashes: dict[str, str] | None = None,
+) -> dict[str, object]:
+    return {
+        "resource_hashes": resource_hashes
+        or {"resource_binding_sha256": RESOURCE_SHA},
+        "required_full_fidelity_admissible": clean,
+        "pressure_state": "normal" if clean else "failed_closed",
+        "rejection_reason": (
+            None if clean else "capture_resource_pressure_cpu"
+        ),
+        "active_reasons": () if clean else ("cpu",),
+        "entry_streak": 0,
+        "recovery_streak": 0,
+        "sample_count": 4,
+        "transition_count": 1,
+        "last_sample_sha256": "a" * 64,
+        "last_observed_at": NOW.isoformat().replace("+00:00", "Z"),
+        "sample_age_seconds": 0.001,
+    }
 
 
 class _FakePublisher:
@@ -378,6 +434,7 @@ class _FakeSource:
         # First N reads raise a transiently-empty source (the fenced-start warmup
         # case); the (N+1)th read primes.  Default 0 => prime on the first read.
         self.unavailable_before_prime_reads = 0
+        self.prime_snapshot_count = 1
 
     def read_snapshot(self) -> tuple[object, ...]:
         self.log.append("source_read")
@@ -391,7 +448,7 @@ class _FakeSource:
             raise CapturedPaperSelectionSourceUnavailable("provider_unavailable")
         if self.read_count == prime_read or self.recovery_snapshot_pending:
             self.recovery_snapshot_pending = False
-            return (object(),)
+            return tuple(object() for _ in range(self.prime_snapshot_count))
         return ()
 
     def build_occurrence(self, snapshot: object, *, source_sequence: int) -> object:
@@ -450,6 +507,8 @@ class _Harness:
         poll_interval_seconds: float = 60.0,
         initial_snapshot_warmup_seconds: float = 0.0,
         source_unavailable_before_prime_reads: int = 0,
+        wait_for_initial_pressure: bool = False,
+        pressure_health_sequence: list[dict[str, object]] | None = None,
     ) -> None:
         self.setup = _application_setup()
         self.runtime = _FakeSharedRuntime(
@@ -460,6 +519,16 @@ class _Harness:
             expected_reader_type=_FakeInitialReader
         )
         self.log: list[str] = []
+        self.pressure_controller: _FakePressureController | None = None
+        if pressure_health_sequence is not None:
+            self.pressure_controller = _FakePressureController(
+                self.runtime.resource_binding,
+                health_sequence=pressure_health_sequence,
+                log=self.log,
+            )
+            self.runtime.shared_admission_budget.pressure_controller = (
+                self.pressure_controller
+            )
         self.fence_calls = 0
         self.setup_calls = 0
         self.component_calls = 0
@@ -568,6 +637,9 @@ class _Harness:
             }
             return {**body, "rollback_sha256": sha256_json(body)}
 
+        worker_kwargs: dict[str, object] = {}
+        if wait_for_initial_pressure:
+            worker_kwargs["wait_for_initial_pressure"] = True
         self.worker = CapturedPaperSelectionLifecycleWorker(
             shared_capture_runtime=self.runtime,  # type: ignore[arg-type]
             deferred_reader=self.reader,
@@ -580,6 +652,7 @@ class _Harness:
             producer_timeout_seconds=0.1,
             initial_snapshot_warmup_seconds=initial_snapshot_warmup_seconds,
             monotonic_clock=monotonic_clock,
+            **worker_kwargs,
         )
 
 
@@ -765,6 +838,164 @@ def test_initial_snapshot_warmup_zero_is_strict_no_retry(tmp_path: Path) -> None
     with pytest.raises(CapturedPaperSelectionRuntimeError):
         harness.worker.start()
     assert harness.worker.health()["initial_warmup_retries"] == 0
+
+
+def test_initial_pressure_wait_precedes_writer_and_source(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(_WARMUP_POLL_TARGET, 0.001)
+    entering = _pressure_health(clean=True)
+    entering["entry_streak"] = 1
+    harness = _Harness(
+        tmp_path,
+        initial_snapshot_warmup_seconds=1.0,
+        wait_for_initial_pressure=True,
+        pressure_health_sequence=[
+            entering,
+            _pressure_health(clean=False),
+            _pressure_health(clean=True),
+            _pressure_health(clean=True),
+            _pressure_health(clean=True),
+        ],
+    )
+
+    harness.worker.start()
+
+    assert harness.pressure_controller is not None
+    assert harness.pressure_controller.health_calls >= 3
+    assert harness.log.index("pressure_health") < harness.log.index(
+        "writer_start"
+    )
+    assert harness.log.index("writer_start") < harness.log.index("source_read")
+    assert harness.source is not None
+    assert harness.source.read_count == 1
+    assert harness.publisher is not None
+    assert harness.publisher.accepted_through == 1
+    harness.worker.close(join_timeout_seconds=1.0)
+
+
+def test_initial_pressure_timeout_cleans_without_writer_or_source(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(_WARMUP_POLL_TARGET, 0.001)
+    harness = _Harness(
+        tmp_path,
+        initial_snapshot_warmup_seconds=0.01,
+        wait_for_initial_pressure=True,
+        pressure_health_sequence=[_pressure_health(clean=False)],
+    )
+
+    with pytest.raises(CapturedPaperSelectionRuntimeError) as failure:
+        harness.worker.start()
+
+    assert failure.value.code == "INITIAL_INGRESS_PRESSURE_UNAVAILABLE"
+    assert harness.source is not None
+    assert harness.source.read_count == 0
+    assert harness.writer is not None
+    assert harness.writer.started is False
+    assert harness.writer.closed is True
+    assert harness.publisher is not None
+    assert harness.publisher.reserved_sequence is None
+    assert harness.publisher.accepted_through == 0
+    assert harness.publisher.poisoned is False
+
+
+def test_initial_pressure_binding_mismatch_rejects_before_writer(
+    tmp_path: Path,
+) -> None:
+    harness = _Harness(
+        tmp_path,
+        initial_snapshot_warmup_seconds=1.0,
+        wait_for_initial_pressure=True,
+        pressure_health_sequence=[_pressure_health(clean=True)],
+    )
+    foreign = _FakePressureController(
+        harness.runtime.resource_binding,
+        health_sequence=[_pressure_health(clean=True)],
+        log=harness.log,
+    )
+    harness.runtime.ingress_pressure_controller_override = (
+        harness.pressure_controller
+    )
+    harness.runtime.shared_admission_budget.pressure_controller = foreign
+
+    with pytest.raises(CapturedPaperSelectionRuntimeError) as failure:
+        harness.worker.start()
+
+    assert failure.value.code == "INITIAL_INGRESS_PRESSURE_BINDING_INVALID"
+    assert harness.source is not None
+    assert harness.source.read_count == 0
+    assert harness.writer is not None
+    assert harness.writer.started is False
+
+
+def test_pressure_return_after_source_read_rejects_before_reservation(
+    tmp_path: Path,
+) -> None:
+    harness = _Harness(
+        tmp_path,
+        initial_snapshot_warmup_seconds=1.0,
+        wait_for_initial_pressure=True,
+        pressure_health_sequence=[
+            _pressure_health(clean=True),
+            _pressure_health(clean=True),
+            _pressure_health(clean=True),
+            _pressure_health(clean=False),
+        ],
+    )
+
+    with pytest.raises(CapturedPaperSelectionRuntimeError) as failure:
+        harness.worker.start()
+
+    assert failure.value.code == "INITIAL_INGRESS_PRESSURE_UNAVAILABLE"
+    assert harness.source is not None
+    assert harness.source.read_count == 1
+    assert harness.publisher is not None
+    assert harness.publisher.reserved_sequence is None
+    assert harness.publisher.accepted_through == 0
+
+
+def test_initial_multi_snapshot_batch_waits_again_before_each_publish(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(_WARMUP_POLL_TARGET, 0.001)
+    harness = _Harness(
+        tmp_path,
+        initial_snapshot_warmup_seconds=1.0,
+        wait_for_initial_pressure=True,
+        pressure_health_sequence=[
+            _pressure_health(clean=True),
+            _pressure_health(clean=True),
+            _pressure_health(clean=True),
+            _pressure_health(clean=True),
+            _pressure_health(clean=True),
+            _pressure_health(clean=False),
+            _pressure_health(clean=True),
+            _pressure_health(clean=True),
+        ],
+    )
+    assert harness.source is None
+
+    original_factory = harness.worker.component_factory
+
+    def two_snapshot_factory(*args: object) -> object:
+        components = original_factory(*args)
+        assert harness.source is not None
+        harness.source.prime_snapshot_count = 2
+        return components
+
+    harness.worker.component_factory = two_snapshot_factory
+    harness.worker.start()
+
+    assert harness.pressure_controller is not None
+    assert harness.pressure_controller.health_calls >= 8
+    assert harness.publisher is not None
+    assert harness.publisher.accepted_through == 2
+    assert harness.publisher.poisoned is False
+    harness.worker.close(join_timeout_seconds=1.0)
 
 
 def test_hash_bound_not_applied_outcome_never_builds_runtime_or_calls_rollback(

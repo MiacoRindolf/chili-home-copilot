@@ -36,7 +36,9 @@ from app.services.trading.momentum_neural.context import (
     build_momentum_regime_context,
 )
 from app.services.trading.momentum_neural.replay_capture_runtime import (
+    CaptureAdaptivePressureController,
     CaptureBudgetPolicy,
+    CapturePressureSample,
     CaptureResourceBinding,
     CaptureResourceMeasurement,
     SharedCaptureAdmissionBudget,
@@ -379,11 +381,28 @@ def test_real_service_selection_lifecycle_primes_reads_and_rolls_back(
     now = datetime.now(UTC).replace(microsecond=0)
     _seed_complete_selection_universe(db, now=now)
     binding = _resource_binding(now)
-    admission = SharedCaptureAdmissionBudget.from_resource_binding(binding)
+    pressure_controller = CaptureAdaptivePressureController(binding)
+    pressure_controller.observe(
+        CapturePressureSample(
+            observed_at=now,
+            resource_binding_sha256=binding.binding_sha256,
+            cpu_percent=20.0,
+            available_memory_bytes=192_000_000,
+            disk_free_bytes=2_000_000_000,
+            write_latency_milliseconds=5.0,
+        )
+    )
+    admission = SharedCaptureAdmissionBudget.from_resource_binding(
+        binding,
+        pressure_controller=pressure_controller,
+    )
     shared = SharedCaptureStoreRuntime.create(
         tmp_path / "selection-store",
         resource_binding=binding,
         shared_admission_budget=admission,
+        # Keep this lifecycle test portable in the zero-egress Linux lane;
+        # compression identity is covered separately and is not under test here.
+        compression_codec="zlib",
     )
     code_body = {"schema_version": "test.service-code.v1", "files": []}
     code_sha = sha256_json(code_body)
@@ -397,12 +416,7 @@ def test_real_service_selection_lifecycle_primes_reads_and_rolls_back(
             binding=binding,
             # The pressure-feed pre-authority worker reads the sealed freshness
             # window at assembly and observes samples only after start().
-            pressure_controller=SimpleNamespace(
-                binding=SimpleNamespace(
-                    policy=SimpleNamespace(pressure_sample_max_age_seconds=5.0)
-                ),
-                observe=lambda sample: {"pressure_state": "normal"},
-            ),
+            pressure_controller=pressure_controller,
         ),
         captured_paper_config_sha256_for=lambda _symbol: settings_sha,
     )
