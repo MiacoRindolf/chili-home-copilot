@@ -3420,7 +3420,12 @@ def bull_flag_confirmation(
             w = vol.tail(21)
             _avg = float(w.iloc[:-1].mean()) if len(w) > 1 else float(vol.iloc[-1])
             vol_ratio = (float(vol.iloc[-1]) / _avg) if _avg > 0 else 0.0
-        debug["vol_ratio"] = round(vol_ratio, 2)
+        # NaN-safe stamp (2026-07-26): a NaN vol_ratio poisons risk_snapshot_json (Postgres
+        # JSONB rejects the NaN token — found by the golden-library benchmark on CLRO 07-07).
+        # Sanitize the STAMP only; the comparison below keeps NaN's legacy pass-through
+        # (NaN < mult is False) so replay baselines stay byte-consistent — the "should NaN
+        # volume pass a conviction gate?" question is a separate flagged lever.
+        debug["vol_ratio"] = round(vol_ratio, 2) if vol_ratio == vol_ratio else None
         if vol_ratio < _vol_mult:
             return False, "bull_flag_low_volume", debug
 
@@ -4798,7 +4803,8 @@ def flush_dip_buy_confirmation(
             except (TypeError, ValueError, IndexError, KeyError):
                 _fd_vol_ratio = None
             if _fd_vol_ratio is not None:
-                debug["vol_ratio"] = round(_fd_vol_ratio, 2)
+                # NaN-safe stamp (see bull_flag site) — JSONB rejects NaN; comparison unchanged.
+                debug["vol_ratio"] = round(_fd_vol_ratio, 2) if _fd_vol_ratio == _fd_vol_ratio else None
                 if _fd_vol_ratio < _fd_vol_mult:
                     return False, "flush_dip_low_volume", debug
         return True, "flush_dip_buy", debug
@@ -4906,7 +4912,8 @@ def vwap_reclaim_confirmation(
             w = vol.tail(21)
             avg = float(w.iloc[:-1].mean()) if len(w) > 1 else float(vol.iloc[-1])
             vol_ratio = (float(vol.iloc[-1]) / avg) if avg > 0 else 0.0
-        debug["vol_ratio"] = round(vol_ratio, 2)
+        # NaN-safe stamp (see bull_flag site) — JSONB rejects NaN; comparison unchanged.
+        debug["vol_ratio"] = round(vol_ratio, 2) if vol_ratio == vol_ratio else None
         if vol_ratio < vol_mult:
             return False, "vwap_reclaim_low_volume", debug
 
