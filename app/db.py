@@ -1,3 +1,4 @@
+import json
 import os
 import sys
 from pathlib import Path
@@ -229,8 +230,37 @@ _connect_args = {
 if _connect_options:
     _connect_args["options"] = " ".join(_connect_options)
 
+
+def _json_dumps_nan_safe(obj):
+    """NaN/Inf-safe JSON serializer for every JSON/JSONB column bind.
+
+    Python's json.dumps emits bare ``NaN``/``Infinity`` tokens (allow_nan=True
+    default) which Postgres JSONB REJECTS (InvalidTextRepresentation) — a single
+    NaN float anywhere in a snapshot/payload dict crashes the session UPDATE
+    (found 2026-07-26 by the golden-library benchmark: an unguarded vol_ratio
+    NaN in risk_snapshot_json killed the CLRO 07-07 replay; live has the same
+    exposure with 14+ producer sites in entry_gates alone). Scrub non-finite
+    floats to null at the ONE choke point instead of chasing every producer.
+    Strictly behavior-preserving: any payload that hits this path with NaN today
+    is a guaranteed crash, so NaN->null can only turn failures into writes.
+    """
+    import math
+
+    def _scrub(x):
+        if isinstance(x, float) and not math.isfinite(x):
+            return None
+        if isinstance(x, dict):
+            return {k: _scrub(v) for k, v in x.items()}
+        if isinstance(x, (list, tuple)):
+            return [_scrub(v) for v in x]
+        return x
+
+    return json.dumps(_scrub(obj))
+
+
 engine = create_engine(
     DATABASE_URL,
+    json_serializer=_json_dumps_nan_safe,
     pool_size=_pool_size,
     max_overflow=_max_overflow,
     pool_timeout=float(_pool_timeout),
