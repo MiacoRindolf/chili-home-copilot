@@ -135,6 +135,21 @@ def test_family_buckets():
     assert rs._family("halt_resume_dip") == "halt"
 
 
+def test_trigger_reasons_from_log(tmp_path):
+    log = tmp_path / "w.log"
+    log.write_text(
+        "  --- ENTRY-DECISION TRACE (ts | event | reason | px) ---\n"
+        "    02:29:19 | live_entry_backside_benched      | benched_backside_below_vwap        | None\n"
+        "    02:30:31 | live_entry_candidate_detected    | hod_break_tick_ok                  | None\n"
+        "    02:30:32 | live_entry_submitted             |                                    | None\n"
+        "    02:30:32 | live_entry_filled                |                                    | None\n"
+        "    02:31:24 | live_entry_candidate_detected    | abcd_break                         | None\n"
+        "    02:31:24 | live_entry_filled                |                                    | None\n",
+        encoding="utf-8")
+    assert rs.trigger_reasons_from_log(str(log)) == ["hod_break_tick_ok", "abcd_break"]
+    assert rs.trigger_reasons_from_log(str(tmp_path / "wala.log")) == []
+
+
 def test_render_markdown_smoke():
     sc = {"generated_at": "2026-07-26T12:00:00",
           "meta": {"build_sha": "abc123def456", "arm": "base", "sink": "chili_replay2_test",

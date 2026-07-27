@@ -138,6 +138,37 @@ def attach_fill_times(rec: dict, trades: list[dict]) -> None:
         t["exit_reason"] = (exits[i].get("exit_reason") if i < len(exits) else None)
 
 
+_TRACE_LINE_RE = None  # compiled lazily (re imported at module top-level use below)
+
+
+def trigger_reasons_from_log(log_path: str) -> list[str]:
+    """Backfill per-trade trigger reasons from the driver's ENTRY-DECISION TRACE block.
+
+    The reason lives on ``live_entry_candidate_detected`` lines; each subsequent
+    ``*entry_filled`` line consumes the pending reason (order-preserving). Logs
+    written before the d97fbce trace fix have no block -> empty list."""
+    import re as _re
+
+    line_re = _re.compile(r"^\s+\d{2}:\d{2}:\d{2}[^|]*\|\s+(\S+)\s+\|\s+(\S*)\s*\|")
+    reasons: list[str] = []
+    pending: str | None = None
+    try:
+        with open(log_path, "r", encoding="utf-8", errors="replace") as f:
+            for line in f:
+                m = line_re.match(line)
+                if not m:
+                    continue
+                event, reason = m.group(1), m.group(2)
+                if "entry_candidate" in event and reason:
+                    pending = reason
+                elif "entry_filled" in event:
+                    reasons.append(pending or "")
+                    pending = None
+    except OSError:
+        return []
+    return reasons
+
+
 def _parse_ts(v) -> datetime | None:
     if not v:
         return None
@@ -468,11 +499,17 @@ def main() -> int:
         conn = psycopg2.connect(args.db)
         conn.autocommit = True  # read-only usage
 
+    results_dir = os.path.dirname(os.path.abspath(args.results[0]))
     trades_by_key: dict[str, list[dict]] = {}
     label_a_rows: list[dict] = []
     for r in ok:
         trades = pair_round_trips(r.get("fills") or [])
         attach_fill_times(r, trades)
+        if trades and not any(t.get("trigger_reason") for t in trades) and r.get("log"):
+            log_reasons = trigger_reasons_from_log(os.path.join(results_dir, r["log"]))
+            for i, t in enumerate(trades):
+                if i < len(log_reasons) and log_reasons[i]:
+                    t["trigger_reason"] = log_reasons[i]
         for t in trades:
             wt = within_trade_metrics(conn, r, t)
             if wt:
