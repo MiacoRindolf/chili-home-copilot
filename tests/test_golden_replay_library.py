@@ -79,6 +79,171 @@ def test_batch_defaults_to_intended_default_on_arm():
     assert batch.DEFAULT_ARM == "both"
 
 
+def test_sink_fill_normalization_uses_canonical_fsm_event_payloads():
+    assert batch.SINK_FILL_EVENT_TYPES[:2] == (
+        "live_entry_filled",
+        "live_exit_filled",
+    )
+    entry = batch.normalize_sink_fill_event(
+        "2026-07-27T13:31:00+00:00",
+        "live_entry_filled",
+        {
+            "order_id": "entry-order-1",
+            "avg": 5.25,
+            "filled_size": 120,
+        },
+    )
+    assert (entry["qty"], entry["px"], entry["fill_identity"]) == (
+        120.0, 5.25, "entry-order-1",
+    )
+    assert entry["provider_or_broker_fill_at"] is None
+    assert entry["coverage_status"] == "COVERAGE_UNAVAILABLE"
+
+    exit_fill = batch.normalize_sink_fill_event(
+        "2026-07-27T13:34:00+00:00",
+        "live_exit_filled",
+        {
+            "reason": "failed_bid",
+            "fill_price": 5.70,
+            "sell_result": {
+                "filled_size": 120,
+                "order_id": "exit-order-1",
+            },
+        },
+    )
+    assert exit_fill["px"] == 5.70
+    assert exit_fill["exit_reason"] == "failed_bid"
+    assert exit_fill["qty"] is None
+    assert exit_fill["fill_identity"] is None
+    assert exit_fill["coverage_reason"] == (
+        "canonical_exit_quantity_identity_fill_clock_unavailable"
+    )
+
+
+def test_sink_fill_normalization_retains_only_self_contained_exit_evidence():
+    orphan = batch.normalize_sink_fill_event(
+        "2026-07-27T13:34:01+00:00",
+        "live_exit_filled",
+        {
+            "reason": "alpaca_orphan_reconcile",
+            "fill_price": 5.70,
+            "quantity": 120,
+            "order_id": "exit-order-2",
+            "client_order_id": "exit-client-2",
+            "source_event_id": 42,
+            "entry_filled_at_utc": "2026-07-27T13:31:00Z",
+            "filled_at_utc": "2026-07-27T13:34:00Z",
+        },
+    )
+    assert orphan["qty"] == 120.0
+    assert orphan["px"] == 5.70
+    assert orphan["fill_identity"] == "exit-order-2"
+    assert orphan["provider_or_broker_fill_at"] == "2026-07-27T13:34:00Z"
+    assert orphan["coverage_status"] == "COVERAGE_UNAVAILABLE"
+    assert orphan["coverage_reason"] == (
+        "immutable_entry_exit_cycle_lineage_unavailable"
+    )
+    legacy = batch.normalize_sink_fill_event(
+        "2026-07-27T13:34:01+00:00",
+        "live_exit_fill",
+        {
+            "fill_price": 5.70,
+            "quantity": 120,
+            "order_id": "legacy-exit",
+            "filled_at_utc": "2026-07-27T13:34:00Z",
+        },
+    )
+    assert legacy["coverage_reason"].startswith(
+        "legacy_exit_alias_diagnostic_only:"
+    )
+
+    contradictory = batch.normalize_sink_fill_event(
+        "2026-07-27T13:34:01+00:00",
+        "live_exit_filled",
+        {
+            "quantity": -1,
+            "filled_size": 120,
+            "fill_price": 5.70,
+            "order_id": "exit-order-3",
+            "source_event_id": 43,
+            "entry_filled_at_utc": "2026-07-27T13:31:00Z",
+            "filled_at_utc": "2026-07-27T13:34:00Z",
+        },
+    )
+    assert contradictory["qty"] is None
+    assert contradictory["provider_or_broker_fill_at"] is None
+    inverted = batch.normalize_sink_fill_event(
+        "2026-07-27T13:34:01+00:00",
+        "live_exit_filled",
+        {
+            "quantity": 1,
+            "fill_price": 5.70,
+            "order_id": "exit-order-4",
+            "source_event_id": 44,
+            "entry_filled_at_utc": "2026-07-27T13:35:00Z",
+            "filled_at_utc": "2026-07-27T13:34:00Z",
+        },
+    )
+    assert inverted["provider_or_broker_fill_at"] is None
+
+
+@pytest.mark.parametrize(
+    ("quantity", "price"),
+    [
+        (True, 5.25),
+        (120, False),
+        (0, 5.25),
+        (120, 0),
+        (-1, 5.25),
+        (120, float("nan")),
+        (float("inf"), 5.25),
+    ],
+)
+def test_sink_fill_normalization_rejects_invalid_economics(quantity, price):
+    event = batch.normalize_sink_fill_event(
+        "2026-07-27T13:31:00+00:00",
+        "live_entry_filled",
+        {
+            "order_id": "entry-order-1",
+            "avg": price,
+            "filled_size": quantity,
+        },
+    )
+    assert event["coverage_status"] == "COVERAGE_UNAVAILABLE"
+    assert event["coverage_reason"] != (
+        "immutable_entry_exit_cycle_lineage_unavailable"
+    )
+
+
+def test_sink_fill_normalization_rejects_malformed_payload_and_clock():
+    malformed = batch.normalize_sink_fill_event(
+        "2026-07-27T13:31:00+00:00",
+        "live_exit_filled",
+        None,
+    )
+    assert malformed["qty"] is None
+    assert malformed["px"] is None
+    assert malformed["fill_identity"] is None
+    assert malformed["provider_or_broker_fill_at"] is None
+    naive_clock = batch.normalize_sink_fill_event(
+        "2026-07-27T13:31:00+00:00",
+        "live_exit_filled",
+        {
+            "quantity": 1,
+            "fill_price": 5,
+            "order_id": "exit-order",
+            "filled_at_utc": "2026-07-27T13:31:00",
+        },
+    )
+    assert naive_clock["provider_or_broker_fill_at"] is None
+    with pytest.raises(ValueError, match="unsupported sink fill event"):
+        batch.normalize_sink_fill_event(
+            "2026-07-27T13:31:00+00:00",
+            "paper_exit_filled",
+            {},
+        )
+
+
 def test_database_guards_normalize_identity_and_reject_remote_or_live_sink():
     _, source_name, source_id = batch.guard_postgres_url(
         "postgresql://u:p@localhost:5433/chili", role="source"
