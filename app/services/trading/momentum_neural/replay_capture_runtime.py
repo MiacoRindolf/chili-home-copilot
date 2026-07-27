@@ -31,6 +31,7 @@ import threading
 import time
 from typing import Any, Callable, Iterable, Mapping, Protocol, runtime_checkable
 import uuid
+import weakref
 import zlib
 
 try:
@@ -8126,7 +8127,60 @@ class _ExclusiveCaptureStoreOwnership:
         self._record: dict[str, Any] | None = None
         self._closed = False
         self._thread_lock = threading.RLock()
+        self._heartbeat_stop = threading.Event()
+        self._heartbeat_thread: threading.Thread | None = None
+        self._heartbeat_failure: str | None = None
+        self._heartbeat_checks = 0
+        self._heartbeat_receipts = 0
+        self._last_heartbeat_receipt_sha256: str | None = None
         self._acquire()
+        try:
+            self._start_heartbeat()
+        except BaseException:
+            try:
+                self.close()
+            except BaseException:
+                pass
+            raise
+
+    @staticmethod
+    def _heartbeat_loop(
+        owner_ref: "weakref.ReferenceType[_ExclusiveCaptureStoreOwnership]",
+        stop: threading.Event,
+        heartbeat_seconds: float,
+    ) -> None:
+        while not stop.wait(heartbeat_seconds):
+            owner = owner_ref()
+            if owner is None:
+                return
+            try:
+                receipt = owner._maintain_heartbeat()
+            except Exception as exc:
+                with owner._thread_lock:
+                    owner._heartbeat_failure = f"{type(exc).__name__}: {exc}"
+                return
+            else:
+                with owner._thread_lock:
+                    owner._heartbeat_checks += 1
+                    if receipt is not None:
+                        owner._heartbeat_receipts += 1
+                        owner._last_heartbeat_receipt_sha256 = receipt
+            finally:
+                del owner
+
+    def _start_heartbeat(self) -> None:
+        thread = threading.Thread(
+            target=self._heartbeat_loop,
+            args=(
+                weakref.ref(self),
+                self._heartbeat_stop,
+                self.heartbeat_seconds / 2.0,
+            ),
+            name="capture-store-owner-heartbeat",
+            daemon=True,
+        )
+        self._heartbeat_thread = thread
+        thread.start()
 
     @staticmethod
     def _lock_handle(handle: Any) -> None:
@@ -8355,6 +8409,20 @@ class _ExclusiveCaptureStoreOwnership:
         with self._thread_lock:
             if self._closed or self._handle is None or self._record is None:
                 raise CaptureContractError("capture store ownership is closed")
+            if self._heartbeat_failure is not None:
+                raise CaptureContractError(
+                    "capture store ownership heartbeat failed: "
+                    f"{self._heartbeat_failure}"
+                )
+            heartbeat_thread = self._heartbeat_thread
+            if (
+                heartbeat_thread is not None
+                and not heartbeat_thread.is_alive()
+                and not self._heartbeat_stop.is_set()
+            ):
+                raise CaptureContractError(
+                    "capture store ownership heartbeat stopped unexpectedly"
+                )
             on_disk = self._read_record()
             if on_disk != self._record:
                 raise CaptureContractError(
@@ -8390,6 +8458,21 @@ class _ExclusiveCaptureStoreOwnership:
             )
             return self._write_record(record)
 
+    def _maintain_heartbeat(self) -> str | None:
+        with self._thread_lock:
+            before = (
+                hashlib.sha256(canonical_json_bytes(self._record)).hexdigest()
+                if self._record is not None
+                else None
+            )
+            self.assert_valid()
+            after = (
+                hashlib.sha256(canonical_json_bytes(self._record)).hexdigest()
+                if self._record is not None
+                else None
+            )
+            return after if after != before else None
+
     def health(self) -> dict[str, Any]:
         with self._thread_lock:
             failure: str | None = None
@@ -8414,11 +8497,36 @@ class _ExclusiveCaptureStoreOwnership:
                     if record
                     else None
                 ),
+                "heartbeat_worker_alive": bool(
+                    self._heartbeat_thread and self._heartbeat_thread.is_alive()
+                ),
+                "heartbeat_checks": self._heartbeat_checks,
+                "heartbeat_receipts": self._heartbeat_receipts,
+                "last_heartbeat_receipt_sha256": (
+                    self._last_heartbeat_receipt_sha256
+                ),
+                "heartbeat_failure": self._heartbeat_failure,
                 "failure": failure,
                 "fail_closed": failure is not None,
             }
 
     def close(self) -> None:
+        self._heartbeat_stop.set()
+        heartbeat_thread = self._heartbeat_thread
+        if (
+            heartbeat_thread is not None
+            and heartbeat_thread is not threading.current_thread()
+        ):
+            heartbeat_thread.join(
+                timeout=max(1.0, min(10.0, self.heartbeat_seconds * 2.0))
+            )
+            if heartbeat_thread.is_alive():
+                self._heartbeat_failure = (
+                    "capture store ownership heartbeat did not stop"
+                )
+                raise CaptureContractError(
+                    "capture store ownership heartbeat did not stop"
+                )
         with self._thread_lock:
             if self._closed:
                 return

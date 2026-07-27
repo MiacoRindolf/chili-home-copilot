@@ -9,6 +9,7 @@ from pathlib import Path
 import subprocess
 import sys
 import threading
+import time
 from types import SimpleNamespace
 import uuid
 
@@ -39,6 +40,7 @@ from app.services.trading.momentum_neural.replay_capture_runtime import (
     ReadOnlyV4CaptureStore,
     ReplayNetworkGuard,
     SharedCaptureAdmissionBudget,
+    SharedCaptureStoreRuntime,
     load_verified_replay_capture_v4,
 )
 
@@ -123,6 +125,8 @@ def _binding(
     write_bytes_per_second: float = 4_000_000,
     calibrated_hot_symbol_bytes: int = 1_000,
     average_cpu_percent: float = 20,
+    store_owner_lease_seconds: float = 60,
+    store_owner_heartbeat_seconds: float = 10,
 ) -> CaptureResourceBinding:
     measurement = CaptureResourceMeasurement(
         measured_at=BASE,
@@ -163,8 +167,8 @@ def _binding(
         pressure_enter_samples=3,
         pressure_recovery_samples=3,
         pressure_sample_max_age_seconds=5,
-        store_owner_lease_seconds=60,
-        store_owner_heartbeat_seconds=10,
+        store_owner_lease_seconds=store_owner_lease_seconds,
+        store_owner_heartbeat_seconds=store_owner_heartbeat_seconds,
     )
     return CaptureResourceBinding.resolve(measurement, policy)
 
@@ -767,6 +771,96 @@ def test_store_owner_heartbeat_renews_with_append_only_receipt(tmp_path) -> None
     assert after["record_sha256"] != before["record_sha256"]
     receipts = tuple((store.root / "ownership" / "receipts").glob("*.json"))
     assert len(receipts) >= 2
+
+
+def test_idle_shared_store_renews_ownership_before_first_write(tmp_path) -> None:
+    binding = _binding(
+        store_owner_lease_seconds=0.5,
+        store_owner_heartbeat_seconds=0.05,
+    )
+    pressure = CaptureAdaptivePressureController(binding)
+    shared_admission = SharedCaptureAdmissionBudget.from_resource_binding(
+        binding,
+        pressure_controller=pressure,
+    )
+    runtime = SharedCaptureStoreRuntime.create(
+        tmp_path / "idle-shared-capture",
+        resource_binding=binding,
+        shared_admission_budget=shared_admission,
+        compression_codec="zlib",
+        disk_usage_provider=lambda _path: SimpleNamespace(free=1_000_000_000),
+    )
+    runtime_closed = False
+    try:
+        initial = runtime.store.resource_health()["exclusive_ownership"]
+        initial_expiry = datetime.fromisoformat(initial["lease_expires_at"])
+        deadline = time.monotonic() + 3.0
+        while datetime.now(UTC) <= initial_expiry + timedelta(seconds=0.1):
+            if time.monotonic() >= deadline:
+                pytest.fail("fixture did not cross the original ownership lease")
+            time.sleep(0.01)
+
+        runtime.store.write_events((_event(1, at=datetime.now(UTC)),))
+
+        current = runtime.health()["store"]["exclusive_ownership"]
+        assert current["fail_closed"] is False
+        assert current["heartbeat_worker_alive"] is True
+        assert current["heartbeat_receipts"] > 0
+        assert datetime.fromisoformat(current["lease_expires_at"]) > initial_expiry
+        assert len(tuple((runtime.store.root / "events").rglob("*.jsonl.zlib"))) == 1
+        runtime.close()
+        runtime_closed = True
+
+        receipts = runtime.store.root / "ownership" / "receipts"
+        count_after_close = len(tuple(receipts.glob("*.json")))
+        time.sleep(0.12)
+        assert len(tuple(receipts.glob("*.json"))) == count_after_close
+        assert any(
+            json.loads(path.read_text(encoding="utf-8"))["state"] == "released"
+            for path in receipts.glob("*.json")
+        )
+
+        reopened = ContentAddressedCaptureStore(
+            runtime.store.root,
+            compression_codec="zlib",
+            resource_binding=binding,
+            disk_usage_provider=lambda _path: SimpleNamespace(free=1_000_000_000),
+        )
+        assert reopened.resource_health()["exclusive_ownership"]["fail_closed"] is False
+        reopened.close()
+    finally:
+        if not runtime_closed:
+            runtime.close()
+
+
+def test_store_owner_heartbeat_failure_is_remembered_and_fail_closed(tmp_path) -> None:
+    binding = _binding(
+        store_owner_lease_seconds=0.5,
+        store_owner_heartbeat_seconds=0.05,
+    )
+    now = [BASE]
+    store = ContentAddressedCaptureStore(
+        tmp_path / "failed-heartbeat",
+        compression_codec="zlib",
+        resource_binding=binding,
+        disk_usage_provider=lambda _path: SimpleNamespace(free=1_000_000_000),
+        wall_clock=lambda: now[0],
+    )
+    now[0] += timedelta(seconds=1)
+    deadline = time.monotonic() + 3.0
+    while True:
+        health = store.resource_health()["exclusive_ownership"]
+        if health["heartbeat_failure"] is not None:
+            break
+        if time.monotonic() >= deadline:
+            pytest.fail("ownership heartbeat failure was not retained")
+        time.sleep(0.01)
+
+    assert health["heartbeat_worker_alive"] is False
+    assert health["fail_closed"] is True
+    with pytest.raises(CaptureContractError, match="ownership heartbeat failed"):
+        store.write_events((_event(1),))
+    store.close()
 
 
 def test_unexpired_foreign_owner_record_remains_fail_closed_after_lock_release(
