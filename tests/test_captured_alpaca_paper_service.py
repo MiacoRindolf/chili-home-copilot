@@ -3277,7 +3277,15 @@ def test_composition_uses_measured_capacity_and_one_exact_adapter_generation(
                     max_queue_events=4096,
                     async_queue_bytes=8 * 1024 * 1024,
                 )
-            )
+            ),
+            # The pressure-feed pre-authority worker reads the sealed freshness
+            # window at assembly and observes samples only after start().
+            pressure_controller=SimpleNamespace(
+                binding=SimpleNamespace(
+                    policy=SimpleNamespace(pressure_sample_max_age_seconds=5.0)
+                ),
+                observe=lambda sample: {"pressure_state": "normal"},
+            ),
         )
 
         @staticmethod
@@ -3403,6 +3411,7 @@ def test_composition_uses_measured_capacity_and_one_exact_adapter_generation(
         "transport",
         "later_fill",
         "exit_owner",
+        "pressure_feed",
         "selection",
     ]
     selection_kwargs = calls["selection_worker"][0][1]
@@ -3437,7 +3446,7 @@ def test_composition_uses_measured_capacity_and_one_exact_adapter_generation(
     assert sha256_json(fenced_body) == supplied_fenced_sha
     assert [
         item.name for item in supervisor_kwargs["active_pre_authority_workers"]
-    ] == ["selection"]
+    ] == ["pressure_feed", "selection"]
     assert callable(supervisor_kwargs["post_quiesce_before_fence_release"])
     post_quiesce = supervisor_kwargs["post_quiesce_before_fence_release"]()
     assert post_quiesce["schema_version"] == (

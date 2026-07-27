@@ -393,7 +393,17 @@ def test_real_service_selection_lifecycle_primes_reads_and_rolls_back(
     policy_receipt = build_adaptive_risk_policy_from_settings(runtime_settings)
     policy = policy_receipt.policy
     host = SimpleNamespace(
-        composition=SimpleNamespace(binding=binding),
+        composition=SimpleNamespace(
+            binding=binding,
+            # The pressure-feed pre-authority worker reads the sealed freshness
+            # window at assembly and observes samples only after start().
+            pressure_controller=SimpleNamespace(
+                binding=SimpleNamespace(
+                    policy=SimpleNamespace(pressure_sample_max_age_seconds=5.0)
+                ),
+                observe=lambda sample: {"pressure_state": "normal"},
+            ),
+        ),
         captured_paper_config_sha256_for=lambda _symbol: settings_sha,
     )
     prepared = _PreparedCapturedPaperCapture(
@@ -469,8 +479,10 @@ def test_real_service_selection_lifecycle_primes_reads_and_rolls_back(
     )
     supervisor_kwargs = composition.supervisor.kwargs
     managed = supervisor_kwargs["active_pre_authority_workers"]
-    assert [item.name for item in managed] == ["selection"]
-    worker = managed[0].worker
+    assert [item.name for item in managed] == ["pressure_feed", "selection"]
+    worker = next(
+        item.worker for item in managed if item.name == "selection"
+    )
     rollback = None
     try:
         worker.start()

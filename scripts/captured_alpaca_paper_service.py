@@ -191,6 +191,115 @@ class _PreparedCapturedPaperCapture:
     policy_authority: _CapturedPaperPolicyAuthority
 
 
+class _CapturedPaperPressureFeedWorker:
+    """Keep the capture pressure controller inside its sealed freshness window.
+
+    The composition-time sample satisfies bounded-ingress admission for only
+    ``pressure_sample_max_age_seconds`` (5s in the sealed policy) while the
+    selection initial cycle publishes minutes after composition, so without a
+    periodic feed every ``BoundedCaptureIngress.submit`` fails closed with
+    ``capture_resource_pressure_sample_unavailable``/``_stale`` and active
+    startup dies with QUEUE_INGRESS_REJECTED (observed on generations
+    premarket-20260727_0105 and _0204).  This ports the capture-only smoke's
+    documented refresh pattern (``iqfeed_capture_only_smoke.py``: caller
+    sampler at half the policy window) onto the supervisor managed-worker
+    lifecycle.  A sampling failure is recorded as fatal and feeding stops; the
+    controller's own staleness rule then fails admission closed on honest
+    evidence.  This worker never widens admission — it only keeps fresh,
+    measured evidence flowing.
+    """
+
+    def __init__(
+        self,
+        *,
+        pressure_controller: Any,
+        sampler: Callable[[], Any],
+        interval_seconds: float,
+    ) -> None:
+        interval = float(interval_seconds)
+        if not math.isfinite(interval) or interval <= 0.0:
+            raise CapturedAlpacaPaperServiceError(
+                "PRESSURE_FEED_INTERVAL_INVALID",
+                "pressure feed interval must be finite and positive",
+            )
+        self._controller = pressure_controller
+        self._sampler = sampler
+        self._interval = interval
+        self._stop_event = threading.Event()
+        self._thread: threading.Thread | None = None
+        self._state_lock = threading.Lock()
+        self._ever_started = False
+        self._fatal = False
+        self._fatal_reason: str | None = None
+        self._samples_fed = 0
+
+    def _feed_once(self) -> None:
+        try:
+            self._controller.observe(self._sampler())
+        except BaseException as exc:
+            with self._state_lock:
+                self._fatal = True
+                if self._fatal_reason is None:
+                    self._fatal_reason = f"{type(exc).__name__}: {exc}"
+            raise
+        with self._state_lock:
+            self._samples_fed += 1
+
+    def _run(self) -> None:
+        while not self._stop_event.wait(self._interval):
+            try:
+                self._feed_once()
+            except BaseException:
+                # Fatal is recorded; stale evidence now fails admission closed
+                # upstream, which is the intended fail-closed degradation.
+                return
+
+    def start(self) -> None:
+        with self._state_lock:
+            if self._ever_started:
+                raise CapturedAlpacaPaperServiceError(
+                    "PRESSURE_FEED_ALREADY_STARTED",
+                    "pressure feed worker start is one-shot",
+                )
+            self._ever_started = True
+        # One synchronous feed BEFORE the thread starts so the next managed
+        # worker (selection) begins inside a guaranteed-fresh window.
+        self._feed_once()
+        thread = threading.Thread(
+            target=self._run,
+            name="captured-paper-pressure-feed",
+            daemon=False,
+        )
+        self._thread = thread
+        thread.start()
+
+    def close(self, *, join_timeout_seconds: float) -> None:
+        self._stop_event.set()
+        thread = self._thread
+        if thread is not None and thread.is_alive():
+            thread.join(timeout=max(0.0, float(join_timeout_seconds)))
+            if thread.is_alive():
+                raise CapturedAlpacaPaperServiceError(
+                    "PRESSURE_FEED_SHUTDOWN_INCOMPLETE",
+                    "pressure feed thread did not join within the timeout",
+                )
+
+    def health(self) -> Mapping[str, Any]:
+        with self._state_lock:
+            thread = self._thread
+            running = bool(
+                thread is not None and thread.is_alive() and not self._fatal
+            )
+            return {
+                "ever_started": self._ever_started,
+                "running": running,
+                "fatal": self._fatal,
+                "fatal_reason": self._fatal_reason,
+                "samples_fed": self._samples_fed,
+                "interval_seconds": self._interval,
+            }
+
+
 class _CapturedPaperServiceSingleton:
     """Second, service-owned cross-process singleton.
 
@@ -6615,7 +6724,30 @@ def _assemble_service_composition(
             name="exit_owner", worker=exit_owner_worker
         ),
     )
+    # The pressure feed MUST start before selection: the selection initial
+    # cycle publishes through the bounded ingress whose admission requires a
+    # pressure sample fresher than pressure_sample_max_age_seconds (5s sealed),
+    # while the composition-time seed sample is minutes old by then (the
+    # QUEUE_INGRESS_REJECTED startup failure, premarket-20260727_0105/_0204).
+    pressure_feed_worker = _CapturedPaperPressureFeedWorker(
+        pressure_controller=prepared.host.composition.pressure_controller,
+        sampler=lambda: _measure_capture_pressure(
+            preflight=prepared.preflight,
+            replay_runtime_module=replay_runtime_module,
+            wall_clock=wall_clock,
+            monotonic_clock=monotonic_clock,
+        ),
+        interval_seconds=(
+            float(
+                prepared.host.composition.pressure_controller.binding.policy.pressure_sample_max_age_seconds
+            )
+            / 2.0
+        ),
+    )
     selection_pre_authority_workers = (
+        supervisor_module.CapturedPaperManagedWorker(
+            name="pressure_feed", worker=pressure_feed_worker
+        ),
         supervisor_module.CapturedPaperManagedWorker(
             name="selection", worker=selection_worker
         ),
