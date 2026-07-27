@@ -375,7 +375,11 @@ def run_arm(label, grid, ticks, flags):
             return r
         _lr2.grind_mode_decision = _gmd_spy
 
-    eng = create_engine(SIM)
+    # Same NaN/Inf->null JSON serializer as the app engine (app/db.py) — the FSM's
+    # sink writes go through THIS engine, and Postgres JSONB rejects bare NaN tokens
+    # (the CLRO 07-07 vol_ratio crash x3 before this landed here).
+    from app.db import _json_dumps_nan_safe
+    eng = create_engine(SIM, json_serializer=_json_dumps_nan_safe)
     Sess = sessionmaker(bind=eng)
     db = Sess()
     # clean any prior replay_v3 ticks + stale seeded CLRO sessions
