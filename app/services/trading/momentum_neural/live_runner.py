@@ -162,6 +162,8 @@ from .risk_policy import (
     policy_int_cap,
     adaptive_reentry_cooldown_seconds,
     alpaca_paper_hard_loss_cap_usd,
+    chase_defer_decision,
+    rapid_whipsaw_cadence_update,
     reentry_after_stop_allowed,
     reentry_escalation_decision,
     reentry_escalation_level_update,
@@ -31019,7 +31021,14 @@ def tick_live_session(
                 # the LIVE regime distribution (hot tape ⇒ ramp shifts up; cold ⇒ down). COLD /
                 # insufficient samples / degenerate dist ⇒ None ⇒ the documented base 0.25/0.75/
                 # 0.15 (byte-identical to today). size_floor STAYS the one documented safety-base.
-                if _fs_score is not None:
+                # While a chase-defer episode is pinned on this session the SAME
+                # weak score would re-enter the shared regime distribution every
+                # tick (self-releasing the defer + dragging cross-name anchors
+                # down) — note once per entry attempt, not once per deferred tick.
+                if _fs_score is not None and not (
+                    bool(getattr(settings, "chili_momentum_chase_defer_enabled", True))
+                    and bool(le.get("chase_defer_episode"))
+                ):
                     _frontside_dist_note(float(_fs_score))
                 _fs_defer_base = float(getattr(settings, "chili_momentum_frontside_defer_pctile", 0.15) or 0.0)
                 _fs_s_lo, _fs_s_hi, _fs_defer_below = 0.25, 0.75, _fs_defer_base
@@ -31089,33 +31098,51 @@ def tick_live_session(
                 # price reset lower releases the entry. Kill-switch
                 # chili_momentum_chase_defer_enabled=False ⇒ byte-identical. Defer
                 # only on POSITIVE chase evidence (missing range read ⇒ no defer).
-                if (
-                    bool(getattr(settings, "chili_momentum_chase_defer_enabled", True))
-                    and bool(_fs_defer)
-                    and _fs_range_pos is not None
-                    and float(_fs_range_pos) >= float(
-                        getattr(settings, "chili_momentum_chase_defer_range_pos_floor", 0.50)
-                        or 0.50
-                    )
+                # The floor is read VERBATIM (no falsy fallback): 0.0 is a legal
+                # operator value meaning "defer ANY weak-tail entry regardless of
+                # range position" — pydantic already enforces the [0,1] band.
+                # The decision rule itself is the PURE shared helper.
+                _chase_floor = float(
+                    getattr(settings, "chili_momentum_chase_defer_range_pos_floor", 0.50)
+                )
+                if chase_defer_decision(
+                    enabled=bool(getattr(settings, "chili_momentum_chase_defer_enabled", True)),
+                    advisory_defer=bool(_fs_defer),
+                    day_range_pos=_fs_range_pos,
+                    range_pos_floor=_chase_floor,
                 ):
-                    _emit(db, sess, "live_entry_wait_chase_deferred", {
-                        "strength": (None if _fs_score is None else round(float(_fs_score), 4)),
-                        "day_range_pos": round(float(_fs_range_pos), 4),
-                        "range_pos_floor": float(
-                            getattr(settings, "chili_momentum_chase_defer_range_pos_floor", 0.50)
-                            or 0.50
-                        ),
-                        "defer_below": round(float(_fs_defer_below), 4),
-                        "adaptive_warm": bool(_fs_warm),
-                        "adaptive_n": int(_fs_n_samples),
-                    })
-                    db.flush()
+                    # Emit ONCE per defer episode (not per tick): the latch also
+                    # gates the dist-note dedupe above; ticks are counted in le
+                    # for forensics.
+                    if not bool(le.get("chase_defer_episode")):
+                        le["chase_defer_episode"] = True
+                        le["chase_defer_ticks"] = 1
+                        _commit_le(sess, le)
+                        _emit(db, sess, "live_entry_wait_chase_deferred", {
+                            "strength": (None if _fs_score is None else round(float(_fs_score), 4)),
+                            "day_range_pos": round(float(_fs_range_pos), 4),
+                            "range_pos_floor": _chase_floor,
+                            "defer_below": round(float(_fs_defer_below), 4),
+                            "adaptive_warm": bool(_fs_warm),
+                            "adaptive_n": int(_fs_n_samples),
+                        })
+                        db.flush()
+                    else:
+                        le["chase_defer_ticks"] = int(le.get("chase_defer_ticks") or 0) + 1
+                        _commit_le(sess, le)
                     return {
                         "ok": True,
                         "session_id": sess.id,
                         "state": sess.state,
                         "skipped": "chase_deferred",
                     }
+                if bool(le.get("chase_defer_episode")):
+                    # Episode released (strength recovered / price reset lower /
+                    # flag flipped off): clear the latch so the NEXT attempt notes
+                    # its score into the regime distribution again. The last
+                    # episode's chase_defer_ticks stays in le for forensics.
+                    le["chase_defer_episode"] = False
+                    _commit_le(sess, le)
             except Exception:
                 _frontside_mult = 1.0  # fail-OPEN: a tilt error never blocks/shrinks the fill
         # ROSS RISK GAP 1 — SIZE-DOWN INTO THE 200MA / OVERHEAD RESISTANCE. Ross cuts share
@@ -39291,42 +39318,35 @@ def tick_live_session(
                     exclude_session_id=sess.id,
                     execution_family=str(getattr(sess, "execution_family", "") or "") or None,
                 )
-                # L4 — WHIPSAW CADENCE (2026-07-27, SILO autopsy): measure the gap
-                # since the PREVIOUS stop-class loss on this session; a loss landing
-                # within the rapid window double-increments the escalation level so
-                # the escalated-confirmation tier binds by whipsaw entry #2-3, not #6.
-                # Fail-open: unreadable/absent prior timestamp ⇒ not rapid.
-                _g4_rapid = False
-                try:
-                    if _was_loss:
-                        # Timestamp bookkeeping runs regardless of the flag so a
-                        # later flag flip never compares against a stale marker;
-                        # only the DECISION is gated.
-                        _g4_prev_loss_raw = le.get("last_loss_exit_at_utc")
-                        if _g4_prev_loss_raw and bool(
-                            getattr(
-                                settings,
-                                "chili_momentum_whipsaw_rapid_escalation_enabled",
-                                True,
-                            )
-                        ):
-                            _g4_gap_s = (
-                                _utcnow()
-                                - datetime.fromisoformat(
-                                    str(_g4_prev_loss_raw).replace("Z", "")
-                                ).replace(tzinfo=None)
-                            ).total_seconds()
-                            _g4_rapid = 0.0 <= _g4_gap_s <= float(
-                                getattr(
-                                    settings,
-                                    "chili_momentum_whipsaw_rapid_loss_seconds",
-                                    120.0,
-                                )
-                                or 120.0
-                            )
-                        le["last_loss_exit_at_utc"] = _utcnow().isoformat()
-                except Exception:
-                    _g4_rapid = False
+                # L4 — WHIPSAW CADENCE (2026-07-27, SILO autopsy): the gap
+                # between CONSECUTIVE STOP-CLASS losses; a stop landing within
+                # the rapid window double-increments the escalation level so the
+                # escalated-confirmation tier binds by whipsaw entry #2-3, not
+                # #6. The ENTIRE rule (stop-class gating on BOTH ends, verbatim
+                # 0⇒disabled window, corrupt-marker overwrite, flag gates the
+                # DECISION only) is the pure shared helper.
+                _g4_rapid, _g4_marker = rapid_whipsaw_cadence_update(
+                    was_loss=_was_loss,
+                    exit_reason=(str(_g4_exit_reason) if _g4_exit_reason else None),
+                    prev_marker_raw=le.get("last_loss_exit_at_utc"),
+                    now=_utcnow(),
+                    window_seconds=float(
+                        getattr(
+                            settings,
+                            "chili_momentum_whipsaw_rapid_loss_seconds",
+                            120.0,
+                        )
+                    ),
+                    decision_enabled=bool(
+                        getattr(
+                            settings,
+                            "chili_momentum_whipsaw_rapid_escalation_enabled",
+                            True,
+                        )
+                    ),
+                )
+                if _g4_marker is not None:
+                    le["last_loss_exit_at_utc"] = _g4_marker
                 _g4_esc, _g4_esc_why = reentry_escalation_level_update(
                     current_level=int(le.get("g4_reentry_escalation") or 0),
                     was_loss=_was_loss,

@@ -3923,6 +3923,86 @@ def _is_stop_class_exit_reason(reason: str | None) -> bool:
     return "stop" in tokens
 
 
+def stop_class_exit_reason(reason: str | None) -> bool:
+    """Public alias of :func:`_is_stop_class_exit_reason` — the ONE stop-class
+    classifier. Callers gating cadence bookkeeping (L4 whipsaw marker) must use
+    the SAME predicate the escalation rule uses so both ends of the
+    "consecutive stop-class losses" contract share one definition."""
+    return _is_stop_class_exit_reason(reason)
+
+
+def chase_defer_decision(
+    *,
+    enabled: bool,
+    advisory_defer: bool,
+    day_range_pos: Any,
+    range_pos_floor: float,
+) -> bool:
+    """L1 range-position chase governor (PURE, no I/O) — TRUE iff the entry
+    must REALLY defer this tick.
+
+    Defer only on POSITIVE chase evidence: the tilt's ADVISORY defer must
+    already hold (strength in the regime-adaptive tail) AND ``day_range_pos``
+    must be a readable number at/above the floor. Missing/None/unreadable
+    range read ⇒ no defer (fail toward the pre-L1 advisory-only behavior).
+    The floor binds VERBATIM — 0.0 is legal and means "defer ANY weak-tail
+    entry regardless of range position" (never coerce falsy values)."""
+    if not (bool(enabled) and bool(advisory_defer)):
+        return False
+    if day_range_pos is None:
+        return False
+    try:
+        return float(day_range_pos) >= float(range_pos_floor)
+    except (TypeError, ValueError):
+        return False
+
+
+def rapid_whipsaw_cadence_update(
+    *,
+    was_loss: bool,
+    exit_reason: str | None,
+    prev_marker_raw: Any,
+    now: datetime,
+    window_seconds: float,
+    decision_enabled: bool,
+) -> tuple[bool, str | None]:
+    """L4 whipsaw cadence bookkeeping (PURE, no I/O) — the ONE rule for both the
+    ``rapid`` decision and the loss-marker stamp.
+
+    Contract (2026-07-27 adversarial review):
+    - BOTH ends of the pair are STOP-CLASS gated by the shared classifier: a
+      bailout / max_hold / kill-switch exit closing red neither stamps the
+      marker nor measures against it (review M1 — not entry-level failures).
+    - The marker is stamped on EVERY stop-class loss regardless of the decision
+      flag or window (a later flag flip never compares against a stale marker;
+      only the DECISION is gated), and stamping is unconditional on parse
+      success: a corrupt prior marker is OVERWRITTEN, never latched.
+    - ``window_seconds`` is honored VERBATIM: <= 0 ⇒ decision disabled.
+    - Unreadable/absent prior marker ⇒ not rapid (fail-open).
+
+    Returns ``(rapid, new_marker_iso_or_None)``; ``None`` marker means "do not
+    write" (the exit was not a stop-class loss)."""
+    if not (bool(was_loss) and _is_stop_class_exit_reason(exit_reason)):
+        return False, None
+    rapid = False
+    try:
+        window_s = float(window_seconds)
+    except (TypeError, ValueError):
+        window_s = 0.0
+    if prev_marker_raw and bool(decision_enabled) and window_s > 0.0:
+        try:
+            gap_s = (
+                now
+                - datetime.fromisoformat(
+                    str(prev_marker_raw).replace("Z", "")
+                ).replace(tzinfo=None)
+            ).total_seconds()
+            rapid = 0.0 <= gap_s <= window_s
+        except Exception:
+            rapid = False
+    return rapid, now.isoformat()
+
+
 def reentry_escalation_level_update(
     *,
     current_level: int,

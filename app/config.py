@@ -4818,7 +4818,7 @@ class Settings(BaseSettings):
         ge=0.0,
         le=1.0,
         validation_alias=AliasChoices("CHILI_MOMENTUM_CHASE_DEFER_RANGE_POS_FLOOR"),
-        description="day_range_pos at/above which a weak-strength entry counts as a CHASE and defers. ONE documented base = 0.50 (the measured autopsy bucket boundary; upper-half entries lost 17:1). A FLOOR per doctrine — regime-adaptive band may later replace it. Band [0,1].",
+        description="day_range_pos at/above which a weak-strength entry counts as a CHASE and defers. ONE documented base = 0.50 (the measured autopsy bucket boundary; upper-half entries lost 17:1). A FLOOR per doctrine — regime-adaptive band may later replace it. Read VERBATIM: 0.0 ⇒ defer ANY weak-tail entry regardless of range position. Band [0,1].",
     )
     # ── L4 WHIPSAW CADENCE ESCALATION (2026-07-27, golden-baseline autopsy) ────────────
     # SILO 07-07: 6 whipsaw entries in ~90s lost −177 BEFORE the g4 escalation bound

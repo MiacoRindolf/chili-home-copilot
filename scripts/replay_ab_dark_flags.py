@@ -101,6 +101,15 @@ UNSCOREABLE_POST_SELECTION_ARMS = (
     "intended-minus-universe-float",
     "intended-minus-catalyst-arb-flat",
 )
+# CLOSED compound arms (mirror of replay_benchmark_batch.py): named multi-flag-off
+# vectors — NOT a free-form grammar. "intended-minus-autopsy-0727" = the
+# 2026-07-27 lever PR's parity vector (both new levers OFF == pre-PR "intended").
+COMPOUND_STRATEGY_ARMS = {
+    "intended-minus-autopsy-0727": (
+        "chili_momentum_chase_defer_enabled",
+        "chili_momentum_whipsaw_rapid_escalation_enabled",
+    ),
+}
 REPLAY_NEUTRALIZED_SETTINGS = {
     "chili_momentum_squeeze_fuel_tilt_enabled": False,
 }
@@ -115,6 +124,9 @@ def _resolve_strategy_policy(label: str) -> dict:
         pass
     elif label == "intended":
         pass
+    elif label in COMPOUND_STRATEGY_ARMS:
+        for flag in COMPOUND_STRATEGY_ARMS[label]:
+            flags[flag] = False
     elif label.startswith("intended-minus-"):
         slug = label.removeprefix("intended-minus-")
         matches = [
