@@ -5507,7 +5507,8 @@ def ross_abcd_confirmation(
             _avg = float(w.iloc[:-1].mean()) if len(w) > 1 else float(vol.iloc[-1])
             vol_ratio = (float(vol.iloc[-1]) / _avg) if _avg > 0 else 0.0
         _vol_mult = float(getattr(settings, "chili_momentum_pullback_volume_spike_multiple", 1.5) or 1.5)
-        debug["vol_ratio"] = round(vol_ratio, 2)
+        # NaN-safe stamp (see bull_flag site) — JSONB rejects NaN; comparison unchanged.
+        debug["vol_ratio"] = round(vol_ratio, 2) if vol_ratio == vol_ratio else None
         if vol_ratio < _vol_mult:
             return False, "abcd_low_volume", debug
         return True, "abcd_break", debug
@@ -6117,7 +6118,9 @@ def false_break_reclaim_confirmation(
         debug["vmult"] = round(float(vmult), 3)
         if _vol_med is None or not (_vol_med > 0) or _vol_now is None:
             return False, "tight_false_break_reclaim_no_volume", debug
-        debug["vol_ratio"] = round(_vol_now / _vol_med, 3)
+        _fbr_vr = _vol_now / _vol_med
+        # NaN-safe stamp (see bull_flag site) — JSONB rejects NaN; comparison unchanged.
+        debug["vol_ratio"] = round(_fbr_vr, 3) if _fbr_vr == _fbr_vr else None
         if _vol_now <= vmult * _vol_med:
             return False, "tight_false_break_reclaim_weak_volume", debug
 
@@ -7147,7 +7150,8 @@ def ross_double_bottom_confirmation(
             _avg = float(w.iloc[:-1].mean()) if len(w) > 1 else float(vol.iloc[-1])
             vol_ratio = (float(vol.iloc[-1]) / _avg) if _avg > 0 else 0.0
         _vol_mult = float(getattr(settings, "chili_momentum_pullback_volume_spike_multiple", 1.5) or 1.5)
-        debug["vol_ratio"] = round(vol_ratio, 2)
+        # NaN-safe stamp (see bull_flag site) — JSONB rejects NaN; comparison unchanged.
+        debug["vol_ratio"] = round(vol_ratio, 2) if vol_ratio == vol_ratio else None
         if vol_ratio < _vol_mult:
             return False, "double_bottom_low_volume", debug
         return True, "double_bottom_break", debug
@@ -7391,7 +7395,8 @@ def inverse_head_shoulders_confirmation(
             _avg = float(w.iloc[:-1].mean()) if len(w) > 1 else float(vol.iloc[-1])
             vol_ratio = (float(vol.iloc[-1]) / _avg) if _avg > 0 else 0.0
         _vol_mult = float(getattr(settings, "chili_momentum_pullback_volume_spike_multiple", 1.5) or 1.5)
-        debug["vol_ratio"] = round(vol_ratio, 2)
+        # NaN-safe stamp (see bull_flag site) — JSONB rejects NaN; comparison unchanged.
+        debug["vol_ratio"] = round(vol_ratio, 2) if vol_ratio == vol_ratio else None
         if vol_ratio < _vol_mult:
             return False, "inverse_head_shoulders_low_volume", debug
         return True, "inverse_head_shoulders_break", debug
@@ -7727,7 +7732,8 @@ def cup_and_handle_confirmation(
             _avg = float(w.iloc[:-1].mean()) if len(w) > 1 else float(vol.iloc[-1])
             vol_ratio = (float(vol.iloc[-1]) / _avg) if _avg > 0 else 0.0
         _vol_mult = float(getattr(settings, "chili_momentum_pullback_volume_spike_multiple", 1.5) or 1.5)
-        debug["vol_ratio"] = round(vol_ratio, 2)
+        # NaN-safe stamp (see bull_flag site) — JSONB rejects NaN; comparison unchanged.
+        debug["vol_ratio"] = round(vol_ratio, 2) if vol_ratio == vol_ratio else None
         if vol_ratio < _vol_mult:
             return False, "cup_and_handle_low_volume", debug
         return True, "cup_and_handle_break", debug
@@ -8356,7 +8362,8 @@ def pullback_break_confirmation(
             # else: volume UNKNOWN (all-NaN frame / zero average) -> stays None (fail-OPEN)
         except (TypeError, ValueError, IndexError):
             vol_ratio = None
-    debug["vol_ratio"] = None if vol_ratio is None else round(vol_ratio, 2)
+    # NaN-safe stamp (see bull_flag site) — JSONB rejects NaN; comparison unchanged.
+    debug["vol_ratio"] = round(vol_ratio, 2) if vol_ratio is not None and vol_ratio == vol_ratio else None
 
     # RED-VOLUME EXHAUSTION VETO (AS101/HVM101 "first sign of weakness"). A trigger bar
     # that closes RED (close<open) WHILE printing the session's MAX volume AND a NEW
@@ -9193,7 +9200,8 @@ def hod_break_confirmation(
             _avg = float(w.iloc[:-1].mean()) if len(w) > 1 else float(vol.iloc[-1])
             vol_ratio = (float(vol.iloc[-1]) / _avg) if _avg > 0 else 0.0
         _vol_mult = float(getattr(settings, "chili_momentum_pullback_volume_spike_multiple", 1.5) or 1.5)
-        debug["vol_ratio"] = round(vol_ratio, 2)
+        # NaN-safe stamp (see bull_flag site) — JSONB rejects NaN; comparison unchanged.
+        debug["vol_ratio"] = round(vol_ratio, 2) if vol_ratio == vol_ratio else None
         if vol_ratio < _vol_mult:
             return False, f"{_reason_fire}_low_volume", debug
 
@@ -9427,7 +9435,8 @@ def blue_sky_break_confirmation(
             w = vol.tail(21)
             _avg = float(w.iloc[:-1].mean()) if len(w) > 1 else float(vol.iloc[-1])
             vol_ratio = (float(vol.iloc[-1]) / _avg) if _avg > 0 else 0.0
-        debug["vol_ratio"] = round(vol_ratio, 2)
+        # NaN-safe stamp (see bull_flag site) — JSONB rejects NaN; comparison unchanged.
+        debug["vol_ratio"] = round(vol_ratio, 2) if vol_ratio == vol_ratio else None
         if vol_ratio < vol_mult:
             return False, "blue_sky_break_low_volume", debug
         return True, "blue_sky_break", debug
@@ -9792,7 +9801,8 @@ def opening_range_breakout_confirmation(
             w = vol.tail(21)
             _avg = float(w.iloc[:-1].mean()) if len(w) > 1 else float(vol.iloc[-1])
             vol_ratio = (float(vol.iloc[-1]) / _avg) if _avg > 0 else 0.0
-        debug["vol_ratio"] = round(vol_ratio, 2)
+        # NaN-safe stamp (see bull_flag site) — JSONB rejects NaN; comparison unchanged.
+        debug["vol_ratio"] = round(vol_ratio, 2) if vol_ratio == vol_ratio else None
         if vol_ratio < vol_mult:
             return False, "orb_low_volume", debug
         return True, "orb_break", debug
@@ -9967,7 +9977,8 @@ def red_to_green_confirmation(
             w = vol.tail(21)
             _avg = float(w.iloc[:-1].mean()) if len(w) > 1 else float(vol.iloc[-1])
             vol_ratio = (float(vol.iloc[-1]) / _avg) if _avg > 0 else 0.0
-        debug["vol_ratio"] = round(vol_ratio, 2)
+        # NaN-safe stamp (see bull_flag site) — JSONB rejects NaN; comparison unchanged.
+        debug["vol_ratio"] = round(vol_ratio, 2) if vol_ratio == vol_ratio else None
         if vol_ratio < vol_mult:
             return False, "red_to_green_low_volume", debug
         return True, "red_to_green", debug
@@ -10257,7 +10268,8 @@ def ma_vwap_pullback_confirmation(
             w = vol.tail(21)
             _avg = float(w.iloc[:-1].mean()) if len(w) > 1 else float(vol.iloc[-1])
             vol_ratio = (float(vol.iloc[-1]) / _avg) if _avg > 0 else 0.0
-        debug["vol_ratio"] = round(vol_ratio, 2)
+        # NaN-safe stamp (see bull_flag site) — JSONB rejects NaN; comparison unchanged.
+        debug["vol_ratio"] = round(vol_ratio, 2) if vol_ratio == vol_ratio else None
         debug["vol_mult"] = round(vol_mult, 2)
         if vol_ratio < vol_mult:
             return False, "ma_vwap_pullback_low_volume", debug
