@@ -62,6 +62,10 @@ def _naive(t):
 def load_prod():
     eng = create_engine(PROD)
     with eng.connect() as c:
+        # The docker postgres has a 64MB /dev/shm; a parallel gather over the grown golden
+        # tables asked for a 57MB segment and died with DiskFull (VRAX 07-09, 2026-07-26).
+        # These are index-range reads — parallelism buys nothing; disable it session-scoped.
+        c.execute(text("SET max_parallel_workers_per_gather = 0"))
         nbbo = pd.read_sql(text(
             "SELECT observed_at, bid, ask, mid FROM " + SRC_NBBO + " "
             "WHERE symbol=:s AND observed_at>=:a AND observed_at<:b AND bid>0 AND ask>=bid "
