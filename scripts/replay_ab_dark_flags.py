@@ -547,7 +547,10 @@ def run_arm(label, grid, ticks, flags):
         import json as _j
         _s = db.query(TradingAutomationSession).filter(
             TradingAutomationSession.id == seed.session_id).one_or_none()
-        _diag_rs = _j.loads(getattr(_s, "risk_snapshot_json", None) or "{}")
+        # JSONB columns come back as dict already — json.loads(dict) raises TypeError and
+        # silently killed this whole diag block (incl. the ENTRY-TRACE) via the except below.
+        _raw_rs = getattr(_s, "risk_snapshot_json", None)
+        _diag_rs = _raw_rs if isinstance(_raw_rs, dict) else _j.loads(_raw_rs or "{}")
         # ENTRY-DECISION TRACE: the entry/fill/exit events with their trigger reason + ts,
         # so we see WHICH indicator fired for each entry, price-vs-VWAP, and HOLD duration
         # (Ross holds 1-2 min — is CHILI entering too early / on the wrong signal?).

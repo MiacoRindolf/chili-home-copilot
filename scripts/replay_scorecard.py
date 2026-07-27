@@ -129,8 +129,8 @@ def attach_fill_times(rec: dict, trades: list[dict]) -> None:
     order) onto FIFO trades sequentially. Mismatched counts -> ts stays None and the
     within-trade MFE degrades to unavailable for that trade."""
     events = (rec.get("sink") or {}).get("fill_events") or []
-    entries = [e for e in events if e.get("event_type") == "live_entry_filled"]
-    exits = [e for e in events if e.get("event_type") == "live_exit_fill"]
+    entries = [e for e in events if "entry_filled" in str(e.get("event_type") or "")]
+    exits = [e for e in events if "exit_filled" in str(e.get("event_type") or "")]
     for i, t in enumerate(trades):
         t["entry_ts"] = entries[i]["ts"] if i < len(entries) else None
         t["exit_ts"] = exits[i]["ts"] if i < len(exits) else None

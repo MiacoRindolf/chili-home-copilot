@@ -118,18 +118,24 @@ def mine_sink(sink_url: str, symbol: str) -> dict:
             GROUP BY 1 ORDER BY 2 DESC LIMIT 10
         """, (sid,))
         out["top_rejects"] = [[r[0], int(r[1])] for r in cur.fetchall()]
-        # fill events carry broker-time timestamps for within-trade MFE downstream
+        # fill events carry broker-time timestamps for within-trade MFE downstream.
+        # SUBSTRING match + payload keys mirror the driver's own ENTRY_DIAG convention
+        # (replay_ab_dark_flags.py: "entry_filled"/"exit_filled" substrings; reason via
+        # payload "reason"/"trigger"; price via "price"/"fill_price"/"entry_price").
         cur.execute("SELECT ts::text, event_type, payload_json FROM trading_automation_events "
-                    "WHERE session_id = %s AND event_type IN "
-                    "('live_entry_filled','live_exit_fill') ORDER BY id ASC", (sid,))
+                    "WHERE session_id = %s AND (event_type LIKE %s OR event_type LIKE %s) "
+                    "ORDER BY id ASC", (sid, "%entry_filled%", "%exit_filled%"))
         fills = []
         for ts, et, payload in cur.fetchall():
             p = payload if isinstance(payload, dict) else {}
+            reason = (p.get("reason") or p.get("trigger") or p.get("trigger_reason")
+                      or p.get("entry_reason"))
             fills.append({"ts": ts, "event_type": et,
-                          "qty": p.get("qty") or p.get("quantity"),
-                          "px": p.get("fill_price") or p.get("price") or p.get("avg_price"),
-                          "trigger_reason": p.get("trigger_reason") or p.get("entry_reason"),
-                          "exit_reason": p.get("exit_reason") or p.get("reason")})
+                          "qty": p.get("qty") or p.get("quantity") or p.get("shares"),
+                          "px": (p.get("price") or p.get("fill_price") or p.get("entry_price")
+                                 or p.get("avg_price")),
+                          "trigger_reason": (reason if "entry" in et else None),
+                          "exit_reason": (reason if "exit" in et else None)})
         out["fill_events"] = fills
         conn.close()
     except Exception as exc:  # mining failure must never kill the batch
