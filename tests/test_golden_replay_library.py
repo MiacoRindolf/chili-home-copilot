@@ -579,10 +579,60 @@ def test_sink_fill_normalization_retains_only_self_contained_exit_evidence():
     assert orphan["px"] == 5.70
     assert orphan["fill_identity"] == "exit-order-2"
     assert orphan["provider_or_broker_fill_at"] == "2026-07-27T13:34:00Z"
-    assert orphan["coverage_status"] == "COVERAGE_UNAVAILABLE"
-    assert orphan["coverage_reason"] == (
-        "immutable_entry_exit_cycle_lineage_unavailable"
+    # E1 (fill-lineage): a COMPLETE self-contained clock contract now GRANTS
+    # coverage — this is the deliberate relaxation the FSM lineage emit enables.
+    # Every incomplete/contradictory variant below still fails closed.
+    assert orphan["coverage_status"] == "COVERAGE_GRANTED"
+    assert orphan["coverage_reason"] == "entry_exit_cycle_lineage_bound"
+    assert orphan["source_event_id"] == 42
+    assert orphan["entry_filled_at_utc"] == "2026-07-27T13:31:00Z"
+
+    # NEW fail-closed cases paired with the relaxation (sealed posture kept):
+    naive_entry_clock = batch.normalize_sink_fill_event(
+        "2026-07-27T13:34:01+00:00",
+        "live_exit_filled",
+        {
+            "reason": "trail_stop",
+            "fill_price": 5.70,
+            "quantity": 120,
+            "order_id": "exit-order-n1",
+            "source_event_id": 44,
+            "entry_filled_at_utc": "2026-07-27T13:31:00",  # NAIVE -> rejected
+            "filled_at_utc": "2026-07-27T13:34:00Z",
+        },
     )
+    assert naive_entry_clock["coverage_status"] == "COVERAGE_UNAVAILABLE"
+
+    backwards_clock = batch.normalize_sink_fill_event(
+        "2026-07-27T13:34:01+00:00",
+        "live_exit_filled",
+        {
+            "reason": "trail_stop",
+            "fill_price": 5.70,
+            "quantity": 120,
+            "order_id": "exit-order-n2",
+            "source_event_id": 45,
+            "entry_filled_at_utc": "2026-07-27T13:35:00Z",  # exit BEFORE entry
+            "filled_at_utc": "2026-07-27T13:34:00Z",
+        },
+    )
+    assert backwards_clock["coverage_status"] == "COVERAGE_UNAVAILABLE"
+
+    bool_source_id = batch.normalize_sink_fill_event(
+        "2026-07-27T13:34:01+00:00",
+        "live_exit_filled",
+        {
+            "reason": "trail_stop",
+            "fill_price": 5.70,
+            "quantity": 120,
+            "order_id": "exit-order-n3",
+            "source_event_id": True,  # bool masquerading as int -> rejected
+            "entry_filled_at_utc": "2026-07-27T13:31:00Z",
+            "filled_at_utc": "2026-07-27T13:34:00Z",
+        },
+    )
+    assert bool_source_id["coverage_status"] == "COVERAGE_UNAVAILABLE"
+    assert bool_source_id["source_event_id"] is None
     legacy = batch.normalize_sink_fill_event(
         "2026-07-27T13:34:01+00:00",
         "live_exit_fill",

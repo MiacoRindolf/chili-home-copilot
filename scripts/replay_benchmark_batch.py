@@ -952,8 +952,16 @@ def replay_fill_inventory_is_flat(fills: list[dict]) -> bool:
     return math.isclose(bought, sold, rel_tol=0.0, abs_tol=1e-9)
 
 
-def normalize_sink_fill_event(ts, event_type: str, payload) -> dict:
-    """Normalize known FSM fill payload fields without inventing cycle lineage."""
+def normalize_sink_fill_event(ts, event_type: str, payload, *, event_id=None) -> dict:
+    """Normalize known FSM fill payload fields without inventing cycle lineage.
+
+    E1 (fill-lineage): when a ``canonical_exit`` carries the complete
+    self-contained clock contract (source_event_id + entry_filled_at_utc +
+    filled_at_utc + quantity + price + identity), coverage is GRANTED — the
+    exit binds to its entry fill by shared ID, no positional inference. Any
+    missing element still fails closed exactly as before. ``event_id`` is the
+    sink row id of THIS event so exits can be joined to entry records.
+    """
 
     body = payload if isinstance(payload, dict) else {}
 
@@ -1036,24 +1044,48 @@ def normalize_sink_fill_event(ts, event_type: str, payload) -> dict:
         )
         if value is None
     ]
-    reason = (
-        f"{contract}_{'_'.join(missing)}_unavailable"
-        if missing
-        else "immutable_entry_exit_cycle_lineage_unavailable"
-    )
+    if missing:
+        coverage_status = "COVERAGE_UNAVAILABLE"
+        reason = f"{contract}_{'_'.join(missing)}_unavailable"
+    elif contract == "canonical_exit":
+        # Complete lineage: shared entry event id + aware entry/exit fill clocks
+        # (window time under the replay clock) + qty/price/identity — the bound
+        # cycle the scorecard's Label A engine consumes.
+        coverage_status = "COVERAGE_GRANTED"
+        reason = "entry_exit_cycle_lineage_bound"
+    else:
+        coverage_status = "COVERAGE_UNAVAILABLE"
+        reason = "immutable_entry_exit_cycle_lineage_unavailable"
     if contract == "legacy_exit_alias":
         reason = f"legacy_exit_alias_diagnostic_only:{reason}"
 
     return {
         "ts": ts,
         "event_type": event_type,
+        "event_id": (
+            int(event_id)
+            if isinstance(event_id, int) and not isinstance(event_id, bool)
+            else None
+        ),
         "qty": quantity,
         "px": price,
         "fill_identity": identity,
         "trigger_reason": trigger_reason,
         "exit_reason": exit_reason,
+        "source_event_id": (
+            source_event_id
+            if isinstance(source_event_id, int)
+            and not isinstance(source_event_id, bool)
+            and source_event_id > 0
+            else None
+        ),
+        "entry_filled_at_utc": (
+            entry_fill_at.isoformat().replace("+00:00", "Z")
+            if entry_fill_at is not None
+            else None
+        ),
         "provider_or_broker_fill_at": provider_or_broker_fill_at,
-        "coverage_status": "COVERAGE_UNAVAILABLE",
+        "coverage_status": coverage_status,
         "coverage_reason": reason,
     }
 
@@ -1151,14 +1183,14 @@ def mine_sink(
         # such, and cycle lineage remains unavailable without a shared ID.
         execute(
             cur,
-            "SELECT ts::text, event_type, payload_json "
+            "SELECT id, ts::text, event_type, payload_json "
             "FROM trading_automation_events "
             "WHERE session_id = %s AND event_type = ANY(%s) ORDER BY id ASC",
             (sid, list(SINK_FILL_EVENT_TYPES)),
         )
         out["fill_events"] = [
-            normalize_sink_fill_event(ts, event_type, payload)
-            for ts, event_type, payload in cur.fetchall()
+            normalize_sink_fill_event(ts, event_type, payload, event_id=row_id)
+            for row_id, ts, event_type, payload in cur.fetchall()
         ]
     except Exception as exc:  # mining failure must never kill the batch
         out["mine_error"] = f"{type(exc).__name__}: {exc}"

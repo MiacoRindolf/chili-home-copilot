@@ -37,8 +37,8 @@ def main() -> int:
     ap.add_argument("--ids", required=True,
                     help="comma-separated YouTube video ids (leading '-' is fine here)")
     ap.add_argument("--out-root", default=os.path.join(
-        os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
-        "project_ws", "AgentOps", "ross_video_evidence"))
+        os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))),
+        "AgentOps", "ross_video_evidence"))
     args = ap.parse_args()
     ids = [v.strip() for v in args.ids.split(",") if v.strip()]
 

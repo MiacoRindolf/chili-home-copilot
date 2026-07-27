@@ -30,7 +30,13 @@ import sys
 import time
 from dataclasses import dataclass
 
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+# Operator tool — lives OUTSIDE the sealed scripts/ surface (the sealed guard
+# test forbids DB-writing/network tools there); imports the pin SQL from the
+# repo's scripts dir explicitly.
+_REPO_ROOT = os.path.dirname(
+    os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+)
+sys.path.insert(0, os.path.join(_REPO_ROOT, "scripts"))
 from pin_replay_window import COPY_NBBO, COPY_TICKS, COUNTS, DDL  # noqa: E402
 
 DB_URL = os.environ.get("DATABASE_URL", "postgresql://chili:chili@localhost:5433/chili")
@@ -113,7 +119,7 @@ def refresh_dump(dump_dir: str) -> str | None:
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("--inventory", default=os.path.join(
-        os.path.dirname(os.path.abspath(__file__)), "data", "golden_harvest_inventory.json"))
+        os.path.dirname(os.path.abspath(__file__)), "golden_harvest_inventory.json"))
     ap.add_argument("--out-dir", default="D:/CHILI-Docker/chili-data/replay_batch")
     ap.add_argument("--dump-dir", default=None,
                     help="refresh the compressed pg_dump of BOTH golden tables into DIR (once, at end)")

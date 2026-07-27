@@ -838,6 +838,66 @@ def test_fill_time_binding_rejects_positional_or_ornamental_identity():
     assert all(trade["entry_ts"] is None for trade in identical_cycles)
 
 
+def test_fill_time_binding_joins_granted_cycle_lineage():
+    # E1: a COVERAGE_GRANTED exit binds by shared source_event_id -> entry;
+    # ambiguity (two identical granted exits for one cycle shape) fails closed.
+    entry = {
+        "event_type": "live_entry_filled",
+        "event_id": 71,
+        "fill_identity": "entry-1",
+        "ts": "2026-07-27T02:30:00Z",
+        "qty": 10.0,
+        "px": 5.0,
+        "trigger_reason": "abcd_break",
+        "coverage_status": "COVERAGE_UNAVAILABLE",
+    }
+    exit_ev = {
+        "event_type": "live_exit_filled",
+        "event_id": 72,
+        "fill_identity": "exit-1",
+        "ts": "2026-07-27T02:31:00Z",
+        "qty": 10.0,
+        "px": 6.0,
+        "exit_reason": "trail_stop",
+        "source_event_id": 71,
+        "entry_filled_at_utc": "2026-07-08T13:30:00Z",
+        "provider_or_broker_fill_at": "2026-07-08T13:41:00Z",
+        "coverage_status": "COVERAGE_GRANTED",
+        "coverage_reason": "entry_exit_cycle_lineage_bound",
+    }
+    rec = {"sink": {"fill_events": [entry, exit_ev]}}
+    trades = [{"qty": 10, "entry_px": 5, "exit_px": 6, "pnl_usd": 10.0}]
+    rs.attach_fill_times(rec, trades)
+    assert trades[0]["entry_ts"] == "2026-07-08T13:30:00Z"
+    assert trades[0]["exit_ts"] == "2026-07-08T13:41:00Z"
+    assert trades[0]["trigger_reason"] == "abcd_break"
+    assert trades[0]["exit_reason"] == "trail_stop"
+    assert "label_a_unavailable_reason" not in trades[0]
+
+    # ambiguity: two granted exits matching the same cycle shape -> fail closed
+    twin = dict(exit_ev, event_id=73, fill_identity="exit-2")
+    rec2 = {"sink": {"fill_events": [entry, exit_ev, twin]}}
+    trades2 = [{"qty": 10, "entry_px": 5, "exit_px": 6, "pnl_usd": 10.0}]
+    rs.attach_fill_times(rec2, trades2)
+    assert trades2[0]["entry_ts"] is None
+    assert trades2[0]["label_a_unavailable_reason"] == "ambiguous_cycle_binding"
+
+    # ungranted exit with matching shape stays unavailable (no inference)
+    ungranted = dict(
+        exit_ev,
+        event_id=74,
+        coverage_status="COVERAGE_UNAVAILABLE",
+        provider_or_broker_fill_at=None,
+    )
+    rec3 = {"sink": {"fill_events": [entry, ungranted]}}
+    trades3 = [{"qty": 10, "entry_px": 5, "exit_px": 6, "pnl_usd": 10.0}]
+    rs.attach_fill_times(rec3, trades3)
+    assert trades3[0]["entry_ts"] is None
+    assert trades3[0]["label_a_unavailable_reason"] == (
+        "immutable_entry_exit_cycle_lineage_unavailable"
+    )
+
+
 def test_main_renders_before_atomic_outputs(monkeypatch, tmp_path):
     manifest, meta, result = _bound_docs()
     manifest_path = tmp_path / "manifest.json"

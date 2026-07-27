@@ -728,21 +728,71 @@ def pair_round_trips(fills: list[dict]) -> list[dict]:
 
 
 def attach_fill_times(rec: dict, trades: list[dict]) -> None:
-    """Keep Label A unavailable until both sides carry immutable cycle lineage.
+    """Bind Label A inputs from immutable entry<->exit cycle lineage (E1).
 
-    The current stdout fill records contain only side/quantity/price. Sink event
-    identities therefore cannot be joined without positional inference, even
-    when quantities/prices happen to match. Positional inference is prohibited.
+    An exit fill event with ``coverage_status == COVERAGE_GRANTED`` carries a
+    self-contained clock contract: ``source_event_id`` (the entry fill event's
+    sink row id), ``entry_filled_at_utc`` and ``provider_or_broker_fill_at``
+    (both tz-aware window time under the replay clock), plus qty/price. A FIFO
+    cycle binds to exactly ONE unconsumed granted exit by exact content match
+    (qty within 1e-6, exit price within 1e-4); the trigger reason comes from
+    the entry record joined by shared ID. Positional inference remains
+    prohibited: no match, an ambiguous match (two candidates), or a multi-add
+    cycle whose lineage cannot bind cleanly all fail closed per-trade with the
+    same reasons as before.
     """
-    del rec
+    events = (rec.get("sink") or {}).get("fill_events") or []
+    entries_by_id: dict[int, dict] = {}
+    for ev in events:
+        if (
+            isinstance(ev, dict)
+            and ev.get("event_type") == "live_entry_filled"
+            and isinstance(ev.get("event_id"), int)
+        ):
+            entries_by_id[ev["event_id"]] = ev
+    granted_exits = [
+        ev
+        for ev in events
+        if isinstance(ev, dict)
+        and ev.get("event_type") == "live_exit_filled"
+        and ev.get("coverage_status") == "COVERAGE_GRANTED"
+        and ev.get("provider_or_broker_fill_at")
+        and ev.get("entry_filled_at_utc")
+    ]
+    consumed: set[int] = set()
     for trade in trades:
         trade["entry_ts"] = None
         trade["exit_ts"] = None
         trade["trigger_reason"] = None
         trade["exit_reason"] = None
-        trade["label_a_unavailable_reason"] = (
-            "immutable_entry_exit_cycle_lineage_unavailable"
+        candidates = [
+            i
+            for i, ev in enumerate(granted_exits)
+            if i not in consumed
+            and ev.get("qty") is not None
+            and ev.get("px") is not None
+            and abs(float(ev["qty"]) - float(trade["qty"])) <= 1e-6
+            and abs(float(ev["px"]) - float(trade["exit_px"])) <= 1e-4
+        ]
+        if not candidates:
+            trade["label_a_unavailable_reason"] = (
+                "immutable_entry_exit_cycle_lineage_unavailable"
+            )
+            continue
+        if len(candidates) > 1:
+            trade["label_a_unavailable_reason"] = "ambiguous_cycle_binding"
+            continue
+        idx = candidates[0]
+        exit_ev = granted_exits[idx]
+        consumed.add(idx)
+        entry_ev = entries_by_id.get(exit_ev.get("source_event_id"))
+        trade["entry_ts"] = exit_ev.get("entry_filled_at_utc")
+        trade["exit_ts"] = exit_ev.get("provider_or_broker_fill_at")
+        trade["exit_reason"] = exit_ev.get("exit_reason")
+        trade["trigger_reason"] = (
+            entry_ev.get("trigger_reason") if isinstance(entry_ev, dict) else None
         )
+        trade.pop("label_a_unavailable_reason", None)
 
 
 def _parse_ts(v) -> datetime | None:
