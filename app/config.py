@@ -5009,6 +5009,11 @@ class Settings(BaseSettings):
         validation_alias=AliasChoices("CHILI_MOMENTUM_FLUSH_DIP_VOLUME_GATE_ENABLED"),
         description="EXPERIMENTAL Ross-parity L1b candidate (2026-07-25): requires a relative-volume surge on the flush-dip curl/reclaim bar. Default False because the reported improvement came from one known losing window and has no sealed paired OOS/cost proof or complete resolved-policy provenance. Explicit True is reserved for isolated causal experiments; False skips the gate.",
     )
+    chili_momentum_vol_nan_fail_closed_enabled: bool = Field(
+        default=True,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_VOL_NAN_FAIL_CLOSED_ENABLED"),
+        description="Conviction volume gates (bull_flag, vwap_reclaim) FAIL-CLOSED when the break/reclaim-bar vol_ratio is NaN/unmeasurable (reason *_volume_unknown). Legacy let NaN PASS because NaN < mult is False — an IEEE comparison accident witnessed live-shaped on CLRO 2026-07-07 (golden-library benchmark), while the family's own _avg<=0 fallback already blocks. flush_dip is untouched (its volume gate is a documented FAIL-OPEN contract, Ross-parity L1b). Kill-switch: False restores the legacy NaN pass-through.",
+    )
     chili_momentum_tick_break_tape_confirm_enabled: bool = Field(
         default=True,
         validation_alias=AliasChoices("CHILI_MOMENTUM_TICK_BREAK_TAPE_CONFIRM_ENABLED"),

@@ -3422,11 +3422,17 @@ def bull_flag_confirmation(
             vol_ratio = (float(vol.iloc[-1]) / _avg) if _avg > 0 else 0.0
         # NaN-safe stamp (2026-07-26): a NaN vol_ratio poisons risk_snapshot_json (Postgres
         # JSONB rejects the NaN token — found by the golden-library benchmark on CLRO 07-07).
-        # Sanitize the STAMP only; the comparison below keeps NaN's legacy pass-through
-        # (NaN < mult is False) so replay baselines stay byte-consistent — the "should NaN
-        # volume pass a conviction gate?" question is a separate flagged lever.
         debug["vol_ratio"] = round(vol_ratio, 2) if vol_ratio == vol_ratio else None
-        if vol_ratio < _vol_mult:
+        if vol_ratio != vol_ratio:
+            # FAIL-CLOSED on unmeasurable volume (2026-07-26, default-ON): this gate's design
+            # intent is "volume spike = conviction", and the _avg<=0 fallback above already
+            # blocks (0.0) when the average is unavailable — NaN passing was only an IEEE
+            # comparison accident (NaN < mult is False), witnessed live-shaped on CLRO 07-07.
+            # Kill-switch OFF restores the legacy NaN pass-through. flush_dip is deliberately
+            # NOT changed (its volume gate is a documented FAIL-OPEN contract).
+            if bool(getattr(settings, "chili_momentum_vol_nan_fail_closed_enabled", True)):
+                return False, "bull_flag_volume_unknown", debug
+        elif vol_ratio < _vol_mult:
             return False, "bull_flag_low_volume", debug
 
         # -- TAPE REQUIRED + FAIL-CLOSED (the LAST gate before the completed-bar fire too) --
@@ -4912,9 +4918,14 @@ def vwap_reclaim_confirmation(
             w = vol.tail(21)
             avg = float(w.iloc[:-1].mean()) if len(w) > 1 else float(vol.iloc[-1])
             vol_ratio = (float(vol.iloc[-1]) / avg) if avg > 0 else 0.0
-        # NaN-safe stamp (see bull_flag site) — JSONB rejects NaN; comparison unchanged.
+        # NaN-safe stamp (see bull_flag site) — JSONB rejects NaN.
         debug["vol_ratio"] = round(vol_ratio, 2) if vol_ratio == vol_ratio else None
-        if vol_ratio < vol_mult:
+        if vol_ratio != vol_ratio:
+            # FAIL-CLOSED on unmeasurable volume (see the bull_flag site): a conviction
+            # reclaim cannot be proven by a NaN ratio. Kill-switch OFF restores legacy pass.
+            if bool(getattr(settings, "chili_momentum_vol_nan_fail_closed_enabled", True)):
+                return False, "vwap_reclaim_volume_unknown", debug
+        elif vol_ratio < vol_mult:
             return False, "vwap_reclaim_low_volume", debug
 
         # Level = the reclaim bar high (break level). STOP (Ross-parity L2a, 2026-07-25):
