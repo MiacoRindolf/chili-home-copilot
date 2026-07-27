@@ -183,7 +183,8 @@ def test_connection_generation_observes_external_stop_and_clears_health(
         def reader(_socket, local_stop, _generation) -> None:
             local_stop.wait(timeout=2.0)
 
-        def writer(_forced, _deadline) -> None:
+        def writer(_forced, _deadline, local_stop) -> None:
+            assert local_stop is not supervisor_stop
             connection.closed.wait(timeout=2.0)
 
     monkeypatch.setattr(bridge, "reader", reader)
@@ -205,6 +206,81 @@ def test_connection_generation_observes_external_stop_and_clears_health(
     assert not thread.is_alive()
     assert errors == []
     assert connection.closed.is_set()
+    assert connected.is_set() is False
+    assert ready.is_set() is False
+
+
+def test_depth_connection_stop_interrupts_before_initial_source_refresh(
+    monkeypatch,
+) -> None:
+    class Socket:
+        def __init__(self) -> None:
+            self.closed = threading.Event()
+
+        def settimeout(self, _timeout) -> None:
+            return None
+
+        def sendall(self, _payload) -> None:
+            return None
+
+        def shutdown(self, _how) -> None:
+            self.closed.set()
+
+        def close(self) -> None:
+            self.closed.set()
+
+    connection = Socket()
+    supervisor_stop = threading.Event()
+    connected = threading.Event()
+    ready = threading.Event()
+    source_entered = threading.Event()
+    boundaries: list[bool] = []
+
+    monkeypatch.setattr(depth_bridge, "SNAP_INTERVAL_S", 0.2)
+    monkeypatch.setattr(depth_bridge, "SUBSCRIBE_ON_ALERT", False)
+    monkeypatch.setattr(
+        depth_bridge.socket,
+        "create_connection",
+        lambda _address, timeout: connection,
+    )
+    monkeypatch.setattr(
+        depth_bridge,
+        "_record_capture_connection_boundary",
+        lambda *, active, **_kwargs: boundaries.append(active),
+    )
+
+    def forbidden_source_read():
+        source_entered.set()
+        raise AssertionError("initial source refresh ran after connection stop")
+
+    monkeypatch.setattr(depth_bridge, "_live_symbols_read", forbidden_source_read)
+
+    def reader(_socket, local_stop, _generation) -> None:
+        local_stop.wait(timeout=2.0)
+
+    monkeypatch.setattr(depth_bridge, "reader", reader)
+    thread, errors = _run_in_thread(
+        lambda: depth_bridge._run_connection(
+            set(),
+            None,
+            supervisor_stop_event=supervisor_stop,
+            connected_event=connected,
+            ready_event=ready,
+        )
+    )
+    assert connected.wait(timeout=1.0)
+    assert ready.wait(timeout=1.0)
+    time.sleep(0.02)
+    started = time.monotonic()
+    supervisor_stop.set()
+    thread.join(timeout=1.0)
+
+    assert not thread.is_alive()
+    assert time.monotonic() - started < 1.0
+    assert errors == []
+    assert source_entered.is_set() is False
+    assert connection.closed.is_set()
+    assert boundaries == [True, False]
     assert connected.is_set() is False
     assert ready.is_set() is False
 
@@ -395,6 +471,7 @@ def test_host_binds_before_lanes_and_stops_joins_unbinds_then_drains(monkeypatch
     host._trade_bound = False
     host._depth_bound = False
     host._captured_paper_runner_symbols = set()
+    host._captured_paper_admission_symbols = set()
     host._macro_feature_caches = {}
     host._provider_supervisor = None
     host._provider_join_timeout_seconds = 20.0
@@ -496,6 +573,7 @@ def test_host_startup_failure_joins_before_unbind_and_drain():
     host._trade_bound = False
     host._depth_bound = False
     host._captured_paper_runner_symbols = set()
+    host._captured_paper_admission_symbols = set()
     host._macro_feature_caches = {}
     host._provider_supervisor = None
     host._provider_join_timeout_seconds = 20.0

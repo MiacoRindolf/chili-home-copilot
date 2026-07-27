@@ -1290,7 +1290,11 @@ def reader(
     running = False
 
 
-def writer(forced_syms: set[str], deadline: float | None) -> None:
+def writer(
+    forced_syms: set[str],
+    deadline: float | None,
+    stop_event: threading.Event,
+) -> None:
     global running, _max_watch, _limit_hit
     last_refresh = 0.0
     last_fast_sub = 0.0
@@ -1399,8 +1403,17 @@ def writer(forced_syms: set[str], deadline: float | None) -> None:
                 ",".join(cause.value for cause in target.causes),
             )
 
-    while running and (deadline is None or time.monotonic() < deadline):
-        time.sleep(SNAP_INTERVAL_S)
+    while (
+        running
+        and not stop_event.is_set()
+        and (deadline is None or time.monotonic() < deadline)
+    ):
+        # The supervisor may close this socket immediately after READY.  Wake
+        # before the initial provider-backed universe refresh, not after it.
+        if stop_event.wait(SNAP_INTERVAL_S):
+            break
+        if not running:
+            break
         if (
             SUBSCRIBE_ON_ALERT
             and not forced_syms
@@ -1411,6 +1424,8 @@ def writer(forced_syms: set[str], deadline: float | None) -> None:
                 SUBSCRIBE_FRESH_WINDOW_S,
                 limit=_max_watch,
             )
+            if stop_event.is_set() or not running:
+                break
             reconcile(allow_unwatch=True)
         if time.monotonic() - last_prune >= 3600.0:
             # retention prune (the exit_parity_log bloat lesson): depth snapshots
@@ -1433,12 +1448,18 @@ def writer(forced_syms: set[str], deadline: float | None) -> None:
                 )
             if not forced_syms:
                 source_reads[TargetCause.ACTIVE] = _live_symbols_read()
+                if stop_event.is_set() or not running:
+                    break
                 source_reads[TargetCause.ELIGIBLE] = _eligible_symbols_read(
                     _max_watch
                 )
+                if stop_event.is_set() or not running:
+                    break
                 source_reads[TargetCause.ROSS] = _ross_universe_symbols_read(
                     _max_watch
                 )
+                if stop_event.is_set() or not running:
+                    break
                 source_reads[TargetCause.HINT] = (
                     _alert_symbols_read(
                         SUBSCRIBE_FRESH_WINDOW_S,
@@ -1447,6 +1468,8 @@ def writer(forced_syms: set[str], deadline: float | None) -> None:
                     if SUBSCRIBE_ON_ALERT
                     else SourceRead.success(TargetCause.HINT, ())
                 )
+            if stop_event.is_set() or not running:
+                break
             reconcile(allow_unwatch=True, sticky_active=STICKY_RESUBSCRIBE)
             last_refresh = time.monotonic()
         rows = []
@@ -1552,7 +1575,7 @@ def _run_connection(
         _capture_bc("READY")
         if ready_event is not None:
             ready_event.set()
-        writer(forced, deadline)
+        writer(forced, deadline, stop_event)
     finally:
         if ready_event is not None:
             ready_event.clear()
