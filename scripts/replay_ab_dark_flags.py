@@ -443,9 +443,12 @@ def run_arm(label, grid, ticks, flags):
     # tuples + stale stats, which flips the per-tick as-of reads from the btree to a
     # lossy BRIN bitmap (118ms -> 6s per call = a multi-hour window). Autocommit conn
     # (VACUUM can't run inside a transaction block).
+    # PARALLEL 0: parallel vacuum workers allocate DSM segments in /dev/shm (64MB sa
+    # docker default) — ang 500k+-row mirrors ay humingi ng 57-67MB at namatay sa
+    # DiskFull (VRAX/VTAK/JLHL 2026-07-26). Serial vacuum = walang DSM, sapat na bilis.
     with eng.connect().execution_options(isolation_level="AUTOCOMMIT") as _vc:
-        _vc.execute(text("VACUUM ANALYZE iqfeed_trade_ticks"))
-        _vc.execute(text("VACUUM ANALYZE momentum_nbbo_spread_tape"))
+        _vc.execute(text("VACUUM (ANALYZE, PARALLEL 0) iqfeed_trade_ticks"))
+        _vc.execute(text("VACUUM (ANALYZE, PARALLEL 0) momentum_nbbo_spread_tape"))
 
     # VALIDATED parity-fixture mock config ($0.05 fidelity, replay_parity.py:219): resting
     # limit orders (fill only when the recorded NBBO crosses), conservative adverse-side fills,
