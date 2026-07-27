@@ -324,6 +324,10 @@ class _FakePublisher:
     def publish_bundle(self, **kwargs: object) -> SimpleNamespace:
         bundle = kwargs["bundle"]
         assert getattr(bundle, "source_sequence") == self.reserved_sequence
+        before_ingress_admission = kwargs.get("before_ingress_admission")
+        if before_ingress_admission is not None:
+            assert callable(before_ingress_admission)
+            before_ingress_admission(None, 0)
         self.accepted_through = int(self.reserved_sequence or 0)
         self.reserved_sequence = None
         if self.auto_durable:
@@ -955,6 +959,42 @@ def test_pressure_return_after_source_read_rejects_before_reservation(
     assert harness.publisher is not None
     assert harness.publisher.reserved_sequence is None
     assert harness.publisher.accepted_through == 0
+
+
+def test_pressure_return_inside_publish_waits_before_ingress_submit(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(_WARMUP_POLL_TARGET, 0.001)
+    harness = _Harness(
+        tmp_path,
+        initial_snapshot_warmup_seconds=1.0,
+        wait_for_initial_pressure=True,
+        pressure_health_sequence=[
+            _pressure_health(clean=True),
+            _pressure_health(clean=True),
+            _pressure_health(clean=True),
+            _pressure_health(clean=True),
+            _pressure_health(clean=True),
+            # The existing runtime check has passed.  This transition models
+            # pressure returning while publish_bundle performs scoring and
+            # hashes the immutable envelope, before its ingress.submit call.
+            _pressure_health(clean=False),
+            _pressure_health(clean=True),
+        ],
+    )
+
+    harness.worker.start()
+    assert harness.pressure_controller is not None
+    health_calls = harness.pressure_controller.health_calls
+    assert harness.publisher is not None
+    accepted_through = harness.publisher.accepted_through
+    poisoned = harness.publisher.poisoned
+    harness.worker.close(join_timeout_seconds=1.0)
+
+    assert health_calls >= 7
+    assert accepted_through == 1
+    assert poisoned is False
 
 
 def test_initial_multi_snapshot_batch_waits_again_before_each_publish(

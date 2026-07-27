@@ -1154,6 +1154,7 @@ class CapturedPaperSelectionLifecycleWorker:
                     source_sequence=sequence,
                 )
                 self._assert_fence()
+                before_ingress_admission = None
                 if require_snapshot:
                     if initial_cycle_deadline is None:
                         self._assert_initial_pressure_clean(
@@ -1168,11 +1169,28 @@ class CapturedPaperSelectionLifecycleWorker:
                             components,
                             deadline=initial_cycle_deadline,
                         )
+
+                    def before_ingress_admission(
+                        _event: Any,
+                        _event_size: int,
+                    ) -> None:
+                        if initial_cycle_deadline is None:
+                            self._assert_initial_pressure_clean(
+                                components,
+                                phase="immediately before ingress admission",
+                            )
+                        else:
+                            self._wait_for_initial_pressure(
+                                components,
+                                deadline=initial_cycle_deadline,
+                            )
+
                 receipt = publisher.publish_bundle(
                     bundle=occurrence.bundle,
                     scoring_authority=occurrence.scoring_authority,
                     evaluation_at=occurrence.bundle.read_at,
                     source_events=occurrence.source_events,
+                    before_ingress_admission=before_ingress_admission,
                 )
                 if getattr(receipt, "accepted", None) is not True:
                     _reject(

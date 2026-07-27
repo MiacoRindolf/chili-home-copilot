@@ -431,6 +431,76 @@ def _publish(harness: _Harness, bundle=None):
     )
 
 
+def test_before_ingress_admission_runs_after_event_cost_and_before_submit(
+    tmp_path: Path,
+) -> None:
+    harness = _harness(tmp_path)
+    assert harness.publisher.reserve_sequence() == harness.bundle.source_sequence
+    observations: list[tuple[bool, bool, int, int, int | None]] = []
+
+    def before_ingress_admission(event: CaptureEvent, size: int) -> None:
+        ingress = harness.publisher.ingress.health()
+        queue = harness.publisher.health()
+        observations.append(
+            (
+                "canonical_size_bytes" in vars(event),
+                "event_sha256" in vars(event),
+                size,
+                int(ingress["submitted"]),
+                queue.reserved_sequence,
+            )
+        )
+
+    receipt = harness.publisher.publish_bundle(
+        bundle=harness.bundle,
+        scoring_authority=harness.scoring,
+        evaluation_at=harness.bundle.read_at,
+        source_events=harness.source_events,
+        before_ingress_admission=before_ingress_admission,
+    )
+
+    assert receipt.accepted is True
+    assert len(observations) == 1
+    cached_size, cached_sha, size, submitted, reserved = observations[0]
+    assert cached_size is True
+    assert cached_sha is True
+    assert size > 0
+    assert submitted == 0
+    assert reserved == 1
+    _close_idle_harness(harness)
+
+
+def test_ingress_remains_final_fail_closed_authority_after_callback(
+    tmp_path: Path,
+) -> None:
+    harness = _harness(tmp_path)
+    assert harness.publisher.reserve_sequence() == harness.bundle.source_sequence
+
+    def close_before_admission(_event: CaptureEvent, _size: int) -> None:
+        harness.publisher.ingress.close()
+
+    receipt = harness.publisher.publish_bundle(
+        bundle=harness.bundle,
+        scoring_authority=harness.scoring,
+        evaluation_at=harness.bundle.read_at,
+        source_events=harness.source_events,
+        before_ingress_admission=close_before_admission,
+    )
+
+    assert receipt.accepted is False
+    ingress = harness.publisher.ingress.health()
+    assert ingress["dropped"] == 1
+    assert ingress["pending_gap_keys"] == 1
+    drained = harness.publisher.ingress.pop_batch(
+        max_events=1,
+        max_bytes=1,
+        timeout_seconds=0,
+    )
+    assert len(drained.gaps) == 1
+    harness.publisher.writer_lease.release()
+    harness.manager.close()
+
+
 def _close_idle_harness(harness: _Harness) -> None:
     # A rejected publish intentionally retains its sequence reservation until
     # shutdown emits and durably drains the generation poison marker.

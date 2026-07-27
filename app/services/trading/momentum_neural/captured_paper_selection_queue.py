@@ -936,9 +936,14 @@ class CapturedPaperSelectionQueuePublisher:
         scoring_authority: CapturedViabilityScoringAuthority,
         evaluation_at: datetime,
         source_events: Sequence[CaptureEvent],
+        before_ingress_admission: Callable[[CaptureEvent, int], None] | None = None,
     ) -> CapturedPaperSelectionQueuePublishReceipt:
         """Validate, score, and enqueue one complete immutable input envelope."""
 
+        if before_ingress_admission is not None and not callable(
+            before_ingress_admission
+        ):
+            _fail("queue pre-admission callback is not callable")
         with self._lock:
             if self._poisoned:
                 _fail("queue generation is poisoned")
@@ -1009,6 +1014,16 @@ class CapturedPaperSelectionQueuePublisher:
                 provider=QUEUE_PROVIDER,
                 symbol=bundle.symbol,
             )
+            # Admission owns the final fail-closed pressure/capacity check, but
+            # canonical payload sizing and event hashing can take seconds for a
+            # full captured selection envelope.  Give the initial-start caller
+            # one last bounded pressure wait only after both expensive values
+            # are cached, immediately before the non-blocking ingress boundary.
+            # Normal hot-path callers supply no callback and remain non-blocking.
+            event_size = queue_event.canonical_size_bytes
+            _ = queue_event.event_sha256
+            if before_ingress_admission is not None:
+                before_ingress_admission(queue_event, event_size)
             accepted = self.ingress.submit(queue_event)
             receipt = CapturedPaperSelectionQueuePublishReceipt(
                 source_sequence=bundle.source_sequence,
