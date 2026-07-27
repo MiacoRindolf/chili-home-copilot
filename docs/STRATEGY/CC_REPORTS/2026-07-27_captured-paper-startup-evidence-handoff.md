@@ -56,12 +56,32 @@ Mga NA-RULE-OUT para sa 0301 reject (para hindi na ninyo balikan):
   service :6372 ay gumagamit ng `shared_store.shared_admission_budget.pressure_controller`
   = parehong instance).
 
-Ang natitirang hypothesis na tugma sa 150ms timing: ang lane-invalidation/coverage-gap
-handling sa loss window ang nagpa-reject ng submit (hal. ingress/state closed o gap-path
-interplay) — ang ugat ay ang subscription client na nagkakasira ng sariling socket
-pagkatapos ng roster-ack mismatch. Posibleng kasangkot ang legacy-bridge IQConnect
-session state (ang legacy bridges ay tumakbo hanggang sa cutover quiesce; ang roster na
-in-ACK ay mukhang sa kanila).
+**KOREKSYON (pagkatapos balikan ang 07-24 findings ninyo)**: ang 10038 ay malamang
+TEARDOWN NOISE ulit (ang 07-24 deep-read ninyo: reject/failure → runtime poison →
+supervisor teardown → lanes' sockets closed → delayed watch send → 10038). Ang stderr
+ordering ngayong gabi ay tugma doon (reject ~26.2 → lane deaths 26.25/26.33 → report
+26.40; may float-gate log pa sa 26.313 sa pagitan = ibang thread na buhay pa).
+
+**ANG LEADING UNIFIED THEORY para sa QUEUE_INGRESS_REJECTED mismo**: sa eksaktong
+sandali ng unang selection publish (03:32:19–26), ang **host_cutover process ay
+naghahash ng dependency capsule** (CPU-intensive; kinumpirmang aktibo sa parehong
+window sa 0204 run via py-spy dump: `_dependency_tree_inventory` hashing loop).
+Ang aking 22–36% cpu measurement ay ~03:50 — IDLE na ang chain noon. Sa fire window,
+3 sunod na feeder samples (kada 2.5s, `pressure_enter_samples=3`,
+`pressure_cpu_enter_percent=92`) na ≥92% ay papasok sa pressured state nang TAPAT →
+`shared_capture_resource_pressure_cpu...` reject → ang natitirang branch na HINDI
+na-refute sa mismong sandali. Deterministic ito kada fire dahil ang capsule hashing
+ay laging tumatakbo sa parehong window.
+
+Kandidatong fix directions (inyo ang disenyo): (a) i-sequence ang capsule
+hashing/cutover verification para TAPOS na bago ang service start_active; (b) startup
+pressure-policy accommodation (hal. hihintayin ng selection start ang admissible-clean
+window nang bounded — pre-publish kaya walang poison risk); (c) ilipat ang hashing sa
+mas mababang priority class. Tandaan din ang 07-24 "hub-stale + clean-quiesce" na
+natitirang direksyon — ang `ROLLBACK_NOT_QUIESCED`/`SERVICE_SHUTDOWN_INCOMPLETE`
+masking sa failed-start teardown ay lumitaw ulit sa lahat ng 3 runs ngayong gabi.
+Ang field-roster CRITICAL sa connect ay totoo pa ring inconsistency (parehong warning
+noong 07-24) pero non-fatal at malamang hindi ang gating issue.
 
 ## Iba pang artifacts
 - py-spy dumps ng chain processes: scratchpad `pyspy_dumps/` (ang isolated -I service
