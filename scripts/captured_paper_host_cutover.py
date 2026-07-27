@@ -33,6 +33,8 @@ import json
 import os
 from pathlib import Path
 import re
+import select
+import socket
 import stat
 import subprocess
 import sys
@@ -85,6 +87,23 @@ REQUIRED_LEGACY_TASKS = (
 REQUIRED_LEGACY_PROCESS_ROLES = frozenset(
     {"iqfeed_trade_bridge", "iqfeed_depth_bridge"}
 )
+IQCONNECT_EXECUTABLE_PATH = Path(r"E:\DTN\IQFeed\iqconnect.exe")
+IQCONNECT_EXECUTABLE_SHA256 = (
+    "eef544c60e5579f0922dc9a3fd01bb36e79155b93b3841fb700d3f0fae952502"
+)
+IQCONNECT_REQUIRED_LISTENERS = (
+    ("127.0.0.1", 5009),
+    ("127.0.0.1", 9200),
+)
+IQCONNECT_CLIENT_ENDPOINT_BY_ROLE = MappingProxyType(
+    {
+        "iqfeed_trade_bridge": ("127.0.0.1", 5009),
+        "iqfeed_depth_bridge": ("127.0.0.1", 9200),
+    }
+)
+IQCONNECT_GUARD_CONNECT_TIMEOUT_SECONDS = 5.0
+IQCONNECT_GUARD_HANDOFF_TIMEOUT_SECONDS = 30.0
+IQCONNECT_GUARD_HANDOFF_POLL_SECONDS = 0.1
 EXECUTION_LANE_RECREATOR_TASKS = (
     "CHILI-Docker-Socket-Guard",
     "CHILI-captured-paper-premarket-activation",
@@ -868,6 +887,16 @@ class CandidateProcessObservation:
     identity: ProcessIdentity
 
 
+@dataclass(frozen=True, slots=True)
+class IqconnectProviderGuardObservation:
+    pid: int
+    create_time_ns: int
+    executable_path: str
+    executable_sha256: str
+    listeners: tuple[tuple[str, int], ...]
+    guard_connection_count: int
+
+
 class HostCutoverBackend(Protocol):
     """All mutable host operations used by the state machine."""
 
@@ -890,6 +919,24 @@ class HostCutoverBackend(Protocol):
     def get_process(self, pid: int, *, role: str) -> ProcessIdentity | None: ...
 
     def stop_process(self, expected: ProcessIdentity) -> None: ...
+
+    def acquire_iqconnect_provider_guard(
+        self,
+    ) -> IqconnectProviderGuardObservation: ...
+
+    def assert_iqconnect_provider_guard_current(
+        self, expected: IqconnectProviderGuardObservation
+    ) -> None: ...
+
+    def await_iqconnect_provider_guard_handoff(
+        self,
+        expected: IqconnectProviderGuardObservation,
+        restored_clients: Sequence[ProcessIdentity],
+        *,
+        timeout_seconds: float,
+    ) -> None: ...
+
+    def release_iqconnect_provider_guard(self) -> None: ...
 
     def find_legacy_processes(
         self, bindings: Sequence[LegacyProcessBinding]
@@ -6656,6 +6703,45 @@ class CapturedPaperHostCutoverExecutor:
             },
         )
 
+    def _rollback_with_provider_guard(
+        self,
+        journal: CutoverJournal,
+        *,
+        reason: str,
+    ) -> int:
+        # Authority revocation must never depend on provider availability.
+        # Publish the generation-owned tombstone and remove the permit first,
+        # then preserve the rollback contract's zero-host-effect drift
+        # rejection before opening local provider continuity sockets.
+        # _rollback repeats both idempotent proofs before its first host
+        # mutation.
+        prepared = self._rollback_material(journal)
+        self._revoke_activation_permit(
+            journal=journal,
+            prepared=prepared,
+            reason=reason,
+        )
+        self._revalidate_restore_authority(prepared)
+        try:
+            guard = self.backend.acquire_iqconnect_provider_guard()
+            self.backend.assert_iqconnect_provider_guard_current(guard)
+        except BaseException as exc:
+            self.backend.release_iqconnect_provider_guard()
+            if isinstance(exc, CapturedPaperHostCutoverError):
+                raise
+            raise CapturedPaperHostCutoverError(
+                "IQCONNECT_PROVIDER_GUARD_UNAVAILABLE",
+                "rollback revoked order authority but could not guard provider continuity",
+            ) from exc
+        try:
+            return self._rollback(
+                journal,
+                reason=reason,
+                iqconnect_guard=guard,
+            )
+        finally:
+            self.backend.release_iqconnect_provider_guard()
+
     def apply(self) -> CutoverReport:
         journal = CutoverJournal(
             root=self.journal_root, prepared=self.prepared, clock=self.clock
@@ -6670,7 +6756,7 @@ class CapturedPaperHostCutoverExecutor:
                     self._assert_applied(prior_lane)
                 except BaseException as exc:
                     try:
-                        self._rollback(
+                        self._rollback_with_provider_guard(
                             journal, reason="recover_applied_postcondition_failure"
                         )
                     except BaseException as rollback_exc:
@@ -6685,7 +6771,9 @@ class CapturedPaperHostCutoverExecutor:
                     ) from exc
                 return self._report(MODE_APPLY, "ALREADY_APPLIED_EXACT", journal, 0)
             if state in {"applying", "rolling_back"}:
-                self._rollback(journal, reason="recover_incomplete_transaction")
+                self._rollback_with_provider_guard(
+                    journal, reason="recover_incomplete_transaction"
+                )
                 raise CapturedPaperHostCutoverError(
                     "INCOMPLETE_TRANSACTION_RECOVERED",
                     "an interrupted cutover was rolled back; rerun Apply explicitly",
@@ -6713,33 +6801,81 @@ class CapturedPaperHostCutoverExecutor:
                 name: journal.publish_object(item.xml, kind="legacy_task_xml")
                 for name, item in self.prepared.task_snapshot.tasks.items()
             }
-            journal.append(
-                "apply_started",
-                {
-                    "activation_generation": self.prepared.activation_generation,
-                    "manifest_sha256": self.prepared.manifest_sha256,
-                    "rollback_receipt_sha256": self.prepared.rollback_receipt_sha256,
-                    "task_snapshot_sha256": self.prepared.task_snapshot.artifact_sha256,
-                    "process_snapshot_sha256": self.prepared.process_snapshot.artifact_sha256,
-                    "restore_plan_sha256": self.prepared.restore_plan.artifact_sha256,
-                    "candidate_action_sha256": self.prepared.candidate_action_sha256,
-                    "candidate_template_sha256": self.prepared.candidate_template_sha256,
-                    "resolved_task_xml_sha256": self.prepared.resolved_task_xml_sha256,
-                    "resolved_task_xml_path": str(resolved_path),
-                    "rollback_capsule_path": str(rollback_capsule_path),
-                    "rollback_capsule_sha256": rollback_capsule_sha,
-                    "rollback_task_xml_paths": {
-                        name: str(path) for name, path in rollback_task_paths.items()
+            try:
+                iqconnect_guard = (
+                    self.backend.acquire_iqconnect_provider_guard()
+                )
+                self.backend.assert_iqconnect_provider_guard_current(
+                    iqconnect_guard
+                )
+                journal.append(
+                    "apply_started",
+                    {
+                        "activation_generation": self.prepared.activation_generation,
+                        "manifest_sha256": self.prepared.manifest_sha256,
+                        "rollback_receipt_sha256": self.prepared.rollback_receipt_sha256,
+                        "task_snapshot_sha256": self.prepared.task_snapshot.artifact_sha256,
+                        "process_snapshot_sha256": self.prepared.process_snapshot.artifact_sha256,
+                        "restore_plan_sha256": self.prepared.restore_plan.artifact_sha256,
+                        "candidate_action_sha256": self.prepared.candidate_action_sha256,
+                        "candidate_template_sha256": self.prepared.candidate_template_sha256,
+                        "resolved_task_xml_sha256": self.prepared.resolved_task_xml_sha256,
+                        "resolved_task_xml_path": str(resolved_path),
+                        "rollback_capsule_path": str(rollback_capsule_path),
+                        "rollback_capsule_sha256": rollback_capsule_sha,
+                        "rollback_task_xml_paths": {
+                            name: str(path) for name, path in rollback_task_paths.items()
+                        },
+                        "legacy_execution_lane": dict(
+                            _legacy_execution_lane_document(prior_lane)
+                        ),
+                        "iqconnect_provider_guard": {
+                            "pid": iqconnect_guard.pid,
+                            "create_time_ns": iqconnect_guard.create_time_ns,
+                            "executable_sha256": (
+                                iqconnect_guard.executable_sha256
+                            ),
+                            "listeners": [
+                                {"host": host, "port": port}
+                                for host, port in iqconnect_guard.listeners
+                            ],
+                        },
+                        "account_scope": "alpaca:paper",
+                        "live_cash_authorized": False,
                     },
-                    "legacy_execution_lane": dict(
-                        _legacy_execution_lane_document(prior_lane)
-                    ),
-                    "account_scope": "alpaca:paper",
-                    "live_cash_authorized": False,
-                },
-            )
+                )
+            except BaseException as exc:
+                self.backend.release_iqconnect_provider_guard()
+                if isinstance(exc, CapturedPaperHostCutoverError):
+                    raise
+                raise CapturedPaperHostCutoverError(
+                    "IQCONNECT_PROVIDER_GUARD_UNAVAILABLE",
+                    "IQConnect provider continuity preflight failed before host mutation",
+                ) from exc
             mutations = 0
             try:
+                journal.append(
+                    "iqconnect_provider_guard_acquired",
+                    {
+                        "pid": iqconnect_guard.pid,
+                        "create_time_ns": iqconnect_guard.create_time_ns,
+                        "executable_path": iqconnect_guard.executable_path,
+                        "executable_sha256": (
+                            iqconnect_guard.executable_sha256
+                        ),
+                        "listeners": [
+                            {"host": host, "port": port}
+                            for host, port in iqconnect_guard.listeners
+                        ],
+                        "guard_connection_count": (
+                            iqconnect_guard.guard_connection_count
+                        ),
+                        "live_cash_authorized": False,
+                    },
+                )
+                self.backend.assert_iqconnect_provider_guard_current(
+                    iqconnect_guard
+                )
                 mutations += self.backend.quiesce_legacy_execution_lane(
                     expected=prior_lane
                 )
@@ -6865,6 +7001,9 @@ class CapturedPaperHostCutoverExecutor:
                         "LEGACY_PROCESS_SURVIVED",
                         "a provenance-matched legacy bridge remains after shutdown",
                     )
+                self.backend.assert_iqconnect_provider_guard_current(
+                    iqconnect_guard
+                )
 
                 # The quiet horizon starts only after *every* local legacy
                 # execution authority is gone.  Quiescing the Docker lane alone
@@ -6886,6 +7025,9 @@ class CapturedPaperHostCutoverExecutor:
                 quiet_horizon_event_sha256 = _sha(
                     quiet_horizon_event.get("event_sha256"),
                     "quiet-horizon journal event",
+                )
+                self.backend.assert_iqconnect_provider_guard_current(
+                    iqconnect_guard
                 )
 
                 if self.backend.get_task(CANDIDATE_TASK_NAME) is not None:
@@ -6920,6 +7062,9 @@ class CapturedPaperHostCutoverExecutor:
                         "task_name": CANDIDATE_TASK_NAME,
                         "resolved_task_xml_sha256": candidate.xml_sha256,
                     },
+                )
+                self.backend.assert_iqconnect_provider_guard_current(
+                    iqconnect_guard
                 )
                 self.backend.start_task(CANDIDATE_TASK_NAME)
                 mutations += 1
@@ -7019,6 +7164,9 @@ class CapturedPaperHostCutoverExecutor:
                         quiet_horizon_event_sha256
                     ),
                 )
+                self.backend.assert_iqconnect_provider_guard_current(
+                    iqconnect_guard
+                )
                 self._assert_applied(prior_lane)
                 apply_completed_at = self.clock()
                 if apply_completed_at >= prepared_valid_until:
@@ -7058,6 +7206,14 @@ class CapturedPaperHostCutoverExecutor:
                             quiet_horizon_event_sha256
                         ),
                         "challenge_sha256": challenge,
+                        "iqconnect_provider_guard": {
+                            "pid": iqconnect_guard.pid,
+                            "create_time_ns": iqconnect_guard.create_time_ns,
+                            "executable_sha256": (
+                                iqconnect_guard.executable_sha256
+                            ),
+                            "candidate_started_receipt_sha256": started_sha,
+                        },
                         "legacy_execution_lane": dict(
                             _legacy_execution_lane_document(quiesced_lane)
                         ),
@@ -7070,7 +7226,14 @@ class CapturedPaperHostCutoverExecutor:
                     },
                     recorded_at=apply_completed_at,
                 )
-                return self._report(MODE_APPLY, "APPLIED_ALPACA_PAPER_ONLY", journal, mutations)
+                report = self._report(
+                    MODE_APPLY,
+                    "APPLIED_ALPACA_PAPER_ONLY",
+                    journal,
+                    mutations,
+                )
+                self.backend.release_iqconnect_provider_guard()
+                return report
             except BaseException as exc:
                 try:
                     journal.append(
@@ -7086,7 +7249,14 @@ class CapturedPaperHostCutoverExecutor:
                     # after postconditions have been restored.
                     pass
                 try:
-                    self._rollback(journal, reason="compensate_apply_failure")
+                    try:
+                        self._rollback(
+                            journal,
+                            reason="compensate_apply_failure",
+                            iqconnect_guard=iqconnect_guard,
+                        )
+                    finally:
+                        self.backend.release_iqconnect_provider_guard()
                 except BaseException as rollback_exc:
                     raise CapturedPaperHostCutoverError(
                         "COMPENSATING_ROLLBACK_FAILED",
@@ -7115,7 +7285,9 @@ class CapturedPaperHostCutoverExecutor:
                 return self._report(
                     MODE_ROLLBACK, "ALREADY_ROLLED_BACK_EXACT", journal, 0
                 )
-            mutations = self._rollback(journal, reason="explicit_rollback")
+            mutations = self._rollback_with_provider_guard(
+                journal, reason="explicit_rollback"
+            )
             return self._report(MODE_ROLLBACK, "ROLLED_BACK_EXACT", journal, mutations)
 
     def adopt_pre_identity_journal_at_exact_baseline(
@@ -7993,7 +8165,13 @@ class CapturedPaperHostCutoverExecutor:
             }
         )
 
-    def _rollback(self, journal: CutoverJournal, *, reason: str) -> int:
+    def _rollback(
+        self,
+        journal: CutoverJournal,
+        *,
+        reason: str,
+        iqconnect_guard: IqconnectProviderGuardObservation | None = None,
+    ) -> int:
         prepared = self._rollback_material(journal)
         prior_lane = _legacy_execution_lane_baseline(journal.events)
         journal_failed = False
@@ -8354,6 +8532,21 @@ class CapturedPaperHostCutoverExecutor:
                 "LEGACY_PROCESS_RESTORE_FAILED",
                 "legacy bridge roles did not restore exactly",
             )
+        if iqconnect_guard is not None:
+            self.backend.await_iqconnect_provider_guard_handoff(
+                iqconnect_guard,
+                restored,
+                timeout_seconds=IQCONNECT_GUARD_HANDOFF_TIMEOUT_SECONDS,
+            )
+            record(
+                "iqconnect_provider_guard_handoff_completed",
+                {
+                    "pid": iqconnect_guard.pid,
+                    "create_time_ns": iqconnect_guard.create_time_ns,
+                    "restored_client_roles": sorted(restored_roles),
+                    "live_cash_authorized": False,
+                },
+            )
         if self.backend.find_candidate_tasks(prepared.invocation):
             # A foreign exact-invocation task appeared after the initial
             # candidate inventory.  Stop the exact legacy bridges we just
@@ -8482,6 +8675,10 @@ class WindowsHostCutoverBackend:
                 "PSUTIL_REQUIRED", "psutil is required for exact process provenance"
             ) from exc
         self._psutil = psutil
+        self._iqconnect_guard_sockets: tuple[socket.socket, ...] = ()
+        self._iqconnect_guard_observation: (
+            IqconnectProviderGuardObservation | None
+        ) = None
 
     def _docker_command(
         self, arguments: Sequence[str]
@@ -9430,6 +9627,359 @@ class WindowsHostCutoverBackend:
 
     def get_process(self, pid: int, *, role: str) -> ProcessIdentity | None:
         return self._identity_for_pid(pid, role=role, binding=self._bindings.get(role))
+
+    def _iqconnect_provider_observation(
+        self,
+    ) -> IqconnectProviderGuardObservation:
+        expected_path, expected_sha = _stable_local_file_unrooted(
+            IQCONNECT_EXECUTABLE_PATH,
+            field="IQConnect executable",
+        )
+        if expected_sha != IQCONNECT_EXECUTABLE_SHA256:
+            raise CapturedPaperHostCutoverError(
+                "IQCONNECT_EXECUTABLE_DRIFT",
+                "IQConnect executable differs from the sealed PAPER cutover binary",
+            )
+
+        matches: list[tuple[int, int, str]] = []
+        try:
+            for process in self._psutil.process_iter(
+                attrs=["pid", "name"], ad_value=None
+            ):
+                pid = int(process.info["pid"])
+                name = process.info.get("name")
+                if name is None:
+                    raise CapturedPaperHostCutoverError(
+                        "IQCONNECT_PROCESS_UNINSPECTABLE",
+                        f"a process name could not be inspected (PID {pid})",
+                    )
+                if str(name).casefold() != expected_path.name.casefold():
+                    continue
+                exact = self._psutil.Process(pid)
+                executable = Path(exact.exe()).resolve(strict=True)
+                executable_path, executable_sha = _stable_local_file_unrooted(
+                    executable,
+                    field=f"IQConnect process {pid} executable",
+                )
+                if (
+                    os.path.normcase(str(executable_path))
+                    != os.path.normcase(str(expected_path))
+                    or executable_sha != expected_sha
+                ):
+                    raise CapturedPaperHostCutoverError(
+                        "IQCONNECT_PROCESS_IDENTITY_MISMATCH",
+                        "an iqconnect.exe process does not match the sealed binary",
+                    )
+                matches.append(
+                    (
+                        pid,
+                        int(float(exact.create_time()) * 1_000_000_000),
+                        str(executable_path),
+                    )
+                )
+        except self._psutil.NoSuchProcess:
+            pass
+        except CapturedPaperHostCutoverError:
+            raise
+        except (
+            self._psutil.AccessDenied,
+            self._psutil.ZombieProcess,
+            OSError,
+            RuntimeError,
+            TypeError,
+            ValueError,
+        ) as exc:
+            raise CapturedPaperHostCutoverError(
+                "IQCONNECT_PROCESS_UNINSPECTABLE",
+                "IQConnect process identity could not be inspected exactly",
+            ) from exc
+        if len(matches) != 1:
+            raise CapturedPaperHostCutoverError(
+                "IQCONNECT_PROCESS_ROSTER_INVALID",
+                "exactly one sealed IQConnect process is required before PAPER cutover",
+            )
+        pid, create_time_ns, executable_path = matches[0]
+
+        observed_listeners: set[tuple[str, int]] = set()
+        try:
+            for connection in self._psutil.net_connections(kind="tcp"):
+                if (
+                    connection.pid != pid
+                    or connection.status != self._psutil.CONN_LISTEN
+                    or not connection.laddr
+                ):
+                    continue
+                if hasattr(connection.laddr, "ip"):
+                    address = str(connection.laddr.ip)
+                    port = int(connection.laddr.port)
+                else:
+                    address = str(connection.laddr[0])
+                    port = int(connection.laddr[1])
+                endpoint = (address, port)
+                if endpoint in IQCONNECT_REQUIRED_LISTENERS:
+                    observed_listeners.add(endpoint)
+        except (
+            self._psutil.AccessDenied,
+            OSError,
+            RuntimeError,
+            TypeError,
+            ValueError,
+        ) as exc:
+            raise CapturedPaperHostCutoverError(
+                "IQCONNECT_LISTENER_INVENTORY_UNAVAILABLE",
+                "IQConnect listener ownership could not be inspected exactly",
+            ) from exc
+        if observed_listeners != set(IQCONNECT_REQUIRED_LISTENERS):
+            raise CapturedPaperHostCutoverError(
+                "IQCONNECT_LISTENERS_UNAVAILABLE",
+                "sealed IQConnect does not own both required loopback listeners",
+            )
+        return IqconnectProviderGuardObservation(
+            pid=pid,
+            create_time_ns=create_time_ns,
+            executable_path=executable_path,
+            executable_sha256=expected_sha,
+            listeners=tuple(sorted(observed_listeners)),
+            guard_connection_count=len(IQCONNECT_REQUIRED_LISTENERS),
+        )
+
+    def acquire_iqconnect_provider_guard(
+        self,
+    ) -> IqconnectProviderGuardObservation:
+        if self._iqconnect_guard_sockets:
+            raise CapturedPaperHostCutoverError(
+                "IQCONNECT_PROVIDER_GUARD_ALREADY_HELD",
+                "IQConnect provider continuity guard is one-shot per cutover",
+            )
+        observation = self._iqconnect_provider_observation()
+        opened: list[socket.socket] = []
+        try:
+            for endpoint in IQCONNECT_REQUIRED_LISTENERS:
+                client = socket.create_connection(
+                    endpoint,
+                    timeout=IQCONNECT_GUARD_CONNECT_TIMEOUT_SECONDS,
+                )
+                client.settimeout(None)
+                opened.append(client)
+            self._iqconnect_guard_sockets = tuple(opened)
+            self._iqconnect_guard_observation = observation
+            self.assert_iqconnect_provider_guard_current(observation)
+            return observation
+        except BaseException as exc:
+            for client in opened:
+                try:
+                    client.close()
+                except OSError:
+                    pass
+            self._iqconnect_guard_sockets = ()
+            self._iqconnect_guard_observation = None
+            if isinstance(exc, CapturedPaperHostCutoverError):
+                raise
+            raise CapturedPaperHostCutoverError(
+                "IQCONNECT_PROVIDER_GUARD_UNAVAILABLE",
+                "required IQConnect continuity connections could not be acquired",
+            ) from exc
+
+    def assert_iqconnect_provider_guard_current(
+        self, expected: IqconnectProviderGuardObservation
+    ) -> None:
+        if (
+            self._iqconnect_guard_observation != expected
+            or len(self._iqconnect_guard_sockets)
+            != len(IQCONNECT_REQUIRED_LISTENERS)
+        ):
+            raise CapturedPaperHostCutoverError(
+                "IQCONNECT_PROVIDER_GUARD_LOST",
+                "IQConnect provider continuity guard is not held exactly",
+            )
+        for client, endpoint in zip(
+            self._iqconnect_guard_sockets,
+            IQCONNECT_REQUIRED_LISTENERS,
+            strict=True,
+        ):
+            try:
+                peer = client.getpeername()
+                socket_error = client.getsockopt(
+                    socket.SOL_SOCKET, socket.SO_ERROR
+                )
+            except OSError as exc:
+                raise CapturedPaperHostCutoverError(
+                    "IQCONNECT_PROVIDER_GUARD_LOST",
+                    "an IQConnect provider continuity connection closed",
+                ) from exc
+            if (
+                (str(peer[0]), int(peer[1])) != endpoint
+                or socket_error != 0
+            ):
+                raise CapturedPaperHostCutoverError(
+                    "IQCONNECT_PROVIDER_GUARD_LOST",
+                    "an IQConnect provider continuity connection changed peer",
+                )
+            # getpeername() may continue to succeed after a remote FIN/RST.
+            # This socket is a dedicated, no-subscription continuity client,
+            # so consume any provider greeting while checking until the
+            # current readable frontier is empty.  A zero-byte read proves
+            # that the peer has closed.
+            for _ in range(16):
+                try:
+                    readable, _, exceptional = select.select(
+                        [client], [], [client], 0.0
+                    )
+                except (OSError, ValueError) as exc:
+                    raise CapturedPaperHostCutoverError(
+                        "IQCONNECT_PROVIDER_GUARD_LOST",
+                        "an IQConnect provider guard socket is uninspectable",
+                    ) from exc
+                if exceptional:
+                    raise CapturedPaperHostCutoverError(
+                        "IQCONNECT_PROVIDER_GUARD_LOST",
+                        "an IQConnect provider guard socket entered an error state",
+                    )
+                if not readable:
+                    break
+                try:
+                    payload = client.recv(4096)
+                except OSError as exc:
+                    raise CapturedPaperHostCutoverError(
+                        "IQCONNECT_PROVIDER_GUARD_LOST",
+                        "an IQConnect provider continuity connection failed",
+                    ) from exc
+                if not payload:
+                    raise CapturedPaperHostCutoverError(
+                        "IQCONNECT_PROVIDER_GUARD_LOST",
+                        "an IQConnect provider continuity connection closed",
+                    )
+            else:
+                raise CapturedPaperHostCutoverError(
+                    "IQCONNECT_PROVIDER_GUARD_NOISY",
+                    "an idle IQConnect continuity connection produced unbounded data",
+                )
+        if self._iqconnect_provider_observation() != expected:
+            raise CapturedPaperHostCutoverError(
+                "IQCONNECT_PROVIDER_GUARD_LOST",
+                "IQConnect process or required listener identity changed",
+            )
+
+    def await_iqconnect_provider_guard_handoff(
+        self,
+        expected: IqconnectProviderGuardObservation,
+        restored_clients: Sequence[ProcessIdentity],
+        *,
+        timeout_seconds: float,
+    ) -> None:
+        timeout = float(timeout_seconds)
+        if not (0.0 < timeout <= 60.0):
+            raise CapturedPaperHostCutoverError(
+                "IQCONNECT_PROVIDER_HANDOFF_INVALID",
+                "IQConnect provider handoff timeout is outside the sealed bound",
+            )
+        by_role = {item.role: item for item in restored_clients}
+        if (
+            set(by_role) != set(IQCONNECT_CLIENT_ENDPOINT_BY_ROLE)
+            or len(by_role) != len(restored_clients)
+        ):
+            raise CapturedPaperHostCutoverError(
+                "IQCONNECT_PROVIDER_HANDOFF_INVALID",
+                "restored IQFeed client roles do not match the sealed handoff",
+            )
+        self.assert_iqconnect_provider_guard_current(expected)
+        for role, identity in by_role.items():
+            current = self.get_process(identity.pid, role=role)
+            if (
+                current is None
+                or current.semantic_key() != identity.semantic_key()
+            ):
+                raise CapturedPaperHostCutoverError(
+                    "IQCONNECT_PROVIDER_HANDOFF_IDENTITY_DRIFT",
+                    f"restored {role} identity changed before provider handoff",
+                )
+
+        deadline = time.monotonic() + timeout
+        while True:
+            connected_roles: set[str] = set()
+            try:
+                for role, identity in by_role.items():
+                    process = self._psutil.Process(identity.pid)
+                    create_time_ns = int(
+                        round(
+                            float(process.create_time())
+                            * 1_000_000_000
+                        )
+                    )
+                    if create_time_ns != identity.create_time_ns:
+                        raise CapturedPaperHostCutoverError(
+                            "IQCONNECT_PROVIDER_HANDOFF_IDENTITY_DRIFT",
+                            f"restored {role} PID was reused during provider handoff",
+                        )
+                    expected_endpoint = IQCONNECT_CLIENT_ENDPOINT_BY_ROLE[
+                        role
+                    ]
+                    for connection in process.net_connections(kind="tcp"):
+                        remote = connection.raddr
+                        if (
+                            connection.status
+                            != self._psutil.CONN_ESTABLISHED
+                            or not remote
+                        ):
+                            continue
+                        if hasattr(remote, "ip"):
+                            endpoint = (
+                                str(remote.ip),
+                                int(remote.port),
+                            )
+                        else:
+                            endpoint = (
+                                str(remote[0]),
+                                int(remote[1]),
+                            )
+                        if endpoint == expected_endpoint:
+                            connected_roles.add(role)
+                            break
+            except CapturedPaperHostCutoverError:
+                raise
+            except (
+                self._psutil.NoSuchProcess,
+                self._psutil.ZombieProcess,
+                self._psutil.AccessDenied,
+                OSError,
+                RuntimeError,
+                TypeError,
+                ValueError,
+            ) as exc:
+                raise CapturedPaperHostCutoverError(
+                    "IQCONNECT_PROVIDER_HANDOFF_UNINSPECTABLE",
+                    "restored IQFeed client connections could not be inspected",
+                ) from exc
+            if connected_roles == set(by_role):
+                for role, identity in by_role.items():
+                    current = self.get_process(identity.pid, role=role)
+                    if (
+                        current is None
+                        or current.semantic_key()
+                        != identity.semantic_key()
+                    ):
+                        raise CapturedPaperHostCutoverError(
+                            "IQCONNECT_PROVIDER_HANDOFF_IDENTITY_DRIFT",
+                            f"restored {role} identity changed after provider handoff",
+                        )
+                self.assert_iqconnect_provider_guard_current(expected)
+                return
+            if time.monotonic() >= deadline:
+                raise CapturedPaperHostCutoverError(
+                    "IQCONNECT_PROVIDER_HANDOFF_TIMEOUT",
+                    "restored IQFeed bridges did not connect before guard release",
+                )
+            time.sleep(IQCONNECT_GUARD_HANDOFF_POLL_SECONDS)
+
+    def release_iqconnect_provider_guard(self) -> None:
+        clients = self._iqconnect_guard_sockets
+        self._iqconnect_guard_sockets = ()
+        self._iqconnect_guard_observation = None
+        for client in clients:
+            try:
+                client.close()
+            except OSError:
+                pass
 
     def _stop_exact_identity(self, expected: ProcessIdentity) -> None:
         binding = self._bindings.get(expected.role)

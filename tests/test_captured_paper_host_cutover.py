@@ -446,6 +446,341 @@ def test_windows_backend_allows_only_recreator_query_toggle_and_end(
         assert ("/End", "/TN", name) in calls
 
 
+def test_windows_backend_holds_exact_iqconnect_listener_guard(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import psutil
+
+    executable = tmp_path / "iqconnect.exe"
+    executable.write_bytes(b"sealed-iqconnect")
+    executable_sha = hashlib.sha256(executable.read_bytes()).hexdigest()
+    monkeypatch.setattr(cutover, "IQCONNECT_EXECUTABLE_PATH", executable)
+    monkeypatch.setattr(
+        cutover, "IQCONNECT_EXECUTABLE_SHA256", executable_sha
+    )
+    monkeypatch.setattr(
+        cutover,
+        "_stable_local_file_unrooted",
+        lambda value, **_kwargs: (
+            Path(value).resolve(strict=True),
+            hashlib.sha256(Path(value).read_bytes()).hexdigest(),
+        ),
+    )
+
+    class ExactProcess:
+        info = {"pid": 4242, "name": "iqconnect.exe"}
+
+    class ExactIdentity:
+        @staticmethod
+        def exe() -> str:
+            return str(executable)
+
+        @staticmethod
+        def create_time() -> float:
+            return 1234.5
+
+    class FakePsutil:
+        NoSuchProcess = psutil.NoSuchProcess
+        AccessDenied = psutil.AccessDenied
+        ZombieProcess = psutil.ZombieProcess
+        CONN_LISTEN = "LISTEN"
+
+        @staticmethod
+        def process_iter(*_args, **_kwargs):
+            return (ExactProcess(),)
+
+        @staticmethod
+        def Process(pid: int):
+            assert pid == 4242
+            return ExactIdentity()
+
+        @staticmethod
+        def net_connections(*, kind: str):
+            assert kind == "tcp"
+            return tuple(
+                SimpleNamespace(
+                    pid=4242,
+                    status="LISTEN",
+                    laddr=SimpleNamespace(ip=host, port=port),
+                )
+                for host, port in cutover.IQCONNECT_REQUIRED_LISTENERS
+            )
+
+    class GuardSocket:
+        def __init__(self, endpoint: tuple[str, int]) -> None:
+            self.endpoint = endpoint
+            self.closed = False
+
+        def settimeout(self, value) -> None:
+            assert value is None
+
+        def getpeername(self) -> tuple[str, int]:
+            if self.closed:
+                raise OSError("closed")
+            return self.endpoint
+
+        def getsockopt(self, *_args) -> int:
+            if self.closed:
+                raise OSError("closed")
+            return 0
+
+        def close(self) -> None:
+            self.closed = True
+
+    opened: list[GuardSocket] = []
+
+    def connect(endpoint, *, timeout):
+        assert timeout == cutover.IQCONNECT_GUARD_CONNECT_TIMEOUT_SECONDS
+        client = GuardSocket(tuple(endpoint))
+        opened.append(client)
+        return client
+
+    monkeypatch.setattr(cutover.socket, "create_connection", connect)
+    monkeypatch.setattr(
+        cutover.select, "select", lambda *_args: ([], [], [])
+    )
+    backend = object.__new__(cutover.WindowsHostCutoverBackend)
+    backend._psutil = FakePsutil()
+    backend._bindings = {}
+    backend._iqconnect_guard_sockets = ()
+    backend._iqconnect_guard_observation = None
+
+    observation = backend.acquire_iqconnect_provider_guard()
+    backend.assert_iqconnect_provider_guard_current(observation)
+    assert observation.pid == 4242
+    assert observation.executable_sha256 == executable_sha
+    assert observation.listeners == cutover.IQCONNECT_REQUIRED_LISTENERS
+    assert [client.endpoint for client in opened] == list(
+        cutover.IQCONNECT_REQUIRED_LISTENERS
+    )
+    monkeypatch.setattr(
+        backend,
+        "_iqconnect_provider_observation",
+        lambda: replace(observation, pid=observation.pid + 1),
+    )
+    with pytest.raises(
+        cutover.CapturedPaperHostCutoverError,
+        match="IQCONNECT_PROVIDER_GUARD_LOST",
+    ):
+        backend.assert_iqconnect_provider_guard_current(observation)
+
+    backend.release_iqconnect_provider_guard()
+    assert all(client.closed for client in opened)
+
+
+def test_windows_backend_rejects_iqconnect_binary_drift_before_connect(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    executable = tmp_path / "iqconnect.exe"
+    executable.write_bytes(b"drifted-iqconnect")
+    monkeypatch.setattr(cutover, "IQCONNECT_EXECUTABLE_PATH", executable)
+    monkeypatch.setattr(cutover, "IQCONNECT_EXECUTABLE_SHA256", "a" * 64)
+    monkeypatch.setattr(
+        cutover,
+        "_stable_local_file_unrooted",
+        lambda value, **_kwargs: (
+            Path(value).resolve(strict=True),
+            hashlib.sha256(Path(value).read_bytes()).hexdigest(),
+        ),
+    )
+    connected: list[object] = []
+    monkeypatch.setattr(
+        cutover.socket,
+        "create_connection",
+        lambda *_args, **_kwargs: connected.append(object()),
+    )
+    backend = object.__new__(cutover.WindowsHostCutoverBackend)
+    backend._iqconnect_guard_sockets = ()
+    backend._iqconnect_guard_observation = None
+
+    with pytest.raises(
+        cutover.CapturedPaperHostCutoverError,
+        match="IQCONNECT_EXECUTABLE_DRIFT",
+    ):
+        backend.acquire_iqconnect_provider_guard()
+    assert connected == []
+
+
+def test_iqconnect_guard_endpoints_match_bridge_runtime_constants() -> None:
+    from scripts import iqfeed_depth_bridge
+    from scripts import iqfeed_trade_bridge
+
+    assert cutover.IQCONNECT_CLIENT_ENDPOINT_BY_ROLE == {
+        "iqfeed_trade_bridge": (
+            iqfeed_trade_bridge.HOST,
+            iqfeed_trade_bridge.PORT,
+        ),
+        "iqfeed_depth_bridge": (
+            iqfeed_depth_bridge.HOST,
+            iqfeed_depth_bridge.PORT,
+        ),
+    }
+    assert set(cutover.IQCONNECT_REQUIRED_LISTENERS) == set(
+        cutover.IQCONNECT_CLIENT_ENDPOINT_BY_ROLE.values()
+    )
+
+
+def test_windows_backend_detects_closed_iqconnect_guard_peer(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    listener = cutover.socket.socket(
+        cutover.socket.AF_INET, cutover.socket.SOCK_STREAM
+    )
+    listener.bind(("127.0.0.1", 0))
+    listener.listen(1)
+    endpoint = listener.getsockname()
+    client = cutover.socket.create_connection(endpoint, timeout=2)
+    accepted, _ = listener.accept()
+    listener.close()
+    observation = cutover.IqconnectProviderGuardObservation(
+        pid=4242,
+        create_time_ns=123456789,
+        executable_path=r"E:\DTN\IQFeed\iqconnect.exe",
+        executable_sha256="a" * 64,
+        listeners=(endpoint,),
+        guard_connection_count=1,
+    )
+    backend = object.__new__(cutover.WindowsHostCutoverBackend)
+    backend._iqconnect_guard_sockets = (client,)
+    backend._iqconnect_guard_observation = observation
+    monkeypatch.setattr(
+        cutover, "IQCONNECT_REQUIRED_LISTENERS", (endpoint,)
+    )
+    monkeypatch.setattr(
+        backend,
+        "_iqconnect_provider_observation",
+        lambda: observation,
+    )
+    accepted.close()
+    deadline = time.monotonic() + 2.0
+    while time.monotonic() < deadline:
+        readable, _, _ = cutover.select.select([client], [], [], 0.05)
+        if readable:
+            break
+    try:
+        with pytest.raises(
+            cutover.CapturedPaperHostCutoverError,
+            match="IQCONNECT_PROVIDER_GUARD_LOST",
+        ):
+            backend.assert_iqconnect_provider_guard_current(observation)
+    finally:
+        backend.release_iqconnect_provider_guard()
+
+
+def test_windows_backend_waits_for_exact_legacy_client_handoff(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    identities = {
+        role: cutover.ProcessIdentity(
+            pid=pid,
+            create_time_ns=1_000_000_000,
+            executable_path=rf"C:\Python\{role}.exe",
+            executable_sha256=str(pid) * 64,
+            cmdline=(role,),
+            cmdline_sha256=hashlib.sha256(role.encode()).hexdigest(),
+            role=role,
+            bridge_script_path=None,
+            bridge_script_sha256=None,
+        )
+        for role, pid in (
+            ("iqfeed_trade_bridge", 1111),
+            ("iqfeed_depth_bridge", 2222),
+        )
+    }
+    calls: dict[int, int] = {1111: 0, 2222: 0}
+    disconnected_roles: set[str] = set()
+
+    class RestoredProcess:
+        def __init__(self, identity: cutover.ProcessIdentity) -> None:
+            self.identity = identity
+
+        def create_time(self) -> float:
+            return 1.0
+
+        def net_connections(self, *, kind: str):
+            assert kind == "tcp"
+            calls[self.identity.pid] += 1
+            if (
+                self.identity.role in disconnected_roles
+                or calls[self.identity.pid] == 1
+            ):
+                return ()
+            host, port = cutover.IQCONNECT_CLIENT_ENDPOINT_BY_ROLE[
+                self.identity.role
+            ]
+            return (
+                SimpleNamespace(
+                    status="ESTABLISHED",
+                    raddr=SimpleNamespace(ip=host, port=port),
+                ),
+            )
+
+    class HandoffPsutil:
+        NoSuchProcess = Exception
+        ZombieProcess = Exception
+        AccessDenied = Exception
+        CONN_ESTABLISHED = "ESTABLISHED"
+
+        @staticmethod
+        def Process(pid: int):
+            return RestoredProcess(
+                next(item for item in identities.values() if item.pid == pid)
+            )
+
+    backend = object.__new__(cutover.WindowsHostCutoverBackend)
+    backend._psutil = HandoffPsutil()
+    monkeypatch.setattr(
+        backend,
+        "get_process",
+        lambda pid, *, role: identities[role]
+        if identities[role].pid == pid
+        else None,
+    )
+    guard = cutover.IqconnectProviderGuardObservation(
+        pid=4242,
+        create_time_ns=123456789,
+        executable_path=r"E:\DTN\IQFeed\iqconnect.exe",
+        executable_sha256="a" * 64,
+        listeners=cutover.IQCONNECT_REQUIRED_LISTENERS,
+        guard_connection_count=2,
+    )
+    guard_checks: list[object] = []
+    monkeypatch.setattr(
+        backend,
+        "assert_iqconnect_provider_guard_current",
+        lambda expected: guard_checks.append(expected),
+    )
+    sleeps: list[float] = []
+    monkeypatch.setattr(cutover.time, "sleep", sleeps.append)
+
+    backend.await_iqconnect_provider_guard_handoff(
+        guard,
+        tuple(identities.values()),
+        timeout_seconds=1.0,
+    )
+
+    assert calls == {1111: 2, 2222: 2}
+    assert sleeps == [cutover.IQCONNECT_GUARD_HANDOFF_POLL_SECONDS]
+    assert guard_checks == [guard, guard]
+
+    disconnected_roles.add("iqfeed_depth_bridge")
+    monotonic_values = iter((0.0, 2.0))
+    monkeypatch.setattr(
+        cutover.time, "monotonic", lambda: next(monotonic_values)
+    )
+    with pytest.raises(
+        cutover.CapturedPaperHostCutoverError,
+        match="IQCONNECT_PROVIDER_HANDOFF_TIMEOUT",
+    ):
+        backend.await_iqconnect_provider_guard_handoff(
+            guard,
+            tuple(identities.values()),
+            timeout_seconds=1.0,
+        )
+
+
 @pytest.mark.parametrize("python_name", ["python.exe", "pythonw.exe"])
 def test_recreator_inventory_detects_orphaned_python_orchestrator(
     monkeypatch: pytest.MonkeyPatch,
@@ -582,6 +917,8 @@ class FakeHost:
         self.execution_lane_recreator_states = {
             name: True for name in cutover.EXECUTION_LANE_RECREATOR_TASKS
         }
+        self.iqconnect_guard_active = False
+        self.iqconnect_guard_checks = 0
 
     def _maybe_fail(self, operation: str, *, after: bool = False) -> None:
         if (
@@ -691,6 +1028,57 @@ class FakeHost:
         self.processes.pop(expected.pid)
         self.mutations.append(operation)
         self._maybe_fail(operation, after=True)
+
+    def acquire_iqconnect_provider_guard(
+        self,
+    ) -> cutover.IqconnectProviderGuardObservation:
+        operation = "iqconnect-guard:acquire"
+        self._maybe_fail(operation)
+        assert not self.iqconnect_guard_active
+        self.iqconnect_guard_active = True
+        self.mutations.append(operation)
+        self._maybe_fail(operation, after=True)
+        return cutover.IqconnectProviderGuardObservation(
+            pid=7777,
+            create_time_ns=123456789,
+            executable_path=str(cutover.IQCONNECT_EXECUTABLE_PATH),
+            executable_sha256=cutover.IQCONNECT_EXECUTABLE_SHA256,
+            listeners=cutover.IQCONNECT_REQUIRED_LISTENERS,
+            guard_connection_count=len(cutover.IQCONNECT_REQUIRED_LISTENERS),
+        )
+
+    def assert_iqconnect_provider_guard_current(
+        self, expected: cutover.IqconnectProviderGuardObservation
+    ) -> None:
+        assert expected.executable_sha256 == cutover.IQCONNECT_EXECUTABLE_SHA256
+        self.iqconnect_guard_checks += 1
+        if not self.iqconnect_guard_active:
+            raise cutover.CapturedPaperHostCutoverError(
+                "IQCONNECT_PROVIDER_GUARD_LOST",
+                "injected IQConnect continuity loss",
+            )
+        self.mutations.append("iqconnect-guard:assert")
+
+    def await_iqconnect_provider_guard_handoff(
+        self,
+        expected: cutover.IqconnectProviderGuardObservation,
+        restored_clients: tuple[cutover.ProcessIdentity, ...],
+        *,
+        timeout_seconds: float,
+    ) -> None:
+        assert self.iqconnect_guard_active
+        assert timeout_seconds == cutover.IQCONNECT_GUARD_HANDOFF_TIMEOUT_SECONDS
+        assert sorted(item.role for item in restored_clients) == [
+            "iqfeed_depth_bridge",
+            "iqfeed_trade_bridge",
+        ]
+        self.assert_iqconnect_provider_guard_current(expected)
+        self.mutations.append("iqconnect-guard:handoff")
+
+    def release_iqconnect_provider_guard(self) -> None:
+        if self.iqconnect_guard_active:
+            self.iqconnect_guard_active = False
+            self.mutations.append("iqconnect-guard:release")
 
     def find_legacy_processes(
         self, bindings: tuple[cutover.LegacyProcessBinding, ...]
@@ -1260,6 +1648,7 @@ def _assert_restored(prepared: cutover.PreparedCutover, backend: FakeHost) -> No
     assert backend.await_candidate_processes(prepared.invocation, timeout_seconds=0) == ()
     assert backend.execution_lane_state == backend.initial_execution_lane_state
     assert all(backend.execution_lane_recreator_states.values())
+    assert not backend.iqconnect_guard_active
 
 
 def test_validate_only_is_default_and_performs_no_mutation(
@@ -1307,6 +1696,239 @@ def test_apply_has_exact_postconditions_and_is_idempotent(
     second = executor.apply()
     assert second.verdict == "ALREADY_APPLIED_EXACT"
     assert backend.mutations == before
+
+
+def test_apply_holds_iqconnect_guard_until_candidate_started(
+    prepared: cutover.PreparedCutover,
+) -> None:
+    class GuardObservedHost(FakeHost):
+        def stop_process(self, expected: cutover.ProcessIdentity) -> None:
+            assert self.iqconnect_guard_active
+            super().stop_process(expected)
+
+        def read_service_startup_receipt(
+            self,
+            invocation: cutover.CandidateInvocation,
+            expected_service: cutover.ProcessIdentity,
+            *,
+            phase: str,
+            timeout_seconds: float,
+        ) -> dict[str, object]:
+            assert self.iqconnect_guard_active
+            return super().read_service_startup_receipt(
+                invocation,
+                expected_service,
+                phase=phase,
+                timeout_seconds=timeout_seconds,
+            )
+
+        def release_iqconnect_provider_guard(self) -> None:
+            if self.iqconnect_guard_active:
+                journal_path = (
+                    prepared.candidate_root
+                    / "journal"
+                    / prepared.activation_generation
+                    / f"{prepared.manifest_sha256}.jsonl"
+                )
+                events = [
+                    json.loads(line)
+                    for line in journal_path.read_text(
+                        encoding="utf-8"
+                    ).splitlines()
+                ]
+                assert events[-1]["event_type"] == "apply_completed"
+            super().release_iqconnect_provider_guard()
+
+    backend = GuardObservedHost(prepared)
+    report = _executor(prepared, backend).apply()
+
+    assert report.verdict == "APPLIED_ALPACA_PAPER_ONLY"
+    assert not backend.iqconnect_guard_active
+    acquire_index = backend.mutations.index("iqconnect-guard:acquire")
+    first_bridge_stop = min(
+        index
+        for index, operation in enumerate(backend.mutations)
+        if operation.startswith("stop-process:iqfeed_")
+    )
+    candidate_start = backend.mutations.index(
+        f"start:{cutover.CANDIDATE_TASK_NAME}"
+    )
+    release_index = backend.mutations.index("iqconnect-guard:release")
+    assert acquire_index < first_bridge_stop < candidate_start < release_index
+    assert backend.iqconnect_guard_checks >= 3
+
+
+def test_iqconnect_guard_loss_rolls_back_without_candidate_start(
+    prepared: cutover.PreparedCutover,
+) -> None:
+    class LostGuardHost(FakeHost):
+        loss_injected = False
+
+        def assert_iqconnect_provider_guard_current(
+            self, expected: cutover.IqconnectProviderGuardObservation
+        ) -> None:
+            super().assert_iqconnect_provider_guard_current(expected)
+            if self.iqconnect_guard_checks >= 2 and not self.loss_injected:
+                self.loss_injected = True
+                raise cutover.CapturedPaperHostCutoverError(
+                    "IQCONNECT_PROVIDER_GUARD_LOST",
+                    "injected one-shot IQConnect continuity loss",
+                )
+
+    backend = LostGuardHost(prepared)
+    with pytest.raises(
+        cutover.CapturedPaperHostCutoverError,
+        match="IQCONNECT_PROVIDER_GUARD_LOST",
+    ):
+        _executor(prepared, backend).apply()
+
+    assert f"start:{cutover.CANDIDATE_TASK_NAME}" not in backend.mutations
+    assert not backend.iqconnect_guard_active
+    _assert_restored(prepared, backend)
+
+
+def test_iqconnect_guard_loss_after_started_rolls_back_and_hands_off(
+    prepared: cutover.PreparedCutover,
+) -> None:
+    class LostAfterStartedHost(FakeHost):
+        started_seen = False
+        loss_injected = False
+
+        def read_service_startup_receipt(
+            self,
+            invocation: cutover.CandidateInvocation,
+            expected_service: cutover.ProcessIdentity,
+            *,
+            phase: str,
+            timeout_seconds: float,
+        ) -> dict[str, object]:
+            receipt = super().read_service_startup_receipt(
+                invocation,
+                expected_service,
+                phase=phase,
+                timeout_seconds=timeout_seconds,
+            )
+            if phase == "started":
+                self.started_seen = True
+            return receipt
+
+        def assert_iqconnect_provider_guard_current(
+            self, expected: cutover.IqconnectProviderGuardObservation
+        ) -> None:
+            super().assert_iqconnect_provider_guard_current(expected)
+            if self.started_seen and not self.loss_injected:
+                self.loss_injected = True
+                raise cutover.CapturedPaperHostCutoverError(
+                    "IQCONNECT_PROVIDER_GUARD_LOST",
+                    "injected post-STARTED IQConnect continuity loss",
+                )
+
+    backend = LostAfterStartedHost(prepared)
+    with pytest.raises(
+        cutover.CapturedPaperHostCutoverError,
+        match="IQCONNECT_PROVIDER_GUARD_LOST",
+    ):
+        _executor(prepared, backend).apply()
+
+    assert f"start:{cutover.CANDIDATE_TASK_NAME}" in backend.mutations
+    assert "iqconnect-guard:handoff" in backend.mutations
+    assert backend.mutations.index("iqconnect-guard:handoff") < (
+        backend.mutations.index("iqconnect-guard:release")
+    )
+    _assert_restored(prepared, backend)
+
+
+def test_apply_failure_holds_guard_until_legacy_provider_handoff(
+    prepared: cutover.PreparedCutover,
+) -> None:
+    candidate_start = f"start:{cutover.CANDIDATE_TASK_NAME}"
+
+    class HandoffObservedHost(FakeHost):
+        handoff_completed = False
+
+        def __init__(self) -> None:
+            super().__init__(
+                prepared,
+                fail_operation=candidate_start,
+                fail_after_effect=True,
+            )
+
+        def await_iqconnect_provider_guard_handoff(
+            self,
+            expected: cutover.IqconnectProviderGuardObservation,
+            restored_clients: tuple[cutover.ProcessIdentity, ...],
+            *,
+            timeout_seconds: float,
+        ) -> None:
+            assert self.iqconnect_guard_active
+            super().await_iqconnect_provider_guard_handoff(
+                expected,
+                restored_clients,
+                timeout_seconds=timeout_seconds,
+            )
+            self.handoff_completed = True
+
+        def release_iqconnect_provider_guard(self) -> None:
+            if self.iqconnect_guard_active:
+                assert self.handoff_completed
+            super().release_iqconnect_provider_guard()
+
+    backend = HandoffObservedHost()
+    with pytest.raises(cutover.CapturedPaperHostCutoverError):
+        _executor(prepared, backend).apply()
+
+    assert candidate_start in backend.mutations
+    assert backend.handoff_completed
+    assert backend.mutations.index("iqconnect-guard:handoff") < (
+        backend.mutations.index("iqconnect-guard:release")
+    )
+    _assert_restored(prepared, backend)
+
+
+def test_apply_failure_handoff_timeout_releases_guard_and_keeps_candidate_off(
+    prepared: cutover.PreparedCutover,
+) -> None:
+    candidate_start = f"start:{cutover.CANDIDATE_TASK_NAME}"
+
+    class HandoffTimeoutHost(FakeHost):
+        def __init__(self) -> None:
+            super().__init__(
+                prepared,
+                fail_operation=candidate_start,
+                fail_after_effect=True,
+            )
+
+        def await_iqconnect_provider_guard_handoff(
+            self,
+            expected: cutover.IqconnectProviderGuardObservation,
+            restored_clients: tuple[cutover.ProcessIdentity, ...],
+            *,
+            timeout_seconds: float,
+        ) -> None:
+            assert self.iqconnect_guard_active
+            raise cutover.CapturedPaperHostCutoverError(
+                "IQCONNECT_PROVIDER_HANDOFF_TIMEOUT",
+                "injected restored-client handoff timeout",
+            )
+
+    backend = HandoffTimeoutHost()
+    with pytest.raises(
+        cutover.CapturedPaperHostCutoverError,
+        match="COMPENSATING_ROLLBACK_FAILED",
+    ):
+        _executor(prepared, backend).apply()
+
+    assert cutover.CANDIDATE_TASK_NAME not in backend.tasks
+    assert not backend.iqconnect_guard_active
+    assert all(
+        backend.tasks[name].enabled for name in cutover.REQUIRED_LEGACY_TASKS
+    )
+    assert sorted(
+        item.role
+        for item in backend.find_legacy_processes(
+            prepared.restore_plan.bindings
+        )
+    ) == ["iqfeed_depth_bridge", "iqfeed_trade_bridge"]
 
 
 def test_recover_only_inventory_finds_one_active_capsule_and_ignores_baseline(
@@ -1567,15 +2189,46 @@ def test_explicit_rollback_restores_exact_tasks_and_provenance_roles(
     report = executor.rollback()
     assert report.verdict == "ROLLED_BACK_EXACT"
     _assert_restored(prepared, backend)
+    assert backend.mutations.count("iqconnect-guard:acquire") == 2
+    assert backend.mutations.count("iqconnect-guard:release") == 2
+    assert backend.mutations.count("iqconnect-guard:handoff") == 1
     before = list(backend.mutations)
     assert executor.rollback().verdict == "ALREADY_ROLLED_BACK_EXACT"
     assert backend.mutations == before
+
+
+def test_explicit_rollback_revokes_permit_before_guard_preflight_failure(
+    prepared: cutover.PreparedCutover,
+) -> None:
+    backend = FakeHost(prepared)
+    executor = _executor(prepared, backend)
+    executor.apply()
+    paths = cutover._startup_handshake_paths(
+        prepared.invocation,
+        roots=prepared.allowed_read_roots,
+    )
+    assert paths["permit"].is_file()
+    baseline = list(backend.mutations)
+    backend.fail_operation = "iqconnect-guard:acquire"
+    backend.fail_after_effect = False
+
+    with pytest.raises(
+        cutover.CapturedPaperHostCutoverError,
+        match="IQCONNECT_PROVIDER_GUARD_UNAVAILABLE",
+    ):
+        executor.rollback()
+
+    assert backend.mutations == baseline
+    assert not paths["permit"].exists()
+    assert paths["revoked"].is_file()
+    assert cutover.CANDIDATE_TASK_NAME in backend.tasks
 
 
 @pytest.mark.parametrize(
     "operation",
     [
         *(f"task:{name}:disable" for name in cutover.REQUIRED_LEGACY_TASKS),
+        "iqconnect-guard:acquire",
         "stop-process:iqfeed_depth_bridge",
         "stop-process:iqfeed_trade_bridge",
         "execution-lane:stop",
@@ -1593,6 +2246,11 @@ def test_every_apply_mutation_failure_compensates_to_restored_host(
     with pytest.raises(cutover.CapturedPaperHostCutoverError):
         _executor(prepared, backend).apply()
     _assert_restored(prepared, backend)
+    if operation == "iqconnect-guard:acquire":
+        assert backend.mutations in (
+            [],
+            ["iqconnect-guard:acquire", "iqconnect-guard:release"],
+        )
 
 
 def test_process_snapshot_drift_fails_before_any_mutation(
