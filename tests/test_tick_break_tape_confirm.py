@@ -68,15 +68,17 @@ def test_helper_flag_off_is_open():
     assert dbg["reason"] == "confirm_disabled"
 
 
-def test_helper_missing_flag_is_open_without_tape_read():
-    tape = MagicMock()
+def test_helper_missing_flag_uses_default_on_tape_confirm():
+    tape = MagicMock(
+        return_value=(False, {"reason": "tape_hold_no_data"})
+    )
     with patch(f"{_GATES}.tape_confirms_hold", tape):
         ok, dbg = _tick_break_tape_ok(
             "TEST", db=MagicMock(), settings=SimpleNamespace()
         )
-    assert ok is True
-    assert dbg["reason"] == "confirm_disabled"
-    tape.assert_not_called()
+    assert ok is False
+    assert dbg["reason"] == "tape_hold_no_data"
+    tape.assert_called_once()
 
 
 def test_helper_tape_confirmed_is_open():
@@ -241,7 +243,7 @@ class TestOrbTickBreakTape:
             setup_family="opening_range_breakout",
         ) == "e5d32cdd6a0473641fb7850e9836a8cbd83c4cee1685ded25c9f543e6871c39b"
 
-    def test_missing_flag_preserves_naked_tick_fire_and_payload(self):
+    def test_missing_flag_uses_default_on_tape_confirm(self):
         df = _orb_df()
         lvl = _orb_level(df)
         ms = SimpleNamespace()
@@ -252,15 +254,10 @@ class TestOrbTickBreakTape:
             ok, reason, dbg = opening_range_breakout_confirmation(
                 df, entry_interval="5m", symbol="TEST", db=MagicMock(), live_price=lvl + 0.02,
             )
-        tape.assert_not_called()
-        assert ok is True
-        assert reason == "orb_break_tick_ok"
-        assert "tape_reason" not in dbg
-        assert _fixed_candidate_generation(
-            debug=dbg,
-            reason=reason,
-            setup_family="opening_range_breakout",
-        ) == "e5d32cdd6a0473641fb7850e9836a8cbd83c4cee1685ded25c9f543e6871c39b"
+        tape.assert_called_once()
+        assert ok is False
+        assert reason == "waiting_for_break"
+        assert dbg["tape_reason"] == "tape_hold_no_data"
 
 
 # ── ABCD detector integration ────────────────────────────────────────────────
@@ -364,7 +361,7 @@ class TestAbcdTickBreakTape:
             setup_family="ross_abcd",
         ) == "876bb2540ca05779eb8c2a3af3d02dfc583f083c8b065944d5a700806f53491f"
 
-    def test_missing_flag_preserves_naked_tick_fire(self):
+    def test_missing_flag_uses_default_on_tick_guards(self):
         ms = SimpleNamespace()
         ok, reason, dbg = self._run(
             ms,
@@ -373,11 +370,5 @@ class TestAbcdTickBreakTape:
             thrust_ok=False,
             confirm_on=None,
         )
-        assert ok is True
-        assert reason == "abcd_break_tick_ok"
-        assert "tape_reason" not in dbg
-        assert _fixed_candidate_generation(
-            debug=dbg,
-            reason=reason,
-            setup_family="ross_abcd",
-        ) == "876bb2540ca05779eb8c2a3af3d02dfc583f083c8b065944d5a700806f53491f"
+        assert ok is False
+        assert reason == "waiting_for_break"

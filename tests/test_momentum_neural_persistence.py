@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
+import json
 from types import SimpleNamespace
 
 from sqlalchemy.orm import Session
@@ -154,6 +155,90 @@ def test_viability_upsert_updates_row(db: Session) -> None:
     assert r2.viability_score == 0.99
     assert r2.correlation_id == "corr-b"
     assert "rationale" in (r2.explain_json or {})
+
+
+def test_viability_rows_persist_only_their_own_scanner_projection(
+    db: Session,
+) -> None:
+    ensure_momentum_strategy_variants(db)
+    db.commit()
+    fam = get_family("impulse_breakout")
+    assert fam is not None
+    ctx = build_momentum_regime_context(
+        now=datetime(2026, 7, 27, 16, 0, tzinfo=timezone.utc),
+        atr_pct=0.02,
+        meta={"spread_regime": "normal"},
+    )
+    base = score_viability("AAA", fam, ctx, ExecutionReadinessFeatures())
+    row = base.to_public_dict()
+    row.update(
+        {
+            "label": fam.label,
+            "entry_style": fam.entry_style,
+            "default_stop_logic": fam.default_stop_logic,
+            "default_exit_logic": fam.default_exit_logic,
+        }
+    )
+    rows = [{**row, "symbol": symbol} for symbol in ("AAA", "BBB")]
+    compact_reference = {
+        "schema_version": "chili.ortex.squeeze-fuel-batch-ref.v1",
+        "batch_sha256": "a" * 64,
+        "decision_at": "2026-07-27T16:00:00+00:00",
+        "complete": True,
+        "quota_policy_sha256": "b" * 64,
+        "members_sha256": "c" * 64,
+    }
+    features = ExecutionReadinessFeatures.from_meta(
+        {
+            "ortex_squeeze_fuel_batch": compact_reference,
+            "ross_signals": {
+                "AAA": {
+                    "ticker": "AAA",
+                    "ortex_selection_reference": {"symbol": "AAA"},
+                },
+                "BBB": {
+                    "ticker": "BBB",
+                    "ortex_selection_reference": {"symbol": "BBB"},
+                },
+            },
+        }
+    )
+
+    assert (
+        persist_neural_momentum_tick(
+            db,
+            row_dicts=rows,
+            regime_snapshot=ctx.to_public_dict(),
+            features=features,
+            correlation_id="row-local-ortex",
+            source_node_id="nm_momentum_crypto_intel",
+        )
+        == 2
+    )
+    db.flush()
+
+    persisted = {
+        value.symbol: value.execution_readiness_json
+        for value in db.query(MomentumSymbolViability)
+        .filter(MomentumSymbolViability.symbol.in_(("AAA", "BBB")))
+        .all()
+    }
+    assert set(persisted) == {"AAA", "BBB"}
+    for symbol, readiness in persisted.items():
+        extra = readiness["extra"]
+        assert extra["ortex_squeeze_fuel_batch"] == compact_reference
+        assert (
+            len(
+                json.dumps(
+                    extra["ortex_squeeze_fuel_batch"],
+                    sort_keys=True,
+                    separators=(",", ":"),
+                ).encode("utf-8")
+            )
+            < 512
+        )
+        assert set(extra["ross_signals"]) == {symbol}
+        assert extra["ross_signals"][symbol]["ticker"] == symbol
 
 
 def test_resolve_viability_upserts_is_deterministically_ordered(db: Session) -> None:

@@ -74,18 +74,21 @@ def test_flag_off_byte_identical():
     assert "T0" in out  # gate skipped -> high-float name retained (legacy behavior)
 
 
-def test_missing_flag_preserves_output_without_provider_read():
+def test_missing_flag_uses_default_on_float_gate():
     settings_obj = SimpleNamespace(
         chili_momentum_universe_uncapped_enabled=False,
         chili_momentum_universe_hard_ceiling=1500,
         chili_momentum_hot_mover_recatch_enabled=False,
         chili_momentum_a_setup_quality_floor_float_ceiling_shares=20_000_000.0,
     )
-    with patch(f"{_MASSIVE}.get_ticker_float") as get_float, \
+    with patch(
+            f"{_MASSIVE}.get_ticker_float",
+            return_value=1_000_000.0,
+         ) as get_float, \
             patch("app.config.settings", settings_obj):
         out = build_equity_universe(EQUITY_ROSS_SMALLCAP, snapshot=_snapshot())
     assert "T0" in out
-    get_float.assert_not_called()
+    assert get_float.call_count == 6
 
 
 def test_lookup_budget_bounded():

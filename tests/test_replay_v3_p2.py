@@ -79,6 +79,15 @@ def _install_network_guard(monkeypatch) -> None:
 @pytest.fixture
 def _enable_runner(monkeypatch):
     monkeypatch.setattr(settings, "chili_momentum_live_runner_enabled", True)
+    # This suite isolates eligibility-recency behavior, not Ortex selection.
+    # Exercise the real per-lever kill switch while dedicated sealed tests
+    # retain default-ON Ortex replay/PAPER coverage.
+    monkeypatch.setattr(
+        settings,
+        "chili_momentum_squeeze_fuel_tilt_enabled",
+        False,
+        raising=False,
+    )
     # This suite isolates the eligibility-recency grace. The independent Ross
     # universe gate has its own fail-closed coverage and, when enabled, its
     # profile proof intentionally backfills live eligibility before the grace

@@ -1,33 +1,52 @@
-"""Derive per-window replay bounds from the golden archive + build the run manifest.
+"""Derive diagnostic replay bounds from an explicitly selected golden archive.
 
-The harvest inventory is symbol-DAY granularity, but the replay driver
-(``scripts/replay_ab_dark_flags.py``) needs ``WIN_START/WIN_END`` (a 2h-class
-intraday burst) + ``OHLCV_START`` (warmup lead). ``derive_window()`` finds the
-activity burst deterministically from the GOLDEN per-minute tick histogram (never
-the 37GB live table): the minimal contiguous span holding >=85%% of the day's
-ticks, always extended to include the day-high minute, capped/floored, padded.
+The replay driver (``scripts/replay_ab_dark_flags.py``) needs
+``WIN_START/WIN_END`` (a 2h-class intraday burst) plus ``OHLCV_START`` (warmup
+lead). ``derive_window()`` finds the activity burst deterministically from the
+GOLDEN per-minute tick histogram (never the live table): the minimal contiguous
+span holding >=85%% of the day's ticks, always extended to include the day-high
+minute, capped/floored, padded.
 
-The three canonical windows (CLRO 07-02 / QTTB 07-13 / PLSM 07-13) keep their
-hand-picked bounds verbatim — they are the tie-back to every banked A/B number —
-and the derived bounds are printed beside them as the algorithm's sanity check.
+This is deliberately POST-SESSION/HINDSIGHT window selection. It is useful for a
+stable diagnostic regression library, but it is not causal setup discovery,
+walk-forward/OOS evidence, or Ross-profitability proof.
+
+Three legacy diagnostic windows (CLRO 07-02 / QTTB 07-13 / PLSM 07-13) keep
+their hand-picked bounds verbatim solely to compare with earlier A/B output;
+derived bounds are printed beside them as a sanity check.
 
     python scripts/derive_replay_windows.py --out-dir D:/CHILI-Docker/chili-data/replay_batch
 
-Output: ``window_manifest.json`` (schema chili.replay-window-manifest.v1) with a
-``tier`` per window: "baseline" (the curated ~20-25 run set: canonicals + Ross-
-evidence cross-reference days + top gold by ticks, max 2 per calendar day) or
-"library" (everything else — runnable later, same manifest). READ-ONLY on the DB.
+Output: ``window_manifest.json`` (schema chili.replay-window-manifest.v2) with a
+``tier`` per window: "baseline" (legacy tie-backs + the largest retained windows,
+max 2 per calendar day) or "library" (everything else). The DB transaction is
+REPEATABLE READ and READ ONLY. No provider/network fallback exists.
 """
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
+import subprocess
+import sys
 from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
-DB_URL = os.environ.get("DATABASE_URL", "postgresql://chili:chili@localhost:5433/chili")
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+if SCRIPT_DIR not in sys.path:
+    sys.path.insert(0, SCRIPT_DIR)
 
+from diagnostic_replay_db import (  # noqa: E402
+    content_receipt_sha256,
+    golden_window_content_receipt,
+    guarded_database_identity,
+    query_contract_sha256,
+    verify_connected_endpoint,
+)
+
+BUILD = os.path.dirname(SCRIPT_DIR)
+RECEIPT_HELPER = os.path.join(SCRIPT_DIR, "diagnostic_replay_db.py")
 HIST_SQL = """
 SELECT date_trunc('minute', observed_at) AS m, count(*) AS n
 FROM replay_golden_ticks
@@ -52,8 +71,9 @@ LEFT JOIN (SELECT symbol, observed_at::date AS day, count(*) AS nbbo
 ORDER BY t.day, t.symbol
 """
 
-# Hand-picked canonical windows — the tie-back to every banked A/B number. NEVER derived.
-CANONICAL = {
+# Legacy tie-back windows preserve comparisons to earlier diagnostic runs. They
+# carry no Ross/economic/causal credit and are never OOS selection.
+LEGACY_TIEBACK = {
     ("CLRO", "2026-07-02"): {"win_start": "2026-07-02T14:00:00", "win_end": "2026-07-02T16:00:00",
                              "ohlcv_start": "2026-07-02T13:00:00", "prepend": False},
     ("QTTB", "2026-07-13"): {"win_start": "2026-07-13T13:00:00", "win_end": "2026-07-13T16:00:00",
@@ -62,39 +82,46 @@ CANONICAL = {
                              "ohlcv_start": "2026-07-13T12:05:00", "prepend": True},
 }
 
-# Fallback Ross cross-reference symbol-days (frame-verified evidence) — used only when the
-# ground-truth manifest is absent; otherwise the manifest's TRADE rows drive promotion.
-ROSS_CROSSREF_FALLBACK = {
-    ("CLRO", "2026-07-07"), ("VRAX", "2026-07-09"), ("CETX", "2026-07-02"),
-    ("BJDX", "2026-07-07"), ("SILO", "2026-07-07"), ("JEM", "2026-06-30"),
-    ("UPC", "2026-06-29"), ("UPC", "2026-06-26"),
-}
-
-DEFAULT_ROSS_MANIFEST = os.path.join(
-    os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
-    "project_ws", "AgentOps", "ross_video_evidence", "manifest.json")
-
-
-def load_ross_crossref(path: str) -> set[tuple[str, str]]:
-    """Ross TRADE symbol-days from the ground-truth manifest (chili.ross_ground_truth_manifest.v1).
-    Reject rows stay library-tier — the scorecard still crossrefs them if replayed later."""
-    try:
-        with open(path, "r", encoding="utf-8") as f:
-            doc = json.load(f)
-        out = {(str(w.get("symbol") or "").upper(), str(w.get("date") or ""))
-               for w in doc.get("windows", [])
-               if w.get("ross_action") == "trade" or w.get("expected_action") == "trade"}
-        return {k for k in out if k[0] and k[1]}
-    except (OSError, ValueError):
-        return set(ROSS_CROSSREF_FALLBACK)
-
-BASELINE_TARGET = 22          # canonicals + crossref + top-gold fill
+BASELINE_TARGET = 22          # legacy tie-backs + top-gold fill
 MAX_PER_DAY = 2               # diversity: no single day monopolizes the baseline
 
 
 def estimate_runtime_s(ticks: int) -> int:
     # CLRO 860k ~ 40-48 min, QTTB 378k ~ 25 min  =>  ~8 min fixed + ~2.8 ms/tick
     return 480 + int(ticks * 0.0028)
+
+
+def guard_source_database_url(url: str) -> tuple[str, str]:
+    identity = guarded_database_identity(url, sink=False)
+    return url, identity.dbname
+
+
+def clean_build_sha() -> str:
+    rev = subprocess.run(
+        ["git", "rev-parse", "HEAD"],
+        cwd=BUILD,
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout.strip()
+    dirty = subprocess.run(
+        ["git", "status", "--porcelain"],
+        cwd=BUILD,
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout
+    if dirty.strip():
+        raise SystemExit(
+            "[derive] REFUSING dirty worktree; manifest provenance requires "
+            "an immutable clean commit"
+        )
+    return rev
+
+
+def file_sha256(path: str) -> str:
+    with open(path, "rb") as f:
+        return hashlib.sha256(f.read()).hexdigest()
 
 
 @dataclass
@@ -177,23 +204,53 @@ def derive_window(minute_counts: list[tuple[datetime, int]], hi_at: datetime, *,
 
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    ap.add_argument(
+        "--source-database-url",
+        required=True,
+        help=(
+            "explicit PostgreSQL URL containing replay_golden_*; opened in one "
+            "REPEATABLE READ, READ ONLY transaction"
+        ),
+    )
     ap.add_argument("--out-dir", default="D:/CHILI-Docker/chili-data/replay_batch")
-    ap.add_argument("--inventory", default=os.path.join(
-        os.path.dirname(os.path.abspath(__file__)), "data", "golden_harvest_inventory.json"))
-    ap.add_argument("--ross-manifest", default=DEFAULT_ROSS_MANIFEST)
     args = ap.parse_args()
-    ross_crossref = load_ross_crossref(args.ross_manifest)
-    print(f"[derive] ross crossref trade symbol-days loaded: {len(ross_crossref)}")
-
-    with open(args.inventory, "r", encoding="utf-8") as f:
-        inv = {(w["symbol"], w["day"]): w for w in json.load(f)["windows"]}
+    build_sha = clean_build_sha()
+    generator_sha256 = file_sha256(__file__)
+    receipt_helper_sha256 = file_sha256(RECEIPT_HELPER)
 
     import psycopg2
 
-    conn = psycopg2.connect(DB_URL)
-    conn.autocommit = True
+    source_identity = guarded_database_identity(
+        args.source_database_url, sink=False
+    )
+    source_url, expected_database_name = (
+        args.source_database_url,
+        source_identity.dbname,
+    )
+    conn = psycopg2.connect(source_url)
+    conn.set_session(
+        readonly=True,
+        autocommit=False,
+        isolation_level="REPEATABLE READ",
+    )
+    verify_connected_endpoint(conn, source_identity)
     windows = []
     with conn.cursor() as cur:
+        cur.execute("SET LOCAL TIME ZONE 'UTC'")
+        cur.execute(
+            "SELECT current_database(), current_setting('transaction_read_only'), "
+            "current_setting('transaction_isolation'), current_setting('TimeZone')"
+        )
+        source_database_name, read_only, isolation, time_zone = cur.fetchone()
+        source_database_name = str(source_database_name)
+        if source_database_name != expected_database_name:
+            raise RuntimeError("source database identity mismatch")
+        if str(read_only).lower() not in {"on", "true"}:
+            raise RuntimeError("source transaction is not read-only")
+        if str(isolation).lower() != "repeatable read":
+            raise RuntimeError("source transaction is not repeatable read")
+        if str(time_zone).upper() not in {"UTC", "ETC/UTC"}:
+            raise RuntimeError("source session timezone is not UTC")
         cur.execute(CENSUS_SQL)
         census = cur.fetchall()
         for sym, day, ticks, nbbo in census:
@@ -204,11 +261,10 @@ def main() -> int:
             cur.execute(HI_SQL, {"s": sym, "day": day})
             (hi_at,) = cur.fetchone()
             d = derive_window([(m, int(n)) for m, n in hist], hi_at)
-            spec = inv.get((sym, day), {})
             key = (sym, day)
             entry = {
                 "symbol": sym, "day": day,
-                "class": spec.get("class", "extra"),
+                "class": "retained_archive",
                 "ticks": int(ticks), "nbbo": int(nbbo),
                 "win_start": d.win_start.isoformat(),
                 "win_end": d.win_end.isoformat(),
@@ -218,25 +274,27 @@ def main() -> int:
                 "est_runtime_s": estimate_runtime_s(int(ticks)),
                 "derivation": d.evidence,
             }
-            if key in CANONICAL:
-                c = CANONICAL[key]
+            if key in LEGACY_TIEBACK:
+                c = LEGACY_TIEBACK[key]
                 delta_start = (datetime.fromisoformat(c["win_start"]) - d.win_start)
                 delta_end = (datetime.fromisoformat(c["win_end"]) - d.win_end)
-                print(f"[derive] CANONICAL {sym} {day}: hand-picked {c['win_start']}..{c['win_end']}"
+                print(f"[derive] TIEBACK {sym} {day}: hand-picked {c['win_start']}..{c['win_end']}"
                       f" | derived {d.win_start.isoformat()}..{d.win_end.isoformat()}"
-                      f" (delta start {delta_start}, end {delta_end}) — keeping hand-picked")
+                      f" (delta start {delta_start}, end {delta_end}) — keeping legacy tie-back")
                 entry.update(c)
-                entry["window_source"] = "canonical"
+                entry["window_source"] = "legacy_tieback_diagnostic"
             windows.append(entry)
-    conn.close()
 
-    # tier selection: canonicals + Ross-crossref always baseline; fill with top gold by ticks
+    # Tier selection is diagnostic only: legacy tie-backs plus the largest
+    # windows. No Ross/video label can promote a window.
     per_day: dict[str, int] = {}
     for w in windows:
         w["tier"] = "library"
     def promote(w) -> bool:
-        if per_day.get(w["day"], 0) >= MAX_PER_DAY and w["window_source"] != "canonical" \
-                and (w["symbol"], w["day"]) not in ross_crossref:
+        if (
+            per_day.get(w["day"], 0) >= MAX_PER_DAY
+            and w["window_source"] != "legacy_tieback_diagnostic"
+        ):
             return False
         w["tier"] = "baseline"
         per_day[w["day"]] = per_day.get(w["day"], 0) + 1
@@ -244,20 +302,64 @@ def main() -> int:
 
     n_base = 0
     for w in windows:
-        if w["window_source"] == "canonical" or (w["symbol"], w["day"]) in ross_crossref:
+        if w["window_source"] == "legacy_tieback_diagnostic":
             if promote(w):
                 n_base += 1
     for w in sorted(windows, key=lambda x: -x["ticks"]):
         if n_base >= BASELINE_TARGET:
             break
-        if w["tier"] == "baseline" or w["class"] != "gold":
+        if w["tier"] == "baseline":
             continue
         if promote(w):
             n_base += 1
 
+    # Hash exact retained rows only for the bounded baseline tier. Nonempty
+    # hashes prove byte stability, not causal completeness or executable coverage.
+    for window in windows:
+        if window["tier"] != "baseline":
+            window["source_content_receipt"] = None
+            window["source_content_receipt_sha256"] = None
+            window["source_content_status"] = "NOT_HASHED"
+            window["coverage_status"] = "COVERAGE_UNAVAILABLE"
+            continue
+        receipt = golden_window_content_receipt(
+            conn,
+            symbol=window["symbol"],
+            start=window["ohlcv_start"],
+            end=window["win_end"],
+        )
+        window["source_content_receipt"] = receipt
+        window["source_content_receipt_sha256"] = content_receipt_sha256(
+            receipt
+        )
+        rows_present = (
+            receipt["ticks"]["bytes"] > 0 and receipt["nbbo"]["bytes"] > 0
+        )
+        window["source_content_status"] = (
+            "CONTENT_HASHED" if rows_present else "ROWS_UNAVAILABLE"
+        )
+        window["coverage_status"] = (
+            "DIAGNOSTIC_ONLY" if rows_present else "COVERAGE_UNAVAILABLE"
+        )
+    conn.rollback()
+    conn.close()
+
     est_total = sum(w["est_runtime_s"] for w in windows if w["tier"] == "baseline")
-    doc = {"schema": "chili.replay-window-manifest.v1",
-           "generated_at": datetime.now().isoformat(timespec="seconds"),
+    doc = {"schema": "chili.replay-window-manifest.v2",
+           "generated_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+           "evidence_grade": "DIAGNOSTIC_ONLY",
+           "causal_use_allowed": False,
+           "window_selection": "post_session_hindsight_activity_burst",
+           "ross_grade_credit_allowed": False,
+           "source_backend_sealed": False,
+           "child_source_snapshot_pinned": False,
+           "build_sha": build_sha,
+           "generator_sha256": generator_sha256,
+           "receipt_helper_sha256": receipt_helper_sha256,
+           "query_contract_sha256": query_contract_sha256(),
+           "source_database_name": source_database_name,
+           "source_database_identity": source_identity.public_dict(),
+           "source_transaction": "REPEATABLE_READ_READ_ONLY",
            "baseline_count": n_base, "library_count": len(windows) - n_base,
            "baseline_est_runtime_s": est_total,
            "windows": sorted(windows, key=lambda w: (w["tier"] != "baseline", w["day"], w["symbol"]))}

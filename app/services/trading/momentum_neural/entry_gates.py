@@ -3422,11 +3422,17 @@ def bull_flag_confirmation(
             vol_ratio = (float(vol.iloc[-1]) / _avg) if _avg > 0 else 0.0
         # NaN-safe stamp (2026-07-26): a NaN vol_ratio poisons risk_snapshot_json (Postgres
         # JSONB rejects the NaN token — found by the golden-library benchmark on CLRO 07-07).
-        # Sanitize the STAMP only; the comparison below keeps NaN's legacy pass-through
-        # (NaN < mult is False) so replay baselines stay byte-consistent — the "should NaN
-        # volume pass a conviction gate?" question is a separate flagged lever.
         debug["vol_ratio"] = round(vol_ratio, 2) if vol_ratio == vol_ratio else None
-        if vol_ratio < _vol_mult:
+        if vol_ratio != vol_ratio:
+            # FAIL-CLOSED on unmeasurable volume (2026-07-26, default-ON): this gate's design
+            # intent is "volume spike = conviction", and the _avg<=0 fallback above already
+            # blocks (0.0) when the average is unavailable — NaN passing was only an IEEE
+            # comparison accident (NaN < mult is False), witnessed live-shaped on CLRO 07-07.
+            # Kill-switch OFF restores the legacy NaN pass-through. flush_dip is deliberately
+            # NOT changed (its volume gate is a documented FAIL-OPEN contract).
+            if bool(getattr(settings, "chili_momentum_vol_nan_fail_closed_enabled", True)):
+                return False, "bull_flag_volume_unknown", debug
+        elif vol_ratio < _vol_mult:
             return False, "bull_flag_low_volume", debug
 
         # -- TAPE REQUIRED + FAIL-CLOSED (the LAST gate before the completed-bar fire too) --
@@ -3793,7 +3799,7 @@ def _tick_break_tape_ok(
       executed tape ⇒ don't chase the tick (the caller falls through to its completed-bar
       + volume path, so a dead tape degrades to bar entries instead of going dark)."""
     try:
-        if not bool(getattr(settings, "chili_momentum_tick_break_tape_confirm_enabled", False)):
+        if not bool(getattr(settings, "chili_momentum_tick_break_tape_confirm_enabled", True)):
             return True, {"reason": "confirm_disabled"}
         ok, dbg = tape_confirms_hold(symbol, db=db, settings=settings, l2_as_of=l2_as_of)
         if ok:
@@ -4755,18 +4761,6 @@ def flush_dip_buy_confirmation(
                     "first_dip_tape_execution_surface_mismatch"
                 )
                 return False, "flush_dip_first_dip_tape_invalid", debug
-            if _actual_surface == "captured_db_paper":
-                # The accepted receipt must reach the same active capture
-                # runtime while it is still a private object.  Persisted debug
-                # cannot reconstruct this lineage later.  A missing/mismatched
-                # sink vetoes only this decision and leaves the daily
-                # opportunity, risk ledger, and broker untouched.
-                debug["first_dip_prior_detector_reference_sha256"] = (
-                    _retain_captured_first_dip_detector_for_opportunity(
-                        _tape_evaluation,
-                        opportunity_key=dict(_first_dip_opportunity or {}),
-                    )
-                )
             debug["first_dip_tape_confirmed"] = True
         # Ross-parity L1b (2026-07-25): relative-volume gate on the curl/reclaim bar —
         # the audit found flush_dip was the only dip/breakout family fire with NO volume
@@ -4774,7 +4768,7 @@ def flush_dip_buy_confirmation(
         # pullback_volume_spike_multiple (no new number) with the ORB bar-path tail(21)
         # fallback. FAIL-OPEN when the ratio is uncomputable (thin data never blocks —
         # the stated ORB convention). Kill-switch flag OFF ⇒ skipped ⇒ byte-identical.
-        if bool(getattr(settings, "chili_momentum_flush_dip_volume_gate_enabled", False)):
+        if bool(getattr(settings, "chili_momentum_flush_dip_volume_gate_enabled", True)):
             try:
                 _fd_vol_mult = float(getattr(
                     settings, "chili_momentum_pullback_volume_spike_multiple", 1.5) or 1.5)
@@ -4807,6 +4801,18 @@ def flush_dip_buy_confirmation(
                 debug["vol_ratio"] = round(_fd_vol_ratio, 2) if _fd_vol_ratio == _fd_vol_ratio else None
                 if _fd_vol_ratio < _fd_vol_mult:
                     return False, "flush_dip_low_volume", debug
+        if _first_dip_candidate and _actual_surface == "captured_db_paper":
+            # Retain only at the terminal detector-success boundary, after
+            # every later veto (including relative volume) has passed.  The
+            # private receipt cannot be reconstructed from persisted debug,
+            # while a rejected decision must leave the daily opportunity,
+            # risk ledger, and broker untouched.
+            debug["first_dip_prior_detector_reference_sha256"] = (
+                _retain_captured_first_dip_detector_for_opportunity(
+                    _tape_evaluation,
+                    opportunity_key=dict(_first_dip_opportunity or {}),
+                )
+            )
         return True, "flush_dip_buy", debug
     except Exception as exc:
         if (
@@ -4912,9 +4918,14 @@ def vwap_reclaim_confirmation(
             w = vol.tail(21)
             avg = float(w.iloc[:-1].mean()) if len(w) > 1 else float(vol.iloc[-1])
             vol_ratio = (float(vol.iloc[-1]) / avg) if avg > 0 else 0.0
-        # NaN-safe stamp (see bull_flag site) — JSONB rejects NaN; comparison unchanged.
+        # NaN-safe stamp (see bull_flag site) — JSONB rejects NaN.
         debug["vol_ratio"] = round(vol_ratio, 2) if vol_ratio == vol_ratio else None
-        if vol_ratio < vol_mult:
+        if vol_ratio != vol_ratio:
+            # FAIL-CLOSED on unmeasurable volume (see the bull_flag site): a conviction
+            # reclaim cannot be proven by a NaN ratio. Kill-switch OFF restores legacy pass.
+            if bool(getattr(settings, "chili_momentum_vol_nan_fail_closed_enabled", True)):
+                return False, "vwap_reclaim_volume_unknown", debug
+        elif vol_ratio < vol_mult:
             return False, "vwap_reclaim_low_volume", debug
 
         # Level = the reclaim bar high (break level). STOP (Ross-parity L2a, 2026-07-25):
@@ -4923,7 +4934,7 @@ def vwap_reclaim_confirmation(
         # low. Legacy reclaim-bar-low behind the ross_stop_alignment kill-switch (OFF ->
         # byte-identical). The 0<stop<level guard holds: level=bar high >= close > vwap.
         level = float(high.iloc[cur])
-        if bool(getattr(settings, "chili_momentum_ross_stop_alignment_enabled", False)):
+        if bool(getattr(settings, "chili_momentum_ross_stop_alignment_enabled", True)):
             stop = float(vwap_cur)
             debug["stop_model"] = "loss_of_vwap"
         else:
@@ -5172,7 +5183,7 @@ def wick_reclaim_confirmation(
         # reclaim bar IS the flush bar this is a no-op (never looser than legacy). Legacy
         # flush-low behind the ross_stop_alignment kill-switch (OFF -> byte-identical).
         level = wick_high
-        if bool(getattr(settings, "chili_momentum_ross_stop_alignment_enabled", False)):
+        if bool(getattr(settings, "chili_momentum_ross_stop_alignment_enabled", True)):
             stop = max(float(flush_low), float(low.iloc[cur]))
             debug["stop_model"] = "reclaim_bar_low"
         else:
@@ -5472,7 +5483,7 @@ def ross_abcd_confirmation(
         # falls through to the completed-bar + volume-spike path below.
         if live_price is not None and float(live_price) > 0 and float(live_price) > level:
             _confirm_on = bool(getattr(
-                settings, "chili_momentum_tick_break_tape_confirm_enabled", False))
+                settings, "chili_momentum_tick_break_tape_confirm_enabled", True))
             if not _confirm_on:
                 # kill-switch OFF -> exact legacy naked-tick behavior (byte-identical)
                 debug["tick_break"] = True
@@ -5507,7 +5518,8 @@ def ross_abcd_confirmation(
             _avg = float(w.iloc[:-1].mean()) if len(w) > 1 else float(vol.iloc[-1])
             vol_ratio = (float(vol.iloc[-1]) / _avg) if _avg > 0 else 0.0
         _vol_mult = float(getattr(settings, "chili_momentum_pullback_volume_spike_multiple", 1.5) or 1.5)
-        debug["vol_ratio"] = round(vol_ratio, 2)
+        # NaN-safe stamp (see bull_flag site) — JSONB rejects NaN; comparison unchanged.
+        debug["vol_ratio"] = round(vol_ratio, 2) if vol_ratio == vol_ratio else None
         if vol_ratio < _vol_mult:
             return False, "abcd_low_volume", debug
         return True, "abcd_break", debug
@@ -6117,7 +6129,9 @@ def false_break_reclaim_confirmation(
         debug["vmult"] = round(float(vmult), 3)
         if _vol_med is None or not (_vol_med > 0) or _vol_now is None:
             return False, "tight_false_break_reclaim_no_volume", debug
-        debug["vol_ratio"] = round(_vol_now / _vol_med, 3)
+        _fbr_vr = _vol_now / _vol_med
+        # NaN-safe stamp (see bull_flag site) — JSONB rejects NaN; comparison unchanged.
+        debug["vol_ratio"] = round(_fbr_vr, 3) if _fbr_vr == _fbr_vr else None
         if _vol_now <= vmult * _vol_med:
             return False, "tight_false_break_reclaim_weak_volume", debug
 
@@ -6556,7 +6570,7 @@ def sub_vwap_trap_entry(
     with NO side effects; fail-OPEN on any error."""
     debug: dict[str, Any] = {"entry_interval": entry_interval, "pattern": "sub_vwap_trap"}
     try:
-        if not bool(getattr(settings, "chili_momentum_sub_vwap_trap_entry_enabled", False)):
+        if not bool(getattr(settings, "chili_momentum_sub_vwap_trap_entry_enabled", True)):
             return False, "sub_vwap_trap_disabled", debug
         if df is None or getattr(df, "empty", True) or len(df) < 10:
             return False, "sub_vwap_trap_insufficient_bars", debug
@@ -7147,7 +7161,8 @@ def ross_double_bottom_confirmation(
             _avg = float(w.iloc[:-1].mean()) if len(w) > 1 else float(vol.iloc[-1])
             vol_ratio = (float(vol.iloc[-1]) / _avg) if _avg > 0 else 0.0
         _vol_mult = float(getattr(settings, "chili_momentum_pullback_volume_spike_multiple", 1.5) or 1.5)
-        debug["vol_ratio"] = round(vol_ratio, 2)
+        # NaN-safe stamp (see bull_flag site) — JSONB rejects NaN; comparison unchanged.
+        debug["vol_ratio"] = round(vol_ratio, 2) if vol_ratio == vol_ratio else None
         if vol_ratio < _vol_mult:
             return False, "double_bottom_low_volume", debug
         return True, "double_bottom_break", debug
@@ -7288,7 +7303,7 @@ def inverse_head_shoulders_confirmation(
         # right shoulder has already failed the structure. Legacy head-low behind the
         # ross_stop_alignment kill-switch (OFF -> byte-identical).
         level = neckline
-        if bool(getattr(settings, "chili_momentum_ross_stop_alignment_enabled", False)):
+        if bool(getattr(settings, "chili_momentum_ross_stop_alignment_enabled", True)):
             stop = rs_l
             debug["stop_model"] = "right_shoulder_low"
         else:
@@ -7391,7 +7406,8 @@ def inverse_head_shoulders_confirmation(
             _avg = float(w.iloc[:-1].mean()) if len(w) > 1 else float(vol.iloc[-1])
             vol_ratio = (float(vol.iloc[-1]) / _avg) if _avg > 0 else 0.0
         _vol_mult = float(getattr(settings, "chili_momentum_pullback_volume_spike_multiple", 1.5) or 1.5)
-        debug["vol_ratio"] = round(vol_ratio, 2)
+        # NaN-safe stamp (see bull_flag site) — JSONB rejects NaN; comparison unchanged.
+        debug["vol_ratio"] = round(vol_ratio, 2) if vol_ratio == vol_ratio else None
         if vol_ratio < _vol_mult:
             return False, "inverse_head_shoulders_low_volume", debug
         return True, "inverse_head_shoulders_break", debug
@@ -7727,7 +7743,8 @@ def cup_and_handle_confirmation(
             _avg = float(w.iloc[:-1].mean()) if len(w) > 1 else float(vol.iloc[-1])
             vol_ratio = (float(vol.iloc[-1]) / _avg) if _avg > 0 else 0.0
         _vol_mult = float(getattr(settings, "chili_momentum_pullback_volume_spike_multiple", 1.5) or 1.5)
-        debug["vol_ratio"] = round(vol_ratio, 2)
+        # NaN-safe stamp (see bull_flag site) — JSONB rejects NaN; comparison unchanged.
+        debug["vol_ratio"] = round(vol_ratio, 2) if vol_ratio == vol_ratio else None
         if vol_ratio < _vol_mult:
             return False, "cup_and_handle_low_volume", debug
         return True, "cup_and_handle_break", debug
@@ -8356,7 +8373,8 @@ def pullback_break_confirmation(
             # else: volume UNKNOWN (all-NaN frame / zero average) -> stays None (fail-OPEN)
         except (TypeError, ValueError, IndexError):
             vol_ratio = None
-    debug["vol_ratio"] = None if vol_ratio is None else round(vol_ratio, 2)
+    # NaN-safe stamp (see bull_flag site) — JSONB rejects NaN; comparison unchanged.
+    debug["vol_ratio"] = round(vol_ratio, 2) if vol_ratio is not None and vol_ratio == vol_ratio else None
 
     # RED-VOLUME EXHAUSTION VETO (AS101/HVM101 "first sign of weakness"). A trigger bar
     # that closes RED (close<open) WHILE printing the session's MAX volume AND a NEW
@@ -9193,7 +9211,8 @@ def hod_break_confirmation(
             _avg = float(w.iloc[:-1].mean()) if len(w) > 1 else float(vol.iloc[-1])
             vol_ratio = (float(vol.iloc[-1]) / _avg) if _avg > 0 else 0.0
         _vol_mult = float(getattr(settings, "chili_momentum_pullback_volume_spike_multiple", 1.5) or 1.5)
-        debug["vol_ratio"] = round(vol_ratio, 2)
+        # NaN-safe stamp (see bull_flag site) — JSONB rejects NaN; comparison unchanged.
+        debug["vol_ratio"] = round(vol_ratio, 2) if vol_ratio == vol_ratio else None
         if vol_ratio < _vol_mult:
             return False, f"{_reason_fire}_low_volume", debug
 
@@ -9427,7 +9446,8 @@ def blue_sky_break_confirmation(
             w = vol.tail(21)
             _avg = float(w.iloc[:-1].mean()) if len(w) > 1 else float(vol.iloc[-1])
             vol_ratio = (float(vol.iloc[-1]) / _avg) if _avg > 0 else 0.0
-        debug["vol_ratio"] = round(vol_ratio, 2)
+        # NaN-safe stamp (see bull_flag site) — JSONB rejects NaN; comparison unchanged.
+        debug["vol_ratio"] = round(vol_ratio, 2) if vol_ratio == vol_ratio else None
         if vol_ratio < vol_mult:
             return False, "blue_sky_break_low_volume", debug
         return True, "blue_sky_break", debug
@@ -9761,7 +9781,7 @@ def opening_range_breakout_confirmation(
             # the completed-bar + volume-spike path below (dead tape degrades to bar
             # entries instead of going dark).
             _confirm_on = bool(getattr(
-                settings, "chili_momentum_tick_break_tape_confirm_enabled", False))
+                settings, "chili_momentum_tick_break_tape_confirm_enabled", True))
             if _confirm_on:
                 _tape_ok, _tape_dbg = _tick_break_tape_ok(
                     symbol, db=db, settings=settings, l2_as_of=l2_as_of)
@@ -9792,7 +9812,8 @@ def opening_range_breakout_confirmation(
             w = vol.tail(21)
             _avg = float(w.iloc[:-1].mean()) if len(w) > 1 else float(vol.iloc[-1])
             vol_ratio = (float(vol.iloc[-1]) / _avg) if _avg > 0 else 0.0
-        debug["vol_ratio"] = round(vol_ratio, 2)
+        # NaN-safe stamp (see bull_flag site) — JSONB rejects NaN; comparison unchanged.
+        debug["vol_ratio"] = round(vol_ratio, 2) if vol_ratio == vol_ratio else None
         if vol_ratio < vol_mult:
             return False, "orb_low_volume", debug
         return True, "orb_break", debug
@@ -9967,7 +9988,8 @@ def red_to_green_confirmation(
             w = vol.tail(21)
             _avg = float(w.iloc[:-1].mean()) if len(w) > 1 else float(vol.iloc[-1])
             vol_ratio = (float(vol.iloc[-1]) / _avg) if _avg > 0 else 0.0
-        debug["vol_ratio"] = round(vol_ratio, 2)
+        # NaN-safe stamp (see bull_flag site) — JSONB rejects NaN; comparison unchanged.
+        debug["vol_ratio"] = round(vol_ratio, 2) if vol_ratio == vol_ratio else None
         if vol_ratio < vol_mult:
             return False, "red_to_green_low_volume", debug
         return True, "red_to_green", debug
@@ -10257,7 +10279,8 @@ def ma_vwap_pullback_confirmation(
             w = vol.tail(21)
             _avg = float(w.iloc[:-1].mean()) if len(w) > 1 else float(vol.iloc[-1])
             vol_ratio = (float(vol.iloc[-1]) / _avg) if _avg > 0 else 0.0
-        debug["vol_ratio"] = round(vol_ratio, 2)
+        # NaN-safe stamp (see bull_flag site) — JSONB rejects NaN; comparison unchanged.
+        debug["vol_ratio"] = round(vol_ratio, 2) if vol_ratio == vol_ratio else None
         debug["vol_mult"] = round(vol_mult, 2)
         if vol_ratio < vol_mult:
             return False, "ma_vwap_pullback_low_volume", debug

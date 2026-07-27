@@ -31935,6 +31935,595 @@ def _migration_354_alpaca_exit_owner_and_post_settlement_exit_v2(conn) -> None:
     )
 
 
+_MIGRATION_355_ID = "355_ortex_monthly_request_authority"
+_MIGRATION_355_COLUMNS = frozenset(
+    {
+        "attempt_id",
+        "plan_scope",
+        "month_start",
+        "bundle_sha256",
+        "bundle_index",
+        "owner_token",
+        "request_sha256",
+        "provider",
+        "endpoint",
+        "symbol",
+        "status",
+        "monthly_limit",
+        "quota_used_after",
+        "reserved_at",
+        "lease_expires_at",
+        "transport_started_at",
+        "completed_at",
+        "refunded_at",
+        "provider_outcome",
+        "http_status",
+        "backoff_until",
+        "transient_streak",
+        "raw_response_body_b64",
+        "response_sha256",
+        "provider_event_at",
+        "effective_at",
+        "received_at",
+        "available_at",
+        "created_at",
+        "updated_at",
+    }
+)
+_MIGRATION_355_CONSTRAINTS = frozenset(
+    {
+        "momentum_ortex_request_attempts_pkey",
+        "uq_ortex_attempt_bundle_index",
+        "ck_ortex_attempt_plan_scope",
+        "ck_ortex_attempt_status",
+        "ck_ortex_attempt_outcome",
+        "ck_ortex_attempt_bounds",
+        "ck_ortex_attempt_phase",
+        "ck_ortex_attempt_response_binding",
+        "ck_ortex_attempt_identity",
+        "ck_ortex_attempt_clock_order",
+        "ck_ortex_attempt_backoff_outcome",
+        "ck_ortex_attempt_completion_evidence",
+    }
+)
+_MIGRATION_355_INDEXES = frozenset(
+    {
+        "ix_ortex_attempt_month_status",
+        "ix_ortex_attempt_request_completed",
+        "ix_ortex_attempt_transport_started",
+        "ix_ortex_attempt_backoff",
+    }
+)
+_MIGRATION_355_CONSTRAINT_KINDS = {
+    "momentum_ortex_request_attempts_pkey": "p",
+    "uq_ortex_attempt_bundle_index": "u",
+    **{
+        name: "c"
+        for name in _MIGRATION_355_CONSTRAINTS
+        if name
+        not in {
+            "momentum_ortex_request_attempts_pkey",
+            "uq_ortex_attempt_bundle_index",
+        }
+    },
+}
+_MIGRATION_355_CONSTRAINT_DEFINITIONS = {
+    "momentum_ortex_request_attempts_pkey": "primary key (attempt_id)",
+    "uq_ortex_attempt_bundle_index": (
+        "unique (plan_scope, bundle_sha256, bundle_index)"
+    ),
+    "ck_ortex_attempt_plan_scope": (
+        "check (plan_scope::text = 'ortex:trader-1000:v1'::text)"
+    ),
+    "ck_ortex_attempt_status": (
+        "check (status::text = any "
+        "(array['reserved'::character varying, "
+        "'transport_committed'::character varying, "
+        "'completed'::character varying, "
+        "'refunded'::character varying]::text[]))"
+    ),
+    "ck_ortex_attempt_outcome": (
+        "check (provider_outcome is null or "
+        "(provider_outcome::text = any "
+        "(array['success'::character varying, "
+        "'authoritative_empty'::character varying, "
+        "'not_found'::character varying, "
+        "'auth_error'::character varying, "
+        "'rate_limited'::character varying, "
+        "'transient_http'::character varying, "
+        "'timeout'::character varying, "
+        "'malformed'::character varying, "
+        "'permanent_error'::character varying]::text[])))"
+    ),
+    "ck_ortex_attempt_bounds": (
+        "check (bundle_index >= 0 and bundle_index <= 1 "
+        "and transient_streak >= 0 and monthly_limit >= 1 "
+        "and monthly_limit <= 1000 and quota_used_after >= 1 "
+        "and quota_used_after <= monthly_limit "
+        "and extract(day from month_start) = 1::numeric "
+        "and month_start = date_trunc("
+        "'month'::text, (reserved_at at time zone 'utc'::text))::date "
+        "and lease_expires_at > reserved_at)"
+    ),
+    "ck_ortex_attempt_phase": (
+        "check (status::text = 'reserved'::text "
+        "and transport_started_at is null and completed_at is null "
+        "and refunded_at is null and provider_outcome is null "
+        "or status::text = 'transport_committed'::text "
+        "and transport_started_at is not null and completed_at is null "
+        "and refunded_at is null and provider_outcome is null "
+        "or status::text = 'completed'::text "
+        "and transport_started_at is not null and completed_at is not null "
+        "and refunded_at is null and provider_outcome is not null "
+        "or status::text = 'refunded'::text "
+        "and transport_started_at is null and completed_at is null "
+        "and refunded_at is not null and provider_outcome is null)"
+    ),
+    "ck_ortex_attempt_response_binding": (
+        "check (raw_response_body_b64 is null and response_sha256 is null "
+        "or raw_response_body_b64 is not null "
+        "and response_sha256::text ~ '^[0-9a-f]{64}$'::text)"
+    ),
+    "ck_ortex_attempt_identity": (
+        "check (bundle_sha256::text ~ '^[0-9a-f]{64}$'::text "
+        "and request_sha256::text ~ '^[0-9a-f]{64}$'::text "
+        "and provider::text = 'ortex'::text "
+        "and endpoint::text ~~ '/api/v1/%'::text "
+        "and endpoint::text !~~ '%?%'::text "
+        "and (http_status is null "
+        "or http_status >= 100 and http_status <= 599))"
+    ),
+    "ck_ortex_attempt_clock_order": (
+        "check ((transport_started_at is null "
+        "or transport_started_at >= reserved_at) "
+        "and (completed_at is null "
+        "or completed_at >= transport_started_at) "
+        "and (refunded_at is null or refunded_at >= reserved_at) "
+        "and (received_at is null or available_at is null "
+        "or received_at <= available_at))"
+    ),
+    "ck_ortex_attempt_backoff_outcome": (
+        "check (backoff_until is null or "
+        "(provider_outcome::text = any "
+        "(array['rate_limited'::character varying, "
+        "'transient_http'::character varying, "
+        "'timeout'::character varying]::text[])))"
+    ),
+    "ck_ortex_attempt_completion_evidence": (
+        "check (status::text <> 'completed'::text "
+        "or (provider_outcome::text <> all "
+        "(array['success'::character varying, "
+        "'authoritative_empty'::character varying]::text[])) "
+        "or raw_response_body_b64 is not null "
+        "and response_sha256::text ~ '^[0-9a-f]{64}$'::text "
+        "and received_at is not null and available_at is not null "
+        "and received_at <= available_at "
+        "and (provider_outcome::text = 'authoritative_empty'::text "
+        "or provider_event_at is not null or effective_at is not null))"
+    ),
+}
+_MIGRATION_355_INDEX_COLUMNS = {
+    "ix_ortex_attempt_month_status": (
+        "plan_scope",
+        "month_start",
+        "status",
+    ),
+    "ix_ortex_attempt_request_completed": (
+        "plan_scope",
+        "request_sha256",
+        "completed_at",
+    ),
+    "ix_ortex_attempt_transport_started": (
+        "plan_scope",
+        "transport_started_at",
+    ),
+    "ix_ortex_attempt_backoff": (
+        "plan_scope",
+        "backoff_until",
+    ),
+}
+_MIGRATION_355_COLUMN_TYPES = {
+    "attempt_id": ("uuid", "NO"),
+    "plan_scope": ("varchar", "NO"),
+    "month_start": ("date", "NO"),
+    "bundle_sha256": ("varchar", "NO"),
+    "bundle_index": ("int2", "NO"),
+    "owner_token": ("varchar", "NO"),
+    "request_sha256": ("varchar", "NO"),
+    "provider": ("varchar", "NO"),
+    "endpoint": ("varchar", "NO"),
+    "symbol": ("varchar", "NO"),
+    "status": ("varchar", "NO"),
+    "monthly_limit": ("int4", "NO"),
+    "quota_used_after": ("int4", "NO"),
+    "reserved_at": ("timestamptz", "NO"),
+    "lease_expires_at": ("timestamptz", "NO"),
+    "transport_started_at": ("timestamptz", "YES"),
+    "completed_at": ("timestamptz", "YES"),
+    "refunded_at": ("timestamptz", "YES"),
+    "provider_outcome": ("varchar", "YES"),
+    "http_status": ("int4", "YES"),
+    "backoff_until": ("timestamptz", "YES"),
+    "transient_streak": ("int4", "NO"),
+    "raw_response_body_b64": ("text", "YES"),
+    "response_sha256": ("varchar", "YES"),
+    "provider_event_at": ("timestamptz", "YES"),
+    "effective_at": ("timestamptz", "YES"),
+    "received_at": ("timestamptz", "YES"),
+    "available_at": ("timestamptz", "YES"),
+    "created_at": ("timestamptz", "NO"),
+    "updated_at": ("timestamptz", "NO"),
+}
+
+
+def _migration_355_relation_columns(conn) -> set[str]:
+    return {
+        str(row[0])
+        for row in conn.execute(
+            text(
+                """
+                SELECT column_name
+                  FROM information_schema.columns
+                 WHERE table_schema = ANY(current_schemas(false))
+                   AND table_name = 'momentum_ortex_request_attempts'
+                """
+            )
+        ).fetchall()
+    }
+
+
+def _migration_355_add_constraint(conn, name: str, clause: str) -> None:
+    present = conn.execute(
+        text(
+            """
+            SELECT EXISTS (
+                SELECT 1
+                  FROM pg_constraint
+                 WHERE conrelid = 'momentum_ortex_request_attempts'::regclass
+                   AND conname = :name
+            )
+            """
+        ),
+        {"name": name},
+    ).scalar_one()
+    if not present:
+        conn.execute(
+            text(
+                "ALTER TABLE momentum_ortex_request_attempts "
+                f"ADD CONSTRAINT {name} {clause}"
+            )
+        )
+
+
+def _verify_migration_355_physical_contract(conn) -> None:
+    columns = _migration_355_relation_columns(conn)
+    if columns != _MIGRATION_355_COLUMNS:
+        raise RuntimeError(
+            "migration 355 column contract mismatch: "
+            f"missing={sorted(_MIGRATION_355_COLUMNS - columns)} "
+            f"extra={sorted(columns - _MIGRATION_355_COLUMNS)}"
+        )
+    physical_columns = {
+        str(row[0]): (str(row[1]), str(row[2]))
+        for row in conn.execute(
+            text(
+                """
+                SELECT column_name, udt_name, is_nullable
+                  FROM information_schema.columns
+                 WHERE table_schema = ANY(current_schemas(false))
+                   AND table_name = 'momentum_ortex_request_attempts'
+                """
+            )
+        ).fetchall()
+    }
+    if physical_columns != _MIGRATION_355_COLUMN_TYPES:
+        raise RuntimeError(
+            "migration 355 type/nullability contract mismatch"
+        )
+    constraint_rows = {
+        str(row[0]): (
+            str(row[1]),
+            bool(row[2]),
+            " ".join(str(row[3]).lower().split()),
+        )
+        for row in conn.execute(
+            text(
+                """
+                SELECT conname, contype, convalidated,
+                       pg_get_constraintdef(oid, true)
+                  FROM pg_constraint
+                 WHERE conrelid = 'momentum_ortex_request_attempts'::regclass
+                """
+            )
+        ).fetchall()
+    }
+    missing_constraints = (
+        _MIGRATION_355_CONSTRAINTS - constraint_rows.keys()
+    )
+    if missing_constraints:
+        raise RuntimeError(
+            "migration 355 missing constraints: "
+            f"{sorted(missing_constraints)}"
+        )
+    for name in sorted(_MIGRATION_355_CONSTRAINTS):
+        kind, validated, definition = constraint_rows[name]
+        if (
+            kind != _MIGRATION_355_CONSTRAINT_KINDS[name]
+            or not validated
+            or definition != _MIGRATION_355_CONSTRAINT_DEFINITIONS[name]
+        ):
+            raise RuntimeError(
+                "migration 355 constraint definition differs: " + name
+            )
+    index_rows = {
+        str(row[0]): (
+            bool(row[1]),
+            bool(row[2]),
+            bool(row[3]),
+            bool(row[4]),
+            bool(row[5]),
+            tuple(str(value) for value in row[6]),
+        )
+        for row in conn.execute(
+            text(
+                """
+                SELECT index_relation.relname,
+                       index_state.indisvalid,
+                       index_state.indisready,
+                       index_state.indisunique,
+                       index_state.indisprimary,
+                       index_state.indpred IS NULL
+                           AND index_state.indexprs IS NULL,
+                       ARRAY(
+                           SELECT attribute.attname
+                             FROM unnest(
+                                 index_state.indkey::smallint[]
+                             ) WITH ORDINALITY AS key(attnum, ordinal)
+                             JOIN pg_attribute AS attribute
+                               ON attribute.attrelid =
+                                  index_state.indrelid
+                              AND attribute.attnum = key.attnum
+                            WHERE key.ordinal <=
+                                  index_state.indnkeyatts
+                            ORDER BY key.ordinal
+                       )
+                  FROM pg_class AS index_relation
+                  JOIN pg_index AS index_state
+                    ON index_state.indexrelid = index_relation.oid
+                  JOIN pg_namespace AS namespace
+                    ON namespace.oid = index_relation.relnamespace
+                 WHERE namespace.nspname = current_schema()
+                   AND index_state.indrelid =
+                       'momentum_ortex_request_attempts'::regclass
+                   AND index_relation.relname = ANY(:names)
+                """
+            ),
+            {"names": list(_MIGRATION_355_INDEXES)},
+        ).fetchall()
+    }
+    missing_indexes = _MIGRATION_355_INDEXES - index_rows.keys()
+    if missing_indexes:
+        raise RuntimeError(
+            "migration 355 missing indexes: " f"{sorted(missing_indexes)}"
+        )
+    for name, expected_columns in _MIGRATION_355_INDEX_COLUMNS.items():
+        (
+            valid,
+            ready,
+            unique,
+            primary,
+            plain,
+            columns,
+        ) = index_rows[name]
+        if (
+            not valid
+            or not ready
+            or unique
+            or primary
+            or not plain
+            or columns != expected_columns
+        ):
+            raise RuntimeError(
+                "migration 355 index contract differs: " + name
+            )
+
+
+def _migration_355_ortex_monthly_request_authority(conn) -> None:
+    relation_exists = conn.execute(
+        text("SELECT to_regclass('momentum_ortex_request_attempts') IS NOT NULL")
+    ).scalar_one()
+    if relation_exists:
+        existing_columns = _migration_355_relation_columns(conn)
+        if existing_columns != _MIGRATION_355_COLUMNS:
+            retained_rows = conn.execute(
+                text("SELECT count(*) FROM momentum_ortex_request_attempts")
+            ).scalar_one()
+            if retained_rows:
+                raise RuntimeError(
+                    "migration 355 refuses to synthesize missing Ortex authority "
+                    "fields for retained partial rows"
+                )
+
+    conn.execute(
+        text(
+            """
+            CREATE TABLE IF NOT EXISTS momentum_ortex_request_attempts (
+                attempt_id UUID PRIMARY KEY
+            )
+            """
+        )
+    )
+    column_definitions = (
+        ("plan_scope", "VARCHAR(48) NOT NULL"),
+        ("month_start", "DATE NOT NULL"),
+        ("bundle_sha256", "VARCHAR(64) NOT NULL"),
+        ("bundle_index", "SMALLINT NOT NULL"),
+        ("owner_token", "VARCHAR(96) NOT NULL"),
+        ("request_sha256", "VARCHAR(64) NOT NULL"),
+        ("provider", "VARCHAR(24) NOT NULL DEFAULT 'ortex'"),
+        ("endpoint", "VARCHAR(256) NOT NULL"),
+        ("symbol", "VARCHAR(36) NOT NULL"),
+        ("status", "VARCHAR(24) NOT NULL"),
+        ("monthly_limit", "INTEGER NOT NULL"),
+        ("quota_used_after", "INTEGER NOT NULL"),
+        ("reserved_at", "TIMESTAMPTZ NOT NULL"),
+        ("lease_expires_at", "TIMESTAMPTZ NOT NULL"),
+        ("transport_started_at", "TIMESTAMPTZ NULL"),
+        ("completed_at", "TIMESTAMPTZ NULL"),
+        ("refunded_at", "TIMESTAMPTZ NULL"),
+        ("provider_outcome", "VARCHAR(32) NULL"),
+        ("http_status", "INTEGER NULL"),
+        ("backoff_until", "TIMESTAMPTZ NULL"),
+        ("transient_streak", "INTEGER NOT NULL DEFAULT 0"),
+        ("raw_response_body_b64", "TEXT NULL"),
+        ("response_sha256", "VARCHAR(64) NULL"),
+        ("provider_event_at", "TIMESTAMPTZ NULL"),
+        ("effective_at", "TIMESTAMPTZ NULL"),
+        ("received_at", "TIMESTAMPTZ NULL"),
+        ("available_at", "TIMESTAMPTZ NULL"),
+        ("created_at", "TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp()"),
+        ("updated_at", "TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp()"),
+    )
+    for column_name, definition in column_definitions:
+        conn.execute(
+            text(
+                "ALTER TABLE momentum_ortex_request_attempts "
+                f"ADD COLUMN IF NOT EXISTS {column_name} {definition}"
+            )
+        )
+
+    _migration_355_add_constraint(
+        conn,
+        "uq_ortex_attempt_bundle_index",
+        "UNIQUE (plan_scope, bundle_sha256, bundle_index)",
+    )
+    _migration_355_add_constraint(
+        conn,
+        "ck_ortex_attempt_plan_scope",
+        "CHECK (plan_scope = 'ortex:trader-1000:v1')",
+    )
+    _migration_355_add_constraint(
+        conn,
+        "ck_ortex_attempt_status",
+        "CHECK (status IN "
+        "('reserved', 'transport_committed', 'completed', 'refunded'))",
+    )
+    _migration_355_add_constraint(
+        conn,
+        "ck_ortex_attempt_outcome",
+        "CHECK (provider_outcome IS NULL OR provider_outcome IN "
+        "('success', 'authoritative_empty', 'not_found', 'auth_error', "
+        "'rate_limited', 'transient_http', 'timeout', 'malformed', "
+        "'permanent_error'))",
+    )
+    _migration_355_add_constraint(
+        conn,
+        "ck_ortex_attempt_bounds",
+        "CHECK (bundle_index BETWEEN 0 AND 1 "
+        "AND transient_streak >= 0 "
+        "AND monthly_limit BETWEEN 1 AND 1000 "
+        "AND quota_used_after BETWEEN 1 AND monthly_limit "
+        "AND extract(day FROM month_start) = 1 "
+        "AND month_start = date_trunc("
+        "'month', reserved_at AT TIME ZONE 'UTC')::date "
+        "AND lease_expires_at > reserved_at)",
+    )
+    _migration_355_add_constraint(
+        conn,
+        "ck_ortex_attempt_phase",
+        "CHECK ("
+        "(status = 'reserved' AND transport_started_at IS NULL "
+        " AND completed_at IS NULL AND refunded_at IS NULL "
+        " AND provider_outcome IS NULL) OR "
+        "(status = 'transport_committed' AND transport_started_at IS NOT NULL "
+        " AND completed_at IS NULL AND refunded_at IS NULL "
+        " AND provider_outcome IS NULL) OR "
+        "(status = 'completed' AND transport_started_at IS NOT NULL "
+        " AND completed_at IS NOT NULL AND refunded_at IS NULL "
+        " AND provider_outcome IS NOT NULL) OR "
+        "(status = 'refunded' AND transport_started_at IS NULL "
+        " AND completed_at IS NULL AND refunded_at IS NOT NULL "
+        " AND provider_outcome IS NULL))",
+    )
+    _migration_355_add_constraint(
+        conn,
+        "ck_ortex_attempt_response_binding",
+        "CHECK ((raw_response_body_b64 IS NULL AND response_sha256 IS NULL) "
+        "OR (raw_response_body_b64 IS NOT NULL "
+        "AND response_sha256 ~ '^[0-9a-f]{64}$'))",
+    )
+    _migration_355_add_constraint(
+        conn,
+        "ck_ortex_attempt_identity",
+        "CHECK (bundle_sha256 ~ '^[0-9a-f]{64}$' "
+        "AND request_sha256 ~ '^[0-9a-f]{64}$' "
+        "AND provider = 'ortex' "
+        "AND endpoint LIKE '/api/v1/%' "
+        "AND endpoint NOT LIKE '%?%' "
+        "AND (http_status IS NULL OR http_status BETWEEN 100 AND 599))",
+    )
+    _migration_355_add_constraint(
+        conn,
+        "ck_ortex_attempt_clock_order",
+        "CHECK ((transport_started_at IS NULL "
+        "OR transport_started_at >= reserved_at) "
+        "AND (completed_at IS NULL "
+        "OR completed_at >= transport_started_at) "
+        "AND (refunded_at IS NULL OR refunded_at >= reserved_at) "
+        "AND (received_at IS NULL OR available_at IS NULL "
+        "OR received_at <= available_at))",
+    )
+    _migration_355_add_constraint(
+        conn,
+        "ck_ortex_attempt_backoff_outcome",
+        "CHECK (backoff_until IS NULL OR provider_outcome IN "
+        "('rate_limited', 'transient_http', 'timeout'))",
+    )
+    _migration_355_add_constraint(
+        conn,
+        "ck_ortex_attempt_completion_evidence",
+        "CHECK (status <> 'completed' OR provider_outcome NOT IN "
+        "('success', 'authoritative_empty') OR "
+        "(raw_response_body_b64 IS NOT NULL "
+        "AND response_sha256 ~ '^[0-9a-f]{64}$' "
+        "AND received_at IS NOT NULL "
+        "AND available_at IS NOT NULL "
+        "AND received_at <= available_at "
+        "AND (provider_outcome = 'authoritative_empty' "
+        "OR provider_event_at IS NOT NULL "
+        "OR effective_at IS NOT NULL)))",
+    )
+    conn.execute(
+        text(
+            "CREATE INDEX IF NOT EXISTS ix_ortex_attempt_month_status "
+            "ON momentum_ortex_request_attempts "
+            "(plan_scope, month_start, status)"
+        )
+    )
+    conn.execute(
+        text(
+            "CREATE INDEX IF NOT EXISTS ix_ortex_attempt_request_completed "
+            "ON momentum_ortex_request_attempts "
+            "(plan_scope, request_sha256, completed_at)"
+        )
+    )
+    conn.execute(
+        text(
+            "CREATE INDEX IF NOT EXISTS ix_ortex_attempt_transport_started "
+            "ON momentum_ortex_request_attempts "
+            "(plan_scope, transport_started_at)"
+        )
+    )
+    conn.execute(
+        text(
+            "CREATE INDEX IF NOT EXISTS ix_ortex_attempt_backoff "
+            "ON momentum_ortex_request_attempts "
+            "(plan_scope, backoff_until)"
+        )
+    )
+    _verify_migration_355_physical_contract(conn)
+
+
 MIGRATIONS = [
     ("001_add_email", _migration_001_add_email),
     ("002_add_image_path", _migration_002_add_image_path),
@@ -32403,6 +32992,8 @@ MIGRATIONS = [
      _migration_353_captured_paper_selection_route_state),
     ("354_alpaca_exit_owner_and_post_settlement_exit_v2",
      _migration_354_alpaca_exit_owner_and_post_settlement_exit_v2),
+    ("355_ortex_monthly_request_authority",
+     _migration_355_ortex_monthly_request_authority),
 ]
 
 

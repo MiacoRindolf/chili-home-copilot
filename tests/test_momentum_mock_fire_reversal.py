@@ -226,6 +226,7 @@ def _vwap_settings(ms) -> None:
     ms.chili_momentum_vwap_reclaim_min_below_bars = 2
     ms.chili_momentum_vwap_reclaim_vol_mult = 1.5
     ms.chili_momentum_ross_stop_alignment_enabled = True  # Ross-parity L2a
+    ms.chili_momentum_vol_nan_fail_closed_enabled = True  # the shipped default
 
 
 def _vwap_arrays(n: int = 12) -> dict:
@@ -278,6 +279,33 @@ class TestVwapReclaimMockFire:
             ok, reason, dbg = vwap_reclaim_confirmation(df, entry_interval="5m", symbol="TEST")
         assert ok is False
         assert reason == "vwap_reclaim_low_volume"
+
+    def test_nan_volume_fails_closed(self):
+        """NaN vol_ratio on the reclaim bar (lever ON, the shipped default) -> NO FIRE
+        ('vwap_reclaim_volume_unknown') and a JSONB-safe None stamp."""
+        df = _vwap_reclaim_df()
+        nan_vol = {**_vwap_arrays(), "volume_ratio": [1.0] * 11 + [float("nan")]}
+        with patch(f"{_GATES}.settings") as ms, \
+                patch(f"{_GATES}.compute_all_from_df", return_value=nan_vol):
+            _vwap_settings(ms)
+            ok, reason, dbg = vwap_reclaim_confirmation(df, entry_interval="5m", symbol="TEST")
+        assert ok is False
+        assert reason == "vwap_reclaim_volume_unknown"
+        assert dbg["vol_ratio"] is None
+
+    def test_nan_volume_legacy_pass_with_lever_off(self):
+        """Kill-switch parity: lever OFF -> the legacy NaN pass-through -> the clean
+        reclaim still FIRES, stamp stays JSONB-safe None."""
+        df = _vwap_reclaim_df()
+        nan_vol = {**_vwap_arrays(), "volume_ratio": [1.0] * 11 + [float("nan")]}
+        with patch(f"{_GATES}.settings") as ms, \
+                patch(f"{_GATES}.compute_all_from_df", return_value=nan_vol):
+            _vwap_settings(ms)
+            ms.chili_momentum_vol_nan_fail_closed_enabled = False
+            ok, reason, dbg = vwap_reclaim_confirmation(df, entry_interval="5m", symbol="TEST")
+        assert ok is True, f"lever OFF must keep the legacy NaN pass, got {reason} dbg={dbg}"
+        assert reason == "vwap_reclaim"
+        assert dbg["vol_ratio"] is None
 
 
 # ════════════════════════════════════════════════════════════════════════════════════════
@@ -341,6 +369,21 @@ class _SubVwapPassGuards:
 
 
 class TestSubVwapTrapMockFire:
+    def test_explicit_off_kill_switch_is_a_no_op(self):
+        df = _sub_vwap_trap_df()
+        with patch(f"{_GATES}.settings") as ms, _SubVwapPassGuards():
+            _sub_vwap_settings(ms)
+            ms.chili_momentum_sub_vwap_trap_entry_enabled = False
+            ok, reason, dbg = sub_vwap_trap_entry(
+                df, entry_interval="5m", symbol="TEST", db=MagicMock(),
+            )
+        assert ok is False
+        assert reason == "sub_vwap_trap_disabled"
+        assert dbg == {
+            "entry_interval": "5m",
+            "pattern": "sub_vwap_trap",
+        }
+
     def test_positive_clean_sub_vwap_trap_fires(self):
         """A sharp undercut-and-reclaim trap with all chase-guards passing -> FIRES
         ``sub_vwap_trap``; stop = trap low, entry = reclaim-bar high."""

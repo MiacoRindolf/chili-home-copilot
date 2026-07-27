@@ -3,6 +3,7 @@ from __future__ import annotations
 import ast
 from dataclasses import replace
 import hashlib
+import importlib.util
 import json
 import os
 from pathlib import Path
@@ -12,6 +13,10 @@ from dotenv import dotenv_values
 import pytest
 
 from scripts import build_captured_paper_runtime_env as builder
+from scripts.captured_paper_runtime_env import (
+    install_captured_paper_runtime_environment,
+    validate_installed_captured_paper_settings,
+)
 
 
 ACCOUNT_ID = "3e0776af-76cd-4afd-8fe1-f2ee8dc6242f"
@@ -26,6 +31,36 @@ SECRET_VALUES = (
     "ortex-secret-sensitive",
     "live-cash-secret-must-not-copy",
     "generic-broker-secret-must-not-copy",
+)
+ORTEX_STRATEGY_POLICY = {
+    "CHILI_MOMENTUM_SQUEEZE_FUEL_TILT_ENABLED": "true",
+    "CHILI_MOMENTUM_SQUEEZE_FUEL_TOP_N": "17",
+    "CHILI_MOMENTUM_FAKE_CATALYST_GUARD_ENABLED": "true",
+    "CHILI_MOMENTUM_SQUEEZE_ENTRY_SIZEUP_ENABLED": "true",
+    "CHILI_MOMENTUM_SQUEEZE_ENTRY_TOP_PCTL": "0.81",
+    "CHILI_MOMENTUM_SQUEEZE_ENTRY_MAX_MULT": "1.41",
+    "CHILI_MOMENTUM_SQUEEZE_EXIT_HOLD_ENABLED": "true",
+    "CHILI_MOMENTUM_SQUEEZE_EXIT_TAIL_PCTL": "0.91",
+    "CHILI_MOMENTUM_SQUEEZE_EXIT_MAX_WIDEN": "1.31",
+    "CHILI_MOMENTUM_KELLY_CONVICTION_ENABLED": "true",
+    "CHILI_MOMENTUM_KELLY_CONVICTION_MAX_MULTIPLIER": "1.42",
+    "CHILI_MOMENTUM_KELLY_CONVICTION_GAIN": "0.92",
+    "CHILI_MOMENTUM_KELLY_CONVICTION_W_SQUEEZE": "0.45",
+    "CHILI_MOMENTUM_KELLY_CONVICTION_W_OFI": "0.35",
+    "CHILI_MOMENTUM_KELLY_CONVICTION_W_NEWS": "0.20",
+    "CHILI_MOMENTUM_SUB_VWAP_TRAP_ENTRY_ENABLED": "true",
+    "CHILI_MOMENTUM_BAIL_ON_NO_CONFIRMATION_ENABLED": "true",
+    "CHILI_MOMENTUM_CATALYST_ARB_FLAT_GATE_ENABLED": "true",
+    "CHILI_MOMENTUM_TICK_BREAK_TAPE_CONFIRM_ENABLED": "true",
+    "CHILI_MOMENTUM_FLUSH_DIP_VOLUME_GATE_ENABLED": "true",
+    "CHILI_MOMENTUM_ROSS_STOP_ALIGNMENT_ENABLED": "true",
+    "CHILI_MOMENTUM_ORB_IHS_STRUCTURAL_STOP_ENABLED": "true",
+    "CHILI_MOMENTUM_FRESH_IGNITION_REENTRY_BYPASS_ENABLED": "true",
+    "CHILI_MOMENTUM_UNIVERSE_FLOAT_GATE_ENABLED": "true",
+}
+WINDOWS_DACL_API_AVAILABLE = os.name == "nt" and all(
+    importlib.util.find_spec(module_name) is not None
+    for module_name in ("ntsecuritycon", "win32api", "win32con", "win32security")
 )
 
 
@@ -134,6 +169,240 @@ def test_exact_projection_excludes_live_flags_magic_caps_test_db_and_unknowns(
     assert all(secret not in rendered_receipt for secret in SECRET_VALUES)
     assert list(output.parent.glob("*.pending")) == []
     assert list(output.parent.glob(".*.pending")) == []
+
+
+@pytest.mark.skipif(
+    not WINDOWS_DACL_API_AVAILABLE,
+    reason="captured PAPER env publication requires the Windows DACL API",
+)
+def test_exact_projection_carries_hash_bound_public_ortex_policy(
+    tmp_path: Path,
+) -> None:
+    policy = {
+        "CHILI_ORTEX_MONTHLY_REQUEST_LIMIT": "1000",
+        "CHILI_ORTEX_REQUEST_INTERVAL_SECONDS": "1.25",
+        "CHILI_ORTEX_RESERVATION_LEASE_SECONDS": "45",
+        "CHILI_ORTEX_RESPONSE_MAX_BYTES": "524288",
+        "CHILI_ORTEX_SUCCESS_CACHE_TTL_SECONDS": "43200",
+        "CHILI_ORTEX_TRANSIENT_BACKOFF_BASE_SECONDS": "3",
+        "CHILI_ORTEX_TRANSIENT_BACKOFF_MAX_SECONDS": "180",
+    }
+    source, source_sha256 = _write_source(
+        tmp_path,
+        _source_text(
+            extra="".join(f"{key}={value}\n" for key, value in policy.items())
+        ),
+    )
+
+    receipt, output = _build(
+        tmp_path,
+        source=source,
+        source_sha256=source_sha256,
+    )
+    parsed = {
+        str(key): str(value)
+        for key, value in dotenv_values(output, interpolate=False).items()
+    }
+
+    assert {key: parsed[key] for key in policy} == policy
+    assert receipt.output_sha256 == hashlib.sha256(output.read_bytes()).hexdigest()
+    rendered_receipt = json.dumps(receipt.to_dict())
+    assert all(value not in rendered_receipt for value in SECRET_VALUES)
+
+
+@pytest.mark.skipif(
+    not WINDOWS_DACL_API_AVAILABLE,
+    reason="captured PAPER env publication requires the Windows DACL API",
+)
+def test_default_on_ortex_requires_credential_but_explicit_off_may_omit_it(
+    tmp_path: Path,
+) -> None:
+    without_key = _source_text().replace(
+        f"CHILI_ORTEX_API_KEY='{SECRET_VALUES[5]}'\n",
+        "",
+    )
+    source, source_sha256 = _write_source(tmp_path, without_key)
+    with pytest.raises(
+        builder.CapturedPaperRuntimeEnvBuildError,
+        match="requires its captured PAPER credential",
+    ):
+        _build(tmp_path, source=source, source_sha256=source_sha256)
+
+    explicitly_off = (
+        without_key + "CHILI_MOMENTUM_SQUEEZE_FUEL_TILT_ENABLED=false\n"
+    )
+    source, source_sha256 = _write_source(tmp_path, explicitly_off)
+    receipt, output = _build(
+        tmp_path,
+        source=source,
+        source_sha256=source_sha256,
+    )
+    parsed = {
+        str(key): str(value)
+        for key, value in dotenv_values(output, interpolate=False).items()
+    }
+    assert parsed["CHILI_MOMENTUM_SQUEEZE_FUEL_TILT_ENABLED"] == "false"
+    assert "CHILI_ORTEX_API_KEY" not in parsed
+    assert receipt.output_sha256 == hashlib.sha256(output.read_bytes()).hexdigest()
+
+
+@pytest.mark.skipif(
+    not WINDOWS_DACL_API_AVAILABLE,
+    reason="captured PAPER env publication requires the Windows DACL API",
+)
+def test_strategy_kill_switch_survives_builder_parse_and_projection_hash(
+    tmp_path: Path,
+) -> None:
+    from app.config import Settings
+
+    def build_projection(
+        root: Path, *, squeeze_fuel_enabled: str
+    ) -> tuple[dict[str, str], Any, dict[str, object]]:
+        root.mkdir(parents=True, exist_ok=True)
+        output = root / "output" / "captured-paper.env"
+        output.unlink(missing_ok=True)
+        strategy = {
+            **ORTEX_STRATEGY_POLICY,
+            "CHILI_MOMENTUM_SQUEEZE_FUEL_TILT_ENABLED": squeeze_fuel_enabled,
+        }
+        source, source_sha256 = _write_source(
+            root,
+            _source_text(
+                extra="".join(f"{key}={value}\n" for key, value in strategy.items())
+            ),
+        )
+        receipt, output = _build(
+            root,
+            source=source,
+            source_sha256=source_sha256,
+            output=output,
+        )
+        parsed = {
+            str(key): str(value)
+            for key, value in dotenv_values(output, interpolate=False).items()
+        }
+        installed: dict[str, str] = {}
+        runtime_receipt = install_captured_paper_runtime_environment(
+            output,
+            expected_env_sha256=receipt.output_sha256,
+            expected_account_id=ACCOUNT_ID,
+            environ=installed,
+        )
+        settings = Settings(_env_file=None, **installed)
+        projection = dict(
+            validate_installed_captured_paper_settings(
+                settings,
+                runtime_receipt,
+                environ=installed,
+            )
+        )
+        return parsed, settings, projection
+
+    enabled_parsed, enabled_settings, enabled_projection = build_projection(
+        tmp_path,
+        squeeze_fuel_enabled="true",
+    )
+    disabled_parsed, disabled_settings, disabled_projection = build_projection(
+        tmp_path,
+        squeeze_fuel_enabled="false",
+    )
+
+    assert {
+        key: disabled_parsed[key]
+        for key in ORTEX_STRATEGY_POLICY
+    } == {
+        **ORTEX_STRATEGY_POLICY,
+        "CHILI_MOMENTUM_SQUEEZE_FUEL_TILT_ENABLED": "false",
+    }
+    assert enabled_settings.chili_momentum_squeeze_fuel_tilt_enabled is True
+    assert disabled_settings.chili_momentum_squeeze_fuel_tilt_enabled is False
+    enabled_policy = enabled_projection["captured_paper_operational_policy"]
+    disabled_policy = disabled_projection["captured_paper_operational_policy"]
+    assert isinstance(enabled_policy, dict)
+    assert isinstance(disabled_policy, dict)
+    assert {
+        key
+        for key in enabled_policy
+        if enabled_policy[key] != disabled_policy[key]
+    } == {"chili_momentum_squeeze_fuel_tilt_enabled"}
+    assert enabled_projection["settings_projection_sha256"] != (
+        disabled_projection["settings_projection_sha256"]
+    )
+    assert enabled_parsed["CHILI_MOMENTUM_SQUEEZE_FUEL_TILT_ENABLED"] == "true"
+
+
+@pytest.mark.skipif(
+    not WINDOWS_DACL_API_AVAILABLE,
+    reason="captured PAPER env publication requires the Windows DACL API",
+)
+def test_all_nine_operator_kill_switches_round_trip_false(
+    tmp_path: Path,
+) -> None:
+    from app.config import Settings
+
+    operator_switches = {
+        "CHILI_MOMENTUM_SUB_VWAP_TRAP_ENTRY_ENABLED": (
+            "chili_momentum_sub_vwap_trap_entry_enabled"
+        ),
+        "CHILI_MOMENTUM_BAIL_ON_NO_CONFIRMATION_ENABLED": (
+            "chili_momentum_bail_on_no_confirmation_enabled"
+        ),
+        "CHILI_MOMENTUM_CATALYST_ARB_FLAT_GATE_ENABLED": (
+            "chili_momentum_catalyst_arb_flat_gate_enabled"
+        ),
+        "CHILI_MOMENTUM_TICK_BREAK_TAPE_CONFIRM_ENABLED": (
+            "chili_momentum_tick_break_tape_confirm_enabled"
+        ),
+        "CHILI_MOMENTUM_FLUSH_DIP_VOLUME_GATE_ENABLED": (
+            "chili_momentum_flush_dip_volume_gate_enabled"
+        ),
+        "CHILI_MOMENTUM_ROSS_STOP_ALIGNMENT_ENABLED": (
+            "chili_momentum_ross_stop_alignment_enabled"
+        ),
+        "CHILI_MOMENTUM_ORB_IHS_STRUCTURAL_STOP_ENABLED": (
+            "chili_momentum_orb_ihs_structural_stop_enabled"
+        ),
+        "CHILI_MOMENTUM_FRESH_IGNITION_REENTRY_BYPASS_ENABLED": (
+            "chili_momentum_fresh_ignition_reentry_bypass_enabled"
+        ),
+        "CHILI_MOMENTUM_UNIVERSE_FLOAT_GATE_ENABLED": (
+            "chili_momentum_universe_float_gate_enabled"
+        ),
+    }
+    strategy = {
+        **ORTEX_STRATEGY_POLICY,
+        **{name: "false" for name in operator_switches},
+    }
+    source, source_sha256 = _write_source(
+        tmp_path,
+        _source_text(
+            extra="".join(f"{key}={value}\n" for key, value in strategy.items())
+        ),
+    )
+    receipt, output = _build(
+        tmp_path,
+        source=source,
+        source_sha256=source_sha256,
+    )
+    installed: dict[str, str] = {}
+    runtime_receipt = install_captured_paper_runtime_environment(
+        output,
+        expected_env_sha256=receipt.output_sha256,
+        expected_account_id=ACCOUNT_ID,
+        environ=installed,
+    )
+    settings = Settings(_env_file=None, **installed)
+    projection = validate_installed_captured_paper_settings(
+        settings,
+        runtime_receipt,
+        environ=installed,
+    )
+    policy = projection["captured_paper_operational_policy"]
+    assert isinstance(policy, dict)
+    for env_name, setting_name in operator_switches.items():
+        assert installed[env_name] == "false"
+        assert getattr(settings, setting_name) is False
+        assert policy[setting_name] is False
 
 
 def test_runtime_validation_uses_an_isolated_mapping_and_precedes_publication(

@@ -35,6 +35,7 @@ def _complete_env(tmp_path: Path, extra: str = "") -> tuple[Path, str]:
         "DATABASE_URL=postgresql://local/test\n"
         "CHILI_ALPACA_API_KEY=paper-key\n"
         "CHILI_ALPACA_API_SECRET=paper-secret\n"
+        "CHILI_ORTEX_API_KEY=ortex-paper-key\n"
         f"CHILI_ALPACA_EXPECTED_ACCOUNT_ID={ACCOUNT_ID}\n"
         "CHILI_AUTOTRADER_USER_ID=7\n"
         f"CHILI_IQFEED_L1_AUTHORITATIVE_BRIDGE_BUILD={IQFEED_BUILD}\n"
@@ -217,6 +218,44 @@ def test_missing_paper_credentials_and_non_candidate_policy_fail_closed(
         )
 
 
+def test_default_on_ortex_requires_credential_but_explicit_off_does_not(
+    tmp_path: Path,
+) -> None:
+    body = (
+        "DATABASE_URL=postgresql://local/test\n"
+        "CHILI_ALPACA_API_KEY=paper-key\n"
+        "CHILI_ALPACA_API_SECRET=paper-secret\n"
+        f"CHILI_ALPACA_EXPECTED_ACCOUNT_ID={ACCOUNT_ID}\n"
+        "CHILI_AUTOTRADER_USER_ID=7\n"
+        f"CHILI_IQFEED_L1_AUTHORITATIVE_BRIDGE_BUILD={IQFEED_BUILD}\n"
+    )
+    enabled, enabled_digest = _env(tmp_path, body)
+    with pytest.raises(
+        CapturedPaperRuntimeEnvError,
+        match="CHILI_ORTEX_API_KEY",
+    ):
+        install_captured_paper_runtime_environment(
+            enabled,
+            expected_env_sha256=enabled_digest,
+            expected_account_id=ACCOUNT_ID,
+            environ={},
+        )
+
+    disabled, disabled_digest = _env(
+        tmp_path,
+        body + "CHILI_MOMENTUM_SQUEEZE_FUEL_TILT_ENABLED=false\n",
+    )
+    target: dict[str, str] = {}
+    install_captured_paper_runtime_environment(
+        disabled,
+        expected_env_sha256=disabled_digest,
+        expected_account_id=ACCOUNT_ID,
+        environ=target,
+    )
+    assert target["CHILI_MOMENTUM_SQUEEZE_FUEL_TILT_ENABLED"] == "false"
+    assert "CHILI_ORTEX_API_KEY" not in target
+
+
 @pytest.mark.parametrize(
     ("extra", "error"),
     [
@@ -255,6 +294,7 @@ def test_iqfeed_notify_contract_fails_before_environment_install(
         "DATABASE_URL=postgresql://local/test\n"
         "CHILI_ALPACA_API_KEY=paper-key\n"
         "CHILI_ALPACA_API_SECRET=paper-secret\n"
+        "CHILI_ORTEX_API_KEY=ortex-paper-key\n"
         f"CHILI_ALPACA_EXPECTED_ACCOUNT_ID={ACCOUNT_ID}\n"
         "CHILI_AUTOTRADER_USER_ID=7\n"
         f"{extra}",
@@ -317,8 +357,40 @@ def test_parsed_settings_projection_rechecks_every_execution_boundary(
         "chili_autotrader_user_id": 7,
         "chili_alpaca_api_key": "paper-key",
         "chili_alpaca_api_secret": "paper-secret",
+        "chili_ortex_api_key": "ortex-paper-key",
         "chili_alpaca_live_api_key": "",
         "chili_alpaca_live_api_secret": "",
+        "chili_ortex_monthly_request_limit": 1000,
+        "chili_ortex_request_interval_seconds": 1.05,
+        "chili_ortex_reservation_lease_seconds": 30.0,
+        "chili_ortex_response_max_bytes": 1_048_576,
+        "chili_ortex_success_cache_ttl_seconds": 86_400,
+        "chili_ortex_transient_backoff_base_seconds": 2.0,
+        "chili_ortex_transient_backoff_max_seconds": 300.0,
+        "chili_momentum_squeeze_fuel_tilt_enabled": True,
+        "chili_momentum_squeeze_fuel_top_n": 12,
+        "chili_momentum_fake_catalyst_guard_enabled": True,
+        "chili_momentum_sub_vwap_trap_entry_enabled": True,
+        "chili_momentum_bail_on_no_confirmation_enabled": True,
+        "chili_momentum_catalyst_arb_flat_gate_enabled": True,
+        "chili_momentum_tick_break_tape_confirm_enabled": True,
+        "chili_momentum_flush_dip_volume_gate_enabled": True,
+        "chili_momentum_ross_stop_alignment_enabled": True,
+        "chili_momentum_orb_ihs_structural_stop_enabled": True,
+        "chili_momentum_fresh_ignition_reentry_bypass_enabled": True,
+        "chili_momentum_universe_float_gate_enabled": True,
+        "chili_momentum_squeeze_entry_sizeup_enabled": True,
+        "chili_momentum_squeeze_entry_top_pctl": 0.80,
+        "chili_momentum_squeeze_entry_max_mult": 1.50,
+        "chili_momentum_squeeze_exit_hold_enabled": True,
+        "chili_momentum_squeeze_exit_tail_pctl": 0.90,
+        "chili_momentum_squeeze_exit_max_widen": 1.25,
+        "chili_momentum_kelly_conviction_enabled": True,
+        "chili_momentum_kelly_conviction_max_multiplier": 1.50,
+        "chili_momentum_kelly_conviction_gain": 1.0,
+        "chili_momentum_kelly_conviction_w_squeeze": 0.4,
+        "chili_momentum_kelly_conviction_w_ofi": 0.4,
+        "chili_momentum_kelly_conviction_w_news": 0.2,
         "chili_momentum_captured_paper_action_claim_lease_seconds": 30,
         "chili_momentum_captured_paper_outbox_max_attempts": 3,
         "chili_momentum_captured_paper_outbox_max_reconciliation_attempts": 3,
@@ -386,6 +458,37 @@ def test_parsed_settings_projection_rechecks_every_execution_boundary(
         "chili_kill_switch_db_fail_closed": True,
         "chili_kill_switch_db_poll_enabled": True,
         "chili_kill_switch_db_poll_interval_s": 0.0,
+        "chili_ortex_monthly_request_limit": 1000,
+        "chili_ortex_request_interval_seconds": 1.05,
+        "chili_ortex_reservation_lease_seconds": 30.0,
+        "chili_ortex_response_max_bytes": 1_048_576,
+        "chili_ortex_success_cache_ttl_seconds": 86_400,
+        "chili_ortex_transient_backoff_base_seconds": 2.0,
+        "chili_ortex_transient_backoff_max_seconds": 300.0,
+        "chili_momentum_kelly_conviction_enabled": True,
+        "chili_momentum_kelly_conviction_gain": 1.0,
+        "chili_momentum_kelly_conviction_max_multiplier": 1.50,
+        "chili_momentum_kelly_conviction_w_news": 0.2,
+        "chili_momentum_kelly_conviction_w_ofi": 0.4,
+        "chili_momentum_kelly_conviction_w_squeeze": 0.4,
+        "chili_momentum_squeeze_entry_max_mult": 1.50,
+        "chili_momentum_squeeze_entry_sizeup_enabled": True,
+        "chili_momentum_squeeze_entry_top_pctl": 0.80,
+        "chili_momentum_squeeze_exit_hold_enabled": True,
+        "chili_momentum_squeeze_exit_max_widen": 1.25,
+        "chili_momentum_squeeze_exit_tail_pctl": 0.90,
+        "chili_momentum_squeeze_fuel_tilt_enabled": True,
+        "chili_momentum_squeeze_fuel_top_n": 12,
+        "chili_momentum_fake_catalyst_guard_enabled": True,
+        "chili_momentum_sub_vwap_trap_entry_enabled": True,
+        "chili_momentum_bail_on_no_confirmation_enabled": True,
+        "chili_momentum_catalyst_arb_flat_gate_enabled": True,
+        "chili_momentum_tick_break_tape_confirm_enabled": True,
+        "chili_momentum_flush_dip_volume_gate_enabled": True,
+        "chili_momentum_ross_stop_alignment_enabled": True,
+        "chili_momentum_orb_ihs_structural_stop_enabled": True,
+        "chili_momentum_fresh_ignition_reentry_bypass_enabled": True,
+        "chili_momentum_universe_float_gate_enabled": True,
         "chili_momentum_captured_paper_action_claim_lease_seconds": 30,
         "chili_momentum_captured_paper_extended_hours": True,
         "chili_momentum_captured_paper_outbox_max_attempts": 3,
@@ -461,6 +564,7 @@ def test_missing_or_noncanonical_autotrader_user_fails_before_install(
         "DATABASE_URL=postgresql://local/test\n"
         "CHILI_ALPACA_API_KEY=paper-key\n"
         "CHILI_ALPACA_API_SECRET=paper-secret\n"
+        "CHILI_ORTEX_API_KEY=ortex-paper-key\n"
         f"CHILI_ALPACA_EXPECTED_ACCOUNT_ID={ACCOUNT_ID}\n"
         f"CHILI_AUTOTRADER_USER_ID={raw}\n",
     )

@@ -467,6 +467,124 @@ def test_viability_bridge_rolls_back_before_each_chunk_tick(monkeypatch):
     assert db.commits == 3
 
 
+def test_viability_bridge_prepares_one_global_ortex_field_before_chunks(
+    monkeypatch,
+):
+    from app.services import trading_scheduler
+    from app.services.trading.momentum_neural import nbbo_tape, pipeline
+
+    db = _FakeBatchSession("bridge")
+    prepared_fields = []
+    tick_meta = []
+    status = {"batch_sha256": "a" * 64}
+
+    def _prepare(
+        seen_db,
+        *,
+        ross_signals,
+        weights,
+        decision_at,
+    ):
+        assert seen_db is db
+        assert decision_at.tzinfo is not None
+        prepared_fields.append(tuple(sorted(ross_signals)))
+        copied = {
+            symbol: dict(signal)
+            for symbol, signal in ross_signals.items()
+        }
+        for index, symbol in enumerate(sorted(copied)):
+            copied[symbol]["squeeze_fuel_rank_pct"] = round(
+                (index + 1) / len(copied),
+                4,
+            )
+        return copied, dict(weights), status
+
+    def _fake_tick(seen_db, *, meta):
+        assert seen_db is db
+        tick_meta.append(meta)
+        return {"ok": True, "persistence_ok": True}
+
+    monkeypatch.setattr(
+        settings,
+        "chili_momentum_universe_uncapped_enabled",
+        True,
+        raising=False,
+    )
+    monkeypatch.setattr(trading_scheduler, "_VIABILITY_BRIDGE_CHUNK", 2)
+    monkeypatch.setattr(
+        nbbo_tape,
+        "tape_running_up_symbols",
+        lambda _db: ["BURST"],
+    )
+    monkeypatch.setattr(
+        trading_scheduler,
+        "_active_equity_session_symbols",
+        lambda _db: ["PIN"],
+    )
+    monkeypatch.setattr(
+        pipeline,
+        "prepare_ortex_squeeze_fuel_field",
+        _prepare,
+    )
+    monkeypatch.setattr(
+        pipeline,
+        "run_momentum_neural_tick",
+        _fake_tick,
+    )
+
+    trading_scheduler._bridge_scanner_to_viability(
+        db,
+        [
+            {
+                "ticker": f"MOVE{i}",
+                "daily_change_pct": 30.0 + i,
+                "dollar_volume": 10_000_000 + i,
+            }
+            for i in range(5)
+        ],
+        source="equity_viability_refresh",
+    )
+
+    assert len(prepared_fields) == 1
+    assert set(prepared_fields[0]) == {
+        "BURST",
+        "PIN",
+        "MOVE0",
+        "MOVE1",
+        "MOVE2",
+        "MOVE3",
+        "MOVE4",
+    }
+    assert len(tick_meta) == 4
+    assert all(
+        meta["ortex_squeeze_fuel_batch"] is status
+        for meta in tick_meta
+    )
+    with trading_scheduler._tape_delta_state_lock:
+        assert (
+            trading_scheduler._tape_delta_ortex_batch_status
+            == status
+        )
+    combined = {
+        symbol: signal["squeeze_fuel_rank_pct"]
+        for meta in tick_meta
+        for symbol, signal in meta["ross_signals"].items()
+    }
+    assert set(combined) == set(prepared_fields[0])
+    materialized = {
+        symbol: signal
+        for meta in tick_meta
+        for symbol, signal in meta["ross_signals"].items()
+    }
+    assert (
+        materialized["BURST"]["selection_input_coverage_unavailable"]
+        is True
+    )
+    assert materialized["BURST"]["signal_type"] == "running_up_pin"
+    assert materialized["PIN"]["selection_input_coverage_unavailable"] is True
+    assert materialized["PIN"]["signal_type"] == "active_session_pin"
+
+
 def test_viability_bridge_does_not_commit_when_tick_persistence_fails(monkeypatch, caplog):
     from app.services import trading_scheduler
     from app.services.trading.momentum_neural import nbbo_tape, pipeline

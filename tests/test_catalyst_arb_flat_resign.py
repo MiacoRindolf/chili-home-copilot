@@ -98,10 +98,7 @@ def test_arb_flat_default_restored_on():
     )
     for module in (pipeline, viability):
         source = inspect.getsource(module)
-        assert (
-            'getattr(settings, "chili_momentum_catalyst_arb_flat_gate_enabled", True)'
-            not in source
-        )
+        assert "chili_momentum_catalyst_arb_flat_gate_enabled" in source
 
 
 def _viability_context(*, arb: bool) -> object:

@@ -62,23 +62,25 @@ def test_restored_structural_defaults_are_on():
         is True
     )
 
-    # A partial/mock settings projection must not silently enable the wider
-    # structural/chase path.
+    # User doctrine is default-ON even for a partial settings projection; the
+    # explicit per-flag False value remains the rollback kill switch.
     with patch(f"{_LR}.settings", new=SimpleNamespace()):
-        assert structural_trigger_reasons() == STRUCTURAL_TRIGGER_REASONS
+        got = structural_trigger_reasons()
+        for reason in ORB_IHS_STRUCTURAL_TRIGGER_REASONS:
+            assert reason in got
 
 
-def test_ross_stop_alignment_missing_setting_fallback_is_off():
+def test_ross_stop_alignment_missing_setting_fallback_is_on():
     import inspect
 
     from app.services.trading.momentum_neural import entry_gates
 
     src = inspect.getsource(entry_gates)
     assert src.count(
-        'getattr(settings, "chili_momentum_ross_stop_alignment_enabled", False)'
+        'getattr(settings, "chili_momentum_ross_stop_alignment_enabled", True)'
     ) == 3
     assert (
-        'getattr(settings, "chili_momentum_ross_stop_alignment_enabled", True)'
+        'getattr(settings, "chili_momentum_ross_stop_alignment_enabled", False)'
         not in src
     )
 

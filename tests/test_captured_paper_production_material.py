@@ -147,6 +147,32 @@ class _Db:
         self.transaction_events.append("lock")
         return None
 
+    def query(self, _model):
+        class _FinalOwnerQuery:
+            @staticmethod
+            def populate_existing():
+                return _FinalOwnerQuery()
+
+            @staticmethod
+            def filter(*_args):
+                return _FinalOwnerQuery()
+
+            @staticmethod
+            def one_or_none():
+                return type(
+                    "_FinalOwnerSession",
+                    (),
+                    {
+                        "risk_snapshot_json": {
+                            "captured_paper_session_owner": {
+                                "status": "final_owner",
+                            }
+                        }
+                    },
+                )()
+
+        return _FinalOwnerQuery()
+
 
 def _request(coordinator) -> CapturedPaperDispatchRequest:
     return CapturedPaperDispatchRequest(
