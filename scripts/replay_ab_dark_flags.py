@@ -11,6 +11,10 @@ in ``_test``. SYMBOL/WIN_START/WIN_END/OHLCV_START are explicit inputs.
 Direct invocation is fail-closed: GOLDEN=1, isolated config/launcher markers,
 explicit source/sink/equity/risk/execution-family values, and the exact disposable
 sink confirmation are required before any app module imports.
+
+This driver starts from a synthetic ``queued_live`` session. It executes only the
+post-selection FSM; universe/catalyst selection and the ordinary risk gate are
+not replayed. That bounded execution scope is hash-bound and child-attested.
 """
 from __future__ import annotations
 
@@ -31,6 +35,7 @@ from diagnostic_replay_db import (  # noqa: E402
 )
 
 STRATEGY_POLICY_SCHEMA = "chili.replay-resolved-strategy-policy.v1"
+EXECUTION_SCOPE_SCHEMA = "chili.replay-execution-scope.v1"
 APPROVED_STRATEGY_FLAGS_BY_SLUG = (
     (
         "universe-float",
@@ -69,6 +74,26 @@ APPROVED_STRATEGY_FLAGS_BY_SLUG = (
         "chili_momentum_sub_vwap_trap_entry_enabled",
     ),
 )
+POST_SELECTION_SCOREABLE_POLICY_FLAGS = (
+    "chili_momentum_orb_ihs_structural_stop_enabled",
+    "chili_momentum_ross_stop_alignment_enabled",
+    "chili_momentum_flush_dip_volume_gate_enabled",
+    "chili_momentum_tick_break_tape_confirm_enabled",
+    "chili_momentum_bail_on_no_confirmation_enabled",
+    "chili_momentum_fresh_ignition_reentry_bypass_enabled",
+    "chili_momentum_sub_vwap_trap_entry_enabled",
+)
+POST_SELECTION_UNSCOREABLE_POLICY_FLAGS = (
+    "chili_momentum_universe_float_gate_enabled",
+    "chili_momentum_catalyst_arb_flat_gate_enabled",
+)
+UNSCOREABLE_POST_SELECTION_ARMS = (
+    "intended-minus-universe-float",
+    "intended-minus-catalyst-arb-flat",
+)
+REPLAY_NEUTRALIZED_SETTINGS = {
+    "chili_momentum_squeeze_fuel_tilt_enabled": False,
+}
 
 
 def _resolve_strategy_policy(label: str) -> dict:
@@ -156,6 +181,11 @@ def _load_resolved_strategy_policy() -> tuple[dict, str]:
     expected = _resolve_strategy_policy(policy["label"])
     if policy != expected:
         raise RuntimeError("resolved strategy policy is not the closed vector")
+    if policy["label"] in UNSCOREABLE_POST_SELECTION_ARMS:
+        raise RuntimeError(
+            f"{policy['label']} changes only a pre-selection flag that this "
+            "queued_live replay does not execute"
+        )
     canonical = json.dumps(
         policy,
         sort_keys=True,
@@ -168,6 +198,70 @@ def _load_resolved_strategy_policy() -> tuple[dict, str]:
     if str(os.environ.get("ARM") or "").strip() != policy["label"]:
         raise RuntimeError("ARM does not match resolved strategy policy")
     return policy, actual_sha256
+
+
+def _replay_execution_scope() -> dict:
+    return {
+        "schema": EXECUTION_SCOPE_SCHEMA,
+        "label": "post-selection-fsm",
+        "pipeline_start_state": "queued_live",
+        "selection_pipeline_executed": False,
+        "viability_input_mode": "synthetic_live_eligible_seed",
+        "entry_risk_gate_executed": False,
+        "ortex_entry_admission_mode":
+            "neutralized_missing_captured_ortex_authority",
+        "quote_freshness_clock_mode": "replay_sim",
+        "neutralized_settings": dict(REPLAY_NEUTRALIZED_SETTINGS),
+        "scoreable_policy_flags": list(POST_SELECTION_SCOREABLE_POLICY_FLAGS),
+        "unscoreable_policy_flags":
+            list(POST_SELECTION_UNSCOREABLE_POLICY_FLAGS),
+        "profitability_scope": "post_selection_fsm_conditional",
+        "whole_policy_profitability_allowed": False,
+    }
+
+
+def _load_execution_scope() -> tuple[dict, str]:
+    raw = str(
+        os.environ.get("CHILI_REPLAY_EXECUTION_SCOPE_JSON") or ""
+    ).strip()
+    expected_sha256 = str(
+        os.environ.get("CHILI_REPLAY_EXECUTION_SCOPE_SHA256") or ""
+    ).strip()
+    if (
+        not raw
+        or len(expected_sha256) != 64
+        or any(ch not in "0123456789abcdef" for ch in expected_sha256)
+    ):
+        raise RuntimeError("exact replay execution-scope authority is required")
+    try:
+        scope = json.loads(
+            raw,
+            object_pairs_hook=_reject_duplicate_policy_keys,
+            parse_constant=_reject_nonfinite_policy_value,
+        )
+    except (TypeError, ValueError, json.JSONDecodeError) as exc:
+        raise RuntimeError("replay execution scope is not strict JSON") from exc
+    expected = _replay_execution_scope()
+    if type(scope) is not dict:
+        raise RuntimeError("replay execution scope is not the closed document")
+    canonical = json.dumps(
+        scope,
+        sort_keys=True,
+        separators=(",", ":"),
+        allow_nan=False,
+    )
+    expected_canonical = json.dumps(
+        expected,
+        sort_keys=True,
+        separators=(",", ":"),
+        allow_nan=False,
+    )
+    if canonical != expected_canonical:
+        raise RuntimeError("replay execution scope is not the closed document")
+    actual_sha256 = hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+    if actual_sha256 != expected_sha256:
+        raise RuntimeError("replay execution-scope hash mismatch")
+    return scope, actual_sha256
 
 
 PROD = str(os.environ.get("REPLAY_SOURCE_DATABASE_URL") or "").strip()
@@ -276,6 +370,10 @@ if _actual_build_sha != _expected_build_sha or _dirty_build.strip():
     _RESOLVED_STRATEGY_POLICY,
     _RESOLVED_STRATEGY_POLICY_SHA256,
 ) = _load_resolved_strategy_policy()
+(
+    _RESOLVED_EXECUTION_SCOPE,
+    _RESOLVED_EXECUTION_SCOPE_SHA256,
+) = _load_execution_scope()
 
 import pandas as pd
 from sqlalchemy import create_engine, text
@@ -544,6 +642,13 @@ def run_arm(label, grid, ticks, flags):
     grid with the given settings-flag overrides, mine the fills -> PnL + entry evidence."""
     for _fk, _fv in dict(flags or {}).items():
         setattr(settings, _fk, _fv)
+    for _setting, _value in _RESOLVED_EXECUTION_SCOPE[
+        "neutralized_settings"
+    ].items():
+        # The diagnostic archive has no captured Ortex-v2 admission receipt.
+        # Neutralize only inside this isolated child and attest it as part of
+        # the hashed post-selection execution scope; production defaults stay ON.
+        setattr(settings, _setting, _value)
     settings.chili_momentum_live_runner_enabled = True
     # neutralize env-coupled gates orthogonal to the exit A/B (kill switch / broker-connectivity
     # / tradeable-now wall-clock) so the run isn't blocked by ops state — these do NOT touch the
@@ -724,13 +829,14 @@ def run_arm(label, grid, ticks, flags):
 
     # VALIDATED parity-fixture mock config ($0.05 fidelity, replay_parity.py:219): resting
     # limit orders (fill only when the recorded NBBO crosses), conservative adverse-side fills,
-    # volume-capped partials, wall freshness (age~0 vs the sim clock). This is the accurate
-    # setup — my earlier resting_limit_fills=False caused the exit-ladder submit spam.
+    # volume-capped partials, and replay-sim freshness. Wall freshness is not
+    # causal for historical data and can make an old quote appear future/fresh
+    # relative to ReplayV3's simulated clock.
     mock = rv3.MockBrokerAdapter(
         resting_limit_fills=True,
         volume_cap_enabled=True,
         fill_mode=FillMode.CONSERVATIVE,
-        freshness_mode="wall",
+        freshness_mode="sim",
     )
     # Feed the REAL per-tick printed volume so resting orders fill against actual traded volume
     # (the ReplayV3Driver sets clock+quote but NOT printed_volume — parity mode_i does; without
@@ -903,6 +1009,10 @@ def main():
     print(
         f"[STRATEGY_POLICY={arm_name}] "
         f"sha256={_RESOLVED_STRATEGY_POLICY_SHA256}"
+    )
+    print(
+        f"[EXECUTION_SCOPE={_RESOLVED_EXECUTION_SCOPE['label']}] "
+        f"sha256={_RESOLVED_EXECUTION_SCOPE_SHA256}"
     )
     print(f"  merged_flags={flags}")
     res = run_arm(f"{SYMBOL}-{arm_name}", grid, ticks, flags)

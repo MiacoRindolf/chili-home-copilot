@@ -143,6 +143,64 @@ def test_driver_and_batch_use_the_same_closed_strategy_policy_allowlist():
     assert tuple(driver_pairs) == batch.APPROVED_STRATEGY_FLAGS_BY_SLUG
 
 
+def test_replay_execution_scope_is_hash_bound_and_refuses_upstream_arms():
+    scope = batch.replay_execution_scope()
+    assert scope["schema"] == batch.EXECUTION_SCOPE_SCHEMA
+    assert scope["pipeline_start_state"] == "queued_live"
+    assert scope["selection_pipeline_executed"] is False
+    assert scope["entry_risk_gate_executed"] is False
+    assert scope["whole_policy_profitability_allowed"] is False
+    assert scope["quote_freshness_clock_mode"] == "replay_sim"
+    assert scope["neutralized_settings"] == {
+        "chili_momentum_squeeze_fuel_tilt_enabled": False,
+    }
+    assert set(scope["scoreable_policy_flags"]) == set(
+        batch.POST_SELECTION_SCOREABLE_POLICY_FLAGS
+    )
+    assert set(scope["unscoreable_policy_flags"]) == set(
+        batch.POST_SELECTION_UNSCOREABLE_POLICY_FLAGS
+    )
+    assert len(batch.execution_scope_sha256(scope)) == 64
+
+    driver_scoreable = _literal_assignment(
+        "scripts/replay_ab_dark_flags.py",
+        "POST_SELECTION_SCOREABLE_POLICY_FLAGS",
+    )
+    driver_unscoreable = _literal_assignment(
+        "scripts/replay_ab_dark_flags.py",
+        "POST_SELECTION_UNSCOREABLE_POLICY_FLAGS",
+    )
+    driver_unscoreable_arms = _literal_assignment(
+        "scripts/replay_ab_dark_flags.py",
+        "UNSCOREABLE_POST_SELECTION_ARMS",
+    )
+    assert tuple(driver_scoreable) == batch.POST_SELECTION_SCOREABLE_POLICY_FLAGS
+    assert (
+        tuple(driver_unscoreable)
+        == batch.POST_SELECTION_UNSCOREABLE_POLICY_FLAGS
+    )
+    assert tuple(driver_unscoreable_arms) == batch.UNSCOREABLE_POST_SELECTION_ARMS
+    for arm in batch.UNSCOREABLE_POST_SELECTION_ARMS:
+        with pytest.raises(ValueError, match="pre-selection flag"):
+            batch.require_scoreable_post_selection_arm(arm)
+    batch.require_scoreable_post_selection_arm("intended")
+    batch.require_scoreable_post_selection_arm(
+        "intended-minus-orb-ihs-stop"
+    )
+
+    driver_source = (
+        ROOT / "scripts" / "replay_ab_dark_flags.py"
+    ).read_text(encoding="utf-8")
+    assert (
+        'setattr(settings, _setting, _value)'
+        in driver_source
+    )
+    assert "canonical != expected_canonical" in driver_source
+    assert "policy[\"label\"] in UNSCOREABLE_POST_SELECTION_ARMS" in driver_source
+    assert 'freshness_mode="sim"' in driver_source
+    assert 'freshness_mode="wall"' not in driver_source
+
+
 def test_strategy_policy_hash_is_part_of_every_result_key():
     intended = batch.resolve_strategy_policy("intended")
     baseline = batch.resolve_strategy_policy("base")
@@ -182,11 +240,15 @@ def test_strategy_policy_hash_is_part_of_every_result_key():
 def test_resumed_run_meta_rehashes_policy_and_run_identity_strictly():
     policy = batch.resolve_strategy_policy("intended")
     policy_sha256 = batch.strategy_policy_sha256(policy)
+    scope = batch.replay_execution_scope()
+    scope_sha256 = batch.execution_scope_sha256(scope)
     candidate = {
         "schema": "chili.golden_replay_run_meta.v3",
         "arm": "intended",
         "resolved_strategy_policy": policy,
         "resolved_strategy_policy_sha256": policy_sha256,
+        "execution_scope": scope,
+        "execution_scope_sha256": scope_sha256,
         "build_sha": "b" * 40,
         "started_at": "2026-07-26T12:00:00",
         "stop_at": "2026-07-26T18:00:00",
@@ -209,6 +271,7 @@ def test_resumed_run_meta_rehashes_policy_and_run_identity_strictly():
         existing,
         candidate,
         expected_policy_sha256=policy_sha256,
+        expected_execution_scope_sha256=scope_sha256,
     ) == existing
 
     numeric_policy = json.loads(json.dumps(existing))
@@ -219,6 +282,19 @@ def test_resumed_run_meta_rehashes_policy_and_run_identity_strictly():
             numeric_policy,
             candidate,
             expected_policy_sha256=policy_sha256,
+            expected_execution_scope_sha256=scope_sha256,
+        )
+
+    numeric_scope = json.loads(json.dumps(existing))
+    numeric_scope["execution_scope"][
+        "whole_policy_profitability_allowed"
+    ] = 0
+    with pytest.raises(ValueError, match="canonical closed document"):
+        batch.validate_resumed_run_meta(
+            numeric_scope,
+            candidate,
+            expected_policy_sha256=policy_sha256,
+            expected_execution_scope_sha256=scope_sha256,
         )
 
     stale_identity = json.loads(json.dumps(existing))
@@ -228,6 +304,7 @@ def test_resumed_run_meta_rehashes_policy_and_run_identity_strictly():
             stale_identity,
             candidate,
             expected_policy_sha256=policy_sha256,
+            expected_execution_scope_sha256=scope_sha256,
         )
 
     legacy_meta = json.loads(json.dumps(existing))
@@ -237,21 +314,33 @@ def test_resumed_run_meta_rehashes_policy_and_run_identity_strictly():
             legacy_meta,
             candidate,
             expected_policy_sha256=policy_sha256,
+            expected_execution_scope_sha256=scope_sha256,
         )
 
 
 def test_driver_stdout_policy_attestation_is_exact_and_conflict_detected():
     policy = batch.resolve_strategy_policy("intended")
     policy_sha256 = batch.strategy_policy_sha256(policy)
+    scope_sha256 = batch.execution_scope_sha256(
+        batch.replay_execution_scope()
+    )
 
     parse = lambda out: batch.parse_driver_stdout(  # noqa: E731
         out,
         expected_symbol="AAA",
         expected_arm="intended",
         expected_policy_sha256=policy_sha256,
+        expected_execution_scope_sha256=scope_sha256,
     )
 
-    def output(*, policy_lines=None, summary=None, fills=None, states=None):
+    def output(
+        *,
+        policy_lines=None,
+        scope_lines=None,
+        summary=None,
+        fills=None,
+        states=None,
+    ):
         return "\n".join(
             [
                 *(
@@ -259,6 +348,14 @@ def test_driver_stdout_policy_attestation_is_exact_and_conflict_detected():
                     if policy_lines is not None
                     else [
                         f"[STRATEGY_POLICY=intended] sha256={policy_sha256}"
+                    ]
+                ),
+                *(
+                    scope_lines
+                    if scope_lines is not None
+                    else [
+                        "[EXECUTION_SCOPE=post-selection-fsm] "
+                        f"sha256={scope_sha256}"
                     ]
                 ),
                 *(states if states is not None else ["final_state=flat"]),
@@ -272,8 +369,33 @@ def test_driver_stdout_policy_attestation_is_exact_and_conflict_detected():
     assert status == "ok"
     assert parsed["strategy_policy_label"] == "intended"
     assert parsed["strategy_policy_sha256"] == policy_sha256
+    assert parsed["execution_scope_label"] == "post-selection-fsm"
+    assert parsed["execution_scope_sha256"] == scope_sha256
 
     status, _ = parse(output(policy_lines=[]))
+    assert status == "parse_fail"
+    status, _ = parse(output(scope_lines=[]))
+    assert status == "parse_fail"
+    status, _ = parse(
+        output(
+            scope_lines=[
+                "[EXECUTION_SCOPE=post-selection-fsm] "
+                f"sha256={scope_sha256}",
+                "[EXECUTION_SCOPE=post-selection-fsm] "
+                f"sha256={scope_sha256}",
+            ]
+        )
+    )
+    assert status == "parse_fail"
+    status, _ = parse(
+        output(
+            scope_lines=[
+                "[EXECUTION_SCOPE=post-selection-fsm] "
+                f"sha256={scope_sha256}",
+                f"[EXECUTION_SCOPE=other] sha256={'0' * 64}",
+            ]
+        )
+    )
     assert status == "parse_fail"
 
     status, _ = parse(
@@ -366,8 +488,17 @@ def test_driver_stdout_policy_attestation_is_exact_and_conflict_detected():
         expected_symbol="AAA",
         expected_arm="intended",
         expected_policy_sha256="0" * 64,
+        expected_execution_scope_sha256=scope_sha256,
     )
     assert forged_expected_status == "parse_fail"
+    forged_scope_status, _ = batch.parse_driver_stdout(
+        output(),
+        expected_symbol="AAA",
+        expected_arm="intended",
+        expected_policy_sha256=policy_sha256,
+        expected_execution_scope_sha256="0" * 64,
+    )
+    assert forged_scope_status == "parse_fail"
 
     assert batch.normalize_child_strategy_policy_attestation(
         {
@@ -377,6 +508,14 @@ def test_driver_stdout_policy_attestation_is_exact_and_conflict_detected():
         },
         expected_arm="intended",
         expected_policy_sha256=policy_sha256,
+    ) == (None, None, 0)
+    assert batch.normalize_child_execution_scope_attestation(
+        {
+            "execution_scope_label": "post-selection-fsm",
+            "execution_scope_sha256": scope_sha256,
+            "execution_scope_attestation_count": 2,
+        },
+        expected_execution_scope_sha256=scope_sha256,
     ) == (None, None, 0)
 
 
@@ -643,6 +782,51 @@ def test_wrong_sink_confirmation_stops_before_database_or_filesystem(
         ],
     )
     with pytest.raises(SystemExit, match="exact confirmation"):
+        batch.main()
+    assert calls == []
+    assert not (tmp_path / "out").exists()
+
+
+def test_upstream_only_arm_stops_before_database_or_filesystem(
+    monkeypatch,
+    tmp_path,
+):
+    calls = []
+    monkeypatch.setattr(
+        batch,
+        "source_window_snapshot",
+        lambda *args: calls.append(args),
+    )
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "replay_benchmark_batch.py",
+            "--manifest",
+            str(tmp_path / "missing.json"),
+            "--out-dir",
+            str(tmp_path / "out"),
+            "--source-database-url",
+            "postgresql://u:p@localhost/chili",
+            "--sink-database-url",
+            "postgresql://u:p@localhost/chili_replay_test",
+            "--confirm-test-sink-reset",
+            batch.TEST_SINK_CONFIRMATION,
+            "--ohlcv-cache-dir",
+            str(tmp_path),
+            "--arm",
+            "intended-minus-universe-float",
+            "--equity",
+            "100000",
+            "--risk-fraction",
+            "0.01",
+            "--exec-family",
+            "alpaca_spot",
+            "--stop-at",
+            "2026-07-27T03:00:00",
+        ],
+    )
+    with pytest.raises(SystemExit, match="pre-selection flag"):
         batch.main()
     assert calls == []
     assert not (tmp_path / "out").exists()

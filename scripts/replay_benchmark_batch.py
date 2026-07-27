@@ -63,6 +63,9 @@ SUMMARY_RE = re.compile(
 POLICY_ATTESTATION_RE = re.compile(
     r"^\[STRATEGY_POLICY=([a-z0-9_.-]+)\]\s+sha256=([0-9a-f]{64})$"
 )
+EXECUTION_SCOPE_ATTESTATION_RE = re.compile(
+    r"^\[EXECUTION_SCOPE=([a-z0-9_.-]+)\]\s+sha256=([0-9a-f]{64})$"
+)
 FILL_RE = re.compile(
     rf"^\s*(BUY|SELL)\s+({_DECIMAL_PATTERN})\s+@\s+\$?"
     rf"({_DECIMAL_PATTERN})"
@@ -70,6 +73,7 @@ FILL_RE = re.compile(
 FINAL_RE = re.compile(r"final_state=(\S+)")
 TEST_SINK_CONFIRMATION = "RESET_DISPOSABLE_REPLAY_TEST_SINK"
 STRATEGY_POLICY_SCHEMA = "chili.replay-resolved-strategy-policy.v1"
+EXECUTION_SCOPE_SCHEMA = "chili.replay-execution-scope.v1"
 APPROVED_STRATEGY_FLAGS_BY_SLUG = (
     (
         "universe-float",
@@ -114,6 +118,26 @@ STRATEGY_ARM_CHOICES = (
     "intended",
     *(f"intended-minus-{slug}" for slug, _ in APPROVED_STRATEGY_FLAGS_BY_SLUG),
 )
+UNSCOREABLE_POST_SELECTION_ARMS = (
+    "intended-minus-universe-float",
+    "intended-minus-catalyst-arb-flat",
+)
+POST_SELECTION_SCOREABLE_POLICY_FLAGS = (
+    "chili_momentum_orb_ihs_structural_stop_enabled",
+    "chili_momentum_ross_stop_alignment_enabled",
+    "chili_momentum_flush_dip_volume_gate_enabled",
+    "chili_momentum_tick_break_tape_confirm_enabled",
+    "chili_momentum_bail_on_no_confirmation_enabled",
+    "chili_momentum_fresh_ignition_reentry_bypass_enabled",
+    "chili_momentum_sub_vwap_trap_entry_enabled",
+)
+POST_SELECTION_UNSCOREABLE_POLICY_FLAGS = (
+    "chili_momentum_universe_float_gate_enabled",
+    "chili_momentum_catalyst_arb_flat_gate_enabled",
+)
+REPLAY_NEUTRALIZED_SETTINGS = {
+    "chili_momentum_squeeze_fuel_tilt_enabled": False,
+}
 RESULT_STATUSES = {
     "ok",
     "error",
@@ -224,6 +248,57 @@ def strategy_policy_sha256(policy: dict) -> str:
     ).hexdigest()
 
 
+def replay_execution_scope() -> dict:
+    """Describe exactly which live-policy boundary this replay executes."""
+
+    return {
+        "schema": EXECUTION_SCOPE_SCHEMA,
+        "label": "post-selection-fsm",
+        "pipeline_start_state": "queued_live",
+        "selection_pipeline_executed": False,
+        "viability_input_mode": "synthetic_live_eligible_seed",
+        "entry_risk_gate_executed": False,
+        "ortex_entry_admission_mode":
+            "neutralized_missing_captured_ortex_authority",
+        "quote_freshness_clock_mode": "replay_sim",
+        "neutralized_settings": dict(REPLAY_NEUTRALIZED_SETTINGS),
+        "scoreable_policy_flags": list(POST_SELECTION_SCOREABLE_POLICY_FLAGS),
+        "unscoreable_policy_flags":
+            list(POST_SELECTION_UNSCOREABLE_POLICY_FLAGS),
+        "profitability_scope": "post_selection_fsm_conditional",
+        "whole_policy_profitability_allowed": False,
+    }
+
+
+def execution_scope_sha256(scope: dict) -> str:
+    expected = replay_execution_scope()
+    if type(scope) is not dict:
+        raise ValueError("execution scope is not the canonical closed document")
+    canonical = json.dumps(
+        scope,
+        sort_keys=True,
+        separators=(",", ":"),
+        allow_nan=False,
+    )
+    expected_canonical = json.dumps(
+        expected,
+        sort_keys=True,
+        separators=(",", ":"),
+        allow_nan=False,
+    )
+    if canonical != expected_canonical:
+        raise ValueError("execution scope is not the canonical closed document")
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+def require_scoreable_post_selection_arm(arm: str) -> None:
+    if arm in UNSCOREABLE_POST_SELECTION_ARMS:
+        raise ValueError(
+            f"{arm} changes only a pre-selection flag that this queued_live "
+            "replay does not execute"
+        )
+
+
 def result_key(
     symbol: str,
     day: str,
@@ -266,11 +341,15 @@ def validate_resumed_run_meta(
     candidate_meta: dict,
     *,
     expected_policy_sha256: str,
+    expected_execution_scope_sha256: str,
 ) -> dict:
     if type(existing_meta) is not dict:
         raise ValueError("resumed run metadata must be an exact object")
     existing_policy_sha256 = strategy_policy_sha256(
         existing_meta.get("resolved_strategy_policy")
+    )
+    existing_execution_scope_sha256 = execution_scope_sha256(
+        existing_meta.get("execution_scope")
     )
     existing_run_payload = {
         key: value
@@ -290,6 +369,10 @@ def validate_resumed_run_meta(
         or existing_policy_sha256 != expected_policy_sha256
         or existing_meta.get("resolved_strategy_policy_sha256")
         != expected_policy_sha256
+        or existing_execution_scope_sha256
+        != expected_execution_scope_sha256
+        or existing_meta.get("execution_scope_sha256")
+        != expected_execution_scope_sha256
         or existing_meta.get("run_identity_sha256")
         != existing_run_identity_sha256
     ):
@@ -695,6 +778,7 @@ def parse_driver_stdout(
     expected_symbol: str,
     expected_arm: str,
     expected_policy_sha256: str,
+    expected_execution_scope_sha256: str,
 ) -> tuple[str, dict]:
     parsed: dict = {
         "fills": [],
@@ -703,6 +787,9 @@ def parse_driver_stdout(
         "strategy_policy_label": None,
         "strategy_policy_sha256": None,
         "strategy_policy_attestation_count": 0,
+        "execution_scope_label": None,
+        "execution_scope_sha256": None,
+        "execution_scope_attestation_count": 0,
     }
     try:
         canonical_expected_policy_sha256 = strategy_policy_sha256(
@@ -711,6 +798,17 @@ def parse_driver_stdout(
     except ValueError:
         return "parse_fail", parsed
     if expected_policy_sha256 != canonical_expected_policy_sha256:
+        return "parse_fail", parsed
+    try:
+        canonical_expected_execution_scope_sha256 = execution_scope_sha256(
+            replay_execution_scope()
+        )
+    except ValueError:
+        return "parse_fail", parsed
+    if (
+        expected_execution_scope_sha256
+        != canonical_expected_execution_scope_sha256
+    ):
         return "parse_fail", parsed
     for line in out.splitlines():
         m = FILL_RE.fullmatch(line.strip())
@@ -746,6 +844,20 @@ def parse_driver_stdout(
                 parsed["strategy_policy_label"],
                 parsed["strategy_policy_sha256"],
             ) = observed
+        em = EXECUTION_SCOPE_ATTESTATION_RE.match(line.strip())
+        if em:
+            parsed["execution_scope_attestation_count"] += 1
+            observed = (em.group(1), em.group(2))
+            previous = (
+                parsed["execution_scope_label"],
+                parsed["execution_scope_sha256"],
+            )
+            if previous != (None, None) and previous != observed:
+                return "parse_fail", parsed
+            (
+                parsed["execution_scope_label"],
+                parsed["execution_scope_sha256"],
+            ) = observed
     summaries = [
         match
         for line in out.splitlines()
@@ -775,6 +887,10 @@ def parse_driver_stdout(
         or parsed["strategy_policy_label"] != expected_arm
         or parsed["strategy_policy_sha256"] != expected_policy_sha256
         or parsed["strategy_policy_attestation_count"] != 1
+        or parsed["execution_scope_label"] != "post-selection-fsm"
+        or parsed["execution_scope_sha256"]
+        != expected_execution_scope_sha256
+        or parsed["execution_scope_attestation_count"] != 1
         or parsed["final_state_attestation_count"] != 1
         or sum(fill["side"] == "buy" for fill in parsed["fills"])
         != parsed["entries"]
@@ -799,6 +915,26 @@ def normalize_child_strategy_policy_attestation(
         parsed.get("strategy_policy_attestation_count"),
     )
     expected = (expected_arm, expected_policy_sha256, 1)
+    return expected if observed == expected else (None, None, 0)
+
+
+def normalize_child_execution_scope_attestation(
+    parsed: dict,
+    *,
+    expected_execution_scope_sha256: str,
+) -> tuple[str | None, str | None, int]:
+    """Retain only the canonical child execution-scope attestation."""
+
+    observed = (
+        parsed.get("execution_scope_label"),
+        parsed.get("execution_scope_sha256"),
+        parsed.get("execution_scope_attestation_count"),
+    )
+    expected = (
+        "post-selection-fsm",
+        expected_execution_scope_sha256,
+        1,
+    )
     return expected if observed == expected else (None, None, 0)
 
 
@@ -1085,8 +1221,9 @@ def main() -> int:
         choices=STRATEGY_ARM_CHOICES,
         default=DEFAULT_ARM,
         help=(
-            "complete nine-flag policy arm; defaults to the intended all-ON "
-            "operator policy, with one-flag kill-switch arms available"
+            "post-selection FSM policy arm; defaults to the intended all-ON "
+            "operator vector, but pre-selection-only one-flag arms are "
+            "refused because this queued_live harness cannot execute them"
         ),
     )
     ap.add_argument("--equity", required=True, type=float)
@@ -1107,8 +1244,15 @@ def main() -> int:
         resolved_strategy_policy_sha256 = strategy_policy_sha256(
             resolved_strategy_policy
         )
+        require_scoreable_post_selection_arm(args.arm)
+        resolved_execution_scope = replay_execution_scope()
+        resolved_execution_scope_sha256 = execution_scope_sha256(
+            resolved_execution_scope
+        )
     except ValueError as exc:
-        raise SystemExit(f"[batch] REFUSING strategy policy: {exc}") from exc
+        raise SystemExit(
+            f"[batch] REFUSING strategy policy/execution scope: {exc}"
+        ) from exc
 
     if args.confirm_test_sink_reset != TEST_SINK_CONFIRMATION:
         raise SystemExit("[batch] REFUSING disposable sink mutation without exact confirmation")
@@ -1260,6 +1404,8 @@ def main() -> int:
             "resolved_strategy_policy": resolved_strategy_policy,
             "resolved_strategy_policy_sha256":
                 resolved_strategy_policy_sha256,
+            "execution_scope": resolved_execution_scope,
+            "execution_scope_sha256": resolved_execution_scope_sha256,
             "driver_sha256": driver_sha256,
             "batch_sha256": batch_sha256,
             "generator_sha256": current_generator_sha256,
@@ -1343,13 +1489,19 @@ def main() -> int:
             prior_policy_sha256 = strategy_policy_sha256(
                 rec.get("resolved_strategy_policy")
             )
+            prior_execution_scope_sha256 = execution_scope_sha256(
+                rec.get("execution_scope")
+            )
         except ValueError as exc:
             raise SystemExit(
-                "[batch] REFUSING invalid prior strategy policy at line "
+                "[batch] REFUSING invalid prior policy/execution scope at line "
                 f"{line_no}: {exc}"
             ) from exc
         child_attestation_count = rec.get(
             "child_strategy_policy_attestation_count"
+        )
+        child_execution_scope_attestation_count = rec.get(
+            "child_execution_scope_attestation_count"
         )
         if (
             rec.get("schema") != "chili.golden_replay_window_result.v3"
@@ -1371,6 +1523,11 @@ def main() -> int:
             or prior_policy_sha256 != resolved_strategy_policy_sha256
             or rec.get("resolved_strategy_policy_sha256")
             != resolved_strategy_policy_sha256
+            or rec.get("execution_scope") != resolved_execution_scope
+            or prior_execution_scope_sha256
+            != resolved_execution_scope_sha256
+            or rec.get("execution_scope_sha256")
+            != resolved_execution_scope_sha256
             or type(child_attestation_count) is not int
             or child_attestation_count not in {0, 1}
             or (
@@ -1391,6 +1548,33 @@ def main() -> int:
                     or rec.get("child_strategy_policy_sha256")
                     != resolved_strategy_policy_sha256
                     or child_attestation_count != 1
+                )
+            )
+            or type(child_execution_scope_attestation_count) is not int
+            or child_execution_scope_attestation_count not in {0, 1}
+            or (
+                (
+                    rec.get("child_execution_scope_label"),
+                    rec.get("child_execution_scope_sha256"),
+                    child_execution_scope_attestation_count,
+                )
+                not in {
+                    (None, None, 0),
+                    (
+                        "post-selection-fsm",
+                        resolved_execution_scope_sha256,
+                        1,
+                    ),
+                }
+            )
+            or (
+                rec.get("status") == "ok"
+                and (
+                    rec.get("child_execution_scope_label")
+                    != "post-selection-fsm"
+                    or rec.get("child_execution_scope_sha256")
+                    != resolved_execution_scope_sha256
+                    or child_execution_scope_attestation_count != 1
                 )
             )
             or rec.get("source_content_receipt_sha256")
@@ -1473,6 +1657,8 @@ def main() -> int:
                 existing_meta,
                 meta,
                 expected_policy_sha256=resolved_strategy_policy_sha256,
+                expected_execution_scope_sha256=
+                    resolved_execution_scope_sha256,
             )
         except ValueError as exc:
             raise SystemExit(
@@ -1581,6 +1767,15 @@ def main() -> int:
                             ),
                         "CHILI_REPLAY_RESOLVED_STRATEGY_POLICY_SHA256":
                             resolved_strategy_policy_sha256,
+                        "CHILI_REPLAY_EXECUTION_SCOPE_JSON":
+                            json.dumps(
+                                resolved_execution_scope,
+                                sort_keys=True,
+                                separators=(",", ":"),
+                                allow_nan=False,
+                            ),
+                        "CHILI_REPLAY_EXECUTION_SCOPE_SHA256":
+                            resolved_execution_scope_sha256,
                         "WIN_START": w["win_start"], "WIN_END": w["win_end"],
                         "OHLCV_START": w["ohlcv_start"], "GOLDEN": "1",
                         "PREPEND_OHLCV": "1" if w.get("prepend") else "0",
@@ -1633,6 +1828,8 @@ def main() -> int:
                     expected_symbol=w["symbol"],
                     expected_arm=args.arm,
                     expected_policy_sha256=resolved_strategy_policy_sha256,
+                    expected_execution_scope_sha256=
+                        resolved_execution_scope_sha256,
                 )
                 if exit_code != 0:
                     status = "error"
@@ -1647,6 +1844,8 @@ def main() -> int:
                     expected_symbol=w["symbol"],
                     expected_arm=args.arm,
                     expected_policy_sha256=resolved_strategy_policy_sha256,
+                    expected_execution_scope_sha256=
+                        resolved_execution_scope_sha256,
                 )
             (
                 child_policy_label,
@@ -1656,6 +1855,15 @@ def main() -> int:
                 parsed,
                 expected_arm=args.arm,
                 expected_policy_sha256=resolved_strategy_policy_sha256,
+            )
+            (
+                child_execution_scope_label,
+                child_execution_scope_sha256,
+                child_execution_scope_attestation_count,
+            ) = normalize_child_execution_scope_attestation(
+                parsed,
+                expected_execution_scope_sha256=
+                    resolved_execution_scope_sha256,
             )
             rec = {"schema": "chili.golden_replay_window_result.v3", "key": key,
                    "symbol": w["symbol"], "day": w["day"], "class": w["class"],
@@ -1673,12 +1881,21 @@ def main() -> int:
                    "resolved_strategy_policy": resolved_strategy_policy,
                    "resolved_strategy_policy_sha256":
                        resolved_strategy_policy_sha256,
+                   "execution_scope": resolved_execution_scope,
+                   "execution_scope_sha256":
+                       resolved_execution_scope_sha256,
                    "child_strategy_policy_label":
                        child_policy_label,
                    "child_strategy_policy_sha256":
                        child_policy_sha256,
                    "child_strategy_policy_attestation_count":
                        child_policy_attestation_count,
+                   "child_execution_scope_label":
+                       child_execution_scope_label,
+                   "child_execution_scope_sha256":
+                       child_execution_scope_sha256,
+                   "child_execution_scope_attestation_count":
+                       child_execution_scope_attestation_count,
                    "source_content_receipt_sha256":
                        w["source_content_receipt_sha256"],
                    "source_content_receipt_pre_sha256":

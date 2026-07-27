@@ -19,6 +19,12 @@ _spec.loader.exec_module(rs)
 
 _POLICY = rs.resolve_strategy_policy("intended")
 _POLICY_SHA256 = rs.strategy_policy_sha256(_POLICY)
+_EXECUTION_SCOPE = rs.replay_execution_scope()
+_EXECUTION_SCOPE_SHA256 = rs.execution_scope_sha256(_EXECUTION_SCOPE)
+_EXECUTION_SCOPE_ATTESTATION = (
+    "[EXECUTION_SCOPE=post-selection-fsm] "
+    f"sha256={_EXECUTION_SCOPE_SHA256}"
+)
 _RESULT_KEY = rs.result_key(
     "AAA",
     "2026-07-07",
@@ -118,6 +124,8 @@ def _bound_docs():
         "arm": "intended",
         "resolved_strategy_policy": _POLICY,
         "resolved_strategy_policy_sha256": _POLICY_SHA256,
+        "execution_scope": _EXECUTION_SCOPE,
+        "execution_scope_sha256": _EXECUTION_SCOPE_SHA256,
         "evidence_grade": "DIAGNOSTIC_ONLY",
         "causal_use_allowed": False,
         "ross_grade_credit_allowed": False,
@@ -171,9 +179,14 @@ def _bound_docs():
         "arm": "intended",
         "resolved_strategy_policy": _POLICY,
         "resolved_strategy_policy_sha256": _POLICY_SHA256,
+        "execution_scope": _EXECUTION_SCOPE,
+        "execution_scope_sha256": _EXECUTION_SCOPE_SHA256,
         "child_strategy_policy_label": "intended",
         "child_strategy_policy_sha256": _POLICY_SHA256,
         "child_strategy_policy_attestation_count": 1,
+        "child_execution_scope_label": "post-selection-fsm",
+        "child_execution_scope_sha256": _EXECUTION_SCOPE_SHA256,
+        "child_execution_scope_attestation_count": 1,
         "build_sha": meta["build_sha"],
         "driver_sha256": meta["driver_sha256"],
         "batch_sha256": meta["batch_sha256"],
@@ -336,6 +349,7 @@ def test_results_loader_requires_hash_bound_matching_driver_log(tmp_path):
         "\n".join(
             [
                 f"[STRATEGY_POLICY=intended] sha256={_POLICY_SHA256}",
+                _EXECUTION_SCOPE_ATTESTATION,
                 "final_state=flat",
                 "[ARM=intended] AAA PnL +99.00 entries=0 exits=0",
             ]
@@ -360,6 +374,7 @@ def test_results_loader_requires_hash_bound_matching_driver_log(tmp_path):
         "\n".join(
             [
                 f"[STRATEGY_POLICY=intended] sha256={_POLICY_SHA256}",
+                _EXECUTION_SCOPE_ATTESTATION,
                 "final_state=flat",
                 "BUY 1 @ 5.00",
                 "[ARM=intended] AAA PnL -5.00 entries=1 exits=0",
@@ -516,6 +531,7 @@ def test_render_states_zero_ross_credit_and_no_green_gate():
     assert "zero Ross credit" in md
     assert "GREEN" not in md
     assert "Ross-parity evidence" in md
+    assert "Quote freshness uses the replay-sim clock" in md
 
 
 def test_run_binding_rejects_forged_key_config_and_receipt():
@@ -564,7 +580,7 @@ def test_run_binding_rejects_forged_key_config_and_receipt():
         rs.verified_producer_file_sha256(forged_producer)
 
 
-def test_run_binding_rejects_incomplete_or_unattested_strategy_policy():
+def test_run_binding_rejects_incomplete_policy_or_execution_scope():
     manifest, meta, result = _bound_docs()
 
     incomplete_meta = json.loads(json.dumps(meta))
@@ -580,7 +596,10 @@ def test_run_binding_rejects_incomplete_or_unattested_strategy_policy():
         if key not in {"run_identity_sha256", "started_at", "stop_at"}
     }
     incomplete_meta["run_identity_sha256"] = rs._canonical_sha256(run_payload)
-    with pytest.raises(ValueError, match="policy is invalid"):
+    with pytest.raises(
+        ValueError,
+        match="policy/execution scope is invalid",
+    ):
         rs.validate_run_bindings(incomplete_meta, manifest, [result])
 
     numeric_meta = json.loads(json.dumps(meta))
@@ -593,15 +612,80 @@ def test_run_binding_rejects_incomplete_or_unattested_strategy_policy():
         if key not in {"run_identity_sha256", "started_at", "stop_at"}
     }
     numeric_meta["run_identity_sha256"] = rs._canonical_sha256(run_payload)
-    with pytest.raises(ValueError, match="policy is invalid"):
+    with pytest.raises(
+        ValueError,
+        match="policy/execution scope is invalid",
+    ):
         rs.validate_run_bindings(numeric_meta, manifest, [result])
 
     numeric_result = json.loads(json.dumps(result))
     numeric_result["resolved_strategy_policy"]["flags"][
         "chili_momentum_ross_stop_alignment_enabled"
     ] = 1.0
-    with pytest.raises(ValueError, match="result strategy policy is invalid"):
+    with pytest.raises(
+        ValueError,
+        match="result strategy policy/execution scope is invalid",
+    ):
         rs.validate_run_bindings(meta, manifest, [numeric_result])
+
+    missing_scope_meta = json.loads(json.dumps(meta))
+    missing_scope_meta.pop("execution_scope")
+    run_payload = {
+        key: value
+        for key, value in missing_scope_meta.items()
+        if key not in {"run_identity_sha256", "started_at", "stop_at"}
+    }
+    missing_scope_meta["run_identity_sha256"] = rs._canonical_sha256(
+        run_payload
+    )
+    with pytest.raises(ValueError, match="execution scope is invalid"):
+        rs.validate_run_bindings(missing_scope_meta, manifest, [result])
+
+    mutated_scope_meta = json.loads(json.dumps(meta))
+    mutated_scope_meta["execution_scope"][
+        "quote_freshness_clock_mode"
+    ] = "wall"
+    mutated_scope_meta["execution_scope_sha256"] = rs._canonical_sha256(
+        mutated_scope_meta["execution_scope"]
+    )
+    run_payload = {
+        key: value
+        for key, value in mutated_scope_meta.items()
+        if key not in {"run_identity_sha256", "started_at", "stop_at"}
+    }
+    mutated_scope_meta["run_identity_sha256"] = rs._canonical_sha256(
+        run_payload
+    )
+    with pytest.raises(ValueError, match="execution scope is invalid"):
+        rs.validate_run_bindings(mutated_scope_meta, manifest, [result])
+
+    numeric_scope_meta = json.loads(json.dumps(meta))
+    numeric_scope_meta["execution_scope"][
+        "whole_policy_profitability_allowed"
+    ] = 0
+    numeric_scope_meta["execution_scope_sha256"] = rs._canonical_sha256(
+        numeric_scope_meta["execution_scope"]
+    )
+    run_payload = {
+        key: value
+        for key, value in numeric_scope_meta.items()
+        if key not in {"run_identity_sha256", "started_at", "stop_at"}
+    }
+    numeric_scope_meta["run_identity_sha256"] = rs._canonical_sha256(
+        run_payload
+    )
+    with pytest.raises(ValueError, match="execution scope is invalid"):
+        rs.validate_run_bindings(numeric_scope_meta, manifest, [result])
+
+    numeric_scope_result = json.loads(json.dumps(result))
+    numeric_scope_result["execution_scope"][
+        "whole_policy_profitability_allowed"
+    ] = 0
+    with pytest.raises(
+        ValueError,
+        match="result strategy policy/execution scope is invalid",
+    ):
+        rs.validate_run_bindings(meta, manifest, [numeric_scope_result])
 
     missing_child_attestation = dict(result)
     missing_child_attestation["child_strategy_policy_label"] = None
@@ -632,11 +716,63 @@ def test_run_binding_rejects_incomplete_or_unattested_strategy_policy():
                 [aliased_child_attestation],
             )
 
+    missing_child_scope_attestation = dict(result)
+    missing_child_scope_attestation["child_execution_scope_label"] = None
+    missing_child_scope_attestation["child_execution_scope_sha256"] = None
+    missing_child_scope_attestation[
+        "child_execution_scope_attestation_count"
+    ] = 0
+    with pytest.raises(ValueError, match="provenance mismatch"):
+        rs.validate_run_bindings(
+            meta,
+            manifest,
+            [missing_child_scope_attestation],
+        )
+
+    mismatched_child_scope_attestation = dict(result)
+    mismatched_child_scope_attestation[
+        "child_execution_scope_sha256"
+    ] = "9" * 64
+    with pytest.raises(ValueError, match="provenance mismatch"):
+        rs.validate_run_bindings(
+            meta,
+            manifest,
+            [mismatched_child_scope_attestation],
+        )
+
+    duplicated_child_scope_attestation = dict(result)
+    duplicated_child_scope_attestation[
+        "child_execution_scope_attestation_count"
+    ] = 2
+    with pytest.raises(ValueError, match="provenance mismatch"):
+        rs.validate_run_bindings(
+            meta,
+            manifest,
+            [duplicated_child_scope_attestation],
+        )
+
+    for numeric_alias in (True, 1.0):
+        aliased_child_scope_attestation = dict(result)
+        aliased_child_scope_attestation[
+            "child_execution_scope_attestation_count"
+        ] = numeric_alias
+        with pytest.raises(ValueError, match="provenance mismatch"):
+            rs.validate_run_bindings(
+                meta,
+                manifest,
+                [aliased_child_scope_attestation],
+            )
+
     failed_before_attestation = dict(result)
     failed_before_attestation["status"] = "parse_fail"
     failed_before_attestation["child_strategy_policy_label"] = None
     failed_before_attestation["child_strategy_policy_sha256"] = None
     failed_before_attestation["child_strategy_policy_attestation_count"] = 0
+    failed_before_attestation["child_execution_scope_label"] = None
+    failed_before_attestation["child_execution_scope_sha256"] = None
+    failed_before_attestation[
+        "child_execution_scope_attestation_count"
+    ] = 0
     selected = rs.validate_run_bindings(
         meta,
         manifest,
@@ -729,6 +865,7 @@ def test_main_renders_before_atomic_outputs(monkeypatch, tmp_path):
         "\n".join(
             [
                 f"[STRATEGY_POLICY=intended] sha256={_POLICY_SHA256}",
+                _EXECUTION_SCOPE_ATTESTATION,
                 "final_state=flat",
                 "[ARM=intended] AAA PnL +0.00 entries=0 exits=0",
             ]

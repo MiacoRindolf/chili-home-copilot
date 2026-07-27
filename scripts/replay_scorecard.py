@@ -91,8 +91,11 @@ from diagnostic_replay_db import (  # noqa: E402
 from replay_benchmark_batch import (  # noqa: E402
     STRATEGY_ARM_CHOICES,
     canonical_result_log_name,
+    execution_scope_sha256,
     parse_driver_stdout,
+    replay_execution_scope,
     replay_fill_inventory_is_flat,
+    require_scoreable_post_selection_arm,
     resolve_strategy_policy,
     result_key,
     strategy_policy_sha256,
@@ -158,6 +161,9 @@ def _verify_result_log_binding(results_path: str, record: dict) -> None:
         expected_arm=str(record.get("arm") or ""),
         expected_policy_sha256=str(
             record.get("resolved_strategy_policy_sha256") or ""
+        ),
+        expected_execution_scope_sha256=str(
+            record.get("execution_scope_sha256") or ""
         ),
     )
     if (
@@ -333,6 +339,7 @@ def validate_run_bindings(
         "run_identity_sha256",
         "selected_window_set_sha256",
         "resolved_strategy_policy_sha256",
+        "execution_scope_sha256",
     ):
         _require_sha256(meta.get(field), field=f"meta.{field}")
     if re.fullmatch(r"[0-9a-f]{40,64}", str(meta.get("build_sha") or "")) is None:
@@ -340,18 +347,30 @@ def validate_run_bindings(
     if meta.get("arm") not in STRATEGY_ARM_CHOICES:
         raise ValueError("meta.arm is invalid")
     try:
+        require_scoreable_post_selection_arm(meta["arm"])
         resolved_strategy_policy = resolve_strategy_policy(meta["arm"])
         resolved_strategy_policy_sha256 = strategy_policy_sha256(
             meta.get("resolved_strategy_policy")
         )
+        resolved_execution_scope = replay_execution_scope()
+        resolved_execution_scope_sha256 = execution_scope_sha256(
+            meta.get("execution_scope")
+        )
     except ValueError as exc:
-        raise ValueError("meta resolved strategy policy is invalid") from exc
+        raise ValueError(
+            "meta resolved strategy policy/execution scope is invalid"
+        ) from exc
     if (
         meta.get("resolved_strategy_policy") != resolved_strategy_policy
         or meta.get("resolved_strategy_policy_sha256")
         != resolved_strategy_policy_sha256
+        or meta.get("execution_scope") != resolved_execution_scope
+        or meta.get("execution_scope_sha256")
+        != resolved_execution_scope_sha256
     ):
-        raise ValueError("meta resolved strategy policy binding mismatch")
+        raise ValueError(
+            "meta resolved strategy policy/execution-scope binding mismatch"
+        )
     if (
         meta.get("source_backend_sealed") is not False
         or meta.get("child_source_snapshot_pinned") is not False
@@ -495,12 +514,18 @@ def validate_run_bindings(
             record_policy_sha256 = strategy_policy_sha256(
                 record.get("resolved_strategy_policy")
             )
+            record_execution_scope_sha256 = execution_scope_sha256(
+                record.get("execution_scope")
+            )
         except ValueError as exc:
             raise ValueError(
-                f"result strategy policy is invalid for {key}"
+                f"result strategy policy/execution scope is invalid for {key}"
             ) from exc
         child_attestation_count = record.get(
             "child_strategy_policy_attestation_count"
+        )
+        child_execution_scope_attestation_count = record.get(
+            "child_execution_scope_attestation_count"
         )
         if (
             key not in selected_receipts
@@ -534,6 +559,11 @@ def validate_run_bindings(
             or record_policy_sha256 != resolved_strategy_policy_sha256
             or record.get("resolved_strategy_policy_sha256")
             != resolved_strategy_policy_sha256
+            or record.get("execution_scope") != resolved_execution_scope
+            or record_execution_scope_sha256
+            != resolved_execution_scope_sha256
+            or record.get("execution_scope_sha256")
+            != resolved_execution_scope_sha256
             or type(child_attestation_count) is not int
             or child_attestation_count not in {0, 1}
             or (
@@ -554,6 +584,33 @@ def validate_run_bindings(
                     or record.get("child_strategy_policy_sha256")
                     != resolved_strategy_policy_sha256
                     or child_attestation_count != 1
+                )
+            )
+            or type(child_execution_scope_attestation_count) is not int
+            or child_execution_scope_attestation_count not in {0, 1}
+            or (
+                (
+                    record.get("child_execution_scope_label"),
+                    record.get("child_execution_scope_sha256"),
+                    child_execution_scope_attestation_count,
+                )
+                not in {
+                    (None, None, 0),
+                    (
+                        "post-selection-fsm",
+                        resolved_execution_scope_sha256,
+                        1,
+                    ),
+                }
+            )
+            or (
+                record.get("status") == "ok"
+                and (
+                    record.get("child_execution_scope_label")
+                    != "post-selection-fsm"
+                    or record.get("child_execution_scope_sha256")
+                    != resolved_execution_scope_sha256
+                    or child_execution_scope_attestation_count != 1
                 )
             )
             or record.get("source_content_receipt_sha256")
@@ -925,9 +982,10 @@ def render_markdown(sc: dict) -> str:
              f"· GOLDEN=1 · sink "
              f"`{m.get('sink_database_name', m.get('sink', '?'))}`")
     L.append(
-        "- replay policy provenance: complete operator-approved nine-flag "
-        "vector is parent-bound; every successful result is exactly once "
-        "child-attested"
+        "- replay policy provenance: the complete operator-approved nine-flag "
+        "configuration vector is parent-bound and every successful result is "
+        "exactly once child-attested; execution credit is limited by the "
+        "post-selection scope below"
     )
     analyzer_build = (sc.get("analyzer_provenance") or {}).get("build_sha")
     if analyzer_build:
@@ -948,6 +1006,12 @@ def render_markdown(sc: dict) -> str:
              "for same-input deltas; this is not OOS, profitability, or Ross-parity evidence.")
     L.append("- PAPER policy parity is false: this harness neutralizes operational "
              "kill-switch/connectivity/session gates and cannot certify activation behavior.")
+    L.append("- Execution scope is **post-selection FSM only**: symbols are seeded "
+             "`queued_live`; universe-float and catalyst-arb-flat selection are "
+             "not executed, the ordinary entry-risk gate is bypassed, and Ortex "
+             "admission is explicitly neutralized because no captured Ortex-v2 "
+             "authority is present. Quote freshness uses the replay-sim clock. "
+             "Whole-policy profitability is not allowed.")
     L.append("- Source receipts are pre/post boundary observations only. The child "
              "does not consume an exported PostgreSQL snapshot, the backend is not "
              "sealed, and mixed-snapshot races therefore receive no causal credit.")
