@@ -481,15 +481,18 @@ _RECEIPT_MAX_AGE_SECONDS: Mapping[str, int] = MappingProxyType(
         # measured ~8-12 minutes from the shared preactivation capture clock
         # through service startup.  A34 proved that 10 minutes starves both
         # lifecycle_preflight and runtime_settings, which share observed_at.
-        # Their bounded 20-minute windows match database/capture.  Unbounded
+        # A later sealed fire measured the same starvation for refreshed
+        # broker/kill evidence after a successful 252s selection prime and
+        # mandatory authority rehash.  Their bounded 20-minute windows match
+        # database/capture and the manifest/no-order maximum.  Unbounded
         # operator waits still fail closed — receipt staleness IS the fence.
         "runtime_settings": 20 * 60,
-        "broker_account": 10 * 60,
+        "broker_account": 20 * 60,
         "database_schema": 20 * 60,
         "capture_host_smoke": 20 * 60,
         "focused_regressions": 60 * 60,
         "lifecycle_preflight": 20 * 60,
-        "kill_switch": 10 * 60,
+        "kill_switch": 20 * 60,
         "no_order_smoke": 20 * 60,
         "rollback_snapshot": 60 * 60,
     }

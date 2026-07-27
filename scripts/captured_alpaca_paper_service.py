@@ -54,16 +54,15 @@ _SERVICE_SHUTDOWN_SECONDS = 30.0
 _MAX_STARTUP_RECONCILIATION_ROWS = 10_000
 _RESTART_GATE_SCHEMA_VERSION = "chili.captured-paper-restart-gate.v1"
 _NO_ORDER_SMOKE_SCHEMA_VERSION = "chili.captured-paper-readiness.no_order_smoke.v4"
-# 2026-07-17: the post-smoke receipt window must cover the whole
-# finalize -> cutover ValidateOnly/Apply -> tape gate -> ActivatePaper tail
-# (~2-4 minutes observed live).  The prior 30s window made that tail
-# impossible by construction: the final manifest inherits
-# min(sealed.expires_at, no_order_expires_at), so cutover always saw
-# MANIFEST_STALE (first observed on the first-ever green finalize,
-# generation 35c79d11).  10 minutes matches the contract's
-# _RECEIPT_MAX_AGE_SECONDS mid-flow class and stays under the 15-minute
-# manifest-age cap.
-_POST_SMOKE_RECEIPT_WINDOW_SECONDS = 10 * 60
+# The post-smoke window covers finalize, cutover, composition, the bounded
+# broker-incapable selection prime, and the final authority rehash.  The
+# 2026-07-27 sealed fire measured a successful 252s prime that left the old
+# 10-minute evidence window too short for the mandatory rehash.  Twenty
+# minutes matches the existing manifest/no-order maximum.  This transports
+# sealed startup evidence only: exact PAPER account, broker order/fill fixed
+# point, kill switch, launcher/cutover identity, and host permit are still
+# rechecked immediately before any order-capable worker.
+_POST_SMOKE_RECEIPT_WINDOW_SECONDS = 20 * 60
 _SERVICE_SINGLETON_NAME = "Global\\CHILI-Captured-Alpaca-PAPER-SERVICE-OWNER"
 _LAUNCH_ATTESTATION_SCHEMA_VERSION = (
     "chili.captured-paper-launcher-cutover-attestation.v1"

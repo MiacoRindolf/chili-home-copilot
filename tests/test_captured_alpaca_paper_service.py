@@ -896,6 +896,27 @@ def _refreshed_readiness(
     return {kind: dict(value) for kind, value in result.items()}
 
 
+def test_post_smoke_live_bound_receipts_cover_measured_startup_and_stay_bounded(
+    tmp_path: Path,
+) -> None:
+    documents = _refreshed_readiness(
+        _preactivation(tmp_path),
+        _paper_broker_snapshot(
+            _PaperAdapter(),
+            verified=_verified_stub(),
+            purpose="post_smoke_window",
+            wall_clock=lambda: NOW,
+        ),
+    )
+
+    for kind in ("broker_account", "kill_switch"):
+        captured_at = datetime.fromisoformat(documents[kind]["captured_at"])
+        expires_at = datetime.fromisoformat(documents[kind]["expires_at"])
+        assert expires_at - captured_at == timedelta(minutes=20)
+        assert captured_at + timedelta(minutes=15) < expires_at
+        assert captured_at + timedelta(minutes=20) == expires_at
+
+
 def test_paper_broker_snapshot_binds_fresh_flat_exact_generation() -> None:
     result = _paper_broker_snapshot(
         _PaperAdapter(),
