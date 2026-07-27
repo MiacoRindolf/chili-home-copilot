@@ -38,6 +38,7 @@ from app.services.trading.momentum_neural.replay_capture_runtime import (
     ContentAddressedCaptureStore,
     ReadOnlyV4CaptureStore,
     ReplayNetworkGuard,
+    SharedCaptureAdmissionBudget,
     load_verified_replay_capture_v4,
 )
 
@@ -524,6 +525,102 @@ def test_sustained_write_budget_rejects_without_blocking_and_emits_gap() -> None
         + 1
     )
     assert ingress.submit(_event(rejected_sequence + 1)) is True
+
+
+def test_retained_shared_admission_retry_does_not_consume_or_gap() -> None:
+    binding = _binding()
+    clock = _Clock()
+    shared = SharedCaptureAdmissionBudget.from_resource_binding(
+        binding,
+        monotonic_clock=clock,
+    )
+    ingress = BoundedCaptureIngress.from_resource_binding(
+        binding,
+        shared_admission_budget=shared,
+        monotonic_clock=clock,
+    )
+    target = _event(1)
+    filler = _event(1, identity=_identity(2))
+    target_size = target.canonical_size_bytes
+    filler_size = binding.budget.async_queue_bytes - target_size + 1
+    assert shared.try_admit(filler, filler_size) is None
+
+    rejected = ingress.try_submit_retained(target)
+
+    assert rejected.accepted is False
+    assert rejected.retryable is True
+    assert (
+        rejected.rejection_reason
+        == "shared_capture_write_bandwidth_budget_exceeded"
+    )
+    assert rejected.event_sha256 == target.event_sha256
+    assert ingress.health()["submitted"] == 0
+    assert ingress.health()["accepted"] == 0
+    assert ingress.health()["dropped"] == 0
+    assert ingress.health()["pending_gap_keys"] == 0
+
+    shared.complete((filler,))
+    clock.now += 1.0
+    accepted = ingress.try_submit_retained(target)
+
+    assert accepted.accepted is True
+    assert accepted.retryable is False
+    assert accepted.rejection_reason is None
+    assert ingress.health()["submitted"] == 1
+    assert ingress.health()["accepted"] == 1
+    assert ingress.health()["dropped"] == 0
+    batch = ingress.pop_batch(
+        max_events=1,
+        max_bytes=binding.budget.async_queue_bytes,
+        timeout_seconds=0,
+    )
+    assert batch.events == (target,)
+    assert batch.gaps == ()
+    ingress.complete_shared_admission(batch.events)
+
+
+def test_retained_rejection_terminalizes_once_with_exact_reason() -> None:
+    binding = _binding()
+    clock = _Clock()
+    shared = SharedCaptureAdmissionBudget.from_resource_binding(
+        binding,
+        monotonic_clock=clock,
+    )
+    ingress = BoundedCaptureIngress.from_resource_binding(
+        binding,
+        shared_admission_budget=shared,
+        monotonic_clock=clock,
+    )
+    target = _event(1)
+    filler = _event(1, identity=_identity(2))
+    target_size = target.canonical_size_bytes
+    filler_size = binding.budget.async_queue_bytes - target_size + 1
+    assert shared.try_admit(filler, filler_size) is None
+    rejected = ingress.try_submit_retained(target)
+    assert ingress.drained is False
+    ingress.close()
+    assert ingress.clean_close_eligible is False
+
+    ingress.finalize_retained_rejection(target, rejected)
+
+    health = ingress.health()
+    assert health["submitted"] == 1
+    assert health["accepted"] == 0
+    assert health["dropped"] == 1
+    assert health["write_bandwidth_dropped"] == 1
+    assert health["pending_gap_keys"] == 1
+    batch = ingress.pop_batch(
+        max_events=1,
+        max_bytes=binding.budget.async_queue_bytes,
+        timeout_seconds=0,
+    )
+    assert batch.events == ()
+    assert len(batch.gaps) == 1
+    assert batch.gaps[0][1].reason == rejected.rejection_reason
+    assert batch.gaps[0][1].lost_count == 1
+    assert ingress.drained is True
+    assert ingress.clean_close_eligible is True
+    shared.complete((filler,))
 
 
 def test_store_logs_resource_hashes_and_fails_closed_on_disk_reserve(tmp_path) -> None:

@@ -68,6 +68,21 @@ SOURCE_SETTINGS = {"viability_setting": 0.75}
 SOURCE_SETTINGS_SHA = sha256_json(SOURCE_SETTINGS)
 
 
+class _RetainedDeadlineClock:
+    def __init__(self, *, step: float) -> None:
+        self.now = 0.0
+        self.step = step
+        self.armed = False
+
+    def __call__(self) -> float:
+        if self.armed:
+            self.now += self.step
+        return self.now
+
+    def arm(self, _reason: str) -> None:
+        self.armed = True
+
+
 def _not_applied_proof() -> dict[str, object]:
     body: dict[str, object] = {
         "schema_version": (
@@ -294,6 +309,8 @@ class _FakePublisher:
         authority: CapturedPaperSelectionAuthority,
         *,
         auto_durable: bool,
+        retained_rejection_reasons: list[str] | None = None,
+        retained_rejection_hook=None,
     ) -> None:
         self.selection_authority = authority
         self.identity = CaptureRunIdentity(
@@ -315,6 +332,11 @@ class _FakePublisher:
         self.reserved_sequence: int | None = None
         self.poisoned = False
         self.poison_reason: str | None = None
+        self.retained_rejection_reasons = list(
+            retained_rejection_reasons or ()
+        )
+        self.admission_callback_reasons: list[str | None] = []
+        self.retained_rejection_hook = retained_rejection_hook
 
     def reserve_sequence(self) -> int:
         assert self.reserved_sequence is None
@@ -327,7 +349,13 @@ class _FakePublisher:
         before_ingress_admission = kwargs.get("before_ingress_admission")
         if before_ingress_admission is not None:
             assert callable(before_ingress_admission)
-            before_ingress_admission(None, 0)
+            self.admission_callback_reasons.append(None)
+            before_ingress_admission(None, 0, None)
+            for reason in self.retained_rejection_reasons:
+                self.admission_callback_reasons.append(reason)
+                if self.retained_rejection_hook is not None:
+                    self.retained_rejection_hook(reason)
+                before_ingress_admission(None, 0, reason)
         self.accepted_through = int(self.reserved_sequence or 0)
         self.reserved_sequence = None
         if self.auto_durable:
@@ -513,6 +541,8 @@ class _Harness:
         source_unavailable_before_prime_reads: int = 0,
         wait_for_initial_pressure: bool = False,
         pressure_health_sequence: list[dict[str, object]] | None = None,
+        retained_rejection_reasons: list[str] | None = None,
+        retained_rejection_hook=None,
     ) -> None:
         self.setup = _application_setup()
         self.runtime = _FakeSharedRuntime(
@@ -569,6 +599,8 @@ class _Harness:
                 self.runtime,
                 setup.authority,
                 auto_durable=self.auto_durable,
+                retained_rejection_reasons=retained_rejection_reasons,
+                retained_rejection_hook=retained_rejection_hook,
             )
             startup_cleanup.register(
                 "writer_lease",
@@ -995,6 +1027,65 @@ def test_pressure_return_inside_publish_waits_before_ingress_submit(
     assert health_calls >= 7
     assert accepted_through == 1
     assert poisoned is False
+
+
+def test_retained_initial_ingress_retries_without_rereading_source(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(_WARMUP_POLL_TARGET, 0.001)
+    reason = "shared_capture_write_bandwidth_budget_exceeded"
+    harness = _Harness(
+        tmp_path,
+        initial_snapshot_warmup_seconds=1.0,
+        wait_for_initial_pressure=True,
+        pressure_health_sequence=[_pressure_health(clean=True)],
+        retained_rejection_reasons=[reason],
+    )
+
+    harness.worker.start()
+
+    assert harness.source is not None
+    assert harness.source.read_count == 1
+    assert harness.log.count("source_build") == 1
+    assert harness.publisher is not None
+    assert harness.publisher.admission_callback_reasons == [None, reason]
+    assert harness.publisher.accepted_through == 1
+    assert harness.publisher.poisoned is False
+    harness.worker.close(join_timeout_seconds=1.0)
+
+
+def test_retained_initial_ingress_deadline_preserves_exact_reason(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(_WARMUP_POLL_TARGET, 0.001)
+    reason = "shared_capture_write_bandwidth_budget_exceeded"
+    clock = _RetainedDeadlineClock(step=0.1)
+    harness = _Harness(
+        tmp_path,
+        monotonic_clock=clock,
+        initial_snapshot_warmup_seconds=1.0,
+        wait_for_initial_pressure=True,
+        pressure_health_sequence=[_pressure_health(clean=True)],
+        retained_rejection_reasons=[reason] * 20,
+        retained_rejection_hook=clock.arm,
+    )
+
+    with pytest.raises(CapturedPaperSelectionRuntimeError) as failure:
+        harness.worker.start()
+
+    assert failure.value.code == "INITIAL_INGRESS_ADMISSION_UNAVAILABLE"
+    assert reason in str(failure.value)
+    assert harness.source is not None
+    assert harness.source.read_count == 1
+    assert harness.log.count("source_build") == 1
+    assert harness.publisher is not None
+    assert harness.publisher.admission_callback_reasons[0] is None
+    assert set(harness.publisher.admission_callback_reasons[1:]) == {reason}
+    assert harness.publisher.accepted_through == 0
+    assert harness.publisher.poisoned is True
+    assert harness.publisher.poison_reason == "selection_source_batch_incomplete"
 
 
 def test_initial_multi_snapshot_batch_waits_again_before_each_publish(

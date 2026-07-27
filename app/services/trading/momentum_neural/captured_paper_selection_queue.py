@@ -887,6 +887,7 @@ class CapturedPaperSelectionQueuePublisher:
         self.monotonic_clock = monotonic_clock
         self._lock = threading.RLock()
         self._reserved_sequence: int | None = None
+        self._active_publish_event_sha256: str | None = None
         self._accepted_through = (
             chain[-1].commit.event_sequence_through if chain else 0
         )
@@ -929,6 +930,48 @@ class CapturedPaperSelectionQueuePublisher:
             self._reserved_sequence = self._accepted_through + 1
             return self._reserved_sequence
 
+    def _finish_publish(
+        self,
+        *,
+        bundle: CapturedViabilityInputBundle,
+        event_sha256: str,
+        score_result: CapturedViabilityScoreResult,
+        accepted: bool,
+        rejection_reason: str | None = None,
+    ) -> CapturedPaperSelectionQueuePublishReceipt:
+        with self._lock:
+            if (
+                self._reserved_sequence != bundle.source_sequence
+                or self._accepted_through + 1 != bundle.source_sequence
+                or self._active_publish_event_sha256
+                not in (None, event_sha256)
+            ):
+                _fail("queue publish reservation changed before receipt")
+            receipt = CapturedPaperSelectionQueuePublishReceipt(
+                source_sequence=bundle.source_sequence,
+                bundle_sha256=bundle.bundle_sha256,
+                event_sha256=event_sha256,
+                score_result=score_result,
+                accepted=accepted,
+            )
+            self._reserved_sequence = None
+            self._active_publish_event_sha256 = None
+            if not accepted:
+                self._poisoned = True
+                self._poison_reason = (
+                    f"queue_ingress_rejected:{rejection_reason}"
+                    if rejection_reason is not None
+                    else "queue_ingress_rejected"
+                )
+                return receipt
+            if self._accepted_through == self._durable_through:
+                pending_at = float(self.monotonic_clock())
+                if not math.isfinite(pending_at):
+                    _fail("queue monotonic clock returned a non-finite value")
+                self._pending_since_monotonic = pending_at
+            self._accepted_through = bundle.source_sequence
+            return receipt
+
     def publish_bundle(
         self,
         *,
@@ -936,7 +979,9 @@ class CapturedPaperSelectionQueuePublisher:
         scoring_authority: CapturedViabilityScoringAuthority,
         evaluation_at: datetime,
         source_events: Sequence[CaptureEvent],
-        before_ingress_admission: Callable[[CaptureEvent, int], None] | None = None,
+        before_ingress_admission: (
+            Callable[[CaptureEvent, int, str | None], None] | None
+        ) = None,
     ) -> CapturedPaperSelectionQueuePublishReceipt:
         """Validate, score, and enqueue one complete immutable input envelope."""
 
@@ -947,6 +992,8 @@ class CapturedPaperSelectionQueuePublisher:
         with self._lock:
             if self._poisoned:
                 _fail("queue generation is poisoned")
+            if self._active_publish_event_sha256 is not None:
+                _fail("queue already has an active retained publish")
             if type(bundle) is not CapturedViabilityInputBundle:
                 _fail("queue bundle is not the exact typed contract")
             if type(scoring_authority) is not CapturedViabilityScoringAuthority:
@@ -1021,29 +1068,82 @@ class CapturedPaperSelectionQueuePublisher:
             # are cached, immediately before the non-blocking ingress boundary.
             # Normal hot-path callers supply no callback and remain non-blocking.
             event_size = queue_event.canonical_size_bytes
-            _ = queue_event.event_sha256
-            if before_ingress_admission is not None:
-                before_ingress_admission(queue_event, event_size)
-            accepted = self.ingress.submit(queue_event)
-            receipt = CapturedPaperSelectionQueuePublishReceipt(
-                source_sequence=bundle.source_sequence,
-                bundle_sha256=bundle.bundle_sha256,
-                event_sha256=queue_event.event_sha256,
-                score_result=score_result,
-                accepted=accepted,
-            )
-            self._reserved_sequence = None
-            if not accepted:
-                self._poisoned = True
-                self._poison_reason = "queue_ingress_rejected"
-                return receipt
-            if self._accepted_through == self._durable_through:
-                pending_at = float(self.monotonic_clock())
-                if not math.isfinite(pending_at):
-                    _fail("queue monotonic clock returned a non-finite value")
-                self._pending_since_monotonic = pending_at
-            self._accepted_through = bundle.source_sequence
-            return receipt
+            event_sha256 = queue_event.event_sha256
+            if before_ingress_admission is None:
+                accepted = self.ingress.submit(queue_event)
+                return self._finish_publish(
+                    bundle=bundle,
+                    event_sha256=event_sha256,
+                    score_result=score_result,
+                    accepted=accepted,
+                )
+            self._active_publish_event_sha256 = event_sha256
+
+        rejection_reason: str | None = None
+        last_attempt = None
+        while True:
+            try:
+                before_ingress_admission(
+                    queue_event,
+                    event_size,
+                    rejection_reason,
+                )
+            except BaseException:
+                with self._lock:
+                    if last_attempt is not None:
+                        self.ingress.finalize_retained_rejection(
+                            queue_event,
+                            last_attempt,
+                        )
+                        self._reserved_sequence = None
+                        self._poisoned = True
+                        self._poison_reason = (
+                            "queue_ingress_rejected:"
+                            f"{last_attempt.rejection_reason}"
+                        )
+                    self._active_publish_event_sha256 = None
+                raise
+            with self._lock:
+                if (
+                    self._poisoned
+                    or self._active_publish_event_sha256 != event_sha256
+                    or self._reserved_sequence != bundle.source_sequence
+                    or self._accepted_through + 1 != bundle.source_sequence
+                ):
+                    if last_attempt is not None:
+                        self.ingress.finalize_retained_rejection(
+                            queue_event,
+                            last_attempt,
+                        )
+                        self._poisoned = True
+                        self._poison_reason = (
+                            "queue_ingress_rejected:"
+                            f"{last_attempt.rejection_reason}"
+                        )
+                    self._active_publish_event_sha256 = None
+                    _fail("queue publish reservation changed during admission")
+                attempt = self.ingress.try_submit_retained(queue_event)
+                if attempt.accepted:
+                    return self._finish_publish(
+                        bundle=bundle,
+                        event_sha256=event_sha256,
+                        score_result=score_result,
+                        accepted=True,
+                    )
+                last_attempt = attempt
+                if not attempt.retryable:
+                    self.ingress.finalize_retained_rejection(
+                        queue_event,
+                        attempt,
+                    )
+                    return self._finish_publish(
+                        bundle=bundle,
+                        event_sha256=event_sha256,
+                        score_result=score_result,
+                        accepted=False,
+                        rejection_reason=attempt.rejection_reason,
+                    )
+                rejection_reason = attempt.rejection_reason
 
     def heartbeat(self, *, watermark_at: datetime) -> CapturedPaperSelectionQueueHealth:
         with self._lock:
@@ -1059,6 +1159,8 @@ class CapturedPaperSelectionQueuePublisher:
     def poison(self, reason: str) -> CapturedPaperSelectionQueuePoisonReceipt:
         normalized = _reason(reason)
         with self._lock:
+            if self._active_publish_event_sha256 is not None:
+                _fail("queue poison cannot race an active retained publish")
             if self._poison_receipt is not None:
                 if self._poison_receipt.reason != normalized:
                     _fail("queue poison reason changed after terminalization")
@@ -1066,6 +1168,7 @@ class CapturedPaperSelectionQueuePublisher:
             now = _utc(self.wall_clock(), "queue poison wall clock")
             reserved = self._reserved_sequence
             self._reserved_sequence = None
+            self._active_publish_event_sha256 = None
             self._poisoned = True
             self._poison_reason = normalized
             accepted = self.ingress.submit_gap(

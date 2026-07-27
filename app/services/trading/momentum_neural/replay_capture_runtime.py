@@ -2359,6 +2359,38 @@ class IngressBatch:
     gaps: tuple[tuple[CaptureRunIdentity, CoverageGap], ...]
 
 
+@dataclass(frozen=True, slots=True)
+class CaptureIngressRetainedAttempt:
+    """One non-consuming admission result for an already-built event."""
+
+    event_sha256: str
+    canonical_size_bytes: int
+    attempt_token: int
+    accepted: bool
+    retryable: bool
+    rejection_reason: str | None
+
+    def __post_init__(self) -> None:
+        _validated_sha256(self.event_sha256, "retained admission event")
+        if self.canonical_size_bytes <= 0 or self.attempt_token <= 0:
+            raise CaptureContractError(
+                "retained admission attempt counters must be positive"
+            )
+        if type(self.accepted) is not bool or type(self.retryable) is not bool:
+            raise CaptureContractError(
+                "retained admission attempt flags are malformed"
+            )
+        if self.accepted:
+            if self.retryable or self.rejection_reason is not None:
+                raise CaptureContractError(
+                    "accepted retained admission cannot carry rejection state"
+                )
+        elif not str(self.rejection_reason or "").strip():
+            raise CaptureContractError(
+                "rejected retained admission requires an exact reason"
+            )
+
+
 class SharedCaptureAdmissionBudget:
     """One measured aggregate queue/write budget shared across run identities.
 
@@ -2459,9 +2491,19 @@ class SharedCaptureAdmissionBudget:
             + elapsed * self.sustained_write_budget_bytes_per_second,
         )
 
-    def try_admit(self, event: CaptureEvent, size: int) -> str | None:
+    def try_admit(
+        self,
+        event: CaptureEvent,
+        size: int,
+        *,
+        record_rejection: bool = True,
+    ) -> str | None:
         if not isinstance(event, CaptureEvent) or int(size) <= 0:
             raise CaptureContractError("shared admission event is malformed")
+        if type(record_rejection) is not bool:
+            raise CaptureContractError(
+                "shared admission rejection accounting flag is malformed"
+            )
         identity = event.identity.identity_sha256
         with self._lock:
             if event.event_sha256 in self._reservations:
@@ -2492,8 +2534,18 @@ class SharedCaptureAdmissionBudget:
                     self._write_tokens -= int(size)
                     self._admitted += 1
                     return None
-            self._rejections[reason] += 1
+            if record_rejection:
+                self._rejections[reason] += 1
             return reason
+
+    def record_rejection(self, reason: str) -> None:
+        normalized = str(reason or "").strip()
+        if not normalized.startswith("shared_capture_"):
+            raise CaptureContractError(
+                "shared admission rejection reason is malformed"
+            )
+        with self._lock:
+            self._rejections[normalized] += 1
 
     def _release(self, events: Iterable[CaptureEvent], *, failed: bool) -> None:
         with self._lock:
@@ -2656,6 +2708,10 @@ class BoundedCaptureIngress:
         self._identity_sha256: str | None = None
         self._sequence_min: int | None = None
         self._sequence_max: int | None = None
+        self._retained_attempt_nonce = 0
+        self._retained_rejections: dict[
+            str, CaptureIngressRetainedAttempt
+        ] = {}
         self._condition = threading.Condition(threading.RLock())
 
     @classmethod
@@ -2821,6 +2877,199 @@ class BoundedCaptureIngress:
             )
         )
         self._dropped += 1
+
+    @staticmethod
+    def _retained_rejection_is_retryable(reason: str) -> bool:
+        if reason in {
+            "capture_resource_pressure_sample_clock_invalid",
+            "shared_capture_resource_pressure_sample_clock_invalid",
+        }:
+            return False
+        return bool(
+            reason.startswith("capture_resource_pressure_")
+            or reason.startswith("shared_capture_resource_pressure_")
+            or reason
+            in {
+                "capture_write_bandwidth_budget_exceeded",
+                "capture_queue_overflow",
+                "shared_capture_write_bandwidth_budget_exceeded",
+                "shared_capture_queue_overflow",
+            }
+        )
+
+    def _retained_attempt(
+        self,
+        event: CaptureEvent,
+        *,
+        size: int,
+        accepted: bool,
+        rejection_reason: str | None,
+    ) -> CaptureIngressRetainedAttempt:
+        self._retained_attempt_nonce += 1
+        attempt = CaptureIngressRetainedAttempt(
+            event_sha256=event.event_sha256,
+            canonical_size_bytes=size,
+            attempt_token=self._retained_attempt_nonce,
+            accepted=accepted,
+            retryable=bool(
+                rejection_reason is not None
+                and self._retained_rejection_is_retryable(rejection_reason)
+            ),
+            rejection_reason=rejection_reason,
+        )
+        if accepted:
+            self._retained_rejections.pop(event.event_sha256, None)
+        else:
+            self._retained_rejections[event.event_sha256] = attempt
+        return attempt
+
+    def try_submit_retained(
+        self,
+        event: CaptureEvent,
+    ) -> CaptureIngressRetainedAttempt:
+        """Try one admission without consuming a transient rejection.
+
+        This is reserved for the already-owned initial selection occurrence.
+        The caller may retry the same immutable event while its existing
+        startup deadline remains live, then must terminalize the last exact
+        rejection. Ordinary capture producers continue to use ``submit``.
+        """
+
+        if not isinstance(event, CaptureEvent):
+            raise CaptureContractError("retained capture event is malformed")
+        size = approximate_event_bytes(event)
+        with self._condition:
+            identity_sha256 = event.identity.identity_sha256
+            if self._identity_sha256 not in (None, identity_sha256):
+                raise CaptureContractError("capture ingress cannot mix run identities")
+            self._identity_sha256 = identity_sha256
+            if self._finalized:
+                raise CaptureContractError(
+                    "capture ingress is durably finalized; late submissions are forbidden"
+                )
+            if any(
+                queued.event_sha256 == event.event_sha256
+                for queued, _queued_size in self._queue
+            ):
+                raise CaptureContractError(
+                    "retained capture event was already admitted"
+                )
+            rejection_reason: str | None = None
+            if self._closed:
+                rejection_reason = "capture_ingress_closed"
+            else:
+                pressure_rejection = (
+                    self.pressure_controller.rejection_reason
+                    if self.pressure_controller is not None
+                    else None
+                )
+                if pressure_rejection is not None:
+                    rejection_reason = pressure_rejection
+                elif size > self.max_bytes:
+                    rejection_reason = "capture_event_exceeds_queue_byte_budget"
+                else:
+                    self._refresh_write_tokens()
+                    if (
+                        self.shared_admission_budget is None
+                        and self.sustained_write_budget_bytes_per_second is not None
+                        and size > self._write_tokens
+                    ):
+                        rejection_reason = (
+                            "capture_write_bandwidth_budget_exceeded"
+                        )
+                    elif (
+                        len(self._queue) >= self.max_events
+                        or self._queued_bytes + size > self.max_bytes
+                    ):
+                        rejection_reason = "capture_queue_overflow"
+                    elif self.shared_admission_budget is not None:
+                        rejection_reason = self.shared_admission_budget.try_admit(
+                            event,
+                            size,
+                            record_rejection=False,
+                        )
+            if rejection_reason is not None:
+                return self._retained_attempt(
+                    event,
+                    size=size,
+                    accepted=False,
+                    rejection_reason=rejection_reason,
+                )
+            self._submitted += 1
+            self._record_submission_sequence(event.sequence)
+            self._queue.append((event, size))
+            self._queued_bytes += size
+            self._accepted += 1
+            if (
+                self.shared_admission_budget is None
+                and self.sustained_write_budget_bytes_per_second is not None
+            ):
+                self._write_tokens -= size
+            self._accepted_event_accumulator_sha256 = _event_accumulator_add(
+                self._accepted_event_accumulator_sha256, event
+            )
+            attempt = self._retained_attempt(
+                event,
+                size=size,
+                accepted=True,
+                rejection_reason=None,
+            )
+            self._condition.notify()
+            return attempt
+
+    def finalize_retained_rejection(
+        self,
+        event: CaptureEvent,
+        attempt: CaptureIngressRetainedAttempt,
+    ) -> None:
+        """Consume one exact retained rejection and emit one terminal gap."""
+
+        if not isinstance(event, CaptureEvent) or not isinstance(
+            attempt, CaptureIngressRetainedAttempt
+        ):
+            raise CaptureContractError(
+                "retained capture rejection terminalization is malformed"
+            )
+        if (
+            attempt.accepted
+            or attempt.event_sha256 != event.event_sha256
+            or attempt.canonical_size_bytes != approximate_event_bytes(event)
+        ):
+            raise CaptureContractError(
+                "retained capture rejection does not match the exact event"
+            )
+        with self._condition:
+            current = self._retained_rejections.get(event.event_sha256)
+            if current != attempt:
+                raise CaptureContractError(
+                    "retained capture rejection is stale or already terminal"
+                )
+            if self._finalized:
+                raise CaptureContractError(
+                    "capture ingress is durably finalized; late gaps are forbidden"
+                )
+            identity_sha256 = event.identity.identity_sha256
+            if self._identity_sha256 != identity_sha256:
+                raise CaptureContractError(
+                    "retained capture rejection identity mismatch"
+                )
+            self._retained_rejections.pop(event.event_sha256)
+            self._submitted += 1
+            self._record_submission_sequence(event.sequence)
+            reason = str(attempt.rejection_reason)
+            if reason == "capture_ingress_closed":
+                self._post_close_submissions += 1
+            if "write_bandwidth" in reason:
+                self._write_bandwidth_dropped += 1
+            if "pressure" in reason:
+                self._resource_pressure_dropped += 1
+            if (
+                reason.startswith("shared_capture_")
+                and self.shared_admission_budget is not None
+            ):
+                self.shared_admission_budget.record_rejection(reason)
+            self._record_gap(event, reason)
+            self._condition.notify()
 
     def submit(self, event: CaptureEvent) -> bool:
         """Return immediately; false always creates pending gap evidence."""
@@ -3043,7 +3292,11 @@ class BoundedCaptureIngress:
     @property
     def drained(self) -> bool:
         with self._condition:
-            return not self._queue and not self._gaps
+            return bool(
+                not self._queue
+                and not self._gaps
+                and not self._retained_rejections
+            )
 
     @property
     def closed(self) -> bool:
@@ -3057,6 +3310,7 @@ class BoundedCaptureIngress:
                 self._closed
                 and self._writer_failure_count == 0
                 and self._post_close_submissions == 0
+                and not self._retained_rejections
                 and not self._queue
                 and not self._gaps
                 and (
@@ -3095,6 +3349,10 @@ class BoundedCaptureIngress:
             if self._writer_failure_count:
                 raise CaptureContractError(
                     "capture writer failure makes lifecycle permanently dirty"
+                )
+            if self._retained_rejections:
+                raise CaptureContractError(
+                    "capture ingress has unterminated retained admissions"
                 )
             if self._queue or self._gaps or self._queued_bytes:
                 raise CaptureContractError(
@@ -3159,6 +3417,7 @@ class BoundedCaptureIngress:
                 "queued_events": len(self._queue),
                 "queued_bytes": self._queued_bytes,
                 "pending_gap_keys": len(self._gaps),
+                "pending_retained_admissions": len(self._retained_rejections),
                 "closed": self._closed,
                 "finalized": self._finalized,
                 "sequence_min": self._sequence_min,
@@ -3200,6 +3459,7 @@ class BoundedCaptureIngress:
                 "queued_events": len(self._queue),
                 "queued_bytes": self._queued_bytes,
                 "pending_gap_keys": len(self._gaps),
+                "pending_retained_admissions": len(self._retained_rejections),
                 "closed": self._closed,
                 "finalized": self._finalized,
                 "post_close_submissions": self._post_close_submissions,
@@ -3212,6 +3472,7 @@ class BoundedCaptureIngress:
                     self._closed
                     and self._writer_failure_count == 0
                     and self._post_close_submissions == 0
+                    and not self._retained_rejections
                     and not self._queue
                     and not self._gaps
                     and (

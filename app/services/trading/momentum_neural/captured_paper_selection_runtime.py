@@ -1005,6 +1005,65 @@ class CapturedPaperSelectionLifecycleWorker:
                 f"initial selection pressure returned {phase} ({detail})",
             )
 
+    def _wait_for_initial_ingress_retry(
+        self,
+        components: CapturedPaperSelectionRuntimeComponents,
+        *,
+        deadline: float | None,
+        rejection_reason: str,
+    ) -> None:
+        reason = str(rejection_reason or "").strip()
+        if not reason:
+            _reject(
+                "INITIAL_INGRESS_ADMISSION_INVALID",
+                "retained initial ingress rejection has no exact reason",
+            )
+        if deadline is None:
+            _reject(
+                "INITIAL_INGRESS_ADMISSION_UNAVAILABLE",
+                "initial selection ingress rejected the retained occurrence "
+                f"without a live startup deadline ({reason})",
+            )
+        self._assert_fence()
+        try:
+            self._wait_for_initial_pressure(components, deadline=deadline)
+        except CapturedPaperSelectionRuntimeError as exc:
+            if exc.code == "INITIAL_INGRESS_PRESSURE_UNAVAILABLE":
+                _reject(
+                    "INITIAL_INGRESS_ADMISSION_UNAVAILABLE",
+                    "initial selection ingress remained unavailable before its "
+                    f"shared startup deadline ({reason}; {exc})",
+                )
+            raise
+        now = float(self.monotonic_clock())
+        if (
+            self._stop_event.is_set()
+            or not math.isfinite(now)
+            or now >= deadline
+        ):
+            _reject(
+                "INITIAL_INGRESS_ADMISSION_UNAVAILABLE",
+                "initial selection ingress remained unavailable before its "
+                f"shared startup deadline ({reason})",
+            )
+        self._stop_event.wait(
+            min(
+                _INITIAL_SNAPSHOT_WARMUP_POLL_SECONDS,
+                max(0.0, deadline - now),
+            )
+        )
+        after_wait = float(self.monotonic_clock())
+        if (
+            self._stop_event.is_set()
+            or not math.isfinite(after_wait)
+            or after_wait >= deadline
+        ):
+            _reject(
+                "INITIAL_INGRESS_ADMISSION_UNAVAILABLE",
+                "initial selection ingress remained unavailable before its "
+                f"shared startup deadline ({reason})",
+            )
+
     def _publisher_health(self) -> dict[str, Any]:
         components = self._components
         if components is None:
@@ -1063,6 +1122,16 @@ class CapturedPaperSelectionLifecycleWorker:
         components = self._components
         if components is None or not self._writer_started:
             return
+        try:
+            publisher_health = _health_mapping(
+                components.publisher.health(),
+                "queue publisher",
+            )
+            if publisher_health.get("poisoned"):
+                return
+        except Exception:
+            # Health ambiguity cannot suppress the original poison attempt.
+            pass
         try:
             components.publisher.poison(reason)
         except Exception:
@@ -1173,8 +1242,15 @@ class CapturedPaperSelectionLifecycleWorker:
                     def before_ingress_admission(
                         _event: Any,
                         _event_size: int,
+                        rejection_reason: str | None,
                     ) -> None:
-                        if initial_cycle_deadline is None:
+                        if rejection_reason is not None:
+                            self._wait_for_initial_ingress_retry(
+                                components,
+                                deadline=initial_cycle_deadline,
+                                rejection_reason=rejection_reason,
+                            )
+                        elif initial_cycle_deadline is None:
                             self._assert_initial_pressure_clean(
                                 components,
                                 phase="immediately before ingress admission",

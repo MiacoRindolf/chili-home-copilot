@@ -4,6 +4,7 @@ from dataclasses import dataclass, replace
 from datetime import datetime, timedelta, timezone
 import hashlib
 from pathlib import Path
+import time
 import uuid
 
 import pytest
@@ -60,6 +61,14 @@ UTC = timezone.utc
 BASE = datetime(2026, 7, 18, 16, 0, tzinfo=UTC)
 ACCOUNT_ID = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
 GENERATION = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"
+
+
+class _Clock:
+    def __init__(self) -> None:
+        self.now = 0.0
+
+    def __call__(self) -> float:
+        return self.now
 
 
 def _digest(value: str) -> str:
@@ -360,12 +369,16 @@ def _harness(
     tmp_path: Path,
     *,
     max_queue_events: int = 100,
+    monotonic_clock=time.monotonic,
 ) -> _Harness:
     bundle, scoring, events, selection, queue_identity = _source_bundle(
         source_sequence=1
     )
     binding = _resource_binding(max_queue_events=max_queue_events)
-    shared = SharedCaptureAdmissionBudget.from_resource_binding(binding)
+    shared = SharedCaptureAdmissionBudget.from_resource_binding(
+        binding,
+        monotonic_clock=monotonic_clock,
+    )
     manager = SharedCaptureStoreRuntime.create(
         tmp_path / "captured-selection-queue",
         resource_binding=binding,
@@ -375,6 +388,7 @@ def _harness(
     ingress = BoundedCaptureIngress.from_resource_binding(
         binding,
         shared_admission_budget=shared,
+        monotonic_clock=monotonic_clock,
     )
     lease = manager.acquire(queue_identity)
     now = bundle.read_at + timedelta(seconds=1)
@@ -383,6 +397,7 @@ def _harness(
         ingress=ingress,
         selection_authority=selection,
         wall_clock=lambda: now,
+        monotonic_clock=monotonic_clock,
     )
     writer = CapturedPaperSelectionQueueWriter(
         publisher=publisher,
@@ -438,7 +453,12 @@ def test_before_ingress_admission_runs_after_event_cost_and_before_submit(
     assert harness.publisher.reserve_sequence() == harness.bundle.source_sequence
     observations: list[tuple[bool, bool, int, int, int | None]] = []
 
-    def before_ingress_admission(event: CaptureEvent, size: int) -> None:
+    def before_ingress_admission(
+        event: CaptureEvent,
+        size: int,
+        rejection_reason: str | None,
+    ) -> None:
+        assert rejection_reason is None
         ingress = harness.publisher.ingress.health()
         queue = harness.publisher.health()
         observations.append(
@@ -476,7 +496,12 @@ def test_ingress_remains_final_fail_closed_authority_after_callback(
     harness = _harness(tmp_path)
     assert harness.publisher.reserve_sequence() == harness.bundle.source_sequence
 
-    def close_before_admission(_event: CaptureEvent, _size: int) -> None:
+    def close_before_admission(
+        _event: CaptureEvent,
+        _size: int,
+        rejection_reason: str | None,
+    ) -> None:
+        assert rejection_reason is None
         harness.publisher.ingress.close()
 
     receipt = harness.publisher.publish_bundle(
@@ -499,6 +524,195 @@ def test_ingress_remains_final_fail_closed_authority_after_callback(
     assert len(drained.gaps) == 1
     harness.publisher.writer_lease.release()
     harness.manager.close()
+
+
+def test_initial_publish_retries_same_event_after_shared_budget_recovers(
+    tmp_path: Path,
+) -> None:
+    clock = _Clock()
+    harness = _harness(tmp_path, monotonic_clock=clock)
+    assert harness.publisher.reserve_sequence() == harness.bundle.source_sequence
+    shared = harness.publisher.ingress.shared_admission_budget
+    assert shared is not None
+    filler: list[CaptureEvent] = []
+    observations: list[tuple[str, int, str | None]] = []
+
+    def before_ingress_admission(
+        event: CaptureEvent,
+        size: int,
+        rejection_reason: str | None,
+    ) -> None:
+        observations.append((event.event_sha256, size, rejection_reason))
+        if rejection_reason is None:
+            other = _event_for_shared_admission(event)
+            filler.append(other)
+            assert shared.try_admit(
+                other,
+                shared.max_bytes - size + 1,
+            ) is None
+            return
+        assert (
+            rejection_reason
+            == "shared_capture_write_bandwidth_budget_exceeded"
+        )
+        shared.complete(tuple(filler))
+        clock.now += 1.0
+
+    receipt = harness.publisher.publish_bundle(
+        bundle=harness.bundle,
+        scoring_authority=harness.scoring,
+        evaluation_at=harness.bundle.read_at,
+        source_events=harness.source_events,
+        before_ingress_admission=before_ingress_admission,
+    )
+
+    assert receipt.accepted is True
+    assert len(observations) == 2
+    assert observations[0][0:2] == observations[1][0:2]
+    assert observations[0][2] is None
+    assert (
+        observations[1][2]
+        == "shared_capture_write_bandwidth_budget_exceeded"
+    )
+    ingress = harness.publisher.ingress.health()
+    assert ingress["submitted"] == 1
+    assert ingress["accepted"] == 1
+    assert ingress["dropped"] == 0
+    assert ingress["pending_gap_keys"] == 0
+    _close_idle_harness(harness)
+
+
+def test_retained_publish_wait_releases_publisher_lock_for_real_writer(
+    tmp_path: Path,
+) -> None:
+    harness = _harness(tmp_path, max_queue_events=1)
+    assert _publish(harness).accepted is True
+    second, scoring, events, _selection, _identity = _source_bundle(
+        source_sequence=2
+    )
+    assert harness.publisher.reserve_sequence() == 2
+    observations: list[tuple[str, int, str | None]] = []
+    writer_started = False
+
+    def before_ingress_admission(
+        event: CaptureEvent,
+        size: int,
+        rejection_reason: str | None,
+    ) -> None:
+        nonlocal writer_started
+        observations.append((event.event_sha256, size, rejection_reason))
+        if rejection_reason is None:
+            return
+        assert rejection_reason == "capture_queue_overflow"
+        assert writer_started is False
+        writer_started = True
+        harness.writer.start()
+        deadline = time.monotonic() + 2.0
+        while harness.publisher.health().durable_through < 1:
+            assert time.monotonic() < deadline
+            time.sleep(0.001)
+
+    receipt = harness.publisher.publish_bundle(
+        bundle=second,
+        scoring_authority=scoring,
+        evaluation_at=second.read_at,
+        source_events=events,
+        before_ingress_admission=before_ingress_admission,
+    )
+
+    assert receipt.accepted is True
+    assert len(observations) == 2
+    assert observations[0][0:2] == observations[1][0:2]
+    assert observations[0][2] is None
+    assert observations[1][2] == "capture_queue_overflow"
+    assert harness.writer.close(timeout_seconds=5) is True
+    queue = harness.publisher.health()
+    assert queue.accepted_through == 2
+    assert queue.durable_through == 2
+    assert queue.ingress is not None
+    assert queue.ingress["submitted"] == 2
+    assert queue.ingress["accepted"] == 2
+    assert queue.ingress["dropped"] == 0
+    harness.manager.close()
+
+
+def test_retained_publish_timeout_records_one_exact_terminal_gap(
+    tmp_path: Path,
+) -> None:
+    clock = _Clock()
+    harness = _harness(tmp_path, monotonic_clock=clock)
+    assert harness.publisher.reserve_sequence() == harness.bundle.source_sequence
+    shared = harness.publisher.ingress.shared_admission_budget
+    assert shared is not None
+    filler: list[CaptureEvent] = []
+
+    def before_ingress_admission(
+        event: CaptureEvent,
+        size: int,
+        rejection_reason: str | None,
+    ) -> None:
+        if rejection_reason is None:
+            other = _event_for_shared_admission(event)
+            filler.append(other)
+            assert shared.try_admit(
+                other,
+                shared.max_bytes - size + 1,
+            ) is None
+            return
+        assert (
+            rejection_reason
+            == "shared_capture_write_bandwidth_budget_exceeded"
+        )
+        raise RuntimeError("startup deadline expired")
+
+    with pytest.raises(RuntimeError, match="startup deadline expired"):
+        harness.publisher.publish_bundle(
+            bundle=harness.bundle,
+            scoring_authority=harness.scoring,
+            evaluation_at=harness.bundle.read_at,
+            source_events=harness.source_events,
+            before_ingress_admission=before_ingress_admission,
+        )
+
+    queue = harness.publisher.health()
+    assert queue.poisoned is True
+    assert queue.poison_reason == (
+        "queue_ingress_rejected:"
+        "shared_capture_write_bandwidth_budget_exceeded"
+    )
+    assert queue.reserved_sequence is None
+    assert queue.ingress is not None
+    assert queue.ingress["submitted"] == 1
+    assert queue.ingress["accepted"] == 0
+    assert queue.ingress["dropped"] == 1
+    assert queue.ingress["pending_gap_keys"] == 1
+    assert queue.ingress["pending_retained_admissions"] == 0
+    shared.complete(tuple(filler))
+    harness.writer.start()
+    assert harness.writer.close(timeout_seconds=5) is True
+    assert harness.publisher.health().ingress["gap_lost_emitted"] == 1
+    harness.manager.close()
+
+
+def _event_for_shared_admission(event: CaptureEvent) -> CaptureEvent:
+    return CaptureEvent(
+        identity=CaptureRunIdentity(
+            run_id="cccccccc-cccc-4ccc-8ccc-cccccccccccc",
+            generation=1,
+            code_build_sha256=_digest("shared-filler-code"),
+            config_sha256=_digest("shared-filler-config"),
+            feature_flags_sha256=_digest("shared-filler-flags"),
+            account_identity_sha256=_digest("shared-filler-account"),
+            broker="fixture",
+            broker_environment="recorded",
+        ),
+        sequence=1,
+        stream=CaptureStream.NBBO_QUOTE,
+        clocks=event.clocks,
+        payload={"fixture": "shared-admission-filler"},
+        provider="fixture",
+        symbol=event.symbol,
+    )
 
 
 def _close_idle_harness(harness: _Harness) -> None:
