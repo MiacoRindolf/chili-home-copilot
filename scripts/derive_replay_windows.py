@@ -82,6 +82,22 @@ LEGACY_TIEBACK = {
                              "ohlcv_start": "2026-07-13T12:05:00", "prepend": True},
 }
 
+# Ross-PHASE cross-reference windows (E2): hand-set bounds matching the frame-
+# verified Ross windows (manifest window_et, EDT+4h -> naive UTC) so the ①②③
+# grading judges the SAME leg Ross traded — the derived activity-burst windows
+# for these days replay a different phase (CETX opens post-squeeze; CLRO both
+# days replay the later leg). Emitted ONLY via --rossxref into a SEPARATE
+# manifest (one (symbol, day) row per manifest). Diagnostic evidence only —
+# carries no Ross/economic/causal credit by itself.
+ROSS_PHASE_XREF = {
+    ("CETX", "2026-07-02"): {"win_start": "2026-07-02T12:25:00", "win_end": "2026-07-02T13:35:00",
+                             "ohlcv_start": "2026-07-02T11:25:00", "prepend": False},
+    ("CLRO", "2026-07-02"): {"win_start": "2026-07-02T12:15:00", "win_end": "2026-07-02T13:00:00",
+                             "ohlcv_start": "2026-07-02T11:15:00", "prepend": False},
+    ("CLRO", "2026-07-07"): {"win_start": "2026-07-07T12:40:00", "win_end": "2026-07-07T13:35:00",
+                             "ohlcv_start": "2026-07-07T11:40:00", "prepend": False},
+}
+
 BASELINE_TARGET = 22          # legacy tie-backs + top-gold fill
 MAX_PER_DAY = 2               # diversity: no single day monopolizes the baseline
 
@@ -213,7 +229,17 @@ def main() -> int:
         ),
     )
     ap.add_argument("--out-dir", default="D:/CHILI-Docker/chili-data/replay_batch")
+    ap.add_argument(
+        "--rossxref",
+        action="store_true",
+        help=(
+            "emit ONLY the hand-set Ross-phase cross-reference windows into "
+            "window_manifest_rossxref.json (separate manifest — one "
+            "(symbol, day) row per manifest)"
+        ),
+    )
     args = ap.parse_args()
+    hand_set = ROSS_PHASE_XREF if args.rossxref else LEGACY_TIEBACK
     build_sha = clean_build_sha()
     generator_sha256 = file_sha256(__file__)
     receipt_helper_sha256 = file_sha256(RECEIPT_HELPER)
@@ -256,6 +282,8 @@ def main() -> int:
         for sym, day, ticks, nbbo in census:
             if ticks == 0:
                 continue
+            if args.rossxref and (sym, day) not in ROSS_PHASE_XREF:
+                continue
             cur.execute(HIST_SQL, {"s": sym, "day": day})
             hist = cur.fetchall()
             cur.execute(HI_SQL, {"s": sym, "day": day})
@@ -274,15 +302,18 @@ def main() -> int:
                 "est_runtime_s": estimate_runtime_s(int(ticks)),
                 "derivation": d.evidence,
             }
-            if key in LEGACY_TIEBACK:
-                c = LEGACY_TIEBACK[key]
+            if key in hand_set:
+                c = hand_set[key]
                 delta_start = (datetime.fromisoformat(c["win_start"]) - d.win_start)
                 delta_end = (datetime.fromisoformat(c["win_end"]) - d.win_end)
-                print(f"[derive] TIEBACK {sym} {day}: hand-picked {c['win_start']}..{c['win_end']}"
+                label = "ROSSXREF" if args.rossxref else "TIEBACK"
+                print(f"[derive] {label} {sym} {day}: hand-picked {c['win_start']}..{c['win_end']}"
                       f" | derived {d.win_start.isoformat()}..{d.win_end.isoformat()}"
-                      f" (delta start {delta_start}, end {delta_end}) — keeping legacy tie-back")
+                      f" (delta start {delta_start}, end {delta_end}) — keeping hand-set bounds")
                 entry.update(c)
                 entry["window_source"] = "legacy_tieback_diagnostic"
+                if args.rossxref:
+                    entry["phase_note"] = "ross_phase_xref"
             windows.append(entry)
 
     # Tier selection is diagnostic only: legacy tie-backs plus the largest
@@ -364,7 +395,10 @@ def main() -> int:
            "baseline_est_runtime_s": est_total,
            "windows": sorted(windows, key=lambda w: (w["tier"] != "baseline", w["day"], w["symbol"]))}
     os.makedirs(args.out_dir, exist_ok=True)
-    out = os.path.join(args.out_dir, "window_manifest.json")
+    out = os.path.join(
+        args.out_dir,
+        "window_manifest_rossxref.json" if args.rossxref else "window_manifest.json",
+    )
     with open(out, "w", encoding="utf-8") as f:
         json.dump(doc, f, indent=1)
     print(f"[derive] {len(windows)} windows -> {out}")
