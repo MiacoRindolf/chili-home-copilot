@@ -333,6 +333,7 @@ def _bf_settings(ms) -> None:
     ms.chili_momentum_dipbuy_distribution_vol_mult = 0.0  # distribution veto OFF
     ms.chili_momentum_pullback_retrace_pct = 0.5
     ms.chili_momentum_adaptive_pullback_depth_ceiling_enabled = False
+    ms.chili_momentum_vol_nan_fail_closed_enabled = True  # the shipped default
 
 
 class _BfPassGuards:
@@ -388,6 +389,33 @@ class TestBullFlagConfirmation:
             ok, reason, dbg = bull_flag_confirmation(df, entry_interval="5m", symbol="TEST", db=MagicMock())
         assert ok is False
         assert reason == "bull_flag_tape_unconfirmed"
+
+    def test_nan_volume_fails_closed(self):
+        """NaN vol_ratio on the break bar (lever ON, the shipped default) -> NO FIRE
+        ('bull_flag_volume_unknown') and a JSONB-safe None stamp (the CLRO 07-07 shape)."""
+        df = _bull_flag_df()
+        nan_vol = {**_arrays(13), "volume_ratio": [1.0] * 12 + [float("nan")]}
+        with patch(f"{_GATES}.settings") as ms, _BfPassGuards() as g:
+            _bf_settings(ms)
+            g.mocks[f"{_GATES}.compute_all_from_df"].return_value = nan_vol
+            ok, reason, dbg = bull_flag_confirmation(df, entry_interval="5m", symbol="TEST", db=MagicMock())
+        assert ok is False
+        assert reason == "bull_flag_volume_unknown"
+        assert dbg["vol_ratio"] is None
+
+    def test_nan_volume_legacy_pass_with_lever_off(self):
+        """Kill-switch parity: lever OFF -> the legacy NaN pass-through (NaN < mult is
+        False) -> the ideal break still FIRES, stamp stays JSONB-safe None."""
+        df = _bull_flag_df()
+        nan_vol = {**_arrays(13), "volume_ratio": [1.0] * 12 + [float("nan")]}
+        with patch(f"{_GATES}.settings") as ms, _BfPassGuards() as g:
+            _bf_settings(ms)
+            ms.chili_momentum_vol_nan_fail_closed_enabled = False
+            g.mocks[f"{_GATES}.compute_all_from_df"].return_value = nan_vol
+            ok, reason, dbg = bull_flag_confirmation(df, entry_interval="5m", symbol="TEST", db=MagicMock())
+        assert ok is True, f"lever OFF must keep the legacy NaN pass, got {reason} dbg={dbg}"
+        assert reason == "bull_flag_break"
+        assert dbg["vol_ratio"] is None
 
 
 # ════════════════════════════════════════════════════════════════════════════════════════

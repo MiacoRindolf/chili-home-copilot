@@ -1,0 +1,4012 @@
+{
+  "schema": "chili.ross_ground_truth_manifest.v1",
+  "generated_at": "2026-07-26T14:47:07+00:00",
+  "evidence_role": "after_fact_grading_only",
+  "usage_constraints": [
+    "recap evidence may label replay outcomes but must never supply event-time strategy inputs",
+    "an empty phase_labels array means the episode has not yet been phase-labeled, not that it contained no trades",
+    "phase descriptions are sequence-only because no exact market event timestamps were independently verified",
+    "role-qualified after-fact timing context is not a phase boundary and is never executable-price evidence",
+    "independently verified day P/L need not equal the sum of phase P/L when a trade-specific outcome is unavailable",
+    "reported dollar outcomes are comparison labels, not a sizing target or a profitability promise"
+  ],
+  "windows": [
+    {
+      "manifest_id": "A7Gnw1CMExI::ANY::2026-06-25::scanner-chase",
+      "video_id": "A7Gnw1CMExI",
+      "date": "2026-06-25",
+      "symbol": "ANY",
+      "account": "main",
+      "ross_action": "trade",
+      "expected_action": "reject",
+      "side": "long",
+      "window_et": "~08:59-09:10",
+      "ross_entry_px": 3.9,
+      "ross_exit_px": null,
+      "ross_net_usd": -6259.7,
+      "pnl_confidence": "frame_verified",
+      "source": {
+        "kind": "frame_audit",
+        "refs": [
+          "project_ws/AgentOps/ross_video_evidence/AUDIT_REPORT_BATCH2.md"
+        ]
+      },
+      "catalyst": "08:00:00 Bitdeer/AI-infrastructure headline (~1h news-to-move lag); float 4.066M",
+      "notes": "Scanner-chase: HOD prints 08:58:51 @3.82 / 08:59:04 @4.16 were literally the top; entry >20% above VWAP into a 09:00 blow-off. Alert-print != entry signal. [pnl: broker panel frame: V5 Positions ANY -6,259.70 (cb 3.57 blended); entry 3.90 / add 4.00 (~13k sh) moments after the MIMI loss]",
+      "tape": {
+        "live_covered": null,
+        "golden_pinned": null
+      }
+    },
+    {
+      "manifest_id": "A7Gnw1CMExI::ILLR::2026-06-25::multiwave-spacex",
+      "video_id": "A7Gnw1CMExI",
+      "date": "2026-06-25",
+      "symbol": "ILLR",
+      "account": "main",
+      "ross_action": "trade",
+      "expected_action": "trade",
+      "side": "long",
+      "window_et": "~09:00-10:00",
+      "ross_entry_px": 1.95,
+      "ross_exit_px": null,
+      "ross_net_usd": 19914.95,
+      "pnl_confidence": "frame_verified",
+      "source": {
+        "kind": "frame_audit",
+        "refs": [
+          "project_ws/AgentOps/ross_video_evidence/AUDIT_REPORT_BATCH2.md"
+        ]
+      },
+      "catalyst": "08:30:00 $400M SpaceX-treasury headline + same-second 8-K; +589% day (HOD ~5.29-5.30 vs 0.77 close)",
+      "notes": "Multi-wave: MP 1.90-2.00 entry, $2 raw_break, LULD halt-up 09:44:50-09:54:50, resume dip-buy STOPPED (unstabilized), re-add, exit into 5.2-5.3 squeeze. halt_resume_dip stabilization requirement validated live. [pnl: broker panel frame: V5 Positions ILLR +19,914.95 (cb 4.61 = final lot); micro-pullback entry 1.90-2.00, 15k->30k on the $2 break (sizing narration-only); best exit 4.86 narration-only]",
+      "tape": {
+        "live_covered": null,
+        "golden_pinned": null
+      }
+    },
+    {
+      "manifest_id": "A7Gnw1CMExI::MIMI::2026-06-25::vwap-reentries-and-add",
+      "video_id": "A7Gnw1CMExI",
+      "date": "2026-06-25",
+      "symbol": "MIMI",
+      "account": "main",
+      "ross_action": "trade",
+      "expected_action": "trade",
+      "side": "long",
+      "window_et": "~08:30-09:00",
+      "ross_entry_px": 4.45,
+      "ross_exit_px": null,
+      "ross_net_usd": -8353.02,
+      "pnl_confidence": "frame_verified",
+      "source": {
+        "kind": "frame_audit",
+        "refs": [
+          "project_ws/AgentOps/ross_video_evidence/AUDIT_REPORT_BATCH2.md"
+        ]
+      },
+      "catalyst": "HK AI/robotics catalyst; float 1.714M",
+      "notes": "Audit verdict: small vwap_reclaim re-entries ~3.95-4.00 OK (graded trade, SMALL size only); the 40k PMH-squeeze add at 4.85-4.95 into the 08:56 false break (H5.04 long upper wick) is REFUSED (extension + effort-no-result; failed_breakout_bailout mandatory). ross_entry_px is the panel blended cost basis. [pnl: broker panel frame: V5 Positions MIMI -8,353.02 (cb 4.45 blended); the 40k add alone ~-$12k (-$0.30 x 40k; add size narration-only)]",
+      "tape": {
+        "live_covered": null,
+        "golden_pinned": null
+      }
+    },
+    {
+      "manifest_id": "hUb-n3kzqjI::QUCY::2026-06-26::teach-review",
+      "video_id": "hUb-n3kzqjI",
+      "date": "2026-06-26",
+      "symbol": "QUCY",
+      "account": null,
+      "ross_action": "watched",
+      "expected_action": "reject",
+      "side": null,
+      "window_et": null,
+      "ross_entry_px": null,
+      "ross_exit_px": null,
+      "ross_net_usd": null,
+      "pnl_confidence": null,
+      "source": {
+        "kind": "frame_audit",
+        "refs": [
+          "project_ws/AgentOps/ross_video_evidence/AUDIT_REPORT_BATCH2.md"
+        ]
+      },
+      "catalyst": "'board approves pursuit' of SpaceX stake (intent verb, not completed action)",
+      "notes": "Teach segment: QUCY +24% pop-and-fade vs ILLR's actual $400M stake (+790% peak). Catalyst-verb lesson: weight completed-action verbs + dollar amounts.",
+      "tape": {
+        "live_covered": null,
+        "golden_pinned": null
+      }
+    },
+    {
+      "manifest_id": "hUb-n3kzqjI::SDOT::2026-06-26::confluence-break",
+      "video_id": "hUb-n3kzqjI",
+      "date": "2026-06-26",
+      "symbol": "SDOT",
+      "account": "main",
+      "ross_action": "trade",
+      "expected_action": "trade",
+      "side": "long",
+      "window_et": "~09:20-10:00",
+      "ross_entry_px": 10.0,
+      "ross_exit_px": null,
+      "ross_net_usd": 5885.15,
+      "pnl_confidence": "frame_verified",
+      "source": {
+        "kind": "frame_audit",
+        "refs": [
+          "project_ws/AgentOps/ross_video_evidence/AUDIT_REPORT_BATCH2.md"
+        ]
+      },
+      "catalyst": "NO fresh news (stale Jun-10/12 8-Ks)",
+      "notes": "09:20 triple-confluence break: whole-dollar 10.00 = VWAP 10.04 = shelf high. A+ CHILI shape; lessons: 12-break add raised basis (ladder exits instead); the 9.81 open washout is where a structural stop exits (his hold-through = survivorship). Peaked ~+13k unrealized (narration-only). [pnl: broker panel frame: V4 Positions SDOT +5,885.15 (cb 11.47); starter ~10 / add 10.50 / add ~12, sold 11.90/12.05]",
+      "tape": {
+        "live_covered": null,
+        "golden_pinned": null
+      }
+    },
+    {
+      "manifest_id": "hUb-n3kzqjI::SHPH::2026-06-26::double-top-second-leg",
+      "video_id": "hUb-n3kzqjI",
+      "date": "2026-06-26",
+      "symbol": "SHPH",
+      "account": "main",
+      "ross_action": "trade",
+      "expected_action": "reject",
+      "side": "long",
+      "window_et": "~09:00-09:20",
+      "ross_entry_px": 5.89,
+      "ross_exit_px": null,
+      "ross_net_usd": -3035.01,
+      "pnl_confidence": "frame_verified",
+      "source": {
+        "kind": "frame_audit",
+        "refs": [
+          "project_ws/AgentOps/ross_video_evidence/AUDIT_REPORT_BATCH2.md"
+        ]
+      },
+      "catalyst": "Dogecoin-miner headline (Ross disliked it); float 551.8K",
+      "notes": "Double-top rejection + P&L-conditioned hold ('instead of just taking the base hit, I held'); no_follow_through_exit covers the hold. [pnl: broker panel frame: V4 Positions SHPH -3,035.01 (cb 5.89); entry ~5.9 second-leg into the 6.26-6.30 double top]",
+      "tape": {
+        "live_covered": null,
+        "golden_pinned": null
+      }
+    },
+    {
+      "manifest_id": "hUb-n3kzqjI::ZDAI::2026-06-26::fomo-extension",
+      "video_id": "hUb-n3kzqjI",
+      "date": "2026-06-26",
+      "symbol": "ZDAI",
+      "account": "main",
+      "ross_action": "trade",
+      "expected_action": "reject",
+      "side": "long",
+      "window_et": "~07:55-08:30",
+      "ross_entry_px": 3.46,
+      "ross_exit_px": null,
+      "ross_net_usd": -25431.11,
+      "pnl_confidence": "frame_verified",
+      "source": {
+        "kind": "frame_audit",
+        "refs": [
+          "project_ws/AgentOps/ross_video_evidence/AUDIT_REPORT_BATCH2.md"
+        ]
+      },
+      "catalyst": "NO news; Chinese, float 6.71M",
+      "notes": "The HUGE LOSS: extension entry after a tweezer/double top at ~4.70, max size, no catalyst ('I had a little FOMO'). Every chase guard fires. ross_entry_px is the panel blended cost basis. [pnl: broker panel frame: V4 Positions ZDAI -25,431.11 (cb 3.46 blended); big-account punch 4.25-4.45 AFTER the 4.70 top printed]",
+      "tape": {
+        "live_covered": null,
+        "golden_pinned": null
+      }
+    },
+    {
+      "manifest_id": "hUb-n3kzqjI::ZDAI::2026-06-26::small-acct-mp2",
+      "video_id": "hUb-n3kzqjI",
+      "date": "2026-06-26",
+      "symbol": "ZDAI",
+      "account": "small",
+      "ross_action": "trade",
+      "expected_action": "reject",
+      "side": "long",
+      "window_et": "~07:50-08:10",
+      "ross_entry_px": 4.0,
+      "ross_exit_px": null,
+      "ross_net_usd": null,
+      "pnl_confidence": "narrated",
+      "source": {
+        "kind": "frame_audit",
+        "refs": [
+          "project_ws/AgentOps/ross_video_evidence/AUDIT_REPORT_BATCH2.md"
+        ]
+      },
+      "catalyst": "NO news; Chinese, float 6.71M",
+      "notes": "MP2 ~4.00 small-account buy. Audit: 'MP1-only was defensible' (both pullbacks FAR above VWAP) -> graded reject. [pnl: narrated in V4 as '+~$1k' (no small-account panel in this video); the challenge fixture (small_account_challenge_manifest.json, video P5qdiBNct1c) frame-verifies small-account ZDAI +$1,095.08 same day]",
+      "tape": {
+        "live_covered": null,
+        "golden_pinned": null
+      }
+    },
+    {
+      "manifest_id": "PnuyhYGHuUY::CAST::2026-06-30::watchlist-pass",
+      "video_id": "PnuyhYGHuUY",
+      "date": "2026-06-30",
+      "symbol": "CAST",
+      "account": null,
+      "ross_action": "no_trade",
+      "expected_action": "reject",
+      "side": null,
+      "window_et": null,
+      "ross_entry_px": null,
+      "ross_exit_px": null,
+      "ross_net_usd": null,
+      "pnl_confidence": null,
+      "source": {
+        "kind": "frame_audit",
+        "refs": [
+          "project_ws/AgentOps/ross_video_evidence/AUDIT_REPORT_BATCH2.md"
+        ]
+      },
+      "catalyst": null,
+      "notes": "Float 22.79M, PM high 9.72 -> 6.48 BELOW VWAP 7.11; mutual pass.",
+      "tape": {
+        "live_covered": null,
+        "golden_pinned": null
+      }
+    },
+    {
+      "manifest_id": "PnuyhYGHuUY::CELZ::2026-06-30::watched-attention",
+      "video_id": "PnuyhYGHuUY",
+      "date": "2026-06-30",
+      "symbol": "CELZ",
+      "account": null,
+      "ross_action": "watched",
+      "expected_action": "trade",
+      "side": "long",
+      "window_et": "~09:30-11:00",
+      "ross_entry_px": null,
+      "ross_exit_px": null,
+      "ross_net_usd": null,
+      "pnl_confidence": null,
+      "source": {
+        "kind": "frame_audit",
+        "refs": [
+          "project_ws/AgentOps/ross_video_evidence/AUDIT_REPORT_BATCH2.md"
+        ]
+      },
+      "catalyst": "offering-withdrawal (Form RW 08:30:33 on screen); float 3.63M; +350% day",
+      "notes": "CHILI's structural edge in one frame: cleanest front-side staircase (0.80->HOD 4.72 above rising VWAP) skipped purely for human attention limits. Audit verdict YES -> expected trade (first_pullback/momentum_continuation, multiple occurrences). [pnl: zero CELZ rows in panels (positively verified non-trade)]",
+      "tape": {
+        "live_covered": null,
+        "golden_pinned": null
+      }
+    },
+    {
+      "manifest_id": "PnuyhYGHuUY::CUPR::2026-06-30::watchlist-pass",
+      "video_id": "PnuyhYGHuUY",
+      "date": "2026-06-30",
+      "symbol": "CUPR",
+      "account": null,
+      "ross_action": "no_trade",
+      "expected_action": "reject",
+      "side": null,
+      "window_et": null,
+      "ross_entry_px": null,
+      "ross_exit_px": null,
+      "ross_net_usd": null,
+      "pnl_confidence": null,
+      "source": {
+        "kind": "frame_audit",
+        "refs": [
+          "project_ws/AgentOps/ross_video_evidence/AUDIT_REPORT_BATCH2.md"
+        ]
+      },
+      "catalyst": null,
+      "notes": "Float 919.67K, VWAP battle, hitting Running-Up all morning with no clean trigger; audit: arm-but-don't-force.",
+      "tape": {
+        "live_covered": null,
+        "golden_pinned": null
+      }
+    },
+    {
+      "manifest_id": "PnuyhYGHuUY::DGNX::2026-06-30::watchlist-pass",
+      "video_id": "PnuyhYGHuUY",
+      "date": "2026-06-30",
+      "symbol": "DGNX",
+      "account": null,
+      "ross_action": "no_trade",
+      "expected_action": "reject",
+      "side": null,
+      "window_et": null,
+      "ross_entry_px": null,
+      "ross_exit_px": null,
+      "ross_net_usd": null,
+      "pnl_confidence": null,
+      "source": {
+        "kind": "frame_audit",
+        "refs": [
+          "project_ws/AgentOps/ross_video_evidence/AUDIT_REPORT_BATCH2.md"
+        ]
+      },
+      "catalyst": "stale Jun-17 catalyst",
+      "notes": "Stale catalyst, faded; mutual pass.",
+      "tape": {
+        "live_covered": null,
+        "golden_pinned": null
+      }
+    },
+    {
+      "manifest_id": "PnuyhYGHuUY::GVH::2026-06-30::watchlist-pass",
+      "video_id": "PnuyhYGHuUY",
+      "date": "2026-06-30",
+      "symbol": "GVH",
+      "account": null,
+      "ross_action": "no_trade",
+      "expected_action": "reject",
+      "side": null,
+      "window_et": null,
+      "ross_entry_px": null,
+      "ross_exit_px": null,
+      "ross_net_usd": null,
+      "pnl_confidence": null,
+      "source": {
+        "kind": "frame_audit",
+        "refs": [
+          "project_ws/AgentOps/ross_video_evidence/AUDIT_REPORT_BATCH2.md"
+        ]
+      },
+      "catalyst": null,
+      "notes": "AU, float 2.23M, 4.52-4.61 slightly above VWAP but slow tape; audit: ARM-watch, entry only on trigger (none fired).",
+      "tape": {
+        "live_covered": null,
+        "golden_pinned": null
+      }
+    },
+    {
+      "manifest_id": "PnuyhYGHuUY::JEM::2026-06-30::scanner-squeeze",
+      "video_id": "PnuyhYGHuUY",
+      "date": "2026-06-30",
+      "symbol": "JEM",
+      "account": "main",
+      "ross_action": "trade",
+      "expected_action": "trade",
+      "side": "long",
+      "window_et": "~08:59-09:02",
+      "ross_entry_px": 4.99,
+      "ross_exit_px": null,
+      "ross_net_usd": 46009.78,
+      "pnl_confidence": "narrated",
+      "source": {
+        "kind": "frame_audit",
+        "refs": [
+          "project_ws/AgentOps/ross_video_evidence/AUDIT_REPORT_BATCH2.md"
+        ]
+      },
+      "catalyst": "day-2 leading gainer; Running-Up ding 08:59:26 @3.57 (52.39M vol / 1.30M float / Gap +230.56)",
+      "notes": "The monster archetype: +37%-range 1-min squeeze bar; +$46k in ~2 minutes. momentum_continuation/explosive_raw_break_ok + hod_break; 5.58 partial fill 23,236/31,609 = fillability ground truth. ross_entry_px is the panel cost basis. [pnl: broker panel frame: V3 Positions JEM +46,009.78 (cb 4.99); 18-row fill ladder on screen, buys 3.70-4.00 (~45k sh) + re-add 4.76-5.31, exits 4.97->5.58] [review: pnl_confidence downgraded: review_manifest marks ross_trade_outcome not certifiable for this (video, symbol); review_manifest: trade/no-trade decision not certifiable from the reviewed frames]",
+      "tape": {
+        "live_covered": null,
+        "golden_pinned": null
+      }
+    },
+    {
+      "manifest_id": "PnuyhYGHuUY::SKYQ::2026-06-30::watchlist-pass",
+      "video_id": "PnuyhYGHuUY",
+      "date": "2026-06-30",
+      "symbol": "SKYQ",
+      "account": null,
+      "ross_action": "no_trade",
+      "expected_action": "reject",
+      "side": null,
+      "window_et": null,
+      "ross_entry_px": null,
+      "ross_exit_px": null,
+      "ross_net_usd": null,
+      "pnl_confidence": null,
+      "source": {
+        "kind": "frame_audit",
+        "refs": [
+          "project_ws/AgentOps/ross_video_evidence/AUDIT_REPORT_BATCH2.md"
+        ]
+      },
+      "catalyst": null,
+      "notes": "07:45:21 alerts 4.07-4.25 -> 3.63 below VWAP 3.91 (200MA-rejection claim is narration-only); mutual pass.",
+      "tape": {
+        "live_covered": null,
+        "golden_pinned": null
+      }
+    },
+    {
+      "manifest_id": "PnuyhYGHuUY::SVRE::2026-06-30::seven-break",
+      "video_id": "PnuyhYGHuUY",
+      "date": "2026-06-30",
+      "symbol": "SVRE",
+      "account": "main",
+      "ross_action": "trade",
+      "expected_action": "trade",
+      "side": "long",
+      "window_et": "~08:40-08:50",
+      "ross_entry_px": 6.98,
+      "ross_exit_px": null,
+      "ross_net_usd": 16063.55,
+      "pnl_confidence": "frame_verified",
+      "source": {
+        "kind": "frame_audit",
+        "refs": [
+          "project_ws/AgentOps/ross_video_evidence/AUDIT_REPORT_BATCH2.md"
+        ]
+      },
+      "catalyst": "08:30:00 ET UAV term-sheet; micro-float 928.4K",
+      "notes": "3-min consolidation above VWAP 6.0-6.6 -> $7 whole-dollar break -> HOD 8.91 @08:47. YES on the break; NO on the later 10k-share post-blowoff dip (~-$3k giveback, stopped). [pnl: broker panel frame: V3 Positions SVRE +16,063.55 (cb 8.01); stated entry 6.98 on the $7 break]",
+      "tape": {
+        "live_covered": null,
+        "golden_pinned": null
+      }
+    },
+    {
+      "manifest_id": "PnuyhYGHuUY::VWAV::2026-06-30::vwap-dip",
+      "video_id": "PnuyhYGHuUY",
+      "date": "2026-06-30",
+      "symbol": "VWAV",
+      "account": "main",
+      "ross_action": "trade",
+      "expected_action": "trade",
+      "side": "long",
+      "window_et": "~08:04-08:20",
+      "ross_entry_px": 7.99,
+      "ross_exit_px": null,
+      "ross_net_usd": 10799.09,
+      "pnl_confidence": "frame_verified",
+      "source": {
+        "kind": "frame_audit",
+        "refs": [
+          "project_ws/AgentOps/ross_video_evidence/AUDIT_REPORT_BATCH2.md"
+        ]
+      },
+      "catalyst": "defense sympathy (SVRE headline in VWAV news feed); alerts 08:02:42 @7.60 -> 08:03:31 @9.75",
+      "notes": "Ross SKIPPED the 7.3-7.6 micro pullback at the daily MA 7.67 (ran to 9.75 anyway) - evidence for daily-resistance size-TILT over veto; his VWAP dip-buy is textbook. Audit: YES on both. [pnl: broker panel frame: V3 Positions VWAV +10,799.09 (cb 7.99); dip-buy at first VWAP touch ~8.0, out ~9.4 PMH retest]",
+      "tape": {
+        "live_covered": null,
+        "golden_pinned": null
+      }
+    },
+    {
+      "manifest_id": "HTgOZI8GOV0::CANF::2026-07-01::premarket-watch-too-risky",
+      "video_id": "HTgOZI8GOV0",
+      "date": "2026-07-01",
+      "symbol": "CANF",
+      "account": "small",
+      "ross_action": "watched",
+      "expected_action": "reject",
+      "side": null,
+      "window_et": "~07:00-07:10",
+      "ross_entry_px": null,
+      "ross_exit_px": null,
+      "ross_net_usd": null,
+      "pnl_confidence": null,
+      "source": {
+        "kind": "frame_audit",
+        "refs": [
+          "project_ws/AgentOps/ross_video_evidence/AUDIT_REPORT.md"
+        ]
+      },
+      "catalyst": "Phase-2a cancer catalyst",
+      "notes": "Small-account pass on the CANF premarket move ('too risky'); the same move was traded in the main account (t1-trendline-break row). Graded reject for the small-account context only. [review: review_manifest: trade/no-trade decision not certifiable from the reviewed frames]",
+      "tape": {
+        "live_covered": null,
+        "golden_pinned": null
+      }
+    },
+    {
+      "manifest_id": "HTgOZI8GOV0::CANF::2026-07-01::vwap-break-0919",
+      "video_id": "HTgOZI8GOV0",
+      "date": "2026-07-01",
+      "symbol": "CANF",
+      "account": "small",
+      "ross_action": "trade",
+      "expected_action": "trade",
+      "side": "long",
+      "window_et": "~09:19-09:30",
+      "ross_entry_px": 5.0793,
+      "ross_exit_px": 5.28,
+      "ross_net_usd": 340.64,
+      "pnl_confidence": "frame_verified",
+      "source": {
+        "kind": "frame_audit",
+        "refs": [
+          "project_ws/AgentOps/ross_video_evidence/AUDIT_REPORT.md"
+        ]
+      },
+      "catalyst": "Phase-2a cancer catalyst; RVOL(d) 16.49, 24.54M vol on 2.12M float",
+      "notes": "Curl-through-VWAP entry candle 09:19 (O5.08 H5.78 L4.99 C5.69); audit: 'the single best CHILI-shaped entry in both videos' - vwap_reclaim + micro_pullback_primary. [pnl: broker panel frame: V2 ThinkOrSwim CANF +$340.64; fills in 5.0793, out 5.276 / 5.2824 (LMT)] [review: review_manifest: trade/no-trade decision not certifiable from the reviewed frames]",
+      "tape": {
+        "live_covered": null,
+        "golden_pinned": null
+      }
+    },
+    {
+      "manifest_id": "HTgOZI8GOV0::DXF::2026-07-01::no-setup-sub-dollar",
+      "video_id": "HTgOZI8GOV0",
+      "date": "2026-07-01",
+      "symbol": "DXF",
+      "account": null,
+      "ross_action": "no_trade",
+      "expected_action": "reject",
+      "side": null,
+      "window_et": null,
+      "ross_entry_px": null,
+      "ross_exit_px": null,
+      "ross_net_usd": null,
+      "pnl_confidence": null,
+      "source": {
+        "kind": "frame_audit",
+        "refs": [
+          "project_ws/AgentOps/ross_video_evidence/AUDIT_REPORT.md"
+        ]
+      },
+      "catalyst": null,
+      "notes": "'Too cheap' - sub-$1 bleed below WT VWAP 1.10 (daily C0.87). Real ticker distinct from DXST; excluded by universe price_min=1.0. [review: review_manifest: trade/no-trade decision not certifiable from the reviewed frames]",
+      "tape": {
+        "live_covered": null,
+        "golden_pinned": null
+      }
+    },
+    {
+      "manifest_id": "HTgOZI8GOV0::DXST::2026-07-01::knife-dip-buy",
+      "video_id": "HTgOZI8GOV0",
+      "date": "2026-07-01",
+      "symbol": "DXST",
+      "account": "small",
+      "ross_action": "trade",
+      "expected_action": "reject",
+      "side": "long",
+      "window_et": "~09:18-09:30",
+      "ross_entry_px": 3.19,
+      "ross_exit_px": 3.52,
+      "ross_net_usd": 728.11,
+      "pnl_confidence": "frame_verified",
+      "source": {
+        "kind": "frame_audit",
+        "refs": [
+          "project_ws/AgentOps/ross_video_evidence/AUDIT_REPORT.md"
+        ]
+      },
+      "catalyst": "news 09:16:00 ET; float 1.008M",
+      "notes": "THE load-bearing decline: knife-catch into a -13%-in-10s flush on 127K-total-volume tape; flush to 2.80 before the bounce. Video-title trade ('narrowly avoided'). Only flush_dip_buy at 2.80 with bottoming-tail would have been valid. [pnl: broker panel frame: V2 ThinkOrSwim DXST +$728.11; fills 3.19/3.214/3.2151/3.2299 in, exits 3.501-3.5259]",
+      "tape": {
+        "live_covered": null,
+        "golden_pinned": null
+      }
+    },
+    {
+      "manifest_id": "HTgOZI8GOV0::JEM::2026-07-01::small-acct-watch",
+      "video_id": "HTgOZI8GOV0",
+      "date": "2026-07-01",
+      "symbol": "JEM",
+      "account": "small",
+      "ross_action": "watched",
+      "expected_action": "reject",
+      "side": null,
+      "window_et": null,
+      "ross_entry_px": null,
+      "ross_exit_px": null,
+      "ross_net_usd": null,
+      "pnl_confidence": null,
+      "source": {
+        "kind": "frame_audit",
+        "refs": [
+          "project_ws/AgentOps/ross_video_evidence/AUDIT_REPORT.md"
+        ]
+      },
+      "catalyst": null,
+      "notes": "Watched only in the small account ('I didn't trust it'); chop 8.10-8.15 below WT VWAP 8.92, no trigger. Main-account JEM trade is the iZ-mXl0ga3U row. [review: review_manifest: trade/no-trade decision not certifiable from the reviewed frames]",
+      "tape": {
+        "live_covered": null,
+        "golden_pinned": null
+      }
+    },
+    {
+      "manifest_id": "HTgOZI8GOV0::LHAI::2026-07-01::slide-no-setup",
+      "video_id": "HTgOZI8GOV0",
+      "date": "2026-07-01",
+      "symbol": "LHAI",
+      "account": null,
+      "ross_action": "no_trade",
+      "expected_action": "reject",
+      "side": null,
+      "window_et": null,
+      "ross_entry_px": null,
+      "ross_exit_px": null,
+      "ross_net_usd": null,
+      "pnl_confidence": null,
+      "source": {
+        "kind": "frame_audit",
+        "refs": [
+          "project_ws/AgentOps/ross_video_evidence/AUDIT_REPORT.md"
+        ]
+      },
+      "catalyst": null,
+      "notes": "Static slide 'Leading Gainer Too Cheap For Me' (+166.64% / $1.76 / 112.81M vol). Biggest philosophical Ross<->CHILI divergence of the session; same divergence note as the V1 LHAI row. [review: review_manifest: trade/no-trade decision not certifiable from the reviewed frames]",
+      "tape": {
+        "live_covered": null,
+        "golden_pinned": null
+      }
+    },
+    {
+      "manifest_id": "HTgOZI8GOV0::TC::2026-07-01::watched-weird",
+      "video_id": "HTgOZI8GOV0",
+      "date": "2026-07-01",
+      "symbol": "TC",
+      "account": "small",
+      "ross_action": "watched",
+      "expected_action": "reject",
+      "side": null,
+      "window_et": null,
+      "ross_entry_px": null,
+      "ross_exit_px": null,
+      "ross_net_usd": null,
+      "pnl_confidence": null,
+      "source": {
+        "kind": "frame_audit",
+        "refs": [
+          "project_ws/AgentOps/ross_video_evidence/AUDIT_REPORT.md"
+        ]
+      },
+      "catalyst": null,
+      "notes": "Review only ('that one was a little weird'): 4.88-5.02 below WT VWAP 5.57, lower-high rejections, backside. CHILI and Ross agree. [review: review_manifest: trade/no-trade decision not certifiable from the reviewed frames]",
+      "tape": {
+        "live_covered": null,
+        "golden_pinned": null
+      }
+    },
+    {
+      "manifest_id": "iZ-mXl0ga3U::CANF::2026-07-01::t1-trendline-break-0706",
+      "video_id": "iZ-mXl0ga3U",
+      "date": "2026-07-01",
+      "symbol": "CANF",
+      "account": "main",
+      "ross_action": "trade",
+      "expected_action": "trade",
+      "side": "long",
+      "window_et": "~07:06-07:08",
+      "ross_entry_px": 5.39,
+      "ross_exit_px": null,
+      "ross_net_usd": 7370.98,
+      "pnl_confidence": "frame_verified",
+      "source": {
+        "kind": "frame_audit",
+        "refs": [
+          "project_ws/AgentOps/ross_video_evidence/AUDIT_REPORT.md"
+        ]
+      },
+      "catalyst": "Phase-2a cancer catalyst; float 2.121M",
+      "notes": "Premarket descending-trendline break ~07:06; fills 5.39/5.41/5.44/5.57 BOT 1000s, adds 5.50/6.00 zone; exits 5.53/5.67/5.77/6.16, halves 6.04/6.03. Alias deep_reclaim/break_retest. [pnl: broker panel frame: V1 retirement Positions CANF +7,370.98 (CANF symbol total across V1 trades 1+2; = title math with DXST/JEM)]",
+      "tape": {
+        "live_covered": null,
+        "golden_pinned": null
+      }
+    },
+    {
+      "manifest_id": "iZ-mXl0ga3U::CANF::2026-07-01::t2-vwap-reclaim-scratch",
+      "video_id": "iZ-mXl0ga3U",
+      "date": "2026-07-01",
+      "symbol": "CANF",
+      "account": "main",
+      "ross_action": "trade",
+      "expected_action": "reject",
+      "side": "long",
+      "window_et": "~09:20-10:07",
+      "ross_entry_px": null,
+      "ross_exit_px": null,
+      "ross_net_usd": null,
+      "pnl_confidence": null,
+      "source": {
+        "kind": "frame_audit",
+        "refs": [
+          "project_ws/AgentOps/ross_video_evidence/AUDIT_REPORT.md"
+        ]
+      },
+      "catalyst": "Phase-2a cancer catalyst",
+      "notes": "VWAP-reclaim attempt, scratched; jackknife wick rejections at 5.9-6.0. Audit verdict MARGINAL (enter small on confirmed hold or decline) -> graded reject. [pnl: no separate figure; included in the CANF +7,370.98 symbol total (see t1 row)]",
+      "tape": {
+        "live_covered": null,
+        "golden_pinned": null
+      }
+    },
+    {
+      "manifest_id": "iZ-mXl0ga3U::DXST::2026-07-01::micro-pullback-0917",
+      "video_id": "iZ-mXl0ga3U",
+      "date": "2026-07-01",
+      "symbol": "DXST",
+      "account": "main",
+      "ross_action": "trade",
+      "expected_action": "reject",
+      "side": "long",
+      "window_et": "~09:17-09:25",
+      "ross_entry_px": 3.35,
+      "ross_exit_px": null,
+      "ross_net_usd": 69.85,
+      "pnl_confidence": "frame_verified",
+      "source": {
+        "kind": "frame_audit",
+        "refs": [
+          "project_ws/AgentOps/ross_video_evidence/AUDIT_REPORT.md"
+        ]
+      },
+      "catalyst": "news 09:16:00 ET; float 1.008M",
+      "notes": "Micro pullback on COLD tape (127.52K vol, RVOL(d) 0.43 at alert) - hot-tape fail-closed gate must decline; audit: +$69.85 is survivorship, not edge. [pnl: broker panel frame: V1 retirement Positions DXST +69.85; basis 3.35 in the circled micro-pullback zone]",
+      "tape": {
+        "live_covered": null,
+        "golden_pinned": null
+      }
+    },
+    {
+      "manifest_id": "iZ-mXl0ga3U::JEM::2026-07-01::break-of-10",
+      "video_id": "iZ-mXl0ga3U",
+      "date": "2026-07-01",
+      "symbol": "JEM",
+      "account": "main",
+      "ross_action": "trade",
+      "expected_action": "reject",
+      "side": "long",
+      "window_et": "~07:30-08:30",
+      "ross_entry_px": 10.48,
+      "ross_exit_px": null,
+      "ross_net_usd": -231.75,
+      "pnl_confidence": "narrated",
+      "source": {
+        "kind": "frame_audit",
+        "refs": [
+          "project_ws/AgentOps/ross_video_evidence/AUDIT_REPORT.md"
+        ]
+      },
+      "catalyst": "blockchain catalyst 08:11 ET; float 1.303M",
+      "notes": "Day-2 raw break of whole-dollar 10 into stacked overhead (descending trendline + 12.95 AH high); audit: at most break_retest with pull-away confirmation. [pnl: broker panel frame: V1 retirement Positions JEM -231.75; fills 10.77 BOT 1000, 10.51/10.50x3/10.46 BOT 5000s (basis 10.48)] [review: pnl_confidence downgraded: review_manifest marks ross_trade_outcome not certifiable for this (video, symbol); review_manifest: trade/no-trade decision not certifiable from the reviewed frames]",
+      "tape": {
+        "live_covered": null,
+        "golden_pinned": null
+      }
+    },
+    {
+      "manifest_id": "iZ-mXl0ga3U::LHAI::2026-07-01::no-setup-price-pillar",
+      "video_id": "iZ-mXl0ga3U",
+      "date": "2026-07-01",
+      "symbol": "LHAI",
+      "account": null,
+      "ross_action": "no_trade",
+      "expected_action": "reject",
+      "side": null,
+      "window_et": null,
+      "ross_entry_px": null,
+      "ross_exit_px": null,
+      "ross_net_usd": null,
+      "pnl_confidence": null,
+      "source": {
+        "kind": "frame_audit",
+        "refs": [
+          "project_ws/AgentOps/ross_video_evidence/AUDIT_REPORT.md"
+        ]
+      },
+      "catalyst": null,
+      "notes": "Ross price-pillar skip ('thickly traded, a little too cheap'; 210.4M vol / 8.16M float). DIVERGENCE: CHILI would ARM ($1.51 >= price_min 1.0) but at recap-time the structure is backside chop and no trigger fires. [pnl: positively verified: NO LHAI row in Positions/Orders panels]",
+      "tape": {
+        "live_covered": null,
+        "golden_pinned": null
+      }
+    },
+    {
+      "manifest_id": "iZ-mXl0ga3U::SDOT::2026-07-01::watched-too-expensive",
+      "video_id": "iZ-mXl0ga3U",
+      "date": "2026-07-01",
+      "symbol": "SDOT",
+      "account": null,
+      "ross_action": "watched",
+      "expected_action": "reject",
+      "side": null,
+      "window_et": null,
+      "ross_entry_px": null,
+      "ross_exit_px": null,
+      "ross_net_usd": null,
+      "pnl_confidence": null,
+      "source": {
+        "kind": "frame_audit",
+        "refs": [
+          "project_ws/AgentOps/ross_video_evidence/AUDIT_REPORT.md"
+        ]
+      },
+      "catalyst": null,
+      "notes": "$76 stock, 732.6K float, multi-point spreads; daily 200MA 86.77 rejection at the 85.79 high. Excluded by universe price_max=20; correct on both sides.",
+      "tape": {
+        "live_covered": null,
+        "golden_pinned": null
+      }
+    },
+    {
+      "manifest_id": "iZ-mXl0ga3U::TC::2026-07-01::recovery-gap-dip",
+      "video_id": "iZ-mXl0ga3U",
+      "date": "2026-07-01",
+      "symbol": "TC",
+      "account": "main",
+      "ross_action": "trade",
+      "expected_action": "reject",
+      "side": "long",
+      "window_et": "~07:00-07:10",
+      "ross_entry_px": 6.88,
+      "ross_exit_px": 6.68,
+      "ross_net_usd": -394.89,
+      "pnl_confidence": "narrated",
+      "source": {
+        "kind": "frame_audit",
+        "refs": [
+          "project_ws/AgentOps/ross_video_evidence/AUDIT_REPORT.md"
+        ]
+      },
+      "catalyst": "recovery gap off Jun-30 collapse 8.60->1.60 (no fresh catalyst)",
+      "notes": "Knife dip under the 8.38 shelf on the backside of an 80% collapse; audit verdict NO. 3x unfilled adds 7.78 BOT 0/5000. [pnl: broker panel frame: V1 margin account TC -394.89 (wrong-account entry); fills 6.88 BOT 2000 -> 6.68 SLD 2000] [review: pnl_confidence downgraded: review_manifest marks ross_trade_outcome not certifiable for this (video, symbol); review_manifest: trade/no-trade decision not certifiable from the reviewed frames]",
+      "tape": {
+        "live_covered": null,
+        "golden_pinned": null
+      }
+    },
+    {
+      "manifest_id": "3dXvK41dpd4::AHMA::2026-07-02::scanner-pass",
+      "video_id": "3dXvK41dpd4",
+      "date": "2026-07-02",
+      "symbol": "AHMA",
+      "account": null,
+      "ross_action": "no_trade",
+      "expected_action": "reject",
+      "side": null,
+      "window_et": null,
+      "ross_entry_px": null,
+      "ross_exit_px": null,
+      "ross_net_usd": null,
+      "pnl_confidence": null,
+      "source": {
+        "kind": "frame_audit",
+        "refs": [
+          "project_ws/AgentOps/ross_video_evidence/AUDIT_REPORT_BATCH3.md"
+        ]
+      },
+      "catalyst": "stale June-16 catalyst",
+      "notes": "First pop of day: spike ~3.1-3.2 instantly rejected, $3 seller zone pink-circled. Audit: arm-watch at best -> graded reject.",
+      "tape": {
+        "live_covered": null,
+        "golden_pinned": null
+      }
+    },
+    {
+      "manifest_id": "3dXvK41dpd4::CETX::2026-07-02::three-wave",
+      "video_id": "3dXvK41dpd4",
+      "date": "2026-07-02",
+      "symbol": "CETX",
+      "account": "main",
+      "ross_action": "trade",
+      "expected_action": "trade",
+      "side": "long",
+      "window_et": "~08:31-09:30",
+      "ross_entry_px": 4.71,
+      "ross_exit_px": null,
+      "ross_net_usd": 8917.32,
+      "pnl_confidence": "frame_verified",
+      "source": {
+        "kind": "frame_audit",
+        "refs": [
+          "project_ws/AgentOps/ross_video_evidence/AUDIT_REPORT_BATCH3.md"
+        ]
+      },
+      "catalyst": "dual Cemtrex acquisition headlines 08:30:00 + 08:59:35 ET; float 1.112M; $3->$6.2-6.5 premarket",
+      "notes": "HEADLINE CORRECTION row: the Jul-2 main-account +$8,917.32 was CETX, NOT CLRO. 3 waves: T1 micro-pullback/tape_confirmed_hold + $5 raw_break (YES), T2 20k add-back 5.71-5.76 under the 6.2 PMH (NO - universal loss shape), T3 dip-buys 5.18-5.36 w/ stabilization (YES); maker-posted exits 5.47/5.48 and 10,500 @6.07 into the $6 seller. DB cross-check: squeeze ran 08:31-08:45 ET, invisible to CHILI until 08:54:57. [pnl: broker panel frame: V7 Lightspeed Positions 'CETX | 0 | cost 5.26 | Realized +8,917.32' (TODAY P/L 8,917 top bar); T1 buys 4.71/4.91/4.96/4.97 on screen]",
+      "tape": {
+        "live_covered": null,
+        "golden_pinned": null
+      }
+    },
+    {
+      "manifest_id": "3dXvK41dpd4::CLRO::2026-07-02::failed-pop-no-trade",
+      "video_id": "3dXvK41dpd4",
+      "date": "2026-07-02",
+      "symbol": "CLRO",
+      "account": "main",
+      "ross_action": "no_trade",
+      "expected_action": "reject",
+      "side": null,
+      "window_et": "~08:23-10:00",
+      "ross_entry_px": null,
+      "ross_exit_px": null,
+      "ross_net_usd": null,
+      "pnl_confidence": null,
+      "source": {
+        "kind": "frame_audit",
+        "refs": [
+          "project_ws/AgentOps/ross_video_evidence/AUDIT_REPORT_BATCH3.md"
+        ]
+      },
+      "catalyst": null,
+      "notes": "'Pops up, doesn't end up holding': 08:23 squeeze-alert 5.18->5.44 bled to 3.54 (-35%), well below VWAP 4.34 by review. Timing IS the setup: same ticker was tradeable 08:23-08:31 (small-acct window) and dead by 10:00. DB: afternoon leg 13:00-14:30 ET 6.41->9.62 AFTER both recaps. [pnl: no CLRO row in Lightspeed panels (positively verified non-trade)]",
+      "tape": {
+        "live_covered": null,
+        "golden_pinned": null
+      }
+    },
+    {
+      "manifest_id": "3dXvK41dpd4::DSY::2026-07-02::scanner-pass",
+      "video_id": "3dXvK41dpd4",
+      "date": "2026-07-02",
+      "symbol": "DSY",
+      "account": null,
+      "ross_action": "no_trade",
+      "expected_action": "reject",
+      "side": null,
+      "window_et": null,
+      "ross_entry_px": null,
+      "ross_exit_px": null,
+      "ross_net_usd": null,
+      "pnl_confidence": null,
+      "source": {
+        "kind": "frame_audit",
+        "refs": [
+          "project_ws/AgentOps/ross_video_evidence/AUDIT_REPORT_BATCH3.md"
+        ]
+      },
+      "catalyst": "stale news",
+      "notes": "Backside of a weeks-old move; 4.22 < VWAP 4.95. Mutual pass.",
+      "tape": {
+        "live_covered": null,
+        "golden_pinned": null
+      }
+    },
+    {
+      "manifest_id": "3dXvK41dpd4::JFB::2026-07-02::scanner-pass",
+      "video_id": "3dXvK41dpd4",
+      "date": "2026-07-02",
+      "symbol": "JFB",
+      "account": null,
+      "ross_action": "no_trade",
+      "expected_action": "reject",
+      "side": null,
+      "window_et": null,
+      "ross_entry_px": null,
+      "ross_exit_px": null,
+      "ross_net_usd": null,
+      "pnl_confidence": null,
+      "source": {
+        "kind": "frame_audit",
+        "refs": [
+          "project_ws/AgentOps/ross_video_evidence/AUDIT_REPORT_BATCH3.md"
+        ]
+      },
+      "catalyst": "Roth PT $9 alert",
+      "notes": "Brief pop only. Mutual pass.",
+      "tape": {
+        "live_covered": null,
+        "golden_pinned": null
+      }
+    },
+    {
+      "manifest_id": "3dXvK41dpd4::TC::2026-07-02::scanner-pass",
+      "video_id": "3dXvK41dpd4",
+      "date": "2026-07-02",
+      "symbol": "TC",
+      "account": null,
+      "ross_action": "no_trade",
+      "expected_action": "reject",
+      "side": null,
+      "window_et": null,
+      "ross_entry_px": null,
+      "ross_exit_px": null,
+      "ross_net_usd": null,
+      "pnl_confidence": null,
+      "source": {
+        "kind": "frame_audit",
+        "refs": [
+          "project_ws/AgentOps/ross_video_evidence/AUDIT_REPORT_BATCH3.md"
+        ]
+      },
+      "catalyst": null,
+      "notes": "Yesterday's runner -34.6%, RVOL 0.30, dead. Mutual pass.",
+      "tape": {
+        "live_covered": null,
+        "golden_pinned": null
+      }
+    },
+    {
+      "manifest_id": "3dXvK41dpd4::TGL::2026-07-02::scanner-pass",
+      "video_id": "3dXvK41dpd4",
+      "date": "2026-07-02",
+      "symbol": "TGL",
+      "account": null,
+      "ross_action": "no_trade",
+      "expected_action": "reject",
+      "side": null,
+      "window_et": null,
+      "ross_entry_px": null,
+      "ross_exit_px": null,
+      "ross_net_usd": null,
+      "pnl_confidence": null,
+      "source": {
+        "kind": "frame_audit",
+        "refs": [
+          "project_ws/AgentOps/ross_video_evidence/AUDIT_REPORT_BATCH3.md"
+        ]
+      },
+      "catalyst": null,
+      "notes": "Premarket 4.81 -> red -5.5%. Mutual pass. (5-Pillars scan printed 'No qualified trading opportunity' this morning.)",
+      "tape": {
+        "live_covered": null,
+        "golden_pinned": null
+      }
+    },
+    {
+      "manifest_id": "3dXvK41dpd4::YRD::2026-07-02::scanner-pass",
+      "video_id": "3dXvK41dpd4",
+      "date": "2026-07-02",
+      "symbol": "YRD",
+      "account": null,
+      "ross_action": "no_trade",
+      "expected_action": "reject",
+      "side": null,
+      "window_et": null,
+      "ross_entry_px": null,
+      "ross_exit_px": null,
+      "ross_net_usd": null,
+      "pnl_confidence": null,
+      "source": {
+        "kind": "frame_audit",
+        "refs": [
+          "project_ws/AgentOps/ross_video_evidence/AUDIT_REPORT_BATCH3.md"
+        ]
+      },
+      "catalyst": "repurchase-program news",
+      "notes": "Yiren Digital, float 56.17M ('higher float'). Mutual pass. (Captions garble as 'YD'.)",
+      "tape": {
+        "live_covered": null,
+        "golden_pinned": null
+      }
+    },
+    {
+      "manifest_id": "zxzE4I3Iig8::CLRO::2026-07-02::cup-handle-curl",
+      "video_id": "zxzE4I3Iig8",
+      "date": "2026-07-02",
+      "symbol": "CLRO",
+      "account": "small",
+      "ross_action": "trade",
+      "expected_action": "trade",
+      "side": "long",
+      "window_et": "~08:23-08:45",
+      "ross_entry_px": null,
+      "ross_exit_px": null,
+      "ross_net_usd": 2943.22,
+      "pnl_confidence": "frame_verified",
+      "source": {
+        "kind": "frame_audit",
+        "refs": [
+          "project_ws/AgentOps/ross_video_evidence/AUDIT_REPORT_BATCH3.md"
+        ]
+      },
+      "catalyst": "dual 08:00:00 ET merger headlines (Vivani/Cortigent x ClearOne); float 893.32K",
+      "notes": "Cup-and-handle live worked example: double top 4.61 with topping tails -> deliberately EARLY entry on the confirmed handle-curl BELOW the trigger (= tape_confirmed_hold) -> breakout to ~5.30/wick 5.45. YES on the curl; NO on the add-back after the 5.45 blow-off (partial give-back = universal loss shape, small). [pnl: broker panel frame: V6 ThinkOrSwim CLRO P/L Day $2,943.22 (10 filled orders / 25 fills / 12 canceled); account $20,389.94]",
+      "tape": {
+        "live_covered": null,
+        "golden_pinned": null
+      }
+    },
+    {
+      "manifest_id": "zxzE4I3Iig8::CWD::2026-07-02::no-setup-price-pillar",
+      "video_id": "zxzE4I3Iig8",
+      "date": "2026-07-02",
+      "symbol": "CWD",
+      "account": null,
+      "ross_action": "no_trade",
+      "expected_action": "reject",
+      "side": null,
+      "window_et": null,
+      "ross_entry_px": null,
+      "ross_exit_px": null,
+      "ross_net_usd": null,
+      "pnl_confidence": null,
+      "source": {
+        "kind": "frame_audit",
+        "refs": [
+          "project_ws/AgentOps/ross_video_evidence/AUDIT_REPORT_BATCH3.md"
+        ]
+      },
+      "catalyst": null,
+      "notes": "CaliberCos +96.81% leading gainer, $1.27, 8.34M float - a grinder ('too cheap' per Ross). Third price-pillar divergence: passes CHILI's universe floor but no expansion candle ever fires an entry gate -> graded reject. Reviewed in both V6/V7; attributed to V6.",
+      "tape": {
+        "live_covered": null,
+        "golden_pinned": null
+      }
+    },
+    {
+      "manifest_id": "zxzE4I3Iig8::PPCB::2026-07-02::no-setup",
+      "video_id": "zxzE4I3Iig8",
+      "date": "2026-07-02",
+      "symbol": "PPCB",
+      "account": null,
+      "ross_action": "no_trade",
+      "expected_action": "reject",
+      "side": null,
+      "window_et": null,
+      "ross_entry_px": null,
+      "ross_exit_px": null,
+      "ross_net_usd": null,
+      "pnl_confidence": null,
+      "source": {
+        "kind": "frame_audit",
+        "refs": [
+          "project_ws/AgentOps/ross_video_evidence/AUDIT_REPORT_BATCH3.md"
+        ]
+      },
+      "catalyst": null,
+      "notes": "Micro-float 1.63M; two spike-and-full-retrace 'teepees' (~2.60 tops) = wick-rejection regime. Same read both sides. (Captions garble as 'PPC'.)",
+      "tape": {
+        "live_covered": null,
+        "golden_pinned": null
+      }
+    },
+    {
+      "manifest_id": "zxzE4I3Iig8::USDE::2026-07-02::no-setup",
+      "video_id": "zxzE4I3Iig8",
+      "date": "2026-07-02",
+      "symbol": "USDE",
+      "account": null,
+      "ross_action": "no_trade",
+      "expected_action": "reject",
+      "side": null,
+      "window_et": null,
+      "ross_entry_px": null,
+      "ross_exit_px": null,
+      "ross_net_usd": null,
+      "pnl_confidence": null,
+      "source": {
+        "kind": "frame_audit",
+        "refs": [
+          "project_ws/AgentOps/ross_video_evidence/AUDIT_REPORT_BATCH3.md"
+        ]
+      },
+      "catalyst": null,
+      "notes": "StablecoinX +91.82% / $3.99 / 61.61M float; ~25% below VWAP 4.59 all day, heavy daily supply. Correct mutual pass. Reviewed in both V6/V7; attributed to V6.",
+      "tape": {
+        "live_covered": null,
+        "golden_pinned": null
+      }
+    },
+    {
+      "manifest_id": "zxzE4I3Iig8::WHLR::2026-07-02::written-off",
+      "video_id": "zxzE4I3Iig8",
+      "date": "2026-07-02",
+      "symbol": "WHLR",
+      "account": null,
+      "ross_action": "no_trade",
+      "expected_action": "reject",
+      "side": null,
+      "window_et": null,
+      "ross_entry_px": null,
+      "ross_exit_px": null,
+      "ross_net_usd": null,
+      "pnl_confidence": null,
+      "source": {
+        "kind": "frame_audit",
+        "refs": [
+          "project_ws/AgentOps/ross_video_evidence/AUDIT_REPORT_BATCH3.md"
+        ]
+      },
+      "catalyst": "ANTI-catalyst: fresh 424B3 prospectus + Form-4 filings (dilution)",
+      "notes": "Float 203.53K, multi-year reverse-split collapse; 4am spike instantly rejected. Teachable negative-catalyst signature for the news gate. Reviewed in both V6/V7; attributed to V6.",
+      "tape": {
+        "live_covered": null,
+        "golden_pinned": null
+      }
+    },
+    {
+      "manifest_id": "550XNdh4y5k::ALNY::2026-07-07::watchlist-pass",
+      "video_id": "550XNdh4y5k",
+      "date": "2026-07-07",
+      "symbol": "ALNY",
+      "account": null,
+      "ross_action": "no_trade",
+      "expected_action": "reject",
+      "side": null,
+      "window_et": null,
+      "ross_entry_px": null,
+      "ross_exit_px": null,
+      "ross_net_usd": null,
+      "pnl_confidence": null,
+      "source": {
+        "kind": "frame_audit",
+        "refs": [
+          "project_ws/AgentOps/ross_video_evidence/AUDIT_REPORT_BATCH4.md"
+        ]
+      },
+      "catalyst": null,
+      "notes": "$385 - far above universe price_max. Shared V8/V10 sweep; attribution approximate.",
+      "tape": {
+        "live_covered": null,
+        "golden_pinned": null
+      }
+    },
+    {
+      "manifest_id": "550XNdh4y5k::BJDX::2026-07-07::watchlist-pass",
+      "video_id": "550XNdh4y5k",
+      "date": "2026-07-07",
+      "symbol": "BJDX",
+      "account": null,
+      "ross_action": "no_trade",
+      "expected_action": "reject",
+      "side": null,
+      "window_et": null,
+      "ross_entry_px": null,
+      "ross_exit_px": null,
+      "ross_net_usd": null,
+      "pnl_confidence": null,
+      "source": {
+        "kind": "frame_audit",
+        "refs": [
+          "project_ws/AgentOps/ross_video_evidence/AUDIT_REPORT_BATCH4.md"
+        ]
+      },
+      "catalyst": null,
+      "notes": "$1.40 - price-pillar pass. Shared V8/V10 sweep; attribution approximate.",
+      "tape": {
+        "live_covered": null,
+        "golden_pinned": null
+      }
+    },
+    {
+      "manifest_id": "550XNdh4y5k::CLRO::2026-07-07::add-into-double-top",
+      "video_id": "550XNdh4y5k",
+      "date": "2026-07-07",
+      "symbol": "CLRO",
+      "account": "small",
+      "ross_action": "trade",
+      "expected_action": "reject",
+      "side": "long",
+      "window_et": "~08:50-09:00",
+      "ross_entry_px": null,
+      "ross_exit_px": null,
+      "ross_net_usd": -259.97,
+      "pnl_confidence": "frame_verified",
+      "source": {
+        "kind": "frame_audit",
+        "refs": [
+          "project_ws/AgentOps/ross_video_evidence/AUDIT_REPORT_BATCH4.md"
+        ]
+      },
+      "catalyst": "alert cascade 08:49:43-08:50:55 (8.11->9.50); 4th CLRO session",
+      "notes": "First pop ~9.40-9.42, dip, ADD (partial-fill habit), double top ~9.50, flush -> stop. Add-into-double-top = universal loss shape (small); failed_breakout_bailout. CLRO printed 10.17 by 09:30 without him. [pnl: broker panel frame: V8 ThinkOrSwim day P/L +$216.80 = SILO +476.77 + CLRO -259.97 (component amount; 36-share starter narration-only)]",
+      "tape": {
+        "live_covered": null,
+        "golden_pinned": null
+      }
+    },
+    {
+      "manifest_id": "550XNdh4y5k::CRNX::2026-07-07::buyout-arb-pass",
+      "video_id": "550XNdh4y5k",
+      "date": "2026-07-07",
+      "symbol": "CRNX",
+      "account": null,
+      "ross_action": "no_trade",
+      "expected_action": "reject",
+      "side": null,
+      "window_et": null,
+      "ross_entry_px": null,
+      "ross_exit_px": null,
+      "ross_net_usd": null,
+      "pnl_confidence": null,
+      "source": {
+        "kind": "frame_audit",
+        "refs": [
+          "project_ws/AgentOps/ross_video_evidence/AUDIT_REPORT_BATCH4.md"
+        ]
+      },
+      "catalyst": "Vertex acquires at $85/~$10bn (buyout at fixed price)",
+      "notes": "Buyout-arb teach: +98.91% gapper dead-flat pinned at ~83.5; $1.50 upside vs ~$42 downside. NO-ARM class -> add buyout-headline veto to the catalyst gate.",
+      "tape": {
+        "live_covered": null,
+        "golden_pinned": null
+      }
+    },
+    {
+      "manifest_id": "550XNdh4y5k::CWD::2026-07-07::watchlist-pass",
+      "video_id": "550XNdh4y5k",
+      "date": "2026-07-07",
+      "symbol": "CWD",
+      "account": null,
+      "ross_action": "no_trade",
+      "expected_action": "reject",
+      "side": null,
+      "window_et": null,
+      "ross_entry_px": null,
+      "ross_exit_px": null,
+      "ross_net_usd": null,
+      "pnl_confidence": null,
+      "source": {
+        "kind": "frame_audit",
+        "refs": [
+          "project_ws/AgentOps/ross_video_evidence/AUDIT_REPORT_BATCH4.md"
+        ]
+      },
+      "catalyst": null,
+      "notes": "Cheap - repeat price-pillar pass (see also 2026-07-02 CWD row). Shared V8/V10 sweep; attribution approximate.",
+      "tape": {
+        "live_covered": null,
+        "golden_pinned": null
+      }
+    },
+    {
+      "manifest_id": "550XNdh4y5k::PMA::2026-07-07::watchlist-pass",
+      "video_id": "550XNdh4y5k",
+      "date": "2026-07-07",
+      "symbol": "PMA",
+      "account": null,
+      "ross_action": "no_trade",
+      "expected_action": "reject",
+      "side": null,
+      "window_et": null,
+      "ross_entry_px": null,
+      "ross_exit_px": null,
+      "ross_net_usd": null,
+      "pnl_confidence": null,
+      "source": {
+        "kind": "frame_audit",
+        "refs": [
+          "project_ws/AgentOps/ross_video_evidence/AUDIT_REPORT_BATCH4.md"
+        ]
+      },
+      "catalyst": null,
+      "notes": "$1.79 - price-pillar pass. Shared V8/V10 sweep; attribution approximate.",
+      "tape": {
+        "live_covered": null,
+        "golden_pinned": null
+      }
+    },
+    {
+      "manifest_id": "550XNdh4y5k::RPGL::2026-07-07::watchlist-pass",
+      "video_id": "550XNdh4y5k",
+      "date": "2026-07-07",
+      "symbol": "RPGL",
+      "account": null,
+      "ross_action": "no_trade",
+      "expected_action": "reject",
+      "side": null,
+      "window_et": null,
+      "ross_entry_px": null,
+      "ross_exit_px": null,
+      "ross_net_usd": null,
+      "pnl_confidence": null,
+      "source": {
+        "kind": "frame_audit",
+        "refs": [
+          "project_ws/AgentOps/ross_video_evidence/AUDIT_REPORT_BATCH4.md"
+        ]
+      },
+      "catalyst": null,
+      "notes": "$2.32 - passed. Shared V8/V10 sweep; attribution approximate.",
+      "tape": {
+        "live_covered": null,
+        "golden_pinned": null
+      }
+    },
+    {
+      "manifest_id": "550XNdh4y5k::SDOT::2026-07-07::watchlist-pass",
+      "video_id": "550XNdh4y5k",
+      "date": "2026-07-07",
+      "symbol": "SDOT",
+      "account": null,
+      "ross_action": "no_trade",
+      "expected_action": "reject",
+      "side": null,
+      "window_et": null,
+      "ross_entry_px": null,
+      "ross_exit_px": null,
+      "ross_net_usd": null,
+      "pnl_confidence": null,
+      "source": {
+        "kind": "frame_audit",
+        "refs": [
+          "project_ws/AgentOps/ross_video_evidence/AUDIT_REPORT_BATCH4.md"
+        ]
+      },
+      "catalyst": null,
+      "notes": "$26.32 - still running since batch 2 (Jun-26 trade); above universe price_max. Shared V8/V10 sweep; attribution approximate.",
+      "tape": {
+        "live_covered": null,
+        "golden_pinned": null
+      }
+    },
+    {
+      "manifest_id": "550XNdh4y5k::SILO::2026-07-07::break-of-nine",
+      "video_id": "550XNdh4y5k",
+      "date": "2026-07-07",
+      "symbol": "SILO",
+      "account": "small",
+      "ross_action": "trade",
+      "expected_action": "trade",
+      "side": "long",
+      "window_et": "~08:11-08:13",
+      "ross_entry_px": 8.814,
+      "ross_exit_px": 9.0321,
+      "ross_net_usd": 476.77,
+      "pnl_confidence": "frame_verified",
+      "source": {
+        "kind": "frame_audit",
+        "refs": [
+          "project_ws/AgentOps/ross_video_evidence/AUDIT_REPORT_BATCH4.md"
+        ]
+      },
+      "catalyst": "08:11:00 ET NVIDIA-developer-program headline (Ross doubts substance); float 947.69K",
+      "notes": "Break-of-$9 on a 46-second vertical (7.30->9.50 by 08:11:48). YES on shape; CHILI missed by infra (first tick 08:12:37, 95s after alert = total capture miss). raw_break($9) + catalyst-substance size-down tilt. [pnl: broker panel frame: V8 ThinkOrSwim fills BUY 1,766+420 @8.814 avg -> SELL 2,186 @9.0321 = +$476.77 (2 orders/3 fills)]",
+      "tape": {
+        "live_covered": null,
+        "golden_pinned": null
+      }
+    },
+    {
+      "manifest_id": "550XNdh4y5k::SUGP::2026-07-07::watchlist-pass",
+      "video_id": "550XNdh4y5k",
+      "date": "2026-07-07",
+      "symbol": "SUGP",
+      "account": null,
+      "ross_action": "no_trade",
+      "expected_action": "reject",
+      "side": null,
+      "window_et": null,
+      "ross_entry_px": null,
+      "ross_exit_px": null,
+      "ross_net_usd": null,
+      "pnl_confidence": null,
+      "source": {
+        "kind": "frame_audit",
+        "refs": [
+          "project_ws/AgentOps/ross_video_evidence/AUDIT_REPORT_BATCH4.md"
+        ]
+      },
+      "catalyst": null,
+      "notes": "$1.13 - price-pillar pass. Shared V8/V10 sweep; attribution approximate.",
+      "tape": {
+        "live_covered": null,
+        "golden_pinned": null
+      }
+    },
+    {
+      "manifest_id": "550XNdh4y5k::TDIC::2026-07-07::watchlist-pass",
+      "video_id": "550XNdh4y5k",
+      "date": "2026-07-07",
+      "symbol": "TDIC",
+      "account": null,
+      "ross_action": "no_trade",
+      "expected_action": "reject",
+      "side": null,
+      "window_et": null,
+      "ross_entry_px": null,
+      "ross_exit_px": null,
+      "ross_net_usd": null,
+      "pnl_confidence": null,
+      "source": {
+        "kind": "frame_audit",
+        "refs": [
+          "project_ws/AgentOps/ross_video_evidence/AUDIT_REPORT_BATCH4.md"
+        ]
+      },
+      "catalyst": null,
+      "notes": "4am pop -> -26% under VWAP ('peaked-before-the-window'). Shared V8/V10 sweep; attribution approximate.",
+      "tape": {
+        "live_covered": null,
+        "golden_pinned": null
+      }
+    },
+    {
+      "manifest_id": "550XNdh4y5k::TDTH::2026-07-07::watchlist-pass",
+      "video_id": "550XNdh4y5k",
+      "date": "2026-07-07",
+      "symbol": "TDTH",
+      "account": null,
+      "ross_action": "no_trade",
+      "expected_action": "reject",
+      "side": null,
+      "window_et": null,
+      "ross_entry_px": null,
+      "ross_exit_px": null,
+      "ross_net_usd": null,
+      "pnl_confidence": null,
+      "source": {
+        "kind": "frame_audit",
+        "refs": [
+          "project_ws/AgentOps/ross_video_evidence/AUDIT_REPORT_BATCH4.md"
+        ]
+      },
+      "catalyst": null,
+      "notes": "Premarket double top ~3.55-3.69, peaked BEFORE his 7am sit-down; below VWAP 3.05 by review ('peaked-before-the-window' = timing-is-the-setup). Shared V8/V10 watchlist sweep; date/video attribution approximate (V8, 2026-07-07).",
+      "tape": {
+        "live_covered": null,
+        "golden_pinned": null
+      }
+    },
+    {
+      "manifest_id": "550XNdh4y5k::TNMG::2026-07-07::watchlist-pass",
+      "video_id": "550XNdh4y5k",
+      "date": "2026-07-07",
+      "symbol": "TNMG",
+      "account": null,
+      "ross_action": "no_trade",
+      "expected_action": "reject",
+      "side": null,
+      "window_et": null,
+      "ross_entry_px": null,
+      "ross_exit_px": null,
+      "ross_net_usd": null,
+      "pnl_confidence": null,
+      "source": {
+        "kind": "frame_audit",
+        "refs": [
+          "project_ws/AgentOps/ross_video_evidence/AUDIT_REPORT_BATCH4.md"
+        ]
+      },
+      "catalyst": null,
+      "notes": "$0.76 - too cheap (Ross ~$2 floor; CHILI floor $1 - standing divergence, sub-$1 excluded both ways). Shared V8/V10 sweep; attribution approximate.",
+      "tape": {
+        "live_covered": null,
+        "golden_pinned": null
+      }
+    },
+    {
+      "manifest_id": "Dpba4GF0KhY::CLRO::2026-07-07::declined-1150-reentry",
+      "video_id": "Dpba4GF0KhY",
+      "date": "2026-07-07",
+      "symbol": "CLRO",
+      "account": "main",
+      "ross_action": "no_trade",
+      "expected_action": "reject",
+      "side": null,
+      "window_et": "~10:05-10:10",
+      "ross_entry_px": null,
+      "ross_exit_px": null,
+      "ross_net_usd": null,
+      "pnl_confidence": null,
+      "source": {
+        "kind": "frame_audit",
+        "refs": [
+          "project_ws/AgentOps/ross_video_evidence/AUDIT_REPORT_BATCH4.md"
+        ]
+      },
+      "catalyst": null,
+      "notes": "Live decline of the 11.50-break re-entry; vindicated in real time by the seller flush (seller wall @10.96, 1,313-sh print). DB: CLRO day high 16.50 AFTER the video - third capture-the-continuation case.",
+      "tape": {
+        "live_covered": null,
+        "golden_pinned": null
+      }
+    },
+    {
+      "manifest_id": "Dpba4GF0KhY::CLRO::2026-07-07::t1-pop-chase",
+      "video_id": "Dpba4GF0KhY",
+      "date": "2026-07-07",
+      "symbol": "CLRO",
+      "account": "main",
+      "ross_action": "trade",
+      "expected_action": "reject",
+      "side": "long",
+      "window_et": "~08:50-08:55",
+      "ross_entry_px": null,
+      "ross_exit_px": null,
+      "ross_net_usd": -1600.0,
+      "pnl_confidence": "narrated",
+      "source": {
+        "kind": "frame_audit",
+        "refs": [
+          "project_ws/AgentOps/ross_video_evidence/AUDIT_REPORT_BATCH4.md"
+        ]
+      },
+      "catalyst": "Sunday-watchlist thesis: 'second break of 9.65' (the Jul-2 high)",
+      "notes": "T1 jump-on-the-pop -> partial fills -> hold through the 08:50 5m rug-pull candle (O8.23 H9.50 L7.44 C8.00, 26% range). Chase-no-structure; guards refuse. [pnl: narrated '-$1,600' first trade; partial 'SLD 7034 @8.72' visible on screen (amount itself not panel-verified)]",
+      "tape": {
+        "live_covered": null,
+        "golden_pinned": null
+      }
+    },
+    {
+      "manifest_id": "Dpba4GF0KhY::CLRO::2026-07-07::t3-anticipation-reentry",
+      "video_id": "Dpba4GF0KhY",
+      "date": "2026-07-07",
+      "symbol": "CLRO",
+      "account": "main",
+      "ross_action": "trade",
+      "expected_action": "trade",
+      "side": "long",
+      "window_et": "~09:15-10:02",
+      "ross_entry_px": 9.4,
+      "ross_exit_px": null,
+      "ross_net_usd": 3284.2,
+      "pnl_confidence": "frame_verified",
+      "source": {
+        "kind": "frame_audit",
+        "refs": [
+          "project_ws/AgentOps/ross_video_evidence/AUDIT_REPORT_BATCH4.md"
+        ]
+      },
+      "catalyst": "CLRO personality/continuation day (Jul-2 high 9.65 thesis)",
+      "notes": "Anticipation re-entry ~9.40 under the triple-tested 9.50 flat top (ascending support + flat top apex) -> 9.68 break -> held the 9.02 dip on the trendline -> exits into the $10 push; LULD halt-up 10.67 @10:01:40. tape_confirmed_hold/break_retest + hod_break. Richest L2/halt footage of all 10 videos. [pnl: broker panel frame: V9 Lightspeed realized +$3,284.20 by 10:05 ET - SYMBOL/DAY NET across 5 CLRO trades (4 red) including the T1 -$1,600; exits 9.70/9.82/9.92 posted-liquidity]",
+      "tape": {
+        "live_covered": null,
+        "golden_pinned": null
+      }
+    },
+    {
+      "manifest_id": "0smkAvTc4AY::ANNA::2026-07-08::watchlist",
+      "video_id": "0smkAvTc4AY",
+      "date": "2026-07-08",
+      "symbol": "ANNA",
+      "account": null,
+      "ross_action": "no_trade",
+      "expected_action": "reject",
+      "side": null,
+      "window_et": "~07:20",
+      "ross_entry_px": null,
+      "ross_exit_px": null,
+      "ross_net_usd": null,
+      "pnl_confidence": null,
+      "source": {
+        "kind": "transcript_extraction",
+        "refs": [
+          "project_ws/AgentOps/ross_video_evidence/0smkAvTc4AY/trades_2026-07-08.json"
+        ]
+      },
+      "catalyst": null,
+      "notes": "light volume, nothing moving",
+      "tape": {
+        "live_covered": null,
+        "golden_pinned": null
+      }
+    },
+    {
+      "manifest_id": "0smkAvTc4AY::BATL::2026-07-08::watchlist",
+      "video_id": "0smkAvTc4AY",
+      "date": "2026-07-08",
+      "symbol": "BATL",
+      "account": null,
+      "ross_action": "no_trade",
+      "expected_action": "reject",
+      "side": null,
+      "window_et": "~07:00",
+      "ross_entry_px": null,
+      "ross_exit_px": null,
+      "ross_net_usd": null,
+      "pnl_confidence": null,
+      "source": {
+        "kind": "transcript_extraction",
+        "refs": [
+          "project_ws/AgentOps/ross_video_evidence/0smkAvTc4AY/trades_2026-07-08.json"
+        ]
+      },
+      "catalyst": null,
+      "notes": "energy squeeze on ceasefire-cancelled war news; sector he avoids",
+      "tape": {
+        "live_covered": null,
+        "golden_pinned": null
+      }
+    },
+    {
+      "manifest_id": "0smkAvTc4AY::BNRG::2026-07-08::watchlist",
+      "video_id": "0smkAvTc4AY",
+      "date": "2026-07-08",
+      "symbol": "BNRG",
+      "account": null,
+      "ross_action": "no_trade",
+      "expected_action": "reject",
+      "side": null,
+      "window_et": "~07:00",
+      "ross_entry_px": null,
+      "ross_exit_px": null,
+      "ross_net_usd": null,
+      "pnl_confidence": null,
+      "source": {
+        "kind": "transcript_extraction",
+        "refs": [
+          "project_ws/AgentOps/ross_video_evidence/0smkAvTc4AY/trades_2026-07-08.json"
+        ]
+      },
+      "catalyst": null,
+      "notes": "premarket pop then drop",
+      "tape": {
+        "live_covered": null,
+        "golden_pinned": null
+      }
+    },
+    {
+      "manifest_id": "0smkAvTc4AY::CCHH::2026-07-08::watchlist",
+      "video_id": "0smkAvTc4AY",
+      "date": "2026-07-08",
+      "symbol": "CCHH",
+      "account": null,
+      "ross_action": "no_trade",
+      "expected_action": "reject",
+      "side": null,
+      "window_et": "~09:25",
+      "ross_entry_px": null,
+      "ross_exit_px": null,
+      "ross_net_usd": null,
+      "pnl_confidence": null,
+      "source": {
+        "kind": "transcript_extraction",
+        "refs": [
+          "project_ws/AgentOps/ross_video_evidence/0smkAvTc4AY/trades_2026-07-08.json"
+        ]
+      },
+      "catalyst": null,
+      "notes": "30c->48c on 9:15 ET GlobeNewswire CEO planned-purchase ($10-30M at >=$1.00); 'planned != actual'",
+      "tape": {
+        "live_covered": null,
+        "golden_pinned": null
+      }
+    },
+    {
+      "manifest_id": "0smkAvTc4AY::IOTR::2026-07-08::watchlist",
+      "video_id": "0smkAvTc4AY",
+      "date": "2026-07-08",
+      "symbol": "IOTR",
+      "account": null,
+      "ross_action": "no_trade",
+      "expected_action": "reject",
+      "side": null,
+      "window_et": "~07:00",
+      "ross_entry_px": null,
+      "ross_exit_px": null,
+      "ross_net_usd": null,
+      "pnl_confidence": null,
+      "source": {
+        "kind": "transcript_extraction",
+        "refs": [
+          "project_ws/AgentOps/ross_video_evidence/0smkAvTc4AY/trades_2026-07-08.json"
+        ]
+      },
+      "catalyst": null,
+      "notes": "after-hours/4am mover fading into 7am",
+      "tape": {
+        "live_covered": null,
+        "golden_pinned": null
+      }
+    },
+    {
+      "manifest_id": "0smkAvTc4AY::LUCY::2026-07-08::watchlist",
+      "video_id": "0smkAvTc4AY",
+      "date": "2026-07-08",
+      "symbol": "LUCY",
+      "account": null,
+      "ross_action": "no_trade",
+      "expected_action": "reject",
+      "side": null,
+      "window_et": "~07:00",
+      "ross_entry_px": null,
+      "ross_exit_px": null,
+      "ross_net_usd": null,
+      "pnl_confidence": null,
+      "source": {
+        "kind": "transcript_extraction",
+        "refs": [
+          "project_ws/AgentOps/ross_video_evidence/0smkAvTc4AY/trades_2026-07-08.json"
+        ]
+      },
+      "catalyst": null,
+      "notes": "Innovative Eyewear; grinding, not pulling away",
+      "tape": {
+        "live_covered": null,
+        "golden_pinned": null
+      }
+    },
+    {
+      "manifest_id": "0smkAvTc4AY::NCRA::2026-07-08::watchlist",
+      "video_id": "0smkAvTc4AY",
+      "date": "2026-07-08",
+      "symbol": "NCRA",
+      "account": null,
+      "ross_action": "no_trade",
+      "expected_action": "reject",
+      "side": null,
+      "window_et": "~08:05",
+      "ross_entry_px": null,
+      "ross_exit_px": null,
+      "ross_net_usd": null,
+      "pnl_confidence": null,
+      "source": {
+        "kind": "transcript_extraction",
+        "refs": [
+          "project_ws/AgentOps/ross_video_evidence/0smkAvTc4AY/trades_2026-07-08.json"
+        ]
+      },
+      "catalyst": null,
+      "notes": "binding-acquisition headline 8:05 ET, $1.80->$3 squeeze, recent reverse split; 'feels heavy', failed to break $3; conditional trigger: break of 3.00 (failed)",
+      "tape": {
+        "live_covered": null,
+        "golden_pinned": null
+      }
+    },
+    {
+      "manifest_id": "0smkAvTc4AY::PDYN::2026-07-08::watchlist",
+      "video_id": "0smkAvTc4AY",
+      "date": "2026-07-08",
+      "symbol": "PDYN",
+      "account": null,
+      "ross_action": "no_trade",
+      "expected_action": "reject",
+      "side": null,
+      "window_et": "~07:15",
+      "ross_entry_px": null,
+      "ross_exit_px": null,
+      "ross_net_usd": null,
+      "pnl_confidence": null,
+      "source": {
+        "kind": "transcript_extraction",
+        "refs": [
+          "project_ws/AgentOps/ross_video_evidence/0smkAvTc4AY/trades_2026-07-08.json"
+        ]
+      },
+      "catalyst": null,
+      "notes": "float 38M too high",
+      "tape": {
+        "live_covered": null,
+        "golden_pinned": null
+      }
+    },
+    {
+      "manifest_id": "0smkAvTc4AY::SHPH::2026-07-08::watchlist",
+      "video_id": "0smkAvTc4AY",
+      "date": "2026-07-08",
+      "symbol": "SHPH",
+      "account": null,
+      "ross_action": "no_trade",
+      "expected_action": "reject",
+      "side": null,
+      "window_et": "~07:00",
+      "ross_entry_px": null,
+      "ross_exit_px": null,
+      "ross_net_usd": null,
+      "pnl_confidence": null,
+      "source": {
+        "kind": "transcript_extraction",
+        "refs": [
+          "project_ws/AgentOps/ross_video_evidence/0smkAvTc4AY/trades_2026-07-08.json"
+        ]
+      },
+      "catalyst": null,
+      "notes": "pop-drop chop",
+      "tape": {
+        "live_covered": null,
+        "golden_pinned": null
+      }
+    },
+    {
+      "manifest_id": "0smkAvTc4AY::SKYQ::2026-07-08::watchlist",
+      "video_id": "0smkAvTc4AY",
+      "date": "2026-07-08",
+      "symbol": "SKYQ",
+      "account": null,
+      "ross_action": "no_trade",
+      "expected_action": "reject",
+      "side": null,
+      "window_et": "~07:00",
+      "ross_entry_px": null,
+      "ross_exit_px": null,
+      "ross_net_usd": null,
+      "pnl_confidence": null,
+      "source": {
+        "kind": "transcript_extraction",
+        "refs": [
+          "project_ws/AgentOps/ross_video_evidence/0smkAvTc4AY/trades_2026-07-08.json"
+        ]
+      },
+      "catalyst": null,
+      "notes": "thick grinder; 'over $4 maybe'; conditional trigger: break of 4.00 (not taken)",
+      "tape": {
+        "live_covered": null,
+        "golden_pinned": null
+      }
+    },
+    {
+      "manifest_id": "0smkAvTc4AY::VEEE::2026-07-08::watchlist",
+      "video_id": "0smkAvTc4AY",
+      "date": "2026-07-08",
+      "symbol": "VEEE",
+      "account": null,
+      "ross_action": "no_trade",
+      "expected_action": "reject",
+      "side": null,
+      "window_et": "~07:13",
+      "ross_entry_px": null,
+      "ross_exit_px": null,
+      "ross_net_usd": null,
+      "pnl_confidence": null,
+      "source": {
+        "kind": "transcript_extraction",
+        "refs": [
+          "project_ws/AgentOps/ross_video_evidence/0smkAvTc4AY/trades_2026-07-08.json"
+        ]
+      },
+      "catalyst": null,
+      "notes": "Twin Vee Powercats; 'not on theme'",
+      "tape": {
+        "live_covered": null,
+        "golden_pinned": null
+      }
+    },
+    {
+      "manifest_id": "0smkAvTc4AY::VTAK::2026-07-08::watchlist",
+      "video_id": "0smkAvTc4AY",
+      "date": "2026-07-08",
+      "symbol": "VTAK",
+      "account": null,
+      "ross_action": "no_trade",
+      "expected_action": "reject",
+      "side": null,
+      "window_et": "~07:26",
+      "ross_entry_px": null,
+      "ross_exit_px": null,
+      "ross_net_usd": null,
+      "pnl_confidence": null,
+      "source": {
+        "kind": "transcript_extraction",
+        "refs": [
+          "project_ws/AgentOps/ross_video_evidence/0smkAvTc4AY/trades_2026-07-08.json"
+        ]
+      },
+      "catalyst": null,
+      "notes": "caption-mishear 'VTAC'; too cheap; later leading gainer +138%",
+      "tape": {
+        "live_covered": null,
+        "golden_pinned": null
+      }
+    },
+    {
+      "manifest_id": "0smkAvTc4AY::WFF::2026-07-08::watchlist",
+      "video_id": "0smkAvTc4AY",
+      "date": "2026-07-08",
+      "symbol": "WFF",
+      "account": null,
+      "ross_action": "no_trade",
+      "expected_action": "reject",
+      "side": null,
+      "window_et": "~07:30",
+      "ross_entry_px": null,
+      "ross_exit_px": null,
+      "ross_net_usd": null,
+      "pnl_confidence": null,
+      "source": {
+        "kind": "transcript_extraction",
+        "refs": [
+          "project_ws/AgentOps/ross_video_evidence/0smkAvTc4AY/trades_2026-07-08.json"
+        ]
+      },
+      "catalyst": null,
+      "notes": "Malaysian, NO news, 2.60->3.40; AH high 3.65 trigger never confirmed; 200MA 4.50 overhead; conditional trigger: break of 3.65 w/ catalyst (never confirmed)",
+      "tape": {
+        "live_covered": null,
+        "golden_pinned": null
+      }
+    },
+    {
+      "manifest_id": "49ykxodJcFc::VRAX::2026-07-09::t2",
+      "video_id": "49ykxodJcFc",
+      "date": "2026-07-09",
+      "symbol": "VRAX",
+      "account": "main",
+      "ross_action": "trade",
+      "expected_action": "trade",
+      "side": "long",
+      "window_et": "~07:40-07:50",
+      "ross_entry_px": 6.55,
+      "ross_exit_px": 8.0,
+      "ross_net_usd": 19000,
+      "pnl_confidence": "stated_verbatim",
+      "source": {
+        "kind": "transcript_extraction",
+        "refs": [
+          "project_ws/AgentOps/ross_video_evidence/49ykxodJcFc/trades_2026-07-09.json"
+        ]
+      },
+      "catalyst": null,
+      "notes": "punched the break through 6.55 (local high 6.65), targeting squeeze through 7 + retest of premarket high (~7.40); stated '$19,000 winner in one trade'; intro rounds it to 'on my very first trade on VRX, I made 20 grand'",
+      "tape": {
+        "live_covered": null,
+        "golden_pinned": null
+      }
+    },
+    {
+      "manifest_id": "49ykxodJcFc::VRAX::2026-07-09::t3",
+      "video_id": "49ykxodJcFc",
+      "date": "2026-07-09",
+      "symbol": "VRAX",
+      "account": "main",
+      "ross_action": "trade",
+      "expected_action": "trade",
+      "side": "long",
+      "window_et": "~07:55-08:10",
+      "ross_entry_px": null,
+      "ross_exit_px": null,
+      "ross_net_usd": null,
+      "pnl_confidence": null,
+      "source": {
+        "kind": "transcript_extraction",
+        "refs": [
+          "project_ws/AgentOps/ross_video_evidence/49ykxodJcFc/trades_2026-07-09.json"
+        ]
+      },
+      "catalyst": null,
+      "notes": "re-entry on pop after stair-step pullback; rejection, drops; derived ~-1,000 to -1,500: 'I give back a little profit there. Now I'm up 18,000 on the day'",
+      "tape": {
+        "live_covered": null,
+        "golden_pinned": null
+      }
+    },
+    {
+      "manifest_id": "49ykxodJcFc::VRAX::2026-07-09::t4",
+      "video_id": "49ykxodJcFc",
+      "date": "2026-07-09",
+      "symbol": "VRAX",
+      "account": "main",
+      "ross_action": "trade",
+      "expected_action": "trade",
+      "side": "long",
+      "window_et": "~08:05-08:30",
+      "ross_entry_px": 8.0,
+      "ross_exit_px": null,
+      "ross_net_usd": null,
+      "pnl_confidence": null,
+      "source": {
+        "kind": "transcript_extraction",
+        "refs": [
+          "project_ws/AgentOps/ross_video_evidence/49ykxodJcFc/trades_2026-07-09.json"
+        ]
+      },
+      "catalyst": null,
+      "notes": "break through 8.00 attempt; rejects again (multiple tests of the level that would not pull away); derived ~-1,000: 'I end up losing money on that. So now I'm up 17,000 on the day'",
+      "tape": {
+        "live_covered": null,
+        "golden_pinned": null
+      }
+    },
+    {
+      "manifest_id": "49ykxodJcFc::VRAX::2026-07-09::t5",
+      "video_id": "49ykxodJcFc",
+      "date": "2026-07-09",
+      "symbol": "VRAX",
+      "account": "main",
+      "ross_action": "trade",
+      "expected_action": "trade",
+      "side": "long",
+      "window_et": "~08:30-09:00",
+      "ross_entry_px": null,
+      "ross_exit_px": null,
+      "ross_net_usd": null,
+      "pnl_confidence": null,
+      "source": {
+        "kind": "transcript_extraction",
+        "refs": [
+          "project_ws/AgentOps/ross_video_evidence/49ykxodJcFc/trades_2026-07-09.json"
+        ]
+      },
+      "catalyst": null,
+      "notes": "around the 9.20 high — 'I got this high of 920 where I kind of screwed it up'; may OVERLAP with the two loss trades above (ambiguous narration on the 1-min chart); listed separately only for completeness",
+      "tape": {
+        "live_covered": null,
+        "golden_pinned": null
+      }
+    },
+    {
+      "manifest_id": "49ykxodJcFc::VRAX::2026-07-09::t6",
+      "video_id": "49ykxodJcFc",
+      "date": "2026-07-09",
+      "symbol": "VRAX",
+      "account": "main",
+      "ross_action": "trade",
+      "expected_action": "trade",
+      "side": "long",
+      "window_et": "~09:05-09:25",
+      "ross_entry_px": 10.0,
+      "ross_exit_px": 12.0,
+      "ross_net_usd": null,
+      "pnl_confidence": null,
+      "source": {
+        "kind": "transcript_extraction",
+        "refs": [
+          "project_ws/AgentOps/ross_video_evidence/49ykxodJcFc/trades_2026-07-09.json"
+        ]
+      },
+      "catalyst": null,
+      "notes": "got back in for the break through 10, adding at 10.50, adding at 11, looking for the parabolic move; derived ~+11,000-12,000 net across these round trips (17k -> ~28.8k peak)",
+      "tape": {
+        "live_covered": null,
+        "golden_pinned": null
+      }
+    },
+    {
+      "manifest_id": "49ykxodJcFc::VRAX::2026-07-09::t7",
+      "video_id": "49ykxodJcFc",
+      "date": "2026-07-09",
+      "symbol": "VRAX",
+      "account": "main",
+      "ross_action": "trade",
+      "expected_action": "trade",
+      "side": "long",
+      "window_et": "~09:35-10:00",
+      "ross_entry_px": 12.0,
+      "ross_exit_px": 11.3,
+      "ross_net_usd": null,
+      "pnl_confidence": null,
+      "source": {
+        "kind": "transcript_extraction",
+        "refs": [
+          "project_ws/AgentOps/ross_video_evidence/49ykxodJcFc/trades_2026-07-09.json"
+        ]
+      },
+      "catalyst": null,
+      "notes": "last trade: in for the break of 12; derived ~-4,400: gave back off the ~28.8k peak to finish 24,359.40",
+      "tape": {
+        "live_covered": null,
+        "golden_pinned": null
+      }
+    },
+    {
+      "manifest_id": "miyJZq-5uIg::VRAX::2026-07-09::mp2-break-of-six",
+      "video_id": "miyJZq-5uIg",
+      "date": "2026-07-09",
+      "symbol": "VRAX",
+      "account": "small",
+      "ross_action": "trade",
+      "expected_action": "trade",
+      "side": "long",
+      "window_et": "~07:33-07:40",
+      "ross_entry_px": 6.0,
+      "ross_exit_px": null,
+      "ross_net_usd": 2262.35,
+      "pnl_confidence": "frame_verified",
+      "source": {
+        "kind": "frame_audit",
+        "refs": [
+          "project_ws/AgentOps/ross_video_evidence/AUDIT_REPORT_BATCH4.md",
+          "project_ws/AgentOps/ross_video_evidence/49ykxodJcFc/trades_2026-07-09.json"
+        ]
+      },
+      "catalyst": "Fosun-Diagnostics supply-agreement headline 07:30:00 ET (named counterparty = high-grade catalyst; +279% day)",
+      "notes": "MP2 for the break of $6 on hot tape, $6.00 pre-marked yellow daily level; slippage broke the 2:1 plan -> exited first iffy sign (slippage-aware risk resize). micro_pullback_primary + raw_break($6). CHILI tape captured 5.43->13.19 from 07:33:46 and filled nothing (conversion gap). Session date frame-corrected to Jul-9. [pnl: broker panel frame: V10 ThinkOrSwim VRAX +$2,262.35 (5 orders/43 fills/9 canceled); account $22,867.39 = +1,043%. Entry level $6.00 from the slide 'Micro Pullback at $6.00'; actual fill ~6.30 (15-20c slippage) is narration-only] Merged with transcript extraction 49ykxodJcFc::VRAX::2026-07-09::t1 (curated wins on conflict).",
+      "tape": {
+        "live_covered": null,
+        "golden_pinned": null
+      }
+    },
+    {
+      "manifest_id": "S2sOq-stPgA::AGEN::2026-07-13::watchlist",
+      "video_id": "S2sOq-stPgA",
+      "date": "2026-07-13",
+      "symbol": "AGEN",
+      "account": null,
+      "ross_action": "no_trade",
+      "expected_action": "reject",
+      "side": null,
+      "window_et": null,
+      "ross_entry_px": null,
+      "ross_exit_px": null,
+      "ross_net_usd": null,
+      "pnl_confidence": null,
+      "source": {
+        "kind": "transcript_extraction",
+        "refs": [
+          "project_ws/AgentOps/ross_video_evidence/S2sOq-stPgA/trades_2026-07-13.json"
+        ]
+      },
+      "catalyst": null,
+      "notes": "float too high (38M), thick/slow; symbol unverified (as heard: A J N)",
+      "tape": {
+        "live_covered": null,
+        "golden_pinned": null
+      }
+    },
+    {
+      "manifest_id": "S2sOq-stPgA::FTRK::2026-07-13::watchlist",
+      "video_id": "S2sOq-stPgA",
+      "date": "2026-07-13",
+      "symbol": "FTRK",
+      "account": null,
+      "ross_action": "no_trade",
+      "expected_action": "reject",
+      "side": null,
+      "window_et": null,
+      "ross_entry_px": null,
+      "ross_exit_px": null,
+      "ross_net_usd": null,
+      "pnl_confidence": null,
+      "source": {
+        "kind": "transcript_extraction",
+        "refs": [
+          "project_ws/AgentOps/ross_video_evidence/S2sOq-stPgA/trades_2026-07-13.json"
+        ]
+      },
+      "catalyst": null,
+      "notes": "too cheap",
+      "tape": {
+        "live_covered": null,
+        "golden_pinned": null
+      }
+    },
+    {
+      "manifest_id": "S2sOq-stPgA::PLSM::2026-07-13::t1",
+      "video_id": "S2sOq-stPgA",
+      "date": "2026-07-13",
+      "symbol": "PLSM",
+      "account": "small",
+      "ross_action": "trade",
+      "expected_action": "trade",
+      "side": "long",
+      "window_et": "08:05",
+      "ross_entry_px": null,
+      "ross_exit_px": null,
+      "ross_net_usd": 2363.44,
+      "pnl_confidence": "stated_verbatim",
+      "source": {
+        "kind": "transcript_extraction",
+        "refs": [
+          "project_ws/AgentOps/ross_video_evidence/S2sOq-stPgA/trades_2026-07-13.json"
+        ]
+      },
+      "catalyst": null,
+      "notes": "not stated; inferred ~$10.5-11.5 (+$1.18/sh on 2,000 sh, high ~$13)",
+      "tape": {
+        "live_covered": null,
+        "golden_pinned": null
+      }
+    },
+    {
+      "manifest_id": "S2sOq-stPgA::PLSM::2026-07-13::t2",
+      "video_id": "S2sOq-stPgA",
+      "date": "2026-07-13",
+      "symbol": "PLSM",
+      "account": "small",
+      "ross_action": "trade",
+      "expected_action": "trade",
+      "side": "long",
+      "window_et": "09:15",
+      "ross_entry_px": 9.5,
+      "ross_exit_px": null,
+      "ross_net_usd": -2924.0,
+      "pnl_confidence": "narrated",
+      "source": {
+        "kind": "transcript_extraction",
+        "refs": [
+          "project_ws/AgentOps/ross_video_evidence/S2sOq-stPgA/trades_2026-07-13.json"
+        ]
+      },
+      "catalyst": null,
+      "notes": "caption 'in right around 9.50', level to break 9.59; broke by ~$0.15 then flushed; derived: +2363.44 -> day -560.56; not directly quoted",
+      "tape": {
+        "live_covered": null,
+        "golden_pinned": null
+      }
+    },
+    {
+      "manifest_id": "S2sOq-stPgA::QTTB::2026-07-13::watchlist",
+      "video_id": "S2sOq-stPgA",
+      "date": "2026-07-13",
+      "symbol": "QTTB",
+      "account": null,
+      "ross_action": "no_trade",
+      "expected_action": "reject",
+      "side": null,
+      "window_et": null,
+      "ross_entry_px": null,
+      "ross_exit_px": null,
+      "ross_net_usd": null,
+      "pnl_confidence": null,
+      "source": {
+        "kind": "transcript_extraction",
+        "refs": [
+          "project_ws/AgentOps/ross_video_evidence/S2sOq-stPgA/trades_2026-07-13.json"
+        ]
+      },
+      "catalyst": null,
+      "notes": "expensive, bigger spreads, easy-to-borrow",
+      "tape": {
+        "live_covered": null,
+        "golden_pinned": null
+      }
+    },
+    {
+      "manifest_id": "S2sOq-stPgA::VEEE::2026-07-13::t3",
+      "video_id": "S2sOq-stPgA",
+      "date": "2026-07-13",
+      "symbol": "VEEE",
+      "account": "small",
+      "ross_action": "trade",
+      "expected_action": "trade",
+      "side": "long",
+      "window_et": "10:15",
+      "ross_entry_px": 11.0,
+      "ross_exit_px": null,
+      "ross_net_usd": 765.0,
+      "pnl_confidence": "narrated",
+      "source": {
+        "kind": "transcript_extraction",
+        "refs": [
+          "project_ws/AgentOps/ross_video_evidence/S2sOq-stPgA/trades_2026-07-13.json"
+        ]
+      },
+      "catalyst": "Strategic merger with USFM Corp. subsidiary + concurrent privatization of recreational marine business (verified, PR 2026-07-13 05:30 ET); expensive-to-borrow squeeze (~$0.50/sh borrow, 300% collateral)",
+      "notes": "'pullback right around 11', squeeze to 12; likely exactly +765.74 given day total 205.18",
+      "tape": {
+        "live_covered": null,
+        "golden_pinned": null
+      }
+    },
+    {
+      "manifest_id": "ChLgwLS9eJY::NXTC::2026-07-14::t1",
+      "video_id": "ChLgwLS9eJY",
+      "date": "2026-07-14",
+      "symbol": "NXTC",
+      "account": "small",
+      "ross_action": "trade",
+      "expected_action": "trade",
+      "side": "long",
+      "window_et": "07:13",
+      "ross_entry_px": 8.45,
+      "ross_exit_px": null,
+      "ross_net_usd": 1400.0,
+      "pnl_confidence": "stated_verbatim",
+      "source": {
+        "kind": "transcript_extraction",
+        "refs": [
+          "project_ws/AgentOps/ross_video_evidence/ChLgwLS9eJY/trades_2026-07-14.json"
+        ]
+      },
+      "catalyst": "Reverse merger with Avere Therapeutics ($320M PIPE, combined co -> AVRX); 30M shares volume vs 3M float; web-verified.",
+      "notes": "Break of the 8.40 level (high of the ~7:01 ET rejection candle); tape-verified first print >=8.45 at 11:13:37 UTC, hit 9.50 within seconds, HOD 12.40 at 07:15 ET.",
+      "tape": {
+        "live_covered": null,
+        "golden_pinned": null
+      }
+    },
+    {
+      "manifest_id": "ChLgwLS9eJY::NXTC::2026-07-14::t1-big-acct",
+      "video_id": "ChLgwLS9eJY",
+      "date": "2026-07-14",
+      "symbol": "NXTC",
+      "account": "main",
+      "ross_action": "trade",
+      "expected_action": "trade",
+      "side": "long",
+      "window_et": "07:13",
+      "ross_entry_px": null,
+      "ross_exit_px": null,
+      "ross_net_usd": 19000.0,
+      "pnl_confidence": "narrated",
+      "source": {
+        "kind": "transcript_extraction",
+        "refs": [
+          "project_ws/AgentOps/ross_video_evidence/ChLgwLS9eJY/trades_2026-07-14.json"
+        ]
+      },
+      "catalyst": "Reverse merger with Avere Therapeutics ($320M PIPE, combined co -> AVRX); 30M shares volume vs 3M float; web-verified.",
+      "notes": "Separate big-account claim attached to the small-account recap trade (big_account_pnl_claimed_separate); never summed with the small-account row.",
+      "tape": {
+        "live_covered": null,
+        "golden_pinned": null
+      }
+    },
+    {
+      "manifest_id": "ChLgwLS9eJY::UBXG::2026-07-14::t2",
+      "video_id": "ChLgwLS9eJY",
+      "date": "2026-07-14",
+      "symbol": "UBXG",
+      "account": "small",
+      "ross_action": "trade",
+      "expected_action": "trade",
+      "side": "long",
+      "window_et": "09:40",
+      "ross_entry_px": null,
+      "ross_exit_px": null,
+      "ross_net_usd": 740.99,
+      "pnl_confidence": "narrated",
+      "source": {
+        "kind": "transcript_extraction",
+        "refs": [
+          "project_ws/AgentOps/ross_video_evidence/ChLgwLS9eJY/trades_2026-07-14.json"
+        ]
+      },
+      "catalyst": "No headline per Ross; scanner alert, Chinese microcap (U-BX Technology), post 1-for-25 reverse split.",
+      "notes": "Micro-pullback buy around the 13:39-13:45 UTC pop/resume (~8.5-9.5); exact fill ambiguous due to halts (gaps 13:41-13:44, 13:46-13:49 UTC). Held VWAP bounce.",
+      "tape": {
+        "live_covered": null,
+        "golden_pinned": null
+      }
+    },
+    {
+      "manifest_id": "8IYunlNOVmM::ERNA::2026-07-15::t1",
+      "video_id": "8IYunlNOVmM",
+      "date": "2026-07-15",
+      "symbol": "ERNA",
+      "account": "small",
+      "ross_action": "trade",
+      "expected_action": "trade",
+      "side": "long",
+      "window_et": "~07:45 (07:40-07:55)",
+      "ross_entry_px": 9.37,
+      "ross_exit_px": 10.0,
+      "ross_net_usd": 873.52,
+      "pnl_confidence": "stated_verbatim",
+      "source": {
+        "kind": "transcript_extraction",
+        "refs": [
+          "project_ws/AgentOps/ross_video_evidence/8IYunlNOVmM/trades_2026-07-15.json"
+        ]
+      },
+      "catalyst": "2026-07-15: independently validated preclinical results for ERNA-101 (67% complete tumor clearance with anti-PD-1 combo); IND on track Q3-2026",
+      "notes": "dip-buy after squeeze to 10.62 + pullbacks, looking for break of 10; fills read off order screen: 9.37, 9.39, 9.42, 9.58, 9.60 (starter + add for break of 10); ~4,000 shares in two clumped 2,000 orders; 'about 20 cents a share'",
+      "tape": {
+        "live_covered": null,
+        "golden_pinned": null
+      }
+    },
+    {
+      "manifest_id": "8IYunlNOVmM::VIVS::2026-07-15::t2",
+      "video_id": "8IYunlNOVmM",
+      "date": "2026-07-15",
+      "symbol": "VIVS",
+      "account": "small",
+      "ross_action": "trade",
+      "expected_action": "trade",
+      "side": "long",
+      "window_et": "~08:05 (08:03-08:06)",
+      "ross_entry_px": 1.91,
+      "ross_exit_px": 3.0,
+      "ross_net_usd": null,
+      "pnl_confidence": null,
+      "source": {
+        "kind": "transcript_extraction",
+        "refs": [
+          "project_ws/AgentOps/ross_video_evidence/8IYunlNOVmM/trades_2026-07-15.json"
+        ]
+      },
+      "catalyst": "GlobeNewswire 2026-07-15: VivoSim receives $5M milestone payment from Eli Lilly; guides >500% FY2027 revenue growth",
+      "notes": "200SMA ($1.80) break -> long for the break of 2.00 (initially expected a reversal at 1.80); first entry 1.91, then 1.95; shift-hotkey 2,000-share adds with partial fills; ~4,000 shares total",
+      "tape": {
+        "live_covered": null,
+        "golden_pinned": null
+      }
+    },
+    {
+      "manifest_id": "8IYunlNOVmM::VIVS::2026-07-15::t3",
+      "video_id": "8IYunlNOVmM",
+      "date": "2026-07-15",
+      "symbol": "VIVS",
+      "account": "small",
+      "ross_action": "trade",
+      "expected_action": "trade",
+      "side": "long (re-entry)",
+      "window_et": "~08:08-08:10 (low confidence)",
+      "ross_entry_px": null,
+      "ross_exit_px": null,
+      "ross_net_usd": null,
+      "pnl_confidence": null,
+      "source": {
+        "kind": "transcript_extraction",
+        "refs": [
+          "project_ws/AgentOps/ross_video_evidence/8IYunlNOVmM/trades_2026-07-15.json"
+        ]
+      },
+      "catalyst": "same as trade 2",
+      "notes": "add-back on the dip after the ~3.00+ top, looking for continuation to 4.00; not stated; 'add back up here' after the dip — likely ~2.9-3.3 zone (12:08-12:10 UTC bars 2.59-3.53); alt window = the 12:19 UTC pop back to exactly 3.00 (8:19 ET)",
+      "tape": {
+        "live_covered": null,
+        "golden_pinned": null
+      }
+    },
+    {
+      "manifest_id": "2UpK6vs0MVQ::ATAI::2026-07-16::watchlist",
+      "video_id": "2UpK6vs0MVQ",
+      "date": "2026-07-16",
+      "symbol": "ATAI",
+      "account": null,
+      "ross_action": "no_trade",
+      "expected_action": "reject",
+      "side": null,
+      "window_et": null,
+      "ross_entry_px": null,
+      "ross_exit_px": null,
+      "ross_net_usd": null,
+      "pnl_confidence": null,
+      "source": {
+        "kind": "transcript_extraction",
+        "refs": [
+          "project_ws/AgentOps/ross_video_evidence/2UpK6vs0MVQ/trades_2026-07-16.json"
+        ]
+      },
+      "catalyst": null,
+      "notes": "price fine, float too high; gap ~34%",
+      "tape": {
+        "live_covered": null,
+        "golden_pinned": null
+      }
+    },
+    {
+      "manifest_id": "2UpK6vs0MVQ::IQST::2026-07-16::watchlist",
+      "video_id": "2UpK6vs0MVQ",
+      "date": "2026-07-16",
+      "symbol": "IQST",
+      "account": null,
+      "ross_action": "no_trade",
+      "expected_action": "reject",
+      "side": null,
+      "window_et": null,
+      "ross_entry_px": null,
+      "ross_exit_px": null,
+      "ross_net_usd": null,
+      "pnl_confidence": null,
+      "source": {
+        "kind": "transcript_extraction",
+        "refs": [
+          "project_ws/AgentOps/ross_video_evidence/2UpK6vs0MVQ/trades_2026-07-16.json"
+        ]
+      },
+      "catalyst": null,
+      "notes": "price too low",
+      "tape": {
+        "live_covered": null,
+        "golden_pinned": null
+      }
+    },
+    {
+      "manifest_id": "2UpK6vs0MVQ::RUBI::2026-07-16::t1",
+      "video_id": "2UpK6vs0MVQ",
+      "date": "2026-07-16",
+      "symbol": "RUBI",
+      "account": "small",
+      "ross_action": "trade",
+      "expected_action": "trade",
+      "side": "long",
+      "window_et": "~08:31-08:40",
+      "ross_entry_px": 6.15,
+      "ross_exit_px": null,
+      "ross_net_usd": 587.78,
+      "pnl_confidence": "stated_verbatim",
+      "source": {
+        "kind": "transcript_extraction",
+        "refs": [
+          "project_ws/AgentOps/ross_video_evidence/2UpK6vs0MVQ/trades_2026-07-16.json"
+        ]
+      },
+      "catalyst": "GlobeNewswire 2026-07-16 08:30 ET: Rubico estimates NAV $183.1M, +94% vs previously reported",
+      "notes": "break of 6.00 after 8:30 ET NAV headline (scanner alert); stated: 'a little slippage ... a little over 6.15'",
+      "tape": {
+        "live_covered": null,
+        "golden_pinned": null
+      }
+    },
+    {
+      "manifest_id": "2UpK6vs0MVQ::TGHL::2026-07-16::watchlist",
+      "video_id": "2UpK6vs0MVQ",
+      "date": "2026-07-16",
+      "symbol": "TGHL",
+      "account": null,
+      "ross_action": "no_trade",
+      "expected_action": "reject",
+      "side": null,
+      "window_et": null,
+      "ross_entry_px": null,
+      "ross_exit_px": null,
+      "ross_net_usd": null,
+      "pnl_confidence": null,
+      "source": {
+        "kind": "transcript_extraction",
+        "refs": [
+          "project_ws/AgentOps/ross_video_evidence/2UpK6vs0MVQ/trades_2026-07-16.json"
+        ]
+      },
+      "catalyst": null,
+      "notes": "price a little too cheap, float a little high; gap ~50%",
+      "tape": {
+        "live_covered": null,
+        "golden_pinned": null
+      }
+    },
+    {
+      "manifest_id": "2UpK6vs0MVQ::VEEE::2026-07-16::watchlist",
+      "video_id": "2UpK6vs0MVQ",
+      "date": "2026-07-16",
+      "symbol": "VEEE",
+      "account": null,
+      "ross_action": "no_trade",
+      "expected_action": "reject",
+      "side": null,
+      "window_et": null,
+      "ross_entry_px": null,
+      "ross_exit_px": null,
+      "ross_net_usd": null,
+      "pnl_confidence": null,
+      "source": {
+        "kind": "transcript_extraction",
+        "refs": [
+          "project_ws/AgentOps/ross_video_evidence/2UpK6vs0MVQ/trades_2026-07-16.json"
+        ]
+      },
+      "catalyst": null,
+      "notes": "price a little high, float fine; gap ~37%",
+      "tape": {
+        "live_covered": null,
+        "golden_pinned": null
+      }
+    },
+    {
+      "manifest_id": "mDQEtmG0PCw::BIYA::2026-07-20::t1",
+      "video_id": "mDQEtmG0PCw",
+      "date": "2026-07-20",
+      "symbol": "BIYA",
+      "account": "main",
+      "ross_action": "trade",
+      "expected_action": "trade",
+      "side": "long",
+      "window_et": "~07:45-07:55",
+      "ross_entry_px": 7.5,
+      "ross_exit_px": 8.0,
+      "ross_net_usd": null,
+      "pnl_confidence": null,
+      "source": {
+        "kind": "transcript_extraction",
+        "refs": [
+          "project_ws/AgentOps/ross_video_evidence/mDQEtmG0PCw/trades_2026-07-20.json"
+        ]
+      },
+      "catalyst": "no news - Chinese (Cayman-holding) stock; leading gainer after hours Friday, closed AH at highs, continuation premarket; theme of no-news China/Singapore squeezes kept him from writing it off",
+      "notes": "after missing the 7:00 AM squeeze (three topping tails made him nervous), took the break of the ~7.56/7.75 resistance area once 6.84 had been retested and proven as support and price curled back up - 'where's the line in the sand, where if this price breaks, it's going to go'; starter at 7.50, added at 7.60, added at 7.85 (stated)",
+      "tape": {
+        "live_covered": null,
+        "golden_pinned": null
+      }
+    },
+    {
+      "manifest_id": "mDQEtmG0PCw::BIYA::2026-07-20::t2",
+      "video_id": "mDQEtmG0PCw",
+      "date": "2026-07-20",
+      "symbol": "BIYA",
+      "account": "main",
+      "ross_action": "trade",
+      "expected_action": "trade",
+      "side": "long",
+      "window_et": null,
+      "ross_entry_px": null,
+      "ross_exit_px": null,
+      "ross_net_usd": null,
+      "pnl_confidence": null,
+      "source": {
+        "kind": "transcript_extraction",
+        "refs": [
+          "project_ws/AgentOps/ross_video_evidence/mDQEtmG0PCw/trades_2026-07-20.json"
+        ]
+      },
+      "catalyst": "same BIYA continuation",
+      "notes": "add into the position near the highs (increased cost basis) - loser #1 of the day; not stated; add near the 8.15-8.30 area",
+      "tape": {
+        "live_covered": null,
+        "golden_pinned": null
+      }
+    },
+    {
+      "manifest_id": "mDQEtmG0PCw::BIYA::2026-07-20::t3",
+      "video_id": "mDQEtmG0PCw",
+      "date": "2026-07-20",
+      "symbol": "BIYA",
+      "account": "main",
+      "ross_action": "trade",
+      "expected_action": "trade",
+      "side": "long",
+      "window_et": null,
+      "ross_entry_px": null,
+      "ross_exit_px": null,
+      "ross_net_usd": null,
+      "pnl_confidence": null,
+      "source": {
+        "kind": "transcript_extraction",
+        "refs": [
+          "project_ws/AgentOps/ross_video_evidence/mDQEtmG0PCw/trades_2026-07-20.json"
+        ]
+      },
+      "catalyst": "same BIYA; theme of topping tails on every pop made him quit - 'short sellers are going to feel comfortable adding as it goes higher'",
+      "notes": "two dip-buys looking for the curl back up - loser #2 of the day; not stated; dips under ~8 after the 8.30 rejection",
+      "tape": {
+        "live_covered": null,
+        "golden_pinned": null
+      }
+    },
+    {
+      "manifest_id": "mDQEtmG0PCw::GVH::2026-07-20::watchlist",
+      "video_id": "mDQEtmG0PCw",
+      "date": "2026-07-20",
+      "symbol": "GVH",
+      "account": null,
+      "ross_action": "no_trade",
+      "expected_action": "reject",
+      "side": null,
+      "window_et": null,
+      "ross_entry_px": null,
+      "ross_exit_px": null,
+      "ross_net_usd": null,
+      "pnl_confidence": null,
+      "source": {
+        "kind": "transcript_extraction",
+        "refs": [
+          "project_ws/AgentOps/ross_video_evidence/mDQEtmG0PCw/trades_2026-07-20.json"
+        ]
+      },
+      "catalyst": null,
+      "notes": "popped this morning on real news (expanding commercial distribution to a platform with 90M+ registered users) and was down ~57-60% at recording time, ~70-80% off the $9 peak - cited as the cautionary example, did not trade",
+      "tape": {
+        "live_covered": null,
+        "golden_pinned": null
+      }
+    },
+    {
+      "manifest_id": "x0qg5eGF7zc::BIYA::2026-07-20::t1",
+      "video_id": "x0qg5eGF7zc",
+      "date": "2026-07-20",
+      "symbol": "BIYA",
+      "account": "small",
+      "ross_action": "trade",
+      "expected_action": "trade",
+      "side": "long",
+      "window_et": "~07:45-07:55",
+      "ross_entry_px": null,
+      "ross_exit_px": 8.6,
+      "ross_net_usd": 1100,
+      "pnl_confidence": "narrated",
+      "source": {
+        "kind": "transcript_extraction",
+        "refs": [
+          "project_ws/AgentOps/ross_video_evidence/x0qg5eGF7zc/trades_2026-07-20.json"
+        ]
+      },
+      "catalyst": "no clear catalyst (fails that pillar) and Chinese - two concerns; but 93% gapper, 2.7M share float, 35M shares volume, very high relative volume; on his uploaded weekend watchlist; leading gainer after hours Friday, closed AH at highs",
+      "notes": "breakout through the high of day off a little micro pullback: after missing the 7:00 AM squeeze (up to 6.65, then 7.00, 7.57, 7.75 - 'I couldn't chase it'), it pulled back and curled back up ~7:41-7:42 AM (hit 7.43); descending resistance had been broken; he started jumping in as it popped despite worry about the prior topping tail; not stated; entries were on the pop through the ~7.75 prior high area (main-account recap: starter 7.50, adds 7.60/7.85)",
+      "tape": {
+        "live_covered": null,
+        "golden_pinned": null
+      }
+    },
+    {
+      "manifest_id": "x0qg5eGF7zc::VEE::2026-07-20::watchlist",
+      "video_id": "x0qg5eGF7zc",
+      "date": "2026-07-20",
+      "symbol": "VEE",
+      "account": null,
+      "ross_action": "no_trade",
+      "expected_action": "reject",
+      "side": null,
+      "window_et": null,
+      "ross_entry_px": null,
+      "ross_exit_px": null,
+      "ross_net_usd": null,
+      "pnl_confidence": null,
+      "source": {
+        "kind": "transcript_extraction",
+        "refs": [
+          "project_ws/AgentOps/ross_video_evidence/x0qg5eGF7zc/trades_2026-07-20.json"
+        ]
+      },
+      "catalyst": null,
+      "notes": "context only, last week: the stock that kept going higher against the swing-short pattern, ~$4 to $56",
+      "tape": {
+        "live_covered": null,
+        "golden_pinned": null
+      }
+    },
+    {
+      "manifest_id": "x0qg5eGF7zc::ZYBT::2026-07-20::watchlist",
+      "video_id": "x0qg5eGF7zc",
+      "date": "2026-07-20",
+      "symbol": "ZYBT",
+      "account": null,
+      "ross_action": "no_trade",
+      "expected_action": "reject",
+      "side": null,
+      "window_et": null,
+      "ross_entry_px": null,
+      "ross_exit_px": null,
+      "ross_net_usd": null,
+      "pnl_confidence": null,
+      "source": {
+        "kind": "transcript_extraction",
+        "refs": [
+          "project_ws/AgentOps/ross_video_evidence/x0qg5eGF7zc/trades_2026-07-20.json"
+        ]
+      },
+      "catalyst": null,
+      "notes": "up 109% and gaining attention while he was recording (after his session ended); attention shifting to it - not traded by him (it went on to squeeze ~1000% later that day)",
+      "tape": {
+        "live_covered": null,
+        "golden_pinned": null
+      }
+    },
+    {
+      "manifest_id": "q-ywzhtkeY8::CPHI::2026-07-21::watchlist",
+      "video_id": "q-ywzhtkeY8",
+      "date": "2026-07-21",
+      "symbol": "CPHI",
+      "account": null,
+      "ross_action": "no_trade",
+      "expected_action": "reject",
+      "side": null,
+      "window_et": null,
+      "ross_entry_px": null,
+      "ross_exit_px": null,
+      "ross_net_usd": null,
+      "pnl_confidence": null,
+      "source": {
+        "kind": "transcript_extraction",
+        "refs": [
+          "project_ws/AgentOps/ross_video_evidence/q-ywzhtkeY8/trades_2026-07-21.json"
+        ]
+      },
+      "catalyst": null,
+      "notes": "today's monster: Chinese stock, no news, <$1 (50-60c) to a high of nearly $20, +2,212%; did not trade because it started below $1 (usually choppier), moved mid-day outside his trading window, and regular-hours halts create being-stuck risk; T-12 halt risk flagged",
+      "tape": {
+        "live_covered": null,
+        "golden_pinned": null
+      }
+    },
+    {
+      "manifest_id": "q-ywzhtkeY8::VIVK::2026-07-21::watchlist",
+      "video_id": "q-ywzhtkeY8",
+      "date": "2026-07-21",
+      "symbol": "VIVK",
+      "account": null,
+      "ross_action": "no_trade",
+      "expected_action": "reject",
+      "side": null,
+      "window_et": null,
+      "ross_entry_px": null,
+      "ross_exit_px": null,
+      "ross_net_usd": null,
+      "pnl_confidence": null,
+      "source": {
+        "kind": "transcript_extraction",
+        "refs": [
+          "project_ws/AgentOps/ross_video_evidence/q-ywzhtkeY8/trades_2026-07-21.json"
+        ]
+      },
+      "catalyst": null,
+      "notes": "popped at ~9:15 AM on legitimate breaking news ($40M AI headline), up 300%; he MISSED it - had concluded the day was over ('10 past nine... I don't think it's happening') and wasn't interested in trading a no-news China stock; it gave a first and second pullback then a big rejection at the third; gave back most gains by day end",
+      "tape": {
+        "live_covered": null,
+        "golden_pinned": null
+      }
+    },
+    {
+      "manifest_id": "q-ywzhtkeY8::ZYBT::2026-07-21::watchlist",
+      "video_id": "q-ywzhtkeY8",
+      "date": "2026-07-21",
+      "symbol": "ZYBT",
+      "account": null,
+      "ross_action": "no_trade",
+      "expected_action": "reject",
+      "side": null,
+      "window_et": null,
+      "ross_entry_px": null,
+      "ross_exit_px": null,
+      "ross_net_usd": null,
+      "pnl_confidence": null,
+      "source": {
+        "kind": "transcript_extraction",
+        "refs": [
+          "project_ws/AgentOps/ross_video_evidence/q-ywzhtkeY8/trades_2026-07-21.json"
+        ]
+      },
+      "catalyst": null,
+      "notes": "yesterday's (Monday's) mover: 60c to ~4.50 intraday, halted into the close, after-hours squeeze to 11.50, then -80% flush to $2.50 in <10 min; 5.6M float, 160M+ shares volume, no news (company shrugged); today premarket it went 3 back up to 9 - he wondered if it could get back over 5-6 and be in play but it couldn't, so no trades",
+      "tape": {
+        "live_covered": null,
+        "golden_pinned": null
+      }
+    },
+    {
+      "manifest_id": "-QZ8buLplck::CPHI::2026-07-22::watchlist",
+      "video_id": "-QZ8buLplck",
+      "date": "2026-07-22",
+      "symbol": "CPHI",
+      "account": null,
+      "ross_action": "no_trade",
+      "expected_action": "reject",
+      "side": null,
+      "window_et": null,
+      "ross_entry_px": null,
+      "ross_exit_px": null,
+      "ross_net_usd": null,
+      "pnl_confidence": null,
+      "source": {
+        "kind": "transcript_extraction",
+        "refs": [
+          "project_ws/AgentOps/ross_video_evidence/-QZ8buLplck/trades_2026-07-22.json"
+        ]
+      },
+      "catalyst": null,
+      "notes": "context: Tuesday's mover (50c to ~10, high near $20, >2,000%); Chinese no-news; he took no trades Tuesday at all",
+      "tape": {
+        "live_covered": null,
+        "golden_pinned": null
+      }
+    },
+    {
+      "manifest_id": "-QZ8buLplck::INM::2026-07-22::watchlist",
+      "video_id": "-QZ8buLplck",
+      "date": "2026-07-22",
+      "symbol": "INM",
+      "account": null,
+      "ross_action": "no_trade",
+      "expected_action": "reject",
+      "side": null,
+      "window_et": null,
+      "ross_entry_px": null,
+      "ross_exit_px": null,
+      "ross_net_usd": null,
+      "pnl_confidence": null,
+      "source": {
+        "kind": "transcript_extraction",
+        "refs": [
+          "project_ws/AgentOps/ross_video_evidence/-QZ8buLplck/trades_2026-07-22.json"
+        ]
+      },
+      "catalyst": null,
+      "notes": "popped on news of a $200M private placement for a migraine medication; ~$1 to almost $6 (+~300%) then all the way back down on higher-volume selling - surprised the legit catalyst failed; made him wonder if good news was bad news today",
+      "tape": {
+        "live_covered": null,
+        "golden_pinned": null
+      }
+    },
+    {
+      "manifest_id": "-QZ8buLplck::LABT::2026-07-22::t1",
+      "video_id": "-QZ8buLplck",
+      "date": "2026-07-22",
+      "symbol": "LABT",
+      "account": "small",
+      "ross_action": "trade",
+      "expected_action": "trade",
+      "side": "long",
+      "window_et": "~08:05",
+      "ross_entry_px": null,
+      "ross_exit_px": null,
+      "ross_net_usd": 1842,
+      "pnl_confidence": "narrated",
+      "source": {
+        "kind": "transcript_extraction",
+        "refs": [
+          "project_ws/AgentOps/ross_video_evidence/-QZ8buLplck/trades_2026-07-22.json"
+        ]
+      },
+      "catalyst": "8:00 AM breaking news, phase-2 headline for the same medication as the news; biotech; recent IPO that reverse-split after going under $1; ~$1.80 close yesterday; highest-volume-ever day (~4M prior max)",
+      "notes": "micro-pullback entry after the squeeze to 3.60: 8:00 AM scanner alert on breaking news; ignored the first pop, then up >100% on the day forced attention; entered the micro pullback before the 3.60 breakout leg; not stated; entry was around the micro pullback under ~3.60",
+      "tape": {
+        "live_covered": null,
+        "golden_pinned": null
+      }
+    },
+    {
+      "manifest_id": "-QZ8buLplck::LABT::2026-07-22::t2",
+      "video_id": "-QZ8buLplck",
+      "date": "2026-07-22",
+      "symbol": "LABT",
+      "account": "small",
+      "ross_action": "trade",
+      "expected_action": "trade",
+      "side": "long",
+      "window_et": "~08:10-08:20",
+      "ross_entry_px": 5.65,
+      "ross_exit_px": null,
+      "ross_net_usd": 400,
+      "pnl_confidence": "stated_verbatim",
+      "source": {
+        "kind": "transcript_extraction",
+        "refs": [
+          "project_ws/AgentOps/ross_video_evidence/-QZ8buLplck/trades_2026-07-22.json"
+        ]
+      },
+      "catalyst": "same LABT phase-2 news; conviction the setup would retest the high",
+      "notes": "re-entry on the pullback after the first flush ('here we go') - filled higher than planned; stated: 'filled at about just under $6 a share... I'm in here at about $5.65, something like that'",
+      "tape": {
+        "live_covered": null,
+        "golden_pinned": null
+      }
+    },
+    {
+      "manifest_id": "-QZ8buLplck::ZYBT::2026-07-22::watchlist",
+      "video_id": "-QZ8buLplck",
+      "date": "2026-07-22",
+      "symbol": "ZYBT",
+      "account": null,
+      "ross_action": "no_trade",
+      "expected_action": "reject",
+      "side": null,
+      "window_et": null,
+      "ross_entry_px": null,
+      "ross_exit_px": null,
+      "ross_net_usd": null,
+      "pnl_confidence": null,
+      "source": {
+        "kind": "transcript_extraction",
+        "refs": [
+          "project_ws/AgentOps/ross_video_evidence/-QZ8buLplck/trades_2026-07-22.json"
+        ]
+      },
+      "catalyst": null,
+      "notes": "context: Monday's mover (~60c to 11, then plummet); he missed the whole move having stopped trading in the morning",
+      "tape": {
+        "live_covered": null,
+        "golden_pinned": null
+      }
+    },
+    {
+      "manifest_id": "YkEOx0ZWlWc::CPHI::2026-07-22::watchlist",
+      "video_id": "YkEOx0ZWlWc",
+      "date": "2026-07-22",
+      "symbol": "CPHI",
+      "account": null,
+      "ross_action": "no_trade",
+      "expected_action": "reject",
+      "side": null,
+      "window_et": null,
+      "ross_entry_px": null,
+      "ross_exit_px": null,
+      "ross_net_usd": null,
+      "pnl_confidence": null,
+      "source": {
+        "kind": "transcript_extraction",
+        "refs": [
+          "project_ws/AgentOps/ross_video_evidence/YkEOx0ZWlWc/trades_2026-07-22.json"
+        ]
+      },
+      "catalyst": null,
+      "notes": "context only: yesterday's 2200% mover (60c to nearly $20), back to $1.96 - not traded by him; did an offering after the move",
+      "tape": {
+        "live_covered": null,
+        "golden_pinned": null
+      }
+    },
+    {
+      "manifest_id": "YkEOx0ZWlWc::INM::2026-07-22::watchlist",
+      "video_id": "YkEOx0ZWlWc",
+      "date": "2026-07-22",
+      "symbol": "INM",
+      "account": null,
+      "ross_action": "no_trade",
+      "expected_action": "reject",
+      "side": null,
+      "window_et": null,
+      "ross_entry_px": null,
+      "ross_exit_px": null,
+      "ross_net_usd": null,
+      "pnl_confidence": null,
+      "source": {
+        "kind": "transcript_extraction",
+        "refs": [
+          "project_ws/AgentOps/ross_video_evidence/YkEOx0ZWlWc/trades_2026-07-22.json"
+        ]
+      },
+      "catalyst": null,
+      "notes": "biotech with $200M private placement news for migraine-prevention medication; went ~$1 to $5.50 high then flushed all the way back down - he wrote it off and it made him think it might be a no-trade day",
+      "tape": {
+        "live_covered": null,
+        "golden_pinned": null
+      }
+    },
+    {
+      "manifest_id": "YkEOx0ZWlWc::LABT::2026-07-22::t1",
+      "video_id": "YkEOx0ZWlWc",
+      "date": "2026-07-22",
+      "symbol": "LABT",
+      "account": "main",
+      "ross_action": "trade",
+      "expected_action": "trade",
+      "side": "long",
+      "window_et": "~08:05",
+      "ross_entry_px": null,
+      "ross_exit_px": null,
+      "ross_net_usd": 20000,
+      "pnl_confidence": "narrated",
+      "source": {
+        "kind": "transcript_extraction",
+        "refs": [
+          "project_ws/AgentOps/ross_video_evidence/YkEOx0ZWlWc/trades_2026-07-22.json"
+        ]
+      },
+      "catalyst": "8:00 AM breaking news - phase 2 (clinical) headline; biotech; somewhat recent IPO, post-reverse-split, highest-volume day ever (reduced bag-holder risk)",
+      "notes": "first entry on micro-pullback pop looking for the break through 3.60 (after 8:00 AM phase-2 news scanner alert and initial squeeze to 3.00 then 3.60); added as it squeezed through 4, 4.50, 5; first entry positioned for the 3.60 break; adds at ~4 / 4.50 / 5 narrated, exact fills not stated",
+      "tape": {
+        "live_covered": null,
+        "golden_pinned": null
+      }
+    },
+    {
+      "manifest_id": "YkEOx0ZWlWc::LABT::2026-07-22::t2",
+      "video_id": "YkEOx0ZWlWc",
+      "date": "2026-07-22",
+      "symbol": "LABT",
+      "account": "main",
+      "ross_action": "trade",
+      "expected_action": "trade",
+      "side": "long",
+      "window_et": "~08:10-08:15",
+      "ross_entry_px": null,
+      "ross_exit_px": 7.0,
+      "ross_net_usd": null,
+      "pnl_confidence": null,
+      "source": {
+        "kind": "transcript_extraction",
+        "refs": [
+          "project_ws/AgentOps/ross_video_evidence/YkEOx0ZWlWc/trades_2026-07-22.json"
+        ]
+      },
+      "catalyst": "same LABT phase-2 news momentum",
+      "notes": "series of follow-on trades: dip-buys sold into pops; one add for a breakout that 'didn't really work very well'; then breakouts over 5.50 and 6.00, adding into the second squeeze to 7; levels 5.50 / 6.00 narrated as triggers; fills not stated",
+      "tape": {
+        "live_covered": null,
+        "golden_pinned": null
+      }
+    },
+    {
+      "manifest_id": "YkEOx0ZWlWc::ZCMD::2026-07-22::watchlist",
+      "video_id": "YkEOx0ZWlWc",
+      "date": "2026-07-22",
+      "symbol": "ZCMD",
+      "account": null,
+      "ross_action": "no_trade",
+      "expected_action": "reject",
+      "side": null,
+      "window_et": null,
+      "ross_entry_px": null,
+      "ross_exit_px": null,
+      "ross_net_usd": null,
+      "pnl_confidence": null,
+      "source": {
+        "kind": "transcript_extraction",
+        "refs": [
+          "project_ws/AgentOps/ross_video_evidence/YkEOx0ZWlWc/trades_2026-07-22.json"
+        ]
+      },
+      "catalyst": null,
+      "notes": "squeezing $2 to $6.60 (+348%) during recording, latest China no-news mover; explicitly not trading it - regular-hours halts (3rd halt in a row, 15-30 min halts), halt-down/gap-down risk, possible T-12 regulatory halt",
+      "tape": {
+        "live_covered": null,
+        "golden_pinned": null
+      }
+    },
+    {
+      "manifest_id": "YkEOx0ZWlWc::ZYBT::2026-07-22::watchlist",
+      "video_id": "YkEOx0ZWlWc",
+      "date": "2026-07-22",
+      "symbol": "ZYBT",
+      "account": null,
+      "ross_action": "no_trade",
+      "expected_action": "reject",
+      "side": null,
+      "window_et": null,
+      "ross_entry_px": null,
+      "ross_exit_px": null,
+      "ross_net_usd": null,
+      "pnl_confidence": null,
+      "source": {
+        "kind": "transcript_extraction",
+        "refs": [
+          "project_ws/AgentOps/ross_video_evidence/YkEOx0ZWlWc/trades_2026-07-22.json"
+        ]
+      },
+      "catalyst": null,
+      "notes": "context only: Monday's ~1000% no-news China squeeze, now back near $1 - not traded by him",
+      "tape": {
+        "live_covered": null,
+        "golden_pinned": null
+      }
+    },
+    {
+      "manifest_id": "CA8i4Rc2bUY::ADVB::2026-07-23::watchlist",
+      "video_id": "CA8i4Rc2bUY",
+      "date": "2026-07-23",
+      "symbol": "ADVB",
+      "account": null,
+      "ross_action": "no_trade",
+      "expected_action": "reject",
+      "side": null,
+      "window_et": null,
+      "ross_entry_px": null,
+      "ross_exit_px": null,
+      "ross_net_usd": null,
+      "pnl_confidence": null,
+      "source": {
+        "kind": "transcript_extraction",
+        "refs": [
+          "project_ws/AgentOps/ross_video_evidence/CA8i4Rc2bUY/trades_2026-07-23.json"
+        ]
+      },
+      "catalyst": null,
+      "notes": "popped on the scanners and amazingly broke yesterday's high despite yesterday's shooting-star candle, but risk too high / spreads bigger - no trades",
+      "tape": {
+        "live_covered": null,
+        "golden_pinned": null
+      }
+    },
+    {
+      "manifest_id": "CA8i4Rc2bUY::EHGO::2026-07-23::t4",
+      "video_id": "CA8i4Rc2bUY",
+      "date": "2026-07-23",
+      "symbol": "EHGO",
+      "account": "main",
+      "ross_action": "trade",
+      "expected_action": "trade",
+      "side": "long",
+      "window_et": "~09:15-09:30 (coming into the open; held through the 9:30 bell)",
+      "ross_entry_px": 3.0,
+      "ross_exit_px": 4.5,
+      "ross_net_usd": 41000,
+      "pnl_confidence": "stated_verbatim",
+      "source": {
+        "kind": "transcript_extraction",
+        "refs": [
+          "project_ws/AgentOps/ross_video_evidence/CA8i4Rc2bUY/trades_2026-07-23.json"
+        ]
+      },
+      "catalyst": "no news - Chinese stock fitting the theme; chart analog of ZCMD's day-one flat-top breakout",
+      "notes": "flat-top breakout analog to ZCMD's day-one 3.15 flat top: looking for the break of 3.00, got in on the first 5-minute candle to make a new high; 200-day moving average flagged as (and later proved) resistance; stated: 'my entry right down there $3'; starter then aggressive adds as it squeezed 3.50 -> 4",
+      "tape": {
+        "live_covered": null,
+        "golden_pinned": null
+      }
+    },
+    {
+      "manifest_id": "CA8i4Rc2bUY::JEM::2026-07-23::t1",
+      "video_id": "CA8i4Rc2bUY",
+      "date": "2026-07-23",
+      "symbol": "JEM",
+      "account": "main",
+      "ross_action": "trade",
+      "expected_action": "trade",
+      "side": "long",
+      "window_et": "~07:00",
+      "ross_entry_px": null,
+      "ross_exit_px": null,
+      "ross_net_usd": 579,
+      "pnl_confidence": "stated_verbatim",
+      "source": {
+        "kind": "transcript_extraction",
+        "refs": [
+          "project_ws/AgentOps/ross_video_evidence/CA8i4Rc2bUY/trades_2026-07-23.json"
+        ]
+      },
+      "catalyst": "no news - Chinese (Hong Kong) stock, recent reverse splits; fit the no-news China theme",
+      "notes": "7 AM squeeze after pop-pullback-pop sequence; jumped in 'a little high in that move' and had to get out very quickly - a close call; not stated; ~5c/share captured on the round trip",
+      "tape": {
+        "live_covered": null,
+        "golden_pinned": null
+      }
+    },
+    {
+      "manifest_id": "CA8i4Rc2bUY::LGCL::2026-07-23::watchlist",
+      "video_id": "CA8i4Rc2bUY",
+      "date": "2026-07-23",
+      "symbol": "LGCL",
+      "account": null,
+      "ross_action": "no_trade",
+      "expected_action": "reject",
+      "side": null,
+      "window_et": null,
+      "ross_entry_px": null,
+      "ross_exit_px": null,
+      "ross_net_usd": null,
+      "pnl_confidence": null,
+      "source": {
+        "kind": "transcript_extraction",
+        "refs": [
+          "project_ws/AgentOps/ross_video_evidence/CA8i4Rc2bUY/trades_2026-07-23.json"
+        ]
+      },
+      "catalyst": null,
+      "notes": "'no trades there'",
+      "tape": {
+        "live_covered": null,
+        "golden_pinned": null
+      }
+    },
+    {
+      "manifest_id": "CA8i4Rc2bUY::WBUY::2026-07-23::watchlist",
+      "video_id": "CA8i4Rc2bUY",
+      "date": "2026-07-23",
+      "symbol": "WBUY",
+      "account": null,
+      "ross_action": "no_trade",
+      "expected_action": "reject",
+      "side": null,
+      "window_et": null,
+      "ross_entry_px": null,
+      "ross_exit_px": null,
+      "ross_net_usd": null,
+      "pnl_confidence": null,
+      "source": {
+        "kind": "transcript_extraction",
+        "refs": [
+          "project_ws/AgentOps/ross_video_evidence/CA8i4Rc2bUY/trades_2026-07-23.json"
+        ]
+      },
+      "catalyst": null,
+      "notes": "'a cheap stock, wasn't interested in that, no trades there'",
+      "tape": {
+        "live_covered": null,
+        "golden_pinned": null
+      }
+    },
+    {
+      "manifest_id": "CA8i4Rc2bUY::ZCMD::2026-07-23::t2",
+      "video_id": "CA8i4Rc2bUY",
+      "date": "2026-07-23",
+      "symbol": "ZCMD",
+      "account": "main",
+      "ross_action": "trade",
+      "expected_action": "trade",
+      "side": "long",
+      "window_et": null,
+      "ross_entry_px": 5.5,
+      "ross_exit_px": null,
+      "ross_net_usd": -11000,
+      "pnl_confidence": "stated_verbatim",
+      "source": {
+        "kind": "transcript_extraction",
+        "refs": [
+          "project_ws/AgentOps/ross_video_evidence/CA8i4Rc2bUY/trades_2026-07-23.json"
+        ]
+      },
+      "catalyst": "9:00 AM $5M secondary offering priced ~$1.10 (float up ~4x from ~1M to ~5M) after yesterday's no-news squeeze to ~$12; shorts pressing the 'nail in the coffin' got squeezed 1.50->8 in ~2 minutes",
+      "notes": "after missing the offering-flush reversal (1.50 to 8 - by the time L2 was up it showed ~7.50, 'can't knock it in up here'), and missing the 2.30->4.50 dead-cat bounce and the run to 6.50: he bought the next pullback resolution, adding at about 5.50 / 5.70, looking for the break over 6.00 then through 6.74, targeting a retest of yesterday's ~12 highs; stated: 'adding at about $5.50, $5.70'",
+      "tape": {
+        "live_covered": null,
+        "golden_pinned": null
+      }
+    },
+    {
+      "manifest_id": "CA8i4Rc2bUY::ZCMD::2026-07-23::t3",
+      "video_id": "CA8i4Rc2bUY",
+      "date": "2026-07-23",
+      "symbol": "ZCMD",
+      "account": "main",
+      "ross_action": "trade",
+      "expected_action": "trade",
+      "side": "long",
+      "window_et": null,
+      "ross_entry_px": null,
+      "ross_exit_px": null,
+      "ross_net_usd": -1000,
+      "pnl_confidence": "stated_verbatim",
+      "source": {
+        "kind": "transcript_extraction",
+        "refs": [
+          "project_ws/AgentOps/ross_video_evidence/CA8i4Rc2bUY/trades_2026-07-23.json"
+        ]
+      },
+      "catalyst": "same ZCMD post-offering squeeze attempt",
+      "notes": "re-entry as it curled back up after the flush that stopped him out; not stated",
+      "tape": {
+        "live_covered": null,
+        "golden_pinned": null
+      }
+    },
+    {
+      "manifest_id": "Ts7C0flv-1g::EHGO::2026-07-23::t1",
+      "video_id": "Ts7C0flv-1g",
+      "date": "2026-07-23",
+      "symbol": "EHGO",
+      "account": "small",
+      "ross_action": "trade",
+      "expected_action": "trade",
+      "side": "long",
+      "window_et": null,
+      "ross_entry_px": null,
+      "ross_exit_px": null,
+      "ross_net_usd": 1868.92,
+      "pnl_confidence": "stated_verbatim",
+      "source": {
+        "kind": "transcript_extraction",
+        "refs": [
+          "project_ws/AgentOps/ross_video_evidence/Ts7C0flv-1g/trades_2026-07-23.json"
+        ]
+      },
+      "catalyst": "no news - Chinese stock fitting the week's 'no-news China squeeze' theme (day 4 of the frenzy)",
+      "notes": "running-up scanner alert at 2.87, already ~3rd leading gainer; setup mirrored day one of ZCMD - sitting right under premarket high ~3.11; Chinese + no news = fit the working theme; jumped in on the push, chased slightly vs main entry; scanner alert was at 2.87 and the trigger level was the ~3.11 premarket high; small-account fill was 'a little higher' than the main-account entry ('I kind of chased in the small account')",
+      "tape": {
+        "live_covered": null,
+        "golden_pinned": null
+      }
+    },
+    {
+      "manifest_id": "Ts7C0flv-1g::EHGO::2026-07-23::t2",
+      "video_id": "Ts7C0flv-1g",
+      "date": "2026-07-23",
+      "symbol": "EHGO",
+      "account": "main",
+      "ross_action": "trade",
+      "expected_action": "trade",
+      "side": "long",
+      "window_et": null,
+      "ross_entry_px": null,
+      "ross_exit_px": null,
+      "ross_net_usd": null,
+      "pnl_confidence": null,
+      "source": {
+        "kind": "transcript_extraction",
+        "refs": [
+          "project_ws/AgentOps/ross_video_evidence/Ts7C0flv-1g/trades_2026-07-23.json"
+        ]
+      },
+      "catalyst": "no news - Chinese no-news squeeze theme",
+      "notes": "same setup as small-account trade; entered first/lower in the main account ('I jumped in it in my main account and then I got in a little higher in the small account'); not stated; slightly lower than small-account fill",
+      "tape": {
+        "live_covered": null,
+        "golden_pinned": null
+      }
+    },
+    {
+      "manifest_id": "Ts7C0flv-1g::LGCL::2026-07-23::watchlist",
+      "video_id": "Ts7C0flv-1g",
+      "date": "2026-07-23",
+      "symbol": "LGCL",
+      "account": null,
+      "ross_action": "no_trade",
+      "expected_action": "reject",
+      "side": null,
+      "window_et": null,
+      "ross_entry_px": null,
+      "ross_exit_px": null,
+      "ross_net_usd": null,
+      "pnl_confidence": null,
+      "source": {
+        "kind": "transcript_extraction",
+        "refs": [
+          "project_ws/AgentOps/ross_video_evidence/Ts7C0flv-1g/trades_2026-07-23.json"
+        ]
+      },
+      "catalyst": null,
+      "notes": "popped after hours but was already pulling back too much - 'that's not gonna work'",
+      "tape": {
+        "live_covered": null,
+        "golden_pinned": null
+      }
+    },
+    {
+      "manifest_id": "Ts7C0flv-1g::WBUY::2026-07-23::watchlist",
+      "video_id": "Ts7C0flv-1g",
+      "date": "2026-07-23",
+      "symbol": "WBUY",
+      "account": null,
+      "ross_action": "no_trade",
+      "expected_action": "reject",
+      "side": null,
+      "window_et": null,
+      "ross_entry_px": null,
+      "ross_exit_px": null,
+      "ross_net_usd": null,
+      "pnl_confidence": null,
+      "source": {
+        "kind": "transcript_extraction",
+        "refs": [
+          "project_ws/AgentOps/ross_video_evidence/Ts7C0flv-1g/trades_2026-07-23.json"
+        ]
+      },
+      "catalyst": null,
+      "notes": "leading gainer at the time but had already broken the premarket high; chronic high-volume selling days ('we joke that they should name their company we-sell') - a no-go",
+      "tape": {
+        "live_covered": null,
+        "golden_pinned": null
+      }
+    },
+    {
+      "manifest_id": "Ts7C0flv-1g::ZCMD::2026-07-23::t3",
+      "video_id": "Ts7C0flv-1g",
+      "date": "2026-07-23",
+      "symbol": "ZCMD",
+      "account": "main",
+      "ross_action": "trade",
+      "expected_action": "trade",
+      "side": "long",
+      "window_et": null,
+      "ross_entry_px": null,
+      "ross_exit_px": null,
+      "ross_net_usd": null,
+      "pnl_confidence": null,
+      "source": {
+        "kind": "transcript_extraction",
+        "refs": [
+          "project_ws/AgentOps/ross_video_evidence/Ts7C0flv-1g/trades_2026-07-23.json"
+        ]
+      },
+      "catalyst": "completed $5M secondary offering headline (dilution news) after yesterday's no-news squeeze from $2.50 to $12 with 5 upside halts; shorts pressing the 'bad news' got squeezed 3->8",
+      "notes": "re-entry attempt on the bounce after the offering-news flush: ZCMD announced a $5M secondary (warrants ~$1), dropped to ~1.50, recovered to 3, broke 3 and went to $8 in ~30 seconds, dropped back; he bought a subsequent bounce-back attempt; not stated; entry was on the come-back after the drop from the $8 spike",
+      "tape": {
+        "live_covered": null,
+        "golden_pinned": null
+      }
+    },
+    {
+      "manifest_id": "b-iczURZwJY::EXYN::2026-07-24::t1",
+      "video_id": "b-iczURZwJY",
+      "date": "2026-07-24",
+      "symbol": "EXYN",
+      "account": "small",
+      "ross_action": "trade",
+      "expected_action": "trade",
+      "side": "long",
+      "window_et": null,
+      "ross_entry_px": null,
+      "ross_exit_px": null,
+      "ross_net_usd": 766.56,
+      "pnl_confidence": "stated_verbatim",
+      "source": {
+        "kind": "transcript_extraction",
+        "refs": [
+          "project_ws/AgentOps/ross_video_evidence/b-iczURZwJY/trades_2026-07-24.json"
+        ]
+      },
+      "catalyst": "breaking news: US company expands into multi-billion-dollar defense sustainment market bringing field-proven AI autonomy to US Air Force aircraft readiness; never had a 1M+ share volume day before, blue sky over 7.20",
+      "notes": "high-of-day breakout after scanner hit on breaking news; good volume on the breakout candles; targeting squeeze to 7.20 (all-time high) with blue sky above; not stated; entered 'for the break through the high of day' after it hit a high of 5, pulled back, popped/pulled several times",
+      "tape": {
+        "live_covered": null,
+        "golden_pinned": null
+      }
+    },
+    {
+      "manifest_id": "b-iczURZwJY::MSS::2026-07-24::t2",
+      "video_id": "b-iczURZwJY",
+      "date": "2026-07-24",
+      "symbol": "MSS",
+      "account": "small",
+      "ross_action": "trade",
+      "expected_action": "trade",
+      "side": "long",
+      "window_et": null,
+      "ross_entry_px": 4.25,
+      "ross_exit_px": null,
+      "ross_net_usd": -716.45,
+      "pnl_confidence": "stated_verbatim",
+      "source": {
+        "kind": "transcript_extraction",
+        "refs": [
+          "project_ws/AgentOps/ross_video_evidence/b-iczURZwJY/trades_2026-07-24.json"
+        ]
+      },
+      "catalyst": "US company, headline tying in with AI; very low float",
+      "notes": "curl over VWAP after pop to 5.20 and pullback; looking for it to curl back through the high of day; stated: 'I bought 2,000 shares at $4.25'",
+      "tape": {
+        "live_covered": null,
+        "golden_pinned": null
+      }
+    },
+    {
+      "manifest_id": "b-iczURZwJY::RADX::2026-07-24::watchlist",
+      "video_id": "b-iczURZwJY",
+      "date": "2026-07-24",
+      "symbol": "RADX",
+      "account": null,
+      "ross_action": "no_trade",
+      "expected_action": "reject",
+      "side": null,
+      "window_et": null,
+      "ross_entry_px": null,
+      "ross_exit_px": null,
+      "ross_net_usd": null,
+      "pnl_confidence": null,
+      "source": {
+        "kind": "transcript_extraction",
+        "refs": [
+          "project_ws/AgentOps/ross_video_evidence/b-iczURZwJY/trades_2026-07-24.json"
+        ]
+      },
+      "catalyst": null,
+      "notes": "popping up late while he was down/frustrated; explicitly refused to revenge-trade it ('how about I just buy 5,000 shares of this thing?' - recognized emotional compromise and walked away)",
+      "tape": {
+        "live_covered": null,
+        "golden_pinned": null
+      }
+    },
+    {
+      "manifest_id": "p73Vmwgg64c::ADVB::2026-07-24::watchlist",
+      "video_id": "p73Vmwgg64c",
+      "date": "2026-07-24",
+      "symbol": "ADVB",
+      "account": null,
+      "ross_action": "no_trade",
+      "expected_action": "reject",
+      "side": null,
+      "window_et": null,
+      "ross_entry_px": null,
+      "ross_exit_px": null,
+      "ross_net_usd": null,
+      "pnl_confidence": null,
+      "source": {
+        "kind": "transcript_extraction",
+        "refs": [
+          "project_ws/AgentOps/ross_video_evidence/p73Vmwgg64c/trades_2026-07-24.json"
+        ]
+      },
+      "catalyst": null,
+      "notes": "on the scanner, a little continuation on light volume then flushing",
+      "tape": {
+        "live_covered": null,
+        "golden_pinned": null
+      }
+    },
+    {
+      "manifest_id": "p73Vmwgg64c::AKAN::2026-07-24::watchlist",
+      "video_id": "p73Vmwgg64c",
+      "date": "2026-07-24",
+      "symbol": "AKAN",
+      "account": null,
+      "ross_action": "no_trade",
+      "expected_action": "reject",
+      "side": null,
+      "window_et": null,
+      "ross_entry_px": null,
+      "ross_exit_px": null,
+      "ross_net_usd": null,
+      "pnl_confidence": null,
+      "source": {
+        "kind": "transcript_extraction",
+        "refs": [
+          "project_ws/AgentOps/ross_video_evidence/p73Vmwgg64c/trades_2026-07-24.json"
+        ]
+      },
+      "catalyst": null,
+      "notes": "a little more expensive, moved later on volume - no trade",
+      "tape": {
+        "live_covered": null,
+        "golden_pinned": null
+      }
+    },
+    {
+      "manifest_id": "p73Vmwgg64c::AMIX::2026-07-24::watchlist",
+      "video_id": "p73Vmwgg64c",
+      "date": "2026-07-24",
+      "symbol": "AMIX",
+      "account": null,
+      "ross_action": "no_trade",
+      "expected_action": "reject",
+      "side": null,
+      "window_et": null,
+      "ross_entry_px": null,
+      "ross_exit_px": null,
+      "ross_net_usd": null,
+      "pnl_confidence": null,
+      "source": {
+        "kind": "transcript_extraction",
+        "refs": [
+          "project_ws/AgentOps/ross_video_evidence/p73Vmwgg64c/trades_2026-07-24.json"
+        ]
+      },
+      "catalyst": null,
+      "notes": "preclinical-study headline; squeezed 3.50 to 5.44 then flushed right back down; no trade (first actual trade of the day was EXYN)",
+      "tape": {
+        "live_covered": null,
+        "golden_pinned": null
+      }
+    },
+    {
+      "manifest_id": "p73Vmwgg64c::CJMB::2026-07-24::watchlist",
+      "video_id": "p73Vmwgg64c",
+      "date": "2026-07-24",
+      "symbol": "CJMB",
+      "account": null,
+      "ross_action": "no_trade",
+      "expected_action": "reject",
+      "side": null,
+      "window_et": null,
+      "ross_entry_px": null,
+      "ross_exit_px": null,
+      "ross_net_usd": null,
+      "pnl_confidence": null,
+      "source": {
+        "kind": "transcript_extraction",
+        "refs": [
+          "project_ws/AgentOps/ross_video_evidence/p73Vmwgg64c/trades_2026-07-24.json"
+        ]
+      },
+      "catalyst": null,
+      "notes": "watched it reverse into a halt DOWN while recording; downside halts theme of the day",
+      "tape": {
+        "live_covered": null,
+        "golden_pinned": null
+      }
+    },
+    {
+      "manifest_id": "p73Vmwgg64c::EXYN::2026-07-24::t1",
+      "video_id": "p73Vmwgg64c",
+      "date": "2026-07-24",
+      "symbol": "EXYN",
+      "account": "main",
+      "ross_action": "trade",
+      "expected_action": "trade",
+      "side": "long",
+      "window_et": "~07:00-08:00 (after EXYN hit scanners; 'ZCMD coming in towards 7 a.m.' then 'all of a sudden we get EXYN on the scanners')",
+      "ross_entry_px": null,
+      "ross_exit_px": null,
+      "ross_net_usd": -900,
+      "pnl_confidence": "narrated",
+      "source": {
+        "kind": "transcript_extraction",
+        "refs": [
+          "project_ws/AgentOps/ross_video_evidence/p73Vmwgg64c/trades_2026-07-24.json"
+        ]
+      },
+      "catalyst": "breaking news - US company expands into multi-billion-dollar defense sustainment market, AI autonomy for US Air Force aircraft readiness (headline read out in small-account recap)",
+      "notes": "scanner alert on breaking news; took a bigger position because of blue sky above 7.20 (all-time high) and highest-volume day ever for this recent IPO; scaled in / added; not stated in this transcript; small-account recap (b-iczURZwJY, same day) says entry was a high-of-day breakout",
+      "tape": {
+        "live_covered": null,
+        "golden_pinned": null
+      }
+    },
+    {
+      "manifest_id": "p73Vmwgg64c::JEM::2026-07-24::watchlist",
+      "video_id": "p73Vmwgg64c",
+      "date": "2026-07-24",
+      "symbol": "JEM",
+      "account": null,
+      "ross_action": "no_trade",
+      "expected_action": "reject",
+      "side": null,
+      "window_et": null,
+      "ross_entry_px": null,
+      "ross_exit_px": null,
+      "ross_net_usd": null,
+      "pnl_confidence": null,
+      "source": {
+        "kind": "transcript_extraction",
+        "refs": [
+          "project_ws/AgentOps/ross_video_evidence/p73Vmwgg64c/trades_2026-07-24.json"
+        ]
+      },
+      "catalyst": null,
+      "notes": "traded it yesterday; today it failed to get over 7.00 and through the 7.46 premarket high, reversed and halted down - no trade today",
+      "tape": {
+        "live_covered": null,
+        "golden_pinned": null
+      }
+    },
+    {
+      "manifest_id": "p73Vmwgg64c::LVWR::2026-07-24::watchlist",
+      "video_id": "p73Vmwgg64c",
+      "date": "2026-07-24",
+      "symbol": "LVWR",
+      "account": null,
+      "ross_action": "no_trade",
+      "expected_action": "reject",
+      "side": null,
+      "window_et": null,
+      "ross_entry_px": null,
+      "ross_exit_px": null,
+      "ross_net_usd": null,
+      "pnl_confidence": null,
+      "source": {
+        "kind": "transcript_extraction",
+        "refs": [
+          "project_ws/AgentOps/ross_video_evidence/p73Vmwgg64c/trades_2026-07-24.json"
+        ]
+      },
+      "catalyst": null,
+      "notes": "first and leading gainer of the morning, a little bit cheaper - no trades on it",
+      "tape": {
+        "live_covered": null,
+        "golden_pinned": null
+      }
+    },
+    {
+      "manifest_id": "p73Vmwgg64c::MSS::2026-07-24::t2",
+      "video_id": "p73Vmwgg64c",
+      "date": "2026-07-24",
+      "symbol": "MSS",
+      "account": "main",
+      "ross_action": "trade",
+      "expected_action": "trade",
+      "side": "long",
+      "window_et": null,
+      "ross_entry_px": null,
+      "ross_exit_px": null,
+      "ross_net_usd": 7000,
+      "pnl_confidence": "narrated",
+      "source": {
+        "kind": "transcript_extraction",
+        "refs": [
+          "project_ws/AgentOps/ross_video_evidence/p73Vmwgg64c/trades_2026-07-24.json"
+        ]
+      },
+      "catalyst": "headline tying in with AI; sub-1M share float, recent reverse split",
+      "notes": "scanner hit; sub-1M share float, recent reverse split, AI-tied headline; waited for it to prove itself, entered 'fairly high' as it pulled away, jumped in and out quickly on the squeeze-then-pullback; not stated; small-account recap shows the action around 4.25-5.20 (pop to 5.20, pullback, VWAP curl)",
+      "tape": {
+        "live_covered": null,
+        "golden_pinned": null
+      }
+    },
+    {
+      "manifest_id": "p73Vmwgg64c::OCG::2026-07-24::watchlist",
+      "video_id": "p73Vmwgg64c",
+      "date": "2026-07-24",
+      "symbol": "OCG",
+      "account": null,
+      "ross_action": "no_trade",
+      "expected_action": "reject",
+      "side": null,
+      "window_et": null,
+      "ross_entry_px": null,
+      "ross_exit_px": null,
+      "ross_net_usd": null,
+      "pnl_confidence": null,
+      "source": {
+        "kind": "transcript_extraction",
+        "refs": [
+          "project_ws/AgentOps/ross_video_evidence/p73Vmwgg64c/trades_2026-07-24.json"
+        ]
+      },
+      "catalyst": null,
+      "notes": "Chinese stock, hit the scans, failed",
+      "tape": {
+        "live_covered": null,
+        "golden_pinned": null
+      }
+    },
+    {
+      "manifest_id": "p73Vmwgg64c::OMH::2026-07-24::watchlist",
+      "video_id": "p73Vmwgg64c",
+      "date": "2026-07-24",
+      "symbol": "OMH",
+      "account": null,
+      "ross_action": "no_trade",
+      "expected_action": "reject",
+      "side": null,
+      "window_et": null,
+      "ross_entry_px": null,
+      "ross_exit_px": null,
+      "ross_net_usd": null,
+      "pnl_confidence": null,
+      "source": {
+        "kind": "transcript_extraction",
+        "refs": [
+          "project_ws/AgentOps/ross_video_evidence/p73Vmwgg64c/trades_2026-07-24.json"
+        ]
+      },
+      "catalyst": null,
+      "notes": "what people were focusing on late, but not jumping in - sub-$1 penny-stock origin, risk of T-12 regulatory/exchange halt",
+      "tape": {
+        "live_covered": null,
+        "golden_pinned": null
+      }
+    },
+    {
+      "manifest_id": "p73Vmwgg64c::RADX::2026-07-24::watchlist",
+      "video_id": "p73Vmwgg64c",
+      "date": "2026-07-24",
+      "symbol": "RADX",
+      "account": null,
+      "ross_action": "no_trade",
+      "expected_action": "reject",
+      "side": null,
+      "window_et": null,
+      "ross_entry_px": null,
+      "ross_exit_px": null,
+      "ross_net_usd": null,
+      "pnl_confidence": null,
+      "source": {
+        "kind": "transcript_extraction",
+        "refs": [
+          "project_ws/AgentOps/ross_video_evidence/p73Vmwgg64c/trades_2026-07-24.json"
+        ]
+      },
+      "catalyst": null,
+      "notes": "popped up on scanner, immediately flushed, only weak rally back",
+      "tape": {
+        "live_covered": null,
+        "golden_pinned": null
+      }
+    },
+    {
+      "manifest_id": "p73Vmwgg64c::SKYQ::2026-07-24::watchlist",
+      "video_id": "p73Vmwgg64c",
+      "date": "2026-07-24",
+      "symbol": "SKYQ",
+      "account": null,
+      "ross_action": "no_trade",
+      "expected_action": "reject",
+      "side": null,
+      "window_et": null,
+      "ross_entry_px": null,
+      "ross_exit_px": null,
+      "ross_net_usd": null,
+      "pnl_confidence": null,
+      "source": {
+        "kind": "transcript_extraction",
+        "refs": [
+          "project_ws/AgentOps/ross_video_evidence/p73Vmwgg64c/trades_2026-07-24.json"
+        ]
+      },
+      "catalyst": null,
+      "notes": "on the scanner, a little continuation then flushing",
+      "tape": {
+        "live_covered": null,
+        "golden_pinned": null
+      }
+    },
+    {
+      "manifest_id": "p73Vmwgg64c::VIVK::2026-07-24::watchlist",
+      "video_id": "p73Vmwgg64c",
+      "date": "2026-07-24",
+      "symbol": "VIVK",
+      "account": null,
+      "ross_action": "no_trade",
+      "expected_action": "reject",
+      "side": null,
+      "window_et": null,
+      "ross_entry_px": null,
+      "ross_exit_px": null,
+      "ross_net_usd": null,
+      "pnl_confidence": null,
+      "source": {
+        "kind": "transcript_extraction",
+        "refs": [
+          "project_ws/AgentOps/ross_video_evidence/p73Vmwgg64c/trades_2026-07-24.json"
+        ]
+      },
+      "catalyst": null,
+      "notes": "continuation/bounce setup but 'in the shadow' of the big move a couple days ago, feared bag holders; popped and reversed",
+      "tape": {
+        "live_covered": null,
+        "golden_pinned": null
+      }
+    },
+    {
+      "manifest_id": "p73Vmwgg64c::WLDS::2026-07-24::watchlist",
+      "video_id": "p73Vmwgg64c",
+      "date": "2026-07-24",
+      "symbol": "WLDS",
+      "account": null,
+      "ross_action": "no_trade",
+      "expected_action": "reject",
+      "side": null,
+      "window_et": null,
+      "ross_entry_px": null,
+      "ross_exit_px": null,
+      "ross_net_usd": null,
+      "pnl_confidence": null,
+      "source": {
+        "kind": "transcript_extraction",
+        "refs": [
+          "project_ws/AgentOps/ross_video_evidence/p73Vmwgg64c/trades_2026-07-24.json"
+        ]
+      },
+      "catalyst": null,
+      "notes": "hit the scans, failed",
+      "tape": {
+        "live_covered": null,
+        "golden_pinned": null
+      }
+    },
+    {
+      "manifest_id": "p73Vmwgg64c::ZCMD::2026-07-24::watchlist",
+      "video_id": "p73Vmwgg64c",
+      "date": "2026-07-24",
+      "symbol": "ZCMD",
+      "account": null,
+      "ross_action": "no_trade",
+      "expected_action": "reject",
+      "side": null,
+      "window_et": null,
+      "ross_entry_px": null,
+      "ross_exit_px": null,
+      "ross_net_usd": null,
+      "pnl_confidence": null,
+      "source": {
+        "kind": "transcript_extraction",
+        "refs": [
+          "project_ws/AgentOps/ross_video_evidence/p73Vmwgg64c/trades_2026-07-24.json"
+        ]
+      },
+      "catalyst": null,
+      "notes": "coming in towards 7 a.m. but 'we really didn't have anything to work with' - no trade stated today",
+      "tape": {
+        "live_covered": null,
+        "golden_pinned": null
+      }
+    }
+  ]
+}
