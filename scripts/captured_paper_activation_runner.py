@@ -2128,20 +2128,6 @@ def run_activation(
             "--journal-root",
             str(journal_root),
         ]
-        validate = _run_stage(
-            name="validate-only",
-            argv=[*cutover_common, "--mode", "ValidateOnly"],
-            timeout=request.timeouts.validate_only,
-            request=request,
-            executor=executor,
-            env=env,
-            recorder=recorder,
-        )
-        validate_doc = _last_json_line(validate.stdout)
-        if validate.returncode != 0 or validate_doc is None or validate_doc.get("verdict") != _VALIDATE_OK:
-            raise CapturedPaperActivationRunnerError(
-                "VALIDATE_ONLY_REJECTED", "real host ValidateOnly rejected"
-            )
         base_result = {
             "schema_version": RESULT_SCHEMA_VERSION,
             "account_scope": ACCOUNT_SCOPE,
@@ -2153,10 +2139,31 @@ def run_activation(
             "generated_at": clock().astimezone(UTC).isoformat().replace("+00:00", "Z"),
         }
         if mode == "ValidateOnly":
+            validate = _run_stage(
+                name="validate-only",
+                argv=[*cutover_common, "--mode", "ValidateOnly"],
+                timeout=request.timeouts.validate_only,
+                request=request,
+                executor=executor,
+                env=env,
+                recorder=recorder,
+            )
+            validate_doc = _last_json_line(validate.stdout)
+            if (
+                validate.returncode != 0
+                or validate_doc is None
+                or validate_doc.get("verdict") != _VALIDATE_OK
+            ):
+                raise CapturedPaperActivationRunnerError(
+                    "VALIDATE_ONLY_REJECTED", "real host ValidateOnly rejected"
+                )
             result = {**base_result, "verdict": "VALIDATED_NO_HOST_MUTATION", "paper_started": False}
             _write_once(run_root / "result.json", _canonical_json_bytes(result))
             return result
 
+        # Apply performs its own in-process ValidateOnly immediately before
+        # mutation and rechecks the baseline again under the journal lock.
+        # Avoid a duplicate full-host pass that can stale the sealed authority.
         apply_started = False
         try:
             apply_started = True

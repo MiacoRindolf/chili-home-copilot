@@ -1313,7 +1313,7 @@ def test_every_post_apply_failure_runs_exactly_one_exact_rollback(
         _run(request_fixture.request, executor, mode="ActivatePaper")
 
     assert _error_code(exc_info) == expected_code
-    assert executor.modes == ["RecoverOnly", "ValidateOnly", "Apply", "Rollback"]
+    assert executor.modes == ["RecoverOnly", "Apply", "Rollback"]
     assert executor.modes.count("Apply") == 1
     assert executor.modes.count("Rollback") == 1
     apply_argv = next(
@@ -1352,7 +1352,7 @@ def test_success_result_fsync_failure_remains_inside_compensated_apply_boundary(
     with pytest.raises(OSError, match="synthetic result fsync failure"):
         _run(request_fixture.request, executor, mode="ActivatePaper")
 
-    assert executor.modes == ["RecoverOnly", "ValidateOnly", "Apply", "Rollback"]
+    assert executor.modes == ["RecoverOnly", "Apply", "Rollback"]
     assert executor.modes.count("Rollback") == 1
 
 
@@ -1374,7 +1374,7 @@ def test_apply_and_rollback_failure_preserves_combined_failure(
     assert _error_code(exc_info) == "APPLY_AND_ROLLBACK_FAILED"
     assert "primary=CapturedPaperActivationRunnerError" in str(exc_info.value)
     assert "rollback=CapturedPaperActivationRunnerError" in str(exc_info.value)
-    assert executor.modes == ["RecoverOnly", "ValidateOnly", "Apply", "Rollback"]
+    assert executor.modes == ["RecoverOnly", "Apply", "Rollback"]
 
 
 def test_success_can_only_report_fake_money_alpaca_paper_started(
@@ -1390,7 +1390,7 @@ def test_success_can_only_report_fake_money_alpaca_paper_started(
     assert result["live_cash_authorized"] is False
     assert result["paper_started"] is True
     assert result["activation_generation"] == GENERATION
-    assert executor.modes == ["RecoverOnly", "ValidateOnly", "Apply"]
+    assert executor.modes == ["RecoverOnly", "Apply"]
     assert executor.task_queries == 2
 
 

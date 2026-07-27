@@ -2569,6 +2569,92 @@ def test_apply_requires_explicit_fake_money_confirmation() -> None:
     ) == 2
 
 
+@pytest.mark.parametrize("reject_validation", [False, True])
+def test_apply_cli_validates_in_process_before_apply(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    reject_validation: bool,
+) -> None:
+    events: list[str] = []
+    prepared = SimpleNamespace(
+        restore_plan=SimpleNamespace(bindings={}),
+    )
+
+    class _Executor:
+        def __init__(self, **_kwargs: object) -> None:
+            return None
+
+        def validate_only(self) -> object:
+            events.append("validate_only")
+            if reject_validation:
+                raise cutover.CapturedPaperHostCutoverError(
+                    "SYNTHETIC_VALIDATE_REJECTED",
+                    "synthetic validation rejection",
+                )
+            return SimpleNamespace(verdict="VALIDATED_NO_HOST_MUTATION")
+
+        def apply(self) -> object:
+            events.append("apply")
+            return SimpleNamespace(verdict="APPLIED_ALPACA_PAPER_ONLY")
+
+    monkeypatch.setattr(cutover, "_strict_roots", lambda _values: (tmp_path,))
+    monkeypatch.setattr(
+        cutover,
+        "_load_activation_for_mode",
+        lambda **_kwargs: object(),
+    )
+    monkeypatch.setattr(
+        cutover,
+        "prepare_cutover",
+        lambda *_args, **_kwargs: prepared,
+    )
+    monkeypatch.setattr(
+        cutover,
+        "WindowsHostCutoverBackend",
+        lambda **_kwargs: object(),
+    )
+    monkeypatch.setattr(cutover, "CapturedPaperHostCutoverExecutor", _Executor)
+    monkeypatch.setattr(
+        cutover,
+        "_report_document",
+        lambda report: {"verdict": report.verdict},
+    )
+
+    rc = cutover._main_with_host_lock_held(
+        [
+            "--mode",
+            cutover.MODE_APPLY,
+            "--manifest",
+            str(tmp_path / "manifest.json"),
+            "--manifest-sha256",
+            "a" * 64,
+            "--candidate-root",
+            str(tmp_path),
+            "--allow-read-root",
+            str(tmp_path),
+            "--task-snapshot",
+            str(tmp_path / "tasks.json"),
+            "--process-snapshot",
+            str(tmp_path / "processes.json"),
+            "--restore-plan",
+            str(tmp_path / "restore.json"),
+            "--candidate-task-template",
+            str(tmp_path / "task.xml"),
+            "--candidate-action",
+            str(tmp_path / "action.json"),
+            "--journal-root",
+            str(tmp_path),
+            "--confirm-fake-money-paper",
+            cutover.APPLY_CONFIRMATION,
+        ]
+    )
+
+    assert rc == (2 if reject_validation else 0)
+    assert events == (
+        ["validate_only"] if reject_validation else ["validate_only", "apply"]
+    )
+
+
 def test_taskless_candidate_processes_are_still_inventoried_and_stopped(
     prepared: cutover.PreparedCutover,
 ) -> None:
