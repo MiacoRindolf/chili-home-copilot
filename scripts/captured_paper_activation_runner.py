@@ -2103,11 +2103,21 @@ def run_activation(
         action = _single_glob(
             generation_root, "candidate-action/**/*.json", field="candidate_action"
         )
+        staged_stage0 = _strict_file(
+            str(no_order_projection.get("stage0_path") or ""),
+            str(no_order_projection.get("stage0_sha256") or ""),
+            field="staged_stage0",
+        )
+        cutover_target = _strict_file(
+            str(request.cutover_script),
+            request.cutover_script_sha256,
+            field="cutover_script",
+        )
         cutover_common = [
             str(request.python_executable),
             "-S",
             "-B",
-            str(request.cutover_script),
+            str(cutover_target),
             "--manifest",
             manifest_path,
             "--manifest-sha256",
@@ -2127,6 +2137,27 @@ def run_activation(
             str(action),
             "--journal-root",
             str(journal_root),
+        ]
+        apply_cutover = [
+            str(request.python_executable),
+            "-I",
+            "-S",
+            "-B",
+            str(staged_stage0),
+            "--manifest",
+            manifest_path,
+            "--manifest-sha256",
+            manifest_sha,
+            "--candidate-root",
+            str(request.candidate_root),
+            "--target-role",
+            "captured_paper_host_cutover",
+            "--target",
+            str(cutover_target),
+            "--target-sha256",
+            request.cutover_script_sha256,
+            "--",
+            *cutover_common[4:],
         ]
         base_result = {
             "schema_version": RESULT_SCHEMA_VERSION,
@@ -2170,7 +2201,7 @@ def run_activation(
             apply_result = _run_stage(
                 name="apply",
                 argv=[
-                    *cutover_common,
+                    *apply_cutover,
                     "--mode",
                     "Apply",
                     "--confirm-fake-money-paper",
@@ -2181,6 +2212,9 @@ def run_activation(
                 executor=executor,
                 env=env,
                 recorder=recorder,
+                prelaunch_validator=lambda: _revalidate_staged_no_order_paths(
+                    no_order_projection
+                ),
             )
             apply_doc = _last_json_line(apply_result.stdout)
             if (

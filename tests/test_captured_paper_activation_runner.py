@@ -19,6 +19,7 @@ import pytest
 
 from scripts import captured_paper_activation_runner as runner
 from scripts import captured_paper_activation_contract as contract
+from scripts import captured_paper_host_cutover as host_cutover
 
 _REAL_ASSERT_ISOLATED_INTERPRETER = runner._assert_isolated_interpreter
 
@@ -1292,6 +1293,74 @@ def test_hash_valid_activation_manifest_alias_is_rejected_before_cutover_validat
     assert executor.modes == ["RecoverOnly"]
 
 
+def test_apply_uses_exact_isolated_stage0_issuer_envelope(
+    request_fixture: RequestFixture,
+    tmp_path: Path,
+) -> None:
+    executor = FakeExecutor(request_fixture.request, tmp_path)
+
+    _run(request_fixture.request, executor, mode="ActivatePaper")
+
+    apply_argv = next(
+        argv
+        for argv, _timeout, _cwd, _env in executor.calls
+        if "--mode" in argv and argv[argv.index("--mode") + 1] == "Apply"
+    )
+    stage0_source = (
+        request_fixture.request.candidate_root
+        / runner._LAUNCHER_SOURCE_PATHS["activation_stage0"]
+    )
+    stage0_sha = _sha(stage0_source.read_bytes())
+    staged_stage0 = (
+        request_fixture.request.artifact_root
+        / "activation"
+        / GENERATION
+        / stage0_sha
+        / f"{stage0_sha}.py"
+    )
+    expected_prefix = (
+        str(request_fixture.request.python_executable),
+        "-I",
+        "-S",
+        "-B",
+        str(staged_stage0),
+        "--manifest",
+        str(executor.manifest_path),
+        "--manifest-sha256",
+        executor.manifest_sha,
+        "--candidate-root",
+        str(request_fixture.request.candidate_root),
+        "--target-role",
+        "captured_paper_host_cutover",
+        "--target",
+        str(request_fixture.request.cutover_script),
+        "--target-sha256",
+        request_fixture.request.cutover_script_sha256,
+        "--",
+    )
+    assert apply_argv[: len(expected_prefix)] == expected_prefix
+    prepared = SimpleNamespace(
+        invocation=SimpleNamespace(
+            stage0_script_path=str(staged_stage0),
+            stage0_source_path=str(stage0_source),
+            stage0_source_sha256=stage0_sha,
+        ),
+        manifest_path=executor.manifest_path.resolve(strict=True),
+        manifest_sha256=executor.manifest_sha,
+        candidate_root=request_fixture.request.candidate_root,
+        allowed_read_roots=tuple(
+            Path(root) for root in request_fixture.request.allowed_read_roots
+        ),
+    )
+    assert host_cutover._validate_apply_issuer_cmdline(
+        apply_argv,
+        executable_path=request_fixture.request.python_executable,
+        source_path=request_fixture.request.cutover_script,
+        prepared=prepared,
+        journal_root=request_fixture.request.artifact_root / "cutover-journal",
+    ) == apply_argv
+
+
 @pytest.mark.parametrize(
     ("scenario", "expected_code"),
     [
@@ -1326,8 +1395,15 @@ def test_every_post_apply_failure_runs_exactly_one_exact_rollback(
         for argv, _timeout, _cwd, _env in executor.calls
         if "--mode" in argv and argv[argv.index("--mode") + 1] == "Rollback"
     )
-    assert apply_argv[: apply_argv.index("--mode")] == rollback_argv[
-        : rollback_argv.index("--mode")
+    assert rollback_argv[:4] == (
+        str(request_fixture.request.python_executable),
+        "-S",
+        "-B",
+        str(request_fixture.request.cutover_script),
+    )
+    apply_inner = apply_argv[apply_argv.index("--") + 1 :]
+    assert apply_inner[: apply_inner.index("--mode")] == rollback_argv[
+        4 : rollback_argv.index("--mode")
     ]
     assert rollback_argv[rollback_argv.index("--mode") :] == (
         "--mode",
