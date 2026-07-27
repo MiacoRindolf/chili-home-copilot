@@ -5564,6 +5564,12 @@ def _measure_capture_pressure(
     import psutil
 
     root = Path(preflight.capture_store_root).resolve(strict=True)
+    # Measure the same filesystem without creating a short-lived object inside
+    # the append-only capture namespace.  A concurrent resource-health scan is
+    # allowed to adopt new bytes found under ``root``; placing this probe there
+    # and then unlinking it can therefore look exactly like an externally
+    # removed capture object and poison the store fail-closed.
+    probe_root = root.parent
     cpu_percent = float(psutil.cpu_percent(interval=0.1))
     available_memory = int(psutil.virtual_memory().available)
     disk_free = int(shutil.disk_usage(root).free)
@@ -5573,7 +5579,7 @@ def _measure_capture_pressure(
         temporary: str | None = None
         try:
             descriptor, temporary = tempfile.mkstemp(
-                prefix=".chili-pressure-", suffix=".tmp", dir=str(root)
+                prefix=".chili-pressure-", suffix=".tmp", dir=str(probe_root)
             )
             started = float(monotonic_clock())
             with os.fdopen(descriptor, "wb", closefd=True) as handle:

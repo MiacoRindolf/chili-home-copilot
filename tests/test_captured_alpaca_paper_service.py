@@ -120,6 +120,47 @@ def test_pressure_feed_reports_alive_but_stale_as_not_pre_authority_ready() -> N
         worker.close(join_timeout_seconds=1.0)
 
 
+def test_pressure_probe_does_not_poison_capture_store_resource_accounting(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from app.services.trading.momentum_neural import replay_capture_runtime
+
+    capture_root = tmp_path / "capture-store"
+    capture_root.mkdir()
+    store = replay_capture_runtime.ContentAddressedCaptureStore(
+        capture_root,
+        compression_codec="zlib",
+    )
+    original_fsync = service_module.os.fsync
+    observed_during_probe = False
+
+    def _observe_store_while_probe_exists(descriptor: int) -> None:
+        nonlocal observed_during_probe
+        original_fsync(descriptor)
+        if not observed_during_probe:
+            observed_during_probe = True
+            store.resource_health()
+
+    monkeypatch.setattr(service_module.os, "fsync", _observe_store_while_probe_exists)
+    try:
+        sample = service_module._measure_capture_pressure(
+            preflight=SimpleNamespace(
+                capture_store_root=capture_root,
+                resource_binding=SimpleNamespace(binding_sha256=SHA_A),
+            ),
+            replay_runtime_module=replay_capture_runtime,
+            wall_clock=lambda: NOW,
+        )
+
+        assert observed_during_probe is True
+        assert sample.resource_binding_sha256 == SHA_A
+        store.put_payload({"event": "selection"})
+        assert store.resource_health()["resource_failure_reasons"] == ()
+    finally:
+        store.close()
+
+
 class _PaperAdapter:
     broker_environment = "paper"
 
