@@ -239,9 +239,13 @@ def main() -> int:
             # (TNMG >3900s/709k, UPC >9000s/1.09M — both timed out) because the sink tape the
             # FSM reads per tick is ~2x rows. Estimate by density; the 9000s ceiling stays so
             # one monster can never eat the night (the 1:1 giants are a dedicated-night job).
+            # Final calibration: per-tick rate is EVENTFULNESS-dependent, not just density
+            # (VTAK 07-08, normal density, ran >0.0074s/tick and blew a 0.0025-based
+            # ceiling). Normal floor raised to 0.005 — ceilings roughly double, the 9000s
+            # absolute cap still bounds any single window.
             dense = int(w.get("nbbo") or 0) >= 0.5 * max(1, int(w["ticks"]))
             est = max(int(w.get("est_runtime_s") or 1800),
-                      600 + int(w["ticks"] * (0.0075 if dense else 0.0025)))
+                      600 + int(w["ticks"] * (0.0075 if dense else 0.005)))
             remaining = (stop_at - datetime.now()).total_seconds()
             if 1.25 * est + 120 > remaining:
                 print(f"[batch] DEADLINE — {key} needs ~{est}s, only {remaining:.0f}s left; "
