@@ -68,6 +68,9 @@ from .adaptive_risk_request_builder import (
     adaptive_risk_source_provider,
     rebuild_adaptive_risk_decision_packet,
 )
+from .adaptive_risk_reservation import (
+    load_adaptive_risk_reservation_request,
+)
 from .live_fsm import (
     STATE_ARMED_PENDING_RUNNER,
     STATE_LIVE_ENTERED,
@@ -109,6 +112,7 @@ from .replay_capture_contract import (
     CaptureBrokerTransition,
     CaptureCoverageGrade,
     CaptureCoverageManifest,
+    CaptureAdaptiveOrderArtifacts,
     CaptureDecisionAction,
     CaptureDecisionCheckpoint,
     CaptureDecisionOutput,
@@ -116,6 +120,7 @@ from .replay_capture_contract import (
     CaptureOrderIntentRole,
     CaptureReadReceipt,
     CaptureRunOpen,
+    CaptureOrtexSelectionSnapshot,
     CaptureScannerSnapshot,
     CaptureEvent,
     CaptureEventRef,
@@ -942,6 +947,7 @@ _SEALED_REPLAY_SUPPORTED_STREAMS = frozenset(
         CaptureStream.ADMISSION_ELIGIBILITY,
         CaptureStream.ACCOUNT_RISK_SNAPSHOT,
         CaptureStream.SCANNER_SNAPSHOT,
+        CaptureStream.ORTEX_SNAPSHOT,
         CaptureStream.BROKER_ORDER_LIFECYCLE,
     }
 )
@@ -950,6 +956,7 @@ _SEALED_REPLAY_QUERY_STREAMS = frozenset(
         CaptureStream.PROVIDER_OHLCV,
         CaptureStream.ACCOUNT_RISK_SNAPSHOT,
         CaptureStream.SCANNER_SNAPSHOT,
+        CaptureStream.ORTEX_SNAPSHOT,
     }
 )
 
@@ -1057,6 +1064,14 @@ class _SealedScannerSnapshotInput:
 
 
 @dataclass(frozen=True)
+class _SealedOrtexSelectionInput:
+    """One content-bound Ortex mechanics/rank observation selected by receipt."""
+
+    event: CaptureEvent
+    snapshot: CaptureOrtexSelectionSnapshot
+
+
+@dataclass(frozen=True)
 class _SealedBrokerLifecycleInput:
     event: CaptureEvent
     broker_order_id: str
@@ -1111,6 +1126,7 @@ class _SealedDecisionTick:
     ] = ()
     decision_read_plan: tuple[_SealedDecisionRead, ...] = ()
     query_read_plan: tuple[_SealedDecisionRead, ...] = ()
+    adaptive_order_artifacts: tuple[CaptureAdaptiveOrderArtifacts, ...] = ()
     first_dip_final_frontier: _SealedFirstDipFinalFrontier | None = None
 
     @property
@@ -2051,6 +2067,18 @@ class SealedReplayV3InputAdapter:
         scheduled_event_hashes: set[str] = set()
         for event in decision_events:
             output = canonical_decision_outputs[event.event_sha256]
+            try:
+                adaptive_order_artifacts = (
+                    capture_adaptive_order_artifacts_from_payload(
+                        event.payload,
+                        output,
+                        identity=manifest.identity,
+                    )
+                )
+            except (CaptureContractError, TypeError, ValueError) as exc:
+                raise SealedReplayInputError(
+                    "sealed ReplayV3 adaptive order artifacts are invalid"
+                ) from exc
             matches = checkpoints_by_event.get(event.event_sha256, [])
             if len(matches) != 1:
                 raise SealedReplayInputError(
@@ -2164,6 +2192,7 @@ class SealedReplayV3InputAdapter:
                     # input merely because it was persisted before publication.
                     input_prefix_available_at=row.decision_at,
                     required_streams=row_streams,
+                    adaptive_order_artifacts=adaptive_order_artifacts,
                     first_dip_final_frontier=final_first_dip,
                 )
             )
@@ -2457,6 +2486,7 @@ class SealedReplayV3InputAdapter:
             | _SealedEligibilityInput
             | _SealedAccountRiskInput
             | _SealedScannerSnapshotInput
+            | _SealedOrtexSelectionInput
             | _SealedBrokerLifecycleInput,
         ] = {}
         replay_events: list[CaptureEvent] = []
@@ -2636,6 +2666,9 @@ class SealedReplayV3InputAdapter:
         self._current_scanner_snapshot: dict[
             str, _SealedScannerSnapshotInput
         ] = {}
+        self._current_ortex_snapshot: dict[
+            str, _SealedOrtexSelectionInput
+        ] = {}
         self._released_broker_lifecycle: list[_SealedBrokerLifecycleInput] = []
         self._released_counterfactual_exact_prints: list[VerifiedExactPrint] = []
         self._released_event_sha256s: set[str] = set()
@@ -2653,6 +2686,9 @@ class SealedReplayV3InputAdapter:
         self._active_sealed_adaptive_material: (
             AdaptiveRiskRuntimeCaptureMaterial | None
         ) = None
+        self._active_prebuilt_ortex_read: _SealedDecisionRead | None = None
+        self._active_prebuilt_ortex_fact: _SealedOrtexSelectionInput | None = None
+        self._active_prebuilt_ortex_consumed = False
         self._terminal_drain_complete = False
         last_decision = self._decision_ticks[-1]
         self._broker_events_unobserved_by_fsm = frozenset(
@@ -2711,6 +2747,7 @@ class SealedReplayV3InputAdapter:
         | _SealedEligibilityInput
         | _SealedAccountRiskInput
         | _SealedScannerSnapshotInput
+        | _SealedOrtexSelectionInput
         | _SealedBrokerLifecycleInput,
         tuple[Any, ...],
     ]:
@@ -3035,6 +3072,21 @@ class SealedReplayV3InputAdapter:
                     event=event,
                     snapshot=snapshot,
                     snapshot_row=snapshot_row,
+                ),
+                (stream.value, event.query_sha256, event.clocks.available_at),
+            )
+
+        if stream is CaptureStream.ORTEX_SNAPSHOT:
+            try:
+                snapshot = CaptureOrtexSelectionSnapshot.from_event(event)
+            except (CaptureContractError, TypeError, ValueError) as exc:
+                raise SealedReplayInputError(
+                    "sealed Ortex selection snapshot is malformed"
+                ) from exc
+            return (
+                _SealedOrtexSelectionInput(
+                    event=event,
+                    snapshot=snapshot,
                 ),
                 (stream.value, event.query_sha256, event.clocks.available_at),
             )
@@ -3437,6 +3489,9 @@ class SealedReplayV3InputAdapter:
         self._active_first_dip_final_tape_consumed = False
         self._active_first_dip_final_authority = None
         self._active_sealed_adaptive_material = None
+        self._active_prebuilt_ortex_read = None
+        self._active_prebuilt_ortex_fact = None
+        self._active_prebuilt_ortex_consumed = False
 
     def complete_decision_read_plan(self) -> None:
         """Require every captured query read to have been consumed exactly once."""
@@ -3460,9 +3515,11 @@ class SealedReplayV3InputAdapter:
         if first_dip_read_id and not self._active_first_dip_tape_consumed:
             missing.append(first_dip_read_id)
         final_frontier = self._active_decision_tick.first_dip_final_frontier
+        adaptive_artifacts = self._active_decision_tick.adaptive_order_artifacts
         if final_frontier is not None:
             if not self._active_first_dip_final_tape_consumed:
                 missing.append(final_frontier.tape_read.receipt.read_id)
+        if final_frontier is not None or adaptive_artifacts:
             material = self._active_sealed_adaptive_material
             sealed_attestation = (
                 None if material is None else material.sealed_replay_attestation
@@ -3471,6 +3528,11 @@ class SealedReplayV3InputAdapter:
                 missing.append("sealed_adaptive_risk_request")
             if sealed_attestation is not None:
                 sealed_attestation.revoke()
+        if (
+            self._active_prebuilt_ortex_read is not None
+            and not self._active_prebuilt_ortex_consumed
+        ):
+            missing.append(self._active_prebuilt_ortex_read.receipt.read_id)
         self._active_decision_tick = None
         self._active_query_reads = ()
         self._active_query_read_cursor = 0
@@ -3479,6 +3541,9 @@ class SealedReplayV3InputAdapter:
         self._active_first_dip_final_tape_consumed = False
         self._active_first_dip_final_authority = None
         self._active_sealed_adaptive_material = None
+        self._active_prebuilt_ortex_read = None
+        self._active_prebuilt_ortex_fact = None
+        self._active_prebuilt_ortex_consumed = False
         if missing:
             raise SealedReplayInputError(
                 "sealed ReplayV3 FSM did not consume its exact query reads: "
@@ -3497,6 +3562,9 @@ class SealedReplayV3InputAdapter:
         self._active_first_dip_final_tape_consumed = False
         self._active_first_dip_final_authority = None
         self._active_sealed_adaptive_material = None
+        self._active_prebuilt_ortex_read = None
+        self._active_prebuilt_ortex_fact = None
+        self._active_prebuilt_ortex_consumed = False
 
     def _first_dip_tape_window(
         self,
@@ -3877,47 +3945,144 @@ class SealedReplayV3InputAdapter:
         self._active_first_dip_tape_authority = authority
         return authority
 
-    def prepare_first_dip_adaptive_risk_material(
+    def _consume_prebuilt_adaptive_query_reads(self) -> None:
+        """Account for reads performed by the captured material factory.
+
+        Captured PAPER resolves its account/context/economic material before it
+        invokes ``tick_live_session``.  The adaptive order artifact is the
+        strict, recomputed result of those reads, so sealed replay consumes the
+        corresponding receipt plan while rebuilding that material rather than
+        waiting for the in-FSM provider seams to call them again.  Ortex is
+        retained as a one-shot value because the unchanged live entry guard
+        consumes that selection result inside the FSM.
+
+        Any query stream outside this closed pre-materialization set remains an
+        actual in-FSM dependency and is rejected here instead of being silently
+        swallowed.
+        """
+
+        allowed_types = {
+            CaptureStream.PROVIDER_OHLCV: _SealedOhlcvInput,
+            CaptureStream.ACCOUNT_RISK_SNAPSHOT: _SealedAccountRiskInput,
+            CaptureStream.SCANNER_SNAPSHOT: _SealedScannerSnapshotInput,
+            CaptureStream.ORTEX_SNAPSHOT: _SealedOrtexSelectionInput,
+        }
+        while self._active_query_read_cursor < len(self._active_query_reads):
+            stream = self._active_query_reads[
+                self._active_query_read_cursor
+            ].receipt.stream
+            expected_type = allowed_types.get(stream)
+            if expected_type is None:
+                # The remaining ordered reads belong to the unchanged FSM
+                # (for example decision-time IQFeed flow).  Leave them for
+                # their exact provider seam; completion still rejects any
+                # read that the FSM fails to consume.
+                break
+            read, fact = self._consume_decision_query(stream)
+            if not isinstance(fact, expected_type):
+                raise SealedReplayInputError(
+                    "sealed adaptive material receipt selected the wrong "
+                    f"typed fact: {stream.value}"
+                )
+            if stream is CaptureStream.ORTEX_SNAPSHOT:
+                if self._active_prebuilt_ortex_read is not None:
+                    raise SealedReplayInputError(
+                        "sealed adaptive material contains multiple Ortex reads"
+                    )
+                self._active_prebuilt_ortex_read = read
+                self._active_prebuilt_ortex_fact = fact
+
+    def prepare_adaptive_risk_material_for_active_decision(
         self,
     ) -> AdaptiveRiskRuntimeCaptureMaterial:
-        """Rebuild one exact recorded paper source under a sealed capability.
+        """Rebuild the exact captured PAPER economics for one real FSM tick.
 
-        The persisted request is not treated as a source or attestation.  Its
-        raw policy/input/account fields are rebound to the detector prefix and
-        sealed identity, then the ordinary builder must reproduce the exact
-        request hash before its one-shot proof is considered consumed.
+        Risk-increasing order artifacts already bind the strict reservation
+        request, recomputed decision packet, reservation claim, and exact order
+        intent.  Replay must feed that request back through the same adaptive
+        builder used by captured PAPER; translating it into legacy risk
+        multipliers would apply different economics and can double size.
+
+        First-dip retains its additional final-tape frontier proof.  For all
+        other setups the typed adaptive artifact is the authority.  Persisted
+        bytes are never elevated directly: their source fields are rebound to
+        the sealed checkpoint and a process-private, one-shot replay
+        attestation requires the ordinary builder to reproduce the exact
+        request hash.
         """
 
         decision_tick = self._active_decision_tick
-        if decision_tick is None or decision_tick.first_dip_final_frontier is None:
+        if decision_tick is None:
             raise SealedReplayInputError(
-                "sealed first-dip adaptive material has no active final frontier"
+                "sealed adaptive material has no active decision"
             )
         if self._active_sealed_adaptive_material is not None:
             return self._active_sealed_adaptive_material
+        artifacts = decision_tick.adaptive_order_artifacts
+        if len(artifacts) > 1:
+            raise SealedReplayInputError(
+                "sealed adaptive decision has multiple risk-increasing intents"
+            )
         final = decision_tick.first_dip_final_frontier
-        expected = final.adaptive_request
+        if artifacts:
+            try:
+                expected = load_adaptive_risk_reservation_request(
+                    artifacts[0].reservation_request
+                )
+            except (TypeError, ValueError) as exc:
+                raise SealedReplayInputError(
+                    "sealed adaptive reservation request is invalid"
+                ) from exc
+            if (
+                final is not None
+                and expected.to_payload() != final.adaptive_request.to_payload()
+            ):
+                raise SealedReplayInputError(
+                    "sealed first-dip adaptive artifact/final frontier mismatch"
+                )
+        elif final is not None:
+            # The no-order first-dip frontier diagnostic predates canonical
+            # order artifacts but still proves the builder/tape lineage.
+            expected = final.adaptive_request
+        else:
+            raise SealedReplayInputError(
+                "sealed adaptive material lacks a risk-increasing order artifact"
+            )
         inputs = expected.inputs
         capture_evidence = inputs.evidence.get("capture_prefix")
         if not isinstance(capture_evidence, RiskInputEvidence):
             raise SealedReplayInputError(
-                "sealed first-dip adaptive request lacks capture-prefix evidence"
+                "sealed adaptive request lacks capture-prefix evidence"
             )
         checkpoint = decision_tick.checkpoint
         identity = self._manifest.identity
         if (
             inputs.execution_surface != "alpaca_paper"
+            or inputs.execution_family != "alpaca_spot"
+            or inputs.venue != "alpaca"
+            or inputs.broker_environment != "paper"
             or inputs.replay_or_paper_run_id != identity.run_id
             or inputs.generation != identity.generation
             or inputs.decision_id != checkpoint.decision_id
             or inputs.symbol != checkpoint.symbol
+            or inputs.account_identity_sha256
+            != identity.account_identity_sha256
+            or inputs.code_build_sha256 != identity.code_build_sha256
+            or inputs.effective_config_sha256 != identity.config_sha256
+            or inputs.feature_flags_sha256
+            != identity.feature_flags_sha256
+            or expected.account_snapshot.account_identity_sha256
+            != identity.account_identity_sha256
+            or expected.account_snapshot.execution_family != "alpaca_spot"
+            or expected.account_snapshot.broker_environment != "paper"
+            or expected.account_snapshot.venue != "alpaca"
             or inputs.capture_prefix_root_sha256
             != checkpoint.input_prefix_root_sha256
             or capture_evidence.content_sha256
             != checkpoint.input_prefix_root_sha256
         ):
             raise SealedReplayInputError(
-                "sealed first-dip adaptive request escaped its recorded paper prefix"
+                "sealed adaptive request escaped its recorded paper prefix"
             )
         try:
             binding = AdaptiveRiskDiagnosticCaptureBinding.create_diagnostic(
@@ -3954,10 +4119,23 @@ class SealedReplayV3InputAdapter:
             )
         except (AdaptiveRiskBuilderError, TypeError, ValueError) as exc:
             raise SealedReplayInputError(
-                "sealed first-dip adaptive request cannot be reconstructed"
+                "sealed adaptive request cannot be reconstructed"
             ) from exc
+        self._consume_prebuilt_adaptive_query_reads()
         self._active_sealed_adaptive_material = material
         return material
+
+    def prepare_first_dip_adaptive_risk_material(
+        self,
+    ) -> AdaptiveRiskRuntimeCaptureMaterial:
+        """Compatibility view retaining the stricter first-dip frontier gate."""
+
+        decision_tick = self._active_decision_tick
+        if decision_tick is None or decision_tick.first_dip_final_frontier is None:
+            raise SealedReplayInputError(
+                "sealed first-dip adaptive material has no active final frontier"
+            )
+        return self.prepare_adaptive_risk_material_for_active_decision()
 
     def prepare_first_dip_final_tape_decision_handoff(
         self,
@@ -4647,6 +4825,142 @@ class SealedReplayV3InputAdapter:
             "min": dict(row["min"]),
         }
 
+    def _ortex_runtime_result_from_bound_read(
+        self,
+        read: _SealedDecisionRead,
+        fact: _SealedOrtexSelectionInput,
+        symbol: str,
+        *,
+        batch_members_sha256: str,
+    ) -> Mapping[str, Any]:
+        """Project one already receipt-bound Ortex fact into runtime mechanics."""
+
+        normalized_symbol = str(symbol or "").strip().upper()
+        query = fact.snapshot.capture_query()
+        if (
+            normalized_symbol != fact.snapshot.symbol
+            or str(batch_members_sha256 or "").strip().lower()
+            != fact.snapshot.batch_members_sha256
+            or read.receipt.query_sha256 != fact.event.query_sha256
+            or read.receipt.query != query
+            or fact.event.query != query
+        ):
+            self._rejected_provider_requests += 1
+            raise SealedReplayInputError(
+                "sealed ReplayV3 Ortex provider call differs from its exact receipt"
+            )
+        mechanics = fact.snapshot.current_member["short_mechanics"]
+        runtime_mechanics = {
+            key: value
+            for key, value in mechanics.items()
+            if key != "endpoints"
+        }
+        return {
+            "schema_version": "chili.ortex-selection-result.v1",
+            "symbol": fact.snapshot.symbol,
+            "short_mechanics": runtime_mechanics,
+            "short_mechanics_sha256": (
+                fact.snapshot.short_mechanics_sha256
+            ),
+            "short_mechanics_runtime_sha256": sha256_json(
+                runtime_mechanics
+            ),
+            "squeeze_fuel_pct": fact.snapshot.current_member[
+                "squeeze_fuel_pct"
+            ],
+            "rank_pct": fact.snapshot.rank_pct,
+            "batch_members_sha256": fact.snapshot.batch_members_sha256,
+            "complete": fact.snapshot.complete,
+        }
+
+    def ortex_snapshot_provider(
+        self,
+        symbol: str,
+        *,
+        batch_members_sha256: str,
+    ) -> Mapping[str, Any]:
+        """Consume the exact sealed Ortex observation selected by its receipt."""
+
+        read, fact = self._consume_decision_query(
+            CaptureStream.ORTEX_SNAPSHOT
+        )
+        if not isinstance(fact, _SealedOrtexSelectionInput):
+            self._rejected_provider_requests += 1
+            raise SealedReplayInputError(
+                "sealed ReplayV3 Ortex receipt selected a non-Ortex fact"
+            )
+        return self._ortex_runtime_result_from_bound_read(
+            read,
+            fact,
+            symbol,
+            batch_members_sha256=batch_members_sha256,
+        )
+
+    def consume_ortex_selection_for_active_decision(
+        self,
+        symbol: str,
+    ) -> Mapping[str, Any]:
+        """Consume the next exact Ortex receipt without exposing sealed raw bytes."""
+
+        if self._active_decision_tick is None:
+            self._rejected_provider_requests += 1
+            raise SealedReplayInputError(
+                "sealed ReplayV3 Ortex read occurred outside a captured FSM tick"
+            )
+        if self._active_prebuilt_ortex_read is not None:
+            fact = self._active_prebuilt_ortex_fact
+            if fact is None or self._active_prebuilt_ortex_consumed:
+                self._rejected_provider_requests += 1
+                raise SealedReplayInputError(
+                    "sealed ReplayV3 prebuilt Ortex receipt was consumed "
+                    "more than once"
+                )
+            read = self._active_prebuilt_ortex_read
+            query = read.receipt.query
+            if not isinstance(query, Mapping):
+                self._rejected_provider_requests += 1
+                raise SealedReplayInputError(
+                    "sealed ReplayV3 prebuilt Ortex query is malformed"
+                )
+            result = self._ortex_runtime_result_from_bound_read(
+                read,
+                fact,
+                symbol,
+                batch_members_sha256=str(
+                    query.get("batch_members_sha256") or ""
+                ),
+            )
+            self._active_prebuilt_ortex_consumed = True
+            return result
+        cursor = self._active_query_read_cursor
+        if cursor >= len(self._active_query_reads):
+            self._rejected_provider_requests += 1
+            raise SealedReplayInputError(
+                "sealed ReplayV3 Ortex receipt is missing from the active read plan"
+            )
+        read = self._active_query_reads[cursor]
+        query = read.receipt.query
+        if (
+            read.receipt.stream is not CaptureStream.ORTEX_SNAPSHOT
+            or not isinstance(query, Mapping)
+            or set(query)
+            != {
+                "schema_version",
+                "ranked_symbol",
+                "batch_members_sha256",
+            }
+        ):
+            self._rejected_provider_requests += 1
+            raise SealedReplayInputError(
+                "sealed ReplayV3 Ortex receipt is not the next exact query read"
+            )
+        return self.ortex_snapshot_provider(
+            symbol,
+            batch_members_sha256=str(
+                query.get("batch_members_sha256") or ""
+            ),
+        )
+
     @property
     def ready_for_fsm(self) -> bool:
         required = self._request.required_streams
@@ -4661,6 +4975,9 @@ class SealedReplayV3InputAdapter:
             ),
             CaptureStream.SCANNER_SNAPSHOT: bool(
                 self._current_scanner_snapshot
+            ),
+            CaptureStream.ORTEX_SNAPSHOT: bool(
+                self._current_ortex_snapshot
             ),
             # Broker lifecycle is an execution response/output stream and is
             # not a prerequisite for the first decision tick.
@@ -4834,6 +5151,9 @@ class SealedReplayV3InputAdapter:
             elif isinstance(parsed, _SealedScannerSnapshotInput):
                 assert event.symbol is not None
                 self._current_scanner_snapshot[event.symbol] = parsed
+            elif isinstance(parsed, _SealedOrtexSelectionInput):
+                assert event.symbol is not None
+                self._current_ortex_snapshot[event.symbol] = parsed
             elif isinstance(parsed, _SealedBrokerLifecycleInput):
                 self._released_broker_lifecycle.append(parsed)
             else:  # pragma: no cover - constructor owns the closed union
@@ -5698,10 +6018,45 @@ class ReplayV3Driver:
                 )
                 or ""
             ).strip()
-            if first_dip_read_id:
-                authority = adapter.prepare_first_dip_tape_decision_authority()
-                if decision_tick.first_dip_final_frontier is not None:
-                    material = adapter.prepare_first_dip_adaptive_risk_material()
+            with lr.replay_ortex_selection_provider(
+                adapter.consume_ortex_selection_for_active_decision
+            ):
+                if first_dip_read_id:
+                    authority = (
+                        adapter.prepare_first_dip_tape_decision_authority()
+                    )
+                    if decision_tick.first_dip_final_frontier is not None:
+                        material = (
+                            adapter.prepare_first_dip_adaptive_risk_material()
+                        )
+
+                        def sealed_adaptive_source(**_boundary: Any) -> object:
+                            return material
+
+                        with adaptive_risk_source_provider(
+                            sealed_adaptive_source,
+                            one_shot=True,
+                        ), _installed_sealed_replay_first_dip_final_authority_provider(
+                            adapter.prepare_first_dip_final_tape_decision_handoff
+                        ), _installed_sealed_replay_first_dip_tape_decision_authority(
+                            authority
+                        ):
+                            trace = self.step(
+                                boundary,
+                                adapter.current_quote(self.seed.symbol),
+                            )
+                    else:
+                        with _installed_sealed_replay_first_dip_tape_decision_authority(
+                            authority
+                        ):
+                            trace = self.step(
+                                boundary,
+                                adapter.current_quote(self.seed.symbol),
+                            )
+                elif decision_tick.adaptive_order_artifacts:
+                    material = (
+                        adapter.prepare_adaptive_risk_material_for_active_decision()
+                    )
 
                     def sealed_adaptive_source(**_boundary: Any) -> object:
                         return material
@@ -5709,25 +6064,16 @@ class ReplayV3Driver:
                     with adaptive_risk_source_provider(
                         sealed_adaptive_source,
                         one_shot=True,
-                    ), _installed_sealed_replay_first_dip_final_authority_provider(
-                        adapter.prepare_first_dip_final_tape_decision_handoff
-                    ), _installed_sealed_replay_first_dip_tape_decision_authority(
-                        authority
                     ):
                         trace = self.step(
-                            boundary, adapter.current_quote(self.seed.symbol)
+                            boundary,
+                            adapter.current_quote(self.seed.symbol),
                         )
                 else:
-                    with _installed_sealed_replay_first_dip_tape_decision_authority(
-                        authority
-                    ):
-                        trace = self.step(
-                            boundary, adapter.current_quote(self.seed.symbol)
-                        )
-            else:
-                trace = self.step(
-                    boundary, adapter.current_quote(self.seed.symbol)
-                )
+                    trace = self.step(
+                        boundary,
+                        adapter.current_quote(self.seed.symbol),
+                    )
             adapter.complete_decision_read_plan()
         except Exception:
             adapter.abort_decision_read_plan()

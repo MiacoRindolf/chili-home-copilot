@@ -81,7 +81,7 @@ class ViabilitySettingsProjection:
             "chili_momentum_no_signal_derank_enabled": False,
             "chili_momentum_no_signal_derank_fraction": 1.0,
             "chili_momentum_catalyst_grade_gate_enabled": True,
-            "chili_momentum_catalyst_arb_flat_gate_enabled": False,
+            "chili_momentum_catalyst_arb_flat_gate_enabled": True,
             "chili_momentum_dilution_history_derate_enabled": True,
             "chili_momentum_theme_sympathy_enabled": True,
             "chili_momentum_thick_tape_veto_enabled": True,
@@ -1155,7 +1155,7 @@ def score_viability_explicit(
                 getattr(
                     settings,
                     "chili_momentum_catalyst_arb_flat_gate_enabled",
-                    False,
+                    True,
                 )
                 and _arb_g
                 and symbol.upper() in {str(s).upper() for s in _arb_g}

@@ -1,4 +1,5 @@
 import pandas as pd
+import pytest
 
 
 def test_replay_v2_prefetch_ohlcv_frames_normalizes_hits_and_misses(monkeypatch):
@@ -39,3 +40,75 @@ def test_replay_v2_prefetch_ohlcv_frames_falls_back_on_batch_error(monkeypatch):
     monkeypatch.setattr(rv, "fetch_ohlcv_batch", fake_batch)
 
     assert rv._prefetch_ohlcv_frames(["AAA"], interval="5m", period="1mo") == {}
+
+
+@pytest.mark.parametrize(
+    ("float_gate_enabled", "reason"),
+    [
+        (True, "historical_float_reference_coverage_unavailable"),
+        (False, "historical_universe_reference_coverage_unavailable"),
+    ],
+)
+def test_full_pipeline_reference_gap_is_terminal_before_current_lookups(
+    monkeypatch,
+    float_gate_enabled,
+    reason,
+):
+    from app.services.trading.momentum_neural import replay_v2 as rv
+
+    monkeypatch.setattr(
+        rv,
+        "Tape",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError(
+                "coverage-unavailable replay must not read the current tape DB"
+            )
+        ),
+    )
+    monkeypatch.setattr(rv, "REPLAY_PRINTS_FILL", True)
+    monkeypatch.setattr(
+        rv.settings,
+        "chili_momentum_universe_float_gate_enabled",
+        float_gate_enabled,
+    )
+    monkeypatch.setattr(
+        rv,
+        "TradeTape",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("coverage-unavailable replay must not load prints")
+        ),
+    )
+    monkeypatch.setattr(
+        rv,
+        "build_equity_universe",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("coverage-unavailable replay must not rank candidates")
+        ),
+    )
+    monkeypatch.setattr(
+        rv,
+        "fetch_ohlcv_batch",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("coverage-unavailable replay must not call providers")
+        ),
+    )
+
+    result = rv.run_replay(
+        "2026-07-24",
+        persist=False,
+        armed_source="full_pipeline",
+    )
+
+    assert result["coverage_grade"] == "COVERAGE_UNAVAILABLE"
+    assert result["coverage_unavailable_reasons"] == [reason]
+    assert result["error"] == reason
+    assert result["coverage_provenance"] == {
+        "selection_builder": "build_equity_universe",
+        "float_gate_setting": "chili_momentum_universe_float_gate_enabled",
+        "float_gate_enabled": float_gate_enabled,
+        "current_db_fallback_allowed": False,
+        "current_provider_fallback_allowed": False,
+    }
+    assert result["tape_symbols"] == 0
+    assert result["trades"] == []
+    assert result["total_usd"] == 0.0

@@ -74,12 +74,12 @@ def test_flag_off_is_byte_identical():
     assert reason == "flush_dip_buy"
 
 
-def test_missing_flag_skips_added_volume_read():
+def test_missing_flag_uses_default_on_volume_gate():
     ms = SimpleNamespace()
     _flush_settings(ms)
     delattr(ms, "chili_momentum_flush_dip_volume_gate_enabled")
     df = _flush_dip_df()
-    df["Volume"] = 1_000_000  # would be rejected if missing silently meant ON
+    df["Volume"] = 1_000_000
     compute = MagicMock(return_value=_flush_arrays(len(df)))
     with patch(f"{_GATES}.settings", new=ms), \
             patch(f"{_GATES}.compute_all_from_df", compute), \
@@ -91,6 +91,6 @@ def test_missing_flag_skips_added_volume_read():
             db=MagicMock(),
             now=_FLUSH_NOW,
         )
-    assert ok is True
-    assert reason == "flush_dip_buy"
-    assert compute.call_count == 1
+    assert ok is False
+    assert reason == "flush_dip_low_volume"
+    assert compute.call_count == 2

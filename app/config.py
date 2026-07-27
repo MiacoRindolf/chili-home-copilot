@@ -2345,7 +2345,7 @@ class Settings(BaseSettings):
     chili_momentum_squeeze_fuel_tilt_enabled: bool = Field(
         default=True,
         validation_alias=AliasChoices("CHILI_MOMENTUM_SQUEEZE_FUEL_TILT_ENABLED"),
-        description="SQUEEZE-FUEL selection tilt (Ross SS101 #2): SOFT within-batch BOOST for squeeze-prone names (high short-interest %% + high cost-to-borrow, via Ortex) and a small DE-RATE for very-low-CTB / easy-to-borrow names (free shares, shorts attack the pop). Ortex fetch gated to top-N explosive low-float candidates + cached 12h. Equity-only; flag-off OR Ortex absent/error ⇒ byte-identical.",
+        description="SQUEEZE-FUEL selection tilt (Ross SS101 #2): SOFT within-batch BOOST for squeeze-prone names (high short-interest %% + high cost-to-borrow, via Ortex) and a small DE-RATE for very-low-CTB / easy-to-borrow names (free shares, shorts attack the pop). Ortex transport is admitted by a durable 1,000-request UTC calendar-month quota, gated to top-N explosive low-float candidates, and successful evidence is cached 24h. Equity-only; the explicit env kill-switch restores byte-identical OFF parity. Missing or non-authoritative evidence contributes no economics and is captured fail-closed.",
     )
     chili_momentum_news_catalyst_weight_enabled: bool = Field(
         default=True,
@@ -3185,7 +3185,7 @@ class Settings(BaseSettings):
     chili_momentum_universe_float_gate_enabled: bool = Field(
         default=True,
         validation_alias=AliasChoices("CHILI_MOMENTUM_UNIVERSE_FLOAT_GATE_ENABLED"),
-        description="EXPERIMENTAL Ross-parity L4 candidate (2026-07-25): float gate on the final ranked universe subset. Default False because the current provider/cache-dependent read is not captured as a typed content-addressed decision input and no causal selection-funnel/OOS economics were measured. Explicit True is reserved for isolated captured-selection experiments; False skips the gate.",
+        description="User-approved default-ON float gate on the final ranked universe subset. False is the exact per-flag rollback switch; missing causal float evidence remains decision-local fail-closed.",
     )
     chili_momentum_universe_uncapped_enabled: bool = Field(
         default=True,
@@ -4997,17 +4997,17 @@ class Settings(BaseSettings):
     chili_momentum_orb_ihs_structural_stop_enabled: bool = Field(
         default=True,
         validation_alias=AliasChoices("CHILI_MOMENTUM_ORB_IHS_STRUCTURAL_STOP_ENABLED"),
-        description="EXPERIMENTAL Ross-parity L2b candidate (2026-07-25): adds orb_break*/inverse_head_shoulders_break* to the structural-trigger reason set used by risk policy, chase-cap bypass, and structural-stop stash. Default False because the available diagnostic replays contained no affected trigger/consumer witness and the widened tape/chase path is not yet sealed-replay/PAPER parity-proven. Explicit True is reserved for isolated causal experiments; False keeps the legacy base tuple.",
+        description="User-approved default-ON structural-stop alignment for ORB and inverse-head-and-shoulders triggers. False restores the exact legacy trigger tuple.",
     )
     chili_momentum_ross_stop_alignment_enabled: bool = Field(
         default=True,
         validation_alias=AliasChoices("CHILI_MOMENTUM_ROSS_STOP_ALIGNMENT_ENABLED"),
-        description="EXPERIMENTAL Ross-parity L2a candidate (2026-07-25): substitutes right-shoulder/reclaim-bar/loss-of-VWAP structural stops. Default False because the available diagnostic replays had no affected setup/consumer witness and therefore did not measure sizing, pending-order, stop/target, or loss-containment effects. Explicit True is reserved for isolated causal OOS experiments; False keeps legacy stops.",
+        description="User-approved default-ON Ross structural-stop alignment using right-shoulder, reclaim-bar, or loss-of-VWAP anchors. False restores legacy stops.",
     )
     chili_momentum_flush_dip_volume_gate_enabled: bool = Field(
         default=True,
         validation_alias=AliasChoices("CHILI_MOMENTUM_FLUSH_DIP_VOLUME_GATE_ENABLED"),
-        description="EXPERIMENTAL Ross-parity L1b candidate (2026-07-25): requires a relative-volume surge on the flush-dip curl/reclaim bar. Default False because the reported improvement came from one known losing window and has no sealed paired OOS/cost proof or complete resolved-policy provenance. Explicit True is reserved for isolated causal experiments; False skips the gate.",
+        description="User-approved default-ON relative-volume confirmation for flush-dip curl/reclaim entries. False skips this gate exactly.",
     )
     chili_momentum_vol_nan_fail_closed_enabled: bool = Field(
         default=True,
@@ -5017,7 +5017,7 @@ class Settings(BaseSettings):
     chili_momentum_tick_break_tape_confirm_enabled: bool = Field(
         default=True,
         validation_alias=AliasChoices("CHILI_MOMENTUM_TICK_BREAK_TAPE_CONFIRM_ENABLED"),
-        description="EXPERIMENTAL Ross-parity L1 candidate (2026-07-25): adds executed-tape confirmation to ORB/ABCD tick breaks and thrust buffers to ABCD. Default False because the diagnostic A/B was net adverse, conflated two mechanisms, and the direct tape query lacks a sealed executed-read receipt. Explicit True is reserved for isolated causal experiments; False preserves the legacy tick path.",
+        description="User-approved default-ON executed-tape confirmation for ORB/ABCD tick breaks. False restores the legacy tick path; unavailable tape evidence fails only that decision closed.",
     )
     chili_momentum_orb_minutes: int = Field(
         default=5,
@@ -5196,7 +5196,7 @@ class Settings(BaseSettings):
     chili_momentum_catalyst_arb_flat_gate_enabled: bool = Field(
         default=True,
         validation_alias=AliasChoices("CHILI_MOMENTUM_CATALYST_ARB_FLAT_GATE_ENABLED"),
-        description="EXPERIMENTAL Ross-parity L3 arb-flat candidate (2026-07-25). Default False because raw headline substring matching does not prove target identity or confirmation and the current-news read has no typed sealed replay receipt or negative-control economics. Explicit True enables the candidate veto under the established catalyst-grade gate; False retains legacy strong classification.",
+        description="User-approved default-ON arb-flat catalyst veto under the typed catalyst-grade gate. False restores legacy strong classification.",
     )
     chili_momentum_catalyst_action_grading_enabled: bool = Field(
         default=True,
@@ -7329,7 +7329,7 @@ class Settings(BaseSettings):
     chili_momentum_bail_on_no_confirmation_enabled: bool = Field(
         default=True,
         validation_alias=AliasChoices("CHILI_MOMENTUM_BAIL_ON_NO_CONFIRMATION_ENABLED"),
-        description="EXPERIMENTAL GAP1 candidate: within the no-confirmation window after entry, bail if the breakout shows no confirming strength. Default False because the available three-window mutable/mock replay was mixed, in-sample, and produced adverse re-entry churn without sealed ask/bid, costs, or OOS proof. Explicit True is reserved for isolated causal experiments.",
+        description="User-approved default-ON early bailout when a breakout shows no confirming strength inside the bounded confirmation window. False disables only this bailout.",
     )
     chili_momentum_no_confirmation_window_seconds: float = Field(
         default=20.0,
@@ -7718,7 +7718,7 @@ class Settings(BaseSettings):
     chili_momentum_fresh_ignition_reentry_bypass_enabled: bool = Field(
         default=True,
         validation_alias=AliasChoices("CHILI_MOMENTUM_FRESH_IGNITION_REENTRY_BYPASS_ENABLED"),
-        description="EXPERIMENTAL Ross-parity L5 / GAP-B: at the stopout-cap terminalization edge, a NON-leader symbol with both an executed-tape confirmation and sustained running-up burst may receive a bounded recycle to WATCHING. Default OFF: the OR form added one losing cycle in each available diagnostic window, while the post-hoc AND form produced zero positive activations on the same windows and has no sealed ReplayV3/captured-PAPER or held-out/OOS promotion evidence. Enable only through an explicit experiment configuration. Missing or unreadable evidence remains fail-closed.",
+        description="User-approved default-ON bounded recycle for a non-leader only when both executed-tape confirmation and sustained running-up ignition are present. False disables the bypass; missing evidence remains fail-closed.",
     )
     chili_momentum_max_ignition_exemptions: int = Field(
         default=1,
@@ -9241,7 +9241,7 @@ class Settings(BaseSettings):
     chili_momentum_sub_vwap_trap_entry_enabled: bool = Field(
         default=True,
         validation_alias=AliasChoices("CHILI_MOMENTUM_SUB_VWAP_TRAP_ENTRY_ENABLED"),
-        description="EXPERIMENTAL LOCATE #4 sub-VWAP-trap entry candidate. Default False because the available CLRO/QTTB/PLSM diagnostics produced zero positive-path fires; no transferable profitability, captured-input parity, or OOS loss-containment result was demonstrated. Explicit True is reserved for isolated causal experiments with the existing chase/tape/L2 guards.",
+        description="User-approved default-ON sub-VWAP-trap entry with the existing chase, tape, and L2 guards. False disables only this entry family.",
     )
     chili_momentum_pulling_away_roc_entry_enabled: bool = Field(
         default=False,
@@ -9954,11 +9954,71 @@ class Settings(BaseSettings):
     )
     # Ortex short-mechanics API key (squeeze-fuel tilt). Trader plan: 1,000 credits/mo,
     # 1 req/s, single-stock only — the fetch is gated to top-N explosive low-float
-    # candidates + cached 12h (see short_mechanics.py). Empty ⇒ no fetch ⇒ no tilt
-    # (fail-open / byte-identical). Use the literal "TEST" key for free random-data tests.
+    # candidates and success/authoritative-empty evidence is durably cached 24h
+    # (see short_mechanics.py). Empty key means no provider request. Use the literal
+    # "TEST" key for free random-data tests.
+    chili_ortex_monthly_request_limit: int = Field(
+        default=1000,
+        ge=1,
+        le=1000,
+        validation_alias=AliasChoices("CHILI_ORTEX_MONTHLY_REQUEST_LIMIT"),
+        description=(
+            "Durable calendar-month Ortex transport-attempt cap. The Trader plan "
+            "allows at most 1,000 requests/month; zero/unlimited is invalid."
+        ),
+    )
+    chili_ortex_success_cache_ttl_seconds: int = Field(
+        default=86400,
+        ge=60,
+        le=604800,
+        validation_alias=AliasChoices("CHILI_ORTEX_SUCCESS_CACHE_TTL_SECONDS"),
+        description=(
+            "Restart-safe TTL for hash-bound Ortex success or authoritative-empty "
+            "responses. Transient failures are never cached as data."
+        ),
+    )
+    chili_ortex_request_interval_seconds: float = Field(
+        default=1.05,
+        ge=1.0,
+        le=10.0,
+        validation_alias=AliasChoices("CHILI_ORTEX_REQUEST_INTERVAL_SECONDS"),
+        description="Durable minimum interval between Ortex transport starts.",
+    )
+    chili_ortex_reservation_lease_seconds: float = Field(
+        default=30.0,
+        ge=1.0,
+        le=300.0,
+        validation_alias=AliasChoices("CHILI_ORTEX_RESERVATION_LEASE_SECONDS"),
+        description="Bounded pre-transport reservation and indeterminate hold lease.",
+    )
+    chili_ortex_transient_backoff_base_seconds: float = Field(
+        default=2.0,
+        ge=1.0,
+        le=60.0,
+        validation_alias=AliasChoices(
+            "CHILI_ORTEX_TRANSIENT_BACKOFF_BASE_SECONDS"
+        ),
+        description="Initial durable backoff after a typed transient Ortex outcome.",
+    )
+    chili_ortex_transient_backoff_max_seconds: float = Field(
+        default=300.0,
+        ge=1.0,
+        le=3600.0,
+        validation_alias=AliasChoices(
+            "CHILI_ORTEX_TRANSIENT_BACKOFF_MAX_SECONDS"
+        ),
+        description="Maximum durable exponential Ortex transient backoff.",
+    )
+    chili_ortex_response_max_bytes: int = Field(
+        default=1048576,
+        ge=1024,
+        le=10485760,
+        validation_alias=AliasChoices("CHILI_ORTEX_RESPONSE_MAX_BYTES"),
+        description="Maximum sanitized hash-bound Ortex response body persisted.",
+    )
     chili_ortex_api_key: str = Field(
         default="", validation_alias=AliasChoices("CHILI_ORTEX_API_KEY"),
-        description="Ortex short-interest / cost-to-borrow API key for the squeeze-fuel selection tilt. Empty ⇒ no Ortex fetch ⇒ no tilt (fail-open).",
+        description="Ortex short-interest / cost-to-borrow API key for the squeeze-fuel selection tilt. Empty means zero provider I/O and a typed credential-unavailable outcome; captured decisions remain fail-closed instead of inventing evidence.",
     )
     # ── SHORT LANE (docs/DESIGN/SHORT_SIDE_LANE.md, P1) ────────────────────────
     # Master gate for the Alpaca short lane. Default FALSE by design (operator-
@@ -13429,6 +13489,18 @@ class Settings(BaseSettings):
     opportunity_weight_pattern_quality: float = 0.22
     opportunity_weight_risk_reward: float = 0.13
     opportunity_weight_eta: float = 0.15
+
+    @model_validator(mode="after")
+    def _ortex_backoff_bounds(self) -> "Settings":
+        if (
+            self.chili_ortex_transient_backoff_base_seconds
+            > self.chili_ortex_transient_backoff_max_seconds
+        ):
+            raise ValueError(
+                "CHILI_ORTEX_TRANSIENT_BACKOFF_BASE_SECONDS must be "
+                "<= CHILI_ORTEX_TRANSIENT_BACKOFF_MAX_SECONDS"
+            )
+        return self
 
     @field_validator("database_url")
     @classmethod

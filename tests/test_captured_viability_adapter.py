@@ -445,16 +445,16 @@ def test_typed_and_serialized_paths_are_identical_and_lossless() -> None:
     # Frozen policy/canonicalization oracle.  Any intentional schema or economic
     # change must update all four roots together after deep review.
     assert bundle.bundle_sha256 == (
-        "a08381b2c63755545b4eddd58ec89a0dd630d7b54f0fc0b95c4da183eef3bdc3"
+        "821a75443fbcb2e46e69177e88e5cc62da982733c2b7e66ea6eb293aded80367"
     )
     assert authority.authority_sha256 == (
-        "1f692356251aeb88ad180f5b1b0615dc7dea619533767071243ad5ac3859bb9f"
+        "9f7220dbe3bc9c14cdb4cb62fa84629c293fccb20c58d3d5601126fead0ce4f8"
     )
     assert bundle.dependency_inventory.inventory_sha256 == (
-        "fbea63390aecc7b5c2d7d1ff790d20475588013b43323730ff5d05c0de15edfc"
+        "ff9d915bb4e0b0ae7b37b0c0eb3a0a407f88c957c57ed1aebd85e33c2846e35e"
     )
     assert typed.observation.observation_sha256 == (
-        "13578486c4ffd3d574ddc13d888d6fcb0bf07ddbd91f605ff6e48f3a54149abb"
+        "45a60964ef81a2fbc79f9fc21477bdf9d3bdce15facc05769ccba188c3c0feda"
     )
 
 

@@ -2,9 +2,11 @@ from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
+from datetime import datetime, timedelta, timezone
 import ast
 import hashlib
 import inspect
+import json
 import os
 import threading
 import uuid
@@ -24,6 +26,9 @@ from app.services.trading.momentum_neural.adaptive_risk_policy import (
     RiskInputEvidence,
     resolve_adaptive_risk,
 )
+from app.services.trading.momentum_neural.adaptive_risk_reservation import (
+    AdaptiveRiskExposureQuarantined,
+)
 from app.services.trading.momentum_neural.adaptive_risk_runtime_contract import (
     AdaptiveRiskLedgerSnapshot,
     build_adaptive_risk_reservation_claim,
@@ -36,9 +41,15 @@ from app.services.trading.momentum_neural.alpaca_orphan_claims import (
     release_entry_and_adaptive_reservation_pre_post_committed,
 )
 from app.services.trading.momentum_neural import first_dip_tape_decision
+from app.services.trading.momentum_neural import alpaca_orphan_claims
 from app.services.trading.momentum_neural import live_runner
 from app.services.trading.momentum_neural.alpaca_paper_identity import (
     alpaca_paper_account_identity_sha256,
+)
+from app.services.trading.momentum_neural.alpaca_fill_activity import (
+    AlpacaPaperFillCycleBinding,
+    publish_prepared_alpaca_paper_entry_fill_batch,
+    read_verified_alpaca_paper_fill_batch,
 )
 from app.services.trading.venue.protocol import NormalizedOrder
 from tests.first_dip_test_support import (
@@ -46,9 +57,18 @@ from tests.first_dip_test_support import (
 )
 from tests.test_adaptive_risk_reservation import _inputs, _request, _snapshot
 from tests.test_alpaca_account_risk_reservations import (
-    TEST_ALPACA_ACCOUNT_ID,
     _session,
     _variant,
+)
+from tests.test_alpaca_locked_daily_pnl_authority import (
+    ACCOUNT_ID as TEST_ALPACA_ACCOUNT_ID,
+    _broker_facts,
+    _request_for_bundle,
+)
+from tests.test_alpaca_fill_activity_capture import (
+    _verified_activity,
+    _verified_adapter,
+    _verified_raw_batch,
 )
 
 
@@ -100,6 +120,235 @@ def _reservation_request(*, symbol: str, cid: str):
     )
 
 
+def _precommit_adaptive_reservation(
+    db,
+    sess,
+    *,
+    symbol: str,
+    cid: str,
+    post_bind_token: str | None = None,
+):
+    """Seed the exact locked-admission side of the post-commit recovery seam."""
+
+    cluster = f"equity:{symbol.lower()}"
+    store = live_runner.AdaptiveRiskReservationStore(db.get_bind())
+    with db.begin():
+        bundle = store.lock_alpaca_paper_admission_bundle(
+            broker_account_facts=_broker_facts(decision_id=cid),
+            symbol=symbol,
+            correlation_cluster=cluster,
+            session=db,
+        )
+        request = _request_for_bundle(
+            bundle,
+            decision_id=cid,
+            symbol=symbol,
+            correlation_cluster=cluster,
+            setup_family="first_dip_reclaim",
+        )
+        resolution = resolve_adaptive_risk(request.policy, request.inputs)
+        assert resolution.valid, resolution.rejection_reasons
+        decision = store.reserve(
+            request,
+            session=db,
+            locked_alpaca_paper_bundle=bundle,
+            prepared_resolution=resolution,
+            prepared_decision_packet=resolution.to_decision_packet(),
+        )
+        assert decision.admission_accepted is True
+        assert decision.reservation_id is not None
+        packet_row = db.get(
+            AdaptiveRiskDecisionPacket,
+            decision.decision_packet_sha256,
+        )
+        assert packet_row is not None
+        packet = dict(packet_row.decision_packet_json)
+        reservation_claim = build_adaptive_risk_reservation_claim(
+            packet,
+            claim_id=cid,
+        ).to_payload()
+        admission_body = {
+            "schema_version": live_runner.CAPTURED_PAPER_ADMISSION_SCHEMA_VERSION,
+            "reservation_id": str(decision.reservation_id),
+            "decision_packet_sha256": decision.decision_packet_sha256,
+            "reservation_request_sha256": request.request_sha256,
+            "adaptive_input_evidence_sha256": packet_row.evidence_sha256,
+            "account_identity_sha256": request.inputs.account_identity_sha256,
+            "quantity_shares": int(decision.quantity_shares),
+        }
+        admission_sha256 = hashlib.sha256(
+            json.dumps(
+                admission_body,
+                sort_keys=True,
+                separators=(",", ":"),
+                ensure_ascii=False,
+                allow_nan=False,
+            ).encode("utf-8")
+        ).hexdigest()
+        claim_token = str(
+            sess.risk_snapshot_json["alpaca_symbol_claim_token"]
+        )
+        binder = post_bind_token or f"binder-{uuid.uuid4().hex}"
+        acquired = acquire_action_claim(
+            db,
+            symbol=symbol,
+            action="entry",
+            claim_token=claim_token,
+            owner_session_id=int(sess.id),
+            client_order_id=cid,
+            metadata={
+                "order_role": "entry",
+                "order_request": {
+                    "account_scope": "alpaca:paper",
+                    "alpaca_account_id": TEST_ALPACA_ACCOUNT_ID,
+                    "base_size": int(decision.quantity_shares),
+                    "client_order_id": cid,
+                    "product_id": symbol,
+                    "side": "buy",
+                },
+                "reserved_risk_usd": float(decision.structural_risk_usd),
+                "alpaca_account_id": TEST_ALPACA_ACCOUNT_ID,
+                "entry_post_bind_token": binder,
+                "adaptive_risk_decision_packet": packet,
+                "adaptive_risk_reservation_claim": reservation_claim,
+                "adaptive_risk_reservation_request": request.to_payload(),
+                "adaptive_risk_reservation_id": str(decision.reservation_id),
+                "captured_paper_admission_record_sha256": admission_sha256,
+                "adaptive_input_evidence_sha256": packet_row.evidence_sha256,
+            },
+            account_scope="alpaca:paper",
+        )
+        assert acquired["ok"] is True, acquired
+
+    snapshot = dict(sess.risk_snapshot_json or {})
+    snapshot["captured_paper_admission"] = {
+        **admission_body,
+        "admission_record_sha256": admission_sha256,
+        "status": "admitted_pending_transport",
+    }
+    sess.risk_snapshot_json = snapshot
+    db.add(sess)
+    db.commit()
+    return request, decision
+
+
+@pytest.mark.parametrize("tamper", ["rehash_marker", "stale_owner"])
+def test_post_commit_recovery_requires_exact_durable_claim_binding(
+    db,
+    tamper,
+) -> None:
+    symbol = f"B{uuid.uuid4().hex[:3]}".upper()
+    cid = f"chili-claim-binding-{uuid.uuid4().hex[:12]}"
+    sess = _live_session(db, symbol=symbol)
+    request, _decision = _precommit_adaptive_reservation(
+        db,
+        sess,
+        symbol=symbol,
+        cid=cid,
+    )
+    packet_count = db.query(AdaptiveRiskDecisionPacket).count()
+    reservation_count = db.query(AdaptiveRiskReservation).count()
+
+    if tamper == "rehash_marker":
+        snapshot = dict(sess.risk_snapshot_json or {})
+        marker = dict(snapshot["captured_paper_admission"])
+        marker["reservation_id"] = str(uuid.uuid4())
+        marker_body = {
+            key: value
+            for key, value in marker.items()
+            if key not in {"admission_record_sha256", "status"}
+        }
+        marker["admission_record_sha256"] = hashlib.sha256(
+            json.dumps(
+                marker_body,
+                sort_keys=True,
+                separators=(",", ":"),
+                ensure_ascii=False,
+                allow_nan=False,
+            ).encode("utf-8")
+        ).hexdigest()
+        snapshot["captured_paper_admission"] = marker
+        sess.risk_snapshot_json = snapshot
+        db.commit()
+    else:
+        db.execute(
+            text(
+                "UPDATE broker_symbol_action_claims "
+                "SET owner_session_id = :stale_owner "
+                "WHERE account_scope = 'alpaca:paper' AND symbol = :symbol"
+            ),
+            {
+                "stale_owner": int(sess.id) + 10_000,
+                "symbol": symbol,
+            },
+        )
+        db.commit()
+
+    le = dict(sess.risk_snapshot_json[live_runner.KEY_LIVE_EXEC])
+    blocked = live_runner._ensure_adaptive_alpaca_reservation(
+        sess,
+        le,
+        request_payload=request.to_payload(),
+    )
+
+    assert blocked["ok"] is False
+    assert blocked["error"] == "adaptive_risk_precommitted_claim_mismatch"
+    assert db.query(AdaptiveRiskDecisionPacket).count() == packet_count
+    assert db.query(AdaptiveRiskReservation).count() == reservation_count
+
+
+def test_post_commit_claim_precheck_does_not_block_transport_start_cas(
+    db,
+    monkeypatch,
+) -> None:
+    symbol = f"C{uuid.uuid4().hex[:3]}".upper()
+    cid = f"chili-claim-no-lock-{uuid.uuid4().hex[:12]}"
+    binder = f"binder-{uuid.uuid4().hex}"
+    sess = _live_session(db, symbol=symbol)
+    request, _decision = _precommit_adaptive_reservation(
+        db,
+        sess,
+        symbol=symbol,
+        cid=cid,
+        post_bind_token=binder,
+    )
+    le = dict(sess.risk_snapshot_json[live_runner.KEY_LIVE_EXEC])
+    ensured = live_runner._ensure_adaptive_alpaca_reservation(
+        sess,
+        le,
+        request_payload=request.to_payload(),
+    )
+    assert ensured["ok"] is True, ensured
+
+    real_short_session = alpaca_orphan_claims._with_short_session
+
+    def bounded_short_session(callback):
+        def bounded_callback(short_db):
+            short_db.execute(text("SET LOCAL lock_timeout = '750ms'"))
+            return callback(short_db)
+
+        return real_short_session(bounded_callback)
+
+    monkeypatch.setattr(
+        alpaca_orphan_claims,
+        "_with_short_session",
+        bounded_short_session,
+    )
+    started = alpaca_orphan_claims.mark_entry_transport_started_committed(
+        symbol=symbol,
+        claim_token=str(
+            sess.risk_snapshot_json["alpaca_symbol_claim_token"]
+        ),
+        owner_session_id=int(sess.id),
+        client_order_id=cid,
+        post_bind_token=binder,
+        account_scope="alpaca:paper",
+        alpaca_account_id=TEST_ALPACA_ACCOUNT_ID,
+    )
+
+    assert started is True
+
+
 def _persist_detector_audit(sess, request, detector_request, resolution) -> None:
     debug = {
         "front_side_via": "first_dip_day_leg",
@@ -147,6 +396,7 @@ def _order(
     cumulative: int,
     planned: int,
 ) -> NormalizedOrder:
+    entry_price = float(request.entry_limit_price)
     return NormalizedOrder(
         order_id=oid,
         client_order_id=request.client_order_id,
@@ -155,16 +405,113 @@ def _order(
         status=status,
         order_type="limit",
         filled_size=float(cumulative),
-        average_filled_price=(10.0 if cumulative else None),
+        average_filled_price=(entry_price if cumulative else None),
         raw={
             "alpaca_status": status,
             "qty": float(planned),
-            "limit_price": 10.0,
+            "limit_price": entry_price,
             "time_in_force": "day",
             "extended_hours": False,
             "position_intent": "buy_to_open",
         },
     )
+
+
+def _publish_verified_entry_fill(
+    db,
+    monkeypatch,
+    *,
+    request,
+    reservation_id,
+    provider_order_id: str,
+    planned: int,
+    cumulative: int,
+):
+    """Publish one exact fake-broker fill through the append-only PAPER lane."""
+
+    assert 0 < cumulative <= planned
+    db.rollback()
+    reservation = db.get(AdaptiveRiskReservation, reservation_id)
+    assert reservation is not None
+    packet = db.get(
+        AdaptiveRiskDecisionPacket,
+        reservation.decision_packet_sha256,
+    )
+    assert packet is not None
+    cycle = AlpacaPaperFillCycleBinding.from_rows(reservation, packet)
+    lifecycle_frontier = max(
+        value
+        for value in (
+            datetime.now(timezone.utc),
+            reservation.last_broker_observed_at,
+            reservation.last_broker_available_at,
+        )
+        if value is not None
+    )
+    fill_at = lifecycle_frontier + timedelta(microseconds=1)
+    db.rollback()
+
+    leaves = planned - cumulative
+    terminal = leaves == 0
+    activity = _verified_activity(
+        activity_id=f"verified-{uuid.uuid4().hex}",
+        transaction_time=fill_at.isoformat().replace("+00:00", "Z"),
+        quantity=f"{cumulative}.0000000000",
+        cumulative_quantity=f"{cumulative}.0000000000",
+        leaves_quantity=f"{leaves}.0000000000",
+        trade_type="fill" if terminal else "partial_fill",
+        order_id=provider_order_id,
+    )
+    activity.update(
+        {
+            "account_id": TEST_ALPACA_ACCOUNT_ID,
+            "symbol": request.inputs.symbol,
+            "price": str(request.entry_limit_price),
+        }
+    )
+    raw_batch = _verified_raw_batch(
+        activities=[activity],
+        order_id=provider_order_id,
+        client_order_id=request.client_order_id,
+    )
+    raw_batch["provider_order"].update(
+        {
+            "account_id": TEST_ALPACA_ACCOUNT_ID,
+            "symbol": request.inputs.symbol,
+            "status": "filled" if terminal else "partially_filled",
+            "qty": f"{planned}.0000000000",
+            "filled_qty": f"{cumulative}.0000000000",
+            "created_at": (
+                fill_at - timedelta(minutes=1)
+            ).isoformat().replace("+00:00", "Z"),
+        }
+    )
+    raw_batch.update(
+        {
+            "query_after": fill_at.replace(
+                hour=0,
+                minute=0,
+                second=0,
+                microsecond=0,
+            ),
+            "query_until": fill_at,
+            "received_at": fill_at,
+            "available_at": fill_at,
+        }
+    )
+    adapter, _calls = _verified_adapter(
+        raw_batch,
+        monkeypatch,
+        account_id=TEST_ALPACA_ACCOUNT_ID,
+    )
+    batch = read_verified_alpaca_paper_fill_batch(
+        adapter,
+        cycle=cycle,
+        provider_order_id=provider_order_id,
+        expected_client_order_id=request.client_order_id,
+    )
+    with db.begin():
+        return publish_prepared_alpaca_paper_entry_fill_batch(db, batch)
 
 
 def _live_session(db, *, symbol: str):
@@ -235,46 +582,13 @@ def _seed_bound_pre_post_pair(db, *, symbol: str):
     cid = f"chili-atomic-release-{uuid.uuid4().hex[:12]}"
     binder = f"binder-{uuid.uuid4().hex}"
     sess = _live_session(db, symbol=symbol)
-    empty = AdaptiveRiskLedgerSnapshot.from_dimensions(
-        open_structural_risk_usd=0.0,
-        pending_reserved_risk_usd=0.0,
-        existing_same_symbol_structural_risk_usd=0.0,
-        pending_same_symbol_structural_risk_usd=0.0,
-        current_cluster_structural_risk_usd=0.0,
-        pending_correlation_cluster_risk_usd=0.0,
-        portfolio_gross_notional_usd=0.0,
-        pending_portfolio_gross_notional_usd=0.0,
-        open_buying_power_impact_usd=0.0,
-        pending_buying_power_impact_usd=0.0,
+    request, precommitted = _precommit_adaptive_reservation(
+        db,
+        sess,
+        symbol=symbol,
+        cid=cid,
+        post_bind_token=binder,
     )
-    base_request = _reservation_request(symbol=symbol, cid=cid)
-    evidence = dict(base_request.inputs.evidence)
-    ledger_evidence = evidence["reservation_ledger"]
-    evidence["reservation_ledger"] = RiskInputEvidence(
-        source="alpaca_account_advisory_transaction",
-        observed_at=ledger_evidence.observed_at,
-        available_at=ledger_evidence.available_at,
-        content_sha256=empty.content_sha256,
-        provider_generation="alpaca-paper-ledger-v1",
-    )
-    exact_inputs = replace(
-        base_request.inputs,
-        open_structural_risk_usd=0.0,
-        pending_reserved_risk_usd=0.0,
-        existing_same_symbol_structural_risk_usd=0.0,
-        pending_same_symbol_structural_risk_usd=0.0,
-        current_cluster_structural_risk_usd=0.0,
-        pending_correlation_cluster_risk_usd=0.0,
-        portfolio_gross_notional_usd=0.0,
-        pending_portfolio_gross_notional_usd=0.0,
-        policy_buying_power_capacity_usd=base_request.inputs.buying_power_usd,
-        open_buying_power_impact_usd=0.0,
-        pending_buying_power_impact_usd=0.0,
-        evidence=evidence,
-    )
-    request = replace(base_request, inputs=exact_inputs)
-    resolution = resolve_adaptive_risk(request.policy, request.inputs)
-    assert resolution.valid, resolution.rejection_reasons
     request_payload = request.to_payload()
     le = dict(sess.risk_snapshot_json[live_runner.KEY_LIVE_EXEC])
     ensured = live_runner._ensure_adaptive_alpaca_reservation(
@@ -284,6 +598,7 @@ def _seed_bound_pre_post_pair(db, *, symbol: str):
     )
     assert ensured["ok"] is True, ensured
     decision = ensured["decision"]
+    assert decision.reservation_id == precommitted.reservation_id
     db.expire_all()
     decision_row = db.get(
         AdaptiveRiskDecisionPacket,
@@ -614,11 +929,19 @@ def test_transport_start_race_never_splits_claim_and_adaptive_reservation(db) ->
         assert opportunity.reservation_id == reservation.reservation_id
 
 
-def test_alpaca_lifecycle_survives_restart_and_tracks_fill_to_flat(db) -> None:
+def test_alpaca_lifecycle_survives_restart_and_tracks_fill_to_flat(
+    db,
+    monkeypatch,
+) -> None:
     symbol = f"A{uuid.uuid4().hex[:3]}".upper()
     cid = f"chili-adaptive-{uuid.uuid4().hex[:12]}"
     sess = _live_session(db, symbol=symbol)
-    request = _reservation_request(symbol=symbol, cid=cid)
+    request, precommitted = _precommit_adaptive_reservation(
+        db,
+        sess,
+        symbol=symbol,
+        cid=cid,
+    )
     le = dict(sess.risk_snapshot_json[live_runner.KEY_LIVE_EXEC])
 
     ensured = live_runner._ensure_adaptive_alpaca_reservation(
@@ -628,6 +951,7 @@ def test_alpaca_lifecycle_survives_restart_and_tracks_fill_to_flat(db) -> None:
     )
     assert ensured["ok"] is True, ensured
     decision = ensured["decision"]
+    assert decision.reservation_id == precommitted.reservation_id
     planned = int(decision.quantity_shares)
     assert planned > 1
 
@@ -667,6 +991,19 @@ def test_alpaca_lifecycle_survives_restart_and_tracks_fill_to_flat(db) -> None:
     assert accepted["state"].opportunity_status == "reserved"
 
     cumulative = max(1, planned // 2)
+    published = _publish_verified_entry_fill(
+        db,
+        monkeypatch,
+        request=request,
+        reservation_id=decision.reservation_id,
+        provider_order_id=oid,
+        planned=planned,
+        cumulative=cumulative,
+    )
+    assert (
+        published.reservation_state.cumulative_filled_quantity_shares
+        == cumulative
+    )
     partial_terminal = live_runner._sync_adaptive_alpaca_order_lifecycle(
         sess,
         restarted_le,
@@ -725,7 +1062,12 @@ def test_zero_fill_terminal_releases_first_dip_opportunity(db) -> None:
     symbol = f"Z{uuid.uuid4().hex[:3]}".upper()
     cid = f"chili-zero-{uuid.uuid4().hex[:12]}"
     sess = _live_session(db, symbol=symbol)
-    request = _reservation_request(symbol=symbol, cid=cid)
+    request, _precommitted = _precommit_adaptive_reservation(
+        db,
+        sess,
+        symbol=symbol,
+        cid=cid,
+    )
     le = dict(sess.risk_snapshot_json[live_runner.KEY_LIVE_EXEC])
     ensured = live_runner._ensure_adaptive_alpaca_reservation(
         sess,
@@ -750,11 +1092,19 @@ def test_zero_fill_terminal_releases_first_dip_opportunity(db) -> None:
     assert terminal["state"].opportunity_status == "available"
 
 
-def test_late_fill_quarantine_stays_reconcilable_and_blocks_new_entries(db) -> None:
+def test_late_fill_quarantine_stays_reconcilable_and_blocks_new_entries(
+    db,
+    monkeypatch,
+) -> None:
     symbol = f"Q{uuid.uuid4().hex[:3]}".upper()
     cid = f"chili-late-quarantine-{uuid.uuid4().hex[:12]}"
     sess = _live_session(db, symbol=symbol)
-    request = _reservation_request(symbol=symbol, cid=cid)
+    request, _precommitted = _precommit_adaptive_reservation(
+        db,
+        sess,
+        symbol=symbol,
+        cid=cid,
+    )
     le = dict(sess.risk_snapshot_json[live_runner.KEY_LIVE_EXEC])
     ensured = live_runner._ensure_adaptive_alpaca_reservation(
         sess,
@@ -765,20 +1115,52 @@ def test_late_fill_quarantine_stays_reconcilable_and_blocks_new_entries(db) -> N
     decision = ensured["decision"]
     planned = int(decision.quantity_shares)
     assert planned > 1
-    released = ensured["store"].release_zero_fill(
-        decision.reservation_id,
-        reason="pre_post_release",
+    oid = f"alpaca-late-{uuid.uuid4().hex[:10]}"
+    accepted = live_runner._sync_adaptive_alpaca_order_lifecycle(
+        sess,
+        le,
+        order=_order(
+            request,
+            oid=oid,
+            status="open",
+            cumulative=0,
+            planned=planned,
+        ),
     )
-    assert released.state == "released"
+    assert accepted["ok"] is True, accepted
+    assert accepted["state"].state == "submitted"
+    terminal = live_runner._sync_adaptive_alpaca_order_lifecycle(
+        sess,
+        le,
+        order=_order(
+            request,
+            oid=oid,
+            status="canceled",
+            cumulative=0,
+            planned=planned,
+        ),
+    )
+    assert terminal["ok"] is True, terminal
+    assert terminal["state"].state == "released"
     stale_outer_le = dict(le)
 
     late_quantity = max(1, planned // 2)
+    published = _publish_verified_entry_fill(
+        db,
+        monkeypatch,
+        request=request,
+        reservation_id=decision.reservation_id,
+        provider_order_id=oid,
+        planned=planned,
+        cumulative=late_quantity,
+    )
+    assert published.reservation_state.state == "exposure_quarantined"
     late = live_runner._sync_adaptive_alpaca_order_lifecycle(
         sess,
         le,
         order=_order(
             request,
-            oid=f"alpaca-late-{uuid.uuid4().hex[:10]}",
+            oid=oid,
             status="canceled",
             cumulative=late_quantity,
             planned=planned,
@@ -804,7 +1186,7 @@ def test_late_fill_quarantine_stays_reconcilable_and_blocks_new_entries(db) -> N
     assert same_cid_recovery["exposure_quarantined"] is True
     assert stale_outer_le[live_runner.KEY_ADAPTIVE_ALPACA_LIFECYCLE][
         "state"
-    ] == "reserved"
+    ] == "released"
     assert live_runner._refresh_adaptive_alpaca_lifecycle_from_session(
         sess,
         stale_outer_le,
@@ -841,32 +1223,33 @@ def test_late_fill_quarantine_stays_reconcilable_and_blocks_new_entries(db) -> N
 
     other_symbol = f"N{uuid.uuid4().hex[:3]}".upper()
     other_sess = _live_session(db, symbol=other_symbol)
-    other_request = _reservation_request(
-        symbol=other_symbol,
-        cid=f"chili-quarantine-new-cid-{uuid.uuid4().hex[:12]}",
-    )
-    other_le = dict(
-        other_sess.risk_snapshot_json[live_runner.KEY_LIVE_EXEC]
-    )
-    new_cid = live_runner._ensure_adaptive_alpaca_reservation(
-        other_sess,
-        other_le,
-        request_payload=other_request.to_payload(),
-    )
-    assert new_cid["ok"] is False
-    assert new_cid["error"] == "adaptive_risk_exposure_quarantined"
-    assert new_cid["adaptive_risk_reconciliation_required"] is True
-    assert other_le["adaptive_risk_alpaca_lifecycle_blocker"]["reason"] == (
-        "adaptive_risk_exposure_quarantined"
-    )
-    assert live_runner._alpaca_entries_quarantined(other_sess) is True
+    other_cid = f"chili-quarantine-new-cid-{uuid.uuid4().hex[:12]}"
+    other_broker_facts = _broker_facts(decision_id=other_cid)
+    with pytest.raises(AdaptiveRiskExposureQuarantined) as blocked:
+        with db.begin():
+            ensured["store"].lock_alpaca_paper_admission_bundle(
+                broker_account_facts=other_broker_facts,
+                symbol=other_symbol,
+                correlation_cluster=f"equity:{other_symbol.lower()}",
+                session=db,
+            )
+    assert blocked.value.reason == "adaptive_risk_exposure_quarantined"
+    assert blocked.value.quarantined_exposures[0]["symbol"] == symbol
 
 
-def test_lifecycle_conflict_cannot_replace_durable_quarantine_marker(db) -> None:
+def test_lifecycle_conflict_cannot_replace_durable_quarantine_marker(
+    db,
+    monkeypatch,
+) -> None:
     symbol = f"M{uuid.uuid4().hex[:3]}".upper()
     cid = f"chili-malformed-late-{uuid.uuid4().hex[:12]}"
     sess = _live_session(db, symbol=symbol)
-    request = _reservation_request(symbol=symbol, cid=cid)
+    request, _precommitted = _precommit_adaptive_reservation(
+        db,
+        sess,
+        symbol=symbol,
+        cid=cid,
+    )
     le = dict(sess.risk_snapshot_json[live_runner.KEY_LIVE_EXEC])
     ensured = live_runner._ensure_adaptive_alpaca_reservation(
         sess,
@@ -874,21 +1257,56 @@ def test_lifecycle_conflict_cannot_replace_durable_quarantine_marker(db) -> None
         request_payload=request.to_payload(),
     )
     assert ensured["ok"] is True
+    decision = ensured["decision"]
     planned = int(ensured["decision"].quantity_shares)
     assert planned > 1
-    ensured["store"].release_zero_fill(
-        ensured["decision"].reservation_id,
-        reason="pre_post_release",
+    oid = f"alpaca-malformed-{uuid.uuid4().hex[:10]}"
+    accepted = live_runner._sync_adaptive_alpaca_order_lifecycle(
+        sess,
+        le,
+        order=_order(
+            request,
+            oid=oid,
+            status="open",
+            cumulative=0,
+            planned=planned,
+        ),
     )
+    assert accepted["ok"] is True, accepted
+    assert accepted["state"].state == "submitted"
+    terminal = live_runner._sync_adaptive_alpaca_order_lifecycle(
+        sess,
+        le,
+        order=_order(
+            request,
+            oid=oid,
+            status="canceled",
+            cumulative=0,
+            planned=planned,
+        ),
+    )
+    assert terminal["ok"] is True, terminal
+    assert terminal["state"].state == "released"
+    late_quantity = max(1, planned // 2)
+    published = _publish_verified_entry_fill(
+        db,
+        monkeypatch,
+        request=request,
+        reservation_id=decision.reservation_id,
+        provider_order_id=oid,
+        planned=planned,
+        cumulative=late_quantity,
+    )
+    assert published.reservation_state.state == "exposure_quarantined"
 
     malformed = live_runner._sync_adaptive_alpaca_order_lifecycle(
         sess,
         le,
         order=_order(
             request,
-            oid=f"alpaca-malformed-{uuid.uuid4().hex[:10]}",
+            oid=oid,
             status="filled",
-            cumulative=max(1, planned // 2),
+            cumulative=late_quantity,
             planned=planned,
         ),
     )

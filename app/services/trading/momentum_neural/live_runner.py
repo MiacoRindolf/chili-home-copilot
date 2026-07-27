@@ -104,6 +104,7 @@ from .captured_paper_selection import (
     resolve_captured_paper_observation,
     resolve_captured_paper_selection,
 )
+from .captured_paper_admission import CAPTURED_PAPER_ADMISSION_SCHEMA_VERSION
 from .captured_paper_entry_intent import CapturedPaperPostCommitRequest
 from .captured_paper_fill_capture import (
     CapturedPaperExitFillPostCommitRequest,
@@ -439,6 +440,45 @@ _PROCESS_DECISION_RUNTIME_STATE = DecisionRuntimeState()
 _BOUND_DECISION_RUNTIME_STATE: contextvars.ContextVar[
     DecisionRuntimeState | None
 ] = contextvars.ContextVar("_chili_decision_runtime_state", default=None)
+
+
+@dataclass(slots=True)
+class _ReplayOrtexDecisionState:
+    """One-shot sealed Ortex input installed around one historical FSM tick."""
+
+    provider: Callable[[str], Mapping[str, Any]]
+    selection: dict[str, Any] | None = None
+    consumed: bool = False
+
+
+_REPLAY_ORTEX_DECISION_STATE: contextvars.ContextVar[
+    _ReplayOrtexDecisionState | None
+] = contextvars.ContextVar("_chili_replay_ortex_decision_state", default=None)
+
+
+@contextlib.contextmanager
+def replay_ortex_selection_provider(
+    provider: Callable[[str], Mapping[str, Any]],
+) -> Iterator[None]:
+    """Bind one exact sealed Ortex receipt to the real live decision seam.
+
+    The provider is invoked only by the normal live entry guard.  Therefore a
+    replay cannot consume the receipt after the decision or pre-load an input
+    that the current FSM never read.  The process-private state is one-shot and
+    is reset on every exit, including exceptions.
+    """
+
+    if not callable(provider):
+        raise ReplayInputContractError(
+            "sealed_replay_ortex_provider_is_not_callable"
+        )
+    token = _REPLAY_ORTEX_DECISION_STATE.set(
+        _ReplayOrtexDecisionState(provider=provider)
+    )
+    try:
+        yield
+    finally:
+        _REPLAY_ORTEX_DECISION_STATE.reset(token)
 
 
 def _current_decision_runtime_state() -> DecisionRuntimeState:
@@ -1069,17 +1109,39 @@ def _adaptive_alpaca_apply_quarantine_blocker(
     return True
 
 
+def _adaptive_alpaca_precommit_block(
+    sess: Any,
+    le: dict[str, Any],
+    *,
+    reason: str,
+    rejection_reasons: list[str] | None = None,
+) -> dict[str, Any]:
+    le["adaptive_risk_alpaca_lifecycle_blocker"] = {
+        "reason": reason,
+        "recorded_at_utc": _utcnow().isoformat(),
+    }
+    _commit_le(sess, le)
+    return {
+        "ok": False,
+        "error": reason,
+        "rejection_reasons": list(rejection_reasons or ()),
+    }
+
+
 def _ensure_adaptive_alpaca_reservation(
     sess: Any,
     le: dict[str, Any],
     *,
     request_payload: dict[str, Any],
     expected_quantity: int | None = None,
+    claim: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    """Strictly load/replay one request and bind its durable reservation.
+    """Strictly bind one request to an already-committed PAPER reservation.
 
-    ``reserve`` is idempotent by account/CID/request hash, so this same helper is
-    used both at the literal POST boundary and after a process restart.
+    Reservation creation belongs exclusively to the locked captured-PAPER
+    admission transaction.  This helper is used later at the literal transport
+    boundary and after a process restart, where it may verify and load that
+    durable reservation but must never manufacture a second risk authority.
     """
 
     try:
@@ -1104,14 +1166,163 @@ def _ensure_adaptive_alpaca_reservation(
             raise AdaptiveRiskContractError(
                 "adaptive Alpaca reservation identity mismatch"
             )
+        snapshot = getattr(sess, "risk_snapshot_json", None)
+        snapshot = snapshot if isinstance(snapshot, dict) else {}
+        admission = snapshot.get("captured_paper_admission")
+        if not isinstance(admission, dict):
+            return _adaptive_alpaca_precommit_block(
+                sess,
+                le,
+                reason="adaptive_risk_reservation_not_precommitted",
+            )
+        try:
+            admission_quantity = int(admission.get("quantity_shares"))
+            admission_reservation_id = str(
+                uuid.UUID(str(admission.get("reservation_id") or ""))
+            )
+        except (TypeError, ValueError, AttributeError):
+            return _adaptive_alpaca_precommit_block(
+                sess,
+                le,
+                reason="adaptive_risk_precommitted_binding_mismatch",
+            )
+        admission_body = {
+            key: value
+            for key, value in admission.items()
+            if key not in {"admission_record_sha256", "status"}
+        }
+        admission_record_sha256 = str(
+            admission.get("admission_record_sha256") or ""
+        ).strip().lower()
+        if not (
+            admission.get("schema_version")
+            == CAPTURED_PAPER_ADMISSION_SCHEMA_VERSION
+            and admission.get("status") == "admitted_pending_transport"
+            and admission_record_sha256
+            == _captured_paper_sha256(admission_body)
+            and admission.get("reservation_request_sha256")
+            == request.request_sha256
+            and admission.get("account_identity_sha256")
+            == request.inputs.account_identity_sha256
+            and admission_quantity > 0
+            and (
+                expected_quantity is None
+                or admission_quantity == int(expected_quantity)
+            )
+        ):
+            return _adaptive_alpaca_precommit_block(
+                sess,
+                le,
+                reason="adaptive_risk_precommitted_binding_mismatch",
+            )
+        owner = object_session(sess)
+        if owner is None:
+            raise AdaptiveRiskContractError(
+                "adaptive Alpaca reservation requires an attached session"
+            )
+        readable, durable_claim = read_action_claim(
+            owner,
+            symbol=request.inputs.symbol,
+            account_scope=request.account_scope,
+            # This is an authority precheck, not the transport ownership CAS.
+            # Holding the claim row in the outer tick transaction would
+            # self-block the short-session transport-start commit that follows.
+            for_update=False,
+        )
+        durable_claim = durable_claim if isinstance(durable_claim, dict) else {}
+        claim_metadata = durable_claim.get("metadata")
+        claim_metadata = (
+            claim_metadata if isinstance(claim_metadata, dict) else {}
+        )
+        passed_claim_token = (
+            str(claim.get("claim_token") or "").strip()
+            if isinstance(claim, dict)
+            else None
+        )
+        frozen_claim_token = str(
+            snapshot.get("alpaca_symbol_claim_token") or ""
+        ).strip()
+        packet_payload = claim_metadata.get("adaptive_risk_decision_packet")
+        reservation_claim_payload = claim_metadata.get(
+            "adaptive_risk_reservation_claim"
+        )
+        try:
+            verified_claim = load_and_verify_adaptive_risk_reservation_claim(
+                packet_payload,
+                reservation_claim_payload,
+            )
+        except (AdaptiveRiskContractError, TypeError, ValueError):
+            verified_claim = None
+        if not (
+            readable
+            and durable_claim.get("account_scope") == request.account_scope
+            and durable_claim.get("symbol") == request.inputs.symbol
+            and durable_claim.get("action") == "entry"
+            and durable_claim.get("phase") != "resolved"
+            and durable_claim.get("owner_session_id") == int(sess.id)
+            and durable_claim.get("client_order_id") == request.client_order_id
+            and frozen_claim_token
+            and durable_claim.get("claim_token") == frozen_claim_token
+            and (
+                passed_claim_token is None
+                or passed_claim_token == frozen_claim_token
+            )
+            and claim_metadata.get("alpaca_account_id")
+            == frozen_account_id
+            and claim_metadata.get("adaptive_risk_reservation_request")
+            == request.to_payload()
+            and claim_metadata.get("adaptive_risk_reservation_id")
+            == admission_reservation_id
+            and claim_metadata.get(
+                "captured_paper_admission_record_sha256"
+            )
+            == admission_record_sha256
+            and claim_metadata.get("adaptive_input_evidence_sha256")
+            == admission.get("adaptive_input_evidence_sha256")
+            and admission.get("adaptive_input_evidence_sha256")
+            and verified_claim is not None
+            and verified_claim.decision_packet_sha256
+            == admission.get("decision_packet_sha256")
+            and verified_claim.account_identity_sha256
+            == request.inputs.account_identity_sha256
+            and verified_claim.symbol == request.inputs.symbol
+            and verified_claim.quantity_shares == admission_quantity
+        ):
+            return _adaptive_alpaca_precommit_block(
+                sess,
+                le,
+                reason="adaptive_risk_precommitted_claim_mismatch",
+            )
         store = _adaptive_risk_store_for_session(sess)
-        decision = store.reserve(request)
-        if not decision.admission_accepted or decision.reservation_id is None:
-            return {
-                "ok": False,
-                "error": "adaptive_risk_reservation_rejected",
-                "rejection_reasons": list(decision.rejection_reasons),
-            }
+        decision = store.load_existing_alpaca_paper_reservation(request)
+        if (
+            decision is None
+            or not decision.admission_accepted
+            or decision.reservation_id is None
+        ):
+            return _adaptive_alpaca_precommit_block(
+                sess,
+                le,
+                reason="adaptive_risk_reservation_not_precommitted",
+                rejection_reasons=(
+                    []
+                    if decision is None
+                    else list(decision.rejection_reasons)
+                ),
+            )
+        if not (
+            str(decision.reservation_id) == admission_reservation_id
+            and decision.decision_packet_sha256
+            == admission.get("decision_packet_sha256")
+            and decision.client_order_id == request.client_order_id
+            and decision.symbol == request.inputs.symbol
+            and int(decision.quantity_shares) == admission_quantity
+        ):
+            return _adaptive_alpaca_precommit_block(
+                sess,
+                le,
+                reason="adaptive_risk_precommitted_binding_mismatch",
+            )
         if expected_quantity is not None and int(decision.quantity_shares) != int(
             expected_quantity
         ):
@@ -1493,6 +1704,7 @@ def _sync_adaptive_alpaca_order_lifecycle(
             le,
             request_payload=payload,
             expected_quantity=expected_quantity,
+            claim=claim,
         )
         if not ensured.get("ok"):
             return ensured
@@ -3592,6 +3804,7 @@ def _prepare_alpaca_place_claim(
         live_exec,
         request_payload=dict(adaptive_request_payload),
         expected_quantity=int(adaptive_claim.quantity_shares),
+        claim=claim,
     )
     if not adaptive_binding.get("ok"):
         legacy_released = False
@@ -4534,6 +4747,7 @@ def _recover_owner_alpaca_entry_claim(
         le,
         request_payload=adaptive_request_payload,
         expected_quantity=expected_adaptive_quantity,
+        claim=claim,
     )
     if not adaptive_recovered.get("ok"):
         return {
@@ -20747,7 +20961,7 @@ def structural_trigger_reasons() -> tuple[str, ...]:
     as a structural trigger for the leader/chase bypasses). ALL consumption sites read this
     accessor so the ``chili_momentum_orb_ihs_structural_stop_enabled`` flag stays consistent
     across stop-stash + bypass semantics. Flag OFF -> the legacy base tuple, byte-identical."""
-    if bool(getattr(settings, "chili_momentum_orb_ihs_structural_stop_enabled", False)):
+    if bool(getattr(settings, "chili_momentum_orb_ihs_structural_stop_enabled", True)):
         return STRUCTURAL_TRIGGER_REASONS + ORB_IHS_STRUCTURAL_TRIGGER_REASONS
     return STRUCTURAL_TRIGGER_REASONS
 
@@ -23683,6 +23897,265 @@ def build_captured_paper_exit_transport_post_commit_handler(
             }
 
     return _handle
+
+
+def _live_ortex_entry_readiness_reason(
+    db: Session,
+    *,
+    execution_readiness: object,
+    symbol: str,
+    read_at: datetime,
+) -> str | None:
+    """Resolve default-ON Ortex admission evidence without a provider read."""
+
+    normalized_symbol = str(symbol or "").strip().upper()
+    if (
+        not bool(
+            getattr(
+                settings,
+                "chili_momentum_squeeze_fuel_tilt_enabled",
+                True,
+            )
+        )
+        or normalized_symbol.endswith("-USD")
+    ):
+        return None
+    replay_state = _REPLAY_ORTEX_DECISION_STATE.get()
+    if replay_state is not None:
+        if replay_state.consumed:
+            raise ReplayInputContractError(
+                "sealed_replay_ortex_receipt_was_consumed_more_than_once"
+            )
+        # Mark before calling the provider. A rejected or malformed call may
+        # never be retried against a different receipt in the same decision.
+        replay_state.consumed = True
+        raw = replay_state.provider(normalized_symbol)
+        expected_fields = {
+            "schema_version",
+            "symbol",
+            "short_mechanics",
+            "short_mechanics_sha256",
+            "short_mechanics_runtime_sha256",
+            "squeeze_fuel_pct",
+            "rank_pct",
+            "batch_members_sha256",
+            "complete",
+        }
+        if not isinstance(raw, Mapping) or set(raw) != expected_fields:
+            raise ReplayInputContractError(
+                "sealed_replay_ortex_result_schema_mismatch"
+            )
+        mechanics = raw.get("short_mechanics")
+        if not isinstance(mechanics, Mapping):
+            raise ReplayInputContractError(
+                "sealed_replay_ortex_mechanics_are_invalid"
+            )
+
+        def exact_sha(value: object, field: str) -> str:
+            normalized = str(value or "").strip().lower()
+            if len(normalized) != 64 or any(
+                character not in "0123456789abcdef"
+                for character in normalized
+            ):
+                raise ReplayInputContractError(
+                    f"sealed_replay_ortex_{field}_is_invalid"
+                )
+            return normalized
+
+        def optional_unit(value: object, field: str) -> float | None:
+            if value is None:
+                return None
+            if isinstance(value, bool):
+                raise ReplayInputContractError(
+                    f"sealed_replay_ortex_{field}_is_invalid"
+                )
+            try:
+                normalized = float(value)
+            except (TypeError, ValueError, OverflowError) as exc:
+                raise ReplayInputContractError(
+                    f"sealed_replay_ortex_{field}_is_invalid"
+                ) from exc
+            if (
+                not math.isfinite(normalized)
+                or normalized < 0.0
+                or normalized > 1.0
+            ):
+                raise ReplayInputContractError(
+                    f"sealed_replay_ortex_{field}_is_invalid"
+                )
+            return normalized
+
+        if (
+            raw.get("schema_version")
+            != "chili.ortex-selection-result.v1"
+            or raw.get("symbol") != normalized_symbol
+            or type(raw.get("complete")) is not bool
+            or (
+                "symbol" in mechanics
+                and mechanics.get("symbol") != normalized_symbol
+            )
+        ):
+            raise ReplayInputContractError(
+                "sealed_replay_ortex_result_identity_mismatch"
+            )
+        mechanics_sha256 = exact_sha(
+            raw.get("short_mechanics_sha256"),
+            "short_mechanics_sha256",
+        )
+        runtime_sha256 = exact_sha(
+            raw.get("short_mechanics_runtime_sha256"),
+            "short_mechanics_runtime_sha256",
+        )
+        members_sha256 = exact_sha(
+            raw.get("batch_members_sha256"),
+            "batch_members_sha256",
+        )
+        if _captured_paper_sha256(dict(mechanics)) != runtime_sha256:
+            raise ReplayInputContractError(
+                "sealed_replay_ortex_runtime_content_hash_mismatch"
+            )
+        squeeze_fuel_pct = optional_unit(
+            raw.get("squeeze_fuel_pct"),
+            "squeeze_fuel_pct",
+        )
+        rank_pct = optional_unit(raw.get("rank_pct"), "rank_pct")
+        if rank_pct is not None and squeeze_fuel_pct is None:
+            raise ReplayInputContractError(
+                "sealed_replay_ortex_rank_without_score"
+            )
+        replay_state.selection = {
+            "symbol": normalized_symbol,
+            "short_mechanics_sha256": mechanics_sha256,
+            "short_mechanics_runtime_sha256": runtime_sha256,
+            "batch_members_sha256": members_sha256,
+            "squeeze_fuel_pct": squeeze_fuel_pct,
+            "squeeze_fuel_rank_pct": rank_pct,
+            "complete": bool(raw["complete"]),
+        }
+        if not raw["complete"]:
+            return "ortex_batch_coverage_unavailable"
+        return None
+    try:
+        from .pipeline import (
+            ORTEX_SQUEEZE_BATCH_STATUS_KEY,
+            ortex_batch_readiness_reason,
+            resolve_ortex_batch_manifest_from_hub,
+        )
+
+        extra = (
+            execution_readiness.get("extra")
+            if isinstance(execution_readiness, dict)
+            else None
+        )
+        reference = (
+            extra.get(ORTEX_SQUEEZE_BATCH_STATUS_KEY)
+            if isinstance(extra, dict)
+            else None
+        )
+        manifest, resolve_reason = resolve_ortex_batch_manifest_from_hub(
+            db,
+            batch_reference=reference,
+        )
+        if resolve_reason is not None:
+            return resolve_reason
+        return ortex_batch_readiness_reason(
+            execution_readiness,
+            symbol=symbol,
+            manifest=manifest,
+            read_at=read_at,
+        )
+    except Exception:
+        return "ortex_batch_readiness_validation_failed"
+
+
+def _overlay_replay_ortex_selection(
+    execution_readiness: dict[str, Any],
+    *,
+    symbol: str,
+) -> dict[str, Any]:
+    """Project the consumed sealed score/rank into the normal live sizing path."""
+
+    state = _REPLAY_ORTEX_DECISION_STATE.get()
+    if state is None:
+        return execution_readiness
+    normalized_symbol = str(symbol or "").strip().upper()
+    policy_applicable = bool(
+        getattr(
+            settings,
+            "chili_momentum_squeeze_fuel_tilt_enabled",
+            True,
+        )
+    ) and not normalized_symbol.endswith("-USD")
+    if not policy_applicable:
+        if state.consumed or state.selection is not None:
+            raise ReplayInputContractError(
+                "sealed_replay_ortex_receipt_consumed_while_policy_bypassed"
+            )
+        return execution_readiness
+    selection = state.selection
+    if (
+        not state.consumed
+        or not isinstance(selection, dict)
+        or selection.get("symbol") != normalized_symbol
+        or selection.get("complete") is not True
+    ):
+        raise ReplayInputContractError(
+            "sealed_replay_ortex_selection_was_not_admitted"
+        )
+    projected = deepcopy(execution_readiness)
+    extra = projected.get("extra")
+    if extra is None:
+        extra = {}
+        projected["extra"] = extra
+    if not isinstance(extra, dict):
+        raise ReplayInputContractError(
+            "sealed_replay_ortex_execution_extra_is_invalid"
+        )
+    signals = extra.get("ross_signals")
+    if signals is None:
+        signals = {}
+        extra["ross_signals"] = signals
+    if not isinstance(signals, dict):
+        raise ReplayInputContractError(
+            "sealed_replay_ortex_signal_map_is_invalid"
+        )
+    matching_keys = [
+        key
+        for key in signals
+        if str(key or "").strip().upper() == normalized_symbol
+    ]
+    if len(matching_keys) > 1:
+        raise ReplayInputContractError(
+            "sealed_replay_ortex_symbol_projection_is_ambiguous"
+        )
+    key = matching_keys[0] if matching_keys else normalized_symbol
+    current = signals.get(key)
+    if current is None:
+        current = {}
+    if not isinstance(current, dict):
+        raise ReplayInputContractError(
+            "sealed_replay_ortex_signal_projection_is_invalid"
+        )
+    if key != normalized_symbol:
+        signals.pop(key, None)
+    signals[normalized_symbol] = current
+    for field in ("squeeze_fuel_pct", "squeeze_fuel_rank_pct"):
+        existing = current.get(field)
+        sealed = selection[field]
+        if existing is not None and existing != sealed:
+            raise ReplayInputContractError(
+                f"sealed_replay_ortex_{field}_projection_mismatch"
+            )
+        current[field] = sealed
+    current["ortex_replay_receipt"] = {
+        "schema_version": "chili.replay-ortex-decision-receipt.v1",
+        "short_mechanics_sha256": selection["short_mechanics_sha256"],
+        "short_mechanics_runtime_sha256": selection[
+            "short_mechanics_runtime_sha256"
+        ],
+        "batch_members_sha256": selection["batch_members_sha256"],
+    }
+    return projected
 
 
 def tick_live_session(
@@ -29313,6 +29786,42 @@ def tick_live_session(
 
         regime_live = via.regime_snapshot_json if isinstance(via.regime_snapshot_json, dict) else {}
         ex_live = via.execution_readiness_json if isinstance(via.execution_readiness_json, dict) else {}
+        _ortex_blocker = _live_ortex_entry_readiness_reason(
+            db,
+            execution_readiness=ex_live,
+            symbol=sess.symbol,
+            read_at=_utcnow_aware(),
+        )
+        if _ortex_blocker is not None:
+            _emit(
+                db,
+                sess,
+                "live_entry_ortex_coverage_unavailable",
+                {
+                    "reason": _ortex_blocker,
+                    "opportunity_consumed": False,
+                    "risk_reserved": False,
+                    "order_posted": False,
+                },
+            )
+            _safe_transition(db, sess, STATE_WATCHING_LIVE)
+            db.flush()
+            return {
+                "ok": True,
+                "session_id": sess.id,
+                "state": sess.state,
+                "deferred": True,
+                "reason": _ortex_blocker,
+            }
+        # A sealed ReplayV3 receipt is consumed by the guard above, at the
+        # exact point where ordinary LIVE validates the persisted batch. Feed
+        # its score/rank into the unchanged live sizing path only after that
+        # admission succeeds. Production/PAPER without the replay capability
+        # receives the original object unchanged.
+        ex_live = _overlay_replay_ortex_selection(
+            ex_live,
+            symbol=sess.symbol,
+        )
         try:
             # Use the live BBO already fetched for this tick. Missing readiness
             # previously fabricated an 8 bps spread even when the executable book
@@ -30265,7 +30774,16 @@ def tick_live_session(
         # NEVER a veto; the max-loss circuit + structural stop + daily-loss breaker are untouched.
         # Equity-only (crypto has no borrow data ⇒ no rank stamped ⇒ 1.0). Fail-neutral to 1.0.
         _squeeze_size_mult = 1.0
-        if bool(getattr(settings, "chili_momentum_squeeze_entry_sizeup_enabled", True)):
+        if (
+            _adaptive_primary_build is None
+            and bool(
+                getattr(
+                    settings,
+                    "chili_momentum_squeeze_entry_sizeup_enabled",
+                    True,
+                )
+            )
+        ):
             try:
                 from .ross_momentum import squeeze_entry_size_multiplier as _sq_size
 
@@ -30304,31 +30822,67 @@ def tick_live_session(
         # leg / OFF / error => 1.0 (byte-identical). Reads are cached/fail-open (no new vendor).
         _kelly_conviction_mult = 1.0
         if (
-            bool(getattr(settings, "chili_momentum_kelly_conviction_enabled", True))
+            _adaptive_primary_build is None
+            and bool(
+                getattr(
+                    settings,
+                    "chili_momentum_kelly_conviction_enabled",
+                    True,
+                )
+            )
             and not str(sess.symbol or "").upper().endswith("-USD")  # equity-only signals
         ):
             try:
-                from .risk_policy import triple_confluence_kelly_multiplier
+                from .risk_policy import (
+                    persisted_catalyst_news_grade_rank,
+                    triple_confluence_kelly_multiplier,
+                )
                 from .pipeline import _live_ofi_microprice as _kc_ofi_reader
                 _kc_ofi, _ = _kc_ofi_reader(sess.symbol, db=db)
                 _kc_sq = None
+                _kc_extra = (
+                    (ex_live.get("extra") or {})
+                    if isinstance(ex_live, dict)
+                    else {}
+                )
                 try:
-                    from .ross_momentum import squeeze_fuel_signal as _kc_sf
-                    from .short_mechanics import get_short_mechanics as _kc_mech
-                    _km = _kc_mech(sess.symbol) or {}
-                    if _km:
-                        _kc_sig = _kc_sf(
-                            _km.get("short_interest_pct"), _km.get("cost_to_borrow"),
-                            utilization=_km.get("utilization"),
-                            is_easy_to_borrow=_km.get("is_easy_to_borrow"),
+                    # Reuse the exact selection-time Ortex scalar persisted in
+                    # this session's sealed readiness packet.  A second live
+                    # provider read here would consume quota independently,
+                    # break replay/PAPER parity, and let sizing observe data
+                    # that the ranking/admission decision did not.
+                    _kc_rows = (
+                        (_kc_extra.get("ross_signals") or {})
+                        if isinstance(_kc_extra.get("ross_signals"), dict)
+                        else {}
+                    )
+                    _kc_row = _kc_rows.get(str(sess.symbol or "").upper())
+                    if isinstance(_kc_row, dict):
+                        _kc_sq = _float_or_none(
+                            _kc_row.get("squeeze_fuel_pct")
                         )
-                        _kc_sq = _kc_sig.squeeze_pct
                 except Exception:
                     _kc_sq = None
                 _kc_rank = 0
                 try:
-                    from .catalyst import catalyst_grade_rank as _kc_grade
-                    _kc_rank = int(_kc_grade(sess.symbol))
+                    # Bind news to the same persisted selection packet too.
+                    # A current catalyst-cache read here would let sizing use a
+                    # different fact than admission and sealed replay.
+                    _kc_rank = persisted_catalyst_news_grade_rank(
+                        symbol=str(sess.symbol or ""),
+                        strong_symbols=_kc_extra.get(
+                            "strong_catalyst_symbols"
+                        ),
+                        weak_symbols=_kc_extra.get("weak_catalyst_symbols"),
+                        fake_symbols=_kc_extra.get("fake_catalyst_symbols"),
+                        fake_guard_enabled=bool(
+                            getattr(
+                                settings,
+                                "chili_momentum_fake_catalyst_guard_enabled",
+                                True,
+                            )
+                        ),
+                    )
                 except Exception:
                     _kc_rank = 0
                 _kelly_conviction_mult, _kc_meta = triple_confluence_kelly_multiplier(
@@ -30363,7 +30917,16 @@ def tick_live_session(
         # `defer` flag is ADVISORY for v1 (logged only — no new re-poll loop, to avoid starving
         # the fast premarket window). docs/DESIGN/MOMENTUM_LANE.md
         _frontside_mult = 1.0
-        if bool(getattr(settings, "chili_momentum_frontside_adaptive_enabled", True)):
+        if (
+            _adaptive_primary_build is None
+            and bool(
+                getattr(
+                    settings,
+                    "chili_momentum_frontside_adaptive_enabled",
+                    True,
+                )
+            )
+        ):
             try:
                 from .ross_momentum import (
                     front_side_size_tilt as _fs_tilt,
@@ -34518,10 +35081,11 @@ def tick_live_session(
         # did not confirm, so BAIL before the stop via the BAILOUT machinery. A winner
         # that pops then consolidates (high-water mark above the buffer) is IMMUNE. The
         # OFI read is fail-open (None ⇒ governed by the price conditions). ENTERED-only,
-        # fresh-quote gated. Flag OFF (default) ⇒ no-op ⇒ byte-identical. PROTECTIVE only.
+        # fresh-quote gated. The explicit OFF kill-switch is a byte-identical no-op.
+        # PROTECTIVE only.
         if (
             st == STATE_LIVE_ENTERED
-            and bool(getattr(settings, "chili_momentum_bail_on_no_confirmation_enabled", False))
+            and bool(getattr(settings, "chili_momentum_bail_on_no_confirmation_enabled", True))
             and bid is not None
             and math.isfinite(float(bid))
             and float(bid) > 0
@@ -38803,14 +39367,14 @@ def tick_live_session(
                         "[momentum_live] g4 leader-exempt read failed (fail-closed)",
                         exc_info=True,
                     )
-            # Experimental Ross-parity L5 / GAP-B fresh-ignition exemption. Promotion
-            # evidence is not yet available, so the real Settings default and this
-            # defensive fallback are both OFF. When explicitly enabled, both the
-            # executed-tape confirmer and the sustained running-up burst must be present.
+            # Ross-parity L5 / GAP-B fresh-ignition exemption. The operator-selected
+            # default is ON; the explicit environment OFF kill-switch restores the
+            # byte-identical base path. Both the executed-tape confirmer and the
+            # sustained running-up burst must be present.
             # Any read error remains fail-closed and terminalizes through the base path.
             if (
                 not _re_ok
-                and bool(getattr(settings, "chili_momentum_fresh_ignition_reentry_bypass_enabled", False))
+                and bool(getattr(settings, "chili_momentum_fresh_ignition_reentry_bypass_enabled", True))
             ):
                 _ign_dbg: dict = {}
                 try:

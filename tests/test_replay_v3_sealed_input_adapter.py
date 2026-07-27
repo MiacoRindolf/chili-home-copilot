@@ -1,8 +1,11 @@
 from __future__ import annotations
 
+import base64
 from dataclasses import dataclass, replace
 from datetime import datetime, timedelta, timezone
 from copy import deepcopy
+import hashlib
+import json
 import socket
 from types import SimpleNamespace
 import uuid
@@ -28,10 +31,26 @@ from app.services.trading.momentum_neural.first_dip_tape_decision import (
     resolve_first_dip_tape_decision,
 )
 from app.services.trading.momentum_neural.adaptive_risk_request_builder import (
+    AdaptiveRiskBuilderSource,
     AdaptiveRiskBuilderError,
+    AdaptiveRiskDiagnosticCaptureBinding,
+    build_adaptive_risk_decision,
     build_adaptive_risk_request,
 )
 from app.services.trading.momentum_neural.adaptive_risk_policy import RiskInputEvidence
+from app.services.trading.momentum_neural.adaptive_risk_runtime_contract import (
+    AdaptiveRiskLedgerSnapshot,
+    build_adaptive_risk_reservation_claim,
+)
+from app.services.trading.momentum_neural.adaptive_risk_reservation import (
+    load_adaptive_risk_reservation_request,
+)
+from app.services.trading.momentum_neural.alpaca_orphan_claims import (
+    acquire_action_claim,
+)
+from app.services.trading.momentum_neural.alpaca_paper_identity import (
+    alpaca_paper_account_identity_sha256,
+)
 from app.services.trading.momentum_neural.live_replay_capture import (
     FirstDipFinalCaptureFrontier,
 )
@@ -50,6 +69,7 @@ from app.services.trading.momentum_neural.replay_capture_contract import (
     ActiveCaptureReadEvidence,
     CaptureBrokerOrderLifecycle,
     CaptureBrokerTransition,
+    CaptureAdaptiveOrderArtifacts,
     CaptureCoverageGrade,
     CaptureCoverageManifest,
     CaptureContractError,
@@ -64,6 +84,7 @@ from app.services.trading.momentum_neural.replay_capture_contract import (
     CaptureOrderIntentRole,
     CaptureReadReceipt,
     CaptureProducerSpec,
+    CaptureOrtexSelectionSnapshot,
     CaptureRunOpen,
     CaptureRunIdentity,
     CaptureScannerProfile,
@@ -85,6 +106,14 @@ from app.services.trading.momentum_neural.replay_capture_contract import (
     capture_final_decision_authority_sha256,
     sha256_json,
 )
+from app.services.trading.momentum_neural import short_mechanics as ortex_module
+from app.services.trading.momentum_neural.ross_momentum import (
+    squeeze_fuel_signal,
+)
+from app.services.trading.momentum_neural.short_mechanics import (
+    ortex_outcome_from_completed_attempts,
+    ortex_public_policy,
+)
 from app.services.trading.momentum_neural.replay_capture_runtime import (
     BoundedCaptureIngress,
     CaptureWriterWorker,
@@ -97,6 +126,20 @@ UTC = timezone.utc
 BASE = datetime(2026, 7, 13, 13, 0, tzinfo=UTC)
 SYMBOL = "VEEE"
 DECISION_ID = "sealed-replay-v3-fixture"
+EMPTY_ADAPTIVE_RISK_LEDGER_SHA256 = (
+    AdaptiveRiskLedgerSnapshot.from_dimensions(
+        open_structural_risk_usd=0.0,
+        pending_reserved_risk_usd=0.0,
+        existing_same_symbol_structural_risk_usd=0.0,
+        pending_same_symbol_structural_risk_usd=0.0,
+        current_cluster_structural_risk_usd=0.0,
+        pending_correlation_cluster_risk_usd=0.0,
+        portfolio_gross_notional_usd=0.0,
+        pending_portfolio_gross_notional_usd=0.0,
+        open_buying_power_impact_usd=0.0,
+        pending_buying_power_impact_usd=0.0,
+    ).content_sha256
+)
 PROFILE_STREAMS = frozenset(
     {
         CaptureStream.NBBO_QUOTE,
@@ -108,6 +151,111 @@ PROFILE_STREAMS = frozenset(
 REPLAY_STREAMS = PROFILE_STREAMS | {
     CaptureStream.BROKER_ORDER_LIFECYCLE,
 }
+
+
+def _ortex_snapshot_payload(
+    *,
+    observed_at: datetime,
+) -> tuple[dict, dict]:
+    dataset_at = observed_at - timedelta(days=14)
+    source_received_at = observed_at - timedelta(seconds=5)
+    policy = ortex_public_policy()
+    policy_sha256 = sha256_json(policy)
+    bundle_sha256 = hashlib.sha256(
+        f"{SYMBOL}:{observed_at.isoformat()}".encode()
+    ).hexdigest()
+    records: list[SimpleNamespace] = []
+    for dataset, field, value, index in (
+        ("cost_to_borrow", "costToBorrowAll", 47.0, 0),
+        ("short_interest", "shortInterestPcFreeFloat", 0.235, 1),
+    ):
+        plan = ortex_module._request_plan(
+            dataset=dataset,
+            symbol=SYMBOL,
+            exchange="nasdaq",
+            policy_sha256=policy_sha256,
+        )
+        received_at = source_received_at - timedelta(milliseconds=20 * index)
+        provider_event_at = dataset_at + timedelta(hours=12)
+        response = json.dumps(
+            {
+                "rows": [
+                    {
+                        "date": dataset_at.date().isoformat(),
+                        "updatedAt": provider_event_at.isoformat(),
+                        field: value,
+                    }
+                ]
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode()
+        records.append(
+            SimpleNamespace(
+                attempt_id=uuid.uuid4(),
+                month_start=observed_at.date().replace(day=1),
+                bundle_sha256=bundle_sha256,
+                bundle_index=index,
+                owner_token=f"fixture-owner-{index}",
+                request_sha256=plan.request_sha256,
+                endpoint=f"/api/v1{plan.path}",
+                symbol=SYMBOL,
+                status="completed",
+                monthly_limit=1_000,
+                quota_used_after=7 + index,
+                reserved_at=received_at - timedelta(seconds=2),
+                lease_expires_at=received_at + timedelta(seconds=28),
+                provider_outcome="success",
+                http_status=200,
+                backoff_until=None,
+                raw_response_body_b64=base64.b64encode(response).decode("ascii"),
+                response_sha256=hashlib.sha256(response).hexdigest(),
+                provider_event_at=provider_event_at,
+                effective_at=datetime(
+                    dataset_at.year,
+                    dataset_at.month,
+                    dataset_at.day,
+                    tzinfo=timezone.utc,
+                ),
+                received_at=received_at,
+                available_at=received_at + timedelta(milliseconds=1),
+            )
+        )
+    outcome = ortex_outcome_from_completed_attempts(
+        symbol=SYMBOL,
+        requested_exchange="nasdaq",
+        records=records,
+        policy=policy,
+        observed_at=observed_at,
+    )
+    short_mechanics = outcome.to_capture_dict()
+    score = squeeze_fuel_signal(
+        outcome.short_interest_pct,
+        outcome.cost_to_borrow,
+        utilization=outcome.utilization,
+        is_easy_to_borrow=outcome.is_easy_to_borrow,
+    ).squeeze_pct
+    members = [
+        {
+            "symbol": SYMBOL,
+            "short_mechanics": short_mechanics,
+            "short_mechanics_sha256": sha256_json(short_mechanics),
+            "squeeze_fuel_pct": score,
+            "rank_pct": 1.0,
+        }
+    ]
+    snapshot = {
+        "schema_version": "chili.ortex-selection-snapshot.v1",
+        "members": members,
+        "members_sha256": sha256_json(members),
+        "complete": True,
+    }
+    typed = CaptureOrtexSelectionSnapshot.from_dict(
+        snapshot,
+        expected_symbol=SYMBOL,
+        expected_rank_pct=1.0,
+    )
+    return snapshot, dict(typed.capture_query())
 
 
 @dataclass(frozen=True)
@@ -165,16 +313,29 @@ def _sealed_fixture(
     first_dip_final_frontier: bool = False,
     first_dip_final_receipt_corruption: str | None = None,
     scanner_snapshot: bool = False,
+    ortex_snapshot: bool = False,
     microstructure_trade_flow: bool = False,
+    microstructure_operation: CaptureMicrostructureOperation = (
+        CaptureMicrostructureOperation.TRADE_FLOW
+    ),
     decision_offset_seconds: float = 10.0,
+    decision_id: str = DECISION_ID,
+    adaptive_entry: bool = False,
+    adaptive_setup_quality: float = 1.0,
+    adaptive_account_id: str | None = None,
 ) -> _Fixture:
+    account_identity_sha256 = (
+        alpaca_paper_account_identity_sha256(adaptive_account_id)
+        if adaptive_account_id is not None
+        else "4" * 64
+    )
     identity = CaptureRunIdentity(
         run_id=str(uuid.uuid4()),
         generation=7,
         code_build_sha256="1" * 64,
         config_sha256="2" * 64,
         feature_flags_sha256="3" * 64,
-        account_identity_sha256="4" * 64,
+        account_identity_sha256=account_identity_sha256,
         broker="alpaca",
         broker_environment="paper",
     )
@@ -204,6 +365,7 @@ def _sealed_fixture(
         market_reference_at: datetime | None = None,
         query: dict | None = None,
         provider: str = "fixture",
+        received_at: datetime | None = None,
     ) -> CaptureEvent:
         event = CaptureEvent(
             identity=identity,
@@ -214,7 +376,11 @@ def _sealed_fixture(
             clocks=CaptureClocks(
                 provider_event_at=provider_event_at,
                 market_reference_at=market_reference_at,
-                received_at=available_at - timedelta(milliseconds=1),
+                received_at=(
+                    received_at
+                    if received_at is not None
+                    else available_at - timedelta(milliseconds=1)
+                ),
                 available_at=available_at,
             ),
             query=query,
@@ -418,6 +584,32 @@ def _sealed_fixture(
                 },
             ),
         )
+    ortex = None
+    ortex_query = None
+    if ortex_snapshot:
+        ortex_payload, ortex_query = _ortex_snapshot_payload(
+            observed_at=BASE + timedelta(seconds=9, milliseconds=750)
+        )
+        typed_ortex = CaptureOrtexSelectionSnapshot.from_dict(
+            ortex_payload,
+            expected_symbol=SYMBOL,
+            expected_rank_pct=1.0,
+        )
+        ortex = add(
+            CaptureStream.ORTEX_SNAPSHOT,
+            available_at=typed_ortex.returned_at,
+            received_at=typed_ortex.source_received_at,
+            market_reference_at=typed_ortex.market_reference_at,
+            symbol=SYMBOL,
+            provider="ortex_api_v1",
+            query=ortex_query,
+            payload=ortex_payload,
+        )
+        assert typed_ortex.source_received_at == ortex.clocks.received_at
+        assert (
+            typed_ortex.source_available_at
+            == ortex.clocks.available_at
+        )
     first_dip_prints: tuple[CaptureEvent, ...] = ()
     if first_dip_tape or microstructure_trade_flow:
         if first_dip_final_frontier:
@@ -492,26 +684,40 @@ def _sealed_fixture(
                         decision_at
                         - timedelta(milliseconds=29 - (10 * index))
                         if first_dip_final_frontier
-                        else BASE
-                        + timedelta(
-                            seconds=4,
-                            milliseconds=(
-                                310 if first_dip_policy is not None else 100
+                        else (
+                            decision_at
+                            - timedelta(milliseconds=50 - index)
+                            if ortex_snapshot and microstructure_trade_flow
+                            else BASE
+                            + timedelta(
+                                seconds=4,
+                                milliseconds=(
+                                    310
+                                    if first_dip_policy is not None
+                                    else 100
+                                )
+                                + index,
                             )
-                            + index,
                         )
                     ),
                     provider_event_at=(
                         decision_at
                         - timedelta(milliseconds=30 - (10 * index))
                         if first_dip_final_frontier
-                        else BASE
-                        + timedelta(
-                            seconds=4,
-                            milliseconds=(
-                                300 if first_dip_policy is not None else 90
+                        else (
+                            decision_at
+                            - timedelta(milliseconds=60 - index)
+                            if ortex_snapshot and microstructure_trade_flow
+                            else BASE
+                            + timedelta(
+                                seconds=4,
+                                milliseconds=(
+                                    300
+                                    if first_dip_policy is not None
+                                    else 90
+                                )
+                                + index,
                             )
-                            + index,
                         )
                     ),
                     symbol=SYMBOL,
@@ -579,44 +785,9 @@ def _sealed_fixture(
                 "freshness_at": flipped_reference.isoformat(),
             },
         )
-    client_order_id = "client-1"
-    intent = CaptureOrderIntent(
-        intent_id=str(uuid.uuid4()),
-        client_order_id=client_order_id,
-        client_order_id_sha256=sha256_json(
-            {"client_order_id": client_order_id}
-        ),
-        symbol=SYMBOL,
-        side="sell",
-        order_type="limit",
-        quantity=100,
-        time_in_force="day",
-        extended_hours=False,
-        intent_role=CaptureOrderIntentRole.EXIT,
-        risk_increasing=False,
-        decision_provenance_sha256="a" * 64,
-        limit_price=9.99,
-    )
-    decision_output = CaptureDecisionOutput(
-        decision_id=DECISION_ID,
-        symbol=SYMBOL,
-        action=(
-            CaptureDecisionAction.REJECT
-            if no_order
-            else CaptureDecisionAction.ORDER_INTENT
-        ),
-        fsm_state="entry_rejected" if no_order else "risk_exit",
-        setup_role=(
-            first_dip_setup_role
-            or (
-                "first_dip_reclaim"
-                if first_dip_tape
-                else ("adaptive_entry" if no_order else "exit")
-            )
-        ),
-        order_intents=() if no_order else (intent,),
-        reason_code="fixture_no_order" if no_order else None,
-    )
+    client_order_id = decision_id if adaptive_entry else "client-1"
+    intent: CaptureOrderIntent | None = None
+    adaptive_artifact: CaptureAdaptiveOrderArtifacts | None = None
     profile_streams = PROFILE_STREAMS | (
         frozenset({CaptureStream.IQFEED_PRINT})
         if first_dip_tape or microstructure_trade_flow
@@ -624,6 +795,10 @@ def _sealed_fixture(
     ) | (
         frozenset({CaptureStream.SCANNER_SNAPSHOT})
         if scanner_snapshot
+        else frozenset()
+    ) | (
+        frozenset({CaptureStream.ORTEX_SNAPSHOT})
+        if ortex_snapshot
         else frozenset()
     )
     replay_streams = profile_streams | (
@@ -642,6 +817,8 @@ def _sealed_fixture(
         read_ids[CaptureStream.IQFEED_PRINT] = str(uuid.uuid4())
     if scanner_snapshot:
         read_ids[CaptureStream.SCANNER_SNAPSHOT] = str(uuid.uuid4())
+    if ortex_snapshot:
+        read_ids[CaptureStream.ORTEX_SNAPSHOT] = str(uuid.uuid4())
     refs = {event.event_sha256: CaptureEventRef.from_event(event) for event in events}
     receipts: list[CaptureReadReceipt] = []
     receipt_sources: list[
@@ -652,11 +829,14 @@ def _sealed_fixture(
         (CaptureStream.ADMISSION_ELIGIBILITY, (eligibility,)),
         (CaptureStream.ACCOUNT_RISK_SNAPSHOT, (account,)),
     ]
-    if first_dip_tape or microstructure_trade_flow:
-        receipt_sources.append((CaptureStream.IQFEED_PRINT, first_dip_prints))
     if scanner_snapshot:
         assert scanner is not None
         receipt_sources.append((CaptureStream.SCANNER_SNAPSHOT, (scanner,)))
+    if ortex_snapshot:
+        assert ortex is not None
+        receipt_sources.append((CaptureStream.ORTEX_SNAPSHOT, (ortex,)))
+    if first_dip_tape or microstructure_trade_flow:
+        receipt_sources.append((CaptureStream.IQFEED_PRINT, first_dip_prints))
     for stream, sources in receipt_sources:
         receipt_sources_for_stream = sources
         if stream is CaptureStream.IQFEED_PRINT:
@@ -697,8 +877,18 @@ def _sealed_fixture(
             elif first_dip_receipt_corruption == "lowered_frontier":
                 source_frontier_sequence = sources[0].sequence
             if microstructure_trade_flow:
+                microstructure_parameters = (
+                    {
+                        "window_seconds": 15.0,
+                        "grid_seconds": 2.0,
+                        "half_life_steps": 4.0,
+                    }
+                    if microstructure_operation
+                    is CaptureMicrostructureOperation.FLOW_SLOPE
+                    else {"window_seconds": 15.0}
+                )
                 receipt_query = CaptureMicrostructureReadQuery(
-                    operation=CaptureMicrostructureOperation.TRADE_FLOW,
+                    operation=microstructure_operation,
                     stream=CaptureStream.IQFEED_PRINT,
                     symbol=SYMBOL,
                     provider="iqfeed",
@@ -708,7 +898,7 @@ def _sealed_fixture(
                     available_at_most=decision_at,
                     source_frontier_sequence=source_frontier_sequence,
                     source_clock_basis="provider_event_at",
-                    parameters={"window_seconds": 15.0},
+                    parameters=microstructure_parameters,
                 ).to_dict()
             else:
                 assert tape_policy is not None
@@ -725,12 +915,15 @@ def _sealed_fixture(
                 ).to_dict()
             if first_dip_receipt_corruption == "missing_query":
                 receipt_query = None
+        elif stream is CaptureStream.ORTEX_SNAPSHOT:
+            assert ortex_query is not None
+            receipt_query = ortex_query
         source_refs = tuple(
             refs[source.event_sha256] for source in receipt_sources_for_stream
         )
         receipt = CaptureReadReceipt(
             read_id=read_ids[stream],
-            decision_id=DECISION_ID,
+            decision_id=decision_id,
             identity_sha256=identity.identity_sha256,
             stream=stream,
             provider=(
@@ -739,7 +932,11 @@ def _sealed_fixture(
                 else (
                     SCANNER_SNAPSHOT_PROVIDER
                     if stream is CaptureStream.SCANNER_SNAPSHOT
-                    else "fixture"
+                    else (
+                        "ortex_api_v1"
+                        if stream is CaptureStream.ORTEX_SNAPSHOT
+                        else "fixture"
+                    )
                 )
             ),
             symbol=(
@@ -796,6 +993,10 @@ def _sealed_fixture(
             receipt_commit_at += timedelta(
                 seconds=first_dip_receipt_commit_delay_seconds
             )
+        receipt_commit_at = max(
+            receipt_commit_at,
+            events[-1].clocks.available_at + timedelta(microseconds=1),
+        )
         add(
             CaptureStream.READ_RECEIPT,
             available_at=receipt_commit_at,
@@ -928,8 +1129,225 @@ def _sealed_fixture(
             for stream in profile_streams
         ),
     )
+    if adaptive_entry:
+        if no_order or first_dip_tape:
+            raise AssertionError(
+                "adaptive entry fixture requires an ordinary order decision"
+            )
+        adaptive_snapshot = replace(
+            _snapshot(account_scope="alpaca:paper"),
+            account_identity_sha256=identity.account_identity_sha256,
+            observed_at=decision_at - timedelta(milliseconds=40),
+            available_at=decision_at - timedelta(milliseconds=30),
+            equity_usd=account_payload["equity_usd"],
+            buying_power_usd=account_payload["buying_power_usd"],
+        )
+        initial_inputs = _inputs(
+            adaptive_snapshot,
+            symbol=SYMBOL,
+            decision_id=decision_id,
+            cluster="equity:veee",
+        )
+        account_evidence = RiskInputEvidence(
+            source=adaptive_snapshot.source,
+            observed_at=adaptive_snapshot.observed_at,
+            available_at=adaptive_snapshot.available_at,
+            content_sha256=adaptive_snapshot.snapshot_sha256,
+            provider_generation=adaptive_snapshot.provider_generation,
+        )
+        adaptive_evidence = {
+            name: RiskInputEvidence(
+                source=f"sealed-fixture:{name}",
+                observed_at=decision_at - timedelta(milliseconds=20),
+                available_at=decision_at - timedelta(milliseconds=10),
+                content_sha256=sha256_json({"sealed_fixture": name}),
+                provider_generation="sealed-adaptive-fixture-v1",
+            )
+            for name in initial_inputs.evidence
+        }
+        adaptive_evidence["account"] = account_evidence
+        adaptive_evidence["daily_pnl"] = account_evidence
+        adaptive_evidence["reservation_ledger"] = replace(
+            adaptive_evidence["reservation_ledger"],
+            content_sha256=EMPTY_ADAPTIVE_RISK_LEDGER_SHA256,
+        )
+        adaptive_evidence["code_build"] = replace(
+            adaptive_evidence["code_build"],
+            content_sha256=identity.code_build_sha256,
+        )
+        adaptive_evidence["effective_config"] = replace(
+            adaptive_evidence["effective_config"],
+            content_sha256=identity.config_sha256,
+        )
+        adaptive_evidence["feature_flags"] = replace(
+            adaptive_evidence["feature_flags"],
+            content_sha256=identity.feature_flags_sha256,
+        )
+        adaptive_evidence["capture_prefix"] = RiskInputEvidence(
+            source="sealed-fixture:decision-prefix",
+            observed_at=decision_at,
+            available_at=decision_at,
+            content_sha256=prefix_root,
+            provider_generation="sealed-decision-prefix-v1",
+        )
+        adaptive_inputs = replace(
+            initial_inputs,
+            replay_or_paper_run_id=identity.run_id,
+            generation=identity.generation,
+            as_of=decision_at,
+            account_identity_sha256=identity.account_identity_sha256,
+            code_build_sha256=identity.code_build_sha256,
+            effective_config_sha256=identity.config_sha256,
+            feature_flags_sha256=identity.feature_flags_sha256,
+            capture_prefix_root_sha256=prefix_root,
+            equity_usd=account_payload["equity_usd"],
+            buying_power_usd=account_payload["buying_power_usd"],
+            open_structural_risk_usd=0.0,
+            pending_reserved_risk_usd=0.0,
+            existing_same_symbol_structural_risk_usd=0.0,
+            pending_same_symbol_structural_risk_usd=0.0,
+            current_cluster_structural_risk_usd=0.0,
+            pending_correlation_cluster_risk_usd=0.0,
+            portfolio_gross_notional_usd=0.0,
+            pending_portfolio_gross_notional_usd=0.0,
+            policy_buying_power_capacity_usd=account_payload[
+                "buying_power_usd"
+            ],
+            open_buying_power_impact_usd=0.0,
+            pending_buying_power_impact_usd=0.0,
+            bid=9.99,
+            ask=10.01,
+            structural_stop=9.50,
+            candidate_buying_power_impact_per_share_usd=10.01,
+            setup_quality=adaptive_setup_quality,
+            evidence=adaptive_evidence,
+        )
+        adaptive_request = replace(
+            _request(
+                symbol=SYMBOL,
+                decision_id=decision_id,
+                client_order_id=client_order_id,
+                setup_family="primary_entry",
+                cluster="equity:veee",
+                snapshot=adaptive_snapshot,
+                inputs=adaptive_inputs,
+            ),
+            entry_limit_price=10.01,
+        )
+        capture_evidence = adaptive_inputs.evidence["capture_prefix"]
+        adaptive_binding = AdaptiveRiskDiagnosticCaptureBinding.create_diagnostic(
+            run_id=identity.run_id,
+            generation=identity.generation,
+            decision_id=decision_id,
+            input_prefix_sequence=prefix_sequence,
+            input_prefix_root_sha256=prefix_root,
+            identity_sha256=identity.identity_sha256,
+            observed_at=capture_evidence.observed_at,
+            available_at=capture_evidence.available_at,
+            verifier_generation=capture_evidence.provider_generation,
+        )
+        adaptive_source = AdaptiveRiskBuilderSource(
+            policy=adaptive_request.policy,
+            inputs=adaptive_request.inputs,
+            account_snapshot=adaptive_request.account_snapshot,
+            capture_binding=adaptive_binding,
+            account_scope=adaptive_request.account_scope,
+            setup_family=adaptive_request.setup_family,
+            correlation_cluster=adaptive_request.correlation_cluster,
+        )
+        adaptive_decision = build_adaptive_risk_decision(
+            adaptive_source.policy,
+            adaptive_source.inputs,
+            adaptive_source.capture_binding,
+        )
+        adaptive_claim = build_adaptive_risk_reservation_claim(
+            adaptive_decision.decision_packet,
+            claim_id=client_order_id,
+        )
+        intent = CaptureOrderIntent(
+            intent_id=str(uuid.uuid4()),
+            client_order_id=client_order_id,
+            client_order_id_sha256=sha256_json(
+                {"client_order_id": client_order_id}
+            ),
+            symbol=SYMBOL,
+            side="buy",
+            order_type="limit",
+            quantity=adaptive_decision.resolution.quantity_shares,
+            time_in_force="day",
+            extended_hours=False,
+            intent_role=CaptureOrderIntentRole.ENTRY,
+            risk_increasing=True,
+            decision_provenance_sha256=sha256_json(
+                {
+                    "decision_id": decision_id,
+                    "input_prefix_root_sha256": prefix_root,
+                }
+            ),
+            adaptive_request_sha256=adaptive_request.request_sha256,
+            adaptive_decision_sha256=(
+                adaptive_decision.resolution.decision_packet_sha256
+            ),
+            adaptive_resolution_sha256=(
+                adaptive_decision.resolution.economic_resolution_sha256
+            ),
+            reservation_claim_sha256=adaptive_claim.claim_sha256,
+            limit_price=adaptive_request.entry_limit_price,
+        )
+        adaptive_artifact = CaptureAdaptiveOrderArtifacts(
+            order_intent_sha256=intent.order_intent_sha256,
+            reservation_request=adaptive_request.to_payload(),
+            decision_packet=adaptive_decision.decision_packet,
+            reservation_claim=adaptive_claim.to_payload(),
+        )
+        decision_output = CaptureDecisionOutput(
+            decision_id=decision_id,
+            symbol=SYMBOL,
+            action=CaptureDecisionAction.ORDER_INTENT,
+            fsm_state=lr.STATE_LIVE_PENDING_ENTRY,
+            setup_role="primary_entry",
+            order_intents=(intent,),
+        )
+    else:
+        intent = CaptureOrderIntent(
+            intent_id=str(uuid.uuid4()),
+            client_order_id=client_order_id,
+            client_order_id_sha256=sha256_json(
+                {"client_order_id": client_order_id}
+            ),
+            symbol=SYMBOL,
+            side="sell",
+            order_type="limit",
+            quantity=100,
+            time_in_force="day",
+            extended_hours=False,
+            intent_role=CaptureOrderIntentRole.EXIT,
+            risk_increasing=False,
+            decision_provenance_sha256="a" * 64,
+            limit_price=9.99,
+        )
+        decision_output = CaptureDecisionOutput(
+            decision_id=decision_id,
+            symbol=SYMBOL,
+            action=(
+                CaptureDecisionAction.REJECT
+                if no_order
+                else CaptureDecisionAction.ORDER_INTENT
+            ),
+            fsm_state="entry_rejected" if no_order else "risk_exit",
+            setup_role=(
+                first_dip_setup_role
+                or (
+                    "first_dip_reclaim"
+                    if first_dip_tape
+                    else ("adaptive_entry" if no_order else "exit")
+                )
+            ),
+            order_intents=() if no_order else (intent,),
+            reason_code="fixture_no_order" if no_order else None,
+        )
     decision_payload = {
-        "decision_id": DECISION_ID,
+        "decision_id": decision_id,
         "symbol": SYMBOL,
         "decision_at": decision_at.isoformat(),
         "input_prefix_sequence": prefix_sequence,
@@ -938,7 +1356,9 @@ def _sealed_fixture(
         "fsm_dependency_profile": dependency_profile.to_dict(),
         "decision_output": decision_output.to_dict(),
         "decision_output_sha256": decision_output.decision_output_sha256,
-        "adaptive_order_artifacts": [],
+        "adaptive_order_artifacts": (
+            [] if adaptive_artifact is None else [adaptive_artifact.to_dict()]
+        ),
     }
     if first_dip_tape:
         decision_payload["first_dip_tape_read_id"] = read_ids[
@@ -1043,7 +1463,7 @@ def _sealed_fixture(
         initial_inputs = _inputs(
             snapshot,
             symbol=SYMBOL,
-            decision_id=DECISION_ID,
+            decision_id=decision_id,
             cluster="equity:veee",
         )
         account_evidence = RiskInputEvidence(
@@ -1065,6 +1485,10 @@ def _sealed_fixture(
         }
         adaptive_evidence["account"] = account_evidence
         adaptive_evidence["daily_pnl"] = account_evidence
+        adaptive_evidence["reservation_ledger"] = replace(
+            adaptive_evidence["reservation_ledger"],
+            content_sha256=EMPTY_ADAPTIVE_RISK_LEDGER_SHA256,
+        )
         adaptive_evidence["code_build"] = replace(
             adaptive_evidence["code_build"],
             content_sha256=identity.code_build_sha256,
@@ -1109,8 +1533,8 @@ def _sealed_fixture(
         )
         adaptive_request = _request(
             symbol=SYMBOL,
-            decision_id=DECISION_ID,
-            client_order_id=DECISION_ID,
+            decision_id=decision_id,
+            client_order_id=decision_id,
             cluster="equity:veee",
             snapshot=snapshot,
             inputs=adaptive_inputs,
@@ -1129,7 +1553,7 @@ def _sealed_fixture(
             authority_source="captured_db_paper",
             generation=identity.generation,
             symbol=SYMBOL,
-            decision_id=DECISION_ID,
+            decision_id=decision_id,
             decision_at=decision_at,
             input_prefix_root_sha256=prefix_root,
             decision_checkpoint_sha256=None,
@@ -1212,7 +1636,7 @@ def _sealed_fixture(
         )
         final_receipt = CaptureReadReceipt(
             read_id=str(uuid.uuid4()),
-            decision_id=DECISION_ID,
+            decision_id=decision_id,
             identity_sha256=identity.identity_sha256,
             stream=CaptureStream.IQFEED_PRINT,
             provider="iqfeed",
@@ -1456,7 +1880,7 @@ def _sealed_fixture(
     )
     checkpoint = CaptureDecisionCheckpoint(
         identity_sha256=identity.identity_sha256,
-        decision_id=DECISION_ID,
+        decision_id=decision_id,
         symbol=SYMBOL,
         decision_at=decision_at,
         available_at=decision_event.clocks.available_at,
@@ -1503,6 +1927,7 @@ def _sealed_fixture(
         )
 
     if not no_order:
+        assert intent is not None
         broker_authority_sha256 = (
             "b" * 64
             if bad_broker_authority
@@ -1511,12 +1936,12 @@ def _sealed_fixture(
             )
         )
         submitted_lifecycle = CaptureBrokerOrderLifecycle(
-            decision_id=DECISION_ID,
+            decision_id=decision_id,
             order_intent_sha256=intent.order_intent_sha256,
             client_order_id=client_order_id,
             client_order_id_sha256=intent.client_order_id_sha256,
             transition=CaptureBrokerTransition.SUBMITTED,
-            order_quantity=100,
+            order_quantity=int(intent.quantity),
             cumulative_filled_quantity=0,
             last_fill_quantity=0,
             prior_transition_event_sha256=None,
@@ -1539,12 +1964,12 @@ def _sealed_fixture(
             payload=submitted_lifecycle.to_dict(),
         )
         canceled_lifecycle = CaptureBrokerOrderLifecycle(
-            decision_id=DECISION_ID,
+            decision_id=decision_id,
             order_intent_sha256=intent.order_intent_sha256,
             client_order_id=client_order_id,
             client_order_id_sha256=intent.client_order_id_sha256,
             transition=CaptureBrokerTransition.CANCELED,
-            order_quantity=100,
+            order_quantity=int(intent.quantity),
             cumulative_filled_quantity=0,
             last_fill_quantity=0,
             prior_transition_event_sha256=broker.event_sha256,
@@ -1650,7 +2075,7 @@ def _sealed_fixture(
         decision_at=decision_at,
         exit_end_at=exit_at,
         required_streams=replay_streams,
-        decision_id=DECISION_ID,
+        decision_id=decision_id,
         decision_checkpoint_sha256=checkpoint.checkpoint_sha256,
         required_read_ids=frozenset(read_ids.values()),
         symbol=SYMBOL,
@@ -1874,6 +2299,827 @@ def test_sealed_scanner_snapshot_rejects_profile_or_ttl_drift(
 
     adapter.abort_decision_read_plan()
     assert adapter.rejected_provider_request_count == 1
+    assert adapter.network_attempt_count == 0
+
+
+def test_sealed_ortex_snapshot_reproduces_rank_without_provider_fallback(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    fixture = _sealed_fixture(tmp_path, ortex_snapshot=True)
+    monkeypatch.setattr(rv3, "grade_replay_coverage", _complete_grade)
+
+    def forbidden_provider(*_args, **_kwargs):
+        raise AssertionError("sealed Ortex replay reached a provider or current DB")
+
+    monkeypatch.setattr(socket, "create_connection", forbidden_provider)
+    adapter = rv3.SealedReplayV3InputAdapter(
+        fixture.capture,
+        fixture.manifest,
+        fixture.request,
+    )
+    checkpoint = fixture.manifest.decision_checkpoints[0]
+    adapter.advance_to_frontier(
+        checkpoint.decision_at,
+        sequence_at_most=checkpoint.input_prefix_sequence,
+    )
+    decision_tick = adapter.decision_tick_for_frontier(
+        checkpoint.decision_at,
+        checkpoint.input_prefix_sequence,
+    )
+    assert decision_tick is not None
+    ortex_event = next(
+        event
+        for event in fixture.capture.events
+        if event.stream is CaptureStream.ORTEX_SNAPSHOT
+    )
+    member = ortex_event.payload["members"][0]
+
+    adapter.begin_decision_read_plan(decision_tick)
+    adapter.ohlcv_provider(SYMBOL, interval="1m", period="1d")
+    adapter.account_equity_provider(prefer_equity=True)
+    replayed = adapter.ortex_snapshot_provider(
+        SYMBOL,
+        batch_members_sha256=ortex_event.payload["members_sha256"],
+    )
+    adapter.complete_decision_read_plan()
+
+    assert replayed["short_mechanics_sha256"] == (
+        member["short_mechanics_sha256"]
+    )
+    assert replayed["rank_pct"] == pytest.approx(1.0)
+    assert replayed["short_mechanics"]["short_interest_pct"] == pytest.approx(0.235)
+    assert "raw_response_b64" not in json.dumps(
+        replayed["short_mechanics"],
+        sort_keys=True,
+    )
+    assert "endpoints" not in replayed["short_mechanics"]
+    assert adapter.rejected_provider_request_count == 0
+    assert adapter.network_attempt_count == 0
+
+
+def test_sealed_general_adaptive_entry_rebuilds_exact_captured_paper_request(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    decision_id = "chili_ml_e_991_parity_deadbeef"
+    fixture = _sealed_fixture(
+        tmp_path,
+        ortex_snapshot=True,
+        adaptive_entry=True,
+        decision_id=decision_id,
+    )
+    monkeypatch.setattr(rv3, "grade_replay_coverage", _complete_grade)
+    adapter = rv3.SealedReplayV3InputAdapter(
+        fixture.capture,
+        fixture.manifest,
+        fixture.request,
+    )
+    checkpoint = fixture.manifest.decision_checkpoints[0]
+    adapter.advance_to_frontier(
+        checkpoint.decision_at,
+        sequence_at_most=checkpoint.input_prefix_sequence,
+    )
+    decision_tick = adapter.decision_tick_for_frontier(
+        checkpoint.decision_at,
+        checkpoint.input_prefix_sequence,
+    )
+    assert decision_tick is not None
+    assert len(decision_tick.adaptive_order_artifacts) == 1
+    expected = load_adaptive_risk_reservation_request(
+        decision_tick.adaptive_order_artifacts[0].reservation_request
+    )
+
+    adapter.begin_decision_read_plan(decision_tick)
+    adapter.ohlcv_provider(SYMBOL, interval="1m", period="1d")
+    adapter.account_equity_provider(prefer_equity=True)
+    replayed_ortex = adapter.consume_ortex_selection_for_active_decision(
+        SYMBOL
+    )
+    assert replayed_ortex["complete"] is True
+    material = adapter.prepare_adaptive_risk_material_for_active_decision()
+    built = build_adaptive_risk_request(
+        material.source,
+        client_order_id=decision_id,
+        entry_limit_price=expected.entry_limit_price,
+        sealed_replay_attestation=material.sealed_replay_attestation,
+    )
+    adapter.complete_decision_read_plan()
+
+    assert built.request.request_sha256 == expected.request_sha256
+    assert built.resolution.decision_packet_sha256 == (
+        decision_tick.output.order_intents[0].adaptive_decision_sha256
+    )
+    assert built.resolution.economic_resolution_sha256 == (
+        decision_tick.output.order_intents[0].adaptive_resolution_sha256
+    )
+    assert built.resolution.quantity_shares == (
+        decision_tick.output.order_intents[0].quantity
+    )
+    assert adapter.network_attempt_count == 0
+
+
+class _RecordedAlpacaReplayMock(MockBrokerAdapter):
+    """Minimal Alpaca identity/BBO surface around the sealed lifecycle mock."""
+
+    def __init__(
+        self,
+        *,
+        account_id: str,
+        bbo_content_sha256: str,
+    ) -> None:
+        super().__init__(
+            freshness_mode="sim",
+            account_identity=account_id,
+        )
+        self._paper_account_id = account_id
+        self._bbo_content_sha256 = bbo_content_sha256
+        self.place_limit_calls: list[dict[str, object]] = []
+
+    def bind_account_id(self, account_id: str) -> bool:
+        return str(account_id or "").strip() == self._paper_account_id
+
+    def get_account_snapshot(self) -> dict[str, object]:
+        return {
+            "ok": True,
+            "paper": True,
+            "account_id": self._paper_account_id,
+            "equity": 75_000.0,
+            "last_equity": 75_000.0,
+            "buying_power": 300_000.0,
+            "status": "ACTIVE",
+        }
+
+    def get_market_clock_snapshot(self) -> dict[str, object]:
+        now = self._clock.replace(tzinfo=UTC)
+        return {
+            "ok": True,
+            "paper": True,
+            "is_open": True,
+            "timestamp": now.isoformat(),
+            "next_close": (now + timedelta(hours=7)).isoformat(),
+        }
+
+    def get_execution_bbo(
+        self,
+        product_id: str,
+        *,
+        max_age_seconds: float,
+    ):
+        del max_age_seconds
+        ticker, freshness = self.get_best_bid_ask(product_id)
+        assert ticker is not None
+        observed_at = self._clock.replace(tzinfo=UTC).isoformat()
+        return (
+            replace(
+                ticker,
+                raw={
+                    "feed": "sealed_iqfeed_nbbo",
+                    "tape_row_id": "sealed-row-1",
+                    "provider_event_at_utc": observed_at,
+                    "received_at_utc": observed_at,
+                    "available_at_utc": observed_at,
+                    "capture_event_sha256": "e" * 64,
+                    "capture_content_sha256": self._bbo_content_sha256,
+                    "capture_sequence": 1,
+                    "timestamp_basis": "provider_quote_event_at",
+                },
+            ),
+            freshness,
+        )
+
+    def list_positions(self):
+        return [], self._freshness()
+
+    def list_open_orders(self, *, strict: bool = False, **kwargs):
+        del strict
+        return super().list_open_orders(**kwargs)
+
+    def place_limit_order_gtc(self, **kwargs):
+        self.place_limit_calls.append(dict(kwargs))
+        return super().place_limit_order_gtc(**kwargs)
+
+
+@pytest.mark.parametrize(
+    ("squeeze_sizeup_enabled", "kelly_conviction_enabled"),
+    ((False, False), (True, True)),
+)
+def test_sealed_real_alpaca_step_keeps_adaptive_qty_and_requires_durable_admission(
+    db,
+    tmp_path,
+    monkeypatch,
+    squeeze_sizeup_enabled: bool,
+    kelly_conviction_enabled: bool,
+) -> None:
+    """Drive the real Alpaca FSM to the captured-admission authority boundary.
+
+    The sealed decision contains the pure adaptive request/claim/packet, but not
+    the later committed reservation UUID or captured-admission record.  Replay
+    must reproduce the exact economics under either flag posture and then stop
+    before PLACE; current operational DB state may never be used to invent that
+    missing lifecycle authority.
+    """
+
+    account_id = "3e0776af-76cd-4afd-8fe1-f2ee8dc6242f"
+    seed = rv3.seed_replay_session(
+        db,
+        rv3.RecordedArm(
+            symbol=SYMBOL,
+            live_eligible_at_utc=(BASE - timedelta(seconds=30)).isoformat(),
+        ),
+        execution_family="alpaca_spot",
+        state=lr.STATE_LIVE_PENDING_ENTRY,
+    )
+    session = db.get(TradingAutomationSession, seed.session_id)
+    assert session is not None
+    cid = lr._entry_client_order_id(
+        session_id=session.id,
+        correlation_id=session.correlation_id,
+        trade_cycles=0,
+        stopout_cycles=0,
+        place_n=1,
+    )
+    fixture = _sealed_fixture(
+        tmp_path,
+        ortex_snapshot=True,
+        microstructure_trade_flow=True,
+        microstructure_operation=CaptureMicrostructureOperation.FLOW_SLOPE,
+        adaptive_entry=True,
+        decision_id=cid,
+        adaptive_account_id=account_id,
+    )
+    decision_event = next(
+        event
+        for event in fixture.capture.events
+        if event.stream is CaptureStream.FSM_DECISION
+    )
+    expected_request = load_adaptive_risk_reservation_request(
+        decision_event.payload["adaptive_order_artifacts"][0][
+            "reservation_request"
+        ]
+    )
+    expected_intent = CaptureOrderIntent.from_dict(
+        decision_event.payload["decision_output"]["order_intents"][0]
+    )
+
+    checkpoint = fixture.manifest.decision_checkpoints[0]
+    confirmed_at = checkpoint.decision_at.isoformat()
+    expires_at = (checkpoint.decision_at + timedelta(hours=2)).isoformat()
+    arm_token = f"sealed-replay-arm-{session.id}"
+    claim_token = f"arm-{arm_token}"
+    snapshot = dict(session.risk_snapshot_json or {})
+    live_exec = dict(snapshot.get(lr.KEY_LIVE_EXEC) or {})
+    live_exec.update(
+        {
+            "entry_submitted": False,
+            "side_long": True,
+            "effective_max_hold_seconds": 3_600,
+            "structural_stop_price": 9.50,
+            "entry_trigger_reason": "primary_entry",
+            "entry_trigger_debug": {},
+        }
+    )
+    snapshot.update(
+        {
+            lr.KEY_LIVE_EXEC: live_exec,
+            "arm_token": arm_token,
+            "expires_at_utc": expires_at,
+            "arm_confirmed_at_utc": confirmed_at,
+            "alpaca_account_scope": "alpaca:paper",
+            "alpaca_account_id": account_id,
+            "alpaca_symbol_claim_token": claim_token,
+            "confirmed_arm_generation": {
+                "version": 1,
+                "session_id": int(session.id),
+                "arm_token": arm_token,
+                "expires_at_utc": expires_at,
+                "alpaca_symbol_claim_token": claim_token,
+                "alpaca_account_scope": "alpaca:paper",
+                "alpaca_account_id": account_id,
+                "confirmed_at_utc": confirmed_at,
+            },
+        }
+    )
+    session.risk_snapshot_json = snapshot
+    db.add(session)
+    claim = acquire_action_claim(
+        db,
+        symbol=SYMBOL,
+        action="entry",
+        claim_token=claim_token,
+        owner_session_id=int(session.id),
+        metadata={
+            "stage": "live_arm_reserved",
+            "variant_id": int(session.variant_id),
+            "alpaca_account_id": account_id,
+        },
+        account_scope="alpaca:paper",
+    )
+    assert claim.get("ok") is True, claim
+    db.commit()
+
+    monkeypatch.setattr(rv3, "grade_replay_coverage", _complete_grade)
+    monkeypatch.setattr(
+        settings,
+        "chili_alpaca_expected_account_id",
+        account_id,
+        raising=False,
+    )
+    monkeypatch.setattr(settings, "chili_alpaca_paper", True, raising=False)
+    monkeypatch.setattr(
+        settings,
+        "chili_momentum_live_runner_enabled",
+        True,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        settings,
+        "brain_enable_decision_ledger",
+        False,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        settings,
+        "brain_decision_packet_required_for_runners",
+        False,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        settings,
+        "chili_momentum_decouple_watching_enabled",
+        False,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        settings,
+        "chili_momentum_squeeze_entry_sizeup_enabled",
+        squeeze_sizeup_enabled,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        settings,
+        "chili_momentum_kelly_conviction_enabled",
+        kelly_conviction_enabled,
+        raising=False,
+    )
+    monkeypatch.setattr(lr, "_venue_broker_connected", lambda _family: True)
+    monkeypatch.setattr(
+        lr,
+        "runner_boundary_risk_ok",
+        lambda *_args, **_kwargs: (True, {"allowed": True}),
+    )
+    monkeypatch.setattr(lr, "is_kill_switch_active", lambda: False)
+    monkeypatch.setattr(
+        lr,
+        "check_autopilot_entry_gate",
+        lambda *_args, **_kwargs: {"allowed": True},
+    )
+    monkeypatch.setattr(
+        lr,
+        "_entry_flow_veto",
+        lambda *_args, **_kwargs: False,
+    )
+    neutral_admission_flow_reads: list[str] = []
+
+    def neutral_ofi_microprice(*_args, **_kwargs):
+        neutral_admission_flow_reads.append("ofi_microprice")
+        return None, None
+
+    def neutral_trade_flow(*_args, **_kwargs):
+        neutral_admission_flow_reads.append("trade_flow")
+        return None
+
+    monkeypatch.setattr(
+        "app.services.trading.momentum_neural.pipeline."
+        "_live_ofi_microprice",
+        neutral_ofi_microprice,
+    )
+    monkeypatch.setattr(
+        "app.services.trading.momentum_neural.pipeline._live_trade_flow",
+        neutral_trade_flow,
+    )
+    monkeypatch.setattr(
+        lr,
+        "_entry_extension_veto",
+        lambda *_args, **_kwargs: False,
+    )
+    monkeypatch.setattr(
+        lr,
+        "round_number_entry_context",
+        lambda *_args, **_kwargs: (True, "ok", {}),
+    )
+    monkeypatch.setattr(
+        lr,
+        "_l2_entry_confirm",
+        lambda *_args, **_kwargs: ("confirm", {}),
+    )
+    monkeypatch.setattr(
+        market_profile,
+        "market_session_now",
+        lambda *_args, **_kwargs: "regular",
+    )
+    monkeypatch.setattr(
+        market_profile,
+        "schedule_window_now",
+        lambda *_args, **_kwargs: "hot",
+    )
+    monkeypatch.setattr(
+        market_profile,
+        "is_tradeable_now",
+        lambda *_args, **_kwargs: True,
+    )
+    monkeypatch.setattr(
+        "app.services.trading.momentum_neural.rail_governor.acquire_rail",
+        lambda _settings, *, lane_key: SimpleNamespace(
+            acquired=True,
+            waited_s=0.0,
+            refill_rps=2.0,
+        ),
+    )
+    final_breaker_phases: list[str] = []
+
+    def captured_final_breaker(_session, *, phase: str):
+        final_breaker_phases.append(phase)
+        return True, {
+            "schema_version": "chili.alpaca-final-breaker-admission.v1",
+            "phase": phase,
+            "execution_family": "alpaca_spot",
+            "allowed": True,
+            "breaker": None,
+            "reason": None,
+            "checks": [{"id": "sealed_test_authority", "ok": True}],
+        }
+
+    monkeypatch.setattr(
+        lr,
+        "_final_alpaca_financial_breaker_admission",
+        captured_final_breaker,
+    )
+    current_ortex_reads: list[object] = []
+
+    def forbidden_current_ortex(*args, **kwargs):
+        current_ortex_reads.append((args, kwargs))
+        raise AssertionError("sealed ReplayV3 reached current Ortex DB state")
+
+    monkeypatch.setattr(
+        "app.services.trading.momentum_neural.pipeline."
+        "resolve_ortex_batch_manifest_from_hub",
+        forbidden_current_ortex,
+    )
+    built_requests: list[object] = []
+    real_builder = lr.build_adaptive_risk_request
+
+    def counted_builder(*args, **kwargs):
+        built = real_builder(*args, **kwargs)
+        built_requests.append(built)
+        return built
+
+    monkeypatch.setattr(lr, "build_adaptive_risk_request", counted_builder)
+    precommit_blocks: list[str] = []
+    real_precommit_block = lr._adaptive_alpaca_precommit_block
+
+    def counted_precommit_block(*args, **kwargs):
+        result = real_precommit_block(*args, **kwargs)
+        precommit_blocks.append(str(result.get("error") or ""))
+        return result
+
+    monkeypatch.setattr(
+        lr,
+        "_adaptive_alpaca_precommit_block",
+        counted_precommit_block,
+    )
+    bbo_evidence = expected_request.inputs.evidence["bbo"]
+    mock = _RecordedAlpacaReplayMock(
+        account_id=account_id,
+        bbo_content_sha256=bbo_evidence.content_sha256,
+    )
+    adapter = rv3.SealedReplayV3InputAdapter(
+        fixture.capture,
+        fixture.manifest,
+        fixture.request,
+    )
+    driver = rv3.ReplayV3Driver.from_sealed_inputs(
+        db,
+        seed,
+        mock=mock,
+        sealed_inputs=adapter,
+    )
+    driver._sealed_run_active = True
+    driver._run_network_guard_active = True
+
+    with pytest.raises(
+        rv3.SealedReplayInputError,
+        match="FSM state differs from captured decision output",
+    ):
+        driver._advance_sealed_boundary(
+            checkpoint.decision_at,
+            sequence_at_most=checkpoint.input_prefix_sequence,
+        )
+
+    assert len(built_requests) == 1
+    built = built_requests[0]
+    assert built.request.request_sha256 == expected_request.request_sha256
+    assert built.resolution.quantity_shares == expected_intent.quantity
+    assert built.request.client_order_id == cid
+    assert float(built.request.entry_limit_price) == pytest.approx(
+        float(expected_intent.limit_price)
+    )
+    assert mock.place_limit_calls == []
+    assert mock.recorded_request_violations == ()
+    assert precommit_blocks == ["adaptive_risk_reservation_not_precommitted"]
+    assert neutral_admission_flow_reads == [
+        "ofi_microprice",
+        "trade_flow",
+    ]
+    assert final_breaker_phases == ["pre_reservation"]
+    assert current_ortex_reads == []
+    assert adapter.network_attempt_count == 0
+    # This deliberately diagnostic fixture reaches the pre-commit boundary
+    # before the captured output diverges.  Its real FSM also makes two
+    # provider reads that are absent from the fixture; the sealed adapter
+    # rejects both locally and never falls back to the network.
+    assert adapter.rejected_provider_request_count == 2
+
+
+def test_sealed_driver_consumes_ortex_at_live_guard_before_economics(
+    db,
+    tmp_path,
+    monkeypatch,
+) -> None:
+    fixture = _sealed_fixture(
+        tmp_path,
+        ortex_snapshot=True,
+        no_order=True,
+    )
+    monkeypatch.setattr(rv3, "grade_replay_coverage", _complete_grade)
+    adapter = rv3.SealedReplayV3InputAdapter(
+        fixture.capture,
+        fixture.manifest,
+        fixture.request,
+    )
+    seed = rv3.seed_replay_session(
+        db,
+        rv3.RecordedArm(
+            symbol=SYMBOL,
+            live_eligible_at_utc=(BASE - timedelta(seconds=30)).isoformat(),
+        ),
+        execution_family="robinhood_spot",
+    )
+    driver = rv3.ReplayV3Driver.from_sealed_inputs(
+        db,
+        seed,
+        mock=MockBrokerAdapter(freshness_mode="sim"),
+        sealed_inputs=adapter,
+    )
+    driver._sealed_run_active = True
+    driver._run_network_guard_active = True
+    checkpoint = fixture.manifest.decision_checkpoints[0]
+    decision_tick = adapter.decision_tick_for_frontier(
+        checkpoint.decision_at,
+        checkpoint.input_prefix_sequence,
+    )
+    assert decision_tick is not None
+    observed: dict[str, object] = {}
+
+    class _NoCurrentDb:
+        def query(self, *_args, **_kwargs):
+            raise AssertionError(
+                "sealed Ortex live guard reached current DB"
+            )
+
+    def bounded_real_tick_inputs(t, quote):
+        adapter.ohlcv_provider(SYMBOL, interval="1m", period="1d")
+        adapter.account_equity_provider(prefer_equity=True)
+        readiness: dict[str, object] = {
+            "extra": {"strong_catalyst_symbols": [SYMBOL]}
+        }
+        assert (
+            lr._live_ortex_entry_readiness_reason(
+                _NoCurrentDb(),  # type: ignore[arg-type]
+                execution_readiness=readiness,
+                symbol=SYMBOL,
+                read_at=t,
+            )
+            is None
+        )
+        projected = lr._overlay_replay_ortex_selection(
+            readiness,
+            symbol=SYMBOL,
+        )
+        signal = projected["extra"]["ross_signals"][SYMBOL]
+        observed["squeeze_fuel_pct"] = signal["squeeze_fuel_pct"]
+        observed["rank_pct"] = signal["squeeze_fuel_rank_pct"]
+        observed["receipt"] = signal["ortex_replay_receipt"]
+        return rv3.TickTrace(
+            ts=t,
+            state_before=decision_tick.output.fsm_state,
+            state_after=decision_tick.output.fsm_state,
+            result={},
+        )
+
+    monkeypatch.setattr(driver, "step", bounded_real_tick_inputs)
+    trace = driver._advance_sealed_boundary(
+        checkpoint.decision_at,
+        sequence_at_most=checkpoint.input_prefix_sequence,
+    )
+
+    expected_ortex_event = next(
+        event
+        for event in fixture.capture.events
+        if event.stream is CaptureStream.ORTEX_SNAPSHOT
+    )
+    assert trace is not None
+    assert observed["squeeze_fuel_pct"] == pytest.approx(
+        expected_ortex_event.payload["members"][0]["squeeze_fuel_pct"]
+    )
+    assert observed["rank_pct"] == pytest.approx(1.0)
+    assert observed["receipt"]["batch_members_sha256"]
+    assert adapter.rejected_provider_request_count == 0
+    assert adapter.network_attempt_count == 0
+
+
+@pytest.mark.parametrize("mismatch", ["symbol", "batch_hash"])
+def test_sealed_ortex_guard_rejects_exact_receipt_mismatch_without_fallback(
+    tmp_path,
+    monkeypatch,
+    mismatch,
+) -> None:
+    fixture = _sealed_fixture(tmp_path, ortex_snapshot=True)
+    monkeypatch.setattr(rv3, "grade_replay_coverage", _complete_grade)
+    adapter = rv3.SealedReplayV3InputAdapter(
+        fixture.capture,
+        fixture.manifest,
+        fixture.request,
+    )
+    checkpoint = fixture.manifest.decision_checkpoints[0]
+    adapter.advance_to_frontier(
+        checkpoint.decision_at,
+        sequence_at_most=checkpoint.input_prefix_sequence,
+    )
+    tick = adapter.decision_tick_for_frontier(
+        checkpoint.decision_at,
+        checkpoint.input_prefix_sequence,
+    )
+    assert tick is not None
+    adapter.begin_decision_read_plan(tick)
+    adapter.ohlcv_provider(SYMBOL, interval="1m", period="1d")
+    adapter.account_equity_provider(prefer_equity=True)
+
+    def provider(symbol: str):
+        return adapter.ortex_snapshot_provider(
+            "WRONG" if mismatch == "symbol" else symbol,
+            batch_members_sha256=(
+                "f" * 64
+                if mismatch == "batch_hash"
+                else str(
+                    tick.query_read_plan[-1].receipt.query[
+                        "batch_members_sha256"
+                    ]
+                )
+            ),
+        )
+
+    try:
+        with lr.replay_ortex_selection_provider(provider):
+            with pytest.raises(
+                rv3.SealedReplayInputError,
+                match="provider call differs from its exact receipt",
+            ):
+                lr._live_ortex_entry_readiness_reason(
+                    object(),  # type: ignore[arg-type]
+                    execution_readiness={},
+                    symbol=SYMBOL,
+                    read_at=checkpoint.decision_at,
+                )
+    finally:
+        adapter.abort_decision_read_plan()
+
+    assert adapter.rejected_provider_request_count == 1
+    assert adapter.network_attempt_count == 0
+
+
+def test_sealed_ortex_guard_missing_receipt_fails_without_current_db(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    fixture = _sealed_fixture(tmp_path, ortex_snapshot=False)
+    monkeypatch.setattr(rv3, "grade_replay_coverage", _complete_grade)
+    adapter = rv3.SealedReplayV3InputAdapter(
+        fixture.capture,
+        fixture.manifest,
+        fixture.request,
+    )
+    checkpoint = fixture.manifest.decision_checkpoints[0]
+    adapter.advance_to_frontier(
+        checkpoint.decision_at,
+        sequence_at_most=checkpoint.input_prefix_sequence,
+    )
+    tick = adapter.decision_tick_for_frontier(
+        checkpoint.decision_at,
+        checkpoint.input_prefix_sequence,
+    )
+    assert tick is not None
+    adapter.begin_decision_read_plan(tick)
+    adapter.ohlcv_provider(SYMBOL, interval="1m", period="1d")
+    adapter.account_equity_provider(prefer_equity=True)
+
+    class _NoCurrentDb:
+        def query(self, *_args, **_kwargs):
+            raise AssertionError("sealed replay reached current DB")
+
+    try:
+        with lr.replay_ortex_selection_provider(
+            adapter.consume_ortex_selection_for_active_decision
+        ):
+            with pytest.raises(
+                rv3.SealedReplayInputError,
+                match="receipt is missing from the active read plan",
+            ):
+                lr._live_ortex_entry_readiness_reason(
+                    _NoCurrentDb(),  # type: ignore[arg-type]
+                    execution_readiness={},
+                    symbol=SYMBOL,
+                    read_at=checkpoint.decision_at,
+                )
+    finally:
+        adapter.abort_decision_read_plan()
+
+    assert adapter.rejected_provider_request_count == 1
+    assert adapter.network_attempt_count == 0
+
+
+def test_sealed_ortex_explicit_off_consumes_no_receipt_and_keeps_economics(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    fixture = _sealed_fixture(tmp_path, ortex_snapshot=False)
+    monkeypatch.setattr(rv3, "grade_replay_coverage", _complete_grade)
+    monkeypatch.setattr(
+        lr.settings,
+        "chili_momentum_squeeze_fuel_tilt_enabled",
+        False,
+    )
+    adapter = rv3.SealedReplayV3InputAdapter(
+        fixture.capture,
+        fixture.manifest,
+        fixture.request,
+    )
+    checkpoint = fixture.manifest.decision_checkpoints[0]
+    adapter.advance_to_frontier(
+        checkpoint.decision_at,
+        sequence_at_most=checkpoint.input_prefix_sequence,
+    )
+    tick = adapter.decision_tick_for_frontier(
+        checkpoint.decision_at,
+        checkpoint.input_prefix_sequence,
+    )
+    assert tick is not None
+    adapter.begin_decision_read_plan(tick)
+    adapter.ohlcv_provider(SYMBOL, interval="1m", period="1d")
+    adapter.account_equity_provider(prefer_equity=True)
+    provider_calls = 0
+
+    def forbidden_provider(_symbol: str):
+        nonlocal provider_calls
+        provider_calls += 1
+        raise AssertionError("explicit OFF consumed an Ortex receipt")
+
+    class _NoCurrentDb:
+        def query(self, *_args, **_kwargs):
+            raise AssertionError("explicit OFF reached current DB")
+
+    readiness = {
+        "spread_bps": 8.0,
+        "extra": {
+            "ross_signals": {
+                SYMBOL: {
+                    "ticker": SYMBOL,
+                    "direction": "long",
+                }
+            }
+        },
+    }
+    before = json.dumps(readiness, sort_keys=True)
+    with lr.replay_ortex_selection_provider(forbidden_provider):
+        assert (
+            lr._live_ortex_entry_readiness_reason(
+                _NoCurrentDb(),  # type: ignore[arg-type]
+                execution_readiness=readiness,
+                symbol=SYMBOL,
+                read_at=checkpoint.decision_at,
+            )
+            is None
+        )
+        projected = lr._overlay_replay_ortex_selection(
+            readiness,
+            symbol=SYMBOL,
+        )
+        assert projected is readiness
+    adapter.complete_decision_read_plan()
+
+    assert provider_calls == 0
+    assert json.dumps(projected, sort_keys=True) == before
+    assert adapter.rejected_provider_request_count == 0
     assert adapter.network_attempt_count == 0
 
 
@@ -2143,8 +3389,6 @@ def test_sealed_first_dip_final_frontier_replays_exact_adaptive_and_tape_lineage
             ),
         )
 
-    adapter.ohlcv_provider(SYMBOL, interval="1m", period="1d")
-    adapter.account_equity_provider(prefer_equity=True)
     adapter.complete_decision_read_plan()
 
 
