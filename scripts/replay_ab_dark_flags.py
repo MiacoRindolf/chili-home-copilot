@@ -419,7 +419,11 @@ def _naive(t):
 
 
 def load_prod():
-    eng = create_engine(PROD)
+    # -c max_parallel_workers_per_gather=0: ang docker postgres ay may 64MB /dev/shm at
+    # ang parallel gather sa golden tables ay humihingi ng 57-67MB DSM segments (DiskFull,
+    # 2026-07-26 VRAX/VTAK/JLHL). Index-range reads ito — walang halaga ang parallelism.
+    eng = create_engine(
+        PROD, connect_args={"options": "-c max_parallel_workers_per_gather=0"})
     probe = eng.raw_connection()
     try:
         verify_connected_endpoint(probe, SOURCE_IDENTITY)
@@ -757,7 +761,12 @@ def run_arm(label, grid, ticks, flags):
             return r
         _lr2.grind_mode_decision = _gmd_spy
 
-    eng = create_engine(SIM)
+    # Parehong NaN/Inf->null JSON serializer ng app engine — ang FSM sink writes ay
+    # dumadaan DITO, at tinatanggihan ng Postgres JSONB ang bare NaN token (ang CLRO
+    # 07-07 vol_ratio crash x3 bago ito). Ang #953 fail-closed lever ang nag-aalis ng
+    # NaN sa gates; ito ang backstop sa data layer.
+    from app.db import _json_dumps_nan_safe as _nan_safe_dumps
+    eng = create_engine(SIM, json_serializer=_nan_safe_dumps)
     _sink_probe = eng.raw_connection()
     try:
         verify_connected_endpoint(_sink_probe, SINK_IDENTITY)
@@ -823,9 +832,12 @@ def run_arm(label, grid, ticks, flags):
     # tuples + stale stats, which flips the per-tick as-of reads from the btree to a
     # lossy BRIN bitmap (118ms -> 6s per call = a multi-hour window). Autocommit conn
     # (VACUUM can't run inside a transaction block).
+    # PARALLEL 0: ang parallel vacuum workers ay nag-a-allocate ng DSM sa 64MB /dev/shm
+    # ng docker postgres — ang 500k+-row mirrors ay humingi ng 57-67MB at namatay sa
+    # DiskFull (2026-07-26). Serial vacuum = walang DSM, sapat ang bilis per-run.
     with eng.connect().execution_options(isolation_level="AUTOCOMMIT") as _vc:
-        _vc.execute(text("VACUUM ANALYZE iqfeed_trade_ticks"))
-        _vc.execute(text("VACUUM ANALYZE momentum_nbbo_spread_tape"))
+        _vc.execute(text("VACUUM (ANALYZE, PARALLEL 0) iqfeed_trade_ticks"))
+        _vc.execute(text("VACUUM (ANALYZE, PARALLEL 0) momentum_nbbo_spread_tape"))
 
     # VALIDATED parity-fixture mock config ($0.05 fidelity, replay_parity.py:219): resting
     # limit orders (fill only when the recorded NBBO crosses), conservative adverse-side fills,
