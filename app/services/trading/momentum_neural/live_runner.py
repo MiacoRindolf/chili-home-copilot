@@ -6563,8 +6563,11 @@ def _emit(
     sess: TradingAutomationSession,
     event_type: str,
     payload: dict[str, Any],
-) -> None:
-    append_trading_automation_event(
+) -> TradingAutomationEvent:
+    # Returns the flushed event (id available) so fill emitters can bind the
+    # entry->exit lineage (source_event_id) the replay scorecard's Label A
+    # contract requires. Every existing caller ignores the return value.
+    return append_trading_automation_event(
         db,
         sess.id,
         event_type,
@@ -16599,6 +16602,20 @@ def _complete_confirmed_live_exit(
         payload["fees_usd"] = fees_usd
     if sell_result is not None:
         payload["sell_result"] = sell_result
+    # FILL-LINEAGE (E1): the five fields the sealed scorecard's canonical-exit
+    # fill-clock contract requires (normalize_sink_fill_event) — quantity,
+    # order_id, filled_at_utc (tz-aware window time under the replay clock),
+    # entry_filled_at_utc + source_event_id stashed at the entry fill. Absent
+    # lineage (older sessions) leaves the keys None and the consumer fails
+    # closed per-trade, exactly as before.
+    payload["quantity"] = float(quantity)
+    payload["order_id"] = (
+        le.get("exit_order_id")
+        or ((sell_result or {}).get("order_id") if isinstance(sell_result, dict) else None)
+    )
+    payload["filled_at_utc"] = _utcnow_aware().isoformat()
+    payload["entry_filled_at_utc"] = le.get("entry_filled_at_utc")
+    payload["source_event_id"] = le.get("entry_fill_event_id")
     _emit(db, sess, "live_exit_filled", payload)
     # MFE SHADOW-LOGGER (Phase 1, log-only, ZERO behavior change): record the realized Maximum
     # Favorable Excursion in R-units per trade, keyed by setup family, so the exit target can
@@ -28746,7 +28763,14 @@ def tick_live_session(
                     target_px=float(target_px), filled=float(filled), prod=prod,
                 )
                 _safe_transition(db, sess, STATE_LIVE_ENTERED)
-                _emit(
+                # FILL-LINEAGE (E1): entry_filled_at_utc is tz-AWARE window time under
+                # the replay clock (prod = real wall clock — byte-identical instant);
+                # trigger_reason gives the scorecard 100% per-setup attribution; the
+                # flushed event id becomes the exit's source_event_id so the sealed
+                # scorecard's entry<->exit cycle-lineage contract binds without any
+                # positional inference.
+                _entry_filled_at_utc = _utcnow_aware().isoformat()
+                _entry_fill_event = _emit(
                     db,
                     sess,
                     "live_entry_filled",
@@ -28754,8 +28778,14 @@ def tick_live_session(
                         "order_id": no.order_id,
                         "avg": avg,
                         "filled_size": filled,
+                        "quantity": float(filled),
+                        "entry_filled_at_utc": _entry_filled_at_utc,
+                        "trigger_reason": le.get("entry_trigger_reason"),
                     },
                 )
+                le["entry_fill_event_id"] = int(_entry_fill_event.id)
+                le["entry_filled_at_utc"] = _entry_filled_at_utc
+                _commit_le(sess, le)
                 # DEAD-MAN broker-side stop (2026-07-10, the GMM -$16k orphan incident):
                 # rest a GTC STOP at the BROKER one risk-buffer BELOW the software stop.
                 # The FSM stays the primary manager (its exits fire first — the dead-man
