@@ -17,11 +17,12 @@ Replay fills and post-session windows are not broker-executable certification.
 Every dollar section is for same-input diagnostic deltas only.
 
     python scripts/replay_scorecard.py \
-        --results D:/CHILI-Docker/chili-data/replay_batch/results.jsonl \
-        --meta    D:/CHILI-Docker/chili-data/replay_batch/meta.json \
+        --results D:/CHILI-Docker/chili-data/replay_batch_policy_v3/results.jsonl \
+        --meta    D:/CHILI-Docker/chili-data/replay_batch_policy_v3/meta.json \
+        --library-manifest D:/CHILI-Docker/chili-data/replay_batch/window_manifest.json \
         --source-database-url postgresql://.../sealed_golden_archive \
-        --out-json D:/CHILI-Docker/chili-data/replay_batch/scorecard.json \
-        --out-md   D:/CHILI-Docker/chili-data/replay_batch/scorecard.md
+        --out-json D:/CHILI-Docker/chili-data/replay_batch_policy_v3/scorecard.json \
+        --out-md   D:/CHILI-Docker/chili-data/replay_batch_policy_v3/scorecard.md
 
 READ-ONLY everywhere (golden tables only when the explicit source is given). Never assumes the
 batch completed — reports attempted vs library size.
@@ -87,6 +88,18 @@ from diagnostic_replay_db import (  # noqa: E402
     query_contract_sha256,
     verify_connected_endpoint,
 )
+from replay_benchmark_batch import (  # noqa: E402
+    STRATEGY_ARM_CHOICES,
+    canonical_result_log_name,
+    execution_scope_sha256,
+    parse_driver_stdout,
+    replay_execution_scope,
+    replay_fill_inventory_is_flat,
+    require_scoreable_post_selection_arm,
+    resolve_strategy_policy,
+    result_key,
+    strategy_policy_sha256,
+)
 
 
 def _parse_finite_float(value: str) -> float:
@@ -96,11 +109,82 @@ def _parse_finite_float(value: str) -> float:
     return parsed
 
 
+def _verify_result_log_binding(results_path: str, record: dict) -> None:
+    relative = record.get("log")
+    try:
+        expected_relative = "logs/" + canonical_result_log_name(
+            str(record.get("symbol") or ""),
+            str(record.get("day") or ""),
+            str(record.get("arm") or ""),
+            str(record.get("resolved_strategy_policy_sha256") or ""),
+        )
+    except ValueError as exc:
+        raise ValueError("result log identity is invalid") from exc
+    if (
+        type(relative) is not str
+        or relative != expected_relative
+        or "\\" in relative
+        or relative.startswith("/")
+        or relative.split("/")[0] != "logs"
+        or any(part in {"", ".", ".."} for part in relative.split("/"))
+    ):
+        raise ValueError("result log path is not a confined relative path")
+    root = os.path.realpath(os.path.dirname(os.path.abspath(results_path)))
+    path = os.path.realpath(
+        os.path.join(root, *relative.split("/"))
+    )
+    if os.path.commonpath([root, path]) != root or not os.path.isfile(path):
+        raise ValueError("result log is missing or escapes its artifact root")
+    with open(path, "rb") as f:
+        raw = f.read()
+    expected_size = record.get("log_size")
+    expected_sha256 = record.get("log_sha256")
+    if (
+        type(expected_size) is not int
+        or expected_size != len(raw)
+        or re.fullmatch(r"[0-9a-f]{64}", str(expected_sha256 or "")) is None
+        or hashlib.sha256(raw).hexdigest() != expected_sha256
+    ):
+        raise ValueError("result log size/hash binding mismatch")
+    if record.get("status") != "ok":
+        return
+    try:
+        stdout = raw.decode("utf-8").split(
+            "\n===== STDERR =====\n",
+            1,
+        )[0]
+    except UnicodeDecodeError as exc:
+        raise ValueError("successful result log is not UTF-8") from exc
+    parse_status, parsed = parse_driver_stdout(
+        stdout,
+        expected_symbol=str(record.get("symbol") or ""),
+        expected_arm=str(record.get("arm") or ""),
+        expected_policy_sha256=str(
+            record.get("resolved_strategy_policy_sha256") or ""
+        ),
+        expected_execution_scope_sha256=str(
+            record.get("execution_scope_sha256") or ""
+        ),
+    )
+    if (
+        parse_status != "ok"
+        or parsed.get("pnl") != record.get("pnl")
+        or parsed.get("entries") != record.get("entries")
+        or parsed.get("exits") != record.get("exits")
+        or parsed.get("final_state") != record.get("final_state")
+        or not replay_fill_inventory_is_flat(parsed.get("fills") or [])
+        or _canonical_sha256(parsed.get("fills"))
+        != _canonical_sha256(record.get("fills"))
+    ):
+        raise ValueError("successful result does not match its driver log")
+
+
 def _load_results_snapshot(
     paths: list[str],
 ) -> tuple[list[dict], list[dict], list[dict]]:
     """Strict, idempotent dedupe on key; split ok vs non-ok."""
     by_key: dict[str, dict] = {}
+    source_by_key: dict[str, str] = {}
     input_hashes: list[dict] = []
     for p in paths:
         with open(p, "rb") as f:
@@ -131,8 +215,8 @@ def _load_results_snapshot(
                     raise ValueError(f"{p}:{line_no}: invalid JSON result: {exc}") from exc
                 if not isinstance(rec, dict):
                     raise ValueError(f"{p}:{line_no}: result must be an object")
-                if rec.get("schema") != "chili.golden_replay_window_result.v2":
-                    raise ValueError(f"{p}:{line_no}: v2 result schema required")
+                if rec.get("schema") != "chili.golden_replay_window_result.v3":
+                    raise ValueError(f"{p}:{line_no}: v3 result schema required")
                 key = rec.get("key")
                 if not isinstance(key, str) or not key:
                     raise ValueError(f"{p}:{line_no}: non-empty result key required")
@@ -155,6 +239,22 @@ def _load_results_snapshot(
                         raise ValueError(f"{p}:{line_no}: ok result PnL must be finite")
                     if not isinstance(rec.get("fills"), list):
                         raise ValueError(f"{p}:{line_no}: ok result fills must be a list")
+                    if any(
+                        type(rec.get(field)) is not int
+                        or rec.get(field) < 0
+                        for field in ("entries", "exits")
+                    ):
+                        raise ValueError(
+                            f"{p}:{line_no}: ok result counts must be exact "
+                            "nonnegative integers"
+                        )
+                    if (
+                        type(rec.get("final_state")) is not str
+                        or not rec["final_state"]
+                    ):
+                        raise ValueError(
+                            f"{p}:{line_no}: ok result final state is invalid"
+                        )
                 previous = by_key.get(key)
                 if previous is not None:
                     kind = "divergent " if previous != rec else ""
@@ -162,6 +262,9 @@ def _load_results_snapshot(
                         f"{p}:{line_no}: {kind}duplicate result key {key}"
                     )
                 by_key[key] = rec
+                source_by_key[key] = p
+    for key, record in by_key.items():
+        _verify_result_log_binding(source_by_key[key], record)
     ok = [r for r in by_key.values() if r.get("status") == "ok"]
     bad = [r for r in by_key.values() if r.get("status") != "ok"]
     key = lambda r: (r.get("day") or "", r.get("symbol") or "")  # noqa: E731
@@ -235,12 +338,39 @@ def validate_run_bindings(
         "manifest_sha256",
         "run_identity_sha256",
         "selected_window_set_sha256",
+        "resolved_strategy_policy_sha256",
+        "execution_scope_sha256",
     ):
         _require_sha256(meta.get(field), field=f"meta.{field}")
     if re.fullmatch(r"[0-9a-f]{40,64}", str(meta.get("build_sha") or "")) is None:
         raise ValueError("meta.build_sha must be a lowercase Git object id")
-    if meta.get("arm") not in {"base", "trap", "bail", "both"}:
+    if meta.get("arm") not in STRATEGY_ARM_CHOICES:
         raise ValueError("meta.arm is invalid")
+    try:
+        require_scoreable_post_selection_arm(meta["arm"])
+        resolved_strategy_policy = resolve_strategy_policy(meta["arm"])
+        resolved_strategy_policy_sha256 = strategy_policy_sha256(
+            meta.get("resolved_strategy_policy")
+        )
+        resolved_execution_scope = replay_execution_scope()
+        resolved_execution_scope_sha256 = execution_scope_sha256(
+            meta.get("execution_scope")
+        )
+    except ValueError as exc:
+        raise ValueError(
+            "meta resolved strategy policy/execution scope is invalid"
+        ) from exc
+    if (
+        meta.get("resolved_strategy_policy") != resolved_strategy_policy
+        or meta.get("resolved_strategy_policy_sha256")
+        != resolved_strategy_policy_sha256
+        or meta.get("execution_scope") != resolved_execution_scope
+        or meta.get("execution_scope_sha256")
+        != resolved_execution_scope_sha256
+    ):
+        raise ValueError(
+            "meta resolved strategy policy/execution-scope binding mismatch"
+        )
     if (
         meta.get("source_backend_sealed") is not False
         or meta.get("child_source_snapshot_pinned") is not False
@@ -306,10 +436,38 @@ def validate_run_bindings(
         day = window.get("day")
         if not isinstance(symbol, str) or not isinstance(day, str):
             raise ValueError(f"manifest window {index} identity is incomplete")
-        result_key = f"{symbol}|{day}|{meta['arm']}"
-        if result_key in manifest_by_key:
+        try:
+            win_start_day = datetime.fromisoformat(
+                str(window.get("win_start") or "")
+            ).date().isoformat()
+        except ValueError as exc:
+            raise ValueError(
+                f"manifest window {index} has an invalid start clock"
+            ) from exc
+        if win_start_day != day:
+            raise ValueError(
+                f"manifest window {index} day/start clock mismatch"
+            )
+        expected_result_key = result_key(
+            symbol,
+            day,
+            meta["arm"],
+            resolved_strategy_policy_sha256,
+        )
+        if expected_result_key in manifest_by_key:
             raise ValueError(f"duplicate manifest window {symbol}|{day}")
-        manifest_by_key[result_key] = window
+        manifest_by_key[expected_result_key] = window
+
+    if meta.get("selection_scope") == "baseline_tier_complete":
+        complete_baseline_keys = {
+            key
+            for key, window in manifest_by_key.items()
+            if window.get("tier") == "baseline"
+        }
+        if set(selected_keys) != complete_baseline_keys:
+            raise ValueError(
+                "complete baseline roster omits or adds a manifest window"
+            )
 
     for key in selected_keys:
         window = manifest_by_key.get(key)
@@ -352,13 +510,36 @@ def validate_run_bindings(
     for record in records:
         key = record.get("key")
         window = manifest_by_key.get(str(key))
+        try:
+            record_policy_sha256 = strategy_policy_sha256(
+                record.get("resolved_strategy_policy")
+            )
+            record_execution_scope_sha256 = execution_scope_sha256(
+                record.get("execution_scope")
+            )
+        except ValueError as exc:
+            raise ValueError(
+                f"result strategy policy/execution scope is invalid for {key}"
+            ) from exc
+        child_attestation_count = record.get(
+            "child_strategy_policy_attestation_count"
+        )
+        child_execution_scope_attestation_count = record.get(
+            "child_execution_scope_attestation_count"
+        )
         if (
             key not in selected_receipts
             or window is None
             or key in seen_result_keys
             or key
-            != f"{record.get('symbol')}|{record.get('day')}|{meta['arm']}"
+            != result_key(
+                str(record.get("symbol") or ""),
+                str(record.get("day") or ""),
+                meta["arm"],
+                resolved_strategy_policy_sha256,
+            )
             or record.get("arm") != meta.get("arm")
+            or type(record.get("prepend")) is not bool
             or any(
                 record.get(field) != window.get(field)
                 for field in result_window_fields
@@ -373,6 +554,65 @@ def validate_run_bindings(
             or record.get("manifest_sha256") != meta.get("manifest_sha256")
             or record.get("run_identity_sha256")
             != meta.get("run_identity_sha256")
+            or record.get("resolved_strategy_policy")
+            != resolved_strategy_policy
+            or record_policy_sha256 != resolved_strategy_policy_sha256
+            or record.get("resolved_strategy_policy_sha256")
+            != resolved_strategy_policy_sha256
+            or record.get("execution_scope") != resolved_execution_scope
+            or record_execution_scope_sha256
+            != resolved_execution_scope_sha256
+            or record.get("execution_scope_sha256")
+            != resolved_execution_scope_sha256
+            or type(child_attestation_count) is not int
+            or child_attestation_count not in {0, 1}
+            or (
+                (
+                    record.get("child_strategy_policy_label"),
+                    record.get("child_strategy_policy_sha256"),
+                    child_attestation_count,
+                )
+                not in {
+                    (None, None, 0),
+                    (meta["arm"], resolved_strategy_policy_sha256, 1),
+                }
+            )
+            or (
+                record.get("status") == "ok"
+                and (
+                    record.get("child_strategy_policy_label") != meta["arm"]
+                    or record.get("child_strategy_policy_sha256")
+                    != resolved_strategy_policy_sha256
+                    or child_attestation_count != 1
+                )
+            )
+            or type(child_execution_scope_attestation_count) is not int
+            or child_execution_scope_attestation_count not in {0, 1}
+            or (
+                (
+                    record.get("child_execution_scope_label"),
+                    record.get("child_execution_scope_sha256"),
+                    child_execution_scope_attestation_count,
+                )
+                not in {
+                    (None, None, 0),
+                    (
+                        "post-selection-fsm",
+                        resolved_execution_scope_sha256,
+                        1,
+                    ),
+                }
+            )
+            or (
+                record.get("status") == "ok"
+                and (
+                    record.get("child_execution_scope_label")
+                    != "post-selection-fsm"
+                    or record.get("child_execution_scope_sha256")
+                    != resolved_execution_scope_sha256
+                    or child_execution_scope_attestation_count != 1
+                )
+            )
             or record.get("source_content_receipt_sha256")
             != selected_receipts.get(key)
             or record.get("source_content_receipt_pre_sha256")
@@ -737,8 +977,16 @@ def render_markdown(sc: dict) -> str:
     L.append("# Golden-library diagnostic replay scorecard")
     L.append("")
     L.append(f"- generated: {sc['generated_at']} · build sha `{m.get('build_sha', '?')[:12]}` "
-             f"· arm `{m.get('arm')}` · GOLDEN=1 · sink "
+             f"· arm `{m.get('arm')}` · policy sha "
+             f"`{str(m.get('resolved_strategy_policy_sha256') or '?')[:12]}` "
+             f"· GOLDEN=1 · sink "
              f"`{m.get('sink_database_name', m.get('sink', '?'))}`")
+    L.append(
+        "- replay policy provenance: the complete operator-approved nine-flag "
+        "configuration vector is parent-bound and every successful result is "
+        "exactly once child-attested; execution credit is limited by the "
+        "post-selection scope below"
+    )
     analyzer_build = (sc.get("analyzer_provenance") or {}).get("build_sha")
     if analyzer_build:
         L.append(
@@ -758,6 +1006,12 @@ def render_markdown(sc: dict) -> str:
              "for same-input deltas; this is not OOS, profitability, or Ross-parity evidence.")
     L.append("- PAPER policy parity is false: this harness neutralizes operational "
              "kill-switch/connectivity/session gates and cannot certify activation behavior.")
+    L.append("- Execution scope is **post-selection FSM only**: symbols are seeded "
+             "`queued_live`; universe-float and catalyst-arb-flat selection are "
+             "not executed, the ordinary entry-risk gate is bypassed, and Ortex "
+             "admission is explicitly neutralized because no captured Ortex-v2 "
+             "authority is present. Quote freshness uses the replay-sim clock. "
+             "Whole-policy profitability is not allowed.")
     L.append("- Source receipts are pre/post boundary observations only. The child "
              "does not consume an exported PostgreSQL snapshot, the backend is not "
              "sealed, and mixed-snapshot races therefore receive no causal credit.")
@@ -869,7 +1123,7 @@ def main() -> int:
         }
     )
     if (
-        meta.get("schema") != "chili.golden_replay_run_meta.v2"
+        meta.get("schema") != "chili.golden_replay_run_meta.v3"
         or meta.get("build_sha") != scorecard_build_sha
         or meta.get("evidence_grade") != "DIAGNOSTIC_ONLY"
         or meta.get("causal_use_allowed") is not False
@@ -1035,7 +1289,7 @@ def main() -> int:
         raise SystemExit(
             "[scorecard] REFUSING analyzer source drift during scorecard run"
         )
-    sc = {"schema": "chili.golden_replay_scorecard.v2",
+    sc = {"schema": "chili.golden_replay_scorecard.v3",
           "generated_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
           "evidence_grade": "DIAGNOSTIC_ONLY",
           "causal_use_allowed": False,

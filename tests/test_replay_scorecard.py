@@ -17,15 +17,40 @@ rs = importlib.util.module_from_spec(_spec)
 sys.modules["replay_scorecard"] = rs
 _spec.loader.exec_module(rs)
 
+_POLICY = rs.resolve_strategy_policy("intended")
+_POLICY_SHA256 = rs.strategy_policy_sha256(_POLICY)
+_EXECUTION_SCOPE = rs.replay_execution_scope()
+_EXECUTION_SCOPE_SHA256 = rs.execution_scope_sha256(_EXECUTION_SCOPE)
+_EXECUTION_SCOPE_ATTESTATION = (
+    "[EXECUTION_SCOPE=post-selection-fsm] "
+    f"sha256={_EXECUTION_SCOPE_SHA256}"
+)
+_RESULT_KEY = rs.result_key(
+    "AAA",
+    "2026-07-07",
+    _POLICY["label"],
+    _POLICY_SHA256,
+)
+_LOG_NAME = rs.canonical_result_log_name(
+    "AAA",
+    "2026-07-07",
+    _POLICY["label"],
+    _POLICY_SHA256,
+)
+_LOG_RELATIVE = f"logs/{_LOG_NAME}"
+
 
 def _result(**overrides):
     doc = {
-        "schema": "chili.golden_replay_window_result.v2",
-        "key": "AAA|2026-07-07|both",
+        "schema": "chili.golden_replay_window_result.v3",
+        "key": _RESULT_KEY,
         "symbol": "AAA",
         "day": "2026-07-07",
         "status": "ok",
         "pnl": 0.0,
+        "entries": 0,
+        "exits": 0,
+        "final_state": "flat",
         "fills": [],
     }
     doc.update(overrides)
@@ -84,11 +109,11 @@ def _bound_docs():
         "source_database_identity": source_identity,
         "windows": [window],
     }
-    key = "AAA|2026-07-07|both"
+    key = _RESULT_KEY
     receipts = {key: receipt_sha}
     roster = {"keys": [key], "receipts": receipts}
     meta = {
-        "schema": "chili.golden_replay_run_meta.v2",
+        "schema": "chili.golden_replay_run_meta.v3",
         "build_sha": "b" * 40,
         "driver_sha256": producer_sha256["driver_sha256"],
         "batch_sha256": producer_sha256["batch_sha256"],
@@ -96,7 +121,11 @@ def _bound_docs():
         "receipt_helper_sha256":
             producer_sha256["receipt_helper_sha256"],
         "manifest_sha256": "7" * 64,
-        "arm": "both",
+        "arm": "intended",
+        "resolved_strategy_policy": _POLICY,
+        "resolved_strategy_policy_sha256": _POLICY_SHA256,
+        "execution_scope": _EXECUTION_SCOPE,
+        "execution_scope_sha256": _EXECUTION_SCOPE_SHA256,
         "evidence_grade": "DIAGNOSTIC_ONLY",
         "causal_use_allowed": False,
         "ross_grade_credit_allowed": False,
@@ -147,7 +176,17 @@ def _bound_docs():
                 "prepend",
             )
         },
-        "arm": "both",
+        "arm": "intended",
+        "resolved_strategy_policy": _POLICY,
+        "resolved_strategy_policy_sha256": _POLICY_SHA256,
+        "execution_scope": _EXECUTION_SCOPE,
+        "execution_scope_sha256": _EXECUTION_SCOPE_SHA256,
+        "child_strategy_policy_label": "intended",
+        "child_strategy_policy_sha256": _POLICY_SHA256,
+        "child_strategy_policy_attestation_count": 1,
+        "child_execution_scope_label": "post-selection-fsm",
+        "child_execution_scope_sha256": _EXECUTION_SCOPE_SHA256,
+        "child_execution_scope_attestation_count": 1,
         "build_sha": meta["build_sha"],
         "driver_sha256": meta["driver_sha256"],
         "batch_sha256": meta["batch_sha256"],
@@ -231,6 +270,15 @@ def test_load_results_rejects_malformed_nonfinite_and_divergent_duplicate(tmp_pa
     with pytest.raises(ValueError, match="invalid JSON"):
         rs.load_results([str(malformed)])
 
+    legacy = tmp_path / "legacy.jsonl"
+    legacy.write_text(
+        json.dumps(_result(schema="chili.golden_replay_window_result.v2"))
+        + "\n",
+        encoding="utf-8",
+    )
+    with pytest.raises(ValueError, match="v3 result schema required"):
+        rs.load_results([str(legacy)])
+
     nonfinite = tmp_path / "nonfinite.jsonl"
     nonfinite.write_text(
         json.dumps(_result()).replace('"status": "ok"', '"pnl": NaN, "status": "ok"')
@@ -264,6 +312,91 @@ def test_load_results_rejects_byte_equivalent_duplicate(tmp_path):
     path.write_text(row + "\n" + row + "\n", encoding="utf-8")
     with pytest.raises(ValueError, match="duplicate result key"):
         rs.load_results([str(path)])
+
+
+def test_results_loader_requires_hash_bound_matching_driver_log(tmp_path):
+    _, _, result = _bound_docs()
+    results_path = tmp_path / "results.jsonl"
+    aliased_count = dict(result)
+    aliased_count["entries"] = True
+    results_path.write_text(
+        json.dumps(aliased_count) + "\n",
+        encoding="utf-8",
+    )
+    with pytest.raises(ValueError, match="exact nonnegative integers"):
+        rs.load_results([str(results_path)])
+
+    renamed_log = dict(result)
+    renamed_log["log"] = _LOG_RELATIVE.replace(
+        "AAA_2026-07-07",
+        "AAA_2026-07-08",
+    )
+    results_path.write_text(
+        json.dumps(renamed_log) + "\n",
+        encoding="utf-8",
+    )
+    with pytest.raises(ValueError, match="log path"):
+        rs.load_results([str(results_path)])
+
+    results_path.write_text(json.dumps(result) + "\n", encoding="utf-8")
+    with pytest.raises(ValueError, match="log path"):
+        rs.load_results([str(results_path)])
+
+    logs_dir = tmp_path / "logs"
+    logs_dir.mkdir()
+    log_path = logs_dir / _LOG_NAME
+    log_path.write_text(
+        "\n".join(
+            [
+                f"[STRATEGY_POLICY=intended] sha256={_POLICY_SHA256}",
+                _EXECUTION_SCOPE_ATTESTATION,
+                "final_state=flat",
+                "[ARM=intended] AAA PnL +99.00 entries=0 exits=0",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    result["log"] = _LOG_RELATIVE
+    result["log_size"] = log_path.stat().st_size
+    result["log_sha256"] = rs.hashlib.sha256(
+        log_path.read_bytes()
+    ).hexdigest()
+    results_path.write_text(json.dumps(result) + "\n", encoding="utf-8")
+    with pytest.raises(ValueError, match="does not match"):
+        rs.load_results([str(results_path)])
+
+    result["log_sha256"] = "9" * 64
+    results_path.write_text(json.dumps(result) + "\n", encoding="utf-8")
+    with pytest.raises(ValueError, match="size/hash"):
+        rs.load_results([str(results_path)])
+
+    log_path.write_text(
+        "\n".join(
+            [
+                f"[STRATEGY_POLICY=intended] sha256={_POLICY_SHA256}",
+                _EXECUTION_SCOPE_ATTESTATION,
+                "final_state=flat",
+                "BUY 1 @ 5.00",
+                "[ARM=intended] AAA PnL -5.00 entries=1 exits=0",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    result.update(
+        {
+            "pnl": -5.0,
+            "entries": 1,
+            "exits": 0,
+            "fills": [{"side": "buy", "qty": 1.0, "px": 5.0}],
+            "log_size": log_path.stat().st_size,
+            "log_sha256": rs.hashlib.sha256(
+                log_path.read_bytes()
+            ).hexdigest(),
+        }
+    )
+    results_path.write_text(json.dumps(result) + "\n", encoding="utf-8")
+    with pytest.raises(ValueError, match="does not match"):
+        rs.load_results([str(results_path)])
 
 
 def test_strict_json_rejects_duplicate_object_keys(tmp_path):
@@ -398,6 +531,7 @@ def test_render_states_zero_ross_credit_and_no_green_gate():
     assert "zero Ross credit" in md
     assert "GREEN" not in md
     assert "Ross-parity evidence" in md
+    assert "Quote freshness uses the replay-sim clock" in md
 
 
 def test_run_binding_rejects_forged_key_config_and_receipt():
@@ -421,6 +555,22 @@ def test_run_binding_rejects_forged_key_config_and_receipt():
     with pytest.raises(ValueError, match="final proof"):
         rs.validate_run_bindings(meta, manifest, [drifted_result])
 
+    aliased_prepend = dict(result)
+    aliased_prepend["prepend"] = 0
+    with pytest.raises(ValueError, match="provenance mismatch"):
+        rs.validate_run_bindings(meta, manifest, [aliased_prepend])
+
+    mismatched_clock_manifest = json.loads(json.dumps(manifest))
+    mismatched_clock_manifest["windows"][0][
+        "win_start"
+    ] = "2026-07-08T13:00:00"
+    with pytest.raises(ValueError, match="day/start clock mismatch"):
+        rs.validate_run_bindings(
+            meta,
+            mismatched_clock_manifest,
+            [result],
+        )
+
     assert rs.verified_producer_file_sha256(meta)[
         "driver_sha256"
     ] == meta["driver_sha256"]
@@ -428,6 +578,220 @@ def test_run_binding_rejects_forged_key_config_and_receipt():
     forged_producer["driver_sha256"] = "9" * 64
     with pytest.raises(ValueError, match="producer bytes"):
         rs.verified_producer_file_sha256(forged_producer)
+
+
+def test_run_binding_rejects_incomplete_policy_or_execution_scope():
+    manifest, meta, result = _bound_docs()
+
+    incomplete_meta = json.loads(json.dumps(meta))
+    incomplete_meta["resolved_strategy_policy"]["flags"].pop(
+        "chili_momentum_ross_stop_alignment_enabled"
+    )
+    incomplete_meta["resolved_strategy_policy_sha256"] = rs._canonical_sha256(
+        incomplete_meta["resolved_strategy_policy"]
+    )
+    run_payload = {
+        key: value
+        for key, value in incomplete_meta.items()
+        if key not in {"run_identity_sha256", "started_at", "stop_at"}
+    }
+    incomplete_meta["run_identity_sha256"] = rs._canonical_sha256(run_payload)
+    with pytest.raises(
+        ValueError,
+        match="policy/execution scope is invalid",
+    ):
+        rs.validate_run_bindings(incomplete_meta, manifest, [result])
+
+    numeric_meta = json.loads(json.dumps(meta))
+    numeric_meta["resolved_strategy_policy"]["flags"][
+        "chili_momentum_ross_stop_alignment_enabled"
+    ] = 1
+    run_payload = {
+        key: value
+        for key, value in numeric_meta.items()
+        if key not in {"run_identity_sha256", "started_at", "stop_at"}
+    }
+    numeric_meta["run_identity_sha256"] = rs._canonical_sha256(run_payload)
+    with pytest.raises(
+        ValueError,
+        match="policy/execution scope is invalid",
+    ):
+        rs.validate_run_bindings(numeric_meta, manifest, [result])
+
+    numeric_result = json.loads(json.dumps(result))
+    numeric_result["resolved_strategy_policy"]["flags"][
+        "chili_momentum_ross_stop_alignment_enabled"
+    ] = 1.0
+    with pytest.raises(
+        ValueError,
+        match="result strategy policy/execution scope is invalid",
+    ):
+        rs.validate_run_bindings(meta, manifest, [numeric_result])
+
+    missing_scope_meta = json.loads(json.dumps(meta))
+    missing_scope_meta.pop("execution_scope")
+    run_payload = {
+        key: value
+        for key, value in missing_scope_meta.items()
+        if key not in {"run_identity_sha256", "started_at", "stop_at"}
+    }
+    missing_scope_meta["run_identity_sha256"] = rs._canonical_sha256(
+        run_payload
+    )
+    with pytest.raises(ValueError, match="execution scope is invalid"):
+        rs.validate_run_bindings(missing_scope_meta, manifest, [result])
+
+    mutated_scope_meta = json.loads(json.dumps(meta))
+    mutated_scope_meta["execution_scope"][
+        "quote_freshness_clock_mode"
+    ] = "wall"
+    mutated_scope_meta["execution_scope_sha256"] = rs._canonical_sha256(
+        mutated_scope_meta["execution_scope"]
+    )
+    run_payload = {
+        key: value
+        for key, value in mutated_scope_meta.items()
+        if key not in {"run_identity_sha256", "started_at", "stop_at"}
+    }
+    mutated_scope_meta["run_identity_sha256"] = rs._canonical_sha256(
+        run_payload
+    )
+    with pytest.raises(ValueError, match="execution scope is invalid"):
+        rs.validate_run_bindings(mutated_scope_meta, manifest, [result])
+
+    numeric_scope_meta = json.loads(json.dumps(meta))
+    numeric_scope_meta["execution_scope"][
+        "whole_policy_profitability_allowed"
+    ] = 0
+    numeric_scope_meta["execution_scope_sha256"] = rs._canonical_sha256(
+        numeric_scope_meta["execution_scope"]
+    )
+    run_payload = {
+        key: value
+        for key, value in numeric_scope_meta.items()
+        if key not in {"run_identity_sha256", "started_at", "stop_at"}
+    }
+    numeric_scope_meta["run_identity_sha256"] = rs._canonical_sha256(
+        run_payload
+    )
+    with pytest.raises(ValueError, match="execution scope is invalid"):
+        rs.validate_run_bindings(numeric_scope_meta, manifest, [result])
+
+    numeric_scope_result = json.loads(json.dumps(result))
+    numeric_scope_result["execution_scope"][
+        "whole_policy_profitability_allowed"
+    ] = 0
+    with pytest.raises(
+        ValueError,
+        match="result strategy policy/execution scope is invalid",
+    ):
+        rs.validate_run_bindings(meta, manifest, [numeric_scope_result])
+
+    missing_child_attestation = dict(result)
+    missing_child_attestation["child_strategy_policy_label"] = None
+    missing_child_attestation["child_strategy_policy_sha256"] = None
+    missing_child_attestation["child_strategy_policy_attestation_count"] = 0
+    with pytest.raises(ValueError, match="provenance mismatch"):
+        rs.validate_run_bindings(meta, manifest, [missing_child_attestation])
+
+    mismatched_child_attestation = dict(result)
+    mismatched_child_attestation["child_strategy_policy_sha256"] = "9" * 64
+    with pytest.raises(ValueError, match="provenance mismatch"):
+        rs.validate_run_bindings(meta, manifest, [mismatched_child_attestation])
+
+    duplicated_child_attestation = dict(result)
+    duplicated_child_attestation["child_strategy_policy_attestation_count"] = 2
+    with pytest.raises(ValueError, match="provenance mismatch"):
+        rs.validate_run_bindings(meta, manifest, [duplicated_child_attestation])
+
+    for numeric_alias in (True, 1.0):
+        aliased_child_attestation = dict(result)
+        aliased_child_attestation[
+            "child_strategy_policy_attestation_count"
+        ] = numeric_alias
+        with pytest.raises(ValueError, match="provenance mismatch"):
+            rs.validate_run_bindings(
+                meta,
+                manifest,
+                [aliased_child_attestation],
+            )
+
+    missing_child_scope_attestation = dict(result)
+    missing_child_scope_attestation["child_execution_scope_label"] = None
+    missing_child_scope_attestation["child_execution_scope_sha256"] = None
+    missing_child_scope_attestation[
+        "child_execution_scope_attestation_count"
+    ] = 0
+    with pytest.raises(ValueError, match="provenance mismatch"):
+        rs.validate_run_bindings(
+            meta,
+            manifest,
+            [missing_child_scope_attestation],
+        )
+
+    mismatched_child_scope_attestation = dict(result)
+    mismatched_child_scope_attestation[
+        "child_execution_scope_sha256"
+    ] = "9" * 64
+    with pytest.raises(ValueError, match="provenance mismatch"):
+        rs.validate_run_bindings(
+            meta,
+            manifest,
+            [mismatched_child_scope_attestation],
+        )
+
+    duplicated_child_scope_attestation = dict(result)
+    duplicated_child_scope_attestation[
+        "child_execution_scope_attestation_count"
+    ] = 2
+    with pytest.raises(ValueError, match="provenance mismatch"):
+        rs.validate_run_bindings(
+            meta,
+            manifest,
+            [duplicated_child_scope_attestation],
+        )
+
+    for numeric_alias in (True, 1.0):
+        aliased_child_scope_attestation = dict(result)
+        aliased_child_scope_attestation[
+            "child_execution_scope_attestation_count"
+        ] = numeric_alias
+        with pytest.raises(ValueError, match="provenance mismatch"):
+            rs.validate_run_bindings(
+                meta,
+                manifest,
+                [aliased_child_scope_attestation],
+            )
+
+    failed_before_attestation = dict(result)
+    failed_before_attestation["status"] = "parse_fail"
+    failed_before_attestation["child_strategy_policy_label"] = None
+    failed_before_attestation["child_strategy_policy_sha256"] = None
+    failed_before_attestation["child_strategy_policy_attestation_count"] = 0
+    failed_before_attestation["child_execution_scope_label"] = None
+    failed_before_attestation["child_execution_scope_sha256"] = None
+    failed_before_attestation[
+        "child_execution_scope_attestation_count"
+    ] = 0
+    selected = rs.validate_run_bindings(
+        meta,
+        manifest,
+        [failed_before_attestation],
+    )
+    assert set(selected) == {failed_before_attestation["key"]}
+
+
+def test_complete_baseline_roster_cannot_omit_a_manifest_window():
+    manifest, meta, result = _bound_docs()
+    second_window = json.loads(json.dumps(manifest["windows"][0]))
+    second_window["symbol"] = "BBB"
+    second_window["source_content_receipt"]["symbol"] = "BBB"
+    second_window["source_content_receipt_sha256"] = (
+        rs.content_receipt_sha256(second_window["source_content_receipt"])
+    )
+    manifest["windows"].append(second_window)
+    with pytest.raises(ValueError, match="complete baseline roster omits"):
+        rs.validate_run_bindings(meta, manifest, [result])
 
 
 def test_fill_time_binding_rejects_positional_or_ornamental_identity():
@@ -494,6 +858,25 @@ def test_main_renders_before_atomic_outputs(monkeypatch, tmp_path):
     result["run_identity_sha256"] = meta["run_identity_sha256"]
     meta_path = tmp_path / "meta.json"
     meta_path.write_text(json.dumps(meta), encoding="utf-8")
+    logs_dir = tmp_path / "logs"
+    logs_dir.mkdir()
+    log_path = logs_dir / _LOG_NAME
+    log_path.write_text(
+        "\n".join(
+            [
+                f"[STRATEGY_POLICY=intended] sha256={_POLICY_SHA256}",
+                _EXECUTION_SCOPE_ATTESTATION,
+                "final_state=flat",
+                "[ARM=intended] AAA PnL +0.00 entries=0 exits=0",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    result["log"] = _LOG_RELATIVE
+    result["log_size"] = log_path.stat().st_size
+    result["log_sha256"] = rs.hashlib.sha256(
+        log_path.read_bytes()
+    ).hexdigest()
     results_path = tmp_path / "results.jsonl"
     results_path.write_text(json.dumps(result) + "\n", encoding="utf-8")
     out_json = tmp_path / "scorecard.json"
