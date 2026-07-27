@@ -4802,6 +4802,41 @@ class Settings(BaseSettings):
         validation_alias=AliasChoices("CHILI_MOMENTUM_FRONTSIDE_DEFER_PCTILE"),
         description="Own-distribution strength percentile below which the entry SOFT-DEFERS (non-terminal re-poll, bounded) instead of admitting at the floor. Default 0.15 (p15). 0 ⇒ defer disabled. Band [0,0.5].",
     )
+    # ── L1 RANGE-POSITION CHASE GOVERNOR (2026-07-27, golden-baseline autopsy) ─────────
+    # Upper-half-of-range entries lost 17:1 (−469.50/18 trades; the ≥75% blowoff bucket
+    # 0/4) while entry PRICES were otherwise Ross-grade. Promote the frontside tilt's
+    # ADVISORY defer to a REAL one-tick defer ONLY when the regime-adaptive strength
+    # score sits in the defer tail AND the entry chases the upper band of today's range.
+    # Weak-but-LOW (dip) entries and strong-anywhere entries are untouched.
+    chili_momentum_chase_defer_enabled: bool = Field(
+        default=True,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_CHASE_DEFER_ENABLED"),
+        description="L1 chase governor: turn the frontside tilt's advisory defer into a REAL one-tick entry defer when strength is in the adaptive defer tail AND day_range_pos is at/above the chase floor. OFF ⇒ advisory-only (byte-identical to pre-L1). Default ON.",
+    )
+    chili_momentum_chase_defer_range_pos_floor: float = Field(
+        default=0.50,
+        ge=0.0,
+        le=1.0,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_CHASE_DEFER_RANGE_POS_FLOOR"),
+        description="day_range_pos at/above which a weak-strength entry counts as a CHASE and defers. ONE documented base = 0.50 (the measured autopsy bucket boundary; upper-half entries lost 17:1). A FLOOR per doctrine — regime-adaptive band may later replace it. Band [0,1].",
+    )
+    # ── L4 WHIPSAW CADENCE ESCALATION (2026-07-27, golden-baseline autopsy) ────────────
+    # SILO 07-07: 6 whipsaw entries in ~90s lost −177 BEFORE the g4 escalation bound
+    # (23 blocks came after). A stop-class loss landing rapidly after the previous loss
+    # DOUBLE-increments the escalation level (quality raise, never a lockout — a strong
+    # re-buy still passes the escalated confirmation; the CELZ 06-30 fast-leader case).
+    chili_momentum_whipsaw_rapid_escalation_enabled: bool = Field(
+        default=True,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_WHIPSAW_RAPID_ESCALATION_ENABLED"),
+        description="L4 whipsaw cadence: DOUBLE-increment the g4 escalation level when consecutive stop-class losses land inside the rapid window. OFF ⇒ single increments only (byte-identical to pre-L4). Default ON.",
+    )
+    chili_momentum_whipsaw_rapid_loss_seconds: float = Field(
+        default=120.0,
+        ge=0.0,
+        le=900.0,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_WHIPSAW_RAPID_LOSS_SECONDS"),
+        description="Gap (seconds) between consecutive stop-class losses at/under which the escalation level DOUBLE-increments (rapid whipsaw). ONE documented base = 120s (SILO chop gaps were 15-20s; normal re-entry cycles run minutes). 0 ⇒ disabled. Band [0,900].",
+    )
     # ── ROSS RISK GAP 1 — SIZE-DOWN INTO THE 200MA / OVERHEAD RESISTANCE ──────────────
     # Ross cuts share size approaching the daily 200MA from below / into clear overhead.
     # A continuous size-DOWN multiplier in [floor, 1.0] keyed on the signed daily-ATR

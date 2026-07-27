@@ -18,6 +18,9 @@ _USER_APPROVED_DEFAULT_ON = (
     "chili_momentum_ross_stop_alignment_enabled",
     "chili_momentum_orb_ihs_structural_stop_enabled",
     "chili_momentum_fresh_ignition_reentry_bypass_enabled",
+    # 2026-07-27 golden-baseline autopsy levers (operator-approved, default ON):
+    "chili_momentum_chase_defer_enabled",
+    "chili_momentum_whipsaw_rapid_escalation_enabled",
 )
 
 
@@ -45,6 +48,8 @@ def test_missing_setting_fallbacks_preserve_default_on_doctrine():
         "chili_momentum_ross_stop_alignment_enabled": (entry_gates,),
         "chili_momentum_orb_ihs_structural_stop_enabled": (live_runner,),
         "chili_momentum_fresh_ignition_reentry_bypass_enabled": (live_runner,),
+        "chili_momentum_chase_defer_enabled": (live_runner,),
+        "chili_momentum_whipsaw_rapid_escalation_enabled": (live_runner,),
     }
     assert set(owners) == set(_USER_APPROVED_DEFAULT_ON)
     for name, modules in owners.items():
@@ -81,7 +86,7 @@ def test_replay_ab_tool_uses_the_complete_closed_operator_policy() -> None:
     ]
     assert len(assignments) == 1
     pairs = tuple(ast.literal_eval(assignments[0].value))
-    assert len(pairs) == 9
+    assert len(pairs) == 11
     assert {flag for _, flag in pairs} == set(_USER_APPROVED_DEFAULT_ON)
     assert "arbitrary FLAGS_JSON is forbidden in sealed replay" in source
     assert "type(value) is not bool" in source

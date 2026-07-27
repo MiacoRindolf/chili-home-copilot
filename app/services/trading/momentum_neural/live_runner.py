@@ -31076,6 +31076,46 @@ def tick_live_session(
                     round(float(_base_max_loss), 4),
                     _fs_detail,
                 )
+                # L1 — RANGE-POSITION CHASE GOVERNOR (2026-07-27; golden-baseline
+                # autopsy: upper-half-of-range entries lost 17:1, −469.50/18 trades,
+                # the ≥75% blowoff bucket 0/4). Promote the tilt's ADVISORY defer to
+                # a REAL one-tick defer ONLY when BOTH hold: (a) strength sits in the
+                # regime-adaptive defer tail (_fs_defer — the same p15-of-distribution
+                # machinery, NOT a new number), AND (b) the entry chases the upper
+                # band of today's range (day_range_pos >= the ONE documented base
+                # floor 0.50 — the exact autopsy bucket boundary; a FLOOR per
+                # doctrine). Weak-but-LOW entries (dips) and strong-anywhere entries
+                # are untouched. The FSM re-polls next tick: strength recovery or a
+                # price reset lower releases the entry. Kill-switch
+                # chili_momentum_chase_defer_enabled=False ⇒ byte-identical. Defer
+                # only on POSITIVE chase evidence (missing range read ⇒ no defer).
+                if (
+                    bool(getattr(settings, "chili_momentum_chase_defer_enabled", True))
+                    and bool(_fs_defer)
+                    and _fs_range_pos is not None
+                    and float(_fs_range_pos) >= float(
+                        getattr(settings, "chili_momentum_chase_defer_range_pos_floor", 0.50)
+                        or 0.50
+                    )
+                ):
+                    _emit(db, sess, "live_entry_wait_chase_deferred", {
+                        "strength": (None if _fs_score is None else round(float(_fs_score), 4)),
+                        "day_range_pos": round(float(_fs_range_pos), 4),
+                        "range_pos_floor": float(
+                            getattr(settings, "chili_momentum_chase_defer_range_pos_floor", 0.50)
+                            or 0.50
+                        ),
+                        "defer_below": round(float(_fs_defer_below), 4),
+                        "adaptive_warm": bool(_fs_warm),
+                        "adaptive_n": int(_fs_n_samples),
+                    })
+                    db.flush()
+                    return {
+                        "ok": True,
+                        "session_id": sess.id,
+                        "state": sess.state,
+                        "skipped": "chase_deferred",
+                    }
             except Exception:
                 _frontside_mult = 1.0  # fail-OPEN: a tilt error never blocks/shrinks the fill
         # ROSS RISK GAP 1 — SIZE-DOWN INTO THE 200MA / OVERHEAD RESISTANCE. Ross cuts share
@@ -39251,11 +39291,48 @@ def tick_live_session(
                     exclude_session_id=sess.id,
                     execution_family=str(getattr(sess, "execution_family", "") or "") or None,
                 )
+                # L4 — WHIPSAW CADENCE (2026-07-27, SILO autopsy): measure the gap
+                # since the PREVIOUS stop-class loss on this session; a loss landing
+                # within the rapid window double-increments the escalation level so
+                # the escalated-confirmation tier binds by whipsaw entry #2-3, not #6.
+                # Fail-open: unreadable/absent prior timestamp ⇒ not rapid.
+                _g4_rapid = False
+                try:
+                    if _was_loss:
+                        # Timestamp bookkeeping runs regardless of the flag so a
+                        # later flag flip never compares against a stale marker;
+                        # only the DECISION is gated.
+                        _g4_prev_loss_raw = le.get("last_loss_exit_at_utc")
+                        if _g4_prev_loss_raw and bool(
+                            getattr(
+                                settings,
+                                "chili_momentum_whipsaw_rapid_escalation_enabled",
+                                True,
+                            )
+                        ):
+                            _g4_gap_s = (
+                                _utcnow()
+                                - datetime.fromisoformat(
+                                    str(_g4_prev_loss_raw).replace("Z", "")
+                                ).replace(tzinfo=None)
+                            ).total_seconds()
+                            _g4_rapid = 0.0 <= _g4_gap_s <= float(
+                                getattr(
+                                    settings,
+                                    "chili_momentum_whipsaw_rapid_loss_seconds",
+                                    120.0,
+                                )
+                                or 120.0
+                            )
+                        le["last_loss_exit_at_utc"] = _utcnow().isoformat()
+                except Exception:
+                    _g4_rapid = False
                 _g4_esc, _g4_esc_why = reentry_escalation_level_update(
                     current_level=int(le.get("g4_reentry_escalation") or 0),
                     was_loss=_was_loss,
                     exit_reason=(str(_g4_exit_reason) if _g4_exit_reason else None),
                     green_banked=bool((_g4_cum + (_g4_day_other or 0.0)) > 0),
+                    rapid_stopout=_g4_rapid,
                 )
                 le["g4_reentry_escalation"] = _g4_esc
             except Exception:

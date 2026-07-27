@@ -90,11 +90,14 @@ def _literal_assignment(relative: str, name: str):
     raise AssertionError(f"{relative} does not define literal {name}")
 
 
-def test_resolved_strategy_policy_binds_all_nine_operator_flags():
+def test_resolved_strategy_policy_binds_all_operator_flags():
+    # 9 weekend levers + the two 2026-07-27 autopsy levers (chase-defer,
+    # whipsaw-escalation) — the roster IS the per-lever A/B surface, so a new
+    # approved lever lands here deliberately, never via FLAGS_JSON.
     pairs = batch.APPROVED_STRATEGY_FLAGS_BY_SLUG
-    assert len(pairs) == 9
-    assert len({slug for slug, _ in pairs}) == 9
-    assert len({flag for _, flag in pairs}) == 9
+    assert len(pairs) == 11
+    assert len({slug for slug, _ in pairs}) == 11
+    assert len({flag for _, flag in pairs}) == 11
 
     intended = batch.resolve_strategy_policy("intended")
     baseline = batch.resolve_strategy_policy("base")
@@ -115,7 +118,7 @@ def test_resolved_strategy_policy_binds_all_nine_operator_flags():
         assert doc["flags"][flag] is False
         assert sum(value is False for value in doc["flags"].values()) == 1
         hashes.add(batch.strategy_policy_sha256(doc))
-    assert len(hashes) == 10
+    assert len(hashes) == 12
 
 
 @pytest.mark.parametrize(

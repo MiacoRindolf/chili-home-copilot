@@ -111,6 +111,14 @@ APPROVED_STRATEGY_FLAGS_BY_SLUG = (
         "sub-vwap-trap",
         "chili_momentum_sub_vwap_trap_entry_enabled",
     ),
+    (
+        "chase-defer",
+        "chili_momentum_chase_defer_enabled",
+    ),
+    (
+        "whipsaw-escalation",
+        "chili_momentum_whipsaw_rapid_escalation_enabled",
+    ),
 )
 DEFAULT_ARM = "intended"
 STRATEGY_ARM_CHOICES = (
@@ -130,6 +138,8 @@ POST_SELECTION_SCOREABLE_POLICY_FLAGS = (
     "chili_momentum_bail_on_no_confirmation_enabled",
     "chili_momentum_fresh_ignition_reentry_bypass_enabled",
     "chili_momentum_sub_vwap_trap_entry_enabled",
+    "chili_momentum_chase_defer_enabled",
+    "chili_momentum_whipsaw_rapid_escalation_enabled",
 )
 POST_SELECTION_UNSCOREABLE_POLICY_FLAGS = (
     "chili_momentum_universe_float_gate_enabled",

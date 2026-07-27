@@ -194,6 +194,36 @@ def test_stop_class_loss_increments(reason) -> None:
     assert why == "stop_class_loss_increment"
 
 
+def test_rapid_whipsaw_stop_class_loss_double_increments() -> None:
+    # L4 (SILO autopsy): consecutive stop-class losses inside the rapid window
+    # double-increment so the escalated tier binds by entry #2-3, not #6.
+    lvl, why = reentry_escalation_level_update(
+        current_level=1, was_loss=True, exit_reason="trail_stop",
+        green_banked=False, rapid_stopout=True,
+    )
+    assert lvl == 3
+    assert why == "rapid_whipsaw_double_increment"
+
+
+def test_rapid_flag_ignored_for_non_stop_class_and_profit_paths() -> None:
+    # rapid_stopout must not touch the non-stop-loss / decay / reset semantics.
+    lvl, why = reentry_escalation_level_update(
+        current_level=2, was_loss=True, exit_reason="bailout",
+        green_banked=False, rapid_stopout=True,
+    )
+    assert (lvl, why) == (2, "non_stop_loss_unchanged")
+    lvl2, why2 = reentry_escalation_level_update(
+        current_level=3, was_loss=False, exit_reason="target",
+        green_banked=False, rapid_stopout=True,
+    )
+    assert (lvl2, why2) == (2, "profit_recycle_decay")
+    lvl3, why3 = reentry_escalation_level_update(
+        current_level=4, was_loss=False, exit_reason="target",
+        green_banked=True, rapid_stopout=True,
+    )
+    assert (lvl3, why3) == (0, "green_banked_reset")
+
+
 @pytest.mark.parametrize("reason", [
     "kill_switch_flatten",
     "bailout",

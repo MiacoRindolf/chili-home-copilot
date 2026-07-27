@@ -3929,6 +3929,7 @@ def reentry_escalation_level_update(
     was_loss: bool,
     exit_reason: str | None,
     green_banked: bool,
+    rapid_stopout: bool = False,
 ) -> tuple[int, str]:
     """G4 P2 (review M1) — the escalation-level bookkeeping rule (PURE, no I/O).
 
@@ -3940,6 +3941,15 @@ def reentry_escalation_level_update(
     BANKED round (the symbol's banked realized PnL > 0 — the caller supplies the
     basis) RESETS it to zero (green_banked_reentry_free parity).
 
+    L4 (2026-07-27, golden-baseline autopsy — SILO 07-07: 6 entries in ~90s of
+    whipsaw lost −177 BEFORE the escalation bound; 23 blocks came after): a
+    stop-class loss that lands RAPIDLY after the previous loss (``rapid_stopout``
+    — the caller measures the cadence) DOUBLE-increments, so the escalated
+    confirmation tier binds by the 2nd-3rd whipsaw entry instead of the 6th.
+    Still a QUALITY raise, never a lockout: a genuinely strong re-buy (structural
+    trigger + HWM reclaim + tape — the CELZ 06-30 fast-leader case) passes the
+    escalated confirmation exactly as before.
+
     Returns ``(new_level, reason)``. Unusable ``current_level`` ⇒ treated as 0."""
     try:
         lvl = max(0, int(current_level or 0))
@@ -3947,6 +3957,8 @@ def reentry_escalation_level_update(
         lvl = 0
     if was_loss:
         if _is_stop_class_exit_reason(exit_reason):
+            if rapid_stopout:
+                return lvl + 2, "rapid_whipsaw_double_increment"
             return lvl + 1, "stop_class_loss_increment"
         return lvl, "non_stop_loss_unchanged"
     if green_banked:
