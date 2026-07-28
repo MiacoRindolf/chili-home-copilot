@@ -1123,6 +1123,119 @@ def test_periodic_pressure_retries_retained_occurrence_without_poison(
     harness.worker.close(join_timeout_seconds=1.0)
 
 
+def test_periodic_pressure_retains_one_event_across_multiple_retry_windows(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(_WARMUP_POLL_TARGET, 0.001)
+    reason = "capture_resource_pressure_write_latency"
+    clock = _RetainedDeadlineClock(step=0.02)
+    harness = _Harness(
+        tmp_path,
+        monotonic_clock=clock,
+        initial_snapshot_warmup_seconds=1.0,
+        wait_for_initial_pressure=True,
+        pressure_health_sequence=[_pressure_health(clean=True)],
+    )
+    harness.worker.start()
+    assert harness.publisher is not None
+    assert harness.source is not None
+    assert harness.pressure_controller is not None
+
+    harness.publisher.retained_rejection_reasons = [reason]
+    harness.publisher.retained_rejection_hook = clock.arm
+    harness.publisher.admission_callback_reasons = []
+    harness.source.recovery_snapshot_pending = True
+    harness.pressure_controller._health_sequence = [
+        *[_pressure_health(clean=False) for _ in range(10)],
+        _pressure_health(clean=True),
+    ]
+    harness.pressure_controller.health_calls = 0
+
+    harness.worker._run_cycle(initial=False)
+
+    health = harness.worker.health()
+    assert health["periodic_ingress_retry_windows_expired"] >= 2
+    assert health["fatal"] is False
+    assert health["ready"] is True
+    assert harness.source.read_count == 2
+    assert harness.log.count("source_build") == 2
+    assert harness.publisher.admission_callback_reasons == [None, reason]
+    assert harness.publisher.accepted_through == 2
+    assert harness.publisher.poisoned is False
+    assert harness.reader.health()["installed"] is True
+    harness.worker.close(join_timeout_seconds=1.0)
+
+
+def test_periodic_pressure_suspension_closes_without_runtime_fatal(
+    tmp_path: Path,
+) -> None:
+    reason = "capture_resource_pressure_write_latency"
+    harness = _Harness(
+        tmp_path,
+        poll_interval_seconds=0.01,
+        initial_snapshot_warmup_seconds=1.0,
+        wait_for_initial_pressure=True,
+        pressure_health_sequence=[_pressure_health(clean=True)],
+    )
+    harness.worker.start()
+    assert harness.publisher is not None
+    assert harness.source is not None
+    assert harness.pressure_controller is not None
+
+    harness.publisher.retained_rejection_reasons = [reason]
+    harness.source.recovery_snapshot_pending = True
+    harness.pressure_controller._health_sequence = [
+        _pressure_health(clean=False)
+    ]
+    harness.pressure_controller.health_calls = 0
+
+    deadline = time.monotonic() + 2.0
+    while time.monotonic() < deadline:
+        if (
+            harness.reader.health()["suspended"]
+            and harness.publisher.reserved_sequence == 2
+        ):
+            break
+        time.sleep(0.005)
+    assert harness.reader.health()["suspended"] is True
+    assert harness.publisher.reserved_sequence == 2
+    assert harness.source.read_count == 2
+    assert harness.log.count("source_build") == 2
+
+    harness.worker.close(join_timeout_seconds=1.0)
+
+    health = harness.worker.health()
+    assert health["state"] == "quiesced"
+    assert health["quiesced"] is True
+    assert health["thread_alive"] is False
+    assert health["fatal"] is False
+    assert health["stop_requested"] is True
+    assert harness.publisher.accepted_through == 1
+    assert harness.publisher.poisoned is True
+    assert harness.publisher.poison_reason == "selection_source_batch_incomplete"
+    assert harness.reader.health()["revoked"] is True
+
+
+def test_quiesced_retained_abandonment_does_not_hide_writer_failure(
+    tmp_path: Path,
+) -> None:
+    harness = _Harness(tmp_path)
+    harness.worker.start()
+    assert harness.publisher is not None
+    harness.worker.close(join_timeout_seconds=1.0)
+    harness.publisher.poisoned = True
+    harness.publisher.poison_reason = "selection_source_batch_incomplete"
+    harness.publisher.ingress.writer_failure_count = 1
+    harness.publisher.ingress.writer_failure_reason = "injected_writer_failure"
+
+    health = harness.worker.health()
+
+    assert health["state"] == "quiesced"
+    assert health["fatal"] is True
+    assert "selection_queue_or_writer_fatal" in str(health["fatal_reason"])
+
+
 def test_retained_initial_ingress_deadline_preserves_exact_reason(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

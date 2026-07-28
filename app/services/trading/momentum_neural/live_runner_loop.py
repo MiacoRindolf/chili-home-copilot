@@ -689,11 +689,29 @@ class LiveRunnerLoop:
                     from .lane_health import record_live_runner_loop_run
 
                     db = SessionLocal()
+                    heartbeat_identity = {}
+                    if self._captured_paper_scope is not None:
+                        heartbeat_identity = {
+                            "account_scope": (
+                                self._captured_paper_scope.account_scope
+                            ),
+                            "expected_account_id": (
+                                self._captured_paper_scope.expected_account_id
+                            ),
+                            "runtime_generation": (
+                                self._captured_paper_scope.runtime_generation
+                            ),
+                            "execution_family": (
+                                self._captured_paper_scope.execution_family
+                            ),
+                            "live_cash_authorized": False,
+                        }
                     record_live_runner_loop_run(
                         db,
                         owner_instance_id=self._owner_instance_id,
                         generation=generation,
                         generation_started_at=generation_started_at,
+                        **heartbeat_identity,
                     )
                     db.commit()
                     self._lane_health_heartbeat_generation = generation

@@ -1,10 +1,14 @@
 from __future__ import annotations
 
-from datetime import datetime, timedelta
+import uuid
+from datetime import datetime, timedelta, timezone
 
+import pytest
 from sqlalchemy import text
 
+from app.config import settings
 from app.models.trading import (
+    BrainBatchJob,
     MomentumAutomationOutcome,
     MomentumStrategyVariant,
     Trade,
@@ -12,6 +16,79 @@ from app.models.trading import (
     TradingAutomationRuntimeSnapshot,
     TradingAutomationSession,
 )
+from app.services.trading.batch_job_constants import (
+    JOB_MOMENTUM_LIVE_LOOP_HEARTBEAT,
+)
+from app.services.trading.momentum_neural import lane_health as lh
+
+
+_PAPER_ACCOUNT_ID = "3e0776af-76cd-4afd-8fe1-f2ee8dc6242f"
+_PAPER_RUNTIME_GENERATION = "64fb7911-1a67-4e2c-a1ca-73cbe6efe5c6"
+
+
+def _runtime_heartbeat(
+    db,
+    *,
+    age_seconds: float,
+    captured_paper: bool,
+    owner_instance_id: str | None = None,
+    generation_started_age_seconds: float = 120.0,
+    tamper_content: bool = False,
+) -> BrainBatchJob:
+    now = datetime.utcnow()
+    row_started_at = now - timedelta(seconds=age_seconds + 1)
+    heartbeat_at = now - timedelta(seconds=age_seconds)
+    owner = owner_instance_id or str(uuid.uuid4())
+    generation_started_at = (
+        datetime.now(timezone.utc)
+        - timedelta(seconds=generation_started_age_seconds)
+    )
+    meta = {
+        "schema": lh.LIVE_LOOP_HEARTBEAT_SCHEMA,
+        "scope": lh.LIVE_LOOP_HEARTBEAT_SCOPE,
+        "owner": "momentum_live_runner_loop",
+        "owner_instance_id": owner,
+        "generation": 1,
+        "generation_identity": f"{owner}:1",
+        "generation_started_at_utc": (
+            generation_started_at.isoformat().replace("+00:00", "Z")
+        ),
+    }
+    if captured_paper:
+        meta.update(
+            {
+                "schema": lh.LIVE_LOOP_HEARTBEAT_SCHEMA_V2,
+                "account_scope": "alpaca:paper",
+                "expected_account_id": _PAPER_ACCOUNT_ID,
+                "runtime_generation": _PAPER_RUNTIME_GENERATION,
+                "execution_family": "alpaca_spot",
+                "live_cash_authorized": False,
+                "row_started_at_utc": (
+                    row_started_at.replace(tzinfo=timezone.utc)
+                    .isoformat()
+                    .replace("+00:00", "Z")
+                ),
+                "heartbeat_at_utc": (
+                    heartbeat_at.replace(tzinfo=timezone.utc)
+                    .isoformat()
+                    .replace("+00:00", "Z")
+                ),
+            }
+        )
+        meta["content_sha256"] = lh._heartbeat_content_sha256(meta)
+        if tamper_content:
+            meta["runtime_generation"] = str(uuid.uuid4())
+    row = BrainBatchJob(
+        id=str(uuid.uuid4()),
+        job_type=JOB_MOMENTUM_LIVE_LOOP_HEARTBEAT,
+        status="ok",
+        started_at=row_started_at,
+        ended_at=heartbeat_at,
+        meta_json=meta,
+    )
+    db.add(row)
+    db.commit()
+    return row
 
 
 def _variant(db):
@@ -31,6 +108,90 @@ def _variant(db):
 def test_live_monitor_requires_paired_account(client):
     response = client.get("/api/trading/momentum/replay/live")
     assert response.status_code == 403
+
+
+def test_zero_session_monitor_uses_fresh_exact_captured_paper_heartbeat(
+    paired_client,
+    db,
+    monkeypatch,
+):
+    from app.services.trading.momentum_neural.live_monitor import (
+        clear_live_monitor_caches,
+    )
+
+    client, _user = paired_client
+    monkeypatch.setattr(
+        settings,
+        "chili_alpaca_expected_account_id",
+        _PAPER_ACCOUNT_ID,
+        raising=False,
+    )
+    row = _runtime_heartbeat(db, age_seconds=2, captured_paper=True)
+    clear_live_monitor_caches()
+
+    response = client.get("/api/trading/momentum/replay/live")
+    assert response.status_code == 200
+    body = response.json()
+    assert body["active_symbol_count"] == 0
+    assert body["latest_runtime_utc"] == (
+        row.ended_at.replace(tzinfo=timezone.utc)
+        .isoformat()
+        .replace("+00:00", "Z")
+    )
+    assert body["observer"]["broker_calls"] == 0
+    assert body["observer"]["provider_calls"] == 0
+    assert body["observer"]["writes"] == 0
+
+
+@pytest.mark.parametrize("case", ("generic", "stale", "tampered", "overlap"))
+def test_non_exact_heartbeat_never_populates_zero_session_runtime(
+    paired_client,
+    db,
+    monkeypatch,
+    case,
+):
+    from app.services.trading.momentum_neural.live_monitor import (
+        clear_live_monitor_caches,
+    )
+
+    client, _user = paired_client
+    monkeypatch.setattr(
+        settings,
+        "chili_alpaca_expected_account_id",
+        _PAPER_ACCOUNT_ID,
+        raising=False,
+    )
+    if case == "generic":
+        _runtime_heartbeat(db, age_seconds=2, captured_paper=False)
+    elif case == "stale":
+        _runtime_heartbeat(db, age_seconds=600, captured_paper=True)
+    elif case == "tampered":
+        _runtime_heartbeat(
+            db,
+            age_seconds=2,
+            captured_paper=True,
+            tamper_content=True,
+        )
+    else:
+        _runtime_heartbeat(
+            db,
+            age_seconds=10,
+            captured_paper=True,
+            owner_instance_id=str(uuid.uuid4()),
+            generation_started_age_seconds=120,
+        )
+        _runtime_heartbeat(
+            db,
+            age_seconds=2,
+            captured_paper=True,
+            owner_instance_id=str(uuid.uuid4()),
+            generation_started_age_seconds=30,
+        )
+    clear_live_monitor_caches()
+
+    response = client.get("/api/trading/momentum/replay/live")
+    assert response.status_code == 200
+    assert response.json()["latest_runtime_utc"] is None
 
 
 def test_live_monitor_returns_runtime_pnl_events_and_bounded_candles(paired_client, db):

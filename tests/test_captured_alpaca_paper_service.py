@@ -7,6 +7,7 @@ import json
 import os
 from pathlib import Path
 import sys
+import threading
 from types import MappingProxyType, SimpleNamespace
 import importlib
 import uuid
@@ -115,6 +116,210 @@ def test_pressure_feed_reports_alive_but_stale_as_not_pre_authority_ready() -> N
         assert stale["pre_authority_ready"] is False
         assert stale["pressure_rejection_reason"] == (
             "capture_resource_pressure_sample_stale"
+        )
+    finally:
+        worker.close(join_timeout_seconds=1.0)
+
+
+def test_pressure_feed_startup_sample_failure_remains_fatal() -> None:
+    class _Controller:
+        def observe(self, _sample: object) -> None:
+            pytest.fail("controller must not receive a failed startup sample")
+
+        def health(self) -> dict[str, object]:
+            return {
+                "required_full_fidelity_admissible": False,
+                "pressure_state": "unobserved_fail_closed",
+                "rejection_reason": "capture_resource_pressure_sample_unavailable",
+                "active_reasons": (),
+                "entry_streak": 0,
+                "sample_count": 0,
+                "sample_age_seconds": None,
+            }
+
+    def fail_startup_sample() -> object:
+        raise TimeoutError("startup metrics unavailable")
+
+    worker = service_module._CapturedPaperPressureFeedWorker(
+        pressure_controller=_Controller(),
+        sampler=fail_startup_sample,
+        interval_seconds=60.0,
+    )
+
+    with pytest.raises(TimeoutError, match="startup metrics unavailable"):
+        worker.start()
+
+    health = worker.health()
+    assert health["running"] is False
+    assert health["fatal"] is True
+    assert health["sample_failure_count"] == 1
+    assert health["consecutive_sample_failures"] == 1
+    assert health["last_sample_error"] == (
+        "TimeoutError: startup metrics unavailable"
+    )
+
+
+def test_pressure_feed_runtime_sample_failure_stays_alive_and_recovers() -> None:
+    failure_sampled = threading.Event()
+    allow_recovery = threading.Event()
+    recovery_observed = threading.Event()
+    lock = threading.Lock()
+
+    class _Controller:
+        def __init__(self) -> None:
+            self.value = {
+                "required_full_fidelity_admissible": True,
+                "pressure_state": "normal",
+                "rejection_reason": None,
+                "active_reasons": (),
+                "entry_streak": 0,
+                "sample_count": 1,
+                "sample_age_seconds": 0.01,
+            }
+
+        def observe(self, sample: object) -> None:
+            with lock:
+                self.value.update(
+                    {
+                        "required_full_fidelity_admissible": True,
+                        "pressure_state": "normal",
+                        "rejection_reason": None,
+                        "sample_count": int(self.value["sample_count"]) + 1,
+                        "sample_age_seconds": 0.0,
+                    }
+                )
+            if sample == "recovery":
+                recovery_observed.set()
+
+        def health(self) -> dict[str, object]:
+            with lock:
+                return dict(self.value)
+
+        def mark_stale(self) -> None:
+            with lock:
+                self.value.update(
+                    {
+                        "required_full_fidelity_admissible": False,
+                        "pressure_state": "stale_fail_closed",
+                        "rejection_reason": (
+                            "capture_resource_pressure_sample_stale"
+                        ),
+                        "sample_age_seconds": 6.0,
+                    }
+                )
+
+    controller = _Controller()
+    sample_calls = 0
+
+    def sample() -> object:
+        nonlocal sample_calls
+        sample_calls += 1
+        if sample_calls == 1:
+            return "startup"
+        if sample_calls == 2:
+            controller.mark_stale()
+            failure_sampled.set()
+            raise TimeoutError("runtime metrics unavailable")
+        assert allow_recovery.wait(timeout=2.0)
+        return "recovery"
+
+    worker = service_module._CapturedPaperPressureFeedWorker(
+        pressure_controller=controller,
+        sampler=sample,
+        interval_seconds=0.01,
+    )
+    worker.start()
+    try:
+        assert failure_sampled.wait(timeout=2.0)
+        for _ in range(200):
+            degraded = worker.health()
+            if degraded["sample_failure_count"] == 1:
+                break
+            threading.Event().wait(0.005)
+        assert degraded["running"] is True
+        assert degraded["fatal"] is False
+        assert degraded["pre_authority_ready"] is False
+        assert degraded["sample_failure_count"] == 1
+        assert degraded["consecutive_sample_failures"] == 1
+        assert degraded["last_sample_error"] == (
+            "TimeoutError: runtime metrics unavailable"
+        )
+
+        allow_recovery.set()
+        assert recovery_observed.wait(timeout=2.0)
+        for _ in range(200):
+            recovered = worker.health()
+            if recovered["samples_fed"] >= 2:
+                break
+            threading.Event().wait(0.005)
+        assert recovered["running"] is True
+        assert recovered["fatal"] is False
+        assert recovered["pre_authority_ready"] is True
+        assert recovered["samples_fed"] >= 2
+        assert recovered["sample_failure_count"] == 1
+        assert recovered["consecutive_sample_failures"] == 0
+        assert recovered["last_sample_error"] is None
+    finally:
+        allow_recovery.set()
+        worker.close(join_timeout_seconds=1.0)
+
+
+@pytest.mark.parametrize("failure_stage", ("sampler", "controller"))
+def test_pressure_feed_runtime_contract_failure_is_fatal(
+    failure_stage: str,
+) -> None:
+    failure_observed = threading.Event()
+
+    class _Controller:
+        def __init__(self) -> None:
+            self.observe_calls = 0
+
+        def observe(self, _sample: object) -> None:
+            self.observe_calls += 1
+            if failure_stage == "controller" and self.observe_calls == 2:
+                failure_observed.set()
+                raise ValueError("pressure contract invalid")
+
+        def health(self) -> dict[str, object]:
+            return {
+                "required_full_fidelity_admissible": True,
+                "pressure_state": "normal",
+                "rejection_reason": None,
+                "active_reasons": (),
+                "entry_streak": 0,
+                "sample_count": 1,
+                "sample_age_seconds": 0.0,
+            }
+
+    sample_calls = 0
+
+    def sample() -> object:
+        nonlocal sample_calls
+        sample_calls += 1
+        if failure_stage == "sampler" and sample_calls == 2:
+            failure_observed.set()
+            raise ValueError("pressure contract invalid")
+        return object()
+
+    worker = service_module._CapturedPaperPressureFeedWorker(
+        pressure_controller=_Controller(),
+        sampler=sample,
+        interval_seconds=0.01,
+    )
+    worker.start()
+    try:
+        assert failure_observed.wait(timeout=2.0)
+        for _ in range(200):
+            health = worker.health()
+            if health["fatal"]:
+                break
+            threading.Event().wait(0.005)
+        assert health["running"] is False
+        assert health["fatal"] is True
+        assert health["sample_failure_count"] == 1
+        assert health["consecutive_sample_failures"] == 1
+        assert health["last_sample_error"] == (
+            "ValueError: pressure contract invalid"
         )
     finally:
         worker.close(join_timeout_seconds=1.0)

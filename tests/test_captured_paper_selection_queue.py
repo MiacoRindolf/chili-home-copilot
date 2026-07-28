@@ -1225,6 +1225,77 @@ def test_restart_recovers_durable_allocator_frontier(tmp_path) -> None:
     harness.manager.close()
 
 
+def _assert_hash_verified_route_backlog_drains(
+    tmp_path: Path,
+    *,
+    backlog_events: int,
+) -> None:
+    restart_after = backlog_events // 2
+    harness = _harness(tmp_path, max_queue_events=backlog_events + 1)
+    for source_sequence in range(1, backlog_events + 1):
+        bundle = replace(
+            harness.bundle,
+            source_sequence=source_sequence,
+            correlation_id=f"captured-queue-soak-{source_sequence}",
+        )
+        assert harness.publisher.reserve_sequence() == source_sequence
+        receipt = harness.publisher.publish_bundle(
+            bundle=bundle,
+            scoring_authority=harness.scoring,
+            evaluation_at=bundle.read_at,
+            source_events=harness.source_events,
+        )
+        assert receipt.accepted is True
+
+    harness.writer.start()
+    assert harness.writer.close(timeout_seconds=10) is True
+    assert harness.publisher.health().durable_through == backlog_events
+
+    frontier = _frontier(harness.selection)
+    port = _input_port(harness, max_batch_events=10, max_read_seconds=5.0)
+    assert port.network_fallback_allowed is False
+    assert port.broker_access_allowed is False
+    assert port.mutation_allowed is False
+
+    observed_sequences: list[int] = []
+    for expected_sequence in range(1, backlog_events + 1):
+        batch = port.read_batch(
+            frontier=frontier,
+            authority=harness.selection,
+        )
+        assert batch is not None
+        assert batch.source_sequence_from == expected_sequence - 1
+        assert batch.source_sequence_through == expected_sequence
+        assert [row.source_sequence for row in batch.observations] == [
+            expected_sequence
+        ]
+        observed_sequences.append(expected_sequence)
+        frontier = _frontier(
+            harness.selection,
+            last_source_sequence=expected_sequence,
+            last_batch_sha256=batch.batch_sha256,
+        )
+        if expected_sequence == restart_after:
+            port = _input_port(
+                harness,
+                max_batch_events=10,
+                max_read_seconds=5.0,
+            )
+
+    assert observed_sequences == list(range(1, backlog_events + 1))
+    assert port.read_batch(
+        frontier=frontier,
+        authority=harness.selection,
+    ) is None
+    harness.manager.close()
+
+
+def test_hash_verified_route_backlog_drains_across_reader_restart(tmp_path) -> None:
+    """The fast suite covers the same route/restart contract at bounded cost."""
+
+    _assert_hash_verified_route_backlog_drains(tmp_path, backlog_events=8)
+
+
 def test_reader_reuses_verified_prefix_but_restart_reverifies(
     tmp_path,
     monkeypatch,

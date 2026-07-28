@@ -202,10 +202,10 @@ class _CapturedPaperPressureFeedWorker:
     premarket-20260727_0105 and _0204).  This ports the capture-only smoke's
     documented refresh pattern (``iqfeed_capture_only_smoke.py``: caller
     sampler at half the policy window) onto the supervisor managed-worker
-    lifecycle.  A sampling failure is recorded as fatal and feeding stops; the
-    controller's own staleness rule then fails admission closed on honest
-    evidence.  This worker never widens admission — it only keeps fresh,
-    measured evidence flowing.
+    lifecycle.  Transient host-I/O sampling failures let the controller's own
+    staleness rule suspend admission until a later clean sample.  Invalid sample
+    construction and controller-observation failures remain fatal.  This worker
+    never widens admission; it only keeps fresh, measured evidence flowing.
     """
 
     def __init__(
@@ -231,26 +231,60 @@ class _CapturedPaperPressureFeedWorker:
         self._fatal = False
         self._fatal_reason: str | None = None
         self._samples_fed = 0
+        self._sample_failure_count = 0
+        self._consecutive_sample_failures = 0
+        self._last_sample_error: str | None = None
 
-    def _feed_once(self) -> None:
-        try:
-            self._controller.observe(self._sampler())
-        except BaseException as exc:
-            with self._state_lock:
+    def _record_sample_failure(
+        self,
+        exc: BaseException,
+        *,
+        fatal: bool,
+    ) -> None:
+        reason = f"{type(exc).__name__}: {exc}"
+        with self._state_lock:
+            self._sample_failure_count += 1
+            self._consecutive_sample_failures += 1
+            self._last_sample_error = reason
+            if fatal:
                 self._fatal = True
                 if self._fatal_reason is None:
-                    self._fatal_reason = f"{type(exc).__name__}: {exc}"
+                    self._fatal_reason = reason
+
+    def _feed_once(self, *, startup: bool) -> None:
+        try:
+            sample = self._sampler()
+        except OSError as exc:
+            self._record_sample_failure(exc, fatal=startup)
+            raise
+        except BaseException as exc:
+            self._record_sample_failure(exc, fatal=True)
+            raise
+        try:
+            self._controller.observe(sample)
+        except BaseException as exc:
+            self._record_sample_failure(exc, fatal=True)
             raise
         with self._state_lock:
             self._samples_fed += 1
+            self._consecutive_sample_failures = 0
+            self._last_sample_error = None
 
     def _run(self) -> None:
         while not self._stop_event.wait(self._interval):
             try:
-                self._feed_once()
+                self._feed_once(startup=False)
+            except OSError:
+                # A runtime sampler can fail transiently (for example while the
+                # host metrics source rolls over).  Keep this broker-incapable
+                # worker alive so it can produce a later recovery sample.  The
+                # controller's bounded freshness window independently makes the
+                # last sample stale and blocks admission until that happens.
+                with self._state_lock:
+                    if self._fatal:
+                        return
+                continue
             except BaseException:
-                # Fatal is recorded; stale evidence now fails admission closed
-                # upstream, which is the intended fail-closed degradation.
                 return
 
     def start(self) -> None:
@@ -263,7 +297,7 @@ class _CapturedPaperPressureFeedWorker:
             self._ever_started = True
         # One synchronous feed BEFORE the thread starts so the next managed
         # worker (selection) begins inside a guaranteed-fresh window.
-        self._feed_once()
+        self._feed_once(startup=True)
         thread = threading.Thread(
             target=self._run,
             name="captured-paper-pressure-feed",
@@ -319,6 +353,11 @@ class _CapturedPaperPressureFeedWorker:
                 "fatal": self._fatal,
                 "fatal_reason": self._fatal_reason,
                 "samples_fed": self._samples_fed,
+                "sample_failure_count": self._sample_failure_count,
+                "consecutive_sample_failures": (
+                    self._consecutive_sample_failures
+                ),
+                "last_sample_error": self._last_sample_error,
                 "interval_seconds": self._interval,
                 # ``running`` deliberately remains a thread-liveness signal so
                 # a pressured feed can stay alive and produce recovery samples.

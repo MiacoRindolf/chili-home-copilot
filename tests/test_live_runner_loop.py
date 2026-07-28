@@ -2410,6 +2410,56 @@ def test_durable_lane_health_heartbeat_is_completed_throttled_and_generation_own
     assert len(sessions) == 1
 
 
+def test_captured_paper_lane_health_heartbeat_carries_exact_runtime_identity(
+    monkeypatch,
+):
+    from app.services.trading.momentum_neural import lane_health as lane_health_mod
+
+    scope = loop_mod.CapturedPaperLiveRunnerScope(
+        expected_account_id=_CAPTURED_PAPER_ACCOUNT_ID,
+        runtime_generation=_CAPTURED_PAPER_GENERATION,
+        broker_connection_generation=_CAPTURED_PAPER_CONNECTION_GENERATION,
+    )
+    loop = LiveRunnerLoop(captured_paper_scope=scope)
+    loop._running = True
+    loop._generation = 4
+    loop._generation_started_at_utc = datetime.now(timezone.utc) - timedelta(
+        seconds=5
+    )
+    staged = []
+
+    class _Db:
+        def commit(self):
+            return None
+
+        def rollback(self):
+            return None
+
+        def close(self):
+            return None
+
+    monkeypatch.setattr(loop_mod, "SessionLocal", _Db)
+    monkeypatch.setattr(
+        lane_health_mod,
+        "record_live_runner_loop_run",
+        lambda db, **kwargs: staged.append(kwargs) or "job-id",
+    )
+
+    assert loop._record_lane_health_heartbeat(generation=4, force=True) is True
+    assert staged == [
+        {
+            "owner_instance_id": loop._owner_instance_id,
+            "generation": 4,
+            "generation_started_at": loop._generation_started_at_utc,
+            "account_scope": "alpaca:paper",
+            "expected_account_id": _CAPTURED_PAPER_ACCOUNT_ID,
+            "runtime_generation": _CAPTURED_PAPER_GENERATION,
+            "execution_family": "alpaca_spot",
+            "live_cash_authorized": False,
+        }
+    ]
+
+
 def test_module_start_self_guards_single_driver_configuration(monkeypatch):
     starts = []
 

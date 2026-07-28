@@ -18,6 +18,7 @@ from zoneinfo import ZoneInfo
 from sqlalchemy import or_, text
 from sqlalchemy.orm import Session
 
+from ....config import settings
 from ....models.trading import (
     MomentumAutomationOutcome,
     Trade,
@@ -740,6 +741,20 @@ def _build_state_snapshot(db: Session, *, user_id: int, now_utc: datetime) -> di
         (row.get("updated_at") for row in active_rows if isinstance(row.get("updated_at"), datetime)),
         default=None,
     )
+    if latest_update is None and not active_rows:
+        from .lane_health import captured_paper_live_runner_control_health
+
+        heartbeat = captured_paper_live_runner_control_health(
+            db,
+            expected_account_id=str(
+                getattr(settings, "chili_alpaca_expected_account_id", "") or ""
+            ),
+            now=now_utc,
+        )
+        if heartbeat.get("ok") is True:
+            heartbeat_at = heartbeat.get("heartbeat_at")
+            if isinstance(heartbeat_at, datetime):
+                latest_update = heartbeat_at
     return {
         "ok": True,
         "read_only": True,

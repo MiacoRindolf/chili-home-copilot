@@ -653,6 +653,7 @@ class CapturedPaperSelectionLifecycleWorker:
         self._cycles_completed = 0
         self._source_unavailable_cycles = 0
         self._initial_warmup_retries = 0
+        self._periodic_ingress_retry_windows_expired = 0
         self._snapshot_batches_read = 0
         self._occurrences_published = 0
         self._producer_batches_applied = 0
@@ -1064,6 +1065,54 @@ class CapturedPaperSelectionLifecycleWorker:
                 f"shared startup deadline ({reason})",
             )
 
+    def _wait_for_periodic_ingress_retry(
+        self,
+        components: CapturedPaperSelectionRuntimeComponents,
+        *,
+        rejection_reason: str,
+    ) -> None:
+        """Retain one owned periodic event across bounded recovery windows.
+
+        The queue publisher has already cached and identity-bound the exact event
+        before calling this hook.  Renewing the wait window therefore does not
+        read another source snapshot, reserve another sequence, consume another
+        opportunity, or create another event.  Shutdown remains interruptible;
+        malformed pressure, a lost fence, and every non-retryable ingress result
+        continue to escape as fatal integrity failures.
+        """
+
+        while True:
+            started_at = float(self.monotonic_clock())
+            if not math.isfinite(started_at):
+                _reject(
+                    "INITIAL_INGRESS_PRESSURE_HEALTH_INVALID",
+                    "periodic retained-admission clock is non-finite",
+                )
+            deadline = started_at + self.durable_timeout_seconds
+            if not math.isfinite(deadline):
+                _reject(
+                    "INITIAL_INGRESS_PRESSURE_HEALTH_INVALID",
+                    "periodic retained-admission deadline is non-finite",
+                )
+            try:
+                self._wait_for_initial_ingress_retry(
+                    components,
+                    deadline=deadline,
+                    rejection_reason=rejection_reason,
+                )
+                return
+            except CapturedPaperSelectionRuntimeError as exc:
+                if (
+                    exc.code != "INITIAL_INGRESS_ADMISSION_UNAVAILABLE"
+                    or self._stop_event.is_set()
+                ):
+                    raise
+                observed_at = float(self.monotonic_clock())
+                if not math.isfinite(observed_at) or observed_at < deadline:
+                    raise
+                with self._state_lock:
+                    self._periodic_ingress_retry_windows_expired += 1
+
     def _publisher_health(self) -> dict[str, Any]:
         components = self._components
         if components is None:
@@ -1298,34 +1347,19 @@ class CapturedPaperSelectionLifecycleWorker:
                                 deadline=initial_cycle_deadline,
                             )
                 elif self.wait_for_initial_pressure:
-                    retained_deadline: float | None = None
-
                     def before_ingress_admission(
                         _event: Any,
                         _event_size: int,
                         rejection_reason: str | None,
                     ) -> None:
-                        nonlocal retained_deadline
                         self._assert_fence()
                         if rejection_reason is None:
                             return
-                        if retained_deadline is None:
-                            retained_deadline = (
-                                float(self.monotonic_clock())
-                                + self.durable_timeout_seconds
-                            )
-                            if not math.isfinite(retained_deadline):
-                                _reject(
-                                    "INGRESS_PRESSURE_HEALTH_INVALID",
-                                    "selection retained-admission deadline is "
-                                    "non-finite",
-                                )
                         self.deferred_reader.suspend(
                             "selection_capture_pressure_unavailable"
                         )
-                        self._wait_for_initial_ingress_retry(
+                        self._wait_for_periodic_ingress_retry(
                             components,
-                            deadline=retained_deadline,
                             rejection_reason=rejection_reason,
                         )
 
@@ -1614,6 +1648,15 @@ class CapturedPaperSelectionLifecycleWorker:
                     # capture boundary suspended it before propagating here.
                     continue
         except BaseException as exc:
+            if (
+                self._stop_event.is_set()
+                and isinstance(exc, CapturedPaperSelectionRuntimeError)
+                and exc.code == "INITIAL_INGRESS_ADMISSION_UNAVAILABLE"
+            ):
+                # An orderly close interrupts a retained periodic admission.
+                # The queue records the abandoned owned event as a coverage gap,
+                # but shutdown itself is not a runtime-health failure.
+                return
             self._poison("selection_runtime_poll_fatal")
             self._record_fatal(exc)
 
@@ -2072,7 +2115,41 @@ class CapturedPaperSelectionLifecycleWorker:
                 dynamic_error = "selection_input_port_fatal"
         except BaseException as exc:
             dynamic_error = f"health_unavailable:{type(exc).__name__}:{exc}"
-        if dynamic_error is not None:
+        with self._state_lock:
+            intentional_quiesce = bool(
+                self._stop_event.is_set()
+                and self._state
+                in {
+                    "quiescing",
+                    "quiesced",
+                    "rollback_complete",
+                }
+            )
+        queue_ingress = queue.get("ingress")
+        writer_detail = writer.get("writer")
+        writer_ingress = (
+            writer_detail.get("ingress")
+            if isinstance(writer_detail, Mapping)
+            else None
+        )
+        expected_retained_abandonment = bool(
+            intentional_quiesce
+            and queue.get("poisoned") is True
+            and queue.get("poison_reason") == "selection_source_batch_incomplete"
+            and isinstance(queue_ingress, Mapping)
+            and not queue_ingress.get("writer_failure_count")
+            and not queue_ingress.get("dropped")
+            and not queue_ingress.get("post_close_submissions")
+            and isinstance(writer_detail, Mapping)
+            and not writer_detail.get("last_error")
+            and isinstance(writer_ingress, Mapping)
+            and not writer_ingress.get("writer_failure_count")
+            and not writer_ingress.get("dropped")
+            and not writer_ingress.get("post_close_submissions")
+            and not input_port.get("poisoned")
+            and not input_port.get("poison_reason")
+        )
+        if dynamic_error is not None and not expected_retained_abandonment:
             self._record_fatal(
                 CapturedPaperSelectionRuntimeError("HEALTH_FATAL", dynamic_error)
             )
@@ -2106,6 +2183,9 @@ class CapturedPaperSelectionLifecycleWorker:
                 "cycles_completed": self._cycles_completed,
                 "source_unavailable_cycles": self._source_unavailable_cycles,
                 "initial_warmup_retries": self._initial_warmup_retries,
+                "periodic_ingress_retry_windows_expired": (
+                    self._periodic_ingress_retry_windows_expired
+                ),
                 "snapshot_batches_read": self._snapshot_batches_read,
                 "occurrences_published": self._occurrences_published,
                 "producer_batches_applied": self._producer_batches_applied,
