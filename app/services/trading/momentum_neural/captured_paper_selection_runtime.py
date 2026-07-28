@@ -1434,6 +1434,8 @@ class CapturedPaperSelectionLifecycleWorker:
         deadline = float(self.monotonic_clock()) + self.producer_timeout_seconds
         if initial_cycle_deadline is not None:
             deadline = min(deadline, initial_cycle_deadline)
+        with self._state_lock:
+            last_sequence = self._last_frontier_sequence
         while True:
             self._assert_fence()
             result = components.producer.tick()
@@ -1450,15 +1452,11 @@ class CapturedPaperSelectionLifecycleWorker:
                     "PRODUCER_GAP",
                     "selection producer recorded a non-reusable coverage gap",
                 )
-            with self._state_lock:
-                self._last_frontier_sequence = sequence
-                self._last_frontier_status = frontier_status
-                if status == "applied":
-                    self._producer_batches_applied += 1
-                elif status == "idle":
-                    self._producer_idle_cycles += 1
-            if sequence == target_sequence and frontier_status == "ready":
-                return frontier
+            if last_sequence is not None and sequence < last_sequence:
+                _reject(
+                    "PRODUCER_FRONTIER_INVALID",
+                    "selection producer frontier moved backwards",
+                )
             if sequence > target_sequence:
                 _reject(
                     "PRODUCER_FRONTIER_INVALID",
@@ -1470,6 +1468,24 @@ class CapturedPaperSelectionLifecycleWorker:
                     "PRODUCER_FRONTIER_TIMEOUT",
                     "selection producer did not reach a ready gap-free frontier",
                 )
+            with self._state_lock:
+                self._last_frontier_sequence = sequence
+                self._last_frontier_status = frontier_status
+                if status == "applied":
+                    self._producer_batches_applied += 1
+                elif status == "idle":
+                    self._producer_idle_cycles += 1
+            if sequence == target_sequence and frontier_status == "ready":
+                return frontier
+            if sequence > last_sequence:
+                # The configured timeout bounds a stalled producer, not the
+                # total drain time of a large immutable queue.  Each strict
+                # gap-free frontier advance renews the bounded liveness window;
+                # fenced startup still retains its absolute cycle deadline.
+                deadline = now + self.producer_timeout_seconds
+                if initial_cycle_deadline is not None:
+                    deadline = min(deadline, initial_cycle_deadline)
+                last_sequence = sequence
             self._stop_event.wait(min(0.01, max(0.0, deadline - now)))
 
     def _run_initial_cycle_with_warmup(

@@ -540,6 +540,17 @@ class _FakeProducer:
         )
 
 
+def _ready_producer_result(sequence: int) -> SimpleNamespace:
+    return SimpleNamespace(
+        status="applied",
+        frontier=SimpleNamespace(
+            last_source_sequence=sequence,
+            status="ready",
+            gap_count=0,
+        ),
+    )
+
+
 class _Harness:
     def __init__(
         self,
@@ -1460,6 +1471,161 @@ def test_durable_progress_never_extends_the_absolute_initial_cycle_deadline(
         )
     assert failure.value.code == "DURABLE_FRONTIER_TIMEOUT"
     harness.worker.close(join_timeout_seconds=1.0)
+
+
+def test_producer_wait_renews_stall_timeout_on_forward_progress(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    harness = _Harness(tmp_path, poll_interval_seconds=60.0)
+    harness.worker.start()
+    components = harness.worker._components
+    assert components is not None
+    sequences = iter((1, 2, 3, 4))
+    observations = iter((0.04, 0.08, 0.12, 0.16, 0.20))
+    monkeypatch.setattr(
+        components.producer,
+        "tick",
+        lambda: _ready_producer_result(next(sequences)),
+    )
+    harness.worker.monotonic_clock = lambda: next(observations)
+
+    # Total elapsed time exceeds the 0.1-second producer timeout, but every
+    # observation advances the exact gap-free frontier.
+    try:
+        frontier = harness.worker._drain_producer_to(4)
+        assert frontier.last_source_sequence == 4
+    finally:
+        harness.worker.close(join_timeout_seconds=1.0)
+
+
+def test_producer_progress_never_extends_absolute_initial_cycle_deadline(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    harness = _Harness(tmp_path, poll_interval_seconds=60.0)
+    harness.worker.start()
+    components = harness.worker._components
+    assert components is not None
+    sequences = iter((1, 2, 3, 4))
+    observations = iter((0.0, 0.04, 0.08, 0.12, 0.16))
+    monkeypatch.setattr(
+        components.producer,
+        "tick",
+        lambda: _ready_producer_result(next(sequences)),
+    )
+    harness.worker.monotonic_clock = lambda: next(observations)
+
+    try:
+        with pytest.raises(CapturedPaperSelectionRuntimeError) as failure:
+            harness.worker._drain_producer_to(
+                4,
+                initial_cycle_deadline=0.15,
+            )
+        assert failure.value.code == "PRODUCER_FRONTIER_TIMEOUT"
+    finally:
+        harness.worker.close(join_timeout_seconds=1.0)
+
+
+def test_producer_wait_rejects_a_backward_frontier(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    harness = _Harness(tmp_path, poll_interval_seconds=60.0)
+    harness.worker.start()
+    components = harness.worker._components
+    assert components is not None
+    sequences = iter((2, 1))
+    monkeypatch.setattr(
+        components.producer,
+        "tick",
+        lambda: _ready_producer_result(next(sequences)),
+    )
+    harness.worker.monotonic_clock = lambda: 0.0
+
+    try:
+        with pytest.raises(CapturedPaperSelectionRuntimeError) as failure:
+            harness.worker._drain_producer_to(4)
+        assert failure.value.code == "PRODUCER_FRONTIER_INVALID"
+    finally:
+        harness.worker.close(join_timeout_seconds=1.0)
+
+
+def test_producer_target_after_absolute_initial_deadline_is_rejected(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    harness = _Harness(tmp_path, poll_interval_seconds=60.0)
+    harness.worker.start()
+    components = harness.worker._components
+    assert components is not None
+    observations = iter((0.0, 0.2))
+    harness.worker.producer_timeout_seconds = 1.0
+    harness.worker.monotonic_clock = lambda: next(observations)
+    monkeypatch.setattr(
+        components.producer,
+        "tick",
+        lambda: _ready_producer_result(4),
+    )
+
+    try:
+        with pytest.raises(CapturedPaperSelectionRuntimeError) as failure:
+            harness.worker._drain_producer_to(
+                4,
+                initial_cycle_deadline=0.15,
+            )
+        assert failure.value.code == "PRODUCER_FRONTIER_TIMEOUT"
+    finally:
+        harness.worker.close(join_timeout_seconds=1.0)
+
+
+def test_producer_late_progress_cannot_resurrect_expired_stall_window(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    harness = _Harness(tmp_path, poll_interval_seconds=60.0)
+    harness.worker.start()
+    components = harness.worker._components
+    assert components is not None
+    sequences = iter((1, 2, 3))
+    observations = iter((0.0, 0.05, 0.11, 0.12))
+    monkeypatch.setattr(
+        components.producer,
+        "tick",
+        lambda: _ready_producer_result(next(sequences)),
+    )
+    harness.worker.monotonic_clock = lambda: next(observations)
+
+    try:
+        with pytest.raises(CapturedPaperSelectionRuntimeError) as failure:
+            harness.worker._drain_producer_to(3)
+        assert failure.value.code == "PRODUCER_FRONTIER_TIMEOUT"
+    finally:
+        harness.worker.close(join_timeout_seconds=1.0)
+
+
+def test_producer_applied_status_without_sequence_progress_times_out(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    harness = _Harness(tmp_path, poll_interval_seconds=60.0)
+    harness.worker.start()
+    components = harness.worker._components
+    assert components is not None
+    observations = iter((0.0, 0.05, 0.11))
+    monkeypatch.setattr(
+        components.producer,
+        "tick",
+        lambda: _ready_producer_result(1),
+    )
+    harness.worker.monotonic_clock = lambda: next(observations)
+
+    try:
+        with pytest.raises(CapturedPaperSelectionRuntimeError) as failure:
+            harness.worker._drain_producer_to(3)
+        assert failure.value.code == "PRODUCER_FRONTIER_TIMEOUT"
+    finally:
+        harness.worker.close(join_timeout_seconds=1.0)
 
 
 def test_writer_failure_reason_survives_startup_and_quiesced_rollback(
