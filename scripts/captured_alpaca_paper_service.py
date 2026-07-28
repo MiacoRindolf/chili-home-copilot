@@ -1846,15 +1846,16 @@ def _assert_final_activation_envelope_current(
 ) -> activation_contract.VerifiedCapturedPaperActivation:
     """Rehash the consumed envelope without rewalking sealed runtime trees.
 
-    Two full semantic reloads have already completed before the host publishes
-    its short-lived start permit.  Stage0 serves every local module from held,
-    verified bytes and retains deny-write/delete handles over the dependency
-    inventory.  After the broker fixed point, only the small authority envelope
-    can still drift without those guards: the manifest, readiness receipts
-    and their raw probe artifacts, capture/preactivation/runtime bindings,
-    launcher arguments, launcher and IQFeed bootstrap manifest.  Rehash and
-    revalidate those exact files, recheck the stage0/source attestation and
-    enforce the envelope expiry before any worker is admitted.
+    Startup validation and the post-composition semantic reload have already
+    completed before the host publishes its short-lived start permit.  Stage0
+    serves every local module from held, verified bytes and retains
+    deny-write/delete handles over the dependency inventory.  Only the small
+    authority envelope can still drift without those guards: the manifest,
+    readiness receipts and their raw probe artifacts,
+    capture/preactivation/runtime bindings, launcher arguments, launcher and
+    IQFeed bootstrap manifest.  Rehash and revalidate those exact files,
+    recheck the stage0/source attestation and enforce the envelope expiry
+    before any worker is admitted.
     """
 
     now = _aware_utc(wall_clock(), "final activation envelope clock")
@@ -7741,7 +7742,7 @@ def _execute_active_service(
     # Composition can include bounded DB/broker reads and restart inventory.
     # Re-read all manifest/source/receipt/kill-switch bytes immediately after it
     # finishes instead of inheriting the earlier validation clock.
-    _reload_final_activation_authority(
+    pre_start_verified = _reload_final_activation_authority(
         verified,
         allowed_read_roots=allowed_read_roots,
         wall_clock=wall_clock,
@@ -7779,8 +7780,14 @@ def _execute_active_service(
 
         def consume_final_start_authority() -> Mapping[str, Any]:
             nonlocal consumed_active_authority, consumed_final_activation
-            refreshed = _reload_final_activation_authority(
-                verified,
+            # The full dependency/capsule walk completed before provider and
+            # selection startup.  Rewalking it while the selection queue is live
+            # can itself trip the measured write-latency pressure gate and
+            # durably poison the selection generation.  Stage0 keeps those
+            # verified bytes immutable; revalidate only the small mutable
+            # authority envelope immediately before PREPARED.
+            refreshed = _assert_final_activation_envelope_current(
+                pre_start_verified,
                 allowed_read_roots=allowed_read_roots,
                 wall_clock=wall_clock,
             )
@@ -7804,11 +7811,10 @@ def _execute_active_service(
                 wait=wait,
             )
             _emit_startup_breadcrumb("END 6c broker_quiet_fixed_point")
-            # Full semantic reloads completed after composition and immediately
-            # before PREPARED.  Stage0 now holds every runtime byte immutable.
-            # Rehash only the small authority envelope here so provider traffic
-            # cannot starve the short permit while retaining a post-broker
-            # expiry/hash linearization point.
+            # The post-composition semantic reload and pre-PREPARED envelope
+            # check completed before the short host permit.  Rehash the small
+            # authority envelope again here to retain a post-broker
+            # expiry/hash linearization point without competing with capture.
             refreshed = _assert_final_activation_envelope_current(
                 refreshed,
                 allowed_read_roots=allowed_read_roots,

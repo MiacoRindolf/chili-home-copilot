@@ -560,6 +560,44 @@ def test_alive_but_stale_pre_authority_worker_blocks_order_authority():
     assert host.running is False
 
 
+def test_pre_authority_worker_failure_during_authority_consume_blocks_order_workers():
+    events = []
+    selection = _Worker("selection", events)
+    transport = _Worker("transport", events)
+    supervisor, host, live = _supervisor(
+        events,
+        pre_authority_workers=(("selection", selection),),
+        workers=(("transport", transport),),
+    )
+    base = _active_authority(events)
+
+    def consume():
+        receipt = base.consume()
+        selection.running = False
+        selection.fatal = True
+        return receipt
+
+    authority = CapturedPaperActiveStartAuthority(
+        expected_account_id=ACCOUNT_ID,
+        runtime_generation=GENERATION,
+        consume=consume,
+        assert_current=base.assert_current,
+    )
+
+    with pytest.raises(
+        CapturedPaperServiceSupervisorError,
+        match="selection_post_authority_health_lost",
+    ):
+        supervisor.start_active(start_authority=authority)
+
+    assert "active_authority_consume" in events
+    assert "transport_start" not in events
+    assert "live_start" not in events
+    assert live["running"] is False
+    assert host.running is False
+    assert selection.running is False
+
+
 def test_post_quiesce_deactivation_runs_after_every_owner_and_before_fence_release():
     events = []
     selection = _Worker("selection", events)

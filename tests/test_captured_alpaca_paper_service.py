@@ -3295,12 +3295,12 @@ def test_final_manifest_or_kill_expiry_after_provider_start_blocks_workers(
         generated_at=NOW - timedelta(seconds=5),
     )
     reloads = []
+    events = []
 
     def reload_authority(*_args, **_kwargs):
         reloads.append("reload")
+        events.append("full_reload")
         return verified
-
-    events = []
 
     class _Supervisor:
         def start_active(self, *, start_authority, provider_options=None):
@@ -3337,8 +3337,14 @@ def test_final_manifest_or_kill_expiry_after_provider_start_blocks_workers(
     monkeypatch.setattr(
         service_module, "_reload_final_activation_authority", reload_authority
     )
-    def reject_envelope(*_args, **_kwargs):
+    envelope_calls = 0
+
+    def reject_envelope(value, **_kwargs):
+        nonlocal envelope_calls
+        envelope_calls += 1
         events.append("envelope_check")
+        if envelope_calls == 1:
+            return value
         raise CapturedAlpacaPaperServiceError(
             "FINAL_ACTIVATION_ENVELOPE_EXPIRED",
             "kill authority expired",
@@ -3379,9 +3385,11 @@ def test_final_manifest_or_kill_expiry_after_provider_start_blocks_workers(
             wall_clock=lambda: NOW + timedelta(seconds=1),
         )
 
-    assert reloads == ["reload", "reload"]
+    assert reloads == ["reload"]
     assert events == [
+        "full_reload",
         "provider_and_runtime_started",
+        "envelope_check",
         "prepared",
         "permit_consumed",
         "broker_fixed_point",
@@ -3471,6 +3479,7 @@ def test_host_permit_is_consumed_before_any_worker_and_started_ack(
     )
     def reload_authority(*_args, **_kwargs):
         reloads.append("reload")
+        events.append("full_reload")
         return verified
 
     monkeypatch.setattr(
@@ -3523,22 +3532,27 @@ def test_host_permit_is_consumed_before_any_worker_and_started_ack(
         wall_clock=lambda: NOW + timedelta(seconds=1),
     )
 
+    envelope_checks = [
+        index for index, event in enumerate(events) if event == "envelope_current"
+    ]
+    assert events.index("full_reload") < events.index("provider_runtime_ready")
+    assert events.index("provider_runtime_ready") < envelope_checks[0]
+    assert envelope_checks[0] < events.index("prepared")
     assert events.index("permit_consumed") < events.index("worker_started")
-    assert events.index("broker_fixed_point") < events.index("envelope_current")
-    assert events.index("envelope_current") < events.index("kill_switch_current")
+    assert events.index("broker_fixed_point") < envelope_checks[1]
+    assert envelope_checks[1] < events.index("kill_switch_current")
     assert events.index("kill_switch_current") < events.index("worker_started")
     assert events.index("health_confirmed") < events.index("started_ack")
     assert events.index("started_ack") < events.index("apply_committed")
     assert events.count("kill_switch_current") == 4
     assert events.count("permit_current") == 4
     assert events.count("active_evidence_current") == 3
-    # Stage0 serves every local module from held verified bytes and retains
-    # deny-write/delete handles over the dependency inventory.  Full semantic
-    # reloads therefore bracket composition and PREPARED.  The post-broker
-    # boundary rehashes only the small bound envelope before the dynamic kill
-    # switch, permit and active-start evidence gates admit any worker.
-    assert reloads == ["reload", "reload"]
-    assert events.count("envelope_current") == 1
+    # The sole post-composition full reload finishes before provider/selection
+    # startup.  Stage0 keeps those verified runtime bytes immutable; only the
+    # small bound envelope is rehashed immediately before PREPARED and again
+    # after the broker fixed point.
+    assert reloads == ["reload"]
+    assert events.count("envelope_current") == 2
 
 
 def test_post_permit_terminal_order_blocks_every_worker(monkeypatch) -> None:
@@ -3598,6 +3612,11 @@ def test_post_permit_terminal_order_blocks_every_worker(monkeypatch) -> None:
         service_module,
         "_reload_final_activation_authority",
         lambda *_args, **_kwargs: verified,
+    )
+    monkeypatch.setattr(
+        service_module,
+        "_assert_final_activation_envelope_current",
+        lambda value, **_kwargs: value,
     )
     monkeypatch.setattr(
         service_module,

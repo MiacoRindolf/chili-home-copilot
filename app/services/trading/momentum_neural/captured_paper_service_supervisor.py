@@ -713,6 +713,26 @@ class CapturedPaperServiceSupervisor:
                 raise CapturedPaperServiceSupervisorError(
                     "captured_paper_active_start_authority_rejected"
                 )
+            # PREPARED/permit/broker-fixed-point work can outlive a healthy
+            # pre-authority snapshot.  Re-prove every broker-incapable worker
+            # after authority consumption and before any order-capable worker
+            # or live loop starts.  This caught a real selection queue poison
+            # during the bounded host round-trip.
+            for managed in self._started_pre_authority_workers:
+                self._service_fence.assert_held()
+                worker_health = _health_mapping(managed.worker.health())
+                if (
+                    worker_health.get("ever_started") is not True
+                    or worker_health.get("running") is not True
+                    or worker_health.get("fatal") is True
+                    or (
+                        "pre_authority_ready" in worker_health
+                        and worker_health.get("pre_authority_ready") is not True
+                    )
+                ):
+                    raise CapturedPaperServiceSupervisorError(
+                        f"captured_paper_{managed.name}_post_authority_health_lost"
+                    )
             self._active_start_authority_receipt = dict(final_authority)
             for managed in self._workers:
                 start_authority.assert_current()
