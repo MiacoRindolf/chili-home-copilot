@@ -106,6 +106,36 @@ class IqfeedRealtimeProbe:
         return self.delay_minutes == 0
 
 
+def _assert_runtime_preselection_bridge_parity(
+    *,
+    preselection: ExactPrintPreselectionReceipt,
+    runtime_receipt: object,
+) -> None:
+    """Refuse activation when the sealed consumer pin differs from its producer."""
+
+    effective_config = getattr(runtime_receipt, "effective_config", None)
+    expected_build = (
+        str(
+            effective_config.get(
+                "CHILI_IQFEED_L1_AUTHORITATIVE_BRIDGE_BUILD", ""
+            )
+            or ""
+        ).strip()
+        if isinstance(effective_config, Mapping)
+        else ""
+    )
+    observed_build = (
+        str(preselection.bridge_version or "").strip()
+        if type(preselection) is ExactPrintPreselectionReceipt
+        else ""
+    )
+    if not expected_build or expected_build != observed_build:
+        raise CapturedPaperOperatorChainError(
+            "IQFEED_BRIDGE_RUNTIME_AUTHORITY_MISMATCH",
+            "sealed PAPER consumer bridge authority differs from candidate capture",
+        )
+
+
 def _canonical_json_bytes(value: Any) -> bytes:
     try:
         return json.dumps(
@@ -1075,6 +1105,10 @@ def run_operator_chain(
         allowed_read_roots=activation_request.allowed_read_roots,
         seed_symbols=seed_symbols,
         allow_closed_session_activation_only=not extended_session_open,
+    )
+    _assert_runtime_preselection_bridge_parity(
+        preselection=preselection,
+        runtime_receipt=preinstalled_runtime_receipt,
     )
     certification_symbol = (
         _select_live_certification_symbol(preselection=preselection)

@@ -1861,6 +1861,60 @@ class LiveRunnerLoop:
         with self._iqfeed_admission_lock:
             self._iqfeed_admission_inflight.pop(token, None)
 
+    def _publish_runtime_snapshot_after_commit(self, session_id: int) -> bool:
+        """Best-effort observer projection, isolated from core PAPER state."""
+
+        scope = self._captured_paper_scope
+        if scope is None:
+            return False
+        db = None
+        try:
+            from .persistence import (
+                build_runtime_snapshot_values,
+                upsert_trading_automation_runtime_snapshot,
+            )
+
+            db = SessionLocal()
+            sess = (
+                db.query(TradingAutomationSession)
+                .filter(TradingAutomationSession.id == int(session_id))
+                .one_or_none()
+            )
+            if sess is None:
+                db.rollback()
+                return False
+            scope.assert_session(sess)
+            values = build_runtime_snapshot_values(
+                sess,
+                last_action=str(sess.state or "captured_paper_runtime_tick"),
+            )
+            upsert_trading_automation_runtime_snapshot(
+                db,
+                session_id=int(sess.id),
+                values=values,
+            )
+            db.commit()
+            return True
+        except Exception:
+            try:
+                if db is not None:
+                    db.rollback()
+            except Exception:
+                pass
+            _log.warning(
+                "[live_loop] captured PAPER runtime observer projection failed "
+                "session=%d core_state_unchanged=true",
+                int(session_id),
+                exc_info=True,
+            )
+            return False
+        finally:
+            try:
+                if db is not None:
+                    db.close()
+            except Exception:
+                pass
+
     def _admit_iqfeed_symbol(
         self,
         symbol: str,
@@ -1908,6 +1962,9 @@ class LiveRunnerLoop:
                         self._tracker.refresh(
                             expected_generation=expected_generation,
                         )
+                    self._publish_runtime_snapshot_after_commit(
+                        int(result["session_id"])
+                    )
                 return result
             except Exception:
                 _log.debug(
@@ -2243,6 +2300,8 @@ class LiveRunnerLoop:
                         "session=%d phase_one_committed=true retry_required=true",
                         session_id,
                     )
+            if self._captured_paper_scope is not None:
+                self._publish_runtime_snapshot_after_commit(session_id)
         finally:
             # Preserve the ordinary cleanup path while making it impossible to
             # imply that a committed captured phase-one write was rolled back.

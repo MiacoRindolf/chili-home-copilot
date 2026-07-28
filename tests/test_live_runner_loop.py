@@ -19,6 +19,7 @@ import app.services.trading.momentum_neural.captured_paper_entry_intent as inten
 import app.services.trading.momentum_neural.captured_paper_fill_capture as fill_capture_mod
 import app.services.trading.momentum_neural.live_runner as live_runner_mod
 import app.services.trading.momentum_neural.live_runner_loop as loop_mod
+import app.services.trading.momentum_neural.persistence as persistence_mod
 from app.services.trading.momentum_neural.alpaca_paper_identity import (
     alpaca_paper_account_identity_sha256,
 )
@@ -1256,6 +1257,11 @@ def test_captured_paper_loop_tick_uses_strict_dispatch_only(monkeypatch):
         broker_connection_generation=_CAPTURED_PAPER_CONNECTION_GENERATION,
     )
     loop = LiveRunnerLoop(captured_paper_scope=scope)
+    monkeypatch.setattr(
+        loop,
+        "_publish_runtime_snapshot_after_commit",
+        lambda _session_id: True,
+    )
     loop._worker_context.generation = 1
     lifecycle = SimpleNamespace(
         commits=0,
@@ -1312,6 +1318,96 @@ def test_captured_paper_loop_tick_uses_strict_dispatch_only(monkeypatch):
     ]
     assert lifecycle.commits == 1
     assert lifecycle.closes == 1
+
+
+def test_captured_paper_runtime_snapshot_isolated_transaction_is_fail_closed(
+    monkeypatch,
+):
+    scope = loop_mod.CapturedPaperLiveRunnerScope(
+        expected_account_id=_CAPTURED_PAPER_ACCOUNT_ID,
+        runtime_generation=_CAPTURED_PAPER_GENERATION,
+        broker_connection_generation=_CAPTURED_PAPER_CONNECTION_GENERATION,
+    )
+    loop = LiveRunnerLoop(captured_paper_scope=scope)
+    session = SimpleNamespace(
+        id=41,
+        user_id=1,
+        symbol="ACTU",
+        mode="live",
+        state="queued_live",
+        execution_family="alpaca_spot",
+        risk_snapshot_json={
+            "alpaca_account_scope": "alpaca:paper",
+            "alpaca_account_id": _CAPTURED_PAPER_ACCOUNT_ID,
+            "captured_paper_session_owner": _captured_paper_owner_marker(
+                session_id=41,
+                symbol="ACTU",
+            )
+        },
+        started_at=None,
+        created_at=datetime.now(timezone.utc).replace(tzinfo=None),
+        correlation_id="captured-paper-observer-test",
+    )
+    trace = []
+
+    class _Query:
+        def filter(self, *_args):
+            return self
+
+        def one_or_none(self):
+            trace.append("read_session")
+            return session
+
+    class _Db:
+        def query(self, _model):
+            return _Query()
+
+        def commit(self):
+            trace.append("observer_commit")
+
+        def rollback(self):
+            trace.append("observer_rollback")
+
+        def close(self):
+            trace.append("observer_close")
+
+    monkeypatch.setattr(loop_mod, "SessionLocal", _Db)
+    monkeypatch.setattr(
+        persistence_mod,
+        "build_runtime_snapshot_values",
+        lambda observed, **_kwargs: trace.append(
+            f"build:{observed.id}"
+        )
+        or {"user_id": 1},
+    )
+    monkeypatch.setattr(
+        persistence_mod,
+        "upsert_trading_automation_runtime_snapshot",
+        lambda _db, *, session_id, values: trace.append(
+            f"upsert:{session_id}:{values['user_id']}"
+        ),
+    )
+
+    assert loop._publish_runtime_snapshot_after_commit(41) is True
+    assert trace == [
+        "read_session",
+        "build:41",
+        "upsert:41:1",
+        "observer_commit",
+        "observer_close",
+    ]
+
+    trace.clear()
+    monkeypatch.setattr(
+        persistence_mod,
+        "build_runtime_snapshot_values",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            RuntimeError("synthetic observer failure")
+        ),
+    )
+
+    assert loop._publish_runtime_snapshot_after_commit(41) is False
+    assert trace == ["read_session", "observer_rollback", "observer_close"]
 
 
 def test_captured_paper_loop_dispatches_entry_and_exit_completion_only_after_commit_and_close(
@@ -1394,6 +1490,15 @@ def test_captured_paper_loop_dispatches_entry_and_exit_completion_only_after_com
         captured_paper_exit_completion_handler=complete_exit,
         captured_paper_exit_transport_handler=transport_exit,
     )
+    monkeypatch.setattr(
+        loop,
+        "_publish_runtime_snapshot_after_commit",
+        lambda session_id: trace.append(
+            (len(databases), f"runtime_snapshot:{session_id}")
+        )
+        or True,
+        raising=False,
+    )
     loop._worker_context.generation = 1
     monkeypatch.setattr(loop_mod, "SessionLocal", session_local)
     monkeypatch.setattr(
@@ -1416,14 +1521,17 @@ def test_captured_paper_loop_dispatches_entry_and_exit_completion_only_after_com
         (1, "commit"),
         (1, "close"),
         (1, "entry_completion"),
+        (1, "runtime_snapshot:41"),
         (2, "tick"),
         (2, "commit"),
         (2, "close"),
         (2, "exit_transport"),
+        (2, "runtime_snapshot:41"),
         (3, "tick"),
         (3, "commit"),
         (3, "close"),
         (3, "exit_completion"),
+        (3, "runtime_snapshot:41"),
     ]
 
 
@@ -1461,6 +1569,17 @@ def test_captured_paper_loop_commit_or_post_commit_failure_preserves_retry_witho
     loop = LiveRunnerLoop(
         captured_paper_scope=scope,
         captured_paper_exit_transport_handler=complete,
+    )
+    observer_attempts = []
+
+    def reject_observer_projection(session_id):
+        observer_attempts.append(session_id)
+        return False
+
+    monkeypatch.setattr(
+        loop,
+        "_publish_runtime_snapshot_after_commit",
+        reject_observer_projection,
     )
     loop._worker_context.generation = 1
     monkeypatch.setattr(loop_mod, "SessionLocal", _CommitFailureDb)
@@ -1501,6 +1620,7 @@ def test_captured_paper_loop_commit_or_post_commit_failure_preserves_retry_witho
     assert committed.rollbacks == 0
     assert committed.closes == 1
     assert calls.completions == 1
+    assert observer_attempts == [41]
 
 
 def test_expired_initial_release_refreshes_tracker_after_commit(monkeypatch):
@@ -1510,6 +1630,11 @@ def test_expired_initial_release_refreshes_tracker_after_commit(monkeypatch):
         broker_connection_generation=_CAPTURED_PAPER_CONNECTION_GENERATION,
     )
     loop = LiveRunnerLoop(captured_paper_scope=scope)
+    monkeypatch.setattr(
+        loop,
+        "_publish_runtime_snapshot_after_commit",
+        lambda _session_id: True,
+    )
     loop._running = True
     loop._generation = 7
     loop._worker_context.generation = 7
@@ -1842,10 +1967,26 @@ def test_captured_paper_admission_runs_under_exact_generation_and_refreshes(
     loop._running = True
     loop._generation = 7
     refreshes = []
+    observer_trace = []
+
+    def refresh_tracker(**kwargs):
+        refreshes.append(kwargs)
+        observer_trace.append("tracker_refresh")
+        return True
+
     monkeypatch.setattr(
         loop._tracker,
         "refresh",
-        lambda **kwargs: refreshes.append(kwargs) or True,
+        refresh_tracker,
+    )
+    monkeypatch.setattr(
+        loop,
+        "_publish_runtime_snapshot_after_commit",
+        lambda session_id: observer_trace.append(
+            f"runtime_snapshot:{session_id}"
+        )
+        or True,
+        raising=False,
     )
     payload = {"source": "iqfeed_l1", "message_type": "Q"}
 
@@ -1879,6 +2020,7 @@ def test_captured_paper_admission_runs_under_exact_generation_and_refreshes(
         }
     ]
     assert refreshes == [{"expected_generation": 7}]
+    assert observer_trace == ["tracker_refresh", "runtime_snapshot:41"]
     assert loop._iqfeed_admission_inflight == {}
 
 

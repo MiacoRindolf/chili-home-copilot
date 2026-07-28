@@ -820,6 +820,135 @@ def test_live_certification_symbol_rejects_untyped_preselection() -> None:
         chain._select_live_certification_symbol(preselection=object())  # type: ignore[arg-type]
 
 
+def test_runtime_bridge_authority_must_match_exact_preselection_build() -> None:
+    preselection = chain.ExactPrintPreselectionReceipt(
+        evidence_path=Path("candidate-preselection.json"),
+        evidence_sha256="a" * 64,
+        started_at=NOW,
+        completed_at=NOW,
+        bridge_version=(
+            "iqfeed-l1-exact-print-provenance-v3+sha256:" + "b" * 16
+        ),
+        bridge_run_id="11111111-2222-4333-8444-555555555555",
+        timestamp_basis="iqfeed_selected_trade_date_timems_exact",
+        bridge_source_sha256="b" * 64,
+    )
+    runtime_receipt = SimpleNamespace(
+        effective_config={
+            "CHILI_IQFEED_L1_AUTHORITATIVE_BRIDGE_BUILD": (
+                "iqfeed-l1-exact-print-provenance-v3+sha256:" + "c" * 16
+            )
+        }
+    )
+
+    with pytest.raises(
+        chain.CapturedPaperOperatorChainError,
+        match="IQFEED_BRIDGE_RUNTIME_AUTHORITY_MISMATCH",
+    ):
+        chain._assert_runtime_preselection_bridge_parity(
+            preselection=preselection,
+            runtime_receipt=runtime_receipt,
+        )
+
+
+def test_full_chain_rejects_runtime_bridge_mismatch_before_host_or_operator_work(
+    monkeypatch: pytest.MonkeyPatch,
+    chain_fixture: ChainFixture,
+) -> None:
+    monkeypatch.setattr(
+        chain, "_equity_extended_session_is_open", lambda **_kwargs: True
+    )
+    activation, _path, _digest = chain_fixture.publish()
+    monkeypatch.delitem(chain.sys.modules, "app.config", raising=False)
+    runtime_receipt = SimpleNamespace(
+        effective_config={
+            "CHILI_IQFEED_L1_AUTHORITATIVE_BRIDGE_BUILD": (
+                "iqfeed-l1-exact-print-provenance-v3+sha256:" + "c" * 16
+            )
+        }
+    )
+    monkeypatch.setattr(
+        chain,
+        "install_captured_paper_runtime_environment",
+        lambda *_args, **_kwargs: runtime_receipt,
+    )
+    monkeypatch.setattr(
+        chain,
+        "_read_exact_paper_account",
+        lambda **_kwargs: (
+            {"equity": "71868.33", "status": "ACTIVE"},
+            {
+                "endpoint": "/v2/account",
+                "environment": "paper",
+                "account_id": ACCOUNT_ID,
+            },
+            NOW,
+            NOW,
+        ),
+    )
+    monkeypatch.setattr(
+        chain, "_sha_source_inventory", lambda _root: {"test": "b" * 64}
+    )
+    manifest = activation.artifact_root / "bootstrap" / "artifacts" / "manifest.json"
+    manifest_sha = _write(manifest, _canonical({"paper": True}))
+    monkeypatch.setattr(
+        chain.bootstrap,
+        "build_iqfeed_capture_bootstrap_bundle_from_request",
+        lambda **_kwargs: SimpleNamespace(
+            manifest_path=manifest,
+            manifest_sha256=manifest_sha,
+        ),
+    )
+    monkeypatch.setattr(
+        chain,
+        "_discover_capture_seed_symbols",
+        lambda **_kwargs: ("VIVS",),
+    )
+    preselection_evidence = activation.artifact_root / "candidate-preselection.json"
+    preselection_sha = _write(
+        preselection_evidence,
+        _canonical({"capture_only": True, "orders_submitted": False}),
+    )
+    monkeypatch.setattr(
+        chain,
+        "_capture_candidate_exact_print_preselection",
+        lambda **_kwargs: chain.ExactPrintPreselectionReceipt(
+            evidence_path=preselection_evidence.resolve(strict=True),
+            evidence_sha256=preselection_sha,
+            started_at=NOW,
+            completed_at=NOW,
+            bridge_version=(
+                "iqfeed-l1-exact-print-provenance-v3+sha256:" + "b" * 16
+            ),
+            bridge_run_id="11111111-2222-4333-8444-555555555555",
+            timestamp_basis="iqfeed_selected_trade_date_timems_exact",
+            bridge_source_sha256="b" * 64,
+        ),
+    )
+
+    def forbidden(*_args: Any, **_kwargs: Any) -> Any:
+        raise AssertionError("host/operator work must not run after bridge mismatch")
+
+    monkeypatch.setattr(chain, "_select_live_certification_symbol", forbidden)
+    monkeypatch.setattr(chain.host_snapshot, "collect_host_snapshot", forbidden)
+    monkeypatch.setattr(chain.operator_flow, "configuration_from_plan", forbidden)
+    monkeypatch.setattr(
+        chain.operator_flow, "run_captured_paper_operator_flow", forbidden
+    )
+
+    with pytest.raises(
+        chain.CapturedPaperOperatorChainError,
+        match="IQFEED_BRIDGE_RUNTIME_AUTHORITY_MISMATCH",
+    ):
+        chain.run_operator_chain(
+            activation_request=activation,
+            chain_document=chain_fixture.document,
+        )
+
+    for name in ("operator", "preactivation", "activation", "receipts"):
+        assert not (activation.artifact_root / name).exists()
+
+
 def test_candidate_preselection_publishes_only_closed_zero_order_evidence(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -1085,7 +1214,13 @@ def test_full_operator_chain_bootstraps_exact_print_before_selection_and_is_hash
     activation, _path, _digest = chain_fixture.publish()
     monkeypatch.delitem(chain.sys.modules, "app.config", raising=False)
     calls: list[str] = []
-    runtime_receipt = object()
+    runtime_receipt = SimpleNamespace(
+        effective_config={
+            "CHILI_IQFEED_L1_AUTHORITATIVE_BRIDGE_BUILD": (
+                "iqfeed-l1-exact-print-provenance-v3+sha256:" + "b" * 16
+            )
+        }
+    )
     manifest = activation.artifact_root / "bootstrap" / "artifacts" / "manifest.json"
     manifest_sha = _write(manifest, _canonical({"paper": True}))
 
