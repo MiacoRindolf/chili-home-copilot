@@ -395,6 +395,7 @@ def _pressure_sample(
     *,
     observed_at: datetime = NOW,
     cpu_percent: float = 20.0,
+    write_latency_milliseconds: float = 10.0,
 ) -> CapturePressureSample:
     return CapturePressureSample(
         observed_at=observed_at,
@@ -402,7 +403,7 @@ def _pressure_sample(
         cpu_percent=cpu_percent,
         available_memory_bytes=16 * 1024**3,
         disk_free_bytes=300 * 1024**3,
-        write_latency_milliseconds=10.0,
+        write_latency_milliseconds=write_latency_milliseconds,
     )
 
 
@@ -1394,27 +1395,70 @@ def test_pressure_freshness_is_checked_after_hash_reverification(tmp_path):
         )
 
 
-@pytest.mark.parametrize(
-    "sample",
-    [
-        lambda bundle: _pressure_sample(
-            bundle, observed_at=NOW - timedelta(minutes=1)
-        ),
-        lambda bundle: _pressure_sample(bundle, cpu_percent=85.0),
-    ],
-)
-def test_composition_rejects_stale_or_already_pressured_host_sample(
-    tmp_path, sample
-):
+def test_composition_rejects_stale_host_pressure_sample(tmp_path):
     bundle = _make_bundle(tmp_path)
     verified = _load(bundle)
 
     with pytest.raises(CaptureContractError, match="pressure"):
         bootstrap.prepare_iqfeed_capture_ingress(
             verified,
-            pressure_sample=sample(bundle),
+            pressure_sample=_pressure_sample(
+                bundle, observed_at=NOW - timedelta(minutes=1)
+            ),
             wall_clock=lambda: NOW,
         )
+
+
+def test_composition_retains_fresh_initial_pressure_for_hysteretic_recovery(
+    tmp_path,
+):
+    bundle = _make_bundle(tmp_path)
+    composition = bootstrap.prepare_iqfeed_capture_ingress(
+        _load(bundle),
+        pressure_sample=_pressure_sample(
+            bundle, write_latency_milliseconds=100.0
+        ),
+        wall_clock=lambda: NOW,
+    )
+    try:
+        assert composition.state is bootstrap.IqfeedIngressCompositionState.PREPARED
+        initial = composition.pressure_controller.health()
+        assert initial["required_full_fidelity_admissible"] is True
+        assert initial["pressure_state"] == "normal"
+        assert initial["entry_streak"] == 1
+        assert initial["sample_count"] == 1
+
+        for offset in (1, 2):
+            pressured = composition.pressure_controller.observe(
+                _pressure_sample(
+                    bundle,
+                    observed_at=NOW + timedelta(seconds=offset),
+                    write_latency_milliseconds=100.0,
+                )
+            )
+        assert pressured["required_full_fidelity_admissible"] is False
+        assert pressured["pressure_state"] == "failed_closed"
+        assert pressured["active_reasons"] == ("write_latency",)
+        assert pressured["rejection_reason"] == (
+            "capture_resource_pressure_write_latency"
+        )
+
+        for offset in (3, 4, 5):
+            recovered = composition.pressure_controller.observe(
+                _pressure_sample(
+                    bundle,
+                    observed_at=NOW + timedelta(seconds=offset),
+                    write_latency_milliseconds=10.0,
+                )
+            )
+        assert recovered["required_full_fidelity_admissible"] is True
+        assert recovered["pressure_state"] == "normal"
+        assert recovered["rejection_reason"] is None
+        assert recovered["entry_streak"] == 0
+        assert recovered["active_reasons"] == ()
+        assert recovered["sample_count"] == 6
+    finally:
+        composition.close()
 
 
 def test_composition_start_rolls_back_first_handoff_if_second_cannot_start(
