@@ -11,6 +11,7 @@ import socket
 import sys
 from types import ModuleType, SimpleNamespace
 from typing import Any, Mapping
+import uuid
 
 import pytest
 
@@ -163,6 +164,7 @@ def chain_fixture(tmp_path: Path) -> ChainFixture:
             "iqfeed_l1": {"transport": "loopback", "capture": "exact-print"},
             "iqfeed_l2": {"transport": "loopback", "capture": "hot-symbol-delta"},
         },
+        "static_proof_cache": None,
     }
     return ChainFixture(
         activation=activation,
@@ -1204,14 +1206,34 @@ def test_full_operator_chain_rejects_application_loaded_before_runtime_install(
     assert installed is False
 
 
+@pytest.mark.parametrize("use_static_cache", (False, True))
 def test_full_operator_chain_bootstraps_exact_print_before_selection_and_is_hash_bound(
     monkeypatch: pytest.MonkeyPatch,
     chain_fixture: ChainFixture,
+    use_static_cache: bool,
 ) -> None:
     monkeypatch.setattr(
         chain, "_equity_extended_session_is_open", lambda **_kwargs: True
     )
-    activation, _path, _digest = chain_fixture.publish()
+    chain_document = dict(chain_fixture.document)
+    cache_path = None
+    cache_sha = None
+    if use_static_cache:
+        cache_raw = _canonical({"prior_static_proof": True})
+        cache_sha = _sha(cache_raw)
+        cache_path = (
+            chain_fixture.root
+            / "prior"
+            / "static-proof-cache"
+            / cache_sha[:2]
+            / f"{cache_sha}.json"
+        )
+        _write(cache_path, cache_raw)
+        chain_document["static_proof_cache"] = {
+            "path": str(cache_path.resolve(strict=True)),
+            "sha256": cache_sha,
+        }
+    activation, _path, _digest = chain_fixture.publish(document=chain_document)
     monkeypatch.delitem(chain.sys.modules, "app.config", raising=False)
     calls: list[str] = []
     runtime_receipt = SimpleNamespace(
@@ -1229,10 +1251,9 @@ def test_full_operator_chain_bootstraps_exact_print_before_selection_and_is_hash
         "install_captured_paper_runtime_environment",
         lambda *_a, **_k: calls.append("install-runtime") or runtime_receipt,
     )
-    monkeypatch.setattr(
-        chain,
-        "_read_exact_paper_account",
-        lambda **_k: (
+    def fake_paper_account(**_kwargs: Any) -> tuple[object, ...]:
+        calls.append("paper-account-fresh")
+        return (
             {"equity": "71868.33", "status": "ACTIVE"},
             {
                 "endpoint": "/v2/account",
@@ -1241,8 +1262,9 @@ def test_full_operator_chain_bootstraps_exact_print_before_selection_and_is_hash
             },
             NOW,
             NOW,
-        ),
-    )
+        )
+
+    monkeypatch.setattr(chain, "_read_exact_paper_account", fake_paper_account)
     monkeypatch.setattr(chain, "_sha_source_inventory", lambda _root: {"test": "b" * 64})
 
     def fake_bootstrap(**kwargs: Any) -> SimpleNamespace:
@@ -1377,11 +1399,12 @@ def test_full_operator_chain_bootstraps_exact_print_before_selection_and_is_hash
 
     result = chain.run_operator_chain(
         activation_request=activation,
-        chain_document=chain_fixture.document,
+        chain_document=chain_document,
     )
 
     assert calls == [
         "install-runtime",
+        "paper-account-fresh",
         "bootstrap-read-only",
         "discover-seed-read-only",
         "candidate-capture-only",
@@ -1421,12 +1444,23 @@ def test_full_operator_chain_bootstraps_exact_print_before_selection_and_is_hash
     )
     assert result["activation_runner_request_sha256"] == activation.request_sha256
     assert result["operator_chain_request_sha256"] == activation.chain_request_sha256
-    assert result["resource_benchmark_sha256"] == chain_fixture.document[
+    assert result["resource_benchmark_sha256"] == chain_document[
         "resource_benchmark"
     ]["sha256"]
     assert observed_plan["expected_account_id"] == ACCOUNT_ID
     assert observed_plan["capture_certification_symbol"] == "VIVS"
     assert observed_plan["runtime_env_sha256"] == activation.runtime_env_sha256
+    if use_static_cache:
+        assert observed_plan["static_proof_cache_path"] == str(cache_path)
+        assert observed_plan["static_proof_cache_sha256"] == cache_sha
+        restart_nonce = str(
+            uuid.UUID(observed_plan["static_proof_restart_nonce"])
+        )
+        assert restart_nonce != observed_plan["activation_generation"]
+    else:
+        assert observed_plan["static_proof_cache_path"] is None
+        assert observed_plan["static_proof_cache_sha256"] is None
+        assert observed_plan["static_proof_restart_nonce"] is None
 
     request_paths = list(
         (activation.artifact_root / "bootstrap" / "inputs").glob("*.request.json")

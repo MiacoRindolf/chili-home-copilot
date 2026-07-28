@@ -101,6 +101,10 @@ _PLAN_KEYS = frozenset(
         "iqfeed_bootstrap_manifest_sha256",
         "python_executable",
         "python_dependency_root",
+        "python_dependency_root_identity_sha256",
+        "static_proof_cache_path",
+        "static_proof_cache_sha256",
+        "static_proof_restart_nonce",
         "no_order_receipt_output",
         "powershell_executable",
         "host_principal_user_id",
@@ -171,6 +175,7 @@ class CapturedPaperOperatorConfiguration:
     iqfeed_bootstrap_manifest_sha256: str
     python_executable: Path
     python_dependency_root: Path
+    python_dependency_root_identity_sha256: str
     no_order_receipt_output: Path
     powershell_executable: Path
     host_principal_user_id: str
@@ -182,6 +187,9 @@ class CapturedPaperOperatorConfiguration:
     restore_plan_sha256: str
     capture_certification_symbol: str
     allowed_read_roots: tuple[Path, ...]
+    static_proof_cache_path: Path | None = None
+    static_proof_cache_sha256: str | None = None
+    static_proof_restart_nonce: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -214,6 +222,11 @@ class BuiltCapturedPaperOperatorFlow:
     code_build_sha256: str
     activation_generation: str
     expected_account_id: str
+    static_proof_cache_path: Path | None
+    static_proof_cache_sha256: str | None
+    static_proof_cache_reused: bool
+    static_proof_restart_nonce: str | None
+    static_proof_cache_mint_reason: str | None
     account_scope: str = "alpaca:paper"
     host_snapshot_authority: str = (
         "PREACTIVATION_BASELINE_FROM_EXTERNAL_RAW_SNAPSHOT"
@@ -234,6 +247,26 @@ class BuiltCapturedPaperOperatorFlow:
             "account_scope": self.account_scope,
             "expected_account_id": self.expected_account_id,
             "code_build_sha256": self.code_build_sha256,
+            "static_proof_cache": {
+                "path": (
+                    str(self.static_proof_cache_path)
+                    if self.static_proof_cache_path is not None
+                    else None
+                ),
+                "sha256": self.static_proof_cache_sha256,
+                "reused": self.static_proof_cache_reused,
+                "restart_nonce": self.static_proof_restart_nonce,
+                "mint_status": (
+                    "REUSED"
+                    if self.static_proof_cache_reused
+                    else (
+                        "MINTED"
+                        if self.static_proof_cache_path is not None
+                        else "UNAVAILABLE"
+                    )
+                ),
+                "reason_code": self.static_proof_cache_mint_reason,
+            },
             "probe_manifest": {
                 "path": str(self.probe_manifest_path),
                 "sha256": self.probe_manifest_sha256,
@@ -449,6 +482,47 @@ def _validated_configuration(
         raise CapturedPaperOperatorFlowError(
             "CAPTURE_SYMBOL_INVALID", "capture certification symbol is invalid"
         )
+    dependency_identity_sha256 = _sha(
+        value.python_dependency_root_identity_sha256,
+        "python_dependency_root_identity_sha256",
+    )
+    cache_values = (
+        value.static_proof_cache_path,
+        value.static_proof_cache_sha256,
+        value.static_proof_restart_nonce,
+    )
+    cache_path: Path | None = None
+    cache_sha256: str | None = None
+    restart_nonce: str | None = None
+    if any(item is not None for item in cache_values):
+        if any(item is None for item in cache_values):
+            raise CapturedPaperOperatorFlowError(
+                "STATIC_CACHE_REFERENCE_INVALID",
+                "static proof cache path, hash, and restart nonce are inseparable",
+            )
+        cache_path = _local_path(
+            Path(str(value.static_proof_cache_path)),
+            "static_proof_cache_path",
+            strict=True,
+        )
+        if not cache_path.is_file() or not _inside(cache_path, roots):
+            raise CapturedPaperOperatorFlowError(
+                "STATIC_CACHE_REFERENCE_INVALID",
+                "static proof cache escaped the allowed read roots",
+            )
+        cache_sha256 = _sha(
+            value.static_proof_cache_sha256,
+            "static_proof_cache_sha256",
+        )
+        _stable_read(
+            cache_path,
+            expected_sha256=cache_sha256,
+            max_bytes=_MAX_ARTIFACT_BYTES,
+        )
+        restart_nonce = _canonical_uuid(
+            value.static_proof_restart_nonce,
+            "static_proof_restart_nonce",
+        )
     return CapturedPaperOperatorConfiguration(
         activation_generation=generation,
         expected_account_id=account,
@@ -481,6 +555,10 @@ def _validated_configuration(
         restore_plan_sha256=snapshot_hashes["restore_plan_path"],
         capture_certification_symbol=symbol,
         allowed_read_roots=tuple(roots),
+        python_dependency_root_identity_sha256=dependency_identity_sha256,
+        static_proof_cache_path=cache_path,
+        static_proof_cache_sha256=cache_sha256,
+        static_proof_restart_nonce=restart_nonce,
     )
 
 
@@ -1189,20 +1267,37 @@ def _materialize_probe_authorities(
         receipt=composition.runtime_receipt,
         settings_projection=composition.settings_projection,
     )
-    focused_authority = probes.SubprocessFocusedRegressionAuthority(
-        candidate_root=config.candidate_root,
-        python_executable=config.python_executable,
-        environment=test_environment,
-        command_runner=composition.command_runner,
-        wall_clock=composition.wall_clock,
-    )
-    lifecycle_authority = probes.SubprocessLifecycleScenarioAuthority(
-        candidate_root=config.candidate_root,
-        python_executable=config.python_executable,
-        environment=test_environment,
-        command_runner=composition.command_runner,
-        wall_clock=composition.wall_clock,
-    )
+    cached_static: probes.LoadedStaticProofCache | None = None
+    if config.static_proof_cache_path is not None:
+        cached_static = probes.load_static_proof_cache(
+            cache_path=config.static_proof_cache_path,
+            cache_sha256=str(config.static_proof_cache_sha256),
+            context=context,
+            python_dependency_root_identity_sha256=(
+                config.python_dependency_root_identity_sha256
+            ),
+            restart_nonce=str(config.static_proof_restart_nonce),
+            allowed_read_roots=config.allowed_read_roots,
+            wall_clock=composition.wall_clock,
+        )
+        focused_native = cached_static.focused_regressions
+        lifecycle_native = cached_static.lifecycle_preflight
+    else:
+        focused_authority = probes.SubprocessFocusedRegressionAuthority(
+            candidate_root=config.candidate_root,
+            python_executable=config.python_executable,
+            environment=test_environment,
+            command_runner=composition.command_runner,
+            wall_clock=composition.wall_clock,
+        )
+        lifecycle_authority = probes.SubprocessLifecycleScenarioAuthority(
+            candidate_root=config.candidate_root,
+            python_executable=config.python_executable,
+            environment=test_environment,
+            command_runner=composition.command_runner,
+            wall_clock=composition.wall_clock,
+        )
+        focused_native = focused_authority.execute()
     rollback_authority = probes.HostCutoverPreactivationBaselineAuthority(
         context=context,
         candidate_root=config.candidate_root,
@@ -1224,10 +1319,10 @@ def _materialize_probe_authorities(
     # Fixed tests and host snapshots have the longest TTL.  The provider smoke,
     # kill-switch read, and broker census happen last so their short freshness
     # windows do not expire behind a test shard.
-    focused_native = focused_authority.execute()
     rollback_native = rollback_authority.observe()
     rehearsal_codes = rehearsal()
-    lifecycle_native = lifecycle_authority.execute()
+    if cached_static is None:
+        lifecycle_native = lifecycle_authority.execute()
     runtime_native = runtime_authority.observe()
     capture_native = probes.CaptureOnlySmokeReadAuthority(
         smoke_runner=composition.capture_smoke_runner
@@ -1498,6 +1593,43 @@ def run_captured_paper_operator_flow(
         max_age_seconds_by_kind=probes.OPERATIONAL_MAX_AGE_SECONDS_BY_KIND,
         wall_clock=lambda: receipt_now,
     )
+    if config.static_proof_cache_path is None:
+        try:
+            static_cache_ref = probes.publish_static_proof_cache(
+                context=context,
+                python_dependency_root_identity_sha256=(
+                    config.python_dependency_root_identity_sha256
+                ),
+                focused_regressions=materialized.focused_regressions.execute(),
+                lifecycle_preflight=materialized.lifecycle_preflight.execute(),
+                source_probe_manifest_path=str(probe_result["manifest_path"]),
+                source_probe_manifest_sha256=str(probe_result["manifest_sha256"]),
+                output_root=probe_root,
+                wall_clock=lambda: receipt_now,
+            )
+        except probes.CapturedPaperPreactivationProbeError as exc:
+            static_cache_path = None
+            static_cache_sha256 = None
+            static_cache_mint_reason = exc.code
+        except OSError:
+            static_cache_path = None
+            static_cache_sha256 = None
+            static_cache_mint_reason = "STATIC_CACHE_MINT_IO_UNAVAILABLE"
+        else:
+            static_cache_path = Path(str(static_cache_ref["path"]))
+            static_cache_sha256 = _sha(
+                static_cache_ref["sha256"],
+                "static_proof_cache.sha256",
+            )
+            static_cache_mint_reason = None
+        static_cache_reused = False
+        static_restart_nonce = None
+    else:
+        static_cache_path = config.static_proof_cache_path
+        static_cache_sha256 = str(config.static_proof_cache_sha256)
+        static_cache_reused = True
+        static_restart_nonce = config.static_proof_restart_nonce
+        static_cache_mint_reason = None
     probe_manifest = probe_result["manifest"]
     receipt_rows = probe_manifest.get("readiness_receipts")
     if not isinstance(receipt_rows, Mapping) or set(receipt_rows) != set(
@@ -1601,6 +1733,11 @@ def run_captured_paper_operator_flow(
         code_build_sha256=inventory.code_build_sha256,
         activation_generation=config.activation_generation,
         expected_account_id=config.expected_account_id,
+        static_proof_cache_path=static_cache_path,
+        static_proof_cache_sha256=static_cache_sha256,
+        static_proof_cache_reused=static_cache_reused,
+        static_proof_restart_nonce=static_restart_nonce,
+        static_proof_cache_mint_reason=static_cache_mint_reason,
     )
 
 
@@ -1671,6 +1808,24 @@ def configuration_from_plan(document: Mapping[str, Any]) -> CapturedPaperOperato
             ),
             python_executable=Path(str(document["python_executable"])),
             python_dependency_root=Path(str(document["python_dependency_root"])),
+            python_dependency_root_identity_sha256=str(
+                document["python_dependency_root_identity_sha256"]
+            ),
+            static_proof_cache_path=(
+                Path(str(document["static_proof_cache_path"]))
+                if document["static_proof_cache_path"] is not None
+                else None
+            ),
+            static_proof_cache_sha256=(
+                str(document["static_proof_cache_sha256"])
+                if document["static_proof_cache_sha256"] is not None
+                else None
+            ),
+            static_proof_restart_nonce=(
+                str(document["static_proof_restart_nonce"])
+                if document["static_proof_restart_nonce"] is not None
+                else None
+            ),
             no_order_receipt_output=Path(str(document["no_order_receipt_output"])),
             powershell_executable=Path(str(document["powershell_executable"])),
             host_principal_user_id=str(document["host_principal_user_id"]),

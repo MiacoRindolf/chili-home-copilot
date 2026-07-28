@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import base64
 from dataclasses import replace
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 import hashlib
 import json
 from pathlib import Path
@@ -25,6 +25,8 @@ UTC = timezone.utc
 NOW = datetime(2026, 7, 16, 18, 0, tzinfo=UTC)
 ACCOUNT = "11111111-2222-4333-8444-555555555555"
 GENERATION = "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee"
+RESTART_GENERATION = "bbbbbbbb-cccc-4ddd-8eee-ffffffffffff"
+RESTART_NONCE = "cccccccc-dddd-4eee-8fff-aaaaaaaaaaaa"
 
 
 def test_operational_receipt_windows_match_activation_contract() -> None:
@@ -727,6 +729,240 @@ def test_full_probe_run_publishes_v3_artifacts_receipts_and_non_overwriting_mani
                 kind: 3600 for kind in readiness.PREACTIVATION_KINDS
             },
             wall_clock=lambda: NOW,
+        )
+
+
+def _mint_static_cache(
+    tmp_path: Path,
+) -> tuple[
+    readiness.ReadinessValidationContext,
+    Mapping[str, object],
+]:
+    output = tmp_path / "cache-output"
+    output.mkdir()
+    (tmp_path / "capture").mkdir()
+    ctx = context(tmp_path)
+    runtime, ctx = runtime_authority(ctx)
+    result = probes.run_trusted_preactivation_probes(
+        context=ctx,
+        authorities=authorities(ctx, runtime),
+        output_root=output,
+        max_age_seconds_by_kind=probes.OPERATIONAL_MAX_AGE_SECONDS_BY_KIND,
+        wall_clock=lambda: NOW,
+    )
+    cache = probes.publish_static_proof_cache(
+        context=ctx,
+        python_dependency_root_identity_sha256=h("dependency-root"),
+        focused_regressions=focused_authority().value,
+        lifecycle_preflight=lifecycle_authority().value,
+        source_probe_manifest_path=str(result["manifest_path"]),
+        source_probe_manifest_sha256=str(result["manifest_sha256"]),
+        output_root=output,
+        wall_clock=lambda: NOW,
+    )
+    return ctx, cache
+
+
+def test_static_proof_cache_round_trip_reuses_only_native_slow_proofs_for_new_generation(
+    tmp_path: Path,
+) -> None:
+    source_context, reference = _mint_static_cache(tmp_path)
+    restart_context = replace(
+        source_context,
+        activation_generation=RESTART_GENERATION,
+    )
+
+    loaded = probes.load_static_proof_cache(
+        cache_path=str(reference["path"]),
+        cache_sha256=str(reference["sha256"]),
+        context=restart_context,
+        python_dependency_root_identity_sha256=h("dependency-root"),
+        restart_nonce=RESTART_NONCE,
+        allowed_read_roots=(tmp_path,),
+        wall_clock=lambda: NOW + timedelta(hours=23),
+    )
+
+    assert loaded.source_activation_generation == GENERATION
+    assert loaded.path.name == f"{loaded.sha256}.json"
+    assert loaded.path.parent.name == loaded.sha256[:2]
+    assert loaded.path.parent.parent.name == "static-proof-cache"
+    focused = probes._focused_regression_observations(
+        StaticAuthority(loaded.focused_regressions),
+        context=restart_context,
+        now=NOW,
+    )
+    lifecycle = probes._lifecycle_observations(
+        StaticAuthority(loaded.lifecycle_preflight),
+        context=restart_context,
+        now=NOW,
+    )
+    assert focused["real_network_call_count"] == 0
+    assert focused["real_broker_post_call_count"] == 0
+    assert lifecycle["real_network_call_count"] == 0
+    assert lifecycle["blind_repost_count"] == 0
+
+
+def test_23_hour_cache_mints_current_receipts_without_rewriting_execution_times(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source_now = NOW
+    source_context, reference = _mint_static_cache(tmp_path)
+    restart_now = source_now + timedelta(hours=23)
+    restart_context = replace(
+        source_context,
+        activation_generation=RESTART_GENERATION,
+    )
+    loaded = probes.load_static_proof_cache(
+        cache_path=str(reference["path"]),
+        cache_sha256=str(reference["sha256"]),
+        context=restart_context,
+        python_dependency_root_identity_sha256=h("dependency-root"),
+        restart_nonce=RESTART_NONCE,
+        allowed_read_roots=(tmp_path,),
+        wall_clock=lambda: restart_now,
+    )
+
+    monkeypatch.setitem(globals(), "NOW", restart_now)
+    monkeypatch.setitem(globals(), "GENERATION", RESTART_GENERATION)
+    runtime, restart_context = runtime_authority(restart_context)
+    fresh = authorities(restart_context, runtime)
+    materialized = replace(
+        fresh,
+        focused_regressions=StaticAuthority(loaded.focused_regressions),
+        lifecycle_preflight=StaticAuthority(loaded.lifecycle_preflight),
+    )
+    output = tmp_path / "restart-output"
+    output.mkdir()
+
+    result = probes.run_trusted_preactivation_probes(
+        context=restart_context,
+        authorities=materialized,
+        output_root=output,
+        max_age_seconds_by_kind=probes.OPERATIONAL_MAX_AGE_SECONDS_BY_KIND,
+        wall_clock=lambda: restart_now,
+    )
+
+    receipts = result["manifest"]["readiness_receipts"]
+    focused_receipt = json.loads(
+        Path(receipts["focused_regressions"]["path"]).read_text(encoding="utf-8")
+    )
+    lifecycle_receipt = json.loads(
+        Path(receipts["lifecycle_preflight"]["path"]).read_text(encoding="utf-8")
+    )
+    assert focused_receipt["captured_at"] == restart_now.isoformat()
+    assert lifecycle_receipt["captured_at"] == restart_now.isoformat()
+    assert focused_receipt["evidence"]["completed_at"] == source_now.isoformat()
+    assert lifecycle_receipt["evidence"]["completed_at"] == source_now.isoformat()
+
+
+def test_static_proof_cache_fails_closed_on_tamper_roster_dependency_generation_and_expiry(
+    tmp_path: Path,
+) -> None:
+    source_context, reference = _mint_static_cache(tmp_path)
+    restart_context = replace(
+        source_context,
+        activation_generation=RESTART_GENERATION,
+    )
+    kwargs = {
+        "context": restart_context,
+        "python_dependency_root_identity_sha256": h("dependency-root"),
+        "restart_nonce": RESTART_NONCE,
+        "allowed_read_roots": (tmp_path,),
+    }
+    cache_path = Path(str(reference["path"]))
+    original = cache_path.read_bytes()
+    cache_path.write_bytes(original + b" ")
+    with pytest.raises(
+        probes.CapturedPaperPreactivationProbeError,
+        match="STATIC_CACHE_HASH_MISMATCH",
+    ):
+        probes.load_static_proof_cache(
+            cache_path=cache_path,
+            cache_sha256=str(reference["sha256"]),
+            wall_clock=lambda: NOW,
+            **kwargs,
+        )
+    cache_path.write_bytes(original)
+
+    forged = json.loads(original)
+    forged["focused_roster_sha256"] = h("foreign-roster")
+    forged_raw = canonical(forged)
+    forged_sha = hashlib.sha256(forged_raw).hexdigest()
+    forged_path = (
+        cache_path.parent.parent / forged_sha[:2] / f"{forged_sha}.json"
+    )
+    forged_path.parent.mkdir()
+    forged_path.write_bytes(forged_raw)
+    with pytest.raises(
+        probes.CapturedPaperPreactivationProbeError,
+        match="STATIC_CACHE_BINDING_MISMATCH",
+    ):
+        probes.load_static_proof_cache(
+            cache_path=forged_path,
+            cache_sha256=forged_sha,
+            wall_clock=lambda: NOW,
+            **kwargs,
+        )
+
+    forged_native = json.loads(original)
+    forged_native["native_observations"]["focused_regressions"][
+        "side_effect_events"
+    ][0]["count"] = 1
+    forged_native_raw = canonical(forged_native)
+    forged_native_sha = hashlib.sha256(forged_native_raw).hexdigest()
+    forged_native_path = (
+        cache_path.parent.parent
+        / forged_native_sha[:2]
+        / f"{forged_native_sha}.json"
+    )
+    forged_native_path.parent.mkdir()
+    forged_native_path.write_bytes(forged_native_raw)
+    with pytest.raises(
+        probes.CapturedPaperPreactivationProbeError,
+        match="STATIC_CACHE_PROVENANCE_INVALID",
+    ):
+        probes.load_static_proof_cache(
+            cache_path=forged_native_path,
+            cache_sha256=forged_native_sha,
+            wall_clock=lambda: NOW,
+            **kwargs,
+        )
+
+    with pytest.raises(
+        probes.CapturedPaperPreactivationProbeError,
+        match="STATIC_CACHE_BINDING_MISMATCH",
+    ):
+        probes.load_static_proof_cache(
+            cache_path=cache_path,
+            cache_sha256=str(reference["sha256"]),
+            wall_clock=lambda: NOW,
+            **{**kwargs, "python_dependency_root_identity_sha256": h("other")},
+        )
+    with pytest.raises(
+        probes.CapturedPaperPreactivationProbeError,
+        match="STATIC_CACHE_BINDING_MISMATCH",
+    ):
+        probes.load_static_proof_cache(
+            cache_path=cache_path,
+            cache_sha256=str(reference["sha256"]),
+            wall_clock=lambda: NOW,
+            **{
+                **kwargs,
+                "context": source_context,
+                "restart_nonce": "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee",
+            },
+        )
+    with pytest.raises(
+        probes.CapturedPaperPreactivationProbeError,
+        match="STATIC_CACHE_BINDING_MISMATCH",
+    ):
+        probes.load_static_proof_cache(
+            cache_path=cache_path,
+            cache_sha256=str(reference["sha256"]),
+            wall_clock=lambda: NOW
+            + timedelta(seconds=probes.STATIC_PROOF_CACHE_MAX_AGE_SECONDS + 1),
+            **kwargs,
         )
 
 
