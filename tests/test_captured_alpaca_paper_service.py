@@ -261,6 +261,8 @@ class _PaperAdapter:
         self, *, after, until, read_binding
     ):
         assert after < until
+        assert read_binding["after"] == after.astimezone(UTC).isoformat()
+        assert read_binding["until"] == until.astimezone(UTC).isoformat()
         encoded = _canonical(self.transition_orders)
         inventory_sha256 = hashlib.sha256(encoded.encode()).hexdigest()
         return {

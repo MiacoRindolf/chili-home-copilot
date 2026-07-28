@@ -2186,8 +2186,8 @@ def _paper_order_transition_fence(
             broker_snapshot.get("order_submission_audit_sha256"),
             "order-submission audit",
         ),
-        "after": _iso(after_utc),
-        "until": _iso(until_utc),
+        "after": after_utc.isoformat(),
+        "until": until_utc.isoformat(),
     }
     census = adapter.get_paper_order_transition_census(
         after=after_utc,
