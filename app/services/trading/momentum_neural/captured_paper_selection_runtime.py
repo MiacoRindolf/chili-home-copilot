@@ -1297,6 +1297,37 @@ class CapturedPaperSelectionLifecycleWorker:
                                 components,
                                 deadline=initial_cycle_deadline,
                             )
+                elif self.wait_for_initial_pressure:
+                    retained_deadline: float | None = None
+
+                    def before_ingress_admission(
+                        _event: Any,
+                        _event_size: int,
+                        rejection_reason: str | None,
+                    ) -> None:
+                        nonlocal retained_deadline
+                        self._assert_fence()
+                        if rejection_reason is None:
+                            return
+                        if retained_deadline is None:
+                            retained_deadline = (
+                                float(self.monotonic_clock())
+                                + self.durable_timeout_seconds
+                            )
+                            if not math.isfinite(retained_deadline):
+                                _reject(
+                                    "INGRESS_PRESSURE_HEALTH_INVALID",
+                                    "selection retained-admission deadline is "
+                                    "non-finite",
+                                )
+                        self.deferred_reader.suspend(
+                            "selection_capture_pressure_unavailable"
+                        )
+                        self._wait_for_initial_ingress_retry(
+                            components,
+                            deadline=retained_deadline,
+                            rejection_reason=rejection_reason,
+                        )
 
                 receipt = publisher.publish_bundle(
                     bundle=occurrence.bundle,

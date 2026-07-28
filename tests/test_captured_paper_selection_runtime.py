@@ -351,6 +351,15 @@ class _FakePublisher:
         bundle = kwargs["bundle"]
         assert getattr(bundle, "source_sequence") == self.reserved_sequence
         before_ingress_admission = kwargs.get("before_ingress_admission")
+        if (
+            before_ingress_admission is None
+            and self.retained_rejection_reasons
+        ):
+            reason = self.retained_rejection_reasons.pop(0)
+            self.reserved_sequence = None
+            self.poisoned = True
+            self.poison_reason = f"queue_ingress_rejected:{reason}"
+            return SimpleNamespace(accepted=False)
         if before_ingress_admission is not None:
             assert callable(before_ingress_admission)
             self.admission_callback_reasons.append(None)
@@ -1056,6 +1065,50 @@ def test_retained_initial_ingress_retries_without_rereading_source(
     assert harness.publisher.admission_callback_reasons == [None, reason]
     assert harness.publisher.accepted_through == 1
     assert harness.publisher.poisoned is False
+    harness.worker.close(join_timeout_seconds=1.0)
+
+
+def test_periodic_pressure_retries_retained_occurrence_without_poison(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(_WARMUP_POLL_TARGET, 0.001)
+    reason = "capture_resource_pressure_write_latency"
+    harness = _Harness(
+        tmp_path,
+        initial_snapshot_warmup_seconds=1.0,
+        wait_for_initial_pressure=True,
+        pressure_health_sequence=[_pressure_health(clean=True)],
+    )
+    harness.worker.start()
+    assert harness.publisher is not None
+    assert harness.source is not None
+    assert harness.pressure_controller is not None
+
+    suspensions: list[tuple[str, bool]] = []
+    suspend = harness.reader.suspend
+
+    def record_suspend(reason: str) -> None:
+        suspend(reason)
+        suspensions.append((reason, harness.reader.health()["suspended"]))
+
+    monkeypatch.setattr(harness.reader, "suspend", record_suspend)
+    harness.publisher.retained_rejection_reasons = [reason]
+    harness.publisher.admission_callback_reasons = []
+    harness.source.recovery_snapshot_pending = True
+    harness.pressure_controller._health_sequence = [_pressure_health(clean=True)]
+    harness.pressure_controller.health_calls = 0
+
+    harness.worker._run_cycle(initial=False)
+
+    assert harness.source.read_count == 2
+    assert harness.log.count("source_build") == 2
+    assert harness.publisher.admission_callback_reasons == [None, reason]
+    assert suspensions == [("selection_capture_pressure_unavailable", True)]
+    assert harness.publisher.accepted_through == 2
+    assert harness.publisher.poisoned is False
+    assert harness.reader.health()["installed"] is True
+    assert harness.worker.health()["fatal"] is False
     harness.worker.close(join_timeout_seconds=1.0)
 
 
