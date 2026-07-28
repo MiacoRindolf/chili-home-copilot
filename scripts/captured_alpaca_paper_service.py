@@ -7420,6 +7420,9 @@ def _execute_active_service(
     supervisor_started = False
     start_health: Mapping[str, Any] | None = None
     consumed_active_authority: Mapping[str, Any] | None = None
+    consumed_final_activation: (
+        activation_contract.VerifiedCapturedPaperActivation | None
+    ) = None
     try:
         final_broker_snapshot = _paper_broker_snapshot(
             composition.adapter,
@@ -7435,7 +7438,7 @@ def _execute_active_service(
         )
 
         def consume_final_start_authority() -> Mapping[str, Any]:
-            nonlocal consumed_active_authority
+            nonlocal consumed_active_authority, consumed_final_activation
             refreshed = _reload_final_activation_authority(
                 verified,
                 allowed_read_roots=allowed_read_roots,
@@ -7534,17 +7537,28 @@ def _execute_active_service(
             host_activation_handshake.publish_active_start_evidence(
                 consumed_active_authority
             )
+            consumed_final_activation = refreshed
             return dict(consumed_active_authority)
 
         def assert_final_start_current() -> None:
-            refreshed = _reload_final_activation_authority(
-                verified,
-                allowed_read_roots=allowed_read_roots,
-                wall_clock=wall_clock,
-            )
+            if (
+                consumed_final_activation is None
+                or consumed_active_authority is None
+            ):
+                raise CapturedAlpacaPaperServiceError(
+                    "ACTIVE_START_AUTHORITY_MISSING",
+                    "PAPER worker boundary lacks consumed activation authority",
+                )
+            # Stage0 serves local modules from held verified bytes and retains
+            # deny-write/delete handles over every dependency file.  The full
+            # sealed reload immediately after the broker fixed point is thus
+            # the last static-authority linearization point.  Worker boundaries
+            # must recheck only state that can still change at runtime; doing a
+            # full capsule rehash before and after every worker can exhaust the
+            # same bounded host permit those checks are meant to protect.
             _paper_kill_switch_snapshot(
                 composition.database_engine,
-                verified=refreshed,
+                verified=consumed_final_activation,
                 wall_clock=wall_clock,
             )
             host_activation_handshake.assert_consumed_permit_current()

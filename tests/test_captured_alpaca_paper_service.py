@@ -2934,6 +2934,7 @@ def test_host_permit_is_consumed_before_any_worker_and_started_ack(
         generated_at=NOW - timedelta(seconds=5),
     )
     events: list[str] = []
+    reloads: list[str] = []
     handshake = object.__new__(
         service_module._CapturedPaperHostActivationHandshake
     )
@@ -2942,8 +2943,12 @@ def test_host_permit_is_consumed_before_any_worker_and_started_ack(
         events.append("permit_consumed") or {"permit_sha256": SHA_C}
     )
     handshake.assert_not_revoked = lambda: None
-    handshake.assert_consumed_permit_current = lambda: None
-    handshake.assert_active_start_evidence_current = lambda: None
+    handshake.assert_consumed_permit_current = lambda: events.append(
+        "permit_current"
+    )
+    handshake.assert_active_start_evidence_current = lambda: events.append(
+        "active_evidence_current"
+    )
     handshake.publish_active_start_evidence = lambda _authority: (
         events.append("evidence_published")
         or {"authority_sha256": SHA_A, "artifact_sha256": SHA_B}
@@ -2961,7 +2966,9 @@ def test_host_permit_is_consumed_before_any_worker_and_started_ack(
             events.append("provider_runtime_ready")
             receipt = start_authority.consume()
             assert receipt["host_activation_permit_consumed"] is True
+            start_authority.assert_current()
             events.append("worker_started")
+            start_authority.assert_current()
             return {"state": "active"}
 
         def assert_healthy(self):
@@ -2985,10 +2992,12 @@ def test_host_permit_is_consumed_before_any_worker_and_started_ack(
         restart_inventory_receipt={},
         database_engine=object(),
     )
+    def reload_authority(*_args, **_kwargs):
+        reloads.append("reload")
+        return verified
+
     monkeypatch.setattr(
-        service_module,
-        "_reload_final_activation_authority",
-        lambda *_args, **_kwargs: verified,
+        service_module, "_reload_final_activation_authority", reload_authority
     )
     monkeypatch.setattr(
         service_module,
@@ -3010,10 +3019,12 @@ def test_host_permit_is_consumed_before_any_worker_and_started_ack(
         "_paper_broker_quiet_fixed_point",
         lambda *_args, **_kwargs: fixed_authority["broker_fixed_point"],
     )
+    def kill_switch_snapshot(*_args, **_kwargs):
+        events.append("kill_switch_current")
+        return fixed_authority["final_kill_switch_query"]
+
     monkeypatch.setattr(
-        service_module,
-        "_paper_kill_switch_snapshot",
-        lambda *_args, **_kwargs: fixed_authority["final_kill_switch_query"],
+        service_module, "_paper_kill_switch_snapshot", kill_switch_snapshot
     )
     stopped = service_module.threading.Event()
     stopped.set()
@@ -3030,6 +3041,16 @@ def test_host_permit_is_consumed_before_any_worker_and_started_ack(
     assert events.index("permit_consumed") < events.index("worker_started")
     assert events.index("health_confirmed") < events.index("started_ack")
     assert events.index("started_ack") < events.index("apply_committed")
+    assert events.count("kill_switch_current") == 4
+    assert events.count("permit_current") == 4
+    assert events.count("active_evidence_current") == 3
+    # Stage0 serves every local module from held verified bytes and retains
+    # deny-write/delete handles over the dependency inventory.  Full capsule
+    # hashing is therefore required after composition and on both sides of the
+    # post-permit broker fixed point, but not once per worker.  Every worker
+    # boundary still rechecks the dynamic kill switch, permit and hash-bound
+    # active-start evidence.
+    assert reloads == ["reload", "reload", "reload"]
 
 
 def test_post_permit_terminal_order_blocks_every_worker(monkeypatch) -> None:
