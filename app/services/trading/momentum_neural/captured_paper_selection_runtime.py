@@ -1351,6 +1351,7 @@ class CapturedPaperSelectionLifecycleWorker:
         deadline = float(self.monotonic_clock()) + self.durable_timeout_seconds
         if initial_cycle_deadline is not None:
             deadline = min(deadline, initial_cycle_deadline)
+        last_durable: int | None = None
         while True:
             self._assert_fence()
             self._assert_runtime_health()
@@ -1358,9 +1359,31 @@ class CapturedPaperSelectionLifecycleWorker:
             accepted = int(health.get("accepted_through", 0) or 0)
             durable = int(health.get("durable_through", 0) or 0)
             reserved = health.get("reserved_sequence")
+            now = float(self.monotonic_clock())
+            if durable < 0 or accepted < 0 or durable > accepted:
+                _reject(
+                    "DURABLE_FRONTIER_INVALID",
+                    "selection queue durable frontier exceeds accepted work",
+                )
+            if last_durable is not None and durable < last_durable:
+                _reject(
+                    "DURABLE_FRONTIER_INVALID",
+                    "selection queue durable frontier moved backwards",
+                )
             if durable == accepted and reserved is None:
                 return durable
-            now = float(self.monotonic_clock())
+            if last_durable is None:
+                last_durable = durable
+            elif durable > last_durable:
+                # The configured timeout bounds a stalled writer, not the total
+                # duration of a large immutable snapshot.  Every advance is an
+                # fsync-acknowledged commit and therefore renews the bounded
+                # liveness window.  Fenced-start still retains its absolute
+                # initial-cycle deadline.
+                deadline = now + self.durable_timeout_seconds
+                if initial_cycle_deadline is not None:
+                    deadline = min(deadline, initial_cycle_deadline)
+                last_durable = durable
             if not math.isfinite(now) or now >= deadline:
                 _reject(
                     "DURABLE_FRONTIER_TIMEOUT",

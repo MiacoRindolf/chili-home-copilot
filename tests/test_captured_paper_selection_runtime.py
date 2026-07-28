@@ -1298,6 +1298,117 @@ def test_missing_durable_ack_never_installs_reader_and_application_remains_rollb
     )
 
 
+def test_durable_wait_allows_bounded_stall_timeout_to_reset_on_forward_progress(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    harness = _Harness(tmp_path, poll_interval_seconds=60.0)
+    harness.worker.start()
+    assert harness.publisher is not None
+    publisher = harness.publisher
+    publisher.accepted_through = 4
+    publisher.durable_through = 1
+
+    class _ProgressClock:
+        now = 0.0
+
+        def __call__(self) -> float:
+            self.now += 0.06
+            return self.now
+
+    clock = _ProgressClock()
+    harness.worker.monotonic_clock = clock
+    original_health = publisher.health
+
+    def progressive_health() -> dict[str, object]:
+        if publisher.durable_through < publisher.accepted_through:
+            publisher.durable_through += 1
+        return original_health()
+
+    monkeypatch.setattr(publisher, "health", progressive_health)
+    monkeypatch.setattr(harness.worker, "_assert_runtime_health", lambda: None)
+
+    # Total elapsed time is greater than the 0.1-second configured timeout, but
+    # every observation advances the exact durable frontier.  This models a
+    # large immutable snapshot whose writer remains healthy while fsyncing
+    # multiple bounded batches.
+    assert harness.worker._wait_for_durable_frontier() == 4
+    harness.worker.close(join_timeout_seconds=1.0)
+
+
+def test_durable_wait_rejects_a_backward_frontier_before_equal_success(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    harness = _Harness(tmp_path, poll_interval_seconds=60.0)
+    harness.worker.start()
+    assert harness.publisher is not None
+    observations = iter(
+        (
+            {
+                "accepted_through": 4,
+                "durable_through": 2,
+                "reserved_sequence": None,
+            },
+            {
+                "accepted_through": 1,
+                "durable_through": 1,
+                "reserved_sequence": None,
+            },
+        )
+    )
+    monkeypatch.setattr(
+        harness.worker,
+        "_publisher_health",
+        lambda: next(observations),
+    )
+    monkeypatch.setattr(harness.worker, "_assert_runtime_health", lambda: None)
+    monkeypatch.setattr(harness.worker, "monotonic_clock", lambda: 0.0)
+
+    with pytest.raises(CapturedPaperSelectionRuntimeError) as failure:
+        harness.worker._wait_for_durable_frontier()
+    assert failure.value.code == "DURABLE_FRONTIER_INVALID"
+    harness.worker.close(join_timeout_seconds=1.0)
+
+
+def test_durable_progress_never_extends_the_absolute_initial_cycle_deadline(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    harness = _Harness(tmp_path, poll_interval_seconds=60.0)
+    harness.worker.start()
+    assert harness.publisher is not None
+    publisher = harness.publisher
+    publisher.accepted_through = 4
+    publisher.durable_through = 0
+
+    class _InitialDeadlineClock:
+        now = -0.06
+
+        def __call__(self) -> float:
+            self.now += 0.06
+            return self.now
+
+    clock = _InitialDeadlineClock()
+    harness.worker.monotonic_clock = clock
+    original_health = publisher.health
+
+    def progressive_health() -> dict[str, object]:
+        if publisher.durable_through < publisher.accepted_through:
+            publisher.durable_through += 1
+        return original_health()
+
+    monkeypatch.setattr(publisher, "health", progressive_health)
+    monkeypatch.setattr(harness.worker, "_assert_runtime_health", lambda: None)
+
+    with pytest.raises(CapturedPaperSelectionRuntimeError) as failure:
+        harness.worker._wait_for_durable_frontier(
+            initial_cycle_deadline=0.15,
+        )
+    assert failure.value.code == "DURABLE_FRONTIER_TIMEOUT"
+    harness.worker.close(join_timeout_seconds=1.0)
+
+
 def test_writer_failure_reason_survives_startup_and_quiesced_rollback(
     tmp_path: Path,
 ) -> None:
