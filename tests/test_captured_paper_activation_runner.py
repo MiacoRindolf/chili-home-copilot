@@ -214,6 +214,7 @@ class Scenario:
     ignored_executable_payload: bool = False
     task_exists_before: bool = False
     task_exists_after: bool = True
+    task_running_after: bool = True
     apply_outcome: str = "success"
     rollback_outcome: str = "success"
     publish_started: bool = True
@@ -557,6 +558,21 @@ class FakeExecutor:
                 if self.task_queries == 1
                 else self.scenario.task_exists_after
             )
+            if exists and "/V" in args:
+                status = (
+                    "Running"
+                    if self.scenario.task_running_after
+                    else "Ready"
+                )
+                return runner.CommandResult(
+                    0,
+                    (
+                        f"TaskName: {runner.PAPER_TASK_NAME}\n"
+                        f"Status: {status}\n"
+                        "Scheduled Task State: Enabled\n"
+                    ),
+                    "",
+                )
             return runner.CommandResult(
                 0 if exists else 1,
                 "task\n" if exists else "",
@@ -655,6 +671,7 @@ def _run(
     executor: FakeExecutor,
     *,
     mode: str = "ValidateOnly",
+    wait: Any = None,
 ) -> Mapping[str, Any]:
     return runner.run_activation(
         request,
@@ -664,6 +681,7 @@ def _run(
         ),
         executor=executor,
         clock=lambda: NOW,
+        wait=wait or (lambda _seconds: None),
     )
 
 
@@ -1368,6 +1386,7 @@ def test_apply_uses_exact_isolated_stage0_issuer_envelope(
         (Scenario(apply_outcome="timeout"), "STAGE_TIMEOUT"),
         (Scenario(publish_started=False), "STARTED_RECEIPT_UNAVAILABLE"),
         (Scenario(task_exists_after=False), "PAPER_TASK_UNAVAILABLE"),
+        (Scenario(task_running_after=False), "PAPER_TASK_NOT_RUNNING"),
     ],
 )
 def test_every_post_apply_failure_runs_exactly_one_exact_rollback(
@@ -1458,8 +1477,14 @@ def test_success_can_only_report_fake_money_alpaca_paper_started(
     tmp_path: Path,
 ) -> None:
     executor = FakeExecutor(request_fixture.request, tmp_path)
+    waits: list[float] = []
 
-    result = _run(request_fixture.request, executor, mode="ActivatePaper")
+    result = _run(
+        request_fixture.request,
+        executor,
+        mode="ActivatePaper",
+        wait=waits.append,
+    )
 
     assert result["verdict"] == "ACTIVATED_ALPACA_PAPER_ONLY"
     assert result["account_scope"] == "alpaca:paper"
@@ -1467,7 +1492,8 @@ def test_success_can_only_report_fake_money_alpaca_paper_started(
     assert result["paper_started"] is True
     assert result["activation_generation"] == GENERATION
     assert executor.modes == ["RecoverOnly", "Apply"]
-    assert executor.task_queries == 2
+    assert executor.task_queries == 3
+    assert waits == [runner._PAPER_TASK_STABILITY_SECONDS]
 
 
 def test_run_artifacts_are_append_only_and_isolated_per_run(
@@ -1537,6 +1563,10 @@ def test_real_git_cleanliness_allows_isolated_pycache_but_rejects_ignored_payloa
     repository = tmp_path / "repo"
     repository.mkdir()
     subprocess.run([git_text, "init", "-q", str(repository)], check=True)
+    subprocess.run(
+        [git_text, "-C", str(repository), "config", "core.autocrlf", "false"],
+        check=True,
+    )
     tracked = sorted(
         {
             *(path.as_posix() for path in runner._CANDIDATE_ENTRYPOINTS.values()),

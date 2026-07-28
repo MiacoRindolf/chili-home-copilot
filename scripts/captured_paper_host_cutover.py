@@ -104,6 +104,7 @@ IQCONNECT_CLIENT_ENDPOINT_BY_ROLE = MappingProxyType(
 IQCONNECT_GUARD_CONNECT_TIMEOUT_SECONDS = 5.0
 IQCONNECT_GUARD_HANDOFF_TIMEOUT_SECONDS = 30.0
 IQCONNECT_GUARD_HANDOFF_POLL_SECONDS = 0.1
+IQCONNECT_COLD_START_TIMEOUT_SECONDS = 45.0
 EXECUTION_LANE_RECREATOR_TASKS = (
     "CHILI-Docker-Socket-Guard",
     "CHILI-captured-paper-premarket-activation",
@@ -6722,13 +6723,24 @@ class CapturedPaperHostCutoverExecutor:
             reason=reason,
         )
         self._revalidate_restore_authority(prepared)
+        guard: IqconnectProviderGuardObservation | None = None
         try:
             guard = self.backend.acquire_iqconnect_provider_guard()
             self.backend.assert_iqconnect_provider_guard_current(guard)
+        except CapturedPaperHostCutoverError as exc:
+            self.backend.release_iqconnect_provider_guard()
+            if exc.code != "IQCONNECT_PROCESS_ABSENT":
+                raise
+            guard = None
+            journal.append(
+                "iqconnect_provider_absent_before_rollback",
+                {
+                    "recovery_mode": "sealed_legacy_starter",
+                    "live_cash_authorized": False,
+                },
+            )
         except BaseException as exc:
             self.backend.release_iqconnect_provider_guard()
-            if isinstance(exc, CapturedPaperHostCutoverError):
-                raise
             raise CapturedPaperHostCutoverError(
                 "IQCONNECT_PROVIDER_GUARD_UNAVAILABLE",
                 "rollback revoked order authority but could not guard provider continuity",
@@ -8208,6 +8220,29 @@ class CapturedPaperHostCutoverExecutor:
         mutations = 0
         foreign_candidate = False
 
+        def assert_provider_or_quiesce_execution_lane() -> None:
+            nonlocal mutations
+            if iqconnect_guard is None:
+                raise CapturedPaperHostCutoverError(
+                    "IQCONNECT_PROVIDER_GUARD_UNAVAILABLE",
+                    "rollback cannot restore execution without provider authority",
+                )
+            try:
+                self.backend.assert_iqconnect_provider_guard_current(
+                    iqconnect_guard
+                )
+            except CapturedPaperHostCutoverError:
+                lane = self.backend.inspect_legacy_execution_lane()
+                if lane.identity_key() != prior_lane.identity_key():
+                    raise CapturedPaperHostCutoverError(
+                        "EXECUTION_LANE_IDENTITY_DRIFT",
+                        "cannot quiesce a changed legacy Docker identity",
+                    )
+                mutations += self.backend.quiesce_legacy_execution_lane(
+                    expected=lane
+                )
+                raise
+
         def late_candidate_evidence() -> tuple[
             TaskObservation | None,
             tuple[TaskObservation, ...],
@@ -8493,6 +8528,33 @@ class CapturedPaperHostCutoverExecutor:
                     "LEGACY_PROCESS_RESTORE_FAILED",
                     f"existing {binding.role} process differs from sealed full argv",
                 )
+        if iqconnect_guard is None and discovered:
+            for process in discovered:
+                current = self.backend.get_process(
+                    process.pid, role=process.role
+                )
+                if (
+                    current is None
+                    or current.semantic_key() != process.semantic_key()
+                ):
+                    raise CapturedPaperHostCutoverError(
+                        "LEGACY_PROCESS_RESTORE_FAILED",
+                        "partial legacy bridge identity changed before cold recovery",
+                    )
+                self.backend.stop_process(process)
+                mutations += 1
+            if self.backend.find_legacy_processes(
+                prepared.restore_plan.bindings
+            ):
+                raise CapturedPaperHostCutoverError(
+                    "LEGACY_PROCESS_RESTORE_FAILED",
+                    "partial legacy bridge survived cold recovery cleanup",
+                )
+            discovered = ()
+            by_role = {}
+        missing_bindings: list[LegacyProcessBinding] = []
+        for binding in prepared.restore_plan.bindings:
+            existing = by_role.get(binding.role, [])
             if not existing:
                 contract = prepared.restore_plan.launch_contracts.get(
                     binding.restore_task
@@ -8509,8 +8571,65 @@ class CapturedPaperHostCutoverExecutor:
                     contract=contract,
                     roots=prepared.allowed_read_roots,
                 )
-                self.backend.start_task(binding.restore_task)
-                mutations += 1
+                missing_bindings.append(binding)
+        if iqconnect_guard is None:
+            bootstrap = [
+                binding
+                for binding in missing_bindings
+                if binding.role == "iqfeed_depth_bridge"
+            ]
+            if len(bootstrap) != 1:
+                raise CapturedPaperHostCutoverError(
+                    "LEGACY_PROVIDER_BOOTSTRAP_INVALID",
+                    "zero-provider rollback lacks one sealed depth starter",
+                )
+            bootstrap_binding = bootstrap[0]
+            self.backend.start_task(bootstrap_binding.restore_task)
+            mutations += 1
+            bootstrap_restored = self.backend.await_legacy_processes(
+                (bootstrap_binding,),
+                timeout_seconds=IQCONNECT_COLD_START_TIMEOUT_SECONDS,
+            )
+            if (
+                len(bootstrap_restored) != 1
+                or bootstrap_restored[0].role != bootstrap_binding.role
+                or not self._process_matches_restore_binding(
+                    bootstrap_restored[0], bootstrap_binding
+                )
+            ):
+                raise CapturedPaperHostCutoverError(
+                    "LEGACY_PROVIDER_BOOTSTRAP_FAILED",
+                    "sealed depth starter did not restore IQConnect and its bridge",
+                )
+            iqconnect_guard = self.backend.acquire_iqconnect_provider_guard()
+            self.backend.assert_iqconnect_provider_guard_current(
+                iqconnect_guard
+            )
+            record(
+                "iqconnect_provider_guard_restored",
+                {
+                    "pid": iqconnect_guard.pid,
+                    "create_time_ns": iqconnect_guard.create_time_ns,
+                    "executable_sha256": iqconnect_guard.executable_sha256,
+                    "listeners": [
+                        {"host": host, "port": port}
+                        for host, port in iqconnect_guard.listeners
+                    ],
+                    "guard_connection_count": (
+                        iqconnect_guard.guard_connection_count
+                    ),
+                    "bootstrap_role": bootstrap_binding.role,
+                    "live_cash_authorized": False,
+                },
+            )
+            missing_bindings = [
+                binding
+                for binding in missing_bindings
+                if binding.role != bootstrap_binding.role
+            ]
+        for binding in missing_bindings:
+            self.backend.start_task(binding.restore_task)
+            mutations += 1
         restored = self.backend.await_legacy_processes(
             prepared.restore_plan.bindings, timeout_seconds=15.0
         )
@@ -8581,6 +8700,10 @@ class CapturedPaperHostCutoverExecutor:
                 "FOREIGN_CANDIDATE_EXECUTION_QUARANTINED",
                 "candidate authority appeared during rollback; legacy was re-quiesced",
             )
+        if iqconnect_guard is not None:
+            self.backend.assert_iqconnect_provider_guard_current(
+                iqconnect_guard
+            )
         mutations += self.backend.restore_legacy_execution_lane(
             expected=prior_lane
         )
@@ -8601,6 +8724,7 @@ class CapturedPaperHostCutoverExecutor:
                 ),
             },
         )
+        assert_provider_or_quiesce_execution_lane()
         named, tasks, processes = late_candidate_evidence()
         if named is not None or tasks or processes:
             quarantine_late_candidate(
@@ -8629,6 +8753,7 @@ class CapturedPaperHostCutoverExecutor:
             raise CapturedPaperHostCutoverError(
                 "ROLLBACK_POSTCONDITION_FAILED", "candidate task remains after rollback"
             )
+        assert_provider_or_quiesce_execution_lane()
         record(
             "rollback_completed",
             {
@@ -9693,6 +9818,11 @@ class WindowsHostCutoverBackend:
                 "IQCONNECT_PROCESS_UNINSPECTABLE",
                 "IQConnect process identity could not be inspected exactly",
             ) from exc
+        if not matches:
+            raise CapturedPaperHostCutoverError(
+                "IQCONNECT_PROCESS_ABSENT",
+                "sealed IQConnect is absent before provider continuity acquisition",
+            )
         if len(matches) != 1:
             raise CapturedPaperHostCutoverError(
                 "IQCONNECT_PROCESS_ROSTER_INVALID",

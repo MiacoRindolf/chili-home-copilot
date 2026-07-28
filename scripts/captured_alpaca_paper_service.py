@@ -5231,6 +5231,7 @@ class _CapturedPaperHostActivationHandshake:
             "active_start_evidence_artifact_sha256",
             "host_quiet_horizon_event_sha256",
             "challenge_sha256",
+            "iqconnect_provider_guard",
             "legacy_execution_lane",
             "legacy_execution_lane_sha256",
             "paper_execution_committed",
@@ -5241,6 +5242,41 @@ class _CapturedPaperHostActivationHandshake:
             payload.get("legacy_execution_lane")
             if isinstance(payload, Mapping)
             else None
+        )
+        committed_provider_guard = (
+            payload.get("iqconnect_provider_guard")
+            if isinstance(payload, Mapping)
+            else None
+        )
+        provider_guard_events = [
+            candidate
+            for candidate in rows
+            if candidate.get("event_type")
+            == "iqconnect_provider_guard_acquired"
+        ]
+        provider_guard_event = (
+            provider_guard_events[0]
+            if len(provider_guard_events) == 1
+            else None
+        )
+        acquired_provider_guard = (
+            provider_guard_event.get("payload")
+            if isinstance(provider_guard_event, Mapping)
+            else None
+        )
+        provider_guard_listeners = (
+            acquired_provider_guard.get("listeners")
+            if isinstance(acquired_provider_guard, Mapping)
+            else None
+        )
+        provider_guard_listener_pairs = (
+            {
+                (item.get("host"), item.get("port"))
+                for item in provider_guard_listeners
+                if isinstance(item, Mapping)
+            }
+            if isinstance(provider_guard_listeners, list)
+            else set()
         )
         recreators = lane.get("recreator_tasks") if isinstance(lane, Mapping) else None
         recorded_at = _parse_utc_text(
@@ -5285,6 +5321,65 @@ class _CapturedPaperHostActivationHandshake:
             and payload.get("host_quiet_horizon_event_sha256")
             == self._quiet_horizon_event_sha256
             and payload.get("challenge_sha256") == self._challenge_sha256
+            and isinstance(committed_provider_guard, Mapping)
+            and set(committed_provider_guard)
+            == {
+                "pid",
+                "create_time_ns",
+                "executable_sha256",
+                "candidate_started_receipt_sha256",
+            }
+            and isinstance(acquired_provider_guard, Mapping)
+            and set(acquired_provider_guard)
+            == {
+                "pid",
+                "create_time_ns",
+                "executable_path",
+                "executable_sha256",
+                "listeners",
+                "guard_connection_count",
+                "live_cash_authorized",
+            }
+            and isinstance(acquired_provider_guard.get("pid"), int)
+            and not isinstance(acquired_provider_guard.get("pid"), bool)
+            and acquired_provider_guard.get("pid") > 0
+            and isinstance(
+                acquired_provider_guard.get("create_time_ns"), int
+            )
+            and not isinstance(
+                acquired_provider_guard.get("create_time_ns"), bool
+            )
+            and acquired_provider_guard.get("create_time_ns") > 0
+            and isinstance(
+                acquired_provider_guard.get("executable_path"), str
+            )
+            and bool(acquired_provider_guard.get("executable_path"))
+            and _SHA256_RE.fullmatch(
+                str(acquired_provider_guard.get("executable_sha256") or "")
+            )
+            is not None
+            and isinstance(provider_guard_listeners, list)
+            and len(provider_guard_listeners) == 2
+            and provider_guard_listener_pairs
+            == {
+                ("127.0.0.1", 5009),
+                ("127.0.0.1", 9200),
+            }
+            and acquired_provider_guard.get("guard_connection_count") == 2
+            and acquired_provider_guard.get("live_cash_authorized") is False
+            and committed_provider_guard.get("pid")
+            == acquired_provider_guard.get("pid")
+            and committed_provider_guard.get("create_time_ns")
+            == acquired_provider_guard.get("create_time_ns")
+            and committed_provider_guard.get("executable_sha256")
+            == acquired_provider_guard.get("executable_sha256")
+            and committed_provider_guard.get(
+                "candidate_started_receipt_sha256"
+            )
+            == self._started_sha256
+            and isinstance(provider_guard_event.get("sequence"), int)
+            and provider_guard_event.get("sequence")
+            < self._permit_body.get("journal_authorization_sequence")
             and isinstance(lane, Mapping)
             and lane.get("state") == "stopped"
             and isinstance(recreators, list)

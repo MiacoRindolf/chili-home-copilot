@@ -1774,12 +1774,36 @@ def _publish_matching_host_permit(
         "live_cash_authorized": False,
         "real_money_authorized": False,
     }
-    lane_sha256 = "7" * 64
-    quiesced = {
+    provider_guard_payload = {
+        "pid": 42_424,
+        "create_time_ns": 9_876_543_210,
+        "executable_path": str(executable),
+        "executable_sha256": hashlib.sha256(
+            executable.read_bytes()
+        ).hexdigest(),
+        "listeners": [
+            {"host": "127.0.0.1", "port": 5009},
+            {"host": "127.0.0.1", "port": 9200},
+        ],
+        "guard_connection_count": 2,
+        "live_cash_authorized": False,
+    }
+    provider_guard = {
         "schema_version": "chili.captured-paper-host-cutover-journal-event.v1",
         "transaction_id": transaction_id,
         "sequence": 1,
         "previous_event_sha256": "0" * 64,
+        "event_type": "iqconnect_provider_guard_acquired",
+        "recorded_at": issued_at,
+        "payload": provider_guard_payload,
+    }
+    provider_guard["event_sha256"] = sha256_json(provider_guard)
+    lane_sha256 = "7" * 64
+    quiesced = {
+        "schema_version": "chili.captured-paper-host-cutover-journal-event.v1",
+        "transaction_id": transaction_id,
+        "sequence": 2,
+        "previous_event_sha256": provider_guard["event_sha256"],
         "event_type": "legacy_execution_lane_quiesced",
         "recorded_at": issued_at,
         "payload": {
@@ -1791,7 +1815,7 @@ def _publish_matching_host_permit(
     quiet = {
         "schema_version": "chili.captured-paper-host-cutover-journal-event.v1",
         "transaction_id": transaction_id,
-        "sequence": 2,
+        "sequence": 3,
         "previous_event_sha256": quiesced["event_sha256"],
         "event_type": "legacy_paper_broker_quiet_horizon_completed",
         "recorded_at": issued_at,
@@ -1813,7 +1837,7 @@ def _publish_matching_host_permit(
     authorization = {
         "schema_version": "chili.captured-paper-host-cutover-journal-event.v1",
         "transaction_id": transaction_id,
-        "sequence": 3,
+        "sequence": 4,
         "previous_event_sha256": quiet["event_sha256"],
         "event_type": "activation_permit_issued",
         "recorded_at": issued_at,
@@ -1829,7 +1853,7 @@ def _publish_matching_host_permit(
                 allow_nan=False,
             ).encode("utf-8")
             + b"\n"
-            for event in (quiesced, quiet, authorization)
+            for event in (provider_guard, quiesced, quiet, authorization)
         )
     )
     permit = {
@@ -1838,7 +1862,7 @@ def _publish_matching_host_permit(
         **authorization_payload,
         "journal_path": str(journal_path),
         "journal_transaction_id": transaction_id,
-        "journal_authorization_sequence": 3,
+        "journal_authorization_sequence": 4,
         "journal_authorization_event_sha256": authorization["event_sha256"],
         "journal_authorization_event": authorization,
     }
@@ -1893,6 +1917,14 @@ def _append_matching_apply_completed(
             handshake._quiet_horizon_event_sha256
         ),
         "challenge_sha256": handshake._challenge_sha256,
+        "iqconnect_provider_guard": {
+            "pid": 42_424,
+            "create_time_ns": 9_876_543_210,
+            "executable_sha256": hashlib.sha256(
+                Path(handshake._permit_body["issuer_executable_path"]).read_bytes()
+            ).hexdigest(),
+            "candidate_started_receipt_sha256": handshake._started_sha256,
+        },
         "legacy_execution_lane": lane,
         "legacy_execution_lane_sha256": sha256_json(lane),
         "paper_execution_committed": True,
@@ -2099,6 +2131,14 @@ def test_committed_host_authority_rejects_later_or_missing_journal(
         {"service_pid": 999_999},
         {"started_receipt_sha256": "0" * 64},
         {"active_start_authority_sha256": "0" * 64},
+        {
+            "iqconnect_provider_guard": {
+                "pid": 42_424,
+                "create_time_ns": 9_876_543_210,
+                "executable_sha256": "0" * 64,
+                "candidate_started_receipt_sha256": "0" * 64,
+            }
+        },
         {"live_cash_authorized": True},
     ],
 )

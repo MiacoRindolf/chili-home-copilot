@@ -603,6 +603,42 @@ def test_windows_backend_rejects_iqconnect_binary_drift_before_connect(
     assert connected == []
 
 
+def test_windows_backend_types_absent_iqconnect_for_sealed_recovery(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import psutil
+
+    executable = tmp_path / "iqconnect.exe"
+    executable.write_bytes(b"sealed-iqconnect")
+    executable_sha = hashlib.sha256(executable.read_bytes()).hexdigest()
+    monkeypatch.setattr(cutover, "IQCONNECT_EXECUTABLE_PATH", executable)
+    monkeypatch.setattr(
+        cutover, "IQCONNECT_EXECUTABLE_SHA256", executable_sha
+    )
+
+    class EmptyPsutil:
+        NoSuchProcess = psutil.NoSuchProcess
+        AccessDenied = psutil.AccessDenied
+        ZombieProcess = psutil.ZombieProcess
+
+        @staticmethod
+        def process_iter(*_args, **_kwargs):
+            return ()
+
+    backend = object.__new__(cutover.WindowsHostCutoverBackend)
+    backend._psutil = EmptyPsutil()
+    backend._bindings = {}
+    backend._iqconnect_guard_sockets = ()
+    backend._iqconnect_guard_observation = None
+
+    with pytest.raises(
+        cutover.CapturedPaperHostCutoverError,
+        match="IQCONNECT_PROCESS_ABSENT",
+    ):
+        backend.acquire_iqconnect_provider_guard()
+
+
 def test_iqconnect_guard_endpoints_match_bridge_runtime_constants() -> None:
     from scripts import iqfeed_depth_bridge
     from scripts import iqfeed_trade_bridge
@@ -1929,6 +1965,232 @@ def test_apply_failure_handoff_timeout_releases_guard_and_keeps_candidate_off(
             prepared.restore_plan.bindings
         )
     ) == ["iqfeed_depth_bridge", "iqfeed_trade_bridge"]
+
+
+def test_explicit_rollback_restores_when_iqconnect_exited_after_apply(
+    prepared: cutover.PreparedCutover,
+) -> None:
+    class ProviderExitedHost(FakeHost):
+        def __init__(self) -> None:
+            super().__init__(prepared)
+            self.provider_guard_acquisitions = 0
+            self.cold_bootstrap_waits: list[
+                tuple[tuple[str, ...], float]
+            ] = []
+
+        def acquire_iqconnect_provider_guard(
+            self,
+        ) -> cutover.IqconnectProviderGuardObservation:
+            self.provider_guard_acquisitions += 1
+            if self.provider_guard_acquisitions == 2:
+                raise cutover.CapturedPaperHostCutoverError(
+                    "IQCONNECT_PROCESS_ABSENT",
+                    "injected provider exit after candidate failure",
+                )
+            return super().acquire_iqconnect_provider_guard()
+
+        def await_legacy_processes(
+            self,
+            bindings: tuple[cutover.LegacyProcessBinding, ...],
+            *,
+            timeout_seconds: float,
+        ) -> tuple[cutover.ProcessIdentity, ...]:
+            if self.provider_guard_acquisitions == 2:
+                self.cold_bootstrap_waits.append(
+                    (
+                        tuple(sorted(item.role for item in bindings)),
+                        timeout_seconds,
+                    )
+                )
+            return super().await_legacy_processes(
+                bindings,
+                timeout_seconds=timeout_seconds,
+            )
+
+    backend = ProviderExitedHost()
+    executor = _executor(prepared, backend)
+    executor.apply()
+
+    report = executor.rollback()
+
+    assert report.verdict == "ROLLED_BACK_EXACT"
+    assert backend.provider_guard_acquisitions == 3
+    assert len(backend.cold_bootstrap_waits) == 1
+    bootstrap_roles, bootstrap_timeout = backend.cold_bootstrap_waits[0]
+    assert bootstrap_roles == ("iqfeed_depth_bridge",)
+    assert bootstrap_timeout > 20.0
+    assert not backend.iqconnect_guard_active
+    _assert_restored(prepared, backend)
+    depth_start = backend.mutations.index(
+        "start:CHILI-IQFeed-Depth-Bridge-Daily"
+    )
+    restored_guard = backend.mutations.index(
+        "iqconnect-guard:acquire", depth_start
+    )
+    trade_start = backend.mutations.index(
+        "start:CHILI-IQFeed-Trade-Bridge-Daily"
+    )
+    assert depth_start < restored_guard < trade_start
+    event_types = [
+        json.loads(line)["event_type"]
+        for line in report.journal_path.read_text(encoding="utf-8").splitlines()
+    ]
+    assert event_types.index("iqconnect_provider_absent_before_rollback") < (
+        event_types.index("rollback_started")
+    )
+    assert event_types.index("rollback_started") < event_types.index(
+        "iqconnect_provider_guard_restored"
+    )
+    assert event_types.index("iqconnect_provider_guard_restored") < (
+        event_types.index("iqconnect_provider_guard_handoff_completed")
+    )
+    assert event_types.index(
+        "iqconnect_provider_guard_handoff_completed"
+    ) < event_types.index("rollback_completed")
+
+
+def test_rollback_discards_guard_when_post_acquire_assert_reports_absence(
+    prepared: cutover.PreparedCutover,
+) -> None:
+    class ProviderDisappearsDuringAcquire(FakeHost):
+        def __init__(self) -> None:
+            super().__init__(prepared)
+            self.provider_guard_acquisitions = 0
+            self.injected_absence = False
+
+        def acquire_iqconnect_provider_guard(
+            self,
+        ) -> cutover.IqconnectProviderGuardObservation:
+            self.provider_guard_acquisitions += 1
+            return super().acquire_iqconnect_provider_guard()
+
+        def assert_iqconnect_provider_guard_current(
+            self,
+            expected: cutover.IqconnectProviderGuardObservation,
+        ) -> None:
+            if (
+                self.provider_guard_acquisitions == 2
+                and not self.injected_absence
+            ):
+                self.injected_absence = True
+                raise cutover.CapturedPaperHostCutoverError(
+                    "IQCONNECT_PROCESS_ABSENT",
+                    "injected provider exit after guard acquisition",
+                )
+            super().assert_iqconnect_provider_guard_current(expected)
+
+    backend = ProviderDisappearsDuringAcquire()
+    executor = _executor(prepared, backend)
+    executor.apply()
+
+    report = executor.rollback()
+
+    assert report.verdict == "ROLLED_BACK_EXACT"
+    assert backend.provider_guard_acquisitions == 3
+    assert not backend.iqconnect_guard_active
+    _assert_restored(prepared, backend)
+
+
+def test_rollback_rejects_provider_loss_after_client_handoff(
+    prepared: cutover.PreparedCutover,
+) -> None:
+    class ProviderLostAfterHandoff(FakeHost):
+        def await_iqconnect_provider_guard_handoff(
+            self,
+            expected: cutover.IqconnectProviderGuardObservation,
+            restored_clients: tuple[cutover.ProcessIdentity, ...],
+            *,
+            timeout_seconds: float,
+        ) -> None:
+            super().await_iqconnect_provider_guard_handoff(
+                expected,
+                restored_clients,
+                timeout_seconds=timeout_seconds,
+            )
+            self.iqconnect_guard_active = False
+
+    backend = ProviderLostAfterHandoff(prepared)
+    executor = _executor(prepared, backend)
+    executor.apply()
+
+    with pytest.raises(
+        cutover.CapturedPaperHostCutoverError,
+        match="IQCONNECT_PROVIDER_GUARD_LOST",
+    ):
+        executor.rollback()
+    assert backend.execution_lane_state == "stopped"
+    assert not any(backend.execution_lane_recreator_states.values())
+
+
+def test_rollback_requiesces_lane_when_provider_is_lost_during_restore(
+    prepared: cutover.PreparedCutover,
+) -> None:
+    class ProviderLostDuringLaneRestore(FakeHost):
+        def restore_legacy_execution_lane(
+            self,
+            *,
+            expected: cutover.LegacyExecutionLaneObservation,
+        ) -> int:
+            mutations = super().restore_legacy_execution_lane(
+                expected=expected
+            )
+            self.iqconnect_guard_active = False
+            return mutations
+
+    backend = ProviderLostDuringLaneRestore(prepared)
+    executor = _executor(prepared, backend)
+    executor.apply()
+
+    with pytest.raises(
+        cutover.CapturedPaperHostCutoverError,
+        match="IQCONNECT_PROVIDER_GUARD_LOST",
+    ):
+        executor.rollback()
+
+    assert backend.execution_lane_state == "stopped"
+    assert not any(backend.execution_lane_recreator_states.values())
+
+
+def test_zero_provider_retry_stops_exact_partial_legacy_client_then_bootstraps(
+    prepared: cutover.PreparedCutover,
+) -> None:
+    class PartialClientHost(FakeHost):
+        def __init__(self) -> None:
+            super().__init__(prepared)
+            self.provider_guard_acquisitions = 0
+
+        def acquire_iqconnect_provider_guard(
+            self,
+        ) -> cutover.IqconnectProviderGuardObservation:
+            self.provider_guard_acquisitions += 1
+            if self.provider_guard_acquisitions == 2:
+                raise cutover.CapturedPaperHostCutoverError(
+                    "IQCONNECT_PROCESS_ABSENT",
+                    "injected absent provider with one exact partial client",
+                )
+            return super().acquire_iqconnect_provider_guard()
+
+    backend = PartialClientHost()
+    executor = _executor(prepared, backend)
+    executor.apply()
+    depth = next(
+        item
+        for item in prepared.process_snapshot.processes
+        if item.role == "iqfeed_depth_bridge"
+    )
+    backend.processes[depth.pid] = depth
+
+    report = executor.rollback()
+
+    assert report.verdict == "ROLLED_BACK_EXACT"
+    stop_index = backend.mutations.index(
+        "stop-process:iqfeed_depth_bridge"
+    )
+    restart_index = backend.mutations.index(
+        "start:CHILI-IQFeed-Depth-Bridge-Daily"
+    )
+    assert stop_index < restart_index
+    _assert_restored(prepared, backend)
 
 
 def test_recover_only_inventory_finds_one_active_capsule_and_ignores_baseline(

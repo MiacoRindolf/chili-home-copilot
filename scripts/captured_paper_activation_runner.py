@@ -27,6 +27,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
 from typing import Any, Callable, Mapping, MutableMapping, Sequence
 import uuid
 
@@ -36,6 +37,7 @@ RESULT_SCHEMA_VERSION = "chili.captured-paper-activation-runner-result.v1"
 ACCOUNT_SCOPE = "alpaca:paper"
 ACTIVATE_CONFIRMATION = "CUTOVER_FAKE_MONEY_ALPACA_PAPER"
 PAPER_TASK_NAME = "CHILI-Captured-Alpaca-PAPER"
+_PAPER_TASK_STABILITY_SECONDS = 2.0
 
 _CHAIN_OK = "CAPTURED_ALPACA_PAPER_BUILD_READY_WITH_EXTERNAL_HOST_BASELINE"
 _FINAL_OK = "CAPTURED_ALPACA_PAPER_FINAL_MANIFEST_PUBLISHED"
@@ -1358,6 +1360,57 @@ def _paper_task_exists(request: ActivationRunnerRequest, executor: Any, env: Map
     )
 
 
+def _paper_task_is_running(
+    request: ActivationRunnerRequest,
+    executor: Any,
+    env: Mapping[str, str],
+) -> bool:
+    _assert_expected_path(
+        _strict_file(
+            str(request.schtasks_executable),
+            request.schtasks_executable_sha256,
+            field="schtasks_executable",
+        ),
+        _authoritative_executable_paths()["schtasks_executable"],
+        field="schtasks_executable",
+    )
+    result = executor.run(
+        [
+            str(request.schtasks_executable),
+            "/Query",
+            "/TN",
+            PAPER_TASK_NAME,
+            "/FO",
+            "LIST",
+            "/V",
+        ],
+        timeout=request.timeouts.task_query,
+        cwd=request.candidate_root,
+        env=env,
+    )
+    if result.returncode == 1:
+        combined = f"{result.stdout}\n{result.stderr}".casefold()
+        if (
+            "cannot find the file specified" in combined
+            or "cannot find the task" in combined
+        ):
+            return False
+    if result.returncode != 0:
+        raise CapturedPaperActivationRunnerError(
+            "TASK_QUERY_FAILED",
+            "candidate PAPER task runtime state is not authoritative",
+        )
+    fields: dict[str, str] = {}
+    for line in result.stdout.splitlines():
+        key, separator, value = line.partition(":")
+        if separator:
+            fields[key.strip().casefold()] = value.strip().casefold()
+    return (
+        fields.get("status") == "running"
+        and fields.get("scheduled task state") == "enabled"
+    )
+
+
 def _run_stage(
     *,
     name: str,
@@ -1824,6 +1877,7 @@ def run_activation(
     confirmation: str | None,
     executor: Any | None = None,
     clock: Callable[[], datetime] | None = None,
+    wait: Callable[[float], None] | None = None,
 ) -> Mapping[str, Any]:
     if mode not in {"ValidateOnly", "ActivatePaper"}:
         raise CapturedPaperActivationRunnerError(
@@ -1843,6 +1897,7 @@ def run_activation(
     _sanitize_python_control_environment()
     executor = executor or SubprocessExecutor()
     clock = clock or (lambda: datetime.now(UTC))
+    wait = wait or time.sleep
     # This path is deliberately independent of every caller-supplied artifact
     # root.  Two otherwise-valid generations rooted in different directories
     # must still serialize through one host authority boundary.
@@ -2235,6 +2290,12 @@ def run_activation(
             if not _paper_task_exists(request, executor, env):
                 raise CapturedPaperActivationRunnerError(
                     "PAPER_TASK_UNAVAILABLE", "candidate PAPER task is absent after Apply"
+                )
+            wait(_PAPER_TASK_STABILITY_SECONDS)
+            if not _paper_task_is_running(request, executor, env):
+                raise CapturedPaperActivationRunnerError(
+                    "PAPER_TASK_NOT_RUNNING",
+                    "candidate PAPER task is not enabled and Running after Apply",
                 )
             result = {
                 **base_result,
