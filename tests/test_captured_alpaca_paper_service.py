@@ -2859,6 +2859,422 @@ def test_python_service_singleton_rejects_second_process_owner():
         first.close()
 
 
+def _post_broker_envelope_fixture(
+    tmp_path: Path,
+    *,
+    receipt_expires_at: datetime = NOW + timedelta(minutes=1),
+) -> tuple[SimpleNamespace, dict[str, Path]]:
+    capture_store = tmp_path / "capture-store"
+    capture_store.mkdir()
+    handshake_root = tmp_path / "handshake"
+    handshake_root.mkdir()
+    files = {
+        "manifest": tmp_path / "manifest.json",
+        "no_order_smoke": tmp_path / "no-order-smoke.json",
+        "capture_binding": tmp_path / "capture-binding.json",
+        "preactivation": tmp_path / "preactivation.json",
+        "pre_broker_receipt": tmp_path / "pre-broker-receipt.json",
+        "pre_broker_raw": tmp_path / "pre-broker-raw.json",
+        "pre_kill_receipt": tmp_path / "pre-kill-receipt.json",
+        "pre_kill_raw": tmp_path / "pre-kill-raw.json",
+        "runtime_env": tmp_path / "captured-paper.env",
+        "launcher": tmp_path / "launcher.ps1",
+        "launcher_arguments": tmp_path / "launcher-arguments.json",
+        "bootstrap": tmp_path / "bootstrap.json",
+    }
+    for role, path in files.items():
+        if role in {"manifest", "preactivation"}:
+            continue
+        body = role
+        if role == "no_order_smoke":
+            body = json.dumps(
+                {
+                    "captured_at": (NOW - timedelta(seconds=1)).isoformat(),
+                    "expires_at": receipt_expires_at.isoformat(),
+                }
+            )
+        path.write_text(body, encoding="utf-8")
+
+    def digest(path: Path) -> str:
+        return hashlib.sha256(path.read_bytes()).hexdigest()
+
+    for kind, receipt_role, raw_role in (
+        ("broker_account", "pre_broker_receipt", "pre_broker_raw"),
+        ("kill_switch", "pre_kill_receipt", "pre_kill_raw"),
+    ):
+        raw_path = files[raw_role]
+        files[receipt_role].write_text(
+            json.dumps(
+                {
+                    "captured_at": (NOW - timedelta(minutes=2)).isoformat(),
+                    "expires_at": (NOW + timedelta(minutes=1)).isoformat(),
+                    "artifact_bindings": {
+                        "raw": {
+                            "path": str(raw_path),
+                            "sha256": digest(raw_path),
+                            "size_bytes": raw_path.stat().st_size,
+                        }
+                    },
+                    "receipt_kind": kind,
+                }
+            ),
+            encoding="utf-8",
+        )
+    preactivation = {
+        "generated_at": (NOW - timedelta(minutes=1)).isoformat(),
+        "readiness_receipts": {
+            "broker_account": {
+                "path": str(files["pre_broker_receipt"]),
+                "sha256": digest(files["pre_broker_receipt"]),
+            },
+            "kill_switch": {
+                "path": str(files["pre_kill_receipt"]),
+                "sha256": digest(files["pre_kill_receipt"]),
+            },
+        },
+    }
+    files["preactivation"].write_text(
+        json.dumps(preactivation),
+        encoding="utf-8",
+    )
+    manifest = {
+        "capture_store_root": str(capture_store),
+        "capture_binding": {
+            "path": str(files["capture_binding"]),
+            "sha256": digest(files["capture_binding"]),
+        },
+        "preactivation_binding": {
+            "path": str(files["preactivation"]),
+            "sha256": digest(files["preactivation"]),
+        },
+        "runtime_environment": {
+            "source_env_path": str(files["runtime_env"]),
+            "source_env_sha256": digest(files["runtime_env"]),
+            "runtime_environment_sha256": SHA_A,
+            "database_target_fingerprint": SHA_B,
+        },
+        "cutover": {
+            "launcher_arguments_path": str(files["launcher_arguments"]),
+            "launcher_arguments_sha256": digest(files["launcher_arguments"]),
+            "host_ready_receipt_base": str(handshake_root / "host-ready.json"),
+        },
+    }
+    files["manifest"].write_text(json.dumps(manifest), encoding="utf-8")
+    return SimpleNamespace(
+        manifest_path=files["manifest"],
+        manifest_sha256=digest(files["manifest"]),
+        manifest=manifest,
+        receipt_paths={"no_order_smoke": files["no_order_smoke"]},
+        receipt_hashes={"no_order_smoke": digest(files["no_order_smoke"])},
+        launcher_path=files["launcher"],
+        launcher_sha256=digest(files["launcher"]),
+        iqfeed_bootstrap_manifest_path=files["bootstrap"],
+        iqfeed_bootstrap_manifest_sha256=digest(files["bootstrap"]),
+        capture_store_root=capture_store,
+        activation_generation=GENERATION,
+        expected_account_id=ACCOUNT,
+        code_build_sha256=SHA_A,
+        effective_config_sha256=SHA_B,
+        capture_receipt_sha256=SHA_C,
+        source_hashes={},
+        generated_at=NOW - timedelta(minutes=1),
+        expires_at=NOW + timedelta(minutes=1),
+    ), files
+
+
+def _install_synthetic_v3_probe_validator(
+    monkeypatch,
+    calls: list[str] | None = None,
+) -> None:
+    def validate(document, *, kind, **_kwargs):
+        if calls is not None:
+            calls.append(kind)
+        for binding in document["artifact_bindings"].values():
+            path = Path(binding["path"])
+            if (
+                path.stat().st_size != binding["size_bytes"]
+                or hashlib.sha256(path.read_bytes()).hexdigest()
+                != binding["sha256"]
+            ):
+                raise readiness_evidence.CapturedPaperReadinessEvidenceError(
+                    "raw artifact content hash mismatch"
+                )
+
+    monkeypatch.setattr(
+        readiness_evidence,
+        "validate_readiness_receipt_v3",
+        validate,
+    )
+
+
+def test_post_broker_envelope_check_rehashes_only_bound_authority(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    verified, files = _post_broker_envelope_fixture(tmp_path)
+    _install_synthetic_v3_probe_validator(monkeypatch)
+    loaded_source_checks: list[object] = []
+    monkeypatch.setattr(
+        service_module,
+        "_verify_loaded_sources",
+        lambda value: loaded_source_checks.append(value),
+    )
+
+    assert (
+        service_module._assert_final_activation_envelope_current(
+            verified,
+            allowed_read_roots=(tmp_path,),
+            wall_clock=lambda: NOW,
+        )
+        is verified
+    )
+    assert loaded_source_checks == [verified]
+
+    files["no_order_smoke"].write_text("drift", encoding="utf-8")
+    with pytest.raises(
+        CapturedAlpacaPaperServiceError,
+        match="FINAL_ACTIVATION_ENVELOPE_INVALID",
+    ):
+        service_module._assert_final_activation_envelope_current(
+            verified,
+            allowed_read_roots=(tmp_path,),
+            wall_clock=lambda: NOW,
+        )
+
+
+def test_post_broker_envelope_check_rejects_expiry_before_rehash(
+    monkeypatch,
+) -> None:
+    verified = SimpleNamespace(
+        generated_at=NOW - timedelta(minutes=1),
+        expires_at=NOW,
+    )
+    monkeypatch.setattr(
+        service_module,
+        "_verify_loaded_sources",
+        lambda _value: pytest.fail("expired envelope rehashed loaded sources"),
+    )
+
+    with pytest.raises(
+        CapturedAlpacaPaperServiceError,
+        match="FINAL_ACTIVATION_ENVELOPE_EXPIRED",
+    ):
+        service_module._assert_final_activation_envelope_current(
+            verified,
+            allowed_read_roots=(),
+            wall_clock=lambda: NOW,
+        )
+
+
+def test_post_broker_envelope_check_rejects_receipt_expiring_first(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    verified, _files = _post_broker_envelope_fixture(
+        tmp_path,
+        receipt_expires_at=NOW,
+    )
+    _install_synthetic_v3_probe_validator(monkeypatch)
+    monkeypatch.setattr(
+        service_module,
+        "_verify_loaded_sources",
+        lambda _value: pytest.fail("stale receipt reached loaded-source check"),
+    )
+
+    with pytest.raises(
+        CapturedAlpacaPaperServiceError,
+        match="FINAL_ACTIVATION_RECEIPT_STALE",
+    ):
+        service_module._assert_final_activation_envelope_current(
+            verified,
+            allowed_read_roots=(tmp_path,),
+            wall_clock=lambda: NOW,
+        )
+
+
+def test_post_broker_envelope_check_rejects_capture_store_drift(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    verified, _files = _post_broker_envelope_fixture(tmp_path)
+    verified.capture_store_root.rmdir()
+    monkeypatch.setattr(
+        service_module,
+        "_verify_loaded_sources",
+        lambda _value: pytest.fail("drifted capture root reached source check"),
+    )
+
+    with pytest.raises(
+        CapturedAlpacaPaperServiceError,
+        match="FINAL_ACTIVATION_ENVELOPE_INVALID",
+    ):
+        service_module._assert_final_activation_envelope_current(
+            verified,
+            allowed_read_roots=(tmp_path,),
+            wall_clock=lambda: NOW,
+        )
+
+
+def test_post_broker_envelope_check_rejects_handshake_root_drift(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    verified, _files = _post_broker_envelope_fixture(tmp_path)
+    Path(verified.manifest["cutover"]["host_ready_receipt_base"]).parent.rmdir()
+    monkeypatch.setattr(
+        service_module,
+        "_verify_loaded_sources",
+        lambda _value: pytest.fail("drifted handshake root reached source check"),
+    )
+
+    with pytest.raises(
+        CapturedAlpacaPaperServiceError,
+        match="FINAL_ACTIVATION_ENVELOPE_INVALID",
+    ):
+        service_module._assert_final_activation_envelope_current(
+            verified,
+            allowed_read_roots=(tmp_path,),
+            wall_clock=lambda: NOW,
+        )
+
+
+def test_post_broker_envelope_check_rejects_nested_manifest_drift(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    verified, _files = _post_broker_envelope_fixture(tmp_path)
+    verified.manifest["cutover"]["launcher_arguments_sha256"] = "f" * 64
+    monkeypatch.setattr(
+        service_module,
+        "_verify_loaded_sources",
+        lambda _value: pytest.fail("mutated manifest reached source check"),
+    )
+
+    with pytest.raises(
+        CapturedAlpacaPaperServiceError,
+        match="FINAL_ACTIVATION_ENVELOPE_INVALID",
+    ):
+        service_module._assert_final_activation_envelope_current(
+            verified,
+            allowed_read_roots=(tmp_path,),
+            wall_clock=lambda: NOW,
+        )
+
+
+def test_post_broker_envelope_check_revalidates_superseded_probe_bindings(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    verified, files = _post_broker_envelope_fixture(tmp_path)
+    calls: list[str] = []
+    _install_synthetic_v3_probe_validator(monkeypatch, calls)
+    monkeypatch.setattr(
+        service_module,
+        "_verify_loaded_sources",
+        lambda _value: None,
+    )
+
+    service_module._assert_final_activation_envelope_current(
+        verified,
+        allowed_read_roots=(tmp_path,),
+        wall_clock=lambda: NOW,
+    )
+    assert calls[:2] == ["broker_account", "kill_switch"]
+
+    files["pre_broker_raw"].write_text("drift", encoding="utf-8")
+    with pytest.raises(
+        CapturedAlpacaPaperServiceError,
+        match="FINAL_ACTIVATION_ENVELOPE_INVALID",
+    ):
+        service_module._assert_final_activation_envelope_current(
+            verified,
+            allowed_read_roots=(tmp_path,),
+            wall_clock=lambda: NOW,
+        )
+
+
+def test_post_broker_envelope_check_revalidates_v3_probe_bindings(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    verified, _files = _post_broker_envelope_fixture(tmp_path)
+    raw_probe = tmp_path / "runtime-settings-probe.json"
+    raw_probe.write_text("sealed raw probe", encoding="utf-8")
+    raw_probe_sha = hashlib.sha256(raw_probe.read_bytes()).hexdigest()
+    receipt_path = tmp_path / "runtime-settings-receipt.json"
+    receipt = {
+        "captured_at": (NOW - timedelta(seconds=1)).isoformat(),
+        "expires_at": (NOW + timedelta(minutes=1)).isoformat(),
+        "artifact_bindings": {
+            "raw": {
+                "path": str(raw_probe),
+                "sha256": raw_probe_sha,
+                "size_bytes": raw_probe.stat().st_size,
+            }
+        },
+    }
+    receipt_path.write_text(json.dumps(receipt), encoding="utf-8")
+    verified.receipt_paths["runtime_settings"] = receipt_path
+    verified.receipt_hashes["runtime_settings"] = hashlib.sha256(
+        receipt_path.read_bytes()
+    ).hexdigest()
+    context = readiness_evidence.ReadinessValidationContext(
+        activation_generation=GENERATION,
+        expected_account_id=ACCOUNT,
+        code_build_sha256=SHA_A,
+        effective_config_sha256=SHA_B,
+        capture_receipt_sha256=SHA_C,
+        runtime_environment_sha256=SHA_A,
+        database_target_fingerprint=SHA_B,
+        iqfeed_bootstrap_manifest_sha256=SHA_C,
+        launcher_argument_contract_sha256=SHA_A,
+        capture_store_root=str(tmp_path),
+        source_hashes={},
+    )
+    monkeypatch.setattr(service_module, "_readiness_context", lambda _value: context)
+    monkeypatch.setattr(
+        service_module,
+        "_verify_loaded_sources",
+        lambda _value: None,
+    )
+    v3_calls: list[str] = []
+
+    def validate_v3(document, *, kind, context, **_kwargs):
+        v3_calls.append(kind)
+        assert context.allowed_read_roots == (str(tmp_path.resolve()),)
+        binding = document["artifact_bindings"]["raw"]
+        if hashlib.sha256(Path(binding["path"]).read_bytes()).hexdigest() != binding[
+            "sha256"
+        ]:
+            raise readiness_evidence.CapturedPaperReadinessEvidenceError(
+                "raw artifact content hash mismatch"
+            )
+
+    monkeypatch.setattr(
+        readiness_evidence,
+        "validate_readiness_receipt_v3",
+        validate_v3,
+    )
+
+    service_module._assert_final_activation_envelope_current(
+        verified,
+        allowed_read_roots=(tmp_path,),
+        wall_clock=lambda: NOW,
+    )
+    assert v3_calls == ["broker_account", "kill_switch", "runtime_settings"]
+
+    raw_probe.write_text("drift", encoding="utf-8")
+    with pytest.raises(
+        CapturedAlpacaPaperServiceError,
+        match="FINAL_ACTIVATION_ENVELOPE_INVALID",
+    ):
+        service_module._assert_final_activation_envelope_current(
+            verified,
+            allowed_read_roots=(tmp_path,),
+            wall_clock=lambda: NOW,
+        )
+
+
 def test_final_manifest_or_kill_expiry_after_provider_start_blocks_workers(
     monkeypatch,
 ):
@@ -2882,11 +3298,6 @@ def test_final_manifest_or_kill_expiry_after_provider_start_blocks_workers(
 
     def reload_authority(*_args, **_kwargs):
         reloads.append("reload")
-        if len(reloads) == 2:
-            raise CapturedAlpacaPaperServiceError(
-                "FINAL_ACTIVATION_REVALIDATION_FAILED",
-                "kill authority expired",
-            )
         return verified
 
     events = []
@@ -2918,8 +3329,25 @@ def test_final_manifest_or_kill_expiry_after_provider_start_blocks_workers(
     host_handshake = object.__new__(
         service_module._CapturedPaperHostActivationHandshake
     )
+    host_handshake.publish_prepared = lambda: events.append("prepared")
+    host_handshake.await_and_consume_permit = lambda: (
+        events.append("permit_consumed") or {"permit_sha256": SHA_C}
+    )
+    host_handshake._quiet_horizon_event_sha256 = SHA_B
     monkeypatch.setattr(
         service_module, "_reload_final_activation_authority", reload_authority
+    )
+    def reject_envelope(*_args, **_kwargs):
+        events.append("envelope_check")
+        raise CapturedAlpacaPaperServiceError(
+            "FINAL_ACTIVATION_ENVELOPE_EXPIRED",
+            "kill authority expired",
+        )
+
+    monkeypatch.setattr(
+        service_module,
+        "_assert_final_activation_envelope_current",
+        reject_envelope,
     )
     monkeypatch.setattr(
         service_module,
@@ -2931,10 +3359,15 @@ def test_final_manifest_or_kill_expiry_after_provider_start_blocks_workers(
         "_assert_composition_broker_generation",
         lambda *_args, **_kwargs: None,
     )
+    monkeypatch.setattr(
+        service_module,
+        "_paper_broker_quiet_fixed_point",
+        lambda *_args, **_kwargs: events.append("broker_fixed_point") or {},
+    )
 
     with pytest.raises(
         CapturedAlpacaPaperServiceError,
-        match="FINAL_ACTIVATION_REVALIDATION_FAILED",
+        match="FINAL_ACTIVATION_ENVELOPE_EXPIRED",
     ):
         service_module._execute_active_service(
             verified=verified,
@@ -2949,6 +3382,10 @@ def test_final_manifest_or_kill_expiry_after_provider_start_blocks_workers(
     assert reloads == ["reload", "reload"]
     assert events == [
         "provider_and_runtime_started",
+        "prepared",
+        "permit_consumed",
+        "broker_fixed_point",
+        "envelope_check",
         "closed",
         "store_closed",
     ]
@@ -3041,6 +3478,11 @@ def test_host_permit_is_consumed_before_any_worker_and_started_ack(
     )
     monkeypatch.setattr(
         service_module,
+        "_assert_final_activation_envelope_current",
+        lambda value, **_kwargs: events.append("envelope_current") or value,
+    )
+    monkeypatch.setattr(
+        service_module,
         "_paper_broker_snapshot",
         lambda *_args, **_kwargs: {},
     )
@@ -3057,7 +3499,10 @@ def test_host_permit_is_consumed_before_any_worker_and_started_ack(
     monkeypatch.setattr(
         service_module,
         "_paper_broker_quiet_fixed_point",
-        lambda *_args, **_kwargs: fixed_authority["broker_fixed_point"],
+        lambda *_args, **_kwargs: (
+            events.append("broker_fixed_point")
+            or fixed_authority["broker_fixed_point"]
+        ),
     )
     def kill_switch_snapshot(*_args, **_kwargs):
         events.append("kill_switch_current")
@@ -3079,18 +3524,21 @@ def test_host_permit_is_consumed_before_any_worker_and_started_ack(
     )
 
     assert events.index("permit_consumed") < events.index("worker_started")
+    assert events.index("broker_fixed_point") < events.index("envelope_current")
+    assert events.index("envelope_current") < events.index("kill_switch_current")
+    assert events.index("kill_switch_current") < events.index("worker_started")
     assert events.index("health_confirmed") < events.index("started_ack")
     assert events.index("started_ack") < events.index("apply_committed")
     assert events.count("kill_switch_current") == 4
     assert events.count("permit_current") == 4
     assert events.count("active_evidence_current") == 3
     # Stage0 serves every local module from held verified bytes and retains
-    # deny-write/delete handles over the dependency inventory.  Full capsule
-    # hashing is therefore required after composition and on both sides of the
-    # post-permit broker fixed point, but not once per worker.  Every worker
-    # boundary still rechecks the dynamic kill switch, permit and hash-bound
-    # active-start evidence.
-    assert reloads == ["reload", "reload", "reload"]
+    # deny-write/delete handles over the dependency inventory.  Full semantic
+    # reloads therefore bracket composition and PREPARED.  The post-broker
+    # boundary rehashes only the small bound envelope before the dynamic kill
+    # switch, permit and active-start evidence gates admit any worker.
+    assert reloads == ["reload", "reload"]
+    assert events.count("envelope_current") == 1
 
 
 def test_post_permit_terminal_order_blocks_every_worker(monkeypatch) -> None:

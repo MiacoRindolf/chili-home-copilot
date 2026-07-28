@@ -17,7 +17,7 @@ from __future__ import annotations
 import argparse
 import base64
 from contextlib import contextmanager, suppress
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timedelta, timezone
 import hashlib
 import importlib
@@ -1836,6 +1836,251 @@ def _reload_final_activation_authority(
     _restore_runtime_import_path_authority(refreshed)
     _verify_loaded_sources(refreshed)
     return refreshed
+
+
+def _assert_final_activation_envelope_current(
+    verified: activation_contract.VerifiedCapturedPaperActivation,
+    *,
+    allowed_read_roots: Sequence[str | Path],
+    wall_clock: Callable[[], datetime] = lambda: datetime.now(UTC),
+) -> activation_contract.VerifiedCapturedPaperActivation:
+    """Rehash the consumed envelope without rewalking sealed runtime trees.
+
+    Two full semantic reloads have already completed before the host publishes
+    its short-lived start permit.  Stage0 serves every local module from held,
+    verified bytes and retains deny-write/delete handles over the dependency
+    inventory.  After the broker fixed point, only the small authority envelope
+    can still drift without those guards: the manifest, readiness receipts
+    and their raw probe artifacts, capture/preactivation/runtime bindings,
+    launcher arguments, launcher and IQFeed bootstrap manifest.  Rehash and
+    revalidate those exact files, recheck the stage0/source attestation and
+    enforce the envelope expiry before any worker is admitted.
+    """
+
+    now = _aware_utc(wall_clock(), "final activation envelope clock")
+    generated_at = _aware_utc(
+        verified.generated_at, "final activation envelope generation"
+    )
+    expires_at = _aware_utc(
+        verified.expires_at, "final activation envelope expiry"
+    )
+    if now < generated_at or now >= expires_at:
+        raise CapturedAlpacaPaperServiceError(
+            "FINAL_ACTIVATION_ENVELOPE_EXPIRED",
+            "activation envelope is future-dated or expired after the broker fixed point",
+        )
+    try:
+        roots = tuple(Path(value).resolve(strict=True) for value in allowed_read_roots)
+        _manifest_path, manifest_raw, _manifest_digest = (
+            activation_contract._stable_read(
+                verified.manifest_path,
+                expected_sha256=verified.manifest_sha256,
+                roots=roots,
+                field="final_activation_envelope.activation_manifest",
+            )
+        )
+        manifest = _strict_json_value(
+            manifest_raw,
+            field="final_activation_envelope.activation_manifest",
+        )
+        if not isinstance(manifest, Mapping):
+            raise ValueError("verified activation manifest is not a mapping")
+        if _canonical_json_bytes(manifest) != _canonical_json_bytes(
+            dict(verified.manifest)
+        ):
+            raise ValueError("verified activation manifest changed in memory")
+        capture_binding = manifest.get("capture_binding")
+        runtime_environment = manifest.get("runtime_environment")
+        preactivation_binding = manifest.get("preactivation_binding")
+        cutover = manifest.get("cutover")
+        if not all(
+            isinstance(value, Mapping)
+            for value in (
+                capture_binding,
+                runtime_environment,
+                preactivation_binding,
+                cutover,
+            )
+        ):
+            raise ValueError("verified activation envelope references are incomplete")
+        capture_store = Path(str(manifest.get("capture_store_root") or ""))
+        if (
+            not capture_store.is_absolute()
+            or str(capture_store).startswith(("\\\\", "//"))
+        ):
+            raise ValueError("capture store is not an absolute local directory")
+        resolved_capture_store = capture_store.resolve(strict=True)
+        cursor = resolved_capture_store
+        while True:
+            info = os.lstat(cursor)
+            attrs = int(getattr(info, "st_file_attributes", 0) or 0)
+            if stat.S_ISLNK(info.st_mode) or attrs & _REPARSE_ATTRIBUTE:
+                raise ValueError("capture store traverses a reparse point")
+            parent = cursor.parent
+            if parent == cursor:
+                break
+            cursor = parent
+        if (
+            not resolved_capture_store.is_dir()
+            or resolved_capture_store != verified.capture_store_root
+            or not any(
+                resolved_capture_store == root
+                or root in resolved_capture_store.parents
+                for root in roots
+            )
+        ):
+            raise ValueError("capture store identity or allowed root changed")
+        activation_contract._strict_local_output_path(
+            cutover.get("host_ready_receipt_base"),
+            roots=roots,
+            field="final_activation_envelope.host_ready_receipt_base",
+        )
+        readiness_context = replace(
+            _readiness_context(verified),
+            allowed_read_roots=tuple(str(root) for root in roots),
+        )
+        (
+            _preactivation_path,
+            preactivation_raw,
+            _preactivation_digest,
+        ) = activation_contract._stable_read(
+            preactivation_binding.get("path"),
+            expected_sha256=preactivation_binding.get("sha256"),
+            roots=roots,
+            field="final_activation_envelope.preactivation_manifest",
+        )
+        preactivation = _strict_json_value(
+            preactivation_raw,
+            field="final_activation_envelope.preactivation_manifest",
+        )
+        if not isinstance(preactivation, Mapping):
+            raise ValueError("preactivation manifest is not a mapping")
+        preactivation_generated_at = _parse_utc_text(
+            preactivation.get("generated_at"),
+            "preactivation manifest generated_at",
+        )
+        preactivation_receipts = preactivation.get("readiness_receipts")
+        if not isinstance(preactivation_receipts, Mapping):
+            raise ValueError("preactivation readiness references are missing")
+        for kind in ("broker_account", "kill_switch"):
+            reference = preactivation_receipts.get(kind)
+            if not isinstance(reference, Mapping):
+                raise ValueError(f"preactivation {kind} reference is missing")
+            _path, raw, _digest = activation_contract._stable_read(
+                reference.get("path"),
+                expected_sha256=reference.get("sha256"),
+                roots=roots,
+                field=(
+                    "final_activation_envelope.preactivation_readiness."
+                    f"{kind}"
+                ),
+            )
+            receipt = _strict_json_value(
+                raw,
+                field=(
+                    "final_activation_envelope.preactivation_readiness."
+                    f"{kind}"
+                ),
+            )
+            if not isinstance(receipt, Mapping):
+                raise ValueError(f"preactivation {kind} receipt is not a mapping")
+            readiness_evidence.validate_readiness_receipt_v3(
+                receipt,
+                kind=kind,
+                context=readiness_context,
+                now=preactivation_generated_at,
+                max_age_seconds=activation_contract._RECEIPT_MAX_AGE_SECONDS[
+                    kind
+                ],
+            )
+        bound_artifacts: list[tuple[str, Path, str]] = [
+            (
+                "capture_binding",
+                Path(str(capture_binding.get("path") or "")),
+                str(capture_binding.get("sha256") or ""),
+            ),
+            (
+                "runtime_environment.source_env",
+                Path(str(runtime_environment.get("source_env_path") or "")),
+                str(runtime_environment.get("source_env_sha256") or ""),
+            ),
+            ("launcher", verified.launcher_path, verified.launcher_sha256),
+            (
+                "launcher_arguments",
+                Path(str(cutover.get("launcher_arguments_path") or "")),
+                str(cutover.get("launcher_arguments_sha256") or ""),
+            ),
+            (
+                "iqfeed_bootstrap_manifest",
+                verified.iqfeed_bootstrap_manifest_path,
+                verified.iqfeed_bootstrap_manifest_sha256,
+            ),
+        ]
+        for field, path, digest in bound_artifacts:
+            activation_contract._stable_read(
+                path,
+                expected_sha256=digest,
+                roots=roots,
+                field=f"final_activation_envelope.{field}",
+            )
+        for kind in sorted(verified.receipt_paths):
+            _path, raw, _digest = activation_contract._stable_read(
+                verified.receipt_paths[kind],
+                expected_sha256=verified.receipt_hashes[kind],
+                roots=roots,
+                field=f"final_activation_envelope.readiness_receipts.{kind}",
+            )
+            receipt = _strict_json_value(
+                raw,
+                field=f"final_activation_envelope.readiness_receipts.{kind}",
+            )
+            if not isinstance(receipt, Mapping):
+                raise ValueError(f"{kind} readiness receipt is not a mapping")
+            captured_at = _parse_utc_text(
+                receipt.get("captured_at"), f"{kind} receipt captured_at"
+            )
+            receipt_expires_at = _parse_utc_text(
+                receipt.get("expires_at"), f"{kind} receipt expires_at"
+            )
+            max_age_seconds = activation_contract._RECEIPT_MAX_AGE_SECONDS[kind]
+            if (
+                captured_at > now
+                or now >= receipt_expires_at
+                or (now - captured_at).total_seconds() > max_age_seconds
+            ):
+                raise CapturedAlpacaPaperServiceError(
+                    "FINAL_ACTIVATION_RECEIPT_STALE",
+                    f"{kind} readiness authority is not current after "
+                    "the broker fixed point",
+                )
+            if kind == "no_order_smoke":
+                continue
+            if kind in {"broker_account", "kill_switch"}:
+                readiness_evidence.validate_readiness_receipt_v2(
+                    receipt,
+                    kind=kind,
+                    context=readiness_context,
+                    now=now,
+                    max_age_seconds=max_age_seconds,
+                )
+            else:
+                readiness_evidence.validate_readiness_receipt_v3(
+                    receipt,
+                    kind=kind,
+                    context=readiness_context,
+                    now=now,
+                    max_age_seconds=max_age_seconds,
+                )
+        _verify_loaded_sources(verified)
+    except CapturedAlpacaPaperServiceError:
+        raise
+    except Exception as exc:
+        raise CapturedAlpacaPaperServiceError(
+            "FINAL_ACTIVATION_ENVELOPE_INVALID",
+            "activation envelope or loaded source authority drifted after "
+            "the broker fixed point",
+        ) from exc
+    return verified
 
 
 def _install_and_validate_settings(
@@ -7559,11 +7804,12 @@ def _execute_active_service(
                 wait=wait,
             )
             _emit_startup_breadcrumb("END 6c broker_quiet_fixed_point")
-            # The broker reads above can consume most or all of the short host
-            # permit window.  Re-read every sealed activation byte and query
-            # the durable kill switch after those reads, then validate the
-            # exact consumed permit last.
-            refreshed = _reload_final_activation_authority(
+            # Full semantic reloads completed after composition and immediately
+            # before PREPARED.  Stage0 now holds every runtime byte immutable.
+            # Rehash only the small authority envelope here so provider traffic
+            # cannot starve the short permit while retaining a post-broker
+            # expiry/hash linearization point.
+            refreshed = _assert_final_activation_envelope_current(
                 refreshed,
                 allowed_read_roots=allowed_read_roots,
                 wall_clock=wall_clock,
@@ -7645,11 +7891,12 @@ def _execute_active_service(
                     "PAPER worker boundary lacks consumed activation authority",
                 )
             # Stage0 serves local modules from held verified bytes and retains
-            # deny-write/delete handles over every dependency file.  The full
-            # sealed reload immediately after the broker fixed point is thus
-            # the last static-authority linearization point.  Worker boundaries
-            # must recheck only state that can still change at runtime; doing a
-            # full capsule rehash before and after every worker can exhaust the
+            # deny-write/delete handles over every dependency file.  A full
+            # sealed reload completes before PREPARED; the bounded envelope,
+            # probe-artifact and source-attestation check after the broker fixed
+            # point is the last static-authority linearization point.  Worker
+            # boundaries must recheck only state that can still change at
+            # runtime; a full capsule rehash at every worker can exhaust the
             # same bounded host permit those checks are meant to protect.
             _paper_kill_switch_snapshot(
                 composition.database_engine,
