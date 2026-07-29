@@ -903,6 +903,49 @@ def test_active_health_loss_is_fail_closed_and_visible():
         supervisor.assert_healthy()
 
 
+def test_active_health_tolerates_provider_reconnect_but_rejects_dead_lane():
+    events = []
+    supervisor, host, _live = _supervisor(events)
+    supervisor.start_active(start_authority=_active_authority(events))
+    provider = {
+        "state": "running",
+        "stop_requested": False,
+        "all_ready": False,
+        "provider_sockets_started": True,
+        "failures": {},
+        "lanes": {
+            "trade": {
+                "thread_alive": True,
+                "schema_verified": True,
+                "ready": False,
+            },
+            "depth": {
+                "thread_alive": True,
+                "schema_verified": True,
+                "ready": True,
+            },
+        },
+    }
+    host.health = lambda: {"provider_loop_supervisor": provider}
+
+    assert supervisor.assert_healthy()["state"] == "active"
+
+    provider["failures"] = {"trade": {"error": "terminal"}}
+    with pytest.raises(
+        CapturedPaperServiceSupervisorError,
+        match="captured_paper_provider_health_lost",
+    ):
+        supervisor.assert_healthy()
+
+    provider["failures"] = {}
+    provider["lanes"]["trade"]["thread_alive"] = False
+    with pytest.raises(
+        CapturedPaperServiceSupervisorError,
+        match="captured_paper_provider_health_lost",
+    ):
+        supervisor.assert_healthy()
+
+
 def test_duplicate_worker_names_and_unknown_provider_options_reject():
     events = []
     worker = _Worker("transport", events)

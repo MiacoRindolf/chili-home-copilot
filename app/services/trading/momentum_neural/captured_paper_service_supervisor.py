@@ -780,11 +780,31 @@ class CapturedPaperServiceSupervisor:
         self._service_fence.assert_held()
         host_health = self._host.health()
         provider = host_health.get("provider_loop_supervisor")
+        provider_reconnecting = False
+        if isinstance(provider, Mapping):
+            lanes = provider.get("lanes")
+            # A supervised reconnect clears readiness while its schema-bound
+            # lane threads remain alive. Readiness gates admission, not liveness.
+            provider_reconnecting = (
+                provider.get("all_ready") is False
+                and provider.get("stop_requested") is False
+                and isinstance(lanes, Mapping)
+                and all(
+                    isinstance(lanes.get(lane), Mapping)
+                    and lanes[lane].get("thread_alive") is True
+                    and lanes[lane].get("schema_verified") is True
+                    for lane in ("trade", "depth")
+                )
+            )
         if not (
             isinstance(provider, Mapping)
             and provider.get("state") == "running"
-            and provider.get("all_ready") is True
+            and provider.get("stop_requested") is not True
             and not provider.get("failures")
+            and (
+                provider.get("all_ready") is True
+                or provider_reconnecting
+            )
         ):
             raise CapturedPaperServiceSupervisorError(
                 "captured_paper_provider_health_lost"
