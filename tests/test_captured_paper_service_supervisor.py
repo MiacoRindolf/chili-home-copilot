@@ -547,6 +547,100 @@ def test_fresh_write_pressure_suspension_starts_active_without_selection_input()
     supervisor.close(join_timeout_seconds=1.0, quiesce_timeout_seconds=1.0)
 
 
+def test_post_authority_pressure_suspension_keeps_service_alive_fail_closed():
+    events = []
+
+    class _PressureSuspendsAfterAuthority(_Worker):
+        def health(self):
+            health = super().health()
+            if "active_authority_consume" not in events:
+                return {
+                    **health,
+                    "pre_authority_ready": True,
+                    "ingress_admissible": True,
+                    "admission_suspended": False,
+                }
+            return {
+                **health,
+                "pre_authority_ready": False,
+                "ingress_admissible": False,
+                "admission_suspended": True,
+                "recoverable_admission_suspension": False,
+                "pressure_state": "health_unavailable",
+                "pressure_rejection_reason": (
+                    "pressure_controller_health_unavailable:OSError"
+                ),
+            }
+
+    pressure = _PressureSuspendsAfterAuthority("pressure_feed", events)
+    selection = _Worker("selection", events)
+    transport = _Worker("transport", events)
+    supervisor, _host, live = _supervisor(
+        events,
+        pre_authority_workers=(
+            ("pressure_feed", pressure),
+            ("selection", selection),
+        ),
+        workers=(("transport", transport),),
+    )
+
+    health = supervisor.start_active(
+        start_authority=_active_authority(events)
+    )
+
+    assert health["state"] == "active"
+    assert health["managed_workers"]["pressure_feed"][
+        "admission_suspended"
+    ] is True
+    assert health["managed_workers"]["pressure_feed"][
+        "ingress_admissible"
+    ] is False
+    assert "transport_start" in events
+    assert "live_start" in events
+    assert live["running"] is True
+    supervisor.close(join_timeout_seconds=1.0, quiesce_timeout_seconds=1.0)
+
+
+def test_post_authority_malformed_pressure_suspension_blocks_order_workers():
+    events = []
+
+    class _MalformedPressureHealth(_Worker):
+        def health(self):
+            health = super().health()
+            if "active_authority_consume" not in events:
+                return {**health, "pre_authority_ready": True}
+            return {
+                **health,
+                "pre_authority_ready": False,
+                "ingress_admissible": False,
+                "admission_suspended": True,
+                "recoverable_admission_suspension": False,
+                "pressure_state": "normal",
+                "pressure_rejection_reason": None,
+                "active_reasons": {},
+            }
+
+    pressure = _MalformedPressureHealth("pressure_feed", events)
+    transport = _Worker("transport", events)
+    supervisor, host, live = _supervisor(
+        events,
+        pre_authority_workers=(("pressure_feed", pressure),),
+        workers=(("transport", transport),),
+    )
+
+    with pytest.raises(
+        CapturedPaperServiceSupervisorError,
+        match="pressure_feed_post_authority_health_lost",
+    ):
+        supervisor.start_active(start_authority=_active_authority(events))
+
+    assert "active_authority_consume" in events
+    assert "transport_start" not in events
+    assert "live_start" not in events
+    assert live["running"] is False
+    assert host.running is False
+
+
 def test_pre_authority_health_loss_stops_before_order_authority_consumption():
     events = []
     pressure = _Worker("pressure", events)

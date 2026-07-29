@@ -721,6 +721,20 @@ class CapturedPaperServiceSupervisor:
             for managed in self._started_pre_authority_workers:
                 self._service_fence.assert_held()
                 worker_health = _health_mapping(managed.worker.health())
+                transient_pressure_health_unavailable = (
+                    managed.name == "pressure_feed"
+                    and worker_health.get("pre_authority_ready") is False
+                    and worker_health.get("ingress_admissible") is False
+                    and worker_health.get("admission_suspended") is True
+                    and worker_health.get(
+                        "recoverable_admission_suspension"
+                    )
+                    is False
+                    and worker_health.get("pressure_state")
+                    == "health_unavailable"
+                    and worker_health.get("pressure_rejection_reason")
+                    == "pressure_controller_health_unavailable:OSError"
+                )
                 if (
                     worker_health.get("ever_started") is not True
                     or worker_health.get("running") is not True
@@ -728,6 +742,7 @@ class CapturedPaperServiceSupervisor:
                     or (
                         "pre_authority_ready" in worker_health
                         and worker_health.get("pre_authority_ready") is not True
+                        and not transient_pressure_health_unavailable
                     )
                 ):
                     raise CapturedPaperServiceSupervisorError(
