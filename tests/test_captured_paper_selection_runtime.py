@@ -1986,6 +1986,194 @@ def test_producer_applied_status_without_sequence_progress_times_out(
         harness.worker.close(join_timeout_seconds=1.0)
 
 
+def test_periodic_producer_timeout_suspends_then_recovers_same_frontier(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    harness = _Harness(tmp_path, poll_interval_seconds=0.2)
+    harness.worker.producer_timeout_seconds = 0.05
+    harness.worker.start()
+    assert harness.source is not None
+    assert harness.publisher is not None
+    components = harness.worker._components
+    assert components is not None
+
+    release_frontier = threading.Event()
+
+    def stalled_then_ready() -> SimpleNamespace:
+        if release_frontier.is_set():
+            return _ready_producer_result(harness.publisher.durable_through)
+        return _ready_producer_result(1)
+
+    monkeypatch.setattr(components.producer, "tick", stalled_then_ready)
+    harness.source.recovery_snapshot_pending = True
+
+    try:
+        suspended = _await_worker_health(
+            harness.worker,
+            lambda health: (
+                health.get("producer_frontier_timeout_cycles", 0) >= 2
+            ),
+        )
+        assert suspended["running"] is True
+        assert suspended["fatal"] is False
+        assert suspended["ready"] is False
+        assert suspended["candidate_reader"]["suspended"] is True
+        assert suspended["candidate_reader"]["suspend_reason"] == (
+            "selection_producer_frontier_pending"
+        )
+        assert harness.source.read_count == 2
+        assert harness.publisher.accepted_through == 2
+        assert suspended["occurrences_published"] == 2
+        assert harness.publisher.poisoned is False
+        with pytest.raises(CapturedPaperInitialCandidateReaderUnavailable):
+            harness.reader.read_candidates(
+                user_id=1,
+                symbol="AAPL",
+                decision_at=NOW,
+            )
+
+        release_frontier.set()
+        recovered = _await_worker_health(
+            harness.worker,
+            lambda health: (
+                health["ready"] is True
+                and health["last_frontier_sequence"] == 2
+            ),
+        )
+        assert recovered["running"] is True
+        assert recovered["fatal"] is False
+        assert recovered["producer_frontier_timeout_cycles"] >= 1
+        assert recovered["candidate_reader"]["installed"] is True
+        assert harness.source.read_count == 2
+        assert harness.publisher.accepted_through == 2
+        assert recovered["occurrences_published"] == 2
+        assert harness.publisher.poisoned is False
+    finally:
+        release_frontier.set()
+        harness.worker.close(join_timeout_seconds=1.0)
+
+
+def test_periodic_producer_drain_is_promptly_interruptible_on_close(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    harness = _Harness(tmp_path, poll_interval_seconds=0.05)
+    harness.worker.producer_timeout_seconds = 5.0
+    harness.worker.start()
+    assert harness.source is not None
+    assert harness.publisher is not None
+    components = harness.worker._components
+    assert components is not None
+
+    monkeypatch.setattr(
+        components.producer,
+        "tick",
+        lambda: _ready_producer_result(1),
+    )
+    harness.source.recovery_snapshot_pending = True
+    _await_worker_health(
+        harness.worker,
+        lambda health: health["candidate_reader"]["suspended"] is True,
+    )
+
+    started_at = time.monotonic()
+    harness.worker.close(join_timeout_seconds=1.0)
+    elapsed = time.monotonic() - started_at
+    health = harness.worker.health()
+
+    assert elapsed < 1.0
+    assert health["state"] == "quiesced"
+    assert health["fatal"] is False
+    assert health["running"] is False
+    assert harness.publisher.poisoned is False
+
+
+def test_non_finite_producer_clock_is_integrity_fatal_not_retryable(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    harness = _Harness(tmp_path, poll_interval_seconds=60.0)
+    harness.worker.start()
+    components = harness.worker._components
+    assert components is not None
+    monkeypatch.setattr(
+        components.producer,
+        "tick",
+        lambda: _ready_producer_result(1),
+    )
+    harness.worker.monotonic_clock = lambda: float("nan")
+
+    try:
+        with pytest.raises(CapturedPaperSelectionRuntimeError) as failure:
+            harness.worker._drain_producer_to(2)
+        assert failure.value.code == "PRODUCER_CLOCK_INVALID"
+    finally:
+        harness.worker.close(join_timeout_seconds=1.0)
+
+
+def test_producer_catchup_does_not_clear_source_coverage_suspension(
+    tmp_path: Path,
+) -> None:
+    harness = _Harness(tmp_path, poll_interval_seconds=60.0)
+    harness.worker.start()
+    assert harness.publisher is not None
+    assert harness.source is not None
+    harness.reader.suspend("selection_source_coverage_unavailable")
+    harness.publisher.accepted_through = 2
+    harness.publisher.durable_through = 2
+
+    try:
+        harness.worker._run_cycle(initial=False)
+        health = harness.worker.health()
+        assert health["last_frontier_sequence"] == 2
+        assert health["producer_frontier_recovery_pending"] is False
+        assert health["candidate_reader"]["suspended"] is True
+        assert health["candidate_reader"]["suspend_reason"] == (
+            "selection_source_coverage_unavailable"
+        )
+        assert harness.source.read_count == 2
+        assert harness.publisher.poisoned is False
+    finally:
+        harness.worker.close(join_timeout_seconds=1.0)
+
+
+def test_producer_recovery_resumes_after_pressure_clears_without_new_source(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    harness = _Harness(tmp_path, poll_interval_seconds=60.0)
+    harness.worker.start()
+    assert harness.source is not None
+    assert harness.publisher is not None
+    harness.source.recovery_snapshot_pending = True
+    harness.worker.wait_for_initial_pressure = True
+    pressure_clean = iter((False, True))
+    monkeypatch.setattr(
+        harness.worker,
+        "_initial_pressure_status",
+        lambda _components: (next(pressure_clean), {}, 1.0),
+    )
+
+    try:
+        harness.worker._run_cycle(initial=False)
+        suspended = harness.worker.health()
+        assert suspended["producer_frontier_recovery_pending"] is True
+        assert suspended["candidate_reader"]["suspended"] is True
+        assert harness.source.read_count == 2
+
+        harness.worker._run_cycle(initial=False)
+        recovered = harness.worker.health()
+        assert recovered["ready"] is True
+        assert recovered["producer_frontier_recovery_pending"] is False
+        assert recovered["candidate_reader"]["installed"] is True
+        assert harness.source.read_count == 3
+        assert harness.publisher.accepted_through == 2
+        assert harness.publisher.poisoned is False
+    finally:
+        harness.worker.close(join_timeout_seconds=1.0)
+
+
 def test_writer_failure_reason_survives_startup_and_quiesced_rollback(
     tmp_path: Path,
 ) -> None:

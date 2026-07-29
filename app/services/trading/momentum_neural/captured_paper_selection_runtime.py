@@ -705,6 +705,8 @@ class CapturedPaperSelectionLifecycleWorker:
         self._occurrences_published = 0
         self._producer_batches_applied = 0
         self._producer_idle_cycles = 0
+        self._producer_frontier_timeout_cycles = 0
+        self._producer_frontier_recovery_pending = False
         self._last_frontier_sequence = 0
         self._last_frontier_status: str | None = None
 
@@ -1300,6 +1302,11 @@ class CapturedPaperSelectionLifecycleWorker:
         except CapturedPaperSelectionSourceUnavailable:
             with self._state_lock:
                 self._source_unavailable_cycles += 1
+                if not require_snapshot:
+                    # Fresh source coverage now supersedes any earlier
+                    # producer-only recovery.  Do not reopen admission until a
+                    # later nonempty snapshot establishes a new frontier.
+                    self._producer_frontier_recovery_pending = False
             if not require_snapshot:
                 self.deferred_reader.suspend(
                     "selection_source_coverage_unavailable"
@@ -1518,6 +1525,11 @@ class CapturedPaperSelectionLifecycleWorker:
         with self._state_lock:
             last_sequence = self._last_frontier_sequence
         while True:
+            if self._stop_event.is_set():
+                _reject(
+                    "PRODUCER_DRAIN_INTERRUPTED",
+                    "shutdown interrupted selection producer drain",
+                )
             self._assert_fence()
             result = components.producer.tick()
             self._assert_fence()
@@ -1546,8 +1558,8 @@ class CapturedPaperSelectionLifecycleWorker:
             now = float(self.monotonic_clock())
             if not math.isfinite(now):
                 _reject(
-                    "PRODUCER_FRONTIER_TIMEOUT",
-                    "selection producer did not reach a ready gap-free frontier",
+                    "PRODUCER_CLOCK_INVALID",
+                    "selection producer clock is non-finite",
                 )
             target_ready = (
                 sequence == target_sequence and frontier_status == "ready"
@@ -1585,7 +1597,13 @@ class CapturedPaperSelectionLifecycleWorker:
                 if initial_cycle_deadline is not None:
                     deadline = min(deadline, initial_cycle_deadline)
                 last_sequence = sequence
-            self._stop_event.wait(min(0.01, max(0.0, deadline - now)))
+            if self._stop_event.wait(
+                min(0.01, max(0.0, deadline - now))
+            ):
+                _reject(
+                    "PRODUCER_DRAIN_INTERRUPTED",
+                    "shutdown interrupted selection producer drain",
+                )
 
     def _run_initial_cycle_with_warmup(
         self,
@@ -1664,13 +1682,58 @@ class CapturedPaperSelectionLifecycleWorker:
                 "DURABLE_FRONTIER_EMPTY",
                 "initial selection frontier has no durable occurrence",
             )
-        self._drain_producer_to(
-            target,
-            initial_cycle_deadline=initial_cycle_deadline,
-        )
+        with self._state_lock:
+            frontier_before_drain = self._last_frontier_sequence
+        frontier_pending = target > frontier_before_drain
+        reader_was_suspended = self.deferred_reader.health()["suspended"]
+        if (
+            not initial
+            and frontier_pending
+            and (published > 0 or not reader_was_suspended)
+        ):
+            with self._state_lock:
+                self._producer_frontier_recovery_pending = True
+        if not initial and frontier_pending and not reader_was_suspended:
+            # Once a newer captured batch is durable, the prior selection view
+            # is no longer current enough for admission.  Keep the service and
+            # its heartbeat alive, but make the reader broker-incapable until
+            # this exact target reaches the gap-free producer frontier.
+            self.deferred_reader.suspend(
+                "selection_producer_frontier_pending"
+            )
+        while True:
+            try:
+                self._drain_producer_to(
+                    target,
+                    initial_cycle_deadline=initial_cycle_deadline,
+                )
+                break
+            except CapturedPaperSelectionRuntimeError as exc:
+                if initial or exc.code != "PRODUCER_FRONTIER_TIMEOUT":
+                    raise
+                # A periodic producer stall is an availability failure, not
+                # evidence corruption.  Retry the same durable target without
+                # rereading or republishing source input.  Gap, backwards,
+                # malformed, poisoned, and clock failures remain terminal.
+                self.deferred_reader.suspend(
+                    "selection_producer_frontier_pending"
+                )
+                self._assert_runtime_health()
+                with self._state_lock:
+                    self._producer_frontier_timeout_cycles += 1
+                if self._stop_event.wait(self.poll_interval_seconds):
+                    return
         self._assert_runtime_health()
         reader_health = self.deferred_reader.health()
-        if not initial and reader_health["suspended"] and published > 0:
+        with self._state_lock:
+            producer_recovery_pending = (
+                self._producer_frontier_recovery_pending
+            )
+        if (
+            not initial
+            and reader_health["suspended"]
+            and (published > 0 or producer_recovery_pending)
+        ):
             components = self._components
             setup = self._application_setup
             if components is None or setup is None:
@@ -1688,6 +1751,8 @@ class CapturedPaperSelectionLifecycleWorker:
                     components.initial_reader,
                     authority=setup.authority,
                 )
+                with self._state_lock:
+                    self._producer_frontier_recovery_pending = False
         with self._state_lock:
             self._cycles_completed += 1
 
@@ -1780,6 +1845,7 @@ class CapturedPaperSelectionLifecycleWorker:
                             "INITIAL_INGRESS_ADMISSION_UNAVAILABLE",
                             "INITIAL_INGRESS_PRESSURE_UNAVAILABLE",
                             "INITIAL_READER_REVOKED",
+                            "PRODUCER_DRAIN_INTERRUPTED",
                         }
                     )
                 )
@@ -2336,6 +2402,12 @@ class CapturedPaperSelectionLifecycleWorker:
                 "occurrences_published": self._occurrences_published,
                 "producer_batches_applied": self._producer_batches_applied,
                 "producer_idle_cycles": self._producer_idle_cycles,
+                "producer_frontier_timeout_cycles": (
+                    self._producer_frontier_timeout_cycles
+                ),
+                "producer_frontier_recovery_pending": (
+                    self._producer_frontier_recovery_pending
+                ),
                 "last_frontier_sequence": self._last_frontier_sequence,
                 "last_frontier_status": self._last_frontier_status,
                 "application_sha256": (
