@@ -176,9 +176,18 @@ def _seed_authority(
     *,
     symbol: str = "SEAL",
     viability_age_seconds: float = 0.02,
+    source_event_age_seconds: float | None = None,
+    material_ttl_seconds: float = 30.0,
     viability_scope: str = "symbol",
 ):
     decision_at = datetime.now(UTC).replace(microsecond=123456)
+    source_event_at = decision_at - timedelta(
+        seconds=(
+            viability_age_seconds
+            if source_event_age_seconds is None
+            else source_event_age_seconds
+        )
+    )
     user = models.User(name=f"captured-preowner-{_digest(symbol)[:12]}")
     db.add(user)
     db.flush()
@@ -209,7 +218,10 @@ def _seed_authority(
         regime_snapshot_json={"regime": "momentum"},
         execution_readiness_json={"captured": True},
         explain_json={"reason": "sealed-test-authority"},
-        evidence_window_json={"coverage": "complete"},
+        evidence_window_json={
+            "coverage": "complete",
+            "event_at": source_event_at.isoformat().replace("+00:00", "Z"),
+        },
         source_node_id="captured_initial_test",
         correlation_id=_digest(f"viability:{symbol}"),
     )
@@ -277,7 +289,7 @@ def _seed_authority(
         ),
         viability_snapshot_sha256=viability_snapshot_sha256,
         decision_at=decision_at,
-        expires_at=decision_at + timedelta(seconds=30),
+        expires_at=decision_at + timedelta(seconds=material_ttl_seconds),
     )
     viability_id = int(viability.id)
     db.rollback()
@@ -543,6 +555,51 @@ def test_stale_viability_rejects_and_rolls_back_preowner_and_claim(db):
     assert _count(db, "trading_automation_events") == 0
     assert _count(db, "broker_symbol_action_claims") == 0
     assert _count(db, "adaptive_risk_opportunity_claims") == 0
+    assert _count(db, "adaptive_risk_reservations") == 0
+    assert _count(db, "captured_paper_post_commit_outbox") == 0
+
+
+def test_stale_original_source_event_rejects_fresh_rewrapped_viability(db):
+    context_max_age = _policy_receipt().policy.context_data_max_age_seconds
+    material, _ = _seed_authority(
+        db,
+        viability_age_seconds=0.02,
+        source_event_age_seconds=context_max_age + 0.001,
+    )
+
+    with pytest.raises(
+        initial.CapturedPaperInitialAdmissionError,
+        match="initial_source_event_stale",
+    ):
+        _commit(material)
+
+    db.rollback()
+    assert _count(db, "trading_automation_sessions") == 0
+    assert _count(db, "trading_automation_events") == 0
+    assert _count(db, "broker_symbol_action_claims") == 0
+    assert _count(db, "adaptive_risk_reservations") == 0
+    assert _count(db, "captured_paper_post_commit_outbox") == 0
+
+
+def test_material_cannot_outlive_original_source_event_deadline(db):
+    context_max_age = _policy_receipt().policy.context_data_max_age_seconds
+    material, _ = _seed_authority(
+        db,
+        viability_age_seconds=0.02,
+        source_event_age_seconds=context_max_age - 1.0,
+        material_ttl_seconds=2.0,
+    )
+
+    with pytest.raises(
+        initial.CapturedPaperInitialAdmissionError,
+        match="initial_material_exceeds_source_event_expiry",
+    ):
+        _commit(material)
+
+    db.rollback()
+    assert _count(db, "trading_automation_sessions") == 0
+    assert _count(db, "trading_automation_events") == 0
+    assert _count(db, "broker_symbol_action_claims") == 0
     assert _count(db, "adaptive_risk_reservations") == 0
     assert _count(db, "captured_paper_post_commit_outbox") == 0
 

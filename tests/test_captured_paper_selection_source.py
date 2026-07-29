@@ -382,6 +382,30 @@ def test_source_admits_complete_fresh_symbol_outside_hub_tick_universe(db) -> No
     assert {item.symbol for item in snapshots} == {"ACTU"}
 
 
+def test_source_admits_fresh_equity_routes_when_latest_hub_tick_is_crypto_only(
+    db,
+) -> None:
+    material = _seed_source(
+        db,
+        symbols=("HUBONLY",),
+        row_symbols=("ACTU",),
+    )
+    hub = db.get(BrainNodeState, HUB_NODE_ID)
+    assert hub is not None
+    local_state = copy.deepcopy(dict(hub.local_state or {}))
+    local_state["symbols_evaluated"] = ["BTC-USD"]
+    hub.local_state = local_state
+    db.commit()
+
+    source = _source(
+        material,
+        fundamentals_reader=lambda symbol: _fresh_fundamentals(symbol),
+    )
+
+    snapshots = source.read_snapshot()
+    assert {item.symbol for item in snapshots} == {"ACTU"}
+
+
 def test_source_survives_nonfinite_floats_in_fundamentals(db) -> None:
     # 2026-07-24 (a86-0948): provider fundamentals (yfinance-shaped) can carry
     # NaN/Infinity for missing fields.  Canonical JSON cannot represent them,

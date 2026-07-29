@@ -564,8 +564,11 @@ class SqlAlchemyCapturedViabilitySnapshotSource:
         equity_symbols = tuple(
             sorted(symbol for symbol in all_symbols if not symbol.endswith("-USD"))
         )
-        if not equity_symbols:
-            _reject("derived_source_equity_universe_empty")
+        # The shared hub row is per-tick and alternates between equity and
+        # crypto-only batches. A crypto-only tick is still a valid, fresh hub
+        # snapshot; the complete/fresh equity route probe supplies the
+        # selection universe below. Rejecting here starved the PAPER frontier
+        # whenever the source sampled between equity batches.
         tick_at = _parse_utc(tick_raw, "derived_source_hub_tick_at")
         body = {
             "schema_version": "chili.captured-paper-viability-hub-snapshot.v1",

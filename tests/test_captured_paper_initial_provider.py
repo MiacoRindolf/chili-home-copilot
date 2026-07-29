@@ -404,6 +404,7 @@ def _candidate(
     *,
     score: float,
     freshness_at: datetime,
+    source_event_at: datetime | None = None,
     viability_id: int | None = None,
     active: bool = True,
     paper_eligible: bool = True,
@@ -443,7 +444,12 @@ def _candidate(
             else {"coverage": "complete", "spread_bps": 7.25}
         ),
         explain_json={"reason": "captured-test"},
-        evidence_window_json={"coverage": "complete"},
+        evidence_window_json={
+            "coverage": "complete",
+            "event_at": (
+                source_event_at or freshness_at
+            ).isoformat().replace("+00:00", "Z"),
+        },
         source_node_id="captured_initial_provider_test",
         correlation_id=_digest(f"candidate:{variant_id}"),
         created_at=created.replace(tzinfo=None),
@@ -935,6 +941,19 @@ def test_provider_rejects_foreign_provider_continuity_for_exact_iqfeed_read() ->
         ),
         (
             _Reader(
+                (
+                    _candidate(
+                        1,
+                        score=0.8,
+                        freshness_at=NOW - timedelta(seconds=1),
+                        source_event_at=NOW - timedelta(seconds=46),
+                    ),
+                )
+            ),
+            "initial_candidate_selection_coverage_unavailable",
+        ),
+        (
+            _Reader(
                 (_candidate(1, score=0.8, freshness_at=NOW - timedelta(seconds=1)),),
                 read_at=NOW - timedelta(seconds=46),
             ),
@@ -956,6 +975,27 @@ def test_missing_or_stale_candidate_evidence_is_local_coverage_unavailable(
     assert reader.network_calls == 0
     assert reader.mutation_calls == 0
     assert reader.order_calls == 0
+
+
+def test_material_expiry_is_capped_by_original_source_event_clock() -> None:
+    source_event_at = NOW - timedelta(seconds=44.9)
+    reader = _Reader(
+        (
+            _candidate(
+                1,
+                score=0.8,
+                freshness_at=NOW - timedelta(seconds=1),
+                source_event_at=source_event_at,
+            ),
+        )
+    )
+    provider, resolution, *_ = _provider_fixture(reader=reader)
+
+    material = _prepare(provider, resolution)
+
+    assert material.expires_at == source_event_at + timedelta(
+        seconds=_policy_receipt().policy.context_data_max_age_seconds
+    )
 
 
 @pytest.mark.parametrize(

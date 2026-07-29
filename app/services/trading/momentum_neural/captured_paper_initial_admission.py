@@ -20,7 +20,7 @@ session is not promotable by this module alone.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
 import hashlib
 import json
@@ -1112,11 +1112,38 @@ def _validate_variant_and_viability(
     policy_receipt = _reconstruct_adaptive_policy_settings_receipt(
         material.adaptive_policy_settings_projection
     )
-    if (
-        freshness_age_seconds
-        > policy_receipt.policy.context_data_max_age_seconds
-    ):
+    context_max_age_seconds = (
+        policy_receipt.policy.context_data_max_age_seconds
+    )
+    if freshness_age_seconds > context_max_age_seconds:
         _reject("initial_viability_stale")
+    evidence = getattr(viability, "evidence_window_json", None)
+    source_event_raw = (
+        evidence.get("event_at") if isinstance(evidence, Mapping) else None
+    )
+    try:
+        if not isinstance(source_event_raw, str):
+            raise ValueError("captured source event clock is unavailable")
+        source_event_at = datetime.fromisoformat(
+            source_event_raw.replace("Z", "+00:00")
+        )
+        if source_event_at.tzinfo is None:
+            raise ValueError("captured source event clock is naive")
+        source_event_at = source_event_at.astimezone(timezone.utc)
+    except (TypeError, ValueError):
+        _reject("initial_source_event_clock_unavailable")
+    source_event_age_seconds = (
+        material.decision_at - source_event_at
+    ).total_seconds()
+    if source_event_age_seconds < 0:
+        _reject("initial_source_event_from_future")
+    if source_event_age_seconds > context_max_age_seconds:
+        _reject("initial_source_event_stale")
+    source_event_expires_at = source_event_at + timedelta(
+        seconds=context_max_age_seconds
+    )
+    if material.expires_at > source_event_expires_at:
+        _reject("initial_material_exceeds_source_event_expiry")
     if captured_paper_initial_viability_sha256(viability) != material.viability_snapshot_sha256:
         _reject("initial_viability_mismatch")
 
