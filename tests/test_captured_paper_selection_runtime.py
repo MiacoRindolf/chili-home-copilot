@@ -1273,7 +1273,10 @@ def test_periodic_pressure_retries_retained_occurrence_without_poison(
     assert harness.source.read_count == 2
     assert harness.log.count("source_build") == 2
     assert harness.publisher.admission_callback_reasons == [None, reason]
-    assert suspensions == [("selection_capture_pressure_unavailable", True)]
+    assert suspensions == [
+        ("selection_producer_frontier_pending", True),
+        ("selection_capture_pressure_unavailable", True),
+    ]
     assert harness.publisher.accepted_through == 2
     assert harness.publisher.poisoned is False
     assert harness.reader.health()["installed"] is True
@@ -1765,6 +1768,66 @@ def test_durable_wait_rejects_a_backward_frontier_before_equal_success(
     harness.worker.close(join_timeout_seconds=1.0)
 
 
+def test_durable_wait_rejects_a_backward_frontier_across_retry_windows(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    harness = _Harness(tmp_path, poll_interval_seconds=60.0)
+    harness.worker.start()
+    assert harness.publisher is not None
+    publisher = harness.publisher
+    publisher.accepted_through = 4
+    publisher.durable_through = 2
+    observations = iter((0.0, 0.2))
+    monkeypatch.setattr(
+        harness.worker,
+        "monotonic_clock",
+        lambda: next(observations),
+    )
+    monkeypatch.setattr(harness.worker, "_assert_runtime_health", lambda: None)
+
+    try:
+        with pytest.raises(CapturedPaperSelectionRuntimeError) as timeout:
+            harness.worker._wait_for_durable_frontier()
+        assert timeout.value.code == "DURABLE_FRONTIER_TIMEOUT"
+
+        publisher.durable_through = 1
+        monkeypatch.setattr(harness.worker, "monotonic_clock", lambda: 0.0)
+        with pytest.raises(CapturedPaperSelectionRuntimeError) as backward:
+            harness.worker._wait_for_durable_frontier()
+        assert backward.value.code == "DURABLE_FRONTIER_INVALID"
+    finally:
+        publisher.durable_through = publisher.accepted_through
+        harness.worker.close(join_timeout_seconds=1.0)
+
+
+def test_durable_wait_rejects_nonfinite_clock_as_fatal(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    harness = _Harness(tmp_path, poll_interval_seconds=60.0)
+    harness.worker.start()
+    assert harness.publisher is not None
+    publisher = harness.publisher
+    publisher.accepted_through = 2
+    publisher.durable_through = 1
+    observations = iter((float("nan"), 0.0))
+    monkeypatch.setattr(
+        harness.worker,
+        "monotonic_clock",
+        lambda: next(observations),
+    )
+    monkeypatch.setattr(harness.worker, "_assert_runtime_health", lambda: None)
+
+    try:
+        with pytest.raises(CapturedPaperSelectionRuntimeError) as failure:
+            harness.worker._wait_for_durable_frontier()
+        assert failure.value.code == "DURABLE_CLOCK_INVALID"
+    finally:
+        publisher.durable_through = publisher.accepted_through
+        harness.worker.close(join_timeout_seconds=1.0)
+
+
 def test_durable_progress_never_extends_the_absolute_initial_cycle_deadline(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -2052,6 +2115,161 @@ def test_periodic_producer_timeout_suspends_then_recovers_same_frontier(
     finally:
         release_frontier.set()
         harness.worker.close(join_timeout_seconds=1.0)
+
+
+def test_periodic_durable_timeout_suspends_then_recovers_same_accepted_frontier(
+    tmp_path: Path,
+) -> None:
+    harness = _Harness(tmp_path, poll_interval_seconds=0.02)
+    harness.worker.durable_timeout_seconds = 0.05
+    harness.worker.start()
+    assert harness.source is not None
+    assert harness.publisher is not None
+    publisher = harness.publisher
+    publisher.auto_durable = False
+    harness.source.recovery_snapshot_pending = True
+
+    try:
+        suspended = _await_worker_health(
+            harness.worker,
+            lambda health: (
+                health.get("durable_frontier_timeout_cycles", 0) >= 2
+            ),
+        )
+        assert suspended["running"] is True
+        assert suspended["fatal"] is False
+        assert suspended["ready"] is False
+        assert suspended["candidate_reader"]["suspended"] is True
+        assert suspended["candidate_reader"]["suspend_reason"] == (
+            "selection_producer_frontier_pending"
+        )
+        assert harness.source.read_count == 2
+        assert publisher.accepted_through == 2
+        assert publisher.durable_through == 1
+        assert publisher.poisoned is False
+        with pytest.raises(CapturedPaperInitialCandidateReaderUnavailable):
+            harness.reader.read_candidates(
+                user_id=1,
+                symbol="AAPL",
+                decision_at=NOW,
+            )
+
+        publisher.durable_through = publisher.accepted_through
+        recovered = _await_worker_health(
+            harness.worker,
+            lambda health: (
+                health["ready"] is True
+                and health["last_frontier_sequence"] == 2
+            ),
+        )
+        assert recovered["running"] is True
+        assert recovered["fatal"] is False
+        assert recovered["durable_frontier_timeout_cycles"] >= 2
+        assert recovered["candidate_reader"]["installed"] is True
+        assert harness.source.read_count == 2
+        assert publisher.accepted_through == 2
+        assert publisher.durable_through == 2
+        assert publisher.poisoned is False
+    finally:
+        publisher.durable_through = publisher.accepted_through
+        harness.worker.close(join_timeout_seconds=1.0)
+
+
+def test_periodic_batch_suspends_after_first_accept_before_later_publish_returns(
+    tmp_path: Path,
+) -> None:
+    harness = _Harness(tmp_path, poll_interval_seconds=0.02)
+    harness.worker.start()
+    assert harness.source is not None
+    assert harness.publisher is not None
+    publisher = harness.publisher
+    harness.source.prime_snapshot_count = 2
+
+    first_publish_accepted = threading.Event()
+    release_first_publish = threading.Event()
+    original_publish = publisher.publish_bundle
+
+    def block_after_first_periodic_accept(**kwargs: object) -> SimpleNamespace:
+        sequence = int(getattr(kwargs["bundle"], "source_sequence"))
+        receipt = original_publish(**kwargs)
+        if sequence == 2:
+            first_publish_accepted.set()
+            assert release_first_publish.wait(timeout=2.0)
+        return receipt
+
+    publisher.publish_bundle = block_after_first_periodic_accept
+    harness.source.recovery_snapshot_pending = True
+
+    try:
+        assert first_publish_accepted.wait(timeout=2.0)
+        health = harness.worker.health()
+        assert health["running"] is True
+        assert health["fatal"] is False
+        assert health["candidate_reader"]["suspended"] is True
+        assert health["candidate_reader"]["suspend_reason"] == (
+            "selection_producer_frontier_pending"
+        )
+        assert publisher.accepted_through == 2
+        with pytest.raises(CapturedPaperInitialCandidateReaderUnavailable):
+            harness.reader.read_candidates(
+                user_id=1,
+                symbol="AAPL",
+                decision_at=NOW,
+            )
+
+        release_first_publish.set()
+        recovered = _await_worker_health(
+            harness.worker,
+            lambda observed: (
+                observed["ready"] is True
+                and observed["last_frontier_sequence"] == 3
+            ),
+        )
+        assert recovered["fatal"] is False
+        assert harness.source.read_count == 2
+        assert publisher.accepted_through == 3
+        assert publisher.poisoned is False
+    finally:
+        release_first_publish.set()
+        harness.worker.close(join_timeout_seconds=1.0)
+
+
+def test_periodic_durable_wait_is_promptly_interruptible_on_close(
+    tmp_path: Path,
+) -> None:
+    harness = _Harness(tmp_path, poll_interval_seconds=0.02)
+    harness.worker.durable_timeout_seconds = 5.0
+    harness.worker.start()
+    assert harness.source is not None
+    assert harness.publisher is not None
+    publisher = harness.publisher
+    publisher.auto_durable = False
+    harness.source.recovery_snapshot_pending = True
+
+    try:
+        _await_worker_health(
+            harness.worker,
+            lambda health: (
+                health["candidate_reader"]["suspended"] is True
+                and publisher.accepted_through == 2
+                and publisher.durable_through == 1
+            ),
+        )
+
+        started_at = time.monotonic()
+        harness.worker.close(join_timeout_seconds=1.0)
+        elapsed = time.monotonic() - started_at
+        health = harness.worker.health()
+
+        assert elapsed < 1.0
+        assert health["state"] == "quiesced"
+        assert health["fatal"] is False
+        assert health["running"] is False
+        assert publisher.poisoned is False
+    finally:
+        publisher.durable_through = publisher.accepted_through
+        if harness.worker.health()["running"]:
+            harness.worker.close(join_timeout_seconds=1.0)
 
 
 def test_periodic_producer_drain_is_promptly_interruptible_on_close(

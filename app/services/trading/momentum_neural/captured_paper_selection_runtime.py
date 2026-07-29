@@ -705,6 +705,8 @@ class CapturedPaperSelectionLifecycleWorker:
         self._occurrences_published = 0
         self._producer_batches_applied = 0
         self._producer_idle_cycles = 0
+        self._durable_frontier_timeout_cycles = 0
+        self._last_durable_sequence = 0
         self._producer_frontier_timeout_cycles = 0
         self._producer_frontier_recovery_pending = False
         self._last_frontier_sequence = 0
@@ -1400,7 +1402,7 @@ class CapturedPaperSelectionLifecycleWorker:
                                 components,
                                 deadline=initial_cycle_deadline,
                             )
-                elif self.wait_for_initial_pressure:
+                elif not require_snapshot:
                     def before_ingress_admission(
                         _event: Any,
                         _event_size: int,
@@ -1408,7 +1410,23 @@ class CapturedPaperSelectionLifecycleWorker:
                     ) -> None:
                         self._assert_fence()
                         if rejection_reason is None:
+                            # Revoke the old reader before this exact event can
+                            # cross the atomic ingress boundary.  Any read
+                            # already in flight carries the prior epoch and is
+                            # discarded before returning.
+                            with self._state_lock:
+                                self._producer_frontier_recovery_pending = True
+                            if not self.deferred_reader.health()["suspended"]:
+                                self.deferred_reader.suspend(
+                                    "selection_producer_frontier_pending"
+                                )
                             return
+                        if not self.wait_for_initial_pressure:
+                            _reject(
+                                "QUEUE_INGRESS_REJECTED",
+                                "periodic selection ingress rejected the "
+                                f"retained occurrence ({rejection_reason})",
+                            )
                         self.deferred_reader.suspend(
                             "selection_capture_pressure_unavailable"
                         )
@@ -1467,11 +1485,22 @@ class CapturedPaperSelectionLifecycleWorker:
         *,
         initial_cycle_deadline: float | None = None,
     ) -> int:
-        deadline = float(self.monotonic_clock()) + self.durable_timeout_seconds
+        started_at = float(self.monotonic_clock())
+        if not math.isfinite(started_at):
+            _reject(
+                "DURABLE_CLOCK_INVALID",
+                "selection queue durability clock is non-finite",
+            )
+        deadline = started_at + self.durable_timeout_seconds
         if initial_cycle_deadline is not None:
             deadline = min(deadline, initial_cycle_deadline)
         last_durable: int | None = None
         while True:
+            if self._stop_event.is_set():
+                _reject(
+                    "DURABLE_DRAIN_INTERRUPTED",
+                    "shutdown interrupted selection queue durability wait",
+                )
             self._assert_fence()
             self._assert_runtime_health()
             health = self._publisher_health()
@@ -1479,11 +1508,25 @@ class CapturedPaperSelectionLifecycleWorker:
             durable = int(health.get("durable_through", 0) or 0)
             reserved = health.get("reserved_sequence")
             now = float(self.monotonic_clock())
+            if not math.isfinite(now):
+                _reject(
+                    "DURABLE_CLOCK_INVALID",
+                    "selection queue durability clock is non-finite",
+                )
             if durable < 0 or accepted < 0 or durable > accepted:
                 _reject(
                     "DURABLE_FRONTIER_INVALID",
                     "selection queue durable frontier exceeds accepted work",
                 )
+            with self._state_lock:
+                durable_floor = self._last_durable_sequence
+                if durable < durable_floor:
+                    _reject(
+                        "DURABLE_FRONTIER_INVALID",
+                        "selection queue durable frontier moved backwards",
+                    )
+                if durable > durable_floor:
+                    self._last_durable_sequence = durable
             if last_durable is not None and durable < last_durable:
                 _reject(
                     "DURABLE_FRONTIER_INVALID",
@@ -1503,12 +1546,16 @@ class CapturedPaperSelectionLifecycleWorker:
                 if initial_cycle_deadline is not None:
                     deadline = min(deadline, initial_cycle_deadline)
                 last_durable = durable
-            if not math.isfinite(now) or now >= deadline:
+            if now >= deadline:
                 _reject(
                     "DURABLE_FRONTIER_TIMEOUT",
                     "selection queue did not reach its fsync acknowledgement frontier",
                 )
-            self._stop_event.wait(min(0.01, max(0.0, deadline - now)))
+            if self._stop_event.wait(min(0.01, max(0.0, deadline - now))):
+                _reject(
+                    "DURABLE_DRAIN_INTERRUPTED",
+                    "shutdown interrupted selection queue durability wait",
+                )
 
     def _drain_producer_to(
         self,
@@ -1674,9 +1721,36 @@ class CapturedPaperSelectionLifecycleWorker:
             require_snapshot=initial,
             initial_cycle_deadline=initial_cycle_deadline,
         )
-        target = self._wait_for_durable_frontier(
-            initial_cycle_deadline=initial_cycle_deadline,
-        )
+        reader_was_suspended = self.deferred_reader.health()["suspended"]
+        if not initial and published > 0:
+            with self._state_lock:
+                self._producer_frontier_recovery_pending = True
+            if not reader_was_suspended:
+                # A newly accepted source occurrence makes the prior selection
+                # view stale before fsync completes.  Suspend admission now and
+                # keep retrying this same accepted frontier; never reread or
+                # republish the source batch merely because the shared writer
+                # exceeded one liveness window.
+                self.deferred_reader.suspend(
+                    "selection_producer_frontier_pending"
+                )
+        while True:
+            try:
+                target = self._wait_for_durable_frontier(
+                    initial_cycle_deadline=initial_cycle_deadline,
+                )
+                break
+            except CapturedPaperSelectionRuntimeError as exc:
+                if initial or exc.code != "DURABLE_FRONTIER_TIMEOUT":
+                    raise
+                self.deferred_reader.suspend(
+                    "selection_producer_frontier_pending"
+                )
+                self._assert_runtime_health()
+                with self._state_lock:
+                    self._durable_frontier_timeout_cycles += 1
+                if self._stop_event.wait(self.poll_interval_seconds):
+                    return
         if initial and target <= 0:
             _reject(
                 "DURABLE_FRONTIER_EMPTY",
@@ -1845,6 +1919,7 @@ class CapturedPaperSelectionLifecycleWorker:
                             "INITIAL_INGRESS_ADMISSION_UNAVAILABLE",
                             "INITIAL_INGRESS_PRESSURE_UNAVAILABLE",
                             "INITIAL_READER_REVOKED",
+                            "DURABLE_DRAIN_INTERRUPTED",
                             "PRODUCER_DRAIN_INTERRUPTED",
                         }
                     )
@@ -2402,6 +2477,10 @@ class CapturedPaperSelectionLifecycleWorker:
                 "occurrences_published": self._occurrences_published,
                 "producer_batches_applied": self._producer_batches_applied,
                 "producer_idle_cycles": self._producer_idle_cycles,
+                "durable_frontier_timeout_cycles": (
+                    self._durable_frontier_timeout_cycles
+                ),
+                "last_durable_sequence": self._last_durable_sequence,
                 "producer_frontier_timeout_cycles": (
                     self._producer_frontier_timeout_cycles
                 ),
