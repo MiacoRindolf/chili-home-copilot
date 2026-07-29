@@ -1857,6 +1857,34 @@ def test_producer_progress_never_extends_absolute_initial_cycle_deadline(
         harness.worker.close(join_timeout_seconds=1.0)
 
 
+def test_producer_target_completed_after_stall_deadline_is_not_false_timed_out(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    harness = _Harness(tmp_path, poll_interval_seconds=60.0)
+    harness.worker.start()
+    components = harness.worker._components
+    assert components is not None
+    observations = iter((0.0, 0.11))
+    harness.worker.monotonic_clock = lambda: next(observations)
+    monkeypatch.setattr(
+        components.producer,
+        "tick",
+        lambda: _ready_producer_result(4),
+    )
+
+    # A producer tick can spend longer than the stall window inside one
+    # authoritative DB transaction and still return the exact ready target.
+    # That is completed work, not a stalled frontier.  A separate finite
+    # initial-cycle deadline remains an absolute startup bound.
+    try:
+        frontier = harness.worker._drain_producer_to(4)
+        assert frontier.last_source_sequence == 4
+        assert frontier.status == "ready"
+    finally:
+        harness.worker.close(join_timeout_seconds=1.0)
+
+
 def test_producer_wait_rejects_a_backward_frontier(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

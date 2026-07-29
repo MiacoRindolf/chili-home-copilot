@@ -1544,7 +1544,25 @@ class CapturedPaperSelectionLifecycleWorker:
                     "selection producer advanced beyond the durable target",
                 )
             now = float(self.monotonic_clock())
-            if not math.isfinite(now) or now >= deadline:
+            if not math.isfinite(now):
+                _reject(
+                    "PRODUCER_FRONTIER_TIMEOUT",
+                    "selection producer did not reach a ready gap-free frontier",
+                )
+            target_ready = (
+                sequence == target_sequence and frontier_status == "ready"
+            )
+            if (
+                target_ready
+                and initial_cycle_deadline is not None
+                and math.isfinite(initial_cycle_deadline)
+                and now >= initial_cycle_deadline
+            ):
+                _reject(
+                    "PRODUCER_FRONTIER_TIMEOUT",
+                    "selection producer did not reach a ready gap-free frontier",
+                )
+            if not target_ready and now >= deadline:
                 _reject(
                     "PRODUCER_FRONTIER_TIMEOUT",
                     "selection producer did not reach a ready gap-free frontier",
@@ -1556,7 +1574,7 @@ class CapturedPaperSelectionLifecycleWorker:
                     self._producer_batches_applied += 1
                 elif status == "idle":
                     self._producer_idle_cycles += 1
-            if sequence == target_sequence and frontier_status == "ready":
+            if target_ready:
                 return frontier
             if sequence > last_sequence:
                 # The configured timeout bounds a stalled producer, not the
