@@ -1216,6 +1216,50 @@ def _decoded_source_frame_line(source_frame_bytes: bytes) -> str | None:
     return decoded
 
 
+def _observe_protocol_ack(
+    line: str,
+    *,
+    connection_generation: int,
+) -> bool:
+    """Accept only the requested protocol on the currently active socket."""
+
+    parts = line.split(",")
+    if parts and parts[-1] == "":
+        parts = parts[:-1]
+    if parts != ["S", "CURRENT PROTOCOL", "6.2"]:
+        return False
+    with _connection_state_lock:
+        generation = int(connection_generation)
+        if _active_connection_generation != generation:
+            return False
+        _protocol_acknowledged_generations.add(generation)
+    return True
+
+
+def _protocol_acknowledged(connection_generation: int) -> bool:
+    with _connection_state_lock:
+        return int(connection_generation) in _protocol_acknowledged_generations
+
+
+def _wait_for_protocol_ack(
+    connection_generation: int,
+    stop_event: threading.Event,
+    *,
+    timeout_seconds: float = SELECTED_FIELDS_ACK_TIMEOUT_S,
+) -> bool:
+    timeout = float(timeout_seconds)
+    if not math.isfinite(timeout) or timeout <= 0:
+        return False
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if _protocol_acknowledged(connection_generation):
+            return True
+        if not _connection_generation_active(connection_generation, stop_event):
+            return False
+        time.sleep(min(0.01, max(0.0, deadline - time.monotonic())))
+    return _protocol_acknowledged(connection_generation)
+
+
 def _observe_selected_update_fields_ack(
     line: str,
     *,
@@ -1434,6 +1478,7 @@ _active_connection_generation = 0
 _last_nbbo_append_monotonic: float | None = None
 _connection_generation = 0
 _frame_sequence_by_generation: dict[int, int] = {}
+_protocol_acknowledged_generations: set[int] = set()
 _selected_fields_ack_sha256_by_generation: dict[int, str] = {}
 _capture_handoff_lock = threading.Lock()
 _capture_handoff: Any | None = None
@@ -1449,6 +1494,7 @@ def _begin_connection_generation() -> int:
         _connection_generation += 1
         _active_connection_generation = _connection_generation
         _frame_sequence_by_generation[_connection_generation] = 0
+        _protocol_acknowledged_generations.discard(_connection_generation)
         _selected_fields_ack_sha256_by_generation.pop(_connection_generation, None)
         return _connection_generation
 
@@ -1458,6 +1504,7 @@ def _activate_connection_generation(connection_generation: int) -> None:
     with _connection_state_lock:
         _active_connection_generation = int(connection_generation)
         _frame_sequence_by_generation.setdefault(int(connection_generation), 0)
+        _protocol_acknowledged_generations.discard(int(connection_generation))
         _selected_fields_ack_sha256_by_generation.pop(
             int(connection_generation), None
         )
@@ -1595,6 +1642,7 @@ def _retire_connection_generation(connection_generation: int) -> None:
         if _active_connection_generation == int(connection_generation):
             _active_connection_generation = 0
         _frame_sequence_by_generation.pop(int(connection_generation), None)
+        _protocol_acknowledged_generations.discard(int(connection_generation))
         _selected_fields_ack_sha256_by_generation.pop(
             int(connection_generation), None
         )
@@ -2205,7 +2253,16 @@ def reader(
             elif c0 == "T":                     # timestamp heartbeat (NOT a trade)
                 continue
             elif line.startswith("S,") or c0 in ("n", "E"):
-                if line.startswith("S,CURRENT UPDATE FIELDNAMES,"):
+                if line.startswith("S,CURRENT PROTOCOL,"):
+                    if not _observe_protocol_ack(
+                        line,
+                        connection_generation=connection_generation,
+                    ):
+                        log.warning(
+                            "IQFeed ignored non-authoritative protocol acknowledgement generation=%d",
+                            connection_generation,
+                        )
+                elif line.startswith("S,CURRENT UPDATE FIELDNAMES,"):
                     if not _observe_selected_update_fields_ack(
                         line,
                         connection_generation=connection_generation,
@@ -2698,7 +2755,6 @@ def _run_connection(
             connection_socket,
             "S,SET PROTOCOL,6.2",
         )
-        _send(connection_socket, SELECT_UPDATE_FIELDS_COMMAND)
         log.info(
             "connected to IQConnect %s:%s (L1 trades, protocol 6.2) run=%s generation=%d",
             HOST,
@@ -2713,7 +2769,15 @@ def _run_connection(
             name=f"iqfeed-trade-reader-g{connection_generation}",
         )
         reader_thread.start()
-        _capture_bc("reader started; BEGIN field-ack wait")
+        _capture_bc("reader started; BEGIN protocol-ack wait")
+        if not _wait_for_protocol_ack(
+            connection_generation,
+            stop_event,
+        ):
+            _capture_bc("protocol-ack FAILED (6.2 not acknowledged)")
+            raise RuntimeError("IQFeed protocol 6.2 was not acknowledged")
+        _send(connection_socket, SELECT_UPDATE_FIELDS_COMMAND)
+        _capture_bc("field selection sent; BEGIN field-ack wait")
         if not _wait_for_selected_fields_ack(
             connection_generation,
             stop_event,

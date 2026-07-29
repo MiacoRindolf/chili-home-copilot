@@ -475,6 +475,11 @@ def test_l1_connection_wrapper_closes_generation_after_indeterminate_send(
     )
     monkeypatch.setattr(
         trade_bridge,
+        "_wait_for_protocol_ack",
+        lambda *_args, **_kwargs: True,
+    )
+    monkeypatch.setattr(
+        trade_bridge,
         "_wait_for_selected_fields_ack",
         lambda *_args, **_kwargs: True,
     )

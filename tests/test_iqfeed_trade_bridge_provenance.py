@@ -38,6 +38,7 @@ def _reset_parser_state() -> None:
     with bridge._connection_state_lock:
         bridge._active_connection_generation = 0
         bridge._frame_sequence_by_generation.clear()
+        bridge._protocol_acknowledged_generations.clear()
         bridge._selected_fields_ack_sha256_by_generation.clear()
     with bridge._capture_handoff_lock:
         bridge._capture_handoff = None
@@ -739,6 +740,7 @@ def test_connection_runner_closes_and_joins_reader_before_rebind(monkeypatch):
 
     monkeypatch.setattr(bridge.socket, "create_connection", _create_connection)
     monkeypatch.setattr(bridge, "writer", _writer)
+    monkeypatch.setattr(bridge, "_wait_for_protocol_ack", lambda *_a, **_k: True)
     monkeypatch.setattr(bridge, "_wait_for_selected_fields_ack", lambda *_a, **_k: True)
 
     bridge._run_connection(set(), None)
@@ -747,6 +749,82 @@ def test_connection_runner_closes_and_joins_reader_before_rebind(monkeypatch):
     assert create_count["value"] == 2
     assert second.closed.is_set()
     assert second.reader_exited.is_set()
+
+
+def test_connection_runner_waits_for_protocol_ack_before_selecting_fields(
+    monkeypatch,
+):
+    class _HandshakeSocket:
+        def __init__(self):
+            self.condition = bridge.threading.Condition()
+            self.responses = []
+            self.closed = False
+            self.protocol_frame_delivered = bridge.threading.Event()
+            self.select_followed_protocol_ack = None
+            self.sent = []
+
+        def settimeout(self, _timeout):
+            return None
+
+        def sendall(self, payload):
+            command = payload.decode("ascii").rstrip("\r\n")
+            with self.condition:
+                self.sent.append(command)
+                if command == "S,SET PROTOCOL,6.2":
+                    self.responses.append(b"S,CURRENT PROTOCOL,6.2\r\n")
+                elif command == bridge.SELECT_UPDATE_FIELDS_COMMAND:
+                    self.select_followed_protocol_ack = (
+                        self.protocol_frame_delivered.is_set()
+                    )
+                    ack = (
+                        "S,CURRENT UPDATE FIELDNAMES,"
+                        + ",".join(bridge.SELECTED_UPDATE_FIELDS)
+                        + ",\r\n"
+                    )
+                    self.responses.append(ack.encode("ascii"))
+                self.condition.notify_all()
+
+        def recv(self, _size):
+            with self.condition:
+                self.condition.wait_for(
+                    lambda: self.responses or self.closed,
+                    timeout=2.0,
+                )
+                if self.responses:
+                    response = self.responses.pop(0)
+                    if response.startswith(b"S,CURRENT PROTOCOL,6.2"):
+                        self.protocol_frame_delivered.set()
+                    return response
+                return b""
+
+        def shutdown(self, _how):
+            with self.condition:
+                self.closed = True
+                self.condition.notify_all()
+
+        def close(self):
+            self.shutdown(None)
+
+    connection = _HandshakeSocket()
+    monkeypatch.setattr(
+        bridge.socket,
+        "create_connection",
+        lambda *_a, **_k: connection,
+    )
+    monkeypatch.setattr(
+        bridge,
+        "_record_capture_connection_boundary",
+        lambda **_k: None,
+    )
+    monkeypatch.setattr(bridge, "writer", lambda *_a: None)
+
+    bridge._run_connection(set(), None)
+
+    assert connection.select_followed_protocol_ack is True
+    assert connection.sent[:2] == [
+        "S,SET PROTOCOL,6.2",
+        bridge.SELECT_UPDATE_FIELDS_COMMAND,
+    ]
 
 
 def test_nonquiescent_reader_refuses_reconnect(monkeypatch):
@@ -779,6 +857,7 @@ def test_nonquiescent_reader_refuses_reconnect(monkeypatch):
     stuck = _StuckSocket()
     monkeypatch.setattr(bridge.socket, "create_connection", lambda *_a, **_k: stuck)
     monkeypatch.setattr(bridge, "READER_JOIN_TIMEOUT_S", 0.01)
+    monkeypatch.setattr(bridge, "_wait_for_protocol_ack", lambda *_a, **_k: True)
     monkeypatch.setattr(bridge, "_wait_for_selected_fields_ack", lambda *_a, **_k: True)
     monkeypatch.setattr(
         bridge,

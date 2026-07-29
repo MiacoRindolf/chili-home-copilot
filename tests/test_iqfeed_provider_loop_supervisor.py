@@ -169,6 +169,11 @@ def test_connection_generation_observes_external_stop_and_clears_health(
     if bridge is trade_bridge:
         monkeypatch.setattr(
             bridge,
+            "_wait_for_protocol_ack",
+            lambda *_args, **_kwargs: True,
+        )
+        monkeypatch.setattr(
+            bridge,
             "_wait_for_selected_fields_ack",
             lambda *_args, **_kwargs: True,
         )
