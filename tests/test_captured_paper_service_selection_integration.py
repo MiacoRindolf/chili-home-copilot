@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import copy
+import time
 from datetime import datetime, timezone
 from types import SimpleNamespace
 
@@ -501,7 +502,15 @@ def test_real_service_selection_lifecycle_primes_reads_and_rolls_back(
     try:
         worker.start()
         health = worker.health()
-        assert health["ready"] is True
+        deadline = time.monotonic() + 5.0
+        while (
+            health["ready"] is not True
+            and health["fatal"] is False
+            and time.monotonic() < deadline
+        ):
+            time.sleep(0.005)
+            health = worker.health()
+        assert health["ready"] is True, health
         assert health["fatal"] is False
         assert fundamentals_calls == ["ACTU"]
         read = worker.deferred_reader.read_candidates(
