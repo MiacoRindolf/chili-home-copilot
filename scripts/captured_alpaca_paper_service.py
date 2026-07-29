@@ -318,10 +318,11 @@ class _CapturedPaperPressureFeedWorker:
                 )
 
     def health(self) -> Mapping[str, Any]:
+        pressure: dict[str, Any] = {}
         try:
             pressure = dict(self._controller.health())
             active_reasons = pressure.get("active_reasons")
-            pre_authority_ready = bool(
+            ingress_admissible = bool(
                 pressure.get("required_full_fidelity_admissible") is True
                 and pressure.get("pressure_state") == "normal"
                 and pressure.get("rejection_reason") is None
@@ -332,20 +333,70 @@ class _CapturedPaperPressureFeedWorker:
                 and not isinstance(pressure.get("sample_count"), bool)
                 and pressure["sample_count"] > 0
             )
+            pressure_health_readable = True
             pressure_state = pressure.get("pressure_state")
             pressure_rejection_reason = pressure.get("rejection_reason")
             pressure_sample_age_seconds = pressure.get("sample_age_seconds")
+            try:
+                pressure_sample_max_age_seconds = float(
+                    self._controller.binding.policy.pressure_sample_max_age_seconds
+                )
+            except (AttributeError, TypeError, ValueError):
+                pressure_sample_max_age_seconds = None
         except Exception as exc:
-            pre_authority_ready = False
+            ingress_admissible = False
+            pressure_health_readable = False
             pressure_state = "health_unavailable"
             pressure_rejection_reason = (
                 f"pressure_controller_health_unavailable:{type(exc).__name__}"
             )
             pressure_sample_age_seconds = None
+            pressure_sample_max_age_seconds = None
         with self._state_lock:
             thread = self._thread
             running = bool(
                 thread is not None and thread.is_alive() and not self._fatal
+            )
+            known_pressure_reasons = (
+                "cpu",
+                "memory",
+                "disk",
+                "write_latency",
+            )
+            observed_active_reasons = tuple(
+                pressure.get("active_reasons") or ()
+            )
+            coherent_active_reasons = bool(
+                observed_active_reasons
+                and observed_active_reasons
+                == tuple(
+                    reason
+                    for reason in known_pressure_reasons
+                    if reason in observed_active_reasons
+                )
+            )
+            recoverable_resource_pressure = bool(
+                running
+                and pressure_health_readable
+                and not ingress_admissible
+                and pressure.get("required_full_fidelity_admissible") is False
+                and pressure_state == "failed_closed"
+                and coherent_active_reasons
+                and pressure_rejection_reason
+                == "capture_resource_pressure_"
+                + "_".join(observed_active_reasons)
+                and isinstance(pressure.get("sample_count"), int)
+                and not isinstance(pressure.get("sample_count"), bool)
+                and pressure["sample_count"] > 0
+                and pressure_sample_max_age_seconds is not None
+                and math.isfinite(pressure_sample_max_age_seconds)
+                and pressure_sample_max_age_seconds > 0.0
+                and isinstance(pressure_sample_age_seconds, (int, float))
+                and not isinstance(pressure_sample_age_seconds, bool)
+                and math.isfinite(float(pressure_sample_age_seconds))
+                and 0.0
+                <= float(pressure_sample_age_seconds)
+                <= pressure_sample_max_age_seconds
             )
             return {
                 "ever_started": self._ever_started,
@@ -359,11 +410,25 @@ class _CapturedPaperPressureFeedWorker:
                 ),
                 "last_sample_error": self._last_sample_error,
                 "interval_seconds": self._interval,
-                # ``running`` deliberately remains a thread-liveness signal so
-                # a pressured feed can stay alive and produce recovery samples.
-                # The supervisor separately requires this exact controller
-                # readiness immediately before consuming order authority.
-                "pre_authority_ready": pre_authority_ready,
+                # A valid pressure state can be non-admissible without making
+                # the broker-incapable recovery worker unsafe to keep running.
+                # Selection owns the fail-closed boundary: its deferred reader
+                # remains unavailable until this same controller recovers and
+                # one exact durable frontier is ready.  Malformed/unreadable
+                # controller health still blocks active startup.
+                "pre_authority_ready": bool(
+                    running
+                    and pressure_health_readable
+                    and (
+                        ingress_admissible
+                        or recoverable_resource_pressure
+                    )
+                ),
+                "ingress_admissible": ingress_admissible,
+                "admission_suspended": not ingress_admissible,
+                "recoverable_admission_suspension": (
+                    recoverable_resource_pressure
+                ),
                 "pressure_state": pressure_state,
                 "pressure_rejection_reason": pressure_rejection_reason,
                 "pressure_sample_age_seconds": pressure_sample_age_seconds,

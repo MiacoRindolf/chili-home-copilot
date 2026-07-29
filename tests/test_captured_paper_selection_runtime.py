@@ -781,6 +781,53 @@ def test_deferred_reader_revoke_is_nonblocking_and_discards_inflight_read() -> N
         reader.read_candidates(user_id=1, symbol="AAPL", decision_at=NOW)
 
 
+def test_deferred_reader_pressure_guard_discards_inflight_read() -> None:
+    setup = _application_setup()
+    entered = threading.Event()
+    release = threading.Event()
+    pressure = {"clean": True}
+    reader = DeferredCapturedPaperInitialCandidateReader(
+        expected_reader_type=_FakeInitialReader
+    )
+    reader.bind_admission_guard(lambda: pressure["clean"])
+    reader.install(
+        _FakeInitialReader(setup.authority, entered=entered, release=release),
+        authority=setup.authority,
+    )
+    result: list[CapturedPaperInitialCandidateRead] = []
+    errors: list[BaseException] = []
+
+    def read() -> None:
+        try:
+            result.append(
+                reader.read_candidates(
+                    user_id=1, symbol="AAPL", decision_at=NOW
+                )
+            )
+        except BaseException as exc:
+            errors.append(exc)
+
+    read_thread = threading.Thread(target=read)
+    read_thread.start()
+    assert entered.wait(timeout=1.0)
+    pressure["clean"] = False
+    release.set()
+    read_thread.join(timeout=1.0)
+
+    assert read_thread.is_alive() is False
+    assert result == []
+    assert len(errors) == 1
+    assert isinstance(errors[0], CapturedPaperInitialCandidateReaderUnavailable)
+    health = reader.health()
+    assert health["admission_guard_bound"] is True
+    assert health["suspended"] is True
+    assert health["suspend_reason"] == (
+        "selection_capture_pressure_unavailable"
+    )
+    with pytest.raises(CapturedPaperInitialCandidateReaderUnavailable):
+        reader.read_candidates(user_id=1, symbol="AAPL", decision_at=NOW)
+
+
 def test_deferred_reader_suspends_until_same_exact_binding_is_resumed() -> None:
     setup = _application_setup()
     reader = DeferredCapturedPaperInitialCandidateReader(
@@ -836,6 +883,21 @@ _WARMUP_POLL_TARGET = (
     "app.services.trading.momentum_neural.captured_paper_selection_runtime."
     "_INITIAL_SNAPSHOT_WARMUP_POLL_SECONDS"
 )
+
+
+def _await_worker_health(
+    worker: CapturedPaperSelectionLifecycleWorker,
+    predicate,
+    *,
+    timeout_seconds: float = 2.0,
+) -> dict[str, object]:
+    deadline = time.monotonic() + timeout_seconds
+    health = worker.health()
+    while not predicate(health) and time.monotonic() < deadline:
+        time.sleep(0.005)
+        health = worker.health()
+    assert predicate(health), health
+    return health
 
 
 def test_initial_snapshot_warmup_retries_transient_empty_then_succeeds(
@@ -921,6 +983,7 @@ def test_initial_pressure_wait_precedes_writer_and_source(
     )
 
     harness.worker.start()
+    _await_worker_health(harness.worker, lambda health: health["ready"] is True)
 
     assert harness.pressure_controller is not None
     assert harness.pressure_controller.health_calls >= 3
@@ -935,7 +998,7 @@ def test_initial_pressure_wait_precedes_writer_and_source(
     harness.worker.close(join_timeout_seconds=1.0)
 
 
-def test_initial_pressure_timeout_cleans_without_writer_or_source(
+def test_initial_pressure_suspends_then_recovers_without_order_input(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -947,18 +1010,90 @@ def test_initial_pressure_timeout_cleans_without_writer_or_source(
         pressure_health_sequence=[_pressure_health(clean=False)],
     )
 
-    with pytest.raises(CapturedPaperSelectionRuntimeError) as failure:
-        harness.worker.start()
+    harness.worker.start()
+    try:
+        suspended = harness.worker.health()
+        assert suspended["running"] is True
+        assert suspended["fatal"] is False
+        assert suspended["ready"] is False
+        assert suspended["admission_suspended"] is True
+        assert suspended["candidate_reader"]["installed"] is False
+        assert harness.source is not None
+        assert harness.source.read_count == 0
+        assert harness.writer is not None
+        assert harness.writer.started is True
+        assert harness.publisher is not None
+        assert harness.publisher.reserved_sequence is None
+        assert harness.publisher.accepted_through == 0
+        assert harness.publisher.poisoned is False
 
-    assert failure.value.code == "INITIAL_INGRESS_PRESSURE_UNAVAILABLE"
-    assert harness.source is not None
-    assert harness.source.read_count == 0
-    assert harness.writer is not None
-    assert harness.writer.started is False
-    assert harness.writer.closed is True
+        assert harness.pressure_controller is not None
+        harness.pressure_controller._health_sequence = [
+            _pressure_health(clean=True)
+        ]
+        harness.pressure_controller.health_calls = 0
+        recovered = _await_worker_health(
+            harness.worker, lambda health: health["ready"] is True
+        )
+        assert recovered["fatal"] is False
+        assert recovered["admission_suspended"] is False
+        assert harness.source.read_count == 1
+        assert harness.publisher.accepted_through == 1
+        assert harness.publisher.poisoned is False
+    finally:
+        harness.worker.close(join_timeout_seconds=1.0)
+
+
+def test_close_racing_async_initial_reader_install_is_orderly(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    harness = _Harness(
+        tmp_path,
+        initial_snapshot_warmup_seconds=1.0,
+        wait_for_initial_pressure=True,
+        pressure_health_sequence=[_pressure_health(clean=True)],
+    )
+    entered = threading.Event()
+    release = threading.Event()
+    original_install = harness.reader.install
+
+    def blocked_install(reader, *, authority) -> None:
+        entered.set()
+        assert release.wait(timeout=2.0)
+        original_install(reader, authority=authority)
+
+    monkeypatch.setattr(harness.reader, "install", blocked_install)
+    harness.worker.start()
+    assert entered.wait(timeout=2.0)
+
+    close_errors: list[BaseException] = []
+
+    def close_worker() -> None:
+        try:
+            harness.worker.close(join_timeout_seconds=1.0)
+        except BaseException as exc:  # pragma: no cover - assertion captures it
+            close_errors.append(exc)
+
+    closer = threading.Thread(target=close_worker, daemon=False)
+    closer.start()
+    deadline = time.monotonic() + 2.0
+    while (
+        not harness.reader.health()["revoked"]
+        and time.monotonic() < deadline
+    ):
+        time.sleep(0.005)
+    assert harness.reader.health()["revoked"] is True
+    release.set()
+    closer.join(timeout=2.0)
+
+    assert closer.is_alive() is False
+    assert close_errors == []
+    health = harness.worker.health()
+    assert health["state"] == "quiesced"
+    assert health["quiesced"] is True
+    assert health["fatal"] is False
     assert harness.publisher is not None
-    assert harness.publisher.reserved_sequence is None
-    assert harness.publisher.accepted_through == 0
     assert harness.publisher.poisoned is False
 
 
@@ -991,7 +1126,7 @@ def test_initial_pressure_binding_mismatch_rejects_before_writer(
     assert harness.writer.started is False
 
 
-def test_pressure_return_after_source_read_rejects_before_reservation(
+def test_pressure_return_after_source_read_retains_then_recovers(
     tmp_path: Path,
 ) -> None:
     harness = _Harness(
@@ -1006,15 +1141,35 @@ def test_pressure_return_after_source_read_rejects_before_reservation(
         ],
     )
 
-    with pytest.raises(CapturedPaperSelectionRuntimeError) as failure:
-        harness.worker.start()
+    harness.worker.start()
+    try:
+        assert harness.source is not None
+        assert harness.publisher is not None
+        _await_worker_health(
+            harness.worker,
+            lambda health: (
+                health["running"] is True
+                and health["ready"] is False
+                and harness.source.read_count == 1
+            ),
+        )
+        assert harness.publisher.accepted_through == 0
+        assert harness.publisher.poisoned is False
 
-    assert failure.value.code == "INITIAL_INGRESS_PRESSURE_UNAVAILABLE"
-    assert harness.source is not None
-    assert harness.source.read_count == 1
-    assert harness.publisher is not None
-    assert harness.publisher.reserved_sequence is None
-    assert harness.publisher.accepted_through == 0
+        assert harness.pressure_controller is not None
+        harness.pressure_controller._health_sequence = [
+            _pressure_health(clean=True)
+        ]
+        harness.pressure_controller.health_calls = 0
+        recovered = _await_worker_health(
+            harness.worker, lambda health: health["ready"] is True
+        )
+        assert recovered["fatal"] is False
+        assert harness.source.read_count == 1
+        assert harness.publisher.accepted_through == 1
+        assert harness.publisher.poisoned is False
+    finally:
+        harness.worker.close(join_timeout_seconds=1.0)
 
 
 def test_pressure_return_inside_publish_waits_before_ingress_submit(
@@ -1041,6 +1196,7 @@ def test_pressure_return_inside_publish_waits_before_ingress_submit(
     )
 
     harness.worker.start()
+    _await_worker_health(harness.worker, lambda health: health["ready"] is True)
     assert harness.pressure_controller is not None
     health_calls = harness.pressure_controller.health_calls
     assert harness.publisher is not None
@@ -1068,6 +1224,7 @@ def test_retained_initial_ingress_retries_without_rereading_source(
     )
 
     harness.worker.start()
+    _await_worker_health(harness.worker, lambda health: health["ready"] is True)
 
     assert harness.source is not None
     assert harness.source.read_count == 1
@@ -1092,6 +1249,7 @@ def test_periodic_pressure_retries_retained_occurrence_without_poison(
         pressure_health_sequence=[_pressure_health(clean=True)],
     )
     harness.worker.start()
+    _await_worker_health(harness.worker, lambda health: health["ready"] is True)
     assert harness.publisher is not None
     assert harness.source is not None
     assert harness.pressure_controller is not None
@@ -1138,6 +1296,7 @@ def test_periodic_pressure_retains_one_event_across_multiple_retry_windows(
         pressure_health_sequence=[_pressure_health(clean=True)],
     )
     harness.worker.start()
+    _await_worker_health(harness.worker, lambda health: health["ready"] is True)
     assert harness.publisher is not None
     assert harness.source is not None
     assert harness.pressure_controller is not None
@@ -1167,6 +1326,61 @@ def test_periodic_pressure_retains_one_event_across_multiple_retry_windows(
     harness.worker.close(join_timeout_seconds=1.0)
 
 
+def test_periodic_pressure_suspends_before_source_and_recovers_on_new_frontier(
+    tmp_path: Path,
+) -> None:
+    harness = _Harness(
+        tmp_path,
+        poll_interval_seconds=0.01,
+        initial_snapshot_warmup_seconds=1.0,
+        wait_for_initial_pressure=True,
+        pressure_health_sequence=[_pressure_health(clean=True)],
+    )
+    harness.worker.start()
+    try:
+        _await_worker_health(
+            harness.worker, lambda health: health["ready"] is True
+        )
+        assert harness.publisher is not None
+        assert harness.source is not None
+        assert harness.pressure_controller is not None
+        initial_reads = harness.source.read_count
+        initial_accepted = harness.publisher.accepted_through
+
+        harness.source.recovery_snapshot_pending = True
+        harness.pressure_controller._health_sequence = [
+            _pressure_health(clean=False)
+        ]
+        harness.pressure_controller.health_calls = 0
+        _await_worker_health(
+            harness.worker,
+            lambda health: (
+                health["candidate_reader"]["suspended"] is True
+            ),
+        )
+        assert harness.source.read_count == initial_reads
+        assert harness.publisher.accepted_through == initial_accepted
+        assert harness.publisher.poisoned is False
+
+        harness.pressure_controller._health_sequence = [
+            _pressure_health(clean=True)
+        ]
+        harness.pressure_controller.health_calls = 0
+        recovered = _await_worker_health(
+            harness.worker,
+            lambda health: (
+                health["ready"] is True
+                and harness.publisher.accepted_through
+                == initial_accepted + 1
+            ),
+        )
+        assert recovered["fatal"] is False
+        assert harness.source.read_count == initial_reads + 1
+        assert harness.publisher.poisoned is False
+    finally:
+        harness.worker.close(join_timeout_seconds=1.0)
+
+
 def test_periodic_pressure_suspension_closes_without_runtime_fatal(
     tmp_path: Path,
 ) -> None:
@@ -1179,6 +1393,7 @@ def test_periodic_pressure_suspension_closes_without_runtime_fatal(
         pressure_health_sequence=[_pressure_health(clean=True)],
     )
     harness.worker.start()
+    _await_worker_health(harness.worker, lambda health: health["ready"] is True)
     assert harness.publisher is not None
     assert harness.source is not None
     assert harness.pressure_controller is not None
@@ -1192,16 +1407,13 @@ def test_periodic_pressure_suspension_closes_without_runtime_fatal(
 
     deadline = time.monotonic() + 2.0
     while time.monotonic() < deadline:
-        if (
-            harness.reader.health()["suspended"]
-            and harness.publisher.reserved_sequence == 2
-        ):
+        if harness.reader.health()["suspended"]:
             break
         time.sleep(0.005)
     assert harness.reader.health()["suspended"] is True
-    assert harness.publisher.reserved_sequence == 2
-    assert harness.source.read_count == 2
-    assert harness.log.count("source_build") == 2
+    assert harness.publisher.reserved_sequence is None
+    assert harness.source.read_count == 1
+    assert harness.log.count("source_build") == 1
 
     harness.worker.close(join_timeout_seconds=1.0)
 
@@ -1212,8 +1424,8 @@ def test_periodic_pressure_suspension_closes_without_runtime_fatal(
     assert health["fatal"] is False
     assert health["stop_requested"] is True
     assert harness.publisher.accepted_through == 1
-    assert harness.publisher.poisoned is True
-    assert harness.publisher.poison_reason == "selection_source_batch_incomplete"
+    assert harness.publisher.poisoned is False
+    assert harness.publisher.poison_reason is None
     assert harness.reader.health()["revoked"] is True
 
 
@@ -1236,37 +1448,41 @@ def test_quiesced_retained_abandonment_does_not_hide_writer_failure(
     assert "selection_queue_or_writer_fatal" in str(health["fatal_reason"])
 
 
-def test_retained_initial_ingress_deadline_preserves_exact_reason(
+def test_retained_initial_ingress_pressure_recovers_without_reread(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(_WARMUP_POLL_TARGET, 0.001)
     reason = "shared_capture_write_bandwidth_budget_exceeded"
-    clock = _RetainedDeadlineClock(step=0.1)
+    clock = _RetainedDeadlineClock(step=0.01)
     harness = _Harness(
         tmp_path,
         monotonic_clock=clock,
         initial_snapshot_warmup_seconds=1.0,
         wait_for_initial_pressure=True,
         pressure_health_sequence=[_pressure_health(clean=True)],
-        retained_rejection_reasons=[reason] * 20,
+        retained_rejection_reasons=[reason] * 3,
         retained_rejection_hook=clock.arm,
     )
 
-    with pytest.raises(CapturedPaperSelectionRuntimeError) as failure:
-        harness.worker.start()
-
-    assert failure.value.code == "INITIAL_INGRESS_ADMISSION_UNAVAILABLE"
-    assert reason in str(failure.value)
-    assert harness.source is not None
-    assert harness.source.read_count == 1
-    assert harness.log.count("source_build") == 1
-    assert harness.publisher is not None
-    assert harness.publisher.admission_callback_reasons[0] is None
-    assert set(harness.publisher.admission_callback_reasons[1:]) == {reason}
-    assert harness.publisher.accepted_through == 0
-    assert harness.publisher.poisoned is True
-    assert harness.publisher.poison_reason == "selection_source_batch_incomplete"
+    harness.worker.start()
+    try:
+        recovered = _await_worker_health(
+            harness.worker, lambda health: health["ready"] is True
+        )
+        assert recovered["fatal"] is False
+        assert harness.source is not None
+        assert harness.source.read_count == 1
+        assert harness.log.count("source_build") == 1
+        assert harness.publisher is not None
+        assert harness.publisher.admission_callback_reasons[0] is None
+        assert set(harness.publisher.admission_callback_reasons[1:]) == {
+            reason
+        }
+        assert harness.publisher.accepted_through == 1
+        assert harness.publisher.poisoned is False
+    finally:
+        harness.worker.close(join_timeout_seconds=1.0)
 
 
 def test_initial_multi_snapshot_batch_waits_again_before_each_publish(
@@ -1301,6 +1517,7 @@ def test_initial_multi_snapshot_batch_waits_again_before_each_publish(
 
     harness.worker.component_factory = two_snapshot_factory
     harness.worker.start()
+    _await_worker_health(harness.worker, lambda health: health["ready"] is True)
 
     assert harness.pressure_controller is not None
     assert harness.pressure_controller.health_calls >= 8

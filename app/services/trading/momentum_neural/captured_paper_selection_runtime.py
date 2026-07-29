@@ -241,6 +241,7 @@ class DeferredCapturedPaperInitialCandidateReader(
         self._expected_reader_type = expected_reader_type
         self._reader: CapturedPaperInitialCandidateReadPort | None = None
         self._authority_sha256: str | None = None
+        self._admission_guard: Callable[[], bool] | None = None
         self._suspended = False
         self._suspend_reason: str | None = None
         self._revoked = False
@@ -296,6 +297,26 @@ class DeferredCapturedPaperInitialCandidateReader(
         """Validate without publishing the reader capability."""
 
         self._validate_installable(reader, authority=authority)
+
+    def bind_admission_guard(self, guard: Callable[[], bool]) -> None:
+        """Bind one process-private fail-closed guard before reader publication."""
+
+        if not callable(guard):
+            _reject("CONTRACT_INVALID", "candidate reader admission guard is invalid")
+        with self._lock:
+            if self._revoked or self._reader is not None:
+                _reject(
+                    "INITIAL_READER_GUARD_LATE",
+                    "candidate reader guard must bind before publication",
+                )
+            if self._admission_guard is not None:
+                if self._admission_guard is guard:
+                    return
+                _reject(
+                    "INITIAL_READER_GUARD_ALREADY_BOUND",
+                    "candidate reader admission guard is one-shot",
+                )
+            self._admission_guard = guard
 
     def install(
         self,
@@ -398,6 +419,18 @@ class DeferredCapturedPaperInitialCandidateReader(
                     f"initial_candidate_selection_coverage_unavailable:{reason}"
                 )
             epoch = self._epoch
+            admission_guard = self._admission_guard
+        if admission_guard is not None:
+            try:
+                admission_allowed = admission_guard() is True
+            except BaseException:
+                admission_allowed = False
+            if not admission_allowed:
+                self.suspend("selection_capture_pressure_unavailable")
+                raise CapturedPaperInitialCandidateReaderUnavailable(
+                    "initial_candidate_selection_coverage_unavailable:"
+                    "selection_capture_pressure_unavailable"
+                )
         try:
             result = reader.read_candidates(
                 user_id=user_id, symbol=symbol, decision_at=decision_at
@@ -416,6 +449,17 @@ class DeferredCapturedPaperInitialCandidateReader(
                     f"initial_candidate_selection_coverage_unavailable:{reason}"
                 ) from exc
             raise
+        if admission_guard is not None:
+            try:
+                admission_allowed = admission_guard() is True
+            except BaseException:
+                admission_allowed = False
+            if not admission_allowed:
+                self.suspend("selection_capture_pressure_unavailable")
+                raise CapturedPaperInitialCandidateReaderUnavailable(
+                    "initial_candidate_selection_coverage_unavailable:"
+                    "selection_capture_pressure_unavailable"
+                )
         with self._lock:
             if (
                 self._revoked
@@ -442,6 +486,7 @@ class DeferredCapturedPaperInitialCandidateReader(
                 "revoked": self._revoked,
                 "revoke_reason": self._revoke_reason,
                 "authority_sha256": self._authority_sha256,
+                "admission_guard_bound": self._admission_guard is not None,
                 "network_fallback_allowed": False,
                 "mutation_allowed": False,
             }
@@ -653,6 +698,8 @@ class CapturedPaperSelectionLifecycleWorker:
         self._cycles_completed = 0
         self._source_unavailable_cycles = 0
         self._initial_warmup_retries = 0
+        self._initial_prime_complete = False
+        self._initial_prime_state = "prepared"
         self._periodic_ingress_retry_windows_expired = 0
         self._snapshot_batches_read = 0
         self._occurrences_published = 0
@@ -1613,10 +1660,16 @@ class CapturedPaperSelectionLifecycleWorker:
                     "LIFECYCLE_INVALID",
                     "selection reader cannot resume without exact components",
                 )
-            self.deferred_reader.resume(
-                components.initial_reader,
-                authority=setup.authority,
-            )
+            pressure_clean = True
+            if self.wait_for_initial_pressure:
+                pressure_clean, _detail, _max_age = (
+                    self._initial_pressure_status(components)
+                )
+            if pressure_clean:
+                self.deferred_reader.resume(
+                    components.initial_reader,
+                    authority=setup.authority,
+                )
         with self._state_lock:
             self._cycles_completed += 1
 
@@ -1638,8 +1691,58 @@ class CapturedPaperSelectionLifecycleWorker:
 
     def _poll(self) -> None:
         try:
+            if self.wait_for_initial_pressure:
+                with self._state_lock:
+                    self._initial_prime_state = "recovering"
+                # Resource pressure and a temporarily empty captured source are
+                # availability states, not integrity failures.  Keep the
+                # broker-incapable worker alive and the deferred reader
+                # unavailable until one exact, gap-free first frontier is
+                # durable.  ``math.inf`` keeps valid pressure and missing source
+                # coverage suspended/retryable instead of killing the service;
+                # writer/producer stalls remain bounded by their own progress
+                # deadlines, malformed pressure/source contracts remain fatal,
+                # and shutdown is still interruptible through ``_stop_event``.
+                self._run_initial_cycle_with_warmup(deadline=math.inf)
+                components = self._components
+                setup = self._application_setup
+                if components is None or setup is None:
+                    _reject(
+                        "LIFECYCLE_INVALID",
+                        "selection initial recovery lost its exact components",
+                    )
+                self._wait_for_initial_pressure(
+                    components,
+                    deadline=math.inf,
+                )
+                self._assert_fence()
+                self.deferred_reader.install(
+                    components.initial_reader,
+                    authority=setup.authority,
+                )
+                with self._state_lock:
+                    self._initial_prime_complete = True
+                    self._initial_prime_state = "ready"
             while not self._stop_event.wait(self.poll_interval_seconds):
                 try:
+                    if self.wait_for_initial_pressure:
+                        components = self._components
+                        if components is None:
+                            _reject(
+                                "LIFECYCLE_INVALID",
+                                "selection pressure recovery lost its components",
+                            )
+                        clean, _detail, _max_age = (
+                            self._initial_pressure_status(components)
+                        )
+                        if not clean:
+                            self.deferred_reader.suspend(
+                                "selection_capture_pressure_unavailable"
+                            )
+                            self._wait_for_initial_pressure(
+                                components,
+                                deadline=math.inf,
+                            )
                     self._run_cycle(initial=False)
                 except CapturedPaperSelectionSourceUnavailable:
                     # No snapshot was returned, hence no source generation was
@@ -1650,8 +1753,18 @@ class CapturedPaperSelectionLifecycleWorker:
         except BaseException as exc:
             if (
                 self._stop_event.is_set()
-                and isinstance(exc, CapturedPaperSelectionRuntimeError)
-                and exc.code == "INITIAL_INGRESS_ADMISSION_UNAVAILABLE"
+                and (
+                    isinstance(exc, CapturedPaperSelectionSourceUnavailable)
+                    or (
+                        isinstance(exc, CapturedPaperSelectionRuntimeError)
+                        and exc.code
+                        in {
+                            "INITIAL_INGRESS_ADMISSION_UNAVAILABLE",
+                            "INITIAL_INGRESS_PRESSURE_UNAVAILABLE",
+                            "INITIAL_READER_REVOKED",
+                        }
+                    )
+                )
             ):
                 # An orderly close interrupts a retained periodic admission.
                 # The queue records the abandoned owned event as a coverage gap,
@@ -1808,19 +1921,22 @@ class CapturedPaperSelectionLifecycleWorker:
                     # understand an untrusted partial object.
                     self._validate_components(setup, components)
                     if self.wait_for_initial_pressure:
-                        started_at = float(self.monotonic_clock())
-                        if not math.isfinite(started_at):
-                            _reject(
-                                "INITIAL_INGRESS_PRESSURE_HEALTH_INVALID",
-                                "initial pressure deadline clock is non-finite",
+                        # Validate the exact shared controller and its sealed
+                        # health contract synchronously, but do not kill the
+                        # service merely because a valid pressure sample is
+                        # currently non-admissible.  The lifecycle thread below
+                        # owns the recoverable wait while the reader remains
+                        # unavailable.
+                        self._initial_pressure_status(components)
+
+                        def captured_pressure_admission_guard() -> bool:
+                            clean, _detail, _max_age = (
+                                self._initial_pressure_status(components)
                             )
-                        initial_cycle_deadline = (
-                            started_at
-                            + self.initial_snapshot_warmup_seconds
-                        )
-                        self._wait_for_initial_pressure(
-                            components,
-                            deadline=initial_cycle_deadline,
+                            return clean
+
+                        self.deferred_reader.bind_admission_guard(
+                            captured_pressure_admission_guard
                         )
                 except BaseException as factory_exc:
                     cleanup_errors = startup_cleanup.cleanup()
@@ -1835,14 +1951,17 @@ class CapturedPaperSelectionLifecycleWorker:
                 self._assert_fence()
                 components.writer.start()
                 self._writer_started = True
-                self._run_initial_cycle_with_warmup(
-                    deadline=initial_cycle_deadline,
-                )
-                self._assert_fence()
-                self.deferred_reader.install(
-                    components.initial_reader,
-                    authority=setup.authority,
-                )
+                if not self.wait_for_initial_pressure:
+                    self._run_initial_cycle_with_warmup(
+                        deadline=initial_cycle_deadline,
+                    )
+                    self._assert_fence()
+                    self.deferred_reader.install(
+                        components.initial_reader,
+                        authority=setup.authority,
+                    )
+                    self._initial_prime_complete = True
+                    self._initial_prime_state = "ready"
                 thread = self.thread_factory(
                     target=self._poll,
                     name="captured-paper-selection-lifecycle",
@@ -2183,6 +2302,15 @@ class CapturedPaperSelectionLifecycleWorker:
                 "cycles_completed": self._cycles_completed,
                 "source_unavailable_cycles": self._source_unavailable_cycles,
                 "initial_warmup_retries": self._initial_warmup_retries,
+                "initial_prime_complete": self._initial_prime_complete,
+                "initial_prime_state": self._initial_prime_state,
+                "admission_suspended": bool(
+                    running
+                    and not (
+                        self._initial_prime_complete
+                        and self.deferred_reader.health()["installed"]
+                    )
+                ),
                 "periodic_ingress_retry_windows_expired": (
                     self._periodic_ingress_retry_windows_expired
                 ),

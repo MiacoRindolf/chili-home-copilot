@@ -486,6 +486,67 @@ def test_selection_prime_precedes_fresh_authority_and_order_workers():
     ]
 
 
+def test_fresh_write_pressure_suspension_starts_active_without_selection_input():
+    events = []
+
+    class _FreshPressuredFeed(_Worker):
+        def health(self):
+            return {
+                **super().health(),
+                "pre_authority_ready": True,
+                "ingress_admissible": False,
+                "admission_suspended": True,
+                "recoverable_admission_suspension": True,
+                "pressure_state": "failed_closed",
+                "pressure_rejection_reason": (
+                    "capture_resource_pressure_write_latency"
+                ),
+            }
+
+    class _SuspendedSelection(_Worker):
+        def health(self):
+            return {
+                **super().health(),
+                "ready": False,
+                "admission_suspended": True,
+            }
+
+    pressure = _FreshPressuredFeed("pressure_feed", events)
+    selection = _SuspendedSelection("selection", events)
+    transport = _Worker("transport", events)
+    supervisor, _host, live = _supervisor(
+        events,
+        pre_authority_workers=(
+            ("pressure_feed", pressure),
+            ("selection", selection),
+        ),
+        workers=(("transport", transport),),
+    )
+
+    health = supervisor.start_active(
+        start_authority=_active_authority(events)
+    )
+
+    assert health["state"] == "active"
+    assert health["live_loop_started"] is True
+    assert live["running"] is True
+    assert "active_authority_consume" in events
+    assert "transport_start" in events
+    assert "live_start" in events
+    assert health["managed_workers"]["pressure_feed"][
+        "pre_authority_ready"
+    ] is True
+    assert health["managed_workers"]["pressure_feed"][
+        "pressure_rejection_reason"
+    ] == "capture_resource_pressure_write_latency"
+    assert health["managed_workers"]["selection"]["ready"] is False
+    assert health["managed_workers"]["selection"][
+        "admission_suspended"
+    ] is True
+    assert supervisor.assert_healthy()["state"] == "active"
+    supervisor.close(join_timeout_seconds=1.0, quiesce_timeout_seconds=1.0)
+
+
 def test_pre_authority_health_loss_stops_before_order_authority_consumption():
     events = []
     pressure = _Worker("pressure", events)

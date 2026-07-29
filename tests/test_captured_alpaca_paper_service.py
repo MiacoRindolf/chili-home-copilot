@@ -72,6 +72,11 @@ def _canonical(value: object) -> str:
 def test_pressure_feed_reports_alive_but_stale_as_not_pre_authority_ready() -> None:
     class _Controller:
         def __init__(self) -> None:
+            self.binding = SimpleNamespace(
+                policy=SimpleNamespace(
+                    pressure_sample_max_age_seconds=5.0
+                )
+            )
             self.value = {
                 "required_full_fidelity_admissible": True,
                 "pressure_state": "normal",
@@ -121,6 +126,90 @@ def test_pressure_feed_reports_alive_but_stale_as_not_pre_authority_ready() -> N
         worker.close(join_timeout_seconds=1.0)
 
 
+def test_pressure_feed_keeps_fresh_write_pressure_recoverable_and_suspended() -> None:
+    class _Controller:
+        def __init__(self) -> None:
+            self.binding = SimpleNamespace(
+                policy=SimpleNamespace(
+                    pressure_sample_max_age_seconds=5.0
+                )
+            )
+            self.value = {
+                "required_full_fidelity_admissible": False,
+                "pressure_state": "failed_closed",
+                "rejection_reason": "capture_resource_pressure_write_latency",
+                "active_reasons": ("write_latency",),
+                "entry_streak": 0,
+                "sample_count": 4,
+                "sample_age_seconds": 0.01,
+            }
+
+        def observe(self, _sample: object) -> None:
+            return None
+
+        def health(self) -> dict[str, object]:
+            return dict(self.value)
+
+    controller = _Controller()
+    worker = service_module._CapturedPaperPressureFeedWorker(
+        pressure_controller=controller,
+        sampler=object,
+        interval_seconds=60.0,
+    )
+    worker.start()
+    try:
+        pressured = worker.health()
+        assert pressured["running"] is True
+        assert pressured["fatal"] is False
+        assert pressured["pre_authority_ready"] is True
+        assert pressured["ingress_admissible"] is False
+        assert pressured["admission_suspended"] is True
+        assert pressured["recoverable_admission_suspension"] is True
+        assert pressured["pressure_rejection_reason"] == (
+            "capture_resource_pressure_write_latency"
+        )
+
+        controller.value.update(
+            {
+                "rejection_reason": (
+                    "capture_resource_pressure_cpu_write_latency"
+                ),
+                "active_reasons": ("cpu", "write_latency"),
+            }
+        )
+        combined = worker.health()
+        assert combined["pre_authority_ready"] is True
+        assert combined["ingress_admissible"] is False
+        assert combined["recoverable_admission_suspension"] is True
+
+        controller.value.update(
+            {
+                "rejection_reason": (
+                    "capture_resource_pressure_write_latency_cpu"
+                ),
+                "active_reasons": ("write_latency", "cpu"),
+            }
+        )
+        malformed_order = worker.health()
+        assert malformed_order["pre_authority_ready"] is False
+        assert malformed_order["recoverable_admission_suspension"] is False
+
+        controller.value.update(
+            {
+                "rejection_reason": (
+                    "capture_resource_pressure_write_latency"
+                ),
+                "active_reasons": ("write_latency",),
+                "sample_age_seconds": 6.0,
+            }
+        )
+        expired = worker.health()
+        assert expired["pre_authority_ready"] is False
+        assert expired["recoverable_admission_suspension"] is False
+    finally:
+        worker.close(join_timeout_seconds=1.0)
+
+
 def test_pressure_feed_startup_sample_failure_remains_fatal() -> None:
     class _Controller:
         def observe(self, _sample: object) -> None:
@@ -157,6 +246,34 @@ def test_pressure_feed_startup_sample_failure_remains_fatal() -> None:
     assert health["last_sample_error"] == (
         "TimeoutError: startup metrics unavailable"
     )
+
+
+def test_pressure_feed_unreadable_health_returns_fail_closed_mapping() -> None:
+    class _Controller:
+        def observe(self, _sample: object) -> None:
+            return None
+
+        def health(self) -> dict[str, object]:
+            raise ValueError("corrupt pressure health")
+
+    worker = service_module._CapturedPaperPressureFeedWorker(
+        pressure_controller=_Controller(),
+        sampler=object,
+        interval_seconds=60.0,
+    )
+    worker.start()
+    try:
+        health = worker.health()
+        assert health["running"] is True
+        assert health["pre_authority_ready"] is False
+        assert health["ingress_admissible"] is False
+        assert health["recoverable_admission_suspension"] is False
+        assert health["pressure_state"] == "health_unavailable"
+        assert health["pressure_rejection_reason"] == (
+            "pressure_controller_health_unavailable:ValueError"
+        )
+    finally:
+        worker.close(join_timeout_seconds=1.0)
 
 
 def test_pressure_feed_runtime_sample_failure_stays_alive_and_recovers() -> None:
