@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import copy
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 import pytest
 from sqlalchemy.orm import Session
@@ -61,13 +61,14 @@ def _fresh_fundamentals(
     symbol: str,
     *,
     short_name: str | None = None,
+    observed_at: datetime | None = None,
 ) -> FundamentalsReceipt:
     return FundamentalsReceipt(
         symbol=symbol,
         status=FundamentalsReceiptStatus.FRESH_DATA,
         provider_state=FundamentalsProviderState.AVAILABLE,
         origin=FundamentalsReceiptOrigin.NETWORK,
-        observed_at=datetime.now(UTC),
+        observed_at=observed_at or datetime.now(UTC),
         data={"short_name": short_name or symbol},
         cache_ttl_seconds=86_400.0,
     )
@@ -251,7 +252,12 @@ def _seed_source(
     }
 
 
-def _source(material, *, fundamentals_reader):
+def _source(
+    material,
+    *,
+    fundamentals_reader,
+    wall_clock=lambda: datetime.now(UTC),
+):
     return SqlAlchemyCapturedViabilitySnapshotSource(
         engine,
         variant_application=material["application"],
@@ -273,7 +279,7 @@ def _source(material, *, fundamentals_reader):
         fundamentals_reader=fundamentals_reader,
         context_max_age_seconds=60.0,
         tenbeat_entry_tilt_weight=0.0,
-        wall_clock=lambda: datetime.now(UTC),
+        wall_clock=wall_clock,
     )
 
 
@@ -477,8 +483,197 @@ def test_source_binds_in_transaction_hub_when_hub_ticks_during_provider_query(
 
     source = _source(material, fundamentals_reader=fundamentals)
 
+    initial_hub_sha = source._probe_hub()["hub_snapshot_sha256"]
     snapshots = source.read_snapshot()
     assert {item.symbol for item in snapshots} == {"ACTU"}
+    assert {item.hub_snapshot_sha256 for item in snapshots} == {
+        initial_hub_sha
+    }
+    advanced_hub_sha = source._probe_hub()["hub_snapshot_sha256"]
+    assert advanced_hub_sha != initial_hub_sha
+    following = source.read_snapshot()
+    assert {item.symbol for item in following} == {"ACTU"}
+    assert {item.hub_snapshot_sha256 for item in following} == {
+        advanced_hub_sha
+    }
+
+
+def test_source_publishes_snapshot_when_fundamentals_outlive_source_ttl(
+    db,
+    monkeypatch,
+) -> None:
+    material = _seed_source(db)
+    clock = {"now": material["tick_at"]}
+    calls: list[str] = []
+
+    def wall_clock() -> datetime:
+        return clock["now"]
+
+    def fundamentals(symbol: str) -> FundamentalsReceipt:
+        calls.append(symbol)
+        clock["now"] += timedelta(seconds=75)
+        return FundamentalsReceipt(
+            symbol=symbol,
+            status=FundamentalsReceiptStatus.FRESH_DATA,
+            provider_state=FundamentalsProviderState.AVAILABLE,
+            origin=FundamentalsReceiptOrigin.NETWORK,
+            observed_at=clock["now"],
+            data={"short_name": "Actuate Therapeutics Inc."},
+            cache_ttl_seconds=86_400.0,
+        )
+
+    def classify(_short_name: str | None) -> bool:
+        clock["now"] += timedelta(seconds=5)
+        return False
+
+    monkeypatch.setattr(
+        "app.services.trading.momentum_neural.captured_paper_selection_source.is_leveraged_etf_name",
+        classify,
+    )
+    monkeypatch.setattr(
+        "app.services.trading.momentum_neural.captured_paper_selection_source.is_excluded_fund_name",
+        classify,
+    )
+    source = _source(
+        material,
+        fundamentals_reader=fundamentals,
+        wall_clock=wall_clock,
+    )
+
+    snapshots = source.read_snapshot()
+    assert len(snapshots) == 1
+    assert calls == ["ACTU"]
+    assert snapshots[0].read_at == clock["now"]
+    occurrence = source.build_occurrence(snapshots[0], source_sequence=1)
+    assert occurrence.bundle.read_receipts[0].requested_at == (
+        snapshots[0].source_payload["source_snapshot"]["captured_at"]
+    )
+    assert occurrence.bundle.read_receipts[0].returned_at == snapshots[0].read_at
+    result = score_captured_viability(
+        occurrence.bundle,
+        authority=occurrence.scoring_authority,
+        evaluation_at=occurrence.bundle.read_at,
+    )
+    assert result.status == COVERAGE_UNAVAILABLE
+    assert any(
+        "source_snapshot_stale_during_enrichment" in reason
+        for reason in result.reasons
+    )
+    assert result.opportunity_consumed is False
+    assert result.risk_reserved is False
+    assert result.order_posted is False
+    assert source.read_snapshot() == ()
+    assert calls == ["ACTU"]
+
+
+def test_scored_unchanged_hub_suspends_after_source_ttl(db) -> None:
+    material = _seed_source(db)
+    clock = {"now": material["tick_at"]}
+    source = _source(
+        material,
+        fundamentals_reader=lambda symbol: _fresh_fundamentals(
+            symbol,
+            observed_at=clock["now"],
+        ),
+        wall_clock=lambda: clock["now"],
+    )
+
+    snapshot = source.read_snapshot()[0]
+    occurrence = source.build_occurrence(snapshot, source_sequence=1)
+    result = score_captured_viability(
+        occurrence.bundle,
+        authority=occurrence.scoring_authority,
+        evaluation_at=occurrence.bundle.read_at,
+    )
+    assert result.status == SCORED
+
+    clock["now"] += timedelta(seconds=61)
+    with pytest.raises(CapturedPaperSelectionSourceUnavailable) as rejected:
+        source.read_snapshot()
+    assert rejected.value.reason == "derived_source_hub_snapshot_stale"
+
+
+def test_source_rejects_already_stale_rows_before_fundamentals(db) -> None:
+    material = _seed_source(db)
+    stale_at = material["tick_at"] - timedelta(seconds=70)
+    row = (
+        db.query(MomentumSymbolViability)
+        .filter(MomentumSymbolViability.symbol == "ACTU")
+        .one()
+    )
+    row.freshness_ts = _naive(stale_at)
+    regime = copy.deepcopy(dict(row.regime_snapshot_json or {}))
+    regime["utc_iso"] = stale_at.isoformat()
+    regime["utc_hour"] = stale_at.hour
+    row.regime_snapshot_json = regime
+    db.commit()
+    calls: list[str] = []
+    source = _source(
+        material,
+        fundamentals_reader=lambda symbol: (
+            calls.append(symbol) or _fresh_fundamentals(symbol)
+        ),
+        wall_clock=lambda: material["tick_at"],
+    )
+
+    with pytest.raises(CapturedPaperSelectionSourceUnavailable) as rejected:
+        source.read_snapshot()
+    assert rejected.value.reason == "derived_source_current_snapshot_empty"
+    assert calls == []
+
+
+def test_source_rejects_future_rows_before_fundamentals(db) -> None:
+    material = _seed_source(db)
+    future_at = material["tick_at"] + timedelta(seconds=10)
+    row = (
+        db.query(MomentumSymbolViability)
+        .filter(MomentumSymbolViability.symbol == "ACTU")
+        .one()
+    )
+    row.freshness_ts = _naive(future_at)
+    regime = copy.deepcopy(dict(row.regime_snapshot_json or {}))
+    regime["utc_iso"] = future_at.isoformat()
+    regime["utc_hour"] = future_at.hour
+    row.regime_snapshot_json = regime
+    db.commit()
+    calls: list[str] = []
+    source = _source(
+        material,
+        fundamentals_reader=lambda symbol: (
+            calls.append(symbol) or _fresh_fundamentals(symbol)
+        ),
+        wall_clock=lambda: material["tick_at"],
+    )
+
+    with pytest.raises(CapturedPaperSelectionSourceUnavailable) as rejected:
+        source.read_snapshot()
+    assert rejected.value.reason == "derived_source_current_snapshot_empty"
+    assert calls == []
+
+
+def test_source_excludes_corrupt_symbol_before_enrichment_but_publishes_peer(
+    db,
+) -> None:
+    material = _seed_source(db, symbols=("ACTU", "BAD"))
+    bad = (
+        db.query(MomentumSymbolViability)
+        .filter(MomentumSymbolViability.symbol == "BAD")
+        .one()
+    )
+    regime = copy.deepcopy(dict(bad.regime_snapshot_json or {}))
+    regime["utc_iso"] = "not-a-timestamp"
+    bad.regime_snapshot_json = regime
+    db.commit()
+    calls: list[str] = []
+
+    def fundamentals(symbol: str) -> FundamentalsReceipt:
+        calls.append(symbol)
+        return _fresh_fundamentals(symbol)
+
+    source = _source(material, fundamentals_reader=fundamentals)
+    snapshots = source.read_snapshot()
+    assert {item.symbol for item in snapshots} == {"ACTU"}
+    assert calls == ["ACTU"]
 
 
 def test_source_binds_dilution_clock_to_transaction_read_time(db, monkeypatch) -> None:
@@ -503,7 +698,9 @@ def test_source_binds_dilution_clock_to_transaction_read_time(db, monkeypatch) -
 
     snapshots = source.read_snapshot()
     assert len(snapshots) == 1
-    assert seen == [snapshots[0].read_at]
+    assert seen == [
+        snapshots[0].source_payload["source_snapshot"]["captured_at"]
+    ]
 
 
 @pytest.mark.parametrize(

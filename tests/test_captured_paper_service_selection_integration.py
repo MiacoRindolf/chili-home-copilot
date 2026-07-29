@@ -212,7 +212,11 @@ def _resource_binding(now: datetime) -> CaptureResourceBinding:
         pressure_write_latency_exit_milliseconds=25,
         pressure_enter_samples=3,
         pressure_recovery_samples=3,
-        pressure_sample_max_age_seconds=5,
+        # This test starts the selection worker directly instead of running the
+        # supervisor-managed pressure feed. Keep its deterministic seed sample
+        # valid across a cold PostgreSQL initial cycle; production still refreshes
+        # the sealed five-second sample through the pressure-feed worker.
+        pressure_sample_max_age_seconds=30,
         store_owner_lease_seconds=60,
         store_owner_heartbeat_seconds=10,
     )
@@ -502,7 +506,9 @@ def test_real_service_selection_lifecycle_primes_reads_and_rolls_back(
     try:
         worker.start()
         health = worker.health()
-        deadline = time.monotonic() + 5.0
+        deadline = time.monotonic() + (
+            float(binding.policy.pressure_sample_max_age_seconds) / 2.0
+        )
         while (
             health["ready"] is not True
             and health["fatal"] is False
