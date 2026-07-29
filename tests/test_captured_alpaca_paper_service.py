@@ -69,7 +69,7 @@ def _canonical(value: object) -> str:
     )
 
 
-def test_pressure_feed_reports_alive_but_stale_as_not_pre_authority_ready() -> None:
+def test_pressure_feed_keeps_coherent_staleness_recoverable_and_suspended() -> None:
     class _Controller:
         def __init__(self) -> None:
             self.binding = SimpleNamespace(
@@ -118,7 +118,10 @@ def test_pressure_feed_reports_alive_but_stale_as_not_pre_authority_ready() -> N
         stale = worker.health()
         assert stale["running"] is True
         assert stale["fatal"] is False
-        assert stale["pre_authority_ready"] is False
+        assert stale["pre_authority_ready"] is True
+        assert stale["ingress_admissible"] is False
+        assert stale["admission_suspended"] is True
+        assert stale["recoverable_admission_suspension"] is True
         assert stale["pressure_rejection_reason"] == (
             "capture_resource_pressure_sample_stale"
         )
@@ -284,6 +287,11 @@ def test_pressure_feed_runtime_sample_failure_stays_alive_and_recovers() -> None
 
     class _Controller:
         def __init__(self) -> None:
+            self.binding = SimpleNamespace(
+                policy=SimpleNamespace(
+                    pressure_sample_max_age_seconds=5.0
+                )
+            )
             self.value = {
                 "required_full_fidelity_admissible": True,
                 "pressure_state": "normal",
@@ -355,7 +363,10 @@ def test_pressure_feed_runtime_sample_failure_stays_alive_and_recovers() -> None
             threading.Event().wait(0.005)
         assert degraded["running"] is True
         assert degraded["fatal"] is False
-        assert degraded["pre_authority_ready"] is False
+        assert degraded["pre_authority_ready"] is True
+        assert degraded["ingress_admissible"] is False
+        assert degraded["admission_suspended"] is True
+        assert degraded["recoverable_admission_suspension"] is True
         assert degraded["sample_failure_count"] == 1
         assert degraded["consecutive_sample_failures"] == 1
         assert degraded["last_sample_error"] == (

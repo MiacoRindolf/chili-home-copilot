@@ -398,6 +398,26 @@ class _CapturedPaperPressureFeedWorker:
                 <= float(pressure_sample_age_seconds)
                 <= pressure_sample_max_age_seconds
             )
+            recoverable_sample_staleness = bool(
+                running
+                and pressure_health_readable
+                and not ingress_admissible
+                and pressure.get("required_full_fidelity_admissible") is False
+                and pressure_state == "stale_fail_closed"
+                and pressure_rejection_reason
+                == "capture_resource_pressure_sample_stale"
+                and isinstance(pressure.get("sample_count"), int)
+                and not isinstance(pressure.get("sample_count"), bool)
+                and pressure["sample_count"] > 0
+                and pressure_sample_max_age_seconds is not None
+                and math.isfinite(pressure_sample_max_age_seconds)
+                and pressure_sample_max_age_seconds > 0.0
+                and isinstance(pressure_sample_age_seconds, (int, float))
+                and not isinstance(pressure_sample_age_seconds, bool)
+                and math.isfinite(float(pressure_sample_age_seconds))
+                and float(pressure_sample_age_seconds)
+                > pressure_sample_max_age_seconds
+            )
             return {
                 "ever_started": self._ever_started,
                 "running": running,
@@ -422,12 +442,14 @@ class _CapturedPaperPressureFeedWorker:
                     and (
                         ingress_admissible
                         or recoverable_resource_pressure
+                        or recoverable_sample_staleness
                     )
                 ),
                 "ingress_admissible": ingress_admissible,
                 "admission_suspended": not ingress_admissible,
                 "recoverable_admission_suspension": (
                     recoverable_resource_pressure
+                    or recoverable_sample_staleness
                 ),
                 "pressure_state": pressure_state,
                 "pressure_rejection_reason": pressure_rejection_reason,
