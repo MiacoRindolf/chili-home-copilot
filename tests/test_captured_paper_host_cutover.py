@@ -850,6 +850,66 @@ def test_recreator_inventory_detects_orphaned_python_orchestrator(
     ) == (f"4242:{python_name}:matched",)
 
 
+def test_recreator_inventory_ignores_unrelated_shared_hidden_wrapper(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import psutil
+
+    class UnrelatedHiddenTask:
+        info = {"pid": 4243, "name": "wscript.exe"}
+
+        @staticmethod
+        def cmdline() -> list[str]:
+            return [
+                r"C:\Windows\System32\wscript.exe",
+                r"D:\dev\chili-home-copilot\scripts\run-hidden.vbs",
+                r"C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe",
+                "-File",
+                r"D:\CHILI-Docker\scripts\nightly-replay.ps1",
+            ]
+
+    monkeypatch.setattr(
+        psutil,
+        "process_iter",
+        lambda *_args, **_kwargs: (UnrelatedHiddenTask(),),
+    )
+    backend = object.__new__(cutover.WindowsHostCutoverBackend)
+
+    assert backend.await_execution_lane_recreator_processes(
+        timeout_seconds=0.0
+    ) == ()
+
+
+def test_recreator_inventory_detects_task_specific_script_behind_shared_wrapper(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import psutil
+
+    class DockerSocketGuard:
+        info = {"pid": 4244, "name": "wscript.exe"}
+
+        @staticmethod
+        def cmdline() -> list[str]:
+            return [
+                r"C:\Windows\System32\wscript.exe",
+                r"D:\dev\chili-home-copilot\scripts\run-hidden.vbs",
+                r"C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe",
+                "-File",
+                r"D:\dev\chili-home-copilot\scripts\docker-socket-guard.ps1",
+            ]
+
+    monkeypatch.setattr(
+        psutil,
+        "process_iter",
+        lambda *_args, **_kwargs: (DockerSocketGuard(),),
+    )
+    backend = object.__new__(cutover.WindowsHostCutoverBackend)
+
+    assert backend.await_execution_lane_recreator_processes(
+        timeout_seconds=0.0
+    ) == ("4244:wscript.exe:matched",)
+
+
 def _active_start_authority_fixture(
     prepared: cutover.PreparedCutover,
     *,

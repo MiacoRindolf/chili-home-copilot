@@ -185,6 +185,9 @@ _EXECUTION_LANE_RECREATOR_DIRECT_SOURCES = MappingProxyType(
         ),
     }
 )
+_EXECUTION_LANE_SHARED_WRAPPER_SOURCES = frozenset(
+    {r"D:\dev\chili-home-copilot\scripts\run-hidden.vbs"}
+)
 _EXECUTION_LANE_COMPOSE_FILE = Path(
     r"D:\dev\chili-home-copilot\docker-compose.yml"
 )
@@ -9496,6 +9499,13 @@ class WindowsHostCutoverBackend:
             for chain in _EXECUTION_LANE_RECREATOR_SOURCES.values()
             for path, _sha256 in chain
         }
+        # run-hidden.vbs is shared by unrelated long-running maintenance tasks.
+        # It identifies a recreator only when a task-specific source token also
+        # appears in the same command line.
+        source_markers.difference_update(
+            os.path.normcase(os.path.normpath(path))
+            for path in _EXECUTION_LANE_SHARED_WRAPPER_SOURCES
+        )
         source_markers.add(
             os.path.normcase(os.path.normpath(str(_EXECUTION_LANE_COMPOSE_FILE)))
         )
