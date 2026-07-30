@@ -833,8 +833,44 @@ class CapturedPaperServiceSupervisor:
                 health.get("running") is not True
                 or health.get("fatal") is True
             ):
+                fatal_reason = health.get("fatal_reason")
+                fatal_suffix = ""
+                if isinstance(fatal_reason, str):
+                    bounded_reason = fatal_reason[:4096]
+                    exception_match = re.match(
+                        r"\s*([A-Za-z_][A-Za-z0-9_.]{0,127})\s*:",
+                        bounded_reason,
+                    )
+                    if bounded_reason.strip():
+                        exception_type = (
+                            exception_match.group(1)
+                            if exception_match
+                            and exception_match.group(1)
+                            in {
+                                "CapturedPaperSelectionRuntimeError",
+                                "DBAPIError",
+                                "IntegrityError",
+                                "InterfaceError",
+                                "MemoryError",
+                                "OperationalError",
+                                "OSError",
+                                "PendingRollbackError",
+                                "RuntimeError",
+                                "TimeoutError",
+                                "ValueError",
+                            }
+                            else "unavailable"
+                        )
+                        diagnostics = [
+                            f"type={exception_type}",
+                            "reason_sha256="
+                            + hashlib.sha256(
+                                bounded_reason.encode("utf-8", "replace")
+                            ).hexdigest(),
+                        ]
+                        fatal_suffix = ":" + ";".join(diagnostics)
                 raise CapturedPaperServiceSupervisorError(
-                    f"captured_paper_{managed.name}_health_lost"
+                    f"captured_paper_{managed.name}_health_lost{fatal_suffix}"
                 )
         if self._live_loop_health() is not True:
             raise CapturedPaperServiceSupervisorError(

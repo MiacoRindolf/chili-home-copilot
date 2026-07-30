@@ -997,6 +997,44 @@ def test_active_health_loss_is_fail_closed_and_visible():
         supervisor.assert_healthy()
 
 
+def test_active_worker_fatal_reason_is_preserved_in_health_loss():
+    events = []
+    worker = _Worker("selection", events)
+    supervisor, _host, _live = _supervisor(
+        events, pre_authority_workers=(("selection", worker),)
+    )
+    supervisor.start_active(start_authority=_active_authority(events))
+    worker.running = False
+    worker.fatal = True
+    base_health = worker.health
+
+    def health_with_reason():
+        return {
+            **base_health(),
+            "fatal_reason": (
+                "DBAPIError: (psycopg2.errors.QueryCanceled) "
+                "SUPERSECRETTOKEN selection route apply failed "
+                "postgresql+psycopg2://worker:do-not-persist@db/chili "
+                '{"password": "also-do-not-persist"} '
+                + ("x" * 5000)
+            ),
+        }
+
+    worker.health = health_with_reason
+
+    with pytest.raises(CapturedPaperServiceSupervisorError) as failure:
+        supervisor.assert_healthy()
+    detail = str(failure.value)
+    assert detail.startswith("captured_paper_selection_health_lost:")
+    assert "type=DBAPIError" in detail
+    assert "reason_sha256=" in detail
+    assert "do-not-persist" not in detail
+    assert "SUPERSECRETTOKEN" not in detail
+    assert "QueryCanceled" not in detail
+    assert "password" not in detail
+    assert len(detail) <= 180
+
+
 def test_active_health_tolerates_provider_reconnect_but_rejects_dead_lane():
     events = []
     supervisor, host, _live = _supervisor(events)
