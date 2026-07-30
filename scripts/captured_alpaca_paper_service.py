@@ -6828,6 +6828,7 @@ def _assemble_service_composition(
                 "SELECTION_WRITER_ACCOUNTING_MISMATCH",
                 "selection writer accounting differs from measured host resources",
             )
+        yf_session_module.open_fundamentals_refresh()
         source = selection_source_module.SqlAlchemyCapturedViabilitySnapshotSource(
             database_engine,
             variant_application=setup.application,
@@ -6842,7 +6843,9 @@ def _assemble_service_composition(
             candidate_code_build_sha256=verified.code_build_sha256,
             adaptive_policy_snapshot=adaptive_policy_snapshot,
             code_build_payload=code_build_payload,
-            fundamentals_reader=yf_session_module.get_fundamentals_receipt,
+            fundamentals_reader=(
+                yf_session_module.get_cached_fundamentals_receipt
+            ),
             context_max_age_seconds=handoff_ttl_seconds,
             tenbeat_entry_tilt_weight=(
                 settings.chili_tenbeat_entry_tilt_weight
@@ -6937,7 +6940,9 @@ def _assemble_service_composition(
             input_port=input_port,
             producer=producer,
             initial_reader=exact_reader,
-            close_source=lambda: None,
+            close_source=lambda: yf_session_module.close_fundamentals_refresh(
+                timeout_seconds=_SERVICE_SHUTDOWN_SECONDS
+            ),
         )
 
     def rollback_selection_application(application: Any) -> Mapping[str, Any]:

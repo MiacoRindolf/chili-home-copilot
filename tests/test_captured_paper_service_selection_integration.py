@@ -295,7 +295,11 @@ class _CommitAckFaultSessionFactory:
         return session
 
 
-def _fake_modules(*, fundamentals_calls: list[str]):
+def _fake_modules(
+    *,
+    fundamentals_calls: list[str],
+    fundamentals_close_timeouts: list[float],
+):
     return {
         "iqfeed_capture_host": SimpleNamespace(
             IqfeedCapturedPaperRuntimeOwner=_RuntimeOwner
@@ -334,7 +338,11 @@ def _fake_modules(*, fundamentals_calls: list[str]):
         "replay_capture_runtime": replay_capture_runtime,
         "app_db": app_db,
         "yf_session": SimpleNamespace(
-            get_fundamentals_receipt=lambda symbol: (
+            open_fundamentals_refresh=lambda: None,
+            close_fundamentals_refresh=lambda *, timeout_seconds: (
+                fundamentals_close_timeouts.append(timeout_seconds)
+            ),
+            get_cached_fundamentals_receipt=lambda symbol: (
                 fundamentals_calls.append(symbol)
                 or FundamentalsReceipt(
                     symbol=symbol,
@@ -479,7 +487,11 @@ def test_real_service_selection_lifecycle_primes_reads_and_rolls_back(
         chili_tenbeat_entry_tilt_weight=0.0,
     )
     fundamentals_calls: list[str] = []
-    modules = _fake_modules(fundamentals_calls=fundamentals_calls)
+    fundamentals_close_timeouts: list[float] = []
+    modules = _fake_modules(
+        fundamentals_calls=fundamentals_calls,
+        fundamentals_close_timeouts=fundamentals_close_timeouts,
+    )
     commit_ack_factory = _CommitAckFaultSessionFactory()
     commit_ack_factory.fail_next_commit_ack = True
     modules["app_db"] = SimpleNamespace(SessionLocal=commit_ack_factory)
@@ -551,6 +563,7 @@ def test_real_service_selection_lifecycle_primes_reads_and_rolls_back(
         )
         assert remaining == 0
         assert commit_ack_factory.injected_failures == 2
+        assert fundamentals_close_timeouts == [30.0]
     finally:
         worker_health = worker.health()
         if worker_health["running"]:

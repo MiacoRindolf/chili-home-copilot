@@ -33,8 +33,8 @@ from __future__ import annotations
 
 import collections
 import copy
-from dataclasses import dataclass
-from datetime import datetime, timezone
+from dataclasses import dataclass, replace
+from datetime import datetime, timedelta, timezone
 from enum import Enum
 import logging
 import math
@@ -52,7 +52,7 @@ logger = logging.getLogger(__name__)
 
 
 UTC = timezone.utc
-FUNDAMENTALS_RECEIPT_SCHEMA_VERSION = "chili.yfinance-fundamentals-receipt.v1"
+FUNDAMENTALS_RECEIPT_SCHEMA_VERSION = "chili.yfinance-fundamentals-receipt.v2"
 
 
 class FundamentalsReceiptStatus(str, Enum):
@@ -68,6 +68,8 @@ class FundamentalsReceiptStatus(str, Enum):
 class FundamentalsProviderState(str, Enum):
     AVAILABLE = "AVAILABLE"
     CIRCUIT_OPEN = "CIRCUIT_OPEN"
+    RATE_LIMITED = "RATE_LIMITED"
+    AUTH_ERROR = "AUTH_ERROR"
     ERROR = "ERROR"
     UNAVAILABLE = "UNAVAILABLE"
 
@@ -76,6 +78,101 @@ class FundamentalsReceiptOrigin(str, Enum):
     NETWORK = "NETWORK"
     CACHE = "CACHE"
     NONE = "NONE"
+
+
+class FundamentalsRefreshState(str, Enum):
+    """Non-blocking refresh ownership observed by a cache-only reader."""
+
+    NOT_REQUESTED = "NOT_REQUESTED"
+    CACHE_CURRENT = "CACHE_CURRENT"
+    SCHEDULED = "SCHEDULED"
+    IN_FLIGHT = "IN_FLIGHT"
+    QUEUED = "QUEUED"
+    BACKOFF = "BACKOFF"
+    CIRCUIT_OPEN = "CIRCUIT_OPEN"
+    CAPACITY_DEFERRED = "CAPACITY_DEFERRED"
+
+
+@dataclass(frozen=True, slots=True)
+class FundamentalsRefreshAttempt:
+    """Typed health/provenance for the most recent provider refresh."""
+
+    status: FundamentalsReceiptStatus
+    provider_state: FundamentalsProviderState
+    completed_at: datetime
+    reason: str | None
+    provider_request_performed: bool
+    limiter_wait_seconds: float | None
+    provider_latency_seconds: float | None
+
+    def __post_init__(self) -> None:
+        object.__setattr__(
+            self,
+            "status",
+            (
+                self.status
+                if isinstance(self.status, FundamentalsReceiptStatus)
+                else FundamentalsReceiptStatus(str(self.status))
+            ),
+        )
+        object.__setattr__(
+            self,
+            "provider_state",
+            (
+                self.provider_state
+                if isinstance(self.provider_state, FundamentalsProviderState)
+                else FundamentalsProviderState(str(self.provider_state))
+            ),
+        )
+        completed = self.completed_at
+        if not isinstance(completed, datetime) or completed.tzinfo is None:
+            raise ValueError(
+                "fundamentals refresh completed_at must be timezone-aware"
+            )
+        if completed.utcoffset() is None:
+            raise ValueError(
+                "fundamentals refresh completed_at must be timezone-aware"
+            )
+        object.__setattr__(self, "completed_at", completed.astimezone(UTC))
+        reason = None if self.reason is None else str(self.reason).strip()
+        if self.status is not FundamentalsReceiptStatus.FRESH_DATA and not reason:
+            raise ValueError("non-data refresh attempt requires a reason")
+        object.__setattr__(self, "reason", reason or None)
+        if type(self.provider_request_performed) is not bool:
+            raise ValueError(
+                "fundamentals refresh provider_request_performed must be bool"
+            )
+        for name in ("limiter_wait_seconds", "provider_latency_seconds"):
+            raw_value = getattr(self, name)
+            if not self.provider_request_performed:
+                if raw_value is not None:
+                    raise ValueError(
+                        f"fundamentals refresh {name} must be null when "
+                        "no provider request was performed"
+                    )
+                continue
+            if raw_value is None:
+                raise ValueError(
+                    f"fundamentals refresh {name} is required when a "
+                    "provider request was performed"
+                )
+            value = float(raw_value)
+            if not math.isfinite(value) or value < 0.0:
+                raise ValueError(
+                    f"fundamentals refresh {name} must be finite and nonnegative"
+                )
+            object.__setattr__(self, name, value)
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "status": self.status.value,
+            "provider_state": self.provider_state.value,
+            "completed_at": self.completed_at.isoformat().replace("+00:00", "Z"),
+            "reason": self.reason,
+            "provider_request_performed": self.provider_request_performed,
+            "limiter_wait_seconds": self.limiter_wait_seconds,
+            "provider_latency_seconds": self.provider_latency_seconds,
+        }
 
 
 @dataclass(frozen=True, slots=True)
@@ -97,6 +194,15 @@ class FundamentalsReceipt:
     cache_age_seconds: float | None = None
     cache_ttl_seconds: float = 0.0
     reason: str | None = None
+    fetched_at: datetime | None = None
+    provider_latency_seconds: float | None = None
+    provider_limiter_wait_seconds: float | None = None
+    refresh_state: FundamentalsRefreshState = (
+        FundamentalsRefreshState.NOT_REQUESTED
+    )
+    refresh_reason: str | None = None
+    next_refresh_at: datetime | None = None
+    last_refresh_attempt: FundamentalsRefreshAttempt | None = None
 
     def __post_init__(self) -> None:
         symbol = str(self.symbol or "").strip().upper()
@@ -132,6 +238,79 @@ class FundamentalsReceipt:
         except Exception as exc:
             raise ValueError("fundamentals receipt clock is invalid") from exc
         object.__setattr__(self, "observed_at", observed.astimezone(UTC))
+        fetched_at = self.fetched_at
+        if fetched_at is not None:
+            if not isinstance(fetched_at, datetime) or fetched_at.tzinfo is None:
+                raise ValueError("fundamentals fetched_at must be timezone-aware")
+            try:
+                if fetched_at.utcoffset() is None:
+                    raise ValueError(
+                        "fundamentals fetched_at must be timezone-aware"
+                    )
+            except Exception as exc:
+                raise ValueError("fundamentals fetched_at is invalid") from exc
+            fetched_at = fetched_at.astimezone(UTC)
+            if fetched_at > observed.astimezone(UTC):
+                raise ValueError("fundamentals fetched_at cannot be in the future")
+            object.__setattr__(self, "fetched_at", fetched_at)
+        for name in (
+            "provider_latency_seconds",
+            "provider_limiter_wait_seconds",
+        ):
+            latency = getattr(self, name)
+            if latency is None:
+                continue
+            latency = float(latency)
+            if not math.isfinite(latency) or latency < 0.0:
+                raise ValueError(
+                    f"fundamentals {name} must be finite and nonnegative"
+                )
+            object.__setattr__(self, name, latency)
+        try:
+            refresh_state = (
+                self.refresh_state
+                if isinstance(self.refresh_state, FundamentalsRefreshState)
+                else FundamentalsRefreshState(str(self.refresh_state))
+            )
+        except ValueError as exc:
+            raise ValueError("fundamentals refresh state is invalid") from exc
+        object.__setattr__(self, "refresh_state", refresh_state)
+        refresh_reason = (
+            None
+            if self.refresh_reason is None
+            else str(self.refresh_reason).strip()
+        )
+        if refresh_state not in {
+            FundamentalsRefreshState.NOT_REQUESTED,
+            FundamentalsRefreshState.CACHE_CURRENT,
+        } and not refresh_reason:
+            raise ValueError(
+                "active fundamentals refresh state requires a reason"
+            )
+        object.__setattr__(self, "refresh_reason", refresh_reason or None)
+        next_refresh_at = self.next_refresh_at
+        if next_refresh_at is not None:
+            if (
+                not isinstance(next_refresh_at, datetime)
+                or next_refresh_at.tzinfo is None
+            ):
+                raise ValueError(
+                    "fundamentals next_refresh_at must be timezone-aware"
+                )
+            try:
+                if next_refresh_at.utcoffset() is None:
+                    raise ValueError(
+                        "fundamentals next_refresh_at must be timezone-aware"
+                    )
+            except Exception as exc:
+                raise ValueError(
+                    "fundamentals next_refresh_at is invalid"
+                ) from exc
+            object.__setattr__(
+                self,
+                "next_refresh_at",
+                next_refresh_at.astimezone(UTC),
+            )
         ttl = float(self.cache_ttl_seconds)
         if not math.isfinite(ttl) or ttl <= 0.0:
             raise ValueError("fundamentals receipt TTL must be finite and positive")
@@ -165,6 +344,13 @@ class FundamentalsReceipt:
         if status is not FundamentalsReceiptStatus.FRESH_DATA and not reason:
             raise ValueError("non-data fundamentals receipt requires a reason")
         object.__setattr__(self, "reason", reason or None)
+        if (
+            self.last_refresh_attempt is not None
+            and type(self.last_refresh_attempt) is not FundamentalsRefreshAttempt
+        ):
+            raise ValueError(
+                "last_refresh_attempt must be a FundamentalsRefreshAttempt"
+            )
 
     @property
     def classification_usable(self) -> bool:
@@ -193,6 +379,27 @@ class FundamentalsReceipt:
             "cache_age_seconds": self.cache_age_seconds,
             "cache_ttl_seconds": self.cache_ttl_seconds,
             "reason": self.reason,
+            "fetched_at": (
+                None
+                if self.fetched_at is None
+                else self.fetched_at.isoformat().replace("+00:00", "Z")
+            ),
+            "provider_latency_seconds": self.provider_latency_seconds,
+            "provider_limiter_wait_seconds": (
+                self.provider_limiter_wait_seconds
+            ),
+            "refresh_state": self.refresh_state.value,
+            "refresh_reason": self.refresh_reason,
+            "next_refresh_at": (
+                None
+                if self.next_refresh_at is None
+                else self.next_refresh_at.isoformat().replace("+00:00", "Z")
+            ),
+            "last_refresh_attempt": (
+                None
+                if self.last_refresh_attempt is None
+                else self.last_refresh_attempt.to_dict()
+            ),
             "classification_usable": self.classification_usable,
         }
 
@@ -340,15 +547,18 @@ _breaker_lock = threading.Lock()
 _breaker_consecutive_failures: int = 0
 _breaker_state: str = "CLOSED"  # "CLOSED" | "OPEN" | "HALF_OPEN"
 _breaker_opened_at: float = 0.0
+_breaker_half_open_probe_inflight = False
 
 
 def _reset_breaker_for_tests() -> None:
     """Reset the breaker. Intended for unit tests only."""
     global _breaker_consecutive_failures, _breaker_state, _breaker_opened_at
+    global _breaker_half_open_probe_inflight
     with _breaker_lock:
         _breaker_consecutive_failures = 0
         _breaker_state = "CLOSED"
         _breaker_opened_at = 0.0
+        _breaker_half_open_probe_inflight = False
 
 
 def _breaker_should_short_circuit() -> bool:
@@ -359,28 +569,33 @@ def _breaker_should_short_circuit() -> bool:
     closes it, ``_breaker_on_failure`` re-opens for another TTL.
     """
     global _breaker_state, _breaker_opened_at
+    global _breaker_half_open_probe_inflight
     with _breaker_lock:
         if _breaker_state == "CLOSED":
             return False
         if _breaker_state == "OPEN":
             if time.monotonic() - _breaker_opened_at >= _BREAKER_HALF_OPEN_TTL_S:
                 _breaker_state = "HALF_OPEN"
+                _breaker_half_open_probe_inflight = True
                 logger.info("[yf_breaker] HALF_OPEN: probing")
                 return False
             return True
-        # HALF_OPEN: let the probe through; outcome handlers below own state.
-        return False
+        # Exactly one probe owns HALF_OPEN. All concurrent callers remain
+        # short-circuited until that probe records success or failure.
+        return _breaker_half_open_probe_inflight
 
 
 def _breaker_on_success() -> None:
     """Reset failure counter on any successful upstream call. CLOSE the
     breaker if it was OPEN/HALF_OPEN."""
     global _breaker_state, _breaker_consecutive_failures
+    global _breaker_half_open_probe_inflight
     with _breaker_lock:
         prev_state = _breaker_state
         _breaker_consecutive_failures = 0
         if prev_state != "CLOSED":
             _breaker_state = "CLOSED"
+            _breaker_half_open_probe_inflight = False
             logger.info("[yf_breaker] CLOSED: success after %s", prev_state)
 
 
@@ -388,6 +603,7 @@ def _breaker_on_failure() -> None:
     """Increment failure counter; trip OPEN at threshold or on HALF_OPEN
     probe failure."""
     global _breaker_state, _breaker_consecutive_failures, _breaker_opened_at
+    global _breaker_half_open_probe_inflight
     with _breaker_lock:
         _breaker_consecutive_failures += 1
         should_trip = (
@@ -405,6 +621,7 @@ def _breaker_on_failure() -> None:
             )
             _breaker_state = "OPEN"
             _breaker_opened_at = time.monotonic()
+            _breaker_half_open_probe_inflight = False
 
 
 # ---------------------------------------------------------------------------
@@ -1160,13 +1377,42 @@ _FUND_EMPTY = "__no_fundamentals__"
 @dataclass(frozen=True, slots=True)
 class _FundamentalsCacheMetadata:
     cache_timestamp: float
+    cache_monotonic: float
     status: FundamentalsReceiptStatus
     provider_state: FundamentalsProviderState
     cache_ttl_seconds: float
     reason: str | None
+    fetched_at: datetime
+    provider_latency_seconds: float | None
+    provider_limiter_wait_seconds: float | None
 
 
 _fundamentals_cache_metadata: dict[str, _FundamentalsCacheMetadata] = {}
+# yfinance reuses one process-wide session and one process-wide breaker. A
+# single provider owner prevents concurrent symbols from turning the sole
+# HALF_OPEN probe into false per-symbol backoff while selection remains
+# nonblocking through the bounded queue.
+_FUNDAMENTALS_REFRESH_MAX_INFLIGHT = 1
+_FUNDAMENTALS_REFRESH_QUEUE_CAPACITY = 256
+_fundamentals_refresh_lock = threading.Lock()
+_fundamentals_refresh_inflight: set[str] = set()
+_fundamentals_refresh_pending: collections.deque[str] = collections.deque()
+_fundamentals_refresh_pending_set: set[str] = set()
+_fundamentals_refresh_threads: dict[str, threading.Thread] = {}
+_fundamentals_refresh_backoff_until: dict[str, float] = {}
+_fundamentals_refresh_last_reason: dict[str, str] = {}
+_fundamentals_refresh_last_attempt: dict[
+    str, FundamentalsRefreshAttempt
+] = {}
+_fundamentals_refresh_accepting = True
+
+
+def _reap_fundamentals_refresh_threads_locked() -> None:
+    """Remove only worker handles already observed terminated."""
+
+    for symbol, worker in tuple(_fundamentals_refresh_threads.items()):
+        if not worker.is_alive():
+            _fundamentals_refresh_threads.pop(symbol, None)
 
 
 def _set_fundamentals_cache(
@@ -1177,11 +1423,53 @@ def _set_fundamentals_cache(
     provider_state: FundamentalsProviderState,
     cache_ttl_seconds: float,
     reason: str | None,
+    fetched_at: datetime | None = None,
+    provider_latency_seconds: float | None = None,
+    provider_limiter_wait_seconds: float | None = None,
+    preserve_verified_current: bool = False,
 ) -> None:
     """Atomically bind legacy cache bytes to their typed provenance."""
 
     now_epoch = time.time()
+    fetched = fetched_at or datetime.now(UTC)
+    if fetched.tzinfo is None or fetched.utcoffset() is None:
+        raise ValueError("fundamentals cache fetched_at must be timezone-aware")
+    fetched = fetched.astimezone(UTC)
+    latency = (
+        None
+        if provider_latency_seconds is None
+        else float(provider_latency_seconds)
+    )
+    if latency is not None and (
+        not math.isfinite(latency) or latency < 0.0
+    ):
+        raise ValueError("fundamentals cache provider latency is invalid")
+    limiter_wait = (
+        None
+        if provider_limiter_wait_seconds is None
+        else float(provider_limiter_wait_seconds)
+    )
+    if limiter_wait is not None and (
+        not math.isfinite(limiter_wait) or limiter_wait < 0.0
+    ):
+        raise ValueError("fundamentals cache limiter wait is invalid")
+    now_monotonic = time.monotonic()
     with _cache_lock:
+        if preserve_verified_current:
+            current = _cache.get(cache_key)
+            if current is not None:
+                current_timestamp, current_value = current
+                current_metadata = _fundamentals_cache_metadata.get(cache_key)
+                if (
+                    current_metadata is not None
+                    and current_metadata.cache_timestamp == current_timestamp
+                    and current_metadata.status
+                    is FundamentalsReceiptStatus.FRESH_DATA
+                    and isinstance(current_value, Mapping)
+                    and isinstance(current_value.get("short_name"), str)
+                    and bool(str(current_value.get("short_name")).strip())
+                ):
+                    return
         if len(_cache) > _MAX_CACHE_SIZE:
             cutoff = now_epoch - 60
             expired = [key for key, (ts, _) in _cache.items() if ts < cutoff]
@@ -1191,10 +1479,14 @@ def _set_fundamentals_cache(
         _cache[cache_key] = (now_epoch, copy.deepcopy(value))
         _fundamentals_cache_metadata[cache_key] = _FundamentalsCacheMetadata(
             cache_timestamp=now_epoch,
+            cache_monotonic=now_monotonic,
             status=status,
             provider_state=provider_state,
             cache_ttl_seconds=float(cache_ttl_seconds),
             reason=reason,
+            fetched_at=fetched,
+            provider_latency_seconds=latency,
+            provider_limiter_wait_seconds=limiter_wait,
         )
 
 
@@ -1212,7 +1504,11 @@ def _probe_fundamentals_cache(
         metadata = _fundamentals_cache_metadata.get(cache_key)
         if metadata is not None and metadata.cache_timestamp != cache_timestamp:
             metadata = None
-        age = max(0.0, now_epoch - cache_timestamp)
+        age = (
+            max(0.0, time.monotonic() - metadata.cache_monotonic)
+            if metadata is not None
+            else max(0.0, now_epoch - cache_timestamp)
+        )
         return age, copy.deepcopy(value), metadata
 
 
@@ -1256,7 +1552,22 @@ def _receipt_from_cache(
     value: Any,
     metadata: _FundamentalsCacheMetadata | None,
 ) -> FundamentalsReceipt:
-    observed_at = datetime.now(UTC)
+    fetched_at = (
+        metadata.fetched_at
+        if metadata is not None
+        else datetime.now(UTC) - timedelta(seconds=age)
+    )
+    observed_at = max(datetime.now(UTC), fetched_at)
+    provider_latency_seconds = (
+        metadata.provider_latency_seconds
+        if metadata is not None
+        else None
+    )
+    provider_limiter_wait_seconds = (
+        metadata.provider_limiter_wait_seconds
+        if metadata is not None
+        else None
+    )
     effective_ttl = (
         metadata.cache_ttl_seconds
         if metadata is not None
@@ -1277,6 +1588,9 @@ def _receipt_from_cache(
             cache_age_seconds=age,
             cache_ttl_seconds=effective_ttl,
             reason="fundamentals_cache_stale",
+            fetched_at=fetched_at,
+            provider_latency_seconds=provider_latency_seconds,
+            provider_limiter_wait_seconds=provider_limiter_wait_seconds,
         )
     if (
         isinstance(value, Mapping)
@@ -1292,6 +1606,9 @@ def _receipt_from_cache(
             data=value,
             cache_age_seconds=age,
             cache_ttl_seconds=effective_ttl,
+            fetched_at=fetched_at,
+            provider_latency_seconds=provider_latency_seconds,
+            provider_limiter_wait_seconds=provider_limiter_wait_seconds,
         )
     if isinstance(value, Mapping):
         return FundamentalsReceipt(
@@ -1303,6 +1620,9 @@ def _receipt_from_cache(
             cache_age_seconds=age,
             cache_ttl_seconds=effective_ttl,
             reason="cached_fundamentals_name_missing",
+            fetched_at=fetched_at,
+            provider_latency_seconds=provider_latency_seconds,
+            provider_limiter_wait_seconds=provider_limiter_wait_seconds,
         )
     if value != _FUND_EMPTY or metadata is None:
         return FundamentalsReceipt(
@@ -1314,6 +1634,9 @@ def _receipt_from_cache(
             cache_age_seconds=age,
             cache_ttl_seconds=effective_ttl,
             reason="legacy_empty_cache_provenance_unavailable",
+            fetched_at=fetched_at,
+            provider_latency_seconds=provider_latency_seconds,
+            provider_limiter_wait_seconds=provider_limiter_wait_seconds,
         )
     return FundamentalsReceipt(
         symbol=symbol,
@@ -1324,11 +1647,245 @@ def _receipt_from_cache(
         cache_age_seconds=age,
         cache_ttl_seconds=effective_ttl,
         reason=metadata.reason or "fundamentals_unavailable",
+        fetched_at=fetched_at,
+        provider_latency_seconds=provider_latency_seconds,
+        provider_limiter_wait_seconds=provider_limiter_wait_seconds,
+    )
+
+
+def _looks_like_yf_rate_limit_error(exc: Exception) -> bool:
+    name = type(exc).__name__.lower()
+    text = str(exc).lower()
+    return (
+        "ratelimit" in name
+        or "rate limit" in text
+        or "too many requests" in text
+        or "429" in text
+    )
+
+
+def _looks_like_yf_auth_error(exc: Exception) -> bool:
+    text = str(exc).lower()
+    return any(
+        marker in text
+        for marker in (
+            "401",
+            "403",
+            "unauthorized",
+            "forbidden",
+            "invalid crumb",
+            "authentication",
+        )
+    )
+
+
+def _fetch_fundamentals_receipt(
+    normalized: str,
+    *,
+    preserve_verified_cache_on_transient_failure: bool,
+) -> FundamentalsReceipt:
+    """Perform one bounded provider attempt and bind its typed cache outcome.
+
+    The yfinance transport itself has a 30-second request timeout.  There is no
+    retry loop here: a transient result enters the existing 120-second
+    per-symbol backoff, while the process-wide limiter/breaker remain in force.
+    """
+
+    cache_key = f"fund:{normalized}"
+    prior_cached = _probe_fundamentals_cache(cache_key)
+    stale_receipt: FundamentalsReceipt | None = None
+    if prior_cached is not None:
+        age, value, metadata = prior_cached
+        candidate = _receipt_from_cache(
+            normalized,
+            age=age,
+            value=value,
+            metadata=metadata,
+        )
+        if candidate.status is FundamentalsReceiptStatus.STALE:
+            stale_receipt = candidate
+
+    if _breaker_should_short_circuit():
+        if stale_receipt is not None:
+            return replace(
+                stale_receipt,
+                provider_state=FundamentalsProviderState.CIRCUIT_OPEN,
+                reason="fundamentals_circuit_open_with_stale_cache",
+            )
+        return FundamentalsReceipt(
+            symbol=normalized,
+            status=FundamentalsReceiptStatus.UNAVAILABLE,
+            provider_state=FundamentalsProviderState.CIRCUIT_OPEN,
+            origin=FundamentalsReceiptOrigin.NONE,
+            observed_at=datetime.now(UTC),
+            cache_ttl_seconds=float(_BREAKER_HALF_OPEN_TTL_S),
+            reason="fundamentals_circuit_open",
+        )
+
+    limiter_started_monotonic = time.monotonic()
+    acquire()
+    request_started_monotonic = time.monotonic()
+    limiter_wait = max(
+        0.0,
+        request_started_monotonic - limiter_started_monotonic,
+    )
+    try:
+        ticker = yf.Ticker(normalized, session=_SHARED_SESSION)
+        info = ticker.info
+        fetched_at = datetime.now(UTC)
+        latency = max(0.0, time.monotonic() - request_started_monotonic)
+        if not isinstance(info, Mapping) or not info:
+            reason = "fundamentals_provider_empty_response"
+            _set_fundamentals_cache(
+                cache_key,
+                _FUND_EMPTY,
+                status=FundamentalsReceiptStatus.AMBIGUOUS_EMPTY,
+                provider_state=FundamentalsProviderState.UNAVAILABLE,
+                cache_ttl_seconds=float(_TTL_QUOTE_MISS),
+                reason=reason,
+                fetched_at=fetched_at,
+                provider_latency_seconds=latency,
+                provider_limiter_wait_seconds=limiter_wait,
+                preserve_verified_current=(
+                    preserve_verified_cache_on_transient_failure
+                ),
+            )
+            _breaker_on_failure()
+            return FundamentalsReceipt(
+                symbol=normalized,
+                status=FundamentalsReceiptStatus.AMBIGUOUS_EMPTY,
+                provider_state=FundamentalsProviderState.UNAVAILABLE,
+                origin=FundamentalsReceiptOrigin.NETWORK,
+                observed_at=fetched_at,
+                cache_ttl_seconds=float(_TTL_QUOTE_MISS),
+                reason=reason,
+                fetched_at=fetched_at,
+                provider_latency_seconds=latency,
+                provider_limiter_wait_seconds=limiter_wait,
+            )
+        if not isinstance(info.get("shortName"), str) or not str(
+            info.get("shortName")
+        ).strip():
+            reason = "fundamentals_name_missing"
+            _set_fundamentals_cache(
+                cache_key,
+                _FUND_EMPTY,
+                status=FundamentalsReceiptStatus.AMBIGUOUS_EMPTY,
+                provider_state=FundamentalsProviderState.AVAILABLE,
+                cache_ttl_seconds=float(_TTL_QUOTE_MISS),
+                reason=reason,
+                fetched_at=fetched_at,
+                provider_latency_seconds=latency,
+                provider_limiter_wait_seconds=limiter_wait,
+                preserve_verified_current=(
+                    preserve_verified_cache_on_transient_failure
+                ),
+            )
+            _breaker_on_failure()
+            return FundamentalsReceipt(
+                symbol=normalized,
+                status=FundamentalsReceiptStatus.AMBIGUOUS_EMPTY,
+                provider_state=FundamentalsProviderState.AVAILABLE,
+                origin=FundamentalsReceiptOrigin.NETWORK,
+                observed_at=fetched_at,
+                cache_ttl_seconds=float(_TTL_QUOTE_MISS),
+                reason=reason,
+                fetched_at=fetched_at,
+                provider_latency_seconds=latency,
+                provider_limiter_wait_seconds=limiter_wait,
+            )
+        result = _fundamentals_result(info)
+    except Exception as exc:
+        fetched_at = datetime.now(UTC)
+        latency = max(0.0, time.monotonic() - request_started_monotonic)
+        authoritative_empty = _looks_like_yf_no_data_error(exc)
+        rate_limited = _looks_like_yf_rate_limit_error(exc)
+        auth_error = not rate_limited and _looks_like_yf_auth_error(exc)
+        status = (
+            FundamentalsReceiptStatus.AUTHORITATIVE_EMPTY
+            if authoritative_empty
+            else FundamentalsReceiptStatus.UNAVAILABLE
+        )
+        if authoritative_empty:
+            provider_state = FundamentalsProviderState.AVAILABLE
+            reason = "fundamentals_authoritative_no_record"
+        elif rate_limited:
+            provider_state = FundamentalsProviderState.RATE_LIMITED
+            reason = "fundamentals_provider_rate_limited"
+        elif auth_error:
+            provider_state = FundamentalsProviderState.AUTH_ERROR
+            reason = "fundamentals_provider_auth_error"
+        else:
+            provider_state = FundamentalsProviderState.ERROR
+            reason = "fundamentals_provider_error"
+        logger.warning("[yf_session] fundamentals(%s) failed: %s", normalized, exc)
+        cache_ttl = (
+            float(_TTL_FUNDAMENTALS)
+            if authoritative_empty
+            else float(_TTL_QUOTE_MISS)
+        )
+        _set_fundamentals_cache(
+            cache_key,
+            _FUND_EMPTY,
+            status=status,
+            provider_state=provider_state,
+            cache_ttl_seconds=cache_ttl,
+            reason=reason,
+            fetched_at=fetched_at,
+            provider_latency_seconds=latency,
+            provider_limiter_wait_seconds=limiter_wait,
+            preserve_verified_current=(
+                not authoritative_empty
+                and preserve_verified_cache_on_transient_failure
+            ),
+        )
+        if authoritative_empty:
+            _breaker_on_success()
+        else:
+            _breaker_on_failure()
+        return FundamentalsReceipt(
+            symbol=normalized,
+            status=status,
+            provider_state=provider_state,
+            origin=FundamentalsReceiptOrigin.NETWORK,
+            observed_at=fetched_at,
+            cache_ttl_seconds=cache_ttl,
+            reason=reason,
+            fetched_at=fetched_at,
+            provider_latency_seconds=latency,
+            provider_limiter_wait_seconds=limiter_wait,
+        )
+
+    fetched_at = datetime.now(UTC)
+    latency = max(0.0, time.monotonic() - request_started_monotonic)
+    _set_fundamentals_cache(
+        cache_key,
+        result,
+        status=FundamentalsReceiptStatus.FRESH_DATA,
+        provider_state=FundamentalsProviderState.AVAILABLE,
+        cache_ttl_seconds=float(_TTL_FUNDAMENTALS),
+        reason=None,
+        fetched_at=fetched_at,
+        provider_latency_seconds=latency,
+        provider_limiter_wait_seconds=limiter_wait,
+    )
+    _breaker_on_success()
+    return FundamentalsReceipt(
+        symbol=normalized,
+        status=FundamentalsReceiptStatus.FRESH_DATA,
+        provider_state=FundamentalsProviderState.AVAILABLE,
+        origin=FundamentalsReceiptOrigin.NETWORK,
+        observed_at=fetched_at,
+        data=result,
+        cache_ttl_seconds=float(_TTL_FUNDAMENTALS),
+        fetched_at=fetched_at,
+        provider_latency_seconds=latency,
+        provider_limiter_wait_seconds=limiter_wait,
     )
 
 
 def get_fundamentals_receipt(symbol: str) -> FundamentalsReceipt:
-    """Return typed evidence without collapsing provider failure to empty."""
+    """Return typed evidence, synchronously refreshing a cache miss."""
 
     normalized = str(symbol or "").strip().upper()
     if not normalized:
@@ -1343,7 +1900,6 @@ def get_fundamentals_receipt(symbol: str) -> FundamentalsReceipt:
         )
     cache_key = f"fund:{normalized}"
     cached = _probe_fundamentals_cache(cache_key)
-    stale_receipt: FundamentalsReceipt | None = None
     if cached is not None:
         age, value, metadata = cached
         receipt = _receipt_from_cache(
@@ -1354,144 +1910,389 @@ def get_fundamentals_receipt(symbol: str) -> FundamentalsReceipt:
         )
         if receipt.status is not FundamentalsReceiptStatus.STALE:
             return receipt
-        stale_receipt = receipt
+    return _fetch_fundamentals_receipt(
+        normalized,
+        preserve_verified_cache_on_transient_failure=False,
+    )
 
-    if _breaker_should_short_circuit():
-        if stale_receipt is not None:
-            return FundamentalsReceipt(
-                symbol=normalized,
-                status=FundamentalsReceiptStatus.STALE,
-                provider_state=FundamentalsProviderState.CIRCUIT_OPEN,
-                origin=FundamentalsReceiptOrigin.CACHE,
-                observed_at=datetime.now(UTC),
-                data=stale_receipt.data,
-                cache_age_seconds=stale_receipt.cache_age_seconds,
-                cache_ttl_seconds=stale_receipt.cache_ttl_seconds,
-                reason="fundamentals_circuit_open_with_stale_cache",
-            )
-        return FundamentalsReceipt(
-            symbol=normalized,
+
+def _fundamentals_breaker_backoff_until() -> datetime | None:
+    with _breaker_lock:
+        if _breaker_state != "OPEN":
+            return None
+        remaining = (
+            float(_BREAKER_HALF_OPEN_TTL_S)
+            - (time.monotonic() - _breaker_opened_at)
+        )
+    if remaining <= 0.0:
+        return None
+    return datetime.now(UTC) + timedelta(seconds=remaining)
+
+
+def _fundamentals_refresh_worker(symbol: str) -> None:
+    outcome: FundamentalsReceipt
+    try:
+        outcome = _fetch_fundamentals_receipt(
+            symbol,
+            preserve_verified_cache_on_transient_failure=True,
+        )
+    except Exception:
+        logger.exception(
+            "[yf_session] background fundamentals refresh crashed for %s",
+            symbol,
+        )
+        outcome = FundamentalsReceipt(
+            symbol=symbol,
             status=FundamentalsReceiptStatus.UNAVAILABLE,
-            provider_state=FundamentalsProviderState.CIRCUIT_OPEN,
+            provider_state=FundamentalsProviderState.ERROR,
             origin=FundamentalsReceiptOrigin.NONE,
             observed_at=datetime.now(UTC),
-            cache_ttl_seconds=float(_BREAKER_HALF_OPEN_TTL_S),
-            reason="fundamentals_circuit_open",
+            cache_ttl_seconds=float(_TTL_QUOTE_MISS),
+            reason="fundamentals_refresh_worker_exception",
+            provider_latency_seconds=0.0,
+            provider_limiter_wait_seconds=0.0,
         )
 
-    acquire()
-    try:
-        ticker = yf.Ticker(normalized, session=_SHARED_SESSION)
-        info = ticker.info
-        if not isinstance(info, Mapping) or not info:
-            reason = "fundamentals_provider_empty_response"
-            _set_fundamentals_cache(
-                cache_key,
-                _FUND_EMPTY,
-                status=FundamentalsReceiptStatus.AMBIGUOUS_EMPTY,
-                provider_state=FundamentalsProviderState.UNAVAILABLE,
-                cache_ttl_seconds=float(_TTL_QUOTE_MISS),
-                reason=reason,
-            )
-            _breaker_on_failure()
-            return FundamentalsReceipt(
-                symbol=normalized,
-                status=FundamentalsReceiptStatus.AMBIGUOUS_EMPTY,
-                provider_state=FundamentalsProviderState.UNAVAILABLE,
-                origin=FundamentalsReceiptOrigin.NETWORK,
-                observed_at=datetime.now(UTC),
-                cache_ttl_seconds=float(_TTL_QUOTE_MISS),
-                reason=reason,
-            )
-        if not isinstance(info.get("shortName"), str) or not str(
-            info.get("shortName")
-        ).strip():
-            reason = "fundamentals_name_missing"
-            _set_fundamentals_cache(
-                cache_key,
-                _FUND_EMPTY,
-                status=FundamentalsReceiptStatus.AMBIGUOUS_EMPTY,
-                provider_state=FundamentalsProviderState.AVAILABLE,
-                cache_ttl_seconds=float(_TTL_QUOTE_MISS),
-                reason=reason,
-            )
-            _breaker_on_failure()
-            return FundamentalsReceipt(
-                symbol=normalized,
-                status=FundamentalsReceiptStatus.AMBIGUOUS_EMPTY,
-                provider_state=FundamentalsProviderState.AVAILABLE,
-                origin=FundamentalsReceiptOrigin.NETWORK,
-                observed_at=datetime.now(UTC),
-                cache_ttl_seconds=float(_TTL_QUOTE_MISS),
-                reason=reason,
-            )
-        result = _fundamentals_result(info)
-    except Exception as exc:
-        authoritative_empty = _looks_like_yf_no_data_error(exc)
-        status = (
-            FundamentalsReceiptStatus.AUTHORITATIVE_EMPTY
-            if authoritative_empty
-            else FundamentalsReceiptStatus.UNAVAILABLE
+    successful = outcome.status in {
+        FundamentalsReceiptStatus.FRESH_DATA,
+        FundamentalsReceiptStatus.AUTHORITATIVE_EMPTY,
+    }
+    backoff_seconds = (
+        None
+        if successful
+        else (
+            float(_BREAKER_HALF_OPEN_TTL_S)
+            if outcome.provider_state
+            is FundamentalsProviderState.CIRCUIT_OPEN
+            else float(_TTL_QUOTE_MISS)
         )
-        provider_state = (
-            FundamentalsProviderState.AVAILABLE
-            if authoritative_empty
-            else FundamentalsProviderState.ERROR
-        )
-        reason = (
-            "fundamentals_authoritative_no_record"
-            if authoritative_empty
-            else "fundamentals_provider_error"
-        )
-        logger.warning("[yf_session] fundamentals(%s) failed: %s", normalized, exc)
-        _set_fundamentals_cache(
-            cache_key,
-            _FUND_EMPTY,
-            status=status,
-            provider_state=provider_state,
-            cache_ttl_seconds=(
-                float(_TTL_FUNDAMENTALS)
-                if authoritative_empty
-                else float(_TTL_QUOTE_MISS)
-            ),
-            reason=reason,
-        )
-        if authoritative_empty:
-            _breaker_on_success()
+    )
+    reason = (
+        "fundamentals_refresh_succeeded"
+        if successful
+        else outcome.reason or "fundamentals_refresh_unavailable"
+    )
+    provider_request_performed = (
+        outcome.origin is FundamentalsReceiptOrigin.NETWORK
+    )
+    attempt = FundamentalsRefreshAttempt(
+        status=outcome.status,
+        provider_state=outcome.provider_state,
+        completed_at=outcome.observed_at,
+        reason=outcome.reason,
+        provider_request_performed=provider_request_performed,
+        limiter_wait_seconds=(
+            outcome.provider_limiter_wait_seconds
+            if provider_request_performed
+            else None
+        ),
+        provider_latency_seconds=(
+            outcome.provider_latency_seconds
+            if provider_request_performed
+            else None
+        ),
+    )
+    with _fundamentals_refresh_lock:
+        _fundamentals_refresh_inflight.discard(symbol)
+        if backoff_seconds is None:
+            _fundamentals_refresh_backoff_until.pop(symbol, None)
         else:
-            _breaker_on_failure()
-        return FundamentalsReceipt(
-            symbol=normalized,
-            status=status,
-            provider_state=provider_state,
-            origin=FundamentalsReceiptOrigin.NETWORK,
-            observed_at=datetime.now(UTC),
-            cache_ttl_seconds=(
-                float(_TTL_FUNDAMENTALS)
-                if authoritative_empty
-                else float(_TTL_QUOTE_MISS)
-            ),
-            reason=reason,
+            _fundamentals_refresh_backoff_until[symbol] = (
+                time.monotonic() + backoff_seconds
+            )
+        _fundamentals_refresh_last_reason[symbol] = reason
+        _fundamentals_refresh_last_attempt[symbol] = attempt
+    _drain_fundamentals_refresh_queue()
+
+
+def _launch_fundamentals_refresh_thread(symbol: str) -> bool:
+    worker = threading.Thread(
+        target=_fundamentals_refresh_worker,
+        args=(symbol,),
+        name=f"yf-fundamentals-refresh-{symbol}",
+        daemon=True,
+    )
+    try:
+        with _fundamentals_refresh_lock:
+            if not _fundamentals_refresh_accepting:
+                _fundamentals_refresh_inflight.discard(symbol)
+                return False
+            _fundamentals_refresh_threads[symbol] = worker
+            # Publish only a started thread to close(); the worker cannot
+            # acquire this lock to complete until start() returns.
+            worker.start()
+        return True
+    except Exception:
+        with _fundamentals_refresh_lock:
+            _fundamentals_refresh_threads.pop(symbol, None)
+            _fundamentals_refresh_inflight.discard(symbol)
+            _fundamentals_refresh_backoff_until[symbol] = (
+                time.monotonic() + float(_TTL_QUOTE_MISS)
+            )
+            _fundamentals_refresh_last_reason[symbol] = (
+                "fundamentals_refresh_start_failed"
+            )
+        logger.exception(
+            "[yf_session] could not start fundamentals refresh for %s",
+            symbol,
+        )
+        return False
+
+
+def _drain_fundamentals_refresh_queue() -> None:
+    while True:
+        with _fundamentals_refresh_lock:
+            if (
+                not _fundamentals_refresh_accepting
+                or not _fundamentals_refresh_pending
+                or len(_fundamentals_refresh_inflight)
+                >= int(_FUNDAMENTALS_REFRESH_MAX_INFLIGHT)
+            ):
+                return
+            symbol = _fundamentals_refresh_pending.popleft()
+            _fundamentals_refresh_pending_set.discard(symbol)
+            _fundamentals_refresh_inflight.add(symbol)
+        if _launch_fundamentals_refresh_thread(symbol):
+            continue
+
+
+def _schedule_fundamentals_refresh(
+    symbol: str,
+) -> tuple[
+    FundamentalsRefreshState,
+    str | None,
+    datetime | None,
+]:
+    breaker_until = _fundamentals_breaker_backoff_until()
+    if breaker_until is not None:
+        return (
+            FundamentalsRefreshState.CIRCUIT_OPEN,
+            "fundamentals_refresh_circuit_open",
+            breaker_until,
         )
 
-    _set_fundamentals_cache(
-        cache_key,
-        result,
-        status=FundamentalsReceiptStatus.FRESH_DATA,
-        provider_state=FundamentalsProviderState.AVAILABLE,
-        cache_ttl_seconds=float(_TTL_FUNDAMENTALS),
-        reason=None,
+    now_monotonic = time.monotonic()
+    with _fundamentals_refresh_lock:
+        _reap_fundamentals_refresh_threads_locked()
+        if not _fundamentals_refresh_accepting:
+            return (
+                FundamentalsRefreshState.BACKOFF,
+                "fundamentals_refresh_manager_closed",
+                None,
+            )
+        tracked_worker = _fundamentals_refresh_threads.get(symbol)
+        if tracked_worker is not None and tracked_worker.is_alive():
+            return (
+                FundamentalsRefreshState.IN_FLIGHT,
+                "fundamentals_refresh_worker_still_exiting",
+                None,
+            )
+        if symbol in _fundamentals_refresh_inflight:
+            return (
+                FundamentalsRefreshState.IN_FLIGHT,
+                "fundamentals_refresh_already_in_flight",
+                None,
+            )
+        if symbol in _fundamentals_refresh_pending_set:
+            return (
+                FundamentalsRefreshState.QUEUED,
+                "fundamentals_refresh_queued",
+                None,
+            )
+        backoff_deadline = _fundamentals_refresh_backoff_until.get(symbol)
+        if (
+            backoff_deadline is not None
+            and backoff_deadline > now_monotonic
+        ):
+            remaining = backoff_deadline - now_monotonic
+            return (
+                FundamentalsRefreshState.BACKOFF,
+                _fundamentals_refresh_last_reason.get(symbol)
+                or "fundamentals_refresh_backoff",
+                datetime.now(UTC) + timedelta(seconds=remaining),
+            )
+        if len(_fundamentals_refresh_inflight) >= int(
+            _FUNDAMENTALS_REFRESH_MAX_INFLIGHT
+        ):
+            if len(_fundamentals_refresh_pending) < int(
+                _FUNDAMENTALS_REFRESH_QUEUE_CAPACITY
+            ):
+                _fundamentals_refresh_pending.append(symbol)
+                _fundamentals_refresh_pending_set.add(symbol)
+                return (
+                    FundamentalsRefreshState.QUEUED,
+                    "fundamentals_refresh_queued",
+                    None,
+                )
+            return (
+                FundamentalsRefreshState.CAPACITY_DEFERRED,
+                "fundamentals_refresh_queue_full",
+                None,
+            )
+        _fundamentals_refresh_inflight.add(symbol)
+        _fundamentals_refresh_backoff_until.pop(symbol, None)
+
+    if not _launch_fundamentals_refresh_thread(symbol):
+        return (
+            FundamentalsRefreshState.BACKOFF,
+            "fundamentals_refresh_start_failed",
+            datetime.now(UTC) + timedelta(seconds=float(_TTL_QUOTE_MISS)),
+        )
+    return (
+        FundamentalsRefreshState.SCHEDULED,
+        "fundamentals_refresh_scheduled",
+        None,
     )
-    _breaker_on_success()
-    return FundamentalsReceipt(
-        symbol=normalized,
-        status=FundamentalsReceiptStatus.FRESH_DATA,
-        provider_state=FundamentalsProviderState.AVAILABLE,
-        origin=FundamentalsReceiptOrigin.NETWORK,
-        observed_at=datetime.now(UTC),
-        data=result,
-        cache_ttl_seconds=float(_TTL_FUNDAMENTALS),
-    )
+
+
+def open_fundamentals_refresh() -> None:
+    """Open the bounded refresh owner for one service lifecycle."""
+
+    global _fundamentals_refresh_accepting
+    with _fundamentals_refresh_lock:
+        _reap_fundamentals_refresh_threads_locked()
+        if _fundamentals_refresh_threads or _fundamentals_refresh_inflight:
+            if _fundamentals_refresh_accepting:
+                return
+            raise RuntimeError("fundamentals refresh close is still in progress")
+        _fundamentals_refresh_accepting = True
+
+
+def close_fundamentals_refresh(timeout_seconds: float = 35.0) -> None:
+    """Stop queue intake and join every owned provider worker."""
+
+    global _fundamentals_refresh_accepting
+    timeout = float(timeout_seconds)
+    if not math.isfinite(timeout) or timeout <= 0.0:
+        raise ValueError("fundamentals refresh close timeout is invalid")
+    with _fundamentals_refresh_lock:
+        _fundamentals_refresh_accepting = False
+        _fundamentals_refresh_pending.clear()
+        _fundamentals_refresh_pending_set.clear()
+        workers = tuple(_fundamentals_refresh_threads.values())
+    deadline = time.monotonic() + timeout
+    for worker in workers:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0.0:
+            break
+        worker.join(timeout=remaining)
+    with _fundamentals_refresh_lock:
+        _reap_fundamentals_refresh_threads_locked()
+        alive = tuple(
+            symbol
+            for symbol, worker in _fundamentals_refresh_threads.items()
+            if worker.is_alive()
+        )
+    if alive:
+        raise RuntimeError(
+            "fundamentals refresh workers did not close: "
+            + ",".join(sorted(alive))
+        )
+
+
+def _reset_fundamentals_refresh_for_tests() -> None:
+    """Clear idle refresh bookkeeping; tests must await any worker first."""
+
+    global _fundamentals_refresh_accepting
+    with _fundamentals_refresh_lock:
+        _reap_fundamentals_refresh_threads_locked()
+        if _fundamentals_refresh_inflight or _fundamentals_refresh_threads:
+            raise RuntimeError("fundamentals refresh worker is still running")
+        _fundamentals_refresh_pending.clear()
+        _fundamentals_refresh_pending_set.clear()
+        _fundamentals_refresh_backoff_until.clear()
+        _fundamentals_refresh_last_reason.clear()
+        _fundamentals_refresh_last_attempt.clear()
+        _fundamentals_refresh_accepting = True
+
+
+def _with_fundamentals_refresh_attempt(
+    symbol: str,
+    receipt: FundamentalsReceipt,
+) -> FundamentalsReceipt:
+    with _fundamentals_refresh_lock:
+        attempt = _fundamentals_refresh_last_attempt.get(symbol)
+    return replace(receipt, last_refresh_attempt=attempt)
+
+
+def get_cached_fundamentals_receipt(symbol: str) -> FundamentalsReceipt:
+    """Return immediately from typed cache and refresh out-of-band.
+
+    This is the order-capable selection-path API.  It performs no rate-limit
+    sleep and no provider I/O.  A miss, semantic expiry, or cache row older than
+    half its field TTL schedules one bounded single-flight daemon refresh.
+    """
+
+    normalized = str(symbol or "").strip().upper()
+    if not normalized:
+        return FundamentalsReceipt(
+            symbol="UNKNOWN",
+            status=FundamentalsReceiptStatus.UNAVAILABLE,
+            provider_state=FundamentalsProviderState.UNAVAILABLE,
+            origin=FundamentalsReceiptOrigin.NONE,
+            observed_at=datetime.now(UTC),
+            cache_ttl_seconds=float(_TTL_FUNDAMENTALS),
+            reason="fundamentals_symbol_invalid",
+            refresh_state=FundamentalsRefreshState.NOT_REQUESTED,
+        )
+
+    cached = _probe_fundamentals_cache(f"fund:{normalized}")
+    receipt: FundamentalsReceipt
+    needs_refresh = True
+    if cached is None:
+        receipt = FundamentalsReceipt(
+            symbol=normalized,
+            status=FundamentalsReceiptStatus.UNAVAILABLE,
+            provider_state=FundamentalsProviderState.UNAVAILABLE,
+            origin=FundamentalsReceiptOrigin.NONE,
+            observed_at=datetime.now(UTC),
+            cache_ttl_seconds=float(_TTL_QUOTE_MISS),
+            reason="fundamentals_cache_miss",
+        )
+    else:
+        age, value, metadata = cached
+        receipt = _receipt_from_cache(
+            normalized,
+            age=age,
+            value=value,
+            metadata=metadata,
+        )
+        if receipt.status in {
+            FundamentalsReceiptStatus.FRESH_DATA,
+            FundamentalsReceiptStatus.AUTHORITATIVE_EMPTY,
+        }:
+            needs_refresh = age >= (receipt.cache_ttl_seconds / 2.0)
+            if not needs_refresh:
+                return replace(
+                    _with_fundamentals_refresh_attempt(normalized, receipt),
+                    refresh_state=FundamentalsRefreshState.CACHE_CURRENT,
+                )
+        elif receipt.status is not FundamentalsReceiptStatus.STALE:
+            next_refresh_at = (
+                (receipt.fetched_at or receipt.observed_at)
+                + timedelta(seconds=receipt.cache_ttl_seconds)
+            )
+            if next_refresh_at > datetime.now(UTC):
+                return replace(
+                    _with_fundamentals_refresh_attempt(normalized, receipt),
+                    refresh_state=FundamentalsRefreshState.BACKOFF,
+                    refresh_reason=(
+                        receipt.reason or "fundamentals_negative_cache_backoff"
+                    ),
+                    next_refresh_at=next_refresh_at,
+                )
+
+    if needs_refresh:
+        state, reason, next_refresh_at = _schedule_fundamentals_refresh(
+            normalized
+        )
+        return replace(
+            _with_fundamentals_refresh_attempt(normalized, receipt),
+            refresh_state=state,
+            refresh_reason=reason,
+            next_refresh_at=next_refresh_at,
+        )
+    return _with_fundamentals_refresh_attempt(normalized, receipt)
 
 
 def _get_fundamentals_legacy(symbol: str) -> dict[str, Any] | None:

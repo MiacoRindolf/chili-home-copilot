@@ -71,7 +71,6 @@ from .replay_capture_contract import (
     CaptureReadReceipt,
     CaptureRunIdentity,
     CaptureStream,
-    CoverageGap,
     FSMDependencyProfile,
     FSMStreamDependency,
     StreamCoverage,
@@ -99,7 +98,7 @@ FEATURE_FLAGS_PROVIDER = "captured_paper_adaptive_policy"
 FUNDAMENTALS_PROVIDER = "yfinance_fundamentals_primary"
 HUB_NODE_ID = "nm_momentum_crypto_intel"
 FUNDAMENTALS_QUERY_SCHEMA_VERSION = (
-    "chili.captured-paper-fundamentals-query.v1"
+    "chili.captured-paper-fundamentals-query.v2"
 )
 
 # 2026-07-23 (a79 finding): the hub is the CRYPTO intel node and its
@@ -484,7 +483,6 @@ class SqlAlchemyCapturedViabilitySnapshotSource:
         self.wall_clock = wall_clock
         self._source_to_target = source_to_target
         self._last_hub_snapshot_sha256: str | None = None
-        self._last_snapshots: tuple[CapturedDerivedViabilitySnapshot, ...] | None = None
 
         # Identity-stream payloads are the exact canonical objects whose hashes
         # the scorer consumes.  Do not wrap them in a second envelope: that
@@ -725,10 +723,32 @@ class SqlAlchemyCapturedViabilitySnapshotSource:
             query = {
                 "schema_version": FUNDAMENTALS_QUERY_SCHEMA_VERSION,
                 "provider": FUNDAMENTALS_PROVIDER,
-                "operation": "get_fundamentals",
+                "operation": "get_cached_fundamentals_receipt",
+                "lookup_performed": True,
                 "symbol": symbol,
                 "started_at": started_at,
                 "returned_at": returned_at,
+                "lookup_latency_seconds": (
+                    returned_at - started_at
+                ).total_seconds(),
+                "provider_event_at": None,
+                "provider_event_clock_status": (
+                    "unavailable_for_reference_fundamentals"
+                ),
+                "received_at": raw.observed_at,
+                "available_at": returned_at,
+                "last_provider_fetched_at": raw.fetched_at,
+                "last_provider_request_latency_seconds": (
+                    raw.provider_latency_seconds
+                ),
+                "last_provider_limiter_wait_seconds": (
+                    raw.provider_limiter_wait_seconds
+                ),
+                "last_refresh_attempt": (
+                    None
+                    if raw.last_refresh_attempt is None
+                    else raw.last_refresh_attempt.to_dict()
+                ),
                 "empty_result": raw.data is None,
                 "result": result,
                 "result_sha256": result_sha256,
@@ -739,12 +759,21 @@ class SqlAlchemyCapturedViabilitySnapshotSource:
                     None
                     if raw.classification_usable
                     else (
-                        "fundamentals_"
+                        raw.reason
+                        or "fundamentals_"
                         f"{raw.status.value.lower()}_"
                         f"{raw.provider_state.value.lower()}"
                     )
                 ),
                 "cache_or_network_transport": raw.origin.value.lower(),
+                "cache_hit": (
+                    raw.origin is FundamentalsReceiptOrigin.CACHE
+                ),
+                "cache_age_seconds": raw.cache_age_seconds,
+                "semantic_ttl_seconds": raw.cache_ttl_seconds,
+                "refresh_state": raw.refresh_state.value,
+                "refresh_reason": raw.refresh_reason,
+                "next_refresh_at": raw.next_refresh_at,
                 "upstream_market_truth_certified": False,
             }
             receipts[symbol] = {
@@ -753,16 +782,106 @@ class SqlAlchemyCapturedViabilitySnapshotSource:
             }
         return receipts
 
-    def _last_hub_snapshot_is_closed(self) -> bool:
-        snapshots = self._last_snapshots
-        if not snapshots:
-            return False
-        return not any(
-            snapshot.source_payload["source_snapshot"]["status"] == "fresh"
-            and snapshot.source_payload["instrument_classification"]["status"]
-            == "available"
-            for snapshot in snapshots
+    def _fundamentals_receipt_at_decision(
+        self,
+        *,
+        symbol: str,
+        receipt: Mapping[str, Any] | None,
+        decision_at: datetime,
+    ) -> Mapping[str, Any]:
+        if receipt is None:
+            missing = FundamentalsReceipt(
+                symbol=symbol,
+                status=FundamentalsReceiptStatus.UNAVAILABLE,
+                provider_state=FundamentalsProviderState.UNAVAILABLE,
+                origin=FundamentalsReceiptOrigin.NONE,
+                observed_at=decision_at,
+                cache_ttl_seconds=1.0,
+                reason="fundamentals_not_in_prefetch_universe",
+            )
+            typed = _finite_json(missing.to_dict())
+            body: dict[str, Any] = {
+                "schema_version": FUNDAMENTALS_QUERY_SCHEMA_VERSION,
+                "provider": FUNDAMENTALS_PROVIDER,
+                "operation": (
+                    "cache_lookup_not_performed_"
+                    "authoritative_symbol_arrived_after_prefetch"
+                ),
+                "lookup_performed": False,
+                "symbol": symbol,
+                "started_at": decision_at,
+                "returned_at": decision_at,
+                "lookup_latency_seconds": 0.0,
+                "provider_event_at": None,
+                "provider_event_clock_status": (
+                    "unavailable_for_reference_fundamentals"
+                ),
+                "received_at": decision_at,
+                "available_at": decision_at,
+                "last_provider_fetched_at": None,
+                "last_provider_request_latency_seconds": None,
+                "last_provider_limiter_wait_seconds": None,
+                "last_refresh_attempt": None,
+                "empty_result": True,
+                "result": {},
+                "result_sha256": sha256_json({}),
+                "typed_provider_receipt": typed,
+                "typed_provider_receipt_sha256": sha256_json(typed),
+                "classification_usable": False,
+                "classification_coverage_reason": missing.reason,
+                "cache_or_network_transport": "none",
+                "cache_hit": False,
+                "cache_age_seconds": None,
+                "semantic_ttl_seconds": missing.cache_ttl_seconds,
+                "refresh_state": missing.refresh_state.value,
+                "refresh_reason": missing.refresh_reason,
+                "next_refresh_at": None,
+                "upstream_market_truth_certified": False,
+            }
+        else:
+            body = copy.deepcopy(dict(receipt))
+            body.pop("query_receipt_sha256", None)
+
+        returned_at = _utc(
+            body.get("returned_at"),
+            "fundamentals_returned_at",
         )
+        received_at = _utc(
+            body.get("received_at"),
+            "fundamentals_received_at",
+        )
+        if returned_at > decision_at or received_at > decision_at:
+            _reject("derived_source_provider_result_from_future")
+        cache_age_raw = body.get("cache_age_seconds")
+        cache_age = 0.0 if cache_age_raw is None else float(cache_age_raw)
+        semantic_age = (
+            decision_at - received_at
+        ).total_seconds() + cache_age
+        ttl = float(body.get("semantic_ttl_seconds") or 0.0)
+        if (
+            not math.isfinite(semantic_age)
+            or semantic_age < 0.0
+            or not math.isfinite(ttl)
+            or ttl <= 0.0
+        ):
+            _reject("derived_source_fundamentals_semantic_clock_invalid")
+        usable = (
+            body.get("classification_usable") is True
+            and semantic_age <= ttl
+        )
+        reason = body.get("classification_coverage_reason")
+        if body.get("classification_usable") is True and not usable:
+            reason = "fundamentals_semantic_ttl_expired"
+        body["decision_at"] = decision_at
+        body["semantic_age_at_decision_seconds"] = semantic_age
+        body["classification_usable_at_decision"] = usable
+        body["classification_coverage_reason"] = (
+            None if usable else str(reason or "fundamentals_unavailable")
+        )
+        return {
+            **body,
+            "query_receipt_sha256": sha256_json(body),
+        }
 
     def read_snapshot(self) -> tuple[CapturedDerivedViabilitySnapshot, ...]:
         probe = self._probe_hub()
@@ -775,9 +894,9 @@ class SqlAlchemyCapturedViabilitySnapshotSource:
         probe_age = (probe_now - probe_tick).total_seconds()
         if probe_age < 0.0:
             _reject("derived_source_hub_snapshot_stale")
-        if self._last_hub_snapshot_sha256 == probe_sha and (
-            probe_age <= self.context_max_age_seconds
-            or self._last_hub_snapshot_is_closed()
+        if (
+            self._last_hub_snapshot_sha256 == probe_sha
+            and probe_age <= self.context_max_age_seconds
         ):
             return ()
         if probe_age > self.context_max_age_seconds:
@@ -792,34 +911,18 @@ class SqlAlchemyCapturedViabilitySnapshotSource:
                 | set(self._viability_universe_probe())
             )
         )
+        # Slow-changing instrument metadata is cache-only on this thread.
+        # Misses schedule bounded background refreshes; no provider call or
+        # rate-limit sleep may age the authoritative fast-market snapshot.
+        fundamentals = self._fundamentals_receipts(symbols)
         db = Session(bind=self._bind, expire_on_commit=False)
         prepared: list[dict[str, Any]] = []
         try:
             db.execute(text(_READ_ONLY_TRANSACTION_SQL))
-            # Capture the authoritative market/selection snapshot BEFORE any
-            # provider enrichment.  The fundamentals reader is intentionally
-            # allowed to perform a primary network query and can take longer
-            # than the market-context TTL.  Reading the DB only after that slow
-            # query created a moving-target race: every once-fresh hub/viability
-            # set had expired by the time it was inspected, so PAPER retried
-            # forever without ever publishing a source occurrence.
-            #
-            # All queried market-derived row eligibility is decided once inside
-            # this repeatable-read transaction at source_snapshot_at.  The two
-            # bounded pre-transaction probes provide only the candidate-universe
-            # hint. Slow enrichment may later make the captured snapshot too old
-            # to score; that becomes a typed coverage gap in build_occurrence,
-            # so the frontier advances while admission/risk/order stay closed.
+            # Supplemental receipt bytes are frozen before this final
+            # repeatable-read transaction. Background refresh may continue, but
+            # no later cache/provider result can alter this decision.
             hub = self._hub_snapshot(db)
-            # PostgreSQL establishes the REPEATABLE READ MVCC snapshot on the
-            # first SELECT, not on SET TRANSACTION.  Stamp the causal snapshot
-            # clock immediately after that first authoritative read so a
-            # producer commit visible to this transaction cannot be rejected
-            # merely because it landed between SET TRANSACTION and SELECT.
-            source_snapshot_at = _utc(
-                self.wall_clock(),
-                "derived_source_snapshot_at",
-            )
             # 2026-07-24 (a86-1532): the probe-vs-in-transaction hub sha
             # EQUALITY pin is unsatisfiable at production cadence: the hub
             # ticks every 5-25s (measured live, even after hours), so the
@@ -832,17 +935,14 @@ class SqlAlchemyCapturedViabilitySnapshotSource:
                 hub.get("hub_snapshot_sha256"),
                 "derived_source_hub_snapshot_sha256",
             )
-            tick_at = _utc(hub["tick_at"], "derived_source_hub_tick_at")
-            hub_age = (source_snapshot_at - tick_at).total_seconds()
-            if hub_age < 0.0:
-                _reject("derived_source_hub_snapshot_stale")
-            if self._last_hub_snapshot_sha256 == hub_sha and (
-                hub_age <= self.context_max_age_seconds
-                or self._last_hub_snapshot_is_closed()
-            ):
+            if self._last_hub_snapshot_sha256 == hub_sha:
                 return ()
-            if hub_age > self.context_max_age_seconds:
-                _reject("derived_source_hub_snapshot_stale")
+            symbols = tuple(
+                sorted(
+                    set(symbols)
+                    | {str(value) for value in hub["equity_symbols"]}
+                )
+            )
             variants = (
                 db.query(MomentumStrategyVariant)
                 .filter(MomentumStrategyVariant.id.in_(self.source_variant_ids))
@@ -875,6 +975,20 @@ class SqlAlchemyCapturedViabilitySnapshotSource:
                 )
                 .all()
             )
+            # This clock pins DB queries that require an as-of boundary.  The
+            # final batch decision/read clock is sampled only after every
+            # resolver read has completed.
+            source_snapshot_at = _utc(
+                self.wall_clock(),
+                "derived_source_transaction_snapshot_at",
+            )
+            tick_at = _utc(hub["tick_at"], "derived_source_hub_tick_at")
+            hub_age = (source_snapshot_at - tick_at).total_seconds()
+            if (
+                hub_age < 0.0
+                or hub_age > self.context_max_age_seconds
+            ):
+                _reject("derived_source_hub_snapshot_stale")
             # 2026-07-23 (a80 finding; supersedes the a75/a76 per-row notes):
             # the production viability writer is INCREMENTAL and sparse -- a
             # tick rewrites rows only for the routes it evaluated (measured
@@ -1070,27 +1184,84 @@ class SqlAlchemyCapturedViabilitySnapshotSource:
 
         if not prepared:
             _reject("derived_source_current_snapshot_empty")
-        surviving_symbols = tuple(
-            sorted({str(item["symbol"]) for item in prepared})
+        read_at = _utc(
+            self.wall_clock(),
+            "derived_source_read_at",
         )
-        fundamentals = self._fundamentals_receipts(surviving_symbols)
+        if read_at < source_snapshot_at:
+            _reject("derived_source_read_clock_reversed")
+        if read_at.date() != source_snapshot_at.date():
+            # The only time-dependent resolver input is calendar-day based.
+            # Never publish a batch whose resolver and decision clocks straddle
+            # that boundary.
+            _reject("derived_source_external_resolution_day_crossed")
+        hub_age = (read_at - tick_at).total_seconds()
+        if hub_age < 0.0 or hub_age > self.context_max_age_seconds:
+            _reject("derived_source_hub_snapshot_stale")
+        final_groups: dict[str, list[dict[str, Any]]] = {}
+        for item in prepared:
+            final_groups.setdefault(str(item["symbol"]), []).append(item)
+        prepared = [
+            item
+            for group in final_groups.values()
+            if all(
+                0.0
+                <= (read_at - candidate["viability_freshness_at"]).total_seconds()
+                <= self.context_max_age_seconds
+                and 0.0
+                <= (read_at - candidate["event_at"]).total_seconds()
+                <= self.context_max_age_seconds
+                for candidate in group
+            )
+            for item in group
+        ]
+        if not prepared:
+            _reject("derived_source_current_snapshot_empty")
         enriched: list[dict[str, Any]] = []
         for item in prepared:
             symbol = str(item["symbol"])
-            fundamentals_receipt = fundamentals[symbol]
+            fundamentals_receipt = self._fundamentals_receipt_at_decision(
+                symbol=symbol,
+                receipt=fundamentals.get(symbol),
+                decision_at=read_at,
+            )
             fundamentals_result = dict(
                 fundamentals_receipt.get("result") or {}
             )
             short_name = fundamentals_result.get("short_name")
             classification_usable = (
-                fundamentals_receipt.get("classification_usable") is True
+                fundamentals_receipt.get(
+                    "classification_usable_at_decision"
+                )
+                is True
             )
             if classification_usable:
-                leveraged_etf = is_leveraged_etf_name(short_name)
-                excluded_fund = is_excluded_fund_name(short_name)
+                leveraged_etf = bool(
+                    self.settings_projection.chili_momentum_exclude_leveraged_etfs
+                ) and is_leveraged_etf_name(short_name)
+                excluded_fund = (
+                    not leveraged_etf
+                    and bool(
+                        self.settings_projection.chili_momentum_exclude_fund_structures_enabled
+                    )
+                    and is_excluded_fund_name(short_name)
+                )
             else:
-                leveraged_etf = True
-                excluded_fund = True
+                # These name classifiers are optional in the intended live
+                # strategy and historically fail open.  Preserve that policy
+                # explicitly while recording the exact provider/cache reason;
+                # a supplemental miss must not become a paper-only dark veto.
+                leveraged_etf = False
+                excluded_fund = False
+            resolved_external = (
+                ViabilityExternalInputs.neutral(leveraged_etf=True)
+                if leveraged_etf
+                else replace(
+                    item["external"],
+                    leveraged_etf=False,
+                    excluded_fund=excluded_fund,
+                )
+            )
             enriched.append(
                 {
                     **item,
@@ -1099,11 +1270,7 @@ class SqlAlchemyCapturedViabilitySnapshotSource:
                     "classification_usable": classification_usable,
                     "leveraged_etf": leveraged_etf,
                     "excluded_fund": excluded_fund,
-                    "external": replace(
-                        item["external"],
-                        leveraged_etf=leveraged_etf,
-                        excluded_fund=excluded_fund,
-                    ),
+                    "external": resolved_external,
                 }
             )
 
@@ -1129,7 +1296,9 @@ class SqlAlchemyCapturedViabilitySnapshotSource:
                 "schema_version": SOURCE_SCHEMA_VERSION,
                 "source_authority": "derived_snapshot_only",
                 "upstream_raw_market_certification": "not_claimed",
-                "network_source_capture": "explicit_primary_query",
+                "network_source_capture": (
+                    "cache_only_with_bounded_background_refresh"
+                ),
                 "account_scope": "alpaca:paper",
                 "expected_account_id": self.expected_account_id,
                 "activation_generation": self.activation_generation,
@@ -1153,25 +1322,18 @@ class SqlAlchemyCapturedViabilitySnapshotSource:
                     "status": (
                         "available"
                         if classification_usable
-                        else "coverage_unavailable"
+                        else "optional_unavailable"
                     ),
                     "coverage_reason": fundamentals_receipt.get(
                         "classification_coverage_reason"
                     ),
-                    "leveraged_etf": (
-                        leveraged_etf if classification_usable else None
-                    ),
-                    "excluded_fund": (
-                        excluded_fund if classification_usable else None
-                    ),
-                    "scorer_placeholders_fail_closed": (
+                    "leveraged_etf": leveraged_etf,
+                    "excluded_fund": excluded_fund,
+                    "required_for_decision": False,
+                    "unavailable_policy": (
                         None
                         if classification_usable
-                        else {
-                            "leveraged_etf": True,
-                            "excluded_fund": True,
-                            "never_scored_without_coverage": True,
-                        }
+                        else "neutral_fail_open_as_intended"
                     ),
                 },
                 "source_variant": item["source_variant"],
@@ -1198,35 +1360,21 @@ class SqlAlchemyCapturedViabilitySnapshotSource:
                     "source_variant_sha256"
                 ],
             }
-            # Complete every deterministic payload projection before sampling
-            # this route's availability clock.  Only insertion of the clock,
-            # age/status arithmetic, and content hashing remain afterward.
-            read_at = _utc(self.wall_clock(), "derived_source_read_at")
-            if read_at < source_snapshot_at:
-                _reject("derived_source_clock_reversed")
-            if (
-                _utc(
-                    fundamentals_receipt["returned_at"],
-                    "fundamentals_returned_at",
-                )
-                > read_at
-            ):
-                _reject("derived_source_provider_result_from_future")
             source_age_at_read_seconds = (
                 read_at - source_freshness_floor_at
             ).total_seconds()
-            if source_age_at_read_seconds < 0.0:
-                _reject("derived_source_clock_reversed")
+            if (
+                source_age_at_read_seconds < 0.0
+                or source_age_at_read_seconds
+                > self.context_max_age_seconds
+            ):
+                _reject("derived_source_market_snapshot_stale")
             source_payload["source_snapshot"] = {
-                "captured_at": source_snapshot_at,
+                "captured_at": read_at,
+                "authoritative_transaction_snapshot_at": source_snapshot_at,
                 "freshness_floor_at": source_freshness_floor_at,
                 "age_at_read_seconds": source_age_at_read_seconds,
-                "status": (
-                    "stale_during_enrichment"
-                    if source_age_at_read_seconds
-                    > self.context_max_age_seconds
-                    else "fresh"
-                ),
+                "status": "fresh",
             }
             source_payload["read_at"] = read_at
             fingerprint = sha256_json(source_payload)
@@ -1267,7 +1415,6 @@ class SqlAlchemyCapturedViabilitySnapshotSource:
             )
         )
         self._last_hub_snapshot_sha256 = hub_sha
-        self._last_snapshots = result
         return result
 
     def build_occurrence(
@@ -1367,44 +1514,35 @@ class SqlAlchemyCapturedViabilitySnapshotSource:
         if not isinstance(classification, Mapping):
             _reject("derived_source_instrument_classification_missing")
         classification_status = str(classification.get("status") or "")
-        if classification_status not in {"available", "coverage_unavailable"}:
+        if classification_status not in {"available", "optional_unavailable"}:
             _reject("derived_source_instrument_classification_invalid")
-        classification_gap: CoverageGap | None = None
-        if classification_status == "coverage_unavailable":
+        if classification_status == "optional_unavailable":
             gap_reason = str(classification.get("coverage_reason") or "").strip()
             if not gap_reason:
                 _reject("derived_source_fundamentals_coverage_reason_missing")
-            classification_gap = CoverageGap(
-                stream=CaptureStream.CAPTURED_VIABILITY_INPUT,
-                reason=gap_reason,
-                first_available_at=read_at,
-                last_available_at=read_at,
-                lost_count=1,
-                symbol=snapshot.symbol,
-            )
+            if classification.get("required_for_decision") is not False:
+                _reject("derived_source_optional_classification_contract_invalid")
+            if (
+                classification.get("unavailable_policy")
+                != "neutral_fail_open_as_intended"
+            ):
+                _reject("derived_source_optional_classification_policy_invalid")
         source_snapshot = snapshot.source_payload.get("source_snapshot")
         if not isinstance(source_snapshot, Mapping):
             _reject("derived_source_snapshot_provenance_missing")
         source_snapshot_status = str(source_snapshot.get("status") or "")
-        if source_snapshot_status not in {
-            "fresh",
-            "stale_during_enrichment",
-        }:
+        if source_snapshot_status != "fresh":
             _reject("derived_source_snapshot_provenance_invalid")
         source_snapshot_at = _utc(
             source_snapshot.get("captured_at"),
             "derived_source_snapshot_captured_at",
         )
-        source_staleness_gap: CoverageGap | None = None
-        if source_snapshot_status == "stale_during_enrichment":
-            source_staleness_gap = CoverageGap(
-                stream=CaptureStream.CAPTURED_VIABILITY_INPUT,
-                reason="source_snapshot_stale_during_enrichment",
-                first_available_at=read_at,
-                last_available_at=read_at,
-                lost_count=1,
-                symbol=snapshot.symbol,
-            )
+        if source_snapshot_at != read_at:
+            _reject("derived_source_snapshot_decision_clock_mismatch")
+        fundamentals_started_at = _utc(
+            fundamentals_receipt.get("started_at"),
+            "fundamentals_started_at",
+        )
         read_receipt = CaptureReadReceipt(
             read_id=read_id,
             decision_id=(
@@ -1415,7 +1553,7 @@ class SqlAlchemyCapturedViabilitySnapshotSource:
             stream=CaptureStream.CAPTURED_VIABILITY_INPUT,
             provider=SOURCE_PROVIDER,
             symbol=snapshot.symbol,
-            requested_at=source_snapshot_at,
+            requested_at=fundamentals_started_at,
             returned_at=read_at,
             query_sha256=source_event.query_sha256 or "",
             source_event_sha256s=(source_ref.event_sha256,),
@@ -1568,11 +1706,7 @@ class SqlAlchemyCapturedViabilitySnapshotSource:
             source_refs=refs,
             read_receipts=(read_receipt,),
             stream_coverages=coverages,
-            coverage_gaps=tuple(
-                gap
-                for gap in (classification_gap, source_staleness_gap)
-                if gap is not None
-            ),
+            coverage_gaps=(),
             correlation_id=snapshot.correlation_id,
         )
         scoring_authority = CapturedViabilityScoringAuthority(

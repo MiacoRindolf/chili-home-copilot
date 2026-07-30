@@ -378,7 +378,7 @@ def test_focused_regression_roster_owns_complete_captured_paper_critical_path() 
 
     required_test_nodes = {
         "tests/test_captured_paper_selection_source.py::test_source_captures_full_four_stream_envelope_and_scores_without_fallback",
-        "tests/test_captured_paper_selection_source.py::test_missing_typed_fundamentals_receipt_fails_only_that_decision",
+        "tests/test_captured_paper_selection_source.py::test_missing_typed_fundamentals_receipt_is_recorded_but_optional",
         "tests/test_captured_paper_selection_queue.py::test_visible_commit_is_ignored_until_post_fsync_gate_acknowledges_it",
         "tests/test_captured_paper_selection_queue.py::test_coverage_unavailable_event_emits_route_tombstone_not_empty_advance",
         "tests/test_captured_paper_selection_producer.py::test_batch_upsert_and_frontier_cas_commit_together",

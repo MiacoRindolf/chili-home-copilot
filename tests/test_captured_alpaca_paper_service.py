@@ -4211,7 +4211,9 @@ def test_composition_uses_measured_capacity_and_one_exact_adapter_generation(
         "replay_capture_runtime": SimpleNamespace(BoundedCaptureIngress=object),
         "app_db": SimpleNamespace(SessionLocal=lambda: None),
         "yf_session": SimpleNamespace(
-            get_fundamentals_receipt=lambda _symbol: None
+            get_cached_fundamentals_receipt=lambda _symbol: None,
+            open_fundamentals_refresh=lambda: None,
+            close_fundamentals_refresh=lambda *, timeout_seconds: None,
         ),
         "captured_paper_initial_controller": SimpleNamespace(
             CapturedPaperInitialAdmissionController=_InitialController,

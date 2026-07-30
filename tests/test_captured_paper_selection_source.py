@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import copy
 import uuid
+from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 
 import pytest
@@ -30,7 +31,6 @@ from app.services.trading.momentum_neural.captured_paper_variant_binding import 
     plan_captured_paper_variant_bindings,
 )
 from app.services.trading.momentum_neural.captured_viability_adapter import (
-    COVERAGE_UNAVAILABLE,
     SCORED,
     score_captured_viability,
 )
@@ -42,6 +42,7 @@ from app.services.trading.momentum_neural.replay_capture_contract import (
     sha256_json,
 )
 from app.services.trading.momentum_neural.viability import (
+    ViabilityExternalInputs,
     ViabilitySettingsProjection,
 )
 from app.services.yf_session import (
@@ -257,13 +258,15 @@ def _source(
     *,
     fundamentals_reader,
     wall_clock=lambda: datetime.now(UTC),
+    settings_projection: ViabilitySettingsProjection | None = None,
 ):
     return SqlAlchemyCapturedViabilitySnapshotSource(
         engine,
         variant_application=material["application"],
         selection_authority=material["selection_authority"],
-        settings_projection=ViabilitySettingsProjection.from_runtime(
-            runtime_settings
+        settings_projection=(
+            settings_projection
+            or ViabilitySettingsProjection.from_runtime(runtime_settings)
         ),
         expected_account_id=ACCOUNT_ID,
         activation_generation=material["generation"],
@@ -346,6 +349,103 @@ def test_source_captures_full_four_stream_envelope_and_scores_without_fallback(
     assert result.risk_reserved is False
     assert result.order_posted is False
     assert source.read_snapshot() == ()
+
+
+def test_source_preserves_leveraged_etf_resolver_short_circuit_parity(
+    db,
+    monkeypatch,
+) -> None:
+    material = _seed_source(db)
+    monkeypatch.setattr(
+        "app.services.trading.momentum_neural.captured_paper_selection_source.is_leveraged_etf_name",
+        lambda _name: True,
+    )
+
+    def excluded_classifier_must_not_run(_name):
+        raise AssertionError(
+            "fund classifier ran after leveraged-ETF short circuit"
+        )
+
+    monkeypatch.setattr(
+        "app.services.trading.momentum_neural.captured_paper_selection_source.is_excluded_fund_name",
+        excluded_classifier_must_not_run,
+    )
+    source = _source(
+        material,
+        fundamentals_reader=lambda symbol: _fresh_fundamentals(
+            symbol,
+            short_name="Example 2X Daily ETF",
+        ),
+    )
+
+    snapshot = source.read_snapshot()[0]
+    assert snapshot.external == ViabilityExternalInputs.neutral(
+        leveraged_etf=True
+    )
+    assert snapshot.source_payload["instrument_classification"][
+        "leveraged_etf"
+    ] is True
+
+
+def test_source_does_not_apply_disabled_leveraged_classifier(
+    db,
+    monkeypatch,
+) -> None:
+    material = _seed_source(db)
+    projection = replace(
+        ViabilitySettingsProjection.from_runtime(runtime_settings),
+        chili_momentum_exclude_leveraged_etfs=False,
+    )
+
+    def leveraged_classifier_must_not_run(_name):
+        raise AssertionError("disabled leveraged classifier was evaluated")
+
+    monkeypatch.setattr(
+        "app.services.trading.momentum_neural.captured_paper_selection_source.is_leveraged_etf_name",
+        leveraged_classifier_must_not_run,
+    )
+    monkeypatch.setattr(
+        "app.services.trading.momentum_neural.captured_paper_selection_source.is_excluded_fund_name",
+        lambda _name: False,
+    )
+    source = _source(
+        material,
+        fundamentals_reader=lambda symbol: _fresh_fundamentals(
+            symbol,
+            short_name="Example 2X Daily ETF",
+        ),
+        settings_projection=projection,
+    )
+
+    snapshot = source.read_snapshot()[0]
+    assert snapshot.external.leveraged_etf is False
+    assert snapshot.external.ross_quality_viability_tilt == 0.2
+    assert snapshot.source_payload["instrument_classification"][
+        "leveraged_etf"
+    ] is False
+
+
+def test_post_prefetch_symbol_receipt_does_not_claim_a_cache_lookup(db) -> None:
+    material = _seed_source(db)
+    source = _source(
+        material,
+        fundamentals_reader=lambda symbol: _fresh_fundamentals(symbol),
+    )
+    decision_at = datetime.now(UTC)
+
+    receipt = source._fundamentals_receipt_at_decision(
+        symbol="LATE",
+        receipt=None,
+        decision_at=decision_at,
+    )
+
+    assert receipt["lookup_performed"] is False
+    assert receipt["operation"] == (
+        "cache_lookup_not_performed_"
+        "authoritative_symbol_arrived_after_prefetch"
+    )
+    assert receipt["started_at"] == decision_at
+    assert receipt["returned_at"] == decision_at
 
 
 def test_source_fails_closed_when_symbol_family_universe_is_partial(db) -> None:
@@ -486,19 +586,15 @@ def test_source_binds_in_transaction_hub_when_hub_ticks_during_provider_query(
     initial_hub_sha = source._probe_hub()["hub_snapshot_sha256"]
     snapshots = source.read_snapshot()
     assert {item.symbol for item in snapshots} == {"ACTU"}
-    assert {item.hub_snapshot_sha256 for item in snapshots} == {
-        initial_hub_sha
-    }
     advanced_hub_sha = source._probe_hub()["hub_snapshot_sha256"]
     assert advanced_hub_sha != initial_hub_sha
-    following = source.read_snapshot()
-    assert {item.symbol for item in following} == {"ACTU"}
-    assert {item.hub_snapshot_sha256 for item in following} == {
+    assert {item.hub_snapshot_sha256 for item in snapshots} == {
         advanced_hub_sha
     }
+    assert source.read_snapshot() == ()
 
 
-def test_source_publishes_snapshot_when_fundamentals_outlive_source_ttl(
+def test_source_revalidates_fast_market_after_supplemental_delay(
     db,
     monkeypatch,
 ) -> None:
@@ -512,6 +608,29 @@ def test_source_publishes_snapshot_when_fundamentals_outlive_source_ttl(
     def fundamentals(symbol: str) -> FundamentalsReceipt:
         calls.append(symbol)
         clock["now"] += timedelta(seconds=75)
+        with Session(bind=engine) as other:
+            hub = other.get(BrainNodeState, HUB_NODE_ID)
+            assert hub is not None
+            hub_payload = copy.deepcopy(dict(hub.local_state or {}))
+            hub_payload["last_tick_utc"] = clock["now"].isoformat()
+            hub_payload["correlation_id"] = (
+                f"refreshed-{uuid.uuid4().hex[:20]}"
+            )
+            hub.local_state = hub_payload
+            hub.updated_at = _naive(clock["now"])
+            hub.last_activated_at = _naive(clock["now"])
+            for row in (
+                other.query(MomentumSymbolViability)
+                .filter(MomentumSymbolViability.symbol == symbol)
+                .all()
+            ):
+                row.freshness_ts = _naive(clock["now"])
+                regime = copy.deepcopy(dict(row.regime_snapshot_json or {}))
+                regime["utc_iso"] = clock["now"].isoformat()
+                regime["utc_hour"] = clock["now"].hour
+                row.regime_snapshot_json = regime
+                row.updated_at = _naive(clock["now"])
+            other.commit()
         return FundamentalsReceipt(
             symbol=symbol,
             status=FundamentalsReceiptStatus.FRESH_DATA,
@@ -543,10 +662,12 @@ def test_source_publishes_snapshot_when_fundamentals_outlive_source_ttl(
     snapshots = source.read_snapshot()
     assert len(snapshots) == 1
     assert calls == ["ACTU"]
-    assert snapshots[0].read_at == clock["now"]
+    assert snapshots[0].read_at == (
+        material["tick_at"] + timedelta(seconds=75)
+    )
     occurrence = source.build_occurrence(snapshots[0], source_sequence=1)
     assert occurrence.bundle.read_receipts[0].requested_at == (
-        snapshots[0].source_payload["source_snapshot"]["captured_at"]
+        snapshots[0].source_payload["fundamentals_query_receipt"]["started_at"]
     )
     assert occurrence.bundle.read_receipts[0].returned_at == snapshots[0].read_at
     result = score_captured_viability(
@@ -554,14 +675,8 @@ def test_source_publishes_snapshot_when_fundamentals_outlive_source_ttl(
         authority=occurrence.scoring_authority,
         evaluation_at=occurrence.bundle.read_at,
     )
-    assert result.status == COVERAGE_UNAVAILABLE
-    assert any(
-        "source_snapshot_stale_during_enrichment" in reason
-        for reason in result.reasons
-    )
-    assert result.opportunity_consumed is False
-    assert result.risk_reserved is False
-    assert result.order_posted is False
+    assert result.status == SCORED
+    assert occurrence.bundle.coverage_gaps == ()
     assert source.read_snapshot() == ()
     assert calls == ["ACTU"]
 
@@ -619,7 +734,7 @@ def test_source_rejects_already_stale_rows_before_fundamentals(db) -> None:
     with pytest.raises(CapturedPaperSelectionSourceUnavailable) as rejected:
         source.read_snapshot()
     assert rejected.value.reason == "derived_source_current_snapshot_empty"
-    assert calls == []
+    assert calls == ["ACTU"]
 
 
 def test_source_rejects_future_rows_before_fundamentals(db) -> None:
@@ -648,7 +763,7 @@ def test_source_rejects_future_rows_before_fundamentals(db) -> None:
     with pytest.raises(CapturedPaperSelectionSourceUnavailable) as rejected:
         source.read_snapshot()
     assert rejected.value.reason == "derived_source_current_snapshot_empty"
-    assert calls == []
+    assert calls == ["ACTU"]
 
 
 def test_source_excludes_corrupt_symbol_before_enrichment_but_publishes_peer(
@@ -673,7 +788,7 @@ def test_source_excludes_corrupt_symbol_before_enrichment_but_publishes_peer(
     source = _source(material, fundamentals_reader=fundamentals)
     snapshots = source.read_snapshot()
     assert {item.symbol for item in snapshots} == {"ACTU"}
-    assert calls == ["ACTU"]
+    assert calls == ["ACTU", "BAD"]
 
 
 def test_source_binds_dilution_clock_to_transaction_read_time(db, monkeypatch) -> None:
@@ -699,7 +814,9 @@ def test_source_binds_dilution_clock_to_transaction_read_time(db, monkeypatch) -
     snapshots = source.read_snapshot()
     assert len(snapshots) == 1
     assert seen == [
-        snapshots[0].source_payload["source_snapshot"]["captured_at"]
+        snapshots[0].source_payload["source_snapshot"][
+            "authoritative_transaction_snapshot_at"
+        ]
     ]
 
 
@@ -716,7 +833,7 @@ def test_source_binds_dilution_clock_to_transaction_read_time(db, monkeypatch) -
                 cache_ttl_seconds=86_400.0,
                 reason="provider_error",
             ),
-            "fundamentals_unavailable_error",
+            "provider_error",
         ),
         (
             lambda symbol: FundamentalsReceipt(
@@ -730,7 +847,7 @@ def test_source_binds_dilution_clock_to_transaction_read_time(db, monkeypatch) -
                 cache_ttl_seconds=86_400.0,
                 reason="cache_stale",
             ),
-            "fundamentals_stale_available",
+            "cache_stale",
         ),
         (
             lambda symbol: FundamentalsReceipt(
@@ -742,7 +859,7 @@ def test_source_binds_dilution_clock_to_transaction_read_time(db, monkeypatch) -
                 cache_ttl_seconds=86_400.0,
                 reason="circuit_open",
             ),
-            "fundamentals_unavailable_circuit_open",
+            "circuit_open",
         ),
         (
             lambda symbol: FundamentalsReceipt(
@@ -754,11 +871,11 @@ def test_source_binds_dilution_clock_to_transaction_read_time(db, monkeypatch) -
                 cache_ttl_seconds=86_400.0,
                 reason="name_missing",
             ),
-            "fundamentals_ambiguous_empty_available",
+            "name_missing",
         ),
     ),
 )
-def test_fundamentals_failure_is_decision_local_coverage_unavailable(
+def test_optional_fundamentals_failure_is_neutral_and_does_not_starve_peer(
     db,
     monkeypatch,
     receipt_factory,
@@ -799,15 +916,21 @@ def test_fundamentals_failure_is_decision_local_coverage_unavailable(
         "coverage_reason": None,
         "leveraged_etf": False,
         "excluded_fund": False,
-        "scorer_placeholders_fail_closed": None,
+        "required_for_decision": False,
+        "unavailable_policy": None,
     }
     unavailable_classification = by_symbol["MISS"].source_payload[
         "instrument_classification"
     ]
-    assert unavailable_classification["status"] == "coverage_unavailable"
+    assert unavailable_classification["status"] == "optional_unavailable"
     assert unavailable_classification["coverage_reason"] == expected_reason
-    assert unavailable_classification["leveraged_etf"] is None
-    assert unavailable_classification["excluded_fund"] is None
+    assert unavailable_classification["leveraged_etf"] is False
+    assert unavailable_classification["excluded_fund"] is False
+    assert unavailable_classification["required_for_decision"] is False
+    assert (
+        unavailable_classification["unavailable_policy"]
+        == "neutral_fail_open_as_intended"
+    )
     assert classified_names == [
         "Actuate Therapeutics Inc.",
         "Actuate Therapeutics Inc.",
@@ -826,15 +949,75 @@ def test_fundamentals_failure_is_decision_local_coverage_unavailable(
         evaluation_at=unavailable.bundle.read_at,
     )
     assert fresh_result.status == SCORED
-    assert unavailable_result.status == COVERAGE_UNAVAILABLE
-    assert any(expected_reason in reason for reason in unavailable_result.reasons)
-    assert unavailable_result.observation is None
-    assert unavailable_result.opportunity_consumed is False
-    assert unavailable_result.risk_reserved is False
-    assert unavailable_result.order_posted is False
+    assert unavailable_result.status == SCORED
+    assert unavailable.bundle.coverage_gaps == ()
+    assert unavailable_result.observation is not None
 
 
-def test_missing_typed_fundamentals_receipt_fails_only_that_decision(db) -> None:
+def test_semantic_ttl_is_bound_to_one_batch_decision_clock(db) -> None:
+    material = _seed_source(db, symbols=("ACTU", "MISS"))
+    clock = {"now": material["tick_at"]}
+
+    def fundamentals(symbol: str) -> FundamentalsReceipt:
+        observed_at = clock["now"]
+        if symbol == "MISS":
+            clock["now"] += timedelta(seconds=2)
+            return FundamentalsReceipt(
+                symbol=symbol,
+                status=FundamentalsReceiptStatus.FRESH_DATA,
+                provider_state=FundamentalsProviderState.AVAILABLE,
+                origin=FundamentalsReceiptOrigin.CACHE,
+                observed_at=observed_at,
+                data={"short_name": "Example Company"},
+                cache_age_seconds=4.0,
+                cache_ttl_seconds=5.0,
+            )
+        return FundamentalsReceipt(
+            symbol=symbol,
+            status=FundamentalsReceiptStatus.FRESH_DATA,
+            provider_state=FundamentalsProviderState.AVAILABLE,
+            origin=FundamentalsReceiptOrigin.CACHE,
+            observed_at=observed_at,
+            data={"short_name": "Actuate Therapeutics Inc."},
+            cache_age_seconds=1.0,
+            cache_ttl_seconds=100.0,
+        )
+
+    source = _source(
+        material,
+        fundamentals_reader=fundamentals,
+        wall_clock=lambda: clock["now"],
+    )
+    snapshots = source.read_snapshot()
+    assert {item.read_at for item in snapshots} == {clock["now"]}
+    by_symbol = {item.symbol: item for item in snapshots}
+    miss_receipt = by_symbol["MISS"].source_payload[
+        "fundamentals_query_receipt"
+    ]
+    assert miss_receipt["semantic_age_at_decision_seconds"] == 6.0
+    assert miss_receipt["classification_usable_at_decision"] is False
+    assert miss_receipt["classification_coverage_reason"] == (
+        "fundamentals_semantic_ttl_expired"
+    )
+    assert (
+        by_symbol["MISS"].source_payload["instrument_classification"]["status"]
+        == "optional_unavailable"
+    )
+    for sequence, snapshot in enumerate(snapshots, start=1):
+        occurrence = source.build_occurrence(
+            snapshot,
+            source_sequence=sequence,
+        )
+        result = score_captured_viability(
+            occurrence.bundle,
+            authority=occurrence.scoring_authority,
+            evaluation_at=occurrence.bundle.read_at,
+        )
+        assert result.status == SCORED
+        assert occurrence.bundle.coverage_gaps == ()
+
+
+def test_missing_typed_fundamentals_receipt_is_recorded_but_optional(db) -> None:
     material = _seed_source(db)
     source = _source(
         material,
@@ -843,16 +1026,18 @@ def test_missing_typed_fundamentals_receipt_fails_only_that_decision(db) -> None
 
     snapshot = source.read_snapshot()[0]
     classification = snapshot.source_payload["instrument_classification"]
-    assert classification["status"] == "coverage_unavailable"
-    assert classification["leveraged_etf"] is None
-    assert classification["excluded_fund"] is None
+    assert classification["status"] == "optional_unavailable"
+    assert classification["coverage_reason"] == (
+        "typed_fundamentals_receipt_missing_or_mismatched"
+    )
+    assert classification["leveraged_etf"] is False
+    assert classification["excluded_fund"] is False
+    assert classification["required_for_decision"] is False
     occurrence = source.build_occurrence(snapshot, source_sequence=1)
     result = score_captured_viability(
         occurrence.bundle,
         authority=occurrence.scoring_authority,
         evaluation_at=occurrence.bundle.read_at,
     )
-    assert result.status == COVERAGE_UNAVAILABLE
-    assert result.opportunity_consumed is False
-    assert result.risk_reserved is False
-    assert result.order_posted is False
+    assert result.status == SCORED
+    assert occurrence.bundle.coverage_gaps == ()
