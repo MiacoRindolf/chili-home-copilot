@@ -940,6 +940,12 @@ class HostCutoverBackend(Protocol):
         timeout_seconds: float,
     ) -> None: ...
 
+    def assert_iqconnect_provider_handoff_current(
+        self,
+        expected: IqconnectProviderGuardObservation,
+        restored_clients: Sequence[ProcessIdentity],
+    ) -> None: ...
+
     def release_iqconnect_provider_guard(self) -> None: ...
 
     def find_legacy_processes(
@@ -8223,7 +8229,10 @@ class CapturedPaperHostCutoverExecutor:
         mutations = 0
         foreign_candidate = False
 
-        def assert_provider_or_quiesce_execution_lane() -> None:
+        def assert_provider_or_quiesce_execution_lane(
+            *,
+            handed_off_clients: Sequence[ProcessIdentity] = (),
+        ) -> None:
             nonlocal mutations
             if iqconnect_guard is None:
                 raise CapturedPaperHostCutoverError(
@@ -8231,10 +8240,17 @@ class CapturedPaperHostCutoverExecutor:
                     "rollback cannot restore execution without provider authority",
                 )
             try:
-                self.backend.assert_iqconnect_provider_guard_current(
-                    iqconnect_guard
-                )
-            except CapturedPaperHostCutoverError:
+                if handed_off_clients:
+                    self.backend.assert_iqconnect_provider_handoff_current(
+                        iqconnect_guard,
+                        handed_off_clients,
+                    )
+                else:
+                    self.backend.assert_iqconnect_provider_guard_current(
+                        iqconnect_guard
+                    )
+                return
+            except BaseException as failure:
                 lane = self.backend.inspect_legacy_execution_lane()
                 if lane.identity_key() != prior_lane.identity_key():
                     raise CapturedPaperHostCutoverError(
@@ -8244,7 +8260,7 @@ class CapturedPaperHostCutoverExecutor:
                 mutations += self.backend.quiesce_legacy_execution_lane(
                     expected=lane
                 )
-                raise
+                raise failure
 
         def late_candidate_evidence() -> tuple[
             TaskObservation | None,
@@ -8704,8 +8720,8 @@ class CapturedPaperHostCutoverExecutor:
                 "candidate authority appeared during rollback; legacy was re-quiesced",
             )
         if iqconnect_guard is not None:
-            self.backend.assert_iqconnect_provider_guard_current(
-                iqconnect_guard
+            assert_provider_or_quiesce_execution_lane(
+                handed_off_clients=restored
             )
         mutations += self.backend.restore_legacy_execution_lane(
             expected=prior_lane
@@ -8727,7 +8743,9 @@ class CapturedPaperHostCutoverExecutor:
                 ),
             },
         )
-        assert_provider_or_quiesce_execution_lane()
+        assert_provider_or_quiesce_execution_lane(
+            handed_off_clients=restored
+        )
         named, tasks, processes = late_candidate_evidence()
         if named is not None or tasks or processes:
             quarantine_late_candidate(
@@ -8756,7 +8774,9 @@ class CapturedPaperHostCutoverExecutor:
             raise CapturedPaperHostCutoverError(
                 "ROLLBACK_POSTCONDITION_FAILED", "candidate task remains after rollback"
             )
-        assert_provider_or_quiesce_execution_lane()
+        assert_provider_or_quiesce_execution_lane(
+            handed_off_clients=restored
+        )
         record(
             "rollback_completed",
             {
@@ -10000,6 +10020,72 @@ class WindowsHostCutoverBackend:
                 "IQConnect process or required listener identity changed",
             )
 
+    def _iqconnect_connected_client_roles(
+        self,
+        restored_clients: Sequence[ProcessIdentity],
+    ) -> set[str]:
+        by_role = {item.role: item for item in restored_clients}
+        if (
+            set(by_role) != set(IQCONNECT_CLIENT_ENDPOINT_BY_ROLE)
+            or len(by_role) != len(restored_clients)
+        ):
+            raise CapturedPaperHostCutoverError(
+                "IQCONNECT_PROVIDER_HANDOFF_INVALID",
+                "restored IQFeed client roles do not match the sealed handoff",
+            )
+        connected_roles: set[str] = set()
+        try:
+            for role, identity in by_role.items():
+                current = self.get_process(identity.pid, role=role)
+                if (
+                    current is None
+                    or current.semantic_key() != identity.semantic_key()
+                ):
+                    raise CapturedPaperHostCutoverError(
+                        "IQCONNECT_PROVIDER_HANDOFF_IDENTITY_DRIFT",
+                        f"restored {role} identity changed during provider handoff",
+                    )
+                process = self._psutil.Process(identity.pid)
+                create_time_ns = int(
+                    round(float(process.create_time()) * 1_000_000_000)
+                )
+                if create_time_ns != identity.create_time_ns:
+                    raise CapturedPaperHostCutoverError(
+                        "IQCONNECT_PROVIDER_HANDOFF_IDENTITY_DRIFT",
+                        f"restored {role} PID was reused during provider handoff",
+                    )
+                expected_endpoint = IQCONNECT_CLIENT_ENDPOINT_BY_ROLE[role]
+                for connection in process.net_connections(kind="tcp"):
+                    remote = connection.raddr
+                    if (
+                        connection.status != self._psutil.CONN_ESTABLISHED
+                        or not remote
+                    ):
+                        continue
+                    if hasattr(remote, "ip"):
+                        endpoint = (str(remote.ip), int(remote.port))
+                    else:
+                        endpoint = (str(remote[0]), int(remote[1]))
+                    if endpoint == expected_endpoint:
+                        connected_roles.add(role)
+                        break
+        except CapturedPaperHostCutoverError:
+            raise
+        except (
+            self._psutil.NoSuchProcess,
+            self._psutil.ZombieProcess,
+            self._psutil.AccessDenied,
+            OSError,
+            RuntimeError,
+            TypeError,
+            ValueError,
+        ) as exc:
+            raise CapturedPaperHostCutoverError(
+                "IQCONNECT_PROVIDER_HANDOFF_UNINSPECTABLE",
+                "restored IQFeed client connections could not be inspected",
+            ) from exc
+        return connected_roles
+
     def await_iqconnect_provider_guard_handoff(
         self,
         expected: IqconnectProviderGuardObservation,
@@ -10013,96 +10099,18 @@ class WindowsHostCutoverBackend:
                 "IQCONNECT_PROVIDER_HANDOFF_INVALID",
                 "IQConnect provider handoff timeout is outside the sealed bound",
             )
-        by_role = {item.role: item for item in restored_clients}
-        if (
-            set(by_role) != set(IQCONNECT_CLIENT_ENDPOINT_BY_ROLE)
-            or len(by_role) != len(restored_clients)
-        ):
-            raise CapturedPaperHostCutoverError(
-                "IQCONNECT_PROVIDER_HANDOFF_INVALID",
-                "restored IQFeed client roles do not match the sealed handoff",
-            )
         self.assert_iqconnect_provider_guard_current(expected)
-        for role, identity in by_role.items():
-            current = self.get_process(identity.pid, role=role)
-            if (
-                current is None
-                or current.semantic_key() != identity.semantic_key()
-            ):
-                raise CapturedPaperHostCutoverError(
-                    "IQCONNECT_PROVIDER_HANDOFF_IDENTITY_DRIFT",
-                    f"restored {role} identity changed before provider handoff",
-                )
-
+        expected_roles = set(IQCONNECT_CLIENT_ENDPOINT_BY_ROLE)
         deadline = time.monotonic() + timeout
         while True:
-            connected_roles: set[str] = set()
-            try:
-                for role, identity in by_role.items():
-                    process = self._psutil.Process(identity.pid)
-                    create_time_ns = int(
-                        round(
-                            float(process.create_time())
-                            * 1_000_000_000
-                        )
-                    )
-                    if create_time_ns != identity.create_time_ns:
-                        raise CapturedPaperHostCutoverError(
-                            "IQCONNECT_PROVIDER_HANDOFF_IDENTITY_DRIFT",
-                            f"restored {role} PID was reused during provider handoff",
-                        )
-                    expected_endpoint = IQCONNECT_CLIENT_ENDPOINT_BY_ROLE[
-                        role
-                    ]
-                    for connection in process.net_connections(kind="tcp"):
-                        remote = connection.raddr
-                        if (
-                            connection.status
-                            != self._psutil.CONN_ESTABLISHED
-                            or not remote
-                        ):
-                            continue
-                        if hasattr(remote, "ip"):
-                            endpoint = (
-                                str(remote.ip),
-                                int(remote.port),
-                            )
-                        else:
-                            endpoint = (
-                                str(remote[0]),
-                                int(remote[1]),
-                            )
-                        if endpoint == expected_endpoint:
-                            connected_roles.add(role)
-                            break
-            except CapturedPaperHostCutoverError:
-                raise
-            except (
-                self._psutil.NoSuchProcess,
-                self._psutil.ZombieProcess,
-                self._psutil.AccessDenied,
-                OSError,
-                RuntimeError,
-                TypeError,
-                ValueError,
-            ) as exc:
-                raise CapturedPaperHostCutoverError(
-                    "IQCONNECT_PROVIDER_HANDOFF_UNINSPECTABLE",
-                    "restored IQFeed client connections could not be inspected",
-                ) from exc
-            if connected_roles == set(by_role):
-                for role, identity in by_role.items():
-                    current = self.get_process(identity.pid, role=role)
-                    if (
-                        current is None
-                        or current.semantic_key()
-                        != identity.semantic_key()
-                    ):
-                        raise CapturedPaperHostCutoverError(
-                            "IQCONNECT_PROVIDER_HANDOFF_IDENTITY_DRIFT",
-                            f"restored {role} identity changed after provider handoff",
-                        )
-                self.assert_iqconnect_provider_guard_current(expected)
+            connected_roles = self._iqconnect_connected_client_roles(
+                restored_clients
+            )
+            if connected_roles == expected_roles:
+                self.assert_iqconnect_provider_handoff_current(
+                    expected,
+                    restored_clients,
+                )
                 return
             if time.monotonic() >= deadline:
                 raise CapturedPaperHostCutoverError(
@@ -10110,6 +10118,28 @@ class WindowsHostCutoverBackend:
                     "restored IQFeed bridges did not connect before guard release",
                 )
             time.sleep(IQCONNECT_GUARD_HANDOFF_POLL_SECONDS)
+
+    def assert_iqconnect_provider_handoff_current(
+        self,
+        expected: IqconnectProviderGuardObservation,
+        restored_clients: Sequence[ProcessIdentity],
+    ) -> None:
+        if self._iqconnect_provider_observation() != expected:
+            raise CapturedPaperHostCutoverError(
+                "IQCONNECT_PROVIDER_HANDOFF_LOST",
+                "IQConnect process or required listener identity changed after handoff",
+            )
+        connected_roles = self._iqconnect_connected_client_roles(
+            restored_clients
+        )
+        expected_roles = set(IQCONNECT_CLIENT_ENDPOINT_BY_ROLE)
+        if connected_roles != expected_roles:
+            missing = sorted(expected_roles - connected_roles)
+            raise CapturedPaperHostCutoverError(
+                "IQCONNECT_PROVIDER_HANDOFF_LOST",
+                "restored IQFeed clients disconnected after handoff: "
+                + ",".join(missing),
+            )
 
     def release_iqconnect_provider_guard(self) -> None:
         clients = self._iqconnect_guard_sockets

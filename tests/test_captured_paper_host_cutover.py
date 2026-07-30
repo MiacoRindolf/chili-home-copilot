@@ -788,6 +788,11 @@ def test_windows_backend_waits_for_exact_legacy_client_handoff(
         "assert_iqconnect_provider_guard_current",
         lambda expected: guard_checks.append(expected),
     )
+    monkeypatch.setattr(
+        backend,
+        "_iqconnect_provider_observation",
+        lambda: guard,
+    )
     sleeps: list[float] = []
     monkeypatch.setattr(cutover.time, "sleep", sleeps.append)
 
@@ -797,11 +802,23 @@ def test_windows_backend_waits_for_exact_legacy_client_handoff(
         timeout_seconds=1.0,
     )
 
-    assert calls == {1111: 2, 2222: 2}
+    assert calls == {1111: 3, 2222: 3}
     assert sleeps == [cutover.IQCONNECT_GUARD_HANDOFF_POLL_SECONDS]
-    assert guard_checks == [guard, guard]
+    assert guard_checks == [guard]
+    backend.assert_iqconnect_provider_handoff_current(
+        guard,
+        tuple(identities.values()),
+    )
 
     disconnected_roles.add("iqfeed_depth_bridge")
+    with pytest.raises(
+        cutover.CapturedPaperHostCutoverError,
+        match="IQCONNECT_PROVIDER_HANDOFF_LOST",
+    ):
+        backend.assert_iqconnect_provider_handoff_current(
+            guard,
+            tuple(identities.values()),
+        )
     monotonic_values = iter((0.0, 2.0))
     monkeypatch.setattr(
         cutover.time, "monotonic", lambda: next(monotonic_values)
@@ -1015,6 +1032,10 @@ class FakeHost:
         }
         self.iqconnect_guard_active = False
         self.iqconnect_guard_checks = 0
+        self.iqconnect_provider_current = True
+        self.iqconnect_client_roles_current = set(
+            cutover.IQCONNECT_CLIENT_ENDPOINT_BY_ROLE
+        )
 
     def _maybe_fail(self, operation: str, *, after: bool = False) -> None:
         if (
@@ -1170,6 +1191,33 @@ class FakeHost:
         ]
         self.assert_iqconnect_provider_guard_current(expected)
         self.mutations.append("iqconnect-guard:handoff")
+
+    def assert_iqconnect_provider_handoff_current(
+        self,
+        expected: cutover.IqconnectProviderGuardObservation,
+        restored_clients: tuple[cutover.ProcessIdentity, ...],
+    ) -> None:
+        assert expected.executable_sha256 == cutover.IQCONNECT_EXECUTABLE_SHA256
+        if not self.iqconnect_provider_current:
+            raise cutover.CapturedPaperHostCutoverError(
+                "IQCONNECT_PROVIDER_HANDOFF_LOST",
+                "injected IQConnect provider loss after handoff",
+            )
+        assert sorted(item.role for item in restored_clients) == [
+            "iqfeed_depth_bridge",
+            "iqfeed_trade_bridge",
+        ]
+        for identity in restored_clients:
+            assert (
+                self.processes[identity.pid].semantic_key()
+                == identity.semantic_key()
+            )
+            if identity.role not in self.iqconnect_client_roles_current:
+                raise cutover.CapturedPaperHostCutoverError(
+                    "IQCONNECT_PROVIDER_HANDOFF_LOST",
+                    f"injected {identity.role} disconnect after handoff",
+                )
+        self.mutations.append("iqconnect-handoff:assert")
 
     def release_iqconnect_provider_guard(self) -> None:
         if self.iqconnect_guard_active:
@@ -2151,6 +2199,35 @@ def test_rollback_discards_guard_when_post_acquire_assert_reports_absence(
     _assert_restored(prepared, backend)
 
 
+def test_rollback_accepts_guard_socket_retirement_after_exact_client_handoff(
+    prepared: cutover.PreparedCutover,
+) -> None:
+    class GuardSocketRetiredAfterHandoff(FakeHost):
+        def await_iqconnect_provider_guard_handoff(
+            self,
+            expected: cutover.IqconnectProviderGuardObservation,
+            restored_clients: tuple[cutover.ProcessIdentity, ...],
+            *,
+            timeout_seconds: float,
+        ) -> None:
+            super().await_iqconnect_provider_guard_handoff(
+                expected,
+                restored_clients,
+                timeout_seconds=timeout_seconds,
+            )
+            self.iqconnect_guard_active = False
+
+    backend = GuardSocketRetiredAfterHandoff(prepared)
+    executor = _executor(prepared, backend)
+    executor.apply()
+
+    report = executor.rollback()
+
+    assert report.verdict == "ROLLED_BACK_EXACT"
+    assert "iqconnect-handoff:assert" in backend.mutations
+    _assert_restored(prepared, backend)
+
+
 def test_rollback_rejects_provider_loss_after_client_handoff(
     prepared: cutover.PreparedCutover,
 ) -> None:
@@ -2168,6 +2245,7 @@ def test_rollback_rejects_provider_loss_after_client_handoff(
                 timeout_seconds=timeout_seconds,
             )
             self.iqconnect_guard_active = False
+            self.iqconnect_provider_current = False
 
     backend = ProviderLostAfterHandoff(prepared)
     executor = _executor(prepared, backend)
@@ -2175,7 +2253,7 @@ def test_rollback_rejects_provider_loss_after_client_handoff(
 
     with pytest.raises(
         cutover.CapturedPaperHostCutoverError,
-        match="IQCONNECT_PROVIDER_GUARD_LOST",
+        match="IQCONNECT_PROVIDER_HANDOFF_LOST",
     ):
         executor.rollback()
     assert backend.execution_lane_state == "stopped"
@@ -2195,6 +2273,7 @@ def test_rollback_requiesces_lane_when_provider_is_lost_during_restore(
                 expected=expected
             )
             self.iqconnect_guard_active = False
+            self.iqconnect_provider_current = False
             return mutations
 
     backend = ProviderLostDuringLaneRestore(prepared)
@@ -2203,10 +2282,42 @@ def test_rollback_requiesces_lane_when_provider_is_lost_during_restore(
 
     with pytest.raises(
         cutover.CapturedPaperHostCutoverError,
-        match="IQCONNECT_PROVIDER_GUARD_LOST",
+        match="IQCONNECT_PROVIDER_HANDOFF_LOST",
     ):
         executor.rollback()
 
+    assert backend.execution_lane_state == "stopped"
+    assert not any(backend.execution_lane_recreator_states.values())
+
+
+def test_rollback_rejects_client_disconnect_after_handoff_even_with_guard(
+    prepared: cutover.PreparedCutover,
+) -> None:
+    class ClientDisconnectedDuringLaneRestore(FakeHost):
+        def restore_legacy_execution_lane(
+            self,
+            *,
+            expected: cutover.LegacyExecutionLaneObservation,
+        ) -> int:
+            mutations = super().restore_legacy_execution_lane(
+                expected=expected
+            )
+            self.iqconnect_client_roles_current.discard(
+                "iqfeed_depth_bridge"
+            )
+            return mutations
+
+    backend = ClientDisconnectedDuringLaneRestore(prepared)
+    executor = _executor(prepared, backend)
+    executor.apply()
+
+    with pytest.raises(
+        cutover.CapturedPaperHostCutoverError,
+        match="IQCONNECT_PROVIDER_HANDOFF_LOST",
+    ):
+        executor.rollback()
+
+    assert not backend.iqconnect_guard_active
     assert backend.execution_lane_state == "stopped"
     assert not any(backend.execution_lane_recreator_states.values())
 
