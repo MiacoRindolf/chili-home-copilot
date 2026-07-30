@@ -773,6 +773,45 @@ def test_store_owner_heartbeat_renews_with_append_only_receipt(tmp_path) -> None
     assert len(receipts) >= 2
 
 
+@pytest.mark.parametrize(
+    ("lease_seconds", "heartbeat_seconds", "elapsed_seconds"),
+    (
+        (60.0, 10.0, 11.0),
+        (0.5, 0.49, 0.25),
+    ),
+    ids=("cadence", "near-expiry-safety"),
+)
+def test_store_owner_heartbeat_renews_on_heartbeat_cadence(
+    tmp_path,
+    lease_seconds: float,
+    heartbeat_seconds: float,
+    elapsed_seconds: float,
+) -> None:
+    binding = _binding(
+        store_owner_lease_seconds=lease_seconds,
+        store_owner_heartbeat_seconds=heartbeat_seconds,
+    )
+    now = [BASE]
+    store = ContentAddressedCaptureStore(
+        tmp_path / "capture",
+        compression_codec="zlib",
+        resource_binding=binding,
+        disk_usage_provider=lambda _path: SimpleNamespace(free=1_000_000_000),
+        wall_clock=lambda: now[0],
+    )
+    try:
+        before = store.resource_health()["exclusive_ownership"]
+        now[0] += timedelta(seconds=elapsed_seconds)
+
+        store.write_events((_event(1),))
+
+        after = store.resource_health()["exclusive_ownership"]
+        assert after["record_sha256"] != before["record_sha256"]
+        assert datetime.fromisoformat(after["heartbeat_at"]) == now[0]
+    finally:
+        store.close()
+
+
 def test_idle_shared_store_renews_ownership_before_first_write(tmp_path) -> None:
     binding = _binding(
         store_owner_lease_seconds=0.5,

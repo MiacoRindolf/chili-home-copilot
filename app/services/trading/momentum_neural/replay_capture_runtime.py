@@ -8450,7 +8450,13 @@ class _ExclusiveCaptureStoreOwnership:
                 raise CaptureContractError("capture store ownership clock moved backwards")
             if now >= expires:
                 raise CaptureContractError("capture store ownership lease expired")
-            if renew_if_due and (expires - now).total_seconds() <= self.heartbeat_seconds:
+            if (
+                renew_if_due
+                and (
+                    (now - heartbeat).total_seconds() >= self.heartbeat_seconds
+                    or (expires - now).total_seconds() <= self.heartbeat_seconds
+                )
+            ):
                 self.renew()
 
     def renew(self) -> str:
