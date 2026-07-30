@@ -428,42 +428,48 @@ class CapturedPaperSelectionQueueDurableGate:
         self._expected_account_id = expected_account_id
         self._activation_generation = activation_generation
         self._lock = threading.RLock()
-        self._commit_count = _positive_int(
+        claimed_commit_count = _positive_int(
             commit_count, "durable gate commit count", allow_zero=True
         )
-        self._last_commit_sha256 = (
+        claimed_last_commit_sha256 = (
             _sha(last_commit_sha256, "durable gate last commit")
             if last_commit_sha256 is not None
             else None
         )
-        self._durable_through = _positive_int(
+        claimed_durable_through = _positive_int(
             durable_through, "durable gate source frontier", allow_zero=True
         )
         if type(poisoned) is not bool:
             _fail("durable gate poison flag must be boolean")
-        self._poisoned = poisoned
-        self._poison_reason = (
+        claimed_poisoned = poisoned
+        claimed_poison_reason = (
             _reason(poison_reason) if poison_reason is not None else None
         )
-        if bool(self._commit_count) != bool(self._last_commit_sha256):
+        if bool(claimed_commit_count) != bool(claimed_last_commit_sha256):
             _fail("durable gate commit count/hash are inconsistent")
-        if self._poisoned != bool(self._poison_reason):
+        if claimed_poisoned != bool(claimed_poison_reason):
             _fail("durable gate poison state is inconsistent")
         chain = tuple(initial_chain)
         if any(type(row) is not _LoadedCommit for row in chain):
             _fail("durable gate initial chain is malformed")
-        if len(chain) != self._commit_count:
+        if len(chain) != claimed_commit_count:
             _fail("durable gate initial chain count is inconsistent")
-        if chain:
-            last = chain[-1]
-            if (
-                last.object_ref.sha256 != self._last_commit_sha256
-                or last.commit.event_sequence_through != self._durable_through
-                or last.commit.poisoned != self._poisoned
-                or last.commit.poison_reason != self._poison_reason
-            ):
-                _fail("durable gate initial chain frontier is inconsistent")
-        self._chain = list(chain)
+        self._commit_count = 0
+        self._last_commit_sha256: str | None = None
+        self._durable_through = 0
+        self._poisoned = False
+        self._poison_reason: str | None = None
+        self._chain: list[_LoadedCommit] = []
+        for row in chain:
+            self._advance(row)
+        if (
+            self._commit_count != claimed_commit_count
+            or self._last_commit_sha256 != claimed_last_commit_sha256
+            or self._durable_through != claimed_durable_through
+            or self._poisoned != claimed_poisoned
+            or self._poison_reason != claimed_poison_reason
+        ):
+            _fail("durable gate initial chain frontier is inconsistent")
 
     def snapshot(self) -> CapturedPaperSelectionQueueDurableFrontier:
         with self._lock:
@@ -1751,6 +1757,24 @@ class CapturedPaperSelectionQueueInputPort:
         # object only when its events first cross the consumer frontier.
         self._verified_chain: list[_LoadedCommit] = []
         self._verified_commit_objects: set[str] = set()
+        self._materialized_commit_sha256: str | None = None
+        self._materialized_commit_events: tuple[CaptureEvent, ...] = ()
+
+    def _materialize_commit_events_once(
+        self,
+        loaded: _LoadedCommit,
+    ) -> tuple[CaptureEvent, ...]:
+        digest = loaded.object_ref.sha256
+        with self._lock:
+            if self._materialized_commit_sha256 == digest:
+                return self._materialized_commit_events
+        events = _materialize_commit_events(self.root, loaded)
+        with self._lock:
+            if self._materialized_commit_sha256 == digest:
+                return self._materialized_commit_events
+            self._materialized_commit_sha256 = digest
+            self._materialized_commit_events = events
+            return events
 
     def _acknowledged_chain(
         self,
@@ -1968,7 +1992,7 @@ class CapturedPaperSelectionQueueInputPort:
                     budget_check=budget_check,
                 )
                 _verify_commit_gaps(self.root, loaded)
-                for event in _materialize_commit_events(self.root, loaded):
+                for event in self._materialize_commit_events_once(loaded):
                     if event.sequence <= frontier.last_source_sequence:
                         continue
                     bundle, result = _verify_queue_event(

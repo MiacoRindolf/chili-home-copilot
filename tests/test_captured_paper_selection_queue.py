@@ -1101,6 +1101,80 @@ def test_duplicate_symbol_variant_route_splits_bounded_batches(tmp_path) -> None
     harness.manager.close()
 
 
+def test_partial_commit_materializes_each_payload_once(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    harness = _harness(tmp_path)
+    assert _publish(harness).accepted is True
+    second, _scoring, _events, _selection, _identity = _source_bundle(
+        source_sequence=2
+    )
+    assert _publish(harness, second).accepted is True
+    harness.writer.start()
+    assert harness.writer.close(timeout_seconds=5) is True
+
+    chain = queue_module._load_commit_chain(
+        harness.manager.store.root,
+        identity=harness.queue_identity,
+        selection_authority=harness.selection,
+    )
+    assert len(chain) == 1
+    loaded = chain[0]
+    rows = tuple(
+        row
+        for chunk in loaded.commit.event_chunks
+        for row in queue_module.ContentAddressedCaptureStore.read_chunk_ref(
+            harness.manager.store.root,
+            chunk,
+        )
+    )
+    assert len(rows) == 2
+    payload_refs = {str(row["payload_ref"]) for row in rows}
+    assert len(payload_refs) == 1
+    shared_pack_ref = next(iter(payload_refs))
+    assert shared_pack_ref.startswith("blobs/packs/sha256/")
+
+    root = harness.manager.store.root
+    pack_path = (root / shared_pack_ref).resolve()
+    event_chunk_paths = {
+        (root / chunk.relative_path).resolve()
+        for chunk in loaded.commit.event_chunks
+    }
+    reads = {"event_chunk": 0, "payload_pack": 0}
+    original_read_bytes = Path.read_bytes
+
+    def counted_read_bytes(path):
+        resolved = path.resolve()
+        if resolved in event_chunk_paths:
+            reads["event_chunk"] += 1
+        if resolved == pack_path:
+            reads["payload_pack"] += 1
+        return original_read_bytes(path)
+
+    monkeypatch.setattr(Path, "read_bytes", counted_read_bytes)
+
+    port = _input_port(harness, max_batch_events=10)
+    first = port.read_batch(
+        frontier=_frontier(harness.selection),
+        authority=harness.selection,
+    )
+    assert first is not None and first.source_sequence_through == 1
+    following = port.read_batch(
+        frontier=_frontier(
+            harness.selection,
+            last_source_sequence=1,
+            last_batch_sha256=first.batch_sha256,
+        ),
+        authority=harness.selection,
+    )
+    assert following is not None and following.source_sequence_through == 2
+
+    observed = dict(reads)
+    harness.manager.close()
+    assert observed == {"event_chunk": 1, "payload_pack": 2}
+
+
 def test_coverage_unavailable_event_emits_route_tombstone_not_empty_advance(
     tmp_path,
 ) -> None:
@@ -1632,6 +1706,45 @@ def test_same_port_concurrent_delta_extension_is_serialized(
     assert port.health().poisoned is False
     assert harness.writer.close(timeout_seconds=5) is True
     harness.manager.close()
+
+
+def test_durable_gate_rejects_cumulative_discontinuity_in_initial_chain(
+    tmp_path,
+) -> None:
+    harness = _harness(tmp_path)
+    _publish_one_commit_at_a_time(harness, 2)
+    assert harness.writer.close(timeout_seconds=5) is True
+
+    durable, rows = harness.publisher.durable_gate._snapshot_since(
+        0,
+        max_commit_files=100,
+    )
+    forged_first = queue_module._LoadedCommit(
+        object_ref=rows[0].object_ref,
+        commit=replace(
+            rows[0].commit,
+            cumulative_sha256=_digest("forged-initial-cumulative"),
+        ),
+    )
+    try:
+        with pytest.raises(
+            CapturedPaperSelectionQueueError,
+            match="breaks the verified chain",
+        ):
+            queue_module.CapturedPaperSelectionQueueDurableGate(
+                queue_identity_sha256=harness.queue_identity.identity_sha256,
+                selection_authority_sha256=harness.selection.authority_sha256,
+                expected_account_id=harness.selection.expected_account_id,
+                activation_generation=harness.selection.activation_generation,
+                commit_count=durable.commit_count,
+                last_commit_sha256=durable.last_commit_sha256,
+                durable_through=durable.durable_through,
+                poisoned=durable.poisoned,
+                poison_reason=durable.poison_reason,
+                initial_chain=(forged_first, rows[1]),
+            )
+    finally:
+        harness.manager.close()
 
 
 @pytest.mark.parametrize(
