@@ -4,6 +4,7 @@ from dataclasses import dataclass, replace
 from datetime import datetime, timedelta, timezone
 import hashlib
 from pathlib import Path
+import threading
 import time
 import uuid
 
@@ -23,6 +24,7 @@ from app.services.trading.momentum_neural.captured_paper_selection_queue import 
     CapturedPaperSelectionQueueError,
     CapturedPaperSelectionQueueInputPort,
     CapturedPaperSelectionQueuePublisher,
+    CapturedPaperSelectionQueueReadTimeout,
     CapturedPaperSelectionQueueWriter,
 )
 from app.services.trading.momentum_neural.captured_viability_adapter import (
@@ -431,6 +433,7 @@ def _input_port(
         max_batch_events=limits.get("max_batch_events", 10),
         max_batch_bytes=limits.get("max_batch_bytes", 5_000_000),
         max_read_seconds=limits.get("max_read_seconds", 5.0),
+        max_commit_files=limits.get("max_commit_files", 100_000),
         wall_clock=lambda: harness.now + timedelta(seconds=1),
     )
 
@@ -444,6 +447,21 @@ def _publish(harness: _Harness, bundle=None):
         evaluation_at=selected.read_at,
         source_events=harness.source_events,
     )
+
+
+def _publish_one_commit_at_a_time(harness: _Harness, count: int) -> None:
+    harness.writer.start()
+    for source_sequence in range(1, count + 1):
+        bundle = replace(
+            harness.bundle,
+            source_sequence=source_sequence,
+            correlation_id=f"captured-queue-commit-{source_sequence}",
+        )
+        assert _publish(harness, bundle).accepted is True
+        deadline = time.monotonic() + 5.0
+        while harness.publisher.health().durable_through < source_sequence:
+            assert time.monotonic() < deadline
+            time.sleep(0.005)
 
 
 def test_before_ingress_admission_runs_after_event_cost_and_before_submit(
@@ -1296,16 +1314,13 @@ def test_hash_verified_route_backlog_drains_across_reader_restart(tmp_path) -> N
     _assert_hash_verified_route_backlog_drains(tmp_path, backlog_events=8)
 
 
-def test_reader_reuses_verified_prefix_but_restart_reverifies(
+def test_reader_uses_gate_deltas_and_publisher_restart_reverifies(
     tmp_path,
     monkeypatch,
 ) -> None:
-    """Repeated reads are bounded; a fresh process still verifies all bytes."""
+    """Hot readers consume exact gate deltas; a process restart verifies disk."""
 
     harness = _harness(tmp_path)
-    assert _publish(harness).accepted is True
-    harness.writer.start()
-    assert harness.writer.close(timeout_seconds=5) is True
 
     original_load = queue_module._load_commit_chain
     calls: list[int] = []
@@ -1315,32 +1330,88 @@ def test_reader_reuses_verified_prefix_but_restart_reverifies(
         return original_load(*args, **kwargs)
 
     monkeypatch.setattr(queue_module, "_load_commit_chain", counted_load)
+    assert _publish(harness).accepted is True
+    harness.writer.start()
+    deadline = time.monotonic() + 5.0
+    while harness.publisher.health().durable_through < 1:
+        assert time.monotonic() < deadline
+        time.sleep(0.005)
+
     port = _input_port(harness)
     first = port.read_batch(
         frontier=_frontier(harness.selection),
         authority=harness.selection,
     )
     assert first is not None and first.source_sequence_through == 1
-    assert len(calls) == 1
+    assert calls == []
+
+    next_bundle = replace(
+        harness.bundle,
+        source_sequence=2,
+        correlation_id="captured-queue-gate-delta-2",
+    )
+    assert _publish(harness, next_bundle).accepted is True
+    deadline = time.monotonic() + 5.0
+    while harness.publisher.health().durable_through < 2:
+        assert time.monotonic() < deadline
+        time.sleep(0.005)
+
+    bounded = _input_port(harness, max_commit_files=1)
+    with pytest.raises(
+        CapturedPaperSelectionQueueUnavailable,
+        match="verification failed",
+    ):
+        bounded.read_batch(
+            frontier=_frontier(harness.selection),
+            authority=harness.selection,
+        )
+    assert bounded.health().poisoned is True
 
     advanced = _frontier(
         harness.selection,
         last_source_sequence=1,
         last_batch_sha256=first.batch_sha256,
     )
+    second = port.read_batch(
+        frontier=advanced,
+        authority=harness.selection,
+    )
+    assert second is not None and second.source_sequence_through == 2
+    assert calls == []
+    consumed = _frontier(
+        harness.selection,
+        last_source_sequence=2,
+        last_batch_sha256=second.batch_sha256,
+    )
     for _ in range(25):
         assert port.read_batch(
-            frontier=advanced,
+            frontier=consumed,
             authority=harness.selection,
         ) is None
-    assert len(calls) == 1
+    assert calls == []
 
     restarted = _input_port(harness)
     assert restarted.read_batch(
-        frontier=advanced,
+        frontier=consumed,
         authority=harness.selection,
     ) is None
-    assert len(calls) == 2
+    assert calls == []
+
+    assert harness.writer.close(timeout_seconds=5) is True
+    binding = harness.manager.resource_binding
+    ingress = BoundedCaptureIngress.from_resource_binding(
+        binding,
+        shared_admission_budget=harness.manager.shared_admission_budget,
+    )
+    lease = harness.manager.acquire(harness.queue_identity)
+    restarted_publisher = CapturedPaperSelectionQueuePublisher(
+        writer_lease=lease,
+        ingress=ingress,
+        selection_authority=harness.selection,
+        wall_clock=lambda: harness.now,
+    )
+    assert len(calls) == 1
+    restarted_publisher.writer_lease.release()
     harness.manager.close()
 
 
@@ -1362,4 +1433,293 @@ def test_tampered_commit_fails_closed_without_network_fallback(tmp_path) -> None
             frontier=_frontier(harness.selection), authority=harness.selection
         )
     assert port.network_fallback_allowed is False
+    harness.manager.close()
+
+
+def test_read_budget_timeout_is_transient_and_does_not_poison_health(
+    tmp_path,
+) -> None:
+    harness = _harness(tmp_path)
+    assert _publish(harness).accepted is True
+    harness.writer.start()
+    assert harness.writer.close(timeout_seconds=5) is True
+    ticks = iter((0.0, 1.0))
+    port = CapturedPaperSelectionQueueInputPort(
+        root=harness.manager.store.root,
+        queue_identity=harness.queue_identity,
+        selection_authority=harness.selection,
+        durable_gate=harness.publisher.durable_gate,
+        max_batch_events=10,
+        max_batch_bytes=5_000_000,
+        max_read_seconds=0.5,
+        wall_clock=lambda: harness.now + timedelta(seconds=1),
+        monotonic_clock=lambda: next(ticks),
+    )
+
+    with pytest.raises(
+        CapturedPaperSelectionQueueReadTimeout,
+        match="exceeded bounded time",
+    ):
+        port.read_batch(
+            frontier=_frontier(harness.selection),
+            authority=harness.selection,
+        )
+
+    health = port.health()
+    assert health.poisoned is False
+    assert health.poison_reason is None
+    harness.manager.close()
+
+
+def test_timed_delta_checkpoint_resumes_without_prefix_livelock(tmp_path) -> None:
+    harness = _harness(tmp_path)
+    commit_count = 8
+    _publish_one_commit_at_a_time(harness, commit_count)
+    ticks = iter(index * 0.2 for index in range(1, 10_000))
+    port = CapturedPaperSelectionQueueInputPort(
+        root=harness.manager.store.root,
+        queue_identity=harness.queue_identity,
+        selection_authority=harness.selection,
+        durable_gate=harness.publisher.durable_gate,
+        max_batch_events=10,
+        max_batch_bytes=5_000_000,
+        max_read_seconds=0.5,
+        max_commit_files=100,
+        wall_clock=lambda: harness.now + timedelta(seconds=1),
+        monotonic_clock=lambda: next(ticks),
+    )
+
+    verified_counts: list[int] = []
+    timeout_count = 0
+    for _attempt in range(commit_count + 1):
+        try:
+            port.read_batch(
+                frontier=_frontier(harness.selection),
+                authority=harness.selection,
+            )
+        except CapturedPaperSelectionQueueReadTimeout:
+            timeout_count += 1
+        verified_counts.append(len(port._verified_chain))
+        if verified_counts[-1] == commit_count:
+            break
+
+    assert verified_counts[-1] == commit_count
+    assert timeout_count >= 1
+    assert 0 < verified_counts[0] < commit_count
+    assert len(verified_counts) > 1
+    assert verified_counts == sorted(verified_counts)
+    assert len(set(verified_counts)) == len(verified_counts)
+    port.monotonic_clock = lambda: 100.0
+    batch = port.read_batch(
+        frontier=_frontier(harness.selection),
+        authority=harness.selection,
+    )
+    assert batch is not None and batch.source_sequence_through == 1
+    assert port.health().poisoned is False
+    assert harness.writer.close(timeout_seconds=5) is True
+    harness.manager.close()
+
+
+def test_caught_up_reader_bisects_without_walking_consumed_prefix(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    harness = _harness(tmp_path)
+    commit_count = 32
+    _publish_one_commit_at_a_time(harness, commit_count)
+    port = _input_port(harness)
+    consumed = _frontier(
+        harness.selection,
+        last_source_sequence=commit_count,
+        last_batch_sha256=_digest("already-consumed-batch"),
+    )
+    assert port.read_batch(
+        frontier=consumed,
+        authority=harness.selection,
+    ) is None
+
+    class CountingList(list):
+        def __init__(self, values):
+            super().__init__(values)
+            self.reads = 0
+            self.iterated = 0
+
+        def __getitem__(self, index):
+            self.reads += 1
+            return super().__getitem__(index)
+
+        def __iter__(self):
+            for value in super().__iter__():
+                self.iterated += 1
+                yield value
+
+    counted = CountingList(port._verified_chain)
+    port._verified_chain = counted
+
+    def unexpected_materialization(*_args, **_kwargs):
+        raise AssertionError("caught-up reader materialized a consumed commit")
+
+    monkeypatch.setattr(
+        queue_module,
+        "_materialize_commit_events",
+        unexpected_materialization,
+    )
+    assert port.read_batch(
+        frontier=consumed,
+        authority=harness.selection,
+    ) is None
+    assert counted.reads + counted.iterated < 15
+    assert harness.writer.close(timeout_seconds=5) is True
+    harness.manager.close()
+
+
+def test_same_port_concurrent_delta_extension_is_serialized(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    harness = _harness(tmp_path)
+    _publish_one_commit_at_a_time(harness, 2)
+    port = _input_port(harness)
+    original_snapshot = harness.publisher.durable_gate._snapshot_since
+    active = 0
+    maximum_active = 0
+    counter_lock = threading.Lock()
+
+    def delayed_snapshot(*args, **kwargs):
+        nonlocal active, maximum_active
+        with counter_lock:
+            active += 1
+            maximum_active = max(maximum_active, active)
+        try:
+            time.sleep(0.05)
+            return original_snapshot(*args, **kwargs)
+        finally:
+            with counter_lock:
+                active -= 1
+
+    monkeypatch.setattr(
+        harness.publisher.durable_gate,
+        "_snapshot_since",
+        delayed_snapshot,
+    )
+    start = threading.Barrier(3)
+    results: list[object] = []
+    failures: list[BaseException] = []
+
+    def reader() -> None:
+        start.wait()
+        try:
+            results.append(
+                port.read_batch(
+                    frontier=_frontier(harness.selection),
+                    authority=harness.selection,
+                )
+            )
+        except BaseException as exc:  # pragma: no cover - assertion payload
+            failures.append(exc)
+
+    workers = [threading.Thread(target=reader) for _ in range(2)]
+    for worker in workers:
+        worker.start()
+    start.wait()
+    for worker in workers:
+        worker.join(timeout=5)
+
+    assert not failures
+    assert all(not worker.is_alive() for worker in workers)
+    assert len(results) == 2
+    assert maximum_active == 1
+    assert port.health().poisoned is False
+    assert harness.writer.close(timeout_seconds=5) is True
+    harness.manager.close()
+
+
+@pytest.mark.parametrize(
+    ("binding_field", "foreign_value"),
+    [
+        (
+            "expected_account_id",
+            "cccccccc-cccc-4ccc-8ccc-cccccccccccc",
+        ),
+        (
+            "activation_generation",
+            "dddddddd-dddd-4ddd-8ddd-dddddddddddd",
+        ),
+    ],
+)
+def test_durable_gate_rejects_foreign_account_generation_binding(
+    tmp_path,
+    binding_field,
+    foreign_value,
+) -> None:
+    harness = _harness(tmp_path)
+    _publish_one_commit_at_a_time(harness, 1)
+    durable, rows = harness.publisher.durable_gate._snapshot_since(
+        0,
+        max_commit_files=100,
+    )
+    assert durable.commit_count == 1
+    last = rows[-1]
+    empty_gate = queue_module.CapturedPaperSelectionQueueDurableGate(
+        queue_identity_sha256=harness.queue_identity.identity_sha256,
+        selection_authority_sha256=harness.selection.authority_sha256,
+        expected_account_id=harness.selection.expected_account_id,
+        activation_generation=harness.selection.activation_generation,
+        commit_count=0,
+        last_commit_sha256=None,
+        durable_through=0,
+        poisoned=False,
+        poison_reason=None,
+        initial_chain=(),
+    )
+    empty_snapshot = empty_gate.snapshot()
+    forged = queue_module._LoadedCommit(
+        object_ref=last.object_ref,
+        commit=replace(
+            last.commit,
+            **{binding_field: foreign_value},
+        ),
+    )
+    with pytest.raises(
+        CapturedPaperSelectionQueueError,
+        match="stale or foreign",
+    ):
+        empty_gate._advance(forged)
+    assert empty_gate.snapshot() == empty_snapshot
+    assert harness.writer.close(timeout_seconds=5) is True
+    harness.manager.close()
+
+
+@pytest.mark.parametrize("invalid_tick", [float("nan"), float("inf"), 0.5])
+def test_invalid_or_regressed_read_clock_remains_terminal(
+    tmp_path,
+    invalid_tick,
+) -> None:
+    harness = _harness(tmp_path)
+    ticks = iter((1.0, invalid_tick))
+    port = CapturedPaperSelectionQueueInputPort(
+        root=harness.manager.store.root,
+        queue_identity=harness.queue_identity,
+        selection_authority=harness.selection,
+        durable_gate=harness.publisher.durable_gate,
+        max_batch_events=10,
+        max_batch_bytes=5_000_000,
+        max_read_seconds=0.5,
+        wall_clock=lambda: harness.now + timedelta(seconds=1),
+        monotonic_clock=lambda: next(ticks),
+    )
+
+    with pytest.raises(
+        CapturedPaperSelectionQueueUnavailable,
+        match="verification failed",
+    ):
+        port.read_batch(
+            frontier=_frontier(harness.selection),
+            authority=harness.selection,
+        )
+
+    health = port.health()
+    assert health.poisoned is True
+    assert "monotonic clock" in str(health.poison_reason)
+    harness.publisher.writer_lease.release()
     harness.manager.close()

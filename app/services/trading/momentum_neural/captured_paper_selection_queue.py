@@ -13,6 +13,7 @@ any committed gap or fork poisons the exact activation generation.
 
 from __future__ import annotations
 
+from bisect import bisect_right
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 import hashlib
@@ -29,6 +30,7 @@ from .captured_paper_selection_producer import (
     CapturedPaperSelectionBatch,
     CapturedPaperSelectionFrontierReceipt,
     CapturedPaperSelectionObservation,
+    CapturedPaperSelectionQueueReadTimeout,
     CapturedPaperSelectionQueueUnavailable,
     CapturedPaperSelectionRouteStateUpdate,
     ROUTE_COVERAGE_UNAVAILABLE,
@@ -399,11 +401,14 @@ class CapturedPaperSelectionQueueDurableGate:
         *,
         queue_identity_sha256: str,
         selection_authority_sha256: str,
+        expected_account_id: str,
+        activation_generation: str,
         commit_count: int,
         last_commit_sha256: str | None,
         durable_through: int,
         poisoned: bool,
         poison_reason: str | None,
+        initial_chain: Sequence["_LoadedCommit"],
     ) -> None:
         self._queue_identity_sha256 = _sha(
             queue_identity_sha256, "durable gate queue identity"
@@ -411,6 +416,17 @@ class CapturedPaperSelectionQueueDurableGate:
         self._selection_authority_sha256 = _sha(
             selection_authority_sha256, "durable gate selection authority"
         )
+        if (
+            not isinstance(expected_account_id, str)
+            or not expected_account_id.strip()
+            or expected_account_id != expected_account_id.strip()
+            or not isinstance(activation_generation, str)
+            or not activation_generation.strip()
+            or activation_generation != activation_generation.strip()
+        ):
+            _fail("durable gate account/generation binding is malformed")
+        self._expected_account_id = expected_account_id
+        self._activation_generation = activation_generation
         self._lock = threading.RLock()
         self._commit_count = _positive_int(
             commit_count, "durable gate commit count", allow_zero=True
@@ -433,18 +449,61 @@ class CapturedPaperSelectionQueueDurableGate:
             _fail("durable gate commit count/hash are inconsistent")
         if self._poisoned != bool(self._poison_reason):
             _fail("durable gate poison state is inconsistent")
+        chain = tuple(initial_chain)
+        if any(type(row) is not _LoadedCommit for row in chain):
+            _fail("durable gate initial chain is malformed")
+        if len(chain) != self._commit_count:
+            _fail("durable gate initial chain count is inconsistent")
+        if chain:
+            last = chain[-1]
+            if (
+                last.object_ref.sha256 != self._last_commit_sha256
+                or last.commit.event_sequence_through != self._durable_through
+                or last.commit.poisoned != self._poisoned
+                or last.commit.poison_reason != self._poison_reason
+            ):
+                _fail("durable gate initial chain frontier is inconsistent")
+        self._chain = list(chain)
 
     def snapshot(self) -> CapturedPaperSelectionQueueDurableFrontier:
         with self._lock:
-            return CapturedPaperSelectionQueueDurableFrontier(
-                queue_identity_sha256=self._queue_identity_sha256,
-                selection_authority_sha256=self._selection_authority_sha256,
-                commit_count=self._commit_count,
-                last_commit_sha256=self._last_commit_sha256,
-                durable_through=self._durable_through,
-                poisoned=self._poisoned,
-                poison_reason=self._poison_reason,
+            return self._snapshot_locked()
+
+    def _snapshot_locked(self) -> CapturedPaperSelectionQueueDurableFrontier:
+        return CapturedPaperSelectionQueueDurableFrontier(
+            queue_identity_sha256=self._queue_identity_sha256,
+            selection_authority_sha256=self._selection_authority_sha256,
+            commit_count=self._commit_count,
+            last_commit_sha256=self._last_commit_sha256,
+            durable_through=self._durable_through,
+            poisoned=self._poisoned,
+            poison_reason=self._poison_reason,
+        )
+
+    def _snapshot_since(
+        self,
+        commit_count: int,
+        *,
+        max_commit_files: int,
+    ) -> tuple[
+        CapturedPaperSelectionQueueDurableFrontier,
+        tuple["_LoadedCommit", ...],
+    ]:
+        with self._lock:
+            count = _positive_int(
+                commit_count,
+                "durable gate reader commit count",
+                allow_zero=True,
             )
+            maximum = _positive_int(
+                max_commit_files,
+                "durable gate reader maximum commit files",
+            )
+            if count > self._commit_count:
+                _fail("durable gate reader commit count is ahead")
+            if self._commit_count > maximum:
+                _fail("queue commit inventory exceeds bounded scan limit")
+            return self._snapshot_locked(), tuple(self._chain[count:])
 
     def _advance(self, loaded: "_LoadedCommit") -> None:
         if type(loaded) is not _LoadedCommit:
@@ -455,11 +514,44 @@ class CapturedPaperSelectionQueueDurableGate:
                 commit.queue_identity_sha256 != self._queue_identity_sha256
                 or commit.selection_authority_sha256
                 != self._selection_authority_sha256
+                or commit.expected_account_id
+                != self._expected_account_id
+                or commit.activation_generation
+                != self._activation_generation
                 or commit.commit_index != self._commit_count + 1
                 or commit.event_sequence_from_exclusive != self._durable_through
                 or commit.previous_commit_sha256 != self._last_commit_sha256
             ):
                 _fail("durable gate acknowledgement is stale or foreign")
+            prior = self._chain[-1] if self._chain else None
+            if (
+                commit.cumulative_sha256
+                != _expected_cumulative(
+                    (
+                        prior.commit.cumulative_sha256
+                        if prior is not None
+                        else None
+                    ),
+                    commit_index=commit.commit_index,
+                    event_refs=commit.event_refs,
+                    gaps=commit.gaps,
+                )
+                or (
+                    prior is not None
+                    and (
+                        commit.resource_binding_sha256
+                        != prior.commit.resource_binding_sha256
+                        or commit.storage_policy_sha256
+                        != prior.commit.storage_policy_sha256
+                    )
+                )
+                or (
+                    self._poisoned
+                    and (commit.event_refs or not commit.poisoned)
+                )
+            ):
+                _fail("durable gate acknowledgement breaks the verified chain")
+            self._chain.append(loaded)
             self._commit_count = commit.commit_index
             self._last_commit_sha256 = loaded.object_ref.sha256
             self._durable_through = commit.event_sequence_through
@@ -908,11 +1000,14 @@ class CapturedPaperSelectionQueuePublisher:
         self._durable_gate = CapturedPaperSelectionQueueDurableGate(
             queue_identity_sha256=self.identity.identity_sha256,
             selection_authority_sha256=self.selection_authority.authority_sha256,
+            expected_account_id=self.selection_authority.expected_account_id,
+            activation_generation=self.selection_authority.activation_generation,
             commit_count=self._commit_count,
             last_commit_sha256=self._last_commit_sha256,
             durable_through=self._durable_through,
             poisoned=self._poisoned,
             poison_reason=self._poison_reason,
+            initial_chain=chain,
         )
 
     @property
@@ -1650,60 +1745,105 @@ class CapturedPaperSelectionQueueInputPort:
         self._durable_watermark_at: datetime | None = None
         self._last_read_at: datetime | None = None
         self._last_error: str | None = None
-        # Frontier events are immutable content-addressed objects.  Reuse an
-        # exact fsync-acknowledged prefix while this reader lives; a new reader
-        # (including every process restart) performs full byte verification.
-        self._verified_chain: tuple[_LoadedCommit, ...] = ()
+        # The publisher verifies the sealed chain once at process startup and
+        # the durable gate appends each exact post-fsync commit token.  Readers
+        # reuse that immutable prefix and independently verify each commit
+        # object only when its events first cross the consumer frontier.
+        self._verified_chain: list[_LoadedCommit] = []
+        self._verified_commit_objects: set[str] = set()
 
     def _acknowledged_chain(
         self,
         *,
         durable: CapturedPaperSelectionQueueDurableFrontier,
+        gate_delta: tuple[_LoadedCommit, ...],
         budget_check: Callable[[], None],
-    ) -> tuple[_LoadedCommit, ...]:
+    ) -> list[_LoadedCommit]:
         with self._lock:
             cached = self._verified_chain
-        if durable.commit_count < len(cached):
-            _fail("queue durable acknowledgement moved backwards")
-        if durable.commit_count == len(cached):
-            cached_hash = cached[-1].object_ref.sha256 if cached else None
-            cached_through = (
+            cached_count = len(cached)
+            if durable.commit_count < cached_count:
+                _fail("queue durable acknowledgement moved backwards")
+            if durable.commit_count > self.max_commit_files:
+                _fail("queue commit inventory exceeds bounded scan limit")
+            if len(gate_delta) != durable.commit_count - cached_count:
+                _fail("queue durable acknowledgement delta is inconsistent")
+            if durable.commit_count == cached_count:
+                cached_hash = cached[-1].object_ref.sha256 if cached else None
+                cached_through = (
+                    cached[-1].commit.event_sequence_through if cached else 0
+                )
+                if (
+                    gate_delta
+                    or cached_hash != durable.last_commit_sha256
+                    or cached_through != durable.durable_through
+                ):
+                    _fail("cached queue prefix differs from durable acknowledgement")
+                return cached
+
+            prior_object = cached[-1].object_ref.sha256 if cached else None
+            prior_through = (
                 cached[-1].commit.event_sequence_through if cached else 0
             )
+            for offset, row in enumerate(gate_delta, start=1):
+                budget_check()
+                commit = row.commit
+                if (
+                    type(row) is not _LoadedCommit
+                    or commit.commit_index != cached_count + offset
+                    or commit.previous_commit_sha256 != prior_object
+                    or commit.event_sequence_from_exclusive != prior_through
+                    or commit.queue_identity_sha256
+                    != self.queue_identity.identity_sha256
+                    or commit.selection_authority_sha256
+                    != self.selection_authority.authority_sha256
+                    or commit.expected_account_id
+                    != self.selection_authority.expected_account_id
+                    or commit.activation_generation
+                    != self.selection_authority.activation_generation
+                ):
+                    _fail("queue durable acknowledgement delta is invalid")
+                prior_object = row.object_ref.sha256
+                prior_through = commit.event_sequence_through
+                # Checkpoint each fully validated immutable token so a bounded
+                # timeout resumes at the next delta instead of rescanning the
+                # same long startup prefix forever.
+                cached.append(row)
             if (
-                cached_hash != durable.last_commit_sha256
-                or cached_through != durable.durable_through
+                prior_object != durable.last_commit_sha256
+                or prior_through != durable.durable_through
             ):
-                _fail("cached queue prefix differs from durable acknowledgement")
+                _fail("queue durable acknowledgement hash/frontier mismatch")
             return cached
 
-        chain = _load_commit_chain(
-            self.root,
-            identity=self.queue_identity,
-            selection_authority=self.selection_authority,
-            max_commit_files=self.max_commit_files,
-            budget_check=budget_check,
-        )
-        if durable.commit_count > len(chain):
-            _fail("queue durable acknowledgement exceeds committed chain")
-        acknowledged = chain[: durable.commit_count]
-        if not acknowledged:
-            _fail("non-empty durable acknowledgement has no committed chain")
-        last = acknowledged[-1]
-        if (
-            last.object_ref.sha256 != durable.last_commit_sha256
-            or last.commit.event_sequence_through != durable.durable_through
-        ):
-            _fail("queue durable acknowledgement hash/frontier mismatch")
-        # The already-cached prefix must be byte-for-byte the same chain.  This
-        # protects against accepting a replacement/fork when the gate advances.
-        if tuple(
-            row.object_ref.sha256 for row in acknowledged[: len(cached)]
-        ) != tuple(row.object_ref.sha256 for row in cached):
-            _fail("queue immutable verified prefix changed")
+    def _verify_commit_object_once(
+        self,
+        loaded: _LoadedCommit,
+        *,
+        budget_check: Callable[[], None],
+    ) -> None:
+        digest = loaded.object_ref.sha256
         with self._lock:
-            self._verified_chain = acknowledged
-        return acknowledged
+            if digest in self._verified_commit_objects:
+                return
+        budget_check()
+        verified = ContentAddressedCaptureStore.read_derived_ref(
+            self.root,
+            loaded.object_ref,
+        )
+        if (
+            verified.get("schema_version")
+            != CAPTURE_DERIVED_ARTIFACT_SCHEMA_VERSION
+            or verified.get("identity") != self.queue_identity.to_dict()
+            or verified.get("kind") != QUEUE_DERIVED_KIND
+            or _mapping(verified.get("payload"), "queue commit payload")
+            != loaded.commit.body()
+            or sha256_json(_mapping(verified.get("payload"), "queue commit payload"))
+            != verified.get("payload_sha256")
+        ):
+            _fail("derived queue commit differs from acknowledged content")
+        with self._lock:
+            self._verified_commit_objects.add(digest)
 
     def read_batch(
         self,
@@ -1745,43 +1885,65 @@ class CapturedPaperSelectionQueueInputPort:
             started = float(self.monotonic_clock())
             if not math.isfinite(started):
                 _fail("queue reader monotonic clock returned a non-finite value")
-            durable = self.durable_gate.snapshot()
+
+            def read_budget_exceeded() -> bool:
+                current = float(self.monotonic_clock())
+                if not math.isfinite(current) or current < started:
+                    _fail("queue reader monotonic clock regressed or is non-finite")
+                return current - started > self.max_read_seconds
 
             def budget_check() -> None:
-                current = float(self.monotonic_clock())
-                if (
-                    not math.isfinite(current)
-                    or current < started
-                    or current - started > self.max_read_seconds
-                ):
-                    raise CapturedPaperSelectionQueueUnavailable(
+                if read_budget_exceeded():
+                    raise CapturedPaperSelectionQueueReadTimeout(
                         "queue committed-chain read exceeded bounded time"
                     )
 
-            if (
-                durable.queue_identity_sha256
-                != self.queue_identity.identity_sha256
-                or durable.selection_authority_sha256
-                != self.selection_authority.authority_sha256
-            ):
-                _fail("queue durable acknowledgement gate is inconsistent")
-            if not durable.commit_count and (
-                durable.last_commit_sha256 is not None or durable.durable_through
-            ):
-                _fail("empty queue durable acknowledgement is inconsistent")
-            chain = self._acknowledged_chain(
-                durable=durable,
-                budget_check=budget_check,
-            )
+            # Snapshot and extend the per-port verified prefix atomically.
+            # Concurrent reads may share the immutable list after this point,
+            # but cannot request overlapping stale deltas and poison the port.
+            with self._lock:
+                verified_commit_count = len(self._verified_chain)
+                durable, gate_delta = self.durable_gate._snapshot_since(
+                    verified_commit_count,
+                    max_commit_files=self.max_commit_files,
+                )
+                if (
+                    durable.queue_identity_sha256
+                    != self.queue_identity.identity_sha256
+                    or durable.selection_authority_sha256
+                    != self.selection_authority.authority_sha256
+                ):
+                    _fail("queue durable acknowledgement gate is inconsistent")
+                if not durable.commit_count and (
+                    durable.last_commit_sha256 is not None
+                    or durable.durable_through
+                ):
+                    _fail("empty queue durable acknowledgement is inconsistent")
+                budget_check()
+                chain = self._acknowledged_chain(
+                    durable=durable,
+                    gate_delta=gate_delta,
+                    budget_check=budget_check,
+                )
+            chain_count = durable.commit_count
             if durable.poisoned:
-                if not chain or not chain[-1].commit.poisoned:
+                if (
+                    not chain_count
+                    or not chain[chain_count - 1].commit.poisoned
+                ):
                     _fail("queue durable poison acknowledgement is inconsistent")
-                _verify_commit_gaps(self.root, chain[-1])
+                self._verify_commit_object_once(
+                    chain[chain_count - 1],
+                    budget_check=budget_check,
+                )
+                _verify_commit_gaps(self.root, chain[chain_count - 1])
                 raise CapturedPaperSelectionQueueUnavailable(
                     f"queue generation poisoned: {durable.poison_reason}"
                 )
             committed_through = (
-                chain[-1].commit.event_sequence_through if chain else 0
+                chain[chain_count - 1].commit.event_sequence_through
+                if chain_count
+                else 0
             )
             if frontier.last_source_sequence > committed_through:
                 _fail("consumer frontier is ahead of durable queue frontier")
@@ -1793,13 +1955,19 @@ class CapturedPaperSelectionQueueInputPort:
             routes: set[tuple[str, int]] = set()
             used_bytes = 0
             bounded_stop = False
-            for loaded in chain:
+            first_unread_commit = bisect_right(
+                chain,
+                frontier.last_source_sequence,
+                hi=chain_count,
+                key=lambda row: row.commit.event_sequence_through,
+            )
+            for commit_offset in range(first_unread_commit, chain_count):
+                loaded = chain[commit_offset]
+                self._verify_commit_object_once(
+                    loaded,
+                    budget_check=budget_check,
+                )
                 _verify_commit_gaps(self.root, loaded)
-                if (
-                    loaded.commit.event_sequence_through
-                    <= frontier.last_source_sequence
-                ):
-                    continue
                 for event in _materialize_commit_events(self.root, loaded):
                     if event.sequence <= frontier.last_source_sequence:
                         continue
@@ -1857,25 +2025,29 @@ class CapturedPaperSelectionQueueInputPort:
                             reason_codes=result.reasons,
                         )
                     )
-                    if float(self.monotonic_clock()) - started > self.max_read_seconds:
+                    if read_budget_exceeded():
                         bounded_stop = True
                         break
                 if bounded_stop:
                     break
-                if float(self.monotonic_clock()) - started > self.max_read_seconds:
+                if read_budget_exceeded():
                     if not selected:
-                        raise CapturedPaperSelectionQueueUnavailable(
+                        raise CapturedPaperSelectionQueueReadTimeout(
                             "queue committed-chain read exceeded bounded time"
                         )
                     break
             with self._lock:
                 self._last_committed_sequence = committed_through
-                self._commit_count = len(chain)
+                self._commit_count = chain_count
                 self._last_commit_sha256 = (
-                    chain[-1].object_ref.sha256 if chain else None
+                    chain[chain_count - 1].object_ref.sha256
+                    if chain_count
+                    else None
                 )
                 self._durable_watermark_at = (
-                    chain[-1].commit.watermark_at if chain else None
+                    chain[chain_count - 1].commit.watermark_at
+                    if chain_count
+                    else None
                 )
             if not selected:
                 with self._lock:
@@ -1931,6 +2103,8 @@ class CapturedPaperSelectionQueueInputPort:
                 self._last_read_at = read_at
                 self._last_error = None
             return batch
+        except CapturedPaperSelectionQueueReadTimeout:
+            raise
         except CapturedPaperSelectionQueueUnavailable:
             with self._lock:
                 self._last_error = "queue_unavailable"
@@ -1989,6 +2163,7 @@ __all__ = [
     "CapturedPaperSelectionQueuePoisonReceipt",
     "CapturedPaperSelectionQueuePublishReceipt",
     "CapturedPaperSelectionQueuePublisher",
+    "CapturedPaperSelectionQueueReadTimeout",
     "CapturedPaperSelectionQueueWriter",
     "QUEUE_DERIVED_KIND",
     "QUEUE_EVENT_SCHEMA_VERSION",

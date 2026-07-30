@@ -36,6 +36,7 @@ from .captured_paper_initial_provider import (
 )
 from .captured_paper_selection_producer import (
     CapturedPaperSelectionAuthority,
+    CapturedPaperSelectionQueueReadTimeout,
 )
 from .captured_paper_selection_source import (
     CapturedPaperSelectionSourceUnavailable,
@@ -62,6 +63,15 @@ def _is_transient_selection_database_error(exc: BaseException) -> bool:
     return isinstance(exc, (OperationalError, SqlAlchemyTimeoutError)) or (
         isinstance(exc, DBAPIError) and bool(exc.connection_invalidated)
     )
+
+
+def _is_transient_selection_producer_error(exc: BaseException) -> bool:
+    """Return true only for typed, pre-commit availability failures."""
+
+    return isinstance(
+        exc,
+        CapturedPaperSelectionQueueReadTimeout,
+    ) or _is_transient_selection_database_error(exc)
 
 
 class CapturedPaperSelectionRuntimeError(RuntimeError):
@@ -721,6 +731,7 @@ class CapturedPaperSelectionLifecycleWorker:
         self._last_durable_sequence = 0
         self._producer_frontier_timeout_cycles = 0
         self._producer_database_unavailable_cycles = 0
+        self._producer_queue_read_timeout_cycles = 0
         self._producer_frontier_recovery_pending = False
         self._last_frontier_sequence = 0
         self._last_frontier_status: str | None = None
@@ -1609,7 +1620,7 @@ class CapturedPaperSelectionLifecycleWorker:
             try:
                 result = components.producer.tick()
             except BaseException as exc:
-                if not _is_transient_selection_database_error(exc):
+                if not _is_transient_selection_producer_error(exc):
                     raise
                 reader_health = self.deferred_reader.health()
                 if (
@@ -1622,7 +1633,13 @@ class CapturedPaperSelectionLifecycleWorker:
                         "selection_producer_frontier_pending"
                     )
                 with self._state_lock:
-                    self._producer_database_unavailable_cycles += 1
+                    if isinstance(
+                        exc,
+                        CapturedPaperSelectionQueueReadTimeout,
+                    ):
+                        self._producer_queue_read_timeout_cycles += 1
+                    else:
+                        self._producer_database_unavailable_cycles += 1
                 now = float(self.monotonic_clock())
                 if not math.isfinite(now):
                     _reject(
@@ -1637,7 +1654,7 @@ class CapturedPaperSelectionLifecycleWorker:
                 if now >= deadline:
                     _reject(
                         "PRODUCER_FRONTIER_TIMEOUT",
-                        "selection producer database remained unavailable",
+                        "selection producer remained transiently unavailable",
                     )
                 if self._stop_event.wait(
                     min(0.01, max(0.0, deadline - now))
@@ -2557,6 +2574,9 @@ class CapturedPaperSelectionLifecycleWorker:
                 ),
                 "producer_database_unavailable_cycles": (
                     self._producer_database_unavailable_cycles
+                ),
+                "producer_queue_read_timeout_cycles": (
+                    self._producer_queue_read_timeout_cycles
                 ),
                 "producer_frontier_recovery_pending": (
                     self._producer_frontier_recovery_pending

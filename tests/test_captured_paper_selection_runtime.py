@@ -18,6 +18,7 @@ from app.services.trading.momentum_neural.captured_paper_initial_provider import
 )
 from app.services.trading.momentum_neural.captured_paper_selection_producer import (
     CapturedPaperSelectionAuthority,
+    CapturedPaperSelectionQueueReadTimeout,
     CapturedPaperSelectionVariantBinding,
 )
 from app.services.trading.momentum_neural.captured_paper_selection_runtime import (
@@ -2134,11 +2135,15 @@ def test_periodic_transient_producer_database_failure_suspends_then_recovers(
     def transient_then_ready() -> SimpleNamespace:
         nonlocal attempts
         attempts += 1
-        if attempts in {1, 3}:
+        if attempts == 1:
             raise OperationalError(
                 "SELECT captured_paper_selection_frontier",
                 {},
                 TimeoutError("statement timeout"),
+            )
+        if attempts == 3:
+            raise CapturedPaperSelectionQueueReadTimeout(
+                "bounded local queue read"
             )
         if attempts == 2:
             reader_health = harness.reader.health()
@@ -2179,7 +2184,8 @@ def test_periodic_transient_producer_database_failure_suspends_then_recovers(
         assert source_suspended["running"] is True
         assert source_suspended["fatal"] is False
         assert source_suspended["ready"] is False
-        assert source_suspended["producer_database_unavailable_cycles"] == 2
+        assert source_suspended["producer_database_unavailable_cycles"] == 1
+        assert source_suspended["producer_queue_read_timeout_cycles"] == 1
         assert source_suspended["producer_frontier_recovery_pending"] is False
         assert source_suspended["candidate_reader"]["suspended"] is True
         assert source_suspended["candidate_reader"]["suspend_reason"] == (
