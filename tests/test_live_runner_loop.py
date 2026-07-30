@@ -2267,6 +2267,359 @@ def test_captured_paper_listener_is_not_ready_during_reconnect_gap(monkeypatch):
     assert loop._notify_failed_generation == 1
 
 
+def test_captured_paper_listener_coalesces_burst_to_latest_payload_per_symbol(
+    monkeypatch,
+):
+    scope = loop_mod.CapturedPaperLiveRunnerScope(
+        expected_account_id=_CAPTURED_PAPER_ACCOUNT_ID,
+        runtime_generation=_CAPTURED_PAPER_GENERATION,
+        broker_connection_generation=_CAPTURED_PAPER_CONNECTION_GENERATION,
+    )
+    loop = LiveRunnerLoop(
+        captured_paper_scope=scope,
+        captured_paper_symbol_admitter=lambda **_kwargs: {"ok": True},
+    )
+    monkeypatch.setattr(
+        loop_mod.settings,
+        "chili_momentum_live_runner_loop_iqfeed_notify_channel",
+        "momentum_iqfeed_l1",
+    )
+    monkeypatch.setattr(
+        loop_mod.settings,
+        "chili_iqfeed_l1_authoritative_bridge_build",
+        _IQFEED_PIN,
+        raising=False,
+    )
+    monkeypatch.setenv("IQFEED_NOTIFY_ENABLED", "1")
+    monkeypatch.setenv("IQFEED_NOTIFY_CHANNEL", "momentum_iqfeed_l1")
+    authority_now = datetime(2026, 7, 30, 9, 0, 1, tzinfo=timezone.utc)
+    event_base = authority_now - timedelta(seconds=1)
+    monkeypatch.setattr(loop_mod, "_utcnow", lambda: authority_now)
+
+    class _Cursor:
+        def execute(self, _sql):
+            return None
+
+    def _notification(symbol, sequence, **overrides):
+        event_at = event_base + timedelta(milliseconds=sequence)
+        payload_overrides = {
+            "symbol": symbol,
+            "source_frame_sequence": sequence,
+            "source_frame_sha256": f"{sequence:064x}",
+            "available_at": (
+                event_at - timedelta(milliseconds=50)
+            ).isoformat(),
+            "connection_generation": 3,
+        }
+        payload_overrides.update(overrides)
+        return SimpleNamespace(
+            channel="momentum_iqfeed_l1",
+            payload=_iqfeed_payload(event_at, **payload_overrides),
+        )
+
+    notifications = []
+    for sequence in range(1, 51):
+        for symbol in ("BURSTA", "BURSTB"):
+            notifications.append(_notification(symbol, sequence))
+    assert (
+        loop._coalesce_captured_paper_iqfeed_notifications(
+            [
+                SimpleNamespace(
+                    channel="momentum_iqfeed_l1",
+                    payload=json.dumps({"symbol": "BURSTA"}),
+                )
+            ]
+        )
+        == []
+    )
+    # Neither a lower-generation nor a foreign-build same-symbol hint may
+    # replace the already pending authoritative generation.
+    dual_run_r = "32553525-2da8-4b22-a69f-d3034871e90c"
+    dual_run_s = "42553525-2da8-4b22-a69f-d3034871e90c"
+    stale_run_r = "52553525-2da8-4b22-a69f-d3034871e90c"
+    eligible_run_s = "62553525-2da8-4b22-a69f-d3034871e90c"
+    dual_candidates = [
+        _notification(
+            "DUAL",
+            60,
+            bridge_run_id=dual_run_r,
+            connection_generation=2,
+        ),
+        _notification(
+            "DUAL",
+            61,
+            bridge_run_id=dual_run_s,
+            connection_generation=1,
+        ),
+        _notification(
+            "DUAL",
+            62,
+            bridge_run_id=dual_run_r,
+            connection_generation=1,
+        ),
+    ]
+    notifications.extend(
+        [
+            _notification("BURSTA", 51, connection_generation=2),
+            _notification(
+                "BURSTB",
+                51,
+                bridge_version=(
+                    "iqfeed-l1-exact-print-provenance-v3+sha256:foreign"
+                ),
+            ),
+            SimpleNamespace(
+                channel="momentum_iqfeed_l1",
+                payload=json.dumps({"symbol": "BURSTB"}),
+            ),
+            _notification(
+                "BURSTB",
+                52,
+                available_at=(
+                    authority_now + timedelta(seconds=2)
+                ).isoformat(),
+            ),
+            *dual_candidates,
+            _notification(
+                "CROSS",
+                70,
+                bridge_run_id=stale_run_r,
+                connection_generation=2,
+            ),
+            _notification(
+                "CROSS",
+                71,
+                bridge_run_id=eligible_run_s,
+                connection_generation=1,
+            ),
+            _notification(
+                "CROSS",
+                72,
+                bridge_run_id=stale_run_r,
+                connection_generation=1,
+            ),
+        ]
+    )
+    for candidates in (dual_candidates, list(reversed(dual_candidates))):
+        selected = loop._coalesce_captured_paper_iqfeed_notifications(
+            candidates
+        )
+        assert [
+            (
+                json.loads(item.payload)["bridge_run_id"],
+                json.loads(item.payload)["source_frame_sequence"],
+            )
+            for item in selected
+        ] == [(dual_run_s, 61)]
+    loop._iqfeed_generation_watermarks[stale_run_r] = 3
+
+    class _Connection:
+        def __init__(self):
+            self.notifies = list(notifications)
+
+        def set_session(self, **_kwargs):
+            return None
+
+        def cursor(self):
+            return _Cursor()
+
+        def poll(self):
+            return None
+
+        def close(self):
+            return None
+
+    connection = _Connection()
+    monkeypatch.setitem(
+        __import__("sys").modules,
+        "psycopg2",
+        SimpleNamespace(connect=lambda _url: connection),
+    )
+
+    handled = []
+    monkeypatch.setattr(
+        loop,
+        "_handle_iqfeed_notify_payload",
+        lambda payload, *, generation: handled.append(
+            (
+                generation,
+                json.loads(payload)["symbol"],
+                json.loads(payload)["source_frame_sequence"],
+                json.loads(payload)["connection_generation"],
+                json.loads(payload)["bridge_run_id"],
+            )
+        )
+        or False,
+    )
+    loop._running = True
+    loop._generation = 1
+    stop_event = loop_mod.threading.Event()
+    loop._stop_event = stop_event
+    loop._notify_thread_generation = 1
+    loop._notify_startup_event = loop_mod.threading.Event()
+    loop._notify_thread = loop_mod.threading.current_thread()
+    select_calls = {"count": 0}
+
+    def _one_burst_then_quiesce(_read, _write, _errors, _timeout):
+        if _timeout == 0.0:
+            return [], [], []
+        select_calls["count"] += 1
+        if select_calls["count"] == 1:
+            return [connection], [], []
+        loop._running = False
+        return [], [], []
+
+    monkeypatch.setattr(loop_mod.select, "select", _one_burst_then_quiesce)
+
+    loop._iqfeed_notify_loop(1, stop_event)
+
+    assert handled == [
+        (1, "BURSTA", 50, 3, _IQFEED_RUN_ID),
+        (1, "BURSTB", 50, 3, _IQFEED_RUN_ID),
+        (1, "DUAL", 61, 1, dual_run_s),
+        (1, "CROSS", 71, 1, eligible_run_s),
+    ]
+
+
+def test_captured_paper_listener_drains_socket_between_admission_hints(monkeypatch):
+    scope = loop_mod.CapturedPaperLiveRunnerScope(
+        expected_account_id=_CAPTURED_PAPER_ACCOUNT_ID,
+        runtime_generation=_CAPTURED_PAPER_GENERATION,
+        broker_connection_generation=_CAPTURED_PAPER_CONNECTION_GENERATION,
+    )
+    loop = LiveRunnerLoop(
+        captured_paper_scope=scope,
+        captured_paper_symbol_admitter=lambda **_kwargs: {"ok": True},
+    )
+    monkeypatch.setattr(
+        loop_mod.settings,
+        "chili_momentum_live_runner_loop_iqfeed_notify_channel",
+        "momentum_iqfeed_l1",
+    )
+    monkeypatch.setattr(
+        loop_mod.settings,
+        "chili_iqfeed_l1_authoritative_bridge_build",
+        _IQFEED_PIN,
+        raising=False,
+    )
+    monkeypatch.setenv("IQFEED_NOTIFY_ENABLED", "1")
+    monkeypatch.setenv("IQFEED_NOTIFY_CHANNEL", "momentum_iqfeed_l1")
+    authority_now = datetime(2026, 7, 30, 9, 0, 1, tzinfo=timezone.utc)
+    event_base = authority_now - timedelta(seconds=1)
+    monkeypatch.setattr(loop_mod, "_utcnow", lambda: authority_now)
+
+    def _notification(symbol, sequence):
+        event_at = event_base + timedelta(milliseconds=sequence)
+        return SimpleNamespace(
+            channel="momentum_iqfeed_l1",
+            payload=_iqfeed_payload(
+                event_at,
+                symbol=symbol,
+                source_frame_sequence=sequence,
+                source_frame_sha256=f"{sequence:064x}",
+                available_at=(
+                    event_at - timedelta(milliseconds=50)
+                ).isoformat(),
+            ),
+        )
+
+    class _Cursor:
+        def execute(self, _sql):
+            return None
+
+    class _Connection:
+        def __init__(self):
+            self.notifies = [
+                _notification("BURSTA", 1),
+                _notification("BURSTB", 1),
+            ]
+            self.poll_calls = 0
+            self.readable = False
+
+        def set_session(self, **_kwargs):
+            return None
+
+        def cursor(self):
+            return _Cursor()
+
+        def poll(self):
+            assert self.readable, "listener polled a blocking socket"
+            self.readable = False
+            self.poll_calls += 1
+            if 2 <= self.poll_calls <= 5:
+                sequence = self.poll_calls
+                self.notifies.extend(
+                    [
+                        _notification("BURSTA", sequence),
+                        _notification("BURSTB", sequence),
+                    ]
+                )
+
+        def close(self):
+            return None
+
+    connection = _Connection()
+    monkeypatch.setitem(
+        __import__("sys").modules,
+        "psycopg2",
+        SimpleNamespace(connect=lambda _url: connection),
+    )
+
+    handled_session_ids = []
+    loop._tracker.get_sessions_for_symbol = lambda symbol: [  # type: ignore
+        {"session_id": 101 if symbol == "BURSTA" else 202}
+    ]
+    monkeypatch.setattr(
+        loop,
+        "_dispatch",
+        lambda session_id, *, expected_generation: (
+            handled_session_ids.append((expected_generation, session_id))
+            or True
+        ),
+    )
+    loop._running = True
+    loop._generation = 1
+    stop_event = loop_mod.threading.Event()
+    loop._stop_event = stop_event
+    loop._notify_thread_generation = 1
+    loop._notify_startup_event = loop_mod.threading.Event()
+    loop._notify_thread = loop_mod.threading.current_thread()
+    blocking_select_calls = {"count": 0}
+    immediate_select_calls = {"count": 0}
+
+    def _one_ready_socket_then_quiesce(_read, _write, _errors, _timeout):
+        if _timeout == 0.0:
+            immediate_select_calls["count"] += 1
+            if immediate_select_calls["count"] <= 4:
+                connection.readable = True
+                return [connection], [], []
+            return [], [], []
+        blocking_select_calls["count"] += 1
+        if blocking_select_calls["count"] == 1:
+            connection.readable = True
+            return [connection], [], []
+        loop._running = False
+        return [], [], []
+
+    monkeypatch.setattr(
+        loop_mod.select,
+        "select",
+        _one_ready_socket_then_quiesce,
+    )
+
+    loop._iqfeed_notify_loop(1, stop_event)
+
+    assert handled_session_ids == [
+        (1, 101),
+        (1, 202),
+        (1, 101),
+        (1, 202),
+        (1, 101),
+        (1, 202),
+    ]
+    assert connection.poll_calls == 5
+
+
 def test_successful_generation_owned_refresh_records_lane_health(monkeypatch):
     loop = LiveRunnerLoop()
     loop._running = True
