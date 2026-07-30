@@ -23,6 +23,9 @@ import time
 from typing import Any, Callable, Mapping
 import uuid
 
+from sqlalchemy.exc import DBAPIError, OperationalError
+from sqlalchemy.exc import TimeoutError as SqlAlchemyTimeoutError
+
 from .captured_paper_initial_candidate_reader import (
     CapturedPaperInitialCandidateReaderUnavailable,
     SqlAlchemyCapturedPaperInitialCandidateReader,
@@ -51,6 +54,14 @@ _RUNTIME_ROLLBACK_SCHEMA_VERSION = (
 )
 _HEALTH_SCHEMA_VERSION = "chili.captured-paper-selection-runtime-health.v1"
 _ACCOUNT_IDENTITY_SCHEMA_VERSION = "chili.captured-paper-selection-account.v1"
+
+
+def _is_transient_selection_database_error(exc: BaseException) -> bool:
+    """Return true only for retryable database availability failures."""
+
+    return isinstance(exc, (OperationalError, SqlAlchemyTimeoutError)) or (
+        isinstance(exc, DBAPIError) and bool(exc.connection_invalidated)
+    )
 
 
 class CapturedPaperSelectionRuntimeError(RuntimeError):
@@ -697,6 +708,7 @@ class CapturedPaperSelectionLifecycleWorker:
         self._rollback_receipt: CapturedPaperSelectionRollbackReceipt | None = None
         self._cycles_completed = 0
         self._source_unavailable_cycles = 0
+        self._source_database_unavailable_cycles = 0
         self._initial_warmup_retries = 0
         self._initial_prime_complete = False
         self._initial_prime_state = "prepared"
@@ -708,6 +720,7 @@ class CapturedPaperSelectionLifecycleWorker:
         self._durable_frontier_timeout_cycles = 0
         self._last_durable_sequence = 0
         self._producer_frontier_timeout_cycles = 0
+        self._producer_database_unavailable_cycles = 0
         self._producer_frontier_recovery_pending = False
         self._last_frontier_sequence = 0
         self._last_frontier_status: str | None = None
@@ -1314,6 +1327,21 @@ class CapturedPaperSelectionLifecycleWorker:
                     "selection_source_coverage_unavailable"
                 )
             raise
+        except BaseException as exc:
+            if not _is_transient_selection_database_error(exc):
+                raise
+            with self._state_lock:
+                self._source_unavailable_cycles += 1
+                self._source_database_unavailable_cycles += 1
+                if not require_snapshot:
+                    self._producer_frontier_recovery_pending = False
+            if not require_snapshot:
+                self.deferred_reader.suspend(
+                    "selection_source_coverage_unavailable"
+                )
+            raise CapturedPaperSelectionSourceUnavailable(
+                "selection_source_database_temporarily_unavailable"
+            ) from exc
         self._assert_fence()
         try:
             snapshots = tuple(snapshots)
@@ -1578,7 +1606,47 @@ class CapturedPaperSelectionLifecycleWorker:
                     "shutdown interrupted selection producer drain",
                 )
             self._assert_fence()
-            result = components.producer.tick()
+            try:
+                result = components.producer.tick()
+            except BaseException as exc:
+                if not _is_transient_selection_database_error(exc):
+                    raise
+                reader_health = self.deferred_reader.health()
+                if (
+                    reader_health["installed"] is True
+                    and not reader_health["suspended"]
+                ):
+                    with self._state_lock:
+                        self._producer_frontier_recovery_pending = True
+                    self.deferred_reader.suspend(
+                        "selection_producer_frontier_pending"
+                    )
+                with self._state_lock:
+                    self._producer_database_unavailable_cycles += 1
+                now = float(self.monotonic_clock())
+                if not math.isfinite(now):
+                    _reject(
+                        "PRODUCER_CLOCK_INVALID",
+                        "selection producer clock is non-finite",
+                    )
+                if self._stop_event.is_set():
+                    _reject(
+                        "PRODUCER_DRAIN_INTERRUPTED",
+                        "shutdown interrupted selection producer drain",
+                    )
+                if now >= deadline:
+                    _reject(
+                        "PRODUCER_FRONTIER_TIMEOUT",
+                        "selection producer database remained unavailable",
+                    )
+                if self._stop_event.wait(
+                    min(0.01, max(0.0, deadline - now))
+                ):
+                    _reject(
+                        "PRODUCER_DRAIN_INTERRUPTED",
+                        "shutdown interrupted selection producer drain",
+                    )
+                continue
             self._assert_fence()
             frontier = getattr(result, "frontier", None)
             status = getattr(result, "status", None)
@@ -2460,6 +2528,9 @@ class CapturedPaperSelectionLifecycleWorker:
                 "thread_alive": bool(thread is not None and thread.is_alive()),
                 "cycles_completed": self._cycles_completed,
                 "source_unavailable_cycles": self._source_unavailable_cycles,
+                "source_database_unavailable_cycles": (
+                    self._source_database_unavailable_cycles
+                ),
                 "initial_warmup_retries": self._initial_warmup_retries,
                 "initial_prime_complete": self._initial_prime_complete,
                 "initial_prime_state": self._initial_prime_state,
@@ -2483,6 +2554,9 @@ class CapturedPaperSelectionLifecycleWorker:
                 "last_durable_sequence": self._last_durable_sequence,
                 "producer_frontier_timeout_cycles": (
                     self._producer_frontier_timeout_cycles
+                ),
+                "producer_database_unavailable_cycles": (
+                    self._producer_database_unavailable_cycles
                 ),
                 "producer_frontier_recovery_pending": (
                     self._producer_frontier_recovery_pending

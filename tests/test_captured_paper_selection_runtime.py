@@ -7,6 +7,8 @@ import threading
 import time
 
 import pytest
+from sqlalchemy.exc import DBAPIError, OperationalError
+from sqlalchemy.exc import TimeoutError as SqlAlchemyTimeoutError
 
 from app.services.trading.momentum_neural.captured_paper_initial_candidate_reader import (
     CapturedPaperInitialCandidateReaderUnavailable,
@@ -2117,6 +2119,198 @@ def test_periodic_producer_timeout_suspends_then_recovers_same_frontier(
         harness.worker.close(join_timeout_seconds=1.0)
 
 
+def test_periodic_transient_producer_database_failure_suspends_then_recovers(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    harness = _Harness(tmp_path, poll_interval_seconds=60.0)
+    harness.worker.start()
+    assert harness.publisher is not None
+    components = harness.worker._components
+    assert components is not None
+    original_tick = components.producer.tick
+    attempts = 0
+
+    def transient_then_ready() -> SimpleNamespace:
+        nonlocal attempts
+        attempts += 1
+        if attempts in {1, 3}:
+            raise OperationalError(
+                "SELECT captured_paper_selection_frontier",
+                {},
+                TimeoutError("statement timeout"),
+            )
+        if attempts == 2:
+            reader_health = harness.reader.health()
+            assert reader_health["suspended"] is True
+            assert reader_health["suspend_reason"] == (
+                "selection_producer_frontier_pending"
+            )
+        if attempts == 4:
+            reader_health = harness.reader.health()
+            assert reader_health["suspended"] is True
+            assert reader_health["suspend_reason"] == (
+                "selection_source_coverage_unavailable"
+            )
+        return original_tick()
+
+    monkeypatch.setattr(components.producer, "tick", transient_then_ready)
+
+    try:
+        harness.worker._run_cycle(initial=False)
+        recovered = harness.worker.health()
+        assert attempts >= 2
+        assert recovered["running"] is True
+        assert recovered["fatal"] is False
+        assert recovered["ready"] is True
+        assert recovered["producer_database_unavailable_cycles"] == 1
+        assert recovered["producer_frontier_recovery_pending"] is False
+        assert recovered["candidate_reader"]["installed"] is True
+        assert recovered["candidate_reader"]["suspended"] is False
+        assert harness.publisher.poisoned is False
+        assert recovered["occurrences_published"] == 1
+        assert harness.publisher.durable_through == 1
+        assert recovered["last_frontier_sequence"] == 1
+
+        harness.reader.suspend("selection_source_coverage_unavailable")
+        harness.worker._run_cycle(initial=False)
+        source_suspended = harness.worker.health()
+        assert attempts >= 4
+        assert source_suspended["running"] is True
+        assert source_suspended["fatal"] is False
+        assert source_suspended["ready"] is False
+        assert source_suspended["producer_database_unavailable_cycles"] == 2
+        assert source_suspended["producer_frontier_recovery_pending"] is False
+        assert source_suspended["candidate_reader"]["suspended"] is True
+        assert source_suspended["candidate_reader"]["suspend_reason"] == (
+            "selection_source_coverage_unavailable"
+        )
+        assert harness.publisher.poisoned is False
+    finally:
+        harness.worker.close(join_timeout_seconds=1.0)
+
+
+def test_initial_transient_producer_database_failure_leaves_no_recovery_state(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    original_tick = _FakeProducer.tick
+    attempts = 0
+
+    def transient_then_ready(producer: _FakeProducer) -> SimpleNamespace:
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            raise OperationalError(
+                "SELECT captured_paper_selection_frontier",
+                {},
+                TimeoutError("statement timeout"),
+            )
+        return original_tick(producer)
+
+    monkeypatch.setattr(_FakeProducer, "tick", transient_then_ready)
+    harness = _Harness(tmp_path, poll_interval_seconds=60.0)
+
+    try:
+        harness.worker.start()
+        health = harness.worker.health()
+        assert attempts >= 2
+        assert health["running"] is True
+        assert health["fatal"] is False
+        assert health["ready"] is True
+        assert health["producer_database_unavailable_cycles"] == 1
+        assert health["producer_frontier_recovery_pending"] is False
+        assert health["candidate_reader"]["installed"] is True
+        assert health["candidate_reader"]["suspended"] is False
+        assert health["last_frontier_sequence"] == 1
+    finally:
+        harness.worker.close(join_timeout_seconds=1.0)
+
+
+def test_persistent_transient_producer_database_failure_uses_existing_deadline(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    harness = _Harness(tmp_path, poll_interval_seconds=60.0)
+    harness.worker.start()
+    assert harness.publisher is not None
+    components = harness.worker._components
+    assert components is not None
+    observations = iter((0.0, 0.11))
+    harness.worker.producer_timeout_seconds = 0.1
+    harness.worker.monotonic_clock = lambda: next(observations)
+
+    def unavailable() -> SimpleNamespace:
+        raise SqlAlchemyTimeoutError("selection pool exhausted")
+
+    monkeypatch.setattr(components.producer, "tick", unavailable)
+
+    try:
+        with pytest.raises(CapturedPaperSelectionRuntimeError) as failure:
+            harness.worker._drain_producer_to(1)
+        assert failure.value.code == "PRODUCER_FRONTIER_TIMEOUT"
+        health = harness.worker.health()
+        assert health["running"] is True
+        assert health["fatal"] is False
+        assert health["producer_database_unavailable_cycles"] == 1
+        assert health["candidate_reader"]["suspended"] is True
+        assert health["candidate_reader"]["suspend_reason"] == (
+            "selection_producer_frontier_pending"
+        )
+        assert harness.publisher.poisoned is False
+        assert harness.publisher.durable_through == 1
+    finally:
+        harness.worker.close(join_timeout_seconds=1.0)
+
+
+def test_initial_transient_producer_database_failure_during_close_is_not_fatal(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    entered = threading.Event()
+    release = threading.Event()
+
+    def blocked_then_unavailable(_producer: _FakeProducer) -> SimpleNamespace:
+        entered.set()
+        assert release.wait(timeout=2.0)
+        raise SqlAlchemyTimeoutError("selection pool exhausted")
+
+    monkeypatch.setattr(_FakeProducer, "tick", blocked_then_unavailable)
+    harness = _Harness(
+        tmp_path,
+        poll_interval_seconds=60.0,
+        wait_for_initial_pressure=True,
+        pressure_health_sequence=[_pressure_health(clean=True)],
+    )
+    harness.worker.producer_timeout_seconds = 0.01
+    close_errors: list[BaseException] = []
+
+    def close_worker() -> None:
+        try:
+            harness.worker.close(join_timeout_seconds=1.0)
+        except BaseException as exc:
+            close_errors.append(exc)
+
+    harness.worker.start()
+    assert entered.wait(timeout=1.0)
+    time.sleep(0.02)
+    close_thread = threading.Thread(target=close_worker)
+    close_thread.start()
+    assert harness.worker._stop_event.wait(timeout=1.0)
+    release.set()
+    close_thread.join(timeout=1.0)
+
+    assert not close_thread.is_alive()
+    assert close_errors == []
+    health = harness.worker.health()
+    assert health["state"] == "quiesced"
+    assert health["fatal"] is False
+    assert health["running"] is False
+    assert health["stop_requested"] is True
+    assert harness.publisher is not None
+    assert harness.publisher.poisoned is False
+
+
 def test_periodic_durable_timeout_suspends_then_recovers_same_accepted_frontier(
     tmp_path: Path,
 ) -> None:
@@ -2519,6 +2713,99 @@ def test_source_unavailable_suspends_decisions_until_new_durable_frontier(
     assert health["occurrences_published"] == 2
     assert harness.reader.health()["installed"] is True
     harness.worker.close(join_timeout_seconds=1.0)
+
+
+@pytest.mark.parametrize(
+    "database_error",
+    [
+        OperationalError(
+            "SELECT captured_paper_selection_source",
+            {},
+            TimeoutError("statement timeout"),
+        ),
+        SqlAlchemyTimeoutError("selection pool exhausted"),
+        DBAPIError(
+            "SELECT captured_paper_selection_source",
+            {},
+            ConnectionError("connection lost"),
+            connection_invalidated=True,
+        ),
+    ],
+    ids=("operational", "pool_timeout", "connection_invalidated"),
+)
+def test_transient_source_database_failure_suspends_then_recovers(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    database_error: BaseException,
+) -> None:
+    harness = _Harness(tmp_path, poll_interval_seconds=0.2)
+    harness.worker.start()
+    assert harness.source is not None
+    assert harness.publisher is not None
+    original_read_snapshot = harness.source.read_snapshot
+    attempts = 0
+
+    def transient_then_snapshot() -> tuple[object, ...]:
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            raise database_error
+        return original_read_snapshot()
+
+    monkeypatch.setattr(harness.source, "read_snapshot", transient_then_snapshot)
+    harness.source.recovery_snapshot_pending = True
+
+    try:
+        recovered = _await_worker_health(
+            harness.worker,
+            lambda health: (
+                health["ready"] is True
+                and health["occurrences_published"] == 2
+                and health["source_unavailable_cycles"] == 1
+                and health["source_database_unavailable_cycles"] == 1
+            ),
+        )
+        assert attempts >= 2
+        assert recovered["running"] is True
+        assert recovered["fatal"] is False
+        assert recovered["candidate_reader"]["installed"] is True
+        assert harness.publisher.poisoned is False
+        assert harness.publisher.durable_through == 2
+        assert recovered["last_frontier_sequence"] == 2
+    finally:
+        harness.worker.close(join_timeout_seconds=1.0)
+
+
+def test_nontransient_source_database_failure_remains_terminal(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    harness = _Harness(tmp_path, poll_interval_seconds=0.2)
+    harness.worker.start()
+    assert harness.source is not None
+    assert harness.publisher is not None
+
+    def invalid_query() -> tuple[object, ...]:
+        raise DBAPIError(
+            "SELECT captured_paper_selection_source",
+            {},
+            ValueError("invalid query contract"),
+            connection_invalidated=False,
+        )
+
+    monkeypatch.setattr(harness.source, "read_snapshot", invalid_query)
+
+    try:
+        failed = _await_worker_health(
+            harness.worker,
+            lambda health: health["fatal"] is True,
+        )
+        assert failed["running"] is False
+        assert failed["source_database_unavailable_cycles"] == 0
+        assert failed["candidate_reader"]["revoked"] is True
+        assert harness.publisher.poisoned is True
+    finally:
+        harness.worker.close(join_timeout_seconds=1.0)
 
 
 def test_ambiguous_rollback_is_retained_and_never_retried(tmp_path: Path) -> None:
