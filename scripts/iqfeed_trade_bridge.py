@@ -135,6 +135,27 @@ except (TypeError, ValueError) as exc:
     raise RuntimeError("IQFEED_DB_RELEASE_BATCH_EVENTS must be a positive integer") from exc
 if DB_RELEASE_BATCH_EVENTS <= 0:
     raise RuntimeError("IQFEED_DB_RELEASE_BATCH_EVENTS must be a positive integer")
+try:
+    DB_RELEASE_CATCHUP_BATCH_EVENTS = int(
+        os.environ.get("IQFEED_DB_RELEASE_CATCHUP_BATCH_EVENTS", "2048") or 2048
+    )
+except (TypeError, ValueError) as exc:
+    raise RuntimeError(
+        "IQFEED_DB_RELEASE_CATCHUP_BATCH_EVENTS must be a positive integer"
+    ) from exc
+if DB_RELEASE_CATCHUP_BATCH_EVENTS < DB_RELEASE_BATCH_EVENTS:
+    raise RuntimeError(
+        "IQFEED_DB_RELEASE_CATCHUP_BATCH_EVENTS must not be below "
+        "IQFEED_DB_RELEASE_BATCH_EVENTS"
+    )
+# The widest vectorized VALUES statement has 18 bind parameters per event.
+# Stay below PostgreSQL's 65,535 bind-parameter ceiling even when a catch-up
+# batch contains only that wider row type.
+if DB_RELEASE_CATCHUP_BATCH_EVENTS * 18 >= 65_535:
+    raise RuntimeError(
+        "IQFEED_DB_RELEASE_CATCHUP_BATCH_EVENTS exceeds the safe PostgreSQL "
+        "bind-parameter budget"
+    )
 REFRESH_S = 20.0                         # execution-session symbol refresh cadence
 STALE_NBBO_RECONNECT_S = float(
     os.environ.get("IQFEED_STALE_NBBO_RECONNECT_SECONDS", "45") or 45
@@ -303,6 +324,7 @@ BRIDGE_CAPTURE_CONFIGURATION = {
     "port": PORT,
     "flush_interval_seconds": FLUSH_INTERVAL_S,
     "db_release_batch_events": DB_RELEASE_BATCH_EVENTS,
+    "db_release_catchup_batch_events": DB_RELEASE_CATCHUP_BATCH_EVENTS,
     "authoritative_max_age_seconds": AUTHORITATIVE_MAX_AGE_S,
     "authoritative_future_tolerance_seconds": AUTHORITATIVE_FUTURE_TOLERANCE_S,
     "authoritative_timestamp_basis": AUTHORITATIVE_TIMESTAMP_BASIS,
@@ -936,38 +958,63 @@ def _drain_pending_write_batch(
     with _pending_lock:
         if not _pending and not _pending_nbbo:
             return [], [], False
-        trade_rows: list[dict] = []
-        quote_rows: list[dict] = []
         selected_events = 0
+        trade_index = 0
+        quote_index = 0
 
-        while _pending or _pending_nbbo:
+        while trade_index < len(_pending) or quote_index < len(_pending_nbbo):
             head_keys = []
-            if _pending:
-                head_keys.append(_pending_frame_key(_pending[0]))
-            if _pending_nbbo:
-                head_keys.append(_pending_frame_key(_pending_nbbo[0]))
+            if trade_index < len(_pending):
+                head_keys.append(_pending_frame_key(_pending[trade_index]))
+            if quote_index < len(_pending_nbbo):
+                head_keys.append(_pending_frame_key(_pending_nbbo[quote_index]))
             frame_key = min(head_keys)
-            trade_count = 0
-            for row in _pending:
-                if _pending_frame_key(row) != frame_key:
-                    break
-                trade_count += 1
-            quote_count = 0
-            for row in _pending_nbbo:
-                if _pending_frame_key(row) != frame_key:
-                    break
-                quote_count += 1
+            next_trade_index = trade_index
+            while (
+                next_trade_index < len(_pending)
+                and _pending_frame_key(_pending[next_trade_index]) == frame_key
+            ):
+                next_trade_index += 1
+            trade_count = next_trade_index - trade_index
+            next_quote_index = quote_index
+            while (
+                next_quote_index < len(_pending_nbbo)
+                and _pending_frame_key(_pending_nbbo[next_quote_index]) == frame_key
+            ):
+                next_quote_index += 1
+            quote_count = next_quote_index - quote_index
             frame_events = trade_count + quote_count
             if selected_events and selected_events + frame_events > max_events:
                 break
-            trade_rows.extend(_pending[:trade_count])
-            quote_rows.extend(_pending_nbbo[:quote_count])
-            del _pending[:trade_count]
-            del _pending_nbbo[:quote_count]
+            trade_index += trade_count
+            quote_index += quote_count
             selected_events += frame_events
             if selected_events >= max_events:
                 break
+        trade_rows = _pending[:trade_index]
+        quote_rows = _pending_nbbo[:quote_index]
+        if trade_index:
+            del _pending[:trade_index]
+        if quote_index:
+            del _pending_nbbo[:quote_index]
         return trade_rows, quote_rows, bool(_pending or _pending_nbbo)
+
+
+def _release_batch_event_limit(*, pending_backlog: bool) -> int:
+    """Use the larger bounded batch only after a prior drain proved backlog."""
+
+    return (
+        DB_RELEASE_CATCHUP_BATCH_EVENTS
+        if pending_backlog
+        else DB_RELEASE_BATCH_EVENTS
+    )
+
+
+def _pending_write_backlog() -> bool:
+    """Observe arrivals that occurred while the prior batch was committed."""
+
+    with _pending_lock:
+        return bool(_pending or _pending_nbbo)
 
 
 def _select_nbbo_rows_for_capture(
@@ -2577,7 +2624,11 @@ def writer(
             _close_connection_socket(connection_socket)
             break
 
-        rows, nbbo_rows, pending_backlog = _drain_pending_write_batch()
+        rows, nbbo_rows, pending_backlog = _drain_pending_write_batch(
+            max_events=_release_batch_event_limit(
+                pending_backlog=pending_backlog,
+            )
+        )
         # Full-fidelity for current hot symbols; bounded newest-per-flush context
         # for the broad universe.  Missing exact IQFeed quote-event clocks still
         # make these rows noncertifying regardless of storage fidelity.
@@ -2657,6 +2708,7 @@ def writer(
                     log.info("ignition notify emitted=%d channel=%s", emitted, IGNITION_CHANNEL)
             except Exception as e:
                 log.warning("ignition notify emit failed (nominations dropped): %s", e)
+        pending_backlog = _pending_write_backlog()
     _request_connection_stop(connection_generation, stop_event)
 
 

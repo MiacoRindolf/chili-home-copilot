@@ -402,6 +402,82 @@ def test_pending_db_release_drain_is_bounded_and_keeps_same_frame_together():
         assert [row["source_frame_sequence"] for row in bridge._pending_nbbo] == [3, 4]
 
 
+def test_pending_db_release_drain_removes_each_selected_prefix_once(monkeypatch):
+    class _DeleteCountingList(list):
+        def __init__(self, rows):
+            super().__init__(rows)
+            self.delete_calls = 0
+
+        def __delitem__(self, key):
+            self.delete_calls += 1
+            return super().__delitem__(key)
+
+    trade_rows = _DeleteCountingList(
+        {
+            "sym": "BULK",
+            "connection_generation": 1,
+            "source_frame_sequence": sequence,
+        }
+        for sequence in range(1, 401)
+    )
+    quote_rows = _DeleteCountingList(
+        {
+            "sym": "BULK",
+            "connection_generation": 1,
+            "source_frame_sequence": sequence,
+        }
+        for sequence in range(1, 401)
+    )
+    monkeypatch.setattr(bridge, "_pending", trade_rows)
+    monkeypatch.setattr(bridge, "_pending_nbbo", quote_rows)
+
+    trades, quotes, backlog = bridge._drain_pending_write_batch(max_events=256)
+
+    assert len(trades) == len(quotes) == 128
+    assert backlog is True
+    assert trade_rows.delete_calls == 1
+    assert quote_rows.delete_calls == 1
+
+
+def test_pending_db_release_drain_is_atomic_on_later_malformed_frame():
+    rows = [
+        {"sym": "GOOD", "connection_generation": 1, "source_frame_sequence": 1},
+        {"sym": "BAD", "connection_generation": 1},
+    ]
+    with bridge._pending_lock:
+        bridge._pending.extend(rows)
+
+    with pytest.raises(ValueError, match="pending frame identity is malformed"):
+        bridge._drain_pending_write_batch(max_events=256)
+
+    with bridge._pending_lock:
+        assert bridge._pending == rows
+
+
+def test_pending_backlog_uses_bounded_catchup_batch():
+    assert bridge._release_batch_event_limit(pending_backlog=False) == (
+        bridge.DB_RELEASE_BATCH_EVENTS
+    )
+    catchup_limit = bridge._release_batch_event_limit(pending_backlog=True)
+    assert catchup_limit == bridge.DB_RELEASE_CATCHUP_BATCH_EVENTS
+    assert catchup_limit > bridge.DB_RELEASE_BATCH_EVENTS
+    # The widest VALUES statement has 18 bind parameters per retained event.
+    assert catchup_limit * 18 < 65_535
+
+
+def test_pending_backlog_is_refreshed_after_new_arrival():
+    assert bridge._pending_write_backlog() is False
+    with bridge._pending_lock:
+        bridge._pending_nbbo.append(
+            {
+                "sym": "NEW",
+                "connection_generation": 1,
+                "source_frame_sequence": 1,
+            }
+        )
+    assert bridge._pending_write_backlog() is True
+
+
 def test_selected_frame_enqueues_trade_and_quote_in_one_atomic_call(monkeypatch):
     generation = 17
     bridge._activate_connection_generation(generation)
