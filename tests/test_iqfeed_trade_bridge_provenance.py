@@ -827,6 +827,66 @@ def test_connection_runner_waits_for_protocol_ack_before_selecting_fields(
     ]
 
 
+def test_connection_runner_retries_field_selection_once_after_missing_ack(
+    monkeypatch,
+):
+    class _BlockingSocket:
+        def __init__(self):
+            self.closed = bridge.threading.Event()
+
+        def settimeout(self, _timeout):
+            return None
+
+        def recv(self, _size):
+            self.closed.wait(timeout=2.0)
+            return b""
+
+        def shutdown(self, _how):
+            self.closed.set()
+
+        def close(self):
+            self.closed.set()
+
+    connection = _BlockingSocket()
+    sent = []
+    acknowledgements = iter((False, True))
+    monkeypatch.setattr(
+        bridge.socket,
+        "create_connection",
+        lambda *_a, **_k: connection,
+    )
+    monkeypatch.setattr(
+        bridge,
+        "_record_capture_connection_boundary",
+        lambda **_k: None,
+    )
+    monkeypatch.setattr(
+        bridge,
+        "_wait_for_protocol_ack",
+        lambda *_a, **_k: True,
+    )
+    monkeypatch.setattr(
+        bridge,
+        "_wait_for_selected_fields_ack",
+        lambda *_a, **_k: next(acknowledgements),
+    )
+    monkeypatch.setattr(
+        bridge,
+        "_send",
+        lambda _socket, command: sent.append(command),
+    )
+    monkeypatch.setattr(bridge, "writer", lambda *_a: None)
+
+    bridge._run_connection(set(), None)
+
+    assert sent == [
+        "S,SET PROTOCOL,6.2",
+        bridge.SELECT_UPDATE_FIELDS_COMMAND,
+        bridge.SELECT_UPDATE_FIELDS_COMMAND,
+    ]
+    assert connection.closed.is_set()
+
+
 def test_nonquiescent_reader_refuses_reconnect(monkeypatch):
     class _StuckSocket:
         def __init__(self):

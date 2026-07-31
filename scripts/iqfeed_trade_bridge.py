@@ -2778,10 +2778,31 @@ def _run_connection(
             raise RuntimeError("IQFeed protocol 6.2 was not acknowledged")
         _send(connection_socket, SELECT_UPDATE_FIELDS_COMMAND)
         _capture_bc("field selection sent; BEGIN field-ack wait")
-        if not _wait_for_selected_fields_ack(
+        selected_fields_acknowledged = _wait_for_selected_fields_ack(
             connection_generation,
             stop_event,
+        )
+        if (
+            not selected_fields_acknowledged
+            and _connection_generation_active(
+                connection_generation,
+                stop_event,
+            )
         ):
+            log.warning(
+                "IQFeed exact selected-field roster was not acknowledged; "
+                "retrying once generation=%d",
+                connection_generation,
+            )
+            _send(connection_socket, SELECT_UPDATE_FIELDS_COMMAND)
+            _capture_bc(
+                "field selection retry sent; BEGIN final field-ack wait"
+            )
+            selected_fields_acknowledged = _wait_for_selected_fields_ack(
+                connection_generation,
+                stop_event,
+            )
+        if not selected_fields_acknowledged:
             _capture_bc("field-ack FAILED (roster not acknowledged)")
             raise RuntimeError(
                 "IQFeed exact selected-field roster was not acknowledged"
