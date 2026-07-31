@@ -71,13 +71,21 @@ from .replay_capture_runtime import (
 
 UTC = timezone.utc
 
-QUEUE_EVENT_SCHEMA_VERSION = "chili.captured-paper-selection-queue-event.v1"
+QUEUE_EVENT_SCHEMA_VERSION = "chili.captured-paper-selection-queue-event.v2"
 QUEUE_COMMIT_SCHEMA_VERSION = "chili.captured-paper-selection-queue-commit.v1"
 QUEUE_RECEIPT_SCHEMA_VERSION = "chili.captured-paper-selection-queue-receipt.v1"
 QUEUE_POISON_SCHEMA_VERSION = "chili.captured-paper-selection-queue-poison.v1"
 QUEUE_DERIVED_KIND = "captured_paper_selection_queue_commit"
 QUEUE_PROVIDER = "captured_viability_adapter"
 QUEUE_SOURCE_NAME = "captured_viability_queue"
+
+_ACTIVATION_STATIC_SOURCE_STREAMS = frozenset(
+    {
+        CaptureStream.CONFIG_SNAPSHOT,
+        CaptureStream.FEATURE_FLAG_SNAPSHOT,
+        CaptureStream.CODE_BUILD,
+    }
+)
 
 _SHA_RE = re.compile(r"^[0-9a-f]{64}$")
 _REASON_RE = re.compile(r"^[a-z0-9][a-z0-9_.:-]{0,127}$")
@@ -219,6 +227,123 @@ def _validate_source_events(
         if CaptureEventRef.from_event(event) != refs[digest]:
             _fail("source event bytes do not reconstruct their bundle ref")
     return tuple(sorted(events, key=lambda event: (event.sequence, event.event_sha256)))
+
+
+def _source_event_refs(events: Sequence[CaptureEvent]) -> list[dict[str, Any]]:
+    return [CaptureEventRef.from_event(event).to_dict() for event in events]
+
+
+def _retained_source_event_envelopes(
+    events: Sequence[CaptureEvent],
+) -> list[dict[str, Any]]:
+    """Retain raw decision-local evidence without duplicating sealed build bytes.
+
+    Config, policy, and code-build payloads are activation-static and already
+    hash-bound by both the selection authority and the scored bundle.  Their
+    exact event refs remain in every queue event, while their large raw payloads
+    stay in the sealed activation evidence instead of being copied once per
+    symbol/variant occurrence.  Dynamic market/provider evidence remains fully
+    embedded and independently reconstructable.
+    """
+
+    return [
+        _event_envelope(event)
+        for event in events
+        if event.stream not in _ACTIVATION_STATIC_SOURCE_STREAMS
+    ]
+
+
+def _recomputed_static_event_sha256(
+    ref: CaptureEventRef,
+    *,
+    identity: CaptureRunIdentity,
+) -> str:
+    """Reconstruct the content address of one payload-elided static event."""
+
+    return sha256_json(
+        {
+            "schema_version": CAPTURE_SCHEMA_VERSION,
+            "identity": identity.to_dict(),
+            "sequence": ref.sequence,
+            "stream": ref.stream.value,
+            "symbol": ref.symbol,
+            "provider": ref.provider,
+            "clocks": CaptureClocks(
+                provider_event_at=ref.provider_event_at,
+                market_reference_at=ref.market_reference_at,
+                received_at=ref.received_at,
+                available_at=ref.available_at,
+            ).to_dict(),
+            "query": None,
+            "query_sha256": None,
+            "payload_sha256": ref.payload_sha256,
+        }
+    )
+
+
+def _validate_compact_source_evidence(
+    bundle: CapturedViabilityInputBundle,
+    *,
+    raw_refs: Any,
+    raw_events: Any,
+) -> tuple[CaptureEventRef, ...]:
+    if not isinstance(raw_refs, list) or not isinstance(raw_events, list):
+        _fail("queue source evidence inventory is malformed")
+    try:
+        refs = tuple(
+            CaptureEventRef.from_dict(_mapping(value, "source event ref"))
+            for value in raw_refs
+        )
+    except (CaptureContractError, TypeError, ValueError) as exc:
+        raise CapturedPaperSelectionQueueError(
+            "queue source event reference is malformed"
+        ) from exc
+    if refs != bundle.source_refs:
+        _fail("queue source event refs differ from bundle refs")
+
+    events = tuple(
+        _event_from_envelope(_mapping(value, "source event envelope"))
+        for value in raw_events
+    )
+    retained_refs = tuple(CaptureEventRef.from_event(event) for event in events)
+    expected_retained_refs = tuple(
+        ref
+        for ref in refs
+        if ref.stream not in _ACTIVATION_STATIC_SOURCE_STREAMS
+    )
+    if retained_refs != expected_retained_refs:
+        _fail("queue retained source payloads differ from dynamic bundle refs")
+    if not events:
+        _fail("queue lacks retained decision-local source evidence")
+    source_identity = events[0].identity
+    if any(event.identity != source_identity for event in events):
+        _fail("queue retained source payloads span capture identities")
+
+    expected_static_hashes = {
+        CaptureStream.CONFIG_SNAPSHOT: bundle.config_sha256,
+        CaptureStream.FEATURE_FLAG_SNAPSHOT: bundle.policy_sha256,
+        CaptureStream.CODE_BUILD: bundle.code_sha256,
+    }
+    for stream, expected_payload_sha256 in expected_static_hashes.items():
+        matches = tuple(ref for ref in refs if ref.stream is stream)
+        if (
+            len(matches) != 1
+            or matches[0].payload_sha256 != expected_payload_sha256
+        ):
+            _fail("queue activation-static source ref binding mismatch")
+        static_ref = matches[0]
+        if static_ref.query_sha256 is not None:
+            _fail("queue activation-static source ref unexpectedly has a query")
+        if (
+            static_ref.identity_sha256 != source_identity.identity_sha256
+            or static_ref.event_sha256
+            != _recomputed_static_event_sha256(
+                static_ref,
+                identity=source_identity,
+            )
+        ):
+            _fail("queue activation-static source ref content address mismatch")
+    return refs
 
 
 def _authority_matches_selection(
@@ -1133,6 +1258,8 @@ class CapturedPaperSelectionQueuePublisher:
                 authority=scoring_authority,
                 evaluation_at=evaluation,
             )
+            source_event_refs = _source_event_refs(events)
+            retained_source_events = _retained_source_event_envelopes(events)
             envelope = {
                 "schema_version": QUEUE_EVENT_SCHEMA_VERSION,
                 "queue_identity_sha256": self.identity.identity_sha256,
@@ -1144,10 +1271,9 @@ class CapturedPaperSelectionQueuePublisher:
                 "scoring_authority": scoring_authority.to_dict(),
                 "evaluation_at": _iso(evaluation),
                 "score_result": score_result.to_dict(),
-                "source_events": [_event_envelope(event) for event in events],
-                "source_event_inventory_sha256": sha256_json(
-                    [_event_envelope(event) for event in events]
-                ),
+                "source_event_refs": source_event_refs,
+                "source_events": retained_source_events,
+                "source_event_inventory_sha256": sha256_json(source_event_refs),
             }
             queue_event = CaptureEvent(
                 identity=self.identity,
@@ -1621,6 +1747,7 @@ def _verify_queue_event(
         "scoring_authority",
         "evaluation_at",
         "score_result",
+        "source_event_refs",
         "source_events",
         "source_event_inventory_sha256",
     }
@@ -1651,19 +1778,28 @@ def _verify_queue_event(
         or not _authority_matches_selection(scoring, selection_authority)
     ):
         _fail("queue bundle/scoring authority binding mismatch")
+    raw_refs = raw.get("source_event_refs")
     raw_sources = raw.get("source_events")
-    if not isinstance(raw_sources, list):
-        _fail("queue source event inventory is malformed")
-    if raw.get("source_event_inventory_sha256") != sha256_json(raw_sources):
+    if not isinstance(raw_refs, list):
+        _fail("queue source event ref inventory is malformed")
+    if raw.get("source_event_inventory_sha256") != sha256_json(raw_refs):
         _fail("queue source event inventory hash mismatch")
+    source_refs = _validate_compact_source_evidence(
+        bundle,
+        raw_refs=raw_refs,
+        raw_events=raw_sources,
+    )
     source_events = tuple(
         _event_from_envelope(_mapping(value, "source event envelope"))
         for value in raw_sources
     )
-    _validate_source_events(bundle, source_events)
     source_identity = source_events[0].identity
     if (
         any(event.identity != source_identity for event in source_events)
+        or any(
+            ref.identity_sha256 != source_identity.identity_sha256
+            for ref in source_refs
+        )
         or source_identity.identity_sha256 != bundle.capture_identity_sha256
         or source_identity.run_id != selection_authority.activation_generation
         or source_identity.generation == queue_identity.generation

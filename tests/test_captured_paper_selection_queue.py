@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass, replace
 from datetime import datetime, timedelta, timezone
 import hashlib
@@ -12,6 +13,9 @@ import pytest
 
 from app.services.trading.momentum_neural import (
     captured_paper_selection_queue as queue_module,
+)
+from app.services.trading.momentum_neural import (
+    replay_capture_contract as capture_contract,
 )
 from app.services.trading.momentum_neural.captured_paper_selection_producer import (
     FRONTIER_SCHEMA_VERSION,
@@ -45,6 +49,7 @@ from app.services.trading.momentum_neural.replay_capture_contract import (
     CoverageGap,
     ProviderWatermark,
     StreamCoverage,
+    canonical_json_bytes,
     captured_read_result_sha256,
     sha256_json,
 )
@@ -124,7 +129,7 @@ def _resource_binding(*, max_queue_events: int = 100) -> CaptureResourceBinding:
 
 
 def _source_bundle(
-    *, source_sequence: int
+    *, source_sequence: int, code_payload: dict | None = None
 ) -> tuple[
     CapturedViabilityInputBundle,
     CapturedViabilityScoringAuthority,
@@ -139,7 +144,11 @@ def _source_bundle(
             "fixture": "intended_strategy_policy",
             "paper_only_strategy_override": False,
         },
-        CaptureStream.CODE_BUILD: {"fixture": "code", "build": "queue-test"},
+        CaptureStream.CODE_BUILD: (
+            code_payload
+            if code_payload is not None
+            else {"fixture": "code", "build": "queue-test"}
+        ),
         CaptureStream.PROVIDER_OHLCV: {"bars": [[10.0, 11.0, 9.5, 10.5, 1000]]},
         CaptureStream.IQFEED_PRINT: {
             "price": 10.55,
@@ -372,9 +381,11 @@ def _harness(
     *,
     max_queue_events: int = 100,
     monotonic_clock=time.monotonic,
+    code_payload: dict | None = None,
 ) -> _Harness:
     bundle, scoring, events, selection, queue_identity = _source_bundle(
-        source_sequence=1
+        source_sequence=1,
+        code_payload=code_payload,
     )
     binding = _resource_binding(max_queue_events=max_queue_events)
     shared = SharedCaptureAdmissionBudget.from_resource_binding(
@@ -506,6 +517,234 @@ def test_before_ingress_admission_runs_after_event_cost_and_before_submit(
     assert submitted == 0
     assert reserved == 1
     _close_idle_harness(harness)
+
+
+def test_queue_event_compacts_activation_static_source_payloads(
+    tmp_path: Path,
+) -> None:
+    code_payload = {
+        "fixture": "code",
+        "artifacts": [
+            {
+                "path": f"module_{index:03d}.py",
+                "sha256": _digest(f"module-{index:03d}"),
+            }
+            for index in range(1_045)
+        ],
+    }
+    harness = _harness(tmp_path, code_payload=code_payload)
+    captured: list[CaptureEvent] = []
+
+    def capture_before_ingress(
+        event: CaptureEvent,
+        _size: int,
+        rejection_reason: str | None,
+    ) -> None:
+        assert rejection_reason is None
+        captured.append(event)
+
+    assert harness.publisher.reserve_sequence() == harness.bundle.source_sequence
+    receipt = harness.publisher.publish_bundle(
+        bundle=harness.bundle,
+        scoring_authority=harness.scoring,
+        evaluation_at=harness.bundle.read_at,
+        source_events=harness.source_events,
+        before_ingress_admission=capture_before_ingress,
+    )
+    assert receipt.accepted is True
+    harness.writer.start()
+    assert harness.writer.close(timeout_seconds=5) is True
+
+    assert len(captured) == 1
+    payload = captured[0].payload
+    assert payload["schema_version"] == queue_module.QUEUE_EVENT_SCHEMA_VERSION
+    assert payload["source_event_refs"] == [
+        CaptureEventRef.from_event(event).to_dict()
+        for event in harness.source_events
+    ]
+    embedded_events = tuple(
+        CaptureEvent.from_record(row["event"])
+        for row in payload["source_events"]
+    )
+    assert {event.stream for event in embedded_events} == {
+        CaptureStream.PROVIDER_OHLCV,
+        CaptureStream.IQFEED_PRINT,
+    }
+    assert b"module_1044.py" not in canonical_json_bytes(payload)
+    assert captured[0].canonical_size_bytes < 64 * 1_024
+
+    legacy_payload = dict(payload)
+    legacy_payload.pop("source_event_refs")
+    legacy_source_events = [
+        queue_module._event_envelope(event) for event in harness.source_events
+    ]
+    legacy_payload["source_events"] = legacy_source_events
+    legacy_payload["source_event_inventory_sha256"] = sha256_json(
+        legacy_source_events
+    )
+    assert len(canonical_json_bytes(payload)) < (
+        len(canonical_json_bytes(legacy_payload)) * 0.65
+    )
+
+    port = _input_port(harness)
+    batch = port.read_batch(
+        frontier=_frontier(harness.selection),
+        authority=harness.selection,
+    )
+    assert batch is not None
+    assert [row.source_sequence for row in batch.observations] == [1]
+    harness.manager.close()
+
+
+@pytest.mark.parametrize(
+    ("mutate_ref", "error"),
+    [
+        (
+            lambda ref: replace(ref, provider="tampered-static-provider"),
+            "content address mismatch",
+        ),
+        (
+            lambda ref: replace(ref, query_sha256=_digest("unexpected-query")),
+            "unexpectedly has a query",
+        ),
+    ],
+)
+def test_compact_static_source_ref_must_reconstruct_exact_event_hash(
+    tmp_path: Path,
+    mutate_ref: Callable[[CaptureEventRef], CaptureEventRef],
+    error: str,
+) -> None:
+    harness = _harness(tmp_path)
+    refs = list(harness.bundle.source_refs)
+    index = next(
+        index
+        for index, ref in enumerate(refs)
+        if ref.stream is CaptureStream.CODE_BUILD
+    )
+    refs[index] = mutate_ref(refs[index])
+    tampered_bundle = replace(harness.bundle, source_refs=tuple(refs))
+    retained_events = [
+        queue_module._event_envelope(event)
+        for event in harness.source_events
+        if event.stream not in queue_module._ACTIVATION_STATIC_SOURCE_STREAMS
+    ]
+
+    with pytest.raises(CapturedPaperSelectionQueueError, match=error):
+        queue_module._validate_compact_source_evidence(
+            tampered_bundle,
+            raw_refs=[ref.to_dict() for ref in refs],
+            raw_events=retained_events,
+        )
+    _close_idle_harness(harness)
+
+
+def test_compacted_240_occurrence_backlog_is_bounded_and_verifies(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    mib = 1_024 * 1_024
+    code_payload = {
+        "schema_version": "chili.captured-paper-code-build.v1",
+        "artifacts": [
+            {
+                "role": (
+                    "dependency:app.services.trading.momentum_neural."
+                    f"fixture_module_{index:04d}"
+                ),
+                "path": (
+                    "D:/sealed/chili/app/services/trading/momentum_neural/"
+                    f"fixture_module_{index:04d}.py"
+                ),
+                "sha256": _digest(f"fixture-module-{index:04d}"),
+            }
+            for index in range(1_045)
+        ],
+    }
+    harness = _harness(
+        tmp_path,
+        max_queue_events=300,
+        code_payload=code_payload,
+    )
+
+    worker = harness.writer.worker
+    worker.batch_events = 256
+    worker.batch_bytes = mib
+    worker.poll_seconds = 0.05
+    worker.flush_interval_seconds = 0.5
+
+    original_canonical = capture_contract.canonical_json_bytes
+    canonical_work_bytes = 0
+
+    def counted_canonical(value: object) -> bytes:
+        nonlocal canonical_work_bytes
+        raw = original_canonical(value)
+        canonical_work_bytes += len(raw)
+        return raw
+
+    monkeypatch.setattr(
+        capture_contract,
+        "canonical_json_bytes",
+        counted_canonical,
+    )
+
+    started_cpu = time.process_time()
+    for sequence in range(1, 241):
+        bundle, scoring, events, selection, identity = _source_bundle(
+            source_sequence=sequence,
+            code_payload=code_payload,
+        )
+        assert selection == harness.selection
+        assert identity == harness.queue_identity
+        assert harness.publisher.reserve_sequence() == sequence
+        assert harness.publisher.publish_bundle(
+            bundle=bundle,
+            scoring_authority=scoring,
+            evaluation_at=bundle.read_at,
+            source_events=events,
+        ).accepted is True
+
+    build_cpu_seconds = time.process_time() - started_cpu
+    queued = harness.publisher.health()
+    total_canonical_bytes = int(queued.ingress["queued_bytes"])
+    assert total_canonical_bytes <= 16 * mib
+    assert canonical_work_bytes <= 384 * mib
+    assert build_cpu_seconds < 30.0
+
+    harness.writer.start()
+    assert harness.writer.close(timeout_seconds=30.0) is True
+
+    durable = harness.publisher.health()
+    assert durable.accepted_through == 240
+    assert durable.durable_through == 240
+    assert durable.poisoned is False
+    assert durable.commit_count <= 16
+    assert harness.writer.health()["writer"]["events_written"] == 240
+
+    chain = queue_module._load_commit_chain(
+        harness.manager.store.root,
+        identity=harness.queue_identity,
+        selection_authority=harness.selection,
+    )
+    materialized = tuple(
+        event
+        for loaded in chain
+        for event in queue_module._materialize_commit_events(
+            harness.manager.store.root,
+            loaded,
+        )
+    )
+    assert [event.sequence for event in materialized] == list(range(1, 241))
+    assert len({event.event_sha256 for event in materialized}) == 240
+    assert sum(len(row.commit.event_refs) for row in chain) == 240
+    for event in materialized:
+        bundle, result = queue_module._verify_queue_event(
+            event,
+            queue_identity=harness.queue_identity,
+            selection_authority=harness.selection,
+        )
+        assert bundle.source_sequence == event.sequence
+        assert result.to_dict() == event.payload["score_result"]
+    harness.manager.close()
 
 
 def test_ingress_remains_final_fail_closed_authority_after_callback(
