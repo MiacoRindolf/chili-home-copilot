@@ -2120,6 +2120,101 @@ def test_periodic_producer_timeout_suspends_then_recovers_same_frontier(
         harness.worker.close(join_timeout_seconds=1.0)
 
 
+def test_background_initial_producer_timeout_recovers_same_frontier(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    original_tick = _FakeProducer.tick
+    release_frontier = threading.Event()
+
+    def stalled_then_ready(producer: _FakeProducer) -> SimpleNamespace:
+        if release_frontier.is_set():
+            return original_tick(producer)
+        return _ready_producer_result(0)
+
+    monkeypatch.setattr(_FakeProducer, "tick", stalled_then_ready)
+    harness = _Harness(
+        tmp_path,
+        poll_interval_seconds=0.02,
+        wait_for_initial_pressure=True,
+        pressure_health_sequence=[_pressure_health(clean=True)],
+    )
+    harness.worker.producer_timeout_seconds = 0.05
+    harness.worker.start()
+
+    try:
+        suspended = _await_worker_health(
+            harness.worker,
+            lambda health: (
+                health["fatal"] is True
+                or health.get("producer_frontier_timeout_cycles", 0) >= 2
+            ),
+        )
+        assert suspended["running"] is True
+        assert suspended["fatal"] is False
+        assert suspended["ready"] is False
+        assert suspended["initial_prime_state"] == "recovering"
+        assert suspended["candidate_reader"]["installed"] is False
+        assert harness.source is not None
+        assert harness.publisher is not None
+        assert harness.source.read_count == 1
+        assert harness.publisher.accepted_through == 1
+        assert harness.publisher.poisoned is False
+
+        release_frontier.set()
+        recovered = _await_worker_health(
+            harness.worker,
+            lambda health: health["ready"] is True,
+        )
+        assert recovered["running"] is True
+        assert recovered["fatal"] is False
+        assert recovered["initial_prime_state"] == "ready"
+        assert recovered["producer_frontier_timeout_cycles"] >= 2
+        assert recovered["candidate_reader"]["installed"] is True
+        assert harness.source.read_count == 1
+        assert harness.publisher.accepted_through == 1
+        assert harness.publisher.durable_through == 1
+        assert harness.publisher.poisoned is False
+    finally:
+        release_frontier.set()
+        harness.worker.close(join_timeout_seconds=1.0)
+
+
+def test_synchronous_initial_producer_timeout_remains_fatal(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    harness = _Harness(tmp_path)
+
+    def producer_timeout(
+        _target: int,
+        *,
+        initial_cycle_deadline: float | None = None,
+    ) -> None:
+        assert initial_cycle_deadline is None
+        raise CapturedPaperSelectionRuntimeError(
+            "PRODUCER_FRONTIER_TIMEOUT",
+            "selection producer did not reach a ready gap-free frontier",
+        )
+
+    monkeypatch.setattr(harness.worker, "_drain_producer_to", producer_timeout)
+
+    with pytest.raises(CapturedPaperSelectionRuntimeError) as failure:
+        harness.worker.start()
+
+    assert failure.value.code == "PRODUCER_FRONTIER_TIMEOUT"
+    health = harness.worker.health()
+    assert health["running"] is False
+    assert health["fatal"] is True
+    assert health["candidate_reader"]["installed"] is False
+    assert harness.source is not None
+    assert harness.publisher is not None
+    assert harness.source.read_count == 1
+    assert harness.publisher.accepted_through == 1
+    assert harness.publisher.poisoned is True
+    assert harness.writer is not None and harness.writer.closed is True
+
+
 def test_periodic_transient_producer_database_failure_suspends_then_recovers(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

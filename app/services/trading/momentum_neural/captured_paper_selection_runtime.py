@@ -1868,12 +1868,17 @@ class CapturedPaperSelectionLifecycleWorker:
                 )
                 break
             except CapturedPaperSelectionRuntimeError as exc:
-                if initial or exc.code != "PRODUCER_FRONTIER_TIMEOUT":
+                if (
+                    exc.code != "PRODUCER_FRONTIER_TIMEOUT"
+                    or (initial and not self.wait_for_initial_pressure)
+                ):
                     raise
-                # A periodic producer stall is an availability failure, not
-                # evidence corruption.  Retry the same durable target without
-                # rereading or republishing source input.  Gap, backwards,
-                # malformed, poisoned, and clock failures remain terminal.
+                # A producer stall in the background initial-prime or periodic
+                # lane is an availability failure, not evidence corruption.
+                # Retry the same durable target without rereading or
+                # republishing source input.  Strict synchronous initial
+                # startup and all gap/backwards/malformed/poisoned/clock
+                # failures remain terminal.
                 self.deferred_reader.suspend(
                     "selection_producer_frontier_pending"
                 )
