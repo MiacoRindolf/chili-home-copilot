@@ -111,12 +111,32 @@ APPROVED_STRATEGY_FLAGS_BY_SLUG = (
         "sub-vwap-trap",
         "chili_momentum_sub_vwap_trap_entry_enabled",
     ),
+    (
+        "chase-defer",
+        "chili_momentum_chase_defer_enabled",
+    ),
+    (
+        "whipsaw-escalation",
+        "chili_momentum_whipsaw_rapid_escalation_enabled",
+    ),
 )
 DEFAULT_ARM = "intended"
+# CLOSED compound arms: named multi-flag-off vectors. NOT a free-form grammar —
+# each entry is an operator-approved, hash-bound vector like every other arm.
+# "intended-minus-autopsy-0727" = the 2026-07-27 lever PR's parity vector
+# (post-PR build with BOTH new levers OFF == the pre-PR "intended" vector);
+# single-minus arms cannot express a two-flag-off parity proof.
+COMPOUND_STRATEGY_ARMS = {
+    "intended-minus-autopsy-0727": (
+        "chili_momentum_chase_defer_enabled",
+        "chili_momentum_whipsaw_rapid_escalation_enabled",
+    ),
+}
 STRATEGY_ARM_CHOICES = (
     "base",
     "intended",
     *(f"intended-minus-{slug}" for slug, _ in APPROVED_STRATEGY_FLAGS_BY_SLUG),
+    *COMPOUND_STRATEGY_ARMS,
 )
 UNSCOREABLE_POST_SELECTION_ARMS = (
     "intended-minus-universe-float",
@@ -130,6 +150,8 @@ POST_SELECTION_SCOREABLE_POLICY_FLAGS = (
     "chili_momentum_bail_on_no_confirmation_enabled",
     "chili_momentum_fresh_ignition_reentry_bypass_enabled",
     "chili_momentum_sub_vwap_trap_entry_enabled",
+    "chili_momentum_chase_defer_enabled",
+    "chili_momentum_whipsaw_rapid_escalation_enabled",
 )
 POST_SELECTION_UNSCOREABLE_POLICY_FLAGS = (
     "chili_momentum_universe_float_gate_enabled",
@@ -189,7 +211,7 @@ WHERE symbol = %(s)s AND observed_at >= %(a)s AND observed_at < %(b)s AND price 
 
 
 def resolve_strategy_policy(arm: str) -> dict:
-    """Return the complete closed nine-flag vector for one named replay arm."""
+    """Return the complete closed operator-flag vector for one named replay arm."""
 
     flags = {
         flag: arm != "base"
@@ -199,6 +221,9 @@ def resolve_strategy_policy(arm: str) -> dict:
         pass
     elif arm == "intended":
         pass
+    elif arm in COMPOUND_STRATEGY_ARMS:
+        for flag in COMPOUND_STRATEGY_ARMS[arm]:
+            flags[flag] = False
     elif arm.startswith("intended-minus-"):
         slug = arm.removeprefix("intended-minus-")
         matches = [

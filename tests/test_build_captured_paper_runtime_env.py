@@ -368,6 +368,12 @@ def test_all_nine_operator_kill_switches_round_trip_false(
         "CHILI_MOMENTUM_UNIVERSE_FLOAT_GATE_ENABLED": (
             "chili_momentum_universe_float_gate_enabled"
         ),
+        "CHILI_MOMENTUM_CHASE_DEFER_ENABLED": (
+            "chili_momentum_chase_defer_enabled"
+        ),
+        "CHILI_MOMENTUM_WHIPSAW_RAPID_ESCALATION_ENABLED": (
+            "chili_momentum_whipsaw_rapid_escalation_enabled"
+        ),
     }
     strategy = {
         **ORTEX_STRATEGY_POLICY,

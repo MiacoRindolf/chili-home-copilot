@@ -90,11 +90,14 @@ def _literal_assignment(relative: str, name: str):
     raise AssertionError(f"{relative} does not define literal {name}")
 
 
-def test_resolved_strategy_policy_binds_all_nine_operator_flags():
+def test_resolved_strategy_policy_binds_all_operator_flags():
+    # 9 weekend levers + the two 2026-07-27 autopsy levers (chase-defer,
+    # whipsaw-escalation) — the roster IS the per-lever A/B surface, so a new
+    # approved lever lands here deliberately, never via FLAGS_JSON.
     pairs = batch.APPROVED_STRATEGY_FLAGS_BY_SLUG
-    assert len(pairs) == 9
-    assert len({slug for slug, _ in pairs}) == 9
-    assert len({flag for _, flag in pairs}) == 9
+    assert len(pairs) == 11
+    assert len({slug for slug, _ in pairs}) == 11
+    assert len({flag for _, flag in pairs}) == 11
 
     intended = batch.resolve_strategy_policy("intended")
     baseline = batch.resolve_strategy_policy("base")
@@ -115,7 +118,26 @@ def test_resolved_strategy_policy_binds_all_nine_operator_flags():
         assert doc["flags"][flag] is False
         assert sum(value is False for value in doc["flags"].values()) == 1
         hashes.add(batch.strategy_policy_sha256(doc))
-    assert len(hashes) == 10
+    assert len(hashes) == 12
+
+    # COMPOUND arms stay CLOSED: exactly one operator-approved multi-flag-off
+    # vector (the 2026-07-27 parity arm), each named flag drawn from the
+    # approved roster, flipping EXACTLY its declared flags and nothing else.
+    assert set(batch.COMPOUND_STRATEGY_ARMS) == {"intended-minus-autopsy-0727"}
+    approved_flags = {flag for _, flag in pairs}
+    for arm, off_flags in batch.COMPOUND_STRATEGY_ARMS.items():
+        assert arm in batch.STRATEGY_ARM_CHOICES
+        assert set(off_flags) <= approved_flags
+        doc = batch.resolve_strategy_policy(arm)
+        assert doc["label"] == arm
+        assert {f for f, v in doc["flags"].items() if v is False} == set(off_flags)
+        hashes.add(batch.strategy_policy_sha256(doc))
+    parity = batch.resolve_strategy_policy("intended-minus-autopsy-0727")
+    assert parity["flags"]["chili_momentum_chase_defer_enabled"] is False
+    assert parity["flags"]["chili_momentum_whipsaw_rapid_escalation_enabled"] is False
+    assert sum(v is False for v in parity["flags"].values()) == 2
+    batch.require_scoreable_post_selection_arm("intended-minus-autopsy-0727")
+    assert len(hashes) == 13
 
 
 @pytest.mark.parametrize(
@@ -141,6 +163,11 @@ def test_driver_and_batch_use_the_same_closed_strategy_policy_allowlist():
         "APPROVED_STRATEGY_FLAGS_BY_SLUG",
     )
     assert tuple(driver_pairs) == batch.APPROVED_STRATEGY_FLAGS_BY_SLUG
+    driver_compound = _literal_assignment(
+        "scripts/replay_ab_dark_flags.py",
+        "COMPOUND_STRATEGY_ARMS",
+    )
+    assert dict(driver_compound) == batch.COMPOUND_STRATEGY_ARMS
 
 
 def test_replay_execution_scope_is_hash_bound_and_refuses_upstream_arms():
