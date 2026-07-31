@@ -974,7 +974,13 @@ def replay_fill_inventory_is_flat(fills: list[dict]) -> bool:
         for fill in fills
         if fill.get("side") == "sell"
     )
-    return math.isclose(bought, sold, rel_tol=0.0, abs_tol=1e-9)
+    # The driver's FILL lines quantize each qty at 1e-10 (_fmt_fill_qty in
+    # replay_ab_dark_flags.py — the mock's volume-capped partials are fractional
+    # shares), so the parsed sums can drift from the raw inventory by up to
+    # 5e-11 per fill. Budget exactly that; a REAL inventory leak is at least one
+    # venue base increment — orders of magnitude above this bound.
+    tolerance = max(1e-9, 5e-11 * len(fills))
+    return math.isclose(bought, sold, rel_tol=0.0, abs_tol=tolerance)
 
 
 def normalize_sink_fill_event(ts, event_type: str, payload, *, event_id=None) -> dict:

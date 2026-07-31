@@ -663,6 +663,16 @@ class AsOfProvider:
         return bars.copy()
 
 
+def _fmt_fill_qty(q: float) -> str:
+    """FILL-line qty at 1e-10 quantization (trailing zeros stripped). The mock's
+    volume-capped partials are FRACTIONAL shares; the old {q:.0f} print rounded
+    each leg independently, so one split round-trip could parse as net ±1 share
+    (phantom oversell → batch coverage_unavailable on a truly flat window). The
+    batch inventory check budgets exactly this per-fill quantization."""
+    s = f"{float(q):.10f}".rstrip("0").rstrip(".")
+    return s or "0"
+
+
 def run_arm(label, grid, ticks, flags):
     """Seed a fresh queued_live session + real ticks in SIM, run the REAL FSM over the
     grid with the given settings-flag overrides, mine the fills -> PnL + entry evidence."""
@@ -1024,9 +1034,9 @@ def run_arm(label, grid, ticks, flags):
         for (ts, et, reason, px) in _entry_trace:
             print(f"    {ts[11:19]} | {et:32s} | {str(reason)[:34]:34s} | {px}")
     for i, (p, q) in enumerate(buys):
-        print(f"    BUY  {q:.0f} @ {p:.4f}")
+        print(f"    BUY  {_fmt_fill_qty(q)} @ {p:.4f}")
     for i, (p, q) in enumerate(sells):
-        print(f"    SELL {q:.0f} @ {p:.4f}")
+        print(f"    SELL {_fmt_fill_qty(q)} @ {p:.4f}")
     print(f"  grind events: {len(grind_evts)}  {grind_evts[:3]}")
     print(f"  escalation events: {len(esc_evts)}  {esc_evts[:3]}")
     print(f"  >>> {label} PnL = {pnl:+.2f} USD")
