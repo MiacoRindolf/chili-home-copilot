@@ -483,6 +483,7 @@ class SqlAlchemyCapturedViabilitySnapshotSource:
         self.wall_clock = wall_clock
         self._source_to_target = source_to_target
         self._last_hub_snapshot_sha256: str | None = None
+        self._last_cohort_symbol: str | None = None
 
         # Identity-stream payloads are the exact canonical objects whose hashes
         # the scorer consumes.  Do not wrap them in a second envelope: that
@@ -1077,7 +1078,66 @@ class SqlAlchemyCapturedViabilitySnapshotSource:
                     continue
             if not eligible_symbols:
                 _reject("derived_source_current_snapshot_empty")
-            for symbol_key in sorted(eligible_symbols):
+            # Publish one complete symbol cohort per hub generation.  The
+            # captured queue is atomic at the returned tuple boundary: while
+            # that tuple is being resolved/published, admission is suspended.
+            # Resolving every fresh symbol here therefore aged the first
+            # usable cohort beyond the configured market-context TTL that the
+            # initial provider correctly enforces.  A cohort remains all bound
+            # routes for one symbol (never a partial route set).  Select from
+            # PAPER+LIVE-eligible source cohorts whenever any exist and walk
+            # that pool in stable round-robin order.  The first cohort is
+            # current-hub/newest first; subsequent hub generations advance the
+            # cursor so one repeatedly ticking symbol cannot starve its peers.
+            # If one symbol is malformed, continue to the next ranked complete
+            # cohort so a single bad dependency cannot starve the universe.
+            hub_equity_symbols = {
+                str(value) for value in hub["equity_symbols"]
+            }
+
+            source_trade_eligible_symbols = {
+                symbol_key
+                for symbol_key in eligible_symbols
+                if any(
+                    bool(row.paper_eligible) and bool(row.live_eligible)
+                    for row in rows_by_symbol[symbol_key]
+                )
+            }
+            candidate_symbols = sorted(
+                source_trade_eligible_symbols or eligible_symbols
+            )
+
+            def initial_cohort_rank(
+                symbol_key: str,
+            ) -> tuple[int, float, str]:
+                group = rows_by_symbol[symbol_key]
+                freshness_floor = min(
+                    _utc(
+                        row.freshness_ts,
+                        "derived_source_viability_freshness",
+                    )
+                    for row in group
+                )
+                return (
+                    0 if symbol_key in hub_equity_symbols else 1,
+                    -freshness_floor.timestamp(),
+                    symbol_key,
+                )
+
+            last_cohort_symbol = self._last_cohort_symbol
+            if last_cohort_symbol in candidate_symbols:
+                cursor = candidate_symbols.index(last_cohort_symbol)
+                ranked_symbols = (
+                    candidate_symbols[cursor + 1 :]
+                    + candidate_symbols[: cursor + 1]
+                )
+            else:
+                ranked_symbols = sorted(
+                    candidate_symbols,
+                    key=initial_cohort_rank,
+                )
+
+            for symbol_key in ranked_symbols:
                 group_prepared: list[dict[str, Any]] = []
                 symbol = str(symbol_key or "").strip().upper()
                 if symbol not in symbols or _SYMBOL_RE.fullmatch(symbol) is None:
@@ -1176,6 +1236,8 @@ class SqlAlchemyCapturedViabilitySnapshotSource:
                 except (KeyError, TypeError, ValueError):
                     continue
                 prepared.extend(group_prepared)
+                self._last_cohort_symbol = symbol_key
+                break
         finally:
             try:
                 db.rollback()
