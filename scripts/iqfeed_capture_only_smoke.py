@@ -1090,10 +1090,30 @@ def run_capture_only_preactivation_smoke(
             role="iqfeed_depth_bridge",
             preflight=preflight,
         )
+    composition_pressure_sample = configuration.pressure_sample
+    if configuration.pressure_sampler is not None:
+        # Cold bridge imports and source verification can outlive the pinned
+        # five-second pressure window.  Refresh at the composition boundary;
+        # the bootstrap still rehashes its inputs and independently rejects a
+        # stale, future-dated, malformed, or mismatched replacement.
+        try:
+            composition_pressure_sample = configuration.pressure_sampler()
+        except BaseException as exc:
+            raise CaptureOnlySmokeError(
+                "PRESSURE_SAMPLE_UNAVAILABLE",
+                "pressure re-sampling failed before composition",
+            ) from exc
+        if not isinstance(
+            composition_pressure_sample, type(configuration.pressure_sample)
+        ):
+            raise CaptureOnlySmokeError(
+                "PRESSURE_SAMPLE_UNAVAILABLE",
+                "pressure re-sampling returned a foreign object",
+            )
     try:
         composition = factory(
             preflight,
-            pressure_sample=configuration.pressure_sample,
+            pressure_sample=composition_pressure_sample,
             wall_clock=wall_clock,
             monotonic_clock=monotonic_clock,
         )
