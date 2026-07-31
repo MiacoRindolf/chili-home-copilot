@@ -683,6 +683,11 @@ def pair_round_trips(fills: list[dict]) -> list[dict]:
     """
     trades: list[dict] = []
     open_qty = buy_qty = buy_cost = sell_qty = sell_proceeds = 0.0
+    # Driver FILL lines quantize each qty at 1e-10 (_fmt_fill_qty in
+    # replay_ab_dark_flags.py), so cumulative open-quantity drift is bounded by
+    # 5e-11 per fill. Budget exactly that; a real oversell is >= one venue base
+    # increment — orders of magnitude above this slack.
+    slack = max(1e-9, 5e-11 * len(fills or []))
     for index, f in enumerate(fills or []):
         if not isinstance(f, dict):
             raise ValueError(f"fill {index} must be an object")
@@ -707,12 +712,12 @@ def pair_round_trips(fills: list[dict]) -> list[dict]:
             buy_qty += qty
             buy_cost += qty * px
             continue
-        if qty > open_qty + 1e-9:
+        if qty > open_qty + slack:
             raise ValueError(f"fill {index} sells more quantity than is open")
         open_qty -= qty
         sell_qty += qty
         sell_proceeds += qty * px
-        if open_qty <= 1e-9:
+        if open_qty <= slack:
             if buy_qty <= 0 or abs(buy_qty - sell_qty) > 1e-7:
                 raise ValueError("fill cycle quantity does not close exactly")
             trades.append({
@@ -722,7 +727,7 @@ def pair_round_trips(fills: list[dict]) -> list[dict]:
                 "pnl_usd": round(sell_proceeds - buy_cost, 2),
             })
             open_qty = buy_qty = buy_cost = sell_qty = sell_proceeds = 0.0
-    if open_qty > 1e-9:
+    if open_qty > slack:
         raise ValueError("fill set leaves an open quantity")
     return trades
 

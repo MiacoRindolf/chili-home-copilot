@@ -1036,3 +1036,115 @@ def test_unsafe_harvest_and_network_fetch_tools_are_not_shipped():
     assert "import yfinance" not in driver
     assert "continuing tick-only" not in driver
     assert "CHILI_REPLAY_PREPEND_CACHE_SHA256 is required" in driver
+
+
+def test_driver_fill_lines_do_not_round_fractional_quantities():
+    """TVRD|2026-07-07 regression: the mock's volume-capped partials fill
+    FRACTIONAL shares; printing each FILL qty with {q:.0f} rounded the legs of
+    one split round-trip independently (178.25 -> 178 vs 26.6+151.65 -> 27+152),
+    so a raw-flat window parsed as net -1 share -> coverage_unavailable."""
+    driver = (ROOT / "scripts" / "replay_ab_dark_flags.py").read_text(encoding="utf-8")
+    assert "{q:.0f} @" not in driver
+    assert 'BUY  {_fmt_fill_qty(q)}' in driver
+    assert 'SELL {_fmt_fill_qty(q)}' in driver
+    # The helper's quantization is the budget the batch/scorecard checks assume.
+    assert 'f"{float(q):.10f}"' in driver
+
+
+def test_fill_inventory_flat_budgets_print_quantization_only():
+    def fills(buys, sells):
+        return (
+            [{"side": "buy", "qty": q, "px": 2.75} for q in buys]
+            + [{"side": "sell", "qty": q, "px": 2.9} for q in sells]
+        )
+
+    # The exact TVRD|2026-07-07 failure shape survives as a detected leak: the
+    # OLD integer-rounded log quantities really do net -1 whole share.
+    assert batch.replay_fill_inventory_is_flat(
+        fills([178.0], [27.0, 152.0])
+    ) is False
+    # The same round-trip printed at 1e-10 quantization is flat.
+    assert batch.replay_fill_inventory_is_flat(
+        fills([178.25], [26.6, 151.65])
+    ) is True
+    # Per-fill print quantization (<= 5e-11 each) is budgeted by fill count...
+    n_side = 29
+    drift = 5e-11 * (2 * n_side) * 0.9
+    assert batch.replay_fill_inventory_is_flat(
+        fills([1.0] * n_side, [1.0] * (n_side - 1) + [1.0 + drift])
+    ) is True
+    # ...but the budget does NOT stretch for small fill sets (2 fills -> 1e-9).
+    assert batch.replay_fill_inventory_is_flat(
+        fills([1.0], [1.0 + 2e-9])
+    ) is False
+    # A real one-share / one-increment leak always fails, at any fill count.
+    assert batch.replay_fill_inventory_is_flat(
+        fills([1.0] * n_side, [1.0] * (n_side - 1) + [2.0])
+    ) is False
+
+
+def test_parse_driver_stdout_round_trips_fractional_fill_quantities():
+    policy = batch.resolve_strategy_policy("intended")
+    policy_sha256 = batch.strategy_policy_sha256(policy)
+    scope_sha256 = batch.execution_scope_sha256(batch.replay_execution_scope())
+    out = "\n".join(
+        [
+            f"[STRATEGY_POLICY=intended] sha256={policy_sha256}",
+            f"[EXECUTION_SCOPE=post-selection-fsm] sha256={scope_sha256}",
+            "final_state=watching_live",
+            "    BUY  178.25 @ 2.7500",
+            "    SELL 26.6 @ 2.9100",
+            "    SELL 151.65 @ 2.8100",
+            "[ARM=intended] TVRD PnL +12.34 entries=1 exits=2",
+        ]
+    )
+    status, parsed = batch.parse_driver_stdout(
+        out,
+        expected_symbol="TVRD",
+        expected_arm="intended",
+        expected_policy_sha256=policy_sha256,
+        expected_execution_scope_sha256=scope_sha256,
+    )
+    assert status == "ok"
+    assert [f["qty"] for f in parsed["fills"]] == [178.25, 26.6, 151.65]
+    assert batch.replay_fill_inventory_is_flat(parsed["fills"]) is True
+
+
+def test_pair_round_trips_closes_print_quantized_fractional_cycles():
+    scorecard = _load("replay_scorecard", "scripts/replay_scorecard.py")
+    # Print order is all buys then all sells (the driver emits the two lists
+    # separately); a fractional split cycle must still close.
+    trades = scorecard.pair_round_trips(
+        [
+            {"side": "buy", "qty": 178.25, "px": 2.75},
+            {"side": "sell", "qty": 26.6, "px": 2.91},
+            {"side": "sell", "qty": 151.65, "px": 2.81},
+        ]
+    )
+    assert len(trades) == 1
+    assert trades[0]["qty"] == 178.25
+    # Cumulative 5e-11-per-fill print drift on a many-fill window stays within
+    # the slack budget instead of raising "sells more quantity than is open".
+    n_side = 29
+    drifted = (
+        [{"side": "buy", "qty": 1.0, "px": 2.75} for _ in range(n_side)]
+        + [{"side": "sell", "qty": 1.0, "px": 2.9} for _ in range(n_side - 1)]
+        + [{"side": "sell", "qty": 1.0 + 5e-11 * (2 * n_side) * 0.9, "px": 2.9}]
+    )
+    assert len(scorecard.pair_round_trips(drifted)) == 1
+    # A real oversell (one whole share) still fails closed.
+    with pytest.raises(ValueError, match="sells more"):
+        scorecard.pair_round_trips(
+            [
+                {"side": "buy", "qty": 178.0, "px": 2.75},
+                {"side": "sell", "qty": 179.0, "px": 2.9},
+            ]
+        )
+    # A real stranded remainder still fails closed.
+    with pytest.raises(ValueError, match="open quantity"):
+        scorecard.pair_round_trips(
+            [
+                {"side": "buy", "qty": 178.0, "px": 2.75},
+                {"side": "sell", "qty": 177.0, "px": 2.9},
+            ]
+        )
