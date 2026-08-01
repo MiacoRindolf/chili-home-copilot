@@ -7,10 +7,14 @@ import pytest
 from sqlalchemy import text
 
 from app.config import settings
+from app.models.captured_paper_selection_frontier import (
+    CapturedPaperSelectionRouteState,
+)
 from app.models.trading import (
     BrainBatchJob,
     MomentumAutomationOutcome,
     MomentumStrategyVariant,
+    MomentumSymbolViability,
     Trade,
     TradingAutomationEvent,
     TradingAutomationRuntimeSnapshot,
@@ -105,6 +109,132 @@ def _variant(db):
     return row
 
 
+def _paper_variant(db, key: str):
+    row = MomentumStrategyVariant(
+        family="ross_momentum",
+        variant_key=key,
+        label=f"Captured PAPER {key}",
+        params_json={},
+        is_active=True,
+        execution_family="alpaca_spot",
+    )
+    db.add(row)
+    db.flush()
+    return row
+
+
+def _captured_route(
+    db,
+    *,
+    symbol: str,
+    variant,
+    sequence: int,
+    observed_at: datetime,
+    state: str = "eligible",
+    paper_eligible: bool = False,
+    live_eligible: bool = False,
+    warning: str | None = None,
+):
+    from app.services.trading.momentum_neural.captured_paper_initial_candidate_reader import (
+        _PROVENANCE_SCHEMA_VERSION,
+        _viability_observation_sha256,
+    )
+
+    authority_sha256 = "a" * 64
+    batch_sha256 = f"{sequence % 16:x}" * 64
+    evidence_sha256 = "e" * 64
+    route = CapturedPaperSelectionRouteState(
+        account_scope="alpaca:paper",
+        expected_account_id=_PAPER_ACCOUNT_ID,
+        activation_generation=_PAPER_RUNTIME_GENERATION,
+        execution_family="alpaca_spot",
+        authority_sha256=authority_sha256,
+        symbol=symbol,
+        variant_id=variant.id,
+        latest_source_sequence=sequence,
+        state=state,
+        evidence_sha256=evidence_sha256,
+        batch_sha256=batch_sha256,
+        source_event_at=observed_at - timedelta(seconds=1),
+        source_available_at=observed_at,
+        version=1,
+        state_sha256="f" * 64,
+        created_at=observed_at,
+        updated_at=observed_at,
+    )
+    db.add(route)
+    viability = None
+    if state == "eligible":
+        provenance = {
+            "schema_version": _PROVENANCE_SCHEMA_VERSION,
+            "account_scope": "alpaca:paper",
+            "expected_account_id": _PAPER_ACCOUNT_ID,
+            "activation_generation": _PAPER_RUNTIME_GENERATION,
+            "authority_sha256": authority_sha256,
+            "policy_sha256": "1" * 64,
+            "settings_projection_sha256": "2" * 64,
+            "code_build_sha256": "3" * 64,
+            "variant_set_sha256": "4" * 64,
+            "variant_id": variant.id,
+            "batch_sha256": batch_sha256,
+            "observation_sha256": evidence_sha256,
+            "source_name": "test_source",
+            "source_generation": "11111111-1111-4111-8111-111111111111",
+            "source_sequence": sequence,
+            "queue_receipt_sha256": "5" * 64,
+            "coverage_receipt_sha256": "6" * 64,
+            "paper_only_strategy_override": False,
+            "live_cash_authorized": False,
+        }
+        explain = {
+            "scorer_output": {
+                "warnings": [warning] if warning else [],
+                "rationale": "persisted test rationale",
+            },
+            "captured_paper_selection_producer": provenance,
+        }
+        viability = MomentumSymbolViability(
+            symbol=symbol,
+            scope="symbol",
+            variant_id=variant.id,
+            viability_score=0.67 if live_eligible else 0.31,
+            paper_eligible=paper_eligible,
+            live_eligible=live_eligible,
+            freshness_ts=observed_at.replace(tzinfo=None),
+            regime_snapshot_json={},
+            execution_readiness_json={
+                "captured_paper_selection_producer": provenance
+            },
+            explain_json=explain,
+            evidence_window_json={
+                "captured_paper_selection_producer": provenance
+            },
+            source_node_id="captured_paper_selection_producer",
+            correlation_id=f"test-{symbol.lower()}",
+            created_at=observed_at.replace(tzinfo=None),
+            updated_at=observed_at.replace(tzinfo=None),
+        )
+        observation_sha256 = _viability_observation_sha256(
+            viability,
+            provenance=provenance,
+            route_state=route,
+        )
+        provenance = {**provenance, "observation_sha256": observation_sha256}
+        viability.execution_readiness_json = {
+            "captured_paper_selection_producer": provenance
+        }
+        viability.explain_json = {
+            **explain,
+            "captured_paper_selection_producer": provenance,
+        }
+        viability.evidence_window_json = {
+            "captured_paper_selection_producer": provenance
+        }
+        route.evidence_sha256 = observation_sha256
+        db.add(viability)
+    return route, viability
+
+
 def test_live_monitor_requires_paired_account(client):
     response = client.get("/api/trading/momentum/replay/live")
     assert response.status_code == 403
@@ -192,6 +322,326 @@ def test_non_exact_heartbeat_never_populates_zero_session_runtime(
     response = client.get("/api/trading/momentum/replay/live")
     assert response.status_code == 200
     assert response.json()["latest_runtime_utc"] is None
+
+
+def test_live_monitor_exposes_persisted_selection_funnel_without_creating_timeline_rows(
+    paired_client,
+    db,
+    monkeypatch,
+):
+    from app.services.trading.momentum_neural.live_monitor import (
+        clear_live_monitor_caches,
+    )
+
+    client, user = paired_client
+    monkeypatch.setattr(
+        settings,
+        "chili_alpaca_expected_account_id",
+        _PAPER_ACCOUNT_ID,
+        raising=False,
+    )
+    _runtime_heartbeat(db, age_seconds=2, captured_paper=True)
+    observed_at = datetime.now(timezone.utc) - timedelta(seconds=4)
+    blocked_variant = _paper_variant(db, "live-funnel-blocked")
+    live_variant = _paper_variant(db, "live-funnel-live")
+    live_sibling_variant = _paper_variant(db, "live-funnel-live-sibling")
+    admitted_variant = _paper_variant(db, "live-funnel-admitted")
+    _captured_route(
+        db,
+        symbol="BLOCK",
+        variant=blocked_variant,
+        sequence=101,
+        observed_at=observed_at,
+        warning="Below A-setup quality floor — not a live setup",
+    )
+    _captured_route(
+        db,
+        symbol="READY",
+        variant=live_variant,
+        sequence=102,
+        observed_at=observed_at + timedelta(seconds=1),
+        paper_eligible=True,
+        live_eligible=True,
+    )
+    _captured_route(
+        db,
+        symbol="READY",
+        variant=live_sibling_variant,
+        sequence=105,
+        observed_at=observed_at + timedelta(seconds=3),
+        warning="Below A-setup quality floor — not a live setup",
+    )
+    _admit_route, admitted_viability = _captured_route(
+        db,
+        symbol="ADMIT",
+        variant=admitted_variant,
+        sequence=103,
+        observed_at=observed_at + timedelta(seconds=2),
+        paper_eligible=True,
+        live_eligible=True,
+    )
+    db.flush()
+    from app.services.trading.momentum_neural.captured_paper_initial_admission import (
+        INITIAL_SESSION_MATERIAL_SCHEMA_VERSION,
+        INITIAL_PREOWNER_MARKER_SCHEMA_VERSION,
+        _sha256_json,
+        captured_paper_initial_viability_sha256,
+    )
+    from app.services.trading.momentum_neural.captured_paper_preowner_promotion import (
+        CAPTURED_PAPER_INITIAL_MATERIAL_KEY,
+        CAPTURED_PAPER_PENDING_OWNER_KEY,
+        PENDING_OWNER_SCHEMA_VERSION,
+    )
+
+    stored_at = (observed_at + timedelta(seconds=3)).replace(tzinfo=None)
+    viability_sha256 = captured_paper_initial_viability_sha256(
+        admitted_viability
+    )
+    material_body = {
+        "schema_version": INITIAL_SESSION_MATERIAL_SCHEMA_VERSION,
+        "symbol": "ADMIT",
+        "user_id": user.id,
+        "variant_id": admitted_variant.id,
+        "account_scope": "alpaca:paper",
+        "expected_account_id": _PAPER_ACCOUNT_ID,
+        "runtime_generation": _PAPER_RUNTIME_GENERATION,
+        "execution_family": "alpaca_spot",
+        "viability_snapshot_sha256": viability_sha256,
+    }
+    initial_material_sha256 = _sha256_json(material_body)
+    material = {
+        **material_body,
+        "material_sha256": initial_material_sha256,
+    }
+    marker_body = {
+        "schema_version": INITIAL_PREOWNER_MARKER_SCHEMA_VERSION,
+        "session_id": 0,
+        "symbol": "ADMIT",
+        "user_id": user.id,
+        "variant_id": admitted_variant.id,
+        "account_scope": "alpaca:paper",
+        "expected_account_id": _PAPER_ACCOUNT_ID,
+        "runtime_generation": _PAPER_RUNTIME_GENERATION,
+        "execution_family": "alpaca_spot",
+        "viability_snapshot_sha256": viability_sha256,
+        "initial_material_sha256": initial_material_sha256,
+    }
+    session = TradingAutomationSession(
+        user_id=user.id,
+        venue="alpaca",
+        execution_family="alpaca_spot",
+        mode="live",
+        symbol="ADMIT",
+        variant_id=admitted_variant.id,
+        state="captured_paper_preowner",
+        risk_snapshot_json={},
+        source_node_id="captured_paper_initial_admission",
+        started_at=stored_at,
+        created_at=stored_at,
+        updated_at=stored_at,
+    )
+    db.add(session)
+    db.flush()
+    marker_body["session_id"] = session.id
+    marker = {**marker_body, "content_sha256": _sha256_json(marker_body)}
+    pending_body = {
+        "schema_version": PENDING_OWNER_SCHEMA_VERSION,
+        "session_id": session.id,
+        "symbol": "ADMIT",
+        "variant_id": admitted_variant.id,
+        "account_scope": "alpaca:paper",
+        "expected_account_id": _PAPER_ACCOUNT_ID,
+        "runtime_generation": _PAPER_RUNTIME_GENERATION,
+        "execution_family": "alpaca_spot",
+        "initial_material_sha256": initial_material_sha256,
+        "preowner_marker_sha256": marker["content_sha256"],
+        "viability_snapshot_sha256": viability_sha256,
+    }
+    pending = {
+        **pending_body,
+        "content_sha256": _sha256_json(pending_body),
+    }
+    session.state = "queued_live"
+    session.correlation_id = initial_material_sha256
+    session.source_node_id = "captured_paper_preowner_promotion"
+    session.risk_snapshot_json = {
+        CAPTURED_PAPER_INITIAL_MATERIAL_KEY: material,
+        CAPTURED_PAPER_PENDING_OWNER_KEY: pending,
+    }
+    db.add(
+        TradingAutomationEvent(
+            session_id=session.id,
+            ts=stored_at,
+            event_type="captured_paper_initial_preowner_committed",
+            payload_json={
+                "schema_version": INITIAL_PREOWNER_MARKER_SCHEMA_VERSION,
+                "symbol": "ADMIT",
+                "account_scope": "alpaca:paper",
+                "expected_account_id": _PAPER_ACCOUNT_ID,
+                "runtime_generation": _PAPER_RUNTIME_GENERATION,
+                "initial_material_sha256": initial_material_sha256,
+                "preowner_marker_sha256": marker["content_sha256"],
+            },
+            source_node_id="captured_paper_initial_admission",
+        )
+    )
+    db.commit()
+    clear_live_monitor_caches()
+
+    response = client.get("/api/trading/momentum/replay/live")
+    assert response.status_code == 200
+    body = response.json()
+    assert body["symbols"] == []
+    assert body["series"] == {}
+    funnel = body["selection_funnel"]
+    assert funnel["status"] == "ready"
+    assert funnel["counts"] == {
+        "monitored": 3,
+        "routed_scored": 3,
+        "live_eligible": 2,
+        "setup_admitted": 1,
+    }
+    rows = {row["symbol"]: row for row in funnel["rows"]}
+    assert rows["BLOCK"]["route_state"] == "scored"
+    assert rows["BLOCK"]["stage"] == "routed_scored"
+    assert rows["BLOCK"]["live_eligible"] is False
+    assert "not a live setup" in rows["BLOCK"]["veto_reason"]
+    assert rows["READY"]["stage"] == "live_eligible"
+    assert rows["READY"]["paper_eligible"] is True
+    assert rows["READY"]["route_count"] == 2
+    assert rows["READY"]["variant_id"] == live_variant.id
+    assert rows["READY"]["veto_reason"] is None
+    assert rows["ADMIT"]["stage"] == "setup_admitted"
+    assert rows["ADMIT"]["session_id"] == session.id
+    assert rows["ADMIT"]["session_state"] == "queued_live"
+    assert all(row["age_seconds"] is not None for row in rows.values())
+    assert body["observer"]["broker_calls"] == 0
+    assert body["observer"]["provider_calls"] == 0
+    assert body["observer"]["writes"] == 0
+
+
+def test_live_monitor_coverage_tombstone_never_reuses_older_eligible_viability(
+    paired_client,
+    db,
+    monkeypatch,
+):
+    from app.services.trading.momentum_neural.live_monitor import (
+        clear_live_monitor_caches,
+    )
+
+    client, _user = paired_client
+    monkeypatch.setattr(
+        settings,
+        "chili_alpaca_expected_account_id",
+        _PAPER_ACCOUNT_ID,
+        raising=False,
+    )
+    _runtime_heartbeat(db, age_seconds=2, captured_paper=True)
+    variant = _paper_variant(db, "live-funnel-coverage")
+    observed_at = datetime.now(timezone.utc) - timedelta(seconds=3)
+    route, _viability = _captured_route(
+        db,
+        symbol="GAP",
+        variant=variant,
+        sequence=104,
+        observed_at=observed_at,
+        state="coverage_unavailable",
+    )
+    stale_provenance = {
+        "account_scope": "alpaca:paper",
+        "expected_account_id": _PAPER_ACCOUNT_ID,
+        "activation_generation": _PAPER_RUNTIME_GENERATION,
+        "authority_sha256": route.authority_sha256,
+        "variant_id": variant.id,
+        "batch_sha256": route.batch_sha256,
+        "observation_sha256": route.evidence_sha256,
+        "source_sequence": route.latest_source_sequence,
+        "paper_only_strategy_override": False,
+        "live_cash_authorized": False,
+    }
+    db.add(
+        MomentumSymbolViability(
+            symbol="GAP",
+            scope="symbol",
+            variant_id=variant.id,
+            viability_score=0.9,
+            paper_eligible=True,
+            live_eligible=True,
+            freshness_ts=(observed_at - timedelta(minutes=1)).replace(
+                tzinfo=None
+            ),
+            regime_snapshot_json={},
+            execution_readiness_json={
+                "captured_paper_selection_producer": stale_provenance
+            },
+            explain_json={
+                "scorer_output": {"warnings": []},
+                "captured_paper_selection_producer": stale_provenance,
+            },
+            evidence_window_json={
+                "captured_paper_selection_producer": stale_provenance
+            },
+            source_node_id="captured_paper_selection_producer",
+        )
+    )
+    db.commit()
+    clear_live_monitor_caches()
+
+    response = client.get("/api/trading/momentum/replay/live")
+    assert response.status_code == 200
+    funnel = response.json()["selection_funnel"]
+    assert funnel["counts"] == {
+        "monitored": 1,
+        "routed_scored": 0,
+        "live_eligible": 0,
+        "setup_admitted": 0,
+    }
+    assert funnel["rows"][0]["symbol"] == "GAP"
+    assert funnel["rows"][0]["route_state"] == "coverage_unavailable"
+    assert funnel["rows"][0]["stage"] == "monitored"
+    assert funnel["rows"][0]["live_eligible"] is False
+
+
+def test_live_monitor_rejects_viability_mutated_after_observation_hash(
+    paired_client,
+    db,
+    monkeypatch,
+):
+    from app.services.trading.momentum_neural.live_monitor import (
+        clear_live_monitor_caches,
+    )
+
+    client, _user = paired_client
+    monkeypatch.setattr(
+        settings,
+        "chili_alpaca_expected_account_id",
+        _PAPER_ACCOUNT_ID,
+        raising=False,
+    )
+    _runtime_heartbeat(db, age_seconds=2, captured_paper=True)
+    variant = _paper_variant(db, "live-funnel-mutated")
+    _route, viability = _captured_route(
+        db,
+        symbol="MUT",
+        variant=variant,
+        sequence=106,
+        observed_at=datetime.now(timezone.utc) - timedelta(seconds=2),
+        paper_eligible=False,
+        live_eligible=False,
+        warning="Not a live setup",
+    )
+    viability.paper_eligible = True
+    viability.live_eligible = True
+    db.commit()
+    clear_live_monitor_caches()
+
+    response = client.get("/api/trading/momentum/replay/live")
+    assert response.status_code == 200
+    funnel = response.json()["selection_funnel"]
+    assert funnel["counts"]["routed_scored"] == 1
+    assert funnel["counts"]["live_eligible"] == 0
+    assert funnel["rows"][0]["stage"] == "routed_scored"
+    assert funnel["rows"][0]["live_eligible"] is False
 
 
 def test_live_monitor_returns_runtime_pnl_events_and_bounded_candles(paired_client, db):

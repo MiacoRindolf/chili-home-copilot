@@ -39,8 +39,25 @@ def test_replay_page_exposes_research_fsm_console(client):
     assert b"liveAttentionReasons" in r.content
     assert b"rp-live-sort" in r.content
     assert b"rpSetLiveSort" in r.content
+    assert b"rp-live-funnel-host" in r.content
+    assert b"Captured PAPER selection funnel" in r.content
+    assert b"Pre-session candidates" in r.content
+    assert b"persisted sessions only" in r.content
+    assert b"Persisted Captured PAPER selection funnel" in r.content
+    assert b"funnel.status !== 'ready' ? ''" in r.content
+    assert b"Showing a bounded route sample" in r.content
+    assert b"renderLiveSelectionFunnel" in r.content
+    assert b"selection_funnel" in r.content
+    assert b"funnelHost.innerHTML = renderLiveSelectionFunnel(payload)" in r.content
     assert b"broker check" in r.content
     assert b"minuteNearAnchor" in r.content
+
+    source = r.text
+    function_start = source.index("function livePayloadToReplayResult")
+    function_end = source.index("\n  function ", function_start + 10)
+    conversion_body = source[function_start:function_end]
+    assert "payload.symbols" in conversion_body
+    assert "selection_funnel" not in conversion_body
 
 
 def test_replay_run_starts_thread_and_single_flights(client):
