@@ -223,6 +223,103 @@
 .rp-workspace {
   padding: 14px;
 }
+.rp-live-funnel {
+  margin: 0 0 12px;
+  border: 1px solid var(--rp-line);
+  border-radius: 8px;
+  background: var(--rp-panel-2);
+  overflow: hidden;
+}
+.rp-live-funnel-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 14px;
+  padding: 10px 12px;
+  border-bottom: 1px solid var(--rp-line);
+}
+.rp-live-funnel-head h3 {
+  margin: 0;
+  color: var(--rp-text);
+  font-size: 12px;
+}
+.rp-live-funnel-head p {
+  margin: 3px 0 0;
+  color: var(--rp-soft);
+  font-size: 10px;
+  line-height: 1.35;
+}
+.rp-live-funnel-counts {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 5px;
+}
+.rp-live-funnel-count {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 4px;
+  border: 1px solid var(--rp-line);
+  border-radius: 999px;
+  background: var(--rp-panel);
+  color: var(--rp-muted);
+  font-size: 9px;
+  padding: 3px 7px;
+  white-space: nowrap;
+}
+.rp-live-funnel-count b {
+  color: var(--rp-text);
+  font-size: 10px;
+}
+.rp-live-funnel-scroll { overflow-x: auto; }
+.rp-live-funnel-table {
+  width: 100%;
+  min-width: 690px;
+  border-collapse: collapse;
+  font-size: 10px;
+}
+.rp-live-funnel-table th,
+.rp-live-funnel-table td {
+  padding: 7px 10px;
+  border-bottom: 1px solid var(--rp-line);
+  text-align: left;
+  vertical-align: top;
+}
+.rp-live-funnel-table tr:last-child td { border-bottom: 0; }
+.rp-live-funnel-table th {
+  color: var(--rp-soft);
+  font-size: 9px;
+  font-weight: 800;
+  letter-spacing: .04em;
+  text-transform: uppercase;
+}
+.rp-live-funnel-table td { color: var(--rp-muted); }
+.rp-live-funnel-table td:first-child {
+  color: var(--rp-text);
+  font-weight: 900;
+}
+.rp-live-funnel-stage {
+  display: inline-flex;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--rp-blue) 13%, transparent);
+  color: #bfdbfe;
+  font-weight: 800;
+  padding: 2px 6px;
+  white-space: nowrap;
+}
+.rp-live-funnel-stage.eligible {
+  background: color-mix(in srgb, var(--rp-green) 13%, transparent);
+  color: var(--rp-green);
+}
+.rp-live-funnel-stage.coverage {
+  background: color-mix(in srgb, var(--rp-amber) 13%, transparent);
+  color: var(--rp-amber);
+}
+.rp-live-funnel-note {
+  padding: 12px;
+  color: var(--rp-muted);
+  font-size: 10px;
+}
 .rp-stats {
   display: grid;
   grid-template-columns: repeat(5, minmax(0, 1fr));
@@ -3595,6 +3692,72 @@
       '<span>' + esc(label) + '</span><b data-live-count="' + esc(key) + '">' + esc(count) + '</b></button>';
   }
 
+  function liveFunnelAgeLabel(row) {
+    if (!row || row.age_seconds == null || row.age_seconds === '') return 'age unavailable';
+    var age = Number(row && row.age_seconds);
+    if (!Number.isFinite(age)) return 'age unavailable';
+    if (age < 60) return Math.round(age) + 's ago';
+    if (age < 3600) return Math.round(age / 60) + 'm ago';
+    return (age / 3600).toFixed(age < 36000 ? 1 : 0) + 'h ago';
+  }
+
+  function renderLiveSelectionFunnel(payload) {
+    var funnel = payload && payload.selection_funnel || {};
+    var counts = funnel.counts || {};
+    var rows = funnel.rows || [];
+    var stageLabels = {
+      monitored: 'Monitored / coverage unavailable',
+      routed_scored: 'Routed / scored',
+      live_eligible: 'PAPER + live eligible',
+      setup_admitted: 'Setup / admission persisted'
+    };
+    var countPrefix = funnel.counts_complete === false ? '≥' : '';
+    var countHtml = funnel.status !== 'ready' ? '' : [
+      ['Monitored', counts.monitored],
+      ['Routed / scored', counts.routed_scored],
+      ['Live-eligible', counts.live_eligible],
+      ['Setup / admission', counts.setup_admitted]
+    ].map(function(item) {
+      return '<span class="rp-live-funnel-count"><b>' + esc(countPrefix + Number(item[1] || 0)) + '</b>' + esc(item[0]) + '</span>';
+    }).join('');
+    var head = '<div class="rp-live-funnel-head"><div><h3>Captured PAPER selection funnel</h3>' +
+      '<p>Pre-session candidates; “live-eligible” is a policy flag, never live-cash authorization. The timeline and order activity below contain persisted sessions only.</p></div>' +
+      '<div class="rp-live-funnel-counts">' + countHtml + '</div></div>';
+    if (funnel.status !== 'ready') {
+      return '<section class="rp-live-funnel" aria-label="Persisted Captured PAPER selection funnel">' + head +
+        '<div class="rp-live-funnel-note">Funnel unavailable: ' + esc(funnel.reason || 'no exact active PAPER identity') + '</div></section>';
+    }
+    if (!rows.length) {
+      return '<section class="rp-live-funnel" aria-label="Persisted Captured PAPER selection funnel">' + head +
+        '<div class="rp-live-funnel-note">No current persisted selection routes.</div></section>';
+    }
+    var body = rows.map(function(row) {
+      var stage = String(row.stage || 'monitored');
+      var stageClass = stage === 'setup_admitted' || stage === 'live_eligible' ? ' eligible' :
+        (stage === 'monitored' ? ' coverage' : '');
+      var routeSummary = Number(row.scored_route_count || 0) + '/' + Number(row.route_count || 0) + ' scored';
+      if (Number(row.live_eligible_route_count || 0)) {
+        routeSummary += '; ' + Number(row.live_eligible_route_count || 0) + ' eligible';
+      }
+      var score = row.viability_score == null ? '-' : Number(row.viability_score).toFixed(2);
+      var detail = stage === 'setup_admitted'
+        ? ('Session ' + (row.session_state || 'admitted'))
+        : (stage === 'live_eligible' ? 'No persisted setup/admission yet'
+          : (row.veto_reason || (row.route_state === 'coverage_unavailable'
+            ? 'Coverage unavailable' : 'No authoritative eligibility reason persisted')));
+      return '<tr><td>' + esc(row.symbol || '-') + '</td>' +
+        '<td><span class="rp-live-funnel-stage' + stageClass + '">' + esc(stageLabels[stage] || stage) + '</span></td>' +
+        '<td>' + esc(routeSummary) + '</td><td>' + esc(score) + '</td>' +
+        '<td>' + esc(liveFunnelAgeLabel(row)) + '</td><td>' + esc(detail) + '</td></tr>';
+    }).join('');
+    var truncated = funnel.truncated ? '<div class="rp-live-funnel-note">Showing a bounded route sample.' +
+      (funnel.counts_complete === false ? ' Prefixed counts are lower bounds.' : '') + '</div>' : '';
+    return '<section class="rp-live-funnel" aria-label="Persisted Captured PAPER selection funnel">' + head +
+      '<div class="rp-live-funnel-scroll"><table class="rp-live-funnel-table"><thead><tr>' +
+      '<th>Symbol</th><th>Furthest persisted stage</th><th>Routes</th><th>Score</th><th>Age</th><th>Veto / next stage</th>' +
+      '</tr></thead><tbody>' + body + '</tbody></table></div>' + truncated + '</section>';
+  }
+
   function renderLiveResearch(payload) {
     var counts = liveFilterCounts(payload);
     return '<div class="rp-live-research" id="rp-live-research">' +
@@ -3799,6 +3962,7 @@
       totals: payload.totals,
       lanes: payload.lanes,
       symbols: symbols.length,
+      selection_funnel: payload.selection_funnel,
       observer: payload.observer
     }, null, 2);
     if (!host) return;
@@ -3829,6 +3993,7 @@
     if (!symbols.length) {
       host.dataset.liveWorkspace = '1';
       host.innerHTML = '<div id="rp-live-stats">' + renderLiveStats(payload) + '</div>' +
+        '<div id="rp-live-funnel-host">' + renderLiveSelectionFunnel(payload) + '</div>' +
         renderLiveResearch(payload) +
         '<div class="rp-empty">No active or completed Chili symbols today.</div>';
       updateLiveResearch(payload);
@@ -3842,6 +4007,7 @@
         return renderLiveSymbolRow(result, sym, rpViewDomain, index < RP_EAGER_ROWS);
       }).join('');
       host.innerHTML = '<div id="rp-live-stats">' + renderLiveStats(payload) + '</div>' +
+        '<div id="rp-live-funnel-host">' + renderLiveSelectionFunnel(payload) + '</div>' +
         renderLiveResearch(payload) +
         '<div class="rp-timeline">' + renderViewportControls() + renderRuler(rpViewDomain) + rows + '</div>';
       updateLiveResearch(payload);
@@ -3852,6 +4018,8 @@
 
     var statsHost = document.getElementById('rp-live-stats');
     if (statsHost) statsHost.innerHTML = renderLiveStats(payload);
+    var funnelHost = document.getElementById('rp-live-funnel-host');
+    if (funnelHost) funnelHost.innerHTML = renderLiveSelectionFunnel(payload);
     updateLiveResearch(payload);
     document.querySelectorAll('.rp-row-live').forEach(function(row) {
       var sym = normalizeSym(row.dataset.symbol);

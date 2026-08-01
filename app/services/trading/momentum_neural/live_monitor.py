@@ -15,12 +15,16 @@ from types import SimpleNamespace
 from typing import Any, Iterable
 from zoneinfo import ZoneInfo
 
-from sqlalchemy import or_, text
+from sqlalchemy import or_, text, tuple_
 from sqlalchemy.orm import Session
 
 from ....config import settings
+from ....models.captured_paper_selection_frontier import (
+    CapturedPaperSelectionRouteState,
+)
 from ....models.trading import (
     MomentumAutomationOutcome,
+    MomentumSymbolViability,
     Trade,
     TradingAutomationEvent,
     TradingAutomationRuntimeSnapshot,
@@ -39,6 +43,11 @@ LIVE_MONITOR_EVENT_LIMIT = 400
 LIVE_MONITOR_EVENTS_PER_SYMBOL = 10
 LIVE_MONITOR_QUOTE_ROWS_PER_SYMBOL = 480
 LIVE_MONITOR_CHART_LOOKBACK_MINUTES = 45
+LIVE_MONITOR_FUNNEL_ROUTE_LIMIT = 160
+LIVE_MONITOR_FUNNEL_SYMBOL_LIMIT = 24
+
+_CAPTURED_SELECTION_PROVENANCE_KEY = "captured_paper_selection_producer"
+_CAPTURED_PREOWNER_EVENT = "captured_paper_initial_preowner_committed"
 
 ACTIVE_STATES = frozenset(
     {
@@ -115,6 +124,508 @@ def _iso_utc(value: datetime | None) -> str | None:
     else:
         value = value.astimezone(timezone.utc)
     return value.isoformat().replace("+00:00", "Z")
+
+
+def _age_seconds(now_utc: datetime, value: datetime | None) -> float | None:
+    if not isinstance(value, datetime):
+        return None
+    now = now_utc
+    if now.tzinfo is not None:
+        now = now.astimezone(timezone.utc).replace(tzinfo=None)
+    observed = value
+    if observed.tzinfo is not None:
+        observed = observed.astimezone(timezone.utc).replace(tzinfo=None)
+    return round(max(0.0, (now - observed).total_seconds()), 1)
+
+
+def _captured_viability_for_route(
+    route: Any,
+    viability: MomentumSymbolViability | None,
+) -> MomentumSymbolViability | None:
+    """Return only a current viability row bound to the exact captured route."""
+
+    from .captured_paper_initial_candidate_reader import (
+        _PROVENANCE_KEYS,
+        _PROVENANCE_SCHEMA_VERSION,
+        _viability_observation_sha256,
+    )
+
+    if route.state != "eligible" or viability is None:
+        return None
+    if (
+        viability.scope != "symbol"
+        or viability.source_node_id != _CAPTURED_SELECTION_PROVENANCE_KEY
+        or str(viability.symbol or "").upper() != str(route.symbol or "").upper()
+        or int(viability.variant_id or 0) != int(route.variant_id or 0)
+    ):
+        return None
+    containers: list[dict[str, Any]] = []
+    for raw in (
+        viability.execution_readiness_json,
+        viability.explain_json,
+        viability.evidence_window_json,
+    ):
+        provenance = _mapping(raw).get(_CAPTURED_SELECTION_PROVENANCE_KEY)
+        if not isinstance(provenance, dict):
+            return None
+        containers.append(dict(provenance))
+    provenance = containers[0]
+    if any(item != provenance for item in containers[1:]):
+        return None
+    if not (
+        frozenset(provenance) == _PROVENANCE_KEYS
+        and provenance.get("schema_version") == _PROVENANCE_SCHEMA_VERSION
+        and provenance.get("account_scope") == route.account_scope
+        and provenance.get("expected_account_id") == route.expected_account_id
+        and provenance.get("activation_generation") == route.activation_generation
+        and provenance.get("authority_sha256") == route.authority_sha256
+        and provenance.get("variant_id") == route.variant_id
+        and provenance.get("batch_sha256") == route.batch_sha256
+        and provenance.get("observation_sha256") == route.evidence_sha256
+        and provenance.get("source_sequence") == route.latest_source_sequence
+        and provenance.get("paper_only_strategy_override") is False
+        and provenance.get("live_cash_authorized") is False
+    ):
+        return None
+    try:
+        observation_sha256 = _viability_observation_sha256(
+            viability,
+            provenance=provenance,
+            route_state=route,
+        )
+    except Exception:
+        return None
+    return viability if observation_sha256 == route.evidence_sha256 else None
+
+
+def _captured_viability_veto_reason(
+    viability: MomentumSymbolViability | None,
+) -> str | None:
+    if viability is None:
+        return None
+    scorer = _mapping(_mapping(viability.explain_json).get("scorer_output"))
+    warnings = scorer.get("warnings")
+    if not isinstance(warnings, list):
+        return None
+    eligibility_tokens = (
+        "eligib",
+        "untradeable",
+        "not a live setup",
+        "veto",
+        "quality floor",
+    )
+    for raw in warnings:
+        warning = str(raw or "").strip()
+        if warning and any(token in warning.lower() for token in eligibility_tokens):
+            return warning
+    return None
+
+
+def _captured_admission_for_route(
+    *,
+    route: Any,
+    viability: MomentumSymbolViability | None,
+    admission: Any,
+    expected_account_id: str,
+    runtime_generation: str,
+) -> Any | None:
+    """Validate that a durable preowner event used this exact viability generation."""
+
+    if (
+        viability is None
+        or not bool(viability.paper_eligible)
+        or not bool(viability.live_eligible)
+        or admission is None
+        or admission.event_source_node_id != "captured_paper_initial_admission"
+        or admission.session_source_node_id
+        not in {
+            "captured_paper_initial_admission",
+            "captured_paper_preowner_promotion",
+        }
+    ):
+        return None
+    payload = _mapping(admission.payload_json)
+    snapshot = _mapping(admission.risk_snapshot_json)
+    event_at = admission.ts
+    route_available_at = route.source_available_at
+    if not isinstance(event_at, datetime) or not isinstance(
+        route_available_at, datetime
+    ):
+        return None
+    if event_at.tzinfo is not None:
+        event_at = event_at.astimezone(timezone.utc).replace(tzinfo=None)
+    if route_available_at.tzinfo is not None:
+        route_available_at = route_available_at.astimezone(timezone.utc).replace(
+            tzinfo=None
+        )
+    try:
+        from .captured_paper_initial_admission import (
+            INITIAL_SESSION_MATERIAL_SCHEMA_VERSION,
+            INITIAL_PREOWNER_MARKER_SCHEMA_VERSION,
+            _sha256_json,
+            captured_paper_initial_viability_sha256,
+        )
+        from .captured_paper_preowner_promotion import (
+            CAPTURED_PAPER_INITIAL_MATERIAL_KEY,
+            CAPTURED_PAPER_PENDING_OWNER_KEY,
+            PENDING_OWNER_SCHEMA_VERSION,
+        )
+
+        viability_sha256 = captured_paper_initial_viability_sha256(viability)
+        preowner = _mapping(snapshot.get("captured_paper_session_preowner"))
+        pending = _mapping(snapshot.get(CAPTURED_PAPER_PENDING_OWNER_KEY))
+        marker = (
+            preowner
+            if admission.session_source_node_id
+            == "captured_paper_initial_admission"
+            else pending
+        )
+        material = _mapping(
+            marker.get("captured_paper_initial_material")
+            if preowner
+            else snapshot.get(CAPTURED_PAPER_INITIAL_MATERIAL_KEY)
+        )
+        marker_body = dict(marker)
+        marker_sha256 = str(marker_body.pop("content_sha256", ""))
+        material_body = dict(material)
+        material_sha256 = str(material_body.pop("material_sha256", ""))
+        if not (
+            marker
+            and material
+            and _sha256_json(marker_body) == marker_sha256
+            and _sha256_json(material_body) == material_sha256
+        ):
+            return None
+    except Exception:
+        return None
+    expected_material = {
+        "schema_version": INITIAL_SESSION_MATERIAL_SCHEMA_VERSION,
+        "symbol": str(route.symbol or "").upper(),
+        "user_id": int(admission.session_user_id),
+        "variant_id": int(route.variant_id),
+        "account_scope": "alpaca:paper",
+        "expected_account_id": expected_account_id,
+        "runtime_generation": runtime_generation,
+        "execution_family": "alpaca_spot",
+        "viability_snapshot_sha256": viability_sha256,
+    }
+    marker_expected = {
+        "session_id": int(admission.session_id),
+        "symbol": expected_material["symbol"],
+        "variant_id": expected_material["variant_id"],
+        "account_scope": expected_material["account_scope"],
+        "expected_account_id": expected_account_id,
+        "runtime_generation": runtime_generation,
+        "execution_family": expected_material["execution_family"],
+        "initial_material_sha256": material_sha256,
+        "viability_snapshot_sha256": viability_sha256,
+    }
+    if preowner:
+        marker_expected.update(
+            {
+                "schema_version": INITIAL_PREOWNER_MARKER_SCHEMA_VERSION,
+                "user_id": int(admission.session_user_id),
+            }
+        )
+        preowner_marker_sha256 = marker_sha256
+    else:
+        marker_expected["schema_version"] = PENDING_OWNER_SCHEMA_VERSION
+        preowner_marker_sha256 = str(marker.get("preowner_marker_sha256") or "")
+    return admission if (
+        event_at >= route_available_at
+        and payload.get("schema_version")
+        == INITIAL_PREOWNER_MARKER_SCHEMA_VERSION
+        and all(
+            material.get(key) == value
+            for key, value in expected_material.items()
+        )
+        and all(marker.get(key) == value for key, value in marker_expected.items())
+        and admission.session_correlation_id == material_sha256
+        and payload.get("symbol") == expected_material["symbol"]
+        and payload.get("account_scope") == expected_material["account_scope"]
+        and payload.get("expected_account_id") == expected_account_id
+        and payload.get("runtime_generation") == runtime_generation
+        and payload.get("initial_material_sha256") == material_sha256
+        and payload.get("preowner_marker_sha256")
+        == preowner_marker_sha256
+    ) else None
+
+
+def _selection_funnel_snapshot(
+    db: Session,
+    *,
+    user_id: int,
+    now_utc: datetime,
+    heartbeat: dict[str, Any],
+) -> dict[str, Any]:
+    """Read the current captured-PAPER pre-session funnel without external I/O."""
+
+    empty_counts = {
+        "monitored": 0,
+        "routed_scored": 0,
+        "live_eligible": 0,
+        "setup_admitted": 0,
+    }
+    if heartbeat.get("ok") is not True:
+        return {
+            "status": "unavailable",
+            "reason": str(
+                heartbeat.get("reason")
+                or "captured_paper_heartbeat_unavailable"
+            ),
+            "as_of_utc": _iso_utc(now_utc),
+            "runtime_generation": None,
+            "counts": empty_counts,
+            "rows": [],
+            "row_limit": LIVE_MONITOR_FUNNEL_SYMBOL_LIMIT,
+            "counts_complete": False,
+            "truncated": False,
+        }
+    runtime_generation = str(heartbeat.get("runtime_generation") or "")
+    expected_account_id = str(heartbeat.get("expected_account_id") or "")
+    if not runtime_generation or not expected_account_id:
+        return {
+            "status": "unavailable",
+            "reason": "captured_paper_heartbeat_identity_incomplete",
+            "as_of_utc": _iso_utc(now_utc),
+            "runtime_generation": None,
+            "counts": empty_counts,
+            "rows": [],
+            "row_limit": LIVE_MONITOR_FUNNEL_SYMBOL_LIMIT,
+            "counts_complete": False,
+            "truncated": False,
+        }
+
+    route_rows = (
+        db.query(CapturedPaperSelectionRouteState)
+        .filter(
+            CapturedPaperSelectionRouteState.account_scope == "alpaca:paper",
+            CapturedPaperSelectionRouteState.expected_account_id
+            == expected_account_id,
+            CapturedPaperSelectionRouteState.activation_generation
+            == runtime_generation,
+            CapturedPaperSelectionRouteState.execution_family == "alpaca_spot",
+        )
+        .order_by(
+            CapturedPaperSelectionRouteState.symbol.asc(),
+            CapturedPaperSelectionRouteState.variant_id.asc(),
+        )
+        .limit(LIVE_MONITOR_FUNNEL_ROUTE_LIMIT + 1)
+        .all()
+    )
+    routes_truncated = len(route_rows) > LIVE_MONITOR_FUNNEL_ROUTE_LIMIT
+    route_rows = route_rows[:LIVE_MONITOR_FUNNEL_ROUTE_LIMIT]
+    if not route_rows:
+        return {
+            "status": "ready",
+            "reason": None,
+            "as_of_utc": _iso_utc(now_utc),
+            "runtime_generation": runtime_generation,
+            "counts": empty_counts,
+            "rows": [],
+            "row_limit": LIVE_MONITOR_FUNNEL_SYMBOL_LIMIT,
+            "counts_complete": True,
+            "truncated": False,
+        }
+
+    route_keys = tuple(
+        (str(row.symbol or "").upper(), int(row.variant_id))
+        for row in route_rows
+    )
+    viability_rows = (
+        db.query(MomentumSymbolViability)
+        .filter(
+            tuple_(
+                MomentumSymbolViability.symbol,
+                MomentumSymbolViability.variant_id,
+            ).in_(route_keys)
+        )
+        .all()
+    )
+    viability_by_route = {
+        (str(row.symbol or "").upper(), int(row.variant_id)): row
+        for row in viability_rows
+    }
+
+    route_symbols = sorted({symbol for symbol, _variant_id in route_keys})
+    admission_rows = (
+        db.query(
+            TradingAutomationEvent.session_id,
+            TradingAutomationEvent.id.label("event_id"),
+            TradingAutomationEvent.ts,
+            TradingAutomationEvent.payload_json,
+            TradingAutomationEvent.source_node_id.label(
+                "event_source_node_id"
+            ),
+            TradingAutomationSession.symbol,
+            TradingAutomationSession.user_id.label("session_user_id"),
+            TradingAutomationSession.variant_id,
+            TradingAutomationSession.state,
+            TradingAutomationSession.risk_snapshot_json,
+            TradingAutomationSession.correlation_id.label(
+                "session_correlation_id"
+            ),
+            TradingAutomationSession.source_node_id.label(
+                "session_source_node_id"
+            ),
+        )
+        .join(
+            TradingAutomationSession,
+            TradingAutomationSession.id == TradingAutomationEvent.session_id,
+        )
+        .filter(
+            TradingAutomationEvent.event_type == _CAPTURED_PREOWNER_EVENT,
+            TradingAutomationEvent.source_node_id
+            == "captured_paper_initial_admission",
+            TradingAutomationEvent.payload_json["account_scope"].astext
+            == "alpaca:paper",
+            TradingAutomationEvent.payload_json["expected_account_id"].astext
+            == expected_account_id,
+            TradingAutomationEvent.payload_json["runtime_generation"].astext
+            == runtime_generation,
+            TradingAutomationSession.user_id == int(user_id),
+            TradingAutomationSession.execution_family == "alpaca_spot",
+            TradingAutomationSession.mode == "live",
+            TradingAutomationSession.symbol.in_(route_symbols),
+        )
+        .order_by(
+            TradingAutomationEvent.ts.desc(),
+            TradingAutomationEvent.id.desc(),
+        )
+        .limit(LIVE_MONITOR_FUNNEL_ROUTE_LIMIT + 1)
+        .all()
+    )
+    admissions_truncated = len(admission_rows) > LIVE_MONITOR_FUNNEL_ROUTE_LIMIT
+    admissions: dict[tuple[str, int], Any] = {}
+    for row in admission_rows[:LIVE_MONITOR_FUNNEL_ROUTE_LIMIT]:
+        key = (str(row.symbol or "").upper(), int(row.variant_id or 0))
+        if key not in admissions:
+            admissions[key] = row
+
+    routes_by_symbol: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    for route in route_rows:
+        symbol = str(route.symbol or "").upper()
+        key = (symbol, int(route.variant_id))
+        raw_viability = viability_by_route.get(key)
+        viability = _captured_viability_for_route(route, raw_viability)
+        admission = _captured_admission_for_route(
+            route=route,
+            viability=viability,
+            admission=admissions.get(key),
+            expected_account_id=expected_account_id,
+            runtime_generation=runtime_generation,
+        )
+        scored = route.state == "eligible"
+        live_eligible = bool(
+            viability is not None
+            and viability.paper_eligible
+            and viability.live_eligible
+        )
+        stage = (
+            "setup_admitted"
+            if admission is not None
+            else "live_eligible"
+            if live_eligible
+            else "routed_scored"
+            if scored
+            else "monitored"
+        )
+        score = _float_or_none(
+            viability.viability_score if viability is not None else None
+        )
+        routes_by_symbol[symbol].append(
+            {
+                "symbol": symbol,
+                "variant_id": int(route.variant_id),
+                "stage": stage,
+                "route_state": "scored" if scored else "coverage_unavailable",
+                "paper_eligible": bool(
+                    viability is not None and viability.paper_eligible
+                ),
+                "live_eligible": live_eligible,
+                "viability_score": round(score, 4) if score is not None else None,
+                "observed_at": route.source_available_at,
+                "age_seconds": _age_seconds(now_utc, route.source_available_at),
+                "veto_reason": (
+                    _captured_viability_veto_reason(viability)
+                    if not live_eligible
+                    else None
+                ),
+                "session_id": (
+                    int(admission.session_id) if admission is not None else None
+                ),
+                "session_state": (
+                    str(admission.state or "") if admission is not None else None
+                ),
+            }
+        )
+
+    stage_rank = {
+        "monitored": 0,
+        "routed_scored": 1,
+        "live_eligible": 2,
+        "setup_admitted": 3,
+    }
+    all_rows: list[dict[str, Any]] = []
+    for symbol, symbol_routes in routes_by_symbol.items():
+        representative = max(
+            symbol_routes,
+            key=lambda row: (
+                stage_rank.get(str(row["stage"]), -1),
+                row["observed_at"],
+                -int(row["variant_id"]),
+            ),
+        )
+        all_rows.append(
+            {
+                **representative,
+                "route_count": len(symbol_routes),
+                "scored_route_count": sum(
+                    1 for row in symbol_routes if row["route_state"] == "scored"
+                ),
+                "live_eligible_route_count": sum(
+                    1 for row in symbol_routes if row["live_eligible"] is True
+                ),
+            }
+        )
+    all_rows = sorted(
+        all_rows,
+        key=lambda row: (
+            -stage_rank.get(str(row["stage"]), -1),
+            float(row["age_seconds"] or 0.0),
+            str(row["symbol"]),
+        ),
+    )
+    counts = {
+        "monitored": len(all_rows),
+        "routed_scored": sum(
+            1 for row in all_rows if row["scored_route_count"] > 0
+        ),
+        "live_eligible": sum(
+            1 for row in all_rows if row["live_eligible"] is True
+        ),
+        "setup_admitted": sum(
+            1 for row in all_rows if row["session_id"] is not None
+        ),
+    }
+    rows = all_rows[:LIVE_MONITOR_FUNNEL_SYMBOL_LIMIT]
+    for row in rows:
+        row["observed_at"] = _iso_utc(row["observed_at"])
+    return {
+        "status": "ready",
+        "reason": None,
+        "as_of_utc": _iso_utc(now_utc),
+        "runtime_generation": runtime_generation,
+        "counts": counts,
+        "rows": rows,
+        "row_limit": LIVE_MONITOR_FUNNEL_SYMBOL_LIMIT,
+        "counts_complete": not routes_truncated and not admissions_truncated,
+        "truncated": (
+            routes_truncated
+            or len(all_rows) > LIVE_MONITOR_FUNNEL_SYMBOL_LIMIT
+            or admissions_truncated
+        ),
+    }
 
 
 def _et_day_bounds(now_utc: datetime) -> tuple[datetime, datetime]:
@@ -737,24 +1248,54 @@ def _build_state_snapshot(db: Session, *, user_id: int, now_utc: datetime) -> di
         "trades": sum(int(row.get("trades") or 0) for row in pnl_by_symbol.values()),
     }
     totals["total_usd"] = round(totals["realized_usd"] + totals["unrealized_usd"], 2)
+    from .lane_health import captured_paper_live_runner_control_health
+
+    heartbeat = captured_paper_live_runner_control_health(
+        db,
+        expected_account_id=str(
+            getattr(settings, "chili_alpaca_expected_account_id", "") or ""
+        ),
+        now=now_utc,
+    )
+    try:
+        selection_funnel = _selection_funnel_snapshot(
+            db,
+            user_id=int(user_id),
+            now_utc=now_utc,
+            heartbeat=heartbeat,
+        )
+    except Exception:
+        logger.warning(
+            "[live_monitor] bounded selection-funnel read failed",
+            exc_info=True,
+        )
+        db.rollback()
+        selection_funnel = {
+            "status": "unavailable",
+            "reason": "selection_funnel_read_failed",
+            "as_of_utc": _iso_utc(now_utc),
+            "runtime_generation": (
+                str(heartbeat.get("runtime_generation") or "") or None
+            ),
+            "counts": {
+                "monitored": 0,
+                "routed_scored": 0,
+                "live_eligible": 0,
+                "setup_admitted": 0,
+            },
+            "rows": [],
+            "row_limit": LIVE_MONITOR_FUNNEL_SYMBOL_LIMIT,
+            "counts_complete": False,
+            "truncated": False,
+        }
     latest_update = max(
         (row.get("updated_at") for row in active_rows if isinstance(row.get("updated_at"), datetime)),
         default=None,
     )
-    if latest_update is None and not active_rows:
-        from .lane_health import captured_paper_live_runner_control_health
-
-        heartbeat = captured_paper_live_runner_control_health(
-            db,
-            expected_account_id=str(
-                getattr(settings, "chili_alpaca_expected_account_id", "") or ""
-            ),
-            now=now_utc,
-        )
-        if heartbeat.get("ok") is True:
-            heartbeat_at = heartbeat.get("heartbeat_at")
-            if isinstance(heartbeat_at, datetime):
-                latest_update = heartbeat_at
+    if latest_update is None and not active_rows and heartbeat.get("ok") is True:
+        heartbeat_at = heartbeat.get("heartbeat_at")
+        if isinstance(heartbeat_at, datetime):
+            latest_update = heartbeat_at
     return {
         "ok": True,
         "read_only": True,
@@ -766,8 +1307,11 @@ def _build_state_snapshot(db: Session, *, user_id: int, now_utc: datetime) -> di
         "totals": totals,
         "lanes": lane_summary,
         "symbols": symbols_out,
+        "selection_funnel": selection_funnel,
         "observer": {
-            "source": "persisted_runtime_events_outcomes_and_quote_tape",
+            "source": (
+                "persisted_runtime_events_outcomes_quote_tape_and_selection_funnel"
+            ),
             "broker_calls": 0,
             "provider_calls": 0,
             "writes": 0,
@@ -775,6 +1319,8 @@ def _build_state_snapshot(db: Session, *, user_id: int, now_utc: datetime) -> di
             "chart_cache_seconds": LIVE_MONITOR_CHART_TTL_SECONDS,
             "symbol_limit": LIVE_MONITOR_SYMBOL_LIMIT,
             "quote_row_cap_per_symbol": LIVE_MONITOR_QUOTE_ROWS_PER_SYMBOL,
+            "selection_funnel_route_limit": LIVE_MONITOR_FUNNEL_ROUTE_LIMIT,
+            "selection_funnel_symbol_limit": LIVE_MONITOR_FUNNEL_SYMBOL_LIMIT,
         },
     }
 
