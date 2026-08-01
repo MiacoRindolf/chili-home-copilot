@@ -2481,17 +2481,85 @@ _MODEL_PREFERENCE = (
     "llama3.2:1b",
 )
 
-_PLAN_TIMEOUT_SEC = float(os.environ.get("CHILI_PROJECT_AUTOPILOT_PLAN_TIMEOUT_SEC") or "90")
-_PLAN_NUM_PREDICT = int(os.environ.get("CHILI_PROJECT_AUTOPILOT_PLAN_NUM_PREDICT") or "700")
-_PLAN_NUM_CTX = int(os.environ.get("CHILI_PROJECT_AUTOPILOT_PLAN_NUM_CTX") or "8192")
+_LOCAL_RESOURCE_PROFILE = str(
+    os.environ.get("CHILI_PROJECT_AUTOPILOT_RESOURCE_PROFILE") or "quality"
+).strip().lower()
+if _LOCAL_RESOURCE_PROFILE not in {"balanced", "quality"}:
+    _LOCAL_RESOURCE_PROFILE = "quality"
+
+_LOCAL_RESOURCE_DEFAULTS: dict[str, dict[str, float | int | str]] = {
+    "balanced": {
+        "plan_timeout_sec": 90.0,
+        "plan_num_predict": 700,
+        "plan_num_ctx": 8192,
+        "diagnostic_timeout_sec": 150.0,
+        "diagnostic_num_predict": 900,
+        "diagnostic_num_ctx": 8192,
+        "diagnostic_recovery_timeout_sec": 150.0,
+        "diagnostic_recovery_num_predict": 700,
+        "edit_timeout_sec": 150.0,
+        "edit_num_predict": 350,
+        "edit_num_ctx": 4096,
+        "local_escalation_repair_rounds": 1,
+        "keep_alive": "15m",
+    },
+    "quality": {
+        # The target workstation has ample system RAM even though its RTX 2070
+        # has 8 GB of VRAM. These bounds intentionally permit Ollama CPU/RAM
+        # offload for difficult diagnosis and 14B repair instead of treating a
+        # 90-150 second GPU-only deadline as a quality ceiling.
+        "plan_timeout_sec": 600.0,
+        "plan_num_predict": 1200,
+        "plan_num_ctx": 12288,
+        "diagnostic_timeout_sec": 600.0,
+        "diagnostic_num_predict": 2400,
+        "diagnostic_num_ctx": 16384,
+        "diagnostic_recovery_timeout_sec": 480.0,
+        "diagnostic_recovery_num_predict": 1000,
+        "edit_timeout_sec": 600.0,
+        "edit_num_predict": 1200,
+        "edit_num_ctx": 12288,
+        "local_escalation_repair_rounds": 2,
+        "keep_alive": "30m",
+    },
+}
+
+
+def _local_resource_default(name: str) -> float | int | str:
+    return _LOCAL_RESOURCE_DEFAULTS[_LOCAL_RESOURCE_PROFILE][name]
+
+
+_PLAN_TIMEOUT_SEC = float(
+    os.environ.get("CHILI_PROJECT_AUTOPILOT_PLAN_TIMEOUT_SEC")
+    or _local_resource_default("plan_timeout_sec")
+)
+_PLAN_NUM_PREDICT = int(
+    os.environ.get("CHILI_PROJECT_AUTOPILOT_PLAN_NUM_PREDICT")
+    or _local_resource_default("plan_num_predict")
+)
+_PLAN_NUM_CTX = int(
+    os.environ.get("CHILI_PROJECT_AUTOPILOT_PLAN_NUM_CTX")
+    or _local_resource_default("plan_num_ctx")
+)
 _DIAGNOSTIC_TIMEOUT_SEC = float(
-    os.environ.get("CHILI_PROJECT_AUTOPILOT_DIAGNOSTIC_TIMEOUT_SEC") or "150"
+    os.environ.get("CHILI_PROJECT_AUTOPILOT_DIAGNOSTIC_TIMEOUT_SEC")
+    or _local_resource_default("diagnostic_timeout_sec")
 )
 _DIAGNOSTIC_NUM_PREDICT = int(
-    os.environ.get("CHILI_PROJECT_AUTOPILOT_DIAGNOSTIC_NUM_PREDICT") or "900"
+    os.environ.get("CHILI_PROJECT_AUTOPILOT_DIAGNOSTIC_NUM_PREDICT")
+    or _local_resource_default("diagnostic_num_predict")
 )
 _DIAGNOSTIC_NUM_CTX = int(
-    os.environ.get("CHILI_PROJECT_AUTOPILOT_DIAGNOSTIC_NUM_CTX") or "8192"
+    os.environ.get("CHILI_PROJECT_AUTOPILOT_DIAGNOSTIC_NUM_CTX")
+    or _local_resource_default("diagnostic_num_ctx")
+)
+_DIAGNOSTIC_RECOVERY_TIMEOUT_SEC = float(
+    os.environ.get("CHILI_PROJECT_AUTOPILOT_DIAGNOSTIC_RECOVERY_TIMEOUT_SEC")
+    or _local_resource_default("diagnostic_recovery_timeout_sec")
+)
+_DIAGNOSTIC_RECOVERY_NUM_PREDICT = int(
+    os.environ.get("CHILI_PROJECT_AUTOPILOT_DIAGNOSTIC_RECOVERY_NUM_PREDICT")
+    or _local_resource_default("diagnostic_recovery_num_predict")
 )
 _DIAGNOSTIC_DEEP_COUNCIL = str(
     os.environ.get("CHILI_PROJECT_AUTOPILOT_DIAGNOSTIC_DEEP_COUNCIL") or "true"
@@ -2520,9 +2588,18 @@ _DIAGNOSTIC_EVALUATION_MODE = str(
     os.environ.get("CHILI_PROJECT_AUTOPILOT_EVALUATION_MODE") or "false"
 ).strip().lower() in {"1", "true", "yes", "on"}
 _PLAN_PROMPT_CHAR_LIMIT = int(os.environ.get("CHILI_PROJECT_AUTOPILOT_PLAN_PROMPT_CHARS") or "24000")
-_EDIT_TIMEOUT_SEC = float(os.environ.get("CHILI_PROJECT_AUTOPILOT_EDIT_TIMEOUT_SEC") or "150")
-_EDIT_NUM_PREDICT = int(os.environ.get("CHILI_PROJECT_AUTOPILOT_EDIT_NUM_PREDICT") or "350")
-_EDIT_NUM_CTX = int(os.environ.get("CHILI_PROJECT_AUTOPILOT_EDIT_NUM_CTX") or "4096")
+_EDIT_TIMEOUT_SEC = float(
+    os.environ.get("CHILI_PROJECT_AUTOPILOT_EDIT_TIMEOUT_SEC")
+    or _local_resource_default("edit_timeout_sec")
+)
+_EDIT_NUM_PREDICT = int(
+    os.environ.get("CHILI_PROJECT_AUTOPILOT_EDIT_NUM_PREDICT")
+    or _local_resource_default("edit_num_predict")
+)
+_EDIT_NUM_CTX = int(
+    os.environ.get("CHILI_PROJECT_AUTOPILOT_EDIT_NUM_CTX")
+    or _local_resource_default("edit_num_ctx")
+)
 _EDIT_MAX_FILE_LINES = int(os.environ.get("CHILI_PROJECT_AUTOPILOT_EDIT_MAX_FILE_LINES") or "260")
 _MAX_DIAGNOSTIC_REPAIR_FILES = min(4, _MAX_FILES_PER_EDIT)
 _VALIDATION_REPAIR_ROUNDS = max(
@@ -2538,11 +2615,14 @@ _LOCAL_ESCALATION_REPAIR_ROUNDS = max(
         _VALIDATION_REPAIR_ROUNDS,
         int(
             os.environ.get("CHILI_PROJECT_AUTOPILOT_LOCAL_ESCALATION_REPAIR_ROUNDS")
-            or "1"
+            or _local_resource_default("local_escalation_repair_rounds")
         ),
     ),
 )
-_OLLAMA_KEEP_ALIVE = os.environ.get("CHILI_PROJECT_AUTOPILOT_OLLAMA_KEEP_ALIVE") or "15m"
+_OLLAMA_KEEP_ALIVE = str(
+    os.environ.get("CHILI_PROJECT_AUTOPILOT_OLLAMA_KEEP_ALIVE")
+    or _local_resource_default("keep_alive")
+)
 _MODEL_COOLDOWN_SEC = int(os.environ.get("CHILI_PROJECT_AUTOPILOT_MODEL_COOLDOWN_SEC") or "900")
 
 _STAGE_ORDER = (
@@ -6184,6 +6264,7 @@ def select_local_reasoning_model(
     from ...config import settings as _settings
 
     base = dict(base_model_info or select_local_model())
+    coder_model = str(base.get("model") or "").strip()
     configured = str(
         getattr(_settings, "chili_code_local_reasoning_model", "") or ""
     ).strip()
@@ -6202,12 +6283,14 @@ def select_local_reasoning_model(
         return {
             **base,
             "model": configured,
+            "coder_model": coder_model or configured,
             "available": True,
             "role": "reasoning",
             "fallback_to_coder": False,
         }
     return {
         **base,
+        "coder_model": coder_model,
         "role": "reasoning",
         "fallback_to_coder": True,
         "requested_reasoning_model": configured or None,
@@ -6572,7 +6655,7 @@ def _run_local_diagnostic_reasoning(
     run: ProjectAutonomyRun,
     context: dict[str, Any],
     repo_path: Path | None,
-    model_info: Mapping[str, Any],
+    model_info: dict[str, Any],
 ) -> dict[str, Any]:
     candidate_paths = _plan_candidate_files(context, repo_path, run.prompt)
     case = diagnostic_reasoning.build_case_from_prompt(
@@ -6621,51 +6704,132 @@ def _run_local_diagnostic_reasoning(
         content_json=memory_retrieval,
         commit=False,
     )
-    model_name = str(model_info.get("model") or "").strip()
+    configured_model_name = str(model_info.get("model") or "").strip()
+    coder_model_name = str(
+        model_info.get("coder_model") or configured_model_name
+    ).strip()
+    active_model_name = configured_model_name
     model_calls: list[dict[str, Any]] = []
     reasoning_round = "initial"
 
     def call_local_role(stage: str, prompt: str) -> str:
-        result = ollama_client.chat(
-            [
-                {
-                    "role": "system",
-                    "content": (
-                        "You are one role in CHILI's premium-independent diagnostic council. "
-                        "Use only supplied evidence, expose uncertainty, and return JSON only."
-                    ),
+        nonlocal active_model_name
+
+        def invoke(
+            model_name: str,
+            *,
+            role_prompt: str,
+            attempt: str,
+            think: bool,
+            timeout_sec: float,
+            num_predict: int,
+            fallback_reason: str = "",
+        ) -> Any:
+            bounded_role_prompt = (
+                "You are one member of CHILI's local-only diagnostic team. "
+                "No premium or remote model may be used for this role.\n\n"
+                + role_prompt
+            )
+            result = ollama_client.chat(
+                [
+                    {
+                        "role": "system",
+                        "content": (
+                            "You are one role in CHILI's premium-independent diagnostic council. "
+                            "Use only supplied evidence, expose uncertainty, and return JSON only."
+                        ),
+                    },
+                    {"role": "user", "content": bounded_role_prompt},
+                ],
+                model_name,
+                temperature=0.1,
+                timeout_sec=timeout_sec,
+                options={
+                    "num_predict": num_predict,
+                    "num_ctx": _DIAGNOSTIC_NUM_CTX,
+                    "keep_alive": _OLLAMA_KEEP_ALIVE,
+                    "format": "json",
                 },
-                {"role": "user", "content": prompt},
-            ],
-            model_name,
-            temperature=0.1,
+                think=think,
+            )
+            _note_model_call_result(model_name, result)
+            parsed = diagnostic_reasoning.parse_json_object(result.text or "")
+            model_calls.append(
+                {
+                    "round": reasoning_round,
+                    "stage": stage,
+                    "attempt": attempt,
+                    "model": model_name,
+                    "ok": result.ok,
+                    "usable_json": parsed is not None,
+                    "latency_ms": result.latency_ms,
+                    "tokens_out": result.tokens_out,
+                    "error": result.error,
+                    "response_chars": len(result.text or ""),
+                    "thinking_enabled": think,
+                    "fallback_reason": fallback_reason or None,
+                    "resource_profile": _LOCAL_RESOURCE_PROFILE,
+                    "timeout_sec": timeout_sec,
+                    "num_predict": num_predict,
+                    "num_ctx": _DIAGNOSTIC_NUM_CTX,
+                }
+            )
+            return result
+
+        result = invoke(
+            active_model_name,
+            role_prompt=prompt,
+            attempt="primary",
+            think=_diagnostic_stage_uses_thinking(active_model_name, stage),
             timeout_sec=_DIAGNOSTIC_TIMEOUT_SEC,
-            options={
-                "num_predict": _DIAGNOSTIC_NUM_PREDICT,
-                "num_ctx": _DIAGNOSTIC_NUM_CTX,
-                "keep_alive": _OLLAMA_KEEP_ALIVE,
-                "format": "json",
-            },
-            think=_diagnostic_stage_uses_thinking(model_name, stage),
+            num_predict=_DIAGNOSTIC_NUM_PREDICT,
         )
-        _note_model_call_result(model_name, result)
-        model_calls.append(
+        if diagnostic_reasoning.parse_json_object(result.text or "") is not None:
+            return result.text
+
+        fallback_reason = (
+            "reasoner_timeout"
+            if _model_call_should_cooldown(result.error)
+            else "empty_visible_response"
+            if not str(result.text or "").strip()
+            else "invalid_json"
+        )
+        if not coder_model_name or active_model_name == coder_model_name:
+            return ""
+
+        failed_model = active_model_name
+        active_model_name = coder_model_name
+        model_info.update(
             {
-                "round": reasoning_round,
-                "stage": stage,
-                "model": model_name,
-                "ok": result.ok,
-                "latency_ms": result.latency_ms,
-                "tokens_out": result.tokens_out,
-                "error": result.error,
-                "response_chars": len(result.text or ""),
+                "model": coder_model_name,
+                "fallback_to_coder": True,
+                "reasoning_fallback_reason": fallback_reason,
+                "failed_reasoning_model": failed_model,
             }
         )
-        return result.text if result.ok else ""
+        recovery_prompt = (
+            "The dedicated reasoner did not return usable visible JSON. Answer the same role directly and "
+            "concisely; preserve every supplied evidence id and do not add prose.\n\n"
+            + prompt
+        )
+        recovery = invoke(
+            active_model_name,
+            role_prompt=recovery_prompt,
+            attempt="coder_recovery",
+            think=False,
+            timeout_sec=_DIAGNOSTIC_RECOVERY_TIMEOUT_SEC,
+            num_predict=_DIAGNOSTIC_RECOVERY_NUM_PREDICT,
+            fallback_reason=fallback_reason,
+        )
+        return (
+            recovery.text
+            if diagnostic_reasoning.parse_json_object(recovery.text or "") is not None
+            else ""
+        )
 
     initial_debate = diagnostic_reasoning.run_local_diagnostic_debate(
         case,
-        call_local_role if model_name else None,
+        call_local_role if configured_model_name else None,
         stages_to_run=(
             ("investigator", "judge")
             if _DIAGNOSTIC_DEEP_COUNCIL
@@ -6769,7 +6933,7 @@ def _run_local_diagnostic_reasoning(
             reasoning_round = f"post_probe_{probe_index + 1}"
             latest_debate = diagnostic_reasoning.run_local_diagnostic_debate(
                 final_case,
-                call_local_role if model_name else None,
+                call_local_role if configured_model_name else None,
                 stages_to_run=("judge",),
                 previous_report=current_report,
             )
@@ -6891,7 +7055,10 @@ def _run_local_diagnostic_reasoning(
             "report": debate.get("report") or {},
             "stages": debate.get("stages") or [],
             "model_calls": model_calls,
-            "local_model": model_name or None,
+            "local_model": active_model_name or None,
+            "configured_reasoning_model": configured_model_name or None,
+            "coder_model": coder_model_name or None,
+            "resource_profile": _LOCAL_RESOURCE_PROFILE,
             "council_mode": (
                 "deep"
                 if _DIAGNOSTIC_DEEP_COUNCIL
@@ -7022,6 +7189,7 @@ def build_local_plan(
             "num_predict": _PLAN_NUM_PREDICT,
             "num_ctx": _PLAN_NUM_CTX,
             "keep_alive": _OLLAMA_KEEP_ALIVE,
+            "resource_profile": _LOCAL_RESOURCE_PROFILE,
         },
     )
     if not result.ok:

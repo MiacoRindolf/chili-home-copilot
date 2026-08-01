@@ -97,6 +97,7 @@ def test_select_local_reasoning_model_prefers_explicit_installed_reasoner(monkey
     )
 
     assert selected["model"] == "qwen3:8b"
+    assert selected["coder_model"] == "qwen2.5-coder:7b"
     assert selected["fallback_to_coder"] is False
     assert orchestrator._reasoning_model_supports_thinking(selected["model"]) is True
     assert (
@@ -126,7 +127,19 @@ def test_select_local_reasoning_model_falls_back_without_premium(monkeypatch):
     )
 
     assert selected["model"] == "qwen2.5-coder:7b"
+    assert selected["coder_model"] == "qwen2.5-coder:7b"
     assert selected["fallback_to_coder"] is True
+
+
+def test_quality_resource_profile_preserves_balanced_escape_hatch():
+    quality = orchestrator._LOCAL_RESOURCE_DEFAULTS["quality"]
+    balanced = orchestrator._LOCAL_RESOURCE_DEFAULTS["balanced"]
+
+    assert quality["diagnostic_timeout_sec"] >= 600
+    assert quality["diagnostic_num_ctx"] >= 16384
+    assert quality["plan_timeout_sec"] > balanced["plan_timeout_sec"]
+    assert quality["local_escalation_repair_rounds"] >= 2
+    assert balanced["diagnostic_timeout_sec"] == 150
 
 
 def test_plan_source_context_contains_bounded_current_code(tmp_path):
@@ -379,6 +392,114 @@ def test_build_local_plan_runs_local_diagnostic_council_before_planning(monkeypa
             {"reason": "missing_memory_scope"}
         ]
     finally:
+        db.close()
+
+
+def test_diagnostic_reasoner_timeout_recovers_on_local_coder_and_keeps_plan_local(
+    monkeypatch,
+    tmp_path,
+):
+    orchestrator._MODEL_COOLDOWNS.clear()
+    db = _sqlite_autonomy_session()
+    try:
+        target = tmp_path / "app/service.py"
+        target.parent.mkdir(parents=True)
+        target.write_text("def replay():\n    return 'old'\n", encoding="utf-8")
+        repo = CodeRepo(path=str(tmp_path), name="repo", active=True)
+        db.add(repo)
+        db.commit()
+        run = ProjectAutonomyRun(
+            run_id="pa_diagnostic_reasoner_recovery",
+            repo_id=repo.id,
+            prompt="Diagnose the replay state mismatch in app/service.py and repair its causal owner.",
+            status="running",
+            current_stage="plan",
+        )
+        db.add(run)
+        db.commit()
+        monkeypatch.setattr(settings, "chili_code_local_reasoning_model", "qwen3:8b")
+        monkeypatch.setattr(
+            orchestrator,
+            "select_local_model",
+            lambda: {
+                "model": "qwen2.5-coder:7b",
+                "available": True,
+                "installed_models": ["qwen2.5-coder:7b", "qwen3:8b"],
+                "skipped_models": {},
+            },
+        )
+        monkeypatch.setattr(
+            orchestrator,
+            "_gather_context",
+            lambda *args, **kwargs: {
+                "repos": [],
+                "insights": [],
+                "hotspots": [],
+                "relevant_files": [{"file": "app/service.py"}],
+            },
+        )
+        calls: list[dict] = []
+
+        def fake_chat(messages, model, **kwargs):
+            calls.append({"messages": messages, "model": model, **kwargs})
+            if model == "qwen3:8b":
+                return SimpleNamespace(
+                    ok=False,
+                    text="",
+                    latency_ms=600001,
+                    tokens_out=0,
+                    error="TimeoutError: timed out",
+                )
+            if "diagnostic council" in messages[0]["content"]:
+                return SimpleNamespace(
+                    ok=True,
+                    text=(
+                        '{"hypotheses":[{"hypothesis_id":"h1","claim":"state owner mismatch",'
+                        '"dimension":"state","support_evidence_ids":[],"contradict_evidence_ids":[],'
+                        '"falsification":"isolate the state transition"}],"experiments":[],'
+                        '"conclusion":{"hypothesis_id":"h1","status":"provisional",'
+                        '"evidence_ids":[],"reason":"owner remains provisional"}}'
+                    ),
+                    latency_ms=10,
+                    tokens_out=50,
+                    error=None,
+                )
+            return SimpleNamespace(
+                ok=True,
+                text=(
+                    '{"analysis":"repair state owner","files":[{"path":"app/service.py",'
+                    '"action":"modify","description":"repair replay state"}],"notes":""}'
+                ),
+                latency_ms=10,
+                tokens_out=50,
+                error=None,
+            )
+
+        monkeypatch.setattr(orchestrator.ollama_client, "chat", fake_chat)
+
+        plan = orchestrator.build_local_plan(db, run, repo)
+
+        assert plan["files"][0]["path"] == "app/service.py"
+        assert calls[0]["model"] == "qwen3:8b"
+        assert calls[0]["think"] is True
+        assert all(call["model"] == "qwen2.5-coder:7b" for call in calls[1:])
+        assert all(call["think"] is False for call in calls[1:])
+        artifact = (
+            db.query(ProjectAutonomyArtifact)
+            .filter(
+                ProjectAutonomyArtifact.run_id == run.run_id,
+                ProjectAutonomyArtifact.name == "local_diagnostic_debate",
+            )
+            .one()
+        )
+        payload = json.loads(artifact.content_json or "{}")
+        assert payload["configured_reasoning_model"] == "qwen3:8b"
+        assert payload["local_model"] == "qwen2.5-coder:7b"
+        assert payload["model_calls"][1]["attempt"] == "coder_recovery"
+        assert payload["model_calls"][1]["fallback_reason"] == "reasoner_timeout"
+        assert payload["premium_calls"] == 0
+    finally:
+        orchestrator._MODEL_COOLDOWNS.clear()
         db.close()
 
 

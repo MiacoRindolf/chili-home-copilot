@@ -4311,6 +4311,38 @@ def test_scope_lane_operator_transfers_across_alternate_selector_names():
     )[0]
 
 
+def test_scope_lane_guard_keeps_partial_generated_rewrite_under_contract():
+    prompt = (
+        "An explicit user path and system alerts with user_id NULL share a broad OR selector. Replace the mixed "
+        "predicate with two scope-pure separate lanes, merge and deduplicate them, and preserve one global cap."
+    )
+    partial = {
+        "engine/selector.py": (
+            "from datetime import datetime\n\n"
+            "def gather_refs(gateway, account_user_id, *, batch_limit, recent_first):\n"
+            "    safe_limit = max(0, int(batch_limit or 0))\n"
+            "    if safe_limit <= 0:\n"
+            "        return []\n"
+            "    user_query = gateway.fetch_scope(('user', int(account_user_id)), "
+            "limit=safe_limit, recent_first=recent_first)\n"
+            "    system_query = gateway.fetch_scope(('system', None), "
+            "limit=safe_limit, recent_first=recent_first)\n"
+            "    unique = list({row[0]: row for row in user_query + system_query}.values())\n"
+            "    if recent_first:\n"
+            "        unique.sort(key=lambda row: (row[1] or datetime.min, -row[0]), reverse=True)\n"
+            "    else:\n"
+            "        unique.sort(key=lambda row: row[0])\n"
+            "    return unique[:safe_limit]\n"
+        )
+    }
+
+    assert reasoning._scope_lane_owner_candidate(partial["engine/selector.py"]) is True
+    assert reasoning._scope_lane_contract_satisfied(partial["engine/selector.py"]) is False
+    assert reasoning.contract_invariant_warnings(prompt, partial) == [
+        "engine/selector.py still mixes scope query shape or omits global merge semantics"
+    ]
+
+
 def test_scope_lane_operator_fails_closed_with_ambiguous_selectors():
     prompt = (
         "An explicit user path and system alerts with user_id NULL share a broad OR selector. Use two separate "

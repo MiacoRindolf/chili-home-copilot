@@ -4285,8 +4285,7 @@ def contract_invariant_warnings(
         owners = [
             (str(path), content)
             for path, content in files.items()
-            if _repair_scope_lane_contract(content) != content
-            or "def _merge_candidate_ref_lanes(" in content
+            if _scope_lane_owner_candidate(content)
         ]
         if len(owners) > 1:
             warnings.append("candidate scope-lane owner is structurally ambiguous")
@@ -7289,6 +7288,40 @@ def _scope_lane_contract_satisfied(content: str) -> bool:
         and "if safe_limit <= 0:" in content
         and "[*user_refs, *system_refs]" in content
     )
+
+
+def _scope_lane_owner_candidate(content: str) -> bool:
+    """Keep the semantic guard attached after a model partially removes the defect.
+
+    A generated edit can replace the mixed-OR call with two lane calls while omitting
+    the required merge helper, timestamp normalization, or id ordering. Looking only
+    for the original repairable shape then loses the owner and falsely reports closure.
+    The prompt has already activated this contract, so recognizing the partial
+    user/system selector shape is evidence for validation, not repair authority.
+    """
+    if _repair_scope_lane_contract(content) != content:
+        return True
+    if any(
+        marker in content
+        for marker in (
+            "def _merge_candidate_ref_lanes(",
+            "def _select_candidate_refs_by_user_scope(",
+        )
+    ):
+        return True
+    simple_lane_calls = bool(
+        any(marker in content for marker in (".query_scope(", ".fetch_scope("))
+        and any(marker in content for marker in ('("user"', "('user'"))
+        and any(marker in content for marker in ('("system"', "('system'"))
+        and "recent_first" in content
+        and "limit" in content
+    )
+    sqlalchemy_lanes = bool(
+        "BreakoutAlert.user_id == uid" in content
+        and "BreakoutAlert.user_id.is_(None)" in content
+        and "candidate_base" in content
+    )
+    return simple_lane_calls or sqlalchemy_lanes
 
 
 def _scope_lane_updates(files: Mapping[str, str]) -> dict[str, str]:
