@@ -4491,9 +4491,51 @@ def flush_dip_buy_confirmation(
                     60 * float(getattr(settings, "chili_momentum_reclaim_max_hours_after_open", 1.0) or 1.0)
                 )
                 if (_fet.hour * 60 + _fet.minute) >= _fd_cutoff_min:
-                    return False, "flush_dip_past_morning_window", {
-                        "entry_interval": entry_interval, "et_time": _fet.strftime("%H:%M"),
-                    }
+                    # L6 (2026-07-31, scorecard v2): ang "umaga" ay proxy lang ng
+                    # DISCOVERY phase. Ang mga hapon-igniter (JLHL +393%, JEM +224%)
+                    # ay binebench ng proxy habang ang tunay na sakit na
+                    # pinoprotektahan nito (JZXN/SPHL/GCDT/DBGI midday fades) ay
+                    # lahat STALE ang session HOD. Direct test: sariwang HOD sa
+                    # loob ng fresh window ⇒ tuloy ang evaluation (ang backside/
+                    # VWAP/volume guards sa chain ang bahala sa natitira); stale
+                    # HOD o anumang read error ⇒ panatilihin ang morning reject.
+                    _fd_afternoon_ok = False
+                    _fd_mins_since_hod = None
+                    if bool(getattr(
+                        settings,
+                        "chili_momentum_flush_dip_fresh_hod_afternoon_enabled",
+                        True,
+                    )):
+                        try:
+                            _fd_hi = df["High"].astype(float)
+                            _fd_hod_pos = int(_fd_hi.values.argmax())
+                            _fd_hod_ts = pd.Timestamp(df.index[_fd_hod_pos])
+                            _fd_hod_ts = (
+                                _fd_hod_ts.tz_localize("UTC")
+                                if _fd_hod_ts.tzinfo is None else _fd_hod_ts
+                            )
+                            _fd_mins_since_hod = (
+                                _fts - _fd_hod_ts
+                            ).total_seconds() / 60.0
+                            _fd_fresh_win = float(getattr(
+                                settings,
+                                "chili_momentum_flush_dip_fresh_hod_minutes",
+                                30.0,
+                            ))
+                            _fd_afternoon_ok = (
+                                0.0 <= _fd_mins_since_hod <= _fd_fresh_win
+                            )
+                        except Exception:
+                            _fd_afternoon_ok = False
+                    if not _fd_afternoon_ok:
+                        return False, "flush_dip_past_morning_window", {
+                            "entry_interval": entry_interval,
+                            "et_time": _fet.strftime("%H:%M"),
+                            "mins_since_hod": (
+                                round(float(_fd_mins_since_hod), 2)
+                                if _fd_mins_since_hod is not None else None
+                            ),
+                        }
             except Exception:
                 pass  # no usable clock -> huwag mag-block sa guard mismo
         close = df["Close"].astype(float)

@@ -5044,6 +5044,25 @@ class Settings(BaseSettings):
         validation_alias=AliasChoices("CHILI_MOMENTUM_FLUSH_DIP_VOLUME_GATE_ENABLED"),
         description="User-approved default-ON relative-volume confirmation for flush-dip curl/reclaim entries. False skips this gate exactly.",
     )
+    # ── L6 FLUSH-DIP AFTERNOON DISCOVERY (2026-07-31, scorecard v2) ────────────────────
+    # Ang morning-only gate ay PROXY lang ng DISCOVERY phase: pinrotektahan nito ang
+    # midday BACKSIDE fades (JZXN −$889, SPHL/GCDT/DBGI — lahat STALE ang session HOD)
+    # pero binench din nito ang mga HAPON-igniter na monster (JLHL +393%, JEM +224% —
+    # top reject = flush_dip_past_morning_window sa scorecard v2). Direct discovery
+    # test ang kapalit ng oras-proxy: sariwang session HOD ⇒ tuloy ang dip-buy
+    # evaluation (ang backside/VWAP guards sa chain ang bahala sa iba).
+    chili_momentum_flush_dip_fresh_hod_afternoon_enabled: bool = Field(
+        default=True,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_FLUSH_DIP_FRESH_HOD_AFTERNOON_ENABLED"),
+        description="L6: past the morning window, allow flush-dip evaluation when the session HOD printed within chili_momentum_flush_dip_fresh_hod_minutes (discovery still active); stale-HOD names keep the flush_dip_past_morning_window reject. OFF ⇒ legacy morning-only gate, byte-identical.",
+    )
+    chili_momentum_flush_dip_fresh_hod_minutes: float = Field(
+        default=30.0,
+        ge=0.0,
+        le=240.0,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_FLUSH_DIP_FRESH_HOD_MINUTES"),
+        description="Minutes since the session HOD bar within which an afternoon flush-dip still counts as DISCOVERY. ONE documented base = 30 (afternoon igniters print HODs every few minutes mid-ramp; the measured midday bleeders' HODs were 1h+ stale). Read VERBATIM: 0 ⇒ fresh only if the HOD is the current bar (effectively legacy). Band [0,240].",
+    )
     chili_momentum_vol_nan_fail_closed_enabled: bool = Field(
         default=True,
         validation_alias=AliasChoices("CHILI_MOMENTUM_VOL_NAN_FAIL_CLOSED_ENABLED"),

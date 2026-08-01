@@ -374,6 +374,9 @@ def test_all_nine_operator_kill_switches_round_trip_false(
         "CHILI_MOMENTUM_WHIPSAW_RAPID_ESCALATION_ENABLED": (
             "chili_momentum_whipsaw_rapid_escalation_enabled"
         ),
+        "CHILI_MOMENTUM_FLUSH_DIP_FRESH_HOD_AFTERNOON_ENABLED": (
+            "chili_momentum_flush_dip_fresh_hod_afternoon_enabled"
+        ),
     }
     strategy = {
         **ORTEX_STRATEGY_POLICY,
