@@ -498,6 +498,75 @@ _VOL_EMA_WICK_ATR_MULT = 0.5    # tolerate a wick this x ATR% below the 9-EMA
 _VOL_RETEST_TOL_ATR_MULT = 0.3  # retest dip/hold tolerance scales this x ATR%
 
 
+def monster_dip_context(
+    *,
+    enabled: bool,
+    decision_px: float | None,
+    day_high: float | None,
+    day_low: float | None,
+    pb_low: float | None,
+    up_off_low_floor: float,
+    day_retrace_cap: float,
+) -> bool:
+    """L7 (2026-08-01, measured sa JLHL/JEM vs JZXN) — TRUE iff may AKTIBONG
+    monster run na ang dip ay dapat sukatin sa DAY-RANGE context sa halip na sa
+    recent-impulse yardstick.
+
+    Dalawang kondisyon, pareho mula sa measured separation (0-overlap sa study):
+    (1) ``decision_px / day_low >= up_off_low_floor`` — may tumatakbong monster
+        (JLHL episodes 1.92-7.76x vs JZXN fades 1.00-1.25x; base floor 1.5 ang
+        gitna ng gap); at
+    (2) ``(day_high - pb_low) / (day_high - day_low) <= day_retrace_cap`` — ang
+        dip ay MABABAW sa konteksto ng buong araw (winner dips p90 0.38 vs
+        climax/backside 0.68; base cap 0.35). Ang (2) rin ang pumipigil sa
+        climax/post-climax admits sa mismong monster day.
+
+    Fail-toward-legacy: anumang missing/unreadable input ⇒ False (walang
+    pagluluwag). VERBATIM ang mga bound — walang falsy coercion."""
+    if not bool(enabled):
+        return False
+    try:
+        px = float(decision_px)
+        hi = float(day_high)
+        lo = float(day_low)
+        pl = float(pb_low)
+    except (TypeError, ValueError):
+        return False
+    if not (lo > 0 and hi > lo and px > 0 and pl > 0):
+        return False
+    if (px / lo) < float(up_off_low_floor):
+        return False
+    day_range = hi - lo
+    if day_range <= 0:
+        return False
+    return ((hi - pl) / day_range) <= float(day_retrace_cap)
+
+
+def _monster_dip_context_from_settings(
+    *,
+    decision_px: float | None,
+    day_high: float | None,
+    day_low: float | None,
+    pb_low: float | None,
+) -> bool:
+    """Settings-bound wrapper ng :func:`monster_dip_context` (verbatim reads)."""
+    return monster_dip_context(
+        enabled=bool(getattr(
+            settings, "chili_momentum_dip_monster_context_enabled", True
+        )),
+        decision_px=decision_px,
+        day_high=day_high,
+        day_low=day_low,
+        pb_low=pb_low,
+        up_off_low_floor=float(getattr(
+            settings, "chili_momentum_monster_up_off_low_floor", 1.5
+        )),
+        day_retrace_cap=float(getattr(
+            settings, "chili_momentum_monster_day_retrace_cap", 0.35
+        )),
+    )
+
+
 def _vol_aware_pullback_tolerances(
     atr_pct: float | None, base_retrace: float
 ) -> tuple[float, float, float]:
@@ -1611,7 +1680,27 @@ def _evaluate_raw_break(
     debug["retrace"] = round(retrace, 3)
     debug["shallow_cap"] = round(eff_shallow, 3)
     if retrace > eff_shallow:
-        return False, "pullback_too_deep", None, None, debug
+        # L7 (2026-08-01): sa aktibong monster run, ang recent-impulse yardstick
+        # ay sira (measured: winner dips nagbabasa ng 0.71-1.0 retrace habang ang
+        # eff_shallow ay saturated sa ~0.61-0.69) — kapag ang DAY-context ay
+        # nagsasabing mababaw ang dip (≤cap ng day range) at may monster na
+        # tumatakbo (px ≥ floor × day low), ituloy ang evaluation; ang EMA-hold,
+        # break, at retest guards sa ibaba ay nananatiling buo.
+        try:
+            # decision_px = ang BAR LOW (konserbatibo: kung pati ito ay lampas
+            # sa floor, tiyak ang monster; walang close series sa scope na ito
+            # at malayo ang measured margin 1.92-7.76x vs floor 1.5).
+            _l7_ctx = _monster_dip_context_from_settings(
+                decision_px=float(low.iloc[cur]),
+                day_high=float(high.iloc[: cur + 1].max()),
+                day_low=float(low.iloc[: cur + 1].min()),
+                pb_low=pb_low,
+            )
+        except Exception:
+            _l7_ctx = False
+        if not _l7_ctx:
+            return False, "pullback_too_deep", None, None, debug
+        debug["monster_context_admitted"] = True
 
     # Held above EMA-9 (structural support) during the pullback — the wick tolerance
     # scales with ATR% so normal small-cap noise below the 9-EMA isn't read as a break.
@@ -4641,7 +4730,26 @@ def flush_dip_buy_confirmation(
         # ── GUARD 2: FAST flush — bottoming-tail bar, ATR-scaled down-spike INTO support ──
         f_o = float(opn.iloc[flush_idx]) if opn is not None else float(close.iloc[flush_idx - 1])
         f_h, f_l, f_c = float(high.iloc[flush_idx]), float(low.iloc[flush_idx]), float(close.iloc[flush_idx])
-        if not _bottoming_tail(f_o, f_h, f_l, f_c):
+        # L7 (2026-08-01): sa monster context, ibababa ang tail requirement sa
+        # monster floor (measured: 76% ng winner flushes sa JLHL ay bumabagsak sa
+        # 0.50 na may median tail 0.33-0.38; sa fade day ang mahihinang tail ay
+        # median 0.18 at sinasala pa rin ng monster gate). Legacy 0.50 kapag
+        # walang context o naka-OFF ang flag.
+        _l7_tail_frac = 0.50
+        try:
+            if _monster_dip_context_from_settings(
+                decision_px=f_c,
+                day_high=float(high.iloc[: cur + 1].max()),
+                day_low=float(low.iloc[: cur + 1].min()),
+                pb_low=f_l,
+            ):
+                _l7_tail_frac = float(getattr(
+                    settings, "chili_momentum_monster_tail_min_frac", 0.30
+                ))
+                debug["monster_tail_frac"] = _l7_tail_frac
+        except Exception:
+            pass
+        if not _bottoming_tail(f_o, f_h, f_l, f_c, min_lower_wick_frac=_l7_tail_frac):
             return False, "flush_dip_no_bottoming_tail", debug
         # Down-spike depth: from the pre-flush close down to the flush LOW, ATR-scaled
         # (the "25-50c+" fast spike, volatility-relative). Floor so a calm name still needs
@@ -4921,7 +5029,7 @@ def vwap_reclaim_confirmation(
         vol = df["Volume"].astype(float)
         n = len(df)
         cur = n - 1
-        arrays = compute_all_from_df(df, needed={"vwap", "volume_ratio"})
+        arrays = compute_all_from_df(df, needed={"vwap", "volume_ratio", "atr"})
         vwap = arrays.get("vwap") or []
         vr = arrays.get("volume_ratio") or []
 
@@ -4944,14 +5052,59 @@ def vwap_reclaim_confirmation(
         if start < 0:
             return False, "vwap_reclaim_insufficient_bars", debug
         below_count = 0
+        _l7_max_pen = 0.0
         for i in range(start, cur):
             vi = vwap[i] if i < len(vwap) and vwap[i] is not None else None
             if vi is None or float(vi) <= 0:
                 return False, "vwap_reclaim_vwap_warmup", debug
             if float(close.iloc[i]) < float(vi):
                 below_count += 1
+            _pen = (float(vi) - float(low.iloc[i])) / float(vi)
+            if _pen > _l7_max_pen:
+                _l7_max_pen = _pen
         if below_count < K:
-            return False, "vwap_reclaim_not_below_enough", debug
+            # L7 (2026-08-01): sa monster tape ang dip ay MALALIM pero MABILIS —
+            # bihira ang 2 magkasunod na 1m close sa ilalim ng VWAP (measured:
+            # JLHL 18:28 blocked na 1 bar below pero 3.6% = 1.2×ATR penetration
+            # → +45% forward; ang post-climax chop ay 0.31×ATR → tama ang block).
+            # LALIM ang pumapalit sa TAGAL: tanggapin ang ≥1 bar below kapag may
+            # monster context AT ang penetration ≥ mult × ATR%.
+            _l7_ok = False
+            if below_count >= 1:
+                try:
+                    _l7_arrays_atr = arrays.get("atr") or []
+                    _l7_atr = (
+                        float(_l7_arrays_atr[cur])
+                        if cur < len(_l7_arrays_atr) and _l7_arrays_atr[cur] is not None
+                        else None
+                    )
+                    _l7_atr_pct = (
+                        (_l7_atr / float(close.iloc[cur]))
+                        if (_l7_atr is not None and float(close.iloc[cur]) > 0)
+                        else None
+                    )
+                    if _l7_atr_pct is not None and _l7_atr_pct > 0 and _monster_dip_context_from_settings(
+                        decision_px=float(close.iloc[cur]),
+                        day_high=float(high.iloc[: cur + 1].max()),
+                        day_low=float(low.iloc[: cur + 1].min()),
+                        pb_low=float(low.iloc[start:cur].min()),
+                    ):
+                        _l7_depth_mult = float(getattr(
+                            settings,
+                            "chili_momentum_monster_vwap_depth_atr_mult",
+                            1.0,
+                        ))
+                        _l7_ok = _l7_max_pen >= (_l7_depth_mult * _l7_atr_pct)
+                        if _l7_ok:
+                            debug["monster_depth_admitted"] = {
+                                "penetration": round(_l7_max_pen, 4),
+                                "atr_pct": round(_l7_atr_pct, 4),
+                                "bars_below": below_count,
+                            }
+                except Exception:
+                    _l7_ok = False
+            if not _l7_ok:
+                return False, "vwap_reclaim_not_below_enough", debug
 
         # ── VOLUME SPIKE on the reclaim bar (conviction, not a drift back over VWAP) ─────
         vol_mult = float(getattr(settings, "chili_momentum_vwap_reclaim_vol_mult", 1.5) or 1.5)

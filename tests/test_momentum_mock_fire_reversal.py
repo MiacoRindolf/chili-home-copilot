@@ -146,6 +146,14 @@ def _flush_settings(ms) -> None:
     ms.chili_momentum_reclaim_max_hours_after_open = 1.0  # morning cutoff 10:30 ET
     ms.chili_momentum_flush_dip_volume_gate_enabled = True  # Ross-parity L1b
     ms.chili_momentum_pullback_volume_spike_multiple = 1.5
+    # L7 monster context OFF sa canonical fixtures (legacy geometry) — ang mga
+    # MagicMock default ay lumalabas na float()=1.0 na sisira sa tail threshold;
+    # ang L7-specific na tests ang tahasang magbubukas nito.
+    ms.chili_momentum_dip_monster_context_enabled = False
+    ms.chili_momentum_monster_up_off_low_floor = 1.5
+    ms.chili_momentum_monster_day_retrace_cap = 0.35
+    ms.chili_momentum_monster_tail_min_frac = 0.30
+    ms.chili_momentum_monster_vwap_depth_atr_mult = 1.0
 
 
 def _flush_arrays(n: int = 12) -> dict:

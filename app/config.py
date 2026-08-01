@@ -5063,6 +5063,44 @@ class Settings(BaseSettings):
         validation_alias=AliasChoices("CHILI_MOMENTUM_FLUSH_DIP_FRESH_HOD_MINUTES"),
         description="Minutes since the session HOD bar within which an afternoon flush-dip still counts as DISCOVERY. ONE documented base = 30 (afternoon igniters print HODs every few minutes mid-ramp; the measured midday bleeders' HODs were 1h+ stale). Read VERBATIM: 0 ⇒ fresh only if the HOD is the current bar (effectively legacy). Band [0,240].",
     )
+    # ── L7 MONSTER-DIP CONTEXT (2026-08-01, JLHL/JEM vs JZXN distribution study) ───────
+    # Sa monster run, ang recent-impulse yardstick ng dip geometry ay sira: winner dips
+    # nagbabasa ng 0.71-1.0 retrace habang saturated ang cap sa ~0.61-0.69 (ang 0.75
+    # ceiling ay hindi kailanman umabot). Ang day-range context + up-off-low ang tamang
+    # panukat: 7/8 JLHL winner dips admitted, 0/19 JZXN fades — zero overlap sa study.
+    chili_momentum_dip_monster_context_enabled: bool = Field(
+        default=True,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_DIP_MONSTER_CONTEXT_ENABLED"),
+        description="L7: sa aktibong monster run (px ≥ up_off_low_floor × day low AT day-range retrace ≤ cap), ang dip geometry guards (pullback retrace, flush tail, vwap below-bars) ay sumusukat sa DAY context sa halip na recent-impulse. OFF ⇒ legacy geometry, byte-identical.",
+    )
+    chili_momentum_monster_up_off_low_floor: float = Field(
+        default=1.5,
+        ge=1.0,
+        le=10.0,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_MONSTER_UP_OFF_LOW_FLOOR"),
+        description="Monster test #1: decision px / day low ≥ floor. ONE documented base = 1.5 (+50% off the low; measured gap: monster episodes 1.92-7.76x vs fade day 1.00-1.25x — ang 1.5 ay nasa gitna ng zero-overlap gap). FLOOR per doctrine. Band [1,10].",
+    )
+    chili_momentum_monster_day_retrace_cap: float = Field(
+        default=0.35,
+        ge=0.0,
+        le=1.0,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_MONSTER_DAY_RETRACE_CAP"),
+        description="Monster test #2: (day_high − dip_low) / day_range ≤ cap — ang dip ay mababaw sa konteksto ng araw. ONE documented base = 0.35 (winner dips p90 = 0.38 mahigpit na binilog pababa; climax/backside 0.68+ — ito rin ang anti-climax guard sa mismong monster day). Band [0,1].",
+    )
+    chili_momentum_monster_tail_min_frac: float = Field(
+        default=0.30,
+        ge=0.0,
+        le=1.0,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_MONSTER_TAIL_MIN_FRAC"),
+        description="L7 flush-dip bottoming-tail requirement SA ILALIM ng monster context (legacy 0.50 kapag walang context). ONE documented base = 0.30 (winner-flush tails median 0.33-0.38 sa study; ang fade-day na mahihinang tail median 0.18 ay sinasala pa rin ng monster gate + iba pang guards). Band [0,1].",
+    )
+    chili_momentum_monster_vwap_depth_atr_mult: float = Field(
+        default=1.0,
+        ge=0.0,
+        le=10.0,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_MONSTER_VWAP_DEPTH_ATR_MULT"),
+        description="L7 vwap-reclaim: sa monster context, tanggapin ang ≥1-bar-below kapag ang below-VWAP penetration ≥ mult × ATR% (LALIM pumapalit sa TAGAL — measured: 1.2×ATR na blocked dip → +45% forward; 0.31×ATR post-climax chop → tamang block). ONE documented base = 1.0. Band [0,10].",
+    )
     chili_momentum_vol_nan_fail_closed_enabled: bool = Field(
         default=True,
         validation_alias=AliasChoices("CHILI_MOMENTUM_VOL_NAN_FAIL_CLOSED_ENABLED"),
