@@ -34,11 +34,58 @@ from __future__ import annotations
 import gc as _gc
 import logging
 import os as _os
+import sys as _sys
 import threading
 import time
 from typing import Any
 
 logger = logging.getLogger(__name__)
+
+# glibc-only: malloc_trim(0) walks ALL arenas (glibc >= 2.8) and returns
+# free pages to the OS. Without it, per-thread arenas retain the high-water
+# mark of every large transient pandas/numpy allocation forever — the
+# 2026-07-31 scheduler-worker 9.9GB RSS incident was this retention, not a
+# Python-object leak (object counts were flat while RSS ratcheted).
+# Set CHILI_MEM_WATCHER_MALLOC_TRIM=0 to disable.
+_libc = None
+if _sys.platform.startswith("linux"):
+    try:
+        import ctypes as _ctypes
+
+        _candidate = _ctypes.CDLL("libc.so.6")
+        if hasattr(_candidate, "malloc_trim"):
+            _libc = _candidate
+    except Exception:
+        _libc = None
+
+
+def _malloc_trim_enabled() -> bool:
+    raw = _os.environ.get("CHILI_MEM_WATCHER_MALLOC_TRIM", "1")
+    return raw.strip().lower() not in ("0", "false", "no", "off")
+
+
+def _read_vm_rss_kb() -> int:
+    try:
+        with open("/proc/self/status") as f:
+            for line in f:
+                if line.startswith("VmRSS:"):
+                    return int(line.split()[1])
+    except Exception:
+        pass
+    return 0
+
+
+def _run_malloc_trim() -> str:
+    """Trim all glibc arenas; return a log fragment (never raises)."""
+    if _libc is None or not _malloc_trim_enabled():
+        return ""
+    try:
+        pre_kb = _read_vm_rss_kb()
+        _libc.malloc_trim(0)
+        reclaimed_mb = max(0, pre_kb - _read_vm_rss_kb()) // 1024
+        return f"malloc_trim_reclaimed={reclaimed_mb}MB "
+    except Exception as e:
+        return f"malloc_trim_failed={e.__class__.__name__} "
 
 
 def run_memory_watcher_tick(
@@ -54,6 +101,9 @@ def run_memory_watcher_tick(
     """
     try:
         _gc.collect()
+        # Trim AFTER collect so freshly-freed chunks are returnable, BEFORE
+        # the /proc status read so the logged vm_rss reflects post-trim truth.
+        _trim_note = _run_malloc_trim()
         try:
             with open("/proc/self/status") as f:
                 _status = f.read()
@@ -95,10 +145,10 @@ def run_memory_watcher_tick(
         )[:5]
 
         logger.info(
-            "%s vm_rss=%dMB vm_size=%dMB threads=%d py_objects=%d "
+            "%s vm_rss=%dMB vm_size=%dMB threads=%d %spy_objects=%d "
             "top_abs=%s top_delta_since_last=%s top_qualnames=%s",
             log_prefix,
-            _vm_rss_kb // 1024, _vm_size_kb // 1024, _threads, total,
+            _vm_rss_kb // 1024, _vm_size_kb // 1024, _threads, _trim_note, total,
             [(t, n) for t, n in top_abs[:6]],
             [(t, f"+{d}", f"now={n}") for d, t, n in top_delta],
             top_qualnames,
