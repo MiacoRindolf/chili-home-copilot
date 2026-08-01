@@ -1,5 +1,12 @@
 #!/bin/sh
 set -e
+# glibc per-thread arenas (cap defaults to 8*ncores = 48 here) ratchet to the
+# high-water mark of every thread's largest transient pandas/numpy working set
+# and never return that memory to the OS — the scheduler-worker reached 9.9GB
+# RSS in 13h (2026-07-31) with flat Python object counts. Two arenas measured
+# peak -36% / idle-retention -93% on the multithreaded churn benchmark when
+# combined with the mem_watcher malloc_trim tick. Override via env if needed.
+export MALLOC_ARENA_MAX="${MALLOC_ARENA_MAX:-2}"
 # docker-compose `command:` (e.g. brain-worker) passes args here — run them instead of uvicorn.
 if [ "$#" -gt 0 ]; then
   echo "[docker-entrypoint-chili] CHILI_SCHEDULER_ROLE=${CHILI_SCHEDULER_ROLE:-unset} (non-web command)"
