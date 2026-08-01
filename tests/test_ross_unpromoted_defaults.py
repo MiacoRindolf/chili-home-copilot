@@ -22,6 +22,8 @@ _USER_APPROVED_DEFAULT_ON = (
     "chili_momentum_whipsaw_rapid_escalation_enabled",
     # 2026-07-31 L6 (scorecard v2: JLHL +393%/JEM +224% benched ng morning proxy):
     "chili_momentum_flush_dip_fresh_hod_afternoon_enabled",
+    # 2026-08-01 L7 (JLHL/JEM vs JZXN distribution study — day-context dip geometry):
+    "chili_momentum_dip_monster_context_enabled",
 )
 
 # EVIDENCE-RETIRED default-OFF levers: still in the sealed arm roster (per-lever
@@ -66,6 +68,7 @@ def test_missing_setting_fallbacks_preserve_default_on_doctrine():
         "chili_momentum_chase_defer_enabled": (live_runner,),
         "chili_momentum_whipsaw_rapid_escalation_enabled": (live_runner,),
         "chili_momentum_flush_dip_fresh_hod_afternoon_enabled": (entry_gates,),
+        "chili_momentum_dip_monster_context_enabled": (entry_gates,),
     }
     assert set(owners) == set(_USER_APPROVED_DEFAULT_ON)
     for name, modules in owners.items():
@@ -121,7 +124,7 @@ def test_replay_ab_tool_uses_the_complete_closed_operator_policy() -> None:
     ]
     assert len(assignments) == 1
     pairs = tuple(ast.literal_eval(assignments[0].value))
-    assert len(pairs) == 12
+    assert len(pairs) == 13
     # Ang arm roster = default-ON levers + evidence-retired levers: ang retired
     # flag ay nananatili sa sealed grammar (kaya nasusukat pa rin per-arm) kahit
     # OFF na ang production default.

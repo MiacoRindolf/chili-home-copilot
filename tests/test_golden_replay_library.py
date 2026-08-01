@@ -95,9 +95,9 @@ def test_resolved_strategy_policy_binds_all_operator_flags():
     # whipsaw-escalation) — the roster IS the per-lever A/B surface, so a new
     # approved lever lands here deliberately, never via FLAGS_JSON.
     pairs = batch.APPROVED_STRATEGY_FLAGS_BY_SLUG
-    assert len(pairs) == 12
-    assert len({slug for slug, _ in pairs}) == 12
-    assert len({flag for _, flag in pairs}) == 12
+    assert len(pairs) == 13
+    assert len({slug for slug, _ in pairs}) == 13
+    assert len({flag for _, flag in pairs}) == 13
 
     intended = batch.resolve_strategy_policy("intended")
     baseline = batch.resolve_strategy_policy("base")
@@ -118,7 +118,7 @@ def test_resolved_strategy_policy_binds_all_operator_flags():
         assert doc["flags"][flag] is False
         assert sum(value is False for value in doc["flags"].values()) == 1
         hashes.add(batch.strategy_policy_sha256(doc))
-    assert len(hashes) == 13
+    assert len(hashes) == 14
 
     # COMPOUND arms stay CLOSED: exactly one operator-approved multi-flag-off
     # vector (the 2026-07-27 parity arm), each named flag drawn from the
@@ -137,7 +137,7 @@ def test_resolved_strategy_policy_binds_all_operator_flags():
     assert parity["flags"]["chili_momentum_whipsaw_rapid_escalation_enabled"] is False
     assert sum(v is False for v in parity["flags"].values()) == 2
     batch.require_scoreable_post_selection_arm("intended-minus-autopsy-0727")
-    assert len(hashes) == 14
+    assert len(hashes) == 15
 
 
 @pytest.mark.parametrize(
