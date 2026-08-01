@@ -81,6 +81,10 @@ APPROVED_STRATEGY_FLAGS_BY_SLUG = (
         "whipsaw-escalation",
         "chili_momentum_whipsaw_rapid_escalation_enabled",
     ),
+    (
+        "flush-dip-afternoon",
+        "chili_momentum_flush_dip_fresh_hod_afternoon_enabled",
+    ),
 )
 POST_SELECTION_SCOREABLE_POLICY_FLAGS = (
     "chili_momentum_orb_ihs_structural_stop_enabled",
@@ -92,6 +96,7 @@ POST_SELECTION_SCOREABLE_POLICY_FLAGS = (
     "chili_momentum_sub_vwap_trap_entry_enabled",
     "chili_momentum_chase_defer_enabled",
     "chili_momentum_whipsaw_rapid_escalation_enabled",
+    "chili_momentum_flush_dip_fresh_hod_afternoon_enabled",
 )
 POST_SELECTION_UNSCOREABLE_POLICY_FLAGS = (
     "chili_momentum_universe_float_gate_enabled",
