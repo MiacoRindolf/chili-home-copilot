@@ -380,6 +380,9 @@ def test_all_nine_operator_kill_switches_round_trip_false(
         "CHILI_MOMENTUM_DIP_MONSTER_CONTEXT_ENABLED": (
             "chili_momentum_dip_monster_context_enabled"
         ),
+        "CHILI_MOMENTUM_BENCH_MONSTER_DIP_BYPASS_ENABLED": (
+            "chili_momentum_bench_monster_dip_bypass_enabled"
+        ),
     }
     strategy = {
         **ORTEX_STRATEGY_POLICY,

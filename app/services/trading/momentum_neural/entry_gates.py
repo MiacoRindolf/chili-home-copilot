@@ -3771,6 +3771,140 @@ def evaluate_sticky_backside_bench(
         return False, "bench_fail_open", None, debug
 
 
+# L8 (2026-08-01): ang mga fired-trigger reason na may STRUCTURAL dip-reclaim definition —
+# ang tanging klaseng maaaring mag-bypass ng sticky bench. Ang measured separation (JEM
+# 06-30): ang E3 winner dips ay may tunay na dip→reclaim structure (flush tail / raw-break
+# micro-high / VWAP cross) samantalang ang E2 hover-then-dump ay pumasa sa LAHAT ng
+# geometry checks pero WALANG structural fire — ang structure ang tanging naghihiwalay.
+_BENCH_BYPASS_STRUCTURAL_REASONS = ("flush_dip_buy", "vwap_reclaim", "raw_break")
+
+
+def bench_monster_dip_bypass(
+    df,
+    *,
+    benched_at_hod: float | None,
+    live_price: float | None,
+    trigger_reason: str | None,
+    enabled: bool,
+    up_off_low_floor: float,
+    min_discount_frac: float,
+    day_retrace_ceiling: float,
+    vwap_hold_buffer: float,
+) -> tuple[bool, dict[str, Any]]:
+    """L8 (2026-08-01, measured sa JEM/JLHL vs LHSW/JZXN) — per-candidate BYPASS ng
+    sticky backside bench sa monster days. HINDI ito unbench: ang ``benched_at_hod``
+    marker ay HINDI ginagalaw (walang never-relatch hole — sa JEM, isang maling marker
+    clear sa ilalim ng 85% range band ay PERMANENTENG nagbubukas ng natitirang session
+    dahil wala nang front_side_state reason na maka-relatch).
+
+    LAHAT ng kondisyon kailangang pumasa (bawat isa ay measured):
+      1. STRUCTURE — ang fired trigger ∈ ``_BENCH_BYPASS_STRUCTURAL_REASONS``. Ito ang
+         naghihiwalay sa JEM E3 dip→reclaim winners (admit) sa E2 hover-then-dump na
+         pumasa sa lahat ng geometry pero walang structural fire (stays vetoed).
+      2. MONSTER DAY — ``px / session_low >= up_off_low_floor`` (premarket-inclusive na
+         session frame; sa LHSW/JZXN lahat ng benched minutes ay <1.5 kaya inert doon).
+      3. TUNAY NA DISCOUNT — ``px <= benched_at_hod * (1 - min_discount_frac)``: ang mga
+         verified winner re-entry ay 13-33% sa ILALIM ng anchor; ang near-anchor hover ang
+         dump class (kabaligtaran ng proximity-unbench na na-refute sa study).
+      4. HINDI ROLLED-OVER — ``(day_high - px) / (day_high - day_low) <= ceiling``: ang
+         pangalang ibinigay na ang mahigit kalahati ng day range ay hindi na binibili.
+      5. VWAP SIDE — para sa non-cross families, ``px >= session_vwap * (1 - buffer)``;
+         ang below-VWAP hover level-test ay hindi kailanman bypass (LHSW 15:10-15:33
+         semantics). Ang ``vwap_reclaim`` trigger ay ang cross mismo kaya exempt.
+
+    Fail-TOWARD-LEGACY (kabaligtaran ng bench na fail-open): anumang error o missing
+    input ⇒ ``(False, debug)`` — nananatili ang veto. VERBATIM ang mga bound."""
+    debug: dict[str, Any] = {"bypass": False}
+    if not bool(enabled):
+        return False, debug
+    try:
+        _trig = str(trigger_reason or "")
+        debug["trigger"] = _trig
+        if _trig not in _BENCH_BYPASS_STRUCTURAL_REASONS:
+            debug["reject"] = "non_structural_trigger"
+            return False, debug
+        anchor = float(benched_at_hod)
+        px = float(live_price)
+        if not (math.isfinite(anchor) and anchor > 0 and math.isfinite(px) and px > 0):
+            debug["reject"] = "bad_inputs"
+            return False, debug
+        _sess = _today_session_frame(df)
+        lo = float(_sess["Low"].astype(float).min())
+        hi = max(float(_sess["High"].astype(float).max()), px)
+        if not (lo > 0 and hi > lo):
+            debug["reject"] = "degenerate_day_range"
+            return False, debug
+        up_off_low = px / lo
+        day_retrace = (hi - px) / (hi - lo)
+        debug.update({
+            "px": round(px, 6), "anchor": round(anchor, 6),
+            "day_low": round(lo, 6), "day_high": round(hi, 6),
+            "up_off_low": round(up_off_low, 6), "day_retrace": round(day_retrace, 6),
+        })
+        if up_off_low < float(up_off_low_floor):
+            debug["reject"] = "not_monster_day"
+            return False, debug
+        if px > anchor * (1.0 - float(min_discount_frac)):
+            debug["reject"] = "no_real_discount"
+            return False, debug
+        if day_retrace > float(day_retrace_ceiling):
+            debug["reject"] = "rolled_over"
+            return False, debug
+        if _trig != "vwap_reclaim":
+            from .ross_momentum import front_side_state
+
+            _vwap = getattr(front_side_state(_sess), "session_vwap", None)
+            if _vwap is None or not math.isfinite(float(_vwap)) or float(_vwap) <= 0:
+                # walang mabasang VWAP -> panatilihin ang veto (fail-toward-legacy).
+                debug["reject"] = "vwap_unavailable"
+                return False, debug
+            debug["session_vwap"] = round(float(_vwap), 6)
+            if px < float(_vwap) * (1.0 - max(0.0, float(vwap_hold_buffer))):
+                debug["reject"] = "below_vwap_hover"
+                return False, debug
+        debug["bypass"] = True
+        return True, debug
+    except Exception:
+        debug["reject"] = "bypass_error"
+        return False, debug
+
+
+def _bench_monster_dip_bypass_from_settings(
+    df,
+    *,
+    benched_at_hod: float | None,
+    live_price: float | None,
+    trigger_reason: str | None,
+) -> tuple[bool, dict[str, Any]]:
+    """Settings-bound wrapper ng :func:`bench_monster_dip_bypass` (verbatim reads).
+    Sariling L8 flag (hiwalay sa L7 dip admits para sa independent per-sha rollback);
+    shared ang monster floor at VWAP buffer (isang dokumentadong base bawat isa)."""
+    try:
+        _buf = max(0.0, float(getattr(
+            settings, "chili_momentum_entry_vwap_hold_buffer", 0.0) or 0.0))
+    except (TypeError, ValueError):
+        _buf = 0.0
+    return bench_monster_dip_bypass(
+        df,
+        benched_at_hod=benched_at_hod,
+        live_price=live_price,
+        trigger_reason=trigger_reason,
+        enabled=bool(getattr(
+            settings, "chili_momentum_bench_monster_dip_bypass_enabled", True
+        )),
+        up_off_low_floor=float(getattr(
+            settings, "chili_momentum_monster_up_off_low_floor", 1.5
+        )),
+        min_discount_frac=float(getattr(
+            settings, "chili_momentum_bench_bypass_min_discount_frac", 0.10
+        )),
+        day_retrace_ceiling=float(getattr(
+            settings, "chili_momentum_bench_bypass_day_retrace_ceiling", 0.50
+        )),
+        vwap_hold_buffer=_buf,
+    )
+
+
 # ── FIX C: TAPE-CONFIRMED-HOLD early entry (graduate the L2 confirmer to a TRIGGER) ──
 # Ross buys the pullback-HOLD bounce when the TAPE confirms buyers, BEFORE the confirmed
 # break (the choppy explosive names that never cleanly cross the pullback high inside the
