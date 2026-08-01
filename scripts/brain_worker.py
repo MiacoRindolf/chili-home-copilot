@@ -2311,7 +2311,18 @@ def main():
     
     status = BrainWorkerStatus()
     _global_status = status  # Set global reference for atexit cleanup
-    
+
+    # Heap fingerprint + glibc malloc_trim tick (2026-07-31 arena-retention
+    # incident): the brain worker churns the same large transient pandas/numpy
+    # working sets as the scheduler-worker, so it needs the same periodic
+    # all-arena trim; without a tick this process retains its high-water RSS.
+    try:
+        from app.services.diagnostics.mem_watcher import start_thread_watcher
+
+        start_thread_watcher(interval_s=300.0, name="chili-brain-mem-watcher")
+    except Exception as _mw_e:
+        logger.warning("[brain] mem_watcher start failed: %s", _mw_e)
+
     # Register cleanup handler
     atexit.register(_cleanup_on_exit)
     
