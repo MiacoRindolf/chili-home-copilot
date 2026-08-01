@@ -18,6 +18,20 @@ adds bounded same-model timeout recovery, atomic partial-bundle recovery, public
 validated-progress refinement, and symbolic half-open history reasoning. It does not yet provide a blinded,
 statistically meaningful head-to-head against Fable 5.
 
+On 2026-08-01, the production local-autonomy path received a quality-first resource profile sized for the actual
+64 GB workstation: 600-second plan/diagnosis/edit bounds, up to 16,384 diagnostic context tokens, larger visible
+output budgets, a bounded coder recovery after reasoner failure, and two local 14B repair opportunities. The host
+WSL/Docker ceiling was separately raised from 24 GB / 6 threads / 8 GB swap to 40 GB / 20 threads / 16 GB swap,
+pending the next normal WSL restart. Broad affected validation passed 519 tests. This is capacity and reliability
+hardening, not a parity result.
+
+The corresponding contract-disabled disclosed stress evidence remains negative. A pre-guard generous replay
+reached 55/100 with a correct diagnosis and owner but failed its sealed final. A post-guard replay reached 25/100
+after all five local calls failed under timeout/socket pressure and produced no patch. The semantic fail-closed
+guard is covered by tests but was not exercised by that no-patch replay. This result rejects the premise that
+simply maximizing a 14B model's time and memory makes CHILI Fable 5-class; adaptive routing and unseen functional
+solves remain required. See `project_ws/AgentOps/FABLE5_LOCAL_QUALITY_RESOURCE_PROFILE_RECEIPT.md`.
+
 The historical diagnosis-to-fix reports used the label `hidden` for tests that were loaded after the initial patch but could then guide bounded repair. Those scores are feedback-guided development evidence, not sealed final-adjudication evidence. Runner schema v3 now separates repair-feedback tests from a final oracle that is first read after every model call for its case. The first eight-case v3 holdout scored 53.75/100 with 1/8 final passes. After generic repair-loop hardening, a new independently authored eight-case holdout improved to 68.75/100 and 2/8 final passes, still far below replacement readiness.
 
 A later contract-guided replay of the now-disclosed tenth suite scored 58.12/100 with the same 2/8 sealed-final
