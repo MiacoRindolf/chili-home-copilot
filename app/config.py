@@ -7362,9 +7362,9 @@ class Settings(BaseSettings):
     # small buffer over the entry — the thesis did not confirm, so bail before the stop.
     # A winner that pops (prints a new high above the confirm buffer) is IMMUNE.
     chili_momentum_bail_on_no_confirmation_enabled: bool = Field(
-        default=True,
+        default=False,
         validation_alias=AliasChoices("CHILI_MOMENTUM_BAIL_ON_NO_CONFIRMATION_ENABLED"),
-        description="User-approved default-ON early bailout when a breakout shows no confirming strength inside the bounded confirmation window. False disables only this bailout.",
+        description="Early bailout when a breakout shows no confirming strength inside the bounded confirmation window. DEFAULT OFF since 2026-07-31 (L2a golden-library sweep + per-trade decomposition): the hair-trigger first bail layer was net −$530 (killed winners +$90 direct, +$440 via bail→cooldown churn loops and trend lockouts) while its protective role (−$46.58) is redundant — the slower structural backstops (breakout_failed_fast_bail, tape-accel bailout) caught every genuinely failing breakout in the no-bail arms. True re-enables the legacy hair-trigger layer.",
     )
     chili_momentum_no_confirmation_window_seconds: float = Field(
         default=20.0,
