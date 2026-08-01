@@ -35182,7 +35182,7 @@ def tick_live_session(
         # PROTECTIVE only.
         if (
             st == STATE_LIVE_ENTERED
-            and bool(getattr(settings, "chili_momentum_bail_on_no_confirmation_enabled", True))
+            and bool(getattr(settings, "chili_momentum_bail_on_no_confirmation_enabled", False))
             and bid is not None
             and math.isfinite(float(bid))
             and float(bid) > 0

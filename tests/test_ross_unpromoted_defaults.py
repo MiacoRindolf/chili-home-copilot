@@ -10,7 +10,6 @@ from app.config import Settings
 
 _USER_APPROVED_DEFAULT_ON = (
     "chili_momentum_sub_vwap_trap_entry_enabled",
-    "chili_momentum_bail_on_no_confirmation_enabled",
     "chili_momentum_catalyst_arb_flat_gate_enabled",
     "chili_momentum_tick_break_tape_confirm_enabled",
     "chili_momentum_universe_float_gate_enabled",
@@ -23,10 +22,25 @@ _USER_APPROVED_DEFAULT_ON = (
     "chili_momentum_whipsaw_rapid_escalation_enabled",
 )
 
+# EVIDENCE-RETIRED default-OFF levers: still in the sealed arm roster (per-lever
+# A/B stays expressible) but the PRODUCTION default is False on measured
+# evidence. bail_on_no_confirmation: 2026-07-31 L2a sweep + per-trade
+# decomposition — net −$530 (killed winners + bail→cooldown churn/lockouts)
+# vs −$46.58 redundant protection (structural backstops breakout_failed_fast_bail
+# and tape-accel caught every genuinely failing breakout a few seconds later).
+_EVIDENCE_RETIRED_DEFAULT_OFF = (
+    "chili_momentum_bail_on_no_confirmation_enabled",
+)
+
 
 def test_user_approved_momentum_levers_default_on():
     for name in _USER_APPROVED_DEFAULT_ON:
         assert Settings.model_fields[name].default is True, name
+
+
+def test_evidence_retired_levers_default_off():
+    for name in _EVIDENCE_RETIRED_DEFAULT_OFF:
+        assert Settings.model_fields[name].default is False, name
 
 
 def test_missing_setting_fallbacks_preserve_default_on_doctrine():
@@ -40,7 +54,6 @@ def test_missing_setting_fallbacks_preserve_default_on_doctrine():
 
     owners = {
         "chili_momentum_sub_vwap_trap_entry_enabled": (entry_gates,),
-        "chili_momentum_bail_on_no_confirmation_enabled": (live_runner,),
         "chili_momentum_catalyst_arb_flat_gate_enabled": (pipeline, viability),
         "chili_momentum_tick_break_tape_confirm_enabled": (entry_gates,),
         "chili_momentum_universe_float_gate_enabled": (universe,),
@@ -69,6 +82,25 @@ def test_missing_setting_fallbacks_preserve_default_on_doctrine():
             assert defaults, (name, module.__name__)
             assert set(defaults) == {True}, (name, module.__name__, defaults)
 
+    # Evidence-retired levers: the getattr fallback must MATCH the config
+    # default (False) so the report-binding doctrine holds sa parehong daan.
+    from app.services.trading.momentum_neural import live_runner as _lr
+    for name in _EVIDENCE_RETIRED_DEFAULT_OFF:
+        source = inspect.getsource(_lr)
+        defaults = [
+            call.args[2].value
+            for call in ast.walk(ast.parse(source))
+            if isinstance(call, ast.Call)
+            and isinstance(call.func, ast.Name)
+            and call.func.id == "getattr"
+            and len(call.args) >= 3
+            and isinstance(call.args[1], ast.Constant)
+            and call.args[1].value == name
+            and isinstance(call.args[2], ast.Constant)
+        ]
+        assert defaults, name
+        assert set(defaults) == {False}, (name, defaults)
+
 
 def test_replay_ab_tool_uses_the_complete_closed_operator_policy() -> None:
     source = (
@@ -87,6 +119,11 @@ def test_replay_ab_tool_uses_the_complete_closed_operator_policy() -> None:
     assert len(assignments) == 1
     pairs = tuple(ast.literal_eval(assignments[0].value))
     assert len(pairs) == 11
-    assert {flag for _, flag in pairs} == set(_USER_APPROVED_DEFAULT_ON)
+    # Ang arm roster = default-ON levers + evidence-retired levers: ang retired
+    # flag ay nananatili sa sealed grammar (kaya nasusukat pa rin per-arm) kahit
+    # OFF na ang production default.
+    assert {flag for _, flag in pairs} == (
+        set(_USER_APPROVED_DEFAULT_ON) | set(_EVIDENCE_RETIRED_DEFAULT_OFF)
+    )
     assert "arbitrary FLAGS_JSON is forbidden in sealed replay" in source
     assert "type(value) is not bool" in source
