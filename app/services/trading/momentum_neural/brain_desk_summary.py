@@ -13,7 +13,7 @@ import logging
 from datetime import datetime, timedelta
 from typing import Any
 
-from sqlalchemy import func
+from sqlalchemy import func, text
 from sqlalchemy.orm import Session
 
 from ....config import settings
@@ -42,6 +42,39 @@ MOMENTUM_GRAPH_NODE_IDS: frozenset[str] = frozenset(
 
 _PREVIEW_VERSION = 1
 _LIVE_LOW_N = 3
+
+# Per-statement ceiling for this read-model (irreducible base setting). The desk is an
+# operator observability surface: if a planner/bloat regression makes any statement slow
+# again, the section degrades in-payload instead of hanging the endpoint (pre-index the
+# viability top-5 alone measured 48.8s and the endpoints hung past 45s).
+_READ_MODEL_STATEMENT_TIMEOUT_MS = 5000
+
+
+def _arm_statement_timeout(db: Session) -> None:
+    """Bound every statement in the CURRENT transaction. SET LOCAL is transaction-scoped,
+    so this must be re-armed after any rollback (see ``_recover_session``)."""
+    try:
+        db.execute(text(f"SET LOCAL statement_timeout = {int(_READ_MODEL_STATEMENT_TIMEOUT_MS)}"))
+    except Exception as ex:
+        _log.debug("statement_timeout arm skipped: %s", ex)
+        try:
+            db.rollback()
+        except Exception:
+            pass
+
+
+def _recover_session(db: Session) -> None:
+    """Roll back a poisoned transaction so later read-model sections still run.
+
+    Postgres aborts the whole transaction on statement error/timeout — without the
+    rollback every later statement fails with InFailedSqlTransaction and the payload
+    collapses instead of degrading one section.
+    """
+    try:
+        db.rollback()
+    except Exception:
+        pass
+    _arm_statement_timeout(db)
 
 
 def _finite_float_or_default(value: Any, default: float) -> float:
@@ -82,59 +115,75 @@ def _brain_ls(db: Session, node_id: str) -> dict[str, Any]:
     return dict(st.local_state)
 
 
-def _viability_durable_stats(db: Session) -> dict[str, Any]:
-    try:
-        total = int(db.query(func.count(MomentumSymbolViability.id)).scalar() or 0)
-    except Exception as ex:
-        _log.debug("viability count: %s", ex)
-        return {"row_count": 0, "error": "query_failed"}
-    if total == 0:
-        return {
-            "row_count": 0,
-            "live_eligible_count": 0,
-            "paper_only_count": 0,
-            "fresh_last_24h_count": 0,
-            "top_lines": [],
-        }
-    live_eligible = int(
-        db.query(func.count(MomentumSymbolViability.id))
-        .filter(MomentumSymbolViability.live_eligible.is_(True))
-        .scalar()
-        or 0
-    )
-    paper_only = int(
-        db.query(func.count(MomentumSymbolViability.id))
-        .filter(
-            MomentumSymbolViability.paper_eligible.is_(True),
-            MomentumSymbolViability.live_eligible.is_(False),
+def _viability_counts(db: Session) -> Any:
+    """One index-only FILTER aggregate over ix_msvi_eligibility (mig356)."""
+    return (
+        db.query(
+            func.count().label("total"),
+            func.count()
+            .filter(MomentumSymbolViability.live_eligible.is_(True))
+            .label("live_eligible"),
+            func.count()
+            .filter(
+                MomentumSymbolViability.paper_eligible.is_(True),
+                MomentumSymbolViability.live_eligible.is_(False),
+            )
+            .label("paper_only"),
         )
-        .scalar()
-        or 0
+        .select_from(MomentumSymbolViability)
+        .one()
     )
-    since = datetime.utcnow() - timedelta(hours=24)
-    fresh_24h = int(
-        db.query(func.count(MomentumSymbolViability.id))
-        .filter(MomentumSymbolViability.freshness_ts >= since)
-        .scalar()
-        or 0
-    )
-    top = (
-        db.query(MomentumSymbolViability)
-        .order_by(MomentumSymbolViability.viability_score.desc())
-        .limit(5)
-        .all()
-    )
-    top_lines: list[str] = []
-    for r in top:
-        le = "live" if r.live_eligible else "paper-only"
-        top_lines.append(f"{r.symbol} · {float(r.viability_score):.2f} · {le}")
-    return {
-        "row_count": total,
-        "live_eligible_count": live_eligible,
-        "paper_only_count": paper_only,
-        "fresh_last_24h_count": fresh_24h,
-        "top_lines": top_lines,
-    }
+
+
+def _viability_durable_stats(db: Session) -> dict[str, Any]:
+    # Each statement stays on its own index (ix_msvi_eligibility / freshness /
+    # ix_msvi_score_desc, mig356) — one combined FILTER aggregate would force a
+    # seq scan of the full heap because no single index covers all three columns.
+    try:
+        agg = _viability_counts(db)
+        total = int(agg.total or 0)
+        if total == 0:
+            return {
+                "row_count": 0,
+                "live_eligible_count": 0,
+                "paper_only_count": 0,
+                "fresh_last_24h_count": 0,
+                "top_lines": [],
+            }
+        since = datetime.utcnow() - timedelta(hours=24)
+        fresh_24h = int(
+            db.query(func.count(MomentumSymbolViability.id))
+            .filter(MomentumSymbolViability.freshness_ts >= since)
+            .scalar()
+            or 0
+        )
+        # Scalar columns only: a full-entity load detoasts 4 JSONB snapshot columns
+        # (~48KB/row on prod) that this preview never reads.
+        top = (
+            db.query(
+                MomentumSymbolViability.symbol,
+                MomentumSymbolViability.viability_score,
+                MomentumSymbolViability.live_eligible,
+            )
+            .order_by(MomentumSymbolViability.viability_score.desc())
+            .limit(5)
+            .all()
+        )
+        top_lines: list[str] = []
+        for r in top:
+            le = "live" if r.live_eligible else "paper-only"
+            top_lines.append(f"{r.symbol} · {float(r.viability_score):.2f} · {le}")
+        return {
+            "row_count": total,
+            "live_eligible_count": int(agg.live_eligible or 0),
+            "paper_only_count": int(agg.paper_only or 0),
+            "fresh_last_24h_count": fresh_24h,
+            "top_lines": top_lines,
+        }
+    except Exception as ex:
+        _log.warning("[brain_desk_summary] viability stats degraded: %s", ex)
+        _recover_session(db)
+        return {"row_count": 0, "error": "query_failed"}
 
 
 def _outcome_windows(db: Session, days: int = 30) -> dict[str, Any]:
@@ -153,8 +202,13 @@ def _outcome_windows(db: Session, days: int = 30) -> dict[str, Any]:
     since = datetime.utcnow() - timedelta(days=max(1, min(days, 120)))
     try:
         for mode in ("paper", "live"):
+            # Scalar columns only — full-entity loads detoast 8 JSONB snapshot
+            # columns per row that the weighted mean never reads.
             rows = (
-                db.query(MomentumAutomationOutcome)
+                db.query(
+                    MomentumAutomationOutcome.return_bps,
+                    MomentumAutomationOutcome.evidence_weight,
+                )
                 .filter(
                     MomentumAutomationOutcome.mode == mode,
                     MomentumAutomationOutcome.terminal_at >= since,
@@ -213,13 +267,15 @@ def _outcome_windows(db: Session, days: int = 30) -> dict[str, Any]:
                 "n": int(worst.cnt),
             }
     except Exception as ex:
-        _log.debug("outcome_windows: %s", ex)
+        _log.warning("[brain_desk_summary] outcome windows degraded: %s", ex)
+        _recover_session(db)
         out["error"] = str(ex)
     return out
 
 
 def build_momentum_neural_graph_context(db: Session) -> dict[str, Any]:
     """Single bundle for graph projection + optional brain panel (compact)."""
+    _arm_statement_timeout(db)
     mesh_on = mesh_enabled()
     mom_on = bool(settings.chili_momentum_neural_enabled)
     fb_on = bool(settings.chili_momentum_neural_feedback_enabled)

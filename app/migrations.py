@@ -32524,6 +32524,29 @@ def _migration_355_ortex_monthly_request_authority(conn) -> None:
     _verify_migration_355_physical_contract(conn)
 
 
+def _migration_356_momentum_viability_desk_indexes(conn) -> None:
+    """Index the momentum-desk read-model queries on momentum_symbol_viability.
+
+    Without these, `_viability_durable_stats` (brain desk/summary endpoints)
+    seq-scans the full heap per request: top-5 `ORDER BY viability_score DESC`
+    measured 48.8s and the eligibility counts 7.1s on the prod table
+    (121k live rows / 1.6GB heap from update churn) — the operator-facing
+    endpoints hung past 45s. Both indexes are tiny (score + two booleans).
+    """
+    conn.execute(
+        text(
+            "CREATE INDEX IF NOT EXISTS ix_msvi_score_desc "
+            "ON momentum_symbol_viability (viability_score DESC)"
+        )
+    )
+    conn.execute(
+        text(
+            "CREATE INDEX IF NOT EXISTS ix_msvi_eligibility "
+            "ON momentum_symbol_viability (live_eligible, paper_eligible)"
+        )
+    )
+
+
 MIGRATIONS = [
     ("001_add_email", _migration_001_add_email),
     ("002_add_image_path", _migration_002_add_image_path),
@@ -32994,6 +33017,8 @@ MIGRATIONS = [
      _migration_354_alpaca_exit_owner_and_post_settlement_exit_v2),
     ("355_ortex_monthly_request_authority",
      _migration_355_ortex_monthly_request_authority),
+    ("356_momentum_viability_desk_indexes",
+     _migration_356_momentum_viability_desk_indexes),
 ]
 
 
