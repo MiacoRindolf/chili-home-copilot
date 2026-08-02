@@ -186,3 +186,110 @@ def test_migration_301_drops_zero_scan_indexes_and_pins_autovacuum():
     assert "autovacuum_vacuum_scale_factor = 0" in src
     assert "autovacuum_vacuum_threshold = 50000" in src
     assert "autovacuum_vacuum_cost_delay = 0" in src
+
+
+def test_migration_357_dedupes_viability_indexes_and_pins_autovacuum():
+    """Migration 357 drops the 3 duplicate momentum_symbol_viability indexes
+    (pkey copy + the ix_msvi_* twins of the model-named indexes) and pins
+    absolute-threshold autovacuum including the TOAST relation (the 5.8 GB
+    was TOAST bloat from JSONB update churn).
+    """
+    src = _read("app/migrations.py")
+
+    assert "_migration_357_momentum_viability_index_dedupe_and_autovacuum" in src
+    assert "357_momentum_viability_index_dedupe_and_autovacuum" in src  # registered
+
+    # The pkey duplicate is dropped unconditionally.
+    assert "DROP INDEX IF EXISTS ix_momentum_symbol_viability_id" in src
+
+    # The migration-named twins are dropped only when the model-named copy
+    # exists (prod-shaped fresh installs only ever get the ix_msvi_* copy,
+    # which must survive as the sole index on its column).
+    assert '"ix_msvi_corr", "ix_momentum_symbol_viability_correlation_id"' in src
+    assert '"ix_msvi_freshness", "ix_momentum_symbol_viability_freshness_ts"' in src
+
+    # Absolute-threshold autovacuum incl. TOAST.
+    assert "autovacuum_vacuum_threshold = 10000" in src
+    assert "toast.autovacuum_vacuum_threshold = 10000" in src
+
+    # The ORM no longer declares the pkey-duplicating index on id.
+    model_src = _read("app/models/trading.py")
+    marker = 'tablename__ = "momentum_symbol_viability"'
+    section = model_src[model_src.index(marker):model_src.index(marker) + 800]
+    assert "id: int = Column(Integer, primary_key=True)\n" in section
+
+
+def test_retention_sweep_includes_viability_snapshot_slim():
+    src = _read("app/services/trading/data_retention.py")
+
+    assert "_slim_stale_viability_snapshots" in src
+    assert "brain_retention_viability_snapshot_days" in src
+    # Slim, not delete: rows are kept; the four JSONB columns reset to '{}'.
+    assert "regime_snapshot_json = '{{}}'::jsonb" in src
+    assert "evidence_window_json = '{{}}'::jsonb" in src
+    assert "DEFAULT_VIABILITY_SNAPSHOT_SLIM_BATCH_SIZE" in src
+    assert "DEFAULT_VIABILITY_SNAPSHOT_MAX_ROWS_PER_SWEEP" in src
+
+    s = Settings(_env_file=None)  # type: ignore[call-arg]
+    assert s.brain_retention_viability_snapshot_days == 30
+
+
+def test_viability_snapshot_slim_only_touches_stale_rows(db):
+    """DB-backed: stale rows get their JSONB slimmed to {}, fresh rows and all
+    scalar columns are untouched, and a second sweep finds nothing (convergent).
+    """
+    from datetime import datetime, timedelta
+
+    from app.models.trading import MomentumStrategyVariant, MomentumSymbolViability
+    from app.services.trading.data_retention import _slim_stale_viability_snapshots
+
+    variant = MomentumStrategyVariant(
+        family="test_family", variant_key="slim_test", version=1, label="slim test",
+    )
+    db.add(variant)
+    db.flush()
+
+    now = datetime.utcnow()
+    payload = {"k": "v", "n": 1}
+    stale = MomentumSymbolViability(
+        symbol="STALE", variant_id=variant.id, viability_score=1.0,
+        freshness_ts=now - timedelta(days=45),
+        regime_snapshot_json=dict(payload),
+        execution_readiness_json=dict(payload),
+        explain_json=dict(payload),
+        evidence_window_json=dict(payload),
+    )
+    fresh = MomentumSymbolViability(
+        symbol="FRESH", variant_id=variant.id, viability_score=2.0,
+        freshness_ts=now - timedelta(days=1),
+        regime_snapshot_json=dict(payload),
+        execution_readiness_json=dict(payload),
+        explain_json=dict(payload),
+        evidence_window_json=dict(payload),
+    )
+    db.add_all([stale, fresh])
+    db.commit()
+
+    dry = _slim_stale_viability_snapshots(db, retain_days=30, dry_run=True)
+    assert dry["eligible_batch"] == 1
+    assert dry["slimmed"] == 0
+
+    result = _slim_stale_viability_snapshots(db, retain_days=30, dry_run=False)
+    assert result["slimmed"] == 1
+    assert result.get("error") is None
+
+    db.expire_all()
+    stale_row = db.query(MomentumSymbolViability).filter_by(symbol="STALE").one()
+    fresh_row = db.query(MomentumSymbolViability).filter_by(symbol="FRESH").one()
+    assert stale_row.regime_snapshot_json == {}
+    assert stale_row.execution_readiness_json == {}
+    assert stale_row.explain_json == {}
+    assert stale_row.evidence_window_json == {}
+    # Scalars survive: the row still answers existence/score/eligibility reads.
+    assert stale_row.viability_score == 1.0
+    assert stale_row.freshness_ts == now - timedelta(days=45)
+    # Fresh row untouched.
+    assert fresh_row.regime_snapshot_json == payload
+
+    again = _slim_stale_viability_snapshots(db, retain_days=30, dry_run=False)
+    assert again["slimmed"] == 0

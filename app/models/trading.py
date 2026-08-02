@@ -3921,7 +3921,9 @@ class MomentumSymbolViability(Base):
         UniqueConstraint("symbol", "variant_id", name="uq_momentum_symbol_viability_sym_var"),
     )
 
-    id: int = Column(Integer, primary_key=True, index=True)
+    # No index=True: the primary key already indexes id; the historical extra
+    # copy (ix_momentum_symbol_viability_id) was dropped by mig357.
+    id: int = Column(Integer, primary_key=True)
     symbol: str = Column(String(36), nullable=False, index=True)
     scope: str = Column(String(16), nullable=False, default="symbol", index=True)
     variant_id: int = Column(
