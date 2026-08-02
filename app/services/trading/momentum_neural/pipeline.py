@@ -291,7 +291,7 @@ def _live_book_imbalance(symbol: str, db: Any = None) -> float | None:
                         "SELECT imbalance5 FROM iqfeed_depth_snapshots "
                         "WHERE symbol = :s AND observed_at > :as_of - interval '15 seconds' "
                         "AND observed_at <= :as_of "
-                        "ORDER BY observed_at DESC LIMIT 1"
+                        "ORDER BY observed_at DESC, id DESC LIMIT 1"
                     ),
                     {"s": s, "as_of": _ao_q},
                 )
@@ -516,7 +516,7 @@ def _live_ofi_microprice(
                 "SELECT bid_top, bid_top_size, ask_top, ask_top_size, bids_json, asks_json "
                 "FROM iqfeed_depth_snapshots "
                 "WHERE symbol = :s AND observed_at > :as_of - make_interval(secs => :w) "
-                "AND observed_at <= :as_of ORDER BY observed_at ASC"
+                "AND observed_at <= :as_of ORDER BY observed_at ASC, id ASC"
             )
             _p = {"s": s, "w": window, "as_of": _ao_q}
             from .optional_db_read import optional_fetchall
@@ -599,7 +599,7 @@ def _live_trade_flow(
         _ao = _tape_asof_default(as_of)
         _ao = _ao.replace(tzinfo=None) if getattr(_ao, "tzinfo", None) is not None else _ao
         q = ("SELECT price, size, bid, ask FROM iqfeed_trade_ticks WHERE symbol = :s AND "
-             "observed_at > :as_of - make_interval(secs => :w) AND observed_at <= :as_of ORDER BY observed_at ASC")
+             "observed_at > :as_of - make_interval(secs => :w) AND observed_at <= :as_of ORDER BY observed_at ASC, id ASC")
         p = {"s": s, "w": window, "as_of": _ao}
         from .optional_db_read import optional_fetchall
 
@@ -781,7 +781,7 @@ def _live_realized_vol(
         _ao = _ao.replace(tzinfo=None) if getattr(_ao, "tzinfo", None) is not None else _ao
         q = ("SELECT price, observed_at FROM iqfeed_trade_ticks WHERE symbol = :s AND "
              "observed_at > :as_of - make_interval(secs => :w) AND observed_at <= :as_of "
-             "ORDER BY observed_at ASC")
+             "ORDER BY observed_at ASC, id ASC")
         p = {"s": s, "w": window, "as_of": _ao}
         from .optional_db_read import optional_fetchall
 
@@ -964,7 +964,7 @@ def _live_flow_slope(
         _ao = _ao.replace(tzinfo=None) if getattr(_ao, "tzinfo", None) is not None else _ao
         q = ("SELECT price, size, bid, ask, observed_at FROM iqfeed_trade_ticks WHERE symbol = :s AND "
              "observed_at > :as_of - make_interval(secs => :w) AND observed_at <= :as_of "
-             "ORDER BY observed_at ASC")
+             "ORDER BY observed_at ASC, id ASC")
         p = {"s": s, "w": window, "as_of": _ao}
         from .optional_db_read import optional_fetchall
 
@@ -1213,7 +1213,7 @@ def _ladder_equity(
                 "bid5_size, ask5_size, imbalance5 FROM iqfeed_depth_snapshots "
                 "WHERE symbol = :s AND observed_at > "
                 "(now() at time zone 'utc') - make_interval(secs => :w) "
-                "ORDER BY observed_at DESC LIMIT :k"
+                "ORDER BY observed_at DESC, id DESC LIMIT :k"
             )
             _p = {"s": s, "w": 30.0, "k": int(k)}
         else:
@@ -1221,7 +1221,7 @@ def _ladder_equity(
                 "SELECT observed_at, bid_top, ask_top, bid_top_size, ask_top_size, "
                 "bid5_size, ask5_size, imbalance5 FROM iqfeed_depth_snapshots "
                 "WHERE symbol = :s AND observed_at > :as_of - make_interval(secs => :w) "
-                "AND observed_at <= :as_of ORDER BY observed_at DESC LIMIT :k"
+                "AND observed_at <= :as_of ORDER BY observed_at DESC, id DESC LIMIT :k"
             )
             _p = {"s": s, "w": 30.0, "k": int(k), "as_of": as_of}
         from .optional_db_read import optional_fetchall

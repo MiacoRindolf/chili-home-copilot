@@ -453,11 +453,18 @@ def guard_postgres_url(
 
 
 def isolated_child_env() -> dict[str, str]:
-    return {
+    env = {
         key: value
         for key, value in os.environ.items()
         if key.upper() in SAFE_PARENT_ENV_KEYS
     }
+    # DETERMINISM (2026-08-02 TC-divergence follow-up): i-pin ang hash seed ng
+    # bawat window subprocess — ang set/dict-hash iteration order ay hindi dapat
+    # maging pinagmumulan ng run-to-run variance sa sealed replay. Hygiene ito
+    # (ang na-root-cause na divergence ay ang tie-ambiguous ORDER BY, hindi ito),
+    # pero sinasara nito ang natitirang nondeterminism channel ng child env.
+    env["PYTHONHASHSEED"] = "0"
+    return env
 
 
 def confined_child_path(root: str, name: str) -> str:
