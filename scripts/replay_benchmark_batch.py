@@ -127,6 +127,10 @@ APPROVED_STRATEGY_FLAGS_BY_SLUG = (
         "monster-dip-context",
         "chili_momentum_dip_monster_context_enabled",
     ),
+    (
+        "late-ah-monster",
+        "chili_momentum_late_ah_monster_placement_enabled",
+    ),
 )
 DEFAULT_ARM = "intended"
 # CLOSED compound arms: named multi-flag-off vectors. NOT a free-form grammar —
@@ -162,6 +166,7 @@ POST_SELECTION_SCOREABLE_POLICY_FLAGS = (
     "chili_momentum_whipsaw_rapid_escalation_enabled",
     "chili_momentum_flush_dip_fresh_hod_afternoon_enabled",
     "chili_momentum_dip_monster_context_enabled",
+    "chili_momentum_late_ah_monster_placement_enabled",
 )
 POST_SELECTION_UNSCOREABLE_POLICY_FLAGS = (
     "chili_momentum_universe_float_gate_enabled",

@@ -30519,8 +30519,47 @@ def tick_live_session(
                 # Fail-CLOSED: a schedule read error must NOT size an entry at full risk.
                 _sched_mult = 0.0
                 _win = "unknown"
+        if _sched_mult <= 0.0 and _win in ("late", "afterhours"):
+            # L8 (2026-08-01): KONDISYONAL na pagbukas ng late/AH placement — ang
+            # binary ×0.0 ay pumapatay sa monster tail (JEM 06-30 window 100% AH,
+            # candidate na-park isang oras bago ang day high; JLHL 07-09 placeable
+            # lang sa unang 5 min). Sa loob ng band, structural dip-reclaim trigger
+            # + monster day ⇒ reduced size sa halip na zero; lahat ng ibang vetoes
+            # (chase/extension/L2/spread/bench) ay tumatakbo pa rin pagkatapos nito.
+            # Fail-toward-legacy: anumang error ⇒ mananatiling 0.0.
+            try:
+                from .entry_gates import _late_window_monster_placement_mult_from_settings
+
+                _l8_iv = str(
+                    getattr(settings, "chili_momentum_pullback_entry_interval", "5m") or "5m"
+                )
+                _l8_df = _replay_aware_fetch_ohlcv_df(sess.symbol, interval=_l8_iv, period="5d")
+                _l8_mult, _l8_dbg = _late_window_monster_placement_mult_from_settings(
+                    _l8_df,
+                    window=_win,
+                    trigger_reason=le.get("entry_trigger_reason"),
+                    live_price=guarded_ask,
+                )
+                if _l8_mult > 0.0:
+                    _sched_mult = float(_l8_mult)
+                    le["schedule_risk"] = {
+                        "window": _win, "mult": _sched_mult, "late_ah_monster": True,
+                    }
+                    _emit(db, sess, "live_entry_late_window_monster_placement", {
+                        "window": _win, "mult": _sched_mult, **_l8_dbg,
+                    })
+            except Exception:
+                pass
         if _sched_mult <= 0.0:
             _emit(db, sess, "live_entry_wait_late_window", {"window": _win})
+            # L8 PARK-BUG FIX: dati ay NANANATILI sa LIVE_PENDING_ENTRY ang session
+            # dito nang walang demote — ang FSM ay naka-PARK bawat tick (wala nang
+            # trigger/bench/backside evaluation) hanggang tape end. Ibalik sa
+            # WATCHING gaya ng lahat ng ibang pending vetoes (extension/round-number
+            # pattern) para patuloy ang session-phase evaluation; babalik din dito
+            # ang isang bagong candidate kapag bumukas ang window o pumasa ang
+            # monster conditions.
+            _safe_transition(db, sess, STATE_WATCHING_LIVE)
             db.flush()
             return {"ok": True, "session_id": sess.id, "state": sess.state, "skipped": "late_window"}
         # TIER-2 OVERNIGHT size reduction: a multiplier (base 0.5) on the equity-relative
