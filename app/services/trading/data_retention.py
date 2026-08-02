@@ -30,6 +30,12 @@ DEFAULT_OPERATIONAL_LOG_DELETE_BATCH_SIZE = 50_000
 # backlog. Steady-state (~hundreds of K/day) is far below it.
 DEFAULT_EXIT_PARITY_MAX_ROWS_PER_SWEEP = 5_000_000
 DEFAULT_FAST_PARTITION_DAYS_AHEAD = 7
+# momentum_symbol_viability JSONB slim (see _slim_stale_viability_snapshots).
+# Batches are small because each doomed row detoasts ~KBs of JSONB in the
+# eligibility filter; the cap bounds one-time catch-up (steady state is a few
+# hundred newly-aged rows per day, far below one batch).
+DEFAULT_VIABILITY_SNAPSHOT_SLIM_BATCH_SIZE = 5_000
+DEFAULT_VIABILITY_SNAPSHOT_MAX_ROWS_PER_SWEEP = 200_000
 
 _IDENT_RE = re.compile(r"^[a-zA-Z_][a-zA-Z0-9_]*$")
 _FAST_PARTITION_LOCK_CLASSID = 0x4650  # FP
@@ -118,6 +124,13 @@ def run_retention_policy(
         ts_col="observed_at",
         retain_days=getattr(settings, "brain_retention_viability_history_days", 30),
         batch_size=DEFAULT_OPERATIONAL_LOG_DELETE_BATCH_SIZE,
+        dry_run=dry_run,
+    )
+    results["viability_snapshots"] = _slim_stale_viability_snapshots(
+        db,
+        retain_days=getattr(settings, "brain_retention_viability_snapshot_days", 30),
+        batch_size=DEFAULT_VIABILITY_SNAPSHOT_SLIM_BATCH_SIZE,
+        max_rows_per_sweep=DEFAULT_VIABILITY_SNAPSHOT_MAX_ROWS_PER_SWEEP,
         dry_run=dry_run,
     )
     results["setup_vitals_history"] = _prune_setup_vitals_history(db, 90, dry_run)
@@ -799,6 +812,145 @@ def _prune_exit_parity_log(
         "live_retain_days": live_days,
         "eligible_batch": deleted_total,
         "deleted": deleted_total,
+        "batches": batches,
+    }
+
+
+def _slim_stale_viability_snapshots(
+    db: Session,
+    *,
+    retain_days: int,
+    batch_size: int | None = None,
+    max_rows_per_sweep: int | None = None,
+    dry_run: bool,
+) -> dict[str, int]:
+    """Slim the four JSONB snapshot columns on stale ``momentum_symbol_viability`` rows.
+
+    The table is a current-state UPSERT store (one row per symbol x variant),
+    but rows whose ``freshness_ts`` has aged out of the selection window keep
+    carrying their last regime/readiness/explain/evidence JSONB (~48KB/row
+    uncompressed TOAST) forever — by 2026-08-02 the >30d cohort alone held
+    ~80k rows / ~224MB of live payload nothing reads (selection is
+    freshness-gated; the desk read-model reads scalars only). Rows are KEPT —
+    score/eligibility/timestamps survive for existence checks — and the
+    producer upsert overwrites all four columns the moment a symbol re-enters
+    the universe, so slimming is invisible to every consumer. ``'{}'`` is
+    already the columns' birth value (NOT NULL DEFAULT '{}'), so readers
+    tolerate it by construction.
+
+    Same drain-loop shape as ``_prune_exit_parity_log``: per-batch commits
+    until the eligible set is drained or the per-sweep cap is hit. The
+    non-empty predicate makes the sweep convergent — a row is rewritten once,
+    then never matches again.
+    """
+    if not _retention_has_leading_time_index(
+        db, "momentum_symbol_viability", "freshness_ts",
+    ):
+        return {
+            "retain_days": retain_days,
+            "eligible_batch": 0,
+            "slimmed": 0,
+            "batches": 0,
+            "skipped": 1,
+        }
+
+    resolved_batch = _safe_positive_int(
+        batch_size, DEFAULT_VIABILITY_SNAPSHOT_SLIM_BATCH_SIZE,
+    )
+    resolved_cap = _safe_positive_int(
+        max_rows_per_sweep, DEFAULT_VIABILITY_SNAPSHOT_MAX_ROWS_PER_SWEEP,
+    )
+    cutoff = datetime.utcnow() - timedelta(days=retain_days)
+    where_clause = """
+        freshness_ts < :cutoff
+        AND (
+            regime_snapshot_json <> '{}'::jsonb
+            OR execution_readiness_json <> '{}'::jsonb
+            OR explain_json <> '{}'::jsonb
+            OR evidence_window_json <> '{}'::jsonb
+        )
+    """
+
+    if dry_run:
+        count_q = text(f"""
+            SELECT COUNT(*)
+            FROM (
+                SELECT 1
+                FROM momentum_symbol_viability
+                WHERE {where_clause}
+                ORDER BY freshness_ts ASC, id ASC
+                LIMIT :limit
+            ) limited
+        """)
+        try:
+            eligible = int(db.execute(count_q, {
+                "cutoff": cutoff,
+                "limit": resolved_cap,
+            }).scalar() or 0)
+        except Exception:
+            eligible = 0
+        return {
+            "retain_days": retain_days,
+            "eligible_batch": eligible,
+            "slimmed": 0,
+            "batches": 0,
+        }
+
+    slim_q = text(f"""
+        WITH doomed AS (
+            SELECT id
+            FROM momentum_symbol_viability
+            WHERE {where_clause}
+            ORDER BY freshness_ts ASC, id ASC
+            LIMIT :limit
+        )
+        UPDATE momentum_symbol_viability t
+        SET regime_snapshot_json = '{{}}'::jsonb,
+            execution_readiness_json = '{{}}'::jsonb,
+            explain_json = '{{}}'::jsonb,
+            evidence_window_json = '{{}}'::jsonb
+        FROM doomed
+        WHERE t.id = doomed.id
+    """)
+
+    slimmed_total = 0
+    batches = 0
+    try:
+        while slimmed_total < resolved_cap:
+            this_limit = min(resolved_batch, resolved_cap - slimmed_total)
+            result = db.execute(slim_q, {
+                "cutoff": cutoff,
+                "limit": this_limit,
+            })
+            n = int(result.rowcount or 0)
+            if n <= 0:
+                break
+            db.commit()
+            slimmed_total += n
+            batches += 1
+            if n < this_limit:
+                break  # eligible set drained
+    except Exception:
+        try:
+            db.rollback()
+        except Exception:
+            pass
+        logger.warning(
+            "[retention] viability snapshot slim aborted after %d rows (%d batches)",
+            slimmed_total, batches,
+        )
+        return {
+            "retain_days": retain_days,
+            "eligible_batch": slimmed_total,
+            "slimmed": slimmed_total,
+            "batches": batches,
+            "error": 1,
+        }
+
+    return {
+        "retain_days": retain_days,
+        "eligible_batch": slimmed_total,
+        "slimmed": slimmed_total,
         "batches": batches,
     }
 
