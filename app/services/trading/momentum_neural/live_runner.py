@@ -19732,26 +19732,56 @@ def _squeeze_exit_band_widen_factor(via: Any, symbol: str) -> float:
         return 1.0
 
 
+_LATEST_RVOL_MEMO: dict[str, tuple[int, float | None]] = {}
+_LATEST_RVOL_MEMO_MAX = 512  # hard max size (conventions: caches = max size + TTL)
+
+
 def _latest_rvol(db, symbol: str) -> float | None:
     """Best-effort latest relative-volume (volume_ratio of the most recent bar) for the
     explosive carve-outs. Reads the SESSION-scoped micro-bar df from the densified tape
     (no network, same resampler the micro-pullback re-load uses) and computes
     volume_ratio via the canonical indicator core. None on thin tape / any error (the
-    caller then treats the name as non-explosive on RVOL ⇒ fail-closed). Pure read."""
+    caller then treats the name as non-explosive on RVOL ⇒ fail-closed). Pure read.
+
+    L8b PERF (2026-08-02, py-spy flamegraph sa JEM replay): ang per-tick micro-bar
+    rebuild dito ay 28.7% ng buong runtime sa gising na FSM sa dense tape. Per-5s
+    memo keyed sa SIM-ANCHORED clock (``_utcnow_aware`` — replay-correct): ang
+    micro-bar frame ay bar-granular kaya ang ≤5s staleness ay walang epekto sa
+    explosive threshold reads; kada bucket isang beses lang ang fetch+resample.
+    ``chili_momentum_latest_rvol_memo_seconds=0`` ⇒ memo OFF (byte-identical
+    legacy). Ang None (thin tape) ay kine-cache din — hindi paulit-ulit na
+    fetch ang thin na pangalan sa loob ng bucket."""
+    _sym = str(symbol or "").upper()
+    _bucket: int | None = None
+    try:
+        _memo_s = float(getattr(
+            settings, "chili_momentum_latest_rvol_memo_seconds", 5.0
+        ) or 0.0)
+        if _memo_s > 0:
+            _bucket = int(_utcnow_aware().timestamp() // _memo_s)
+            _hit = _LATEST_RVOL_MEMO.get(_sym)
+            if _hit is not None and _hit[0] == _bucket:
+                return _hit[1]
+    except Exception:
+        _bucket = None
+    v_out: float | None = None
     try:
         from ..indicator_core import compute_all_from_df as _rv_compute
 
         _df = _build_micro_bar_df(db, symbol, bar_seconds=15)
-        if _df is None or getattr(_df, "empty", True) or len(_df) < 10:
-            return None
-        arrays = _rv_compute(_df, needed={"volume_ratio"})
-        vr = arrays.get("volume_ratio") or []
-        if not len(vr):
-            return None
-        v = vr[-1]
-        return None if v is None else float(v)
+        if _df is not None and not getattr(_df, "empty", True) and len(_df) >= 10:
+            arrays = _rv_compute(_df, needed={"volume_ratio"})
+            vr = arrays.get("volume_ratio") or []
+            if len(vr):
+                v = vr[-1]
+                v_out = None if v is None else float(v)
     except Exception:
-        return None
+        v_out = None
+    if _bucket is not None:
+        if len(_LATEST_RVOL_MEMO) > _LATEST_RVOL_MEMO_MAX:
+            _LATEST_RVOL_MEMO.clear()
+        _LATEST_RVOL_MEMO[_sym] = (_bucket, v_out)
+    return v_out
 
 
 def _breakout_bailout_lock_in_seconds(*, explosive: bool) -> float:
