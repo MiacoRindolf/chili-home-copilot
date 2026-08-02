@@ -13290,6 +13290,14 @@ class Settings(BaseSettings):
     # 30d keeps the table small (one row per viable name per tick). Pruned by the same
     # batched _prune_operational_time_log drain the other operational logs use.
     brain_retention_viability_history_days: int = 30
+    # Staleness window after which momentum_symbol_viability rows get their four
+    # JSONB snapshot columns slimmed to '{}' (rows are KEPT — scalar score/
+    # eligibility/timestamps survive; the upsert fully repopulates the JSONB the
+    # moment a symbol re-enters the universe). A row whose freshness_ts is this
+    # old has left the freshness-gated selection universe, so its snapshot
+    # detail is dead weight (~48KB/row TOAST). 30d mirrors the viability-history
+    # TTL above — the two tables describe the same tick stream.
+    brain_retention_viability_snapshot_days: int = 30
     brain_retention_fast_snapshot_days: int = 30
     brain_retention_fast_orderbook_days: int = 3
     brain_retention_fast_alert_days: int = 14
