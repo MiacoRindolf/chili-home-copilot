@@ -5113,6 +5113,25 @@ class Settings(BaseSettings):
         validation_alias=AliasChoices("CHILI_MOMENTUM_LATE_AH_MONSTER_MULT"),
         description="L8: ang schedule multiplier na ipapalit sa ×0.0 kapag pumasa ang late/AH monster conditions — kalahating size (0.5) sa halip na buo, dahil mas manipis ang AH book. ONE documented base = 0.5. Band [0,2].",
     )
+    chili_momentum_late_window_refire_cooldown_enabled: bool = Field(
+        default=True,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_LATE_WINDOW_REFIRE_COOLDOWN_ENABLED"),
+        description="L8b (2026-08-02): pagkatapos ng late_window demote (sched mult ≤ 0), laktawan ang trigger ladder nang refire-cooldown seconds bago muling sumubok — ang sched band ay minuto-scale magbago kaya ang per-tick refire ay purong churn (ang buong pending chain kada tick ang nag-timeout sa JEM replay kahit 7200s; sa live, CPU hygiene). Bench/unbench + halt lifecycle hindi apektado. Fail-open (sirang marker ⇒ normal evaluation).",
+    )
+    chili_momentum_late_window_refire_cooldown_seconds: float = Field(
+        default=20.0,
+        ge=0.0,
+        le=300.0,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_LATE_WINDOW_REFIRE_COOLDOWN_SECONDS"),
+        description="L8b: tagal ng refire cooldown pagkatapos ng late_window demote. Worst case ay naaantala ang isang L8-eligible fire nang ganito katagal sa loob ng zero band. ONE documented base = 20s. Band [0,300]; 0 = walang cooldown.",
+    )
+    chili_momentum_latest_rvol_memo_seconds: float = Field(
+        default=5.0,
+        ge=0.0,
+        le=60.0,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_LATEST_RVOL_MEMO_SECONDS"),
+        description="L8b perf: per-bucket memo ng _latest_rvol (py-spy: ang per-tick micro-bar rebuild ay 28.7% ng JEM replay runtime). Sim-anchored clock ang bucket key (replay-correct); ang micro-bar frame ay bar-granular kaya ≤5s staleness ay walang epekto sa explosive thresholds. ONE documented base = 5s. Band [0,60]; 0 = memo OFF (byte-identical legacy).",
+    )
     chili_momentum_vol_nan_fail_closed_enabled: bool = Field(
         default=True,
         validation_alias=AliasChoices("CHILI_MOMENTUM_VOL_NAN_FAIL_CLOSED_ENABLED"),

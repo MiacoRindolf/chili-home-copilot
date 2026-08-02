@@ -19732,26 +19732,56 @@ def _squeeze_exit_band_widen_factor(via: Any, symbol: str) -> float:
         return 1.0
 
 
+_LATEST_RVOL_MEMO: dict[str, tuple[int, float | None]] = {}
+_LATEST_RVOL_MEMO_MAX = 512  # hard max size (conventions: caches = max size + TTL)
+
+
 def _latest_rvol(db, symbol: str) -> float | None:
     """Best-effort latest relative-volume (volume_ratio of the most recent bar) for the
     explosive carve-outs. Reads the SESSION-scoped micro-bar df from the densified tape
     (no network, same resampler the micro-pullback re-load uses) and computes
     volume_ratio via the canonical indicator core. None on thin tape / any error (the
-    caller then treats the name as non-explosive on RVOL ⇒ fail-closed). Pure read."""
+    caller then treats the name as non-explosive on RVOL ⇒ fail-closed). Pure read.
+
+    L8b PERF (2026-08-02, py-spy flamegraph sa JEM replay): ang per-tick micro-bar
+    rebuild dito ay 28.7% ng buong runtime sa gising na FSM sa dense tape. Per-5s
+    memo keyed sa SIM-ANCHORED clock (``_utcnow_aware`` — replay-correct): ang
+    micro-bar frame ay bar-granular kaya ang ≤5s staleness ay walang epekto sa
+    explosive threshold reads; kada bucket isang beses lang ang fetch+resample.
+    ``chili_momentum_latest_rvol_memo_seconds=0`` ⇒ memo OFF (byte-identical
+    legacy). Ang None (thin tape) ay kine-cache din — hindi paulit-ulit na
+    fetch ang thin na pangalan sa loob ng bucket."""
+    _sym = str(symbol or "").upper()
+    _bucket: int | None = None
+    try:
+        _memo_s = float(getattr(
+            settings, "chili_momentum_latest_rvol_memo_seconds", 5.0
+        ) or 0.0)
+        if _memo_s > 0:
+            _bucket = int(_utcnow_aware().timestamp() // _memo_s)
+            _hit = _LATEST_RVOL_MEMO.get(_sym)
+            if _hit is not None and _hit[0] == _bucket:
+                return _hit[1]
+    except Exception:
+        _bucket = None
+    v_out: float | None = None
     try:
         from ..indicator_core import compute_all_from_df as _rv_compute
 
         _df = _build_micro_bar_df(db, symbol, bar_seconds=15)
-        if _df is None or getattr(_df, "empty", True) or len(_df) < 10:
-            return None
-        arrays = _rv_compute(_df, needed={"volume_ratio"})
-        vr = arrays.get("volume_ratio") or []
-        if not len(vr):
-            return None
-        v = vr[-1]
-        return None if v is None else float(v)
+        if _df is not None and not getattr(_df, "empty", True) and len(_df) >= 10:
+            arrays = _rv_compute(_df, needed={"volume_ratio"})
+            vr = arrays.get("volume_ratio") or []
+            if len(vr):
+                v = vr[-1]
+                v_out = None if v is None else float(v)
     except Exception:
-        return None
+        v_out = None
+    if _bucket is not None:
+        if len(_LATEST_RVOL_MEMO) > _LATEST_RVOL_MEMO_MAX:
+            _LATEST_RVOL_MEMO.clear()
+        _LATEST_RVOL_MEMO[_sym] = (_bucket, v_out)
+    return v_out
 
 
 def _breakout_bailout_lock_in_seconds(*, explosive: bool) -> float:
@@ -26605,7 +26635,40 @@ def tick_live_session(
         # approve or veto that decision, but a generic/additive detector must not
         # overwrite a missing, stale, or mismatched receipt and reach admission.
         _first_dip_owned_result: tuple[bool, str, dict[str, Any]] | None = None
+        # L8b (2026-08-02): PENDING-REFIRE COOLDOWN — churn bound para sa
+        # zero-band demote loop. Pagkatapos ng late_window demote, ang parehong
+        # structure ay muling nagpapaputok kada tick → buong pending chain kada
+        # tick (ang JEM 100%-AH na 1.19M-tick tape ay nag-timeout kahit 7200s sa
+        # replay). Ang schedule band ay minuto-scale magbago, kaya ang per-tick
+        # na muling pagtatangka ay purong churn: sa loob ng cooldown, laktawan
+        # ang trigger ladder (ang bench/unbench + halt lifecycle ay tumatakbo pa
+        # rin — hiwalay na block). Fail-open: sirang marker ⇒ normal evaluation.
+        _refire_cooldown = False
         if _score_ok:
+            try:
+                from .entry_gates import refire_cooldown_active
+
+                _refire_cooldown = refire_cooldown_active(
+                    now=_utcnow_aware(),
+                    until_iso=le.get("late_window_refire_until"),
+                    enabled=bool(getattr(
+                        settings,
+                        "chili_momentum_late_window_refire_cooldown_enabled",
+                        True,
+                    )),
+                )
+            except Exception:
+                _refire_cooldown = False
+            if not _refire_cooldown and le.get("late_window_refire_until"):
+                # expired — linisin ang marker (mapepersist kasama ng susunod
+                # na normal na ledger commit; hindi ito nag-i-issue ng sarili).
+                le.pop("late_window_refire_until", None)
+        if _refire_cooldown:
+            # HINDI hinahayaang manatili ang initial True/"score_only" — ang
+            # laktaw sa ladder ay kailangang mag-iwan ng malinaw na WAIT state.
+            _trigger_ok, _trigger_reason = False, "late_window_refire_cooldown"
+            _reject_map["late_window_refire_cooldown"] = True
+        elif _score_ok:
             try:
                 from .entry_gates import (
                     _FIRST_DIP_FRONT_SIDE_VIA,
@@ -30570,6 +30633,23 @@ def tick_live_session(
                 pass
         if _sched_mult <= 0.0:
             _emit(db, sess, "live_entry_wait_late_window", {"window": _win})
+            # L8b: itakda ang refire cooldown BAGO ang demote — sa loob nito,
+            # lalaktawan ng WATCHING flow ang trigger ladder (ang sched band ay
+            # minuto-scale magbago; ang per-tick refire ay purong churn).
+            try:
+                _cool_s = max(0.0, float(getattr(
+                    settings,
+                    "chili_momentum_late_window_refire_cooldown_seconds", 20.0,
+                ) or 0.0))
+                if _cool_s > 0 and bool(getattr(
+                    settings,
+                    "chili_momentum_late_window_refire_cooldown_enabled", True,
+                )):
+                    le["late_window_refire_until"] = (
+                        _utcnow_aware() + timedelta(seconds=_cool_s)
+                    ).isoformat()
+            except Exception:
+                pass
             # L8 PARK-BUG FIX: dati ay NANANATILI sa LIVE_PENDING_ENTRY ang session
             # dito nang walang demote — ang FSM ay naka-PARK bawat tick (wala nang
             # trigger/bench/backside evaluation) hanggang tape end. Ibalik sa
