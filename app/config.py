@@ -5101,6 +5101,18 @@ class Settings(BaseSettings):
         validation_alias=AliasChoices("CHILI_MOMENTUM_MONSTER_VWAP_DEPTH_ATR_MULT"),
         description="L7 vwap-reclaim: sa monster context, tanggapin ang ≥1-bar-below kapag ang below-VWAP penetration ≥ mult × ATR% (LALIM pumapalit sa TAGAL — measured: 1.2×ATR na blocked dip → +45% forward; 0.31×ATR post-climax chop → tamang block). ONE documented base = 1.0. Band [0,10].",
     )
+    chili_momentum_late_ah_monster_placement_enabled: bool = Field(
+        default=True,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_LATE_AH_MONSTER_PLACEMENT_ENABLED"),
+        description="L8 (2026-08-01): kondisyonal na pagbukas ng late/afterhours (14:30-20:00 ET) placement na hard-zeroed ng A2 schedule. Sa loob ng band: payagan LANG kapag STRUCTURAL dip-reclaim trigger (flush_dip/raw_break/vwap_reclaim/abcd/double_bottom — measured FSM vocabulary sa monster tape) AT monster day (px/session_low ≥ 1.5), sa reduced size (chili_momentum_late_ah_monster_mult, base 0.5). Ang ×0.0 ay galing sa 14d AH 1W/11L (−$72.65) na random chop; ang JEM/JLHL monster bursts (Ross winning days) ay structurally unplayable dito bago ang lever. Lahat ng ibang proteksyon tumatakbo pa rin.",
+    )
+    chili_momentum_late_ah_monster_mult: float = Field(
+        default=0.5,
+        ge=0.0,
+        le=2.0,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_LATE_AH_MONSTER_MULT"),
+        description="L8: ang schedule multiplier na ipapalit sa ×0.0 kapag pumasa ang late/AH monster conditions — kalahating size (0.5) sa halip na buo, dahil mas manipis ang AH book. ONE documented base = 0.5. Band [0,2].",
+    )
     chili_momentum_vol_nan_fail_closed_enabled: bool = Field(
         default=True,
         validation_alias=AliasChoices("CHILI_MOMENTUM_VOL_NAN_FAIL_CLOSED_ENABLED"),

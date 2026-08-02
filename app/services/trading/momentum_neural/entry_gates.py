@@ -3771,6 +3771,122 @@ def evaluate_sticky_backside_bench(
         return False, "bench_fail_open", None, debug
 
 
+# L8 (2026-08-01): ang mga trigger reason na may STRUCTURAL dip-reclaim definition —
+# ang tanging klaseng puwedeng mag-place sa late/afterhours band ng A2 schedule.
+# Ang vocabulary ay MEASURED sa monster tape (JEM/JLHL sealed logs + instrumented
+# probe): abcd_break at double_bottom_break(+_tick_ok) ang talagang pumuputok sa
+# FSM sa mga burst na iyon; flush_dip_buy/raw_break/vwap_reclaim ang canonical na
+# dip-reclaim families. HINDI kasama ang momentum_ok_* (continuation/volume
+# confirmation, hindi dip structure).
+_LATE_AH_STRUCTURAL_REASONS = (
+    "flush_dip_buy",
+    "vwap_reclaim",
+    "raw_break",
+    "abcd_break",
+    "abcd_break_tick_ok",
+    "double_bottom_break",
+    "double_bottom_break_tick_ok",
+)
+
+
+def late_window_monster_placement_mult(
+    *,
+    window: str | None,
+    trigger_reason: str | None,
+    live_price: float | None,
+    session_low: float | None,
+    enabled: bool,
+    up_off_low_floor: float,
+    monster_mult: float,
+) -> tuple[float, dict[str, Any]]:
+    """L8 (2026-08-01) — kondisyonal na pagbukas ng late/afterhours placement
+    para sa monster days. Ang A2 schedule multiplier ay ×0.0 sa late (14:30-16:00
+    ET) at afterhours (16:00-20:00 ET) mula sa 14-araw na AH sample na 1W/11L
+    (−$72.65) — pero pinapatay din nito ang Ross monster tail: ang JEM 06-30
+    window ay 100% afterhours (ang candidate ay na-park isang oras bago ang day
+    high) at ang JLHL 07-09 ay placeable lang sa unang 5 minuto. Ang mga burst
+    na iyon ang mismong winning days ni Ross.
+
+    Sa halip na binary na oras-based na zero, MEKANISMO ang kondisyon: sa loob
+    ng late/afterhours band, ibalik ang ``monster_mult`` (base 0.5 — kalahating
+    size, hindi buo) kapag SABAY na:
+      1. STRUCTURAL dip-reclaim trigger (``_LATE_AH_STRUCTURAL_REASONS``) — ang
+         random AH chop na pinagmulan ng 1W/11L ay hindi structural; at
+      2. MONSTER day — ``px / session_low >= up_off_low_floor`` (premarket-
+         inclusive session frame; shared floor ng L7).
+
+    Ang lahat ng IBANG proteksyon (chase guards, L2 confirm, spread caps, bench,
+    max-loss circuit) ay tumatakbo pa rin — placement multiplier lang ito.
+    PURE SCALARS (walang frame/I/O — ang caller ang nagme-memoize ng
+    ``session_low`` kada minuto; ang per-attempt na OHLCV fetch ang nag-timeout
+    sa unang proof attempt). Fail-toward-legacy: anumang error/missing input ⇒
+    0.0 (nananatiling blocked). VERBATIM ang mga bound."""
+    debug: dict[str, Any] = {"opened": False}
+    if not bool(enabled):
+        return 0.0, debug
+    try:
+        _win = str(window or "")
+        if _win not in ("late", "afterhours"):
+            debug["reject"] = "not_late_ah_window"
+            return 0.0, debug
+        _trig = str(trigger_reason or "")
+        debug["trigger"] = _trig
+        if _trig not in _LATE_AH_STRUCTURAL_REASONS:
+            debug["reject"] = "non_structural_trigger"
+            return 0.0, debug
+        px = float(live_price)
+        if not (math.isfinite(px) and px > 0):
+            debug["reject"] = "bad_price"
+            return 0.0, debug
+        lo = float(session_low)
+        if not (math.isfinite(lo) and lo > 0):
+            debug["reject"] = "bad_session_low"
+            return 0.0, debug
+        up_off_low = px / lo
+        debug.update({
+            "px": round(px, 6), "session_low": round(lo, 6),
+            "up_off_low": round(up_off_low, 6), "window": _win,
+        })
+        if up_off_low < float(up_off_low_floor):
+            debug["reject"] = "not_monster_day"
+            return 0.0, debug
+        m = float(monster_mult)
+        if not (math.isfinite(m) and m > 0):
+            debug["reject"] = "bad_mult"
+            return 0.0, debug
+        debug["opened"] = True
+        return m, debug
+    except Exception:
+        debug["reject"] = "late_ah_monster_error"
+        return 0.0, debug
+
+
+def _late_window_monster_placement_mult_from_settings(
+    *,
+    window: str | None,
+    trigger_reason: str | None,
+    live_price: float | None,
+    session_low: float | None,
+) -> tuple[float, dict[str, Any]]:
+    """Settings-bound wrapper ng :func:`late_window_monster_placement_mult`
+    (verbatim reads; shared monster floor ng L7 — isang dokumentadong base)."""
+    return late_window_monster_placement_mult(
+        window=window,
+        trigger_reason=trigger_reason,
+        live_price=live_price,
+        session_low=session_low,
+        enabled=bool(getattr(
+            settings, "chili_momentum_late_ah_monster_placement_enabled", True
+        )),
+        up_off_low_floor=float(getattr(
+            settings, "chili_momentum_monster_up_off_low_floor", 1.5
+        )),
+        monster_mult=float(getattr(
+            settings, "chili_momentum_late_ah_monster_mult", 0.5
+        )),
+    )
+
+
 # ── FIX C: TAPE-CONFIRMED-HOLD early entry (graduate the L2 confirmer to a TRIGGER) ──
 # Ross buys the pullback-HOLD bounce when the TAPE confirms buyers, BEFORE the confirmed
 # break (the choppy explosive names that never cleanly cross the pullback high inside the

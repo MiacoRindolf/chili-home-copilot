@@ -127,6 +127,10 @@ APPROVED_STRATEGY_FLAGS_BY_SLUG = (
         "monster-dip-context",
         "chili_momentum_dip_monster_context_enabled",
     ),
+    (
+        "late-ah-monster",
+        "chili_momentum_late_ah_monster_placement_enabled",
+    ),
 )
 DEFAULT_ARM = "intended"
 # CLOSED compound arms: named multi-flag-off vectors. NOT a free-form grammar —
@@ -162,6 +166,7 @@ POST_SELECTION_SCOREABLE_POLICY_FLAGS = (
     "chili_momentum_whipsaw_rapid_escalation_enabled",
     "chili_momentum_flush_dip_fresh_hod_afternoon_enabled",
     "chili_momentum_dip_monster_context_enabled",
+    "chili_momentum_late_ah_monster_placement_enabled",
 )
 POST_SELECTION_UNSCOREABLE_POLICY_FLAGS = (
     "chili_momentum_universe_float_gate_enabled",
@@ -1308,6 +1313,12 @@ def main() -> int:
         help="explicit LOCAL naive ISO hard deadline — no window starts unless it fits",
     )
     ap.add_argument("--limit", type=int, default=None)
+    ap.add_argument(
+        "--window-timeout-seconds", type=int, default=3900,
+        help="per-window subprocess timeout cap (default 3900; ang L8 park fix "
+             "ay nagpapagising sa FSM sa buong late/AH tape kaya ang mga "
+             "monster window ay maaaring mangailangan ng mas mahaba)",
+    )
     ap.add_argument("--only", default=None,
                     help="comma list of SYMBOL|YYYY-MM-DD keys — run just these (smoke)")
     args = ap.parse_args()
@@ -1827,7 +1838,10 @@ def main() -> int:
                     flush=True,
                 )
                 break
-            timeout = min(3900, max(60, int(remaining - 120)))
+            timeout = min(
+                int(getattr(args, "window_timeout_seconds", 3900) or 3900),
+                max(60, int(remaining - 120)),
+            )
             env = isolated_child_env()
             prepend_receipt = cache_receipts.get(f"{w['symbol']}|{w['day']}")
             env.update({"SYMBOL": w["symbol"], "ARM": args.arm,

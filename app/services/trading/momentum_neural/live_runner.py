@@ -30519,8 +30519,65 @@ def tick_live_session(
                 # Fail-CLOSED: a schedule read error must NOT size an entry at full risk.
                 _sched_mult = 0.0
                 _win = "unknown"
+        if _sched_mult <= 0.0 and _win in ("late", "afterhours"):
+            # L8 (2026-08-01): KONDISYONAL na pagbukas ng late/AH placement — ang
+            # binary ×0.0 ay pumapatay sa monster tail (JEM 06-30 window 100% AH,
+            # candidate na-park isang oras bago ang day high; JLHL 07-09 placeable
+            # lang sa unang 5 min). Sa loob ng band, structural dip-reclaim trigger
+            # + monster day ⇒ reduced size sa halip na zero; lahat ng ibang vetoes
+            # (chase/extension/L2/spread/bench) ay tumatakbo pa rin pagkatapos nito.
+            # Fail-toward-legacy: anumang error ⇒ mananatiling 0.0. PERFORMANCE:
+            # cheap-first (structural check bago ang anumang I/O) + per-MINUTE
+            # memo ng session_low sa ledger — ang per-attempt na OHLCV fetch ang
+            # nag-timeout sa unang proof attempt (JEM 100% AH = fetch kada tick).
+            try:
+                from .entry_gates import (
+                    _LATE_AH_STRUCTURAL_REASONS,
+                    _late_window_monster_placement_mult_from_settings,
+                    _today_session_frame,
+                )
+
+                _l8_trig = str(le.get("entry_trigger_reason") or "")
+                if _l8_trig not in _LATE_AH_STRUCTURAL_REASONS:
+                    raise LookupError("non_structural_trigger")  # cheap skip, walang fetch
+                _l8_minute = _utcnow_aware().strftime("%Y-%m-%dT%H:%M")
+                _l8_memo = le.get("l8_session_low_memo") or {}
+                if _l8_memo.get("m") != _l8_minute:
+                    _l8_iv = str(
+                        getattr(settings, "chili_momentum_pullback_entry_interval", "5m") or "5m"
+                    )
+                    _l8_df = _replay_aware_fetch_ohlcv_df(sess.symbol, interval=_l8_iv, period="5d")
+                    _l8_lo = float(
+                        _today_session_frame(_l8_df)["Low"].astype(float).min()
+                    )
+                    _l8_memo = {"m": _l8_minute, "lo": _l8_lo}
+                    le["l8_session_low_memo"] = _l8_memo
+                _l8_mult, _l8_dbg = _late_window_monster_placement_mult_from_settings(
+                    window=_win,
+                    trigger_reason=_l8_trig,
+                    live_price=guarded_ask,
+                    session_low=_l8_memo.get("lo"),
+                )
+                if _l8_mult > 0.0:
+                    _sched_mult = float(_l8_mult)
+                    le["schedule_risk"] = {
+                        "window": _win, "mult": _sched_mult, "late_ah_monster": True,
+                    }
+                    _emit(db, sess, "live_entry_late_window_monster_placement", {
+                        "window": _win, "mult": _sched_mult, **_l8_dbg,
+                    })
+            except Exception:
+                pass
         if _sched_mult <= 0.0:
             _emit(db, sess, "live_entry_wait_late_window", {"window": _win})
+            # L8 PARK-BUG FIX: dati ay NANANATILI sa LIVE_PENDING_ENTRY ang session
+            # dito nang walang demote — ang FSM ay naka-PARK bawat tick (wala nang
+            # trigger/bench/backside evaluation) hanggang tape end. Ibalik sa
+            # WATCHING gaya ng lahat ng ibang pending vetoes (extension/round-number
+            # pattern) para patuloy ang session-phase evaluation; babalik din dito
+            # ang isang bagong candidate kapag bumukas ang window o pumasa ang
+            # monster conditions.
+            _safe_transition(db, sess, STATE_WATCHING_LIVE)
             db.flush()
             return {"ok": True, "session_id": sess.id, "state": sess.state, "skipped": "late_window"}
         # TIER-2 OVERNIGHT size reduction: a multiplier (base 0.5) on the equity-relative
