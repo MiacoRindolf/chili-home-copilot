@@ -26605,7 +26605,40 @@ def tick_live_session(
         # approve or veto that decision, but a generic/additive detector must not
         # overwrite a missing, stale, or mismatched receipt and reach admission.
         _first_dip_owned_result: tuple[bool, str, dict[str, Any]] | None = None
+        # L8b (2026-08-02): PENDING-REFIRE COOLDOWN — churn bound para sa
+        # zero-band demote loop. Pagkatapos ng late_window demote, ang parehong
+        # structure ay muling nagpapaputok kada tick → buong pending chain kada
+        # tick (ang JEM 100%-AH na 1.19M-tick tape ay nag-timeout kahit 7200s sa
+        # replay). Ang schedule band ay minuto-scale magbago, kaya ang per-tick
+        # na muling pagtatangka ay purong churn: sa loob ng cooldown, laktawan
+        # ang trigger ladder (ang bench/unbench + halt lifecycle ay tumatakbo pa
+        # rin — hiwalay na block). Fail-open: sirang marker ⇒ normal evaluation.
+        _refire_cooldown = False
         if _score_ok:
+            try:
+                from .entry_gates import refire_cooldown_active
+
+                _refire_cooldown = refire_cooldown_active(
+                    now=_utcnow_aware(),
+                    until_iso=le.get("late_window_refire_until"),
+                    enabled=bool(getattr(
+                        settings,
+                        "chili_momentum_late_window_refire_cooldown_enabled",
+                        True,
+                    )),
+                )
+            except Exception:
+                _refire_cooldown = False
+            if not _refire_cooldown and le.get("late_window_refire_until"):
+                # expired — linisin ang marker (mapepersist kasama ng susunod
+                # na normal na ledger commit; hindi ito nag-i-issue ng sarili).
+                le.pop("late_window_refire_until", None)
+        if _refire_cooldown:
+            # HINDI hinahayaang manatili ang initial True/"score_only" — ang
+            # laktaw sa ladder ay kailangang mag-iwan ng malinaw na WAIT state.
+            _trigger_ok, _trigger_reason = False, "late_window_refire_cooldown"
+            _reject_map["late_window_refire_cooldown"] = True
+        elif _score_ok:
             try:
                 from .entry_gates import (
                     _FIRST_DIP_FRONT_SIDE_VIA,
@@ -30570,6 +30603,23 @@ def tick_live_session(
                 pass
         if _sched_mult <= 0.0:
             _emit(db, sess, "live_entry_wait_late_window", {"window": _win})
+            # L8b: itakda ang refire cooldown BAGO ang demote — sa loob nito,
+            # lalaktawan ng WATCHING flow ang trigger ladder (ang sched band ay
+            # minuto-scale magbago; ang per-tick refire ay purong churn).
+            try:
+                _cool_s = max(0.0, float(getattr(
+                    settings,
+                    "chili_momentum_late_window_refire_cooldown_seconds", 20.0,
+                ) or 0.0))
+                if _cool_s > 0 and bool(getattr(
+                    settings,
+                    "chili_momentum_late_window_refire_cooldown_enabled", True,
+                )):
+                    le["late_window_refire_until"] = (
+                        _utcnow_aware() + timedelta(seconds=_cool_s)
+                    ).isoformat()
+            except Exception:
+                pass
             # L8 PARK-BUG FIX: dati ay NANANATILI sa LIVE_PENDING_ENTRY ang session
             # dito nang walang demote — ang FSM ay naka-PARK bawat tick (wala nang
             # trigger/bench/backside evaluation) hanggang tape end. Ibalik sa

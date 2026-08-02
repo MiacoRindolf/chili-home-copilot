@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import logging
 import math
+from datetime import datetime, timezone
 from typing import Any
 
 import pandas as pd
@@ -3885,6 +3886,37 @@ def _late_window_monster_placement_mult_from_settings(
             settings, "chili_momentum_late_ah_monster_mult", 0.5
         )),
     )
+
+
+def refire_cooldown_active(
+    *,
+    now: datetime,
+    until_iso: str | None,
+    enabled: bool,
+) -> bool:
+    """L8b (2026-08-02) — pending-refire cooldown check (pure clock logic).
+
+    Pagkatapos ng late_window demote, ang parehong structure ay muling
+    nagpapaputok kada tick sa zero band → buong pending chain kada tick — ang
+    replay-churn na nag-timeout sa JEM (1.19M ticks, 100% AH) kahit 7200s. Sa
+    loob ng cooldown, nilalaktawan ng WATCHING flow ang trigger ladder; ang
+    bench/unbench at halt lifecycle ay hindi apektado.
+
+    FAIL-OPEN: flag off, walang marker, o sirang ISO ⇒ False (normal
+    evaluation) — hindi kailanman naka-strand ang isang pangalan sa cooldown
+    dahil sa bug."""
+    if not bool(enabled):
+        return False
+    try:
+        if not until_iso:
+            return False
+        until = datetime.fromisoformat(str(until_iso))
+        if until.tzinfo is None:
+            until = until.replace(tzinfo=timezone.utc)
+        _n = now if now.tzinfo is not None else now.replace(tzinfo=timezone.utc)
+        return _n < until
+    except Exception:
+        return False
 
 
 # ── FIX C: TAPE-CONFIRMED-HOLD early entry (graduate the L2 confirmer to a TRIGGER) ──
