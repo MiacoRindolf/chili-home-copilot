@@ -3790,11 +3790,11 @@ _LATE_AH_STRUCTURAL_REASONS = (
 
 
 def late_window_monster_placement_mult(
-    df,
     *,
     window: str | None,
     trigger_reason: str | None,
     live_price: float | None,
+    session_low: float | None,
     enabled: bool,
     up_off_low_floor: float,
     monster_mult: float,
@@ -3817,8 +3817,10 @@ def late_window_monster_placement_mult(
 
     Ang lahat ng IBANG proteksyon (chase guards, L2 confirm, spread caps, bench,
     max-loss circuit) ay tumatakbo pa rin — placement multiplier lang ito.
-    Fail-toward-legacy: anumang error/missing input ⇒ 0.0 (nananatiling blocked).
-    VERBATIM ang mga bound."""
+    PURE SCALARS (walang frame/I/O — ang caller ang nagme-memoize ng
+    ``session_low`` kada minuto; ang per-attempt na OHLCV fetch ang nag-timeout
+    sa unang proof attempt). Fail-toward-legacy: anumang error/missing input ⇒
+    0.0 (nananatiling blocked). VERBATIM ang mga bound."""
     debug: dict[str, Any] = {"opened": False}
     if not bool(enabled):
         return 0.0, debug
@@ -3836,8 +3838,7 @@ def late_window_monster_placement_mult(
         if not (math.isfinite(px) and px > 0):
             debug["reject"] = "bad_price"
             return 0.0, debug
-        _sess = _today_session_frame(df)
-        lo = float(_sess["Low"].astype(float).min())
+        lo = float(session_low)
         if not (math.isfinite(lo) and lo > 0):
             debug["reject"] = "bad_session_low"
             return 0.0, debug
@@ -3861,19 +3862,19 @@ def late_window_monster_placement_mult(
 
 
 def _late_window_monster_placement_mult_from_settings(
-    df,
     *,
     window: str | None,
     trigger_reason: str | None,
     live_price: float | None,
+    session_low: float | None,
 ) -> tuple[float, dict[str, Any]]:
     """Settings-bound wrapper ng :func:`late_window_monster_placement_mult`
     (verbatim reads; shared monster floor ng L7 — isang dokumentadong base)."""
     return late_window_monster_placement_mult(
-        df,
         window=window,
         trigger_reason=trigger_reason,
         live_price=live_price,
+        session_low=session_low,
         enabled=bool(getattr(
             settings, "chili_momentum_late_ah_monster_placement_enabled", True
         )),

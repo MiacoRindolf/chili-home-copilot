@@ -30526,19 +30526,37 @@ def tick_live_session(
             # lang sa unang 5 min). Sa loob ng band, structural dip-reclaim trigger
             # + monster day ⇒ reduced size sa halip na zero; lahat ng ibang vetoes
             # (chase/extension/L2/spread/bench) ay tumatakbo pa rin pagkatapos nito.
-            # Fail-toward-legacy: anumang error ⇒ mananatiling 0.0.
+            # Fail-toward-legacy: anumang error ⇒ mananatiling 0.0. PERFORMANCE:
+            # cheap-first (structural check bago ang anumang I/O) + per-MINUTE
+            # memo ng session_low sa ledger — ang per-attempt na OHLCV fetch ang
+            # nag-timeout sa unang proof attempt (JEM 100% AH = fetch kada tick).
             try:
-                from .entry_gates import _late_window_monster_placement_mult_from_settings
-
-                _l8_iv = str(
-                    getattr(settings, "chili_momentum_pullback_entry_interval", "5m") or "5m"
+                from .entry_gates import (
+                    _LATE_AH_STRUCTURAL_REASONS,
+                    _late_window_monster_placement_mult_from_settings,
+                    _today_session_frame,
                 )
-                _l8_df = _replay_aware_fetch_ohlcv_df(sess.symbol, interval=_l8_iv, period="5d")
+
+                _l8_trig = str(le.get("entry_trigger_reason") or "")
+                if _l8_trig not in _LATE_AH_STRUCTURAL_REASONS:
+                    raise LookupError("non_structural_trigger")  # cheap skip, walang fetch
+                _l8_minute = _utcnow_aware().strftime("%Y-%m-%dT%H:%M")
+                _l8_memo = le.get("l8_session_low_memo") or {}
+                if _l8_memo.get("m") != _l8_minute:
+                    _l8_iv = str(
+                        getattr(settings, "chili_momentum_pullback_entry_interval", "5m") or "5m"
+                    )
+                    _l8_df = _replay_aware_fetch_ohlcv_df(sess.symbol, interval=_l8_iv, period="5d")
+                    _l8_lo = float(
+                        _today_session_frame(_l8_df)["Low"].astype(float).min()
+                    )
+                    _l8_memo = {"m": _l8_minute, "lo": _l8_lo}
+                    le["l8_session_low_memo"] = _l8_memo
                 _l8_mult, _l8_dbg = _late_window_monster_placement_mult_from_settings(
-                    _l8_df,
                     window=_win,
-                    trigger_reason=le.get("entry_trigger_reason"),
+                    trigger_reason=_l8_trig,
                     live_price=guarded_ask,
+                    session_low=_l8_memo.get("lo"),
                 )
                 if _l8_mult > 0.0:
                     _sched_mult = float(_l8_mult)
