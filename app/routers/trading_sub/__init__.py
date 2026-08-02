@@ -1,5 +1,6 @@
 """Trading sub-routers: AI brain, broker, Web3, operator, trades, patterns, scanning, backtest, fast-path."""
 from .ai import router as ai_router
+from .paper_observer import router as paper_observer_router
 from .backtest import router as backtest_router
 from .broker import router as broker_router
 from .data_provider import router as data_provider_router
@@ -15,6 +16,7 @@ from .web3 import router as web3_router
 
 __all__ = [
     "ai_router",
+    "paper_observer_router",
     "backtest_router",
     "broker_router",
     "data_provider_router",

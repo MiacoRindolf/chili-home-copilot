@@ -117,6 +117,7 @@ from ..services import trading_service as ts
 from ..services.trading.scanner import validate_live_prices as _smart_pick_validate_live_prices
 from .trading_sub import (
     ai_router, backtest_router, broker_router, data_provider_router,
+    paper_observer_router,
     fast_path_router,
     inspect_router, momentum_api, monitor_router, operator_router, patterns_router,
     replay_router,
@@ -132,6 +133,7 @@ from ..schemas.trading import (
 
 router = APIRouter(tags=["trading"])
 router.include_router(ai_router)
+router.include_router(paper_observer_router)
 router.include_router(momentum_api.router)
 router.include_router(replay_router)
 router.include_router(inspect_router)
