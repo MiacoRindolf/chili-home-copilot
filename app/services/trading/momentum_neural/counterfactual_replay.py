@@ -1948,27 +1948,10 @@ def _iter_bar_candidates(
                     phase_reason = "bench_fail_open"
                     phase_debug = {}
                 if phase_benched:
-                    # L8 (2026-08-01): STRUCTURAL MONSTER-DIP BYPASS — parehong helper
-                    # ng production (live_runner) para sa live/replay parity. Ang bench
-                    # latch state ay HINDI ginagalaw (per-candidate bypass, hindi
-                    # unbench); fail-toward-legacy sa loob ng helper.
-                    try:
-                        from .entry_gates import _bench_monster_dip_bypass_from_settings
-
-                        _byp_ok, _byp_dbg = _bench_monster_dip_bypass_from_settings(
-                            frame,
-                            benched_at_hod=benched_at_hod,
-                            live_price=fire_tick.ask,
-                            trigger_reason=str(reason),
-                        )
-                    except Exception:
-                        _byp_ok, _byp_dbg = False, {"reject": "bypass_error"}
-                    if not _byp_ok:
-                        blocked_reason = f"backside_bench_veto:{phase_reason}"
-                        reasons[blocked_reason] = reasons.get(blocked_reason, 0) + 1
-                        fired = True
-                        break
-                    candidate.trigger_debug["bench_bypass"] = dict(_byp_dbg)
+                    blocked_reason = f"backside_bench_veto:{phase_reason}"
+                    reasons[blocked_reason] = reasons.get(blocked_reason, 0) + 1
+                    fired = True
+                    break
                 candidate.trigger_debug["phase_bench_reason"] = phase_reason
                 candidate.trigger_debug["bar_market_close_at"] = _json_dt(
                     market_close_ts

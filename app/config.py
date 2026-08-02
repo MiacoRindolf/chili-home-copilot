@@ -5101,25 +5101,6 @@ class Settings(BaseSettings):
         validation_alias=AliasChoices("CHILI_MOMENTUM_MONSTER_VWAP_DEPTH_ATR_MULT"),
         description="L7 vwap-reclaim: sa monster context, tanggapin ang ≥1-bar-below kapag ang below-VWAP penetration ≥ mult × ATR% (LALIM pumapalit sa TAGAL — measured: 1.2×ATR na blocked dip → +45% forward; 0.31×ATR post-climax chop → tamang block). ONE documented base = 1.0. Band [0,10].",
     )
-    chili_momentum_bench_monster_dip_bypass_enabled: bool = Field(
-        default=True,
-        validation_alias=AliasChoices("CHILI_MOMENTUM_BENCH_MONSTER_DIP_BYPASS_ENABLED"),
-        description="L8 (2026-08-01): per-candidate BYPASS ng sticky backside bench sa monster days — structural dip-reclaim trigger (flush_dip_buy/raw_break/vwap_reclaim) + monster floor + ≥10% discount sa ilalim ng bench anchor + hindi rolled-over + VWAP side. HINDI unbench (marker nananatiling latched — never-relatch hole guard, measured sa JEM). Ang purong geometry na walang structure ay BALIKTAD ang selectivity (JEM E2 hover-dump 9/9 admit, E3 winner 0/30) — kaya structure ang necessary key. Fail-toward-legacy (error ⇒ veto stays).",
-    )
-    chili_momentum_bench_bypass_min_discount_frac: float = Field(
-        default=0.10,
-        ge=0.0,
-        le=1.0,
-        validation_alias=AliasChoices("CHILI_MOMENTUM_BENCH_BYPASS_MIN_DISCOUNT_FRAC"),
-        description="L8: minimum discount sa ilalim ng benched_at_hod para sa bypass (px ≤ anchor × (1−frac)). Measured: verified winner re-entries 13-33% sa ilalim ng anchor; ang near-anchor hover ang dump class (JEM E2, JLHL post-climax). ONE documented base = 0.10. Band [0,1].",
-    )
-    chili_momentum_bench_bypass_day_retrace_ceiling: float = Field(
-        default=0.50,
-        ge=0.0,
-        le=1.0,
-        validation_alias=AliasChoices("CHILI_MOMENTUM_BENCH_BYPASS_DAY_RETRACE_CEILING"),
-        description="L8: rolled-over refusal — walang bypass kapag (day_high − px)/(day_high − day_low) > ceiling (ibinigay na ang mahigit kalahati ng day range = hindi na binibili, Ross rule). Measured: LHSW late-day fade 0.48-0.61, JZXN deep fades 0.52-0.67. ONE documented base = 0.50. Band [0,1].",
-    )
     chili_momentum_vol_nan_fail_closed_enabled: bool = Field(
         default=True,
         validation_alias=AliasChoices("CHILI_MOMENTUM_VOL_NAN_FAIL_CLOSED_ENABLED"),

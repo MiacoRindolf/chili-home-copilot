@@ -27416,35 +27416,14 @@ def tick_live_session(
                             **_bench_dbg,
                         })
                     if _trigger_ok:
-                        # L8 (2026-08-01): STRUCTURAL MONSTER-DIP BYPASS — per-candidate,
-                        # HINDI unbench (ang marker ay nananatiling latched; walang
-                        # never-relatch hole). Structure + monster floor + tunay na
-                        # discount + hindi rolled-over + VWAP side; fail-toward-legacy
-                        # (anumang error ⇒ tuloy ang veto).
-                        from .entry_gates import _bench_monster_dip_bypass_from_settings
-                        _bypass_ok, _bypass_dbg = _bench_monster_dip_bypass_from_settings(
-                            _bench_df,
-                            benched_at_hod=le.get("benched_backside_hod"),
-                            live_price=_bench_px,
-                            trigger_reason=_trigger_reason,
-                        )
-                        if _bypass_ok:
-                            _emit(db, sess, "live_entry_backside_bench_bypass", {
-                                "trigger": _trigger_reason,
-                                "benched_at_hod": le.get("benched_backside_hod"),
-                                **_bypass_dbg,
-                            })
-                        else:
-                            # VETO the fired trigger — the name is benched on the back side.
-                            _prev_trigger = _trigger_reason
-                            _trigger_ok = False
-                            _trigger_reason = "backside_benched"
-                            _emit(db, sess, "live_entry_backside_bench_veto", {
-                                "blocked_trigger": _prev_trigger, "reason": _bench_reason,
-                                "benched_at_hod": le.get("benched_backside_hod"),
-                                "bypass_reject": _bypass_dbg.get("reject"),
-                                **_bench_dbg,
-                            })
+                        # VETO the fired trigger — the name is benched on the back side.
+                        _prev_trigger = _trigger_reason
+                        _trigger_ok = False
+                        _trigger_reason = "backside_benched"
+                        _emit(db, sess, "live_entry_backside_bench_veto", {
+                            "blocked_trigger": _prev_trigger, "reason": _bench_reason,
+                            "benched_at_hod": le.get("benched_backside_hod"), **_bench_dbg,
+                        })
                 elif _prev_benched:
                     # MANDATORY UN-BENCH: a genuine new high OR (WAVE-4 ITEM-5) a fresh VWAP-
                     # reclaim CROSS-from-below cleared the bench -> drop the marker so the name

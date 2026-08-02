@@ -150,7 +150,6 @@ def _flush_settings(ms) -> None:
     # MagicMock default ay lumalabas na float()=1.0 na sisira sa tail threshold;
     # ang L7-specific na tests ang tahasang magbubukas nito.
     ms.chili_momentum_dip_monster_context_enabled = False
-    ms.chili_momentum_bench_monster_dip_bypass_enabled = False
     ms.chili_momentum_monster_up_off_low_floor = 1.5
     ms.chili_momentum_monster_day_retrace_cap = 0.35
     ms.chili_momentum_monster_tail_min_frac = 0.30
