@@ -6,9 +6,13 @@ audit, outcome, fill, and quote-tape records that the trading processes already 
 
 from __future__ import annotations
 
+import hashlib
+import json
 import logging
+import math
 import threading
 import time
+import uuid
 from collections import defaultdict
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
@@ -18,7 +22,9 @@ from zoneinfo import ZoneInfo
 from sqlalchemy import or_, text
 from sqlalchemy.orm import Session
 
+from ....config import settings
 from ....models.trading import (
+    BrainBatchJob,
     MomentumAutomationOutcome,
     Trade,
     TradingAutomationEvent,
@@ -26,6 +32,7 @@ from ....models.trading import (
     TradingAutomationSession,
     TradingAutomationSimulatedFill,
 )
+from ..batch_job_constants import JOB_MOMENTUM_LIVE_LOOP_HEARTBEAT
 
 logger = logging.getLogger(__name__)
 
@@ -36,8 +43,81 @@ LIVE_MONITOR_SESSION_SCAN_LIMIT = 96
 LIVE_MONITOR_SYMBOL_LIMIT = 24
 LIVE_MONITOR_EVENT_LIMIT = 400
 LIVE_MONITOR_EVENTS_PER_SYMBOL = 10
-LIVE_MONITOR_QUOTE_ROWS_PER_SYMBOL = 480
-LIVE_MONITOR_CHART_LOOKBACK_MINUTES = 45
+LIVE_MONITOR_QUOTE_ROWS_PER_SYMBOL = 120
+LIVE_MONITOR_CAPTURED_ROUTE_ROW_LIMIT = 1024
+LIVE_MONITOR_CAPTURED_WATCH_STALE_SECONDS = 600.0
+
+_CAPTURED_HEARTBEAT_SCHEMA = "momentum_live_loop_control_heartbeat_v2"
+_LEGACY_HEARTBEAT_SCHEMA = "momentum_live_loop_control_heartbeat_v1"
+_CAPTURED_HEARTBEAT_SCOPE = "tracker_refresh_and_callback_registration"
+_CAPTURED_HEARTBEAT_META_KEYS = frozenset(
+    {
+        "schema",
+        "scope",
+        "owner",
+        "owner_instance_id",
+        "generation",
+        "generation_identity",
+        "generation_started_at_utc",
+        "account_scope",
+        "expected_account_id",
+        "runtime_generation",
+        "execution_family",
+        "live_cash_authorized",
+        "row_started_at_utc",
+        "heartbeat_at_utc",
+        "content_sha256",
+    }
+)
+_CAPTURED_PROVENANCE_KEY = "captured_paper_selection_producer"
+_CAPTURED_PROVENANCE_KEYS = frozenset(
+    {
+        "schema_version",
+        "account_scope",
+        "expected_account_id",
+        "activation_generation",
+        "authority_sha256",
+        "policy_sha256",
+        "settings_projection_sha256",
+        "code_build_sha256",
+        "variant_set_sha256",
+        "variant_id",
+        "batch_sha256",
+        "observation_sha256",
+        "source_name",
+        "source_generation",
+        "source_sequence",
+        "queue_receipt_sha256",
+        "coverage_receipt_sha256",
+        "paper_only_strategy_override",
+        "live_cash_authorized",
+    }
+)
+
+_ACTIVE_CAPTURED_GENERATION_SQL = text("""
+    SELECT DISTINCT
+           refinement_meta_json -> 'captured_paper_variant_binding'
+               ->> 'activation_generation' AS activation_generation
+    FROM momentum_strategy_variants
+    WHERE is_active IS TRUE
+      AND execution_family = 'alpaca_spot'
+      AND refinement_meta_json -> 'captured_paper_variant_binding'
+          ->> 'schema_version' = 'chili.captured-paper-variant-binding-meta.v1'
+      AND refinement_meta_json -> 'captured_paper_variant_binding'
+          ->> 'account_scope' = 'alpaca:paper'
+      AND refinement_meta_json -> 'captured_paper_variant_binding'
+          ->> 'execution_family' = 'alpaca_spot'
+      AND refinement_meta_json -> 'captured_paper_variant_binding'
+          ->> 'expected_account_id' = :expected_account_id
+      AND refinement_meta_json -> 'captured_paper_variant_binding'
+          ->> 'paper_order_submission_authorized' = 'false'
+      AND refinement_meta_json -> 'captured_paper_variant_binding'
+          ->> 'live_cash_authorized' = 'false'
+      AND refinement_meta_json -> 'captured_paper_variant_binding'
+          ->> 'real_money_authorized' = 'false'
+    ORDER BY activation_generation
+    LIMIT 2
+""")
 
 ACTIVE_STATES = frozenset(
     {
@@ -114,6 +194,250 @@ def _iso_utc(value: datetime | None) -> str | None:
     else:
         value = value.astimezone(timezone.utc)
     return value.isoformat().replace("+00:00", "Z")
+
+
+def _utc_naive(value: Any) -> datetime | None:
+    if not isinstance(value, datetime):
+        return None
+    if value.tzinfo is not None:
+        value = value.astimezone(timezone.utc).replace(tzinfo=None)
+    return value
+
+
+def _strict_utc_iso(value: Any) -> datetime | None:
+    if not isinstance(value, str) or not value.endswith("Z"):
+        return None
+    try:
+        parsed = datetime.fromisoformat(value[:-1] + "+00:00")
+    except ValueError:
+        return None
+    if parsed.utcoffset() != timedelta(0):
+        return None
+    return parsed.astimezone(timezone.utc).replace(tzinfo=None)
+
+
+def _sha256_json(value: dict[str, Any]) -> str:
+    encoded = json.dumps(
+        value,
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=False,
+        allow_nan=False,
+    ).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def _captured_heartbeat_content_sha256(meta: dict[str, Any]) -> str:
+    body = dict(meta)
+    body.pop("content_sha256", None)
+    return _sha256_json(body)
+
+
+def _legacy_captured_runtime_identity(
+    db: Session,
+    *,
+    expected_account_id: str,
+    now_utc: datetime,
+) -> tuple[dict[str, Any] | None, str]:
+    """Bind a valid v1 loop heartbeat to exactly one active PAPER generation.
+
+    Main still emits the v1 control heartbeat.  It intentionally contains no
+    broker identity, so the observer may use it only when the durable active
+    variant bindings resolve to one exact PAPER-only activation generation.
+    """
+
+    try:
+        from .lane_health import live_runner_loop_control_health
+
+        health = live_runner_loop_control_health(db, now=now_utc)
+    except Exception:
+        logger.warning(
+            "[live_monitor] legacy captured PAPER heartbeat validation failed",
+            exc_info=True,
+        )
+        return None, "captured_watch_heartbeat_unreadable"
+    reason = health.get("reason")
+    if reason not in (None, "live_runner_loop_heartbeat_stale"):
+        return None, str(reason or "captured_watch_heartbeat_invalid")
+    heartbeat_at = _utc_naive(health.get("heartbeat_at"))
+    checked_at = _utc_naive(now_utc) or datetime.utcnow()
+    if heartbeat_at is None:
+        return None, "captured_watch_heartbeat_invalid"
+    day_start, day_end = _et_day_bounds(checked_at)
+    if not (day_start <= heartbeat_at < day_end):
+        return None, "captured_watch_heartbeat_not_today"
+    try:
+        generations = [
+            str(value or "").strip().lower()
+            for value in db.execute(
+                _ACTIVE_CAPTURED_GENERATION_SQL,
+                {"expected_account_id": expected_account_id},
+            ).scalars()
+            if str(value or "").strip()
+        ]
+    except Exception:
+        logger.warning(
+            "[live_monitor] active captured PAPER generation read failed",
+            exc_info=True,
+        )
+        return None, "captured_watch_generation_unreadable"
+    if len(generations) != 1:
+        return None, (
+            "captured_watch_generation_missing"
+            if not generations
+            else "captured_watch_generation_ambiguous"
+        )
+    try:
+        runtime_generation = str(uuid.UUID(generations[0]))
+    except (AttributeError, TypeError, ValueError):
+        return None, "captured_watch_generation_invalid"
+    age_seconds = (checked_at - heartbeat_at).total_seconds()
+    if age_seconds < -2.0:
+        return None, "captured_watch_heartbeat_future"
+    stale_after = float(health.get("stale_seconds") or 75.0)
+    runtime_stale = age_seconds >= stale_after
+    return (
+        {
+            "expected_account_id": expected_account_id,
+            "runtime_generation": runtime_generation,
+            "heartbeat_at": heartbeat_at,
+            "heartbeat_age_seconds": max(0.0, age_seconds),
+            "runtime_stale": runtime_stale,
+            "live_cash_authorized": False,
+        },
+        "runtime_stale" if runtime_stale else "ok",
+    )
+
+
+def _captured_runtime_identity(
+    db: Session,
+    *,
+    user_id: int,
+    now_utc: datetime,
+) -> tuple[dict[str, Any] | None, str]:
+    """Read the exact signed captured-PAPER heartbeat identity.
+
+    The selection ledgers retain prior activation generations, so the observer must
+    never guess the current one from a recent row or UUID.  This validates the same
+    content-addressed v2 heartbeat emitted by the running captured PAPER service.
+    """
+
+    configured_user_id = getattr(settings, "chili_autotrader_user_id", None)
+    if configured_user_id is None or isinstance(configured_user_id, bool):
+        return None, "captured_watch_user_scope_unconfigured"
+    try:
+        configured_user_id = int(configured_user_id)
+    except (TypeError, ValueError):
+        return None, "captured_watch_user_scope_unconfigured"
+    if configured_user_id != int(user_id):
+        return None, "captured_watch_user_scope_mismatch"
+    expected_account_id = str(
+        getattr(settings, "chili_alpaca_expected_account_id", "") or ""
+    ).strip().lower()
+    try:
+        expected_account_id = str(uuid.UUID(expected_account_id))
+    except (AttributeError, TypeError, ValueError):
+        return None, "captured_watch_account_unconfigured"
+    try:
+        row = (
+            db.query(BrainBatchJob)
+            .filter(
+                BrainBatchJob.job_type == JOB_MOMENTUM_LIVE_LOOP_HEARTBEAT
+            )
+            .order_by(BrainBatchJob.started_at.desc(), BrainBatchJob.id.desc())
+            .limit(1)
+            .one_or_none()
+        )
+    except Exception:
+        logger.warning(
+            "[live_monitor] captured PAPER heartbeat read failed",
+            exc_info=True,
+        )
+        return None, "captured_watch_heartbeat_unreadable"
+    if row is None:
+        return None, "captured_watch_heartbeat_missing"
+    started_at = _utc_naive(getattr(row, "started_at", None))
+    heartbeat_at = _utc_naive(getattr(row, "ended_at", None))
+    meta = getattr(row, "meta_json", None)
+    if isinstance(meta, dict) and meta.get("schema") == _LEGACY_HEARTBEAT_SCHEMA:
+        return _legacy_captured_runtime_identity(
+            db,
+            expected_account_id=expected_account_id,
+            now_utc=now_utc,
+        )
+    if (
+        str(getattr(row, "status", "") or "").strip().lower() != "ok"
+        or started_at is None
+        or heartbeat_at is None
+        or not isinstance(meta, dict)
+        or set(meta) != _CAPTURED_HEARTBEAT_META_KEYS
+        or meta.get("schema") != _CAPTURED_HEARTBEAT_SCHEMA
+        or meta.get("scope") != _CAPTURED_HEARTBEAT_SCOPE
+        or meta.get("owner") != "momentum_live_runner_loop"
+        or meta.get("account_scope") != "alpaca:paper"
+        or meta.get("execution_family") != "alpaca_spot"
+        or meta.get("live_cash_authorized") is not False
+        or meta.get("expected_account_id") != expected_account_id
+    ):
+        return None, "captured_watch_heartbeat_invalid"
+    supplied_hash = str(meta.get("content_sha256") or "")
+    if (
+        len(supplied_hash) != 64
+        or supplied_hash != supplied_hash.lower()
+        or any(char not in "0123456789abcdef" for char in supplied_hash)
+        or supplied_hash != _captured_heartbeat_content_sha256(meta)
+    ):
+        return None, "captured_watch_heartbeat_hash_mismatch"
+    owner_id = str(meta.get("owner_instance_id") or "").strip().lower()
+    runtime_generation = str(meta.get("runtime_generation") or "").strip().lower()
+    try:
+        owner_id = str(uuid.UUID(owner_id))
+        runtime_generation = str(uuid.UUID(runtime_generation))
+    except (AttributeError, TypeError, ValueError):
+        return None, "captured_watch_heartbeat_identity_invalid"
+    generation = meta.get("generation")
+    if (
+        isinstance(generation, bool)
+        or not isinstance(generation, int)
+        or generation <= 0
+        or meta.get("generation_identity") != f"{owner_id}:{generation}"
+        or _strict_utc_iso(meta.get("row_started_at_utc")) != started_at
+        or _strict_utc_iso(meta.get("heartbeat_at_utc")) != heartbeat_at
+    ):
+        return None, "captured_watch_heartbeat_identity_invalid"
+    generation_started_at = _strict_utc_iso(
+        meta.get("generation_started_at_utc")
+    )
+    if (
+        generation_started_at is None
+        or heartbeat_at + timedelta(seconds=2) < started_at
+        or started_at + timedelta(seconds=2) < generation_started_at
+    ):
+        return None, "captured_watch_heartbeat_clock_invalid"
+    checked_at = _utc_naive(now_utc) or datetime.utcnow()
+    age_seconds = (checked_at - heartbeat_at).total_seconds()
+    if age_seconds < -2.0:
+        return None, "captured_watch_heartbeat_future"
+    day_start, day_end = _et_day_bounds(checked_at)
+    if not (day_start <= heartbeat_at < day_end):
+        return None, "captured_watch_heartbeat_not_today"
+    try:
+        from .lane_health import live_loop_stale_seconds
+
+        stale_after = float(live_loop_stale_seconds())
+    except Exception:
+        stale_after = 75.0
+    return (
+        {
+            "expected_account_id": expected_account_id,
+            "runtime_generation": runtime_generation,
+            "heartbeat_at": heartbeat_at,
+            "heartbeat_age_seconds": max(0.0, age_seconds),
+            "runtime_stale": age_seconds >= stale_after,
+            "live_cash_authorized": False,
+        },
+        "ok" if age_seconds < stale_after else "runtime_stale",
+    )
 
 
 def _et_day_bounds(now_utc: datetime) -> tuple[datetime, datetime]:
@@ -620,8 +944,371 @@ def _recent_events(
     return dict(by_symbol)
 
 
+_CAPTURED_WATCH_SQL = text("""
+    WITH current_frontier AS MATERIALIZED (
+        SELECT f.*
+        FROM captured_paper_selection_frontiers f
+        WHERE f.account_scope = 'alpaca:paper'
+          AND f.execution_family = 'alpaca_spot'
+          AND f.expected_account_id = :expected_account_id
+          AND f.activation_generation = :activation_generation
+          AND f.status = 'ready'
+          AND f.gap_count = 0
+        LIMIT 1
+    ), current_routes AS MATERIALIZED (
+        SELECT r.*, f.policy_sha256, f.settings_projection_sha256,
+               f.code_build_sha256, f.variant_set_sha256
+        FROM current_frontier f
+        JOIN captured_paper_selection_route_states r
+          ON r.account_scope = f.account_scope
+         AND r.expected_account_id = f.expected_account_id
+         AND r.activation_generation = f.activation_generation
+         AND r.execution_family = f.execution_family
+         AND r.authority_sha256 = f.authority_sha256
+        WHERE r.state = 'eligible'
+        ORDER BY r.symbol, r.variant_id
+        LIMIT :row_limit
+    ), ranked AS MATERIALIZED (
+        SELECT r.symbol, r.variant_id, r.latest_source_sequence,
+               r.evidence_sha256, r.batch_sha256, r.source_event_at,
+               r.source_available_at, r.authority_sha256, r.policy_sha256,
+               r.settings_projection_sha256, r.code_build_sha256,
+               r.variant_set_sha256, v.viability_score, v.paper_eligible,
+               v.live_eligible, v.freshness_ts, v.regime_snapshot_json,
+               v.execution_readiness_json, v.explain_json,
+               v.evidence_window_json, v.correlation_id, mv.family, mv.label,
+               count(*) OVER (PARTITION BY r.symbol) AS route_count,
+               count(*) FILTER (
+                   WHERE v.paper_eligible IS TRUE AND v.live_eligible IS TRUE
+               ) OVER (PARTITION BY r.symbol) AS policy_eligible_route_count,
+               row_number() OVER (
+                   PARTITION BY r.symbol
+                   ORDER BY CASE WHEN v.paper_eligible AND v.live_eligible
+                                 THEN 0 ELSE 1 END,
+                            v.viability_score DESC,
+                            r.source_available_at DESC,
+                            r.variant_id
+               ) AS symbol_rank
+        FROM current_routes r
+        JOIN momentum_strategy_variants mv
+          ON mv.id = r.variant_id
+         AND mv.is_active IS TRUE
+         AND mv.execution_family = 'alpaca_spot'
+         AND mv.refinement_meta_json -> 'captured_paper_variant_binding'
+             ->> 'schema_version' = 'chili.captured-paper-variant-binding-meta.v1'
+         AND mv.refinement_meta_json -> 'captured_paper_variant_binding'
+             ->> 'account_scope' = r.account_scope
+         AND mv.refinement_meta_json -> 'captured_paper_variant_binding'
+             ->> 'execution_family' = r.execution_family
+         AND mv.refinement_meta_json -> 'captured_paper_variant_binding'
+             ->> 'expected_account_id' = r.expected_account_id
+         AND mv.refinement_meta_json -> 'captured_paper_variant_binding'
+             ->> 'activation_generation' = r.activation_generation
+         AND mv.refinement_meta_json -> 'captured_paper_variant_binding'
+             ->> 'policy_sha256' = r.policy_sha256
+         AND mv.refinement_meta_json -> 'captured_paper_variant_binding'
+             ->> 'settings_projection_sha256' = r.settings_projection_sha256
+         AND mv.refinement_meta_json -> 'captured_paper_variant_binding'
+             ->> 'code_build_sha256' = r.code_build_sha256
+         AND mv.refinement_meta_json -> 'captured_paper_variant_binding'
+             ->> 'strategy_params_overridden' = 'false'
+         AND mv.refinement_meta_json -> 'captured_paper_variant_binding'
+             ->> 'live_cash_authorized' = 'false'
+         AND mv.refinement_meta_json -> 'captured_paper_variant_binding'
+             ->> 'paper_order_submission_authorized' = 'false'
+         AND mv.refinement_meta_json -> 'captured_paper_variant_binding'
+             ->> 'real_money_authorized' = 'false'
+        JOIN momentum_symbol_viability v
+          ON v.symbol = r.symbol
+         AND v.variant_id = r.variant_id
+         AND v.scope = 'symbol'
+         AND v.source_node_id = 'captured_paper_selection_producer'
+         AND (v.freshness_ts AT TIME ZONE 'UTC') = r.source_available_at
+    )
+    SELECT * FROM ranked
+    WHERE symbol_rank = 1
+    ORDER BY CASE WHEN policy_eligible_route_count > 0 THEN 0 ELSE 1 END,
+             viability_score DESC, source_available_at DESC, symbol
+    LIMIT :symbol_limit
+""")
+
+
+def _hash_is_exact(value: Any) -> bool:
+    clean = str(value or "")
+    return (
+        len(clean) == 64
+        and clean == clean.lower()
+        and all(char in "0123456789abcdef" for char in clean)
+    )
+
+
+def _candidate_last_price(raw: dict[str, Any], symbol: str) -> float | None:
+    features = _mapping(raw.get("features"))
+    meta = _mapping(features.get("meta"))
+    ross = _mapping(meta.get("ross_signals"))
+    signal = _mapping(ross.get(symbol))
+    for key in ("price", "last", "close", "last_price"):
+        value = _float_or_none(signal.get(key))
+        if value is not None and math.isfinite(value) and value > 0:
+            return value
+    return None
+
+
+def _validated_captured_watch_route(
+    raw: Any,
+    *,
+    identity: dict[str, Any],
+) -> dict[str, Any] | None:
+    row = dict(raw)
+    symbol = str(row.get("symbol") or "").strip().upper()
+    variant_id = row.get("variant_id")
+    source_sequence = row.get("latest_source_sequence")
+    score = _float_or_none(row.get("viability_score"))
+    route_count = row.get("route_count")
+    policy_eligible_route_count = row.get("policy_eligible_route_count")
+    if (
+        not symbol
+        or type(variant_id) is not int
+        or variant_id <= 0
+        or type(source_sequence) is not int
+        or source_sequence <= 0
+        or type(route_count) is not int
+        or route_count <= 0
+        or type(policy_eligible_route_count) is not int
+        or not 0 <= policy_eligible_route_count <= route_count
+        or score is None
+        or not math.isfinite(score)
+        or not 0.0 <= score <= 1.0
+        or type(row.get("paper_eligible")) is not bool
+        or type(row.get("live_eligible")) is not bool
+        or row.get("paper_eligible") != row.get("live_eligible")
+        or bool(policy_eligible_route_count)
+        != bool(row.get("paper_eligible") and row.get("live_eligible"))
+    ):
+        return None
+    containers: list[dict[str, Any]] = []
+    payloads: list[dict[str, Any]] = []
+    for key in (
+        "execution_readiness_json",
+        "explain_json",
+        "evidence_window_json",
+    ):
+        payload = _mapping(row.get(key))
+        provenance = payload.get(_CAPTURED_PROVENANCE_KEY)
+        if not isinstance(provenance, dict):
+            return None
+        containers.append(dict(provenance))
+        payload = dict(payload)
+        payload.pop(_CAPTURED_PROVENANCE_KEY, None)
+        payloads.append(payload)
+    provenance = containers[0]
+    if (
+        set(provenance) != _CAPTURED_PROVENANCE_KEYS
+        or any(item != provenance for item in containers[1:])
+    ):
+        return None
+    expected = {
+        "schema_version": (
+            "chili.captured-paper-selection-viability-provenance.v1"
+        ),
+        "account_scope": "alpaca:paper",
+        "expected_account_id": identity["expected_account_id"],
+        "activation_generation": identity["runtime_generation"],
+        "authority_sha256": row.get("authority_sha256"),
+        "policy_sha256": row.get("policy_sha256"),
+        "settings_projection_sha256": row.get("settings_projection_sha256"),
+        "code_build_sha256": row.get("code_build_sha256"),
+        "variant_set_sha256": row.get("variant_set_sha256"),
+        "variant_id": variant_id,
+        "batch_sha256": row.get("batch_sha256"),
+        "observation_sha256": row.get("evidence_sha256"),
+        "source_sequence": source_sequence,
+        "paper_only_strategy_override": False,
+        "live_cash_authorized": False,
+    }
+    if any(provenance.get(key) != value for key, value in expected.items()):
+        return None
+    try:
+        source_generation = str(
+            uuid.UUID(str(provenance.get("source_generation") or ""))
+        )
+    except (AttributeError, TypeError, ValueError):
+        return None
+    if (
+        source_generation != provenance.get("source_generation")
+        or not str(provenance.get("source_name") or "").strip()
+    ):
+        return None
+    for key in (
+        "authority_sha256",
+        "policy_sha256",
+        "settings_projection_sha256",
+        "code_build_sha256",
+        "variant_set_sha256",
+        "batch_sha256",
+        "observation_sha256",
+        "queue_receipt_sha256",
+        "coverage_receipt_sha256",
+    ):
+        value = provenance.get(key) if key in provenance else row.get(key)
+        if not _hash_is_exact(value):
+            return None
+    source_event_at = _utc_naive(row.get("source_event_at"))
+    source_available_at = _utc_naive(row.get("source_available_at"))
+    freshness = _utc_naive(row.get("freshness_ts"))
+    if (
+        source_event_at is None
+        or source_available_at is None
+        or freshness is None
+        or source_available_at < source_event_at
+        or freshness != source_available_at
+    ):
+        return None
+    observation_body = {
+        "schema_version": "chili.captured-paper-selection-observation.v1",
+        "source_sequence": source_sequence,
+        "source_event_at": _iso_utc(source_event_at),
+        "source_available_at": _iso_utc(source_available_at),
+        "symbol": symbol,
+        "variant_id": variant_id,
+        "viability_score": float(score),
+        "paper_eligible": row["paper_eligible"],
+        "live_eligible": row["live_eligible"],
+        "regime_snapshot_json": _mapping(row.get("regime_snapshot_json")),
+        "execution_readiness_json": payloads[0],
+        "explain_json": payloads[1],
+        "evidence_window_json": payloads[2],
+        "correlation_id": row.get("correlation_id"),
+    }
+    try:
+        observation_hash = _sha256_json(observation_body)
+    except (TypeError, ValueError):
+        return None
+    if observation_hash != row.get("evidence_sha256"):
+        return None
+    return {
+        "symbol": symbol,
+        "variant_id": variant_id,
+        "updated_at": source_available_at,
+        "confidence": float(score),
+        "strategy": str(row.get("label") or row.get("family") or "Captured PAPER"),
+        "route_count": route_count,
+        "policy_eligible_route_count": policy_eligible_route_count,
+        "policy_eligible": bool(
+            row.get("paper_eligible") and row.get("live_eligible")
+        ),
+        "last_price": _candidate_last_price(
+            _mapping(row.get("execution_readiness_json")),
+            symbol,
+        ),
+    }
+
+
+def _captured_watch_inventory(
+    db: Session,
+    *,
+    user_id: int,
+    now_utc: datetime,
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    identity, identity_status = _captured_runtime_identity(
+        db,
+        user_id=user_id,
+        now_utc=now_utc,
+    )
+    if identity is None:
+        return [], {"status": identity_status, "heartbeat_at": None}
+    try:
+        with db.begin_nested():
+            raw_rows = db.execute(
+                _CAPTURED_WATCH_SQL,
+                {
+                    "expected_account_id": identity["expected_account_id"],
+                    "activation_generation": identity["runtime_generation"],
+                    "row_limit": LIVE_MONITOR_CAPTURED_ROUTE_ROW_LIMIT,
+                    "symbol_limit": LIVE_MONITOR_SYMBOL_LIMIT,
+                },
+            ).mappings().all()
+    except Exception:
+        logger.warning(
+            "[live_monitor] captured PAPER watch inventory read failed",
+            exc_info=True,
+        )
+        return [], {
+            "status": "captured_watch_inventory_unreadable",
+            "heartbeat_at": identity["heartbeat_at"],
+            "runtime_stale": identity["runtime_stale"],
+            "activation_generation": identity["runtime_generation"],
+        }
+    routes = [
+        candidate
+        for raw in raw_rows
+        if (
+            candidate := _validated_captured_watch_route(
+                raw,
+                identity=identity,
+            )
+        )
+        is not None
+    ]
+    rows = [
+        {
+            **route,
+            "activation_generation": identity["runtime_generation"],
+            "runtime_heartbeat_at": identity["heartbeat_at"],
+            "runtime_stale": identity["runtime_stale"],
+        }
+        for route in routes[:LIVE_MONITOR_SYMBOL_LIMIT]
+    ]
+    return rows, {
+        "status": identity_status,
+        "heartbeat_at": identity["heartbeat_at"],
+        "runtime_stale": identity["runtime_stale"],
+        "activation_generation": identity["runtime_generation"],
+    }
+
+
+def _session_card_status(
+    primary: dict[str, Any] | None,
+    positions: list[dict[str, Any]],
+    watch: dict[str, Any] | None,
+) -> str:
+    if positions:
+        return "IN POSITION"
+    if primary is None:
+        return "SETUP" if (watch or {}).get("policy_eligible") else "WATCHING"
+    state_text = " ".join(
+        str(primary.get(key) or "")
+        for key in ("state", "state_label", "last_action")
+    ).lower()
+    if any(
+        token in state_text
+        for token in (
+            "entry_candidate",
+            "entry candidate",
+            "pending_entry",
+            "pending entry",
+            "queued_live",
+            "queued live",
+            "awaiting fill",
+            "submitted",
+        )
+    ):
+        return "SETUP"
+    return "WATCHING"
+
+
 def _build_state_snapshot(db: Session, *, user_id: int, now_utc: datetime) -> dict[str, Any]:
     active_rows = _active_session_rows(db, user_id=user_id)
+    captured_rows, captured_status = _captured_watch_inventory(
+        db,
+        user_id=user_id,
+        now_utc=now_utc,
+    )
+    captured_by_symbol = {
+        str(row.get("symbol") or "").upper(): row
+        for row in captured_rows
+        if row.get("symbol")
+    }
     pnl_by_symbol, evidence_session_ids = _pnl_rows(
         db,
         user_id=user_id,
@@ -645,23 +1332,45 @@ def _build_state_snapshot(db: Session, *, user_id: int, now_utc: datetime) -> di
     sessions_by_symbol: dict[str, list[dict[str, Any]]] = defaultdict(list)
     for row in active_rows:
         sessions_by_symbol[row["symbol"]].append(row)
-    all_symbols = set(sessions_by_symbol) | set(pnl_by_symbol)
-    ranked_symbols = sorted(
-        all_symbols,
-        key=lambda symbol: (
-            0 if sessions_by_symbol.get(symbol) else 1,
-            -max((_session_priority(row) for row in sessions_by_symbol.get(symbol, [])), default=(0, 0, 0))[0],
-            -max((_session_priority(row) for row in sessions_by_symbol.get(symbol, [])), default=(0, 0, 0))[1],
-            -max((_session_priority(row) for row in sessions_by_symbol.get(symbol, [])), default=(0, 0, 0))[2],
+    all_symbols = (
+        set(sessions_by_symbol)
+        | set(pnl_by_symbol)
+        | set(captured_by_symbol)
+    )
+
+    def _symbol_rank(symbol: str) -> tuple[Any, ...]:
+        session_rows = sessions_by_symbol.get(symbol, [])
+        session_rank = max(
+            (_session_priority(row) for row in session_rows),
+            default=(0, 0, 0.0),
+        )
+        candidate_rank = (
+            0
+            if not session_rows
+            and captured_by_symbol.get(symbol, {}).get("policy_eligible")
+            else 1
+        )
+        return (
+            0 if session_rows else 1,
+            -session_rank[0],
+            -session_rank[1],
+            -session_rank[2],
+            candidate_rank,
+            -float(captured_by_symbol.get(symbol, {}).get("confidence") or 0.0),
             -abs(float(pnl_by_symbol.get(symbol, {}).get("total_usd") or 0.0)),
             symbol,
-        ),
+        )
+
+    ranked_symbols = sorted(
+        all_symbols,
+        key=_symbol_rank,
     )[:LIVE_MONITOR_SYMBOL_LIMIT]
 
     symbols_out: list[dict[str, Any]] = []
     for symbol in ranked_symbols:
         session_rows = sorted(sessions_by_symbol.get(symbol, []), key=_session_priority, reverse=True)
         primary = session_rows[0] if session_rows else None
+        watch = captured_by_symbol.get(symbol)
         lanes: dict[str, dict[str, Any]] = {}
         positions: list[dict[str, Any]] = []
         for row in session_rows:
@@ -698,27 +1407,115 @@ def _build_state_snapshot(db: Session, *, user_id: int, now_utc: datetime) -> di
                 "broker_unconfirmed": False,
             },
         )
-        updated = primary.get("updated_at") if primary else None
+        updated = (
+            primary.get("updated_at")
+            if primary
+            else (watch or {}).get("updated_at")
+        )
         age_seconds = max(0.0, (now_utc - updated).total_seconds()) if isinstance(updated, datetime) else None
+        candidate_only = primary is None and watch is not None
+        card_status = _session_card_status(primary, positions, watch)
+        candidate_stale = bool(
+            candidate_only
+            and (
+                (watch or {}).get("runtime_stale")
+                or (
+                    age_seconds is not None
+                    and age_seconds > LIVE_MONITOR_CAPTURED_WATCH_STALE_SECONDS
+                )
+            )
+        )
         symbols_out.append(
             {
                 "symbol": symbol,
                 "active": bool(session_rows),
                 "armed": bool(session_rows) and not positions,
-                "state": primary.get("state") if primary else "completed_today",
-                "state_label": primary.get("state_label") if primary else "completed today",
+                "card_status": card_status,
+                "state": (
+                    primary.get("state")
+                    if primary
+                    else (
+                        (
+                            "captured_setup"
+                            if (watch or {}).get("policy_eligible")
+                            else "captured_watching"
+                        )
+                        if watch is not None
+                        else "completed_today"
+                    )
+                ),
+                "state_label": (
+                    primary.get("state_label")
+                    if primary
+                    else (
+                        (
+                            "setup"
+                            if (watch or {}).get("policy_eligible")
+                            else "watching"
+                        )
+                        if watch is not None
+                        else "completed today"
+                    )
+                ),
                 "primary_lane": primary.get("lane") if primary else None,
-                "last_action": primary.get("last_action") if primary else "completed today",
-                "strategy": primary.get("strategy") if primary else None,
-                "confidence": primary.get("confidence") if primary else None,
-                "last_price": primary.get("position", {}).get("mark") if primary else None,
+                "last_action": (
+                    primary.get("last_action")
+                    if primary
+                    else (
+                        "captured policy eligible"
+                        if (watch or {}).get("policy_eligible")
+                        else (
+                            "captured selection scored"
+                            if watch is not None
+                            else "completed today"
+                        )
+                    )
+                ),
+                "strategy": (
+                    primary.get("strategy")
+                    if primary
+                    else (watch or {}).get("strategy")
+                ),
+                "confidence": (
+                    primary.get("confidence")
+                    if primary
+                    else (watch or {}).get("confidence")
+                ),
+                "last_price": (
+                    primary.get("position", {}).get("mark")
+                    if primary
+                    else (watch or {}).get("last_price")
+                ),
                 "updated_at": _iso_utc(updated),
                 "age_seconds": round(age_seconds, 1) if age_seconds is not None else None,
-                "stale": bool(age_seconds is not None and age_seconds > 30.0),
+                "stale": (
+                    candidate_stale
+                    if candidate_only
+                    else bool(age_seconds is not None and age_seconds > 30.0)
+                ),
                 "lanes": list(lanes.values()),
                 "positions": positions,
                 "pnl": pnl,
                 "events": events.get(symbol, []),
+                "observer_source": (
+                    "captured_paper_selection"
+                    if candidate_only
+                    else "trading_automation_session"
+                ),
+                "watch": (
+                    {
+                        "policy_eligible": bool(watch.get("policy_eligible")),
+                        "route_count": int(watch.get("route_count") or 0),
+                        "policy_eligible_route_count": int(
+                            watch.get("policy_eligible_route_count") or 0
+                        ),
+                        "activation_generation": watch.get(
+                            "activation_generation"
+                        ),
+                    }
+                    if watch is not None
+                    else None
+                ),
             }
         )
 
@@ -736,10 +1533,15 @@ def _build_state_snapshot(db: Session, *, user_id: int, now_utc: datetime) -> di
         "trades": sum(int(row.get("trades") or 0) for row in pnl_by_symbol.values()),
     }
     totals["total_usd"] = round(totals["realized_usd"] + totals["unrealized_usd"], 2)
-    latest_update = max(
-        (row.get("updated_at") for row in active_rows if isinstance(row.get("updated_at"), datetime)),
-        default=None,
-    )
+    latest_candidates = [
+        row.get("updated_at")
+        for row in active_rows
+        if isinstance(row.get("updated_at"), datetime)
+    ]
+    heartbeat_at = captured_status.get("heartbeat_at")
+    if isinstance(heartbeat_at, datetime):
+        latest_candidates.append(heartbeat_at)
+    latest_update = max(latest_candidates, default=None)
     return {
         "ok": True,
         "read_only": True,
@@ -747,6 +1549,9 @@ def _build_state_snapshot(db: Session, *, user_id: int, now_utc: datetime) -> di
         "latest_runtime_utc": _iso_utc(latest_update),
         "refresh_after_ms": 3000,
         "active_symbol_count": len({row["symbol"] for row in active_rows}),
+        "watching_symbol_count": len(
+            set(captured_by_symbol).difference(sessions_by_symbol)
+        ),
         "open_position_count": sum(1 for row in active_rows if row["position"].get("is_open")),
         "totals": totals,
         "lanes": lane_summary,
@@ -760,6 +1565,8 @@ def _build_state_snapshot(db: Session, *, user_id: int, now_utc: datetime) -> di
             "chart_cache_seconds": LIVE_MONITOR_CHART_TTL_SECONDS,
             "symbol_limit": LIVE_MONITOR_SYMBOL_LIMIT,
             "quote_row_cap_per_symbol": LIVE_MONITOR_QUOTE_ROWS_PER_SYMBOL,
+            "captured_watch_status": captured_status.get("status"),
+            "captured_watch_source": "exact_generation_persisted_selection",
         },
     }
 
@@ -829,7 +1636,10 @@ def _load_chart_series(
 ) -> dict[str, list[list[Any]]]:
     if not symbols:
         return {}
-    since_utc = now_utc - timedelta(minutes=LIVE_MONITOR_CHART_LOOKBACK_MINUTES)
+    # Candidate-only watch cards can precede a session by hours.  Keep the read
+    # bounded by both the current ET day and the per-source row cap so a quiet
+    # candidate still has its retained chart without materializing the full tape.
+    since_utc = _et_day_bounds(now_utc)[0]
     rows = db.execute(
         text(
             "WITH syms(symbol) AS (SELECT unnest(CAST(:symbols AS text[]))) "
@@ -839,7 +1649,7 @@ def _load_chart_series(
             " SELECT observed_at, bid, ask, mid, day_volume "
             " FROM momentum_nbbo_spread_tape t "
             " WHERE t.symbol = s.symbol AND t.observed_at >= :since_utc "
-            " ORDER BY t.observed_at DESC LIMIT :row_limit"
+            " ORDER BY observed_at DESC LIMIT :row_limit"
             ") q ORDER BY s.symbol, q.observed_at"
         ),
         {
@@ -848,7 +1658,31 @@ def _load_chart_series(
             "row_limit": LIVE_MONITOR_QUOTE_ROWS_PER_SYMBOL,
         },
     ).fetchall()
-    return _minute_bar_series(rows)
+    series = _minute_bar_series(rows)
+    missing = tuple(symbol for symbol in symbols if not series.get(symbol))
+    if not missing:
+        return series
+    # Trade ticks are a persisted fallback only when a symbol has no retained NBBO;
+    # avoiding the second index walk keeps the normal 24-card observer bounded.
+    tick_rows = db.execute(
+        text(
+            "WITH syms(symbol) AS (SELECT unnest(CAST(:symbols AS text[]))) "
+            "SELECT s.symbol, q.observed_at, q.bid, q.ask, q.price, "
+            "NULL::double precision AS day_volume FROM syms s "
+            "CROSS JOIN LATERAL ("
+            " SELECT observed_at, bid, ask, price FROM iqfeed_trade_ticks t "
+            " WHERE t.symbol = s.symbol AND t.observed_at >= :since_utc "
+            " ORDER BY observed_at DESC LIMIT :row_limit"
+            ") q ORDER BY s.symbol, q.observed_at"
+        ),
+        {
+            "symbols": list(missing),
+            "since_utc": since_utc,
+            "row_limit": LIVE_MONITOR_QUOTE_ROWS_PER_SYMBOL,
+        },
+    ).fetchall()
+    series.update(_minute_bar_series(tick_rows))
+    return series
 
 
 def _cached_chart_series(
