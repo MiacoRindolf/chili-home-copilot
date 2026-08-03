@@ -475,6 +475,22 @@ def _publish_one_commit_at_a_time(harness: _Harness, count: int) -> None:
             time.sleep(0.005)
 
 
+def test_queue_heartbeat_retains_high_watermark_for_reordered_market_time(
+    tmp_path: Path,
+) -> None:
+    harness = _harness(tmp_path)
+    later = harness.bundle.event_at + timedelta(milliseconds=31.112)
+    reordered = harness.bundle.event_at
+
+    first = harness.publisher.heartbeat(watermark_at=later)
+    second = harness.publisher.heartbeat(watermark_at=reordered)
+
+    assert first.watermark_at == later
+    assert second.watermark_at == later
+    assert second.poisoned is False
+    _close_idle_harness(harness)
+
+
 def test_before_ingress_admission_runs_after_event_cost_and_before_submit(
     tmp_path: Path,
 ) -> None:

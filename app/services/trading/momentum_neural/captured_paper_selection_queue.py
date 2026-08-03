@@ -1378,9 +1378,13 @@ class CapturedPaperSelectionQueuePublisher:
             now = _utc(self.wall_clock(), "queue heartbeat wall clock")
             if watermark > now:
                 _fail("queue heartbeat watermark is in the future")
-            if self._watermark_at is not None and watermark < self._watermark_at:
-                _fail("queue heartbeat watermark moved backwards")
-            self._watermark_at = watermark
+            # Source cohorts are sequenced by durable ingestion, not by their
+            # market-reference clocks.  A later cohort can therefore carry a
+            # slightly older valid event time.  The queue watermark is the
+            # observed high-water mark: retain it instead of poisoning an
+            # otherwise complete batch for normal event-time reordering.
+            if self._watermark_at is None or watermark > self._watermark_at:
+                self._watermark_at = watermark
             return self.health()
 
     def poison(self, reason: str) -> CapturedPaperSelectionQueuePoisonReceipt:
