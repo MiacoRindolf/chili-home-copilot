@@ -466,6 +466,18 @@ def _append_event_safe(
         )
 
 
+def _source_owns_commit_fence(source: object) -> bool:
+    """L9-C4 (2026-08-03): TRUE para sa mga source na dumadaan sa
+    generation-fenced IQFeed loop commit — 'iqfeed*' AT ang ignition tag.
+    Ang lumang bare 'iqfeed' substring ay HINDI tumutugma sa
+    ``source='ignition_tick'`` kaya ang ignition admissions ay nag-i-immediate-
+    tick nang WALA pang commit (latent bug; zero epekto sa sealed paper lane —
+    ang ignition consumer doon ay hindi pa bukas — pero kailangang tama bago
+    i-soak ang ordinary-loop ignition path)."""
+    s = str(source or "").strip().lower()
+    return "iqfeed" in s or "ignition" in s
+
+
 def admit_ross_event(
     db: Session,
     *,
@@ -507,8 +519,7 @@ def admit_ross_event(
     # Other callers retain the existing immediate-tick behavior even if they pass
     # this option accidentally.
     defer_iqfeed_ticks = bool(
-        defer_live_ticks_until_commit
-        and "iqfeed" in str(source or "").strip().lower()
+        defer_live_ticks_until_commit and _source_owns_commit_fence(source)
     )
     admission_tick_count = 0 if defer_iqfeed_ticks else _tick_count()
     if defer_iqfeed_ticks:

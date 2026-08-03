@@ -3688,6 +3688,54 @@ def _active_equity_session_symbols(db: "Session") -> list[str]:
         return []
 
 
+def _emit_viability_subscribe_hints(db: "Session", movers: list[dict]) -> int:
+    """L9-C1 (2026-08-03): isulat ang mga refresh-detected equity mover bilang
+    subscribe HINTS para sa host bridge fast-poll (3s) — sinasara ang
+    watch-resolver starvation gap (HYFM: eligible 11:39:30Z pero trades-watched
+    11:58:01Z = 18m31s). Capped kada refresh (proteksyon sa ~500-watch budget
+    ng bridge na may self-halving governor); pair-shaped symbols nilalaktawan;
+    savepoint-safe ang bawat insert (request_bridge_subscription); sariling
+    commit para hindi mawala sa caller's finally-rollback. Fail-open: anumang
+    error ⇒ 0 hints, hindi kailanman sinisira ang viability refresh."""
+    try:
+        from ..config import settings as _hint_settings
+
+        if not bool(getattr(
+            _hint_settings,
+            "chili_momentum_viability_refresh_subscribe_hints_enabled", True,
+        )):
+            return 0
+        _cap = int(getattr(
+            _hint_settings,
+            "chili_momentum_viability_refresh_subscribe_hint_cap", 25,
+        ) or 0)
+        if _cap <= 0:
+            return 0
+        from .trading.momentum_neural.bridge_subscribe import request_bridge_subscription
+
+        hinted = 0
+        for _m in movers or []:
+            if hinted >= _cap:
+                break
+            _sym = str(
+                ((_m or {}).get("symbol") or (_m or {}).get("ticker") or "")
+            ).strip().upper()
+            if not _sym or "-" in _sym:
+                continue
+            if request_bridge_subscription(db, _sym, reason="viability_refresh"):
+                hinted += 1
+        if hinted:
+            db.commit()
+            logger.info(
+                "[scheduler] equity viability refresh: %d subscribe hints -> bridge fast-poll (3s)",
+                hinted,
+            )
+        return hinted
+    except Exception:
+        logger.debug("[scheduler] subscribe-hint block failed (non-fatal)", exc_info=True)
+        return 0
+
+
 def _bridge_scanner_to_viability(
     db: "Session",
     results: list[dict],
@@ -5010,6 +5058,17 @@ def _run_equity_viability_refresh_job():
             "[scheduler] equity viability refresh: %d movers -> viability (crypto-parity cadence)",
             len(movers),
         )
+        # L9-C1 (2026-08-03): SUBSCRIBE-HINT WIRING — ang HYFM 500% day ay
+        # na-detect at naging eligible sa loob ng 10 min, pero ang TRADES
+        # subscription ng bridge ay dumating 18m31s pa (watch-resolver
+        # starvation; DB-proven: depth watch 11:39:01Z vs trades 11:58:01Z).
+        # Ang bawat mover ng refresh na ito ay isinusulat na rin bilang
+        # subscribe HINT sa momentum_bridge_subscribe_requests — ang deployed
+        # host bridge ay nagpo-poll nito kada 3s (fast path), kaya ang mover ay
+        # trades-watched sa loob ng ilang segundo sa halip na minuto. Walang
+        # bridge/host na binabago; savepoint-safe ang writer; idempotent sa
+        # bridge side (de-dup vs current watch set).
+        _emit_viability_subscribe_hints(write_db, movers)
         # S1 INSTRUMENT (docs/DESIGN/MOMENTUM_ENGINE.md §5): the batch path is the BASELINE
         # ignite latency the event feeder is measured against (~half the 600s gate). Logging
         # it here lets the tape-delta path's per-symbol lead-time be compared apples-to-apples.
