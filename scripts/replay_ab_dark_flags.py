@@ -93,6 +93,10 @@ APPROVED_STRATEGY_FLAGS_BY_SLUG = (
         "late-ah-monster",
         "chili_momentum_late_ah_monster_placement_enabled",
     ),
+    (
+        "monster-structure-floor",
+        "chili_momentum_monster_structure_floor_enabled",
+    ),
 )
 POST_SELECTION_SCOREABLE_POLICY_FLAGS = (
     "chili_momentum_orb_ihs_structural_stop_enabled",
@@ -107,6 +111,7 @@ POST_SELECTION_SCOREABLE_POLICY_FLAGS = (
     "chili_momentum_flush_dip_fresh_hod_afternoon_enabled",
     "chili_momentum_dip_monster_context_enabled",
     "chili_momentum_late_ah_monster_placement_enabled",
+    "chili_momentum_monster_structure_floor_enabled",
 )
 POST_SELECTION_UNSCOREABLE_POLICY_FLAGS = (
     "chili_momentum_universe_float_gate_enabled",
