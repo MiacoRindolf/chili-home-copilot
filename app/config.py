@@ -5132,6 +5132,18 @@ class Settings(BaseSettings):
         validation_alias=AliasChoices("CHILI_MOMENTUM_LATEST_RVOL_MEMO_SECONDS"),
         description="L8b perf: per-bucket memo ng _latest_rvol (py-spy: ang per-tick micro-bar rebuild ay 28.7% ng JEM replay runtime). Sim-anchored clock ang bucket key (replay-correct); ang micro-bar frame ay bar-granular kaya ≤5s staleness ay walang epekto sa explosive thresholds. ONE documented base = 5s. Band [0,60]; 0 = memo OFF (byte-identical legacy).",
     )
+    chili_momentum_viability_refresh_subscribe_hints_enabled: bool = Field(
+        default=True,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_VIABILITY_REFRESH_SUBSCRIBE_HINTS_ENABLED"),
+        description="L9-C1 (2026-08-03): bawat equity mover ng viability refresh ay isinusulat bilang subscribe HINT sa momentum_bridge_subscribe_requests (fast-polled ng host bridge kada 3s) — sinasara ang watch-resolver starvation (HYFM 500% day: eligible 11:39:30Z pero trades-watched 11:58:01Z = 18m31s; ~68% ng 28-min blindness). Walang bridge change; savepoint-safe; idempotent sa bridge de-dup.",
+    )
+    chili_momentum_viability_refresh_subscribe_hint_cap: int = Field(
+        default=25,
+        ge=0,
+        le=200,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_VIABILITY_REFRESH_SUBSCRIBE_HINT_CAP"),
+        description="L9-C1: max subscribe hints kada viability refresh — proteksyon sa ~500-watch budget ng bridge (self-halving governor). ONE documented base = 25. Band [0,200]; 0 = OFF.",
+    )
     chili_momentum_vol_nan_fail_closed_enabled: bool = Field(
         default=True,
         validation_alias=AliasChoices("CHILI_MOMENTUM_VOL_NAN_FAIL_CLOSED_ENABLED"),
