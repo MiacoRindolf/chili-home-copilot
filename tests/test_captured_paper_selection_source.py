@@ -540,6 +540,90 @@ def test_source_publishes_one_complete_hot_symbol_cohort_per_hub_snapshot(
     assert resolved_symbols == ["ACTU", "MISS"]
 
 
+def test_source_drains_complete_cohorts_from_one_unchanged_hub_snapshot(
+    db,
+    monkeypatch,
+) -> None:
+    material = _seed_source(db, symbols=("ACTU", "MISS"))
+    clock = {"now": material["tick_at"] + timedelta(seconds=2)}
+    resolved_symbols: list[str] = []
+    original_resolver = (
+        selection_source_module.resolve_viability_external_inputs_for_capture
+    )
+
+    def resolve_one_cohort(symbol, *args, **kwargs):
+        resolved_symbols.append(symbol)
+        return original_resolver(symbol, *args, **kwargs)
+
+    monkeypatch.setattr(
+        selection_source_module,
+        "resolve_viability_external_inputs_for_capture",
+        resolve_one_cohort,
+    )
+    source = _source(
+        material,
+        fundamentals_reader=lambda symbol: _fresh_fundamentals(symbol),
+        wall_clock=lambda: clock["now"],
+    )
+
+    first = source.read_snapshot()
+    second = source.read_snapshot()
+    third = source.read_snapshot()
+
+    assert [item.symbol for item in first] == ["ACTU"]
+    assert [item.symbol for item in second] == ["MISS"]
+    assert third == ()
+    assert resolved_symbols == ["ACTU", "MISS"]
+
+
+def test_post_transaction_stale_tail_does_not_revoke_prior_hub_survivor(
+    db,
+    monkeypatch,
+) -> None:
+    material = _seed_source(db, symbols=("ACTU", "MISS"))
+    clock = {"now": material["tick_at"]}
+    for row in (
+        db.query(MomentumSymbolViability)
+        .filter(MomentumSymbolViability.symbol == "MISS")
+        .all()
+    ):
+        old_at = material["tick_at"] - timedelta(seconds=59)
+        row.freshness_ts = _naive(old_at)
+        regime = copy.deepcopy(dict(row.regime_snapshot_json or {}))
+        regime["utc_iso"] = old_at.isoformat()
+        regime["utc_hour"] = old_at.hour
+        row.regime_snapshot_json = regime
+    db.commit()
+
+    original_resolver = (
+        selection_source_module.resolve_viability_external_inputs_for_capture
+    )
+    advanced = False
+
+    def age_miss_after_transaction_snapshot(symbol, *args, **kwargs):
+        nonlocal advanced
+        result = original_resolver(symbol, *args, **kwargs)
+        if symbol == "MISS" and not advanced:
+            clock["now"] += timedelta(seconds=2)
+            advanced = True
+        return result
+
+    monkeypatch.setattr(
+        selection_source_module,
+        "resolve_viability_external_inputs_for_capture",
+        age_miss_after_transaction_snapshot,
+    )
+    source = _source(
+        material,
+        fundamentals_reader=lambda symbol: _fresh_fundamentals(symbol),
+        wall_clock=lambda: clock["now"],
+    )
+
+    assert [item.symbol for item in source.read_snapshot()] == ["ACTU"]
+    assert source.read_snapshot() == ()
+    assert source.read_snapshot() == ()
+
+
 def test_source_prefers_trade_eligible_peer_over_ineligible_hub_symbol(db) -> None:
     material = _seed_source(
         db,
@@ -888,7 +972,9 @@ def test_source_excludes_corrupt_symbol_before_enrichment_but_publishes_peer(
     source = _source(material, fundamentals_reader=fundamentals)
     snapshots = source.read_snapshot()
     assert {item.symbol for item in snapshots} == {"ACTU"}
-    assert calls == ["ACTU", "BAD"]
+    assert source.read_snapshot() == ()
+    assert source.read_snapshot() == ()
+    assert calls == ["ACTU", "BAD", "ACTU", "BAD"]
 
 
 def test_source_binds_dilution_clock_to_transaction_read_time(db, monkeypatch) -> None:

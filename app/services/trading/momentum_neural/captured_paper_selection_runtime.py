@@ -1198,7 +1198,13 @@ class CapturedPaperSelectionLifecycleWorker:
         components = self._components
         if components is None:
             return {}
-        return _health_mapping(components.writer.health(), "queue writer")
+        progress_health = getattr(components.writer, "progress_health", None)
+        observed = (
+            progress_health()
+            if callable(progress_health)
+            else components.writer.health()
+        )
+        return _health_mapping(observed, "queue writer")
 
     @staticmethod
     def _queue_health_is_fatal(health: Mapping[str, Any]) -> bool:

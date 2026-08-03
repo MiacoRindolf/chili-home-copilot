@@ -405,6 +405,8 @@ class _FakeWriter:
         self.log = log
         self.started = False
         self.closed = False
+        self.health_calls = 0
+        self.progress_health_calls = 0
 
     def start(self) -> None:
         self.log.append("writer_start")
@@ -417,7 +419,7 @@ class _FakeWriter:
         self.publisher.writer_lease.released = True
         return True
 
-    def health(self) -> dict[str, object]:
+    def _health(self) -> dict[str, object]:
         return {
             "queue": self.publisher.health(),
             "writer": {
@@ -426,6 +428,14 @@ class _FakeWriter:
                 "ingress": self.publisher.ingress.health(),
             },
         }
+
+    def health(self) -> dict[str, object]:
+        self.health_calls += 1
+        return self._health()
+
+    def progress_health(self) -> dict[str, object]:
+        self.progress_health_calls += 1
+        return self._health()
 
 
 class _FakeInputPort:
@@ -865,6 +875,7 @@ def test_constructor_is_fully_inert_then_prime_precedes_reader_install(
     assert health["fatal"] is False
     assert health["ready"] is True
     assert health["last_frontier_sequence"] == 1
+    assert harness.writer.progress_health_calls >= 1
     assert health["writer_slot_accounting"] == {
         "max_writer_threads": 3,
         "permanent_selection_writer_slots": 1,

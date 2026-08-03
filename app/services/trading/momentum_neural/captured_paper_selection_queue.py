@@ -1679,6 +1679,14 @@ class CapturedPaperSelectionQueueWriter:
             "writer": self._worker.health(),
         }
 
+    def progress_health(self) -> dict[str, Any]:
+        """Bounded health used only while awaiting the fsync frontier."""
+
+        return {
+            "queue": self.publisher.health().to_dict(),
+            "writer": self._worker.progress_health(),
+        }
+
 
 def _materialize_commit_events(
     root: Path,

@@ -8814,7 +8814,10 @@ class ContentAddressedCaptureStore:
             raise CaptureContractError("capture disk reserve would be breached")
 
     def resource_health(
-        self, ingress: BoundedCaptureIngress | None = None
+        self,
+        ingress: BoundedCaptureIngress | None = None,
+        *,
+        audit_filesystem: bool = True,
     ) -> dict[str, Any]:
         binding = self.resource_binding
         ownership_health = self._ownership.health()
@@ -8825,16 +8828,22 @@ class ContentAddressedCaptureStore:
         # publisher count the same object a second time.  The next probe would
         # falsely report an externally removed object and poison the run.
         with self._publish_state_lock:
-            actual_root_bytes = self._root_file_bytes()
-            if actual_root_bytes < self._tracked_root_bytes:
-                self._record_resource_failure(
-                    "capture_owned_object_removed_outside_store"
-                )
-            elif actual_root_bytes > self._tracked_root_bytes:
-                # Ownership receipts bypass the content-object publisher but
-                # remain part of this store's measured quota.
-                self._tracked_root_bytes = actual_root_bytes
-            root_bytes = max(self._tracked_root_bytes, actual_root_bytes)
+            actual_root_bytes: int | None = None
+            if audit_filesystem:
+                actual_root_bytes = self._root_file_bytes()
+                if actual_root_bytes < self._tracked_root_bytes:
+                    self._record_resource_failure(
+                        "capture_owned_object_removed_outside_store"
+                    )
+                elif actual_root_bytes > self._tracked_root_bytes:
+                    # Ownership receipts bypass the content-object publisher but
+                    # remain part of this store's measured quota.
+                    self._tracked_root_bytes = actual_root_bytes
+            root_bytes = (
+                max(self._tracked_root_bytes, actual_root_bytes)
+                if actual_root_bytes is not None
+                else self._tracked_root_bytes
+            )
             published_bytes = self._published_bytes
             publish_seconds = self._publish_seconds
             publish_count = self._publish_count
@@ -8861,9 +8870,14 @@ class ContentAddressedCaptureStore:
         return {
             "enforced": binding is not None,
             "resource_hashes": binding.hashes if binding is not None else None,
+            "filesystem_audited": audit_filesystem,
             "root_bytes": root_bytes,
             "actual_root_bytes": actual_root_bytes,
-            "untracked_root_bytes": max(0, actual_root_bytes - root_bytes),
+            "untracked_root_bytes": (
+                max(0, actual_root_bytes - root_bytes)
+                if actual_root_bytes is not None
+                else None
+            ),
             "disk_free_bytes": free,
             "disk_quota_bytes": (
                 binding.budget.disk_quota_bytes if binding is not None else None
@@ -11685,7 +11699,7 @@ class CaptureWriterWorker:
     def seal_run(self, identity: CaptureRunIdentity) -> CaptureRunSeal:
         return self.store.seal_run(identity, lifecycle=self)
 
-    def health(self) -> dict[str, Any]:
+    def _health(self, *, audit_filesystem: bool) -> dict[str, Any]:
         thread = self._thread
         elapsed = (
             max(0.0, time.monotonic() - self._started_at)
@@ -11708,8 +11722,24 @@ class CaptureWriterWorker:
             "gap_accumulator_sha256": self._gap_accumulator_sha256,
             "elapsed_seconds": elapsed,
             "ingress": self.ingress.health(),
-            "resource": self.store.resource_health(self.ingress),
+            "resource": self.store.resource_health(
+                self.ingress,
+                audit_filesystem=audit_filesystem,
+            ),
         }
+
+    def progress_health(self) -> dict[str, Any]:
+        """O(1) writer progress for tight durability-wait polling.
+
+        Publish capacity retains the fail-closed filesystem audit.  Evidence,
+        preflight, and ordinary health callers use :meth:`health`, whose
+        default remains a full capture-root audit.
+        """
+
+        return self._health(audit_filesystem=False)
+
+    def health(self) -> dict[str, Any]:
+        return self._health(audit_filesystem=True)
 
 
 class CaptureWriterPool:

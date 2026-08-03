@@ -482,7 +482,14 @@ class SqlAlchemyCapturedViabilitySnapshotSource:
         self.fundamentals_reader = fundamentals_reader
         self.wall_clock = wall_clock
         self._source_to_target = source_to_target
+        # A hub generation may contain many complete symbol cohorts.  One
+        # read returns only one cohort so its fast-market context cannot age
+        # behind a large enrichment/publish batch; these fields drain the
+        # remaining cohorts before declaring that generation consumed.
         self._last_hub_snapshot_sha256: str | None = None
+        self._draining_hub_snapshot_sha256: str | None = None
+        self._attempted_cohort_symbols: set[str] = set()
+        self._emitted_cohort_symbols: set[str] = set()
         self._last_cohort_symbol: str | None = None
 
         # Identity-stream payloads are the exact canonical objects whose hashes
@@ -1103,9 +1110,22 @@ class SqlAlchemyCapturedViabilitySnapshotSource:
                     for row in rows_by_symbol[symbol_key]
                 )
             }
-            candidate_symbols = sorted(
+            all_candidate_symbols = set(
                 source_trade_eligible_symbols or eligible_symbols
             )
+            attempted_symbols = (
+                set(self._attempted_cohort_symbols)
+                if self._draining_hub_snapshot_sha256 == hub_sha
+                else set()
+            )
+            hub_had_survivor = bool(
+                self._emitted_cohort_symbols
+                if self._draining_hub_snapshot_sha256 == hub_sha
+                else ()
+            )
+            candidate_symbols = sorted(all_candidate_symbols - attempted_symbols)
+            attempted_this_read: set[str] = set()
+            selected_symbol: str | None = None
 
             def initial_cohort_rank(
                 symbol_key: str,
@@ -1138,6 +1158,7 @@ class SqlAlchemyCapturedViabilitySnapshotSource:
                 )
 
             for symbol_key in ranked_symbols:
+                attempted_this_read.add(symbol_key)
                 group_prepared: list[dict[str, Any]] = []
                 symbol = str(symbol_key or "").strip().upper()
                 if symbol not in symbols or _SYMBOL_RE.fullmatch(symbol) is None:
@@ -1236,7 +1257,7 @@ class SqlAlchemyCapturedViabilitySnapshotSource:
                 except (KeyError, TypeError, ValueError):
                     continue
                 prepared.extend(group_prepared)
-                self._last_cohort_symbol = symbol_key
+                selected_symbol = symbol
                 break
         finally:
             try:
@@ -1244,8 +1265,19 @@ class SqlAlchemyCapturedViabilitySnapshotSource:
             finally:
                 db.close()
 
+        if not prepared and hub_had_survivor:
+            # This immutable hub generation already established a valid
+            # frontier.  Remaining malformed/expired cohorts are symbol-local
+            # exclusions and cannot revoke or repeatedly suspend that frontier.
+            self._last_hub_snapshot_sha256 = hub_sha
+            self._draining_hub_snapshot_sha256 = None
+            self._attempted_cohort_symbols.clear()
+            self._emitted_cohort_symbols.clear()
+            return ()
         if not prepared:
             _reject("derived_source_current_snapshot_empty")
+        if selected_symbol is None:
+            _reject("derived_source_symbol_cohort_invalid")
         read_at = _utc(
             self.wall_clock(),
             "derived_source_read_at",
@@ -1260,6 +1292,15 @@ class SqlAlchemyCapturedViabilitySnapshotSource:
         hub_age = (read_at - tick_at).total_seconds()
         if hub_age < 0.0 or hub_age > self.context_max_age_seconds:
             _reject("derived_source_hub_snapshot_stale")
+        # Only commit per-hub progress after the transaction and global clock
+        # checks succeed.  From here onward a rejection belongs to this one
+        # symbol cohort; it may be skipped without revoking a prior survivor.
+        if self._draining_hub_snapshot_sha256 != hub_sha:
+            self._draining_hub_snapshot_sha256 = hub_sha
+            self._attempted_cohort_symbols.clear()
+            self._emitted_cohort_symbols.clear()
+        self._attempted_cohort_symbols.update(attempted_this_read)
+        self._last_cohort_symbol = selected_symbol
         final_groups: dict[str, list[dict[str, Any]]] = {}
         for item in prepared:
             final_groups.setdefault(str(item["symbol"]), []).append(item)
@@ -1278,15 +1319,22 @@ class SqlAlchemyCapturedViabilitySnapshotSource:
             for item in group
         ]
         if not prepared:
+            if hub_had_survivor:
+                return ()
             _reject("derived_source_current_snapshot_empty")
         enriched: list[dict[str, Any]] = []
         for item in prepared:
             symbol = str(item["symbol"])
-            fundamentals_receipt = self._fundamentals_receipt_at_decision(
-                symbol=symbol,
-                receipt=fundamentals.get(symbol),
-                decision_at=read_at,
-            )
+            try:
+                fundamentals_receipt = self._fundamentals_receipt_at_decision(
+                    symbol=symbol,
+                    receipt=fundamentals.get(symbol),
+                    decision_at=read_at,
+                )
+            except CapturedPaperSelectionSourceUnavailable:
+                if hub_had_survivor:
+                    return ()
+                raise
             fundamentals_result = dict(
                 fundamentals_receipt.get("result") or {}
             )
@@ -1430,6 +1478,8 @@ class SqlAlchemyCapturedViabilitySnapshotSource:
                 or source_age_at_read_seconds
                 > self.context_max_age_seconds
             ):
+                if hub_had_survivor:
+                    return ()
                 _reject("derived_source_market_snapshot_stale")
             source_payload["source_snapshot"] = {
                 "captured_at": read_at,
@@ -1465,6 +1515,8 @@ class SqlAlchemyCapturedViabilitySnapshotSource:
                 )
             )
         if not snapshots:
+            if hub_had_survivor:
+                return ()
             _reject("derived_source_current_snapshot_empty")
         result = tuple(
             sorted(
@@ -1476,7 +1528,11 @@ class SqlAlchemyCapturedViabilitySnapshotSource:
                 ),
             )
         )
-        self._last_hub_snapshot_sha256 = hub_sha
+        emitted_symbols = {row.symbol for row in result}
+        if len(emitted_symbols) != 1:
+            _reject("derived_source_symbol_cohort_invalid")
+        emitted_symbol = next(iter(emitted_symbols))
+        self._emitted_cohort_symbols.add(emitted_symbol)
         return result
 
     def build_occurrence(
