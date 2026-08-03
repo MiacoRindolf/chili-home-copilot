@@ -96,6 +96,8 @@ _IQFEED_AUTHORITY_BASIS = "iqfeed_q_receive_trade_reference_fenced"
 _IQFEED_AUTHORITY_MAX_AGE_S = 2.0
 _IQFEED_FUTURE_TOLERANCE_S = 1.0
 _IQFEED_DEDUP_RETENTION_S = 5.0
+_CAPTURED_PAPER_ADMISSION_REJECTION_LOG_INTERVAL_S = 60.0
+_CAPTURED_PAPER_ADMISSION_REASON_RE = re.compile(r"^[a-z][a-z0-9_]{0,127}$")
 _IQFEED_BUILD_RE = re.compile(
     r"^iqfeed-l1-exact-print-provenance-v3\+sha256:[0-9a-f]{16}$"
 )
@@ -447,6 +449,7 @@ class LiveRunnerLoop:
         self._iqfeed_generation_watermarks: dict[str, int] = {}
         self._iqfeed_admission_lock = threading.Lock()
         self._iqfeed_admission_inflight: dict[object, tuple[int, str]] = {}
+        self._captured_paper_admission_rejection_log_monotonic: float | None = None
         # IGNITION nomination governors (monotonic clocks; consumer-side caps).
         self._ignition_lock = threading.Lock()
         self._ignition_dedup: dict[str, float] = {}
@@ -2196,6 +2199,38 @@ class LiveRunnerLoop:
                 if not isinstance(result, Mapping):
                     return None
                 result = dict(result)
+                raw_rejection_reason = result.get("reason")
+                rejection_reason = (
+                    raw_rejection_reason.strip()
+                    if isinstance(raw_rejection_reason, str)
+                    else ""
+                )
+                if result.get("admitted") is not True and rejection_reason:
+                    if not _CAPTURED_PAPER_ADMISSION_REASON_RE.fullmatch(
+                        rejection_reason
+                    ):
+                        rejection_reason = "captured_paper_admission_rejected"
+                    now_monotonic = time.monotonic()
+                    with self._iqfeed_admission_lock:
+                        last_log = (
+                            self._captured_paper_admission_rejection_log_monotonic
+                        )
+                        emit_rejection_log = bool(
+                            last_log is None
+                            or now_monotonic - last_log
+                            >= _CAPTURED_PAPER_ADMISSION_REJECTION_LOG_INTERVAL_S
+                        )
+                        if emit_rejection_log:
+                            self._captured_paper_admission_rejection_log_monotonic = (
+                                now_monotonic
+                            )
+                    if emit_rejection_log:
+                        _log.info(
+                            "[live_loop] captured PAPER admission rejected "
+                            "symbol=%s reason=%s",
+                            symbol,
+                            rejection_reason,
+                        )
                 publish_session = bool(
                     result.get("admitted")
                     or (

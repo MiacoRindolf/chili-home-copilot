@@ -2024,6 +2024,68 @@ def test_captured_paper_admission_runs_under_exact_generation_and_refreshes(
     assert loop._iqfeed_admission_inflight == {}
 
 
+def test_captured_paper_admission_logs_typed_rejection_reason(
+    caplog,
+    monkeypatch,
+):
+    scope = loop_mod.CapturedPaperLiveRunnerScope(
+        expected_account_id=_CAPTURED_PAPER_ACCOUNT_ID,
+        runtime_generation=_CAPTURED_PAPER_GENERATION,
+        broker_connection_generation=_CAPTURED_PAPER_CONNECTION_GENERATION,
+    )
+    loop = LiveRunnerLoop(
+        captured_paper_scope=scope,
+        captured_paper_symbol_admitter=lambda **_kwargs: {
+            "ok": False,
+            "admitted": False,
+            "reason": "initial_candidate_read_unavailable",
+            "symbol": "FCUV",
+        },
+    )
+    loop._running = True
+    loop._generation = 7
+    monotonic = iter((100.0, 101.0, 161.0, 222.0))
+    monkeypatch.setattr(loop_mod.time, "monotonic", lambda: next(monotonic))
+
+    with caplog.at_level("INFO", logger=loop_mod.__name__):
+        results = [
+            loop._admit_iqfeed_symbol(
+                "FCUV",
+                {"source": "iqfeed_l1", "message_type": "Q"},
+                expected_generation=7,
+            )
+            for _ in range(3)
+        ]
+        loop._captured_paper_symbol_admitter = lambda **_kwargs: {
+            "ok": False,
+            "admitted": False,
+            "reason": "postgres://user:secret@host",
+            "symbol": "FCUV",
+        }
+        unsafe_result = loop._admit_iqfeed_symbol(
+            "FCUV",
+            {"source": "iqfeed_l1", "message_type": "Q"},
+            expected_generation=7,
+        )
+
+    assert all(result is not None for result in results)
+    assert all(result["admitted"] is False for result in results)
+    assert all(
+        result["reason"] == "initial_candidate_read_unavailable"
+        for result in results
+    )
+    assert caplog.messages.count(
+        "[live_loop] captured PAPER admission rejected "
+        "symbol=FCUV reason=initial_candidate_read_unavailable"
+    ) == 2
+    assert unsafe_result is not None
+    assert caplog.messages.count(
+        "[live_loop] captured PAPER admission rejected "
+        "symbol=FCUV reason=captured_paper_admission_rejected"
+    ) == 1
+    assert all("secret" not in message for message in caplog.messages)
+
+
 def test_ordinary_loop_cannot_install_captured_paper_admitter():
     with pytest.raises(
         ValueError,

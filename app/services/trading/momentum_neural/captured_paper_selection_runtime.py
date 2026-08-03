@@ -1007,12 +1007,15 @@ class CapturedPaperSelectionLifecycleWorker:
             sample_is_fresh = (
                 sample_count > 0 and resolved_age <= max_sample_age
             )
+        # The pressure controller's published admissibility is authoritative.
+        # ``entry_streak`` is only the controller's in-progress hysteresis
+        # evidence; a sub-threshold streak must remain admissible until the
+        # sealed enter-sample threshold changes the published pressure state.
         clean = bool(
             admissible
             and pressure_state == "normal"
             and rejection_reason is None
             and not active_reasons
-            and entry_streak == 0
             and sample_is_fresh
         )
         detail = (

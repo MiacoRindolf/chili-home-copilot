@@ -1012,6 +1012,36 @@ def test_initial_pressure_wait_precedes_writer_and_source(
     harness.worker.close(join_timeout_seconds=1.0)
 
 
+def test_entry_hysteresis_keeps_runtime_candidate_reader_admissible(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(_WARMUP_POLL_TARGET, 0.001)
+    entering = _pressure_health(clean=True)
+    entering["entry_streak"] = 1
+    harness = _Harness(
+        tmp_path,
+        initial_snapshot_warmup_seconds=1.0,
+        wait_for_initial_pressure=True,
+        pressure_health_sequence=[entering],
+    )
+
+    harness.worker.start()
+    try:
+        ready = _await_worker_health(
+            harness.worker, lambda health: health["ready"] is True
+        )
+        assert ready["admission_suspended"] is False
+        assert harness.reader.read_candidates(
+            user_id=1,
+            symbol="AAPL",
+            decision_at=NOW,
+        ).rows == ()
+        assert harness.reader.health()["suspended"] is False
+    finally:
+        harness.worker.close(join_timeout_seconds=1.0)
+
+
 def test_initial_pressure_suspends_then_recovers_without_order_input(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
