@@ -129,6 +129,50 @@ def test_pressure_feed_keeps_coherent_staleness_recoverable_and_suspended() -> N
         worker.close(join_timeout_seconds=1.0)
 
 
+def test_pressure_feed_respects_controller_admissibility_during_entry_hysteresis() -> None:
+    class _Controller:
+        def __init__(self) -> None:
+            self.binding = SimpleNamespace(
+                policy=SimpleNamespace(
+                    pressure_sample_max_age_seconds=5.0
+                )
+            )
+
+        def observe(self, _sample: object) -> None:
+            return None
+
+        def health(self) -> dict[str, object]:
+            return {
+                "required_full_fidelity_admissible": True,
+                "pressure_state": "normal",
+                "rejection_reason": None,
+                "active_reasons": (),
+                # One pressure observation is below the sealed three-sample
+                # entry threshold.  The controller remains authoritative and
+                # explicitly admissible while its hysteresis evidence builds.
+                "entry_streak": 1,
+                "sample_count": 2,
+                "sample_age_seconds": 0.01,
+            }
+
+    worker = service_module._CapturedPaperPressureFeedWorker(
+        pressure_controller=_Controller(),
+        sampler=object,
+        interval_seconds=60.0,
+    )
+    worker.start()
+    try:
+        health = worker.health()
+        assert health["running"] is True
+        assert health["fatal"] is False
+        assert health["pre_authority_ready"] is True
+        assert health["ingress_admissible"] is True
+        assert health["admission_suspended"] is False
+        assert health["recoverable_admission_suspension"] is False
+    finally:
+        worker.close(join_timeout_seconds=1.0)
+
+
 def test_pressure_feed_keeps_fresh_write_pressure_recoverable_and_suspended() -> None:
     class _Controller:
         def __init__(self) -> None:

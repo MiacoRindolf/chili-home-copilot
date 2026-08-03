@@ -322,13 +322,15 @@ class _CapturedPaperPressureFeedWorker:
         try:
             pressure = dict(self._controller.health())
             active_reasons = pressure.get("active_reasons")
+            # The controller's sealed hysteresis contract is authoritative.
+            # A nonzero entry_streak remains admissible until the configured
+            # pressure_enter_samples threshold changes this published state.
             ingress_admissible = bool(
                 pressure.get("required_full_fidelity_admissible") is True
                 and pressure.get("pressure_state") == "normal"
                 and pressure.get("rejection_reason") is None
                 and isinstance(active_reasons, (list, tuple))
                 and not active_reasons
-                and pressure.get("entry_streak") == 0
                 and isinstance(pressure.get("sample_count"), int)
                 and not isinstance(pressure.get("sample_count"), bool)
                 and pressure["sample_count"] > 0
