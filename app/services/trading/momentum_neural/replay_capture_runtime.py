@@ -2585,6 +2585,13 @@ class SharedCaptureAdmissionBudget:
         with self._lock:
             return self._events_by_identity.get(identity, 0)
 
+    @property
+    def outstanding_events(self) -> int:
+        """Return the in-memory reservation count without refreshing probes."""
+
+        with self._lock:
+            return len(self._reservations)
+
     def health(self) -> dict[str, Any]:
         with self._lock:
             self._refresh_tokens()
@@ -11728,6 +11735,23 @@ class CaptureWriterWorker:
             ),
         }
 
+    def lifecycle_health(self) -> dict[str, Any]:
+        """In-memory shutdown state without clocks, pressure, or disk probes."""
+
+        thread = self._thread
+        return {
+            "has_started": self._has_started,
+            "writer_alive": bool(thread and thread.is_alive()),
+            "stopped_cleanly": bool(
+                self._stopped_cleanly and self.ingress.clean_close_eligible
+            ),
+            "last_error": self._last_error,
+            "ingress": {
+                "closed": self.ingress.closed,
+                "drained": self.ingress.drained,
+            },
+        }
+
     def progress_health(self) -> dict[str, Any]:
         """O(1) writer progress for tight durability-wait polling.
 
@@ -11916,6 +11940,11 @@ class SharedCaptureWriterLease:
         with self._lock:
             return self._writer
 
+    @property
+    def released(self) -> bool:
+        with self._lock:
+            return self._released
+
     def build_writer(
         self,
         *,
@@ -11954,7 +11983,7 @@ class SharedCaptureWriterLease:
                 return
             writer = self._writer
             if writer is not None:
-                writer_health = writer.health()
+                writer_health = writer.lifecycle_health()
                 outstanding = self._runtime.shared_admission_budget.outstanding_for(
                     self.identity.identity_sha256
                 )
@@ -12163,8 +12192,7 @@ class SharedCaptureStoreRuntime:
                 raise CaptureContractError(
                     "cannot close shared capture store with active writer leases"
                 )
-            shared_health = self.shared_admission_budget.health()
-            if int(shared_health["outstanding_events"]) != 0:
+            if self.shared_admission_budget.outstanding_events != 0:
                 raise CaptureContractError(
                     "cannot close shared capture store with outstanding reservations"
                 )

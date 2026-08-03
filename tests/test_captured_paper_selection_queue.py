@@ -1262,13 +1262,57 @@ def test_writer_failure_before_third_commit_is_quiescent_but_never_clean(
     # Physical shutdown and lease release permit strategy rollback, but the
     # capture remains permanently dirty and can never claim a clean seal.
     assert harness.writer.close(timeout_seconds=5) is True
-    assert harness.publisher.writer_lease.health()["released"] is True
+    assert harness.publisher.writer_lease.released is True
     terminal = failed["writer"]["ingress"]
     assert terminal["clean_close_eligible"] is False
     assert failed["writer"]["stopped_cleanly"] is False
     with pytest.raises(Exception, match="clean, error-free shutdown"):
         harness.writer.worker.seal_run(harness.queue_identity)
     harness.manager.close()
+
+
+def test_resource_probe_failure_does_not_strand_writer_lease_on_shutdown(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    harness = _harness(tmp_path)
+    root = harness.manager.store.root
+    binding = harness.manager.resource_binding
+    harness.writer.start()
+
+    def fail_probe(*_args, **_kwargs):
+        raise OSError("injected capture health probe failure")
+
+    monkeypatch.setattr(
+        harness.manager.store,
+        "_disk_usage_provider",
+        fail_probe,
+    )
+    monkeypatch.setattr(
+        harness.publisher.ingress,
+        "_monotonic_clock",
+        fail_probe,
+    )
+    monkeypatch.setattr(
+        harness.manager.shared_admission_budget,
+        "_monotonic_clock",
+        fail_probe,
+    )
+    with pytest.raises(OSError, match="injected capture health probe failure"):
+        harness.writer.worker.health()
+
+    assert harness.writer.close(timeout_seconds=5) is True
+    assert harness.publisher.writer_lease.released is True
+    harness.manager.close()
+
+    restarted_budget = SharedCaptureAdmissionBudget.from_resource_binding(binding)
+    restarted = SharedCaptureStoreRuntime.create(
+        root,
+        resource_binding=binding,
+        shared_admission_budget=restarted_budget,
+        compression_codec="zlib",
+    )
+    restarted.close()
 
 
 def test_exact_source_event_mismatch_poison_is_durable_and_fail_closed(tmp_path) -> None:

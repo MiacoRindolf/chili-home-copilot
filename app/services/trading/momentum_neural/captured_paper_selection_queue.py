@@ -1145,6 +1145,13 @@ class CapturedPaperSelectionQueuePublisher:
     def durable_gate(self) -> CapturedPaperSelectionQueueDurableGate:
         return self._durable_gate
 
+    @property
+    def has_outstanding_reservation(self) -> bool:
+        """Inspect shutdown ownership without invoking runtime health probes."""
+
+        with self._lock:
+            return self._reserved_sequence is not None
+
     def reserve_sequence(self) -> int:
         """Reserve exactly one sequence before the caller hashes its bundle."""
 
@@ -1660,10 +1667,10 @@ class CapturedPaperSelectionQueueWriter:
         return self._worker.stop(timeout_seconds=timeout_seconds)
 
     def close(self, *, timeout_seconds: float = 10.0) -> bool:
-        if self.publisher.health().reserved_sequence is not None:
+        if self.publisher.has_outstanding_reservation:
             self.publisher.poison("queue_shutdown_with_outstanding_reservation")
         stopped = self.stop(timeout_seconds=timeout_seconds)
-        worker_health = self._worker.health()
+        worker_health = self._worker.lifecycle_health()
         physically_quiesced_after_failure = bool(
             worker_health.get("has_started")
             and not worker_health["writer_alive"]

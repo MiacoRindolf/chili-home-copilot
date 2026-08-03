@@ -2058,7 +2058,7 @@ class CapturedPaperSelectionLifecycleWorker:
                 errors.append(f"writer_close:{type(exc).__name__}:{exc}")
             try:
                 lease_health = _health_mapping(
-                    components.publisher.writer_lease.health(),
+                    {"released": components.publisher.writer_lease.released},
                     "selection writer lease",
                 )
                 if lease_health.get("released") is not True:
