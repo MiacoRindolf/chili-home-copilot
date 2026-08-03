@@ -3416,12 +3416,14 @@
   }
 
   function liveAgeLabel(meta) {
-    if (!meta || !meta.updated_at) return 'no current runtime tick';
+    var candidate = !!(meta && meta.observer_source === 'captured_paper_selection');
+    if (!meta || !meta.updated_at) return candidate ? 'candidate age unknown' : 'no current runtime tick';
     var age = Math.max(0, Math.round((Date.now() - new Date(meta.updated_at).getTime()) / 1000));
-    if (!Number.isFinite(age)) return 'runtime age unknown';
-    if (age < 2) return 'updated now';
-    if (age < 60) return 'updated ' + age + 's ago';
-    return 'updated ' + Math.floor(age / 60) + 'm ago';
+    if (!Number.isFinite(age)) return candidate ? 'candidate age unknown' : 'runtime age unknown';
+    var prefix = candidate ? 'candidate updated ' : 'updated ';
+    if (age < 2) return prefix + 'now';
+    if (age < 60) return prefix + age + 's ago';
+    return prefix + Math.floor(age / 60) + 'm ago';
   }
 
   function liveMetaHasPosition(meta) {
@@ -3434,6 +3436,7 @@
 
   function liveMetaIsEntry(meta) {
     if (!meta || liveMetaHasPosition(meta)) return false;
+    if (String(meta.card_status || '').toUpperCase() === 'SETUP') return true;
     var text = [meta.state, meta.state_label, meta.last_action].filter(Boolean).join(' ').toLowerCase();
     return /(entry candidate|pending entry|entry pending|queued live|trigger ready|triggered|placement pending|order pending|awaiting fill|submitted)/.test(text);
   }
@@ -3703,11 +3706,12 @@
       if (laneParts.indexOf(liveLaneLabel(lane)) === -1 && laneParts.indexOf(label) === -1) laneParts.push(label);
     });
     var laneText = laneParts.join(' + ');
-    var state = meta.armed ? 'armed - ' + (meta.state_label || 'watching') : (meta.state_label || 'completed today');
+    var state = meta.card_status || (meta.armed ? 'armed - ' + (meta.state_label || 'watching') : (meta.state_label || 'completed today'));
+    var sourceFallback = meta.observer_source === 'captured_paper_selection' ? 'Captured PAPER' : 'Completed today';
     var total = Number(pnl.total_usd || 0);
     var badgeClass = total >= 0 ? 'rp-pos' : 'rp-neg';
     return '<b>' + esc(sym) + '</b>' +
-      '<span>' + esc(laneText || 'Completed today') + '</span>' +
+      '<span>' + esc(laneText || sourceFallback) + '</span>' +
       '<span class="rp-symbol-state">' + esc(state) + '</span>' +
       '<span>' + esc(fmtNum(bars.length) + ' one-minute candles') + '</span>' +
       '<span class="rp-symbol-freshness' + (meta.stale ? ' stale' : '') + '">' + esc(liveAgeLabel(meta)) + '</span>' +
@@ -3725,6 +3729,11 @@
       return '<span class="rp-chip ' + esc(liveLaneClass(row.lane)) + '">' +
         esc(liveLaneLabel(row.lane) + ' - ' + (row.state_label || row.state || 'active')) + '</span>';
     }));
+    if (meta.watch) {
+      chips.push('<span class="rp-chip paper-twin">Captured PAPER watch</span>');
+      if (meta.watch.policy_eligible) chips.push('<span class="rp-chip">CHILI policy eligible</span>');
+      chips.push('<span class="rp-chip">' + esc(fmtNum(meta.watch.route_count || 0) + ' scored setup families') + '</span>');
+    }
     Object.keys(pnl.by_lane || {}).forEach(function(lane) {
       var lanePnl = pnl.by_lane[lane] || {};
       var laneTotal = Number(lanePnl.realized_usd || 0) + Number(lanePnl.unrealized_usd || 0);
@@ -3767,6 +3776,9 @@
     var activeSymbols = Number(payload.active_symbol_count == null
       ? symbols.filter(function(row) { return row.active; }).length
       : payload.active_symbol_count);
+    var watchingSymbols = Number(payload.watching_symbol_count == null
+      ? symbols.filter(function(row) { return row.observer_source === 'captured_paper_selection'; }).length
+      : payload.watching_symbol_count);
     var laneDetail = [
       Number((lanes.live || {}).symbols || 0) + ' live',
       Number((lanes.paper_twin || {}).symbols || 0) + ' twins',
@@ -3776,7 +3788,7 @@
       statCard(fmtSignedMoney(totals.total_usd || 0), 'Today Total', fmtNum(totals.trades || 0) + ' completed trades', pnlClass(totals.total_usd)) +
       statCard(fmtSignedMoney(totals.realized_usd || 0), 'Realized', 'ET trading day', pnlClass(totals.realized_usd)) +
       statCard(fmtSignedMoney(totals.unrealized_usd || 0), 'Unrealized', openPositions + ' open positions', pnlClass(totals.unrealized_usd)) +
-      statCard(activeSymbols, 'Active Symbols', laneDetail) +
+      statCard(activeSymbols + ' / ' + watchingSymbols, 'Active / Watching', laneDetail) +
       statCard(openPositions, 'Open Positions', 'persisted runner state') +
       '</div>';
   }
@@ -3796,6 +3808,7 @@
       mode: 'live_observer',
       as_of_utc: payload.as_of_utc,
       latest_runtime_utc: payload.latest_runtime_utc,
+      watching_symbol_count: payload.watching_symbol_count,
       totals: payload.totals,
       lanes: payload.lanes,
       symbols: symbols.length,
@@ -3830,7 +3843,7 @@
       host.dataset.liveWorkspace = '1';
       host.innerHTML = '<div id="rp-live-stats">' + renderLiveStats(payload) + '</div>' +
         renderLiveResearch(payload) +
-        '<div class="rp-empty">No active or completed Chili symbols today.</div>';
+        '<div class="rp-empty">No watched, active, or completed Chili symbols today.</div>';
       updateLiveResearch(payload);
       return;
     }
