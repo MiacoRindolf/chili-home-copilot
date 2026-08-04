@@ -104,6 +104,20 @@ _CAUSE_ORDER: tuple[TargetCause, ...] = (
     TargetCause.FORCED,
     TargetCause.RETAINED,
 )
+
+# Capacity priority is deliberately separate from canonical cause ordering.
+# ``_CAUSE_ORDER`` is part of durable evidence serialization, while this order
+# decides which non-protected symbols retain scarce IQFeed watch slots.  The
+# current Ross universe is more time-sensitive than the standing eligible
+# inventory, which may legitimately retain older re-ignition candidates.
+_TARGET_PRIORITY_ORDER: tuple[TargetCause, ...] = (
+    TargetCause.ACTIVE,
+    TargetCause.HINT,
+    TargetCause.ROSS,
+    TargetCause.ELIGIBLE,
+    TargetCause.FORCED,
+    TargetCause.RETAINED,
+)
 REQUIRED_DYNAMIC_CAUSES = frozenset(
     {
         TargetCause.ACTIVE,
@@ -302,11 +316,11 @@ def resolve_subscription_target(
         add_protected(sorted(previous))
 
     # Deterministic priority is deliberate: load-bearing active/held first,
-    # newest-first fresh hints next, then viability-ranked eligible and finally
-    # Ross broad fallback. Capacity losses are never silent.
+    # newest-first fresh hints next, then the current Ross universe before the
+    # longer-lived eligible inventory. Capacity losses are never silent.
     ranked: list[str] = list(protected)
     ranked_seen = set(ranked)
-    for cause in _CAUSE_ORDER:
+    for cause in _TARGET_PRIORITY_ORDER:
         for symbol in ranked_by_cause.get(cause, ()):
             if symbol not in ranked_seen:
                 ranked_seen.add(symbol)
