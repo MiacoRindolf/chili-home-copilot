@@ -569,31 +569,40 @@ def _parse_csv_floats(raw: str | None) -> list[float]:
 VERTICAL_LEG_MAX_SECONDS = 180.0
 
 
-def vertical_leg_shape(
-    *, leg_age_seconds: float | None, halt_lit: bool
-) -> tuple[bool, str]:
-    """Pure: VERTICAL ba ang kasalukuyang leg (kaysa halt-stairs/grind)?
+def rung_clears_noise(
+    *, entry: float | None, target: float | None, atr_pct: float | None
+) -> bool:
+    """Pure: sapat ba ang layo ng rung para maging TUNAY na strength, hindi ingay?
 
-    Ang L10b proof (08-04, 4 windows) ang nagpakita na ang scale ladder ay
-    KONDISYONAL sa hugis ng galaw, hindi basta mabuti o masama:
-      * HYFM (34-segundong single-bar vertical): +0.22 -> +24.46 — ang ladder ay
-        nagbabangko ng tranches papasok sa pagsabog kung saan nakaupo ang
-        round-number liquidity;
-      * JLHL (halt-stairs, 83% ng hold sa loob ng halt): +23.63 -> +12.67 — ang
-        parehong partials ay PUMUPUTOL sa buntot ng hakbang-hakbang na akyat.
-    Fail-toward-NOT-vertical sa bawat pagdududa: ang hindi alam na edad ay
-    ibinabalik sa single scale-out (ang mas konserbatibong dating ugali).
+    L10c BIGO at ito ang naitamang lever. Ang ladder targets ay R-multiples ng
+    STOP DISTANCE, kaya sa mahigpit na stop ay nagiging kalapit-lapit sa entry ang
+    unang rung. Sukat mula sa L10b/L10c proof:
+
+      HYFM: entry 3.66 -> rung 3.92 = +7.1%  sa window na 36.0% ang range   -> TAMA
+      JLHL: entry 9.50 -> rung 9.61 = +1.2%  sa window na 422.5% ang range  -> MALI
+
+    Nagbenta ang ladder ng KALAHATI ng posisyon para sa 1.2% sa isang pangalang
+    umakyat ng 422%. Hindi iyon "selling into strength" — nasa loob iyon ng ingay.
+
+    ISANG dokumentadong base: ang SARILING ATR%% ng pangalan (`entry_stop_atr_pct`,
+    nakuha na sa entry at ginagamit na ng trail path) — ang rung ay dapat hindi
+    bababa sa isang yunit ng normal na galaw ng pangalan. Walang bagong numero.
+    Fail-toward-KEEP kapag walang ATR: ang kawalan ng datos ay hindi dahilan para
+    bawasan ang umiiral nang ladder.
     """
-    if bool(halt_lit):
-        return False, "halt_stairs"
     try:
-        if leg_age_seconds is None or not math.isfinite(float(leg_age_seconds)):
-            return False, "leg_age_unknown"
-        if float(leg_age_seconds) >= VERTICAL_LEG_MAX_SECONDS:
-            return False, "leg_mature_1m_owns"
+        e = float(entry) if entry is not None else None
+        t = float(target) if target is not None else None
+        a = float(atr_pct) if atr_pct is not None else None
     except (TypeError, ValueError):
-        return False, "bad_inputs"
-    return True, "vertical"
+        return True
+    if e is None or t is None or a is None:
+        return True
+    if not (math.isfinite(e) and math.isfinite(t) and math.isfinite(a)):
+        return True
+    if e <= 0 or a <= 0:
+        return True
+    return ((t - e) / e) >= a
 
 
 def scale_grid_enabled() -> bool:
@@ -615,6 +624,7 @@ def scale_grid_levels(
     side_long: bool = True,
     symbol: str | None = None,
     rr_target: float | None = None,
+    atr_pct: float | None = None,
 ) -> list[tuple[float, float]]:
     """Build the MULTI-LEVEL scale-out ladder: ``[(target_price, fraction), ...]``.
 
@@ -669,6 +679,11 @@ def scale_grid_levels(
                 tgt = rn  # nearest qualifying round number (ascending -> first wins is lowest)
                 break
         if tgt <= prev_px * (1.0 + 1e-9):  # not strictly ascending -> skip this rung
+            continue
+        # L10d — NOISE FLOOR: ang rung na mas malapit sa entry kaysa sa isang yunit
+        # ng sariling ATR%% ng pangalan ay hindi "strength" kundi ingay (JLHL: +1.2%
+        # rung sa 422%-range na mover). Walang ATR => panatilihin (fail-toward-KEEP).
+        if not rung_clears_noise(entry=e, target=tgt, atr_pct=atr_pct):
             continue
         # Clamp the cumulative fraction so a runner always remains (< _GRID_MAX_CUMULATIVE).
         room = _GRID_MAX_CUMULATIVE - cum

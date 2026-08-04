@@ -16817,7 +16817,9 @@ def _scale_out_to_runner(
 # (byte-identical). docs/DESIGN/MOMENTUM_LANE.md
 
 
-def _resolve_scale_grid(pos: dict[str, Any], symbol: str | None) -> list[list[float]]:
+def _resolve_scale_grid(
+    pos: dict[str, Any], symbol: str | None, *, le: dict[str, Any] | None = None
+) -> list[list[float]]:
     """Return the frozen ladder ``[[target_px, fraction], ...]`` for this position.
 
     Computed ONCE off the FROZEN entry + the position's initial stop (the risk
@@ -16839,7 +16841,17 @@ def _resolve_scale_grid(pos: dict[str, Any], symbol: str | None) -> list[list[fl
             stop = _float_or_none(pos.get("stop_price"))
     except (TypeError, ValueError):
         entry, stop = 0.0, None
-    levels = scale_grid_levels(entry, float(stop) if stop is not None else 0.0, side_long=_le_side_long(pos), symbol=symbol)
+    # L10d — ipinapasa ang SARILING ATR%% ng pangalan (nakuha na sa entry) para
+    # mabaklas ang mga rung na nasa loob ng ingay. Walang le => walang ATR =>
+    # fail-toward-KEEP (dating ladder).
+    _atr = _float_or_none((le or {}).get("entry_stop_atr_pct"))
+    levels = scale_grid_levels(
+        entry,
+        float(stop) if stop is not None else 0.0,
+        side_long=_le_side_long(pos),
+        symbol=symbol,
+        atr_pct=_atr,
+    )
     pos["scale_grid"] = [[float(px), float(fr)] for px, fr in levels]
     return [list(x) for x in pos["scale_grid"]]
 
@@ -16858,36 +16870,11 @@ def _scale_grid_active(
     na siyang tamang kilos: nabangko na ang spike, hinahayaan ang natitira sa
     hakbang-hakbang na akyat. Walang `le` (o flag OFF) => dating ugali.
     """
-    grid = _resolve_scale_grid(pos, symbol)
+    grid = _resolve_scale_grid(pos, symbol, le=le)
     if len(grid) < 2:  # 0/1 rung => no ladder; the single scale-out path handles it
         return False
     idx = int(pos.get("scale_grid_idx") or 0)
-    if idx >= len(grid):
-        return False
-    if le is not None and bool(
-        getattr(settings, "chili_momentum_scale_grid_vertical_only_enabled", True)
-    ):
-        try:
-            from .paper_execution import vertical_leg_shape
-
-            _age = None
-            _opened = _parse_dt(pos.get("opened_at_utc"))
-            if _opened is not None:
-                _o = _opened if _opened.tzinfo is not None else _opened.replace(
-                    tzinfo=timezone.utc
-                )
-                _age = (_utcnow_aware() - _o).total_seconds()
-            _is_vert, _shape = vertical_leg_shape(
-                leg_age_seconds=_age,
-                halt_lit=bool(le.get("suspected_halt_since_utc")),
-            )
-            if not _is_vert:
-                return False
-        except Exception:
-            # Fail-toward-EXISTING: anumang error => ang ladder ang magpapasya
-            # gaya ng dati (walang bagong pagkabigo mula sa gate na ito).
-            pass
-    return True
+    return idx < len(grid)
 
 
 def _scale_out_grid_step(
