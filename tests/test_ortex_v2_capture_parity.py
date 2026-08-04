@@ -221,6 +221,17 @@ def _not_applicable(symbol: str) -> OrtexShortMechanicsOutcome:
     )
 
 
+def _non_equity(symbol: str) -> OrtexShortMechanicsOutcome:
+    policy = ortex_public_policy()
+    return OrtexShortMechanicsOutcome.not_applicable(
+        symbol=symbol,
+        reason="non_equity",
+        observed_at=OBSERVED_AT,
+        policy_sha256=sha256_json(policy),
+        policy=policy,
+    )
+
+
 def _selection_manifest(
     outcomes: tuple[OrtexShortMechanicsOutcome, ...],
 ) -> dict[str, object]:
@@ -371,6 +382,83 @@ def test_full_selection_manifest_and_compact_reference_bind_exactly() -> None:
     )
     assert typed_manifest.selected_symbols == ("ACTU",)
     assert tuple(typed_manifest.signal_by_symbol) == ("ACTU", "BETA")
+
+
+def test_selection_manifest_accepts_current_coinbase_non_equity_symbols() -> None:
+    symbols = ("00-USD", "1INCH-USD", "2Z-USD")
+    manifest = _selection_manifest(tuple(_non_equity(symbol) for symbol in symbols))
+
+    typed = validate_ortex_squeeze_fuel_batch_manifest(
+        manifest,
+        read_at=OBSERVED_AT + timedelta(seconds=1),
+        expected_quota_policy_sha256=sha256_json(ortex_public_policy()),
+        freshness_ttl_seconds=float(
+            ortex_public_policy()["success_cache_ttl_seconds"]
+        ),
+    )
+
+    assert typed.complete is True
+    assert typed.selected_symbols == ()
+    assert tuple(typed.signal_by_symbol) == tuple(sorted(symbols))
+    assert all(
+        signal["ortex_selection_reference"]["detail_code"] == "non_equity"
+        for signal in typed.signal_by_symbol.values()
+    )
+
+
+def test_selection_manifest_rejects_noncanonical_or_mislabeled_members() -> None:
+    validate_kwargs = {
+        "read_at": OBSERVED_AT + timedelta(seconds=1),
+        "expected_quota_policy_sha256": sha256_json(ortex_public_policy()),
+        "freshness_ttl_seconds": float(
+            ortex_public_policy()["success_cache_ttl_seconds"]
+        ),
+    }
+    selected_crypto = _selection_manifest((_non_equity("BTC-USD"),))
+    selected_crypto["selected_symbols"] = ["BTC-USD"]
+    _resign_selection_manifest(selected_crypto)
+    with pytest.raises(CaptureContractError, match="selected symbol is invalid"):
+        validate_ortex_squeeze_fuel_batch_manifest(
+            selected_crypto,
+            **validate_kwargs,
+        )
+
+    bare_numeric = _selection_manifest((_non_equity("1INCH-USD"),))
+    members = bare_numeric["members"]
+    assert isinstance(members, list) and isinstance(members[0], dict)
+    members[0]["symbol"] = "1INCH"
+    _resign_selection_manifest(bare_numeric)
+    with pytest.raises(CaptureContractError, match="symbol-sorted/unique"):
+        validate_ortex_squeeze_fuel_batch_manifest(
+            bare_numeric,
+            **validate_kwargs,
+        )
+
+    mislabeled = _selection_manifest((_non_equity("1INCH-USD"),))
+    members = mislabeled["members"]
+    assert isinstance(members, list) and isinstance(members[0], dict)
+    reference = members[0]["ortex_selection_reference"]
+    assert isinstance(reference, dict)
+    reference["detail_code"] = "outside_top_n"
+    _resign_selection_manifest(mislabeled)
+    with pytest.raises(CaptureContractError, match="non-equity.*semantics"):
+        validate_ortex_squeeze_fuel_batch_manifest(
+            mislabeled,
+            **validate_kwargs,
+        )
+
+    mislabeled_equity = _selection_manifest((_not_applicable("ACTU"),))
+    members = mislabeled_equity["members"]
+    assert isinstance(members, list) and isinstance(members[0], dict)
+    reference = members[0]["ortex_selection_reference"]
+    assert isinstance(reference, dict)
+    reference["detail_code"] = "non_equity"
+    _resign_selection_manifest(mislabeled_equity)
+    with pytest.raises(CaptureContractError, match="non-equity.*semantics"):
+        validate_ortex_squeeze_fuel_batch_manifest(
+            mislabeled_equity,
+            **validate_kwargs,
+        )
 
 
 def test_exchange_discovery_preserves_404_then_si_proof_then_ctb() -> None:

@@ -363,6 +363,39 @@ def test_not_applicable_factory_is_deterministic_and_does_no_io(monkeypatch):
     assert non_equity.symbol == "BTC-USD"
     assert non_equity.kind is sm.OrtexOutcomeKind.NOT_APPLICABLE
 
+    for venue_symbol in ("00-USD", "1INCH-USD", "2Z-USD"):
+        typed = sm.OrtexShortMechanicsOutcome.not_applicable(
+            symbol=venue_symbol,
+            reason="non_equity",
+            observed_at=NOW,
+            policy_sha256=sm._policy_sha256(),
+        )
+        assert typed.symbol == venue_symbol
+        assert typed.kind is sm.OrtexOutcomeKind.NOT_APPLICABLE
+        assert (
+            sm.OrtexShortMechanicsOutcome.from_capture_dict(
+                typed.to_capture_dict()
+            )
+            == typed
+        )
+
+    with pytest.raises(ValueError, match="canonical"):
+        sm.OrtexShortMechanicsOutcome.not_applicable(
+            symbol="BTC/USDT",
+            reason="non_equity",
+            observed_at=NOW,
+            policy_sha256=sm._policy_sha256(),
+        )
+
+    for unicode_symbol in ("币安人生-USD", "ßTC-USD"):
+        with pytest.raises(ValueError, match="canonical"):
+            sm.OrtexShortMechanicsOutcome.not_applicable(
+                symbol=unicode_symbol,
+                reason="non_equity",
+                observed_at=NOW,
+                policy_sha256=sm._policy_sha256(),
+            )
+
 
 def test_without_durable_quota_authority_no_network_is_possible(monkeypatch):
     monkeypatch.setattr(

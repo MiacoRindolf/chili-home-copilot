@@ -67,7 +67,15 @@ def _normalize_product_id(product_id: str | None) -> str:
     or empty / None input. We do NOT auto-correct — the producer is the
     bug; refuse so the broker doesn't see it.
     """
-    pid = (product_id or "").strip().upper()
+    raw = (product_id or "").strip()
+    # Reject before case-folding. Otherwise a non-ASCII product such as
+    # ``ßTC-USD`` expands to the different, apparently valid ``SSTC-USD``.
+    if not raw.isascii():
+        raise ValueError(
+            f"coinbase_spot: invalid product_id {product_id!r}; "
+            "expected '<BASE>-USD' or '<BASE>-USDC'"
+        )
+    pid = raw.upper()
     if not _VALID_PRODUCT_ID.match(pid):
         raise ValueError(
             f"coinbase_spot: invalid product_id {product_id!r}; "

@@ -50,7 +50,7 @@ _DISCOVERY_EXCHANGES = ("nasdaq", "nyse", "amex")
 _ENDPOINT_DATASETS = ("short_interest", "cost_to_borrow")
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 _SYMBOL_RE = re.compile(r"^[A-Z][A-Z0-9.]{0,15}$")
-_NON_EQUITY_SYMBOL_RE = re.compile(r"^[A-Z][A-Z0-9.]{0,15}-USD$")
+_NON_EQUITY_SYMBOL_RE = re.compile(r"^[A-Z0-9][A-Z0-9.]{0,15}-USD$")
 _SAFE_CODE_RE = re.compile(r"^[A-Za-z0-9_.:/-]{1,160}$")
 _UTC = timezone.utc
 
@@ -888,7 +888,10 @@ class OrtexShortMechanicsOutcome:
     ) -> "OrtexShortMechanicsOutcome":
         if reason not in {"outside_top_n", "non_equity"}:
             raise ValueError("unsupported not-applicable reason")
-        canonical_symbol = str(symbol or "").strip().upper()
+        raw_symbol = str(symbol or "").strip()
+        if not raw_symbol.isascii():
+            raise ValueError("not-applicable symbol is not canonical")
+        canonical_symbol = raw_symbol.upper()
         valid_symbol = bool(_SYMBOL_RE.fullmatch(canonical_symbol))
         if reason == "non_equity":
             valid_symbol = bool(_NON_EQUITY_SYMBOL_RE.fullmatch(canonical_symbol))

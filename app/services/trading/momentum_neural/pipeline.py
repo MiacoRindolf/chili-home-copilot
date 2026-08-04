@@ -1422,6 +1422,13 @@ def _sanitize_ortex_signal_values(
             signal.pop(key, None)
 
 
+def _canonical_ortex_field_symbol(raw_symbol: object) -> str:
+    symbol = str(raw_symbol or "").strip()
+    if not symbol or not symbol.isascii():
+        raise ValueError("Ortex batch symbol is empty or non-ASCII")
+    return symbol.upper()
+
+
 def _selection_reference_is_valid(
     reference: object,
     *,
@@ -1434,11 +1441,12 @@ def _selection_reference_is_valid(
         return False
     unsigned = dict(reference)
     unsigned.pop("selection_reference_sha256", None)
+    reference_symbol = str(reference.get("symbol") or "").strip()
     return (
         reference.get("schema") == "chili.ortex.selection-reference.v1"
         and reference.get("version") == 1
-        and str(reference.get("symbol") or "").strip().upper()
-        == expected_symbol
+        and reference_symbol.isascii()
+        and reference_symbol.upper() == expected_symbol
         and _canonical_json_sha256(unsigned) == claimed
     )
 
@@ -1764,8 +1772,8 @@ def _apply_ortex_squeeze_fuel_batch(
     for raw_symbol, signal in ross_signals.items():
         if not isinstance(signal, dict):
             continue
-        symbol = str(raw_symbol or "").strip().upper()
-        if not symbol or symbol in signal_by_symbol:
+        symbol = _canonical_ortex_field_symbol(raw_symbol)
+        if symbol in signal_by_symbol:
             raise ValueError("Ortex batch symbols are empty or non-unique")
         signal_by_symbol[symbol] = signal
     field_symbols = sorted(signal_by_symbol)
@@ -1947,11 +1955,12 @@ def prepare_ortex_squeeze_fuel_field(
 ) -> tuple[dict[str, Any], dict[str, float], dict[str, Any] | None]:
     """Prepare one immutable decision-local field before scheduler chunking."""
 
-    prepared: dict[str, Any] = {
-        str(symbol or "").strip().upper(): copy.deepcopy(signal)
-        for symbol, signal in ross_signals.items()
-        if str(symbol or "").strip()
-    }
+    prepared: dict[str, Any] = {}
+    for raw_symbol, signal in ross_signals.items():
+        symbol = _canonical_ortex_field_symbol(raw_symbol)
+        if symbol in prepared:
+            raise ValueError("Ortex batch symbols are empty or non-unique")
+        prepared[symbol] = copy.deepcopy(signal)
     _sanitize_ortex_signal_values(prepared)
     if not bool(
         getattr(settings, "chili_momentum_squeeze_fuel_tilt_enabled", True)

@@ -74,17 +74,21 @@ def test_feeder_filters_non_usd_untradable_and_zero(monkeypatch) -> None:
             _prod("DEAD-USD", "DEAD", "USD", price="1", chg="5", volpct="0", qvol="1000", tradable=False),
             _prod("NOPX-USD", "NOPX", "USD", price="0", chg="5", volpct="0", qvol="1000"),  # zero price
             _prod("NOVOL-USD", "NOVOL", "USD", price="1", chg="5", volpct="0", qvol="0"),  # zero turnover
+            _prod("EURC-USDC", "EURC", "USDC", price="1", chg="1", volpct="1", qvol="5000"),  # unsupported execution quote
+            _prod("ODD-USDC", "ODD", "USD", price="1", chg="20", volpct="20", qvol="5000"),  # inconsistent product metadata
+            _prod("币安人生-USD", "币安人生", "USD", price="1", chg="20", volpct="20", qvol="5000"),  # unsupported product id
+            _prod("1INCH-USD", "1INCH", "USD", price="1", chg="20", volpct="20", qvol="5000"),  # numeric-leading canonical id
             _prod("OK-USD", "OK", "USD", price="2", chg="9", volpct="100", qvol="5000"),  # keep
         ],
     )
     out = _build_crypto_momentum_universe()
-    assert {e["symbol"] for e in out} == {"OK-USD"}
+    assert {e["symbol"] for e in out} == {"1INCH-USD", "OK-USD"}
 
 
 def test_feeder_dedupes_usd_over_usdc(monkeypatch) -> None:
     from app.services.trading_scheduler import _build_crypto_momentum_universe
 
-    # USDC book appears first; the -USD book must win and collapse to one entry.
+    # USDC book appears first; only the execution-compatible -USD book survives.
     _patch(
         monkeypatch,
         [

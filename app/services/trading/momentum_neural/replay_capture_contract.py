@@ -109,7 +109,10 @@ _FIRST_DIP_TAPE_PURPOSES = frozenset(
     }
 )
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
-_ORTEX_BATCH_SYMBOL_RE = re.compile(r"^[A-Z][A-Z0-9.-]{0,35}$")
+_ORTEX_BATCH_SYMBOL_RE = re.compile(r"^[A-Z][A-Z0-9.]{0,15}$")
+_ORTEX_BATCH_MEMBER_SYMBOL_RE = re.compile(
+    r"^(?:[A-Z][A-Z0-9.]{0,15}|[A-Z0-9][A-Z0-9.]{0,15}-USD)$"
+)
 _PRODUCER_ID_RE = re.compile(r"^[a-z0-9][a-z0-9_.-]{0,127}$")
 _LIFECYCLE_REASON_RE = re.compile(r"^[a-z0-9][a-z0-9_.-]{0,127}$")
 
@@ -3597,7 +3600,7 @@ def validate_ortex_squeeze_fuel_batch_manifest(
         symbol = str(member.get("symbol") or "").strip().upper()
         if (
             member.get("symbol") != symbol
-            or _ORTEX_BATCH_SYMBOL_RE.fullmatch(symbol) is None
+            or _ORTEX_BATCH_MEMBER_SYMBOL_RE.fullmatch(symbol) is None
             or symbol <= prior_symbol
         ):
             raise CaptureContractError(
@@ -3649,6 +3652,14 @@ def validate_ortex_squeeze_fuel_batch_manifest(
                 "Ortex incomplete batch carries economic values"
             )
         detail_code = str(reference.get("detail_code") or "")
+        is_non_equity_symbol = symbol.endswith("-USD")
+        is_non_equity_reference = (
+            kind == "NOT_APPLICABLE" and detail_code == "non_equity"
+        )
+        if is_non_equity_symbol != is_non_equity_reference:
+            raise CaptureContractError(
+                "Ortex non-equity batch member semantics mismatch"
+            )
         if detail_code not in _ORTEX_NOT_PROVIDER_CALLED_DETAILS:
             provider_called_symbols.append(symbol)
         signal = {

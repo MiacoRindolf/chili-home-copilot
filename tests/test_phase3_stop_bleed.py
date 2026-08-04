@@ -996,6 +996,10 @@ class TestD3NormalizeProductId:
     def test_already_canonical_passes_through(self):
         assert _normalize_product_id("ETH-USDC") == "ETH-USDC"
 
+    @pytest.mark.parametrize("symbol", ["00-USD", "1INCH-USD", "2Z-USD"])
+    def test_numeric_leading_base_is_canonical(self, symbol):
+        assert _normalize_product_id(symbol) == symbol
+
     def test_strip_whitespace(self):
         assert _normalize_product_id("  BTC-USD  ") == "BTC-USD"
 
@@ -1007,6 +1011,11 @@ class TestD3NormalizeProductId:
     def test_rejects_none(self):
         with pytest.raises(ValueError, match="invalid product_id"):
             _normalize_product_id(None)
+
+    @pytest.mark.parametrize("bad", ["币安人生-USD", "ßTC-USD"])
+    def test_rejects_non_ascii_before_case_folding(self, bad):
+        with pytest.raises(ValueError, match="invalid product_id"):
+            _normalize_product_id(bad)
 
     def test_error_message_preserves_original_input(self):
         """The error string must contain the un-normalized input so the

@@ -1246,7 +1246,6 @@ def test_source_fails_closed_when_symbol_family_universe_is_partial(db) -> None:
     snapshots = source.read_snapshot()
     assert {item.symbol for item in snapshots} == {"ACTU"}
 
-
 def test_source_publishes_one_complete_hot_symbol_cohort_per_hub_snapshot(
     db,
     monkeypatch,
@@ -1553,7 +1552,7 @@ def test_source_admits_fresh_equity_routes_when_latest_hub_tick_is_crypto_only(
     hub = db.get(BrainNodeState, HUB_NODE_ID)
     assert hub is not None
     local_state = copy.deepcopy(dict(hub.local_state or {}))
-    local_state["symbols_evaluated"] = ["BTC-USD"]
+    local_state["symbols_evaluated"] = ["1INCH-USD"]
     hub.local_state = local_state
     db.commit()
 
@@ -1564,6 +1563,13 @@ def test_source_admits_fresh_equity_routes_when_latest_hub_tick_is_crypto_only(
 
     snapshots = source.read_snapshot()
     assert {item.symbol for item in snapshots} == {"ACTU"}
+
+    local_state["symbols_evaluated"] = ["1INCH"]
+    hub.local_state = local_state
+    db.commit()
+    with pytest.raises(CapturedPaperSelectionSourceUnavailable) as rejected:
+        source.read_snapshot()
+    assert rejected.value.reason == "derived_source_hub_symbol_invalid"
 
 
 def test_source_survives_nonfinite_floats_in_fundamentals(db) -> None:
