@@ -58,6 +58,7 @@ class ViabilitySettingsProjection:
     chili_momentum_explosive_prequal_floor_enabled: Any
     chili_momentum_explosive_prequal_bar_ref: Any
     chili_momentum_explosive_prequal_margin: Any
+    chili_momentum_paper_setup_quality_gate_enabled: Any
 
     @classmethod
     def from_runtime(cls, source: Any) -> "ViabilitySettingsProjection":
@@ -89,6 +90,7 @@ class ViabilitySettingsProjection:
             "chili_momentum_explosive_prequal_floor_enabled": True,
             "chili_momentum_explosive_prequal_bar_ref": 0.56,
             "chili_momentum_explosive_prequal_margin": 0.02,
+            "chili_momentum_paper_setup_quality_gate_enabled": True,
         }
         values = {name: getattr(source, name, default) for name, default in defaults.items()}
         # The legacy trade-flow threshold defaults dynamically to the resolved
@@ -700,6 +702,19 @@ def score_viability_explicit(
 
     paper_eligible = True
     live_eligible = True
+    # L11 (2026-08-04) — SETUP-QUALITY VETO TRACKER.
+    # May DALAWANG magkaibang klase ang mga live_eligible knock-down sa ibaba:
+    #   (a) SETUP-QUALITY — "hindi ito Ross momentum setup" (below explosiveness
+    #       floor, below A-setup floor, hindi tradable, arb-flat/weak catalyst).
+    #       TOTOO ito kahit pekeng pera ang gamit.
+    #   (b) LIVE-MONEY COST/RISK — "hindi kayang bayaran ng totoong pera" (spread
+    #       ceiling, extreme-vol sizing). Live-only ito; may saysay pa ring
+    #       i-rehearse ng paper ang ganitong pangalan.
+    # Ang (a) lang ang sinusundan dito, at ito ang ipinapataw sa paper_eligible sa
+    # dulo — para MANATILI ang deployment ladder (deployment_ladder_service.py:122
+    # live_eligible -> live, elif paper_eligible -> paper rehearsal) habang hindi
+    # nagre-rehearse ng mga pangalang HINDI naman setup.
+    _setup_quality_veto: str | None = None
     # RISK-BOUNDED size-down marker (LEVER-1 extreme-vol relax AND the thin-spread
     # squeeze carve-out both set this True). Initialized ONCE here — above the spread
     # block (line ~296) — so the thin-spread carve-out's assignment isn't clobbered by
@@ -864,6 +879,7 @@ def score_viability_explicit(
 
     if feats.product_tradable is False:
         live_eligible = False
+        _setup_quality_veto = _setup_quality_veto or "product_not_tradable"
         warnings.append("Product not tradable / metadata missing")
 
     # LEVER 1 — WIN-WIN gate predicate. Compute ONCE: is this a GENUINE explosive
@@ -963,6 +979,7 @@ def score_viability_explicit(
         )
         if _below and symbol in _below:
             live_eligible = False
+            _setup_quality_veto = _setup_quality_veto or "ross_explosiveness_floor"
             warnings.append("Below Ross explosiveness floor (RVOL/change) — not a live setup")
     except (TypeError, AttributeError):
         pass
@@ -1062,6 +1079,7 @@ def score_viability_explicit(
                     )
                 if _reason is not None:
                     live_eligible = False
+                    _setup_quality_veto = _setup_quality_veto or "a_setup_quality_floor"
                     warnings.append(f"Below A-setup quality floor ({_reason}) — not a live setup")
     except (TypeError, ValueError, AttributeError):
         pass
@@ -1168,6 +1186,7 @@ def score_viability_explicit(
             if _arb_match:
                 base += _grade_delta
                 live_eligible = False
+                _setup_quality_veto = _setup_quality_veto or "arb_flat_catalyst"
                 warnings.append(
                     "Arb-flat catalyst (confirmed buyout target â€” price pinned at deal)"
                 )
@@ -1175,6 +1194,7 @@ def score_viability_explicit(
                 if _grade_delta < 0:
                     base += _grade_delta
                     live_eligible = False
+                    _setup_quality_veto = _setup_quality_veto or "weak_catalyst"
                     warnings.append(
                         "Weak catalyst (dilution/compliance/legal) — not a live Ross setup"
                     )
@@ -1430,12 +1450,37 @@ def score_viability_explicit(
     )
 
     _final_live_eligible = live_eligible and viability >= 0.42
+
+    # L11 (2026-08-04) — PAPER SETUP-QUALITY GATE.
+    # Dati, ang paper_eligible ay `True` para sa LAHAT maliban sa leveraged/inverse
+    # ETF veto — walang anumang setup-quality bar. Sukat sa prod (08-04): 610
+    # distinct eligible symbols sa 24h, 117 lang ang live-eligible; 493 ang
+    # paper-only, at 437 sa kanila ay may "Below Ross explosiveness floor — not a
+    # live setup". Malaki ang epekto nito dahil ang eligible band ay LOAD-BEARING
+    # na: siya ang cause #3 ng IQFeed L1 subscription resolver, at nang humati ang
+    # rail-governor sa 312 slots, inubos ng 610-na-band ang BUONG budget at
+    # 100% ng ross band (109 distinct, 29,677 eviction lines) — ang mga TUNAY na
+    # mover ng araw — ang na-evict. Pumapatay din ito ng paper->live parity:
+    # nagre-rehearse ang paper ng mga pangalang hindi naman kukunin ng live, kaya
+    # kontaminado ang expectancy stats.
+    # Ang gate ay SETUP-QUALITY lang (tingnan ang tracker sa itaas) — buhay pa rin
+    # ang deployment ladder: ang live-money COST/RISK na knock-down (spread
+    # ceiling, extreme-vol) ay nananatiling live-only, kaya nire-rehearse pa rin ng
+    # paper ang totoong setup na mahal lang para sa live. Default-ON;
+    # kill-switch CHILI_MOMENTUM_PAPER_SETUP_QUALITY_GATE_ENABLED=0 => byte-identical.
+    _final_paper_eligible = paper_eligible and not (
+        _setup_quality_veto is not None
+        and bool(getattr(settings, "chili_momentum_paper_setup_quality_gate_enabled", True))
+    )
+    if paper_eligible and not _final_paper_eligible:
+        warnings.append(f"Paper setup-quality gate: {_setup_quality_veto}")
+
     return ViabilityResult(
         symbol=symbol,
         family_id=family.family_id,
         family_version=family.version,
         viability=viability,
-        paper_eligible=paper_eligible,
+        paper_eligible=_final_paper_eligible,
         live_eligible=_final_live_eligible,
         freshness_hint="mesh_tick",
         regime_fit=regime_fit,

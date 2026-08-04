@@ -3187,6 +3187,11 @@ class Settings(BaseSettings):
         validation_alias=AliasChoices("CHILI_MOMENTUM_UNIVERSE_FLOAT_GATE_ENABLED"),
         description="User-approved default-ON float gate on the final ranked universe subset. False is the exact per-flag rollback switch; missing causal float evidence remains decision-local fail-closed.",
     )
+    chili_momentum_paper_setup_quality_gate_enabled: bool = Field(
+        default=True,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_PAPER_SETUP_QUALITY_GATE_ENABLED"),
+        description="Apply the SETUP-QUALITY vetoes (below Ross explosiveness floor, below A-setup quality floor, product not tradable, arb-flat/weak catalyst) to paper_eligible as well as live_eligible. These say 'this is not a Ross momentum setup', which is true regardless of whether the money is real; the live-money COST/RISK knock-downs (spread ceiling, extreme-vol sizing) stay live-only so the deployment ladder still rehearses genuine-but-expensive setups in paper. Measured 2026-08-04 on prod: 610 distinct eligible symbols in 24h vs 117 live-eligible, 437 of the paper-only 493 carrying the Ross-floor veto — that band is the IQFeed subscription resolver's cause #3 and it evicted 100% of the ross band (today's real movers) once the rail-governor halved capacity to 312. 0 = byte-identical to the prior fail-open behaviour.",
+    )
     chili_momentum_universe_uncapped_enabled: bool = Field(
         default=True,
         validation_alias=AliasChoices("CHILI_MOMENTUM_UNIVERSE_UNCAPPED_ENABLED"),

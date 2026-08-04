@@ -104,6 +104,7 @@ _BOOLEAN_SETTING_FIELDS = frozenset(
         "chili_momentum_thick_tape_veto_enabled",
         "chili_momentum_nonmonotonic_volume_enabled",
         "chili_momentum_explosive_prequal_floor_enabled",
+        "chili_momentum_paper_setup_quality_gate_enabled",
     }
 )
 _NUMERIC_SETTING_FIELDS = frozenset(ViabilitySettingsProjection.__dataclass_fields__) - (
