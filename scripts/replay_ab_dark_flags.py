@@ -435,6 +435,19 @@ GOLDEN = True
 SRC_TICKS = "replay_golden_ticks"
 SRC_NBBO = "replay_golden_nbbo"
 
+# NBBO-STARVATION FALLBACK (2026-08-04, L10/HYFM): kapag ang na-capture na NBBO ay
+# starved (HYFM 08-03: 173 quotes sa 2h45m — subscribe-hint starvation bago ang L9
+# C1), ang quote-driven decision grid ay bumabagsak sa ~minutong cadence at ang
+# trail/exit machinery ay hindi makaandar — ang resulta ay artifact ng grid, hindi
+# ng strategy. Ang tick rows ay may embedded bid/ask (100% sa HYFM), kaya kapag ang
+# mean quote spacing ay lampas sa base na ito, ang quote frame ay sini-synthesize
+# mula sa tick-embedded NBBO (grid + sink-tape mirror, parehong frame → self-
+# consistent ang run). ISANG documented base (walang ibang magic): 15.0s = ang 15s
+# bar cadence — ang pinakapinong structure na pinag-iisipan ng strategy; ang mas
+# bihirang quote stream ay hindi kayang magmaneho ng tapat na replay.
+NBBO_STARVATION_MAX_SPACING_S = 15.0
+_NBBO_SYNTH_FULL = None  # buong-span synth frame para sa sink-tape mirror
+
 def _required_env(name: str) -> str:
     value = str(os.environ.get(name) or "").strip()
     if not value:
@@ -495,7 +508,40 @@ def load_prod():
             "  WHERE symbol=:s AND observed_at>=:a AND observed_at<:b AND price>0"
             ") q WHERE mod(rn, :st) = 0 ORDER BY observed_at ASC"),
             c, params={"s": SYMBOL, "a": OHLCV_START, "b": WIN_END, "st": stride})
-    return nbbo, ticks
+    return _nbbo_starvation_fallback(nbbo, ticks), ticks
+
+
+def _nbbo_starvation_fallback(nbbo, ticks):
+    """Kapag starved ang captured NBBO, i-synthesize ang quote frame mula sa
+    tick-embedded bid/ask (tingnan ang NBBO_STARVATION_MAX_SPACING_S sa itaas).
+    Fail-toward-existing: kapag walang usable embedded quotes, ibalik ang nbbo
+    as-is. Ang buong-span frame ay itinatago sa _NBBO_SYNTH_FULL para ang sink-
+    tape mirror ay gumamit ng PAREHONG frame (self-consistent na run)."""
+    global _NBBO_SYNTH_FULL
+    win_seconds = max(1.0, (WIN_END - WIN_START).total_seconds())
+    mean_spacing = win_seconds / max(1, len(nbbo))
+    if mean_spacing <= NBBO_STARVATION_MAX_SPACING_S:
+        return nbbo
+    q = ticks[(ticks["bid"] > 0) & (ticks["ask"] >= ticks["bid"])].copy()
+    if q.empty or len(q) <= len(nbbo):
+        return nbbo
+    q["mid"] = (q["bid"].astype(float) + q["ask"].astype(float)) / 2.0
+    q["spread_bps"] = (
+        (q["ask"].astype(float) - q["bid"].astype(float)) / q["mid"] * 10000.0
+    )
+    q["day_volume"] = q["size"].astype(float).cumsum()
+    full = q[["observed_at", "bid", "ask", "mid", "spread_bps", "day_volume"]]
+    _NBBO_SYNTH_FULL = full
+    win_start_cmp = pd.Timestamp(_naive(WIN_START))
+    ts_naive = pd.to_datetime(full["observed_at"]).map(_naive)
+    synth = full[ts_naive >= win_start_cmp].reset_index(drop=True)
+    print(
+        f"[nbbo_starvation_fallback] nbbo_rows={len(nbbo)} "
+        f"mean_spacing={mean_spacing:.1f}s > {NBBO_STARVATION_MAX_SPACING_S}s — "
+        f"synthesized {len(synth)} quote rows (grid) / {len(full)} (mirror) "
+        f"from tick-embedded bid/ask"
+    )
+    return synth
 
 
 def build_grid(nbbo):
@@ -542,6 +588,25 @@ def mirror_nbbo_streaming(sim_engine):
     empty tape → escalation re-entries blocked → JEM +$15,034 → −$5,419 with NO code change
     (misattributed to two feature A/Bs). Bounded DELETE (symbol) + streaming re-mirror from
     prod per run makes the replay self-contained and immune to sink-table drift."""
+    if _NBBO_SYNTH_FULL is not None:
+        # Starvation fallback aktibo: ang sink tape ay kailangang PAREHONG frame
+        # ng grid (self-consistent) — hindi ang starved na prod rows.
+        dst = sim_engine.raw_connection()
+        dcur = dst.cursor()
+        dcur.execute("DELETE FROM momentum_nbbo_spread_tape WHERE symbol=%s", (SYMBOL,))
+        ins = ("INSERT INTO momentum_nbbo_spread_tape "
+               "(symbol, observed_at, bid, ask, mid, spread_bps, day_volume, source) "
+               "VALUES (%s,%s,%s,%s,%s,%s,%s,%s)")
+        rows = [
+            (SYMBOL, r.observed_at, float(r.bid), float(r.ask), float(r.mid),
+             float(r.spread_bps), float(r.day_volume), "tick_synth_fallback")
+            for r in _NBBO_SYNTH_FULL.itertuples(index=False)
+        ]
+        for i in range(0, len(rows), 10000):
+            dcur.executemany(ins, rows[i:i + 10000])
+        dst.commit()
+        dcur.close(); dst.close()
+        return len(rows)
     import psycopg2
     src = psycopg2.connect(PROD)
     src.set_session(readonly=True, isolation_level="REPEATABLE READ")
