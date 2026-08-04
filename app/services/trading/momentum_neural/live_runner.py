@@ -16844,13 +16844,50 @@ def _resolve_scale_grid(pos: dict[str, Any], symbol: str | None) -> list[list[fl
     return [list(x) for x in pos["scale_grid"]]
 
 
-def _scale_grid_active(pos: dict[str, Any], symbol: str | None) -> bool:
-    """True iff a multi-level grid is in force AND has un-fired rungs remaining."""
+def _scale_grid_active(
+    pos: dict[str, Any], symbol: str | None, *, le: dict[str, Any] | None = None
+) -> bool:
+    """True iff a multi-level grid is in force AND has un-fired rungs remaining.
+
+    L10c (2026-08-04) — SHAPE GATE. Ang L10b proof (4 windows) ay nagpakita na ang
+    ladder ay kondisyonal sa hugis ng galaw: HYFM (34s vertical) +0.22 -> +24.46,
+    pero JLHL (halt-stairs) +23.63 -> +12.67. Kaya ang ladder ay pinapayagan LANG
+    habang VERTICAL ang leg (bata + hindi halt-lit); sa stairs/grind ay bumabalik
+    sa single scale-out. Ang gate ay tinatasa sa BAWAT rung — ang isang posisyong
+    nagsimulang vertical at naging grind ay titigil sa pagbabangko sa puntong iyon,
+    na siyang tamang kilos: nabangko na ang spike, hinahayaan ang natitira sa
+    hakbang-hakbang na akyat. Walang `le` (o flag OFF) => dating ugali.
+    """
     grid = _resolve_scale_grid(pos, symbol)
     if len(grid) < 2:  # 0/1 rung => no ladder; the single scale-out path handles it
         return False
     idx = int(pos.get("scale_grid_idx") or 0)
-    return idx < len(grid)
+    if idx >= len(grid):
+        return False
+    if le is not None and bool(
+        getattr(settings, "chili_momentum_scale_grid_vertical_only_enabled", True)
+    ):
+        try:
+            from .paper_execution import vertical_leg_shape
+
+            _age = None
+            _opened = _parse_dt(pos.get("opened_at_utc"))
+            if _opened is not None:
+                _o = _opened if _opened.tzinfo is not None else _opened.replace(
+                    tzinfo=timezone.utc
+                )
+                _age = (_utcnow_aware() - _o).total_seconds()
+            _is_vert, _shape = vertical_leg_shape(
+                leg_age_seconds=_age,
+                halt_lit=bool(le.get("suspected_halt_since_utc")),
+            )
+            if not _is_vert:
+                return False
+        except Exception:
+            # Fail-toward-EXISTING: anumang error => ang ladder ang magpapasya
+            # gaya ng dati (walang bagong pagkabigo mula sa gate na ito).
+            pass
+    return True
 
 
 def _scale_out_grid_step(
@@ -33260,7 +33297,7 @@ def tick_live_session(
                     # bank the partial, move the balance to breakeven, hold the runner.
                     # E(1): route through the grid step when a multi-level ladder is in
                     # force (advances the rung); else the single scale-out (byte-identical).
-                    _step = _scale_out_grid_step if _scale_grid_active(pos, sess.symbol) else _scale_out_to_runner
+                    _step = _scale_out_grid_step if _scale_grid_active(pos, sess.symbol, le=le) else _scale_out_to_runner
                     _step(
                         db,
                         sess,
@@ -33291,7 +33328,7 @@ def tick_live_session(
                     else float(poll["filled_size"])
                 )
                 if is_scale_out:
-                    _step = _scale_out_grid_step if _scale_grid_active(pos, sess.symbol) else _scale_out_to_runner
+                    _step = _scale_out_grid_step if _scale_grid_active(pos, sess.symbol, le=le) else _scale_out_to_runner
                     _step(
                         db,
                         sess,
@@ -39251,7 +39288,7 @@ def tick_live_session(
                     # E(1): a resting-limit fill advances the grid rung when a ladder is
                     # in force (the reactive market path takes the later rungs); else it
                     # finishes the single scale-out to the runner (byte-identical).
-                    _step = _scale_out_grid_step if _scale_grid_active(pos, sess.symbol) else _scale_out_to_runner
+                    _step = _scale_out_grid_step if _scale_grid_active(pos, sess.symbol, le=le) else _scale_out_to_runner
                     _step(
                         db, sess, le=le, filled_quantity=_new_qty,
                         entry_price=avg, fill_price=_px_f, reason="scale_out_limit",
@@ -39325,7 +39362,7 @@ def tick_live_session(
             try:
                 if pos.get("scale_grid_anchor_stop") is None and not pos.get("partial_taken"):
                     pos["scale_grid_anchor_stop"] = float(pos.get("stop_price") or 0.0)
-                _grid_active = _scale_grid_active(pos, sess.symbol)
+                _grid_active = _scale_grid_active(pos, sess.symbol, le=le)
             except Exception:
                 _grid_active = False
             if _grid_active:

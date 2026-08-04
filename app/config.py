@@ -6463,6 +6463,11 @@ class Settings(BaseSettings):
         validation_alias=AliasChoices("CHILI_MOMENTUM_SCALE_GRID_ENABLED"),
         description="Multi-level scale-out grid (E1) — the price-structure partials: ladder targets are R-multiples, PULLED IN to a round/half-dollar level when one sits below the next R (Ross sells into where sellers stack). Default flipped False->True on 2026-08-04 as a REPLAY/PRODUCTION PARITY CORRECTION, not a behaviour change: production has been running it ON via CHILI_MOMENTUM_SCALE_GRID_ENABLED=1 while the code default said False, so every sealed replay measured a DIFFERENT exit configuration (single first-scale) than the lane actually runs. A feature that is live in production but off in code is exactly the dark flag the project forbids. false = single first-scale then trail (the pre-2026-08-04 replay behaviour).",
     )
+    chili_momentum_scale_grid_vertical_only_enabled: bool = Field(
+        default=True,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_SCALE_GRID_VERTICAL_ONLY_ENABLED"),
+        description="L10c — allow the multi-level scale ladder ONLY while the leg is VERTICAL (younger than the shared VERTICAL_LEG_MAX_SECONDS window and not halt-lit); on halt-stairs / grind legs fall back to the single scale-out. Measured 2026-08-04 on 4 golden windows: the ladder is conditional on move SHAPE, not good-or-bad — HYFM (34s single-bar vertical) +0.22 -> +24.46 because tranches bank into the spike where round-number liquidity sits, but JLHL (halt-stairs, 83% of hold inside halt) +23.63 -> +12.67 because the same partials cut the tail of a step-wise climb. Re-evaluated at every rung, so a position that starts vertical and turns into a grind simply stops banking. 0 = ladder runs on every shape (the 2026-08-04 pre-L10c behaviour).",
+    )
     chili_momentum_scale_grid_fractions: str = Field(
         default="0.5,0.25",
         validation_alias=AliasChoices("CHILI_MOMENTUM_SCALE_GRID_FRACTIONS"),
