@@ -444,17 +444,23 @@ def test_typed_and_serialized_paths_are_identical_and_lossless() -> None:
     assert typed.observation.explain_json["policy_parity"]["policy_parity"] is True
     # Frozen policy/canonicalization oracle.  Any intentional schema or economic
     # change must update all four roots together after deep review.
+    # ROTATED 2026-08-04 (L11 paper setup-quality gate): ang
+    # ViabilitySettingsProjection ay may bagong field
+    # `chili_momentum_paper_setup_quality_gate_enabled`, kaya nagbago ang apat na
+    # canonicalization root. SCHEMA rotation lang ito — hindi economic: ang
+    # scorer_output.paper_eligible ng fixture na ito ay True PA RIN (ang knock-down
+    # dito ay LIVE-MONEY COST, hindi setup-quality), kaya walang nabagong desisyon.
     assert bundle.bundle_sha256 == (
-        "821a75443fbcb2e46e69177e88e5cc62da982733c2b7e66ea6eb293aded80367"
+        "17d07c3cfe261ed3e1763e6ce296ee76ecbe20f8a70a3c6e770bfa6399ba265d"
     )
     assert authority.authority_sha256 == (
-        "9f7220dbe3bc9c14cdb4cb62fa84629c293fccb20c58d3d5601126fead0ce4f8"
+        "f8058470e8ab250c6d94a7c62840012bca66c7feb0099c92b4cd0c50068661f9"
     )
     assert bundle.dependency_inventory.inventory_sha256 == (
-        "ff9d915bb4e0b0ae7b37b0c0eb3a0a407f88c957c57ed1aebd85e33c2846e35e"
+        "27bee44e50233e6b573810c15e2e0357796b8db9ec177e9253d28af98551abd9"
     )
     assert typed.observation.observation_sha256 == (
-        "45a60964ef81a2fbc79f9fc21477bdf9d3bdce15facc05769ccba188c3c0feda"
+        "58064367b9e003e2a078c059ce038dd6a097e6ba432fc5b205e401c678a3239a"
     )
 
 
