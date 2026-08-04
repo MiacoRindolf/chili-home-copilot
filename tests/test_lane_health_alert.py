@@ -28,6 +28,10 @@ from app.services.trading.batch_job_constants import (
 from app.services.trading.momentum_neural import lane_health as lh
 
 
+_PAPER_ACCOUNT_ID = "3e0776af-76cd-4afd-8fe1-f2ee8dc6242f"
+_PAPER_RUNTIME_GENERATION = "64fb7911-1a67-4e2c-a1ca-73cbe6efe5c6"
+
+
 @pytest.fixture(autouse=True)
 def _reset(monkeypatch):
     """Clean governance + lane_health module state; in-process kill switch authoritative
@@ -158,6 +162,10 @@ def _live_loop_heartbeat(
     generation: int = 1,
     generation_started_age_seconds: float | None = None,
     malformed_meta: bool = False,
+    captured_paper: bool = False,
+    expected_account_id: str = _PAPER_ACCOUNT_ID,
+    runtime_generation: str = _PAPER_RUNTIME_GENERATION,
+    tamper_content: bool = False,
 ) -> None:
     now = datetime.utcnow()
     heartbeat_at = now - timedelta(seconds=age_seconds)
@@ -187,6 +195,31 @@ def _live_loop_heartbeat(
             generation_started_at.isoformat().replace("+00:00", "Z")
         ),
     }
+    if captured_paper:
+        meta.update(
+            {
+                "schema": lh.LIVE_LOOP_HEARTBEAT_SCHEMA_V2,
+                "account_scope": "alpaca:paper",
+                "expected_account_id": expected_account_id,
+                "runtime_generation": runtime_generation,
+                "execution_family": "alpaca_spot",
+                "live_cash_authorized": False,
+                "row_started_at_utc": (
+                    (heartbeat_at - timedelta(seconds=1))
+                    .replace(tzinfo=timezone.utc)
+                    .isoformat()
+                    .replace("+00:00", "Z")
+                ),
+                "heartbeat_at_utc": (
+                    heartbeat_at.replace(tzinfo=timezone.utc)
+                    .isoformat()
+                    .replace("+00:00", "Z")
+                ),
+            }
+        )
+        meta["content_sha256"] = lh._heartbeat_content_sha256(meta)
+        if tamper_content:
+            meta["runtime_generation"] = str(uuid.uuid4())
     if malformed_meta:
         meta.pop("generation_identity")
     db.add(BrainBatchJob(
@@ -279,6 +312,113 @@ def test_live_loop_owner_writes_completed_durable_heartbeat(db):
             generation_started_at.isoformat().replace("+00:00", "Z")
         ),
     }
+
+
+def test_live_loop_owner_writes_hash_bound_captured_paper_heartbeat(db):
+    owner_instance_id = str(uuid.uuid4())
+    generation_started_at = datetime.now(timezone.utc) - timedelta(seconds=5)
+    job_id = lh.record_live_runner_loop_run(
+        db,
+        owner_instance_id=owner_instance_id,
+        generation=7,
+        generation_started_at=generation_started_at,
+        account_scope="alpaca:paper",
+        expected_account_id=_PAPER_ACCOUNT_ID,
+        runtime_generation=_PAPER_RUNTIME_GENERATION,
+        execution_family="alpaca_spot",
+        live_cash_authorized=False,
+    )
+    db.commit()
+
+    row = db.query(BrainBatchJob).filter(BrainBatchJob.id == job_id).one()
+    assert row.meta_json["schema"] == lh.LIVE_LOOP_HEARTBEAT_SCHEMA_V2
+    assert row.meta_json["account_scope"] == "alpaca:paper"
+    assert row.meta_json["expected_account_id"] == _PAPER_ACCOUNT_ID
+    assert row.meta_json["runtime_generation"] == _PAPER_RUNTIME_GENERATION
+    assert row.meta_json["execution_family"] == "alpaca_spot"
+    assert row.meta_json["live_cash_authorized"] is False
+    assert row.meta_json["content_sha256"] == lh._heartbeat_content_sha256(
+        row.meta_json
+    )
+    truth = lh.captured_paper_live_runner_control_health(
+        db,
+        expected_account_id=_PAPER_ACCOUNT_ID,
+    )
+    assert truth["ok"] is True
+    assert truth["captured_paper"] is True
+
+
+def test_captured_paper_heartbeat_identity_must_be_atomic_and_exact(db):
+    base = {
+        "owner_instance_id": str(uuid.uuid4()),
+        "generation": 1,
+        "generation_started_at": datetime.now(timezone.utc),
+    }
+    with pytest.raises(ValueError, match="supplied atomically"):
+        lh.record_live_runner_loop_run(
+            db,
+            **base,
+            account_scope="alpaca:paper",
+        )
+    with pytest.raises(ValueError, match="not exact"):
+        lh.record_live_runner_loop_run(
+            db,
+            **base,
+            account_scope="alpaca:paper",
+            expected_account_id=_PAPER_ACCOUNT_ID,
+            runtime_generation=_PAPER_RUNTIME_GENERATION,
+            execution_family="alpaca_spot",
+            live_cash_authorized=True,
+        )
+
+
+@pytest.mark.parametrize(
+    ("case", "expected_reason"),
+    (
+        ("generic", "captured_paper_heartbeat_generic"),
+        ("stale", "live_runner_loop_heartbeat_stale"),
+        ("tampered", "live_runner_loop_heartbeat_latest_malformed"),
+        ("overlap", "live_runner_loop_owner_overlap"),
+    ),
+)
+def test_non_exact_heartbeat_never_proves_captured_paper_active(
+    db,
+    case,
+    expected_reason,
+):
+    if case == "generic":
+        _live_loop_heartbeat(db, age_seconds=2)
+    elif case == "stale":
+        _live_loop_heartbeat(db, age_seconds=600, captured_paper=True)
+    elif case == "tampered":
+        _live_loop_heartbeat(
+            db,
+            age_seconds=2,
+            captured_paper=True,
+            tamper_content=True,
+        )
+    else:
+        _live_loop_heartbeat(
+            db,
+            age_seconds=10,
+            captured_paper=True,
+            owner_instance_id=str(uuid.uuid4()),
+            generation_started_age_seconds=120,
+        )
+        _live_loop_heartbeat(
+            db,
+            age_seconds=2,
+            captured_paper=True,
+            owner_instance_id=str(uuid.uuid4()),
+            generation_started_age_seconds=30,
+        )
+
+    truth = lh.captured_paper_live_runner_control_health(
+        db,
+        expected_account_id=_PAPER_ACCOUNT_ID,
+    )
+    assert truth["ok"] is False
+    assert truth["reason"] == expected_reason
 
 
 def test_live_loop_heartbeat_rejects_missing_completed_row(db, monkeypatch):

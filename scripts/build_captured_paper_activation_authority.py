@@ -64,6 +64,7 @@ _CHAIN_KEYS = frozenset(
         "bootstrap_stage0_script_sha256",
         "host_principal_user_id",
         "bridge_configuration",
+        "static_proof_cache",
     }
 )
 _REQUEST_KEYS = frozenset(
@@ -1166,6 +1167,8 @@ def build_captured_paper_activation_authority(
     expected_account_id: str,
     test_database_name: str,
     bridge_configuration: Mapping[str, Any],
+    static_proof_cache_path: str | Path | None = None,
+    static_proof_cache_sha256: str | None = None,
     timeouts: Mapping[str, int] | None = None,
 ) -> BuiltCapturedPaperActivationAuthority:
     """Create the exact inner and outer PAPER authority envelopes.
@@ -1184,6 +1187,35 @@ def build_captured_paper_activation_authority(
     benchmark = _canonical_file(
         resource_benchmark_path, field="resource_benchmark_path"
     )
+    cache_path: Path | None = None
+    cache_expected_sha256: str | None = None
+    cache_scope_root: Path | None = None
+    if static_proof_cache_path is not None or static_proof_cache_sha256 is not None:
+        if static_proof_cache_path is None or static_proof_cache_sha256 is None:
+            raise CapturedPaperActivationAuthorityError(
+                "STATIC_CACHE_REFERENCE_INVALID",
+                "static proof cache path and SHA-256 are inseparable",
+            )
+        cache_expected_sha256 = str(static_proof_cache_sha256 or "").lower()
+        if _SHA256_RE.fullmatch(cache_expected_sha256) is None:
+            raise CapturedPaperActivationAuthorityError(
+                "STATIC_CACHE_REFERENCE_INVALID",
+                "static proof cache SHA-256 is malformed",
+            )
+        cache_path = _canonical_file(
+            static_proof_cache_path,
+            field="static_proof_cache_path",
+        )
+        if (
+            cache_path.name != f"{cache_expected_sha256}.json"
+            or cache_path.parent.name != cache_expected_sha256[:2]
+            or cache_path.parent.parent.name != "static-proof-cache"
+        ):
+            raise CapturedPaperActivationAuthorityError(
+                "STATIC_CACHE_REFERENCE_INVALID",
+                "static proof cache is not stored at its content address",
+            )
+        cache_scope_root = cache_path.parent.parent.parent
     _reject_security_domain_overlaps(
         {
             "candidate_root": candidate,
@@ -1195,6 +1227,7 @@ def build_captured_paper_activation_authority(
     for field, input_path in (
         ("runtime_env_path", runtime),
         ("resource_benchmark_path", benchmark),
+        *((("static_proof_cache_path", cache_path),) if cache_path else ()),
     ):
         if _inside(input_path, artifact):
             raise CapturedPaperActivationAuthorityError(
@@ -1251,6 +1284,18 @@ def build_captured_paper_activation_authority(
             max_bytes=_MAX_BENCHMARK_BYTES,
         ),
     }
+    if cache_path is not None:
+        cache_pin = _pin_file(
+            cache_path,
+            field="static_proof_cache_path",
+            max_bytes=_MAX_RUNTIME_ENV_BYTES,
+        )
+        if cache_pin.sha256 != cache_expected_sha256:
+            raise CapturedPaperActivationAuthorityError(
+                "STATIC_CACHE_HASH_MISMATCH",
+                "static proof cache differs from its explicit SHA-256",
+            )
+        pins["static_proof_cache"] = cache_pin
     for field, path in executables.items():
         pins[field] = _pin_file(path, field=field, max_bytes=_MAX_EXECUTABLE_BYTES)
     entrypoints: dict[str, _PinnedFile] = {}
@@ -1272,6 +1317,26 @@ def build_captured_paper_activation_authority(
         dependency_root=dependency,
         python_pin=pins["python_executable"],
     )
+    if cache_path is not None:
+        cache_raw = _read_pinned_bytes(
+            pins["static_proof_cache"],
+            field="static_proof_cache_path",
+        )
+        cache_document = _strict_json(cache_raw, field="static_proof_cache")
+        if _canonical_json_bytes(cache_document) != cache_raw or not (
+            cache_document.get("schema_version")
+            == "chili.captured-paper-static-proof-cache.v1"
+            and cache_document.get("python_dependency_root_identity_sha256")
+            == dependency_identity_sha256
+            and cache_document.get("account_scope") == ACCOUNT_SCOPE
+            and cache_document.get("expected_account_id") == canonical_account_id
+            and cache_document.get("live_cash_authorized") is False
+            and cache_document.get("orders_submitted") is False
+        ):
+            raise CapturedPaperActivationAuthorityError(
+                "STATIC_CACHE_BINDING_MISMATCH",
+                "static proof cache escaped dependency/PAPER authority",
+            )
 
     roots = _minimal_allowed_roots(
         (
@@ -1281,6 +1346,7 @@ def build_captured_paper_activation_authority(
             dependency,
             runtime.parent,
             benchmark.parent,
+            *((cache_scope_root,) if cache_scope_root is not None else ()),
             *(path.parent for path in executables.values()),
         )
     )
@@ -1301,6 +1367,14 @@ def build_captured_paper_activation_authority(
         ].sha256,
         "host_principal_user_id": principal,
         "bridge_configuration": safe_bridge_configuration,
+        "static_proof_cache": (
+            {
+                "path": str(cache_path),
+                "sha256": str(cache_expected_sha256),
+            }
+            if cache_path is not None
+            else None
+        ),
     }
     if set(chain_document) != set(_CHAIN_KEYS):
         raise CapturedPaperActivationAuthorityError(
@@ -1426,6 +1500,7 @@ def build_captured_paper_activation_authority(
         "python_dependency_root_identity_sha256": dependency_identity_sha256,
         "runtime_env_sha256": pins["runtime_env"].sha256,
         "resource_benchmark_sha256": pins["resource_benchmark"].sha256,
+        "static_proof_cache": chain_document["static_proof_cache"],
         "validate_only_argv": list(validate_argv),
         "activate_paper_argv": list(activate_argv),
         "argv_is_shell_string": False,
@@ -1464,6 +1539,8 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--test-database-name", required=True)
     parser.add_argument("--bridge-configuration", required=True)
     parser.add_argument("--bridge-configuration-sha256", required=True)
+    parser.add_argument("--static-proof-cache")
+    parser.add_argument("--static-proof-cache-sha256")
     return parser
 
 
@@ -1501,6 +1578,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             expected_account_id=arguments.expected_account_id,
             test_database_name=arguments.test_database_name,
             bridge_configuration=bridge,
+            static_proof_cache_path=arguments.static_proof_cache,
+            static_proof_cache_sha256=arguments.static_proof_cache_sha256,
         )
         _recheck_pin(bridge_pin, field="bridge_configuration_path")
     except CapturedPaperActivationAuthorityError as exc:

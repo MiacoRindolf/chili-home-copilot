@@ -906,6 +906,47 @@ def test_store_rejects_same_count_gap_replacement_after_external_removal(
     assert store.resource_health()["fail_closed"] is True
 
 
+def test_writer_health_does_not_rescan_the_capture_store_hot_path(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    store = ContentAddressedCaptureStore(
+        tmp_path / "capture", compression_codec="zlib"
+    )
+    ingress = BoundedCaptureIngress(
+        max_events=10, max_bytes=500_000, max_gap_keys=8
+    )
+    worker = CaptureWriterWorker(
+        ingress=ingress,
+        store=store,
+        batch_events=20,
+        batch_bytes=500_000,
+        poll_seconds=0.001,
+    )
+    scans = 0
+    original = store._root_file_bytes
+
+    def counted_root_file_bytes() -> int:
+        nonlocal scans
+        scans += 1
+        return original()
+
+    monkeypatch.setattr(store, "_root_file_bytes", counted_root_file_bytes)
+
+    for _ in range(25):
+        health = worker.progress_health()
+        assert health["last_error"] is None
+
+    # Selection's durable-frontier wait polls writer health every 10ms.  That
+    # observation must remain O(1); the explicit store audit below retains the
+    # fail-closed filesystem verification boundary.
+    assert scans == 0
+    audited = worker.health()["resource"]
+    assert scans == 1
+    assert audited["filesystem_audited"] is True
+    assert audited["fail_closed"] is False
+
+
 def test_valid_seal_finalizes_ingress_and_rejects_late_submission(tmp_path) -> None:
     store = ContentAddressedCaptureStore(
         tmp_path / "capture", compression_codec="zlib"

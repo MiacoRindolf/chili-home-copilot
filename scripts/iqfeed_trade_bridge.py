@@ -129,6 +129,35 @@ DB_URL = os.environ.get("DATABASE_URL", "postgresql://chili:chili@localhost:5433
 # One latest quote row per symbol per flush bounds tape growth while still keeping
 # the execution-age contract below two seconds. Operators can lower this explicitly.
 FLUSH_INTERVAL_S = float(os.environ.get("IQFEED_TRADE_FLUSH_INTERVAL_S", "1.0") or 1.0)
+try:
+    DB_RELEASE_BATCH_EVENTS = int(
+        os.environ.get("IQFEED_DB_RELEASE_BATCH_EVENTS", "256") or 256
+    )
+except (TypeError, ValueError) as exc:
+    raise RuntimeError("IQFEED_DB_RELEASE_BATCH_EVENTS must be a positive integer") from exc
+if DB_RELEASE_BATCH_EVENTS <= 0:
+    raise RuntimeError("IQFEED_DB_RELEASE_BATCH_EVENTS must be a positive integer")
+try:
+    DB_RELEASE_CATCHUP_BATCH_EVENTS = int(
+        os.environ.get("IQFEED_DB_RELEASE_CATCHUP_BATCH_EVENTS", "2048") or 2048
+    )
+except (TypeError, ValueError) as exc:
+    raise RuntimeError(
+        "IQFEED_DB_RELEASE_CATCHUP_BATCH_EVENTS must be a positive integer"
+    ) from exc
+if DB_RELEASE_CATCHUP_BATCH_EVENTS < DB_RELEASE_BATCH_EVENTS:
+    raise RuntimeError(
+        "IQFEED_DB_RELEASE_CATCHUP_BATCH_EVENTS must not be below "
+        "IQFEED_DB_RELEASE_BATCH_EVENTS"
+    )
+# The widest vectorized VALUES statement has 18 bind parameters per event.
+# Stay below PostgreSQL's 65,535 bind-parameter ceiling even when a catch-up
+# batch contains only that wider row type.
+if DB_RELEASE_CATCHUP_BATCH_EVENTS * 18 >= 65_535:
+    raise RuntimeError(
+        "IQFEED_DB_RELEASE_CATCHUP_BATCH_EVENTS exceeds the safe PostgreSQL "
+        "bind-parameter budget"
+    )
 REFRESH_S = 20.0                         # execution-session symbol refresh cadence
 STALE_NBBO_RECONNECT_S = float(
     os.environ.get("IQFEED_STALE_NBBO_RECONNECT_SECONDS", "45") or 45
@@ -299,6 +328,8 @@ BRIDGE_CAPTURE_CONFIGURATION = {
     "host": HOST,
     "port": PORT,
     "flush_interval_seconds": FLUSH_INTERVAL_S,
+    "db_release_batch_events": DB_RELEASE_BATCH_EVENTS,
+    "db_release_catchup_batch_events": DB_RELEASE_CATCHUP_BATCH_EVENTS,
     "authoritative_max_age_seconds": AUTHORITATIVE_MAX_AGE_S,
     "authoritative_future_tolerance_seconds": AUTHORITATIVE_FUTURE_TOLERANCE_S,
     "authoritative_timestamp_basis": AUTHORITATIVE_TIMESTAMP_BASIS,
@@ -359,6 +390,49 @@ MARK_NBBO_AVAILABLE = sa.text(
     "AND provider_trade_reference_at IS NOT DISTINCT FROM "
     ":provider_trade_reference_at AND message_type = :message_type "
     "AND available_at IS NULL"
+)
+
+_TRADE_WRITE_TABLE = sa.table(
+    "iqfeed_trade_ticks",
+    sa.column("symbol", sa.String(16)),
+    sa.column("observed_at", sa.DateTime(timezone=False)),
+    sa.column("price", sa.Float()),
+    sa.column("size", sa.Float()),
+    sa.column("bid", sa.Float()),
+    sa.column("ask", sa.Float()),
+    sa.column("provider_event_at", sa.DateTime(timezone=True)),
+    sa.column("received_at", sa.DateTime(timezone=True)),
+    sa.column("timestamp_basis", sa.String(48)),
+    sa.column("bridge_version", sa.String(96)),
+    sa.column("provider_trade_reference_at", sa.DateTime(timezone=True)),
+    sa.column("message_type", sa.String(1)),
+    sa.column("bridge_run_id", sa.String(36)),
+    sa.column("connection_generation", sa.BigInteger()),
+    sa.column("source_frame_sequence", sa.BigInteger()),
+    sa.column("source_frame_sha256", sa.String(64)),
+    sa.column("available_at", sa.DateTime(timezone=True)),
+)
+_NBBO_WRITE_TABLE = sa.table(
+    "momentum_nbbo_spread_tape",
+    sa.column("symbol", sa.String(32)),
+    sa.column("observed_at", sa.DateTime(timezone=True)),
+    sa.column("bid", sa.Float()),
+    sa.column("ask", sa.Float()),
+    sa.column("mid", sa.Float()),
+    sa.column("spread_bps", sa.Float()),
+    sa.column("day_volume", sa.Float()),
+    sa.column("source", sa.String(24)),
+    sa.column("provider_event_at", sa.DateTime(timezone=True)),
+    sa.column("received_at", sa.DateTime(timezone=True)),
+    sa.column("timestamp_basis", sa.String(48)),
+    sa.column("bridge_version", sa.String(96)),
+    sa.column("provider_trade_reference_at", sa.DateTime(timezone=True)),
+    sa.column("message_type", sa.String(1)),
+    sa.column("bridge_run_id", sa.String(36)),
+    sa.column("connection_generation", sa.BigInteger()),
+    sa.column("source_frame_sequence", sa.BigInteger()),
+    sa.column("source_frame_sha256", sa.String(64)),
+    sa.column("available_at", sa.DateTime(timezone=True)),
 )
 
 IQFEED_SCHEMA_OWNER_MIGRATION_ID = "334_iqfeed_host_bridge_schema_ownership"
@@ -497,6 +571,455 @@ def _availability_params(row: dict, *, available_at: datetime) -> dict:
         "provider_trade_reference_at": row.get("provider_trade_reference_at"),
         "message_type": str(row.get("message_type") or ""),
     }
+
+
+def _require_batch_rowcount(result: Any, expected: int, *, operation: str) -> None:
+    rowcount = getattr(result, "rowcount", -1)
+    if rowcount not in (-1, expected):
+        raise RuntimeError(
+            f"IQFeed {operation} row-count mismatch: "
+            f"expected={expected} affected={rowcount}"
+        )
+
+
+def _insert_pending_batch(
+    connection: Any,
+    *,
+    trade_rows: list[dict],
+    quote_rows: list[dict],
+) -> None:
+    """Persist one bounded batch with at most one statement per tape.
+
+    SQLAlchemy ``VALUES`` produces one PostgreSQL INSERT ... SELECT statement,
+    rather than the driver's row-scaled executemany path.  The writer's outer
+    transaction remains the sole commit boundary.
+    """
+
+    if trade_rows:
+        incoming = sa.values(
+            sa.column("symbol", sa.String(16)),
+            sa.column("observed_at", sa.DateTime(timezone=False)),
+            sa.column("price", sa.Float()),
+            sa.column("size", sa.Float()),
+            sa.column("bid", sa.Float()),
+            sa.column("ask", sa.Float()),
+            sa.column("provider_event_at", sa.DateTime(timezone=True)),
+            sa.column("received_at", sa.DateTime(timezone=True)),
+            sa.column("timestamp_basis", sa.String(48)),
+            sa.column("bridge_version", sa.String(96)),
+            sa.column(
+                "provider_trade_reference_at",
+                sa.DateTime(timezone=True),
+            ),
+            sa.column("message_type", sa.String(1)),
+            sa.column("bridge_run_id", sa.String(36)),
+            sa.column("connection_generation", sa.BigInteger()),
+            sa.column("source_frame_sequence", sa.BigInteger()),
+            sa.column("source_frame_sha256", sa.String(64)),
+            name="incoming_trade_rows",
+        ).data(
+            [
+                (
+                    row.get("sym"),
+                    row.get("at"),
+                    row.get("px"),
+                    row.get("sz"),
+                    row.get("bid"),
+                    row.get("ask"),
+                    row.get("provider_at"),
+                    row.get("received_at"),
+                    row.get("basis"),
+                    row.get("bridge"),
+                    row.get("provider_trade_reference_at"),
+                    row.get("message_type"),
+                    row.get("bridge_run_id"),
+                    row.get("connection_generation"),
+                    row.get("source_frame_sequence"),
+                    row.get("source_frame_sha256"),
+                )
+                for row in trade_rows
+            ]
+        )
+        columns = (
+            "symbol",
+            "observed_at",
+            "price",
+            "size",
+            "bid",
+            "ask",
+            "provider_event_at",
+            "received_at",
+            "timestamp_basis",
+            "bridge_version",
+            "provider_trade_reference_at",
+            "message_type",
+            "bridge_run_id",
+            "connection_generation",
+            "source_frame_sequence",
+            "source_frame_sha256",
+        )
+        result = connection.execute(
+            sa.insert(_TRADE_WRITE_TABLE).from_select(
+                columns,
+                sa.select(
+                    *(
+                        sa.cast(
+                            incoming.c[name],
+                            _TRADE_WRITE_TABLE.c[name].type,
+                        ).label(name)
+                        for name in columns
+                    )
+                ),
+            )
+        )
+        _require_batch_rowcount(
+            result,
+            len(trade_rows),
+            operation="trade insert",
+        )
+
+    if quote_rows:
+        incoming = sa.values(
+            sa.column("symbol", sa.String(32)),
+            sa.column("observed_at", sa.DateTime(timezone=True)),
+            sa.column("bid", sa.Float()),
+            sa.column("ask", sa.Float()),
+            sa.column("mid", sa.Float()),
+            sa.column("spread_bps", sa.Float()),
+            sa.column("day_volume", sa.Float()),
+            sa.column("source", sa.String(24)),
+            sa.column("provider_event_at", sa.DateTime(timezone=True)),
+            sa.column("received_at", sa.DateTime(timezone=True)),
+            sa.column("timestamp_basis", sa.String(48)),
+            sa.column("bridge_version", sa.String(96)),
+            sa.column(
+                "provider_trade_reference_at",
+                sa.DateTime(timezone=True),
+            ),
+            sa.column("message_type", sa.String(1)),
+            sa.column("bridge_run_id", sa.String(36)),
+            sa.column("connection_generation", sa.BigInteger()),
+            sa.column("source_frame_sequence", sa.BigInteger()),
+            sa.column("source_frame_sha256", sa.String(64)),
+            name="incoming_nbbo_rows",
+        ).data(
+            [
+                (
+                    row.get("sym"),
+                    row.get("at"),
+                    row.get("bid"),
+                    row.get("ask"),
+                    row.get("mid"),
+                    row.get("spread_bps"),
+                    None,
+                    "iqfeed_l1",
+                    row.get("provider_at"),
+                    row.get("received_at"),
+                    row.get("basis"),
+                    row.get("bridge"),
+                    row.get("provider_trade_reference_at"),
+                    row.get("message_type"),
+                    row.get("bridge_run_id"),
+                    row.get("connection_generation"),
+                    row.get("source_frame_sequence"),
+                    row.get("source_frame_sha256"),
+                )
+                for row in quote_rows
+            ]
+        )
+        columns = (
+            "symbol",
+            "observed_at",
+            "bid",
+            "ask",
+            "mid",
+            "spread_bps",
+            "day_volume",
+            "source",
+            "provider_event_at",
+            "received_at",
+            "timestamp_basis",
+            "bridge_version",
+            "provider_trade_reference_at",
+            "message_type",
+            "bridge_run_id",
+            "connection_generation",
+            "source_frame_sequence",
+            "source_frame_sha256",
+        )
+        result = connection.execute(
+            sa.insert(_NBBO_WRITE_TABLE).from_select(
+                columns,
+                sa.select(
+                    *(
+                        sa.cast(
+                            incoming.c[name],
+                            _NBBO_WRITE_TABLE.c[name].type,
+                        ).label(name)
+                        for name in columns
+                    )
+                ),
+            )
+        )
+        _require_batch_rowcount(
+            result,
+            len(quote_rows),
+            operation="NBBO insert",
+        )
+
+
+def _release_values(
+    rows: list[dict],
+    *,
+    available_at: datetime,
+    name: str,
+) -> Any:
+    return sa.values(
+        sa.column("available_at", sa.DateTime(timezone=True)),
+        sa.column("bridge_run_id", sa.String(36)),
+        sa.column("connection_generation", sa.BigInteger()),
+        sa.column("source_frame_sequence", sa.BigInteger()),
+        sa.column("source_frame_sha256", sa.String(64)),
+        sa.column("symbol", sa.String(32)),
+        sa.column("received_at", sa.DateTime(timezone=True)),
+        sa.column(
+            "provider_trade_reference_at",
+            sa.DateTime(timezone=True),
+        ),
+        sa.column("message_type", sa.String(1)),
+        name=name,
+    ).data(
+        [
+            (
+                params["available_at"],
+                params["bridge_run_id"],
+                params["connection_generation"],
+                params["source_frame_sequence"],
+                params["source_frame_sha256"],
+                params["sym"],
+                params["received_at"],
+                params["provider_trade_reference_at"],
+                params["message_type"],
+            )
+            for params in (
+                _availability_params(row, available_at=available_at)
+                for row in rows
+            )
+        ]
+    )
+
+
+def _release_statement(table: Any, incoming: Any) -> Any:
+    return (
+        sa.update(table)
+        .where(
+            table.c.bridge_run_id
+            == sa.cast(incoming.c.bridge_run_id, table.c.bridge_run_id.type)
+        )
+        .where(
+            table.c.connection_generation
+            == sa.cast(
+                incoming.c.connection_generation,
+                table.c.connection_generation.type,
+            )
+        )
+        .where(
+            table.c.source_frame_sequence
+            == sa.cast(
+                incoming.c.source_frame_sequence,
+                table.c.source_frame_sequence.type,
+            )
+        )
+        .where(
+            table.c.source_frame_sha256
+            == sa.cast(
+                incoming.c.source_frame_sha256,
+                table.c.source_frame_sha256.type,
+            )
+        )
+        .where(
+            table.c.symbol
+            == sa.cast(incoming.c.symbol, table.c.symbol.type)
+        )
+        .where(
+            table.c.received_at
+            == sa.cast(incoming.c.received_at, table.c.received_at.type)
+        )
+        .where(
+            table.c.provider_trade_reference_at.is_not_distinct_from(
+                sa.cast(
+                    incoming.c.provider_trade_reference_at,
+                    table.c.provider_trade_reference_at.type,
+                )
+            )
+        )
+        .where(
+            table.c.message_type
+            == sa.cast(incoming.c.message_type, table.c.message_type.type)
+        )
+        .where(table.c.available_at.is_(None))
+        .values(
+            available_at=sa.cast(
+                incoming.c.available_at,
+                table.c.available_at.type,
+            )
+        )
+    )
+
+
+def _release_pending_batch(
+    connection: Any,
+    *,
+    trade_rows: list[dict],
+    quote_rows: list[dict],
+    available_at: datetime,
+) -> None:
+    """Release one batch and enqueue its quote notifications set-wise."""
+
+    if trade_rows:
+        incoming = _release_values(
+            trade_rows,
+            available_at=available_at,
+            name="released_trade_rows",
+        )
+        result = connection.execute(
+            _release_statement(_TRADE_WRITE_TABLE, incoming)
+        )
+        _require_batch_rowcount(
+            result,
+            len(trade_rows),
+            operation="trade release",
+        )
+
+    if quote_rows:
+        incoming = _release_values(
+            quote_rows,
+            available_at=available_at,
+            name="released_nbbo_rows",
+        )
+        result = connection.execute(
+            _release_statement(_NBBO_WRITE_TABLE, incoming)
+        )
+        _require_batch_rowcount(
+            result,
+            len(quote_rows),
+            operation="NBBO release",
+        )
+        if IQFEED_NOTIFY_ENABLED:
+            for row in quote_rows:
+                row["available_at"] = available_at
+            payload_rows = sa.values(
+                sa.column("payload", sa.Text()),
+                name="iqfeed_notify_rows",
+            ).data([(_notify_payload(row),) for row in quote_rows])
+            result = connection.execute(
+                sa.select(
+                    sa.func.pg_notify(
+                        sa.bindparam("channel"),
+                        payload_rows.c.payload,
+                    )
+                ).select_from(payload_rows),
+                {"channel": IQFEED_NOTIFY_CHANNEL},
+            )
+            _require_batch_rowcount(
+                result,
+                len(quote_rows),
+                operation="NBBO notification enqueue",
+            )
+
+
+def _pending_frame_key(row: dict) -> tuple[int, int]:
+    generation = row.get("connection_generation")
+    sequence = row.get("source_frame_sequence")
+    if (
+        isinstance(generation, bool)
+        or not isinstance(generation, int)
+        or generation <= 0
+        or isinstance(sequence, bool)
+        or not isinstance(sequence, int)
+        or sequence <= 0
+    ):
+        raise ValueError("IQFeed pending frame identity is malformed")
+    return generation, sequence
+
+
+def _drain_pending_write_batch(
+    *,
+    max_events: int = DB_RELEASE_BATCH_EVENTS,
+) -> tuple[list[dict], list[dict], bool]:
+    """Drain a bounded prefix without splitting one source frame.
+
+    Trade and quote evidence for the same frame share the exact generation and
+    sequence.  A frame may exceed the operational cap, but it is never split
+    across commit boundaries.
+    """
+
+    if (
+        isinstance(max_events, bool)
+        or not isinstance(max_events, int)
+        or max_events <= 0
+    ):
+        raise ValueError("IQFeed DB release batch size must be a positive integer")
+    with _pending_lock:
+        if not _pending and not _pending_nbbo:
+            return [], [], False
+        selected_events = 0
+        trade_index = 0
+        quote_index = 0
+
+        while trade_index < len(_pending) or quote_index < len(_pending_nbbo):
+            head_keys = []
+            if trade_index < len(_pending):
+                head_keys.append(_pending_frame_key(_pending[trade_index]))
+            if quote_index < len(_pending_nbbo):
+                head_keys.append(_pending_frame_key(_pending_nbbo[quote_index]))
+            frame_key = min(head_keys)
+            next_trade_index = trade_index
+            while (
+                next_trade_index < len(_pending)
+                and _pending_frame_key(_pending[next_trade_index]) == frame_key
+            ):
+                next_trade_index += 1
+            trade_count = next_trade_index - trade_index
+            next_quote_index = quote_index
+            while (
+                next_quote_index < len(_pending_nbbo)
+                and _pending_frame_key(_pending_nbbo[next_quote_index]) == frame_key
+            ):
+                next_quote_index += 1
+            quote_count = next_quote_index - quote_index
+            frame_events = trade_count + quote_count
+            if selected_events and selected_events + frame_events > max_events:
+                break
+            trade_index += trade_count
+            quote_index += quote_count
+            selected_events += frame_events
+            if selected_events >= max_events:
+                break
+        trade_rows = _pending[:trade_index]
+        quote_rows = _pending_nbbo[:quote_index]
+        if trade_index:
+            del _pending[:trade_index]
+        if quote_index:
+            del _pending_nbbo[:quote_index]
+        return trade_rows, quote_rows, bool(_pending or _pending_nbbo)
+
+
+def _release_batch_event_limit(*, pending_backlog: bool) -> int:
+    """Use the larger bounded batch only after a prior drain proved backlog."""
+
+    return (
+        DB_RELEASE_CATCHUP_BATCH_EVENTS
+        if pending_backlog
+        else DB_RELEASE_BATCH_EVENTS
+    )
+
+
+def _pending_write_backlog() -> bool:
+    """Observe arrivals that occurred while the prior batch was committed."""
+
+    with _pending_lock:
+        return bool(_pending or _pending_nbbo)
 
 
 def _select_nbbo_rows_for_capture(
@@ -745,6 +1268,50 @@ def _decoded_source_frame_line(source_frame_bytes: bytes) -> str | None:
     return decoded
 
 
+def _observe_protocol_ack(
+    line: str,
+    *,
+    connection_generation: int,
+) -> bool:
+    """Accept only the requested protocol on the currently active socket."""
+
+    parts = line.split(",")
+    if parts and parts[-1] == "":
+        parts = parts[:-1]
+    if parts != ["S", "CURRENT PROTOCOL", "6.2"]:
+        return False
+    with _connection_state_lock:
+        generation = int(connection_generation)
+        if _active_connection_generation != generation:
+            return False
+        _protocol_acknowledged_generations.add(generation)
+    return True
+
+
+def _protocol_acknowledged(connection_generation: int) -> bool:
+    with _connection_state_lock:
+        return int(connection_generation) in _protocol_acknowledged_generations
+
+
+def _wait_for_protocol_ack(
+    connection_generation: int,
+    stop_event: threading.Event,
+    *,
+    timeout_seconds: float = SELECTED_FIELDS_ACK_TIMEOUT_S,
+) -> bool:
+    timeout = float(timeout_seconds)
+    if not math.isfinite(timeout) or timeout <= 0:
+        return False
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if _protocol_acknowledged(connection_generation):
+            return True
+        if not _connection_generation_active(connection_generation, stop_event):
+            return False
+        time.sleep(min(0.01, max(0.0, deadline - time.monotonic())))
+    return _protocol_acknowledged(connection_generation)
+
+
 def _observe_selected_update_fields_ack(
     line: str,
     *,
@@ -970,6 +1537,7 @@ _active_connection_generation = 0
 _last_nbbo_append_monotonic: float | None = None
 _connection_generation = 0
 _frame_sequence_by_generation: dict[int, int] = {}
+_protocol_acknowledged_generations: set[int] = set()
 _selected_fields_ack_sha256_by_generation: dict[int, str] = {}
 _capture_handoff_lock = threading.Lock()
 _capture_handoff: Any | None = None
@@ -1035,6 +1603,7 @@ def _begin_connection_generation() -> int:
         _connection_generation += 1
         _active_connection_generation = _connection_generation
         _frame_sequence_by_generation[_connection_generation] = 0
+        _protocol_acknowledged_generations.discard(_connection_generation)
         _selected_fields_ack_sha256_by_generation.pop(_connection_generation, None)
         return _connection_generation
 
@@ -1044,6 +1613,7 @@ def _activate_connection_generation(connection_generation: int) -> None:
     with _connection_state_lock:
         _active_connection_generation = int(connection_generation)
         _frame_sequence_by_generation.setdefault(int(connection_generation), 0)
+        _protocol_acknowledged_generations.discard(int(connection_generation))
         _selected_fields_ack_sha256_by_generation.pop(
             int(connection_generation), None
         )
@@ -1181,6 +1751,7 @@ def _retire_connection_generation(connection_generation: int) -> None:
         if _active_connection_generation == int(connection_generation):
             _active_connection_generation = 0
         _frame_sequence_by_generation.pop(int(connection_generation), None)
+        _protocol_acknowledged_generations.discard(int(connection_generation))
         _selected_fields_ack_sha256_by_generation.pop(
             int(connection_generation), None
         )
@@ -1358,6 +1929,32 @@ def _resolve_target(
     )
 
 
+def _enqueue_pending_frame(
+    *,
+    trade_row: dict | None = None,
+    quote_row: dict | None = None,
+) -> None:
+    """Publish one parsed frame to the writer queues under one lock."""
+
+    global _last_nbbo_append_monotonic
+    if trade_row is None and quote_row is None:
+        return
+    if trade_row is not None and quote_row is not None:
+        if (
+            _pending_frame_key(trade_row) != _pending_frame_key(quote_row)
+            or trade_row.get("source_frame_sha256")
+            != quote_row.get("source_frame_sha256")
+        ):
+            raise ValueError("IQFeed frame trade/quote identity mismatch")
+    with _pending_lock:
+        if quote_row is not None:
+            _pending_nbbo.append(quote_row)
+        if trade_row is not None:
+            _pending.append(trade_row)
+    if quote_row is not None:
+        _last_nbbo_append_monotonic = time.monotonic()
+
+
 def _parse_selected_l1(
     line: str,
     *,
@@ -1369,7 +1966,13 @@ def _parse_selected_l1(
 ) -> tuple[bool, bool]:
     """Parse one provider-confirmed selected-field Q frame into an exact print."""
 
-    global _last_nbbo_append_monotonic
+    quote_row: dict | None = None
+
+    def enqueue(trade_row: dict | None = None) -> None:
+        nonlocal quote_row
+        _enqueue_pending_frame(trade_row=trade_row, quote_row=quote_row)
+        quote_row = None
+
     p = line.split(",")
     if len(p) <= max(_SELECTED_FIELD_INDEX.values()):
         return False, False
@@ -1454,28 +2057,24 @@ def _parse_selected_l1(
         if quote_captured:
             assert bid is not None and ask is not None
             mid = (bid + ask) / 2.0
-            with _pending_lock:
-                _pending_nbbo.append(
-                    {
-                        "sym": sym,
-                        "at": provider_event_at.replace(tzinfo=None),
-                        "bid": bid,
-                        "ask": ask,
-                        "mid": mid,
-                        "spread_bps": (ask - bid) / mid * 10_000.0,
-                        "provider_at": None,
-                        "provider_trade_reference_at": provider_event_at,
-                        "received_at": received,
-                        "basis": AUTHORITATIVE_TIMESTAMP_BASIS,
-                        "bridge": BRIDGE_BUILD,
-                        "message_type": message_type,
-                        "bridge_run_id": BRIDGE_RUN_ID,
-                        "connection_generation": generation,
-                        "source_frame_sequence": frame_sequence,
-                        "source_frame_sha256": frame_sha256,
-                    }
-                )
-            _last_nbbo_append_monotonic = time.monotonic()
+            quote_row = {
+                "sym": sym,
+                "at": provider_event_at.replace(tzinfo=None),
+                "bid": bid,
+                "ask": ask,
+                "mid": mid,
+                "spread_bps": (ask - bid) / mid * 10_000.0,
+                "provider_at": None,
+                "provider_trade_reference_at": provider_event_at,
+                "received_at": received,
+                "basis": AUTHORITATIVE_TIMESTAMP_BASIS,
+                "bridge": BRIDGE_BUILD,
+                "message_type": message_type,
+                "bridge_run_id": BRIDGE_RUN_ID,
+                "connection_generation": generation,
+                "source_frame_sequence": frame_sequence,
+                "source_frame_sha256": frame_sha256,
+            }
 
         raw_tick_id = str(p[_SELECTED_FIELD_INDEX["TickID"]] or "").strip()
         raw_market_center = str(
@@ -1488,11 +2087,13 @@ def _parse_selected_l1(
             p[_SELECTED_FIELD_INDEX["Message Contents"]] or ""
         )
         if not raw_tick_id.isdigit() or not raw_market_center:
+            enqueue()
             return False, quote_captured
         trade_key = "|".join(
             (raw_trade_date, raw_trade_time, raw_tick_id, raw_market_center)
         )
         if _last_trade.get(sym) == trade_key:
+            enqueue()
             return True, quote_captured
         price = float(p[_SELECTED_FIELD_INDEX["Most Recent Trade"]] or 0)
         size = float(p[_SELECTED_FIELD_INDEX["Most Recent Trade Size"]] or 0)
@@ -1502,43 +2103,42 @@ def _parse_selected_l1(
             or price <= 0
             or size <= 0
         ):
+            enqueue()
             return False, quote_captured
         trade_conditions = [raw_conditions] if raw_conditions else []
         _last_trade[sym] = trade_key
-        with _pending_lock:
-            _pending.append(
-                {
-                    "sym": sym,
-                    "at": provider_event_at.replace(tzinfo=None),
-                    "px": price,
-                    "sz": size,
-                    "bid": bid if quote_valid else None,
-                    "ask": ask if quote_valid else None,
-                    "provider_at": provider_event_at,
-                    "provider_trade_reference_at": provider_event_at,
-                    "received_at": received,
-                    "basis": EXACT_PRINT_TIMESTAMP_BASIS,
-                    "bridge": BRIDGE_BUILD,
-                    "message_type": message_type,
-                    "bridge_run_id": BRIDGE_RUN_ID,
-                    "connection_generation": generation,
-                    "source_frame_sequence": frame_sequence,
-                    "source_frame_sha256": frame_sha256,
-                    "provider_trade_date": raw_trade_date,
-                    "provider_trade_time": raw_trade_time,
-                    "provider_tick_id": raw_tick_id,
-                    "trade_market_center": raw_market_center,
-                    "trade_conditions": trade_conditions,
-                    "message_contents": message_contents,
-                    "selected_update_fields": list(SELECTED_UPDATE_FIELDS),
-                    "selected_update_fields_sha256": (
-                        SELECTED_UPDATE_FIELDS_SHA256
-                    ),
-                    "selected_update_fields_ack_sha256": (
-                        selected_fields_ack_sha256
-                    ),
-                }
-            )
+        trade_row = {
+            "sym": sym,
+            "at": provider_event_at.replace(tzinfo=None),
+            "px": price,
+            "sz": size,
+            "bid": bid if quote_valid else None,
+            "ask": ask if quote_valid else None,
+            "provider_at": provider_event_at,
+            "provider_trade_reference_at": provider_event_at,
+            "received_at": received,
+            "basis": EXACT_PRINT_TIMESTAMP_BASIS,
+            "bridge": BRIDGE_BUILD,
+            "message_type": message_type,
+            "bridge_run_id": BRIDGE_RUN_ID,
+            "connection_generation": generation,
+            "source_frame_sequence": frame_sequence,
+            "source_frame_sha256": frame_sha256,
+            "provider_trade_date": raw_trade_date,
+            "provider_trade_time": raw_trade_time,
+            "provider_tick_id": raw_tick_id,
+            "trade_market_center": raw_market_center,
+            "trade_conditions": trade_conditions,
+            "message_contents": message_contents,
+            "selected_update_fields": list(SELECTED_UPDATE_FIELDS),
+            "selected_update_fields_sha256": (
+                SELECTED_UPDATE_FIELDS_SHA256
+            ),
+            "selected_update_fields_ack_sha256": (
+                selected_fields_ack_sha256
+            ),
+        }
+        enqueue(trade_row)
         # Ignition nomination rides the SAME exact-print stream (genuinely-new
         # trades only — the dedup key above already dropped repeats/replays).
         _observe_ignition_print(
@@ -1550,6 +2150,8 @@ def _parse_selected_l1(
         )
         return True, quote_captured
     except (TypeError, ValueError, IndexError):
+        if quote_row is not None:
+            enqueue()
         return False, False
 
 
@@ -1759,7 +2361,16 @@ def reader(
             elif c0 == "T":                     # timestamp heartbeat (NOT a trade)
                 continue
             elif line.startswith("S,") or c0 in ("n", "E"):
-                if line.startswith("S,CURRENT UPDATE FIELDNAMES,"):
+                if line.startswith("S,CURRENT PROTOCOL,"):
+                    if not _observe_protocol_ack(
+                        line,
+                        connection_generation=connection_generation,
+                    ):
+                        log.warning(
+                            "IQFeed ignored non-authoritative protocol acknowledgement generation=%d",
+                            connection_generation,
+                        )
+                elif line.startswith("S,CURRENT UPDATE FIELDNAMES,"):
                     if not _observe_selected_update_fields_ack(
                         line,
                         connection_generation=connection_generation,
@@ -1909,6 +2520,7 @@ def writer(
             TargetCause.ROSS,
         )
     }
+    pending_backlog = False
     capacity_pressure = False
 
     def reconcile(*, allow_unwatch: bool, sticky: bool = False) -> None:
@@ -1998,7 +2610,10 @@ def writer(
         _connection_generation_active(connection_generation, stop_event)
         and (deadline is None or time.monotonic() < deadline)
     ):
-        if stop_event.wait(FLUSH_INTERVAL_S):
+        # Preserve the normal one-second collection window when caught up.
+        # Once a bounded drain observes backlog, immediately consume the next
+        # bounded batch so incoming tape cannot amplify transaction latency.
+        if stop_event.wait(0.0 if pending_backlog else FLUSH_INTERVAL_S):
             break
         # CAPTURE-G3 FAST PATH: subscribe first-alert names IMMEDIATELY (short poll), additive to
         # the slow REFRESH_S set below — closes the ~2.7-min Gate-0 blind window. Runs BEFORE the
@@ -2099,11 +2714,11 @@ def writer(
             _close_connection_socket(connection_socket)
             break
 
-        with _pending_lock:
-            rows = _pending[:]
-            nbbo_rows = _pending_nbbo[:]
-            _pending.clear()
-            _pending_nbbo.clear()
+        rows, nbbo_rows, pending_backlog = _drain_pending_write_batch(
+            max_events=_release_batch_event_limit(
+                pending_backlog=pending_backlog,
+            )
+        )
         # Full-fidelity for current hot symbols; bounded newest-per-flush context
         # for the broad universe.  Missing exact IQFeed quote-event clocks still
         # make these rows noncertifying regardless of storage fidelity.
@@ -2117,10 +2732,11 @@ def writer(
                 # this commit by up to the flush interval, so it is not a
                 # strategy-availability clock.
                 with engine.begin() as c:
-                    if rows:
-                        c.execute(INS, rows)
-                    if WRITE_NBBO_TAPE and nbbo_rows:
-                        c.execute(NBBO_INS, nbbo_rows)
+                    _insert_pending_batch(
+                        c,
+                        trade_rows=rows,
+                        quote_rows=(nbbo_rows if WRITE_NBBO_TAPE else []),
+                    )
                 # Phase 2: stamp the replay release clock and enqueue the
                 # event-driven notifications in ONE transaction.  PostgreSQL
                 # delivers NOTIFY messages only when this transaction commits,
@@ -2132,42 +2748,12 @@ def writer(
                 # L1 layout still exposes no exact quote-event timestamp.
                 available_at = datetime.now(timezone.utc)
                 with engine.begin() as c:
-                    if rows:
-                        result = c.execute(
-                            MARK_TRADE_AVAILABLE,
-                            [
-                                _availability_params(row, available_at=available_at)
-                                for row in rows
-                            ],
-                        )
-                        if result.rowcount not in (-1, len(rows)):
-                            raise RuntimeError(
-                                "IQFeed trade release identity mismatch: "
-                                f"expected={len(rows)} updated={result.rowcount}"
-                            )
-                    if WRITE_NBBO_TAPE and nbbo_rows:
-                        result = c.execute(
-                            MARK_NBBO_AVAILABLE,
-                            [
-                                _availability_params(row, available_at=available_at)
-                                for row in nbbo_rows
-                            ],
-                        )
-                        if result.rowcount not in (-1, len(nbbo_rows)):
-                            raise RuntimeError(
-                                "IQFeed NBBO release identity mismatch: "
-                                f"expected={len(nbbo_rows)} updated={result.rowcount}"
-                            )
-                        if IQFEED_NOTIFY_ENABLED:
-                            for row in nbbo_rows:
-                                row["available_at"] = available_at
-                                c.execute(
-                                    NOTIFY_IQFEED_TICK,
-                                    {
-                                        "channel": IQFEED_NOTIFY_CHANNEL,
-                                        "payload": _notify_payload(row),
-                                    },
-                                )
+                    _release_pending_batch(
+                        c,
+                        trade_rows=rows,
+                        quote_rows=(nbbo_rows if WRITE_NBBO_TAPE else []),
+                        available_at=available_at,
+                    )
                 capture_accepted, capture_rejected = _publish_released_capture_rows(
                     trade_rows=rows,
                     quote_rows=(nbbo_rows if WRITE_NBBO_TAPE else []),
@@ -2212,6 +2798,7 @@ def writer(
                     log.info("ignition notify emitted=%d channel=%s", emitted, IGNITION_CHANNEL)
             except Exception as e:
                 log.warning("ignition notify emit failed (nominations dropped): %s", e)
+        pending_backlog = _pending_write_backlog()
     _request_connection_stop(connection_generation, stop_event)
 
 
@@ -2310,7 +2897,6 @@ def _run_connection(
             connection_socket,
             "S,SET PROTOCOL,6.2",
         )
-        _send(connection_socket, SELECT_UPDATE_FIELDS_COMMAND)
         log.info(
             "connected to IQConnect %s:%s (L1 trades, protocol 6.2) run=%s generation=%d",
             HOST,
@@ -2325,11 +2911,40 @@ def _run_connection(
             name=f"iqfeed-trade-reader-g{connection_generation}",
         )
         reader_thread.start()
-        _capture_bc("reader started; BEGIN field-ack wait")
-        if not _wait_for_selected_fields_ack(
+        _capture_bc("reader started; BEGIN protocol-ack wait")
+        if not _wait_for_protocol_ack(
             connection_generation,
             stop_event,
         ):
+            _capture_bc("protocol-ack FAILED (6.2 not acknowledged)")
+            raise RuntimeError("IQFeed protocol 6.2 was not acknowledged")
+        _send(connection_socket, SELECT_UPDATE_FIELDS_COMMAND)
+        _capture_bc("field selection sent; BEGIN field-ack wait")
+        selected_fields_acknowledged = _wait_for_selected_fields_ack(
+            connection_generation,
+            stop_event,
+        )
+        if (
+            not selected_fields_acknowledged
+            and _connection_generation_active(
+                connection_generation,
+                stop_event,
+            )
+        ):
+            log.warning(
+                "IQFeed exact selected-field roster was not acknowledged; "
+                "retrying once generation=%d",
+                connection_generation,
+            )
+            _send(connection_socket, SELECT_UPDATE_FIELDS_COMMAND)
+            _capture_bc(
+                "field selection retry sent; BEGIN final field-ack wait"
+            )
+            selected_fields_acknowledged = _wait_for_selected_fields_ack(
+                connection_generation,
+                stop_event,
+            )
+        if not selected_fields_acknowledged:
             _capture_bc("field-ack FAILED (roster not acknowledged)")
             raise RuntimeError(
                 "IQFeed exact selected-field roster was not acknowledged"

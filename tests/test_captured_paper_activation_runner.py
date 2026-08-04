@@ -19,6 +19,7 @@ import pytest
 
 from scripts import captured_paper_activation_runner as runner
 from scripts import captured_paper_activation_contract as contract
+from scripts import captured_paper_host_cutover as host_cutover
 
 _REAL_ASSERT_ISOLATED_INTERPRETER = runner._assert_isolated_interpreter
 
@@ -213,6 +214,7 @@ class Scenario:
     ignored_executable_payload: bool = False
     task_exists_before: bool = False
     task_exists_after: bool = True
+    task_running_after: bool = True
     apply_outcome: str = "success"
     rollback_outcome: str = "success"
     publish_started: bool = True
@@ -556,6 +558,21 @@ class FakeExecutor:
                 if self.task_queries == 1
                 else self.scenario.task_exists_after
             )
+            if exists and "/V" in args:
+                status = (
+                    "Running"
+                    if self.scenario.task_running_after
+                    else "Ready"
+                )
+                return runner.CommandResult(
+                    0,
+                    (
+                        f"TaskName: {runner.PAPER_TASK_NAME}\n"
+                        f"Status: {status}\n"
+                        "Scheduled Task State: Enabled\n"
+                    ),
+                    "",
+                )
             return runner.CommandResult(
                 0 if exists else 1,
                 "task\n" if exists else "",
@@ -654,6 +671,7 @@ def _run(
     executor: FakeExecutor,
     *,
     mode: str = "ValidateOnly",
+    wait: Any = None,
 ) -> Mapping[str, Any]:
     return runner.run_activation(
         request,
@@ -663,6 +681,7 @@ def _run(
         ),
         executor=executor,
         clock=lambda: NOW,
+        wait=wait or (lambda _seconds: None),
     )
 
 
@@ -1292,6 +1311,74 @@ def test_hash_valid_activation_manifest_alias_is_rejected_before_cutover_validat
     assert executor.modes == ["RecoverOnly"]
 
 
+def test_apply_uses_exact_isolated_stage0_issuer_envelope(
+    request_fixture: RequestFixture,
+    tmp_path: Path,
+) -> None:
+    executor = FakeExecutor(request_fixture.request, tmp_path)
+
+    _run(request_fixture.request, executor, mode="ActivatePaper")
+
+    apply_argv = next(
+        argv
+        for argv, _timeout, _cwd, _env in executor.calls
+        if "--mode" in argv and argv[argv.index("--mode") + 1] == "Apply"
+    )
+    stage0_source = (
+        request_fixture.request.candidate_root
+        / runner._LAUNCHER_SOURCE_PATHS["activation_stage0"]
+    )
+    stage0_sha = _sha(stage0_source.read_bytes())
+    staged_stage0 = (
+        request_fixture.request.artifact_root
+        / "activation"
+        / GENERATION
+        / stage0_sha
+        / f"{stage0_sha}.py"
+    )
+    expected_prefix = (
+        str(request_fixture.request.python_executable),
+        "-I",
+        "-S",
+        "-B",
+        str(staged_stage0),
+        "--manifest",
+        str(executor.manifest_path),
+        "--manifest-sha256",
+        executor.manifest_sha,
+        "--candidate-root",
+        str(request_fixture.request.candidate_root),
+        "--target-role",
+        "captured_paper_host_cutover",
+        "--target",
+        str(request_fixture.request.cutover_script),
+        "--target-sha256",
+        request_fixture.request.cutover_script_sha256,
+        "--",
+    )
+    assert apply_argv[: len(expected_prefix)] == expected_prefix
+    prepared = SimpleNamespace(
+        invocation=SimpleNamespace(
+            stage0_script_path=str(staged_stage0),
+            stage0_source_path=str(stage0_source),
+            stage0_source_sha256=stage0_sha,
+        ),
+        manifest_path=executor.manifest_path.resolve(strict=True),
+        manifest_sha256=executor.manifest_sha,
+        candidate_root=request_fixture.request.candidate_root,
+        allowed_read_roots=tuple(
+            Path(root) for root in request_fixture.request.allowed_read_roots
+        ),
+    )
+    assert host_cutover._validate_apply_issuer_cmdline(
+        apply_argv,
+        executable_path=request_fixture.request.python_executable,
+        source_path=request_fixture.request.cutover_script,
+        prepared=prepared,
+        journal_root=request_fixture.request.artifact_root / "cutover-journal",
+    ) == apply_argv
+
+
 @pytest.mark.parametrize(
     ("scenario", "expected_code"),
     [
@@ -1299,6 +1386,7 @@ def test_hash_valid_activation_manifest_alias_is_rejected_before_cutover_validat
         (Scenario(apply_outcome="timeout"), "STAGE_TIMEOUT"),
         (Scenario(publish_started=False), "STARTED_RECEIPT_UNAVAILABLE"),
         (Scenario(task_exists_after=False), "PAPER_TASK_UNAVAILABLE"),
+        (Scenario(task_running_after=False), "PAPER_TASK_NOT_RUNNING"),
     ],
 )
 def test_every_post_apply_failure_runs_exactly_one_exact_rollback(
@@ -1313,7 +1401,7 @@ def test_every_post_apply_failure_runs_exactly_one_exact_rollback(
         _run(request_fixture.request, executor, mode="ActivatePaper")
 
     assert _error_code(exc_info) == expected_code
-    assert executor.modes == ["RecoverOnly", "ValidateOnly", "Apply", "Rollback"]
+    assert executor.modes == ["RecoverOnly", "Apply", "Rollback"]
     assert executor.modes.count("Apply") == 1
     assert executor.modes.count("Rollback") == 1
     apply_argv = next(
@@ -1326,8 +1414,15 @@ def test_every_post_apply_failure_runs_exactly_one_exact_rollback(
         for argv, _timeout, _cwd, _env in executor.calls
         if "--mode" in argv and argv[argv.index("--mode") + 1] == "Rollback"
     )
-    assert apply_argv[: apply_argv.index("--mode")] == rollback_argv[
-        : rollback_argv.index("--mode")
+    assert rollback_argv[:4] == (
+        str(request_fixture.request.python_executable),
+        "-S",
+        "-B",
+        str(request_fixture.request.cutover_script),
+    )
+    apply_inner = apply_argv[apply_argv.index("--") + 1 :]
+    assert apply_inner[: apply_inner.index("--mode")] == rollback_argv[
+        4 : rollback_argv.index("--mode")
     ]
     assert rollback_argv[rollback_argv.index("--mode") :] == (
         "--mode",
@@ -1352,7 +1447,7 @@ def test_success_result_fsync_failure_remains_inside_compensated_apply_boundary(
     with pytest.raises(OSError, match="synthetic result fsync failure"):
         _run(request_fixture.request, executor, mode="ActivatePaper")
 
-    assert executor.modes == ["RecoverOnly", "ValidateOnly", "Apply", "Rollback"]
+    assert executor.modes == ["RecoverOnly", "Apply", "Rollback"]
     assert executor.modes.count("Rollback") == 1
 
 
@@ -1374,7 +1469,7 @@ def test_apply_and_rollback_failure_preserves_combined_failure(
     assert _error_code(exc_info) == "APPLY_AND_ROLLBACK_FAILED"
     assert "primary=CapturedPaperActivationRunnerError" in str(exc_info.value)
     assert "rollback=CapturedPaperActivationRunnerError" in str(exc_info.value)
-    assert executor.modes == ["RecoverOnly", "ValidateOnly", "Apply", "Rollback"]
+    assert executor.modes == ["RecoverOnly", "Apply", "Rollback"]
 
 
 def test_success_can_only_report_fake_money_alpaca_paper_started(
@@ -1382,16 +1477,23 @@ def test_success_can_only_report_fake_money_alpaca_paper_started(
     tmp_path: Path,
 ) -> None:
     executor = FakeExecutor(request_fixture.request, tmp_path)
+    waits: list[float] = []
 
-    result = _run(request_fixture.request, executor, mode="ActivatePaper")
+    result = _run(
+        request_fixture.request,
+        executor,
+        mode="ActivatePaper",
+        wait=waits.append,
+    )
 
     assert result["verdict"] == "ACTIVATED_ALPACA_PAPER_ONLY"
     assert result["account_scope"] == "alpaca:paper"
     assert result["live_cash_authorized"] is False
     assert result["paper_started"] is True
     assert result["activation_generation"] == GENERATION
-    assert executor.modes == ["RecoverOnly", "ValidateOnly", "Apply"]
-    assert executor.task_queries == 2
+    assert executor.modes == ["RecoverOnly", "Apply"]
+    assert executor.task_queries == 3
+    assert waits == [runner._PAPER_TASK_STABILITY_SECONDS]
 
 
 def test_run_artifacts_are_append_only_and_isolated_per_run(
@@ -1461,6 +1563,10 @@ def test_real_git_cleanliness_allows_isolated_pycache_but_rejects_ignored_payloa
     repository = tmp_path / "repo"
     repository.mkdir()
     subprocess.run([git_text, "init", "-q", str(repository)], check=True)
+    subprocess.run(
+        [git_text, "-C", str(repository), "config", "core.autocrlf", "false"],
+        check=True,
+    )
     tracked = sorted(
         {
             *(path.as_posix() for path in runner._CANDIDATE_ENTRYPOINTS.values()),

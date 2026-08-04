@@ -5,6 +5,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import re
 import subprocess
 from typing import Any, Callable
 
@@ -123,6 +124,7 @@ def _invoke_launcher(
     caller_cwd: Path | None = None,
     manifest_alias: bool = False,
     mutate_manifest_after_hash: bool = False,
+    startup_attempt_id: str | None = None,
 ) -> tuple[subprocess.CompletedProcess[str], dict[str, Any] | None]:
     tmp_path.mkdir(parents=True, exist_ok=True)
     captured = tmp_path / "captured-launch.json"
@@ -243,6 +245,18 @@ def _invoke_launcher(
     ]
     if no_order_receipt_path is not None:
         command.extend(["-NoOrderReceiptPath", str(no_order_receipt_path)])
+    if startup_attempt_id is not None:
+        attempt_parent = (
+            Path(activate_projection["host_ready_receipt_base"]).parent
+            / "attempts"
+            / startup_attempt_id
+        )
+        if re.fullmatch(
+            r"[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}",
+            startup_attempt_id,
+        ):
+            attempt_parent.mkdir(parents=True, exist_ok=True)
+        command.extend(["-StartupAttemptId", startup_attempt_id])
     env = dict(os.environ)
     env["CHILI_TEST_CAPTURED_ARGS"] = str(captured)
     result = subprocess.run(
@@ -296,6 +310,60 @@ def test_launcher_remains_foreground_and_anchors_candidate_working_directory(
     assert "& $python @arguments" in source
     assert "Push-Location -LiteralPath $candidate" in source
     assert "$LASTEXITCODE" in source
+
+
+def test_restart_attempt_derives_disjoint_receipt_base_and_preserves_prior_handshake(
+    tmp_path: Path,
+) -> None:
+    attempt_id = "45a9d0f5-bf22-4d19-8870-a7b1dbeaf519"
+    original = (
+        tmp_path
+        / "staged"
+        / TEST_GENERATION
+        / "handshake"
+        / "host-ready.json"
+    )
+    original.parent.mkdir(parents=True, exist_ok=True)
+    original.write_bytes(b"prior-started-handshake")
+
+    result, payload = _invoke_launcher(
+        tmp_path,
+        mode="ActivatePaper",
+        no_order_receipt_path=None,
+        startup_attempt_id=attempt_id,
+    )
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert payload is not None
+    forwarded = payload["arguments"]
+    ready_index = forwarded.index("--host-ready-receipt")
+    expected = original.parent / "attempts" / attempt_id / "host-ready.json"
+    assert Path(forwarded[ready_index + 1]) == expected
+    assert forwarded[forwarded.index("--startup-attempt-id") + 1] == attempt_id
+    assert original.read_bytes() == b"prior-started-handshake"
+
+
+@pytest.mark.parametrize(
+    "attempt_id",
+    [
+        "45A9D0F5-BF22-4D19-8870-A7B1DBEAF519",
+        "../45a9d0f5-bf22-4d19-8870-a7b1dbeaf519",
+        "not-a-uuid",
+    ],
+)
+def test_restart_attempt_id_is_canonical_or_child_never_runs(
+    tmp_path: Path,
+    attempt_id: str,
+) -> None:
+    result, payload = _invoke_launcher(
+        tmp_path,
+        mode="ActivatePaper",
+        no_order_receipt_path=None,
+        startup_attempt_id=attempt_id,
+    )
+
+    assert result.returncode != 0
+    assert payload is None
 
 
 def test_no_order_smoke_requires_and_forwards_one_strict_bound_output(

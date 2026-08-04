@@ -16,7 +16,8 @@ environment has been installed.
 from __future__ import annotations
 
 import argparse
-from dataclasses import dataclass
+import base64
+from dataclasses import dataclass, replace
 from datetime import datetime, timedelta, timezone
 import hashlib
 import json
@@ -44,6 +45,9 @@ UTC = timezone.utc
 PROBE_RUN_MANIFEST_SCHEMA_VERSION = (
     "chili.captured-paper-preactivation-probe-run.v1"
 )
+STATIC_PROOF_CACHE_SCHEMA_VERSION = "chili.captured-paper-static-proof-cache.v1"
+STATIC_PROOF_CACHE_MAX_AGE_SECONDS = readiness.STATIC_PROOF_MAX_AGE_SECONDS
+_STATIC_PROOF_KINDS = ("focused_regressions", "lifecycle_preflight")
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 _MAX_NATIVE_DOCUMENT_BYTES = 16 * 1024 * 1024
 
@@ -81,7 +85,7 @@ FOCUSED_COMPILE_RELATIVE_PATHS = (
 FOCUSED_PYTEST_NODE_IDS = (
     "tests/test_iqfeed_capture_only_smoke.py::test_capture_only_smoke_binds_real_shape_checks_exact_print_and_quiesces",
     "tests/test_captured_paper_selection_source.py::test_source_captures_full_four_stream_envelope_and_scores_without_fallback",
-    "tests/test_captured_paper_selection_source.py::test_missing_typed_fundamentals_receipt_fails_only_that_decision",
+    "tests/test_captured_paper_selection_source.py::test_missing_typed_fundamentals_receipt_is_recorded_but_optional",
     "tests/test_captured_paper_selection_queue.py::test_visible_commit_is_ignored_until_post_fsync_gate_acknowledges_it",
     "tests/test_captured_paper_selection_queue.py::test_coverage_unavailable_event_emits_route_tombstone_not_empty_advance",
     "tests/test_captured_paper_selection_producer.py::test_batch_upsert_and_frontier_cas_commit_together",
@@ -137,6 +141,24 @@ LIFECYCLE_SCENARIOS = (
     "same_cid_reconciliation",
     "no_blind_repost",
 )
+_FOCUSED_PYTEST_ARGV = (
+    "python",
+    "-B",
+    "-m",
+    "pytest",
+    "-q",
+    *FOCUSED_PYTEST_NODE_IDS,
+    "-p",
+    "scripts.captured_paper_pytest_side_effect_guard",
+    "--junitxml=@producer-owned",
+)
+_LIFECYCLE_ARGV = (
+    "python",
+    "-B",
+    "scripts/run_captured_paper_lifecycle_preflight.py",
+    "--fake-transport-only",
+    "--output=@producer-owned",
+)
 OPERATIONAL_MAX_AGE_SECONDS_BY_KIND: Mapping[str, int] = MappingProxyType(
     {
         # 2026-07-17: raised from 30s/60s (and then from 5 minutes) — must
@@ -146,12 +168,12 @@ OPERATIONAL_MAX_AGE_SECONDS_BY_KIND: Mapping[str, int] = MappingProxyType(
         # roster against the contract table, so the two tables must agree
         # per kind.  See the contract table for the full sizing rationale.
         "runtime_settings": 20 * 60,
-        "broker_account": 10 * 60,
+        "broker_account": 20 * 60,
         "database_schema": 20 * 60,
         "capture_host_smoke": 20 * 60,
         "focused_regressions": 60 * 60,
         "lifecycle_preflight": 20 * 60,
-        "kill_switch": 10 * 60,
+        "kill_switch": 20 * 60,
         "rollback_snapshot": 60 * 60,
     }
 )
@@ -331,6 +353,17 @@ class FocusedRegressionNativeObservation:
 class LifecycleNativeObservation:
     scenario_run: CommandExecution
     event_report: bytes
+
+
+@dataclass(frozen=True, slots=True)
+class LoadedStaticProofCache:
+    path: Path
+    sha256: str
+    source_activation_generation: str
+    minted_at: datetime
+    expires_at: datetime
+    focused_regressions: FocusedRegressionNativeObservation
+    lifecycle_preflight: LifecycleNativeObservation
 
 
 @dataclass(frozen=True, slots=True)
@@ -729,17 +762,7 @@ class SubprocessFocusedRegressionAuthority:
             temporary = Path(raw_temp)
             junit = temporary / "junit.xml"
             side_effect = temporary / "side-effects.json"
-            normalized = (
-                "python",
-                "-B",
-                "-m",
-                "pytest",
-                "-q",
-                *FOCUSED_PYTEST_NODE_IDS,
-                "-p",
-                "scripts.captured_paper_pytest_side_effect_guard",
-                "--junitxml=@producer-owned",
-            )
+            normalized = _FOCUSED_PYTEST_ARGV
             actual = (
                 str(self.python_executable),
                 *normalized[1:-1],
@@ -802,13 +825,7 @@ class SubprocessLifecycleScenarioAuthority:
             )
             return LifecycleNativeObservation(
                 scenario_run=CommandExecution(
-                    argv=(
-                        "python",
-                        "-B",
-                        "scripts/run_captured_paper_lifecycle_preflight.py",
-                        "--fake-transport-only",
-                        "--output=@producer-owned",
-                    ),
+                    argv=_LIFECYCLE_ARGV,
                     exit_code=0,
                     completed_at=_utc(self.wall_clock(), "lifecycle completion clock"),
                 ),
@@ -1400,18 +1417,7 @@ def _focused_regression_observations(
         raise CapturedPaperPreactivationProbeError(
             "REGRESSION_COMMAND_MISMATCH", "compile command roster is not fixed"
         )
-    expected_pytest = (
-        "python",
-        "-B",
-        "-m",
-        "pytest",
-        "-q",
-        *FOCUSED_PYTEST_NODE_IDS,
-        "-p",
-        "scripts.captured_paper_pytest_side_effect_guard",
-        "--junitxml=@producer-owned",
-    )
-    if native.pytest_run.argv != expected_pytest:
+    if native.pytest_run.argv != _FOCUSED_PYTEST_ARGV:
         raise CapturedPaperPreactivationProbeError(
             "REGRESSION_COMMAND_MISMATCH", "pytest command is not the fixed shard"
         )
@@ -1451,7 +1457,7 @@ def _focused_regression_observations(
     completed = _fresh(
         native.pytest_run.completed_at,
         now,
-        seconds=3600,
+        seconds=STATIC_PROOF_CACHE_MAX_AGE_SECONDS,
         field="focused regressions completed_at",
     )
     return MappingProxyType(
@@ -1483,14 +1489,10 @@ def _lifecycle_observations(
         raise CapturedPaperPreactivationProbeError(
             "LIFECYCLE_AUTHORITY_INVALID", "lifecycle authority returned shaped booleans"
         )
-    expected_argv = (
-        "python",
-        "-B",
-        "scripts/run_captured_paper_lifecycle_preflight.py",
-        "--fake-transport-only",
-        "--output=@producer-owned",
-    )
-    if native.scenario_run.argv != expected_argv or native.scenario_run.exit_code != 0:
+    if (
+        native.scenario_run.argv != _LIFECYCLE_ARGV
+        or native.scenario_run.exit_code != 0
+    ):
         raise CapturedPaperPreactivationProbeError(
             "LIFECYCLE_COMMAND_MISMATCH", "lifecycle executable was not the fixed harness"
         )
@@ -1550,7 +1552,10 @@ def _lifecycle_observations(
             )
         transport_counts[event_type] += _nonnegative_int(event.get("count"), event_type)
     completed = _fresh(
-        report.get("completed_at"), now, seconds=300, field="lifecycle completed_at"
+        report.get("completed_at"),
+        now,
+        seconds=STATIC_PROOF_CACHE_MAX_AGE_SECONDS,
+        field="lifecycle completed_at",
     )
     return MappingProxyType(
         {
@@ -1790,6 +1795,616 @@ def _content_addressed_new(
         except OSError:
             pass
     return final.resolve(), digest, len(raw)
+
+
+def _static_proof_roster_bindings() -> Mapping[str, str]:
+    focused = {
+        "compile_relative_paths": list(FOCUSED_COMPILE_RELATIVE_PATHS),
+        "pytest_argv": list(_FOCUSED_PYTEST_ARGV),
+    }
+    lifecycle = {
+        "scenarios": list(LIFECYCLE_SCENARIOS),
+        "argv": list(_LIFECYCLE_ARGV),
+    }
+    return MappingProxyType(
+        {
+            "focused_roster_sha256": readiness.sha256_json(focused),
+            "lifecycle_roster_sha256": readiness.sha256_json(lifecycle),
+            "schema_sha256": readiness.sha256_json(
+                {
+                    "schema_version": STATIC_PROOF_CACHE_SCHEMA_VERSION,
+                    "max_age_seconds": STATIC_PROOF_CACHE_MAX_AGE_SECONDS,
+                    "cached_kinds": list(_STATIC_PROOF_KINDS),
+                    "fresh_kinds": sorted(
+                        set(readiness.PREACTIVATION_KINDS)
+                        - set(_STATIC_PROOF_KINDS)
+                    ),
+                }
+            ),
+        }
+    )
+
+
+def _native_cache_document(
+    *,
+    focused: FocusedRegressionNativeObservation,
+    lifecycle: LifecycleNativeObservation,
+) -> Mapping[str, Any]:
+    if type(focused) is not FocusedRegressionNativeObservation or type(
+        lifecycle
+    ) is not LifecycleNativeObservation:
+        raise CapturedPaperPreactivationProbeError(
+            "STATIC_CACHE_NATIVE_INVALID",
+            "static proof cache accepts only exact native observations",
+        )
+    if (
+        any(run.exit_code != 0 for run in focused.compile_runs)
+        or focused.pytest_run.exit_code != 0
+        or lifecycle.scenario_run.exit_code != 0
+    ):
+        raise CapturedPaperPreactivationProbeError(
+            "STATIC_CACHE_NATIVE_INVALID", "failed commands are not reusable"
+        )
+    return MappingProxyType(
+        {
+            "focused_regressions": {
+                "compile_completed_at": [
+                    _iso(row.completed_at) for row in focused.compile_runs
+                ],
+                "pytest_completed_at": _iso(focused.pytest_run.completed_at),
+                "junit_xml_base64": base64.b64encode(focused.junit_xml).decode("ascii"),
+                "side_effect_events": [
+                    dict(row) for row in focused.side_effect_events
+                ],
+            },
+            "lifecycle_preflight": {
+                "scenario_completed_at": _iso(lifecycle.scenario_run.completed_at),
+                "event_report_base64": base64.b64encode(
+                    lifecycle.event_report
+                ).decode("ascii"),
+            },
+        }
+    )
+
+
+def _decode_cache_bytes(value: Any, *, field: str) -> bytes:
+    if not isinstance(value, str) or len(value) > (_MAX_NATIVE_DOCUMENT_BYTES * 2):
+        raise CapturedPaperPreactivationProbeError(
+            "STATIC_CACHE_SCHEMA_MISMATCH", f"{field} is not bounded base64"
+        )
+    try:
+        decoded = base64.b64decode(value, validate=True)
+    except (ValueError, TypeError) as exc:
+        raise CapturedPaperPreactivationProbeError(
+            "STATIC_CACHE_SCHEMA_MISMATCH", f"{field} is not valid base64"
+        ) from exc
+    if not decoded or len(decoded) > _MAX_NATIVE_DOCUMENT_BYTES:
+        raise CapturedPaperPreactivationProbeError(
+            "STATIC_CACHE_SCHEMA_MISMATCH", f"{field} decoded bytes are invalid"
+        )
+    return decoded
+
+
+def _native_from_cache_document(
+    value: Any,
+) -> tuple[FocusedRegressionNativeObservation, LifecycleNativeObservation]:
+    if not isinstance(value, Mapping):
+        raise CapturedPaperPreactivationProbeError(
+            "STATIC_CACHE_SCHEMA_MISMATCH",
+            "static native observations are not an object",
+        )
+    _exact_keys(
+        value,
+        {"focused_regressions", "lifecycle_preflight"},
+        "native_observations",
+    )
+    focused = value.get("focused_regressions")
+    lifecycle = value.get("lifecycle_preflight")
+    if not isinstance(focused, Mapping) or not isinstance(lifecycle, Mapping):
+        raise CapturedPaperPreactivationProbeError(
+            "STATIC_CACHE_SCHEMA_MISMATCH",
+            "static native observation kinds are malformed",
+        )
+    _exact_keys(
+        focused,
+        {
+            "compile_completed_at",
+            "pytest_completed_at",
+            "junit_xml_base64",
+            "side_effect_events",
+        },
+        "native_observations.focused_regressions",
+    )
+    _exact_keys(
+        lifecycle,
+        {"scenario_completed_at", "event_report_base64"},
+        "native_observations.lifecycle_preflight",
+    )
+    compile_times = focused.get("compile_completed_at")
+    side_effect_rows = focused.get("side_effect_events")
+    if (
+        not isinstance(compile_times, list)
+        or len(compile_times) != len(FOCUSED_COMPILE_RELATIVE_PATHS)
+        or not isinstance(side_effect_rows, list)
+        or len(side_effect_rows) > 32
+        or any(not isinstance(row, Mapping) for row in side_effect_rows)
+    ):
+        raise CapturedPaperPreactivationProbeError(
+            "STATIC_CACHE_SCHEMA_MISMATCH",
+            "focused native cache roster is malformed",
+        )
+    focused_native = FocusedRegressionNativeObservation(
+        compile_runs=tuple(
+            CommandExecution(
+                argv=("python", "-B", "-m", "py_compile", relative),
+                exit_code=0,
+                completed_at=_utc(
+                    completed_at,
+                    f"native.focused.compile_completed_at[{index}]",
+                ),
+            )
+            for index, (completed_at, relative) in enumerate(
+                zip(compile_times, FOCUSED_COMPILE_RELATIVE_PATHS, strict=True)
+            )
+        ),
+        pytest_run=CommandExecution(
+            argv=_FOCUSED_PYTEST_ARGV,
+            exit_code=0,
+            completed_at=_utc(
+                focused.get("pytest_completed_at"), "native.focused.pytest_completed_at"
+            ),
+        ),
+        junit_xml=_decode_cache_bytes(
+            focused.get("junit_xml_base64"),
+            field="native_observations.focused_regressions.junit_xml_base64",
+        ),
+        side_effect_events=tuple(dict(row) for row in side_effect_rows),
+    )
+    lifecycle_native = LifecycleNativeObservation(
+        scenario_run=CommandExecution(
+            argv=_LIFECYCLE_ARGV,
+            exit_code=0,
+            completed_at=_utc(
+                lifecycle.get("scenario_completed_at"),
+                "native.lifecycle.scenario_completed_at",
+            ),
+        ),
+        event_report=_decode_cache_bytes(
+            lifecycle.get("event_report_base64"),
+            field="native_observations.lifecycle_preflight.event_report_base64",
+        ),
+    )
+    return focused_native, lifecycle_native
+
+
+@dataclass(frozen=True, slots=True)
+class _StaticExecutionAuthority:
+    value: Any
+
+    def execute(self) -> Any:
+        return self.value
+
+
+def _stable_cache_json(
+    path_value: str | Path,
+    *,
+    expected_sha256: str,
+    allowed_read_roots: Sequence[str | Path],
+    field: str,
+) -> tuple[Path, Mapping[str, Any], str]:
+    digest = _sha(expected_sha256, f"{field}.sha256")
+    raw_path = str(path_value)
+    path = Path(raw_path)
+    if not path.is_absolute() or raw_path.startswith(("\\\\", "//")):
+        raise CapturedPaperPreactivationProbeError(
+            "STATIC_CACHE_PATH_INVALID", f"{field} path is not absolute and local"
+        )
+    try:
+        roots = tuple(Path(value).resolve(strict=True) for value in allowed_read_roots)
+        for root in roots:
+            readiness._reject_reparse_chain(root)
+            readiness._reject_network_drive(root)
+        if not roots or any(not root.is_dir() for root in roots):
+            raise OSError("static cache roots are not bounded directories")
+        size = path.stat(follow_symlinks=False).st_size
+        resolved, raw, _actual, _size = readiness._stable_probe_read(
+            {"path": raw_path, "sha256": digest, "size_bytes": size},
+            roots=roots,
+            field=field,
+        )
+    except (OSError, readiness.CapturedPaperReadinessEvidenceError) as exc:
+        code = (
+            "STATIC_CACHE_HASH_MISMATCH"
+            if "hash mismatch" in str(exc)
+            else "STATIC_CACHE_PATH_INVALID"
+        )
+        raise CapturedPaperPreactivationProbeError(
+            code, f"{field} failed stable local validation"
+        ) from exc
+    if resolved.name != f"{digest}.json" or resolved.parent.name != digest[:2]:
+        raise CapturedPaperPreactivationProbeError(
+            "STATIC_CACHE_NOT_CONTENT_ADDRESSED",
+            f"{field} is not stored at its content address",
+        )
+    document = _strict_json(raw, field)
+    if _canonical_json_bytes(document) != raw:
+        raise CapturedPaperPreactivationProbeError(
+            "STATIC_CACHE_NOT_CANONICAL", f"{field} bytes are not canonical JSON"
+        )
+    return resolved, document, digest
+
+
+def _source_probe_manifest(
+    reference: Any,
+    *,
+    allowed_read_roots: Sequence[str | Path],
+    expected_generation: str,
+    context: readiness.ReadinessValidationContext,
+) -> tuple[Path, Mapping[str, Any], str]:
+    if not isinstance(reference, Mapping):
+        raise CapturedPaperPreactivationProbeError(
+            "STATIC_CACHE_PROVENANCE_INVALID",
+            "source probe manifest reference is malformed",
+        )
+    _exact_keys(reference, {"path", "sha256"}, "source_probe_manifest")
+    path, document, digest = _stable_cache_json(
+        str(reference.get("path") or ""),
+        expected_sha256=str(reference.get("sha256") or ""),
+        allowed_read_roots=allowed_read_roots,
+        field="source_probe_manifest",
+    )
+    _exact_keys(
+        document,
+        {
+            "schema_version",
+            "generated_at",
+            "activation_generation",
+            "account_scope",
+            "expected_account_id",
+            "code_build_sha256",
+            "effective_config_sha256",
+            "capture_receipt_sha256",
+            "probe_runner_source_sha256",
+            "artifact_bindings",
+            "readiness_receipts",
+            "readiness_receipt_sha256s",
+            "live_cash_authorized",
+            "orders_submitted",
+            "manifest_sha256",
+        },
+        "source_probe_manifest",
+    )
+    body = dict(document)
+    claimed_manifest_sha = _sha(
+        body.pop("manifest_sha256", None), "source_probe_manifest.manifest_sha256"
+    )
+    receipts = document.get("readiness_receipts")
+    if not (
+        readiness.sha256_json(body) == claimed_manifest_sha
+        and document.get("schema_version") == PROBE_RUN_MANIFEST_SCHEMA_VERSION
+        and document.get("activation_generation") == expected_generation
+        and document.get("account_scope") == "alpaca:paper"
+        and document.get("expected_account_id") == context.expected_account_id
+        and document.get("code_build_sha256") == context.code_build_sha256
+        and document.get("probe_runner_source_sha256")
+        == context.source_hashes["captured_paper_preactivation_probes"]
+        and document.get("live_cash_authorized") is False
+        and document.get("orders_submitted") is False
+        and isinstance(receipts, Mapping)
+        and set(receipts) == set(readiness.PREACTIVATION_KINDS)
+    ):
+        raise CapturedPaperPreactivationProbeError(
+            "STATIC_CACHE_PROVENANCE_INVALID",
+            "source probe manifest is not one complete successful PAPER probe run",
+        )
+    return path, document, digest
+
+
+def _source_static_receipts(
+    *,
+    source_manifest: Mapping[str, Any],
+    context: readiness.ReadinessValidationContext,
+    allowed_read_roots: Sequence[str | Path],
+    validation_at: datetime,
+) -> Mapping[str, Mapping[str, Any]]:
+    kinds = _STATIC_PROOF_KINDS
+    references = source_manifest.get("readiness_receipts")
+    if not isinstance(references, Mapping):
+        raise CapturedPaperPreactivationProbeError(
+            "STATIC_CACHE_PROVENANCE_INVALID",
+            "source static readiness references are malformed",
+        )
+    source_context = replace(
+        context,
+        activation_generation=str(source_manifest["activation_generation"]),
+        effective_config_sha256=str(source_manifest["effective_config_sha256"]),
+        capture_receipt_sha256=str(source_manifest["capture_receipt_sha256"]),
+        allowed_read_roots=tuple(str(Path(root)) for root in allowed_read_roots),
+    )
+    evidence: dict[str, Mapping[str, Any]] = {}
+    for kind in kinds:
+        reference = references.get(kind)
+        if not isinstance(reference, Mapping):
+            raise CapturedPaperPreactivationProbeError(
+                "STATIC_CACHE_PROVENANCE_INVALID",
+                f"source {kind} receipt reference is malformed",
+            )
+        _exact_keys(reference, {"path", "sha256", "size_bytes"}, f"source.{kind}")
+        path, document, digest = _stable_cache_json(
+            str(reference.get("path") or ""),
+            expected_sha256=str(reference.get("sha256") or ""),
+            allowed_read_roots=allowed_read_roots,
+            field=f"source_readiness_receipts.{kind}",
+        )
+        receipt_digests = source_manifest.get("readiness_receipt_sha256s")
+        if (
+            reference.get("size_bytes") != path.stat().st_size
+            or not isinstance(receipt_digests, Mapping)
+            or receipt_digests.get(kind) != digest
+        ):
+            raise CapturedPaperPreactivationProbeError(
+                "STATIC_CACHE_PROVENANCE_INVALID",
+                f"source {kind} readiness size drifted",
+            )
+        try:
+            readiness.validate_readiness_receipt_v3(
+                document,
+                kind=kind,
+                context=source_context,
+                now=validation_at,
+                max_age_seconds=OPERATIONAL_MAX_AGE_SECONDS_BY_KIND[kind],
+            )
+        except readiness.CapturedPaperReadinessEvidenceError as exc:
+            raise CapturedPaperPreactivationProbeError(
+                "STATIC_CACHE_PROVENANCE_INVALID",
+                f"source {kind} readiness was not valid when minted",
+            ) from exc
+        if digest != reference.get("sha256"):
+            raise CapturedPaperPreactivationProbeError(
+                "STATIC_CACHE_PROVENANCE_INVALID",
+                f"source {kind} readiness digest drifted",
+            )
+        observations = dict(document["evidence"])
+        observations.pop("schema_version", None)
+        observations.pop("source_receipts", None)
+        evidence[kind] = observations
+    return MappingProxyType(evidence)
+
+
+def publish_static_proof_cache(
+    *,
+    context: readiness.ReadinessValidationContext,
+    python_dependency_root_identity_sha256: str,
+    focused_regressions: FocusedRegressionNativeObservation,
+    lifecycle_preflight: LifecycleNativeObservation,
+    source_probe_manifest_path: str | Path,
+    source_probe_manifest_sha256: str,
+    output_root: str | Path,
+    wall_clock: Callable[[], datetime] = lambda: datetime.now(UTC),
+) -> Mapping[str, Any]:
+    """Publish reusable native proof only after the complete probe run succeeded."""
+
+    if type(context) is not readiness.ReadinessValidationContext:
+        raise CapturedPaperPreactivationProbeError(
+            "STATIC_CACHE_CONTEXT_INVALID", "static cache context is not typed"
+        )
+    now = _utc(wall_clock(), "static cache wall clock")
+    dependency_sha = _sha(
+        python_dependency_root_identity_sha256,
+        "python_dependency_root_identity_sha256",
+    )
+    focused_evidence = _focused_regression_observations(
+        _StaticExecutionAuthority(focused_regressions),
+        context=context,
+        now=now,
+    )
+    lifecycle_evidence = _lifecycle_observations(
+        _StaticExecutionAuthority(lifecycle_preflight),
+        context=context,
+        now=now,
+    )
+    roots = context.allowed_read_roots
+    manifest_path, manifest, manifest_sha = _source_probe_manifest(
+        {
+            "path": str(source_probe_manifest_path),
+            "sha256": source_probe_manifest_sha256,
+        },
+        allowed_read_roots=roots,
+        expected_generation=context.activation_generation,
+        context=context,
+    )
+    source_evidence = _source_static_receipts(
+        source_manifest=manifest,
+        context=context,
+        allowed_read_roots=roots,
+        validation_at=now,
+    )
+    if (
+        dict(source_evidence["focused_regressions"]) != dict(focused_evidence)
+        or dict(source_evidence["lifecycle_preflight"]) != dict(lifecycle_evidence)
+    ):
+        raise CapturedPaperPreactivationProbeError(
+            "STATIC_CACHE_PROVENANCE_INVALID",
+            "native proof differs from the successful source receipts",
+        )
+    proof_completed_at = min(
+        _utc(
+            focused_evidence["completed_at"],
+            "focused regressions completed_at",
+        ),
+        _utc(
+            lifecycle_evidence["completed_at"],
+            "lifecycle preflight completed_at",
+        ),
+    )
+    expires_at = proof_completed_at + timedelta(
+        seconds=STATIC_PROOF_CACHE_MAX_AGE_SECONDS
+    )
+    bindings = _static_proof_roster_bindings()
+    document = {
+        "schema_version": STATIC_PROOF_CACHE_SCHEMA_VERSION,
+        "source_activation_generation": context.activation_generation,
+        "minted_at": _iso(now),
+        "expires_at": _iso(expires_at),
+        "account_scope": "alpaca:paper",
+        "expected_account_id": context.expected_account_id,
+        "code_build_sha256": context.code_build_sha256,
+        "python_dependency_root_identity_sha256": dependency_sha,
+        "probe_runner_source_sha256": context.source_hashes[
+            "captured_paper_preactivation_probes"
+        ],
+        **dict(bindings),
+        "source_probe_manifest": {
+            "path": str(manifest_path),
+            "sha256": manifest_sha,
+        },
+        "native_observations": dict(
+            _native_cache_document(
+                focused=focused_regressions,
+                lifecycle=lifecycle_preflight,
+            )
+        ),
+        "live_cash_authorized": False,
+        "orders_submitted": False,
+    }
+    root = Path(output_root).resolve(strict=True)
+    _reject_reparse_chain(root)
+    path, digest, size = _content_addressed_new(
+        root,
+        namespace=("static-proof-cache",),
+        document=document,
+    )
+    return MappingProxyType(
+        {"path": str(path), "sha256": digest, "size_bytes": size}
+    )
+
+
+def load_static_proof_cache(
+    *,
+    cache_path: str | Path,
+    cache_sha256: str,
+    context: readiness.ReadinessValidationContext,
+    python_dependency_root_identity_sha256: str,
+    restart_nonce: str,
+    allowed_read_roots: Sequence[str | Path],
+    wall_clock: Callable[[], datetime] = lambda: datetime.now(UTC),
+) -> LoadedStaticProofCache:
+    """Load a prior native proof without carrying its activation generation."""
+
+    if type(context) is not readiness.ReadinessValidationContext:
+        raise CapturedPaperPreactivationProbeError(
+            "STATIC_CACHE_CONTEXT_INVALID", "static cache context is not typed"
+        )
+    now = _utc(wall_clock(), "static cache wall clock")
+    path, document, digest = _stable_cache_json(
+        cache_path,
+        expected_sha256=cache_sha256,
+        allowed_read_roots=allowed_read_roots,
+        field="static_proof_cache",
+    )
+    expected_keys = {
+        "schema_version",
+        "source_activation_generation",
+        "minted_at",
+        "expires_at",
+        "account_scope",
+        "expected_account_id",
+        "code_build_sha256",
+        "python_dependency_root_identity_sha256",
+        "probe_runner_source_sha256",
+        "focused_roster_sha256",
+        "lifecycle_roster_sha256",
+        "schema_sha256",
+        "source_probe_manifest",
+        "native_observations",
+        "live_cash_authorized",
+        "orders_submitted",
+    }
+    _exact_keys(document, expected_keys, "static_proof_cache")
+    try:
+        source_generation = str(
+            uuid.UUID(str(document.get("source_activation_generation") or ""))
+        )
+        current_generation = str(uuid.UUID(context.activation_generation))
+        current_nonce = str(uuid.UUID(str(restart_nonce or "")))
+    except (ValueError, TypeError, AttributeError) as exc:
+        raise CapturedPaperPreactivationProbeError(
+            "STATIC_CACHE_GENERATION_INVALID",
+            "static cache generation or nonce is malformed",
+        ) from exc
+    minted_at = _utc(document.get("minted_at"), "static_proof_cache.minted_at")
+    expires_at = _utc(document.get("expires_at"), "static_proof_cache.expires_at")
+    bindings = _static_proof_roster_bindings()
+    if not (
+        document.get("schema_version") == STATIC_PROOF_CACHE_SCHEMA_VERSION
+        and document.get("source_activation_generation") == source_generation
+        and current_generation == context.activation_generation
+        and source_generation != current_generation
+        and current_nonce not in {source_generation, current_generation}
+        and minted_at <= now < expires_at
+        and 0
+        < (expires_at - minted_at).total_seconds()
+        <= STATIC_PROOF_CACHE_MAX_AGE_SECONDS
+        and document.get("account_scope") == "alpaca:paper"
+        and document.get("expected_account_id") == context.expected_account_id
+        and document.get("code_build_sha256") == context.code_build_sha256
+        and document.get("python_dependency_root_identity_sha256")
+        == _sha(
+            python_dependency_root_identity_sha256,
+            "python_dependency_root_identity_sha256",
+        )
+        and document.get("probe_runner_source_sha256")
+        == context.source_hashes["captured_paper_preactivation_probes"]
+        and all(document.get(name) == value for name, value in bindings.items())
+        and document.get("live_cash_authorized") is False
+        and document.get("orders_submitted") is False
+    ):
+        raise CapturedPaperPreactivationProbeError(
+            "STATIC_CACHE_BINDING_MISMATCH",
+            "static proof cache escaped its code/dependency/roster/freshness boundary",
+        )
+    _manifest_path, source_manifest, _manifest_sha = _source_probe_manifest(
+        document.get("source_probe_manifest"),
+        allowed_read_roots=allowed_read_roots,
+        expected_generation=source_generation,
+        context=context,
+    )
+    source_evidence = _source_static_receipts(
+        source_manifest=source_manifest,
+        context=context,
+        allowed_read_roots=allowed_read_roots,
+        validation_at=minted_at,
+    )
+    focused, lifecycle = _native_from_cache_document(
+        document.get("native_observations")
+    )
+    focused_evidence = _focused_regression_observations(
+        _StaticExecutionAuthority(focused),
+        context=context,
+        now=minted_at,
+    )
+    lifecycle_evidence = _lifecycle_observations(
+        _StaticExecutionAuthority(lifecycle),
+        context=context,
+        now=minted_at,
+    )
+    if (
+        dict(source_evidence["focused_regressions"]) != dict(focused_evidence)
+        or dict(source_evidence["lifecycle_preflight"]) != dict(lifecycle_evidence)
+    ):
+        raise CapturedPaperPreactivationProbeError(
+            "STATIC_CACHE_PROVENANCE_INVALID",
+            "cached native proof differs from its successful source receipts",
+        )
+    return LoadedStaticProofCache(
+        path=path,
+        sha256=digest,
+        source_activation_generation=source_generation,
+        minted_at=minted_at,
+        expires_at=expires_at,
+        focused_regressions=focused,
+        lifecycle_preflight=lifecycle,
+    )
 
 
 def _artifact_refs_for_kind(
@@ -2070,6 +2685,7 @@ __all__ = [
     "LIFECYCLE_SCENARIOS",
     "LifecycleNativeObservation",
     "LifecycleScenarioAuthority",
+    "LoadedStaticProofCache",
     "OPERATIONAL_MAX_AGE_SECONDS_BY_KIND",
     "PROBE_RUN_MANIFEST_SCHEMA_VERSION",
     "RollbackNativeObservation",
@@ -2078,11 +2694,15 @@ __all__ = [
     "SqlAlchemyKillSwitchReadAuthority",
     "SubprocessFocusedRegressionAuthority",
     "SubprocessLifecycleScenarioAuthority",
+    "STATIC_PROOF_CACHE_MAX_AGE_SECONDS",
+    "STATIC_PROOF_CACHE_SCHEMA_VERSION",
     "TrustedOperationalProbeComposition",
     "RuntimeSettingsAuthority",
     "RuntimeSettingsNativeObservation",
     "TrustedProbeAuthorities",
     "main",
+    "load_static_proof_cache",
+    "publish_static_proof_cache",
     "run_operational_preactivation_probe_command",
     "run_trusted_preactivation_probes",
 ]

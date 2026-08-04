@@ -27,6 +27,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
 from typing import Any, Callable, Mapping, MutableMapping, Sequence
 import uuid
 
@@ -36,6 +37,7 @@ RESULT_SCHEMA_VERSION = "chili.captured-paper-activation-runner-result.v1"
 ACCOUNT_SCOPE = "alpaca:paper"
 ACTIVATE_CONFIRMATION = "CUTOVER_FAKE_MONEY_ALPACA_PAPER"
 PAPER_TASK_NAME = "CHILI-Captured-Alpaca-PAPER"
+_PAPER_TASK_STABILITY_SECONDS = 2.0
 
 _CHAIN_OK = "CAPTURED_ALPACA_PAPER_BUILD_READY_WITH_EXTERNAL_HOST_BASELINE"
 _FINAL_OK = "CAPTURED_ALPACA_PAPER_FINAL_MANIFEST_PUBLISHED"
@@ -1358,6 +1360,57 @@ def _paper_task_exists(request: ActivationRunnerRequest, executor: Any, env: Map
     )
 
 
+def _paper_task_is_running(
+    request: ActivationRunnerRequest,
+    executor: Any,
+    env: Mapping[str, str],
+) -> bool:
+    _assert_expected_path(
+        _strict_file(
+            str(request.schtasks_executable),
+            request.schtasks_executable_sha256,
+            field="schtasks_executable",
+        ),
+        _authoritative_executable_paths()["schtasks_executable"],
+        field="schtasks_executable",
+    )
+    result = executor.run(
+        [
+            str(request.schtasks_executable),
+            "/Query",
+            "/TN",
+            PAPER_TASK_NAME,
+            "/FO",
+            "LIST",
+            "/V",
+        ],
+        timeout=request.timeouts.task_query,
+        cwd=request.candidate_root,
+        env=env,
+    )
+    if result.returncode == 1:
+        combined = f"{result.stdout}\n{result.stderr}".casefold()
+        if (
+            "cannot find the file specified" in combined
+            or "cannot find the task" in combined
+        ):
+            return False
+    if result.returncode != 0:
+        raise CapturedPaperActivationRunnerError(
+            "TASK_QUERY_FAILED",
+            "candidate PAPER task runtime state is not authoritative",
+        )
+    fields: dict[str, str] = {}
+    for line in result.stdout.splitlines():
+        key, separator, value = line.partition(":")
+        if separator:
+            fields[key.strip().casefold()] = value.strip().casefold()
+    return (
+        fields.get("status") == "running"
+        and fields.get("scheduled task state") == "enabled"
+    )
+
+
 def _run_stage(
     *,
     name: str,
@@ -1824,6 +1877,7 @@ def run_activation(
     confirmation: str | None,
     executor: Any | None = None,
     clock: Callable[[], datetime] | None = None,
+    wait: Callable[[float], None] | None = None,
 ) -> Mapping[str, Any]:
     if mode not in {"ValidateOnly", "ActivatePaper"}:
         raise CapturedPaperActivationRunnerError(
@@ -1843,6 +1897,7 @@ def run_activation(
     _sanitize_python_control_environment()
     executor = executor or SubprocessExecutor()
     clock = clock or (lambda: datetime.now(UTC))
+    wait = wait or time.sleep
     # This path is deliberately independent of every caller-supplied artifact
     # root.  Two otherwise-valid generations rooted in different directories
     # must still serialize through one host authority boundary.
@@ -2103,11 +2158,21 @@ def run_activation(
         action = _single_glob(
             generation_root, "candidate-action/**/*.json", field="candidate_action"
         )
+        staged_stage0 = _strict_file(
+            str(no_order_projection.get("stage0_path") or ""),
+            str(no_order_projection.get("stage0_sha256") or ""),
+            field="staged_stage0",
+        )
+        cutover_target = _strict_file(
+            str(request.cutover_script),
+            request.cutover_script_sha256,
+            field="cutover_script",
+        )
         cutover_common = [
             str(request.python_executable),
             "-S",
             "-B",
-            str(request.cutover_script),
+            str(cutover_target),
             "--manifest",
             manifest_path,
             "--manifest-sha256",
@@ -2128,20 +2193,27 @@ def run_activation(
             "--journal-root",
             str(journal_root),
         ]
-        validate = _run_stage(
-            name="validate-only",
-            argv=[*cutover_common, "--mode", "ValidateOnly"],
-            timeout=request.timeouts.validate_only,
-            request=request,
-            executor=executor,
-            env=env,
-            recorder=recorder,
-        )
-        validate_doc = _last_json_line(validate.stdout)
-        if validate.returncode != 0 or validate_doc is None or validate_doc.get("verdict") != _VALIDATE_OK:
-            raise CapturedPaperActivationRunnerError(
-                "VALIDATE_ONLY_REJECTED", "real host ValidateOnly rejected"
-            )
+        apply_cutover = [
+            str(request.python_executable),
+            "-I",
+            "-S",
+            "-B",
+            str(staged_stage0),
+            "--manifest",
+            manifest_path,
+            "--manifest-sha256",
+            manifest_sha,
+            "--candidate-root",
+            str(request.candidate_root),
+            "--target-role",
+            "captured_paper_host_cutover",
+            "--target",
+            str(cutover_target),
+            "--target-sha256",
+            request.cutover_script_sha256,
+            "--",
+            *cutover_common[4:],
+        ]
         base_result = {
             "schema_version": RESULT_SCHEMA_VERSION,
             "account_scope": ACCOUNT_SCOPE,
@@ -2153,17 +2225,38 @@ def run_activation(
             "generated_at": clock().astimezone(UTC).isoformat().replace("+00:00", "Z"),
         }
         if mode == "ValidateOnly":
+            validate = _run_stage(
+                name="validate-only",
+                argv=[*cutover_common, "--mode", "ValidateOnly"],
+                timeout=request.timeouts.validate_only,
+                request=request,
+                executor=executor,
+                env=env,
+                recorder=recorder,
+            )
+            validate_doc = _last_json_line(validate.stdout)
+            if (
+                validate.returncode != 0
+                or validate_doc is None
+                or validate_doc.get("verdict") != _VALIDATE_OK
+            ):
+                raise CapturedPaperActivationRunnerError(
+                    "VALIDATE_ONLY_REJECTED", "real host ValidateOnly rejected"
+                )
             result = {**base_result, "verdict": "VALIDATED_NO_HOST_MUTATION", "paper_started": False}
             _write_once(run_root / "result.json", _canonical_json_bytes(result))
             return result
 
+        # Apply performs its own in-process ValidateOnly immediately before
+        # mutation and rechecks the baseline again under the journal lock.
+        # Avoid a duplicate full-host pass that can stale the sealed authority.
         apply_started = False
         try:
             apply_started = True
             apply_result = _run_stage(
                 name="apply",
                 argv=[
-                    *cutover_common,
+                    *apply_cutover,
                     "--mode",
                     "Apply",
                     "--confirm-fake-money-paper",
@@ -2174,6 +2267,9 @@ def run_activation(
                 executor=executor,
                 env=env,
                 recorder=recorder,
+                prelaunch_validator=lambda: _revalidate_staged_no_order_paths(
+                    no_order_projection
+                ),
             )
             apply_doc = _last_json_line(apply_result.stdout)
             if (
@@ -2194,6 +2290,12 @@ def run_activation(
             if not _paper_task_exists(request, executor, env):
                 raise CapturedPaperActivationRunnerError(
                     "PAPER_TASK_UNAVAILABLE", "candidate PAPER task is absent after Apply"
+                )
+            wait(_PAPER_TASK_STABILITY_SECONDS)
+            if not _paper_task_is_running(request, executor, env):
+                raise CapturedPaperActivationRunnerError(
+                    "PAPER_TASK_NOT_RUNNING",
+                    "candidate PAPER task is not enabled and Running after Apply",
                 )
             result = {
                 **base_result,

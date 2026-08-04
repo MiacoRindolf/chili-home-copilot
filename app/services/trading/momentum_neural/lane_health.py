@@ -32,6 +32,8 @@ See [[project_per_broker_daily_loss]] (the 06-15 incident) and
 """
 from __future__ import annotations
 
+import hashlib
+import json
 import logging
 import threading
 import time
@@ -50,14 +52,17 @@ logger = logging.getLogger(__name__)
 # signal: it proves that the generation-owned tracker refresh and price-bus callback
 # attachment completed.  It does not claim quote/feed freshness or that a broker
 # worker finished an individual tick; those need their own data/worker watchdogs.
-LIVE_LOOP_HEARTBEAT_SCHEMA = "momentum_live_loop_control_heartbeat_v1"
+LIVE_LOOP_HEARTBEAT_SCHEMA_V1 = "momentum_live_loop_control_heartbeat_v1"
+LIVE_LOOP_HEARTBEAT_SCHEMA_V2 = "momentum_live_loop_control_heartbeat_v2"
+# Compatibility alias for generic/non-captured callers and existing persisted rows.
+LIVE_LOOP_HEARTBEAT_SCHEMA = LIVE_LOOP_HEARTBEAT_SCHEMA_V1
 LIVE_LOOP_HEARTBEAT_SCOPE = "tracker_refresh_and_callback_registration"
 LIVE_LOOP_HEARTBEAT_INTERVAL_SECONDS = 30.0
 _LIVE_LOOP_HEARTBEAT_MIN_STALE_SECONDS = 2.0 * LIVE_LOOP_HEARTBEAT_INTERVAL_SECONDS
 _LIVE_LOOP_HEARTBEAT_MAX_STALE_SECONDS = 300.0
 _LIVE_LOOP_HEARTBEAT_HISTORY_LIMIT = 64
 _LIVE_LOOP_HANDOFF_CLOCK_TOLERANCE_SECONDS = 2.0
-_LIVE_LOOP_HEARTBEAT_META_KEYS = frozenset(
+_LIVE_LOOP_HEARTBEAT_V1_META_KEYS = frozenset(
     {
         "schema",
         "scope",
@@ -66,6 +71,19 @@ _LIVE_LOOP_HEARTBEAT_META_KEYS = frozenset(
         "generation",
         "generation_identity",
         "generation_started_at_utc",
+    }
+)
+_LIVE_LOOP_HEARTBEAT_V2_META_KEYS = frozenset(
+    {
+        *_LIVE_LOOP_HEARTBEAT_V1_META_KEYS,
+        "account_scope",
+        "expected_account_id",
+        "runtime_generation",
+        "execution_family",
+        "live_cash_authorized",
+        "row_started_at_utc",
+        "heartbeat_at_utc",
+        "content_sha256",
     }
 )
 
@@ -95,12 +113,30 @@ def record_auto_arm_run() -> None:
         _auto_arm_last_run_wall = datetime.utcnow()
 
 
+def _heartbeat_content_sha256(meta: dict[str, Any]) -> str:
+    body = dict(meta)
+    body.pop("content_sha256", None)
+    encoded = json.dumps(
+        body,
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=False,
+        allow_nan=False,
+    ).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
 def record_live_runner_loop_run(
     db,
     *,
     owner_instance_id: str,
     generation: int,
     generation_started_at: datetime,
+    account_scope: str | None = None,
+    expected_account_id: str | None = None,
+    runtime_generation: str | None = None,
+    execution_family: str | None = None,
+    live_cash_authorized: bool | None = None,
 ) -> str:
     """Stage one completed, cross-process event-loop heartbeat.
 
@@ -126,23 +162,65 @@ def record_live_runner_loop_run(
         raise ValueError("live-loop generation start must be timezone-aware UTC")
     generation_started_at = generation_started_at.astimezone(timezone.utc)
     generation_identity = f"{owner_instance_id}:{generation}"
+    meta = {
+        "schema": LIVE_LOOP_HEARTBEAT_SCHEMA_V1,
+        "scope": LIVE_LOOP_HEARTBEAT_SCOPE,
+        "owner": "momentum_live_runner_loop",
+        "owner_instance_id": owner_instance_id,
+        "generation": generation,
+        "generation_identity": generation_identity,
+        "generation_started_at_utc": (
+            generation_started_at.isoformat().replace("+00:00", "Z")
+        ),
+    }
+    captured_values = (
+        account_scope,
+        expected_account_id,
+        runtime_generation,
+        execution_family,
+        live_cash_authorized,
+    )
+    if any(value is not None for value in captured_values):
+        if any(value is None for value in captured_values):
+            raise ValueError(
+                "captured PAPER heartbeat identity must be supplied atomically"
+            )
+        try:
+            canonical_account_id = str(uuid.UUID(str(expected_account_id or "")))
+            canonical_runtime_generation = str(
+                uuid.UUID(str(runtime_generation or ""))
+            )
+        except (AttributeError, TypeError, ValueError) as exc:
+            raise ValueError(
+                "captured PAPER heartbeat identity UUID is invalid"
+            ) from exc
+        if (
+            str(expected_account_id or "").strip().lower()
+            != canonical_account_id
+            or str(runtime_generation or "").strip().lower()
+            != canonical_runtime_generation
+            or account_scope != "alpaca:paper"
+            or execution_family != "alpaca_spot"
+            or live_cash_authorized is not False
+        ):
+            raise ValueError("captured PAPER heartbeat identity is not exact")
+        meta.update(
+            {
+                "schema": LIVE_LOOP_HEARTBEAT_SCHEMA_V2,
+                "account_scope": "alpaca:paper",
+                "expected_account_id": canonical_account_id,
+                "runtime_generation": canonical_runtime_generation,
+                "execution_family": "alpaca_spot",
+                "live_cash_authorized": False,
+            }
+        )
     from ..brain_batch_job_log import brain_batch_job_record_completed
 
     job_id = brain_batch_job_record_completed(
         db,
         JOB_MOMENTUM_LIVE_LOOP_HEARTBEAT,
         ok=True,
-        meta={
-            "schema": LIVE_LOOP_HEARTBEAT_SCHEMA,
-            "scope": LIVE_LOOP_HEARTBEAT_SCOPE,
-            "owner": "momentum_live_runner_loop",
-            "owner_instance_id": owner_instance_id,
-            "generation": generation,
-            "generation_identity": generation_identity,
-            "generation_started_at_utc": (
-                generation_started_at.isoformat().replace("+00:00", "Z")
-            ),
-        },
+        meta=meta,
     )
     # ``brain_batch_job_finish`` is intentionally best-effort for generic batch
     # error reporting and may swallow a retry/missing-row failure.  A live-owner
@@ -158,12 +236,47 @@ def record_live_runner_loop_run(
         )
         .one_or_none()
     )
+    if row is not None and meta["schema"] == LIVE_LOOP_HEARTBEAT_SCHEMA_V2:
+        row_started_at = _utc_naive_datetime(getattr(row, "started_at", None))
+        heartbeat_at = _utc_naive_datetime(getattr(row, "ended_at", None))
+        if row_started_at is not None and heartbeat_at is not None:
+            meta = {
+                **meta,
+                "row_started_at_utc": (
+                    row_started_at.replace(tzinfo=timezone.utc)
+                    .isoformat()
+                    .replace("+00:00", "Z")
+                ),
+                "heartbeat_at_utc": (
+                    heartbeat_at.replace(tzinfo=timezone.utc)
+                    .isoformat()
+                    .replace("+00:00", "Z")
+                ),
+            }
+            meta["content_sha256"] = _heartbeat_content_sha256(meta)
+            row.meta_json = meta
+            db.flush()
     persisted = _validated_live_loop_heartbeat_row(row) if row is not None else None
     expected_started_at = generation_started_at.replace(tzinfo=None)
     if (
         persisted is None
         or persisted.get("generation_identity") != generation_identity
         or persisted.get("generation_started_at") != expected_started_at
+        or (
+            meta["schema"] == LIVE_LOOP_HEARTBEAT_SCHEMA_V2
+            and (
+                persisted.get("captured_paper") is not True
+                or persisted.get("account_scope") != meta["account_scope"]
+                or persisted.get("expected_account_id")
+                != meta["expected_account_id"]
+                or persisted.get("runtime_generation")
+                != meta["runtime_generation"]
+                or persisted.get("execution_family")
+                != meta["execution_family"]
+                or persisted.get("live_cash_authorized") is not False
+                or persisted.get("content_sha256") != meta["content_sha256"]
+            )
+        )
     ):
         raise RuntimeError(
             "live-loop heartbeat writer did not persist the exact completed row"
@@ -344,11 +457,59 @@ def _validated_live_loop_heartbeat_row(row: Any) -> dict[str, Any] | None:
     meta = getattr(row, "meta_json", None)
     if started_at is None or ended_at is None or not isinstance(meta, dict):
         return None
-    if set(meta) != _LIVE_LOOP_HEARTBEAT_META_KEYS:
+    schema = meta.get("schema")
+    if schema == LIVE_LOOP_HEARTBEAT_SCHEMA_V1:
+        if set(meta) != _LIVE_LOOP_HEARTBEAT_V1_META_KEYS:
+            return None
+        captured_paper = False
+        captured_identity: dict[str, Any] = {}
+    elif schema == LIVE_LOOP_HEARTBEAT_SCHEMA_V2:
+        if set(meta) != _LIVE_LOOP_HEARTBEAT_V2_META_KEYS:
+            return None
+        supplied_sha256 = str(meta.get("content_sha256") or "").strip()
+        if (
+            len(supplied_sha256) != 64
+            or supplied_sha256 != supplied_sha256.lower()
+            or any(char not in "0123456789abcdef" for char in supplied_sha256)
+            or supplied_sha256 != _heartbeat_content_sha256(meta)
+        ):
+            return None
+        try:
+            expected_account_id = str(
+                uuid.UUID(str(meta.get("expected_account_id") or ""))
+            )
+            runtime_generation = str(
+                uuid.UUID(str(meta.get("runtime_generation") or ""))
+            )
+        except (AttributeError, TypeError, ValueError):
+            return None
+        bound_started_at = _strict_aware_utc(meta.get("row_started_at_utc"))
+        bound_heartbeat_at = _strict_aware_utc(meta.get("heartbeat_at_utc"))
+        if (
+            str(meta.get("expected_account_id") or "").strip().lower()
+            != expected_account_id
+            or str(meta.get("runtime_generation") or "").strip().lower()
+            != runtime_generation
+            or meta.get("account_scope") != "alpaca:paper"
+            or meta.get("execution_family") != "alpaca_spot"
+            or meta.get("live_cash_authorized") is not False
+            or bound_started_at != started_at
+            or bound_heartbeat_at != ended_at
+        ):
+            return None
+        captured_paper = True
+        captured_identity = {
+            "account_scope": "alpaca:paper",
+            "expected_account_id": expected_account_id,
+            "runtime_generation": runtime_generation,
+            "execution_family": "alpaca_spot",
+            "live_cash_authorized": False,
+            "content_sha256": supplied_sha256,
+        }
+    else:
         return None
     if (
-        meta.get("schema") != LIVE_LOOP_HEARTBEAT_SCHEMA
-        or meta.get("scope") != LIVE_LOOP_HEARTBEAT_SCOPE
+        meta.get("scope") != LIVE_LOOP_HEARTBEAT_SCOPE
         or meta.get("owner") != "momentum_live_runner_loop"
     ):
         return None
@@ -384,6 +545,9 @@ def _validated_live_loop_heartbeat_row(row: Any) -> dict[str, Any] | None:
         "generation": generation,
         "generation_identity": generation_identity,
         "scope": LIVE_LOOP_HEARTBEAT_SCOPE,
+        "schema": schema,
+        "captured_paper": captured_paper,
+        **captured_identity,
     }
 
 
@@ -558,6 +722,48 @@ def live_runner_loop_control_health(
         "stale_seconds": stale_after,
         "scope": truth.get("scope") or LIVE_LOOP_HEARTBEAT_SCOPE,
     }
+
+
+def captured_paper_live_runner_control_health(
+    db,
+    *,
+    expected_account_id: str,
+    now: datetime | None = None,
+) -> dict[str, Any]:
+    """Return exact, fresh captured-PAPER heartbeat truth for read-only observers.
+
+    Generic v1 rows remain valid for legacy lane-health monitoring, but cannot prove
+    that the isolated Alpaca PAPER runtime is active.
+    """
+    try:
+        canonical_account_id = str(uuid.UUID(str(expected_account_id or "")))
+    except (AttributeError, TypeError, ValueError):
+        canonical_account_id = ""
+    if canonical_account_id != str(expected_account_id or "").strip().lower():
+        return {
+            "ok": False,
+            "reason": "captured_paper_heartbeat_expected_account_invalid",
+            "scope": LIVE_LOOP_HEARTBEAT_SCOPE,
+        }
+    truth = live_runner_loop_control_health(db, now=now)
+    if truth.get("ok") is not True:
+        return truth
+    if (
+        truth.get("schema") != LIVE_LOOP_HEARTBEAT_SCHEMA_V2
+        or truth.get("captured_paper") is not True
+    ):
+        return {
+            **truth,
+            "ok": False,
+            "reason": "captured_paper_heartbeat_generic",
+        }
+    if truth.get("expected_account_id") != canonical_account_id:
+        return {
+            **truth,
+            "ok": False,
+            "reason": "captured_paper_heartbeat_account_mismatch",
+        }
+    return truth
 
 
 def evaluate_lane_health(db, *, user_id: int | None = None) -> dict[str, Any]:

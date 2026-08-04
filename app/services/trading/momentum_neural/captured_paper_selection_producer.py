@@ -86,6 +86,12 @@ class CapturedPaperSelectionQueueUnavailable(RuntimeError):
     pass
 
 
+class CapturedPaperSelectionQueueReadTimeout(
+    CapturedPaperSelectionQueueUnavailable
+):
+    """A bounded local read exceeded its budget without evidence corruption."""
+
+
 def _reject(code: str, message: str) -> None:
     raise CapturedPaperSelectionProducerError(code, message)
 
@@ -1607,6 +1613,11 @@ class CapturedPaperSelectionProducer:
         self.authority = authority
         self.input_port = input_port
         self.wall_clock = wall_clock
+        # Keep at most one already-verified, immutable queue batch across a
+        # transient database failure.  The persisted frontier is the durable
+        # checkpoint; retrying this exact frontier-bound batch avoids rereading
+        # and rehashing the same captured files before every database retry.
+        self._pending_batch: CapturedPaperSelectionBatch | None = None
 
     def _frontier(self) -> CapturedPaperSelectionFrontierReceipt:
         db = self.session_factory()
@@ -1656,22 +1667,43 @@ class CapturedPaperSelectionProducer:
             unsafe_port = True
         if unsafe_port:
             return self._gap(frontier, "port_capability_unsafe")
-        try:
-            batch = port.read_batch(frontier=frontier, authority=self.authority)
-        except CapturedPaperSelectionProviderUnavailable:
-            return self._gap(frontier, "provider_unavailable")
-        except CapturedPaperSelectionQueueUnavailable:
-            return self._gap(frontier, "queue_unavailable")
-        except Exception:
-            return self._gap(frontier, "input_contract_invalid")
+        batch = self._pending_batch
         if batch is None:
-            return CapturedPaperSelectionTickResult(status="idle", frontier=frontier)
-        if (
-            type(batch) is not CapturedPaperSelectionBatch
-            or batch.authority_sha256 != self.authority.authority_sha256
-            or batch.expected_frontier.frontier_sha256 != frontier.frontier_sha256
-        ):
-            return self._gap(frontier, "input_contract_invalid")
+            try:
+                batch = port.read_batch(
+                    frontier=frontier,
+                    authority=self.authority,
+                )
+            except CapturedPaperSelectionQueueReadTimeout:
+                raise
+            except CapturedPaperSelectionProviderUnavailable:
+                return self._gap(frontier, "provider_unavailable")
+            except CapturedPaperSelectionQueueUnavailable:
+                return self._gap(frontier, "queue_unavailable")
+            except Exception:
+                return self._gap(frontier, "input_contract_invalid")
+            if batch is None:
+                return CapturedPaperSelectionTickResult(status="idle", frontier=frontier)
+            if (
+                type(batch) is not CapturedPaperSelectionBatch
+                or batch.authority_sha256 != self.authority.authority_sha256
+                or batch.expected_frontier.frontier_sha256 != frontier.frontier_sha256
+            ):
+                return self._gap(frontier, "input_contract_invalid")
+        else:
+            expected_frontier = (
+                batch.expected_frontier.frontier_sha256 == frontier.frontier_sha256
+                and batch.source_sequence_from == frontier.last_source_sequence
+            )
+            already_applied = (
+                frontier.last_batch_sha256 == batch.batch_sha256
+                and frontier.last_source_sequence == batch.source_sequence_through
+            )
+            if not (expected_frontier or already_applied):
+                raise CapturedPaperSelectionProducerError(
+                    "PENDING_BATCH_FRONTIER_DRIFT",
+                    "verified pending batch no longer matches the durable frontier",
+                )
         try:
             _validate_batch_integrity(batch)
             if any(
@@ -1687,10 +1719,11 @@ class CapturedPaperSelectionProducer:
                 )
         except CapturedPaperSelectionProducerError:
             return self._gap(frontier, "input_contract_invalid")
+        self._pending_batch = batch
         db = self.session_factory()
         try:
             with db.begin():
-                return apply_captured_paper_selection_batch(
+                result = apply_captured_paper_selection_batch(
                     db,
                     authority=self.authority,
                     batch=batch,
@@ -1698,6 +1731,8 @@ class CapturedPaperSelectionProducer:
                 )
         finally:
             db.close()
+        self._pending_batch = None
+        return result
 
     def record_gap(self, reason_code: str) -> CapturedPaperSelectionTickResult:
         """Persist an explicit local-queue loss which happened before a read."""
@@ -1718,6 +1753,7 @@ __all__ = [
     "CapturedPaperSelectionProducer",
     "CapturedPaperSelectionProducerError",
     "CapturedPaperSelectionProviderUnavailable",
+    "CapturedPaperSelectionQueueReadTimeout",
     "CapturedPaperSelectionQueueUnavailable",
     "CapturedPaperSelectionTickResult",
     "CapturedPaperSelectionVariantBinding",

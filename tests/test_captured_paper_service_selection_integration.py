@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import copy
+import time
 from datetime import datetime, timezone
 from types import SimpleNamespace
 
@@ -36,7 +37,9 @@ from app.services.trading.momentum_neural.context import (
     build_momentum_regime_context,
 )
 from app.services.trading.momentum_neural.replay_capture_runtime import (
+    CaptureAdaptivePressureController,
     CaptureBudgetPolicy,
+    CapturePressureSample,
     CaptureResourceBinding,
     CaptureResourceMeasurement,
     SharedCaptureAdmissionBudget,
@@ -209,7 +212,11 @@ def _resource_binding(now: datetime) -> CaptureResourceBinding:
         pressure_write_latency_exit_milliseconds=25,
         pressure_enter_samples=3,
         pressure_recovery_samples=3,
-        pressure_sample_max_age_seconds=5,
+        # This test starts the selection worker directly instead of running the
+        # supervisor-managed pressure feed. Keep its deterministic seed sample
+        # valid across a cold PostgreSQL initial cycle; production still refreshes
+        # the sealed five-second sample through the pressure-feed worker.
+        pressure_sample_max_age_seconds=30,
         store_owner_lease_seconds=60,
         store_owner_heartbeat_seconds=10,
     )
@@ -288,7 +295,11 @@ class _CommitAckFaultSessionFactory:
         return session
 
 
-def _fake_modules(*, fundamentals_calls: list[str]):
+def _fake_modules(
+    *,
+    fundamentals_calls: list[str],
+    fundamentals_close_timeouts: list[float],
+):
     return {
         "iqfeed_capture_host": SimpleNamespace(
             IqfeedCapturedPaperRuntimeOwner=_RuntimeOwner
@@ -327,7 +338,11 @@ def _fake_modules(*, fundamentals_calls: list[str]):
         "replay_capture_runtime": replay_capture_runtime,
         "app_db": app_db,
         "yf_session": SimpleNamespace(
-            get_fundamentals_receipt=lambda symbol: (
+            open_fundamentals_refresh=lambda: None,
+            close_fundamentals_refresh=lambda *, timeout_seconds: (
+                fundamentals_close_timeouts.append(timeout_seconds)
+            ),
+            get_cached_fundamentals_receipt=lambda symbol: (
                 fundamentals_calls.append(symbol)
                 or FundamentalsReceipt(
                     symbol=symbol,
@@ -379,11 +394,28 @@ def test_real_service_selection_lifecycle_primes_reads_and_rolls_back(
     now = datetime.now(UTC).replace(microsecond=0)
     _seed_complete_selection_universe(db, now=now)
     binding = _resource_binding(now)
-    admission = SharedCaptureAdmissionBudget.from_resource_binding(binding)
+    pressure_controller = CaptureAdaptivePressureController(binding)
+    pressure_controller.observe(
+        CapturePressureSample(
+            observed_at=now,
+            resource_binding_sha256=binding.binding_sha256,
+            cpu_percent=20.0,
+            available_memory_bytes=192_000_000,
+            disk_free_bytes=2_000_000_000,
+            write_latency_milliseconds=5.0,
+        )
+    )
+    admission = SharedCaptureAdmissionBudget.from_resource_binding(
+        binding,
+        pressure_controller=pressure_controller,
+    )
     shared = SharedCaptureStoreRuntime.create(
         tmp_path / "selection-store",
         resource_binding=binding,
         shared_admission_budget=admission,
+        # Keep this lifecycle test portable in the zero-egress Linux lane;
+        # compression identity is covered separately and is not under test here.
+        compression_codec="zlib",
     )
     code_body = {"schema_version": "test.service-code.v1", "files": []}
     code_sha = sha256_json(code_body)
@@ -393,7 +425,12 @@ def test_real_service_selection_lifecycle_primes_reads_and_rolls_back(
     policy_receipt = build_adaptive_risk_policy_from_settings(runtime_settings)
     policy = policy_receipt.policy
     host = SimpleNamespace(
-        composition=SimpleNamespace(binding=binding),
+        composition=SimpleNamespace(
+            binding=binding,
+            # The pressure-feed pre-authority worker reads the sealed freshness
+            # window at assembly and observes samples only after start().
+            pressure_controller=pressure_controller,
+        ),
         captured_paper_config_sha256_for=lambda _symbol: settings_sha,
     )
     prepared = _PreparedCapturedPaperCapture(
@@ -454,7 +491,11 @@ def test_real_service_selection_lifecycle_primes_reads_and_rolls_back(
         chili_tenbeat_entry_tilt_weight=0.0,
     )
     fundamentals_calls: list[str] = []
-    modules = _fake_modules(fundamentals_calls=fundamentals_calls)
+    fundamentals_close_timeouts: list[float] = []
+    modules = _fake_modules(
+        fundamentals_calls=fundamentals_calls,
+        fundamentals_close_timeouts=fundamentals_close_timeouts,
+    )
     commit_ack_factory = _CommitAckFaultSessionFactory()
     commit_ack_factory.fail_next_commit_ack = True
     modules["app_db"] = SimpleNamespace(SessionLocal=commit_ack_factory)
@@ -473,13 +514,25 @@ def test_real_service_selection_lifecycle_primes_reads_and_rolls_back(
     )
     supervisor_kwargs = composition.supervisor.kwargs
     managed = supervisor_kwargs["active_pre_authority_workers"]
-    assert [item.name for item in managed] == ["selection"]
-    worker = managed[0].worker
+    assert [item.name for item in managed] == ["pressure_feed", "selection"]
+    worker = next(
+        item.worker for item in managed if item.name == "selection"
+    )
     rollback = None
     try:
         worker.start()
         health = worker.health()
-        assert health["ready"] is True
+        deadline = time.monotonic() + (
+            float(binding.policy.pressure_sample_max_age_seconds) / 2.0
+        )
+        while (
+            health["ready"] is not True
+            and health["fatal"] is False
+            and time.monotonic() < deadline
+        ):
+            time.sleep(0.005)
+            health = worker.health()
+        assert health["ready"] is True, health
         assert health["fatal"] is False
         assert fundamentals_calls == ["ACTU"]
         read = worker.deferred_reader.read_candidates(
@@ -514,6 +567,7 @@ def test_real_service_selection_lifecycle_primes_reads_and_rolls_back(
         )
         assert remaining == 0
         assert commit_ack_factory.injected_failures == 2
+        assert fundamentals_close_timeouts == [30.0]
     finally:
         worker_health = worker.health()
         if worker_health["running"]:

@@ -751,6 +751,21 @@ def test_l1_connection_wrapper_closes_generation_after_indeterminate_send(
         "create_connection",
         lambda *_args, **_kwargs: connection,
     )
+    monkeypatch.setattr(
+        trade_bridge,
+        "_record_capture_connection_boundary",
+        lambda **_kwargs: None,
+    )
+    monkeypatch.setattr(
+        trade_bridge,
+        "_wait_for_protocol_ack",
+        lambda *_args, **_kwargs: True,
+    )
+    monkeypatch.setattr(
+        trade_bridge,
+        "_wait_for_selected_fields_ack",
+        lambda *_args, **_kwargs: True,
+    )
     monkeypatch.setattr(trade_bridge, "_send", fail_subscription_send)
     monkeypatch.setattr(trade_bridge, "writer", writer)
 
@@ -791,7 +806,7 @@ def test_l2_connection_wrapper_closes_generation_after_indeterminate_send(
         if command_count["value"] == 2:
             raise OSError("ambiguous send")
 
-    def writer(_forced, _deadline) -> None:
+    def writer(_forced, _deadline, _stop) -> None:
         depth_bridge.watched.update({"PLSM", "OTHER"})
         depth_bridge._try_watch_symbol("VEEE")
 
@@ -799,6 +814,11 @@ def test_l2_connection_wrapper_closes_generation_after_indeterminate_send(
         depth_bridge.socket,
         "create_connection",
         lambda *_args, **_kwargs: connection,
+    )
+    monkeypatch.setattr(
+        depth_bridge,
+        "_record_capture_connection_boundary",
+        lambda **_kwargs: None,
     )
     monkeypatch.setattr(depth_bridge, "_send", fail_second_subscription_command)
     monkeypatch.setattr(depth_bridge, "writer", writer)

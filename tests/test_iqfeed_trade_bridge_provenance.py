@@ -38,6 +38,7 @@ def _reset_parser_state() -> None:
     with bridge._connection_state_lock:
         bridge._active_connection_generation = 0
         bridge._frame_sequence_by_generation.clear()
+        bridge._protocol_acknowledged_generations.clear()
         bridge._selected_fields_ack_sha256_by_generation.clear()
     with bridge._capture_handoff_lock:
         bridge._capture_handoff = None
@@ -101,8 +102,8 @@ def test_p_summary_never_writes_authoritative_nbbo_or_notify(monkeypatch):
 
     bridge._parse_l1(_frame(message_type="P"), connection_generation=1)
 
-    assert bridge._pending_nbbo == []
-    assert bridge._pending == []
+    assert not bridge._pending_nbbo
+    assert not bridge._pending
 
 
 @pytest.mark.parametrize("reference_delta", [2.01, -1.01, None])
@@ -114,24 +115,24 @@ def test_stale_future_or_unparseable_q_cannot_create_authoritative_row(
 
     bridge._parse_l1(_frame(), connection_generation=3)
 
-    assert bridge._pending_nbbo == []
+    assert not bridge._pending_nbbo
     # No generic live trade consumer may treat a stale/unparseable Q as fresh.
-    assert bridge._pending == []
+    assert not bridge._pending
 
 
 def test_preconnect_generation_cannot_create_any_row(monkeypatch):
     _reference_delta(monkeypatch, 0.1)
     bridge._parse_l1(_frame(), connection_generation=0)
-    assert bridge._pending_nbbo == []
-    assert bridge._pending == []
+    assert not bridge._pending_nbbo
+    assert not bridge._pending
 
 
 @pytest.mark.parametrize("symbol", ["BTC-USD", "A/B", "ACTU.", "AC..TU"])
 def test_non_equity_symbol_never_enters_bridge_queues(monkeypatch, symbol):
     _reference_delta(monkeypatch, 0.1)
     bridge._parse_l1(_frame(symbol=symbol), connection_generation=1)
-    assert bridge._pending_nbbo == []
-    assert bridge._pending == []
+    assert not bridge._pending_nbbo
+    assert not bridge._pending
 
 
 def test_notify_payload_carries_complete_certified_tuple(monkeypatch):
@@ -203,7 +204,10 @@ def test_release_update_is_bound_to_the_exact_batch_row(monkeypatch):
     assert "source_frame_sha256 = :source_frame_sha256" in sql
 
 
-def test_release_identity_distinguishes_colliding_receive_and_reference_clocks(db):
+def test_release_identity_distinguishes_colliding_receive_and_reference_clocks(
+    db,
+    monkeypatch,
+):
     from app.migrations import _migration_333_iqfeed_source_frame_release_identity
 
     with db.get_bind().connect() as connection:
@@ -235,18 +239,24 @@ def test_release_identity_distinguishes_colliding_receive_and_reference_clocks(d
                 "digest": digest,
             }).scalar_one())
 
-        result = db.execute(bridge.MARK_NBBO_AVAILABLE, {
-            "available_at": released_at,
-            "bridge_run_id": bridge_run_id,
-            "connection_generation": 9,
-            "source_frame_sequence": 41,
-            "source_frame_sha256": "a" * 64,
-            "sym": "M333IDENT",
-            "received_at": received_at,
-            "provider_trade_reference_at": reference_at,
-            "message_type": "Q",
-        })
-        assert result.rowcount == 1
+        monkeypatch.setattr(bridge, "IQFEED_NOTIFY_ENABLED", False)
+        bridge._release_pending_batch(
+            db,
+            trade_rows=[],
+            quote_rows=[
+                {
+                    "bridge_run_id": bridge_run_id,
+                    "connection_generation": 9,
+                    "source_frame_sequence": 41,
+                    "source_frame_sha256": "a" * 64,
+                    "sym": "M333IDENT",
+                    "received_at": received_at,
+                    "provider_trade_reference_at": reference_at,
+                    "message_type": "Q",
+                }
+            ],
+            available_at=released_at,
+        )
         released = db.execute(sa.text(
             "SELECT source_frame_sequence, available_at "
             "FROM momentum_nbbo_spread_tape WHERE id = ANY(:row_ids) "
@@ -260,6 +270,72 @@ def test_release_identity_distinguishes_colliding_receive_and_reference_clocks(d
                 "DELETE FROM momentum_nbbo_spread_tape WHERE id = ANY(:row_ids)"
             ), {"row_ids": row_ids})
             db.commit()
+
+
+def test_set_based_insert_and_release_round_trip_on_postgresql(db, monkeypatch):
+    now = datetime(2026, 7, 28, 16, 42, 7, tzinfo=timezone.utc)
+    bridge_run_id = "889a1dd2-7de9-4ac9-a61e-5566096a1282"
+    digest = hashlib.sha256(b"set-based-round-trip").hexdigest()
+    common = {
+        "sym": "SETBATCH",
+        "at": now.replace(tzinfo=None),
+        "received_at": now - timedelta(milliseconds=2),
+        "provider_trade_reference_at": now - timedelta(milliseconds=3),
+        "provider_at": None,
+        "basis": bridge.AUTHORITATIVE_TIMESTAMP_BASIS,
+        "bridge": bridge.BRIDGE_BUILD,
+        "message_type": "Q",
+        "bridge_run_id": bridge_run_id,
+        "connection_generation": 4,
+        "source_frame_sequence": 91,
+        "source_frame_sha256": digest,
+    }
+    trade_row = {
+        **common,
+        "px": 2.11,
+        "sz": 100.0,
+        "bid": 2.10,
+        "ask": 2.12,
+    }
+    quote_row = {
+        **common,
+        "bid": 2.10,
+        "ask": 2.12,
+        "mid": 2.11,
+        "spread_bps": 94.7867,
+    }
+    monkeypatch.setattr(bridge, "IQFEED_NOTIFY_ENABLED", False)
+    try:
+        bridge._insert_pending_batch(
+            db,
+            trade_rows=[trade_row],
+            quote_rows=[quote_row],
+        )
+        bridge._release_pending_batch(
+            db,
+            trade_rows=[trade_row],
+            quote_rows=[quote_row],
+            available_at=now,
+        )
+        trade_release = db.execute(
+            sa.text(
+                "SELECT available_at FROM iqfeed_trade_ticks "
+                "WHERE bridge_run_id = :run_id "
+                "AND source_frame_sequence = 91"
+            ),
+            {"run_id": bridge_run_id},
+        ).scalar_one()
+        quote_release = db.execute(
+            sa.text(
+                "SELECT available_at FROM momentum_nbbo_spread_tape "
+                "WHERE bridge_run_id = :run_id "
+                "AND source_frame_sequence = 91"
+            ),
+            {"run_id": bridge_run_id},
+        ).scalar_one()
+        assert trade_release == quote_release == now
+    finally:
+        db.rollback()
 
 
 def test_hot_symbols_keep_every_quote_while_broad_symbols_keep_newest(monkeypatch):
@@ -299,6 +375,257 @@ def test_hot_full_fidelity_kill_switch_reverts_to_broad_sampling(monkeypatch):
         ("HOT", 2),
         ("COLD", 4),
     ]
+
+
+def test_pending_db_release_drain_is_bounded_and_keeps_same_frame_together():
+    trade_rows = [
+        {"sym": "A", "connection_generation": 1, "source_frame_sequence": 1},
+        {"sym": "B", "connection_generation": 1, "source_frame_sequence": 2},
+        {"sym": "C", "connection_generation": 1, "source_frame_sequence": 4},
+    ]
+    quote_rows = [
+        {"sym": "B", "connection_generation": 1, "source_frame_sequence": 2},
+        {"sym": "D", "connection_generation": 1, "source_frame_sequence": 3},
+        {"sym": "C", "connection_generation": 1, "source_frame_sequence": 4},
+    ]
+    with bridge._pending_lock:
+        bridge._pending.extend(trade_rows)
+        bridge._pending_nbbo.extend(quote_rows)
+
+    trades, quotes, backlog = bridge._drain_pending_write_batch(max_events=3)
+
+    assert [row["source_frame_sequence"] for row in trades] == [1, 2]
+    assert [row["source_frame_sequence"] for row in quotes] == [2]
+    assert backlog is True
+    with bridge._pending_lock:
+        assert [row["source_frame_sequence"] for row in bridge._pending] == [4]
+        assert [row["source_frame_sequence"] for row in bridge._pending_nbbo] == [3, 4]
+
+
+def test_pending_db_release_drain_removes_each_selected_prefix_once(monkeypatch):
+    class _DeleteCountingList(list):
+        def __init__(self, rows):
+            super().__init__(rows)
+            self.delete_calls = 0
+
+        def __delitem__(self, key):
+            self.delete_calls += 1
+            return super().__delitem__(key)
+
+    trade_rows = _DeleteCountingList(
+        {
+            "sym": "BULK",
+            "connection_generation": 1,
+            "source_frame_sequence": sequence,
+        }
+        for sequence in range(1, 401)
+    )
+    quote_rows = _DeleteCountingList(
+        {
+            "sym": "BULK",
+            "connection_generation": 1,
+            "source_frame_sequence": sequence,
+        }
+        for sequence in range(1, 401)
+    )
+    monkeypatch.setattr(bridge, "_pending", trade_rows)
+    monkeypatch.setattr(bridge, "_pending_nbbo", quote_rows)
+
+    trades, quotes, backlog = bridge._drain_pending_write_batch(max_events=256)
+
+    assert len(trades) == len(quotes) == 128
+    assert backlog is True
+    assert trade_rows.delete_calls == 1
+    assert quote_rows.delete_calls == 1
+
+
+def test_pending_db_release_drain_is_atomic_on_later_malformed_frame():
+    rows = [
+        {"sym": "GOOD", "connection_generation": 1, "source_frame_sequence": 1},
+        {"sym": "BAD", "connection_generation": 1},
+    ]
+    with bridge._pending_lock:
+        bridge._pending.extend(rows)
+
+    with pytest.raises(ValueError, match="pending frame identity is malformed"):
+        bridge._drain_pending_write_batch(max_events=256)
+
+    with bridge._pending_lock:
+        assert bridge._pending == rows
+
+
+def test_pending_backlog_uses_bounded_catchup_batch():
+    assert bridge._release_batch_event_limit(pending_backlog=False) == (
+        bridge.DB_RELEASE_BATCH_EVENTS
+    )
+    catchup_limit = bridge._release_batch_event_limit(pending_backlog=True)
+    assert catchup_limit == bridge.DB_RELEASE_CATCHUP_BATCH_EVENTS
+    assert catchup_limit > bridge.DB_RELEASE_BATCH_EVENTS
+    # The widest VALUES statement has 18 bind parameters per retained event.
+    assert catchup_limit * 18 < 65_535
+
+
+def test_pending_backlog_is_refreshed_after_new_arrival():
+    assert bridge._pending_write_backlog() is False
+    with bridge._pending_lock:
+        bridge._pending_nbbo.append(
+            {
+                "sym": "NEW",
+                "connection_generation": 1,
+                "source_frame_sequence": 1,
+            }
+        )
+    assert bridge._pending_write_backlog() is True
+
+
+def test_selected_frame_enqueues_trade_and_quote_in_one_atomic_call(monkeypatch):
+    generation = 17
+    bridge._activate_connection_generation(generation)
+    ack_line = "S,CURRENT UPDATE FIELDNAMES," + ",".join(
+        bridge.SELECTED_UPDATE_FIELDS
+    ) + ","
+    ack_sha256 = hashlib.sha256(ack_line.encode()).hexdigest()
+    assert bridge._observe_selected_update_fields_ack(
+        ack_line,
+        connection_generation=generation,
+        source_frame_sha256=ack_sha256,
+    )
+    values = {
+        "Symbol": "ATOMIC",
+        "Most Recent Trade": "2.11",
+        "Most Recent Trade Size": "100",
+        "Most Recent Trade Time": "12:42:07.000000",
+        "Most Recent Trade Date": "2026-07-28",
+        "Most Recent Trade Market Center": "Q",
+        "Most Recent Trade Conditions": "",
+        "TickID": "17",
+        "Bid": "2.10",
+        "Bid Size": "200",
+        "Bid Time": "12:42:06.999999",
+        "Ask": "2.12",
+        "Ask Size": "300",
+        "Ask Time": "12:42:07.000000",
+        "Total Volume": "10000",
+        "Delay": "0",
+        "Message Contents": "C",
+        "Decimal Precision": "4",
+    }
+    frame = "Q," + ",".join(
+        values[field] for field in bridge.SELECTED_UPDATE_FIELDS
+    )
+    calls = []
+    monkeypatch.setattr(
+        bridge,
+        "_enqueue_pending_frame",
+        lambda **kwargs: calls.append(kwargs),
+    )
+
+    assert bridge._parse_selected_l1(
+        frame,
+        connection_generation=generation,
+        selected_fields_ack_sha256=ack_sha256,
+        received_at=datetime(
+            2026,
+            7,
+            28,
+            16,
+            42,
+            7,
+            100000,
+            tzinfo=timezone.utc,
+        ),
+        source_frame_sha256=hashlib.sha256(frame.encode()).hexdigest(),
+    ) == (True, True)
+    assert len(calls) == 1
+    trade_row = calls[0]["trade_row"]
+    quote_row = calls[0]["quote_row"]
+    assert trade_row is not None and quote_row is not None
+    assert (
+        trade_row["connection_generation"],
+        trade_row["source_frame_sequence"],
+        trade_row["source_frame_sha256"],
+    ) == (
+        quote_row["connection_generation"],
+        quote_row["source_frame_sequence"],
+        quote_row["source_frame_sha256"],
+    )
+
+
+def test_vectorized_db_release_has_constant_statement_count_for_full_batch(
+    monkeypatch,
+):
+    monkeypatch.setattr(bridge, "IQFEED_NOTIFY_ENABLED", True)
+    release_at = datetime(2026, 7, 28, 16, 42, 7, tzinfo=timezone.utc)
+    trade_rows = []
+    quote_rows = []
+    for sequence in range(1, bridge.DB_RELEASE_BATCH_EVENTS + 1, 2):
+        common = {
+            "sym": f"S{sequence}",
+            "at": release_at.replace(tzinfo=None),
+            "received_at": release_at - timedelta(milliseconds=5),
+            "provider_trade_reference_at": release_at - timedelta(milliseconds=6),
+            "provider_at": None,
+            "basis": bridge.AUTHORITATIVE_TIMESTAMP_BASIS,
+            "bridge": bridge.BRIDGE_BUILD,
+            "message_type": "Q",
+            "bridge_run_id": bridge.BRIDGE_RUN_ID,
+            "connection_generation": 1,
+            "source_frame_sequence": sequence,
+            "source_frame_sha256": hashlib.sha256(
+                f"frame-{sequence}".encode()
+            ).hexdigest(),
+        }
+        trade_rows.append(
+            {
+                **common,
+                "px": 1.0,
+                "sz": 100.0,
+                "bid": 0.99,
+                "ask": 1.01,
+            }
+        )
+        quote_rows.append(
+            {
+                **common,
+                "mid": 1.0,
+                "spread_bps": 200.0,
+                "bid": 0.99,
+                "ask": 1.01,
+            }
+        )
+
+    class _Result:
+        def __init__(self, rowcount):
+            self.rowcount = rowcount
+
+    class _Connection:
+        def __init__(self, rowcounts):
+            self.rowcounts = list(rowcounts)
+            self.calls = []
+
+        def execute(self, statement, *_args, **_kwargs):
+            self.calls.append(statement)
+            return _Result(self.rowcounts.pop(0))
+
+    insert_connection = _Connection([len(trade_rows), len(quote_rows)])
+    bridge._insert_pending_batch(
+        insert_connection,
+        trade_rows=trade_rows,
+        quote_rows=quote_rows,
+    )
+    assert len(insert_connection.calls) == 2
+
+    release_connection = _Connection(
+        [len(trade_rows), len(quote_rows), len(quote_rows)]
+    )
+    bridge._release_pending_batch(
+        release_connection,
+        trade_rows=trade_rows,
+        quote_rows=quote_rows,
+        available_at=release_at,
+    )
+    assert len(release_connection.calls) == 3
+    assert all(row["available_at"] == release_at for row in quote_rows)
 
 
 def test_trade_reference_is_not_mislabeled_provider_event(monkeypatch):
@@ -489,6 +816,7 @@ def test_connection_runner_closes_and_joins_reader_before_rebind(monkeypatch):
 
     monkeypatch.setattr(bridge.socket, "create_connection", _create_connection)
     monkeypatch.setattr(bridge, "writer", _writer)
+    monkeypatch.setattr(bridge, "_wait_for_protocol_ack", lambda *_a, **_k: True)
     monkeypatch.setattr(bridge, "_wait_for_selected_fields_ack", lambda *_a, **_k: True)
 
     bridge._run_connection(set(), None)
@@ -497,6 +825,142 @@ def test_connection_runner_closes_and_joins_reader_before_rebind(monkeypatch):
     assert create_count["value"] == 2
     assert second.closed.is_set()
     assert second.reader_exited.is_set()
+
+
+def test_connection_runner_waits_for_protocol_ack_before_selecting_fields(
+    monkeypatch,
+):
+    class _HandshakeSocket:
+        def __init__(self):
+            self.condition = bridge.threading.Condition()
+            self.responses = []
+            self.closed = False
+            self.protocol_frame_delivered = bridge.threading.Event()
+            self.select_followed_protocol_ack = None
+            self.sent = []
+
+        def settimeout(self, _timeout):
+            return None
+
+        def sendall(self, payload):
+            command = payload.decode("ascii").rstrip("\r\n")
+            with self.condition:
+                self.sent.append(command)
+                if command == "S,SET PROTOCOL,6.2":
+                    self.responses.append(b"S,CURRENT PROTOCOL,6.2\r\n")
+                elif command == bridge.SELECT_UPDATE_FIELDS_COMMAND:
+                    self.select_followed_protocol_ack = (
+                        self.protocol_frame_delivered.is_set()
+                    )
+                    ack = (
+                        "S,CURRENT UPDATE FIELDNAMES,"
+                        + ",".join(bridge.SELECTED_UPDATE_FIELDS)
+                        + ",\r\n"
+                    )
+                    self.responses.append(ack.encode("ascii"))
+                self.condition.notify_all()
+
+        def recv(self, _size):
+            with self.condition:
+                self.condition.wait_for(
+                    lambda: self.responses or self.closed,
+                    timeout=2.0,
+                )
+                if self.responses:
+                    response = self.responses.pop(0)
+                    if response.startswith(b"S,CURRENT PROTOCOL,6.2"):
+                        self.protocol_frame_delivered.set()
+                    return response
+                return b""
+
+        def shutdown(self, _how):
+            with self.condition:
+                self.closed = True
+                self.condition.notify_all()
+
+        def close(self):
+            self.shutdown(None)
+
+    connection = _HandshakeSocket()
+    monkeypatch.setattr(
+        bridge.socket,
+        "create_connection",
+        lambda *_a, **_k: connection,
+    )
+    monkeypatch.setattr(
+        bridge,
+        "_record_capture_connection_boundary",
+        lambda **_k: None,
+    )
+    monkeypatch.setattr(bridge, "writer", lambda *_a: None)
+
+    bridge._run_connection(set(), None)
+
+    assert connection.select_followed_protocol_ack is True
+    assert connection.sent[:2] == [
+        "S,SET PROTOCOL,6.2",
+        bridge.SELECT_UPDATE_FIELDS_COMMAND,
+    ]
+
+
+def test_connection_runner_retries_field_selection_once_after_missing_ack(
+    monkeypatch,
+):
+    class _BlockingSocket:
+        def __init__(self):
+            self.closed = bridge.threading.Event()
+
+        def settimeout(self, _timeout):
+            return None
+
+        def recv(self, _size):
+            self.closed.wait(timeout=2.0)
+            return b""
+
+        def shutdown(self, _how):
+            self.closed.set()
+
+        def close(self):
+            self.closed.set()
+
+    connection = _BlockingSocket()
+    sent = []
+    acknowledgements = iter((False, True))
+    monkeypatch.setattr(
+        bridge.socket,
+        "create_connection",
+        lambda *_a, **_k: connection,
+    )
+    monkeypatch.setattr(
+        bridge,
+        "_record_capture_connection_boundary",
+        lambda **_k: None,
+    )
+    monkeypatch.setattr(
+        bridge,
+        "_wait_for_protocol_ack",
+        lambda *_a, **_k: True,
+    )
+    monkeypatch.setattr(
+        bridge,
+        "_wait_for_selected_fields_ack",
+        lambda *_a, **_k: next(acknowledgements),
+    )
+    monkeypatch.setattr(
+        bridge,
+        "_send",
+        lambda _socket, command: sent.append(command),
+    )
+    monkeypatch.setattr(bridge, "writer", lambda *_a: None)
+
+    bridge._run_connection(set(), None)
+
+    assert sent == [
+        "S,SET PROTOCOL,6.2",
+        bridge.SELECT_UPDATE_FIELDS_COMMAND,
+        bridge.SELECT_UPDATE_FIELDS_COMMAND,
+    ]
+    assert connection.closed.is_set()
 
 
 def test_nonquiescent_reader_refuses_reconnect(monkeypatch):
@@ -529,6 +993,7 @@ def test_nonquiescent_reader_refuses_reconnect(monkeypatch):
     stuck = _StuckSocket()
     monkeypatch.setattr(bridge.socket, "create_connection", lambda *_a, **_k: stuck)
     monkeypatch.setattr(bridge, "READER_JOIN_TIMEOUT_S", 0.01)
+    monkeypatch.setattr(bridge, "_wait_for_protocol_ack", lambda *_a, **_k: True)
     monkeypatch.setattr(bridge, "_wait_for_selected_fields_ack", lambda *_a, **_k: True)
     monkeypatch.setattr(
         bridge,

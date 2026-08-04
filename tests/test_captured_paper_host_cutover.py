@@ -27,6 +27,16 @@ def _issuer_apply_cmdline(
     prepared: cutover.PreparedCutover, journal_root: Path
 ) -> list[str]:
     source = Path(cutover.__file__).resolve(strict=True)
+    attempt_positions = [
+        index
+        for index, value in enumerate(prepared.invocation.launcher_arguments)
+        if value == "-StartupAttemptId"
+    ]
+    attempt_id = (
+        prepared.invocation.launcher_arguments[attempt_positions[0] + 1]
+        if len(attempt_positions) == 1
+        else None
+    )
     values = [
         sys.executable,
         "-I",
@@ -40,7 +50,9 @@ def _issuer_apply_cmdline(
         "--target", str(source),
         "--target-sha256", hashlib.sha256(source.read_bytes()).hexdigest(),
         "--",
-        "--mode", cutover.MODE_APPLY,
+        "--mode", (
+            cutover.MODE_RESTART_ONLY if attempt_id else cutover.MODE_APPLY
+        ),
         "--manifest", str(prepared.manifest_path),
         "--manifest-sha256", prepared.manifest_sha256,
         "--candidate-root", str(prepared.candidate_root),
@@ -58,6 +70,8 @@ def _issuer_apply_cmdline(
             "--confirm-fake-money-paper", cutover.APPLY_CONFIRMATION,
         )
     )
+    if attempt_id:
+        values.extend(("--startup-attempt-id", attempt_id))
     return values
 
 
@@ -446,6 +460,394 @@ def test_windows_backend_allows_only_recreator_query_toggle_and_end(
         assert ("/End", "/TN", name) in calls
 
 
+def test_windows_backend_holds_exact_iqconnect_listener_guard(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import psutil
+
+    executable = tmp_path / "iqconnect.exe"
+    executable.write_bytes(b"sealed-iqconnect")
+    executable_sha = hashlib.sha256(executable.read_bytes()).hexdigest()
+    monkeypatch.setattr(cutover, "IQCONNECT_EXECUTABLE_PATH", executable)
+    monkeypatch.setattr(
+        cutover, "IQCONNECT_EXECUTABLE_SHA256", executable_sha
+    )
+    monkeypatch.setattr(
+        cutover,
+        "_stable_local_file_unrooted",
+        lambda value, **_kwargs: (
+            Path(value).resolve(strict=True),
+            hashlib.sha256(Path(value).read_bytes()).hexdigest(),
+        ),
+    )
+
+    class ExactProcess:
+        info = {"pid": 4242, "name": "iqconnect.exe"}
+
+    class ExactIdentity:
+        @staticmethod
+        def exe() -> str:
+            return str(executable)
+
+        @staticmethod
+        def create_time() -> float:
+            return 1234.5
+
+    class FakePsutil:
+        NoSuchProcess = psutil.NoSuchProcess
+        AccessDenied = psutil.AccessDenied
+        ZombieProcess = psutil.ZombieProcess
+        CONN_LISTEN = "LISTEN"
+
+        @staticmethod
+        def process_iter(*_args, **_kwargs):
+            return (ExactProcess(),)
+
+        @staticmethod
+        def Process(pid: int):
+            assert pid == 4242
+            return ExactIdentity()
+
+        @staticmethod
+        def net_connections(*, kind: str):
+            assert kind == "tcp"
+            return tuple(
+                SimpleNamespace(
+                    pid=4242,
+                    status="LISTEN",
+                    laddr=SimpleNamespace(ip=host, port=port),
+                )
+                for host, port in cutover.IQCONNECT_REQUIRED_LISTENERS
+            )
+
+    class GuardSocket:
+        def __init__(self, endpoint: tuple[str, int]) -> None:
+            self.endpoint = endpoint
+            self.closed = False
+
+        def settimeout(self, value) -> None:
+            assert value is None
+
+        def getpeername(self) -> tuple[str, int]:
+            if self.closed:
+                raise OSError("closed")
+            return self.endpoint
+
+        def getsockopt(self, *_args) -> int:
+            if self.closed:
+                raise OSError("closed")
+            return 0
+
+        def close(self) -> None:
+            self.closed = True
+
+    opened: list[GuardSocket] = []
+
+    def connect(endpoint, *, timeout):
+        assert timeout == cutover.IQCONNECT_GUARD_CONNECT_TIMEOUT_SECONDS
+        client = GuardSocket(tuple(endpoint))
+        opened.append(client)
+        return client
+
+    monkeypatch.setattr(cutover.socket, "create_connection", connect)
+    monkeypatch.setattr(
+        cutover.select, "select", lambda *_args: ([], [], [])
+    )
+    backend = object.__new__(cutover.WindowsHostCutoverBackend)
+    backend._psutil = FakePsutil()
+    backend._bindings = {}
+    backend._iqconnect_guard_sockets = ()
+    backend._iqconnect_guard_observation = None
+
+    observation = backend.acquire_iqconnect_provider_guard()
+    backend.assert_iqconnect_provider_guard_current(observation)
+    assert observation.pid == 4242
+    assert observation.executable_sha256 == executable_sha
+    assert observation.listeners == cutover.IQCONNECT_REQUIRED_LISTENERS
+    assert [client.endpoint for client in opened] == list(
+        cutover.IQCONNECT_REQUIRED_LISTENERS
+    )
+    monkeypatch.setattr(
+        backend,
+        "_iqconnect_provider_observation",
+        lambda: replace(observation, pid=observation.pid + 1),
+    )
+    with pytest.raises(
+        cutover.CapturedPaperHostCutoverError,
+        match="IQCONNECT_PROVIDER_GUARD_LOST",
+    ):
+        backend.assert_iqconnect_provider_guard_current(observation)
+
+    backend.release_iqconnect_provider_guard()
+    assert all(client.closed for client in opened)
+
+
+def test_windows_backend_rejects_iqconnect_binary_drift_before_connect(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    executable = tmp_path / "iqconnect.exe"
+    executable.write_bytes(b"drifted-iqconnect")
+    monkeypatch.setattr(cutover, "IQCONNECT_EXECUTABLE_PATH", executable)
+    monkeypatch.setattr(cutover, "IQCONNECT_EXECUTABLE_SHA256", "a" * 64)
+    monkeypatch.setattr(
+        cutover,
+        "_stable_local_file_unrooted",
+        lambda value, **_kwargs: (
+            Path(value).resolve(strict=True),
+            hashlib.sha256(Path(value).read_bytes()).hexdigest(),
+        ),
+    )
+    connected: list[object] = []
+    monkeypatch.setattr(
+        cutover.socket,
+        "create_connection",
+        lambda *_args, **_kwargs: connected.append(object()),
+    )
+    backend = object.__new__(cutover.WindowsHostCutoverBackend)
+    backend._iqconnect_guard_sockets = ()
+    backend._iqconnect_guard_observation = None
+
+    with pytest.raises(
+        cutover.CapturedPaperHostCutoverError,
+        match="IQCONNECT_EXECUTABLE_DRIFT",
+    ):
+        backend.acquire_iqconnect_provider_guard()
+    assert connected == []
+
+
+def test_windows_backend_types_absent_iqconnect_for_sealed_recovery(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import psutil
+
+    executable = tmp_path / "iqconnect.exe"
+    executable.write_bytes(b"sealed-iqconnect")
+    executable_sha = hashlib.sha256(executable.read_bytes()).hexdigest()
+    monkeypatch.setattr(cutover, "IQCONNECT_EXECUTABLE_PATH", executable)
+    monkeypatch.setattr(
+        cutover, "IQCONNECT_EXECUTABLE_SHA256", executable_sha
+    )
+
+    class EmptyPsutil:
+        NoSuchProcess = psutil.NoSuchProcess
+        AccessDenied = psutil.AccessDenied
+        ZombieProcess = psutil.ZombieProcess
+
+        @staticmethod
+        def process_iter(*_args, **_kwargs):
+            return ()
+
+    backend = object.__new__(cutover.WindowsHostCutoverBackend)
+    backend._psutil = EmptyPsutil()
+    backend._bindings = {}
+    backend._iqconnect_guard_sockets = ()
+    backend._iqconnect_guard_observation = None
+
+    with pytest.raises(
+        cutover.CapturedPaperHostCutoverError,
+        match="IQCONNECT_PROCESS_ABSENT",
+    ):
+        backend.acquire_iqconnect_provider_guard()
+
+
+def test_iqconnect_guard_endpoints_match_bridge_runtime_constants() -> None:
+    from scripts import iqfeed_depth_bridge
+    from scripts import iqfeed_trade_bridge
+
+    assert cutover.IQCONNECT_CLIENT_ENDPOINT_BY_ROLE == {
+        "iqfeed_trade_bridge": (
+            iqfeed_trade_bridge.HOST,
+            iqfeed_trade_bridge.PORT,
+        ),
+        "iqfeed_depth_bridge": (
+            iqfeed_depth_bridge.HOST,
+            iqfeed_depth_bridge.PORT,
+        ),
+    }
+    assert set(cutover.IQCONNECT_REQUIRED_LISTENERS) == set(
+        cutover.IQCONNECT_CLIENT_ENDPOINT_BY_ROLE.values()
+    )
+
+
+def test_windows_backend_detects_closed_iqconnect_guard_peer(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    listener = cutover.socket.socket(
+        cutover.socket.AF_INET, cutover.socket.SOCK_STREAM
+    )
+    listener.bind(("127.0.0.1", 0))
+    listener.listen(1)
+    endpoint = listener.getsockname()
+    client = cutover.socket.create_connection(endpoint, timeout=2)
+    accepted, _ = listener.accept()
+    listener.close()
+    observation = cutover.IqconnectProviderGuardObservation(
+        pid=4242,
+        create_time_ns=123456789,
+        executable_path=r"E:\DTN\IQFeed\iqconnect.exe",
+        executable_sha256="a" * 64,
+        listeners=(endpoint,),
+        guard_connection_count=1,
+    )
+    backend = object.__new__(cutover.WindowsHostCutoverBackend)
+    backend._iqconnect_guard_sockets = (client,)
+    backend._iqconnect_guard_observation = observation
+    monkeypatch.setattr(
+        cutover, "IQCONNECT_REQUIRED_LISTENERS", (endpoint,)
+    )
+    monkeypatch.setattr(
+        backend,
+        "_iqconnect_provider_observation",
+        lambda: observation,
+    )
+    accepted.close()
+    deadline = time.monotonic() + 2.0
+    while time.monotonic() < deadline:
+        readable, _, _ = cutover.select.select([client], [], [], 0.05)
+        if readable:
+            break
+    try:
+        with pytest.raises(
+            cutover.CapturedPaperHostCutoverError,
+            match="IQCONNECT_PROVIDER_GUARD_LOST",
+        ):
+            backend.assert_iqconnect_provider_guard_current(observation)
+    finally:
+        backend.release_iqconnect_provider_guard()
+
+
+def test_windows_backend_waits_for_exact_legacy_client_handoff(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    identities = {
+        role: cutover.ProcessIdentity(
+            pid=pid,
+            create_time_ns=1_000_000_000,
+            executable_path=rf"C:\Python\{role}.exe",
+            executable_sha256=str(pid) * 64,
+            cmdline=(role,),
+            cmdline_sha256=hashlib.sha256(role.encode()).hexdigest(),
+            role=role,
+            bridge_script_path=None,
+            bridge_script_sha256=None,
+        )
+        for role, pid in (
+            ("iqfeed_trade_bridge", 1111),
+            ("iqfeed_depth_bridge", 2222),
+        )
+    }
+    calls: dict[int, int] = {1111: 0, 2222: 0}
+    disconnected_roles: set[str] = set()
+
+    class RestoredProcess:
+        def __init__(self, identity: cutover.ProcessIdentity) -> None:
+            self.identity = identity
+
+        def create_time(self) -> float:
+            return 1.0
+
+        def net_connections(self, *, kind: str):
+            assert kind == "tcp"
+            calls[self.identity.pid] += 1
+            if (
+                self.identity.role in disconnected_roles
+                or calls[self.identity.pid] == 1
+            ):
+                return ()
+            host, port = cutover.IQCONNECT_CLIENT_ENDPOINT_BY_ROLE[
+                self.identity.role
+            ]
+            return (
+                SimpleNamespace(
+                    status="ESTABLISHED",
+                    raddr=SimpleNamespace(ip=host, port=port),
+                ),
+            )
+
+    class HandoffPsutil:
+        NoSuchProcess = Exception
+        ZombieProcess = Exception
+        AccessDenied = Exception
+        CONN_ESTABLISHED = "ESTABLISHED"
+
+        @staticmethod
+        def Process(pid: int):
+            return RestoredProcess(
+                next(item for item in identities.values() if item.pid == pid)
+            )
+
+    backend = object.__new__(cutover.WindowsHostCutoverBackend)
+    backend._psutil = HandoffPsutil()
+    monkeypatch.setattr(
+        backend,
+        "get_process",
+        lambda pid, *, role: identities[role]
+        if identities[role].pid == pid
+        else None,
+    )
+    guard = cutover.IqconnectProviderGuardObservation(
+        pid=4242,
+        create_time_ns=123456789,
+        executable_path=r"E:\DTN\IQFeed\iqconnect.exe",
+        executable_sha256="a" * 64,
+        listeners=cutover.IQCONNECT_REQUIRED_LISTENERS,
+        guard_connection_count=2,
+    )
+    guard_checks: list[object] = []
+    monkeypatch.setattr(
+        backend,
+        "assert_iqconnect_provider_guard_current",
+        lambda expected: guard_checks.append(expected),
+    )
+    monkeypatch.setattr(
+        backend,
+        "_iqconnect_provider_observation",
+        lambda: guard,
+    )
+    sleeps: list[float] = []
+    monkeypatch.setattr(cutover.time, "sleep", sleeps.append)
+
+    backend.await_iqconnect_provider_guard_handoff(
+        guard,
+        tuple(identities.values()),
+        timeout_seconds=1.0,
+    )
+
+    assert calls == {1111: 3, 2222: 3}
+    assert sleeps == [cutover.IQCONNECT_GUARD_HANDOFF_POLL_SECONDS]
+    assert guard_checks == [guard]
+    backend.assert_iqconnect_provider_handoff_current(
+        guard,
+        tuple(identities.values()),
+    )
+
+    disconnected_roles.add("iqfeed_depth_bridge")
+    with pytest.raises(
+        cutover.CapturedPaperHostCutoverError,
+        match="IQCONNECT_PROVIDER_HANDOFF_LOST",
+    ):
+        backend.assert_iqconnect_provider_handoff_current(
+            guard,
+            tuple(identities.values()),
+        )
+    monotonic_values = iter((0.0, 2.0))
+    monkeypatch.setattr(
+        cutover.time, "monotonic", lambda: next(monotonic_values)
+    )
+    with pytest.raises(
+        cutover.CapturedPaperHostCutoverError,
+        match="IQCONNECT_PROVIDER_HANDOFF_TIMEOUT",
+    ):
+        backend.await_iqconnect_provider_guard_handoff(
+            guard,
+            tuple(identities.values()),
+            timeout_seconds=1.0,
+        )
+
+
 @pytest.mark.parametrize("python_name", ["python.exe", "pythonw.exe"])
 def test_recreator_inventory_detects_orphaned_python_orchestrator(
     monkeypatch: pytest.MonkeyPatch,
@@ -477,6 +879,66 @@ def test_recreator_inventory_detects_orphaned_python_orchestrator(
     assert backend.await_execution_lane_recreator_processes(
         timeout_seconds=0.0
     ) == (f"4242:{python_name}:matched",)
+
+
+def test_recreator_inventory_ignores_unrelated_shared_hidden_wrapper(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import psutil
+
+    class UnrelatedHiddenTask:
+        info = {"pid": 4243, "name": "wscript.exe"}
+
+        @staticmethod
+        def cmdline() -> list[str]:
+            return [
+                r"C:\Windows\System32\wscript.exe",
+                r"D:\dev\chili-home-copilot\scripts\run-hidden.vbs",
+                r"C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe",
+                "-File",
+                r"D:\CHILI-Docker\scripts\nightly-replay.ps1",
+            ]
+
+    monkeypatch.setattr(
+        psutil,
+        "process_iter",
+        lambda *_args, **_kwargs: (UnrelatedHiddenTask(),),
+    )
+    backend = object.__new__(cutover.WindowsHostCutoverBackend)
+
+    assert backend.await_execution_lane_recreator_processes(
+        timeout_seconds=0.0
+    ) == ()
+
+
+def test_recreator_inventory_detects_task_specific_script_behind_shared_wrapper(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import psutil
+
+    class DockerSocketGuard:
+        info = {"pid": 4244, "name": "wscript.exe"}
+
+        @staticmethod
+        def cmdline() -> list[str]:
+            return [
+                r"C:\Windows\System32\wscript.exe",
+                r"D:\dev\chili-home-copilot\scripts\run-hidden.vbs",
+                r"C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe",
+                "-File",
+                r"D:\dev\chili-home-copilot\scripts\docker-socket-guard.ps1",
+            ]
+
+    monkeypatch.setattr(
+        psutil,
+        "process_iter",
+        lambda *_args, **_kwargs: (DockerSocketGuard(),),
+    )
+    backend = object.__new__(cutover.WindowsHostCutoverBackend)
+
+    assert backend.await_execution_lane_recreator_processes(
+        timeout_seconds=0.0
+    ) == ("4244:wscript.exe:matched",)
 
 
 def _active_start_authority_fixture(
@@ -582,6 +1044,13 @@ class FakeHost:
         self.execution_lane_recreator_states = {
             name: True for name in cutover.EXECUTION_LANE_RECREATOR_TASKS
         }
+        self.iqconnect_guard_active = False
+        self.iqconnect_guard_checks = 0
+        self.fail_guard_assert_number: int | None = None
+        self.iqconnect_provider_current = True
+        self.iqconnect_client_roles_current = set(
+            cutover.IQCONNECT_CLIENT_ENDPOINT_BY_ROLE
+        )
 
     def _maybe_fail(self, operation: str, *, after: bool = False) -> None:
         if (
@@ -673,11 +1142,13 @@ class FakeHost:
     def find_candidate_tasks(
         self, invocation: cutover.CandidateInvocation
     ) -> tuple[cutover.TaskObservation, ...]:
-        del invocation
+        expected_arguments = cutover._quote_windows_arguments(
+            invocation.launcher_arguments
+        )
         return tuple(
             item
             for item in self.tasks.values()
-            if item.xml_sha256 == self.prepared.resolved_task_xml_sha256
+            if cutover._task_exec_from_xml(item.xml)[1] == expected_arguments
         )
 
     def get_process(self, pid: int, *, role: str) -> cutover.ProcessIdentity | None:
@@ -691,6 +1162,89 @@ class FakeHost:
         self.processes.pop(expected.pid)
         self.mutations.append(operation)
         self._maybe_fail(operation, after=True)
+
+    def acquire_iqconnect_provider_guard(
+        self,
+    ) -> cutover.IqconnectProviderGuardObservation:
+        operation = "iqconnect-guard:acquire"
+        self._maybe_fail(operation)
+        assert not self.iqconnect_guard_active
+        self.iqconnect_guard_active = True
+        self.mutations.append(operation)
+        self._maybe_fail(operation, after=True)
+        return cutover.IqconnectProviderGuardObservation(
+            pid=7777,
+            create_time_ns=123456789,
+            executable_path=str(cutover.IQCONNECT_EXECUTABLE_PATH),
+            executable_sha256=cutover.IQCONNECT_EXECUTABLE_SHA256,
+            listeners=cutover.IQCONNECT_REQUIRED_LISTENERS,
+            guard_connection_count=len(cutover.IQCONNECT_REQUIRED_LISTENERS),
+        )
+
+    def assert_iqconnect_provider_guard_current(
+        self, expected: cutover.IqconnectProviderGuardObservation
+    ) -> None:
+        assert expected.executable_sha256 == cutover.IQCONNECT_EXECUTABLE_SHA256
+        self.iqconnect_guard_checks += 1
+        if self.fail_guard_assert_number == self.iqconnect_guard_checks:
+            raise cutover.CapturedPaperHostCutoverError(
+                "IQCONNECT_PROVIDER_GUARD_LOST",
+                "injected IQConnect continuity loss",
+            )
+        if not self.iqconnect_guard_active:
+            raise cutover.CapturedPaperHostCutoverError(
+                "IQCONNECT_PROVIDER_GUARD_LOST",
+                "injected IQConnect continuity loss",
+            )
+        self.mutations.append("iqconnect-guard:assert")
+
+    def await_iqconnect_provider_guard_handoff(
+        self,
+        expected: cutover.IqconnectProviderGuardObservation,
+        restored_clients: tuple[cutover.ProcessIdentity, ...],
+        *,
+        timeout_seconds: float,
+    ) -> None:
+        assert self.iqconnect_guard_active
+        assert timeout_seconds == cutover.IQCONNECT_GUARD_HANDOFF_TIMEOUT_SECONDS
+        assert sorted(item.role for item in restored_clients) == [
+            "iqfeed_depth_bridge",
+            "iqfeed_trade_bridge",
+        ]
+        self.assert_iqconnect_provider_guard_current(expected)
+        self.mutations.append("iqconnect-guard:handoff")
+
+    def assert_iqconnect_provider_handoff_current(
+        self,
+        expected: cutover.IqconnectProviderGuardObservation,
+        restored_clients: tuple[cutover.ProcessIdentity, ...],
+    ) -> None:
+        assert expected.executable_sha256 == cutover.IQCONNECT_EXECUTABLE_SHA256
+        if not self.iqconnect_provider_current:
+            raise cutover.CapturedPaperHostCutoverError(
+                "IQCONNECT_PROVIDER_HANDOFF_LOST",
+                "injected IQConnect provider loss after handoff",
+            )
+        assert sorted(item.role for item in restored_clients) == [
+            "iqfeed_depth_bridge",
+            "iqfeed_trade_bridge",
+        ]
+        for identity in restored_clients:
+            assert (
+                self.processes[identity.pid].semantic_key()
+                == identity.semantic_key()
+            )
+            if identity.role not in self.iqconnect_client_roles_current:
+                raise cutover.CapturedPaperHostCutoverError(
+                    "IQCONNECT_PROVIDER_HANDOFF_LOST",
+                    f"injected {identity.role} disconnect after handoff",
+                )
+        self.mutations.append("iqconnect-handoff:assert")
+
+    def release_iqconnect_provider_guard(self) -> None:
+        if self.iqconnect_guard_active:
+            self.iqconnect_guard_active = False
+            self.mutations.append("iqconnect-guard:release")
 
     def find_legacy_processes(
         self, bindings: tuple[cutover.LegacyProcessBinding, ...]
@@ -757,7 +1311,7 @@ class FakeHost:
                 self.dispatch_lock_identity = dict(
                     cutover.create_startup_dispatch_lock(paths["dispatch_lock"])
                 )
-            return dict(cutover.build_startup_prepared_receipt(
+            receipt = dict(cutover.build_startup_prepared_receipt(
                 prepared=self.prepared,
                 service=expected_service,
                 challenge_sha256=self.startup_challenge,
@@ -765,6 +1319,11 @@ class FakeHost:
                 prepared_at=NOW,
                 valid_until=NOW + timedelta(seconds=20),
             ))
+            paths = cutover._startup_handshake_paths(
+                invocation, roots=self.prepared.allowed_read_roots
+            )
+            paths["prepared"].write_bytes(cutover._canonical_json_bytes(receipt))
+            return receipt
         if phase == "started":
             permit_path = Path(f"{invocation.host_ready_receipt_base}.permit.json")
             permit = cutover._strict_json(permit_path.read_bytes(), "fake permit")
@@ -776,7 +1335,7 @@ class FakeHost:
             ]
             quiet_event = next(
                 row
-                for row in journal_rows
+                for row in reversed(journal_rows)
                 if row.get("event_type")
                 == "legacy_paper_broker_quiet_horizon_completed"
             )
@@ -790,7 +1349,7 @@ class FakeHost:
             )
             evidence_raw = cutover._canonical_json_bytes(authority)
             paths["active_start_evidence"].write_bytes(evidence_raw)
-            return dict(cutover.build_startup_started_receipt(
+            receipt = dict(cutover.build_startup_started_receipt(
                 prepared=self.prepared,
                 service=expected_service,
                 challenge_sha256=self.startup_challenge,
@@ -803,6 +1362,8 @@ class FakeHost:
                 started_at=NOW,
                 valid_until=NOW + timedelta(seconds=20),
             ))
+            paths["started"].write_bytes(cutover._canonical_json_bytes(receipt))
+            return receipt
         raise AssertionError(f"unexpected startup phase {phase}")
 
     def inspect_legacy_execution_lane(
@@ -1260,6 +1821,7 @@ def _assert_restored(prepared: cutover.PreparedCutover, backend: FakeHost) -> No
     assert backend.await_candidate_processes(prepared.invocation, timeout_seconds=0) == ()
     assert backend.execution_lane_state == backend.initial_execution_lane_state
     assert all(backend.execution_lane_recreator_states.values())
+    assert not backend.iqconnect_guard_active
 
 
 def test_validate_only_is_default_and_performs_no_mutation(
@@ -1307,6 +1869,528 @@ def test_apply_has_exact_postconditions_and_is_idempotent(
     second = executor.apply()
     assert second.verdict == "ALREADY_APPLIED_EXACT"
     assert backend.mutations == before
+
+
+def test_apply_holds_iqconnect_guard_until_candidate_started(
+    prepared: cutover.PreparedCutover,
+) -> None:
+    class GuardObservedHost(FakeHost):
+        def stop_process(self, expected: cutover.ProcessIdentity) -> None:
+            assert self.iqconnect_guard_active
+            super().stop_process(expected)
+
+        def read_service_startup_receipt(
+            self,
+            invocation: cutover.CandidateInvocation,
+            expected_service: cutover.ProcessIdentity,
+            *,
+            phase: str,
+            timeout_seconds: float,
+        ) -> dict[str, object]:
+            assert self.iqconnect_guard_active
+            return super().read_service_startup_receipt(
+                invocation,
+                expected_service,
+                phase=phase,
+                timeout_seconds=timeout_seconds,
+            )
+
+        def release_iqconnect_provider_guard(self) -> None:
+            if self.iqconnect_guard_active:
+                journal_path = (
+                    prepared.candidate_root
+                    / "journal"
+                    / prepared.activation_generation
+                    / f"{prepared.manifest_sha256}.jsonl"
+                )
+                events = [
+                    json.loads(line)
+                    for line in journal_path.read_text(
+                        encoding="utf-8"
+                    ).splitlines()
+                ]
+                assert events[-1]["event_type"] == "apply_completed"
+            super().release_iqconnect_provider_guard()
+
+    backend = GuardObservedHost(prepared)
+    report = _executor(prepared, backend).apply()
+
+    assert report.verdict == "APPLIED_ALPACA_PAPER_ONLY"
+    assert not backend.iqconnect_guard_active
+    acquire_index = backend.mutations.index("iqconnect-guard:acquire")
+    first_bridge_stop = min(
+        index
+        for index, operation in enumerate(backend.mutations)
+        if operation.startswith("stop-process:iqfeed_")
+    )
+    candidate_start = backend.mutations.index(
+        f"start:{cutover.CANDIDATE_TASK_NAME}"
+    )
+    release_index = backend.mutations.index("iqconnect-guard:release")
+    assert acquire_index < first_bridge_stop < candidate_start < release_index
+    assert backend.iqconnect_guard_checks >= 3
+
+
+def test_iqconnect_guard_loss_rolls_back_without_candidate_start(
+    prepared: cutover.PreparedCutover,
+) -> None:
+    class LostGuardHost(FakeHost):
+        loss_injected = False
+
+        def assert_iqconnect_provider_guard_current(
+            self, expected: cutover.IqconnectProviderGuardObservation
+        ) -> None:
+            super().assert_iqconnect_provider_guard_current(expected)
+            if self.iqconnect_guard_checks >= 2 and not self.loss_injected:
+                self.loss_injected = True
+                raise cutover.CapturedPaperHostCutoverError(
+                    "IQCONNECT_PROVIDER_GUARD_LOST",
+                    "injected one-shot IQConnect continuity loss",
+                )
+
+    backend = LostGuardHost(prepared)
+    with pytest.raises(
+        cutover.CapturedPaperHostCutoverError,
+        match="IQCONNECT_PROVIDER_GUARD_LOST",
+    ):
+        _executor(prepared, backend).apply()
+
+    assert f"start:{cutover.CANDIDATE_TASK_NAME}" not in backend.mutations
+    assert not backend.iqconnect_guard_active
+    _assert_restored(prepared, backend)
+
+
+def test_iqconnect_guard_loss_after_started_rolls_back_and_hands_off(
+    prepared: cutover.PreparedCutover,
+) -> None:
+    class LostAfterStartedHost(FakeHost):
+        started_seen = False
+        loss_injected = False
+
+        def read_service_startup_receipt(
+            self,
+            invocation: cutover.CandidateInvocation,
+            expected_service: cutover.ProcessIdentity,
+            *,
+            phase: str,
+            timeout_seconds: float,
+        ) -> dict[str, object]:
+            receipt = super().read_service_startup_receipt(
+                invocation,
+                expected_service,
+                phase=phase,
+                timeout_seconds=timeout_seconds,
+            )
+            if phase == "started":
+                self.started_seen = True
+            return receipt
+
+        def assert_iqconnect_provider_guard_current(
+            self, expected: cutover.IqconnectProviderGuardObservation
+        ) -> None:
+            super().assert_iqconnect_provider_guard_current(expected)
+            if self.started_seen and not self.loss_injected:
+                self.loss_injected = True
+                raise cutover.CapturedPaperHostCutoverError(
+                    "IQCONNECT_PROVIDER_GUARD_LOST",
+                    "injected post-STARTED IQConnect continuity loss",
+                )
+
+    backend = LostAfterStartedHost(prepared)
+    with pytest.raises(
+        cutover.CapturedPaperHostCutoverError,
+        match="IQCONNECT_PROVIDER_GUARD_LOST",
+    ):
+        _executor(prepared, backend).apply()
+
+    assert f"start:{cutover.CANDIDATE_TASK_NAME}" in backend.mutations
+    assert "iqconnect-guard:handoff" in backend.mutations
+    assert backend.mutations.index("iqconnect-guard:handoff") < (
+        backend.mutations.index("iqconnect-guard:release")
+    )
+    _assert_restored(prepared, backend)
+
+
+def test_apply_failure_holds_guard_until_legacy_provider_handoff(
+    prepared: cutover.PreparedCutover,
+) -> None:
+    candidate_start = f"start:{cutover.CANDIDATE_TASK_NAME}"
+
+    class HandoffObservedHost(FakeHost):
+        handoff_completed = False
+
+        def __init__(self) -> None:
+            super().__init__(
+                prepared,
+                fail_operation=candidate_start,
+                fail_after_effect=True,
+            )
+
+        def await_iqconnect_provider_guard_handoff(
+            self,
+            expected: cutover.IqconnectProviderGuardObservation,
+            restored_clients: tuple[cutover.ProcessIdentity, ...],
+            *,
+            timeout_seconds: float,
+        ) -> None:
+            assert self.iqconnect_guard_active
+            super().await_iqconnect_provider_guard_handoff(
+                expected,
+                restored_clients,
+                timeout_seconds=timeout_seconds,
+            )
+            self.handoff_completed = True
+
+        def release_iqconnect_provider_guard(self) -> None:
+            if self.iqconnect_guard_active:
+                assert self.handoff_completed
+            super().release_iqconnect_provider_guard()
+
+    backend = HandoffObservedHost()
+    with pytest.raises(cutover.CapturedPaperHostCutoverError):
+        _executor(prepared, backend).apply()
+
+    assert candidate_start in backend.mutations
+    assert backend.handoff_completed
+    assert backend.mutations.index("iqconnect-guard:handoff") < (
+        backend.mutations.index("iqconnect-guard:release")
+    )
+    _assert_restored(prepared, backend)
+
+
+def test_apply_failure_handoff_timeout_releases_guard_and_keeps_candidate_off(
+    prepared: cutover.PreparedCutover,
+) -> None:
+    candidate_start = f"start:{cutover.CANDIDATE_TASK_NAME}"
+
+    class HandoffTimeoutHost(FakeHost):
+        def __init__(self) -> None:
+            super().__init__(
+                prepared,
+                fail_operation=candidate_start,
+                fail_after_effect=True,
+            )
+
+        def await_iqconnect_provider_guard_handoff(
+            self,
+            expected: cutover.IqconnectProviderGuardObservation,
+            restored_clients: tuple[cutover.ProcessIdentity, ...],
+            *,
+            timeout_seconds: float,
+        ) -> None:
+            assert self.iqconnect_guard_active
+            raise cutover.CapturedPaperHostCutoverError(
+                "IQCONNECT_PROVIDER_HANDOFF_TIMEOUT",
+                "injected restored-client handoff timeout",
+            )
+
+    backend = HandoffTimeoutHost()
+    with pytest.raises(
+        cutover.CapturedPaperHostCutoverError,
+        match="COMPENSATING_ROLLBACK_FAILED",
+    ):
+        _executor(prepared, backend).apply()
+
+    assert cutover.CANDIDATE_TASK_NAME not in backend.tasks
+    assert not backend.iqconnect_guard_active
+    assert all(
+        backend.tasks[name].enabled for name in cutover.REQUIRED_LEGACY_TASKS
+    )
+    assert sorted(
+        item.role
+        for item in backend.find_legacy_processes(
+            prepared.restore_plan.bindings
+        )
+    ) == ["iqfeed_depth_bridge", "iqfeed_trade_bridge"]
+
+
+def test_explicit_rollback_restores_when_iqconnect_exited_after_apply(
+    prepared: cutover.PreparedCutover,
+) -> None:
+    class ProviderExitedHost(FakeHost):
+        def __init__(self) -> None:
+            super().__init__(prepared)
+            self.provider_guard_acquisitions = 0
+            self.cold_bootstrap_waits: list[
+                tuple[tuple[str, ...], float]
+            ] = []
+
+        def acquire_iqconnect_provider_guard(
+            self,
+        ) -> cutover.IqconnectProviderGuardObservation:
+            self.provider_guard_acquisitions += 1
+            if self.provider_guard_acquisitions == 2:
+                raise cutover.CapturedPaperHostCutoverError(
+                    "IQCONNECT_PROCESS_ABSENT",
+                    "injected provider exit after candidate failure",
+                )
+            return super().acquire_iqconnect_provider_guard()
+
+        def await_legacy_processes(
+            self,
+            bindings: tuple[cutover.LegacyProcessBinding, ...],
+            *,
+            timeout_seconds: float,
+        ) -> tuple[cutover.ProcessIdentity, ...]:
+            if self.provider_guard_acquisitions == 2:
+                self.cold_bootstrap_waits.append(
+                    (
+                        tuple(sorted(item.role for item in bindings)),
+                        timeout_seconds,
+                    )
+                )
+            return super().await_legacy_processes(
+                bindings,
+                timeout_seconds=timeout_seconds,
+            )
+
+    backend = ProviderExitedHost()
+    executor = _executor(prepared, backend)
+    executor.apply()
+
+    report = executor.rollback()
+
+    assert report.verdict == "ROLLED_BACK_EXACT"
+    assert backend.provider_guard_acquisitions == 3
+    assert len(backend.cold_bootstrap_waits) == 1
+    bootstrap_roles, bootstrap_timeout = backend.cold_bootstrap_waits[0]
+    assert bootstrap_roles == ("iqfeed_depth_bridge",)
+    assert bootstrap_timeout > 20.0
+    assert not backend.iqconnect_guard_active
+    _assert_restored(prepared, backend)
+    depth_start = backend.mutations.index(
+        "start:CHILI-IQFeed-Depth-Bridge-Daily"
+    )
+    restored_guard = backend.mutations.index(
+        "iqconnect-guard:acquire", depth_start
+    )
+    trade_start = backend.mutations.index(
+        "start:CHILI-IQFeed-Trade-Bridge-Daily"
+    )
+    assert depth_start < restored_guard < trade_start
+    event_types = [
+        json.loads(line)["event_type"]
+        for line in report.journal_path.read_text(encoding="utf-8").splitlines()
+    ]
+    assert event_types.index("iqconnect_provider_absent_before_rollback") < (
+        event_types.index("rollback_started")
+    )
+    assert event_types.index("rollback_started") < event_types.index(
+        "iqconnect_provider_guard_restored"
+    )
+    assert event_types.index("iqconnect_provider_guard_restored") < (
+        event_types.index("iqconnect_provider_guard_handoff_completed")
+    )
+    assert event_types.index(
+        "iqconnect_provider_guard_handoff_completed"
+    ) < event_types.index("rollback_completed")
+
+
+def test_rollback_discards_guard_when_post_acquire_assert_reports_absence(
+    prepared: cutover.PreparedCutover,
+) -> None:
+    class ProviderDisappearsDuringAcquire(FakeHost):
+        def __init__(self) -> None:
+            super().__init__(prepared)
+            self.provider_guard_acquisitions = 0
+            self.injected_absence = False
+
+        def acquire_iqconnect_provider_guard(
+            self,
+        ) -> cutover.IqconnectProviderGuardObservation:
+            self.provider_guard_acquisitions += 1
+            return super().acquire_iqconnect_provider_guard()
+
+        def assert_iqconnect_provider_guard_current(
+            self,
+            expected: cutover.IqconnectProviderGuardObservation,
+        ) -> None:
+            if (
+                self.provider_guard_acquisitions == 2
+                and not self.injected_absence
+            ):
+                self.injected_absence = True
+                raise cutover.CapturedPaperHostCutoverError(
+                    "IQCONNECT_PROCESS_ABSENT",
+                    "injected provider exit after guard acquisition",
+                )
+            super().assert_iqconnect_provider_guard_current(expected)
+
+    backend = ProviderDisappearsDuringAcquire()
+    executor = _executor(prepared, backend)
+    executor.apply()
+
+    report = executor.rollback()
+
+    assert report.verdict == "ROLLED_BACK_EXACT"
+    assert backend.provider_guard_acquisitions == 3
+    assert not backend.iqconnect_guard_active
+    _assert_restored(prepared, backend)
+
+
+def test_rollback_accepts_guard_socket_retirement_after_exact_client_handoff(
+    prepared: cutover.PreparedCutover,
+) -> None:
+    class GuardSocketRetiredAfterHandoff(FakeHost):
+        def await_iqconnect_provider_guard_handoff(
+            self,
+            expected: cutover.IqconnectProviderGuardObservation,
+            restored_clients: tuple[cutover.ProcessIdentity, ...],
+            *,
+            timeout_seconds: float,
+        ) -> None:
+            super().await_iqconnect_provider_guard_handoff(
+                expected,
+                restored_clients,
+                timeout_seconds=timeout_seconds,
+            )
+            self.iqconnect_guard_active = False
+
+    backend = GuardSocketRetiredAfterHandoff(prepared)
+    executor = _executor(prepared, backend)
+    executor.apply()
+
+    report = executor.rollback()
+
+    assert report.verdict == "ROLLED_BACK_EXACT"
+    assert "iqconnect-handoff:assert" in backend.mutations
+    _assert_restored(prepared, backend)
+
+
+def test_rollback_rejects_provider_loss_after_client_handoff(
+    prepared: cutover.PreparedCutover,
+) -> None:
+    class ProviderLostAfterHandoff(FakeHost):
+        def await_iqconnect_provider_guard_handoff(
+            self,
+            expected: cutover.IqconnectProviderGuardObservation,
+            restored_clients: tuple[cutover.ProcessIdentity, ...],
+            *,
+            timeout_seconds: float,
+        ) -> None:
+            super().await_iqconnect_provider_guard_handoff(
+                expected,
+                restored_clients,
+                timeout_seconds=timeout_seconds,
+            )
+            self.iqconnect_guard_active = False
+            self.iqconnect_provider_current = False
+
+    backend = ProviderLostAfterHandoff(prepared)
+    executor = _executor(prepared, backend)
+    executor.apply()
+
+    with pytest.raises(
+        cutover.CapturedPaperHostCutoverError,
+        match="IQCONNECT_PROVIDER_HANDOFF_LOST",
+    ):
+        executor.rollback()
+    assert backend.execution_lane_state == "stopped"
+    assert not any(backend.execution_lane_recreator_states.values())
+
+
+def test_rollback_requiesces_lane_when_provider_is_lost_during_restore(
+    prepared: cutover.PreparedCutover,
+) -> None:
+    class ProviderLostDuringLaneRestore(FakeHost):
+        def restore_legacy_execution_lane(
+            self,
+            *,
+            expected: cutover.LegacyExecutionLaneObservation,
+        ) -> int:
+            mutations = super().restore_legacy_execution_lane(
+                expected=expected
+            )
+            self.iqconnect_guard_active = False
+            self.iqconnect_provider_current = False
+            return mutations
+
+    backend = ProviderLostDuringLaneRestore(prepared)
+    executor = _executor(prepared, backend)
+    executor.apply()
+
+    with pytest.raises(
+        cutover.CapturedPaperHostCutoverError,
+        match="IQCONNECT_PROVIDER_HANDOFF_LOST",
+    ):
+        executor.rollback()
+
+    assert backend.execution_lane_state == "stopped"
+    assert not any(backend.execution_lane_recreator_states.values())
+
+
+def test_rollback_rejects_client_disconnect_after_handoff_even_with_guard(
+    prepared: cutover.PreparedCutover,
+) -> None:
+    class ClientDisconnectedDuringLaneRestore(FakeHost):
+        def restore_legacy_execution_lane(
+            self,
+            *,
+            expected: cutover.LegacyExecutionLaneObservation,
+        ) -> int:
+            mutations = super().restore_legacy_execution_lane(
+                expected=expected
+            )
+            self.iqconnect_client_roles_current.discard(
+                "iqfeed_depth_bridge"
+            )
+            return mutations
+
+    backend = ClientDisconnectedDuringLaneRestore(prepared)
+    executor = _executor(prepared, backend)
+    executor.apply()
+
+    with pytest.raises(
+        cutover.CapturedPaperHostCutoverError,
+        match="IQCONNECT_PROVIDER_HANDOFF_LOST",
+    ):
+        executor.rollback()
+
+    assert not backend.iqconnect_guard_active
+    assert backend.execution_lane_state == "stopped"
+    assert not any(backend.execution_lane_recreator_states.values())
+
+
+def test_zero_provider_retry_stops_exact_partial_legacy_client_then_bootstraps(
+    prepared: cutover.PreparedCutover,
+) -> None:
+    class PartialClientHost(FakeHost):
+        def __init__(self) -> None:
+            super().__init__(prepared)
+            self.provider_guard_acquisitions = 0
+
+        def acquire_iqconnect_provider_guard(
+            self,
+        ) -> cutover.IqconnectProviderGuardObservation:
+            self.provider_guard_acquisitions += 1
+            if self.provider_guard_acquisitions == 2:
+                raise cutover.CapturedPaperHostCutoverError(
+                    "IQCONNECT_PROCESS_ABSENT",
+                    "injected absent provider with one exact partial client",
+                )
+            return super().acquire_iqconnect_provider_guard()
+
+    backend = PartialClientHost()
+    executor = _executor(prepared, backend)
+    executor.apply()
+    depth = next(
+        item
+        for item in prepared.process_snapshot.processes
+        if item.role == "iqfeed_depth_bridge"
+    )
+    backend.processes[depth.pid] = depth
+
+    report = executor.rollback()
+
+    assert report.verdict == "ROLLED_BACK_EXACT"
+    stop_index = backend.mutations.index(
+        "stop-process:iqfeed_depth_bridge"
+    )
+    restart_index = backend.mutations.index(
+        "start:CHILI-IQFeed-Depth-Bridge-Daily"
+    )
+    assert stop_index < restart_index
+    _assert_restored(prepared, backend)
 
 
 def test_recover_only_inventory_finds_one_active_capsule_and_ignores_baseline(
@@ -1558,6 +2642,292 @@ def test_already_applied_service_crash_compensates_to_exact_legacy_state(
     _assert_restored(prepared, backend)
 
 
+def _publish_fake_clean_stop(
+    *,
+    prepared: cutover.PreparedCutover,
+    executor: cutover.CapturedPaperHostCutoverExecutor,
+) -> tuple[bytes, str]:
+    journal = cutover.CutoverJournal(
+        root=executor.journal_root,
+        prepared=prepared,
+        clock=lambda: NOW,
+    )
+    committed = next(
+        event
+        for event in reversed(journal.events)
+        if event.get("event_type") in {"apply_completed", "restart_completed"}
+    )
+    payload = committed["payload"]
+    paths = cutover._startup_handshake_paths(
+        prepared.invocation, roots=prepared.allowed_read_roots
+    )
+    started = cutover._strict_json(
+        paths["started"].read_bytes(), "fake STARTED"
+    )
+    body = {
+        "schema_version": cutover.STARTUP_STOPPED_SCHEMA,
+        "state": "STOPPED_CLEANLY",
+        "activation_generation": prepared.activation_generation,
+        "manifest_sha256": prepared.manifest_sha256,
+        "account_scope": "alpaca:paper",
+        "expected_account_id": prepared.expected_account_id,
+        "service_pid": payload["service_pid"],
+        "service_create_time_ns": payload["service_create_time_ns"],
+        "service_executable_path": payload["service_executable_path"],
+        "service_executable_sha256": payload["service_executable_sha256"],
+        "service_cmdline_sha256": payload["service_cmdline_sha256"],
+        "challenge_sha256": payload["challenge_sha256"],
+        "prepared_receipt_sha256": payload["prepared_receipt_sha256"],
+        "activation_permit_sha256": payload["activation_permit_sha256"],
+        "started_receipt_sha256": started["receipt_sha256"],
+        "apply_completed_event_sha256": committed["event_sha256"],
+        "stopped_at": NOW.isoformat().replace("+00:00", "Z"),
+        "supervisor_stopped": True,
+        "shared_store_closed": True,
+        "writer_lease_released": True,
+        "paper_execution_started": True,
+        "paper_execution_stopped": True,
+        "live_cash_authorized": False,
+        "real_money_authorized": False,
+    }
+    body["receipt_sha256"] = cutover.sha256_json(body)
+    raw = cutover._canonical_json_bytes(body)
+    paths["stopped"].write_bytes(raw)
+    return raw, body["receipt_sha256"]
+
+
+def test_restart_only_after_clean_stop_rotates_attempt_and_preserves_applied_host(
+    prepared: cutover.PreparedCutover,
+) -> None:
+    backend = FakeHost(prepared)
+    executor = _executor(prepared, backend)
+    assert executor.apply().verdict == "APPLIED_ALPACA_PAPER_ONLY"
+    original_paths = cutover._startup_handshake_paths(
+        prepared.invocation, roots=prepared.allowed_read_roots
+    )
+    backend.processes = {
+        pid: value
+        for pid, value in backend.processes.items()
+        if not value.role.startswith("candidate_")
+    }
+    stopped_raw, stopped_sha = _publish_fake_clean_stop(
+        prepared=prepared, executor=executor
+    )
+    original_bytes = {
+        name: path.read_bytes()
+        for name, path in original_paths.items()
+        if path.is_file()
+    }
+    attempt_id = "45a9d0f5-bf22-4d19-8870-a7b1dbeaf519"
+    restart_prepared = cutover._restart_prepared_cutover(
+        prepared,
+        startup_attempt_id=attempt_id,
+        create_attempt_root=False,
+    )
+    backend.prepared = restart_prepared
+    backend.dispatch_lock_identity = None
+
+    report = executor.restart_only(attempt_id)
+
+    assert report.verdict == "RESTARTED_ALPACA_PAPER_ONLY"
+    assert report.mode == cutover.MODE_RESTART_ONLY
+    assert stopped_sha == cutover.sha256_json(
+        {k: v for k, v in json.loads(stopped_raw).items() if k != "receipt_sha256"}
+    )
+    assert all(
+        original_paths[name].read_bytes() == raw
+        for name, raw in original_bytes.items()
+    )
+    restart_paths = cutover._startup_handshake_paths(
+        restart_prepared.invocation,
+        roots=restart_prepared.allowed_read_roots,
+    )
+    assert restart_paths["prepared"].is_file()
+    assert restart_paths["permit"].is_file()
+    assert restart_paths["started"].is_file()
+    assert backend.tasks[cutover.CANDIDATE_TASK_NAME].enabled is True
+    assert not backend.find_legacy_processes(prepared.restore_plan.bindings)
+    assert backend.execution_lane_state == "stopped"
+
+
+def test_restart_only_can_rotate_again_from_the_latest_clean_attempt(
+    prepared: cutover.PreparedCutover,
+) -> None:
+    backend = FakeHost(prepared)
+    executor = _executor(prepared, backend)
+    executor.apply()
+    backend.processes = {
+        pid: value
+        for pid, value in backend.processes.items()
+        if not value.role.startswith("candidate_")
+    }
+    _publish_fake_clean_stop(prepared=prepared, executor=executor)
+    first_attempt = "45a9d0f5-bf22-4d19-8870-a7b1dbeaf519"
+    first_prepared = cutover._restart_prepared_cutover(
+        prepared,
+        startup_attempt_id=first_attempt,
+        create_attempt_root=False,
+    )
+    backend.prepared = first_prepared
+    backend.dispatch_lock_identity = None
+    executor.restart_only(first_attempt)
+
+    backend.processes = {
+        pid: value
+        for pid, value in backend.processes.items()
+        if not value.role.startswith("candidate_")
+    }
+    _publish_fake_clean_stop(prepared=first_prepared, executor=executor)
+    second_attempt = "1fd9d47a-6b49-4a27-9cb6-a0ca6ae77a03"
+    second_prepared = cutover._restart_prepared_cutover(
+        prepared,
+        startup_attempt_id=second_attempt,
+        create_attempt_root=False,
+    )
+    backend.prepared = second_prepared
+    backend.dispatch_lock_identity = None
+
+    report = executor.restart_only(second_attempt)
+
+    assert report.verdict == "RESTARTED_ALPACA_PAPER_ONLY"
+    second_paths = cutover._startup_handshake_paths(
+        second_prepared.invocation, roots=prepared.allowed_read_roots
+    )
+    assert second_paths["prepared"].is_file()
+    assert second_paths["permit"].is_file()
+    assert second_paths["started"].is_file()
+    assert backend.tasks[cutover.CANDIDATE_TASK_NAME].enabled is True
+
+
+@pytest.mark.parametrize(
+    "failure",
+    ["missing", "stale", "mismatched", "live-process"],
+)
+def test_restart_only_rejects_unproven_clean_stop_before_host_mutation(
+    prepared: cutover.PreparedCutover,
+    failure: str,
+) -> None:
+    backend = FakeHost(prepared)
+    executor = _executor(prepared, backend)
+    executor.apply()
+    if failure != "live-process":
+        backend.processes = {
+            pid: value
+            for pid, value in backend.processes.items()
+            if not value.role.startswith("candidate_")
+        }
+    paths = cutover._startup_handshake_paths(
+        prepared.invocation, roots=prepared.allowed_read_roots
+    )
+    if failure != "missing":
+        _publish_fake_clean_stop(prepared=prepared, executor=executor)
+        body = json.loads(paths["stopped"].read_text(encoding="utf-8"))
+        if failure == "stale":
+            body["stopped_at"] = (NOW - timedelta(hours=2)).isoformat().replace(
+                "+00:00", "Z"
+            )
+        elif failure == "mismatched":
+            body["service_pid"] += 1
+        if failure in {"stale", "mismatched"}:
+            body.pop("receipt_sha256")
+            body["receipt_sha256"] = cutover.sha256_json(body)
+            paths["stopped"].write_bytes(cutover._canonical_json_bytes(body))
+    attempt_id = "45a9d0f5-bf22-4d19-8870-a7b1dbeaf519"
+    backend.prepared = cutover._restart_prepared_cutover(
+        prepared,
+        startup_attempt_id=attempt_id,
+        create_attempt_root=False,
+    )
+    backend.dispatch_lock_identity = None
+    before = list(backend.mutations)
+
+    with pytest.raises(cutover.CapturedPaperHostCutoverError):
+        executor.restart_only(attempt_id)
+
+    assert backend.mutations == before
+    assert not (
+        paths["prepared"].parent / "attempts" / attempt_id
+    ).exists()
+
+
+@pytest.mark.parametrize("fail_after_effect", [False, True])
+def test_restart_only_start_failure_rolls_back_exact_legacy_state(
+    prepared: cutover.PreparedCutover,
+    fail_after_effect: bool,
+) -> None:
+    backend = FakeHost(prepared)
+    executor = _executor(prepared, backend)
+    executor.apply()
+    backend.processes = {
+        pid: value
+        for pid, value in backend.processes.items()
+        if not value.role.startswith("candidate_")
+    }
+    _publish_fake_clean_stop(prepared=prepared, executor=executor)
+    attempt_id = "45a9d0f5-bf22-4d19-8870-a7b1dbeaf519"
+    backend.prepared = cutover._restart_prepared_cutover(
+        prepared,
+        startup_attempt_id=attempt_id,
+        create_attempt_root=False,
+    )
+    backend.dispatch_lock_identity = None
+    backend.fail_operation = f"start:{cutover.CANDIDATE_TASK_NAME}"
+    backend.fail_after_effect = fail_after_effect
+    backend.failed = False
+
+    with pytest.raises(
+        cutover.CapturedPaperHostCutoverError,
+        match="RESTART_FAILED_ROLLED_BACK",
+    ):
+        executor.restart_only(attempt_id)
+
+    _assert_restored(prepared, backend)
+
+
+def test_restart_only_post_permit_failure_revokes_all_authority_and_rolls_back(
+    prepared: cutover.PreparedCutover,
+) -> None:
+    backend = FakeHost(prepared)
+    executor = _executor(prepared, backend)
+    executor.apply()
+    original_paths = cutover._startup_handshake_paths(
+        prepared.invocation, roots=prepared.allowed_read_roots
+    )
+    backend.processes = {
+        pid: value
+        for pid, value in backend.processes.items()
+        if not value.role.startswith("candidate_")
+    }
+    _publish_fake_clean_stop(prepared=prepared, executor=executor)
+    attempt_id = "45a9d0f5-bf22-4d19-8870-a7b1dbeaf519"
+    restart_prepared = cutover._restart_prepared_cutover(
+        prepared,
+        startup_attempt_id=attempt_id,
+        create_attempt_root=False,
+    )
+    backend.prepared = restart_prepared
+    backend.dispatch_lock_identity = None
+    # Restart checks the guard before mutation, before task start, and once
+    # more after STARTED.  Fail only the last of those so the new permit is
+    # already durable and must be revoked by compensation.
+    backend.fail_guard_assert_number = backend.iqconnect_guard_checks + 3
+
+    with pytest.raises(
+        cutover.CapturedPaperHostCutoverError,
+        match="IQCONNECT_PROVIDER_GUARD_LOST",
+    ):
+        executor.restart_only(attempt_id)
+
+    restart_paths = cutover._startup_handshake_paths(
+        restart_prepared.invocation, roots=prepared.allowed_read_roots
+    )
+    assert not original_paths["permit"].exists()
+    assert original_paths["revoked"].is_file()
+    assert not restart_paths["permit"].exists()
+    assert restart_paths["revoked"].is_file()
+    _assert_restored(prepared, backend)
+
+
 def test_explicit_rollback_restores_exact_tasks_and_provenance_roles(
     prepared: cutover.PreparedCutover,
 ) -> None:
@@ -1567,15 +2937,46 @@ def test_explicit_rollback_restores_exact_tasks_and_provenance_roles(
     report = executor.rollback()
     assert report.verdict == "ROLLED_BACK_EXACT"
     _assert_restored(prepared, backend)
+    assert backend.mutations.count("iqconnect-guard:acquire") == 2
+    assert backend.mutations.count("iqconnect-guard:release") == 2
+    assert backend.mutations.count("iqconnect-guard:handoff") == 1
     before = list(backend.mutations)
     assert executor.rollback().verdict == "ALREADY_ROLLED_BACK_EXACT"
     assert backend.mutations == before
+
+
+def test_explicit_rollback_revokes_permit_before_guard_preflight_failure(
+    prepared: cutover.PreparedCutover,
+) -> None:
+    backend = FakeHost(prepared)
+    executor = _executor(prepared, backend)
+    executor.apply()
+    paths = cutover._startup_handshake_paths(
+        prepared.invocation,
+        roots=prepared.allowed_read_roots,
+    )
+    assert paths["permit"].is_file()
+    baseline = list(backend.mutations)
+    backend.fail_operation = "iqconnect-guard:acquire"
+    backend.fail_after_effect = False
+
+    with pytest.raises(
+        cutover.CapturedPaperHostCutoverError,
+        match="IQCONNECT_PROVIDER_GUARD_UNAVAILABLE",
+    ):
+        executor.rollback()
+
+    assert backend.mutations == baseline
+    assert not paths["permit"].exists()
+    assert paths["revoked"].is_file()
+    assert cutover.CANDIDATE_TASK_NAME in backend.tasks
 
 
 @pytest.mark.parametrize(
     "operation",
     [
         *(f"task:{name}:disable" for name in cutover.REQUIRED_LEGACY_TASKS),
+        "iqconnect-guard:acquire",
         "stop-process:iqfeed_depth_bridge",
         "stop-process:iqfeed_trade_bridge",
         "execution-lane:stop",
@@ -1593,6 +2994,11 @@ def test_every_apply_mutation_failure_compensates_to_restored_host(
     with pytest.raises(cutover.CapturedPaperHostCutoverError):
         _executor(prepared, backend).apply()
     _assert_restored(prepared, backend)
+    if operation == "iqconnect-guard:acquire":
+        assert backend.mutations in (
+            [],
+            ["iqconnect-guard:acquire", "iqconnect-guard:release"],
+        )
 
 
 def test_process_snapshot_drift_fails_before_any_mutation(
@@ -1898,10 +3304,13 @@ def test_snapshot_builders_round_trip_exact_restore_material(
     cutover._assert_snapshot_plan_consistency(task, process, restore)
 
 
-def test_apply_requires_explicit_fake_money_confirmation() -> None:
+@pytest.mark.parametrize(
+    "mode", [cutover.MODE_APPLY, cutover.MODE_RESTART_ONLY]
+)
+def test_paper_start_requires_explicit_fake_money_confirmation(mode: str) -> None:
     assert cutover.main(
         [
-            "--mode", "Apply",
+            "--mode", mode,
             "--manifest", "x", "--manifest-sha256", "a" * 64,
             "--candidate-root", "x", "--allow-read-root", "x",
             "--task-snapshot", "x", "--process-snapshot", "x",
@@ -1909,6 +3318,92 @@ def test_apply_requires_explicit_fake_money_confirmation() -> None:
             "--candidate-action", "x", "--journal-root", "x",
         ]
     ) == 2
+
+
+@pytest.mark.parametrize("reject_validation", [False, True])
+def test_apply_cli_validates_in_process_before_apply(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    reject_validation: bool,
+) -> None:
+    events: list[str] = []
+    prepared = SimpleNamespace(
+        restore_plan=SimpleNamespace(bindings={}),
+    )
+
+    class _Executor:
+        def __init__(self, **_kwargs: object) -> None:
+            return None
+
+        def validate_only(self) -> object:
+            events.append("validate_only")
+            if reject_validation:
+                raise cutover.CapturedPaperHostCutoverError(
+                    "SYNTHETIC_VALIDATE_REJECTED",
+                    "synthetic validation rejection",
+                )
+            return SimpleNamespace(verdict="VALIDATED_NO_HOST_MUTATION")
+
+        def apply(self) -> object:
+            events.append("apply")
+            return SimpleNamespace(verdict="APPLIED_ALPACA_PAPER_ONLY")
+
+    monkeypatch.setattr(cutover, "_strict_roots", lambda _values: (tmp_path,))
+    monkeypatch.setattr(
+        cutover,
+        "_load_activation_for_mode",
+        lambda **_kwargs: object(),
+    )
+    monkeypatch.setattr(
+        cutover,
+        "prepare_cutover",
+        lambda *_args, **_kwargs: prepared,
+    )
+    monkeypatch.setattr(
+        cutover,
+        "WindowsHostCutoverBackend",
+        lambda **_kwargs: object(),
+    )
+    monkeypatch.setattr(cutover, "CapturedPaperHostCutoverExecutor", _Executor)
+    monkeypatch.setattr(
+        cutover,
+        "_report_document",
+        lambda report: {"verdict": report.verdict},
+    )
+
+    rc = cutover._main_with_host_lock_held(
+        [
+            "--mode",
+            cutover.MODE_APPLY,
+            "--manifest",
+            str(tmp_path / "manifest.json"),
+            "--manifest-sha256",
+            "a" * 64,
+            "--candidate-root",
+            str(tmp_path),
+            "--allow-read-root",
+            str(tmp_path),
+            "--task-snapshot",
+            str(tmp_path / "tasks.json"),
+            "--process-snapshot",
+            str(tmp_path / "processes.json"),
+            "--restore-plan",
+            str(tmp_path / "restore.json"),
+            "--candidate-task-template",
+            str(tmp_path / "task.xml"),
+            "--candidate-action",
+            str(tmp_path / "action.json"),
+            "--journal-root",
+            str(tmp_path),
+            "--confirm-fake-money-paper",
+            cutover.APPLY_CONFIRMATION,
+        ]
+    )
+
+    assert rc == (2 if reject_validation else 0)
+    assert events == (
+        ["validate_only"] if reject_validation else ["validate_only", "apply"]
+    )
 
 
 def test_taskless_candidate_processes_are_still_inventoried_and_stopped(
@@ -2841,6 +4336,22 @@ def test_python_c_importer_and_non_apply_argv_cannot_issue_permit(
     ):
         cutover._validate_apply_issuer_cmdline(
             not_apply,
+            executable_path=executable,
+            source_path=source,
+            prepared=prepared,
+            journal_root=journal_root,
+        )
+
+    alternate_snapshot = prepared.candidate_root / "alternate-task-snapshot.json"
+    alternate_snapshot.write_text("{}", encoding="utf-8")
+    mismatched_input = list(valid)
+    task_index = mismatched_input.index("--task-snapshot") + 1
+    mismatched_input[task_index] = str(alternate_snapshot)
+    with pytest.raises(
+        cutover.CapturedPaperHostCutoverError, match="ISSUER_CMDLINE_INVALID"
+    ):
+        cutover._validate_apply_issuer_cmdline(
+            mismatched_input,
             executable_path=executable,
             source_path=source,
             prepared=prepared,

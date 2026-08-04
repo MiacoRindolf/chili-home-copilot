@@ -5215,6 +5215,13 @@ def _run_tape_delta_ignite_job():
             _field_ortex_batch_status = copy.deepcopy(
                 _tape_delta_ortex_batch_status
             )
+        _field_ortex_symbols = {
+            str(member.get("symbol") or "").strip().upper()
+            for member in (
+                (_field_ortex_batch_status or {}).get("members") or []
+            )
+            if isinstance(member, dict)
+        }
 
         from .trading.momentum_neural.pipeline import run_momentum_neural_tick
 
@@ -5253,7 +5260,14 @@ def _run_tape_delta_ignite_job():
                     "tickers": [sym],
                     "ross_signals": _universe,
                 }
-                if _field_ortex_batch_status is not None:
+                # A cold crosser extends the cached field.  Its old immutable
+                # Ortex manifest cannot truthfully authorize the new member;
+                # omit it so the pipeline builds one exact extended-field
+                # manifest instead of rejecting the crosser as outside-field.
+                if (
+                    _field_ortex_batch_status is not None
+                    and sym in _field_ortex_symbols
+                ):
                     _tick_meta["ortex_squeeze_fuel_batch"] = (
                         _field_ortex_batch_status
                     )

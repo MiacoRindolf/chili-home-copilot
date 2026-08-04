@@ -23,6 +23,8 @@ from typing import Any, Mapping
 
 from sqlalchemy import select, text
 from sqlalchemy.engine import Engine
+from sqlalchemy.exc import DBAPIError, OperationalError
+from sqlalchemy.exc import TimeoutError as SqlAlchemyTimeoutError
 from sqlalchemy.orm import sessionmaker
 
 from app.models.trading import (
@@ -91,6 +93,14 @@ _EQUITY_SYMBOL_RE = re.compile(r"^[A-Z][A-Z0-9.]{0,35}$")
 _TERMINAL_ZERO_EXIT_STATUSES = frozenset(
     {"canceled", "cancelled", "expired", "failed", "rejected", "voided"}
 )
+
+
+def _is_transient_exit_owner_database_error(exc: BaseException) -> bool:
+    """Return true only for retryable database availability failures."""
+
+    return isinstance(exc, (OperationalError, SqlAlchemyTimeoutError)) or (
+        isinstance(exc, DBAPIError) and bool(exc.connection_invalidated)
+    )
 
 
 def _canonical_sha256(payload: Mapping[str, Any]) -> str:
@@ -2018,6 +2028,10 @@ class CapturedPaperExitOwnerWorker:
         self._ever_started = False
         self._running = False
         self._fatal_error_type: str | None = None
+        self._fatal_reason: str | None = None
+        self._recoverable_database_error_count = 0
+        self._consecutive_database_errors = 0
+        self._last_recoverable_error_type: str | None = None
         self._cycles_completed = 0
         self._pending = 0
         self._broker_reads = 0
@@ -2076,10 +2090,35 @@ class CapturedPaperExitOwnerWorker:
                 try:
                     receipt = self.run_one_cycle()
                 except Exception as exc:
+                    retry_transient_database_error = False
                     with self._state_lock:
-                        self._fatal_error_type = type(exc).__name__
+                        if (
+                            _is_transient_exit_owner_database_error(exc)
+                            and self._consecutive_database_errors == 0
+                        ):
+                            # An otherwise healthy empty-inventory poll can lose
+                            # a pooled connection or time out at checkout. Retry
+                            # exactly once on a pristine session. A repeated
+                            # availability failure, or any non-transient error,
+                            # remains fatal so durable exit ownership cannot be
+                            # silently abandoned.
+                            self._recoverable_database_error_count += 1
+                            self._consecutive_database_errors = 1
+                            self._last_recoverable_error_type = type(exc).__name__
+                            retry_transient_database_error = True
+                        else:
+                            self._fatal_error_type = type(exc).__name__
+                            self._fatal_reason = (
+                                f"{type(exc).__name__}: exit_owner_cycle_failed"
+                            )
+                    if retry_transient_database_error:
+                        self._wake.wait(self._idle_poll_seconds)
+                        self._wake.clear()
+                        continue
                     self._stop.set()
                     break
+                with self._state_lock:
+                    self._consecutive_database_errors = 0
                 if (
                     receipt.get("exit_owner_inventory_resolved") is True
                     or not receipt.get("completed_request_sha256s")
@@ -2143,6 +2182,16 @@ class CapturedPaperExitOwnerWorker:
                 "stop_requested": self._stop.is_set(),
                 "fatal": self._fatal_error_type is not None,
                 "fatal_error_type": self._fatal_error_type,
+                "fatal_reason": self._fatal_reason,
+                "recoverable_database_error_count": (
+                    self._recoverable_database_error_count
+                ),
+                "consecutive_database_errors": (
+                    self._consecutive_database_errors
+                ),
+                "last_recoverable_error_type": (
+                    self._last_recoverable_error_type
+                ),
                 "cycles_completed": self._cycles_completed,
                 "pending": self._pending,
                 "broker_reads": self._broker_reads,

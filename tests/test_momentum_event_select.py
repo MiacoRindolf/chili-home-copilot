@@ -138,7 +138,18 @@ def test_tape_delta_job_scores_crosser_via_single_symbol_path(db: Session, monke
     # Reset the in-process feeder state so the test is deterministic.
     monkeypatch.setattr(ts, "_tape_delta_hwm", None, raising=False)
     monkeypatch.setattr(ts, "_tape_delta_last_run_monotonic", 0.0, raising=False)
-    monkeypatch.setattr(ts, "_tape_delta_field_snapshot", {}, raising=False)
+    monkeypatch.setattr(
+        ts,
+        "_tape_delta_field_snapshot",
+        {"OLD": {"ticker": "OLD", "direction": "long"}},
+        raising=False,
+    )
+    monkeypatch.setattr(
+        ts,
+        "_tape_delta_ortex_batch_status",
+        {"members": [{"symbol": "OLD"}]},
+        raising=False,
+    )
     from app.config import settings
     monkeypatch.setattr(settings, "chili_momentum_event_select_primary_enabled", True, raising=False)
     monkeypatch.setattr(settings, "chili_momentum_tape_delta_ignite_enabled", True, raising=False)
@@ -147,6 +158,10 @@ def test_tape_delta_job_scores_crosser_via_single_symbol_path(db: Session, monke
     scored: list[str] = []
 
     def _fake_tick(_db, *, meta=None, **kw):
+        # ZOOM is a cold crosser outside the cached immutable Ortex field.  The
+        # scheduler must not attach that stale manifest; the real pipeline will
+        # build a fresh exact-field manifest for this extended universe.
+        assert "ortex_squeeze_fuel_batch" not in (meta or {})
         tickers = (meta or {}).get("tickers") or []
         scored.extend(str(t).upper() for t in tickers)
         return {"ok": True}

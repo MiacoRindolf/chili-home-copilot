@@ -486,6 +486,273 @@ def test_selection_prime_precedes_fresh_authority_and_order_workers():
     ]
 
 
+def test_fresh_write_pressure_suspension_starts_active_without_selection_input():
+    events = []
+
+    class _FreshPressuredFeed(_Worker):
+        def health(self):
+            return {
+                **super().health(),
+                "pre_authority_ready": True,
+                "ingress_admissible": False,
+                "admission_suspended": True,
+                "recoverable_admission_suspension": True,
+                "pressure_state": "failed_closed",
+                "pressure_rejection_reason": (
+                    "capture_resource_pressure_write_latency"
+                ),
+            }
+
+    class _SuspendedSelection(_Worker):
+        def health(self):
+            return {
+                **super().health(),
+                "ready": False,
+                "admission_suspended": True,
+            }
+
+    pressure = _FreshPressuredFeed("pressure_feed", events)
+    selection = _SuspendedSelection("selection", events)
+    transport = _Worker("transport", events)
+    supervisor, _host, live = _supervisor(
+        events,
+        pre_authority_workers=(
+            ("pressure_feed", pressure),
+            ("selection", selection),
+        ),
+        workers=(("transport", transport),),
+    )
+
+    health = supervisor.start_active(
+        start_authority=_active_authority(events)
+    )
+
+    assert health["state"] == "active"
+    assert health["live_loop_started"] is True
+    assert live["running"] is True
+    assert "active_authority_consume" in events
+    assert "transport_start" in events
+    assert "live_start" in events
+    assert health["managed_workers"]["pressure_feed"][
+        "pre_authority_ready"
+    ] is True
+    assert health["managed_workers"]["pressure_feed"][
+        "pressure_rejection_reason"
+    ] == "capture_resource_pressure_write_latency"
+    assert health["managed_workers"]["selection"]["ready"] is False
+    assert health["managed_workers"]["selection"][
+        "admission_suspended"
+    ] is True
+    assert supervisor.assert_healthy()["state"] == "active"
+    supervisor.close(join_timeout_seconds=1.0, quiesce_timeout_seconds=1.0)
+
+
+def test_post_authority_pressure_suspension_keeps_service_alive_fail_closed():
+    events = []
+
+    class _PressureSuspendsAfterAuthority(_Worker):
+        def health(self):
+            health = super().health()
+            if "active_authority_consume" not in events:
+                return {
+                    **health,
+                    "pre_authority_ready": True,
+                    "ingress_admissible": True,
+                    "admission_suspended": False,
+                }
+            return {
+                **health,
+                "pre_authority_ready": False,
+                "ingress_admissible": False,
+                "admission_suspended": True,
+                "recoverable_admission_suspension": False,
+                "pressure_state": "health_unavailable",
+                "pressure_rejection_reason": (
+                    "pressure_controller_health_unavailable:OSError"
+                ),
+            }
+
+    pressure = _PressureSuspendsAfterAuthority("pressure_feed", events)
+    selection = _Worker("selection", events)
+    transport = _Worker("transport", events)
+    supervisor, _host, live = _supervisor(
+        events,
+        pre_authority_workers=(
+            ("pressure_feed", pressure),
+            ("selection", selection),
+        ),
+        workers=(("transport", transport),),
+    )
+
+    health = supervisor.start_active(
+        start_authority=_active_authority(events)
+    )
+
+    assert health["state"] == "active"
+    assert health["managed_workers"]["pressure_feed"][
+        "admission_suspended"
+    ] is True
+    assert health["managed_workers"]["pressure_feed"][
+        "ingress_admissible"
+    ] is False
+    assert "transport_start" in events
+    assert "live_start" in events
+    assert live["running"] is True
+    supervisor.close(join_timeout_seconds=1.0, quiesce_timeout_seconds=1.0)
+
+
+def test_post_authority_malformed_pressure_suspension_blocks_order_workers():
+    events = []
+
+    class _MalformedPressureHealth(_Worker):
+        def health(self):
+            health = super().health()
+            if "active_authority_consume" not in events:
+                return {**health, "pre_authority_ready": True}
+            return {
+                **health,
+                "pre_authority_ready": False,
+                "ingress_admissible": False,
+                "admission_suspended": True,
+                "recoverable_admission_suspension": False,
+                "pressure_state": "normal",
+                "pressure_rejection_reason": None,
+                "active_reasons": {},
+            }
+
+    pressure = _MalformedPressureHealth("pressure_feed", events)
+    transport = _Worker("transport", events)
+    supervisor, host, live = _supervisor(
+        events,
+        pre_authority_workers=(("pressure_feed", pressure),),
+        workers=(("transport", transport),),
+    )
+
+    with pytest.raises(
+        CapturedPaperServiceSupervisorError,
+        match="pressure_feed_post_authority_health_lost",
+    ):
+        supervisor.start_active(start_authority=_active_authority(events))
+
+    assert "active_authority_consume" in events
+    assert "transport_start" not in events
+    assert "live_start" not in events
+    assert live["running"] is False
+    assert host.running is False
+
+
+def test_pre_authority_health_loss_stops_before_order_authority_consumption():
+    events = []
+    pressure = _Worker("pressure", events)
+
+    class _SelectionThatObservesPressureDeath(_Worker):
+        def start(self):
+            super().start()
+            pressure.running = False
+            pressure.fatal = True
+
+    selection = _SelectionThatObservesPressureDeath("selection", events)
+    transport = _Worker("transport", events)
+    supervisor, host, live = _supervisor(
+        events,
+        pre_authority_workers=(
+            ("pressure", pressure),
+            ("selection", selection),
+        ),
+        workers=(("transport", transport),),
+    )
+
+    with pytest.raises(
+        CapturedPaperServiceSupervisorError,
+        match="pressure_pre_authority_health_lost",
+    ):
+        supervisor.start_active(start_authority=_active_authority(events))
+
+    assert "active_authority_consume" not in events
+    assert "transport_start" not in events
+    assert "live_start" not in events
+    assert live["running"] is False
+    assert host.running is False
+    assert pressure.running is False
+    assert selection.running is False
+
+
+def test_alive_but_stale_pre_authority_worker_blocks_order_authority():
+    events = []
+
+    class _AliveButStalePressure(_Worker):
+        def health(self):
+            return {
+                **super().health(),
+                # The first check occurs immediately after start and allows the
+                # feed to remain alive while selection waits.  The final
+                # pre-authority check must consume this explicit readiness bit.
+                "pre_authority_ready": "selection_start" not in events,
+            }
+
+    pressure = _AliveButStalePressure("pressure", events)
+    selection = _Worker("selection", events)
+    transport = _Worker("transport", events)
+    supervisor, host, live = _supervisor(
+        events,
+        pre_authority_workers=(
+            ("pressure", pressure),
+            ("selection", selection),
+        ),
+        workers=(("transport", transport),),
+    )
+
+    with pytest.raises(
+        CapturedPaperServiceSupervisorError,
+        match="pressure_pre_authority_health_lost",
+    ):
+        supervisor.start_active(start_authority=_active_authority(events))
+
+    assert "active_authority_consume" not in events
+    assert "transport_start" not in events
+    assert "live_start" not in events
+    assert live["running"] is False
+    assert host.running is False
+
+
+def test_pre_authority_worker_failure_during_authority_consume_blocks_order_workers():
+    events = []
+    selection = _Worker("selection", events)
+    transport = _Worker("transport", events)
+    supervisor, host, live = _supervisor(
+        events,
+        pre_authority_workers=(("selection", selection),),
+        workers=(("transport", transport),),
+    )
+    base = _active_authority(events)
+
+    def consume():
+        receipt = base.consume()
+        selection.running = False
+        selection.fatal = True
+        return receipt
+
+    authority = CapturedPaperActiveStartAuthority(
+        expected_account_id=ACCOUNT_ID,
+        runtime_generation=GENERATION,
+        consume=consume,
+        assert_current=base.assert_current,
+    )
+
+    with pytest.raises(
+        CapturedPaperServiceSupervisorError,
+        match="selection_post_authority_health_lost",
+    ):
+        supervisor.start_active(start_authority=authority)
+
+    assert "active_authority_consume" in events
+    assert "transport_start" not in events
+    assert "live_start" not in events
+    assert live["running"] is False
+    assert host.running is False
+    assert selection.running is False
+
+
 def test_post_quiesce_deactivation_runs_after_every_owner_and_before_fence_release():
     events = []
     selection = _Worker("selection", events)
@@ -726,6 +993,87 @@ def test_active_health_loss_is_fail_closed_and_visible():
     with pytest.raises(
         CapturedPaperServiceSupervisorError,
         match="live_loop_health_lost",
+    ):
+        supervisor.assert_healthy()
+
+
+def test_active_worker_fatal_reason_is_preserved_in_health_loss():
+    events = []
+    worker = _Worker("selection", events)
+    supervisor, _host, _live = _supervisor(
+        events, pre_authority_workers=(("selection", worker),)
+    )
+    supervisor.start_active(start_authority=_active_authority(events))
+    worker.running = False
+    worker.fatal = True
+    base_health = worker.health
+
+    def health_with_reason():
+        return {
+            **base_health(),
+            "fatal_reason": (
+                "DBAPIError: (psycopg2.errors.QueryCanceled) "
+                "SUPERSECRETTOKEN selection route apply failed "
+                "postgresql+psycopg2://worker:do-not-persist@db/chili "
+                '{"password": "also-do-not-persist"} '
+                + ("x" * 5000)
+            ),
+        }
+
+    worker.health = health_with_reason
+
+    with pytest.raises(CapturedPaperServiceSupervisorError) as failure:
+        supervisor.assert_healthy()
+    detail = str(failure.value)
+    assert detail.startswith("captured_paper_selection_health_lost:")
+    assert "type=DBAPIError" in detail
+    assert "reason_sha256=" in detail
+    assert "do-not-persist" not in detail
+    assert "SUPERSECRETTOKEN" not in detail
+    assert "QueryCanceled" not in detail
+    assert "password" not in detail
+    assert len(detail) <= 180
+
+
+def test_active_health_tolerates_provider_reconnect_but_rejects_dead_lane():
+    events = []
+    supervisor, host, _live = _supervisor(events)
+    supervisor.start_active(start_authority=_active_authority(events))
+    provider = {
+        "state": "running",
+        "stop_requested": False,
+        "all_ready": False,
+        "provider_sockets_started": True,
+        "failures": {},
+        "lanes": {
+            "trade": {
+                "thread_alive": True,
+                "schema_verified": True,
+                "ready": False,
+            },
+            "depth": {
+                "thread_alive": True,
+                "schema_verified": True,
+                "ready": True,
+            },
+        },
+    }
+    host.health = lambda: {"provider_loop_supervisor": provider}
+
+    assert supervisor.assert_healthy()["state"] == "active"
+
+    provider["failures"] = {"trade": {"error": "terminal"}}
+    with pytest.raises(
+        CapturedPaperServiceSupervisorError,
+        match="captured_paper_provider_health_lost",
+    ):
+        supervisor.assert_healthy()
+
+    provider["failures"] = {}
+    provider["lanes"]["trade"]["thread_alive"] = False
+    with pytest.raises(
+        CapturedPaperServiceSupervisorError,
+        match="captured_paper_provider_health_lost",
     ):
         supervisor.assert_healthy()
 
