@@ -61,6 +61,7 @@ try:
         SubscriptionConnectionIndeterminate,
         TargetCause,
         TargetResolution,
+        WatchCapacityGovernor,
         active_capture_symbols,
         require_complete_source_inventory,
         resolve_subscription_target,
@@ -73,6 +74,7 @@ except ModuleNotFoundError:  # direct ``python scripts/...`` host invocation
         SubscriptionConnectionIndeterminate,
         TargetCause,
         TargetResolution,
+        WatchCapacityGovernor,
         active_capture_symbols,
         require_complete_source_inventory,
         resolve_subscription_target,
@@ -136,6 +138,10 @@ DEPTH_WATCH_FLOOR = int(
 )
 DEPTH_WATCH_HARD_MAX = int(
     os.environ.get("CHILI_IQFEED_DEPTH_WATCH_MAX", "128") or 128
+)
+DEPTH_WATCH_RECOVERY_QUIET_S = float(
+    os.environ.get("CHILI_IQFEED_DEPTH_WATCH_RECOVERY_QUIET_SECONDS", "300")
+    or 300
 )
 READER_JOIN_TIMEOUT_S = float(
     os.environ.get("CHILI_IQFEED_DEPTH_READER_JOIN_TIMEOUT_SECONDS", "5") or 5
@@ -493,8 +499,15 @@ watched: set[str] = set()
 sock_lock = threading.Lock()
 sock: socket.socket | None = None
 running = True
-_max_watch = DEPTH_WATCH_HARD_MAX
+_watch_capacity = WatchCapacityGovernor.start(
+    cap=DEPTH_WATCH_HARD_MAX,
+    floor=DEPTH_WATCH_FLOOR,
+    hard_max=DEPTH_WATCH_HARD_MAX,
+    quiet_interval_seconds=DEPTH_WATCH_RECOVERY_QUIET_S,
+    now=time.monotonic(),
+)
 _limit_hit = False
+_limit_hit_lock = threading.Lock()
 _connection_state_lock = threading.Lock()
 _connection_generation = 0
 _active_connection_generation = 0
@@ -503,6 +516,56 @@ _capture_handoff_lock = threading.Lock()
 _capture_handoff: Any | None = None
 _capture_hot_symbols: set[str] = set()
 _capture_checkpointed_generation: dict[str, int] = {}
+
+
+def _mark_watch_limit_hit() -> None:
+    global _limit_hit
+    with _limit_hit_lock:
+        _limit_hit = True
+
+
+def _consume_watch_limit_hit() -> bool:
+    global _limit_hit
+    with _limit_hit_lock:
+        limit_hit = bool(_limit_hit)
+        _limit_hit = False
+        return limit_hit
+
+
+def _advance_watch_capacity(
+    *,
+    now: float,
+    capacity_pressure: bool,
+    at_capacity: bool,
+) -> tuple[WatchCapacityGovernor, WatchCapacityGovernor, bool]:
+    global _watch_capacity
+    previous = _watch_capacity
+    limit_hit = _consume_watch_limit_hit()
+    _watch_capacity = previous.advance(
+        now=now,
+        limit_hit=limit_hit,
+        capacity_pressure=capacity_pressure,
+        at_capacity=at_capacity,
+    )
+    return previous, _watch_capacity, limit_hit
+
+
+def _start_watch_capacity_connection(
+    *,
+    now: float,
+) -> tuple[WatchCapacityGovernor, WatchCapacityGovernor, bool]:
+    global _watch_capacity
+    previous = _watch_capacity
+    limit_hit = _consume_watch_limit_hit()
+    if limit_hit:
+        _watch_capacity = _watch_capacity.advance(
+            now=now,
+            limit_hit=True,
+            capacity_pressure=True,
+            at_capacity=True,
+        )
+    _watch_capacity = _watch_capacity.connection_started(now=now)
+    return previous, _watch_capacity, limit_hit
 
 
 class _DepthReaderQuiescenceError(RuntimeError):
@@ -1163,7 +1226,7 @@ def reader(
     stop_event: threading.Event,
     connection_generation: int,
 ) -> None:
-    global running, _limit_hit
+    global running
     buf = b""
     frames = 0
     while running and _connection_generation_active(
@@ -1282,7 +1345,7 @@ def reader(
                         "TOO MANY SYMBOL",
                     )
                 ):
-                    _limit_hit = True
+                    _mark_watch_limit_hit()
                     log.warning("IQFeed depth symbol-limit signal: %s", line[:160])
                 else:
                     log.info("feed: %s", line[:160])
@@ -1291,8 +1354,17 @@ def reader(
 
 
 def writer(forced_syms: set[str], deadline: float | None) -> None:
-    global running, _max_watch, _limit_hit
+    global running, _watch_capacity
     last_refresh = 0.0
+    previous_capacity, current_capacity, pending_limit = (
+        _start_watch_capacity_connection(now=time.monotonic())
+    )
+    if pending_limit:
+        log.warning(
+            "depth pending symbol limit applied before reconnect %d -> %d",
+            previous_capacity.cap,
+            current_capacity.cap,
+        )
     last_fast_sub = 0.0
     # Defer the first retention sweep (same starvation as the L1 bridge): a
     # first-iteration DELETE scan on iqfeed_depth_snapshots blocked the first
@@ -1317,9 +1389,10 @@ def writer(forced_syms: set[str], deadline: float | None) -> None:
             TargetCause.ROSS,
         )
     }
+    capacity_pressure = False
 
     def reconcile(*, allow_unwatch: bool, sticky_active: bool = False) -> None:
-        nonlocal prior_causes
+        nonlocal prior_causes, capacity_pressure
         reads = (
             [SourceRead.success(TargetCause.FORCED, forced_syms)]
             if forced_syms
@@ -1328,7 +1401,10 @@ def writer(forced_syms: set[str], deadline: float | None) -> None:
         resolution = _resolve_target(
             reads=reads,
             prior_causes=prior_causes,
-            capacity=max(_max_watch, len(forced_syms)),
+            capacity=max(_watch_capacity.cap, len(forced_syms)),
+        )
+        capacity_pressure = any(
+            gap.code == "capacity_eviction" for gap in resolution.gaps
         )
         _log_subscription_gaps(resolution.gaps)
         if sticky_active:
@@ -1409,7 +1485,7 @@ def writer(forced_syms: set[str], deadline: float | None) -> None:
             last_fast_sub = time.monotonic()
             source_reads[TargetCause.HINT] = _alert_symbols_read(
                 SUBSCRIBE_FRESH_WINDOW_S,
-                limit=_max_watch,
+                limit=_watch_capacity.source_read_limit,
             )
             reconcile(allow_unwatch=True)
         if time.monotonic() - last_prune >= 3600.0:
@@ -1424,25 +1500,38 @@ def writer(forced_syms: set[str], deadline: float | None) -> None:
                 log.debug("retention prune failed: %s", e)
             last_prune = time.monotonic()
         if time.monotonic() - last_refresh >= REFRESH_S:
-            if _limit_hit:
-                _max_watch = max(DEPTH_WATCH_FLOOR, _max_watch // 2)
-                _limit_hit = False
+            previous_capacity, current_capacity, limit_hit = (
+                _advance_watch_capacity(
+                    now=time.monotonic(),
+                    capacity_pressure=capacity_pressure,
+                    at_capacity=len(watched) >= _watch_capacity.cap,
+                )
+            )
+            if limit_hit:
                 log.warning(
-                    "depth watch cap halved -> %d (IQFeed L2 symbol-limit)",
-                    _max_watch,
+                    "depth watch cap limited %d -> %d (IQFeed L2 symbol-limit)",
+                    previous_capacity.cap,
+                    current_capacity.cap,
+                )
+            elif current_capacity.cap != previous_capacity.cap:
+                log.info(
+                    "depth watch-cap recovery probe %d -> %d after %.0fs quiet",
+                    previous_capacity.cap,
+                    current_capacity.cap,
+                    DEPTH_WATCH_RECOVERY_QUIET_S,
                 )
             if not forced_syms:
                 source_reads[TargetCause.ACTIVE] = _live_symbols_read()
                 source_reads[TargetCause.ELIGIBLE] = _eligible_symbols_read(
-                    _max_watch
+                    _watch_capacity.source_read_limit
                 )
                 source_reads[TargetCause.ROSS] = _ross_universe_symbols_read(
-                    _max_watch
+                    _watch_capacity.source_read_limit
                 )
                 source_reads[TargetCause.HINT] = (
                     _alert_symbols_read(
                         SUBSCRIBE_FRESH_WINDOW_S,
-                        limit=_max_watch,
+                        limit=_watch_capacity.source_read_limit,
                     )
                     if SUBSCRIBE_ON_ALERT
                     else SourceRead.success(TargetCause.HINT, ())
