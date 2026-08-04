@@ -4858,17 +4858,22 @@ def _run_eligibility_lease_sweep_job():
     inilalathalang band ay katumbas ng tatanggapin ng trading path mismo.
     Best-effort; fail-open sa bawat pagdududa (tingnan ang eligibility_lease)."""
     try:
+        from ..config import settings as _settings
+        from ..db import SessionLocal
         from .trading.momentum_neural.eligibility_lease import (
             expire_stale_equity_eligibility,
         )
 
-        if not bool(getattr(settings, "chili_momentum_eligibility_lease_enabled", True)):
+        if not bool(getattr(_settings, "chili_momentum_eligibility_lease_enabled", True)):
             return
-        with SessionLocal() as db:
+        db = SessionLocal()
+        try:
             protected = _active_equity_session_symbols(db)
             result = expire_stale_equity_eligibility(
-                db, settings_obj=settings, protected_symbols=protected
+                db, settings_obj=_settings, protected_symbols=protected
             )
+        finally:
+            db.close()
         if result.get("demoted"):
             logger.info("[scheduler] eligibility lease sweep: %s", result)
     except Exception:
