@@ -20,7 +20,6 @@ def _floor(**kw):
     # entry 3.76, atr_pct 0.05 → buffer = 3.76*max(0.001, 0.0125) = 0.047.
     base = dict(
         enabled=True,
-        monster_ctx=True,
         halt_lit=False,
         leg_age_seconds=30.0,
         last15_low=3.70,
@@ -56,11 +55,6 @@ def test_jlhl_band_adequate_walang_candidate():
 def test_halt_lit_walang_candidate():
     floor, reason = _floor(halt_lit=True)
     assert floor is None and reason == "halt_lit"
-
-
-def test_not_monster_walang_candidate():
-    floor, reason = _floor(monster_ctx=False)
-    assert floor is None and reason == "not_monster"
 
 
 def test_descending_lows_walang_candidate():

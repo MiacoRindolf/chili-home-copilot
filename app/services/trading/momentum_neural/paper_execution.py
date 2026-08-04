@@ -1579,7 +1579,6 @@ def trail_width_maturity_factor(
 def monster_structure_floor_candidate(
     *,
     enabled: bool,
-    monster_ctx: bool,
     halt_lit: bool,
     leg_age_seconds: float | None,
     last15_low: float | None,
@@ -1598,19 +1597,22 @@ def monster_structure_floor_candidate(
     net-negative ang 1m trail sa klase). Candidate LANG ito — ang caller ay
     magko-compose via max() (INVARIANT-A automatic: hindi kailanman lumuluwag).
 
-    APAT na adaptive na kondisyon (lahat kailangan):
-      (i)   ``monster_ctx`` — ang L7 monster_dip_context (reuse, walang bagong
-            threshold);
-      (ii)  BAR MATURITY — ``leg_age_seconds < 180`` (wala pang 3 kumpletong 1m
+    TATLONG adaptive na kondisyon (lahat kailangan; ang naunang monster-ctx na
+    kondisyon ay TINANGGAL — sa replay frame na nagsisimula mid-move, ang
+    day-low-anchored na context ay imposibleng mag-true (HYFM uol ≈ 1.1 sa
+    frame vs 500% na totoong araw — ang frame-anchor trap), at per ang
+    adversarial study, ang BAND INADEQUACY ang tunay na separator; ang monster
+    ctx ay pumuputok sa parehong HYFM at JLHL kaya walang discriminating value
+    dito):
+      (i)   BAR MATURITY — ``leg_age_seconds < 180`` (wala pang 3 kumpletong 1m
             bar sa leg; pagkatapos noon ang existing 5m-EMA9/G4 structure path
             ang may-ari — ONE documented base = 180s, ang boundary ng 1m
             timeframe mismo);
-      (iii) BAND INADEQUACY — ``retrace_amp_pct > (hwm − composed_stop)/hwm``:
-            ang realized 30s retrace ay mas malaki sa kasalukuyang band —
-            self-referential, ITO ang tunay na HYFM-vs-JLHL separator (HYFM
-            9.12% > 5% band; JLHL 2.2-3.3% < band — ang monster ctx lang ay
-            pumuputok sa PAREHO);
-      (iv)  HINDI naka-ilaw ang suspected-halt lifecycle (ang JLHL halt-stairs
+      (ii)  BAND INADEQUACY — ``retrace_amp_pct > (hwm − composed_stop)/hwm``:
+            ang realized 30s amplitude ay mas malaki sa kasalukuyang band —
+            self-referential na explosiveness detector, ITO ang tunay na
+            HYFM-vs-JLHL separator (HYFM ~11% > 5% band; JLHL 2.2-3.3% < band);
+      (iii) HINDI naka-ilaw ang suspected-halt lifecycle (ang JLHL halt-stairs
             ay hindi ginagalaw).
     Structure: ang huling kumpletong 15s bar low ay dapat ASCENDING
     (> prev low). Floor = last15_low − entry×max(0.001, atr_pct×0.25) — ang
@@ -1619,8 +1621,6 @@ def monster_structure_floor_candidate(
     candidate, walang pagbabago sa trail."""
     if not bool(enabled):
         return None, "disabled"
-    if not bool(monster_ctx):
-        return None, "not_monster"
     if bool(halt_lit):
         return None, "halt_lit"
     try:

@@ -36142,22 +36142,8 @@ def tick_live_session(
                         le["l10_sf_amp"] = _sf_amp
                         le["l10_sf_day_hi"] = _sf_day_hi
                         le["l10_sf_day_lo"] = _sf_day_lo
-                    _sf_px_now = None
-                    try:
-                        _sf_px_now = float(tick.bid or tick.mid or 0) or None
-                    except Exception:
-                        _sf_px_now = None
-                    _sf_hi = _float_or_none(le.get("l10_sf_day_hi"))
-                    _sf_lo = _float_or_none(le.get("l10_sf_day_lo"))
-                    from .entry_gates import _monster_dip_context_from_settings
                     from .paper_execution import monster_structure_floor_candidate
 
-                    _sf_ctx = _monster_dip_context_from_settings(
-                        decision_px=_sf_px_now,
-                        day_high=_sf_hi,
-                        day_low=_sf_lo,
-                        pb_low=_sf_px_now,
-                    )
                     _sf_age = None
                     try:
                         _sf_opened = _parse_dt(pos.get("opened_at_utc"))
@@ -36171,7 +36157,6 @@ def tick_live_session(
                         _sf_age = None
                     _sf_floor, _sf_reason = monster_structure_floor_candidate(
                         enabled=True,
-                        monster_ctx=bool(_sf_ctx),
                         halt_lit=False,
                         leg_age_seconds=_sf_age,
                         last15_low=_float_or_none(le.get("l10_sf_last_low")),
@@ -36189,6 +36174,16 @@ def tick_live_session(
                             "last15_low": le.get("l10_sf_last_low"),
                             "retrace_amp_pct": le.get("l10_sf_amp"),
                             "leg_age_s": _sf_age,
+                        })
+                    elif _sf_reason not in ("leg_mature_1m_owns", "band_adequate") and \
+                            le.get("l10_sf_last_reject") != _sf_reason:
+                        # OBSERVABILITY (aral ng L8/L10 zero-trace debugging):
+                        # ang mga DI-INAASAHANG reject ay ini-emit nang minsan
+                        # kada reason transition — ang dalawang normal na quiet
+                        # reason lang ang hindi (bawas ingay).
+                        le["l10_sf_last_reject"] = _sf_reason
+                        _emit(db, sess, "monster_structure_floor_reject", {
+                            "reason": _sf_reason, "leg_age_s": _sf_age,
                         })
             except Exception:
                 pass
