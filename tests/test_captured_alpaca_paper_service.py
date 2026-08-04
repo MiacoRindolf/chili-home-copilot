@@ -1919,6 +1919,7 @@ def test_mode_arguments_require_receipt_only_for_no_order_smoke() -> None:
             mode="activate-paper",
             no_order_receipt_output=None,
             host_ready_receipt=r"D:\receipts\host-ready.json",
+            startup_attempt_id="45a9d0f5-bf22-4d19-8870-a7b1dbeaf519",
         )
     )
 
@@ -1952,12 +1953,25 @@ def test_mode_arguments_require_receipt_only_for_no_order_smoke() -> None:
                 host_ready_receipt=None,
             )
         )
+    with pytest.raises(
+        CapturedAlpacaPaperServiceError,
+        match="canonical lowercase UUID",
+    ):
+        _validate_mode_arguments(
+            SimpleNamespace(
+                mode="activate-paper",
+                no_order_receipt_output=None,
+                host_ready_receipt=r"D:\receipts\host-ready.json",
+                startup_attempt_id="NOT-A-UUID",
+            )
+        )
 
 
 def _host_handshake_fixture(
     tmp_path: Path,
     *,
     wall_clock=lambda: NOW,
+    startup_attempt_id: str | None = None,
 ):
     host_source = (
         Path(service_module.__file__).resolve().parent
@@ -2004,14 +2018,19 @@ def _host_handshake_fixture(
         "service_cmdline_sha256": sha256_json(service_cmdline),
     }
     issuer_live: dict[str, object] = {}
+    ready_output = tmp_path / "host-ready.json"
+    if startup_attempt_id is not None:
+        ready_output = tmp_path / "attempts" / startup_attempt_id / "host-ready.json"
+        ready_output.parent.mkdir(parents=True)
     handshake = service_module._CapturedPaperHostActivationHandshake.prepare(
-        ready_output=tmp_path / "host-ready.json",
+        ready_output=ready_output,
         verified=verified,
         allowed_roots=(tmp_path,),
         wall_clock=wall_clock,
         process_probe=lambda: identity,
         issuer_process_probe=lambda _pid: dict(issuer_live),
         challenge_factory=lambda: SHA_C,
+        startup_attempt_id=startup_attempt_id,
     )
     return (
         handshake,
@@ -2070,7 +2089,7 @@ def _publish_matching_host_permit(
         hashlib.sha256(host_source.read_bytes()).hexdigest(),
         "--",
         "--mode",
-        "Apply",
+        "RestartOnly" if handshake._startup_attempt_id is not None else "Apply",
         "--manifest",
         str(verified.manifest_path),
         "--manifest-sha256",
@@ -2094,6 +2113,10 @@ def _publish_matching_host_permit(
         "--confirm-fake-money-paper",
         "CUTOVER_FAKE_MONEY_ALPACA_PAPER",
     ]
+    if handshake._startup_attempt_id is not None:
+        issuer_cmdline.extend(
+            ["--startup-attempt-id", handshake._startup_attempt_id]
+        )
     issuer = {
         "issuer_pid": os.getpid(),
         "issuer_create_time_ns": 987_654_321,
@@ -2221,6 +2244,39 @@ def _publish_matching_host_permit(
         "payload": authorization_payload,
     }
     authorization["event_sha256"] = sha256_json(authorization)
+    events = [provider_guard, quiesced, quiet, authorization]
+    if handshake._startup_attempt_id is not None:
+        events.insert(
+            0,
+            {
+                "schema_version": (
+                    "chili.captured-paper-host-cutover-journal-event.v1"
+                ),
+                "transaction_id": transaction_id,
+                "sequence": 1,
+                "previous_event_sha256": "0" * 64,
+                "event_type": "restart_started",
+                "recorded_at": issued_at,
+                "payload": {
+                    "startup_attempt_id": handshake._startup_attempt_id,
+                    "clean_stopped_receipt_sha256": SHA_B,
+                    "resolved_task_xml_sha256": "d" * 64,
+                    "resolved_task_xml_path": str(
+                        handshake.ready_path.parent / "restart-task.xml"
+                    ),
+                    "account_scope": "alpaca:paper",
+                    "live_cash_authorized": False,
+                },
+            },
+        )
+    previous = "0" * 64
+    for sequence, event in enumerate(events, start=1):
+        event["sequence"] = sequence
+        event["previous_event_sha256"] = previous
+        event.pop("event_sha256", None)
+        event["event_sha256"] = sha256_json(event)
+        previous = event["event_sha256"]
+    authorization = events[-1]
     journal_path.write_bytes(
         b"".join(
             json.dumps(
@@ -2230,7 +2286,7 @@ def _publish_matching_host_permit(
                 allow_nan=False,
             ).encode("utf-8")
             + b"\n"
-            for event in (provider_guard, quiesced, quiet, authorization)
+            for event in events
         )
     )
     permit = {
@@ -2239,7 +2295,7 @@ def _publish_matching_host_permit(
         **authorization_payload,
         "journal_path": str(journal_path),
         "journal_transaction_id": transaction_id,
-        "journal_authorization_sequence": 4,
+        "journal_authorization_sequence": authorization["sequence"],
         "journal_authorization_event_sha256": authorization["event_sha256"],
         "journal_authorization_event": authorization,
     }
@@ -2309,12 +2365,23 @@ def _append_matching_apply_completed(
         "real_money_authorized": False,
     }
     payload.update(payload_overrides or {})
+    if handshake._startup_attempt_id is not None:
+        payload.update(
+            {
+                "startup_attempt_id": handshake._startup_attempt_id,
+                "clean_stopped_receipt_sha256": SHA_B,
+            }
+        )
     event = {
         "schema_version": "chili.captured-paper-host-cutover-journal-event.v1",
         "transaction_id": permit["journal_transaction_id"],
         "sequence": len(rows) + 1,
         "previous_event_sha256": rows[-1]["event_sha256"],
-        "event_type": "apply_completed",
+        "event_type": (
+            "restart_completed"
+            if handshake._startup_attempt_id is not None
+            else "apply_completed"
+        ),
         "recorded_at": recorded_at.isoformat().replace("+00:00", "Z"),
         "payload": payload,
     }
@@ -2326,7 +2393,12 @@ def _append_matching_apply_completed(
     return event
 
 
-def _published_started_handshake(tmp_path: Path, *, clock: dict[str, datetime]):
+def _published_started_handshake(
+    tmp_path: Path,
+    *,
+    clock: dict[str, datetime],
+    startup_attempt_id: str | None = None,
+):
     (
         handshake,
         verified,
@@ -2335,7 +2407,11 @@ def _published_started_handshake(tmp_path: Path, *, clock: dict[str, datetime]):
         executable,
         service_cmdline,
         issuer_live,
-    ) = _host_handshake_fixture(tmp_path, wall_clock=lambda: clock["now"])
+    ) = _host_handshake_fixture(
+        tmp_path,
+        wall_clock=lambda: clock["now"],
+        startup_attempt_id=startup_attempt_id,
+    )
     handshake.publish_prepared()
     permit = _publish_matching_host_permit(
         handshake,
@@ -2462,6 +2538,60 @@ def test_committed_host_authority_survives_startup_permit_expiry_but_not_revocat
     handshake.revocation_requested_path.write_text("{}", encoding="utf-8")
     with pytest.raises(CapturedAlpacaPaperServiceError, match="REVOKED"):
         handshake.assert_dispatch_authority_current()
+
+
+def test_committed_host_publishes_clean_stopped_receipt_once(
+    tmp_path: Path,
+) -> None:
+    clock = {"now": NOW}
+    handshake, permit, _issuer_live = _published_started_handshake(
+        tmp_path, clock=clock
+    )
+    committed = _append_matching_apply_completed(handshake, permit=permit)
+    handshake.await_and_consume_apply_completed_authority()
+
+    clock["now"] = NOW + timedelta(seconds=1)
+    stopped = handshake.publish_stopped(
+        supervisor_stopped=True,
+        shared_store_closed=True,
+        writer_lease_released=True,
+    )
+
+    assert stopped["state"] == "STOPPED_CLEANLY"
+    assert stopped["apply_completed_event_sha256"] == committed["event_sha256"]
+    assert stopped["started_receipt_sha256"] == handshake._started_sha256
+    assert stopped["supervisor_stopped"] is True
+    assert stopped["shared_store_closed"] is True
+    assert stopped["writer_lease_released"] is True
+    assert handshake.stopped_path.is_file()
+    assert json.loads(handshake.stopped_path.read_text(encoding="utf-8")) == stopped
+
+    with pytest.raises(CapturedAlpacaPaperServiceError, match="one-shot"):
+        handshake.publish_stopped(
+            supervisor_stopped=True,
+            shared_store_closed=True,
+            writer_lease_released=True,
+        )
+
+
+def test_restart_attempt_consumes_only_its_journal_segment_and_commit(
+    tmp_path: Path,
+) -> None:
+    attempt_id = "45a9d0f5-bf22-4d19-8870-a7b1dbeaf519"
+    clock = {"now": NOW}
+    handshake, permit, _issuer_live = _published_started_handshake(
+        tmp_path,
+        clock=clock,
+        startup_attempt_id=attempt_id,
+    )
+    committed = _append_matching_apply_completed(handshake, permit=permit)
+
+    consumed = handshake.await_and_consume_apply_completed_authority()
+
+    assert committed["event_type"] == "restart_completed"
+    assert consumed["event_sha256"] == committed["event_sha256"]
+    assert consumed["payload"]["startup_attempt_id"] == attempt_id
+    assert consumed["payload"]["clean_stopped_receipt_sha256"] == SHA_B
 
 
 def test_uncommitted_host_authority_expires_fail_closed(

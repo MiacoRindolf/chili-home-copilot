@@ -27,6 +27,16 @@ def _issuer_apply_cmdline(
     prepared: cutover.PreparedCutover, journal_root: Path
 ) -> list[str]:
     source = Path(cutover.__file__).resolve(strict=True)
+    attempt_positions = [
+        index
+        for index, value in enumerate(prepared.invocation.launcher_arguments)
+        if value == "-StartupAttemptId"
+    ]
+    attempt_id = (
+        prepared.invocation.launcher_arguments[attempt_positions[0] + 1]
+        if len(attempt_positions) == 1
+        else None
+    )
     values = [
         sys.executable,
         "-I",
@@ -40,7 +50,9 @@ def _issuer_apply_cmdline(
         "--target", str(source),
         "--target-sha256", hashlib.sha256(source.read_bytes()).hexdigest(),
         "--",
-        "--mode", cutover.MODE_APPLY,
+        "--mode", (
+            cutover.MODE_RESTART_ONLY if attempt_id else cutover.MODE_APPLY
+        ),
         "--manifest", str(prepared.manifest_path),
         "--manifest-sha256", prepared.manifest_sha256,
         "--candidate-root", str(prepared.candidate_root),
@@ -58,6 +70,8 @@ def _issuer_apply_cmdline(
             "--confirm-fake-money-paper", cutover.APPLY_CONFIRMATION,
         )
     )
+    if attempt_id:
+        values.extend(("--startup-attempt-id", attempt_id))
     return values
 
 
@@ -1032,6 +1046,7 @@ class FakeHost:
         }
         self.iqconnect_guard_active = False
         self.iqconnect_guard_checks = 0
+        self.fail_guard_assert_number: int | None = None
         self.iqconnect_provider_current = True
         self.iqconnect_client_roles_current = set(
             cutover.IQCONNECT_CLIENT_ENDPOINT_BY_ROLE
@@ -1127,11 +1142,13 @@ class FakeHost:
     def find_candidate_tasks(
         self, invocation: cutover.CandidateInvocation
     ) -> tuple[cutover.TaskObservation, ...]:
-        del invocation
+        expected_arguments = cutover._quote_windows_arguments(
+            invocation.launcher_arguments
+        )
         return tuple(
             item
             for item in self.tasks.values()
-            if item.xml_sha256 == self.prepared.resolved_task_xml_sha256
+            if cutover._task_exec_from_xml(item.xml)[1] == expected_arguments
         )
 
     def get_process(self, pid: int, *, role: str) -> cutover.ProcessIdentity | None:
@@ -1169,6 +1186,11 @@ class FakeHost:
     ) -> None:
         assert expected.executable_sha256 == cutover.IQCONNECT_EXECUTABLE_SHA256
         self.iqconnect_guard_checks += 1
+        if self.fail_guard_assert_number == self.iqconnect_guard_checks:
+            raise cutover.CapturedPaperHostCutoverError(
+                "IQCONNECT_PROVIDER_GUARD_LOST",
+                "injected IQConnect continuity loss",
+            )
         if not self.iqconnect_guard_active:
             raise cutover.CapturedPaperHostCutoverError(
                 "IQCONNECT_PROVIDER_GUARD_LOST",
@@ -1289,7 +1311,7 @@ class FakeHost:
                 self.dispatch_lock_identity = dict(
                     cutover.create_startup_dispatch_lock(paths["dispatch_lock"])
                 )
-            return dict(cutover.build_startup_prepared_receipt(
+            receipt = dict(cutover.build_startup_prepared_receipt(
                 prepared=self.prepared,
                 service=expected_service,
                 challenge_sha256=self.startup_challenge,
@@ -1297,6 +1319,11 @@ class FakeHost:
                 prepared_at=NOW,
                 valid_until=NOW + timedelta(seconds=20),
             ))
+            paths = cutover._startup_handshake_paths(
+                invocation, roots=self.prepared.allowed_read_roots
+            )
+            paths["prepared"].write_bytes(cutover._canonical_json_bytes(receipt))
+            return receipt
         if phase == "started":
             permit_path = Path(f"{invocation.host_ready_receipt_base}.permit.json")
             permit = cutover._strict_json(permit_path.read_bytes(), "fake permit")
@@ -1308,7 +1335,7 @@ class FakeHost:
             ]
             quiet_event = next(
                 row
-                for row in journal_rows
+                for row in reversed(journal_rows)
                 if row.get("event_type")
                 == "legacy_paper_broker_quiet_horizon_completed"
             )
@@ -1322,7 +1349,7 @@ class FakeHost:
             )
             evidence_raw = cutover._canonical_json_bytes(authority)
             paths["active_start_evidence"].write_bytes(evidence_raw)
-            return dict(cutover.build_startup_started_receipt(
+            receipt = dict(cutover.build_startup_started_receipt(
                 prepared=self.prepared,
                 service=expected_service,
                 challenge_sha256=self.startup_challenge,
@@ -1335,6 +1362,8 @@ class FakeHost:
                 started_at=NOW,
                 valid_until=NOW + timedelta(seconds=20),
             ))
+            paths["started"].write_bytes(cutover._canonical_json_bytes(receipt))
+            return receipt
         raise AssertionError(f"unexpected startup phase {phase}")
 
     def inspect_legacy_execution_lane(
@@ -2613,6 +2642,292 @@ def test_already_applied_service_crash_compensates_to_exact_legacy_state(
     _assert_restored(prepared, backend)
 
 
+def _publish_fake_clean_stop(
+    *,
+    prepared: cutover.PreparedCutover,
+    executor: cutover.CapturedPaperHostCutoverExecutor,
+) -> tuple[bytes, str]:
+    journal = cutover.CutoverJournal(
+        root=executor.journal_root,
+        prepared=prepared,
+        clock=lambda: NOW,
+    )
+    committed = next(
+        event
+        for event in reversed(journal.events)
+        if event.get("event_type") in {"apply_completed", "restart_completed"}
+    )
+    payload = committed["payload"]
+    paths = cutover._startup_handshake_paths(
+        prepared.invocation, roots=prepared.allowed_read_roots
+    )
+    started = cutover._strict_json(
+        paths["started"].read_bytes(), "fake STARTED"
+    )
+    body = {
+        "schema_version": cutover.STARTUP_STOPPED_SCHEMA,
+        "state": "STOPPED_CLEANLY",
+        "activation_generation": prepared.activation_generation,
+        "manifest_sha256": prepared.manifest_sha256,
+        "account_scope": "alpaca:paper",
+        "expected_account_id": prepared.expected_account_id,
+        "service_pid": payload["service_pid"],
+        "service_create_time_ns": payload["service_create_time_ns"],
+        "service_executable_path": payload["service_executable_path"],
+        "service_executable_sha256": payload["service_executable_sha256"],
+        "service_cmdline_sha256": payload["service_cmdline_sha256"],
+        "challenge_sha256": payload["challenge_sha256"],
+        "prepared_receipt_sha256": payload["prepared_receipt_sha256"],
+        "activation_permit_sha256": payload["activation_permit_sha256"],
+        "started_receipt_sha256": started["receipt_sha256"],
+        "apply_completed_event_sha256": committed["event_sha256"],
+        "stopped_at": NOW.isoformat().replace("+00:00", "Z"),
+        "supervisor_stopped": True,
+        "shared_store_closed": True,
+        "writer_lease_released": True,
+        "paper_execution_started": True,
+        "paper_execution_stopped": True,
+        "live_cash_authorized": False,
+        "real_money_authorized": False,
+    }
+    body["receipt_sha256"] = cutover.sha256_json(body)
+    raw = cutover._canonical_json_bytes(body)
+    paths["stopped"].write_bytes(raw)
+    return raw, body["receipt_sha256"]
+
+
+def test_restart_only_after_clean_stop_rotates_attempt_and_preserves_applied_host(
+    prepared: cutover.PreparedCutover,
+) -> None:
+    backend = FakeHost(prepared)
+    executor = _executor(prepared, backend)
+    assert executor.apply().verdict == "APPLIED_ALPACA_PAPER_ONLY"
+    original_paths = cutover._startup_handshake_paths(
+        prepared.invocation, roots=prepared.allowed_read_roots
+    )
+    backend.processes = {
+        pid: value
+        for pid, value in backend.processes.items()
+        if not value.role.startswith("candidate_")
+    }
+    stopped_raw, stopped_sha = _publish_fake_clean_stop(
+        prepared=prepared, executor=executor
+    )
+    original_bytes = {
+        name: path.read_bytes()
+        for name, path in original_paths.items()
+        if path.is_file()
+    }
+    attempt_id = "45a9d0f5-bf22-4d19-8870-a7b1dbeaf519"
+    restart_prepared = cutover._restart_prepared_cutover(
+        prepared,
+        startup_attempt_id=attempt_id,
+        create_attempt_root=False,
+    )
+    backend.prepared = restart_prepared
+    backend.dispatch_lock_identity = None
+
+    report = executor.restart_only(attempt_id)
+
+    assert report.verdict == "RESTARTED_ALPACA_PAPER_ONLY"
+    assert report.mode == cutover.MODE_RESTART_ONLY
+    assert stopped_sha == cutover.sha256_json(
+        {k: v for k, v in json.loads(stopped_raw).items() if k != "receipt_sha256"}
+    )
+    assert all(
+        original_paths[name].read_bytes() == raw
+        for name, raw in original_bytes.items()
+    )
+    restart_paths = cutover._startup_handshake_paths(
+        restart_prepared.invocation,
+        roots=restart_prepared.allowed_read_roots,
+    )
+    assert restart_paths["prepared"].is_file()
+    assert restart_paths["permit"].is_file()
+    assert restart_paths["started"].is_file()
+    assert backend.tasks[cutover.CANDIDATE_TASK_NAME].enabled is True
+    assert not backend.find_legacy_processes(prepared.restore_plan.bindings)
+    assert backend.execution_lane_state == "stopped"
+
+
+def test_restart_only_can_rotate_again_from_the_latest_clean_attempt(
+    prepared: cutover.PreparedCutover,
+) -> None:
+    backend = FakeHost(prepared)
+    executor = _executor(prepared, backend)
+    executor.apply()
+    backend.processes = {
+        pid: value
+        for pid, value in backend.processes.items()
+        if not value.role.startswith("candidate_")
+    }
+    _publish_fake_clean_stop(prepared=prepared, executor=executor)
+    first_attempt = "45a9d0f5-bf22-4d19-8870-a7b1dbeaf519"
+    first_prepared = cutover._restart_prepared_cutover(
+        prepared,
+        startup_attempt_id=first_attempt,
+        create_attempt_root=False,
+    )
+    backend.prepared = first_prepared
+    backend.dispatch_lock_identity = None
+    executor.restart_only(first_attempt)
+
+    backend.processes = {
+        pid: value
+        for pid, value in backend.processes.items()
+        if not value.role.startswith("candidate_")
+    }
+    _publish_fake_clean_stop(prepared=first_prepared, executor=executor)
+    second_attempt = "1fd9d47a-6b49-4a27-9cb6-a0ca6ae77a03"
+    second_prepared = cutover._restart_prepared_cutover(
+        prepared,
+        startup_attempt_id=second_attempt,
+        create_attempt_root=False,
+    )
+    backend.prepared = second_prepared
+    backend.dispatch_lock_identity = None
+
+    report = executor.restart_only(second_attempt)
+
+    assert report.verdict == "RESTARTED_ALPACA_PAPER_ONLY"
+    second_paths = cutover._startup_handshake_paths(
+        second_prepared.invocation, roots=prepared.allowed_read_roots
+    )
+    assert second_paths["prepared"].is_file()
+    assert second_paths["permit"].is_file()
+    assert second_paths["started"].is_file()
+    assert backend.tasks[cutover.CANDIDATE_TASK_NAME].enabled is True
+
+
+@pytest.mark.parametrize(
+    "failure",
+    ["missing", "stale", "mismatched", "live-process"],
+)
+def test_restart_only_rejects_unproven_clean_stop_before_host_mutation(
+    prepared: cutover.PreparedCutover,
+    failure: str,
+) -> None:
+    backend = FakeHost(prepared)
+    executor = _executor(prepared, backend)
+    executor.apply()
+    if failure != "live-process":
+        backend.processes = {
+            pid: value
+            for pid, value in backend.processes.items()
+            if not value.role.startswith("candidate_")
+        }
+    paths = cutover._startup_handshake_paths(
+        prepared.invocation, roots=prepared.allowed_read_roots
+    )
+    if failure != "missing":
+        _publish_fake_clean_stop(prepared=prepared, executor=executor)
+        body = json.loads(paths["stopped"].read_text(encoding="utf-8"))
+        if failure == "stale":
+            body["stopped_at"] = (NOW - timedelta(hours=2)).isoformat().replace(
+                "+00:00", "Z"
+            )
+        elif failure == "mismatched":
+            body["service_pid"] += 1
+        if failure in {"stale", "mismatched"}:
+            body.pop("receipt_sha256")
+            body["receipt_sha256"] = cutover.sha256_json(body)
+            paths["stopped"].write_bytes(cutover._canonical_json_bytes(body))
+    attempt_id = "45a9d0f5-bf22-4d19-8870-a7b1dbeaf519"
+    backend.prepared = cutover._restart_prepared_cutover(
+        prepared,
+        startup_attempt_id=attempt_id,
+        create_attempt_root=False,
+    )
+    backend.dispatch_lock_identity = None
+    before = list(backend.mutations)
+
+    with pytest.raises(cutover.CapturedPaperHostCutoverError):
+        executor.restart_only(attempt_id)
+
+    assert backend.mutations == before
+    assert not (
+        paths["prepared"].parent / "attempts" / attempt_id
+    ).exists()
+
+
+@pytest.mark.parametrize("fail_after_effect", [False, True])
+def test_restart_only_start_failure_rolls_back_exact_legacy_state(
+    prepared: cutover.PreparedCutover,
+    fail_after_effect: bool,
+) -> None:
+    backend = FakeHost(prepared)
+    executor = _executor(prepared, backend)
+    executor.apply()
+    backend.processes = {
+        pid: value
+        for pid, value in backend.processes.items()
+        if not value.role.startswith("candidate_")
+    }
+    _publish_fake_clean_stop(prepared=prepared, executor=executor)
+    attempt_id = "45a9d0f5-bf22-4d19-8870-a7b1dbeaf519"
+    backend.prepared = cutover._restart_prepared_cutover(
+        prepared,
+        startup_attempt_id=attempt_id,
+        create_attempt_root=False,
+    )
+    backend.dispatch_lock_identity = None
+    backend.fail_operation = f"start:{cutover.CANDIDATE_TASK_NAME}"
+    backend.fail_after_effect = fail_after_effect
+    backend.failed = False
+
+    with pytest.raises(
+        cutover.CapturedPaperHostCutoverError,
+        match="RESTART_FAILED_ROLLED_BACK",
+    ):
+        executor.restart_only(attempt_id)
+
+    _assert_restored(prepared, backend)
+
+
+def test_restart_only_post_permit_failure_revokes_all_authority_and_rolls_back(
+    prepared: cutover.PreparedCutover,
+) -> None:
+    backend = FakeHost(prepared)
+    executor = _executor(prepared, backend)
+    executor.apply()
+    original_paths = cutover._startup_handshake_paths(
+        prepared.invocation, roots=prepared.allowed_read_roots
+    )
+    backend.processes = {
+        pid: value
+        for pid, value in backend.processes.items()
+        if not value.role.startswith("candidate_")
+    }
+    _publish_fake_clean_stop(prepared=prepared, executor=executor)
+    attempt_id = "45a9d0f5-bf22-4d19-8870-a7b1dbeaf519"
+    restart_prepared = cutover._restart_prepared_cutover(
+        prepared,
+        startup_attempt_id=attempt_id,
+        create_attempt_root=False,
+    )
+    backend.prepared = restart_prepared
+    backend.dispatch_lock_identity = None
+    # Restart checks the guard before mutation, before task start, and once
+    # more after STARTED.  Fail only the last of those so the new permit is
+    # already durable and must be revoked by compensation.
+    backend.fail_guard_assert_number = backend.iqconnect_guard_checks + 3
+
+    with pytest.raises(
+        cutover.CapturedPaperHostCutoverError,
+        match="IQCONNECT_PROVIDER_GUARD_LOST",
+    ):
+        executor.restart_only(attempt_id)
+
+    restart_paths = cutover._startup_handshake_paths(
+        restart_prepared.invocation, roots=prepared.allowed_read_roots
+    )
+    assert not original_paths["permit"].exists()
+    assert original_paths["revoked"].is_file()
+    assert not restart_paths["permit"].exists()
+    assert restart_paths["revoked"].is_file()
+    _assert_restored(prepared, backend)
+
+
 def test_explicit_rollback_restores_exact_tasks_and_provenance_roles(
     prepared: cutover.PreparedCutover,
 ) -> None:
@@ -2989,10 +3304,13 @@ def test_snapshot_builders_round_trip_exact_restore_material(
     cutover._assert_snapshot_plan_consistency(task, process, restore)
 
 
-def test_apply_requires_explicit_fake_money_confirmation() -> None:
+@pytest.mark.parametrize(
+    "mode", [cutover.MODE_APPLY, cutover.MODE_RESTART_ONLY]
+)
+def test_paper_start_requires_explicit_fake_money_confirmation(mode: str) -> None:
     assert cutover.main(
         [
-            "--mode", "Apply",
+            "--mode", mode,
             "--manifest", "x", "--manifest-sha256", "a" * 64,
             "--candidate-root", "x", "--allow-read-root", "x",
             "--task-snapshot", "x", "--process-snapshot", "x",
@@ -4018,6 +4336,22 @@ def test_python_c_importer_and_non_apply_argv_cannot_issue_permit(
     ):
         cutover._validate_apply_issuer_cmdline(
             not_apply,
+            executable_path=executable,
+            source_path=source,
+            prepared=prepared,
+            journal_root=journal_root,
+        )
+
+    alternate_snapshot = prepared.candidate_root / "alternate-task-snapshot.json"
+    alternate_snapshot.write_text("{}", encoding="utf-8")
+    mismatched_input = list(valid)
+    task_index = mismatched_input.index("--task-snapshot") + 1
+    mismatched_input[task_index] = str(alternate_snapshot)
+    with pytest.raises(
+        cutover.CapturedPaperHostCutoverError, match="ISSUER_CMDLINE_INVALID"
+    ):
+        cutover._validate_apply_issuer_cmdline(
+            mismatched_input,
             executable_path=executable,
             source_path=source,
             prepared=prepared,

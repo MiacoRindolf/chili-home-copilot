@@ -23,7 +23,7 @@ from __future__ import annotations
 
 import argparse
 import base64
-from contextlib import contextmanager
+from contextlib import contextmanager, suppress
 import copy
 import csv
 from dataclasses import dataclass, field, replace as dataclass_replace
@@ -52,6 +52,7 @@ from scripts import captured_paper_activation_contract as activation_contract
 UTC = timezone.utc
 MODE_VALIDATE_ONLY = "ValidateOnly"
 MODE_APPLY = "Apply"
+MODE_RESTART_ONLY = "RestartOnly"
 MODE_ROLLBACK = "Rollback"
 MODE_RECOVER_ONLY = "RecoverOnly"
 APPLY_CONFIRMATION = "CUTOVER_FAKE_MONEY_ALPACA_PAPER"
@@ -236,6 +237,11 @@ ROLLBACK_CAPSULE_SCHEMA = "chili.captured-paper-host-rollback-capsule.v1"
 STARTUP_PREPARED_SCHEMA = "chili.captured-paper-host-startup-prepared.v1"
 STARTUP_PERMIT_SCHEMA = "chili.captured-paper-host-startup-permit.v1"
 STARTUP_STARTED_SCHEMA = "chili.captured-paper-host-startup-started.v2"
+STARTUP_STOPPED_SCHEMA = "chili.captured-paper-host-stopped.v1"
+_STARTUP_ATTEMPT_RE = re.compile(
+    r"^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+)
+_CLEAN_STOP_RESTART_MAX_AGE_SECONDS = 60.0 * 60.0
 ACTIVE_START_AUTHORITY_SCHEMA = "chili.captured-paper-active-start-authority.v2"
 STARTUP_REVOKED_SCHEMA = "chili.captured-paper-host-startup-revoked.v1"
 PREACTIVATION_ROLLBACK_BASELINE_SCHEMA = (
@@ -1574,6 +1580,83 @@ def _validate_started_receipt(
     ):
         raise CapturedPaperHostCutoverError(
             "STARTUP_STARTED_INVALID", "STARTED did not consume the exact host permit"
+        )
+    return claimed
+
+
+def _validate_clean_stopped_receipt(
+    value: Mapping[str, Any],
+    *,
+    prepared: PreparedCutover,
+    committed_event: Mapping[str, Any],
+    started_receipt_sha256: str,
+    now: datetime,
+) -> str:
+    _exact_keys(
+        value,
+        {
+            "schema_version", "state", "activation_generation", "manifest_sha256",
+            "account_scope", "expected_account_id", "service_pid",
+            "service_create_time_ns", "service_executable_path",
+            "service_executable_sha256", "service_cmdline_sha256",
+            "challenge_sha256", "prepared_receipt_sha256",
+            "activation_permit_sha256", "started_receipt_sha256",
+            "apply_completed_event_sha256", "stopped_at",
+            "supervisor_stopped", "shared_store_closed", "writer_lease_released",
+            "paper_execution_started", "paper_execution_stopped",
+            "live_cash_authorized", "real_money_authorized", "receipt_sha256",
+        },
+        "clean STOPPED receipt",
+    )
+    payload = _mapping(committed_event.get("payload"), "committed start payload")
+    body = dict(value)
+    claimed = _sha(body.pop("receipt_sha256", None), "clean STOPPED receipt")
+    stopped_at = _parse_utc(value.get("stopped_at"), "clean STOPPED stopped_at")
+    committed_at = _parse_utc(
+        committed_event.get("recorded_at"), "committed start recorded_at"
+    )
+    observed_now = now.astimezone(UTC)
+    if not (
+        sha256_json(body) == claimed
+        and value.get("schema_version") == STARTUP_STOPPED_SCHEMA
+        and value.get("state") == "STOPPED_CLEANLY"
+        and value.get("activation_generation") == prepared.activation_generation
+        and value.get("manifest_sha256") == prepared.manifest_sha256
+        and value.get("account_scope") == "alpaca:paper"
+        and value.get("expected_account_id") == prepared.expected_account_id
+        and value.get("service_pid") == payload.get("service_pid")
+        and value.get("service_create_time_ns")
+        == payload.get("service_create_time_ns")
+        and os.path.normcase(str(value.get("service_executable_path") or ""))
+        == os.path.normcase(str(payload.get("service_executable_path") or ""))
+        and value.get("service_executable_sha256")
+        == payload.get("service_executable_sha256")
+        and value.get("service_cmdline_sha256")
+        == payload.get("service_cmdline_sha256")
+        and value.get("challenge_sha256") == payload.get("challenge_sha256")
+        and value.get("prepared_receipt_sha256")
+        == payload.get("prepared_receipt_sha256")
+        and value.get("activation_permit_sha256")
+        == payload.get("activation_permit_sha256")
+        and value.get("started_receipt_sha256") == started_receipt_sha256
+        and value.get("started_receipt_sha256")
+        == payload.get("started_receipt_sha256")
+        and value.get("apply_completed_event_sha256")
+        == committed_event.get("event_sha256")
+        and value.get("supervisor_stopped") is True
+        and value.get("shared_store_closed") is True
+        and value.get("writer_lease_released") is True
+        and value.get("paper_execution_started") is True
+        and value.get("paper_execution_stopped") is True
+        and value.get("live_cash_authorized") is False
+        and value.get("real_money_authorized") is False
+        and committed_at <= stopped_at <= observed_now
+        and (observed_now - stopped_at).total_seconds()
+        <= _CLEAN_STOP_RESTART_MAX_AGE_SECONDS
+    ):
+        raise CapturedPaperHostCutoverError(
+            "CLEAN_STOP_RECEIPT_INVALID",
+            "restart lacks a fresh process-bound complete shutdown receipt",
         )
     return claimed
 
@@ -5755,6 +5838,7 @@ def _startup_handshake_paths(
         ),
         "revocation_requested": Path(f"{base}.revocation-requested.json"),
         "revoked": Path(f"{base}.revoked.json"),
+        "stopped": Path(f"{base}.stopped.json"),
         "dispatch_lock": Path(f"{base}.dispatch.lock"),
     }
     for kind, path in values.items():
@@ -5766,6 +5850,132 @@ def _startup_handshake_paths(
             "STARTUP_HANDSHAKE_PATH_INVALID", "startup paths are not distinct"
         )
     return MappingProxyType(values)
+
+
+def _canonical_startup_attempt_id(value: str) -> str:
+    attempt_id = str(value or "").strip()
+    if _STARTUP_ATTEMPT_RE.fullmatch(attempt_id) is None:
+        raise CapturedPaperHostCutoverError(
+            "STARTUP_ATTEMPT_ID_INVALID",
+            "restart requires one canonical lowercase UUID",
+        )
+    return attempt_id
+
+
+def _restart_prepared_cutover(
+    prepared: PreparedCutover,
+    *,
+    startup_attempt_id: str,
+    create_attempt_root: bool,
+) -> PreparedCutover:
+    """Derive one disjoint startup namespace from the sealed original action."""
+
+    attempt_id = _canonical_startup_attempt_id(startup_attempt_id)
+    original_base = _sealed_capsule_path(
+        prepared.invocation.host_ready_receipt_base,
+        roots=prepared.allowed_read_roots,
+        field="original startup receipt base",
+    )
+    attempts_root = original_base.parent / "attempts"
+    attempt_root = attempts_root / attempt_id
+    if create_attempt_root:
+        try:
+            attempts_root.mkdir(mode=0o700, exist_ok=True)
+            _reject_reparse_chain(attempts_root)
+            attempt_root.mkdir(mode=0o700, exist_ok=False)
+            _reject_reparse_chain(attempt_root)
+        except FileExistsError as exc:
+            raise CapturedPaperHostCutoverError(
+                "STARTUP_ATTEMPT_REPLAY",
+                "restart attempt namespace already exists",
+            ) from exc
+        except OSError as exc:
+            raise CapturedPaperHostCutoverError(
+                "STARTUP_ATTEMPT_CREATE_FAILED",
+                "restart attempt namespace could not be created",
+            ) from exc
+    restart_base = _sealed_capsule_path(
+        attempt_root / "host-ready.json",
+        roots=prepared.allowed_read_roots,
+        field="restart startup receipt base",
+    )
+    if create_attempt_root and os.path.lexists(restart_base):
+        raise CapturedPaperHostCutoverError(
+            "STARTUP_ATTEMPT_REPLAY",
+            "restart PREPARED receipt already exists",
+        )
+
+    launcher_arguments = tuple(prepared.invocation.launcher_arguments)
+    if "-StartupAttemptId" in launcher_arguments:
+        raise CapturedPaperHostCutoverError(
+            "STARTUP_ATTEMPT_REPLAY",
+            "sealed original launcher already carries a restart attempt",
+        )
+    launcher_arguments += ("-StartupAttemptId", attempt_id)
+
+    service_arguments = list(prepared.invocation.service_arguments)
+    positions = [
+        index
+        for index, item in enumerate(service_arguments)
+        if item == "--host-ready-receipt"
+    ]
+    if len(positions) != 1 or positions[0] + 1 >= len(service_arguments):
+        raise CapturedPaperHostCutoverError(
+            "STARTUP_HANDSHAKE_PATH_INVALID",
+            "sealed service argv lacks one host-ready receipt",
+        )
+    if "--startup-attempt-id" in service_arguments:
+        raise CapturedPaperHostCutoverError(
+            "STARTUP_ATTEMPT_REPLAY",
+            "sealed original service already carries a restart attempt",
+        )
+    service_arguments[positions[0] + 1] = str(restart_base)
+    service_arguments.extend(("--startup-attempt-id", attempt_id))
+
+    invocation = dataclass_replace(
+        prepared.invocation,
+        host_ready_receipt_base=str(restart_base),
+        launcher_arguments=launcher_arguments,
+        service_arguments=tuple(service_arguments),
+    )
+    try:
+        root = ET.fromstring(prepared.resolved_task_xml)
+    except ET.ParseError as exc:
+        raise CapturedPaperHostCutoverError(
+            "TASK_XML_INVALID", "sealed candidate task XML is malformed"
+        ) from exc
+    arguments_node = root.find(
+        f"{{{_TASK_NS}}}Actions/{{{_TASK_NS}}}Exec/{{{_TASK_NS}}}Arguments"
+    )
+    if arguments_node is None:
+        raise CapturedPaperHostCutoverError(
+            "TASK_ACTION_INVALID", "sealed candidate task has no arguments"
+        )
+    arguments_node.text = _quote_windows_arguments(launcher_arguments)
+    encoding = (
+        "utf-16"
+        if prepared.resolved_task_xml.startswith((b"\xff\xfe", b"\xfe\xff"))
+        else "utf-8"
+    )
+    resolved = ET.tostring(root, encoding=encoding, xml_declaration=True)
+    _validate_candidate_task_semantics(
+        resolved, candidate_root=str(prepared.candidate_root)
+    )
+    command, arguments = _task_exec_from_xml(resolved)
+    if not (
+        os.path.normcase(command)
+        == os.path.normcase(invocation.powershell_executable_path)
+        and arguments == _quote_windows_arguments(invocation.launcher_arguments)
+    ):
+        raise CapturedPaperHostCutoverError(
+            "TASK_ACTION_INVALID", "restart task action did not bind the derived argv"
+        )
+    return dataclass_replace(
+        prepared,
+        invocation=invocation,
+        resolved_task_xml=resolved,
+        resolved_task_xml_sha256=sha256_bytes(resolved),
+    )
 
 
 _DISPATCH_LOCK_IDENTITY_KEYS = frozenset(
@@ -6226,6 +6436,27 @@ def _validate_apply_issuer_cmdline(
         "--journal-root",
         "--confirm-fake-money-paper",
     }
+    restart_positions = [
+        index
+        for index, item in enumerate(prepared.invocation.launcher_arguments)
+        if item == "-StartupAttemptId"
+    ]
+    startup_attempt_id: str | None = None
+    expected_mode = MODE_APPLY
+    if restart_positions:
+        if (
+            len(restart_positions) != 1
+            or restart_positions[0] + 1
+            >= len(prepared.invocation.launcher_arguments)
+        ):
+            raise CapturedPaperHostCutoverError(
+                "ISSUER_CMDLINE_INVALID", "restart launcher attempt binding is malformed"
+            )
+        startup_attempt_id = _canonical_startup_attempt_id(
+            prepared.invocation.launcher_arguments[restart_positions[0] + 1]
+        )
+        allowed.add("--startup-attempt-id")
+        expected_mode = MODE_RESTART_ONLY
     for index in range(0, len(arguments), 2):
         option, value = arguments[index : index + 2]
         if option not in allowed or not value:
@@ -6259,22 +6490,25 @@ def _validate_apply_issuer_cmdline(
             raise CapturedPaperHostCutoverError(
                 "ISSUER_CMDLINE_INVALID", f"cutover issuer {option} differs from authority"
             )
-    for option in (
-        "--task-snapshot",
-        "--process-snapshot",
-        "--restore-plan",
-        "--candidate-task-template",
-        "--candidate-action",
-    ):
+    expected_input_paths = {
+        "--task-snapshot": prepared.task_snapshot.artifact_path,
+        "--process-snapshot": prepared.process_snapshot.artifact_path,
+        "--restore-plan": prepared.restore_plan.artifact_path,
+        "--candidate-task-template": prepared.candidate_template_path,
+        "--candidate-action": prepared.candidate_action_path,
+    }
+    for option, expected in expected_input_paths.items():
         supplied = Path(option_values[option][0])
         if (
             not supplied.is_absolute()
             or not supplied.resolve(strict=True).is_file()
             or not _inside(supplied.resolve(strict=True), prepared.allowed_read_roots)
+            or os.path.normcase(str(supplied.resolve(strict=True)))
+            != os.path.normcase(str(expected.resolve(strict=True)))
         ):
             raise CapturedPaperHostCutoverError(
                 "ISSUER_CMDLINE_INVALID",
-                f"cutover issuer {option} is not a sealed local input",
+                f"cutover issuer {option} differs from the sealed input",
             )
     supplied_roots = tuple(
         sorted(
@@ -6294,13 +6528,17 @@ def _validate_apply_issuer_cmdline(
             "ISSUER_CMDLINE_INVALID", "cutover issuer allowed roots differ from authority"
         )
     if not (
-        option_values["--mode"][0] == MODE_APPLY
+        option_values["--mode"][0] == expected_mode
+        and (
+            startup_attempt_id is None
+            or option_values["--startup-attempt-id"][0] == startup_attempt_id
+        )
         and option_values["--manifest-sha256"][0] == prepared.manifest_sha256
         and option_values["--confirm-fake-money-paper"][0] == APPLY_CONFIRMATION
     ):
         raise CapturedPaperHostCutoverError(
             "ISSUER_CMDLINE_INVALID",
-            "cutover issuer is not the exact fake-money PAPER Apply command",
+            "cutover issuer is not the exact fake-money PAPER start command",
         )
     return values
 
@@ -6726,9 +6964,12 @@ class CapturedPaperHostCutoverExecutor:
         # _rollback repeats both idempotent proofs before its first host
         # mutation.
         prepared = self._rollback_material(journal)
+        candidate_prepared = self._rollback_candidate_material(
+            journal=journal, prepared=prepared
+        )
         self._revoke_activation_permit(
             journal=journal,
-            prepared=prepared,
+            prepared=candidate_prepared,
             reason=reason,
         )
         self._revalidate_restore_authority(prepared)
@@ -6759,9 +7000,495 @@ class CapturedPaperHostCutoverExecutor:
                 journal,
                 reason=reason,
                 iqconnect_guard=guard,
+                candidate_prepared=candidate_prepared,
             )
         finally:
             self.backend.release_iqconnect_provider_guard()
+
+    @staticmethod
+    def _latest_start_commit(
+        journal: CutoverJournal,
+    ) -> tuple[Mapping[str, Any], str | None]:
+        apply_commits = [
+            event
+            for event in journal.events
+            if event.get("event_type") == "apply_completed"
+        ]
+        restart_commits = [
+            event
+            for event in journal.events
+            if event.get("event_type") == "restart_completed"
+        ]
+        if len(apply_commits) != 1:
+            raise CapturedPaperHostCutoverError(
+                "RESTART_BASELINE_INVALID",
+                "restart requires one exact committed initial Apply",
+            )
+        attempts: list[str] = []
+        for event in restart_commits:
+            payload = _mapping(event.get("payload"), "restart_completed.payload")
+            attempts.append(
+                _canonical_startup_attempt_id(
+                    str(payload.get("startup_attempt_id") or "")
+                )
+            )
+        if len(attempts) != len(set(attempts)):
+            raise CapturedPaperHostCutoverError(
+                "STARTUP_ATTEMPT_REPLAY", "restart journal repeats an attempt UUID"
+            )
+        if restart_commits:
+            return restart_commits[-1], attempts[-1]
+        return apply_commits[0], None
+
+    def _rollback_candidate_material(
+        self, *, journal: CutoverJournal, prepared: PreparedCutover
+    ) -> PreparedCutover:
+        """Bind rollback to the exact journal-authorized action now installed."""
+
+        restart_events = [
+            event
+            for event in journal.events
+            if event.get("event_type") == "restart_started"
+        ]
+        if not restart_events:
+            return prepared
+        materials = [prepared]
+        by_attempt: dict[str, PreparedCutover] = {}
+        for event in restart_events:
+            payload = _mapping(
+                event.get("payload"), "restart_started.payload"
+            )
+            attempt_id = _canonical_startup_attempt_id(
+                str(payload.get("startup_attempt_id") or "")
+            )
+            attempt_prepared = _restart_prepared_cutover(
+                prepared,
+                startup_attempt_id=attempt_id,
+                create_attempt_root=False,
+            )
+            materials.append(attempt_prepared)
+            by_attempt[attempt_id] = attempt_prepared
+
+        named = self.backend.get_task(CANDIDATE_TASK_NAME)
+        if named is not None:
+            matches = [
+                item
+                for item in materials
+                if _candidate_task_semantics_match(
+                    named.xml, item.resolved_task_xml
+                )
+            ]
+            if len(matches) == 1:
+                return matches[0]
+
+        registered = [
+            event
+            for event in journal.events
+            if event.get("event_type") == "candidate_task_registered"
+        ]
+        if registered:
+            payload = _mapping(
+                registered[-1].get("payload"),
+                "candidate_task_registered.payload",
+            )
+            attempt = payload.get("startup_attempt_id")
+            if attempt is None:
+                return prepared
+            attempt_id = _canonical_startup_attempt_id(str(attempt))
+            installed = by_attempt.get(attempt_id)
+            if installed is None:
+                raise CapturedPaperHostCutoverError(
+                    "ROLLBACK_CAPSULE_MISSING",
+                    "registered restart task lacks its journal attempt boundary",
+                )
+            return installed
+        return prepared
+
+    def _clean_stop_restart_authority(
+        self,
+        *,
+        current_prepared: PreparedCutover,
+        committed_event: Mapping[str, Any],
+    ) -> str:
+        paths = _startup_handshake_paths(
+            current_prepared.invocation,
+            roots=current_prepared.allowed_read_roots,
+        )
+        _started_path, started_raw, _started_artifact_sha = _stable_read(
+            paths["started"],
+            roots=current_prepared.allowed_read_roots,
+            field="committed STARTED receipt",
+            max_bytes=ACTIVE_START_EVIDENCE_MAX_BYTES,
+        )
+        started = _strict_json(started_raw, "committed STARTED receipt")
+        if started_raw != _canonical_json_bytes(started):
+            raise CapturedPaperHostCutoverError(
+                "STARTUP_STARTED_INVALID", "committed STARTED is not canonical"
+            )
+        started_sha = _sha(
+            started.get("receipt_sha256"), "committed STARTED receipt"
+        )
+        _stopped_path, stopped_raw, _stopped_artifact_sha = _stable_read(
+            paths["stopped"],
+            roots=current_prepared.allowed_read_roots,
+            field="clean STOPPED receipt",
+            max_bytes=64 * 1024,
+        )
+        stopped = _strict_json(stopped_raw, "clean STOPPED receipt")
+        if stopped_raw != _canonical_json_bytes(stopped):
+            raise CapturedPaperHostCutoverError(
+                "CLEAN_STOP_RECEIPT_INVALID",
+                "clean STOPPED receipt is not canonical",
+            )
+        return _validate_clean_stopped_receipt(
+            stopped,
+            prepared=current_prepared,
+            committed_event=committed_event,
+            started_receipt_sha256=started_sha,
+            now=self.clock(),
+        )
+
+    def restart_only(self, startup_attempt_id: str) -> CutoverReport:
+        """Restart one cleanly stopped PAPER service without redoing static cutover."""
+
+        attempt_id = _canonical_startup_attempt_id(startup_attempt_id)
+        journal = CutoverJournal(
+            root=self.journal_root, prepared=self.prepared, clock=self.clock
+        )
+        with journal.lock():
+            journal._events = journal._read_events()
+            if _journal_state(journal.events) != "applied":
+                raise CapturedPaperHostCutoverError(
+                    "RESTART_BASELINE_INVALID",
+                    "RestartOnly requires the still-applied PAPER host baseline",
+                )
+            committed_event, prior_attempt_id = self._latest_start_commit(journal)
+            prior_attempts = {
+                str(_mapping(event.get("payload"), "restart_completed.payload").get(
+                    "startup_attempt_id"
+                ))
+                for event in journal.events
+                if event.get("event_type") == "restart_completed"
+            }
+            if attempt_id in prior_attempts:
+                raise CapturedPaperHostCutoverError(
+                    "STARTUP_ATTEMPT_REPLAY", "restart attempt UUID was already consumed"
+                )
+            current_prepared = self.prepared
+            if prior_attempt_id is not None:
+                current_prepared = _restart_prepared_cutover(
+                    self.prepared,
+                    startup_attempt_id=prior_attempt_id,
+                    create_attempt_root=False,
+                )
+            current_executor = CapturedPaperHostCutoverExecutor(
+                prepared=current_prepared,
+                backend=self.backend,
+                journal_root=self.journal_root,
+                clock=self.clock,
+                monotonic_clock=self.monotonic_clock,
+                wait=self.wait,
+            )
+            prior_lane = _legacy_execution_lane_baseline(journal.events)
+            current_executor._assert_applied(
+                prior_lane, require_running=False
+            )
+            clean_stop_sha = current_executor._clean_stop_restart_authority(
+                current_prepared=current_prepared,
+                committed_event=committed_event,
+            )
+            restart_prepared = _restart_prepared_cutover(
+                self.prepared,
+                startup_attempt_id=attempt_id,
+                create_attempt_root=True,
+            )
+            restart_executor = CapturedPaperHostCutoverExecutor(
+                prepared=restart_prepared,
+                backend=self.backend,
+                journal_root=self.journal_root,
+                clock=self.clock,
+                monotonic_clock=self.monotonic_clock,
+                wait=self.wait,
+            )
+            return restart_executor._restart_locked(
+                journal=journal,
+                prior_lane=prior_lane,
+                startup_attempt_id=attempt_id,
+                clean_stop_receipt_sha256=clean_stop_sha,
+            )
+
+    def _restart_locked(
+        self,
+        *,
+        journal: CutoverJournal,
+        prior_lane: LegacyExecutionLaneObservation,
+        startup_attempt_id: str,
+        clean_stop_receipt_sha256: str,
+    ) -> CutoverReport:
+        resolved_path = journal.publish_object(
+            self.prepared.resolved_task_xml, kind="candidate_restart_task_xml"
+        )
+        journal.append(
+            "restart_started",
+            {
+                "startup_attempt_id": startup_attempt_id,
+                "clean_stopped_receipt_sha256": clean_stop_receipt_sha256,
+                "resolved_task_xml_sha256": self.prepared.resolved_task_xml_sha256,
+                "resolved_task_xml_path": str(resolved_path),
+                "account_scope": "alpaca:paper",
+                "live_cash_authorized": False,
+            },
+        )
+        try:
+            iqconnect_guard = self.backend.acquire_iqconnect_provider_guard()
+            self.backend.assert_iqconnect_provider_guard_current(iqconnect_guard)
+        except BaseException as exc:
+            self.backend.release_iqconnect_provider_guard()
+            if isinstance(exc, CapturedPaperHostCutoverError):
+                raise
+            raise CapturedPaperHostCutoverError(
+                "IQCONNECT_PROVIDER_GUARD_UNAVAILABLE",
+                "restart provider continuity preflight failed before host mutation",
+            ) from exc
+        mutations = 0
+        try:
+            journal.append(
+                "iqconnect_provider_guard_acquired",
+                {
+                    "pid": iqconnect_guard.pid,
+                    "create_time_ns": iqconnect_guard.create_time_ns,
+                    "executable_path": iqconnect_guard.executable_path,
+                    "executable_sha256": iqconnect_guard.executable_sha256,
+                    "listeners": [
+                        {"host": host, "port": port}
+                        for host, port in iqconnect_guard.listeners
+                    ],
+                    "guard_connection_count": iqconnect_guard.guard_connection_count,
+                    "live_cash_authorized": False,
+                },
+            )
+            lane = self.backend.inspect_legacy_execution_lane()
+            if (
+                lane.identity_key() != prior_lane.identity_key()
+                or lane.state != "stopped"
+                or any(item.enabled for item in lane.recreator_tasks)
+                or self.backend.find_legacy_processes(
+                    self.prepared.restore_plan.bindings
+                )
+            ):
+                raise CapturedPaperHostCutoverError(
+                    "RESTART_BASELINE_INVALID",
+                    "legacy ownership changed before clean restart",
+                )
+            lane_document = dict(_legacy_execution_lane_document(lane))
+            journal.append(
+                "legacy_execution_lane_quiesced",
+                {
+                    "legacy_execution_lane": lane_document,
+                    "legacy_execution_lane_sha256": sha256_json(lane_document),
+                },
+            )
+            self._await_legacy_paper_broker_quiet_horizon(
+                journal=journal, expected_lane=lane
+            )
+            quiet_event = journal.events[-1]
+            quiet_sha = _sha(
+                quiet_event.get("event_sha256"), "restart quiet-horizon event"
+            )
+            self.backend.assert_iqconnect_provider_guard_current(iqconnect_guard)
+            self.backend.register_task(
+                CANDIDATE_TASK_NAME,
+                resolved_path,
+                self.prepared.resolved_task_xml_sha256,
+            )
+            mutations += 1
+            candidate = self.backend.get_task(CANDIDATE_TASK_NAME)
+            if (
+                candidate is None
+                or not _candidate_task_semantics_match(
+                    candidate.xml, self.prepared.resolved_task_xml
+                )
+                or candidate.enabled is not True
+            ):
+                raise CapturedPaperHostCutoverError(
+                    "CANDIDATE_TASK_READBACK_FAILED",
+                    "restart task readback differs from derived XML",
+                )
+            journal.append(
+                "candidate_task_registered",
+                {
+                    "task_name": CANDIDATE_TASK_NAME,
+                    "resolved_task_xml_sha256": candidate.xml_sha256,
+                    "startup_attempt_id": startup_attempt_id,
+                },
+            )
+            self.backend.start_task(CANDIDATE_TASK_NAME)
+            mutations += 1
+            processes = self.backend.await_candidate_processes(
+                self.prepared.invocation, timeout_seconds=15.0
+            )
+            self._assert_candidate_process_roster(processes)
+            journal.append(
+                "candidate_task_started",
+                {
+                    "task_name": CANDIDATE_TASK_NAME,
+                    "startup_attempt_id": startup_attempt_id,
+                    "candidate_processes": [
+                        {
+                            "kind": item.kind,
+                            "pid": item.identity.pid,
+                            "create_time_ns": item.identity.create_time_ns,
+                            "cmdline_sha256": item.identity.cmdline_sha256,
+                        }
+                        for item in sorted(processes, key=lambda row: row.kind)
+                    ],
+                },
+            )
+            service = next(
+                item.identity for item in processes if item.kind == "service"
+            )
+            prepared_receipt = self.backend.read_service_startup_receipt(
+                self.prepared.invocation,
+                service,
+                phase="prepared",
+                timeout_seconds=600.0,
+            )
+            prepared_sha, challenge, valid_until, lock_identity = (
+                _validate_prepared_receipt(
+                    prepared_receipt,
+                    prepared=self.prepared,
+                    service=service,
+                    now=self.clock(),
+                )
+            )
+            postcondition_processes = self._assert_applied(prior_lane)
+            current_service = next(
+                item.identity
+                for item in postcondition_processes
+                if item.kind == "service"
+            )
+            if current_service.semantic_key() != service.semantic_key():
+                raise CapturedPaperHostCutoverError(
+                    "STARTUP_SERVICE_IDENTITY_DRIFT",
+                    "restart service identity changed after PREPARED",
+                )
+            _permit, permit_sha = self._issue_activation_permit(
+                journal=journal,
+                service=service,
+                prepared_receipt_sha256=prepared_sha,
+                challenge_sha256=challenge,
+                valid_until=valid_until,
+                dispatch_lock_identity=lock_identity,
+            )
+            started_receipt = self.backend.read_service_startup_receipt(
+                self.prepared.invocation,
+                service,
+                phase="started",
+                timeout_seconds=max(
+                    0.0, (valid_until - self.clock()).total_seconds()
+                ),
+            )
+            started_sha = _validate_started_receipt(
+                started_receipt,
+                prepared=self.prepared,
+                service=service,
+                now=self.clock(),
+                challenge_sha256=challenge,
+                prepared_receipt_sha256=prepared_sha,
+                activation_permit_sha256=permit_sha,
+                host_quiet_horizon_event_sha256=quiet_sha,
+            )
+            self.backend.assert_iqconnect_provider_guard_current(iqconnect_guard)
+            self._assert_applied(prior_lane)
+            completed_at = self.clock()
+            if completed_at >= valid_until:
+                raise CapturedPaperHostCutoverError(
+                    "HOST_ACTIVATION_PERMIT_EXPIRED",
+                    "restart could not commit STARTED before permit expiry",
+                )
+            lane_document = dict(_legacy_execution_lane_document(lane))
+            journal.append(
+                "restart_completed",
+                {
+                    "postcondition": "one_unified_candidate_host",
+                    "activation_generation": self.prepared.activation_generation,
+                    "manifest_sha256": self.prepared.manifest_sha256,
+                    "account_scope": "alpaca:paper",
+                    "expected_account_id": self.prepared.expected_account_id,
+                    "service_pid": service.pid,
+                    "service_create_time_ns": service.create_time_ns,
+                    "service_executable_sha256": service.executable_sha256,
+                    "service_executable_path": service.executable_path,
+                    "service_cmdline_sha256": service.cmdline_sha256,
+                    "legacy_task_count_disabled": len(REQUIRED_LEGACY_TASKS),
+                    "legacy_process_count": 0,
+                    "prepared_receipt_sha256": prepared_sha,
+                    "activation_permit_sha256": permit_sha,
+                    "started_receipt_sha256": started_sha,
+                    "active_start_authority_sha256": started_receipt[
+                        "active_start_authority_sha256"
+                    ],
+                    "active_start_evidence_artifact_sha256": started_receipt[
+                        "active_start_evidence_artifact_sha256"
+                    ],
+                    "host_quiet_horizon_event_sha256": quiet_sha,
+                    "challenge_sha256": challenge,
+                    "iqconnect_provider_guard": {
+                        "pid": iqconnect_guard.pid,
+                        "create_time_ns": iqconnect_guard.create_time_ns,
+                        "executable_sha256": iqconnect_guard.executable_sha256,
+                        "candidate_started_receipt_sha256": started_sha,
+                    },
+                    "legacy_execution_lane": lane_document,
+                    "legacy_execution_lane_sha256": sha256_json(lane_document),
+                    "startup_attempt_id": startup_attempt_id,
+                    "clean_stopped_receipt_sha256": clean_stop_receipt_sha256,
+                    "paper_execution_committed": True,
+                    "live_cash_authorized": False,
+                    "real_money_authorized": False,
+                },
+                recorded_at=completed_at,
+            )
+            report = self._report(
+                MODE_RESTART_ONLY,
+                "RESTARTED_ALPACA_PAPER_ONLY",
+                journal,
+                mutations,
+            )
+            self.backend.release_iqconnect_provider_guard()
+            return report
+        except BaseException as exc:
+            with suppress(BaseException):
+                journal.append(
+                    "restart_failed",
+                    {
+                        "startup_attempt_id": startup_attempt_id,
+                        "error_type": type(exc).__name__,
+                        "error_code": getattr(exc, "code", "UNEXPECTED_FAILURE"),
+                    },
+                )
+            try:
+                try:
+                    self._rollback(
+                        journal,
+                        reason="compensate_restart_failure",
+                        iqconnect_guard=iqconnect_guard,
+                    )
+                finally:
+                    self.backend.release_iqconnect_provider_guard()
+            except BaseException as rollback_exc:
+                raise CapturedPaperHostCutoverError(
+                    "COMPENSATING_ROLLBACK_FAILED",
+                    "restart failed and exact rollback also failed: "
+                    f"{type(rollback_exc).__name__}",
+                ) from rollback_exc
+            if isinstance(exc, CapturedPaperHostCutoverError):
+                raise
+            raise CapturedPaperHostCutoverError(
+                "RESTART_FAILED_ROLLED_BACK",
+                "clean restart failed and restored exact legacy ownership: "
+                f"{type(exc).__name__}",
+            ) from exc
 
     def apply(self) -> CutoverReport:
         journal = CutoverJournal(
@@ -7536,7 +8263,10 @@ class CapturedPaperHostCutoverExecutor:
             )
 
     def _assert_applied(
-        self, prior_execution_lane: LegacyExecutionLaneObservation
+        self,
+        prior_execution_lane: LegacyExecutionLaneObservation,
+        *,
+        require_running: bool = True,
     ) -> tuple[CandidateProcessObservation, ...]:
         lane = self.backend.inspect_legacy_execution_lane()
         if (
@@ -7630,7 +8360,13 @@ class CapturedPaperHostCutoverExecutor:
         processes = self.backend.await_candidate_processes(
             self.prepared.invocation, timeout_seconds=0.0
         )
-        self._assert_candidate_process_roster(processes)
+        if require_running:
+            self._assert_candidate_process_roster(processes)
+        elif processes:
+            raise CapturedPaperHostCutoverError(
+                "CLEAN_STOP_PROCESS_SURVIVED",
+                "clean restart requires no surviving candidate process",
+            )
         return tuple(processes)
 
     def _issue_activation_permit(
@@ -7923,18 +8659,27 @@ class CapturedPaperHostCutoverExecutor:
     def _revoke_activation_permit(
         self, *, journal: CutoverJournal, prepared: PreparedCutover, reason: str
     ) -> Mapping[str, Any] | None:
-        issued = [
-            event
-            for event in journal.events
-            if event.get("event_type") == "activation_permit_issued"
-        ]
-        published = [
-            event for event in journal.events
-            if event.get("event_type") == "activation_permit_published"
-        ]
         paths = _startup_handshake_paths(
             prepared.invocation, roots=prepared.allowed_read_roots
         )
+        issued = []
+        for event in journal.events:
+            if event.get("event_type") != "activation_permit_issued":
+                continue
+            payload = _mapping(
+                event.get("payload"), "activation permit issuance payload"
+            )
+            if Path(str(payload.get("permit_path") or "")) == paths["permit"]:
+                issued.append(event)
+        published = []
+        for event in journal.events:
+            if event.get("event_type") != "activation_permit_published":
+                continue
+            payload = _mapping(
+                event.get("payload"), "activation permit publication payload"
+            )
+            if Path(str(payload.get("permit_path") or "")) == paths["permit"]:
+                published.append(event)
         if not issued:
             if paths["permit"].exists():
                 raise CapturedPaperHostCutoverError(
@@ -8192,8 +8937,12 @@ class CapturedPaperHostCutoverExecutor:
         *,
         reason: str,
         iqconnect_guard: IqconnectProviderGuardObservation | None = None,
+        candidate_prepared: PreparedCutover | None = None,
     ) -> int:
         prepared = self._rollback_material(journal)
+        active_prepared = candidate_prepared or self._rollback_candidate_material(
+            journal=journal, prepared=prepared
+        )
         prior_lane = _legacy_execution_lane_baseline(journal.events)
         journal_failed = False
 
@@ -8208,9 +8957,40 @@ class CapturedPaperHostCutoverExecutor:
         # an O_EXCL generation-owned tombstone without appending to the
         # journal, so even a blocked/failing evidence append below cannot
         # extend an already-issued permit.
-        revocation = self._revoke_activation_permit(
-            journal=journal, prepared=prepared, reason=reason
-        )
+        authority_materials = [active_prepared]
+        historical_materials = [prepared]
+        for event in journal.events:
+            if event.get("event_type") != "restart_started":
+                continue
+            payload = _mapping(event.get("payload"), "restart_started.payload")
+            historical_materials.append(
+                _restart_prepared_cutover(
+                    prepared,
+                    startup_attempt_id=_canonical_startup_attempt_id(
+                        str(payload.get("startup_attempt_id") or "")
+                    ),
+                    create_attempt_root=False,
+                )
+            )
+        seen_bases = {
+            os.path.normcase(active_prepared.invocation.host_ready_receipt_base)
+        }
+        for historical in reversed(historical_materials):
+            base = os.path.normcase(
+                historical.invocation.host_ready_receipt_base
+            )
+            if base not in seen_bases:
+                authority_materials.append(historical)
+                seen_bases.add(base)
+        revocations = []
+        for authority_prepared in authority_materials:
+            revoked = self._revoke_activation_permit(
+                journal=journal,
+                prepared=authority_prepared,
+                reason=reason,
+            )
+            if revoked is not None:
+                revocations.append(dict(revoked))
         record(
             "rollback_started",
             {
@@ -8219,8 +8999,8 @@ class CapturedPaperHostCutoverExecutor:
                 "live_cash_authorized": False,
             },
         )
-        if revocation is not None:
-            record("activation_permit_revoked", dict(revocation))
+        for revocation in revocations:
+            record("activation_permit_revoked", revocation)
         # Fail closed before ANY host mutation when restore sources drifted.
         # Registering a drifted wrapper/starter as an enabled Daily/Logon task
         # would hand the scheduler unapproved code, so nothing below may run
@@ -8269,10 +9049,10 @@ class CapturedPaperHostCutoverExecutor:
         ]:
             return (
                 self.backend.get_task(CANDIDATE_TASK_NAME),
-                tuple(self.backend.find_candidate_tasks(prepared.invocation)),
+                tuple(self.backend.find_candidate_tasks(active_prepared.invocation)),
                 tuple(
                     self.backend.await_candidate_processes(
-                        prepared.invocation, timeout_seconds=0.0
+                        active_prepared.invocation, timeout_seconds=0.0
                     )
                 ),
             )
@@ -8304,7 +9084,7 @@ class CapturedPaperHostCutoverExecutor:
 
             for process in processes:
                 current = self.backend.await_candidate_processes(
-                    prepared.invocation, timeout_seconds=0.0
+                    active_prepared.invocation, timeout_seconds=0.0
                 )
                 match = next(
                     (
@@ -8317,7 +9097,9 @@ class CapturedPaperHostCutoverExecutor:
                     None,
                 )
                 if match is not None:
-                    self.backend.stop_candidate_process(match, prepared.invocation)
+                    self.backend.stop_candidate_process(
+                        match, active_prepared.invocation
+                    )
                     mutations += 1
 
             for process in self.backend.find_legacy_processes(
@@ -8352,7 +9134,7 @@ class CapturedPaperHostCutoverExecutor:
                 prepared.restore_plan.bindings
             )
             candidate_processes_after = self.backend.await_candidate_processes(
-                prepared.invocation, timeout_seconds=0.0
+                active_prepared.invocation, timeout_seconds=0.0
             )
             legacy_tasks_quiesced = all(
                 (observed := self.backend.get_task(name)) is not None
@@ -8396,14 +9178,14 @@ class CapturedPaperHostCutoverExecutor:
         # Inventory, then disable/End the on-demand-only task before signaling
         # either process.  This also prevents a concurrent explicit /Run.
         candidate_processes = self.backend.await_candidate_processes(
-            prepared.invocation, timeout_seconds=0.0
+            active_prepared.invocation, timeout_seconds=0.0
         )
         self._assert_candidate_process_subset(candidate_processes)
         candidate = self.backend.get_task(CANDIDATE_TASK_NAME)
         if candidate is not None:
             # Semantic identity, not sha (see _candidate_task_semantics_match).
             if not _candidate_task_semantics_match(
-                candidate.xml, prepared.resolved_task_xml
+                candidate.xml, active_prepared.resolved_task_xml
             ):
                 # Never mutate a foreign colliding task, but also never let it
                 # strand disabled legacy capture.  Restore legacy first and
@@ -8422,7 +9204,7 @@ class CapturedPaperHostCutoverExecutor:
                 mutations += 1
         for process in candidate_processes:
             current = self.backend.await_candidate_processes(
-                prepared.invocation, timeout_seconds=0.0
+                active_prepared.invocation, timeout_seconds=0.0
             )
             match = next(
                 (
@@ -8433,10 +9215,12 @@ class CapturedPaperHostCutoverExecutor:
                 None,
             )
             if match is not None:
-                self.backend.stop_candidate_process(match, prepared.invocation)
+                self.backend.stop_candidate_process(
+                    match, active_prepared.invocation
+                )
                 mutations += 1
         if self.backend.await_candidate_processes(
-            prepared.invocation, timeout_seconds=0.0
+            active_prepared.invocation, timeout_seconds=0.0
         ):
             raise CapturedPaperHostCutoverError(
                 "CANDIDATE_STOP_FAILED", "candidate process survived exact rollback"
@@ -8446,7 +9230,8 @@ class CapturedPaperHostCutoverExecutor:
                 if (
                     candidate_before_delete is None
                     or not _candidate_task_semantics_match(
-                        candidate_before_delete.xml, prepared.resolved_task_xml
+                        candidate_before_delete.xml,
+                        active_prepared.resolved_task_xml,
                     )
                 ):
                     foreign_candidate = True
@@ -8459,11 +9244,15 @@ class CapturedPaperHostCutoverExecutor:
                         )
                     record(
                         "candidate_removed",
-                        {"resolved_task_xml_sha256": prepared.resolved_task_xml_sha256},
+                        {
+                            "resolved_task_xml_sha256": (
+                                active_prepared.resolved_task_xml_sha256
+                            )
+                        },
                     )
 
         remaining_candidate_tasks = self.backend.find_candidate_tasks(
-            prepared.invocation
+            active_prepared.invocation
         )
         if foreign_candidate or remaining_candidate_tasks:
             record(
@@ -8685,7 +9474,7 @@ class CapturedPaperHostCutoverExecutor:
                     "live_cash_authorized": False,
                 },
             )
-        if self.backend.find_candidate_tasks(prepared.invocation):
+        if self.backend.find_candidate_tasks(active_prepared.invocation):
             # A foreign exact-invocation task appeared after the initial
             # candidate inventory.  Stop the exact legacy bridges we just
             # restored and disable their tasks before the Docker lane can be
@@ -8708,7 +9497,7 @@ class CapturedPaperHostCutoverExecutor:
                     "exact_invocation_task_names": sorted(
                         item.name
                         for item in self.backend.find_candidate_tasks(
-                            prepared.invocation
+                            active_prepared.invocation
                         )
                     ),
                     "legacy_execution_remains_quiesced": True,
@@ -10457,7 +11246,13 @@ def _parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--mode",
-        choices=(MODE_VALIDATE_ONLY, MODE_APPLY, MODE_ROLLBACK, MODE_RECOVER_ONLY),
+        choices=(
+            MODE_VALIDATE_ONLY,
+            MODE_APPLY,
+            MODE_RESTART_ONLY,
+            MODE_ROLLBACK,
+            MODE_RECOVER_ONLY,
+        ),
         default=MODE_VALIDATE_ONLY,
     )
     parser.add_argument("--manifest")
@@ -10471,6 +11266,7 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--candidate-action")
     parser.add_argument("--journal-root", required=True)
     parser.add_argument("--confirm-fake-money-paper")
+    parser.add_argument("--startup-attempt-id")
     return parser
 
 
@@ -10513,14 +11309,14 @@ def _load_activation_for_mode(
 
 def _main_with_host_lock_held(argv: Sequence[str] | None = None) -> int:
     arguments = _parser().parse_args(argv)
-    if arguments.mode == MODE_APPLY and (
+    if arguments.mode in {MODE_APPLY, MODE_RESTART_ONLY} and (
         arguments.confirm_fake_money_paper != APPLY_CONFIRMATION
     ):
         print(
             json.dumps(
                 {
                     "verdict": "REJECTED",
-                    "reason": "Apply requires the exact fake-money PAPER confirmation",
+                    "reason": "PAPER start requires the exact fake-money confirmation",
                     "live_cash_authorized": False,
                 },
                 sort_keys=True,
@@ -10552,6 +11348,63 @@ def _main_with_host_lock_held(argv: Sequence[str] | None = None) -> int:
                 )
                 return 0
             prepared, state = discovered
+        elif arguments.mode == MODE_RESTART_ONLY:
+            if not arguments.startup_attempt_id:
+                raise CapturedPaperHostCutoverError(
+                    "STARTUP_ATTEMPT_ID_INVALID",
+                    "RestartOnly requires one canonical startup attempt UUID",
+                )
+            required_restart_fields = (
+                "manifest",
+                "manifest_sha256",
+                "candidate_root",
+                "task_snapshot",
+                "process_snapshot",
+                "restore_plan",
+                "candidate_task_template",
+                "candidate_action",
+            )
+            if any(
+                not getattr(arguments, field)
+                for field in required_restart_fields
+            ):
+                raise CapturedPaperHostCutoverError(
+                    "ACTIVATION_ARGUMENTS_INCOMPLETE",
+                    "RestartOnly requires the complete prior sealed Apply argv",
+                )
+            discovered = _discover_single_active_rollback_capsule(
+                journal_root=arguments.journal_root,
+                caller_roots=roots,
+            )
+            if discovered is None or discovered[1] != "applied":
+                raise CapturedPaperHostCutoverError(
+                    "RESTART_BASELINE_INVALID",
+                    "RestartOnly found no exact applied PAPER capsule",
+                )
+            prepared, state = discovered
+            exact_restart_paths = {
+                "task_snapshot": prepared.task_snapshot.artifact_path,
+                "process_snapshot": prepared.process_snapshot.artifact_path,
+                "restore_plan": prepared.restore_plan.artifact_path,
+                "candidate_task_template": prepared.candidate_template_path,
+                "candidate_action": prepared.candidate_action_path,
+            }
+            if not (
+                arguments.manifest_sha256 == prepared.manifest_sha256
+                and Path(arguments.manifest).resolve(strict=True)
+                == prepared.manifest_path.resolve(strict=True)
+                and Path(arguments.candidate_root).resolve(strict=True)
+                == prepared.candidate_root.resolve(strict=True)
+                and all(
+                    Path(getattr(arguments, field)).resolve(strict=True)
+                    == expected.resolve(strict=True)
+                    for field, expected in exact_restart_paths.items()
+                )
+            ):
+                raise CapturedPaperHostCutoverError(
+                    "RESTART_AUTHORITY_MISMATCH",
+                    "RestartOnly argv differs from the applied capsule",
+                )
         elif any(
             not getattr(arguments, field)
             for field in (
@@ -10618,6 +11471,8 @@ def _main_with_host_lock_held(argv: Sequence[str] | None = None) -> int:
             # lock before its first host mutation.
             executor.validate_only()
             report = executor.apply()
+        elif arguments.mode == MODE_RESTART_ONLY:
+            report = executor.restart_only(arguments.startup_attempt_id)
         else:
             report = executor.rollback()
     except (
@@ -10656,7 +11511,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     arguments = _parser().parse_args(argv)
     # Preserve the cheap, mutation-free confirmation rejection before any
     # journal path is touched.
-    if arguments.mode == MODE_APPLY and (
+    if arguments.mode in {MODE_APPLY, MODE_RESTART_ONLY} and (
         arguments.confirm_fake_money_paper != APPLY_CONFIRMATION
     ):
         return _main_with_host_lock_held(argv)
@@ -10724,6 +11579,7 @@ __all__ = [
     "MANIFEST_PATH_TOKEN",
     "MANIFEST_SHA256_TOKEN",
     "MODE_APPLY",
+    "MODE_RESTART_ONLY",
     "MODE_ROLLBACK",
     "MODE_RECOVER_ONLY",
     "MODE_VALIDATE_ONLY",

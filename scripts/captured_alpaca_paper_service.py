@@ -49,6 +49,9 @@ SERVICE_REPORT_SCHEMA_VERSION = "chili.captured-paper-service-report.v1"
 _MODES = ("validate-only", "no-order-smoke", "activate-paper")
 _REPARSE_ATTRIBUTE = int(getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400))
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
+_STARTUP_ATTEMPT_RE = re.compile(
+    r"^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+)
 _SERVICE_HEALTH_POLL_SECONDS = 1.0
 _SERVICE_SHUTDOWN_SECONDS = 30.0
 _MAX_STARTUP_RECONCILIATION_ROWS = 10_000
@@ -74,6 +77,7 @@ _HOST_ACTIVATION_PERMIT_SCHEMA_VERSION = (
     "chili.captured-paper-host-startup-permit.v1"
 )
 _HOST_STARTED_SCHEMA_VERSION = "chili.captured-paper-host-startup-started.v2"
+_HOST_STOPPED_SCHEMA_VERSION = "chili.captured-paper-host-stopped.v1"
 _ACTIVE_START_AUTHORITY_SCHEMA_VERSION = (
     "chili.captured-paper-active-start-authority.v2"
 )
@@ -1149,6 +1153,9 @@ def _issue_launcher_cutover_attestation(
             "broker authority requires the ActivatePaper launcher projection",
         )
     projection = _launcher_projection(verified, mode="ActivatePaper")
+    startup_attempt_id = str(
+        getattr(args, "startup_attempt_id", None) or ""
+    ).strip()
     raw_evidence = process_probe()
     normalized = _normalized_process_evidence(raw_evidence)
     service_argv = list(raw_evidence["service_argv"])
@@ -1174,6 +1181,10 @@ def _issue_launcher_cutover_attestation(
     expected_service_argv.extend(
         ("--host-ready-receipt", str(args.host_ready_receipt))
     )
+    if startup_attempt_id:
+        expected_service_argv.extend(
+            ("--startup-attempt-id", startup_attempt_id)
+        )
     if service_argv != expected_service_argv:
         raise CapturedAlpacaPaperServiceError(
             "SERVICE_ARGV_NOT_LAUNCHER_BOUND",
@@ -1190,13 +1201,23 @@ def _issue_launcher_cutover_attestation(
         for index, value in enumerate(projected_arguments)
         if value == "--host-ready-receipt"
     ]
+    projected_host_ready = _canonical_uncreated_local_path(
+        projected_arguments[positions[0] + 1],
+        "projected host-ready receipt",
+    ) if len(positions) == 1 and positions[0] + 1 < len(projected_arguments) else None
+    expected_host_ready = projected_host_ready
+    if projected_host_ready is not None and startup_attempt_id:
+        expected_host_ready = _canonical_uncreated_local_path(
+            Path(projected_host_ready).parent
+            / "attempts"
+            / startup_attempt_id
+            / "host-ready.json",
+            "restart host-ready receipt",
+        )
     if (
         len(positions) != 1
         or positions[0] + 1 >= len(projected_arguments)
-        or _canonical_uncreated_local_path(
-            projected_arguments[positions[0] + 1],
-            "projected host-ready receipt",
-        )
+        or expected_host_ready
         != _canonical_uncreated_local_path(
             args.host_ready_receipt, "service host-ready receipt"
         )
@@ -1238,6 +1259,10 @@ def _issue_launcher_cutover_attestation(
         "-AllowedReadRootsBase64",
         roots_b64,
     ]
+    if startup_attempt_id:
+        expected_parent_tail.extend(
+            ("-StartupAttemptId", startup_attempt_id)
+        )
     if parent_cmdline[1:] != expected_parent_tail:
         raise CapturedAlpacaPaperServiceError(
             "PARENT_NOT_SEALED_LAUNCHER",
@@ -4480,6 +4505,7 @@ class _CapturedPaperHostActivationHandshake:
         active_start_evidence_path: Path,
         revocation_requested_path: Path,
         revoked_path: Path,
+        stopped_path: Path,
         dispatch_lock_path: Path,
         dispatch_lock_identity: Mapping[str, Any],
         verified: activation_contract.VerifiedCapturedPaperActivation,
@@ -4490,6 +4516,7 @@ class _CapturedPaperHostActivationHandshake:
         wall_clock: Callable[[], datetime],
         monotonic_clock: Callable[[], float] = time.monotonic,
         wait: Callable[[float], None] = time.sleep,
+        startup_attempt_id: str | None = None,
     ) -> None:
         self.ready_path = ready_path
         self.permit_path = permit_path
@@ -4497,6 +4524,7 @@ class _CapturedPaperHostActivationHandshake:
         self.active_start_evidence_path = active_start_evidence_path
         self.revocation_requested_path = revocation_requested_path
         self.revoked_path = revoked_path
+        self.stopped_path = stopped_path
         self.dispatch_lock_path = dispatch_lock_path
         if set(dispatch_lock_identity) != _HOST_DISPATCH_LOCK_IDENTITY_KEYS:
             raise CapturedAlpacaPaperServiceError(
@@ -4514,6 +4542,7 @@ class _CapturedPaperHostActivationHandshake:
         self._wall_clock = wall_clock
         self._monotonic = monotonic_clock
         self._wait = wait
+        self._startup_attempt_id = startup_attempt_id
         self._lock = threading.Lock()
         self._prepared_sha256: str | None = None
         self._permit_sha256: str | None = None
@@ -4525,6 +4554,7 @@ class _CapturedPaperHostActivationHandshake:
         self._started_body: Mapping[str, Any] | None = None
         self._apply_completed_event_sha256: str | None = None
         self._apply_completed_event_body: Mapping[str, Any] | None = None
+        self._stopped_sha256: str | None = None
 
     @property
     def quiet_horizon_event_sha256(self) -> str:
@@ -4543,6 +4573,17 @@ class _CapturedPaperHostActivationHandshake:
                 "durable active-start evidence has not been published",
             )
         return self._active_start_evidence_artifact_sha256
+
+    @property
+    def committed_started(self) -> bool:
+        """Whether this process consumed the durable host commit for STARTED."""
+
+        with self._lock:
+            return bool(
+                self._started_sha256
+                and self._apply_completed_event_sha256
+                and self._apply_completed_event_body
+            )
 
     def _assert_active_start_evidence_current_unlocked(self) -> None:
         expected = self._active_start_authority_body
@@ -4631,6 +4672,7 @@ class _CapturedPaperHostActivationHandshake:
             _host_cutover_issuer_process_identity
         ),
         challenge_factory: Callable[[], str] = lambda: secrets.token_hex(32),
+        startup_attempt_id: str | None = None,
     ) -> "_CapturedPaperHostActivationHandshake":
         base = _strict_new_local_json_path(
             ready_output, allowed_roots=allowed_roots
@@ -4645,6 +4687,7 @@ class _CapturedPaperHostActivationHandshake:
                 base.name + ".revocation-requested.json"
             ),
             "revoked": base.with_name(base.name + ".revoked.json"),
+            "stopped": base.with_name(base.name + ".stopped.json"),
         }
         for path in derived.values():
             _strict_new_local_json_path(path, allowed_roots=allowed_roots)
@@ -4692,6 +4735,7 @@ class _CapturedPaperHostActivationHandshake:
             active_start_evidence_path=derived["active_start_evidence"],
             revocation_requested_path=derived["revocation_requested"],
             revoked_path=derived["revoked"],
+            stopped_path=derived["stopped"],
             dispatch_lock_path=dispatch_lock_path,
             dispatch_lock_identity=dispatch_lock_identity,
             verified=verified,
@@ -4702,6 +4746,7 @@ class _CapturedPaperHostActivationHandshake:
             wall_clock=wall_clock,
             monotonic_clock=monotonic_clock,
             wait=wait,
+            startup_attempt_id=startup_attempt_id,
         )
 
     def _common_body(self) -> dict[str, Any]:
@@ -4931,6 +4976,10 @@ class _CapturedPaperHostActivationHandshake:
             "--journal-root",
             "--confirm-fake-money-paper",
         }
+        expected_mode = "Apply"
+        if self._startup_attempt_id is not None:
+            required_options.add("--startup-attempt-id")
+            expected_mode = "RestartOnly"
         if set(options) != required_options or any(
             len(items) != 1
             for option, items in options.items()
@@ -4938,7 +4987,7 @@ class _CapturedPaperHostActivationHandshake:
         ) or not options.get("--allow-read-root"):
             raise CapturedAlpacaPaperServiceError(
                 "HOST_ACTIVATION_ISSUER_COMMAND_INVALID",
-                "host-cutover issuer command does not match the exact Apply schema",
+                "host-cutover issuer command does not match the exact PAPER start schema",
             )
 
         def one(option: str) -> str:
@@ -4949,7 +4998,11 @@ class _CapturedPaperHostActivationHandshake:
             Path(item).resolve(strict=True) for item in options["--allow-read-root"]
         )
         if not (
-            one("--mode") == "Apply"
+            one("--mode") == expected_mode
+            and (
+                self._startup_attempt_id is None
+                or one("--startup-attempt-id") == self._startup_attempt_id
+            )
             and one("--manifest-sha256") == self._verified.manifest_sha256
             and one("--confirm-fake-money-paper")
             == _HOST_CUTOVER_APPLY_CONFIRMATION
@@ -4963,7 +5016,7 @@ class _CapturedPaperHostActivationHandshake:
         ):
             raise CapturedAlpacaPaperServiceError(
                 "HOST_ACTIVATION_ISSUER_COMMAND_INVALID",
-                "host-cutover issuer command is not the exact sealed PAPER Apply",
+                "host-cutover issuer command is not the exact sealed PAPER start",
             )
 
     def _verify_journal_authorization(
@@ -5040,14 +5093,31 @@ class _CapturedPaperHostActivationHandshake:
                 "host-cutover authorization sequence is outside the journal",
             )
         prior_rows = rows[: int(sequence) - 1]
+        cycle_start_index = 0
+        if self._startup_attempt_id is not None:
+            matching_restart_rows = [
+                (index, event)
+                for index, event in enumerate(prior_rows)
+                if event.get("event_type") == "restart_started"
+                and isinstance(event.get("payload"), Mapping)
+                and event["payload"].get("startup_attempt_id")
+                == self._startup_attempt_id
+            ]
+            if len(matching_restart_rows) != 1:
+                raise CapturedAlpacaPaperServiceError(
+                    "HOST_ACTIVATION_JOURNAL_INVALID",
+                    "restart permit lacks one exact attempt boundary",
+                )
+            cycle_start_index = matching_restart_rows[0][0]
+        cycle_prior_rows = prior_rows[cycle_start_index:]
         quiesced_rows = [
             event
-            for event in prior_rows
+            for event in cycle_prior_rows
             if event.get("event_type") == "legacy_execution_lane_quiesced"
         ]
         quiet_rows = [
             event
-            for event in prior_rows
+            for event in cycle_prior_rows
             if event.get("event_type")
             == "legacy_paper_broker_quiet_horizon_completed"
         ]
@@ -5172,11 +5242,11 @@ class _CapturedPaperHostActivationHandshake:
                 "permit claims do not match the durable journal authorization event",
             )
         authorizations = [
-            event for event in rows
+            event for event in rows[cycle_start_index:]
             if event.get("event_type") == "activation_permit_issued"
         ]
         publications = [
-            event for event in rows
+            event for event in rows[cycle_start_index:]
             if event.get("event_type") == "activation_permit_published"
         ]
         publication_valid = True
@@ -5570,8 +5640,23 @@ class _CapturedPaperHostActivationHandshake:
             journal_path,
             field="host committed apply journal",
         )
+        commit_event_type = (
+            "restart_completed"
+            if self._startup_attempt_id is not None
+            else "apply_completed"
+        )
         commits = [
-            event for event in rows if event.get("event_type") == "apply_completed"
+            event
+            for event in rows
+            if event.get("event_type") == commit_event_type
+            and (
+                self._startup_attempt_id is None
+                or (
+                    isinstance(event.get("payload"), Mapping)
+                    and event["payload"].get("startup_attempt_id")
+                    == self._startup_attempt_id
+                )
+            )
         ]
         if not commits:
             raise CapturedAlpacaPaperServiceError(
@@ -5612,6 +5697,10 @@ class _CapturedPaperHostActivationHandshake:
             "live_cash_authorized",
             "real_money_authorized",
         }
+        if self._startup_attempt_id is not None:
+            expected_payload_keys.update(
+                {"startup_attempt_id", "clean_stopped_receipt_sha256"}
+            )
         lane = (
             payload.get("legacy_execution_lane")
             if isinstance(payload, Mapping)
@@ -5622,9 +5711,25 @@ class _CapturedPaperHostActivationHandshake:
             if isinstance(payload, Mapping)
             else None
         )
+        cycle_rows = rows
+        if self._startup_attempt_id is not None:
+            starts = [
+                index
+                for index, candidate in enumerate(rows)
+                if candidate.get("event_type") == "restart_started"
+                and isinstance(candidate.get("payload"), Mapping)
+                and candidate["payload"].get("startup_attempt_id")
+                == self._startup_attempt_id
+            ]
+            if len(starts) != 1:
+                raise CapturedAlpacaPaperServiceError(
+                    "HOST_APPLY_COMMIT_INVALID",
+                    "host restart commit lacks one exact attempt boundary",
+                )
+            cycle_rows = rows[starts[0] :]
         provider_guard_events = [
             candidate
-            for candidate in rows
+            for candidate in cycle_rows
             if candidate.get("event_type")
             == "iqconnect_provider_guard_acquired"
         ]
@@ -5766,6 +5871,17 @@ class _CapturedPaperHostActivationHandshake:
             and payload.get("paper_execution_committed") is True
             and payload.get("live_cash_authorized") is False
             and payload.get("real_money_authorized") is False
+            and (
+                self._startup_attempt_id is None
+                or (
+                    payload.get("startup_attempt_id")
+                    == self._startup_attempt_id
+                    and _SHA256_RE.fullmatch(
+                        str(payload.get("clean_stopped_receipt_sha256") or "")
+                    )
+                    is not None
+                )
+            )
             and started_at <= recorded_at <= permit_valid_until
             and event.get("sequence")
             > self._permit_body.get("journal_authorization_sequence")
@@ -5804,6 +5920,67 @@ class _CapturedPaperHostActivationHandshake:
                     "host did not durably commit STARTED before authority expired",
                 )
             self._wait(min(0.01, remaining))
+
+    def publish_stopped(
+        self,
+        *,
+        supervisor_stopped: bool,
+        shared_store_closed: bool,
+        writer_lease_released: bool,
+    ) -> Mapping[str, Any]:
+        """Publish restart authority only after the complete local close succeeds."""
+
+        with self._lock:
+            if self._stopped_sha256 is not None or os.path.lexists(self.stopped_path):
+                raise CapturedAlpacaPaperServiceError(
+                    "HOST_STOPPED_ALREADY_PUBLISHED",
+                    "clean STOPPED receipt is one-shot",
+                )
+            if not (
+                supervisor_stopped is True
+                and shared_store_closed is True
+                and writer_lease_released is True
+                and self._started_sha256 is not None
+                and self._apply_completed_event_sha256 is not None
+                and self._apply_completed_event_body is not None
+            ):
+                raise CapturedAlpacaPaperServiceError(
+                    "HOST_STOPPED_UNPROVEN",
+                    "clean STOPPED requires the committed STARTED chain and complete close",
+                )
+            now = _aware_utc(self._wall_clock(), "host stopped clock")
+            applied_at = _parse_utc_text(
+                self._apply_completed_event_body.get("recorded_at"),
+                "host apply-completed recorded_at",
+            )
+            if now < applied_at:
+                raise CapturedAlpacaPaperServiceError(
+                    "HOST_STOPPED_CLOCK_INVALID",
+                    "clean STOPPED predates the committed STARTED state",
+                )
+            body = {
+                "schema_version": _HOST_STOPPED_SCHEMA_VERSION,
+                "state": "STOPPED_CLEANLY",
+                **self._common_body(),
+                "prepared_receipt_sha256": self._prepared_sha256,
+                "activation_permit_sha256": self._permit_sha256,
+                "started_receipt_sha256": self._started_sha256,
+                "apply_completed_event_sha256": (
+                    self._apply_completed_event_sha256
+                ),
+                "stopped_at": _iso(now),
+                "supervisor_stopped": True,
+                "shared_store_closed": True,
+                "writer_lease_released": True,
+                "paper_execution_started": True,
+                "paper_execution_stopped": True,
+                "live_cash_authorized": False,
+                "real_money_authorized": False,
+            }
+            body["receipt_sha256"] = activation_contract.sha256_json(body)
+            _publish_canonical_json_once(self.stopped_path, body)
+            self._stopped_sha256 = str(body["receipt_sha256"])
+            return dict(body)
 
     def _assert_dispatch_authority_current_unlocked(self) -> None:
         self.assert_not_revoked()
@@ -8134,6 +8311,12 @@ def _execute_active_service(
             composition,
             supervisor_started=supervisor_started,
         )
+        if host_activation_handshake.committed_started:
+            host_activation_handshake.publish_stopped(
+                supervisor_stopped=stopped_health.get("state") == "stopped",
+                shared_store_closed=True,
+                writer_lease_released=True,
+            )
         for signum, prior in installed_handlers.items():
             signal.signal(signum, prior)
     if start_health is None:
@@ -8242,6 +8425,7 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--launcher-sha256", required=True)
     parser.add_argument("--no-order-receipt-output")
     parser.add_argument("--host-ready-receipt")
+    parser.add_argument("--startup-attempt-id")
     return parser
 
 
@@ -8250,6 +8434,9 @@ def _validate_mode_arguments(args: argparse.Namespace) -> None:
         getattr(args, "no_order_receipt_output", None) or ""
     ).strip()
     host_ready = str(getattr(args, "host_ready_receipt", None) or "").strip()
+    startup_attempt_id = str(
+        getattr(args, "startup_attempt_id", None) or ""
+    ).strip()
     if args.mode == "no-order-smoke" and not receipt_output:
         raise CapturedAlpacaPaperServiceError(
             "NO_ORDER_RECEIPT_OUTPUT_REQUIRED",
@@ -8269,6 +8456,14 @@ def _validate_mode_arguments(args: argparse.Namespace) -> None:
         raise CapturedAlpacaPaperServiceError(
             "HOST_READY_RECEIPT_FORBIDDEN",
             "host activation receipt is accepted only for active PAPER",
+        )
+    if startup_attempt_id and (
+        args.mode != "activate-paper"
+        or _STARTUP_ATTEMPT_RE.fullmatch(startup_attempt_id) is None
+    ):
+        raise CapturedAlpacaPaperServiceError(
+            "STARTUP_ATTEMPT_ID_INVALID",
+            "startup attempt must be one canonical lowercase UUID for active PAPER",
         )
 
 
@@ -8444,6 +8639,11 @@ def main(argv: Sequence[str] | None = None) -> int:
                         ready_output=args.host_ready_receipt,
                         verified=verified,
                         allowed_roots=args.allow_read_root,
+                        startup_attempt_id=(
+                            str(args.startup_attempt_id)
+                            if args.startup_attempt_id
+                            else None
+                        ),
                     )
                 )
             launcher_attestation = (

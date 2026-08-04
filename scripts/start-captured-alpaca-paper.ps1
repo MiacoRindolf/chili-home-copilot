@@ -27,7 +27,13 @@ param(
     [string]$ManifestSha256,
 
     [Parameter(Mandatory = $true)]
-    [string]$AllowedReadRootsBase64
+    [string]$AllowedReadRootsBase64,
+
+    [Parameter(Mandatory = $false)]
+    [ValidateScript({
+        $_ -cmatch '^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$'
+    })]
+    [string]$StartupAttemptId
 )
 
 $ErrorActionPreference = 'Stop'
@@ -829,16 +835,37 @@ if ($Mode -eq 'ActivatePaper') {
     ) {
         throw 'ActivatePaper requires one sealed host-ready receipt path.'
     }
-    $hostReadyReceipt = Resolve-StrictLocalOutputPath `
+    $projectedHostReadyReceipt = Resolve-StrictLocalOutputPath `
         -LiteralPath ([string]$projectedServiceArguments[$hostReadyPositions[0] + 1])
+    $canonicalProjectedHostReadyReceipt = ConvertTo-CanonicalLocalPath `
+        -ResolvedPath $projectedHostReadyReceipt
+    if ($canonicalProjectedHostReadyReceipt -cne $canonicalManifestHostReadyReceipt) {
+        throw 'The projected host-ready receipt differs from the manifest cutover.'
+    }
+    if (-not [string]::IsNullOrWhiteSpace($StartupAttemptId)) {
+        $attemptsRoot = [IO.Path]::Combine(
+            [IO.Path]::GetDirectoryName($projectedHostReadyReceipt),
+            'attempts'
+        )
+        $attemptRoot = Resolve-StrictLocalPath `
+            -LiteralPath ([IO.Path]::Combine($attemptsRoot, $StartupAttemptId)) `
+            -RequireFile $false
+        $hostReadyReceipt = Resolve-StrictLocalOutputPath `
+            -LiteralPath ([IO.Path]::Combine($attemptRoot, 'host-ready.json'))
+    }
+    else {
+        $hostReadyReceipt = $projectedHostReadyReceipt
+    }
     if (Test-LocalPathEntryPresent -LiteralPath $hostReadyReceipt) {
         throw 'The host-ready PREPARED receipt path is append-only.'
     }
     foreach ($suffix in @(
         '.permit.json',
         '.started.json',
+        '.active-start-evidence.json',
         '.revocation-requested.json',
         '.revoked.json',
+        '.stopped.json',
         '.dispatch.lock'
     )) {
         if (Test-LocalPathEntryPresent -LiteralPath ($hostReadyReceipt + $suffix)) {
@@ -854,12 +881,12 @@ if ($Mode -eq 'ActivatePaper') {
     }).Count) {
         throw 'The host-ready receipt path escaped AllowedReadRoot.'
     }
-    if ($canonicalHostReadyReceipt -cne $canonicalManifestHostReadyReceipt) {
-        throw 'The projected host-ready receipt differs from the manifest cutover.'
-    }
 }
 elseif ($hostReadyPositions.Count -ne 0) {
     throw 'Only ActivatePaper may include a host-ready receipt path.'
+}
+elseif (-not [string]::IsNullOrWhiteSpace($StartupAttemptId)) {
+    throw 'StartupAttemptId is accepted only for ActivatePaper.'
 }
 $actualProjection = New-LauncherInvocationProjection `
     -SelectedMode $Mode `
@@ -882,7 +909,14 @@ $actualProjection = New-LauncherInvocationProjection `
     -ServiceSha256 $serviceSha `
     -ReceiptPolicy $receiptPolicy `
     -CanonicalReceiptOutput $canonicalNoOrderReceipt `
-    -CanonicalHostReadyReceipt $canonicalHostReadyReceipt
+    -CanonicalHostReadyReceipt $(
+        if ($Mode -eq 'ActivatePaper') {
+            $canonicalManifestHostReadyReceipt
+        }
+        else {
+            $null
+        }
+    )
 $actualProjectionJson = ConvertTo-CanonicalProjectionJson -Projection $actualProjection
 $actualProjectionSha = Get-Sha256Text -Value $actualProjectionJson
 if (
@@ -961,6 +995,9 @@ try {
     }
     if ($Mode -eq 'ActivatePaper') {
         $arguments += @('--host-ready-receipt', $hostReadyReceipt)
+        if (-not [string]::IsNullOrWhiteSpace($StartupAttemptId)) {
+            $arguments += @('--startup-attempt-id', $StartupAttemptId)
+        }
     }
 
     # Foreground ownership is intentional: Task Scheduler observes the actual
