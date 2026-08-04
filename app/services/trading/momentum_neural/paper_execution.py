@@ -562,7 +562,10 @@ def _parse_csv_floats(raw: str | None) -> list[float]:
 
 
 def scale_grid_enabled() -> bool:
-    return bool(getattr(settings, "chili_momentum_scale_grid_enabled", False))
+    # Ang fallback ay dapat TUMUGMA sa config default (True mula 2026-08-04) —
+    # report-binding doctrine: ang isang False dito ay tahimik na magpapatakbo ng
+    # ibang exit configuration sa anumang daan kung saan wala ang setting.
+    return bool(getattr(settings, "chili_momentum_scale_grid_enabled", True))
 
 
 # The cumulative scale-out fraction must stay strictly below 1.0 so a RUNNER always

@@ -6459,9 +6459,9 @@ class Settings(BaseSettings):
     # preserved (breakeven move unchanged). OFF => the lane takes ONE scale-out then trails
     # (today's behavior, byte-identical). docs/DESIGN/MOMENTUM_LANE.md
     chili_momentum_scale_grid_enabled: bool = Field(
-        default=False,
+        default=True,
         validation_alias=AliasChoices("CHILI_MOMENTUM_SCALE_GRID_ENABLED"),
-        description="Kill-switch for the multi-level scale-out grid (E1). false = single first-scale then trail (byte-identical).",
+        description="Multi-level scale-out grid (E1) — the price-structure partials: ladder targets are R-multiples, PULLED IN to a round/half-dollar level when one sits below the next R (Ross sells into where sellers stack). Default flipped False->True on 2026-08-04 as a REPLAY/PRODUCTION PARITY CORRECTION, not a behaviour change: production has been running it ON via CHILI_MOMENTUM_SCALE_GRID_ENABLED=1 while the code default said False, so every sealed replay measured a DIFFERENT exit configuration (single first-scale) than the lane actually runs. A feature that is live in production but off in code is exactly the dark flag the project forbids. false = single first-scale then trail (the pre-2026-08-04 replay behaviour).",
     )
     chili_momentum_scale_grid_fractions: str = Field(
         default="0.5,0.25",
