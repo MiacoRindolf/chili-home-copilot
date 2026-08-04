@@ -383,6 +383,9 @@ def test_all_nine_operator_kill_switches_round_trip_false(
         "CHILI_MOMENTUM_LATE_AH_MONSTER_PLACEMENT_ENABLED": (
             "chili_momentum_late_ah_monster_placement_enabled"
         ),
+        "CHILI_MOMENTUM_MONSTER_STRUCTURE_FLOOR_ENABLED": (
+            "chili_momentum_monster_structure_floor_enabled"
+        ),
     }
     strategy = {
         **ORTEX_STRATEGY_POLICY,

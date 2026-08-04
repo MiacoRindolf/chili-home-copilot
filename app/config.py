@@ -5113,6 +5113,11 @@ class Settings(BaseSettings):
         validation_alias=AliasChoices("CHILI_MOMENTUM_LATE_AH_MONSTER_MULT"),
         description="L8: ang schedule multiplier na ipapalit sa ×0.0 kapag pumasa ang late/AH monster conditions — kalahating size (0.5) sa halip na buo, dahil mas manipis ang AH book. ONE documented base = 0.5. Band [0,2].",
     )
+    chili_momentum_monster_structure_floor_enabled: bool = Field(
+        default=True,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_MONSTER_STRUCTURE_FLOOR_ENABLED"),
+        description="L10 (2026-08-04): monster-conditioned 15s STRUCTURE-FLOOR trail candidate sa first-minute verticals (HYFM 500% autopsy: ang giveback band ay huli — exit 3.57 vs structure-exitable 3.69; ang 1m trail ay proven −$42 net-negative sa klase). Compose-only via max() (INVARIANT-A: hindi lumuluwag); 4 adaptive conditions (monster ctx reuse + <3 kumpletong 1m bars + band-inadequacy self-referential + halt suppression); walang bagong threshold knobs.",
+    )
     chili_momentum_late_window_refire_cooldown_enabled: bool = Field(
         default=True,
         validation_alias=AliasChoices("CHILI_MOMENTUM_LATE_WINDOW_REFIRE_COOLDOWN_ENABLED"),

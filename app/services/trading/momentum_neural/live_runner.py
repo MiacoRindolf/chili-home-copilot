@@ -36106,6 +36106,88 @@ def tick_live_session(
                 except Exception:
                     pass
 
+            # L10 (2026-08-04): MONSTER-CONDITIONED 15s STRUCTURE-FLOOR CANDIDATE —
+            # sa first-minute verticals (HYFM class), ang giveback band ay huli at
+            # ang 1m structure ay wala pa; ang huling ASCENDING 15s-bar low (may
+            # wick buffer) ay dinadagdag bilang candidate sa parehong max() compose
+            # (INVARIANT-A automatic). Ang 15s scalars ay mine-memo sa ledger kada
+            # 15s bucket (L8b lesson: bawal ang per-tick frame fetch). Fail-open:
+            # anumang error ⇒ walang candidate.
+            try:
+                if bool(getattr(
+                    settings, "chili_momentum_monster_structure_floor_enabled", True
+                )) and not le.get("suspected_halt_since_utc"):
+                    _sf_bucket = int(_utcnow_aware().timestamp() // 15)
+                    if le.get("l10_sf_bucket") != _sf_bucket:
+                        _mb15 = _build_micro_bar_df(db, sess.symbol, bar_seconds=15)
+                        _sf_last = _sf_prev = _sf_amp = None
+                        _sf_day_hi = _sf_day_lo = None
+                        if _mb15 is not None and len(_mb15) >= 3:
+                            # huling KUMPLETONG bar = index -2 (ang -1 ay forming)
+                            _sf_last = float(_mb15["Low"].iloc[-2])
+                            _sf_prev = float(_mb15["Low"].iloc[-3])
+                            _sf_hi2 = float(_mb15["High"].iloc[-3:-1].max())
+                            _sf_lo2 = float(_mb15["Low"].iloc[-3:-1].min())
+                            _sf_px = float(_mb15["Close"].iloc[-2])
+                            if _sf_px > 0:
+                                _sf_amp = (_sf_hi2 - _sf_lo2) / _sf_px
+                            # session-scoped ang micro frame — day hi/lo mula rito
+                            # (walang dagdag na fetch; ang _df5 ay minute-memo-gated
+                            # at wala sa scope sa karamihan ng ticks).
+                            _sf_day_hi = float(_mb15["High"].astype(float).max())
+                            _sf_day_lo = float(_mb15["Low"].astype(float).min())
+                        le["l10_sf_bucket"] = _sf_bucket
+                        le["l10_sf_last_low"] = _sf_last
+                        le["l10_sf_prev_low"] = _sf_prev
+                        le["l10_sf_amp"] = _sf_amp
+                        le["l10_sf_day_hi"] = _sf_day_hi
+                        le["l10_sf_day_lo"] = _sf_day_lo
+                    from .paper_execution import monster_structure_floor_candidate
+
+                    _sf_age = None
+                    try:
+                        _sf_opened = _parse_dt(pos.get("opened_at_utc"))
+                        if _sf_opened is not None:
+                            _sf_o = (
+                                _sf_opened if _sf_opened.tzinfo is not None
+                                else _sf_opened.replace(tzinfo=timezone.utc)
+                            )
+                            _sf_age = (_utcnow_aware() - _sf_o).total_seconds()
+                    except Exception:
+                        _sf_age = None
+                    _sf_floor, _sf_reason = monster_structure_floor_candidate(
+                        enabled=True,
+                        halt_lit=False,
+                        leg_age_seconds=_sf_age,
+                        last15_low=_float_or_none(le.get("l10_sf_last_low")),
+                        prev15_low=_float_or_none(le.get("l10_sf_prev_low")),
+                        retrace_amp_pct=_float_or_none(le.get("l10_sf_amp")),
+                        hwm=_hwm_trail,
+                        composed_stop=_trailed,
+                        entry=avg,
+                        atr_pct=_atr_pct_trail,
+                    )
+                    if _sf_floor is not None and _sf_floor > _trailed:
+                        _trailed = _sf_floor
+                        _emit(db, sess, "monster_structure_floor_candidate", {
+                            "floor": round(float(_sf_floor), 6),
+                            "last15_low": le.get("l10_sf_last_low"),
+                            "retrace_amp_pct": le.get("l10_sf_amp"),
+                            "leg_age_s": _sf_age,
+                        })
+                    elif _sf_reason not in ("leg_mature_1m_owns", "band_adequate") and \
+                            le.get("l10_sf_last_reject") != _sf_reason:
+                        # OBSERVABILITY (aral ng L8/L10 zero-trace debugging):
+                        # ang mga DI-INAASAHANG reject ay ini-emit nang minsan
+                        # kada reason transition — ang dalawang normal na quiet
+                        # reason lang ang hindi (bawas ingay).
+                        le["l10_sf_last_reject"] = _sf_reason
+                        _emit(db, sess, "monster_structure_floor_reject", {
+                            "reason": _sf_reason, "leg_age_s": _sf_age,
+                        })
+            except Exception:
+                pass
+
             # LEVER 2B — VELOCITY/PERSISTENCE RIDE-LOCK on top of the 2A vol-norm trail.
             # Reads the DENOISED flow (OFI LEVEL + its EWMA SLOPE = the 1st derivative, NOT
             # raw signed_accel) + the live tick_rate, and modulates the 2A band by regime:

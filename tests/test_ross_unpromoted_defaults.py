@@ -25,6 +25,7 @@ _USER_APPROVED_DEFAULT_ON = (
     # 2026-08-01 L7 (JLHL/JEM vs JZXN distribution study — day-context dip geometry):
     "chili_momentum_dip_monster_context_enabled",
     "chili_momentum_late_ah_monster_placement_enabled",
+    "chili_momentum_monster_structure_floor_enabled",
 )
 
 # EVIDENCE-RETIRED default-OFF levers: still in the sealed arm roster (per-lever
@@ -71,6 +72,7 @@ def test_missing_setting_fallbacks_preserve_default_on_doctrine():
         "chili_momentum_flush_dip_fresh_hod_afternoon_enabled": (entry_gates,),
         "chili_momentum_dip_monster_context_enabled": (entry_gates,),
         "chili_momentum_late_ah_monster_placement_enabled": (entry_gates,),
+        "chili_momentum_monster_structure_floor_enabled": (live_runner,),
     }
     assert set(owners) == set(_USER_APPROVED_DEFAULT_ON)
     for name, modules in owners.items():
@@ -126,7 +128,7 @@ def test_replay_ab_tool_uses_the_complete_closed_operator_policy() -> None:
     ]
     assert len(assignments) == 1
     pairs = tuple(ast.literal_eval(assignments[0].value))
-    assert len(pairs) == 14
+    assert len(pairs) == 15
     # Ang arm roster = default-ON levers + evidence-retired levers: ang retired
     # flag ay nananatili sa sealed grammar (kaya nasusukat pa rin per-arm) kahit
     # OFF na ang production default.
