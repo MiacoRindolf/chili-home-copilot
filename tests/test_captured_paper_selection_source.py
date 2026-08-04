@@ -10,6 +10,9 @@ from sqlalchemy.orm import Session
 
 from app.config import settings as runtime_settings
 from app.db import engine
+from app.models.captured_paper_selection_frontier import (
+    CapturedPaperSelectionRouteState,
+)
 from app.models.trading import (
     BrainGraphNode,
     BrainNodeState,
@@ -538,6 +541,99 @@ def test_source_publishes_one_complete_hot_symbol_cohort_per_hub_snapshot(
         source.source_variant_ids
     )
     assert resolved_symbols == ["ACTU", "MISS"]
+
+
+def test_source_skips_symbol_whose_route_market_clock_regressed(db) -> None:
+    material = _seed_source(db, symbols=("ACTU", "SAFE"))
+    tick_at = material["tick_at"]
+    target_variant_id = material["selection_authority"].variant_ids[0]
+    route_available_at = tick_at + timedelta(seconds=1)
+    route_body = {
+        "schema_version": "chili.captured-paper-selection-route-state.v1",
+        "account_scope": "alpaca:paper",
+        "expected_account_id": ACCOUNT_ID,
+        "activation_generation": material["generation"],
+        "execution_family": "alpaca_spot",
+        "authority_sha256": material["selection_authority"].authority_sha256,
+        "symbol": "ACTU",
+        "variant_id": target_variant_id,
+        "latest_source_sequence": 7,
+        "state": "eligible",
+        "evidence_sha256": "1" * 64,
+        "batch_sha256": "2" * 64,
+        "source_event_at": tick_at.isoformat().replace("+00:00", "Z"),
+        "source_available_at": route_available_at.isoformat().replace(
+            "+00:00", "Z"
+        ),
+        "version": 1,
+    }
+    db.add(
+        CapturedPaperSelectionRouteState(
+            account_scope="alpaca:paper",
+            expected_account_id=ACCOUNT_ID,
+            activation_generation=material["generation"],
+            execution_family="alpaca_spot",
+            authority_sha256=material["selection_authority"].authority_sha256,
+            symbol="ACTU",
+            variant_id=target_variant_id,
+            latest_source_sequence=7,
+            state="eligible",
+            evidence_sha256="1" * 64,
+            batch_sha256="2" * 64,
+            source_event_at=tick_at,
+            source_available_at=route_available_at,
+            version=1,
+            state_sha256=sha256_json(route_body),
+            created_at=route_available_at,
+            updated_at=route_available_at,
+        )
+    )
+    regressed = (
+        db.query(MomentumSymbolViability)
+        .filter(
+            MomentumSymbolViability.symbol == "ACTU",
+            MomentumSymbolViability.variant_id
+            == int(material["source_variant"].id),
+        )
+        .one()
+    )
+    regressed_context = copy.deepcopy(dict(regressed.regime_snapshot_json or {}))
+    regressed_at = tick_at - timedelta(seconds=1)
+    regressed_context["utc_iso"] = regressed_at.isoformat()
+    regressed_context["utc_hour"] = regressed_at.hour
+    regressed.regime_snapshot_json = regressed_context
+    db.commit()
+
+    source = _source(
+        material,
+        fundamentals_reader=lambda symbol: _fresh_fundamentals(
+            symbol,
+            observed_at=tick_at,
+        ),
+        wall_clock=lambda: tick_at + timedelta(seconds=5),
+    )
+
+    snapshots = source.read_snapshot()
+
+    assert [item.symbol for item in snapshots] == ["SAFE"]
+
+    equal_context = copy.deepcopy(dict(regressed.regime_snapshot_json or {}))
+    equal_context["utc_iso"] = tick_at.isoformat()
+    equal_context["utc_hour"] = tick_at.hour
+    regressed.regime_snapshot_json = equal_context
+    db.commit()
+    equal_source = _source(
+        material,
+        fundamentals_reader=lambda symbol: _fresh_fundamentals(
+            symbol,
+            observed_at=tick_at,
+        ),
+        wall_clock=lambda: tick_at + timedelta(seconds=5),
+    )
+
+    equal_snapshots = equal_source.read_snapshot()
+
+    assert [item.symbol for item in equal_snapshots] == ["ACTU"]
 
 
 def test_source_drains_complete_cohorts_from_one_unchanged_hub_snapshot(

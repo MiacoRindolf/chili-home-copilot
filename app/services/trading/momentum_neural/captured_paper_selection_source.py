@@ -27,6 +27,9 @@ from sqlalchemy import func, text
 from sqlalchemy.engine import Engine
 from sqlalchemy.orm import Session
 
+from app.models.captured_paper_selection_frontier import (
+    CapturedPaperSelectionRouteState,
+)
 from app.models.trading import (
     BrainNodeState,
     MomentumStrategyVariant,
@@ -969,6 +972,45 @@ class SqlAlchemyCapturedViabilitySnapshotSource:
                     and captured_paper_initial_variant_sha256(row) == source_sha
                 ):
                     _reject("derived_source_variant_drift")
+            target_variant_ids = tuple(
+                sorted(self.selection_authority.variant_ids)
+            )
+            route_state_rows = (
+                db.query(CapturedPaperSelectionRouteState)
+                .filter(
+                    CapturedPaperSelectionRouteState.account_scope
+                    == self.selection_authority.account_scope,
+                    CapturedPaperSelectionRouteState.expected_account_id
+                    == self.expected_account_id,
+                    CapturedPaperSelectionRouteState.activation_generation
+                    == self.activation_generation,
+                    CapturedPaperSelectionRouteState.symbol.in_(symbols),
+                    CapturedPaperSelectionRouteState.variant_id.in_(
+                        target_variant_ids
+                    ),
+                )
+                .order_by(
+                    CapturedPaperSelectionRouteState.symbol.asc(),
+                    CapturedPaperSelectionRouteState.variant_id.asc(),
+                )
+                .all()
+            )
+            route_event_floors: dict[tuple[str, int], datetime] = {}
+            for route_state in route_state_rows:
+                if not (
+                    route_state.execution_family
+                    == self.selection_authority.execution_family
+                    and route_state.authority_sha256
+                    == self.selection_authority.authority_sha256
+                ):
+                    _reject("derived_source_route_state_authority_drift")
+                route_event_at = _utc(
+                    route_state.source_event_at,
+                    "derived_source_route_state_event_at",
+                )
+                route_event_floors[
+                    (str(route_state.symbol), int(route_state.variant_id))
+                ] = route_event_at
             rows = (
                 db.query(MomentumSymbolViability)
                 .filter(
@@ -1185,6 +1227,14 @@ class SqlAlchemyCapturedViabilitySnapshotSource:
                             context.utc_iso,
                             "derived_source_context_event_at",
                         )
+                        route_event_floor = route_event_floors.get(
+                            (symbol, target_id)
+                        )
+                        if (
+                            route_event_floor is not None
+                            and event_at < route_event_floor
+                        ):
+                            _reject("derived_source_route_clock_regressed")
                         context_age = (
                             source_snapshot_at - event_at
                         ).total_seconds()
