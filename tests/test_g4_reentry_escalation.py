@@ -194,6 +194,36 @@ def test_stop_class_loss_increments(reason) -> None:
     assert why == "stop_class_loss_increment"
 
 
+def test_rapid_whipsaw_stop_class_loss_double_increments() -> None:
+    # L4 (SILO autopsy): consecutive stop-class losses inside the rapid window
+    # double-increment so the escalated tier binds by entry #2-3, not #6.
+    lvl, why = reentry_escalation_level_update(
+        current_level=1, was_loss=True, exit_reason="trail_stop",
+        green_banked=False, rapid_stopout=True,
+    )
+    assert lvl == 3
+    assert why == "rapid_whipsaw_double_increment"
+
+
+def test_rapid_flag_ignored_for_non_stop_class_and_profit_paths() -> None:
+    # rapid_stopout must not touch the non-stop-loss / decay / reset semantics.
+    lvl, why = reentry_escalation_level_update(
+        current_level=2, was_loss=True, exit_reason="bailout",
+        green_banked=False, rapid_stopout=True,
+    )
+    assert (lvl, why) == (2, "non_stop_loss_unchanged")
+    lvl2, why2 = reentry_escalation_level_update(
+        current_level=3, was_loss=False, exit_reason="target",
+        green_banked=False, rapid_stopout=True,
+    )
+    assert (lvl2, why2) == (2, "profit_recycle_decay")
+    lvl3, why3 = reentry_escalation_level_update(
+        current_level=4, was_loss=False, exit_reason="target",
+        green_banked=True, rapid_stopout=True,
+    )
+    assert (lvl3, why3) == (0, "green_banked_reset")
+
+
 @pytest.mark.parametrize("reason", [
     "kill_switch_flatten",
     "bailout",
@@ -338,3 +368,124 @@ def test_leader_substitute_margin_scales_with_level() -> None:
         prior_risk_dist=0.05, tape_accel=1.2, is_day_leader=True,
     )
     assert allowed2 is True
+
+
+# ── L4 cadence bookkeeping: rapid_whipsaw_cadence_update (pure helper) ──────────
+# Both ends of the "consecutive stop-class losses" pair share the ONE classifier;
+# the marker stamps on every stop-class loss regardless of the decision flag and
+# window (only the DECISION is gated); the window binds VERBATIM (0 => disabled);
+# a corrupt marker is overwritten, never latched.
+
+from datetime import datetime, timedelta  # noqa: E402
+
+from app.services.trading.momentum_neural.risk_policy import (  # noqa: E402
+    rapid_whipsaw_cadence_update,
+)
+
+_NOW = datetime(2026, 7, 27, 13, 30, 0)
+
+
+def _cadence(**kw):
+    base = dict(
+        was_loss=True, exit_reason="trail_stop",
+        prev_marker_raw=None, now=_NOW,
+        window_seconds=120.0, decision_enabled=True,
+    )
+    base.update(kw)
+    return rapid_whipsaw_cadence_update(**base)
+
+
+def test_cadence_stop_to_stop_within_window_is_rapid_and_restamps() -> None:
+    prev = (_NOW - timedelta(seconds=70)).isoformat()
+    rapid, marker = _cadence(prev_marker_raw=prev)
+    assert rapid is True
+    assert marker == _NOW.isoformat()
+
+
+def test_cadence_stop_to_stop_outside_window_not_rapid_but_stamps() -> None:
+    prev = (_NOW - timedelta(seconds=121)).isoformat()
+    rapid, marker = _cadence(prev_marker_raw=prev)
+    assert rapid is False
+    assert marker == _NOW.isoformat()
+
+
+def test_cadence_window_zero_disables_decision_but_still_stamps() -> None:
+    # Config contract: 0 => disabled — must bind VERBATIM (the `or 120.0`
+    # falsy-coercion defect this test pins against regression).
+    prev = (_NOW - timedelta(seconds=5)).isoformat()
+    rapid, marker = _cadence(prev_marker_raw=prev, window_seconds=0.0)
+    assert rapid is False
+    assert marker == _NOW.isoformat()
+
+
+def test_cadence_decision_flag_off_still_stamps_marker() -> None:
+    # Bookkeeping runs regardless of the flag so a later flag flip never
+    # compares against a stale marker; only the decision is gated.
+    prev = (_NOW - timedelta(seconds=5)).isoformat()
+    rapid, marker = _cadence(prev_marker_raw=prev, decision_enabled=False)
+    assert rapid is False
+    assert marker == _NOW.isoformat()
+
+
+def test_cadence_non_stop_class_loss_neither_stamps_nor_measures() -> None:
+    for reason in ("bailout", "max_hold", "kill_switch_flatten", None, ""):
+        rapid, marker = _cadence(
+            exit_reason=reason,
+            prev_marker_raw=(_NOW - timedelta(seconds=5)).isoformat(),
+        )
+        assert (rapid, marker) == (False, None), reason
+
+
+def test_cadence_profit_exit_neither_stamps_nor_measures() -> None:
+    rapid, marker = _cadence(was_loss=False)
+    assert (rapid, marker) == (False, None)
+
+
+def test_cadence_absent_marker_not_rapid_but_stamps_first() -> None:
+    rapid, marker = _cadence(prev_marker_raw=None)
+    assert rapid is False
+    assert marker == _NOW.isoformat()
+
+
+def test_cadence_corrupt_marker_fails_open_and_restamps() -> None:
+    # A corrupt marker must be OVERWRITTEN, never latched — otherwise rapid
+    # detection dies silently for the rest of the session.
+    rapid, marker = _cadence(prev_marker_raw="not-a-date")
+    assert rapid is False
+    assert marker == _NOW.isoformat()
+
+
+def test_cadence_z_suffixed_marker_parses() -> None:
+    prev = (_NOW - timedelta(seconds=30)).isoformat() + "Z"
+    rapid, marker = _cadence(prev_marker_raw=prev)
+    assert rapid is True
+    assert marker == _NOW.isoformat()
+
+
+def test_cadence_future_marker_negative_gap_not_rapid() -> None:
+    prev = (_NOW + timedelta(seconds=30)).isoformat()
+    rapid, marker = _cadence(prev_marker_raw=prev)
+    assert rapid is False
+    assert marker == _NOW.isoformat()
+
+
+def test_cadence_bail_between_stops_does_not_reset_the_pair() -> None:
+    # Composition per the documented contract: stop at t0, bailout at t0+60
+    # (no stamp), stop at t0+90 -> gap measured from t0 (90s <= 120s) => rapid.
+    t0 = _NOW - timedelta(seconds=90)
+    _, marker0 = rapid_whipsaw_cadence_update(
+        was_loss=True, exit_reason="trail_stop", prev_marker_raw=None,
+        now=t0, window_seconds=120.0, decision_enabled=True,
+    )
+    assert marker0 == t0.isoformat()
+    rapid_bail, marker_bail = rapid_whipsaw_cadence_update(
+        was_loss=True, exit_reason="bailout", prev_marker_raw=marker0,
+        now=_NOW - timedelta(seconds=30), window_seconds=120.0,
+        decision_enabled=True,
+    )
+    assert (rapid_bail, marker_bail) == (False, None)
+    rapid, _ = rapid_whipsaw_cadence_update(
+        was_loss=True, exit_reason="trail_stop", prev_marker_raw=marker0,
+        now=_NOW, window_seconds=120.0, decision_enabled=True,
+    )
+    assert rapid is True

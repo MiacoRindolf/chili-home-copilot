@@ -450,10 +450,15 @@ def test_host_binds_before_lanes_and_stops_joins_unbinds_then_drains(monkeypatch
         l2_handoff = object()
 
         @staticmethod
-        def close():
+        def quiesce_ingress_for_shutdown():
             assert "depth_unbound" in events
             assert "trade_unbound" in events
             events.append("composition_drained")
+            return {"state": "ingress_quiescent"}
+
+        @staticmethod
+        def close():
+            assert "composition_drained" in events
             return {"state": "closed"}
 
         @staticmethod
@@ -480,6 +485,7 @@ def test_host_binds_before_lanes_and_stops_joins_unbinds_then_drains(monkeypatch
     host._macro_feature_caches = {}
     host._provider_supervisor = None
     host._provider_join_timeout_seconds = 20.0
+    host._shutdown_capture_aborts = ()
     host._lock = threading.RLock()
 
     def bind(self):
@@ -582,6 +588,7 @@ def test_host_startup_failure_joins_before_unbind_and_drain():
     host._macro_feature_caches = {}
     host._provider_supervisor = None
     host._provider_join_timeout_seconds = 20.0
+    host._shutdown_capture_aborts = ()
     host._lock = threading.RLock()
 
     def bind(self):

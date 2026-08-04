@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from enum import Enum
@@ -101,6 +102,20 @@ _CAUSE_ORDER: tuple[TargetCause, ...] = (
     TargetCause.HINT,
     TargetCause.ELIGIBLE,
     TargetCause.ROSS,
+    TargetCause.FORCED,
+    TargetCause.RETAINED,
+)
+
+# Capacity priority is deliberately separate from canonical cause ordering.
+# ``_CAUSE_ORDER`` is part of durable evidence serialization, while this order
+# decides which non-protected symbols retain scarce IQFeed watch slots.  The
+# current Ross universe is more time-sensitive than the standing eligible
+# inventory, which may legitimately retain older re-ignition candidates.
+_TARGET_PRIORITY_ORDER: tuple[TargetCause, ...] = (
+    TargetCause.ACTIVE,
+    TargetCause.HINT,
+    TargetCause.ROSS,
+    TargetCause.ELIGIBLE,
     TargetCause.FORCED,
     TargetCause.RETAINED,
 )
@@ -211,6 +226,141 @@ class TargetResolution:
         return not self.gaps
 
 
+@dataclass(frozen=True)
+class WatchCapacityGovernor:
+    """Pure, bounded IQFeed watch-cap backoff and recovery state.
+
+    A provider limit halves the current configured cap, never the transient
+    watched roster.  After a quiet interval the bridge probes exactly one new
+    slot.  If that probe hits the limit, the prior stable cap is restored rather
+    than halved a second time.
+    """
+
+    cap: int
+    floor: int
+    hard_max: int
+    quiet_interval_seconds: float
+    next_probe_at: float
+    probe_base_cap: int | None = None
+
+    @property
+    def source_read_limit(self) -> int:
+        """Read one sentinel beyond the cap so excess demand stays observable."""
+        return min(self.hard_max, self.cap + 1)
+
+    @classmethod
+    def start(
+        cls,
+        *,
+        cap: int,
+        floor: int,
+        hard_max: int,
+        quiet_interval_seconds: float,
+        now: float,
+    ) -> "WatchCapacityGovernor":
+        cap = int(cap)
+        floor = int(floor)
+        hard_max = int(hard_max)
+        quiet_interval_seconds = float(quiet_interval_seconds)
+        now = float(now)
+        if floor < 0 or floor > cap or cap > hard_max:
+            raise ValueError("watch capacity must satisfy 0 <= floor <= cap <= hard_max")
+        if not math.isfinite(quiet_interval_seconds) or quiet_interval_seconds <= 0:
+            raise ValueError("watch capacity quiet interval must be positive")
+        if not math.isfinite(now):
+            raise ValueError("watch capacity clock must be finite")
+        return cls(
+            cap=cap,
+            floor=floor,
+            hard_max=hard_max,
+            quiet_interval_seconds=quiet_interval_seconds,
+            next_probe_at=now + quiet_interval_seconds,
+        )
+
+    def advance(
+        self,
+        *,
+        now: float,
+        limit_hit: bool,
+        capacity_pressure: bool,
+        at_capacity: bool,
+    ) -> "WatchCapacityGovernor":
+        now = float(now)
+        if not math.isfinite(now):
+            raise ValueError("watch capacity clock must be finite")
+        if limit_hit:
+            if self.probe_base_cap is not None:
+                next_cap = self.probe_base_cap
+            else:
+                next_cap = max(self.floor, self.cap // 2)
+            return WatchCapacityGovernor(
+                cap=min(self.cap, next_cap),
+                floor=self.floor,
+                hard_max=self.hard_max,
+                quiet_interval_seconds=self.quiet_interval_seconds,
+                next_probe_at=now + self.quiet_interval_seconds,
+            )
+
+        if self.probe_base_cap is not None and not at_capacity:
+            return WatchCapacityGovernor(
+                cap=self.cap,
+                floor=self.floor,
+                hard_max=self.hard_max,
+                quiet_interval_seconds=self.quiet_interval_seconds,
+                next_probe_at=now + self.quiet_interval_seconds,
+                probe_base_cap=self.probe_base_cap,
+            )
+        if now < self.next_probe_at:
+            return self
+        if self.probe_base_cap is not None and not capacity_pressure:
+            return WatchCapacityGovernor(
+                cap=self.cap,
+                floor=self.floor,
+                hard_max=self.hard_max,
+                quiet_interval_seconds=self.quiet_interval_seconds,
+                next_probe_at=now + self.quiet_interval_seconds,
+            )
+        if self.cap >= self.hard_max:
+            if self.probe_base_cap is None:
+                return self
+            return WatchCapacityGovernor(
+                cap=self.cap,
+                floor=self.floor,
+                hard_max=self.hard_max,
+                quiet_interval_seconds=self.quiet_interval_seconds,
+                next_probe_at=now + self.quiet_interval_seconds,
+            )
+        if not capacity_pressure:
+            return self
+
+        stable_cap = self.cap
+        return WatchCapacityGovernor(
+            cap=min(self.hard_max, stable_cap + 1),
+            floor=self.floor,
+            hard_max=self.hard_max,
+            quiet_interval_seconds=self.quiet_interval_seconds,
+            next_probe_at=now + self.quiet_interval_seconds,
+            probe_base_cap=stable_cap,
+        )
+
+    def connection_started(self, *, now: float) -> "WatchCapacityGovernor":
+        """Discard outage time and revert any probe not proven before disconnect."""
+        now = float(now)
+        if not math.isfinite(now):
+            raise ValueError("watch capacity clock must be finite")
+        return WatchCapacityGovernor(
+            cap=(
+                self.probe_base_cap
+                if self.probe_base_cap is not None
+                else self.cap
+            ),
+            floor=self.floor,
+            hard_max=self.hard_max,
+            quiet_interval_seconds=self.quiet_interval_seconds,
+            next_probe_at=now + self.quiet_interval_seconds,
+        )
+
+
 def require_complete_source_inventory(reads: Sequence[SourceRead]) -> None:
     """Reject a regression back to a session-only production target."""
     causes = {read.cause for read in reads}
@@ -237,8 +387,8 @@ def resolve_subscription_target(
     If *any* source query fails, the complete prior watch set is also protected so
     an empty/error result can never be interpreted as an instruction to unwatch.
 
-    Under capacity pressure validated fresh hints are selected before ranked
-    eligible and cold Ross-fallback symbols.  Hints are still additive source
+    Under capacity pressure validated fresh hints and the current Ross universe
+    are selected before the longer-lived eligible inventory. Hints are still additive source
     evidence (never a replacement query): every displaced broad target is returned
     as explicit coverage-unavailable evidence, and a hint that overlaps a broad
     source retains both causes.
@@ -302,11 +452,11 @@ def resolve_subscription_target(
         add_protected(sorted(previous))
 
     # Deterministic priority is deliberate: load-bearing active/held first,
-    # newest-first fresh hints next, then viability-ranked eligible and finally
-    # Ross broad fallback. Capacity losses are never silent.
+    # newest-first fresh hints next, then the current Ross universe before the
+    # longer-lived eligible inventory. Capacity losses are never silent.
     ranked: list[str] = list(protected)
     ranked_seen = set(ranked)
-    for cause in _CAUSE_ORDER:
+    for cause in _TARGET_PRIORITY_ORDER:
         for symbol in ranked_by_cause.get(cause, ()):
             if symbol not in ranked_seen:
                 ranked_seen.add(symbol)

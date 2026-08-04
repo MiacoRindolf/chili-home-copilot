@@ -399,12 +399,11 @@ _WEAK_CATALYST_KEYWORDS = (
     "compliance with", "notice of delisting", "delisting", "bankrupt", "chapter 11",
     "default", "restatement", "securities fraud", "class action", "investigation",
     "subpoena", "private placement", "warrant exercise", "shelf registration",
-    # SEC dilution-filing forms (Ross SS101: a secondary/shelf prices the stock DOWN
-    # toward the offering — a long-side fade, not a catalyst). COLLISION-SAFE forms
-    # only: bare "s-1"/"s-3"/"f-1" are substrings of ordinary words ("class-1",
-    # "phase-1") because this classifier is a lowercase substring match; the "form"-
-    # prefixed / "registration"-suffixed variants and the "424b" prospectus stem
-    # (covers 424B1..B5) are unambiguous in real headline text.
+    # SEC dilution-filing forms (Ross SS101; restored 2026-07-26 per operator decision —
+    # no-dark-flags doctrine). COLLISION-SAFE forms only: bare "s-1"/"s-3"/"f-1" are
+    # substrings of ordinary words ("class-1", "f-15") in this lowercase substring
+    # classifier; the "form"-prefixed / "registration"-suffixed variants and the "424b"
+    # prospectus stem (covers 424B1..B5) are unambiguous in real headline text.
     "form s-1", "s-1 registration", "form s-3", "s-3 registration",
     "form f-1", "f-1 registration", "424b",
 )

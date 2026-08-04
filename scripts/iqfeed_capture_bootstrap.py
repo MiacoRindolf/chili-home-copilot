@@ -95,6 +95,7 @@ _STATIC_BLOCKING_REASONS = (
 class IqfeedIngressCompositionState(str, Enum):
     PREPARED = "prepared"
     INGRESS_RUNNING = "ingress_running"
+    INGRESS_QUIESCENT = "ingress_quiescent"
     CLOSED = "closed"
     FAILED = "failed"
 
@@ -1249,12 +1250,12 @@ class IqfeedCaptureIngressComposition:
         """
 
         with self._lock:
-            if self._state in {
-                IqfeedIngressCompositionState.CLOSED,
-                IqfeedIngressCompositionState.FAILED,
+            if self._state not in {
+                IqfeedIngressCompositionState.PREPARED,
+                IqfeedIngressCompositionState.INGRESS_RUNNING,
             }:
                 raise CaptureContractError(
-                    "cannot install IQFeed hot run factory on terminal composition"
+                    "cannot install IQFeed hot run factory on quiescent or terminal composition"
                 )
             if not isinstance(shared_store_runtime, SharedCaptureStoreRuntime):
                 raise CaptureContractError("IQFeed shared capture runtime is malformed")
@@ -1320,6 +1321,39 @@ class IqfeedCaptureIngressComposition:
                 ) from exc
             self._state = IqfeedIngressCompositionState.INGRESS_RUNNING
 
+    def _drain_handoffs_locked(self) -> None:
+        failures: list[BaseException] = []
+        for handoff in (self.l2_handoff, self.l1_handoff):
+            try:
+                handoff.close()
+            except BaseException as exc:
+                failures.append(exc)
+        if failures:
+            self._state = IqfeedIngressCompositionState.FAILED
+            raise CaptureContractError(
+                "IQFeed ingress composition closed with unpersisted loss"
+            ) from failures[0]
+        self._state = IqfeedIngressCompositionState.INGRESS_QUIESCENT
+
+    def quiesce_ingress_for_shutdown(self) -> Mapping[str, Any]:
+        """Stop accepting and drain both handoffs before run disposition.
+
+        The host calls this only after provider loops are joined and both
+        bridge bindings are removed.  Active capture runs are intentionally
+        allowed to remain while queued frames drain; their terminal disposition
+        is decided only after this method returns successfully.
+        """
+
+        with self._lock:
+            if self._state is IqfeedIngressCompositionState.INGRESS_QUIESCENT:
+                return self.health()
+            if self._state is not IqfeedIngressCompositionState.INGRESS_RUNNING:
+                raise CaptureContractError(
+                    "IQFeed ingress shutdown drain requires running ingress"
+                )
+            self._drain_handoffs_locked()
+            return self.health()
+
     def close(self) -> Mapping[str, Any]:
         with self._lock:
             if self._state is IqfeedIngressCompositionState.CLOSED:
@@ -1334,17 +1368,12 @@ class IqfeedCaptureIngressComposition:
                 raise CaptureContractError(
                     "cannot close IQFeed ingress composition with active capture runs"
                 )
-            failures: list[BaseException] = []
-            for handoff in (self.l2_handoff, self.l1_handoff):
-                try:
-                    handoff.close()
-                except BaseException as exc:
-                    failures.append(exc)
-            if failures:
-                self._state = IqfeedIngressCompositionState.FAILED
+            if self._state is IqfeedIngressCompositionState.INGRESS_RUNNING:
+                self._drain_handoffs_locked()
+            if self._state is not IqfeedIngressCompositionState.INGRESS_QUIESCENT:
                 raise CaptureContractError(
-                    "IQFeed ingress composition closed with unpersisted loss"
-                ) from failures[0]
+                    "IQFeed ingress composition did not reach quiescence"
+                )
             self._state = IqfeedIngressCompositionState.CLOSED
             return self.health()
 

@@ -7,7 +7,7 @@ from datetime import datetime, timedelta
 from typing import Any, Optional
 
 from sqlalchemy import func, inspect as sa_inspect
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, load_only
 
 from ....models.trading import MomentumAutomationOutcome, MomentumStrategyVariant
 from .evolution import (
@@ -259,8 +259,27 @@ def evolution_credit_diagnostics(
         return out
 
     since = datetime.utcnow() - timedelta(days=window_days)
+    # The diagnostics loop reads scalars + extracted_summary_json only; load_only
+    # skips detoasting the 7 other JSONB snapshot columns (~11KB/row on prod)
+    # across up to row_limit rows.
     q = (
         db.query(MomentumAutomationOutcome)
+        .options(
+            load_only(
+                MomentumAutomationOutcome.id,
+                MomentumAutomationOutcome.session_id,
+                MomentumAutomationOutcome.user_id,
+                MomentumAutomationOutcome.variant_id,
+                MomentumAutomationOutcome.symbol,
+                MomentumAutomationOutcome.mode,
+                MomentumAutomationOutcome.execution_family,
+                MomentumAutomationOutcome.terminal_at,
+                MomentumAutomationOutcome.outcome_class,
+                MomentumAutomationOutcome.contributes_to_evolution,
+                MomentumAutomationOutcome.extracted_summary_json,
+                MomentumAutomationOutcome.created_at,
+            )
+        )
         .filter(MomentumAutomationOutcome.terminal_at >= since)
         .order_by(MomentumAutomationOutcome.created_at.desc())
     )

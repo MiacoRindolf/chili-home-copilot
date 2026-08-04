@@ -1,0 +1,15 @@
+{
+  "schema": "chili.golden-harvest-inventory.v1",
+  "census_date": "2026-08-03",
+  "notes": "HYFM 500% squeeze day (Ross +~$20k combined sa pangalan; video bcn3-gerSsQ). CHILI tape 11:58:01-18:57:21Z na may outage gaps sa araw — kasama ang buong main-account squeeze window (3.03->4.12 bago ang 12:10:38Z outage). Pinned para sa replay validation ng lever chain laban sa sariling tape.",
+  "windows": [
+    {
+      "symbol": "HYFM",
+      "day": "2026-08-03",
+      "class": "gold",
+      "exp_ticks": 188165,
+      "exp_nbbo": 7347,
+      "canonical": false
+    }
+  ]
+}

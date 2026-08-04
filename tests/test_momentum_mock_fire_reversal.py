@@ -39,6 +39,9 @@ from unittest.mock import MagicMock, patch
 import pandas as pd
 import pytest
 
+from app.services.trading.momentum_neural.captured_paper_selection import (
+    captured_paper_candidate_generation_sha256,
+)
 from app.services.trading.momentum_neural.entry_gates import (
     absorption_snap_entry,
     bottom_reversal_confirmation,
@@ -59,6 +62,31 @@ _GATES = "app.services.trading.momentum_neural.entry_gates"
 _ROSS = "app.services.trading.momentum_neural.ross_momentum"
 _CANDLES = "app.services.trading.momentum_neural.candles"
 _PIPELINE = "app.services.trading.momentum_neural.pipeline"
+
+
+def _fixed_candidate_generation(
+    *,
+    debug: dict,
+    stop: float,
+    reason: str,
+    setup_family: str,
+) -> str:
+    return captured_paper_candidate_generation_sha256(
+        session_id=1,
+        symbol="TEST",
+        execution_family="alpaca_spot",
+        entry_place_count=1,
+        client_order_id="cid-test",
+        setup_family=setup_family,
+        structural_stop_price=stop,
+        trigger_reason=reason,
+        trigger_debug=debug,
+        confirmed_arm_marker={"marker": "fixed"},
+        viability_updated_at=datetime(2026, 7, 25, tzinfo=timezone.utc),
+        viability_score="0.5",
+        viability_payload_sha256="0" * 64,
+        execution_readiness_sha256="1" * 64,
+    )
 
 
 def _rows(bars):
@@ -118,6 +146,16 @@ def _flush_settings(ms) -> None:
     ms.chili_momentum_reclaim_max_hours_after_open = 1.0  # morning cutoff 10:30 ET
     ms.chili_momentum_flush_dip_volume_gate_enabled = True  # Ross-parity L1b
     ms.chili_momentum_pullback_volume_spike_multiple = 1.5
+    # L7 monster context OFF sa canonical fixtures (legacy geometry) — ang mga
+    # MagicMock default ay lumalabas na float()=1.0 na sisira sa tail threshold;
+    # ang L7-specific na tests ang tahasang magbubukas nito.
+    ms.chili_momentum_dip_monster_context_enabled = False
+    ms.chili_momentum_late_ah_monster_placement_enabled = False
+    ms.chili_momentum_late_ah_monster_mult = 0.5
+    ms.chili_momentum_monster_up_off_low_floor = 1.5
+    ms.chili_momentum_monster_day_retrace_cap = 0.35
+    ms.chili_momentum_monster_tail_min_frac = 0.30
+    ms.chili_momentum_monster_vwap_depth_atr_mult = 1.0
 
 
 def _flush_arrays(n: int = 12) -> dict:
@@ -198,6 +236,7 @@ def _vwap_settings(ms) -> None:
     ms.chili_momentum_vwap_reclaim_min_below_bars = 2
     ms.chili_momentum_vwap_reclaim_vol_mult = 1.5
     ms.chili_momentum_ross_stop_alignment_enabled = True  # Ross-parity L2a
+    ms.chili_momentum_vol_nan_fail_closed_enabled = True  # the shipped default
 
 
 def _vwap_arrays(n: int = 12) -> dict:
@@ -231,7 +270,13 @@ class TestVwapReclaimMockFire:
             ok, reason, dbg = vwap_reclaim_confirmation(df, entry_interval="5m", symbol="TEST")
         assert ok is True
         assert dbg["pullback_low"] == pytest.approx(9.42, abs=1e-6)
-        assert dbg["stop_model"] == "reclaim_bar_low"
+        assert "stop_model" not in dbg
+        assert _fixed_candidate_generation(
+            debug=dbg,
+            stop=dbg["pullback_low"],
+            reason=reason,
+            setup_family="vwap_reclaim",
+        ) == "b7a5e7ef1e167464607f53b692ff9e7d7c3fe9edc529235bed3fcfa67e91a09d"
 
     def test_negative_low_volume_no_fire(self):
         """The reclaim happens but WITHOUT the volume spike (a drift back over VWAP, not a
@@ -244,6 +289,33 @@ class TestVwapReclaimMockFire:
             ok, reason, dbg = vwap_reclaim_confirmation(df, entry_interval="5m", symbol="TEST")
         assert ok is False
         assert reason == "vwap_reclaim_low_volume"
+
+    def test_nan_volume_fails_closed(self):
+        """NaN vol_ratio on the reclaim bar (lever ON, the shipped default) -> NO FIRE
+        ('vwap_reclaim_volume_unknown') and a JSONB-safe None stamp."""
+        df = _vwap_reclaim_df()
+        nan_vol = {**_vwap_arrays(), "volume_ratio": [1.0] * 11 + [float("nan")]}
+        with patch(f"{_GATES}.settings") as ms, \
+                patch(f"{_GATES}.compute_all_from_df", return_value=nan_vol):
+            _vwap_settings(ms)
+            ok, reason, dbg = vwap_reclaim_confirmation(df, entry_interval="5m", symbol="TEST")
+        assert ok is False
+        assert reason == "vwap_reclaim_volume_unknown"
+        assert dbg["vol_ratio"] is None
+
+    def test_nan_volume_legacy_pass_with_lever_off(self):
+        """Kill-switch parity: lever OFF -> the legacy NaN pass-through -> the clean
+        reclaim still FIRES, stamp stays JSONB-safe None."""
+        df = _vwap_reclaim_df()
+        nan_vol = {**_vwap_arrays(), "volume_ratio": [1.0] * 11 + [float("nan")]}
+        with patch(f"{_GATES}.settings") as ms, \
+                patch(f"{_GATES}.compute_all_from_df", return_value=nan_vol):
+            _vwap_settings(ms)
+            ms.chili_momentum_vol_nan_fail_closed_enabled = False
+            ok, reason, dbg = vwap_reclaim_confirmation(df, entry_interval="5m", symbol="TEST")
+        assert ok is True, f"lever OFF must keep the legacy NaN pass, got {reason} dbg={dbg}"
+        assert reason == "vwap_reclaim"
+        assert dbg["vol_ratio"] is None
 
 
 # ════════════════════════════════════════════════════════════════════════════════════════
@@ -307,6 +379,21 @@ class _SubVwapPassGuards:
 
 
 class TestSubVwapTrapMockFire:
+    def test_explicit_off_kill_switch_is_a_no_op(self):
+        df = _sub_vwap_trap_df()
+        with patch(f"{_GATES}.settings") as ms, _SubVwapPassGuards():
+            _sub_vwap_settings(ms)
+            ms.chili_momentum_sub_vwap_trap_entry_enabled = False
+            ok, reason, dbg = sub_vwap_trap_entry(
+                df, entry_interval="5m", symbol="TEST", db=MagicMock(),
+            )
+        assert ok is False
+        assert reason == "sub_vwap_trap_disabled"
+        assert dbg == {
+            "entry_interval": "5m",
+            "pattern": "sub_vwap_trap",
+        }
+
     def test_positive_clean_sub_vwap_trap_fires(self):
         """A sharp undercut-and-reclaim trap with all chase-guards passing -> FIRES
         ``sub_vwap_trap``; stop = trap low, entry = reclaim-bar high."""
@@ -729,7 +816,13 @@ class TestInverseHeadShouldersMockFire:
             )
         assert ok is True
         assert dbg["pullback_low"] == pytest.approx(8.50, abs=1e-6)
-        assert dbg["stop_model"] == "head_low"
+        assert "stop_model" not in dbg
+        assert _fixed_candidate_generation(
+            debug=dbg,
+            stop=dbg["pullback_low"],
+            reason=reason,
+            setup_family="inverse_head_shoulders",
+        ) == "afff9dc938e73308af551b0660dda5945f211d89f4aa69c1e7dc649111d1ef7c"
 
     def test_negative_extended_no_fire(self):
         """The NOT-PARABOLIC extension guard trips (the neckline break is excessively extended
@@ -820,7 +913,13 @@ class TestWickReclaimMockFire:
             ok, reason, dbg = wick_reclaim_confirmation(df, entry_interval="5m", symbol="TEST")
         assert ok is True
         assert dbg["pullback_low"] == pytest.approx(9.80, abs=1e-6)
-        assert dbg["stop_model"] == "flush_low"
+        assert "stop_model" not in dbg
+        assert _fixed_candidate_generation(
+            debug=dbg,
+            stop=dbg["pullback_low"],
+            reason=reason,
+            setup_family="wick_reclaim",
+        ) == "7ef82e4150d6b684dc769d11e17ec251ff444714de72dccad20d7a784058488d"
 
     def test_negative_cold_tape_no_fire(self):
         """The MANDATORY hot-tape gate fails (cold tape: low RVOL + low ATR%) -> the trigger

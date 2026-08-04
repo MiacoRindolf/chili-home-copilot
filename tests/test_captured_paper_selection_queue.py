@@ -4,9 +4,11 @@ from collections.abc import Callable
 from dataclasses import dataclass, replace
 from datetime import datetime, timedelta, timezone
 import hashlib
+import json
 from pathlib import Path
 import threading
 import time
+from types import SimpleNamespace
 import uuid
 
 import pytest
@@ -41,23 +43,34 @@ from app.services.trading.momentum_neural.captured_viability_adapter import (
     captured_viability_read_receipt_sha256,
 )
 from app.services.trading.momentum_neural.replay_capture_contract import (
+    CaptureOrtexSelectionSnapshot,
     CaptureClocks,
+    CaptureContractError,
     CaptureEvent,
     CaptureEventRef,
+    CaptureReadReceipt,
     CaptureRunIdentity,
     CaptureStream,
     CoverageGap,
+    FSMDependencyProfile,
+    FSMStreamDependency,
+    ORTEX_SNAPSHOT_PROVIDER,
     ProviderWatermark,
     StreamCoverage,
     canonical_json_bytes,
     captured_read_result_sha256,
     sha256_json,
 )
+from app.services.trading.momentum_neural.short_mechanics import (
+    OrtexShortMechanicsOutcome,
+    ortex_public_policy,
+)
 from app.services.trading.momentum_neural.replay_capture_runtime import (
     BoundedCaptureIngress,
     CaptureBudgetPolicy,
     CaptureResourceBinding,
     CaptureResourceMeasurement,
+    RetentionObjectRef,
     SharedCaptureAdmissionBudget,
     SharedCaptureStoreRuntime,
 )
@@ -82,12 +95,16 @@ def _digest(value: str) -> str:
     return hashlib.sha256(value.encode("utf-8")).hexdigest()
 
 
-def _resource_binding(*, max_queue_events: int = 100) -> CaptureResourceBinding:
+def _resource_binding(
+    *,
+    max_queue_events: int = 100,
+    available_memory_bytes: int = 192_000_000,
+) -> CaptureResourceBinding:
     measurement = CaptureResourceMeasurement(
         measured_at=BASE,
         sample_seconds=5,
         total_memory_bytes=256_000_000,
-        available_memory_bytes=192_000_000,
+        available_memory_bytes=available_memory_bytes,
         disk_free_bytes=2_000_000_000,
         average_cpu_percent=20,
         sustained_append_bytes_per_second=20_000_000,
@@ -320,6 +337,152 @@ def _source_bundle(
     return bundle, scoring, tuple(events), selection, queue_identity
 
 
+def _with_ortex_batch(
+    bundle: CapturedViabilityInputBundle,
+    scoring: CapturedViabilityScoringAuthority,
+    events: tuple[CaptureEvent, ...],
+    *,
+    member_count: int = 96,
+) -> tuple[
+    CapturedViabilityInputBundle,
+    CapturedViabilityScoringAuthority,
+    tuple[CaptureEvent, ...],
+    str,
+]:
+    policy = ortex_public_policy()
+    policy_sha256 = sha256_json(policy)
+    observed_at = bundle.event_at - timedelta(milliseconds=500)
+    symbols = [bundle.symbol]
+    for index in range(max(0, member_count - 1)):
+        symbols.append(
+            "S"
+            + chr(ord("A") + (index // (26 * 26)) % 26)
+            + chr(ord("A") + (index // 26) % 26)
+            + chr(ord("A") + index % 26)
+        )
+    members = []
+    for symbol in sorted(set(symbols)):
+        outcome = OrtexShortMechanicsOutcome.not_applicable(
+            symbol=symbol,
+            reason="outside_top_n",
+            observed_at=observed_at,
+            policy_sha256=policy_sha256,
+            policy=policy,
+        )
+        mechanics = outcome.to_capture_dict()
+        members.append(
+            {
+                "symbol": symbol,
+                "short_mechanics": mechanics,
+                "short_mechanics_sha256": sha256_json(mechanics),
+                "squeeze_fuel_pct": None,
+                "rank_pct": None,
+            }
+        )
+    payload = {
+        "schema_version": "chili.ortex-selection-snapshot.v1",
+        "members": members,
+        "members_sha256": sha256_json(members),
+        "complete": True,
+    }
+    typed = CaptureOrtexSelectionSnapshot.from_dict(
+        payload,
+        expected_symbol=bundle.symbol,
+    )
+    ortex_event = CaptureEvent(
+        identity=events[0].identity,
+        sequence=max(event.sequence for event in events) + 1,
+        stream=CaptureStream.ORTEX_SNAPSHOT,
+        clocks=CaptureClocks(
+            received_at=typed.source_received_at,
+            available_at=typed.returned_at,
+            market_reference_at=typed.market_reference_at,
+        ),
+        payload=payload,
+        provider=ORTEX_SNAPSHOT_PROVIDER,
+        symbol=bundle.symbol,
+        query=typed.capture_query(),
+    )
+    CaptureOrtexSelectionSnapshot.from_event(ortex_event)
+    ortex_ref = CaptureEventRef.from_event(ortex_event)
+    ortex_read_id = "22222222-2222-4222-8222-222222222222"
+    ortex_receipt = CaptureReadReceipt(
+        read_id=ortex_read_id,
+        decision_id=f"captured-queue-ortex-{bundle.source_sequence}",
+        identity_sha256=bundle.capture_identity_sha256,
+        stream=CaptureStream.ORTEX_SNAPSHOT,
+        provider=ORTEX_SNAPSHOT_PROVIDER,
+        symbol=bundle.symbol,
+        requested_at=typed.requested_at,
+        returned_at=typed.returned_at,
+        query_sha256=ortex_event.query_sha256 or "",
+        source_event_sha256s=(ortex_ref.event_sha256,),
+        empty_result=False,
+        result_sha256=captured_read_result_sha256((ortex_ref,)),
+        query=typed.capture_query(),
+    )
+    receipt_sha256 = captured_viability_read_receipt_sha256(ortex_receipt)
+    profile = bundle.dependency_inventory.dependency_profile
+    dependency = FSMStreamDependency(
+        stream=CaptureStream.ORTEX_SNAPSHOT,
+        exact_provider_event_at_required=False,
+        market_reference_at_required=True,
+        max_source_age_seconds=300.0,
+        coverage_start_at=min(
+            row.coverage_start_at for row in profile.stream_dependencies
+        ),
+    )
+    profile = FSMDependencyProfile(
+        required_streams=profile.required_streams
+        | {CaptureStream.ORTEX_SNAPSHOT},
+        required_read_ids=profile.required_read_ids + (ortex_read_id,),
+        stream_dependencies=profile.stream_dependencies + (dependency,),
+    )
+    bindings = []
+    for binding in bundle.dependency_inventory.bindings:
+        if binding.component == "execution_readiness":
+            binding = CapturedViabilityDependencyBinding(
+                component=binding.component,
+                component_sha256=binding.component_sha256,
+                source_event_sha256s=(
+                    binding.source_event_sha256s + (ortex_ref.event_sha256,)
+                ),
+                read_receipt_sha256s=(
+                    binding.read_receipt_sha256s + (receipt_sha256,)
+                ),
+            )
+        bindings.append(binding)
+    inventory = CapturedViabilityDependencyInventory(
+        dependency_profile=profile,
+        bindings=tuple(bindings),
+    )
+    coverage = StreamCoverage(
+        stream=CaptureStream.ORTEX_SNAPSHOT,
+        identity_sha256=bundle.capture_identity_sha256,
+        provider=ORTEX_SNAPSHOT_PROVIDER,
+        symbol=bundle.symbol,
+        first_available_at=dependency.coverage_start_at,
+        last_available_at=typed.returned_at,
+        event_count=1,
+        exact_event_clock_complete=False,
+        content_verified=True,
+        continuity_complete=True,
+        query_receipt_count=1,
+    )
+    bundle = replace(
+        bundle,
+        dependency_inventory=inventory,
+        source_refs=bundle.source_refs + (ortex_ref,),
+        read_receipts=bundle.read_receipts + (ortex_receipt,),
+        stream_coverages=bundle.stream_coverages + (coverage,),
+    )
+    scoring = replace(
+        scoring,
+        dependency_profile_sha256=profile.profile_sha256,
+    )
+    return bundle, scoring, events + (ortex_event,), ortex_event.payload_sha256
+
+
 def _frontier(
     authority: CapturedPaperSelectionAuthority,
     *,
@@ -382,12 +545,16 @@ def _harness(
     max_queue_events: int = 100,
     monotonic_clock=time.monotonic,
     code_payload: dict | None = None,
+    available_memory_bytes: int = 192_000_000,
 ) -> _Harness:
     bundle, scoring, events, selection, queue_identity = _source_bundle(
         source_sequence=1,
         code_payload=code_payload,
     )
-    binding = _resource_binding(max_queue_events=max_queue_events)
+    binding = _resource_binding(
+        max_queue_events=max_queue_events,
+        available_memory_bytes=available_memory_bytes,
+    )
     shared = SharedCaptureAdmissionBudget.from_resource_binding(
         binding,
         monotonic_clock=monotonic_clock,
@@ -592,7 +759,11 @@ def test_queue_event_compacts_activation_static_source_payloads(
     legacy_payload = dict(payload)
     legacy_payload.pop("source_event_refs")
     legacy_source_events = [
-        queue_module._event_envelope(event) for event in harness.source_events
+        queue_module._event_envelope(
+            event,
+            queue_source_sequence=harness.bundle.source_sequence,
+        )[0]
+        for event in harness.source_events
     ]
     legacy_payload["source_events"] = legacy_source_events
     legacy_payload["source_event_inventory_sha256"] = sha256_json(
@@ -640,7 +811,10 @@ def test_compact_static_source_ref_must_reconstruct_exact_event_hash(
     refs[index] = mutate_ref(refs[index])
     tampered_bundle = replace(harness.bundle, source_refs=tuple(refs))
     retained_events = [
-        queue_module._event_envelope(event)
+        queue_module._event_envelope(
+            event,
+            queue_source_sequence=tampered_bundle.source_sequence,
+        )[0]
         for event in harness.source_events
         if event.stream not in queue_module._ACTIVATION_STATIC_SOURCE_STREAMS
     ]
@@ -650,6 +824,13 @@ def test_compact_static_source_ref_must_reconstruct_exact_event_hash(
             tampered_bundle,
             raw_refs=[ref.to_dict() for ref in refs],
             raw_events=retained_events,
+            root=harness.manager.store.root,
+            queue_identity=harness.queue_identity,
+            loaded_commit=SimpleNamespace(
+                commit=SimpleNamespace(ortex_manifest_refs=())
+            ),
+            manifest_cache={},
+            budget_check=lambda: None,
         )
     _close_idle_harness(harness)
 
@@ -752,11 +933,23 @@ def test_compacted_240_occurrence_backlog_is_bounded_and_verifies(
     assert [event.sequence for event in materialized] == list(range(1, 241))
     assert len({event.event_sha256 for event in materialized}) == 240
     assert sum(len(row.commit.event_refs) for row in chain) == 240
+    manifest_cache = {}
     for event in materialized:
+        loaded_commit = next(
+            loaded
+            for loaded in chain
+            if loaded.commit.event_sequence_from_exclusive
+            < event.sequence
+            <= loaded.commit.event_sequence_through
+        )
         bundle, result = queue_module._verify_queue_event(
             event,
+            root=harness.manager.store.root,
             queue_identity=harness.queue_identity,
             selection_authority=harness.selection,
+            loaded_commit=loaded_commit,
+            manifest_cache=manifest_cache,
+            budget_check=lambda: None,
         )
         assert bundle.source_sequence == event.sequence
         assert result.to_dict() == event.payload["score_result"]
@@ -1844,6 +2037,199 @@ def test_read_budget_timeout_is_transient_and_does_not_poison_health(
     harness.manager.close()
 
 
+def _ortex_artifact_paths(root: Path) -> tuple[Path, ...]:
+    matches = []
+    for path in (root / "derived").rglob("*.json"):
+        value = json.loads(path.read_text(encoding="utf-8"))
+        if (
+            value.get("kind")
+            == queue_module.QUEUE_ORTEX_MANIFEST_DERIVED_KIND
+        ):
+            matches.append(path)
+    return tuple(sorted(matches))
+
+
+def test_ortex_batch_is_one_durable_object_and_routes_stay_compact(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    harness = _harness(tmp_path)
+    submitted: list[CaptureEvent] = []
+    durable_order: list[str] = []
+    original_submit = harness.publisher.ingress.submit
+    original_put_derived = harness.manager.store.put_derived_artifact
+    original_sync_derived = harness.manager.store.sync_derived_ref
+
+    def submit(event, **kwargs):
+        submitted.append(event)
+        return original_submit(event, **kwargs)
+
+    def put_derived_artifact(**kwargs):
+        durable_order.append(f"put:{kwargs['kind']}")
+        return original_put_derived(**kwargs)
+
+    def sync_derived_ref(ref):
+        durable_order.append("sync:ortex_manifest")
+        return original_sync_derived(ref)
+
+    monkeypatch.setattr(harness.publisher.ingress, "submit", submit)
+    monkeypatch.setattr(
+        harness.manager.store,
+        "put_derived_artifact",
+        put_derived_artifact,
+    )
+    monkeypatch.setattr(
+        harness.manager.store,
+        "sync_derived_ref",
+        sync_derived_ref,
+    )
+    expected_batch_sha256 = None
+    full_manifest_bytes = None
+    for sequence in range(1, 4):
+        bundle, scoring, events, selection, _identity = _source_bundle(
+            source_sequence=sequence
+        )
+        assert selection.to_dict() == harness.selection.to_dict()
+        bundle, scoring, events, batch_sha256 = _with_ortex_batch(
+            bundle,
+            scoring,
+            events,
+        )
+        expected_batch_sha256 = expected_batch_sha256 or batch_sha256
+        assert batch_sha256 == expected_batch_sha256
+        ortex_event = next(
+            event
+            for event in events
+            if event.stream is CaptureStream.ORTEX_SNAPSHOT
+        )
+        full_manifest_bytes = len(canonical_json_bytes(ortex_event.payload))
+        assert harness.publisher.reserve_sequence() == sequence
+        receipt = harness.publisher.publish_bundle(
+            bundle=bundle,
+            scoring_authority=scoring,
+            evaluation_at=bundle.read_at,
+            source_events=events,
+        )
+        assert receipt.accepted is True
+        ingress_health = harness.publisher.ingress.health()
+        shared_health = ingress_health["shared_admission"]
+        assert ingress_health["retained_objects"] == 1
+        assert ingress_health["retained_bytes"] == full_manifest_bytes
+        assert shared_health["outstanding_retained_objects"] == 1
+        assert (
+            shared_health["outstanding_retained_bytes"]
+            == full_manifest_bytes
+        )
+        expected_bounded_bytes = (
+            sum(event.canonical_size_bytes for event in submitted)
+            + full_manifest_bytes
+        )
+        assert ingress_health["bounded_memory_bytes"] == expected_bounded_bytes
+        assert shared_health["outstanding_bytes"] == expected_bounded_bytes
+        assert shared_health["bytes_by_identity"] == {
+            harness.queue_identity.identity_sha256: expected_bounded_bytes
+        }
+
+    assert len(submitted) == 3
+    assert full_manifest_bytes is not None
+    for queued_event in submitted:
+        raw_sources = queued_event.payload["source_events"]
+        ortex_source = next(
+            row
+            for row in raw_sources
+            if row["event"]["stream"] == CaptureStream.ORTEX_SNAPSHOT.value
+        )
+        assert "payload" not in ortex_source["event"]
+        assert set(ortex_source) == {
+            "event",
+            "event_sha256",
+            "ortex_manifest_ref",
+        }
+        assert (
+            ortex_source["ortex_manifest_ref"]["batch_sha256"]
+            == expected_batch_sha256
+        )
+        assert queued_event.canonical_size_bytes < full_manifest_bytes
+
+    harness.writer.start()
+    assert harness.writer.close(timeout_seconds=5) is True
+    ingress_health = harness.publisher.ingress.health()
+    assert ingress_health["retained_objects"] == 0
+    assert ingress_health["retained_bytes"] == 0
+    assert (
+        ingress_health["shared_admission"]["outstanding_retained_objects"]
+        == 0
+    )
+    artifact_paths = _ortex_artifact_paths(harness.manager.store.root)
+    assert len(artifact_paths) == 1
+    assert durable_order == [
+        f"put:{queue_module.QUEUE_ORTEX_MANIFEST_DERIVED_KIND}",
+        "sync:ortex_manifest",
+        f"put:{queue_module.QUEUE_DERIVED_KIND}",
+    ]
+    artifact = json.loads(artifact_paths[0].read_text(encoding="utf-8"))
+    assert artifact["payload_sha256"] == expected_batch_sha256
+    assert sha256_json(artifact["payload"]) == expected_batch_sha256
+
+    commit_rows = []
+    for path in (harness.manager.store.root / "derived").rglob("*.json"):
+        value = json.loads(path.read_text(encoding="utf-8"))
+        if value.get("kind") == queue_module.QUEUE_DERIVED_KIND:
+            commit_rows.append(value)
+    assert len(commit_rows) == 1
+    pinned = commit_rows[0]["payload"]["ortex_manifest_refs"]
+    assert len(pinned) == 1
+    assert pinned[0]["sha256"] == artifact_paths[0].stem
+    durable_ref = queue_module._retention_ref_from_dict(pinned[0])
+    durable_record = (
+        queue_module.ContentAddressedCaptureStore.read_derived_ref(
+            harness.manager.store.root,
+            durable_ref,
+        )
+    )
+    ortex_source = next(
+        row
+        for row in submitted[0].payload["source_events"]
+        if row["event"]["stream"] == CaptureStream.ORTEX_SNAPSHOT.value
+    )
+    wrong_size_ref = RetentionObjectRef(
+        tier=durable_ref.tier,
+        relative_path=durable_ref.relative_path,
+        sha256=durable_ref.sha256,
+        bytes=durable_ref.bytes + 1,
+    )
+    with pytest.raises(CaptureContractError, match="content mismatch"):
+        queue_module._event_from_envelope(
+            ortex_source,
+            root=harness.manager.store.root,
+            queue_identity=harness.queue_identity,
+            ortex_manifest_refs=(wrong_size_ref,),
+            manifest_cache={
+                expected_batch_sha256: (durable_record, durable_ref)
+            },
+            budget_check=lambda: None,
+        )
+
+    with pytest.raises(
+        CapturedPaperSelectionQueueUnavailable,
+        match="batch byte limit",
+    ):
+        _input_port(
+            harness,
+            max_batch_bytes=durable_ref.bytes,
+        ).read_batch(
+            frontier=_frontier(harness.selection),
+            authority=harness.selection,
+        )
+
+    batch = _input_port(harness).read_batch(
+        frontier=_frontier(harness.selection),
+        authority=harness.selection,
+    )
+    assert batch is not None and batch.source_sequence_through == 1
+    harness.manager.close()
+
+
 def test_timed_delta_checkpoint_resumes_without_prefix_livelock(tmp_path) -> None:
     harness = _harness(tmp_path)
     commit_count = 8
@@ -1943,6 +2329,281 @@ def test_caught_up_reader_bisects_without_walking_consumed_prefix(
     ) is None
     assert counted.reads + counted.iterated < 15
     assert harness.writer.close(timeout_seconds=5) is True
+    harness.manager.close()
+
+
+def test_ortex_route_fanout_retains_one_bounded_payload_until_last_ack(
+    tmp_path,
+) -> None:
+    harness = _harness(tmp_path)
+    manifest_bytes = None
+    for sequence in range(1, 4):
+        bundle, scoring, events, selection, _identity = _source_bundle(
+            source_sequence=sequence
+        )
+        assert selection.to_dict() == harness.selection.to_dict()
+        bundle, scoring, events, _batch_sha256 = _with_ortex_batch(
+            bundle,
+            scoring,
+            events,
+        )
+        ortex_event = next(
+            event
+            for event in events
+            if event.stream is CaptureStream.ORTEX_SNAPSHOT
+        )
+        manifest_bytes = len(canonical_json_bytes(ortex_event.payload))
+        assert harness.publisher.reserve_sequence() == sequence
+        assert harness.publisher.publish_bundle(
+            bundle=bundle,
+            scoring_authority=scoring,
+            evaluation_at=bundle.read_at,
+            source_events=events,
+        ).accepted
+
+    assert manifest_bytes is not None
+    for expected_through in range(1, 4):
+        batch = harness.publisher.ingress.pop_batch(
+            max_events=1,
+            max_bytes=harness.manager.resource_binding.budget.async_queue_bytes,
+            timeout_seconds=0,
+        )
+        assert len(batch.events) == 1
+        event_chunks = harness.manager.store.write_events(batch.events)
+        gap_chunks = harness.manager.store.write_gaps(batch.gaps)
+        harness.manager.store.sync()
+        prepared = harness.publisher._prepare_commit(
+            store=harness.manager.store,
+            batch=batch,
+            event_chunks=event_chunks,
+            gap_chunks=gap_chunks,
+        )
+        harness.manager.store.sync()
+        harness.publisher._acknowledge_commit(prepared)
+        harness.publisher.ingress.complete_shared_admission(batch.events)
+
+        health = harness.publisher.ingress.health()
+        expected_objects = 0 if expected_through == 3 else 1
+        expected_bytes = 0 if expected_through == 3 else manifest_bytes
+        assert health["retained_objects"] == expected_objects
+        assert health["retained_bytes"] == expected_bytes
+        assert (
+            health["shared_admission"]["outstanding_retained_objects"]
+            == expected_objects
+        )
+        assert (
+            health["shared_admission"]["outstanding_retained_bytes"]
+            == expected_bytes
+        )
+        assert harness.publisher.health().durable_through == expected_through
+
+    assert len(_ortex_artifact_paths(harness.manager.store.root)) == 1
+    assert harness.writer.close(timeout_seconds=5) is False
+    harness.manager.close()
+
+
+def test_ortex_32_route_fanout_racing_writer_never_multiplies_payload(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    harness = _harness(tmp_path)
+    retained_observations = []
+    original_submit = harness.publisher.ingress.submit
+
+    def observed_submit(event, **kwargs):
+        accepted = original_submit(event, **kwargs)
+        retained_observations.append(harness.publisher.ingress.health())
+        return accepted
+
+    monkeypatch.setattr(
+        harness.publisher.ingress,
+        "submit",
+        observed_submit,
+    )
+    harness.writer.start()
+    batch_sha256 = None
+    manifest_bytes = None
+    for sequence in range(1, 33):
+        bundle, scoring, events, selection, _identity = _source_bundle(
+            source_sequence=sequence
+        )
+        assert selection.to_dict() == harness.selection.to_dict()
+        bundle, scoring, events, current_sha256 = _with_ortex_batch(
+            bundle,
+            scoring,
+            events,
+            member_count=10,
+        )
+        batch_sha256 = batch_sha256 or current_sha256
+        assert current_sha256 == batch_sha256
+        ortex_event = next(
+            event
+            for event in events
+            if event.stream is CaptureStream.ORTEX_SNAPSHOT
+        )
+        manifest_bytes = len(canonical_json_bytes(ortex_event.payload))
+        assert harness.publisher.reserve_sequence() == sequence
+        assert harness.publisher.publish_bundle(
+            bundle=bundle,
+            scoring_authority=scoring,
+            evaluation_at=bundle.read_at,
+            source_events=events,
+        ).accepted
+
+    assert harness.writer.close(timeout_seconds=10) is True
+    assert manifest_bytes is not None
+    assert len(retained_observations) == 32
+    assert all(row["retained_objects"] == 1 for row in retained_observations)
+    assert all(
+        row["retained_bytes"] == manifest_bytes
+        for row in retained_observations
+    )
+    assert harness.publisher.health().durable_through == 32
+    assert harness.writer.worker.health()["last_error"] is None
+    assert len(_ortex_artifact_paths(harness.manager.store.root)) == 1
+    health = harness.publisher.ingress.health()
+    assert health["retained_objects"] == 0
+    assert health["shared_admission"]["outstanding_retained_objects"] == 0
+    harness.manager.close()
+
+
+def test_ortex_manifest_over_budget_rejects_and_releases_staged_payload(
+    tmp_path,
+) -> None:
+    harness = _harness(
+        tmp_path,
+        available_memory_bytes=34_000_000,
+    )
+    bundle, scoring, events, _selection, _identity = _source_bundle(
+        source_sequence=1
+    )
+    bundle, scoring, events, _batch_sha256 = _with_ortex_batch(
+        bundle,
+        scoring,
+        events,
+        member_count=500,
+    )
+    ortex_event = next(
+        event
+        for event in events
+        if event.stream is CaptureStream.ORTEX_SNAPSHOT
+    )
+    assert (
+        len(canonical_json_bytes(ortex_event.payload))
+        > harness.publisher.ingress.max_bytes
+    )
+    assert harness.publisher.reserve_sequence() == 1
+    receipt = harness.publisher.publish_bundle(
+        bundle=bundle,
+        scoring_authority=scoring,
+        evaluation_at=bundle.read_at,
+        source_events=events,
+    )
+    assert receipt.accepted is False
+    health = harness.publisher.ingress.health()
+    assert health["retained_objects"] == 0
+    assert health["retained_bytes"] == 0
+    assert health["shared_admission"]["outstanding_retained_objects"] == 0
+    assert health["shared_admission"]["outstanding_retained_bytes"] == 0
+    assert health["dropped"] == 1
+    assert not _ortex_artifact_paths(harness.manager.store.root)
+
+    harness.writer.start()
+    assert harness.writer.close(timeout_seconds=5) is True
+    harness.manager.close()
+
+
+def test_same_batch_ack_then_later_rejection_releases_transferred_retention(
+    tmp_path: Path,
+) -> None:
+    harness = _harness(tmp_path)
+
+    first, first_scoring, first_events, _selection, _identity = _source_bundle(
+        source_sequence=1
+    )
+    first, first_scoring, first_events, batch_sha256 = _with_ortex_batch(
+        first,
+        first_scoring,
+        first_events,
+    )
+    manifest_bytes = len(
+        canonical_json_bytes(
+            next(
+                event.payload
+                for event in first_events
+                if event.stream is CaptureStream.ORTEX_SNAPSHOT
+            )
+        )
+    )
+    assert harness.publisher.reserve_sequence() == 1
+    assert harness.publisher.publish_bundle(
+        bundle=first,
+        scoring_authority=first_scoring,
+        evaluation_at=first.read_at,
+        source_events=first_events,
+    ).accepted
+
+    second, second_scoring, second_events, _selection, _identity = _source_bundle(
+        source_sequence=2
+    )
+    second, second_scoring, second_events, second_batch_sha256 = _with_ortex_batch(
+        second,
+        second_scoring,
+        second_events,
+    )
+    assert second_batch_sha256 == batch_sha256
+    assert harness.publisher.reserve_sequence() == 2
+
+    def ack_first_then_close(
+        _event: CaptureEvent,
+        _size: int,
+        rejection_reason: str | None,
+    ) -> None:
+        assert rejection_reason is None
+        batch = harness.publisher.ingress.pop_batch(
+            max_events=1,
+            max_bytes=harness.manager.resource_binding.budget.async_queue_bytes,
+            timeout_seconds=0,
+        )
+        assert len(batch.events) == 1
+        event_chunks = harness.manager.store.write_events(batch.events)
+        gap_chunks = harness.manager.store.write_gaps(batch.gaps)
+        harness.manager.store.sync()
+        prepared = harness.publisher._prepare_commit(
+            store=harness.manager.store,
+            batch=batch,
+            event_chunks=event_chunks,
+            gap_chunks=gap_chunks,
+        )
+        harness.manager.store.sync()
+        harness.publisher._acknowledge_commit(prepared)
+        harness.publisher.ingress.complete_shared_admission(batch.events)
+        transferred = harness.publisher.ingress.health()
+        assert transferred["retained_objects"] == 1
+        assert transferred["retained_bytes"] == manifest_bytes
+        harness.publisher.ingress.close()
+
+    receipt = harness.publisher.publish_bundle(
+        bundle=second,
+        scoring_authority=second_scoring,
+        evaluation_at=second.read_at,
+        source_events=second_events,
+        before_ingress_admission=ack_first_then_close,
+    )
+
+    assert receipt.accepted is False
+    health = harness.publisher.ingress.health()
+    assert health["retained_objects"] == 0
+    assert health["retained_bytes"] == 0
+    assert health["shared_admission"]["outstanding_retained_objects"] == 0
+    assert health["shared_admission"]["outstanding_retained_bytes"] == 0
+    drained = harness.publisher.ingress.pop_batch(
+        max_events=1,
+        max_bytes=1,
+        timeout_seconds=0,
+    )
+    assert len(drained.gaps) == 1
+    harness.publisher.writer_lease.release()
     harness.manager.close()
 
 
@@ -2134,4 +2795,232 @@ def test_invalid_or_regressed_read_clock_remains_terminal(
     assert health.poisoned is True
     assert "monotonic clock" in str(health.poison_reason)
     harness.publisher.writer_lease.release()
+    harness.manager.close()
+
+
+def test_ortex_manifest_fsync_then_commit_crash_restarts_without_frontier(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    root = tmp_path / "captured-selection-queue"
+    first = _harness(tmp_path)
+    bundle, scoring, events, _selection, _identity = _source_bundle(
+        source_sequence=1
+    )
+    bundle, scoring, events, batch_sha256 = _with_ortex_batch(
+        bundle,
+        scoring,
+        events,
+    )
+    assert first.publisher.reserve_sequence() == 1
+    assert first.publisher.publish_bundle(
+        bundle=bundle,
+        scoring_authority=scoring,
+        evaluation_at=bundle.read_at,
+        source_events=events,
+    ).accepted
+
+    original_put_derived = first.manager.store.put_derived_artifact
+    original_sync_derived = first.manager.store.sync_derived_ref
+    manifest_was_synced = False
+
+    def crash_before_commit(**kwargs):
+        if kwargs["kind"] == queue_module.QUEUE_DERIVED_KIND:
+            assert manifest_was_synced
+            raise RuntimeError("crash_after_ortex_manifest_fsync")
+        return original_put_derived(**kwargs)
+
+    def observe_manifest_sync(ref):
+        nonlocal manifest_was_synced
+        result = original_sync_derived(ref)
+        manifest_was_synced = True
+        return result
+
+    monkeypatch.setattr(
+        first.manager.store,
+        "put_derived_artifact",
+        crash_before_commit,
+    )
+    monkeypatch.setattr(
+        first.manager.store,
+        "sync_derived_ref",
+        observe_manifest_sync,
+    )
+    first.writer.start()
+    # Runtime close now reports success once a failed writer is physically
+    # quiesced and its retained resources are released; the durable frontier
+    # and typed writer error still prove the injected commit crash.
+    assert first.writer.close(timeout_seconds=5) is True
+    assert "crash_after_ortex_manifest_fsync" in str(
+        first.writer.worker.lifecycle_health()["last_error"]
+    )
+    assert manifest_was_synced is True
+    assert len(_ortex_artifact_paths(root)) == 1
+    assert first.publisher.health().durable_through == 0
+    first_port = _input_port(first)
+    assert first_port.network_fallback_allowed is False
+    assert first_port.read_batch(
+        frontier=_frontier(first.selection),
+        authority=first.selection,
+    ) is None
+    first_health = first.publisher.ingress.health()
+    assert first_health["retained_objects"] == 0
+    assert first_health["shared_admission"]["outstanding_retained_objects"] == 0
+    first.manager.close()
+
+    second = _harness(tmp_path)
+    retry_bundle, retry_scoring, retry_events, _selection, _identity = (
+        _source_bundle(source_sequence=1)
+    )
+    retry_bundle, retry_scoring, retry_events, retry_sha256 = _with_ortex_batch(
+        retry_bundle,
+        retry_scoring,
+        retry_events,
+    )
+    assert retry_sha256 == batch_sha256
+    assert second.publisher.reserve_sequence() == 1
+    assert second.publisher.publish_bundle(
+        bundle=retry_bundle,
+        scoring_authority=retry_scoring,
+        evaluation_at=retry_bundle.read_at,
+        source_events=retry_events,
+    ).accepted
+    second.writer.start()
+    assert second.writer.close(timeout_seconds=5) is True
+    assert len(_ortex_artifact_paths(root)) == 1
+    batch = _input_port(second).read_batch(
+        frontier=_frontier(second.selection),
+        authority=second.selection,
+    )
+    assert batch is not None
+    assert batch.source_sequence_through == 1
+    second.manager.close()
+
+
+def test_ortex_manifest_restart_retry_is_content_idempotent(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    root = tmp_path / "captured-selection-queue"
+    first = _harness(tmp_path)
+    bundle, scoring, events, _selection, _identity = _source_bundle(
+        source_sequence=1
+    )
+    bundle, scoring, events, batch_sha256 = _with_ortex_batch(
+        bundle,
+        scoring,
+        events,
+    )
+    assert first.publisher.reserve_sequence() == 1
+    assert first.publisher.publish_bundle(
+        bundle=bundle,
+        scoring_authority=scoring,
+        evaluation_at=bundle.read_at,
+        source_events=events,
+    ).accepted
+    first.writer.start()
+    assert first.writer.close(timeout_seconds=5) is True
+    assert len(_ortex_artifact_paths(root)) == 1
+    binding = first.manager.resource_binding
+    selection = first.selection
+    queue_identity = first.queue_identity
+    first.manager.close()
+
+    shared = SharedCaptureAdmissionBudget.from_resource_binding(binding)
+    manager = SharedCaptureStoreRuntime.create(
+        root,
+        resource_binding=binding,
+        shared_admission_budget=shared,
+        compression_codec="zlib",
+    )
+    ingress = BoundedCaptureIngress.from_resource_binding(
+        binding,
+        shared_admission_budget=shared,
+    )
+    publisher = CapturedPaperSelectionQueuePublisher(
+        writer_lease=manager.acquire(queue_identity),
+        ingress=ingress,
+        selection_authority=selection,
+        wall_clock=lambda: bundle.read_at + timedelta(seconds=1),
+    )
+    retry_sync_refs = []
+    original_sync_derived = manager.store.sync_derived_ref
+
+    def sync_derived_ref(ref):
+        retry_sync_refs.append(ref)
+        return original_sync_derived(ref)
+
+    monkeypatch.setattr(
+        manager.store,
+        "sync_derived_ref",
+        sync_derived_ref,
+    )
+    writer = CapturedPaperSelectionQueueWriter(
+        publisher=publisher,
+        batch_events=10,
+        batch_bytes=binding.budget.async_queue_bytes,
+        poll_seconds=0.001,
+        flush_interval_seconds=0.001,
+    )
+    retry_bundle, retry_scoring, retry_events, *_rest = _source_bundle(
+        source_sequence=2
+    )
+    retry_bundle, retry_scoring, retry_events, retry_sha256 = _with_ortex_batch(
+        retry_bundle,
+        retry_scoring,
+        retry_events,
+    )
+    assert retry_sha256 == batch_sha256
+    assert publisher.reserve_sequence() == 2
+    assert publisher.publish_bundle(
+        bundle=retry_bundle,
+        scoring_authority=retry_scoring,
+        evaluation_at=retry_bundle.read_at,
+        source_events=retry_events,
+    ).accepted
+    writer.start()
+    assert writer.close(timeout_seconds=5) is True
+    assert len(_ortex_artifact_paths(root)) == 1
+    assert len(retry_sync_refs) == 1
+    manager.close()
+
+
+@pytest.mark.parametrize("mutation", ("missing", "tampered"))
+def test_ortex_manifest_missing_or_tampered_fails_closed(
+    tmp_path,
+    mutation: str,
+) -> None:
+    harness = _harness(tmp_path)
+    bundle, scoring, events, _selection, _identity = _source_bundle(
+        source_sequence=1
+    )
+    bundle, scoring, events, _batch_sha256 = _with_ortex_batch(
+        bundle,
+        scoring,
+        events,
+    )
+    assert harness.publisher.reserve_sequence() == 1
+    assert harness.publisher.publish_bundle(
+        bundle=bundle,
+        scoring_authority=scoring,
+        evaluation_at=bundle.read_at,
+        source_events=events,
+    ).accepted
+    harness.writer.start()
+    assert harness.writer.close(timeout_seconds=5) is True
+    (artifact_path,) = _ortex_artifact_paths(harness.manager.store.root)
+    if mutation == "missing":
+        artifact_path.unlink()
+    else:
+        artifact_path.write_bytes(artifact_path.read_bytes() + b" ")
+
+    with pytest.raises(
+        CapturedPaperSelectionQueueUnavailable,
+        match="verification failed",
+    ):
+        _input_port(harness).read_batch(
+            frontier=_frontier(harness.selection),
+            authority=harness.selection,
+        )
+    assert harness.publisher.health().durable_through == 1
     harness.manager.close()

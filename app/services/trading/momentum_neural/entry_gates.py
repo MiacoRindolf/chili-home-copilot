@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import logging
 import math
+from datetime import datetime, timezone
 from typing import Any
 
 import pandas as pd
@@ -496,6 +497,75 @@ _VOL_SHALLOW_ATR_MULT = 1.5     # widen the shallow cap by this x ATR%
 _VOL_EMA_WICK_FLOOR = 0.001     # min EMA-9 wick tolerance (the original 0.1%)
 _VOL_EMA_WICK_ATR_MULT = 0.5    # tolerate a wick this x ATR% below the 9-EMA
 _VOL_RETEST_TOL_ATR_MULT = 0.3  # retest dip/hold tolerance scales this x ATR%
+
+
+def monster_dip_context(
+    *,
+    enabled: bool,
+    decision_px: float | None,
+    day_high: float | None,
+    day_low: float | None,
+    pb_low: float | None,
+    up_off_low_floor: float,
+    day_retrace_cap: float,
+) -> bool:
+    """L7 (2026-08-01, measured sa JLHL/JEM vs JZXN) — TRUE iff may AKTIBONG
+    monster run na ang dip ay dapat sukatin sa DAY-RANGE context sa halip na sa
+    recent-impulse yardstick.
+
+    Dalawang kondisyon, pareho mula sa measured separation (0-overlap sa study):
+    (1) ``decision_px / day_low >= up_off_low_floor`` — may tumatakbong monster
+        (JLHL episodes 1.92-7.76x vs JZXN fades 1.00-1.25x; base floor 1.5 ang
+        gitna ng gap); at
+    (2) ``(day_high - pb_low) / (day_high - day_low) <= day_retrace_cap`` — ang
+        dip ay MABABAW sa konteksto ng buong araw (winner dips p90 0.38 vs
+        climax/backside 0.68; base cap 0.35). Ang (2) rin ang pumipigil sa
+        climax/post-climax admits sa mismong monster day.
+
+    Fail-toward-legacy: anumang missing/unreadable input ⇒ False (walang
+    pagluluwag). VERBATIM ang mga bound — walang falsy coercion."""
+    if not bool(enabled):
+        return False
+    try:
+        px = float(decision_px)
+        hi = float(day_high)
+        lo = float(day_low)
+        pl = float(pb_low)
+    except (TypeError, ValueError):
+        return False
+    if not (lo > 0 and hi > lo and px > 0 and pl > 0):
+        return False
+    if (px / lo) < float(up_off_low_floor):
+        return False
+    day_range = hi - lo
+    if day_range <= 0:
+        return False
+    return ((hi - pl) / day_range) <= float(day_retrace_cap)
+
+
+def _monster_dip_context_from_settings(
+    *,
+    decision_px: float | None,
+    day_high: float | None,
+    day_low: float | None,
+    pb_low: float | None,
+) -> bool:
+    """Settings-bound wrapper ng :func:`monster_dip_context` (verbatim reads)."""
+    return monster_dip_context(
+        enabled=bool(getattr(
+            settings, "chili_momentum_dip_monster_context_enabled", True
+        )),
+        decision_px=decision_px,
+        day_high=day_high,
+        day_low=day_low,
+        pb_low=pb_low,
+        up_off_low_floor=float(getattr(
+            settings, "chili_momentum_monster_up_off_low_floor", 1.5
+        )),
+        day_retrace_cap=float(getattr(
+            settings, "chili_momentum_monster_day_retrace_cap", 0.35
+        )),
+    )
 
 
 def _vol_aware_pullback_tolerances(
@@ -1611,7 +1681,27 @@ def _evaluate_raw_break(
     debug["retrace"] = round(retrace, 3)
     debug["shallow_cap"] = round(eff_shallow, 3)
     if retrace > eff_shallow:
-        return False, "pullback_too_deep", None, None, debug
+        # L7 (2026-08-01): sa aktibong monster run, ang recent-impulse yardstick
+        # ay sira (measured: winner dips nagbabasa ng 0.71-1.0 retrace habang ang
+        # eff_shallow ay saturated sa ~0.61-0.69) — kapag ang DAY-context ay
+        # nagsasabing mababaw ang dip (≤cap ng day range) at may monster na
+        # tumatakbo (px ≥ floor × day low), ituloy ang evaluation; ang EMA-hold,
+        # break, at retest guards sa ibaba ay nananatiling buo.
+        try:
+            # decision_px = ang BAR LOW (konserbatibo: kung pati ito ay lampas
+            # sa floor, tiyak ang monster; walang close series sa scope na ito
+            # at malayo ang measured margin 1.92-7.76x vs floor 1.5).
+            _l7_ctx = _monster_dip_context_from_settings(
+                decision_px=float(low.iloc[cur]),
+                day_high=float(high.iloc[: cur + 1].max()),
+                day_low=float(low.iloc[: cur + 1].min()),
+                pb_low=pb_low,
+            )
+        except Exception:
+            _l7_ctx = False
+        if not _l7_ctx:
+            return False, "pullback_too_deep", None, None, debug
+        debug["monster_context_admitted"] = True
 
     # Held above EMA-9 (structural support) during the pullback — the wick tolerance
     # scales with ATR% so normal small-cap noise below the 9-EMA isn't read as a break.
@@ -3420,8 +3510,19 @@ def bull_flag_confirmation(
             w = vol.tail(21)
             _avg = float(w.iloc[:-1].mean()) if len(w) > 1 else float(vol.iloc[-1])
             vol_ratio = (float(vol.iloc[-1]) / _avg) if _avg > 0 else 0.0
-        debug["vol_ratio"] = round(vol_ratio, 2)
-        if vol_ratio < _vol_mult:
+        # NaN-safe stamp (2026-07-26): a NaN vol_ratio poisons risk_snapshot_json (Postgres
+        # JSONB rejects the NaN token — found by the golden-library benchmark on CLRO 07-07).
+        debug["vol_ratio"] = round(vol_ratio, 2) if vol_ratio == vol_ratio else None
+        if vol_ratio != vol_ratio:
+            # FAIL-CLOSED on unmeasurable volume (2026-07-26, default-ON): this gate's design
+            # intent is "volume spike = conviction", and the _avg<=0 fallback above already
+            # blocks (0.0) when the average is unavailable — NaN passing was only an IEEE
+            # comparison accident (NaN < mult is False), witnessed live-shaped on CLRO 07-07.
+            # Kill-switch OFF restores the legacy NaN pass-through. flush_dip is deliberately
+            # NOT changed (its volume gate is a documented FAIL-OPEN contract).
+            if bool(getattr(settings, "chili_momentum_vol_nan_fail_closed_enabled", True)):
+                return False, "bull_flag_volume_unknown", debug
+        elif vol_ratio < _vol_mult:
             return False, "bull_flag_low_volume", debug
 
         # -- TAPE REQUIRED + FAIL-CLOSED (the LAST gate before the completed-bar fire too) --
@@ -3669,6 +3770,153 @@ def evaluate_sticky_backside_bench(
     except (TypeError, ValueError, AttributeError, KeyError):
         # thin / degenerate frame or any error -> fail-OPEN (never bench on a bug).
         return False, "bench_fail_open", None, debug
+
+
+# L8 (2026-08-01): ang mga trigger reason na may STRUCTURAL dip-reclaim definition —
+# ang tanging klaseng puwedeng mag-place sa late/afterhours band ng A2 schedule.
+# Ang vocabulary ay MEASURED sa monster tape (JEM/JLHL sealed logs + instrumented
+# probe): abcd_break at double_bottom_break(+_tick_ok) ang talagang pumuputok sa
+# FSM sa mga burst na iyon; flush_dip_buy/raw_break/vwap_reclaim ang canonical na
+# dip-reclaim families. HINDI kasama ang momentum_ok_* (continuation/volume
+# confirmation, hindi dip structure).
+_LATE_AH_STRUCTURAL_REASONS = (
+    "flush_dip_buy",
+    "vwap_reclaim",
+    "raw_break",
+    "abcd_break",
+    "abcd_break_tick_ok",
+    "double_bottom_break",
+    "double_bottom_break_tick_ok",
+)
+
+
+def late_window_monster_placement_mult(
+    *,
+    window: str | None,
+    trigger_reason: str | None,
+    live_price: float | None,
+    session_low: float | None,
+    enabled: bool,
+    up_off_low_floor: float,
+    monster_mult: float,
+) -> tuple[float, dict[str, Any]]:
+    """L8 (2026-08-01) — kondisyonal na pagbukas ng late/afterhours placement
+    para sa monster days. Ang A2 schedule multiplier ay ×0.0 sa late (14:30-16:00
+    ET) at afterhours (16:00-20:00 ET) mula sa 14-araw na AH sample na 1W/11L
+    (−$72.65) — pero pinapatay din nito ang Ross monster tail: ang JEM 06-30
+    window ay 100% afterhours (ang candidate ay na-park isang oras bago ang day
+    high) at ang JLHL 07-09 ay placeable lang sa unang 5 minuto. Ang mga burst
+    na iyon ang mismong winning days ni Ross.
+
+    Sa halip na binary na oras-based na zero, MEKANISMO ang kondisyon: sa loob
+    ng late/afterhours band, ibalik ang ``monster_mult`` (base 0.5 — kalahating
+    size, hindi buo) kapag SABAY na:
+      1. STRUCTURAL dip-reclaim trigger (``_LATE_AH_STRUCTURAL_REASONS``) — ang
+         random AH chop na pinagmulan ng 1W/11L ay hindi structural; at
+      2. MONSTER day — ``px / session_low >= up_off_low_floor`` (premarket-
+         inclusive session frame; shared floor ng L7).
+
+    Ang lahat ng IBANG proteksyon (chase guards, L2 confirm, spread caps, bench,
+    max-loss circuit) ay tumatakbo pa rin — placement multiplier lang ito.
+    PURE SCALARS (walang frame/I/O — ang caller ang nagme-memoize ng
+    ``session_low`` kada minuto; ang per-attempt na OHLCV fetch ang nag-timeout
+    sa unang proof attempt). Fail-toward-legacy: anumang error/missing input ⇒
+    0.0 (nananatiling blocked). VERBATIM ang mga bound."""
+    debug: dict[str, Any] = {"opened": False}
+    if not bool(enabled):
+        return 0.0, debug
+    try:
+        _win = str(window or "")
+        if _win not in ("late", "afterhours"):
+            debug["reject"] = "not_late_ah_window"
+            return 0.0, debug
+        _trig = str(trigger_reason or "")
+        debug["trigger"] = _trig
+        if _trig not in _LATE_AH_STRUCTURAL_REASONS:
+            debug["reject"] = "non_structural_trigger"
+            return 0.0, debug
+        px = float(live_price)
+        if not (math.isfinite(px) and px > 0):
+            debug["reject"] = "bad_price"
+            return 0.0, debug
+        lo = float(session_low)
+        if not (math.isfinite(lo) and lo > 0):
+            debug["reject"] = "bad_session_low"
+            return 0.0, debug
+        up_off_low = px / lo
+        debug.update({
+            "px": round(px, 6), "session_low": round(lo, 6),
+            "up_off_low": round(up_off_low, 6), "window": _win,
+        })
+        if up_off_low < float(up_off_low_floor):
+            debug["reject"] = "not_monster_day"
+            return 0.0, debug
+        m = float(monster_mult)
+        if not (math.isfinite(m) and m > 0):
+            debug["reject"] = "bad_mult"
+            return 0.0, debug
+        debug["opened"] = True
+        return m, debug
+    except Exception:
+        debug["reject"] = "late_ah_monster_error"
+        return 0.0, debug
+
+
+def _late_window_monster_placement_mult_from_settings(
+    *,
+    window: str | None,
+    trigger_reason: str | None,
+    live_price: float | None,
+    session_low: float | None,
+) -> tuple[float, dict[str, Any]]:
+    """Settings-bound wrapper ng :func:`late_window_monster_placement_mult`
+    (verbatim reads; shared monster floor ng L7 — isang dokumentadong base)."""
+    return late_window_monster_placement_mult(
+        window=window,
+        trigger_reason=trigger_reason,
+        live_price=live_price,
+        session_low=session_low,
+        enabled=bool(getattr(
+            settings, "chili_momentum_late_ah_monster_placement_enabled", True
+        )),
+        up_off_low_floor=float(getattr(
+            settings, "chili_momentum_monster_up_off_low_floor", 1.5
+        )),
+        monster_mult=float(getattr(
+            settings, "chili_momentum_late_ah_monster_mult", 0.5
+        )),
+    )
+
+
+def refire_cooldown_active(
+    *,
+    now: datetime,
+    until_iso: str | None,
+    enabled: bool,
+) -> bool:
+    """L8b (2026-08-02) — pending-refire cooldown check (pure clock logic).
+
+    Pagkatapos ng late_window demote, ang parehong structure ay muling
+    nagpapaputok kada tick sa zero band → buong pending chain kada tick — ang
+    replay-churn na nag-timeout sa JEM (1.19M ticks, 100% AH) kahit 7200s. Sa
+    loob ng cooldown, nilalaktawan ng WATCHING flow ang trigger ladder; ang
+    bench/unbench at halt lifecycle ay hindi apektado.
+
+    FAIL-OPEN: flag off, walang marker, o sirang ISO ⇒ False (normal
+    evaluation) — hindi kailanman naka-strand ang isang pangalan sa cooldown
+    dahil sa bug."""
+    if not bool(enabled):
+        return False
+    try:
+        if not until_iso:
+            return False
+        until = datetime.fromisoformat(str(until_iso))
+        if until.tzinfo is None:
+            until = until.replace(tzinfo=timezone.utc)
+        _n = now if now.tzinfo is not None else now.replace(tzinfo=timezone.utc)
+        return _n < until
+    except Exception:
+        return False
 
 
 # ── FIX C: TAPE-CONFIRMED-HOLD early entry (graduate the L2 confirmer to a TRIGGER) ──
@@ -4480,9 +4728,51 @@ def flush_dip_buy_confirmation(
                     60 * float(getattr(settings, "chili_momentum_reclaim_max_hours_after_open", 1.0) or 1.0)
                 )
                 if (_fet.hour * 60 + _fet.minute) >= _fd_cutoff_min:
-                    return False, "flush_dip_past_morning_window", {
-                        "entry_interval": entry_interval, "et_time": _fet.strftime("%H:%M"),
-                    }
+                    # L6 (2026-07-31, scorecard v2): ang "umaga" ay proxy lang ng
+                    # DISCOVERY phase. Ang mga hapon-igniter (JLHL +393%, JEM +224%)
+                    # ay binebench ng proxy habang ang tunay na sakit na
+                    # pinoprotektahan nito (JZXN/SPHL/GCDT/DBGI midday fades) ay
+                    # lahat STALE ang session HOD. Direct test: sariwang HOD sa
+                    # loob ng fresh window ⇒ tuloy ang evaluation (ang backside/
+                    # VWAP/volume guards sa chain ang bahala sa natitira); stale
+                    # HOD o anumang read error ⇒ panatilihin ang morning reject.
+                    _fd_afternoon_ok = False
+                    _fd_mins_since_hod = None
+                    if bool(getattr(
+                        settings,
+                        "chili_momentum_flush_dip_fresh_hod_afternoon_enabled",
+                        True,
+                    )):
+                        try:
+                            _fd_hi = df["High"].astype(float)
+                            _fd_hod_pos = int(_fd_hi.values.argmax())
+                            _fd_hod_ts = pd.Timestamp(df.index[_fd_hod_pos])
+                            _fd_hod_ts = (
+                                _fd_hod_ts.tz_localize("UTC")
+                                if _fd_hod_ts.tzinfo is None else _fd_hod_ts
+                            )
+                            _fd_mins_since_hod = (
+                                _fts - _fd_hod_ts
+                            ).total_seconds() / 60.0
+                            _fd_fresh_win = float(getattr(
+                                settings,
+                                "chili_momentum_flush_dip_fresh_hod_minutes",
+                                30.0,
+                            ))
+                            _fd_afternoon_ok = (
+                                0.0 <= _fd_mins_since_hod <= _fd_fresh_win
+                            )
+                        except Exception:
+                            _fd_afternoon_ok = False
+                    if not _fd_afternoon_ok:
+                        return False, "flush_dip_past_morning_window", {
+                            "entry_interval": entry_interval,
+                            "et_time": _fet.strftime("%H:%M"),
+                            "mins_since_hod": (
+                                round(float(_fd_mins_since_hod), 2)
+                                if _fd_mins_since_hod is not None else None
+                            ),
+                        }
             except Exception:
                 pass  # no usable clock -> huwag mag-block sa guard mismo
         close = df["Close"].astype(float)
@@ -4588,7 +4878,26 @@ def flush_dip_buy_confirmation(
         # ── GUARD 2: FAST flush — bottoming-tail bar, ATR-scaled down-spike INTO support ──
         f_o = float(opn.iloc[flush_idx]) if opn is not None else float(close.iloc[flush_idx - 1])
         f_h, f_l, f_c = float(high.iloc[flush_idx]), float(low.iloc[flush_idx]), float(close.iloc[flush_idx])
-        if not _bottoming_tail(f_o, f_h, f_l, f_c):
+        # L7 (2026-08-01): sa monster context, ibababa ang tail requirement sa
+        # monster floor (measured: 76% ng winner flushes sa JLHL ay bumabagsak sa
+        # 0.50 na may median tail 0.33-0.38; sa fade day ang mahihinang tail ay
+        # median 0.18 at sinasala pa rin ng monster gate). Legacy 0.50 kapag
+        # walang context o naka-OFF ang flag.
+        _l7_tail_frac = 0.50
+        try:
+            if _monster_dip_context_from_settings(
+                decision_px=f_c,
+                day_high=float(high.iloc[: cur + 1].max()),
+                day_low=float(low.iloc[: cur + 1].min()),
+                pb_low=f_l,
+            ):
+                _l7_tail_frac = float(getattr(
+                    settings, "chili_momentum_monster_tail_min_frac", 0.30
+                ))
+                debug["monster_tail_frac"] = _l7_tail_frac
+        except Exception:
+            pass
+        if not _bottoming_tail(f_o, f_h, f_l, f_c, min_lower_wick_frac=_l7_tail_frac):
             return False, "flush_dip_no_bottoming_tail", debug
         # Down-spike depth: from the pre-flush close down to the flush LOW, ATR-scaled
         # (the "25-50c+" fast spike, volatility-relative). Floor so a calm name still needs
@@ -4750,18 +5059,6 @@ def flush_dip_buy_confirmation(
                     "first_dip_tape_execution_surface_mismatch"
                 )
                 return False, "flush_dip_first_dip_tape_invalid", debug
-            if _actual_surface == "captured_db_paper":
-                # The accepted receipt must reach the same active capture
-                # runtime while it is still a private object.  Persisted debug
-                # cannot reconstruct this lineage later.  A missing/mismatched
-                # sink vetoes only this decision and leaves the daily
-                # opportunity, risk ledger, and broker untouched.
-                debug["first_dip_prior_detector_reference_sha256"] = (
-                    _retain_captured_first_dip_detector_for_opportunity(
-                        _tape_evaluation,
-                        opportunity_key=dict(_first_dip_opportunity or {}),
-                    )
-                )
             debug["first_dip_tape_confirmed"] = True
         # Ross-parity L1b (2026-07-25): relative-volume gate on the curl/reclaim bar —
         # the audit found flush_dip was the only dip/breakout family fire with NO volume
@@ -4798,9 +5095,22 @@ def flush_dip_buy_confirmation(
             except (TypeError, ValueError, IndexError, KeyError):
                 _fd_vol_ratio = None
             if _fd_vol_ratio is not None:
-                debug["vol_ratio"] = round(_fd_vol_ratio, 2)
+                # NaN-safe stamp (see bull_flag site) — JSONB rejects NaN; comparison unchanged.
+                debug["vol_ratio"] = round(_fd_vol_ratio, 2) if _fd_vol_ratio == _fd_vol_ratio else None
                 if _fd_vol_ratio < _fd_vol_mult:
                     return False, "flush_dip_low_volume", debug
+        if _first_dip_candidate and _actual_surface == "captured_db_paper":
+            # Retain only at the terminal detector-success boundary, after
+            # every later veto (including relative volume) has passed.  The
+            # private receipt cannot be reconstructed from persisted debug,
+            # while a rejected decision must leave the daily opportunity,
+            # risk ledger, and broker untouched.
+            debug["first_dip_prior_detector_reference_sha256"] = (
+                _retain_captured_first_dip_detector_for_opportunity(
+                    _tape_evaluation,
+                    opportunity_key=dict(_first_dip_opportunity or {}),
+                )
+            )
         return True, "flush_dip_buy", debug
     except Exception as exc:
         if (
@@ -4867,7 +5177,7 @@ def vwap_reclaim_confirmation(
         vol = df["Volume"].astype(float)
         n = len(df)
         cur = n - 1
-        arrays = compute_all_from_df(df, needed={"vwap", "volume_ratio"})
+        arrays = compute_all_from_df(df, needed={"vwap", "volume_ratio", "atr"})
         vwap = arrays.get("vwap") or []
         vr = arrays.get("volume_ratio") or []
 
@@ -4890,14 +5200,59 @@ def vwap_reclaim_confirmation(
         if start < 0:
             return False, "vwap_reclaim_insufficient_bars", debug
         below_count = 0
+        _l7_max_pen = 0.0
         for i in range(start, cur):
             vi = vwap[i] if i < len(vwap) and vwap[i] is not None else None
             if vi is None or float(vi) <= 0:
                 return False, "vwap_reclaim_vwap_warmup", debug
             if float(close.iloc[i]) < float(vi):
                 below_count += 1
+            _pen = (float(vi) - float(low.iloc[i])) / float(vi)
+            if _pen > _l7_max_pen:
+                _l7_max_pen = _pen
         if below_count < K:
-            return False, "vwap_reclaim_not_below_enough", debug
+            # L7 (2026-08-01): sa monster tape ang dip ay MALALIM pero MABILIS —
+            # bihira ang 2 magkasunod na 1m close sa ilalim ng VWAP (measured:
+            # JLHL 18:28 blocked na 1 bar below pero 3.6% = 1.2×ATR penetration
+            # → +45% forward; ang post-climax chop ay 0.31×ATR → tama ang block).
+            # LALIM ang pumapalit sa TAGAL: tanggapin ang ≥1 bar below kapag may
+            # monster context AT ang penetration ≥ mult × ATR%.
+            _l7_ok = False
+            if below_count >= 1:
+                try:
+                    _l7_arrays_atr = arrays.get("atr") or []
+                    _l7_atr = (
+                        float(_l7_arrays_atr[cur])
+                        if cur < len(_l7_arrays_atr) and _l7_arrays_atr[cur] is not None
+                        else None
+                    )
+                    _l7_atr_pct = (
+                        (_l7_atr / float(close.iloc[cur]))
+                        if (_l7_atr is not None and float(close.iloc[cur]) > 0)
+                        else None
+                    )
+                    if _l7_atr_pct is not None and _l7_atr_pct > 0 and _monster_dip_context_from_settings(
+                        decision_px=float(close.iloc[cur]),
+                        day_high=float(high.iloc[: cur + 1].max()),
+                        day_low=float(low.iloc[: cur + 1].min()),
+                        pb_low=float(low.iloc[start:cur].min()),
+                    ):
+                        _l7_depth_mult = float(getattr(
+                            settings,
+                            "chili_momentum_monster_vwap_depth_atr_mult",
+                            1.0,
+                        ))
+                        _l7_ok = _l7_max_pen >= (_l7_depth_mult * _l7_atr_pct)
+                        if _l7_ok:
+                            debug["monster_depth_admitted"] = {
+                                "penetration": round(_l7_max_pen, 4),
+                                "atr_pct": round(_l7_atr_pct, 4),
+                                "bars_below": below_count,
+                            }
+                except Exception:
+                    _l7_ok = False
+            if not _l7_ok:
+                return False, "vwap_reclaim_not_below_enough", debug
 
         # ── VOLUME SPIKE on the reclaim bar (conviction, not a drift back over VWAP) ─────
         vol_mult = float(getattr(settings, "chili_momentum_vwap_reclaim_vol_mult", 1.5) or 1.5)
@@ -4906,8 +5261,14 @@ def vwap_reclaim_confirmation(
             w = vol.tail(21)
             avg = float(w.iloc[:-1].mean()) if len(w) > 1 else float(vol.iloc[-1])
             vol_ratio = (float(vol.iloc[-1]) / avg) if avg > 0 else 0.0
-        debug["vol_ratio"] = round(vol_ratio, 2)
-        if vol_ratio < vol_mult:
+        # NaN-safe stamp (see bull_flag site) — JSONB rejects NaN.
+        debug["vol_ratio"] = round(vol_ratio, 2) if vol_ratio == vol_ratio else None
+        if vol_ratio != vol_ratio:
+            # FAIL-CLOSED on unmeasurable volume (see the bull_flag site): a conviction
+            # reclaim cannot be proven by a NaN ratio. Kill-switch OFF restores legacy pass.
+            if bool(getattr(settings, "chili_momentum_vol_nan_fail_closed_enabled", True)):
+                return False, "vwap_reclaim_volume_unknown", debug
+        elif vol_ratio < vol_mult:
             return False, "vwap_reclaim_low_volume", debug
 
         # Level = the reclaim bar high (break level). STOP (Ross-parity L2a, 2026-07-25):
@@ -4921,7 +5282,6 @@ def vwap_reclaim_confirmation(
             debug["stop_model"] = "loss_of_vwap"
         else:
             stop = float(low.iloc[cur])
-            debug["stop_model"] = "reclaim_bar_low"
         if not (0.0 < stop < level):
             return False, "vwap_reclaim_bad_level", debug
         debug.update({
@@ -5171,7 +5531,6 @@ def wick_reclaim_confirmation(
             debug["stop_model"] = "reclaim_bar_low"
         else:
             stop = flush_low
-            debug["stop_model"] = "flush_low"
         if not (0.0 < stop < level):
             return False, "wick_reclaim_bad_level", debug
         debug.update({
@@ -5470,7 +5829,6 @@ def ross_abcd_confirmation(
                 settings, "chili_momentum_tick_break_tape_confirm_enabled", True))
             if not _confirm_on:
                 # kill-switch OFF -> exact legacy naked-tick behavior (byte-identical)
-                debug["tape_reason"] = "confirm_disabled"
                 debug["tick_break"] = True
                 debug["live_price"] = float(live_price)
                 return True, "abcd_break_tick_ok", debug
@@ -5503,7 +5861,8 @@ def ross_abcd_confirmation(
             _avg = float(w.iloc[:-1].mean()) if len(w) > 1 else float(vol.iloc[-1])
             vol_ratio = (float(vol.iloc[-1]) / _avg) if _avg > 0 else 0.0
         _vol_mult = float(getattr(settings, "chili_momentum_pullback_volume_spike_multiple", 1.5) or 1.5)
-        debug["vol_ratio"] = round(vol_ratio, 2)
+        # NaN-safe stamp (see bull_flag site) — JSONB rejects NaN; comparison unchanged.
+        debug["vol_ratio"] = round(vol_ratio, 2) if vol_ratio == vol_ratio else None
         if vol_ratio < _vol_mult:
             return False, "abcd_low_volume", debug
         return True, "abcd_break", debug
@@ -6113,7 +6472,9 @@ def false_break_reclaim_confirmation(
         debug["vmult"] = round(float(vmult), 3)
         if _vol_med is None or not (_vol_med > 0) or _vol_now is None:
             return False, "tight_false_break_reclaim_no_volume", debug
-        debug["vol_ratio"] = round(_vol_now / _vol_med, 3)
+        _fbr_vr = _vol_now / _vol_med
+        # NaN-safe stamp (see bull_flag site) — JSONB rejects NaN; comparison unchanged.
+        debug["vol_ratio"] = round(_fbr_vr, 3) if _fbr_vr == _fbr_vr else None
         if _vol_now <= vmult * _vol_med:
             return False, "tight_false_break_reclaim_weak_volume", debug
 
@@ -6552,7 +6913,7 @@ def sub_vwap_trap_entry(
     with NO side effects; fail-OPEN on any error."""
     debug: dict[str, Any] = {"entry_interval": entry_interval, "pattern": "sub_vwap_trap"}
     try:
-        if not bool(getattr(settings, "chili_momentum_sub_vwap_trap_entry_enabled", False)):
+        if not bool(getattr(settings, "chili_momentum_sub_vwap_trap_entry_enabled", True)):
             return False, "sub_vwap_trap_disabled", debug
         if df is None or getattr(df, "empty", True) or len(df) < 10:
             return False, "sub_vwap_trap_insufficient_bars", debug
@@ -7143,7 +7504,8 @@ def ross_double_bottom_confirmation(
             _avg = float(w.iloc[:-1].mean()) if len(w) > 1 else float(vol.iloc[-1])
             vol_ratio = (float(vol.iloc[-1]) / _avg) if _avg > 0 else 0.0
         _vol_mult = float(getattr(settings, "chili_momentum_pullback_volume_spike_multiple", 1.5) or 1.5)
-        debug["vol_ratio"] = round(vol_ratio, 2)
+        # NaN-safe stamp (see bull_flag site) — JSONB rejects NaN; comparison unchanged.
+        debug["vol_ratio"] = round(vol_ratio, 2) if vol_ratio == vol_ratio else None
         if vol_ratio < _vol_mult:
             return False, "double_bottom_low_volume", debug
         return True, "double_bottom_break", debug
@@ -7289,7 +7651,6 @@ def inverse_head_shoulders_confirmation(
             debug["stop_model"] = "right_shoulder_low"
         else:
             stop = head_l
-            debug["stop_model"] = "head_low"
         if not (0.0 < stop < level):
             return False, "inverse_head_shoulders_bad_level", debug
         debug["pullback_high"] = float(level)
@@ -7388,7 +7749,8 @@ def inverse_head_shoulders_confirmation(
             _avg = float(w.iloc[:-1].mean()) if len(w) > 1 else float(vol.iloc[-1])
             vol_ratio = (float(vol.iloc[-1]) / _avg) if _avg > 0 else 0.0
         _vol_mult = float(getattr(settings, "chili_momentum_pullback_volume_spike_multiple", 1.5) or 1.5)
-        debug["vol_ratio"] = round(vol_ratio, 2)
+        # NaN-safe stamp (see bull_flag site) — JSONB rejects NaN; comparison unchanged.
+        debug["vol_ratio"] = round(vol_ratio, 2) if vol_ratio == vol_ratio else None
         if vol_ratio < _vol_mult:
             return False, "inverse_head_shoulders_low_volume", debug
         return True, "inverse_head_shoulders_break", debug
@@ -7724,7 +8086,8 @@ def cup_and_handle_confirmation(
             _avg = float(w.iloc[:-1].mean()) if len(w) > 1 else float(vol.iloc[-1])
             vol_ratio = (float(vol.iloc[-1]) / _avg) if _avg > 0 else 0.0
         _vol_mult = float(getattr(settings, "chili_momentum_pullback_volume_spike_multiple", 1.5) or 1.5)
-        debug["vol_ratio"] = round(vol_ratio, 2)
+        # NaN-safe stamp (see bull_flag site) — JSONB rejects NaN; comparison unchanged.
+        debug["vol_ratio"] = round(vol_ratio, 2) if vol_ratio == vol_ratio else None
         if vol_ratio < _vol_mult:
             return False, "cup_and_handle_low_volume", debug
         return True, "cup_and_handle_break", debug
@@ -8353,7 +8716,8 @@ def pullback_break_confirmation(
             # else: volume UNKNOWN (all-NaN frame / zero average) -> stays None (fail-OPEN)
         except (TypeError, ValueError, IndexError):
             vol_ratio = None
-    debug["vol_ratio"] = None if vol_ratio is None else round(vol_ratio, 2)
+    # NaN-safe stamp (see bull_flag site) — JSONB rejects NaN; comparison unchanged.
+    debug["vol_ratio"] = round(vol_ratio, 2) if vol_ratio is not None and vol_ratio == vol_ratio else None
 
     # RED-VOLUME EXHAUSTION VETO (AS101/HVM101 "first sign of weakness"). A trigger bar
     # that closes RED (close<open) WHILE printing the session's MAX volume AND a NEW
@@ -9190,7 +9554,8 @@ def hod_break_confirmation(
             _avg = float(w.iloc[:-1].mean()) if len(w) > 1 else float(vol.iloc[-1])
             vol_ratio = (float(vol.iloc[-1]) / _avg) if _avg > 0 else 0.0
         _vol_mult = float(getattr(settings, "chili_momentum_pullback_volume_spike_multiple", 1.5) or 1.5)
-        debug["vol_ratio"] = round(vol_ratio, 2)
+        # NaN-safe stamp (see bull_flag site) — JSONB rejects NaN; comparison unchanged.
+        debug["vol_ratio"] = round(vol_ratio, 2) if vol_ratio == vol_ratio else None
         if vol_ratio < _vol_mult:
             return False, f"{_reason_fire}_low_volume", debug
 
@@ -9424,7 +9789,8 @@ def blue_sky_break_confirmation(
             w = vol.tail(21)
             _avg = float(w.iloc[:-1].mean()) if len(w) > 1 else float(vol.iloc[-1])
             vol_ratio = (float(vol.iloc[-1]) / _avg) if _avg > 0 else 0.0
-        debug["vol_ratio"] = round(vol_ratio, 2)
+        # NaN-safe stamp (see bull_flag site) — JSONB rejects NaN; comparison unchanged.
+        debug["vol_ratio"] = round(vol_ratio, 2) if vol_ratio == vol_ratio else None
         if vol_ratio < vol_mult:
             return False, "blue_sky_break_low_volume", debug
         return True, "blue_sky_break", debug
@@ -9757,9 +10123,17 @@ def opening_range_breakout_confirmation(
             # tape (the bull_flag standard). Tape-fail does NOT return — fall through to
             # the completed-bar + volume-spike path below (dead tape degrades to bar
             # entries instead of going dark).
-            _tape_ok, _tape_dbg = _tick_break_tape_ok(
-                symbol, db=db, settings=settings, l2_as_of=l2_as_of)
-            debug["tape_reason"] = str(_tape_dbg.get("reason") or "")
+            _confirm_on = bool(getattr(
+                settings, "chili_momentum_tick_break_tape_confirm_enabled", True))
+            if _confirm_on:
+                _tape_ok, _tape_dbg = _tick_break_tape_ok(
+                    symbol, db=db, settings=settings, l2_as_of=l2_as_of)
+                debug["tape_reason"] = str(_tape_dbg.get("reason") or "")
+            else:
+                # Preserve the exact pre-experiment detector payload as well as
+                # its naked tick-fire behavior. ``trigger_debug`` participates
+                # in captured-PAPER candidate-generation identity.
+                _tape_ok = True
             if _tape_ok:
                 debug["tick_break"] = True
                 debug["live_price"] = float(live_price)
@@ -9781,7 +10155,8 @@ def opening_range_breakout_confirmation(
             w = vol.tail(21)
             _avg = float(w.iloc[:-1].mean()) if len(w) > 1 else float(vol.iloc[-1])
             vol_ratio = (float(vol.iloc[-1]) / _avg) if _avg > 0 else 0.0
-        debug["vol_ratio"] = round(vol_ratio, 2)
+        # NaN-safe stamp (see bull_flag site) — JSONB rejects NaN; comparison unchanged.
+        debug["vol_ratio"] = round(vol_ratio, 2) if vol_ratio == vol_ratio else None
         if vol_ratio < vol_mult:
             return False, "orb_low_volume", debug
         return True, "orb_break", debug
@@ -9956,7 +10331,8 @@ def red_to_green_confirmation(
             w = vol.tail(21)
             _avg = float(w.iloc[:-1].mean()) if len(w) > 1 else float(vol.iloc[-1])
             vol_ratio = (float(vol.iloc[-1]) / _avg) if _avg > 0 else 0.0
-        debug["vol_ratio"] = round(vol_ratio, 2)
+        # NaN-safe stamp (see bull_flag site) — JSONB rejects NaN; comparison unchanged.
+        debug["vol_ratio"] = round(vol_ratio, 2) if vol_ratio == vol_ratio else None
         if vol_ratio < vol_mult:
             return False, "red_to_green_low_volume", debug
         return True, "red_to_green", debug
@@ -10246,7 +10622,8 @@ def ma_vwap_pullback_confirmation(
             w = vol.tail(21)
             _avg = float(w.iloc[:-1].mean()) if len(w) > 1 else float(vol.iloc[-1])
             vol_ratio = (float(vol.iloc[-1]) / _avg) if _avg > 0 else 0.0
-        debug["vol_ratio"] = round(vol_ratio, 2)
+        # NaN-safe stamp (see bull_flag site) — JSONB rejects NaN; comparison unchanged.
+        debug["vol_ratio"] = round(vol_ratio, 2) if vol_ratio == vol_ratio else None
         debug["vol_mult"] = round(vol_mult, 2)
         if vol_ratio < vol_mult:
             return False, "ma_vwap_pullback_low_volume", debug

@@ -57,6 +57,10 @@ window.__CHILI_BRAIN_INITIAL_DOMAIN__ = {{ _bd|tojson }};
         <button type="button" class="bx-help-btn" id="bx-help-btn" onclick="openRuntimeHelpModal()" title="How to read this desk" aria-label="How to read this desk">?</button>
       </header>
 
+      <!-- Captured-paper PAPER lane observer strip (2026-08-02: ang buhay na
+           paper service ay dating invisible sa UI — read-only status lang ito) -->
+      <div id="tb-captured-paper-strip" style="display:none;font-size:11px;padding:4px 10px;border-bottom:1px solid var(--border,#333)" aria-live="polite"></div>
+
       <!-- Single thesis line (one element, no badge stack, no narrative wall) -->
       <div class="bx-thesis-line" id="bx-thesis-line" aria-live="polite">Loading market thesis&hellip;</div>
 

@@ -2366,6 +2366,8 @@ class CaptureIngressRetainedAttempt:
 
     event_sha256: str
     canonical_size_bytes: int
+    retained_key: str | None
+    retained_bytes: int
     attempt_token: int
     accepted: bool
     retryable: bool
@@ -2376,6 +2378,19 @@ class CaptureIngressRetainedAttempt:
         if self.canonical_size_bytes <= 0 or self.attempt_token <= 0:
             raise CaptureContractError(
                 "retained admission attempt counters must be positive"
+            )
+        if isinstance(self.retained_bytes, bool) or self.retained_bytes < 0:
+            raise CaptureContractError(
+                "retained admission byte count is malformed"
+            )
+        if self.retained_bytes:
+            _validated_sha256(
+                self.retained_key,
+                "retained admission object key",
+            )
+        elif self.retained_key is not None:
+            raise CaptureContractError(
+                "retained admission key lacks retained bytes"
             )
         if type(self.accepted) is not bool or type(self.retryable) is not bool:
             raise CaptureContractError(
@@ -2444,9 +2459,11 @@ class SharedCaptureAdmissionBudget:
         self._monotonic_clock = monotonic_clock
         self._lock = threading.RLock()
         self._reservations: dict[str, tuple[str, int]] = {}
+        self._retained_reservations: dict[tuple[str, str], int] = {}
         self._events_by_identity: dict[str, int] = defaultdict(int)
         self._bytes_by_identity: dict[str, int] = defaultdict(int)
         self._outstanding_bytes = 0
+        self._outstanding_retained_bytes = 0
         self._write_tokens = float(self.max_bytes)
         self._token_updated_at = float(self._monotonic_clock())
         if not math.isfinite(self._token_updated_at):
@@ -2498,6 +2515,8 @@ class SharedCaptureAdmissionBudget:
         size: int,
         *,
         record_rejection: bool = True,
+        retained_key: str | None = None,
+        retained_bytes: int = 0,
     ) -> str | None:
         if not isinstance(event, CaptureEvent) or int(size) <= 0:
             raise CaptureContractError("shared admission event is malformed")
@@ -2505,10 +2524,37 @@ class SharedCaptureAdmissionBudget:
             raise CaptureContractError(
                 "shared admission rejection accounting flag is malformed"
             )
+        if isinstance(retained_bytes, bool) or int(retained_bytes) < 0:
+            raise CaptureContractError(
+                "shared admission retained byte count is malformed"
+            )
+        retained_size = int(retained_bytes)
+        normalized_retained_key = (
+            _validated_sha256(retained_key, "shared admission retained key")
+            if retained_size
+            else None
+        )
+        if retained_size == 0 and retained_key is not None:
+            raise CaptureContractError(
+                "shared admission retained key lacks retained bytes"
+            )
         identity = event.identity.identity_sha256
+        retained_identity_key = (
+            (identity, normalized_retained_key)
+            if normalized_retained_key is not None
+            else None
+        )
+        admitted_size = int(size) + retained_size
         with self._lock:
             if event.event_sha256 in self._reservations:
                 raise CaptureContractError("shared admission event is duplicated")
+            if (
+                retained_identity_key is not None
+                and retained_identity_key in self._retained_reservations
+            ):
+                raise CaptureContractError(
+                    "shared admission retained object is duplicated"
+                )
             rejection = (
                 self.pressure_controller.rejection_reason
                 if self.pressure_controller is not None
@@ -2516,23 +2562,28 @@ class SharedCaptureAdmissionBudget:
             )
             if rejection is not None:
                 reason = f"shared_{rejection}"
-            elif size > self.max_bytes:
+            elif admitted_size > self.max_bytes:
                 reason = "shared_capture_event_exceeds_byte_budget"
             else:
                 self._refresh_tokens()
-                if size > self._write_tokens:
+                if admitted_size > self._write_tokens:
                     reason = "shared_capture_write_bandwidth_budget_exceeded"
                 elif (
                     len(self._reservations) >= self.max_events
-                    or self._outstanding_bytes + size > self.max_bytes
+                    or self._outstanding_bytes + admitted_size > self.max_bytes
                 ):
                     reason = "shared_capture_queue_overflow"
                 else:
                     self._reservations[event.event_sha256] = (identity, int(size))
                     self._events_by_identity[identity] += 1
-                    self._bytes_by_identity[identity] += int(size)
-                    self._outstanding_bytes += int(size)
-                    self._write_tokens -= int(size)
+                    self._bytes_by_identity[identity] += admitted_size
+                    self._outstanding_bytes += admitted_size
+                    if retained_identity_key is not None:
+                        self._retained_reservations[retained_identity_key] = (
+                            retained_size
+                        )
+                        self._outstanding_retained_bytes += retained_size
+                    self._write_tokens -= admitted_size
                     self._admitted += 1
                     return None
             if record_rejection:
@@ -2547,6 +2598,39 @@ class SharedCaptureAdmissionBudget:
             )
         with self._lock:
             self._rejections[normalized] += 1
+
+    def release_retained(
+        self,
+        *,
+        identity_sha256: str,
+        retained_key: str,
+        expected_bytes: int,
+    ) -> None:
+        identity = _validated_sha256(
+            identity_sha256, "shared admission retained identity"
+        )
+        key = _validated_sha256(retained_key, "shared admission retained key")
+        if isinstance(expected_bytes, bool) or int(expected_bytes) <= 0:
+            raise CaptureContractError(
+                "shared admission retained release byte count is malformed"
+            )
+        identity_key = (identity, key)
+        with self._lock:
+            retained_size = self._retained_reservations.get(identity_key)
+            if retained_size is None:
+                raise CaptureContractError(
+                    "shared admission retained release has no exact reservation"
+                )
+            if retained_size != int(expected_bytes):
+                raise CaptureContractError(
+                    "shared admission retained release byte count mismatch"
+                )
+            self._retained_reservations.pop(identity_key)
+            self._bytes_by_identity[identity] -= retained_size
+            self._outstanding_bytes -= retained_size
+            self._outstanding_retained_bytes -= retained_size
+            if self._bytes_by_identity[identity] == 0:
+                self._bytes_by_identity.pop(identity, None)
 
     def _release(self, events: Iterable[CaptureEvent], *, failed: bool) -> None:
         with self._lock:
@@ -2592,6 +2676,24 @@ class SharedCaptureAdmissionBudget:
         with self._lock:
             return len(self._reservations)
 
+    @property
+    def outstanding_retained_objects(self) -> int:
+        """Return retained reservations without refreshing pressure probes."""
+
+        with self._lock:
+            return len(self._retained_reservations)
+
+    def retained_for(self, identity_sha256: str) -> int:
+        identity = _validated_sha256(
+            identity_sha256, "shared admission retained identity"
+        )
+        with self._lock:
+            return sum(
+                1
+                for retained_identity, _key in self._retained_reservations
+                if retained_identity == identity
+            )
+
     def health(self) -> dict[str, Any]:
         with self._lock:
             self._refresh_tokens()
@@ -2604,6 +2706,10 @@ class SharedCaptureAdmissionBudget:
                 ),
                 "outstanding_events": len(self._reservations),
                 "outstanding_bytes": self._outstanding_bytes,
+                "outstanding_retained_objects": len(
+                    self._retained_reservations
+                ),
+                "outstanding_retained_bytes": self._outstanding_retained_bytes,
                 "events_by_identity": dict(sorted(self._events_by_identity.items())),
                 "bytes_by_identity": dict(sorted(self._bytes_by_identity.items())),
                 "admitted": self._admitted,
@@ -2696,6 +2802,8 @@ class BoundedCaptureIngress:
             raise CaptureContractError("ingress monotonic clock returned a non-finite value")
         self._queue: deque[tuple[CaptureEvent, int]] = deque()
         self._queued_bytes = 0
+        self._retained_reservations: dict[tuple[str, str], int] = {}
+        self._retained_bytes = 0
         self._gaps: dict[tuple[str, str, str, str], _PendingGap] = {}
         self._submitted = 0
         self._accepted = 0
@@ -2910,6 +3018,8 @@ class BoundedCaptureIngress:
         event: CaptureEvent,
         *,
         size: int,
+        retained_key: str | None,
+        retained_bytes: int,
         accepted: bool,
         rejection_reason: str | None,
     ) -> CaptureIngressRetainedAttempt:
@@ -2917,6 +3027,8 @@ class BoundedCaptureIngress:
         attempt = CaptureIngressRetainedAttempt(
             event_sha256=event.event_sha256,
             canonical_size_bytes=size,
+            retained_key=retained_key,
+            retained_bytes=retained_bytes,
             attempt_token=self._retained_attempt_nonce,
             accepted=accepted,
             retryable=bool(
@@ -2934,6 +3046,9 @@ class BoundedCaptureIngress:
     def try_submit_retained(
         self,
         event: CaptureEvent,
+        *,
+        retained_key: str | None = None,
+        retained_bytes: int = 0,
     ) -> CaptureIngressRetainedAttempt:
         """Try one admission without consuming a transient rejection.
 
@@ -2946,8 +3061,28 @@ class BoundedCaptureIngress:
         if not isinstance(event, CaptureEvent):
             raise CaptureContractError("retained capture event is malformed")
         size = approximate_event_bytes(event)
+        if isinstance(retained_bytes, bool) or int(retained_bytes) < 0:
+            raise CaptureContractError(
+                "retained capture byte count is malformed"
+            )
+        retained_size = int(retained_bytes)
+        normalized_retained_key = (
+            _validated_sha256(retained_key, "retained capture key")
+            if retained_size
+            else None
+        )
+        if retained_size == 0 and retained_key is not None:
+            raise CaptureContractError(
+                "retained capture key lacks retained bytes"
+            )
+        admitted_size = size + retained_size
         with self._condition:
             identity_sha256 = event.identity.identity_sha256
+            retained_identity_key = (
+                (identity_sha256, normalized_retained_key)
+                if normalized_retained_key is not None
+                else None
+            )
             if self._identity_sha256 not in (None, identity_sha256):
                 raise CaptureContractError("capture ingress cannot mix run identities")
             self._identity_sha256 = identity_sha256
@@ -2962,6 +3097,13 @@ class BoundedCaptureIngress:
                 raise CaptureContractError(
                     "retained capture event was already admitted"
                 )
+            if (
+                retained_identity_key is not None
+                and retained_identity_key in self._retained_reservations
+            ):
+                raise CaptureContractError(
+                    "retained capture object was already admitted"
+                )
             rejection_reason: str | None = None
             if self._closed:
                 rejection_reason = "capture_ingress_closed"
@@ -2973,21 +3115,24 @@ class BoundedCaptureIngress:
                 )
                 if pressure_rejection is not None:
                     rejection_reason = pressure_rejection
-                elif size > self.max_bytes:
+                elif admitted_size > self.max_bytes:
                     rejection_reason = "capture_event_exceeds_queue_byte_budget"
                 else:
                     self._refresh_write_tokens()
                     if (
                         self.shared_admission_budget is None
                         and self.sustained_write_budget_bytes_per_second is not None
-                        and size > self._write_tokens
+                        and admitted_size > self._write_tokens
                     ):
                         rejection_reason = (
                             "capture_write_bandwidth_budget_exceeded"
                         )
                     elif (
                         len(self._queue) >= self.max_events
-                        or self._queued_bytes + size > self.max_bytes
+                        or self._queued_bytes
+                        + self._retained_bytes
+                        + admitted_size
+                        > self.max_bytes
                     ):
                         rejection_reason = "capture_queue_overflow"
                     elif self.shared_admission_budget is not None:
@@ -2995,11 +3140,15 @@ class BoundedCaptureIngress:
                             event,
                             size,
                             record_rejection=False,
+                            retained_key=normalized_retained_key,
+                            retained_bytes=retained_size,
                         )
             if rejection_reason is not None:
                 return self._retained_attempt(
                     event,
                     size=size,
+                    retained_key=normalized_retained_key,
+                    retained_bytes=retained_size,
                     accepted=False,
                     rejection_reason=rejection_reason,
                 )
@@ -3007,18 +3156,25 @@ class BoundedCaptureIngress:
             self._record_submission_sequence(event.sequence)
             self._queue.append((event, size))
             self._queued_bytes += size
+            if retained_identity_key is not None:
+                self._retained_reservations[retained_identity_key] = (
+                    retained_size
+                )
+                self._retained_bytes += retained_size
             self._accepted += 1
             if (
                 self.shared_admission_budget is None
                 and self.sustained_write_budget_bytes_per_second is not None
             ):
-                self._write_tokens -= size
+                self._write_tokens -= admitted_size
             self._accepted_event_accumulator_sha256 = _event_accumulator_add(
                 self._accepted_event_accumulator_sha256, event
             )
             attempt = self._retained_attempt(
                 event,
                 size=size,
+                retained_key=normalized_retained_key,
+                retained_bytes=retained_size,
                 accepted=True,
                 rejection_reason=None,
             )
@@ -3091,14 +3247,41 @@ class BoundedCaptureIngress:
             self._record_gap(event, reason)
             self._condition.notify()
 
-    def submit(self, event: CaptureEvent) -> bool:
+    def submit(
+        self,
+        event: CaptureEvent,
+        *,
+        retained_key: str | None = None,
+        retained_bytes: int = 0,
+    ) -> bool:
         """Return immediately; false always creates pending gap evidence."""
 
         size = approximate_event_bytes(event)
+        if isinstance(retained_bytes, bool) or int(retained_bytes) < 0:
+            raise CaptureContractError("capture retained byte count is malformed")
+        retained_size = int(retained_bytes)
+        normalized_retained_key = (
+            _validated_sha256(retained_key, "capture retained key")
+            if retained_size
+            else None
+        )
+        if retained_size == 0 and retained_key is not None:
+            raise CaptureContractError("capture retained key lacks retained bytes")
+        admitted_size = size + retained_size
         with self._condition:
             identity_sha256 = event.identity.identity_sha256
+            retained_identity_key = (
+                (identity_sha256, normalized_retained_key)
+                if normalized_retained_key is not None
+                else None
+            )
             if self._identity_sha256 not in (None, identity_sha256):
                 raise CaptureContractError("capture ingress cannot mix run identities")
+            if (
+                retained_identity_key is not None
+                and retained_identity_key in self._retained_reservations
+            ):
+                raise CaptureContractError("capture retained object is duplicated")
             self._identity_sha256 = identity_sha256
             if self._finalized:
                 raise CaptureContractError(
@@ -3121,7 +3304,7 @@ class BoundedCaptureIngress:
                 self._record_gap(event, pressure_rejection)
                 self._condition.notify()
                 return False
-            if size > self.max_bytes:
+            if admitted_size > self.max_bytes:
                 self._record_gap(event, "capture_event_exceeds_queue_byte_budget")
                 self._condition.notify()
                 return False
@@ -3130,7 +3313,7 @@ class BoundedCaptureIngress:
                 self.shared_admission_budget is None
                 and
                 self.sustained_write_budget_bytes_per_second is not None
-                and size > self._write_tokens
+                and admitted_size > self._write_tokens
             ):
                 self._write_bandwidth_dropped += 1
                 self._record_gap(event, "capture_write_bandwidth_budget_exceeded")
@@ -3138,13 +3321,19 @@ class BoundedCaptureIngress:
                 return False
             if (
                 len(self._queue) >= self.max_events
-                or self._queued_bytes + size > self.max_bytes
+                or self._queued_bytes + self._retained_bytes + admitted_size
+                > self.max_bytes
             ):
                 self._record_gap(event, "capture_queue_overflow")
                 self._condition.notify()
                 return False
             if self.shared_admission_budget is not None:
-                shared_rejection = self.shared_admission_budget.try_admit(event, size)
+                shared_rejection = self.shared_admission_budget.try_admit(
+                    event,
+                    size,
+                    retained_key=normalized_retained_key,
+                    retained_bytes=retained_size,
+                )
                 if shared_rejection is not None:
                     if "write_bandwidth" in shared_rejection:
                         self._write_bandwidth_dropped += 1
@@ -3155,17 +3344,56 @@ class BoundedCaptureIngress:
                     return False
             self._queue.append((event, size))
             self._queued_bytes += size
+            if retained_identity_key is not None:
+                self._retained_reservations[retained_identity_key] = retained_size
+                self._retained_bytes += retained_size
             self._accepted += 1
             if (
                 self.shared_admission_budget is None
                 and self.sustained_write_budget_bytes_per_second is not None
             ):
-                self._write_tokens -= size
+                self._write_tokens -= admitted_size
             self._accepted_event_accumulator_sha256 = _event_accumulator_add(
                 self._accepted_event_accumulator_sha256, event
             )
             self._condition.notify()
             return True
+
+    def release_retained(
+        self,
+        *,
+        identity_sha256: str,
+        retained_key: str,
+        expected_bytes: int,
+    ) -> None:
+        identity = _validated_sha256(
+            identity_sha256, "capture retained identity"
+        )
+        key = _validated_sha256(retained_key, "capture retained key")
+        if isinstance(expected_bytes, bool) or int(expected_bytes) <= 0:
+            raise CaptureContractError(
+                "capture retained release byte count is malformed"
+            )
+        identity_key = (identity, key)
+        with self._condition:
+            retained_size = self._retained_reservations.get(identity_key)
+            if retained_size is None:
+                raise CaptureContractError(
+                    "capture retained release has no exact reservation"
+                )
+            if retained_size != int(expected_bytes):
+                raise CaptureContractError(
+                    "capture retained release byte count mismatch"
+                )
+            if self.shared_admission_budget is not None:
+                self.shared_admission_budget.release_retained(
+                    identity_sha256=identity,
+                    retained_key=key,
+                    expected_bytes=retained_size,
+                )
+            self._retained_reservations.pop(identity_key)
+            self._retained_bytes -= retained_size
+            self._condition.notify_all()
 
     def submit_gap(
         self,
@@ -3333,6 +3561,7 @@ class BoundedCaptureIngress:
                 and not self._retained_rejections
                 and not self._queue
                 and not self._gaps
+                and not self._retained_reservations
                 and (
                     self.shared_admission_budget is None
                     or self._identity_sha256 is None
@@ -3374,7 +3603,13 @@ class BoundedCaptureIngress:
                 raise CaptureContractError(
                     "capture ingress has unterminated retained admissions"
                 )
-            if self._queue or self._gaps or self._queued_bytes:
+            if (
+                self._queue
+                or self._gaps
+                or self._queued_bytes
+                or self._retained_reservations
+                or self._retained_bytes
+            ):
                 raise CaptureContractError(
                     "capture ingress queues or coverage gaps are not drained"
                 )
@@ -3436,6 +3671,8 @@ class BoundedCaptureIngress:
                 "writer_failure_reason": self._writer_failure_reason,
                 "queued_events": len(self._queue),
                 "queued_bytes": self._queued_bytes,
+                "retained_objects": len(self._retained_reservations),
+                "retained_bytes": self._retained_bytes,
                 "pending_gap_keys": len(self._gaps),
                 "pending_retained_admissions": len(self._retained_rejections),
                 "closed": self._closed,
@@ -3448,7 +3685,8 @@ class BoundedCaptureIngress:
         with self._condition:
             self._refresh_write_tokens()
             event_utilization = len(self._queue) / self.max_events
-            byte_utilization = self._queued_bytes / self.max_bytes
+            bounded_memory_bytes = self._queued_bytes + self._retained_bytes
+            byte_utilization = bounded_memory_bytes / self.max_bytes
             token_fraction = (
                 self._write_tokens / self.max_bytes
                 if self.sustained_write_budget_bytes_per_second is not None
@@ -3478,6 +3716,9 @@ class BoundedCaptureIngress:
                 "gap_accumulator_sha256": self._gap_accumulator_sha256,
                 "queued_events": len(self._queue),
                 "queued_bytes": self._queued_bytes,
+                "retained_objects": len(self._retained_reservations),
+                "retained_bytes": self._retained_bytes,
+                "bounded_memory_bytes": bounded_memory_bytes,
                 "pending_gap_keys": len(self._gaps),
                 "pending_retained_admissions": len(self._retained_rejections),
                 "closed": self._closed,
@@ -3495,6 +3736,7 @@ class BoundedCaptureIngress:
                     and not self._retained_rejections
                     and not self._queue
                     and not self._gaps
+                    and not self._retained_reservations
                     and (
                         self.shared_admission_budget is None
                         or self._identity_sha256 is None
@@ -3700,7 +3942,12 @@ class CaptureProducerLifecycleRuntime:
         self._receipt_event_owner: dict[str, str] = {}
         self._read_evidence_by_id: dict[str, ActiveCaptureReadEvidence] = {}
         self._first_dip_tape_by_id: dict[str, FirstDipTapeReceiptEvidence] = {}
-        self._accepted_first_dip_detector_refs: dict[str, object] = {}
+        # Capture retains evidence per decision, not per daily opportunity.
+        # Durable adaptive reservation remains the once-per-day consumer.
+        self._accepted_first_dip_detector_refs_by_sha256: dict[str, object] = {}
+        self._accepted_first_dip_detector_ref_sha256_by_decision_id: dict[
+            str, str
+        ] = {}
         self._decision_ids: set[str] = set()
         self._decision_events: dict[str, CaptureEvent] = {}
         self._decision_outputs: dict[str, CaptureDecisionOutput] = {}
@@ -4336,6 +4583,14 @@ class CaptureProducerLifecycleRuntime:
             ) from exc
 
         with self._lock:
+            rejected_output = self._decision_outputs.get(reference.decision_id)
+            if (
+                rejected_output is not None
+                and rejected_output.action is CaptureDecisionAction.REJECT
+            ):
+                raise CaptureContractError(
+                    "first-dip detector decision is already terminal"
+                )
             if (
                 reference.authority_source != "captured_db_paper"
                 or reference.run_id != self.identity.run_id
@@ -4395,15 +4650,37 @@ class CaptureProducerLifecycleRuntime:
                 raise CaptureContractError(
                     "accepted first-dip detector receipt inventory is mismatched"
                 )
-            existing = self._accepted_first_dip_detector_refs.get(opportunity)
-            if existing is not None and sha256_json(existing.to_dict()) != sha256_json(
-                reference.to_dict()
+            reference_sha256 = sha256_json(reference.to_dict())
+            existing_sha256 = (
+                self._accepted_first_dip_detector_ref_sha256_by_decision_id
+                .get(reference.decision_id)
+            )
+            if (
+                existing_sha256 is not None
+                and existing_sha256 != reference_sha256
             ):
                 raise CaptureContractError(
-                    "first-dip opportunity already has a different detector receipt"
+                    "first-dip decision already has a different detector receipt"
                 )
-            self._accepted_first_dip_detector_refs[opportunity] = reference
-            return sha256_json(reference.to_dict())
+            existing_reference = (
+                self._accepted_first_dip_detector_refs_by_sha256.get(
+                    reference_sha256
+                )
+            )
+            if (
+                existing_reference is not None
+                and existing_reference.to_dict() != reference.to_dict()
+            ):
+                raise CaptureContractError(
+                    "first-dip detector receipt hash collision"
+                )
+            self._accepted_first_dip_detector_refs_by_sha256[
+                reference_sha256
+            ] = reference
+            self._accepted_first_dip_detector_ref_sha256_by_decision_id[
+                reference.decision_id
+            ] = reference_sha256
+            return reference_sha256
 
     def attest_first_dip_pre_reservation_input_prefix(
         self,
@@ -4440,7 +4717,15 @@ class CaptureProducerLifecycleRuntime:
             )
         opportunity = opportunity_key.key_sha256
         with self._lock:
-            reference = self._accepted_first_dip_detector_refs.get(opportunity)
+            reference_sha256 = (
+                self._accepted_first_dip_detector_ref_sha256_by_decision_id
+                .get(request.inputs.decision_id)
+            )
+            reference = (
+                self._accepted_first_dip_detector_refs_by_sha256.get(
+                    str(reference_sha256 or "")
+                )
+            )
             read = self._read_evidence_by_id.get(
                 str(first_dip_tape_read_id or "").strip()
             )
@@ -4450,6 +4735,14 @@ class CaptureProducerLifecycleRuntime:
             if reference is None:
                 raise CaptureContractError(
                     "first-dip final boundary lacks an accepted detector receipt"
+                )
+            rejected_output = self._decision_outputs.get(reference.decision_id)
+            if (
+                rejected_output is not None
+                and rejected_output.action is CaptureDecisionAction.REJECT
+            ):
+                raise CaptureContractError(
+                    "first-dip detector decision is already terminal"
                 )
             if read is None:
                 raise CaptureContractError(
@@ -4470,6 +4763,7 @@ class CaptureProducerLifecycleRuntime:
                 != self.identity.config_sha256
                 or request.inputs.feature_flags_sha256
                 != self.identity.feature_flags_sha256
+                or reference.decision_id != request.inputs.decision_id
                 or detector_input is None
                 or detector_input.input_prefix_root_sha256
                 != request.inputs.capture_prefix_root_sha256
@@ -4483,7 +4777,7 @@ class CaptureProducerLifecycleRuntime:
                     "first-dip final boundary escaped detector/request capture identity"
                 )
             final_binding = _FirstDipFinalInputBinding(
-                prior_detector_reference_sha256=sha256_json(reference.to_dict()),
+                prior_detector_reference_sha256=str(reference_sha256),
                 adaptive_request_sha256=request.request_sha256,
                 opportunity_key_sha256=opportunity,
                 _verification_token=_FIRST_DIP_FINAL_INPUT_BINDING_TOKEN,
@@ -4513,13 +4807,31 @@ class CaptureProducerLifecycleRuntime:
             prior_reference = None
             if str(purpose or "").strip().lower() == "pre_reservation":
                 opportunity = proof.first_dip_opportunity_key_sha256
-                prior_reference = self._accepted_first_dip_detector_refs.get(
-                    str(opportunity or "")
+                prior_reference_sha256 = (
+                    proof.first_dip_prior_detector_reference_sha256
+                )
+                prior_reference = (
+                    self._accepted_first_dip_detector_refs_by_sha256.get(
+                        str(prior_reference_sha256 or "")
+                    )
+                )
+                rejected_output = (
+                    self._decision_outputs.get(prior_reference.decision_id)
+                    if prior_reference is not None
+                    else None
                 )
                 if (
+                    rejected_output is not None
+                    and rejected_output.action is CaptureDecisionAction.REJECT
+                ):
+                    raise CaptureContractError(
+                        "first-dip detector decision is already terminal"
+                    )
+                if (
                     prior_reference is None
-                    or proof.first_dip_prior_detector_reference_sha256
+                    or prior_reference_sha256
                     != sha256_json(prior_reference.to_dict())
+                    or prior_reference.opportunity_key_sha256 != opportunity
                 ):
                     raise CaptureContractError(
                         "captured first-dip final proof lacks retained detector lineage"
@@ -9787,6 +10099,59 @@ class ContentAddressedCaptureStore:
             bytes=len(raw),
         )
 
+    def sync_derived_ref(self, ref: RetentionObjectRef) -> None:
+        """Fsync one exact derived object, including an idempotent retry.
+
+        ``put_derived_artifact`` intentionally returns an existing immutable
+        object without adding it to this process's dirty set.  A caller which
+        must durably order that object before a later commit therefore needs
+        an exact-reference fsync rather than a broad dirty-set flush.
+        """
+
+        if not isinstance(ref, RetentionObjectRef) or ref.tier != "derived":
+            raise CaptureContractError("derived sync reference is malformed")
+        self._ownership.assert_valid()
+        # Re-inventory exact bytes before granting durability.  This also
+        # validates root confinement, size and the content-addressed filename.
+        self.read_derived_ref(self.root, ref)
+        path = (self.root / ref.relative_path).resolve()
+        with self._sync_lock:
+            self._sync_calls += 1
+            sync_started = float(self._monotonic_clock())
+            if not math.isfinite(sync_started):
+                self._record_resource_failure("capture_sync_clock_non_finite")
+                raise CaptureContractError(
+                    "capture sync clock returned a non-finite value"
+                )
+            try:
+                with path.open("rb+") as handle:
+                    os.fsync(handle.fileno())
+            except FileNotFoundError as exc:
+                self._sync_failures += 1
+                self._record_resource_failure(
+                    "capture_object_missing_before_sync"
+                )
+                raise CaptureContractError(
+                    f"published capture object disappeared before sync: {path}"
+                ) from exc
+            except OSError as exc:
+                self._sync_failures += 1
+                self._record_resource_failure("capture_fsync_failed")
+                raise CaptureContractError(
+                    f"capture object fsync failed: {path}: {exc}"
+                ) from exc
+            with self._publish_state_lock:
+                self._dirty_paths.discard(path)
+                self._durable_paths.add(path)
+            sync_finished = float(self._monotonic_clock())
+            if not math.isfinite(sync_finished):
+                self._record_resource_failure("capture_sync_clock_non_finite")
+                raise CaptureContractError(
+                    "capture sync clock returned a non-finite value"
+                )
+            self._synced_objects += 1
+            self._sync_seconds += max(0.0, sync_finished - sync_started)
+
     @staticmethod
     def _pin_intersects(
         pins: Iterable[CaptureRetentionPin],
@@ -11987,10 +12352,14 @@ class SharedCaptureWriterLease:
                 outstanding = self._runtime.shared_admission_budget.outstanding_for(
                     self.identity.identity_sha256
                 )
+                retained = self._runtime.shared_admission_budget.retained_for(
+                    self.identity.identity_sha256
+                )
                 if (
                     writer_health["writer_alive"]
                     or not writer.ingress.drained
                     or outstanding != 0
+                    or retained != 0
                     or (writer._has_started and not writer.ingress.closed)
                 ):
                     raise CaptureContractError(
@@ -12192,7 +12561,11 @@ class SharedCaptureStoreRuntime:
                 raise CaptureContractError(
                     "cannot close shared capture store with active writer leases"
                 )
-            if self.shared_admission_budget.outstanding_events != 0:
+            if (
+                self.shared_admission_budget.outstanding_events != 0
+                or self.shared_admission_budget.outstanding_retained_objects
+                != 0
+            ):
                 raise CaptureContractError(
                     "cannot close shared capture store with outstanding reservations"
                 )

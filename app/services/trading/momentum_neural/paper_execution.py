@@ -1576,6 +1576,82 @@ def trail_width_maturity_factor(
     return max(1.0, min(mw, factor))
 
 
+def monster_structure_floor_candidate(
+    *,
+    enabled: bool,
+    halt_lit: bool,
+    leg_age_seconds: float | None,
+    last15_low: float | None,
+    prev15_low: float | None,
+    retrace_amp_pct: float | None,
+    hwm: float | None,
+    composed_stop: float | None,
+    entry: float | None,
+    atr_pct: float | None,
+) -> tuple[float | None, str]:
+    """L10 (2026-08-04, HYFM 500% autopsy) — monster-conditioned 15s
+    STRUCTURE-FLOOR trail candidate. Sa 34-segundong single-bar verticals, ang
+    giveback-fraction band ay huli (HYFM: 15s ascending lows 3.48→3.70 buo
+    hanggang 0.95s bago ang fill; ang 3.70 break ay exitable sa ~3.69 pero ang
+    band fill ay 3.57) at ang 1m structure ay hindi pa umiiral (proven −$42
+    net-negative ang 1m trail sa klase). Candidate LANG ito — ang caller ay
+    magko-compose via max() (INVARIANT-A automatic: hindi kailanman lumuluwag).
+
+    TATLONG adaptive na kondisyon (lahat kailangan; ang naunang monster-ctx na
+    kondisyon ay TINANGGAL — sa replay frame na nagsisimula mid-move, ang
+    day-low-anchored na context ay imposibleng mag-true (HYFM uol ≈ 1.1 sa
+    frame vs 500% na totoong araw — ang frame-anchor trap), at per ang
+    adversarial study, ang BAND INADEQUACY ang tunay na separator; ang monster
+    ctx ay pumuputok sa parehong HYFM at JLHL kaya walang discriminating value
+    dito):
+      (i)   BAR MATURITY — ``leg_age_seconds < 180`` (wala pang 3 kumpletong 1m
+            bar sa leg; pagkatapos noon ang existing 5m-EMA9/G4 structure path
+            ang may-ari — ONE documented base = 180s, ang boundary ng 1m
+            timeframe mismo);
+      (ii)  BAND INADEQUACY — ``retrace_amp_pct > (hwm − composed_stop)/hwm``:
+            ang realized 30s amplitude ay mas malaki sa kasalukuyang band —
+            self-referential na explosiveness detector, ITO ang tunay na
+            HYFM-vs-JLHL separator (HYFM ~11% > 5% band; JLHL 2.2-3.3% < band);
+      (iii) HINDI naka-ilaw ang suspected-halt lifecycle (ang JLHL halt-stairs
+            ay hindi ginagalaw).
+    Structure: ang huling kumpletong 15s bar low ay dapat ASCENDING
+    (> prev low). Floor = last15_low − entry×max(0.001, atr_pct×0.25) — ang
+    EKSAKTONG wick buffer ng 5m-EMA9 override sa ibaba.
+    Fail-toward-legacy: anumang missing/sirang input ⇒ (None, reason) — walang
+    candidate, walang pagbabago sa trail."""
+    if not bool(enabled):
+        return None, "disabled"
+    if bool(halt_lit):
+        return None, "halt_lit"
+    try:
+        if leg_age_seconds is None or not math.isfinite(float(leg_age_seconds)):
+            return None, "leg_age_unknown"
+        if float(leg_age_seconds) >= 180.0:
+            return None, "leg_mature_1m_owns"
+        ll = float(last15_low)
+        pl = float(prev15_low)
+        if not (math.isfinite(ll) and math.isfinite(pl) and ll > 0 and pl > 0):
+            return None, "bars_missing"
+        if ll <= pl:
+            return None, "not_ascending"
+        amp = float(retrace_amp_pct)
+        h = float(hwm)
+        cs = float(composed_stop)
+        if not (math.isfinite(amp) and math.isfinite(h) and h > 0 and math.isfinite(cs)):
+            return None, "band_inputs_missing"
+        band_width_pct = max(0.0, (h - cs) / h)
+        if amp <= band_width_pct:
+            return None, "band_adequate"
+        e = float(entry)
+        a = float(atr_pct) if atr_pct is not None else 0.0
+        if not (math.isfinite(e) and e > 0):
+            return None, "entry_missing"
+        buf = e * max(0.001, a * 0.25)
+        return ll - buf, "structure_floor"
+    except (TypeError, ValueError):
+        return None, "bad_inputs"
+
+
 def volnorm_runner_trail_stop(
     *,
     high_water_mark: float,

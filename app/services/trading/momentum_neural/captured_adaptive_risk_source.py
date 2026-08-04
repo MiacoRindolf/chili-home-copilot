@@ -68,6 +68,7 @@ from .replay_capture_contract import (
     ActiveCaptureInputPrefixAttestation,
     CaptureContractError,
     CaptureStream,
+    freeze_canonical_json,
     sha256_json,
     verify_active_capture_input_attestation,
 )
@@ -79,6 +80,9 @@ CAPTURED_ADAPTIVE_RISK_FACT_SCHEMA_VERSION = (
 )
 CAPTURED_ADAPTIVE_RISK_POLICY_SPEC_SCHEMA_VERSION = (
     "chili.captured-adaptive-risk-policy-spec.v1"
+)
+SEALED_READINESS_CONVICTION_SCHEMA_VERSION = (
+    "chili.sealed-readiness-conviction-adjustment.v1"
 )
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 _SETUP_FAMILY_RE = re.compile(r"^[a-z0-9][a-z0-9_.:-]{0,127}$")
@@ -378,6 +382,8 @@ class CapturedAdaptiveRiskEconomicInputs:
     recent_volume_shares: float
     executable_depth_shares: float
     candidate_buying_power_impact_per_share_usd: float
+    effective_setup_quality: float | None = None
+    setup_quality_adjustment_audit: Mapping[str, Any] | None = None
 
     def __post_init__(self) -> None:
         positive = (
@@ -408,6 +414,77 @@ class CapturedAdaptiveRiskEconomicInputs:
         if not 0.0 <= quality <= 1.0:
             _coverage_unavailable("setup_quality_out_of_range")
         object.__setattr__(self, "setup_quality", quality)
+        effective_quality = (
+            quality
+            if self.effective_setup_quality is None
+            else _finite(
+                self.effective_setup_quality,
+                "effective_setup_quality",
+            )
+        )
+        if not 0.0 <= effective_quality <= 1.0:
+            _coverage_unavailable("effective_setup_quality_out_of_range")
+        raw_audit = self.setup_quality_adjustment_audit
+        if raw_audit is None:
+            if effective_quality != quality:
+                _coverage_unavailable(
+                    "effective_setup_quality_provenance_unavailable"
+                )
+            audit = None
+        else:
+            if not isinstance(raw_audit, Mapping):
+                _coverage_unavailable("setup_quality_adjustment_audit_invalid")
+            audit = freeze_canonical_json(dict(raw_audit))
+            if (
+                audit.get("schema_version")
+                != SEALED_READINESS_CONVICTION_SCHEMA_VERSION
+                or audit.get("base_setup_quality") != quality
+                or audit.get("adjusted_setup_quality") != effective_quality
+                or not isinstance(audit.get("policy"), Mapping)
+                or not isinstance(audit.get("selection_inputs"), Mapping)
+                or not isinstance(audit.get("catalyst_dominance"), Mapping)
+            ):
+                _coverage_unavailable(
+                    "setup_quality_adjustment_audit_mismatch"
+                )
+            unsigned_audit = dict(audit)
+            claimed_audit_sha256 = _sha(
+                unsigned_audit.pop("audit_sha256", None),
+                "setup_quality_adjustment_audit",
+            )
+            if sha256_json(unsigned_audit) != claimed_audit_sha256:
+                _coverage_unavailable(
+                    "setup_quality_adjustment_audit_hash_mismatch"
+                )
+            policy = dict(audit["policy"])
+            if (
+                sha256_json(policy)
+                != _sha(
+                    audit.get("policy_sha256"),
+                    "setup_quality_adjustment_policy",
+                )
+            ):
+                _coverage_unavailable(
+                    "setup_quality_adjustment_policy_hash_mismatch"
+                )
+            _sha(
+                audit.get("config_provenance_sha256"),
+                "setup_quality_adjustment_config",
+            )
+            _sha(
+                audit.get("selection_payload_sha256"),
+                "setup_quality_adjustment_selection",
+            )
+        object.__setattr__(
+            self,
+            "effective_setup_quality",
+            effective_quality,
+        )
+        object.__setattr__(
+            self,
+            "setup_quality_adjustment_audit",
+            audit,
+        )
 
 
 def captured_adaptive_risk_fact_payloads(
@@ -426,17 +503,28 @@ def captured_adaptive_risk_fact_payloads(
         "symbol": identity.symbol,
         "setup_family": identity.setup_family,
     }
+    setup_quality_payload: dict[str, Any] = {
+        **common,
+        "fact": "setup_quality",
+        "setup_quality": economics.setup_quality,
+    }
+    if economics.setup_quality_adjustment_audit is not None:
+        setup_quality_payload.update(
+            {
+                "setup_quality": economics.effective_setup_quality,
+                "base_setup_quality": economics.setup_quality,
+                "conviction_adjustment": dict(
+                    economics.setup_quality_adjustment_audit
+                ),
+            }
+        )
     return {
         "structural_stop": {
             **common,
             "fact": "structural_stop",
             "structural_stop": economics.structural_stop,
         },
-        "setup_quality": {
-            **common,
-            "fact": "setup_quality",
-            "setup_quality": economics.setup_quality,
-        },
+        "setup_quality": setup_quality_payload,
         "volatility": {
             **common,
             "fact": "volatility",
@@ -742,6 +830,15 @@ class CapturedAdaptiveRiskSourceFactory:
         economics = boundary.economics
         if type(economics) is not CapturedAdaptiveRiskEconomicInputs:
             _coverage_unavailable("economic_inputs_invalid")
+        conviction_audit = economics.setup_quality_adjustment_audit
+        if conviction_audit is not None and (
+            conviction_audit.get("config_provenance_sha256")
+            != proof.config_sha256
+            or conviction_audit.get("symbol") != identity.symbol
+        ):
+            _coverage_unavailable(
+                "setup_quality_adjustment_decision_binding_mismatch"
+            )
         if economics.structural_stop >= ask:
             _coverage_unavailable("structural_stop_not_below_captured_ask")
         derived_payloads = captured_adaptive_risk_fact_payloads(identity, economics)
@@ -853,7 +950,7 @@ class CapturedAdaptiveRiskSourceFactory:
             entry_slippage_bps=economics.entry_slippage_bps,
             exit_slippage_bps=economics.exit_slippage_bps,
             fees_per_share_usd=economics.fees_per_share_usd,
-            setup_quality=economics.setup_quality,
+            setup_quality=economics.effective_setup_quality,
             realized_volatility_fraction=(
                 economics.realized_volatility_fraction
             ),

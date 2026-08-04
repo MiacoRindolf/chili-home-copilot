@@ -8,6 +8,7 @@ output. Reference = the ONE shared viability A-setup ceiling (no second number).
 """
 from __future__ import annotations
 
+from types import SimpleNamespace
 from unittest.mock import patch
 
 from app.services.trading.momentum_neural.universe import (
@@ -71,6 +72,23 @@ def test_flag_off_byte_identical():
     floats = {"T0": 60_000_000.0}
     out = _build(floats, settings_obj=_Off())
     assert "T0" in out  # gate skipped -> high-float name retained (legacy behavior)
+
+
+def test_missing_flag_uses_default_on_float_gate():
+    settings_obj = SimpleNamespace(
+        chili_momentum_universe_uncapped_enabled=False,
+        chili_momentum_universe_hard_ceiling=1500,
+        chili_momentum_hot_mover_recatch_enabled=False,
+        chili_momentum_a_setup_quality_floor_float_ceiling_shares=20_000_000.0,
+    )
+    with patch(
+            f"{_MASSIVE}.get_ticker_float",
+            return_value=1_000_000.0,
+         ) as get_float, \
+            patch("app.config.settings", settings_obj):
+        out = build_equity_universe(EQUITY_ROSS_SMALLCAP, snapshot=_snapshot())
+    assert "T0" in out
+    assert get_float.call_count == 6
 
 
 def test_lookup_budget_bounded():

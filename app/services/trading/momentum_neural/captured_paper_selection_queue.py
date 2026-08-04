@@ -46,6 +46,7 @@ from .captured_viability_adapter import (
 )
 from .replay_capture_contract import (
     CAPTURE_SCHEMA_VERSION,
+    CaptureOrtexSelectionSnapshot,
     CaptureClocks,
     CaptureContractError,
     CaptureEvent,
@@ -72,10 +73,14 @@ from .replay_capture_runtime import (
 UTC = timezone.utc
 
 QUEUE_EVENT_SCHEMA_VERSION = "chili.captured-paper-selection-queue-event.v2"
-QUEUE_COMMIT_SCHEMA_VERSION = "chili.captured-paper-selection-queue-commit.v1"
+QUEUE_COMMIT_SCHEMA_VERSION = "chili.captured-paper-selection-queue-commit.v2"
 QUEUE_RECEIPT_SCHEMA_VERSION = "chili.captured-paper-selection-queue-receipt.v1"
 QUEUE_POISON_SCHEMA_VERSION = "chili.captured-paper-selection-queue-poison.v1"
 QUEUE_DERIVED_KIND = "captured_paper_selection_queue_commit"
+QUEUE_ORTEX_MANIFEST_DERIVED_KIND = "captured_paper_ortex_selection_batch"
+QUEUE_ORTEX_MANIFEST_REF_SCHEMA_VERSION = (
+    "chili.captured-paper-ortex-manifest-ref.v1"
+)
 QUEUE_PROVIDER = "captured_viability_adapter"
 QUEUE_SOURCE_NAME = "captured_viability_queue"
 
@@ -195,16 +200,227 @@ def _chunk_from_dict(raw: Mapping[str, Any]) -> ChunkRef:
     )
 
 
-def _event_envelope(event: CaptureEvent) -> dict[str, Any]:
+@dataclass(frozen=True, slots=True)
+class _PendingOrtexManifest:
+    source_sequence: int
+    batch_sha256: str
+    window_start: datetime
+    window_end: datetime
+    payload: Mapping[str, Any]
+    payload_bytes: int = field(init=False, repr=False, compare=False)
+
+    def __post_init__(self) -> None:
+        _positive_int(self.source_sequence, "Ortex manifest source sequence")
+        object.__setattr__(
+            self,
+            "batch_sha256",
+            _sha(self.batch_sha256, "Ortex manifest batch SHA256"),
+        )
+        start = _utc(self.window_start, "Ortex manifest window_start")
+        end = _utc(self.window_end, "Ortex manifest window_end")
+        if end < start:
+            _fail("Ortex manifest window is reversed")
+        if not isinstance(self.payload, Mapping):
+            _fail("Ortex manifest payload is malformed")
+        raw_payload = canonical_json_bytes(self.payload)
+        if hashlib.sha256(raw_payload).hexdigest() != self.batch_sha256:
+            _fail("Ortex manifest payload hash mismatch")
+        object.__setattr__(self, "window_start", start)
+        object.__setattr__(self, "window_end", end)
+        object.__setattr__(self, "payload", json.loads(raw_payload))
+        object.__setattr__(self, "payload_bytes", len(raw_payload))
+
+
+def _ortex_manifest_pointer(
+    event: CaptureEvent,
+    *,
+    queue_source_sequence: int,
+) -> tuple[dict[str, Any], _PendingOrtexManifest]:
+    if event.stream is not CaptureStream.ORTEX_SNAPSHOT:
+        _fail("Ortex manifest pointer received a non-Ortex event")
+    try:
+        CaptureOrtexSelectionSnapshot.from_event(event)
+    except (CaptureContractError, TypeError, ValueError) as exc:
+        raise CapturedPaperSelectionQueueError(
+            "Ortex source event failed strict batch validation"
+        ) from exc
+    batch_sha256 = event.payload_sha256
+    pointer = {
+        "schema_version": QUEUE_ORTEX_MANIFEST_REF_SCHEMA_VERSION,
+        "kind": QUEUE_ORTEX_MANIFEST_DERIVED_KIND,
+        "batch_sha256": batch_sha256,
+        "window_start": _iso(event.clocks.received_at),
+        "window_end": _iso(event.clocks.available_at),
+    }
+    return pointer, _PendingOrtexManifest(
+        source_sequence=queue_source_sequence,
+        batch_sha256=batch_sha256,
+        window_start=event.clocks.received_at,
+        window_end=event.clocks.available_at,
+        payload=event.payload,
+    )
+
+
+def _event_envelope(
+    event: CaptureEvent,
+    *,
+    queue_source_sequence: int,
+) -> tuple[dict[str, Any], _PendingOrtexManifest | None]:
+    if event.stream is CaptureStream.ORTEX_SNAPSHOT:
+        pointer, pending = _ortex_manifest_pointer(
+            event,
+            queue_source_sequence=queue_source_sequence,
+        )
+        return (
+            {
+                "event": event.to_record(include_payload=False),
+                "event_sha256": event.event_sha256,
+                "ortex_manifest_ref": pointer,
+            },
+            pending,
+        )
     return {
         "event": event.to_record(include_payload=True),
         "event_sha256": event.event_sha256,
-    }
+    }, None
 
 
-def _event_from_envelope(raw: Mapping[str, Any]) -> CaptureEvent:
-    _exact_fields(raw, {"event", "event_sha256"}, "source event envelope")
-    event = CaptureEvent.from_record(_mapping(raw.get("event"), "source event"))
+def _retention_ref_from_dict(raw: Mapping[str, Any]) -> RetentionObjectRef:
+    _exact_fields(raw, {"tier", "relative_path", "sha256", "bytes"}, "retention ref")
+    return RetentionObjectRef(
+        tier=str(raw.get("tier") or ""),
+        relative_path=str(raw.get("relative_path") or ""),
+        sha256=str(raw.get("sha256") or ""),
+        bytes=raw.get("bytes"),
+    )
+
+
+def _event_from_envelope(
+    raw: Mapping[str, Any],
+    *,
+    root: Path,
+    queue_identity: CaptureRunIdentity,
+    ortex_manifest_refs: Sequence[RetentionObjectRef],
+    manifest_cache: dict[
+        str, tuple[Mapping[str, Any], RetentionObjectRef]
+    ],
+    budget_check: Callable[[], None],
+) -> CaptureEvent:
+    budget_check()
+    if set(raw) == {"event", "event_sha256"}:
+        event = CaptureEvent.from_record(_mapping(raw.get("event"), "source event"))
+        if event.stream is CaptureStream.ORTEX_SNAPSHOT:
+            _fail("Ortex source event lacks a durable manifest ref")
+    else:
+        _exact_fields(
+            raw,
+            {"event", "event_sha256", "ortex_manifest_ref"},
+            "source event envelope",
+        )
+        event_record = _mapping(raw.get("event"), "source event")
+        pointer = _mapping(raw.get("ortex_manifest_ref"), "Ortex manifest ref")
+        _exact_fields(
+            pointer,
+            {
+                "schema_version",
+                "kind",
+                "batch_sha256",
+                "window_start",
+                "window_end",
+            },
+            "Ortex manifest ref",
+        )
+        if (
+            pointer.get("schema_version")
+            != QUEUE_ORTEX_MANIFEST_REF_SCHEMA_VERSION
+            or pointer.get("kind") != QUEUE_ORTEX_MANIFEST_DERIVED_KIND
+        ):
+            _fail("Ortex manifest ref schema/kind mismatch")
+        batch_sha256 = _sha(
+            pointer.get("batch_sha256"), "Ortex manifest ref batch SHA256"
+        )
+        if event_record.get("payload_sha256") != batch_sha256:
+            _fail("Ortex manifest ref differs from source event payload hash")
+        window_start = _parse_utc(
+            pointer.get("window_start"), "Ortex manifest ref window_start"
+        )
+        window_end = _parse_utc(
+            pointer.get("window_end"), "Ortex manifest ref window_end"
+        )
+        if window_end < window_start:
+            _fail("Ortex manifest ref window is reversed")
+
+        cached = manifest_cache.get(batch_sha256)
+        manifest = None
+        if cached is not None and any(
+            ref == cached[1] for ref in ortex_manifest_refs
+        ):
+            manifest = cached[0]
+        if manifest is None:
+            matches: list[Mapping[str, Any]] = []
+            matching_ref_sha256: str | None = None
+            for object_ref in ortex_manifest_refs:
+                budget_check()
+                record = ContentAddressedCaptureStore.read_derived_ref(
+                    root, object_ref
+                )
+                budget_check()
+                expected_record_fields = {
+                    "schema_version",
+                    "identity",
+                    "kind",
+                    "window_start",
+                    "window_end",
+                    "payload",
+                    "payload_sha256",
+                }
+                if set(record) != expected_record_fields:
+                    _fail("Ortex derived artifact fields do not match schema")
+                if (
+                    record.get("schema_version")
+                    != CAPTURE_DERIVED_ARTIFACT_SCHEMA_VERSION
+                    or record.get("identity") != queue_identity.to_dict()
+                    or record.get("kind")
+                    != QUEUE_ORTEX_MANIFEST_DERIVED_KIND
+                    or record.get("payload_sha256") != batch_sha256
+                    or not isinstance(record.get("payload"), Mapping)
+                    or sha256_json(record["payload"]) != batch_sha256
+                ):
+                    continue
+                matches.append(record)
+                matching_ref_sha256 = object_ref.sha256
+            if len(matches) != 1:
+                _fail("Ortex committed manifest is missing or duplicated")
+            manifest = matches[0]
+            assert matching_ref_sha256 is not None
+            manifest_cache[batch_sha256] = (
+                manifest,
+                next(
+                    ref
+                    for ref in ortex_manifest_refs
+                    if ref.sha256 == matching_ref_sha256
+                ),
+            )
+        if (
+            manifest.get("window_start") != _iso(window_start)
+            or manifest.get("window_end") != _iso(window_end)
+        ):
+            _fail("Ortex manifest ref window differs from durable artifact")
+        payload = _mapping(manifest.get("payload"), "Ortex manifest payload")
+        event = CaptureEvent.from_record(event_record, payload=payload)
+        if (
+            event.stream is not CaptureStream.ORTEX_SNAPSHOT
+            or event.clocks.received_at != window_start
+            or event.clocks.available_at != window_end
+        ):
+            _fail("Ortex manifest ref differs from source event clocks")
+        try:
+            CaptureOrtexSelectionSnapshot.from_event(event)
+        except (CaptureContractError, TypeError, ValueError) as exc:
+            raise CapturedPaperSelectionQueueError(
+                "durable Ortex manifest failed strict batch validation"
+            ) from exc
+        budget_check()
     if event.event_sha256 != _sha(raw.get("event_sha256"), "source event SHA256"):
         _fail("source event content address mismatch")
     return event
@@ -235,7 +451,9 @@ def _source_event_refs(events: Sequence[CaptureEvent]) -> list[dict[str, Any]]:
 
 def _retained_source_event_envelopes(
     events: Sequence[CaptureEvent],
-) -> list[dict[str, Any]]:
+    *,
+    queue_source_sequence: int,
+) -> tuple[list[dict[str, Any]], list[_PendingOrtexManifest]]:
     """Retain raw decision-local evidence without duplicating sealed build bytes.
 
     Config, policy, and code-build payloads are activation-static and already
@@ -246,11 +464,19 @@ def _retained_source_event_envelopes(
     embedded and independently reconstructable.
     """
 
-    return [
-        _event_envelope(event)
-        for event in events
-        if event.stream not in _ACTIVATION_STATIC_SOURCE_STREAMS
-    ]
+    envelopes: list[dict[str, Any]] = []
+    pending_ortex: list[_PendingOrtexManifest] = []
+    for event in events:
+        if event.stream in _ACTIVATION_STATIC_SOURCE_STREAMS:
+            continue
+        envelope, pending = _event_envelope(
+            event,
+            queue_source_sequence=queue_source_sequence,
+        )
+        envelopes.append(envelope)
+        if pending is not None:
+            pending_ortex.append(pending)
+    return envelopes, pending_ortex
 
 
 def _recomputed_static_event_sha256(
@@ -286,7 +512,14 @@ def _validate_compact_source_evidence(
     *,
     raw_refs: Any,
     raw_events: Any,
-) -> tuple[CaptureEventRef, ...]:
+    root: Path,
+    queue_identity: CaptureRunIdentity,
+    loaded_commit: _LoadedCommit,
+    manifest_cache: dict[
+        str, tuple[Mapping[str, Any], RetentionObjectRef]
+    ],
+    budget_check: Callable[[], None],
+) -> tuple[tuple[CaptureEventRef, ...], tuple[CaptureEvent, ...]]:
     if not isinstance(raw_refs, list) or not isinstance(raw_events, list):
         _fail("queue source evidence inventory is malformed")
     try:
@@ -302,7 +535,14 @@ def _validate_compact_source_evidence(
         _fail("queue source event refs differ from bundle refs")
 
     events = tuple(
-        _event_from_envelope(_mapping(value, "source event envelope"))
+        _event_from_envelope(
+            _mapping(value, "source event envelope"),
+            root=root,
+            queue_identity=queue_identity,
+            ortex_manifest_refs=loaded_commit.commit.ortex_manifest_refs,
+            manifest_cache=manifest_cache,
+            budget_check=budget_check,
+        )
         for value in raw_events
     )
     retained_refs = tuple(CaptureEventRef.from_event(event) for event in events)
@@ -343,7 +583,7 @@ def _validate_compact_source_evidence(
             )
         ):
             _fail("queue activation-static source ref content address mismatch")
-    return refs
+    return refs, events
 
 
 def _authority_matches_selection(
@@ -666,6 +906,7 @@ class CapturedPaperSelectionQueueDurableGate:
                     commit_index=commit.commit_index,
                     event_refs=commit.event_refs,
                     gaps=commit.gaps,
+                    ortex_manifest_refs=commit.ortex_manifest_refs,
                 )
                 or (
                     prior is not None
@@ -705,6 +946,7 @@ class CapturedPaperSelectionQueueCommit:
     event_chunks: tuple[ChunkRef, ...]
     gaps: tuple[Mapping[str, Any], ...]
     gap_chunks: tuple[ChunkRef, ...]
+    ortex_manifest_refs: tuple[RetentionObjectRef, ...]
     poisoned: bool
     poison_reason: str | None
     watermark_at: datetime
@@ -756,6 +998,9 @@ class CapturedPaperSelectionQueueCommit:
         refs = tuple(sorted(self.event_refs, key=lambda ref: ref.sequence))
         chunks = tuple(sorted(self.event_chunks, key=lambda ref: ref.relative_path))
         gap_chunks = tuple(sorted(self.gap_chunks, key=lambda ref: ref.relative_path))
+        ortex_manifest_refs = tuple(
+            sorted(self.ortex_manifest_refs, key=lambda ref: ref.sha256)
+        )
         gaps = tuple(sorted((dict(row) for row in self.gaps), key=canonical_json_bytes))
         if any(type(ref) is not CaptureEventRef for ref in refs):
             _fail("queue commit event refs are malformed")
@@ -771,6 +1016,15 @@ class CapturedPaperSelectionQueueCommit:
             _fail("queue commit has event chunks without event refs")
         if bool(gaps) != bool(gap_chunks):
             _fail("queue commit gap rows/chunks do not agree")
+        if (
+            any(
+                type(ref) is not RetentionObjectRef or ref.tier != "derived"
+                for ref in ortex_manifest_refs
+            )
+            or len({ref.sha256 for ref in ortex_manifest_refs})
+            != len(ortex_manifest_refs)
+        ):
+            _fail("queue commit Ortex manifest refs are malformed or duplicated")
         if self.poisoned != bool(gaps):
             _fail("queue commit poison state does not match durable gaps")
         if self.poisoned:
@@ -788,6 +1042,7 @@ class CapturedPaperSelectionQueueCommit:
         object.__setattr__(self, "event_refs", refs)
         object.__setattr__(self, "event_chunks", chunks)
         object.__setattr__(self, "gap_chunks", gap_chunks)
+        object.__setattr__(self, "ortex_manifest_refs", ortex_manifest_refs)
         object.__setattr__(self, "gaps", gaps)
 
     def body(self) -> dict[str, Any]:
@@ -805,6 +1060,9 @@ class CapturedPaperSelectionQueueCommit:
             "event_chunks": [_chunk_dict(ref) for ref in self.event_chunks],
             "gaps": [dict(row) for row in self.gaps],
             "gap_chunks": [_chunk_dict(ref) for ref in self.gap_chunks],
+            "ortex_manifest_refs": [
+                ref.to_dict() for ref in self.ortex_manifest_refs
+            ],
             "poisoned": self.poisoned,
             "poison_reason": self.poison_reason,
             "watermark_at": _iso(self.watermark_at),
@@ -830,6 +1088,7 @@ class CapturedPaperSelectionQueueCommit:
             "event_chunks",
             "gaps",
             "gap_chunks",
+            "ortex_manifest_refs",
             "poisoned",
             "poison_reason",
             "watermark_at",
@@ -843,9 +1102,16 @@ class CapturedPaperSelectionQueueCommit:
         raw_chunks = raw.get("event_chunks")
         raw_gaps = raw.get("gaps")
         raw_gap_chunks = raw.get("gap_chunks")
+        raw_ortex_manifest_refs = raw.get("ortex_manifest_refs")
         if not all(
             isinstance(value, list)
-            for value in (raw_refs, raw_chunks, raw_gaps, raw_gap_chunks)
+            for value in (
+                raw_refs,
+                raw_chunks,
+                raw_gaps,
+                raw_gap_chunks,
+                raw_ortex_manifest_refs,
+            )
         ):
             _fail("queue commit arrays are malformed")
         return cls(
@@ -874,6 +1140,12 @@ class CapturedPaperSelectionQueueCommit:
             gap_chunks=tuple(
                 _chunk_from_dict(_mapping(value, "queue gap chunk"))
                 for value in raw_gap_chunks
+            ),
+            ortex_manifest_refs=tuple(
+                _retention_ref_from_dict(
+                    _mapping(value, "queue Ortex manifest ref")
+                )
+                for value in raw_ortex_manifest_refs
             ),
             poisoned=raw.get("poisoned"),
             poison_reason=raw.get("poison_reason"),
@@ -906,6 +1178,7 @@ def _expected_cumulative(
     commit_index: int,
     event_refs: Sequence[CaptureEventRef],
     gaps: Sequence[Mapping[str, Any]],
+    ortex_manifest_refs: Sequence[RetentionObjectRef],
 ) -> str:
     return sha256_json(
         {
@@ -913,6 +1186,9 @@ def _expected_cumulative(
             "commit_index": commit_index,
             "event_refs": [ref.to_dict() for ref in event_refs],
             "gaps": [dict(row) for row in gaps],
+            "ortex_manifest_refs": [
+                ref.to_dict() for ref in ortex_manifest_refs
+            ],
         }
     )
 
@@ -1038,6 +1314,7 @@ def _load_commit_chain(
             commit_index=commit.commit_index,
             event_refs=commit.event_refs,
             gaps=commit.gaps,
+            ortex_manifest_refs=commit.ortex_manifest_refs,
         )
         if commit.cumulative_sha256 != expected_cumulative:
             _fail("queue commit cumulative hash chain is invalid")
@@ -1128,6 +1405,16 @@ class CapturedPaperSelectionQueuePublisher:
             chain[-1].commit.poison_reason if self._poisoned else None
         )
         self._poison_receipt: CapturedPaperSelectionQueuePoisonReceipt | None = None
+        self._pending_ortex_manifests_by_batch: dict[
+            str, _PendingOrtexManifest
+        ] = {}
+        self._pending_ortex_batch_refcounts: dict[str, int] = {}
+        self._pending_ortex_batches_by_sequence: dict[int, tuple[str, ...]] = {}
+        # A manifest may outlive the sequence that first reserved its retained
+        # bytes when a later same-batch publish is still pending.  Track the
+        # reservation by content hash rather than by sequence so ACK/rollback
+        # races release it exactly once.
+        self._pending_ortex_retained_batches: set[str] = set()
         self._durable_gate = CapturedPaperSelectionQueueDurableGate(
             queue_identity_sha256=self.identity.identity_sha256,
             selection_authority_sha256=self.selection_authority.authority_sha256,
@@ -1190,6 +1477,7 @@ class CapturedPaperSelectionQueuePublisher:
             self._reserved_sequence = None
             self._active_publish_event_sha256 = None
             if not accepted:
+                self._rollback_pending_ortex_sequence(bundle.source_sequence)
                 self._poisoned = True
                 self._poison_reason = (
                     f"queue_ingress_rejected:{rejection_reason}"
@@ -1204,6 +1492,46 @@ class CapturedPaperSelectionQueuePublisher:
                 self._pending_since_monotonic = pending_at
             self._accepted_through = bundle.source_sequence
             return receipt
+
+    def _stage_pending_ortex_sequence(
+        self,
+        *,
+        source_sequence: int,
+        pending_ortex: Sequence[_PendingOrtexManifest],
+    ) -> tuple[str | None, int]:
+        """Bind one queue sequence to bounded, deduplicated Ortex RAM."""
+
+        if source_sequence in self._pending_ortex_batches_by_sequence:
+            _fail("queue sequence already owns pending Ortex material")
+        retained_key: str | None = None
+        retained_bytes = 0
+        pending_batch_hashes = tuple(row.batch_sha256 for row in pending_ortex)
+        for row in pending_ortex:
+            prior = self._pending_ortex_manifests_by_batch.get(row.batch_sha256)
+            if prior is None:
+                self._pending_ortex_manifests_by_batch[row.batch_sha256] = row
+                self._pending_ortex_batch_refcounts[row.batch_sha256] = 1
+                retained_key = row.batch_sha256
+                retained_bytes = row.payload_bytes
+            else:
+                if (
+                    prior.payload != row.payload
+                    or prior.window_start != row.window_start
+                    or prior.window_end != row.window_end
+                ):
+                    _fail("same Ortex batch hash carries different material")
+                refcount = self._pending_ortex_batch_refcounts.get(
+                    row.batch_sha256
+                )
+                if refcount is None or refcount <= 0:
+                    _fail("pending Ortex manifest refcount is malformed")
+                self._pending_ortex_batch_refcounts[row.batch_sha256] = (
+                    refcount + 1
+                )
+        self._pending_ortex_batches_by_sequence[source_sequence] = (
+            pending_batch_hashes
+        )
+        return retained_key, retained_bytes
 
     def publish_bundle(
         self,
@@ -1266,7 +1594,29 @@ class CapturedPaperSelectionQueuePublisher:
                 evaluation_at=evaluation,
             )
             source_event_refs = _source_event_refs(events)
-            retained_source_events = _retained_source_event_envelopes(events)
+            retained_source_events, pending_ortex = (
+                _retained_source_event_envelopes(
+                    events,
+                    queue_source_sequence=bundle.source_sequence,
+                )
+            )
+            if len(pending_ortex) > 1:
+                _fail("queue route carries multiple Ortex batch manifests")
+            if bundle.source_sequence in self._pending_ortex_batches_by_sequence:
+                _fail("queue sequence already owns pending Ortex material")
+            pending_batch_hashes = tuple(
+                row.batch_sha256 for row in pending_ortex
+            )
+            for row in pending_ortex:
+                prior = self._pending_ortex_manifests_by_batch.get(
+                    row.batch_sha256
+                )
+                if prior is not None and (
+                    prior.payload != row.payload
+                    or prior.window_start != row.window_start
+                    or prior.window_end != row.window_end
+                ):
+                    _fail("same Ortex batch hash carries different material")
             envelope = {
                 "schema_version": QUEUE_EVENT_SCHEMA_VERSION,
                 "queue_identity_sha256": self.identity.identity_sha256,
@@ -1295,6 +1645,10 @@ class CapturedPaperSelectionQueuePublisher:
                 provider=QUEUE_PROVIDER,
                 symbol=bundle.symbol,
             )
+            retained_key, retained_bytes = self._stage_pending_ortex_sequence(
+                source_sequence=bundle.source_sequence,
+                pending_ortex=pending_ortex,
+            )
             # Admission owns the final fail-closed pressure/capacity check, but
             # canonical payload sizing and event hashing can take seconds for a
             # full captured selection envelope.  Give the initial-start caller
@@ -1304,7 +1658,19 @@ class CapturedPaperSelectionQueuePublisher:
             event_size = queue_event.canonical_size_bytes
             event_sha256 = queue_event.event_sha256
             if before_ingress_admission is None:
-                accepted = self.ingress.submit(queue_event)
+                try:
+                    accepted = self.ingress.submit(
+                        queue_event,
+                        retained_key=retained_key,
+                        retained_bytes=retained_bytes,
+                    )
+                except Exception:
+                    self._rollback_pending_ortex_sequence(
+                        bundle.source_sequence
+                    )
+                    raise
+                if accepted and retained_key is not None:
+                    self._pending_ortex_retained_batches.add(retained_key)
                 return self._finish_publish(
                     bundle=bundle,
                     event_sha256=event_sha256,
@@ -1335,6 +1701,9 @@ class CapturedPaperSelectionQueuePublisher:
                             "queue_ingress_rejected:"
                             f"{last_attempt.rejection_reason}"
                         )
+                    self._rollback_pending_ortex_sequence(
+                        bundle.source_sequence
+                    )
                     self._active_publish_event_sha256 = None
                 raise
             with self._lock:
@@ -1354,10 +1723,26 @@ class CapturedPaperSelectionQueuePublisher:
                             "queue_ingress_rejected:"
                             f"{last_attempt.rejection_reason}"
                         )
+                    self._rollback_pending_ortex_sequence(
+                        bundle.source_sequence
+                    )
                     self._active_publish_event_sha256 = None
                     _fail("queue publish reservation changed during admission")
-                attempt = self.ingress.try_submit_retained(queue_event)
+                try:
+                    attempt = self.ingress.try_submit_retained(
+                        queue_event,
+                        retained_key=retained_key,
+                        retained_bytes=retained_bytes,
+                    )
+                except Exception:
+                    self._rollback_pending_ortex_sequence(
+                        bundle.source_sequence
+                    )
+                    self._active_publish_event_sha256 = None
+                    raise
                 if attempt.accepted:
+                    if retained_key is not None:
+                        self._pending_ortex_retained_batches.add(retained_key)
                     return self._finish_publish(
                         bundle=bundle,
                         event_sha256=event_sha256,
@@ -1378,6 +1763,56 @@ class CapturedPaperSelectionQueuePublisher:
                         rejection_reason=attempt.rejection_reason,
                     )
                 rejection_reason = attempt.rejection_reason
+
+    def _rollback_pending_ortex_sequence(self, source_sequence: int) -> None:
+        batch_hashes = self._pending_ortex_batches_by_sequence.pop(
+            source_sequence, ()
+        )
+        for batch_sha256 in batch_hashes:
+            refcount = self._pending_ortex_batch_refcounts.get(batch_sha256)
+            if refcount is None or refcount <= 0:
+                _fail("pending Ortex manifest refcount is malformed")
+            if refcount == 1:
+                self._pending_ortex_batch_refcounts.pop(batch_sha256)
+                pending = self._pending_ortex_manifests_by_batch.pop(
+                    batch_sha256, None
+                )
+                if pending is None:
+                    _fail("pending Ortex manifest material is missing")
+                if batch_sha256 in self._pending_ortex_retained_batches:
+                    self.ingress.release_retained(
+                        identity_sha256=self.identity.identity_sha256,
+                        retained_key=batch_sha256,
+                        expected_bytes=pending.payload_bytes,
+                    )
+                    self._pending_ortex_retained_batches.remove(batch_sha256)
+            else:
+                self._pending_ortex_batch_refcounts[batch_sha256] = refcount - 1
+
+    def _release_pending_ortex_after_writer_failure(self) -> None:
+        """Release bounded RAM only after the writer is terminally fenced.
+
+        Failed writer events are never retried in this publisher instance.
+        Their orphaned content-addressed files remain uncommitted and invisible;
+        a fresh publisher may safely reuse those exact bytes on restart.
+        """
+
+        with self._lock:
+            pending = tuple(
+                row
+                for row in self._pending_ortex_manifests_by_batch.values()
+                if row.batch_sha256 in self._pending_ortex_retained_batches
+            )
+            for row in pending:
+                self.ingress.release_retained(
+                    identity_sha256=self.identity.identity_sha256,
+                    retained_key=row.batch_sha256,
+                    expected_bytes=row.payload_bytes,
+                )
+            self._pending_ortex_manifests_by_batch.clear()
+            self._pending_ortex_batch_refcounts.clear()
+            self._pending_ortex_batches_by_sequence.clear()
+            self._pending_ortex_retained_batches.clear()
 
     def heartbeat(self, *, watermark_at: datetime) -> CapturedPaperSelectionQueueHealth:
         with self._lock:
@@ -1487,12 +1922,110 @@ class CapturedPaperSelectionQueuePublisher:
             if watermark > now:
                 _fail("queue commit watermark is in the future")
             refs = tuple(CaptureEventRef.from_event(event) for event in events)
+            pending_by_batch: dict[str, _PendingOrtexManifest] = {}
+            for event in events:
+                raw_event = _mapping(event.payload, "queue event payload")
+                raw_sources = raw_event.get("source_events")
+                if not isinstance(raw_sources, list):
+                    _fail("queue source event inventory is malformed")
+                compact_batch_hashes = []
+                for raw_source in raw_sources:
+                    source_envelope = _mapping(
+                        raw_source, "source event envelope"
+                    )
+                    pointer = source_envelope.get("ortex_manifest_ref")
+                    if pointer is None:
+                        continue
+                    pointer = _mapping(pointer, "Ortex manifest ref")
+                    _exact_fields(
+                        pointer,
+                        {
+                            "schema_version",
+                            "kind",
+                            "batch_sha256",
+                            "window_start",
+                            "window_end",
+                        },
+                        "Ortex manifest ref",
+                    )
+                    if (
+                        pointer.get("schema_version")
+                        != QUEUE_ORTEX_MANIFEST_REF_SCHEMA_VERSION
+                        or pointer.get("kind")
+                        != QUEUE_ORTEX_MANIFEST_DERIVED_KIND
+                    ):
+                        _fail("Ortex manifest ref schema/kind mismatch")
+                    compact_batch_hashes.append(
+                        _sha(
+                            pointer.get("batch_sha256"),
+                            "Ortex manifest ref batch SHA256",
+                        )
+                    )
+                pending_hashes = self._pending_ortex_batches_by_sequence.get(
+                    event.sequence
+                )
+                if pending_hashes is None:
+                    _fail("queue writer lost pending Ortex manifest ownership")
+                if compact_batch_hashes != list(pending_hashes):
+                    _fail("queue compact/full Ortex manifest inventory mismatch")
+                for batch_sha256 in pending_hashes:
+                    row = self._pending_ortex_manifests_by_batch.get(
+                        batch_sha256
+                    )
+                    if row is None:
+                        _fail("queue writer lost content-addressed Ortex material")
+                    prior = pending_by_batch.get(batch_sha256)
+                    if prior is not None and (
+                        prior.payload != row.payload
+                        or prior.window_start != row.window_start
+                        or prior.window_end != row.window_end
+                    ):
+                        _fail("same Ortex batch hash carries different material")
+                    pending_by_batch[batch_sha256] = row
+
+            ortex_manifest_refs: list[RetentionObjectRef] = []
+            for batch_sha256 in sorted(pending_by_batch):
+                pending = pending_by_batch[batch_sha256]
+                manifest_ref = store.put_derived_artifact(
+                    identity=self.identity,
+                    kind=QUEUE_ORTEX_MANIFEST_DERIVED_KIND,
+                    window_start=pending.window_start,
+                    window_end=pending.window_end,
+                    payload=pending.payload,
+                )
+                verified_manifest = ContentAddressedCaptureStore.read_derived_ref(
+                    store.root,
+                    manifest_ref,
+                )
+                if (
+                    verified_manifest.get("identity") != self.identity.to_dict()
+                    or verified_manifest.get("kind")
+                    != QUEUE_ORTEX_MANIFEST_DERIVED_KIND
+                    or verified_manifest.get("window_start")
+                    != _iso(pending.window_start)
+                    or verified_manifest.get("window_end")
+                    != _iso(pending.window_end)
+                    or verified_manifest.get("payload_sha256") != batch_sha256
+                    or not isinstance(verified_manifest.get("payload"), Mapping)
+                    or sha256_json(verified_manifest["payload"]) != batch_sha256
+                ):
+                    _fail("persisted Ortex manifest wrapper is invalid")
+                # The queue commit must never become durable before the
+                # immutable manifest it pins.  This exact-ref fsync also
+                # handles an idempotent restart which found an orphan created
+                # before the prior process could flush it.
+                store.sync_derived_ref(manifest_ref)
+                ortex_manifest_refs.append(manifest_ref)
+            immutable_ortex_refs = tuple(
+                sorted(ortex_manifest_refs, key=lambda ref: ref.sha256)
+            )
             index = self._commit_count + 1
             cumulative = _expected_cumulative(
                 self._last_cumulative_sha256,
                 commit_index=index,
                 event_refs=refs,
                 gaps=gap_rows,
+                ortex_manifest_refs=immutable_ortex_refs,
             )
             poison_reason = None
             if gap_rows:
@@ -1523,6 +2056,7 @@ class CapturedPaperSelectionQueuePublisher:
                 event_chunks=event_chunks,
                 gaps=gap_rows,
                 gap_chunks=gap_chunks,
+                ortex_manifest_refs=immutable_ortex_refs,
                 poisoned=bool(gap_rows),
                 poison_reason=poison_reason,
                 watermark_at=watermark,
@@ -1564,6 +2098,47 @@ class CapturedPaperSelectionQueuePublisher:
             self._last_commit_sha256 = loaded.object_ref.sha256
             self._last_cumulative_sha256 = commit.cumulative_sha256
             self._watermark_at = commit.watermark_at
+            release_manifests: list[_PendingOrtexManifest] = []
+            for source_sequence in range(
+                commit.event_sequence_from_exclusive + 1,
+                commit.event_sequence_through + 1,
+            ):
+                batch_hashes = self._pending_ortex_batches_by_sequence.pop(
+                    source_sequence, None
+                )
+                if batch_hashes is None:
+                    _fail("durable commit lost pending Ortex sequence ownership")
+                for batch_sha256 in batch_hashes:
+                    refcount = self._pending_ortex_batch_refcounts.get(
+                        batch_sha256
+                    )
+                    if refcount is None or refcount <= 0:
+                        _fail("pending Ortex manifest refcount is malformed")
+                    if refcount == 1:
+                        self._pending_ortex_batch_refcounts.pop(batch_sha256)
+                        pending = self._pending_ortex_manifests_by_batch.pop(
+                            batch_sha256, None
+                        )
+                        if pending is None:
+                            _fail(
+                                "durable commit lost content-addressed Ortex material"
+                            )
+                        release_manifests.append(pending)
+                    else:
+                        self._pending_ortex_batch_refcounts[batch_sha256] = (
+                            refcount - 1
+                        )
+            for pending in release_manifests:
+                if pending.batch_sha256 not in self._pending_ortex_retained_batches:
+                    _fail("durable commit lost retained Ortex ownership")
+                self.ingress.release_retained(
+                    identity_sha256=self.identity.identity_sha256,
+                    retained_key=pending.batch_sha256,
+                    expected_bytes=pending.payload_bytes,
+                )
+                self._pending_ortex_retained_batches.remove(
+                    pending.batch_sha256
+                )
             durable_at = float(self.monotonic_clock())
             if not math.isfinite(durable_at):
                 _fail("queue monotonic clock returned a non-finite value")
@@ -1679,6 +2254,11 @@ class CapturedPaperSelectionQueueWriter:
         )
         if (
             not worker_health["writer_alive"]
+            and worker_health.get("last_error") is not None
+        ):
+            self.publisher._release_pending_ortex_after_writer_failure()
+        if (
+            not worker_health["writer_alive"]
             and self._worker.ingress.drained
         ):
             self.publisher.writer_lease.release()
@@ -1747,8 +2327,14 @@ def _verify_commit_gaps(root: Path, loaded: _LoadedCommit) -> None:
 def _verify_queue_event(
     event: CaptureEvent,
     *,
+    root: Path,
+    loaded_commit: _LoadedCommit,
     queue_identity: CaptureRunIdentity,
     selection_authority: CapturedPaperSelectionAuthority,
+    manifest_cache: dict[
+        str, tuple[Mapping[str, Any], RetentionObjectRef]
+    ],
+    budget_check: Callable[[], None],
 ) -> tuple[CapturedViabilityInputBundle, CapturedViabilityScoreResult]:
     if (
         event.identity != queue_identity
@@ -1803,14 +2389,15 @@ def _verify_queue_event(
         _fail("queue source event ref inventory is malformed")
     if raw.get("source_event_inventory_sha256") != sha256_json(raw_refs):
         _fail("queue source event inventory hash mismatch")
-    source_refs = _validate_compact_source_evidence(
+    source_refs, source_events = _validate_compact_source_evidence(
         bundle,
         raw_refs=raw_refs,
         raw_events=raw_sources,
-    )
-    source_events = tuple(
-        _event_from_envelope(_mapping(value, "source event envelope"))
-        for value in raw_sources
+        root=root,
+        queue_identity=queue_identity,
+        loaded_commit=loaded_commit,
+        manifest_cache=manifest_cache,
+        budget_check=budget_check,
     )
     source_identity = source_events[0].identity
     if (
@@ -2134,6 +2721,10 @@ class CapturedPaperSelectionQueueInputPort:
             routes: set[tuple[str, int]] = set()
             used_bytes = 0
             bounded_stop = False
+            ortex_manifest_cache: dict[
+                str, tuple[Mapping[str, Any], RetentionObjectRef]
+            ] = {}
+            charged_ortex_refs: set[tuple[str, str, int]] = set()
             first_unread_commit = bisect_right(
                 chain,
                 frontier.last_source_sequence,
@@ -2150,29 +2741,54 @@ class CapturedPaperSelectionQueueInputPort:
                 for event in self._materialize_commit_events_once(loaded):
                     if event.sequence <= frontier.last_source_sequence:
                         continue
+                    event_bytes = event.canonical_size_bytes
+                    current_ortex_ref_keys = {
+                        (ref.sha256, ref.relative_path, ref.bytes)
+                        for ref in loaded.commit.ortex_manifest_refs
+                    }
+                    new_ortex_bytes = sum(
+                        ref.bytes
+                        for ref in loaded.commit.ortex_manifest_refs
+                        if (
+                            ref.sha256,
+                            ref.relative_path,
+                            ref.bytes,
+                        )
+                        not in charged_ortex_refs
+                    )
+                    prospective_bytes = (
+                        used_bytes + event_bytes + new_ortex_bytes
+                    )
+                    if not selected and prospective_bytes > self.max_batch_bytes:
+                        raise CapturedPaperSelectionQueueUnavailable(
+                            "next committed queue event and Ortex manifest "
+                            "exceed batch byte limit"
+                        )
+                    if selected and (
+                        len(selected) >= self.max_batch_events
+                        or prospective_bytes > self.max_batch_bytes
+                    ):
+                        bounded_stop = True
+                        break
                     bundle, result = _verify_queue_event(
                         event,
+                        root=self.root,
+                        loaded_commit=loaded,
                         queue_identity=self.queue_identity,
                         selection_authority=self.selection_authority,
+                        manifest_cache=ortex_manifest_cache,
+                        budget_check=budget_check,
                     )
-                    event_bytes = event.canonical_size_bytes
-                    if not selected and event_bytes > self.max_batch_bytes:
-                        raise CapturedPaperSelectionQueueUnavailable(
-                            "next committed queue event exceeds batch byte limit"
-                        )
                     observation = (
                         result.observation if result.status == SCORED else None
                     )
                     route = (bundle.symbol, bundle.variant_id)
-                    if selected and (
-                        len(selected) >= self.max_batch_events
-                        or used_bytes + event_bytes > self.max_batch_bytes
-                        or route in routes
-                    ):
+                    if selected and route in routes:
                         bounded_stop = True
                         break
                     selected.append((event, loaded, bundle, result))
-                    used_bytes += event_bytes
+                    used_bytes = prospective_bytes
+                    charged_ortex_refs.update(current_ortex_ref_keys)
                     routes.add(route)
                     if observation is not None:
                         observations.append(observation)

@@ -180,10 +180,12 @@ def test_migration_355_handles_old_partial_current_and_reapply(db):
 
 def test_migration_355_is_registered_once_after_354():
     ids = [version_id for version_id, _ in migrations.MIGRATIONS]
-    assert ids[-2:] == [
-        "354_alpaca_exit_owner_and_post_settlement_exit_v2",
-        "355_ortex_monthly_request_authority",
-    ]
+    current = "355_ortex_monthly_request_authority"
+    assert ids.count(current) == 1
+    index = ids.index(current)
+    assert ids[index - 1] == (
+        "354_alpaca_exit_owner_and_post_settlement_exit_v2"
+    )
     assert ids.count("355_ortex_monthly_request_authority") == 1
     migrations._assert_migration_ids_unique()
 

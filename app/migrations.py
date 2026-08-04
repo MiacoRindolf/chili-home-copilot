@@ -32524,6 +32524,108 @@ def _migration_355_ortex_monthly_request_authority(conn) -> None:
     _verify_migration_355_physical_contract(conn)
 
 
+def _migration_356_momentum_viability_desk_indexes(conn) -> None:
+    """Index the momentum-desk read-model queries on momentum_symbol_viability.
+
+    Without these, `_viability_durable_stats` (brain desk/summary endpoints)
+    seq-scans the full heap per request: top-5 `ORDER BY viability_score DESC`
+    measured 48.8s and the eligibility counts 7.1s on the prod table
+    (121k live rows / 1.6GB heap from update churn) — the operator-facing
+    endpoints hung past 45s. Both indexes are tiny (score + two booleans).
+    """
+    conn.execute(
+        text(
+            "CREATE INDEX IF NOT EXISTS ix_msvi_score_desc "
+            "ON momentum_symbol_viability (viability_score DESC)"
+        )
+    )
+    conn.execute(
+        text(
+            "CREATE INDEX IF NOT EXISTS ix_msvi_eligibility "
+            "ON momentum_symbol_viability (live_eligible, paper_eligible)"
+        )
+    )
+
+
+def _migration_357_momentum_viability_index_dedupe_and_autovacuum(conn) -> None:
+    """Dedupe ``momentum_symbol_viability`` indexes + pin absolute-threshold autovacuum.
+
+    The table is a ~122k-row UPSERT-churn current-state store (one row per
+    symbol x variant, rewritten on every viability tick) that grew to 7.8 GB:
+    1.68 GB heap + 5.8 GB TOAST against only ~477 MB of LIVE JSONB payload
+    (measured 2026-08-02) -- i.e. >90% accumulated dead-tuple bloat. Every
+    update also wrote 16 indexes with ZERO HOT updates (``n_tup_hot_upd=0``
+    over 1.1M updates) because ``freshness_ts`` is indexed and changes each
+    tick. Two schema-level fixes here (the heap/TOAST reclaim itself is a
+    maintenance-window rewrite -- see ``scripts/reclaim_momentum_viability.sql``
+    -- and the ongoing JSONB slim lives in ``data_retention.py``):
+
+    1. Drop exact-duplicate indexes (verified identical definitions +
+       ``pg_stat_user_indexes``): the ORM historically declared ``index=True``
+       on ``id``/``freshness_ts``/``correlation_id`` (auto-named
+       ``ix_momentum_symbol_viability_*`` via ``create_all``) while the table
+       migrations created the same indexes under ``ix_msvi_*`` names -- both
+       sets existed in prod, doubling write amplification on those columns.
+       ``ix_momentum_symbol_viability_id`` additionally duplicates the primary
+       key outright. The migration-named copy is dropped ONLY when its
+       model-named twin exists: a prod-shaped fresh install (table created by
+       migration, never ``create_all``) only ever has the ``ix_msvi_*`` copy,
+       which must survive there as the sole index on its column.
+
+    2. Pin per-table AND per-TOAST autovacuum to absolute thresholds (mig301
+       precedent): the default 20%-of-reltuples trigger let dead TOAST chunks
+       accumulate between passes under the tick firehose. 10k dead tuples is
+       roughly one active market-day's row churn at the measured cadence
+       (~26k rows touched over the trailing 1-7d freshness window), so a pass
+       triggers a few times per trading day and stays small.
+    """
+    if "momentum_symbol_viability" not in _tables(conn):
+        conn.commit()
+        return
+
+    present = {
+        str(r[0])
+        for r in conn.execute(
+            text(
+                "SELECT indexname FROM pg_indexes "
+                "WHERE tablename = 'momentum_symbol_viability'"
+            )
+        ).fetchall()
+    }
+
+    # The primary key always indexes ``id``; this was a full second copy.
+    conn.execute(text("DROP INDEX IF EXISTS ix_momentum_symbol_viability_id"))
+
+    # Exact-duplicate pairs: drop the migration-named copy only when the
+    # model-named twin exists (see docstring point 1).
+    for doomed, twin in (
+        ("ix_msvi_corr", "ix_momentum_symbol_viability_correlation_id"),
+        ("ix_msvi_freshness", "ix_momentum_symbol_viability_freshness_ts"),
+    ):
+        if twin in present:
+            conn.execute(text(f"DROP INDEX IF EXISTS {doomed}"))
+
+    conn.execute(text("""
+        ALTER TABLE momentum_symbol_viability SET (
+            autovacuum_vacuum_scale_factor = 0,
+            autovacuum_vacuum_threshold = 10000,
+            autovacuum_analyze_scale_factor = 0,
+            autovacuum_analyze_threshold = 10000,
+            autovacuum_vacuum_cost_delay = 0,
+            toast.autovacuum_vacuum_scale_factor = 0,
+            toast.autovacuum_vacuum_threshold = 10000,
+            toast.autovacuum_vacuum_cost_delay = 0
+        )
+    """))
+
+    conn.commit()
+    logger.info(
+        "[mig357] deduped momentum_symbol_viability indexes (pkey copy + "
+        "ix_msvi_corr/ix_msvi_freshness twins) + pinned absolute-threshold "
+        "autovacuum incl. TOAST"
+    )
+
+
 MIGRATIONS = [
     ("001_add_email", _migration_001_add_email),
     ("002_add_image_path", _migration_002_add_image_path),
@@ -32994,6 +33096,10 @@ MIGRATIONS = [
      _migration_354_alpaca_exit_owner_and_post_settlement_exit_v2),
     ("355_ortex_monthly_request_authority",
      _migration_355_ortex_monthly_request_authority),
+    ("356_momentum_viability_desk_indexes",
+     _migration_356_momentum_viability_desk_indexes),
+    ("357_momentum_viability_index_dedupe_and_autovacuum",
+     _migration_357_momentum_viability_index_dedupe_and_autovacuum),
 ]
 
 

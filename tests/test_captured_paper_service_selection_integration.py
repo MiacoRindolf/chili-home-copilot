@@ -484,6 +484,10 @@ def test_real_service_selection_lifecycle_primes_reads_and_rolls_back(
         chili_momentum_captured_paper_trigger_retry_delay_seconds=0.01,
         chili_momentum_captured_paper_trigger_future_tolerance_seconds=1.0,
         chili_momentum_captured_paper_trigger_exact_print_window_seconds=0.001,
+        # This fixture exercises service lifecycle/rollback with a legacy
+        # viability seed.  Ortex v2 default-ON captured selection is covered by
+        # the dedicated sealed source, pipeline, and parity integration suites.
+        chili_momentum_squeeze_fuel_tilt_enabled=False,
         chili_tenbeat_entry_tilt_weight=0.0,
     )
     fundamentals_calls: list[str] = []

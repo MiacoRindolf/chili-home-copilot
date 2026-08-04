@@ -61,6 +61,7 @@ try:
         SubscriptionConnectionIndeterminate,
         TargetCause,
         TargetResolution,
+        WatchCapacityGovernor,
         active_capture_symbols,
         require_complete_source_inventory,
         resolve_subscription_target,
@@ -73,6 +74,7 @@ except ModuleNotFoundError:  # direct ``python scripts/...`` host invocation
         SubscriptionConnectionIndeterminate,
         TargetCause,
         TargetResolution,
+        WatchCapacityGovernor,
         active_capture_symbols,
         require_complete_source_inventory,
         resolve_subscription_target,
@@ -223,13 +225,16 @@ IGNITION_CHANNEL = (
 IGNITION_SCHEMA_VERSION = "chili.iqfeed-ignition-nominate.v1"
 # --- Version-agnostic-backtest coverage (STEP 0): watch the ELIGIBLE-MOVER universe (the names ANY momentum
 # version could pick — ranked by explosiveness), not just armed names, so a backtest of a NEW version has
-# prints to fill against. The working cap is SELF-DISCOVERED: start at WATCH_HARD_MAX, HALVE on an IQFeed
-# symbol-limit signal (the rail-governor pattern), floored at WATCH_FLOOR — no need to know the plan's limit
-# up front. The fresh-eligible set is the natural ceiling (usually a few hundred), so the cap rarely binds.
+# prints to fill against. The working cap is SELF-DISCOVERED: start at WATCH_HARD_MAX, halve the configured
+# cap on an IQFeed symbol-limit signal, then probe one slot after each quiet interval. A failed probe returns
+# to the prior stable cap. The fresh-eligible set is the natural ceiling (usually a few hundred).
 # One documented base (WATCH_FLOOR); the cap is adaptive. Retention raised 3d->30d so we can backtest N days.
 RETENTION_DAYS = float(os.environ.get("IQFEED_TRADE_RETENTION_DAYS", "30") or 30)
 WATCH_FLOOR = int(os.environ.get("IQFEED_WATCH_FLOOR", "64") or 64)          # the ONE documented base
 WATCH_HARD_MAX = int(os.environ.get("IQFEED_WATCH_HARD_MAX", "1000") or 1000)  # backstop only
+WATCH_RECOVERY_QUIET_S = float(
+    os.environ.get("IQFEED_WATCH_RECOVERY_QUIET_SECONDS", "300") or 300
+)
 # STANDING-WATCH WIDENING (2026-07-17, PIT-measured): the 1800s freshness window let
 # eligible movers flicker OUT of the roster between snapshot passes, so the ignition
 # detector had no eyes on re-igniters (PLSM re-spiked +17% at 12:25 UTC). One documented
@@ -237,7 +242,7 @@ WATCH_HARD_MAX = int(os.environ.get("IQFEED_WATCH_HARD_MAX", "1000") or 1000)  #
 # + viability-score ranking + the adaptive IQFeed-limit governor. Measured 2026-07-17:
 # 24h-eligible = 363 distinct symbols; roster peak over the prior week = 259/hour;
 # premarket usage 9-61/hour — comfortably inside the ~500 IQFeed L1 watch limit that
-# the rail-governor self-discovers (WATCH_HARD_MAX start, halve-on-limit-signal).
+# the rail-governor self-discovers (WATCH_HARD_MAX start, bounded backoff/recovery).
 ELIGIBLE_FRESH_S = float(os.environ.get("IQFEED_ELIGIBLE_FRESH_SECONDS", "86400") or 86400)  # standing-watch window (floor)
 # These default-layout positions remain only for legacy diagnostic fixtures.
 # Production ``reader`` requires an exact, generation-bound selected-field
@@ -1517,8 +1522,15 @@ def _emit_ignition_notifications(connection) -> int:
     return len(payloads)
 _last_trade: dict[str, str] = {}        # symbol -> last seen Most-Recent-Trade-Time (dedup key)
 watched: set[str] = set()
-_max_watch = WATCH_HARD_MAX             # adaptive watch cap; halved on an IQFeed limit signal, floored at WATCH_FLOOR
+_watch_capacity = WatchCapacityGovernor.start(
+    cap=WATCH_HARD_MAX,
+    floor=WATCH_FLOOR,
+    hard_max=WATCH_HARD_MAX,
+    quiet_interval_seconds=WATCH_RECOVERY_QUIET_S,
+    now=time.monotonic(),
+)
 _limit_hit = False                      # set by the reader thread when IQFeed signals a symbol limit
+_limit_hit_lock = threading.Lock()
 sock_lock = threading.Lock()
 _connection_state_lock = threading.Lock()
 _active_connection_generation = 0
@@ -1529,6 +1541,56 @@ _protocol_acknowledged_generations: set[int] = set()
 _selected_fields_ack_sha256_by_generation: dict[int, str] = {}
 _capture_handoff_lock = threading.Lock()
 _capture_handoff: Any | None = None
+
+
+def _mark_watch_limit_hit() -> None:
+    global _limit_hit
+    with _limit_hit_lock:
+        _limit_hit = True
+
+
+def _consume_watch_limit_hit() -> bool:
+    global _limit_hit
+    with _limit_hit_lock:
+        limit_hit = bool(_limit_hit)
+        _limit_hit = False
+        return limit_hit
+
+
+def _advance_watch_capacity(
+    *,
+    now: float,
+    capacity_pressure: bool,
+    at_capacity: bool,
+) -> tuple[WatchCapacityGovernor, WatchCapacityGovernor, bool]:
+    global _watch_capacity
+    previous = _watch_capacity
+    limit_hit = _consume_watch_limit_hit()
+    _watch_capacity = previous.advance(
+        now=now,
+        limit_hit=limit_hit,
+        capacity_pressure=capacity_pressure,
+        at_capacity=at_capacity,
+    )
+    return previous, _watch_capacity, limit_hit
+
+
+def _start_watch_capacity_connection(
+    *,
+    now: float,
+) -> tuple[WatchCapacityGovernor, WatchCapacityGovernor, bool]:
+    global _watch_capacity
+    previous = _watch_capacity
+    limit_hit = _consume_watch_limit_hit()
+    if limit_hit:
+        _watch_capacity = _watch_capacity.advance(
+            now=now,
+            limit_hit=True,
+            capacity_pressure=True,
+            at_capacity=True,
+        )
+    _watch_capacity = _watch_capacity.connection_started(now=now)
+    return previous, _watch_capacity, limit_hit
 
 
 class _ReaderQuiescenceError(RuntimeError):
@@ -2231,7 +2293,6 @@ def reader(
     stop_event: threading.Event,
     connection_generation: int,
 ) -> None:
-    global _limit_hit
     buf = b""
     seen = 0
     while _connection_generation_active(connection_generation, stop_event):
@@ -2322,7 +2383,7 @@ def reader(
                         )
                 elif any(k in line.upper() for k in ("SYMBOL LIMIT", "MAX SYMBOL", "LIMIT REACHED", "TOO MANY SYMBOL")):
                     if _connection_generation_active(connection_generation, stop_event):
-                        _limit_hit = True            # current writer halves its watch-set on this signal
+                        _mark_watch_limit_hit()
                     log.warning("IQFeed symbol-limit signal: %s", line[:160])
                 else:
                     log.info("feed: %s", line[:160])
@@ -2426,8 +2487,17 @@ def writer(
     stop_event: threading.Event,
     connection_generation: int,
 ) -> None:
-    global _max_watch, _limit_hit
+    global _watch_capacity
     last_refresh = 0.0
+    previous_capacity, current_capacity, pending_limit = (
+        _start_watch_capacity_connection(now=time.monotonic())
+    )
+    if pending_limit:
+        log.warning(
+            "IQFeed pending symbol limit applied before reconnect %d -> %d",
+            previous_capacity.cap,
+            current_capacity.cap,
+        )
     # Defer the first hourly retention sweep to one hour after connect: with
     # last_prune=0.0 it ran on the FIRST loop iteration, and its observed_at-only
     # DELETE full-scans iqfeed_trade_ticks (~128M rows, 139s live-measured
@@ -2451,9 +2521,10 @@ def writer(
         )
     }
     pending_backlog = False
+    capacity_pressure = False
 
     def reconcile(*, allow_unwatch: bool, sticky: bool = False) -> None:
-        nonlocal prior_causes, hot_symbols
+        nonlocal prior_causes, hot_symbols, capacity_pressure
         reads = (
             [SourceRead.success(TargetCause.FORCED, forced_syms)]
             if forced_syms
@@ -2462,7 +2533,10 @@ def writer(
         resolution = _resolve_target(
             reads=reads,
             prior_causes=prior_causes,
-            capacity=max(_max_watch, len(forced_syms)),
+            capacity=max(_watch_capacity.cap, len(forced_syms)),
+        )
+        capacity_pressure = any(
+            gap.code == "capacity_eviction" for gap in resolution.gaps
         )
         _log_subscription_gaps("iqfeed_l1", resolution.gaps)
         target_causes = resolution.causes_by_symbol
@@ -2556,7 +2630,7 @@ def writer(
             last_fast_sub = time.monotonic()
             source_reads[TargetCause.HINT] = _alert_symbols_read(
                 SUBSCRIBE_FRESH_WINDOW_S,
-                limit=_max_watch,
+                limit=_watch_capacity.source_read_limit,
             )
             reconcile(allow_unwatch=True)
         # retention prune (the exit_parity_log bloat lesson): a rolling research window, not an archive
@@ -2583,22 +2657,38 @@ def writer(
                 log.debug("subscribe-requests prune failed: %s", e)
             last_prune = time.monotonic()
         if time.monotonic() - last_refresh >= REFRESH_S:
-            if _limit_hit:                          # adaptive: IQFeed signalled its symbol limit -> back off
-                _max_watch = max(WATCH_FLOOR, len(watched) // 2)
-                _limit_hit = False
-                log.warning("IQFeed symbol limit -> capping watch-set to %d", _max_watch)
+            previous_capacity, current_capacity, limit_hit = (
+                _advance_watch_capacity(
+                    now=time.monotonic(),
+                    capacity_pressure=capacity_pressure,
+                    at_capacity=len(watched) >= _watch_capacity.cap,
+                )
+            )
+            if limit_hit:
+                log.warning(
+                    "IQFeed symbol limit -> capping watch-set %d -> %d",
+                    previous_capacity.cap,
+                    current_capacity.cap,
+                )
+            elif current_capacity.cap != previous_capacity.cap:
+                log.info(
+                    "IQFeed watch-cap recovery probe %d -> %d after %.0fs quiet",
+                    previous_capacity.cap,
+                    current_capacity.cap,
+                    WATCH_RECOVERY_QUIET_S,
+                )
             if not forced_syms:
                 source_reads[TargetCause.ACTIVE] = _live_symbols_read()
                 source_reads[TargetCause.ELIGIBLE] = _eligible_symbols_read(
-                    _max_watch
+                    _watch_capacity.source_read_limit
                 )
                 source_reads[TargetCause.ROSS] = _ross_universe_symbols_read(
-                    _max_watch
+                    _watch_capacity.source_read_limit
                 )
                 source_reads[TargetCause.HINT] = (
                     _alert_symbols_read(
                         SUBSCRIBE_FRESH_WINDOW_S,
-                        limit=_max_watch,
+                        limit=_watch_capacity.source_read_limit,
                     )
                     if SUBSCRIBE_ON_ALERT
                     else SourceRead.success(TargetCause.HINT, ())

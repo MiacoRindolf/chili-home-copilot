@@ -194,8 +194,12 @@ def test_non_exact_heartbeat_never_populates_zero_session_runtime(
     assert response.json()["latest_runtime_utc"] is None
 
 
-def test_live_monitor_returns_runtime_pnl_events_and_bounded_candles(paired_client, db):
-    from app.services.trading.momentum_neural.live_monitor import clear_live_monitor_caches
+def test_live_monitor_returns_runtime_pnl_events_and_bounded_candles(
+    paired_client,
+    db,
+    monkeypatch,
+):
+    from app.services.trading.momentum_neural import live_monitor as monitor
 
     client, user = paired_client
     variant = _variant(db)
@@ -304,8 +308,30 @@ def test_live_monitor_returns_runtime_pnl_events_and_bounded_candles(paired_clie
             ),
             {"ts": now - timedelta(minutes=offset), "bid": bid, "ask": ask, "volume": volume},
         )
+    monkeypatch.setattr(
+        monitor,
+        "_captured_watch_inventory",
+        lambda _db, *, user_id, now_utc: (
+            [
+                {
+                    "symbol": "OBS",
+                    "updated_at": now,
+                    "confidence": 0.99,
+                    "strategy": "Must not replace live session strategy",
+                    "route_count": 2,
+                    "policy_eligible_route_count": 2,
+                    "policy_eligible": True,
+                    "last_price": 999.0,
+                    "activation_generation": "11111111-1111-4111-8111-111111111111",
+                    "runtime_heartbeat_at": now,
+                    "runtime_stale": False,
+                }
+            ],
+            {"status": "ok", "heartbeat_at": now},
+        ),
+    )
     db.commit()
-    clear_live_monitor_caches()
+    monitor.clear_live_monitor_caches()
 
     response = client.get("/api/trading/momentum/replay/live")
     assert response.status_code == 200
@@ -315,7 +341,7 @@ def test_live_monitor_returns_runtime_pnl_events_and_bounded_candles(paired_clie
     assert body["observer"]["broker_calls"] == 0
     assert body["observer"]["provider_calls"] == 0
     assert body["observer"]["writes"] == 0
-    assert body["observer"]["quote_row_cap_per_symbol"] == 480
+    assert body["observer"]["quote_row_cap_per_symbol"] == 120
     assert body["totals"] == {
         "realized_usd": 12.0,
         "unrealized_usd": 2.0,
@@ -323,7 +349,12 @@ def test_live_monitor_returns_runtime_pnl_events_and_bounded_candles(paired_clie
         "total_usd": 14.0,
     }
     symbol = next(row for row in body["symbols"] if row["symbol"] == "OBS")
+    assert len([row for row in body["symbols"] if row["symbol"] == "OBS"]) == 1
+    assert body["watching_symbol_count"] == 0
+    assert symbol["card_status"] == "IN POSITION"
     assert symbol["state"] == "live_entered"
+    assert symbol["strategy"] == "Ross momentum"
+    assert symbol["last_price"] == 2.2
     assert symbol["armed"] is False
     assert symbol["positions"][0]["quantity"] == 10.0
     assert symbol["pnl"]["realized_usd"] == 12.0
@@ -370,3 +401,254 @@ def test_minute_bar_series_builds_ohlc_without_external_market_data():
     ]
     bars = _minute_bar_series(rows)
     assert bars["OBS"] == [["14:31", 10.0, 10.5, 9.8, 9.8, 70.0]]
+
+
+def test_live_monitor_adds_captured_paper_watch_chart_without_synthetic_session(
+    paired_client,
+    db,
+    monkeypatch,
+):
+    from app.services.trading.momentum_neural import live_monitor as monitor
+
+    client, _user = paired_client
+    now = datetime.utcnow().replace(second=0, microsecond=0)
+    candidate = {
+        "symbol": "WATCH",
+        "updated_at": now - timedelta(seconds=12),
+        "confidence": 0.91,
+        "strategy": "Breakout continuation",
+        "route_count": 3,
+        "policy_eligible_route_count": 1,
+        "policy_eligible": True,
+        "last_price": 4.25,
+        "activation_generation": "11111111-1111-4111-8111-111111111111",
+        "runtime_heartbeat_at": now - timedelta(seconds=4),
+        "runtime_stale": False,
+    }
+    monkeypatch.setattr(
+        monitor,
+        "_captured_watch_inventory",
+        lambda _db, *, user_id, now_utc: (
+            [candidate],
+            {"status": "ok", "heartbeat_at": candidate["runtime_heartbeat_at"]},
+        ),
+    )
+    db.execute(
+        text(
+            "INSERT INTO momentum_nbbo_spread_tape "
+            "(symbol, observed_at, bid, ask, mid, day_volume, source) "
+            "VALUES ('WATCH', :ts, 4.24, 4.26, 4.25, 1000, 'test')"
+        ),
+        {"ts": now - timedelta(seconds=20)},
+    )
+    db.commit()
+    monitor.clear_live_monitor_caches()
+
+    response = client.get("/api/trading/momentum/replay/live")
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["active_symbol_count"] == 0
+    assert body["watching_symbol_count"] == 1
+    assert body["observer"]["captured_watch_status"] == "ok"
+    assert body["latest_runtime_utc"] is not None
+    assert [row["symbol"] for row in body["symbols"]] == ["WATCH"]
+    watched = body["symbols"][0]
+    assert watched["card_status"] == "SETUP"
+    assert watched["active"] is False
+    assert watched["armed"] is False
+    assert watched["lanes"] == []
+    assert watched["positions"] == []
+    assert watched["events"] == []
+    assert watched["watch"]["policy_eligible"] is True
+    assert body["series"]["WATCH"][-1][4] == 4.25
+
+
+def test_live_monitor_rejects_mutated_captured_viability_observation():
+    from app.services.trading.momentum_neural import live_monitor as monitor
+
+    available_at = datetime(2026, 8, 3, 14, 5, 0)
+    identity = {
+        "expected_account_id": "3e0776af-76cd-4afd-8fe1-f2ee8dc6242f",
+        "runtime_generation": "11111111-1111-4111-8111-111111111111",
+    }
+    row = {
+        "symbol": "WATCH",
+        "variant_id": 7,
+        "latest_source_sequence": 22,
+        "batch_sha256": "b" * 64,
+        "source_event_at": available_at - timedelta(seconds=1),
+        "source_available_at": available_at,
+        "authority_sha256": "a" * 64,
+        "policy_sha256": "c" * 64,
+        "settings_projection_sha256": "d" * 64,
+        "code_build_sha256": "e" * 64,
+        "variant_set_sha256": "f" * 64,
+        "viability_score": 0.75,
+        "paper_eligible": False,
+        "live_eligible": False,
+        "route_count": 1,
+        "policy_eligible_route_count": 0,
+        "freshness_ts": available_at,
+        "regime_snapshot_json": {},
+        "correlation_id": "watch-correlation",
+        "family": "ross_momentum",
+        "label": "Breakout continuation",
+    }
+    observation = {
+        "schema_version": "chili.captured-paper-selection-observation.v1",
+        "source_sequence": 22,
+        "source_event_at": "2026-08-03T14:04:59Z",
+        "source_available_at": "2026-08-03T14:05:00Z",
+        "symbol": "WATCH",
+        "variant_id": 7,
+        "viability_score": 0.75,
+        "paper_eligible": False,
+        "live_eligible": False,
+        "regime_snapshot_json": {},
+        "execution_readiness_json": {},
+        "explain_json": {},
+        "evidence_window_json": {},
+        "correlation_id": "watch-correlation",
+    }
+    row["evidence_sha256"] = monitor._sha256_json(observation)
+    provenance = {
+        "schema_version": "chili.captured-paper-selection-viability-provenance.v1",
+        "account_scope": "alpaca:paper",
+        "expected_account_id": identity["expected_account_id"],
+        "activation_generation": identity["runtime_generation"],
+        "authority_sha256": row["authority_sha256"],
+        "policy_sha256": row["policy_sha256"],
+        "settings_projection_sha256": row["settings_projection_sha256"],
+        "code_build_sha256": row["code_build_sha256"],
+        "variant_set_sha256": row["variant_set_sha256"],
+        "variant_id": 7,
+        "batch_sha256": row["batch_sha256"],
+        "observation_sha256": row["evidence_sha256"],
+        "source_name": "captured_queue",
+        "source_generation": "22222222-2222-4222-8222-222222222222",
+        "source_sequence": 22,
+        "queue_receipt_sha256": "1" * 64,
+        "coverage_receipt_sha256": "2" * 64,
+        "paper_only_strategy_override": False,
+        "live_cash_authorized": False,
+    }
+    for key in (
+        "execution_readiness_json",
+        "explain_json",
+        "evidence_window_json",
+    ):
+        row[key] = {monitor._CAPTURED_PROVENANCE_KEY: dict(provenance)}
+
+    assert monitor._validated_captured_watch_route(row, identity=identity) is not None
+
+    row["paper_eligible"] = True
+    row["live_eligible"] = True
+    row["policy_eligible_route_count"] = 1
+    assert monitor._validated_captured_watch_route(row, identity=identity) is None
+
+
+def test_live_monitor_binds_v1_heartbeat_to_one_owned_active_paper_generation(
+    paired_client,
+    db,
+    monkeypatch,
+):
+    from app.services.trading.momentum_neural import live_monitor as monitor
+
+    _client, user = paired_client
+    now = datetime.utcnow().replace(microsecond=0)
+    owner = str(uuid.uuid4())
+    runtime_generation = str(uuid.uuid4())
+    db.add(
+        MomentumStrategyVariant(
+            family="ross_momentum",
+            variant_key=f"captured-observer-{runtime_generation[:8]}",
+            label="Captured observer binding",
+            params_json={},
+            is_active=True,
+            execution_family="alpaca_spot",
+            refinement_meta_json={
+                "captured_paper_variant_binding": {
+                    "schema_version": (
+                        "chili.captured-paper-variant-binding-meta.v1"
+                    ),
+                    "account_scope": "alpaca:paper",
+                    "execution_family": "alpaca_spot",
+                    "expected_account_id": (
+                        "3e0776af-76cd-4afd-8fe1-f2ee8dc6242f"
+                    ),
+                    "activation_generation": runtime_generation,
+                    "policy_sha256": "a" * 64,
+                    "settings_projection_sha256": "b" * 64,
+                    "code_build_sha256": "c" * 64,
+                    "bound_at": now.replace(tzinfo=timezone.utc)
+                    .isoformat()
+                    .replace("+00:00", "Z"),
+                    "paper_order_submission_authorized": False,
+                    "live_cash_authorized": False,
+                    "real_money_authorized": False,
+                }
+            },
+        )
+    )
+    db.add(
+        BrainBatchJob(
+            id=str(uuid.uuid4()),
+            job_type=JOB_MOMENTUM_LIVE_LOOP_HEARTBEAT,
+            status="ok",
+            started_at=now - timedelta(seconds=1),
+            ended_at=now,
+            meta_json={
+                "schema": "momentum_live_loop_control_heartbeat_v1",
+                "scope": "tracker_refresh_and_callback_registration",
+                "owner": "momentum_live_runner_loop",
+                "owner_instance_id": owner,
+                "generation": 1,
+                "generation_identity": f"{owner}:1",
+                "generation_started_at_utc": (
+                    (now - timedelta(seconds=10))
+                    .replace(tzinfo=timezone.utc)
+                    .isoformat()
+                    .replace("+00:00", "Z")
+                ),
+            },
+        )
+    )
+    db.commit()
+    monkeypatch.setattr(
+        monitor.settings,
+        "chili_autotrader_user_id",
+        user.id,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        monitor.settings,
+        "chili_alpaca_expected_account_id",
+        "3e0776af-76cd-4afd-8fe1-f2ee8dc6242f",
+        raising=False,
+    )
+
+    identity, status = monitor._captured_runtime_identity(
+        db,
+        user_id=user.id,
+        now_utc=now,
+    )
+
+    assert status == "ok"
+    assert identity is not None
+    assert identity["runtime_generation"] == runtime_generation
+    assert identity["live_cash_authorized"] is False
+
+    monkeypatch.setattr(
+        monitor.settings,
+        "chili_autotrader_user_id",
+        None,
+        raising=False,
+    )
+    identity, status = monitor._captured_runtime_identity(
+        db,
+        user_id=user.id,
+        now_utc=now,
+    )
+    assert identity is None
+    assert status == "captured_watch_user_scope_unconfigured"

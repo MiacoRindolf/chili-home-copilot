@@ -104,6 +104,7 @@ from .captured_paper_selection import (
     resolve_captured_paper_observation,
     resolve_captured_paper_selection,
 )
+from .captured_paper_admission import CAPTURED_PAPER_ADMISSION_SCHEMA_VERSION
 from .captured_paper_entry_intent import CapturedPaperPostCommitRequest
 from .captured_paper_fill_capture import (
     CapturedPaperExitFillPostCommitRequest,
@@ -161,6 +162,8 @@ from .risk_policy import (
     policy_int_cap,
     adaptive_reentry_cooldown_seconds,
     alpaca_paper_hard_loss_cap_usd,
+    chase_defer_decision,
+    rapid_whipsaw_cadence_update,
     reentry_after_stop_allowed,
     reentry_escalation_decision,
     reentry_escalation_level_update,
@@ -439,6 +442,45 @@ _PROCESS_DECISION_RUNTIME_STATE = DecisionRuntimeState()
 _BOUND_DECISION_RUNTIME_STATE: contextvars.ContextVar[
     DecisionRuntimeState | None
 ] = contextvars.ContextVar("_chili_decision_runtime_state", default=None)
+
+
+@dataclass(slots=True)
+class _ReplayOrtexDecisionState:
+    """One-shot sealed Ortex input installed around one historical FSM tick."""
+
+    provider: Callable[[str], Mapping[str, Any]]
+    selection: dict[str, Any] | None = None
+    consumed: bool = False
+
+
+_REPLAY_ORTEX_DECISION_STATE: contextvars.ContextVar[
+    _ReplayOrtexDecisionState | None
+] = contextvars.ContextVar("_chili_replay_ortex_decision_state", default=None)
+
+
+@contextlib.contextmanager
+def replay_ortex_selection_provider(
+    provider: Callable[[str], Mapping[str, Any]],
+) -> Iterator[None]:
+    """Bind one exact sealed Ortex receipt to the real live decision seam.
+
+    The provider is invoked only by the normal live entry guard.  Therefore a
+    replay cannot consume the receipt after the decision or pre-load an input
+    that the current FSM never read.  The process-private state is one-shot and
+    is reset on every exit, including exceptions.
+    """
+
+    if not callable(provider):
+        raise ReplayInputContractError(
+            "sealed_replay_ortex_provider_is_not_callable"
+        )
+    token = _REPLAY_ORTEX_DECISION_STATE.set(
+        _ReplayOrtexDecisionState(provider=provider)
+    )
+    try:
+        yield
+    finally:
+        _REPLAY_ORTEX_DECISION_STATE.reset(token)
 
 
 def _current_decision_runtime_state() -> DecisionRuntimeState:
@@ -1069,17 +1111,39 @@ def _adaptive_alpaca_apply_quarantine_blocker(
     return True
 
 
+def _adaptive_alpaca_precommit_block(
+    sess: Any,
+    le: dict[str, Any],
+    *,
+    reason: str,
+    rejection_reasons: list[str] | None = None,
+) -> dict[str, Any]:
+    le["adaptive_risk_alpaca_lifecycle_blocker"] = {
+        "reason": reason,
+        "recorded_at_utc": _utcnow().isoformat(),
+    }
+    _commit_le(sess, le)
+    return {
+        "ok": False,
+        "error": reason,
+        "rejection_reasons": list(rejection_reasons or ()),
+    }
+
+
 def _ensure_adaptive_alpaca_reservation(
     sess: Any,
     le: dict[str, Any],
     *,
     request_payload: dict[str, Any],
     expected_quantity: int | None = None,
+    claim: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    """Strictly load/replay one request and bind its durable reservation.
+    """Strictly bind one request to an already-committed PAPER reservation.
 
-    ``reserve`` is idempotent by account/CID/request hash, so this same helper is
-    used both at the literal POST boundary and after a process restart.
+    Reservation creation belongs exclusively to the locked captured-PAPER
+    admission transaction.  This helper is used later at the literal transport
+    boundary and after a process restart, where it may verify and load that
+    durable reservation but must never manufacture a second risk authority.
     """
 
     try:
@@ -1104,14 +1168,163 @@ def _ensure_adaptive_alpaca_reservation(
             raise AdaptiveRiskContractError(
                 "adaptive Alpaca reservation identity mismatch"
             )
+        snapshot = getattr(sess, "risk_snapshot_json", None)
+        snapshot = snapshot if isinstance(snapshot, dict) else {}
+        admission = snapshot.get("captured_paper_admission")
+        if not isinstance(admission, dict):
+            return _adaptive_alpaca_precommit_block(
+                sess,
+                le,
+                reason="adaptive_risk_reservation_not_precommitted",
+            )
+        try:
+            admission_quantity = int(admission.get("quantity_shares"))
+            admission_reservation_id = str(
+                uuid.UUID(str(admission.get("reservation_id") or ""))
+            )
+        except (TypeError, ValueError, AttributeError):
+            return _adaptive_alpaca_precommit_block(
+                sess,
+                le,
+                reason="adaptive_risk_precommitted_binding_mismatch",
+            )
+        admission_body = {
+            key: value
+            for key, value in admission.items()
+            if key not in {"admission_record_sha256", "status"}
+        }
+        admission_record_sha256 = str(
+            admission.get("admission_record_sha256") or ""
+        ).strip().lower()
+        if not (
+            admission.get("schema_version")
+            == CAPTURED_PAPER_ADMISSION_SCHEMA_VERSION
+            and admission.get("status") == "admitted_pending_transport"
+            and admission_record_sha256
+            == _captured_paper_sha256(admission_body)
+            and admission.get("reservation_request_sha256")
+            == request.request_sha256
+            and admission.get("account_identity_sha256")
+            == request.inputs.account_identity_sha256
+            and admission_quantity > 0
+            and (
+                expected_quantity is None
+                or admission_quantity == int(expected_quantity)
+            )
+        ):
+            return _adaptive_alpaca_precommit_block(
+                sess,
+                le,
+                reason="adaptive_risk_precommitted_binding_mismatch",
+            )
+        owner = object_session(sess)
+        if owner is None:
+            raise AdaptiveRiskContractError(
+                "adaptive Alpaca reservation requires an attached session"
+            )
+        readable, durable_claim = read_action_claim(
+            owner,
+            symbol=request.inputs.symbol,
+            account_scope=request.account_scope,
+            # This is an authority precheck, not the transport ownership CAS.
+            # Holding the claim row in the outer tick transaction would
+            # self-block the short-session transport-start commit that follows.
+            for_update=False,
+        )
+        durable_claim = durable_claim if isinstance(durable_claim, dict) else {}
+        claim_metadata = durable_claim.get("metadata")
+        claim_metadata = (
+            claim_metadata if isinstance(claim_metadata, dict) else {}
+        )
+        passed_claim_token = (
+            str(claim.get("claim_token") or "").strip()
+            if isinstance(claim, dict)
+            else None
+        )
+        frozen_claim_token = str(
+            snapshot.get("alpaca_symbol_claim_token") or ""
+        ).strip()
+        packet_payload = claim_metadata.get("adaptive_risk_decision_packet")
+        reservation_claim_payload = claim_metadata.get(
+            "adaptive_risk_reservation_claim"
+        )
+        try:
+            verified_claim = load_and_verify_adaptive_risk_reservation_claim(
+                packet_payload,
+                reservation_claim_payload,
+            )
+        except (AdaptiveRiskContractError, TypeError, ValueError):
+            verified_claim = None
+        if not (
+            readable
+            and durable_claim.get("account_scope") == request.account_scope
+            and durable_claim.get("symbol") == request.inputs.symbol
+            and durable_claim.get("action") == "entry"
+            and durable_claim.get("phase") != "resolved"
+            and durable_claim.get("owner_session_id") == int(sess.id)
+            and durable_claim.get("client_order_id") == request.client_order_id
+            and frozen_claim_token
+            and durable_claim.get("claim_token") == frozen_claim_token
+            and (
+                passed_claim_token is None
+                or passed_claim_token == frozen_claim_token
+            )
+            and claim_metadata.get("alpaca_account_id")
+            == frozen_account_id
+            and claim_metadata.get("adaptive_risk_reservation_request")
+            == request.to_payload()
+            and claim_metadata.get("adaptive_risk_reservation_id")
+            == admission_reservation_id
+            and claim_metadata.get(
+                "captured_paper_admission_record_sha256"
+            )
+            == admission_record_sha256
+            and claim_metadata.get("adaptive_input_evidence_sha256")
+            == admission.get("adaptive_input_evidence_sha256")
+            and admission.get("adaptive_input_evidence_sha256")
+            and verified_claim is not None
+            and verified_claim.decision_packet_sha256
+            == admission.get("decision_packet_sha256")
+            and verified_claim.account_identity_sha256
+            == request.inputs.account_identity_sha256
+            and verified_claim.symbol == request.inputs.symbol
+            and verified_claim.quantity_shares == admission_quantity
+        ):
+            return _adaptive_alpaca_precommit_block(
+                sess,
+                le,
+                reason="adaptive_risk_precommitted_claim_mismatch",
+            )
         store = _adaptive_risk_store_for_session(sess)
-        decision = store.reserve(request)
-        if not decision.admission_accepted or decision.reservation_id is None:
-            return {
-                "ok": False,
-                "error": "adaptive_risk_reservation_rejected",
-                "rejection_reasons": list(decision.rejection_reasons),
-            }
+        decision = store.load_existing_alpaca_paper_reservation(request)
+        if (
+            decision is None
+            or not decision.admission_accepted
+            or decision.reservation_id is None
+        ):
+            return _adaptive_alpaca_precommit_block(
+                sess,
+                le,
+                reason="adaptive_risk_reservation_not_precommitted",
+                rejection_reasons=(
+                    []
+                    if decision is None
+                    else list(decision.rejection_reasons)
+                ),
+            )
+        if not (
+            str(decision.reservation_id) == admission_reservation_id
+            and decision.decision_packet_sha256
+            == admission.get("decision_packet_sha256")
+            and decision.client_order_id == request.client_order_id
+            and decision.symbol == request.inputs.symbol
+            and int(decision.quantity_shares) == admission_quantity
+        ):
+            return _adaptive_alpaca_precommit_block(
+                sess,
+                le,
+                reason="adaptive_risk_precommitted_binding_mismatch",
+            )
         if expected_quantity is not None and int(decision.quantity_shares) != int(
             expected_quantity
         ):
@@ -1406,6 +1619,50 @@ def _settle_adaptive_alpaca_cycle_if_complete(
         return pending
 
 
+def _alpaca_cycle_accounting_projection(
+    settlement: dict[str, Any] | None,
+) -> dict[str, Any]:
+    """Expose only the verified append-only settlement row to outcome learning."""
+
+    if not isinstance(settlement, dict) or not settlement.get("ok"):
+        return {
+            "accounting_ready": False,
+            "accounting_block_reason": (
+                (settlement or {}).get("reason")
+                if isinstance(settlement, dict)
+                else None
+            )
+            or "alpaca_typed_settlement_projection_unavailable",
+        }
+    settled = settlement.get("settlement")
+    row = getattr(settled, "row", None)
+    settlement_sha256 = str(
+        getattr(row, "settlement_sha256", "") or ""
+    ).strip().lower()
+    try:
+        net_realized_pnl_usd = float(
+            getattr(row, "net_realized_pnl_usd", None)
+        )
+    except (TypeError, ValueError):
+        net_realized_pnl_usd = math.nan
+    if (
+        not math.isfinite(net_realized_pnl_usd)
+        or len(settlement_sha256) != 64
+        or any(char not in "0123456789abcdef" for char in settlement_sha256)
+    ):
+        return {
+            "accounting_ready": False,
+            "accounting_block_reason": (
+                "alpaca_typed_settlement_projection_invalid"
+            ),
+        }
+    return {
+        "accounting_ready": True,
+        "accounting_net_realized_pnl_usd": net_realized_pnl_usd,
+        "accounting_settlement_sha256": settlement_sha256,
+    }
+
+
 def _sync_adaptive_alpaca_order_lifecycle(
     sess: Any,
     le: dict[str, Any],
@@ -1449,6 +1706,7 @@ def _sync_adaptive_alpaca_order_lifecycle(
             le,
             request_payload=payload,
             expected_quantity=expected_quantity,
+            claim=claim,
         )
         if not ensured.get("ok"):
             return ensured
@@ -2071,9 +2329,36 @@ def _sync_adaptive_alpaca_position_lifecycle(
         store = _adaptive_risk_store_for_session(sess)
         reservation_id = uuid.UUID(str(binding["reservation_id"]))
         state = store.read_state(reservation_id)
-        if state.state in {"released", "closed"}:
+        if state.state == "released":
             _adaptive_alpaca_refresh_binding(sess, le, state=state)
-            return {"ok": True, "state": state}
+            return {
+                "ok": True,
+                "state": state,
+                "accounting_ready": False,
+                "accounting_block_reason": (
+                    "alpaca_released_reservation_has_no_cycle_settlement"
+                ),
+            }
+        if state.state == "closed":
+            settlement = _settle_adaptive_alpaca_cycle_if_complete(
+                sess, le, reservation_id=reservation_id
+            )
+            owner = object_session(sess)
+            if settlement.get("ok") and owner is not None:
+                state = store.read_state(reservation_id, session=owner)
+                _adaptive_alpaca_refresh_binding(sess, le, state=state)
+            return {
+                "ok": bool(settlement.get("ok")),
+                "state": state,
+                "settlement": settlement,
+                "error": (
+                    None
+                    if settlement.get("ok")
+                    else settlement.get("reason")
+                    or "alpaca_cycle_settlement_pending"
+                ),
+                **_alpaca_cycle_accounting_projection(settlement),
+            }
         if state.state == "flat_pending_settlement":
             settlement = _capture_and_settle_flat_adaptive_alpaca_cycle(
                 sess,
@@ -2097,6 +2382,7 @@ def _sync_adaptive_alpaca_position_lifecycle(
                     else settlement.get("reason")
                     or "alpaca_cycle_settlement_pending"
                 ),
+                **_alpaca_cycle_accounting_projection(settlement),
             }
         quantity_reader = getattr(adapter, "get_position_quantity", None)
         if not callable(quantity_reader):
@@ -2217,6 +2503,7 @@ def _sync_adaptive_alpaca_position_lifecycle(
                 state = store.read_state(reservation_id, session=owner)
                 _adaptive_alpaca_refresh_binding(sess, le, state=state)
         exposure_quarantined = state.state == "exposure_quarantined"
+        accounting = _alpaca_cycle_accounting_projection(settlement)
         return {
             "ok": True,
             "state": state,
@@ -2228,6 +2515,7 @@ def _sync_adaptive_alpaca_position_lifecycle(
             ),
             "exposure_quarantined": exposure_quarantined,
             "adaptive_risk_reconciliation_required": exposure_quarantined,
+            **accounting,
         }
     except (
         AdaptiveRiskContractError,
@@ -3518,6 +3806,7 @@ def _prepare_alpaca_place_claim(
         live_exec,
         request_payload=dict(adaptive_request_payload),
         expected_quantity=int(adaptive_claim.quantity_shares),
+        claim=claim,
     )
     if not adaptive_binding.get("ok"):
         legacy_released = False
@@ -4460,6 +4749,7 @@ def _recover_owner_alpaca_entry_claim(
         le,
         request_payload=adaptive_request_payload,
         expected_quantity=expected_adaptive_quantity,
+        claim=claim,
     )
     if not adaptive_recovered.get("ok"):
         return {
@@ -6275,8 +6565,11 @@ def _emit(
     sess: TradingAutomationSession,
     event_type: str,
     payload: dict[str, Any],
-) -> None:
-    append_trading_automation_event(
+) -> TradingAutomationEvent:
+    # Returns the flushed event (id available) so fill emitters can bind the
+    # entry->exit lineage (source_event_id) the replay scorecard's Label A
+    # contract requires. Every existing caller ignores the return value.
+    return append_trading_automation_event(
         db,
         sess.id,
         event_type,
@@ -6293,6 +6586,7 @@ def _finalize_live_decision_after_exit(
     le: dict[str, Any],
     realized_pnl_usd: float,
     slip_bps: float,
+    cumulative_session_pnl_usd: float | None = None,
 ) -> None:
     pid = le.get("entry_decision_packet_id")
     if not pid:
@@ -6314,7 +6608,7 @@ def _finalize_live_decision_after_exit(
             slippage_bps=slip_bps,
             missed_fill=False,
             partial_fill=False,
-            cumulative_session_pnl_usd=float(le.get("realized_pnl_usd") or 0.0),
+            cumulative_session_pnl_usd=cumulative_session_pnl_usd,
         )
     except Exception:
         _log.debug("live decision packet finalize skipped session=%s", sess.id, exc_info=True)
@@ -16036,6 +16330,9 @@ def _complete_confirmed_live_exit(
     sell_result: dict[str, Any] | None = None,
     adapter: Any | None = None,
 ) -> float:
+    _authoritative_cycle_pnl: float | None = None
+    _authoritative_settlement_sha256: str | None = None
+    _session_realized_before_exit = _float_or_none(le.get("realized_pnl_usd"))
     if (
         normalize_execution_family(sess.execution_family)
         in ALPACA_EXECUTION_FAMILIES
@@ -16065,6 +16362,26 @@ def _complete_confirmed_live_exit(
                     or "alpaca_typed_settlement_projection_unavailable"
                 )
             )
+        _authoritative_cycle_pnl = _float_or_none(
+            adaptive_position.get("accounting_net_realized_pnl_usd")
+        )
+        if _authoritative_cycle_pnl is None:
+            raise AdaptiveRiskContractError(
+                "alpaca_typed_settlement_projection_invalid"
+            )
+        _authoritative_settlement_sha256 = str(
+            adaptive_position.get("accounting_settlement_sha256") or ""
+        ).strip().lower()
+        if (
+            len(_authoritative_settlement_sha256) != 64
+            or any(
+                char not in "0123456789abcdef"
+                for char in _authoritative_settlement_sha256
+            )
+        ):
+            raise AdaptiveRiskContractError(
+                "alpaca_typed_settlement_projection_invalid"
+            )
     pnl_gross = (float(fill_price) - float(entry_price)) * float(quantity)
     notional_basis = abs(float(entry_price) * float(quantity))
     # Fee truth (2026-06-13): net the broker-reported commissions out of the
@@ -16078,7 +16395,16 @@ def _complete_confirmed_live_exit(
     fees_usd = max(0.0, _exit_fee) + max(0.0, _entry_fee)
     pnl = pnl_gross - fees_usd
     le["fees_usd_total"] = float(le.get("fees_usd_total") or 0.0) + fees_usd
-    le["realized_pnl_usd"] = float(le.get("realized_pnl_usd") or 0.0) + pnl
+    _local_session_pnl_after_exit = float(
+        _session_realized_before_exit or 0.0
+    ) + pnl
+    if _authoritative_cycle_pnl is None:
+        le["realized_pnl_usd"] = _local_session_pnl_after_exit
+    else:
+        le["alpaca_terminal_leg_pnl_diagnostic"] = {
+            "realized_pnl_usd": float(pnl),
+            "settlement_sha256": _authoritative_settlement_sha256,
+        }
     le["last_exit_price"] = float(fill_price)
     le["last_exit_entry_price"] = float(entry_price)
     le["last_exit_quantity"] = float(quantity)
@@ -16119,13 +16445,97 @@ def _complete_confirmed_live_exit(
         pnl_gross_usd=pnl_gross,
         raw={"slip_bps": slip_bps, "fees_usd": fees_usd, "reconciled": (_bt is None)},
     )
-    _finalize_live_decision_after_exit(db, sess, le=le, realized_pnl_usd=pnl, slip_bps=slip_bps)
+    _exit_pos = le.get("position") if isinstance(le.get("position"), dict) else {}
+    # Deployment expectancy and the packet outcome are one record per completed
+    # trade, not one record per exit leg. Captured Alpaca PAPER is sourced only
+    # from its verified append-only cycle settlement. Other live families use
+    # the persisted scale-out accumulator, but never turn a missing/malformed
+    # partial accumulator into a fabricated zero.
+    _partial_taken = bool(_exit_pos.get("partial_taken"))
+    _partial_pnl = _float_or_none(_exit_pos.get("trade_realized_usd"))
+    _cumulative_session_pnl_for_learning: float | None
+    if _authoritative_cycle_pnl is not None:
+        _whole_trade_pnl: float | None = _authoritative_cycle_pnl
+        _prior_settled_session_pnl = _float_or_none(
+            le.get("alpaca_settled_session_pnl_usd")
+        )
+        if _prior_settled_session_pnl is None:
+            _current_cycle_local_before = (
+                _partial_pnl if _partial_taken else 0.0
+            )
+            if (
+                _session_realized_before_exit is None
+                and not _partial_taken
+                and "realized_pnl_usd" not in le
+            ):
+                _prior_settled_session_pnl = 0.0
+            elif (
+                _session_realized_before_exit is not None
+                and _current_cycle_local_before is not None
+                and math.isclose(
+                    _session_realized_before_exit,
+                    _current_cycle_local_before,
+                    rel_tol=1e-9,
+                    abs_tol=1e-8,
+                )
+            ):
+                _prior_settled_session_pnl = 0.0
+        if _prior_settled_session_pnl is None:
+            _cumulative_session_pnl_for_learning = None
+            le["alpaca_settled_session_pnl_gap"] = {
+                "reason_code": (
+                    "alpaca_prior_settled_session_pnl_unavailable"
+                ),
+                "settlement_sha256": _authoritative_settlement_sha256,
+            }
+            _emit(
+                db,
+                sess,
+                "live_cycle_learning_gap",
+                dict(le["alpaca_settled_session_pnl_gap"]),
+            )
+        else:
+            _cumulative_session_pnl_for_learning = (
+                _prior_settled_session_pnl + _authoritative_cycle_pnl
+            )
+            le["alpaca_settled_session_pnl_usd"] = (
+                _cumulative_session_pnl_for_learning
+            )
+            le["realized_pnl_usd"] = (
+                _cumulative_session_pnl_for_learning
+            )
+            le.pop("alpaca_settled_session_pnl_gap", None)
+    elif _partial_taken and _partial_pnl is None:
+        _whole_trade_pnl = None
+        _cumulative_session_pnl_for_learning = None
+        _emit(
+            db,
+            sess,
+            "live_cycle_learning_gap",
+            {
+                "reason_code": "live_partial_cycle_pnl_unavailable",
+                "terminal_leg_pnl_usd": float(pnl),
+            },
+        )
+    else:
+        _whole_trade_pnl = float(_partial_pnl or 0.0) + float(pnl)
+        _cumulative_session_pnl_for_learning = _local_session_pnl_after_exit
+    if _whole_trade_pnl is not None:
+        _finalize_live_decision_after_exit(
+            db,
+            sess,
+            le=le,
+            realized_pnl_usd=_whole_trade_pnl,
+            slip_bps=slip_bps,
+            cumulative_session_pnl_usd=(
+                _cumulative_session_pnl_for_learning
+            ),
+        )
     le["last_exit_reason"] = reason
     # Shake-out learning: stash the inputs (incl. the REAL momentum stop/target,
     # still on the position here) so a deferred job can judge whether the thesis
     # worked AFTER we exited — was the stop too tight? — instead of the learner
     # seeing a shallow loss. (post_exit_excursion.py; docs/DESIGN/MOMENTUM_LANE.md)
-    _exit_pos = le.get("position") if isinstance(le.get("position"), dict) else {}
     # G4 P2: persist the CLOSED trade's reference levels for the same-symbol re-entry
     # escalation (kept across recycle — NOT in _RECYCLE_ENTRY_STATE_KEYS; overwritten
     # on the next real exit). risk_dist prefers the frozen entry sizing stop_distance
@@ -16137,34 +16547,51 @@ def _complete_confirmed_live_exit(
         _g4_rd = _float_or_none(_g4_es.get("stop_distance"))
         if _g4_rd is None or _g4_rd <= 0:
             _g4_rd = abs(float(entry_price) - float(fill_price)) or None
+        if _whole_trade_pnl is None:
+            raise ValueError("full-cycle P&L is unavailable")
         # was_loss reflects the WHOLE TRADE net (banked partials/scale-outs + this final
         # tranche), NOT the final tranche alone — else a scaled WINNER whose runner trails
         # out below the avg entry (green trade, red final tranche) would be tagged a loss
         # and its next legitimate re-entry wrongly blocked by the anti-chase gate. For a
         # non-scaled trade trade_realized_usd is absent (0) ⇒ identical to bool(pnl<=0).
-        _g4_trade_net = (_float_or_none(_exit_pos.get("trade_realized_usd")) or 0.0) + float(pnl)
         le["g4_prior_trade"] = {
             "exit_price": float(fill_price),
             "high_water_mark": _float_or_none(_exit_pos.get("high_water_mark")),
             "risk_dist": _g4_rd,
-            "was_loss": bool(_g4_trade_net <= 0),
+            "was_loss": bool(_whole_trade_pnl <= 0),
             "exit_reason": reason,
         }
     except Exception:
         pass
-    le["post_exit_excursion_pending"] = {
-        "symbol": sess.symbol,
-        "entry_price": float(entry_price),
-        "exit_price": float(fill_price),
-        "original_stop": _exit_pos.get("stop_price"),
-        "original_target": _exit_pos.get("target_price"),
-        "side_long": True,
-        "exit_reason": reason,
-        "realized_pnl": pnl,
-        "exit_time_utc": _utcnow().isoformat(),
-        "horizon_seconds": int(getattr(settings, "chili_momentum_post_exit_horizon_seconds", 1800) or 1800),
-        "state": "pending",
-    }
+    if _whole_trade_pnl is not None:
+        le["post_exit_excursion_pending"] = {
+            "symbol": sess.symbol,
+            "entry_price": float(entry_price),
+            "exit_price": float(fill_price),
+            "original_stop": _exit_pos.get("stop_price"),
+            "original_target": _exit_pos.get("target_price"),
+            "side_long": True,
+            "exit_reason": reason,
+            "realized_pnl": _whole_trade_pnl,
+            "realized_pnl_scope": (
+                "verified_alpaca_cycle_settlement"
+                if _authoritative_cycle_pnl is not None
+                else "complete_local_cycle"
+            ),
+            "settlement_sha256": _authoritative_settlement_sha256,
+            "exit_time_utc": _utcnow().isoformat(),
+            "horizon_seconds": int(
+                getattr(
+                    settings,
+                    "chili_momentum_post_exit_horizon_seconds",
+                    1800,
+                )
+                or 1800
+            ),
+            "state": "pending",
+        }
+    else:
+        le.pop("post_exit_excursion_pending", None)
     le["position"] = None
     le.pop("pending_exit_reason", None)
     le.pop("pending_exit_quantity", None)
@@ -16177,6 +16604,20 @@ def _complete_confirmed_live_exit(
         payload["fees_usd"] = fees_usd
     if sell_result is not None:
         payload["sell_result"] = sell_result
+    # FILL-LINEAGE (E1): the five fields the sealed scorecard's canonical-exit
+    # fill-clock contract requires (normalize_sink_fill_event) — quantity,
+    # order_id, filled_at_utc (tz-aware window time under the replay clock),
+    # entry_filled_at_utc + source_event_id stashed at the entry fill. Absent
+    # lineage (older sessions) leaves the keys None and the consumer fails
+    # closed per-trade, exactly as before.
+    payload["quantity"] = float(quantity)
+    payload["order_id"] = (
+        le.get("exit_order_id")
+        or ((sell_result or {}).get("order_id") if isinstance(sell_result, dict) else None)
+    )
+    payload["filled_at_utc"] = _utcnow_aware().isoformat()
+    payload["entry_filled_at_utc"] = le.get("entry_filled_at_utc")
+    payload["source_event_id"] = le.get("entry_fill_event_id")
     _emit(db, sess, "live_exit_filled", payload)
     # MFE SHADOW-LOGGER (Phase 1, log-only, ZERO behavior change): record the realized Maximum
     # Favorable Excursion in R-units per trade, keyed by setup family, so the exit target can
@@ -19291,26 +19732,56 @@ def _squeeze_exit_band_widen_factor(via: Any, symbol: str) -> float:
         return 1.0
 
 
+_LATEST_RVOL_MEMO: dict[str, tuple[int, float | None]] = {}
+_LATEST_RVOL_MEMO_MAX = 512  # hard max size (conventions: caches = max size + TTL)
+
+
 def _latest_rvol(db, symbol: str) -> float | None:
     """Best-effort latest relative-volume (volume_ratio of the most recent bar) for the
     explosive carve-outs. Reads the SESSION-scoped micro-bar df from the densified tape
     (no network, same resampler the micro-pullback re-load uses) and computes
     volume_ratio via the canonical indicator core. None on thin tape / any error (the
-    caller then treats the name as non-explosive on RVOL ⇒ fail-closed). Pure read."""
+    caller then treats the name as non-explosive on RVOL ⇒ fail-closed). Pure read.
+
+    L8b PERF (2026-08-02, py-spy flamegraph sa JEM replay): ang per-tick micro-bar
+    rebuild dito ay 28.7% ng buong runtime sa gising na FSM sa dense tape. Per-5s
+    memo keyed sa SIM-ANCHORED clock (``_utcnow_aware`` — replay-correct): ang
+    micro-bar frame ay bar-granular kaya ang ≤5s staleness ay walang epekto sa
+    explosive threshold reads; kada bucket isang beses lang ang fetch+resample.
+    ``chili_momentum_latest_rvol_memo_seconds=0`` ⇒ memo OFF (byte-identical
+    legacy). Ang None (thin tape) ay kine-cache din — hindi paulit-ulit na
+    fetch ang thin na pangalan sa loob ng bucket."""
+    _sym = str(symbol or "").upper()
+    _bucket: int | None = None
+    try:
+        _memo_s = float(getattr(
+            settings, "chili_momentum_latest_rvol_memo_seconds", 5.0
+        ) or 0.0)
+        if _memo_s > 0:
+            _bucket = int(_utcnow_aware().timestamp() // _memo_s)
+            _hit = _LATEST_RVOL_MEMO.get(_sym)
+            if _hit is not None and _hit[0] == _bucket:
+                return _hit[1]
+    except Exception:
+        _bucket = None
+    v_out: float | None = None
     try:
         from ..indicator_core import compute_all_from_df as _rv_compute
 
         _df = _build_micro_bar_df(db, symbol, bar_seconds=15)
-        if _df is None or getattr(_df, "empty", True) or len(_df) < 10:
-            return None
-        arrays = _rv_compute(_df, needed={"volume_ratio"})
-        vr = arrays.get("volume_ratio") or []
-        if not len(vr):
-            return None
-        v = vr[-1]
-        return None if v is None else float(v)
+        if _df is not None and not getattr(_df, "empty", True) and len(_df) >= 10:
+            arrays = _rv_compute(_df, needed={"volume_ratio"})
+            vr = arrays.get("volume_ratio") or []
+            if len(vr):
+                v = vr[-1]
+                v_out = None if v is None else float(v)
     except Exception:
-        return None
+        v_out = None
+    if _bucket is not None:
+        if len(_LATEST_RVOL_MEMO) > _LATEST_RVOL_MEMO_MAX:
+            _LATEST_RVOL_MEMO.clear()
+        _LATEST_RVOL_MEMO[_sym] = (_bucket, v_out)
+    return v_out
 
 
 def _breakout_bailout_lock_in_seconds(*, explosive: bool) -> float:
@@ -23477,6 +23948,265 @@ def build_captured_paper_exit_transport_post_commit_handler(
     return _handle
 
 
+def _live_ortex_entry_readiness_reason(
+    db: Session,
+    *,
+    execution_readiness: object,
+    symbol: str,
+    read_at: datetime,
+) -> str | None:
+    """Resolve default-ON Ortex admission evidence without a provider read."""
+
+    normalized_symbol = str(symbol or "").strip().upper()
+    if (
+        not bool(
+            getattr(
+                settings,
+                "chili_momentum_squeeze_fuel_tilt_enabled",
+                True,
+            )
+        )
+        or normalized_symbol.endswith("-USD")
+    ):
+        return None
+    replay_state = _REPLAY_ORTEX_DECISION_STATE.get()
+    if replay_state is not None:
+        if replay_state.consumed:
+            raise ReplayInputContractError(
+                "sealed_replay_ortex_receipt_was_consumed_more_than_once"
+            )
+        # Mark before calling the provider. A rejected or malformed call may
+        # never be retried against a different receipt in the same decision.
+        replay_state.consumed = True
+        raw = replay_state.provider(normalized_symbol)
+        expected_fields = {
+            "schema_version",
+            "symbol",
+            "short_mechanics",
+            "short_mechanics_sha256",
+            "short_mechanics_runtime_sha256",
+            "squeeze_fuel_pct",
+            "rank_pct",
+            "batch_members_sha256",
+            "complete",
+        }
+        if not isinstance(raw, Mapping) or set(raw) != expected_fields:
+            raise ReplayInputContractError(
+                "sealed_replay_ortex_result_schema_mismatch"
+            )
+        mechanics = raw.get("short_mechanics")
+        if not isinstance(mechanics, Mapping):
+            raise ReplayInputContractError(
+                "sealed_replay_ortex_mechanics_are_invalid"
+            )
+
+        def exact_sha(value: object, field: str) -> str:
+            normalized = str(value or "").strip().lower()
+            if len(normalized) != 64 or any(
+                character not in "0123456789abcdef"
+                for character in normalized
+            ):
+                raise ReplayInputContractError(
+                    f"sealed_replay_ortex_{field}_is_invalid"
+                )
+            return normalized
+
+        def optional_unit(value: object, field: str) -> float | None:
+            if value is None:
+                return None
+            if isinstance(value, bool):
+                raise ReplayInputContractError(
+                    f"sealed_replay_ortex_{field}_is_invalid"
+                )
+            try:
+                normalized = float(value)
+            except (TypeError, ValueError, OverflowError) as exc:
+                raise ReplayInputContractError(
+                    f"sealed_replay_ortex_{field}_is_invalid"
+                ) from exc
+            if (
+                not math.isfinite(normalized)
+                or normalized < 0.0
+                or normalized > 1.0
+            ):
+                raise ReplayInputContractError(
+                    f"sealed_replay_ortex_{field}_is_invalid"
+                )
+            return normalized
+
+        if (
+            raw.get("schema_version")
+            != "chili.ortex-selection-result.v1"
+            or raw.get("symbol") != normalized_symbol
+            or type(raw.get("complete")) is not bool
+            or (
+                "symbol" in mechanics
+                and mechanics.get("symbol") != normalized_symbol
+            )
+        ):
+            raise ReplayInputContractError(
+                "sealed_replay_ortex_result_identity_mismatch"
+            )
+        mechanics_sha256 = exact_sha(
+            raw.get("short_mechanics_sha256"),
+            "short_mechanics_sha256",
+        )
+        runtime_sha256 = exact_sha(
+            raw.get("short_mechanics_runtime_sha256"),
+            "short_mechanics_runtime_sha256",
+        )
+        members_sha256 = exact_sha(
+            raw.get("batch_members_sha256"),
+            "batch_members_sha256",
+        )
+        if _captured_paper_sha256(dict(mechanics)) != runtime_sha256:
+            raise ReplayInputContractError(
+                "sealed_replay_ortex_runtime_content_hash_mismatch"
+            )
+        squeeze_fuel_pct = optional_unit(
+            raw.get("squeeze_fuel_pct"),
+            "squeeze_fuel_pct",
+        )
+        rank_pct = optional_unit(raw.get("rank_pct"), "rank_pct")
+        if rank_pct is not None and squeeze_fuel_pct is None:
+            raise ReplayInputContractError(
+                "sealed_replay_ortex_rank_without_score"
+            )
+        replay_state.selection = {
+            "symbol": normalized_symbol,
+            "short_mechanics_sha256": mechanics_sha256,
+            "short_mechanics_runtime_sha256": runtime_sha256,
+            "batch_members_sha256": members_sha256,
+            "squeeze_fuel_pct": squeeze_fuel_pct,
+            "squeeze_fuel_rank_pct": rank_pct,
+            "complete": bool(raw["complete"]),
+        }
+        if not raw["complete"]:
+            return "ortex_batch_coverage_unavailable"
+        return None
+    try:
+        from .pipeline import (
+            ORTEX_SQUEEZE_BATCH_STATUS_KEY,
+            ortex_batch_readiness_reason,
+            resolve_ortex_batch_manifest_from_hub,
+        )
+
+        extra = (
+            execution_readiness.get("extra")
+            if isinstance(execution_readiness, dict)
+            else None
+        )
+        reference = (
+            extra.get(ORTEX_SQUEEZE_BATCH_STATUS_KEY)
+            if isinstance(extra, dict)
+            else None
+        )
+        manifest, resolve_reason = resolve_ortex_batch_manifest_from_hub(
+            db,
+            batch_reference=reference,
+        )
+        if resolve_reason is not None:
+            return resolve_reason
+        return ortex_batch_readiness_reason(
+            execution_readiness,
+            symbol=symbol,
+            manifest=manifest,
+            read_at=read_at,
+        )
+    except Exception:
+        return "ortex_batch_readiness_validation_failed"
+
+
+def _overlay_replay_ortex_selection(
+    execution_readiness: dict[str, Any],
+    *,
+    symbol: str,
+) -> dict[str, Any]:
+    """Project the consumed sealed score/rank into the normal live sizing path."""
+
+    state = _REPLAY_ORTEX_DECISION_STATE.get()
+    if state is None:
+        return execution_readiness
+    normalized_symbol = str(symbol or "").strip().upper()
+    policy_applicable = bool(
+        getattr(
+            settings,
+            "chili_momentum_squeeze_fuel_tilt_enabled",
+            True,
+        )
+    ) and not normalized_symbol.endswith("-USD")
+    if not policy_applicable:
+        if state.consumed or state.selection is not None:
+            raise ReplayInputContractError(
+                "sealed_replay_ortex_receipt_consumed_while_policy_bypassed"
+            )
+        return execution_readiness
+    selection = state.selection
+    if (
+        not state.consumed
+        or not isinstance(selection, dict)
+        or selection.get("symbol") != normalized_symbol
+        or selection.get("complete") is not True
+    ):
+        raise ReplayInputContractError(
+            "sealed_replay_ortex_selection_was_not_admitted"
+        )
+    projected = deepcopy(execution_readiness)
+    extra = projected.get("extra")
+    if extra is None:
+        extra = {}
+        projected["extra"] = extra
+    if not isinstance(extra, dict):
+        raise ReplayInputContractError(
+            "sealed_replay_ortex_execution_extra_is_invalid"
+        )
+    signals = extra.get("ross_signals")
+    if signals is None:
+        signals = {}
+        extra["ross_signals"] = signals
+    if not isinstance(signals, dict):
+        raise ReplayInputContractError(
+            "sealed_replay_ortex_signal_map_is_invalid"
+        )
+    matching_keys = [
+        key
+        for key in signals
+        if str(key or "").strip().upper() == normalized_symbol
+    ]
+    if len(matching_keys) > 1:
+        raise ReplayInputContractError(
+            "sealed_replay_ortex_symbol_projection_is_ambiguous"
+        )
+    key = matching_keys[0] if matching_keys else normalized_symbol
+    current = signals.get(key)
+    if current is None:
+        current = {}
+    if not isinstance(current, dict):
+        raise ReplayInputContractError(
+            "sealed_replay_ortex_signal_projection_is_invalid"
+        )
+    if key != normalized_symbol:
+        signals.pop(key, None)
+    signals[normalized_symbol] = current
+    for field in ("squeeze_fuel_pct", "squeeze_fuel_rank_pct"):
+        existing = current.get(field)
+        sealed = selection[field]
+        if existing is not None and existing != sealed:
+            raise ReplayInputContractError(
+                f"sealed_replay_ortex_{field}_projection_mismatch"
+            )
+        current[field] = sealed
+    current["ortex_replay_receipt"] = {
+        "schema_version": "chili.replay-ortex-decision-receipt.v1",
+        "short_mechanics_sha256": selection["short_mechanics_sha256"],
+        "short_mechanics_runtime_sha256": selection[
+            "short_mechanics_runtime_sha256"
+        ],
+        "batch_members_sha256": selection["batch_members_sha256"],
+    }
+    return projected
+
+
 def tick_live_session(
     db: Session,
     session_id: int,
@@ -25905,7 +26635,40 @@ def tick_live_session(
         # approve or veto that decision, but a generic/additive detector must not
         # overwrite a missing, stale, or mismatched receipt and reach admission.
         _first_dip_owned_result: tuple[bool, str, dict[str, Any]] | None = None
+        # L8b (2026-08-02): PENDING-REFIRE COOLDOWN — churn bound para sa
+        # zero-band demote loop. Pagkatapos ng late_window demote, ang parehong
+        # structure ay muling nagpapaputok kada tick → buong pending chain kada
+        # tick (ang JEM 100%-AH na 1.19M-tick tape ay nag-timeout kahit 7200s sa
+        # replay). Ang schedule band ay minuto-scale magbago, kaya ang per-tick
+        # na muling pagtatangka ay purong churn: sa loob ng cooldown, laktawan
+        # ang trigger ladder (ang bench/unbench + halt lifecycle ay tumatakbo pa
+        # rin — hiwalay na block). Fail-open: sirang marker ⇒ normal evaluation.
+        _refire_cooldown = False
         if _score_ok:
+            try:
+                from .entry_gates import refire_cooldown_active
+
+                _refire_cooldown = refire_cooldown_active(
+                    now=_utcnow_aware(),
+                    until_iso=le.get("late_window_refire_until"),
+                    enabled=bool(getattr(
+                        settings,
+                        "chili_momentum_late_window_refire_cooldown_enabled",
+                        True,
+                    )),
+                )
+            except Exception:
+                _refire_cooldown = False
+            if not _refire_cooldown and le.get("late_window_refire_until"):
+                # expired — linisin ang marker (mapepersist kasama ng susunod
+                # na normal na ledger commit; hindi ito nag-i-issue ng sarili).
+                le.pop("late_window_refire_until", None)
+        if _refire_cooldown:
+            # HINDI hinahayaang manatili ang initial True/"score_only" — ang
+            # laktaw sa ladder ay kailangang mag-iwan ng malinaw na WAIT state.
+            _trigger_ok, _trigger_reason = False, "late_window_refire_cooldown"
+            _reject_map["late_window_refire_cooldown"] = True
+        elif _score_ok:
             try:
                 from .entry_gates import (
                     _FIRST_DIP_FRONT_SIDE_VIA,
@@ -28065,7 +28828,14 @@ def tick_live_session(
                     target_px=float(target_px), filled=float(filled), prod=prod,
                 )
                 _safe_transition(db, sess, STATE_LIVE_ENTERED)
-                _emit(
+                # FILL-LINEAGE (E1): entry_filled_at_utc is tz-AWARE window time under
+                # the replay clock (prod = real wall clock — byte-identical instant);
+                # trigger_reason gives the scorecard 100% per-setup attribution; the
+                # flushed event id becomes the exit's source_event_id so the sealed
+                # scorecard's entry<->exit cycle-lineage contract binds without any
+                # positional inference.
+                _entry_filled_at_utc = _utcnow_aware().isoformat()
+                _entry_fill_event = _emit(
                     db,
                     sess,
                     "live_entry_filled",
@@ -28073,8 +28843,14 @@ def tick_live_session(
                         "order_id": no.order_id,
                         "avg": avg,
                         "filled_size": filled,
+                        "quantity": float(filled),
+                        "entry_filled_at_utc": _entry_filled_at_utc,
+                        "trigger_reason": le.get("entry_trigger_reason"),
                     },
                 )
+                le["entry_fill_event_id"] = int(_entry_fill_event.id)
+                le["entry_filled_at_utc"] = _entry_filled_at_utc
+                _commit_le(sess, le)
                 # DEAD-MAN broker-side stop (2026-07-10, the GMM -$16k orphan incident):
                 # rest a GTC STOP at the BROKER one risk-buffer BELOW the software stop.
                 # The FSM stays the primary manager (its exits fire first — the dead-man
@@ -29105,6 +29881,42 @@ def tick_live_session(
 
         regime_live = via.regime_snapshot_json if isinstance(via.regime_snapshot_json, dict) else {}
         ex_live = via.execution_readiness_json if isinstance(via.execution_readiness_json, dict) else {}
+        _ortex_blocker = _live_ortex_entry_readiness_reason(
+            db,
+            execution_readiness=ex_live,
+            symbol=sess.symbol,
+            read_at=_utcnow_aware(),
+        )
+        if _ortex_blocker is not None:
+            _emit(
+                db,
+                sess,
+                "live_entry_ortex_coverage_unavailable",
+                {
+                    "reason": _ortex_blocker,
+                    "opportunity_consumed": False,
+                    "risk_reserved": False,
+                    "order_posted": False,
+                },
+            )
+            _safe_transition(db, sess, STATE_WATCHING_LIVE)
+            db.flush()
+            return {
+                "ok": True,
+                "session_id": sess.id,
+                "state": sess.state,
+                "deferred": True,
+                "reason": _ortex_blocker,
+            }
+        # A sealed ReplayV3 receipt is consumed by the guard above, at the
+        # exact point where ordinary LIVE validates the persisted batch. Feed
+        # its score/rank into the unchanged live sizing path only after that
+        # admission succeeds. Production/PAPER without the replay capability
+        # receives the original object unchanged.
+        ex_live = _overlay_replay_ortex_selection(
+            ex_live,
+            symbol=sess.symbol,
+        )
         try:
             # Use the live BBO already fetched for this tick. Missing readiness
             # previously fabricated an 8 bps spread even when the executable book
@@ -29770,8 +30582,82 @@ def tick_live_session(
                 # Fail-CLOSED: a schedule read error must NOT size an entry at full risk.
                 _sched_mult = 0.0
                 _win = "unknown"
+        if _sched_mult <= 0.0 and _win in ("late", "afterhours"):
+            # L8 (2026-08-01): KONDISYONAL na pagbukas ng late/AH placement — ang
+            # binary ×0.0 ay pumapatay sa monster tail (JEM 06-30 window 100% AH,
+            # candidate na-park isang oras bago ang day high; JLHL 07-09 placeable
+            # lang sa unang 5 min). Sa loob ng band, structural dip-reclaim trigger
+            # + monster day ⇒ reduced size sa halip na zero; lahat ng ibang vetoes
+            # (chase/extension/L2/spread/bench) ay tumatakbo pa rin pagkatapos nito.
+            # Fail-toward-legacy: anumang error ⇒ mananatiling 0.0. PERFORMANCE:
+            # cheap-first (structural check bago ang anumang I/O) + per-MINUTE
+            # memo ng session_low sa ledger — ang per-attempt na OHLCV fetch ang
+            # nag-timeout sa unang proof attempt (JEM 100% AH = fetch kada tick).
+            try:
+                from .entry_gates import (
+                    _LATE_AH_STRUCTURAL_REASONS,
+                    _late_window_monster_placement_mult_from_settings,
+                    _today_session_frame,
+                )
+
+                _l8_trig = str(le.get("entry_trigger_reason") or "")
+                if _l8_trig not in _LATE_AH_STRUCTURAL_REASONS:
+                    raise LookupError("non_structural_trigger")  # cheap skip, walang fetch
+                _l8_minute = _utcnow_aware().strftime("%Y-%m-%dT%H:%M")
+                _l8_memo = le.get("l8_session_low_memo") or {}
+                if _l8_memo.get("m") != _l8_minute:
+                    _l8_iv = str(
+                        getattr(settings, "chili_momentum_pullback_entry_interval", "5m") or "5m"
+                    )
+                    _l8_df = _replay_aware_fetch_ohlcv_df(sess.symbol, interval=_l8_iv, period="5d")
+                    _l8_lo = float(
+                        _today_session_frame(_l8_df)["Low"].astype(float).min()
+                    )
+                    _l8_memo = {"m": _l8_minute, "lo": _l8_lo}
+                    le["l8_session_low_memo"] = _l8_memo
+                _l8_mult, _l8_dbg = _late_window_monster_placement_mult_from_settings(
+                    window=_win,
+                    trigger_reason=_l8_trig,
+                    live_price=guarded_ask,
+                    session_low=_l8_memo.get("lo"),
+                )
+                if _l8_mult > 0.0:
+                    _sched_mult = float(_l8_mult)
+                    le["schedule_risk"] = {
+                        "window": _win, "mult": _sched_mult, "late_ah_monster": True,
+                    }
+                    _emit(db, sess, "live_entry_late_window_monster_placement", {
+                        "window": _win, "mult": _sched_mult, **_l8_dbg,
+                    })
+            except Exception:
+                pass
         if _sched_mult <= 0.0:
             _emit(db, sess, "live_entry_wait_late_window", {"window": _win})
+            # L8b: itakda ang refire cooldown BAGO ang demote — sa loob nito,
+            # lalaktawan ng WATCHING flow ang trigger ladder (ang sched band ay
+            # minuto-scale magbago; ang per-tick refire ay purong churn).
+            try:
+                _cool_s = max(0.0, float(getattr(
+                    settings,
+                    "chili_momentum_late_window_refire_cooldown_seconds", 20.0,
+                ) or 0.0))
+                if _cool_s > 0 and bool(getattr(
+                    settings,
+                    "chili_momentum_late_window_refire_cooldown_enabled", True,
+                )):
+                    le["late_window_refire_until"] = (
+                        _utcnow_aware() + timedelta(seconds=_cool_s)
+                    ).isoformat()
+            except Exception:
+                pass
+            # L8 PARK-BUG FIX: dati ay NANANATILI sa LIVE_PENDING_ENTRY ang session
+            # dito nang walang demote — ang FSM ay naka-PARK bawat tick (wala nang
+            # trigger/bench/backside evaluation) hanggang tape end. Ibalik sa
+            # WATCHING gaya ng lahat ng ibang pending vetoes (extension/round-number
+            # pattern) para patuloy ang session-phase evaluation; babalik din dito
+            # ang isang bagong candidate kapag bumukas ang window o pumasa ang
+            # monster conditions.
+            _safe_transition(db, sess, STATE_WATCHING_LIVE)
             db.flush()
             return {"ok": True, "session_id": sess.id, "state": sess.state, "skipped": "late_window"}
         # TIER-2 OVERNIGHT size reduction: a multiplier (base 0.5) on the equity-relative
@@ -30057,7 +30943,16 @@ def tick_live_session(
         # NEVER a veto; the max-loss circuit + structural stop + daily-loss breaker are untouched.
         # Equity-only (crypto has no borrow data ⇒ no rank stamped ⇒ 1.0). Fail-neutral to 1.0.
         _squeeze_size_mult = 1.0
-        if bool(getattr(settings, "chili_momentum_squeeze_entry_sizeup_enabled", True)):
+        if (
+            _adaptive_primary_build is None
+            and bool(
+                getattr(
+                    settings,
+                    "chili_momentum_squeeze_entry_sizeup_enabled",
+                    True,
+                )
+            )
+        ):
             try:
                 from .ross_momentum import squeeze_entry_size_multiplier as _sq_size
 
@@ -30096,31 +30991,67 @@ def tick_live_session(
         # leg / OFF / error => 1.0 (byte-identical). Reads are cached/fail-open (no new vendor).
         _kelly_conviction_mult = 1.0
         if (
-            bool(getattr(settings, "chili_momentum_kelly_conviction_enabled", True))
+            _adaptive_primary_build is None
+            and bool(
+                getattr(
+                    settings,
+                    "chili_momentum_kelly_conviction_enabled",
+                    True,
+                )
+            )
             and not str(sess.symbol or "").upper().endswith("-USD")  # equity-only signals
         ):
             try:
-                from .risk_policy import triple_confluence_kelly_multiplier
+                from .risk_policy import (
+                    persisted_catalyst_news_grade_rank,
+                    triple_confluence_kelly_multiplier,
+                )
                 from .pipeline import _live_ofi_microprice as _kc_ofi_reader
                 _kc_ofi, _ = _kc_ofi_reader(sess.symbol, db=db)
                 _kc_sq = None
+                _kc_extra = (
+                    (ex_live.get("extra") or {})
+                    if isinstance(ex_live, dict)
+                    else {}
+                )
                 try:
-                    from .ross_momentum import squeeze_fuel_signal as _kc_sf
-                    from .short_mechanics import get_short_mechanics as _kc_mech
-                    _km = _kc_mech(sess.symbol) or {}
-                    if _km:
-                        _kc_sig = _kc_sf(
-                            _km.get("short_interest_pct"), _km.get("cost_to_borrow"),
-                            utilization=_km.get("utilization"),
-                            is_easy_to_borrow=_km.get("is_easy_to_borrow"),
+                    # Reuse the exact selection-time Ortex scalar persisted in
+                    # this session's sealed readiness packet.  A second live
+                    # provider read here would consume quota independently,
+                    # break replay/PAPER parity, and let sizing observe data
+                    # that the ranking/admission decision did not.
+                    _kc_rows = (
+                        (_kc_extra.get("ross_signals") or {})
+                        if isinstance(_kc_extra.get("ross_signals"), dict)
+                        else {}
+                    )
+                    _kc_row = _kc_rows.get(str(sess.symbol or "").upper())
+                    if isinstance(_kc_row, dict):
+                        _kc_sq = _float_or_none(
+                            _kc_row.get("squeeze_fuel_pct")
                         )
-                        _kc_sq = _kc_sig.squeeze_pct
                 except Exception:
                     _kc_sq = None
                 _kc_rank = 0
                 try:
-                    from .catalyst import catalyst_grade_rank as _kc_grade
-                    _kc_rank = int(_kc_grade(sess.symbol))
+                    # Bind news to the same persisted selection packet too.
+                    # A current catalyst-cache read here would let sizing use a
+                    # different fact than admission and sealed replay.
+                    _kc_rank = persisted_catalyst_news_grade_rank(
+                        symbol=str(sess.symbol or ""),
+                        strong_symbols=_kc_extra.get(
+                            "strong_catalyst_symbols"
+                        ),
+                        weak_symbols=_kc_extra.get("weak_catalyst_symbols"),
+                        fake_symbols=_kc_extra.get("fake_catalyst_symbols"),
+                        fake_guard_enabled=bool(
+                            getattr(
+                                settings,
+                                "chili_momentum_fake_catalyst_guard_enabled",
+                                True,
+                            )
+                        ),
+                    )
                 except Exception:
                     _kc_rank = 0
                 _kelly_conviction_mult, _kc_meta = triple_confluence_kelly_multiplier(
@@ -30155,7 +31086,16 @@ def tick_live_session(
         # `defer` flag is ADVISORY for v1 (logged only — no new re-poll loop, to avoid starving
         # the fast premarket window). docs/DESIGN/MOMENTUM_LANE.md
         _frontside_mult = 1.0
-        if bool(getattr(settings, "chili_momentum_frontside_adaptive_enabled", True)):
+        if (
+            _adaptive_primary_build is None
+            and bool(
+                getattr(
+                    settings,
+                    "chili_momentum_frontside_adaptive_enabled",
+                    True,
+                )
+            )
+        ):
             try:
                 from .ross_momentum import (
                     front_side_size_tilt as _fs_tilt,
@@ -30218,7 +31158,14 @@ def tick_live_session(
                 # the LIVE regime distribution (hot tape ⇒ ramp shifts up; cold ⇒ down). COLD /
                 # insufficient samples / degenerate dist ⇒ None ⇒ the documented base 0.25/0.75/
                 # 0.15 (byte-identical to today). size_floor STAYS the one documented safety-base.
-                if _fs_score is not None:
+                # While a chase-defer episode is pinned on this session the SAME
+                # weak score would re-enter the shared regime distribution every
+                # tick (self-releasing the defer + dragging cross-name anchors
+                # down) — note once per entry attempt, not once per deferred tick.
+                if _fs_score is not None and not (
+                    bool(getattr(settings, "chili_momentum_chase_defer_enabled", True))
+                    and bool(le.get("chase_defer_episode"))
+                ):
                     _frontside_dist_note(float(_fs_score))
                 _fs_defer_base = float(getattr(settings, "chili_momentum_frontside_defer_pctile", 0.15) or 0.0)
                 _fs_s_lo, _fs_s_hi, _fs_defer_below = 0.25, 0.75, _fs_defer_base
@@ -30275,6 +31222,64 @@ def tick_live_session(
                     round(float(_base_max_loss), 4),
                     _fs_detail,
                 )
+                # L1 — RANGE-POSITION CHASE GOVERNOR (2026-07-27; golden-baseline
+                # autopsy: upper-half-of-range entries lost 17:1, −469.50/18 trades,
+                # the ≥75% blowoff bucket 0/4). Promote the tilt's ADVISORY defer to
+                # a REAL one-tick defer ONLY when BOTH hold: (a) strength sits in the
+                # regime-adaptive defer tail (_fs_defer — the same p15-of-distribution
+                # machinery, NOT a new number), AND (b) the entry chases the upper
+                # band of today's range (day_range_pos >= the ONE documented base
+                # floor 0.50 — the exact autopsy bucket boundary; a FLOOR per
+                # doctrine). Weak-but-LOW entries (dips) and strong-anywhere entries
+                # are untouched. The FSM re-polls next tick: strength recovery or a
+                # price reset lower releases the entry. Kill-switch
+                # chili_momentum_chase_defer_enabled=False ⇒ byte-identical. Defer
+                # only on POSITIVE chase evidence (missing range read ⇒ no defer).
+                # The floor is read VERBATIM (no falsy fallback): 0.0 is a legal
+                # operator value meaning "defer ANY weak-tail entry regardless of
+                # range position" — pydantic already enforces the [0,1] band.
+                # The decision rule itself is the PURE shared helper.
+                _chase_floor = float(
+                    getattr(settings, "chili_momentum_chase_defer_range_pos_floor", 0.50)
+                )
+                if chase_defer_decision(
+                    enabled=bool(getattr(settings, "chili_momentum_chase_defer_enabled", True)),
+                    advisory_defer=bool(_fs_defer),
+                    day_range_pos=_fs_range_pos,
+                    range_pos_floor=_chase_floor,
+                ):
+                    # Emit ONCE per defer episode (not per tick): the latch also
+                    # gates the dist-note dedupe above; ticks are counted in le
+                    # for forensics.
+                    if not bool(le.get("chase_defer_episode")):
+                        le["chase_defer_episode"] = True
+                        le["chase_defer_ticks"] = 1
+                        _commit_le(sess, le)
+                        _emit(db, sess, "live_entry_wait_chase_deferred", {
+                            "strength": (None if _fs_score is None else round(float(_fs_score), 4)),
+                            "day_range_pos": round(float(_fs_range_pos), 4),
+                            "range_pos_floor": _chase_floor,
+                            "defer_below": round(float(_fs_defer_below), 4),
+                            "adaptive_warm": bool(_fs_warm),
+                            "adaptive_n": int(_fs_n_samples),
+                        })
+                        db.flush()
+                    else:
+                        le["chase_defer_ticks"] = int(le.get("chase_defer_ticks") or 0) + 1
+                        _commit_le(sess, le)
+                    return {
+                        "ok": True,
+                        "session_id": sess.id,
+                        "state": sess.state,
+                        "skipped": "chase_deferred",
+                    }
+                if bool(le.get("chase_defer_episode")):
+                    # Episode released (strength recovered / price reset lower /
+                    # flag flipped off): clear the latch so the NEXT attempt notes
+                    # its score into the regime distribution again. The last
+                    # episode's chase_defer_ticks stays in le for forensics.
+                    le["chase_defer_episode"] = False
+                    _commit_le(sess, le)
             except Exception:
                 _frontside_mult = 1.0  # fail-OPEN: a tilt error never blocks/shrinks the fill
         # ROSS RISK GAP 1 — SIZE-DOWN INTO THE 200MA / OVERHEAD RESISTANCE. Ross cuts share
@@ -34310,7 +35315,8 @@ def tick_live_session(
         # did not confirm, so BAIL before the stop via the BAILOUT machinery. A winner
         # that pops then consolidates (high-water mark above the buffer) is IMMUNE. The
         # OFI read is fail-open (None ⇒ governed by the price conditions). ENTERED-only,
-        # fresh-quote gated. Flag OFF (default) ⇒ no-op ⇒ byte-identical. PROTECTIVE only.
+        # fresh-quote gated. The explicit OFF kill-switch is a byte-identical no-op.
+        # PROTECTIVE only.
         if (
             st == STATE_LIVE_ENTERED
             and bool(getattr(settings, "chili_momentum_bail_on_no_confirmation_enabled", False))
@@ -35099,6 +36105,88 @@ def tick_live_session(
                         })
                 except Exception:
                     pass
+
+            # L10 (2026-08-04): MONSTER-CONDITIONED 15s STRUCTURE-FLOOR CANDIDATE —
+            # sa first-minute verticals (HYFM class), ang giveback band ay huli at
+            # ang 1m structure ay wala pa; ang huling ASCENDING 15s-bar low (may
+            # wick buffer) ay dinadagdag bilang candidate sa parehong max() compose
+            # (INVARIANT-A automatic). Ang 15s scalars ay mine-memo sa ledger kada
+            # 15s bucket (L8b lesson: bawal ang per-tick frame fetch). Fail-open:
+            # anumang error ⇒ walang candidate.
+            try:
+                if bool(getattr(
+                    settings, "chili_momentum_monster_structure_floor_enabled", True
+                )) and not le.get("suspected_halt_since_utc"):
+                    _sf_bucket = int(_utcnow_aware().timestamp() // 15)
+                    if le.get("l10_sf_bucket") != _sf_bucket:
+                        _mb15 = _build_micro_bar_df(db, sess.symbol, bar_seconds=15)
+                        _sf_last = _sf_prev = _sf_amp = None
+                        _sf_day_hi = _sf_day_lo = None
+                        if _mb15 is not None and len(_mb15) >= 3:
+                            # huling KUMPLETONG bar = index -2 (ang -1 ay forming)
+                            _sf_last = float(_mb15["Low"].iloc[-2])
+                            _sf_prev = float(_mb15["Low"].iloc[-3])
+                            _sf_hi2 = float(_mb15["High"].iloc[-3:-1].max())
+                            _sf_lo2 = float(_mb15["Low"].iloc[-3:-1].min())
+                            _sf_px = float(_mb15["Close"].iloc[-2])
+                            if _sf_px > 0:
+                                _sf_amp = (_sf_hi2 - _sf_lo2) / _sf_px
+                            # session-scoped ang micro frame — day hi/lo mula rito
+                            # (walang dagdag na fetch; ang _df5 ay minute-memo-gated
+                            # at wala sa scope sa karamihan ng ticks).
+                            _sf_day_hi = float(_mb15["High"].astype(float).max())
+                            _sf_day_lo = float(_mb15["Low"].astype(float).min())
+                        le["l10_sf_bucket"] = _sf_bucket
+                        le["l10_sf_last_low"] = _sf_last
+                        le["l10_sf_prev_low"] = _sf_prev
+                        le["l10_sf_amp"] = _sf_amp
+                        le["l10_sf_day_hi"] = _sf_day_hi
+                        le["l10_sf_day_lo"] = _sf_day_lo
+                    from .paper_execution import monster_structure_floor_candidate
+
+                    _sf_age = None
+                    try:
+                        _sf_opened = _parse_dt(pos.get("opened_at_utc"))
+                        if _sf_opened is not None:
+                            _sf_o = (
+                                _sf_opened if _sf_opened.tzinfo is not None
+                                else _sf_opened.replace(tzinfo=timezone.utc)
+                            )
+                            _sf_age = (_utcnow_aware() - _sf_o).total_seconds()
+                    except Exception:
+                        _sf_age = None
+                    _sf_floor, _sf_reason = monster_structure_floor_candidate(
+                        enabled=True,
+                        halt_lit=False,
+                        leg_age_seconds=_sf_age,
+                        last15_low=_float_or_none(le.get("l10_sf_last_low")),
+                        prev15_low=_float_or_none(le.get("l10_sf_prev_low")),
+                        retrace_amp_pct=_float_or_none(le.get("l10_sf_amp")),
+                        hwm=_hwm_trail,
+                        composed_stop=_trailed,
+                        entry=avg,
+                        atr_pct=_atr_pct_trail,
+                    )
+                    if _sf_floor is not None and _sf_floor > _trailed:
+                        _trailed = _sf_floor
+                        _emit(db, sess, "monster_structure_floor_candidate", {
+                            "floor": round(float(_sf_floor), 6),
+                            "last15_low": le.get("l10_sf_last_low"),
+                            "retrace_amp_pct": le.get("l10_sf_amp"),
+                            "leg_age_s": _sf_age,
+                        })
+                    elif _sf_reason not in ("leg_mature_1m_owns", "band_adequate") and \
+                            le.get("l10_sf_last_reject") != _sf_reason:
+                        # OBSERVABILITY (aral ng L8/L10 zero-trace debugging):
+                        # ang mga DI-INAASAHANG reject ay ini-emit nang minsan
+                        # kada reason transition — ang dalawang normal na quiet
+                        # reason lang ang hindi (bawas ingay).
+                        le["l10_sf_last_reject"] = _sf_reason
+                        _emit(db, sess, "monster_structure_floor_reject", {
+                            "reason": _sf_reason, "leg_age_s": _sf_age,
+                        })
+            except Exception:
+                pass
 
             # LEVER 2B — VELOCITY/PERSISTENCE RIDE-LOCK on top of the 2A vol-norm trail.
             # Reads the DENOISED flow (OFI LEVEL + its EWMA SLOPE = the 1st derivative, NOT
@@ -38449,11 +39537,41 @@ def tick_live_session(
                     exclude_session_id=sess.id,
                     execution_family=str(getattr(sess, "execution_family", "") or "") or None,
                 )
+                # L4 — WHIPSAW CADENCE (2026-07-27, SILO autopsy): the gap
+                # between CONSECUTIVE STOP-CLASS losses; a stop landing within
+                # the rapid window double-increments the escalation level so the
+                # escalated-confirmation tier binds by whipsaw entry #2-3, not
+                # #6. The ENTIRE rule (stop-class gating on BOTH ends, verbatim
+                # 0⇒disabled window, corrupt-marker overwrite, flag gates the
+                # DECISION only) is the pure shared helper.
+                _g4_rapid, _g4_marker = rapid_whipsaw_cadence_update(
+                    was_loss=_was_loss,
+                    exit_reason=(str(_g4_exit_reason) if _g4_exit_reason else None),
+                    prev_marker_raw=le.get("last_loss_exit_at_utc"),
+                    now=_utcnow(),
+                    window_seconds=float(
+                        getattr(
+                            settings,
+                            "chili_momentum_whipsaw_rapid_loss_seconds",
+                            120.0,
+                        )
+                    ),
+                    decision_enabled=bool(
+                        getattr(
+                            settings,
+                            "chili_momentum_whipsaw_rapid_escalation_enabled",
+                            True,
+                        )
+                    ),
+                )
+                if _g4_marker is not None:
+                    le["last_loss_exit_at_utc"] = _g4_marker
                 _g4_esc, _g4_esc_why = reentry_escalation_level_update(
                     current_level=int(le.get("g4_reentry_escalation") or 0),
                     was_loss=_was_loss,
                     exit_reason=(str(_g4_exit_reason) if _g4_exit_reason else None),
                     green_banked=bool((_g4_cum + (_g4_day_other or 0.0)) > 0),
+                    rapid_stopout=_g4_rapid,
                 )
                 le["g4_reentry_escalation"] = _g4_esc
             except Exception:
@@ -38595,19 +39713,11 @@ def tick_live_session(
                         "[momentum_live] g4 leader-exempt read failed (fail-closed)",
                         exc_info=True,
                     )
-            # Ross-parity L5 / GAP-B (2026-07-25): FRESH-IGNITION exemption — a NON-leader
-            # symbol whose tape is actively igniting at the cap edge must not terminalize
-            # with its next leg ahead (the leader exemption above already covers the #1;
-            # this covers the fresh igniter that hasn't taken the crown yet — the
-            # ross-parity study's re-entry conversion lever). Fresh ignition = buyers
-            # lifting NOW (tape_confirms_hold: signed accel>0 + tick-rate floor, fail-
-            # CLOSED) OR membership in the running-up burst map (>=3%/5min). Bounded:
-            # at most chili_momentum_max_ignition_exemptions grants per session (default
-            # 1 — one extra cycle per ignition episode; max_stopout_reentries stays the
-            # base cap). The grant only recycles to WATCHING — the actual re-entry still
-            # passes the existing G4 escalated confirmation (structural trigger + tape),
-            # the same quality-raise contract the leader exemption uses. FAIL-CLOSED:
-            # any read error => no exemption => terminalize exactly as today.
+            # Ross-parity L5 / GAP-B fresh-ignition exemption. The operator-selected
+            # default is ON; the explicit environment OFF kill-switch restores the
+            # byte-identical base path. Both the executed-tape confirmer and the
+            # sustained running-up burst must be present.
+            # Any read error remains fail-closed and terminalizes through the base path.
             if (
                 not _re_ok
                 and bool(getattr(settings, "chili_momentum_fresh_ignition_reentry_bypass_enabled", True))
@@ -38621,13 +39731,10 @@ def tick_live_session(
                     _ign_ok = False
                     if _ign_used < _ign_max:
                         _ign_sym = str(sess.symbol or "").strip().upper()
-                        # AND-composition (validated 2026-07-25): the replay A/B showed the
-                        # instant-accel leg alone grants on NOISE (a momentary lift on a
-                        # fade/chop day: CLRO −0.97 / QTTB −2.93 per granted cycle). A REAL
-                        # ignition must show BOTH: buyers lifting at this instant (leg 1,
-                        # fail-closed) AND a sustained >=3%/5min burst (leg 2, the running-up
-                        # map) — the JEM-class re-ignition signature. Either leg absent =>
-                        # no grant.
+                        # Experimental AND composition: the earlier OR form added one
+                        # losing cycle in each diagnostic window. Requiring both legs
+                        # removed those known grants, but has not earned positive/OOS or
+                        # sealed capture evidence. Either leg absent => no grant.
                         # leg 1: executed-tape confirmer (module-attr call so the replay
                         # driver's sim-clock patch of signed_tape_accel_features applies)
                         from . import entry_gates as _ign_eg

@@ -272,6 +272,49 @@ def test_nonblocking_ingress_aggregates_every_overflow_as_explicit_gap() -> None
     assert ingress.health()["dropped"] == 1
 
 
+def test_ingress_retained_object_stays_bounded_after_event_is_inflight() -> None:
+    event = _event(1)
+    retained_key = "e" * 64
+    retained_bytes = 1_024
+    ingress = BoundedCaptureIngress(
+        max_events=2,
+        max_bytes=event.canonical_size_bytes + retained_bytes + 1,
+        max_gap_keys=8,
+    )
+    assert ingress.submit(
+        event,
+        retained_key=retained_key,
+        retained_bytes=retained_bytes,
+    )
+    health = ingress.health()
+    assert health["queued_bytes"] == event.canonical_size_bytes
+    assert health["retained_objects"] == 1
+    assert health["retained_bytes"] == retained_bytes
+    assert (
+        health["bounded_memory_bytes"]
+        == event.canonical_size_bytes + retained_bytes
+    )
+
+    batch = ingress.pop_batch(
+        max_events=1,
+        max_bytes=event.canonical_size_bytes,
+        timeout_seconds=0,
+    )
+    assert batch.events == (event,)
+    health = ingress.health()
+    assert health["queued_bytes"] == 0
+    assert health["bounded_memory_bytes"] == retained_bytes
+
+    ingress.release_retained(
+        identity_sha256=event.identity.identity_sha256,
+        retained_key=retained_key,
+        expected_bytes=retained_bytes,
+    )
+    health = ingress.health()
+    assert health["retained_objects"] == 0
+    assert health["bounded_memory_bytes"] == 0
+
+
 def test_gap_ledger_key_budget_stays_bounded_and_fails_all_streams() -> None:
     ingress = BoundedCaptureIngress(max_events=1, max_bytes=50_000, max_gap_keys=1)
     assert ingress.submit(_event(1))

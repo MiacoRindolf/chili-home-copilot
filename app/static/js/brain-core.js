@@ -53,6 +53,42 @@ function tbRefreshMomentumNeuralStrip() {
     });
 }
 
+/** 2026-08-02: captured-paper PAPER lane observer strip (read-only; ang buhay
+ *  na paper service ay dating INVISIBLE sa UI — DB lang ang observability). */
+function tbRefreshCapturedPaperStrip() {
+  var el = document.getElementById('tb-captured-paper-strip');
+  if (!el) return;
+  fetch('/api/trading/observer/captured-paper', { credentials: 'same-origin' })
+    .then(function(r) { return r.json(); })
+    .then(function(d) {
+      if (!d || !d.ok || !d.service) { el.style.display = 'none'; return; }
+      var s = d.service, f = d.frontier || {}, o = d.orders || {}, t = d.tape || {};
+      var hbAge = s.heartbeat_age_s;
+      var alive = hbAge != null && hbAge < 300;
+      var parts = [];
+      parts.push('<strong style="color:var(--text)">PAPER lane</strong> ');
+      parts.push(alive
+        ? '<span style="color:#34d399;font-weight:600">LIVE</span>'
+        : '<span style="color:#f87171;font-weight:600">' + (hbAge == null ? 'WALANG HEARTBEAT' : 'STALE ' + Math.round(hbAge) + 's') + '</span>');
+      if (s.account_scope) parts.push(' <span style="color:var(--text-muted)">· ' + escHtml(String(s.account_scope)) + '</span>');
+      if (s.live_cash_authorized === false) parts.push(' <span style="color:var(--text-muted)">· no live cash</span>');
+      if (f.status) parts.push(' · frontier <strong>' + escHtml(String(f.status)) + '</strong>' + (f.gap_count ? ' <span style="color:#f59e0b">gaps ' + escHtml(String(f.gap_count)) + '</span>' : ''));
+      parts.push(' · orders 24h <strong>' + escHtml(String(o.outbox_24h != null ? o.outbox_24h : '?')) + '</strong>');
+      parts.push(t.age_s != null
+        ? ' · tape <strong>' + Math.round(t.age_s) + 's</strong>'
+        : ' · <span style="color:var(--text-muted)">tape idle</span>');
+      el.innerHTML = parts.join('');
+      el.style.display = 'block';
+    })
+    .catch(function() { el.style.display = 'none'; });
+}
+if (typeof document !== 'undefined') {
+  document.addEventListener('DOMContentLoaded', function() {
+    tbRefreshCapturedPaperStrip();
+    setInterval(tbRefreshCapturedPaperStrip, 60000);
+  });
+}
+
 function openBrainModal(title, bodyHtml, footerHtml, footerClass, showPineHeaderTools) {
   document.getElementById('brain-modal-title').textContent = title;
   document.getElementById('brain-modal-body').innerHTML = bodyHtml;

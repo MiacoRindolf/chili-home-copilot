@@ -5,6 +5,7 @@ automatically on a schedule so the AI Brain is always growing.
 """
 from __future__ import annotations
 
+import copy
 import logging
 import threading
 import time
@@ -46,21 +47,35 @@ _tape_delta_state_lock = threading.Lock()
 _tape_delta_hwm: "datetime | None" = None
 _tape_delta_last_run_monotonic: float = 0.0
 _tape_delta_field_snapshot: dict = {}
+_tape_delta_ortex_batch_status: dict | None = None
 
 
-def _tape_delta_set_field_snapshot(signals: dict) -> None:
+def _tape_delta_set_field_snapshot(
+    signals: dict,
+    *,
+    ortex_batch_status: dict | None = None,
+) -> None:
     """Cache the last batch's {symbol: ross_signal} dict so the tape-delta ignite job
     can score a single crosser against the SAME field for percentile context. Called by
     the equity viability-refresh batch (the field source). Best-effort; bounded copy."""
     if not isinstance(signals, dict) or not signals:
         return
     try:
-        snap = {str(k).strip().upper(): v for k, v in signals.items() if k}
+        snap = {
+            str(k).strip().upper(): copy.deepcopy(v)
+            for k, v in signals.items()
+            if k
+        }
     except Exception:
         return
     with _tape_delta_state_lock:
-        global _tape_delta_field_snapshot
+        global _tape_delta_field_snapshot, _tape_delta_ortex_batch_status
         _tape_delta_field_snapshot = snap
+        _tape_delta_ortex_batch_status = (
+            copy.deepcopy(ortex_batch_status)
+            if isinstance(ortex_batch_status, dict)
+            else None
+        )
 
 
 def _should_write_scheduler_baseline_audit(job_id: str) -> bool:
@@ -3673,6 +3688,54 @@ def _active_equity_session_symbols(db: "Session") -> list[str]:
         return []
 
 
+def _emit_viability_subscribe_hints(db: "Session", movers: list[dict]) -> int:
+    """L9-C1 (2026-08-03): isulat ang mga refresh-detected equity mover bilang
+    subscribe HINTS para sa host bridge fast-poll (3s) — sinasara ang
+    watch-resolver starvation gap (HYFM: eligible 11:39:30Z pero trades-watched
+    11:58:01Z = 18m31s). Capped kada refresh (proteksyon sa ~500-watch budget
+    ng bridge na may self-halving governor); pair-shaped symbols nilalaktawan;
+    savepoint-safe ang bawat insert (request_bridge_subscription); sariling
+    commit para hindi mawala sa caller's finally-rollback. Fail-open: anumang
+    error ⇒ 0 hints, hindi kailanman sinisira ang viability refresh."""
+    try:
+        from ..config import settings as _hint_settings
+
+        if not bool(getattr(
+            _hint_settings,
+            "chili_momentum_viability_refresh_subscribe_hints_enabled", True,
+        )):
+            return 0
+        _cap = int(getattr(
+            _hint_settings,
+            "chili_momentum_viability_refresh_subscribe_hint_cap", 25,
+        ) or 0)
+        if _cap <= 0:
+            return 0
+        from .trading.momentum_neural.bridge_subscribe import request_bridge_subscription
+
+        hinted = 0
+        for _m in movers or []:
+            if hinted >= _cap:
+                break
+            _sym = str(
+                ((_m or {}).get("symbol") or (_m or {}).get("ticker") or "")
+            ).strip().upper()
+            if not _sym or "-" in _sym:
+                continue
+            if request_bridge_subscription(db, _sym, reason="viability_refresh"):
+                hinted += 1
+        if hinted:
+            db.commit()
+            logger.info(
+                "[scheduler] equity viability refresh: %d subscribe hints -> bridge fast-poll (3s)",
+                hinted,
+            )
+        return hinted
+    except Exception:
+        logger.debug("[scheduler] subscribe-hint block failed (non-fatal)", exc_info=True)
+        return 0
+
+
 def _bridge_scanner_to_viability(
     db: "Session",
     results: list[dict],
@@ -3810,7 +3873,7 @@ def _bridge_scanner_to_viability(
             # M2: forward the Ross pillars (RVOL/gap/daily-change/float) the
             # scanner already computed instead of discarding them — the momentum
             # lane ranks explosive instruments from these (docs/DESIGN/MOMENTUM_LANE.md).
-            ross_signals[t] = r
+            ross_signals[t] = copy.deepcopy(r)
         if not _bridge_uncapped and len(tickers) >= _VIABILITY_BRIDGE_MAX_TICKERS:
             break
 
@@ -3822,6 +3885,7 @@ def _bridge_scanner_to_viability(
     # fastest mid-bursts of the last few minutes into the batch (the pin block
     # below then prepends armed sessions ahead of them, so the head order is
     # pins -> bursts -> ranked, all inside the pipeline's 32-symbol cut).
+    _bursts: list[str] = []
     try:
         from .trading.momentum_neural.nbbo_tape import tape_running_up_symbols
 
@@ -3842,6 +3906,7 @@ def _bridge_scanner_to_viability(
     # never refreshed again, and got strangled (stale 1887s) while Ross banked
     # +$782 on the same chart (also killed UEC today and AAOG on 06-10). Active
     # live sessions' symbols are ALWAYS pinned into the refresh batch.
+    _pins: list[str] = []
     try:
         _pins = _active_equity_session_symbols(db)
         if _pins:
@@ -3853,13 +3918,83 @@ def _bridge_scanner_to_viability(
 
     if not tickers:
         return
+
+    # Pins/running-up symbols are prepended after scanner-result construction.
+    # Materialize every final decision symbol before the one global Ortex
+    # receipt; otherwise a valid PIN/BURST would be absent from its own batch.
+    with _tape_delta_state_lock:
+        _prior_field = copy.deepcopy(_tape_delta_field_snapshot)
+    for _ticker in tickers:
+        if _ticker in ross_signals:
+            continue
+        _cached_signal = _prior_field.get(_ticker)
+        if isinstance(_cached_signal, dict):
+            _materialized_signal = copy.deepcopy(_cached_signal)
+            _materialized_signal.setdefault("ticker", _ticker)
+            _materialized_signal.setdefault("direction", "long")
+            _materialized_signal[
+                "selection_input_snapshot_origin"
+            ] = "prior_field_snapshot"
+        else:
+            _materialized_signal = {
+                "ticker": _ticker,
+                "direction": "long",
+                "signal_type": (
+                    "running_up_pin"
+                    if _ticker in _bursts
+                    else "active_session_pin"
+                ),
+                # Persist the candidate row for liveness, but the live guard
+                # must reject a new exposure until a causal scanner/tape
+                # projection is available.
+                "selection_input_coverage_unavailable": True,
+            }
+        ross_signals[_ticker] = _materialized_signal
+
+    # Ortex quota/ranking is a complete-field decision, not a chunk decision.
+    # Prepare it once before the 32-symbol persistence chunks so every row
+    # carries one content-addressed field receipt and no chunk can spend quota
+    # again or manufacture a chunk-relative percentile.
+    _ortex_batch_status = None
+    try:
+        from .trading.momentum_neural.pipeline import (
+            prepare_ortex_squeeze_fuel_field,
+        )
+        from .trading.momentum_neural.ross_momentum import (
+            ROSS_PILLAR_WEIGHTS_LIQUIDITY_BIASED,
+        )
+
+        (
+            ross_signals,
+            _ortex_prepared_weights,
+            _ortex_batch_status,
+        ) = prepare_ortex_squeeze_fuel_field(
+            db,
+            ross_signals=ross_signals,
+            weights=ROSS_PILLAR_WEIGHTS_LIQUIDITY_BIASED,
+            decision_at=datetime.now(timezone.utc),
+        )
+        _ = _ortex_prepared_weights
+    except Exception as exc:
+        logger.warning(
+            "[scheduler] global Ortex field preparation failed closed: %s",
+            type(exc).__name__,
+        )
+        try:
+            db.rollback()
+        except Exception:
+            pass
+        return
     # S1 EVENT FEEDER (docs/DESIGN/MOMENTUM_ENGINE.md §5): cache this EQUITY batch's
     # ross_signals so the tape-delta ignite job can score a single crosser against the
     # SAME field for percentile context. Equity refresh only (crypto has its own field
     # semantics); best-effort + never affects the bridge write.
     if source in ("equity_viability_refresh", "equity_momentum"):
         try:
-            _tape_delta_set_field_snapshot(ross_signals)
+            _tape_delta_set_field_snapshot(
+                ross_signals,
+                ortex_batch_status=_ortex_batch_status,
+            )
         except Exception:
             logger.debug("[momentum_event_select] field snapshot cache skipped", exc_info=True)
     try:
@@ -3879,11 +4014,20 @@ def _bridge_scanner_to_viability(
             for _i in range(0, len(tickers), _VIABILITY_BRIDGE_CHUNK):
                 _chunk = tickers[_i : _i + _VIABILITY_BRIDGE_CHUNK]
                 _chunk_signals = {t: ross_signals[t] for t in _chunk if t in ross_signals}
+                _chunk_meta = {
+                    "tickers": _chunk,
+                    "ross_signals": _chunk_signals,
+                }
+                if _ortex_batch_status is not None:
+                    _chunk_meta["ortex_squeeze_fuel_batch"] = (
+                        _ortex_batch_status
+                    )
                 try:
                     # Clear aborted best-effort probe transactions before durable viability writes.
                     db.rollback()
                     _tick_result = run_momentum_neural_tick(
-                        db, meta={"tickers": _chunk, "ross_signals": _chunk_signals}
+                        db,
+                        meta=_chunk_meta,
                     )
                     _require_persistence_ok(_tick_result)
                     db.commit()
@@ -3906,8 +4050,17 @@ def _bridge_scanner_to_viability(
         else:
             # Clear aborted best-effort probe transactions before durable viability writes.
             db.rollback()
+            _single_meta = {
+                "tickers": tickers,
+                "ross_signals": ross_signals,
+            }
+            if _ortex_batch_status is not None:
+                _single_meta["ortex_squeeze_fuel_batch"] = (
+                    _ortex_batch_status
+                )
             _tick_result = run_momentum_neural_tick(
-                db, meta={"tickers": tickers, "ross_signals": ross_signals}
+                db,
+                meta=_single_meta,
             )
             _require_persistence_ok(_tick_result)
             db.commit()
@@ -4693,6 +4846,40 @@ def _run_crypto_viability_refresh_job():
         db.close()
 
 
+def _run_eligibility_lease_sweep_job():
+    """L11b — i-demote ang mga EQUITY viability row na lumampas na sa lease.
+
+    Ang `paper_eligible`/`live_eligible` ay walang TTL: kapag naisulat, nananatili
+    hanggang overwrite. Pero ang mambabasa ng band (IQFeed L1 subscription
+    resolver) ay may 24h freshness window, kaya ang "eligible band" niya ay ang
+    UNION ng lahat ng na-score sa nakaraang 24h — hindi ang mga tradeable NGAYON.
+    Sukat 08-04: 645 distinct, 482 lampas 600s; inubos nito ang 312-slot capacity
+    at 100% ng ross band ang na-evict. Ipinapatupad nito ang invariant na ang
+    inilalathalang band ay katumbas ng tatanggapin ng trading path mismo.
+    Best-effort; fail-open sa bawat pagdududa (tingnan ang eligibility_lease)."""
+    try:
+        from ..config import settings as _settings
+        from ..db import SessionLocal
+        from .trading.momentum_neural.eligibility_lease import (
+            expire_stale_equity_eligibility,
+        )
+
+        if not bool(getattr(_settings, "chili_momentum_eligibility_lease_enabled", True)):
+            return
+        db = SessionLocal()
+        try:
+            protected = _active_equity_session_symbols(db)
+            result = expire_stale_equity_eligibility(
+                db, settings_obj=_settings, protected_symbols=protected
+            )
+        finally:
+            db.close()
+        if result.get("demoted"):
+            logger.info("[scheduler] eligibility lease sweep: %s", result)
+    except Exception:
+        logger.warning("[scheduler] eligibility lease sweep failed", exc_info=True)
+
+
 def _merge_equity_refresh_universe(ross_tickers, active_session_symbols) -> list[str]:
     """Pure: build the equity-refresh scan list = the screened Ross movers UNION the
     EQUITY symbols of currently-active live sessions, de-duped + uppercased + sorted.
@@ -4905,6 +5092,17 @@ def _run_equity_viability_refresh_job():
             "[scheduler] equity viability refresh: %d movers -> viability (crypto-parity cadence)",
             len(movers),
         )
+        # L9-C1 (2026-08-03): SUBSCRIBE-HINT WIRING — ang HYFM 500% day ay
+        # na-detect at naging eligible sa loob ng 10 min, pero ang TRADES
+        # subscription ng bridge ay dumating 18m31s pa (watch-resolver
+        # starvation; DB-proven: depth watch 11:39:01Z vs trades 11:58:01Z).
+        # Ang bawat mover ng refresh na ito ay isinusulat na rin bilang
+        # subscribe HINT sa momentum_bridge_subscribe_requests — ang deployed
+        # host bridge ay nagpo-poll nito kada 3s (fast path), kaya ang mover ay
+        # trades-watched sa loob ng ilang segundo sa halip na minuto. Walang
+        # bridge/host na binabago; savepoint-safe ang writer; idempotent sa
+        # bridge side (de-dup vs current watch set).
+        _emit_viability_subscribe_hints(write_db, movers)
         # S1 INSTRUMENT (docs/DESIGN/MOMENTUM_ENGINE.md §5): the batch path is the BASELINE
         # ignite latency the event feeder is measured against (~half the 600s gate). Logging
         # it here lets the tape-delta path's per-symbol lead-time be compared apples-to-apples.
@@ -5013,7 +5211,17 @@ def _run_tape_delta_ignite_job():
         # `ross_signals` (the ranking universe) are decoupled, so only the crosser's own
         # row is written.
         with _tape_delta_state_lock:
-            _field = dict(_tape_delta_field_snapshot)
+            _field = copy.deepcopy(_tape_delta_field_snapshot)
+            _field_ortex_batch_status = copy.deepcopy(
+                _tape_delta_ortex_batch_status
+            )
+        _field_ortex_symbols = {
+            str(member.get("symbol") or "").strip().upper()
+            for member in (
+                (_field_ortex_batch_status or {}).get("members") or []
+            )
+            if isinstance(member, dict)
+        }
 
         from .trading.momentum_neural.pipeline import run_momentum_neural_tick
 
@@ -5048,8 +5256,24 @@ def _run_tape_delta_ignite_job():
             _universe = dict(_field)
             _universe[sym] = _sig
             try:
+                _tick_meta = {
+                    "tickers": [sym],
+                    "ross_signals": _universe,
+                }
+                # A cold crosser extends the cached field.  Its old immutable
+                # Ortex manifest cannot truthfully authorize the new member;
+                # omit it so the pipeline builds one exact extended-field
+                # manifest instead of rejecting the crosser as outside-field.
+                if (
+                    _field_ortex_batch_status is not None
+                    and sym in _field_ortex_symbols
+                ):
+                    _tick_meta["ortex_squeeze_fuel_batch"] = (
+                        _field_ortex_batch_status
+                    )
                 run_momentum_neural_tick(
-                    db, meta={"tickers": [sym], "ross_signals": _universe}
+                    db,
+                    meta=_tick_meta,
                 )
                 db.commit()
                 _scored += 1
@@ -6447,6 +6671,25 @@ def start_scheduler():
                 name="Momentum scanner (9:30-11AM ET every 15min)",
                 replace_existing=True,
                 max_instances=1,
+            )
+
+            # L11b — ELIGIBILITY RETENTION LEASE. Ang cadence ay ang PRODUCER
+            # refresh interval (derived mula sa iisang base), kaya may pagkakataong
+            # mag-demote sa pagitan ng dalawang sulat ng producer. DB-only ang job
+            # na ito — hindi siya umaasa sa producer process, kaya tumatakbo siya
+            # kahit saang scheduler-bearing container.
+            from .trading.momentum_neural.eligibility_lease import (
+                refresh_interval_seconds as _lease_cadence,
+            )
+
+            _scheduler.add_job(
+                _run_eligibility_lease_sweep_job,
+                trigger=IntervalTrigger(seconds=int(_lease_cadence(settings))),
+                id="eligibility_lease_sweep",
+                name="Eligibility retention lease sweep (equity viability band)",
+                replace_existing=True,
+                max_instances=1,
+                next_run_time=datetime.now() + timedelta(seconds=60),
             )
 
             # Reliability: detect a work-ledger processor going silent (dead/absent)

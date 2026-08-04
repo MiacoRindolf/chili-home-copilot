@@ -43,6 +43,43 @@ _EXACT_ALLOWED = frozenset(
         "MASSIVE_API_KEY",
         "POLYGON_API_KEY",
         "CHILI_ORTEX_API_KEY",
+        "CHILI_ORTEX_MONTHLY_REQUEST_LIMIT",
+        "CHILI_ORTEX_REQUEST_INTERVAL_SECONDS",
+        "CHILI_ORTEX_RESERVATION_LEASE_SECONDS",
+        "CHILI_ORTEX_RESPONSE_MAX_BYTES",
+        "CHILI_ORTEX_SUCCESS_CACHE_TTL_SECONDS",
+        "CHILI_ORTEX_TRANSIENT_BACKOFF_BASE_SECONDS",
+        "CHILI_ORTEX_TRANSIENT_BACKOFF_MAX_SECONDS",
+        "CHILI_MOMENTUM_SQUEEZE_FUEL_TILT_ENABLED",
+        "CHILI_MOMENTUM_SQUEEZE_FUEL_TOP_N",
+        "CHILI_MOMENTUM_FAKE_CATALYST_GUARD_ENABLED",
+        "CHILI_MOMENTUM_SQUEEZE_ENTRY_SIZEUP_ENABLED",
+        "CHILI_MOMENTUM_SQUEEZE_ENTRY_TOP_PCTL",
+        "CHILI_MOMENTUM_SQUEEZE_ENTRY_MAX_MULT",
+        "CHILI_MOMENTUM_SQUEEZE_EXIT_HOLD_ENABLED",
+        "CHILI_MOMENTUM_SQUEEZE_EXIT_TAIL_PCTL",
+        "CHILI_MOMENTUM_SQUEEZE_EXIT_MAX_WIDEN",
+        "CHILI_MOMENTUM_KELLY_CONVICTION_ENABLED",
+        "CHILI_MOMENTUM_KELLY_CONVICTION_MAX_MULTIPLIER",
+        "CHILI_MOMENTUM_KELLY_CONVICTION_GAIN",
+        "CHILI_MOMENTUM_KELLY_CONVICTION_W_SQUEEZE",
+        "CHILI_MOMENTUM_KELLY_CONVICTION_W_OFI",
+        "CHILI_MOMENTUM_KELLY_CONVICTION_W_NEWS",
+        "CHILI_MOMENTUM_SUB_VWAP_TRAP_ENTRY_ENABLED",
+        "CHILI_MOMENTUM_BAIL_ON_NO_CONFIRMATION_ENABLED",
+        "CHILI_MOMENTUM_CATALYST_ARB_FLAT_GATE_ENABLED",
+        "CHILI_MOMENTUM_TICK_BREAK_TAPE_CONFIRM_ENABLED",
+        "CHILI_MOMENTUM_FLUSH_DIP_VOLUME_GATE_ENABLED",
+        "CHILI_MOMENTUM_ROSS_STOP_ALIGNMENT_ENABLED",
+        "CHILI_MOMENTUM_ORB_IHS_STRUCTURAL_STOP_ENABLED",
+        "CHILI_MOMENTUM_FRESH_IGNITION_REENTRY_BYPASS_ENABLED",
+        "CHILI_MOMENTUM_UNIVERSE_FLOAT_GATE_ENABLED",
+        "CHILI_MOMENTUM_CHASE_DEFER_ENABLED",
+        "CHILI_MOMENTUM_WHIPSAW_RAPID_ESCALATION_ENABLED",
+        "CHILI_MOMENTUM_FLUSH_DIP_FRESH_HOD_AFTERNOON_ENABLED",
+        "CHILI_MOMENTUM_DIP_MONSTER_CONTEXT_ENABLED",
+        "CHILI_MOMENTUM_LATE_AH_MONSTER_PLACEMENT_ENABLED",
+        "CHILI_MOMENTUM_MONSTER_STRUCTURE_FLOOR_ENABLED",
         "CHILI_ALPACA_API_KEY",
         "CHILI_ALPACA_API_SECRET",
         "CHILI_ALPACA_DATA_FEED",
@@ -78,11 +115,50 @@ _SECRET_KEYS = frozenset(
 _REQUIRED_SECRET_KEYS = frozenset(
     {"DATABASE_URL", "CHILI_ALPACA_API_KEY", "CHILI_ALPACA_API_SECRET"}
 )
+_TRUE_VALUES = frozenset({"1", "true", "yes", "on"})
+_FALSE_VALUES = frozenset({"0", "false", "no", "off"})
 
 _CAPTURED_PAPER_OPERATIONAL_SETTING_NAMES = (
     "chili_kill_switch_db_fail_closed",
     "chili_kill_switch_db_poll_enabled",
     "chili_kill_switch_db_poll_interval_s",
+    "chili_ortex_monthly_request_limit",
+    "chili_ortex_request_interval_seconds",
+    "chili_ortex_reservation_lease_seconds",
+    "chili_ortex_response_max_bytes",
+    "chili_ortex_success_cache_ttl_seconds",
+    "chili_ortex_transient_backoff_base_seconds",
+    "chili_ortex_transient_backoff_max_seconds",
+    "chili_momentum_squeeze_fuel_tilt_enabled",
+    "chili_momentum_squeeze_fuel_top_n",
+    "chili_momentum_fake_catalyst_guard_enabled",
+    "chili_momentum_squeeze_entry_sizeup_enabled",
+    "chili_momentum_squeeze_entry_top_pctl",
+    "chili_momentum_squeeze_entry_max_mult",
+    "chili_momentum_squeeze_exit_hold_enabled",
+    "chili_momentum_squeeze_exit_tail_pctl",
+    "chili_momentum_squeeze_exit_max_widen",
+    "chili_momentum_kelly_conviction_enabled",
+    "chili_momentum_kelly_conviction_max_multiplier",
+    "chili_momentum_kelly_conviction_gain",
+    "chili_momentum_kelly_conviction_w_squeeze",
+    "chili_momentum_kelly_conviction_w_ofi",
+    "chili_momentum_kelly_conviction_w_news",
+    "chili_momentum_sub_vwap_trap_entry_enabled",
+    "chili_momentum_bail_on_no_confirmation_enabled",
+    "chili_momentum_catalyst_arb_flat_gate_enabled",
+    "chili_momentum_tick_break_tape_confirm_enabled",
+    "chili_momentum_flush_dip_volume_gate_enabled",
+    "chili_momentum_ross_stop_alignment_enabled",
+    "chili_momentum_orb_ihs_structural_stop_enabled",
+    "chili_momentum_fresh_ignition_reentry_bypass_enabled",
+    "chili_momentum_universe_float_gate_enabled",
+    "chili_momentum_chase_defer_enabled",
+    "chili_momentum_whipsaw_rapid_escalation_enabled",
+    "chili_momentum_flush_dip_fresh_hod_afternoon_enabled",
+    "chili_momentum_dip_monster_context_enabled",
+    "chili_momentum_late_ah_monster_placement_enabled",
+    "chili_momentum_monster_structure_floor_enabled",
     "chili_momentum_captured_paper_action_claim_lease_seconds",
     "chili_momentum_captured_paper_outbox_max_attempts",
     "chili_momentum_captured_paper_outbox_max_reconciliation_attempts",
@@ -502,6 +578,13 @@ def validate_installed_captured_paper_settings(
             raise CapturedPaperRuntimeEnvError(
                 "captured PAPER parsed paper credential is missing"
             )
+    if bool(
+        getattr(settings, "chili_momentum_squeeze_fuel_tilt_enabled", True)
+    ) and not str(getattr(settings, "chili_ortex_api_key", "") or "").strip():
+        raise CapturedPaperRuntimeEnvError(
+            "captured PAPER parsed Ortex credential is missing while its "
+            "default-ON strategy lane is enabled"
+        )
     for name in ("chili_alpaca_live_api_key", "chili_alpaca_live_api_secret"):
         if str(getattr(settings, name, "") or "").strip():
             raise CapturedPaperRuntimeEnvError(
@@ -608,9 +691,24 @@ def install_captured_paper_runtime_environment(
             continue
         imported[key] = value
 
+    raw_ortex_enabled = str(
+        imported.get("CHILI_MOMENTUM_SQUEEZE_FUEL_TILT_ENABLED", "")
+    ).strip().lower()
+    if not raw_ortex_enabled:
+        ortex_enabled = True
+    elif raw_ortex_enabled in _TRUE_VALUES:
+        ortex_enabled = True
+    elif raw_ortex_enabled in _FALSE_VALUES:
+        ortex_enabled = False
+    else:
+        raise CapturedPaperRuntimeEnvError(
+            "captured PAPER Ortex strategy switch is not a canonical boolean"
+        )
     missing = sorted(
         key for key in _REQUIRED_SECRET_KEYS if not imported.get(key, "").strip()
     )
+    if ortex_enabled and not imported.get("CHILI_ORTEX_API_KEY", "").strip():
+        missing.append("CHILI_ORTEX_API_KEY")
     if missing:
         raise CapturedPaperRuntimeEnvError(
             "captured PAPER required environment inputs are missing:"

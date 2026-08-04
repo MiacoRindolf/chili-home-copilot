@@ -10,8 +10,10 @@ detectors to the legacy ATR-stop behavior.
 """
 from __future__ import annotations
 
+from types import SimpleNamespace
 from unittest.mock import patch
 
+from app.config import Settings
 from app.services.trading.momentum_neural.live_runner import (
     ORB_IHS_STRUCTURAL_TRIGGER_REASONS,
     STRUCTURAL_TRIGGER_REASONS,
@@ -46,6 +48,41 @@ def test_flag_off_is_legacy_base_tuple():
     assert got == STRUCTURAL_TRIGGER_REASONS
     for r in ORB_IHS_STRUCTURAL_TRIGGER_REASONS:
         assert r not in got
+
+
+def test_restored_structural_defaults_are_on():
+    assert (
+        Settings.model_fields[
+            "chili_momentum_orb_ihs_structural_stop_enabled"
+        ].default
+        is True
+    )
+    assert (
+        Settings.model_fields["chili_momentum_ross_stop_alignment_enabled"].default
+        is True
+    )
+
+    # User doctrine is default-ON even for a partial settings projection; the
+    # explicit per-flag False value remains the rollback kill switch.
+    with patch(f"{_LR}.settings", new=SimpleNamespace()):
+        got = structural_trigger_reasons()
+        for reason in ORB_IHS_STRUCTURAL_TRIGGER_REASONS:
+            assert reason in got
+
+
+def test_ross_stop_alignment_missing_setting_fallback_is_on():
+    import inspect
+
+    from app.services.trading.momentum_neural import entry_gates
+
+    src = inspect.getsource(entry_gates)
+    assert src.count(
+        'getattr(settings, "chili_momentum_ross_stop_alignment_enabled", True)'
+    ) == 3
+    assert (
+        'getattr(settings, "chili_momentum_ross_stop_alignment_enabled", False)'
+        not in src
+    )
 
 
 def test_base_tuple_unchanged_by_this_pr():

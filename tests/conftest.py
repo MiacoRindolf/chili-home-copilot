@@ -365,12 +365,108 @@ _TRADING_DEFAULT_USER_TESTS = (
 )
 
 
+def _expected_static_mesh_node_ids() -> list[str]:
+    """Migration-seeded static node ids that MUST exist in a canonically migrated DB.
+
+    ``LEARNING_CYCLE_NODE_IDS`` is intentionally excluded: five of its ids
+    (nm_lc_c_monitor_learning, nm_lc_trade_feedback, nm_lc_rules_learner,
+    nm_lc_plan_accuracy, nm_lc_graduation_check) have drifted from the migration
+    chain and are absent even from a freshly fully-migrated database — including
+    them would make the seed repair below fire on every bootstrap.
+    """
+    from app.services.trading.brain_neural_mesh import seed_graph as _seed_graph
+
+    want = set(_seed_graph.CORE_SPINE_NODE_IDS)
+    want |= set(_seed_graph.VENUE_NODE_IDS)
+    want |= set(_seed_graph.EXECUTION_CONTEXT_NODE_IDS)
+    want |= set(_seed_graph.OPERATIONAL_CLUSTER_NODE_IDS)
+    for _cid, _label, members in _seed_graph.OPERATIONAL_CLUSTERS:
+        want |= set(members)
+    return sorted(want)
+
+
+def _repair_wiped_neural_mesh_seed() -> None:
+    """Self-heal a wiped/degraded brain-graph seed BEFORE running pending migrations.
+
+    ``brain_graph_nodes`` / ``brain_graph_edges`` are seeded by migrations (086 +
+    successors) and deliberately excluded from per-test truncation. An external
+    collision (a second pytest / replay process sharing this ``*_test`` sink) can
+    wipe the seed rows while ``schema_version`` still records the seed
+    migrations. In that state any still-pending graph migration fails at
+    ``db``-fixture bootstrap with ForeignKeyViolation on
+    ``brain_graph_edges.target_node_id`` (e.g. nm_action_signals) and EVERY DB
+    test errors until the sink is rebuilt by hand. Detect the state, wipe the
+    graph fully (count-guarded seeds like 086 early-return on partial graphs),
+    and forget every graph-touching migration so ``run_migrations`` replays them
+    in order and rebuilds the canonical topology. Test-database only —
+    production startup keeps fail-fast semantics.
+    """
+    import inspect
+    import sys
+
+    from app import migrations as _app_migrations
+
+    expected_ids = _expected_static_mesh_node_ids()
+    with engine.begin() as conn:
+        tables_present = conn.execute(
+            text(
+                "SELECT to_regclass('public.brain_graph_nodes') IS NOT NULL "
+                "AND to_regclass('public.schema_version') IS NOT NULL"
+            )
+        ).scalar_one()
+        if not tables_present:
+            return
+        seed_recorded = conn.execute(
+            text(
+                "SELECT EXISTS (SELECT 1 FROM schema_version "
+                "WHERE version_id = '086_trading_brain_neural_mesh')"
+            )
+        ).scalar_one()
+        if not seed_recorded:
+            # Fresh database: run_migrations seeds the graph normally.
+            return
+        present_ids = {
+            row[0]
+            for row in conn.execute(
+                text("SELECT id FROM brain_graph_nodes WHERE id = ANY(:ids)"),
+                {"ids": expected_ids},
+            ).fetchall()
+        }
+        missing_ids = sorted(set(expected_ids) - present_ids)
+        if not missing_ids:
+            return
+    graph_migration_ids = [
+        version_id
+        for version_id, migrate_fn in _app_migrations.MIGRATIONS
+        if "brain_graph" in inspect.getsource(migrate_fn)
+    ]
+    sys.stderr.write(
+        "pytest: brain-graph seed wiped/degraded (%d/%d static mesh nodes present; "
+        "missing e.g. %s) — replaying %d graph migration(s) to rebuild the "
+        "canonical mesh\n"
+        % (
+            len(present_ids),
+            len(expected_ids),
+            ", ".join(missing_ids[:5]),
+            len(graph_migration_ids),
+        )
+    )
+    sys.stderr.flush()
+    with engine.begin() as conn:
+        conn.execute(text("TRUNCATE brain_graph_nodes CASCADE"))
+        conn.execute(
+            text("DELETE FROM schema_version WHERE version_id = ANY(:ids)"),
+            {"ids": graph_migration_ids},
+        )
+
+
 def _bootstrap_test_schema() -> None:
     """Create tables and run versioned migrations (idempotent)."""
     global _schema_initialized
     if _schema_initialized:
         return
     Base.metadata.create_all(bind=engine)
+    _repair_wiped_neural_mesh_seed()
     from app.migrations import run_migrations
 
     run_migrations(engine)

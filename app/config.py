@@ -2345,7 +2345,7 @@ class Settings(BaseSettings):
     chili_momentum_squeeze_fuel_tilt_enabled: bool = Field(
         default=True,
         validation_alias=AliasChoices("CHILI_MOMENTUM_SQUEEZE_FUEL_TILT_ENABLED"),
-        description="SQUEEZE-FUEL selection tilt (Ross SS101 #2): SOFT within-batch BOOST for squeeze-prone names (high short-interest %% + high cost-to-borrow, via Ortex) and a small DE-RATE for very-low-CTB / easy-to-borrow names (free shares, shorts attack the pop). Ortex fetch gated to top-N explosive low-float candidates + cached 12h. Equity-only; flag-off OR Ortex absent/error ⇒ byte-identical.",
+        description="SQUEEZE-FUEL selection tilt (Ross SS101 #2): SOFT within-batch BOOST for squeeze-prone names (high short-interest %% + high cost-to-borrow, via Ortex) and a small DE-RATE for very-low-CTB / easy-to-borrow names (free shares, shorts attack the pop). Ortex transport is admitted by a durable 1,000-request UTC calendar-month quota, gated to top-N explosive low-float candidates, and successful evidence is cached 24h. Equity-only; the explicit env kill-switch restores byte-identical OFF parity. Missing or non-authoritative evidence contributes no economics and is captured fail-closed.",
     )
     chili_momentum_news_catalyst_weight_enabled: bool = Field(
         default=True,
@@ -3185,7 +3185,17 @@ class Settings(BaseSettings):
     chili_momentum_universe_float_gate_enabled: bool = Field(
         default=True,
         validation_alias=AliasChoices("CHILI_MOMENTUM_UNIVERSE_FLOAT_GATE_ENABLED"),
-        description="Ross-parity L4 (2026-07-25): FLOAT gate on the final ranked universe subset (Ross scans float FIRST — supply side). Per-candidate get_ticker_float (process-cached) on the ranked head only, lookup budget 2x profile.max_universe (~100 — never the uncapped hard ceiling; no API storm). Reference = profile.float_shares_max override else the ONE shared viability A-setup ceiling (a_setup_quality_floor_float_ceiling_shares, 20M — no second number). FAIL-OPEN on None float / error / exhausted budget (the viability fail-CLOSED gate is the backstop); high-float names stop burning ranked slots + enrichment budget. KILL-SWITCH: False -> gate skipped -> byte-identical.",
+        description="User-approved default-ON float gate on the final ranked universe subset. False is the exact per-flag rollback switch; missing causal float evidence remains decision-local fail-closed.",
+    )
+    chili_momentum_eligibility_lease_enabled: bool = Field(
+        default=True,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_ELIGIBILITY_LEASE_ENABLED"),
+        description="Expire EQUITY viability eligibility that the producer has stopped renewing, so the published eligible band equals the set the trading path would itself accept. The lease is derived from chili_momentum_risk_viability_max_age_seconds (the one documented base): lease = max(base, 2 x refresh) where refresh = max(60, base/2) — never shorter than two producer cycles, so a single missed refresh never demotes. Fail-open on producer silence (an outage must not wipe the band), on unknown ages, and for symbols with an active session. Measured 2026-08-04 on prod: 645 distinct symbols in the 24h eligible band, 482 of them older than 600s — that band is the IQFeed subscription resolver's cause #3 and it consumed the whole 312-slot capacity, evicting 100% of the ross band (today's real movers). 0 = no sweep (prior no-TTL behaviour).",
+    )
+    chili_momentum_paper_setup_quality_gate_enabled: bool = Field(
+        default=True,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_PAPER_SETUP_QUALITY_GATE_ENABLED"),
+        description="Apply the SETUP-QUALITY vetoes (below Ross explosiveness floor, below A-setup quality floor, product not tradable, arb-flat/weak catalyst) to paper_eligible as well as live_eligible. These say 'this is not a Ross momentum setup', which is true regardless of whether the money is real; the live-money COST/RISK knock-downs (spread ceiling, extreme-vol sizing) stay live-only so the deployment ladder still rehearses genuine-but-expensive setups in paper. Measured 2026-08-04 on prod: 610 distinct eligible symbols in 24h vs 117 live-eligible, 437 of the paper-only 493 carrying the Ross-floor veto — that band is the IQFeed subscription resolver's cause #3 and it evicted 100% of the ross band (today's real movers) once the rail-governor halved capacity to 312. 0 = byte-identical to the prior fail-open behaviour.",
     )
     chili_momentum_universe_uncapped_enabled: bool = Field(
         default=True,
@@ -4802,6 +4812,41 @@ class Settings(BaseSettings):
         validation_alias=AliasChoices("CHILI_MOMENTUM_FRONTSIDE_DEFER_PCTILE"),
         description="Own-distribution strength percentile below which the entry SOFT-DEFERS (non-terminal re-poll, bounded) instead of admitting at the floor. Default 0.15 (p15). 0 ⇒ defer disabled. Band [0,0.5].",
     )
+    # ── L1 RANGE-POSITION CHASE GOVERNOR (2026-07-27, golden-baseline autopsy) ─────────
+    # Upper-half-of-range entries lost 17:1 (−469.50/18 trades; the ≥75% blowoff bucket
+    # 0/4) while entry PRICES were otherwise Ross-grade. Promote the frontside tilt's
+    # ADVISORY defer to a REAL one-tick defer ONLY when the regime-adaptive strength
+    # score sits in the defer tail AND the entry chases the upper band of today's range.
+    # Weak-but-LOW (dip) entries and strong-anywhere entries are untouched.
+    chili_momentum_chase_defer_enabled: bool = Field(
+        default=True,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_CHASE_DEFER_ENABLED"),
+        description="L1 chase governor: turn the frontside tilt's advisory defer into a REAL one-tick entry defer when strength is in the adaptive defer tail AND day_range_pos is at/above the chase floor. OFF ⇒ advisory-only (byte-identical to pre-L1). Default ON.",
+    )
+    chili_momentum_chase_defer_range_pos_floor: float = Field(
+        default=0.50,
+        ge=0.0,
+        le=1.0,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_CHASE_DEFER_RANGE_POS_FLOOR"),
+        description="day_range_pos at/above which a weak-strength entry counts as a CHASE and defers. ONE documented base = 0.50 (the measured autopsy bucket boundary; upper-half entries lost 17:1). A FLOOR per doctrine — regime-adaptive band may later replace it. Read VERBATIM: 0.0 ⇒ defer ANY weak-tail entry regardless of range position. Band [0,1].",
+    )
+    # ── L4 WHIPSAW CADENCE ESCALATION (2026-07-27, golden-baseline autopsy) ────────────
+    # SILO 07-07: 6 whipsaw entries in ~90s lost −177 BEFORE the g4 escalation bound
+    # (23 blocks came after). A stop-class loss landing rapidly after the previous loss
+    # DOUBLE-increments the escalation level (quality raise, never a lockout — a strong
+    # re-buy still passes the escalated confirmation; the CELZ 06-30 fast-leader case).
+    chili_momentum_whipsaw_rapid_escalation_enabled: bool = Field(
+        default=True,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_WHIPSAW_RAPID_ESCALATION_ENABLED"),
+        description="L4 whipsaw cadence: DOUBLE-increment the g4 escalation level when consecutive stop-class losses land inside the rapid window. OFF ⇒ single increments only (byte-identical to pre-L4). Default ON.",
+    )
+    chili_momentum_whipsaw_rapid_loss_seconds: float = Field(
+        default=120.0,
+        ge=0.0,
+        le=900.0,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_WHIPSAW_RAPID_LOSS_SECONDS"),
+        description="Gap (seconds) between consecutive stop-class losses at/under which the escalation level DOUBLE-increments (rapid whipsaw). ONE documented base = 120s (SILO chop gaps were 15-20s; normal re-entry cycles run minutes). 0 ⇒ disabled. Band [0,900].",
+    )
     # ── ROSS RISK GAP 1 — SIZE-DOWN INTO THE 200MA / OVERHEAD RESISTANCE ──────────────
     # Ross cuts share size approaching the daily 200MA from below / into clear overhead.
     # A continuous size-DOWN multiplier in [floor, 1.0] keyed on the signed daily-ATR
@@ -4997,22 +5042,132 @@ class Settings(BaseSettings):
     chili_momentum_orb_ihs_structural_stop_enabled: bool = Field(
         default=True,
         validation_alias=AliasChoices("CHILI_MOMENTUM_ORB_IHS_STRUCTURAL_STOP_ENABLED"),
-        description="Ross-parity L2b (2026-07-25): adds orb_break*/inverse_head_shoulders_break* to the structural-trigger reason set (accessor structural_trigger_reasons(), read by ALL three consumers: the risk_policy structural_trigger flag, the chase-cap leader bypass, and the structural-stop stash). Fixes the latent bug where both detectors emitted pullback_low that was silently dropped (ATR-fallback stops). Declared interaction: also widens leader/chase bypass eligibility for these two genuinely-structural triggers. KILL-SWITCH: False -> legacy base tuple -> byte-identical (both revert to ATR stops).",
+        description="User-approved default-ON structural-stop alignment for ORB and inverse-head-and-shoulders triggers. False restores the exact legacy trigger tuple.",
     )
     chili_momentum_ross_stop_alignment_enabled: bool = Field(
         default=True,
         validation_alias=AliasChoices("CHILI_MOMENTUM_ROSS_STOP_ALIGNMENT_ENABLED"),
-        description="Ross-parity L2a (2026-07-25): stops = the Ross structural reference, not the deepest low. THREE sites: inverse-H&S stop = RIGHT-SHOULDER low (was head low — a full pattern-depth away, ~2x the earned R; a retest that loses the right shoulder already failed); wick_reclaim stop = RECLAIM-BAR low w/ max(flush_low,...) degeneracy guard (Ross instant-out, structural form — losing the reclaim bar = the reclaim failed; was flush low); vwap_reclaim stop = LOSS-OF-VWAP (the thesis IS 'bulls hold VWAP'; was reclaim-bar low). Sizing hazard bounded by construction: structural_or_vol_floored_atr_pct (paper_execution.py) takes the FURTHER of structural-vs-vol-floor, so tighter structural stops never shrink the sizing distance below the shared vol floor. KILL-SWITCH: False -> all three revert to legacy stops -> byte-identical.",
+        description="User-approved default-ON Ross structural-stop alignment using right-shoulder, reclaim-bar, or loss-of-VWAP anchors. False restores legacy stops.",
     )
     chili_momentum_flush_dip_volume_gate_enabled: bool = Field(
         default=True,
         validation_alias=AliasChoices("CHILI_MOMENTUM_FLUSH_DIP_VOLUME_GATE_ENABLED"),
-        description="Ross-parity L1b (2026-07-25): flush_dip_buy additionally requires a relative-volume surge on the curl/reclaim bar (volume_ratio >= pullback_volume_spike_multiple — the same reference the ORB/ABCD bar paths use; no new number). FAIL-OPEN when the ratio is uncomputable (thin data never blocks, the ORB convention). Reject reason: flush_dip_low_volume. KILL-SWITCH: False -> gate skipped -> byte-identical.",
+        description="User-approved default-ON relative-volume confirmation for flush-dip curl/reclaim entries. False skips this gate exactly.",
+    )
+    # ── L6 FLUSH-DIP AFTERNOON DISCOVERY (2026-07-31, scorecard v2) ────────────────────
+    # Ang morning-only gate ay PROXY lang ng DISCOVERY phase: pinrotektahan nito ang
+    # midday BACKSIDE fades (JZXN −$889, SPHL/GCDT/DBGI — lahat STALE ang session HOD)
+    # pero binench din nito ang mga HAPON-igniter na monster (JLHL +393%, JEM +224% —
+    # top reject = flush_dip_past_morning_window sa scorecard v2). Direct discovery
+    # test ang kapalit ng oras-proxy: sariwang session HOD ⇒ tuloy ang dip-buy
+    # evaluation (ang backside/VWAP guards sa chain ang bahala sa iba).
+    chili_momentum_flush_dip_fresh_hod_afternoon_enabled: bool = Field(
+        default=True,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_FLUSH_DIP_FRESH_HOD_AFTERNOON_ENABLED"),
+        description="L6: past the morning window, allow flush-dip evaluation when the session HOD printed within chili_momentum_flush_dip_fresh_hod_minutes (discovery still active); stale-HOD names keep the flush_dip_past_morning_window reject. OFF ⇒ legacy morning-only gate, byte-identical.",
+    )
+    chili_momentum_flush_dip_fresh_hod_minutes: float = Field(
+        default=30.0,
+        ge=0.0,
+        le=240.0,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_FLUSH_DIP_FRESH_HOD_MINUTES"),
+        description="Minutes since the session HOD bar within which an afternoon flush-dip still counts as DISCOVERY. ONE documented base = 30 (afternoon igniters print HODs every few minutes mid-ramp; the measured midday bleeders' HODs were 1h+ stale). Read VERBATIM: 0 ⇒ fresh only if the HOD is the current bar (effectively legacy). Band [0,240].",
+    )
+    # ── L7 MONSTER-DIP CONTEXT (2026-08-01, JLHL/JEM vs JZXN distribution study) ───────
+    # Sa monster run, ang recent-impulse yardstick ng dip geometry ay sira: winner dips
+    # nagbabasa ng 0.71-1.0 retrace habang saturated ang cap sa ~0.61-0.69 (ang 0.75
+    # ceiling ay hindi kailanman umabot). Ang day-range context + up-off-low ang tamang
+    # panukat: 7/8 JLHL winner dips admitted, 0/19 JZXN fades — zero overlap sa study.
+    chili_momentum_dip_monster_context_enabled: bool = Field(
+        default=True,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_DIP_MONSTER_CONTEXT_ENABLED"),
+        description="L7: sa aktibong monster run (px ≥ up_off_low_floor × day low AT day-range retrace ≤ cap), ang dip geometry guards (pullback retrace, flush tail, vwap below-bars) ay sumusukat sa DAY context sa halip na recent-impulse. OFF ⇒ legacy geometry, byte-identical.",
+    )
+    chili_momentum_monster_up_off_low_floor: float = Field(
+        default=1.5,
+        ge=1.0,
+        le=10.0,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_MONSTER_UP_OFF_LOW_FLOOR"),
+        description="Monster test #1: decision px / day low ≥ floor. ONE documented base = 1.5 (+50% off the low; measured gap: monster episodes 1.92-7.76x vs fade day 1.00-1.25x — ang 1.5 ay nasa gitna ng zero-overlap gap). FLOOR per doctrine. Band [1,10].",
+    )
+    chili_momentum_monster_day_retrace_cap: float = Field(
+        default=0.35,
+        ge=0.0,
+        le=1.0,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_MONSTER_DAY_RETRACE_CAP"),
+        description="Monster test #2: (day_high − dip_low) / day_range ≤ cap — ang dip ay mababaw sa konteksto ng araw. ONE documented base = 0.35 (winner dips p90 = 0.38 mahigpit na binilog pababa; climax/backside 0.68+ — ito rin ang anti-climax guard sa mismong monster day). Band [0,1].",
+    )
+    chili_momentum_monster_tail_min_frac: float = Field(
+        default=0.30,
+        ge=0.0,
+        le=1.0,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_MONSTER_TAIL_MIN_FRAC"),
+        description="L7 flush-dip bottoming-tail requirement SA ILALIM ng monster context (legacy 0.50 kapag walang context). ONE documented base = 0.30 (winner-flush tails median 0.33-0.38 sa study; ang fade-day na mahihinang tail median 0.18 ay sinasala pa rin ng monster gate + iba pang guards). Band [0,1].",
+    )
+    chili_momentum_monster_vwap_depth_atr_mult: float = Field(
+        default=1.0,
+        ge=0.0,
+        le=10.0,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_MONSTER_VWAP_DEPTH_ATR_MULT"),
+        description="L7 vwap-reclaim: sa monster context, tanggapin ang ≥1-bar-below kapag ang below-VWAP penetration ≥ mult × ATR% (LALIM pumapalit sa TAGAL — measured: 1.2×ATR na blocked dip → +45% forward; 0.31×ATR post-climax chop → tamang block). ONE documented base = 1.0. Band [0,10].",
+    )
+    chili_momentum_late_ah_monster_placement_enabled: bool = Field(
+        default=True,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_LATE_AH_MONSTER_PLACEMENT_ENABLED"),
+        description="L8 (2026-08-01): kondisyonal na pagbukas ng late/afterhours (14:30-20:00 ET) placement na hard-zeroed ng A2 schedule. Sa loob ng band: payagan LANG kapag STRUCTURAL dip-reclaim trigger (flush_dip/raw_break/vwap_reclaim/abcd/double_bottom — measured FSM vocabulary sa monster tape) AT monster day (px/session_low ≥ 1.5), sa reduced size (chili_momentum_late_ah_monster_mult, base 0.5). Ang ×0.0 ay galing sa 14d AH 1W/11L (−$72.65) na random chop; ang JEM/JLHL monster bursts (Ross winning days) ay structurally unplayable dito bago ang lever. Lahat ng ibang proteksyon tumatakbo pa rin.",
+    )
+    chili_momentum_late_ah_monster_mult: float = Field(
+        default=0.5,
+        ge=0.0,
+        le=2.0,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_LATE_AH_MONSTER_MULT"),
+        description="L8: ang schedule multiplier na ipapalit sa ×0.0 kapag pumasa ang late/AH monster conditions — kalahating size (0.5) sa halip na buo, dahil mas manipis ang AH book. ONE documented base = 0.5. Band [0,2].",
+    )
+    chili_momentum_monster_structure_floor_enabled: bool = Field(
+        default=True,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_MONSTER_STRUCTURE_FLOOR_ENABLED"),
+        description="L10 (2026-08-04): monster-conditioned 15s STRUCTURE-FLOOR trail candidate sa first-minute verticals (HYFM 500% autopsy: ang giveback band ay huli — exit 3.57 vs structure-exitable 3.69; ang 1m trail ay proven −$42 net-negative sa klase). Compose-only via max() (INVARIANT-A: hindi lumuluwag); 4 adaptive conditions (monster ctx reuse + <3 kumpletong 1m bars + band-inadequacy self-referential + halt suppression); walang bagong threshold knobs.",
+    )
+    chili_momentum_late_window_refire_cooldown_enabled: bool = Field(
+        default=True,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_LATE_WINDOW_REFIRE_COOLDOWN_ENABLED"),
+        description="L8b (2026-08-02): pagkatapos ng late_window demote (sched mult ≤ 0), laktawan ang trigger ladder nang refire-cooldown seconds bago muling sumubok — ang sched band ay minuto-scale magbago kaya ang per-tick refire ay purong churn (ang buong pending chain kada tick ang nag-timeout sa JEM replay kahit 7200s; sa live, CPU hygiene). Bench/unbench + halt lifecycle hindi apektado. Fail-open (sirang marker ⇒ normal evaluation).",
+    )
+    chili_momentum_late_window_refire_cooldown_seconds: float = Field(
+        default=20.0,
+        ge=0.0,
+        le=300.0,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_LATE_WINDOW_REFIRE_COOLDOWN_SECONDS"),
+        description="L8b: tagal ng refire cooldown pagkatapos ng late_window demote. Worst case ay naaantala ang isang L8-eligible fire nang ganito katagal sa loob ng zero band. ONE documented base = 20s. Band [0,300]; 0 = walang cooldown.",
+    )
+    chili_momentum_latest_rvol_memo_seconds: float = Field(
+        default=5.0,
+        ge=0.0,
+        le=60.0,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_LATEST_RVOL_MEMO_SECONDS"),
+        description="L8b perf: per-bucket memo ng _latest_rvol (py-spy: ang per-tick micro-bar rebuild ay 28.7% ng JEM replay runtime). Sim-anchored clock ang bucket key (replay-correct); ang micro-bar frame ay bar-granular kaya ≤5s staleness ay walang epekto sa explosive thresholds. ONE documented base = 5s. Band [0,60]; 0 = memo OFF (byte-identical legacy).",
+    )
+    chili_momentum_viability_refresh_subscribe_hints_enabled: bool = Field(
+        default=True,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_VIABILITY_REFRESH_SUBSCRIBE_HINTS_ENABLED"),
+        description="L9-C1 (2026-08-03): bawat equity mover ng viability refresh ay isinusulat bilang subscribe HINT sa momentum_bridge_subscribe_requests (fast-polled ng host bridge kada 3s) — sinasara ang watch-resolver starvation (HYFM 500% day: eligible 11:39:30Z pero trades-watched 11:58:01Z = 18m31s; ~68% ng 28-min blindness). Walang bridge change; savepoint-safe; idempotent sa bridge de-dup.",
+    )
+    chili_momentum_viability_refresh_subscribe_hint_cap: int = Field(
+        default=25,
+        ge=0,
+        le=200,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_VIABILITY_REFRESH_SUBSCRIBE_HINT_CAP"),
+        description="L9-C1: max subscribe hints kada viability refresh — proteksyon sa ~500-watch budget ng bridge (self-halving governor). ONE documented base = 25. Band [0,200]; 0 = OFF.",
+    )
+    chili_momentum_vol_nan_fail_closed_enabled: bool = Field(
+        default=True,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_VOL_NAN_FAIL_CLOSED_ENABLED"),
+        description="Conviction volume gates (bull_flag, vwap_reclaim) FAIL-CLOSED when the break/reclaim-bar vol_ratio is NaN/unmeasurable (reason *_volume_unknown). Legacy let NaN PASS because NaN < mult is False — an IEEE comparison accident witnessed live-shaped on CLRO 2026-07-07 (golden-library benchmark), while the family's own _avg<=0 fallback already blocks. flush_dip is untouched (its volume gate is a documented FAIL-OPEN contract, Ross-parity L1b). Kill-switch: False restores the legacy NaN pass-through.",
     )
     chili_momentum_tick_break_tape_confirm_enabled: bool = Field(
         default=True,
         validation_alias=AliasChoices("CHILI_MOMENTUM_TICK_BREAK_TAPE_CONFIRM_ENABLED"),
-        description="Ross-parity L1 (2026-07-25): the ORB/ABCD TICK-BREAK paths additionally require buyers on the executed tape (tape_confirms_hold — the bull_flag/inverse-H&S standard) + the tick-break family's thrust buffers on ABCD (was a bare price>level fire). Tape-fail does NOT darken the detector — it falls through to the completed-bar + volume-spike path. Independent rollback domains: a pattern_tape_gate_enabled rollback fail-OPENs here (never newly darkens ORB/ABCD). KILL-SWITCH: False -> exact legacy naked-tick behavior -> byte-identical.",
+        description="User-approved default-ON executed-tape confirmation for ORB/ABCD tick breaks. False restores the legacy tick path; unavailable tape evidence fails only that decision closed.",
     )
     chili_momentum_orb_minutes: int = Field(
         default=5,
@@ -5191,7 +5346,7 @@ class Settings(BaseSettings):
     chili_momentum_catalyst_arb_flat_gate_enabled: bool = Field(
         default=True,
         validation_alias=AliasChoices("CHILI_MOMENTUM_CATALYST_ARB_FLAT_GATE_ENABLED"),
-        description="Ross-parity L3 (2026-07-25): ARB-FLAT catalyst class — a CONFIRMED buyout TARGET ('to be acquired'/'buyout'/'takeover'/'tender offer') trades pinned at the deal price; no intraday long opportunity, residual gap = merger-arb tail risk. Negative tilt + live-ineligible with precedence OVER strong (a 'definitive agreement to be acquired' headline is FLAT). Distinct class from weak so the reverse-split/private-placement sign-refinements and the fake-catalyst set (weak-keyed) never touch it. Nested under catalyst_grade_gate_enabled. KILL-SWITCH: False -> byte-identical.",
+        description="User-approved default-ON arb-flat catalyst veto under the typed catalyst-grade gate. False restores legacy strong classification.",
     )
     chili_momentum_catalyst_action_grading_enabled: bool = Field(
         default=True,
@@ -7322,9 +7477,9 @@ class Settings(BaseSettings):
     # small buffer over the entry — the thesis did not confirm, so bail before the stop.
     # A winner that pops (prints a new high above the confirm buffer) is IMMUNE.
     chili_momentum_bail_on_no_confirmation_enabled: bool = Field(
-        default=True,
+        default=False,
         validation_alias=AliasChoices("CHILI_MOMENTUM_BAIL_ON_NO_CONFIRMATION_ENABLED"),
-        description="GAP1: within the no-confirmation window after entry, bail if the breakout shows NO confirming strength (no new high since entry AND price at/below the confirm buffer over entry). A new high above the buffer makes the position immune (a popping winner is never cut). DEFAULT ON (2026-07-25, Ross 'breakout or bailout'): FSM replay A/B on recorded tape — QTTB 07-13 +26.92 (cut fading losers early), CLRO 07-02 -8.18 (re-entry churn in a midday grind), PLSM 07-13 0.00; net +18.74 across the matrix, and bailing frees the concurrency slot for re-entry rotation. Kill-switch: env CHILI_MOMENTUM_BAIL_ON_NO_CONFIRMATION_ENABLED=0.",
+        description="Early bailout when a breakout shows no confirming strength inside the bounded confirmation window. DEFAULT OFF since 2026-07-31 (L2a golden-library sweep + per-trade decomposition): the hair-trigger first bail layer was net −$530 (killed winners +$90 direct, +$440 via bail→cooldown churn loops and trend lockouts) while its protective role (−$46.58) is redundant — the slower structural backstops (breakout_failed_fast_bail, tape-accel bailout) caught every genuinely failing breakout in the no-bail arms. True re-enables the legacy hair-trigger layer.",
     )
     chili_momentum_no_confirmation_window_seconds: float = Field(
         default=20.0,
@@ -7713,7 +7868,7 @@ class Settings(BaseSettings):
     chili_momentum_fresh_ignition_reentry_bypass_enabled: bool = Field(
         default=True,
         validation_alias=AliasChoices("CHILI_MOMENTUM_FRESH_IGNITION_REENTRY_BYPASS_ENABLED"),
-        description="Ross-parity L5 / GAP-B (2026-07-25): at the stopout-cap terminalization edge, a NON-leader symbol with a FRESH IGNITION (tape_confirms_hold: signed accel>0 + tick-rate floor, fail-closed; AND membership in the running-up burst map >=3%/5min — AND-composition validated 2026-07-25: the instant-accel leg alone granted on fade/chop-day noise in replay) is granted a bounded exemption — recycle to WATCHING instead of FINISHED. The re-entry itself still passes the existing G4 escalated confirmation (structural trigger + tape) — the same quality-raise contract as the leader exemption. Emits live_reentry_cap_ignition_exempt. FAIL-CLOSED on any read error. KILL-SWITCH: False -> terminalize exactly as legacy -> byte-identical.",
+        description="User-approved default-ON bounded recycle for a non-leader only when both executed-tape confirmation and sustained running-up ignition are present. False disables the bypass; missing evidence remains fail-closed.",
     )
     chili_momentum_max_ignition_exemptions: int = Field(
         default=1,
@@ -9236,7 +9391,7 @@ class Settings(BaseSettings):
     chili_momentum_sub_vwap_trap_entry_enabled: bool = Field(
         default=True,
         validation_alias=AliasChoices("CHILI_MOMENTUM_SUB_VWAP_TRAP_ENTRY_ENABLED"),
-        description="LOCATE #4 SUB-VWAP TRAP: a breakdown BELOW VWAP that FAILS to follow through (no new low for K bars, a bottoming-tail flush that got bought) then RECLAIMS back above VWAP = a bear-trap / short-cover long. DISTINCT from vwap_reclaim (which needs K closes below): the trap is a SHARP undercut-and-reclaim (the stop-run below VWAP), not a sustained loss. Entry = the reclaim bar high (pullback_high); stop = the trap low (pullback_low). Carries ALL chase-guards (tape REQUIRED+fail-closed, _hod_extension_ok, _detect_back_side + front_side_state, _l2_entry_veto) + the LIVE_PENDING_ENTRY vetoes. DEFAULT ON (2026-07-25, Ross SS101 #018 coverage-audit promotion): mechanism-verified FULL fidelity; FSM replay A/B on CLRO 07-02 + QTTB 07-13 + PLSM 07-13 = byte-identical to base in all three (never mis-fires when the geometry is absent). Kill-switch: env CHILI_MOMENTUM_SUB_VWAP_TRAP_ENTRY_ENABLED=0.",
+        description="User-approved default-ON sub-VWAP-trap entry with the existing chase, tape, and L2 guards. False disables only this entry family.",
     )
     chili_momentum_pulling_away_roc_entry_enabled: bool = Field(
         default=False,
@@ -9949,11 +10104,71 @@ class Settings(BaseSettings):
     )
     # Ortex short-mechanics API key (squeeze-fuel tilt). Trader plan: 1,000 credits/mo,
     # 1 req/s, single-stock only — the fetch is gated to top-N explosive low-float
-    # candidates + cached 12h (see short_mechanics.py). Empty ⇒ no fetch ⇒ no tilt
-    # (fail-open / byte-identical). Use the literal "TEST" key for free random-data tests.
+    # candidates and success/authoritative-empty evidence is durably cached 24h
+    # (see short_mechanics.py). Empty key means no provider request. Use the literal
+    # "TEST" key for free random-data tests.
+    chili_ortex_monthly_request_limit: int = Field(
+        default=1000,
+        ge=1,
+        le=1000,
+        validation_alias=AliasChoices("CHILI_ORTEX_MONTHLY_REQUEST_LIMIT"),
+        description=(
+            "Durable calendar-month Ortex transport-attempt cap. The Trader plan "
+            "allows at most 1,000 requests/month; zero/unlimited is invalid."
+        ),
+    )
+    chili_ortex_success_cache_ttl_seconds: int = Field(
+        default=86400,
+        ge=60,
+        le=604800,
+        validation_alias=AliasChoices("CHILI_ORTEX_SUCCESS_CACHE_TTL_SECONDS"),
+        description=(
+            "Restart-safe TTL for hash-bound Ortex success or authoritative-empty "
+            "responses. Transient failures are never cached as data."
+        ),
+    )
+    chili_ortex_request_interval_seconds: float = Field(
+        default=1.05,
+        ge=1.0,
+        le=10.0,
+        validation_alias=AliasChoices("CHILI_ORTEX_REQUEST_INTERVAL_SECONDS"),
+        description="Durable minimum interval between Ortex transport starts.",
+    )
+    chili_ortex_reservation_lease_seconds: float = Field(
+        default=30.0,
+        ge=1.0,
+        le=300.0,
+        validation_alias=AliasChoices("CHILI_ORTEX_RESERVATION_LEASE_SECONDS"),
+        description="Bounded pre-transport reservation and indeterminate hold lease.",
+    )
+    chili_ortex_transient_backoff_base_seconds: float = Field(
+        default=2.0,
+        ge=1.0,
+        le=60.0,
+        validation_alias=AliasChoices(
+            "CHILI_ORTEX_TRANSIENT_BACKOFF_BASE_SECONDS"
+        ),
+        description="Initial durable backoff after a typed transient Ortex outcome.",
+    )
+    chili_ortex_transient_backoff_max_seconds: float = Field(
+        default=300.0,
+        ge=1.0,
+        le=3600.0,
+        validation_alias=AliasChoices(
+            "CHILI_ORTEX_TRANSIENT_BACKOFF_MAX_SECONDS"
+        ),
+        description="Maximum durable exponential Ortex transient backoff.",
+    )
+    chili_ortex_response_max_bytes: int = Field(
+        default=1048576,
+        ge=1024,
+        le=10485760,
+        validation_alias=AliasChoices("CHILI_ORTEX_RESPONSE_MAX_BYTES"),
+        description="Maximum sanitized hash-bound Ortex response body persisted.",
+    )
     chili_ortex_api_key: str = Field(
         default="", validation_alias=AliasChoices("CHILI_ORTEX_API_KEY"),
-        description="Ortex short-interest / cost-to-borrow API key for the squeeze-fuel selection tilt. Empty ⇒ no Ortex fetch ⇒ no tilt (fail-open).",
+        description="Ortex short-interest / cost-to-borrow API key for the squeeze-fuel selection tilt. Empty means zero provider I/O and a typed credential-unavailable outcome; captured decisions remain fail-closed instead of inventing evidence.",
     )
     # ── SHORT LANE (docs/DESIGN/SHORT_SIDE_LANE.md, P1) ────────────────────────
     # Master gate for the Alpaca short lane. Default FALSE by design (operator-
@@ -13102,6 +13317,14 @@ class Settings(BaseSettings):
     # 30d keeps the table small (one row per viable name per tick). Pruned by the same
     # batched _prune_operational_time_log drain the other operational logs use.
     brain_retention_viability_history_days: int = 30
+    # Staleness window after which momentum_symbol_viability rows get their four
+    # JSONB snapshot columns slimmed to '{}' (rows are KEPT — scalar score/
+    # eligibility/timestamps survive; the upsert fully repopulates the JSONB the
+    # moment a symbol re-enters the universe). A row whose freshness_ts is this
+    # old has left the freshness-gated selection universe, so its snapshot
+    # detail is dead weight (~48KB/row TOAST). 30d mirrors the viability-history
+    # TTL above — the two tables describe the same tick stream.
+    brain_retention_viability_snapshot_days: int = 30
     brain_retention_fast_snapshot_days: int = 30
     brain_retention_fast_orderbook_days: int = 3
     brain_retention_fast_alert_days: int = 14
@@ -13424,6 +13647,18 @@ class Settings(BaseSettings):
     opportunity_weight_pattern_quality: float = 0.22
     opportunity_weight_risk_reward: float = 0.13
     opportunity_weight_eta: float = 0.15
+
+    @model_validator(mode="after")
+    def _ortex_backoff_bounds(self) -> "Settings":
+        if (
+            self.chili_ortex_transient_backoff_base_seconds
+            > self.chili_ortex_transient_backoff_max_seconds
+        ):
+            raise ValueError(
+                "CHILI_ORTEX_TRANSIENT_BACKOFF_BASE_SECONDS must be "
+                "<= CHILI_ORTEX_TRANSIENT_BACKOFF_MAX_SECONDS"
+            )
+        return self
 
     @field_validator("database_url")
     @classmethod

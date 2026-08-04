@@ -11,6 +11,7 @@ flush-dip geometry + the frozen 10:00-ET morning clock) so both suites stay in l
 """
 from __future__ import annotations
 
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import numpy as np
@@ -71,3 +72,25 @@ def test_flag_off_is_byte_identical():
         ok, reason, dbg = _fire(ms, df, gate_on=False)
     assert ok is True, f"flag OFF must skip the gate, got {reason}"
     assert reason == "flush_dip_buy"
+
+
+def test_missing_flag_uses_default_on_volume_gate():
+    ms = SimpleNamespace()
+    _flush_settings(ms)
+    delattr(ms, "chili_momentum_flush_dip_volume_gate_enabled")
+    df = _flush_dip_df()
+    df["Volume"] = 1_000_000
+    compute = MagicMock(return_value=_flush_arrays(len(df)))
+    with patch(f"{_GATES}.settings", new=ms), \
+            patch(f"{_GATES}.compute_all_from_df", compute), \
+            patch(f"{_CANDLES}.is_bounce_curl_candle", return_value=True):
+        ok, reason, _ = flush_dip_buy_confirmation(
+            df,
+            entry_interval="1m",
+            symbol="TEST",
+            db=MagicMock(),
+            now=_FLUSH_NOW,
+        )
+    assert ok is False
+    assert reason == "flush_dip_low_volume"
+    assert compute.call_count == 2

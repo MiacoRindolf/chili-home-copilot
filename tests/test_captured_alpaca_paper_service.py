@@ -28,6 +28,7 @@ from scripts.captured_alpaca_paper_service import (
     _build_policy_authority,
     _build_service_composition,
     _build_startup_evidence,
+    _captured_paper_ortex_public_policy,
     _close_composition,
     _execute_no_order_smoke,
     _issue_post_smoke_refreshed_readiness,
@@ -536,6 +537,32 @@ def test_pressure_probe_does_not_poison_capture_store_resource_accounting(
         assert store.resource_health()["resource_failure_reasons"] == ()
     finally:
         store.close()
+
+
+def test_service_composition_binds_default_on_and_explicit_off_ortex_policy() -> None:
+    policy = MappingProxyType(
+        {
+            "schema_version": "chili.ortex-public-policy.v2",
+            "policy_sha256": SHA_A,
+        }
+    )
+    calls: list[str] = []
+    source_module = SimpleNamespace(
+        ortex_public_policy=lambda: calls.append("policy") or policy
+    )
+
+    assert _captured_paper_ortex_public_policy(
+        SimpleNamespace(chili_momentum_squeeze_fuel_tilt_enabled=True),
+        source_module,
+    ) is policy
+    assert calls == ["policy"]
+
+    calls.clear()
+    assert _captured_paper_ortex_public_policy(
+        SimpleNamespace(chili_momentum_squeeze_fuel_tilt_enabled=False),
+        source_module,
+    ) is None
+    assert calls == []
 
 
 class _PaperAdapter:
@@ -3836,6 +3863,10 @@ def test_final_manifest_or_kill_expiry_after_provider_start_blocks_workers(
     host_handshake = object.__new__(
         service_module._CapturedPaperHostActivationHandshake
     )
+    host_handshake._lock = service_module.threading.Lock()
+    host_handshake._started_sha256 = None
+    host_handshake._apply_completed_event_sha256 = None
+    host_handshake._apply_completed_event_body = None
     host_handshake.publish_prepared = lambda: events.append("prepared")
     host_handshake.await_and_consume_permit = lambda: (
         events.append("permit_consumed") or {"permit_sha256": SHA_C}
@@ -3930,6 +3961,10 @@ def test_host_permit_is_consumed_before_any_worker_and_started_ack(
     handshake = object.__new__(
         service_module._CapturedPaperHostActivationHandshake
     )
+    handshake._lock = service_module.threading.Lock()
+    handshake._started_sha256 = None
+    handshake._apply_completed_event_sha256 = None
+    handshake._apply_completed_event_body = None
     handshake.publish_prepared = lambda: events.append("prepared")
     handshake.await_and_consume_permit = lambda: (
         events.append("permit_consumed") or {"permit_sha256": SHA_C}
@@ -3946,12 +3981,22 @@ def test_host_permit_is_consumed_before_any_worker_and_started_ack(
         or {"authority_sha256": SHA_A, "artifact_sha256": SHA_B}
     )
     handshake._quiet_horizon_event_sha256 = SHA_B
-    handshake.publish_started = lambda *, health, active_start_authority: (
-        events.append("started_ack") or {"state": "STARTED"}
+    def publish_started(*, health, active_start_authority):
+        handshake._started_sha256 = SHA_C
+        events.append("started_ack")
+        return {"state": "STARTED"}
+
+    def consume_apply_completed():
+        handshake._apply_completed_event_sha256 = SHA_A
+        handshake._apply_completed_event_body = {"event_sha256": SHA_A}
+        events.append("apply_committed")
+        return {"event_sha256": SHA_A}
+
+    handshake.publish_started = publish_started
+    handshake.await_and_consume_apply_completed_authority = (
+        consume_apply_completed
     )
-    handshake.await_and_consume_apply_completed_authority = lambda: (
-        events.append("apply_committed") or {"event_sha256": SHA_A}
-    )
+    handshake.publish_stopped = lambda **_kwargs: events.append("stopped_ack")
 
     class _Supervisor:
         def start_active(self, *, start_authority, provider_options=None):
@@ -4083,6 +4128,10 @@ def test_post_permit_terminal_order_blocks_every_worker(monkeypatch) -> None:
     handshake = object.__new__(
         service_module._CapturedPaperHostActivationHandshake
     )
+    handshake._lock = service_module.threading.Lock()
+    handshake._started_sha256 = None
+    handshake._apply_completed_event_sha256 = None
+    handshake._apply_completed_event_body = None
     handshake.publish_prepared = lambda: events.append("prepared")
     handshake.await_and_consume_permit = lambda: (
         events.append("permit_consumed") or {"permit_sha256": SHA_C}

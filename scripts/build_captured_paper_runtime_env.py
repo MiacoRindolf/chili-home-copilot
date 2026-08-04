@@ -54,13 +54,60 @@ _OPTIONAL_PROVIDER_KEYS = (
     "POLYGON_API_KEY",
     "CHILI_ORTEX_API_KEY",
 )
+_OPTIONAL_ORTEX_POLICY_KEYS = (
+    "CHILI_ORTEX_MONTHLY_REQUEST_LIMIT",
+    "CHILI_ORTEX_REQUEST_INTERVAL_SECONDS",
+    "CHILI_ORTEX_RESERVATION_LEASE_SECONDS",
+    "CHILI_ORTEX_RESPONSE_MAX_BYTES",
+    "CHILI_ORTEX_SUCCESS_CACHE_TTL_SECONDS",
+    "CHILI_ORTEX_TRANSIENT_BACKOFF_BASE_SECONDS",
+    "CHILI_ORTEX_TRANSIENT_BACKOFF_MAX_SECONDS",
+)
+_OPTIONAL_ORTEX_STRATEGY_KEYS = (
+    "CHILI_MOMENTUM_SQUEEZE_FUEL_TILT_ENABLED",
+    "CHILI_MOMENTUM_SQUEEZE_FUEL_TOP_N",
+    "CHILI_MOMENTUM_FAKE_CATALYST_GUARD_ENABLED",
+    "CHILI_MOMENTUM_SQUEEZE_ENTRY_SIZEUP_ENABLED",
+    "CHILI_MOMENTUM_SQUEEZE_ENTRY_TOP_PCTL",
+    "CHILI_MOMENTUM_SQUEEZE_ENTRY_MAX_MULT",
+    "CHILI_MOMENTUM_SQUEEZE_EXIT_HOLD_ENABLED",
+    "CHILI_MOMENTUM_SQUEEZE_EXIT_TAIL_PCTL",
+    "CHILI_MOMENTUM_SQUEEZE_EXIT_MAX_WIDEN",
+    "CHILI_MOMENTUM_KELLY_CONVICTION_ENABLED",
+    "CHILI_MOMENTUM_KELLY_CONVICTION_MAX_MULTIPLIER",
+    "CHILI_MOMENTUM_KELLY_CONVICTION_GAIN",
+    "CHILI_MOMENTUM_KELLY_CONVICTION_W_SQUEEZE",
+    "CHILI_MOMENTUM_KELLY_CONVICTION_W_OFI",
+    "CHILI_MOMENTUM_KELLY_CONVICTION_W_NEWS",
+    "CHILI_MOMENTUM_SUB_VWAP_TRAP_ENTRY_ENABLED",
+    "CHILI_MOMENTUM_BAIL_ON_NO_CONFIRMATION_ENABLED",
+    "CHILI_MOMENTUM_CATALYST_ARB_FLAT_GATE_ENABLED",
+    "CHILI_MOMENTUM_TICK_BREAK_TAPE_CONFIRM_ENABLED",
+    "CHILI_MOMENTUM_FLUSH_DIP_VOLUME_GATE_ENABLED",
+    "CHILI_MOMENTUM_ROSS_STOP_ALIGNMENT_ENABLED",
+    "CHILI_MOMENTUM_ORB_IHS_STRUCTURAL_STOP_ENABLED",
+    "CHILI_MOMENTUM_FRESH_IGNITION_REENTRY_BYPASS_ENABLED",
+    "CHILI_MOMENTUM_UNIVERSE_FLOAT_GATE_ENABLED",
+    "CHILI_MOMENTUM_CHASE_DEFER_ENABLED",
+    "CHILI_MOMENTUM_WHIPSAW_RAPID_ESCALATION_ENABLED",
+    "CHILI_MOMENTUM_FLUSH_DIP_FRESH_HOD_AFTERNOON_ENABLED",
+    "CHILI_MOMENTUM_DIP_MONSTER_CONTEXT_ENABLED",
+    "CHILI_MOMENTUM_LATE_AH_MONSTER_PLACEMENT_ENABLED",
+    "CHILI_MOMENTUM_MONSTER_STRUCTURE_FLOOR_ENABLED",
+)
 _SUPPLIED_KEYS = (
     "CHILI_ALPACA_EXPECTED_ACCOUNT_ID",
     "CHILI_IQFEED_L1_AUTHORITATIVE_BRIDGE_BUILD",
     "IQFEED_NOTIFY_CHANNEL",
 )
 _OUTPUT_KEYS = frozenset(
-    {*_REQUIRED_SOURCE_KEYS, *_OPTIONAL_PROVIDER_KEYS, *_SUPPLIED_KEYS}
+    {
+        *_REQUIRED_SOURCE_KEYS,
+        *_OPTIONAL_PROVIDER_KEYS,
+        *_OPTIONAL_ORTEX_POLICY_KEYS,
+        *_OPTIONAL_ORTEX_STRATEGY_KEYS,
+        *_SUPPLIED_KEYS,
+    }
 )
 _SECRET_KEYS = frozenset(
     {
@@ -72,6 +119,8 @@ _SECRET_KEYS = frozenset(
         "CHILI_ORTEX_API_KEY",
     }
 )
+_TRUE_VALUES = frozenset({"1", "true", "yes", "on"})
+_FALSE_VALUES = frozenset({"0", "false", "no", "off"})
 
 
 class CapturedPaperRuntimeEnvBuildError(RuntimeError):
@@ -397,6 +446,24 @@ def _parse_source(raw: bytes) -> Mapping[str, str]:
     return MappingProxyType(normalized)
 
 
+def _squeeze_fuel_enabled(source: Mapping[str, str]) -> bool:
+    """Resolve the default-ON Ortex lane before publishing its authority."""
+
+    raw = str(
+        source.get("CHILI_MOMENTUM_SQUEEZE_FUEL_TILT_ENABLED", "")
+    ).strip().lower()
+    if not raw:
+        return True
+    if raw in _TRUE_VALUES:
+        return True
+    if raw in _FALSE_VALUES:
+        return False
+    raise CapturedPaperRuntimeEnvBuildError(
+        "the Ortex strategy switch is not a canonical boolean",
+        code="INVALID_STRATEGY_SWITCH",
+    )
+
+
 def _project_values(
     source: Mapping[str, str],
     *,
@@ -410,6 +477,14 @@ def _project_values(
     if missing:
         raise CapturedPaperRuntimeEnvBuildError(
             "one or more required curated PAPER inputs are missing",
+            code="MISSING_REQUIRED_INPUT",
+        )
+    if (
+        _squeeze_fuel_enabled(source)
+        and not str(source.get("CHILI_ORTEX_API_KEY", "")).strip()
+    ):
+        raise CapturedPaperRuntimeEnvBuildError(
+            "the default-ON Ortex lane requires its captured PAPER credential",
             code="MISSING_REQUIRED_INPUT",
         )
     raw_feed = str(source["CHILI_ALPACA_DATA_FEED"])
@@ -439,6 +514,14 @@ def _project_values(
         value = str(source.get(key, ""))
         if value.strip():
             projected[key] = value
+    for key in _OPTIONAL_ORTEX_POLICY_KEYS:
+        value = str(source.get(key, ""))
+        if value.strip():
+            projected[key] = value
+    for key in _OPTIONAL_ORTEX_STRATEGY_KEYS:
+        value = str(source.get(key, ""))
+        if value.strip():
+            projected[key] = value
     projected.update(
         {
             "CHILI_ALPACA_EXPECTED_ACCOUNT_ID": _canonical_uuid(
@@ -463,6 +546,8 @@ def _render_environment(values: Mapping[str, str]) -> bytes:
     keys = [
         *_REQUIRED_SOURCE_KEYS,
         *(key for key in _OPTIONAL_PROVIDER_KEYS if key in values),
+        *(key for key in _OPTIONAL_ORTEX_POLICY_KEYS if key in values),
+        *(key for key in _OPTIONAL_ORTEX_STRATEGY_KEYS if key in values),
         *_SUPPLIED_KEYS,
     ]
     if set(keys) != set(values) or len(keys) != len(values):

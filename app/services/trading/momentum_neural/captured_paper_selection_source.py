@@ -32,6 +32,7 @@ from app.models.captured_paper_selection_frontier import (
 )
 from app.models.trading import (
     BrainNodeState,
+    MomentumOrtexRequestAttempt,
     MomentumStrategyVariant,
     MomentumSymbolViability,
 )
@@ -69,17 +70,28 @@ from .features import ExecutionReadinessFeatures
 from .leveraged_etf import is_excluded_fund_name, is_leveraged_etf_name
 from .replay_capture_contract import (
     CaptureClocks,
+    CaptureContractError,
     CaptureEvent,
     CaptureEventRef,
+    CaptureOrtexSelectionSnapshot,
     CaptureReadReceipt,
     CaptureRunIdentity,
     CaptureStream,
+    CoverageGap,
     FSMDependencyProfile,
     FSMStreamDependency,
     StreamCoverage,
+    ORTEX_SNAPSHOT_PROVIDER,
+    ValidatedOrtexSqueezeFuelBatchManifest,
+    bind_ortex_squeeze_fuel_batch_reference,
     captured_read_result_sha256,
     sha256_json,
+    validate_ortex_squeeze_fuel_batch_manifest,
+    validate_ortex_squeeze_fuel_batch_reference,
+    validate_ortex_selection_endpoint_discovery_chain,
+    validate_ortex_selection_batch,
 )
+from .short_mechanics import ortex_public_policy
 from .variants import MomentumStrategyFamily, get_family
 from .viability import (
     ViabilityExternalInputs,
@@ -103,6 +115,7 @@ HUB_NODE_ID = "nm_momentum_crypto_intel"
 FUNDAMENTALS_QUERY_SCHEMA_VERSION = (
     "chili.captured-paper-fundamentals-query.v2"
 )
+ORTEX_BATCH_STATUS_KEY = "ortex_squeeze_fuel_batch"
 
 # 2026-07-23 (a79 finding): the hub is the CRYPTO intel node and its
 # symbols_evaluated intermittently contains crypto pairs like BTC-USD -- which
@@ -256,6 +269,550 @@ def _features_from_snapshot(raw: Any) -> ExecutionReadinessFeatures:
         ) from exc
 
 
+@dataclass(frozen=True, slots=True)
+class _OrtexSelectionEvidence:
+    affected: bool
+    snapshot: CaptureOrtexSelectionSnapshot | None
+    coverage_reason: str | None
+
+
+def _ortex_global_batch_inventory(
+    db: Session,
+    feature_meta: Mapping[str, Any],
+    *,
+    required_symbol: str,
+    read_at: datetime,
+    public_policy_sha256: str,
+    freshness_ttl_seconds: float,
+    manifest_cache: dict[
+        str,
+        ValidatedOrtexSqueezeFuelBatchManifest,
+    ],
+) -> tuple[Mapping[str, Mapping[str, Any]] | None, str | None, str | None]:
+    """Resolve a compact row receipt to the exact full hub manifest.
+
+    Scheduler persistence is intentionally chunked while Ortex percentile
+    ranks are computed against the complete field.  The full manifest is
+    stored once on ``BrainNodeState(HUB_NODE_ID)``; each viability row carries
+    only a compact content-addressed pointer plus its chunk-local signal.  Both
+    rows are read inside the caller's existing repeatable-read, read-only
+    transaction.  Durable provider-attempt rows are still reconstructed below
+    before any member becomes economic evidence.
+    """
+
+    raw_reference = feature_meta.get(ORTEX_BATCH_STATUS_KEY)
+    if not isinstance(raw_reference, Mapping):
+        return None, None, "ortex_selection_batch_reference_missing"
+    try:
+        typed_reference = validate_ortex_squeeze_fuel_batch_reference(
+            raw_reference,
+            read_at=read_at,
+            expected_quota_policy_sha256=public_policy_sha256,
+        )
+    except CaptureContractError:
+        return None, None, "ortex_selection_batch_reference_invalid"
+
+    typed_manifest = manifest_cache.get(typed_reference.batch_sha256)
+    if typed_manifest is None:
+        hub_row = (
+            db.query(BrainNodeState)
+            .filter(BrainNodeState.node_id == HUB_NODE_ID)
+            .one_or_none()
+        )
+        if hub_row is None or not isinstance(hub_row.local_state, Mapping):
+            return (
+                None,
+                typed_reference.batch_sha256,
+                "ortex_selection_batch_hub_missing",
+            )
+        raw_manifest = hub_row.local_state.get(ORTEX_BATCH_STATUS_KEY)
+        if not isinstance(raw_manifest, Mapping):
+            return (
+                None,
+                typed_reference.batch_sha256,
+                "ortex_selection_batch_hub_missing",
+            )
+        try:
+            typed_manifest = validate_ortex_squeeze_fuel_batch_manifest(
+                raw_manifest,
+                read_at=read_at,
+                expected_quota_policy_sha256=public_policy_sha256,
+                freshness_ttl_seconds=freshness_ttl_seconds,
+            )
+        except CaptureContractError as exc:
+            reason = str(exc).lower()
+            if "stale" in reason:
+                typed_reason = "ortex_selection_batch_hub_stale"
+            elif "future" in reason:
+                typed_reason = "ortex_selection_batch_hub_from_future"
+            else:
+                typed_reason = "ortex_selection_batch_hub_invalid"
+            return None, typed_reference.batch_sha256, typed_reason
+        manifest_cache[typed_manifest.batch_sha256] = typed_manifest
+    try:
+        bound_manifest = bind_ortex_squeeze_fuel_batch_reference(
+            typed_reference,
+            typed_manifest,
+        )
+    except CaptureContractError:
+        return (
+            None,
+            typed_reference.batch_sha256,
+            "ortex_selection_batch_hub_reference_mismatch",
+        )
+    if not bound_manifest.complete:
+        return (
+            None,
+            bound_manifest.batch_sha256,
+            "ortex_selection_batch_coverage_unavailable",
+        )
+    inventory = bound_manifest.signal_by_symbol
+    if required_symbol not in inventory:
+        return (
+            None,
+            bound_manifest.batch_sha256,
+            "ortex_selection_batch_symbol_missing",
+        )
+    return inventory, bound_manifest.batch_sha256, None
+
+
+def _ortex_row_signal_matches_global_member(
+    signal: Mapping[str, Any],
+    member: Mapping[str, Any],
+) -> bool:
+    """Require the persisted chunk projection to equal its global member."""
+
+    if (
+        signal.get("ortex_selection_reference")
+        != member.get("ortex_selection_reference")
+    ):
+        return False
+    for field_name in ("squeeze_fuel_pct", "squeeze_fuel_rank_pct"):
+        current = signal.get(field_name)
+        expected = member.get(field_name)
+        if current is None or expected is None:
+            if current is not expected:
+                return False
+            continue
+        if (
+            isinstance(current, bool)
+            or isinstance(expected, bool)
+            or not isinstance(current, (int, float))
+            or not isinstance(expected, (int, float))
+            or not math.isfinite(float(current))
+            or not math.isfinite(float(expected))
+            or float(current) != float(expected)
+        ):
+            return False
+    return True
+
+
+def _ortex_selection_evidence(
+    features: ExecutionReadinessFeatures,
+    *,
+    batch: Mapping[str, Any] | None,
+    affected: bool,
+    preflight_reason: str | None,
+    symbol: str,
+    read_at: datetime,
+) -> _OrtexSelectionEvidence:
+    if not affected:
+        return _OrtexSelectionEvidence(False, None, None)
+    if batch is None:
+        return _OrtexSelectionEvidence(
+            True,
+            None,
+            str(preflight_reason or "ortex_selection_batch_unavailable"),
+        )
+    meta = features.meta if isinstance(features.meta, Mapping) else {}
+    ross_signals = meta.get("ross_signals")
+    if not isinstance(ross_signals, Mapping):
+        return _OrtexSelectionEvidence(
+            True,
+            None,
+            "ortex_selection_signal_inventory_missing",
+        )
+    signal = ross_signals.get(symbol)
+    if not isinstance(signal, Mapping):
+        return _OrtexSelectionEvidence(
+            True,
+            None,
+            "ortex_selection_ranked_signal_missing",
+        )
+    rank_present = signal.get("squeeze_fuel_rank_pct") is not None
+    try:
+        typed = validate_ortex_selection_batch(
+            batch,
+            ranked_symbol=symbol,
+            expected_rank_pct=(
+                None
+                if signal.get("squeeze_fuel_rank_pct") is None
+                else float(signal["squeeze_fuel_rank_pct"])
+            ),
+        )
+    except (CaptureContractError, TypeError, ValueError):
+        return _OrtexSelectionEvidence(
+            True,
+            None,
+            "ortex_selection_snapshot_invalid",
+        )
+    if typed.returned_at > read_at:
+        return _OrtexSelectionEvidence(
+            True,
+            None,
+            "ortex_selection_snapshot_from_future",
+        )
+    source_age = (read_at - typed.source_received_at).total_seconds()
+    if source_age < 0.0:
+        return _OrtexSelectionEvidence(
+            True,
+            None,
+            "ortex_selection_source_clock_from_future",
+        )
+    if source_age > typed.success_cache_ttl_seconds:
+        return _OrtexSelectionEvidence(
+            True,
+            None,
+            "ortex_selection_source_stale",
+        )
+    if typed.outcome == "SUCCESS":
+        if not typed.complete or typed.rank_pct is None or not rank_present:
+            return _OrtexSelectionEvidence(
+                True,
+                None,
+                "ortex_selection_success_rank_incomplete",
+            )
+    elif typed.outcome in {
+        "AUTHORITATIVE_EMPTY",
+        "NOT_APPLICABLE",
+        "UNSUPPORTED_SYMBOL_OR_EXCHANGE",
+    }:
+        if not typed.complete or typed.rank_pct is not None or rank_present:
+            return _OrtexSelectionEvidence(
+                True,
+                None,
+                "ortex_selection_neutral_rank_mismatch",
+            )
+    else:
+        return _OrtexSelectionEvidence(
+            True,
+            None,
+            f"ortex_selection_outcome_unavailable:{typed.outcome.lower()}",
+        )
+    return _OrtexSelectionEvidence(True, typed, None)
+
+
+def _materialize_ortex_selection_batch(
+    db: Session,
+    ross_signals: Mapping[str, Any],
+    *,
+    read_at: datetime,
+    public_policy: Mapping[str, Any],
+    public_policy_sha256: str,
+) -> tuple[Mapping[str, Any] | None, str | None]:
+    """Resolve compact viability refs to full response bytes in one DB snapshot."""
+
+    outer_expected = {
+        "schema",
+        "version",
+        "outcome_capture_sha256",
+        "kind",
+        "symbol",
+        "requested_exchange",
+        "resolved_exchange",
+        "short_interest_pct",
+        "cost_to_borrow",
+        "utilization",
+        "is_easy_to_borrow",
+        "provider_event_at",
+        "effective_at",
+        "received_at",
+        "available_at",
+        "detail_code",
+        "quota_policy_sha256",
+        "cache_origin_sha256",
+        "cache_origin_received_at",
+        "cache_origin_available_at",
+        "endpoint_refs",
+        "selection_reference_sha256",
+    }
+    endpoint_expected = {
+        "dataset",
+        "kind",
+        "exchange",
+        "attempt_id",
+        "request_sha256",
+        "raw_response_sha256",
+        "endpoint_capture_sha256",
+        "selected_row_sha256",
+        "http_status",
+        "provider_event_at",
+        "effective_at",
+        "received_at",
+        "available_at",
+        "value",
+    }
+    refs: dict[str, Mapping[str, Any]] = {}
+    attempt_ids: set[uuid.UUID] = set()
+    for raw_symbol, raw_signal in sorted(ross_signals.items()):
+        symbol = str(raw_symbol or "").strip().upper()
+        if not isinstance(raw_signal, Mapping):
+            continue
+        raw_ref = raw_signal.get("ortex_selection_reference")
+        if raw_ref is None:
+            return None, "ortex_selection_reference_missing"
+        if (
+            not isinstance(raw_ref, Mapping)
+            or set(raw_ref) != outer_expected
+            or raw_ref.get("schema") != "chili.ortex.selection-reference.v1"
+            or raw_ref.get("version") != 1
+            or raw_ref.get("symbol") != symbol
+        ):
+            return None, "ortex_selection_reference_invalid"
+        reference_body = {
+            key: value
+            for key, value in raw_ref.items()
+            if key != "selection_reference_sha256"
+        }
+        if raw_ref.get("selection_reference_sha256") != sha256_json(
+            reference_body
+        ):
+            return None, "ortex_selection_reference_hash_mismatch"
+        if raw_ref.get("quota_policy_sha256") != public_policy_sha256:
+            return None, "ortex_selection_policy_mismatch"
+        try:
+            _sha(
+                raw_ref.get("outcome_capture_sha256"),
+                "ortex_outcome_capture_sha256",
+            )
+        except CapturedPaperSelectionSourceUnavailable:
+            return None, "ortex_selection_outcome_hash_invalid"
+        endpoint_refs = raw_ref.get("endpoint_refs")
+        if not isinstance(endpoint_refs, list):
+            return None, "ortex_selection_endpoint_refs_invalid"
+        for endpoint_ref in endpoint_refs:
+            if (
+                not isinstance(endpoint_ref, Mapping)
+                or set(endpoint_ref) != endpoint_expected
+            ):
+                return None, "ortex_selection_endpoint_ref_invalid"
+            dataset = str(endpoint_ref.get("dataset") or "")
+            if dataset not in {"short_interest", "cost_to_borrow"}:
+                return None, "ortex_selection_endpoint_dataset_invalid"
+            try:
+                attempt_id = uuid.UUID(
+                    str(endpoint_ref.get("attempt_id") or "")
+                )
+            except ValueError:
+                return None, "ortex_selection_attempt_id_invalid"
+            for hash_field in (
+                "request_sha256",
+                "endpoint_capture_sha256",
+            ):
+                try:
+                    _sha(
+                        endpoint_ref.get(hash_field),
+                        f"ortex_{hash_field}",
+                    )
+                except CapturedPaperSelectionSourceUnavailable:
+                    return None, "ortex_selection_endpoint_hash_invalid"
+            raw_response_sha256 = endpoint_ref.get("raw_response_sha256")
+            if raw_response_sha256 is not None:
+                try:
+                    _sha(
+                        raw_response_sha256,
+                        "ortex_raw_response_sha256",
+                    )
+                except CapturedPaperSelectionSourceUnavailable:
+                    return None, "ortex_selection_response_hash_invalid"
+            attempt_ids.add(attempt_id)
+        try:
+            validate_ortex_selection_endpoint_discovery_chain(
+                endpoint_refs,
+                symbol=symbol,
+                aggregate_kind=str(raw_ref.get("kind") or ""),
+                requested_exchange=raw_ref.get("requested_exchange"),
+                resolved_exchange=raw_ref.get("resolved_exchange"),
+                expected_quota_policy_sha256=public_policy_sha256,
+            )
+        except CaptureContractError:
+            return None, "ortex_selection_endpoint_discovery_invalid"
+        refs[symbol] = copy.deepcopy(dict(raw_ref))
+
+    if not refs:
+        return None, None
+    records = (
+        db.query(MomentumOrtexRequestAttempt)
+        .filter(MomentumOrtexRequestAttempt.attempt_id.in_(attempt_ids))
+        .order_by(
+            MomentumOrtexRequestAttempt.bundle_sha256.asc(),
+            MomentumOrtexRequestAttempt.bundle_index.asc(),
+            MomentumOrtexRequestAttempt.attempt_id.asc(),
+        )
+        .all()
+        if attempt_ids
+        else []
+    )
+    records_by_id = {str(row.attempt_id): row for row in records}
+    if len(records_by_id) != len(attempt_ids):
+        return None, "ortex_selection_attempt_rows_missing"
+
+    try:
+        from .short_mechanics import (
+            OrtexShortMechanicsOutcome,
+            ortex_outcome_from_completed_attempts,
+        )
+    except ImportError:
+        return None, "ortex_selection_reconstructor_unavailable"
+
+    members: list[dict[str, Any]] = []
+    unusable_kind: str | None = None
+    for symbol, reference in refs.items():
+        endpoint_refs = reference["endpoint_refs"]
+        selected_records = [
+            records_by_id[str(endpoint_ref["attempt_id"])]
+            for endpoint_ref in endpoint_refs
+        ]
+        try:
+            observed_at = _parse_utc(
+                reference.get("available_at"),
+                "ortex_selection_observed_at",
+            )
+            if reference.get("kind") == "NOT_APPLICABLE":
+                if endpoint_refs or selected_records:
+                    return None, "ortex_not_applicable_attempts_present"
+                outcome = OrtexShortMechanicsOutcome.not_applicable(
+                    symbol=symbol,
+                    reason=str(reference.get("detail_code") or ""),
+                    observed_at=observed_at,
+                    policy_sha256=public_policy_sha256,
+                    policy=public_policy,
+                )
+            else:
+                durable_outcome = ortex_outcome_from_completed_attempts(
+                    symbol=symbol,
+                    requested_exchange=reference.get("requested_exchange"),
+                    records=selected_records,
+                    policy=public_policy,
+                    observed_at=observed_at,
+                )
+                durable_ref = durable_outcome.to_selection_reference_dict()
+                stable_fields = (
+                    "kind",
+                    "symbol",
+                    "requested_exchange",
+                    "resolved_exchange",
+                    "short_interest_pct",
+                    "cost_to_borrow",
+                    "utilization",
+                    "is_easy_to_borrow",
+                    "provider_event_at",
+                    "effective_at",
+                    "quota_policy_sha256",
+                    "endpoint_refs",
+                )
+                if any(
+                    durable_ref.get(field) != reference.get(field)
+                    for field in stable_fields
+                ):
+                    return None, "ortex_selection_reference_row_mismatch"
+                outcome = OrtexShortMechanicsOutcome(
+                    kind=durable_outcome.kind,
+                    symbol=durable_outcome.symbol,
+                    requested_exchange=durable_outcome.requested_exchange,
+                    resolved_exchange=durable_outcome.resolved_exchange,
+                    endpoints=durable_outcome.endpoints,
+                    short_interest_pct=durable_outcome.short_interest_pct,
+                    cost_to_borrow=durable_outcome.cost_to_borrow,
+                    utilization=durable_outcome.utilization,
+                    is_easy_to_borrow=durable_outcome.is_easy_to_borrow,
+                    provider_event_at=durable_outcome.provider_event_at,
+                    effective_at=durable_outcome.effective_at,
+                    received_at=_parse_utc(
+                        reference.get("received_at"),
+                        "ortex_selection_received_at",
+                    ),
+                    available_at=observed_at,
+                    detail_code=str(reference.get("detail_code") or ""),
+                    policy=public_policy,
+                    quota_policy_sha256=public_policy_sha256,
+                    cache_origin_sha256=reference.get(
+                        "cache_origin_sha256"
+                    ),
+                    cache_origin_received_at=(
+                        None
+                        if reference.get("cache_origin_received_at") is None
+                        else _parse_utc(
+                            reference.get("cache_origin_received_at"),
+                            "ortex_cache_origin_received_at",
+                        )
+                    ),
+                    cache_origin_available_at=(
+                        None
+                        if reference.get("cache_origin_available_at") is None
+                        else _parse_utc(
+                            reference.get("cache_origin_available_at"),
+                            "ortex_cache_origin_available_at",
+                        )
+                    ),
+                )
+            reconstructed_ref = outcome.to_selection_reference_dict()
+        except (KeyError, TypeError, ValueError):
+            return None, "ortex_selection_attempt_reconstruction_failed"
+        if reconstructed_ref != reference:
+            return None, "ortex_selection_reference_row_mismatch"
+        signal = ross_signals[symbol]
+        mechanics = outcome.to_capture_dict()
+        members.append(
+            {
+                "symbol": symbol,
+                "short_mechanics": mechanics,
+                "short_mechanics_sha256": sha256_json(mechanics),
+                "squeeze_fuel_pct": signal.get("squeeze_fuel_pct"),
+                "rank_pct": signal.get("squeeze_fuel_rank_pct"),
+            }
+        )
+        if outcome.kind.value not in {
+            "SUCCESS",
+            "AUTHORITATIVE_EMPTY",
+            "NOT_APPLICABLE",
+            "UNSUPPORTED_SYMBOL_OR_EXCHANGE",
+        }:
+            unusable_kind = outcome.kind.value.lower()
+
+    if unusable_kind is not None:
+        return None, f"ortex_selection_outcome_unavailable:{unusable_kind}"
+    members.sort(key=lambda row: row["symbol"])
+    batch = {
+        "schema_version": "chili.ortex-selection-snapshot.v1",
+        "members": members,
+        "members_sha256": sha256_json(members),
+        "complete": True,
+    }
+    try:
+        # Validate every member as a possible ranked decision so no malformed
+        # equity sibling can hide behind the currently selected symbol.
+        # Non-equity policy members are still fully parsed by every validation
+        # call, but cannot themselves be a ranked decision (the typed capture
+        # contract intentionally rejects ``*-USD`` as ``expected_symbol``).
+        for member in members:
+            if member["symbol"].endswith("-USD"):
+                continue
+            validate_ortex_selection_batch(
+                batch,
+                ranked_symbol=member["symbol"],
+                expected_rank_pct=member["rank_pct"],
+            )
+    except (CaptureContractError, TypeError, ValueError):
+        return None, "ortex_selection_batch_invalid"
+    if _utc(read_at, "ortex_selection_read_at") < max(
+        _parse_utc(reference["available_at"], "ortex_selection_available_at")
+        for reference in refs.values()
+    ):
+        return None, "ortex_selection_reference_from_future"
+    return batch, None
+
+
 def _variant_snapshot(row: MomentumStrategyVariant) -> dict[str, Any]:
     return {
         "id": int(row.id),
@@ -314,6 +871,9 @@ class CapturedDerivedViabilitySnapshot:
     external: ViabilityExternalInputs
     post_score_adjustment: CapturedViabilityPostScoreAdjustment
     source_payload: Mapping[str, Any]
+    ortex_selection_batch: Mapping[str, Any] | None
+    ortex_selection_affected: bool
+    ortex_coverage_reason: str | None
     source_fingerprint_sha256: str
     hub_snapshot_sha256: str
     event_at: datetime
@@ -342,6 +902,26 @@ class CapturedDerivedViabilitySnapshot:
             _reject("derived_source_external_invalid")
         if type(self.post_score_adjustment) is not CapturedViabilityPostScoreAdjustment:
             _reject("derived_source_post_score_invalid")
+        if type(self.ortex_selection_affected) is not bool:
+            _reject("derived_source_ortex_affected_invalid")
+        if self.ortex_selection_batch is not None:
+            if not isinstance(self.ortex_selection_batch, Mapping):
+                _reject("derived_source_ortex_batch_invalid")
+            if self.ortex_coverage_reason is not None:
+                _reject("derived_source_ortex_batch_reason_conflict")
+            expected_batch_sha = self.source_payload.get(
+                "ortex_selection_batch_sha256"
+            )
+            if expected_batch_sha != sha256_json(self.ortex_selection_batch):
+                _reject("derived_source_ortex_batch_hash_mismatch")
+        elif self.ortex_selection_affected:
+            if not str(self.ortex_coverage_reason or "").strip():
+                _reject("derived_source_ortex_coverage_reason_missing")
+        elif (
+            self.ortex_coverage_reason is not None
+            or self.source_payload.get("ortex_selection_batch_sha256") is not None
+        ):
+            _reject("derived_source_ortex_unaffected_material_invalid")
         event = _utc(self.event_at, "derived_source_event_at")
         read = _utc(self.read_at, "derived_source_read_at")
         if event > read:
@@ -383,6 +963,7 @@ class SqlAlchemyCapturedViabilitySnapshotSource:
         candidate_code_build_sha256: str,
         adaptive_policy_snapshot: Mapping[str, Any],
         code_build_payload: Mapping[str, Any],
+        ortex_public_policy: Mapping[str, Any] | None,
         fundamentals_reader: Callable[[str], FundamentalsReceipt],
         context_max_age_seconds: float,
         tenbeat_entry_tilt_weight: float,
@@ -429,14 +1010,33 @@ class SqlAlchemyCapturedViabilitySnapshotSource:
             _reject("adaptive_policy_snapshot_invalid")
         if not isinstance(code_build_payload, Mapping):
             _reject("candidate_code_build_payload_invalid")
+        if ortex_public_policy is not None and not isinstance(
+            ortex_public_policy, Mapping
+        ):
+            _reject("ortex_public_policy_invalid")
         if not callable(fundamentals_reader) or not callable(wall_clock):
             _reject("derived_source_provider_capability_invalid")
         adaptive_policy_payload = copy.deepcopy(dict(adaptive_policy_snapshot))
         candidate_code_payload = copy.deepcopy(dict(code_build_payload))
+        ortex_policy_payload = (
+            None
+            if ortex_public_policy is None
+            else copy.deepcopy(dict(ortex_public_policy))
+        )
         if sha256_json(adaptive_policy_payload) != policy_sha256:
             _reject("adaptive_policy_snapshot_hash_mismatch")
         if sha256_json(candidate_code_payload) != candidate_code_build_sha256:
             _reject("candidate_code_build_payload_hash_mismatch")
+        if ortex_policy_payload is not None and (
+            type(ortex_policy_payload.get("monthly_limit")) is not int
+            or ortex_policy_payload["monthly_limit"] != 1_000
+            or type(ortex_policy_payload.get("success_cache_ttl_seconds"))
+            is not int
+            or not 60
+            <= ortex_policy_payload["success_cache_ttl_seconds"]
+            <= 7 * 24 * 60 * 60
+        ):
+            _reject("ortex_public_policy_contract_invalid")
         max_age = _finite_positive(context_max_age_seconds, "context_max_age_seconds")
         if isinstance(tenbeat_entry_tilt_weight, bool) or not isinstance(
             tenbeat_entry_tilt_weight, (int, float)
@@ -480,6 +1080,12 @@ class SqlAlchemyCapturedViabilitySnapshotSource:
             service_settings_projection_sha256
         )
         self.candidate_code_build_sha256 = str(candidate_code_build_sha256)
+        self.ortex_public_policy = ortex_policy_payload
+        self.ortex_public_policy_sha256 = (
+            None
+            if ortex_policy_payload is None
+            else sha256_json(ortex_policy_payload)
+        )
         self.context_max_age_seconds = max_age
         self.tenbeat_entry_tilt_weight = tenbeat_weight
         self.fundamentals_reader = fundamentals_reader
@@ -1168,6 +1774,12 @@ class SqlAlchemyCapturedViabilitySnapshotSource:
             candidate_symbols = sorted(all_candidate_symbols - attempted_symbols)
             attempted_this_read: set[str] = set()
             selected_symbol: str | None = None
+            ortex_batch_cache: dict[
+                str, tuple[Mapping[str, Any] | None, str | None]
+            ] = {}
+            ortex_manifest_cache: dict[
+                str, ValidatedOrtexSqueezeFuelBatchManifest
+            ] = {}
 
             def initial_cohort_rank(
                 symbol_key: str,
@@ -1246,6 +1858,89 @@ class SqlAlchemyCapturedViabilitySnapshotSource:
                         features = _features_from_snapshot(
                             viability.execution_readiness_json
                         )
+                        feature_meta = (
+                            features.meta
+                            if isinstance(features.meta, Mapping)
+                            else {}
+                        )
+                        ross_signals = feature_meta.get("ross_signals")
+                        current_ortex_batch: Mapping[str, Any] | None = None
+                        current_ortex_reason: str | None = None
+                        current_ortex_affected = (
+                            self.ortex_public_policy is not None
+                        )
+                        if current_ortex_affected and isinstance(
+                            ross_signals, Mapping
+                        ):
+                            current_signal = ross_signals.get(symbol)
+                            if not isinstance(current_signal, Mapping):
+                                current_ortex_reason = (
+                                    "ortex_selection_ranked_signal_missing"
+                                )
+                            else:
+                                (
+                                    global_signals,
+                                    batch_cache_key,
+                                    current_ortex_reason,
+                                ) = _ortex_global_batch_inventory(
+                                    db,
+                                    feature_meta,
+                                    required_symbol=symbol,
+                                    read_at=source_snapshot_at,
+                                    public_policy_sha256=(
+                                        self.ortex_public_policy_sha256
+                                    ),
+                                    freshness_ttl_seconds=float(
+                                        self.ortex_public_policy[
+                                            "success_cache_ttl_seconds"
+                                        ]
+                                    ),
+                                    manifest_cache=ortex_manifest_cache,
+                                )
+                                if (
+                                    current_ortex_reason is None
+                                    and global_signals is not None
+                                    and batch_cache_key is not None
+                                ):
+                                    global_member = global_signals[symbol]
+                                    if not _ortex_row_signal_matches_global_member(
+                                        current_signal,
+                                        global_member,
+                                    ):
+                                        current_ortex_reason = (
+                                            "ortex_selection_batch_signal_"
+                                            "projection_mismatch"
+                                        )
+                                    else:
+                                        if batch_cache_key not in ortex_batch_cache:
+                                            ortex_batch_cache[batch_cache_key] = (
+                                                _materialize_ortex_selection_batch(
+                                                    db,
+                                                    global_signals,
+                                                    read_at=source_snapshot_at,
+                                                    public_policy=(
+                                                        self.ortex_public_policy
+                                                    ),
+                                                    public_policy_sha256=(
+                                                        self.ortex_public_policy_sha256
+                                                    ),
+                                                )
+                                            )
+                                        (
+                                            current_ortex_batch,
+                                            current_ortex_reason,
+                                        ) = ortex_batch_cache[batch_cache_key]
+                                if (
+                                    current_ortex_batch is None
+                                    and current_ortex_reason is None
+                                ):
+                                    current_ortex_reason = (
+                                        "ortex_selection_batch_unavailable"
+                                    )
+                        elif current_ortex_affected:
+                            current_ortex_reason = (
+                                "ortex_selection_signal_inventory_missing"
+                            )
                         external = resolve_viability_external_inputs_for_capture(
                             symbol,
                             family,
@@ -1290,6 +1985,13 @@ class SqlAlchemyCapturedViabilitySnapshotSource:
                                     viability
                                 ),
                                 "source_variant_sha256": source_variant_sha,
+                                "ortex_selection_batch": current_ortex_batch,
+                                "ortex_selection_affected": current_ortex_affected,
+                                "ortex_coverage_reason": (
+                                    current_ortex_reason
+                                    if current_ortex_affected
+                                    else None
+                                ),
                                 "viability_freshness_at": _utc(
                                     viability.freshness_ts,
                                     "derived_source_viability_freshness",
@@ -1516,6 +2218,16 @@ class SqlAlchemyCapturedViabilitySnapshotSource:
                 "post_score_adjustment": item[
                     "post_score_adjustment"
                 ].to_dict(),
+                "ortex_selection_batch_sha256": (
+                    None
+                    if item["ortex_selection_batch"] is None
+                    else sha256_json(item["ortex_selection_batch"])
+                ),
+                "ortex_selection_coverage_reason": (
+                    item["ortex_coverage_reason"]
+                    if item["ortex_selection_affected"]
+                    else None
+                ),
                 "source_variant_sha256": item[
                     "source_variant_sha256"
                 ],
@@ -1557,6 +2269,15 @@ class SqlAlchemyCapturedViabilitySnapshotSource:
                         "post_score_adjustment"
                     ],
                     source_payload=source_payload,
+                    ortex_selection_batch=item["ortex_selection_batch"],
+                    ortex_selection_affected=item[
+                        "ortex_selection_affected"
+                    ],
+                    ortex_coverage_reason=(
+                        item["ortex_coverage_reason"]
+                        if item["ortex_selection_affected"]
+                        else None
+                    ),
                     source_fingerprint_sha256=fingerprint,
                     hub_snapshot_sha256=hub_sha,
                     event_at=item["event_at"],
@@ -1608,14 +2329,39 @@ class SqlAlchemyCapturedViabilitySnapshotSource:
             != snapshot.settings.to_dict()
             or snapshot.source_payload.get("post_score_adjustment")
             != snapshot.post_score_adjustment.to_dict()
+            or snapshot.source_payload.get("ortex_selection_batch_sha256")
+            != (
+                None
+                if snapshot.ortex_selection_batch is None
+                else sha256_json(snapshot.ortex_selection_batch)
+            )
+            or snapshot.source_payload.get(
+                "ortex_selection_coverage_reason"
+            )
+            != (
+                snapshot.ortex_coverage_reason
+                if snapshot.ortex_selection_affected
+                else None
+            )
         ):
             _reject("derived_source_snapshot_material_drift")
         read_at = snapshot.read_at
         event_at = snapshot.event_at
-        base = source_sequence * 4
+        ortex_evidence = _ortex_selection_evidence(
+            snapshot.features,
+            batch=snapshot.ortex_selection_batch,
+            affected=snapshot.ortex_selection_affected,
+            preflight_reason=snapshot.ortex_coverage_reason,
+            symbol=snapshot.symbol,
+            read_at=read_at,
+        )
+        # Five fixed slots per occurrence keep the optional Ortex event from
+        # colliding with the next occurrence's config snapshot. The unused
+        # fifth slot remains reserved when Ortex is not an input.
+        slot_base = (source_sequence - 1) * 5
         config_event = CaptureEvent(
             identity=self.capture_identity,
-            sequence=base - 3,
+            sequence=slot_base + 1,
             stream=CaptureStream.CONFIG_SNAPSHOT,
             clocks=CaptureClocks(received_at=read_at, available_at=read_at),
             payload=self._config_payload,
@@ -1623,7 +2369,7 @@ class SqlAlchemyCapturedViabilitySnapshotSource:
         )
         feature_flags_event = CaptureEvent(
             identity=self.capture_identity,
-            sequence=base - 2,
+            sequence=slot_base + 2,
             stream=CaptureStream.FEATURE_FLAG_SNAPSHOT,
             clocks=CaptureClocks(received_at=read_at, available_at=read_at),
             payload=self._feature_flags_payload,
@@ -1631,7 +2377,7 @@ class SqlAlchemyCapturedViabilitySnapshotSource:
         )
         code_event = CaptureEvent(
             identity=self.capture_identity,
-            sequence=base - 1,
+            sequence=slot_base + 3,
             stream=CaptureStream.CODE_BUILD,
             clocks=CaptureClocks(received_at=read_at, available_at=read_at),
             payload=self._code_payload,
@@ -1647,7 +2393,7 @@ class SqlAlchemyCapturedViabilitySnapshotSource:
         }
         source_event = CaptureEvent(
             identity=self.capture_identity,
-            sequence=base,
+            sequence=slot_base + 4,
             stream=CaptureStream.CAPTURED_VIABILITY_INPUT,
             clocks=CaptureClocks(
                 received_at=read_at,
@@ -1659,14 +2405,40 @@ class SqlAlchemyCapturedViabilitySnapshotSource:
             symbol=snapshot.symbol,
             query=source_query,
         )
-        events = (
+        core_events = (
             config_event,
             feature_flags_event,
             code_event,
             source_event,
         )
+        ortex_event: CaptureEvent | None = None
+        if ortex_evidence.snapshot is not None:
+            typed_ortex = ortex_evidence.snapshot
+            ortex_event = CaptureEvent(
+                identity=self.capture_identity,
+                sequence=slot_base + 5,
+                stream=CaptureStream.ORTEX_SNAPSHOT,
+                clocks=CaptureClocks(
+                    received_at=typed_ortex.source_received_at,
+                    available_at=typed_ortex.returned_at,
+                    market_reference_at=typed_ortex.market_reference_at,
+                ),
+                payload=typed_ortex.payload,
+                provider=ORTEX_SNAPSHOT_PROVIDER,
+                symbol=snapshot.symbol,
+                query=typed_ortex.capture_query(),
+            )
+            # Reparse the exact immutable event envelope before admitting it
+            # into the queue.  This catches any clock/query drift introduced by
+            # capture composition itself.
+            CaptureOrtexSelectionSnapshot.from_event(ortex_event)
+        events = core_events + (() if ortex_event is None else (ortex_event,))
         refs = tuple(CaptureEventRef.from_event(event) for event in events)
-        source_ref = refs[-1]
+        source_ref = next(
+            ref
+            for ref in refs
+            if ref.stream is CaptureStream.CAPTURED_VIABILITY_INPUT
+        )
         read_id = str(
             uuid.uuid5(
                 uuid.UUID(self.activation_generation),
@@ -1734,49 +2506,117 @@ class SqlAlchemyCapturedViabilitySnapshotSource:
         read_receipt_sha256 = captured_viability_read_receipt_sha256(
             read_receipt
         )
+        ortex_read_receipt: CaptureReadReceipt | None = None
+        ortex_read_receipt_sha256: str | None = None
+        if ortex_event is not None:
+            typed_ortex = ortex_evidence.snapshot
+            assert typed_ortex is not None
+            ortex_ref = next(
+                ref
+                for ref in refs
+                if ref.stream is CaptureStream.ORTEX_SNAPSHOT
+            )
+            ortex_read_id = str(
+                uuid.uuid5(
+                    uuid.UUID(self.activation_generation),
+                    (
+                        f"{source_sequence}:ortex:"
+                        f"{ortex_event.payload_sha256}:"
+                        f"{ortex_event.query_sha256}"
+                    ),
+                )
+            )
+            ortex_read_receipt = CaptureReadReceipt(
+                read_id=ortex_read_id,
+                decision_id=(
+                    f"captured-paper-selection:{self.activation_generation}:"
+                    f"{source_sequence}"
+                ),
+                identity_sha256=self.capture_identity.identity_sha256,
+                stream=CaptureStream.ORTEX_SNAPSHOT,
+                provider=ORTEX_SNAPSHOT_PROVIDER,
+                symbol=snapshot.symbol,
+                requested_at=typed_ortex.requested_at,
+                returned_at=typed_ortex.returned_at,
+                query_sha256=ortex_event.query_sha256 or "",
+                source_event_sha256s=(ortex_ref.event_sha256,),
+                empty_result=False,
+                result_sha256=captured_read_result_sha256((ortex_ref,)),
+                content_verified=True,
+                replay_network_fallback_used=False,
+                query=typed_ortex.capture_query(),
+            )
+            ortex_read_receipt_sha256 = (
+                captured_viability_read_receipt_sha256(
+                    ortex_read_receipt
+                )
+            )
         max_age = self.context_max_age_seconds
-        profile = FSMDependencyProfile(
-            required_streams=frozenset(
-                {
-                    CaptureStream.CONFIG_SNAPSHOT,
-                    CaptureStream.FEATURE_FLAG_SNAPSHOT,
-                    CaptureStream.CODE_BUILD,
-                    CaptureStream.CAPTURED_VIABILITY_INPUT,
-                }
+        required_streams = {
+            CaptureStream.CONFIG_SNAPSHOT,
+            CaptureStream.FEATURE_FLAG_SNAPSHOT,
+            CaptureStream.CODE_BUILD,
+            CaptureStream.CAPTURED_VIABILITY_INPUT,
+        }
+        if ortex_evidence.affected:
+            required_streams.add(CaptureStream.ORTEX_SNAPSHOT)
+        required_read_ids = [read_id]
+        if ortex_read_receipt is not None:
+            required_read_ids.append(ortex_read_receipt.read_id)
+        stream_dependencies = [
+            FSMStreamDependency(
+                stream=CaptureStream.CONFIG_SNAPSHOT,
+                exact_provider_event_at_required=False,
+                market_reference_at_required=False,
+                max_source_age_seconds=max_age,
+                coverage_start_at=read_at,
             ),
-            required_read_ids=(read_id,),
-            stream_dependencies=(
+            FSMStreamDependency(
+                stream=CaptureStream.FEATURE_FLAG_SNAPSHOT,
+                exact_provider_event_at_required=False,
+                market_reference_at_required=False,
+                max_source_age_seconds=max_age,
+                coverage_start_at=read_at,
+            ),
+            FSMStreamDependency(
+                stream=CaptureStream.CODE_BUILD,
+                exact_provider_event_at_required=False,
+                market_reference_at_required=False,
+                max_source_age_seconds=max_age,
+                coverage_start_at=read_at,
+            ),
+            FSMStreamDependency(
+                stream=CaptureStream.CAPTURED_VIABILITY_INPUT,
+                exact_provider_event_at_required=False,
+                market_reference_at_required=True,
+                max_source_age_seconds=max_age,
+                coverage_start_at=read_at,
+            ),
+        ]
+        if ortex_evidence.affected:
+            stream_dependencies.append(
                 FSMStreamDependency(
-                    stream=CaptureStream.CONFIG_SNAPSHOT,
-                    exact_provider_event_at_required=False,
-                    market_reference_at_required=False,
-                    max_source_age_seconds=max_age,
-                    coverage_start_at=read_at,
-                ),
-                FSMStreamDependency(
-                    stream=CaptureStream.FEATURE_FLAG_SNAPSHOT,
-                    exact_provider_event_at_required=False,
-                    market_reference_at_required=False,
-                    max_source_age_seconds=max_age,
-                    coverage_start_at=read_at,
-                ),
-                FSMStreamDependency(
-                    stream=CaptureStream.CODE_BUILD,
-                    exact_provider_event_at_required=False,
-                    market_reference_at_required=False,
-                    max_source_age_seconds=max_age,
-                    coverage_start_at=read_at,
-                ),
-                FSMStreamDependency(
-                    stream=CaptureStream.CAPTURED_VIABILITY_INPUT,
+                    stream=CaptureStream.ORTEX_SNAPSHOT,
                     exact_provider_event_at_required=False,
                     market_reference_at_required=True,
-                    max_source_age_seconds=max_age,
-                    coverage_start_at=read_at,
-                ),
-            ),
+                    max_source_age_seconds=(
+                        ortex_evidence.snapshot.success_cache_ttl_seconds
+                        if ortex_evidence.snapshot is not None
+                        else max_age
+                    ),
+                    coverage_start_at=(
+                        ortex_event.clocks.available_at
+                        if ortex_event is not None
+                        else read_at
+                    ),
+                )
+            )
+        profile = FSMDependencyProfile(
+            required_streams=frozenset(required_streams),
+            required_read_ids=tuple(required_read_ids),
+            stream_dependencies=tuple(stream_dependencies),
         )
-        coverages = (
+        coverages = [
             StreamCoverage(
                 stream=CaptureStream.CONFIG_SNAPSHOT,
                 identity_sha256=self.capture_identity.identity_sha256,
@@ -1822,7 +2662,33 @@ class SqlAlchemyCapturedViabilitySnapshotSource:
                 content_verified=True,
                 continuity_complete=True,
             ),
-        )
+        ]
+        if ortex_evidence.affected:
+            coverages.append(
+                StreamCoverage(
+                    stream=CaptureStream.ORTEX_SNAPSHOT,
+                    identity_sha256=self.capture_identity.identity_sha256,
+                    provider=ORTEX_SNAPSHOT_PROVIDER,
+                    symbol=snapshot.symbol,
+                    first_available_at=(
+                        ortex_event.clocks.available_at
+                        if ortex_event is not None
+                        else read_at
+                    ),
+                    last_available_at=(
+                        ortex_event.clocks.available_at
+                        if ortex_event is not None
+                        else read_at
+                    ),
+                    event_count=1 if ortex_event is not None else 0,
+                    exact_event_clock_complete=False,
+                    content_verified=ortex_event is not None,
+                    continuity_complete=ortex_event is not None,
+                    query_receipt_count=(
+                        1 if ortex_read_receipt is not None else 0
+                    ),
+                )
+            )
         roots = captured_viability_component_sha256s(
             symbol=snapshot.symbol,
             variant_id=snapshot.target_variant_id,
@@ -1841,6 +2707,9 @@ class SqlAlchemyCapturedViabilitySnapshotSource:
             code_sha256=code_event.payload_sha256,
         )
         event_hashes = tuple(event.event_sha256 for event in events)
+        read_receipt_hashes = [read_receipt_sha256]
+        if ortex_read_receipt_sha256 is not None:
+            read_receipt_hashes.append(ortex_read_receipt_sha256)
         inventory = CapturedViabilityDependencyInventory(
             dependency_profile=profile,
             bindings=tuple(
@@ -1848,7 +2717,7 @@ class SqlAlchemyCapturedViabilitySnapshotSource:
                     component=component,
                     component_sha256=roots[component],
                     source_event_sha256s=event_hashes,
-                    read_receipt_sha256s=(read_receipt_sha256,),
+                    read_receipt_sha256s=tuple(read_receipt_hashes),
                 )
                 for component in REQUIRED_COMPONENTS
             ),
@@ -1872,9 +2741,30 @@ class SqlAlchemyCapturedViabilitySnapshotSource:
             code_sha256=code_event.payload_sha256,
             dependency_inventory=inventory,
             source_refs=refs,
-            read_receipts=(read_receipt,),
-            stream_coverages=coverages,
-            coverage_gaps=(),
+            read_receipts=(
+                (read_receipt,)
+                if ortex_read_receipt is None
+                else (read_receipt, ortex_read_receipt)
+            ),
+            stream_coverages=tuple(coverages),
+            coverage_gaps=tuple(
+                gap
+                for gap in (
+                    (
+                        CoverageGap(
+                            stream=CaptureStream.ORTEX_SNAPSHOT,
+                            reason=ortex_evidence.coverage_reason,
+                            first_available_at=read_at,
+                            last_available_at=read_at,
+                            lost_count=1,
+                            symbol=snapshot.symbol,
+                        )
+                        if ortex_evidence.coverage_reason is not None
+                        else None
+                    ),
+                )
+                if gap is not None
+            ),
             correlation_id=snapshot.correlation_id,
         )
         scoring_authority = CapturedViabilityScoringAuthority(
@@ -1913,4 +2803,5 @@ __all__ = [
     "CapturedPaperSelectionSourceUnavailable",
     "CapturedViabilityQueueOccurrence",
     "SqlAlchemyCapturedViabilitySnapshotSource",
+    "ortex_public_policy",
 ]
