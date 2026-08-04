@@ -124,6 +124,9 @@ ORTEX_BATCH_STATUS_KEY = "ortex_squeeze_fuel_batch"
 # a crypto symbol present rejected derived_source_hub_symbol_invalid before
 # the split could run.  Allow hyphens, matching the reader's own design.
 _SYMBOL_RE = re.compile(r"^[A-Z][A-Z0-9.-]{0,35}$")
+_HUB_SYMBOL_RE = re.compile(
+    r"^(?:[A-Z][A-Z0-9.-]{0,35}|[0-9][A-Z0-9.]{0,15}-USD)$"
+)
 _SHA_RE = re.compile(r"^[0-9a-f]{64}$")
 # Bound on the viability-driven admission-universe probe (fundamentals are
 # fetched per admitted symbol, ~1 network call each, so the union must stay
@@ -1171,7 +1174,7 @@ class SqlAlchemyCapturedViabilitySnapshotSource:
         all_symbols: list[str] = []
         for raw in symbols_raw:
             symbol = str(raw or "").strip().upper()
-            if symbol != raw or _SYMBOL_RE.fullmatch(symbol) is None:
+            if symbol != raw or _HUB_SYMBOL_RE.fullmatch(symbol) is None:
                 _reject("derived_source_hub_symbol_invalid")
             all_symbols.append(symbol)
         if not all_symbols or len(all_symbols) != len(set(all_symbols)):
