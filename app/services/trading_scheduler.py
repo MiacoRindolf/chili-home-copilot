@@ -4846,6 +4846,35 @@ def _run_crypto_viability_refresh_job():
         db.close()
 
 
+def _run_eligibility_lease_sweep_job():
+    """L11b — i-demote ang mga EQUITY viability row na lumampas na sa lease.
+
+    Ang `paper_eligible`/`live_eligible` ay walang TTL: kapag naisulat, nananatili
+    hanggang overwrite. Pero ang mambabasa ng band (IQFeed L1 subscription
+    resolver) ay may 24h freshness window, kaya ang "eligible band" niya ay ang
+    UNION ng lahat ng na-score sa nakaraang 24h — hindi ang mga tradeable NGAYON.
+    Sukat 08-04: 645 distinct, 482 lampas 600s; inubos nito ang 312-slot capacity
+    at 100% ng ross band ang na-evict. Ipinapatupad nito ang invariant na ang
+    inilalathalang band ay katumbas ng tatanggapin ng trading path mismo.
+    Best-effort; fail-open sa bawat pagdududa (tingnan ang eligibility_lease)."""
+    try:
+        from .trading.momentum_neural.eligibility_lease import (
+            expire_stale_equity_eligibility,
+        )
+
+        if not bool(getattr(settings, "chili_momentum_eligibility_lease_enabled", True)):
+            return
+        with SessionLocal() as db:
+            protected = _active_equity_session_symbols(db)
+            result = expire_stale_equity_eligibility(
+                db, settings_obj=settings, protected_symbols=protected
+            )
+        if result.get("demoted"):
+            logger.info("[scheduler] eligibility lease sweep: %s", result)
+    except Exception:
+        logger.warning("[scheduler] eligibility lease sweep failed", exc_info=True)
+
+
 def _merge_equity_refresh_universe(ross_tickers, active_session_symbols) -> list[str]:
     """Pure: build the equity-refresh scan list = the screened Ross movers UNION the
     EQUITY symbols of currently-active live sessions, de-duped + uppercased + sorted.
@@ -6623,6 +6652,25 @@ def start_scheduler():
                 name="Momentum scanner (9:30-11AM ET every 15min)",
                 replace_existing=True,
                 max_instances=1,
+            )
+
+            # L11b — ELIGIBILITY RETENTION LEASE. Ang cadence ay ang PRODUCER
+            # refresh interval (derived mula sa iisang base), kaya may pagkakataong
+            # mag-demote sa pagitan ng dalawang sulat ng producer. DB-only ang job
+            # na ito — hindi siya umaasa sa producer process, kaya tumatakbo siya
+            # kahit saang scheduler-bearing container.
+            from .trading.momentum_neural.eligibility_lease import (
+                refresh_interval_seconds as _lease_cadence,
+            )
+
+            _scheduler.add_job(
+                _run_eligibility_lease_sweep_job,
+                trigger=IntervalTrigger(seconds=int(_lease_cadence(settings))),
+                id="eligibility_lease_sweep",
+                name="Eligibility retention lease sweep (equity viability band)",
+                replace_existing=True,
+                max_instances=1,
+                next_run_time=datetime.now() + timedelta(seconds=60),
             )
 
             # Reliability: detect a work-ledger processor going silent (dead/absent)
