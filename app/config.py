@@ -3187,6 +3187,11 @@ class Settings(BaseSettings):
         validation_alias=AliasChoices("CHILI_MOMENTUM_UNIVERSE_FLOAT_GATE_ENABLED"),
         description="User-approved default-ON float gate on the final ranked universe subset. False is the exact per-flag rollback switch; missing causal float evidence remains decision-local fail-closed.",
     )
+    chili_momentum_eligibility_lease_enabled: bool = Field(
+        default=True,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_ELIGIBILITY_LEASE_ENABLED"),
+        description="Expire EQUITY viability eligibility that the producer has stopped renewing, so the published eligible band equals the set the trading path would itself accept. The lease is derived from chili_momentum_risk_viability_max_age_seconds (the one documented base): lease = max(base, 2 x refresh) where refresh = max(60, base/2) — never shorter than two producer cycles, so a single missed refresh never demotes. Fail-open on producer silence (an outage must not wipe the band), on unknown ages, and for symbols with an active session. Measured 2026-08-04 on prod: 645 distinct symbols in the 24h eligible band, 482 of them older than 600s — that band is the IQFeed subscription resolver's cause #3 and it consumed the whole 312-slot capacity, evicting 100% of the ross band (today's real movers). 0 = no sweep (prior no-TTL behaviour).",
+    )
     chili_momentum_paper_setup_quality_gate_enabled: bool = Field(
         default=True,
         validation_alias=AliasChoices("CHILI_MOMENTUM_PAPER_SETUP_QUALITY_GATE_ENABLED"),
