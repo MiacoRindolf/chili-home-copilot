@@ -127,6 +127,27 @@ def test_fresh_hot_hint_outranks_cold_ross_fallback_but_not_active() -> None:
     )
 
 
+def test_ross_outranks_standing_eligible_without_reordering_canonical_causes() -> None:
+    result = resolve_subscription_target(
+        reads=_all_sources(
+            eligible=("E_ONLY", "BOTH"),
+            ross=("R_ONLY", "BOTH"),
+        ),
+        prior_causes={},
+        capacity=1,
+    )
+
+    assert tuple(target.symbol for target in result.targets) == ("R_ONLY",)
+    capacity_gaps = tuple(
+        gap for gap in result.gaps if gap.code == "capacity_eviction"
+    )
+    assert tuple(gap.symbol for gap in capacity_gaps) == ("BOTH", "E_ONLY")
+    assert capacity_gaps[0].causes == (
+        TargetCause.ELIGIBLE,
+        TargetCause.ROSS,
+    )
+
+
 def test_hint_flood_input_is_deduped_without_losing_newest_first_rank() -> None:
     hints = SourceRead.success(
         TargetCause.HINT,
@@ -178,10 +199,10 @@ def test_capacity_eviction_is_deterministic_and_explicit() -> None:
     second = resolve_subscription_target(**kwargs)
 
     assert first == second
-    assert tuple(target.symbol for target in first.targets) == ("H2", "H1", "E2")
+    assert tuple(target.symbol for target in first.targets) == ("H2", "H1", "R2")
     assert tuple(
         gap.symbol for gap in first.gaps if gap.code == "capacity_eviction"
-    ) == ("E1", "R2", "R1")
+    ) == ("R1", "E2", "E1")
 
 
 def test_both_bridges_use_the_same_four_source_resolver() -> None:
@@ -191,17 +212,17 @@ def test_both_bridges_use_the_same_four_source_resolver() -> None:
         eligible=("PLSM",),
         ross=("VEEE",),
     )
-    expected = {"HELD", "HINT", "PLSM", "VEEE"}
+    expected = {"HELD", "HINT", "VEEE"}
 
     l1 = trade_bridge._resolve_target(
         reads=reads,
         prior_causes={},
-        capacity=8,
+        capacity=3,
     )
     l2 = depth_bridge._resolve_target(
         reads=reads,
         prior_causes={},
-        capacity=8,
+        capacity=3,
     )
 
     assert l1.symbols == expected
