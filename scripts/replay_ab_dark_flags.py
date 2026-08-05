@@ -97,6 +97,14 @@ APPROVED_STRATEGY_FLAGS_BY_SLUG = (
         "monster-structure-floor",
         "chili_momentum_monster_structure_floor_enabled",
     ),
+    # L10b (2026-08-04) — price-structure partials (multi-level ladder + round-number
+    # pull-in). Idinagdag dahil ang prod ay naka-ON ito via env samantalang False ang
+    # config default: replay/production parity gap. Tingnan ang kambal na roster sa
+    # replay_benchmark_batch.py.
+    (
+        "scale-grid",
+        "chili_momentum_scale_grid_enabled",
+    ),
 )
 POST_SELECTION_SCOREABLE_POLICY_FLAGS = (
     "chili_momentum_orb_ihs_structural_stop_enabled",
@@ -112,6 +120,7 @@ POST_SELECTION_SCOREABLE_POLICY_FLAGS = (
     "chili_momentum_dip_monster_context_enabled",
     "chili_momentum_late_ah_monster_placement_enabled",
     "chili_momentum_monster_structure_floor_enabled",
+    "chili_momentum_scale_grid_enabled",
 )
 POST_SELECTION_UNSCOREABLE_POLICY_FLAGS = (
     "chili_momentum_universe_float_gate_enabled",

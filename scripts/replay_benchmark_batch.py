@@ -135,6 +135,17 @@ APPROVED_STRATEGY_FLAGS_BY_SLUG = (
         "monster-structure-floor",
         "chili_momentum_monster_structure_floor_enabled",
     ),
+    # L10b (2026-08-04) — ang MULTI-LEVEL scale-out ladder na may round-number
+    # pull-in (ang price-structure partials). Idinagdag sa roster dahil natuklasan
+    # ang isang REPLAY/PRODUCTION PARITY GAP: ang prod ay tumatakbo nang naka-ON
+    # ito sa pamamagitan ng env (CHILI_MOMENTUM_SCALE_GRID_ENABLED=1) samantalang
+    # ang config default ay False, kaya ang LAHAT ng nakaraang replay proof ay
+    # sumukat ng SINGLE scale-out lang — ibang exit configuration kaysa sa
+    # aktwal na tumatakbo. Hindi masusukat ang isang lever na wala sa roster.
+    (
+        "scale-grid",
+        "chili_momentum_scale_grid_enabled",
+    ),
 )
 DEFAULT_ARM = "intended"
 # CLOSED compound arms: named multi-flag-off vectors. NOT a free-form grammar —
@@ -172,6 +183,7 @@ POST_SELECTION_SCOREABLE_POLICY_FLAGS = (
     "chili_momentum_dip_monster_context_enabled",
     "chili_momentum_late_ah_monster_placement_enabled",
     "chili_momentum_monster_structure_floor_enabled",
+    "chili_momentum_scale_grid_enabled",
 )
 POST_SELECTION_UNSCOREABLE_POLICY_FLAGS = (
     "chili_momentum_universe_float_gate_enabled",

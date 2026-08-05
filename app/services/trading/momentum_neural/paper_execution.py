@@ -561,8 +561,19 @@ def _parse_csv_floats(raw: str | None) -> list[float]:
     return out
 
 
+# L10c (2026-08-04) — ANG VERTICAL WINDOW. ISANG dokumentadong base na ibinabahagi
+# ng L10 structure floor at ng L10c ladder gate: 180s = tatlong 1-minutong bar, ang
+# punto kung saan may sapat nang 1m structure para ito ang mag-ari ng leg. Sa ilalim
+# nito ang galaw ay VERTICAL (single-bar spike class); sa itaas ito ay STAIRS/grind.
+# Hindi dalawang numero — iisa, ginagamit ng dalawang lever.
+VERTICAL_LEG_MAX_SECONDS = 180.0
+
+
 def scale_grid_enabled() -> bool:
-    return bool(getattr(settings, "chili_momentum_scale_grid_enabled", False))
+    # Ang fallback ay dapat TUMUGMA sa config default (True mula 2026-08-04) —
+    # report-binding doctrine: ang isang False dito ay tahimik na magpapatakbo ng
+    # ibang exit configuration sa anumang daan kung saan wala ang setting.
+    return bool(getattr(settings, "chili_momentum_scale_grid_enabled", True))
 
 
 # The cumulative scale-out fraction must stay strictly below 1.0 so a RUNNER always
@@ -1604,10 +1615,10 @@ def monster_structure_floor_candidate(
     adversarial study, ang BAND INADEQUACY ang tunay na separator; ang monster
     ctx ay pumuputok sa parehong HYFM at JLHL kaya walang discriminating value
     dito):
-      (i)   BAR MATURITY — ``leg_age_seconds < 180`` (wala pang 3 kumpletong 1m
-            bar sa leg; pagkatapos noon ang existing 5m-EMA9/G4 structure path
-            ang may-ari — ONE documented base = 180s, ang boundary ng 1m
-            timeframe mismo);
+      (i)   BAR MATURITY — ``leg_age_seconds < VERTICAL_LEG_MAX_SECONDS`` (wala
+            pang 3 kumpletong 1m bar sa leg; pagkatapos noon ang existing
+            5m-EMA9/G4 structure path ang may-ari). ISANG dokumentadong base,
+            ibinabahagi ng L10c ladder gate — tingnan ang constant sa itaas;
       (ii)  BAND INADEQUACY — ``retrace_amp_pct > (hwm − composed_stop)/hwm``:
             ang realized 30s amplitude ay mas malaki sa kasalukuyang band —
             self-referential na explosiveness detector, ITO ang tunay na
@@ -1626,7 +1637,9 @@ def monster_structure_floor_candidate(
     try:
         if leg_age_seconds is None or not math.isfinite(float(leg_age_seconds)):
             return None, "leg_age_unknown"
-        if float(leg_age_seconds) >= 180.0:
+        # ISANG ibinabahaging base kasama ang L10c ladder gate — dating literal
+        # dito, parehong halaga (walang pagbabago sa ugali).
+        if float(leg_age_seconds) >= VERTICAL_LEG_MAX_SECONDS:
             return None, "leg_mature_1m_owns"
         ll = float(last15_low)
         pl = float(prev15_low)
