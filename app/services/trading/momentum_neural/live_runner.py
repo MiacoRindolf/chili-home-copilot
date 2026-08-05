@@ -8590,7 +8590,7 @@ def _service_deadman_replacement_containment(
         try:
             cancel(successor_oid)
         except Exception:
-            logger.warning(
+            _log.warning(
                 "[live_runner] replacement containment successor cancel failed",
                 exc_info=True,
             )
@@ -12938,7 +12938,7 @@ def _submit_live_market_exit(
             try:
                 adapter.cancel_order_by_id(order_id)
             except Exception:
-                logger.warning("[live_runner] deadman cancel transport failed", exc_info=True)
+                _log.warning("[live_runner] deadman cancel transport failed", exc_info=True)
             # A cancel response is never truth.  The exact CID must now be found
             # terminal; absent/unknown/open preserves the stop identity and blocks.
             strict_state, exact_order = _strict_client_order_id_truth(adapter, client_id)
@@ -16883,7 +16883,7 @@ def _log_scale_grid_freeze(
             if (stop is not None and entry > 0)
             else float("nan")
         )
-        logger.info(
+        _log.info(
             "[momentum_live] SCALE-GRID FROZEN symbol=%s entry=%.4f stop=%s risk=%.2f%% "
             "rungs=%s | bases: entry_stop_atr_pct=%s structural_stop_atr_pct=%s "
             "entry_day_range_pct=%s — ang rung distance ay ihahambing sa mga base na "
@@ -16898,7 +16898,7 @@ def _log_scale_grid_freeze(
             _l.get("entry_day_range_pct"),
         )
     except Exception:
-        logger.debug("[momentum_live] scale-grid freeze diagnostic failed", exc_info=True)
+        _log.debug("[momentum_live] scale-grid freeze diagnostic failed", exc_info=True)
 
 
 def _scale_grid_active(
@@ -17123,7 +17123,7 @@ def _place_scale_out_limit(
                 "error": str(res.get("error"))[:120], "fallback": "reactive_market_scale_out",
             })
     except Exception:
-        logger.warning(
+        _log.warning(
             "[live_runner] scale-out limit placement failed sess=%s (reactive path covers)",
             sess.id, exc_info=True,
         )
@@ -17306,7 +17306,7 @@ def _cancel_scale_limit_and_clamp(
             "order_id": str(oid), "filled_qty": filled, "for_exit": reason,
         })
     except Exception:
-        logger.warning(
+        _log.warning(
             "[live_runner] scale-limit cancel-adopt failed sess=%s", sess.id, exc_info=True
         )
     finally:
@@ -21178,7 +21178,7 @@ def _sweep_unresolved_entry_orders(adapter, db, sess, le: dict) -> bool:
                 try:
                     adapter.cancel_order(str(oid))
                 except Exception:
-                    logger.debug("[momentum_live] open-with-fills remainder cancel failed", exc_info=True)
+                    _log.debug("[momentum_live] open-with-fills remainder cancel failed", exc_info=True)
         if _order_done_for_entry(no) or float(no.filled_size or 0.0) > 0.0:
             # LATE FILL — re-point the session at the real order and let the
             # hardened pending-entry fill-handler adopt it (position + stop/target).
@@ -28067,7 +28067,7 @@ def tick_live_session(
         except Exception:
             _mkt_open = True
         try:
-            logger.info(
+            _log.info(
                 "[momentum_live] entry_branch symbol=%s state=%s mkt_open=%s score_ok=%s trigger_ok=%s trigger_reason=%s",
                 sess.symbol, sess.state, _mkt_open, _score_ok, _trigger_ok, _trigger_reason,
             )
@@ -28207,7 +28207,7 @@ def tick_live_session(
             # returns (False, ...) before any I/O ⇒ this whole block is a no-op (break-only).
             _tape_hold_fired = False
             try:
-                logger.info(
+                _log.info(
                     "[momentum_live] tape_hold_gate symbol=%s reason=%s flag=%s in_valid=%s pb_low=%s benched=%s",
                     sess.symbol, _trigger_reason,
                     bool(getattr(settings, "chili_momentum_tape_hold_entry_enabled", False)),
@@ -28234,7 +28234,7 @@ def tick_live_session(
                     # (2) REQUIRED tape confirm — fail-CLOSED.
                     _tape_ok, _tape_dbg = tape_confirms_hold(sess.symbol, db=db, settings=settings)
                     try:
-                        logger.info(
+                        _log.info(
                             "[momentum_live] tape_hold_tape symbol=%s tape_ok=%s accel=%s rate=%s floor=%s n=%s reason=%s",
                             sess.symbol, _tape_ok, _tape_dbg.get("signed_tape_accel"), _tape_dbg.get("tick_rate"),
                             _tape_dbg.get("tick_rate_floor"), _tape_dbg.get("n_ticks"), _tape_dbg.get("reason"),
@@ -28258,7 +28258,7 @@ def tick_live_session(
                             entry_interval=_th_iv,
                         )
                         try:
-                            logger.info(
+                            _log.info(
                                 "[momentum_live] tape_hold_struct symbol=%s struct_ok=%s reason=%s",
                                 sess.symbol, _th_struct_ok, _th_reason,
                             )
@@ -28396,7 +28396,7 @@ def tick_live_session(
                         _ross_score, _rvol_now, _daily_breaking, settings
                     )
                     try:
-                        logger.info(
+                        _log.info(
                             "[momentum_live] continuation_gate symbol=%s high_conv=%s ross=%s ross_floor=%s rvol=%s rvol_floor=%s breaking=%s",
                             sess.symbol, _high_conviction, _ross_score, _ross_floor,
                             _rvol_now, _rvol_conviction_floor, _daily_breaking,
@@ -28421,7 +28421,7 @@ def tick_live_session(
                             l2_as_of=_replay_l2_as_of_or_none(),
                         )
                         try:
-                            logger.info(
+                            _log.info(
                                 "[momentum_live] continuation_struct symbol=%s mc_ok=%s reason=%s pb_low=%s pb_high=%s",
                                 sess.symbol, _mc_ok, _mc_reason,
                                 (_mc_dbg.get("pullback_low") if isinstance(_mc_dbg, dict) else None),
@@ -28436,7 +28436,7 @@ def tick_live_session(
                                 sess.symbol, db=db, settings=settings
                             )
                             try:
-                                logger.info(
+                                _log.info(
                                     "[momentum_live] continuation_tape symbol=%s tape_ok=%s accel=%s rate=%s floor=%s n=%s reason=%s",
                                     sess.symbol, _mc_tape_ok,
                                     _mc_tape_dbg.get("signed_tape_accel"), _mc_tape_dbg.get("tick_rate"),
@@ -34383,7 +34383,7 @@ def tick_live_session(
                                                 try:
                                                     cancel(replacement_oid)
                                                 except Exception:
-                                                    logger.warning(
+                                                    _log.warning(
                                                         "[live_runner] replacement deadman cancel failed",
                                                         exc_info=True,
                                                     )
@@ -37095,7 +37095,7 @@ def tick_live_session(
                     # Fail-OPEN: any error leaves the position unchanged (the probe leg is
                     # already a complete, fully-managed position on its own). Never crash
                     # the tick; never mutate pos outside the confirmed-fill PHASE-1 merge.
-                    logger.debug(
+                    _log.debug(
                         "[momentum_live] anticipation remainder pass skipped session=%s",
                         sess.id, exc_info=True,
                     )
