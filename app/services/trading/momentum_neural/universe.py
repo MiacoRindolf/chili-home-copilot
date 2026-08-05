@@ -79,6 +79,44 @@ class UniverseProfile:
 # Each field is a documented Ross criterion, framed as a FLOOR / class-definition,
 # not a magic number. Operator can tune this ONE spec; downstream selection is
 # adaptive (top-N by move → percentile rank in score_universe).
+def _price_in_band(px: float | None, profile: "UniverseProfile") -> bool:
+    """Pure: nasa loob ba ng instrument-class band ang presyong ito?"""
+    try:
+        if px is None or not math.isfinite(float(px)) or float(px) <= 0:
+            return False
+        p = float(px)
+    except (TypeError, ValueError):
+        return False
+    if profile.price_min is not None and p < profile.price_min:
+        return False
+    if profile.price_max is not None and p > profile.price_max:
+        return False
+    return True
+
+
+def _session_origin_price(price: float | None, change_pct: float | None) -> float | None:
+    """Pure: ang PRIOR CLOSE, derived mula sa live price at sa today's % change.
+
+    ``price = prior_close * (1 + chg/100)`` kaya ``prior_close = price / (1+chg/100)``.
+    Walang bagong data source — ang dalawang input ay nasa screen na. None kapag
+    hindi mabasa o degenerate (chg <= -100), kaya fail-toward-EXISTING ang caller.
+    """
+    try:
+        if price is None or change_pct is None:
+            return None
+        p = float(price)
+        c = float(change_pct)
+        if not (math.isfinite(p) and math.isfinite(c)) or p <= 0:
+            return None
+        denom = 1.0 + (c / 100.0)
+        if denom <= 1e-9:
+            return None
+        origin = p / denom
+        return origin if math.isfinite(origin) and origin > 0 else None
+    except (TypeError, ValueError, ZeroDivisionError):
+        return None
+
+
 EQUITY_ROSS_SMALLCAP = UniverseProfile(
     profile_id="equity_ross_smallcap",
     asset_class="equity",
@@ -416,9 +454,34 @@ def ross_smallcap_profile_evidence(
         return False, "ross_universe_missing_price", debug
     if price <= 0:
         return False, "ross_universe_invalid_price", debug
-    if profile.price_min is not None and price < profile.price_min:
-        return False, "ross_universe_price_below_profile", debug
-    if profile.price_max is not None and price > profile.price_max:
+    # L12 (2026-08-05) — ORIGIN-BASED PRICE BAND. Ang band ay tungkol sa
+    # INSTRUMENT CLASS ("low-priced small-cap"), hindi sa kasalukuyang presyo — pero
+    # sinusukat ito sa live na presyo, kaya ang isang matagumpay na runner ay KUSANG
+    # NAGPAPALABAS sa sarili nito sa mismong sandaling ito ang pinakamalaking mover
+    # ng araw.
+    #
+    # SINUKAT (AMIX, 2026-08-04 — ang #1 mover ni Ross, +400%):
+    #   19:11  tape balik, $17.29    — nasa loob ng band
+    #   19:33  tumawid sa $20        — LUMABAS sa universe, hindi na muling ini-score
+    #          umakyat hanggang      $24.68   (nasa loob si Ross)
+    # Ang instrumento ay hindi nagbago: parehong ~500k-float na small-cap pa rin
+    # ang AMIX sa $24 gaya noong $4.51. Ang nagbago ay ang presyo — na siya mismong
+    # layunin natin.
+    #
+    # ANG AYOS: tinatanggap kung ang KASALUKUYANG presyo O ang session ORIGIN
+    # (prior close, derived mula sa presyo at sa today's % change — walang bagong
+    # data source) ay nasa loob ng band. PURONG PAGPAPALAWAK: walang pangalang
+    # dating tinatanggap ang matatanggal, dahil ang unang tseke ay ang dating
+    # kondisyon mismo. Kapag walang mabasang change_pct, ang origin ay hindi
+    # made-derive at ang dating current-price-only na ugali ang umiiral.
+    _origin_px = _session_origin_price(price, change_pct)
+    _cur_in_band = _price_in_band(price, profile)
+    _origin_in_band = _price_in_band(_origin_px, profile)
+    debug["origin_price"] = _origin_px
+    debug["origin_in_band"] = _origin_in_band
+    if not _cur_in_band and not _origin_in_band:
+        if profile.price_min is not None and price < profile.price_min:
+            return False, "ross_universe_price_below_profile", debug
         return False, "ross_universe_price_above_profile", debug
 
     if dollar_volume is None:
