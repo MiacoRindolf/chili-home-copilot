@@ -16817,7 +16817,9 @@ def _scale_out_to_runner(
 # (byte-identical). docs/DESIGN/MOMENTUM_LANE.md
 
 
-def _resolve_scale_grid(pos: dict[str, Any], symbol: str | None) -> list[list[float]]:
+def _resolve_scale_grid(
+    pos: dict[str, Any], symbol: str | None, *, le: dict[str, Any] | None = None
+) -> list[list[float]]:
     """Return the frozen ladder ``[[target_px, fraction], ...]`` for this position.
 
     Computed ONCE off the FROZEN entry + the position's initial stop (the risk
@@ -16825,7 +16827,10 @@ def _resolve_scale_grid(pos: dict[str, Any], symbol: str | None) -> list[list[fl
     cannot re-scale the rung prices. Empty list when the flag is off or the config is
     degenerate (the caller then falls back to the single scale-out — byte-identical)."""
     # Flag OFF => never touch the position dict (byte-identical persisted JSON).
-    if not bool(getattr(settings, "chili_momentum_scale_grid_enabled", False)):
+    # Ang fallback ay TUMUTUGMA sa config default (True mula 2026-08-04) — ang
+    # mismatch dito ay tahimik na magpapatakbo ng ibang exit configuration sa
+    # anumang daan kung saan wala ang setting (report-binding doctrine).
+    if not bool(getattr(settings, "chili_momentum_scale_grid_enabled", True)):
         return []
     cached = pos.get("scale_grid")
     if isinstance(cached, list):
@@ -16841,10 +16846,64 @@ def _resolve_scale_grid(pos: dict[str, Any], symbol: str | None) -> list[list[fl
         entry, stop = 0.0, None
     levels = scale_grid_levels(entry, float(stop) if stop is not None else 0.0, side_long=_le_side_long(pos), symbol=symbol)
     pos["scale_grid"] = [[float(px), float(fr)] for px, fr in levels]
+    _log_scale_grid_freeze(pos, symbol, entry=entry, stop=stop, levels=levels, le=le)
     return [list(x) for x in pos["scale_grid"]]
 
 
-def _scale_grid_active(pos: dict[str, Any], symbol: str | None) -> bool:
+def _log_scale_grid_freeze(
+    pos: dict[str, Any],
+    symbol: str | None,
+    *,
+    entry: float,
+    stop: float | None,
+    levels: list[tuple[float, float]],
+    le: dict[str, Any] | None,
+) -> None:
+    """MINSANANG diagnostic sa sandaling nag-FREEZE ang ladder (isang linya kada posisyon).
+
+    BAKIT ITO UMIIRAL. Ang ladder ay nagkakahalaga ng −$10.96 sa JLHL habang
+    nagbibigay ng +$24.24 sa HYFM (L10b proof, 4 golden windows). DALAWANG
+    pagtatangkang i-kondisyon ito ang PAREHONG naging inert dahil nagdisenyo ako ng
+    threshold mula sa HINUHA tungkol sa runtime state: (a) leg-age/halt gate — ang
+    rungs pala ay pumuputok 1s pagkatapos ng entry, bago pa may halt; (b) ATR noise
+    floor — circular pala, ang ATR na iyon mismo ang naglagay ng stop na siyang
+    basehan ng rung. Ang linyang ito ang nag-eemit ng AKTWAL na mga halaga sa
+    mismong decision point para ang susunod na threshold ay galing sa NAKIKITANG
+    datos, hindi sa palagay. Minsan lang kada posisyon (ang ladder ay isang beses
+    lang nagfa-freeze), kaya mura. Best-effort — walang exception na lalabas.
+    """
+    try:
+        rungs = []
+        for px, fr in levels:
+            dist = ((float(px) - entry) / entry * 100.0) if entry > 0 else float("nan")
+            rungs.append(f"{float(px):.4f}/{float(fr):.2f}/{dist:+.2f}%")
+        _l = le or {}
+        risk_pct = (
+            ((entry - float(stop)) / entry * 100.0)
+            if (stop is not None and entry > 0)
+            else float("nan")
+        )
+        logger.info(
+            "[momentum_live] SCALE-GRID FROZEN symbol=%s entry=%.4f stop=%s risk=%.2f%% "
+            "rungs=%s | bases: entry_stop_atr_pct=%s structural_stop_atr_pct=%s "
+            "entry_day_range_pct=%s — ang rung distance ay ihahambing sa mga base na "
+            "ito para sa susunod na threshold",
+            symbol,
+            entry,
+            "None" if stop is None else f"{float(stop):.4f}",
+            risk_pct,
+            "[" + " ".join(rungs) + "]" if rungs else "[]",
+            _l.get("entry_stop_atr_pct"),
+            _l.get("structural_stop_atr_pct"),
+            _l.get("entry_day_range_pct"),
+        )
+    except Exception:
+        logger.debug("[momentum_live] scale-grid freeze diagnostic failed", exc_info=True)
+
+
+def _scale_grid_active(
+    pos: dict[str, Any], symbol: str | None, *, le: dict[str, Any] | None = None
+) -> bool:
     """True iff a multi-level grid is in force AND has un-fired rungs remaining.
 
     ⚠️ ALAM NA GASTOS (L10b proof, 2026-08-04, 4 golden windows): ang ladder ay
@@ -16858,7 +16917,7 @@ def _scale_grid_active(pos: dict[str, Any], symbol: str | None) -> bool:
     siyang basehan ng rung). Ang susunod ay INSTRUMENTATION muna, hindi bagong
     hula: sukatin ang rung distance vs entry_day_range_pct sa freeze moment.
     """
-    grid = _resolve_scale_grid(pos, symbol)
+    grid = _resolve_scale_grid(pos, symbol, le=le)
     if len(grid) < 2:  # 0/1 rung => no ladder; the single scale-out path handles it
         return False
     idx = int(pos.get("scale_grid_idx") or 0)
@@ -33272,7 +33331,7 @@ def tick_live_session(
                     # bank the partial, move the balance to breakeven, hold the runner.
                     # E(1): route through the grid step when a multi-level ladder is in
                     # force (advances the rung); else the single scale-out (byte-identical).
-                    _step = _scale_out_grid_step if _scale_grid_active(pos, sess.symbol) else _scale_out_to_runner
+                    _step = _scale_out_grid_step if _scale_grid_active(pos, sess.symbol, le=le) else _scale_out_to_runner
                     _step(
                         db,
                         sess,
@@ -33303,7 +33362,7 @@ def tick_live_session(
                     else float(poll["filled_size"])
                 )
                 if is_scale_out:
-                    _step = _scale_out_grid_step if _scale_grid_active(pos, sess.symbol) else _scale_out_to_runner
+                    _step = _scale_out_grid_step if _scale_grid_active(pos, sess.symbol, le=le) else _scale_out_to_runner
                     _step(
                         db,
                         sess,
@@ -39263,7 +39322,7 @@ def tick_live_session(
                     # E(1): a resting-limit fill advances the grid rung when a ladder is
                     # in force (the reactive market path takes the later rungs); else it
                     # finishes the single scale-out to the runner (byte-identical).
-                    _step = _scale_out_grid_step if _scale_grid_active(pos, sess.symbol) else _scale_out_to_runner
+                    _step = _scale_out_grid_step if _scale_grid_active(pos, sess.symbol, le=le) else _scale_out_to_runner
                     _step(
                         db, sess, le=le, filled_quantity=_new_qty,
                         entry_price=avg, fill_price=_px_f, reason="scale_out_limit",
@@ -39337,7 +39396,7 @@ def tick_live_session(
             try:
                 if pos.get("scale_grid_anchor_stop") is None and not pos.get("partial_taken"):
                     pos["scale_grid_anchor_stop"] = float(pos.get("stop_price") or 0.0)
-                _grid_active = _scale_grid_active(pos, sess.symbol)
+                _grid_active = _scale_grid_active(pos, sess.symbol, le=le)
             except Exception:
                 _grid_active = False
             if _grid_active:

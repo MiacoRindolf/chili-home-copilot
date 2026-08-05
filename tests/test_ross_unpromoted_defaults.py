@@ -79,7 +79,11 @@ def test_missing_setting_fallbacks_preserve_default_on_doctrine():
         "chili_momentum_dip_monster_context_enabled": (entry_gates,),
         "chili_momentum_late_ah_monster_placement_enabled": (entry_gates,),
         "chili_momentum_monster_structure_floor_enabled": (live_runner,),
-        "chili_momentum_scale_grid_enabled": (paper_execution,),
+        # DALAWANG may-ari: parehong may sariling getattr fallback ang
+        # paper_execution.scale_grid_enabled() at live_runner._resolve_scale_grid.
+        # Ang isa sa kanila ay naiwang False matapos ang 2026-08-04 parity fix —
+        # ito ang pumipigil na maulit iyon.
+        "chili_momentum_scale_grid_enabled": (paper_execution, live_runner),
     }
     assert set(owners) == set(_USER_APPROVED_DEFAULT_ON)
     for name, modules in owners.items():
