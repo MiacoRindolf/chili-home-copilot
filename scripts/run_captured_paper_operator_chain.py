@@ -65,6 +65,7 @@ _CHAIN_KEYS = frozenset(
         "bootstrap_stage0_script_sha256",
         "host_principal_user_id",
         "bridge_configuration",
+        "static_proof_cache",
     }
 )
 
@@ -104,6 +105,36 @@ class IqfeedRealtimeProbe:
     @property
     def delay_zero(self) -> bool:
         return self.delay_minutes == 0
+
+
+def _assert_runtime_preselection_bridge_parity(
+    *,
+    preselection: ExactPrintPreselectionReceipt,
+    runtime_receipt: object,
+) -> None:
+    """Refuse activation when the sealed consumer pin differs from its producer."""
+
+    effective_config = getattr(runtime_receipt, "effective_config", None)
+    expected_build = (
+        str(
+            effective_config.get(
+                "CHILI_IQFEED_L1_AUTHORITATIVE_BRIDGE_BUILD", ""
+            )
+            or ""
+        ).strip()
+        if isinstance(effective_config, Mapping)
+        else ""
+    )
+    observed_build = (
+        str(preselection.bridge_version or "").strip()
+        if type(preselection) is ExactPrintPreselectionReceipt
+        else ""
+    )
+    if not expected_build or expected_build != observed_build:
+        raise CapturedPaperOperatorChainError(
+            "IQFEED_BRIDGE_RUNTIME_AUTHORITY_MISMATCH",
+            "sealed PAPER consumer bridge authority differs from candidate capture",
+        )
 
 
 def _canonical_json_bytes(value: Any) -> bytes:
@@ -881,8 +912,15 @@ def _select_live_certification_symbol(
                 connection.execute(text("SET TRANSACTION READ ONLY"))
                 rows = connection.execute(
                     text(
-                        "SELECT symbol, count(*) AS n "
+                        "WITH recent_tail AS MATERIALIZED ("
+                        "SELECT symbol, received_at, available_at, "
+                        "provider_event_at, provider_trade_reference_at, "
+                        "timestamp_basis, bridge_version, bridge_run_id, "
+                        "message_type, source_frame_sha256 "
                         "FROM iqfeed_trade_ticks "
+                        "ORDER BY id DESC LIMIT :tail_rows"
+                        ") SELECT symbol, count(*) AS n "
+                        "FROM recent_tail "
                         "WHERE received_at >= :started_at "
                         "AND received_at <= :completed_at "
                         "AND available_at IS NOT NULL "
@@ -896,6 +934,7 @@ def _select_live_certification_symbol(
                         "GROUP BY symbol ORDER BY n DESC, symbol ASC LIMIT 40"
                     ),
                     {
+                        "tail_rows": _PRESELECTION_SEED_TAIL_ROWS,
                         "started_at": started_at.astimezone(UTC),
                         "completed_at": preselection.completed_at.astimezone(UTC),
                         "timestamp_basis": preselection.timestamp_basis,
@@ -933,6 +972,7 @@ def run_operator_chain(
     chain_document: Mapping[str, Any],
 ) -> Mapping[str, Any]:
     roots = tuple(Path(value).resolve(strict=True) for value in activation_request.allowed_read_roots)
+    artifact_root = activation_request.artifact_root
     benchmark_ref = chain_document.get("resource_benchmark")
     if not isinstance(benchmark_ref, dict) or set(benchmark_ref) != {"path", "sha256"}:
         raise CapturedPaperOperatorChainError(
@@ -946,6 +986,36 @@ def run_operator_chain(
         expected_sha256=str(benchmark_ref.get("sha256") or ""),
         max_bytes=_MAX_BENCHMARK_BYTES,
     )
+    static_cache_reference = chain_document.get("static_proof_cache")
+    static_cache_path: Path | None = None
+    static_cache_sha256: str | None = None
+    if static_cache_reference is not None:
+        if not isinstance(static_cache_reference, dict) or set(
+            static_cache_reference
+        ) != {"path", "sha256"}:
+            raise CapturedPaperOperatorChainError(
+                "STATIC_CACHE_REFERENCE_INVALID",
+                "static proof cache reference is malformed",
+            )
+        static_cache_sha256 = str(static_cache_reference.get("sha256") or "")
+        static_cache_path = _strict_path(
+            static_cache_reference.get("path"),
+            field="static_proof_cache",
+            roots=roots,
+            directory=False,
+            expected_sha256=static_cache_sha256,
+            max_bytes=_MAX_BENCHMARK_BYTES,
+        )
+        if (
+            static_cache_path.name != f"{static_cache_sha256}.json"
+            or static_cache_path.parent.name != static_cache_sha256[:2]
+            or static_cache_path.parent.parent.name != "static-proof-cache"
+            or static_cache_path.is_relative_to(artifact_root)
+        ):
+            raise CapturedPaperOperatorChainError(
+                "STATIC_CACHE_REFERENCE_INVALID",
+                "static proof cache is not an earlier content-addressed artifact",
+            )
     legacy_root = _strict_path(
         chain_document.get("legacy_root"),
         field="legacy_root",
@@ -1013,8 +1083,10 @@ def run_operator_chain(
         expected_account_id=activation_request.expected_account_id
     )
     generation = str(uuid.uuid4())
+    static_proof_restart_nonce = (
+        str(uuid.uuid4()) if static_cache_path is not None else None
+    )
     now = datetime.now(UTC)
-    artifact_root = activation_request.artifact_root
     capture_store_root = artifact_root / "capture-store"
     capture_store_root.mkdir(mode=0o700, parents=True, exist_ok=True)
     bootstrap_artifacts = artifact_root / "bootstrap" / "artifacts"
@@ -1067,6 +1139,10 @@ def run_operator_chain(
         allowed_read_roots=activation_request.allowed_read_roots,
         seed_symbols=seed_symbols,
         allow_closed_session_activation_only=not extended_session_open,
+    )
+    _assert_runtime_preselection_bridge_parity(
+        preselection=preselection,
+        runtime_receipt=preinstalled_runtime_receipt,
     )
     certification_symbol = (
         _select_live_certification_symbol(preselection=preselection)
@@ -1155,6 +1231,14 @@ def run_operator_chain(
         "iqfeed_bootstrap_manifest_sha256": built.manifest_sha256,
         "python_executable": str(activation_request.python_executable),
         "python_dependency_root": str(dependency_root),
+        "python_dependency_root_identity_sha256": (
+            activation_request.python_dependency_root_identity_sha256
+        ),
+        "static_proof_cache_path": (
+            str(static_cache_path) if static_cache_path is not None else None
+        ),
+        "static_proof_cache_sha256": static_cache_sha256,
+        "static_proof_restart_nonce": static_proof_restart_nonce,
         "no_order_receipt_output": str(
             receipt_output_root / f"no-order-receipt-{generation}.json"
         ),

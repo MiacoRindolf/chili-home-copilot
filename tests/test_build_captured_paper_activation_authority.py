@@ -251,6 +251,61 @@ def test_real_temp_git_builds_exact_canonical_loader_roundtrip_and_no_secret_rec
     assert _git(authority_fixture.candidate, "status", "--porcelain").stdout == ""
 
 
+def test_static_proof_cache_reference_is_content_addressed_and_pinned_into_chain(
+    authority_fixture: AuthorityFixture,
+) -> None:
+    baseline = builder.build_captured_paper_activation_authority(
+        **authority_fixture.kwargs()
+    )
+    dependency_sha = json.loads(baseline.chain_request_path.read_bytes())[
+        "python_dependency_root_identity_sha256"
+    ]
+    cache_document = {
+        "schema_version": "chili.captured-paper-static-proof-cache.v1",
+        "python_dependency_root_identity_sha256": dependency_sha,
+        "account_scope": "alpaca:paper",
+        "expected_account_id": ACCOUNT_ID,
+        "live_cash_authorized": False,
+        "orders_submitted": False,
+    }
+    cache_raw = builder._canonical_json_bytes(cache_document)
+    cache_sha = _sha(cache_raw)
+    cache_path = (
+        authority_fixture.root
+        / "prior-probes"
+        / "static-proof-cache"
+        / cache_sha[:2]
+        / f"{cache_sha}.json"
+    )
+    cache_path.parent.mkdir(parents=True)
+    cache_path.write_bytes(cache_raw)
+    next_artifact = authority_fixture.root / "next-artifacts"
+    next_artifact.mkdir()
+
+    built = builder.build_captured_paper_activation_authority(
+        **authority_fixture.kwargs(
+            artifact_root=next_artifact,
+            static_proof_cache_path=cache_path,
+            static_proof_cache_sha256=cache_sha,
+        )
+    )
+
+    chain_document = json.loads(built.chain_request_path.read_bytes())
+    assert chain_document["static_proof_cache"] == {
+        "path": str(cache_path.resolve(strict=True)),
+        "sha256": cache_sha,
+    }
+    loaded = runner.load_activation_runner_request(
+        request_path=built.activation_request_path,
+        request_sha256=built.activation_request_sha256,
+    )
+    assert chain._load_chain_request(
+        request_path=built.chain_request_path,
+        request_sha256=built.chain_request_sha256,
+        activation_request=loaded,
+    ) == chain_document
+
+
 @pytest.mark.parametrize(
     ("left", "right"),
     (

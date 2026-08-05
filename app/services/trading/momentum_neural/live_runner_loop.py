@@ -55,6 +55,9 @@ from .captured_paper_fill_capture import (
     CapturedPaperExitFillPostCommitRequest,
     CapturedPaperExitTransportPostCommitRequest,
 )
+from .captured_paper_iqfeed_trigger import (
+    parse_captured_paper_iqfeed_q_notify,
+)
 from .captured_paper_pending_owner import (
     validate_captured_paper_pending_owner_inventory,
 )
@@ -68,6 +71,7 @@ from .live_fsm import (
     STATE_WATCHING_LIVE,
 )
 from .lane_health import LIVE_LOOP_HEARTBEAT_INTERVAL_SECONDS
+from .replay_capture_contract import CaptureContractError
 
 _log = logging.getLogger(__name__)
 
@@ -92,6 +96,8 @@ _IQFEED_AUTHORITY_BASIS = "iqfeed_q_receive_trade_reference_fenced"
 _IQFEED_AUTHORITY_MAX_AGE_S = 2.0
 _IQFEED_FUTURE_TOLERANCE_S = 1.0
 _IQFEED_DEDUP_RETENTION_S = 5.0
+_CAPTURED_PAPER_ADMISSION_REJECTION_LOG_INTERVAL_S = 60.0
+_CAPTURED_PAPER_ADMISSION_REASON_RE = re.compile(r"^[a-z][a-z0-9_]{0,127}$")
 _IQFEED_BUILD_RE = re.compile(
     r"^iqfeed-l1-exact-print-provenance-v3\+sha256:[0-9a-f]{16}$"
 )
@@ -443,6 +449,7 @@ class LiveRunnerLoop:
         self._iqfeed_generation_watermarks: dict[str, int] = {}
         self._iqfeed_admission_lock = threading.Lock()
         self._iqfeed_admission_inflight: dict[object, tuple[int, str]] = {}
+        self._captured_paper_admission_rejection_log_monotonic: float | None = None
         # IGNITION nomination governors (monotonic clocks; consumer-side caps).
         self._ignition_lock = threading.Lock()
         self._ignition_dedup: dict[str, float] = {}
@@ -689,11 +696,29 @@ class LiveRunnerLoop:
                     from .lane_health import record_live_runner_loop_run
 
                     db = SessionLocal()
+                    heartbeat_identity = {}
+                    if self._captured_paper_scope is not None:
+                        heartbeat_identity = {
+                            "account_scope": (
+                                self._captured_paper_scope.account_scope
+                            ),
+                            "expected_account_id": (
+                                self._captured_paper_scope.expected_account_id
+                            ),
+                            "runtime_generation": (
+                                self._captured_paper_scope.runtime_generation
+                            ),
+                            "execution_family": (
+                                self._captured_paper_scope.execution_family
+                            ),
+                            "live_cash_authorized": False,
+                        }
                     record_live_runner_loop_run(
                         db,
                         owner_instance_id=self._owner_instance_id,
                         generation=generation,
                         generation_started_at=generation_started_at,
+                        **heartbeat_identity,
                     )
                     db.commit()
                     self._lane_health_heartbeat_generation = generation
@@ -1368,6 +1393,150 @@ class LiveRunnerLoop:
             return False
         return True
 
+    def _coalesce_captured_paper_iqfeed_notifications(
+        self,
+        notifications: list[Any],
+    ) -> list[Any]:
+        """Keep one authoritative PAPER wake-up hint per exact symbol.
+
+        PostgreSQL ``NOTIFY`` payloads are wake-up hints, never market evidence;
+        the captured admission path revalidates the complete signed envelope and
+        reads the exact retained stream before it can create a session.  A burst
+        of historical hints for one symbol is therefore redundant and, if
+        handled serially, can keep the LISTEN socket backpressured long enough
+        that every later envelope exceeds the two-second authority window.
+
+        Ordinary live execution retains its existing per-notification behavior.
+        Captured PAPER drains the socket first, then evaluates the highest
+        generation/newest fully validated hint per symbol.  The first pending
+        position for each symbol is preserved so sustained ingress cannot starve
+        another symbol; a just-handled symbol is requeued behind existing work.
+        """
+
+        if self._captured_paper_scope is None or not notifications:
+            return notifications
+
+        expected_build = str(
+            getattr(settings, "chili_iqfeed_l1_authoritative_bridge_build", "")
+            or ""
+        ).strip()
+        retained_by_run: dict[
+            tuple[str, str],
+            tuple[int, Any, tuple, tuple, tuple],
+        ] = {}
+        for index, notification in enumerate(notifications):
+            payload = getattr(notification, "payload", None)
+            try:
+                exact_notify = parse_captured_paper_iqfeed_q_notify(
+                    payload,
+                    expected_bridge_version=expected_build,
+                )
+            except CaptureContractError:
+                continue
+            available_age = (
+                _utcnow() - exact_notify.available_at
+            ).total_seconds()
+            if (
+                available_age < -_IQFEED_FUTURE_TOLERANCE_S
+                or available_age > _IQFEED_AUTHORITY_MAX_AGE_S
+            ):
+                continue
+            normalized = self._normalized_iqfeed_notify_authority(
+                payload
+            )
+            if normalized is None:
+                continue
+            _data, certified_tuple = normalized
+            run_key = (exact_notify.symbol, exact_notify.bridge_run_id)
+            candidate_rank = (
+                exact_notify.connection_generation,
+                exact_notify.source_frame_sequence,
+                exact_notify.provider_trade_reference_at,
+                exact_notify.received_at,
+                exact_notify.available_at,
+                index,
+            )
+            cross_run_rank = (
+                exact_notify.provider_trade_reference_at,
+                exact_notify.received_at,
+                exact_notify.available_at,
+                exact_notify.connection_generation,
+                exact_notify.source_frame_sequence,
+                exact_notify.bridge_run_id,
+                index,
+            )
+            prior = retained_by_run.get(run_key)
+            if prior is None:
+                retained_by_run[run_key] = (
+                    index,
+                    notification,
+                    certified_tuple,
+                    candidate_rank,
+                    cross_run_rank,
+                )
+                continue
+            (
+                first_index,
+                _prior_notification,
+                _prior_tuple,
+                prior_rank,
+                _prior_cross_run_rank,
+            ) = prior
+            if candidate_rank > prior_rank:
+                retained_by_run[run_key] = (
+                    first_index,
+                    notification,
+                    certified_tuple,
+                    candidate_rank,
+                    cross_run_rank,
+                )
+        retained_by_symbol: dict[
+            str,
+            tuple[int, Any, tuple],
+        ] = {}
+        for (
+            first_index,
+            notification,
+            certified_tuple,
+            _run_rank,
+            cross_run_rank,
+        ) in retained_by_run.values():
+            if not self._iqfeed_notify_candidate_is_reservable(
+                certified_tuple
+            ):
+                continue
+            symbol = certified_tuple[0]
+            prior = retained_by_symbol.get(symbol)
+            if prior is None:
+                retained_by_symbol[symbol] = (
+                    first_index,
+                    notification,
+                    cross_run_rank,
+                )
+                continue
+            prior_first_index, _prior_notification, prior_rank = prior
+            if cross_run_rank > prior_rank:
+                retained_by_symbol[symbol] = (
+                    min(prior_first_index, first_index),
+                    notification,
+                    cross_run_rank,
+                )
+        retained = [
+            notification
+            for _index, notification, _rank in sorted(
+                retained_by_symbol.values(),
+                key=lambda item: item[0],
+            )
+        ]
+        if len(retained) != len(notifications):
+            _log.debug(
+                "[live_loop] coalesced captured PAPER IQFeed wake hints "
+                "received=%d retained=%d",
+                len(notifications),
+                len(retained),
+            )
+        return retained
+
     def _iqfeed_notify_loop(
         self,
         generation: int | None = None,
@@ -1433,8 +1602,54 @@ class LiveRunnerLoop:
                         if not ready:
                             continue
                         conn.poll()
-                        while conn.notifies:
-                            notify = conn.notifies.pop(0)
+                        notifications = list(conn.notifies)
+                        del conn.notifies[:]
+                        notifications = (
+                            self._coalesce_captured_paper_iqfeed_notifications(
+                                notifications
+                            )
+                        )
+                        if self._captured_paper_scope is not None:
+                            while notifications:
+                                notify = notifications.pop(0)
+                                if not self._generation_active(
+                                    generation,
+                                    stop_event,
+                                ):
+                                    break
+                                self._handle_iqfeed_notify_payload(
+                                    notify.payload,
+                                    generation=generation,
+                                )
+                                if not self._generation_active(
+                                    generation,
+                                    stop_event,
+                                ):
+                                    break
+                                # Admission can perform bounded capture/DB work.
+                                # Drain the socket again after every hint so the
+                                # PostgreSQL backend never waits for an entire
+                                # multi-symbol admission batch to finish.  Any
+                                # newer hint replaces the still-pending hint for
+                                # that symbol before the next evaluation.
+                                immediate_ready, _, _ = select.select(
+                                    [conn],
+                                    [],
+                                    [],
+                                    0.0,
+                                )
+                                if immediate_ready:
+                                    conn.poll()
+                                if conn.notifies:
+                                    incoming = list(conn.notifies)
+                                    del conn.notifies[:]
+                                    notifications = (
+                                        self._coalesce_captured_paper_iqfeed_notifications(
+                                            notifications + incoming
+                                        )
+                                    )
+                            continue
+                        for notify in notifications:
                             if not self._generation_active(generation, stop_event):
                                 break
                             if (
@@ -1632,8 +1847,11 @@ class LiveRunnerLoop:
             handled = False
         return handled
 
-    def _validated_iqfeed_notify(self, payload: str) -> tuple[dict, tuple] | None:
-        """Validate the complete v3 authority tuple before any admission work."""
+    def _normalized_iqfeed_notify_authority(
+        self,
+        payload: str,
+    ) -> tuple[dict, tuple] | None:
+        """Purely validate and normalize the complete v3 authority tuple."""
 
         def _object_without_duplicate_keys(pairs):
             obj = {}
@@ -1735,40 +1953,6 @@ class LiveRunnerLoop:
             bid,
             ask,
         )
-        now_monotonic = time.monotonic()
-        with self._iqfeed_provenance_lock:
-            self._iqfeed_certified_watermarks = {
-                key: expires_at
-                for key, expires_at in self._iqfeed_certified_watermarks.items()
-                if expires_at > now_monotonic
-            }
-            committed_generation = self._iqfeed_generation_watermarks.get(
-                bridge_run_id
-            )
-            if (
-                committed_generation is not None
-                and generation < committed_generation
-            ):
-                return None
-            inflight_generations = (
-                key[6]
-                for key in self._iqfeed_inflight_certified
-                if key[5] == bridge_run_id
-            )
-            highest_inflight_generation = max(inflight_generations, default=None)
-            if (
-                highest_inflight_generation is not None
-                and generation < highest_inflight_generation
-            ):
-                return None
-            if (
-                certified_tuple in self._iqfeed_certified_watermarks
-                or certified_tuple in self._iqfeed_inflight_certified
-            ):
-                return None
-            # A short-lived concurrency reservation is not an accepted-event
-            # watermark. It is removed on every failed admission/dispatch path.
-            self._iqfeed_inflight_certified.add(certified_tuple)
         normalized = dict(data)
         normalized.update(
             {
@@ -1780,6 +1964,73 @@ class LiveRunnerLoop:
                 "provider_trade_reference_at": reference_at.isoformat(),
             }
         )
+        return normalized, certified_tuple
+
+    def _iqfeed_notify_candidate_is_reservable_locked(
+        self,
+        certified_tuple: tuple,
+    ) -> bool:
+        bridge_run_id = certified_tuple[5]
+        generation = certified_tuple[6]
+        committed_generation = self._iqfeed_generation_watermarks.get(
+            bridge_run_id
+        )
+        if (
+            committed_generation is not None
+            and generation < committed_generation
+        ):
+            return False
+        inflight_generations = (
+            key[6]
+            for key in self._iqfeed_inflight_certified
+            if key[5] == bridge_run_id
+        )
+        highest_inflight_generation = max(inflight_generations, default=None)
+        return bool(
+            (
+                highest_inflight_generation is None
+                or generation >= highest_inflight_generation
+            )
+            and certified_tuple not in self._iqfeed_certified_watermarks
+            and certified_tuple not in self._iqfeed_inflight_certified
+        )
+
+    def _iqfeed_notify_candidate_is_reservable(
+        self,
+        certified_tuple: tuple,
+    ) -> bool:
+        now_monotonic = time.monotonic()
+        with self._iqfeed_provenance_lock:
+            self._iqfeed_certified_watermarks = {
+                key: expires_at
+                for key, expires_at in self._iqfeed_certified_watermarks.items()
+                if expires_at > now_monotonic
+            }
+            return self._iqfeed_notify_candidate_is_reservable_locked(
+                certified_tuple
+            )
+
+    def _validated_iqfeed_notify(self, payload: str) -> tuple[dict, tuple] | None:
+        """Validate and reserve the complete v3 tuple before admission work."""
+
+        normalized_authority = self._normalized_iqfeed_notify_authority(payload)
+        if normalized_authority is None:
+            return None
+        normalized, certified_tuple = normalized_authority
+        now_monotonic = time.monotonic()
+        with self._iqfeed_provenance_lock:
+            self._iqfeed_certified_watermarks = {
+                key: expires_at
+                for key, expires_at in self._iqfeed_certified_watermarks.items()
+                if expires_at > now_monotonic
+            }
+            if not self._iqfeed_notify_candidate_is_reservable_locked(
+                certified_tuple
+            ):
+                return None
+            # A short-lived concurrency reservation is not an accepted-event
+            # watermark. It is removed on every failed admission/dispatch path.
+            self._iqfeed_inflight_certified.add(certified_tuple)
         return normalized, certified_tuple
 
     def _handle_iqfeed_notify_payload(
@@ -1861,6 +2112,60 @@ class LiveRunnerLoop:
         with self._iqfeed_admission_lock:
             self._iqfeed_admission_inflight.pop(token, None)
 
+    def _publish_runtime_snapshot_after_commit(self, session_id: int) -> bool:
+        """Best-effort observer projection, isolated from core PAPER state."""
+
+        scope = self._captured_paper_scope
+        if scope is None:
+            return False
+        db = None
+        try:
+            from .persistence import (
+                build_runtime_snapshot_values,
+                upsert_trading_automation_runtime_snapshot,
+            )
+
+            db = SessionLocal()
+            sess = (
+                db.query(TradingAutomationSession)
+                .filter(TradingAutomationSession.id == int(session_id))
+                .one_or_none()
+            )
+            if sess is None:
+                db.rollback()
+                return False
+            scope.assert_session(sess)
+            values = build_runtime_snapshot_values(
+                sess,
+                last_action=str(sess.state or "captured_paper_runtime_tick"),
+            )
+            upsert_trading_automation_runtime_snapshot(
+                db,
+                session_id=int(sess.id),
+                values=values,
+            )
+            db.commit()
+            return True
+        except Exception:
+            try:
+                if db is not None:
+                    db.rollback()
+            except Exception:
+                pass
+            _log.warning(
+                "[live_loop] captured PAPER runtime observer projection failed "
+                "session=%d core_state_unchanged=true",
+                int(session_id),
+                exc_info=True,
+            )
+            return False
+        finally:
+            try:
+                if db is not None:
+                    db.close()
+            except Exception:
+                pass
+
     def _admit_iqfeed_symbol(
         self,
         symbol: str,
@@ -1894,6 +2199,38 @@ class LiveRunnerLoop:
                 if not isinstance(result, Mapping):
                     return None
                 result = dict(result)
+                raw_rejection_reason = result.get("reason")
+                rejection_reason = (
+                    raw_rejection_reason.strip()
+                    if isinstance(raw_rejection_reason, str)
+                    else ""
+                )
+                if result.get("admitted") is not True and rejection_reason:
+                    if not _CAPTURED_PAPER_ADMISSION_REASON_RE.fullmatch(
+                        rejection_reason
+                    ):
+                        rejection_reason = "captured_paper_admission_rejected"
+                    now_monotonic = time.monotonic()
+                    with self._iqfeed_admission_lock:
+                        last_log = (
+                            self._captured_paper_admission_rejection_log_monotonic
+                        )
+                        emit_rejection_log = bool(
+                            last_log is None
+                            or now_monotonic - last_log
+                            >= _CAPTURED_PAPER_ADMISSION_REJECTION_LOG_INTERVAL_S
+                        )
+                        if emit_rejection_log:
+                            self._captured_paper_admission_rejection_log_monotonic = (
+                                now_monotonic
+                            )
+                    if emit_rejection_log:
+                        _log.info(
+                            "[live_loop] captured PAPER admission rejected "
+                            "symbol=%s reason=%s",
+                            symbol,
+                            rejection_reason,
+                        )
                 publish_session = bool(
                     result.get("admitted")
                     or (
@@ -1908,6 +2245,9 @@ class LiveRunnerLoop:
                         self._tracker.refresh(
                             expected_generation=expected_generation,
                         )
+                    self._publish_runtime_snapshot_after_commit(
+                        int(result["session_id"])
+                    )
                 return result
             except Exception:
                 _log.debug(
@@ -2243,6 +2583,8 @@ class LiveRunnerLoop:
                         "session=%d phase_one_committed=true retry_required=true",
                         session_id,
                     )
+            if self._captured_paper_scope is not None:
+                self._publish_runtime_snapshot_after_commit(session_id)
         finally:
             # Preserve the ordinary cleanup path while making it impossible to
             # imply that a committed captured phase-one write was rolled back.

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import replace
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 import hashlib
 import json
 import os
@@ -300,6 +300,42 @@ def test_capture_only_smoke_binds_real_shape_checks_exact_print_and_quiesces(tmp
     assert trade.stopped.is_set() and depth.stopped.is_set()
     assert composition.state is IqfeedIngressCompositionState.CLOSED
     assert len(evidence.evidence_sha256) == 64
+
+
+def test_capture_only_smoke_refreshes_pressure_before_composition(tmp_path):
+    config, _composition, _trade, _depth = _fixture(tmp_path)
+    stale_pressure = replace(
+        config.pressure_sample,
+        observed_at=NOW - timedelta(seconds=6),
+    )
+    fresh_pressure = CapturePressureSample(
+        observed_at=NOW,
+        resource_binding_sha256=BINDING_SHA,
+        cpu_percent=2.0,
+        available_memory_bytes=2,
+        disk_free_bytes=2,
+        write_latency_milliseconds=2.0,
+    )
+    sampler = lambda: fresh_pressure
+    config = replace(
+        config,
+        pressure_sample=stale_pressure,
+        pressure_sampler=sampler,
+    )
+    observed = {}
+
+    def factory(*_args, **kwargs):
+        observed.update(kwargs)
+        raise RuntimeError("stop after composition arguments are captured")
+
+    with pytest.raises(smoke.CaptureOnlySmokeError, match="COMPOSITION_UNAVAILABLE"):
+        smoke.run_capture_only_preactivation_smoke(
+            config,
+            wall_clock=lambda: NOW,
+            composition_factory=factory,
+        )
+
+    assert observed["pressure_sample"] is fresh_pressure
 
 
 def test_capture_only_smoke_missing_current_exact_print_fails_closed_and_stops(tmp_path):

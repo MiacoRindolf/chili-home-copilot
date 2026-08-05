@@ -1372,12 +1372,11 @@ def test_slow_no_order_smoke_requires_and_accepts_post_shutdown_refresh(
     output_root = tmp_path / "slow-final-objects"
     output_root.mkdir()
     preactivation = _load_preactivation(bundle)
-    # 2026-07-17: the mid-flow receipt class is uniform (10 minutes), so a
-    # smoke that outlives broker/kill authority also outlives every other
-    # probe receipt — past the class boundary the whole envelope is dead
-    # (fail-closed), and within it a slow smoke still finalizes via the
-    # mandatory post-shutdown refresh.  Exercise both sides.
-    stale_probe_horizon = NOW + timedelta(seconds=615)
+    # The live-bound post-smoke class is capped at 20 minutes.  Past that
+    # boundary the whole envelope is dead (fail-closed), while a slow smoke
+    # well inside it still finalizes via the mandatory post-shutdown refresh.
+    # Exercise both sides.
+    stale_probe_horizon = NOW + timedelta(minutes=20, seconds=1)
     smoke_completed_at = NOW + timedelta(seconds=320)
 
     # Past the class boundary: the original receipts (captured NOW-5s,
@@ -1389,7 +1388,7 @@ def test_slow_no_order_smoke_requires_and_accepts_post_shutdown_refresh(
         < stale_probe_horizon
         for kind in ("broker_account", "kill_switch")
     )
-    with pytest.raises(CapturedPaperActivationContractError, match="typed readiness"):
+    with pytest.raises(CapturedPaperActivationContractError, match="MANIFEST_STALE"):
         load_captured_paper_preactivation(
             bundle.preactivation_path,
             expected_manifest_sha256=bundle.preactivation_sha256,

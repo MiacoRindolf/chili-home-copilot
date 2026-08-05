@@ -4,12 +4,16 @@ from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from decimal import Decimal
 import hashlib
+import json
 from types import SimpleNamespace
 import threading
+import time
 import uuid
 
 import pytest
 from sqlalchemy import func, select, text
+from sqlalchemy.exc import DBAPIError, OperationalError
+from sqlalchemy.exc import TimeoutError as SqlAlchemyTimeoutError
 from sqlalchemy.orm import sessionmaker
 
 from app import migrations
@@ -50,6 +54,7 @@ from app.services.trading.momentum_neural.alpaca_orphan_claims import (
 )
 from app.services.trading.momentum_neural.captured_paper_fill_capture import (
     CapturedPaperExitFillPostCommitRequest,
+    CapturedPaperExitOwnerWorker,
     SqlAlchemyCapturedPaperFillCapture,
 )
 from tests import test_alpaca_fill_activity_capture as fill_capture_support
@@ -74,6 +79,187 @@ class _RecordingConnection:
 
 def _sha(label: str) -> str:
     return hashlib.sha256(label.encode("utf-8")).hexdigest()
+
+
+def _wait_for_exit_owner_health(worker, predicate):
+    deadline = time.monotonic() + 1.0
+    while time.monotonic() < deadline:
+        health = worker.health()
+        if predicate(health):
+            return health
+        time.sleep(0.005)
+    return worker.health()
+
+
+def test_exit_owner_worker_retries_one_invalidated_database_connection() -> None:
+    capture = object.__new__(SqlAlchemyCapturedPaperFillCapture)
+    capture._max_pending_reads = 1
+    calls = 0
+    recovered = threading.Event()
+    runtime_generation = "73c593c2-92ee-4b65-9ae0-16e335884eab"
+    broker_connection_generation = "paper-connection-generation"
+
+    body = {
+        "schema_version": "chili.captured-paper-exit-owner-recovery.v1",
+        "account_scope": "alpaca:paper",
+        "expected_account_id": ACCOUNT_ID,
+        "runtime_generation": runtime_generation,
+        "broker_connection_generation": broker_connection_generation,
+        "execution_family": "alpaca_spot",
+        "bounded_limit": 1,
+        "attempted_request_sha256s": [],
+        "completed_request_sha256s": [],
+        "remaining_request_sha256s": [],
+        "unavailable_error_types": [],
+        "broker_read_count": 0,
+        "exit_owner_inventory_resolved": True,
+        "exit_owner_recovery_bounded": True,
+        "exit_owner_recovery_exhausted": False,
+        "paper_order_submission_authorized": False,
+        "live_cash_authorized": False,
+        "real_money_authorized": False,
+    }
+
+    def recover_exit_owner_inventory_bounded(**_kwargs):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise SqlAlchemyTimeoutError("database pool checkout timed out")
+        recovered.set()
+        return {
+            **body,
+            "receipt_sha256": hashlib.sha256(
+                json.dumps(
+                    body,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                    ensure_ascii=False,
+                ).encode("utf-8")
+            ).hexdigest(),
+        }
+
+    capture.recover_exit_owner_inventory_bounded = (
+        recover_exit_owner_inventory_bounded
+    )
+    worker = CapturedPaperExitOwnerWorker(
+        fill_capture=capture,
+        expected_account_id=ACCOUNT_ID,
+        runtime_generation=runtime_generation,
+        broker_connection_generation=broker_connection_generation,
+        execution_family="alpaca_spot",
+        max_items_per_cycle=1,
+        idle_poll_seconds=0.01,
+    )
+
+    worker.start()
+    try:
+        assert recovered.wait(1.0)
+        health = _wait_for_exit_owner_health(
+            worker,
+            lambda value: (
+                value["cycles_completed"] >= 1
+                and value["consecutive_database_errors"] == 0
+            ),
+        )
+        assert health["running"] is True
+        assert health["fatal"] is False
+        assert health["recoverable_database_error_count"] == 1
+        assert health["consecutive_database_errors"] == 0
+        assert health["last_recoverable_error_type"] == "TimeoutError"
+    finally:
+        worker.close(join_timeout_seconds=1.0)
+
+
+def test_exit_owner_worker_fails_closed_after_repeated_database_disconnect() -> None:
+    capture = object.__new__(SqlAlchemyCapturedPaperFillCapture)
+    capture._max_pending_reads = 1
+    calls = 0
+    attempted_twice = threading.Event()
+
+    def recover_exit_owner_inventory_bounded(**_kwargs):
+        nonlocal calls
+        calls += 1
+        if calls >= 2:
+            attempted_twice.set()
+        raise OperationalError(
+            "SELECT MAX(id)",
+            {},
+            OSError("connection reset"),
+            connection_invalidated=True,
+        )
+
+    capture.recover_exit_owner_inventory_bounded = (
+        recover_exit_owner_inventory_bounded
+    )
+    worker = CapturedPaperExitOwnerWorker(
+        fill_capture=capture,
+        expected_account_id=ACCOUNT_ID,
+        runtime_generation="73c593c2-92ee-4b65-9ae0-16e335884eab",
+        broker_connection_generation="paper-connection-generation",
+        execution_family="alpaca_spot",
+        max_items_per_cycle=1,
+        idle_poll_seconds=0.01,
+    )
+
+    worker.start()
+    try:
+        assert attempted_twice.wait(1.0)
+        health = _wait_for_exit_owner_health(
+            worker,
+            lambda value: value["fatal"] is True,
+        )
+        assert health["running"] is False
+        assert health["fatal"] is True
+        assert health["fatal_error_type"] == "OperationalError"
+        assert health["fatal_reason"] == (
+            "OperationalError: exit_owner_cycle_failed"
+        )
+        assert health["recoverable_database_error_count"] == 1
+        assert health["consecutive_database_errors"] == 1
+    finally:
+        worker.close(join_timeout_seconds=1.0)
+
+
+def test_exit_owner_worker_does_not_retry_nontransient_database_error() -> None:
+    capture = object.__new__(SqlAlchemyCapturedPaperFillCapture)
+    capture._max_pending_reads = 1
+    attempted = threading.Event()
+
+    def recover_exit_owner_inventory_bounded(**_kwargs):
+        attempted.set()
+        raise DBAPIError(
+            "SELECT MAX(id)",
+            {},
+            RuntimeError("non-transient database error"),
+            connection_invalidated=False,
+        )
+
+    capture.recover_exit_owner_inventory_bounded = (
+        recover_exit_owner_inventory_bounded
+    )
+    worker = CapturedPaperExitOwnerWorker(
+        fill_capture=capture,
+        expected_account_id=ACCOUNT_ID,
+        runtime_generation="73c593c2-92ee-4b65-9ae0-16e335884eab",
+        broker_connection_generation="paper-connection-generation",
+        execution_family="alpaca_spot",
+        max_items_per_cycle=1,
+        idle_poll_seconds=0.01,
+    )
+
+    worker.start()
+    try:
+        assert attempted.wait(1.0)
+        health = _wait_for_exit_owner_health(
+            worker,
+            lambda value: value["fatal"] is True,
+        )
+        assert health["running"] is False
+        assert health["fatal_error_type"] == "DBAPIError"
+        assert health["recoverable_database_error_count"] == 0
+        assert health["consecutive_database_errors"] == 0
+    finally:
+        worker.close(join_timeout_seconds=1.0)
 
 
 def _cycle() -> AlpacaPaperFillCycleBinding:

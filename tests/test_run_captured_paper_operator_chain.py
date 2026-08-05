@@ -11,6 +11,7 @@ import socket
 import sys
 from types import ModuleType, SimpleNamespace
 from typing import Any, Mapping
+import uuid
 
 import pytest
 
@@ -163,6 +164,7 @@ def chain_fixture(tmp_path: Path) -> ChainFixture:
             "iqfeed_l1": {"transport": "loopback", "capture": "exact-print"},
             "iqfeed_l2": {"transport": "loopback", "capture": "hot-symbol-delta"},
         },
+        "static_proof_cache": None,
     }
     return ChainFixture(
         activation=activation,
@@ -708,11 +710,14 @@ def test_live_certification_symbol_uses_current_exact_prints_and_delay_zero(
     assert checked == ["STALE", "VIVS"]
     assert engine.disposed is True
     query, parameters = engine.executions[-1]
+    assert "WITH recent_tail AS MATERIALIZED" in query
+    assert "ORDER BY id DESC LIMIT :tail_rows" in query
     assert "received_at >= :started_at" in query
     assert "received_at <= :completed_at" in query
     assert "bridge_run_id = :bridge_run_id" in query
     assert "provider_trade_reference_at = provider_event_at" in query
     assert parameters == {
+        "tail_rows": chain._PRESELECTION_SEED_TAIL_ROWS,
         "started_at": NOW,
         "completed_at": NOW,
         "timestamp_basis": "iqfeed_selected_trade_date_timems_exact",
@@ -815,6 +820,135 @@ def test_live_certification_symbol_rejects_untyped_preselection() -> None:
         match="CAPTURE_ONLY_ATTESTATION_INVALID",
     ):
         chain._select_live_certification_symbol(preselection=object())  # type: ignore[arg-type]
+
+
+def test_runtime_bridge_authority_must_match_exact_preselection_build() -> None:
+    preselection = chain.ExactPrintPreselectionReceipt(
+        evidence_path=Path("candidate-preselection.json"),
+        evidence_sha256="a" * 64,
+        started_at=NOW,
+        completed_at=NOW,
+        bridge_version=(
+            "iqfeed-l1-exact-print-provenance-v3+sha256:" + "b" * 16
+        ),
+        bridge_run_id="11111111-2222-4333-8444-555555555555",
+        timestamp_basis="iqfeed_selected_trade_date_timems_exact",
+        bridge_source_sha256="b" * 64,
+    )
+    runtime_receipt = SimpleNamespace(
+        effective_config={
+            "CHILI_IQFEED_L1_AUTHORITATIVE_BRIDGE_BUILD": (
+                "iqfeed-l1-exact-print-provenance-v3+sha256:" + "c" * 16
+            )
+        }
+    )
+
+    with pytest.raises(
+        chain.CapturedPaperOperatorChainError,
+        match="IQFEED_BRIDGE_RUNTIME_AUTHORITY_MISMATCH",
+    ):
+        chain._assert_runtime_preselection_bridge_parity(
+            preselection=preselection,
+            runtime_receipt=runtime_receipt,
+        )
+
+
+def test_full_chain_rejects_runtime_bridge_mismatch_before_host_or_operator_work(
+    monkeypatch: pytest.MonkeyPatch,
+    chain_fixture: ChainFixture,
+) -> None:
+    monkeypatch.setattr(
+        chain, "_equity_extended_session_is_open", lambda **_kwargs: True
+    )
+    activation, _path, _digest = chain_fixture.publish()
+    monkeypatch.delitem(chain.sys.modules, "app.config", raising=False)
+    runtime_receipt = SimpleNamespace(
+        effective_config={
+            "CHILI_IQFEED_L1_AUTHORITATIVE_BRIDGE_BUILD": (
+                "iqfeed-l1-exact-print-provenance-v3+sha256:" + "c" * 16
+            )
+        }
+    )
+    monkeypatch.setattr(
+        chain,
+        "install_captured_paper_runtime_environment",
+        lambda *_args, **_kwargs: runtime_receipt,
+    )
+    monkeypatch.setattr(
+        chain,
+        "_read_exact_paper_account",
+        lambda **_kwargs: (
+            {"equity": "71868.33", "status": "ACTIVE"},
+            {
+                "endpoint": "/v2/account",
+                "environment": "paper",
+                "account_id": ACCOUNT_ID,
+            },
+            NOW,
+            NOW,
+        ),
+    )
+    monkeypatch.setattr(
+        chain, "_sha_source_inventory", lambda _root: {"test": "b" * 64}
+    )
+    manifest = activation.artifact_root / "bootstrap" / "artifacts" / "manifest.json"
+    manifest_sha = _write(manifest, _canonical({"paper": True}))
+    monkeypatch.setattr(
+        chain.bootstrap,
+        "build_iqfeed_capture_bootstrap_bundle_from_request",
+        lambda **_kwargs: SimpleNamespace(
+            manifest_path=manifest,
+            manifest_sha256=manifest_sha,
+        ),
+    )
+    monkeypatch.setattr(
+        chain,
+        "_discover_capture_seed_symbols",
+        lambda **_kwargs: ("VIVS",),
+    )
+    preselection_evidence = activation.artifact_root / "candidate-preselection.json"
+    preselection_sha = _write(
+        preselection_evidence,
+        _canonical({"capture_only": True, "orders_submitted": False}),
+    )
+    monkeypatch.setattr(
+        chain,
+        "_capture_candidate_exact_print_preselection",
+        lambda **_kwargs: chain.ExactPrintPreselectionReceipt(
+            evidence_path=preselection_evidence.resolve(strict=True),
+            evidence_sha256=preselection_sha,
+            started_at=NOW,
+            completed_at=NOW,
+            bridge_version=(
+                "iqfeed-l1-exact-print-provenance-v3+sha256:" + "b" * 16
+            ),
+            bridge_run_id="11111111-2222-4333-8444-555555555555",
+            timestamp_basis="iqfeed_selected_trade_date_timems_exact",
+            bridge_source_sha256="b" * 64,
+        ),
+    )
+
+    def forbidden(*_args: Any, **_kwargs: Any) -> Any:
+        raise AssertionError("host/operator work must not run after bridge mismatch")
+
+    monkeypatch.setattr(chain, "_select_live_certification_symbol", forbidden)
+    monkeypatch.setattr(chain.host_snapshot, "collect_host_snapshot", forbidden)
+    monkeypatch.setattr(chain.operator_flow, "configuration_from_plan", forbidden)
+    monkeypatch.setattr(
+        chain.operator_flow, "run_captured_paper_operator_flow", forbidden
+    )
+
+    with pytest.raises(
+        chain.CapturedPaperOperatorChainError,
+        match="IQFEED_BRIDGE_RUNTIME_AUTHORITY_MISMATCH",
+    ):
+        chain.run_operator_chain(
+            activation_request=activation,
+            chain_document=chain_fixture.document,
+        )
+
+    for name in ("operator", "preactivation", "activation", "receipts"):
+        assert not (activation.artifact_root / name).exists()
 
 
 def test_candidate_preselection_publishes_only_closed_zero_order_evidence(
@@ -1072,17 +1206,43 @@ def test_full_operator_chain_rejects_application_loaded_before_runtime_install(
     assert installed is False
 
 
+@pytest.mark.parametrize("use_static_cache", (False, True))
 def test_full_operator_chain_bootstraps_exact_print_before_selection_and_is_hash_bound(
     monkeypatch: pytest.MonkeyPatch,
     chain_fixture: ChainFixture,
+    use_static_cache: bool,
 ) -> None:
     monkeypatch.setattr(
         chain, "_equity_extended_session_is_open", lambda **_kwargs: True
     )
-    activation, _path, _digest = chain_fixture.publish()
+    chain_document = dict(chain_fixture.document)
+    cache_path = None
+    cache_sha = None
+    if use_static_cache:
+        cache_raw = _canonical({"prior_static_proof": True})
+        cache_sha = _sha(cache_raw)
+        cache_path = (
+            chain_fixture.root
+            / "prior"
+            / "static-proof-cache"
+            / cache_sha[:2]
+            / f"{cache_sha}.json"
+        )
+        _write(cache_path, cache_raw)
+        chain_document["static_proof_cache"] = {
+            "path": str(cache_path.resolve(strict=True)),
+            "sha256": cache_sha,
+        }
+    activation, _path, _digest = chain_fixture.publish(document=chain_document)
     monkeypatch.delitem(chain.sys.modules, "app.config", raising=False)
     calls: list[str] = []
-    runtime_receipt = object()
+    runtime_receipt = SimpleNamespace(
+        effective_config={
+            "CHILI_IQFEED_L1_AUTHORITATIVE_BRIDGE_BUILD": (
+                "iqfeed-l1-exact-print-provenance-v3+sha256:" + "b" * 16
+            )
+        }
+    )
     manifest = activation.artifact_root / "bootstrap" / "artifacts" / "manifest.json"
     manifest_sha = _write(manifest, _canonical({"paper": True}))
 
@@ -1091,10 +1251,9 @@ def test_full_operator_chain_bootstraps_exact_print_before_selection_and_is_hash
         "install_captured_paper_runtime_environment",
         lambda *_a, **_k: calls.append("install-runtime") or runtime_receipt,
     )
-    monkeypatch.setattr(
-        chain,
-        "_read_exact_paper_account",
-        lambda **_k: (
+    def fake_paper_account(**_kwargs: Any) -> tuple[object, ...]:
+        calls.append("paper-account-fresh")
+        return (
             {"equity": "71868.33", "status": "ACTIVE"},
             {
                 "endpoint": "/v2/account",
@@ -1103,8 +1262,9 @@ def test_full_operator_chain_bootstraps_exact_print_before_selection_and_is_hash
             },
             NOW,
             NOW,
-        ),
-    )
+        )
+
+    monkeypatch.setattr(chain, "_read_exact_paper_account", fake_paper_account)
     monkeypatch.setattr(chain, "_sha_source_inventory", lambda _root: {"test": "b" * 64})
 
     def fake_bootstrap(**kwargs: Any) -> SimpleNamespace:
@@ -1239,11 +1399,12 @@ def test_full_operator_chain_bootstraps_exact_print_before_selection_and_is_hash
 
     result = chain.run_operator_chain(
         activation_request=activation,
-        chain_document=chain_fixture.document,
+        chain_document=chain_document,
     )
 
     assert calls == [
         "install-runtime",
+        "paper-account-fresh",
         "bootstrap-read-only",
         "discover-seed-read-only",
         "candidate-capture-only",
@@ -1283,12 +1444,23 @@ def test_full_operator_chain_bootstraps_exact_print_before_selection_and_is_hash
     )
     assert result["activation_runner_request_sha256"] == activation.request_sha256
     assert result["operator_chain_request_sha256"] == activation.chain_request_sha256
-    assert result["resource_benchmark_sha256"] == chain_fixture.document[
+    assert result["resource_benchmark_sha256"] == chain_document[
         "resource_benchmark"
     ]["sha256"]
     assert observed_plan["expected_account_id"] == ACCOUNT_ID
     assert observed_plan["capture_certification_symbol"] == "VIVS"
     assert observed_plan["runtime_env_sha256"] == activation.runtime_env_sha256
+    if use_static_cache:
+        assert observed_plan["static_proof_cache_path"] == str(cache_path)
+        assert observed_plan["static_proof_cache_sha256"] == cache_sha
+        restart_nonce = str(
+            uuid.UUID(observed_plan["static_proof_restart_nonce"])
+        )
+        assert restart_nonce != observed_plan["activation_generation"]
+    else:
+        assert observed_plan["static_proof_cache_path"] is None
+        assert observed_plan["static_proof_cache_sha256"] is None
+        assert observed_plan["static_proof_restart_nonce"] is None
 
     request_paths = list(
         (activation.artifact_root / "bootstrap" / "inputs").glob("*.request.json")

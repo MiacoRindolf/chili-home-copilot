@@ -7,6 +7,7 @@ import json
 import os
 from pathlib import Path
 import sys
+import threading
 from types import MappingProxyType, SimpleNamespace
 import importlib
 import uuid
@@ -67,6 +68,475 @@ def _canonical(value: object) -> str:
         separators=(",", ":"),
         allow_nan=False,
     )
+
+
+def test_pressure_feed_keeps_coherent_staleness_recoverable_and_suspended() -> None:
+    class _Controller:
+        def __init__(self) -> None:
+            self.binding = SimpleNamespace(
+                policy=SimpleNamespace(
+                    pressure_sample_max_age_seconds=5.0
+                )
+            )
+            self.value = {
+                "required_full_fidelity_admissible": True,
+                "pressure_state": "normal",
+                "rejection_reason": None,
+                "active_reasons": (),
+                "entry_streak": 0,
+                "sample_count": 1,
+                "sample_age_seconds": 0.01,
+            }
+
+        def observe(self, _sample: object) -> None:
+            return None
+
+        def health(self) -> dict[str, object]:
+            return dict(self.value)
+
+    controller = _Controller()
+    worker = service_module._CapturedPaperPressureFeedWorker(
+        pressure_controller=controller,
+        sampler=object,
+        interval_seconds=60.0,
+    )
+    worker.start()
+    try:
+        clean = worker.health()
+        assert clean["running"] is True
+        assert clean["pre_authority_ready"] is True
+
+        controller.value.update(
+            {
+                "required_full_fidelity_admissible": False,
+                "pressure_state": "stale_fail_closed",
+                "rejection_reason": (
+                    "capture_resource_pressure_sample_stale"
+                ),
+                "sample_age_seconds": 6.0,
+            }
+        )
+        stale = worker.health()
+        assert stale["running"] is True
+        assert stale["fatal"] is False
+        assert stale["pre_authority_ready"] is True
+        assert stale["ingress_admissible"] is False
+        assert stale["admission_suspended"] is True
+        assert stale["recoverable_admission_suspension"] is True
+        assert stale["pressure_rejection_reason"] == (
+            "capture_resource_pressure_sample_stale"
+        )
+    finally:
+        worker.close(join_timeout_seconds=1.0)
+
+
+def test_pressure_feed_respects_controller_admissibility_during_entry_hysteresis() -> None:
+    class _Controller:
+        def __init__(self) -> None:
+            self.binding = SimpleNamespace(
+                policy=SimpleNamespace(
+                    pressure_sample_max_age_seconds=5.0
+                )
+            )
+
+        def observe(self, _sample: object) -> None:
+            return None
+
+        def health(self) -> dict[str, object]:
+            return {
+                "required_full_fidelity_admissible": True,
+                "pressure_state": "normal",
+                "rejection_reason": None,
+                "active_reasons": (),
+                # One pressure observation is below the sealed three-sample
+                # entry threshold.  The controller remains authoritative and
+                # explicitly admissible while its hysteresis evidence builds.
+                "entry_streak": 1,
+                "sample_count": 2,
+                "sample_age_seconds": 0.01,
+            }
+
+    worker = service_module._CapturedPaperPressureFeedWorker(
+        pressure_controller=_Controller(),
+        sampler=object,
+        interval_seconds=60.0,
+    )
+    worker.start()
+    try:
+        health = worker.health()
+        assert health["running"] is True
+        assert health["fatal"] is False
+        assert health["pre_authority_ready"] is True
+        assert health["ingress_admissible"] is True
+        assert health["admission_suspended"] is False
+        assert health["recoverable_admission_suspension"] is False
+    finally:
+        worker.close(join_timeout_seconds=1.0)
+
+
+def test_pressure_feed_keeps_fresh_write_pressure_recoverable_and_suspended() -> None:
+    class _Controller:
+        def __init__(self) -> None:
+            self.binding = SimpleNamespace(
+                policy=SimpleNamespace(
+                    pressure_sample_max_age_seconds=5.0
+                )
+            )
+            self.value = {
+                "required_full_fidelity_admissible": False,
+                "pressure_state": "failed_closed",
+                "rejection_reason": "capture_resource_pressure_write_latency",
+                "active_reasons": ("write_latency",),
+                "entry_streak": 0,
+                "sample_count": 4,
+                "sample_age_seconds": 0.01,
+            }
+
+        def observe(self, _sample: object) -> None:
+            return None
+
+        def health(self) -> dict[str, object]:
+            return dict(self.value)
+
+    controller = _Controller()
+    worker = service_module._CapturedPaperPressureFeedWorker(
+        pressure_controller=controller,
+        sampler=object,
+        interval_seconds=60.0,
+    )
+    worker.start()
+    try:
+        pressured = worker.health()
+        assert pressured["running"] is True
+        assert pressured["fatal"] is False
+        assert pressured["pre_authority_ready"] is True
+        assert pressured["ingress_admissible"] is False
+        assert pressured["admission_suspended"] is True
+        assert pressured["recoverable_admission_suspension"] is True
+        assert pressured["pressure_rejection_reason"] == (
+            "capture_resource_pressure_write_latency"
+        )
+
+        controller.value.update(
+            {
+                "rejection_reason": (
+                    "capture_resource_pressure_cpu_write_latency"
+                ),
+                "active_reasons": ("cpu", "write_latency"),
+            }
+        )
+        combined = worker.health()
+        assert combined["pre_authority_ready"] is True
+        assert combined["ingress_admissible"] is False
+        assert combined["recoverable_admission_suspension"] is True
+
+        controller.value.update(
+            {
+                "rejection_reason": (
+                    "capture_resource_pressure_write_latency_cpu"
+                ),
+                "active_reasons": ("write_latency", "cpu"),
+            }
+        )
+        malformed_order = worker.health()
+        assert malformed_order["pre_authority_ready"] is False
+        assert malformed_order["recoverable_admission_suspension"] is False
+
+        controller.value.update(
+            {
+                "rejection_reason": (
+                    "capture_resource_pressure_write_latency"
+                ),
+                "active_reasons": ("write_latency",),
+                "sample_age_seconds": 6.0,
+            }
+        )
+        expired = worker.health()
+        assert expired["pre_authority_ready"] is False
+        assert expired["recoverable_admission_suspension"] is False
+    finally:
+        worker.close(join_timeout_seconds=1.0)
+
+
+def test_pressure_feed_startup_sample_failure_remains_fatal() -> None:
+    class _Controller:
+        def observe(self, _sample: object) -> None:
+            pytest.fail("controller must not receive a failed startup sample")
+
+        def health(self) -> dict[str, object]:
+            return {
+                "required_full_fidelity_admissible": False,
+                "pressure_state": "unobserved_fail_closed",
+                "rejection_reason": "capture_resource_pressure_sample_unavailable",
+                "active_reasons": (),
+                "entry_streak": 0,
+                "sample_count": 0,
+                "sample_age_seconds": None,
+            }
+
+    def fail_startup_sample() -> object:
+        raise TimeoutError("startup metrics unavailable")
+
+    worker = service_module._CapturedPaperPressureFeedWorker(
+        pressure_controller=_Controller(),
+        sampler=fail_startup_sample,
+        interval_seconds=60.0,
+    )
+
+    with pytest.raises(TimeoutError, match="startup metrics unavailable"):
+        worker.start()
+
+    health = worker.health()
+    assert health["running"] is False
+    assert health["fatal"] is True
+    assert health["sample_failure_count"] == 1
+    assert health["consecutive_sample_failures"] == 1
+    assert health["last_sample_error"] == (
+        "TimeoutError: startup metrics unavailable"
+    )
+
+
+def test_pressure_feed_unreadable_health_returns_fail_closed_mapping() -> None:
+    class _Controller:
+        def observe(self, _sample: object) -> None:
+            return None
+
+        def health(self) -> dict[str, object]:
+            raise ValueError("corrupt pressure health")
+
+    worker = service_module._CapturedPaperPressureFeedWorker(
+        pressure_controller=_Controller(),
+        sampler=object,
+        interval_seconds=60.0,
+    )
+    worker.start()
+    try:
+        health = worker.health()
+        assert health["running"] is True
+        assert health["pre_authority_ready"] is False
+        assert health["ingress_admissible"] is False
+        assert health["recoverable_admission_suspension"] is False
+        assert health["pressure_state"] == "health_unavailable"
+        assert health["pressure_rejection_reason"] == (
+            "pressure_controller_health_unavailable:ValueError"
+        )
+    finally:
+        worker.close(join_timeout_seconds=1.0)
+
+
+def test_pressure_feed_runtime_sample_failure_stays_alive_and_recovers() -> None:
+    failure_sampled = threading.Event()
+    allow_recovery = threading.Event()
+    recovery_observed = threading.Event()
+    lock = threading.Lock()
+
+    class _Controller:
+        def __init__(self) -> None:
+            self.binding = SimpleNamespace(
+                policy=SimpleNamespace(
+                    pressure_sample_max_age_seconds=5.0
+                )
+            )
+            self.value = {
+                "required_full_fidelity_admissible": True,
+                "pressure_state": "normal",
+                "rejection_reason": None,
+                "active_reasons": (),
+                "entry_streak": 0,
+                "sample_count": 1,
+                "sample_age_seconds": 0.01,
+            }
+
+        def observe(self, sample: object) -> None:
+            with lock:
+                self.value.update(
+                    {
+                        "required_full_fidelity_admissible": True,
+                        "pressure_state": "normal",
+                        "rejection_reason": None,
+                        "sample_count": int(self.value["sample_count"]) + 1,
+                        "sample_age_seconds": 0.0,
+                    }
+                )
+            if sample == "recovery":
+                recovery_observed.set()
+
+        def health(self) -> dict[str, object]:
+            with lock:
+                return dict(self.value)
+
+        def mark_stale(self) -> None:
+            with lock:
+                self.value.update(
+                    {
+                        "required_full_fidelity_admissible": False,
+                        "pressure_state": "stale_fail_closed",
+                        "rejection_reason": (
+                            "capture_resource_pressure_sample_stale"
+                        ),
+                        "sample_age_seconds": 6.0,
+                    }
+                )
+
+    controller = _Controller()
+    sample_calls = 0
+
+    def sample() -> object:
+        nonlocal sample_calls
+        sample_calls += 1
+        if sample_calls == 1:
+            return "startup"
+        if sample_calls == 2:
+            controller.mark_stale()
+            failure_sampled.set()
+            raise TimeoutError("runtime metrics unavailable")
+        assert allow_recovery.wait(timeout=2.0)
+        return "recovery"
+
+    worker = service_module._CapturedPaperPressureFeedWorker(
+        pressure_controller=controller,
+        sampler=sample,
+        interval_seconds=0.01,
+    )
+    worker.start()
+    try:
+        assert failure_sampled.wait(timeout=2.0)
+        for _ in range(200):
+            degraded = worker.health()
+            if degraded["sample_failure_count"] == 1:
+                break
+            threading.Event().wait(0.005)
+        assert degraded["running"] is True
+        assert degraded["fatal"] is False
+        assert degraded["pre_authority_ready"] is True
+        assert degraded["ingress_admissible"] is False
+        assert degraded["admission_suspended"] is True
+        assert degraded["recoverable_admission_suspension"] is True
+        assert degraded["sample_failure_count"] == 1
+        assert degraded["consecutive_sample_failures"] == 1
+        assert degraded["last_sample_error"] == (
+            "TimeoutError: runtime metrics unavailable"
+        )
+
+        allow_recovery.set()
+        assert recovery_observed.wait(timeout=2.0)
+        for _ in range(200):
+            recovered = worker.health()
+            if recovered["samples_fed"] >= 2:
+                break
+            threading.Event().wait(0.005)
+        assert recovered["running"] is True
+        assert recovered["fatal"] is False
+        assert recovered["pre_authority_ready"] is True
+        assert recovered["samples_fed"] >= 2
+        assert recovered["sample_failure_count"] == 1
+        assert recovered["consecutive_sample_failures"] == 0
+        assert recovered["last_sample_error"] is None
+    finally:
+        allow_recovery.set()
+        worker.close(join_timeout_seconds=1.0)
+
+
+@pytest.mark.parametrize("failure_stage", ("sampler", "controller"))
+def test_pressure_feed_runtime_contract_failure_is_fatal(
+    failure_stage: str,
+) -> None:
+    failure_observed = threading.Event()
+
+    class _Controller:
+        def __init__(self) -> None:
+            self.observe_calls = 0
+
+        def observe(self, _sample: object) -> None:
+            self.observe_calls += 1
+            if failure_stage == "controller" and self.observe_calls == 2:
+                failure_observed.set()
+                raise ValueError("pressure contract invalid")
+
+        def health(self) -> dict[str, object]:
+            return {
+                "required_full_fidelity_admissible": True,
+                "pressure_state": "normal",
+                "rejection_reason": None,
+                "active_reasons": (),
+                "entry_streak": 0,
+                "sample_count": 1,
+                "sample_age_seconds": 0.0,
+            }
+
+    sample_calls = 0
+
+    def sample() -> object:
+        nonlocal sample_calls
+        sample_calls += 1
+        if failure_stage == "sampler" and sample_calls == 2:
+            failure_observed.set()
+            raise ValueError("pressure contract invalid")
+        return object()
+
+    worker = service_module._CapturedPaperPressureFeedWorker(
+        pressure_controller=_Controller(),
+        sampler=sample,
+        interval_seconds=0.01,
+    )
+    worker.start()
+    try:
+        assert failure_observed.wait(timeout=2.0)
+        for _ in range(200):
+            health = worker.health()
+            if health["fatal"]:
+                break
+            threading.Event().wait(0.005)
+        assert health["running"] is False
+        assert health["fatal"] is True
+        assert health["sample_failure_count"] == 1
+        assert health["consecutive_sample_failures"] == 1
+        assert health["last_sample_error"] == (
+            "ValueError: pressure contract invalid"
+        )
+    finally:
+        worker.close(join_timeout_seconds=1.0)
+
+
+def test_pressure_probe_does_not_poison_capture_store_resource_accounting(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from app.services.trading.momentum_neural import replay_capture_runtime
+
+    capture_root = tmp_path / "capture-store"
+    capture_root.mkdir()
+    store = replay_capture_runtime.ContentAddressedCaptureStore(
+        capture_root,
+        compression_codec="zlib",
+    )
+    original_fsync = service_module.os.fsync
+    observed_during_probe = False
+
+    def _observe_store_while_probe_exists(descriptor: int) -> None:
+        nonlocal observed_during_probe
+        original_fsync(descriptor)
+        if not observed_during_probe:
+            observed_during_probe = True
+            store.resource_health()
+
+    monkeypatch.setattr(service_module.os, "fsync", _observe_store_while_probe_exists)
+    try:
+        sample = service_module._measure_capture_pressure(
+            preflight=SimpleNamespace(
+                capture_store_root=capture_root,
+                resource_binding=SimpleNamespace(binding_sha256=SHA_A),
+            ),
+            replay_runtime_module=replay_capture_runtime,
+            wall_clock=lambda: NOW,
+        )
+
+        assert observed_during_probe is True
+        assert sample.resource_binding_sha256 == SHA_A
+        store.put_payload({"event": "selection"})
+        assert store.resource_health()["resource_failure_reasons"] == ()
+    finally:
+        store.close()
 
 
 def test_service_composition_binds_default_on_and_explicit_off_ortex_policy() -> None:
@@ -195,6 +665,8 @@ class _PaperAdapter:
         self, *, after, until, read_binding
     ):
         assert after < until
+        assert read_binding["after"] == after.astimezone(UTC).isoformat()
+        assert read_binding["until"] == until.astimezone(UTC).isoformat()
         encoded = _canonical(self.transition_orders)
         inventory_sha256 = hashlib.sha256(encoded.encode()).hexdigest()
         return {
@@ -830,6 +1302,27 @@ def _refreshed_readiness(
     return {kind: dict(value) for kind, value in result.items()}
 
 
+def test_post_smoke_live_bound_receipts_cover_measured_startup_and_stay_bounded(
+    tmp_path: Path,
+) -> None:
+    documents = _refreshed_readiness(
+        _preactivation(tmp_path),
+        _paper_broker_snapshot(
+            _PaperAdapter(),
+            verified=_verified_stub(),
+            purpose="post_smoke_window",
+            wall_clock=lambda: NOW,
+        ),
+    )
+
+    for kind in ("broker_account", "kill_switch"):
+        captured_at = datetime.fromisoformat(documents[kind]["captured_at"])
+        expires_at = datetime.fromisoformat(documents[kind]["expires_at"])
+        assert expires_at - captured_at == timedelta(minutes=20)
+        assert captured_at + timedelta(minutes=15) < expires_at
+        assert captured_at + timedelta(minutes=20) == expires_at
+
+
 def test_paper_broker_snapshot_binds_fresh_flat_exact_generation() -> None:
     result = _paper_broker_snapshot(
         _PaperAdapter(),
@@ -1453,6 +1946,7 @@ def test_mode_arguments_require_receipt_only_for_no_order_smoke() -> None:
             mode="activate-paper",
             no_order_receipt_output=None,
             host_ready_receipt=r"D:\receipts\host-ready.json",
+            startup_attempt_id="45a9d0f5-bf22-4d19-8870-a7b1dbeaf519",
         )
     )
 
@@ -1486,12 +1980,25 @@ def test_mode_arguments_require_receipt_only_for_no_order_smoke() -> None:
                 host_ready_receipt=None,
             )
         )
+    with pytest.raises(
+        CapturedAlpacaPaperServiceError,
+        match="canonical lowercase UUID",
+    ):
+        _validate_mode_arguments(
+            SimpleNamespace(
+                mode="activate-paper",
+                no_order_receipt_output=None,
+                host_ready_receipt=r"D:\receipts\host-ready.json",
+                startup_attempt_id="NOT-A-UUID",
+            )
+        )
 
 
 def _host_handshake_fixture(
     tmp_path: Path,
     *,
     wall_clock=lambda: NOW,
+    startup_attempt_id: str | None = None,
 ):
     host_source = (
         Path(service_module.__file__).resolve().parent
@@ -1538,14 +2045,19 @@ def _host_handshake_fixture(
         "service_cmdline_sha256": sha256_json(service_cmdline),
     }
     issuer_live: dict[str, object] = {}
+    ready_output = tmp_path / "host-ready.json"
+    if startup_attempt_id is not None:
+        ready_output = tmp_path / "attempts" / startup_attempt_id / "host-ready.json"
+        ready_output.parent.mkdir(parents=True)
     handshake = service_module._CapturedPaperHostActivationHandshake.prepare(
-        ready_output=tmp_path / "host-ready.json",
+        ready_output=ready_output,
         verified=verified,
         allowed_roots=(tmp_path,),
         wall_clock=wall_clock,
         process_probe=lambda: identity,
         issuer_process_probe=lambda _pid: dict(issuer_live),
         challenge_factory=lambda: SHA_C,
+        startup_attempt_id=startup_attempt_id,
     )
     return (
         handshake,
@@ -1604,7 +2116,7 @@ def _publish_matching_host_permit(
         hashlib.sha256(host_source.read_bytes()).hexdigest(),
         "--",
         "--mode",
-        "Apply",
+        "RestartOnly" if handshake._startup_attempt_id is not None else "Apply",
         "--manifest",
         str(verified.manifest_path),
         "--manifest-sha256",
@@ -1628,6 +2140,10 @@ def _publish_matching_host_permit(
         "--confirm-fake-money-paper",
         "CUTOVER_FAKE_MONEY_ALPACA_PAPER",
     ]
+    if handshake._startup_attempt_id is not None:
+        issuer_cmdline.extend(
+            ["--startup-attempt-id", handshake._startup_attempt_id]
+        )
     issuer = {
         "issuer_pid": os.getpid(),
         "issuer_create_time_ns": 987_654_321,
@@ -1685,12 +2201,36 @@ def _publish_matching_host_permit(
         "live_cash_authorized": False,
         "real_money_authorized": False,
     }
-    lane_sha256 = "7" * 64
-    quiesced = {
+    provider_guard_payload = {
+        "pid": 42_424,
+        "create_time_ns": 9_876_543_210,
+        "executable_path": str(executable),
+        "executable_sha256": hashlib.sha256(
+            executable.read_bytes()
+        ).hexdigest(),
+        "listeners": [
+            {"host": "127.0.0.1", "port": 5009},
+            {"host": "127.0.0.1", "port": 9200},
+        ],
+        "guard_connection_count": 2,
+        "live_cash_authorized": False,
+    }
+    provider_guard = {
         "schema_version": "chili.captured-paper-host-cutover-journal-event.v1",
         "transaction_id": transaction_id,
         "sequence": 1,
         "previous_event_sha256": "0" * 64,
+        "event_type": "iqconnect_provider_guard_acquired",
+        "recorded_at": issued_at,
+        "payload": provider_guard_payload,
+    }
+    provider_guard["event_sha256"] = sha256_json(provider_guard)
+    lane_sha256 = "7" * 64
+    quiesced = {
+        "schema_version": "chili.captured-paper-host-cutover-journal-event.v1",
+        "transaction_id": transaction_id,
+        "sequence": 2,
+        "previous_event_sha256": provider_guard["event_sha256"],
         "event_type": "legacy_execution_lane_quiesced",
         "recorded_at": issued_at,
         "payload": {
@@ -1702,7 +2242,7 @@ def _publish_matching_host_permit(
     quiet = {
         "schema_version": "chili.captured-paper-host-cutover-journal-event.v1",
         "transaction_id": transaction_id,
-        "sequence": 2,
+        "sequence": 3,
         "previous_event_sha256": quiesced["event_sha256"],
         "event_type": "legacy_paper_broker_quiet_horizon_completed",
         "recorded_at": issued_at,
@@ -1724,13 +2264,46 @@ def _publish_matching_host_permit(
     authorization = {
         "schema_version": "chili.captured-paper-host-cutover-journal-event.v1",
         "transaction_id": transaction_id,
-        "sequence": 3,
+        "sequence": 4,
         "previous_event_sha256": quiet["event_sha256"],
         "event_type": "activation_permit_issued",
         "recorded_at": issued_at,
         "payload": authorization_payload,
     }
     authorization["event_sha256"] = sha256_json(authorization)
+    events = [provider_guard, quiesced, quiet, authorization]
+    if handshake._startup_attempt_id is not None:
+        events.insert(
+            0,
+            {
+                "schema_version": (
+                    "chili.captured-paper-host-cutover-journal-event.v1"
+                ),
+                "transaction_id": transaction_id,
+                "sequence": 1,
+                "previous_event_sha256": "0" * 64,
+                "event_type": "restart_started",
+                "recorded_at": issued_at,
+                "payload": {
+                    "startup_attempt_id": handshake._startup_attempt_id,
+                    "clean_stopped_receipt_sha256": SHA_B,
+                    "resolved_task_xml_sha256": "d" * 64,
+                    "resolved_task_xml_path": str(
+                        handshake.ready_path.parent / "restart-task.xml"
+                    ),
+                    "account_scope": "alpaca:paper",
+                    "live_cash_authorized": False,
+                },
+            },
+        )
+    previous = "0" * 64
+    for sequence, event in enumerate(events, start=1):
+        event["sequence"] = sequence
+        event["previous_event_sha256"] = previous
+        event.pop("event_sha256", None)
+        event["event_sha256"] = sha256_json(event)
+        previous = event["event_sha256"]
+    authorization = events[-1]
     journal_path.write_bytes(
         b"".join(
             json.dumps(
@@ -1740,7 +2313,7 @@ def _publish_matching_host_permit(
                 allow_nan=False,
             ).encode("utf-8")
             + b"\n"
-            for event in (quiesced, quiet, authorization)
+            for event in events
         )
     )
     permit = {
@@ -1749,7 +2322,7 @@ def _publish_matching_host_permit(
         **authorization_payload,
         "journal_path": str(journal_path),
         "journal_transaction_id": transaction_id,
-        "journal_authorization_sequence": 3,
+        "journal_authorization_sequence": authorization["sequence"],
         "journal_authorization_event_sha256": authorization["event_sha256"],
         "journal_authorization_event": authorization,
     }
@@ -1804,6 +2377,14 @@ def _append_matching_apply_completed(
             handshake._quiet_horizon_event_sha256
         ),
         "challenge_sha256": handshake._challenge_sha256,
+        "iqconnect_provider_guard": {
+            "pid": 42_424,
+            "create_time_ns": 9_876_543_210,
+            "executable_sha256": hashlib.sha256(
+                Path(handshake._permit_body["issuer_executable_path"]).read_bytes()
+            ).hexdigest(),
+            "candidate_started_receipt_sha256": handshake._started_sha256,
+        },
         "legacy_execution_lane": lane,
         "legacy_execution_lane_sha256": sha256_json(lane),
         "paper_execution_committed": True,
@@ -1811,12 +2392,23 @@ def _append_matching_apply_completed(
         "real_money_authorized": False,
     }
     payload.update(payload_overrides or {})
+    if handshake._startup_attempt_id is not None:
+        payload.update(
+            {
+                "startup_attempt_id": handshake._startup_attempt_id,
+                "clean_stopped_receipt_sha256": SHA_B,
+            }
+        )
     event = {
         "schema_version": "chili.captured-paper-host-cutover-journal-event.v1",
         "transaction_id": permit["journal_transaction_id"],
         "sequence": len(rows) + 1,
         "previous_event_sha256": rows[-1]["event_sha256"],
-        "event_type": "apply_completed",
+        "event_type": (
+            "restart_completed"
+            if handshake._startup_attempt_id is not None
+            else "apply_completed"
+        ),
         "recorded_at": recorded_at.isoformat().replace("+00:00", "Z"),
         "payload": payload,
     }
@@ -1828,7 +2420,12 @@ def _append_matching_apply_completed(
     return event
 
 
-def _published_started_handshake(tmp_path: Path, *, clock: dict[str, datetime]):
+def _published_started_handshake(
+    tmp_path: Path,
+    *,
+    clock: dict[str, datetime],
+    startup_attempt_id: str | None = None,
+):
     (
         handshake,
         verified,
@@ -1837,7 +2434,11 @@ def _published_started_handshake(tmp_path: Path, *, clock: dict[str, datetime]):
         executable,
         service_cmdline,
         issuer_live,
-    ) = _host_handshake_fixture(tmp_path, wall_clock=lambda: clock["now"])
+    ) = _host_handshake_fixture(
+        tmp_path,
+        wall_clock=lambda: clock["now"],
+        startup_attempt_id=startup_attempt_id,
+    )
     handshake.publish_prepared()
     permit = _publish_matching_host_permit(
         handshake,
@@ -1966,6 +2567,60 @@ def test_committed_host_authority_survives_startup_permit_expiry_but_not_revocat
         handshake.assert_dispatch_authority_current()
 
 
+def test_committed_host_publishes_clean_stopped_receipt_once(
+    tmp_path: Path,
+) -> None:
+    clock = {"now": NOW}
+    handshake, permit, _issuer_live = _published_started_handshake(
+        tmp_path, clock=clock
+    )
+    committed = _append_matching_apply_completed(handshake, permit=permit)
+    handshake.await_and_consume_apply_completed_authority()
+
+    clock["now"] = NOW + timedelta(seconds=1)
+    stopped = handshake.publish_stopped(
+        supervisor_stopped=True,
+        shared_store_closed=True,
+        writer_lease_released=True,
+    )
+
+    assert stopped["state"] == "STOPPED_CLEANLY"
+    assert stopped["apply_completed_event_sha256"] == committed["event_sha256"]
+    assert stopped["started_receipt_sha256"] == handshake._started_sha256
+    assert stopped["supervisor_stopped"] is True
+    assert stopped["shared_store_closed"] is True
+    assert stopped["writer_lease_released"] is True
+    assert handshake.stopped_path.is_file()
+    assert json.loads(handshake.stopped_path.read_text(encoding="utf-8")) == stopped
+
+    with pytest.raises(CapturedAlpacaPaperServiceError, match="one-shot"):
+        handshake.publish_stopped(
+            supervisor_stopped=True,
+            shared_store_closed=True,
+            writer_lease_released=True,
+        )
+
+
+def test_restart_attempt_consumes_only_its_journal_segment_and_commit(
+    tmp_path: Path,
+) -> None:
+    attempt_id = "45a9d0f5-bf22-4d19-8870-a7b1dbeaf519"
+    clock = {"now": NOW}
+    handshake, permit, _issuer_live = _published_started_handshake(
+        tmp_path,
+        clock=clock,
+        startup_attempt_id=attempt_id,
+    )
+    committed = _append_matching_apply_completed(handshake, permit=permit)
+
+    consumed = handshake.await_and_consume_apply_completed_authority()
+
+    assert committed["event_type"] == "restart_completed"
+    assert consumed["event_sha256"] == committed["event_sha256"]
+    assert consumed["payload"]["startup_attempt_id"] == attempt_id
+    assert consumed["payload"]["clean_stopped_receipt_sha256"] == SHA_B
+
+
 def test_uncommitted_host_authority_expires_fail_closed(
     tmp_path: Path,
 ) -> None:
@@ -2010,6 +2665,14 @@ def test_committed_host_authority_rejects_later_or_missing_journal(
         {"service_pid": 999_999},
         {"started_receipt_sha256": "0" * 64},
         {"active_start_authority_sha256": "0" * 64},
+        {
+            "iqconnect_provider_guard": {
+                "pid": 42_424,
+                "create_time_ns": 9_876_543_210,
+                "executable_sha256": "0" * 64,
+                "candidate_started_receipt_sha256": "0" * 64,
+            }
+        },
         {"live_cash_authorized": True},
     ],
 )
@@ -2730,6 +3393,422 @@ def test_python_service_singleton_rejects_second_process_owner():
         first.close()
 
 
+def _post_broker_envelope_fixture(
+    tmp_path: Path,
+    *,
+    receipt_expires_at: datetime = NOW + timedelta(minutes=1),
+) -> tuple[SimpleNamespace, dict[str, Path]]:
+    capture_store = tmp_path / "capture-store"
+    capture_store.mkdir()
+    handshake_root = tmp_path / "handshake"
+    handshake_root.mkdir()
+    files = {
+        "manifest": tmp_path / "manifest.json",
+        "no_order_smoke": tmp_path / "no-order-smoke.json",
+        "capture_binding": tmp_path / "capture-binding.json",
+        "preactivation": tmp_path / "preactivation.json",
+        "pre_broker_receipt": tmp_path / "pre-broker-receipt.json",
+        "pre_broker_raw": tmp_path / "pre-broker-raw.json",
+        "pre_kill_receipt": tmp_path / "pre-kill-receipt.json",
+        "pre_kill_raw": tmp_path / "pre-kill-raw.json",
+        "runtime_env": tmp_path / "captured-paper.env",
+        "launcher": tmp_path / "launcher.ps1",
+        "launcher_arguments": tmp_path / "launcher-arguments.json",
+        "bootstrap": tmp_path / "bootstrap.json",
+    }
+    for role, path in files.items():
+        if role in {"manifest", "preactivation"}:
+            continue
+        body = role
+        if role == "no_order_smoke":
+            body = json.dumps(
+                {
+                    "captured_at": (NOW - timedelta(seconds=1)).isoformat(),
+                    "expires_at": receipt_expires_at.isoformat(),
+                }
+            )
+        path.write_text(body, encoding="utf-8")
+
+    def digest(path: Path) -> str:
+        return hashlib.sha256(path.read_bytes()).hexdigest()
+
+    for kind, receipt_role, raw_role in (
+        ("broker_account", "pre_broker_receipt", "pre_broker_raw"),
+        ("kill_switch", "pre_kill_receipt", "pre_kill_raw"),
+    ):
+        raw_path = files[raw_role]
+        files[receipt_role].write_text(
+            json.dumps(
+                {
+                    "captured_at": (NOW - timedelta(minutes=2)).isoformat(),
+                    "expires_at": (NOW + timedelta(minutes=1)).isoformat(),
+                    "artifact_bindings": {
+                        "raw": {
+                            "path": str(raw_path),
+                            "sha256": digest(raw_path),
+                            "size_bytes": raw_path.stat().st_size,
+                        }
+                    },
+                    "receipt_kind": kind,
+                }
+            ),
+            encoding="utf-8",
+        )
+    preactivation = {
+        "generated_at": (NOW - timedelta(minutes=1)).isoformat(),
+        "readiness_receipts": {
+            "broker_account": {
+                "path": str(files["pre_broker_receipt"]),
+                "sha256": digest(files["pre_broker_receipt"]),
+            },
+            "kill_switch": {
+                "path": str(files["pre_kill_receipt"]),
+                "sha256": digest(files["pre_kill_receipt"]),
+            },
+        },
+    }
+    files["preactivation"].write_text(
+        json.dumps(preactivation),
+        encoding="utf-8",
+    )
+    manifest = {
+        "capture_store_root": str(capture_store),
+        "capture_binding": {
+            "path": str(files["capture_binding"]),
+            "sha256": digest(files["capture_binding"]),
+        },
+        "preactivation_binding": {
+            "path": str(files["preactivation"]),
+            "sha256": digest(files["preactivation"]),
+        },
+        "runtime_environment": {
+            "source_env_path": str(files["runtime_env"]),
+            "source_env_sha256": digest(files["runtime_env"]),
+            "runtime_environment_sha256": SHA_A,
+            "database_target_fingerprint": SHA_B,
+        },
+        "cutover": {
+            "launcher_arguments_path": str(files["launcher_arguments"]),
+            "launcher_arguments_sha256": digest(files["launcher_arguments"]),
+            "host_ready_receipt_base": str(handshake_root / "host-ready.json"),
+        },
+    }
+    files["manifest"].write_text(json.dumps(manifest), encoding="utf-8")
+    return SimpleNamespace(
+        manifest_path=files["manifest"],
+        manifest_sha256=digest(files["manifest"]),
+        manifest=manifest,
+        receipt_paths={"no_order_smoke": files["no_order_smoke"]},
+        receipt_hashes={"no_order_smoke": digest(files["no_order_smoke"])},
+        launcher_path=files["launcher"],
+        launcher_sha256=digest(files["launcher"]),
+        iqfeed_bootstrap_manifest_path=files["bootstrap"],
+        iqfeed_bootstrap_manifest_sha256=digest(files["bootstrap"]),
+        capture_store_root=capture_store,
+        activation_generation=GENERATION,
+        expected_account_id=ACCOUNT,
+        code_build_sha256=SHA_A,
+        effective_config_sha256=SHA_B,
+        capture_receipt_sha256=SHA_C,
+        source_hashes={},
+        generated_at=NOW - timedelta(minutes=1),
+        expires_at=NOW + timedelta(minutes=1),
+    ), files
+
+
+def _install_synthetic_v3_probe_validator(
+    monkeypatch,
+    calls: list[str] | None = None,
+) -> None:
+    def validate(document, *, kind, **_kwargs):
+        if calls is not None:
+            calls.append(kind)
+        for binding in document["artifact_bindings"].values():
+            path = Path(binding["path"])
+            if (
+                path.stat().st_size != binding["size_bytes"]
+                or hashlib.sha256(path.read_bytes()).hexdigest()
+                != binding["sha256"]
+            ):
+                raise readiness_evidence.CapturedPaperReadinessEvidenceError(
+                    "raw artifact content hash mismatch"
+                )
+
+    monkeypatch.setattr(
+        readiness_evidence,
+        "validate_readiness_receipt_v3",
+        validate,
+    )
+
+
+def test_post_broker_envelope_check_rehashes_only_bound_authority(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    verified, files = _post_broker_envelope_fixture(tmp_path)
+    _install_synthetic_v3_probe_validator(monkeypatch)
+    loaded_source_checks: list[object] = []
+    monkeypatch.setattr(
+        service_module,
+        "_verify_loaded_sources",
+        lambda value: loaded_source_checks.append(value),
+    )
+
+    assert (
+        service_module._assert_final_activation_envelope_current(
+            verified,
+            allowed_read_roots=(tmp_path,),
+            wall_clock=lambda: NOW,
+        )
+        is verified
+    )
+    assert loaded_source_checks == [verified]
+
+    files["no_order_smoke"].write_text("drift", encoding="utf-8")
+    with pytest.raises(
+        CapturedAlpacaPaperServiceError,
+        match="FINAL_ACTIVATION_ENVELOPE_INVALID",
+    ):
+        service_module._assert_final_activation_envelope_current(
+            verified,
+            allowed_read_roots=(tmp_path,),
+            wall_clock=lambda: NOW,
+        )
+
+
+def test_post_broker_envelope_check_rejects_expiry_before_rehash(
+    monkeypatch,
+) -> None:
+    verified = SimpleNamespace(
+        generated_at=NOW - timedelta(minutes=1),
+        expires_at=NOW,
+    )
+    monkeypatch.setattr(
+        service_module,
+        "_verify_loaded_sources",
+        lambda _value: pytest.fail("expired envelope rehashed loaded sources"),
+    )
+
+    with pytest.raises(
+        CapturedAlpacaPaperServiceError,
+        match="FINAL_ACTIVATION_ENVELOPE_EXPIRED",
+    ):
+        service_module._assert_final_activation_envelope_current(
+            verified,
+            allowed_read_roots=(),
+            wall_clock=lambda: NOW,
+        )
+
+
+def test_post_broker_envelope_check_rejects_receipt_expiring_first(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    verified, _files = _post_broker_envelope_fixture(
+        tmp_path,
+        receipt_expires_at=NOW,
+    )
+    _install_synthetic_v3_probe_validator(monkeypatch)
+    monkeypatch.setattr(
+        service_module,
+        "_verify_loaded_sources",
+        lambda _value: pytest.fail("stale receipt reached loaded-source check"),
+    )
+
+    with pytest.raises(
+        CapturedAlpacaPaperServiceError,
+        match="FINAL_ACTIVATION_RECEIPT_STALE",
+    ):
+        service_module._assert_final_activation_envelope_current(
+            verified,
+            allowed_read_roots=(tmp_path,),
+            wall_clock=lambda: NOW,
+        )
+
+
+def test_post_broker_envelope_check_rejects_capture_store_drift(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    verified, _files = _post_broker_envelope_fixture(tmp_path)
+    verified.capture_store_root.rmdir()
+    monkeypatch.setattr(
+        service_module,
+        "_verify_loaded_sources",
+        lambda _value: pytest.fail("drifted capture root reached source check"),
+    )
+
+    with pytest.raises(
+        CapturedAlpacaPaperServiceError,
+        match="FINAL_ACTIVATION_ENVELOPE_INVALID",
+    ):
+        service_module._assert_final_activation_envelope_current(
+            verified,
+            allowed_read_roots=(tmp_path,),
+            wall_clock=lambda: NOW,
+        )
+
+
+def test_post_broker_envelope_check_rejects_handshake_root_drift(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    verified, _files = _post_broker_envelope_fixture(tmp_path)
+    Path(verified.manifest["cutover"]["host_ready_receipt_base"]).parent.rmdir()
+    monkeypatch.setattr(
+        service_module,
+        "_verify_loaded_sources",
+        lambda _value: pytest.fail("drifted handshake root reached source check"),
+    )
+
+    with pytest.raises(
+        CapturedAlpacaPaperServiceError,
+        match="FINAL_ACTIVATION_ENVELOPE_INVALID",
+    ):
+        service_module._assert_final_activation_envelope_current(
+            verified,
+            allowed_read_roots=(tmp_path,),
+            wall_clock=lambda: NOW,
+        )
+
+
+def test_post_broker_envelope_check_rejects_nested_manifest_drift(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    verified, _files = _post_broker_envelope_fixture(tmp_path)
+    verified.manifest["cutover"]["launcher_arguments_sha256"] = "f" * 64
+    monkeypatch.setattr(
+        service_module,
+        "_verify_loaded_sources",
+        lambda _value: pytest.fail("mutated manifest reached source check"),
+    )
+
+    with pytest.raises(
+        CapturedAlpacaPaperServiceError,
+        match="FINAL_ACTIVATION_ENVELOPE_INVALID",
+    ):
+        service_module._assert_final_activation_envelope_current(
+            verified,
+            allowed_read_roots=(tmp_path,),
+            wall_clock=lambda: NOW,
+        )
+
+
+def test_post_broker_envelope_check_revalidates_superseded_probe_bindings(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    verified, files = _post_broker_envelope_fixture(tmp_path)
+    calls: list[str] = []
+    _install_synthetic_v3_probe_validator(monkeypatch, calls)
+    monkeypatch.setattr(
+        service_module,
+        "_verify_loaded_sources",
+        lambda _value: None,
+    )
+
+    service_module._assert_final_activation_envelope_current(
+        verified,
+        allowed_read_roots=(tmp_path,),
+        wall_clock=lambda: NOW,
+    )
+    assert calls[:2] == ["broker_account", "kill_switch"]
+
+    files["pre_broker_raw"].write_text("drift", encoding="utf-8")
+    with pytest.raises(
+        CapturedAlpacaPaperServiceError,
+        match="FINAL_ACTIVATION_ENVELOPE_INVALID",
+    ):
+        service_module._assert_final_activation_envelope_current(
+            verified,
+            allowed_read_roots=(tmp_path,),
+            wall_clock=lambda: NOW,
+        )
+
+
+def test_post_broker_envelope_check_revalidates_v3_probe_bindings(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    verified, _files = _post_broker_envelope_fixture(tmp_path)
+    raw_probe = tmp_path / "runtime-settings-probe.json"
+    raw_probe.write_text("sealed raw probe", encoding="utf-8")
+    raw_probe_sha = hashlib.sha256(raw_probe.read_bytes()).hexdigest()
+    receipt_path = tmp_path / "runtime-settings-receipt.json"
+    receipt = {
+        "captured_at": (NOW - timedelta(seconds=1)).isoformat(),
+        "expires_at": (NOW + timedelta(minutes=1)).isoformat(),
+        "artifact_bindings": {
+            "raw": {
+                "path": str(raw_probe),
+                "sha256": raw_probe_sha,
+                "size_bytes": raw_probe.stat().st_size,
+            }
+        },
+    }
+    receipt_path.write_text(json.dumps(receipt), encoding="utf-8")
+    verified.receipt_paths["runtime_settings"] = receipt_path
+    verified.receipt_hashes["runtime_settings"] = hashlib.sha256(
+        receipt_path.read_bytes()
+    ).hexdigest()
+    context = readiness_evidence.ReadinessValidationContext(
+        activation_generation=GENERATION,
+        expected_account_id=ACCOUNT,
+        code_build_sha256=SHA_A,
+        effective_config_sha256=SHA_B,
+        capture_receipt_sha256=SHA_C,
+        runtime_environment_sha256=SHA_A,
+        database_target_fingerprint=SHA_B,
+        iqfeed_bootstrap_manifest_sha256=SHA_C,
+        launcher_argument_contract_sha256=SHA_A,
+        capture_store_root=str(tmp_path),
+        source_hashes={},
+    )
+    monkeypatch.setattr(service_module, "_readiness_context", lambda _value: context)
+    monkeypatch.setattr(
+        service_module,
+        "_verify_loaded_sources",
+        lambda _value: None,
+    )
+    v3_calls: list[str] = []
+
+    def validate_v3(document, *, kind, context, **_kwargs):
+        v3_calls.append(kind)
+        assert context.allowed_read_roots == (str(tmp_path.resolve()),)
+        binding = document["artifact_bindings"]["raw"]
+        if hashlib.sha256(Path(binding["path"]).read_bytes()).hexdigest() != binding[
+            "sha256"
+        ]:
+            raise readiness_evidence.CapturedPaperReadinessEvidenceError(
+                "raw artifact content hash mismatch"
+            )
+
+    monkeypatch.setattr(
+        readiness_evidence,
+        "validate_readiness_receipt_v3",
+        validate_v3,
+    )
+
+    service_module._assert_final_activation_envelope_current(
+        verified,
+        allowed_read_roots=(tmp_path,),
+        wall_clock=lambda: NOW,
+    )
+    assert v3_calls == ["broker_account", "kill_switch", "runtime_settings"]
+
+    raw_probe.write_text("drift", encoding="utf-8")
+    with pytest.raises(
+        CapturedAlpacaPaperServiceError,
+        match="FINAL_ACTIVATION_ENVELOPE_INVALID",
+    ):
+        service_module._assert_final_activation_envelope_current(
+            verified,
+            allowed_read_roots=(tmp_path,),
+            wall_clock=lambda: NOW,
+        )
+
+
 def test_final_manifest_or_kill_expiry_after_provider_start_blocks_workers(
     monkeypatch,
 ):
@@ -2750,17 +3829,12 @@ def test_final_manifest_or_kill_expiry_after_provider_start_blocks_workers(
         generated_at=NOW - timedelta(seconds=5),
     )
     reloads = []
+    events = []
 
     def reload_authority(*_args, **_kwargs):
         reloads.append("reload")
-        if len(reloads) == 2:
-            raise CapturedAlpacaPaperServiceError(
-                "FINAL_ACTIVATION_REVALIDATION_FAILED",
-                "kill authority expired",
-            )
+        events.append("full_reload")
         return verified
-
-    events = []
 
     class _Supervisor:
         def start_active(self, *, start_authority, provider_options=None):
@@ -2789,8 +3863,35 @@ def test_final_manifest_or_kill_expiry_after_provider_start_blocks_workers(
     host_handshake = object.__new__(
         service_module._CapturedPaperHostActivationHandshake
     )
+    host_handshake._lock = service_module.threading.Lock()
+    host_handshake._started_sha256 = None
+    host_handshake._apply_completed_event_sha256 = None
+    host_handshake._apply_completed_event_body = None
+    host_handshake.publish_prepared = lambda: events.append("prepared")
+    host_handshake.await_and_consume_permit = lambda: (
+        events.append("permit_consumed") or {"permit_sha256": SHA_C}
+    )
+    host_handshake._quiet_horizon_event_sha256 = SHA_B
     monkeypatch.setattr(
         service_module, "_reload_final_activation_authority", reload_authority
+    )
+    envelope_calls = 0
+
+    def reject_envelope(value, **_kwargs):
+        nonlocal envelope_calls
+        envelope_calls += 1
+        events.append("envelope_check")
+        if envelope_calls == 1:
+            return value
+        raise CapturedAlpacaPaperServiceError(
+            "FINAL_ACTIVATION_ENVELOPE_EXPIRED",
+            "kill authority expired",
+        )
+
+    monkeypatch.setattr(
+        service_module,
+        "_assert_final_activation_envelope_current",
+        reject_envelope,
     )
     monkeypatch.setattr(
         service_module,
@@ -2802,10 +3903,15 @@ def test_final_manifest_or_kill_expiry_after_provider_start_blocks_workers(
         "_assert_composition_broker_generation",
         lambda *_args, **_kwargs: None,
     )
+    monkeypatch.setattr(
+        service_module,
+        "_paper_broker_quiet_fixed_point",
+        lambda *_args, **_kwargs: events.append("broker_fixed_point") or {},
+    )
 
     with pytest.raises(
         CapturedAlpacaPaperServiceError,
-        match="FINAL_ACTIVATION_REVALIDATION_FAILED",
+        match="FINAL_ACTIVATION_ENVELOPE_EXPIRED",
     ):
         service_module._execute_active_service(
             verified=verified,
@@ -2817,9 +3923,15 @@ def test_final_manifest_or_kill_expiry_after_provider_start_blocks_workers(
             wall_clock=lambda: NOW + timedelta(seconds=1),
         )
 
-    assert reloads == ["reload", "reload"]
+    assert reloads == ["reload"]
     assert events == [
+        "full_reload",
         "provider_and_runtime_started",
+        "envelope_check",
+        "prepared",
+        "permit_consumed",
+        "broker_fixed_point",
+        "envelope_check",
         "closed",
         "store_closed",
     ]
@@ -2845,34 +3957,55 @@ def test_host_permit_is_consumed_before_any_worker_and_started_ack(
         generated_at=NOW - timedelta(seconds=5),
     )
     events: list[str] = []
+    reloads: list[str] = []
     handshake = object.__new__(
         service_module._CapturedPaperHostActivationHandshake
     )
+    handshake._lock = service_module.threading.Lock()
+    handshake._started_sha256 = None
+    handshake._apply_completed_event_sha256 = None
+    handshake._apply_completed_event_body = None
     handshake.publish_prepared = lambda: events.append("prepared")
     handshake.await_and_consume_permit = lambda: (
         events.append("permit_consumed") or {"permit_sha256": SHA_C}
     )
     handshake.assert_not_revoked = lambda: None
-    handshake.assert_consumed_permit_current = lambda: None
-    handshake.assert_active_start_evidence_current = lambda: None
+    handshake.assert_consumed_permit_current = lambda: events.append(
+        "permit_current"
+    )
+    handshake.assert_active_start_evidence_current = lambda: events.append(
+        "active_evidence_current"
+    )
     handshake.publish_active_start_evidence = lambda _authority: (
         events.append("evidence_published")
         or {"authority_sha256": SHA_A, "artifact_sha256": SHA_B}
     )
     handshake._quiet_horizon_event_sha256 = SHA_B
-    handshake.publish_started = lambda *, health, active_start_authority: (
-        events.append("started_ack") or {"state": "STARTED"}
+    def publish_started(*, health, active_start_authority):
+        handshake._started_sha256 = SHA_C
+        events.append("started_ack")
+        return {"state": "STARTED"}
+
+    def consume_apply_completed():
+        handshake._apply_completed_event_sha256 = SHA_A
+        handshake._apply_completed_event_body = {"event_sha256": SHA_A}
+        events.append("apply_committed")
+        return {"event_sha256": SHA_A}
+
+    handshake.publish_started = publish_started
+    handshake.await_and_consume_apply_completed_authority = (
+        consume_apply_completed
     )
-    handshake.await_and_consume_apply_completed_authority = lambda: (
-        events.append("apply_committed") or {"event_sha256": SHA_A}
-    )
+    handshake.publish_stopped = lambda **_kwargs: events.append("stopped_ack")
 
     class _Supervisor:
         def start_active(self, *, start_authority, provider_options=None):
             events.append("provider_runtime_ready")
             receipt = start_authority.consume()
             assert receipt["host_activation_permit_consumed"] is True
+            start_authority.assert_current()
             events.append("worker_started")
+            start_authority.assert_current()
             return {"state": "active"}
 
         def assert_healthy(self):
@@ -2896,10 +4029,18 @@ def test_host_permit_is_consumed_before_any_worker_and_started_ack(
         restart_inventory_receipt={},
         database_engine=object(),
     )
+    def reload_authority(*_args, **_kwargs):
+        reloads.append("reload")
+        events.append("full_reload")
+        return verified
+
+    monkeypatch.setattr(
+        service_module, "_reload_final_activation_authority", reload_authority
+    )
     monkeypatch.setattr(
         service_module,
-        "_reload_final_activation_authority",
-        lambda *_args, **_kwargs: verified,
+        "_assert_final_activation_envelope_current",
+        lambda value, **_kwargs: events.append("envelope_current") or value,
     )
     monkeypatch.setattr(
         service_module,
@@ -2919,12 +4060,17 @@ def test_host_permit_is_consumed_before_any_worker_and_started_ack(
     monkeypatch.setattr(
         service_module,
         "_paper_broker_quiet_fixed_point",
-        lambda *_args, **_kwargs: fixed_authority["broker_fixed_point"],
+        lambda *_args, **_kwargs: (
+            events.append("broker_fixed_point")
+            or fixed_authority["broker_fixed_point"]
+        ),
     )
+    def kill_switch_snapshot(*_args, **_kwargs):
+        events.append("kill_switch_current")
+        return fixed_authority["final_kill_switch_query"]
+
     monkeypatch.setattr(
-        service_module,
-        "_paper_kill_switch_snapshot",
-        lambda *_args, **_kwargs: fixed_authority["final_kill_switch_query"],
+        service_module, "_paper_kill_switch_snapshot", kill_switch_snapshot
     )
     stopped = service_module.threading.Event()
     stopped.set()
@@ -2938,9 +4084,27 @@ def test_host_permit_is_consumed_before_any_worker_and_started_ack(
         wall_clock=lambda: NOW + timedelta(seconds=1),
     )
 
+    envelope_checks = [
+        index for index, event in enumerate(events) if event == "envelope_current"
+    ]
+    assert events.index("full_reload") < events.index("provider_runtime_ready")
+    assert events.index("provider_runtime_ready") < envelope_checks[0]
+    assert envelope_checks[0] < events.index("prepared")
     assert events.index("permit_consumed") < events.index("worker_started")
+    assert events.index("broker_fixed_point") < envelope_checks[1]
+    assert envelope_checks[1] < events.index("kill_switch_current")
+    assert events.index("kill_switch_current") < events.index("worker_started")
     assert events.index("health_confirmed") < events.index("started_ack")
     assert events.index("started_ack") < events.index("apply_committed")
+    assert events.count("kill_switch_current") == 4
+    assert events.count("permit_current") == 4
+    assert events.count("active_evidence_current") == 3
+    # The sole post-composition full reload finishes before provider/selection
+    # startup.  Stage0 keeps those verified runtime bytes immutable; only the
+    # small bound envelope is rehashed immediately before PREPARED and again
+    # after the broker fixed point.
+    assert reloads == ["reload"]
+    assert events.count("envelope_current") == 2
 
 
 def test_post_permit_terminal_order_blocks_every_worker(monkeypatch) -> None:
@@ -2964,6 +4128,10 @@ def test_post_permit_terminal_order_blocks_every_worker(monkeypatch) -> None:
     handshake = object.__new__(
         service_module._CapturedPaperHostActivationHandshake
     )
+    handshake._lock = service_module.threading.Lock()
+    handshake._started_sha256 = None
+    handshake._apply_completed_event_sha256 = None
+    handshake._apply_completed_event_body = None
     handshake.publish_prepared = lambda: events.append("prepared")
     handshake.await_and_consume_permit = lambda: (
         events.append("permit_consumed") or {"permit_sha256": SHA_C}
@@ -3000,6 +4168,11 @@ def test_post_permit_terminal_order_blocks_every_worker(monkeypatch) -> None:
         service_module,
         "_reload_final_activation_authority",
         lambda *_args, **_kwargs: verified,
+    )
+    monkeypatch.setattr(
+        service_module,
+        "_assert_final_activation_envelope_current",
+        lambda value, **_kwargs: value,
     )
     monkeypatch.setattr(
         service_module,
@@ -3261,7 +4434,9 @@ def test_composition_uses_measured_capacity_and_one_exact_adapter_generation(
         "replay_capture_runtime": SimpleNamespace(BoundedCaptureIngress=object),
         "app_db": SimpleNamespace(SessionLocal=lambda: None),
         "yf_session": SimpleNamespace(
-            get_fundamentals_receipt=lambda _symbol: None
+            get_cached_fundamentals_receipt=lambda _symbol: None,
+            open_fundamentals_refresh=lambda: None,
+            close_fundamentals_refresh=lambda *, timeout_seconds: None,
         ),
         "captured_paper_initial_controller": SimpleNamespace(
             CapturedPaperInitialAdmissionController=_InitialController,
@@ -3304,7 +4479,15 @@ def test_composition_uses_measured_capacity_and_one_exact_adapter_generation(
                     max_queue_events=4096,
                     async_queue_bytes=8 * 1024 * 1024,
                 )
-            )
+            ),
+            # The pressure-feed pre-authority worker reads the sealed freshness
+            # window at assembly and observes samples only after start().
+            pressure_controller=SimpleNamespace(
+                binding=SimpleNamespace(
+                    policy=SimpleNamespace(pressure_sample_max_age_seconds=5.0)
+                ),
+                observe=lambda sample: {"pressure_state": "normal"},
+            ),
         )
 
         @staticmethod
@@ -3430,6 +4613,7 @@ def test_composition_uses_measured_capacity_and_one_exact_adapter_generation(
         "transport",
         "later_fill",
         "exit_owner",
+        "pressure_feed",
         "selection",
     ]
     selection_kwargs = calls["selection_worker"][0][1]
@@ -3440,6 +4624,7 @@ def test_composition_uses_measured_capacity_and_one_exact_adapter_generation(
     assert selection_kwargs["assert_service_fence_held"].__self__ is instances[
         "service_fence"
     ][0]
+    assert selection_kwargs["wait_for_initial_pressure"] is True
     supervisor_kwargs = calls["supervisor"][0][1]
     fenced_prestart = supervisor_kwargs["fenced_prestart_revalidate"]()
     fenced_body = dict(fenced_prestart)
@@ -3464,7 +4649,7 @@ def test_composition_uses_measured_capacity_and_one_exact_adapter_generation(
     assert sha256_json(fenced_body) == supplied_fenced_sha
     assert [
         item.name for item in supervisor_kwargs["active_pre_authority_workers"]
-    ] == ["selection"]
+    ] == ["pressure_feed", "selection"]
     assert callable(supervisor_kwargs["post_quiesce_before_fence_release"])
     post_quiesce = supervisor_kwargs["post_quiesce_before_fence_release"]()
     assert post_quiesce["schema_version"] == (

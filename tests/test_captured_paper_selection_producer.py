@@ -6,13 +6,14 @@ import hashlib
 import threading
 import time
 import uuid
+from contextlib import nullcontext
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
 from sqlalchemy import text
-from sqlalchemy.exc import DBAPIError
+from sqlalchemy.exc import DBAPIError, OperationalError
 from sqlalchemy.orm import sessionmaker
 
 from app.models.captured_paper_selection_frontier import (
@@ -28,12 +29,15 @@ from app.services.trading.momentum_neural.captured_paper_selection_producer impo
     PROVENANCE_KEY,
     CapturedPaperSelectionAuthority,
     CapturedPaperSelectionBatch,
+    CapturedPaperSelectionFrontierReceipt,
     CapturedPaperSelectionObservation,
     CapturedPaperSelectionProducer,
     CapturedPaperSelectionProducerError,
     CapturedPaperSelectionProviderUnavailable,
     CapturedPaperSelectionQueueUnavailable,
+    CapturedPaperSelectionQueueReadTimeout,
     CapturedPaperSelectionRouteStateUpdate,
+    CapturedPaperSelectionTickResult,
     CapturedPaperSelectionVariantBinding,
     apply_captured_paper_selection_batch,
     ensure_captured_paper_selection_frontier,
@@ -590,6 +594,264 @@ def test_provider_or_queue_failure_records_gap_without_advancing_or_writing(
     assert event.gap_sha256 == result.gap_sha256
     assert reason in event.detail_canonical_json
     assert db.query(MomentumSymbolViability).count() == 0
+
+
+def test_transient_apply_retry_reuses_exact_verified_batch(
+    monkeypatch,
+) -> None:
+    authority = CapturedPaperSelectionAuthority(
+        expected_account_id=ACCOUNT_ID,
+        activation_generation=GEN_A,
+        policy_sha256=_digest("policy"),
+        settings_projection_sha256=_digest("settings"),
+        code_build_sha256=_digest("build"),
+        variant_bindings=(
+            CapturedPaperSelectionVariantBinding(
+                variant_id=1,
+                family="captured_tape_breakout",
+                version=1,
+                variant_key="captured_paper:captured_tape_breakout",
+                target_after_sha256=_digest("bound-variant"),
+            ),
+        ),
+    )
+    frontier_values = {
+        "account_scope": authority.account_scope,
+        "expected_account_id": authority.expected_account_id,
+        "activation_generation": authority.activation_generation,
+        "execution_family": authority.execution_family,
+        "authority_sha256": authority.authority_sha256,
+        "policy_sha256": authority.policy_sha256,
+        "settings_projection_sha256": authority.settings_projection_sha256,
+        "code_build_sha256": authority.code_build_sha256,
+        "variant_set_sha256": authority.variant_set_sha256,
+        "last_source_sequence": 0,
+        "last_source_event_at": None,
+        "last_source_available_at": None,
+        "last_batch_sha256": None,
+        "status": "ready",
+        "gap_count": 0,
+        "version": 1,
+        "event_sequence": 0,
+        "last_event_sha256": None,
+    }
+    frontier = CapturedPaperSelectionFrontierReceipt(
+        frontier_id=1,
+        **frontier_values,
+        frontier_sha256=producer_module._hash_json(
+            {"schema_version": "chili.captured-paper-selection-frontier.v1", **frontier_values}
+        ),
+    )
+    batch = _batch(authority, frontier)
+
+    class OneShotPort:
+        network_fallback_allowed = False
+        broker_access_allowed = False
+        mutation_allowed = False
+
+        def __init__(self) -> None:
+            self.reads = 0
+
+        def read_batch(self, *, frontier, authority):
+            self.reads += 1
+            return batch if self.reads == 1 else None
+
+    class SessionStub:
+        def begin(self):
+            return nullcontext()
+
+        def close(self) -> None:
+            return None
+
+    port = OneShotPort()
+    producer = CapturedPaperSelectionProducer(
+        session_factory=SessionStub,
+        authority=authority,
+        input_port=port,
+        wall_clock=lambda: T0 + timedelta(seconds=4),
+    )
+    monkeypatch.setattr(producer, "_frontier", lambda: frontier)
+    apply_calls = 0
+
+    def transient_apply(*args, **kwargs):
+        nonlocal apply_calls
+        apply_calls += 1
+        if apply_calls == 1:
+            raise OperationalError(
+                "UPDATE captured_paper_selection_frontiers",
+                {},
+                RuntimeError("synthetic transient database failure"),
+            )
+        return CapturedPaperSelectionTickResult(
+            status="applied",
+            frontier=frontier,
+            batch_sha256=batch.batch_sha256,
+        )
+
+    monkeypatch.setattr(
+        producer_module,
+        "apply_captured_paper_selection_batch",
+        transient_apply,
+    )
+
+    with pytest.raises(OperationalError, match="synthetic transient database failure"):
+        producer.tick()
+    assert port.reads == 1
+
+    result = producer.tick()
+    assert result.status == "applied"
+    assert result.batch_sha256 == batch.batch_sha256
+    assert port.reads == 1
+    assert apply_calls == 2
+
+    idle = producer.tick()
+    assert idle.status == "idle"
+    assert port.reads == 2
+
+    class TimedOutPort(OneShotPort):
+        def read_batch(self, *, frontier, authority):
+            raise CapturedPaperSelectionQueueReadTimeout("bounded local read")
+
+    timed_out = CapturedPaperSelectionProducer(
+        session_factory=SessionStub,
+        authority=authority,
+        input_port=TimedOutPort(),
+        wall_clock=lambda: T0 + timedelta(seconds=4),
+    )
+    monkeypatch.setattr(timed_out, "_frontier", lambda: frontier)
+    with pytest.raises(
+        CapturedPaperSelectionQueueReadTimeout,
+        match="bounded local read",
+    ):
+        timed_out.tick()
+
+    advanced_values = {
+        **frontier_values,
+        "last_source_sequence": batch.source_sequence_through,
+        "last_source_event_at": batch.route_state_updates[-1].source_event_at,
+        "last_source_available_at": (
+            batch.route_state_updates[-1].source_available_at
+        ),
+        "last_batch_sha256": batch.batch_sha256,
+        "version": 2,
+        "event_sequence": 1,
+        "last_event_sha256": _digest("post-commit-event"),
+    }
+    advanced = CapturedPaperSelectionFrontierReceipt(
+        frontier_id=1,
+        **advanced_values,
+        frontier_sha256=producer_module._hash_json(
+            {
+                "schema_version": "chili.captured-paper-selection-frontier.v1",
+                **advanced_values,
+            }
+        ),
+    )
+    ambiguous_port = OneShotPort()
+    transaction_exits = 0
+
+    class AmbiguousTransaction:
+        def __enter__(self):
+            return None
+
+        def __exit__(self, exc_type, exc, traceback):
+            nonlocal transaction_exits
+            transaction_exits += 1
+            if transaction_exits == 1:
+                raise OperationalError(
+                    "COMMIT",
+                    {},
+                    RuntimeError("commit acknowledgement lost"),
+                )
+            return False
+
+    class AmbiguousSession:
+        def begin(self):
+            return AmbiguousTransaction()
+
+        def close(self) -> None:
+            return None
+
+    ambiguous = CapturedPaperSelectionProducer(
+        session_factory=AmbiguousSession,
+        authority=authority,
+        input_port=ambiguous_port,
+        wall_clock=lambda: T0 + timedelta(seconds=4),
+    )
+    frontier_reads = 0
+
+    def committed_frontier():
+        nonlocal frontier_reads
+        frontier_reads += 1
+        return frontier if frontier_reads == 1 else advanced
+
+    monkeypatch.setattr(ambiguous, "_frontier", committed_frontier)
+    ambiguous_apply_calls = 0
+
+    def idempotent_apply(*args, **kwargs):
+        nonlocal ambiguous_apply_calls
+        ambiguous_apply_calls += 1
+        return CapturedPaperSelectionTickResult(
+            status="applied",
+            frontier=advanced,
+            batch_sha256=batch.batch_sha256,
+            idempotent=ambiguous_apply_calls > 1,
+        )
+
+    monkeypatch.setattr(
+        producer_module,
+        "apply_captured_paper_selection_batch",
+        idempotent_apply,
+    )
+    with pytest.raises(
+        OperationalError,
+        match="commit acknowledgement lost",
+    ):
+        ambiguous.tick()
+    assert ambiguous_port.reads == 1
+    assert ambiguous._pending_batch is batch
+
+    recovered = ambiguous.tick()
+    assert recovered.status == "applied"
+    assert recovered.idempotent is True
+    assert ambiguous_port.reads == 1
+    assert ambiguous_apply_calls == 2
+    assert ambiguous._pending_batch is None
+
+    assert ambiguous.tick().status == "idle"
+    assert ambiguous_port.reads == 2
+
+    drift_values = {
+        **advanced_values,
+        "last_source_sequence": batch.source_sequence_through + 1,
+        "last_batch_sha256": _digest("different-durable-batch"),
+    }
+    drifted = CapturedPaperSelectionFrontierReceipt(
+        frontier_id=1,
+        **drift_values,
+        frontier_sha256=producer_module._hash_json(
+            {
+                "schema_version": "chili.captured-paper-selection-frontier.v1",
+                **drift_values,
+            }
+        ),
+    )
+    drift_port = OneShotPort()
+    drifted_producer = CapturedPaperSelectionProducer(
+        session_factory=SessionStub,
+        authority=authority,
+        input_port=drift_port,
+        wall_clock=lambda: T0 + timedelta(seconds=4),
+    )
+    drifted_producer._pending_batch = batch
+    monkeypatch.setattr(drifted_producer, "_frontier", lambda: drifted)
+    with pytest.raises(
+        CapturedPaperSelectionProducerError,
+        match="PENDING_BATCH_FRONTIER_DRIFT",
+    ):
+        drifted_producer.tick()
+    assert drift_port.reads == 0
+    assert drifted_producer._pending_batch is batch
 
 
 def test_generation_rotation_rejects_old_authority_and_accepts_new(db) -> None:

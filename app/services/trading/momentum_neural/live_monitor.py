@@ -1541,6 +1541,20 @@ def _build_state_snapshot(db: Session, *, user_id: int, now_utc: datetime) -> di
     heartbeat_at = captured_status.get("heartbeat_at")
     if isinstance(heartbeat_at, datetime):
         latest_candidates.append(heartbeat_at)
+    if not latest_candidates:
+        from .lane_health import captured_paper_live_runner_control_health
+
+        heartbeat = captured_paper_live_runner_control_health(
+            db,
+            expected_account_id=str(
+                getattr(settings, "chili_alpaca_expected_account_id", "") or ""
+            ),
+            now=now_utc,
+        )
+        if heartbeat.get("ok") is True:
+            heartbeat_at = heartbeat.get("heartbeat_at")
+            if isinstance(heartbeat_at, datetime):
+                latest_candidates.append(heartbeat_at)
     latest_update = max(latest_candidates, default=None)
     return {
         "ok": True,

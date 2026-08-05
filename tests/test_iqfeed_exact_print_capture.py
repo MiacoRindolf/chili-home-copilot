@@ -65,6 +65,7 @@ def _reset_bridge_state(monkeypatch):
     with bridge._connection_state_lock:
         bridge._active_connection_generation = 0
         bridge._frame_sequence_by_generation.clear()
+        bridge._protocol_acknowledged_generations.clear()
         bridge._selected_fields_ack_sha256_by_generation.clear()
     with bridge._capture_handoff_lock:
         bridge._capture_handoff = None
@@ -79,6 +80,7 @@ def _reset_bridge_state(monkeypatch):
     with bridge._connection_state_lock:
         bridge._active_connection_generation = 0
         bridge._frame_sequence_by_generation.clear()
+        bridge._protocol_acknowledged_generations.clear()
         bridge._selected_fields_ack_sha256_by_generation.clear()
 
 

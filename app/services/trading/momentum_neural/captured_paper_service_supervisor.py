@@ -561,6 +561,26 @@ class CapturedPaperServiceSupervisor:
                         f"captured_paper_{managed.name}_pre_authority_start_unconfirmed"
                     )
                 self._service_fence.assert_held()
+            # A preceding pre-authority worker can fail while a later worker is
+            # completing its bounded prime.  Re-prove the whole broker-incapable
+            # graph immediately before consuming the short-lived order
+            # authority; a dead pressure feed must never be masked by its last
+            # still-fresh controller sample.
+            for managed in self._started_pre_authority_workers:
+                self._service_fence.assert_held()
+                worker_health = _health_mapping(managed.worker.health())
+                if (
+                    worker_health.get("ever_started") is not True
+                    or worker_health.get("running") is not True
+                    or worker_health.get("fatal") is True
+                    or (
+                        "pre_authority_ready" in worker_health
+                        and worker_health.get("pre_authority_ready") is not True
+                    )
+                ):
+                    raise CapturedPaperServiceSupervisorError(
+                        f"captured_paper_{managed.name}_pre_authority_health_lost"
+                    )
             # This intentionally runs *after* provider startup and runtime
             # registration *and* broker-incapable selection priming.  Those
             # bounded operations may consume meaningful wall time, so authority
@@ -693,6 +713,41 @@ class CapturedPaperServiceSupervisor:
                 raise CapturedPaperServiceSupervisorError(
                     "captured_paper_active_start_authority_rejected"
                 )
+            # PREPARED/permit/broker-fixed-point work can outlive a healthy
+            # pre-authority snapshot.  Re-prove every broker-incapable worker
+            # after authority consumption and before any order-capable worker
+            # or live loop starts.  This caught a real selection queue poison
+            # during the bounded host round-trip.
+            for managed in self._started_pre_authority_workers:
+                self._service_fence.assert_held()
+                worker_health = _health_mapping(managed.worker.health())
+                transient_pressure_health_unavailable = (
+                    managed.name == "pressure_feed"
+                    and worker_health.get("pre_authority_ready") is False
+                    and worker_health.get("ingress_admissible") is False
+                    and worker_health.get("admission_suspended") is True
+                    and worker_health.get(
+                        "recoverable_admission_suspension"
+                    )
+                    is False
+                    and worker_health.get("pressure_state")
+                    == "health_unavailable"
+                    and worker_health.get("pressure_rejection_reason")
+                    == "pressure_controller_health_unavailable:OSError"
+                )
+                if (
+                    worker_health.get("ever_started") is not True
+                    or worker_health.get("running") is not True
+                    or worker_health.get("fatal") is True
+                    or (
+                        "pre_authority_ready" in worker_health
+                        and worker_health.get("pre_authority_ready") is not True
+                        and not transient_pressure_health_unavailable
+                    )
+                ):
+                    raise CapturedPaperServiceSupervisorError(
+                        f"captured_paper_{managed.name}_post_authority_health_lost"
+                    )
             self._active_start_authority_receipt = dict(final_authority)
             for managed in self._workers:
                 start_authority.assert_current()
@@ -740,11 +795,31 @@ class CapturedPaperServiceSupervisor:
         self._service_fence.assert_held()
         host_health = self._host.health()
         provider = host_health.get("provider_loop_supervisor")
+        provider_reconnecting = False
+        if isinstance(provider, Mapping):
+            lanes = provider.get("lanes")
+            # A supervised reconnect clears readiness while its schema-bound
+            # lane threads remain alive. Readiness gates admission, not liveness.
+            provider_reconnecting = (
+                provider.get("all_ready") is False
+                and provider.get("stop_requested") is False
+                and isinstance(lanes, Mapping)
+                and all(
+                    isinstance(lanes.get(lane), Mapping)
+                    and lanes[lane].get("thread_alive") is True
+                    and lanes[lane].get("schema_verified") is True
+                    for lane in ("trade", "depth")
+                )
+            )
         if not (
             isinstance(provider, Mapping)
             and provider.get("state") == "running"
-            and provider.get("all_ready") is True
+            and provider.get("stop_requested") is not True
             and not provider.get("failures")
+            and (
+                provider.get("all_ready") is True
+                or provider_reconnecting
+            )
         ):
             raise CapturedPaperServiceSupervisorError(
                 "captured_paper_provider_health_lost"
@@ -758,8 +833,44 @@ class CapturedPaperServiceSupervisor:
                 health.get("running") is not True
                 or health.get("fatal") is True
             ):
+                fatal_reason = health.get("fatal_reason")
+                fatal_suffix = ""
+                if isinstance(fatal_reason, str):
+                    bounded_reason = fatal_reason[:4096]
+                    exception_match = re.match(
+                        r"\s*([A-Za-z_][A-Za-z0-9_.]{0,127})\s*:",
+                        bounded_reason,
+                    )
+                    if bounded_reason.strip():
+                        exception_type = (
+                            exception_match.group(1)
+                            if exception_match
+                            and exception_match.group(1)
+                            in {
+                                "CapturedPaperSelectionRuntimeError",
+                                "DBAPIError",
+                                "IntegrityError",
+                                "InterfaceError",
+                                "MemoryError",
+                                "OperationalError",
+                                "OSError",
+                                "PendingRollbackError",
+                                "RuntimeError",
+                                "TimeoutError",
+                                "ValueError",
+                            }
+                            else "unavailable"
+                        )
+                        diagnostics = [
+                            f"type={exception_type}",
+                            "reason_sha256="
+                            + hashlib.sha256(
+                                bounded_reason.encode("utf-8", "replace")
+                            ).hexdigest(),
+                        ]
+                        fatal_suffix = ":" + ";".join(diagnostics)
                 raise CapturedPaperServiceSupervisorError(
-                    f"captured_paper_{managed.name}_health_lost"
+                    f"captured_paper_{managed.name}_health_lost{fatal_suffix}"
                 )
         if self._live_loop_health() is not True:
             raise CapturedPaperServiceSupervisorError(

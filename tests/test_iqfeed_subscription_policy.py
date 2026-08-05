@@ -15,6 +15,7 @@ from scripts.iqfeed_subscription_policy import (
     SourceRead,
     SubscriptionLifecycleRecord,
     TargetCause,
+    WatchCapacityGovernor,
     active_capture_symbols,
     is_active_capture_session,
     resolve_subscription_target,
@@ -34,6 +35,267 @@ def _all_sources(
         SourceRead.success(TargetCause.ELIGIBLE, eligible),
         SourceRead.success(TargetCause.ROSS, ross),
     ]
+
+
+def test_limit_transition_uses_current_cap_and_never_increases_it() -> None:
+    governor = WatchCapacityGovernor.start(
+        cap=1_000,
+        floor=64,
+        hard_max=1_000,
+        quiet_interval_seconds=300.0,
+        now=0.0,
+    )
+
+    reduced = governor.advance(
+        now=1.0,
+        limit_hit=True,
+        capacity_pressure=True,
+        at_capacity=True,
+    )
+    assert reduced.cap == 500
+
+    floor_governor = WatchCapacityGovernor.start(
+        cap=64,
+        floor=64,
+        hard_max=1_000,
+        quiet_interval_seconds=300.0,
+        now=0.0,
+    )
+    assert floor_governor.advance(
+        now=1.0,
+        limit_hit=True,
+        capacity_pressure=True,
+        at_capacity=True,
+    ).cap == 64
+
+
+def test_capacity_recovers_one_slot_only_after_quiet_interval() -> None:
+    governor = WatchCapacityGovernor.start(
+        cap=500,
+        floor=64,
+        hard_max=1_000,
+        quiet_interval_seconds=300.0,
+        now=100.0,
+    )
+
+    assert governor.advance(
+        now=399.999,
+        limit_hit=False,
+        capacity_pressure=True,
+        at_capacity=True,
+    ).cap == 500
+    first_probe = governor.advance(
+        now=400.0,
+        limit_hit=False,
+        capacity_pressure=True,
+        at_capacity=True,
+    )
+    assert first_probe.cap == 501
+    assert first_probe.advance(
+        now=699.999,
+        limit_hit=False,
+        capacity_pressure=True,
+        at_capacity=True,
+    ).cap == 501
+    assert first_probe.advance(
+        now=700.0,
+        limit_hit=False,
+        capacity_pressure=True,
+        at_capacity=True,
+    ).cap == 502
+
+    final_probe = WatchCapacityGovernor.start(
+        cap=999,
+        floor=64,
+        hard_max=1_000,
+        quiet_interval_seconds=10.0,
+        now=0.0,
+    ).advance(
+        now=10.0,
+        limit_hit=False,
+        capacity_pressure=True,
+        at_capacity=True,
+    )
+    assert final_probe.cap == 1_000
+    assert final_probe.advance(
+        now=20.0,
+        limit_hit=False,
+        capacity_pressure=True,
+        at_capacity=True,
+    ).cap == 1_000
+
+
+def test_failed_recovery_probe_reverts_without_second_halving() -> None:
+    governor = WatchCapacityGovernor.start(
+        cap=64,
+        floor=64,
+        hard_max=1_000,
+        quiet_interval_seconds=10.0,
+        now=0.0,
+    )
+
+    probe = governor.advance(
+        now=10.0,
+        limit_hit=False,
+        capacity_pressure=True,
+        at_capacity=True,
+    )
+    assert probe.cap == 65
+    reverted = probe.advance(
+        now=10.1,
+        limit_hit=True,
+        capacity_pressure=True,
+        at_capacity=True,
+    )
+    assert reverted.cap == 64
+    assert reverted.advance(
+        now=20.099,
+        limit_hit=False,
+        capacity_pressure=True,
+        at_capacity=True,
+    ).cap == 64
+
+
+def test_capacity_does_not_recover_without_excess_demand() -> None:
+    governor = WatchCapacityGovernor.start(
+        cap=500,
+        floor=64,
+        hard_max=1_000,
+        quiet_interval_seconds=10.0,
+        now=0.0,
+    )
+
+    assert governor.advance(
+        now=1_000.0,
+        limit_hit=False,
+        capacity_pressure=False,
+        at_capacity=False,
+    ).cap == 500
+
+
+def test_one_source_sentinel_exposes_excess_capacity_demand() -> None:
+    governor = WatchCapacityGovernor.start(
+        cap=2,
+        floor=1,
+        hard_max=10,
+        quiet_interval_seconds=10.0,
+        now=0.0,
+    )
+    assert governor.source_read_limit == 3
+
+    result = resolve_subscription_target(
+        reads=_all_sources(eligible=("E1", "E2", "E3")[: governor.source_read_limit]),
+        prior_causes={},
+        capacity=governor.cap,
+    )
+
+    assert tuple(target.symbol for target in result.targets) == ("E1", "E2")
+    assert any(
+        gap.code == "capacity_eviction" and gap.symbol == "E3"
+        for gap in result.gaps
+    )
+
+
+def test_reconnect_reverts_unproven_probe_and_restarts_quiet_interval() -> None:
+    governor = WatchCapacityGovernor.start(
+        cap=64,
+        floor=64,
+        hard_max=1_000,
+        quiet_interval_seconds=10.0,
+        now=0.0,
+    )
+    probe = governor.advance(
+        now=10.0,
+        limit_hit=False,
+        capacity_pressure=True,
+        at_capacity=True,
+    )
+
+    restarted = probe.connection_started(now=100.0)
+
+    assert restarted.cap == 64
+    assert restarted.probe_base_cap is None
+    assert restarted.next_probe_at == 110.0
+
+
+def test_capacity_governor_rejects_non_finite_clocks() -> None:
+    with pytest.raises(ValueError, match="quiet interval"):
+        WatchCapacityGovernor.start(
+            cap=64,
+            floor=64,
+            hard_max=1_000,
+            quiet_interval_seconds=float("nan"),
+            now=0.0,
+        )
+    with pytest.raises(ValueError, match="clock"):
+        WatchCapacityGovernor.start(
+            cap=64,
+            floor=64,
+            hard_max=1_000,
+            quiet_interval_seconds=10.0,
+            now=float("inf"),
+        )
+
+
+@pytest.mark.parametrize("bridge", (trade_bridge, depth_bridge))
+def test_both_bridges_apply_the_shared_capacity_transition(
+    monkeypatch,
+    bridge,
+) -> None:
+    governor = WatchCapacityGovernor.start(
+        cap=1_000,
+        floor=64,
+        hard_max=1_000,
+        quiet_interval_seconds=300.0,
+        now=0.0,
+    )
+    monkeypatch.setattr(bridge, "_watch_capacity", governor)
+    monkeypatch.setattr(bridge, "_limit_hit", True)
+
+    previous, current, limit_hit = bridge._advance_watch_capacity(
+        now=1.0,
+        capacity_pressure=True,
+        at_capacity=True,
+    )
+
+    assert previous.cap == 1_000
+    assert current.cap == 500
+    assert limit_hit is True
+    assert bridge._watch_capacity == current
+    assert bridge._limit_hit is False
+
+
+@pytest.mark.parametrize("bridge", (trade_bridge, depth_bridge))
+def test_pending_probe_limit_is_consumed_before_reconnect_reset(
+    monkeypatch,
+    bridge,
+) -> None:
+    stable = WatchCapacityGovernor.start(
+        cap=500,
+        floor=64,
+        hard_max=1_000,
+        quiet_interval_seconds=300.0,
+        now=0.0,
+    )
+    probe = stable.advance(
+        now=300.0,
+        limit_hit=False,
+        capacity_pressure=True,
+        at_capacity=True,
+    )
+    assert probe.cap == 501
+    monkeypatch.setattr(bridge, "_watch_capacity", probe)
+    monkeypatch.setattr(bridge, "_limit_hit", True)
+
+    previous, current, limit_hit = bridge._start_watch_capacity_connection(
+        now=301.0
+    )
+
+    assert previous.cap == 501
+    assert current.cap == 500
+    assert current.probe_base_cap is None
+    assert limit_hit is True
+    assert bridge._limit_hit is False
 
 
 def test_union_preserves_every_source_and_overlapping_causes() -> None:
@@ -489,6 +751,21 @@ def test_l1_connection_wrapper_closes_generation_after_indeterminate_send(
         "create_connection",
         lambda *_args, **_kwargs: connection,
     )
+    monkeypatch.setattr(
+        trade_bridge,
+        "_record_capture_connection_boundary",
+        lambda **_kwargs: None,
+    )
+    monkeypatch.setattr(
+        trade_bridge,
+        "_wait_for_protocol_ack",
+        lambda *_args, **_kwargs: True,
+    )
+    monkeypatch.setattr(
+        trade_bridge,
+        "_wait_for_selected_fields_ack",
+        lambda *_args, **_kwargs: True,
+    )
     monkeypatch.setattr(trade_bridge, "_send", fail_subscription_send)
     monkeypatch.setattr(trade_bridge, "writer", writer)
 
@@ -529,7 +806,7 @@ def test_l2_connection_wrapper_closes_generation_after_indeterminate_send(
         if command_count["value"] == 2:
             raise OSError("ambiguous send")
 
-    def writer(_forced, _deadline) -> None:
+    def writer(_forced, _deadline, _stop) -> None:
         depth_bridge.watched.update({"PLSM", "OTHER"})
         depth_bridge._try_watch_symbol("VEEE")
 
@@ -537,6 +814,11 @@ def test_l2_connection_wrapper_closes_generation_after_indeterminate_send(
         depth_bridge.socket,
         "create_connection",
         lambda *_args, **_kwargs: connection,
+    )
+    monkeypatch.setattr(
+        depth_bridge,
+        "_record_capture_connection_boundary",
+        lambda **_kwargs: None,
     )
     monkeypatch.setattr(depth_bridge, "_send", fail_second_subscription_command)
     monkeypatch.setattr(depth_bridge, "writer", writer)

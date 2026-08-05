@@ -17,7 +17,7 @@ from __future__ import annotations
 import argparse
 import base64
 from contextlib import contextmanager, suppress
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timedelta, timezone
 import hashlib
 import importlib
@@ -49,21 +49,23 @@ SERVICE_REPORT_SCHEMA_VERSION = "chili.captured-paper-service-report.v1"
 _MODES = ("validate-only", "no-order-smoke", "activate-paper")
 _REPARSE_ATTRIBUTE = int(getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400))
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
+_STARTUP_ATTEMPT_RE = re.compile(
+    r"^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+)
 _SERVICE_HEALTH_POLL_SECONDS = 1.0
 _SERVICE_SHUTDOWN_SECONDS = 30.0
 _MAX_STARTUP_RECONCILIATION_ROWS = 10_000
 _RESTART_GATE_SCHEMA_VERSION = "chili.captured-paper-restart-gate.v1"
 _NO_ORDER_SMOKE_SCHEMA_VERSION = "chili.captured-paper-readiness.no_order_smoke.v4"
-# 2026-07-17: the post-smoke receipt window must cover the whole
-# finalize -> cutover ValidateOnly/Apply -> tape gate -> ActivatePaper tail
-# (~2-4 minutes observed live).  The prior 30s window made that tail
-# impossible by construction: the final manifest inherits
-# min(sealed.expires_at, no_order_expires_at), so cutover always saw
-# MANIFEST_STALE (first observed on the first-ever green finalize,
-# generation 35c79d11).  10 minutes matches the contract's
-# _RECEIPT_MAX_AGE_SECONDS mid-flow class and stays under the 15-minute
-# manifest-age cap.
-_POST_SMOKE_RECEIPT_WINDOW_SECONDS = 10 * 60
+# The post-smoke window covers finalize, cutover, composition, the bounded
+# broker-incapable selection prime, and the final authority rehash.  The
+# 2026-07-27 sealed fire measured a successful 252s prime that left the old
+# 10-minute evidence window too short for the mandatory rehash.  Twenty
+# minutes matches the existing manifest/no-order maximum.  This transports
+# sealed startup evidence only: exact PAPER account, broker order/fill fixed
+# point, kill switch, launcher/cutover identity, and host permit are still
+# rechecked immediately before any order-capable worker.
+_POST_SMOKE_RECEIPT_WINDOW_SECONDS = 20 * 60
 _SERVICE_SINGLETON_NAME = "Global\\CHILI-Captured-Alpaca-PAPER-SERVICE-OWNER"
 _LAUNCH_ATTESTATION_SCHEMA_VERSION = (
     "chili.captured-paper-launcher-cutover-attestation.v1"
@@ -75,6 +77,7 @@ _HOST_ACTIVATION_PERMIT_SCHEMA_VERSION = (
     "chili.captured-paper-host-startup-permit.v1"
 )
 _HOST_STARTED_SCHEMA_VERSION = "chili.captured-paper-host-startup-started.v2"
+_HOST_STOPPED_SCHEMA_VERSION = "chili.captured-paper-host-stopped.v1"
 _ACTIVE_START_AUTHORITY_SCHEMA_VERSION = (
     "chili.captured-paper-active-start-authority.v2"
 )
@@ -189,6 +192,275 @@ class _PreparedCapturedPaperCapture:
     adapter: Any
     broker_snapshot: Mapping[str, Any]
     policy_authority: _CapturedPaperPolicyAuthority
+
+
+class _CapturedPaperPressureFeedWorker:
+    """Keep the capture pressure controller inside its sealed freshness window.
+
+    The composition-time sample satisfies bounded-ingress admission for only
+    ``pressure_sample_max_age_seconds`` (5s in the sealed policy) while the
+    selection initial cycle publishes minutes after composition, so without a
+    periodic feed every ``BoundedCaptureIngress.submit`` fails closed with
+    ``capture_resource_pressure_sample_unavailable``/``_stale`` and active
+    startup dies with QUEUE_INGRESS_REJECTED (observed on generations
+    premarket-20260727_0105 and _0204).  This ports the capture-only smoke's
+    documented refresh pattern (``iqfeed_capture_only_smoke.py``: caller
+    sampler at half the policy window) onto the supervisor managed-worker
+    lifecycle.  Transient host-I/O sampling failures let the controller's own
+    staleness rule suspend admission until a later clean sample.  Invalid sample
+    construction and controller-observation failures remain fatal.  This worker
+    never widens admission; it only keeps fresh, measured evidence flowing.
+    """
+
+    def __init__(
+        self,
+        *,
+        pressure_controller: Any,
+        sampler: Callable[[], Any],
+        interval_seconds: float,
+    ) -> None:
+        interval = float(interval_seconds)
+        if not math.isfinite(interval) or interval <= 0.0:
+            raise CapturedAlpacaPaperServiceError(
+                "PRESSURE_FEED_INTERVAL_INVALID",
+                "pressure feed interval must be finite and positive",
+            )
+        self._controller = pressure_controller
+        self._sampler = sampler
+        self._interval = interval
+        self._stop_event = threading.Event()
+        self._thread: threading.Thread | None = None
+        self._state_lock = threading.Lock()
+        self._ever_started = False
+        self._fatal = False
+        self._fatal_reason: str | None = None
+        self._samples_fed = 0
+        self._sample_failure_count = 0
+        self._consecutive_sample_failures = 0
+        self._last_sample_error: str | None = None
+
+    def _record_sample_failure(
+        self,
+        exc: BaseException,
+        *,
+        fatal: bool,
+    ) -> None:
+        reason = f"{type(exc).__name__}: {exc}"
+        with self._state_lock:
+            self._sample_failure_count += 1
+            self._consecutive_sample_failures += 1
+            self._last_sample_error = reason
+            if fatal:
+                self._fatal = True
+                if self._fatal_reason is None:
+                    self._fatal_reason = reason
+
+    def _feed_once(self, *, startup: bool) -> None:
+        try:
+            sample = self._sampler()
+        except OSError as exc:
+            self._record_sample_failure(exc, fatal=startup)
+            raise
+        except BaseException as exc:
+            self._record_sample_failure(exc, fatal=True)
+            raise
+        try:
+            self._controller.observe(sample)
+        except BaseException as exc:
+            self._record_sample_failure(exc, fatal=True)
+            raise
+        with self._state_lock:
+            self._samples_fed += 1
+            self._consecutive_sample_failures = 0
+            self._last_sample_error = None
+
+    def _run(self) -> None:
+        while not self._stop_event.wait(self._interval):
+            try:
+                self._feed_once(startup=False)
+            except OSError:
+                # A runtime sampler can fail transiently (for example while the
+                # host metrics source rolls over).  Keep this broker-incapable
+                # worker alive so it can produce a later recovery sample.  The
+                # controller's bounded freshness window independently makes the
+                # last sample stale and blocks admission until that happens.
+                with self._state_lock:
+                    if self._fatal:
+                        return
+                continue
+            except BaseException:
+                return
+
+    def start(self) -> None:
+        with self._state_lock:
+            if self._ever_started:
+                raise CapturedAlpacaPaperServiceError(
+                    "PRESSURE_FEED_ALREADY_STARTED",
+                    "pressure feed worker start is one-shot",
+                )
+            self._ever_started = True
+        # One synchronous feed BEFORE the thread starts so the next managed
+        # worker (selection) begins inside a guaranteed-fresh window.
+        self._feed_once(startup=True)
+        thread = threading.Thread(
+            target=self._run,
+            name="captured-paper-pressure-feed",
+            daemon=False,
+        )
+        self._thread = thread
+        thread.start()
+
+    def close(self, *, join_timeout_seconds: float) -> None:
+        self._stop_event.set()
+        thread = self._thread
+        if thread is not None and thread.is_alive():
+            thread.join(timeout=max(0.0, float(join_timeout_seconds)))
+            if thread.is_alive():
+                raise CapturedAlpacaPaperServiceError(
+                    "PRESSURE_FEED_SHUTDOWN_INCOMPLETE",
+                    "pressure feed thread did not join within the timeout",
+                )
+
+    def health(self) -> Mapping[str, Any]:
+        pressure: dict[str, Any] = {}
+        try:
+            pressure = dict(self._controller.health())
+            active_reasons = pressure.get("active_reasons")
+            # The controller's sealed hysteresis contract is authoritative.
+            # A nonzero entry_streak remains admissible until the configured
+            # pressure_enter_samples threshold changes this published state.
+            ingress_admissible = bool(
+                pressure.get("required_full_fidelity_admissible") is True
+                and pressure.get("pressure_state") == "normal"
+                and pressure.get("rejection_reason") is None
+                and isinstance(active_reasons, (list, tuple))
+                and not active_reasons
+                and isinstance(pressure.get("sample_count"), int)
+                and not isinstance(pressure.get("sample_count"), bool)
+                and pressure["sample_count"] > 0
+            )
+            pressure_health_readable = True
+            pressure_state = pressure.get("pressure_state")
+            pressure_rejection_reason = pressure.get("rejection_reason")
+            pressure_sample_age_seconds = pressure.get("sample_age_seconds")
+            try:
+                pressure_sample_max_age_seconds = float(
+                    self._controller.binding.policy.pressure_sample_max_age_seconds
+                )
+            except (AttributeError, TypeError, ValueError):
+                pressure_sample_max_age_seconds = None
+        except Exception as exc:
+            ingress_admissible = False
+            pressure_health_readable = False
+            pressure_state = "health_unavailable"
+            pressure_rejection_reason = (
+                f"pressure_controller_health_unavailable:{type(exc).__name__}"
+            )
+            pressure_sample_age_seconds = None
+            pressure_sample_max_age_seconds = None
+        with self._state_lock:
+            thread = self._thread
+            running = bool(
+                thread is not None and thread.is_alive() and not self._fatal
+            )
+            known_pressure_reasons = (
+                "cpu",
+                "memory",
+                "disk",
+                "write_latency",
+            )
+            observed_active_reasons = tuple(
+                pressure.get("active_reasons") or ()
+            )
+            coherent_active_reasons = bool(
+                observed_active_reasons
+                and observed_active_reasons
+                == tuple(
+                    reason
+                    for reason in known_pressure_reasons
+                    if reason in observed_active_reasons
+                )
+            )
+            recoverable_resource_pressure = bool(
+                running
+                and pressure_health_readable
+                and not ingress_admissible
+                and pressure.get("required_full_fidelity_admissible") is False
+                and pressure_state == "failed_closed"
+                and coherent_active_reasons
+                and pressure_rejection_reason
+                == "capture_resource_pressure_"
+                + "_".join(observed_active_reasons)
+                and isinstance(pressure.get("sample_count"), int)
+                and not isinstance(pressure.get("sample_count"), bool)
+                and pressure["sample_count"] > 0
+                and pressure_sample_max_age_seconds is not None
+                and math.isfinite(pressure_sample_max_age_seconds)
+                and pressure_sample_max_age_seconds > 0.0
+                and isinstance(pressure_sample_age_seconds, (int, float))
+                and not isinstance(pressure_sample_age_seconds, bool)
+                and math.isfinite(float(pressure_sample_age_seconds))
+                and 0.0
+                <= float(pressure_sample_age_seconds)
+                <= pressure_sample_max_age_seconds
+            )
+            recoverable_sample_staleness = bool(
+                running
+                and pressure_health_readable
+                and not ingress_admissible
+                and pressure.get("required_full_fidelity_admissible") is False
+                and pressure_state == "stale_fail_closed"
+                and pressure_rejection_reason
+                == "capture_resource_pressure_sample_stale"
+                and isinstance(pressure.get("sample_count"), int)
+                and not isinstance(pressure.get("sample_count"), bool)
+                and pressure["sample_count"] > 0
+                and pressure_sample_max_age_seconds is not None
+                and math.isfinite(pressure_sample_max_age_seconds)
+                and pressure_sample_max_age_seconds > 0.0
+                and isinstance(pressure_sample_age_seconds, (int, float))
+                and not isinstance(pressure_sample_age_seconds, bool)
+                and math.isfinite(float(pressure_sample_age_seconds))
+                and float(pressure_sample_age_seconds)
+                > pressure_sample_max_age_seconds
+            )
+            return {
+                "ever_started": self._ever_started,
+                "running": running,
+                "fatal": self._fatal,
+                "fatal_reason": self._fatal_reason,
+                "samples_fed": self._samples_fed,
+                "sample_failure_count": self._sample_failure_count,
+                "consecutive_sample_failures": (
+                    self._consecutive_sample_failures
+                ),
+                "last_sample_error": self._last_sample_error,
+                "interval_seconds": self._interval,
+                # A valid pressure state can be non-admissible without making
+                # the broker-incapable recovery worker unsafe to keep running.
+                # Selection owns the fail-closed boundary: its deferred reader
+                # remains unavailable until this same controller recovers and
+                # one exact durable frontier is ready.  Malformed/unreadable
+                # controller health still blocks active startup.
+                "pre_authority_ready": bool(
+                    running
+                    and pressure_health_readable
+                    and (
+                        ingress_admissible
+                        or recoverable_resource_pressure
+                        or recoverable_sample_staleness
+                    )
+                ),
+                "ingress_admissible": ingress_admissible,
+                "admission_suspended": not ingress_admissible,
+                "recoverable_admission_suspension": (
+                    recoverable_resource_pressure
+                    or recoverable_sample_staleness
+                ),
+                "pressure_state": pressure_state,
+                "pressure_rejection_reason": pressure_rejection_reason,
+                "pressure_sample_age_seconds": pressure_sample_age_seconds,
+            }
 
 
 class _CapturedPaperServiceSingleton:
@@ -881,6 +1153,9 @@ def _issue_launcher_cutover_attestation(
             "broker authority requires the ActivatePaper launcher projection",
         )
     projection = _launcher_projection(verified, mode="ActivatePaper")
+    startup_attempt_id = str(
+        getattr(args, "startup_attempt_id", None) or ""
+    ).strip()
     raw_evidence = process_probe()
     normalized = _normalized_process_evidence(raw_evidence)
     service_argv = list(raw_evidence["service_argv"])
@@ -906,6 +1181,10 @@ def _issue_launcher_cutover_attestation(
     expected_service_argv.extend(
         ("--host-ready-receipt", str(args.host_ready_receipt))
     )
+    if startup_attempt_id:
+        expected_service_argv.extend(
+            ("--startup-attempt-id", startup_attempt_id)
+        )
     if service_argv != expected_service_argv:
         raise CapturedAlpacaPaperServiceError(
             "SERVICE_ARGV_NOT_LAUNCHER_BOUND",
@@ -922,13 +1201,23 @@ def _issue_launcher_cutover_attestation(
         for index, value in enumerate(projected_arguments)
         if value == "--host-ready-receipt"
     ]
+    projected_host_ready = _canonical_uncreated_local_path(
+        projected_arguments[positions[0] + 1],
+        "projected host-ready receipt",
+    ) if len(positions) == 1 and positions[0] + 1 < len(projected_arguments) else None
+    expected_host_ready = projected_host_ready
+    if projected_host_ready is not None and startup_attempt_id:
+        expected_host_ready = _canonical_uncreated_local_path(
+            Path(projected_host_ready).parent
+            / "attempts"
+            / startup_attempt_id
+            / "host-ready.json",
+            "restart host-ready receipt",
+        )
     if (
         len(positions) != 1
         or positions[0] + 1 >= len(projected_arguments)
-        or _canonical_uncreated_local_path(
-            projected_arguments[positions[0] + 1],
-            "projected host-ready receipt",
-        )
+        or expected_host_ready
         != _canonical_uncreated_local_path(
             args.host_ready_receipt, "service host-ready receipt"
         )
@@ -970,6 +1259,10 @@ def _issue_launcher_cutover_attestation(
         "-AllowedReadRootsBase64",
         roots_b64,
     ]
+    if startup_attempt_id:
+        expected_parent_tail.extend(
+            ("-StartupAttemptId", startup_attempt_id)
+        )
     if parent_cmdline[1:] != expected_parent_tail:
         raise CapturedAlpacaPaperServiceError(
             "PARENT_NOT_SEALED_LAUNCHER",
@@ -1698,6 +1991,252 @@ def _reload_final_activation_authority(
     return refreshed
 
 
+def _assert_final_activation_envelope_current(
+    verified: activation_contract.VerifiedCapturedPaperActivation,
+    *,
+    allowed_read_roots: Sequence[str | Path],
+    wall_clock: Callable[[], datetime] = lambda: datetime.now(UTC),
+) -> activation_contract.VerifiedCapturedPaperActivation:
+    """Rehash the consumed envelope without rewalking sealed runtime trees.
+
+    Startup validation and the post-composition semantic reload have already
+    completed before the host publishes its short-lived start permit.  Stage0
+    serves every local module from held, verified bytes and retains
+    deny-write/delete handles over the dependency inventory.  Only the small
+    authority envelope can still drift without those guards: the manifest,
+    readiness receipts and their raw probe artifacts,
+    capture/preactivation/runtime bindings, launcher arguments, launcher and
+    IQFeed bootstrap manifest.  Rehash and revalidate those exact files,
+    recheck the stage0/source attestation and enforce the envelope expiry
+    before any worker is admitted.
+    """
+
+    now = _aware_utc(wall_clock(), "final activation envelope clock")
+    generated_at = _aware_utc(
+        verified.generated_at, "final activation envelope generation"
+    )
+    expires_at = _aware_utc(
+        verified.expires_at, "final activation envelope expiry"
+    )
+    if now < generated_at or now >= expires_at:
+        raise CapturedAlpacaPaperServiceError(
+            "FINAL_ACTIVATION_ENVELOPE_EXPIRED",
+            "activation envelope is future-dated or expired after the broker fixed point",
+        )
+    try:
+        roots = tuple(Path(value).resolve(strict=True) for value in allowed_read_roots)
+        _manifest_path, manifest_raw, _manifest_digest = (
+            activation_contract._stable_read(
+                verified.manifest_path,
+                expected_sha256=verified.manifest_sha256,
+                roots=roots,
+                field="final_activation_envelope.activation_manifest",
+            )
+        )
+        manifest = _strict_json_value(
+            manifest_raw,
+            field="final_activation_envelope.activation_manifest",
+        )
+        if not isinstance(manifest, Mapping):
+            raise ValueError("verified activation manifest is not a mapping")
+        if _canonical_json_bytes(manifest) != _canonical_json_bytes(
+            dict(verified.manifest)
+        ):
+            raise ValueError("verified activation manifest changed in memory")
+        capture_binding = manifest.get("capture_binding")
+        runtime_environment = manifest.get("runtime_environment")
+        preactivation_binding = manifest.get("preactivation_binding")
+        cutover = manifest.get("cutover")
+        if not all(
+            isinstance(value, Mapping)
+            for value in (
+                capture_binding,
+                runtime_environment,
+                preactivation_binding,
+                cutover,
+            )
+        ):
+            raise ValueError("verified activation envelope references are incomplete")
+        capture_store = Path(str(manifest.get("capture_store_root") or ""))
+        if (
+            not capture_store.is_absolute()
+            or str(capture_store).startswith(("\\\\", "//"))
+        ):
+            raise ValueError("capture store is not an absolute local directory")
+        resolved_capture_store = capture_store.resolve(strict=True)
+        cursor = resolved_capture_store
+        while True:
+            info = os.lstat(cursor)
+            attrs = int(getattr(info, "st_file_attributes", 0) or 0)
+            if stat.S_ISLNK(info.st_mode) or attrs & _REPARSE_ATTRIBUTE:
+                raise ValueError("capture store traverses a reparse point")
+            parent = cursor.parent
+            if parent == cursor:
+                break
+            cursor = parent
+        if (
+            not resolved_capture_store.is_dir()
+            or resolved_capture_store != verified.capture_store_root
+            or not any(
+                resolved_capture_store == root
+                or root in resolved_capture_store.parents
+                for root in roots
+            )
+        ):
+            raise ValueError("capture store identity or allowed root changed")
+        activation_contract._strict_local_output_path(
+            cutover.get("host_ready_receipt_base"),
+            roots=roots,
+            field="final_activation_envelope.host_ready_receipt_base",
+        )
+        readiness_context = replace(
+            _readiness_context(verified),
+            allowed_read_roots=tuple(str(root) for root in roots),
+        )
+        (
+            _preactivation_path,
+            preactivation_raw,
+            _preactivation_digest,
+        ) = activation_contract._stable_read(
+            preactivation_binding.get("path"),
+            expected_sha256=preactivation_binding.get("sha256"),
+            roots=roots,
+            field="final_activation_envelope.preactivation_manifest",
+        )
+        preactivation = _strict_json_value(
+            preactivation_raw,
+            field="final_activation_envelope.preactivation_manifest",
+        )
+        if not isinstance(preactivation, Mapping):
+            raise ValueError("preactivation manifest is not a mapping")
+        preactivation_generated_at = _parse_utc_text(
+            preactivation.get("generated_at"),
+            "preactivation manifest generated_at",
+        )
+        preactivation_receipts = preactivation.get("readiness_receipts")
+        if not isinstance(preactivation_receipts, Mapping):
+            raise ValueError("preactivation readiness references are missing")
+        for kind in ("broker_account", "kill_switch"):
+            reference = preactivation_receipts.get(kind)
+            if not isinstance(reference, Mapping):
+                raise ValueError(f"preactivation {kind} reference is missing")
+            _path, raw, _digest = activation_contract._stable_read(
+                reference.get("path"),
+                expected_sha256=reference.get("sha256"),
+                roots=roots,
+                field=(
+                    "final_activation_envelope.preactivation_readiness."
+                    f"{kind}"
+                ),
+            )
+            receipt = _strict_json_value(
+                raw,
+                field=(
+                    "final_activation_envelope.preactivation_readiness."
+                    f"{kind}"
+                ),
+            )
+            if not isinstance(receipt, Mapping):
+                raise ValueError(f"preactivation {kind} receipt is not a mapping")
+            readiness_evidence.validate_readiness_receipt_v3(
+                receipt,
+                kind=kind,
+                context=readiness_context,
+                now=preactivation_generated_at,
+                max_age_seconds=activation_contract._RECEIPT_MAX_AGE_SECONDS[
+                    kind
+                ],
+            )
+        bound_artifacts: list[tuple[str, Path, str]] = [
+            (
+                "capture_binding",
+                Path(str(capture_binding.get("path") or "")),
+                str(capture_binding.get("sha256") or ""),
+            ),
+            (
+                "runtime_environment.source_env",
+                Path(str(runtime_environment.get("source_env_path") or "")),
+                str(runtime_environment.get("source_env_sha256") or ""),
+            ),
+            ("launcher", verified.launcher_path, verified.launcher_sha256),
+            (
+                "launcher_arguments",
+                Path(str(cutover.get("launcher_arguments_path") or "")),
+                str(cutover.get("launcher_arguments_sha256") or ""),
+            ),
+            (
+                "iqfeed_bootstrap_manifest",
+                verified.iqfeed_bootstrap_manifest_path,
+                verified.iqfeed_bootstrap_manifest_sha256,
+            ),
+        ]
+        for field, path, digest in bound_artifacts:
+            activation_contract._stable_read(
+                path,
+                expected_sha256=digest,
+                roots=roots,
+                field=f"final_activation_envelope.{field}",
+            )
+        for kind in sorted(verified.receipt_paths):
+            _path, raw, _digest = activation_contract._stable_read(
+                verified.receipt_paths[kind],
+                expected_sha256=verified.receipt_hashes[kind],
+                roots=roots,
+                field=f"final_activation_envelope.readiness_receipts.{kind}",
+            )
+            receipt = _strict_json_value(
+                raw,
+                field=f"final_activation_envelope.readiness_receipts.{kind}",
+            )
+            if not isinstance(receipt, Mapping):
+                raise ValueError(f"{kind} readiness receipt is not a mapping")
+            captured_at = _parse_utc_text(
+                receipt.get("captured_at"), f"{kind} receipt captured_at"
+            )
+            receipt_expires_at = _parse_utc_text(
+                receipt.get("expires_at"), f"{kind} receipt expires_at"
+            )
+            max_age_seconds = activation_contract._RECEIPT_MAX_AGE_SECONDS[kind]
+            if (
+                captured_at > now
+                or now >= receipt_expires_at
+                or (now - captured_at).total_seconds() > max_age_seconds
+            ):
+                raise CapturedAlpacaPaperServiceError(
+                    "FINAL_ACTIVATION_RECEIPT_STALE",
+                    f"{kind} readiness authority is not current after "
+                    "the broker fixed point",
+                )
+            if kind == "no_order_smoke":
+                continue
+            if kind in {"broker_account", "kill_switch"}:
+                readiness_evidence.validate_readiness_receipt_v2(
+                    receipt,
+                    kind=kind,
+                    context=readiness_context,
+                    now=now,
+                    max_age_seconds=max_age_seconds,
+                )
+            else:
+                readiness_evidence.validate_readiness_receipt_v3(
+                    receipt,
+                    kind=kind,
+                    context=readiness_context,
+                    now=now,
+                    max_age_seconds=max_age_seconds,
+                )
+        _verify_loaded_sources(verified)
+    except CapturedAlpacaPaperServiceError:
+        raise
+    except Exception as exc:
+        raise CapturedAlpacaPaperServiceError(
+            "FINAL_ACTIVATION_ENVELOPE_INVALID",
+            "activation envelope or loaded source authority drifted after "
+            "the broker fixed point",
+        ) from exc
+    return verified
+
+
 def _install_and_validate_settings(
     verified: activation_contract.VerifiedCapturedPaperActivation,
 ) -> tuple[runtime_env.CapturedPaperRuntimeEnvironmentReceipt, Mapping[str, Any]]:
@@ -2046,8 +2585,8 @@ def _paper_order_transition_fence(
             broker_snapshot.get("order_submission_audit_sha256"),
             "order-submission audit",
         ),
-        "after": _iso(after_utc),
-        "until": _iso(until_utc),
+        "after": after_utc.isoformat(),
+        "until": until_utc.isoformat(),
     }
     census = adapter.get_paper_order_transition_census(
         after=after_utc,
@@ -3966,6 +4505,7 @@ class _CapturedPaperHostActivationHandshake:
         active_start_evidence_path: Path,
         revocation_requested_path: Path,
         revoked_path: Path,
+        stopped_path: Path,
         dispatch_lock_path: Path,
         dispatch_lock_identity: Mapping[str, Any],
         verified: activation_contract.VerifiedCapturedPaperActivation,
@@ -3976,6 +4516,7 @@ class _CapturedPaperHostActivationHandshake:
         wall_clock: Callable[[], datetime],
         monotonic_clock: Callable[[], float] = time.monotonic,
         wait: Callable[[float], None] = time.sleep,
+        startup_attempt_id: str | None = None,
     ) -> None:
         self.ready_path = ready_path
         self.permit_path = permit_path
@@ -3983,6 +4524,7 @@ class _CapturedPaperHostActivationHandshake:
         self.active_start_evidence_path = active_start_evidence_path
         self.revocation_requested_path = revocation_requested_path
         self.revoked_path = revoked_path
+        self.stopped_path = stopped_path
         self.dispatch_lock_path = dispatch_lock_path
         if set(dispatch_lock_identity) != _HOST_DISPATCH_LOCK_IDENTITY_KEYS:
             raise CapturedAlpacaPaperServiceError(
@@ -4000,6 +4542,7 @@ class _CapturedPaperHostActivationHandshake:
         self._wall_clock = wall_clock
         self._monotonic = monotonic_clock
         self._wait = wait
+        self._startup_attempt_id = startup_attempt_id
         self._lock = threading.Lock()
         self._prepared_sha256: str | None = None
         self._permit_sha256: str | None = None
@@ -4011,6 +4554,7 @@ class _CapturedPaperHostActivationHandshake:
         self._started_body: Mapping[str, Any] | None = None
         self._apply_completed_event_sha256: str | None = None
         self._apply_completed_event_body: Mapping[str, Any] | None = None
+        self._stopped_sha256: str | None = None
 
     @property
     def quiet_horizon_event_sha256(self) -> str:
@@ -4029,6 +4573,17 @@ class _CapturedPaperHostActivationHandshake:
                 "durable active-start evidence has not been published",
             )
         return self._active_start_evidence_artifact_sha256
+
+    @property
+    def committed_started(self) -> bool:
+        """Whether this process consumed the durable host commit for STARTED."""
+
+        with self._lock:
+            return bool(
+                self._started_sha256
+                and self._apply_completed_event_sha256
+                and self._apply_completed_event_body
+            )
 
     def _assert_active_start_evidence_current_unlocked(self) -> None:
         expected = self._active_start_authority_body
@@ -4117,6 +4672,7 @@ class _CapturedPaperHostActivationHandshake:
             _host_cutover_issuer_process_identity
         ),
         challenge_factory: Callable[[], str] = lambda: secrets.token_hex(32),
+        startup_attempt_id: str | None = None,
     ) -> "_CapturedPaperHostActivationHandshake":
         base = _strict_new_local_json_path(
             ready_output, allowed_roots=allowed_roots
@@ -4131,6 +4687,7 @@ class _CapturedPaperHostActivationHandshake:
                 base.name + ".revocation-requested.json"
             ),
             "revoked": base.with_name(base.name + ".revoked.json"),
+            "stopped": base.with_name(base.name + ".stopped.json"),
         }
         for path in derived.values():
             _strict_new_local_json_path(path, allowed_roots=allowed_roots)
@@ -4178,6 +4735,7 @@ class _CapturedPaperHostActivationHandshake:
             active_start_evidence_path=derived["active_start_evidence"],
             revocation_requested_path=derived["revocation_requested"],
             revoked_path=derived["revoked"],
+            stopped_path=derived["stopped"],
             dispatch_lock_path=dispatch_lock_path,
             dispatch_lock_identity=dispatch_lock_identity,
             verified=verified,
@@ -4188,6 +4746,7 @@ class _CapturedPaperHostActivationHandshake:
             wall_clock=wall_clock,
             monotonic_clock=monotonic_clock,
             wait=wait,
+            startup_attempt_id=startup_attempt_id,
         )
 
     def _common_body(self) -> dict[str, Any]:
@@ -4417,6 +4976,10 @@ class _CapturedPaperHostActivationHandshake:
             "--journal-root",
             "--confirm-fake-money-paper",
         }
+        expected_mode = "Apply"
+        if self._startup_attempt_id is not None:
+            required_options.add("--startup-attempt-id")
+            expected_mode = "RestartOnly"
         if set(options) != required_options or any(
             len(items) != 1
             for option, items in options.items()
@@ -4424,7 +4987,7 @@ class _CapturedPaperHostActivationHandshake:
         ) or not options.get("--allow-read-root"):
             raise CapturedAlpacaPaperServiceError(
                 "HOST_ACTIVATION_ISSUER_COMMAND_INVALID",
-                "host-cutover issuer command does not match the exact Apply schema",
+                "host-cutover issuer command does not match the exact PAPER start schema",
             )
 
         def one(option: str) -> str:
@@ -4435,7 +4998,11 @@ class _CapturedPaperHostActivationHandshake:
             Path(item).resolve(strict=True) for item in options["--allow-read-root"]
         )
         if not (
-            one("--mode") == "Apply"
+            one("--mode") == expected_mode
+            and (
+                self._startup_attempt_id is None
+                or one("--startup-attempt-id") == self._startup_attempt_id
+            )
             and one("--manifest-sha256") == self._verified.manifest_sha256
             and one("--confirm-fake-money-paper")
             == _HOST_CUTOVER_APPLY_CONFIRMATION
@@ -4449,7 +5016,7 @@ class _CapturedPaperHostActivationHandshake:
         ):
             raise CapturedAlpacaPaperServiceError(
                 "HOST_ACTIVATION_ISSUER_COMMAND_INVALID",
-                "host-cutover issuer command is not the exact sealed PAPER Apply",
+                "host-cutover issuer command is not the exact sealed PAPER start",
             )
 
     def _verify_journal_authorization(
@@ -4526,14 +5093,31 @@ class _CapturedPaperHostActivationHandshake:
                 "host-cutover authorization sequence is outside the journal",
             )
         prior_rows = rows[: int(sequence) - 1]
+        cycle_start_index = 0
+        if self._startup_attempt_id is not None:
+            matching_restart_rows = [
+                (index, event)
+                for index, event in enumerate(prior_rows)
+                if event.get("event_type") == "restart_started"
+                and isinstance(event.get("payload"), Mapping)
+                and event["payload"].get("startup_attempt_id")
+                == self._startup_attempt_id
+            ]
+            if len(matching_restart_rows) != 1:
+                raise CapturedAlpacaPaperServiceError(
+                    "HOST_ACTIVATION_JOURNAL_INVALID",
+                    "restart permit lacks one exact attempt boundary",
+                )
+            cycle_start_index = matching_restart_rows[0][0]
+        cycle_prior_rows = prior_rows[cycle_start_index:]
         quiesced_rows = [
             event
-            for event in prior_rows
+            for event in cycle_prior_rows
             if event.get("event_type") == "legacy_execution_lane_quiesced"
         ]
         quiet_rows = [
             event
-            for event in prior_rows
+            for event in cycle_prior_rows
             if event.get("event_type")
             == "legacy_paper_broker_quiet_horizon_completed"
         ]
@@ -4658,11 +5242,11 @@ class _CapturedPaperHostActivationHandshake:
                 "permit claims do not match the durable journal authorization event",
             )
         authorizations = [
-            event for event in rows
+            event for event in rows[cycle_start_index:]
             if event.get("event_type") == "activation_permit_issued"
         ]
         publications = [
-            event for event in rows
+            event for event in rows[cycle_start_index:]
             if event.get("event_type") == "activation_permit_published"
         ]
         publication_valid = True
@@ -5056,8 +5640,23 @@ class _CapturedPaperHostActivationHandshake:
             journal_path,
             field="host committed apply journal",
         )
+        commit_event_type = (
+            "restart_completed"
+            if self._startup_attempt_id is not None
+            else "apply_completed"
+        )
         commits = [
-            event for event in rows if event.get("event_type") == "apply_completed"
+            event
+            for event in rows
+            if event.get("event_type") == commit_event_type
+            and (
+                self._startup_attempt_id is None
+                or (
+                    isinstance(event.get("payload"), Mapping)
+                    and event["payload"].get("startup_attempt_id")
+                    == self._startup_attempt_id
+                )
+            )
         ]
         if not commits:
             raise CapturedAlpacaPaperServiceError(
@@ -5091,16 +5690,72 @@ class _CapturedPaperHostActivationHandshake:
             "active_start_evidence_artifact_sha256",
             "host_quiet_horizon_event_sha256",
             "challenge_sha256",
+            "iqconnect_provider_guard",
             "legacy_execution_lane",
             "legacy_execution_lane_sha256",
             "paper_execution_committed",
             "live_cash_authorized",
             "real_money_authorized",
         }
+        if self._startup_attempt_id is not None:
+            expected_payload_keys.update(
+                {"startup_attempt_id", "clean_stopped_receipt_sha256"}
+            )
         lane = (
             payload.get("legacy_execution_lane")
             if isinstance(payload, Mapping)
             else None
+        )
+        committed_provider_guard = (
+            payload.get("iqconnect_provider_guard")
+            if isinstance(payload, Mapping)
+            else None
+        )
+        cycle_rows = rows
+        if self._startup_attempt_id is not None:
+            starts = [
+                index
+                for index, candidate in enumerate(rows)
+                if candidate.get("event_type") == "restart_started"
+                and isinstance(candidate.get("payload"), Mapping)
+                and candidate["payload"].get("startup_attempt_id")
+                == self._startup_attempt_id
+            ]
+            if len(starts) != 1:
+                raise CapturedAlpacaPaperServiceError(
+                    "HOST_APPLY_COMMIT_INVALID",
+                    "host restart commit lacks one exact attempt boundary",
+                )
+            cycle_rows = rows[starts[0] :]
+        provider_guard_events = [
+            candidate
+            for candidate in cycle_rows
+            if candidate.get("event_type")
+            == "iqconnect_provider_guard_acquired"
+        ]
+        provider_guard_event = (
+            provider_guard_events[0]
+            if len(provider_guard_events) == 1
+            else None
+        )
+        acquired_provider_guard = (
+            provider_guard_event.get("payload")
+            if isinstance(provider_guard_event, Mapping)
+            else None
+        )
+        provider_guard_listeners = (
+            acquired_provider_guard.get("listeners")
+            if isinstance(acquired_provider_guard, Mapping)
+            else None
+        )
+        provider_guard_listener_pairs = (
+            {
+                (item.get("host"), item.get("port"))
+                for item in provider_guard_listeners
+                if isinstance(item, Mapping)
+            }
+            if isinstance(provider_guard_listeners, list)
+            else set()
         )
         recreators = lane.get("recreator_tasks") if isinstance(lane, Mapping) else None
         recorded_at = _parse_utc_text(
@@ -5145,6 +5800,65 @@ class _CapturedPaperHostActivationHandshake:
             and payload.get("host_quiet_horizon_event_sha256")
             == self._quiet_horizon_event_sha256
             and payload.get("challenge_sha256") == self._challenge_sha256
+            and isinstance(committed_provider_guard, Mapping)
+            and set(committed_provider_guard)
+            == {
+                "pid",
+                "create_time_ns",
+                "executable_sha256",
+                "candidate_started_receipt_sha256",
+            }
+            and isinstance(acquired_provider_guard, Mapping)
+            and set(acquired_provider_guard)
+            == {
+                "pid",
+                "create_time_ns",
+                "executable_path",
+                "executable_sha256",
+                "listeners",
+                "guard_connection_count",
+                "live_cash_authorized",
+            }
+            and isinstance(acquired_provider_guard.get("pid"), int)
+            and not isinstance(acquired_provider_guard.get("pid"), bool)
+            and acquired_provider_guard.get("pid") > 0
+            and isinstance(
+                acquired_provider_guard.get("create_time_ns"), int
+            )
+            and not isinstance(
+                acquired_provider_guard.get("create_time_ns"), bool
+            )
+            and acquired_provider_guard.get("create_time_ns") > 0
+            and isinstance(
+                acquired_provider_guard.get("executable_path"), str
+            )
+            and bool(acquired_provider_guard.get("executable_path"))
+            and _SHA256_RE.fullmatch(
+                str(acquired_provider_guard.get("executable_sha256") or "")
+            )
+            is not None
+            and isinstance(provider_guard_listeners, list)
+            and len(provider_guard_listeners) == 2
+            and provider_guard_listener_pairs
+            == {
+                ("127.0.0.1", 5009),
+                ("127.0.0.1", 9200),
+            }
+            and acquired_provider_guard.get("guard_connection_count") == 2
+            and acquired_provider_guard.get("live_cash_authorized") is False
+            and committed_provider_guard.get("pid")
+            == acquired_provider_guard.get("pid")
+            and committed_provider_guard.get("create_time_ns")
+            == acquired_provider_guard.get("create_time_ns")
+            and committed_provider_guard.get("executable_sha256")
+            == acquired_provider_guard.get("executable_sha256")
+            and committed_provider_guard.get(
+                "candidate_started_receipt_sha256"
+            )
+            == self._started_sha256
+            and isinstance(provider_guard_event.get("sequence"), int)
+            and provider_guard_event.get("sequence")
+            < self._permit_body.get("journal_authorization_sequence")
             and isinstance(lane, Mapping)
             and lane.get("state") == "stopped"
             and isinstance(recreators, list)
@@ -5157,6 +5871,17 @@ class _CapturedPaperHostActivationHandshake:
             and payload.get("paper_execution_committed") is True
             and payload.get("live_cash_authorized") is False
             and payload.get("real_money_authorized") is False
+            and (
+                self._startup_attempt_id is None
+                or (
+                    payload.get("startup_attempt_id")
+                    == self._startup_attempt_id
+                    and _SHA256_RE.fullmatch(
+                        str(payload.get("clean_stopped_receipt_sha256") or "")
+                    )
+                    is not None
+                )
+            )
             and started_at <= recorded_at <= permit_valid_until
             and event.get("sequence")
             > self._permit_body.get("journal_authorization_sequence")
@@ -5195,6 +5920,67 @@ class _CapturedPaperHostActivationHandshake:
                     "host did not durably commit STARTED before authority expired",
                 )
             self._wait(min(0.01, remaining))
+
+    def publish_stopped(
+        self,
+        *,
+        supervisor_stopped: bool,
+        shared_store_closed: bool,
+        writer_lease_released: bool,
+    ) -> Mapping[str, Any]:
+        """Publish restart authority only after the complete local close succeeds."""
+
+        with self._lock:
+            if self._stopped_sha256 is not None or os.path.lexists(self.stopped_path):
+                raise CapturedAlpacaPaperServiceError(
+                    "HOST_STOPPED_ALREADY_PUBLISHED",
+                    "clean STOPPED receipt is one-shot",
+                )
+            if not (
+                supervisor_stopped is True
+                and shared_store_closed is True
+                and writer_lease_released is True
+                and self._started_sha256 is not None
+                and self._apply_completed_event_sha256 is not None
+                and self._apply_completed_event_body is not None
+            ):
+                raise CapturedAlpacaPaperServiceError(
+                    "HOST_STOPPED_UNPROVEN",
+                    "clean STOPPED requires the committed STARTED chain and complete close",
+                )
+            now = _aware_utc(self._wall_clock(), "host stopped clock")
+            applied_at = _parse_utc_text(
+                self._apply_completed_event_body.get("recorded_at"),
+                "host apply-completed recorded_at",
+            )
+            if now < applied_at:
+                raise CapturedAlpacaPaperServiceError(
+                    "HOST_STOPPED_CLOCK_INVALID",
+                    "clean STOPPED predates the committed STARTED state",
+                )
+            body = {
+                "schema_version": _HOST_STOPPED_SCHEMA_VERSION,
+                "state": "STOPPED_CLEANLY",
+                **self._common_body(),
+                "prepared_receipt_sha256": self._prepared_sha256,
+                "activation_permit_sha256": self._permit_sha256,
+                "started_receipt_sha256": self._started_sha256,
+                "apply_completed_event_sha256": (
+                    self._apply_completed_event_sha256
+                ),
+                "stopped_at": _iso(now),
+                "supervisor_stopped": True,
+                "shared_store_closed": True,
+                "writer_lease_released": True,
+                "paper_execution_started": True,
+                "paper_execution_stopped": True,
+                "live_cash_authorized": False,
+                "real_money_authorized": False,
+            }
+            body["receipt_sha256"] = activation_contract.sha256_json(body)
+            _publish_canonical_json_once(self.stopped_path, body)
+            self._stopped_sha256 = str(body["receipt_sha256"])
+            return dict(body)
 
     def _assert_dispatch_authority_current_unlocked(self) -> None:
         self.assert_not_revoked()
@@ -5423,6 +6209,12 @@ def _measure_capture_pressure(
     import psutil
 
     root = Path(preflight.capture_store_root).resolve(strict=True)
+    # Measure the same filesystem without creating a short-lived object inside
+    # the append-only capture namespace.  A concurrent resource-health scan is
+    # allowed to adopt new bytes found under ``root``; placing this probe there
+    # and then unlinking it can therefore look exactly like an externally
+    # removed capture object and poison the store fail-closed.
+    probe_root = root.parent
     cpu_percent = float(psutil.cpu_percent(interval=0.1))
     available_memory = int(psutil.virtual_memory().available)
     disk_free = int(shutil.disk_usage(root).free)
@@ -5432,7 +6224,7 @@ def _measure_capture_pressure(
         temporary: str | None = None
         try:
             descriptor, temporary = tempfile.mkstemp(
-                prefix=".chili-pressure-", suffix=".tmp", dir=str(root)
+                prefix=".chili-pressure-", suffix=".tmp", dir=str(probe_root)
             )
             started = float(monotonic_clock())
             with os.fdopen(descriptor, "wb", closefd=True) as handle:
@@ -6228,6 +7020,7 @@ def _assemble_service_composition(
                 "SELECTION_WRITER_ACCOUNTING_MISMATCH",
                 "selection writer accounting differs from measured host resources",
             )
+        yf_session_module.open_fundamentals_refresh()
         source = selection_source_module.SqlAlchemyCapturedViabilitySnapshotSource(
             database_engine,
             variant_application=setup.application,
@@ -6246,7 +7039,9 @@ def _assemble_service_composition(
                 settings,
                 selection_source_module,
             ),
-            fundamentals_reader=yf_session_module.get_fundamentals_receipt,
+            fundamentals_reader=(
+                yf_session_module.get_cached_fundamentals_receipt
+            ),
             context_max_age_seconds=handoff_ttl_seconds,
             tenbeat_entry_tilt_weight=(
                 settings.chili_tenbeat_entry_tilt_weight
@@ -6341,7 +7136,9 @@ def _assemble_service_composition(
             input_port=input_port,
             producer=producer,
             initial_reader=exact_reader,
-            close_source=lambda: None,
+            close_source=lambda: yf_session_module.close_fundamentals_refresh(
+                timeout_seconds=_SERVICE_SHUTDOWN_SECONDS
+            ),
         )
 
     def rollback_selection_application(application: Any) -> Mapping[str, Any]:
@@ -6435,6 +7232,11 @@ def _assemble_service_composition(
             # (480s pair) with margin, so the startup receipt is still written
             # before the host gives up.
             initial_snapshot_warmup_seconds=360.0,
+            # The same 360s initial-cycle deadline above is shared by pressure
+            # admission and source warmup.  Selection derives the controller
+            # from its validated ingress graph; no caller-supplied verdict can
+            # bypass the measured fail-closed policy.
+            wait_for_initial_pressure=True,
             monotonic_clock=monotonic_clock,
         )
     )
@@ -6632,7 +7434,30 @@ def _assemble_service_composition(
             name="exit_owner", worker=exit_owner_worker
         ),
     )
+    # The pressure feed MUST start before selection: the selection initial
+    # cycle publishes through the bounded ingress whose admission requires a
+    # pressure sample fresher than pressure_sample_max_age_seconds (5s sealed),
+    # while the composition-time seed sample is minutes old by then (the
+    # QUEUE_INGRESS_REJECTED startup failure, premarket-20260727_0105/_0204).
+    pressure_feed_worker = _CapturedPaperPressureFeedWorker(
+        pressure_controller=prepared.host.composition.pressure_controller,
+        sampler=lambda: _measure_capture_pressure(
+            preflight=prepared.preflight,
+            replay_runtime_module=replay_runtime_module,
+            wall_clock=wall_clock,
+            monotonic_clock=monotonic_clock,
+        ),
+        interval_seconds=(
+            float(
+                prepared.host.composition.pressure_controller.binding.policy.pressure_sample_max_age_seconds
+            )
+            / 2.0
+        ),
+    )
     selection_pre_authority_workers = (
+        supervisor_module.CapturedPaperManagedWorker(
+            name="pressure_feed", worker=pressure_feed_worker
+        ),
         supervisor_module.CapturedPaperManagedWorker(
             name="selection", worker=selection_worker
         ),
@@ -7244,7 +8069,7 @@ def _execute_active_service(
     # Composition can include bounded DB/broker reads and restart inventory.
     # Re-read all manifest/source/receipt/kill-switch bytes immediately after it
     # finishes instead of inheriting the earlier validation clock.
-    _reload_final_activation_authority(
+    pre_start_verified = _reload_final_activation_authority(
         verified,
         allowed_read_roots=allowed_read_roots,
         wall_clock=wall_clock,
@@ -7263,6 +8088,9 @@ def _execute_active_service(
     supervisor_started = False
     start_health: Mapping[str, Any] | None = None
     consumed_active_authority: Mapping[str, Any] | None = None
+    consumed_final_activation: (
+        activation_contract.VerifiedCapturedPaperActivation | None
+    ) = None
     try:
         final_broker_snapshot = _paper_broker_snapshot(
             composition.adapter,
@@ -7278,9 +8106,15 @@ def _execute_active_service(
         )
 
         def consume_final_start_authority() -> Mapping[str, Any]:
-            nonlocal consumed_active_authority
-            refreshed = _reload_final_activation_authority(
-                verified,
+            nonlocal consumed_active_authority, consumed_final_activation
+            # The full dependency/capsule walk completed before provider and
+            # selection startup.  Rewalking it while the selection queue is live
+            # can itself trip the measured write-latency pressure gate and
+            # durably poison the selection generation.  Stage0 keeps those
+            # verified bytes immutable; revalidate only the small mutable
+            # authority envelope immediately before PREPARED.
+            refreshed = _assert_final_activation_envelope_current(
+                pre_start_verified,
                 allowed_read_roots=allowed_read_roots,
                 wall_clock=wall_clock,
             )
@@ -7304,11 +8138,11 @@ def _execute_active_service(
                 wait=wait,
             )
             _emit_startup_breadcrumb("END 6c broker_quiet_fixed_point")
-            # The broker reads above can consume most or all of the short host
-            # permit window.  Re-read every sealed activation byte and query
-            # the durable kill switch after those reads, then validate the
-            # exact consumed permit last.
-            refreshed = _reload_final_activation_authority(
+            # The post-composition semantic reload and pre-PREPARED envelope
+            # check completed before the short host permit.  Rehash the small
+            # authority envelope again here to retain a post-broker
+            # expiry/hash linearization point without competing with capture.
+            refreshed = _assert_final_activation_envelope_current(
                 refreshed,
                 allowed_read_roots=allowed_read_roots,
                 wall_clock=wall_clock,
@@ -7377,17 +8211,29 @@ def _execute_active_service(
             host_activation_handshake.publish_active_start_evidence(
                 consumed_active_authority
             )
+            consumed_final_activation = refreshed
             return dict(consumed_active_authority)
 
         def assert_final_start_current() -> None:
-            refreshed = _reload_final_activation_authority(
-                verified,
-                allowed_read_roots=allowed_read_roots,
-                wall_clock=wall_clock,
-            )
+            if (
+                consumed_final_activation is None
+                or consumed_active_authority is None
+            ):
+                raise CapturedAlpacaPaperServiceError(
+                    "ACTIVE_START_AUTHORITY_MISSING",
+                    "PAPER worker boundary lacks consumed activation authority",
+                )
+            # Stage0 serves local modules from held verified bytes and retains
+            # deny-write/delete handles over every dependency file.  A full
+            # sealed reload completes before PREPARED; the bounded envelope,
+            # probe-artifact and source-attestation check after the broker fixed
+            # point is the last static-authority linearization point.  Worker
+            # boundaries must recheck only state that can still change at
+            # runtime; a full capsule rehash at every worker can exhaust the
+            # same bounded host permit those checks are meant to protect.
             _paper_kill_switch_snapshot(
                 composition.database_engine,
-                verified=refreshed,
+                verified=consumed_final_activation,
                 wall_clock=wall_clock,
             )
             host_activation_handshake.assert_consumed_permit_current()
@@ -7482,6 +8328,12 @@ def _execute_active_service(
             composition,
             supervisor_started=supervisor_started,
         )
+        if host_activation_handshake.committed_started:
+            host_activation_handshake.publish_stopped(
+                supervisor_stopped=stopped_health.get("state") == "stopped",
+                shared_store_closed=True,
+                writer_lease_released=True,
+            )
         for signum, prior in installed_handlers.items():
             signal.signal(signum, prior)
     if start_health is None:
@@ -7590,6 +8442,7 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--launcher-sha256", required=True)
     parser.add_argument("--no-order-receipt-output")
     parser.add_argument("--host-ready-receipt")
+    parser.add_argument("--startup-attempt-id")
     return parser
 
 
@@ -7598,6 +8451,9 @@ def _validate_mode_arguments(args: argparse.Namespace) -> None:
         getattr(args, "no_order_receipt_output", None) or ""
     ).strip()
     host_ready = str(getattr(args, "host_ready_receipt", None) or "").strip()
+    startup_attempt_id = str(
+        getattr(args, "startup_attempt_id", None) or ""
+    ).strip()
     if args.mode == "no-order-smoke" and not receipt_output:
         raise CapturedAlpacaPaperServiceError(
             "NO_ORDER_RECEIPT_OUTPUT_REQUIRED",
@@ -7617,6 +8473,14 @@ def _validate_mode_arguments(args: argparse.Namespace) -> None:
         raise CapturedAlpacaPaperServiceError(
             "HOST_READY_RECEIPT_FORBIDDEN",
             "host activation receipt is accepted only for active PAPER",
+        )
+    if startup_attempt_id and (
+        args.mode != "activate-paper"
+        or _STARTUP_ATTEMPT_RE.fullmatch(startup_attempt_id) is None
+    ):
+        raise CapturedAlpacaPaperServiceError(
+            "STARTUP_ATTEMPT_ID_INVALID",
+            "startup attempt must be one canonical lowercase UUID for active PAPER",
         )
 
 
@@ -7792,6 +8656,11 @@ def main(argv: Sequence[str] | None = None) -> int:
                         ready_output=args.host_ready_receipt,
                         verified=verified,
                         allowed_roots=args.allow_read_root,
+                        startup_attempt_id=(
+                            str(args.startup_attempt_id)
+                            if args.startup_attempt_id
+                            else None
+                        ),
                     )
                 )
             launcher_attestation = (

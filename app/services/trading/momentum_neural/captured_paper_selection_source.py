@@ -19,7 +19,7 @@ import copy
 import math
 import re
 import uuid
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timedelta, timezone
 from typing import Any, Callable, Mapping, Sequence
 
@@ -27,6 +27,9 @@ from sqlalchemy import func, text
 from sqlalchemy.engine import Engine
 from sqlalchemy.orm import Session
 
+from app.models.captured_paper_selection_frontier import (
+    CapturedPaperSelectionRouteState,
+)
 from app.models.trading import (
     BrainNodeState,
     MomentumOrtexRequestAttempt,
@@ -110,7 +113,7 @@ FEATURE_FLAGS_PROVIDER = "captured_paper_adaptive_policy"
 FUNDAMENTALS_PROVIDER = "yfinance_fundamentals_primary"
 HUB_NODE_ID = "nm_momentum_crypto_intel"
 FUNDAMENTALS_QUERY_SCHEMA_VERSION = (
-    "chili.captured-paper-fundamentals-query.v1"
+    "chili.captured-paper-fundamentals-query.v2"
 )
 ORTEX_BATCH_STATUS_KEY = "ortex_squeeze_fuel_batch"
 
@@ -121,6 +124,9 @@ ORTEX_BATCH_STATUS_KEY = "ortex_squeeze_fuel_batch"
 # a crypto symbol present rejected derived_source_hub_symbol_invalid before
 # the split could run.  Allow hyphens, matching the reader's own design.
 _SYMBOL_RE = re.compile(r"^[A-Z][A-Z0-9.-]{0,35}$")
+_HUB_SYMBOL_RE = re.compile(
+    r"^(?:[A-Z][A-Z0-9.-]{0,35}|[0-9][A-Z0-9.]{0,15}-USD)$"
+)
 _SHA_RE = re.compile(r"^[0-9a-f]{64}$")
 # Bound on the viability-driven admission-universe probe (fundamentals are
 # fetched per admitted symbol, ~1 network call each, so the union must stay
@@ -1088,8 +1094,15 @@ class SqlAlchemyCapturedViabilitySnapshotSource:
         self.fundamentals_reader = fundamentals_reader
         self.wall_clock = wall_clock
         self._source_to_target = source_to_target
+        # A hub generation may contain many complete symbol cohorts.  One
+        # read returns only one cohort so its fast-market context cannot age
+        # behind a large enrichment/publish batch; these fields drain the
+        # remaining cohorts before declaring that generation consumed.
         self._last_hub_snapshot_sha256: str | None = None
-        self._last_snapshots: tuple[CapturedDerivedViabilitySnapshot, ...] | None = None
+        self._draining_hub_snapshot_sha256: str | None = None
+        self._attempted_cohort_symbols: set[str] = set()
+        self._emitted_cohort_symbols: set[str] = set()
+        self._last_cohort_symbol: str | None = None
 
         # Identity-stream payloads are the exact canonical objects whose hashes
         # the scorer consumes.  Do not wrap them in a second envelope: that
@@ -1161,7 +1174,7 @@ class SqlAlchemyCapturedViabilitySnapshotSource:
         all_symbols: list[str] = []
         for raw in symbols_raw:
             symbol = str(raw or "").strip().upper()
-            if symbol != raw or _SYMBOL_RE.fullmatch(symbol) is None:
+            if symbol != raw or _HUB_SYMBOL_RE.fullmatch(symbol) is None:
                 _reject("derived_source_hub_symbol_invalid")
             all_symbols.append(symbol)
         if not all_symbols or len(all_symbols) != len(set(all_symbols)):
@@ -1169,8 +1182,11 @@ class SqlAlchemyCapturedViabilitySnapshotSource:
         equity_symbols = tuple(
             sorted(symbol for symbol in all_symbols if not symbol.endswith("-USD"))
         )
-        if not equity_symbols:
-            _reject("derived_source_equity_universe_empty")
+        # The shared hub row is per-tick and alternates between equity and
+        # crypto-only batches. A crypto-only tick is still a valid, fresh hub
+        # snapshot; the complete/fresh equity route probe supplies the
+        # selection universe below. Rejecting here starved the PAPER frontier
+        # whenever the source sampled between equity batches.
         tick_at = _parse_utc(tick_raw, "derived_source_hub_tick_at")
         body = {
             "schema_version": "chili.captured-paper-viability-hub-snapshot.v1",
@@ -1327,10 +1343,32 @@ class SqlAlchemyCapturedViabilitySnapshotSource:
             query = {
                 "schema_version": FUNDAMENTALS_QUERY_SCHEMA_VERSION,
                 "provider": FUNDAMENTALS_PROVIDER,
-                "operation": "get_fundamentals",
+                "operation": "get_cached_fundamentals_receipt",
+                "lookup_performed": True,
                 "symbol": symbol,
                 "started_at": started_at,
                 "returned_at": returned_at,
+                "lookup_latency_seconds": (
+                    returned_at - started_at
+                ).total_seconds(),
+                "provider_event_at": None,
+                "provider_event_clock_status": (
+                    "unavailable_for_reference_fundamentals"
+                ),
+                "received_at": raw.observed_at,
+                "available_at": returned_at,
+                "last_provider_fetched_at": raw.fetched_at,
+                "last_provider_request_latency_seconds": (
+                    raw.provider_latency_seconds
+                ),
+                "last_provider_limiter_wait_seconds": (
+                    raw.provider_limiter_wait_seconds
+                ),
+                "last_refresh_attempt": (
+                    None
+                    if raw.last_refresh_attempt is None
+                    else raw.last_refresh_attempt.to_dict()
+                ),
                 "empty_result": raw.data is None,
                 "result": result,
                 "result_sha256": result_sha256,
@@ -1341,12 +1379,21 @@ class SqlAlchemyCapturedViabilitySnapshotSource:
                     None
                     if raw.classification_usable
                     else (
-                        "fundamentals_"
+                        raw.reason
+                        or "fundamentals_"
                         f"{raw.status.value.lower()}_"
                         f"{raw.provider_state.value.lower()}"
                     )
                 ),
                 "cache_or_network_transport": raw.origin.value.lower(),
+                "cache_hit": (
+                    raw.origin is FundamentalsReceiptOrigin.CACHE
+                ),
+                "cache_age_seconds": raw.cache_age_seconds,
+                "semantic_ttl_seconds": raw.cache_ttl_seconds,
+                "refresh_state": raw.refresh_state.value,
+                "refresh_reason": raw.refresh_reason,
+                "next_refresh_at": raw.next_refresh_at,
                 "upstream_market_truth_certified": False,
             }
             receipts[symbol] = {
@@ -1354,6 +1401,107 @@ class SqlAlchemyCapturedViabilitySnapshotSource:
                 "query_receipt_sha256": sha256_json(query),
             }
         return receipts
+
+    def _fundamentals_receipt_at_decision(
+        self,
+        *,
+        symbol: str,
+        receipt: Mapping[str, Any] | None,
+        decision_at: datetime,
+    ) -> Mapping[str, Any]:
+        if receipt is None:
+            missing = FundamentalsReceipt(
+                symbol=symbol,
+                status=FundamentalsReceiptStatus.UNAVAILABLE,
+                provider_state=FundamentalsProviderState.UNAVAILABLE,
+                origin=FundamentalsReceiptOrigin.NONE,
+                observed_at=decision_at,
+                cache_ttl_seconds=1.0,
+                reason="fundamentals_not_in_prefetch_universe",
+            )
+            typed = _finite_json(missing.to_dict())
+            body: dict[str, Any] = {
+                "schema_version": FUNDAMENTALS_QUERY_SCHEMA_VERSION,
+                "provider": FUNDAMENTALS_PROVIDER,
+                "operation": (
+                    "cache_lookup_not_performed_"
+                    "authoritative_symbol_arrived_after_prefetch"
+                ),
+                "lookup_performed": False,
+                "symbol": symbol,
+                "started_at": decision_at,
+                "returned_at": decision_at,
+                "lookup_latency_seconds": 0.0,
+                "provider_event_at": None,
+                "provider_event_clock_status": (
+                    "unavailable_for_reference_fundamentals"
+                ),
+                "received_at": decision_at,
+                "available_at": decision_at,
+                "last_provider_fetched_at": None,
+                "last_provider_request_latency_seconds": None,
+                "last_provider_limiter_wait_seconds": None,
+                "last_refresh_attempt": None,
+                "empty_result": True,
+                "result": {},
+                "result_sha256": sha256_json({}),
+                "typed_provider_receipt": typed,
+                "typed_provider_receipt_sha256": sha256_json(typed),
+                "classification_usable": False,
+                "classification_coverage_reason": missing.reason,
+                "cache_or_network_transport": "none",
+                "cache_hit": False,
+                "cache_age_seconds": None,
+                "semantic_ttl_seconds": missing.cache_ttl_seconds,
+                "refresh_state": missing.refresh_state.value,
+                "refresh_reason": missing.refresh_reason,
+                "next_refresh_at": None,
+                "upstream_market_truth_certified": False,
+            }
+        else:
+            body = copy.deepcopy(dict(receipt))
+            body.pop("query_receipt_sha256", None)
+
+        returned_at = _utc(
+            body.get("returned_at"),
+            "fundamentals_returned_at",
+        )
+        received_at = _utc(
+            body.get("received_at"),
+            "fundamentals_received_at",
+        )
+        if returned_at > decision_at or received_at > decision_at:
+            _reject("derived_source_provider_result_from_future")
+        cache_age_raw = body.get("cache_age_seconds")
+        cache_age = 0.0 if cache_age_raw is None else float(cache_age_raw)
+        semantic_age = (
+            decision_at - received_at
+        ).total_seconds() + cache_age
+        ttl = float(body.get("semantic_ttl_seconds") or 0.0)
+        if (
+            not math.isfinite(semantic_age)
+            or semantic_age < 0.0
+            or not math.isfinite(ttl)
+            or ttl <= 0.0
+        ):
+            _reject("derived_source_fundamentals_semantic_clock_invalid")
+        usable = (
+            body.get("classification_usable") is True
+            and semantic_age <= ttl
+        )
+        reason = body.get("classification_coverage_reason")
+        if body.get("classification_usable") is True and not usable:
+            reason = "fundamentals_semantic_ttl_expired"
+        body["decision_at"] = decision_at
+        body["semantic_age_at_decision_seconds"] = semantic_age
+        body["classification_usable_at_decision"] = usable
+        body["classification_coverage_reason"] = (
+            None if usable else str(reason or "fundamentals_unavailable")
+        )
+        return {
+            **body,
+            "query_receipt_sha256": sha256_json(body),
+        }
 
     def read_snapshot(self) -> tuple[CapturedDerivedViabilitySnapshot, ...]:
         probe = self._probe_hub()
@@ -1364,10 +1512,15 @@ class SqlAlchemyCapturedViabilitySnapshotSource:
         probe_now = _utc(self.wall_clock(), "derived_source_probe_at")
         probe_tick = _utc(probe["tick_at"], "derived_source_hub_tick_at")
         probe_age = (probe_now - probe_tick).total_seconds()
-        if probe_age < 0.0 or probe_age > self.context_max_age_seconds:
+        if probe_age < 0.0:
             _reject("derived_source_hub_snapshot_stale")
-        if self._last_hub_snapshot_sha256 == probe_sha:
+        if (
+            self._last_hub_snapshot_sha256 == probe_sha
+            and probe_age <= self.context_max_age_seconds
+        ):
             return ()
+        if probe_age > self.context_max_age_seconds:
+            _reject("derived_source_hub_snapshot_stale")
 
         # Universe = hub equity symbols UNION symbols with complete fresh
         # viability route-sets (see _viability_universe_probe).  The hub's
@@ -1378,54 +1531,38 @@ class SqlAlchemyCapturedViabilitySnapshotSource:
                 | set(self._viability_universe_probe())
             )
         )
+        # Slow-changing instrument metadata is cache-only on this thread.
+        # Misses schedule bounded background refreshes; no provider call or
+        # rate-limit sleep may age the authoritative fast-market snapshot.
         fundamentals = self._fundamentals_receipts(symbols)
         db = Session(bind=self._bind, expire_on_commit=False)
+        prepared: list[dict[str, Any]] = []
         try:
             db.execute(text(_READ_ONLY_TRANSACTION_SQL))
-            # 2026-07-24 (a86-0825): stamp read_at from the SAME wall clock that
-            # stamps every timestamp it is compared against.  It was previously
-            # pg transaction_timestamp() -- the ONLY pg-clock anchor in this
-            # flow, while fundamentals returned_at, the hub's last_tick_utc, and
-            # every viability-row freshness stamp are host datetime.now(UTC)
-            # (producer + this process share the host clock).  Those cross-clock
-            # comparisons had ZERO skew tolerance, so any transient pg/WSL VM
-            # clock lag behind the host (bursts under load) spuriously rejected
-            # with derived_source_provider_result_from_future / hub_snapshot_
-            # stale even though real-time ordering was correct.  Same-clock
-            # anchoring removes the entire failure class with no tolerance
-            # constant; the read-only transaction still pins the DB snapshot and
-            # the hub sha re-check still detects mid-capture movement.
-            read_at = _utc(
-                self.wall_clock(),
-                "derived_source_read_at",
-            )
+            # Supplemental receipt bytes are frozen before this final
+            # repeatable-read transaction. Background refresh may continue, but
+            # no later cache/provider result can alter this decision.
             hub = self._hub_snapshot(db)
             # 2026-07-24 (a86-1532): the probe-vs-in-transaction hub sha
             # EQUALITY pin is unsatisfiable at production cadence: the hub
-            # ticks every 5-25s (measured live, even after hours) while the
-            # fundamentals prefetch for the union universe takes multiples of
-            # that, so every read lost the race and rejected
-            # derived_source_hub_changed_during_capture.  The IN-TRANSACTION
-            # hub read is the authoritative snapshot (same REPEATABLE READ
-            # snapshot as the viability rows); the probe is only a prefetch
-            # hint for the fundamentals universe.  No-lookahead is preserved
-            # (fundamentals still predate read_at, checked below) and the
-            # published occurrence binds THIS in-transaction hub sha.
+            # ticks every 5-25s (measured live, even after hours), so the
+            # bounded probe may already differ by the authoritative read.  The
+            # IN-TRANSACTION hub read is the captured snapshot (same REPEATABLE
+            # READ view as the viability rows); the probe is only a bounded
+            # candidate-universe hint. The published occurrence binds THIS
+            # in-transaction hub sha, and later provider work cannot rebind it.
             hub_sha = _sha(
                 hub.get("hub_snapshot_sha256"),
                 "derived_source_hub_snapshot_sha256",
             )
             if self._last_hub_snapshot_sha256 == hub_sha:
                 return ()
-            if any(
-                _utc(receipt["returned_at"], "fundamentals_returned_at") > read_at
-                for receipt in fundamentals.values()
-            ):
-                _reject("derived_source_provider_result_from_future")
-            tick_at = _utc(hub["tick_at"], "derived_source_hub_tick_at")
-            hub_age = (read_at - tick_at).total_seconds()
-            if hub_age < 0.0 or hub_age > self.context_max_age_seconds:
-                _reject("derived_source_hub_snapshot_stale")
+            symbols = tuple(
+                sorted(
+                    set(symbols)
+                    | {str(value) for value in hub["equity_symbols"]}
+                )
+            )
             variants = (
                 db.query(MomentumStrategyVariant)
                 .filter(MomentumStrategyVariant.id.in_(self.source_variant_ids))
@@ -1444,6 +1581,45 @@ class SqlAlchemyCapturedViabilitySnapshotSource:
                     and captured_paper_initial_variant_sha256(row) == source_sha
                 ):
                     _reject("derived_source_variant_drift")
+            target_variant_ids = tuple(
+                sorted(self.selection_authority.variant_ids)
+            )
+            route_state_rows = (
+                db.query(CapturedPaperSelectionRouteState)
+                .filter(
+                    CapturedPaperSelectionRouteState.account_scope
+                    == self.selection_authority.account_scope,
+                    CapturedPaperSelectionRouteState.expected_account_id
+                    == self.expected_account_id,
+                    CapturedPaperSelectionRouteState.activation_generation
+                    == self.activation_generation,
+                    CapturedPaperSelectionRouteState.symbol.in_(symbols),
+                    CapturedPaperSelectionRouteState.variant_id.in_(
+                        target_variant_ids
+                    ),
+                )
+                .order_by(
+                    CapturedPaperSelectionRouteState.symbol.asc(),
+                    CapturedPaperSelectionRouteState.variant_id.asc(),
+                )
+                .all()
+            )
+            route_event_floors: dict[tuple[str, int], datetime] = {}
+            for route_state in route_state_rows:
+                if not (
+                    route_state.execution_family
+                    == self.selection_authority.execution_family
+                    and route_state.authority_sha256
+                    == self.selection_authority.authority_sha256
+                ):
+                    _reject("derived_source_route_state_authority_drift")
+                route_event_at = _utc(
+                    route_state.source_event_at,
+                    "derived_source_route_state_event_at",
+                )
+                route_event_floors[
+                    (str(route_state.symbol), int(route_state.variant_id))
+                ] = route_event_at
             rows = (
                 db.query(MomentumSymbolViability)
                 .filter(
@@ -1458,6 +1634,20 @@ class SqlAlchemyCapturedViabilitySnapshotSource:
                 )
                 .all()
             )
+            # This clock pins DB queries that require an as-of boundary.  The
+            # final batch decision/read clock is sampled only after every
+            # resolver read has completed.
+            source_snapshot_at = _utc(
+                self.wall_clock(),
+                "derived_source_transaction_snapshot_at",
+            )
+            tick_at = _utc(hub["tick_at"], "derived_source_hub_tick_at")
+            hub_age = (source_snapshot_at - tick_at).total_seconds()
+            if (
+                hub_age < 0.0
+                or hub_age > self.context_max_age_seconds
+            ):
+                _reject("derived_source_hub_snapshot_stale")
             # 2026-07-23 (a80 finding; supersedes the a75/a76 per-row notes):
             # the production viability writer is INCREMENTAL and sparse -- a
             # tick rewrites rows only for the routes it evaluated (measured
@@ -1503,7 +1693,7 @@ class SqlAlchemyCapturedViabilitySnapshotSource:
                             r.freshness_ts,
                             "derived_source_viability_freshness",
                         )
-                        ag = (read_at - fr).total_seconds()
+                        ag = (source_snapshot_at - fr).total_seconds()
                         # 2026-07-24 (a86-0948): viability_score is a float8
                         # column, so the producer CAN persist NaN/Infinity
                         # (JSONB fields cannot).  A non-finite score survives
@@ -1544,294 +1734,580 @@ class SqlAlchemyCapturedViabilitySnapshotSource:
                     ValueError,
                 ):
                     continue
-            rows = [
-                row
-                for row in rows
-                if str(row.symbol or "") in eligible_symbols
-            ]
-            if not rows:
+            if not eligible_symbols:
                 _reject("derived_source_current_snapshot_empty")
-            snapshots: list[CapturedDerivedViabilitySnapshot] = []
+            # Publish one complete symbol cohort per hub generation.  The
+            # captured queue is atomic at the returned tuple boundary: while
+            # that tuple is being resolved/published, admission is suspended.
+            # Resolving every fresh symbol here therefore aged the first
+            # usable cohort beyond the configured market-context TTL that the
+            # initial provider correctly enforces.  A cohort remains all bound
+            # routes for one symbol (never a partial route set).  Select from
+            # PAPER+LIVE-eligible source cohorts whenever any exist and walk
+            # that pool in stable round-robin order.  The first cohort is
+            # current-hub/newest first; subsequent hub generations advance the
+            # cursor so one repeatedly ticking symbol cannot starve its peers.
+            # If one symbol is malformed, continue to the next ranked complete
+            # cohort so a single bad dependency cannot starve the universe.
+            hub_equity_symbols = {
+                str(value) for value in hub["equity_symbols"]
+            }
+
+            source_trade_eligible_symbols = {
+                symbol_key
+                for symbol_key in eligible_symbols
+                if any(
+                    bool(row.paper_eligible) and bool(row.live_eligible)
+                    for row in rows_by_symbol[symbol_key]
+                )
+            }
+            all_candidate_symbols = set(
+                source_trade_eligible_symbols or eligible_symbols
+            )
+            attempted_symbols = (
+                set(self._attempted_cohort_symbols)
+                if self._draining_hub_snapshot_sha256 == hub_sha
+                else set()
+            )
+            hub_had_survivor = bool(
+                self._emitted_cohort_symbols
+                if self._draining_hub_snapshot_sha256 == hub_sha
+                else ()
+            )
+            candidate_symbols = sorted(all_candidate_symbols - attempted_symbols)
+            attempted_this_read: set[str] = set()
+            selected_symbol: str | None = None
             ortex_batch_cache: dict[
                 str, tuple[Mapping[str, Any] | None, str | None]
             ] = {}
             ortex_manifest_cache: dict[
-                str,
-                ValidatedOrtexSqueezeFuelBatchManifest,
+                str, ValidatedOrtexSqueezeFuelBatchManifest
             ] = {}
-            for viability in rows:
-                symbol = str(viability.symbol or "").strip().upper()
+
+            def initial_cohort_rank(
+                symbol_key: str,
+            ) -> tuple[int, float, str]:
+                group = rows_by_symbol[symbol_key]
+                freshness_floor = min(
+                    _utc(
+                        row.freshness_ts,
+                        "derived_source_viability_freshness",
+                    )
+                    for row in group
+                )
+                return (
+                    0 if symbol_key in hub_equity_symbols else 1,
+                    -freshness_floor.timestamp(),
+                    symbol_key,
+                )
+
+            last_cohort_symbol = self._last_cohort_symbol
+            if last_cohort_symbol in candidate_symbols:
+                cursor = candidate_symbols.index(last_cohort_symbol)
+                ranked_symbols = (
+                    candidate_symbols[cursor + 1 :]
+                    + candidate_symbols[: cursor + 1]
+                )
+            else:
+                ranked_symbols = sorted(
+                    candidate_symbols,
+                    key=initial_cohort_rank,
+                )
+
+            for symbol_key in ranked_symbols:
+                attempted_this_read.add(symbol_key)
+                group_prepared: list[dict[str, Any]] = []
+                symbol = str(symbol_key or "").strip().upper()
                 if symbol not in symbols or _SYMBOL_RE.fullmatch(symbol) is None:
                     _reject("derived_source_row_symbol_invalid")
-                # Freshness / coherence / correlation / source-node were
-                # validated per-symbol in the eligibility pre-pass above;
-                # only eligible symbols' rows reach this loop.
-                source_variant = by_id[int(viability.variant_id)]
-                target_id, family_id, source_variant_sha = self._source_to_target[
-                    int(source_variant.id)
-                ]
-                family = get_family(family_id)
-                if family is None:
-                    _reject("derived_source_family_unavailable")
-                context = _context_from_snapshot(viability.regime_snapshot_json)
-                event_at = _parse_utc(
-                    context.utc_iso,
-                    "derived_source_context_event_at",
-                )
-                context_age = (read_at - event_at).total_seconds()
-                if context_age < 0.0 or context_age > self.context_max_age_seconds:
-                    _reject("derived_source_context_stale")
-                features = _features_from_snapshot(
-                    viability.execution_readiness_json
-                )
-                feature_meta = (
-                    features.meta if isinstance(features.meta, Mapping) else {}
-                )
-                ross_signals = feature_meta.get("ross_signals")
-                current_ortex_affected = False
-                current_ortex_batch: Mapping[str, Any] | None = None
-                current_ortex_reason: str | None = None
-                current_ortex_affected = self.ortex_public_policy is not None
-                if current_ortex_affected and isinstance(
-                    ross_signals, Mapping
-                ):
-                    current_signal = ross_signals.get(symbol)
-                    if not isinstance(current_signal, Mapping):
-                        current_ortex_reason = (
-                            "ortex_selection_ranked_signal_missing"
-                        )
-                    else:
+                # A malformed route invalidates only its symbol.  Build all
+                # route payloads into a temporary group and publish none of
+                # them unless every route survives structural parsing and
+                # explicit DB-input resolution.
+                try:
+                    for viability in rows_by_symbol[symbol_key]:
+                        source_variant = by_id[int(viability.variant_id)]
                         (
-                            global_signals,
-                            batch_cache_key,
-                            current_ortex_reason,
-                        ) = _ortex_global_batch_inventory(
-                            db,
-                            feature_meta,
-                            required_symbol=symbol,
-                            read_at=read_at,
-                            public_policy_sha256=(
-                                self.ortex_public_policy_sha256
-                            ),
-                            freshness_ttl_seconds=float(
-                                self.ortex_public_policy[
-                                    "success_cache_ttl_seconds"
-                                ]
-                            ),
-                            manifest_cache=ortex_manifest_cache,
+                            target_id,
+                            family_id,
+                            source_variant_sha,
+                        ) = self._source_to_target[int(source_variant.id)]
+                        family = get_family(family_id)
+                        if family is None:
+                            _reject("derived_source_family_unavailable")
+                        context = _context_from_snapshot(
+                            viability.regime_snapshot_json
+                        )
+                        event_at = _parse_utc(
+                            context.utc_iso,
+                            "derived_source_context_event_at",
+                        )
+                        route_event_floor = route_event_floors.get(
+                            (symbol, target_id)
                         )
                         if (
-                            current_ortex_reason is None
-                            and global_signals is not None
-                            and batch_cache_key is not None
+                            route_event_floor is not None
+                            and event_at < route_event_floor
                         ):
-                            global_member = global_signals[symbol]
-                            if not _ortex_row_signal_matches_global_member(
-                                current_signal,
-                                global_member,
-                            ):
+                            _reject("derived_source_route_clock_regressed")
+                        context_age = (
+                            source_snapshot_at - event_at
+                        ).total_seconds()
+                        if (
+                            context_age < 0.0
+                            or context_age > self.context_max_age_seconds
+                        ):
+                            _reject("derived_source_context_stale")
+                        features = _features_from_snapshot(
+                            viability.execution_readiness_json
+                        )
+                        feature_meta = (
+                            features.meta
+                            if isinstance(features.meta, Mapping)
+                            else {}
+                        )
+                        ross_signals = feature_meta.get("ross_signals")
+                        current_ortex_batch: Mapping[str, Any] | None = None
+                        current_ortex_reason: str | None = None
+                        current_ortex_affected = (
+                            self.ortex_public_policy is not None
+                        )
+                        if current_ortex_affected and isinstance(
+                            ross_signals, Mapping
+                        ):
+                            current_signal = ross_signals.get(symbol)
+                            if not isinstance(current_signal, Mapping):
                                 current_ortex_reason = (
-                                    "ortex_selection_batch_signal_"
-                                    "projection_mismatch"
+                                    "ortex_selection_ranked_signal_missing"
                                 )
                             else:
-                                if batch_cache_key not in ortex_batch_cache:
-                                    ortex_batch_cache[batch_cache_key] = (
-                                        _materialize_ortex_selection_batch(
-                                            db,
-                                            global_signals,
-                                            read_at=read_at,
-                                            public_policy=(
-                                                self.ortex_public_policy
-                                            ),
-                                            public_policy_sha256=(
-                                                self.ortex_public_policy_sha256
-                                            ),
-                                        )
-                                    )
                                 (
-                                    current_ortex_batch,
+                                    global_signals,
+                                    batch_cache_key,
                                     current_ortex_reason,
-                                ) = ortex_batch_cache[batch_cache_key]
-                        if (
-                            current_ortex_batch is None
-                            and current_ortex_reason is None
-                        ):
+                                ) = _ortex_global_batch_inventory(
+                                    db,
+                                    feature_meta,
+                                    required_symbol=symbol,
+                                    read_at=source_snapshot_at,
+                                    public_policy_sha256=(
+                                        self.ortex_public_policy_sha256
+                                    ),
+                                    freshness_ttl_seconds=float(
+                                        self.ortex_public_policy[
+                                            "success_cache_ttl_seconds"
+                                        ]
+                                    ),
+                                    manifest_cache=ortex_manifest_cache,
+                                )
+                                if (
+                                    current_ortex_reason is None
+                                    and global_signals is not None
+                                    and batch_cache_key is not None
+                                ):
+                                    global_member = global_signals[symbol]
+                                    if not _ortex_row_signal_matches_global_member(
+                                        current_signal,
+                                        global_member,
+                                    ):
+                                        current_ortex_reason = (
+                                            "ortex_selection_batch_signal_"
+                                            "projection_mismatch"
+                                        )
+                                    else:
+                                        if batch_cache_key not in ortex_batch_cache:
+                                            ortex_batch_cache[batch_cache_key] = (
+                                                _materialize_ortex_selection_batch(
+                                                    db,
+                                                    global_signals,
+                                                    read_at=source_snapshot_at,
+                                                    public_policy=(
+                                                        self.ortex_public_policy
+                                                    ),
+                                                    public_policy_sha256=(
+                                                        self.ortex_public_policy_sha256
+                                                    ),
+                                                )
+                                            )
+                                        (
+                                            current_ortex_batch,
+                                            current_ortex_reason,
+                                        ) = ortex_batch_cache[batch_cache_key]
+                                if (
+                                    current_ortex_batch is None
+                                    and current_ortex_reason is None
+                                ):
+                                    current_ortex_reason = (
+                                        "ortex_selection_batch_unavailable"
+                                    )
+                        elif current_ortex_affected:
                             current_ortex_reason = (
-                                "ortex_selection_batch_unavailable"
+                                "ortex_selection_signal_inventory_missing"
                             )
-                elif current_ortex_affected:
-                    current_ortex_reason = (
-                        "ortex_selection_signal_inventory_missing"
-                    )
-                fundamentals_receipt = fundamentals[symbol]
-                fundamentals_result = dict(
-                    fundamentals_receipt.get("result") or {}
-                )
-                short_name = fundamentals_result.get("short_name")
-                classification_usable = (
-                    fundamentals_receipt.get("classification_usable") is True
-                )
-                if classification_usable:
-                    leveraged_etf = is_leveraged_etf_name(short_name)
-                    excluded_fund = is_excluded_fund_name(short_name)
-                else:
-                    # These conservative placeholders are never scored: the
-                    # occurrence carries an intersecting coverage gap below.
-                    # They prevent any accidental fail-open inference while
-                    # retaining the fixed typed scorer schema.
-                    leveraged_etf = True
-                    excluded_fund = True
-                external = resolve_viability_external_inputs_for_capture(
-                    symbol,
-                    family,
-                    context,
-                    features,
-                    db=db,
-                    settings_projection=self.settings_projection,
-                    leveraged_etf=leveraged_etf,
-                    excluded_fund=excluded_fund,
-                    decision_as_of=read_at,
-                )
-                post_score = CapturedViabilityPostScoreAdjustment(
-                    tenbeat_entry_tilt_weight=self.tenbeat_entry_tilt_weight,
-                    tenbeat_breakout_score=None,
-                    lookup_status=(
-                        "disabled"
-                        if self.tenbeat_entry_tilt_weight == 0.0
-                        else "inapplicable_non_crypto"
-                    ),
-                    source_read_id=None,
-                )
-                source_payload = {
-                    "schema_version": SOURCE_SCHEMA_VERSION,
-                    "source_authority": "derived_snapshot_only",
-                    "upstream_raw_market_certification": "not_claimed",
-                    "network_source_capture": "explicit_primary_query",
-                    "account_scope": "alpaca:paper",
-                    "expected_account_id": self.expected_account_id,
-                    "activation_generation": self.activation_generation,
-                    "selection_authority_sha256": (
-                        self.selection_authority.authority_sha256
-                    ),
-                    "policy_sha256": self.policy_sha256,
-                    "service_settings_projection_sha256": (
-                        self.service_settings_projection_sha256
-                    ),
-                    "candidate_code_build_sha256": (
-                        self.candidate_code_build_sha256
-                    ),
-                    "read_at": read_at,
-                    "hub_snapshot": copy.deepcopy(dict(hub)),
-                    "hub_snapshot_sha256": hub_sha,
-                    "fundamentals_query_receipt": copy.deepcopy(
-                        dict(fundamentals_receipt)
-                    ),
-                    "instrument_classification": {
-                        "short_name": short_name,
-                        "status": (
-                            "available"
-                            if classification_usable
-                            else "coverage_unavailable"
-                        ),
-                        "coverage_reason": fundamentals_receipt.get(
-                            "classification_coverage_reason"
-                        ),
-                        "leveraged_etf": (
-                            leveraged_etf if classification_usable else None
-                        ),
-                        "excluded_fund": (
-                            excluded_fund if classification_usable else None
-                        ),
-                        "scorer_placeholders_fail_closed": (
-                            None
-                            if classification_usable
-                            else {
-                                "leveraged_etf": True,
-                                "excluded_fund": True,
-                                "never_scored_without_coverage": True,
+                        external = resolve_viability_external_inputs_for_capture(
+                            symbol,
+                            family,
+                            context,
+                            features,
+                            db=db,
+                            settings_projection=self.settings_projection,
+                            # Classification is filled after the transaction
+                            # from the typed fundamentals receipt. Resolve all
+                            # remaining DB inputs without either classifier
+                            # short-circuit.
+                            leveraged_etf=False,
+                            excluded_fund=False,
+                            decision_as_of=source_snapshot_at,
+                        )
+                        post_score = CapturedViabilityPostScoreAdjustment(
+                            tenbeat_entry_tilt_weight=(
+                                self.tenbeat_entry_tilt_weight
+                            ),
+                            tenbeat_breakout_score=None,
+                            lookup_status=(
+                                "disabled"
+                                if self.tenbeat_entry_tilt_weight == 0.0
+                                else "inapplicable_non_crypto"
+                            ),
+                            source_read_id=None,
+                        )
+                        group_prepared.append(
+                            {
+                                "symbol": symbol,
+                                "source_variant_id": int(source_variant.id),
+                                "target_variant_id": target_id,
+                                "family": family,
+                                "context": context,
+                                "features": features,
+                                "external": external,
+                                "post_score_adjustment": post_score,
+                                "source_variant": _variant_snapshot(
+                                    source_variant
+                                ),
+                                "source_viability": _viability_snapshot(
+                                    viability
+                                ),
+                                "source_variant_sha256": source_variant_sha,
+                                "ortex_selection_batch": current_ortex_batch,
+                                "ortex_selection_affected": current_ortex_affected,
+                                "ortex_coverage_reason": (
+                                    current_ortex_reason
+                                    if current_ortex_affected
+                                    else None
+                                ),
+                                "viability_freshness_at": _utc(
+                                    viability.freshness_ts,
+                                    "derived_source_viability_freshness",
+                                ),
+                                "event_at": event_at,
+                                "correlation_id": str(
+                                    viability.correlation_id or ""
+                                ).strip(),
                             }
-                        ),
-                    },
-                    "source_variant": _variant_snapshot(source_variant),
-                    "source_viability": _viability_snapshot(viability),
-                    "target_variant_id": target_id,
-                    "family": {
-                        "family_id": family.family_id,
-                        "version": family.version,
-                        "label": family.label,
-                        "entry_style": family.entry_style,
-                        "default_stop_logic": family.default_stop_logic,
-                        "default_exit_logic": family.default_exit_logic,
-                    },
-                    "regime_context": context.to_public_dict(),
-                    "execution_readiness": features.to_public_dict(),
-                    "viability_settings_projection": (
-                        self.settings_projection.to_dict()
-                    ),
-                    "resolved_external_inputs": external.to_dict(),
-                    "post_score_adjustment": post_score.to_dict(),
-                    "ortex_selection_batch_sha256": (
-                        None
-                        if current_ortex_batch is None
-                        else sha256_json(current_ortex_batch)
-                    ),
-                    "ortex_selection_coverage_reason": (
-                        current_ortex_reason
-                        if current_ortex_affected
-                        else None
-                    ),
-                    "source_variant_sha256": source_variant_sha,
-                }
-                fingerprint = sha256_json(source_payload)
-                correlation = str(viability.correlation_id or "").strip()
-                if not correlation or len(correlation) > 64:
-                    correlation = f"captured:{fingerprint[:55]}"
-                snapshots.append(
-                    CapturedDerivedViabilitySnapshot(
-                        symbol=symbol,
-                        source_variant_id=int(source_variant.id),
-                        target_variant_id=target_id,
-                        family=family,
-                        context=context,
-                        features=features,
-                        settings=self.settings_projection,
-                        external=external,
-                        post_score_adjustment=post_score,
-                        source_payload=source_payload,
-                        ortex_selection_batch=current_ortex_batch,
-                        ortex_selection_affected=current_ortex_affected,
-                        ortex_coverage_reason=(
-                            current_ortex_reason
-                            if current_ortex_affected
-                            else None
-                        ),
-                        source_fingerprint_sha256=fingerprint,
-                        hub_snapshot_sha256=hub_sha,
-                        event_at=event_at,
-                        read_at=read_at,
-                        correlation_id=correlation,
-                    )
-                )
-            if not snapshots:
-                _reject("derived_source_current_snapshot_empty")
-            result = tuple(
-                sorted(
-                    snapshots,
-                    key=lambda row: (
-                        row.symbol,
-                        row.source_variant_id,
-                        row.source_fingerprint_sha256,
-                    ),
-                )
-            )
-            self._last_hub_snapshot_sha256 = hub_sha
-            return result
+                        )
+                except CapturedPaperSelectionSourceUnavailable as exc:
+                    if exc.reason == "derived_source_family_unavailable":
+                        raise
+                    continue
+                except (KeyError, TypeError, ValueError):
+                    continue
+                prepared.extend(group_prepared)
+                selected_symbol = symbol
+                break
         finally:
             try:
                 db.rollback()
             finally:
                 db.close()
+
+        if not prepared and hub_had_survivor:
+            # This immutable hub generation already established a valid
+            # frontier.  Remaining malformed/expired cohorts are symbol-local
+            # exclusions and cannot revoke or repeatedly suspend that frontier.
+            self._last_hub_snapshot_sha256 = hub_sha
+            self._draining_hub_snapshot_sha256 = None
+            self._attempted_cohort_symbols.clear()
+            self._emitted_cohort_symbols.clear()
+            return ()
+        if not prepared:
+            _reject("derived_source_current_snapshot_empty")
+        if selected_symbol is None:
+            _reject("derived_source_symbol_cohort_invalid")
+        read_at = _utc(
+            self.wall_clock(),
+            "derived_source_read_at",
+        )
+        if read_at < source_snapshot_at:
+            _reject("derived_source_read_clock_reversed")
+        if read_at.date() != source_snapshot_at.date():
+            # The only time-dependent resolver input is calendar-day based.
+            # Never publish a batch whose resolver and decision clocks straddle
+            # that boundary.
+            _reject("derived_source_external_resolution_day_crossed")
+        hub_age = (read_at - tick_at).total_seconds()
+        if hub_age < 0.0 or hub_age > self.context_max_age_seconds:
+            _reject("derived_source_hub_snapshot_stale")
+        # Only commit per-hub progress after the transaction and global clock
+        # checks succeed.  From here onward a rejection belongs to this one
+        # symbol cohort; it may be skipped without revoking a prior survivor.
+        if self._draining_hub_snapshot_sha256 != hub_sha:
+            self._draining_hub_snapshot_sha256 = hub_sha
+            self._attempted_cohort_symbols.clear()
+            self._emitted_cohort_symbols.clear()
+        self._attempted_cohort_symbols.update(attempted_this_read)
+        self._last_cohort_symbol = selected_symbol
+        final_groups: dict[str, list[dict[str, Any]]] = {}
+        for item in prepared:
+            final_groups.setdefault(str(item["symbol"]), []).append(item)
+        prepared = [
+            item
+            for group in final_groups.values()
+            if all(
+                0.0
+                <= (read_at - candidate["viability_freshness_at"]).total_seconds()
+                <= self.context_max_age_seconds
+                and 0.0
+                <= (read_at - candidate["event_at"]).total_seconds()
+                <= self.context_max_age_seconds
+                for candidate in group
+            )
+            for item in group
+        ]
+        if not prepared:
+            if hub_had_survivor:
+                return ()
+            _reject("derived_source_current_snapshot_empty")
+        enriched: list[dict[str, Any]] = []
+        for item in prepared:
+            symbol = str(item["symbol"])
+            try:
+                fundamentals_receipt = self._fundamentals_receipt_at_decision(
+                    symbol=symbol,
+                    receipt=fundamentals.get(symbol),
+                    decision_at=read_at,
+                )
+            except CapturedPaperSelectionSourceUnavailable:
+                if hub_had_survivor:
+                    return ()
+                raise
+            fundamentals_result = dict(
+                fundamentals_receipt.get("result") or {}
+            )
+            short_name = fundamentals_result.get("short_name")
+            classification_usable = (
+                fundamentals_receipt.get(
+                    "classification_usable_at_decision"
+                )
+                is True
+            )
+            if classification_usable:
+                leveraged_etf = bool(
+                    self.settings_projection.chili_momentum_exclude_leveraged_etfs
+                ) and is_leveraged_etf_name(short_name)
+                excluded_fund = (
+                    not leveraged_etf
+                    and bool(
+                        self.settings_projection.chili_momentum_exclude_fund_structures_enabled
+                    )
+                    and is_excluded_fund_name(short_name)
+                )
+            else:
+                # These name classifiers are optional in the intended live
+                # strategy and historically fail open.  Preserve that policy
+                # explicitly while recording the exact provider/cache reason;
+                # a supplemental miss must not become a paper-only dark veto.
+                leveraged_etf = False
+                excluded_fund = False
+            resolved_external = (
+                ViabilityExternalInputs.neutral(leveraged_etf=True)
+                if leveraged_etf
+                else replace(
+                    item["external"],
+                    leveraged_etf=False,
+                    excluded_fund=excluded_fund,
+                )
+            )
+            enriched.append(
+                {
+                    **item,
+                    "fundamentals_receipt": fundamentals_receipt,
+                    "short_name": short_name,
+                    "classification_usable": classification_usable,
+                    "leveraged_etf": leveraged_etf,
+                    "excluded_fund": excluded_fund,
+                    "external": resolved_external,
+                }
+            )
+
+        snapshots: list[CapturedDerivedViabilitySnapshot] = []
+        for item in enriched:
+            symbol = str(item["symbol"])
+            family = item["family"]
+            context = item["context"]
+            features = item["features"]
+            fundamentals_receipt = item["fundamentals_receipt"]
+            short_name = item["short_name"]
+            classification_usable = item["classification_usable"]
+            leveraged_etf = item["leveraged_etf"]
+            excluded_fund = item["excluded_fund"]
+            external = item["external"]
+
+            source_freshness_floor_at = min(
+                tick_at,
+                item["viability_freshness_at"],
+                item["event_at"],
+            )
+            source_payload = {
+                "schema_version": SOURCE_SCHEMA_VERSION,
+                "source_authority": "derived_snapshot_only",
+                "upstream_raw_market_certification": "not_claimed",
+                "network_source_capture": (
+                    "cache_only_with_bounded_background_refresh"
+                ),
+                "account_scope": "alpaca:paper",
+                "expected_account_id": self.expected_account_id,
+                "activation_generation": self.activation_generation,
+                "selection_authority_sha256": (
+                    self.selection_authority.authority_sha256
+                ),
+                "policy_sha256": self.policy_sha256,
+                "service_settings_projection_sha256": (
+                    self.service_settings_projection_sha256
+                ),
+                "candidate_code_build_sha256": (
+                    self.candidate_code_build_sha256
+                ),
+                "hub_snapshot": copy.deepcopy(dict(hub)),
+                "hub_snapshot_sha256": hub_sha,
+                "fundamentals_query_receipt": copy.deepcopy(
+                    dict(fundamentals_receipt)
+                ),
+                "instrument_classification": {
+                    "short_name": short_name,
+                    "status": (
+                        "available"
+                        if classification_usable
+                        else "optional_unavailable"
+                    ),
+                    "coverage_reason": fundamentals_receipt.get(
+                        "classification_coverage_reason"
+                    ),
+                    "leveraged_etf": leveraged_etf,
+                    "excluded_fund": excluded_fund,
+                    "required_for_decision": False,
+                    "unavailable_policy": (
+                        None
+                        if classification_usable
+                        else "neutral_fail_open_as_intended"
+                    ),
+                },
+                "source_variant": item["source_variant"],
+                "source_viability": item["source_viability"],
+                "target_variant_id": item["target_variant_id"],
+                "family": {
+                    "family_id": family.family_id,
+                    "version": family.version,
+                    "label": family.label,
+                    "entry_style": family.entry_style,
+                    "default_stop_logic": family.default_stop_logic,
+                    "default_exit_logic": family.default_exit_logic,
+                },
+                "regime_context": context.to_public_dict(),
+                "execution_readiness": features.to_public_dict(),
+                "viability_settings_projection": (
+                    self.settings_projection.to_dict()
+                ),
+                "resolved_external_inputs": external.to_dict(),
+                "post_score_adjustment": item[
+                    "post_score_adjustment"
+                ].to_dict(),
+                "ortex_selection_batch_sha256": (
+                    None
+                    if item["ortex_selection_batch"] is None
+                    else sha256_json(item["ortex_selection_batch"])
+                ),
+                "ortex_selection_coverage_reason": (
+                    item["ortex_coverage_reason"]
+                    if item["ortex_selection_affected"]
+                    else None
+                ),
+                "source_variant_sha256": item[
+                    "source_variant_sha256"
+                ],
+            }
+            source_age_at_read_seconds = (
+                read_at - source_freshness_floor_at
+            ).total_seconds()
+            if (
+                source_age_at_read_seconds < 0.0
+                or source_age_at_read_seconds
+                > self.context_max_age_seconds
+            ):
+                if hub_had_survivor:
+                    return ()
+                _reject("derived_source_market_snapshot_stale")
+            source_payload["source_snapshot"] = {
+                "captured_at": read_at,
+                "authoritative_transaction_snapshot_at": source_snapshot_at,
+                "freshness_floor_at": source_freshness_floor_at,
+                "age_at_read_seconds": source_age_at_read_seconds,
+                "status": "fresh",
+            }
+            source_payload["read_at"] = read_at
+            fingerprint = sha256_json(source_payload)
+            correlation = item["correlation_id"]
+            if not correlation or len(correlation) > 64:
+                correlation = f"captured:{fingerprint[:55]}"
+            snapshots.append(
+                CapturedDerivedViabilitySnapshot(
+                    symbol=symbol,
+                    source_variant_id=item["source_variant_id"],
+                    target_variant_id=item["target_variant_id"],
+                    family=family,
+                    context=context,
+                    features=features,
+                    settings=self.settings_projection,
+                    external=external,
+                    post_score_adjustment=item[
+                        "post_score_adjustment"
+                    ],
+                    source_payload=source_payload,
+                    ortex_selection_batch=item["ortex_selection_batch"],
+                    ortex_selection_affected=item[
+                        "ortex_selection_affected"
+                    ],
+                    ortex_coverage_reason=(
+                        item["ortex_coverage_reason"]
+                        if item["ortex_selection_affected"]
+                        else None
+                    ),
+                    source_fingerprint_sha256=fingerprint,
+                    hub_snapshot_sha256=hub_sha,
+                    event_at=item["event_at"],
+                    read_at=read_at,
+                    correlation_id=correlation,
+                )
+            )
+        if not snapshots:
+            if hub_had_survivor:
+                return ()
+            _reject("derived_source_current_snapshot_empty")
+        result = tuple(
+            sorted(
+                snapshots,
+                key=lambda row: (
+                    row.symbol,
+                    row.source_variant_id,
+                    row.source_fingerprint_sha256,
+                ),
+            )
+        )
+        emitted_symbols = {row.symbol for row in result}
+        if len(emitted_symbols) != 1:
+            _reject("derived_source_symbol_cohort_invalid")
+        emitted_symbol = next(iter(emitted_symbols))
+        self._emitted_cohort_symbols.add(emitted_symbol)
+        return result
 
     def build_occurrence(
         self,
@@ -1981,21 +2457,35 @@ class SqlAlchemyCapturedViabilitySnapshotSource:
         if not isinstance(classification, Mapping):
             _reject("derived_source_instrument_classification_missing")
         classification_status = str(classification.get("status") or "")
-        if classification_status not in {"available", "coverage_unavailable"}:
+        if classification_status not in {"available", "optional_unavailable"}:
             _reject("derived_source_instrument_classification_invalid")
-        classification_gap: CoverageGap | None = None
-        if classification_status == "coverage_unavailable":
+        if classification_status == "optional_unavailable":
             gap_reason = str(classification.get("coverage_reason") or "").strip()
             if not gap_reason:
                 _reject("derived_source_fundamentals_coverage_reason_missing")
-            classification_gap = CoverageGap(
-                stream=CaptureStream.CAPTURED_VIABILITY_INPUT,
-                reason=gap_reason,
-                first_available_at=read_at,
-                last_available_at=read_at,
-                lost_count=1,
-                symbol=snapshot.symbol,
-            )
+            if classification.get("required_for_decision") is not False:
+                _reject("derived_source_optional_classification_contract_invalid")
+            if (
+                classification.get("unavailable_policy")
+                != "neutral_fail_open_as_intended"
+            ):
+                _reject("derived_source_optional_classification_policy_invalid")
+        source_snapshot = snapshot.source_payload.get("source_snapshot")
+        if not isinstance(source_snapshot, Mapping):
+            _reject("derived_source_snapshot_provenance_missing")
+        source_snapshot_status = str(source_snapshot.get("status") or "")
+        if source_snapshot_status != "fresh":
+            _reject("derived_source_snapshot_provenance_invalid")
+        source_snapshot_at = _utc(
+            source_snapshot.get("captured_at"),
+            "derived_source_snapshot_captured_at",
+        )
+        if source_snapshot_at != read_at:
+            _reject("derived_source_snapshot_decision_clock_mismatch")
+        fundamentals_started_at = _utc(
+            fundamentals_receipt.get("started_at"),
+            "fundamentals_started_at",
+        )
         read_receipt = CaptureReadReceipt(
             read_id=read_id,
             decision_id=(
@@ -2006,10 +2496,7 @@ class SqlAlchemyCapturedViabilitySnapshotSource:
             stream=CaptureStream.CAPTURED_VIABILITY_INPUT,
             provider=SOURCE_PROVIDER,
             symbol=snapshot.symbol,
-            requested_at=_utc(
-                fundamentals_receipt.get("started_at"),
-                "derived_source_read_requested_at",
-            ),
+            requested_at=fundamentals_started_at,
             returned_at=read_at,
             query_sha256=source_event.query_sha256 or "",
             source_event_sha256s=(source_ref.event_sha256,),
@@ -2266,7 +2753,6 @@ class SqlAlchemyCapturedViabilitySnapshotSource:
             coverage_gaps=tuple(
                 gap
                 for gap in (
-                    classification_gap,
                     (
                         CoverageGap(
                             stream=CaptureStream.ORTEX_SNAPSHOT,

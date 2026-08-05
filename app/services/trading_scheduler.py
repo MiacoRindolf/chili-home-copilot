@@ -4708,7 +4708,7 @@ def _build_crypto_momentum_universe() -> list[dict]:
         volume day is ~2.5x normal)
       * ``approximate_quote_24h_volume`` -> liquidity (USD turnover)
 
-    USD/USDC spot only, tradable, real price + turnover. We return the full
+    USD spot only, tradable, real price + turnover. We return the full
     qualifying set; ``_bridge_scanner_to_viability`` ranks it by Ross momentum
     quality (percentile, no hardcoded thresholds) and keeps the explosive leaders.
     docs/DESIGN/MOMENTUM_LANE.md
@@ -4717,6 +4717,7 @@ def _build_crypto_momentum_universe() -> list[dict]:
         EXECUTION_FAMILY_COINBASE_SPOT,
         resolve_live_spot_adapter_factory,
     )
+    from .trading.venue.coinbase_spot import _normalize_product_id
 
     def _f(v):
         try:
@@ -4730,7 +4731,7 @@ def _build_crypto_momentum_universe() -> list[dict]:
     adapter = factory()
     products, _fr = adapter.get_products()
     out: list[dict] = []
-    seen_base: dict[str, int] = {}  # base currency -> index in out (USD/USDC dedupe)
+    seen_base: dict[str, int] = {}  # base currency -> index in USD-only output
     for p in products:
         try:
             if (getattr(p, "quote_currency", "") or "").upper() not in ("USD", "USDC"):
@@ -4751,8 +4752,20 @@ def _build_crypto_momentum_universe() -> list[dict]:
             rvol = (1.0 + vol_pct / 100.0) if vol_pct is not None else None
             base = (getattr(p, "base_currency", "") or "").upper()
             quote = (getattr(p, "quote_currency", "") or "").upper()
+            product_id = _normalize_product_id(
+                getattr(p, "product_id", None)
+            )
+            # The momentum/execution ABI is canonical ``BASE-USD``. A USDC-only
+            # venue product cannot graduate into that lane and, if admitted,
+            # is misclassified as equity by the Ortex field builder. Keep it
+            # out here rather than letting one unsupported product invalidate
+            # the entire content-addressed viability batch.
+            if quote != "USD" or not product_id.endswith("-USD"):
+                continue
+            if base and product_id != f"{base}-USD":
+                continue
             entry = {
-                "symbol": p.product_id,
+                "symbol": product_id,
                 "price": price,
                 "change_24h": chg,        # momentum pillar (scorer reads change_24h)
                 "daily_change_pct": chg,  # alias the scorer also accepts
@@ -4761,12 +4774,9 @@ def _build_crypto_momentum_universe() -> list[dict]:
                 "volume_24h": bvol,
                 "source": "coinbase_products_24h",
             }
-            # Dedupe a coin's USD/USDC books so the bridge top-N cap covers N
-            # DISTINCT movers; prefer the -USD book.
+            # Dedupe venue aliases so the bridge top-N cap covers N distinct
+            # movers. Only the execution-compatible -USD book reaches here.
             if base and base in seen_base:
-                ex_idx = seen_base[base]
-                if quote == "USD" and not str(out[ex_idx]["symbol"]).endswith("-USD"):
-                    out[ex_idx] = entry
                 continue
             if base:
                 seen_base[base] = len(out)
@@ -5215,6 +5225,13 @@ def _run_tape_delta_ignite_job():
             _field_ortex_batch_status = copy.deepcopy(
                 _tape_delta_ortex_batch_status
             )
+        _field_ortex_symbols = {
+            str(member.get("symbol") or "").strip().upper()
+            for member in (
+                (_field_ortex_batch_status or {}).get("members") or []
+            )
+            if isinstance(member, dict)
+        }
 
         from .trading.momentum_neural.pipeline import run_momentum_neural_tick
 
@@ -5253,7 +5270,14 @@ def _run_tape_delta_ignite_job():
                     "tickers": [sym],
                     "ross_signals": _universe,
                 }
-                if _field_ortex_batch_status is not None:
+                # A cold crosser extends the cached field.  Its old immutable
+                # Ortex manifest cannot truthfully authorize the new member;
+                # omit it so the pipeline builds one exact extended-field
+                # manifest instead of rejecting the crosser as outside-field.
+                if (
+                    _field_ortex_batch_status is not None
+                    and sym in _field_ortex_symbols
+                ):
                     _tick_meta["ortex_squeeze_fuel_batch"] = (
                         _field_ortex_batch_status
                     )

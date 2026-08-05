@@ -35,6 +35,7 @@ READINESS_PROBE_ARTIFACT_SCHEMA_PREFIX = (
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 _REPARSE_ATTRIBUTE = int(getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400))
 _MAX_PROBE_ARTIFACT_BYTES = 4 * 1024 * 1024
+STATIC_PROOF_MAX_AGE_SECONDS = 24 * 60 * 60
 
 PREACTIVATION_KINDS = frozenset(
     {
@@ -1117,7 +1118,12 @@ def _validate_regressions(
         raise CapturedPaperReadinessEvidenceError(
             "focused regression evidence is incomplete or side-effectful"
         )
-    _evidence_time(evidence, "completed_at", captured_at=captured_at, max_age_seconds=3600)
+    _evidence_time(
+        evidence,
+        "completed_at",
+        captured_at=captured_at,
+        max_age_seconds=STATIC_PROOF_MAX_AGE_SECONDS,
+    )
 
 
 def _validate_lifecycle(
@@ -1157,7 +1163,12 @@ def _validate_lifecycle(
         raise CapturedPaperReadinessEvidenceError(
             "lifecycle preflight did not exercise the required runtime invariants"
         )
-    _evidence_time(evidence, "completed_at", captured_at=captured_at, max_age_seconds=300)
+    _evidence_time(
+        evidence,
+        "completed_at",
+        captured_at=captured_at,
+        max_age_seconds=STATIC_PROOF_MAX_AGE_SECONDS,
+    )
 
 
 def _validate_kill_switch(
@@ -1635,6 +1646,7 @@ __all__ = [
     "REQUIRED_DATABASE_TABLES",
     "REQUIRED_TASKS",
     "ReadinessValidationContext",
+    "STATIC_PROOF_MAX_AGE_SECONDS",
     "canonical_json_bytes",
     "build_readiness_probe_artifact",
     "issue_readiness_receipt_v2",

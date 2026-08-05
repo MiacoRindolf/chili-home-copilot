@@ -13,6 +13,7 @@ any committed gap or fork poisons the exact activation generation.
 
 from __future__ import annotations
 
+from bisect import bisect_right
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 import hashlib
@@ -29,6 +30,7 @@ from .captured_paper_selection_producer import (
     CapturedPaperSelectionBatch,
     CapturedPaperSelectionFrontierReceipt,
     CapturedPaperSelectionObservation,
+    CapturedPaperSelectionQueueReadTimeout,
     CapturedPaperSelectionQueueUnavailable,
     CapturedPaperSelectionRouteStateUpdate,
     ROUTE_COVERAGE_UNAVAILABLE,
@@ -70,7 +72,7 @@ from .replay_capture_runtime import (
 
 UTC = timezone.utc
 
-QUEUE_EVENT_SCHEMA_VERSION = "chili.captured-paper-selection-queue-event.v1"
+QUEUE_EVENT_SCHEMA_VERSION = "chili.captured-paper-selection-queue-event.v2"
 QUEUE_COMMIT_SCHEMA_VERSION = "chili.captured-paper-selection-queue-commit.v2"
 QUEUE_RECEIPT_SCHEMA_VERSION = "chili.captured-paper-selection-queue-receipt.v1"
 QUEUE_POISON_SCHEMA_VERSION = "chili.captured-paper-selection-queue-poison.v1"
@@ -81,6 +83,14 @@ QUEUE_ORTEX_MANIFEST_REF_SCHEMA_VERSION = (
 )
 QUEUE_PROVIDER = "captured_viability_adapter"
 QUEUE_SOURCE_NAME = "captured_viability_queue"
+
+_ACTIVATION_STATIC_SOURCE_STREAMS = frozenset(
+    {
+        CaptureStream.CONFIG_SNAPSHOT,
+        CaptureStream.FEATURE_FLAG_SNAPSHOT,
+        CaptureStream.CODE_BUILD,
+    }
+)
 
 _SHA_RE = re.compile(r"^[0-9a-f]{64}$")
 _REASON_RE = re.compile(r"^[a-z0-9][a-z0-9_.:-]{0,127}$")
@@ -435,6 +445,147 @@ def _validate_source_events(
     return tuple(sorted(events, key=lambda event: (event.sequence, event.event_sha256)))
 
 
+def _source_event_refs(events: Sequence[CaptureEvent]) -> list[dict[str, Any]]:
+    return [CaptureEventRef.from_event(event).to_dict() for event in events]
+
+
+def _retained_source_event_envelopes(
+    events: Sequence[CaptureEvent],
+    *,
+    queue_source_sequence: int,
+) -> tuple[list[dict[str, Any]], list[_PendingOrtexManifest]]:
+    """Retain raw decision-local evidence without duplicating sealed build bytes.
+
+    Config, policy, and code-build payloads are activation-static and already
+    hash-bound by both the selection authority and the scored bundle.  Their
+    exact event refs remain in every queue event, while their large raw payloads
+    stay in the sealed activation evidence instead of being copied once per
+    symbol/variant occurrence.  Dynamic market/provider evidence remains fully
+    embedded and independently reconstructable.
+    """
+
+    envelopes: list[dict[str, Any]] = []
+    pending_ortex: list[_PendingOrtexManifest] = []
+    for event in events:
+        if event.stream in _ACTIVATION_STATIC_SOURCE_STREAMS:
+            continue
+        envelope, pending = _event_envelope(
+            event,
+            queue_source_sequence=queue_source_sequence,
+        )
+        envelopes.append(envelope)
+        if pending is not None:
+            pending_ortex.append(pending)
+    return envelopes, pending_ortex
+
+
+def _recomputed_static_event_sha256(
+    ref: CaptureEventRef,
+    *,
+    identity: CaptureRunIdentity,
+) -> str:
+    """Reconstruct the content address of one payload-elided static event."""
+
+    return sha256_json(
+        {
+            "schema_version": CAPTURE_SCHEMA_VERSION,
+            "identity": identity.to_dict(),
+            "sequence": ref.sequence,
+            "stream": ref.stream.value,
+            "symbol": ref.symbol,
+            "provider": ref.provider,
+            "clocks": CaptureClocks(
+                provider_event_at=ref.provider_event_at,
+                market_reference_at=ref.market_reference_at,
+                received_at=ref.received_at,
+                available_at=ref.available_at,
+            ).to_dict(),
+            "query": None,
+            "query_sha256": None,
+            "payload_sha256": ref.payload_sha256,
+        }
+    )
+
+
+def _validate_compact_source_evidence(
+    bundle: CapturedViabilityInputBundle,
+    *,
+    raw_refs: Any,
+    raw_events: Any,
+    root: Path,
+    queue_identity: CaptureRunIdentity,
+    loaded_commit: _LoadedCommit,
+    manifest_cache: dict[
+        str, tuple[Mapping[str, Any], RetentionObjectRef]
+    ],
+    budget_check: Callable[[], None],
+) -> tuple[tuple[CaptureEventRef, ...], tuple[CaptureEvent, ...]]:
+    if not isinstance(raw_refs, list) or not isinstance(raw_events, list):
+        _fail("queue source evidence inventory is malformed")
+    try:
+        refs = tuple(
+            CaptureEventRef.from_dict(_mapping(value, "source event ref"))
+            for value in raw_refs
+        )
+    except (CaptureContractError, TypeError, ValueError) as exc:
+        raise CapturedPaperSelectionQueueError(
+            "queue source event reference is malformed"
+        ) from exc
+    if refs != bundle.source_refs:
+        _fail("queue source event refs differ from bundle refs")
+
+    events = tuple(
+        _event_from_envelope(
+            _mapping(value, "source event envelope"),
+            root=root,
+            queue_identity=queue_identity,
+            ortex_manifest_refs=loaded_commit.commit.ortex_manifest_refs,
+            manifest_cache=manifest_cache,
+            budget_check=budget_check,
+        )
+        for value in raw_events
+    )
+    retained_refs = tuple(CaptureEventRef.from_event(event) for event in events)
+    expected_retained_refs = tuple(
+        ref
+        for ref in refs
+        if ref.stream not in _ACTIVATION_STATIC_SOURCE_STREAMS
+    )
+    if retained_refs != expected_retained_refs:
+        _fail("queue retained source payloads differ from dynamic bundle refs")
+    if not events:
+        _fail("queue lacks retained decision-local source evidence")
+    source_identity = events[0].identity
+    if any(event.identity != source_identity for event in events):
+        _fail("queue retained source payloads span capture identities")
+
+    expected_static_hashes = {
+        CaptureStream.CONFIG_SNAPSHOT: bundle.config_sha256,
+        CaptureStream.FEATURE_FLAG_SNAPSHOT: bundle.policy_sha256,
+        CaptureStream.CODE_BUILD: bundle.code_sha256,
+    }
+    for stream, expected_payload_sha256 in expected_static_hashes.items():
+        matches = tuple(ref for ref in refs if ref.stream is stream)
+        if (
+            len(matches) != 1
+            or matches[0].payload_sha256 != expected_payload_sha256
+        ):
+            _fail("queue activation-static source ref binding mismatch")
+        static_ref = matches[0]
+        if static_ref.query_sha256 is not None:
+            _fail("queue activation-static source ref unexpectedly has a query")
+        if (
+            static_ref.identity_sha256 != source_identity.identity_sha256
+            or static_ref.event_sha256
+            != _recomputed_static_event_sha256(
+                static_ref,
+                identity=source_identity,
+            )
+        ):
+            _fail("queue activation-static source ref content address mismatch")
+    return refs, events
+
+
 def _authority_matches_selection(
     scoring: CapturedViabilityScoringAuthority,
     selection: CapturedPaperSelectionAuthority,
@@ -615,11 +766,14 @@ class CapturedPaperSelectionQueueDurableGate:
         *,
         queue_identity_sha256: str,
         selection_authority_sha256: str,
+        expected_account_id: str,
+        activation_generation: str,
         commit_count: int,
         last_commit_sha256: str | None,
         durable_through: int,
         poisoned: bool,
         poison_reason: str | None,
+        initial_chain: Sequence["_LoadedCommit"],
     ) -> None:
         self._queue_identity_sha256 = _sha(
             queue_identity_sha256, "durable gate queue identity"
@@ -627,40 +781,100 @@ class CapturedPaperSelectionQueueDurableGate:
         self._selection_authority_sha256 = _sha(
             selection_authority_sha256, "durable gate selection authority"
         )
+        if (
+            not isinstance(expected_account_id, str)
+            or not expected_account_id.strip()
+            or expected_account_id != expected_account_id.strip()
+            or not isinstance(activation_generation, str)
+            or not activation_generation.strip()
+            or activation_generation != activation_generation.strip()
+        ):
+            _fail("durable gate account/generation binding is malformed")
+        self._expected_account_id = expected_account_id
+        self._activation_generation = activation_generation
         self._lock = threading.RLock()
-        self._commit_count = _positive_int(
+        claimed_commit_count = _positive_int(
             commit_count, "durable gate commit count", allow_zero=True
         )
-        self._last_commit_sha256 = (
+        claimed_last_commit_sha256 = (
             _sha(last_commit_sha256, "durable gate last commit")
             if last_commit_sha256 is not None
             else None
         )
-        self._durable_through = _positive_int(
+        claimed_durable_through = _positive_int(
             durable_through, "durable gate source frontier", allow_zero=True
         )
         if type(poisoned) is not bool:
             _fail("durable gate poison flag must be boolean")
-        self._poisoned = poisoned
-        self._poison_reason = (
+        claimed_poisoned = poisoned
+        claimed_poison_reason = (
             _reason(poison_reason) if poison_reason is not None else None
         )
-        if bool(self._commit_count) != bool(self._last_commit_sha256):
+        if bool(claimed_commit_count) != bool(claimed_last_commit_sha256):
             _fail("durable gate commit count/hash are inconsistent")
-        if self._poisoned != bool(self._poison_reason):
+        if claimed_poisoned != bool(claimed_poison_reason):
             _fail("durable gate poison state is inconsistent")
+        chain = tuple(initial_chain)
+        if any(type(row) is not _LoadedCommit for row in chain):
+            _fail("durable gate initial chain is malformed")
+        if len(chain) != claimed_commit_count:
+            _fail("durable gate initial chain count is inconsistent")
+        self._commit_count = 0
+        self._last_commit_sha256: str | None = None
+        self._durable_through = 0
+        self._poisoned = False
+        self._poison_reason: str | None = None
+        self._chain: list[_LoadedCommit] = []
+        for row in chain:
+            self._advance(row)
+        if (
+            self._commit_count != claimed_commit_count
+            or self._last_commit_sha256 != claimed_last_commit_sha256
+            or self._durable_through != claimed_durable_through
+            or self._poisoned != claimed_poisoned
+            or self._poison_reason != claimed_poison_reason
+        ):
+            _fail("durable gate initial chain frontier is inconsistent")
 
     def snapshot(self) -> CapturedPaperSelectionQueueDurableFrontier:
         with self._lock:
-            return CapturedPaperSelectionQueueDurableFrontier(
-                queue_identity_sha256=self._queue_identity_sha256,
-                selection_authority_sha256=self._selection_authority_sha256,
-                commit_count=self._commit_count,
-                last_commit_sha256=self._last_commit_sha256,
-                durable_through=self._durable_through,
-                poisoned=self._poisoned,
-                poison_reason=self._poison_reason,
+            return self._snapshot_locked()
+
+    def _snapshot_locked(self) -> CapturedPaperSelectionQueueDurableFrontier:
+        return CapturedPaperSelectionQueueDurableFrontier(
+            queue_identity_sha256=self._queue_identity_sha256,
+            selection_authority_sha256=self._selection_authority_sha256,
+            commit_count=self._commit_count,
+            last_commit_sha256=self._last_commit_sha256,
+            durable_through=self._durable_through,
+            poisoned=self._poisoned,
+            poison_reason=self._poison_reason,
+        )
+
+    def _snapshot_since(
+        self,
+        commit_count: int,
+        *,
+        max_commit_files: int,
+    ) -> tuple[
+        CapturedPaperSelectionQueueDurableFrontier,
+        tuple["_LoadedCommit", ...],
+    ]:
+        with self._lock:
+            count = _positive_int(
+                commit_count,
+                "durable gate reader commit count",
+                allow_zero=True,
             )
+            maximum = _positive_int(
+                max_commit_files,
+                "durable gate reader maximum commit files",
+            )
+            if count > self._commit_count:
+                _fail("durable gate reader commit count is ahead")
+            if self._commit_count > maximum:
+                _fail("queue commit inventory exceeds bounded scan limit")
+            return self._snapshot_locked(), tuple(self._chain[count:])
 
     def _advance(self, loaded: "_LoadedCommit") -> None:
         if type(loaded) is not _LoadedCommit:
@@ -671,11 +885,45 @@ class CapturedPaperSelectionQueueDurableGate:
                 commit.queue_identity_sha256 != self._queue_identity_sha256
                 or commit.selection_authority_sha256
                 != self._selection_authority_sha256
+                or commit.expected_account_id
+                != self._expected_account_id
+                or commit.activation_generation
+                != self._activation_generation
                 or commit.commit_index != self._commit_count + 1
                 or commit.event_sequence_from_exclusive != self._durable_through
                 or commit.previous_commit_sha256 != self._last_commit_sha256
             ):
                 _fail("durable gate acknowledgement is stale or foreign")
+            prior = self._chain[-1] if self._chain else None
+            if (
+                commit.cumulative_sha256
+                != _expected_cumulative(
+                    (
+                        prior.commit.cumulative_sha256
+                        if prior is not None
+                        else None
+                    ),
+                    commit_index=commit.commit_index,
+                    event_refs=commit.event_refs,
+                    gaps=commit.gaps,
+                    ortex_manifest_refs=commit.ortex_manifest_refs,
+                )
+                or (
+                    prior is not None
+                    and (
+                        commit.resource_binding_sha256
+                        != prior.commit.resource_binding_sha256
+                        or commit.storage_policy_sha256
+                        != prior.commit.storage_policy_sha256
+                    )
+                )
+                or (
+                    self._poisoned
+                    and (commit.event_refs or not commit.poisoned)
+                )
+            ):
+                _fail("durable gate acknowledgement breaks the verified chain")
+            self._chain.append(loaded)
             self._commit_count = commit.commit_index
             self._last_commit_sha256 = loaded.object_ref.sha256
             self._durable_through = commit.event_sequence_through
@@ -1139,6 +1387,7 @@ class CapturedPaperSelectionQueuePublisher:
         self.monotonic_clock = monotonic_clock
         self._lock = threading.RLock()
         self._reserved_sequence: int | None = None
+        self._active_publish_event_sha256: str | None = None
         self._accepted_through = (
             chain[-1].commit.event_sequence_through if chain else 0
         )
@@ -1161,19 +1410,34 @@ class CapturedPaperSelectionQueuePublisher:
         ] = {}
         self._pending_ortex_batch_refcounts: dict[str, int] = {}
         self._pending_ortex_batches_by_sequence: dict[int, tuple[str, ...]] = {}
+        # A manifest may outlive the sequence that first reserved its retained
+        # bytes when a later same-batch publish is still pending.  Track the
+        # reservation by content hash rather than by sequence so ACK/rollback
+        # races release it exactly once.
+        self._pending_ortex_retained_batches: set[str] = set()
         self._durable_gate = CapturedPaperSelectionQueueDurableGate(
             queue_identity_sha256=self.identity.identity_sha256,
             selection_authority_sha256=self.selection_authority.authority_sha256,
+            expected_account_id=self.selection_authority.expected_account_id,
+            activation_generation=self.selection_authority.activation_generation,
             commit_count=self._commit_count,
             last_commit_sha256=self._last_commit_sha256,
             durable_through=self._durable_through,
             poisoned=self._poisoned,
             poison_reason=self._poison_reason,
+            initial_chain=chain,
         )
 
     @property
     def durable_gate(self) -> CapturedPaperSelectionQueueDurableGate:
         return self._durable_gate
+
+    @property
+    def has_outstanding_reservation(self) -> bool:
+        """Inspect shutdown ownership without invoking runtime health probes."""
+
+        with self._lock:
+            return self._reserved_sequence is not None
 
     def reserve_sequence(self) -> int:
         """Reserve exactly one sequence before the caller hashes its bundle."""
@@ -1186,6 +1450,89 @@ class CapturedPaperSelectionQueuePublisher:
             self._reserved_sequence = self._accepted_through + 1
             return self._reserved_sequence
 
+    def _finish_publish(
+        self,
+        *,
+        bundle: CapturedViabilityInputBundle,
+        event_sha256: str,
+        score_result: CapturedViabilityScoreResult,
+        accepted: bool,
+        rejection_reason: str | None = None,
+    ) -> CapturedPaperSelectionQueuePublishReceipt:
+        with self._lock:
+            if (
+                self._reserved_sequence != bundle.source_sequence
+                or self._accepted_through + 1 != bundle.source_sequence
+                or self._active_publish_event_sha256
+                not in (None, event_sha256)
+            ):
+                _fail("queue publish reservation changed before receipt")
+            receipt = CapturedPaperSelectionQueuePublishReceipt(
+                source_sequence=bundle.source_sequence,
+                bundle_sha256=bundle.bundle_sha256,
+                event_sha256=event_sha256,
+                score_result=score_result,
+                accepted=accepted,
+            )
+            self._reserved_sequence = None
+            self._active_publish_event_sha256 = None
+            if not accepted:
+                self._rollback_pending_ortex_sequence(bundle.source_sequence)
+                self._poisoned = True
+                self._poison_reason = (
+                    f"queue_ingress_rejected:{rejection_reason}"
+                    if rejection_reason is not None
+                    else "queue_ingress_rejected"
+                )
+                return receipt
+            if self._accepted_through == self._durable_through:
+                pending_at = float(self.monotonic_clock())
+                if not math.isfinite(pending_at):
+                    _fail("queue monotonic clock returned a non-finite value")
+                self._pending_since_monotonic = pending_at
+            self._accepted_through = bundle.source_sequence
+            return receipt
+
+    def _stage_pending_ortex_sequence(
+        self,
+        *,
+        source_sequence: int,
+        pending_ortex: Sequence[_PendingOrtexManifest],
+    ) -> tuple[str | None, int]:
+        """Bind one queue sequence to bounded, deduplicated Ortex RAM."""
+
+        if source_sequence in self._pending_ortex_batches_by_sequence:
+            _fail("queue sequence already owns pending Ortex material")
+        retained_key: str | None = None
+        retained_bytes = 0
+        pending_batch_hashes = tuple(row.batch_sha256 for row in pending_ortex)
+        for row in pending_ortex:
+            prior = self._pending_ortex_manifests_by_batch.get(row.batch_sha256)
+            if prior is None:
+                self._pending_ortex_manifests_by_batch[row.batch_sha256] = row
+                self._pending_ortex_batch_refcounts[row.batch_sha256] = 1
+                retained_key = row.batch_sha256
+                retained_bytes = row.payload_bytes
+            else:
+                if (
+                    prior.payload != row.payload
+                    or prior.window_start != row.window_start
+                    or prior.window_end != row.window_end
+                ):
+                    _fail("same Ortex batch hash carries different material")
+                refcount = self._pending_ortex_batch_refcounts.get(
+                    row.batch_sha256
+                )
+                if refcount is None or refcount <= 0:
+                    _fail("pending Ortex manifest refcount is malformed")
+                self._pending_ortex_batch_refcounts[row.batch_sha256] = (
+                    refcount + 1
+                )
+        self._pending_ortex_batches_by_sequence[source_sequence] = (
+            pending_batch_hashes
+        )
+        return retained_key, retained_bytes
+
     def publish_bundle(
         self,
         *,
@@ -1193,12 +1540,21 @@ class CapturedPaperSelectionQueuePublisher:
         scoring_authority: CapturedViabilityScoringAuthority,
         evaluation_at: datetime,
         source_events: Sequence[CaptureEvent],
+        before_ingress_admission: (
+            Callable[[CaptureEvent, int, str | None], None] | None
+        ) = None,
     ) -> CapturedPaperSelectionQueuePublishReceipt:
         """Validate, score, and enqueue one complete immutable input envelope."""
 
+        if before_ingress_admission is not None and not callable(
+            before_ingress_admission
+        ):
+            _fail("queue pre-admission callback is not callable")
         with self._lock:
             if self._poisoned:
                 _fail("queue generation is poisoned")
+            if self._active_publish_event_sha256 is not None:
+                _fail("queue already has an active retained publish")
             if type(bundle) is not CapturedViabilityInputBundle:
                 _fail("queue bundle is not the exact typed contract")
             if type(scoring_authority) is not CapturedViabilityScoringAuthority:
@@ -1237,16 +1593,13 @@ class CapturedPaperSelectionQueuePublisher:
                 authority=scoring_authority,
                 evaluation_at=evaluation,
             )
-            source_envelopes: list[dict[str, Any]] = []
-            pending_ortex: list[_PendingOrtexManifest] = []
-            for source_event in events:
-                source_envelope, pending_manifest = _event_envelope(
-                    source_event,
+            source_event_refs = _source_event_refs(events)
+            retained_source_events, pending_ortex = (
+                _retained_source_event_envelopes(
+                    events,
                     queue_source_sequence=bundle.source_sequence,
                 )
-                source_envelopes.append(source_envelope)
-                if pending_manifest is not None:
-                    pending_ortex.append(pending_manifest)
+            )
             if len(pending_ortex) > 1:
                 _fail("queue route carries multiple Ortex batch manifests")
             if bundle.source_sequence in self._pending_ortex_batches_by_sequence:
@@ -1275,10 +1628,9 @@ class CapturedPaperSelectionQueuePublisher:
                 "scoring_authority": scoring_authority.to_dict(),
                 "evaluation_at": _iso(evaluation),
                 "score_result": score_result.to_dict(),
-                "source_events": source_envelopes,
-                "source_event_inventory_sha256": sha256_json(
-                    source_envelopes
-                ),
+                "source_event_refs": source_event_refs,
+                "source_events": retained_source_events,
+                "source_event_inventory_sha256": sha256_json(source_event_refs),
             }
             queue_event = CaptureEvent(
                 identity=self.identity,
@@ -1293,58 +1645,124 @@ class CapturedPaperSelectionQueuePublisher:
                 provider=QUEUE_PROVIDER,
                 symbol=bundle.symbol,
             )
-            retained_bytes = 0
-            retained_key = None
-            for row in pending_ortex:
-                prior = self._pending_ortex_manifests_by_batch.get(
-                    row.batch_sha256
-                )
-                if prior is None:
-                    self._pending_ortex_manifests_by_batch[row.batch_sha256] = row
-                    self._pending_ortex_batch_refcounts[row.batch_sha256] = 1
-                    retained_key = row.batch_sha256
-                    retained_bytes = row.payload_bytes
-                else:
-                    refcount = self._pending_ortex_batch_refcounts.get(
-                        row.batch_sha256
-                    )
-                    if refcount is None or refcount <= 0:
-                        _fail("pending Ortex manifest refcount is malformed")
-                    self._pending_ortex_batch_refcounts[row.batch_sha256] = (
-                        refcount + 1
-                    )
-            self._pending_ortex_batches_by_sequence[bundle.source_sequence] = (
-                pending_batch_hashes
-            )
-            try:
-                accepted = self.ingress.submit(
-                    queue_event,
-                    retained_key=retained_key,
-                    retained_bytes=retained_bytes,
-                )
-            except Exception:
-                self._rollback_pending_ortex_sequence(bundle.source_sequence)
-                raise
-            receipt = CapturedPaperSelectionQueuePublishReceipt(
+            retained_key, retained_bytes = self._stage_pending_ortex_sequence(
                 source_sequence=bundle.source_sequence,
-                bundle_sha256=bundle.bundle_sha256,
-                event_sha256=queue_event.event_sha256,
-                score_result=score_result,
-                accepted=accepted,
+                pending_ortex=pending_ortex,
             )
-            self._reserved_sequence = None
-            if not accepted:
-                self._rollback_pending_ortex_sequence(bundle.source_sequence)
-                self._poisoned = True
-                self._poison_reason = "queue_ingress_rejected"
-                return receipt
-            if self._accepted_through == self._durable_through:
-                pending_at = float(self.monotonic_clock())
-                if not math.isfinite(pending_at):
-                    _fail("queue monotonic clock returned a non-finite value")
-                self._pending_since_monotonic = pending_at
-            self._accepted_through = bundle.source_sequence
-            return receipt
+            # Admission owns the final fail-closed pressure/capacity check, but
+            # canonical payload sizing and event hashing can take seconds for a
+            # full captured selection envelope.  Give the initial-start caller
+            # one last bounded pressure wait only after both expensive values
+            # are cached, immediately before the non-blocking ingress boundary.
+            # Normal hot-path callers supply no callback and remain non-blocking.
+            event_size = queue_event.canonical_size_bytes
+            event_sha256 = queue_event.event_sha256
+            if before_ingress_admission is None:
+                try:
+                    accepted = self.ingress.submit(
+                        queue_event,
+                        retained_key=retained_key,
+                        retained_bytes=retained_bytes,
+                    )
+                except Exception:
+                    self._rollback_pending_ortex_sequence(
+                        bundle.source_sequence
+                    )
+                    raise
+                if accepted and retained_key is not None:
+                    self._pending_ortex_retained_batches.add(retained_key)
+                return self._finish_publish(
+                    bundle=bundle,
+                    event_sha256=event_sha256,
+                    score_result=score_result,
+                    accepted=accepted,
+                )
+            self._active_publish_event_sha256 = event_sha256
+
+        rejection_reason: str | None = None
+        last_attempt = None
+        while True:
+            try:
+                before_ingress_admission(
+                    queue_event,
+                    event_size,
+                    rejection_reason,
+                )
+            except BaseException:
+                with self._lock:
+                    if last_attempt is not None:
+                        self.ingress.finalize_retained_rejection(
+                            queue_event,
+                            last_attempt,
+                        )
+                        self._reserved_sequence = None
+                        self._poisoned = True
+                        self._poison_reason = (
+                            "queue_ingress_rejected:"
+                            f"{last_attempt.rejection_reason}"
+                        )
+                    self._rollback_pending_ortex_sequence(
+                        bundle.source_sequence
+                    )
+                    self._active_publish_event_sha256 = None
+                raise
+            with self._lock:
+                if (
+                    self._poisoned
+                    or self._active_publish_event_sha256 != event_sha256
+                    or self._reserved_sequence != bundle.source_sequence
+                    or self._accepted_through + 1 != bundle.source_sequence
+                ):
+                    if last_attempt is not None:
+                        self.ingress.finalize_retained_rejection(
+                            queue_event,
+                            last_attempt,
+                        )
+                        self._poisoned = True
+                        self._poison_reason = (
+                            "queue_ingress_rejected:"
+                            f"{last_attempt.rejection_reason}"
+                        )
+                    self._rollback_pending_ortex_sequence(
+                        bundle.source_sequence
+                    )
+                    self._active_publish_event_sha256 = None
+                    _fail("queue publish reservation changed during admission")
+                try:
+                    attempt = self.ingress.try_submit_retained(
+                        queue_event,
+                        retained_key=retained_key,
+                        retained_bytes=retained_bytes,
+                    )
+                except Exception:
+                    self._rollback_pending_ortex_sequence(
+                        bundle.source_sequence
+                    )
+                    self._active_publish_event_sha256 = None
+                    raise
+                if attempt.accepted:
+                    if retained_key is not None:
+                        self._pending_ortex_retained_batches.add(retained_key)
+                    return self._finish_publish(
+                        bundle=bundle,
+                        event_sha256=event_sha256,
+                        score_result=score_result,
+                        accepted=True,
+                    )
+                last_attempt = attempt
+                if not attempt.retryable:
+                    self.ingress.finalize_retained_rejection(
+                        queue_event,
+                        attempt,
+                    )
+                    return self._finish_publish(
+                        bundle=bundle,
+                        event_sha256=event_sha256,
+                        score_result=score_result,
+                        accepted=False,
+                        rejection_reason=attempt.rejection_reason,
+                    )
+                rejection_reason = attempt.rejection_reason
 
     def _rollback_pending_ortex_sequence(self, source_sequence: int) -> None:
         batch_hashes = self._pending_ortex_batches_by_sequence.pop(
@@ -1356,13 +1774,18 @@ class CapturedPaperSelectionQueuePublisher:
                 _fail("pending Ortex manifest refcount is malformed")
             if refcount == 1:
                 self._pending_ortex_batch_refcounts.pop(batch_sha256)
-                if (
-                    self._pending_ortex_manifests_by_batch.pop(
-                        batch_sha256, None
-                    )
-                    is None
-                ):
+                pending = self._pending_ortex_manifests_by_batch.pop(
+                    batch_sha256, None
+                )
+                if pending is None:
                     _fail("pending Ortex manifest material is missing")
+                if batch_sha256 in self._pending_ortex_retained_batches:
+                    self.ingress.release_retained(
+                        identity_sha256=self.identity.identity_sha256,
+                        retained_key=batch_sha256,
+                        expected_bytes=pending.payload_bytes,
+                    )
+                    self._pending_ortex_retained_batches.remove(batch_sha256)
             else:
                 self._pending_ortex_batch_refcounts[batch_sha256] = refcount - 1
 
@@ -1375,7 +1798,11 @@ class CapturedPaperSelectionQueuePublisher:
         """
 
         with self._lock:
-            pending = tuple(self._pending_ortex_manifests_by_batch.values())
+            pending = tuple(
+                row
+                for row in self._pending_ortex_manifests_by_batch.values()
+                if row.batch_sha256 in self._pending_ortex_retained_batches
+            )
             for row in pending:
                 self.ingress.release_retained(
                     identity_sha256=self.identity.identity_sha256,
@@ -1385,6 +1812,7 @@ class CapturedPaperSelectionQueuePublisher:
             self._pending_ortex_manifests_by_batch.clear()
             self._pending_ortex_batch_refcounts.clear()
             self._pending_ortex_batches_by_sequence.clear()
+            self._pending_ortex_retained_batches.clear()
 
     def heartbeat(self, *, watermark_at: datetime) -> CapturedPaperSelectionQueueHealth:
         with self._lock:
@@ -1392,14 +1820,20 @@ class CapturedPaperSelectionQueuePublisher:
             now = _utc(self.wall_clock(), "queue heartbeat wall clock")
             if watermark > now:
                 _fail("queue heartbeat watermark is in the future")
-            if self._watermark_at is not None and watermark < self._watermark_at:
-                _fail("queue heartbeat watermark moved backwards")
-            self._watermark_at = watermark
+            # Source cohorts are sequenced by durable ingestion, not by their
+            # market-reference clocks.  A later cohort can therefore carry a
+            # slightly older valid event time.  The queue watermark is the
+            # observed high-water mark: retain it instead of poisoning an
+            # otherwise complete batch for normal event-time reordering.
+            if self._watermark_at is None or watermark > self._watermark_at:
+                self._watermark_at = watermark
             return self.health()
 
     def poison(self, reason: str) -> CapturedPaperSelectionQueuePoisonReceipt:
         normalized = _reason(reason)
         with self._lock:
+            if self._active_publish_event_sha256 is not None:
+                _fail("queue poison cannot race an active retained publish")
             if self._poison_receipt is not None:
                 if self._poison_receipt.reason != normalized:
                     _fail("queue poison reason changed after terminalization")
@@ -1407,6 +1841,7 @@ class CapturedPaperSelectionQueuePublisher:
             now = _utc(self.wall_clock(), "queue poison wall clock")
             reserved = self._reserved_sequence
             self._reserved_sequence = None
+            self._active_publish_event_sha256 = None
             self._poisoned = True
             self._poison_reason = normalized
             accepted = self.ingress.submit_gap(
@@ -1694,10 +2129,15 @@ class CapturedPaperSelectionQueuePublisher:
                             refcount - 1
                         )
             for pending in release_manifests:
+                if pending.batch_sha256 not in self._pending_ortex_retained_batches:
+                    _fail("durable commit lost retained Ortex ownership")
                 self.ingress.release_retained(
                     identity_sha256=self.identity.identity_sha256,
                     retained_key=pending.batch_sha256,
                     expected_bytes=pending.payload_bytes,
+                )
+                self._pending_ortex_retained_batches.remove(
+                    pending.batch_sha256
                 )
             durable_at = float(self.monotonic_clock())
             if not math.isfinite(durable_at):
@@ -1802,23 +2242,40 @@ class CapturedPaperSelectionQueueWriter:
         return self._worker.stop(timeout_seconds=timeout_seconds)
 
     def close(self, *, timeout_seconds: float = 10.0) -> bool:
-        if self.publisher.health().reserved_sequence is not None:
+        if self.publisher.has_outstanding_reservation:
             self.publisher.poison("queue_shutdown_with_outstanding_reservation")
         stopped = self.stop(timeout_seconds=timeout_seconds)
-        worker_health = self._worker.health()
+        worker_health = self._worker.lifecycle_health()
+        physically_quiesced_after_failure = bool(
+            worker_health.get("has_started")
+            and not worker_health["writer_alive"]
+            and worker_health.get("last_error")
+            and self._worker.ingress.drained
+        )
         if (
             not worker_health["writer_alive"]
             and worker_health.get("last_error") is not None
         ):
             self.publisher._release_pending_ortex_after_writer_failure()
-        if not worker_health["writer_alive"] and self._worker.ingress.drained:
+        if (
+            not worker_health["writer_alive"]
+            and self._worker.ingress.drained
+        ):
             self.publisher.writer_lease.release()
-        return stopped
+        return bool(stopped or physically_quiesced_after_failure)
 
     def health(self) -> dict[str, Any]:
         return {
             "queue": self.publisher.health().to_dict(),
             "writer": self._worker.health(),
+        }
+
+    def progress_health(self) -> dict[str, Any]:
+        """Bounded health used only while awaiting the fsync frontier."""
+
+        return {
+            "queue": self.publisher.health().to_dict(),
+            "writer": self._worker.progress_health(),
         }
 
 
@@ -1895,6 +2352,7 @@ def _verify_queue_event(
         "scoring_authority",
         "evaluation_at",
         "score_result",
+        "source_event_refs",
         "source_events",
         "source_event_inventory_sha256",
     }
@@ -1925,26 +2383,29 @@ def _verify_queue_event(
         or not _authority_matches_selection(scoring, selection_authority)
     ):
         _fail("queue bundle/scoring authority binding mismatch")
+    raw_refs = raw.get("source_event_refs")
     raw_sources = raw.get("source_events")
-    if not isinstance(raw_sources, list):
-        _fail("queue source event inventory is malformed")
-    if raw.get("source_event_inventory_sha256") != sha256_json(raw_sources):
+    if not isinstance(raw_refs, list):
+        _fail("queue source event ref inventory is malformed")
+    if raw.get("source_event_inventory_sha256") != sha256_json(raw_refs):
         _fail("queue source event inventory hash mismatch")
-    source_events = tuple(
-        _event_from_envelope(
-            _mapping(value, "source event envelope"),
-            root=root,
-            queue_identity=queue_identity,
-            ortex_manifest_refs=loaded_commit.commit.ortex_manifest_refs,
-            manifest_cache=manifest_cache,
-            budget_check=budget_check,
-        )
-        for value in raw_sources
+    source_refs, source_events = _validate_compact_source_evidence(
+        bundle,
+        raw_refs=raw_refs,
+        raw_events=raw_sources,
+        root=root,
+        queue_identity=queue_identity,
+        loaded_commit=loaded_commit,
+        manifest_cache=manifest_cache,
+        budget_check=budget_check,
     )
-    _validate_source_events(bundle, source_events)
     source_identity = source_events[0].identity
     if (
         any(event.identity != source_identity for event in source_events)
+        or any(
+            ref.identity_sha256 != source_identity.identity_sha256
+            for ref in source_refs
+        )
         or source_identity.identity_sha256 != bundle.capture_identity_sha256
         or source_identity.run_id != selection_authority.activation_generation
         or source_identity.generation == queue_identity.generation
@@ -2032,60 +2493,123 @@ class CapturedPaperSelectionQueueInputPort:
         self._durable_watermark_at: datetime | None = None
         self._last_read_at: datetime | None = None
         self._last_error: str | None = None
-        # Frontier events are immutable content-addressed objects.  Reuse an
-        # exact fsync-acknowledged prefix while this reader lives; a new reader
-        # (including every process restart) performs full byte verification.
-        self._verified_chain: tuple[_LoadedCommit, ...] = ()
+        # The publisher verifies the sealed chain once at process startup and
+        # the durable gate appends each exact post-fsync commit token.  Readers
+        # reuse that immutable prefix and independently verify each commit
+        # object only when its events first cross the consumer frontier.
+        self._verified_chain: list[_LoadedCommit] = []
+        self._verified_commit_objects: set[str] = set()
+        self._materialized_commit_sha256: str | None = None
+        self._materialized_commit_events: tuple[CaptureEvent, ...] = ()
+
+    def _materialize_commit_events_once(
+        self,
+        loaded: _LoadedCommit,
+    ) -> tuple[CaptureEvent, ...]:
+        digest = loaded.object_ref.sha256
+        with self._lock:
+            if self._materialized_commit_sha256 == digest:
+                return self._materialized_commit_events
+        events = _materialize_commit_events(self.root, loaded)
+        with self._lock:
+            if self._materialized_commit_sha256 == digest:
+                return self._materialized_commit_events
+            self._materialized_commit_sha256 = digest
+            self._materialized_commit_events = events
+            return events
 
     def _acknowledged_chain(
         self,
         *,
         durable: CapturedPaperSelectionQueueDurableFrontier,
+        gate_delta: tuple[_LoadedCommit, ...],
         budget_check: Callable[[], None],
-    ) -> tuple[_LoadedCommit, ...]:
+    ) -> list[_LoadedCommit]:
         with self._lock:
             cached = self._verified_chain
-        if durable.commit_count < len(cached):
-            _fail("queue durable acknowledgement moved backwards")
-        if durable.commit_count == len(cached):
-            cached_hash = cached[-1].object_ref.sha256 if cached else None
-            cached_through = (
+            cached_count = len(cached)
+            if durable.commit_count < cached_count:
+                _fail("queue durable acknowledgement moved backwards")
+            if durable.commit_count > self.max_commit_files:
+                _fail("queue commit inventory exceeds bounded scan limit")
+            if len(gate_delta) != durable.commit_count - cached_count:
+                _fail("queue durable acknowledgement delta is inconsistent")
+            if durable.commit_count == cached_count:
+                cached_hash = cached[-1].object_ref.sha256 if cached else None
+                cached_through = (
+                    cached[-1].commit.event_sequence_through if cached else 0
+                )
+                if (
+                    gate_delta
+                    or cached_hash != durable.last_commit_sha256
+                    or cached_through != durable.durable_through
+                ):
+                    _fail("cached queue prefix differs from durable acknowledgement")
+                return cached
+
+            prior_object = cached[-1].object_ref.sha256 if cached else None
+            prior_through = (
                 cached[-1].commit.event_sequence_through if cached else 0
             )
+            for offset, row in enumerate(gate_delta, start=1):
+                budget_check()
+                commit = row.commit
+                if (
+                    type(row) is not _LoadedCommit
+                    or commit.commit_index != cached_count + offset
+                    or commit.previous_commit_sha256 != prior_object
+                    or commit.event_sequence_from_exclusive != prior_through
+                    or commit.queue_identity_sha256
+                    != self.queue_identity.identity_sha256
+                    or commit.selection_authority_sha256
+                    != self.selection_authority.authority_sha256
+                    or commit.expected_account_id
+                    != self.selection_authority.expected_account_id
+                    or commit.activation_generation
+                    != self.selection_authority.activation_generation
+                ):
+                    _fail("queue durable acknowledgement delta is invalid")
+                prior_object = row.object_ref.sha256
+                prior_through = commit.event_sequence_through
+                # Checkpoint each fully validated immutable token so a bounded
+                # timeout resumes at the next delta instead of rescanning the
+                # same long startup prefix forever.
+                cached.append(row)
             if (
-                cached_hash != durable.last_commit_sha256
-                or cached_through != durable.durable_through
+                prior_object != durable.last_commit_sha256
+                or prior_through != durable.durable_through
             ):
-                _fail("cached queue prefix differs from durable acknowledgement")
+                _fail("queue durable acknowledgement hash/frontier mismatch")
             return cached
 
-        chain = _load_commit_chain(
-            self.root,
-            identity=self.queue_identity,
-            selection_authority=self.selection_authority,
-            max_commit_files=self.max_commit_files,
-            budget_check=budget_check,
-        )
-        if durable.commit_count > len(chain):
-            _fail("queue durable acknowledgement exceeds committed chain")
-        acknowledged = chain[: durable.commit_count]
-        if not acknowledged:
-            _fail("non-empty durable acknowledgement has no committed chain")
-        last = acknowledged[-1]
-        if (
-            last.object_ref.sha256 != durable.last_commit_sha256
-            or last.commit.event_sequence_through != durable.durable_through
-        ):
-            _fail("queue durable acknowledgement hash/frontier mismatch")
-        # The already-cached prefix must be byte-for-byte the same chain.  This
-        # protects against accepting a replacement/fork when the gate advances.
-        if tuple(
-            row.object_ref.sha256 for row in acknowledged[: len(cached)]
-        ) != tuple(row.object_ref.sha256 for row in cached):
-            _fail("queue immutable verified prefix changed")
+    def _verify_commit_object_once(
+        self,
+        loaded: _LoadedCommit,
+        *,
+        budget_check: Callable[[], None],
+    ) -> None:
+        digest = loaded.object_ref.sha256
         with self._lock:
-            self._verified_chain = acknowledged
-        return acknowledged
+            if digest in self._verified_commit_objects:
+                return
+        budget_check()
+        verified = ContentAddressedCaptureStore.read_derived_ref(
+            self.root,
+            loaded.object_ref,
+        )
+        if (
+            verified.get("schema_version")
+            != CAPTURE_DERIVED_ARTIFACT_SCHEMA_VERSION
+            or verified.get("identity") != self.queue_identity.to_dict()
+            or verified.get("kind") != QUEUE_DERIVED_KIND
+            or _mapping(verified.get("payload"), "queue commit payload")
+            != loaded.commit.body()
+            or sha256_json(_mapping(verified.get("payload"), "queue commit payload"))
+            != verified.get("payload_sha256")
+        ):
+            _fail("derived queue commit differs from acknowledged content")
+        with self._lock:
+            self._verified_commit_objects.add(digest)
 
     def read_batch(
         self,
@@ -2127,43 +2651,65 @@ class CapturedPaperSelectionQueueInputPort:
             started = float(self.monotonic_clock())
             if not math.isfinite(started):
                 _fail("queue reader monotonic clock returned a non-finite value")
-            durable = self.durable_gate.snapshot()
+
+            def read_budget_exceeded() -> bool:
+                current = float(self.monotonic_clock())
+                if not math.isfinite(current) or current < started:
+                    _fail("queue reader monotonic clock regressed or is non-finite")
+                return current - started > self.max_read_seconds
 
             def budget_check() -> None:
-                current = float(self.monotonic_clock())
-                if (
-                    not math.isfinite(current)
-                    or current < started
-                    or current - started > self.max_read_seconds
-                ):
-                    raise CapturedPaperSelectionQueueUnavailable(
+                if read_budget_exceeded():
+                    raise CapturedPaperSelectionQueueReadTimeout(
                         "queue committed-chain read exceeded bounded time"
                     )
 
-            if (
-                durable.queue_identity_sha256
-                != self.queue_identity.identity_sha256
-                or durable.selection_authority_sha256
-                != self.selection_authority.authority_sha256
-            ):
-                _fail("queue durable acknowledgement gate is inconsistent")
-            if not durable.commit_count and (
-                durable.last_commit_sha256 is not None or durable.durable_through
-            ):
-                _fail("empty queue durable acknowledgement is inconsistent")
-            chain = self._acknowledged_chain(
-                durable=durable,
-                budget_check=budget_check,
-            )
+            # Snapshot and extend the per-port verified prefix atomically.
+            # Concurrent reads may share the immutable list after this point,
+            # but cannot request overlapping stale deltas and poison the port.
+            with self._lock:
+                verified_commit_count = len(self._verified_chain)
+                durable, gate_delta = self.durable_gate._snapshot_since(
+                    verified_commit_count,
+                    max_commit_files=self.max_commit_files,
+                )
+                if (
+                    durable.queue_identity_sha256
+                    != self.queue_identity.identity_sha256
+                    or durable.selection_authority_sha256
+                    != self.selection_authority.authority_sha256
+                ):
+                    _fail("queue durable acknowledgement gate is inconsistent")
+                if not durable.commit_count and (
+                    durable.last_commit_sha256 is not None
+                    or durable.durable_through
+                ):
+                    _fail("empty queue durable acknowledgement is inconsistent")
+                budget_check()
+                chain = self._acknowledged_chain(
+                    durable=durable,
+                    gate_delta=gate_delta,
+                    budget_check=budget_check,
+                )
+            chain_count = durable.commit_count
             if durable.poisoned:
-                if not chain or not chain[-1].commit.poisoned:
+                if (
+                    not chain_count
+                    or not chain[chain_count - 1].commit.poisoned
+                ):
                     _fail("queue durable poison acknowledgement is inconsistent")
-                _verify_commit_gaps(self.root, chain[-1])
+                self._verify_commit_object_once(
+                    chain[chain_count - 1],
+                    budget_check=budget_check,
+                )
+                _verify_commit_gaps(self.root, chain[chain_count - 1])
                 raise CapturedPaperSelectionQueueUnavailable(
                     f"queue generation poisoned: {durable.poison_reason}"
                 )
             committed_through = (
-                chain[-1].commit.event_sequence_through if chain else 0
+                chain[chain_count - 1].commit.event_sequence_through
+                if chain_count
+                else 0
             )
             if frontier.last_source_sequence > committed_through:
                 _fail("consumer frontier is ahead of durable queue frontier")
@@ -2178,17 +2724,21 @@ class CapturedPaperSelectionQueueInputPort:
             ortex_manifest_cache: dict[
                 str, tuple[Mapping[str, Any], RetentionObjectRef]
             ] = {}
-            charged_ortex_refs: set[
-                tuple[str, str, int]
-            ] = set()
-            for loaded in chain:
+            charged_ortex_refs: set[tuple[str, str, int]] = set()
+            first_unread_commit = bisect_right(
+                chain,
+                frontier.last_source_sequence,
+                hi=chain_count,
+                key=lambda row: row.commit.event_sequence_through,
+            )
+            for commit_offset in range(first_unread_commit, chain_count):
+                loaded = chain[commit_offset]
+                self._verify_commit_object_once(
+                    loaded,
+                    budget_check=budget_check,
+                )
                 _verify_commit_gaps(self.root, loaded)
-                if (
-                    loaded.commit.event_sequence_through
-                    <= frontier.last_source_sequence
-                ):
-                    continue
-                for event in _materialize_commit_events(self.root, loaded):
+                for event in self._materialize_commit_events_once(loaded):
                     if event.sequence <= frontier.last_source_sequence:
                         continue
                     event_bytes = event.canonical_size_bytes
@@ -2270,25 +2820,29 @@ class CapturedPaperSelectionQueueInputPort:
                             reason_codes=result.reasons,
                         )
                     )
-                    if float(self.monotonic_clock()) - started > self.max_read_seconds:
+                    if read_budget_exceeded():
                         bounded_stop = True
                         break
                 if bounded_stop:
                     break
-                if float(self.monotonic_clock()) - started > self.max_read_seconds:
+                if read_budget_exceeded():
                     if not selected:
-                        raise CapturedPaperSelectionQueueUnavailable(
+                        raise CapturedPaperSelectionQueueReadTimeout(
                             "queue committed-chain read exceeded bounded time"
                         )
                     break
             with self._lock:
                 self._last_committed_sequence = committed_through
-                self._commit_count = len(chain)
+                self._commit_count = chain_count
                 self._last_commit_sha256 = (
-                    chain[-1].object_ref.sha256 if chain else None
+                    chain[chain_count - 1].object_ref.sha256
+                    if chain_count
+                    else None
                 )
                 self._durable_watermark_at = (
-                    chain[-1].commit.watermark_at if chain else None
+                    chain[chain_count - 1].commit.watermark_at
+                    if chain_count
+                    else None
                 )
             if not selected:
                 with self._lock:
@@ -2344,6 +2898,8 @@ class CapturedPaperSelectionQueueInputPort:
                 self._last_read_at = read_at
                 self._last_error = None
             return batch
+        except CapturedPaperSelectionQueueReadTimeout:
+            raise
         except CapturedPaperSelectionQueueUnavailable:
             with self._lock:
                 self._last_error = "queue_unavailable"
@@ -2402,6 +2958,7 @@ __all__ = [
     "CapturedPaperSelectionQueuePoisonReceipt",
     "CapturedPaperSelectionQueuePublishReceipt",
     "CapturedPaperSelectionQueuePublisher",
+    "CapturedPaperSelectionQueueReadTimeout",
     "CapturedPaperSelectionQueueWriter",
     "QUEUE_DERIVED_KIND",
     "QUEUE_EVENT_SCHEMA_VERSION",

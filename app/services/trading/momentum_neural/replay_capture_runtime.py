@@ -31,6 +31,7 @@ import threading
 import time
 from typing import Any, Callable, Iterable, Mapping, Protocol, runtime_checkable
 import uuid
+import weakref
 import zlib
 
 try:
@@ -2359,6 +2360,53 @@ class IngressBatch:
     gaps: tuple[tuple[CaptureRunIdentity, CoverageGap], ...]
 
 
+@dataclass(frozen=True, slots=True)
+class CaptureIngressRetainedAttempt:
+    """One non-consuming admission result for an already-built event."""
+
+    event_sha256: str
+    canonical_size_bytes: int
+    retained_key: str | None
+    retained_bytes: int
+    attempt_token: int
+    accepted: bool
+    retryable: bool
+    rejection_reason: str | None
+
+    def __post_init__(self) -> None:
+        _validated_sha256(self.event_sha256, "retained admission event")
+        if self.canonical_size_bytes <= 0 or self.attempt_token <= 0:
+            raise CaptureContractError(
+                "retained admission attempt counters must be positive"
+            )
+        if isinstance(self.retained_bytes, bool) or self.retained_bytes < 0:
+            raise CaptureContractError(
+                "retained admission byte count is malformed"
+            )
+        if self.retained_bytes:
+            _validated_sha256(
+                self.retained_key,
+                "retained admission object key",
+            )
+        elif self.retained_key is not None:
+            raise CaptureContractError(
+                "retained admission key lacks retained bytes"
+            )
+        if type(self.accepted) is not bool or type(self.retryable) is not bool:
+            raise CaptureContractError(
+                "retained admission attempt flags are malformed"
+            )
+        if self.accepted:
+            if self.retryable or self.rejection_reason is not None:
+                raise CaptureContractError(
+                    "accepted retained admission cannot carry rejection state"
+                )
+        elif not str(self.rejection_reason or "").strip():
+            raise CaptureContractError(
+                "rejected retained admission requires an exact reason"
+            )
+
+
 class SharedCaptureAdmissionBudget:
     """One measured aggregate queue/write budget shared across run identities.
 
@@ -2466,11 +2514,16 @@ class SharedCaptureAdmissionBudget:
         event: CaptureEvent,
         size: int,
         *,
+        record_rejection: bool = True,
         retained_key: str | None = None,
         retained_bytes: int = 0,
     ) -> str | None:
         if not isinstance(event, CaptureEvent) or int(size) <= 0:
             raise CaptureContractError("shared admission event is malformed")
+        if type(record_rejection) is not bool:
+            raise CaptureContractError(
+                "shared admission rejection accounting flag is malformed"
+            )
         if isinstance(retained_bytes, bool) or int(retained_bytes) < 0:
             raise CaptureContractError(
                 "shared admission retained byte count is malformed"
@@ -2533,8 +2586,18 @@ class SharedCaptureAdmissionBudget:
                     self._write_tokens -= admitted_size
                     self._admitted += 1
                     return None
-            self._rejections[reason] += 1
+            if record_rejection:
+                self._rejections[reason] += 1
             return reason
+
+    def record_rejection(self, reason: str) -> None:
+        normalized = str(reason or "").strip()
+        if not normalized.startswith("shared_capture_"):
+            raise CaptureContractError(
+                "shared admission rejection reason is malformed"
+            )
+        with self._lock:
+            self._rejections[normalized] += 1
 
     def release_retained(
         self,
@@ -2605,6 +2668,20 @@ class SharedCaptureAdmissionBudget:
         identity = _validated_sha256(identity_sha256, "shared admission identity")
         with self._lock:
             return self._events_by_identity.get(identity, 0)
+
+    @property
+    def outstanding_events(self) -> int:
+        """Return the in-memory reservation count without refreshing probes."""
+
+        with self._lock:
+            return len(self._reservations)
+
+    @property
+    def outstanding_retained_objects(self) -> int:
+        """Return retained reservations without refreshing pressure probes."""
+
+        with self._lock:
+            return len(self._retained_reservations)
 
     def retained_for(self, identity_sha256: str) -> int:
         identity = _validated_sha256(
@@ -2747,6 +2824,10 @@ class BoundedCaptureIngress:
         self._identity_sha256: str | None = None
         self._sequence_min: int | None = None
         self._sequence_max: int | None = None
+        self._retained_attempt_nonce = 0
+        self._retained_rejections: dict[
+            str, CaptureIngressRetainedAttempt
+        ] = {}
         self._condition = threading.Condition(threading.RLock())
 
     @classmethod
@@ -2912,6 +2993,259 @@ class BoundedCaptureIngress:
             )
         )
         self._dropped += 1
+
+    @staticmethod
+    def _retained_rejection_is_retryable(reason: str) -> bool:
+        if reason in {
+            "capture_resource_pressure_sample_clock_invalid",
+            "shared_capture_resource_pressure_sample_clock_invalid",
+        }:
+            return False
+        return bool(
+            reason.startswith("capture_resource_pressure_")
+            or reason.startswith("shared_capture_resource_pressure_")
+            or reason
+            in {
+                "capture_write_bandwidth_budget_exceeded",
+                "capture_queue_overflow",
+                "shared_capture_write_bandwidth_budget_exceeded",
+                "shared_capture_queue_overflow",
+            }
+        )
+
+    def _retained_attempt(
+        self,
+        event: CaptureEvent,
+        *,
+        size: int,
+        retained_key: str | None,
+        retained_bytes: int,
+        accepted: bool,
+        rejection_reason: str | None,
+    ) -> CaptureIngressRetainedAttempt:
+        self._retained_attempt_nonce += 1
+        attempt = CaptureIngressRetainedAttempt(
+            event_sha256=event.event_sha256,
+            canonical_size_bytes=size,
+            retained_key=retained_key,
+            retained_bytes=retained_bytes,
+            attempt_token=self._retained_attempt_nonce,
+            accepted=accepted,
+            retryable=bool(
+                rejection_reason is not None
+                and self._retained_rejection_is_retryable(rejection_reason)
+            ),
+            rejection_reason=rejection_reason,
+        )
+        if accepted:
+            self._retained_rejections.pop(event.event_sha256, None)
+        else:
+            self._retained_rejections[event.event_sha256] = attempt
+        return attempt
+
+    def try_submit_retained(
+        self,
+        event: CaptureEvent,
+        *,
+        retained_key: str | None = None,
+        retained_bytes: int = 0,
+    ) -> CaptureIngressRetainedAttempt:
+        """Try one admission without consuming a transient rejection.
+
+        This is reserved for the already-owned initial selection occurrence.
+        The caller may retry the same immutable event while its existing
+        startup deadline remains live, then must terminalize the last exact
+        rejection. Ordinary capture producers continue to use ``submit``.
+        """
+
+        if not isinstance(event, CaptureEvent):
+            raise CaptureContractError("retained capture event is malformed")
+        size = approximate_event_bytes(event)
+        if isinstance(retained_bytes, bool) or int(retained_bytes) < 0:
+            raise CaptureContractError(
+                "retained capture byte count is malformed"
+            )
+        retained_size = int(retained_bytes)
+        normalized_retained_key = (
+            _validated_sha256(retained_key, "retained capture key")
+            if retained_size
+            else None
+        )
+        if retained_size == 0 and retained_key is not None:
+            raise CaptureContractError(
+                "retained capture key lacks retained bytes"
+            )
+        admitted_size = size + retained_size
+        with self._condition:
+            identity_sha256 = event.identity.identity_sha256
+            retained_identity_key = (
+                (identity_sha256, normalized_retained_key)
+                if normalized_retained_key is not None
+                else None
+            )
+            if self._identity_sha256 not in (None, identity_sha256):
+                raise CaptureContractError("capture ingress cannot mix run identities")
+            self._identity_sha256 = identity_sha256
+            if self._finalized:
+                raise CaptureContractError(
+                    "capture ingress is durably finalized; late submissions are forbidden"
+                )
+            if any(
+                queued.event_sha256 == event.event_sha256
+                for queued, _queued_size in self._queue
+            ):
+                raise CaptureContractError(
+                    "retained capture event was already admitted"
+                )
+            if (
+                retained_identity_key is not None
+                and retained_identity_key in self._retained_reservations
+            ):
+                raise CaptureContractError(
+                    "retained capture object was already admitted"
+                )
+            rejection_reason: str | None = None
+            if self._closed:
+                rejection_reason = "capture_ingress_closed"
+            else:
+                pressure_rejection = (
+                    self.pressure_controller.rejection_reason
+                    if self.pressure_controller is not None
+                    else None
+                )
+                if pressure_rejection is not None:
+                    rejection_reason = pressure_rejection
+                elif admitted_size > self.max_bytes:
+                    rejection_reason = "capture_event_exceeds_queue_byte_budget"
+                else:
+                    self._refresh_write_tokens()
+                    if (
+                        self.shared_admission_budget is None
+                        and self.sustained_write_budget_bytes_per_second is not None
+                        and admitted_size > self._write_tokens
+                    ):
+                        rejection_reason = (
+                            "capture_write_bandwidth_budget_exceeded"
+                        )
+                    elif (
+                        len(self._queue) >= self.max_events
+                        or self._queued_bytes
+                        + self._retained_bytes
+                        + admitted_size
+                        > self.max_bytes
+                    ):
+                        rejection_reason = "capture_queue_overflow"
+                    elif self.shared_admission_budget is not None:
+                        rejection_reason = self.shared_admission_budget.try_admit(
+                            event,
+                            size,
+                            record_rejection=False,
+                            retained_key=normalized_retained_key,
+                            retained_bytes=retained_size,
+                        )
+            if rejection_reason is not None:
+                return self._retained_attempt(
+                    event,
+                    size=size,
+                    retained_key=normalized_retained_key,
+                    retained_bytes=retained_size,
+                    accepted=False,
+                    rejection_reason=rejection_reason,
+                )
+            self._submitted += 1
+            self._record_submission_sequence(event.sequence)
+            self._queue.append((event, size))
+            self._queued_bytes += size
+            if retained_identity_key is not None:
+                self._retained_reservations[retained_identity_key] = (
+                    retained_size
+                )
+                self._retained_bytes += retained_size
+            self._accepted += 1
+            if (
+                self.shared_admission_budget is None
+                and self.sustained_write_budget_bytes_per_second is not None
+            ):
+                self._write_tokens -= admitted_size
+            self._accepted_event_accumulator_sha256 = _event_accumulator_add(
+                self._accepted_event_accumulator_sha256, event
+            )
+            attempt = self._retained_attempt(
+                event,
+                size=size,
+                retained_key=normalized_retained_key,
+                retained_bytes=retained_size,
+                accepted=True,
+                rejection_reason=None,
+            )
+            self._condition.notify()
+            return attempt
+
+    def finalize_retained_rejection(
+        self,
+        event: CaptureEvent,
+        attempt: CaptureIngressRetainedAttempt,
+    ) -> None:
+        """Consume one exact retained rejection and emit one terminal gap."""
+
+        if not isinstance(event, CaptureEvent) or not isinstance(
+            attempt, CaptureIngressRetainedAttempt
+        ):
+            raise CaptureContractError(
+                "retained capture rejection terminalization is malformed"
+            )
+        if (
+            attempt.accepted
+            or attempt.event_sha256 != event.event_sha256
+            or attempt.canonical_size_bytes != approximate_event_bytes(event)
+        ):
+            raise CaptureContractError(
+                "retained capture rejection does not match the exact event"
+            )
+        with self._condition:
+            current = self._retained_rejections.get(event.event_sha256)
+            if current != attempt:
+                raise CaptureContractError(
+                    "retained capture rejection is stale or already terminal"
+                )
+            if self._finalized:
+                raise CaptureContractError(
+                    "capture ingress is durably finalized; late gaps are forbidden"
+                )
+            identity_sha256 = event.identity.identity_sha256
+            if self._identity_sha256 != identity_sha256:
+                raise CaptureContractError(
+                    "retained capture rejection identity mismatch"
+                )
+            self._retained_rejections.pop(event.event_sha256)
+            self._submitted += 1
+            self._record_submission_sequence(event.sequence)
+            reason = str(attempt.rejection_reason)
+            if reason == "capture_ingress_closed" and self._writer_failure_count:
+                # The writer already terminally failed and released every
+                # queued/inflight shared reservation.  A gap appended here
+                # could never be drained by that dead writer and would make
+                # physical quiescence (and therefore strategy rollback)
+                # impossible.  Retain the attempted post-close loss in the
+                # ordinary counters while the pre-existing writer failure
+                # permanently forbids a clean seal/certification claim.
+                self._post_close_submissions += 1
+                self._dropped += 1
+                self._condition.notify_all()
+                return
+            if reason == "capture_ingress_closed":
+                self._post_close_submissions += 1
+            if "write_bandwidth" in reason:
+                self._write_bandwidth_dropped += 1
+            if "pressure" in reason:
+                self._resource_pressure_dropped += 1
+            if (
+                reason.startswith("shared_capture_")
+                and self.shared_admission_budget is not None
+            ):
+                self.shared_admission_budget.record_rejection(reason)
+            self._record_gap(event, reason)
+            self._condition.notify()
 
     def submit(
         self,
@@ -3206,7 +3540,11 @@ class BoundedCaptureIngress:
     @property
     def drained(self) -> bool:
         with self._condition:
-            return not self._queue and not self._gaps
+            return bool(
+                not self._queue
+                and not self._gaps
+                and not self._retained_rejections
+            )
 
     @property
     def closed(self) -> bool:
@@ -3220,6 +3558,7 @@ class BoundedCaptureIngress:
                 self._closed
                 and self._writer_failure_count == 0
                 and self._post_close_submissions == 0
+                and not self._retained_rejections
                 and not self._queue
                 and not self._gaps
                 and not self._retained_reservations
@@ -3259,6 +3598,10 @@ class BoundedCaptureIngress:
             if self._writer_failure_count:
                 raise CaptureContractError(
                     "capture writer failure makes lifecycle permanently dirty"
+                )
+            if self._retained_rejections:
+                raise CaptureContractError(
+                    "capture ingress has unterminated retained admissions"
                 )
             if (
                 self._queue
@@ -3331,6 +3674,7 @@ class BoundedCaptureIngress:
                 "retained_objects": len(self._retained_reservations),
                 "retained_bytes": self._retained_bytes,
                 "pending_gap_keys": len(self._gaps),
+                "pending_retained_admissions": len(self._retained_rejections),
                 "closed": self._closed,
                 "finalized": self._finalized,
                 "sequence_min": self._sequence_min,
@@ -3376,6 +3720,7 @@ class BoundedCaptureIngress:
                 "retained_bytes": self._retained_bytes,
                 "bounded_memory_bytes": bounded_memory_bytes,
                 "pending_gap_keys": len(self._gaps),
+                "pending_retained_admissions": len(self._retained_rejections),
                 "closed": self._closed,
                 "finalized": self._finalized,
                 "post_close_submissions": self._post_close_submissions,
@@ -3388,6 +3733,7 @@ class BoundedCaptureIngress:
                     self._closed
                     and self._writer_failure_count == 0
                     and self._post_close_submissions == 0
+                    and not self._retained_rejections
                     and not self._queue
                     and not self._gaps
                     and not self._retained_reservations
@@ -8112,7 +8458,60 @@ class _ExclusiveCaptureStoreOwnership:
         self._record: dict[str, Any] | None = None
         self._closed = False
         self._thread_lock = threading.RLock()
+        self._heartbeat_stop = threading.Event()
+        self._heartbeat_thread: threading.Thread | None = None
+        self._heartbeat_failure: str | None = None
+        self._heartbeat_checks = 0
+        self._heartbeat_receipts = 0
+        self._last_heartbeat_receipt_sha256: str | None = None
         self._acquire()
+        try:
+            self._start_heartbeat()
+        except BaseException:
+            try:
+                self.close()
+            except BaseException:
+                pass
+            raise
+
+    @staticmethod
+    def _heartbeat_loop(
+        owner_ref: "weakref.ReferenceType[_ExclusiveCaptureStoreOwnership]",
+        stop: threading.Event,
+        heartbeat_seconds: float,
+    ) -> None:
+        while not stop.wait(heartbeat_seconds):
+            owner = owner_ref()
+            if owner is None:
+                return
+            try:
+                receipt = owner._maintain_heartbeat()
+            except Exception as exc:
+                with owner._thread_lock:
+                    owner._heartbeat_failure = f"{type(exc).__name__}: {exc}"
+                return
+            else:
+                with owner._thread_lock:
+                    owner._heartbeat_checks += 1
+                    if receipt is not None:
+                        owner._heartbeat_receipts += 1
+                        owner._last_heartbeat_receipt_sha256 = receipt
+            finally:
+                del owner
+
+    def _start_heartbeat(self) -> None:
+        thread = threading.Thread(
+            target=self._heartbeat_loop,
+            args=(
+                weakref.ref(self),
+                self._heartbeat_stop,
+                self.heartbeat_seconds / 2.0,
+            ),
+            name="capture-store-owner-heartbeat",
+            daemon=True,
+        )
+        self._heartbeat_thread = thread
+        thread.start()
 
     @staticmethod
     def _lock_handle(handle: Any) -> None:
@@ -8341,6 +8740,20 @@ class _ExclusiveCaptureStoreOwnership:
         with self._thread_lock:
             if self._closed or self._handle is None or self._record is None:
                 raise CaptureContractError("capture store ownership is closed")
+            if self._heartbeat_failure is not None:
+                raise CaptureContractError(
+                    "capture store ownership heartbeat failed: "
+                    f"{self._heartbeat_failure}"
+                )
+            heartbeat_thread = self._heartbeat_thread
+            if (
+                heartbeat_thread is not None
+                and not heartbeat_thread.is_alive()
+                and not self._heartbeat_stop.is_set()
+            ):
+                raise CaptureContractError(
+                    "capture store ownership heartbeat stopped unexpectedly"
+                )
             on_disk = self._read_record()
             if on_disk != self._record:
                 raise CaptureContractError(
@@ -8356,7 +8769,13 @@ class _ExclusiveCaptureStoreOwnership:
                 raise CaptureContractError("capture store ownership clock moved backwards")
             if now >= expires:
                 raise CaptureContractError("capture store ownership lease expired")
-            if renew_if_due and (expires - now).total_seconds() <= self.heartbeat_seconds:
+            if (
+                renew_if_due
+                and (
+                    (now - heartbeat).total_seconds() >= self.heartbeat_seconds
+                    or (expires - now).total_seconds() <= self.heartbeat_seconds
+                )
+            ):
                 self.renew()
 
     def renew(self) -> str:
@@ -8375,6 +8794,21 @@ class _ExclusiveCaptureStoreOwnership:
                 previous_receipt_sha256=previous,
             )
             return self._write_record(record)
+
+    def _maintain_heartbeat(self) -> str | None:
+        with self._thread_lock:
+            before = (
+                hashlib.sha256(canonical_json_bytes(self._record)).hexdigest()
+                if self._record is not None
+                else None
+            )
+            self.assert_valid()
+            after = (
+                hashlib.sha256(canonical_json_bytes(self._record)).hexdigest()
+                if self._record is not None
+                else None
+            )
+            return after if after != before else None
 
     def health(self) -> dict[str, Any]:
         with self._thread_lock:
@@ -8400,11 +8834,36 @@ class _ExclusiveCaptureStoreOwnership:
                     if record
                     else None
                 ),
+                "heartbeat_worker_alive": bool(
+                    self._heartbeat_thread and self._heartbeat_thread.is_alive()
+                ),
+                "heartbeat_checks": self._heartbeat_checks,
+                "heartbeat_receipts": self._heartbeat_receipts,
+                "last_heartbeat_receipt_sha256": (
+                    self._last_heartbeat_receipt_sha256
+                ),
+                "heartbeat_failure": self._heartbeat_failure,
                 "failure": failure,
                 "fail_closed": failure is not None,
             }
 
     def close(self) -> None:
+        self._heartbeat_stop.set()
+        heartbeat_thread = self._heartbeat_thread
+        if (
+            heartbeat_thread is not None
+            and heartbeat_thread is not threading.current_thread()
+        ):
+            heartbeat_thread.join(
+                timeout=max(1.0, min(10.0, self.heartbeat_seconds * 2.0))
+            )
+            if heartbeat_thread.is_alive():
+                self._heartbeat_failure = (
+                    "capture store ownership heartbeat did not stop"
+                )
+                raise CaptureContractError(
+                    "capture store ownership heartbeat did not stop"
+                )
         with self._thread_lock:
             if self._closed:
                 return
@@ -8674,7 +9133,10 @@ class ContentAddressedCaptureStore:
             raise CaptureContractError("capture disk reserve would be breached")
 
     def resource_health(
-        self, ingress: BoundedCaptureIngress | None = None
+        self,
+        ingress: BoundedCaptureIngress | None = None,
+        *,
+        audit_filesystem: bool = True,
     ) -> dict[str, Any]:
         binding = self.resource_binding
         ownership_health = self._ownership.health()
@@ -8685,16 +9147,22 @@ class ContentAddressedCaptureStore:
         # publisher count the same object a second time.  The next probe would
         # falsely report an externally removed object and poison the run.
         with self._publish_state_lock:
-            actual_root_bytes = self._root_file_bytes()
-            if actual_root_bytes < self._tracked_root_bytes:
-                self._record_resource_failure(
-                    "capture_owned_object_removed_outside_store"
-                )
-            elif actual_root_bytes > self._tracked_root_bytes:
-                # Ownership receipts bypass the content-object publisher but
-                # remain part of this store's measured quota.
-                self._tracked_root_bytes = actual_root_bytes
-            root_bytes = max(self._tracked_root_bytes, actual_root_bytes)
+            actual_root_bytes: int | None = None
+            if audit_filesystem:
+                actual_root_bytes = self._root_file_bytes()
+                if actual_root_bytes < self._tracked_root_bytes:
+                    self._record_resource_failure(
+                        "capture_owned_object_removed_outside_store"
+                    )
+                elif actual_root_bytes > self._tracked_root_bytes:
+                    # Ownership receipts bypass the content-object publisher but
+                    # remain part of this store's measured quota.
+                    self._tracked_root_bytes = actual_root_bytes
+            root_bytes = (
+                max(self._tracked_root_bytes, actual_root_bytes)
+                if actual_root_bytes is not None
+                else self._tracked_root_bytes
+            )
             published_bytes = self._published_bytes
             publish_seconds = self._publish_seconds
             publish_count = self._publish_count
@@ -8721,9 +9189,14 @@ class ContentAddressedCaptureStore:
         return {
             "enforced": binding is not None,
             "resource_hashes": binding.hashes if binding is not None else None,
+            "filesystem_audited": audit_filesystem,
             "root_bytes": root_bytes,
             "actual_root_bytes": actual_root_bytes,
-            "untracked_root_bytes": max(0, actual_root_bytes - root_bytes),
+            "untracked_root_bytes": (
+                max(0, actual_root_bytes - root_bytes)
+                if actual_root_bytes is not None
+                else None
+            ),
             "disk_free_bytes": free,
             "disk_quota_bytes": (
                 binding.budget.disk_quota_bytes if binding is not None else None
@@ -11598,7 +12071,7 @@ class CaptureWriterWorker:
     def seal_run(self, identity: CaptureRunIdentity) -> CaptureRunSeal:
         return self.store.seal_run(identity, lifecycle=self)
 
-    def health(self) -> dict[str, Any]:
+    def _health(self, *, audit_filesystem: bool) -> dict[str, Any]:
         thread = self._thread
         elapsed = (
             max(0.0, time.monotonic() - self._started_at)
@@ -11606,6 +12079,7 @@ class CaptureWriterWorker:
             else 0.0
         )
         return {
+            "has_started": self._has_started,
             "writer_alive": bool(thread and thread.is_alive()),
             "stopped_cleanly": bool(
                 self._stopped_cleanly and self.ingress.clean_close_eligible
@@ -11620,8 +12094,41 @@ class CaptureWriterWorker:
             "gap_accumulator_sha256": self._gap_accumulator_sha256,
             "elapsed_seconds": elapsed,
             "ingress": self.ingress.health(),
-            "resource": self.store.resource_health(self.ingress),
+            "resource": self.store.resource_health(
+                self.ingress,
+                audit_filesystem=audit_filesystem,
+            ),
         }
+
+    def lifecycle_health(self) -> dict[str, Any]:
+        """In-memory shutdown state without clocks, pressure, or disk probes."""
+
+        thread = self._thread
+        return {
+            "has_started": self._has_started,
+            "writer_alive": bool(thread and thread.is_alive()),
+            "stopped_cleanly": bool(
+                self._stopped_cleanly and self.ingress.clean_close_eligible
+            ),
+            "last_error": self._last_error,
+            "ingress": {
+                "closed": self.ingress.closed,
+                "drained": self.ingress.drained,
+            },
+        }
+
+    def progress_health(self) -> dict[str, Any]:
+        """O(1) writer progress for tight durability-wait polling.
+
+        Publish capacity retains the fail-closed filesystem audit.  Evidence,
+        preflight, and ordinary health callers use :meth:`health`, whose
+        default remains a full capture-root audit.
+        """
+
+        return self._health(audit_filesystem=False)
+
+    def health(self) -> dict[str, Any]:
+        return self._health(audit_filesystem=True)
 
 
 class CaptureWriterPool:
@@ -11798,6 +12305,11 @@ class SharedCaptureWriterLease:
         with self._lock:
             return self._writer
 
+    @property
+    def released(self) -> bool:
+        with self._lock:
+            return self._released
+
     def build_writer(
         self,
         *,
@@ -11836,7 +12348,7 @@ class SharedCaptureWriterLease:
                 return
             writer = self._writer
             if writer is not None:
-                writer_health = writer.health()
+                writer_health = writer.lifecycle_health()
                 outstanding = self._runtime.shared_admission_budget.outstanding_for(
                     self.identity.identity_sha256
                 )
@@ -12049,10 +12561,10 @@ class SharedCaptureStoreRuntime:
                 raise CaptureContractError(
                     "cannot close shared capture store with active writer leases"
                 )
-            shared_health = self.shared_admission_budget.health()
             if (
-                int(shared_health["outstanding_events"]) != 0
-                or int(shared_health["outstanding_retained_objects"]) != 0
+                self.shared_admission_budget.outstanding_events != 0
+                or self.shared_admission_budget.outstanding_retained_objects
+                != 0
             ):
                 raise CaptureContractError(
                     "cannot close shared capture store with outstanding reservations"

@@ -370,6 +370,25 @@ def _candidate_snapshot(
         reasons.append("viability_from_future")
     elif age_seconds > max_age_seconds:
         reasons.append("viability_stale")
+    source_event_at: datetime | None = None
+    source_event_raw = viability["evidence_window_json"].get("event_at")
+    try:
+        if not isinstance(source_event_raw, str):
+            raise ValueError("captured source event clock is unavailable")
+        source_event_at = datetime.fromisoformat(
+            source_event_raw.replace("Z", "+00:00")
+        )
+        if source_event_at.tzinfo is None:
+            raise ValueError("captured source event clock is naive")
+        source_event_at = source_event_at.astimezone(UTC)
+    except (TypeError, ValueError):
+        reasons.append("source_event_clock_unavailable")
+    else:
+        source_event_age_seconds = (decision_at - source_event_at).total_seconds()
+        if source_event_age_seconds < 0.0:
+            reasons.append("source_event_from_future")
+        elif source_event_age_seconds > max_age_seconds:
+            reasons.append("source_event_stale")
     if not variant["is_active"]:
         reasons.append("variant_inactive")
     if variant["execution_family"] != ALPACA_SPOT_EXECUTION_FAMILY:
@@ -389,6 +408,9 @@ def _candidate_snapshot(
         "viability": viability,
         "viability_sha256": viability_sha256,
         "readiness_freshness_at": _iso(freshness),
+        "source_event_at": (
+            _iso(source_event_at) if source_event_at is not None else None
+        ),
         "readiness_sha256": _hash_json(readiness),
         "eligible": not reasons,
         "rejection_reasons": sorted(reasons),
@@ -1122,12 +1144,16 @@ class CaptureBackedPaperInitialSessionMaterialProvider:
         selected_freshness = datetime.fromisoformat(
             str(selected["readiness_freshness_at"]).replace("Z", "+00:00")
         )
+        selected_source_event_at = datetime.fromisoformat(
+            str(selected["source_event_at"]).replace("Z", "+00:00")
+        )
         expires_at = min(
             decision_at + timedelta(seconds=self.material_ttl_seconds),
             proof.expires_at,
             trigger.source_available_at + timedelta(seconds=market_max_age),
             candidate_read.read_at + timedelta(seconds=context_max_age),
             selected_freshness + timedelta(seconds=context_max_age),
+            selected_source_event_at + timedelta(seconds=context_max_age),
         )
         if expires_at <= decision_at:
             _unavailable("initial_provider_material_expired")

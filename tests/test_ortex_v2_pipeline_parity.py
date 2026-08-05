@@ -214,6 +214,11 @@ def _signals() -> dict[str, dict[str, float]]:
             "daily_change_pct": 20.0,
             "dollar_volume": 2_000_000.0,
         },
+        "1INCH-USD": {
+            "vol_ratio": 7.0,
+            "daily_change_pct": 18.0,
+            "dollar_volume": 1_500_000.0,
+        },
     }
 
 
@@ -279,6 +284,10 @@ def test_complete_batch_stamps_compact_refs_and_reproducible_ranks(
         signals["BTC-USD"]["ortex_selection_reference"]["detail_code"]
         == "non_equity"
     )
+    assert (
+        signals["1INCH-USD"]["ortex_selection_reference"]["detail_code"]
+        == "non_equity"
+    )
     serialized = json.dumps(signals, sort_keys=True)
     assert "raw_response_b64" not in serialized
     assert "selection_reference_sha256" in serialized
@@ -331,6 +340,7 @@ def test_complete_batch_emits_hash_bound_global_receipt(
     ]
     assert status["selected_symbols"] == ["AAA", "BBB"]
     assert [member["symbol"] for member in status["members"]] == [
+        "1INCH-USD",
         "AAA",
         "BBB",
         "BTC-USD",
@@ -462,6 +472,32 @@ def test_empty_field_is_typed_incomplete_without_provider_or_clock_error(
     assert status["decision_at"] == NOW.isoformat()
     assert status["complete"] is False
     assert status["members"] == []
+
+
+def test_field_rejects_unicode_casefold_alias_before_provider_io(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    provider = _Provider({})
+    signals = {
+        "ßTC-USD": copy.deepcopy(_signals()["BTC-USD"]),
+        "SSTC-USD": copy.deepcopy(_signals()["BTC-USD"]),
+    }
+    monkeypatch.setattr(
+        pipeline.settings,
+        "chili_momentum_squeeze_fuel_tilt_enabled",
+        True,
+    )
+
+    with sm.ortex_outcome_provider(provider):
+        with pytest.raises(ValueError, match="non-ASCII"):
+            pipeline.prepare_ortex_squeeze_fuel_field(
+                SimpleNamespace(get_bind=lambda: None),
+                ross_signals=signals,
+                weights=ROSS_PILLAR_WEIGHTS_LIQUIDITY_BIASED,
+                decision_at=NOW,
+            )
+
+    assert provider.calls == []
 
 
 def test_off_path_strips_stale_ortex_values_without_mutating_source(

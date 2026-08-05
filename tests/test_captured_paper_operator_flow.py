@@ -77,6 +77,7 @@ def configuration(tmp_path: Path) -> operator.CapturedPaperOperatorConfiguration
         ).hexdigest(),
         python_executable=python,
         python_dependency_root=dependencies,
+        python_dependency_root_identity_sha256=h("dependencies"),
         no_order_receipt_output=output / "no-order.json",
         powershell_executable=powershell,
         host_principal_user_id="test-user",
@@ -335,8 +336,11 @@ def test_live_composition_rejects_stale_cached_settings_before_adapter(
     assert adapters == []
 
 
+@pytest.mark.parametrize("cache_mint_failure", (None, "typed", "io"))
 def test_operator_flow_publishes_build_ready_and_only_no_order_next_command(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    cache_mint_failure: str | None,
 ) -> None:
     config = configuration(tmp_path)
     receipt = runtime_receipt(config)
@@ -430,7 +434,7 @@ def test_operator_flow_publishes_build_ready_and_only_no_order_next_command(
             ],
         },
     )
-    empty_authority = SimpleNamespace()
+    empty_authority = operator._NativeAuthority(object())
     materialized = probes.TrustedProbeAuthorities(
         runtime_settings=empty_authority,
         broker_account=empty_authority,
@@ -468,6 +472,26 @@ def test_operator_flow_publishes_build_ready_and_only_no_order_next_command(
         }
 
     monkeypatch.setattr(operator.probes, "run_trusted_preactivation_probes", fake_probe_run)
+    cache_path = write(
+        config.operator_output_root / "static-proof-cache.json",
+        canonical({"cache": True}),
+    )
+    def publish_cache(**_kwargs):
+        if cache_mint_failure == "typed":
+            raise probes.CapturedPaperPreactivationProbeError(
+                "STATIC_CACHE_TEST_UNAVAILABLE", "injected cache publication failure"
+            )
+        if cache_mint_failure == "io":
+            raise OSError("injected optional cache disk failure")
+        return {
+            "path": str(cache_path),
+            "sha256": hashlib.sha256(cache_path.read_bytes()).hexdigest(),
+            "size_bytes": cache_path.stat().st_size,
+        }
+
+    monkeypatch.setattr(
+        operator.probes, "publish_static_proof_cache", publish_cache
+    )
 
     captured_request: dict[str, object] = {}
 
@@ -514,6 +538,16 @@ def test_operator_flow_publishes_build_ready_and_only_no_order_next_command(
     )
     assert result.current_host_inventory_observed is False
     assert result.final_real_validate_only_required is True
+    cache_result = result.to_dict()["static_proof_cache"]
+    assert cache_result["mint_status"] == (
+        "UNAVAILABLE" if cache_mint_failure else "MINTED"
+    )
+    expected_cache_reason = {
+        None: None,
+        "typed": "STATIC_CACHE_TEST_UNAVAILABLE",
+        "io": "STATIC_CACHE_MINT_IO_UNAVAILABLE",
+    }[cache_mint_failure]
+    assert cache_result["reason_code"] == expected_cache_reason
     next_command = json.loads(result.next_command_path.read_text(encoding="utf-8"))
     assert next_command["next_step"] == "NO_ORDER_SMOKE_ONLY"
     assert next_command["invoked"] is False
@@ -682,10 +716,22 @@ def test_launcher_staging_reinventories_and_rejects_any_source_drift(
         )
 
 
+@pytest.mark.parametrize("use_static_cache", (False, True))
 def test_materialization_runs_runtime_after_long_shards_and_short_ttl_reads_last(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    use_static_cache: bool,
 ) -> None:
     config = configuration(tmp_path)
+    if use_static_cache:
+        cache_path = write(tmp_path / "prior-cache.json", b"cache")
+        config = replace(
+            config,
+            python_dependency_root_identity_sha256=h("dependencies"),
+            static_proof_cache_path=cache_path,
+            static_proof_cache_sha256=hashlib.sha256(b"cache").hexdigest(),
+            static_proof_restart_nonce="d492f2f5-d6e4-498e-80dd-7332cb2c0d51",
+        )
     receipt = runtime_receipt(config)
     projection = settings_projection(receipt)
     order: list[str] = []
@@ -707,16 +753,39 @@ def test_materialization_runs_runtime_after_long_shards_and_short_ttl_reads_last
         "InstalledRuntimeSettingsAuthority",
         lambda **kwargs: Authority("runtime"),
     )
-    monkeypatch.setattr(
-        operator.probes,
-        "SubprocessFocusedRegressionAuthority",
-        lambda **kwargs: Authority("focused"),
-    )
-    monkeypatch.setattr(
-        operator.probes,
-        "SubprocessLifecycleScenarioAuthority",
-        lambda **kwargs: Authority("lifecycle"),
-    )
+    if use_static_cache:
+        monkeypatch.setattr(
+            operator.probes,
+            "load_static_proof_cache",
+            lambda **kwargs: (
+                order.append("cache")
+                or SimpleNamespace(
+                    focused_regressions=object(),
+                    lifecycle_preflight=object(),
+                )
+            ),
+        )
+        monkeypatch.setattr(
+            operator.probes,
+            "SubprocessFocusedRegressionAuthority",
+            lambda **kwargs: pytest.fail("focused subprocess must be skipped"),
+        )
+        monkeypatch.setattr(
+            operator.probes,
+            "SubprocessLifecycleScenarioAuthority",
+            lambda **kwargs: pytest.fail("lifecycle subprocess must be skipped"),
+        )
+    else:
+        monkeypatch.setattr(
+            operator.probes,
+            "SubprocessFocusedRegressionAuthority",
+            lambda **kwargs: Authority("focused"),
+        )
+        monkeypatch.setattr(
+            operator.probes,
+            "SubprocessLifecycleScenarioAuthority",
+            lambda **kwargs: Authority("lifecycle"),
+        )
     monkeypatch.setattr(
         operator.probes,
         "HostCutoverPreactivationBaselineAuthority",
@@ -792,11 +861,15 @@ def test_materialization_runs_runtime_after_long_shards_and_short_ttl_reads_last
 
     assert type(roster) is probes.TrustedProbeAuthorities
     assert observed_at == NOW
-    assert order == [
+    slow_prefix = ["cache"] if use_static_cache else [
         "focused",
         "rollback",
         "rehearsal",
         "lifecycle",
+    ]
+    if use_static_cache:
+        slow_prefix += ["rollback", "rehearsal"]
+    assert order == slow_prefix + [
         "runtime",
         "capture",
         "database",

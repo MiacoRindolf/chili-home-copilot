@@ -693,6 +693,16 @@ def _validate_pressure_start(
     binding: CaptureResourceBinding,
     now: datetime,
 ) -> None:
+    """Validate the seed observation without bypassing controller hysteresis.
+
+    A fresh threshold-crossing sample is not a malformed composition.  The
+    shared pressure controller owns the configured entry/recovery streaks and
+    every ingress consumer remains fail-closed while it reports pressure.
+    Rejecting the first spike here prevented that controller and its periodic
+    sampler from ever starting, so a recoverable host-I/O spike killed the
+    whole PAPER generation instead of suspending admission until recovery.
+    """
+
     if not isinstance(sample, CapturePressureSample):
         raise CaptureContractError("capture pressure sample is malformed")
     if sample.resource_binding_sha256 != binding.binding_sha256:
@@ -701,28 +711,6 @@ def _validate_pressure_start(
     age = (now - observed_at).total_seconds()
     if age < 0 or age > binding.policy.pressure_sample_max_age_seconds:
         raise CaptureContractError("capture pressure sample is stale or future-dated")
-    policy = binding.policy
-    reasons: list[str] = []
-    if sample.cpu_percent >= policy.pressure_cpu_enter_percent:
-        reasons.append("cpu")
-    if sample.available_memory_bytes <= (
-        policy.memory_reserve_bytes + policy.pressure_memory_enter_margin_bytes
-    ):
-        reasons.append("memory")
-    if sample.disk_free_bytes <= (
-        policy.disk_reserve_bytes + policy.pressure_disk_enter_margin_bytes
-    ):
-        reasons.append("disk")
-    if (
-        sample.write_latency_milliseconds
-        >= policy.pressure_write_latency_enter_milliseconds
-    ):
-        reasons.append("write_latency")
-    if reasons:
-        raise CaptureContractError(
-            "capture resources are already pressured at composition: "
-            + ",".join(reasons)
-        )
 
 
 @dataclass(frozen=True)
@@ -1478,8 +1466,6 @@ def prepare_iqfeed_capture_ingress(
         binding, monotonic_clock=monotonic_clock
     )
     pressure_controller.observe(pressure_sample)
-    if not pressure_controller.required_full_fidelity_admissible:
-        raise CaptureContractError("capture pressure controller failed closed at start")
 
     identity = CaptureRunIdentity(
         run_id=preflight.startup_process_instance_id,
