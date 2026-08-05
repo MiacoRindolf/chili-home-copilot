@@ -3781,6 +3781,109 @@ def bind_ortex_squeeze_fuel_batch_reference(
     return manifest
 
 
+_ORTEX_SUPPLEMENTAL_OPERATIONAL_UNAVAILABLE_KINDS = frozenset(
+    {
+        "CREDENTIAL_UNAVAILABLE",
+        "AUTH_REJECTED",
+        "RATE_LIMITED",
+        "TRANSIENT_UNAVAILABLE",
+        "MONTHLY_QUOTA_EXHAUSTED",
+        "BACKOFF_ACTIVE",
+        "QUOTA_AUTHORITY_UNAVAILABLE",
+    }
+)
+_ORTEX_SUPPLEMENTAL_BENIGN_KINDS = frozenset(
+    {
+        "SUCCESS",
+        "AUTHORITATIVE_EMPTY",
+        "NOT_APPLICABLE",
+        "UNSUPPORTED_SYMBOL_OR_EXCHANGE",
+    }
+)
+
+
+def _ortex_typed_supplemental_neutral_reason(
+    *,
+    complete: bool,
+    member_kinds: Iterable[str],
+    economics_scrubbed: bool,
+) -> str | None:
+    """Return the only typed Ortex condition that may be neutralized."""
+
+    if complete or not economics_scrubbed:
+        return None
+    kinds = tuple(member_kinds)
+    allowed_kinds = (
+        _ORTEX_SUPPLEMENTAL_OPERATIONAL_UNAVAILABLE_KINDS
+        | _ORTEX_SUPPLEMENTAL_BENIGN_KINDS
+    )
+    if any(kind not in allowed_kinds for kind in kinds):
+        return None
+    if not any(
+        kind in _ORTEX_SUPPLEMENTAL_OPERATIONAL_UNAVAILABLE_KINDS
+        for kind in kinds
+    ):
+        return None
+    return "operational_unavailable"
+
+
+def ortex_supplemental_neutral_reason(
+    manifest: ValidatedOrtexSqueezeFuelBatchManifest,
+    *,
+    symbol: str,
+    projected_signal: Mapping[str, Any],
+) -> str | None:
+    """Classify one exact incomplete Ortex field as supplemental-neutral.
+
+    The caller must first validate and compact/full-bind ``manifest``.  This
+    helper never blesses malformed provider material: only typed operational
+    unavailability may neutralize the optional squeeze-fuel tilt, and only
+    when the all-or-nothing producer scrubbed economics from every member.
+    """
+
+    if (
+        not isinstance(manifest, ValidatedOrtexSqueezeFuelBatchManifest)
+        or manifest.complete
+        or not isinstance(projected_signal, Mapping)
+    ):
+        return None
+    normalized_symbol = str(symbol or "").strip().upper()
+    expected = manifest.signal_by_symbol.get(normalized_symbol)
+    if not isinstance(expected, Mapping):
+        return None
+    economic_fields = ("squeeze_fuel_pct", "squeeze_fuel_rank_pct")
+    if any(
+        member.get(field_name) is not None
+        for member in manifest.signal_by_symbol.values()
+        if isinstance(member, Mapping)
+        for field_name in economic_fields
+    ) or any(
+        projected_signal.get(field_name) is not None
+        for field_name in economic_fields
+    ):
+        return None
+    if (
+        projected_signal.get("ortex_selection_reference")
+        != expected.get("ortex_selection_reference")
+    ):
+        return None
+
+    kinds: list[str] = []
+    for member in manifest.signal_by_symbol.values():
+        if not isinstance(member, Mapping):
+            return None
+        reference = member.get("ortex_selection_reference")
+        if not isinstance(reference, Mapping):
+            return None
+        kind = str(reference.get("kind") or "")
+        kinds.append(kind)
+    return _ortex_typed_supplemental_neutral_reason(
+        complete=manifest.complete,
+        member_kinds=kinds,
+        economics_scrubbed=True,
+    )
+
+
 @dataclass(frozen=True)
 class CaptureOrtexSelectionSnapshot:
     """Self-contained Ortex batch selected by one exact decision receipt."""
@@ -3792,6 +3895,7 @@ class CaptureOrtexSelectionSnapshot:
     batch_members_sha256: str
     rank_pct: float | None
     complete: bool
+    supplemental_neutral_reason: str | None
     outcome: str
     origin: str
     requested_at: datetime
@@ -3930,9 +4034,14 @@ class CaptureOrtexSelectionSnapshot:
                 minimum=0.0,
                 maximum=1.0,
             )
-            if derived_score != supplied_score:
+            if complete:
+                if derived_score != supplied_score:
+                    raise CaptureContractError(
+                        "Ortex member squeeze score differs from raw mechanics"
+                    )
+            elif supplied_score is not None or supplied_rank is not None:
                 raise CaptureContractError(
-                    "Ortex member squeeze score differs from raw mechanics"
+                    "Ortex incomplete batch carries economic values"
                 )
             parsed_members.append(
                 {
@@ -3979,12 +4088,6 @@ class CaptureOrtexSelectionSnapshot:
             raise CaptureContractError(
                 "Ortex complete batch contains an unavailable outcome"
             )
-        if not complete and any(
-            row["rank_pct"] is not None for row in parsed_members
-        ):
-            raise CaptureContractError(
-                "Ortex incomplete batch cannot influence persisted rank"
-            )
         score_values = sorted(
             float(row["squeeze_fuel_pct"])
             for row in parsed_members
@@ -4023,6 +4126,16 @@ class CaptureOrtexSelectionSnapshot:
             )
 
         mechanics_outcome = current["mechanics_outcome"]
+        supplemental_neutral_reason = _ortex_typed_supplemental_neutral_reason(
+            complete=complete,
+            member_kinds=(
+                row["mechanics_outcome"].kind.value for row in parsed_members
+            ),
+            economics_scrubbed=all(
+                row["squeeze_fuel_pct"] is None and row["rank_pct"] is None
+                for row in parsed_members
+            ),
+        )
         rank_contributors = [
             row
             for row in parsed_members
@@ -4050,6 +4163,7 @@ class CaptureOrtexSelectionSnapshot:
             batch_members_sha256=str(raw["members_sha256"]),
             rank_pct=rank_pct,
             complete=bool(complete),
+            supplemental_neutral_reason=supplemental_neutral_reason,
             outcome=mechanics_outcome.kind.value,
             origin=origin,
             requested_at=requested_at,

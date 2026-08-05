@@ -32,6 +32,7 @@ from .replay_capture_contract import (
     ORTEX_SQUEEZE_FUEL_BATCH_REF_SCHEMA_VERSION,
     ORTEX_SQUEEZE_FUEL_BATCH_SCHEMA_VERSION,
     bind_ortex_squeeze_fuel_batch_reference,
+    ortex_supplemental_neutral_reason,
     validate_ortex_squeeze_fuel_batch_manifest,
     validate_ortex_squeeze_fuel_batch_reference,
 )
@@ -1642,6 +1643,7 @@ def ortex_batch_readiness_reason(
     symbol: str,
     manifest: Mapping[str, Any] | None,
     read_at: datetime,
+    allow_supplemental_neutral: bool = False,
 ) -> str | None:
     """Return a typed decision-local blocker for an enabled Ortex policy."""
 
@@ -1678,8 +1680,6 @@ def ortex_batch_readiness_reason(
             read_at=read_at,
             expected_quota_policy_sha256=policy_sha256,
         )
-        if not reference.complete:
-            return "ortex_batch_coverage_unavailable"
         if not isinstance(manifest, Mapping):
             return "ortex_batch_manifest_missing"
         validated_manifest = validate_ortex_squeeze_fuel_batch_manifest(
@@ -1717,7 +1717,18 @@ def ortex_batch_readiness_reason(
         != expected.get("squeeze_fuel_rank_pct")
     ):
         return "ortex_batch_signal_economics_mismatch"
-    return None
+    if bound.complete:
+        return None
+    if allow_supplemental_neutral and (
+        ortex_supplemental_neutral_reason(
+            bound,
+            symbol=normalized_symbol,
+            projected_signal=current_signal,
+        )
+        is not None
+    ):
+        return None
+    return "ortex_batch_coverage_unavailable"
 
 
 def _apply_ortex_squeeze_fuel_batch(

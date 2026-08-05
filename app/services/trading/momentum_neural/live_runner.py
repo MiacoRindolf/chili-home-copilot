@@ -451,6 +451,8 @@ class _ReplayOrtexDecisionState:
     provider: Callable[[str], Mapping[str, Any]]
     selection: dict[str, Any] | None = None
     consumed: bool = False
+    admitted: bool = False
+    allow_supplemental_neutral: bool = False
 
 
 _REPLAY_ORTEX_DECISION_STATE: contextvars.ContextVar[
@@ -461,6 +463,8 @@ _REPLAY_ORTEX_DECISION_STATE: contextvars.ContextVar[
 @contextlib.contextmanager
 def replay_ortex_selection_provider(
     provider: Callable[[str], Mapping[str, Any]],
+    *,
+    allow_supplemental_neutral: bool = False,
 ) -> Iterator[None]:
     """Bind one exact sealed Ortex receipt to the real live decision seam.
 
@@ -474,8 +478,15 @@ def replay_ortex_selection_provider(
         raise ReplayInputContractError(
             "sealed_replay_ortex_provider_is_not_callable"
         )
+    if type(allow_supplemental_neutral) is not bool:
+        raise ReplayInputContractError(
+            "sealed_replay_ortex_supplemental_neutral_capability_is_invalid"
+        )
     token = _REPLAY_ORTEX_DECISION_STATE.set(
-        _ReplayOrtexDecisionState(provider=provider)
+        _ReplayOrtexDecisionState(
+            provider=provider,
+            allow_supplemental_neutral=allow_supplemental_neutral,
+        )
     )
     try:
         yield
@@ -24029,6 +24040,7 @@ def _live_ortex_entry_readiness_reason(
     execution_readiness: object,
     symbol: str,
     read_at: datetime,
+    locked_session: TradingAutomationSession | None = None,
 ) -> str | None:
     """Resolve default-ON Ortex admission evidence without a provider read."""
 
@@ -24044,6 +24056,21 @@ def _live_ortex_entry_readiness_reason(
         or normalized_symbol.endswith("-USD")
     ):
         return None
+    captured_paper_owner_proof: Mapping[str, Any] | None = None
+    if locked_session is not None:
+        try:
+            from .captured_paper_dispatcher import (
+                revalidate_captured_paper_session_owner,
+            )
+
+            captured_paper_owner_proof = (
+                revalidate_captured_paper_session_owner(locked_session)
+            )
+        except Exception:
+            # Supplemental-neutral admission is capability scoped. A missing,
+            # stale, or corrupt owner receipt is indistinguishable from no
+            # capability here and therefore remains fail-closed.
+            captured_paper_owner_proof = None
     replay_state = _REPLAY_ORTEX_DECISION_STATE.get()
     if replay_state is not None:
         if replay_state.consumed:
@@ -24064,6 +24091,7 @@ def _live_ortex_entry_readiness_reason(
             "rank_pct",
             "batch_members_sha256",
             "complete",
+            "supplemental_neutral_reason",
         }
         if not isinstance(raw, Mapping) or set(raw) != expected_fields:
             raise ReplayInputContractError(
@@ -24111,7 +24139,7 @@ def _live_ortex_entry_readiness_reason(
 
         if (
             raw.get("schema_version")
-            != "chili.ortex-selection-result.v1"
+            != "chili.ortex-selection-result.v2"
             or raw.get("symbol") != normalized_symbol
             or type(raw.get("complete")) is not bool
             or (
@@ -24143,9 +24171,30 @@ def _live_ortex_entry_readiness_reason(
             "squeeze_fuel_pct",
         )
         rank_pct = optional_unit(raw.get("rank_pct"), "rank_pct")
+        supplemental_neutral_reason = raw.get(
+            "supplemental_neutral_reason"
+        )
+        if supplemental_neutral_reason not in {
+            None,
+            "operational_unavailable",
+        }:
+            raise ReplayInputContractError(
+                "sealed_replay_ortex_supplemental_neutral_reason_is_invalid"
+            )
         if rank_pct is not None and squeeze_fuel_pct is None:
             raise ReplayInputContractError(
                 "sealed_replay_ortex_rank_without_score"
+            )
+        complete = bool(raw["complete"])
+        if complete and supplemental_neutral_reason is not None:
+            raise ReplayInputContractError(
+                "sealed_replay_ortex_complete_neutral_reason_is_invalid"
+            )
+        if not complete and (
+            squeeze_fuel_pct is not None or rank_pct is not None
+        ):
+            raise ReplayInputContractError(
+                "sealed_replay_ortex_incomplete_economics_are_invalid"
             )
         replay_state.selection = {
             "symbol": normalized_symbol,
@@ -24154,10 +24203,18 @@ def _live_ortex_entry_readiness_reason(
             "batch_members_sha256": members_sha256,
             "squeeze_fuel_pct": squeeze_fuel_pct,
             "squeeze_fuel_rank_pct": rank_pct,
-            "complete": bool(raw["complete"]),
+            "complete": complete,
+            "supplemental_neutral_reason": supplemental_neutral_reason,
         }
-        if not raw["complete"]:
+        if not complete and not (
+            supplemental_neutral_reason == "operational_unavailable"
+            and (
+                captured_paper_owner_proof is not None
+                or replay_state.allow_supplemental_neutral
+            )
+        ):
             return "ortex_batch_coverage_unavailable"
+        replay_state.admitted = True
         return None
     try:
         from .pipeline import (
@@ -24187,6 +24244,9 @@ def _live_ortex_entry_readiness_reason(
             symbol=symbol,
             manifest=manifest,
             read_at=read_at,
+            allow_supplemental_neutral=(
+                captured_paper_owner_proof is not None
+            ),
         )
     except Exception:
         return "ortex_batch_readiness_validation_failed"
@@ -24219,10 +24279,22 @@ def _overlay_replay_ortex_selection(
     selection = state.selection
     if (
         not state.consumed
+        or not state.admitted
         or not isinstance(selection, dict)
         or selection.get("symbol") != normalized_symbol
-        or selection.get("complete") is not True
     ):
+        raise ReplayInputContractError(
+            "sealed_replay_ortex_selection_was_not_admitted"
+        )
+    if selection.get("complete") is not True:
+        if (
+            selection.get("complete") is False
+            and selection.get("supplemental_neutral_reason")
+            == "operational_unavailable"
+            and selection.get("squeeze_fuel_pct") is None
+            and selection.get("squeeze_fuel_rank_pct") is None
+        ):
+            return execution_readiness
         raise ReplayInputContractError(
             "sealed_replay_ortex_selection_was_not_admitted"
         )
@@ -29961,6 +30033,7 @@ def tick_live_session(
             execution_readiness=ex_live,
             symbol=sess.symbol,
             read_at=_utcnow_aware(),
+            locked_session=sess,
         )
         if _ortex_blocker is not None:
             _emit(

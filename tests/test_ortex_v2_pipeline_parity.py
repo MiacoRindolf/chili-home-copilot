@@ -570,6 +570,124 @@ def test_one_transient_member_cannot_create_partial_rank_or_weight(
         assert "ortex_selection_reference" in signal
 
 
+def test_operationally_unavailable_batch_is_neutral_at_live_entry(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    signals = _signals()
+    provider = _Provider(
+        {
+            "AAA": _outcome(
+                "AAA",
+                kind=sm.OrtexOutcomeKind.BACKOFF_ACTIVE,
+            ),
+        }
+    )
+    monkeypatch.setattr(
+        pipeline.settings,
+        "chili_momentum_squeeze_fuel_top_n",
+        1,
+    )
+    status: dict[str, object] = {}
+    with sm.ortex_outcome_provider(provider):
+        weights = pipeline._apply_ortex_squeeze_fuel_batch(
+            SimpleNamespace(get_bind=lambda: None),
+            ross_signals=signals,
+            weights=ROSS_PILLAR_WEIGHTS_LIQUIDITY_BIASED,
+            decision_at=NOW,
+            batch_status_out=status,
+        )
+    reference = {
+        "schema_version": "chili.ortex.squeeze-fuel-batch-ref.v1",
+        "batch_sha256": status["batch_sha256"],
+        "decision_at": status["decision_at"],
+        "complete": status["complete"],
+        "quota_policy_sha256": status["quota_policy_sha256"],
+        "members_sha256": status["members_sha256"],
+    }
+    readiness = {
+        "extra": {
+            "ross_signals": signals,
+            pipeline.ORTEX_SQUEEZE_BATCH_STATUS_KEY: reference,
+        }
+    }
+
+    assert weights == dict(ROSS_PILLAR_WEIGHTS_LIQUIDITY_BIASED)
+    assert status["complete"] is False
+    assert pipeline.ortex_batch_readiness_reason(
+        readiness,
+        symbol="AAA",
+        manifest=status,
+        read_at=NOW,
+        allow_supplemental_neutral=False,
+    ) == "ortex_batch_coverage_unavailable"
+    assert pipeline.ortex_batch_readiness_reason(
+        readiness,
+        symbol="AAA",
+        manifest=status,
+        read_at=NOW,
+        allow_supplemental_neutral=True,
+    ) is None
+    assert pipeline.ortex_batch_readiness_reason(
+        readiness,
+        symbol="CCC",
+        manifest=status,
+        read_at=NOW,
+        allow_supplemental_neutral=True,
+    ) is None
+
+
+@pytest.mark.parametrize(
+    "kind",
+    (
+        sm.OrtexOutcomeKind.MALFORMED_RESPONSE,
+        sm.OrtexOutcomeKind.CONTRACT_MISMATCH,
+        sm.OrtexOutcomeKind.PERMANENT_REJECTED,
+        sm.OrtexOutcomeKind.DISABLED,
+    ),
+)
+def test_non_operational_ortex_failure_remains_fail_closed_at_live_entry(
+    monkeypatch: pytest.MonkeyPatch,
+    kind: sm.OrtexOutcomeKind,
+) -> None:
+    signals = _signals()
+    provider = _Provider({"AAA": _outcome("AAA", kind=kind)})
+    monkeypatch.setattr(
+        pipeline.settings,
+        "chili_momentum_squeeze_fuel_top_n",
+        1,
+    )
+    status: dict[str, object] = {}
+    with sm.ortex_outcome_provider(provider):
+        pipeline._apply_ortex_squeeze_fuel_batch(
+            SimpleNamespace(get_bind=lambda: None),
+            ross_signals=signals,
+            weights=ROSS_PILLAR_WEIGHTS_LIQUIDITY_BIASED,
+            decision_at=NOW,
+            batch_status_out=status,
+        )
+    readiness = {
+        "extra": {
+            "ross_signals": signals,
+            pipeline.ORTEX_SQUEEZE_BATCH_STATUS_KEY: {
+                "schema_version": "chili.ortex.squeeze-fuel-batch-ref.v1",
+                "batch_sha256": status["batch_sha256"],
+                "decision_at": status["decision_at"],
+                "complete": status["complete"],
+                "quota_policy_sha256": status["quota_policy_sha256"],
+                "members_sha256": status["members_sha256"],
+            },
+        }
+    }
+
+    assert pipeline.ortex_batch_readiness_reason(
+        readiness,
+        symbol="AAA",
+        manifest=status,
+        read_at=NOW,
+        allow_supplemental_neutral=True,
+    ) == "ortex_batch_coverage_unavailable"
+
+
 def test_runtime_sizing_has_no_second_ortex_or_current_catalyst_fetch() -> None:
     source = __import__("inspect").getsource(
         __import__(
@@ -657,11 +775,18 @@ def test_live_guard_binds_hub_manifest_before_entry_side_effects(
     monkeypatch.setattr(
         pipeline,
         "ortex_batch_readiness_reason",
-        lambda execution_readiness, *, symbol, manifest, read_at: (
+        lambda execution_readiness, *, symbol, manifest, read_at,
+        allow_supplemental_neutral=False: (
             calls.append(
                 (
                     "validate",
-                    (execution_readiness, symbol, manifest, read_at),
+                    (
+                        execution_readiness,
+                        symbol,
+                        manifest,
+                        read_at,
+                        allow_supplemental_neutral,
+                    ),
                 )
             )
             or None
@@ -678,6 +803,7 @@ def test_live_guard_binds_hub_manifest_before_entry_side_effects(
         is None
     )
     assert [name for name, _value in calls] == ["resolve", "validate"]
+    assert calls[1][1] == (readiness, "AAA", manifest, NOW, False)
     source = inspect.getsource(live_runner.tick_live_session)
     guard_index = source.index("_live_ortex_entry_readiness_reason")
     defer_index = source.index("live_entry_ortex_coverage_unavailable")
@@ -889,7 +1015,7 @@ def test_sealed_replay_ortex_guard_consumes_before_live_sizing_without_db(
     def provider(symbol: str) -> dict[str, object]:
         calls.append(symbol)
         return {
-            "schema_version": "chili.ortex-selection-result.v1",
+            "schema_version": "chili.ortex-selection-result.v2",
             "symbol": "AAA",
             "short_mechanics": mechanics,
             "short_mechanics_sha256": "a" * 64,
@@ -898,6 +1024,7 @@ def test_sealed_replay_ortex_guard_consumes_before_live_sizing_without_db(
             "rank_pct": 1.0,
             "batch_members_sha256": "b" * 64,
             "complete": True,
+            "supplemental_neutral_reason": None,
         }
 
     original = {"extra": {"strong_catalyst_symbols": ["AAA"]}}
@@ -934,6 +1061,97 @@ def test_sealed_replay_ortex_guard_consumes_before_live_sizing_without_db(
     assert source.index("_overlay_replay_ortex_selection") < source.index(
         "triple_confluence_kelly_multiplier"
     )
+
+
+def test_sealed_replay_operational_neutral_requires_paper_or_replay_capability(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import inspect
+
+    from app.services.trading.momentum_neural import captured_paper_dispatcher
+    from app.services.trading.momentum_neural import live_runner
+    from app.services.trading.momentum_neural import replay_v3
+
+    monkeypatch.setattr(
+        live_runner.settings,
+        "chili_momentum_squeeze_fuel_tilt_enabled",
+        True,
+    )
+    mechanics = {"schema_version": "runtime-view.v1", "symbol": "AAA"}
+    result = {
+        "schema_version": "chili.ortex-selection-result.v2",
+        "symbol": "AAA",
+        "short_mechanics": mechanics,
+        "short_mechanics_sha256": "a" * 64,
+        "short_mechanics_runtime_sha256": (
+            live_runner._captured_paper_sha256(mechanics)
+        ),
+        "squeeze_fuel_pct": None,
+        "rank_pct": None,
+        "batch_members_sha256": "b" * 64,
+        "complete": False,
+        "supplemental_neutral_reason": "operational_unavailable",
+    }
+    original = {"extra": {"strong_catalyst_symbols": ["AAA"]}}
+
+    with live_runner.replay_ortex_selection_provider(lambda _symbol: result):
+        assert live_runner._live_ortex_entry_readiness_reason(
+            object(),  # type: ignore[arg-type]
+            execution_readiness=original,
+            symbol="AAA",
+            read_at=NOW,
+        ) == "ortex_batch_coverage_unavailable"
+
+    with live_runner.replay_ortex_selection_provider(
+        lambda _symbol: result,
+        allow_supplemental_neutral=True,
+    ):
+        assert (
+            live_runner._live_ortex_entry_readiness_reason(
+                object(),  # type: ignore[arg-type]
+                execution_readiness=original,
+                symbol="AAA",
+                read_at=NOW,
+            )
+            is None
+        )
+        assert (
+            live_runner._overlay_replay_ortex_selection(
+                original,
+                symbol="AAA",
+            )
+            is original
+        )
+    driver_source = inspect.getsource(replay_v3.ReplayV3Driver)
+    assert "allow_supplemental_neutral=True" in driver_source
+
+    owner_marker = {
+        "account_scope": "alpaca:paper",
+        "live_cash_authorized": False,
+    }
+    monkeypatch.setattr(
+        captured_paper_dispatcher,
+        "revalidate_captured_paper_session_owner",
+        lambda _session: owner_marker,
+    )
+    with live_runner.replay_ortex_selection_provider(lambda _symbol: result):
+        assert (
+            live_runner._live_ortex_entry_readiness_reason(
+                object(),  # type: ignore[arg-type]
+                execution_readiness=original,
+                symbol="AAA",
+                read_at=NOW,
+                locked_session=object(),  # type: ignore[arg-type]
+            )
+            is None
+        )
+        assert (
+            live_runner._overlay_replay_ortex_selection(
+                original,
+                symbol="AAA",
+            )
+            is original
+        )
 
 
 @pytest.mark.parametrize(
@@ -974,7 +1192,7 @@ def test_sealed_replay_ortex_guard_rejects_identity_and_hash_mismatch(
     )
     mechanics = {"schema_version": "runtime-view.v1", "symbol": "AAA"}
     result: dict[str, object] = {
-        "schema_version": "chili.ortex-selection-result.v1",
+        "schema_version": "chili.ortex-selection-result.v2",
         "symbol": "AAA",
         "short_mechanics": mechanics,
         "short_mechanics_sha256": "a" * 64,
@@ -985,6 +1203,7 @@ def test_sealed_replay_ortex_guard_rejects_identity_and_hash_mismatch(
         "rank_pct": 1.0,
         "batch_members_sha256": "b" * 64,
         "complete": True,
+        "supplemental_neutral_reason": None,
     }
     result[field] = value
     with live_runner.replay_ortex_selection_provider(lambda _symbol: result):
@@ -1126,7 +1345,7 @@ def test_real_live_fsm_consumes_incomplete_sealed_ortex_at_entry_guard(
     def provider(symbol: str) -> dict[str, object]:
         calls.append(symbol)
         return {
-            "schema_version": "chili.ortex-selection-result.v1",
+            "schema_version": "chili.ortex-selection-result.v2",
             "symbol": "AAA",
             "short_mechanics": mechanics,
             "short_mechanics_sha256": "a" * 64,
@@ -1137,6 +1356,7 @@ def test_real_live_fsm_consumes_incomplete_sealed_ortex_at_entry_guard(
             "rank_pct": None,
             "batch_members_sha256": "b" * 64,
             "complete": False,
+            "supplemental_neutral_reason": "operational_unavailable",
         }
 
     with live_runner.replay_clock(NOW), (

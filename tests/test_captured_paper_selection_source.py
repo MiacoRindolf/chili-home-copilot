@@ -249,6 +249,7 @@ def _set_ortex_signal(
     reference: dict | None,
     rank_pct: float | None = 1.0,
     squeeze_fuel_pct: float | None = 0.6238,
+    batch_complete: bool = True,
 ) -> None:
     row = (
         db.query(MomentumSymbolViability)
@@ -287,7 +288,7 @@ def _set_ortex_signal(
         batch_status = {
             "schema_version": "chili.ortex.squeeze-fuel-batch.v1",
             "decision_at": decision_at.isoformat(),
-            "complete": True,
+            "complete": batch_complete,
             "quota_policy_sha256": reference["quota_policy_sha256"],
             "selected_symbols": (
                 []
@@ -316,6 +317,33 @@ def _set_ortex_signal(
     readiness["extra"] = extra
     row.execution_readiness_json = readiness
     db.commit()
+
+
+def _ortex_operational_unavailable_reference(
+    *,
+    symbol: str,
+    observed_at: datetime,
+    kind: OrtexOutcomeKind = OrtexOutcomeKind.BACKOFF_ACTIVE,
+) -> dict:
+    policy = ortex_public_policy()
+    return OrtexShortMechanicsOutcome(
+        kind=kind,
+        symbol=symbol,
+        requested_exchange=None,
+        resolved_exchange=None,
+        endpoints=(),
+        short_interest_pct=None,
+        cost_to_borrow=None,
+        utilization=None,
+        is_easy_to_borrow=None,
+        provider_event_at=None,
+        effective_at=None,
+        received_at=observed_at,
+        available_at=observed_at,
+        detail_code=kind.value.lower(),
+        policy=policy,
+        quota_policy_sha256=sha256_json(policy),
+    ).to_selection_reference_dict()
 
 
 def _seed_source(
@@ -732,6 +760,65 @@ def test_ortex_rank_without_typed_snapshot_is_coverage_unavailable(
     )
     assert result.status == COVERAGE_UNAVAILABLE
     assert result.opportunity_consumed is False
+    assert result.risk_reserved is False
+    assert result.order_posted is False
+
+
+def test_exact_operationally_unavailable_ortex_batch_is_supplemental_neutral(
+    db,
+) -> None:
+    material = _seed_source(db)
+    reference = _ortex_operational_unavailable_reference(
+        symbol="ACTU",
+        observed_at=material["tick_at"],
+    )
+    _set_ortex_signal(
+        db,
+        reference=reference,
+        rank_pct=None,
+        squeeze_fuel_pct=None,
+        batch_complete=False,
+    )
+    source = _source(
+        material,
+        fundamentals_reader=lambda symbol: _fresh_fundamentals(symbol),
+        ortex_enabled=True,
+    )
+
+    snapshot = source.read_snapshot()[0]
+    occurrence = source.build_occurrence(snapshot, source_sequence=1)
+    result = score_captured_viability(
+        occurrence.bundle,
+        authority=occurrence.scoring_authority,
+        evaluation_at=occurrence.bundle.read_at,
+    )
+
+    assert snapshot.ortex_selection_affected is True
+    assert snapshot.ortex_coverage_reason is None
+    assert CaptureStream.ORTEX_SNAPSHOT in (
+        occurrence.bundle.dependency_inventory.dependency_profile.required_streams
+    )
+    ortex_event = next(
+        event
+        for event in occurrence.source_events
+        if event.stream is CaptureStream.ORTEX_SNAPSHOT
+    )
+    assert ortex_event.payload["complete"] is False
+    assert all(
+        member["squeeze_fuel_pct"] is None and member["rank_pct"] is None
+        for member in ortex_event.payload["members"]
+    )
+    assert all(
+        gap.stream is not CaptureStream.ORTEX_SNAPSHOT
+        for gap in occurrence.bundle.coverage_gaps
+    )
+    assert (
+        snapshot.source_payload["execution_readiness"]["extra"]["ross_signals"][
+            "ACTU"
+        ]["ortex_selection_reference"]["kind"]
+        == "BACKOFF_ACTIVE"
+    )
+    assert result.status == SCORED
     assert result.risk_reserved is False
     assert result.order_posted is False
 
