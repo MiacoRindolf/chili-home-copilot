@@ -16817,9 +16817,7 @@ def _scale_out_to_runner(
 # (byte-identical). docs/DESIGN/MOMENTUM_LANE.md
 
 
-def _resolve_scale_grid(
-    pos: dict[str, Any], symbol: str | None, *, le: dict[str, Any] | None = None
-) -> list[list[float]]:
+def _resolve_scale_grid(pos: dict[str, Any], symbol: str | None) -> list[list[float]]:
     """Return the frozen ladder ``[[target_px, fraction], ...]`` for this position.
 
     Computed ONCE off the FROZEN entry + the position's initial stop (the risk
@@ -16841,24 +16839,12 @@ def _resolve_scale_grid(
             stop = _float_or_none(pos.get("stop_price"))
     except (TypeError, ValueError):
         entry, stop = 0.0, None
-    # L10d — ipinapasa ang SARILING ATR%% ng pangalan (nakuha na sa entry) para
-    # mabaklas ang mga rung na nasa loob ng ingay. Walang le => walang ATR =>
-    # fail-toward-KEEP (dating ladder).
-    _atr = _float_or_none((le or {}).get("entry_stop_atr_pct"))
-    levels = scale_grid_levels(
-        entry,
-        float(stop) if stop is not None else 0.0,
-        side_long=_le_side_long(pos),
-        symbol=symbol,
-        atr_pct=_atr,
-    )
+    levels = scale_grid_levels(entry, float(stop) if stop is not None else 0.0, side_long=_le_side_long(pos), symbol=symbol)
     pos["scale_grid"] = [[float(px), float(fr)] for px, fr in levels]
     return [list(x) for x in pos["scale_grid"]]
 
 
-def _scale_grid_active(
-    pos: dict[str, Any], symbol: str | None, *, le: dict[str, Any] | None = None
-) -> bool:
+def _scale_grid_active(pos: dict[str, Any], symbol: str | None) -> bool:
     """True iff a multi-level grid is in force AND has un-fired rungs remaining.
 
     L10c (2026-08-04) — SHAPE GATE. Ang L10b proof (4 windows) ay nagpakita na ang
@@ -16870,7 +16856,7 @@ def _scale_grid_active(
     na siyang tamang kilos: nabangko na ang spike, hinahayaan ang natitira sa
     hakbang-hakbang na akyat. Walang `le` (o flag OFF) => dating ugali.
     """
-    grid = _resolve_scale_grid(pos, symbol, le=le)
+    grid = _resolve_scale_grid(pos, symbol)
     if len(grid) < 2:  # 0/1 rung => no ladder; the single scale-out path handles it
         return False
     idx = int(pos.get("scale_grid_idx") or 0)
@@ -33284,7 +33270,7 @@ def tick_live_session(
                     # bank the partial, move the balance to breakeven, hold the runner.
                     # E(1): route through the grid step when a multi-level ladder is in
                     # force (advances the rung); else the single scale-out (byte-identical).
-                    _step = _scale_out_grid_step if _scale_grid_active(pos, sess.symbol, le=le) else _scale_out_to_runner
+                    _step = _scale_out_grid_step if _scale_grid_active(pos, sess.symbol) else _scale_out_to_runner
                     _step(
                         db,
                         sess,
@@ -33315,7 +33301,7 @@ def tick_live_session(
                     else float(poll["filled_size"])
                 )
                 if is_scale_out:
-                    _step = _scale_out_grid_step if _scale_grid_active(pos, sess.symbol, le=le) else _scale_out_to_runner
+                    _step = _scale_out_grid_step if _scale_grid_active(pos, sess.symbol) else _scale_out_to_runner
                     _step(
                         db,
                         sess,
@@ -39275,7 +39261,7 @@ def tick_live_session(
                     # E(1): a resting-limit fill advances the grid rung when a ladder is
                     # in force (the reactive market path takes the later rungs); else it
                     # finishes the single scale-out to the runner (byte-identical).
-                    _step = _scale_out_grid_step if _scale_grid_active(pos, sess.symbol, le=le) else _scale_out_to_runner
+                    _step = _scale_out_grid_step if _scale_grid_active(pos, sess.symbol) else _scale_out_to_runner
                     _step(
                         db, sess, le=le, filled_quantity=_new_qty,
                         entry_price=avg, fill_price=_px_f, reason="scale_out_limit",
@@ -39349,7 +39335,7 @@ def tick_live_session(
             try:
                 if pos.get("scale_grid_anchor_stop") is None and not pos.get("partial_taken"):
                     pos["scale_grid_anchor_stop"] = float(pos.get("stop_price") or 0.0)
-                _grid_active = _scale_grid_active(pos, sess.symbol, le=le)
+                _grid_active = _scale_grid_active(pos, sess.symbol)
             except Exception:
                 _grid_active = False
             if _grid_active:
