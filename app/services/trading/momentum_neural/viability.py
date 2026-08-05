@@ -72,14 +72,24 @@ class ViabilitySettingsProjection:
             "chili_momentum_a_setup_quality_floor_change_pct_min": 10.0,
             "chili_momentum_exclude_leveraged_etfs": True,
             "chili_momentum_exclude_fund_structures_enabled": True,
-            "chili_momentum_live_eligible_max_spread_bps": 0.0,
+            # 2026-08-05: ang apat na halagang ito ay dating SUMASALUNGAT sa
+            # `app/config.py`, at LAHAT sa permissive na direksyon — 0.0 dito ay
+            # nangangahulugang WALANG toxic-spread ceiling (config: 300.0), 1500
+            # ay 5x ang abs cap (config: 300.0), at False ang dalawang quality
+            # gate na naka-True sa config. Dormant ito ngayon dahil lahat ng
+            # tunay na caller ay nagpapasa ng buong `settings`, pero ang
+            # fallback na ito ay ginagamit sa BAWAT attribute na wala sa source,
+            # kaya isang partial/mock source ay tahimik na makakakuha ng ibang
+            # polisiya kaysa produksyon — fail-OPEN sa isang live-money gate.
+            # Isinalin sa config defaults; bantayan ng test_viability_shim_defaults.
+            "chili_momentum_live_eligible_max_spread_bps": 300.0,
             "chili_momentum_thin_spread_squeeze_lane_enabled": True,
             "chili_momentum_thin_spread_squeeze_top_pctl": 0.80,
             "chili_momentum_thin_spread_ceiling_squeeze_slope": 1.0,
-            "chili_momentum_risk_max_spread_bps_abs_cap": 1500.0,
+            "chili_momentum_risk_max_spread_bps_abs_cap": 300.0,
             "chili_momentum_live_eligible_allow_extreme_explosive": True,
-            "chili_momentum_a_setup_quality_floor_enabled": False,
-            "chili_momentum_no_signal_derank_enabled": False,
+            "chili_momentum_a_setup_quality_floor_enabled": True,
+            "chili_momentum_no_signal_derank_enabled": True,
             "chili_momentum_no_signal_derank_fraction": 1.0,
             "chili_momentum_catalyst_grade_gate_enabled": True,
             "chili_momentum_catalyst_arb_flat_gate_enabled": True,
