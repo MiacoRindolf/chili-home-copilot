@@ -23,7 +23,7 @@ def test_momentum_families_count():
     assert get_family("nope") is None
 
 
-def test_viability_live_blocked_on_wide_spread():
+def _wide_spread_result(spread_bps: float):
     fam = get_family("impulse_breakout")
     assert fam is not None
     ctx = build_momentum_regime_context(
@@ -31,11 +31,41 @@ def test_viability_live_blocked_on_wide_spread():
         atr_pct=0.015,
         meta={"spread_regime": "tight", "fee_burden_regime": "low"},
     )
-    feats = ExecutionReadinessFeatures(spread_bps=40.0, fee_to_target_ratio=0.1)
-    vr = score_viability("BTC-USD", fam, ctx, feats)
+    feats = ExecutionReadinessFeatures(spread_bps=spread_bps, fee_to_target_ratio=0.1)
+    return score_viability("BTC-USD", fam, ctx, feats)
+
+
+def test_viability_derates_but_does_not_disqualify_a_wide_spread():
+    """40bps ay DINE-DERATE, hindi dini-disqualify.
+
+    Ang testong ito ay dating umaasang live_eligible is False sa 40bps. Ang
+    kontratang iyon ay SINADYANG inalis noong 2026-06-25 (commit ef96a15): ang
+    hard 12/25bps disqualify ay tahimik na humaharang sa BAWAT wide-spread
+    squeeze — 1,495 "Not live-eligible" na entry block sa iisang araw, ILLR
+    38-91bps at FCUV 70-87bps, ang mismong pangalang umiiral ang lane para
+    i-trade. Pinalitan ito ng IISANG dokumentadong ceiling,
+    `chili_momentum_live_eligible_max_spread_bps` (default 300bps = sirang o
+    naka-halt na quote). Hindi na-update ang test kaya pula ito mula noon.
+
+    Ang binabantayan ngayon: derate + babala, pero nananatiling live-eligible.
+    """
+    vr = _wide_spread_result(40.0)
     assert vr.paper_eligible is True
-    assert vr.live_eligible is False
+    assert vr.live_eligible is True
     assert any("spread" in w.lower() for w in vr.warnings)
+
+
+def test_viability_disqualifies_a_truly_toxic_spread():
+    """Ang tunay na ceiling ay umiiral pa rin — 400bps > 300bps default.
+
+    Ito ang kalahating nawala noong tinanggal ang lumang assertion: kung wala
+    ito, walang test na magpapatunay na may natitira pang toxic-spread gate.
+    """
+    from app.config import settings
+
+    vr = _wide_spread_result(float(settings.chili_momentum_live_eligible_max_spread_bps) + 100.0)
+    assert vr.live_eligible is False
+    assert any("untradeable" in w.lower() or "exceeds" in w.lower() for w in vr.warnings)
 
 
 def test_viability_allows_live_when_tight_and_calm():

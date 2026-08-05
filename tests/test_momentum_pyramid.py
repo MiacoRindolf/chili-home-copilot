@@ -21,6 +21,10 @@ import pytest
 
 from app.services.trading.momentum_neural.risk_policy import max_loss_circuit_decision
 
+# Isang matatag na account-identity para sa mga session na ito. Non-Alpaca
+# (coinbase_spot) ang execution family, kaya may aktibong identity fence.
+PYRAMID_TEST_ACCOUNT_IDENTITY = "test-non-alpaca-account-v1"
+
 K = 2.0  # chili_momentum_max_loss_risk_multiple default
 EPS = 1e-6
 
@@ -202,6 +206,10 @@ def test_B_parity_off_full_tick_no_add_no_mutation(monkeypatch, db):
         state=STATE_LIVE_TRAILING,
         risk_snapshot_json={
             RISK_SNAPSHOT_KEY: {"allowed": True},
+            # Ang frozen na katapat ng account-identity fence (tingnan ang
+            # _mk_held_adapter): kung wala ito, `frozen_non_alpaca_account_identity`
+            # ay None at nagki-quarantine ang tick bago pa maabot ang guard.
+            "non_alpaca_account_identity": PYRAMID_TEST_ACCOUNT_IDENTITY,
             "momentum_risk_policy_summary": {"disable_live_if_governance_inhibit": True},
             "momentum_policy_caps": {"max_notional_per_trade_usd": 5000, "max_hold_seconds": 86400},
             "momentum_live_execution": {
@@ -406,6 +414,10 @@ def test_E_guard4_admission_refusal_aborts_add_not_exit(monkeypatch, db):
         state=STATE_LIVE_TRAILING,
         risk_snapshot_json={
             RISK_SNAPSHOT_KEY: {"allowed": True},
+            # Ang frozen na katapat ng account-identity fence (tingnan ang
+            # _mk_held_adapter): kung wala ito, `frozen_non_alpaca_account_identity`
+            # ay None at nagki-quarantine ang tick bago pa maabot ang guard.
+            "non_alpaca_account_identity": PYRAMID_TEST_ACCOUNT_IDENTITY,
             "momentum_risk_policy_summary": {"disable_live_if_governance_inhibit": True},
             "momentum_policy_caps": {"max_notional_per_trade_usd": 5000, "max_hold_seconds": 86400},
             "momentum_live_execution": {
@@ -498,6 +510,10 @@ def test_D_full_add_lifecycle_submit_adopt_blend_idempotent(monkeypatch, db):
         state=STATE_LIVE_TRAILING,
         risk_snapshot_json={
             RISK_SNAPSHOT_KEY: {"allowed": True},
+            # Ang frozen na katapat ng account-identity fence (tingnan ang
+            # _mk_held_adapter): kung wala ito, `frozen_non_alpaca_account_identity`
+            # ay None at nagki-quarantine ang tick bago pa maabot ang guard.
+            "non_alpaca_account_identity": PYRAMID_TEST_ACCOUNT_IDENTITY,
             "momentum_risk_policy_summary": {"disable_live_if_governance_inhibit": True},
             "momentum_policy_caps": {"max_notional_per_trade_usd": 50000, "max_hold_seconds": 86400},
             "momentum_live_execution": {
@@ -608,4 +624,17 @@ def _mk_held_adapter(symbol: str, *, bid: float, ask: float):
     ad.get_product.return_value = (prod, fresh)
     ad.place_limit_order_gtc.return_value = {"ok": True, "order_id": "ord-pyr-1", "client_order_id": "cid-pyr"}
     ad.cancel_order.return_value = {"ok": True, "raw": {}}
+    # NON-ALPACA ACCOUNT-IDENTITY FENCE. Ang session dito ay coinbase_spot (ang
+    # default ng create_trading_automation_session), kaya ang UNANG gate na
+    # nadadaanan ng tick ay `_non_alpaca_account_identity_fence(phase="tick_start")`.
+    # Kapag hindi mabasa ang kasalukuyang identity, nagki-quarantine ito at
+    # bumabalik agad ang tick — ~1900 linya BAGO ang unang runner_boundary_risk_ok
+    # — kaya natatabunan ang mismong guard na sinusuri ng mga test na ito
+    # (nakikita bilang `non_alpaca_account_identity_quarantined`). Pinapadaan
+    # natin ang TUNAY na fence sa halip na i-monkeypatch, kaya nananatili itong
+    # sakop; ang frozen na katapat ay nasa risk_snapshot_json ng bawat session.
+    ad.get_account_identity_truth.return_value = {
+        "readable": True,
+        "identity": PYRAMID_TEST_ACCOUNT_IDENTITY,
+    }
     return ad
