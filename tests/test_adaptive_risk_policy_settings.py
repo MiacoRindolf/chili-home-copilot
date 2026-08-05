@@ -280,6 +280,19 @@ def test_captured_paper_marker_prevents_desktop_env_file_reload(
     tmp_path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """Ang buong seam ng `load_process_settings` — TATLONG posisyon ngayon.
+
+    Dating dalawa lang (walang marker -> basahin ang `.env`; may marker -> huwag).
+    Nagdagdag ng pangatlo noong 2026-08-05: kapag `CHILI_PYTEST=1` ay hindi rin
+    binabasa ang `.env`, dahil ang suite ay dapat sumukat sa CODE DEFAULT at hindi
+    sa desktop config ng operator (41 policy flag ang magkaiba, at dahil doon may
+    mga testong GREEN sa CI pero RED nang lokal).
+
+    Dahil doon, ang testong ito ay dapat KUMONTROL ng `CHILI_PYTEST` — itinatakda
+    ito ng conftest.py:84 para sa buong suite, kaya kung hindi aalisin ay ang
+    pytest branch ang tatakbo at hindi kailanman maa-abot ang non-pytest na
+    posisyon na sinusukat ng unang assertion.
+    """
     (tmp_path / ".env").write_text(
         "CHILI_MOMENTUM_RISK_LOSS_FRACTION_OF_EQUITY=0.77\n",
         encoding="utf-8",
@@ -290,12 +303,21 @@ def test_captured_paper_marker_prevents_desktop_env_file_reload(
         raising=False,
     )
     monkeypatch.delenv(CAPTURED_PAPER_CONFIG_ISOLATION_ENV, raising=False)
+    monkeypatch.delenv("CHILI_PYTEST", raising=False)
 
+    # (1) PRODUKSYON: walang marker, walang CHILI_PYTEST -> binabasa ang `.env`.
     assert load_process_settings().chili_momentum_risk_loss_fraction_of_equity == 0.77
 
+    # (2) PYTEST: `.env` ay hindi binabasa kahit walang captured-PAPER marker.
+    monkeypatch.setenv("CHILI_PYTEST", "1")
+    assert load_process_settings().chili_momentum_risk_loss_fraction_of_equity == 0.01
+    monkeypatch.delenv("CHILI_PYTEST", raising=False)
+
+    # (3) CAPTURED-PAPER: ang marker ay humaharang nang mag-isa (walang CHILI_PYTEST).
     monkeypatch.setenv(CAPTURED_PAPER_CONFIG_ISOLATION_ENV, "true")
     assert load_process_settings().chili_momentum_risk_loss_fraction_of_equity == 0.01
 
+    # ...at fail-CLOSED pa rin ito sa maling halaga (hindi lang basta "truthy").
     monkeypatch.setenv(CAPTURED_PAPER_CONFIG_ISOLATION_ENV, "TRUE")
     with pytest.raises(RuntimeError, match="must be exactly 'true'"):
         load_process_settings()
