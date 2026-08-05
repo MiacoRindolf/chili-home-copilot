@@ -89,14 +89,31 @@ def test_non_equity_profile_returns_empty():
 
 
 def test_price_band_is_inclusive_at_bounds():
+    # L12 (2026-08-05): ang ceiling ay sinusukat na ngayon sa KASALUKUYAN **o** sa
+    # session ORIGIN, kaya ang "just over" ay hindi na sapat na kondisyon para
+    # ma-drop — kailangang labas ang PAREHO. Ang OVER dito ay $25 @ +2%, kaya ang
+    # origin ($24.51) ay labas din: tunay na out-of-class.
     snap = [
         _row("ATMIN", 10.0, 1.0, 5_000_000),   # exactly price_min
         _row("ATMAX", 10.0, 20.0, 5_000_000),  # exactly price_max
-        _row("OVER", 10.0, 20.01, 5_000_000),  # just over -> DROP
+        _row("OVER", 2.0, 25.0, 5_000_000),    # kasalukuyan AT origin labas -> DROP
     ]
     out = build_equity_universe(EQUITY_ROSS_SMALLCAP, snapshot=snap)
     assert "ATMIN" in out and "ATMAX" in out
     assert "OVER" not in out
+
+
+def test_runner_na_tumawid_sa_ceiling_ay_hindi_na_nag_eeject_sa_sarili():
+    """L12: ang dating kontrata ay "just over -> DROP" kahit ang pangalan ay
+    nagsimula sa loob ng band. Iyon ang nagpapalabas sa runner sa mismong
+    sandaling ito ang pinakamalaking mover (AMIX 08-04: $4.51 -> $24.68)."""
+    snap = [
+        _row("RUNNER", 10.0, 20.01, 5_000_000),  # origin $18.19 -> IN CLASS
+        _row("LARGE", 2.0, 250.0, 5_000_000),    # origin $245   -> labas pa rin
+    ]
+    out = build_equity_universe(EQUITY_ROSS_SMALLCAP, snapshot=snap)
+    assert "RUNNER" in out
+    assert "LARGE" not in out
 
 
 def test_last_trade_price_fallback_when_day_close_absent():
