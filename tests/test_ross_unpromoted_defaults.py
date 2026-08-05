@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import ast
 import inspect
+import re
 from pathlib import Path
 
 from app.config import Settings
@@ -79,7 +80,11 @@ def test_missing_setting_fallbacks_preserve_default_on_doctrine():
         "chili_momentum_dip_monster_context_enabled": (entry_gates,),
         "chili_momentum_late_ah_monster_placement_enabled": (entry_gates,),
         "chili_momentum_monster_structure_floor_enabled": (live_runner,),
-        "chili_momentum_scale_grid_enabled": (paper_execution,),
+        # DALAWANG may-ari: parehong may sariling getattr fallback ang
+        # paper_execution.scale_grid_enabled() at live_runner._resolve_scale_grid.
+        # Ang isa sa kanila ay naiwang False matapos ang 2026-08-04 parity fix —
+        # ito ang pumipigil na maulit iyon.
+        "chili_momentum_scale_grid_enabled": (paper_execution, live_runner),
     }
     assert set(owners) == set(_USER_APPROVED_DEFAULT_ON)
     for name, modules in owners.items():
@@ -144,3 +149,25 @@ def test_replay_ab_tool_uses_the_complete_closed_operator_policy() -> None:
     )
     assert "arbitrary FLAGS_JSON is forbidden in sealed replay" in source
     assert "type(value) is not bool" in source
+
+
+def test_live_runner_ay_walang_undefined_logger_reference() -> None:
+    """Ang module logger ng live_runner ay `_log`, HINDI `logger`.
+
+    2026-08-04: 16 na bare `logger.` reference ang natagpuan doon — walang
+    module-level na `logger`, kaya ang bawat isa ay NameError kapag naabot.
+    Karamihan ay nasa EXCEPTION HANDLERS, kung saan pinapalitan nila ang isang
+    handled na error ng tumatalbog na NameError. Isa rito ang tumama sa isang
+    diagnostic na idinagdag ko: tahimik nitong nilaktawan ang buong scale-out
+    step, kaya kumilos ang lane na parang OFF ang scale grid (JLHL +12.67 ->
+    +23.63) nang WALANG anumang traceback sa log.
+    """
+    import app.services.trading.momentum_neural.live_runner as live_runner_mod
+
+    assert hasattr(live_runner_mod, "_log")
+    assert not hasattr(live_runner_mod, "logger"), (
+        "kung may module-level na `logger` na, i-update ang panuntunang ito"
+    )
+    source = inspect.getsource(live_runner_mod)
+    bad = re.findall(r"(?<![\w.])logger\s*\.", source)
+    assert not bad, f"{len(bad)} bare `logger.` reference — gamitin ang `_log.`"
