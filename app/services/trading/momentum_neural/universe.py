@@ -775,7 +775,21 @@ def build_equity_universe(
             if _under_min and not _subdollar_on:
                 continue
             if profile.price_max is not None and price > profile.price_max:
-                continue
+                # L12 (2026-08-05) — ORIGIN-BASED CEILING. ITO ang site na
+                # nagpalabas sa AMIX: dito napagpapasyahan kung SINO ang papasok
+                # sa pool, at ang ceiling ay sinusukat sa live na presyo — kaya
+                # ang runner ay kusang nagpapalabas sa sarili nito sa oras na
+                # ito na ang pinakamalaking mover. Pinapasok kung ang session
+                # ORIGIN (prior close) ay nasa loob ng band. Ang change ay
+                # binabasa nang maaga rito; ang parehong halaga ay muling
+                # ginagamit sa ibaba, kaya walang bagong data source.
+                _chg_for_origin = _f(s.get("todaysChangePerc"))
+                if _chg_for_origin is None:
+                    _chg_for_origin = _premarket_change_pct(s)
+                if not _price_in_band(
+                    _session_origin_price(price, _chg_for_origin), profile
+                ):
+                    continue
 
             day = s.get("day") or {}
             mn = s.get("min") or {}
@@ -1020,8 +1034,8 @@ def symbols_within_profile_price_band(
     *,
     snapshot: list[dict] | None = None,
 ) -> tuple[set[str], bool]:
-    """Keep only ``symbols`` whose CURRENT price sits in the profile's instrument
-    CLASS band ``[price_min, price_max]``.
+    """Keep only ``symbols`` whose CURRENT price **or session ORIGIN** (prior
+    close) sits in the profile's instrument CLASS band ``[price_min, price_max]``.
 
     This is the LIVE-ARM instrument-class gate. ``build_equity_universe`` price-
     screens the equity-viability *refresh*, but large-caps still reach
@@ -1063,6 +1077,7 @@ def symbols_within_profile_price_band(
         return set(), False  # total snapshot outage -> caller decides fail-open/safe
 
     prices: dict[str, float] = {}
+    origins: dict[str, float] = {}
     for s in snapshot:
         try:
             if not isinstance(s, dict):
@@ -1072,6 +1087,13 @@ def symbols_within_profile_price_band(
                 p = _snapshot_price(s)
                 if p is not None and p > 0:
                     prices[t] = p
+                    # L12: ang session origin (prior close) mula sa parehong row.
+                    _c = _f(s.get("todaysChangePerc"))
+                    if _c is None:
+                        _c = _premarket_change_pct(s)
+                    _o = _session_origin_price(p, _c)
+                    if _o is not None:
+                        origins[t] = _o
         except Exception:
             continue
 
@@ -1080,11 +1102,14 @@ def symbols_within_profile_price_band(
         p = prices.get(t)
         if p is None:
             continue  # unknown current price -> drop (fail-safe for a live-arm pool)
-        if profile.price_min is not None and p < profile.price_min:
-            continue
-        if profile.price_max is not None and p > profile.price_max:
-            continue
-        kept.add(t)
+        # L12 (2026-08-05): in-class kung ang KASALUKUYAN o ang session ORIGIN ay
+        # nasa band. Ang panganib na binabantayan ng gate na ito — ang $70-$100 na
+        # large cap na dumaan sa broad-brain scoring — ay hindi lumuluwag: ang
+        # origin ng MU sa $100 @ +3% ay $97, labas pa rin. Ang tanging bagong
+        # papasok ay ang nagsimulang IN-CLASS at umakyat, na siya mismong pangalang
+        # hinahabol ng lane.
+        if _price_in_band(p, profile) or _price_in_band(origins.get(t), profile):
+            kept.add(t)
     return kept, True
 
 

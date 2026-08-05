@@ -22,7 +22,20 @@ from app.services.trading.momentum_neural.universe import (
     EQUITY_ROSS_SMALLCAP as P,
     _price_in_band,
     _session_origin_price,
+    build_equity_universe,
+    symbols_within_profile_price_band,
 )
+
+
+def _row(ticker: str, price: float, chg: float, *, shares: float = 5_000_000.0) -> dict:
+    """Isang Massive snapshot row na sapat para makadaan sa lahat ng ibang floor."""
+    return {
+        "ticker": ticker,
+        "lastTrade": {"p": price},
+        "todaysChangePerc": chg,
+        "day": {"v": shares, "c": price, "h": price, "l": price * 0.5},
+        "min": {"av": shares, "c": price},
+    }
 
 
 def test_amix_origin_derivation():
@@ -77,3 +90,55 @@ def test_origin_ay_none_sa_sirang_input(price, chg):
 def test_band_helper_ay_matibay_sa_sirang_input():
     for bad in (None, 0.0, -1.0, float("nan"), float("inf"), "hindi-numero"):
         assert _price_in_band(bad, P) is False
+
+
+# ---------------------------------------------------------------------------
+# TATLO ANG SITE NA NAGPAPATUPAD NG BAND, at ang unang bersyon ng L12 ay isa
+# lang ang inayos. Ang `ross_smallcap_profile_evidence` ay tinatanong lamang
+# MATAPOS makapasok sa pool ang pangalan — kaya kung nag-eeject ang pool builder,
+# hindi na naaabot ang gate na iyon. Sinasakop ng mga test sa ibaba ang dalawang
+# site na aktwal na nagpalabas sa AMIX.
+# ---------------------------------------------------------------------------
+
+
+def test_pool_builder_ay_hindi_nag_eeject_ng_runner_sa_sarili_nitong_tagumpay():
+    """`build_equity_universe` — ITO ang site na nagpalabas sa AMIX sa $20."""
+    kept = build_equity_universe(P, snapshot=[_row("AMIX", 24.68, 400.0)])
+    assert "AMIX" in kept, "muling nag-eeject ang pool builder sa runner"
+
+
+def test_pool_builder_ay_hindi_pa_rin_nagpapapasok_ng_large_cap():
+    kept = build_equity_universe(P, snapshot=[_row("MU", 250.0, 2.0)])
+    assert "MU" not in kept
+
+
+def test_pool_builder_ay_hindi_pa_rin_nagpapapasok_ng_penny():
+    kept = build_equity_universe(P, snapshot=[_row("PENNY", 0.40, 8.0)])
+    assert "PENNY" not in kept
+
+
+def test_pool_builder_ay_pinapanatili_ang_karaniwang_in_band_na_pangalan():
+    kept = build_equity_universe(P, snapshot=[_row("NORM", 9.72, 30.0)])
+    assert "NORM" in kept
+
+
+def test_live_arm_gate_ay_pinapapasok_ang_umakyat_na_in_class():
+    """`symbols_within_profile_price_band` — ang live-arm instrument-class gate."""
+    kept, ok = symbols_within_profile_price_band(
+        ["AMIX"], P, snapshot=[_row("AMIX", 24.68, 400.0)]
+    )
+    assert ok is True and kept == {"AMIX"}
+
+
+def test_live_arm_gate_ay_humaharang_pa_rin_sa_large_cap():
+    """Ang mismong panganib na dahilan ng gate: $70-$100 na pangalan mula sa
+    broad-brain scoring. Ang origin ng MU sa $250 @ +2% ay $245 — labas pa rin."""
+    kept, ok = symbols_within_profile_price_band(
+        ["MU"], P, snapshot=[_row("MU", 250.0, 2.0)]
+    )
+    assert ok is True and kept == set()
+
+
+def test_live_arm_gate_ay_fail_safe_pa_rin_kapag_walang_snapshot():
+    kept, ok = symbols_within_profile_price_band(["AMIX"], P, snapshot=[])
+    assert ok is False and kept == set()
