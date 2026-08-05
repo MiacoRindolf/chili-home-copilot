@@ -21,6 +21,8 @@ Flag default OFF -> byte-identical (both gates skipped).
 """
 from __future__ import annotations
 
+from datetime import datetime, timezone
+
 import pandas as pd
 
 from app.config import settings
@@ -31,6 +33,13 @@ from app.services.trading.momentum_neural.entry_gates import (
     _resample_htf,
     pullback_break_confirmation,
 )
+
+# SESSION CLOCK. Ang `_premarket_tickbreak_confirmed` ay tumatakbo BAGO ang doji at
+# HTF veto sa tick-break na sangay, at kapag walang `now` ay tunay na wall clock ang
+# binabasa nito — kaya ang mga testong nagpapasa ng `live_price` ay nakadepende sa
+# oras ng pagtakbo. Ang mga frame dito ay RangeIndex (walang sariling oras), kaya
+# tahasang RTH ang ini-angkla para ang doji/HTF veto ang talagang nasusukat.
+_RTH_NOW = datetime(2026, 6, 29, 14, 45, tzinfo=timezone.utc)  # Lunes 10:45 ET
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -751,6 +760,7 @@ def test_doji_veto_skipped_on_tick_break(monkeypatch) -> None:
     )
     ok, reason, dbg = pullback_break_confirmation(
         df, entry_interval="1m", require_retest=True, live_price=pb_high + 1.0, symbol="TEST",
+        now=_RTH_NOW,
     )
     # The doji gate must NOT be the verdict (it was skipped for the forming tick bar).
     assert reason != "doji_trigger_veto", (reason, dbg)
@@ -771,6 +781,7 @@ def test_htf_veto_applies_on_tick_break(monkeypatch) -> None:
     )
     ok, reason, dbg = pullback_break_confirmation(
         df, entry_interval="1m", require_retest=True, live_price=pb_high + 1.0, symbol="TEST",
+        now=_RTH_NOW,
     )
     assert ok is False, (reason, dbg)
     assert reason == "htf_against_veto", (reason, dbg)

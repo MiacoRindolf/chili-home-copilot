@@ -52,9 +52,19 @@ def _waiting_structure():
     return rows
 
 
+# SESSION CLOCK (2026-08-05). Ang `_premarket_tickbreak_confirmed` ay humihingi ng
+# ATR thrust buffer sa PREMARKET (ang CUPR false-pop guard) at hindi sa RTH. Kapag
+# hindi ipinapasa ang `now`, TUNAY NA WALL CLOCK ang binabasa nito — kaya ang mga
+# testong ito na tumutusok ng $0.01 ay pumapasa kapag pinatakbo sa RTH at
+# bumabagsak kapag premarket, sa parehong code at parehong data. Ang frame sa ibaba
+# ay naka-timestamp na sa RTH (14:00-14:20Z = 10:00-10:20 ET); ito ang nagsasabi
+# noon sa production code, para magkatugma ang bar time at decision time.
+# Ang guard mismo ay may sariling walong test sa test_premarket_tickbreak_confirm.py.
+_RTH_NOW = pd.Timestamp("2026-06-10 14:21:00", tz="UTC").to_pydatetime()
+
 KW = dict(entry_interval="1m", require_retest=False, require_sustained_volume=True,
           require_break_candle=True, require_vwap_hold=True, require_macd_bullish=False,
-          allow_runaway_break=False)
+          allow_runaway_break=False, now=_RTH_NOW)
 
 
 def test_waiting_without_tick_stays_waiting():

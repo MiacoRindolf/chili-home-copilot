@@ -13,6 +13,8 @@ Two layers, mirroring tests/test_dipbuy_deep_reclaim.py:
 """
 from __future__ import annotations
 
+from datetime import datetime, timezone
+
 import numpy as np
 import pandas as pd
 import pytest
@@ -303,10 +305,21 @@ def test_arm_then_tick_break_fires_and_thrust_guard_blocks_1tick_poke(monkeypatc
     assert v == "ARM"
     level = float(lvl)
 
+    # SESSION CLOCK: sa PREMARKET, ang `_premarket_tickbreak_confirmed` ay
+    # bumabagsak MUNA, kaya nala-laktawan ang dip-buy/first-pullback thrust check
+    # (`if _confirmed and reason_t in (...)`) at ang reason ay nagiging
+    # `premarket_tickbreak_unconfirmed` sa halip na ang inaasahan dito. Parehong
+    # HINAHARANGAN ang poke sa dalawang session — iba lang ang reason code — pero
+    # kung walang `now` ay tunay na wall clock ang nababasa, kaya nakadepende sa
+    # oras ng pagtakbo. Ini-angkla natin sa RTH para ang thrust-buffer routing ang
+    # eksaktong nasusukat. (Ang premarket na sangay ay sakop ng
+    # test_premarket_tickbreak_confirm.py.)
+    _rth_now = datetime(2026, 6, 29, 14, 45, tzinfo=timezone.utc)  # Lunes 10:45 ET
+
     # a 1-tick poke just over the level -> thrust buffer rejects (not confirmed).
     ok_poke, reason_poke, dbg_poke = pullback_break_confirmation(
         df, entry_interval="1m", require_retest=True, first_pullback_interval="1m",
-        live_price=level + 0.0001, symbol="JRSH",
+        live_price=level + 0.0001, symbol="JRSH", now=_rth_now,
     )
     assert ok_poke is False
     assert reason_poke == "first_pullback_tickbreak_unconfirmed", (reason_poke, dbg_poke)
@@ -314,7 +327,7 @@ def test_arm_then_tick_break_fires_and_thrust_guard_blocks_1tick_poke(monkeypatc
     # a decisive tick well above the level clears the buffer -> tick-break fires.
     ok_thrust, reason_thrust, dbg_thrust = pullback_break_confirmation(
         df, entry_interval="1m", require_retest=True, first_pullback_interval="1m",
-        live_price=level * 1.05, symbol="JRSH",
+        live_price=level * 1.05, symbol="JRSH", now=_rth_now,
     )
     assert ok_thrust is True, (reason_thrust, dbg_thrust)
     assert reason_thrust == "first_pullback_tick_ok", reason_thrust

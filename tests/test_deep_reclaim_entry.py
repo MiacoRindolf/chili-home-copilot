@@ -30,9 +30,23 @@ def _isolate_trigger_logic(monkeypatch) -> None:
     monkeypatch.setattr(settings, "chili_momentum_entry_verticality_atr_mult", 0.0, raising=False)
 
 
-def _frame(bars: list[tuple[float, float, float, float, float]]) -> pd.DataFrame:
+# Ang default na index sa ibaba (12:00Z) ay 08:00 ET — PREMARKET. Walang epekto
+# iyon sa halos lahat ng test dito dahil hindi sila nagpapasa ng `live_price`,
+# kaya hindi naaabot ang tick-break na sangay. ANG ISANG nagpapasa ay
+# `test_reclaim_wait_arms_tick_watch_then_tick_fires`, at doon may ATR thrust
+# buffer ang premarket (ang CUPR guard) na tumatanggi sa $0.02 na tusok nito.
+# Para roon ay may RTH na index — nasa loob pa rin ng 10:30 ET na morning cutoff
+# ng deep-reclaim (entry_gates.py:1518).
+_RTH_START = "2026-06-11 13:35"  # 09:35 ET
+
+
+def _frame(
+    bars: list[tuple[float, float, float, float, float]],
+    *,
+    start: str = "2026-06-11 12:00",
+) -> pd.DataFrame:
     """bars = [(open, high, low, close, volume)] on a 1m index."""
-    idx = pd.date_range("2026-06-11 12:00", periods=len(bars), freq="1min")
+    idx = pd.date_range(start, periods=len(bars), freq="1min")
     return pd.DataFrame(
         {
             "Open": [b[0] for b in bars],
@@ -96,14 +110,19 @@ def test_deep_v_reclaim_break_fires_on_completed_bar(monkeypatch) -> None:
 def test_reclaim_wait_arms_tick_watch_then_tick_fires() -> None:
     # current bar has NOT broken the recovery high (14.8) yet
     waiting_last = (14.5, 14.7, 14.45, 14.65, 200_000.0)
-    df = _frame(_deep_v_bars(last_bar=waiting_last))
+    # RTH frame + katugmang `now`: ito lang ang test sa file na nagpapasa ng
+    # `live_price`, kaya ito lang ang umaabot sa premarket CUPR guard. Kung walang
+    # `now` ay TUNAY NA WALL CLOCK ang binabasa nito — pumapasa kapag RTH,
+    # bumabagsak kapag premarket, sa parehong code at data.
+    df = _frame(_deep_v_bars(last_bar=waiting_last), start=_RTH_START)
+    _rth_now = df.index[-1].tz_localize("UTC").to_pydatetime()
     ok, reason, dbg = pullback_break_confirmation(df, **_GATES)
     assert not ok and reason == "waiting_for_reclaim_high", (reason, dbg)
     assert reason in TICK_ARMED_WAIT_REASONS  # the runner will stash the watch level
     assert dbg["pullback_high"] >= 14.8
     # the live WS ask trades through the level -> tick fire, no completed bar needed
     ok2, reason2, dbg2 = pullback_break_confirmation(
-        df, live_price=dbg["pullback_high"] + 0.02, **_GATES
+        df, live_price=dbg["pullback_high"] + 0.02, now=_rth_now, **_GATES
     )
     assert ok2 and reason2 == "deep_reclaim_tick_ok", (reason2, dbg2)
     assert dbg2["tick_break"] is True
