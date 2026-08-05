@@ -7314,14 +7314,13 @@ def start_scheduler():
         # heartbeat instead of silently disappearing with that legacy job.
         if (
             include_momentum_exec
-            and settings.chili_momentum_live_runner_enabled
             and getattr(settings, "chili_lane_health_alert_enabled", True)
         ):
             _scheduler.add_job(
                 _run_lane_health_check_job,
                 trigger=IntervalTrigger(seconds=_aa_secs),
                 id="lane_health_check",
-                name=f"Lane-health FROZEN watch (every {_aa_secs}s; alerts on a stuck live driver)",
+                name=f"Lane-health FROZEN watch (every {_aa_secs}s; driver + exact equity tape)",
                 replace_existing=True,
                 max_instances=1,
                 coalesce=True,

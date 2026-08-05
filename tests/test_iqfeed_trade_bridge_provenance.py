@@ -42,12 +42,22 @@ def _reset_parser_state() -> None:
         bridge._selected_fields_ack_sha256_by_generation.clear()
     with bridge._capture_handoff_lock:
         bridge._capture_handoff = None
+    with bridge._exact_print_heartbeat_lock:
+        bridge._last_exact_print_heartbeat_attempt_monotonic = None
+        bridge._pending_exact_print_heartbeat = None
+    bridge._exact_print_heartbeat_event.clear()
+    bridge._exact_print_heartbeat_capable = True
 
 
 @pytest.fixture(autouse=True)
 def _isolated_bridge_parser(monkeypatch):
     _reset_parser_state()
     monkeypatch.setattr(bridge, "BRIDGE_RUN_ID", "12553525-2da8-4b22-a69f-d3034871e90c")
+    monkeypatch.setattr(
+        bridge,
+        "BRIDGE_RUN_STARTED_AT",
+        datetime(2026, 8, 5, 7, 55, 0, tzinfo=timezone.utc),
+    )
     yield
     _reset_parser_state()
 
@@ -175,6 +185,164 @@ def test_notify_payload_carries_the_release_stamp_used_by_the_commit(monkeypatch
     assert payload["available_at"] == release_at.isoformat()
     assert payload["bridge_run_id"] == bridge.BRIDGE_RUN_ID
     assert payload["connection_generation"] == 1
+
+
+def _exact_print_row(*, provider_at: datetime, received_at: datetime) -> dict:
+    return {
+        "sym": "AMIX",
+        "provider_at": provider_at,
+        "received_at": received_at,
+        "basis": bridge.EXACT_PRINT_TIMESTAMP_BASIS,
+        "bridge": bridge.BRIDGE_BUILD,
+        "message_type": "Q",
+        "bridge_run_id": bridge.BRIDGE_RUN_ID,
+        "connection_generation": 7,
+        "source_frame_sequence": 41,
+        "source_frame_sha256": "a" * 64,
+    }
+
+
+def test_exact_print_heartbeat_binds_only_committed_release_clocks():
+    provider_at = datetime(2026, 8, 5, 8, 0, 0, tzinfo=timezone.utc)
+    received_at = provider_at + timedelta(milliseconds=5)
+    available_at = received_at + timedelta(milliseconds=7)
+
+    body = bridge._canonical_exact_print_heartbeat_body(
+        trade_rows=[
+            _exact_print_row(
+                provider_at=provider_at,
+                received_at=received_at,
+            )
+        ],
+        available_at=available_at,
+    )
+
+    assert body is not None
+    assert body["schema"] == bridge.IQFEED_EXACT_PRINT_HEARTBEAT_SCHEMA
+    assert body["scope"] == bridge.IQFEED_EXACT_PRINT_HEARTBEAT_SCOPE
+    assert body["symbol"] == "AMIX"
+    assert body["observed_at_utc"] == "2026-08-05T08:00:00Z"
+    assert body["provider_event_at_utc"] == "2026-08-05T08:00:00Z"
+    assert body["received_at_utc"] == "2026-08-05T08:00:00.005000Z"
+    assert body["available_at_utc"] == "2026-08-05T08:00:00.012000Z"
+    assert body["committed_print_count"] == 1
+    claimed = body.pop("content_sha256")
+    assert claimed == hashlib.sha256(
+        json.dumps(
+            body,
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=False,
+            allow_nan=False,
+        ).encode("utf-8")
+    ).hexdigest()
+
+
+def test_exact_print_wire_literals_match_app_consumer_contract():
+    from app.services.trading import batch_job_constants as contract
+
+    assert (
+        bridge.JOB_IQFEED_EXACT_PRINT_HEARTBEAT
+        == contract.JOB_IQFEED_EXACT_PRINT_HEARTBEAT
+    )
+    assert (
+        bridge.IQFEED_EXACT_PRINT_HEARTBEAT_SCHEMA
+        == contract.IQFEED_EXACT_PRINT_HEARTBEAT_SCHEMA
+    )
+    assert (
+        bridge.IQFEED_EXACT_PRINT_HEARTBEAT_SCOPE
+        == contract.IQFEED_EXACT_PRINT_HEARTBEAT_SCOPE
+    )
+
+
+def test_exact_print_heartbeat_accepts_parser_clock_tolerance():
+    received_at = datetime(2026, 8, 5, 8, 0, 0, tzinfo=timezone.utc)
+    body = bridge._canonical_exact_print_heartbeat_body(
+        trade_rows=[
+            _exact_print_row(
+                provider_at=received_at + timedelta(milliseconds=500),
+                received_at=received_at,
+            )
+        ],
+        available_at=received_at + timedelta(seconds=1),
+    )
+
+    assert body is not None
+    assert body["provider_event_at_utc"] == "2026-08-05T08:00:00.500000Z"
+
+
+def test_exact_print_heartbeat_enqueue_is_throttled_and_never_waits_on_db(
+    monkeypatch,
+):
+    event_sets = []
+    monkeypatch.setattr(
+        bridge, "_ensure_exact_print_heartbeat_worker_locked", lambda: None
+    )
+    monkeypatch.setattr(
+        bridge._exact_print_heartbeat_event,
+        "set",
+        lambda: event_sets.append(True),
+    )
+    provider_at = datetime(2026, 8, 5, 8, 0, 0, tzinfo=timezone.utc)
+    row = _exact_print_row(
+        provider_at=provider_at,
+        received_at=provider_at + timedelta(milliseconds=5),
+    )
+
+    assert bridge._record_committed_exact_print_heartbeat(
+        trade_rows=[], available_at=provider_at, monotonic_now=0.0
+    ) is False
+    assert bridge._record_committed_exact_print_heartbeat(
+        trade_rows=[row],
+        available_at=provider_at + timedelta(milliseconds=10),
+        monotonic_now=1.0,
+    ) is True
+    assert bridge._record_committed_exact_print_heartbeat(
+        trade_rows=[row],
+        available_at=provider_at + timedelta(seconds=1),
+        monotonic_now=2.0,
+    ) is False
+    assert bridge._record_committed_exact_print_heartbeat(
+        trade_rows=[row],
+        available_at=provider_at + timedelta(seconds=31),
+        monotonic_now=32.0,
+    ) is False
+    assert bridge._record_committed_exact_print_heartbeat(
+        trade_rows=[row],
+        available_at=provider_at + timedelta(seconds=61),
+        monotonic_now=62.0,
+    ) is True
+    assert len(event_sets) == 2
+    assert bridge._pending_exact_print_heartbeat is not None
+    assert bridge._last_exact_print_heartbeat_attempt_monotonic == 62.0
+
+
+def test_exact_print_heartbeat_append_uses_db_clock(monkeypatch):
+    calls = []
+
+    class _Connection:
+        def execute(self, statement, params):
+            calls.append((statement, dict(params)))
+
+    class _Begin:
+        def __enter__(self):
+            return _Connection()
+
+        def __exit__(self, *_args):
+            return False
+
+    class _Engine:
+        def begin(self):
+            return _Begin()
+
+    monkeypatch.setattr(bridge, "engine", _Engine())
+    bridge._append_exact_print_heartbeat({"content_sha256": "a" * 64})
+
+    assert len(calls) == 1
+    _statement, params = calls[0]
+    assert params["job_type"] == bridge.JOB_IQFEED_EXACT_PRINT_HEARTBEAT
+    assert "started_at" not in params
+    assert "ended_at" not in params
 
 
 def test_release_update_is_bound_to_the_exact_batch_row(monkeypatch):

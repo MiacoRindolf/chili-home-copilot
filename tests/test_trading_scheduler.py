@@ -725,6 +725,33 @@ def test_momentum_exec_event_loop_is_the_only_live_driver(monkeypatch):
         stop_scheduler()
 
 
+def test_momentum_exec_keeps_tape_health_registered_while_paper_is_off(
+    monkeypatch,
+):
+    from app.services.trading_scheduler import (
+        get_scheduler_info,
+        start_scheduler,
+        stop_scheduler,
+    )
+
+    stop_scheduler()
+    monkeypatch.setattr(settings, "chili_scheduler_role", "momentum_exec_only")
+    monkeypatch.setattr(settings, "chili_momentum_live_runner_enabled", False)
+    monkeypatch.setattr(settings, "chili_lane_health_alert_enabled", True)
+    monkeypatch.setattr(settings, "chili_momentum_ws_ignition_enabled", False)
+    monkeypatch.setattr(settings, "chili_momentum_nbbo_tape_enabled", False)
+    monkeypatch.setattr(
+        settings, "chili_momentum_alpaca_orphan_reconcile_enabled", False
+    )
+    try:
+        start_scheduler()
+        job_ids = {j["id"] for j in get_scheduler_info().get("jobs", [])}
+        assert "lane_health_check" in job_ids
+        assert "momentum_live_runner_batch" not in job_ids
+    finally:
+        stop_scheduler()
+
+
 def test_momentum_exec_dual_live_driver_config_fails_closed(monkeypatch):
     from app.services.trading.momentum_neural import live_runner_loop
     from app.services.trading_scheduler import get_scheduler_info, start_scheduler, stop_scheduler

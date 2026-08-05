@@ -53,6 +53,13 @@ _REPO_ROOT = str(Path(__file__).resolve().parents[1])
 if _REPO_ROOT not in sys.path:
     sys.path.insert(0, _REPO_ROOT)
 
+# Keep the standalone bridge startup independent of ``app.services.trading``:
+# importing that package executes the scanner/market/ML import graph.  Tests pin
+# these wire literals to the canonical app constants consumed by lane health.
+JOB_IQFEED_EXACT_PRINT_HEARTBEAT = "iqfeed_exact_print_heartbeat"
+IQFEED_EXACT_PRINT_HEARTBEAT_SCHEMA = "iqfeed_exact_print_heartbeat_v1"
+IQFEED_EXACT_PRINT_HEARTBEAT_SCOPE = "committed_exact_print_release"
+
 try:
     from scripts.iqfeed_subscription_policy import (
         ACTIVE_EXECUTION_SESSION_SQL,
@@ -204,6 +211,7 @@ def _bridge_source_sha256(path: str | Path = __file__) -> str:
 BRIDGE_BUILD = _bridge_build_id()
 BRIDGE_SOURCE_SHA256 = _bridge_source_sha256()
 BRIDGE_RUN_ID = str(uuid.uuid4())
+BRIDGE_RUN_STARTED_AT = datetime.now(timezone.utc)
 # CAPTURE-G3: event-driven subscribe-on-first-alert. The app container writes a subscribe HINT
 # to momentum_bridge_subscribe_requests the instant a name first ignites; this bridge FAST-POLLS
 # that table (much shorter than REFRESH_S) and subscribes immediately, additively to the normal
@@ -304,6 +312,15 @@ INS = sa.text(
     ":bridge, :provider_trade_reference_at, :message_type, :bridge_run_id, "
     ":connection_generation, :source_frame_sequence, :source_frame_sha256)"
 )
+_INSERT_EXACT_PRINT_HEARTBEAT = sa.text(
+    "INSERT INTO brain_batch_jobs "
+    "(id, job_type, status, started_at, ended_at, meta_json) "
+    "VALUES (:id, :job_type, 'ok', "
+    "CURRENT_TIMESTAMP AT TIME ZONE 'UTC', "
+    "CURRENT_TIMESTAMP AT TIME ZONE 'UTC', "
+    "CAST(:meta_json AS jsonb))"
+)
+_EXACT_PRINT_HEARTBEAT_INTERVAL_S = 60.0
 
 # Also feed the momentum ENTRY-GATE's NBBO freshness tape with this SAME tick-level IQFeed L1.
 # The entry gate reads momentum_nbbo_spread_tape for its stale_bbo freshness check, but that
@@ -489,10 +506,16 @@ _SUBSCRIBE_REQUIRED_COLUMNS = frozenset(
         "correlation_id",
     }
 )
+_EXACT_PRINT_HEARTBEAT_REQUIRED_COLUMNS = frozenset(
+    {"id", "job_type", "status", "started_at", "ended_at", "meta_json"}
+)
+_exact_print_heartbeat_capable = True
 
 
 def _verify_bridge_schema() -> None:
     """Read-only migration/schema gate which runs before any provider socket."""
+
+    global _exact_print_heartbeat_capable
 
     required = {
         "iqfeed_trade_ticks": _TRADE_REQUIRED_COLUMNS,
@@ -531,6 +554,25 @@ def _verify_bridge_schema() -> None:
                         f"IQFeed bridge schema {table_name} is missing: "
                         + ", ".join(missing)
                     )
+            heartbeat_columns = frozenset(
+                connection.execute(
+                    sa.text(
+                        "SELECT column_name FROM information_schema.columns "
+                        "WHERE table_schema = current_schema() "
+                        "AND table_name = 'brain_batch_jobs'"
+                    )
+                ).scalars()
+            )
+            heartbeat_missing = sorted(
+                _EXACT_PRINT_HEARTBEAT_REQUIRED_COLUMNS - heartbeat_columns
+            )
+            _exact_print_heartbeat_capable = not heartbeat_missing
+            if heartbeat_missing:
+                log.critical(
+                    "IQFeed exact-print health receipts disabled; "
+                    "brain_batch_jobs is missing: %s",
+                    ", ".join(heartbeat_missing),
+                )
     except RuntimeError:
         raise
     except Exception as exc:
@@ -1541,6 +1583,183 @@ _protocol_acknowledged_generations: set[int] = set()
 _selected_fields_ack_sha256_by_generation: dict[int, str] = {}
 _capture_handoff_lock = threading.Lock()
 _capture_handoff: Any | None = None
+_exact_print_heartbeat_lock = threading.Lock()
+_exact_print_heartbeat_event = threading.Event()
+_exact_print_heartbeat_thread: threading.Thread | None = None
+_pending_exact_print_heartbeat: dict[str, Any] | None = None
+_last_exact_print_heartbeat_attempt_monotonic: float | None = None
+
+
+def _canonical_exact_print_heartbeat_body(
+    *,
+    trade_rows: list[dict[str, Any]],
+    available_at: datetime,
+) -> dict[str, Any] | None:
+    """Bind one heartbeat to exact prints whose release transaction committed."""
+
+    if not trade_rows or not isinstance(available_at, datetime):
+        return None
+    if available_at.tzinfo is None:
+        return None
+    available_utc = available_at.astimezone(timezone.utc)
+    exact_rows: list[dict[str, Any]] = []
+    for row in trade_rows:
+        provider_at = row.get("provider_at")
+        received_at = row.get("received_at")
+        symbol = str(row.get("sym") or "").strip().upper()
+        if not (
+            row.get("basis") == EXACT_PRINT_TIMESTAMP_BASIS
+            and row.get("message_type") == "Q"
+            and bool(symbol)
+            and isinstance(provider_at, datetime)
+            and provider_at.tzinfo is not None
+            and isinstance(received_at, datetime)
+            and received_at.tzinfo is not None
+            and isinstance(row.get("connection_generation"), int)
+            and not isinstance(row.get("connection_generation"), bool)
+            and int(row["connection_generation"]) > 0
+            and isinstance(row.get("source_frame_sequence"), int)
+            and not isinstance(row.get("source_frame_sequence"), bool)
+            and int(row["source_frame_sequence"]) > 0
+            and re.fullmatch(
+                r"[0-9a-f]{64}",
+                str(row.get("source_frame_sha256") or "").strip().lower(),
+            )
+            and str(row.get("bridge_run_id") or "").strip()
+            and str(row.get("bridge") or "").strip()
+        ):
+            return None
+        exact_rows.append(row)
+    latest = max(
+        exact_rows,
+        key=lambda row: row["provider_at"].astimezone(timezone.utc),
+    )
+    provider_at = latest["provider_at"].astimezone(timezone.utc)
+    received_at = latest["received_at"].astimezone(timezone.utc)
+    if (
+        provider_at
+        > received_at + timedelta(seconds=AUTHORITATIVE_FUTURE_TOLERANCE_S)
+        or received_at > available_utc
+    ):
+        return None
+    body: dict[str, Any] = {
+        "schema": IQFEED_EXACT_PRINT_HEARTBEAT_SCHEMA,
+        "scope": IQFEED_EXACT_PRINT_HEARTBEAT_SCOPE,
+        "symbol": str(latest["sym"]).strip().upper(),
+        "observed_at_utc": provider_at.isoformat().replace("+00:00", "Z"),
+        "provider_event_at_utc": provider_at.isoformat().replace("+00:00", "Z"),
+        "received_at_utc": received_at.isoformat().replace("+00:00", "Z"),
+        "available_at_utc": available_utc.isoformat().replace("+00:00", "Z"),
+        "bridge_version": str(latest["bridge"]),
+        "bridge_run_id": str(latest["bridge_run_id"]),
+        "bridge_run_started_at_utc": (
+            BRIDGE_RUN_STARTED_AT.isoformat().replace("+00:00", "Z")
+        ),
+        "connection_generation": int(latest["connection_generation"]),
+        "source_frame_sequence": int(latest["source_frame_sequence"]),
+        "source_frame_sha256": str(latest["source_frame_sha256"]).lower(),
+        "committed_print_count": len(exact_rows),
+    }
+    canonical = json.dumps(
+        body,
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=False,
+        allow_nan=False,
+    )
+    body["content_sha256"] = hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+    return body
+
+
+def _append_exact_print_heartbeat(body: dict[str, Any]) -> None:
+    """Append one receipt off the critical tape writer path."""
+
+    with engine.begin() as connection:
+        connection.execute(
+            _INSERT_EXACT_PRINT_HEARTBEAT,
+            {
+                "id": str(uuid.uuid4()),
+                "job_type": JOB_IQFEED_EXACT_PRINT_HEARTBEAT,
+                "meta_json": json.dumps(
+                    body,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                    ensure_ascii=False,
+                    allow_nan=False,
+                ),
+            },
+        )
+
+
+def _exact_print_heartbeat_worker_main() -> None:
+    """Drain the latest receipt without ever blocking exact-print persistence."""
+
+    global _pending_exact_print_heartbeat
+    while True:
+        _exact_print_heartbeat_event.wait()
+        _exact_print_heartbeat_event.clear()
+        with _exact_print_heartbeat_lock:
+            body = _pending_exact_print_heartbeat
+            _pending_exact_print_heartbeat = None
+        if body is None:
+            continue
+        try:
+            _append_exact_print_heartbeat(body)
+        except Exception:
+            log.warning(
+                "exact-print heartbeat append failed after tape commit",
+                exc_info=True,
+            )
+
+
+def _ensure_exact_print_heartbeat_worker_locked() -> None:
+    global _exact_print_heartbeat_thread
+    if (
+        _exact_print_heartbeat_thread is not None
+        and _exact_print_heartbeat_thread.is_alive()
+    ):
+        return
+    _exact_print_heartbeat_thread = threading.Thread(
+        target=_exact_print_heartbeat_worker_main,
+        name="iqfeed-exact-print-heartbeat",
+        daemon=True,
+    )
+    _exact_print_heartbeat_thread.start()
+
+
+def _record_committed_exact_print_heartbeat(
+    *,
+    trade_rows: list[dict[str, Any]],
+    available_at: datetime,
+    monotonic_now: float | None = None,
+) -> bool:
+    """Non-blockingly enqueue a receipt after exact-print release commits."""
+
+    global _last_exact_print_heartbeat_attempt_monotonic
+    global _pending_exact_print_heartbeat
+
+    if not _exact_print_heartbeat_capable:
+        return False
+    now_mono = time.monotonic() if monotonic_now is None else float(monotonic_now)
+    with _exact_print_heartbeat_lock:
+        last = _last_exact_print_heartbeat_attempt_monotonic
+        if last is not None and now_mono - last < _EXACT_PRINT_HEARTBEAT_INTERVAL_S:
+            return False
+    body = _canonical_exact_print_heartbeat_body(
+        trade_rows=trade_rows,
+        available_at=available_at,
+    )
+    if body is None:
+        return False
+    with _exact_print_heartbeat_lock:
+        last = _last_exact_print_heartbeat_attempt_monotonic
+        if last is not None and now_mono - last < _EXACT_PRINT_HEARTBEAT_INTERVAL_S:
+            return False
+        _last_exact_print_heartbeat_attempt_monotonic = now_mono
+        _pending_exact_print_heartbeat = dict(body)
+        _ensure_exact_print_heartbeat_worker_locked()
+    _exact_print_heartbeat_event.set()
+    return True
 
 
 def _mark_watch_limit_hit() -> None:
@@ -2759,6 +2978,19 @@ def writer(
                     quote_rows=(nbbo_rows if WRITE_NBBO_TAPE else []),
                     available_at=available_at,
                 )
+                # Telemetry is queued only after release and capture publication.
+                # Its independent daemon writer can never stall this sole tape
+                # drain or delay PAPER's already-committed capture handoff.
+                try:
+                    _record_committed_exact_print_heartbeat(
+                        trade_rows=rows,
+                        available_at=available_at,
+                    )
+                except Exception:
+                    log.warning(
+                        "exact-print heartbeat enqueue failed after capture publish",
+                        exc_info=True,
+                    )
                 if capture_rejected:
                     log.warning(
                         "IQFeed replay capture rejected/gapped %d of %d released rows",
