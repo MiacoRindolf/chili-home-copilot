@@ -6154,6 +6154,17 @@ def start_scheduler():
             role = "all"
         # cron_only = legacy 'worker' role minus autotrader minus broker_sync
         # (so scheduler-worker container drops both hot-loop call paths).
+        # FLAG-DRIFT VISIBILITY (2026-08-04). Ini-emit ang bawat boolean momentum
+        # env override na sumasalungat sa code default, ISANG BESES kada boot, kasama
+        # ang role — dahil ang katahimikan dito ang nagpapahintulot sa tatlong
+        # magkaibang runtime vector na mabuhay nang sabay nang walang nakakapansin.
+        # Pagmamasid lang; walang binabago.
+        try:
+            from .trading.momentum_neural.flag_drift import log_flag_drift
+
+            log_flag_drift(context=f"scheduler role={role}")
+        except Exception:
+            logger_drift_failed = True  # noqa: F841 — hindi dapat pumigil sa boot
         include_heavy = role in ("all", "worker", "cron_only", "rnd_only")
         # The minimal market-snapshot lane is a mesh producer. It also needs a
         # bounded drain so stale imminent_eval chatter cannot starve fresh
