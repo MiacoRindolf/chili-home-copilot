@@ -580,6 +580,29 @@ def scale_grid_enabled() -> bool:
 # remains (the asymmetric Ross tail). One documented invariant constant.
 _GRID_MAX_CUMULATIVE = 0.9
 
+# L10e (2026-08-04) — ANG PINAKAMAKITID NA PULL-IN NA PINAPAYAGAN, bilang bahagi ng
+# sariling R distance ng rung. ISANG dokumentadong base, hango sa SINUKAT na
+# distribusyon (scale-grid freeze instrumentation, HYFM + JLHL golden windows):
+#
+#   freeze                     1R      rung 1            % ng R
+#   HYFM  entry 3.66         3.25%   3.70 (+1.09%)         34%
+#   JLHL  entry 11.82        4.01%   12.00 (+1.52%)        38%
+#   JLHL  entry 13.54        9.75%   14.00 (+3.40%)        35%
+#   JLHL  entry  9.50        9.75%   9.55 (+0.53%)        5.4%   <-- patolohiko
+#
+# Ang lahat ng lehitimong pull-in ay 34%+; iisa ang outlier sa 5.4%. Ang 0.25 ay
+# nasa gitna ng malinaw na puwang, may margin sa magkabilang panig.
+#
+# UGAT NG PROBLEMA: ang `round_numbers_above` ay may sub-steps na step*0.1 at
+# step*0.05, kaya ang RELATIBONG resolusyon nito ay nagbabago nang ~10x depende sa
+# kinalalagyan ng presyo sa loob ng decade nito. Sa $0.12 (ilalim ng decade) ang
+# pinong step ay +4.2% — makabuluhan, at para doon idinisenyo. Sa $9.50 (dulo ng
+# decade) ang parehong step ay +0.53% — tick noise, hindi seller stack. Doon,
+# hinila ng pull-in ang 1R target mula 10.43 pababa sa 9.55 at nagbenta ng
+# KALAHATING posisyon sa 5% ng daan papunta sa 1R, habang ang pangalan ay tumakbo
+# papuntang 13.54+.
+_GRID_MIN_PULL_IN_R_FRACTION = 0.25
+
 
 def scale_grid_levels(
     entry: float,
@@ -639,6 +662,17 @@ def scale_grid_levels(
         tgt = r_px
         for rn in rns:
             if rn > prev_px * (1.0 + 1e-9) and rn <= r_px * (1.0 + 1e-9):
+                # L10e: tanggapin ang pull-in LAMANG kung may natitira pa itong
+                # makabuluhang bahagi ng R distance. Ang isang "round number" na
+                # nickel/dime ay hindi seller stack — ingay ito, at ang pagbebenta
+                # doon ay pumapatay sa buntot. Kapag masyadong makitid, PANATILIHIN
+                # ang orihinal na R target (hindi tinatanggal ang rung — ang sirang
+                # bahagi ay ang PULL-IN, hindi ang ladder).
+                _r_dist = r_px - e
+                if _r_dist > 0 and (
+                    (rn - e) / _r_dist
+                ) < _GRID_MIN_PULL_IN_R_FRACTION:
+                    break
                 tgt = rn  # nearest qualifying round number (ascending -> first wins is lowest)
                 break
         if tgt <= prev_px * (1.0 + 1e-9):  # not strictly ascending -> skip this rung
