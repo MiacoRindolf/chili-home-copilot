@@ -16847,14 +16847,16 @@ def _resolve_scale_grid(pos: dict[str, Any], symbol: str | None) -> list[list[fl
 def _scale_grid_active(pos: dict[str, Any], symbol: str | None) -> bool:
     """True iff a multi-level grid is in force AND has un-fired rungs remaining.
 
-    L10c (2026-08-04) — SHAPE GATE. Ang L10b proof (4 windows) ay nagpakita na ang
-    ladder ay kondisyonal sa hugis ng galaw: HYFM (34s vertical) +0.22 -> +24.46,
-    pero JLHL (halt-stairs) +23.63 -> +12.67. Kaya ang ladder ay pinapayagan LANG
-    habang VERTICAL ang leg (bata + hindi halt-lit); sa stairs/grind ay bumabalik
-    sa single scale-out. Ang gate ay tinatasa sa BAWAT rung — ang isang posisyong
-    nagsimulang vertical at naging grind ay titigil sa pagbabangko sa puntong iyon,
-    na siyang tamang kilos: nabangko na ang spike, hinahayaan ang natitira sa
-    hakbang-hakbang na akyat. Walang `le` (o flag OFF) => dating ugali.
+    ⚠️ ALAM NA GASTOS (L10b proof, 2026-08-04, 4 golden windows): ang ladder ay
+    KONDISYONAL sa hugis ng galaw. Sa vertical spike ay malaki ang panalo (HYFM
+    +0.22 -> +24.46: nababangko ang tranches papasok sa pagsabog kung saan nakaupo
+    ang round-number liquidity), pero sa halt-stairs ay pumuputol ito ng buntot
+    (JLHL +23.63 -> +12.67). Net sa 4 windows: +15.85, kaya nananatili itong ON.
+    DALAWANG pagtatangkang i-kondisyon ay PAREHONG naging INERT: leg-age/halt gate
+    (ang rungs ay pumuputok 1s pagkatapos ng entry, bago pa may halt) at
+    ATR-based noise floor (circular — ang ATR na iyon ang naglagay ng stop na
+    siyang basehan ng rung). Ang susunod ay INSTRUMENTATION muna, hindi bagong
+    hula: sukatin ang rung distance vs entry_day_range_pct sa freeze moment.
     """
     grid = _resolve_scale_grid(pos, symbol)
     if len(grid) < 2:  # 0/1 rung => no ladder; the single scale-out path handles it
