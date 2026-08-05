@@ -87,7 +87,7 @@ def test_ang_detector_ay_tunay_na_humuhuli(tmp_path):
 
 
 @pytest.mark.parametrize("session_now,expect_ok", [("premarket", False), ("rth", True)])
-def test_ang_session_ay_talagang_nagpapabago_ng_resulta(session_now, expect_ok):
+def test_ang_session_ay_talagang_nagpapabago_ng_resulta(session_now, expect_ok, monkeypatch):
     """Ang mismong dahilan kung bakit mahalaga ang guard: parehong code, parehong
     data, magkaibang session -> magkaibang desisyon."""
     from datetime import datetime, timezone
@@ -99,7 +99,18 @@ def test_ang_session_ay_talagang_nagpapabago_ng_resulta(session_now, expect_ok):
         pullback_break_confirmation,
     )
 
-    eg.settings.chili_momentum_entry_verticality_atr_mult = 0.0
+    # MONKEYPATCH, hindi tuwirang assignment. Ang `settings` ay iisang global na
+    # object na hinahati ng buong session: ang isang hubad na
+    # `eg.settings.X = 0.0` ay HINDI naibabalik, kaya mananatiling patay ang
+    # verticality gate para sa BAWAT sumunod na test file. Iyon mismo ang
+    # naganap: pinatay nito ang gate para sa
+    # test_ross_small_account_panel.py::test_chase_guards_still_gate_on_the_escape_path
+    # (tumatakbo ito pagkatapos ayon sa pagkakasunod-sunod ng pangalan), na
+    # umaasang ang verticality chase-guard ay MAG-VETO — at bumagsak ito sa CI
+    # ("verticality ON -> fired=True") gayong pumapasa nang mag-isa.
+    monkeypatch.setattr(
+        eg.settings, "chili_momentum_entry_verticality_atr_mult", 0.0, raising=False
+    )
     rows = []
     px = 1.00
     for _ in range(18):
