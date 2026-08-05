@@ -16883,7 +16883,11 @@ def _log_scale_grid_freeze(
             if (stop is not None and entry > 0)
             else float("nan")
         )
-        _log.info(
+        # WARNING, hindi INFO: walang logging config ang mga replay script, kaya ang
+        # default na root level (WARNING) ang umiiral at nalalaglag ang INFO. Ito rin
+        # ang lokal na convention ng `[momentum_live]` operational notices (SUSPECTED
+        # HALT / POSITION HALTED ay `_log.warning` din kahit informational).
+        _log.warning(
             "[momentum_live] SCALE-GRID FROZEN symbol=%s entry=%.4f stop=%s risk=%.2f%% "
             "rungs=%s | bases: entry_stop_atr_pct=%s structural_stop_atr_pct=%s "
             "entry_day_range_pct=%s — ang rung distance ay ihahambing sa mga base na "
