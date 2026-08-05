@@ -321,3 +321,51 @@ def test_captured_paper_marker_prevents_desktop_env_file_reload(
     monkeypatch.setenv(CAPTURED_PAPER_CONFIG_ISOLATION_ENV, "TRUE")
     with pytest.raises(RuntimeError, match="must be exactly 'true'"):
         load_process_settings()
+
+
+def test_pytest_isolation_ay_nagpapaliwanag_kapag_kulang_ang_required_env(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Ang bagong pytest branch ay may bagong paraan ng pagpalya, kaya dapat itong
+    magpaliwanag.
+
+    Ang `database_url` ay REQUIRED at walang default; sa produksyon ay galing ito
+    sa `.env`. Kapag hindi na binabasa iyon, kailangang nasa `os.environ` na —
+    ginagawa iyon ng conftest bago ang app import, kaya ligtas ang tunay na
+    suite. Pero ang sinumang magse-set ng CHILI_PYTEST sa labas ng conftest ay
+    dating tahimik na gumagana at ngayon ay bibigo; dapat niyang malaman kung
+    bakit, sa halip na makakuha ng hubad na pydantic na "Field required".
+    """
+    monkeypatch.chdir(tmp_path)  # walang `.env` dito
+    monkeypatch.delenv(CAPTURED_PAPER_CONFIG_ISOLATION_ENV, raising=False)
+    monkeypatch.setenv("CHILI_PYTEST", "1")
+    monkeypatch.delenv("DATABASE_URL", raising=False)
+
+    with pytest.raises(RuntimeError) as excinfo:
+        load_process_settings()
+
+    msg = str(excinfo.value)
+    assert "CHILI_PYTEST" in msg
+    assert "DATABASE_URL" in msg
+    assert "conftest" in msg
+    # Nakalakip pa rin ang orihinal para hindi mawala ang tunay na dahilan.
+    assert "database_url" in msg.lower()
+
+
+def test_pytest_isolation_ay_gumagana_kapag_kumpleto_ang_env(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Ang kabilang panig: kapag nasa os.environ ang required (gaya ng ginagawa ng
+    conftest), maayos itong nagle-load at code default ang nananaig."""
+    (tmp_path / ".env").write_text(
+        "CHILI_MOMENTUM_RISK_LOSS_FRACTION_OF_EQUITY=0.77\n", encoding="utf-8"
+    )
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.delenv(CAPTURED_PAPER_CONFIG_ISOLATION_ENV, raising=False)
+    monkeypatch.delenv("CHILI_MOMENTUM_RISK_LOSS_FRACTION_OF_EQUITY", raising=False)
+    monkeypatch.setenv("CHILI_PYTEST", "1")
+    monkeypatch.setenv("DATABASE_URL", "postgresql://chili:chili@localhost:5433/chili_test")
+
+    assert load_process_settings().chili_momentum_risk_loss_fraction_of_equity == 0.01

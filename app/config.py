@@ -4,7 +4,13 @@ from __future__ import annotations
 import os
 from typing import Any, Optional
 
-from pydantic import AliasChoices, Field, field_validator, model_validator
+from pydantic import (
+    AliasChoices,
+    Field,
+    ValidationError,
+    field_validator,
+    model_validator,
+)
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 SECONDS_PER_MINUTE = 60
@@ -13754,7 +13760,28 @@ def load_process_settings() -> Settings:
         # ng conftest (bago ang app import) ay tumatalab pa rin. Ang `.env` FILE
         # lamang ang hindi na binabasa.
         if (os.environ.get("CHILI_PYTEST") or "").strip():
-            return Settings(_env_file=None)
+            try:
+                return Settings(_env_file=None)
+            except ValidationError as exc:
+                # Ang `database_url` ay REQUIRED at walang default; sa produksyon
+                # ito ay galing sa `.env`. Kapag hindi na binabasa iyon, kailangang
+                # nasa `os.environ` na ito — ginagawa ito ng `tests/conftest.py`
+                # (itinatakda ang DATABASE_URL sa :75, ang CHILI_PYTEST sa :84,
+                # bago ang unang app import sa :91), kaya tama ang tunay na suite.
+                # Ang mahuhulog dito ay ang ibang nagse-set ng CHILI_PYTEST nang
+                # hindi dumadaan sa conftest — at dating tahimik silang gumagana
+                # dahil binabasa pa ang `.env`. Malinaw na sabihin kung ano ang
+                # nangyari, sa halip na hubad na pydantic "Field required".
+                raise RuntimeError(
+                    "CHILI_PYTEST ay nakatakda, kaya HINDI binabasa ang `.env` — "
+                    "dapat sumukat ang suite sa code defaults, hindi sa desktop "
+                    "config ng operator. Dahil doon, ang bawat REQUIRED na setting "
+                    "ay kailangang nasa os.environ na (pangunahin ang DATABASE_URL) "
+                    "BAGO i-import ang `app`. Ginagawa ito ng tests/conftest.py; "
+                    "kung tumatakbo ka sa labas nito, itakda ang DATABASE_URL mismo "
+                    "o alisin ang CHILI_PYTEST kung gusto mo talagang basahin ang "
+                    f"`.env`. Orihinal na error: {exc}"
+                ) from exc
         return Settings()
     if marker != "true":
         raise RuntimeError(
