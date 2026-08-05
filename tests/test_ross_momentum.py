@@ -101,10 +101,7 @@ def test_in_top_fraction_is_adaptive_cutoff():
     assert all(s.rank <= 2 for s in top)
 
 
-def test_viability_tilt_prefers_explosive_setup():
-    """End-to-end wiring (M2): ross_scores threaded via ctx.meta makes
-    score_viability tilt toward the explosive symbol and away from the dull one,
-    while a symbol with no ross_score is unaffected (strict no-op)."""
+def _tilt_triplet():
     from app.services.trading.momentum_neural.context import (
         build_momentum_regime_context,
     )
@@ -121,12 +118,47 @@ def test_viability_tilt_prefers_explosive_setup():
     )
     feats = ExecutionReadinessFeatures.from_meta({})
     fam = next(iter(iter_momentum_families()))
+    return (
+        score_viability("HOT", fam, ctx, feats, db=None),
+        score_viability("COLD", fam, ctx, feats, db=None),
+        score_viability("NOSCORE", fam, ctx, feats, db=None),
+    )
 
-    hot = score_viability("HOT", fam, ctx, feats, db=None)
-    cold = score_viability("COLD", fam, ctx, feats, db=None)
-    neutral = score_viability("NOSCORE", fam, ctx, feats, db=None)  # no tilt
 
+def test_viability_tilt_prefers_explosive_setup(monkeypatch):
+    """End-to-end wiring (M2): ang ross_scores na dumadaan sa ctx.meta ay
+    nagti-tilt sa explosive at palayo sa dull.
+
+    Dating iginigiit nito ang ``hot > neutral > cold`` — na ang walang ross_score
+    ay strict no-op. Napalitan ang bahaging iyon ng `no_signal_derank_enabled`
+    (config default TRUE): ang pangalang WALANG Ross signal ay sinasadyang
+    ibinababa sa ILALIM ng mga scored mover, gaya mismo ng sinasabi ng babala
+    nito ("de-ranked below scored movers"). Dahil hindi na-update ang test, pula
+    ito mula nang mag-default ON ang derank.
+
+    Ngayon ay parehong kontrata ang naka-pin — hindi lang ang bagong ugali — kaya
+    ang epekto ng flag ay tahasang nababantayan sa halip na maipahiwatig.
+    """
+    from app.services.trading.momentum_neural import viability as v
+
+    monkeypatch.setattr(v.settings, "chili_momentum_no_signal_derank_enabled", True, raising=False)
+    hot, cold, neutral = _tilt_triplet()
+    # Ang tilt mismo: buhay pa rin ang HOT vs COLD.
+    assert hot.viability > cold.viability
+    # At ang no-signal ay nasa ILALIM ng scored mover kahit mababa ang score nito.
+    assert cold.viability > neutral.viability
+    assert any("no ross momentum signal" in w.lower() for w in neutral.warnings)
+
+
+def test_viability_tilt_no_signal_ay_no_op_kapag_naka_off_ang_derank(monkeypatch):
+    """Kapag naka-OFF ang derank, bumabalik ang orihinal na kontrata: ang
+    walang-signal ay hindi ginagalaw, kaya nasa PAGITAN ito ng hot at cold."""
+    from app.services.trading.momentum_neural import viability as v
+
+    monkeypatch.setattr(v.settings, "chili_momentum_no_signal_derank_enabled", False, raising=False)
+    hot, cold, neutral = _tilt_triplet()
     assert hot.viability > neutral.viability > cold.viability
+    assert not any("de-ranked" in w.lower() for w in neutral.warnings)
 
 
 def test_crypto_breakout_schema_keys_work():
@@ -170,9 +202,18 @@ def test_liquidity_biased_weights_lift_fillable_names():
 
     # default weights ignore the new pillar entirely (weight absent -> not blended)
     assert base["EXPLO"].score == 1.0
-    # biased: the liquid name closes the gap (lifted by its top $-turnover percentile)
-    assert biased["LIQ"].score > base["LIQ"].score
-    assert biased["EXPLO"].score < base["EXPLO"].score
+    # ANG PAGSASARA NG AGWAT ANG SINUSUKAT, HINDI ANG ABSOLUTONG SCORE.
+    # Dating iginigiit nito ang `biased["LIQ"].score > base["LIQ"].score`. Naging
+    # imposible iyon nang dumating ang 3-layer explosive scorer (9b52d30, ang
+    # PLSM #15 compression fix), na nag-normalize ng huling score sa loob ng
+    # batch: sa dalawang pangalan, ang mas mababa ay LAGING eksaktong 0.0
+    # anuman ang timbang, kaya 0.0 > 0.0 ang naging assertion. Ang INTENSYON —
+    # inaangat ng liquidity bias ang fillable na pangalan patungo sa explosive —
+    # ay buhay pa rin at nasusukat sa AGWAT.
     assert biased["LIQ"].tradeable_liquidity_pct == 1.0
+    base_gap = base["EXPLO"].score - base["LIQ"].score
+    biased_gap = biased["EXPLO"].score - biased["LIQ"].score
+    assert biased_gap < base_gap, (base_gap, biased_gap)
+    assert biased["EXPLO"].score < base["EXPLO"].score
     # explosiveness still leads (rvol+momentum dominate the blend) — bias, not flip
     assert biased["EXPLO"].rank == 1

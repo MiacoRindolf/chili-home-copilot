@@ -38,6 +38,12 @@ from app.services.trading.momentum_neural.entry_gates import (
 )
 from app.services.trading.momentum_neural.ross_momentum import front_side_state
 
+# SESSION CLOCK. Ang `_premarket_tickbreak_confirmed` ay tumatakbo sa tick-break
+# na sangay bago ang backside veto, at kapag walang `now` ay tunay na wall clock
+# ang binabasa nito — kaya ang resulta ay maaaring magdepende sa oras ng pagtakbo.
+# Tahasang RTH para ang backside lifecycle ang talagang nasusukat.
+_RTH_NOW = pd.Timestamp("2026-06-29 14:45:00", tz="UTC").to_pydatetime()  # Lunes 10:45 ET
+
 
 # --------------------------------------------------------------------------- #
 # Frame builders — tz-aware UTC DatetimeIndex, realistic OHLCV.
@@ -454,7 +460,7 @@ def test_chasing_top_live_tick_new_high_not_vetoed(monkeypatch):
 
     frame_hod = float(_today_session_frame(df)["High"].astype(float).max())
     ok, reason, debug = pullback_break_confirmation(
-        df, entry_interval="1m", live_price=frame_hod * 1.05,   # decisive NEW high
+        df, entry_interval="1m", live_price=frame_hod * 1.05, now=_RTH_NOW,   # decisive NEW high
     )
     assert reason != "backside_lifecycle_veto"                  # carve-out skips the veto
     assert debug.get("front_side_state_live_new_high") == "chasing_top"
@@ -471,7 +477,7 @@ def test_chasing_top_live_tick_below_hod_still_vetoed(monkeypatch):
     df = _entry_frame(closes, vols)
     frame_hod = float(_today_session_frame(df)["High"].astype(float).max())
     ok, reason, debug = pullback_break_confirmation(
-        df, entry_interval="1m", live_price=frame_hod * 0.98,   # below the bar HOD
+        df, entry_interval="1m", live_price=frame_hod * 0.98, now=_RTH_NOW,   # below the bar HOD
     )
     assert ok is False
     assert reason == "backside_lifecycle_veto"
@@ -491,7 +497,7 @@ def test_below_vwap_not_reprieved_by_live_new_high(monkeypatch):
 
     frame_hod = float(_today_session_frame(df)["High"].astype(float).max())
     ok, reason, debug = pullback_break_confirmation(
-        df, entry_interval="1m", live_price=frame_hod * 1.10,   # a live new high
+        df, entry_interval="1m", live_price=frame_hod * 1.10, now=_RTH_NOW,   # a live new high
     )
     assert ok is False
     assert reason == "backside_lifecycle_veto"                  # still vetoed (not chasing_top)

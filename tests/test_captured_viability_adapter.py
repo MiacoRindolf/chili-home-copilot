@@ -450,17 +450,32 @@ def test_typed_and_serialized_paths_are_identical_and_lossless() -> None:
     # canonicalization root. SCHEMA rotation lang ito — hindi economic: ang
     # scorer_output.paper_eligible ng fixture na ito ay True PA RIN (ang knock-down
     # dito ay LIVE-MONEY COST, hindi setup-quality), kaya walang nabagong desisyon.
+    #
+    # ROTATED 2026-08-05 (pagtutugma ng shim defaults sa config): tatlong fallback
+    # default sa `ViabilitySettingsProjection.from_runtime` ang dating SUMASALUNGAT
+    # sa `app/config.py`, lahat sa permissive na direksyon, at ang fixture na ito ay
+    # gumagamit ng `from_runtime(SimpleNamespace())` kaya minamana nito ang mga ito:
+    #     risk_max_spread_bps_abs_cap    1500.0 -> 300.0
+    #     a_setup_quality_floor_enabled  False  -> True
+    #     no_signal_derank_enabled       False  -> True
+    # (ang live_eligible_max_spread_bps ay hindi kasama — tahasang pinipin ng
+    # fixture sa 25.0 sa itaas, kaya hindi ito naapektuhan ng 0.0 -> 300.0.)
+    # VALUES rotation ito, HINDI economic: bawat desisyon sa itaas ay pareho pa rin
+    # — viability 0.5665, scorer paper=True/live=False, observation paper=False/
+    # live=False, policy_parity=True. Ang mga assertion na iyon ay nauuna sa apat na
+    # root sa ibaba, kaya sila ang patunay: kung nagbago ang ekonomiya, doon muna
+    # babagsak, hindi sa hash.
     assert bundle.bundle_sha256 == (
-        "17d07c3cfe261ed3e1763e6ce296ee76ecbe20f8a70a3c6e770bfa6399ba265d"
+        "6cc25432e45585e699a21414823ba5d7a0178712dd0bf295761777094618ebbd"
     )
     assert authority.authority_sha256 == (
-        "f8058470e8ab250c6d94a7c62840012bca66c7feb0099c92b4cd0c50068661f9"
+        "f8bb414941e7e4a1d636bc8c9b7ff7191b62ba7784ef01f2d0e258f0dc0bfee8"
     )
     assert bundle.dependency_inventory.inventory_sha256 == (
-        "27bee44e50233e6b573810c15e2e0357796b8db9ec177e9253d28af98551abd9"
+        "978955a2a8d85f22da554e9fdc172274995f72cec93f4fc4b3f74ec9a4b0f3c5"
     )
     assert typed.observation.observation_sha256 == (
-        "58064367b9e003e2a078c059ce038dd6a097e6ba432fc5b205e401c678a3239a"
+        "64278ffa7c8a620865d6cafd3fa1398de0e890649007390af46e208ef8f439a9"
     )
 
 
