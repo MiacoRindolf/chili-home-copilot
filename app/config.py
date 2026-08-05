@@ -13738,6 +13738,23 @@ def load_process_settings() -> Settings:
 
     marker = os.environ.get(CAPTURED_PAPER_CONFIG_ISOLATION_ENV)
     if marker is None:
+        # PYTEST ISOLATION (2026-08-05). Ang suite ay dapat sumukat sa CODE
+        # DEFAULT, hindi sa desktop `.env` ng operator. Walang exemption dati,
+        # kaya bawat lokal na pytest ay nagmamana ng 41 policy override na
+        # sumasalungat sa default (hal. CHILI_MOMENTUM_AUTO_ARM_CRYPTO_ONLY=false
+        # gayong True ang default) — habang ang CI, na walang `.env` dahil
+        # gitignored ito, ay tumatakbo sa mga default. Dahil doon ay may mga
+        # testong GREEN sa CI pero RED sa makina ng operator
+        # (test_equity_candidate_skipped_even_if_higher_viability: bumabagsak
+        # kapag may `.env`, pumapasa kapag wala) — kaya ang "lokal na green" ay
+        # hindi ang parehong sinusukat ng CI.
+        #
+        # Ang mga TUNAY na env var ay HINDI apektado: binabasa pa rin ng pydantic
+        # ang os.environ, kaya ang TEST_DATABASE_URL / DATABASE_URL na itinatakda
+        # ng conftest (bago ang app import) ay tumatalab pa rin. Ang `.env` FILE
+        # lamang ang hindi na binabasa.
+        if (os.environ.get("CHILI_PYTEST") or "").strip():
+            return Settings(_env_file=None)
         return Settings()
     if marker != "true":
         raise RuntimeError(
