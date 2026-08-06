@@ -146,3 +146,67 @@ Each group green locally: 332-test A/B subset, 55 viability, 39 pyramid, 113 ent
 - Nine pre-existing failures explained; the remaining CI redness is dominated by the captured-paper/Alpaca lane (~114 of 319 failures across `test_build_captured_paper_activation_authority`, `test_adaptive_risk_reservation`, `test_alpaca_governed_place_bbo`, and siblings) — Codex's lane.
 
 **None of this moves us closer to a first fill.** It makes the suite trustworthy, which it was not: local "green" measured the operator's desktop, and several tests measured the hour they ran. The binding constraint remains the execution lane with zero fills.
+
+---
+
+# Addendum — the rest of 2026-08-05: the zero-fill gap, located
+
+**Further PRs:** [#991](https://github.com/MiacoRindolf/chili-home-copilot/pull/991) (clear pytest-isolation error, → `487be94`) · [#992](https://github.com/MiacoRindolf/chili-home-copilot/pull/992) (chain probe + admission census, → `fbfa7f2`)
+
+**Operator direction:** "sige, ayusin mo na yung execution lane" → "tanggalin mo yung hangganan, ayusin mo na" (the four Codex-owned files were opened to me).
+
+## 6. Where the chain actually stops
+
+Not liveness. Not strategy. **Eligible → arm.**
+
+`one-shot-r102` ran **51 minutes of RTH** (16:22–17:13 UTC): 3,027 capture events, **550 selection events, 18 symbols**. It reached selection and stopped — arm 0, entry 0, order 0, fill 0.
+
+In the same window `momentum_viability_history` shows `paper_eligible=t` AND `live_eligible=t` for YXT (460 scores), BJDX, JLHL, ASTC, INLF, SHPH, AMWL, OESX — several with **no `blocked_reason` at all**. And `trading_automation_sessions` for the day: **0**; last row **2026-07-13**.
+
+Eligible candidates for 90 minutes; nothing armed.
+
+### Two premises of mine that were wrong
+
+- **"The service wasn't alive."** I inspected one run-subdir, saw 8 bootstrap events, and nearly wrote that off. The probe scans every subdir: 3,027 events. Manual inspection of a sharded store is not sampling — it is guessing.
+- **"`admit_ross_event` arms the captured-paper lane."** It does not. `_admit_iqfeed_symbol` (`live_runner_loop.py:2176`) branches on `_captured_paper_scope` to the sealed `CapturedPaperInitialAdmissionController.admit` and returns before `:2269`; that call is the ordinary-lane tail. Five independent tracers all returned `blocks_arming = no` on my five hypothesised gates — the blocker was not among them.
+
+### What the tracers did establish
+
+`start_captured_paper_live_runner_loop` **did** start. `captured_paper_runtime_env.py:461-477` force-installs `LIVE_RUNNER_ENABLED` / `LIVE_RUNNER_LOOP_ENABLED` / `AUTOPILOT_PRICE_BUS_ENABLED` = `true` into `os.environ` before the first `app` import, and sets `CHILI_CAPTURED_PAPER_CONFIG_ISOLATED=true` so pydantic never reads the `.env`. The desktop `.env` says `CHILI_MOMENTUM_LIVE_RUNNER_ENABLED=false` — overridden. **I nearly "fixed" a gate that was already open.**
+
+`CHILI_SCHEDULER_ROLE=rnd_only` is likewise deliberate (`docs/DESIGN/SCHEDULER_SPLIT.md`) and not the cause.
+
+## 7. The real blocker: the admission path cannot be observed
+
+Four silent-loss paths in `_admit_iqfeed_symbol`:
+
+1. rejection with **no reason string** → never logged (the guard is `... and rejection_reason`)
+2. rate-limited log with **no counts** → 3,000 rejections look like 1
+3. non-`Mapping` result → silent `return None`
+4. exception → `_log.debug`, invisible wherever root WARNING is the default
+
+The fourth is the same shape as the bug that silently skipped an entire scale-out step earlier in the day.
+
+**Fix (#992):** every outcome counted by reason, emitted with counts at WARNING every 120 s; exception path raised to warning with traceback. **Observation only — no admission decision changes.**
+
+### A real behaviour change I introduced and caught
+
+The first version read `time.monotonic()` on **every** outcome. That doubled clock reads in the admission path and exhausted the **exact** monotonic budget of `test_captured_paper_admission_logs_typed_rejection_reason` → `StopIteration` → a silent `None`. A genuine behaviour change from what was supposed to be pure observation. Now the clock is read once every 16 outcomes.
+
+Also: the `try/except` that keeps observation from breaking admission **hides a missing attribute on a test double** — counting appeared to work while the summary never emitted. There is now a guard asserting the double covers every attribute the method touches.
+
+## 8. Measurement discipline — five traps recorded
+
+1. **Baseline must be main's own run at the same sha**, not the pre-merge PR run. Using the latter turned 4 new failures into a phantom 5.
+2. **CI has a UTC-date-roll dependency.** Re-running the *same main sha* at 22:23 UTC and again at 01:48 UTC produced different failure sets; **3 of the 4 "new" failures appeared in the main rerun**. Always compare runs from comparable clock windows.
+3. **Churn on an identical commit is ~1 test** (same sha twice: 318 → 319). So a larger delta is time or code, never "just flake".
+4. **Never use `git stash` for an A/B.** `stash push` failed silently, so `stash pop` applied an unrelated older stash and left 11 files with conflict markers — and the A/B itself was meaningless because both arms ran the same code. Use `git checkout <sha> -- <file>` and **prove the arm changed** (count refs) before believing the result.
+5. **`git fetch origin main` silently fails to advance the tracking ref here** ("did not send all necessary objects"). Use the authenticated URL with an explicit refspec, or you will report a merge as not-landed.
+
+## 9. State
+
+- main `fbfa7f2`; CI 322 → ~313 failed across the day, each drop name-verified.
+- The census is in main but **inert until Codex re-seals it into the next activation**. No effect on the running r106.
+- New tool: `scripts/paper_lane_chain_probe.py` (read-only) answers "where did the chain stop, and was it RTH?" in one command.
+
+**Still zero fills, ever.** This did not fix that. It converts the next "why no fill?" from a day of forensics into a log line naming the rejecting reason — which is the prerequisite for fixing it, not the fix.
