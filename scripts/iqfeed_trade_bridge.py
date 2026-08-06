@@ -236,8 +236,7 @@ IGNITION_SCHEMA_VERSION = "chili.iqfeed-ignition-nominate.v1"
 # prints to fill against. The working cap is SELF-DISCOVERED: start at WATCH_HARD_MAX, halve the configured
 # cap on an IQFeed symbol-limit signal, then probe one slot after each quiet interval. A failed probe returns
 # to the prior stable cap. The fresh-eligible set is the natural ceiling (usually a few hundred).
-# One documented base (WATCH_FLOOR); the cap is adaptive. Retention raised 3d->30d so we can backtest N days.
-RETENTION_DAYS = float(os.environ.get("IQFEED_TRADE_RETENTION_DAYS", "30") or 30)
+# One documented base (WATCH_FLOOR); the cap is adaptive.
 WATCH_FLOOR = int(os.environ.get("IQFEED_WATCH_FLOOR", "64") or 64)          # the ONE documented base
 WATCH_HARD_MAX = int(os.environ.get("IQFEED_WATCH_HARD_MAX", "1000") or 1000)  # backstop only
 WATCH_RECOVERY_QUIET_S = float(
@@ -2717,12 +2716,7 @@ def writer(
             previous_capacity.cap,
             current_capacity.cap,
         )
-    # Defer the first hourly retention sweep to one hour after connect: with
-    # last_prune=0.0 it ran on the FIRST loop iteration, and its observed_at-only
-    # DELETE full-scans iqfeed_trade_ticks (~128M rows, 139s live-measured
-    # 2026-07-16) BEFORE the first reconcile() can send any watch -- every
-    # watch (and the 30s capture-certification smoke window) starved behind it.
-    last_prune = time.monotonic()
+    last_hint_prune = time.monotonic()
     last_fast_sub = 0.0
     # Explicit CLI symbols are capture-hot for the lifetime of this writer.
     # Dynamic hot membership is refreshed from live/paper sessions + fresh alerts.
@@ -2852,16 +2846,12 @@ def writer(
                 limit=_watch_capacity.source_read_limit,
             )
             reconcile(allow_unwatch=True)
-        # retention prune (the exit_parity_log bloat lesson): a rolling research window, not an archive
-        if time.monotonic() - last_prune >= 3600.0:
-            try:
-                with engine.begin() as c:
-                    c.execute(sa.text(
-                        "DELETE FROM iqfeed_trade_ticks "
-                        "WHERE observed_at < (now() at time zone 'utc') - make_interval(days => :d)"),
-                        {"d": int(RETENTION_DAYS)})
-            except Exception as e:
-                log.debug("retention prune failed: %s", e)
+        # The sole tape writer must never own historical tick retention.  The old
+        # hourly observed_at DELETE could full-scan the live table and stop all
+        # ingest while this thread still appeared healthy.  Retention belongs to
+        # an out-of-band maintenance owner; this loop only performs the small
+        # subscribe-hint coordination cleanup.
+        if time.monotonic() - last_hint_prune >= 3600.0:
             # F7 (capture-g fix): drain the subscribe-hint coordination table too — hints are
             # only meaningful for the ~180s fresh window; without a sweep the table grew
             # unbounded (the mig313 docstring promised a retention sweep — this makes it
@@ -2874,7 +2864,7 @@ def writer(
                         "WHERE requested_at < (now() at time zone 'utc') - make_interval(hours => 48)"))
             except Exception as e:
                 log.debug("subscribe-requests prune failed: %s", e)
-            last_prune = time.monotonic()
+            last_hint_prune = time.monotonic()
         if time.monotonic() - last_refresh >= REFRESH_S:
             previous_capacity, current_capacity, limit_hit = (
                 _advance_watch_capacity(

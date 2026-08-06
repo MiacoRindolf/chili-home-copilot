@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import inspect
 import threading
 import time
 from types import MethodType
@@ -12,6 +13,13 @@ from app.services.trading.momentum_neural.replay_capture_contract import (
 from scripts import iqfeed_capture_host as host_module
 from scripts import iqfeed_depth_bridge as depth_bridge
 from scripts import iqfeed_trade_bridge as trade_bridge
+
+
+def test_trade_writer_never_runs_historical_tick_retention() -> None:
+    source = inspect.getsource(trade_bridge.writer)
+
+    assert "DELETE FROM iqfeed_trade_ticks" not in source
+    assert "subscribe-hint coordination cleanup" in source
 
 
 def _run_in_thread(target):
