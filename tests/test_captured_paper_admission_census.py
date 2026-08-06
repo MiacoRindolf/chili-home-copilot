@@ -46,6 +46,11 @@ class _Loop:
         self._captured_paper_admission_census_ticks = 0
 
     _record = lrl.LiveRunnerLoop._record_captured_paper_admission_outcome
+    # Ang TUNAY na sidecar writer, hindi stub — para tunay na nasusubok ang
+    # pagsulat sa disk at hindi lang ang pagbibilang.
+    _append_admission_census_sidecar = (
+        lrl.LiveRunnerLoop._append_admission_census_sidecar
+    )
 
 
 def test_ang_test_double_ay_sakop_ang_bawat_attribute_na_hinahawakan():
@@ -175,3 +180,86 @@ def test_ang_apat_na_landas_ay_talagang_naka_instrumento_sa_source():
         assert needed in src, f"nawala ang instrumentasyon para sa: {needed}"
     # Ang exception path ay dapat WARNING, hindi debug.
     assert "_log.warning(" in src
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# SIDECAR — ang durable na daan palabas.
+#
+# Ang log line lang ay hindi sapat: sa unang RTH na may instrumentasyon ay WALA
+# akong mabasang census. Ang tatlong service log ng captured-paper host ay may
+# ZERO `[live_loop]` line kahit kailan, at ang tanging may Python WARNING output
+# ay tumigil isang oras BAGO magbukas ang market. Instrumento na walang
+# mababasang labasan ay hindi instrumento.
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+def _sidecar_path():
+    import os
+    import tempfile
+
+    return os.path.join(tempfile.gettempdir(), "chili_admission_census.jsonl")
+
+
+def test_ang_sidecar_ay_talagang_nasusulat(monkeypatch, tmp_path):
+    """Hindi sapat na tawagin ang writer — dapat may TUNAY na linya sa disk."""
+    import json as _json
+    import tempfile
+
+    monkeypatch.setattr(tempfile, "gettempdir", lambda: str(tmp_path))
+    lp = _Loop()
+    lp._append_admission_census_sidecar({"rejected_cooldown": 5, "admitted": 1}, 6, 1)
+
+    p = tmp_path / "chili_admission_census.jsonl"
+    assert p.is_file(), "walang naisulat na sidecar"
+    rec = _json.loads(p.read_text(encoding="utf-8").strip())
+    assert rec["total"] == 6
+    assert rec["admitted"] == 1
+    assert rec["outcomes"]["rejected_cooldown"] == 5
+    assert rec["at"] and rec["pid"]
+
+
+def test_ang_sidecar_ay_nag_a_append_hindi_nag_o_overwrite(monkeypatch, tmp_path):
+    """Cumulative ang counters, pero kailangan pa rin ng kasaysayan para makita
+    ang paglaki sa paglipas ng oras."""
+    import tempfile
+
+    monkeypatch.setattr(tempfile, "gettempdir", lambda: str(tmp_path))
+    lp = _Loop()
+    lp._append_admission_census_sidecar({"admitted": 1}, 1, 1)
+    lp._append_admission_census_sidecar({"admitted": 2}, 2, 2)
+    lines = [
+        l for l in (tmp_path / "chili_admission_census.jsonl")
+        .read_text(encoding="utf-8").splitlines() if l.strip()
+    ]
+    assert len(lines) == 2
+
+
+def test_ang_sidecar_ay_hindi_sumisira_ng_admission(monkeypatch):
+    """Ang pagmamasid ay hindi dapat magtapon. Kahit hindi masulatan ang disk."""
+    import tempfile
+
+    monkeypatch.setattr(
+        tempfile, "gettempdir", lambda: "Z:/wala-itong-ganitong-drive"
+    )
+    lp = _Loop()
+    lp._append_admission_census_sidecar({"admitted": 1}, 1, 1)  # hindi dapat magtapon
+
+
+def test_binabasa_ng_probe_ang_sidecar():
+    """Ang writer at ang reader ay dapat magkaintindihan — walang saysay ang
+    sidecar kung hindi ito mahanap ng probe."""
+    import pathlib
+    import re
+
+    src = pathlib.Path("scripts/paper_lane_chain_probe.py").read_text(
+        encoding="utf-8", errors="replace"
+    )
+    assert "chili_admission_census.jsonl" in src, "hindi hinahanap ng probe ang sidecar"
+    loop_src = pathlib.Path(
+        "app/services/trading/momentum_neural/live_runner_loop.py"
+    ).read_text(encoding="utf-8", errors="replace")
+    # Iisang pangalan ng file sa magkabilang panig.
+    names = set(re.findall(r'"(chili_admission_census\.jsonl)"', src)) & set(
+        re.findall(r'"(chili_admission_census\.jsonl)"', loop_src)
+    )
+    assert names, "hindi tugma ang pangalan ng sidecar sa writer at reader"

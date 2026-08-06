@@ -2241,8 +2241,52 @@ class LiveRunnerLoop:
                     admitted,
                     detail,
                 )
+                self._append_admission_census_sidecar(emit, total, admitted)
         except Exception:  # pragma: no cover — hindi dapat makaapekto sa admission
             _log.debug("[live_loop] admission census failed", exc_info=True)
+
+    def _append_admission_census_sidecar(
+        self, outcomes: dict[str, int], total: int, admitted: int
+    ) -> None:
+        """Isulat ang census sa isang DURABLE na JSONL, hindi lang sa logger.
+
+        BAKIT MAY SIDECAR (2026-08-06). Ang log line lang ay hindi sapat: nang
+        subukan kong basahin ang census sa unang RTH na may instrumentasyon,
+        WALA akong mabasa. Ang tatlong service log ng captured-paper host ay may
+        ZERO `[live_loop]` line kahit kailan — hindi nila nahuhuli ang logger na
+        ito — at ang tanging may Python WARNING output ay tumigil isang oras
+        BAGO magbukas ang market. Naglagay ako ng instrumento nang hindi
+        tinitiyak na may mababasang daan palabas.
+
+        BAKIT HINDI ANG CAPTURE STORE. Iyon sana ang unang balak, pero sarado
+        ang pinto at tama lang: ang `CaptureStream` ay closed enum, at ang
+        `submit_capture_health` ay nangangailangan ng EKSAKTONG key allowlist +
+        tugmang identity/resource hashes + `durable_sequence_next` — isang
+        sadyang non-spoofable envelope na hindi kayang magdala ng census
+        counters. Ang pagpapasok nito roon ay mangangailangan ng bagong stream
+        sa sealed contract at ng capture-runtime handle sa loop na ito, para sa
+        isang DIAGNOSTIC. Sabi mismo ng contract: "Keep this registry explicit."
+
+        Kaya: plain JSONL sa temp — ang parehong direktoryo na pinatunayan nang
+        nasusulatan ng prosesong ito (naroon ang service-*.log nito). Cumulative
+        ang counters, kaya sapat ang HULING linya kahit mamatay ang proseso.
+        Binabasa ito ng `scripts/paper_lane_chain_probe.py`.
+        """
+        try:
+            import tempfile
+
+            path = os.path.join(tempfile.gettempdir(), "chili_admission_census.jsonl")
+            record = {
+                "at": datetime.now(timezone.utc).isoformat(),
+                "pid": os.getpid(),
+                "total": total,
+                "admitted": admitted,
+                "outcomes": outcomes,
+            }
+            with open(path, "a", encoding="utf-8") as fh:
+                fh.write(json.dumps(record, sort_keys=True) + "\n")
+        except Exception:  # pragma: no cover — kailanman huwag sirain ang admission
+            _log.debug("[live_loop] admission census sidecar failed", exc_info=True)
 
     def _admit_iqfeed_symbol(
         self,
