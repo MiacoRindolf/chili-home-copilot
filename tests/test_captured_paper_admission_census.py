@@ -25,6 +25,24 @@ import pytest
 from app.services.trading.momentum_neural import live_runner_loop as lrl
 
 
+@pytest.fixture(autouse=True)
+def _isolate_sidecar_tempdir(monkeypatch, tmp_path):
+    """WALANG test ang dapat sumulat sa TUNAY na sidecar path.
+
+    Ang sidecar ay isang PRODUCTION diagnostic na binabasa ng
+    `paper_lane_chain_probe.py`. Nang hindi ito naka-isolate, ang emit test dito
+    ay sumulat ng `{"rejected_cooldown": 16}` sa tunay na temp file — at nang
+    tingnan ko ang lane pagkatapos, MUKHANG may production census na. Muntik
+    kong iulat ang sariling test bilang datos ng lane.
+
+    Autouse: bawat test sa file na ito, walang maaalala.
+    """
+    import tempfile
+
+    monkeypatch.setattr(tempfile, "gettempdir", lambda: str(tmp_path))
+    return tmp_path
+
+
 class _Loop:
     """Ang pinakamaliit na tunay na bahagi: ang aktwal na method ng klase,
     nakakabit sa isang bagay na may kailangan lang nitong estado.
@@ -200,12 +218,10 @@ def _sidecar_path():
     return os.path.join(tempfile.gettempdir(), "chili_admission_census.jsonl")
 
 
-def test_ang_sidecar_ay_talagang_nasusulat(monkeypatch, tmp_path):
+def test_ang_sidecar_ay_talagang_nasusulat(tmp_path):
     """Hindi sapat na tawagin ang writer — dapat may TUNAY na linya sa disk."""
     import json as _json
-    import tempfile
 
-    monkeypatch.setattr(tempfile, "gettempdir", lambda: str(tmp_path))
     lp = _Loop()
     lp._append_admission_census_sidecar({"rejected_cooldown": 5, "admitted": 1}, 6, 1)
 
@@ -218,12 +234,9 @@ def test_ang_sidecar_ay_talagang_nasusulat(monkeypatch, tmp_path):
     assert rec["at"] and rec["pid"]
 
 
-def test_ang_sidecar_ay_nag_a_append_hindi_nag_o_overwrite(monkeypatch, tmp_path):
+def test_ang_sidecar_ay_nag_a_append_hindi_nag_o_overwrite(tmp_path):
     """Cumulative ang counters, pero kailangan pa rin ng kasaysayan para makita
     ang paglaki sa paglipas ng oras."""
-    import tempfile
-
-    monkeypatch.setattr(tempfile, "gettempdir", lambda: str(tmp_path))
     lp = _Loop()
     lp._append_admission_census_sidecar({"admitted": 1}, 1, 1)
     lp._append_admission_census_sidecar({"admitted": 2}, 2, 2)
@@ -263,3 +276,24 @@ def test_binabasa_ng_probe_ang_sidecar():
         re.findall(r'"(chili_admission_census\.jsonl)"', loop_src)
     )
     assert names, "hindi tugma ang pangalan ng sidecar sa writer at reader"
+
+
+def test_walang_test_na_sumusulat_sa_TUNAY_na_sidecar(tmp_path):
+    """Ang bitag na muntik nang magpahamak.
+
+    Ang sidecar ay production diagnostic. Kapag sumulat dito ang isang test,
+    ang susunod na tumingin sa lane ay makakakita ng SYNTHETIC na counter at
+    aakalaing datos ng produksyon iyon — eksaktong nangyari sa akin
+    (`rejected_cooldown: 16` mula sa emit test, na-ulat sana bilang lane data).
+
+    Pinatutunayan nito na tumatalab ang autouse na isolation: ang path na
+    nakikita ng writer ay NASA LOOB ng tmp_path, hindi sa tunay na temp.
+    """
+    import os
+    import tempfile
+
+    seen = tempfile.gettempdir()
+    assert str(tmp_path) == seen, "hindi naka-isolate ang tempdir sa test na ito"
+    lp = _Loop()
+    lp._append_admission_census_sidecar({"admitted": 1}, 1, 1)
+    assert os.path.isfile(os.path.join(seen, "chili_admission_census.jsonl"))
