@@ -169,9 +169,10 @@ if DB_RELEASE_CATCHUP_BATCH_EVENTS * 18 >= 65_535:
 # A broad IQFeed watch roster can emit many quote-only Q frames for the same
 # cold symbols between commits.  Those frames are collapsed to the newest quote
 # per symbol, so let one drain inspect a larger *raw* prefix while retaining the
-# existing PostgreSQL-safe event cap.  The bound keeps reader-lock hold time
-# independent of the full queue tail.
-_DB_RELEASE_RAW_SCAN_MULTIPLIER = 16
+# existing PostgreSQL-safe event cap.  Production evidence at the prior 16x
+# bound showed the raw frontier advancing at only ~0.66x real time; 64x restores
+# bounded catch-up headroom without increasing retained rows or SQL bind count.
+_DB_RELEASE_RAW_SCAN_MULTIPLIER = 64
 REFRESH_S = 20.0                         # execution-session symbol refresh cadence
 STALE_NBBO_RECONNECT_S = float(
     os.environ.get("IQFEED_STALE_NBBO_RECONNECT_SECONDS", "45") or 45

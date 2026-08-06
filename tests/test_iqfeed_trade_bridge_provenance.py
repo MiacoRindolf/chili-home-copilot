@@ -621,26 +621,26 @@ def test_pending_db_release_drain_uses_backlog_independent_head_queues(monkeypat
 
 
 def test_pending_db_release_drain_counts_retained_cold_quotes_not_raw_frames():
+    legacy_raw_limit = bridge.DB_RELEASE_BATCH_EVENTS * 16
+    terminal_sequence = legacy_raw_limit + 1
     quote_rows = [
         {
             "sym": "COLD",
             "connection_generation": 1,
             "source_frame_sequence": sequence,
         }
-        for sequence in range(1, 101)
+        for sequence in range(1, terminal_sequence + 1)
     ]
     trade_row = {
         "sym": "MOVER",
         "connection_generation": 1,
-        "source_frame_sequence": 100,
+        "source_frame_sequence": terminal_sequence,
     }
     with bridge._pending_lock:
         bridge._pending.extend([trade_row])
         bridge._pending_nbbo.extend(quote_rows)
 
     trades, quotes, backlog = bridge._drain_pending_write_batch(
-        max_events=4,
-        max_scan_events=200,
         hot_symbols=set(),
     )
 
