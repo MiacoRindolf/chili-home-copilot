@@ -166,6 +166,12 @@ if DB_RELEASE_CATCHUP_BATCH_EVENTS * 18 >= 65_535:
         "IQFEED_DB_RELEASE_CATCHUP_BATCH_EVENTS exceeds the safe PostgreSQL "
         "bind-parameter budget"
     )
+# A broad IQFeed watch roster can emit many quote-only Q frames for the same
+# cold symbols between commits.  Those frames are collapsed to the newest quote
+# per symbol, so let one drain inspect a larger *raw* prefix while retaining the
+# existing PostgreSQL-safe event cap.  The bound keeps reader-lock hold time
+# independent of the full queue tail.
+_DB_RELEASE_RAW_SCAN_MULTIPLIER = 16
 REFRESH_S = 20.0                         # execution-session symbol refresh cadence
 STALE_NBBO_RECONNECT_S = float(
     os.environ.get("IQFEED_STALE_NBBO_RECONNECT_SECONDS", "45") or 45
@@ -988,12 +994,19 @@ def _pending_frame_key(row: dict) -> tuple[int, int]:
 def _drain_pending_write_batch(
     *,
     max_events: int = DB_RELEASE_BATCH_EVENTS,
+    max_scan_events: int | None = None,
+    hot_symbols: set[str] | None = None,
 ) -> tuple[list[dict], list[dict], bool]:
-    """Drain a bounded prefix without splitting one source frame.
+    """Drain a bounded raw prefix under a retained-event commit cap.
 
     Trade and quote evidence for the same frame share the exact generation and
     sequence.  A frame may exceed the operational cap, but it is never split
-    across commit boundaries.
+    across commit boundaries.  Every trade and every hot quote consumes the
+    retained-event cap.  Repeated cold quotes consume only one retained slot per
+    symbol, so a broad quote-only roster cannot starve newer trades behind it.
+
+    ``hot_symbols=None`` preserves the unsampled helper contract used by direct
+    callers.  The production writer passes its current hot-symbol snapshot.
     """
 
     if (
@@ -1002,12 +1015,33 @@ def _drain_pending_write_batch(
         or max_events <= 0
     ):
         raise ValueError("IQFeed DB release batch size must be a positive integer")
+    raw_scan_limit = (
+        max_events * _DB_RELEASE_RAW_SCAN_MULTIPLIER
+        if max_scan_events is None
+        else max_scan_events
+    )
+    if (
+        isinstance(raw_scan_limit, bool)
+        or not isinstance(raw_scan_limit, int)
+        or raw_scan_limit <= 0
+    ):
+        raise ValueError("IQFeed DB raw scan size must be a positive integer")
+    sample_cold_quotes = hot_symbols is not None
+    hot = {
+        str(symbol or "").strip().upper()
+        for symbol in (hot_symbols or set())
+    }
+    if not HOT_FULL_FIDELITY:
+        hot.clear()
     with _pending_lock:
         if not _pending and not _pending_nbbo:
             return [], [], False
         trade_rows: list[dict] = []
-        quote_rows: list[dict] = []
-        selected_events = 0
+        mandatory_quote_rows: list[dict] = []
+        latest_cold_quote: dict[str, dict] = {}
+        retained_events = 0
+        scanned_events = 0
+        drained_quote_count = 0
         missing = object()
         trade_iter = iter(_pending)
         quote_iter = iter(_pending_nbbo)
@@ -1038,17 +1072,56 @@ def _drain_pending_write_batch(
                 frame_quotes.append(cast(dict, quote_head))
                 quote_head = next(quote_iter, missing)
             frame_events = len(frame_trades) + len(frame_quotes)
-            if selected_events and selected_events + frame_events > max_events:
+            frame_mandatory_quotes: list[dict] = []
+            frame_cold_quotes: dict[str, dict] = {}
+            for row in frame_quotes:
+                symbol = str(row.get("sym") or "").strip().upper()
+                if not sample_cold_quotes or frame_trades or symbol in hot:
+                    frame_mandatory_quotes.append(row)
+                else:
+                    frame_cold_quotes[symbol] = row
+            projected_cold_symbols = set(latest_cold_quote)
+            # A mandatory quote supersedes an older optional sample for the same
+            # symbol, but never another mandatory quote from a trade/hot frame.
+            projected_cold_symbols.difference_update(
+                str(row.get("sym") or "").strip().upper()
+                for row in frame_mandatory_quotes
+            )
+            projected_cold_symbols.update(frame_cold_quotes)
+            projected_retained_events = (
+                len(trade_rows)
+                + len(frame_trades)
+                + len(mandatory_quote_rows)
+                + len(frame_mandatory_quotes)
+                + len(projected_cold_symbols)
+            )
+            if (
+                retained_events
+                and projected_retained_events > max_events
+            ):
                 break
             trade_rows.extend(frame_trades)
-            quote_rows.extend(frame_quotes)
-            selected_events += frame_events
-            if selected_events >= max_events:
+            for row in frame_mandatory_quotes:
+                symbol = str(row.get("sym") or "").strip().upper()
+                latest_cold_quote.pop(symbol, None)
+                mandatory_quote_rows.append(row)
+            latest_cold_quote.update(frame_cold_quotes)
+            retained_events = projected_retained_events
+            scanned_events += frame_events
+            drained_quote_count += len(frame_quotes)
+            if (
+                scanned_events >= raw_scan_limit
+                or (retained_events >= max_events and not sample_cold_quotes)
+            ):
                 break
         for _ in range(len(trade_rows)):
             _pending.popleft()
-        for _ in range(len(quote_rows)):
+        for _ in range(drained_quote_count):
             _pending_nbbo.popleft()
+        quote_rows = sorted(
+            (*mandatory_quote_rows, *latest_cold_quote.values()),
+            key=_pending_frame_key,
+        )
         return trade_rows, quote_rows, bool(_pending or _pending_nbbo)
 
 
@@ -2932,13 +3005,7 @@ def writer(
         rows, nbbo_rows, pending_backlog = _drain_pending_write_batch(
             max_events=_release_batch_event_limit(
                 pending_backlog=pending_backlog,
-            )
-        )
-        # Full-fidelity for current hot symbols; bounded newest-per-flush context
-        # for the broad universe.  Missing exact IQFeed quote-event clocks still
-        # make these rows noncertifying regardless of storage fidelity.
-        nbbo_rows = _select_nbbo_rows_for_capture(
-            nbbo_rows,
+            ),
             hot_symbols=hot_symbols,
         )
         if rows or nbbo_rows:

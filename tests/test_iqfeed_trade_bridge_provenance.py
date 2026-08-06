@@ -620,6 +620,90 @@ def test_pending_db_release_drain_uses_backlog_independent_head_queues(monkeypat
     assert bridge._pending_nbbo[0]["source_frame_sequence"] == 129
 
 
+def test_pending_db_release_drain_counts_retained_cold_quotes_not_raw_frames():
+    quote_rows = [
+        {
+            "sym": "COLD",
+            "connection_generation": 1,
+            "source_frame_sequence": sequence,
+        }
+        for sequence in range(1, 101)
+    ]
+    trade_row = {
+        "sym": "MOVER",
+        "connection_generation": 1,
+        "source_frame_sequence": 100,
+    }
+    with bridge._pending_lock:
+        bridge._pending.extend([trade_row])
+        bridge._pending_nbbo.extend(quote_rows)
+
+    trades, quotes, backlog = bridge._drain_pending_write_batch(
+        max_events=4,
+        max_scan_events=200,
+        hot_symbols=set(),
+    )
+
+    assert trades == [trade_row]
+    assert quotes == [quote_rows[-1]]
+    assert backlog is False
+    with bridge._pending_lock:
+        assert not bridge._pending
+        assert not bridge._pending_nbbo
+
+
+def test_pending_db_release_drain_keeps_trade_sibling_before_newer_cold_sample():
+    trade_row = {
+        "sym": "COLD",
+        "connection_generation": 1,
+        "source_frame_sequence": 1,
+    }
+    paired_quote = dict(trade_row)
+    newer_quote = {
+        "sym": "COLD",
+        "connection_generation": 1,
+        "source_frame_sequence": 2,
+    }
+    with bridge._pending_lock:
+        bridge._pending.append(trade_row)
+        bridge._pending_nbbo.extend([paired_quote, newer_quote])
+
+    trades, quotes, backlog = bridge._drain_pending_write_batch(
+        max_events=3,
+        max_scan_events=10,
+        hot_symbols=set(),
+    )
+
+    assert trades == [trade_row]
+    assert quotes == [paired_quote, newer_quote]
+    assert backlog is False
+
+
+def test_pending_db_release_drain_preserves_hot_quote_fidelity_at_retained_cap():
+    quote_rows = [
+        {
+            "sym": "HOT",
+            "connection_generation": 1,
+            "source_frame_sequence": sequence,
+        }
+        for sequence in range(1, 6)
+    ]
+    with bridge._pending_lock:
+        bridge._pending_nbbo.extend(quote_rows)
+
+    trades, quotes, backlog = bridge._drain_pending_write_batch(
+        max_events=3,
+        max_scan_events=100,
+        hot_symbols={"HOT"},
+    )
+
+    assert trades == []
+    assert quotes == quote_rows[:3]
+    assert backlog is True
+    with bridge._pending_lock:
+        assert list(bridge._pending_nbbo) == quote_rows[3:]
+
+
 def test_pending_db_release_drain_is_atomic_on_later_malformed_frame():
     rows = [
         {"sym": "GOOD", "connection_generation": 1, "source_frame_sequence": 1},
