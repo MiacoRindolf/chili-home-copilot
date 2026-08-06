@@ -97,6 +97,15 @@ _IQFEED_AUTHORITY_MAX_AGE_S = 2.0
 _IQFEED_FUTURE_TOLERANCE_S = 1.0
 _IQFEED_DEDUP_RETENTION_S = 5.0
 _CAPTURED_PAPER_ADMISSION_REJECTION_LOG_INTERVAL_S = 60.0
+# ADMISSION OUTCOME CENSUS (2026-08-05). Ang buod ay lumalabas kada ganito
+# karaming segundo, sa WARNING — sinadya ang antas: ang ilang runtime dito ay
+# walang logging config kaya root WARNING ang default, at ang INFO ay tahimik na
+# nawawala (napatunayan sa replay harness ngayong araw).
+_CAPTURED_PAPER_ADMISSION_CENSUS_INTERVAL_S = 120.0
+# Tuwing ilang kalalabasan bago bumasa ng orasan. Hindi ito tuning para sa
+# isang test: ang pagbasa ng orasan kada admission ay dagdag na trabaho sa
+# hot path AT nag-e-exhaust ng eksaktong monotonic budget ng mga test.
+_CAPTURED_PAPER_ADMISSION_CENSUS_TICKS = 16
 _CAPTURED_PAPER_ADMISSION_REASON_RE = re.compile(r"^[a-z][a-z0-9_]{0,127}$")
 _IQFEED_BUILD_RE = re.compile(
     r"^iqfeed-l1-exact-print-provenance-v3\+sha256:[0-9a-f]{16}$"
@@ -450,6 +459,12 @@ class LiveRunnerLoop:
         self._iqfeed_admission_lock = threading.Lock()
         self._iqfeed_admission_inflight: dict[object, tuple[int, str]] = {}
         self._captured_paper_admission_rejection_log_monotonic: float | None = None
+        # ADMISSION OUTCOME CENSUS (2026-08-05). Ang bawat kalalabasan ng sealed
+        # captured-paper admitter ay binibilang dito ayon sa dahilan, KASAMA ang
+        # mga dating tahimik. Tingnan ang paliwanag sa _admit_iqfeed_symbol.
+        self._captured_paper_admission_outcomes: dict[str, int] = {}
+        self._captured_paper_admission_census_monotonic: float | None = None
+        self._captured_paper_admission_census_ticks: int = 0
         # IGNITION nomination governors (monotonic clocks; consumer-side caps).
         self._ignition_lock = threading.Lock()
         self._ignition_dedup: dict[str, float] = {}
@@ -2166,6 +2181,69 @@ class LiveRunnerLoop:
             except Exception:
                 pass
 
+    def _record_captured_paper_admission_outcome(self, outcome: str) -> None:
+        """Bilangin ang isang kalalabasan ng admitter at pana-panahong ilabas.
+
+        BAKIT ITO UMIIRAL (2026-08-05). Tumakbo ang lane nang 51 minuto ng RTH,
+        gumawa ng 550 selection event sa 18 symbol, at may mga pangalang umabot
+        sa live_eligible NANG WALANG veto — pero ZERO ang naarm, at halos walang
+        naiwang ebidensya kung bakit. Apat na landas ang tahimik na nawawala:
+
+          1. tinatanggihan NANG WALANG reason string  -> walang log (ang tseke ay
+             `... and rejection_reason`, kaya ang blangkong dahilan ay lumalampas)
+          2. rate-limited: isang linya kada 60s at WALANG BILANG, kaya ang
+             "tinanggihan nang 3,000 beses" at "isang beses" ay magkamukha
+          3. hindi-Mapping na resulta -> `return None`, tahimik
+          4. exception sa admitter  -> `_log.debug`, at sa runtime na walang
+             logging config ay hindi ito lumalabas
+
+        Kaya binibilang ang BAWAT kalalabasan at inilalabas nang may bilang. Ang
+        counter ay pagmamasid lamang — walang desisyong nababago nito.
+        """
+        try:
+            emit: dict[str, int] | None = None
+            with self._iqfeed_admission_lock:
+                self._captured_paper_admission_outcomes[outcome] = (
+                    self._captured_paper_admission_outcomes.get(outcome, 0) + 1
+                )
+                # ANG PAGBIBILANG AY WALANG ORASAN. Tanging tuwing ika-N na
+                # kalalabasan tayo bumabasa ng `time.monotonic()`. Dalawang
+                # dahilan: (a) ito ay hot path — isang clock read kada admission
+                # ay puro dagdag; (b) ang admission ay may mga testong nagbibigay
+                # ng EKSAKTONG badyet ng monotonic na halaga, kaya ang dagdag na
+                # pagbasa kada kalalabasan ay nag-e-exhaust ng kanilang iterator
+                # at nagpapabago ng ugali — napatunayan: dinoble nito ang clock
+                # reads at pinalitan ng StopIteration ang isang tunay na resulta.
+                self._captured_paper_admission_census_ticks += 1
+                due = (
+                    self._captured_paper_admission_census_ticks
+                    % _CAPTURED_PAPER_ADMISSION_CENSUS_TICKS
+                ) == 0
+                if due:
+                    now = time.monotonic()
+                    last = self._captured_paper_admission_census_monotonic
+                    if last is None:
+                        # Huwag ilabas agad; simulan ang orasan.
+                        self._captured_paper_admission_census_monotonic = now
+                    elif now - last >= _CAPTURED_PAPER_ADMISSION_CENSUS_INTERVAL_S:
+                        self._captured_paper_admission_census_monotonic = now
+                        emit = dict(self._captured_paper_admission_outcomes)
+            if emit:
+                total = sum(emit.values())
+                admitted = emit.get("admitted", 0)
+                detail = ", ".join(
+                    f"{k}={v}" for k, v in sorted(emit.items(), key=lambda kv: -kv[1])
+                )
+                _log.warning(
+                    "[live_loop] captured PAPER admission census: %d attempt, "
+                    "%d admitted | %s",
+                    total,
+                    admitted,
+                    detail,
+                )
+        except Exception:  # pragma: no cover — hindi dapat makaapekto sa admission
+            _log.debug("[live_loop] admission census failed", exc_info=True)
+
     def _admit_iqfeed_symbol(
         self,
         symbol: str,
@@ -2193,10 +2271,16 @@ class LiveRunnerLoop:
                 symbol,
             )
             if admission_token is None:
+                self._record_captured_paper_admission_outcome(
+                    "admission_token_unavailable"
+                )
                 return None
             try:
                 result = admitter(symbol=symbol, payload=payload)
                 if not isinstance(result, Mapping):
+                    self._record_captured_paper_admission_outcome(
+                        "non_mapping_result"
+                    )
                     return None
                 result = dict(result)
                 raw_rejection_reason = result.get("reason")
@@ -2205,11 +2289,21 @@ class LiveRunnerLoop:
                     if isinstance(raw_rejection_reason, str)
                     else ""
                 )
+                if result.get("admitted") is True:
+                    self._record_captured_paper_admission_outcome("admitted")
+                elif not rejection_reason:
+                    # Dating LUBOS na tahimik: tinanggihan nang walang dahilan.
+                    self._record_captured_paper_admission_outcome(
+                        "rejected_unspecified"
+                    )
                 if result.get("admitted") is not True and rejection_reason:
                     if not _CAPTURED_PAPER_ADMISSION_REASON_RE.fullmatch(
                         rejection_reason
                     ):
                         rejection_reason = "captured_paper_admission_rejected"
+                    self._record_captured_paper_admission_outcome(
+                        f"rejected_{rejection_reason}"[:96]
+                    )
                     now_monotonic = time.monotonic()
                     with self._iqfeed_admission_lock:
                         last_log = (
@@ -2250,8 +2344,13 @@ class LiveRunnerLoop:
                     )
                 return result
             except Exception:
-                _log.debug(
-                    "[live_loop] captured PAPER IQFeed admission failed symbol=%s",
+                # DATING `debug`: sa runtime na walang logging config ay root
+                # WARNING ang default, kaya ang pumuputok na admitter ay lubos na
+                # hindi nakikita. Ito ang eksaktong hugis ng bug na nag-skip ng
+                # buong scale-out step nang walang traceback ngayong araw.
+                self._record_captured_paper_admission_outcome("admitter_exception")
+                _log.warning(
+                    "[live_loop] captured PAPER IQFeed admission FAILED symbol=%s",
                     symbol,
                     exc_info=True,
                 )
