@@ -32,9 +32,10 @@ import sys
 import threading
 import time
 import uuid
+from collections import deque
 from datetime import datetime, time as _dtime, timedelta, timezone
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any, Iterable, cast
 
 try:  # stdlib tz DB (3.9+); used to anchor the IQFeed time-of-day to US/Eastern
     from zoneinfo import ZoneInfo
@@ -1004,45 +1005,50 @@ def _drain_pending_write_batch(
     with _pending_lock:
         if not _pending and not _pending_nbbo:
             return [], [], False
+        trade_rows: list[dict] = []
+        quote_rows: list[dict] = []
         selected_events = 0
-        trade_index = 0
-        quote_index = 0
+        missing = object()
+        trade_iter = iter(_pending)
+        quote_iter = iter(_pending_nbbo)
+        trade_head: dict | object = next(trade_iter, missing)
+        quote_head: dict | object = next(quote_iter, missing)
 
-        while trade_index < len(_pending) or quote_index < len(_pending_nbbo):
+        # Inspect only the bounded prefix before mutating either queue.  This
+        # retains the all-or-nothing malformed-frame behavior while avoiding
+        # list prefix deletion, whose full-tail memmove became quadratic once
+        # a busy broad-universe feed accumulated a large in-memory backlog.
+        while trade_head is not missing or quote_head is not missing:
             head_keys = []
-            if trade_index < len(_pending):
-                head_keys.append(_pending_frame_key(_pending[trade_index]))
-            if quote_index < len(_pending_nbbo):
-                head_keys.append(_pending_frame_key(_pending_nbbo[quote_index]))
+            if trade_head is not missing:
+                head_keys.append(_pending_frame_key(cast(dict, trade_head)))
+            if quote_head is not missing:
+                head_keys.append(_pending_frame_key(cast(dict, quote_head)))
             frame_key = min(head_keys)
-            next_trade_index = trade_index
-            while (
-                next_trade_index < len(_pending)
-                and _pending_frame_key(_pending[next_trade_index]) == frame_key
-            ):
-                next_trade_index += 1
-            trade_count = next_trade_index - trade_index
-            next_quote_index = quote_index
-            while (
-                next_quote_index < len(_pending_nbbo)
-                and _pending_frame_key(_pending_nbbo[next_quote_index]) == frame_key
-            ):
-                next_quote_index += 1
-            quote_count = next_quote_index - quote_index
-            frame_events = trade_count + quote_count
+            frame_trades: list[dict] = []
+            while trade_head is not missing and _pending_frame_key(
+                cast(dict, trade_head)
+            ) == frame_key:
+                frame_trades.append(cast(dict, trade_head))
+                trade_head = next(trade_iter, missing)
+            frame_quotes: list[dict] = []
+            while quote_head is not missing and _pending_frame_key(
+                cast(dict, quote_head)
+            ) == frame_key:
+                frame_quotes.append(cast(dict, quote_head))
+                quote_head = next(quote_iter, missing)
+            frame_events = len(frame_trades) + len(frame_quotes)
             if selected_events and selected_events + frame_events > max_events:
                 break
-            trade_index += trade_count
-            quote_index += quote_count
+            trade_rows.extend(frame_trades)
+            quote_rows.extend(frame_quotes)
             selected_events += frame_events
             if selected_events >= max_events:
                 break
-        trade_rows = _pending[:trade_index]
-        quote_rows = _pending_nbbo[:quote_index]
-        if trade_index:
-            del _pending[:trade_index]
-        if quote_index:
-            del _pending_nbbo[:quote_index]
+        for _ in range(len(trade_rows)):
+            _pending.popleft()
+        for _ in range(len(quote_rows)):
+            _pending_nbbo.popleft()
         return trade_rows, quote_rows, bool(_pending or _pending_nbbo)
 
 
@@ -1476,8 +1482,8 @@ def _notify_payload(row: dict) -> str:
     )
 
 
-_pending: list[dict] = []
-_pending_nbbo: list[dict] = []
+_pending: deque[dict] = deque()
+_pending_nbbo: deque[dict] = deque()
 _pending_lock = threading.Lock()
 _ignition_detector = IgnitionDetector(IgnitionConfig())
 _ignition_fires: list[str] = []          # serialized nomination payloads awaiting NOTIFY

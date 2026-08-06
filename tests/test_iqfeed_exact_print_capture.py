@@ -220,7 +220,7 @@ def test_missing_exact_print_authority_fails_closed(frame: str) -> None:
     _activate_with_ack()
     print_valid, _quote_captured = _parse(frame)
     assert print_valid is False
-    assert bridge._pending == []
+    assert not bridge._pending
 
 
 def test_stale_exact_print_is_preserved_with_late_availability_but_not_nbbo() -> None:
@@ -230,7 +230,7 @@ def test_stale_exact_print_is_preserved_with_late_availability_but_not_nbbo() ->
         received_at=BASE,
     ) == (True, False)
     assert len(bridge._pending) == 1
-    assert bridge._pending_nbbo == []
+    assert not bridge._pending_nbbo
     assert (
         bridge._pending[0]["received_at"]
         - bridge._pending[0]["provider_at"]
@@ -243,8 +243,8 @@ def test_provider_clock_too_far_in_future_is_rejected() -> None:
         _frame(trade_time="11:30:02.000000"),
         received_at=BASE,
     ) == (False, False)
-    assert bridge._pending == []
-    assert bridge._pending_nbbo == []
+    assert not bridge._pending
+    assert not bridge._pending_nbbo
 
 
 def test_ack_must_match_exact_ordered_field_roster() -> None:
@@ -304,8 +304,8 @@ def test_exact_q_bytes_must_match_the_declared_frame_hash(mismatch: str) -> None
         source_frame_sha256=source_sha256,
         source_frame_bytes=source_bytes,
     ) == (False, False)
-    assert bridge._pending == []
-    assert bridge._pending_nbbo == []
+    assert not bridge._pending
+    assert not bridge._pending_nbbo
 
 
 def test_exact_print_envelope_is_hash_bound_and_replay_typed() -> None:
@@ -432,8 +432,8 @@ def test_reader_without_ack_records_both_stream_gaps_and_no_rows() -> None:
         bridge.unbind_capture_handoff(handoff)
     handoff.close()
 
-    assert bridge._pending == []
-    assert bridge._pending_nbbo == []
+    assert not bridge._pending
+    assert not bridge._pending_nbbo
     assert {(gap.stream, gap.reason) for gap in sink.gaps} == {
         (CaptureStream.IQFEED_PRINT, "iqfeed_selected_fields_unconfirmed"),
         (CaptureStream.NBBO_QUOTE, "iqfeed_selected_fields_unconfirmed"),

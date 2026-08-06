@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+from collections import deque
 from datetime import datetime, timedelta, timezone
 
 import pytest
@@ -570,17 +571,25 @@ def test_pending_db_release_drain_is_bounded_and_keeps_same_frame_together():
         assert [row["source_frame_sequence"] for row in bridge._pending_nbbo] == [3, 4]
 
 
-def test_pending_db_release_drain_removes_each_selected_prefix_once(monkeypatch):
-    class _DeleteCountingList(list):
+def test_pending_db_release_drain_uses_backlog_independent_head_queues(monkeypatch):
+    class _CountingDeque(deque):
         def __init__(self, rows):
             super().__init__(rows)
-            self.delete_calls = 0
+            self.iter_yields = 0
+            self.popleft_calls = 0
 
-        def __delitem__(self, key):
-            self.delete_calls += 1
-            return super().__delitem__(key)
+        def __iter__(self):
+            for row in super().__iter__():
+                self.iter_yields += 1
+                if self.iter_yields > 129:
+                    raise AssertionError("drain inspected beyond its bounded prefix")
+                yield row
 
-    trade_rows = _DeleteCountingList(
+        def popleft(self):
+            self.popleft_calls += 1
+            return super().popleft()
+
+    trade_rows = _CountingDeque(
         {
             "sym": "BULK",
             "connection_generation": 1,
@@ -588,7 +597,7 @@ def test_pending_db_release_drain_removes_each_selected_prefix_once(monkeypatch)
         }
         for sequence in range(1, 401)
     )
-    quote_rows = _DeleteCountingList(
+    quote_rows = _CountingDeque(
         {
             "sym": "BULK",
             "connection_generation": 1,
@@ -603,8 +612,12 @@ def test_pending_db_release_drain_removes_each_selected_prefix_once(monkeypatch)
 
     assert len(trades) == len(quotes) == 128
     assert backlog is True
-    assert trade_rows.delete_calls == 1
-    assert quote_rows.delete_calls == 1
+    assert isinstance(bridge._pending, deque)
+    assert isinstance(bridge._pending_nbbo, deque)
+    assert trade_rows.iter_yields == quote_rows.iter_yields == 129
+    assert trade_rows.popleft_calls == quote_rows.popleft_calls == 128
+    assert bridge._pending[0]["source_frame_sequence"] == 129
+    assert bridge._pending_nbbo[0]["source_frame_sequence"] == 129
 
 
 def test_pending_db_release_drain_is_atomic_on_later_malformed_frame():
@@ -619,7 +632,7 @@ def test_pending_db_release_drain_is_atomic_on_later_malformed_frame():
         bridge._drain_pending_write_batch(max_events=256)
 
     with bridge._pending_lock:
-        assert bridge._pending == rows
+        assert list(bridge._pending) == rows
 
 
 def test_pending_backlog_uses_bounded_catchup_batch():
