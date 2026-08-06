@@ -127,6 +127,52 @@ def probe_generation(gen_dir: str) -> dict:
     }
 
 
+def _print_admission_census() -> None:
+    """Ang admission-census sidecar — kung BAKIT tumanggi ang sealed admitter.
+
+    Ang capture store ay nagsasabi kung SAAN huminto ang kadena; ito ang
+    nagsasabi kung BAKIT. Hiwalay itong file dahil ang census ay diagnostic at
+    hindi kasya sa non-spoofable na capture-health envelope (tingnan ang
+    paliwanag sa live_runner_loop._append_admission_census_sidecar).
+    """
+    import tempfile
+
+    path = os.path.join(tempfile.gettempdir(), "chili_admission_census.jsonl")
+    print()
+    print("=== ADMISSION CENSUS (bakit tumanggi ang admitter) ===")
+    if not os.path.isfile(path):
+        print("  walang sidecar — hindi pa naaabot ng lane ang admitter,")
+        print("  o hindi pa naka-deploy ang build na may census.")
+        return
+    last = None
+    lines = 0
+    try:
+        with open(path, encoding="utf-8") as fh:
+            for line in fh:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    last = json.loads(line)
+                    lines += 1
+                except Exception:
+                    continue
+    except Exception as exc:  # pragma: no cover
+        print(f"  hindi mabasa: {exc}")
+        return
+    if last is None:
+        print("  may file pero walang mabasang record")
+        return
+    # Cumulative ang counters, kaya ang HULING linya ang buong larawan.
+    print(f"  {lines} snapshot | huli {last.get('at')} (pid {last.get('pid')})")
+    print(f"  {last.get('total')} attempt, {last.get('admitted')} admitted")
+    for k, v in sorted(
+        (last.get("outcomes") or {}).items(), key=lambda kv: -kv[1]
+    ):
+        mark = "  " if k == "admitted" else ">>"
+        print(f"    {mark} {k:44s} {v}")
+
+
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--cp-root", default=r"D:\cp")
@@ -156,6 +202,8 @@ def main() -> int:
             live_rth.append(r)
         label = " -> ".join(reached) if reached else "(WALA)"
         print(f"{r['dir']:<50} {r['events']:>7}  {rth:>5}  {label:<26} {len(r['symbols'])}")
+
+    _print_admission_census()
 
     print()
     print("=== HATOL ===")
