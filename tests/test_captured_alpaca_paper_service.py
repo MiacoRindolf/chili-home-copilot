@@ -2982,6 +2982,10 @@ def test_active_failure_reports_order_and_external_state_as_unknown(
     monkeypatch: pytest.MonkeyPatch,
     capfd: pytest.CaptureFixture[str],
 ) -> None:
+    breadcrumbs: list[str] = []
+    monkeypatch.setattr(
+        service_module, "_emit_startup_breadcrumb", breadcrumbs.append
+    )
     verified = SimpleNamespace()
     monkeypatch.setattr(
         service_module,
@@ -3059,6 +3063,28 @@ def test_active_failure_reports_order_and_external_state_as_unknown(
     assert report["database_connected"] is None
     assert report["broker_contacted"] is None
     assert report["live_cash_authorized"] is False
+    assert [
+        marker
+        for marker in breadcrumbs
+        if marker
+        in {
+            "BEGIN validate_offline_startup",
+            "END validate_offline_startup",
+            "BEGIN load_pinned_runtime_modules",
+            "END load_pinned_runtime_modules",
+            "BEGIN build_service_composition",
+            "END build_service_composition",
+            "BEGIN active _execute_active_service",
+        }
+    ] == [
+        "BEGIN validate_offline_startup",
+        "END validate_offline_startup",
+        "BEGIN load_pinned_runtime_modules",
+        "END load_pinned_runtime_modules",
+        "BEGIN build_service_composition",
+        "END build_service_composition",
+        "BEGIN active _execute_active_service",
+    ]
 
 
 def _launcher_attestation_fixture(monkeypatch):

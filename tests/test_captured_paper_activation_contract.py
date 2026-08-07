@@ -5,6 +5,7 @@ from datetime import datetime, timedelta, timezone
 import hashlib
 import json
 from pathlib import Path
+import sys
 from typing import Any
 import pytest
 
@@ -980,6 +981,121 @@ def test_valid_envelope_authorizes_only_fake_money_equity_paper(
         bundle.receipts["capture_host_smoke"]["evidence"]["l2_policy"]
         == "decision_local_fail_closed"
     )
+
+
+def test_final_activation_reuses_exact_bound_preactivation_code_build(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    bundle = _bundle(tmp_path)
+    closure_calls = 0
+    code_build_reads: dict[str, int] = {}
+    original_closure = contract.discover_captured_paper_local_dependency_closure
+    original_stable_read = contract._stable_read
+    code_build_sha = bundle.manifest["code_build"]["code_build_sha256"]
+    monkeypatch.setattr(
+        sys,
+        "_captured_paper_isolated_stage0",
+        {
+            "schema_version": "chili.captured-paper-isolated-stage0.v2",
+            "target_role": "activation_service",
+            "manifest_path": str(bundle.manifest_path.resolve()),
+            "manifest_sha256": bundle.manifest_sha256,
+            "candidate_root": str(bundle.candidate.resolve()),
+            "code_build_sha256": code_build_sha,
+            "local_roster_sha256": code_build_sha,
+            "local_module_count": len(bundle.role_paths),
+            "dependency_mutation_guard_mode": (
+                "windows-deny-write-delete-held-handles.v1"
+                if contract.os.name == "nt"
+                else "import-time-hash-held-read-handles.v1"
+            ),
+        },
+        raising=False,
+    )
+
+    def counted_closure(**kwargs):
+        nonlocal closure_calls
+        closure_calls += 1
+        return original_closure(**kwargs)
+
+    def counted_stable_read(*args, **kwargs):
+        field = str(kwargs.get("field") or "")
+        if field.startswith("code_build."):
+            code_build_reads[field] = code_build_reads.get(field, 0) + 1
+        return original_stable_read(*args, **kwargs)
+
+    monkeypatch.setattr(
+        contract, "discover_captured_paper_local_dependency_closure", counted_closure
+    )
+    monkeypatch.setattr(contract, "_stable_read", counted_stable_read)
+
+    verified = _load(bundle)
+
+    assert closure_calls == 1
+    assert len(code_build_reads) == len(verified.source_paths)
+    assert set(code_build_reads.values()) == {1}
+
+
+def test_final_activation_without_exact_stage0_attestation_keeps_two_proofs(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    bundle = _bundle(tmp_path)
+    closure_calls = 0
+    original_closure = contract.discover_captured_paper_local_dependency_closure
+
+    def counted_closure(**kwargs):
+        nonlocal closure_calls
+        closure_calls += 1
+        return original_closure(**kwargs)
+
+    monkeypatch.delattr(sys, "_captured_paper_isolated_stage0", raising=False)
+    monkeypatch.setattr(
+        contract, "discover_captured_paper_local_dependency_closure", counted_closure
+    )
+
+    _load(bundle)
+
+    assert closure_calls == 2
+
+
+def test_nonidentical_call_local_code_build_is_not_reused(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    bundle = _bundle(tmp_path)
+    closure_calls = 0
+    original_closure = contract.discover_captured_paper_local_dependency_closure
+
+    def counted_closure(**kwargs):
+        nonlocal closure_calls
+        closure_calls += 1
+        return original_closure(**kwargs)
+
+    monkeypatch.setattr(
+        contract, "discover_captured_paper_local_dependency_closure", counted_closure
+    )
+    mismatched = contract._VerifiedCodeBuild(
+        candidate_root=bundle.candidate.resolve(),
+        canonical_document=b"{}",
+        code_build_sha256="0" * 64,
+        source_paths={},
+        source_hashes={},
+    )
+
+    verified = contract._load_captured_paper_envelope(
+        bundle.preactivation_path,
+        expected_manifest_sha256=bundle.preactivation_sha256,
+        candidate_root=bundle.candidate,
+        allowed_read_roots=(bundle.root,),
+        envelope_stage="preactivation",
+        wall_clock=lambda: NOW,
+        _verified_code_build=mismatched,
+    )
+
+    assert isinstance(verified, VerifiedCapturedPaperPreactivation)
+    assert closure_calls == 1
 
 
 def test_code_byte_drift_fails_before_any_runtime_import(tmp_path: Path) -> None:
