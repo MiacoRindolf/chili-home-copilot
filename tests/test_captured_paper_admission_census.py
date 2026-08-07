@@ -182,6 +182,22 @@ def test_ang_apat_na_dating_tahimik_ay_may_sariling_pangalan(src, expected):
     assert expected in lp._captured_paper_admission_outcomes
 
 
+@pytest.mark.parametrize(
+    "raw,expected",
+    [
+        ("initial_candidate_read_unavailable", "initial_candidate_read_unavailable"),
+        (
+            "INITIAL_INGRESS_PRESSURE_UNAVAILABLE: current sample is stale",
+            "initial_ingress_pressure_unavailable",
+        ),
+        ("postgres://user:secret@host", "captured_paper_admission_rejected"),
+        ("free form provider failure", "captured_paper_admission_rejected"),
+    ],
+)
+def test_admission_reason_code_preserves_only_safe_typed_prefix(raw, expected):
+    assert lrl._captured_paper_admission_reason_code(raw) == expected
+
+
 def test_ang_apat_na_landas_ay_talagang_naka_instrumento_sa_source():
     """Istrukturang bantay: kung may mag-aalis ng isang call site, dito
     babagsak — hindi sa isang tahimik na production run makalipas ang linggo."""
