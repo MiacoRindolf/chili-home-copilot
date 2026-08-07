@@ -1468,7 +1468,10 @@ class BoundedPreTriggerRing:
         self.max_change_keys = change_key_limit
         self.resource_binding = resource_binding
         self.pressure_controller = pressure_controller
-        self._by_symbol: dict[str, deque[tuple[CaptureEvent, int]]] = defaultdict(deque)
+        self._symbol_heaps: dict[
+            str, list[tuple[datetime, int, str]]
+        ] = defaultdict(list)
+        self._symbol_active_counts: dict[str, int] = {}
         self._global: list[tuple[datetime, int, str]] = []
         self._active: dict[int, tuple[str, CaptureEvent, int]] = {}
         self._evictions: dict[
@@ -1567,16 +1570,15 @@ class BoundedPreTriggerRing:
             return
         symbol, event, size = active
         self._bytes -= size
-        rows = self._by_symbol.get(symbol)
-        if rows:
-            if rows[0][0].sequence == sequence:
-                rows.popleft()
-            else:
-                self._by_symbol[symbol] = deque(
-                    row for row in rows if row[0].sequence != sequence
-                )
-            if not self._by_symbol[symbol]:
-                self._by_symbol.pop(symbol, None)
+        active_count = self._symbol_active_counts.get(symbol)
+        if active_count is None or active_count <= 0:
+            raise CaptureContractError("pre-trigger symbol active count is invalid")
+        if active_count == 1:
+            self._symbol_active_counts.pop(symbol, None)
+            self._symbol_heaps.pop(symbol, None)
+        else:
+            self._symbol_active_counts[symbol] = active_count - 1
+            self._prune_symbol_heap(symbol)
         if record_gap_reason and sequence not in self._pending_transfer_sequences:
             self._record_eviction(event, symbol=symbol, reason=record_gap_reason)
         for key in self._change_keys_by_sequence.pop(sequence, set()):
@@ -1592,6 +1594,53 @@ class BoundedPreTriggerRing:
             ):
                 self._admission_handoffs.pop(handoff_id, None)
                 self._admission_handoff_by_symbol.pop(symbol, None)
+
+    def _prune_symbol_heap(self, symbol: str) -> None:
+        """Discard lazy tombstones and keep one symbol's order index bounded."""
+
+        active_count = self._symbol_active_counts.get(symbol, 0)
+        heap = self._symbol_heaps.get(symbol)
+        if active_count <= 0:
+            self._symbol_heaps.pop(symbol, None)
+            return
+        if heap is None:
+            raise CaptureContractError("pre-trigger symbol order index is missing")
+        while heap:
+            _available_at, sequence, event_sha256 = heap[0]
+            active = self._active.get(sequence)
+            if (
+                active is not None
+                and active[0] == symbol
+                and active[1].event_sha256 == event_sha256
+            ):
+                break
+            heapq.heappop(heap)
+        if not heap:
+            raise CaptureContractError("pre-trigger symbol order index is empty")
+        threshold = max(active_count * 2, active_count + 1_024)
+        if len(heap) > threshold:
+            heap = [
+                row
+                for row in heap
+                if (
+                    (active := self._active.get(row[1])) is not None
+                    and active[0] == symbol
+                    and active[1].event_sha256 == row[2]
+                )
+            ]
+            if len(heap) != active_count:
+                raise CaptureContractError(
+                    "pre-trigger symbol order index count mismatch"
+                )
+            heapq.heapify(heap)
+            self._symbol_heaps[symbol] = heap
+
+    def _oldest_symbol_sequence(self, symbol: str) -> int:
+        self._prune_symbol_heap(symbol)
+        heap = self._symbol_heaps.get(symbol)
+        if not heap:  # pragma: no cover - guarded by _prune_symbol_heap
+            raise CaptureContractError("pre-trigger symbol order index is unavailable")
+        return int(heap[0][1])
 
     def _record_eviction(
         self,
@@ -1691,7 +1740,8 @@ class BoundedPreTriggerRing:
                 )
 
     def _compact_global_heap(self) -> None:
-        threshold = max(self.max_events * 2, self.max_events + 1_024)
+        active_count = len(self._active)
+        threshold = max(active_count * 2, active_count + 1_024)
         if len(self._global) <= threshold:
             return
         self._global = [
@@ -1756,25 +1806,27 @@ class BoundedPreTriggerRing:
                     reason="pretrigger_event_exceeds_byte_budget",
                 )
                 return False
-            self._by_symbol[symbol].append((event, size))
+            heapq.heappush(
+                self._symbol_heaps[symbol],
+                (event.clocks.available_at, event.sequence, event.event_sha256),
+            )
             heapq.heappush(
                 self._global,
                 (event.clocks.available_at, event.sequence, event.event_sha256),
             )
             self._active[event.sequence] = (symbol, event, size)
+            self._symbol_active_counts[symbol] = (
+                self._symbol_active_counts.get(symbol, 0) + 1
+            )
             self._bytes += size
 
-            while len(self._by_symbol.get(symbol, ())) > self.per_symbol_max_events:
-                oldest, _ = min(
-                    self._by_symbol[symbol],
-                    key=lambda row: (
-                        row[0].clocks.available_at,
-                        row[0].sequence,
-                        row[0].event_sha256,
-                    ),
-                )
+            while (
+                self._symbol_active_counts.get(symbol, 0)
+                > self.per_symbol_max_events
+            ):
+                oldest_sequence = self._oldest_symbol_sequence(symbol)
                 self._remove(
-                    oldest.sequence,
+                    oldest_sequence,
                     record_gap_reason="pretrigger_per_symbol_capacity",
                 )
             while len(self._active) > self.max_events or self._bytes > self.max_bytes:
@@ -2099,7 +2151,19 @@ class BoundedPreTriggerRing:
                 if self.pressure_controller is not None
                 else None
             )
-            rows = list(self._by_symbol.get(normalized, ()))
+            if self._symbol_active_counts.get(normalized, 0):
+                self._prune_symbol_heap(normalized)
+            rows = []
+            for _available_at, sequence, event_sha256 in self._symbol_heaps.get(
+                normalized, ()
+            ):
+                active = self._active.get(sequence)
+                if (
+                    active is not None
+                    and active[0] == normalized
+                    and active[1].event_sha256 == event_sha256
+                ):
+                    rows.append((active[1], active[2]))
             events = tuple(
                 sorted(
                     (

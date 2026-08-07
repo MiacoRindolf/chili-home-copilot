@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import builtins
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 import socket
@@ -230,6 +231,76 @@ def test_pretrigger_expiry_is_correct_for_out_of_order_arrivals() -> None:
     )
     assert [event.sequence for event in promoted.events] == [200]
     assert promoted.gaps == ()
+
+
+def test_pretrigger_per_symbol_capacity_evicts_oldest_available_event_out_of_order() -> None:
+    ring = BoundedPreTriggerRing(
+        horizon=timedelta(minutes=3),
+        max_events=10,
+        max_bytes=1_000_000,
+        per_symbol_max_events=2,
+    )
+    assert ring.add(_event(100))
+    assert ring.add(_event(1))
+    assert ring.add(_event(200))
+
+    promoted = ring.promote(
+        "VEEE", promoted_at=BASE + timedelta(milliseconds=200)
+    )
+    assert [event.sequence for event in promoted.events] == [100, 200]
+    assert len(promoted.gaps) == 1
+    assert promoted.gaps[0].reason == "pretrigger_per_symbol_capacity"
+    assert promoted.gaps[0].lost_count == 1
+
+
+def test_pretrigger_per_symbol_capacity_does_not_rescan_the_retained_roster(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    per_symbol_limit = 64
+    ring = BoundedPreTriggerRing(
+        horizon=timedelta(days=1),
+        max_events=per_symbol_limit + 1,
+        max_bytes=10_000_000,
+        per_symbol_max_events=per_symbol_limit,
+    )
+    for sequence in range(1, per_symbol_limit + 1):
+        assert ring.add(_event(sequence))
+
+    original_min = builtins.min
+    scanned_rosters: list[int] = []
+
+    def tracked_min(*args, **kwargs):
+        if len(args) == 1 and kwargs.get("key") is not None:
+            try:
+                size = len(args[0])
+            except TypeError:
+                size = 0
+            if size >= per_symbol_limit:
+                scanned_rosters.append(size)
+        return original_min(*args, **kwargs)
+
+    monkeypatch.setattr(builtins, "min", tracked_min)
+    assert ring.add(_event(per_symbol_limit + 1))
+
+    assert scanned_rosters == []
+
+
+def test_pretrigger_promotion_compacts_global_order_tombstones() -> None:
+    ring = BoundedPreTriggerRing(
+        horizon=timedelta(minutes=3),
+        max_events=2_000,
+        max_bytes=100_000_000,
+        per_symbol_max_events=2_000,
+    )
+    for sequence in range(1, 1_501):
+        assert ring.add(_event(sequence, symbol="AAAA"))
+    assert ring.add(_event(2_000, symbol="BBBB"))
+
+    promoted = ring.promote("AAAA", promoted_at=BASE + timedelta(seconds=3))
+
+    assert len(promoted.events) == 1_500
+    assert ring.event_count == 1
+    assert len(ring._global) == 1
 
 
 def test_pretrigger_gap_ledger_overflow_is_bounded_and_globally_visible() -> None:

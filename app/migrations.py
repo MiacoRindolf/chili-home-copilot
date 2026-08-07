@@ -32626,6 +32626,56 @@ def _migration_357_momentum_viability_index_dedupe_and_autovacuum(conn) -> None:
     )
 
 
+def _migration_358_trading_session_capture_lookup_index(conn) -> None:
+    """Keep the IQFeed sole writer out of the automation-session heap.
+
+    Both host bridges refresh the active equity capture roster every twenty
+    seconds. The exact query filters by ``mode`` and ``state`` and projects
+    ``symbol``; without a matching index PostgreSQL scanned the 216 MB session
+    heap on the tape writer before every drain. Production creates this index
+    concurrently before activation; this idempotent migration formalizes the
+    same bytes for fresh databases and records the schema version afterward.
+    """
+
+    if "trading_automation_sessions" not in _tables(conn):
+        conn.commit()
+        return
+    conn.execute(
+        text(
+            "CREATE INDEX IF NOT EXISTS ix_tas_capture_active "
+            "ON trading_automation_sessions (mode, state, symbol) "
+            "WHERE symbol NOT LIKE '%-%'"
+        )
+    )
+    row = conn.execute(
+        text(
+            "SELECT i.indisvalid, i.indisready, "
+            "ARRAY(SELECT pg_get_indexdef(i.indexrelid, n, true) "
+            "      FROM generate_series(1, i.indnkeyatts) AS n ORDER BY n) "
+            "      AS key_columns, "
+            "pg_get_expr(i.indpred, i.indrelid) AS predicate "
+            "FROM pg_index i "
+            "JOIN pg_class idx ON idx.oid = i.indexrelid "
+            "JOIN pg_class tbl ON tbl.oid = i.indrelid "
+            "JOIN pg_namespace ns ON ns.oid = tbl.relnamespace "
+            "WHERE ns.nspname = 'public' "
+            "AND tbl.relname = 'trading_automation_sessions' "
+            "AND idx.relname = 'ix_tas_capture_active'"
+        )
+    ).mappings().one_or_none()
+    predicate = str((row or {}).get("predicate") or "")
+    if (
+        row is None
+        or not bool(row["indisvalid"])
+        or not bool(row["indisready"])
+        or tuple(row["key_columns"] or ()) != ("mode", "state", "symbol")
+        or "symbol" not in predicate
+        or "!~~" not in predicate
+        or "'%-%'::text" not in predicate
+    ):
+        raise RuntimeError("migration 358 capture lookup index contract differs")
+
+
 MIGRATIONS = [
     ("001_add_email", _migration_001_add_email),
     ("002_add_image_path", _migration_002_add_image_path),
@@ -33100,6 +33150,8 @@ MIGRATIONS = [
      _migration_356_momentum_viability_desk_indexes),
     ("357_momentum_viability_index_dedupe_and_autovacuum",
      _migration_357_momentum_viability_index_dedupe_and_autovacuum),
+    ("358_trading_session_capture_lookup_index",
+     _migration_358_trading_session_capture_lookup_index),
 ]
 
 
