@@ -106,6 +106,10 @@ _CAPTURED_PAPER_ADMISSION_CENSUS_INTERVAL_S = 120.0
 # isang test: ang pagbasa ng orasan kada admission ay dagdag na trabaho sa
 # hot path AT nag-e-exhaust ng eksaktong monotonic budget ng mga test.
 _CAPTURED_PAPER_ADMISSION_CENSUS_TICKS = 16
+# Ilang MAGKAKAIBANG hilaw na dahilan ang itatabi bilang sample. Maliit at may
+# hangganan — pagmamasid ito, hindi imbakan.
+_CAPTURED_PAPER_ADMISSION_RAW_SAMPLE_KEYS = 8
+_CAPTURED_PAPER_ADMISSION_RAW_SAMPLE_LEN = 120
 _CAPTURED_PAPER_ADMISSION_REASON_RE = re.compile(r"^[a-z][a-z0-9_]{0,127}$")
 _IQFEED_BUILD_RE = re.compile(
     r"^iqfeed-l1-exact-print-provenance-v3\+sha256:[0-9a-f]{16}$"
@@ -465,6 +469,7 @@ class LiveRunnerLoop:
         self._captured_paper_admission_outcomes: dict[str, int] = {}
         self._captured_paper_admission_census_monotonic: float | None = None
         self._captured_paper_admission_census_ticks: int = 0
+        self._captured_paper_admission_raw_samples: dict[str, int] = {}
         # IGNITION nomination governors (monotonic clocks; consumer-side caps).
         self._ignition_lock = threading.Lock()
         self._ignition_dedup: dict[str, float] = {}
@@ -2181,6 +2186,37 @@ class LiveRunnerLoop:
             except Exception:
                 pass
 
+    def _sample_admission_raw_reason(self, raw: str) -> None:
+        """Itabi ang HILAW na rejection reason bago ito ma-normalize.
+
+        BAKIT (2026-08-07, unang tunay na census): 17,008 na rejection sa isang
+        generation, LAHAT lumabas bilang `rejected_captured_paper_admission_rejected`
+        — ang fallback ng normalizer kapag hindi tumugma ang raw string sa
+        `^[a-z][a-z0-9_]{0,127}$`. Ibig sabihin, ang TUNAY na dahilan ay may
+        uppercase/espasyo/simbolo (halimbawa ang mga viability blocked_reason ay
+        ganito ang hugis), at ang sarili kong normalizer ang nagtago nito. Kaya
+        bago mag-normalize, itinatabi ang bounded na sample ng mga hilaw na
+        anyo — top-N distinct, pinutol, nilinis ang control chars — at kasama
+        sila sa census emit. Pagmamasid lamang; walang desisyong nababago.
+        """
+        try:
+            clean = "".join(
+                ch if ch.isprintable() else " " for ch in str(raw)
+            )
+            clean = " ".join(clean.split())[:_CAPTURED_PAPER_ADMISSION_RAW_SAMPLE_LEN]
+            if not clean:
+                return
+            with self._iqfeed_admission_lock:
+                samples = self._captured_paper_admission_raw_samples
+                if clean in samples:
+                    samples[clean] += 1
+                elif len(samples) < _CAPTURED_PAPER_ADMISSION_RAW_SAMPLE_KEYS:
+                    samples[clean] = 1
+                # puno na at bago ang susi -> hindi na idinadagdag; ang bilang ng
+                # fallback outcome ang nagsasabi ng kabuuan
+        except Exception:  # pragma: no cover — huwag makaapekto sa admission
+            _log.debug("[live_loop] raw-reason sampling failed", exc_info=True)
+
     def _record_captured_paper_admission_outcome(self, outcome: str) -> None:
         """Bilangin ang isang kalalabasan ng admitter at pana-panahong ilabas.
 
@@ -2202,6 +2238,7 @@ class LiveRunnerLoop:
         """
         try:
             emit: dict[str, int] | None = None
+            raw_samples: dict[str, int] = {}
             with self._iqfeed_admission_lock:
                 self._captured_paper_admission_outcomes[outcome] = (
                     self._captured_paper_admission_outcomes.get(outcome, 0) + 1
@@ -2228,6 +2265,7 @@ class LiveRunnerLoop:
                     elif now - last >= _CAPTURED_PAPER_ADMISSION_CENSUS_INTERVAL_S:
                         self._captured_paper_admission_census_monotonic = now
                         emit = dict(self._captured_paper_admission_outcomes)
+                        raw_samples = dict(self._captured_paper_admission_raw_samples)
             if emit:
                 total = sum(emit.values())
                 admitted = emit.get("admitted", 0)
@@ -2241,12 +2279,27 @@ class LiveRunnerLoop:
                     admitted,
                     detail,
                 )
-                self._append_admission_census_sidecar(emit, total, admitted)
+                if raw_samples:
+                    _log.warning(
+                        "[live_loop] admission raw-reason samples: %s",
+                        " | ".join(
+                            f"({v}x) {k}" for k, v in sorted(
+                                raw_samples.items(), key=lambda kv: -kv[1]
+                            )
+                        ),
+                    )
+                self._append_admission_census_sidecar(
+                    emit, total, admitted, raw_samples=raw_samples
+                )
         except Exception:  # pragma: no cover — hindi dapat makaapekto sa admission
             _log.debug("[live_loop] admission census failed", exc_info=True)
 
     def _append_admission_census_sidecar(
-        self, outcomes: dict[str, int], total: int, admitted: int
+        self,
+        outcomes: dict[str, int],
+        total: int,
+        admitted: int,
+        raw_samples: dict[str, int] | None = None,
     ) -> None:
         """Isulat ang census sa isang DURABLE na JSONL, hindi lang sa logger.
 
@@ -2282,6 +2335,7 @@ class LiveRunnerLoop:
                 "total": total,
                 "admitted": admitted,
                 "outcomes": outcomes,
+                "raw_samples": raw_samples or {},
             }
             with open(path, "a", encoding="utf-8") as fh:
                 fh.write(json.dumps(record, sort_keys=True) + "\n")
@@ -2344,6 +2398,7 @@ class LiveRunnerLoop:
                     if not _CAPTURED_PAPER_ADMISSION_REASON_RE.fullmatch(
                         rejection_reason
                     ):
+                        self._sample_admission_raw_reason(rejection_reason)
                         rejection_reason = "captured_paper_admission_rejected"
                     self._record_captured_paper_admission_outcome(
                         f"rejected_{rejection_reason}"[:96]

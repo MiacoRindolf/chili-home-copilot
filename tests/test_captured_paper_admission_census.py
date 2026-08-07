@@ -62,6 +62,7 @@ class _Loop:
         self._captured_paper_admission_outcomes = {}
         self._captured_paper_admission_census_monotonic = None
         self._captured_paper_admission_census_ticks = 0
+        self._captured_paper_admission_raw_samples = {}
 
     _record = lrl.LiveRunnerLoop._record_captured_paper_admission_outcome
     # Ang TUNAY na sidecar writer, hindi stub — para tunay na nasusubok ang
@@ -297,3 +298,75 @@ def test_walang_test_na_sumusulat_sa_TUNAY_na_sidecar(tmp_path):
     lp = _Loop()
     lp._append_admission_census_sidecar({"admitted": 1}, 1, 1)
     assert os.path.isfile(os.path.join(seen, "chili_admission_census.jsonl"))
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# RAW-REASON SAMPLING — huwag itago ng normalizer ang tunay na dahilan.
+#
+# Unang tunay na census (08-07): 17,008 rejection, LAHAT lumabas bilang ang
+# fallback na `rejected_captured_paper_admission_rejected` — dahil ang hilaw na
+# dahilan ay hindi tumugma sa regex at ni-normalize BAGO binilang. Ang sarili
+# kong instrumento ang nagtago ng sagot. Ngayon ay tinatabi ang bounded na
+# sample ng mga hilaw na anyo bago mag-normalize.
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+class _LoopS(_Loop):
+    _sample_admission_raw_reason = lrl.LiveRunnerLoop._sample_admission_raw_reason
+
+
+def test_ang_hilaw_na_dahilan_ay_naitatabi_bago_ma_normalize():
+    lp = _LoopS()
+    lp._sample_admission_raw_reason("Below A-setup quality floor (change none < 10%) — not a live setup")
+    lp._sample_admission_raw_reason("Below A-setup quality floor (change none < 10%) — not a live setup")
+    s = lp._captured_paper_admission_raw_samples
+    assert len(s) == 1
+    k = next(iter(s))
+    assert s[k] == 2
+    assert "Below A-setup quality floor" in k
+
+
+def test_ang_sample_ay_pinuputol_at_nililinis():
+    lp = _LoopS()
+    lp._sample_admission_raw_reason("x" * 500 + "\x00\n\t" + "y" * 50)
+    k = next(iter(lp._captured_paper_admission_raw_samples))
+    assert len(k) <= lrl._CAPTURED_PAPER_ADMISSION_RAW_SAMPLE_LEN
+    assert "\x00" not in k and "\n" not in k
+
+
+def test_ang_sample_keys_ay_may_hangganan():
+    lp = _LoopS()
+    for i in range(50):
+        lp._sample_admission_raw_reason(f"Iba-ibang dahilan numero {i}")
+    assert len(lp._captured_paper_admission_raw_samples) <= lrl._CAPTURED_PAPER_ADMISSION_RAW_SAMPLE_KEYS
+
+
+def test_ang_sampling_ay_hindi_kailanman_sumasabog():
+    lp = _LoopS()
+    lp._captured_paper_admission_raw_samples = None  # sadyang sira
+    lp._sample_admission_raw_reason("kahit ano")  # hindi dapat magtapon
+
+
+def test_ang_sidecar_ay_may_raw_samples(tmp_path):
+    import json as _json
+
+    lp = _LoopS()
+    lp._append_admission_census_sidecar(
+        {"rejected_captured_paper_admission_rejected": 3}, 3, 0,
+        raw_samples={"Below A-setup quality floor (…)": 3},
+    )
+    rec = _json.loads(
+        (tmp_path / "chili_admission_census.jsonl").read_text(encoding="utf-8").strip()
+    )
+    assert rec["raw_samples"] == {"Below A-setup quality floor (…)": 3}
+
+
+def test_ang_call_site_ay_nagsa_sample_bago_mag_normalize():
+    """Istrukturang bantay: ang sampling ay dapat BAGO ang normalization sa
+    _admit_iqfeed_symbol — pagkatapos ay wala nang maitatabi."""
+    import inspect
+
+    src = inspect.getsource(lrl.LiveRunnerLoop._admit_iqfeed_symbol)
+    i_sample = src.find("_sample_admission_raw_reason")
+    i_norm = src.find('rejection_reason = "captured_paper_admission_rejected"')
+    assert 0 < i_sample < i_norm, "ang sample ay dapat mauna sa normalization"
