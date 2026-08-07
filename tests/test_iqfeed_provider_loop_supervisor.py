@@ -36,6 +36,263 @@ def _run_in_thread(target):
     return thread, errors
 
 
+def _reset_ross_refresh_state(
+    monkeypatch,
+    *,
+    now: float | None = 100.0,
+) -> dict[str, float]:
+    """Isolate the bridge's process-local subscription-universe cache."""
+
+    monkeypatch.setattr(
+        trade_bridge,
+        "_ross_universe_cache_lock",
+        threading.Lock(),
+        raising=False,
+    )
+    monkeypatch.setattr(
+        trade_bridge, "_ross_universe_cache_symbols", (), raising=False
+    )
+    monkeypatch.setattr(
+        trade_bridge, "_ross_universe_cache_success_at", None, raising=False
+    )
+    monkeypatch.setattr(
+        trade_bridge, "_ross_universe_cache_max_age_s", None, raising=False
+    )
+    monkeypatch.setattr(
+        trade_bridge, "_ross_universe_refresh_due_at", 0.0, raising=False
+    )
+    monkeypatch.setattr(
+        trade_bridge, "_ross_universe_refresh_inflight", False, raising=False
+    )
+    monkeypatch.setattr(
+        trade_bridge, "_ross_universe_refresh_thread", None, raising=False
+    )
+    monkeypatch.setattr(
+        trade_bridge, "_ross_universe_last_error_code", None, raising=False
+    )
+    monkeypatch.setattr(
+        trade_bridge, "_ross_universe_last_error_detail", None, raising=False
+    )
+    clock = {"now": float(now if now is not None else time.monotonic())}
+    if now is not None:
+        monkeypatch.setattr(trade_bridge.time, "monotonic", lambda: clock["now"])
+    return clock
+
+
+def test_ross_universe_refresh_never_blocks_writer_and_singleflights(monkeypatch):
+    from app.services.trading.momentum_neural import universe
+
+    _reset_ross_refresh_state(monkeypatch)
+    fetch_entered = threading.Event()
+    release_fetch = threading.Event()
+    fetch_finished = threading.Event()
+    fetch_calls: list[object] = []
+
+    def blocking_fetch(profile):
+        fetch_calls.append(profile)
+        fetch_entered.set()
+        assert release_fetch.wait(timeout=2.0)
+        fetch_finished.set()
+        return [" yxt ", "YXT", "BJDX"]
+
+    monkeypatch.setattr(universe, "build_equity_universe", blocking_fetch)
+    result_box = {}
+    returned = threading.Event()
+
+    def read_from_writer_thread() -> None:
+        result_box["read"] = trade_bridge._ross_universe_symbols_read(2)
+        returned.set()
+
+    caller = threading.Thread(target=read_from_writer_thread)
+    caller.start()
+    try:
+        assert returned.wait(timeout=0.5), "Ross refresh blocked the tape writer"
+        assert fetch_entered.wait(timeout=0.5)
+        first = result_box["read"]
+        assert first.ok is False
+        assert first.error_code == "ross_refresh_pending"
+
+        second = trade_bridge._ross_universe_symbols_read(2)
+        assert second.ok is False
+        assert len(fetch_calls) == 1
+    finally:
+        release_fetch.set()
+        caller.join(timeout=1.0)
+
+    assert fetch_finished.wait(timeout=1.0)
+    refresh_thread = trade_bridge._ross_universe_refresh_thread
+    assert refresh_thread is not None
+    refresh_thread.join(timeout=1.0)
+    assert not refresh_thread.is_alive()
+
+    cached = trade_bridge._ross_universe_symbols_read(1)
+    assert cached.ok is True
+    assert cached.symbols == ("YXT",)
+    assert fetch_calls == [universe.EQUITY_ROSS_SMALLCAP]
+
+
+def test_ross_universe_refresh_failure_never_erases_last_success(monkeypatch):
+    from app.services.trading.momentum_neural import universe
+
+    clock = _reset_ross_refresh_state(monkeypatch)
+    monkeypatch.setattr(
+        trade_bridge, "_ross_universe_cache_symbols", ("CACHED",), raising=False
+    )
+    monkeypatch.setattr(
+        trade_bridge, "_ross_universe_cache_success_at", 99.0, raising=False
+    )
+    monkeypatch.setattr(
+        trade_bridge, "_ross_universe_cache_max_age_s", 300.0, raising=False
+    )
+    release_fetch = threading.Event()
+    fetch_calls = 0
+
+    def empty_fetch(_profile):
+        nonlocal fetch_calls
+        fetch_calls += 1
+        assert release_fetch.wait(timeout=2.0)
+        return []
+
+    monkeypatch.setattr(universe, "build_equity_universe", empty_fetch)
+    pending = trade_bridge._ross_universe_symbols_read(10)
+    assert pending.ok is True
+    assert pending.symbols == ("CACHED",)
+
+    release_fetch.set()
+    refresh_thread = trade_bridge._ross_universe_refresh_thread
+    assert refresh_thread is not None
+    refresh_thread.join(timeout=1.0)
+    assert not refresh_thread.is_alive()
+
+    failed = trade_bridge._ross_universe_symbols_read(10)
+    assert failed.ok is False
+    assert failed.error_code == "ross_universe_empty_or_unavailable"
+    assert trade_bridge._ross_universe_cache_symbols == ("CACHED",)
+
+    # The builder's 30-second timeout may leave its own provider daemon alive.
+    # Do not create another provider attempt just REFRESH_S later; the profile's
+    # semantic snapshot TTL is the conservative failure retry boundary.
+    first_refresh_thread = trade_bridge._ross_universe_refresh_thread
+    clock["now"] = 121.0
+    still_failed = trade_bridge._ross_universe_symbols_read(10)
+    assert still_failed.ok is False
+    assert trade_bridge._ross_universe_refresh_thread is first_refresh_thread
+    assert trade_bridge._ross_universe_refresh_due_at == 400.0
+    assert fetch_calls == 1
+
+
+def test_trade_writer_drains_while_ross_refresh_is_blocked(monkeypatch):
+    _reset_ross_refresh_state(monkeypatch, now=None)
+    now = time.monotonic()
+    monkeypatch.setattr(
+        trade_bridge, "_ross_universe_cache_symbols", ("CACHED",), raising=False
+    )
+    monkeypatch.setattr(
+        trade_bridge,
+        "_ross_universe_cache_success_at",
+        now - 301.0,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        trade_bridge, "_ross_universe_cache_max_age_s", 300.0, raising=False
+    )
+    fetch_entered = threading.Event()
+    release_fetch = threading.Event()
+    writer_progressed = threading.Event()
+    stop = threading.Event()
+    loader_calls = 0
+    drain_calls = 0
+    sent_commands: list[str] = []
+
+    def blocking_loader():
+        nonlocal loader_calls
+        loader_calls += 1
+        fetch_entered.set()
+        assert release_fetch.wait(timeout=2.0)
+        return ("NEW",), 300.0
+
+    def drain_batch(*, max_events, hot_symbols):
+        del max_events, hot_symbols
+        nonlocal drain_calls
+        drain_calls += 1
+        writer_progressed.set()
+        if drain_calls >= 2:
+            stop.set()
+        return [], [], False
+
+    governor = trade_bridge.WatchCapacityGovernor.start(
+        cap=10,
+        floor=1,
+        hard_max=10,
+        quiet_interval_seconds=60.0,
+        now=now,
+    )
+    monkeypatch.setattr(trade_bridge, "_watch_capacity", governor)
+    monkeypatch.setattr(
+        trade_bridge,
+        "_start_watch_capacity_connection",
+        lambda **_kwargs: (governor, governor, False),
+    )
+    monkeypatch.setattr(
+        trade_bridge,
+        "_advance_watch_capacity",
+        lambda **_kwargs: (governor, governor, False),
+    )
+    monkeypatch.setattr(trade_bridge, "_load_ross_universe_symbols", blocking_loader)
+    monkeypatch.setattr(
+        trade_bridge,
+        "_live_symbols_read",
+        lambda: trade_bridge.SourceRead.success(trade_bridge.TargetCause.ACTIVE, ()),
+    )
+    monkeypatch.setattr(
+        trade_bridge,
+        "_eligible_symbols_read",
+        lambda _limit: trade_bridge.SourceRead.success(
+            trade_bridge.TargetCause.ELIGIBLE, ()
+        ),
+    )
+    monkeypatch.setattr(trade_bridge, "SUBSCRIBE_ON_ALERT", False)
+    monkeypatch.setattr(trade_bridge, "STICKY_RESUBSCRIBE", False)
+    monkeypatch.setattr(trade_bridge, "STALE_NBBO_RECONNECT_S", 0.0)
+    monkeypatch.setattr(trade_bridge, "FLUSH_INTERVAL_S", 0.0)
+    monkeypatch.setattr(trade_bridge, "REFRESH_S", 0.0)
+    monkeypatch.setattr(trade_bridge, "_drain_pending_write_batch", drain_batch)
+    monkeypatch.setattr(
+        trade_bridge,
+        "_send",
+        lambda _socket, command: sent_commands.append(command),
+    )
+
+    old_watched = set(trade_bridge.watched)
+    trade_bridge.watched.clear()
+    trade_bridge.watched.add("CACHED")
+    generation = 901
+    trade_bridge._activate_connection_generation(generation)
+    writer_thread, errors = _run_in_thread(
+        lambda: trade_bridge.writer(set(), None, object(), stop, generation)
+    )
+    try:
+        assert fetch_entered.wait(timeout=0.5)
+        assert writer_progressed.wait(timeout=0.5), "tape drain waited on Ross refresh"
+        writer_thread.join(timeout=1.0)
+        assert not writer_thread.is_alive()
+        assert errors == []
+        assert drain_calls >= 2
+        assert loader_calls == 1
+        assert "CACHED" in trade_bridge.watched
+        assert "rCACHED" not in sent_commands
+    finally:
+        stop.set()
+        release_fetch.set()
+        writer_thread.join(timeout=1.0)
+        refresh_thread = trade_bridge._ross_universe_refresh_thread
+        if refresh_thread is not None:
+            refresh_thread.join(timeout=1.0)
+        trade_bridge._retire_connection_generation(generation)
+        trade_bridge.watched.clear()
+        trade_bridge.watched.update(old_watched)
+
+
 @pytest.mark.parametrize(
     ("bridge", "terminal_error"),
     (

@@ -174,6 +174,21 @@ if DB_RELEASE_CATCHUP_BATCH_EVENTS * 18 >= 65_535:
 # bounded catch-up headroom without increasing retained rows or SQL bind count.
 _DB_RELEASE_RAW_SCAN_MULTIPLIER = 64
 REFRESH_S = 20.0                         # execution-session symbol refresh cadence
+# The Ross universe builder may spend up to 30 seconds waiting on a full-market
+# snapshot.  Subscription refresh runs on the sole tape-writer thread, so that
+# provider wait must be single-flight and off-thread.  A failed refresh never
+# erases the last successful roster; SourceRead.failure then makes the resolver
+# protect the complete prior watch set instead of interpreting absence as an
+# instruction to unwatch.
+_ross_universe_cache_lock = threading.Lock()
+_ross_universe_cache_symbols: tuple[str, ...] = ()
+_ross_universe_cache_success_at: float | None = None
+_ross_universe_cache_max_age_s: float | None = None
+_ross_universe_refresh_due_at = 0.0
+_ross_universe_refresh_inflight = False
+_ross_universe_refresh_thread: threading.Thread | None = None
+_ross_universe_last_error_code: str | None = None
+_ross_universe_last_error_detail: str | None = None
 STALE_NBBO_RECONNECT_S = float(
     os.environ.get("IQFEED_STALE_NBBO_RECONNECT_SECONDS", "45") or 45
 )
@@ -2169,34 +2184,124 @@ def _ross_universe_symbols(limit: int) -> list[str]:
     return list(result.symbols)
 
 
+def _load_ross_universe_symbols() -> tuple[tuple[str, ...], float]:
+    """Blocking provider read; invoked only by the background refresher."""
+
+    from app.services.trading.momentum_neural.universe import (
+        EQUITY_ROSS_SMALLCAP,
+        build_equity_universe,
+    )
+
+    symbols = SourceRead.success(
+        TargetCause.ROSS,
+        build_equity_universe(EQUITY_ROSS_SMALLCAP) or (),
+    ).symbols
+    max_age = float(EQUITY_ROSS_SMALLCAP.snapshot_max_age_seconds or REFRESH_S)
+    return symbols, max(REFRESH_S, max_age)
+
+
+def _refresh_ross_universe_cache() -> None:
+    global _ross_universe_cache_symbols
+    global _ross_universe_cache_success_at
+    global _ross_universe_cache_max_age_s
+    global _ross_universe_refresh_due_at
+    global _ross_universe_refresh_inflight
+    global _ross_universe_last_error_code
+    global _ross_universe_last_error_detail
+
+    symbols: tuple[str, ...] = ()
+    max_age_s: float | None = None
+    error_code: str | None = None
+    error_detail: str | None = None
+    try:
+        symbols, max_age_s = _load_ross_universe_symbols()
+        if not symbols:
+            error_code = "ross_universe_empty_or_unavailable"
+    except Exception as exc:
+        error_code = "ross_query_failed"
+        error_detail = str(exc)[:512]
+        log.warning("ross universe query failed: %s", exc)
+
+    completed_at = time.monotonic()
+    with _ross_universe_cache_lock:
+        if error_code is None:
+            _ross_universe_cache_symbols = symbols
+            _ross_universe_cache_success_at = completed_at
+            _ross_universe_cache_max_age_s = max_age_s
+            _ross_universe_last_error_code = None
+            _ross_universe_last_error_detail = None
+        else:
+            _ross_universe_last_error_code = error_code
+            _ross_universe_last_error_detail = error_detail
+        retry_after_s = (
+            max(REFRESH_S, float(max_age_s or REFRESH_S))
+            if error_code is not None
+            else REFRESH_S
+        )
+        _ross_universe_refresh_due_at = completed_at + retry_after_s
+        _ross_universe_refresh_inflight = False
+
+
+def _start_ross_universe_refresh_locked(now: float) -> None:
+    global _ross_universe_refresh_due_at
+    global _ross_universe_refresh_inflight
+    global _ross_universe_refresh_thread
+    global _ross_universe_last_error_code
+    global _ross_universe_last_error_detail
+
+    if _ross_universe_refresh_inflight or now < _ross_universe_refresh_due_at:
+        return
+    _ross_universe_refresh_inflight = True
+    refresh_thread = threading.Thread(
+        target=_refresh_ross_universe_cache,
+        name="ross-universe-refresh",
+        daemon=True,
+    )
+    _ross_universe_refresh_thread = refresh_thread
+    try:
+        refresh_thread.start()
+    except Exception as exc:
+        _ross_universe_refresh_inflight = False
+        _ross_universe_refresh_due_at = now + REFRESH_S
+        _ross_universe_last_error_code = "ross_refresh_start_failed"
+        _ross_universe_last_error_detail = str(exc)[:512]
+        log.warning("ross universe refresh could not start: %s", exc)
+
+
 def _ross_universe_symbols_read(limit: int) -> SourceRead:
-    """Direct Ross-profile universe; independent of viability admission."""
+    """Cached Ross universe read that never blocks the sole tape writer."""
     if limit <= 0:
         return SourceRead.success(TargetCause.ROSS, ())
-    try:
-        from app.services.trading.momentum_neural.universe import (
-            EQUITY_ROSS_SMALLCAP,
-            build_equity_universe,
-        )
 
-        symbols = build_equity_universe(EQUITY_ROSS_SMALLCAP) or []
-        result = SourceRead.success(TargetCause.ROSS, symbols[: int(limit)])
-        if not result.symbols:
-            # The universe helper intentionally collapses provider/query errors
-            # to [], which is indistinguishable from a legitimately empty scan.
-            # Capture cannot interpret that ambiguity as permission to unwatch.
-            return SourceRead.failure(
-                TargetCause.ROSS,
-                error_code="ross_universe_empty_or_unavailable",
-            )
-        return result
-    except Exception as e:
-        log.warning("ross universe query failed: %s", e)
+    now = time.monotonic()
+    with _ross_universe_cache_lock:
+        _start_ross_universe_refresh_locked(now)
+        symbols = _ross_universe_cache_symbols
+        success_at = _ross_universe_cache_success_at
+        max_age_s = _ross_universe_cache_max_age_s
+        inflight = _ross_universe_refresh_inflight
+        error_code = _ross_universe_last_error_code
+        error_detail = _ross_universe_last_error_detail
+
+    if error_code is not None:
         return SourceRead.failure(
             TargetCause.ROSS,
-            error_code="ross_query_failed",
-            error_detail=str(e),
+            error_code=error_code,
+            error_detail=error_detail,
         )
+    if symbols and success_at is not None and max_age_s is not None:
+        age_s = max(0.0, now - success_at)
+        if age_s <= max_age_s:
+            return SourceRead.success(TargetCause.ROSS, symbols[: int(limit)])
+        return SourceRead.failure(
+            TargetCause.ROSS,
+            error_code="ross_universe_cache_expired",
+            error_detail=f"age_s={age_s:.3f}; max_age_s={max_age_s:.3f}",
+        )
+    return SourceRead.failure(
+        TargetCause.ROSS,
+        error_code=("ross_refresh_pending" if inflight else "ross_refresh_unavailable"),
+    )
 
 
 def _log_subscription_gaps(feed: str, gaps: tuple[CoverageGap, ...]) -> None:
