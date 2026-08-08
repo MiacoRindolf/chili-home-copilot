@@ -188,3 +188,27 @@ def test_scanner_confidence_scores_cross_paper_floor_for_strong_setups():
     assert gap_conf >= intraday_signals.INTRADAY_AUTO_PAPER_MIN_CONFIDENCE
     assert orb_conf >= intraday_signals.INTRADAY_AUTO_PAPER_MIN_CONFIDENCE
     assert momentum_conf >= intraday_signals.INTRADAY_AUTO_PAPER_MIN_CONFIDENCE
+
+
+def test_momentum_scan_override_skips_adaptive_parameter_transaction(monkeypatch):
+    from app.services.trading import market_data
+
+    def _unexpected_parameter_read(_db):
+        raise AssertionError("provider loop reopened the parameter transaction")
+
+    monkeypatch.setattr(
+        intraday_signals,
+        "_resolve_momentum_rvol_min",
+        _unexpected_parameter_read,
+    )
+    monkeypatch.setattr(
+        market_data,
+        "fetch_ohlcv_df",
+        lambda *_args, **_kwargs: __import__("pandas").DataFrame(),
+    )
+
+    assert intraday_signals.scan_momentum_continuation(
+        ["MOVE"],
+        db=object(),
+        rvol_min_override=1.25,
+    ) == []
