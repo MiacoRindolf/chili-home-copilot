@@ -930,7 +930,7 @@ def test_seal_rejects_whole_chunk_missing_before_seal(tmp_path) -> None:
         worker.seal_run(identity)
 
 
-def test_store_rejects_same_count_event_replacement_after_external_removal(
+def test_store_audit_rejects_same_count_event_replacement_after_external_removal(
     tmp_path,
 ) -> None:
     store = ContentAddressedCaptureStore(
@@ -939,14 +939,15 @@ def test_store_rejects_same_count_event_replacement_after_external_removal(
     identity = _identity()
     worker = _closed_writer(store, (_event(1, identity=identity),))
     next((store.root / "events").rglob("*.jsonl.zlib")).unlink()
+    audited = store.resource_health()
+    assert audited["fail_closed"] is True
     with pytest.raises(
         CaptureContractError, match="capture_owned_object_removed_outside_store"
     ):
         store.write_events((_event(1, identity=identity, symbol="FAKE"),))
-    assert store.resource_health()["fail_closed"] is True
 
 
-def test_store_rejects_same_count_gap_replacement_after_external_removal(
+def test_store_audit_rejects_same_count_gap_replacement_after_external_removal(
     tmp_path,
 ) -> None:
     store = ContentAddressedCaptureStore(
@@ -959,6 +960,8 @@ def test_store_rejects_same_count_gap_replacement_after_external_removal(
         dropped_events=(_event(2, identity=identity),),
     )
     next((store.root / "gaps").rglob("*.jsonl.zlib")).unlink()
+    audited = store.resource_health()
+    assert audited["fail_closed"] is True
     forged_gap = (
         identity,
         CoverageGap(
@@ -974,7 +977,6 @@ def test_store_rejects_same_count_gap_replacement_after_external_removal(
         CaptureContractError, match="capture_owned_object_removed_outside_store"
     ):
         store.write_gaps((forged_gap,))
-    assert store.resource_health()["fail_closed"] is True
 
 
 def test_writer_health_does_not_rescan_the_capture_store_hot_path(
@@ -1016,6 +1018,56 @@ def test_writer_health_does_not_rescan_the_capture_store_hot_path(
     assert scans == 1
     assert audited["filesystem_audited"] is True
     assert audited["fail_closed"] is False
+
+
+def test_immutable_publish_does_not_rescan_the_capture_store_hot_path(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    store = ContentAddressedCaptureStore(
+        tmp_path / "capture", compression_codec="zlib"
+    )
+    scans = 0
+    original = store._root_file_bytes
+
+    def counted_root_file_bytes() -> int:
+        nonlocal scans
+        scans += 1
+        return original()
+
+    monkeypatch.setattr(store, "_root_file_bytes", counted_root_file_bytes)
+
+    store.write_events((_event(1),))
+
+    # The startup inventory plus incrementally tracked immutable publishes are
+    # sufficient for the publish-time quota gate.  A full capture-root walk is
+    # reserved for an explicit integrity audit, not every hot-path append.
+    assert scans == 0
+    audited = store.resource_health()
+    assert scans == 1
+    assert audited["filesystem_audited"] is True
+    assert audited["fail_closed"] is False
+
+
+def test_ownership_receipt_publish_advances_incremental_store_bytes(
+    tmp_path,
+) -> None:
+    now = [BASE]
+    store = ContentAddressedCaptureStore(
+        tmp_path / "capture",
+        compression_codec="zlib",
+        wall_clock=lambda: now[0],
+    )
+    before = store.resource_health(audit_filesystem=False)["root_bytes"]
+
+    now[0] += timedelta(seconds=1)
+    receipt_sha256 = store.renew_ownership()
+    receipt = store._ownership.receipt_root / f"{receipt_sha256}.json"
+    after = store.resource_health(audit_filesystem=False)["root_bytes"]
+
+    assert after - before == receipt.stat().st_size
+    audited = store.resource_health()
+    assert audited["actual_root_bytes"] == audited["root_bytes"]
 
 
 def test_valid_seal_finalizes_ingress_and_rejects_late_submission(tmp_path) -> None:
@@ -1163,6 +1215,45 @@ def test_parallel_writer_pool_preserves_every_sequence(tmp_path) -> None:
     assert store.load_sealed_run(
         _identity(), expected_seal_sha256=seal.seal_sha256
     ).seal == seal
+
+
+def test_parallel_writer_pool_progress_health_avoids_shared_store_rescan(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    store = ContentAddressedCaptureStore(
+        tmp_path / "capture", compression_codec="zlib"
+    )
+    ingress = BoundedCaptureIngress(
+        max_events=10,
+        max_bytes=500_000,
+        max_gap_keys=8,
+    )
+    pool = CaptureWriterPool(
+        ingress=ingress,
+        store=store,
+        workers=2,
+        batch_events=10,
+        batch_bytes=500_000,
+        poll_seconds=0.001,
+    )
+    scans = 0
+    original = store._root_file_bytes
+
+    def counted_root_file_bytes() -> int:
+        nonlocal scans
+        scans += 1
+        return original()
+
+    monkeypatch.setattr(store, "_root_file_bytes", counted_root_file_bytes)
+
+    progress = pool.progress_health()
+    assert progress["resource"]["filesystem_audited"] is False
+    assert scans == 0
+    audited = pool.health()
+    assert audited["resource"]["filesystem_audited"] is True
+    assert scans == 1
+    store.close()
 
 
 def test_network_guard_proves_attempt_and_restores_socket() -> None:
