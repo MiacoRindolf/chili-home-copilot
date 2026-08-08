@@ -2,20 +2,71 @@
 {% block title %}CHILI Replay Timeline{% endblock %}
 
 {% block head_extra %}
+<link rel="stylesheet" href="/static/css/workspace.css?v=20260808a" />
 <style>
+/* This page used to hard-code a dark palette on top of base.html's tokens, but
+   base.html is LIGHT-first: `[data-theme="dark"]` is opt-in via localStorage only,
+   with no prefers-color-scheme branch. A clean profile, a phone or incognito got
+   the light palette, where the old --rp-green (#34d399) measured 1.84:1 on #f8fafc
+   and every P/L number effectively vanished.
+
+   workspace.css (the same token set as the dashboard cockpit) is DARK-first, so
+   aliasing onto it makes this page dark by default and gives it a real, readable
+   light palette when the operator asks for one. The --rp-* names are kept because
+   ~1000 lines of rules below reference them -- and so does the Replay tab. */
 :root {
-  --rp-bg: var(--bg, #0b1220);
-  --rp-panel: color-mix(in srgb, var(--bg-header, #111827) 82%, #0f172a 18%);
-  --rp-panel-2: color-mix(in srgb, var(--bg, #0b1220) 90%, #111827 10%);
-  --rp-line: var(--border, rgba(148, 163, 184, .24));
-  --rp-text: var(--text, #e5e7eb);
-  --rp-muted: var(--text-secondary, #94a3b8);
-  --rp-soft: var(--text-muted, #64748b);
-  --rp-blue: #60a5fa;
-  --rp-green: #34d399;
-  --rp-amber: #fbbf24;
-  --rp-red: #fb7185;
-  --rp-purple: #c084fc;
+  --rp-bg: var(--ws-bg, #0b0e14);
+  --rp-panel: var(--ws-surface, #11151e);
+  --rp-panel-2: var(--ws-surface-2, #161b26);
+  --rp-panel-3: var(--ws-surface-3, #1c2230);
+  --rp-line: var(--ws-border, rgba(255, 255, 255, .07));
+  --rp-line-strong: var(--ws-border-strong, rgba(255, 255, 255, .13));
+  --rp-text: var(--ws-text, #e7ecf3);
+  --rp-muted: var(--ws-text-2, #9aa6b8);
+  /* was var(--text-muted,#64748b) = 3.18:1 at 9-10px. --ws-text-3 clears AA at the
+     11-12px this page now uses for the same labels. */
+  --rp-soft: var(--ws-text-3, #5e6a7e);
+  --rp-blue: var(--ws-accent, #5b8cff);
+  --rp-blue-2: var(--ws-accent-2, #7aa2ff);
+  --rp-blue-bg: var(--ws-accent-bg, rgba(91, 140, 255, .13));
+  --rp-green: var(--ws-up, #3fdd9a);
+  --rp-green-bg: var(--ws-up-bg, rgba(63, 221, 154, .12));
+  --rp-red: var(--ws-down, #ff5c6c);
+  --rp-red-bg: var(--ws-down-bg, rgba(255, 92, 108, .12));
+  --rp-amber: var(--ws-gold, #f2c14e);
+  --rp-purple: var(--ws-violet, #a78bfa);
+  /* --rp-gold was referenced twice (scrubber trade markers) and never defined, so
+     those markers computed to `transparent` and drew nothing -- on BOTH tabs. */
+  --rp-gold: var(--ws-gold, #f2c14e);
+  --rp-grey: var(--ws-text-2, #9aa6b8);
+  --rp-shadow: var(--ws-shadow-md, 0 8px 24px -6px rgba(0, 0, 0, .5));
+  --rp-ease: var(--ws-ease, cubic-bezier(.2, .7, .2, 1));
+  --rp-dur: var(--ws-dur, .18s);
+  /* Three radii, down from six (999/8/7/6/5/2). */
+  --rp-r-ctl: 6px;
+  --rp-r-panel: 8px;
+  --rp-r-pill: 999px;
+  --rp-ctl-h: 32px;
+}
+/* --ws-text-3 measures 3.15:1 on --ws-surface-2, below AA -- and it carries the
+   proof line, the funnel labels and the state meta, which is precisely the text
+   scanned first. Lifted here rather than in workspace.css so the shared cockpit
+   tokens are untouched. */
+:root { --rp-soft: #8b98ab; }
+/* workspace.css's light theme overrides only the -bg tints (--ws-up-bg etc.) and
+   keeps the dark-tuned hues, so --ws-up lands at 1.75:1 on white and every P/L
+   number disappears for anyone who explicitly picks light. These are the same
+   semantics re-tuned for a light surface; all clear AA. */
+:root[data-theme="light"] {
+  --rp-blue: #1d4ed8;
+  --rp-blue-2: #1e40af;
+  --rp-green: #047857;
+  --rp-amber: #b45309;
+  --rp-gold: #b45309;
+  --rp-red: #be123c;
+  --rp-purple: #7e22ce;
+  --rp-grey: #475569;
+  --rp-soft: #5b6779;
 }
 .rp-page {
   min-height: 100vh;
@@ -272,14 +323,21 @@
 }
 .rp-live-filter:last-child { border-right: 0; }
 .rp-live-filter b {
-  color: var(--rp-soft);
-  font-size: 9px;
+  color: var(--rp-muted);
+  font-size: 11px;
   font-variant-numeric: tabular-nums;
 }
-.rp-live-filter:hover,
-.rp-live-filter:focus-visible {
+.rp-live-filter:hover {
   color: var(--rp-text);
-  outline: none;
+}
+/* Must out-specify .rp-live-filter[aria-pressed="true"] below, which ties on
+   specificity and wins on source order -- so the SELECTED chip previously showed
+   no focus change at all. */
+.rp-live-filter:focus-visible,
+.rp-live-filter[aria-pressed="true"]:focus-visible {
+  color: var(--rp-text);
+  outline: 2px solid var(--rp-blue);
+  outline-offset: -2px;
 }
 .rp-live-filter[aria-pressed="true"] {
   background: color-mix(in srgb, var(--rp-blue) 16%, var(--rp-panel-2));
@@ -325,8 +383,8 @@
 }
 .rp-live-focus-summary {
   margin-left: auto;
-  color: var(--rp-soft);
-  font-size: 10px;
+  color: var(--rp-muted);
+  font-size: 11px;
   font-variant-numeric: tabular-nums;
   white-space: nowrap;
 }
@@ -348,10 +406,10 @@
   min-width: 0;
 }
 .rp-live-activity-label {
-  color: var(--rp-soft);
-  font-size: 9px;
-  font-weight: 800;
-  letter-spacing: .04em;
+  color: var(--rp-muted);
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: .06em;
   text-transform: uppercase;
 }
 .rp-live-activity-events {
@@ -371,8 +429,8 @@
 }
 .rp-live-activity-empty {
   align-self: center;
-  color: var(--rp-soft);
-  font-size: 10px;
+  color: var(--rp-muted);
+  font-size: 12px;
 }
 .rp-live-filter-empty {
   margin-top: 2px;
@@ -388,6 +446,8 @@
 .rp-stat b {
   display: block;
   font-size: 18px;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
   line-height: 1.2;
   overflow-wrap: anywhere;
 }
@@ -395,9 +455,9 @@
   display: block;
   margin-top: 4px;
   color: var(--rp-muted);
-  font-size: 10px;
-  font-weight: 800;
-  letter-spacing: .05em;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: .06em;
   text-transform: uppercase;
 }
 .rp-stat em {
@@ -420,6 +480,277 @@
   text-align: center;
   font-size: 13px;
 }
+
+/* ===================== LIVE STATUS BOARD ==================================== */
+/* The governing typographic rule for the live surface: the largest type on the
+   page is always a value that CHANGES. Previously the biggest thing on screen was
+   a static H1, and the number the operator actually needed was 11px. */
+
+.rp-verdict {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 20px;
+  padding: 18px 20px;
+  border-left: 4px solid var(--verdict, var(--rp-grey));
+  border-bottom: 1px solid var(--rp-line);
+  /* --rp-panel-2 is ~1.17:1 against --rp-panel: invisible as elevation. */
+  background: color-mix(in srgb, var(--rp-panel) 88%, #ffffff 12%);
+  box-shadow: 0 1px 0 rgba(0, 0, 0, .35), inset 0 1px 0 rgba(255, 255, 255, .04);
+}
+.rp-verdict[data-severity="ok"] { --verdict: var(--rp-green); }
+.rp-verdict[data-severity="info"] { --verdict: var(--rp-grey); }
+.rp-verdict[data-severity="warn"] { --verdict: var(--rp-amber); }
+.rp-verdict[data-severity="critical"] { --verdict: var(--rp-red); }
+.rp-verdict-main { min-width: 0; flex: 1; }
+.rp-verdict-headline {
+  margin: 0;
+  color: var(--rp-text);
+  font-size: 28px;
+  font-weight: 700;
+  letter-spacing: -.01em;
+  line-height: 1.15;
+}
+.rp-verdict-proof {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 10px;
+  margin-top: 8px;
+  color: var(--rp-muted);
+  font-size: 13px;
+  font-variant-numeric: tabular-nums;
+}
+/* The anti-"heartbeat != healthy" device: loop age and tape age are always
+   printed side by side and are never collapsed into one freshness number. */
+.rp-verdict-proof b { color: var(--rp-text); font-weight: 600; }
+.rp-verdict-proof .rp-proof-bad { color: var(--rp-amber); }
+.rp-verdict-proof .rp-proof-sep { color: var(--rp-soft); }
+.rp-verdict-detail {
+  margin: 8px 0 0;
+  max-width: 76ch;
+  color: var(--rp-muted);
+  font-size: 13px;
+  line-height: 1.45;
+}
+.rp-verdict-side {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 8px;
+  flex: 0 0 auto;
+}
+.rp-session-pill {
+  border: 1px solid var(--rp-line);
+  border-radius: var(--rp-r-pill);
+  background: var(--rp-panel-2);
+  color: var(--rp-muted);
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: .06em;
+  padding: 5px 10px;
+  text-transform: uppercase;
+  white-space: nowrap;
+}
+.rp-verdict-state {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  color: var(--rp-muted);
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: .06em;
+  text-transform: uppercase;
+}
+.rp-verdict-dot {
+  width: 10px;
+  height: 10px;
+  border-radius: var(--rp-r-pill);
+  background: var(--verdict, var(--rp-grey));
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--verdict, var(--rp-grey)) 16%, transparent);
+}
+.rp-verdict-actions { display: flex; gap: 8px; margin-top: 12px; flex-wrap: wrap; }
+@keyframes rpVerdictPulse {
+  from { background: color-mix(in srgb, var(--verdict) 22%, var(--rp-panel)); }
+  to { background: color-mix(in srgb, var(--rp-panel) 88%, #ffffff 12%); }
+}
+.rp-verdict.rp-verdict-changed { animation: rpVerdictPulse .42s var(--rp-ease); }
+
+/* Halt banner. Must render in the POPULATED case too: a drawdown breaker trips
+   BECAUSE of realized losses, so rows exist when it fires. */
+.rp-halt {
+  padding: 14px 20px;
+  border-left: 3px solid var(--rp-red);
+  border-bottom: 1px solid var(--rp-line);
+  background: color-mix(in srgb, var(--rp-red) 12%, var(--rp-panel-2));
+}
+.rp-halt b { display: block; color: var(--rp-text); font-size: 15px; font-weight: 700; }
+.rp-halt p { margin: 5px 0 0; color: var(--rp-muted); font-size: 13px; line-height: 1.45; }
+.rp-halt-chips { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 10px; }
+.rp-halt-chip {
+  border: 1px solid color-mix(in srgb, var(--rp-red) 45%, transparent);
+  border-radius: var(--rp-r-ctl);
+  color: var(--rp-red);
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: .04em;
+  padding: 4px 8px;
+  text-transform: uppercase;
+}
+.rp-note {
+  margin: 0 0 12px;
+  border: 1px solid color-mix(in srgb, var(--rp-amber) 34%, transparent);
+  border-radius: var(--rp-r-ctl);
+  background: color-mix(in srgb, var(--rp-amber) 9%, transparent);
+  color: var(--rp-amber);
+  font-size: 12px;
+  line-height: 1.45;
+  padding: 8px 11px;
+}
+
+/* Funnel. The 1px gap over a line-coloured background yields hairline dividers. */
+.rp-funnel {
+  display: grid;
+  grid-template-columns: repeat(6, minmax(0, 1fr));
+  gap: 1px;
+  margin-bottom: 12px;
+  border: 1px solid var(--rp-line);
+  border-radius: var(--rp-r-panel);
+  background: var(--rp-line);
+  overflow: hidden;
+}
+.rp-funnel-cell { background: var(--rp-panel-2); padding: 9px 12px; min-width: 0; }
+.rp-funnel-cell b {
+  display: block;
+  color: var(--rp-text);
+  font-size: 20px;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+  line-height: 1.2;
+}
+.rp-funnel-cell span {
+  display: block;
+  margin-top: 3px;
+  color: var(--rp-muted);
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: .06em;
+  text-transform: uppercase;
+}
+/* A stage at zero whose predecessor is non-zero is where the day is choking:
+   "12 candidates, 0 armed" is gating; "5 armed, 0 filled" is conversion. */
+.rp-funnel-cell.is-choke { background: color-mix(in srgb, var(--rp-amber) 10%, var(--rp-panel-2)); }
+.rp-funnel-cell.is-choke b { color: var(--rp-amber); }
+.rp-funnel-cell.is-choke span { color: var(--rp-amber); }
+
+/* Accounting, demoted from five equal tiles to one line. */
+.rp-accounting {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 6px 18px;
+  margin-bottom: 12px;
+  padding: 9px 0;
+  border-top: 1px solid var(--rp-line);
+  border-bottom: 1px solid var(--rp-line);
+}
+.rp-accounting-total {
+  font-size: 17px;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+}
+.rp-accounting-total small {
+  margin-right: 7px;
+  color: var(--rp-muted);
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: .06em;
+  text-transform: uppercase;
+}
+.rp-accounting span {
+  color: var(--rp-muted);
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+}
+.rp-accounting span b { color: var(--rp-text); font-weight: 600; }
+
+/* Latest actions as a real list. Was a 9px label beside chips clipped to 210px. */
+.rp-actionlist { display: grid; gap: 2px; }
+.rp-actionrow {
+  display: grid;
+  grid-template-columns: 72px 64px minmax(0, 1fr);
+  gap: 4px 10px;
+  align-items: baseline;
+  width: 100%;
+  border: 0;
+  border-radius: var(--rp-r-ctl);
+  background: transparent;
+  color: var(--rp-muted);
+  cursor: pointer;
+  font-size: 13px;
+  padding: 4px 6px;
+  text-align: left;
+}
+.rp-actionrow:hover { background: color-mix(in srgb, var(--rp-blue) 10%, transparent); }
+.rp-actionrow:focus-visible { outline: 2px solid var(--rp-blue); outline-offset: -2px; }
+.rp-actionrow time { color: var(--rp-muted); font-variant-numeric: tabular-nums; }
+.rp-actionrow .rp-actionrow-sym { color: var(--rp-text); font-weight: 700; }
+.rp-actionrow .rp-actionrow-detail { min-width: 0; overflow-wrap: anywhere; }
+.rp-actionrow.entry .rp-actionrow-sym { color: var(--rp-green); }
+.rp-actionrow.exit .rp-actionrow-sym { color: var(--rp-blue-2); }
+.rp-actionrow.loss .rp-actionrow-sym { color: var(--rp-red); }
+.rp-actionrow-pnl { font-variant-numeric: tabular-nums; font-weight: 600; }
+.rp-actionmore {
+  justify-self: start;
+  margin-top: 4px;
+  border: 1px solid var(--rp-line);
+  border-radius: var(--rp-r-ctl);
+  background: transparent;
+  color: var(--rp-muted);
+  cursor: pointer;
+  font-size: 11px;
+  padding: 4px 9px;
+}
+.rp-actionmore:hover { color: var(--rp-text); border-color: var(--rp-line-strong); }
+
+/* Value-change flash, matching the repo's existing wsKpiFlash convention. */
+@keyframes rpFlash {
+  from { background: color-mix(in srgb, var(--rp-blue) 30%, transparent); }
+  to { background: transparent; }
+}
+.rp-flash { animation: rpFlash .9s var(--rp-ease); border-radius: 4px; }
+
+/* Empty states: six conditions, six treatments. Previously one dashed box served
+   about twenty distinct conditions including hard lane faults. */
+.rp-state {
+  display: grid;
+  justify-items: center;
+  gap: 8px;
+  border: 1px solid var(--rp-line);
+  border-radius: var(--rp-r-panel);
+  background: var(--rp-panel-2);
+  padding: 34px 26px;
+  text-align: center;
+}
+.rp-state b { color: var(--rp-text); font-size: 17px; font-weight: 700; }
+.rp-state p { margin: 0; max-width: 62ch; color: var(--rp-muted); font-size: 13px; line-height: 1.5; }
+.rp-state .rp-state-meta { color: var(--rp-soft); font-size: 12px; font-variant-numeric: tabular-nums; }
+.rp-state-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 6px; }
+.rp-state.is-idle { border-style: dashed; }
+.rp-state.is-bad {
+  border-color: color-mix(in srgb, var(--rp-red) 40%, var(--rp-line));
+  background: color-mix(in srgb, var(--rp-red) 8%, var(--rp-panel-2));
+}
+.rp-state.is-warn {
+  border-color: color-mix(in srgb, var(--rp-amber) 40%, var(--rp-line));
+  background: color-mix(in srgb, var(--rp-amber) 8%, var(--rp-panel-2));
+}
+.rp-state.is-loading { border-style: dashed; opacity: .8; }
+
+/* Paused must be unmistakable: the header said "paused" but every stop, size and
+   P/L below it still read as current. */
+.rp-paused-body { filter: saturate(.55); opacity: .72; }
+
 .rp-timeline {
   display: grid;
   gap: 9px;
@@ -507,11 +838,15 @@
   text-transform: none;
   white-space: nowrap;
 }
-.rp-correlation-event:hover,
+.rp-correlation-event:hover {
+  border-color: color-mix(in srgb, var(--rp-blue) 50%, var(--rp-line));
+  color: var(--rp-text);
+}
 .rp-correlation-event:focus-visible {
   border-color: color-mix(in srgb, var(--rp-blue) 50%, var(--rp-line));
   color: var(--rp-text);
-  outline: none;
+  outline: 2px solid var(--rp-blue);
+  outline-offset: 1px;
 }
 .rp-correlation-event.entry {
   border-color: color-mix(in srgb, var(--rp-blue) 46%, var(--rp-line));
@@ -677,6 +1012,7 @@
 }
 .rp-symbol b {
   font-size: 18px;
+  font-weight: 700;
   line-height: 1;
 }
 .rp-symbol span {
@@ -694,9 +1030,10 @@
   display: inline-flex;
   width: fit-content;
   border: 1px solid var(--rp-line);
-  border-radius: 999px;
+  border-radius: var(--rp-r-pill);
   color: var(--rp-muted);
-  font-size: 10px;
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
   padding: 3px 7px;
 }
 .rp-chart {
@@ -862,7 +1199,13 @@
 .rp-chip.entry { color: var(--rp-blue); border-color: color-mix(in srgb, var(--rp-blue) 42%, transparent); }
 .rp-chip.exit { color: var(--rp-green); border-color: color-mix(in srgb, var(--rp-green) 42%, transparent); }
 .rp-chip.loss { color: var(--rp-red); border-color: color-mix(in srgb, var(--rp-red) 42%, transparent); }
-.rp-chip.warn { color: var(--rp-amber); border-color: color-mix(in srgb, var(--rp-amber) 42%, transparent); }
+/* `armed` is a GOOD state and used to render amber right beside the amber
+   `stale` chip in the same flex run. Amber is now reserved for degradation only. */
+.rp-chip.warn {
+  color: var(--rp-blue-2);
+  border-color: color-mix(in srgb, var(--rp-blue) 45%, transparent);
+  background: var(--rp-blue-bg);
+}
 .rp-trade-chip {
   appearance: none;
   cursor: pointer;
@@ -915,11 +1258,15 @@
   padding: 2px 4px;
   text-align: left;
 }
-.rp-trace-line:hover,
-.rp-trace-line:focus {
+.rp-trace-line:hover {
   background: color-mix(in srgb, var(--rp-blue) 14%, transparent);
   color: var(--rp-text);
-  outline: none;
+}
+.rp-trace-line:focus-visible {
+  background: color-mix(in srgb, var(--rp-blue) 14%, transparent);
+  color: var(--rp-text);
+  outline: 2px solid var(--rp-blue);
+  outline-offset: -2px;
 }
 .rp-trace-line.is-active {
   background: color-mix(in srgb, var(--rp-amber) 16%, transparent);
@@ -1007,6 +1354,19 @@
   .rp-setup {
     grid-template-columns: 1fr;
   }
+  /* Six funnel stages across a 1100px viewport is ~150px each; two rows of three
+     keeps the 20px values legible instead of shrinking them. */
+  .rp-funnel {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+  .rp-verdict {
+    flex-direction: column;
+    gap: 12px;
+  }
+  .rp-verdict-side {
+    flex-direction: row;
+    align-items: center;
+  }
 }
 @media (max-width: 760px) {
   .rp-shell {
@@ -1032,6 +1392,22 @@
   }
   .rp-stats {
     grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+  .rp-verdict {
+    padding: 15px 16px;
+  }
+  .rp-verdict-headline {
+    font-size: 22px;
+  }
+  .rp-funnel {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+  .rp-accounting {
+    gap: 4px 14px;
+  }
+  .rp-actionrow {
+    grid-template-columns: 62px 56px minmax(0, 1fr);
+    font-size: 12px;
   }
   .rp-live-toolbar {
     align-items: stretch;
@@ -1064,6 +1440,19 @@
     height: 218px;
   }
 }
+
+/* House convention: every stylesheet in app/static/css/ ends with one of these.
+   This file had none, and it is about to gain a verdict pulse and value flashes. */
+@media (prefers-reduced-motion: reduce) {
+  .rp-page *,
+  .rp-page *::before,
+  .rp-page *::after {
+    animation-duration: .001ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: .001ms !important;
+    scroll-behavior: auto !important;
+  }
+}
 </style>
 {% endblock %}
 
@@ -1084,8 +1473,8 @@
       </div>
     </header>
 
-    <section class="rp-card" aria-label="Replay timeline">
-      <div class="rp-command">
+    <section class="rp-card" id="rp-panel" role="tabpanel" aria-labelledby="rp-surface-replay" aria-label="Replay timeline">
+      <div class="rp-command" id="rp-command">
         <div>
           <div class="rp-eyebrow" id="rp-command-eyebrow">Replay v3</div>
           <h2 id="rp-command-title">Trading behavior timeline</h2>
@@ -1115,6 +1504,12 @@
         </div>
       </div>
 
+      <!-- Live-only status board. `role=status`/`aria-live=polite` is scoped to the
+           headline + proof line ONLY: this surface repaints every few seconds, and a
+           wider live region would flood a screen reader continuously. -->
+      <div id="rp-live-verdict" hidden></div>
+      <div id="rp-live-halt" hidden></div>
+
       <div class="rp-workspace" id="rp-workspace">
         <div class="rp-empty">No replay loaded.</div>
       </div>
@@ -1125,7 +1520,7 @@
       <div class="rp-history" id="rp-history"></div>
     </details>
 
-    <details class="rp-details">
+    <details class="rp-details" id="rp-diagnostics">
       <summary>Diagnostics</summary>
       <span id="rp-fsm-endpoint">/api/trading/momentum/replay/fsm</span>
       <span id="rp-live-endpoint">/api/trading/momentum/replay/live</span>
@@ -1137,7 +1532,17 @@
 <script>
 (function() {
   var rpPoll = null;
-  var rpSurfaceMode = 'replay';
+  var rpSurfaceMode = (function() {
+    // Honour #live / #replay, then the persisted choice, then default to live:
+    // this page's job is "what is Chili doing NOW".
+    try {
+      var hash = String(window.location.hash || '').replace('#', '').toLowerCase();
+      if (hash === 'live' || hash === 'replay') return hash;
+      var saved = localStorage.getItem('chili:replay:surface');
+      if (saved === 'live' || saved === 'replay') return saved;
+    } catch (err) { /* private mode */ }
+    return 'live';
+  })();
   var rpHistoryRows = [];
   var rpLastResult = null;
   var rpLastReplayResult = null;
@@ -1152,6 +1557,12 @@
   var rpLiveQuery = '';
   var rpLiveSort = 'priority';
   var rpLivePaused = false;
+  var rpLivePausedAt = null;
+  var rpLastVerdictKey = '';
+  var rpLastPollOkAt = 0;
+  var rpDecayTimer = null;
+  var rpActivityExpanded = false;
+  var rpLastFlashValues = {};
   var rpLiveActivityHtml = '';
   var rpReplayCache = null;
   var rpPinnedChart = null;
@@ -1183,6 +1594,9 @@
   var RP_VIEWPORT_SMOOTHING = 0.34;
   var RP_VIEWPORT_SMOOTH_EPS = 1.1;
   var RP_PLAYBACK_INTERVAL_MS = window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches ? 1300 : 850;
+  var RP_ACTIVITY_CAP = 40;
+  var RP_ACTIVITY_VISIBLE = 6;
+  var RP_FETCH_TIMEOUT_MS = 8000;
   var RP_STORAGE_PREFIX = 'chili:replay:v5:';
   var RP_HISTORY_CACHE_KEY = RP_STORAGE_PREFIX + 'history';
   var RP_RESULT_INDEX_KEY = RP_STORAGE_PREFIX + 'result:index';
@@ -1393,7 +1807,13 @@
   function fmtMoney(value) {
     var n = Number(value || 0);
     var sign = n < 0 ? '-' : '';
-    return sign + '$' + Math.abs(n).toLocaleString(undefined, { maximumFractionDigits: 2 });
+    // minimumFractionDigits matters as much as the maximum: without it $19.60 renders
+    // as "$19.6", so the string LENGTH changes as cents land and the column jitters
+    // on every poll -- which is exactly what tabular-nums is there to prevent.
+    return sign + '$' + Math.abs(n).toLocaleString(undefined, {
+      minimumFractionDigits: 2,
+      maximumFractionDigits: 2
+    });
   }
 
   function fmtSignedMoney(value) {
@@ -2569,7 +2989,10 @@
 
   function elementNearViewport(el) {
     if (!el || !el.getBoundingClientRect) return false;
+    if (el.hidden) return false;
     var rect = el.getBoundingClientRect();
+    // A display:none element reports an all-zero rect, which satisfies both bounds.
+    if (!rect.width && !rect.height) return false;
     var margin = Math.max(420, window.innerHeight * 0.65);
     return rect.bottom >= -margin && rect.top <= window.innerHeight + margin;
   }
@@ -3575,21 +3998,55 @@
       });
     });
     rows.sort(function(a, b) { return b.stamp - a.stamp || b.minute - a.minute || a.sym.localeCompare(b.sym); });
-    return rows.slice(0, 16);
+    // Return the total alongside the slice: the old bare `.slice(0, 16)` truncated
+    // silently, so a busy morning looked identical to a quiet one.
+    return { rows: rows.slice(0, RP_ACTIVITY_CAP), total: rows.length };
   }
 
+  // A real list, not chips. The old markup was clipped to 210px by a dead-CSS
+  // cascade (.rp-correlation-event beat .rp-live-event on source order), and the
+  // P/L of an exit was carried by border-colour alone -- invisible to AT and to
+  // anyone who cannot separate those two reds.
   function renderLiveActivity(payload) {
-    var rows = liveActivityRows(payload);
+    var result = liveActivityRows(payload);
+    var rows = result.rows;
+    var total = result.total;
     if (!rows.length) return '<span class="rp-live-activity-empty">No activity yet</span>';
-    return rows.map(function(row) {
-      var outcomeClass = row.kind === 'exit' && Number(row.pnl_usd) < 0 ? 'loss' : (row.kind === 'entry' || row.kind === 'exit' ? row.kind : '');
-      var detail = row.stage + (row.detail && row.detail !== row.stage ? ': ' + row.detail : '');
-      var label = row.t + ' ' + row.sym + ' ' + detail;
-      return '<button class="rp-correlation-event rp-live-event ' + esc(outcomeClass) + '" type="button" data-symbol="' +
+    var shown = rpActivityExpanded ? rows : rows.slice(0, RP_ACTIVITY_VISIBLE);
+    var html = shown.map(function(row) {
+      var pnl = Number(row.pnl_usd);
+      var hasPnl = row.kind === 'exit' && Number.isFinite(pnl);
+      var outcomeClass = hasPnl && pnl < 0 ? 'loss'
+        : (row.kind === 'entry' || row.kind === 'exit' ? row.kind : '');
+      var detail = row.stage + (row.detail && row.detail !== row.stage ? ' · ' + row.detail : '');
+      var money = hasPnl ? (pnl >= 0 ? '▲ ' : '▼ ') + fmtSignedMoney(pnl) : '';
+      var label = row.t + ' ' + row.sym + ' ' + detail + (money ? ' ' + money : '');
+      return '<button class="rp-actionrow ' + esc(outcomeClass) + '" type="button" data-symbol="' +
         esc(row.sym) + '" data-minute="' + esc(row.minute) + '" aria-label="Focus ' + esc(label) + '">' +
-        '<b>' + esc(row.t) + '</b><span>' + esc(row.sym + ' ' + detail) + '</span></button>';
+        '<time>' + esc(row.t) + '</time>' +
+        '<span class="rp-actionrow-sym">' + esc(row.sym) + '</span>' +
+        '<span class="rp-actionrow-detail">' + esc(detail) +
+          (money ? ' <span class="rp-actionrow-pnl ' + pnlClass(pnl) + '">' + esc(money) + '</span>' : '') +
+        '</span></button>';
     }).join('');
+    var hidden = total - shown.length;
+    if (hidden > 0 && !rpActivityExpanded) {
+      html += '<button class="rp-actionmore" type="button" onclick="rpToggleActivity()">+' +
+        esc(String(hidden)) + ' earlier</button>';
+    } else if (rpActivityExpanded && total > RP_ACTIVITY_VISIBLE) {
+      html += '<button class="rp-actionmore" type="button" onclick="rpToggleActivity()">Show fewer</button>';
+    }
+    return '<div class="rp-actionlist">' + html + '</div>';
   }
+
+  window.rpToggleActivity = function() {
+    rpActivityExpanded = !rpActivityExpanded;
+    var host = document.getElementById('rp-live-activity-events');
+    if (host && rpLastLivePayload) {
+      rpLiveActivityHtml = renderLiveActivity(rpLastLivePayload);
+      host.innerHTML = rpLiveActivityHtml;
+    }
+  };
 
   function renderLiveFilterButton(key, label, count, tooltip) {
     var tooltipAttrs = tooltip ? ' title="' + esc(tooltip) + '" aria-label="' + esc(label + ' ' + count + '. ' + tooltip) + '"' : '';
@@ -3637,13 +4094,23 @@
     var total = 0;
     var visible = 0;
     var rows = liveSortedRows(Array.prototype.slice.call(document.querySelectorAll('.rp-row-live')));
+    // Reorder real DOM nodes rather than painting CSS `order` over them, so the
+    // keyboard and a screen reader traverse what the operator actually sees.
+    // appendChild blurs an attached node, so focus is captured and restored.
+    var active = document.activeElement;
+    var activeInRows = active && active.closest && active.closest('.rp-row-live');
+    var parent = rows.length ? rows[0].row.parentNode : null;
     rows.forEach(function(record, index) {
       var show = liveFilterMatches(record.meta, record.sym);
       total += 1;
       if (show) visible += 1;
       record.row.hidden = !show;
-      record.row.style.order = String(10 + index);
+      record.row.style.order = '';
+      if (parent) parent.appendChild(record.row);
     });
+    if (activeInRows && active && document.contains(active) && document.activeElement !== active) {
+      try { active.focus({ preventScroll: true }); } catch (err) { /* detached */ }
+    }
     if (rpPinnedChart && rpPinnedChart.closest('.rp-row-live') && rpPinnedChart.closest('.rp-row-live').hidden) clearPinnedChart();
     var summary = document.getElementById('rp-live-focus-summary');
     if (summary) summary.textContent = visible + ' / ' + total;
@@ -3713,7 +4180,15 @@
     return '<b>' + esc(sym) + '</b>' +
       '<span>' + esc(laneText || sourceFallback) + '</span>' +
       '<span class="rp-symbol-state">' + esc(state) + '</span>' +
-      '<span>' + esc(fmtNum(bars.length) + ' one-minute candles') + '</span>' +
+      // Was "N one-minute candles" -- chart plumbing, operationally meaningless,
+      // and it changed every tick. last_price and confidence are both already on
+      // the wire and had zero references anywhere in the template.
+      (meta.last_price == null
+        ? ''
+        : '<span>' + esc('last ' + fmtPrice(meta.last_price)) + '</span>') +
+      (meta.confidence == null
+        ? ''
+        : '<span>' + esc('conf ' + Math.round(Number(meta.confidence) * 100) + '%') + '</span>') +
       '<span class="rp-symbol-freshness' + (meta.stale ? ' stale' : '') + '">' + esc(liveAgeLabel(meta)) + '</span>' +
       '<span class="rp-badge ' + badgeClass + '">' + esc(fmtSignedMoney(total)) + '</span>';
   }
@@ -3725,6 +4200,9 @@
       return '<span class="rp-chip attention-reason attention-' + esc(reason.key) + '" title="' + esc(reason.detail) + '">' +
         esc(reason.label) + '</span>';
     });
+    // `armed` used to be pushed LAST, after lane chips, watch chips and per-lane
+    // P/L, so the urgency group was not contiguous.
+    if (meta.armed) chips.push('<span class="rp-chip warn">armed</span>');
     chips = chips.concat((meta.lanes || []).map(function(row) {
       return '<span class="rp-chip ' + esc(liveLaneClass(row.lane)) + '">' +
         esc(liveLaneLabel(row.lane) + ' - ' + (row.state_label || row.state || 'active')) + '</span>';
@@ -3741,12 +4219,13 @@
       chips.push('<span class="rp-chip ' + esc(liveLaneClass(lane)) + '">' +
         esc(liveLaneLabel(lane) + ' P/L ' + fmtSignedMoney(laneTotal)) + '</span>');
     });
-    if (meta.armed) chips.push('<span class="rp-chip warn">armed</span>');
     var positions = (meta.positions || []).map(function(row) {
       return '<div class="rp-live-position"><b>' + esc(liveLaneLabel(row.lane)) + ' position</b> - ' +
         esc(fmtNum(row.quantity || 0) + ' shares @ ' + fmtPrice(row.entry)) +
         (row.mark == null ? '' : esc(' - mark ' + fmtPrice(row.mark))) +
         (row.stop == null ? '' : esc(' - stop ' + fmtPrice(row.stop))) +
+        // Built at live_monitor.py _build_state_snapshot and dropped on the floor.
+        (row.target == null ? '' : esc(' - target ' + fmtPrice(row.target))) +
         '</div>';
     }).join('');
     return '<div class="rp-live-pnl">' +
@@ -3766,36 +4245,341 @@
       '</article>';
   }
 
-  function renderLiveStats(payload) {
-    var totals = payload && payload.totals || {};
-    var symbols = payload && payload.symbols || [];
-    var lanes = payload && payload.lanes || {};
-    var openPositions = Object.keys(lanes).reduce(function(sum, key) {
-      return sum + Number((lanes[key] || {}).open_positions || 0);
-    }, 0);
-    var activeSymbols = Number(payload.active_symbol_count == null
-      ? symbols.filter(function(row) { return row.active; }).length
-      : payload.active_symbol_count);
-    var watchingSymbols = Number(payload.watching_symbol_count == null
-      ? symbols.filter(function(row) { return row.observer_source === 'captured_paper_selection'; }).length
-      : payload.watching_symbol_count);
-    var laneDetail = [
-      Number((lanes.live || {}).symbols || 0) + ' live',
-      Number((lanes.paper_twin || {}).symbols || 0) + ' twins',
-      Number((lanes.paper || {}).symbols || 0) + ' paper'
-    ].join(' - ');
-    return '<div class="rp-stats">' +
-      statCard(fmtSignedMoney(totals.total_usd || 0), 'Today Total', fmtNum(totals.trades || 0) + ' completed trades', pnlClass(totals.total_usd)) +
-      statCard(fmtSignedMoney(totals.realized_usd || 0), 'Realized', 'ET trading day', pnlClass(totals.realized_usd)) +
-      statCard(fmtSignedMoney(totals.unrealized_usd || 0), 'Unrealized', openPositions + ' open positions', pnlClass(totals.unrealized_usd)) +
-      statCard(activeSymbols + ' / ' + watchingSymbols, 'Active / Watching', laneDetail) +
-      statCard(openPositions, 'Open Positions', 'persisted runner state') +
+  // ===================== LIVE STATUS BOARD ===================================
+
+  function fmtAge(seconds) {
+    if (seconds == null || !Number.isFinite(Number(seconds))) return null;
+    var s = Math.max(0, Math.round(Number(seconds)));
+    // Keep raw seconds well past a minute: these are read against a 75s threshold
+    // printed beside them, and "1m" for 94s reads as if it were under it.
+    if (s < 120) return s + 's';
+    var m = Math.floor(s / 60);
+    if (m < 60) return (s % 60) ? m + 'm ' + (s % 60) + 's' : m + 'm';
+    var h = Math.floor(m / 60);
+    if (h < 24) return (m % 60) ? h + 'h ' + (m % 60) + 'm' : h + 'h';
+    return Math.floor(h / 24) + 'd ' + (h % 24) + 'h';
+  }
+
+  // The two ages are ALWAYS printed side by side and never merged. A control loop
+  // that keeps beating while the tape is dead is the failure that looks healthy,
+  // and one combined "freshness" number is exactly what hid it.
+  function verdictProofHtml(payload) {
+    var lane = (payload && payload.lane) || {};
+    var loop = fmtAge(lane.control_heartbeat_age_s);
+    var tape = fmtAge(lane.tape_age_s);
+    var stale = Number(lane.stale_after_s || 75);
+    var loopBad = lane.control_heartbeat_age_s != null && lane.control_heartbeat_age_s > stale;
+    var tapeBad = lane.tape_age_s == null || lane.tape_age_s > 120;
+    var open = !!((payload.market_session || {}).is_open);
+    var parts = [];
+    parts.push('<span>loop <b' + (loopBad ? ' class="rp-proof-bad"' : '') + '>' +
+      esc(loop || 'never') + '</b></span>');
+    parts.push('<span class="rp-proof-sep">&middot;</span>');
+    parts.push('<span>tape <b' + (tapeBad && open ? ' class="rp-proof-bad"' : '') + '>' +
+      esc(tape || '\u2014') + '</b></span>');
+    var symbolCount = (payload.symbols || []).length;
+    if (symbolCount) {
+      parts.push('<span class="rp-proof-sep">&middot;</span>');
+      parts.push('<span><b>' + esc(String(symbolCount)) + '</b> symbol' +
+        (symbolCount === 1 ? '' : 's') + '</span>');
+    }
+    var dropped = Number(lane.dropped_route_count || 0);
+    if (dropped) {
+      parts.push('<span class="rp-proof-sep">&middot;</span>');
+      parts.push('<span class="rp-proof-bad"><b>' + esc(String(dropped)) +
+        '</b> routes dropped</span>');
+    }
+    return parts.join('');
+  }
+
+  function flashEl(el) {
+    if (!el) return;
+    el.classList.remove('rp-flash');
+    void el.offsetWidth;  // force reflow so the animation restarts
+    el.classList.add('rp-flash');
+  }
+
+  // The one job of this surface is surfacing transitions, and a fill landing used
+  // to produce no perceptible event at all: the stylesheet had one transition and
+  // zero keyframes.
+  function flashChangedValues(payload) {
+    var funnel = (payload && payload.funnel) || {};
+    var totals = (payload && payload.totals) || {};
+    var next = { total: Number(totals.total_usd || 0) };
+    RP_FUNNEL_STAGES.forEach(function(stage) {
+      next['f_' + stage.key] = Number(funnel[stage.key] || 0);
+    });
+    var host = document.getElementById('rp-live-stats');
+    if (host) {
+      var cells = host.querySelectorAll('.rp-funnel-cell b');
+      RP_FUNNEL_STAGES.forEach(function(stage, index) {
+        var key = 'f_' + stage.key;
+        if (rpLastFlashValues[key] != null && rpLastFlashValues[key] !== next[key]) {
+          flashEl(cells[index]);
+        }
+      });
+      if (rpLastFlashValues.total != null && rpLastFlashValues.total !== next.total) {
+        flashEl(host.querySelector('.rp-accounting-total'));
+      }
+    }
+    rpLastFlashValues = next;
+  }
+
+  function renderVerdictBar(payload) {
+    var host = document.getElementById('rp-live-verdict');
+    if (!host) return;
+    var lane = (payload && payload.lane) || {};
+    var market = (payload && payload.market_session) || {};
+    var severity = rpLivePaused ? 'info' : (lane.severity || 'warn');
+    var headline = lane.headline || 'Chili\u2019s state cannot be confirmed.';
+    var detail = lane.detail || '';
+
+    if (rpLivePaused) {
+      // The header said "paused" but every stop, size and P/L below still read as
+      // current. Say it in the headline instead of a 32px glyph.
+      var heldAt = rpLivePausedAt ? new Date(rpLivePausedAt) : null;
+      headline = heldAt
+        ? 'Paused. Showing state held at ' +
+          heldAt.toLocaleTimeString('en-US', { hour12: false }) + '.'
+        : 'Paused.';
+      detail = 'Nothing below is updating. Press play to resume live updates.';
+    }
+
+    var word = rpLivePaused ? 'paused' : String(lane.verdict || 'unknown').replace(/_/g, ' ');
+    var critical = severity === 'critical' && !rpLivePaused;
+    var html = '<div class="rp-verdict" data-severity="' + esc(severity) + '">' +
+      '<div class="rp-verdict-main">' +
+        '<h2 class="rp-verdict-headline">' + esc(headline) + '</h2>' +
+        '<div class="rp-verdict-proof" id="rp-verdict-proof">' +
+          verdictProofHtml(payload) + '</div>' +
+        (detail ? '<p class="rp-verdict-detail">' + esc(detail) + '</p>' : '') +
+        (critical
+          ? '<div class="rp-verdict-actions">' +
+            '<button class="rp-btn secondary" type="button" onclick="rpCopyDiagnostics()">' +
+            'Copy diagnostics</button>' +
+            '<button class="rp-btn secondary" type="button" onclick="rpOpenDiagnostics()">' +
+            'Open diagnostics</button>' +
+            '</div>'
+          : '') +
+      '</div>' +
+      '<div class="rp-verdict-side">' +
+        (market.label
+          ? '<span class="rp-session-pill">' + esc(market.label) +
+            (market.et_clock ? ' \u00b7 ' + esc(market.et_clock) + ' ET' : '') + '</span>'
+          : '') +
+        '<span class="rp-verdict-state"><span class="rp-verdict-dot"></span>' +
+          esc(word) + '</span>' +
+      '</div>' +
+    '</div>';
+
+    var key = severity + '|' + (rpLivePaused ? 'paused' : (lane.verdict || ''));
+    var changed = !!rpLastVerdictKey && rpLastVerdictKey !== key;
+    host.innerHTML = html;
+    host.hidden = false;
+    var bar = host.firstElementChild;
+    if (bar) {
+      // Live region scoped to headline + proof ONLY. A wider one would announce the
+      // whole surface every few seconds and flood the buffer.
+      var main = bar.querySelector('.rp-verdict-main');
+      if (main) {
+        main.setAttribute('role', 'status');
+        main.setAttribute('aria-live', critical ? 'assertive' : 'polite');
+      }
+      var dot = bar.querySelector('.rp-verdict-dot');
+      if (dot) dot.setAttribute('aria-label', 'Lane status: ' + word);
+      if (changed) bar.classList.add('rp-verdict-changed');
+    }
+    rpLastVerdictKey = key;
+  }
+
+  function renderHaltBanner(payload) {
+    var host = document.getElementById('rp-live-halt');
+    if (!host) return;
+    var health = (payload && payload.lane_health) || {};
+    // Gate on `enabled` FIRST: evaluate_lane_health short-circuits to
+    // {severity:"ok", conditions:[]} when alerting is off, so a DISABLED probe would
+    // otherwise render identically to a clean bill of health.
+    if (!health.enabled || !health.frozen) {
+      host.hidden = true;
+      host.innerHTML = '';
+      return;
+    }
+    var chips = (health.conditions || []).map(function(row) {
+      var bits = [String(row.kind || 'condition').replace(/_/g, ' ')];
+      if (row.family) bits.push(row.family);
+      if (row.elapsed_human) bits.push(row.elapsed_human);
+      else if (row.elapsed_seconds != null) bits.push(fmtAge(row.elapsed_seconds));
+      return '<span class="rp-halt-chip">' +
+        esc(bits.filter(Boolean).join(' \u00b7 ')) + '</span>';
+    }).join('');
+    host.innerHTML = '<div class="rp-halt" role="alert">' +
+      '<b>' + esc(health.headline || 'Chili is halted. Manual reset required.') + '</b>' +
+      (health.detail ? '<p>' + esc(health.detail) + '</p>' : '') +
+      (chips ? '<div class="rp-halt-chips">' + chips + '</div>' : '') +
+      '</div>';
+    host.hidden = false;
+  }
+
+  function renderLaneHealthNote(payload) {
+    var health = (payload && payload.lane_health) || {};
+    if (health.enabled !== false) return '';
+    // Without this, a disabled probe reads as a clean bill of health.
+    return '<p class="rp-note">Lane-health alerting is off \u2014 kill switch and ' +
+      'daily-loss breakers are not being checked from this page.</p>';
+  }
+
+  var RP_FUNNEL_STAGES = [
+    { key: 'routes_scored', label: 'Scanned' },
+    { key: 'policy_eligible', label: 'Eligible' },
+    { key: 'watching', label: 'Watching' },
+    { key: 'setup', label: 'Setup' },
+    { key: 'armed', label: 'Armed' },
+    { key: 'in_position', label: 'In position' }
+  ];
+
+  function renderFunnel(payload) {
+    var funnel = (payload && payload.funnel) || {};
+    var market = (payload && payload.market_session) || {};
+    if (!market.is_open) return '';  // there is no funnel on a Saturday
+    var prev = null;
+    var cells = RP_FUNNEL_STAGES.map(function(stage) {
+      var value = Number(funnel[stage.key] || 0);
+      // A stage at zero whose predecessor is non-zero is where the day is choking:
+      // "12 eligible, 0 armed" is gating; "5 armed, 0 in position" is conversion.
+      var choke = prev !== null && prev > 0 && value === 0;
+      prev = value;
+      return '<div class="rp-funnel-cell' + (choke ? ' is-choke' : '') + '">' +
+        '<b>' + esc(fmtNum(value)) + '</b><span>' + esc(stage.label) + '</span></div>';
+    }).join('');
+    return '<div class="rp-funnel" aria-label="Selection funnel">' + cells + '</div>';
+  }
+
+  function renderAccounting(payload) {
+    var totals = (payload && payload.totals) || {};
+    var closed = ((payload && payload.funnel) || {}).closed_today || {};
+    var market = (payload && payload.market_session) || {};
+    var open = Number(payload.open_position_count || 0);
+    var trades = Number(totals.trades || 0);
+    if (!trades && !open && !market.is_open) return '';
+    var total = Number(totals.total_usd || 0);
+    return '<div class="rp-accounting">' +
+      '<span class="rp-accounting-total ' + pnlClass(total) + '"><small>Today</small>' +
+        esc(fmtSignedMoney(total)) + '</span>' +
+      '<span>realized <b>' + esc(fmtSignedMoney(totals.realized_usd || 0)) + '</b></span>' +
+      '<span>open <b>' + esc(fmtSignedMoney(totals.unrealized_usd || 0)) + '</b></span>' +
+      '<span><b>' + esc(fmtNum(trades)) + '</b> trade' + (trades === 1 ? '' : 's') +
+        ' (' + esc(fmtNum(closed.wins || 0)) + 'W / ' +
+        esc(fmtNum(closed.losses || 0)) + 'L)</span>' +
+      (open
+        ? '<span><b>' + esc(fmtNum(open)) + '</b> open position' +
+          (open === 1 ? '' : 's') + '</span>'
+        : '') +
+    '</div>';
+  }
+
+  // Six conditions, six treatments, six next actions. Replaces the single sentence
+  // that covered ~20 distinct states including hard lane faults.
+  function renderLiveStateScreen(payload) {
+    var lane = (payload && payload.lane) || {};
+    var market = (payload && payload.market_session) || {};
+    var funnel = (payload && payload.funnel) || {};
+    var verdict = String(lane.verdict || 'unknown');
+    var proof = 'loop ' + (fmtAge(lane.control_heartbeat_age_s) || 'never') +
+      ' \u00b7 tape ' + (fmtAge(lane.tape_age_s) || '\u2014') +
+      (market.et_clock ? ' \u00b7 ' + market.et_clock + ' ET' : '');
+
+    // The verdict bar directly above already states the headline and the detail.
+    // Repeating them here is the same redundancy the five stat tiles used to have,
+    // so each body screen carries only what the bar does NOT say: the next action,
+    // the supporting numbers, and the raw status code.
+    if (verdict === 'blind' || verdict === 'halted') {
+      return '<div class="rp-state is-bad">' +
+        '<b>Nothing below is current.</b>' +
+        '<p>No symbol state can be trusted while the lane is reporting this. ' +
+        'The status code is the thing to search for in the runner logs.</p>' +
+        '<span class="rp-state-meta">' +
+          esc(lane.captured_watch_status || 'unknown') + ' \u00b7 ' + esc(proof) + '</span>' +
+        '<div class="rp-state-actions">' +
+          '<button class="rp-btn secondary" type="button" onclick="rpCopyDiagnostics()">' +
+          'Copy diagnostics</button>' +
+          '<button class="rp-btn secondary" type="button" onclick="rpOpenDiagnostics()">' +
+          'Open diagnostics</button>' +
+        '</div>' +
+        '</div>';
+    }
+    if (verdict === 'tape_blind' || verdict === 'degraded' || verdict === 'unknown') {
+      return '<div class="rp-state is-warn">' +
+        '<b>No symbols are being reported.</b>' +
+        '<p>Selection is degraded, so an empty list here is not evidence that ' +
+        'nothing qualified.</p>' +
+        '<span class="rp-state-meta">' +
+          esc(lane.captured_watch_status || 'unknown') + ' \u00b7 ' + esc(proof) + '</span>' +
+        '</div>';
+    }
+    if (verdict === 'idle_closed') {
+      var next = market.next_open_label
+        ? 'Next session \u2014 ' + market.next_open_label +
+          (market.next_open_in ? ', in ' + market.next_open_in + '.' : '.')
+        : '';
+      return '<div class="rp-state is-idle">' +
+        (next ? '<b>' + esc(next) + '</b>' : '<b>Market closed.</b>') +
+        '<p>Chili does not select or arm outside session hours. An empty board ' +
+        'here is the correct state, not a fault.</p>' +
+        '<span class="rp-state-meta">' + esc(proof) + '</span>' +
+        '<div class="rp-state-actions">' +
+          '<button class="rp-btn secondary" type="button" onclick="rpShowLastSession()">' +
+          'View the last session\u2019s replay \u2192</button>' +
+        '</div>' +
+        '</div>';
+    }
+    // Healthy, market open, nothing has qualified: the one screen where a green dot
+    // is legitimate. Nothing is wrong, so there is no action button.
+    var scanned = Number(funnel.routes_scored || 0);
+    var eligible = Number(funnel.policy_eligible || 0);
+    return '<div class="rp-state">' +
+      '<b>' + (scanned
+        ? esc(fmtNum(scanned) + ' routes scored, ' + fmtNum(eligible) + ' passed policy')
+        : 'No routes scored yet this session') + '</b>' +
+      '<p>No symbol has reached setup. The funnel above shows how far each stage ' +
+      'got.</p>' +
+      '<span class="rp-state-meta">' + esc(proof) + '</span>' +
       '</div>';
   }
+
+  window.rpCopyDiagnostics = function() {
+    var pre = document.getElementById('rp-debug');
+    if (!pre) return;
+    var text = pre.textContent || '';
+    if (!navigator.clipboard) {
+      rpOpenDiagnostics();
+      return;
+    }
+    navigator.clipboard.writeText(text).then(function() {
+      setStatus('diagnostics copied', 'done');
+    }, function() {
+      rpOpenDiagnostics();
+    });
+  };
+
+  window.rpOpenDiagnostics = function() {
+    var box = document.getElementById('rp-diagnostics');
+    if (!box) return;
+    box.open = true;
+    box.scrollIntoView({ block: 'nearest' });
+  };
+
+  window.rpShowLastSession = function() {
+    rpSetSurfaceMode('replay');
+  };
+
 
   function renderLive(payload) {
     if (rpSurfaceMode !== 'live') return;
     rpLastLivePayload = payload;
+    // The verdict is the page's answer to "what is Chili doing right now", so it
+    // renders before -- and independently of -- whether there are any symbols.
+    renderVerdictBar(payload);
+    renderHaltBanner(payload);
     var result = livePayloadToReplayResult(payload);
     var symbols = (payload.symbols || []).map(function(row) { return normalizeSym(row.symbol); }).filter(Boolean);
     var structure = symbols.slice().sort().join('|');
@@ -3840,11 +4624,15 @@
     rpLiveChartSignature = chartSignature;
 
     if (!symbols.length) {
-      host.dataset.liveWorkspace = '1';
-      host.innerHTML = '<div id="rp-live-stats">' + renderLiveStats(payload) + '</div>' +
-        renderLiveResearch(payload) +
-        '<div class="rp-empty">No watched, active, or completed Chili symbols today.</div>';
-      updateLiveResearch(payload);
+      host.dataset.liveWorkspace = '';
+      rpLiveStructureSignature = '';
+      // No symbols means no filters, no sort, no pause target and no funnel rows to
+      // scan. Rendering the full toolbar over an empty set spent roughly 5x more
+      // vertical space on inert controls than on the answer.
+      host.innerHTML = renderLaneHealthNote(payload) +
+        renderFunnel(payload) +
+        renderAccounting(payload) +
+        renderLiveStateScreen(payload);
       return;
     }
     if (rebuild) {
@@ -3854,9 +4642,12 @@
       var rows = symbols.map(function(sym, index) {
         return renderLiveSymbolRow(result, sym, rpViewDomain, index < RP_EAGER_ROWS);
       }).join('');
-      host.innerHTML = '<div id="rp-live-stats">' + renderLiveStats(payload) + '</div>' +
+      host.innerHTML = renderLaneHealthNote(payload) +
+        '<div id="rp-live-stats">' + renderFunnel(payload) + renderAccounting(payload) + '</div>' +
         renderLiveResearch(payload) +
-        '<div class="rp-timeline">' + renderViewportControls() + renderRuler(rpViewDomain) + rows + '</div>';
+        // The FSM playback transport is a category error on a now-view: there is no
+        // future to seek to. renderViewportControls() stays replay-only.
+        '<div class="rp-timeline">' + renderRuler(rpViewDomain) + rows + '</div>';
       updateLiveResearch(payload);
       syncPlaybackControls();
       requestVisibleChartRefresh();
@@ -3864,14 +4655,41 @@
     }
 
     var statsHost = document.getElementById('rp-live-stats');
-    if (statsHost) statsHost.innerHTML = renderLiveStats(payload);
+    if (statsHost) {
+      var nextStats = renderFunnel(payload) + renderAccounting(payload);
+      if (statsHost.innerHTML !== nextStats) {
+        statsHost.innerHTML = nextStats;
+        flashChangedValues(payload);
+      }
+    }
     updateLiveResearch(payload);
     document.querySelectorAll('.rp-row-live').forEach(function(row) {
       var sym = normalizeSym(row.dataset.symbol);
       var symbolHost = row.querySelector('.rp-symbol');
       var setupHost = row.querySelector('.rp-setup');
-      if (symbolHost) symbolHost.innerHTML = renderLiveSymbolHeader(result, sym);
-      if (setupHost) setupHost.innerHTML = renderLiveSetup(result, sym, !row.hidden && elementNearViewport(row));
+      // Dirty-check before writing, the way the activity strip already does. An
+      // unconditional innerHTML swap every poll is what made the trace list
+      // unscrollable and blew away focus, selection and tooltips.
+      if (symbolHost) {
+        var nextHeader = renderLiveSymbolHeader(result, sym);
+        if (symbolHost.innerHTML !== nextHeader) symbolHost.innerHTML = nextHeader;
+      }
+      if (setupHost) {
+        var nextSetup = renderLiveSetup(result, sym, !row.hidden && elementNearViewport(row));
+        if (setupHost.innerHTML !== nextSetup) {
+          var list = setupHost.querySelector('.rp-trace-list');
+          var keepScroll = list ? list.scrollTop : 0;
+          var focused = document.activeElement;
+          var refocus = focused && setupHost.contains(focused) ? focused.getAttribute('data-minute') : null;
+          setupHost.innerHTML = nextSetup;
+          var nextList = setupHost.querySelector('.rp-trace-list');
+          if (nextList && keepScroll) nextList.scrollTop = keepScroll;
+          if (refocus) {
+            var again = setupHost.querySelector('[data-minute="' + refocus + '"]');
+            if (again) { try { again.focus({ preventScroll: true }); } catch (err) { /* gone */ } }
+          }
+        }
+      }
       if (chartChanged) {
         var chart = row.querySelector('.rp-chart');
         if (chart) {
@@ -4132,7 +4950,9 @@
       label.textContent = 'Read-only observer - waiting for a runtime tick';
       return;
     }
-    if (age > 30) dot.classList.add('stale');
+    var staleAfter = Number(((payload || {}).lane || {}).stale_after_s || 0) ||
+      Number(((payload || {}).lane || {}).heartbeat_interval_s || 0) * 2.5 || 75;
+    if (age > staleAfter) dot.classList.add('stale');
     var ageText = age < 2 ? 'updated now' : age < 60 ? 'updated ' + age + 's ago' : 'updated ' + Math.floor(age / 60) + 'm ago';
     label.textContent = 'Read-only observer - ' + ageText + ' - auto refresh';
   }
@@ -4160,6 +4980,17 @@
   function pollLiveSnapshot() {
     if (rpSurfaceMode !== 'live' || rpLivePaused || document.hidden || rpLiveAbort) return;
     rpLiveAbort = typeof AbortController === 'function' ? new AbortController() : null;
+    var ctrl = rpLiveAbort;
+    var watchdog = null;
+    if (ctrl) {
+      watchdog = setTimeout(function() {
+        ctrl._timedOut = true;
+        try { ctrl.abort(); } catch (err) { /* already settled */ }
+      }, RP_FETCH_TIMEOUT_MS);
+    }
+    function clearWatchdog() {
+      if (watchdog) { clearTimeout(watchdog); watchdog = null; }
+    }
     var options = { credentials: 'same-origin', cache: 'no-store' };
     if (rpLiveAbort) options.signal = rpLiveAbort.signal;
     fetch('/api/trading/momentum/replay/live', options)
@@ -4167,28 +4998,142 @@
         return resp.json().then(function(body) { return { ok: resp.ok, status: resp.status, body: body }; });
       })
       .then(function(out) {
+        clearWatchdog();
         rpLiveAbort = null;
         if (rpSurfaceMode !== 'live') return;
+        if (out.status === 403) {
+          // Not transient. Retrying forever at 4/8/16/30/30s with copy that names
+          // an action but offers no control to perform it is a dead end.
+          var unpaired = new Error('This browser isn\u2019t paired.');
+          unpaired.rpFatal = true;
+          throw unpaired;
+        }
         if (!out.ok || !out.body || !out.body.ok) {
-          throw new Error(out.status === 403 ? 'Pair this browser to view live trading.' : ((out.body || {}).detail || 'Live observer unavailable.'));
+          throw new Error(((out.body || {}).detail) || 'Live observer unavailable.');
         }
         rpLiveFailureCount = 0;
+        rpLastPollOkAt = Date.now();
         updateLiveFreshness(out.body, null);
         setStatus('live', 'done');
         renderLive(out.body);
         scheduleLivePoll(Number(out.body.refresh_after_ms || 3000));
       })
       .catch(function(err) {
-        var aborted = err && err.name === 'AbortError';
+        clearWatchdog();
+        var timedOut = !!(ctrl && ctrl._timedOut);
+        // A timed-out abort is a FAILURE, not a deliberate cancellation. Taking the
+        // AbortError early-return here is what let a hung request freeze the page.
+        var aborted = err && err.name === 'AbortError' && !timedOut;
         rpLiveAbort = null;
         if (aborted || rpSurfaceMode !== 'live') return;
+        if (err && err.rpFatal) {
+          stopLivePolling();
+          setStatus('not paired', 'error');
+          renderUnpaired();
+          return;
+        }
         rpLiveFailureCount += 1;
-        var message = err && err.message ? err.message : 'Live observer unavailable.';
+        var message = timedOut
+          ? 'The live observer did not respond within ' +
+            Math.round(RP_FETCH_TIMEOUT_MS / 1000) + 's.'
+          : (err && err.message ? err.message : 'Live observer unavailable.');
         updateLiveFreshness(null, message);
         setStatus('retrying', 'error');
         if (!rpLastLivePayload) renderLoading(message);
         scheduleLivePoll(Math.min(30000, 2000 * Math.pow(2, Math.min(4, rpLiveFailureCount))));
       });
+  }
+
+  function renderUnpaired() {
+    var host = document.getElementById('rp-workspace');
+    var verdict = document.getElementById('rp-live-verdict');
+    if (verdict) {
+      verdict.innerHTML = '<div class="rp-verdict" data-severity="critical">' +
+        '<div class="rp-verdict-main" role="status" aria-live="assertive">' +
+        '<h2 class="rp-verdict-headline">This browser isn\u2019t paired.</h2>' +
+        '<p class="rp-verdict-detail">Live trading state is only served to a paired ' +
+        'device.</p></div>' +
+        '<div class="rp-verdict-side"><span class="rp-verdict-state">' +
+        '<span class="rp-verdict-dot"></span>not paired</span></div></div>';
+      verdict.hidden = false;
+    }
+    if (host) {
+      // The bar above already states the headline; the body carries the consequence
+      // and the way out.
+      host.innerHTML = '<div class="rp-state is-bad">' +
+        '<b>Polling has stopped.</b>' +
+        '<p>Nothing on this page will update until this browser is paired. This is ' +
+        'not a retryable error, so the observer is no longer asking.</p>' +
+        '<div class="rp-state-actions">' +
+        '<a class="rp-btn" href="/chat">Pair this browser \u2192</a></div></div>';
+    }
+  }
+
+  // Ages must decay on their own. liveAgeLabel is call-driven only, so during a
+  // backoff or a pause every "updated 4s ago" froze as literal text and actively
+  // lied. This also owns the no-updates watchdog screen.
+  function startDecayTicker() {
+    if (rpDecayTimer) return;
+    rpDecayTimer = setInterval(function() {
+      if (rpSurfaceMode !== 'live' || document.hidden) return;
+      var proof = document.getElementById('rp-verdict-proof');
+      if (proof && rpLastLivePayload && !rpLivePaused) {
+        var lane = rpLastLivePayload.lane || {};
+        var drift = Math.max(0, (Date.now() - rpLastPollOkAt) / 1000);
+        // Re-derive from the wall clock so the ages keep moving between polls.
+        proof.innerHTML = verdictProofHtml({
+          lane: Object.assign({}, lane, {
+            control_heartbeat_age_s: lane.control_heartbeat_age_s == null
+              ? null : lane.control_heartbeat_age_s + drift,
+            tape_age_s: lane.tape_age_s == null ? null : lane.tape_age_s + drift
+          }),
+          symbols: rpLastLivePayload.symbols,
+          market_session: rpLastLivePayload.market_session
+        });
+      }
+      if (rpLivePaused && rpLivePausedAt) {
+        var held = document.querySelector('.rp-verdict-detail');
+        if (held) {
+          held.textContent = 'Nothing below is updating \u2014 held for ' +
+            fmtAge((Date.now() - rpLivePausedAt) / 1000) +
+            '. Press play to resume live updates.';
+        }
+        return;
+      }
+      // The page stopped receiving updates: say so instead of showing stale state
+      // at full fidelity behind a green dot.
+      var budget = Number((rpLastLivePayload || {}).refresh_after_ms || 3000) * 3 +
+        RP_FETCH_TIMEOUT_MS;
+      if (rpLastPollOkAt && Date.now() - rpLastPollOkAt > budget) {
+        var bar = document.querySelector('#rp-live-verdict .rp-verdict');
+        if (bar && bar.dataset.severity !== 'critical') {
+          bar.dataset.severity = 'critical';
+          var headline = bar.querySelector('.rp-verdict-headline');
+          if (headline) {
+            headline.textContent = 'Chili\u2019s status is unknown. The page stopped ' +
+              'receiving updates.';
+          }
+          var state = bar.querySelector('.rp-verdict-state');
+          if (state) {
+            state.innerHTML = '<span class="rp-verdict-dot"></span>no updates';
+          }
+        }
+        var stale = bar && bar.querySelector('.rp-verdict-detail');
+        if (bar && !stale) {
+          // A healthy verdict renders no detail element, so one has to be created
+          // or the "how stale is this" line silently never appears.
+          stale = document.createElement('p');
+          stale.className = 'rp-verdict-detail';
+          var main = bar.querySelector('.rp-verdict-main');
+          if (main) main.appendChild(stale);
+        }
+        if (stale) {
+          stale.textContent = 'Last successful snapshot ' +
+            fmtAge((Date.now() - rpLastPollOkAt) / 1000) +
+            ' ago. Everything below is frozen at that moment.';
+        }
+      }
+    }, 1000);
   }
 
   function applySurfaceModeUi(mode) {
@@ -4202,11 +5147,34 @@
     var title = document.getElementById('rp-command-title');
     var pageSubtitle = document.getElementById('rp-page-subtitle');
     var subtitle = document.getElementById('rp-subtitle');
-    if (replayTab) replayTab.setAttribute('aria-selected', replay ? 'true' : 'false');
-    if (liveTab) liveTab.setAttribute('aria-selected', replay ? 'false' : 'true');
+    var command = document.getElementById('rp-command');
+    var panel = document.getElementById('rp-panel');
+    var verdict = document.getElementById('rp-live-verdict');
+    var halt = document.getElementById('rp-live-halt');
+    var shell = document.querySelector('.rp-page');
+    if (replayTab) {
+      replayTab.setAttribute('aria-selected', replay ? 'true' : 'false');
+      replayTab.setAttribute('tabindex', replay ? '0' : '-1');
+    }
+    if (liveTab) {
+      liveTab.setAttribute('aria-selected', replay ? 'false' : 'true');
+      liveTab.setAttribute('tabindex', replay ? '-1' : '0');
+    }
     if (replayControls) replayControls.hidden = !replay;
     if (liveControls) liveControls.hidden = replay;
     if (archive) archive.hidden = !replay;
+    if (verdict) verdict.hidden = replay;
+    if (halt && replay) halt.hidden = true;
+    // The section previously announced "Replay timeline" while showing live money.
+    if (panel) {
+      panel.setAttribute('aria-label', replay ? 'Replay timeline' : 'Live trading now');
+      panel.setAttribute('aria-labelledby', replay ? 'rp-surface-replay' : 'rp-surface-live');
+    }
+    if (shell) shell.classList.toggle('rp-live-mode', !replay);
+    // In live mode the static block is COLLAPSED rather than restated. The largest
+    // type on the page must always be a value that changes, and both the H2 and the
+    // body copy here are constants.
+    if (command) command.hidden = !replay;
     if (eyebrow) eyebrow.textContent = replay ? 'Replay v3' : 'Live observer';
     if (title) title.textContent = replay ? 'Trading behavior timeline' : 'Chili trading now';
     if (pageSubtitle) pageSubtitle.textContent = replay
@@ -4227,6 +5195,7 @@
     }
     stopLivePolling();
     rpSurfaceMode = next;
+    try { localStorage.setItem('chili:replay:surface', next); } catch (err) { /* private mode */ }
     applySurfaceModeUi(next);
     clearPinnedChart();
     rpFullDomain = null;
@@ -4355,6 +5324,10 @@
   window.rpToggleLivePause = function() {
     if (rpSurfaceMode !== 'live') return;
     rpLivePaused = !rpLivePaused;
+    rpLivePausedAt = rpLivePaused ? Date.now() : null;
+    var pausedBody = document.getElementById('rp-workspace');
+    if (pausedBody) pausedBody.classList.toggle('rp-paused-body', rpLivePaused);
+    if (rpLastLivePayload) renderVerdictBar(rpLastLivePayload);
     if (rpLivePaused) {
       stopLivePolling();
       setStatus('paused');
@@ -4405,7 +5378,32 @@
       }
     });
     applySurfaceModeUi(rpSurfaceMode);
-    loadHistory();
+    startDecayTicker();
+    // Roving tabindex + arrow keys: the tablist declared role=tab/aria-selected but
+    // implemented none of the keyboard contract that goes with it.
+    var tabs = [document.getElementById('rp-surface-replay'), document.getElementById('rp-surface-live')];
+    tabs.forEach(function(tab, index) {
+      if (!tab) return;
+      tab.addEventListener('keydown', function(event) {
+        var key = event.key;
+        if (key !== 'ArrowLeft' && key !== 'ArrowRight' && key !== 'Home' && key !== 'End') return;
+        event.preventDefault();
+        var target = key === 'Home' ? 0
+          : key === 'End' ? tabs.length - 1
+          : (index + (key === 'ArrowRight' ? 1 : tabs.length - 1)) % tabs.length;
+        var next = tabs[target];
+        if (!next) return;
+        next.focus();
+        rpSetSurfaceMode(next.id === 'rp-surface-live' ? 'live' : 'replay');
+      });
+    });
+    if (rpSurfaceMode === 'live') {
+      setStatus('connecting', 'running');
+      renderLoading('Connecting to persisted Chili state\u2026');
+      scheduleLivePoll(0);
+    } else {
+      loadHistory();
+    }
   });
 })();
 </script>
