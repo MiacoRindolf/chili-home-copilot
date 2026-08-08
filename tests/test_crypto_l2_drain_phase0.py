@@ -11,6 +11,7 @@ sink.
 
 from __future__ import annotations
 
+import ast
 import json
 from pathlib import Path
 
@@ -233,6 +234,47 @@ def test_no_equity_keys_enter_ring(clean_ring):
     assert "AAPL" not in pids and "TSLA" not in pids
 
 
+def _references_in_code(src: str, needle: str) -> bool:
+    """True iff ``needle`` appears in EXECUTABLE code — a (non-docstring) string
+    literal (e.g. a SQL query ``... FROM fast_orderbook ...``), an identifier, or an
+    import — as opposed to merely a docstring/comment mention. Comments are absent
+    from the AST entirely; docstrings (the first string statement of a module / class
+    / function) are the only string literals excluded. This is the original bare
+    substring scan MINUS prose-only hits, so the isolation guarantee is not weakened:
+    any real read/import of the sink is still flagged. Falls back to a bare substring
+    scan if the file cannot be parsed (fail-closed)."""
+    try:
+        tree = ast.parse(src)
+    except SyntaxError:  # pragma: no cover - never expected for in-tree modules
+        return needle in src
+    docstring_ids = set()
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.Module, ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            body = getattr(node, "body", None) or []
+            if (
+                body
+                and isinstance(body[0], ast.Expr)
+                and isinstance(body[0].value, ast.Constant)
+                and isinstance(body[0].value.value, str)
+            ):
+                docstring_ids.add(id(body[0].value))
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Constant) and isinstance(node.value, str):
+            if id(node) not in docstring_ids and needle in node.value:
+                return True  # SQL query string / non-docstring literal -> a real read
+        elif isinstance(node, ast.Name) and needle in node.id:
+            return True
+        elif isinstance(node, ast.Attribute) and needle in node.attr:
+            return True
+        elif isinstance(node, ast.ImportFrom):
+            if (node.module and needle in node.module) or any(needle in a.name for a in node.names):
+                return True
+        elif isinstance(node, ast.Import):
+            if any(needle in a.name for a in node.names):
+                return True
+    return False
+
+
 def test_momentum_neural_equity_path_isolated_from_crypto_l2_sink():
     """Equity decisions must never be perturbed by crypto rows. The crypto L2 sink
     table (``fast_orderbook``) may be READ only in ``pipeline.py`` and only inside
@@ -244,7 +286,7 @@ def test_momentum_neural_equity_path_isolated_from_crypto_l2_sink():
     never imported by the equity decision path."""
     mn = Path(__file__).resolve().parents[1] / "app" / "services" / "trading" / "momentum_neural"
     writepath_offenders = []   # the write path / audit log must never be imported here
-    sink_offenders = []        # the sink table may be read ONLY in pipeline.py
+    sink_offenders = []        # the sink table may be READ ONLY in pipeline.py
     for py in mn.rglob("*.py"):
         txt = py.read_text(encoding="utf-8", errors="ignore")
         # IMPORTING the write-path module (not the bare substring — the legitimate
@@ -256,7 +298,11 @@ def test_momentum_neural_equity_path_isolated_from_crypto_l2_sink():
             or "trading_microstructure_log" in txt
         ):
             writepath_offenders.append(py.name)
-        if "fast_orderbook" in txt and py.name != "pipeline.py":
+        # Match a REAL read of the sink table (SQL string / identifier / import), not a
+        # bare prose mention: ``entry_gates.py`` documents that its reusable L2 reader is
+        # class-aware ("crypto ``fast_orderbook``") in a DOCSTRING but never queries the
+        # table — the actual reads live in the crypto-gated ``pipeline.py`` reader it calls.
+        if py.name != "pipeline.py" and _references_in_code(txt, "fast_orderbook"):
             sink_offenders.append(py.name)
     assert writepath_offenders == [], (
         f"momentum_neural imports the crypto L2 write path/audit log: {writepath_offenders}"
