@@ -1070,10 +1070,12 @@ class BoundedIqfeedL1CaptureHandoff:
 
     def health(self) -> Mapping[str, Any]:
         with self._condition:
+            thread = self._thread
             return {
                 "network_fallback_allowed": False,
                 "started": self._started,
                 "accepting": self._accepting,
+                "thread_alive": bool(thread and thread.is_alive()),
                 "queue_depth": self._queue.qsize(),
                 "unfinished_tasks": self._queue.unfinished_tasks,
                 "max_pending_events": self.max_pending_events,

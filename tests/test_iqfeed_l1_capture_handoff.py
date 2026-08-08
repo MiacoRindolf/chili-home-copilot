@@ -136,6 +136,16 @@ def _handoff(
     )
 
 
+def test_handoff_health_exposes_worker_thread_liveness() -> None:
+    handoff = _handoff(_Sink())
+    assert handoff.health()["thread_alive"] is False
+
+    handoff.start()
+    assert handoff.health()["thread_alive"] is True
+
+    assert handoff.close()["thread_alive"] is False
+
+
 @pytest.mark.parametrize(
     "stream",
     [CaptureStream.NBBO_QUOTE, CaptureStream.IQFEED_PRINT],
