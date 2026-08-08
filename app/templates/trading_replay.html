@@ -48,6 +48,26 @@
   --rp-r-pill: 999px;
   --rp-ctl-h: 32px;
 }
+/* --ws-text-3 measures 3.15:1 on --ws-surface-2, below AA -- and it carries the
+   proof line, the funnel labels and the state meta, which is precisely the text
+   scanned first. Lifted here rather than in workspace.css so the shared cockpit
+   tokens are untouched. */
+:root { --rp-soft: #8b98ab; }
+/* workspace.css's light theme overrides only the -bg tints (--ws-up-bg etc.) and
+   keeps the dark-tuned hues, so --ws-up lands at 1.75:1 on white and every P/L
+   number disappears for anyone who explicitly picks light. These are the same
+   semantics re-tuned for a light surface; all clear AA. */
+:root[data-theme="light"] {
+  --rp-blue: #1d4ed8;
+  --rp-blue-2: #1e40af;
+  --rp-green: #047857;
+  --rp-amber: #b45309;
+  --rp-gold: #b45309;
+  --rp-red: #be123c;
+  --rp-purple: #7e22ce;
+  --rp-grey: #475569;
+  --rp-soft: #5b6779;
+}
 .rp-page {
   min-height: 100vh;
   background: var(--rp-bg);
@@ -1512,7 +1532,17 @@
 <script>
 (function() {
   var rpPoll = null;
-  var rpSurfaceMode = 'replay';
+  var rpSurfaceMode = (function() {
+    // Honour #live / #replay, then the persisted choice, then default to live:
+    // this page's job is "what is Chili doing NOW".
+    try {
+      var hash = String(window.location.hash || '').replace('#', '').toLowerCase();
+      if (hash === 'live' || hash === 'replay') return hash;
+      var saved = localStorage.getItem('chili:replay:surface');
+      if (saved === 'live' || saved === 'replay') return saved;
+    } catch (err) { /* private mode */ }
+    return 'live';
+  })();
   var rpHistoryRows = [];
   var rpLastResult = null;
   var rpLastReplayResult = null;
@@ -1777,7 +1807,13 @@
   function fmtMoney(value) {
     var n = Number(value || 0);
     var sign = n < 0 ? '-' : '';
-    return sign + '$' + Math.abs(n).toLocaleString(undefined, { maximumFractionDigits: 2 });
+    // minimumFractionDigits matters as much as the maximum: without it $19.60 renders
+    // as "$19.6", so the string LENGTH changes as cents land and the column jitters
+    // on every poll -- which is exactly what tabular-nums is there to prevent.
+    return sign + '$' + Math.abs(n).toLocaleString(undefined, {
+      minimumFractionDigits: 2,
+      maximumFractionDigits: 2
+    });
   }
 
   function fmtSignedMoney(value) {
@@ -2953,7 +2989,10 @@
 
   function elementNearViewport(el) {
     if (!el || !el.getBoundingClientRect) return false;
+    if (el.hidden) return false;
     var rect = el.getBoundingClientRect();
+    // A display:none element reports an all-zero rect, which satisfies both bounds.
+    if (!rect.width && !rect.height) return false;
     var margin = Math.max(420, window.innerHeight * 0.65);
     return rect.bottom >= -margin && rect.top <= window.innerHeight + margin;
   }
@@ -4055,13 +4094,23 @@
     var total = 0;
     var visible = 0;
     var rows = liveSortedRows(Array.prototype.slice.call(document.querySelectorAll('.rp-row-live')));
+    // Reorder real DOM nodes rather than painting CSS `order` over them, so the
+    // keyboard and a screen reader traverse what the operator actually sees.
+    // appendChild blurs an attached node, so focus is captured and restored.
+    var active = document.activeElement;
+    var activeInRows = active && active.closest && active.closest('.rp-row-live');
+    var parent = rows.length ? rows[0].row.parentNode : null;
     rows.forEach(function(record, index) {
       var show = liveFilterMatches(record.meta, record.sym);
       total += 1;
       if (show) visible += 1;
       record.row.hidden = !show;
-      record.row.style.order = String(10 + index);
+      record.row.style.order = '';
+      if (parent) parent.appendChild(record.row);
     });
+    if (activeInRows && active && document.contains(active) && document.activeElement !== active) {
+      try { active.focus({ preventScroll: true }); } catch (err) { /* detached */ }
+    }
     if (rpPinnedChart && rpPinnedChart.closest('.rp-row-live') && rpPinnedChart.closest('.rp-row-live').hidden) clearPinnedChart();
     var summary = document.getElementById('rp-live-focus-summary');
     if (summary) summary.textContent = visible + ' / ' + total;
@@ -4435,13 +4484,21 @@
     var market = (payload && payload.market_session) || {};
     var funnel = (payload && payload.funnel) || {};
     var verdict = String(lane.verdict || 'unknown');
+    var proof = 'loop ' + (fmtAge(lane.control_heartbeat_age_s) || 'never') +
+      ' \u00b7 tape ' + (fmtAge(lane.tape_age_s) || '\u2014') +
+      (market.et_clock ? ' \u00b7 ' + market.et_clock + ' ET' : '');
 
+    // The verdict bar directly above already states the headline and the detail.
+    // Repeating them here is the same redundancy the five stat tiles used to have,
+    // so each body screen carries only what the bar does NOT say: the next action,
+    // the supporting numbers, and the raw status code.
     if (verdict === 'blind' || verdict === 'halted') {
       return '<div class="rp-state is-bad">' +
-        '<b>' + esc(lane.headline || 'Chili is not seeing the market.') + '</b>' +
-        '<p>' + esc(lane.detail || '') + '</p>' +
-        '<span class="rp-state-meta">status ' +
-          esc(lane.captured_watch_status || 'unknown') + '</span>' +
+        '<b>Nothing below is current.</b>' +
+        '<p>No symbol state can be trusted while the lane is reporting this. ' +
+        'The status code is the thing to search for in the runner logs.</p>' +
+        '<span class="rp-state-meta">' +
+          esc(lane.captured_watch_status || 'unknown') + ' \u00b7 ' + esc(proof) + '</span>' +
         '<div class="rp-state-actions">' +
           '<button class="rp-btn secondary" type="button" onclick="rpCopyDiagnostics()">' +
           'Copy diagnostics</button>' +
@@ -4452,11 +4509,11 @@
     }
     if (verdict === 'tape_blind' || verdict === 'degraded' || verdict === 'unknown') {
       return '<div class="rp-state is-warn">' +
-        '<b>' + esc(lane.headline || '') + '</b>' +
-        '<p>' + esc(lane.detail || '') + '</p>' +
-        '<span class="rp-state-meta">' + esc(
-          'loop ' + (fmtAge(lane.control_heartbeat_age_s) || 'never') +
-          ' \u00b7 tape ' + (fmtAge(lane.tape_age_s) || '\u2014')) + '</span>' +
+        '<b>No symbols are being reported.</b>' +
+        '<p>Selection is degraded, so an empty list here is not evidence that ' +
+        'nothing qualified.</p>' +
+        '<span class="rp-state-meta">' +
+          esc(lane.captured_watch_status || 'unknown') + ' \u00b7 ' + esc(proof) + '</span>' +
         '</div>';
     }
     if (verdict === 'idle_closed') {
@@ -4465,29 +4522,27 @@
           (market.next_open_in ? ', in ' + market.next_open_in + '.' : '.')
         : '';
       return '<div class="rp-state is-idle">' +
-        '<b>' + esc(lane.headline || 'Chili is idle.') + '</b>' +
-        '<p>Nothing is expected to happen until the next session opens.</p>' +
-        (next ? '<span class="rp-state-meta">' + esc(next) + '</span>' : '') +
+        (next ? '<b>' + esc(next) + '</b>' : '<b>Market closed.</b>') +
+        '<p>Chili does not select or arm outside session hours. An empty board ' +
+        'here is the correct state, not a fault.</p>' +
+        '<span class="rp-state-meta">' + esc(proof) + '</span>' +
         '<div class="rp-state-actions">' +
           '<button class="rp-btn secondary" type="button" onclick="rpShowLastSession()">' +
           'View the last session\u2019s replay \u2192</button>' +
         '</div>' +
         '</div>';
     }
-    // Healthy, market open, nothing has qualified: the only screen where a green
-    // dot is legitimate. Nothing is wrong, so there is no action button.
+    // Healthy, market open, nothing has qualified: the one screen where a green dot
+    // is legitimate. Nothing is wrong, so there is no action button.
     var scanned = Number(funnel.routes_scored || 0);
     var eligible = Number(funnel.policy_eligible || 0);
     return '<div class="rp-state">' +
-      '<b>Chili is watching. Nothing has qualified yet.</b>' +
-      '<p>' + (scanned
-        ? esc('Scanned ' + fmtNum(scanned) + ' routes this session; ' +
-          fmtNum(eligible) + ' passed policy. No symbol has reached setup.')
-        : 'No symbol has reached setup yet this session.') + '</p>' +
-      '<span class="rp-state-meta">' + esc(
-        'loop ' + (fmtAge(lane.control_heartbeat_age_s) || 'never') +
-        ' \u00b7 tape ' + (fmtAge(lane.tape_age_s) || '\u2014') +
-        (market.et_clock ? ' \u00b7 ' + market.et_clock + ' ET' : '')) + '</span>' +
+      '<b>' + (scanned
+        ? esc(fmtNum(scanned) + ' routes scored, ' + fmtNum(eligible) + ' passed policy')
+        : 'No routes scored yet this session') + '</b>' +
+      '<p>No symbol has reached setup. The funnel above shows how far each stage ' +
+      'got.</p>' +
+      '<span class="rp-state-meta">' + esc(proof) + '</span>' +
       '</div>';
   }
 
@@ -4612,8 +4667,29 @@
       var sym = normalizeSym(row.dataset.symbol);
       var symbolHost = row.querySelector('.rp-symbol');
       var setupHost = row.querySelector('.rp-setup');
-      if (symbolHost) symbolHost.innerHTML = renderLiveSymbolHeader(result, sym);
-      if (setupHost) setupHost.innerHTML = renderLiveSetup(result, sym, !row.hidden && elementNearViewport(row));
+      // Dirty-check before writing, the way the activity strip already does. An
+      // unconditional innerHTML swap every poll is what made the trace list
+      // unscrollable and blew away focus, selection and tooltips.
+      if (symbolHost) {
+        var nextHeader = renderLiveSymbolHeader(result, sym);
+        if (symbolHost.innerHTML !== nextHeader) symbolHost.innerHTML = nextHeader;
+      }
+      if (setupHost) {
+        var nextSetup = renderLiveSetup(result, sym, !row.hidden && elementNearViewport(row));
+        if (setupHost.innerHTML !== nextSetup) {
+          var list = setupHost.querySelector('.rp-trace-list');
+          var keepScroll = list ? list.scrollTop : 0;
+          var focused = document.activeElement;
+          var refocus = focused && setupHost.contains(focused) ? focused.getAttribute('data-minute') : null;
+          setupHost.innerHTML = nextSetup;
+          var nextList = setupHost.querySelector('.rp-trace-list');
+          if (nextList && keepScroll) nextList.scrollTop = keepScroll;
+          if (refocus) {
+            var again = setupHost.querySelector('[data-minute="' + refocus + '"]');
+            if (again) { try { again.focus({ preventScroll: true }); } catch (err) { /* gone */ } }
+          }
+        }
+      }
       if (chartChanged) {
         var chart = row.querySelector('.rp-chart');
         if (chart) {
@@ -4874,7 +4950,9 @@
       label.textContent = 'Read-only observer - waiting for a runtime tick';
       return;
     }
-    if (age > 30) dot.classList.add('stale');
+    var staleAfter = Number(((payload || {}).lane || {}).stale_after_s || 0) ||
+      Number(((payload || {}).lane || {}).heartbeat_interval_s || 0) * 2.5 || 75;
+    if (age > staleAfter) dot.classList.add('stale');
     var ageText = age < 2 ? 'updated now' : age < 60 ? 'updated ' + age + 's ago' : 'updated ' + Math.floor(age / 60) + 'm ago';
     label.textContent = 'Read-only observer - ' + ageText + ' - auto refresh';
   }
@@ -4902,6 +4980,17 @@
   function pollLiveSnapshot() {
     if (rpSurfaceMode !== 'live' || rpLivePaused || document.hidden || rpLiveAbort) return;
     rpLiveAbort = typeof AbortController === 'function' ? new AbortController() : null;
+    var ctrl = rpLiveAbort;
+    var watchdog = null;
+    if (ctrl) {
+      watchdog = setTimeout(function() {
+        ctrl._timedOut = true;
+        try { ctrl.abort(); } catch (err) { /* already settled */ }
+      }, RP_FETCH_TIMEOUT_MS);
+    }
+    function clearWatchdog() {
+      if (watchdog) { clearTimeout(watchdog); watchdog = null; }
+    }
     var options = { credentials: 'same-origin', cache: 'no-store' };
     if (rpLiveAbort) options.signal = rpLiveAbort.signal;
     fetch('/api/trading/momentum/replay/live', options)
@@ -4909,28 +4998,142 @@
         return resp.json().then(function(body) { return { ok: resp.ok, status: resp.status, body: body }; });
       })
       .then(function(out) {
+        clearWatchdog();
         rpLiveAbort = null;
         if (rpSurfaceMode !== 'live') return;
+        if (out.status === 403) {
+          // Not transient. Retrying forever at 4/8/16/30/30s with copy that names
+          // an action but offers no control to perform it is a dead end.
+          var unpaired = new Error('This browser isn\u2019t paired.');
+          unpaired.rpFatal = true;
+          throw unpaired;
+        }
         if (!out.ok || !out.body || !out.body.ok) {
-          throw new Error(out.status === 403 ? 'Pair this browser to view live trading.' : ((out.body || {}).detail || 'Live observer unavailable.'));
+          throw new Error(((out.body || {}).detail) || 'Live observer unavailable.');
         }
         rpLiveFailureCount = 0;
+        rpLastPollOkAt = Date.now();
         updateLiveFreshness(out.body, null);
         setStatus('live', 'done');
         renderLive(out.body);
         scheduleLivePoll(Number(out.body.refresh_after_ms || 3000));
       })
       .catch(function(err) {
-        var aborted = err && err.name === 'AbortError';
+        clearWatchdog();
+        var timedOut = !!(ctrl && ctrl._timedOut);
+        // A timed-out abort is a FAILURE, not a deliberate cancellation. Taking the
+        // AbortError early-return here is what let a hung request freeze the page.
+        var aborted = err && err.name === 'AbortError' && !timedOut;
         rpLiveAbort = null;
         if (aborted || rpSurfaceMode !== 'live') return;
+        if (err && err.rpFatal) {
+          stopLivePolling();
+          setStatus('not paired', 'error');
+          renderUnpaired();
+          return;
+        }
         rpLiveFailureCount += 1;
-        var message = err && err.message ? err.message : 'Live observer unavailable.';
+        var message = timedOut
+          ? 'The live observer did not respond within ' +
+            Math.round(RP_FETCH_TIMEOUT_MS / 1000) + 's.'
+          : (err && err.message ? err.message : 'Live observer unavailable.');
         updateLiveFreshness(null, message);
         setStatus('retrying', 'error');
         if (!rpLastLivePayload) renderLoading(message);
         scheduleLivePoll(Math.min(30000, 2000 * Math.pow(2, Math.min(4, rpLiveFailureCount))));
       });
+  }
+
+  function renderUnpaired() {
+    var host = document.getElementById('rp-workspace');
+    var verdict = document.getElementById('rp-live-verdict');
+    if (verdict) {
+      verdict.innerHTML = '<div class="rp-verdict" data-severity="critical">' +
+        '<div class="rp-verdict-main" role="status" aria-live="assertive">' +
+        '<h2 class="rp-verdict-headline">This browser isn\u2019t paired.</h2>' +
+        '<p class="rp-verdict-detail">Live trading state is only served to a paired ' +
+        'device.</p></div>' +
+        '<div class="rp-verdict-side"><span class="rp-verdict-state">' +
+        '<span class="rp-verdict-dot"></span>not paired</span></div></div>';
+      verdict.hidden = false;
+    }
+    if (host) {
+      // The bar above already states the headline; the body carries the consequence
+      // and the way out.
+      host.innerHTML = '<div class="rp-state is-bad">' +
+        '<b>Polling has stopped.</b>' +
+        '<p>Nothing on this page will update until this browser is paired. This is ' +
+        'not a retryable error, so the observer is no longer asking.</p>' +
+        '<div class="rp-state-actions">' +
+        '<a class="rp-btn" href="/chat">Pair this browser \u2192</a></div></div>';
+    }
+  }
+
+  // Ages must decay on their own. liveAgeLabel is call-driven only, so during a
+  // backoff or a pause every "updated 4s ago" froze as literal text and actively
+  // lied. This also owns the no-updates watchdog screen.
+  function startDecayTicker() {
+    if (rpDecayTimer) return;
+    rpDecayTimer = setInterval(function() {
+      if (rpSurfaceMode !== 'live' || document.hidden) return;
+      var proof = document.getElementById('rp-verdict-proof');
+      if (proof && rpLastLivePayload && !rpLivePaused) {
+        var lane = rpLastLivePayload.lane || {};
+        var drift = Math.max(0, (Date.now() - rpLastPollOkAt) / 1000);
+        // Re-derive from the wall clock so the ages keep moving between polls.
+        proof.innerHTML = verdictProofHtml({
+          lane: Object.assign({}, lane, {
+            control_heartbeat_age_s: lane.control_heartbeat_age_s == null
+              ? null : lane.control_heartbeat_age_s + drift,
+            tape_age_s: lane.tape_age_s == null ? null : lane.tape_age_s + drift
+          }),
+          symbols: rpLastLivePayload.symbols,
+          market_session: rpLastLivePayload.market_session
+        });
+      }
+      if (rpLivePaused && rpLivePausedAt) {
+        var held = document.querySelector('.rp-verdict-detail');
+        if (held) {
+          held.textContent = 'Nothing below is updating \u2014 held for ' +
+            fmtAge((Date.now() - rpLivePausedAt) / 1000) +
+            '. Press play to resume live updates.';
+        }
+        return;
+      }
+      // The page stopped receiving updates: say so instead of showing stale state
+      // at full fidelity behind a green dot.
+      var budget = Number((rpLastLivePayload || {}).refresh_after_ms || 3000) * 3 +
+        RP_FETCH_TIMEOUT_MS;
+      if (rpLastPollOkAt && Date.now() - rpLastPollOkAt > budget) {
+        var bar = document.querySelector('#rp-live-verdict .rp-verdict');
+        if (bar && bar.dataset.severity !== 'critical') {
+          bar.dataset.severity = 'critical';
+          var headline = bar.querySelector('.rp-verdict-headline');
+          if (headline) {
+            headline.textContent = 'Chili\u2019s status is unknown. The page stopped ' +
+              'receiving updates.';
+          }
+          var state = bar.querySelector('.rp-verdict-state');
+          if (state) {
+            state.innerHTML = '<span class="rp-verdict-dot"></span>no updates';
+          }
+        }
+        var stale = bar && bar.querySelector('.rp-verdict-detail');
+        if (bar && !stale) {
+          // A healthy verdict renders no detail element, so one has to be created
+          // or the "how stale is this" line silently never appears.
+          stale = document.createElement('p');
+          stale.className = 'rp-verdict-detail';
+          var main = bar.querySelector('.rp-verdict-main');
+          if (main) main.appendChild(stale);
+        }
+        if (stale) {
+          stale.textContent = 'Last successful snapshot ' +
+            fmtAge((Date.now() - rpLastPollOkAt) / 1000) +
+            ' ago. Everything below is frozen at that moment.';
+        }
+      }
+    }, 1000);
   }
 
   function applySurfaceModeUi(mode) {
@@ -4992,6 +5195,7 @@
     }
     stopLivePolling();
     rpSurfaceMode = next;
+    try { localStorage.setItem('chili:replay:surface', next); } catch (err) { /* private mode */ }
     applySurfaceModeUi(next);
     clearPinnedChart();
     rpFullDomain = null;
@@ -5174,7 +5378,32 @@
       }
     });
     applySurfaceModeUi(rpSurfaceMode);
-    loadHistory();
+    startDecayTicker();
+    // Roving tabindex + arrow keys: the tablist declared role=tab/aria-selected but
+    // implemented none of the keyboard contract that goes with it.
+    var tabs = [document.getElementById('rp-surface-replay'), document.getElementById('rp-surface-live')];
+    tabs.forEach(function(tab, index) {
+      if (!tab) return;
+      tab.addEventListener('keydown', function(event) {
+        var key = event.key;
+        if (key !== 'ArrowLeft' && key !== 'ArrowRight' && key !== 'Home' && key !== 'End') return;
+        event.preventDefault();
+        var target = key === 'Home' ? 0
+          : key === 'End' ? tabs.length - 1
+          : (index + (key === 'ArrowRight' ? 1 : tabs.length - 1)) % tabs.length;
+        var next = tabs[target];
+        if (!next) return;
+        next.focus();
+        rpSetSurfaceMode(next.id === 'rp-surface-live' ? 'live' : 'replay');
+      });
+    });
+    if (rpSurfaceMode === 'live') {
+      setStatus('connecting', 'running');
+      renderLoading('Connecting to persisted Chili state\u2026');
+      scheduleLivePoll(0);
+    } else {
+      loadHistory();
+    }
   });
 })();
 </script>
