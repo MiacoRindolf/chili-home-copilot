@@ -81,7 +81,10 @@ def test_iqfeed_dollar_volume_queries_only_viable_snapshot_shortfalls(monkeypatc
     out = build_equity_universe(EQUITY_ROSS_SMALLCAP, snapshot=snapshot)
 
     assert queried == [{"JEM", "SQ"}]
-    assert set(out) == {"JEM", "MASSIVE_OK"}
+    # L12 keeps a runner whose live price crossed the ceiling when its session
+    # origin was still inside the declared instrument-class band. ``HIGH`` is
+    # $25 after a +40% move, so its derived origin remains below $20.
+    assert set(out) == {"HIGH", "JEM", "MASSIVE_OK"}
 
 
 def test_ross_profile_evidence_rejects_broad_high_price_signal():
