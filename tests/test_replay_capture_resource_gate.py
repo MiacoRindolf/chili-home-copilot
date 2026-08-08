@@ -12,6 +12,7 @@ import threading
 import time
 from types import SimpleNamespace
 import uuid
+import weakref
 
 import pytest
 
@@ -879,6 +880,18 @@ raise SystemExit(9)
         disk_usage_provider=lambda _path: SimpleNamespace(free=1_000_000_000),
     )
     assert reopened.resource_health()["exclusive_ownership"]["state"] == "active"
+    reopened.close()
+
+
+def test_store_receipt_observer_does_not_retain_the_owner_lock(tmp_path) -> None:
+    root = tmp_path / "capture"
+    store = ContentAddressedCaptureStore(root, compression_codec="zlib")
+    store_ref = weakref.ref(store)
+
+    del store
+
+    assert store_ref() is None
+    reopened = ContentAddressedCaptureStore(root, compression_codec="zlib")
     reopened.close()
 
 

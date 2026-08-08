@@ -9075,6 +9075,18 @@ class ContentAddressedCaptureStore:
         self._sync_seconds = 0.0
         self._sync_failures = 0
         self.root.mkdir(parents=True, exist_ok=True)
+        store_ref = weakref.ref(self)
+
+        def _observe_ownership_receipt(
+            digest: str,
+            size: int,
+            *,
+            _store_ref: weakref.ReferenceType["ContentAddressedCaptureStore"] = store_ref,
+        ) -> None:
+            store = _store_ref()
+            if store is not None:
+                store._record_ownership_receipt_bytes(digest, size)
+
         self._ownership = _ExclusiveCaptureStoreOwnership(
             self.root,
             resource_binding_sha256=(
@@ -9090,7 +9102,7 @@ class ContentAddressedCaptureStore:
             lease_seconds=owner_lease,
             heartbeat_seconds=owner_heartbeat,
             wall_clock=wall_clock,
-            receipt_publish_observer=self._record_ownership_receipt_bytes,
+            receipt_publish_observer=_observe_ownership_receipt,
         )
         try:
             # The content inventory excludes ownership receipts, so the
