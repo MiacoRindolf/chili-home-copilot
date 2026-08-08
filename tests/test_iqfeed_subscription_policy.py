@@ -569,6 +569,67 @@ def test_active_capture_sql_inventories_both_fsm_modes() -> None:
     assert "finished" not in ACTIVE_EXECUTION_SESSION_SQL
 
 
+def test_active_capture_query_has_migration_owned_covering_index() -> None:
+    from app import migrations
+    from app.models.trading import TradingAutomationSession
+
+    index = next(
+        (
+            candidate
+            for candidate in TradingAutomationSession.__table__.indexes
+            if candidate.name == "ix_tas_capture_active"
+        ),
+        None,
+    )
+    assert index is not None
+    assert [column.name for column in index.columns] == ["mode", "state", "symbol"]
+    assert "symbol NOT LIKE '%-%'" in str(
+        index.dialect_options["postgresql"]["where"]
+    )
+    assert any(
+        version_id == "358_trading_session_capture_lookup_index"
+        and migrate_fn is migrations._migration_358_trading_session_capture_lookup_index
+        for version_id, migrate_fn in migrations.MIGRATIONS
+    )
+
+
+def test_active_capture_migration_creates_and_verifies_physical_index(db) -> None:
+    from sqlalchemy import text
+
+    from app import migrations
+
+    connection = db.connection()
+    connection.execute(text("DROP INDEX IF EXISTS ix_tas_capture_active"))
+    migrations._migration_358_trading_session_capture_lookup_index(connection)
+    row = connection.execute(
+        text(
+            "SELECT i.indisvalid,i.indisready,pg_get_expr(i.indpred,i.indrelid) "
+            "FROM pg_index i JOIN pg_class c ON c.oid=i.indexrelid "
+            "WHERE c.relname='ix_tas_capture_active'"
+        )
+    ).one()
+    assert row[0] is True
+    assert row[1] is True
+    assert "!~~" in str(row[2])
+
+
+def test_active_capture_migration_rejects_wrong_same_named_index(db) -> None:
+    from sqlalchemy import text
+
+    from app import migrations
+
+    connection = db.connection()
+    connection.execute(text("DROP INDEX IF EXISTS ix_tas_capture_active"))
+    connection.execute(
+        text(
+            "CREATE INDEX ix_tas_capture_active "
+            "ON trading_automation_sessions (symbol)"
+        )
+    )
+    with pytest.raises(RuntimeError, match="migration 358 capture lookup index"):
+        migrations._migration_358_trading_session_capture_lookup_index(connection)
+
+
 def test_lifecycle_contract_enumerates_every_required_stage() -> None:
     assert {stage.value for stage in LifecycleStage} == {
         "target_evaluation",

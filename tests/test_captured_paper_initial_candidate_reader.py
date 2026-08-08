@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import copy
+from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 import inspect as python_inspect
 import uuid
@@ -495,11 +496,19 @@ def _fake_batch_transition(
     return receipt, event
 
 
-def _two_batch_selection_state():
+def _two_batch_selection_state(
+    *,
+    second_event_at: datetime | None = None,
+):
     state = _selection_state()
     authority = state["authority"]
     variants = state["variants"]
     observations = state["observations"]
+    if second_event_at is not None:
+        observations = (
+            observations[0],
+            replace(observations[1], source_event_at=second_event_at),
+        )
     initial_frontier = state["initial_frontier"]
     batch_a = CapturedPaperSelectionBatch(
         authority_sha256=authority.authority_sha256,
@@ -845,6 +854,36 @@ def test_reader_keeps_rows_from_each_hash_bound_ancestor_batch(monkeypatch):
         ]
         for row in result.rows
     ] == [state["batch_a"].batch_sha256, state["batch_b"].batch_sha256]
+    assert fake.rollback_calls == 1
+    assert fake.close_calls == 1
+
+
+def test_reader_accepts_cross_route_event_clock_reordering(monkeypatch):
+    state = _two_batch_selection_state(
+        second_event_at=NOW - timedelta(seconds=5),
+    )
+    assert (
+        state["batch_b"].route_state_updates[0].source_event_at
+        < state["batch_a"].route_state_updates[0].source_event_at
+    )
+    assert (
+        state["batch_b"].route_state_updates[0].source_available_at
+        > state["batch_a"].route_state_updates[0].source_available_at
+    )
+    fake = _FakeSession(state, read_at=NOW)
+    _install_fake_session(monkeypatch, fake)
+    reader = reader_module.SqlAlchemyCapturedPaperInitialCandidateReader(
+        engine,
+        authority=state["authority"],
+    )
+
+    result = reader.read_candidates(
+        user_id=41,
+        symbol="CAND",
+        decision_at=NOW,
+    )
+
+    assert [row.variant.id for row in result.rows] == [700, 701]
     assert fake.rollback_calls == 1
     assert fake.close_calls == 1
 

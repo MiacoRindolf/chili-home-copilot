@@ -95,6 +95,11 @@ def test_scheduler_excludes_web_pattern_research_job(monkeypatch):
         assert "pattern_imminent_scanner" in job_ids
         assert "daily_prescreen" in job_ids
         assert "daily_market_scan" in job_ids
+        daily_scan = next(
+            job for job in info.get("jobs", []) if job["id"] == "daily_market_scan"
+        )
+        daily_scan_at = datetime.fromisoformat(daily_scan["next_run"])
+        assert (daily_scan_at.hour, daily_scan_at.minute) == (2, 30)
         assert "brain_market_snapshots" in job_ids
         assert "realized_stats_sync" in job_ids
         assert "alpha_portfolio_gate_maintenance" in job_ids
@@ -437,6 +442,63 @@ def test_viability_bridge_rolls_back_before_direct_tick(monkeypatch):
     assert db.commits == 1
 
 
+def test_equity_refresh_closes_parameter_session_before_provider_io(monkeypatch):
+    import app.db as app_db
+    from app.services import trading_scheduler
+    from app.services.trading import intraday_signals
+    from app.services.trading.momentum_neural import auto_arm, universe
+
+    active_db = _FakeBatchSession("active")
+    parameter_db = _FakeBatchSession("parameter")
+    write_db = _FakeBatchSession("write")
+    sessions = [active_db, parameter_db, write_db]
+    bridge_calls: list[tuple[object, list[dict]]] = []
+
+    monkeypatch.setattr(app_db, "SessionLocal", lambda: sessions.pop(0))
+    monkeypatch.setattr(
+        universe,
+        "build_equity_universe",
+        lambda _profile: ["MOVE"],
+    )
+    monkeypatch.setattr(
+        auto_arm,
+        "_symbols_with_active_live_session",
+        lambda _db, user_id=None: set(),
+    )
+
+    def _resolve(seen_db):
+        assert seen_db is parameter_db
+        return 1.25
+
+    def _scan(*, tickers, rvol_min_override):
+        assert parameter_db.closed is True
+        assert tickers == ["MOVE"]
+        assert rvol_min_override == 1.25
+        return [{"ticker": "MOVE", "rvol": 2.0}]
+
+    monkeypatch.setattr(intraday_signals, "_resolve_momentum_rvol_min", _resolve)
+    monkeypatch.setattr(intraday_signals, "scan_momentum_continuation", _scan)
+    monkeypatch.setattr(intraday_signals, "scan_premarket_gaps", lambda **_kwargs: [])
+    monkeypatch.setattr(
+        trading_scheduler,
+        "_bridge_scanner_to_viability",
+        lambda db, movers, **_kwargs: bridge_calls.append((db, movers)),
+    )
+    monkeypatch.setattr(
+        trading_scheduler,
+        "_emit_viability_subscribe_hints",
+        lambda _db, _movers: 0,
+    )
+
+    trading_scheduler._run_equity_viability_refresh_job()
+
+    assert bridge_calls == [(write_db, [{"ticker": "MOVE", "rvol": 2.0}])]
+    assert active_db.closed is True
+    assert parameter_db.closed is True
+    assert write_db.closed is True
+    assert sessions == []
+
+
 def test_viability_bridge_rolls_back_before_each_chunk_tick(monkeypatch):
     from app.services import trading_scheduler
     from app.services.trading.momentum_neural import nbbo_tape, pipeline
@@ -721,6 +783,33 @@ def test_momentum_exec_event_loop_is_the_only_live_driver(monkeypatch):
         assert "momentum_live_runner_batch" not in job_ids
         assert "momentum_auto_arm_live" not in job_ids
         assert "lane_health_check" in job_ids
+    finally:
+        stop_scheduler()
+
+
+def test_momentum_exec_keeps_tape_health_registered_while_paper_is_off(
+    monkeypatch,
+):
+    from app.services.trading_scheduler import (
+        get_scheduler_info,
+        start_scheduler,
+        stop_scheduler,
+    )
+
+    stop_scheduler()
+    monkeypatch.setattr(settings, "chili_scheduler_role", "momentum_exec_only")
+    monkeypatch.setattr(settings, "chili_momentum_live_runner_enabled", False)
+    monkeypatch.setattr(settings, "chili_lane_health_alert_enabled", True)
+    monkeypatch.setattr(settings, "chili_momentum_ws_ignition_enabled", False)
+    monkeypatch.setattr(settings, "chili_momentum_nbbo_tape_enabled", False)
+    monkeypatch.setattr(
+        settings, "chili_momentum_alpaca_orphan_reconcile_enabled", False
+    )
+    try:
+        start_scheduler()
+        job_ids = {j["id"] for j in get_scheduler_info().get("jobs", [])}
+        assert "lane_health_check" in job_ids
+        assert "momentum_live_runner_batch" not in job_ids
     finally:
         stop_scheduler()
 

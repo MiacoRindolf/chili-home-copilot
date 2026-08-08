@@ -6,6 +6,7 @@ static large-cap DEFAULT_SCAN_TICKERS (KLAC/MU/NVDA). Pure: synthetic snapshot
 injected, no DB / no network.
 """
 
+from app.services.trading.momentum_neural import universe as U
 from app.services.trading.momentum_neural.universe import (
     EQUITY_ROSS_SMALLCAP,
     UniverseProfile,
@@ -43,6 +44,47 @@ def test_rejects_megacaps_pennies_downs_and_illiquids():
     out = set(build_equity_universe(EQUITY_ROSS_SMALLCAP, snapshot=_SNAP))
     for rejected in ("MEGA", "HIGH", "PENNY", "DOWN", "ILLIQ", "FLAT"):
         assert rejected not in out
+
+
+def test_iqfeed_dollar_volume_queries_only_viable_snapshot_shortfalls(monkeypatch):
+    """The recurrent IQFeed aggregate must not scan the raw ~10K snapshot."""
+
+    monkeypatch.setattr(
+        settings,
+        "chili_momentum_hot_mover_recatch_enabled",
+        False,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        settings,
+        "chili_momentum_universe_float_gate_enabled",
+        False,
+        raising=False,
+    )
+    queried: list[set[str]] = []
+
+    def _iqfeed_dvols(symbols):
+        queried.append(set(symbols))
+        return {"JEM": 2_000_000.0}
+
+    monkeypatch.setattr(U, "_iqfeed_dollar_volumes", _iqfeed_dvols)
+    snapshot = [
+        _row("JEM", 40.0, 2.0, 100_000),
+        # Keep the pre-existing raw-query semantics for corporate-action aliases:
+        # the IQFeed fallback must not silently turn legacy SQ into current XYZ.
+        _row("SQ", 40.0, 2.0, 100_000),
+        _row("MASSIVE_OK", 40.0, 2.0, 1_000_000),
+        _row("FLAT", 2.0, 2.0, 100_000),
+        _row("HIGH", 40.0, 25.0, 100_000),
+    ]
+
+    out = build_equity_universe(EQUITY_ROSS_SMALLCAP, snapshot=snapshot)
+
+    assert queried == [{"JEM", "SQ"}]
+    # L12 keeps a runner whose live price crossed the ceiling when its session
+    # origin was still inside the declared instrument-class band. ``HIGH`` is
+    # $25 after a +40% move, so its derived origin remains below $20.
+    assert set(out) == {"HIGH", "JEM", "MASSIVE_OK"}
 
 
 def test_ross_profile_evidence_rejects_broad_high_price_signal():

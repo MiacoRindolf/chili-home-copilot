@@ -652,17 +652,11 @@ def _validate_frontier(
             and next_event_at <= batch_watermark_at
             and next_available_at is not None
             and next_available_at <= batch_read_at
-            and (
-                previous_values["last_source_event_at"] is None
-                or (
-                    next_event_at is not None
-                    and next_event_at
-                    >= _db_utc(
-                        previous_values["last_source_event_at"],
-                        "initial_candidate_frontier_event_at",
-                    )
-                )
-            )
+            # Source sequence is durable-ingestion order, not global market
+            # event-time order.  A later batch for a different route may carry
+            # an older provider event while still becoming available later.
+            # Per-route event clocks are checked below; availability remains
+            # globally monotonic across the immutable frontier.
             and (
                 previous_values["last_source_available_at"] is None
                 or (

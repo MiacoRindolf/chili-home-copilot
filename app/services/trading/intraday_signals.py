@@ -378,6 +378,7 @@ def scan_momentum_continuation(
     tickers: list[str] | None = None,
     *,
     db: Optional[Session] = None,
+    rvol_min_override: float | None = None,
 ) -> list[dict[str, Any]]:
     """Find stocks/crypto in strong intraday momentum pulling back to EMA support.
 
@@ -392,7 +393,14 @@ def scan_momentum_continuation(
             + list(DEFAULT_CRYPTO_TICKERS)[:DEFAULT_MOMENTUM_CRYPTO_TICKER_LIMIT]
         )
 
-    rvol_min = _resolve_momentum_rvol_min(db)
+    if rvol_min_override is None:
+        rvol_min = _resolve_momentum_rvol_min(db)
+    else:
+        try:
+            rvol_min = float(rvol_min_override)
+        except (TypeError, ValueError):
+            rvol_min = 0.8
+        rvol_min = max(0.3, min(5.0, rvol_min))
 
     signals = []
     for ticker in tickers:

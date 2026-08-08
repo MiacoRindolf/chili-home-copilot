@@ -32,9 +32,10 @@ import sys
 import threading
 import time
 import uuid
+from collections import deque
 from datetime import datetime, time as _dtime, timedelta, timezone
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any, Iterable, cast
 
 try:  # stdlib tz DB (3.9+); used to anchor the IQFeed time-of-day to US/Eastern
     from zoneinfo import ZoneInfo
@@ -52,6 +53,13 @@ import sqlalchemy as sa
 _REPO_ROOT = str(Path(__file__).resolve().parents[1])
 if _REPO_ROOT not in sys.path:
     sys.path.insert(0, _REPO_ROOT)
+
+# Keep the standalone bridge startup independent of ``app.services.trading``:
+# importing that package executes the scanner/market/ML import graph.  Tests pin
+# these wire literals to the canonical app constants consumed by lane health.
+JOB_IQFEED_EXACT_PRINT_HEARTBEAT = "iqfeed_exact_print_heartbeat"
+IQFEED_EXACT_PRINT_HEARTBEAT_SCHEMA = "iqfeed_exact_print_heartbeat_v1"
+IQFEED_EXACT_PRINT_HEARTBEAT_SCOPE = "committed_exact_print_release"
 
 try:
     from scripts.iqfeed_subscription_policy import (
@@ -158,7 +166,29 @@ if DB_RELEASE_CATCHUP_BATCH_EVENTS * 18 >= 65_535:
         "IQFEED_DB_RELEASE_CATCHUP_BATCH_EVENTS exceeds the safe PostgreSQL "
         "bind-parameter budget"
     )
+# A broad IQFeed watch roster can emit many quote-only Q frames for the same
+# cold symbols between commits.  Those frames are collapsed to the newest quote
+# per symbol, so let one drain inspect a larger *raw* prefix while retaining the
+# existing PostgreSQL-safe event cap.  Production evidence at the prior 16x
+# bound showed the raw frontier advancing at only ~0.66x real time; 64x restores
+# bounded catch-up headroom without increasing retained rows or SQL bind count.
+_DB_RELEASE_RAW_SCAN_MULTIPLIER = 64
 REFRESH_S = 20.0                         # execution-session symbol refresh cadence
+# The Ross universe builder may spend up to 30 seconds waiting on a full-market
+# snapshot.  Subscription refresh runs on the sole tape-writer thread, so that
+# provider wait must be single-flight and off-thread.  A failed refresh never
+# erases the last successful roster; SourceRead.failure then makes the resolver
+# protect the complete prior watch set instead of interpreting absence as an
+# instruction to unwatch.
+_ross_universe_cache_lock = threading.Lock()
+_ross_universe_cache_symbols: tuple[str, ...] = ()
+_ross_universe_cache_success_at: float | None = None
+_ross_universe_cache_max_age_s: float | None = None
+_ross_universe_refresh_due_at = 0.0
+_ross_universe_refresh_inflight = False
+_ross_universe_refresh_thread: threading.Thread | None = None
+_ross_universe_last_error_code: str | None = None
+_ross_universe_last_error_detail: str | None = None
 STALE_NBBO_RECONNECT_S = float(
     os.environ.get("IQFEED_STALE_NBBO_RECONNECT_SECONDS", "45") or 45
 )
@@ -204,6 +234,7 @@ def _bridge_source_sha256(path: str | Path = __file__) -> str:
 BRIDGE_BUILD = _bridge_build_id()
 BRIDGE_SOURCE_SHA256 = _bridge_source_sha256()
 BRIDGE_RUN_ID = str(uuid.uuid4())
+BRIDGE_RUN_STARTED_AT = datetime.now(timezone.utc)
 # CAPTURE-G3: event-driven subscribe-on-first-alert. The app container writes a subscribe HINT
 # to momentum_bridge_subscribe_requests the instant a name first ignites; this bridge FAST-POLLS
 # that table (much shorter than REFRESH_S) and subscribes immediately, additively to the normal
@@ -228,8 +259,7 @@ IGNITION_SCHEMA_VERSION = "chili.iqfeed-ignition-nominate.v1"
 # prints to fill against. The working cap is SELF-DISCOVERED: start at WATCH_HARD_MAX, halve the configured
 # cap on an IQFeed symbol-limit signal, then probe one slot after each quiet interval. A failed probe returns
 # to the prior stable cap. The fresh-eligible set is the natural ceiling (usually a few hundred).
-# One documented base (WATCH_FLOOR); the cap is adaptive. Retention raised 3d->30d so we can backtest N days.
-RETENTION_DAYS = float(os.environ.get("IQFEED_TRADE_RETENTION_DAYS", "30") or 30)
+# One documented base (WATCH_FLOOR); the cap is adaptive.
 WATCH_FLOOR = int(os.environ.get("IQFEED_WATCH_FLOOR", "64") or 64)          # the ONE documented base
 WATCH_HARD_MAX = int(os.environ.get("IQFEED_WATCH_HARD_MAX", "1000") or 1000)  # backstop only
 WATCH_RECOVERY_QUIET_S = float(
@@ -304,6 +334,15 @@ INS = sa.text(
     ":bridge, :provider_trade_reference_at, :message_type, :bridge_run_id, "
     ":connection_generation, :source_frame_sequence, :source_frame_sha256)"
 )
+_INSERT_EXACT_PRINT_HEARTBEAT = sa.text(
+    "INSERT INTO brain_batch_jobs "
+    "(id, job_type, status, started_at, ended_at, meta_json) "
+    "VALUES (:id, :job_type, 'ok', "
+    "CURRENT_TIMESTAMP AT TIME ZONE 'UTC', "
+    "CURRENT_TIMESTAMP AT TIME ZONE 'UTC', "
+    "CAST(:meta_json AS jsonb))"
+)
+_EXACT_PRINT_HEARTBEAT_INTERVAL_S = 60.0
 
 # Also feed the momentum ENTRY-GATE's NBBO freshness tape with this SAME tick-level IQFeed L1.
 # The entry gate reads momentum_nbbo_spread_tape for its stale_bbo freshness check, but that
@@ -489,10 +528,16 @@ _SUBSCRIBE_REQUIRED_COLUMNS = frozenset(
         "correlation_id",
     }
 )
+_EXACT_PRINT_HEARTBEAT_REQUIRED_COLUMNS = frozenset(
+    {"id", "job_type", "status", "started_at", "ended_at", "meta_json"}
+)
+_exact_print_heartbeat_capable = True
 
 
 def _verify_bridge_schema() -> None:
     """Read-only migration/schema gate which runs before any provider socket."""
+
+    global _exact_print_heartbeat_capable
 
     required = {
         "iqfeed_trade_ticks": _TRADE_REQUIRED_COLUMNS,
@@ -531,6 +576,25 @@ def _verify_bridge_schema() -> None:
                         f"IQFeed bridge schema {table_name} is missing: "
                         + ", ".join(missing)
                     )
+            heartbeat_columns = frozenset(
+                connection.execute(
+                    sa.text(
+                        "SELECT column_name FROM information_schema.columns "
+                        "WHERE table_schema = current_schema() "
+                        "AND table_name = 'brain_batch_jobs'"
+                    )
+                ).scalars()
+            )
+            heartbeat_missing = sorted(
+                _EXACT_PRINT_HEARTBEAT_REQUIRED_COLUMNS - heartbeat_columns
+            )
+            _exact_print_heartbeat_capable = not heartbeat_missing
+            if heartbeat_missing:
+                log.critical(
+                    "IQFeed exact-print health receipts disabled; "
+                    "brain_batch_jobs is missing: %s",
+                    ", ".join(heartbeat_missing),
+                )
     except RuntimeError:
         raise
     except Exception as exc:
@@ -946,12 +1010,19 @@ def _pending_frame_key(row: dict) -> tuple[int, int]:
 def _drain_pending_write_batch(
     *,
     max_events: int = DB_RELEASE_BATCH_EVENTS,
+    max_scan_events: int | None = None,
+    hot_symbols: set[str] | None = None,
 ) -> tuple[list[dict], list[dict], bool]:
-    """Drain a bounded prefix without splitting one source frame.
+    """Drain a bounded raw prefix under a retained-event commit cap.
 
     Trade and quote evidence for the same frame share the exact generation and
     sequence.  A frame may exceed the operational cap, but it is never split
-    across commit boundaries.
+    across commit boundaries.  Every trade and every hot quote consumes the
+    retained-event cap.  Repeated cold quotes consume only one retained slot per
+    symbol, so a broad quote-only roster cannot starve newer trades behind it.
+
+    ``hot_symbols=None`` preserves the unsampled helper contract used by direct
+    callers.  The production writer passes its current hot-symbol snapshot.
     """
 
     if (
@@ -960,48 +1031,113 @@ def _drain_pending_write_batch(
         or max_events <= 0
     ):
         raise ValueError("IQFeed DB release batch size must be a positive integer")
+    raw_scan_limit = (
+        max_events * _DB_RELEASE_RAW_SCAN_MULTIPLIER
+        if max_scan_events is None
+        else max_scan_events
+    )
+    if (
+        isinstance(raw_scan_limit, bool)
+        or not isinstance(raw_scan_limit, int)
+        or raw_scan_limit <= 0
+    ):
+        raise ValueError("IQFeed DB raw scan size must be a positive integer")
+    sample_cold_quotes = hot_symbols is not None
+    hot = {
+        str(symbol or "").strip().upper()
+        for symbol in (hot_symbols or set())
+    }
+    if not HOT_FULL_FIDELITY:
+        hot.clear()
     with _pending_lock:
         if not _pending and not _pending_nbbo:
             return [], [], False
-        selected_events = 0
-        trade_index = 0
-        quote_index = 0
+        trade_rows: list[dict] = []
+        mandatory_quote_rows: list[dict] = []
+        latest_cold_quote: dict[str, dict] = {}
+        retained_events = 0
+        scanned_events = 0
+        drained_quote_count = 0
+        missing = object()
+        trade_iter = iter(_pending)
+        quote_iter = iter(_pending_nbbo)
+        trade_head: dict | object = next(trade_iter, missing)
+        quote_head: dict | object = next(quote_iter, missing)
 
-        while trade_index < len(_pending) or quote_index < len(_pending_nbbo):
+        # Inspect only the bounded prefix before mutating either queue.  This
+        # retains the all-or-nothing malformed-frame behavior while avoiding
+        # list prefix deletion, whose full-tail memmove became quadratic once
+        # a busy broad-universe feed accumulated a large in-memory backlog.
+        while trade_head is not missing or quote_head is not missing:
             head_keys = []
-            if trade_index < len(_pending):
-                head_keys.append(_pending_frame_key(_pending[trade_index]))
-            if quote_index < len(_pending_nbbo):
-                head_keys.append(_pending_frame_key(_pending_nbbo[quote_index]))
+            if trade_head is not missing:
+                head_keys.append(_pending_frame_key(cast(dict, trade_head)))
+            if quote_head is not missing:
+                head_keys.append(_pending_frame_key(cast(dict, quote_head)))
             frame_key = min(head_keys)
-            next_trade_index = trade_index
-            while (
-                next_trade_index < len(_pending)
-                and _pending_frame_key(_pending[next_trade_index]) == frame_key
+            frame_trades: list[dict] = []
+            while trade_head is not missing and _pending_frame_key(
+                cast(dict, trade_head)
+            ) == frame_key:
+                frame_trades.append(cast(dict, trade_head))
+                trade_head = next(trade_iter, missing)
+            frame_quotes: list[dict] = []
+            while quote_head is not missing and _pending_frame_key(
+                cast(dict, quote_head)
+            ) == frame_key:
+                frame_quotes.append(cast(dict, quote_head))
+                quote_head = next(quote_iter, missing)
+            frame_events = len(frame_trades) + len(frame_quotes)
+            frame_mandatory_quotes: list[dict] = []
+            frame_cold_quotes: dict[str, dict] = {}
+            for row in frame_quotes:
+                symbol = str(row.get("sym") or "").strip().upper()
+                if not sample_cold_quotes or frame_trades or symbol in hot:
+                    frame_mandatory_quotes.append(row)
+                else:
+                    frame_cold_quotes[symbol] = row
+            projected_cold_symbols = set(latest_cold_quote)
+            # A mandatory quote supersedes an older optional sample for the same
+            # symbol, but never another mandatory quote from a trade/hot frame.
+            projected_cold_symbols.difference_update(
+                str(row.get("sym") or "").strip().upper()
+                for row in frame_mandatory_quotes
+            )
+            projected_cold_symbols.update(frame_cold_quotes)
+            projected_retained_events = (
+                len(trade_rows)
+                + len(frame_trades)
+                + len(mandatory_quote_rows)
+                + len(frame_mandatory_quotes)
+                + len(projected_cold_symbols)
+            )
+            if (
+                retained_events
+                and projected_retained_events > max_events
             ):
-                next_trade_index += 1
-            trade_count = next_trade_index - trade_index
-            next_quote_index = quote_index
-            while (
-                next_quote_index < len(_pending_nbbo)
-                and _pending_frame_key(_pending_nbbo[next_quote_index]) == frame_key
+                break
+            trade_rows.extend(frame_trades)
+            for row in frame_mandatory_quotes:
+                symbol = str(row.get("sym") or "").strip().upper()
+                latest_cold_quote.pop(symbol, None)
+                mandatory_quote_rows.append(row)
+            latest_cold_quote.update(frame_cold_quotes)
+            retained_events = projected_retained_events
+            scanned_events += frame_events
+            drained_quote_count += len(frame_quotes)
+            if (
+                scanned_events >= raw_scan_limit
+                or (retained_events >= max_events and not sample_cold_quotes)
             ):
-                next_quote_index += 1
-            quote_count = next_quote_index - quote_index
-            frame_events = trade_count + quote_count
-            if selected_events and selected_events + frame_events > max_events:
                 break
-            trade_index += trade_count
-            quote_index += quote_count
-            selected_events += frame_events
-            if selected_events >= max_events:
-                break
-        trade_rows = _pending[:trade_index]
-        quote_rows = _pending_nbbo[:quote_index]
-        if trade_index:
-            del _pending[:trade_index]
-        if quote_index:
-            del _pending_nbbo[:quote_index]
+        for _ in range(len(trade_rows)):
+            _pending.popleft()
+        for _ in range(drained_quote_count):
+            _pending_nbbo.popleft()
+        quote_rows = sorted(
+            (*mandatory_quote_rows, *latest_cold_quote.values()),
+            key=_pending_frame_key,
+        )
         return trade_rows, quote_rows, bool(_pending or _pending_nbbo)
 
 
@@ -1435,8 +1571,8 @@ def _notify_payload(row: dict) -> str:
     )
 
 
-_pending: list[dict] = []
-_pending_nbbo: list[dict] = []
+_pending: deque[dict] = deque()
+_pending_nbbo: deque[dict] = deque()
 _pending_lock = threading.Lock()
 _ignition_detector = IgnitionDetector(IgnitionConfig())
 _ignition_fires: list[str] = []          # serialized nomination payloads awaiting NOTIFY
@@ -1541,6 +1677,183 @@ _protocol_acknowledged_generations: set[int] = set()
 _selected_fields_ack_sha256_by_generation: dict[int, str] = {}
 _capture_handoff_lock = threading.Lock()
 _capture_handoff: Any | None = None
+_exact_print_heartbeat_lock = threading.Lock()
+_exact_print_heartbeat_event = threading.Event()
+_exact_print_heartbeat_thread: threading.Thread | None = None
+_pending_exact_print_heartbeat: dict[str, Any] | None = None
+_last_exact_print_heartbeat_attempt_monotonic: float | None = None
+
+
+def _canonical_exact_print_heartbeat_body(
+    *,
+    trade_rows: list[dict[str, Any]],
+    available_at: datetime,
+) -> dict[str, Any] | None:
+    """Bind one heartbeat to exact prints whose release transaction committed."""
+
+    if not trade_rows or not isinstance(available_at, datetime):
+        return None
+    if available_at.tzinfo is None:
+        return None
+    available_utc = available_at.astimezone(timezone.utc)
+    exact_rows: list[dict[str, Any]] = []
+    for row in trade_rows:
+        provider_at = row.get("provider_at")
+        received_at = row.get("received_at")
+        symbol = str(row.get("sym") or "").strip().upper()
+        if not (
+            row.get("basis") == EXACT_PRINT_TIMESTAMP_BASIS
+            and row.get("message_type") == "Q"
+            and bool(symbol)
+            and isinstance(provider_at, datetime)
+            and provider_at.tzinfo is not None
+            and isinstance(received_at, datetime)
+            and received_at.tzinfo is not None
+            and isinstance(row.get("connection_generation"), int)
+            and not isinstance(row.get("connection_generation"), bool)
+            and int(row["connection_generation"]) > 0
+            and isinstance(row.get("source_frame_sequence"), int)
+            and not isinstance(row.get("source_frame_sequence"), bool)
+            and int(row["source_frame_sequence"]) > 0
+            and re.fullmatch(
+                r"[0-9a-f]{64}",
+                str(row.get("source_frame_sha256") or "").strip().lower(),
+            )
+            and str(row.get("bridge_run_id") or "").strip()
+            and str(row.get("bridge") or "").strip()
+        ):
+            return None
+        exact_rows.append(row)
+    latest = max(
+        exact_rows,
+        key=lambda row: row["provider_at"].astimezone(timezone.utc),
+    )
+    provider_at = latest["provider_at"].astimezone(timezone.utc)
+    received_at = latest["received_at"].astimezone(timezone.utc)
+    if (
+        provider_at
+        > received_at + timedelta(seconds=AUTHORITATIVE_FUTURE_TOLERANCE_S)
+        or received_at > available_utc
+    ):
+        return None
+    body: dict[str, Any] = {
+        "schema": IQFEED_EXACT_PRINT_HEARTBEAT_SCHEMA,
+        "scope": IQFEED_EXACT_PRINT_HEARTBEAT_SCOPE,
+        "symbol": str(latest["sym"]).strip().upper(),
+        "observed_at_utc": provider_at.isoformat().replace("+00:00", "Z"),
+        "provider_event_at_utc": provider_at.isoformat().replace("+00:00", "Z"),
+        "received_at_utc": received_at.isoformat().replace("+00:00", "Z"),
+        "available_at_utc": available_utc.isoformat().replace("+00:00", "Z"),
+        "bridge_version": str(latest["bridge"]),
+        "bridge_run_id": str(latest["bridge_run_id"]),
+        "bridge_run_started_at_utc": (
+            BRIDGE_RUN_STARTED_AT.isoformat().replace("+00:00", "Z")
+        ),
+        "connection_generation": int(latest["connection_generation"]),
+        "source_frame_sequence": int(latest["source_frame_sequence"]),
+        "source_frame_sha256": str(latest["source_frame_sha256"]).lower(),
+        "committed_print_count": len(exact_rows),
+    }
+    canonical = json.dumps(
+        body,
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=False,
+        allow_nan=False,
+    )
+    body["content_sha256"] = hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+    return body
+
+
+def _append_exact_print_heartbeat(body: dict[str, Any]) -> None:
+    """Append one receipt off the critical tape writer path."""
+
+    with engine.begin() as connection:
+        connection.execute(
+            _INSERT_EXACT_PRINT_HEARTBEAT,
+            {
+                "id": str(uuid.uuid4()),
+                "job_type": JOB_IQFEED_EXACT_PRINT_HEARTBEAT,
+                "meta_json": json.dumps(
+                    body,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                    ensure_ascii=False,
+                    allow_nan=False,
+                ),
+            },
+        )
+
+
+def _exact_print_heartbeat_worker_main() -> None:
+    """Drain the latest receipt without ever blocking exact-print persistence."""
+
+    global _pending_exact_print_heartbeat
+    while True:
+        _exact_print_heartbeat_event.wait()
+        _exact_print_heartbeat_event.clear()
+        with _exact_print_heartbeat_lock:
+            body = _pending_exact_print_heartbeat
+            _pending_exact_print_heartbeat = None
+        if body is None:
+            continue
+        try:
+            _append_exact_print_heartbeat(body)
+        except Exception:
+            log.warning(
+                "exact-print heartbeat append failed after tape commit",
+                exc_info=True,
+            )
+
+
+def _ensure_exact_print_heartbeat_worker_locked() -> None:
+    global _exact_print_heartbeat_thread
+    if (
+        _exact_print_heartbeat_thread is not None
+        and _exact_print_heartbeat_thread.is_alive()
+    ):
+        return
+    _exact_print_heartbeat_thread = threading.Thread(
+        target=_exact_print_heartbeat_worker_main,
+        name="iqfeed-exact-print-heartbeat",
+        daemon=True,
+    )
+    _exact_print_heartbeat_thread.start()
+
+
+def _record_committed_exact_print_heartbeat(
+    *,
+    trade_rows: list[dict[str, Any]],
+    available_at: datetime,
+    monotonic_now: float | None = None,
+) -> bool:
+    """Non-blockingly enqueue a receipt after exact-print release commits."""
+
+    global _last_exact_print_heartbeat_attempt_monotonic
+    global _pending_exact_print_heartbeat
+
+    if not _exact_print_heartbeat_capable:
+        return False
+    now_mono = time.monotonic() if monotonic_now is None else float(monotonic_now)
+    with _exact_print_heartbeat_lock:
+        last = _last_exact_print_heartbeat_attempt_monotonic
+        if last is not None and now_mono - last < _EXACT_PRINT_HEARTBEAT_INTERVAL_S:
+            return False
+    body = _canonical_exact_print_heartbeat_body(
+        trade_rows=trade_rows,
+        available_at=available_at,
+    )
+    if body is None:
+        return False
+    with _exact_print_heartbeat_lock:
+        last = _last_exact_print_heartbeat_attempt_monotonic
+        if last is not None and now_mono - last < _EXACT_PRINT_HEARTBEAT_INTERVAL_S:
+            return False
+        _last_exact_print_heartbeat_attempt_monotonic = now_mono
+        _pending_exact_print_heartbeat = dict(body)
+        _ensure_exact_print_heartbeat_worker_locked()
+    _exact_print_heartbeat_event.set()
+    return True
 
 
 def _mark_watch_limit_hit() -> None:
@@ -1871,34 +2184,124 @@ def _ross_universe_symbols(limit: int) -> list[str]:
     return list(result.symbols)
 
 
+def _load_ross_universe_symbols() -> tuple[tuple[str, ...], float]:
+    """Blocking provider read; invoked only by the background refresher."""
+
+    from app.services.trading.momentum_neural.universe import (
+        EQUITY_ROSS_SMALLCAP,
+        build_equity_universe,
+    )
+
+    symbols = SourceRead.success(
+        TargetCause.ROSS,
+        build_equity_universe(EQUITY_ROSS_SMALLCAP) or (),
+    ).symbols
+    max_age = float(EQUITY_ROSS_SMALLCAP.snapshot_max_age_seconds or REFRESH_S)
+    return symbols, max(REFRESH_S, max_age)
+
+
+def _refresh_ross_universe_cache() -> None:
+    global _ross_universe_cache_symbols
+    global _ross_universe_cache_success_at
+    global _ross_universe_cache_max_age_s
+    global _ross_universe_refresh_due_at
+    global _ross_universe_refresh_inflight
+    global _ross_universe_last_error_code
+    global _ross_universe_last_error_detail
+
+    symbols: tuple[str, ...] = ()
+    max_age_s: float | None = None
+    error_code: str | None = None
+    error_detail: str | None = None
+    try:
+        symbols, max_age_s = _load_ross_universe_symbols()
+        if not symbols:
+            error_code = "ross_universe_empty_or_unavailable"
+    except Exception as exc:
+        error_code = "ross_query_failed"
+        error_detail = str(exc)[:512]
+        log.warning("ross universe query failed: %s", exc)
+
+    completed_at = time.monotonic()
+    with _ross_universe_cache_lock:
+        if error_code is None:
+            _ross_universe_cache_symbols = symbols
+            _ross_universe_cache_success_at = completed_at
+            _ross_universe_cache_max_age_s = max_age_s
+            _ross_universe_last_error_code = None
+            _ross_universe_last_error_detail = None
+        else:
+            _ross_universe_last_error_code = error_code
+            _ross_universe_last_error_detail = error_detail
+        retry_after_s = (
+            max(REFRESH_S, float(max_age_s or REFRESH_S))
+            if error_code is not None
+            else REFRESH_S
+        )
+        _ross_universe_refresh_due_at = completed_at + retry_after_s
+        _ross_universe_refresh_inflight = False
+
+
+def _start_ross_universe_refresh_locked(now: float) -> None:
+    global _ross_universe_refresh_due_at
+    global _ross_universe_refresh_inflight
+    global _ross_universe_refresh_thread
+    global _ross_universe_last_error_code
+    global _ross_universe_last_error_detail
+
+    if _ross_universe_refresh_inflight or now < _ross_universe_refresh_due_at:
+        return
+    _ross_universe_refresh_inflight = True
+    refresh_thread = threading.Thread(
+        target=_refresh_ross_universe_cache,
+        name="ross-universe-refresh",
+        daemon=True,
+    )
+    _ross_universe_refresh_thread = refresh_thread
+    try:
+        refresh_thread.start()
+    except Exception as exc:
+        _ross_universe_refresh_inflight = False
+        _ross_universe_refresh_due_at = now + REFRESH_S
+        _ross_universe_last_error_code = "ross_refresh_start_failed"
+        _ross_universe_last_error_detail = str(exc)[:512]
+        log.warning("ross universe refresh could not start: %s", exc)
+
+
 def _ross_universe_symbols_read(limit: int) -> SourceRead:
-    """Direct Ross-profile universe; independent of viability admission."""
+    """Cached Ross universe read that never blocks the sole tape writer."""
     if limit <= 0:
         return SourceRead.success(TargetCause.ROSS, ())
-    try:
-        from app.services.trading.momentum_neural.universe import (
-            EQUITY_ROSS_SMALLCAP,
-            build_equity_universe,
-        )
 
-        symbols = build_equity_universe(EQUITY_ROSS_SMALLCAP) or []
-        result = SourceRead.success(TargetCause.ROSS, symbols[: int(limit)])
-        if not result.symbols:
-            # The universe helper intentionally collapses provider/query errors
-            # to [], which is indistinguishable from a legitimately empty scan.
-            # Capture cannot interpret that ambiguity as permission to unwatch.
-            return SourceRead.failure(
-                TargetCause.ROSS,
-                error_code="ross_universe_empty_or_unavailable",
-            )
-        return result
-    except Exception as e:
-        log.warning("ross universe query failed: %s", e)
+    now = time.monotonic()
+    with _ross_universe_cache_lock:
+        _start_ross_universe_refresh_locked(now)
+        symbols = _ross_universe_cache_symbols
+        success_at = _ross_universe_cache_success_at
+        max_age_s = _ross_universe_cache_max_age_s
+        inflight = _ross_universe_refresh_inflight
+        error_code = _ross_universe_last_error_code
+        error_detail = _ross_universe_last_error_detail
+
+    if error_code is not None:
         return SourceRead.failure(
             TargetCause.ROSS,
-            error_code="ross_query_failed",
-            error_detail=str(e),
+            error_code=error_code,
+            error_detail=error_detail,
         )
+    if symbols and success_at is not None and max_age_s is not None:
+        age_s = max(0.0, now - success_at)
+        if age_s <= max_age_s:
+            return SourceRead.success(TargetCause.ROSS, symbols[: int(limit)])
+        return SourceRead.failure(
+            TargetCause.ROSS,
+            error_code="ross_universe_cache_expired",
+            error_detail=f"age_s={age_s:.3f}; max_age_s={max_age_s:.3f}",
+        )
+    return SourceRead.failure(
+        TargetCause.ROSS,
+        error_code=("ross_refresh_pending" if inflight else "ross_refresh_unavailable"),
+    )
 
 
 def _log_subscription_gaps(feed: str, gaps: tuple[CoverageGap, ...]) -> None:
@@ -2498,12 +2901,7 @@ def writer(
             previous_capacity.cap,
             current_capacity.cap,
         )
-    # Defer the first hourly retention sweep to one hour after connect: with
-    # last_prune=0.0 it ran on the FIRST loop iteration, and its observed_at-only
-    # DELETE full-scans iqfeed_trade_ticks (~128M rows, 139s live-measured
-    # 2026-07-16) BEFORE the first reconcile() can send any watch -- every
-    # watch (and the 30s capture-certification smoke window) starved behind it.
-    last_prune = time.monotonic()
+    last_hint_prune = time.monotonic()
     last_fast_sub = 0.0
     # Explicit CLI symbols are capture-hot for the lifetime of this writer.
     # Dynamic hot membership is refreshed from live/paper sessions + fresh alerts.
@@ -2633,16 +3031,12 @@ def writer(
                 limit=_watch_capacity.source_read_limit,
             )
             reconcile(allow_unwatch=True)
-        # retention prune (the exit_parity_log bloat lesson): a rolling research window, not an archive
-        if time.monotonic() - last_prune >= 3600.0:
-            try:
-                with engine.begin() as c:
-                    c.execute(sa.text(
-                        "DELETE FROM iqfeed_trade_ticks "
-                        "WHERE observed_at < (now() at time zone 'utc') - make_interval(days => :d)"),
-                        {"d": int(RETENTION_DAYS)})
-            except Exception as e:
-                log.debug("retention prune failed: %s", e)
+        # The sole tape writer must never own historical tick retention.  The old
+        # hourly observed_at DELETE could full-scan the live table and stop all
+        # ingest while this thread still appeared healthy.  Retention belongs to
+        # an out-of-band maintenance owner; this loop only performs the small
+        # subscribe-hint coordination cleanup.
+        if time.monotonic() - last_hint_prune >= 3600.0:
             # F7 (capture-g fix): drain the subscribe-hint coordination table too — hints are
             # only meaningful for the ~180s fresh window; without a sweep the table grew
             # unbounded (the mig313 docstring promised a retention sweep — this makes it
@@ -2655,7 +3049,7 @@ def writer(
                         "WHERE requested_at < (now() at time zone 'utc') - make_interval(hours => 48)"))
             except Exception as e:
                 log.debug("subscribe-requests prune failed: %s", e)
-            last_prune = time.monotonic()
+            last_hint_prune = time.monotonic()
         if time.monotonic() - last_refresh >= REFRESH_S:
             previous_capacity, current_capacity, limit_hit = (
                 _advance_watch_capacity(
@@ -2717,13 +3111,7 @@ def writer(
         rows, nbbo_rows, pending_backlog = _drain_pending_write_batch(
             max_events=_release_batch_event_limit(
                 pending_backlog=pending_backlog,
-            )
-        )
-        # Full-fidelity for current hot symbols; bounded newest-per-flush context
-        # for the broad universe.  Missing exact IQFeed quote-event clocks still
-        # make these rows noncertifying regardless of storage fidelity.
-        nbbo_rows = _select_nbbo_rows_for_capture(
-            nbbo_rows,
+            ),
             hot_symbols=hot_symbols,
         )
         if rows or nbbo_rows:
@@ -2759,6 +3147,19 @@ def writer(
                     quote_rows=(nbbo_rows if WRITE_NBBO_TAPE else []),
                     available_at=available_at,
                 )
+                # Telemetry is queued only after release and capture publication.
+                # Its independent daemon writer can never stall this sole tape
+                # drain or delay PAPER's already-committed capture handoff.
+                try:
+                    _record_committed_exact_print_heartbeat(
+                        trade_rows=rows,
+                        available_at=available_at,
+                    )
+                except Exception:
+                    log.warning(
+                        "exact-print heartbeat enqueue failed after capture publish",
+                        exc_info=True,
+                    )
                 if capture_rejected:
                     log.warning(
                         "IQFeed replay capture rejected/gapped %d of %d released rows",

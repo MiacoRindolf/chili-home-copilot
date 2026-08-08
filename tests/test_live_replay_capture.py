@@ -205,6 +205,7 @@ def _coordinator(
     wall_clock: _WallClock | None = None,
     shared_admission_budget=None,
     start: bool = True,
+    writer_workers: int = 1,
 ) -> tuple[LiveReplayCaptureCoordinator, tuple, _WallClock]:
     binding = binding or _binding()
     if controller is None:
@@ -257,6 +258,7 @@ def _coordinator(
         writer_batch_bytes=128 * 1024,
         writer_poll_seconds=0.01,
         writer_flush_interval_seconds=0.02,
+        writer_workers=writer_workers,
         shared_admission_budget=shared_admission_budget,
         compression_codec="zlib",
         compression_level=3,
@@ -403,6 +405,41 @@ def test_current_state_inventory_re_receipts_exact_startup_identity_without_fetc
         assert read.receipt.replay_network_fallback_used is False
     finally:
         coordinator.abort(reason="current_state_identity_test_complete")
+
+
+@pytest.mark.parametrize("writer_workers", (1, 2))
+def test_coordinator_liveness_health_does_not_audit_entire_capture_tree(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    writer_workers: int,
+) -> None:
+    coordinator, _startup, _wall_clock = _coordinator(
+        tmp_path / f"coordinator-progress-health-{writer_workers}",
+        writer_workers=writer_workers,
+    )
+    scans = 0
+    original = coordinator.writer.store._root_file_bytes
+
+    def counted_root_file_bytes() -> int:
+        nonlocal scans
+        scans += 1
+        return original()
+
+    monkeypatch.setattr(
+        coordinator.writer.store,
+        "_root_file_bytes",
+        counted_root_file_bytes,
+    )
+    try:
+        health = coordinator.health()
+        assert health["writer"]["resource"]["filesystem_audited"] is False
+        assert scans == 0
+
+        audited = coordinator.writer.health()
+        assert audited["resource"]["filesystem_audited"] is True
+        assert scans == 1
+    finally:
+        coordinator.abort(reason="coordinator_progress_health_test_complete")
 
 
 def test_missing_current_state_is_fail_closed_without_fabricated_event(

@@ -41,9 +41,16 @@ import uuid
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
+from sqlalchemy import text
+
 from ....config import settings
 from ....models.trading import BrainBatchJob
-from ..batch_job_constants import JOB_MOMENTUM_LIVE_LOOP_HEARTBEAT
+from ..batch_job_constants import (
+    IQFEED_EXACT_PRINT_HEARTBEAT_SCHEMA,
+    IQFEED_EXACT_PRINT_HEARTBEAT_SCOPE,
+    JOB_IQFEED_EXACT_PRINT_HEARTBEAT,
+    JOB_MOMENTUM_LIVE_LOOP_HEARTBEAT,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -86,6 +93,28 @@ _LIVE_LOOP_HEARTBEAT_V2_META_KEYS = frozenset(
         "content_sha256",
     }
 )
+_IQFEED_EXACT_PRINT_META_KEYS = frozenset(
+    {
+        "schema",
+        "scope",
+        "symbol",
+        "observed_at_utc",
+        "provider_event_at_utc",
+        "received_at_utc",
+        "available_at_utc",
+        "bridge_version",
+        "bridge_run_id",
+        "bridge_run_started_at_utc",
+        "connection_generation",
+        "source_frame_sequence",
+        "source_frame_sha256",
+        "committed_print_count",
+        "content_sha256",
+    }
+)
+_IQFEED_EXACT_PRINT_FUTURE_TOLERANCE_SECONDS = 2.0
+_IQFEED_EXACT_PRINT_CLOCK_TOLERANCE_SECONDS = 1.0
+_IQFEED_EXACT_PRINT_HISTORY_LIMIT = 64
 
 # Process-start floor: a fresh scheduler process has no in-process auto-arm heartbeat
 # yet, so "stalled" must be measured from when this module loaded, not from epoch.
@@ -448,6 +477,363 @@ def _strict_aware_utc(value: Any) -> datetime | None:
     return parsed.astimezone(timezone.utc).replace(tzinfo=None)
 
 
+def _validated_exact_iqfeed_print_row(row: Any) -> dict[str, Any] | None:
+    """Validate one append-only receipt for a committed exact IQFeed print."""
+
+    if str(getattr(row, "status", "") or "").strip().lower() != "ok":
+        return None
+    started_at = _utc_naive_datetime(getattr(row, "started_at", None))
+    ended_at = _utc_naive_datetime(getattr(row, "ended_at", None))
+    meta = getattr(row, "meta_json", None)
+    if (
+        started_at is None
+        or ended_at is None
+        or ended_at < started_at
+        or not isinstance(meta, dict)
+        or set(meta) != _IQFEED_EXACT_PRINT_META_KEYS
+        or meta.get("schema") != IQFEED_EXACT_PRINT_HEARTBEAT_SCHEMA
+        or meta.get("scope") != IQFEED_EXACT_PRINT_HEARTBEAT_SCOPE
+    ):
+        return None
+
+    supplied_sha256 = str(meta.get("content_sha256") or "").strip()
+    source_frame_sha256 = str(meta.get("source_frame_sha256") or "").strip()
+    if (
+        len(supplied_sha256) != 64
+        or supplied_sha256 != supplied_sha256.lower()
+        or any(char not in "0123456789abcdef" for char in supplied_sha256)
+        or supplied_sha256 != _heartbeat_content_sha256(meta)
+        or len(source_frame_sha256) != 64
+        or source_frame_sha256 != source_frame_sha256.lower()
+        or any(char not in "0123456789abcdef" for char in source_frame_sha256)
+    ):
+        return None
+
+    symbol = str(meta.get("symbol") or "").strip().upper()
+    bridge_version = str(meta.get("bridge_version") or "").strip()
+    try:
+        bridge_run_id = str(uuid.UUID(str(meta.get("bridge_run_id") or "")))
+    except (AttributeError, TypeError, ValueError):
+        return None
+    connection_generation = meta.get("connection_generation")
+    source_frame_sequence = meta.get("source_frame_sequence")
+    committed_print_count = meta.get("committed_print_count")
+    if (
+        not symbol
+        or len(symbol) > 16
+        or not bridge_version
+        or str(meta.get("bridge_run_id") or "").strip().lower() != bridge_run_id
+        or isinstance(connection_generation, bool)
+        or not isinstance(connection_generation, int)
+        or connection_generation <= 0
+        or isinstance(source_frame_sequence, bool)
+        or not isinstance(source_frame_sequence, int)
+        or source_frame_sequence <= 0
+        or isinstance(committed_print_count, bool)
+        or not isinstance(committed_print_count, int)
+        or committed_print_count <= 0
+    ):
+        return None
+
+    observed_at = _strict_aware_utc(meta.get("observed_at_utc"))
+    provider_event_at = _strict_aware_utc(meta.get("provider_event_at_utc"))
+    received_at = _strict_aware_utc(meta.get("received_at_utc"))
+    available_at = _strict_aware_utc(meta.get("available_at_utc"))
+    bridge_run_started_at = _strict_aware_utc(
+        meta.get("bridge_run_started_at_utc")
+    )
+    clock_tolerance = timedelta(
+        seconds=_IQFEED_EXACT_PRINT_CLOCK_TOLERANCE_SECONDS
+    )
+    if (
+        observed_at is None
+        or provider_event_at is None
+        or received_at is None
+        or available_at is None
+        or bridge_run_started_at is None
+        or observed_at != provider_event_at
+        or provider_event_at > received_at + clock_tolerance
+        or received_at > available_at
+        or bridge_run_started_at > ended_at + clock_tolerance
+    ):
+        return None
+    return {
+        "row_started_at": started_at,
+        "heartbeat_at": ended_at,
+        "symbol": symbol,
+        "observed_at": observed_at,
+        "provider_event_at": provider_event_at,
+        "received_at": received_at,
+        "available_at": available_at,
+        "bridge_version": bridge_version,
+        "bridge_run_id": bridge_run_id,
+        "bridge_run_started_at": bridge_run_started_at,
+        "connection_generation": connection_generation,
+        "source_frame_sequence": source_frame_sequence,
+        "source_frame_sha256": source_frame_sha256,
+        "committed_print_count": committed_print_count,
+        "content_sha256": supplied_sha256,
+        "scope": IQFEED_EXACT_PRINT_HEARTBEAT_SCOPE,
+    }
+
+
+def _exact_iqfeed_print_receipt_has_tape_row(db, truth: dict[str, Any]) -> bool:
+    """Bind the receipt to one indexed, phase-two-released exact tape row."""
+
+    provider_event_at = truth["provider_event_at"].replace(tzinfo=timezone.utc)
+    received_at = truth["received_at"].replace(tzinfo=timezone.utc)
+    available_at = truth["available_at"].replace(tzinfo=timezone.utc)
+    return bool(
+        db.execute(
+            text(
+                "SELECT EXISTS ("
+                "SELECT 1 FROM iqfeed_trade_ticks "
+                "WHERE symbol = :symbol AND observed_at = :observed_at "
+                "AND provider_event_at = :provider_event_at "
+                "AND received_at = :received_at "
+                "AND available_at = :available_at "
+                "AND timestamp_basis = 'iqfeed_selected_trade_date_timems_exact' "
+                "AND bridge_version = :bridge_version "
+                "AND bridge_run_id = :bridge_run_id "
+                "AND connection_generation = :connection_generation "
+                "AND source_frame_sequence = :source_frame_sequence "
+                "AND source_frame_sha256 = :source_frame_sha256 "
+                "LIMIT 1)"
+            ),
+            {
+                "symbol": truth["symbol"],
+                "observed_at": truth["observed_at"],
+                "provider_event_at": provider_event_at,
+                "received_at": received_at,
+                "available_at": available_at,
+                "bridge_version": truth["bridge_version"],
+                "bridge_run_id": truth["bridge_run_id"],
+                "connection_generation": truth["connection_generation"],
+                "source_frame_sequence": truth["source_frame_sequence"],
+                "source_frame_sha256": truth["source_frame_sha256"],
+            },
+        ).scalar_one()
+    )
+
+
+def _latest_exact_iqfeed_print_status(db) -> dict[str, Any]:
+    """Validate latest exact print, its tape row, and singleton bridge ownership."""
+
+    rows = (
+        db.query(BrainBatchJob)
+        .filter(BrainBatchJob.job_type == JOB_IQFEED_EXACT_PRINT_HEARTBEAT)
+        .order_by(BrainBatchJob.started_at.desc(), BrainBatchJob.id.desc())
+        .limit(_IQFEED_EXACT_PRINT_HISTORY_LIMIT)
+        .all()
+    )
+    if not rows:
+        return {
+            "ok": False,
+            "reason": "iqfeed_exact_print_missing",
+            "scope": IQFEED_EXACT_PRINT_HEARTBEAT_SCOPE,
+        }
+    latest_row = rows[0]
+    status = str(getattr(latest_row, "status", "") or "").strip().lower()
+    if status == "running" or getattr(latest_row, "ended_at", None) is None:
+        return {
+            "ok": False,
+            "reason": "iqfeed_exact_print_latest_unfinished",
+            "scope": IQFEED_EXACT_PRINT_HEARTBEAT_SCOPE,
+        }
+    if status != "ok":
+        return {
+            "ok": False,
+            "reason": "iqfeed_exact_print_latest_error",
+            "scope": IQFEED_EXACT_PRINT_HEARTBEAT_SCOPE,
+        }
+    truth = _validated_exact_iqfeed_print_row(latest_row)
+    if truth is None:
+        return {
+            "ok": False,
+            "reason": "iqfeed_exact_print_latest_malformed",
+            "scope": IQFEED_EXACT_PRINT_HEARTBEAT_SCOPE,
+        }
+    if not _exact_iqfeed_print_receipt_has_tape_row(db, truth):
+        return {
+            "ok": False,
+            "reason": "iqfeed_exact_print_tape_row_missing",
+            "scope": IQFEED_EXACT_PRINT_HEARTBEAT_SCOPE,
+        }
+
+    tolerance = timedelta(seconds=_LIVE_LOOP_HANDOFF_CLOCK_TOLERANCE_SECONDS)
+    for row in rows[1:]:
+        other = _validated_exact_iqfeed_print_row(row)
+        if other is None or other["bridge_run_id"] == truth["bridge_run_id"]:
+            continue
+        overlap_start = max(
+            truth["bridge_run_started_at"], other["bridge_run_started_at"]
+        )
+        overlap_end = min(truth["heartbeat_at"], other["heartbeat_at"])
+        if overlap_end - overlap_start > tolerance:
+            return {
+                "ok": False,
+                "reason": "iqfeed_exact_print_bridge_owner_overlap",
+                "scope": IQFEED_EXACT_PRINT_HEARTBEAT_SCOPE,
+                "overlapping_owner_count": 2,
+            }
+    return {"ok": True, **truth}
+
+
+def _iqfeed_data_session_open() -> bool:
+    """Fail open so a clock/profile fault cannot suppress a real tape outage."""
+
+    try:
+        from .market_profile import is_data_session_now
+
+        return bool(is_data_session_now(None))
+    except Exception:
+        logger.warning(
+            "[lane_health] IQFeed data-session clock probe failed",
+            exc_info=True,
+        )
+        return True
+
+
+def _iqfeed_data_session_age_seconds() -> float | None:
+    """Return elapsed current-session time; fail open after the normal grace."""
+
+    if not _iqfeed_data_session_open():
+        return None
+    try:
+        from . import market_profile
+
+        now_utc = datetime.now(timezone.utc)
+        local = now_utc.astimezone(market_profile._NY_TZ)
+        open_minute = int(market_profile._data_session_open_min())
+        opened = local.replace(
+            hour=open_minute // 60,
+            minute=open_minute % 60,
+            second=0,
+            microsecond=0,
+        )
+        return max(0.0, (local - opened).total_seconds())
+    except Exception:
+        logger.warning(
+            "[lane_health] IQFeed data-session age probe failed",
+            exc_info=True,
+        )
+        return iqfeed_print_stale_seconds()
+
+
+def iqfeed_print_stale_seconds() -> float:
+    """Reuse the entry tape-age contract, retaining a loud floor if it is disabled."""
+
+    try:
+        configured = float(
+            getattr(settings, "chili_momentum_arm_tape_freshness_max_sec", 180.0)
+        )
+    except (TypeError, ValueError):
+        configured = 180.0
+    if configured <= 0:
+        configured = 180.0
+    return min(900.0, max(60.0, configured))
+
+
+def _equity_exact_print_tape_condition(
+    db,
+    *,
+    now: datetime,
+) -> dict[str, Any] | None:
+    """Return one loud exact-print failure independently of PAPER ownership."""
+
+    equity_only = bool(
+        getattr(settings, "chili_momentum_auto_arm_equity_only", False)
+    )
+    crypto_only = bool(
+        getattr(settings, "chili_momentum_auto_arm_crypto_only", True)
+    )
+    if not equity_only or crypto_only:
+        return None
+    stale_seconds = iqfeed_print_stale_seconds()
+    session_age = _iqfeed_data_session_age_seconds()
+    if session_age is None or session_age < stale_seconds:
+        return None
+    try:
+        tape_truth = _latest_exact_iqfeed_print_status(db)
+    except Exception:
+        logger.exception("[lane_health] exact IQFeed print receipt read failed")
+        tape_truth = {
+            "ok": False,
+            "reason": "iqfeed_exact_print_unreadable",
+            "scope": IQFEED_EXACT_PRINT_HEARTBEAT_SCOPE,
+        }
+    if tape_truth.get("ok") is not True:
+        return {
+            "kind": "equity_tape_stalled",
+            "reason": str(
+                tape_truth.get("reason") or "iqfeed_exact_print_unreadable"
+            ),
+            "scope": (
+                tape_truth.get("scope") or IQFEED_EXACT_PRINT_HEARTBEAT_SCOPE
+            ),
+            "since_utc": None,
+            "elapsed_seconds": round(session_age, 1),
+            "elapsed_human": _human(session_age),
+            "stale_seconds": round(stale_seconds, 1),
+            "frozen": True,
+            **(
+                {"overlapping_owner_count": tape_truth["overlapping_owner_count"]}
+                if tape_truth.get("overlapping_owner_count") is not None
+                else {}
+            ),
+        }
+
+    provider_event_at = _utc_naive_datetime(tape_truth.get("provider_event_at"))
+    received_at = _utc_naive_datetime(tape_truth.get("received_at"))
+    available_at = _utc_naive_datetime(tape_truth.get("available_at"))
+    if provider_event_at is None or received_at is None or available_at is None:
+        reason = "iqfeed_exact_print_latest_malformed"
+        elapsed = session_age
+        since = None
+    else:
+        provider_age = (now - provider_event_at).total_seconds()
+        available_age = (now - available_at).total_seconds()
+        if provider_age < -_IQFEED_EXACT_PRINT_FUTURE_TOLERANCE_SECONDS:
+            reason = "iqfeed_exact_print_provider_future"
+            elapsed = provider_age
+            since = provider_event_at
+        elif available_age < -_IQFEED_EXACT_PRINT_FUTURE_TOLERANCE_SECONDS:
+            reason = "iqfeed_exact_print_available_future"
+            elapsed = available_age
+            since = available_at
+        elif provider_age >= stale_seconds:
+            reason = "iqfeed_exact_print_provider_stale"
+            elapsed = provider_age
+            since = provider_event_at
+        elif available_age >= stale_seconds:
+            reason = "iqfeed_exact_print_persistence_stale"
+            elapsed = available_age
+            since = available_at
+        else:
+            return None
+    return {
+        "kind": "equity_tape_stalled",
+        "reason": reason,
+        "scope": IQFEED_EXACT_PRINT_HEARTBEAT_SCOPE,
+        "since_utc": since.isoformat() + "Z" if since is not None else None,
+        "elapsed_seconds": round(elapsed, 1),
+        "elapsed_human": _human(elapsed),
+        "stale_seconds": round(stale_seconds, 1),
+        "provider_event_at_utc": (
+            provider_event_at.isoformat() + "Z"
+            if provider_event_at is not None
+            else None
+        ),
+        "received_at_utc": (
+            received_at.isoformat() + "Z" if received_at is not None else None
+        ),
+        "available_at_utc": (
+            available_at.isoformat() + "Z" if available_at is not None else None
+        ),
+        "frozen": True,
+    }
+
+
 def _validated_live_loop_heartbeat_row(row: Any) -> dict[str, Any] | None:
     """Validate the exact durable control-heartbeat schema for one completed row."""
     if str(getattr(row, "status", "") or "").strip().lower() != "ok":
@@ -786,6 +1172,7 @@ def evaluate_lane_health(db, *, user_id: int | None = None) -> dict[str, Any]:
         "conditions": [],
         "grace_seconds": round(grace, 1),
         "live_loop_stale_seconds": round(live_loop_stale_seconds(), 1),
+        "iqfeed_print_stale_seconds": round(iqfeed_print_stale_seconds(), 1),
         "as_of_utc": now.isoformat() + "Z",
     }
     if not enabled:
@@ -896,6 +1283,7 @@ def evaluate_lane_health(db, *, user_id: int | None = None) -> dict[str, Any]:
                     else {}
                 ),
             })
+
     elif driver_mode == "scheduled_auto_arm" and _expected_trading_window_open():
         # Legacy batch ownership remains trading-window scoped.  Breakers do not
         # suppress its scheduler health signal.
@@ -953,6 +1341,12 @@ def evaluate_lane_health(db, *, user_id: int | None = None) -> dict[str, Any]:
                     "frozen": True,
                 })
 
+    # Tape health is operationally independent of the PAPER process.  A dead or
+    # disabled live runner must never make an equity print outage silent.
+    tape_condition = _equity_exact_print_tape_condition(db, now=now)
+    if tape_condition is not None:
+        conditions.append(tape_condition)
+
     out["conditions"] = conditions
     frozen = [c for c in conditions if c.get("frozen")]
     if frozen:
@@ -977,6 +1371,8 @@ def _headline_for(frozen: list[dict[str, Any]]) -> str:
         return f"MOMENTUM LANE FROZEN — auto-arm pass not executing ({c.get('elapsed_human')}){extra}"
     if kind == "live_loop_stalled":
         return f"MOMENTUM LANE FROZEN — live event-loop control plane unhealthy ({c.get('elapsed_human')}){extra}"
+    if kind == "equity_tape_stalled":
+        return f"MOMENTUM LANE FROZEN - committed IQFeed prints stale ({c.get('elapsed_human')}){extra}"
     if kind == "driver_misconfigured":
         return f"MOMENTUM LANE FROZEN — live driver misconfigured{extra}"
     return f"MOMENTUM LANE FROZEN ({len(frozen)} condition(s))"
@@ -1003,6 +1399,10 @@ def _detail_for(frozen: list[dict[str, Any]]) -> str:
         elif kind == "live_loop_stalled":
             parts.append(
                 f"live_loop_control[{c.get('reason')}] {c.get('elapsed_human')}"
+            )
+        elif kind == "equity_tape_stalled":
+            parts.append(
+                f"equity_tape[{c.get('reason')}] {c.get('elapsed_human')}"
             )
         elif kind == "driver_misconfigured":
             parts.append(f"driver[{c.get('reason')}]")

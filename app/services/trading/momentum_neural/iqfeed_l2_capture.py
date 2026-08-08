@@ -1403,10 +1403,12 @@ class BoundedIqfeedL2CaptureHandoff:
 
     def health(self) -> Mapping[str, Any]:
         with self._condition:
+            thread = self._thread
             return {
                 "network_fallback_allowed": False,
                 "started": self._started,
                 "accepting": self._accepting,
+                "thread_alive": bool(thread and thread.is_alive()),
                 "requested_hot_symbols": tuple(sorted(self._requested_hot)),
                 "pending_checkpoint_generations": dict(
                     sorted(self._pending_checkpoint_generation.items())

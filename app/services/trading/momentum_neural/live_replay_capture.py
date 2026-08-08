@@ -3587,7 +3587,11 @@ class LiveReplayCaptureCoordinator:
                 else self.hot_symbol_leases.health()
             ),
             "pressure": self.pressure_controller.health(),
-            "writer": self.writer.health(),
+            # The service health loop runs every second.  Its liveness/frontier
+            # check must not recursively re-enumerate the historical capture
+            # tree; explicit evidence/preflight paths retain writer.health()'s
+            # full filesystem audit.
+            "writer": self.writer.progress_health(),
         }
 
     def _emit_capture_health_locked(

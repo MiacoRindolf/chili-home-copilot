@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+from collections import deque
 from datetime import datetime, timedelta, timezone
 
 import pytest
@@ -42,12 +43,22 @@ def _reset_parser_state() -> None:
         bridge._selected_fields_ack_sha256_by_generation.clear()
     with bridge._capture_handoff_lock:
         bridge._capture_handoff = None
+    with bridge._exact_print_heartbeat_lock:
+        bridge._last_exact_print_heartbeat_attempt_monotonic = None
+        bridge._pending_exact_print_heartbeat = None
+    bridge._exact_print_heartbeat_event.clear()
+    bridge._exact_print_heartbeat_capable = True
 
 
 @pytest.fixture(autouse=True)
 def _isolated_bridge_parser(monkeypatch):
     _reset_parser_state()
     monkeypatch.setattr(bridge, "BRIDGE_RUN_ID", "12553525-2da8-4b22-a69f-d3034871e90c")
+    monkeypatch.setattr(
+        bridge,
+        "BRIDGE_RUN_STARTED_AT",
+        datetime(2026, 8, 5, 7, 55, 0, tzinfo=timezone.utc),
+    )
     yield
     _reset_parser_state()
 
@@ -175,6 +186,164 @@ def test_notify_payload_carries_the_release_stamp_used_by_the_commit(monkeypatch
     assert payload["available_at"] == release_at.isoformat()
     assert payload["bridge_run_id"] == bridge.BRIDGE_RUN_ID
     assert payload["connection_generation"] == 1
+
+
+def _exact_print_row(*, provider_at: datetime, received_at: datetime) -> dict:
+    return {
+        "sym": "AMIX",
+        "provider_at": provider_at,
+        "received_at": received_at,
+        "basis": bridge.EXACT_PRINT_TIMESTAMP_BASIS,
+        "bridge": bridge.BRIDGE_BUILD,
+        "message_type": "Q",
+        "bridge_run_id": bridge.BRIDGE_RUN_ID,
+        "connection_generation": 7,
+        "source_frame_sequence": 41,
+        "source_frame_sha256": "a" * 64,
+    }
+
+
+def test_exact_print_heartbeat_binds_only_committed_release_clocks():
+    provider_at = datetime(2026, 8, 5, 8, 0, 0, tzinfo=timezone.utc)
+    received_at = provider_at + timedelta(milliseconds=5)
+    available_at = received_at + timedelta(milliseconds=7)
+
+    body = bridge._canonical_exact_print_heartbeat_body(
+        trade_rows=[
+            _exact_print_row(
+                provider_at=provider_at,
+                received_at=received_at,
+            )
+        ],
+        available_at=available_at,
+    )
+
+    assert body is not None
+    assert body["schema"] == bridge.IQFEED_EXACT_PRINT_HEARTBEAT_SCHEMA
+    assert body["scope"] == bridge.IQFEED_EXACT_PRINT_HEARTBEAT_SCOPE
+    assert body["symbol"] == "AMIX"
+    assert body["observed_at_utc"] == "2026-08-05T08:00:00Z"
+    assert body["provider_event_at_utc"] == "2026-08-05T08:00:00Z"
+    assert body["received_at_utc"] == "2026-08-05T08:00:00.005000Z"
+    assert body["available_at_utc"] == "2026-08-05T08:00:00.012000Z"
+    assert body["committed_print_count"] == 1
+    claimed = body.pop("content_sha256")
+    assert claimed == hashlib.sha256(
+        json.dumps(
+            body,
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=False,
+            allow_nan=False,
+        ).encode("utf-8")
+    ).hexdigest()
+
+
+def test_exact_print_wire_literals_match_app_consumer_contract():
+    from app.services.trading import batch_job_constants as contract
+
+    assert (
+        bridge.JOB_IQFEED_EXACT_PRINT_HEARTBEAT
+        == contract.JOB_IQFEED_EXACT_PRINT_HEARTBEAT
+    )
+    assert (
+        bridge.IQFEED_EXACT_PRINT_HEARTBEAT_SCHEMA
+        == contract.IQFEED_EXACT_PRINT_HEARTBEAT_SCHEMA
+    )
+    assert (
+        bridge.IQFEED_EXACT_PRINT_HEARTBEAT_SCOPE
+        == contract.IQFEED_EXACT_PRINT_HEARTBEAT_SCOPE
+    )
+
+
+def test_exact_print_heartbeat_accepts_parser_clock_tolerance():
+    received_at = datetime(2026, 8, 5, 8, 0, 0, tzinfo=timezone.utc)
+    body = bridge._canonical_exact_print_heartbeat_body(
+        trade_rows=[
+            _exact_print_row(
+                provider_at=received_at + timedelta(milliseconds=500),
+                received_at=received_at,
+            )
+        ],
+        available_at=received_at + timedelta(seconds=1),
+    )
+
+    assert body is not None
+    assert body["provider_event_at_utc"] == "2026-08-05T08:00:00.500000Z"
+
+
+def test_exact_print_heartbeat_enqueue_is_throttled_and_never_waits_on_db(
+    monkeypatch,
+):
+    event_sets = []
+    monkeypatch.setattr(
+        bridge, "_ensure_exact_print_heartbeat_worker_locked", lambda: None
+    )
+    monkeypatch.setattr(
+        bridge._exact_print_heartbeat_event,
+        "set",
+        lambda: event_sets.append(True),
+    )
+    provider_at = datetime(2026, 8, 5, 8, 0, 0, tzinfo=timezone.utc)
+    row = _exact_print_row(
+        provider_at=provider_at,
+        received_at=provider_at + timedelta(milliseconds=5),
+    )
+
+    assert bridge._record_committed_exact_print_heartbeat(
+        trade_rows=[], available_at=provider_at, monotonic_now=0.0
+    ) is False
+    assert bridge._record_committed_exact_print_heartbeat(
+        trade_rows=[row],
+        available_at=provider_at + timedelta(milliseconds=10),
+        monotonic_now=1.0,
+    ) is True
+    assert bridge._record_committed_exact_print_heartbeat(
+        trade_rows=[row],
+        available_at=provider_at + timedelta(seconds=1),
+        monotonic_now=2.0,
+    ) is False
+    assert bridge._record_committed_exact_print_heartbeat(
+        trade_rows=[row],
+        available_at=provider_at + timedelta(seconds=31),
+        monotonic_now=32.0,
+    ) is False
+    assert bridge._record_committed_exact_print_heartbeat(
+        trade_rows=[row],
+        available_at=provider_at + timedelta(seconds=61),
+        monotonic_now=62.0,
+    ) is True
+    assert len(event_sets) == 2
+    assert bridge._pending_exact_print_heartbeat is not None
+    assert bridge._last_exact_print_heartbeat_attempt_monotonic == 62.0
+
+
+def test_exact_print_heartbeat_append_uses_db_clock(monkeypatch):
+    calls = []
+
+    class _Connection:
+        def execute(self, statement, params):
+            calls.append((statement, dict(params)))
+
+    class _Begin:
+        def __enter__(self):
+            return _Connection()
+
+        def __exit__(self, *_args):
+            return False
+
+    class _Engine:
+        def begin(self):
+            return _Begin()
+
+    monkeypatch.setattr(bridge, "engine", _Engine())
+    bridge._append_exact_print_heartbeat({"content_sha256": "a" * 64})
+
+    assert len(calls) == 1
+    _statement, params = calls[0]
+    assert params["job_type"] == bridge.JOB_IQFEED_EXACT_PRINT_HEARTBEAT
+    assert "started_at" not in params
+    assert "ended_at" not in params
 
 
 def test_release_update_is_bound_to_the_exact_batch_row(monkeypatch):
@@ -402,17 +571,25 @@ def test_pending_db_release_drain_is_bounded_and_keeps_same_frame_together():
         assert [row["source_frame_sequence"] for row in bridge._pending_nbbo] == [3, 4]
 
 
-def test_pending_db_release_drain_removes_each_selected_prefix_once(monkeypatch):
-    class _DeleteCountingList(list):
+def test_pending_db_release_drain_uses_backlog_independent_head_queues(monkeypatch):
+    class _CountingDeque(deque):
         def __init__(self, rows):
             super().__init__(rows)
-            self.delete_calls = 0
+            self.iter_yields = 0
+            self.popleft_calls = 0
 
-        def __delitem__(self, key):
-            self.delete_calls += 1
-            return super().__delitem__(key)
+        def __iter__(self):
+            for row in super().__iter__():
+                self.iter_yields += 1
+                if self.iter_yields > 129:
+                    raise AssertionError("drain inspected beyond its bounded prefix")
+                yield row
 
-    trade_rows = _DeleteCountingList(
+        def popleft(self):
+            self.popleft_calls += 1
+            return super().popleft()
+
+    trade_rows = _CountingDeque(
         {
             "sym": "BULK",
             "connection_generation": 1,
@@ -420,7 +597,7 @@ def test_pending_db_release_drain_removes_each_selected_prefix_once(monkeypatch)
         }
         for sequence in range(1, 401)
     )
-    quote_rows = _DeleteCountingList(
+    quote_rows = _CountingDeque(
         {
             "sym": "BULK",
             "connection_generation": 1,
@@ -435,8 +612,96 @@ def test_pending_db_release_drain_removes_each_selected_prefix_once(monkeypatch)
 
     assert len(trades) == len(quotes) == 128
     assert backlog is True
-    assert trade_rows.delete_calls == 1
-    assert quote_rows.delete_calls == 1
+    assert isinstance(bridge._pending, deque)
+    assert isinstance(bridge._pending_nbbo, deque)
+    assert trade_rows.iter_yields == quote_rows.iter_yields == 129
+    assert trade_rows.popleft_calls == quote_rows.popleft_calls == 128
+    assert bridge._pending[0]["source_frame_sequence"] == 129
+    assert bridge._pending_nbbo[0]["source_frame_sequence"] == 129
+
+
+def test_pending_db_release_drain_counts_retained_cold_quotes_not_raw_frames():
+    legacy_raw_limit = bridge.DB_RELEASE_BATCH_EVENTS * 16
+    terminal_sequence = legacy_raw_limit + 1
+    quote_rows = [
+        {
+            "sym": "COLD",
+            "connection_generation": 1,
+            "source_frame_sequence": sequence,
+        }
+        for sequence in range(1, terminal_sequence + 1)
+    ]
+    trade_row = {
+        "sym": "MOVER",
+        "connection_generation": 1,
+        "source_frame_sequence": terminal_sequence,
+    }
+    with bridge._pending_lock:
+        bridge._pending.extend([trade_row])
+        bridge._pending_nbbo.extend(quote_rows)
+
+    trades, quotes, backlog = bridge._drain_pending_write_batch(
+        hot_symbols=set(),
+    )
+
+    assert trades == [trade_row]
+    assert quotes == [quote_rows[-1]]
+    assert backlog is False
+    with bridge._pending_lock:
+        assert not bridge._pending
+        assert not bridge._pending_nbbo
+
+
+def test_pending_db_release_drain_keeps_trade_sibling_before_newer_cold_sample():
+    trade_row = {
+        "sym": "COLD",
+        "connection_generation": 1,
+        "source_frame_sequence": 1,
+    }
+    paired_quote = dict(trade_row)
+    newer_quote = {
+        "sym": "COLD",
+        "connection_generation": 1,
+        "source_frame_sequence": 2,
+    }
+    with bridge._pending_lock:
+        bridge._pending.append(trade_row)
+        bridge._pending_nbbo.extend([paired_quote, newer_quote])
+
+    trades, quotes, backlog = bridge._drain_pending_write_batch(
+        max_events=3,
+        max_scan_events=10,
+        hot_symbols=set(),
+    )
+
+    assert trades == [trade_row]
+    assert quotes == [paired_quote, newer_quote]
+    assert backlog is False
+
+
+def test_pending_db_release_drain_preserves_hot_quote_fidelity_at_retained_cap():
+    quote_rows = [
+        {
+            "sym": "HOT",
+            "connection_generation": 1,
+            "source_frame_sequence": sequence,
+        }
+        for sequence in range(1, 6)
+    ]
+    with bridge._pending_lock:
+        bridge._pending_nbbo.extend(quote_rows)
+
+    trades, quotes, backlog = bridge._drain_pending_write_batch(
+        max_events=3,
+        max_scan_events=100,
+        hot_symbols={"HOT"},
+    )
+
+    assert trades == []
+    assert quotes == quote_rows[:3]
+    assert backlog is True
+    with bridge._pending_lock:
+        assert list(bridge._pending_nbbo) == quote_rows[3:]
 
 
 def test_pending_db_release_drain_is_atomic_on_later_malformed_frame():
@@ -451,7 +716,7 @@ def test_pending_db_release_drain_is_atomic_on_later_malformed_frame():
         bridge._drain_pending_write_batch(max_events=256)
 
     with bridge._pending_lock:
-        assert bridge._pending == rows
+        assert list(bridge._pending) == rows
 
 
 def test_pending_backlog_uses_bounded_catchup_batch():

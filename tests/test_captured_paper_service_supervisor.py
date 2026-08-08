@@ -223,13 +223,55 @@ class _Host:
                 "all_ready": self.running,
                 "provider_sockets_started": self.running,
                 "failures": {},
-            }
+            },
+            "composition": _healthy_capture_composition(),
         }
 
     def close(self):
         self.events.append("host_close")
         self.running = False
         return self.health()
+
+
+def _healthy_capture_composition(*, runs=None):
+    active_runs = {} if runs is None else runs
+    return {
+        "state": "ingress_running",
+        "l1_handoff": {
+            "started": True,
+            "accepting": True,
+            "thread_alive": True,
+            "terminal_error": None,
+            "unpersisted_gap_count": 0,
+        },
+        "l2_handoff": {
+            "started": True,
+            "accepting": True,
+            "thread_alive": True,
+            "terminal_error": None,
+            "unpersisted_gap_count": 0,
+            "gap_ledger_overflow": False,
+        },
+        "service": {
+            "running_symbols": tuple(sorted(active_runs)),
+            "runs": active_runs,
+        },
+    }
+
+
+def _healthy_capture_run():
+    return {
+        "state": "running",
+        "writer": {
+            "has_started": True,
+            "writer_alive": True,
+            "last_error": None,
+            "ingress": {
+                "closed": False,
+                "writer_failure_count": 0,
+            },
+        },
+    }
 
 
 class _Worker:
@@ -1058,7 +1100,10 @@ def test_active_health_tolerates_provider_reconnect_but_rejects_dead_lane():
             },
         },
     }
-    host.health = lambda: {"provider_loop_supervisor": provider}
+    host.health = lambda: {
+        "provider_loop_supervisor": provider,
+        "composition": _healthy_capture_composition(),
+    }
 
     assert supervisor.assert_healthy()["state"] == "active"
 
@@ -1076,6 +1121,89 @@ def test_active_health_tolerates_provider_reconnect_but_rejects_dead_lane():
         match="captured_paper_provider_health_lost",
     ):
         supervisor.assert_healthy()
+
+
+@pytest.mark.parametrize(
+    ("mutate", "expected_reason"),
+    [
+        (
+            lambda composition: composition.update(state="failed"),
+            "captured_paper_capture_composition_health_lost",
+        ),
+        (
+            lambda composition: composition["l1_handoff"].update(
+                thread_alive=False
+            ),
+            "captured_paper_l1_capture_handoff_health_lost",
+        ),
+        (
+            lambda composition: composition["l2_handoff"].update(
+                accepting=False
+            ),
+            "captured_paper_l2_capture_handoff_health_lost",
+        ),
+        (
+            lambda composition: composition["l2_handoff"].update(
+                terminal_error="CaptureContractError",
+                unpersisted_gap_count=1,
+            ),
+            "captured_paper_l2_capture_handoff_health_lost",
+        ),
+        (
+            lambda composition: composition["l2_handoff"].update(
+                gap_ledger_overflow=True
+            ),
+            "captured_paper_l2_capture_handoff_health_lost",
+        ),
+    ],
+)
+def test_active_capture_composition_and_handoffs_are_supervised(
+    mutate, expected_reason
+):
+    events = []
+    supervisor, host, _live = _supervisor(events)
+    supervisor.start_active(start_authority=_active_authority(events))
+    base_health = host.health()
+    composition = _healthy_capture_composition()
+    mutate(composition)
+    host.health = lambda: {
+        **base_health,
+        "composition": composition,
+    }
+
+    with pytest.raises(
+        CapturedPaperServiceSupervisorError,
+        match=expected_reason,
+    ):
+        supervisor.assert_healthy()
+
+
+@pytest.mark.parametrize(
+    "writer_mutation",
+    [
+        {"writer_alive": False},
+        {"last_error": "OSError: disk write failed"},
+        {"ingress": {"closed": True, "writer_failure_count": 1}},
+    ],
+)
+def test_active_capture_writer_failure_is_supervised(writer_mutation):
+    events = []
+    supervisor, host, _live = _supervisor(events)
+    supervisor.start_active(start_authority=_active_authority(events))
+    run = _healthy_capture_run()
+    run["writer"].update(writer_mutation)
+    base_health = host.health()
+    host.health = lambda: {
+        **base_health,
+        "composition": _healthy_capture_composition(runs={"VEEE": run}),
+    }
+
+    with pytest.raises(
+        CapturedPaperServiceSupervisorError,
+        match="captured_paper_capture_writer_health_lost",
+    ) as failure:
+        supervisor.assert_healthy()
+    assert "disk write failed" not in str(failure.value)
 
 
 def test_duplicate_worker_names_and_unknown_provider_options_reject():

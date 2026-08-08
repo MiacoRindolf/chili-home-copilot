@@ -12,6 +12,7 @@ import threading
 import time
 from types import SimpleNamespace
 import uuid
+import weakref
 
 import pytest
 
@@ -240,6 +241,160 @@ def test_resource_health_cannot_double_count_an_inflight_immutable_publish(
     final_health = store.resource_health()
     assert final_health["resource_failure_reasons"] == ()
     assert final_health["actual_root_bytes"] == final_health["root_bytes"]
+    store.close()
+
+
+def test_resource_health_cannot_double_count_concurrent_ownership_receipt(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    now = [BASE]
+    store = ContentAddressedCaptureStore(
+        tmp_path / "capture",
+        compression_codec="zlib",
+        resource_binding=_binding(),
+        wall_clock=lambda: now[0],
+    )
+    original_inventory = store._root_file_bytes
+    inventory_started = threading.Event()
+    allow_inventory = threading.Event()
+    failures: list[BaseException] = []
+
+    def paused_inventory() -> int:
+        inventory_started.set()
+        if not allow_inventory.wait(timeout=5):
+            raise AssertionError("fixture did not release filesystem inventory")
+        return original_inventory()
+
+    monkeypatch.setattr(store, "_root_file_bytes", paused_inventory)
+    now[0] += timedelta(seconds=1)
+
+    def inspect_health() -> None:
+        try:
+            store.resource_health()
+        except BaseException as exc:
+            failures.append(exc)
+
+    def renew_owner() -> None:
+        try:
+            store.renew_ownership()
+        except BaseException as exc:
+            failures.append(exc)
+
+    health = threading.Thread(target=inspect_health, daemon=True)
+    renewal = threading.Thread(target=renew_owner, daemon=True)
+    health.start()
+    assert inventory_started.wait(timeout=5)
+    renewal.start()
+    allow_inventory.set()
+    health.join(timeout=5)
+    renewal.join(timeout=5)
+
+    assert not health.is_alive()
+    assert not renewal.is_alive()
+    assert failures == []
+    monkeypatch.setattr(store, "_root_file_bytes", original_inventory)
+    final_health = store.resource_health()
+    assert final_health["resource_failure_reasons"] == ()
+    assert final_health["actual_root_bytes"] == final_health["root_bytes"]
+    store.close()
+
+
+def test_slow_filesystem_audit_does_not_block_ownership_heartbeat(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    binding = _binding(
+        store_owner_lease_seconds=0.5,
+        store_owner_heartbeat_seconds=0.05,
+    )
+    store = ContentAddressedCaptureStore(
+        tmp_path / "capture",
+        compression_codec="zlib",
+        resource_binding=binding,
+        disk_usage_provider=lambda _path: SimpleNamespace(free=1_000_000_000),
+    )
+    original_inventory = store._root_file_bytes
+
+    def slow_inventory() -> int:
+        time.sleep(0.7)
+        return original_inventory()
+
+    monkeypatch.setattr(store, "_root_file_bytes", slow_inventory)
+    audited = store.resource_health()
+    current = store.resource_health(audit_filesystem=False)[
+        "exclusive_ownership"
+    ]
+
+    assert audited["filesystem_audited"] is True
+    assert audited["resource_failure_reasons"] == ()
+    assert current["fail_closed"] is False
+    assert current["heartbeat_worker_alive"] is True
+    assert current["heartbeat_receipts"] > 0
+    store.write_events((_event(1, at=datetime.now(UTC)),))
+    store.close()
+
+
+def test_explicit_audit_detects_deleted_historical_ownership_receipt(
+    tmp_path: Path,
+) -> None:
+    now = [BASE]
+    store = ContentAddressedCaptureStore(
+        tmp_path / "capture",
+        compression_codec="zlib",
+        resource_binding=_binding(),
+        wall_clock=lambda: now[0],
+    )
+    initial = store.resource_health(audit_filesystem=False)[
+        "exclusive_ownership"
+    ]["record_sha256"]
+    now[0] += timedelta(seconds=1)
+    renewed = store.renew_ownership()
+    assert renewed != initial
+
+    (store._ownership.receipt_root / f"{initial}.json").unlink()
+    audited = store.resource_health()
+
+    assert audited["fail_closed"] is True
+    assert "capture_owned_object_removed_outside_store" in audited[
+        "resource_failure_reasons"
+    ]
+    store.close()
+
+
+def test_slow_startup_inventory_does_not_expire_ownership_lease(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    binding = _binding(
+        store_owner_lease_seconds=0.5,
+        store_owner_heartbeat_seconds=0.05,
+    )
+    original_inventory = ContentAddressedCaptureStore._root_file_bytes
+
+    def slow_inventory(store: ContentAddressedCaptureStore) -> int:
+        time.sleep(0.7)
+        return original_inventory(store)
+
+    monkeypatch.setattr(
+        ContentAddressedCaptureStore,
+        "_root_file_bytes",
+        slow_inventory,
+    )
+    store = ContentAddressedCaptureStore(
+        tmp_path / "capture",
+        compression_codec="zlib",
+        resource_binding=binding,
+        disk_usage_provider=lambda _path: SimpleNamespace(free=1_000_000_000),
+    )
+    ownership = store.resource_health(audit_filesystem=False)[
+        "exclusive_ownership"
+    ]
+
+    assert ownership["fail_closed"] is False
+    assert ownership["heartbeat_worker_alive"] is True
+    assert ownership["heartbeat_receipts"] > 0
+    store.write_events((_event(1, at=datetime.now(UTC)),))
     store.close()
 
 
@@ -725,6 +880,18 @@ raise SystemExit(9)
         disk_usage_provider=lambda _path: SimpleNamespace(free=1_000_000_000),
     )
     assert reopened.resource_health()["exclusive_ownership"]["state"] == "active"
+    reopened.close()
+
+
+def test_store_receipt_observer_does_not_retain_the_owner_lock(tmp_path) -> None:
+    root = tmp_path / "capture"
+    store = ContentAddressedCaptureStore(root, compression_codec="zlib")
+    store_ref = weakref.ref(store)
+
+    del store
+
+    assert store_ref() is None
+    reopened = ContentAddressedCaptureStore(root, compression_codec="zlib")
     reopened.close()
 
 
