@@ -208,7 +208,7 @@ def main() -> int:
     print()
     print("=== HATOL ===")
     if not live_rth:
-        print("  🔴 WALANG generation na nag-emit ng event habang BUKAS ang market (RTH).")
+        print("  [!] WALANG generation na nag-emit ng event habang BUKAS ang market (RTH).")
         print("     Ang lane ay hindi buhay nang mahalaga — LIVENESS ito, hindi estratehiya.")
         print("     Wala pang masasabi tungkol sa conversion hangga't walang RTH na takbo.")
         return 0
