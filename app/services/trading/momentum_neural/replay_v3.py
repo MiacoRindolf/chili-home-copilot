@@ -4856,7 +4856,7 @@ class SealedReplayV3InputAdapter:
             if key != "endpoints"
         }
         return {
-            "schema_version": "chili.ortex-selection-result.v1",
+            "schema_version": "chili.ortex-selection-result.v2",
             "symbol": fact.snapshot.symbol,
             "short_mechanics": runtime_mechanics,
             "short_mechanics_sha256": (
@@ -4871,6 +4871,9 @@ class SealedReplayV3InputAdapter:
             "rank_pct": fact.snapshot.rank_pct,
             "batch_members_sha256": fact.snapshot.batch_members_sha256,
             "complete": fact.snapshot.complete,
+            "supplemental_neutral_reason": (
+                fact.snapshot.supplemental_neutral_reason
+            ),
         }
 
     def ortex_snapshot_provider(
@@ -6019,7 +6022,8 @@ class ReplayV3Driver:
                 or ""
             ).strip()
             with lr.replay_ortex_selection_provider(
-                adapter.consume_ortex_selection_for_active_decision
+                adapter.consume_ortex_selection_for_active_decision,
+                allow_supplemental_neutral=True,
             ):
                 if first_dip_read_id:
                     authority = (

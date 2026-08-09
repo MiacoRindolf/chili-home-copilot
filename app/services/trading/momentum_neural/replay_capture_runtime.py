@@ -1468,7 +1468,10 @@ class BoundedPreTriggerRing:
         self.max_change_keys = change_key_limit
         self.resource_binding = resource_binding
         self.pressure_controller = pressure_controller
-        self._by_symbol: dict[str, deque[tuple[CaptureEvent, int]]] = defaultdict(deque)
+        self._symbol_heaps: dict[
+            str, list[tuple[datetime, int, str]]
+        ] = defaultdict(list)
+        self._symbol_active_counts: dict[str, int] = {}
         self._global: list[tuple[datetime, int, str]] = []
         self._active: dict[int, tuple[str, CaptureEvent, int]] = {}
         self._evictions: dict[
@@ -1567,16 +1570,15 @@ class BoundedPreTriggerRing:
             return
         symbol, event, size = active
         self._bytes -= size
-        rows = self._by_symbol.get(symbol)
-        if rows:
-            if rows[0][0].sequence == sequence:
-                rows.popleft()
-            else:
-                self._by_symbol[symbol] = deque(
-                    row for row in rows if row[0].sequence != sequence
-                )
-            if not self._by_symbol[symbol]:
-                self._by_symbol.pop(symbol, None)
+        active_count = self._symbol_active_counts.get(symbol)
+        if active_count is None or active_count <= 0:
+            raise CaptureContractError("pre-trigger symbol active count is invalid")
+        if active_count == 1:
+            self._symbol_active_counts.pop(symbol, None)
+            self._symbol_heaps.pop(symbol, None)
+        else:
+            self._symbol_active_counts[symbol] = active_count - 1
+            self._prune_symbol_heap(symbol)
         if record_gap_reason and sequence not in self._pending_transfer_sequences:
             self._record_eviction(event, symbol=symbol, reason=record_gap_reason)
         for key in self._change_keys_by_sequence.pop(sequence, set()):
@@ -1592,6 +1594,53 @@ class BoundedPreTriggerRing:
             ):
                 self._admission_handoffs.pop(handoff_id, None)
                 self._admission_handoff_by_symbol.pop(symbol, None)
+
+    def _prune_symbol_heap(self, symbol: str) -> None:
+        """Discard lazy tombstones and keep one symbol's order index bounded."""
+
+        active_count = self._symbol_active_counts.get(symbol, 0)
+        heap = self._symbol_heaps.get(symbol)
+        if active_count <= 0:
+            self._symbol_heaps.pop(symbol, None)
+            return
+        if heap is None:
+            raise CaptureContractError("pre-trigger symbol order index is missing")
+        while heap:
+            _available_at, sequence, event_sha256 = heap[0]
+            active = self._active.get(sequence)
+            if (
+                active is not None
+                and active[0] == symbol
+                and active[1].event_sha256 == event_sha256
+            ):
+                break
+            heapq.heappop(heap)
+        if not heap:
+            raise CaptureContractError("pre-trigger symbol order index is empty")
+        threshold = max(active_count * 2, active_count + 1_024)
+        if len(heap) > threshold:
+            heap = [
+                row
+                for row in heap
+                if (
+                    (active := self._active.get(row[1])) is not None
+                    and active[0] == symbol
+                    and active[1].event_sha256 == row[2]
+                )
+            ]
+            if len(heap) != active_count:
+                raise CaptureContractError(
+                    "pre-trigger symbol order index count mismatch"
+                )
+            heapq.heapify(heap)
+            self._symbol_heaps[symbol] = heap
+
+    def _oldest_symbol_sequence(self, symbol: str) -> int:
+        self._prune_symbol_heap(symbol)
+        heap = self._symbol_heaps.get(symbol)
+        if not heap:  # pragma: no cover - guarded by _prune_symbol_heap
+            raise CaptureContractError("pre-trigger symbol order index is unavailable")
+        return int(heap[0][1])
 
     def _record_eviction(
         self,
@@ -1691,7 +1740,8 @@ class BoundedPreTriggerRing:
                 )
 
     def _compact_global_heap(self) -> None:
-        threshold = max(self.max_events * 2, self.max_events + 1_024)
+        active_count = len(self._active)
+        threshold = max(active_count * 2, active_count + 1_024)
         if len(self._global) <= threshold:
             return
         self._global = [
@@ -1756,25 +1806,27 @@ class BoundedPreTriggerRing:
                     reason="pretrigger_event_exceeds_byte_budget",
                 )
                 return False
-            self._by_symbol[symbol].append((event, size))
+            heapq.heappush(
+                self._symbol_heaps[symbol],
+                (event.clocks.available_at, event.sequence, event.event_sha256),
+            )
             heapq.heappush(
                 self._global,
                 (event.clocks.available_at, event.sequence, event.event_sha256),
             )
             self._active[event.sequence] = (symbol, event, size)
+            self._symbol_active_counts[symbol] = (
+                self._symbol_active_counts.get(symbol, 0) + 1
+            )
             self._bytes += size
 
-            while len(self._by_symbol.get(symbol, ())) > self.per_symbol_max_events:
-                oldest, _ = min(
-                    self._by_symbol[symbol],
-                    key=lambda row: (
-                        row[0].clocks.available_at,
-                        row[0].sequence,
-                        row[0].event_sha256,
-                    ),
-                )
+            while (
+                self._symbol_active_counts.get(symbol, 0)
+                > self.per_symbol_max_events
+            ):
+                oldest_sequence = self._oldest_symbol_sequence(symbol)
                 self._remove(
-                    oldest.sequence,
+                    oldest_sequence,
                     record_gap_reason="pretrigger_per_symbol_capacity",
                 )
             while len(self._active) > self.max_events or self._bytes > self.max_bytes:
@@ -2099,7 +2151,19 @@ class BoundedPreTriggerRing:
                 if self.pressure_controller is not None
                 else None
             )
-            rows = list(self._by_symbol.get(normalized, ()))
+            if self._symbol_active_counts.get(normalized, 0):
+                self._prune_symbol_heap(normalized)
+            rows = []
+            for _available_at, sequence, event_sha256 in self._symbol_heaps.get(
+                normalized, ()
+            ):
+                active = self._active.get(sequence)
+                if (
+                    active is not None
+                    and active[0] == normalized
+                    and active[1].event_sha256 == event_sha256
+                ):
+                    rows.append((active[1], active[2]))
             events = tuple(
                 sorted(
                     (
@@ -8422,9 +8486,16 @@ class _ExclusiveCaptureStoreOwnership:
         lease_seconds: float,
         heartbeat_seconds: float,
         wall_clock: Callable[[], datetime],
+        receipt_publish_observer: Callable[[str, int], None] | None = None,
     ) -> None:
         if not callable(wall_clock):
             raise CaptureContractError("capture ownership wall clock must be callable")
+        if receipt_publish_observer is not None and not callable(
+            receipt_publish_observer
+        ):
+            raise CaptureContractError(
+                "capture ownership receipt observer must be callable"
+            )
         self.root = root.resolve()
         self.lock_path = self.root / _STORE_OWNER_LOCK_NAME
         self.receipt_root = self.root / "ownership" / "receipts"
@@ -8453,6 +8524,7 @@ class _ExclusiveCaptureStoreOwnership:
         ):
             raise CaptureContractError("capture ownership lease timing is invalid")
         self._wall_clock = wall_clock
+        self._receipt_publish_observer = receipt_publish_observer
         self.owner_token = str(uuid.uuid4())
         self._handle: Any | None = None
         self._record: dict[str, Any] | None = None
@@ -8623,6 +8695,7 @@ class _ExclusiveCaptureStoreOwnership:
                 raise CaptureContractError("capture ownership receipt collision")
             return digest
         temp = target.parent / f".{target.name}.{uuid.uuid4().hex}.tmp"
+        published_new = False
         try:
             with temp.open("xb") as handle:
                 handle.write(raw)
@@ -8630,6 +8703,7 @@ class _ExclusiveCaptureStoreOwnership:
                 os.fsync(handle.fileno())
             try:
                 os.link(temp, target)
+                published_new = True
             except FileExistsError:
                 if target.read_bytes() != raw:
                     raise CaptureContractError("capture ownership receipt collision")
@@ -8642,6 +8716,8 @@ class _ExclusiveCaptureStoreOwnership:
                 temp.unlink()
             except FileNotFoundError:
                 pass
+        if published_new and self._receipt_publish_observer is not None:
+            self._receipt_publish_observer(digest, len(raw))
         return digest
 
     def _verify_receipt(self, record: Mapping[str, Any]) -> str:
@@ -8659,6 +8735,23 @@ class _ExclusiveCaptureStoreOwnership:
                 "capture store ownership receipt is corrupt or ambiguous"
             )
         return digest
+
+    def receipt_inventory(self) -> dict[str, int]:
+        """Validate and inventory immutable receipts without pausing renewal."""
+
+        inventory: dict[str, int] = {}
+        for path in self.receipt_root.glob("*.json"):
+            if not path.is_file():
+                continue
+            raw = path.read_bytes()
+            digest = hashlib.sha256(raw).hexdigest()
+            if digest != path.stem:
+                raise CaptureContractError(
+                    "capture ownership receipt content address mismatch"
+                )
+            self._parse_record(raw)
+            inventory[digest] = len(raw)
+        return inventory
 
     def _write_record(self, record: dict[str, Any]) -> str:
         assert self._handle is not None
@@ -8958,6 +9051,9 @@ class ContentAddressedCaptureStore:
         self._disk_usage_provider = disk_usage_provider
         self._monotonic_clock = monotonic_clock
         self._publish_state_lock = threading.RLock()
+        self._ownership_receipt_lock = threading.Lock()
+        self._pending_ownership_receipt_bytes = 0
+        self._known_ownership_receipts: dict[str, int] = {}
         self._payload_pack_lock = threading.Lock()
         self._sync_lock = threading.Lock()
         self._seal_lock = threading.Lock()
@@ -8969,6 +9065,8 @@ class ContentAddressedCaptureStore:
         self._payload_duplicate_locations = 0
         self._resource_failure_reasons: list[str] = []
         self._reserved_publish_bytes = 0
+        self._tracked_root_bytes = 0
+        self._tracked_ownership_receipt_bytes = 0
         self._published_bytes = 0
         self._publish_seconds = 0.0
         self._publish_count = 0
@@ -8977,6 +9075,18 @@ class ContentAddressedCaptureStore:
         self._sync_seconds = 0.0
         self._sync_failures = 0
         self.root.mkdir(parents=True, exist_ok=True)
+        store_ref = weakref.ref(self)
+
+        def _observe_ownership_receipt(
+            digest: str,
+            size: int,
+            *,
+            _store_ref: weakref.ReferenceType["ContentAddressedCaptureStore"] = store_ref,
+        ) -> None:
+            store = _store_ref()
+            if store is not None:
+                store._record_ownership_receipt_bytes(digest, size)
+
         self._ownership = _ExclusiveCaptureStoreOwnership(
             self.root,
             resource_binding_sha256=(
@@ -8992,9 +9102,30 @@ class ContentAddressedCaptureStore:
             lease_seconds=owner_lease,
             heartbeat_seconds=owner_heartbeat,
             wall_clock=wall_clock,
+            receipt_publish_observer=_observe_ownership_receipt,
         )
-        self._tracked_root_bytes = self._root_file_bytes()
         try:
+            # The content inventory excludes ownership receipts, so the
+            # heartbeat remains free to renew even when a historical tree is
+            # large. Merge its flat immutable receipt inventory with callbacks
+            # that raced the scan; digest de-duplication keeps bytes exact.
+            with self._publish_state_lock:
+                content_bytes = self._root_file_bytes()
+                receipt_inventory = self._ownership.receipt_inventory()
+                with self._ownership_receipt_lock:
+                    for digest, size in receipt_inventory.items():
+                        prior = self._known_ownership_receipts.get(digest)
+                        if prior is not None and prior != size:
+                            raise CaptureContractError(
+                                "capture ownership receipt size changed"
+                            )
+                        self._known_ownership_receipts[digest] = size
+                    receipt_bytes = sum(
+                        self._known_ownership_receipts.values()
+                    )
+                    self._tracked_ownership_receipt_bytes = receipt_bytes
+                    self._tracked_root_bytes = content_bytes + receipt_bytes
+                    self._pending_ownership_receipt_bytes = 0
             if self.resource_binding is not None:
                 record = canonical_json_bytes(self.resource_binding.to_record())
                 audit_path = (
@@ -9044,8 +9175,17 @@ class ContentAddressedCaptureStore:
         )
 
     def _root_file_bytes(self) -> int:
+        """Inventory store-owned content, excluding lease receipt objects."""
+
         total = 0
         for path in self.root.rglob("*"):
+            relative_parts = path.relative_to(self.root).parts
+            if (
+                len(relative_parts) >= 2
+                and relative_parts[0] == "ownership"
+                and relative_parts[1] == "receipts"
+            ):
+                continue
             name = path.name
             temporary_token = (
                 name[1:-4].rsplit(".", 1)[-1]
@@ -9063,6 +9203,71 @@ class ContentAddressedCaptureStore:
             ):
                 total += path.stat().st_size
         return total
+
+    def _record_ownership_receipt_bytes(
+        self,
+        receipt_sha256: str,
+        published_bytes: int,
+    ) -> None:
+        digest = _validated_sha256(
+            receipt_sha256,
+            "capture ownership receipt sha256",
+        )
+        size = int(published_bytes)
+        if size < 0:
+            raise CaptureContractError(
+                "capture ownership receipt byte count is invalid"
+            )
+        # Ownership renewal holds its own lease lock while publishing this
+        # receipt.  Do not acquire _publish_state_lock here: publishers hold
+        # that lock while revalidating ownership, so doing so would invert the
+        # two locks.  The next quota/health snapshot consumes this exact delta.
+        with self._ownership_receipt_lock:
+            prior = self._known_ownership_receipts.get(digest)
+            if prior is not None:
+                if prior != size:
+                    raise CaptureContractError(
+                        "capture ownership receipt size changed"
+                    )
+                return
+            self._known_ownership_receipts[digest] = size
+            self._pending_ownership_receipt_bytes += size
+
+    def _ownership_receipt_snapshot(self) -> dict[str, int]:
+        with self._ownership_receipt_lock:
+            return dict(self._known_ownership_receipts)
+
+    def _merge_ownership_receipt_inventory(
+        self,
+        inventory: Mapping[str, int],
+    ) -> None:
+        with self._ownership_receipt_lock:
+            for digest, raw_size in inventory.items():
+                validated = _validated_sha256(
+                    digest,
+                    "capture ownership receipt inventory sha256",
+                )
+                size = int(raw_size)
+                if size < 0:
+                    raise CaptureContractError(
+                        "capture ownership receipt byte count is invalid"
+                    )
+                prior = self._known_ownership_receipts.get(validated)
+                if prior is not None:
+                    if prior != size:
+                        raise CaptureContractError(
+                            "capture ownership receipt size changed"
+                        )
+                    continue
+                self._known_ownership_receipts[validated] = size
+                self._pending_ownership_receipt_bytes += size
+
+    def _consume_ownership_receipt_bytes(self) -> None:
+        with self._ownership_receipt_lock:
+            pending = self._pending_ownership_receipt_bytes
+            self._pending_ownership_receipt_bytes = 0
+        self._tracked_ownership_receipt_bytes += pending
+        self._tracked_root_bytes += pending
 
     def close(self) -> None:
         self._ownership.close()
@@ -9101,14 +9306,8 @@ class ContentAddressedCaptureStore:
 
     def _assert_publish_capacity(self, additional_bytes: int) -> None:
         self._ownership.assert_valid()
+        self._consume_ownership_receipt_bytes()
         binding = self.resource_binding
-        actual_root_bytes = self._root_file_bytes()
-        if actual_root_bytes < self._tracked_root_bytes:
-            self._record_resource_failure("capture_owned_object_removed_outside_store")
-        elif actual_root_bytes > self._tracked_root_bytes:
-            # Cross-process ownership receipts are part of this store's quota
-            # even though they bypass the content-object publisher.
-            self._tracked_root_bytes = actual_root_bytes
         if self._resource_failure_reasons:
             raise CaptureContractError(
                 "capture resource gate is dirty: "
@@ -9139,30 +9338,56 @@ class ContentAddressedCaptureStore:
         audit_filesystem: bool = True,
     ) -> dict[str, Any]:
         binding = self.resource_binding
-        ownership_health = self._ownership.health()
+        free = self._disk_free_bytes()
         # A publish creates the immutable hard link before it advances the
-        # tracked byte count.  Keep the filesystem scan in the same critical
-        # section as that transition; otherwise a concurrent health probe can
-        # observe the new link, advance the counter itself, and then make the
-        # publisher count the same object a second time.  The next probe would
-        # falsely report an externally removed object and poison the run.
+        # tracked byte count. Keep content publication in the same critical
+        # section as the audit. Ownership receipts are tracked separately, so
+        # their heartbeat remains free to renew during a long content scan.
         with self._publish_state_lock:
             actual_root_bytes: int | None = None
             if audit_filesystem:
-                actual_root_bytes = self._root_file_bytes()
-                if actual_root_bytes < self._tracked_root_bytes:
+                self._consume_ownership_receipt_bytes()
+                known_receipts_before = self._ownership_receipt_snapshot()
+                actual_content_bytes = self._root_file_bytes()
+                receipt_inventory = self._ownership.receipt_inventory()
+                if set(known_receipts_before).difference(receipt_inventory):
                     self._record_resource_failure(
                         "capture_owned_object_removed_outside_store"
                     )
-                elif actual_root_bytes > self._tracked_root_bytes:
-                    # Ownership receipts bypass the content-object publisher but
-                    # remain part of this store's measured quota.
-                    self._tracked_root_bytes = actual_root_bytes
+                self._merge_ownership_receipt_inventory(receipt_inventory)
+                self._consume_ownership_receipt_bytes()
+                tracked_content_bytes = (
+                    self._tracked_root_bytes
+                    - self._tracked_ownership_receipt_bytes
+                )
+                if actual_content_bytes < tracked_content_bytes:
+                    self._record_resource_failure(
+                        "capture_owned_object_removed_outside_store"
+                    )
+                elif actual_content_bytes > tracked_content_bytes:
+                    self._tracked_root_bytes += (
+                        actual_content_bytes - tracked_content_bytes
+                    )
+                actual_root_bytes = (
+                    actual_content_bytes
+                    + sum(receipt_inventory.values())
+                )
+            else:
+                self._consume_ownership_receipt_bytes()
             root_bytes = (
                 max(self._tracked_root_bytes, actual_root_bytes)
                 if actual_root_bytes is not None
                 else self._tracked_root_bytes
             )
+            if binding is not None:
+                if root_bytes > binding.budget.disk_quota_bytes:
+                    self._record_resource_failure(
+                        "capture_disk_quota_exceeded"
+                    )
+                if free < binding.policy.disk_reserve_bytes:
+                    self._record_resource_failure(
+                        "capture_disk_reserve_breached"
+                    )
             published_bytes = self._published_bytes
             publish_seconds = self._publish_seconds
             publish_count = self._publish_count
@@ -9175,7 +9400,7 @@ class ContentAddressedCaptureStore:
             dirty_objects = len(self._dirty_paths)
             durable_objects = len(self._durable_paths)
             resource_failure_reasons = tuple(self._resource_failure_reasons)
-        free = self._disk_free_bytes()
+        ownership_health = self._ownership.health()
         ingress_health = ingress.health() if ingress is not None else None
         ingress_failed_closed = bool(
             ingress_health is not None
@@ -12120,9 +12345,10 @@ class CaptureWriterWorker:
     def progress_health(self) -> dict[str, Any]:
         """O(1) writer progress for tight durability-wait polling.
 
-        Publish capacity retains the fail-closed filesystem audit.  Evidence,
-        preflight, and ordinary health callers use :meth:`health`, whose
-        default remains a full capture-root audit.
+        Publish capacity uses the exact startup inventory plus incrementally
+        tracked immutable objects and ownership receipts.  Evidence and
+        preflight callers use :meth:`health`, whose default remains a full
+        capture-root integrity audit.
         """
 
         return self._health(audit_filesystem=False)
@@ -12255,8 +12481,11 @@ class CaptureWriterPool:
     def seal_run(self, identity: CaptureRunIdentity) -> CaptureRunSeal:
         return self.store.seal_run(identity, lifecycle=self)
 
-    def health(self) -> dict[str, Any]:
-        rows = tuple(worker.health() for worker in self.workers)
+    def _health(self, *, audit_filesystem: bool) -> dict[str, Any]:
+        # Every worker reports progress over this same ingress/store.  Audit
+        # the shared filesystem once at the pool boundary, never once per
+        # worker in the live health loop.
+        rows = tuple(worker.progress_health() for worker in self.workers)
         return {
             "worker_count": len(rows),
             "stopped_cleanly": all(row["stopped_cleanly"] for row in rows),
@@ -12271,9 +12500,18 @@ class CaptureWriterPool:
                 int(row["lost_events_recorded"]) for row in rows
             ),
             "ingress": self.ingress.health(),
-            "resource": self.store.resource_health(self.ingress),
+            "resource": self.store.resource_health(
+                self.ingress,
+                audit_filesystem=audit_filesystem,
+            ),
             "workers": rows,
         }
+
+    def progress_health(self) -> dict[str, Any]:
+        return self._health(audit_filesystem=False)
+
+    def health(self) -> dict[str, Any]:
+        return self._health(audit_filesystem=True)
 
 
 class SharedCaptureWriterLease:

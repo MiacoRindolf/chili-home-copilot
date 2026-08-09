@@ -824,6 +824,66 @@ class CapturedPaperServiceSupervisor:
             raise CapturedPaperServiceSupervisorError(
                 "captured_paper_provider_health_lost"
             )
+        composition = host_health.get("composition")
+        if not (
+            isinstance(composition, Mapping)
+            and composition.get("state") == "ingress_running"
+        ):
+            raise CapturedPaperServiceSupervisorError(
+                "captured_paper_capture_composition_health_lost"
+            )
+        for handoff_name in ("l1", "l2"):
+            handoff = composition.get(f"{handoff_name}_handoff")
+            if not (
+                isinstance(handoff, Mapping)
+                and handoff.get("started") is True
+                and handoff.get("accepting") is True
+                and handoff.get("thread_alive") is True
+                and handoff.get("terminal_error") is None
+                and handoff.get("unpersisted_gap_count") == 0
+                and (
+                    handoff_name != "l2"
+                    or handoff.get("gap_ledger_overflow") is False
+                )
+            ):
+                raise CapturedPaperServiceSupervisorError(
+                    f"captured_paper_{handoff_name}_capture_handoff_health_lost"
+                )
+        capture_service = composition.get("service")
+        capture_runs = (
+            capture_service.get("runs")
+            if isinstance(capture_service, Mapping)
+            else None
+        )
+        if not isinstance(capture_runs, Mapping):
+            raise CapturedPaperServiceSupervisorError(
+                "captured_paper_capture_composition_health_lost"
+            )
+        for run_health in capture_runs.values():
+            writer = (
+                run_health.get("writer")
+                if isinstance(run_health, Mapping)
+                else None
+            )
+            writer_ingress = (
+                writer.get("ingress")
+                if isinstance(writer, Mapping)
+                else None
+            )
+            if not (
+                isinstance(run_health, Mapping)
+                and run_health.get("state") == "running"
+                and isinstance(writer, Mapping)
+                and writer.get("has_started") is True
+                and writer.get("writer_alive") is True
+                and writer.get("last_error") is None
+                and isinstance(writer_ingress, Mapping)
+                and writer_ingress.get("closed") is False
+                and writer_ingress.get("writer_failure_count") == 0
+            ):
+                raise CapturedPaperServiceSupervisorError(
+                    "captured_paper_capture_writer_health_lost"
+                )
         for managed in (
             *self._started_pre_authority_workers,
             *self._started_workers,

@@ -452,6 +452,38 @@ def _et_day_bounds(now_utc: datetime) -> tuple[datetime, datetime]:
     )
 
 
+def _tape_freshness(db: Session, *, since_utc: datetime) -> tuple[datetime | None, str | None]:
+    """Newest quote/tick row across the WHOLE tape today, unscoped by symbol.
+
+    This is deliberately not derived from ``_load_chart_series``: that short-circuits
+    on an empty symbol list and joins ``WHERE t.symbol = s.symbol``, so it returns
+    nothing in exactly the blind case we need to detect. Both reads are covered by
+    the ``(observed_at)`` index created in migration 303.
+    """
+    for table, source in (
+        ("momentum_nbbo_spread_tape", "momentum_nbbo_spread_tape"),
+        ("iqfeed_trade_ticks", "iqfeed_trade_ticks"),
+    ):
+        try:
+            with db.begin_nested():
+                row = db.execute(
+                    text(
+                        f"SELECT max(observed_at) AS newest FROM {table} "
+                        "WHERE observed_at >= :since_utc"
+                    ),
+                    {"since_utc": since_utc},
+                ).first()
+        except Exception:
+            logger.warning(
+                "[live_monitor] tape freshness read failed for %s", table, exc_info=True
+            )
+            continue
+        newest = row[0] if row else None
+        if isinstance(newest, datetime):
+            return _utc_naive(newest), source
+    return None, None
+
+
 def _lane_bucket(mode: str | None, execution_family: str | None) -> str:
     if str(mode or "").lower() != "live":
         return "paper"
@@ -1250,6 +1282,16 @@ def _captured_watch_inventory(
         )
         is not None
     ]
+    # `_validated_captured_watch_route` has ten silent `return None` exits, six of
+    # which are provenance sha comparisons. A post-deploy sha drift zeroes the watch
+    # list while the lane is actively selecting, and nothing anywhere surfaced it.
+    dropped_route_count = max(0, len(raw_rows) - len(routes))
+    if dropped_route_count:
+        logger.info(
+            "[live_monitor] captured watch dropped %s of %s routes on validation",
+            dropped_route_count,
+            len(raw_rows),
+        )
     rows = [
         {
             **route,
@@ -1264,6 +1306,14 @@ def _captured_watch_inventory(
         "heartbeat_at": identity["heartbeat_at"],
         "runtime_stale": identity["runtime_stale"],
         "activation_generation": identity["runtime_generation"],
+        # Counted BEFORE the [:LIVE_MONITOR_SYMBOL_LIMIT] slice above, so the funnel
+        # reports the true selection width rather than the capped view.
+        "routes_scored": len(raw_rows),
+        "routes_validated": len(routes),
+        "policy_eligible_routes": sum(
+            1 for route in routes if route.get("policy_eligible")
+        ),
+        "dropped_route_count": dropped_route_count,
     }
 
 
@@ -1556,20 +1606,107 @@ def _build_state_snapshot(db: Session, *, user_id: int, now_utc: datetime) -> di
             if isinstance(heartbeat_at, datetime):
                 latest_candidates.append(heartbeat_at)
     latest_update = max(latest_candidates, default=None)
+
+    # ---- Operator status -------------------------------------------------------
+    # `latest_update` above is loop-iteration recency on BOTH paths and always has
+    # been. Keep it on the wire for compatibility, but derive the page's verdict from
+    # the control heartbeat and the tape as two independent facts.
+    from .lane_health import (
+        LIVE_LOOP_HEARTBEAT_INTERVAL_SECONDS,
+        evaluate_lane_health,
+        live_loop_stale_seconds,
+    )
+    from .live_status import market_session_snapshot, resolve_lane_verdict
+
+    market = market_session_snapshot(now_utc)
+    day_start = _et_day_bounds(now_utc)[0]
+    tape_at, tape_source = _tape_freshness(db, since_utc=day_start)
+
+    def _age(value: datetime | None) -> float | None:
+        if not isinstance(value, datetime):
+            return None
+        return round(max(0.0, (now_utc - value).total_seconds()), 1)
+
+    control_at = captured_status.get("heartbeat_at")
+    control_at = control_at if isinstance(control_at, datetime) else None
+    stale_after = live_loop_stale_seconds()
+
+    try:
+        lane_health = evaluate_lane_health(db, user_id=user_id)
+    except Exception:  # documented never to raise, but this is a read-only surface
+        logger.warning("[live_monitor] lane health probe failed", exc_info=True)
+        lane_health = {"enabled": False, "frozen": False, "severity": "ok", "conditions": []}
+
+    verdict = resolve_lane_verdict(
+        watch_status=captured_status.get("status"),
+        market_open=bool(market["is_open"]),
+        market_label=market["label"],
+        control_age_s=_age(control_at),
+        tape_age_s=_age(tape_at),
+        stale_after_s=stale_after,
+        lane_health=lane_health,
+        symbol_count=len(symbols_out),
+    )
+
+    watching_symbols = set(captured_by_symbol).difference(sessions_by_symbol)
+    in_position = sum(1 for row in active_rows if row["position"].get("is_open"))
+    funnel = {
+        # `routes_scored` / `policy_eligible` come from the pre-truncation counters in
+        # `_captured_watch_inventory`; aggregating symbols_out here would silently cap
+        # at LIVE_MONITOR_SYMBOL_LIMIT exactly when the funnel is widest.
+        "routes_scored": int(captured_status.get("routes_scored") or 0),
+        "policy_eligible": int(captured_status.get("policy_eligible_routes") or 0),
+        "watching": len(watching_symbols),
+        "setup": sum(
+            1
+            for row in symbols_out
+            if str(row.get("card_status") or "").upper() == "SETUP"
+        ),
+        "armed": sum(1 for row in symbols_out if row.get("armed")),
+        "in_position": in_position,
+        "closed_today": {
+            "trades": totals["trades"],
+            "wins": sum(int(row.get("wins") or 0) for row in pnl_by_symbol.values()),
+            "losses": sum(int(row.get("losses") or 0) for row in pnl_by_symbol.values()),
+        },
+        "dropped_routes": int(captured_status.get("dropped_route_count") or 0),
+        "truncated_at": LIVE_MONITOR_SYMBOL_LIMIT,
+    }
+
+    # A closed market does not need a 3s DB snapshot; a regular session does.
+    refresh_after_ms = {
+        "regular": 2000,
+        "premarket": 3000,
+        "afterhours": 3000,
+    }.get(market["phase"], 30000)
+
     return {
         "ok": True,
         "read_only": True,
         "as_of_utc": _iso_utc(now_utc),
         "latest_runtime_utc": _iso_utc(latest_update),
-        "refresh_after_ms": 3000,
+        "refresh_after_ms": refresh_after_ms,
         "active_symbol_count": len({row["symbol"] for row in active_rows}),
-        "watching_symbol_count": len(
-            set(captured_by_symbol).difference(sessions_by_symbol)
-        ),
-        "open_position_count": sum(1 for row in active_rows if row["position"].get("is_open")),
+        "watching_symbol_count": len(watching_symbols),
+        "open_position_count": in_position,
         "totals": totals,
         "lanes": lane_summary,
         "symbols": symbols_out,
+        "market_session": market,
+        "funnel": funnel,
+        "lane": {
+            **verdict,
+            "captured_watch_status": captured_status.get("status"),
+            "control_heartbeat_utc": _iso_utc(control_at),
+            "control_heartbeat_age_s": _age(control_at),
+            "tape_utc": _iso_utc(tape_at),
+            "tape_age_s": _age(tape_at),
+            "tape_source": tape_source,
+            "stale_after_s": round(stale_after, 1),
+            "heartbeat_interval_s": LIVE_LOOP_HEARTBEAT_INTERVAL_SECONDS,
+            "dropped_route_count": funnel["dropped_routes"],
+        },
+        "lane_health": lane_health,
         "observer": {
             "source": "persisted_runtime_events_outcomes_and_quote_tape",
             "broker_calls": 0,

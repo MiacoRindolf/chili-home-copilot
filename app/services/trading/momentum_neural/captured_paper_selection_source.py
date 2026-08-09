@@ -85,6 +85,7 @@ from .replay_capture_contract import (
     ValidatedOrtexSqueezeFuelBatchManifest,
     bind_ortex_squeeze_fuel_batch_reference,
     captured_read_result_sha256,
+    ortex_supplemental_neutral_reason,
     sha256_json,
     validate_ortex_squeeze_fuel_batch_manifest,
     validate_ortex_squeeze_fuel_batch_reference,
@@ -291,7 +292,7 @@ def _ortex_global_batch_inventory(
         str,
         ValidatedOrtexSqueezeFuelBatchManifest,
     ],
-) -> tuple[Mapping[str, Mapping[str, Any]] | None, str | None, str | None]:
+) -> tuple[ValidatedOrtexSqueezeFuelBatchManifest | None, str | None]:
     """Resolve a compact row receipt to the exact full hub manifest.
 
     Scheduler persistence is intentionally chunked while Ortex percentile
@@ -305,7 +306,7 @@ def _ortex_global_batch_inventory(
 
     raw_reference = feature_meta.get(ORTEX_BATCH_STATUS_KEY)
     if not isinstance(raw_reference, Mapping):
-        return None, None, "ortex_selection_batch_reference_missing"
+        return None, "ortex_selection_batch_reference_missing"
     try:
         typed_reference = validate_ortex_squeeze_fuel_batch_reference(
             raw_reference,
@@ -313,7 +314,7 @@ def _ortex_global_batch_inventory(
             expected_quota_policy_sha256=public_policy_sha256,
         )
     except CaptureContractError:
-        return None, None, "ortex_selection_batch_reference_invalid"
+        return None, "ortex_selection_batch_reference_invalid"
 
     typed_manifest = manifest_cache.get(typed_reference.batch_sha256)
     if typed_manifest is None:
@@ -323,18 +324,10 @@ def _ortex_global_batch_inventory(
             .one_or_none()
         )
         if hub_row is None or not isinstance(hub_row.local_state, Mapping):
-            return (
-                None,
-                typed_reference.batch_sha256,
-                "ortex_selection_batch_hub_missing",
-            )
+            return None, "ortex_selection_batch_hub_missing"
         raw_manifest = hub_row.local_state.get(ORTEX_BATCH_STATUS_KEY)
         if not isinstance(raw_manifest, Mapping):
-            return (
-                None,
-                typed_reference.batch_sha256,
-                "ortex_selection_batch_hub_missing",
-            )
+            return None, "ortex_selection_batch_hub_missing"
         try:
             typed_manifest = validate_ortex_squeeze_fuel_batch_manifest(
                 raw_manifest,
@@ -350,7 +343,7 @@ def _ortex_global_batch_inventory(
                 typed_reason = "ortex_selection_batch_hub_from_future"
             else:
                 typed_reason = "ortex_selection_batch_hub_invalid"
-            return None, typed_reference.batch_sha256, typed_reason
+            return None, typed_reason
         manifest_cache[typed_manifest.batch_sha256] = typed_manifest
     try:
         bound_manifest = bind_ortex_squeeze_fuel_batch_reference(
@@ -358,25 +351,10 @@ def _ortex_global_batch_inventory(
             typed_manifest,
         )
     except CaptureContractError:
-        return (
-            None,
-            typed_reference.batch_sha256,
-            "ortex_selection_batch_hub_reference_mismatch",
-        )
-    if not bound_manifest.complete:
-        return (
-            None,
-            bound_manifest.batch_sha256,
-            "ortex_selection_batch_coverage_unavailable",
-        )
-    inventory = bound_manifest.signal_by_symbol
-    if required_symbol not in inventory:
-        return (
-            None,
-            bound_manifest.batch_sha256,
-            "ortex_selection_batch_symbol_missing",
-        )
-    return inventory, bound_manifest.batch_sha256, None
+        return None, "ortex_selection_batch_hub_reference_mismatch"
+    if required_symbol not in bound_manifest.signal_by_symbol:
+        return None, "ortex_selection_batch_symbol_missing"
+    return bound_manifest, None
 
 
 def _ortex_row_signal_matches_global_member(
@@ -478,8 +456,20 @@ def _ortex_selection_evidence(
             None,
             "ortex_selection_source_stale",
         )
+    if not typed.complete:
+        if (
+            typed.supplemental_neutral_reason == "operational_unavailable"
+            and typed.rank_pct is None
+            and not rank_present
+        ):
+            return _OrtexSelectionEvidence(True, typed, None)
+        return _OrtexSelectionEvidence(
+            True,
+            None,
+            "ortex_selection_batch_coverage_unavailable",
+        )
     if typed.outcome == "SUCCESS":
-        if not typed.complete or typed.rank_pct is None or not rank_present:
+        if typed.rank_pct is None or not rank_present:
             return _OrtexSelectionEvidence(
                 True,
                 None,
@@ -490,7 +480,7 @@ def _ortex_selection_evidence(
         "NOT_APPLICABLE",
         "UNSUPPORTED_SYMBOL_OR_EXCHANGE",
     }:
-        if not typed.complete or typed.rank_pct is not None or rank_present:
+        if typed.rank_pct is not None or rank_present:
             return _OrtexSelectionEvidence(
                 True,
                 None,
@@ -512,6 +502,8 @@ def _materialize_ortex_selection_batch(
     read_at: datetime,
     public_policy: Mapping[str, Any],
     public_policy_sha256: str,
+    complete: bool,
+    allow_supplemental_neutral: bool = False,
 ) -> tuple[Mapping[str, Any] | None, str | None]:
     """Resolve compact viability refs to full response bytes in one DB snapshot."""
 
@@ -662,6 +654,7 @@ def _materialize_ortex_selection_batch(
 
     try:
         from .short_mechanics import (
+            OrtexOutcomeKind,
             OrtexShortMechanicsOutcome,
             ortex_outcome_from_completed_attempts,
         )
@@ -681,15 +674,60 @@ def _materialize_ortex_selection_batch(
                 reference.get("available_at"),
                 "ortex_selection_observed_at",
             )
-            if reference.get("kind") == "NOT_APPLICABLE":
-                if endpoint_refs or selected_records:
-                    return None, "ortex_not_applicable_attempts_present"
-                outcome = OrtexShortMechanicsOutcome.not_applicable(
+            if not endpoint_refs:
+                if selected_records:
+                    return None, "ortex_endpointless_attempts_present"
+                outcome = OrtexShortMechanicsOutcome(
+                    kind=OrtexOutcomeKind(str(reference.get("kind") or "")),
                     symbol=symbol,
-                    reason=str(reference.get("detail_code") or ""),
-                    observed_at=observed_at,
-                    policy_sha256=public_policy_sha256,
+                    requested_exchange=reference.get("requested_exchange"),
+                    resolved_exchange=reference.get("resolved_exchange"),
+                    endpoints=(),
+                    short_interest_pct=reference.get("short_interest_pct"),
+                    cost_to_borrow=reference.get("cost_to_borrow"),
+                    utilization=reference.get("utilization"),
+                    is_easy_to_borrow=reference.get("is_easy_to_borrow"),
+                    provider_event_at=(
+                        None
+                        if reference.get("provider_event_at") is None
+                        else _parse_utc(
+                            reference.get("provider_event_at"),
+                            "ortex_provider_event_at",
+                        )
+                    ),
+                    effective_at=(
+                        None
+                        if reference.get("effective_at") is None
+                        else _parse_utc(
+                            reference.get("effective_at"),
+                            "ortex_effective_at",
+                        )
+                    ),
+                    received_at=_parse_utc(
+                        reference.get("received_at"),
+                        "ortex_selection_received_at",
+                    ),
+                    available_at=observed_at,
+                    detail_code=str(reference.get("detail_code") or ""),
                     policy=public_policy,
+                    quota_policy_sha256=public_policy_sha256,
+                    cache_origin_sha256=reference.get("cache_origin_sha256"),
+                    cache_origin_received_at=(
+                        None
+                        if reference.get("cache_origin_received_at") is None
+                        else _parse_utc(
+                            reference.get("cache_origin_received_at"),
+                            "ortex_cache_origin_received_at",
+                        )
+                    ),
+                    cache_origin_available_at=(
+                        None
+                        if reference.get("cache_origin_available_at") is None
+                        else _parse_utc(
+                            reference.get("cache_origin_available_at"),
+                            "ortex_cache_origin_available_at",
+                        )
+                    ),
                 )
             else:
                 durable_outcome = ortex_outcome_from_completed_attempts(
@@ -783,14 +821,16 @@ def _materialize_ortex_selection_batch(
         }:
             unusable_kind = outcome.kind.value.lower()
 
-    if unusable_kind is not None:
+    if unusable_kind is not None and (
+        complete or not allow_supplemental_neutral
+    ):
         return None, f"ortex_selection_outcome_unavailable:{unusable_kind}"
     members.sort(key=lambda row: row["symbol"])
     batch = {
         "schema_version": "chili.ortex-selection-snapshot.v1",
         "members": members,
         "members_sha256": sha256_json(members),
-        "complete": True,
+        "complete": complete,
     }
     try:
         # Validate every member as a possible ranked decision so no malformed
@@ -798,14 +838,22 @@ def _materialize_ortex_selection_batch(
         # Non-equity policy members are still fully parsed by every validation
         # call, but cannot themselves be a ranked decision (the typed capture
         # contract intentionally rejects ``*-USD`` as ``expected_symbol``).
+        typed_batch: CaptureOrtexSelectionSnapshot | None = None
         for member in members:
             if member["symbol"].endswith("-USD"):
                 continue
-            validate_ortex_selection_batch(
+            typed_batch = validate_ortex_selection_batch(
                 batch,
                 ranked_symbol=member["symbol"],
                 expected_rank_pct=member["rank_pct"],
             )
+        if not complete and (
+            not allow_supplemental_neutral
+            or typed_batch is None
+            or typed_batch.supplemental_neutral_reason
+            != "operational_unavailable"
+        ):
+            return None, "ortex_selection_batch_coverage_unavailable"
     except (CaptureContractError, TypeError, ValueError):
         return None, "ortex_selection_batch_invalid"
     if _utc(read_at, "ortex_selection_read_at") < max(
@@ -1882,8 +1930,7 @@ class SqlAlchemyCapturedViabilitySnapshotSource:
                                 )
                             else:
                                 (
-                                    global_signals,
-                                    batch_cache_key,
+                                    bound_manifest,
                                     current_ortex_reason,
                                 ) = _ortex_global_batch_inventory(
                                     db,
@@ -1902,9 +1949,11 @@ class SqlAlchemyCapturedViabilitySnapshotSource:
                                 )
                                 if (
                                     current_ortex_reason is None
-                                    and global_signals is not None
-                                    and batch_cache_key is not None
+                                    and bound_manifest is not None
                                 ):
+                                    global_signals = (
+                                        bound_manifest.signal_by_symbol
+                                    )
                                     global_member = global_signals[symbol]
                                     if not _ortex_row_signal_matches_global_member(
                                         current_signal,
@@ -1915,7 +1964,31 @@ class SqlAlchemyCapturedViabilitySnapshotSource:
                                             "projection_mismatch"
                                         )
                                     else:
-                                        if batch_cache_key not in ortex_batch_cache:
+                                        supplemental_neutral = (
+                                            not bound_manifest.complete
+                                            and ortex_supplemental_neutral_reason(
+                                                bound_manifest,
+                                                symbol=symbol,
+                                                projected_signal=current_signal,
+                                            )
+                                            == "operational_unavailable"
+                                        )
+                                        if (
+                                            not bound_manifest.complete
+                                            and not supplemental_neutral
+                                        ):
+                                            current_ortex_reason = (
+                                                "ortex_selection_batch_"
+                                                "coverage_unavailable"
+                                            )
+                                        batch_cache_key = (
+                                            bound_manifest.batch_sha256
+                                        )
+                                        if (
+                                            current_ortex_reason is None
+                                            and batch_cache_key
+                                            not in ortex_batch_cache
+                                        ):
                                             ortex_batch_cache[batch_cache_key] = (
                                                 _materialize_ortex_selection_batch(
                                                     db,
@@ -1927,15 +2000,23 @@ class SqlAlchemyCapturedViabilitySnapshotSource:
                                                     public_policy_sha256=(
                                                         self.ortex_public_policy_sha256
                                                     ),
+                                                    complete=(
+                                                        bound_manifest.complete
+                                                    ),
+                                                    allow_supplemental_neutral=(
+                                                        supplemental_neutral
+                                                    ),
                                                 )
                                             )
-                                        (
-                                            current_ortex_batch,
-                                            current_ortex_reason,
-                                        ) = ortex_batch_cache[batch_cache_key]
+                                        if current_ortex_reason is None:
+                                            (
+                                                current_ortex_batch,
+                                                current_ortex_reason,
+                                            ) = ortex_batch_cache[batch_cache_key]
                                 if (
                                     current_ortex_batch is None
                                     and current_ortex_reason is None
+                                    and current_ortex_affected
                                 ):
                                     current_ortex_reason = (
                                         "ortex_selection_batch_unavailable"

@@ -483,15 +483,19 @@ _RECEIPT_MAX_AGE_SECONDS: Mapping[str, int] = MappingProxyType(
         # lifecycle_preflight and runtime_settings, which share observed_at.
         # A later sealed fire measured the same starvation for refreshed
         # broker/kill evidence after a successful 252s selection prime and
-        # mandatory authority rehash.  Their bounded 20-minute windows match
-        # database/capture and the manifest/no-order maximum.  Unbounded
-        # operator waits still fail closed — receipt staleness IS the fence.
-        "runtime_settings": 20 * 60,
+        # mandatory authority rehash.
+        # Operator waits still fail closed — receipt staleness IS the fence.
+        # r130 measured 20m50s from the static operational capture clock to
+        # the final consumer even with replay work serialized; the duplicate
+        # sealed rewalk alone took about 146s.  Content-bound static proofs get
+        # a bounded 30-minute window.  Dynamic broker, kill-switch and no-order
+        # evidence remain at 20 minutes and are live-probed at service start.
+        "runtime_settings": 30 * 60,
         "broker_account": 20 * 60,
-        "database_schema": 20 * 60,
-        "capture_host_smoke": 20 * 60,
+        "database_schema": 30 * 60,
+        "capture_host_smoke": 30 * 60,
         "focused_regressions": 60 * 60,
-        "lifecycle_preflight": 20 * 60,
+        "lifecycle_preflight": 30 * 60,
         "kill_switch": 20 * 60,
         "no_order_smoke": 20 * 60,
         "rollback_snapshot": 60 * 60,
@@ -603,6 +607,24 @@ class CapturedPaperActivationContractError(RuntimeError):
         self.code = str(code)
         self.message = str(message)
         super().__init__(f"{self.code}: {self.message}")
+
+
+@dataclass(frozen=True, slots=True)
+class _VerifiedCodeBuild:
+    """One call-local, fully verified code-build result.
+
+    A final activation embeds the exact code-build already present in its
+    bound preactivation.  Revalidating that nested envelope used to repeat the
+    complete source hash, module-index, and AST dependency-closure walk.  This
+    value is never process-global: it can only be reused by the recursive load
+    in the same stack, and only after the nested code-build is byte-identical.
+    """
+
+    candidate_root: Path
+    canonical_document: bytes
+    code_build_sha256: str
+    source_paths: Mapping[str, Path]
+    source_hashes: Mapping[str, str]
 
 
 @dataclass(frozen=True, slots=True)
@@ -723,6 +745,54 @@ def _sha(value: Any, field: str) -> str:
             "INVALID_SHA256", f"{field} is not a lowercase SHA-256"
         )
     return normalized
+
+
+def _stage0_attests_code_build_reuse(
+    *,
+    manifest_path: Path,
+    manifest_sha256: str,
+    candidate_root: Path,
+    code_build_sha256: str,
+) -> bool:
+    """Return whether stage0 still guards the exact outer code-build.
+
+    Outside the isolated service loader, the contract retains its historical
+    behavior and physically validates both envelopes.  The optimization is
+    admitted only when stage0 has already hash-verified every rostered source
+    and is retaining the platform-specific mutation guards for this exact
+    final manifest.
+    """
+
+    attestation = getattr(sys, "_captured_paper_isolated_stage0", None)
+    if not isinstance(attestation, Mapping):
+        return False
+    expected_guard = (
+        "windows-deny-write-delete-held-handles.v1"
+        if os.name == "nt"
+        else "import-time-hash-held-read-handles.v1"
+    )
+    try:
+        attested_manifest = Path(
+            str(attestation.get("manifest_path") or "")
+        ).resolve(strict=True)
+        attested_root = Path(
+            str(attestation.get("candidate_root") or "")
+        ).resolve(strict=True)
+    except (OSError, RuntimeError):
+        return False
+    return bool(
+        attestation.get("schema_version")
+        == "chili.captured-paper-isolated-stage0.v2"
+        and attestation.get("target_role") == "activation_service"
+        and attested_manifest == manifest_path
+        and attestation.get("manifest_sha256") == manifest_sha256
+        and attested_root == candidate_root
+        and attestation.get("code_build_sha256") == code_build_sha256
+        and attestation.get("local_roster_sha256") == code_build_sha256
+        and type(attestation.get("local_module_count")) is int
+        and int(attestation["local_module_count"]) > 0
+        and attestation.get("dependency_mutation_guard_mode") == expected_guard
+    )
 
 
 def _uuid(value: Any, field: str) -> str:
@@ -1898,6 +1968,7 @@ def _load_captured_paper_envelope(
     envelope_stage: str,
     wall_clock: Callable[[], datetime] = lambda: datetime.now(UTC),
     _superseded_readiness_kinds: frozenset[str] = frozenset(),
+    _verified_code_build: _VerifiedCodeBuild | None = None,
 ) -> VerifiedCapturedPaperActivation:
     """Verify one exact stage of the two-stage PAPER envelope locally."""
 
@@ -2057,81 +2128,104 @@ def _load_captured_paper_envelope(
         raise CapturedPaperActivationContractError(
             "CODE_BUILD_SCHEMA_MISMATCH", "code-build schema is unsupported"
         )
-    rows = code_build.get("artifacts")
-    if not isinstance(rows, list):
-        raise CapturedPaperActivationContractError(
-            "CODE_BUILD_INVALID", "code-build artifacts are not an array"
-        )
-    source_paths: dict[str, Path] = {}
-    source_hashes: dict[str, str] = {}
-    path_roles: dict[Path, str] = {}
-    normalized_rows: list[dict[str, str]] = []
-    for row in rows:
-        item = _mapping(row, "code_build.artifact")
-        _exact_keys(item, {"role", "path", "sha256"}, "code_build.artifact")
-        role = str(item.get("role") or "").strip().lower()
-        if not role or role in source_paths:
+    canonical_code_build = _canonical_json_bytes(code_build)
+    if (
+        _verified_code_build is not None
+        and _verified_code_build.candidate_root == root
+        and _verified_code_build.canonical_document == canonical_code_build
+    ):
+        source_paths = dict(_verified_code_build.source_paths)
+        source_hashes = dict(_verified_code_build.source_hashes)
+        code_build_sha256 = _verified_code_build.code_build_sha256
+        verified_code_build = _verified_code_build
+    else:
+        rows = code_build.get("artifacts")
+        if not isinstance(rows, list):
             raise CapturedPaperActivationContractError(
-                "CODE_ROLE_INVALID", "code-build role is empty or duplicated"
+                "CODE_BUILD_INVALID", "code-build artifacts are not an array"
             )
-        path, _bytes, digest = _stable_read(
-            item.get("path"),
-            expected_sha256=item.get("sha256"),
-            roots=(root,),
-            field=f"code_build.{role}",
-            allow_empty=role.startswith(_DEPENDENCY_ROLE_PREFIX),
-        )
-        if path in path_roles:
+        source_paths = {}
+        source_hashes = {}
+        path_roles: dict[Path, str] = {}
+        normalized_rows: list[dict[str, str]] = []
+        for row in rows:
+            item = _mapping(row, "code_build.artifact")
+            _exact_keys(item, {"role", "path", "sha256"}, "code_build.artifact")
+            role = str(item.get("role") or "").strip().lower()
+            if not role or role in source_paths:
+                raise CapturedPaperActivationContractError(
+                    "CODE_ROLE_INVALID", "code-build role is empty or duplicated"
+                )
+            path, _bytes, digest = _stable_read(
+                item.get("path"),
+                expected_sha256=item.get("sha256"),
+                roots=(root,),
+                field=f"code_build.{role}",
+                allow_empty=role.startswith(_DEPENDENCY_ROLE_PREFIX),
+            )
+            if path in path_roles:
+                raise CapturedPaperActivationContractError(
+                    "CODE_ROLE_INVALID",
+                    f"code-build path is duplicated by {path_roles[path]} and {role}",
+                )
+            path_roles[path] = role
+            source_paths[role] = path
+            source_hashes[role] = digest
+            normalized_rows.append(
+                {"role": role, "path": str(path), "sha256": digest}
+            )
+        missing_primary = _REQUIRED_CODE_ROLES - set(source_paths)
+        if missing_primary:
             raise CapturedPaperActivationContractError(
-                "CODE_ROLE_INVALID",
-                f"code-build path is duplicated by {path_roles[path]} and {role}",
+                "CODE_ROSTER_MISMATCH",
+                f"code-build primary roles differ; missing={sorted(missing_primary)}",
             )
-        path_roles[path] = role
-        source_paths[role] = path
-        source_hashes[role] = digest
-        normalized_rows.append({"role": role, "path": str(path), "sha256": digest})
-    missing_primary = _REQUIRED_CODE_ROLES - set(source_paths)
-    if missing_primary:
-        raise CapturedPaperActivationContractError(
-            "CODE_ROSTER_MISMATCH",
-            f"code-build primary roles differ; missing={sorted(missing_primary)}",
+        primary_paths = {source_paths[role] for role in _REQUIRED_CODE_ROLES}
+        closure = discover_captured_paper_local_dependency_closure(
+            candidate_root=root,
+            seed_paths=primary_paths,
         )
-    primary_paths = {source_paths[role] for role in _REQUIRED_CODE_ROLES}
-    closure = discover_captured_paper_local_dependency_closure(
-        candidate_root=root,
-        seed_paths=primary_paths,
-    )
-    expected_dependencies = {
-        dependency_role(module_name): path
-        for module_name, path in closure.items()
-        if path not in primary_paths
-    }
-    expected_roles = set(_REQUIRED_CODE_ROLES) | set(expected_dependencies)
-    if set(source_paths) != expected_roles:
-        raise CapturedPaperActivationContractError(
-            "CODE_DEPENDENCY_CLOSURE_MISMATCH",
-            "code-build does not exactly bind the local PAPER dependency closure; "
-            f"missing={sorted(expected_roles-set(source_paths))} "
-            f"extra={sorted(set(source_paths)-expected_roles)}",
-        )
-    for role, expected_path in expected_dependencies.items():
-        if source_paths[role] != expected_path:
+        expected_dependencies = {
+            dependency_role(module_name): path
+            for module_name, path in closure.items()
+            if path not in primary_paths
+        }
+        expected_roles = set(_REQUIRED_CODE_ROLES) | set(expected_dependencies)
+        if set(source_paths) != expected_roles:
             raise CapturedPaperActivationContractError(
                 "CODE_DEPENDENCY_CLOSURE_MISMATCH",
-                f"local dependency role {role} points to another source",
+                "code-build does not exactly bind the local PAPER dependency closure; "
+                f"missing={sorted(expected_roles-set(source_paths))} "
+                f"extra={sorted(set(source_paths)-expected_roles)}",
             )
-    if normalized_rows != sorted(normalized_rows, key=lambda row: row["role"]):
-        raise CapturedPaperActivationContractError(
-            "CODE_ROSTER_UNSORTED", "code-build roles must be sorted"
+        for role, expected_path in expected_dependencies.items():
+            if source_paths[role] != expected_path:
+                raise CapturedPaperActivationContractError(
+                    "CODE_DEPENDENCY_CLOSURE_MISMATCH",
+                    f"local dependency role {role} points to another source",
+                )
+        if normalized_rows != sorted(normalized_rows, key=lambda row: row["role"]):
+            raise CapturedPaperActivationContractError(
+                "CODE_ROSTER_UNSORTED", "code-build roles must be sorted"
+            )
+        code_body = {
+            "schema_version": CODE_BUILD_SCHEMA_VERSION,
+            "artifacts": normalized_rows,
+        }
+        code_build_sha256 = _sha(
+            code_build.get("code_build_sha256"), "code_build_sha256"
         )
-    code_body = {
-        "schema_version": CODE_BUILD_SCHEMA_VERSION,
-        "artifacts": normalized_rows,
-    }
-    code_build_sha256 = _sha(code_build.get("code_build_sha256"), "code_build_sha256")
-    if sha256_json(code_body) != code_build_sha256:
-        raise CapturedPaperActivationContractError(
-            "CODE_BUILD_HASH_MISMATCH", "code-build digest did not bind the source roster"
+        if sha256_json(code_body) != code_build_sha256:
+            raise CapturedPaperActivationContractError(
+                "CODE_BUILD_HASH_MISMATCH",
+                "code-build digest did not bind the source roster",
+            )
+        verified_code_build = _VerifiedCodeBuild(
+            candidate_root=root,
+            canonical_document=canonical_code_build,
+            code_build_sha256=code_build_sha256,
+            source_paths=MappingProxyType(dict(source_paths)),
+            source_hashes=MappingProxyType(dict(source_hashes)),
         )
 
     capture_ref = _mapping(document.get("capture_binding"), "capture_binding")
@@ -2528,6 +2622,16 @@ def _load_captured_paper_envelope(
             wall_clock=lambda: now,
             _superseded_readiness_kinds=frozenset(
                 {"broker_account", "kill_switch"}
+            ),
+            _verified_code_build=(
+                verified_code_build
+                if _stage0_attests_code_build_reuse(
+                    manifest_path=manifest_file,
+                    manifest_sha256=manifest_sha,
+                    candidate_root=root,
+                    code_build_sha256=code_build_sha256,
+                )
+                else None
             ),
         )
         shared_fields = (

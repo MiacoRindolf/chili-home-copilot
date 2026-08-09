@@ -8632,6 +8632,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     service_singleton: _CapturedPaperServiceSingleton | None = None
     try:
         _validate_mode_arguments(args)
+        _emit_startup_breadcrumb("BEGIN validate_offline_startup")
         verified, receipt, projection = validate_offline_startup(
             manifest_path=args.manifest,
             manifest_sha256=args.manifest_sha256,
@@ -8643,6 +8644,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 "preactivation" if args.mode == "no-order-smoke" else "activation"
             ),
         )
+        _emit_startup_breadcrumb("END validate_offline_startup")
         if args.mode == "validate-only":
             report = _offline_report(verified, receipt, projection)
         else:
@@ -8675,7 +8677,10 @@ def main(argv: Sequence[str] | None = None) -> int:
             # preflights.  Preserve uncertainty in the rejection report if an
             # exception interrupts one of those reads.
             external_runtime_boundary_entered = True
+            _emit_startup_breadcrumb("BEGIN load_pinned_runtime_modules")
             runtime_modules = _load_pinned_runtime_modules(verified)
+            _emit_startup_breadcrumb("END load_pinned_runtime_modules")
+            _emit_startup_breadcrumb("BEGIN build_service_composition")
             composition = _build_service_composition(
                 verified=verified,
                 projection=projection,
@@ -8692,6 +8697,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                     else _deny_active_transport_dispatch
                 ),
             )
+            _emit_startup_breadcrumb("END build_service_composition")
             if args.mode == "no-order-smoke":
                 provider_start_may_have_been_attempted = True
                 report = _execute_no_order_smoke(

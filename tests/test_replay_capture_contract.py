@@ -938,6 +938,9 @@ def _sealed_passing_manifest(
         stream_coverage=logical.stream_coverage,
         read_receipts=logical.read_receipts,
     )
+    # The store now owns an explicit cross-process writer lease. Release the
+    # fixture's writer before a test reopens the same sealed bytes for reading.
+    store.close()
     return request, manifest, verified
 
 
@@ -1045,13 +1048,15 @@ def test_verified_load_requires_the_exact_expected_final_seal_sha(tmp_path) -> N
     store = ContentAddressedCaptureStore(
         tmp_path / "sealed-capture", compression_codec="zlib"
     )
-
-    with pytest.raises(CaptureContractError, match="expected SHA"):
-        VerifiedReplayCapture.load_sealed_run(
-            store,
-            verified.identity,
-            expected_final_seal_sha256="f" * 64,
-        )
+    try:
+        with pytest.raises(CaptureContractError, match="expected SHA"):
+            VerifiedReplayCapture.load_sealed_run(
+                store,
+                verified.identity,
+                expected_final_seal_sha256="f" * 64,
+            )
+    finally:
+        store.close()
 
 
 def test_duck_typed_loader_cannot_self_attest_a_verified_capture() -> None:

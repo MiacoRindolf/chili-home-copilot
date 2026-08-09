@@ -4013,6 +4013,15 @@ class TradingAutomationSession(Base):
     """Automation runner session (persistence only in Phase 2 — no runner logic here)."""
 
     __tablename__ = "trading_automation_sessions"
+    __table_args__ = (
+        Index(
+            "ix_tas_capture_active",
+            "mode",
+            "state",
+            "symbol",
+            postgresql_where=text("symbol NOT LIKE '%-%'"),
+        ),
+    )
 
     id: int = Column(Integer, primary_key=True, index=True)
     user_id: Optional[int] = Column(Integer, ForeignKey("users.id", ondelete="SET NULL"), nullable=True, index=True)

@@ -749,56 +749,101 @@ def build_equity_universe(
     advs: list[float | None] = []  # parallel ADV-shares proxy per row (prevDay.v); None = unknown
     rvols: list[float | None] = []  # parallel intraday RVOL per row (today/prevDay shares); None = unknown
     below_price_min: list[bool] = []  # parallel: True when the row is a sub-price_min exemption candidate
-    _iqfeed_dvols = _iqfeed_dollar_volumes(
-        [s.get("ticker") for s in (snapshot or []) if isinstance(s, dict)]
-    )  # IQFeed ground-truth today $-vol for the snapshot candidates (index-fast via symbol=ANY)
-    for s in snapshot or []:
+    # Query IQFeed only for names that can still pass every cheap snapshot gate
+    # and whose snapshot turnover is below the required floor.  The previous
+    # call handed the aggregate the raw ~10K full-market snapshot every 20s,
+    # including high-priced, flat, and already-liquid names.  On the live PAPER
+    # host that all-day index work repeatedly starved the co-resident L1 writer
+    # for 6-11s.  This is a semantics-preserving pre-screen: IQFeed is used only
+    # as a monotonic fallback for the dollar-volume floor below, so a name that
+    # cannot pass another gate or already clears the floor cannot benefit from
+    # the query.  Sub-dollar exemption candidates remain included because their
+    # later RVOL/change bar still owns the final decision.
+    _prequalified: list[tuple[dict, object, str, float, float, float, bool]] = []
+    for _snapshot_row in snapshot or []:
         try:
-            if not isinstance(s, dict):
+            if not isinstance(_snapshot_row, dict):
                 continue
+            _query_ticker = _snapshot_row.get("ticker")
+            _ticker = _normalize_ross_common_stock_symbol(_query_ticker)
+            if not _ticker:
+                continue
+            _price = _snapshot_price(_snapshot_row)
+            if _price is None:
+                continue
+            _under_min = (
+                profile.price_min is not None and _price < profile.price_min
+            )
+            if _under_min and not _subdollar_on:
+                continue
+            _change = _f(_snapshot_row.get("todaysChangePerc"))
+            if _change is None:
+                _change = _premarket_change_pct(_snapshot_row)
+            if _change is None:
+                continue
+            # Preserve L12's origin-based ceiling while prequalifying the
+            # bounded IQFeed dollar-volume query. A runner that started inside
+            # the instrument-class band must not evict itself solely because
+            # its live price crossed ``price_max``.
+            if profile.price_max is not None and _price > profile.price_max:
+                if not _price_in_band(
+                    _session_origin_price(_price, _change), profile
+                ):
+                    continue
+            if (
+                profile.min_change_pct is not None
+                and _change < profile.min_change_pct
+            ):
+                continue
+            _day = _snapshot_row.get("day") or {}
+            _minute = _snapshot_row.get("min") or {}
+            _volume = max(
+                _f(_day.get("v")) or 0.0,
+                _f(_minute.get("av")) or 0.0,
+            )
+            _prequalified.append(
+                (
+                    _snapshot_row,
+                    _query_ticker,
+                    _ticker,
+                    _price,
+                    _volume,
+                    _change,
+                    bool(_under_min),
+                )
+            )
+        except Exception:
+            continue
+    _iqfeed_shortfalls = [
+        query_ticker
+        for (
+            _row,
+            query_ticker,
+            _ticker,
+            price,
+            volume,
+            _change,
+            _under_min,
+        ) in _prequalified
+        if profile.min_dollar_volume is not None
+        and price * volume < profile.min_dollar_volume
+    ]
+    _iqfeed_dvols = _iqfeed_dollar_volumes(_iqfeed_shortfalls)
+    for s, _query_ticker, ticker, price, vol, chg, _under_min in _prequalified:
+        try:
             # instrument-class hygiene (2026-07-09, ported with the event-admission
             # consumer): warrants/units/rights + the leveraged-ETP blocklist never
             # enter the Ross universe — the <1s tick path must not event-arm them.
-            ticker = _normalize_ross_common_stock_symbol(s.get("ticker"))
-            if not ticker:
-                continue
-
-            price = _snapshot_price(s)
-            if price is None:
-                continue
             # SUB-$1 EXEMPTION (deferred): when the sub-dollar exemption is on, a name
             # priced UNDER price_min is NOT dropped here — it is carried as an exemption
             # candidate and the price_min filter is re-applied AFTER the batch hot-mover
             # bar is known, so ONLY an explosive sub-$1 runner (NEXR $0.95→$1.18) survives
             # while ordinary penny tape is still dropped. OFF ⇒ the original early drop.
-            _under_min = profile.price_min is not None and price < profile.price_min
-            if _under_min and not _subdollar_on:
-                continue
-            if profile.price_max is not None and price > profile.price_max:
-                # L12 (2026-08-05) — ORIGIN-BASED CEILING. ITO ang site na
-                # nagpalabas sa AMIX: dito napagpapasyahan kung SINO ang papasok
-                # sa pool, at ang ceiling ay sinusukat sa live na presyo — kaya
-                # ang runner ay kusang nagpapalabas sa sarili nito sa oras na
-                # ito na ang pinakamalaking mover. Pinapasok kung ang session
-                # ORIGIN (prior close) ay nasa loob ng band. Ang change ay
-                # binabasa nang maaga rito; ang parehong halaga ay muling
-                # ginagamit sa ibaba, kaya walang bagong data source.
-                _chg_for_origin = _f(s.get("todaysChangePerc"))
-                if _chg_for_origin is None:
-                    _chg_for_origin = _premarket_change_pct(s)
-                if not _price_in_band(
-                    _session_origin_price(price, _chg_for_origin), profile
-                ):
-                    continue
-
-            day = s.get("day") or {}
-            mn = s.get("min") or {}
             # PRE-MARKET truth: the snapshot 'day' aggregate stays zeroed until the
             # RTH open, so the $-volume floor must also read the minute bar's
             # ACCUMULATED volume ('av', counts extended-hours prints). Without this
             # every equity fails the floor pre-market -> empty universe -> nothing
             # to arm in the very window Ross trades (#562's hour gate opened it).
-            vol = max(_f(day.get("v")) or 0.0, _f(mn.get("av")) or 0.0)
             # IQFeed ground-truth premarket $-vol (Massive day/min aggregates lag pre-open —
             # JEM-class movers fail the floor until RTH though IQFeed has them from ~04:00 ET).
             # MONOTONIC (max) => can only ADD a missed mover, never remove a current one => no regression.
@@ -806,18 +851,6 @@ def build_equity_universe(
             # The $-vol floor is NEVER relaxed — it is the tradability bar that keeps
             # junk out of BOTH the normal pool and the hot-mover guarantee/exemption.
             if profile.min_dollar_volume is not None and dollar_vol < profile.min_dollar_volume:
-                continue
-
-            chg = _f(s.get("todaysChangePerc"))
-            if chg is None:
-                # premarket fallback (today-open → prev-close vs live print) — proven
-                # in nbbo_tape; surfaces already-printing gappers by ~04:00 ET not 09:40
-                chg = _premarket_change_pct(s)
-            if chg is None:
-                continue
-            # Long bias: a positive floor keeps only names moving UP into the day
-            # (the momentum lane is long-only; a high-volume dump is not a buy).
-            if profile.min_change_pct is not None and chg < profile.min_change_pct:
                 continue
 
             # Ross enters EARLY/fresh, not after a name has run +1000% and rolled

@@ -4983,7 +4983,11 @@ def _run_equity_viability_refresh_job():
     """
     from ..config import settings
     from ..db import SessionLocal
-    from .trading.intraday_signals import scan_momentum_continuation, scan_premarket_gaps
+    from .trading.intraday_signals import (
+        _resolve_momentum_rvol_min,
+        scan_momentum_continuation,
+        scan_premarket_gaps,
+    )
     from .trading.momentum_neural.universe import EQUITY_ROSS_SMALLCAP, build_equity_universe
 
     # Tailor the equity universe to the Ross small-cap PROFILE (low-priced, in-play,
@@ -5034,11 +5038,11 @@ def _run_equity_viability_refresh_job():
         )
 
     # The equity momentum scan does per-ticker OHLCV fetches and can run for minutes.
-    # Holding ONE db across the scan AND the bridge write left the connection
-    # idle-in-transaction long enough for PG to drop it ("server closed the connection
-    # unexpectedly"), so the bridge write failed and equities went stale. So: scan on a
-    # short-lived session that is RELEASED before the write, then bridge on a FRESH
-    # connection (the scan's may already be dead). docs/DESIGN/MOMENTUM_LANE.md
+    # Resolve its adaptive DB parameter first, then RELEASE that transaction before
+    # any provider I/O. Holding the parameter-read transaction through the serial
+    # provider loop made PostgreSQL kill it at the 120s idle-in-transaction timeout.
+    # The numeric value is passed into the unchanged scanner, and the bridge still
+    # writes through its own fresh connection. docs/DESIGN/MOMENTUM_LANE.md
     # Premarket-gap output cap: the input ``scan_tickers`` is ALREADY the screened
     # Ross pool, so cap the gap scan to that pool's size — every screened gapper
     # reaches the Ross percentile re-rank (which makes the real selection) instead
@@ -5055,27 +5059,34 @@ def _run_equity_viability_refresh_job():
         )
         else None
     )
-    sweep: dict[str, Any] = {"momentum_signals": [], "premarket_gaps": []}
-    scan_db = SessionLocal()
+    parameter_db = SessionLocal()
     try:
-        try:
-            sweep["momentum_signals"] = list(
-                scan_momentum_continuation(tickers=scan_tickers, db=scan_db) or []
-            )
-        except Exception:
-            sweep["momentum_signals"] = []
-        try:
-            sweep["premarket_gaps"] = list(
-                scan_premarket_gaps(tickers=scan_tickers, max_signals=_pm_gap_cap) or []
-            )
-        except Exception:
-            sweep["premarket_gaps"] = []
+        rvol_min = _resolve_momentum_rvol_min(parameter_db)
     finally:
         try:
-            scan_db.rollback()
+            parameter_db.rollback()
         except Exception:
             pass
-        scan_db.close()
+        parameter_db.close()
+
+    sweep: dict[str, Any] = {"momentum_signals": [], "premarket_gaps": []}
+    try:
+        sweep["momentum_signals"] = list(
+            scan_momentum_continuation(
+                tickers=scan_tickers,
+                rvol_min_override=rvol_min,
+            )
+            or []
+        )
+    except Exception:
+        sweep["momentum_signals"] = []
+    try:
+        sweep["premarket_gaps"] = list(
+            scan_premarket_gaps(tickers=scan_tickers, max_signals=_pm_gap_cap)
+            or []
+        )
+    except Exception:
+        sweep["premarket_gaps"] = []
 
     movers = _equity_movers_for_ross_bridge(sweep)
     # WAVE-4 ITEM-6(a): even with NO scanner movers, an ACTIVE watched/held session must still
@@ -6295,7 +6306,6 @@ def start_scheduler():
                 name="Daily market scan (2:30 America/Los_Angeles)",
                 replace_existing=True,
                 max_instances=1,
-                next_run_time=datetime.now() + timedelta(seconds=35),
             )
 
         if include_web_light and getattr(settings, "chili_daily_trading_brief_enabled", False):
@@ -7314,14 +7324,13 @@ def start_scheduler():
         # heartbeat instead of silently disappearing with that legacy job.
         if (
             include_momentum_exec
-            and settings.chili_momentum_live_runner_enabled
             and getattr(settings, "chili_lane_health_alert_enabled", True)
         ):
             _scheduler.add_job(
                 _run_lane_health_check_job,
                 trigger=IntervalTrigger(seconds=_aa_secs),
                 id="lane_health_check",
-                name=f"Lane-health FROZEN watch (every {_aa_secs}s; alerts on a stuck live driver)",
+                name=f"Lane-health FROZEN watch (every {_aa_secs}s; driver + exact equity tape)",
                 replace_existing=True,
                 max_instances=1,
                 coalesce=True,

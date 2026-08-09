@@ -84,6 +84,10 @@ def happy(monkeypatch):
     # wall-clock driven — pin it to a productive window so the equity selection tests
     # are deterministic regardless of when the suite runs (no test asserts the late path).
     monkeypatch.setattr(market_profile, "schedule_window_now", lambda *a, **k: "midday", raising=False)
+    # Candidate-selection tests exercise arm policy, not the wall clock. Keep the
+    # default happy path deterministic on weekends; the dedicated market-closed
+    # regression below overrides this seam explicitly.
+    monkeypatch.setattr(aa, "_symbol_market_open", lambda _symbol: True)
     monkeypatch.setattr(governance, "is_kill_switch_active", lambda: False)
     monkeypatch.setattr(aa, "_active_live_session_count", lambda db, *, user_id: 0)
     monkeypatch.setattr(portfolio_risk, "check_portfolio_drawdown_breaker", lambda db, uid: (False, None))

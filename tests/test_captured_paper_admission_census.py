@@ -183,6 +183,22 @@ def test_ang_apat_na_dating_tahimik_ay_may_sariling_pangalan(src, expected):
     assert expected in lp._captured_paper_admission_outcomes
 
 
+@pytest.mark.parametrize(
+    "raw,expected",
+    [
+        ("initial_candidate_read_unavailable", "initial_candidate_read_unavailable"),
+        (
+            "INITIAL_INGRESS_PRESSURE_UNAVAILABLE: current sample is stale",
+            "initial_ingress_pressure_unavailable",
+        ),
+        ("postgres://user:secret@host", "captured_paper_admission_rejected"),
+        ("free form provider failure", "captured_paper_admission_rejected"),
+    ],
+)
+def test_admission_reason_code_preserves_only_safe_typed_prefix(raw, expected):
+    assert lrl._captured_paper_admission_reason_code(raw) == expected
+
+
 def test_ang_apat_na_landas_ay_talagang_naka_instrumento_sa_source():
     """Istrukturang bantay: kung may mag-aalis ng isang call site, dito
     babagsak — hindi sa isang tahimik na production run makalipas ang linggo."""
@@ -361,12 +377,22 @@ def test_ang_sidecar_ay_may_raw_samples(tmp_path):
     assert rec["raw_samples"] == {"Below A-setup quality floor (…)": 3}
 
 
-def test_ang_call_site_ay_nagsa_sample_bago_mag_normalize():
-    """Istrukturang bantay: ang sampling ay dapat BAGO ang normalization sa
-    _admit_iqfeed_symbol — pagkatapos ay wala nang maitatabi."""
+def test_ang_call_site_ay_nagsa_sample_ng_hilaw_sa_fallback_na_landas():
+    """Istrukturang bantay: sa _admit_iqfeed_symbol, ang sampler ay dapat
+    tumanggap ng HILAW na dahilan (`raw_reason`, bago ang helper) at nasa
+    purong-fallback na landas — kapag ang typed-prefix extraction ng
+    `_captured_paper_admission_reason_code` ay hindi tumama at mawawala na
+    sana ang tunay na dahilan."""
     import inspect
 
     src = inspect.getsource(lrl.LiveRunnerLoop._admit_iqfeed_symbol)
-    i_sample = src.find("_sample_admission_raw_reason")
-    i_norm = src.find('rejection_reason = "captured_paper_admission_rejected"')
-    assert 0 < i_sample < i_norm, "ang sample ay dapat mauna sa normalization"
+    assert "_sample_admission_raw_reason(raw_reason)" in src, (
+        "ang sampler ay dapat tumanggap ng hilaw na dahilan, hindi ang "
+        "na-normalize nang resulta"
+    )
+    i_helper = src.find("_captured_paper_admission_reason_code(")
+    i_guard = src.find('== "captured_paper_admission_rejected"')
+    i_sample = src.find("_sample_admission_raw_reason(raw_reason)")
+    assert 0 < i_helper < i_guard < i_sample, (
+        "ang sampler ay dapat nasa fallback-guard pagkatapos ng helper"
+    )

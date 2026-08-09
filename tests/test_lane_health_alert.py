@@ -17,11 +17,15 @@ import uuid
 from datetime import datetime, timedelta, timezone
 
 import pytest
+from sqlalchemy import text
 
 from app.config import settings
 from app.models.trading import AlertHistory, BrainBatchJob
 from app.services.trading import governance as gov
 from app.services.trading.batch_job_constants import (
+    IQFEED_EXACT_PRINT_HEARTBEAT_SCHEMA,
+    IQFEED_EXACT_PRINT_HEARTBEAT_SCOPE,
+    JOB_IQFEED_EXACT_PRINT_HEARTBEAT,
     JOB_MOMENTUM_LIVE_LOOP_HEARTBEAT,
     JOB_SCHEDULER_WORKER_HEARTBEAT,
 )
@@ -60,6 +64,12 @@ def _reset(monkeypatch):
     # Default the lane OFF so condition (c) only fires when a test opts in via
     # _enable_lane — independent of the operator's ambient .env (where it may be on).
     monkeypatch.setattr(settings, "chili_momentum_live_runner_enabled", False, raising=False)
+    monkeypatch.setattr(
+        settings, "chili_momentum_auto_arm_equity_only", False, raising=False
+    )
+    monkeypatch.setattr(
+        settings, "chili_momentum_auto_arm_crypto_only", True, raising=False
+    )
     yield
     gov.deactivate_kill_switch()
     with gov._per_broker_lock:
@@ -278,12 +288,430 @@ def _enable_event_lane(monkeypatch):
     monkeypatch.setattr(settings, "chili_momentum_auto_arm_crypto_only", True, raising=False)
 
 
+def _enable_equity_event_lane(monkeypatch):
+    _enable_event_lane(monkeypatch)
+    monkeypatch.setattr(
+        settings, "chili_momentum_auto_arm_equity_only", True, raising=False
+    )
+    monkeypatch.setattr(
+        settings, "chili_momentum_auto_arm_crypto_only", False, raising=False
+    )
+    monkeypatch.setattr(
+        settings, "chili_momentum_arm_tape_freshness_max_sec", 300.0
+    )
+
+
 def test_event_loop_heartbeat_keeps_quiet_lane_healthy(db, monkeypatch):
     _enable_event_lane(monkeypatch)
     _live_loop_heartbeat(db, age_seconds=2)
     r = lh.evaluate_lane_health(db)
     assert r["frozen"] is False
     assert r["conditions"] == []
+
+
+def test_equity_event_loop_stale_exact_print_is_loud_even_with_fresh_heartbeat(
+    db,
+    monkeypatch,
+):
+    _enable_equity_event_lane(monkeypatch)
+    _live_loop_heartbeat(db, age_seconds=2, captured_paper=True)
+    monkeypatch.setattr(lh, "_iqfeed_data_session_age_seconds", lambda: 601.0)
+    monkeypatch.setattr(
+        lh,
+        "_latest_exact_iqfeed_print_status",
+        lambda _db: {
+            "ok": True,
+            "provider_event_at": datetime.utcnow() - timedelta(seconds=601),
+            "received_at": datetime.utcnow() - timedelta(seconds=1),
+            "available_at": datetime.utcnow() - timedelta(seconds=1),
+        },
+    )
+
+    r = lh.evaluate_lane_health(db)
+
+    cond = next(c for c in r["conditions"] if c["kind"] == "equity_tape_stalled")
+    assert r["frozen"] is True
+    assert cond["reason"] == "iqfeed_exact_print_provider_stale"
+    assert cond["elapsed_seconds"] >= 600.0
+    assert cond["stale_seconds"] == 300.0
+
+
+def test_equity_event_loop_missing_exact_print_is_loud(db, monkeypatch):
+    _enable_equity_event_lane(monkeypatch)
+    _live_loop_heartbeat(db, age_seconds=2, captured_paper=True)
+    monkeypatch.setattr(lh, "_iqfeed_data_session_age_seconds", lambda: 301.0)
+    monkeypatch.setattr(
+        lh,
+        "_latest_exact_iqfeed_print_status",
+        lambda _db: {"ok": False, "reason": "iqfeed_exact_print_missing"},
+    )
+
+    r = lh.evaluate_lane_health(db)
+
+    cond = next(c for c in r["conditions"] if c["kind"] == "equity_tape_stalled")
+    assert r["frozen"] is True
+    assert cond["reason"] == "iqfeed_exact_print_missing"
+
+
+def test_equity_event_loop_fresh_exact_print_keeps_lane_healthy(db, monkeypatch):
+    _enable_equity_event_lane(monkeypatch)
+    _live_loop_heartbeat(db, age_seconds=2, captured_paper=True)
+    monkeypatch.setattr(lh, "_iqfeed_data_session_age_seconds", lambda: 301.0)
+    monkeypatch.setattr(
+        lh,
+        "_latest_exact_iqfeed_print_status",
+        lambda _db: {
+            "ok": True,
+            "provider_event_at": datetime.utcnow() - timedelta(seconds=2),
+            "received_at": datetime.utcnow() - timedelta(seconds=1),
+            "available_at": datetime.utcnow() - timedelta(seconds=1),
+        },
+    )
+
+    r = lh.evaluate_lane_health(db)
+
+    assert r["frozen"] is False
+    assert r["conditions"] == []
+
+
+def test_equity_exact_print_alert_is_quiet_outside_tradeable_window(
+    db,
+    monkeypatch,
+):
+    _enable_equity_event_lane(monkeypatch)
+    _live_loop_heartbeat(db, age_seconds=2, captured_paper=True)
+    monkeypatch.setattr(lh, "_iqfeed_data_session_age_seconds", lambda: None)
+    monkeypatch.setattr(
+        lh,
+        "_latest_exact_iqfeed_print_status",
+        lambda _db: (_ for _ in ()).throw(
+            AssertionError("closed session must not read a tape receipt")
+        ),
+    )
+
+    r = lh.evaluate_lane_health(db)
+
+    assert r["frozen"] is False
+    assert r["conditions"] == []
+
+
+def test_exact_print_alert_waits_for_current_session_grace(db, monkeypatch):
+    _enable_equity_event_lane(monkeypatch)
+    _live_loop_heartbeat(db, age_seconds=2, captured_paper=True)
+    monkeypatch.setattr(lh, "_iqfeed_data_session_age_seconds", lambda: 299.0)
+    monkeypatch.setattr(
+        lh,
+        "_latest_exact_iqfeed_print_status",
+        lambda _db: (_ for _ in ()).throw(
+            AssertionError("session grace must avoid a receipt read")
+        ),
+    )
+
+    r = lh.evaluate_lane_health(db)
+
+    assert r["frozen"] is False
+    assert r["conditions"] == []
+
+
+def test_exact_print_alert_is_independent_of_paper_and_notify(db, monkeypatch):
+    monkeypatch.setattr(
+        settings, "chili_momentum_auto_arm_equity_only", True, raising=False
+    )
+    monkeypatch.setattr(
+        settings, "chili_momentum_auto_arm_crypto_only", False, raising=False
+    )
+    monkeypatch.setattr(
+        settings,
+        "chili_momentum_live_runner_loop_iqfeed_notify_enabled",
+        False,
+        raising=False,
+    )
+    monkeypatch.setattr(lh, "_iqfeed_data_session_age_seconds", lambda: 301.0)
+    monkeypatch.setattr(
+        lh,
+        "_latest_exact_iqfeed_print_status",
+        lambda _db: {"ok": False, "reason": "iqfeed_exact_print_missing"},
+    )
+
+    r = lh.evaluate_lane_health(db)
+
+    assert r["frozen"] is True
+    assert any(c["kind"] == "equity_tape_stalled" for c in r["conditions"])
+
+
+def test_exact_print_query_failure_becomes_typed_loud_condition(db, monkeypatch):
+    monkeypatch.setattr(
+        settings, "chili_momentum_auto_arm_equity_only", True, raising=False
+    )
+    monkeypatch.setattr(
+        settings, "chili_momentum_auto_arm_crypto_only", False, raising=False
+    )
+    monkeypatch.setattr(lh, "_iqfeed_data_session_age_seconds", lambda: 301.0)
+    monkeypatch.setattr(
+        lh,
+        "_latest_exact_iqfeed_print_status",
+        lambda _db: (_ for _ in ()).throw(RuntimeError("db unavailable")),
+    )
+
+    r = lh.evaluate_lane_health(db)
+
+    cond = next(c for c in r["conditions"] if c["kind"] == "equity_tape_stalled")
+    assert cond["reason"] == "iqfeed_exact_print_unreadable"
+
+
+def _exact_print_receipt_meta(
+    *,
+    at: datetime,
+    bridge_run_id: str | None = None,
+    bridge_run_started_at: datetime | None = None,
+) -> dict:
+    at_utc = at.replace(tzinfo=timezone.utc).isoformat().replace("+00:00", "Z")
+    bridge_run_started_at = bridge_run_started_at or at - timedelta(minutes=5)
+    meta = {
+        "schema": IQFEED_EXACT_PRINT_HEARTBEAT_SCHEMA,
+        "scope": IQFEED_EXACT_PRINT_HEARTBEAT_SCOPE,
+        "symbol": "AMIX",
+        "observed_at_utc": at_utc,
+        "provider_event_at_utc": at_utc,
+        "received_at_utc": at_utc,
+        "available_at_utc": at_utc,
+        "bridge_version": "test-bridge-build",
+        "bridge_run_id": bridge_run_id or str(uuid.uuid4()),
+        "bridge_run_started_at_utc": (
+            bridge_run_started_at.replace(tzinfo=timezone.utc)
+            .isoformat()
+            .replace("+00:00", "Z")
+        ),
+        "connection_generation": 1,
+        "source_frame_sequence": 1,
+        "source_frame_sha256": "a" * 64,
+        "committed_print_count": 1,
+    }
+    meta["content_sha256"] = lh._heartbeat_content_sha256(meta)
+    return meta
+
+
+def _insert_exact_print_tape_row(db, *, meta: dict) -> None:
+    db.execute(
+        text(
+            "INSERT INTO iqfeed_trade_ticks "
+            "(symbol, observed_at, price, size, source, provider_event_at, "
+            "received_at, timestamp_basis, bridge_version, message_type, "
+            "bridge_run_id, connection_generation, source_frame_sequence, "
+            "source_frame_sha256, available_at) VALUES "
+            "(:symbol, :observed_at, 1.0, 100.0, 'iqfeed_l1', "
+            ":provider_event_at, :received_at, "
+            "'iqfeed_selected_trade_date_timems_exact', :bridge_version, 'Q', "
+            ":bridge_run_id, :connection_generation, :source_frame_sequence, "
+            ":source_frame_sha256, :available_at)"
+        ),
+        {
+            "symbol": meta["symbol"],
+            "observed_at": datetime.fromisoformat(
+                meta["observed_at_utc"].replace("Z", "+00:00")
+            ).replace(tzinfo=None),
+            "provider_event_at": meta["provider_event_at_utc"],
+            "received_at": meta["received_at_utc"],
+            "available_at": meta["available_at_utc"],
+            "bridge_version": meta["bridge_version"],
+            "bridge_run_id": meta["bridge_run_id"],
+            "connection_generation": meta["connection_generation"],
+            "source_frame_sequence": meta["source_frame_sequence"],
+            "source_frame_sha256": meta["source_frame_sha256"],
+        },
+    )
+
+
+def test_exact_print_receipt_validator_accepts_content_bound_completed_row(db):
+    at = datetime.utcnow()
+    meta = _exact_print_receipt_meta(at=at)
+    _insert_exact_print_tape_row(db, meta=meta)
+    db.add(
+        BrainBatchJob(
+            id=str(uuid.uuid4()),
+            job_type=JOB_IQFEED_EXACT_PRINT_HEARTBEAT,
+            status="ok",
+            started_at=at,
+            ended_at=at,
+            meta_json=meta,
+        )
+    )
+    db.commit()
+
+    truth = lh._latest_exact_iqfeed_print_status(db)
+
+    assert truth["ok"] is True
+    assert truth["provider_event_at"] == at
+    assert truth["scope"] == IQFEED_EXACT_PRINT_HEARTBEAT_SCOPE
+
+
+def test_exact_print_receipt_validator_accepts_parser_clock_tolerance(db):
+    received_at = datetime.utcnow()
+    provider_at = received_at + timedelta(milliseconds=500)
+    available_at = received_at + timedelta(seconds=1)
+    meta = _exact_print_receipt_meta(at=available_at)
+    meta["observed_at_utc"] = (
+        provider_at.replace(tzinfo=timezone.utc).isoformat().replace("+00:00", "Z")
+    )
+    meta["provider_event_at_utc"] = meta["observed_at_utc"]
+    meta["received_at_utc"] = (
+        received_at.replace(tzinfo=timezone.utc).isoformat().replace("+00:00", "Z")
+    )
+    meta["content_sha256"] = lh._heartbeat_content_sha256(meta)
+    _insert_exact_print_tape_row(db, meta=meta)
+    db.add(
+        BrainBatchJob(
+            id=str(uuid.uuid4()),
+            job_type=JOB_IQFEED_EXACT_PRINT_HEARTBEAT,
+            status="ok",
+            started_at=available_at,
+            ended_at=available_at,
+            meta_json=meta,
+        )
+    )
+    db.commit()
+
+    truth = lh._latest_exact_iqfeed_print_status(db)
+
+    assert truth["ok"] is True
+
+
+def test_exact_print_receipt_rejects_missing_bound_tape_row(db):
+    at = datetime.utcnow()
+    db.add(
+        BrainBatchJob(
+            id=str(uuid.uuid4()),
+            job_type=JOB_IQFEED_EXACT_PRINT_HEARTBEAT,
+            status="ok",
+            started_at=at,
+            ended_at=at,
+            meta_json=_exact_print_receipt_meta(at=at),
+        )
+    )
+    db.commit()
+
+    truth = lh._latest_exact_iqfeed_print_status(db)
+
+    assert truth["reason"] == "iqfeed_exact_print_tape_row_missing"
+
+
+def test_exact_print_receipt_rejects_overlapping_bridge_owners(db):
+    now = datetime.utcnow()
+    old_at = now - timedelta(seconds=2)
+    old_meta = _exact_print_receipt_meta(
+        at=old_at,
+        bridge_run_id=str(uuid.uuid4()),
+        bridge_run_started_at=now - timedelta(minutes=10),
+    )
+    latest_meta = _exact_print_receipt_meta(
+        at=now,
+        bridge_run_id=str(uuid.uuid4()),
+        bridge_run_started_at=now - timedelta(seconds=5),
+    )
+    _insert_exact_print_tape_row(db, meta=latest_meta)
+    db.add_all(
+        [
+            BrainBatchJob(
+                id=str(uuid.uuid4()),
+                job_type=JOB_IQFEED_EXACT_PRINT_HEARTBEAT,
+                status="ok",
+                started_at=old_at,
+                ended_at=old_at,
+                meta_json=old_meta,
+            ),
+            BrainBatchJob(
+                id=str(uuid.uuid4()),
+                job_type=JOB_IQFEED_EXACT_PRINT_HEARTBEAT,
+                status="ok",
+                started_at=now,
+                ended_at=now,
+                meta_json=latest_meta,
+            ),
+        ]
+    )
+    db.commit()
+
+    truth = lh._latest_exact_iqfeed_print_status(db)
+
+    assert truth["reason"] == "iqfeed_exact_print_bridge_owner_overlap"
+    assert truth["overlapping_owner_count"] == 2
+
+
+def test_exact_print_receipt_accepts_clean_one_second_owner_handoff(db):
+    now = datetime.utcnow()
+    old_at = now - timedelta(seconds=1)
+    old_meta = _exact_print_receipt_meta(
+        at=old_at,
+        bridge_run_id=str(uuid.uuid4()),
+        bridge_run_started_at=now - timedelta(minutes=10),
+    )
+    latest_at = now + timedelta(seconds=1)
+    latest_meta = _exact_print_receipt_meta(
+        at=latest_at,
+        bridge_run_id=str(uuid.uuid4()),
+        bridge_run_started_at=now,
+    )
+    _insert_exact_print_tape_row(db, meta=latest_meta)
+    db.add_all(
+        [
+            BrainBatchJob(
+                id=str(uuid.uuid4()),
+                job_type=JOB_IQFEED_EXACT_PRINT_HEARTBEAT,
+                status="ok",
+                started_at=old_at,
+                ended_at=old_at,
+                meta_json=old_meta,
+            ),
+            BrainBatchJob(
+                id=str(uuid.uuid4()),
+                job_type=JOB_IQFEED_EXACT_PRINT_HEARTBEAT,
+                status="ok",
+                started_at=latest_at,
+                ended_at=latest_at,
+                meta_json=latest_meta,
+            ),
+        ]
+    )
+    db.commit()
+
+    truth = lh._latest_exact_iqfeed_print_status(db)
+
+    assert truth["ok"] is True
+    assert truth["bridge_run_id"] == latest_meta["bridge_run_id"]
+
+
+def test_exact_print_latest_malformed_does_not_fall_back_to_older_success(db):
+    older = datetime.utcnow() - timedelta(seconds=2)
+    latest = datetime.utcnow()
+    db.add_all(
+        [
+            BrainBatchJob(
+                id=str(uuid.uuid4()),
+                job_type=JOB_IQFEED_EXACT_PRINT_HEARTBEAT,
+                status="ok",
+                started_at=older,
+                ended_at=older,
+                meta_json=_exact_print_receipt_meta(at=older),
+            ),
+            BrainBatchJob(
+                id=str(uuid.uuid4()),
+                job_type=JOB_IQFEED_EXACT_PRINT_HEARTBEAT,
+                status="ok",
+                started_at=latest,
+                ended_at=latest,
+                meta_json={"schema": IQFEED_EXACT_PRINT_HEARTBEAT_SCHEMA},
+            ),
+        ]
+    )
+    db.commit()
+
+    truth = lh._latest_exact_iqfeed_print_status(db)
+
+    assert truth == {
+        "ok": False,
+        "reason": "iqfeed_exact_print_latest_malformed",
+        "scope": IQFEED_EXACT_PRINT_HEARTBEAT_SCOPE,
+    }
 
 
 def test_live_loop_owner_writes_completed_durable_heartbeat(db):

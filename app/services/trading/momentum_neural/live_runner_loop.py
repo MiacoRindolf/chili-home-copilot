@@ -111,6 +111,9 @@ _CAPTURED_PAPER_ADMISSION_CENSUS_TICKS = 16
 _CAPTURED_PAPER_ADMISSION_RAW_SAMPLE_KEYS = 8
 _CAPTURED_PAPER_ADMISSION_RAW_SAMPLE_LEN = 120
 _CAPTURED_PAPER_ADMISSION_REASON_RE = re.compile(r"^[a-z][a-z0-9_]{0,127}$")
+_CAPTURED_PAPER_ADMISSION_TYPED_PREFIX_RE = re.compile(
+    r"^([A-Z][A-Z0-9_]{0,127}):(?:\s|$)"
+)
 _IQFEED_BUILD_RE = re.compile(
     r"^iqfeed-l1-exact-print-provenance-v3\+sha256:[0-9a-f]{16}$"
 )
@@ -127,6 +130,24 @@ _IGNITION_SCHEMA_VERSION = "chili.iqfeed-ignition-nominate.v1"
 _IGNITION_SOURCE_TAG = "ignition_tick"
 _IGNITION_MAX_AGE_S = 30.0
 _IGNITION_FUTURE_TOLERANCE_S = 1.0
+
+
+def _captured_paper_admission_reason_code(value: Any) -> str:
+    """Return a bounded typed reason without persisting arbitrary exception text."""
+
+    reason = value.strip() if isinstance(value, str) else ""
+    if _CAPTURED_PAPER_ADMISSION_REASON_RE.fullmatch(reason):
+        return reason
+    # Selection-runtime errors carry ``UPPER_SNAKE_CODE: detail``.  Preserve only
+    # that stable code and discard the free-form detail.  This keeps the census
+    # useful without allowing URLs, credentials, symbols, or exception text into
+    # logs/sidecars.
+    typed = _CAPTURED_PAPER_ADMISSION_TYPED_PREFIX_RE.match(reason)
+    if typed is not None:
+        return typed.group(1).lower()
+    return "captured_paper_admission_rejected"
+
+
 _IGNITION_DEDUP_TTL_S = 300.0            # one admission attempt per symbol per TTL
 _IGNITION_ADMITS_PER_MINUTE = 6          # hard cap on ignition admission attempts
 _IQFEED_EQUITY_SYMBOL_RE = re.compile(r"^[A-Z][A-Z0-9.]{0,15}$")
@@ -2395,11 +2416,15 @@ class LiveRunnerLoop:
                         "rejected_unspecified"
                     )
                 if result.get("admitted") is not True and rejection_reason:
-                    if not _CAPTURED_PAPER_ADMISSION_REASON_RE.fullmatch(
-                        rejection_reason
-                    ):
-                        self._sample_admission_raw_reason(rejection_reason)
-                        rejection_reason = "captured_paper_admission_rejected"
+                    raw_reason = rejection_reason
+                    rejection_reason = _captured_paper_admission_reason_code(
+                        raw_reason
+                    )
+                    if rejection_reason == "captured_paper_admission_rejected":
+                        # Hindi tumama ang typed-prefix extraction — ito ang
+                        # ganap na bulag na klase. Itabi ang bounded sample ng
+                        # hilaw na anyo bago ito tuluyang mawala sa census.
+                        self._sample_admission_raw_reason(raw_reason)
                     self._record_captured_paper_admission_outcome(
                         f"rejected_{rejection_reason}"[:96]
                     )
