@@ -3721,6 +3721,52 @@ def fresh_ignition_reentry_allowed(
     return True, "ignition_exempt"
 
 
+def symbol_day_loss_lockout_decision(
+    *,
+    enabled: bool,
+    day_net_realized_usd: float | None,
+    max_loss_per_trade_usd: float | None,
+    r_multiple: float,
+) -> tuple[bool, str, float | None]:
+    """L13 (2026-08-09): pure SYMBOL-DAY LOSS LOCKOUT decision at the recycle edge
+    (no I/O — the caller composes ``day_net_realized_usd`` from the session ledger
+    plus the other-sessions banked sum).
+
+    The canon-v3 autopsy: three windows (VTAK −748, CWD −309, LHSW −252) are 84%
+    of the set's gross red, and each is the same mechanism — nothing stops the
+    symbol-day after the cumulative realized loss is already deep. The empirical
+    sweep over all 16 fill-complete canon windows (R=130): a lockout at
+    −1.5R saves +291.60 net, trips ONLY those three windows, and no green or
+    recovery window ever goes below −1.01R (13x margin on the greens) — so 1.5
+    is the documented floor, not a tuned constant.
+
+    LOCKED when ``day_net <= -(r_multiple * max_loss_per_trade_usd)``. The basis
+    is the session's own per-trade risk cap (adaptive: equity x risk-fraction at
+    seed time), so the threshold scales with account size by construction.
+
+    Deliberately NOT exempted by the day-leader or fresh-ignition bypasses: those
+    exist for the COUNT-based stopout cap; this brake is LOSS-measured, and in the
+    16-window evidence no symbol-day ever recovered from below the threshold
+    (deepest recovery started at −1.01R). Flag OFF => byte-identical legacy.
+    Returns (locked, reason, threshold_usd)."""
+    if not enabled:
+        return False, "flag_off", None
+    try:
+        net = float(day_net_realized_usd) if day_net_realized_usd is not None else 0.0
+        basis = float(max_loss_per_trade_usd or 0.0)
+        k = float(r_multiple or 0.0)
+    except (TypeError, ValueError):
+        return False, "bad_basis_fail_open", None
+    if not (math.isfinite(net) and math.isfinite(basis) and math.isfinite(k)):
+        return False, "bad_basis_fail_open", None
+    if basis <= 0.0 or k <= 0.0:
+        return False, "no_threshold_basis", None
+    threshold = k * basis
+    if net <= -threshold:
+        return True, "symbol_day_loss_lockout", threshold
+    return False, "above_lockout_threshold", threshold
+
+
 def reentry_escalation_decision(
     *,
     enabled: bool,

@@ -94,6 +94,13 @@ _OPTIONAL_ORTEX_STRATEGY_KEYS = (
     "CHILI_MOMENTUM_DIP_MONSTER_CONTEXT_ENABLED",
     "CHILI_MOMENTUM_LATE_AH_MONSTER_PLACEMENT_ENABLED",
     "CHILI_MOMENTUM_MONSTER_STRUCTURE_FLOOR_ENABLED",
+    # L10b registration-gap fix (2026-08-09): naka-rehistro sa replay rosters
+    # pero nakalimutan dito — walang env kill-switch ang paper worker para sa
+    # scale-grid hanggang ngayon.
+    "CHILI_MOMENTUM_SCALE_GRID_ENABLED",
+    # L13 (2026-08-09) — symbol-day loss lockout.
+    "CHILI_MOMENTUM_SYMBOL_DAY_LOSS_LOCKOUT_ENABLED",
+    "CHILI_MOMENTUM_SYMBOL_DAY_LOSS_LOCKOUT_R_MULTIPLE",
 )
 _SUPPLIED_KEYS = (
     "CHILI_ALPACA_EXPECTED_ACCOUNT_ID",

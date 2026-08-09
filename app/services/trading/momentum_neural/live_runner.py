@@ -165,6 +165,7 @@ from .risk_policy import (
     chase_defer_decision,
     rapid_whipsaw_cadence_update,
     reentry_after_stop_allowed,
+    symbol_day_loss_lockout_decision,
     reentry_escalation_decision,
     reentry_escalation_level_update,
     symbol_day_banked_pnl_other_sessions,
@@ -39919,6 +39920,61 @@ def tick_live_session(
                     _ign_dbg["error"] = repr(_ign_exc)
                     _log.debug(
                         "[momentum_live] fresh-ignition exempt read failed (fail-closed)",
+                        exc_info=True,
+                    )
+            # L13 SYMBOL-DAY LOSS LOCKOUT (2026-08-09, canon-v3 autopsy): the three
+            # catastrophe windows (VTAK −748 / CWD −309 / LHSW −252 = 84% of the
+            # set's red) are all the same shape — the stopout-count cap never binds
+            # because most losing cycles exit via bailout/trail (not stop-class),
+            # so the symbol-day bleeds 15-24 cycles deep. This brake is LOSS-
+            # measured: cumulative TODAY-net for the symbol (this session's ledger
+            # + other terminal sessions' banked sum — the g4 green_banked read)
+            # at or below −K x per-trade risk cap terminalizes the session. It
+            # deliberately runs AFTER (and overrides) the leader/ignition
+            # exemptions: those serve the COUNT cap, and in the 16-window evidence
+            # no symbol-day ever recovered from below the threshold. Any read
+            # error ⇒ fail-open (the brake simply does not engage). Flag OFF ⇒
+            # byte-identical legacy.
+            if _re_ok and bool(
+                getattr(settings, "chili_momentum_symbol_day_loss_lockout_enabled", True)
+            ):
+                try:
+                    _l13_cum = _float_or_none(le.get("realized_pnl_usd")) or 0.0
+                    _l13_other = symbol_day_banked_pnl_other_sessions(
+                        db,
+                        symbol=str(sess.symbol or ""),
+                        exclude_session_id=sess.id,
+                        execution_family=str(getattr(sess, "execution_family", "") or "") or None,
+                    )
+                    _l13_locked, _l13_why, _l13_thr = symbol_day_loss_lockout_decision(
+                        enabled=True,  # the flag gates this whole block above
+                        day_net_realized_usd=_l13_cum + (_l13_other or 0.0),
+                        max_loss_per_trade_usd=_float_or_none(
+                            (caps or {}).get("max_loss_per_trade_usd")
+                        ),
+                        r_multiple=float(
+                            getattr(
+                                settings,
+                                "chili_momentum_symbol_day_loss_lockout_r_multiple",
+                                1.5,
+                            )
+                            or 1.5
+                        ),
+                    )
+                    if _l13_locked:
+                        _re_ok = False
+                        _re_reason = _l13_why
+                        _emit(db, sess, "live_symbol_day_loss_lockout", {
+                            "day_net_realized_usd": round(_l13_cum + (_l13_other or 0.0), 4),
+                            "session_realized_usd": round(_l13_cum, 4),
+                            "other_sessions_usd": round(float(_l13_other or 0.0), 4),
+                            "threshold_usd": _l13_thr,
+                            "trade_cycles": int(le.get("trade_cycles") or 0),
+                            "stopout_cycles": int(le.get("stopout_cycles") or 0),
+                        })
+                except Exception:
+                    _log.debug(
+                        "[momentum_live] symbol-day loss lockout read failed (fail-open)",
                         exc_info=True,
                     )
             if not _re_ok:

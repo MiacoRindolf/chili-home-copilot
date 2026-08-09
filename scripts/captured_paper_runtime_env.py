@@ -159,6 +159,10 @@ _CAPTURED_PAPER_OPERATIONAL_SETTING_NAMES = (
     "chili_momentum_dip_monster_context_enabled",
     "chili_momentum_late_ah_monster_placement_enabled",
     "chili_momentum_monster_structure_floor_enabled",
+    # L10b registration-gap fix (2026-08-09) + L13:
+    "chili_momentum_scale_grid_enabled",
+    "chili_momentum_symbol_day_loss_lockout_enabled",
+    "chili_momentum_symbol_day_loss_lockout_r_multiple",
     "chili_momentum_captured_paper_action_claim_lease_seconds",
     "chili_momentum_captured_paper_outbox_max_attempts",
     "chili_momentum_captured_paper_outbox_max_reconciliation_attempts",
