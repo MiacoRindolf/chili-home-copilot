@@ -1,0 +1,55 @@
+{
+  "schema": "chili.golden-harvest-inventory.v1",
+  "census_date": "2026-08-07",
+  "notes": "Dalawang Ross recap (ofCxvrijsss = 08-06 big-account +$37k; coqONALABpo = 08-07 day-31, RED ang big account sa DSY flush). Cross-check win: LAHAT ng apat na pangalan ni Ross sa 08-07 (CLRO/NAMI/DSY/MB) ay paper_eligible AT live_eligible sa momentum_viability_history, tugma pa ang timestamps sa salaysay niya (CLRO eligible mula 4:03am ET, nawala pagkatapos ng 7am rejection). Ikatlong sunod na araw ng selection hit (YXT 08-05 -> CLRO/WYHG 08-06 -> apat na ito 08-07); ang bottleneck ay CONVERSION hindi selection. Layunin ng bawat window: DSY|08-07 = loss-avoidance test (7.13->7.50->5.00 flush na tumama sa max loss ni Ross — sasala ba tayo ng gates?); NAMI|08-07 = leader-rollover / attention-shift; MB|08-07 = ikatlong obvious name; CLRO|08-07 = premarket continuation attempt + 7am rejection; CLRO|08-06 = Ross +$26k (7:01am micro-pullback sa $7, partials 7.87-7.90, bull-flag sa $10, breakout stacking, huminto bago mag-open dahil sa halt cascades) — canon symbol na nag-refire, at ang 17,008 admission rejections natin ay sa AH ng araw ring ito; WYHG|08-06 = +$10k VWAP break 8:30-8:45am, may 4am pump 3.62->12.82 sa ~50k shares lang = validation case ng liquidity floor (dapat VETO, hindi miss). Counts sa ibaba = at-pin (18:5x UTC 08-07); may top-up 00:10 UTC para sa AH tape ng 08-07 (idempotent).",
+  "windows": [
+    {
+      "symbol": "DSY",
+      "day": "2026-08-07",
+      "class": "gold",
+      "exp_ticks": 310954,
+      "exp_nbbo": 42368,
+      "canonical": false
+    },
+    {
+      "symbol": "NAMI",
+      "day": "2026-08-07",
+      "class": "gold",
+      "exp_ticks": 641203,
+      "exp_nbbo": 55953,
+      "canonical": false
+    },
+    {
+      "symbol": "MB",
+      "day": "2026-08-07",
+      "class": "gold",
+      "exp_ticks": 664854,
+      "exp_nbbo": 52850,
+      "canonical": false
+    },
+    {
+      "symbol": "CLRO",
+      "day": "2026-08-07",
+      "class": "gold",
+      "exp_ticks": 68637,
+      "exp_nbbo": 12939,
+      "canonical": false
+    },
+    {
+      "symbol": "CLRO",
+      "day": "2026-08-06",
+      "class": "gold",
+      "exp_ticks": 753972,
+      "exp_nbbo": 198811,
+      "canonical": false
+    },
+    {
+      "symbol": "WYHG",
+      "day": "2026-08-06",
+      "class": "gold",
+      "exp_ticks": 886068,
+      "exp_nbbo": 159185,
+      "canonical": false
+    }
+  ]
+}
