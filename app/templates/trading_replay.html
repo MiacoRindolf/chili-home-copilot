@@ -2890,7 +2890,10 @@
     var title = sym + ' - ' + timeLabel(minute);
     if (barHit && barHit.delta <= 5) {
       var bar = barHit.row;
-      title = sym + ' - ' + bar[0];
+      // bar[0] is the backend's raw UTC HH:MM. The no-bar branch below uses
+      // timeLabel; both must agree or the tooltip's zone depends on whether
+      // tape exists at this minute.
+      title = sym + ' - ' + timeLabel(barMinute(bar));
       lines.push('O ' + bar[1] + ' - H ' + bar[2] + ' - L ' + bar[3] + ' - C ' + bar[4]);
       lines.push('Vol ' + fmtNum(bar[5]));
     }
@@ -4014,7 +4017,13 @@
       var exitM = tradeExitMinute(t);
       var minute = entryM != null ? entryM : exitM;
       var outcomeClass = Number(t.usd || 0) >= 0 ? 'exit' : 'loss';
-      var timeText = (t.t || 'entry') + (t.exit_t ? ' -> ' + t.exit_t : '');
+      // Raw t / exit_t are UTC; derive from the resolved minutes so the chip
+      // agrees with the ENTRY/EXIT markers drawn on the chart beside it.
+      var chipEntryM = tradeEntryMinute(t);
+      var chipExitM = tradeExitMinute(t);
+      var entryText = chipEntryM == null ? (t.t || 'entry') : timeLabel(chipEntryM);
+      var exitText = chipExitM == null ? (t.exit_t || '') : timeLabel(chipExitM);
+      var timeText = entryText + (exitText ? ' -> ' + exitText : '');
       var tradeLabel = timeText + ' ' + fmtSignedMoney(t.usd);
       chips.push('<button class="rp-chip rp-trade-chip ' + outcomeClass + '" type="button" data-symbol="' + esc(sym) + '" data-minute="' + esc(minute == null ? '' : minute) + '" title="Jump chart to this trade">' + esc(tradeLabel) + '</button>');
       if (t.why) chips.push('<span class="rp-chip warn">' + esc(String(t.why).replace(/^recorded_live:/, '')) + '</span>');
