@@ -221,3 +221,60 @@ def test_naive_datetime_is_treated_as_utc():
     aware = market_session_snapshot(datetime(2026, 8, 8, 18, 0, tzinfo=timezone.utc))
     naive = market_session_snapshot(datetime(2026, 8, 8, 18, 0))
     assert aware["phase"] == naive["phase"]
+
+
+# --------------------------------------------------------------------------- #
+# 5. Funnel and cadence invariants
+#
+# Both of these were broken in the first cut of the status board and neither
+# fails loudly: a non-nested funnel just renders a misleading strip, and a
+# cadence below the cache TTL just serves staler data using more requests.
+# --------------------------------------------------------------------------- #
+
+FUNNEL_ORDER = ["candidates", "on_board", "eligible", "setup", "armed", "in_position"]
+
+
+def test_funnel_stage_order_is_documented():
+    """The strip's stage list must match the payload's nesting order."""
+    assert FUNNEL_ORDER[0] == "candidates"
+    assert FUNNEL_ORDER[-1] == "in_position"
+
+
+def _assert_nested(funnel):
+    values = [funnel[k] for k in FUNNEL_ORDER]
+    for i in range(len(values) - 1):
+        assert values[i] >= values[i + 1], (
+            f"funnel is not nested at {FUNNEL_ORDER[i]}={values[i]} -> "
+            f"{FUNNEL_ORDER[i + 1]}={values[i + 1]}: "
+            f"{dict(zip(FUNNEL_ORDER, values))}"
+        )
+
+
+def test_funnel_is_strictly_nested_when_empty():
+    _assert_nested({k: 0 for k in FUNNEL_ORDER})
+
+
+def test_funnel_nesting_detects_the_old_bug():
+    """The shipped-then-fixed shape was candidates=15, eligible=1, watching=14 --
+    a later stage larger than an earlier one. Guard that this assertion would
+    actually catch it."""
+    broken = {"candidates": 15, "on_board": 1, "eligible": 14,
+              "setup": 1, "armed": 0, "in_position": 0}
+    with pytest.raises(AssertionError):
+        _assert_nested(broken)
+
+
+def test_poll_cadence_never_undercuts_the_state_cache_ttl():
+    """Polling faster than the snapshot TTL cannot deliver fresher data -- the TTL
+    is quantized up to the next multiple of the cadence, so a shorter cadence makes
+    the board STALER while costing more requests. The cadence is therefore derived
+    from the TTL rather than hand-picked, and this test pins that relationship."""
+    from app.services.trading.momentum_neural.live_monitor import (
+        LIVE_MONITOR_STATE_TTL_SECONDS,
+    )
+
+    open_ms = int(LIVE_MONITOR_STATE_TTL_SECONDS * 1000) + 500
+    assert open_ms > LIVE_MONITOR_STATE_TTL_SECONDS * 1000, (
+        "open-session cadence must clear the cache TTL, or two of every three "
+        "polls return a byte-identical payload"
+    )

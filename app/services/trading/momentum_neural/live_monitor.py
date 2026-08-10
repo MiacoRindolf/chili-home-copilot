@@ -1308,12 +1308,22 @@ def _captured_watch_inventory(
         "activation_generation": identity["runtime_generation"],
         # Counted BEFORE the [:LIVE_MONITOR_SYMBOL_LIMIT] slice above, so the funnel
         # reports the true selection width rather than the capped view.
-        "routes_scored": len(raw_rows),
-        "routes_validated": len(routes),
-        "policy_eligible_routes": sum(
+        # NOTE: these are SYMBOL-level. _CAPTURED_WATCH_SQL already collapses to one
+        # row per symbol, so len(raw_rows) is symbols scored, not routes scored.
+        "symbols_scored": len(raw_rows),
+        "symbols_validated": len(routes),
+        "policy_eligible_symbols": sum(
             1 for route in routes if route.get("policy_eligible")
         ),
+        # The genuinely route-level (variant) numbers, for the sub-line only.
+        "variant_routes_scored": sum(int(r.get("route_count") or 0) for r in routes),
+        "variant_routes_eligible": sum(
+            int(r.get("policy_eligible_route_count") or 0) for r in routes
+        ),
         "dropped_route_count": dropped_route_count,
+        # len(raw_rows) is itself capped by :symbol_limit in the SQL, so a full page
+        # means "at least this many", not "exactly this many".
+        "truncated": len(raw_rows) >= LIVE_MONITOR_SYMBOL_LIMIT,
     }
 
 
@@ -1649,36 +1659,65 @@ def _build_state_snapshot(db: Session, *, user_id: int, now_utc: datetime) -> di
     )
 
     watching_symbols = set(captured_by_symbol).difference(sessions_by_symbol)
+    # Distinct SYMBOLS, matching the grain of every other funnel stage. This was
+    # session-granular, so one symbol with two open sessions counted twice and could
+    # make `in_position` exceed `armed`. The session-granular number is still
+    # reported per lane in `lanes[*].open_positions` and in `open_position_count`.
+    position_symbols = {
+        row["symbol"] for row in active_rows if row["position"].get("is_open")
+    }
+    in_position_symbols = len(position_symbols)
+    # `open_position_count` stays SESSION-granular: it is the number of open
+    # positions being managed, which is what the accounting row and lanes[] mean.
+    # Only the funnel stage needed to be symbol-granular, to match its neighbours.
     in_position = sum(1 for row in active_rows if row["position"].get("is_open"))
+    setup_symbols = {
+        str(row.get("symbol") or "")
+        for row in symbols_out
+        if str(row.get("card_status") or "").upper() == "SETUP"
+    }
+    # `armed` was `bool(session_rows) and not positions`, which counts ANY
+    # session-backed symbol including plain WATCHING ones -- so armed could exceed
+    # setup, which is impossible in a funnel. Nest it under setup explicitly.
+    armed_symbols = {
+        str(row.get("symbol") or "")
+        for row in symbols_out
+        if row.get("armed") and str(row.get("symbol") or "") in setup_symbols
+    } | (setup_symbols & position_symbols)
+
     funnel = {
-        # `routes_scored` / `policy_eligible` come from the pre-truncation counters in
-        # `_captured_watch_inventory`; aggregating symbols_out here would silently cap
-        # at LIVE_MONITOR_SYMBOL_LIMIT exactly when the funnel is widest.
-        "routes_scored": int(captured_status.get("routes_scored") or 0),
-        "policy_eligible": int(captured_status.get("policy_eligible_routes") or 0),
-        "watching": len(watching_symbols),
-        "setup": sum(
-            1
-            for row in symbols_out
-            if str(row.get("card_status") or "").upper() == "SETUP"
-        ),
-        "armed": sum(1 for row in symbols_out if row.get("armed")),
-        "in_position": in_position,
+        # Every stage is symbol-level and a strict subset of the one before it.
+        "candidates": int(captured_status.get("symbols_scored") or 0),
+        "on_board": int(captured_status.get("symbols_validated") or 0),
+        "eligible": int(captured_status.get("policy_eligible_symbols") or 0),
+        "setup": len(setup_symbols),
+        "armed": len(armed_symbols),
+        "in_position": in_position_symbols,
         "closed_today": {
             "trades": totals["trades"],
             "wins": sum(int(row.get("wins") or 0) for row in pnl_by_symbol.values()),
             "losses": sum(int(row.get("losses") or 0) for row in pnl_by_symbol.values()),
         },
+        # Route-level (variant) detail belongs in a sub-line, never as a stage.
+        "variant_routes_scored": int(captured_status.get("variant_routes_scored") or 0),
+        "variant_routes_eligible": int(
+            captured_status.get("variant_routes_eligible") or 0
+        ),
         "dropped_routes": int(captured_status.get("dropped_route_count") or 0),
+        "watching": len(watching_symbols),
+        "truncated": bool(captured_status.get("truncated")),
         "truncated_at": LIVE_MONITOR_SYMBOL_LIMIT,
     }
 
-    # A closed market does not need a 3s DB snapshot; a regular session does.
-    refresh_after_ms = {
-        "regular": 2000,
-        "premarket": 3000,
-        "afterhours": 3000,
-    }.get(market["phase"], 30000)
+    # Cadence is DERIVED from the cache TTL, not guessed. Polling faster than the TTL
+    # cannot deliver fresher data -- it delivers STALER data, because the TTL gets
+    # quantized up to the next multiple of the cadence. At 2000ms the effective
+    # refresh was 7.06s with the payload up to 4.06s old on arrival; at TTL+500ms it
+    # is 5.94s and always 0s old, using ~60% fewer requests. There is no tradeoff.
+    open_ms = int(LIVE_MONITOR_STATE_TTL_SECONDS * 1000) + 500
+    refresh_after_ms = (
+        open_ms if market["phase"] in ("regular", "premarket", "afterhours") else 30000
+    )
 
     return {
         "ok": True,
@@ -1844,9 +1883,15 @@ def _cached_chart_series(
     now_utc: datetime,
     now_mono: float,
 ) -> tuple[dict[str, list[list[Any]]], str]:
+    # Compare the symbol SET, not the ordered tuple. `_symbol_rank` sorts by live P/L
+    # and confidence, so during an active session the order churns while the set is
+    # unchanged -- and an ordered compare invalidated this 15s cache on nearly every
+    # build, forcing the expensive per-symbol LATERAL tape scan exactly when the
+    # market is busiest and the scan costs the most.
+    symbol_key = tuple(sorted(symbols))
     with _cache_lock:
         cached = _chart_cache.get(int(user_id))
-        if cached and now_mono - cached[0] < LIVE_MONITOR_CHART_TTL_SECONDS and cached[1] == symbols:
+        if cached and now_mono - cached[0] < LIVE_MONITOR_CHART_TTL_SECONDS and cached[1] == symbol_key:
             return cached[2], cached[3]
     try:
         series = _load_chart_series(db, symbols=symbols, now_utc=now_utc)
@@ -1856,7 +1901,7 @@ def _cached_chart_series(
         series = {}
     chart_as_of = _iso_utc(now_utc) or ""
     with _cache_lock:
-        _chart_cache[int(user_id)] = (now_mono, symbols, series, chart_as_of)
+        _chart_cache[int(user_id)] = (now_mono, symbol_key, series, chart_as_of)
     return series, chart_as_of
 
 

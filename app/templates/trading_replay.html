@@ -330,20 +330,20 @@
 .rp-live-filter:hover {
   color: var(--rp-text);
 }
-/* Must out-specify .rp-live-filter[aria-pressed="true"] below, which ties on
+/* Must out-specify .rp-live-filter[aria-checked="true"] below, which ties on
    specificity and wins on source order -- so the SELECTED chip previously showed
    no focus change at all. */
 .rp-live-filter:focus-visible,
-.rp-live-filter[aria-pressed="true"]:focus-visible {
+.rp-live-filter[aria-checked="true"]:focus-visible {
   color: var(--rp-text);
   outline: 2px solid var(--rp-blue);
   outline-offset: -2px;
 }
-.rp-live-filter[aria-pressed="true"] {
+.rp-live-filter[aria-checked="true"] {
   background: color-mix(in srgb, var(--rp-blue) 16%, var(--rp-panel-2));
-  color: #dbeafe;
+  color: var(--rp-text);
 }
-.rp-live-filter[aria-pressed="true"] b { color: var(--rp-blue); }
+.rp-live-filter[aria-checked="true"] b { color: var(--rp-blue); }
 .rp-live-search {
   flex: 0 1 150px;
   width: 150px;
@@ -609,6 +609,13 @@
 }
 
 /* Funnel. The 1px gap over a line-coloured background yields hairline dividers. */
+.rp-funnel-sub {
+  margin: -6px 0 12px;
+  color: var(--rp-muted);
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+}
+.rp-funnel-drop { color: var(--rp-amber); font-weight: 600; }
 .rp-funnel {
   display: grid;
   grid-template-columns: repeat(6, minmax(0, 1fr));
@@ -746,6 +753,33 @@
   background: color-mix(in srgb, var(--rp-amber) 8%, var(--rp-panel-2));
 }
 .rp-state.is-loading { border-style: dashed; opacity: .8; }
+
+/* First paint used the same dashed box as "empty" and as "error", so a loading
+   board and a dead board looked identical. */
+.rp-skeleton-strip {
+  display: grid;
+  grid-template-columns: repeat(6, minmax(0, 1fr));
+  gap: 8px;
+  width: min(560px, 100%);
+  margin-bottom: 6px;
+}
+.rp-skeleton-strip i {
+  height: 34px;
+  border-radius: var(--rp-r-ctl);
+  background: linear-gradient(90deg,
+    var(--rp-panel-2) 0%, var(--rp-panel-3) 50%, var(--rp-panel-2) 100%);
+  background-size: 200% 100%;
+  animation: rpShimmer 1.15s var(--rp-ease) infinite;
+}
+.rp-skeleton-strip i:nth-child(2) { animation-delay: .08s; }
+.rp-skeleton-strip i:nth-child(3) { animation-delay: .16s; }
+.rp-skeleton-strip i:nth-child(4) { animation-delay: .24s; }
+.rp-skeleton-strip i:nth-child(5) { animation-delay: .32s; }
+.rp-skeleton-strip i:nth-child(6) { animation-delay: .40s; }
+@keyframes rpShimmer {
+  from { background-position: 200% 0; }
+  to { background-position: -200% 0; }
+}
 
 /* Paused must be unmistakable: the header said "paused" but every stop, size and
    P/L below it still read as current. */
@@ -1001,6 +1035,10 @@
   padding: 10px;
   transition: border-color .12s ease, box-shadow .12s ease;
 }
+/* Two columns instead of three when the symbol has no tape to draw. */
+.rp-row-live[data-nochart="1"] {
+  grid-template-columns: 150px minmax(0, 1fr);
+}
 .rp-row.is-active {
   border-color: color-mix(in srgb, var(--rp-blue) 58%, var(--rp-line));
   box-shadow: 0 0 0 1px color-mix(in srgb, var(--rp-blue) 24%, transparent);
@@ -1149,6 +1187,12 @@
   font-size: 12px;
   text-transform: none;
 }
+.rp-live-reason {
+  color: var(--rp-muted);
+  font-size: 12px;
+  line-height: 1.4;
+}
+.rp-chip.muted { color: var(--rp-soft); }
 .rp-live-position {
   color: var(--rp-muted);
   font-size: 10px;
@@ -4049,9 +4093,17 @@
   };
 
   function renderLiveFilterButton(key, label, count, tooltip) {
-    var tooltipAttrs = tooltip ? ' title="' + esc(tooltip) + '" aria-label="' + esc(label + ' ' + count + '. ' + tooltip) + '"' : '';
-    return '<button class="rp-live-filter" type="button" data-live-filter="' + esc(key) + '" aria-pressed="' +
-      (rpLiveFilter === key ? 'true' : 'false') + tooltipAttrs + ' onclick="rpSetLiveFilter(\'' + esc(key) + '\')">' +
+    var selected = rpLiveFilter === key;
+    var tooltipAttrs = tooltip
+      ? ' title="' + esc(tooltip) + '" aria-label="' + esc(label + ' ' + count + '. ' + tooltip) + '"'
+      : '';
+    // role=radio (not aria-pressed): these six are mutually exclusive, and a toggle
+    // role tells a screen reader the opposite -- that they combine freely.
+    // Roving tabindex so the group is one tab stop with arrow keys inside it.
+    return '<button class="rp-live-filter" type="button" role="radio" data-live-filter="' +
+      esc(key) + '" aria-checked="' + (selected ? 'true' : 'false') + '" tabindex="' +
+      (selected ? '0' : '-1') + '"' + tooltipAttrs +
+      ' onclick="rpSetLiveFilter(\'' + esc(key) + '\')">' +
       '<span>' + esc(label) + '</span><b data-live-count="' + esc(key) + '">' + esc(count) + '</b></button>';
   }
 
@@ -4059,7 +4111,7 @@
     var counts = liveFilterCounts(payload);
     return '<div class="rp-live-research" id="rp-live-research">' +
       '<div class="rp-live-toolbar">' +
-        '<div class="rp-live-segments" role="group" aria-label="Focus live symbols">' +
+        '<div class="rp-live-segments" role="radiogroup" aria-label="Focus live symbols" onkeydown="rpFilterKeydown(event)">' +
           renderLiveFilterButton('all', 'All', counts.all) +
           renderLiveFilterButton('attention', 'Attention', counts.attention, liveAttentionSummary(payload)) +
           renderLiveFilterButton('positions', 'Positions', counts.positions) +
@@ -4076,9 +4128,11 @@
           '<option value="symbol"' + (rpLiveSort === 'symbol' ? ' selected' : '') + '>Symbol</option>' +
         '</select>' +
         '<span class="rp-live-focus-summary" id="rp-live-focus-summary"></span>' +
+        // Stable label + aria-pressed. Swapping BOTH announced "Resume live
+        // updates, pressed" while paused -- i.e. that resuming was already active.
         '<button class="rp-tool rp-live-pause" id="rp-live-pause" type="button" aria-pressed="' +
-          (rpLivePaused ? 'true' : 'false') + '" aria-label="' + (rpLivePaused ? 'Resume live updates' : 'Pause live updates') +
-          '" title="' + (rpLivePaused ? 'Resume live updates' : 'Pause live updates') + '" onclick="rpToggleLivePause()">' +
+          (rpLivePaused ? 'true' : 'false') + '" aria-label="Pause live updates"' +
+          ' title="' + (rpLivePaused ? 'Resume live updates' : 'Pause live updates') + '" onclick="rpToggleLivePause()">' +
           (rpLivePaused ? '&#9654;' : '&#10074;&#10074;') + '</button>' +
       '</div>' +
       '<div class="rp-live-activity">' +
@@ -4123,7 +4177,10 @@
     var counts = liveFilterCounts(payload);
     document.querySelectorAll('[data-live-filter]').forEach(function(button) {
       var key = button.dataset.liveFilter || 'all';
-      button.setAttribute('aria-pressed', rpLiveFilter === key ? 'true' : 'false');
+      var on = rpLiveFilter === key;
+      button.setAttribute('aria-checked', on ? 'true' : 'false');
+      button.setAttribute('tabindex', on ? '0' : '-1');
+      button.removeAttribute('aria-pressed');
       var count = button.querySelector('[data-live-count]');
       if (count) count.textContent = counts[key] == null ? 0 : counts[key];
       if (key === 'attention') {
@@ -4139,7 +4196,7 @@
     var pause = document.getElementById('rp-live-pause');
     if (pause) {
       pause.setAttribute('aria-pressed', rpLivePaused ? 'true' : 'false');
-      pause.setAttribute('aria-label', rpLivePaused ? 'Resume live updates' : 'Pause live updates');
+      pause.setAttribute('aria-label', 'Pause live updates');
       pause.title = rpLivePaused ? 'Resume live updates' : 'Pause live updates';
       pause.innerHTML = rpLivePaused ? '&#9654;' : '&#10074;&#10074;';
     }
@@ -4177,6 +4234,8 @@
     var sourceFallback = meta.observer_source === 'captured_paper_selection' ? 'Captured PAPER' : 'Completed today';
     var total = Number(pnl.total_usd || 0);
     var badgeClass = total >= 0 ? 'rp-pos' : 'rp-neg';
+    var showBadge = (meta.positions || []).length || Number(pnl.trades || 0) ||
+      Math.abs(total) >= 0.005;
     return '<b>' + esc(sym) + '</b>' +
       '<span>' + esc(laneText || sourceFallback) + '</span>' +
       '<span class="rp-symbol-state">' + esc(state) + '</span>' +
@@ -4190,7 +4249,9 @@
         ? ''
         : '<span>' + esc('conf ' + Math.round(Number(meta.confidence) * 100) + '%') + '</span>') +
       '<span class="rp-symbol-freshness' + (meta.stale ? ' stale' : '') + '">' + esc(liveAgeLabel(meta)) + '</span>' +
-      '<span class="rp-badge ' + badgeClass + '">' + esc(fmtSignedMoney(total)) + '</span>';
+      (showBadge
+        ? '<span class="rp-badge ' + badgeClass + '">' + esc(fmtSignedMoney(total)) + '</span>'
+        : '');
   }
 
   function renderLiveSetup(result, sym, eager) {
@@ -4210,7 +4271,13 @@
     if (meta.watch) {
       chips.push('<span class="rp-chip paper-twin">Captured PAPER watch</span>');
       if (meta.watch.policy_eligible) chips.push('<span class="rp-chip">CHILI policy eligible</span>');
-      chips.push('<span class="rp-chip">' + esc(fmtNum(meta.watch.route_count || 0) + ' scored setup families') + '</span>');
+      // route_count alone is a constant across the whole board; the eligible count
+      // is the half that varies, and it was rendered nowhere.
+      var routes = Number(meta.watch.route_count || 0);
+      var eligibleRoutes = Number(meta.watch.policy_eligible_route_count || 0);
+      chips.push('<span class="rp-chip' + (eligibleRoutes ? '' : ' muted') + '">' +
+        esc(fmtNum(eligibleRoutes) + ' of ' + fmtNum(routes) + ' setup families eligible') +
+        '</span>');
     }
     Object.keys(pnl.by_lane || {}).forEach(function(lane) {
       var lanePnl = pnl.by_lane[lane] || {};
@@ -4228,19 +4295,39 @@
         (row.target == null ? '' : esc(' - target ' + fmtPrice(row.target))) +
         '</div>';
     }).join('');
-    return '<div class="rp-live-pnl">' +
-      '<span>Realized<b class="' + pnlClass(pnl.realized_usd) + '">' + esc(fmtSignedMoney(pnl.realized_usd || 0)) + '</b></span>' +
-      '<span>Unrealized<b class="' + pnlClass(pnl.unrealized_usd) + '">' + esc(fmtSignedMoney(pnl.unrealized_usd || 0)) + '</b></span>' +
-      '</div>' +
+    // A watch candidate has never traded, so "Realized $0.00 / Unrealized $0.00"
+    // is two zeros pretending to be a result. Only show the pair once there is one.
+    var hasMoney = (meta.positions || []).length ||
+      Number(pnl.trades || 0) ||
+      Math.abs(Number(pnl.total_usd || 0)) >= 0.005;
+    var reason = meta.last_action && meta.last_action !== meta.state_label
+      ? '<div class="rp-live-reason">' + esc(cleanStage(meta.last_action)) + '</div>'
+      : '';
+    return (hasMoney
+      ? '<div class="rp-live-pnl">' +
+        '<span>Realized<b class="' + pnlClass(pnl.realized_usd) + '">' + esc(fmtSignedMoney(pnl.realized_usd || 0)) + '</b></span>' +
+        '<span>Unrealized<b class="' + pnlClass(pnl.unrealized_usd) + '">' + esc(fmtSignedMoney(pnl.unrealized_usd || 0)) + '</b></span>' +
+        '</div>'
+      : reason) +
       '<div class="rp-actions">' + (chips.join('') || '<span class="rp-chip">completed today</span>') + '</div>' +
       positions + renderTraceLines(result, sym, eager);
   }
 
+  function liveHasBars(result, sym) {
+    return barsFor(result, sym).length >= 2;
+  }
+
   function renderLiveSymbolRow(result, sym, domain, eager) {
-    return '<article class="rp-row rp-row-live" data-symbol="' + esc(sym) + '">' +
+    // A chart cell is EARNED by having bars. Emitting an empty one costs 234px of
+    // height and ~80% of the row's area to say "no candles in view".
+    var hasBars = liveHasBars(result, sym);
+    return '<article class="rp-row rp-row-live" data-symbol="' + esc(sym) + '"' +
+      (hasBars ? '' : ' data-nochart="1"') + '>' +
       '<div class="rp-symbol">' + renderLiveSymbolHeader(result, sym) + '</div>' +
-      '<div class="rp-chart" tabindex="0" aria-label="' + esc(sym) + ' interactive live chart" data-symbol="' + esc(sym) + '" data-domain-min="' + esc(eager ? domain.min : '') + '" data-domain-max="' + esc(eager ? domain.max : '') + '">' +
-        (eager ? chartSvg(result, sym, domain) + chartOverlayHtml() : chartPlaceholderHtml()) + '</div>' +
+      (hasBars
+        ? '<div class="rp-chart" tabindex="0" aria-label="' + esc(sym) + ' interactive live chart" data-symbol="' + esc(sym) + '" data-domain-min="' + esc(eager ? domain.min : '') + '" data-domain-max="' + esc(eager ? domain.max : '') + '">' +
+          (eager ? chartSvg(result, sym, domain) + chartOverlayHtml() : chartPlaceholderHtml()) + '</div>'
+        : '') +
       '<div class="rp-setup">' + renderLiveSetup(result, sym, eager) + '</div>' +
       '</article>';
   }
@@ -4374,8 +4461,14 @@
 
     var key = severity + '|' + (rpLivePaused ? 'paused' : (lane.verdict || ''));
     var changed = !!rpLastVerdictKey && rpLastVerdictKey !== key;
-    host.innerHTML = html;
     host.hidden = false;
+    if (host.innerHTML === html) {
+      // Identical markup: rewriting it would destroy the live region and the
+      // diagnostics buttons for no reason. The 1s ticker keeps the ages moving.
+      rpLastVerdictKey = key;
+      return;
+    }
+    host.innerHTML = html;
     var bar = host.firstElementChild;
     if (bar) {
       // Live region scoped to headline + proof ONLY. A wider one would announce the
@@ -4428,13 +4521,17 @@
       'daily-loss breakers are not being checked from this page.</p>';
   }
 
+  // Every stage is symbol-level and a strict subset of the one before it, so a
+  // drop between two cells is always real. The old list mixed a symbol count
+  // ("Watching") in after a policy count and read 15 -> 1 -> 14, which is not a
+  // funnel and made the choke marker fire on a non-choke.
   var RP_FUNNEL_STAGES = [
-    { key: 'routes_scored', label: 'Scanned' },
-    { key: 'policy_eligible', label: 'Eligible' },
-    { key: 'watching', label: 'Watching' },
-    { key: 'setup', label: 'Setup' },
-    { key: 'armed', label: 'Armed' },
-    { key: 'in_position', label: 'In position' }
+    { key: 'candidates', label: 'Candidates', hint: 'symbols the selector scored' },
+    { key: 'on_board', label: 'On board', hint: 'passed provenance validation' },
+    { key: 'eligible', label: 'Eligible', hint: 'passed CHILI policy' },
+    { key: 'setup', label: 'Setup', hint: 'reached a setup' },
+    { key: 'armed', label: 'Armed', hint: 'armed and waiting for trigger' },
+    { key: 'in_position', label: 'In position', hint: 'filled and being managed' }
   ];
 
   function renderFunnel(payload) {
@@ -4442,16 +4539,34 @@
     var market = (payload && payload.market_session) || {};
     if (!market.is_open) return '';  // there is no funnel on a Saturday
     var prev = null;
-    var cells = RP_FUNNEL_STAGES.map(function(stage) {
+    var cells = RP_FUNNEL_STAGES.map(function(stage, index) {
       var value = Number(funnel[stage.key] || 0);
-      // A stage at zero whose predecessor is non-zero is where the day is choking:
-      // "12 eligible, 0 armed" is gating; "5 armed, 0 in position" is conversion.
-      var choke = prev !== null && prev > 0 && value === 0;
+      // Where the day is choking. Only meaningful now that each stage nests inside
+      // the previous one, and never on the first cell (nothing precedes it).
+      var choke = index > 0 && prev > 0 && value === 0;
       prev = value;
-      return '<div class="rp-funnel-cell' + (choke ? ' is-choke' : '') + '">' +
-        '<b>' + esc(fmtNum(value)) + '</b><span>' + esc(stage.label) + '</span></div>';
+      var label = stage.label + (index === 0 && funnel.truncated ? '+' : '');
+      return '<div class="rp-funnel-cell' + (choke ? ' is-choke' : '') +
+        '" title="' + esc(stage.hint) + '">' +
+        '<b>' + esc(fmtNum(value)) + '</b><span>' + esc(label) + '</span></div>';
     }).join('');
-    return '<div class="rp-funnel" aria-label="Selection funnel">' + cells + '</div>';
+    // Route-level (variant) counts are NOT stages -- "scored" only means variants
+    // here, and mixing the two units is what broke the strip.
+    var variants = Number(funnel.variant_routes_scored || 0);
+    var dropped = Number(funnel.dropped_routes || 0);
+    var sub = [];
+    if (variants) {
+      sub.push(fmtNum(variants) + ' scored setup families across ' +
+        fmtNum(funnel.candidates || 0) + ' symbols');
+      if (funnel.variant_routes_eligible) {
+        sub.push(fmtNum(funnel.variant_routes_eligible) + ' passed policy');
+      }
+    }
+    if (dropped) {
+      sub.push('<b class="rp-funnel-drop">' + fmtNum(dropped) + ' dropped on validation</b>');
+    }
+    return '<div class="rp-funnel" aria-label="Selection funnel">' + cells + '</div>' +
+      (sub.length ? '<p class="rp-funnel-sub">' + sub.join(' \u00b7 ') + '</p>' : '');
   }
 
   function renderAccounting(payload) {
@@ -4534,12 +4649,12 @@
     }
     // Healthy, market open, nothing has qualified: the one screen where a green dot
     // is legitimate. Nothing is wrong, so there is no action button.
-    var scanned = Number(funnel.routes_scored || 0);
-    var eligible = Number(funnel.policy_eligible || 0);
+    var scanned = Number(funnel.candidates || 0);
+    var eligible = Number(funnel.eligible || 0);
     return '<div class="rp-state">' +
       '<b>' + (scanned
-        ? esc(fmtNum(scanned) + ' routes scored, ' + fmtNum(eligible) + ' passed policy')
-        : 'No routes scored yet this session') + '</b>' +
+        ? esc(fmtNum(scanned) + ' symbols scored, ' + fmtNum(eligible) + ' passed policy')
+        : 'No symbols scored yet this session') + '</b>' +
       '<p>No symbol has reached setup. The funnel above shows how far each stage ' +
       'got.</p>' +
       '<span class="rp-state-meta">' + esc(proof) + '</span>' +
@@ -4582,7 +4697,11 @@
     renderHaltBanner(payload);
     var result = livePayloadToReplayResult(payload);
     var symbols = (payload.symbols || []).map(function(row) { return normalizeSym(row.symbol); }).filter(Boolean);
-    var structure = symbols.slice().sort().join('|');
+    // Include whether each symbol has a chart: without this, the first tick of the
+    // session arrives and no row ever grows its chart cell back.
+    var structure = symbols.slice().sort().map(function(sym) {
+      return sym + (liveHasBars(result, sym) ? ':c' : '');
+    }).join('|');
     var chartSignature = String(payload.chart_as_of_utc || '') + '|' + Object.keys(payload.series || {}).map(function(sym) {
       return sym + ':' + (payload.series[sym] || []).length;
     }).join('|');
@@ -4642,15 +4761,22 @@
       var rows = symbols.map(function(sym, index) {
         return renderLiveSymbolRow(result, sym, rpViewDomain, index < RP_EAGER_ROWS);
       }).join('');
+      var keepScrollY = window.scrollY;
       host.innerHTML = renderLaneHealthNote(payload) +
         '<div id="rp-live-stats">' + renderFunnel(payload) + renderAccounting(payload) + '</div>' +
         renderLiveResearch(payload) +
         // The FSM playback transport is a category error on a now-view: there is no
         // future to seek to. renderViewportControls() stays replay-only.
-        '<div class="rp-timeline">' + renderRuler(rpViewDomain) + rows + '</div>';
+        '<div class="rp-timeline">' +
+          (symbols.some(function(sym) { return liveHasBars(result, sym); })
+            ? renderRuler(rpViewDomain) : '') +
+          rows + '</div>';
       updateLiveResearch(payload);
       syncPlaybackControls();
       requestVisibleChartRefresh();
+      // A rebuild swaps the entire workspace; without this the operator is thrown
+      // back to the top of the board mid-read.
+      if (keepScrollY) window.scrollTo({ top: keepScrollY, behavior: 'auto' });
       return;
     }
 
@@ -4788,7 +4914,13 @@
     rpReplayCache = null;
     rpRenderedSignature = null;
     rpIndicatorCache = {};
-    host.innerHTML = '<div class="rp-empty">' + esc(text || 'Loading replay...') + '</div>';
+    host.innerHTML = '<div class="rp-state is-loading" role="status" aria-live="polite">' +
+      '<div class="rp-skeleton-strip" aria-hidden="true">' +
+        '<i></i><i></i><i></i><i></i><i></i><i></i>' +
+      '</div>' +
+      '<b>' + esc(text || 'Loading replay...') + '</b>' +
+      '<p>Reading persisted runner evidence. No broker or provider is contacted.</p>' +
+      '</div>';
   }
 
   function loadResult(date, mode, quiet) {
@@ -5079,7 +5211,13 @@
       var proof = document.getElementById('rp-verdict-proof');
       if (proof && rpLastLivePayload && !rpLivePaused) {
         var lane = rpLastLivePayload.lane || {};
-        var drift = Math.max(0, (Date.now() - rpLastPollOkAt) / 1000);
+        // Anchor to the payload's own build time, NOT to when we received it. A
+        // cache hit resets receive-time while the ages inside it are up to one TTL
+        // old, which made these two numbers tick backwards.
+        var builtAt = Date.parse(rpLastLivePayload.as_of_utc || '');
+        var drift = Number.isFinite(builtAt)
+          ? Math.max(0, (Date.now() - builtAt) / 1000)
+          : Math.max(0, (Date.now() - rpLastPollOkAt) / 1000);
         // Re-derive from the wall clock so the ages keep moving between polls.
         proof.innerHTML = verdictProofHtml({
           lane: Object.assign({}, lane, {
@@ -5302,6 +5440,21 @@
 
   window.rpStepReplayEvent = function(direction) {
     stepReplayEvent(Number(direction) < 0 ? -1 : 1, false);
+  };
+
+  window.rpFilterKeydown = function(event) {
+    var key = event.key;
+    if (key !== 'ArrowLeft' && key !== 'ArrowRight' && key !== 'Home' && key !== 'End') return;
+    var chips = Array.prototype.slice.call(document.querySelectorAll('[data-live-filter]'));
+    if (!chips.length) return;
+    event.preventDefault();
+    var at = chips.indexOf(document.activeElement);
+    if (at < 0) at = 0;
+    var next = key === 'Home' ? 0
+      : key === 'End' ? chips.length - 1
+      : (at + (key === 'ArrowRight' ? 1 : chips.length - 1)) % chips.length;
+    chips[next].focus();
+    rpSetLiveFilter(chips[next].dataset.liveFilter || 'all');
   };
 
   window.rpSetLiveFilter = function(filter) {
