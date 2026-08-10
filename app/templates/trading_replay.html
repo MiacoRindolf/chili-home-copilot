@@ -1813,6 +1813,7 @@
   var rpDecayTimer = null;
   var rpActivityExpanded = false;
   var rpLastFlashValues = {};
+  var rpEtOffsetMin = 0;         // minutes ET is behind UTC for the loaded surface
   var rpTrend = [];              // [{t, loop, tape, verdict}] newest last
   var rpVerdictSince = 0;        // wall clock when the CURRENT verdict began
   var RP_TREND_CAP = 40;         // ~3.5 min at the open-session cadence
@@ -2110,8 +2111,52 @@
     return choices[0];
   }
 
+  // Minutes that ET is behind UTC at a given instant. DST-correct: derived from
+  // the platform tz database rather than a hardcoded -4/-5, which would be wrong
+  // half the year and wrong on both transition days.
+  function etOffsetMinutes(instantMs) {
+    try {
+      var d = new Date(instantMs);
+      if (!Number.isFinite(d.getTime())) return 0;
+      var utc = Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate(),
+                         d.getUTCHours(), d.getUTCMinutes());
+      var parts = new Intl.DateTimeFormat('en-US', {
+        timeZone: 'America/New_York', hour12: false, year: 'numeric',
+        month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit'
+      }).formatToParts(d).reduce(function(acc, part) {
+        acc[part.type] = part.value; return acc;
+      }, {});
+      var asEt = Date.UTC(Number(parts.year), Number(parts.month) - 1,
+                          Number(parts.day), Number(parts.hour) % 24,
+                          Number(parts.minute));
+      return Math.round((utc - asEt) / 60000);
+    } catch (err) {
+      return 0;  // never throw on a label; an uncorrected clock beats a blank page
+    }
+  }
+
+  // Re-resolved whenever a surface loads a payload. Live takes the instant from
+  // `as_of_utc`; replay takes NOON on the replayed date, which is unambiguous on
+  // both transition days (the gap and the overlap are both around 02:00 local).
+  function setEtOffsetForLive(payload) {
+    var stamp = Date.parse((payload && payload.as_of_utc) || '');
+    rpEtOffsetMin = etOffsetMinutes(Number.isFinite(stamp) ? stamp : Date.now());
+  }
+
+  function setEtOffsetForReplay(result) {
+    var date = String((result && result.date) || '');
+    var stamp = /^\d{4}-\d{2}-\d{2}$/.test(date)
+      ? Date.parse(date + 'T12:00:00Z')
+      : NaN;
+    // A replayed day may sit in the other DST season than today, so the offset
+    // MUST come from the replayed date, not from now.
+    rpEtOffsetMin = etOffsetMinutes(Number.isFinite(stamp) ? stamp : Date.now());
+  }
+
   function timeLabel(minute) {
-    var normalized = ((Math.round(minute) % 1440) + 1440) % 1440;
+    // Every label on this page is Eastern. The minute values are UTC in both
+    // surfaces; the offset converts them before the day-wrap.
+    var normalized = ((Math.round(minute - rpEtOffsetMin) % 1440) + 1440) % 1440;
     var h = Math.floor(normalized / 60);
     var m = normalized % 60;
     return String(h).padStart(2, '0') + ':' + String(m).padStart(2, '0');
@@ -2421,8 +2466,11 @@
   function replayDomain(result) {
     var cache = replayCache(result);
     var isLive = !!(result && result.live_observer);
-    var floor = isLive ? -Infinity : 4 * 60;
-    var ceiling = isLive ? Infinity : 20 * 60;
+    // 04:00-20:00 ET (premarket open through afterhours close). The stored
+    // minutes are UTC, so shift the ET bounds into UTC space rather than
+    // comparing an ET intent against a UTC value.
+    var floor = isLive ? -Infinity : 4 * 60 + rpEtOffsetMin;
+    var ceiling = isLive ? Infinity : 20 * 60 + rpEtOffsetMin;
     if (cache && cache.allMinutes.length) {
       return {
         min: Math.max(floor, Math.min.apply(null, cache.allMinutes) - 8),
@@ -2521,7 +2569,7 @@
     var view = Math.max(1, domainSpan(rpViewDomain));
     var scale = full / view;
     var scaleText = scale >= 10 ? scale.toFixed(1) : scale.toFixed(2);
-    return timeLabel(rpViewDomain.min) + ' - ' + timeLabel(rpViewDomain.max) + ' / ' + scaleText + 'x';
+    return timeLabel(rpViewDomain.min) + ' - ' + timeLabel(rpViewDomain.max) + ' ET / ' + scaleText + 'x';
   }
 
   function viewportScrubberMetrics() {
@@ -2792,13 +2840,19 @@
   function nearestAction(sym, minute) {
     var actions = [];
     tradesFor(rpLastResult || {}, sym).forEach(function(t) {
-      if (t.t) actions.push({ kind: 'entry', t: t.t, price: t.entry, detail: 'entry ' + (t.entry == null ? '' : t.entry) });
-      if (t.exit_t) actions.push({ kind: 'exit', t: t.exit_t, price: t.exit, detail: 'exit ' + (t.exit == null ? '' : t.exit) + ' - ' + (t.why || '') });
-      if (t.stop != null) actions.push({ kind: 'stop', t: t.t || t.exit_t, price: t.stop, detail: 'stop ' + t.stop });
-      if (t.target != null) actions.push({ kind: 'target', t: t.t || t.exit_t, price: t.target, detail: 'target ' + t.target });
+      // Carry the already-resolved minute (_rpEntryMin / _rpExitMin). Rebuilding
+      // from the raw `t` string yields a minute-of-day, while the live caller
+      // passes an epoch minute -- two different spaces, so the <= 8 minute match
+      // below could never succeed on the live surface.
+      var entryM = tradeEntryMinute(t);
+      var exitM = tradeExitMinute(t);
+      if (t.t) actions.push({ kind: 'entry', t: t.t, _rpMinute: entryM, price: t.entry, detail: 'entry ' + (t.entry == null ? '' : t.entry) });
+      if (t.exit_t) actions.push({ kind: 'exit', t: t.exit_t, _rpMinute: exitM, price: t.exit, detail: 'exit ' + (t.exit == null ? '' : t.exit) + ' - ' + (t.why || '') });
+      if (t.stop != null) actions.push({ kind: 'stop', t: t.t || t.exit_t, _rpMinute: entryM == null ? exitM : entryM, price: t.stop, detail: 'stop ' + t.stop });
+      if (t.target != null) actions.push({ kind: 'target', t: t.t || t.exit_t, _rpMinute: entryM == null ? exitM : entryM, price: t.target, detail: 'target ' + t.target });
     });
     tracesFor(rpLastResult || {}, sym).forEach(function(row) {
-      actions.push({ kind: 'setup', t: row.t, detail: cleanStage(row.stage) });
+      actions.push({ kind: 'setup', t: row.t, _rpMinute: rowMinute(row), detail: cleanStage(row.stage) });
     });
     var found = nearestByMinute(actions, minute, function(row) { return rowMinute(row); });
     return found && found.delta <= 8 ? found.row : null;
@@ -2836,7 +2890,10 @@
     var title = sym + ' - ' + timeLabel(minute);
     if (barHit && barHit.delta <= 5) {
       var bar = barHit.row;
-      title = sym + ' - ' + bar[0];
+      // bar[0] is the backend's raw UTC HH:MM. The no-bar branch below uses
+      // timeLabel; both must agree or the tooltip's zone depends on whether
+      // tape exists at this minute.
+      title = sym + ' - ' + timeLabel(barMinute(bar));
       lines.push('O ' + bar[1] + ' - H ' + bar[2] + ' - L ' + bar[3] + ' - C ' + bar[4]);
       lines.push('Vol ' + fmtNum(bar[5]));
     }
@@ -3863,14 +3920,14 @@
       if (inDomain(entryM, domain)) {
         parts.push('<line x1="' + entryX.toFixed(1) + '" y1="14" x2="' + entryX.toFixed(1) + '" y2="' + priceBottom + '" stroke="#60a5fa" stroke-width="1.3" opacity=".85"/>');
         parts.push('<circle cx="' + entryX.toFixed(1) + '" cy="' + entryY.toFixed(1) + '" r="4" fill="#60a5fa"/>');
-        parts.push('<text x="' + Math.min(width - 80, entryX + 6).toFixed(1) + '" y="' + Math.max(16, entryY - 8).toFixed(1) + '" fill="#bfdbfe" font-size="10">ENTRY ' + esc(t.t || '') + '</text>');
+        parts.push('<text x="' + Math.min(width - 80, entryX + 6).toFixed(1) + '" y="' + Math.max(16, entryY - 8).toFixed(1) + '" fill="#bfdbfe" font-size="10">ENTRY ' + esc(entryM == null ? (t.t || '') : timeLabel(entryM)) + '</text>');
       }
       if (inDomain(exitM, domain)) {
         var good = Number(t.usd || 0) >= 0;
         var color = good ? '#34d399' : '#fb7185';
         parts.push('<line x1="' + exitX.toFixed(1) + '" y1="14" x2="' + exitX.toFixed(1) + '" y2="' + priceBottom + '" stroke="' + color + '" stroke-width="1.3" opacity=".85"/>');
         parts.push('<rect x="' + (exitX - 4).toFixed(1) + '" y="' + (exitY - 4).toFixed(1) + '" width="8" height="8" rx="2" fill="' + color + '"/>');
-        parts.push('<text x="' + Math.min(width - 72, exitX + 6).toFixed(1) + '" y="' + Math.min(height - 34, exitY + 14).toFixed(1) + '" fill="' + color + '" font-size="10">EXIT ' + esc(t.exit_t || '') + '</text>');
+        parts.push('<text x="' + Math.min(width - 72, exitX + 6).toFixed(1) + '" y="' + Math.min(height - 34, exitY + 14).toFixed(1) + '" fill="' + color + '" font-size="10">EXIT ' + esc(exitM == null ? (t.exit_t || '') : timeLabel(exitM)) + '</text>');
       }
     });
     traces.forEach(function(row) {
@@ -3894,7 +3951,7 @@
     drawLinePath(parts, visibleIndicators, domain, width, pad, 'signal', macdY, '#f97316', 1.2, .9);
     parts.push('<text x="' + pad + '" y="' + (macdTop - 4) + '" fill="#94a3b8" font-size="9">MACD</text>');
     parts.push('<text x="' + pad + '" y="' + footerY + '" fill="#64748b" font-size="10">' + esc(timeLabel(domain.min)) + '</text>');
-    parts.push('<text x="' + (width - pad) + '" y="' + footerY + '" fill="#64748b" font-size="10" text-anchor="end">' + esc(timeLabel(domain.max)) + '</text>');
+    parts.push('<text x="' + (width - pad) + '" y="' + footerY + '" fill="#64748b" font-size="10" text-anchor="end">' + esc(timeLabel(domain.max) + ' ET') + '</text>');
     parts.push('</svg>');
     return parts.join('');
   }
@@ -3960,7 +4017,13 @@
       var exitM = tradeExitMinute(t);
       var minute = entryM != null ? entryM : exitM;
       var outcomeClass = Number(t.usd || 0) >= 0 ? 'exit' : 'loss';
-      var timeText = (t.t || 'entry') + (t.exit_t ? ' -> ' + t.exit_t : '');
+      // Raw t / exit_t are UTC; derive from the resolved minutes so the chip
+      // agrees with the ENTRY/EXIT markers drawn on the chart beside it.
+      var chipEntryM = tradeEntryMinute(t);
+      var chipExitM = tradeExitMinute(t);
+      var entryText = chipEntryM == null ? (t.t || 'entry') : timeLabel(chipEntryM);
+      var exitText = chipExitM == null ? (t.exit_t || '') : timeLabel(chipExitM);
+      var timeText = entryText + (exitText ? ' -> ' + exitText : '');
       var tradeLabel = timeText + ' ' + fmtSignedMoney(t.usd);
       chips.push('<button class="rp-chip rp-trade-chip ' + outcomeClass + '" type="button" data-symbol="' + esc(sym) + '" data-minute="' + esc(minute == null ? '' : minute) + '" title="Jump chart to this trade">' + esc(tradeLabel) + '</button>');
       if (t.why) chips.push('<span class="rp-chip warn">' + esc(String(t.why).replace(/^recorded_live:/, '')) + '</span>');
@@ -3985,7 +4048,7 @@
   function renderTraceButtonsFromRows(rows, sym) {
     return rows.map(function(row) {
       var minute = rowMinute(row);
-      return '<button class="rp-trace-line" type="button" data-symbol="' + esc(sym) + '" data-minute="' + esc(minute) + '"><b>' + esc(row.t || timeLabel(minute)) + '</b> ' + esc(cleanStage(row.stage)) + '</button>';
+      return '<button class="rp-trace-line" type="button" data-symbol="' + esc(sym) + '" data-minute="' + esc(minute) + '"><b>' + esc(minute == null ? (row.t || '') : timeLabel(minute)) + '</b> ' + esc(cleanStage(row.stage)) + '</button>';
     }).join('');
   }
 
@@ -4242,7 +4305,9 @@
         rows.push({
           sym: sym,
           minute: minute,
-          t: event.t || timeLabel(minute),
+          // `event.t` is the backend's UTC HH:MM; derive from the minute so the
+          // strip agrees with the axis and the verdict bar above it.
+          t: minute == null ? (event.t || '') : timeLabel(minute),
           kind: event.kind || 'decision',
           stage: cleanStage(event.stage || event.kind || 'event'),
           detail: cleanStage(event.detail || ''),
@@ -5176,6 +5241,7 @@
     rpLastLivePayload = payload;
     // The verdict is the page's answer to "what is Chili doing right now", so it
     // renders before -- and independently of -- whether there are any symbols.
+    setEtOffsetForLive(payload);
     recordTrend(payload);
     renderVerdictBar(payload);
     renderHaltBanner(payload);
@@ -5340,6 +5406,8 @@
 
   function renderReplay(result) {
     rpLastReplayResult = result;
+    // The replayed date may be in the other DST season than today.
+    setEtOffsetForReplay(result);
     if (rpSurfaceMode !== 'replay') return;
     rpLastResult = result;
     rpRenderedSignature = resultSignature(result);
