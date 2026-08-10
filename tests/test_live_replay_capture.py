@@ -95,11 +95,14 @@ BASE = datetime(2026, 7, 14, 20, 0, tzinfo=UTC)
 
 
 class _WallClock:
-    def __init__(self, now: datetime) -> None:
+    def __init__(self, now: datetime, *, step: timedelta = timedelta(0)) -> None:
         self.now = now
+        self.step = step
 
     def __call__(self) -> datetime:
-        return self.now
+        value = self.now
+        self.now += self.step
+        return value
 
     def set(self, value: datetime) -> None:
         self.now = value
@@ -276,6 +279,82 @@ def _quote_clocks(index: int, *, available: datetime | None = None) -> CaptureCl
         received_at=available - timedelta(milliseconds=1),
         available_at=available,
     )
+
+
+def test_capture_start_preserves_typed_resource_rejection(tmp_path: Path) -> None:
+    binding = _binding()
+    controller = CaptureAdaptivePressureController(binding)
+    coordinator, _startup, _clock = _coordinator(
+        tmp_path / "typed-resource-rejection",
+        binding=binding,
+        controller=controller,
+        start=False,
+    )
+    try:
+        with pytest.raises(
+            CaptureContractError,
+            match="^capture_resource_pressure_sample_unavailable$",
+        ):
+            coordinator.start(_identity_and_evidence("VEEE")[1])
+    finally:
+        coordinator._release_storage()
+
+
+def test_supervised_promotion_uses_one_trusted_timestamp_with_advancing_clock(
+    tmp_path: Path,
+) -> None:
+    binding = _binding()
+    controller = CaptureAdaptivePressureController(binding)
+    controller.observe(
+        CapturePressureSample(
+            observed_at=BASE + timedelta(seconds=1),
+            resource_binding_sha256=binding.binding_sha256,
+            cpu_percent=20,
+            available_memory_bytes=50_000_000,
+            disk_free_bytes=900_000_000,
+            write_latency_milliseconds=5,
+        )
+    )
+    clock = _WallClock(BASE + timedelta(seconds=2))
+    supervisor_identity, _ = _identity_and_evidence("SUPERVISOR")
+    supervisor = LiveReplayCaptureSupervisor.create(
+        identity=supervisor_identity,
+        resource_binding=binding,
+        pressure_controller=controller,
+        wall_clock=clock,
+        pretrigger_horizon=timedelta(minutes=3),
+        per_symbol_pretrigger_events=1,
+    )
+    coordinator, _startup, _ = _coordinator(
+        tmp_path / "advancing-supervisor-clock",
+        certification_symbol="VEEE",
+        binding=binding,
+        controller=controller,
+        wall_clock=clock,
+        shared_admission_budget=supervisor.shared_admission_budget,
+        start=False,
+    )
+    supervisor.attach(coordinator)
+    coordinator.start(_identity_and_evidence("VEEE")[1])
+    clock.step = timedelta(microseconds=1)
+    try:
+        with pytest.raises(
+            CaptureContractError,
+            match="^supervisor promotion differs from trusted wall clock$",
+        ):
+            supervisor.promote_hot_symbol(
+                "VEEE",
+                promoted_at=clock.now + timedelta(seconds=1),
+                required_stream=CaptureStream.NBBO_QUOTE,
+            )
+        promotion = supervisor.promote_hot_symbol(
+            "VEEE", required_stream=CaptureStream.NBBO_QUOTE
+        )
+        assert promotion.hot
+        assert promotion.lease is not None
+        assert supervisor.release_hot_symbol("VEEE") is True
+    finally:
+        coordinator.abort(reason="test_cleanup")
 
 
 def _epoch_ns(value: datetime) -> int:

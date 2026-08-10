@@ -1450,10 +1450,14 @@ class LiveReplayCaptureCoordinator:
         with self._lock:
             if self._state is not CaptureSessionState.CREATED:
                 raise CaptureContractError("capture coordinator is one-shot")
-            if not self.pressure_controller.required_full_fidelity_admissible:
-                raise CaptureContractError(
-                    "capture cannot start without a fresh admissible resource sample"
-                )
+            pressure_rejection = self.pressure_controller.rejection_reason
+            if pressure_rejection is not None:
+                # Preserve the controller's typed fail-closed reason.  The old
+                # umbrella text collapsed stale/unavailable evidence and real
+                # CPU, memory, disk, or write-latency pressure into one opaque
+                # admission failure, making a recoverable suspension
+                # indistinguishable from the resource that actually caused it.
+                raise CaptureContractError(pressure_rejection)
             try:
                 self.writer.start()
             except BaseException:
@@ -2086,9 +2090,16 @@ class LiveReplayCaptureCoordinator:
                 raise CaptureContractError(
                     "supervised promotion resource binding mismatch"
                 )
-            if batch.promoted_at != self._observed_now():
+            # The supervisor sampled ``at`` once, then used that exact value for
+            # both the scarce lease and the opaque promotion transfer.  Calling
+            # the shared wall clock a second time here makes every real clock
+            # differ by microseconds even though attach() already proved both
+            # objects share the same trusted clock.  Bind to the immutable lease
+            # timestamp instead; _admit_promotion_batch_locked separately proves
+            # that the batch is the exact transfer produced by the supervisor.
+            if batch.promoted_at != lease.acquired_at:
                 raise CaptureContractError(
-                    "supervised promotion differs from trusted coordinator clock"
+                    "supervised promotion differs from trusted lease clock"
                 )
             result = self._admit_promotion_batch_locked(
                 batch.symbol,

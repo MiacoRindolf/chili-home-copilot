@@ -437,6 +437,50 @@ def test_pressure_feed_runtime_sample_failure_stays_alive_and_recovers() -> None
         worker.close(join_timeout_seconds=1.0)
 
 
+def test_pressure_feed_cadence_does_not_add_sampling_duration() -> None:
+    class _Controller:
+        def observe(self, _sample: object) -> None:
+            return None
+
+    class _Clock:
+        def __init__(self) -> None:
+            self.now = 0.0
+
+        def __call__(self) -> float:
+            return self.now
+
+    class _StopEvent:
+        def __init__(self) -> None:
+            self.waits: list[float] = []
+
+        def wait(self, seconds: float) -> bool:
+            self.waits.append(float(seconds))
+            return len(self.waits) >= 3
+
+    clock = _Clock()
+    sample_calls = 0
+
+    def slow_sample() -> object:
+        nonlocal sample_calls
+        sample_calls += 1
+        clock.now += 0.7
+        return object()
+
+    worker = service_module._CapturedPaperPressureFeedWorker(
+        pressure_controller=_Controller(),
+        sampler=slow_sample,
+        interval_seconds=0.5,
+        monotonic_clock=clock,
+    )
+    stop_event = _StopEvent()
+    worker._stop_event = stop_event
+
+    worker._run()
+
+    assert sample_calls == 2
+    assert stop_event.waits == pytest.approx([0.5, 0.0, 0.0])
+
+
 @pytest.mark.parametrize("failure_stage", ("sampler", "controller"))
 def test_pressure_feed_runtime_contract_failure_is_fatal(
     failure_stage: str,
