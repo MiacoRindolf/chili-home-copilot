@@ -10,10 +10,19 @@ from app.config import (
     DATABASE_PYTEST_DEFAULT_POOL_SIZE,
     DATABASE_PYTEST_DEFAULT_POOL_TIMEOUT_SECONDS,
 )
-from app.db import _resolve_pool_config
+from app.db import (
+    _PG_CONNECT_TIMEOUT_SECONDS,
+    _connect_args,
+    _resolve_pool_config,
+)
 
 _MP_CHILD_POOL_SIZE = 1
 _MP_CHILD_MAX_OVERFLOW = 2
+
+
+def test_postgres_connect_attempt_has_a_fixed_timeout() -> None:
+    assert _PG_CONNECT_TIMEOUT_SECONDS == 10
+    assert _connect_args["connect_timeout"] == _PG_CONNECT_TIMEOUT_SECONDS
 
 
 def _settings(**overrides: object) -> SimpleNamespace:

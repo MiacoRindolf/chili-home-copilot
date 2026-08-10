@@ -13,6 +13,11 @@ import importlib
 import uuid
 
 import pytest
+from sqlalchemy.exc import (
+    InterfaceError as SqlAlchemyInterfaceError,
+    OperationalError as SqlAlchemyOperationalError,
+    ProgrammingError as SqlAlchemyProgrammingError,
+)
 import scripts.captured_alpaca_paper_service as service_module
 from scripts import captured_paper_readiness_evidence as readiness_evidence
 
@@ -5157,8 +5162,10 @@ def test_database_schema_fence_rejects_future_unknown_migration() -> None:
         def __init__(self, versions, *, missing_tables=()):
             self.versions = versions
             self.missing_tables = tuple(missing_tables)
+            self.connect_calls = 0
 
         def connect(self):
+            self.connect_calls += 1
             return _Connection(
                 self.versions,
                 missing_tables=self.missing_tables,
@@ -5174,11 +5181,16 @@ def test_database_schema_fence_rejects_future_unknown_migration() -> None:
     )
     assert result["latest_migration"] == "002"
 
+    future_engine = _Engine(("001", "002", "future_999"))
     with pytest.raises(CapturedAlpacaPaperServiceError, match="exact code generation"):
         _verify_database_schema(
-            _Engine(("001", "002", "future_999")),
+            future_engine,
             migrations_module=migrations,
+            readiness_timeout_seconds=5.0,
+            monotonic_clock=lambda: 0.0,
+            wait=lambda _seconds: pytest.fail("schema drift must not be retried"),
         )
+    assert future_engine.connect_calls == 1
 
     with pytest.raises(CapturedAlpacaPaperServiceError, match="exact code generation"):
         _verify_database_schema(
@@ -5188,6 +5200,224 @@ def test_database_schema_fence_rejects_future_unknown_migration() -> None:
             ),
             migrations_module=migrations,
         )
+
+
+def test_database_schema_fence_retries_transient_database_readiness() -> None:
+    required_tables = (
+        "captured_paper_post_commit_outbox",
+        "captured_paper_post_commit_outbox_events",
+        "captured_paper_completed_fill_watch",
+        "captured_paper_completed_fill_watch_events",
+        "alpaca_paper_fill_activities",
+        "alpaca_paper_fill_query_observations",
+        "alpaca_paper_post_settlement_fill_contradictions",
+        "captured_paper_selection_frontiers",
+        "captured_paper_selection_frontier_events",
+        "captured_paper_selection_route_states",
+        "captured_paper_variant_application_receipts",
+        "captured_paper_variant_application_events",
+    )
+
+    class _Result:
+        def __init__(self, rows):
+            self.rows = rows
+
+        def fetchall(self):
+            return self.rows
+
+    class _Connection:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return None
+
+        def execute(self, statement):
+            if "schema_version" in statement:
+                return _Result([("001",), ("002",)])
+            return _Result([(name, True) for name in required_tables])
+
+    class _Engine:
+        def __init__(self):
+            self.connect_calls = 0
+
+        def connect(self):
+            self.connect_calls += 1
+            if self.connect_calls < 3:
+                raise SqlAlchemyOperationalError(
+                    None,
+                    None,
+                    RuntimeError("database is starting"),
+                    connection_invalidated=True,
+                )
+            return _Connection()
+
+    migrations = SimpleNamespace(
+        MIGRATIONS=(("001", object()), ("002", object())),
+        text=lambda value: value,
+        _verify_migration_354_physical_contract=lambda _connection: None,
+    )
+    engine = _Engine()
+    now = [0.0]
+    sleeps: list[float] = []
+
+    def wait(seconds: float) -> None:
+        sleeps.append(seconds)
+        now[0] += seconds
+
+    result = _verify_database_schema(
+        engine,
+        migrations_module=migrations,
+        readiness_timeout_seconds=5.0,
+        retry_interval_seconds=1.0,
+        monotonic_clock=lambda: now[0],
+        wait=wait,
+    )
+
+    assert result["latest_migration"] == "002"
+    assert engine.connect_calls == 3
+    assert sleeps == [1.0, 1.0]
+
+
+def test_database_schema_fence_does_not_start_attempt_at_deadline() -> None:
+    class _Engine:
+        def __init__(self):
+            self.connect_calls = 0
+
+        def connect(self):
+            self.connect_calls += 1
+            raise SqlAlchemyInterfaceError(
+                None,
+                None,
+                RuntimeError("database is still unavailable"),
+                connection_invalidated=True,
+            )
+
+    migrations = SimpleNamespace(
+        MIGRATIONS=(("001", object()),),
+        text=lambda value: value,
+        _verify_migration_354_physical_contract=lambda _connection: None,
+    )
+    engine = _Engine()
+    now = [0.0]
+    sleeps: list[float] = []
+
+    def wait(seconds: float) -> None:
+        sleeps.append(seconds)
+        now[0] += seconds
+
+    with pytest.raises(CapturedAlpacaPaperServiceError) as rejected:
+        _verify_database_schema(
+            engine,
+            migrations_module=migrations,
+            readiness_timeout_seconds=2.5,
+            retry_interval_seconds=1.0,
+            monotonic_clock=lambda: now[0],
+            wait=wait,
+        )
+
+    assert rejected.value.code == "DATABASE_SCHEMA_UNREADABLE"
+    assert isinstance(rejected.value.__cause__, SqlAlchemyInterfaceError)
+    assert engine.connect_calls == 3
+    assert sleeps == [1.0, 1.0, 0.5]
+
+
+def test_database_schema_fence_rejects_zero_retry_window_before_connect() -> None:
+    class _Engine:
+        def connect(self):
+            pytest.fail("a zero readiness window must not start a DB attempt")
+
+    with pytest.raises(ValueError, match="finite and positive"):
+        _verify_database_schema(
+            _Engine(),
+            migrations_module=SimpleNamespace(),
+            readiness_timeout_seconds=0.0,
+            monotonic_clock=lambda: 0.0,
+        )
+
+
+def test_database_schema_fence_rejects_slow_success_past_deadline() -> None:
+    class _Result:
+        def __init__(self, rows):
+            self.rows = rows
+
+        def fetchall(self):
+            return self.rows
+
+    now = [0.0]
+
+    class _Connection:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return None
+
+        def execute(self, statement):
+            now[0] = 2.0
+            if "schema_version" in statement:
+                return _Result([("001",)])
+            return _Result([])
+
+    class _Engine:
+        connect_calls = 0
+
+        def connect(self):
+            self.connect_calls += 1
+            return _Connection()
+
+    engine = _Engine()
+    migrations = SimpleNamespace(
+        MIGRATIONS=(("001", object()),),
+        text=lambda value: value,
+        _verify_migration_354_physical_contract=lambda _connection: None,
+    )
+
+    with pytest.raises(CapturedAlpacaPaperServiceError) as rejected:
+        _verify_database_schema(
+            engine,
+            migrations_module=migrations,
+            readiness_timeout_seconds=1.0,
+            monotonic_clock=lambda: now[0],
+            wait=lambda _seconds: pytest.fail("a successful read is not retried"),
+        )
+
+    assert rejected.value.code == "DATABASE_SCHEMA_UNREADABLE"
+    assert "deadline" in rejected.value.message
+    assert engine.connect_calls == 1
+
+
+def test_database_schema_fence_does_not_retry_programming_error() -> None:
+    class _Engine:
+        connect_calls = 0
+
+        def connect(self):
+            self.connect_calls += 1
+            raise SqlAlchemyProgrammingError(
+                None,
+                None,
+                RuntimeError("schema query is invalid"),
+            )
+
+    engine = _Engine()
+    migrations = SimpleNamespace(
+        MIGRATIONS=(("001", object()),),
+        text=lambda value: value,
+        _verify_migration_354_physical_contract=lambda _connection: None,
+    )
+
+    with pytest.raises(CapturedAlpacaPaperServiceError) as rejected:
+        _verify_database_schema(
+            engine,
+            migrations_module=migrations,
+            readiness_timeout_seconds=5.0,
+            monotonic_clock=lambda: 0.0,
+            wait=lambda _seconds: pytest.fail("programming errors must not retry"),
+        )
+
+    assert rejected.value.code == "DATABASE_SCHEMA_UNREADABLE"
+    assert isinstance(rejected.value.__cause__, SqlAlchemyProgrammingError)
+    assert engine.connect_calls == 1
 
 
 def test_policy_and_startup_evidence_bind_same_code_config_and_account() -> None:
