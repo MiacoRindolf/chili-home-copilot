@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
+import threading
+import time
 import uuid
 from zoneinfo import ZoneInfo
 
@@ -3565,6 +3567,134 @@ def test_shared_store_two_leases_share_quota_and_release_independently(
     assert manager.health()["lease_count"] == 1
     lease_b.release()
     assert manager.health()["claimed_writer_ingresses"] == 0
+    manager.close()
+
+
+def test_requested_release_remains_charged_until_blocked_writer_drains(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    binding = _resource_binding()
+    shared = SharedCaptureAdmissionBudget.from_resource_binding(binding)
+    manager = SharedCaptureStoreRuntime.create(
+        tmp_path / "deferred-release-manager",
+        resource_binding=binding,
+        shared_admission_budget=shared,
+        compression_codec="zlib",
+    )
+    identity = _identity()
+    ingress = BoundedCaptureIngress.from_resource_binding(
+        binding, shared_admission_budget=shared
+    )
+    lease = manager.acquire(identity)
+    writer = lease.build_writer(
+        ingress=ingress,
+        batch_events=1,
+        batch_bytes=binding.budget.async_queue_bytes,
+        poll_seconds=0.001,
+        flush_interval_seconds=0.001,
+    )
+    entered_sync = threading.Event()
+    allow_sync = threading.Event()
+    original_sync = manager.store.sync
+
+    def blocked_sync() -> None:
+        entered_sync.set()
+        assert allow_sync.wait(timeout=5)
+        original_sync()
+
+    monkeypatch.setattr(manager.store, "sync", blocked_sync)
+    at = BASE + timedelta(milliseconds=1)
+    assert ingress.submit(
+        CaptureEvent(
+            identity=identity,
+            sequence=1,
+            stream=CaptureStream.CONFIG_SNAPSHOT,
+            provider="chili",
+            symbol="VEEE",
+            clocks=CaptureClocks(received_at=at, available_at=at),
+            payload={"symbol": "VEEE"},
+        )
+    )
+    writer.start()
+    writer.request_stop(close_ingress=True)
+    assert entered_sync.wait(timeout=5)
+
+    assert lease.request_release() is False
+    charged = manager.health()
+    assert charged["lease_count"] == 1
+    assert charged["writer_threads_in_use"] == 1
+    assert charged["deferred_release_count"] == 1
+    assert lease.health()["release_requested"] is True
+
+    allow_sync.set()
+    assert writer.join(timeout_seconds=5)
+    deadline = time.monotonic() + 5
+    while manager.health()["lease_count"] and time.monotonic() < deadline:
+        time.sleep(0.01)
+    released = manager.health()
+    assert released["lease_count"] == 0
+    assert released["writer_threads_in_use"] == 0
+    assert released["claimed_writer_ingresses"] == 0
+    assert shared.health()["outstanding_events"] == 0
+    manager.close()
+
+
+def test_writer_thread_launch_failure_is_terminal_and_releases_lease(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    binding = _resource_binding()
+    shared = SharedCaptureAdmissionBudget.from_resource_binding(binding)
+    manager = SharedCaptureStoreRuntime.create(
+        tmp_path / "writer-launch-failure-manager",
+        resource_binding=binding,
+        shared_admission_budget=shared,
+        compression_codec="zlib",
+    )
+    ingress = BoundedCaptureIngress.from_resource_binding(
+        binding, shared_admission_budget=shared
+    )
+    identity = _identity()
+    lease = manager.acquire(identity)
+    writer = lease.build_writer(
+        ingress=ingress,
+        batch_events=1,
+        batch_bytes=binding.budget.async_queue_bytes,
+    )
+    at = BASE + timedelta(milliseconds=1)
+    assert ingress.submit(
+        CaptureEvent(
+            identity=identity,
+            sequence=1,
+            stream=CaptureStream.CONFIG_SNAPSHOT,
+            provider="chili",
+            symbol="VEEE",
+            clocks=CaptureClocks(received_at=at, available_at=at),
+            payload={"symbol": "VEEE"},
+        )
+    )
+
+    def fail_start(_thread) -> None:
+        raise RuntimeError("fixture writer thread launch failure")
+
+    monkeypatch.setattr(threading.Thread, "start", fail_start)
+    with pytest.raises(RuntimeError, match="fixture writer thread launch failure"):
+        writer.start()
+
+    lifecycle = writer.lifecycle_health()
+    assert lifecycle["has_started"] is True
+    assert lifecycle["writer_alive"] is False
+    assert lifecycle["ingress"] == {"closed": True, "drained": True}
+    assert lifecycle["last_error"] == (
+        "RuntimeError: fixture writer thread launch failure"
+    )
+    assert shared.health()["outstanding_events"] == 0
+    lease.release()
+    assert manager.health()["lease_count"] == 0
+    assert manager.health()["claimed_writer_ingresses"] == 0
+    with pytest.raises(CaptureContractError, match="one-shot"):
+        writer.start()
     manager.close()
 
 

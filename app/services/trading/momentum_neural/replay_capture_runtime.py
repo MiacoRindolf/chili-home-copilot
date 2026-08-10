@@ -12129,7 +12129,18 @@ class CaptureWriterWorker:
                 name="replay-capture-writer",
                 daemon=True,
             )
-            self._thread.start()
+            try:
+                self._thread.start()
+            except Exception as exc:
+                # A pre-launch failure is terminal for this one-shot writer.
+                # Close ingress so its lease can be released, but retain the
+                # attempted state so no caller can restart the writer after
+                # its store ownership has been removed.
+                if self._thread.ident is None and not self._thread.is_alive():
+                    self._last_error = f"{type(exc).__name__}: {exc}"
+                    self._stop.set()
+                    self.ingress.fail_writer((), reason=self._last_error)
+                raise
 
     def _write(self, batch: IngressBatch) -> None:
         event_refs = self.store.write_events(batch.events)
@@ -12529,6 +12540,7 @@ class SharedCaptureWriterLease:
         self.identity = identity
         self._writer: CaptureWriterWorker | None = None
         self._released = False
+        self._release_requested = False
         self._lock = threading.RLock()
 
     @property
@@ -12547,6 +12559,11 @@ class SharedCaptureWriterLease:
     def released(self) -> bool:
         with self._lock:
             return self._released
+
+    @property
+    def release_requested(self) -> bool:
+        with self._lock:
+            return self._release_requested
 
     def build_writer(
         self,
@@ -12584,33 +12601,70 @@ class SharedCaptureWriterLease:
         with self._lock:
             if self._released:
                 return
-            writer = self._writer
-            if writer is not None:
-                writer_health = writer.lifecycle_health()
-                outstanding = self._runtime.shared_admission_budget.outstanding_for(
-                    self.identity.identity_sha256
+            if not self._release_ready_locked():
+                raise CaptureContractError(
+                    "cannot release shared capture store with active or reserved writer work"
                 )
-                retained = self._runtime.shared_admission_budget.retained_for(
-                    self.identity.identity_sha256
-                )
-                if (
-                    writer_health["writer_alive"]
-                    or not writer.ingress.drained
-                    or outstanding != 0
-                    or retained != 0
-                    or (writer._has_started and not writer.ingress.closed)
-                ):
-                    raise CaptureContractError(
-                        "cannot release shared capture store with active or reserved writer work"
-                    )
             self._runtime._release(self)
             self._released = True
+
+    def _release_ready_locked(self) -> bool:
+        writer = self._writer
+        if writer is None:
+            return True
+        writer_health = writer.lifecycle_health()
+        outstanding = self._runtime.shared_admission_budget.outstanding_for(
+            self.identity.identity_sha256
+        )
+        retained = self._runtime.shared_admission_budget.retained_for(
+            self.identity.identity_sha256
+        )
+        return bool(
+            not writer_health["writer_alive"]
+            and writer.ingress.drained
+            and outstanding == 0
+            and retained == 0
+            and (not writer._has_started or writer.ingress.closed)
+        )
+
+    def request_release(self) -> bool:
+        """Release now or arrange one terminal-safe retry after writer drain.
+
+        Abort paths may time out while another writer owns the shared store's
+        sync lock.  The lease must remain counted while work is live, but it
+        must not become an orphan after that writer later drains.
+        """
+
+        defer = False
+        with self._lock:
+            if self._released:
+                return True
+            self._release_requested = True
+            if self._release_ready_locked():
+                self._runtime._release(self)
+                self._released = True
+                return True
+            defer = True
+        if defer:
+            self._runtime._defer_requested_release(self)
+        return False
+
+    def _retry_requested_release(self) -> bool:
+        with self._lock:
+            if self._released:
+                return True
+            if not self._release_requested or not self._release_ready_locked():
+                return False
+            self._runtime._release(self)
+            self._released = True
+            return True
 
     def health(self) -> dict[str, Any]:
         with self._lock:
             return {
                 "identity_sha256": self.identity.identity_sha256,
                 "released": self._released,
+                "release_requested": self._release_requested,
                 "writer_built": self._writer is not None,
                 "writer": self._writer.health() if self._writer is not None else None,
             }
@@ -12652,8 +12706,57 @@ class SharedCaptureStoreRuntime:
         self._leases: dict[str, SharedCaptureWriterLease] = {}
         self._lease_by_identity: dict[str, str] = {}
         self._writer_ingress_owners: dict[BoundedCaptureIngress, str] = {}
+        self._deferred_release_tokens: set[str] = set()
+        self._deferred_release_wake = threading.Event()
+        self._deferred_release_stop = threading.Event()
+        self._deferred_release_last_error: str | None = None
         self._closed = False
         self._lock = threading.RLock()
+        self._deferred_release_thread = threading.Thread(
+            target=self._deferred_release_loop,
+            name="capture-writer-lease-reaper",
+            daemon=True,
+        )
+        self._deferred_release_thread.start()
+
+    def _defer_requested_release(self, lease: SharedCaptureWriterLease) -> None:
+        """Retry one explicitly requested release without stealing live work."""
+
+        with self._lock:
+            if self._closed or lease._released:
+                return
+            if self._leases.get(lease._lease_token) is not lease:
+                return
+            if lease._lease_token in self._deferred_release_tokens:
+                return
+            self._deferred_release_tokens.add(lease._lease_token)
+        self._deferred_release_wake.set()
+
+    def _deferred_release_loop(self) -> None:
+        while not self._deferred_release_stop.is_set():
+            self._deferred_release_wake.wait()
+            self._deferred_release_wake.clear()
+            while not self._deferred_release_stop.is_set():
+                with self._lock:
+                    pending = tuple(self._deferred_release_tokens)
+                    leases = tuple(
+                        (token, self._leases.get(token)) for token in pending
+                    )
+                if not pending:
+                    break
+                for token, lease in leases:
+                    if lease is None:
+                        with self._lock:
+                            self._deferred_release_tokens.discard(token)
+                        continue
+                    try:
+                        lease._retry_requested_release()
+                    except Exception as exc:
+                        with self._lock:
+                            self._deferred_release_last_error = (
+                                f"{type(exc).__name__}: {exc}"
+                            )
+                self._deferred_release_stop.wait(0.05)
 
     @classmethod
     def create(
@@ -12758,8 +12861,6 @@ class SharedCaptureStoreRuntime:
                 raise CaptureContractError(
                     "shared capture writer identity ownership is inconsistent"
                 )
-            self._leases.pop(lease._lease_token)
-            self._lease_by_identity.pop(identity_sha256)
             writer = lease.writer
             if writer is not None:
                 owner = self._writer_ingress_owners.get(writer.ingress)
@@ -12767,6 +12868,10 @@ class SharedCaptureStoreRuntime:
                     raise CaptureContractError(
                         "shared capture writer ingress ownership is inconsistent"
                     )
+            self._leases.pop(lease._lease_token)
+            self._lease_by_identity.pop(identity_sha256)
+            self._deferred_release_tokens.discard(lease._lease_token)
+            if writer is not None:
                 self._writer_ingress_owners.pop(writer.ingress)
 
     def health(self) -> dict[str, Any]:
@@ -12785,6 +12890,11 @@ class SharedCaptureStoreRuntime:
                 "writer_threads_in_use": len(self._leases),
                 "writer_threads_available": self.max_writer_threads - len(self._leases),
                 "lease_count": len(self._leases),
+                "deferred_release_count": len(self._deferred_release_tokens),
+                "deferred_release_worker_alive": (
+                    self._deferred_release_thread.is_alive()
+                ),
+                "deferred_release_last_error": self._deferred_release_last_error,
                 "claimed_writer_ingresses": len(self._writer_ingress_owners),
                 "active_identity_sha256s": active,
                 "shared_admission": self.shared_admission_budget.health(),
@@ -12793,27 +12903,33 @@ class SharedCaptureStoreRuntime:
 
     def close(self) -> None:
         with self._lock:
-            if self._closed:
-                return
-            if self._leases:
-                raise CaptureContractError(
-                    "cannot close shared capture store with active writer leases"
-                )
-            if (
-                self.shared_admission_budget.outstanding_events != 0
-                or self.shared_admission_budget.outstanding_retained_objects
-                != 0
-            ):
-                raise CaptureContractError(
-                    "cannot close shared capture store with outstanding reservations"
-                )
-            if self._writer_ingress_owners:
-                raise CaptureContractError(
-                    "cannot close shared capture store with claimed writer ingresses"
-                )
-            self.store.sync()
-            self.store.close()
-            self._closed = True
+            if not self._closed:
+                if self._leases:
+                    raise CaptureContractError(
+                        "cannot close shared capture store with active writer leases"
+                    )
+                if (
+                    self.shared_admission_budget.outstanding_events != 0
+                    or self.shared_admission_budget.outstanding_retained_objects
+                    != 0
+                ):
+                    raise CaptureContractError(
+                        "cannot close shared capture store with outstanding reservations"
+                    )
+                if self._writer_ingress_owners:
+                    raise CaptureContractError(
+                        "cannot close shared capture store with claimed writer ingresses"
+                    )
+                self.store.sync()
+                self.store.close()
+                self._closed = True
+            self._deferred_release_stop.set()
+            self._deferred_release_wake.set()
+        self._deferred_release_thread.join(timeout=5.0)
+        if self._deferred_release_thread.is_alive():
+            raise CaptureContractError(
+                "shared capture deferred release worker did not stop"
+            )
 
     def __enter__(self) -> "SharedCaptureStoreRuntime":
         return self

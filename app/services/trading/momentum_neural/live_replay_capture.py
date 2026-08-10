@@ -1085,12 +1085,16 @@ class LiveReplayCaptureCoordinator:
             lease.release()
             raise
 
-    def _release_storage(self) -> None:
+    def _release_storage(self, *, defer_shared_if_busy: bool = False) -> bool:
         lease = self._shared_writer_lease
         if lease is None:
             self.store.close()
+            return True
+        if defer_shared_if_busy:
+            return lease.request_release()
         else:
             lease.release()
+            return True
 
     def discard_unstarted(self, *, reason: str) -> UnsealedCaptureClose:
         """Release an inert CREATED run which never emitted lifecycle evidence."""
@@ -4084,7 +4088,7 @@ class LiveReplayCaptureCoordinator:
             self._state = CaptureSessionState.STOPPING
             stopped = self.writer.stop(timeout_seconds=timeout_seconds)
             if not stopped:
-                self._release_storage()
+                self._release_storage(defer_shared_if_busy=True)
                 self._state = CaptureSessionState.ABORTED
                 raise CaptureContractError("capture writer did not stop cleanly; run unsealed")
             try:
@@ -4130,13 +4134,13 @@ class LiveReplayCaptureCoordinator:
         )
         self._submit_gap_locked(gap)
         writer_stopped = self.writer.stop(timeout_seconds=10.0)
-        self._release_storage()
+        storage_released = self._release_storage(defer_shared_if_busy=True)
         self._state = CaptureSessionState.ABORTED
         return UnsealedCaptureClose(
             identity=self.identity,
             capture_root=self.capture_root,
             reason=gap.reason,
-            writer_stopped=writer_stopped,
+            writer_stopped=bool(writer_stopped and storage_released),
         )
 
     def abort(
@@ -5744,6 +5748,7 @@ class LiveReplayCaptureSupervisor:
                 )
             assert admission.lease is not None
             transfer = None
+            coordinator_admitted = False
             try:
                 transfer = self.pretrigger_ring.begin_promotion(
                     normalized,
@@ -5757,6 +5762,7 @@ class LiveReplayCaptureSupervisor:
                     batch=batch,
                     transfer=transfer,
                 )
+                coordinator_admitted = bool(result.hot)
                 if not result.hot:
                     self.pretrigger_ring.abort_promotion(transfer)
                     self.hot_symbol_leases.release(admission.lease)
@@ -5770,11 +5776,14 @@ class LiveReplayCaptureSupervisor:
             except BaseException:
                 if transfer is not None:
                     self.pretrigger_ring.abort_promotion(transfer)
-                coordinator._release_supervised_hot_symbol(
-                    self._ownership_token,
-                    admission.lease,
-                )
-                self.hot_symbol_leases.release(admission.lease)
+                try:
+                    if coordinator_admitted:
+                        coordinator._release_supervised_hot_symbol(
+                            self._ownership_token,
+                            admission.lease,
+                        )
+                finally:
+                    self.hot_symbol_leases.release(admission.lease)
                 coordinator._report_supervised_gap(
                     self._ownership_token,
                     CoverageGap(
@@ -7867,6 +7876,7 @@ class LiveReplayCaptureProcessService:
                 )
             self._pending_symbols.add(normalized)
         coordinator: LiveReplayCaptureCoordinator | None = None
+        coordinator_attached = False
         startup: tuple[CaptureEvent, ...] = ()
         try:
             coordinator, evidence = self.run_factory(
@@ -7885,6 +7895,7 @@ class LiveReplayCaptureProcessService:
                     "capture run factory returned a mismatched one-symbol run"
                 )
             self.supervisor.attach(coordinator)
+            coordinator_attached = True
             startup = coordinator.start(evidence)
             promotion = self.supervisor.promote_hot_symbol(
                 normalized,
@@ -7939,7 +7950,7 @@ class LiveReplayCaptureProcessService:
                     coordinator.discard_unstarted(
                         reason="hot_symbol_admission_exception_before_start"
                     )
-                if coordinator.state in {
+                if coordinator_attached and coordinator.state in {
                     CaptureSessionState.CREATED,
                     CaptureSessionState.ABORTED,
                     CaptureSessionState.SEALED,
