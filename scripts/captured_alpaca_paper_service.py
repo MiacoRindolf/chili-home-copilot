@@ -54,6 +54,9 @@ _STARTUP_ATTEMPT_RE = re.compile(
 )
 _SERVICE_HEALTH_POLL_SECONDS = 1.0
 _SERVICE_SHUTDOWN_SECONDS = 30.0
+_DATABASE_READINESS_WAIT_SECONDS = 120.0
+_DATABASE_READINESS_RETRY_SECONDS = 2.0
+_DATABASE_SCHEMA_STATEMENT_TIMEOUT_MILLISECONDS = 5_000
 _MAX_STARTUP_RECONCILIATION_ROWS = 10_000
 _RESTART_GATE_SCHEMA_VERSION = "chili.captured-paper-restart-gate.v1"
 _NO_ORDER_SMOKE_SCHEMA_VERSION = "chili.captured-paper-readiness.no_order_smoke.v4"
@@ -6261,12 +6264,60 @@ def _measure_capture_pressure(
     )
 
 
+def _is_transient_database_availability_error(exc: BaseException) -> bool:
+    """Recognize only SQLAlchemy connection-availability failures.
+
+    This module intentionally avoids importing application/runtime dependencies
+    before the sealed PAPER environment is installed.  SQLAlchemy therefore
+    remains a pinned runtime module and is identified by its exception type,
+    rather than imported at module load time.  Schema/programming failures are
+    deliberately excluded: retrying those would hide real code/DB drift.
+    """
+
+    seen: set[int] = set()
+    current: BaseException | None = exc
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        exception_type = type(current)
+        module_name = str(getattr(exception_type, "__module__", "") or "")
+        type_name = str(getattr(exception_type, "__name__", "") or "")
+        if module_name.startswith("sqlalchemy.") and (
+            type_name in {"OperationalError", "InterfaceError", "TimeoutError"}
+            or getattr(current, "connection_invalidated", False) is True
+        ):
+            return True
+        current = current.__cause__ or current.__context__
+    return False
+
+
 def _verify_database_schema(
     engine: Any,
     *,
     migrations_module: ModuleType,
+    readiness_timeout_seconds: float = _DATABASE_READINESS_WAIT_SECONDS,
+    retry_interval_seconds: float = _DATABASE_READINESS_RETRY_SECONDS,
+    monotonic_clock: Callable[[], float] = time.monotonic,
+    wait: Callable[[float], None] = time.sleep,
 ) -> Mapping[str, Any]:
-    """Read-only exact-code migration fence immediately before service start."""
+    """Read-only exact-code migration fence immediately before service start.
+
+    A host reboot can bring the scheduled PAPER task up while PostgreSQL is
+    still replaying WAL.  Retry only typed connection-availability failures
+    within one fixed window; schema drift and malformed physical contracts are
+    never retried.  No provider, broker, or order-capable component exists at
+    this point in startup.
+    """
+
+    timeout = float(readiness_timeout_seconds)
+    retry_interval = float(retry_interval_seconds)
+    if not math.isfinite(timeout) or timeout <= 0.0:
+        raise ValueError("database readiness timeout must be finite and positive")
+    if not math.isfinite(retry_interval) or retry_interval <= 0.0:
+        raise ValueError("database readiness retry interval must be finite and positive")
+    started_at = float(monotonic_clock())
+    if not math.isfinite(started_at):
+        raise ValueError("database readiness monotonic clock must be finite")
+    deadline = started_at + timeout
 
     migrations = tuple(getattr(migrations_module, "MIGRATIONS", ()))
     if not migrations:
@@ -6288,35 +6339,84 @@ def _verify_database_schema(
             "MIGRATION_354_VERIFIER_UNAVAILABLE",
             "PAPER database lacks the exact migration 354 physical verifier",
         )
-    try:
-        with engine.connect() as connection:
-            rows = connection.execute(
-                migrations_module.text("SELECT version_id FROM schema_version")
-            ).fetchall()
-            table_rows = connection.execute(
-                migrations_module.text(
-                    "SELECT name, to_regclass(name) IS NOT NULL AS present "
-                    "FROM (VALUES "
-                    "('captured_paper_post_commit_outbox'),"
-                    "('captured_paper_post_commit_outbox_events'),"
-                    "('captured_paper_completed_fill_watch'),"
-                    "('captured_paper_completed_fill_watch_events'),"
-                    "('alpaca_paper_fill_activities'),"
-                    "('alpaca_paper_fill_query_observations'),"
-                    "('alpaca_paper_post_settlement_fill_contradictions'),"
-                    "('captured_paper_selection_frontiers'),"
-                    "('captured_paper_selection_frontier_events'),"
-                    "('captured_paper_selection_route_states'),"
-                    "('captured_paper_variant_application_receipts'),"
-                    "('captured_paper_variant_application_events')"
-                    ") AS required(name)"
+    last_transient_error: BaseException | None = None
+    while True:
+        attempt_started_at = float(monotonic_clock())
+        if not math.isfinite(attempt_started_at):
+            raise CapturedAlpacaPaperServiceError(
+                "DATABASE_SCHEMA_UNREADABLE",
+                "PAPER database readiness clock became invalid",
+            ) from last_transient_error
+        if attempt_started_at >= deadline:
+            raise CapturedAlpacaPaperServiceError(
+                "DATABASE_SCHEMA_UNREADABLE",
+                "PAPER database schema remained unavailable through the readiness deadline",
+            ) from last_transient_error
+        try:
+            with engine.connect() as connection:
+                # PostgreSQL applies both values transaction-locally.  They do
+                # not weaken the schema fence; they only prevent a blocked
+                # catalog/physical-contract read from outliving the startup
+                # retry window.  The engine's libpq connect_timeout separately
+                # bounds connection establishment.
+                timeout_ms = min(
+                    _DATABASE_SCHEMA_STATEMENT_TIMEOUT_MILLISECONDS,
+                    max(1, int(max(0.0, deadline - attempt_started_at) * 1000)),
                 )
-            ).fetchall()
-            migration_354_verifier(connection)
-    except Exception as exc:
-        raise CapturedAlpacaPaperServiceError(
-            "DATABASE_SCHEMA_UNREADABLE", "PAPER database schema read failed"
-        ) from exc
+                connection.execute(
+                    migrations_module.text(
+                        f"SET LOCAL statement_timeout = '{timeout_ms}ms'"
+                    )
+                )
+                connection.execute(
+                    migrations_module.text(
+                        f"SET LOCAL lock_timeout = '{timeout_ms}ms'"
+                    )
+                )
+                rows = connection.execute(
+                    migrations_module.text("SELECT version_id FROM schema_version")
+                ).fetchall()
+                table_rows = connection.execute(
+                    migrations_module.text(
+                        "SELECT name, to_regclass(name) IS NOT NULL AS present "
+                        "FROM (VALUES "
+                        "('captured_paper_post_commit_outbox'),"
+                        "('captured_paper_post_commit_outbox_events'),"
+                        "('captured_paper_completed_fill_watch'),"
+                        "('captured_paper_completed_fill_watch_events'),"
+                        "('alpaca_paper_fill_activities'),"
+                        "('alpaca_paper_fill_query_observations'),"
+                        "('alpaca_paper_post_settlement_fill_contradictions'),"
+                        "('captured_paper_selection_frontiers'),"
+                        "('captured_paper_selection_frontier_events'),"
+                        "('captured_paper_selection_route_states'),"
+                        "('captured_paper_variant_application_receipts'),"
+                        "('captured_paper_variant_application_events')"
+                        ") AS required(name)"
+                    )
+                ).fetchall()
+                migration_354_verifier(connection)
+        except Exception as exc:
+            now = float(monotonic_clock())
+            if (
+                not math.isfinite(now)
+                or not _is_transient_database_availability_error(exc)
+                or now >= deadline
+            ):
+                raise CapturedAlpacaPaperServiceError(
+                    "DATABASE_SCHEMA_UNREADABLE",
+                    "PAPER database schema read failed",
+                ) from exc
+            last_transient_error = exc
+            wait(min(retry_interval, max(0.0, deadline - now)))
+            continue
+        completed_at = float(monotonic_clock())
+        if not math.isfinite(completed_at) or completed_at > deadline:
+            raise CapturedAlpacaPaperServiceError(
+                "DATABASE_SCHEMA_UNREADABLE",
+                "PAPER database schema read exceeded the readiness deadline",
+            )
+        break
     applied = {str(row[0]) for row in rows}
     missing = tuple(version for version in expected_ids if version not in applied)
     unexpected = tuple(sorted(applied.difference(expected_ids)))

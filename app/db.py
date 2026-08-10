@@ -13,6 +13,7 @@ _PG_KEEPALIVES_ENABLED = 1
 _PG_KEEPALIVE_IDLE_SECONDS = 30
 _PG_KEEPALIVE_INTERVAL_SECONDS = 5
 _PG_KEEPALIVE_COUNT = 5
+_PG_CONNECT_TIMEOUT_SECONDS = 10
 _SERVICE_POOL_CAPS_ENABLED_ENV = "CHILI_DATABASE_SERVICE_POOL_CAPS_ENABLED"
 _SERVICE_RETAINED_POOL_CAPS: dict[str, int] = {
     # Keep resident pools small for long-lived, low-concurrency services. These
@@ -219,6 +220,11 @@ if _idle_xact_timeout_ms > 0:
         ]
     )
 _connect_args = {
+    # A local/container PostgreSQL endpoint that cannot complete a TCP/libpq
+    # handshake inside this bound is unavailable for a latency-sensitive
+    # service startup.  This also gives the captured-PAPER readiness retry a
+    # real per-attempt connection bound instead of relying on OS TCP defaults.
+    "connect_timeout": _PG_CONNECT_TIMEOUT_SECONDS,
     "keepalives": _PG_KEEPALIVES_ENABLED,
     "keepalives_idle": _PG_KEEPALIVE_IDLE_SECONDS,
     "keepalives_interval": _PG_KEEPALIVE_INTERVAL_SECONDS,
