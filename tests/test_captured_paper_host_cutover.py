@@ -4213,6 +4213,139 @@ def test_two_phase_handshake_stages_exact_runtime_and_consumes_one_permit(
     ) < kinds.index("apply_completed")
 
 
+def test_two_phase_handshake_retries_transient_postprepared_process_inventory(
+    prepared: cutover.PreparedCutover,
+) -> None:
+    class TransientPostpreparedInventoryHost(FakeHost):
+        postprepared_inventory_snapshots: tuple[
+            tuple[cutover.CandidateProcessObservation, ...], ...
+        ] = ()
+        postprepared_timeout_seconds: float | None = None
+
+        def await_candidate_processes(
+            self,
+            invocation: cutover.CandidateInvocation,
+            *,
+            timeout_seconds: float,
+        ) -> tuple[cutover.CandidateProcessObservation, ...]:
+            complete = super().await_candidate_processes(
+                invocation, timeout_seconds=timeout_seconds
+            )
+            prepared_path = Path(invocation.host_ready_receipt_base)
+            permit_path = Path(f"{invocation.host_ready_receipt_base}.permit.json")
+            if (
+                prepared_path.is_file()
+                and not permit_path.exists()
+                and not self.postprepared_inventory_snapshots
+            ):
+                service_only = tuple(
+                    item for item in complete if item.kind == "service"
+                )
+                self.postprepared_inventory_snapshots = (service_only, complete)
+                self.postprepared_timeout_seconds = timeout_seconds
+                if timeout_seconds <= 0.0:
+                    return service_only
+                # Model WindowsHostCutoverBackend's bounded retry: the first
+                # exact process snapshot is incomplete, then both sealed
+                # identities are visible without weakening roster validation.
+                return complete
+            return complete
+
+    backend = TransientPostpreparedInventoryHost(prepared)
+    report = _executor(prepared, backend).apply()
+
+    assert report.verdict == "APPLIED_ALPACA_PAPER_ONLY"
+    assert [item.kind for item in backend.postprepared_inventory_snapshots[0]] == [
+        "service"
+    ]
+    assert [item.kind for item in backend.postprepared_inventory_snapshots[1]] == [
+        "launcher",
+        "service",
+    ]
+    assert (
+        backend.postprepared_timeout_seconds
+        == cutover.CANDIDATE_PROCESS_ROSTER_WAIT_SECONDS
+    )
+
+
+def test_two_phase_handshake_rejects_persistent_missing_launcher_after_prepared(
+    prepared: cutover.PreparedCutover,
+) -> None:
+    class MissingLauncherHost(FakeHost):
+        def await_candidate_processes(
+            self,
+            invocation: cutover.CandidateInvocation,
+            *,
+            timeout_seconds: float,
+        ) -> tuple[cutover.CandidateProcessObservation, ...]:
+            complete = super().await_candidate_processes(
+                invocation, timeout_seconds=timeout_seconds
+            )
+            if (
+                Path(invocation.host_ready_receipt_base).is_file()
+                and not Path(
+                    f"{invocation.host_ready_receipt_base}.permit.json"
+                ).exists()
+            ):
+                return tuple(item for item in complete if item.kind == "service")
+            return complete
+
+    backend = MissingLauncherHost(prepared)
+    with pytest.raises(
+        cutover.CapturedPaperHostCutoverError,
+        match="CANDIDATE_PROCESS_ROSTER_INVALID",
+    ):
+        _executor(prepared, backend).apply()
+    _assert_restored(prepared, backend)
+
+
+def test_two_phase_handshake_rejects_replacement_launcher_after_prepared(
+    prepared: cutover.PreparedCutover,
+) -> None:
+    class ReplacementLauncherHost(FakeHost):
+        replaced = False
+
+        def await_candidate_processes(
+            self,
+            invocation: cutover.CandidateInvocation,
+            *,
+            timeout_seconds: float,
+        ) -> tuple[cutover.CandidateProcessObservation, ...]:
+            complete = super().await_candidate_processes(
+                invocation, timeout_seconds=timeout_seconds
+            )
+            if (
+                Path(invocation.host_ready_receipt_base).is_file()
+                and not Path(
+                    f"{invocation.host_ready_receipt_base}.permit.json"
+                ).exists()
+                and not self.replaced
+            ):
+                self.replaced = True
+                return tuple(
+                    replace(
+                        item,
+                        identity=replace(
+                            item.identity,
+                            pid=item.identity.pid + 10_000,
+                            create_time_ns=item.identity.create_time_ns + 1,
+                        ),
+                    )
+                    if item.kind == "launcher"
+                    else item
+                    for item in complete
+                )
+            return complete
+
+    backend = ReplacementLauncherHost(prepared)
+    with pytest.raises(
+        cutover.CapturedPaperHostCutoverError,
+        match="STARTUP_PROCESS_IDENTITY_DRIFT",
+    ):
+        _executor(prepared, backend).apply()
+    _assert_restored(prepared, backend)
+
+
 def test_preexisting_handshake_artifact_blocks_before_any_host_mutation(
     prepared: cutover.PreparedCutover,
 ) -> None:

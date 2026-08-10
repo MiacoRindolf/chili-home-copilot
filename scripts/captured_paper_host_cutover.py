@@ -259,6 +259,7 @@ PREACTIVATION_ROLLBACK_BASELINE_MODE = "PREACTIVATION_ROLLBACK_BASELINE"
 # / 15-min manifest windows.
 STARTUP_HANDSHAKE_MAX_AGE_SECONDS = 480.0
 STARTUP_DISPATCH_LOCK_WAIT_SECONDS = 30.0
+CANDIDATE_PROCESS_ROSTER_WAIT_SECONDS = 5.0
 STARTUP_DISPATCH_LOCK_BYTE = b"0"
 STARTUP_DISPATCH_LOCK_BYTE_SHA256 = hashlib.sha256(
     STARTUP_DISPATCH_LOCK_BYTE
@@ -7361,7 +7362,13 @@ class CapturedPaperHostCutoverExecutor:
                     now=self.clock(),
                 )
             )
-            postcondition_processes = self._assert_applied(prior_lane)
+            postcondition_processes = self._assert_applied(
+                prior_lane,
+                candidate_process_timeout_seconds=(
+                    CANDIDATE_PROCESS_ROSTER_WAIT_SECONDS
+                ),
+                expected_candidate_processes=processes,
+            )
             current_service = next(
                 item.identity
                 for item in postcondition_processes
@@ -7399,7 +7406,13 @@ class CapturedPaperHostCutoverExecutor:
                 host_quiet_horizon_event_sha256=quiet_sha,
             )
             self.backend.assert_iqconnect_provider_guard_current(iqconnect_guard)
-            self._assert_applied(prior_lane)
+            self._assert_applied(
+                prior_lane,
+                candidate_process_timeout_seconds=(
+                    CANDIDATE_PROCESS_ROSTER_WAIT_SECONDS
+                ),
+                expected_candidate_processes=processes,
+            )
             completed_at = self.clock()
             if completed_at >= valid_until:
                 raise CapturedPaperHostCutoverError(
@@ -7862,7 +7875,13 @@ class CapturedPaperHostCutoverExecutor:
                 )
                 # Re-evaluate every host postcondition only after PREPARED has
                 # proven workers are still stopped.  No permit exists yet.
-                postcondition_processes = self._assert_applied(prior_lane)
+                postcondition_processes = self._assert_applied(
+                    prior_lane,
+                    candidate_process_timeout_seconds=(
+                        CANDIDATE_PROCESS_ROSTER_WAIT_SECONDS
+                    ),
+                    expected_candidate_processes=processes,
+                )
                 current_service = next(
                     item.identity
                     for item in postcondition_processes
@@ -7915,7 +7934,13 @@ class CapturedPaperHostCutoverExecutor:
                 self.backend.assert_iqconnect_provider_guard_current(
                     iqconnect_guard
                 )
-                self._assert_applied(prior_lane)
+                self._assert_applied(
+                    prior_lane,
+                    candidate_process_timeout_seconds=(
+                        CANDIDATE_PROCESS_ROSTER_WAIT_SECONDS
+                    ),
+                    expected_candidate_processes=processes,
+                )
                 apply_completed_at = self.clock()
                 if apply_completed_at >= prepared_valid_until:
                     raise CapturedPaperHostCutoverError(
@@ -8238,9 +8263,14 @@ class CapturedPaperHostCutoverExecutor:
         CapturedPaperHostCutoverExecutor._assert_candidate_process_subset(processes)
         kinds = [item.kind for item in processes]
         if sorted(kinds) != ["launcher", "service"]:
+            observed = ",".join(
+                f"{item.kind}:{item.identity.pid}:{item.identity.create_time_ns}"
+                for item in sorted(processes, key=lambda row: (row.kind, row.identity.pid))
+            ) or "none"
             raise CapturedPaperHostCutoverError(
                 "CANDIDATE_PROCESS_ROSTER_INVALID",
-                "candidate must have exactly one launcher and one foreground service",
+                "candidate must have exactly one launcher and one foreground service; "
+                f"observed={observed}",
             )
         if len({item.identity.pid for item in processes}) != 2:
             raise CapturedPaperHostCutoverError(
@@ -8267,6 +8297,10 @@ class CapturedPaperHostCutoverExecutor:
         prior_execution_lane: LegacyExecutionLaneObservation,
         *,
         require_running: bool = True,
+        candidate_process_timeout_seconds: float = 0.0,
+        expected_candidate_processes: (
+            Sequence[CandidateProcessObservation] | None
+        ) = None,
     ) -> tuple[CandidateProcessObservation, ...]:
         lane = self.backend.inspect_legacy_execution_lane()
         if (
@@ -8358,10 +8392,30 @@ class CapturedPaperHostCutoverExecutor:
                 "the exact candidate invocation is not owned by one unified task",
             )
         processes = self.backend.await_candidate_processes(
-            self.prepared.invocation, timeout_seconds=0.0
+            self.prepared.invocation,
+            timeout_seconds=candidate_process_timeout_seconds,
         )
         if require_running:
             self._assert_candidate_process_roster(processes)
+            if expected_candidate_processes is not None:
+                self._assert_candidate_process_roster(expected_candidate_processes)
+                expected_by_kind = {
+                    item.kind: item.identity.semantic_key()
+                    for item in expected_candidate_processes
+                }
+                current_by_kind = {
+                    item.kind: item.identity.semantic_key() for item in processes
+                }
+                if current_by_kind != expected_by_kind:
+                    observed = ",".join(
+                        f"{item.kind}:{item.identity.pid}:{item.identity.create_time_ns}"
+                        for item in sorted(processes, key=lambda row: row.kind)
+                    )
+                    raise CapturedPaperHostCutoverError(
+                        "STARTUP_PROCESS_IDENTITY_DRIFT",
+                        "candidate launcher/service identity changed during startup; "
+                        f"observed={observed}",
+                    )
         elif processes:
             raise CapturedPaperHostCutoverError(
                 "CLEAN_STOP_PROCESS_SURVIVED",
