@@ -430,9 +430,18 @@ MARK_NBBO_AVAILABLE = sa.text(
     ":provider_trade_reference_at AND message_type = :message_type "
     "AND available_at IS NULL"
 )
+MARK_TRADE_IDS_AVAILABLE = sa.text(
+    "UPDATE iqfeed_trade_ticks SET available_at = :available_at "
+    "WHERE id = ANY(:row_ids) AND available_at IS NULL"
+)
+MARK_NBBO_IDS_AVAILABLE = sa.text(
+    "UPDATE momentum_nbbo_spread_tape SET available_at = :available_at "
+    "WHERE id = ANY(:row_ids) AND available_at IS NULL"
+)
 
 _TRADE_WRITE_TABLE = sa.table(
     "iqfeed_trade_ticks",
+    sa.column("id", sa.BigInteger()),
     sa.column("symbol", sa.String(16)),
     sa.column("observed_at", sa.DateTime(timezone=False)),
     sa.column("price", sa.Float()),
@@ -453,6 +462,7 @@ _TRADE_WRITE_TABLE = sa.table(
 )
 _NBBO_WRITE_TABLE = sa.table(
     "momentum_nbbo_spread_tape",
+    sa.column("id", sa.BigInteger()),
     sa.column("symbol", sa.String(32)),
     sa.column("observed_at", sa.DateTime(timezone=True)),
     sa.column("bid", sa.Float()),
@@ -603,13 +613,8 @@ def _verify_bridge_schema() -> None:
         ) from exc
 
 
-def _availability_params(row: dict, *, available_at: datetime) -> dict:
-    """Exact batch-row identity for the post-insert release transaction.
-
-    A failed release transaction intentionally leaves only that batch's rows
-    NULL forever.  A later writer pass must not make an older, never-published
-    frame appear observable merely because it shares the process generation.
-    """
+def _require_release_identity(row: dict) -> tuple[int, str]:
+    """Validate the non-spoofable source-frame identity before persistence."""
 
     source_frame_sequence = row.get("source_frame_sequence")
     if (
@@ -623,6 +628,18 @@ def _availability_params(row: dict, *, available_at: datetime) -> dict:
         ch not in "0123456789abcdef" for ch in source_frame_sha256
     ):
         raise ValueError("IQFeed release source-frame SHA-256 is malformed")
+    return source_frame_sequence, source_frame_sha256
+
+
+def _availability_params(row: dict, *, available_at: datetime) -> dict:
+    """Exact batch-row identity for the post-insert release transaction.
+
+    A failed release transaction intentionally leaves only that batch's rows
+    NULL forever.  A later writer pass must not make an older, never-published
+    frame appear observable merely because it shares the process generation.
+    """
+
+    source_frame_sequence, source_frame_sha256 = _require_release_identity(row)
 
     return {
         "available_at": available_at,
@@ -646,18 +663,49 @@ def _require_batch_rowcount(result: Any, expected: int, *, operation: str) -> No
         )
 
 
+def _returned_row_ids(
+    result: Any,
+    expected: int,
+    *,
+    operation: str,
+) -> tuple[int, ...]:
+    row_ids = tuple(result.scalars())
+    if (
+        len(row_ids) != expected
+        or any(
+            isinstance(row_id, bool)
+            or not isinstance(row_id, int)
+            or row_id <= 0
+            for row_id in row_ids
+        )
+        or len(set(row_ids)) != len(row_ids)
+    ):
+        raise RuntimeError(
+            f"IQFeed {operation} returned-row identity mismatch: "
+            f"expected={expected} returned={len(row_ids)}"
+        )
+    return row_ids
+
+
 def _insert_pending_batch(
     connection: Any,
     *,
     trade_rows: list[dict],
     quote_rows: list[dict],
-) -> None:
+    return_row_ids: bool = False,
+) -> tuple[tuple[int, ...], tuple[int, ...]]:
     """Persist one bounded batch with at most one statement per tape.
 
     SQLAlchemy ``VALUES`` produces one PostgreSQL INSERT ... SELECT statement,
     rather than the driver's row-scaled executemany path.  The writer's outer
-    transaction remains the sole commit boundary.
+    transaction remains the sole commit boundary.  The optional primary-key
+    return binds the later post-commit release to exactly these inserted rows.
     """
+
+    for row in (*trade_rows, *quote_rows):
+        _require_release_identity(row)
+    trade_row_ids: tuple[int, ...] = ()
+    quote_row_ids: tuple[int, ...] = ()
 
     if trade_rows:
         incoming = sa.values(
@@ -722,25 +770,32 @@ def _insert_pending_batch(
             "source_frame_sequence",
             "source_frame_sha256",
         )
-        result = connection.execute(
-            sa.insert(_TRADE_WRITE_TABLE).from_select(
-                columns,
-                sa.select(
-                    *(
-                        sa.cast(
-                            incoming.c[name],
-                            _TRADE_WRITE_TABLE.c[name].type,
-                        ).label(name)
-                        for name in columns
-                    )
-                ),
-            )
+        statement = sa.insert(_TRADE_WRITE_TABLE).from_select(
+            columns,
+            sa.select(
+                *(
+                    sa.cast(
+                        incoming.c[name],
+                        _TRADE_WRITE_TABLE.c[name].type,
+                    ).label(name)
+                    for name in columns
+                )
+            ),
         )
+        if return_row_ids:
+            statement = statement.returning(_TRADE_WRITE_TABLE.c.id)
+        result = connection.execute(statement)
         _require_batch_rowcount(
             result,
             len(trade_rows),
             operation="trade insert",
         )
+        if return_row_ids:
+            trade_row_ids = _returned_row_ids(
+                result,
+                len(trade_rows),
+                operation="trade insert",
+            )
 
     if quote_rows:
         incoming = sa.values(
@@ -811,25 +866,66 @@ def _insert_pending_batch(
             "source_frame_sequence",
             "source_frame_sha256",
         )
-        result = connection.execute(
-            sa.insert(_NBBO_WRITE_TABLE).from_select(
-                columns,
-                sa.select(
-                    *(
-                        sa.cast(
-                            incoming.c[name],
-                            _NBBO_WRITE_TABLE.c[name].type,
-                        ).label(name)
-                        for name in columns
-                    )
-                ),
-            )
+        statement = sa.insert(_NBBO_WRITE_TABLE).from_select(
+            columns,
+            sa.select(
+                *(
+                    sa.cast(
+                        incoming.c[name],
+                        _NBBO_WRITE_TABLE.c[name].type,
+                    ).label(name)
+                    for name in columns
+                )
+            ),
         )
+        if return_row_ids:
+            statement = statement.returning(_NBBO_WRITE_TABLE.c.id)
+        result = connection.execute(statement)
         _require_batch_rowcount(
             result,
             len(quote_rows),
             operation="NBBO insert",
         )
+        if return_row_ids:
+            quote_row_ids = _returned_row_ids(
+                result,
+                len(quote_rows),
+                operation="NBBO insert",
+            )
+
+    return trade_row_ids, quote_row_ids
+
+
+def _enqueue_nbbo_notifications(
+    connection: Any,
+    *,
+    quote_rows: list[dict],
+    available_at: datetime,
+) -> None:
+    """Enqueue quote notifications inside the row-publication transaction."""
+
+    if not quote_rows or not IQFEED_NOTIFY_ENABLED:
+        return
+    for row in quote_rows:
+        row["available_at"] = available_at
+    payload_rows = sa.values(
+        sa.column("payload", sa.Text()),
+        name="iqfeed_notify_rows",
+    ).data([(_notify_payload(row),) for row in quote_rows])
+    result = connection.execute(
+        sa.select(
+            sa.func.pg_notify(
+                sa.bindparam("channel"),
+                payload_rows.c.payload,
+            )
+        ).select_from(payload_rows),
+        {"channel": IQFEED_NOTIFY_CHANNEL},
+    )
+    _require_batch_rowcount(
+        result,
+        len(quote_rows),
+        operation="NBBO notification enqueue",
+    )
 
 
 def _release_values(
@@ -931,65 +1027,105 @@ def _release_statement(table: Any, incoming: Any) -> Any:
     )
 
 
+def _release_inserted_row_ids(
+    connection: Any,
+    *,
+    statement: Any,
+    row_ids: tuple[int, ...],
+    expected: int,
+    available_at: datetime,
+    operation: str,
+) -> None:
+    if (
+        len(row_ids) != expected
+        or any(
+            isinstance(row_id, bool)
+            or not isinstance(row_id, int)
+            or row_id <= 0
+            for row_id in row_ids
+        )
+        or len(set(row_ids)) != len(row_ids)
+    ):
+        raise RuntimeError(
+            f"IQFeed {operation} row identity mismatch: "
+            f"expected={expected} supplied={len(row_ids)}"
+        )
+    result = connection.execute(
+        statement,
+        {"available_at": available_at, "row_ids": list(row_ids)},
+    )
+    _require_batch_rowcount(result, expected, operation=operation)
+
+
 def _release_pending_batch(
     connection: Any,
     *,
     trade_rows: list[dict],
     quote_rows: list[dict],
     available_at: datetime,
+    trade_row_ids: tuple[int, ...] | None = None,
+    quote_row_ids: tuple[int, ...] | None = None,
 ) -> None:
     """Release one batch and enqueue its quote notifications set-wise."""
 
     if trade_rows:
-        incoming = _release_values(
-            trade_rows,
-            available_at=available_at,
-            name="released_trade_rows",
-        )
-        result = connection.execute(
-            _release_statement(_TRADE_WRITE_TABLE, incoming)
-        )
-        _require_batch_rowcount(
-            result,
-            len(trade_rows),
-            operation="trade release",
-        )
+        if trade_row_ids is None:
+            incoming = _release_values(
+                trade_rows,
+                available_at=available_at,
+                name="released_trade_rows",
+            )
+            result = connection.execute(
+                _release_statement(_TRADE_WRITE_TABLE, incoming)
+            )
+            _require_batch_rowcount(
+                result,
+                len(trade_rows),
+                operation="trade release",
+            )
+        else:
+            _release_inserted_row_ids(
+                connection,
+                statement=MARK_TRADE_IDS_AVAILABLE,
+                row_ids=trade_row_ids,
+                expected=len(trade_rows),
+                available_at=available_at,
+                operation="trade primary-key release",
+            )
+    elif trade_row_ids:
+        raise RuntimeError("IQFeed trade release has row IDs without rows")
 
     if quote_rows:
-        incoming = _release_values(
-            quote_rows,
-            available_at=available_at,
-            name="released_nbbo_rows",
-        )
-        result = connection.execute(
-            _release_statement(_NBBO_WRITE_TABLE, incoming)
-        )
-        _require_batch_rowcount(
-            result,
-            len(quote_rows),
-            operation="NBBO release",
-        )
-        if IQFEED_NOTIFY_ENABLED:
-            for row in quote_rows:
-                row["available_at"] = available_at
-            payload_rows = sa.values(
-                sa.column("payload", sa.Text()),
-                name="iqfeed_notify_rows",
-            ).data([(_notify_payload(row),) for row in quote_rows])
+        if quote_row_ids is None:
+            incoming = _release_values(
+                quote_rows,
+                available_at=available_at,
+                name="released_nbbo_rows",
+            )
             result = connection.execute(
-                sa.select(
-                    sa.func.pg_notify(
-                        sa.bindparam("channel"),
-                        payload_rows.c.payload,
-                    )
-                ).select_from(payload_rows),
-                {"channel": IQFEED_NOTIFY_CHANNEL},
+                _release_statement(_NBBO_WRITE_TABLE, incoming)
             )
             _require_batch_rowcount(
                 result,
                 len(quote_rows),
-                operation="NBBO notification enqueue",
+                operation="NBBO release",
             )
+        else:
+            _release_inserted_row_ids(
+                connection,
+                statement=MARK_NBBO_IDS_AVAILABLE,
+                row_ids=quote_row_ids,
+                expected=len(quote_rows),
+                available_at=available_at,
+                operation="NBBO primary-key release",
+            )
+        _enqueue_nbbo_notifications(
+            connection,
+            quote_rows=quote_rows,
+            available_at=available_at,
+        )
+    elif quote_row_ids:
+        raise RuntimeError("IQFeed NBBO release has row IDs without rows")
 
 
 def _pending_frame_key(row: dict) -> tuple[int, int]:
@@ -3116,21 +3252,21 @@ def writer(
         )
         if rows or nbbo_rows:
             try:
-                # Phase 1: persist the raw rows.  ``received_at`` may precede
-                # this commit by up to the flush interval, so it is not a
-                # strategy-availability clock.
+                written_quotes = nbbo_rows if WRITE_NBBO_TAPE else []
+                # Persist pending rows first and retain their database primary
+                # keys. ``received_at`` may precede this commit by the flush
+                # interval and is not a strategy-availability clock.
                 with engine.begin() as c:
-                    _insert_pending_batch(
+                    trade_row_ids, quote_row_ids = _insert_pending_batch(
                         c,
                         trade_rows=rows,
-                        quote_rows=(nbbo_rows if WRITE_NBBO_TAPE else []),
+                        quote_rows=written_quotes,
+                        return_row_ids=True,
                     )
-                # Phase 2: stamp the replay release clock and enqueue the
-                # event-driven notifications in ONE transaction.  PostgreSQL
-                # delivers NOTIFY messages only when this transaction commits,
-                # so a dispatcher can never observe an authority envelope whose
-                # matching DB row still has ``available_at IS NULL``.  Strict
-                # replay treats this commit boundary as the release boundary.
+                # Stamp the conservative post-insert publication clock and
+                # enqueue notifications in one follow-up transaction. Releasing
+                # by the returned primary keys preserves migration 318's causal
+                # boundary without scanning the historical tape by frame identity.
                 # Exact print rows retain the provider Date+TimeMS event clock;
                 # quote rows keep provider_event_at NULL because the selected
                 # L1 layout still exposes no exact quote-event timestamp.
@@ -3139,12 +3275,14 @@ def writer(
                     _release_pending_batch(
                         c,
                         trade_rows=rows,
-                        quote_rows=(nbbo_rows if WRITE_NBBO_TAPE else []),
+                        quote_rows=written_quotes,
                         available_at=available_at,
+                        trade_row_ids=trade_row_ids,
+                        quote_row_ids=quote_row_ids,
                     )
                 capture_accepted, capture_rejected = _publish_released_capture_rows(
                     trade_rows=rows,
-                    quote_rows=(nbbo_rows if WRITE_NBBO_TAPE else []),
+                    quote_rows=written_quotes,
                     available_at=available_at,
                 )
                 # Telemetry is queued only after release and capture publication.

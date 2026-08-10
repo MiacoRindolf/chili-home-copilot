@@ -507,6 +507,110 @@ def test_set_based_insert_and_release_round_trip_on_postgresql(db, monkeypatch):
         db.rollback()
 
 
+def test_primary_key_release_round_trip_on_postgresql(db, monkeypatch):
+    now = datetime(2026, 8, 10, 18, 30, 7, tzinfo=timezone.utc)
+    bridge_run_id = "ad3b40b3-0d03-46b2-bbfa-4f63fb3c9a09"
+    digest = hashlib.sha256(b"primary-key-release-round-trip").hexdigest()
+    common = {
+        "sym": "PKBATCH",
+        "at": now.replace(tzinfo=None),
+        "received_at": now - timedelta(milliseconds=2),
+        "provider_trade_reference_at": now - timedelta(milliseconds=3),
+        "provider_at": None,
+        "basis": bridge.AUTHORITATIVE_TIMESTAMP_BASIS,
+        "bridge": bridge.BRIDGE_BUILD,
+        "message_type": "Q",
+        "bridge_run_id": bridge_run_id,
+        "connection_generation": 5,
+        "source_frame_sequence": 92,
+        "source_frame_sha256": digest,
+    }
+    trade_row = {
+        **common,
+        "px": 2.11,
+        "sz": 100.0,
+        "bid": 2.10,
+        "ask": 2.12,
+    }
+    quote_row = {
+        **common,
+        "bid": 2.10,
+        "ask": 2.12,
+        "mid": 2.11,
+        "spread_bps": 94.7867,
+    }
+    monkeypatch.setattr(bridge, "IQFEED_NOTIFY_ENABLED", False)
+    try:
+        with db.get_bind().begin() as connection:
+            trade_ids, quote_ids = bridge._insert_pending_batch(
+                connection,
+                trade_rows=[trade_row],
+                quote_rows=[quote_row],
+                return_row_ids=True,
+            )
+        assert len(trade_ids) == len(quote_ids) == 1
+        with db.get_bind().begin() as connection:
+            bridge._release_pending_batch(
+                connection,
+                trade_rows=[trade_row],
+                quote_rows=[quote_row],
+                available_at=now,
+                trade_row_ids=trade_ids,
+                quote_row_ids=quote_ids,
+            )
+        with db.get_bind().connect() as connection:
+            trade_release = connection.execute(
+                sa.text(
+                    "SELECT available_at FROM iqfeed_trade_ticks "
+                    "WHERE bridge_run_id = :run_id "
+                    "AND source_frame_sequence = 92"
+                ),
+                {"run_id": bridge_run_id},
+            ).scalar_one()
+            quote_release = connection.execute(
+                sa.text(
+                    "SELECT available_at FROM momentum_nbbo_spread_tape "
+                    "WHERE bridge_run_id = :run_id "
+                    "AND source_frame_sequence = 92"
+                ),
+                {"run_id": bridge_run_id},
+            ).scalar_one()
+        assert trade_release == quote_release == now
+    finally:
+        with db.get_bind().begin() as connection:
+            connection.execute(
+                sa.text(
+                    "DELETE FROM iqfeed_trade_ticks WHERE bridge_run_id = :run_id"
+                ),
+                {"run_id": bridge_run_id},
+            )
+            connection.execute(
+                sa.text(
+                    "DELETE FROM momentum_nbbo_spread_tape "
+                    "WHERE bridge_run_id = :run_id"
+                ),
+                {"run_id": bridge_run_id},
+            )
+
+
+def test_pending_insert_rejects_malformed_identity_before_db_write():
+    class _Connection:
+        def execute(self, *_args, **_kwargs):
+            raise AssertionError("malformed source identity reached PostgreSQL")
+
+    with pytest.raises(ValueError, match="source-frame sequence is malformed"):
+        bridge._insert_pending_batch(
+            _Connection(),
+            trade_rows=[
+                {
+                    "source_frame_sequence": 0,
+                    "source_frame_sha256": "a" * 64,
+                }
+            ],
+            quote_rows=[],
+        )
+
+
 def test_hot_symbols_keep_every_quote_while_broad_symbols_keep_newest(monkeypatch):
     monkeypatch.setattr(bridge, "HOT_FULL_FIDELITY", True)
     rows = [
@@ -860,8 +964,12 @@ def test_vectorized_db_release_has_constant_statement_count_for_full_batch(
         )
 
     class _Result:
-        def __init__(self, rowcount):
+        def __init__(self, rowcount, scalar_values=()):
             self.rowcount = rowcount
+            self.scalar_values = tuple(scalar_values)
+
+        def scalars(self):
+            return iter(self.scalar_values)
 
     class _Connection:
         def __init__(self, rowcounts):
@@ -891,6 +999,52 @@ def test_vectorized_db_release_has_constant_statement_count_for_full_batch(
     )
     assert len(release_connection.calls) == 3
     assert all(row["available_at"] == release_at for row in quote_rows)
+
+    class _ReturningConnection(_Connection):
+        def __init__(self):
+            super().__init__([len(trade_rows), len(quote_rows)])
+            self.returned_ids = [
+                tuple(range(1, len(trade_rows) + 1)),
+                tuple(range(100_001, 100_001 + len(quote_rows))),
+            ]
+
+        def execute(self, statement, *_args, **_kwargs):
+            self.calls.append(statement)
+            return _Result(
+                self.rowcounts.pop(0),
+                self.returned_ids.pop(0),
+            )
+
+    returning_connection = _ReturningConnection()
+    trade_ids, quote_ids = bridge._insert_pending_batch(
+        returning_connection,
+        trade_rows=trade_rows,
+        quote_rows=quote_rows,
+        return_row_ids=True,
+    )
+    assert len(trade_ids) == len(trade_rows)
+    assert len(quote_ids) == len(quote_rows)
+
+    primary_key_release = _Connection(
+        [len(trade_rows), len(quote_rows), len(quote_rows)]
+    )
+    bridge._release_pending_batch(
+        primary_key_release,
+        trade_rows=trade_rows,
+        quote_rows=quote_rows,
+        available_at=release_at,
+        trade_row_ids=trade_ids,
+        quote_row_ids=quote_ids,
+    )
+    primary_key_sql = [
+        str(statement).lower() for statement in primary_key_release.calls
+    ]
+    assert len(primary_key_sql) == 3
+    assert "where id = any(:row_ids)" in primary_key_sql[0]
+    assert "where id = any(:row_ids)" in primary_key_sql[1]
+    assert "source_frame_sequence" not in primary_key_sql[0]
+    assert "source_frame_sequence" not in primary_key_sql[1]
+    assert "pg_notify" in primary_key_sql[2]
 
 
 def test_trade_reference_is_not_mislabeled_provider_event(monkeypatch):
