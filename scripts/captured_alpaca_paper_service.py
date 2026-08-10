@@ -218,6 +218,7 @@ class _CapturedPaperPressureFeedWorker:
         pressure_controller: Any,
         sampler: Callable[[], Any],
         interval_seconds: float,
+        monotonic_clock: Callable[[], float] = time.monotonic,
     ) -> None:
         interval = float(interval_seconds)
         if not math.isfinite(interval) or interval <= 0.0:
@@ -228,6 +229,7 @@ class _CapturedPaperPressureFeedWorker:
         self._controller = pressure_controller
         self._sampler = sampler
         self._interval = interval
+        self._monotonic_clock = monotonic_clock
         self._stop_event = threading.Event()
         self._thread: threading.Thread | None = None
         self._state_lock = threading.Lock()
@@ -275,7 +277,22 @@ class _CapturedPaperPressureFeedWorker:
             self._last_sample_error = None
 
     def _run(self) -> None:
-        while not self._stop_event.wait(self._interval):
+        # Schedule by sample *start* time.  Waiting a full interval after the
+        # sampler returns adds three serial fsync durations to every period; on
+        # the live PAPER host that pushed a nominal 2.5s cadence past the sealed
+        # 5s sample-freshness window.  If sampling itself consumes an interval,
+        # retry immediately after it finishes rather than manufacturing a stale
+        # gap.  Admission remains fail-closed against the measured sample.
+        next_sample_at = float(self._monotonic_clock()) + self._interval
+        while True:
+            wait_seconds = max(
+                0.0,
+                next_sample_at - float(self._monotonic_clock()),
+            )
+            if self._stop_event.wait(wait_seconds):
+                return
+            sample_started_at = float(self._monotonic_clock())
+            next_sample_at = sample_started_at + self._interval
             try:
                 self._feed_once(startup=False)
             except OSError:
@@ -7453,6 +7470,7 @@ def _assemble_service_composition(
             )
             / 2.0
         ),
+        monotonic_clock=monotonic_clock,
     )
     selection_pre_authority_workers = (
         supervisor_module.CapturedPaperManagedWorker(
