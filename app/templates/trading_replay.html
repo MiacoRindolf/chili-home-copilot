@@ -1039,6 +1039,175 @@
 .rp-row-live[data-nochart="1"] {
   grid-template-columns: 150px minmax(0, 1fr);
 }
+
+/* ===================== TWO TIERS ============================================
+   The board renders one layout for two populations that share almost no fields.
+   A session-backed symbol has bars, events, positions, lanes and P/L. A captured
+   candidate has five: card_status, confidence, watch.route_count,
+   watch.policy_eligible_route_count, updated_at. On a real weekend payload it is
+   14 of the second kind and 0 of the first, so the full card was being drawn 14
+   times to carry 5 fields each. Split on the discriminator the payload already
+   has -- observer_source -- and give each population its own shape. */
+.rp-tier { display: block; margin-bottom: 14px; }
+.rp-tier:last-child { margin-bottom: 0; }
+.rp-tier-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 4px 14px;
+  padding: 0 0 7px;
+  border-bottom: 1px solid var(--rp-line-strong);
+}
+.rp-tier-head h3 {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  margin: 0;
+  color: var(--rp-text);
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: .08em;
+  text-transform: uppercase;
+}
+/* Same 20px as .rp-funnel-cell b: the tier counts and the funnel cells are the
+   same measurement and must read as the same typographic rank. */
+.rp-tier-head h3 b {
+  color: var(--rp-text);
+  font-size: 20px;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+  letter-spacing: 0;
+  line-height: 1;
+}
+.rp-tier-head[data-tier="active"] h3 b { color: var(--rp-blue); }
+.rp-tier-note {
+  color: var(--rp-muted);
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+}
+/* The redundancy sink: a value identical across every row in a tier is printed
+   once here instead of 14 times down the list. */
+.rp-tier-sub {
+  flex: 1 0 100%;
+  min-width: 0;
+  color: var(--rp-soft);
+  font-size: 11px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.rp-tier-sub.is-warn { color: var(--rp-amber); }
+.rp-tier-empty {
+  margin: 0;
+  padding: 9px 2px 0;
+  color: var(--rp-muted);
+  font-size: 13px;
+  line-height: 1.45;
+}
+.rp-tier[data-tier="active"] .rp-timeline { margin-top: 9px; }
+
+/* ===================== WATCH TABLE ========================================= */
+.rp-watchtable { display: block; margin-top: 2px; }
+.rp-watchhead,
+.rp-watchrow {
+  display: grid;
+  grid-template-columns: 88px 84px 62px 104px 128px minmax(0, 1fr);
+  gap: 0 12px;
+  align-items: baseline;
+  min-width: 0;
+  padding-left: 10px;
+  padding-right: 10px;
+}
+/* The tape column is ABSENT, not hidden, when no candidate has bars. */
+.rp-watchtable[data-spark="1"] .rp-watchhead,
+.rp-watchtable[data-spark="1"] .rp-watchrow {
+  grid-template-columns: 88px 84px 62px 104px 128px 76px minmax(0, 1fr);
+}
+.rp-watchhead {
+  padding-top: 8px;
+  padding-bottom: 5px;
+  color: var(--rp-soft);
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: .06em;
+  text-transform: uppercase;
+}
+.rp-watchrow {
+  min-height: 34px;
+  padding-top: 7px;
+  padding-bottom: 7px;
+  border: 0;
+  border-top: 1px solid var(--rp-line);
+  background: transparent;
+  color: var(--rp-muted);
+  cursor: pointer;
+  font-size: 13px;
+  line-height: 1.35;
+  text-align: left;
+  width: 100%;
+  transition: background var(--rp-dur) var(--rp-ease);
+}
+.rp-watchrow:hover { background: color-mix(in srgb, var(--rp-blue) 7%, transparent); }
+.rp-watchrow:focus-visible { outline: 2px solid var(--rp-blue); outline-offset: -2px; }
+.rp-watchrow[data-setup="1"] {
+  background: color-mix(in srgb, var(--rp-blue) 8%, transparent);
+  box-shadow: inset 3px 0 0 var(--rp-blue);
+}
+.rp-watch-sym {
+  color: var(--rp-text);
+  font-size: 14px;
+  font-weight: 700;
+  letter-spacing: .01em;
+}
+.rp-watch-status {
+  justify-self: start;
+  border: 1px solid var(--rp-line);
+  border-radius: var(--rp-r-pill);
+  color: var(--rp-muted);
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: .04em;
+  line-height: 1.2;
+  padding: 3px 8px;
+  text-transform: uppercase;
+  white-space: nowrap;
+}
+.rp-watch-status.is-setup {
+  border-color: color-mix(in srgb, var(--rp-blue) 52%, transparent);
+  background: var(--rp-blue-bg);
+  color: var(--rp-blue-2);
+}
+.rp-watch-status.is-unknown { border-style: dashed; color: var(--rp-soft); }
+.rp-watch-conf,
+.rp-watch-routes,
+.rp-watch-age { font-variant-numeric: tabular-nums; }
+.rp-watch-conf { color: var(--rp-text); }
+.rp-watch-routes b { color: var(--rp-text); font-weight: 700; }
+/* The eligible ones are the only bright numbers in the column. */
+.rp-watch-routes.is-zero b { color: var(--rp-soft); font-weight: 400; }
+.rp-watch-age { color: var(--rp-soft); }
+/* Amber only while the market is open: 13 of 14 rows are stale on a weekend and
+   that is the expected state, not a triage signal. */
+.rp-watch-age.is-stale { color: var(--rp-amber); }
+.rp-watch-action {
+  min-width: 0;
+  color: var(--rp-muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.rp-watch-spark { display: block; width: 76px; height: 20px; }
+.rp-watch-spark path {
+  fill: none;
+  stroke: var(--rp-blue-2);
+  stroke-width: 1.25;
+  stroke-linejoin: round;
+}
+
+/* The strip now renders on a closed market too, so the list and the funnel
+   agree. Dormant, not hidden: the counts are real, they are just not advancing. */
+.rp-funnel[data-dormant="1"] { opacity: .82; }
+.rp-funnel[data-dormant="1"] .rp-funnel-cell b { color: var(--rp-muted); }
 .rp-row.is-active {
   border-color: color-mix(in srgb, var(--rp-blue) 58%, var(--rp-line));
   box-shadow: 0 0 0 1px color-mix(in srgb, var(--rp-blue) 24%, transparent);
@@ -1411,6 +1580,21 @@
     flex-direction: row;
     align-items: center;
   }
+  /* Six columns do not fit; fold to three lines and drop the column header,
+     which is why every cell repeats its label in the row's aria-label. */
+  .rp-watchhead { display: none; }
+  .rp-watchrow,
+  .rp-watchtable[data-spark="1"] .rp-watchrow {
+    grid-template-columns: 84px 82px minmax(0, 1fr);
+    gap: 2px 10px;
+    min-height: 0;
+  }
+  .rp-watch-conf { justify-self: end; }
+  .rp-watch-routes { grid-column: 1 / 3; }
+  .rp-watch-age { grid-column: 3; justify-self: end; }
+  .rp-watch-action { grid-column: 1 / -1; }
+  .rp-watch-spark { grid-column: 1 / -1; width: 100%; }
+  .rp-tier-head { gap: 3px 10px; }
 }
 @media (max-width: 760px) {
   .rp-shell {
@@ -1453,6 +1637,12 @@
     grid-template-columns: 62px 56px minmax(0, 1fr);
     font-size: 12px;
   }
+  .rp-watchrow,
+  .rp-watchtable[data-spark="1"] .rp-watchrow {
+    grid-template-columns: 76px minmax(0, 1fr) auto;
+    font-size: 12px;
+  }
+  .rp-tier-head h3 b { font-size: 18px; }
   .rp-live-toolbar {
     align-items: stretch;
     flex-wrap: wrap;
@@ -4143,24 +4333,41 @@
     '</div>';
   }
 
+  var RP_LIVE_ROW_SELECTOR = '.rp-row-live, .rp-watchrow';
+
   function applyLiveFocus() {
     if (rpSurfaceMode !== 'live' || !rpLastResult) return;
     var total = 0;
     var visible = 0;
-    var rows = liveSortedRows(Array.prototype.slice.call(document.querySelectorAll('.rp-row-live')));
     // Reorder real DOM nodes rather than painting CSS `order` over them, so the
     // keyboard and a screen reader traverse what the operator actually sees.
     // appendChild blurs an attached node, so focus is captured and restored.
     var active = document.activeElement;
-    var activeInRows = active && active.closest && active.closest('.rp-row-live');
-    var parent = rows.length ? rows[0].row.parentNode : null;
-    rows.forEach(function(record, index) {
-      var show = liveFilterMatches(record.meta, record.sym);
-      total += 1;
-      if (show) visible += 1;
-      record.row.hidden = !show;
-      record.row.style.order = '';
-      if (parent) parent.appendChild(record.row);
+    var activeInRows = active && active.closest && active.closest(RP_LIVE_ROW_SELECTOR);
+    // Scoped PER CONTAINER: a single global reparent would splice the watch rows
+    // into the active timeline the first time anything sorted.
+    ['.rp-tier[data-tier="active"] .rp-timeline', '.rp-watchtable'].forEach(function(sel) {
+      var container = document.querySelector(sel);
+      if (!container) return;
+      var tierVisible = 0;
+      var tierTotal = 0;
+      liveSortedRows(Array.prototype.slice.call(container.querySelectorAll(RP_LIVE_ROW_SELECTOR)))
+        .forEach(function(record) {
+          var show = liveFilterMatches(record.meta, record.sym);
+          tierTotal += 1;
+          if (show) tierVisible += 1;
+          record.row.hidden = !show;
+          record.row.style.order = '';
+          // Keeps the ruler / column head as the container's first children.
+          container.appendChild(record.row);
+        });
+      total += tierTotal;
+      visible += tierVisible;
+      var tierEmpty = container.querySelector('[data-filter-empty]');
+      if (tierEmpty) {
+        container.appendChild(tierEmpty);
+        tierEmpty.hidden = tierTotal === 0 || tierVisible !== 0;
+      }
     });
     if (activeInRows && active && document.contains(active) && document.activeElement !== active) {
       try { active.focus({ preventScroll: true }); } catch (err) { /* detached */ }
@@ -4537,13 +4744,16 @@
   function renderFunnel(payload) {
     var funnel = (payload && payload.funnel) || {};
     var market = (payload && payload.market_session) || {};
-    if (!market.is_open) return '';  // there is no funnel on a Saturday
+    // Rendered dormant rather than hidden when the market is shut: the counts are
+    // real, they are simply not advancing, and hiding the strip left the tier
+    // headers with nothing to agree with.
+    var dormant = !market.is_open;
     var prev = null;
     var cells = RP_FUNNEL_STAGES.map(function(stage, index) {
       var value = Number(funnel[stage.key] || 0);
       // Where the day is choking. Only meaningful now that each stage nests inside
       // the previous one, and never on the first cell (nothing precedes it).
-      var choke = index > 0 && prev > 0 && value === 0;
+      var choke = !dormant && index > 0 && prev > 0 && value === 0;
       prev = value;
       var label = stage.label + (index === 0 && funnel.truncated ? '+' : '');
       return '<div class="rp-funnel-cell' + (choke ? ' is-choke' : '') +
@@ -4565,7 +4775,8 @@
     if (dropped) {
       sub.push('<b class="rp-funnel-drop">' + fmtNum(dropped) + ' dropped on validation</b>');
     }
-    return '<div class="rp-funnel" aria-label="Selection funnel">' + cells + '</div>' +
+    return '<div class="rp-funnel" aria-label="Selection funnel"' +
+      (dormant ? ' data-dormant="1"' : '') + '>' + cells + '</div>' +
       (sub.length ? '<p class="rp-funnel-sub">' + sub.join(' \u00b7 ') + '</p>' : '');
   }
 
@@ -4594,6 +4805,203 @@
 
   // Six conditions, six treatments, six next actions. Replaces the single sentence
   // that covered ~20 distinct states including hard lane faults.
+  // The one discriminator the payload already carries. A captured candidate and a
+  // session-backed symbol share almost no fields, so they get different shapes.
+  function liveTierOf(meta) {
+    return (meta && meta.observer_source) === 'captured_paper_selection'
+      ? 'watching' : 'active';
+  }
+
+  function watchAgeLabel(meta) {
+    if (!meta || !meta.updated_at) return 'age unknown';
+    var age = Math.max(0, Math.round((Date.now() - new Date(meta.updated_at).getTime()) / 1000));
+    if (!Number.isFinite(age)) return 'age unknown';
+    if (age < 2) return 'now';
+    if (age < 60) return age + 's ago';
+    return Math.floor(age / 60) + 'm ago';
+  }
+
+  function watchSparkSvg(result, sym) {
+    var bars = barsFor(result, sym);
+    if (bars.length < 2) return '';
+    var closes = bars.map(function(b) { return Number(b[4]); })
+      .filter(function(v) { return Number.isFinite(v); });
+    if (closes.length < 2) return '';
+    var lo = Math.min.apply(null, closes), hi = Math.max.apply(null, closes);
+    var span = (hi - lo) || 1;
+    var d = closes.map(function(v, i) {
+      var x = (i / (closes.length - 1)) * 74 + 1;
+      var y = 19 - ((v - lo) / span) * 18;
+      return (i ? 'L' : 'M') + x.toFixed(1) + ' ' + y.toFixed(1);
+    }).join(' ');
+    return '<svg class="rp-watch-spark" viewBox="0 0 76 20" aria-hidden="true">' +
+      '<path d="' + d + '"/></svg>';
+  }
+
+  // Every cell is null-aware: a field with no value contributes ZERO glyphs. No
+  // dash, no "n/a", no "0%". A placeholder is a claim that something is missing;
+  // an empty cell is the truth that this candidate simply has no such fact yet.
+  function renderWatchRowInner(result, meta, payload, spark) {
+    var open = !!((payload.market_session || {}).is_open);
+    var status = String(meta.card_status || meta.state_label || '').toUpperCase();
+    var statusClass = status === 'SETUP' ? ' is-setup' : (status ? '' : ' is-unknown');
+    if (!status) status = 'UNKNOWN';
+
+    var conf = Number(meta.confidence);
+    var confText = Number.isFinite(conf) ? Math.round(conf * 100) + '%' : '';
+
+    var watch = meta.watch || null;
+    var routes = watch ? Number(watch.route_count || 0) : 0;
+    var eligible = watch ? Number(watch.policy_eligible_route_count || 0) : 0;
+    var routesHtml = (watch && routes > 0)
+      ? '<b>' + esc(fmtNum(eligible)) + '</b> / ' + esc(fmtNum(routes))
+      : '';
+    var routesClass = (watch && routes > 0 && !eligible) ? ' is-zero' : '';
+
+    // Amber staleness is only actionable while the market is open.
+    var ageStale = meta.stale && open ? ' is-stale' : '';
+
+    return '<span class="rp-watch-sym">' + esc(meta.symbol || '') + '</span>' +
+      '<span class="rp-watch-status' + statusClass + '">' + esc(status) + '</span>' +
+      '<span class="rp-watch-conf">' + esc(confText) + '</span>' +
+      '<span class="rp-watch-routes' + routesClass + '">' + routesHtml + '</span>' +
+      '<span class="rp-watch-age' + ageStale + '">' + esc(watchAgeLabel(meta)) + '</span>' +
+      (spark ? '<span>' + watchSparkSvg(result, normalizeSym(meta.symbol)) + '</span>' : '') +
+      '<span class="rp-watch-action">' + esc(cleanStage(meta.last_action || '')) + '</span>';
+  }
+
+  function watchRowLabel(meta) {
+    var conf = Number(meta.confidence);
+    var watch = meta.watch || {};
+    var bits = [meta.symbol,
+      String(meta.card_status || meta.state_label || 'unknown').toLowerCase()];
+    if (Number.isFinite(conf)) bits.push('confidence ' + Math.round(conf * 100) + '%');
+    if (Number(watch.route_count || 0) > 0) {
+      bits.push(fmtNum(watch.policy_eligible_route_count || 0) + ' of ' +
+        fmtNum(watch.route_count) + ' routes eligible');
+    }
+    bits.push('updated ' + watchAgeLabel(meta));
+    if (meta.last_action) bits.push(cleanStage(meta.last_action));
+    return bits.join(', ');
+  }
+
+  function renderWatchRow(result, meta, payload, spark) {
+    var sym = normalizeSym(meta.symbol);
+    var setup = String(meta.card_status || '').toUpperCase() === 'SETUP';
+    return '<button class="rp-watchrow" type="button" data-symbol="' + esc(sym) +
+      '" data-setup="' + (setup ? '1' : '0') + '" aria-label="' + esc(watchRowLabel(meta)) +
+      '" onclick="rpFocusWatchSymbol(\'' + esc(sym) + '\')">' +
+      renderWatchRowInner(result, meta, payload, spark) + '</button>';
+  }
+
+  // A value identical on every row is not information -- it is 14 copies of one
+  // fact. Hoist it to the tier header and print it once. If it STOPS being
+  // constant (two activation generations in one list) that is a torn selection
+  // pass, and it is completely dark today.
+  function renderTierSub(metas) {
+    var strategies = {}, gens = {};
+    metas.forEach(function(m) {
+      if (m.strategy) strategies[m.strategy] = 1;
+      var g = (m.watch || {}).activation_generation;
+      if (g) gens[g] = 1;
+    });
+    var sKeys = Object.keys(strategies), gKeys = Object.keys(gens);
+    if (gKeys.length > 1) {
+      return '<span class="rp-tier-sub is-warn">' + esc(gKeys.length +
+        ' activation generations in this list \u2014 the selection pass may be torn.') +
+        '</span>';
+    }
+    var parts = [];
+    if (sKeys.length === 1) parts.push('All from ' + sKeys[0]);
+    if (gKeys.length === 1) parts.push('gen ' + gKeys[0].slice(0, 8));
+    if (!parts.length) return '';
+    return '<span class="rp-tier-sub">' + esc(parts.join(' \u00b7 ')) + '</span>';
+  }
+
+  function renderActiveTier(result, payload, metas) {
+    var inPos = metas.filter(function(m) { return (m.positions || []).length; }).length;
+    var armed = metas.filter(function(m) { return m.armed; }).length;
+    var note = [];
+    if (inPos) note.push(inPos + ' in position');
+    if (armed) note.push(armed + ' armed');
+    var body;
+    if (!metas.length) {
+      body = '<p class="rp-tier-empty">No symbol has a live session. ' +
+        'Nothing is armed and nothing is held.</p>';
+    } else {
+      var anyBars = metas.some(function(m) { return liveHasBars(result, normalizeSym(m.symbol)); });
+      var rows = metas.map(function(m, i) {
+        return renderLiveSymbolRow(result, normalizeSym(m.symbol), rpViewDomain, i < RP_EAGER_ROWS);
+      }).join('');
+      body = '<div class="rp-timeline">' + (anyBars ? renderRuler(rpViewDomain) : '') + rows +
+        '<p class="rp-tier-empty" data-filter-empty hidden>No active symbol matches this focus.</p>' +
+        '</div>';
+    }
+    return '<section class="rp-tier" data-tier="active">' +
+      '<header class="rp-tier-head" data-tier="active">' +
+        '<h3>Active<b>' + esc(String(metas.length)) + '</b></h3>' +
+        (note.length ? '<span class="rp-tier-note">' + esc(note.join(' \u00b7 ')) + '</span>' : '') +
+      '</header>' + body + '</section>';
+  }
+
+  function renderWatchingTier(result, payload, metas) {
+    var funnel = payload.funnel || {};
+    var setups = metas.filter(function(m) {
+      return String(m.card_status || '').toUpperCase() === 'SETUP';
+    }).length;
+    var routes = metas.reduce(function(a, m) { return a + Number((m.watch || {}).route_count || 0); }, 0);
+    var eligible = metas.reduce(function(a, m) {
+      return a + Number((m.watch || {}).policy_eligible_route_count || 0);
+    }, 0);
+    var note = [];
+    if (setups) note.push(setups + ' at setup');
+    if (routes) note.push(fmtNum(eligible) + ' of ' + fmtNum(routes) + ' routes eligible');
+    var dropped = Number(funnel.dropped_routes || 0);
+    if (dropped) note.push(fmtNum(dropped) + ' dropped on validation');
+    if (funnel.truncated) note.push('showing first ' + fmtNum(funnel.truncated_at || 24));
+
+    var body;
+    if (!metas.length) {
+      body = '<p class="rp-tier-empty">Nothing is on the watch list. ' +
+        'Selection has not put a candidate on the board.</p>';
+    } else {
+      // The tape column EXISTS only if some candidate actually has bars.
+      var spark = metas.some(function(m) { return liveHasBars(result, normalizeSym(m.symbol)); });
+      body = '<div class="rp-watchtable" data-spark="' + (spark ? '1' : '0') + '">' +
+        '<div class="rp-watchhead" aria-hidden="true">' +
+          '<span>Symbol</span><span>Status</span><span>Conf</span>' +
+          '<span>Elig / routes</span><span>Updated</span>' +
+          (spark ? '<span>Tape</span>' : '') + '<span>Last action</span>' +
+        '</div>' +
+        metas.map(function(m) { return renderWatchRow(result, m, payload, spark); }).join('') +
+        '<p class="rp-tier-empty" data-filter-empty hidden>No candidate matches this focus.</p>' +
+        '</div>';
+    }
+    return '<section class="rp-tier" data-tier="watching">' +
+      '<header class="rp-tier-head" data-tier="watching">' +
+        '<h3>Watching<b>' + esc(String(metas.length)) + '</b></h3>' +
+        (note.length ? '<span class="rp-tier-note">' + esc(note.join(' \u00b7 ')) + '</span>' : '') +
+        renderTierSub(metas) +
+      '</header>' + body + '</section>';
+  }
+
+  function renderLiveTiers(result, payload) {
+    var metas = (payload.symbols || []).filter(function(m) { return m && m.symbol; });
+    var active = metas.filter(function(m) { return liveTierOf(m) === 'active'; });
+    var watching = metas.filter(function(m) { return liveTierOf(m) === 'watching'; });
+    return renderActiveTier(result, payload, active) +
+      renderWatchingTier(result, payload, watching);
+  }
+
+  window.rpFocusWatchSymbol = function(symbol) {
+    var sym = normalizeSym(symbol);
+    revealLiveSymbol(sym);
+    var row = document.querySelector('.rp-watchrow[data-symbol="' + sym + '"]');
+    if (!row) return;
+    row.scrollIntoView({ block: 'nearest' });
+    flashEl(row);
+  };
+
   function renderLiveStateScreen(payload) {
     var lane = (payload && payload.lane) || {};
     var market = (payload && payload.market_session) || {};
@@ -4699,9 +5107,13 @@
     var symbols = (payload.symbols || []).map(function(row) { return normalizeSym(row.symbol); }).filter(Boolean);
     // Include whether each symbol has a chart: without this, the first tick of the
     // session arrives and no row ever grows its chart cell back.
-    var structure = symbols.slice().sort().map(function(sym) {
-      return sym + (liveHasBars(result, sym) ? ':c' : '');
-    }).join('|');
+    var structure = (payload.symbols || []).map(function(meta) {
+      var sym = normalizeSym(meta.symbol);
+      // Tier AND has-bars: without the tier bit, a candidate that gains a session
+      // keeps its compact watch row; without the bars bit, a row that gains a tape
+      // never grows its chart back.
+      return sym + ':' + liveTierOf(meta) + (liveHasBars(result, sym) ? ':c' : '');
+    }).sort().join('|');
     var chartSignature = String(payload.chart_as_of_utc || '') + '|' + Object.keys(payload.series || {}).map(function(sym) {
       return sym + ':' + (payload.series[sym] || []).length;
     }).join('|');
@@ -4758,19 +5170,14 @@
       clearPinnedChart();
       cancelSmoothViewport();
       host.dataset.liveWorkspace = '1';
-      var rows = symbols.map(function(sym, index) {
-        return renderLiveSymbolRow(result, sym, rpViewDomain, index < RP_EAGER_ROWS);
-      }).join('');
       var keepScrollY = window.scrollY;
       host.innerHTML = renderLaneHealthNote(payload) +
         '<div id="rp-live-stats">' + renderFunnel(payload) + renderAccounting(payload) + '</div>' +
         renderLiveResearch(payload) +
         // The FSM playback transport is a category error on a now-view: there is no
-        // future to seek to. renderViewportControls() stays replay-only.
-        '<div class="rp-timeline">' +
-          (symbols.some(function(sym) { return liveHasBars(result, sym); })
-            ? renderRuler(rpViewDomain) : '') +
-          rows + '</div>';
+        // future to seek to. renderViewportControls() stays replay-only. The ruler
+        // is emitted inside the ACTIVE tier only, and only when something has bars.
+        renderLiveTiers(result, payload);
       updateLiveResearch(payload);
       syncPlaybackControls();
       requestVisibleChartRefresh();
@@ -4789,6 +5196,32 @@
       }
     }
     updateLiveResearch(payload);
+    // Watch rows are cheap strings; diff before writing so hover, focus and the
+    // native tooltip survive the poll exactly as they do on the active cards.
+    var watchSpark = document.querySelector('.rp-watchtable');
+    watchSpark = !!(watchSpark && watchSpark.dataset.spark === '1');
+    document.querySelectorAll('.rp-watchrow').forEach(function(row) {
+      var meta = liveMetaFor(result, normalizeSym(row.dataset.symbol));
+      var next = renderWatchRowInner(result, meta, payload, watchSpark);
+      if (row.innerHTML !== next) row.innerHTML = next;
+      var setup = String(meta.card_status || '').toUpperCase() === 'SETUP' ? '1' : '0';
+      if (row.dataset.setup !== setup) row.dataset.setup = setup;
+      var label = watchRowLabel(meta);
+      if (row.getAttribute('aria-label') !== label) row.setAttribute('aria-label', label);
+    });
+    document.querySelectorAll('.rp-tier').forEach(function(section) {
+      var tier = section.dataset.tier;
+      var metas = (payload.symbols || []).filter(function(m) {
+        return m && m.symbol && liveTierOf(m) === tier;
+      });
+      var head = section.querySelector('.rp-tier-head');
+      if (!head) return;
+      var next = tier === 'active'
+        ? renderActiveTier(result, payload, metas)
+        : renderWatchingTier(result, payload, metas);
+      var nextHead = (next.match(/<header[\s\S]*?<\/header>/) || [''])[0];
+      if (nextHead && head.outerHTML !== nextHead) head.outerHTML = nextHead;
+    });
     document.querySelectorAll('.rp-row-live').forEach(function(row) {
       var sym = normalizeSym(row.dataset.symbol);
       var symbolHost = row.querySelector('.rp-symbol');
