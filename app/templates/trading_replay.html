@@ -609,6 +609,13 @@
 }
 
 /* Funnel. The 1px gap over a line-coloured background yields hairline dividers. */
+.rp-funnel-sub {
+  margin: -6px 0 12px;
+  color: var(--rp-muted);
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+}
+.rp-funnel-drop { color: var(--rp-amber); font-weight: 600; }
 .rp-funnel {
   display: grid;
   grid-template-columns: repeat(6, minmax(0, 1fr));
@@ -4414,8 +4421,14 @@
 
     var key = severity + '|' + (rpLivePaused ? 'paused' : (lane.verdict || ''));
     var changed = !!rpLastVerdictKey && rpLastVerdictKey !== key;
-    host.innerHTML = html;
     host.hidden = false;
+    if (host.innerHTML === html) {
+      // Identical markup: rewriting it would destroy the live region and the
+      // diagnostics buttons for no reason. The 1s ticker keeps the ages moving.
+      rpLastVerdictKey = key;
+      return;
+    }
+    host.innerHTML = html;
     var bar = host.firstElementChild;
     if (bar) {
       // Live region scoped to headline + proof ONLY. A wider one would announce the
@@ -4468,13 +4481,17 @@
       'daily-loss breakers are not being checked from this page.</p>';
   }
 
+  // Every stage is symbol-level and a strict subset of the one before it, so a
+  // drop between two cells is always real. The old list mixed a symbol count
+  // ("Watching") in after a policy count and read 15 -> 1 -> 14, which is not a
+  // funnel and made the choke marker fire on a non-choke.
   var RP_FUNNEL_STAGES = [
-    { key: 'routes_scored', label: 'Scanned' },
-    { key: 'policy_eligible', label: 'Eligible' },
-    { key: 'watching', label: 'Watching' },
-    { key: 'setup', label: 'Setup' },
-    { key: 'armed', label: 'Armed' },
-    { key: 'in_position', label: 'In position' }
+    { key: 'candidates', label: 'Candidates', hint: 'symbols the selector scored' },
+    { key: 'on_board', label: 'On board', hint: 'passed provenance validation' },
+    { key: 'eligible', label: 'Eligible', hint: 'passed CHILI policy' },
+    { key: 'setup', label: 'Setup', hint: 'reached a setup' },
+    { key: 'armed', label: 'Armed', hint: 'armed and waiting for trigger' },
+    { key: 'in_position', label: 'In position', hint: 'filled and being managed' }
   ];
 
   function renderFunnel(payload) {
@@ -4482,16 +4499,34 @@
     var market = (payload && payload.market_session) || {};
     if (!market.is_open) return '';  // there is no funnel on a Saturday
     var prev = null;
-    var cells = RP_FUNNEL_STAGES.map(function(stage) {
+    var cells = RP_FUNNEL_STAGES.map(function(stage, index) {
       var value = Number(funnel[stage.key] || 0);
-      // A stage at zero whose predecessor is non-zero is where the day is choking:
-      // "12 eligible, 0 armed" is gating; "5 armed, 0 in position" is conversion.
-      var choke = prev !== null && prev > 0 && value === 0;
+      // Where the day is choking. Only meaningful now that each stage nests inside
+      // the previous one, and never on the first cell (nothing precedes it).
+      var choke = index > 0 && prev > 0 && value === 0;
       prev = value;
-      return '<div class="rp-funnel-cell' + (choke ? ' is-choke' : '') + '">' +
-        '<b>' + esc(fmtNum(value)) + '</b><span>' + esc(stage.label) + '</span></div>';
+      var label = stage.label + (index === 0 && funnel.truncated ? '+' : '');
+      return '<div class="rp-funnel-cell' + (choke ? ' is-choke' : '') +
+        '" title="' + esc(stage.hint) + '">' +
+        '<b>' + esc(fmtNum(value)) + '</b><span>' + esc(label) + '</span></div>';
     }).join('');
-    return '<div class="rp-funnel" aria-label="Selection funnel">' + cells + '</div>';
+    // Route-level (variant) counts are NOT stages -- "scored" only means variants
+    // here, and mixing the two units is what broke the strip.
+    var variants = Number(funnel.variant_routes_scored || 0);
+    var dropped = Number(funnel.dropped_routes || 0);
+    var sub = [];
+    if (variants) {
+      sub.push(fmtNum(variants) + ' scored setup families across ' +
+        fmtNum(funnel.candidates || 0) + ' symbols');
+      if (funnel.variant_routes_eligible) {
+        sub.push(fmtNum(funnel.variant_routes_eligible) + ' passed policy');
+      }
+    }
+    if (dropped) {
+      sub.push('<b class="rp-funnel-drop">' + fmtNum(dropped) + ' dropped on validation</b>');
+    }
+    return '<div class="rp-funnel" aria-label="Selection funnel">' + cells + '</div>' +
+      (sub.length ? '<p class="rp-funnel-sub">' + sub.join(' \u00b7 ') + '</p>' : '');
   }
 
   function renderAccounting(payload) {
@@ -4574,12 +4609,12 @@
     }
     // Healthy, market open, nothing has qualified: the one screen where a green dot
     // is legitimate. Nothing is wrong, so there is no action button.
-    var scanned = Number(funnel.routes_scored || 0);
-    var eligible = Number(funnel.policy_eligible || 0);
+    var scanned = Number(funnel.candidates || 0);
+    var eligible = Number(funnel.eligible || 0);
     return '<div class="rp-state">' +
       '<b>' + (scanned
-        ? esc(fmtNum(scanned) + ' routes scored, ' + fmtNum(eligible) + ' passed policy')
-        : 'No routes scored yet this session') + '</b>' +
+        ? esc(fmtNum(scanned) + ' symbols scored, ' + fmtNum(eligible) + ' passed policy')
+        : 'No symbols scored yet this session') + '</b>' +
       '<p>No symbol has reached setup. The funnel above shows how far each stage ' +
       'got.</p>' +
       '<span class="rp-state-meta">' + esc(proof) + '</span>' +
@@ -5125,7 +5160,13 @@
       var proof = document.getElementById('rp-verdict-proof');
       if (proof && rpLastLivePayload && !rpLivePaused) {
         var lane = rpLastLivePayload.lane || {};
-        var drift = Math.max(0, (Date.now() - rpLastPollOkAt) / 1000);
+        // Anchor to the payload's own build time, NOT to when we received it. A
+        // cache hit resets receive-time while the ages inside it are up to one TTL
+        // old, which made these two numbers tick backwards.
+        var builtAt = Date.parse(rpLastLivePayload.as_of_utc || '');
+        var drift = Number.isFinite(builtAt)
+          ? Math.max(0, (Date.now() - builtAt) / 1000)
+          : Math.max(0, (Date.now() - rpLastPollOkAt) / 1000);
         // Re-derive from the wall clock so the ages keep moving between polls.
         proof.innerHTML = verdictProofHtml({
           lane: Object.assign({}, lane, {
