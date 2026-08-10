@@ -5,6 +5,8 @@ from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 import json
+import threading
+import time
 import uuid
 
 import pandas as pd
@@ -1786,6 +1788,98 @@ def test_failed_shared_run_start_releases_its_writer_lease(
     assert health["lease_count"] == 0
     assert health["writer_threads_in_use"] == 0
     assert service.health()["running_symbols"] == ()
+    shared_store.close()
+
+
+def test_shared_stop_timeout_defers_release_until_writer_quiesces(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    binding = _binding()
+    controller = CaptureAdaptivePressureController(binding)
+    controller.observe(
+        CapturePressureSample(
+            observed_at=BASE + timedelta(seconds=1),
+            resource_binding_sha256=binding.binding_sha256,
+            cpu_percent=20,
+            available_memory_bytes=50_000_000,
+            disk_free_bytes=900_000_000,
+            write_latency_milliseconds=5,
+        )
+    )
+    clock = _WallClock(BASE + timedelta(seconds=2))
+    shared_admission = SharedCaptureAdmissionBudget.from_resource_binding(
+        binding,
+        pressure_controller=controller,
+    )
+    shared_store = SharedCaptureStoreRuntime.create(
+        tmp_path / "shared-stop-timeout",
+        resource_binding=binding,
+        shared_admission_budget=shared_admission,
+        compression_codec="zlib",
+        wall_clock=clock,
+    )
+    identity, evidence = _identity_and_evidence("VEEE")
+    producer = CaptureProducerSpec(
+        producer_id="live_fsm",
+        instance_id=str(uuid.uuid4()),
+        generation=identity.generation,
+        streams=tuple(
+            sorted(
+                {
+                    CaptureStream.CODE_BUILD,
+                    CaptureStream.CONFIG_SNAPSHOT,
+                    CaptureStream.FEATURE_FLAG_SNAPSHOT,
+                    CaptureStream.ACCOUNT_RISK_SNAPSHOT,
+                },
+                key=lambda stream: stream.value,
+            )
+        ),
+        code_build_sha256=identity.code_build_sha256,
+        config_sha256=identity.config_sha256,
+        feature_flags_sha256=identity.feature_flags_sha256,
+        resource_binding_sha256=binding.binding_sha256,
+    )
+    coordinator = LiveReplayCaptureCoordinator.create_with_shared_store(
+        identity=identity,
+        certification_symbol="VEEE",
+        resource_binding=binding,
+        pressure_controller=controller,
+        shared_store_runtime=shared_store,
+        producers=(producer,),
+        heartbeat_timeout_seconds=300,
+        wall_clock=clock,
+        pretrigger_horizon=timedelta(minutes=3),
+        per_symbol_pretrigger_events=8,
+        writer_batch_events=1,
+        writer_poll_seconds=0.001,
+        writer_flush_interval_seconds=0.001,
+    )
+    coordinator.start(evidence)
+    entered_sync = threading.Event()
+    allow_sync = threading.Event()
+    original_sync = shared_store.store.sync
+
+    def blocked_sync() -> None:
+        entered_sync.set()
+        assert allow_sync.wait(timeout=5)
+        original_sync()
+
+    monkeypatch.setattr(shared_store.store, "sync", blocked_sync)
+    with pytest.raises(CaptureContractError, match="did not stop cleanly"):
+        coordinator.stop_and_seal(timeout_seconds=0.01)
+
+    assert coordinator.state is CaptureSessionState.ABORTED
+    charged = shared_store.health()
+    assert charged["lease_count"] == 1
+    assert charged["deferred_release_count"] == 1
+    assert entered_sync.wait(timeout=5)
+    allow_sync.set()
+    assert coordinator.writer.join(timeout_seconds=5)
+    deadline = time.monotonic() + 5
+    while shared_store.health()["lease_count"] and time.monotonic() < deadline:
+        time.sleep(0.01)
+    assert shared_store.health()["lease_count"] == 0
     shared_store.close()
 
 
