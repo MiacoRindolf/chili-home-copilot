@@ -330,20 +330,20 @@
 .rp-live-filter:hover {
   color: var(--rp-text);
 }
-/* Must out-specify .rp-live-filter[aria-pressed="true"] below, which ties on
+/* Must out-specify .rp-live-filter[aria-checked="true"] below, which ties on
    specificity and wins on source order -- so the SELECTED chip previously showed
    no focus change at all. */
 .rp-live-filter:focus-visible,
-.rp-live-filter[aria-pressed="true"]:focus-visible {
+.rp-live-filter[aria-checked="true"]:focus-visible {
   color: var(--rp-text);
   outline: 2px solid var(--rp-blue);
   outline-offset: -2px;
 }
-.rp-live-filter[aria-pressed="true"] {
+.rp-live-filter[aria-checked="true"] {
   background: color-mix(in srgb, var(--rp-blue) 16%, var(--rp-panel-2));
-  color: #dbeafe;
+  color: var(--rp-text);
 }
-.rp-live-filter[aria-pressed="true"] b { color: var(--rp-blue); }
+.rp-live-filter[aria-checked="true"] b { color: var(--rp-blue); }
 .rp-live-search {
   flex: 0 1 150px;
   width: 150px;
@@ -746,6 +746,33 @@
   background: color-mix(in srgb, var(--rp-amber) 8%, var(--rp-panel-2));
 }
 .rp-state.is-loading { border-style: dashed; opacity: .8; }
+
+/* First paint used the same dashed box as "empty" and as "error", so a loading
+   board and a dead board looked identical. */
+.rp-skeleton-strip {
+  display: grid;
+  grid-template-columns: repeat(6, minmax(0, 1fr));
+  gap: 8px;
+  width: min(560px, 100%);
+  margin-bottom: 6px;
+}
+.rp-skeleton-strip i {
+  height: 34px;
+  border-radius: var(--rp-r-ctl);
+  background: linear-gradient(90deg,
+    var(--rp-panel-2) 0%, var(--rp-panel-3) 50%, var(--rp-panel-2) 100%);
+  background-size: 200% 100%;
+  animation: rpShimmer 1.15s var(--rp-ease) infinite;
+}
+.rp-skeleton-strip i:nth-child(2) { animation-delay: .08s; }
+.rp-skeleton-strip i:nth-child(3) { animation-delay: .16s; }
+.rp-skeleton-strip i:nth-child(4) { animation-delay: .24s; }
+.rp-skeleton-strip i:nth-child(5) { animation-delay: .32s; }
+.rp-skeleton-strip i:nth-child(6) { animation-delay: .40s; }
+@keyframes rpShimmer {
+  from { background-position: 200% 0; }
+  to { background-position: -200% 0; }
+}
 
 /* Paused must be unmistakable: the header said "paused" but every stop, size and
    P/L below it still read as current. */
@@ -4049,9 +4076,17 @@
   };
 
   function renderLiveFilterButton(key, label, count, tooltip) {
-    var tooltipAttrs = tooltip ? ' title="' + esc(tooltip) + '" aria-label="' + esc(label + ' ' + count + '. ' + tooltip) + '"' : '';
-    return '<button class="rp-live-filter" type="button" data-live-filter="' + esc(key) + '" aria-pressed="' +
-      (rpLiveFilter === key ? 'true' : 'false') + tooltipAttrs + ' onclick="rpSetLiveFilter(\'' + esc(key) + '\')">' +
+    var selected = rpLiveFilter === key;
+    var tooltipAttrs = tooltip
+      ? ' title="' + esc(tooltip) + '" aria-label="' + esc(label + ' ' + count + '. ' + tooltip) + '"'
+      : '';
+    // role=radio (not aria-pressed): these six are mutually exclusive, and a toggle
+    // role tells a screen reader the opposite -- that they combine freely.
+    // Roving tabindex so the group is one tab stop with arrow keys inside it.
+    return '<button class="rp-live-filter" type="button" role="radio" data-live-filter="' +
+      esc(key) + '" aria-checked="' + (selected ? 'true' : 'false') + '" tabindex="' +
+      (selected ? '0' : '-1') + '"' + tooltipAttrs +
+      ' onclick="rpSetLiveFilter(\'' + esc(key) + '\')">' +
       '<span>' + esc(label) + '</span><b data-live-count="' + esc(key) + '">' + esc(count) + '</b></button>';
   }
 
@@ -4059,7 +4094,7 @@
     var counts = liveFilterCounts(payload);
     return '<div class="rp-live-research" id="rp-live-research">' +
       '<div class="rp-live-toolbar">' +
-        '<div class="rp-live-segments" role="group" aria-label="Focus live symbols">' +
+        '<div class="rp-live-segments" role="radiogroup" aria-label="Focus live symbols" onkeydown="rpFilterKeydown(event)">' +
           renderLiveFilterButton('all', 'All', counts.all) +
           renderLiveFilterButton('attention', 'Attention', counts.attention, liveAttentionSummary(payload)) +
           renderLiveFilterButton('positions', 'Positions', counts.positions) +
@@ -4076,9 +4111,11 @@
           '<option value="symbol"' + (rpLiveSort === 'symbol' ? ' selected' : '') + '>Symbol</option>' +
         '</select>' +
         '<span class="rp-live-focus-summary" id="rp-live-focus-summary"></span>' +
+        // Stable label + aria-pressed. Swapping BOTH announced "Resume live
+        // updates, pressed" while paused -- i.e. that resuming was already active.
         '<button class="rp-tool rp-live-pause" id="rp-live-pause" type="button" aria-pressed="' +
-          (rpLivePaused ? 'true' : 'false') + '" aria-label="' + (rpLivePaused ? 'Resume live updates' : 'Pause live updates') +
-          '" title="' + (rpLivePaused ? 'Resume live updates' : 'Pause live updates') + '" onclick="rpToggleLivePause()">' +
+          (rpLivePaused ? 'true' : 'false') + '" aria-label="Pause live updates"' +
+          ' title="' + (rpLivePaused ? 'Resume live updates' : 'Pause live updates') + '" onclick="rpToggleLivePause()">' +
           (rpLivePaused ? '&#9654;' : '&#10074;&#10074;') + '</button>' +
       '</div>' +
       '<div class="rp-live-activity">' +
@@ -4123,7 +4160,10 @@
     var counts = liveFilterCounts(payload);
     document.querySelectorAll('[data-live-filter]').forEach(function(button) {
       var key = button.dataset.liveFilter || 'all';
-      button.setAttribute('aria-pressed', rpLiveFilter === key ? 'true' : 'false');
+      var on = rpLiveFilter === key;
+      button.setAttribute('aria-checked', on ? 'true' : 'false');
+      button.setAttribute('tabindex', on ? '0' : '-1');
+      button.removeAttribute('aria-pressed');
       var count = button.querySelector('[data-live-count]');
       if (count) count.textContent = counts[key] == null ? 0 : counts[key];
       if (key === 'attention') {
@@ -4139,7 +4179,7 @@
     var pause = document.getElementById('rp-live-pause');
     if (pause) {
       pause.setAttribute('aria-pressed', rpLivePaused ? 'true' : 'false');
-      pause.setAttribute('aria-label', rpLivePaused ? 'Resume live updates' : 'Pause live updates');
+      pause.setAttribute('aria-label', 'Pause live updates');
       pause.title = rpLivePaused ? 'Resume live updates' : 'Pause live updates';
       pause.innerHTML = rpLivePaused ? '&#9654;' : '&#10074;&#10074;';
     }
@@ -4788,7 +4828,13 @@
     rpReplayCache = null;
     rpRenderedSignature = null;
     rpIndicatorCache = {};
-    host.innerHTML = '<div class="rp-empty">' + esc(text || 'Loading replay...') + '</div>';
+    host.innerHTML = '<div class="rp-state is-loading" role="status" aria-live="polite">' +
+      '<div class="rp-skeleton-strip" aria-hidden="true">' +
+        '<i></i><i></i><i></i><i></i><i></i><i></i>' +
+      '</div>' +
+      '<b>' + esc(text || 'Loading replay...') + '</b>' +
+      '<p>Reading persisted runner evidence. No broker or provider is contacted.</p>' +
+      '</div>';
   }
 
   function loadResult(date, mode, quiet) {
@@ -5302,6 +5348,21 @@
 
   window.rpStepReplayEvent = function(direction) {
     stepReplayEvent(Number(direction) < 0 ? -1 : 1, false);
+  };
+
+  window.rpFilterKeydown = function(event) {
+    var key = event.key;
+    if (key !== 'ArrowLeft' && key !== 'ArrowRight' && key !== 'Home' && key !== 'End') return;
+    var chips = Array.prototype.slice.call(document.querySelectorAll('[data-live-filter]'));
+    if (!chips.length) return;
+    event.preventDefault();
+    var at = chips.indexOf(document.activeElement);
+    if (at < 0) at = 0;
+    var next = key === 'Home' ? 0
+      : key === 'End' ? chips.length - 1
+      : (at + (key === 'ArrowRight' ? 1 : chips.length - 1)) % chips.length;
+    chips[next].focus();
+    rpSetLiveFilter(chips[next].dataset.liveFilter || 'all');
   };
 
   window.rpSetLiveFilter = function(filter) {
