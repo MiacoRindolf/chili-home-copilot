@@ -562,6 +562,22 @@
   letter-spacing: .06em;
   text-transform: uppercase;
 }
+.rp-trend {
+  margin-left: 4px;
+  font-size: 10px;
+  font-style: normal;
+  vertical-align: 1px;
+}
+/* A rising age always means something stopped updating, so up is never good. */
+.rp-trend.is-bad { color: var(--rp-red); }
+.rp-trend.is-good { color: var(--rp-green); }
+.rp-verdict-held {
+  color: var(--rp-muted);
+  font-variant-numeric: tabular-nums;
+  font-weight: 400;
+  letter-spacing: 0;
+  text-transform: none;
+}
 .rp-verdict-dot {
   width: 10px;
   height: 10px;
@@ -1797,6 +1813,10 @@
   var rpDecayTimer = null;
   var rpActivityExpanded = false;
   var rpLastFlashValues = {};
+  var rpTrend = [];              // [{t, loop, tape, verdict}] newest last
+  var rpVerdictSince = 0;        // wall clock when the CURRENT verdict began
+  var RP_TREND_CAP = 40;         // ~3.5 min at the open-session cadence
+  var RP_TREND_MIN_DELTA = 8;    // seconds of change before calling a direction
   var rpLiveActivityHtml = '';
   var rpReplayCache = null;
   var rpPinnedChart = null;
@@ -4541,6 +4561,54 @@
 
   // ===================== LIVE STATUS BOARD ===================================
 
+  // Record what we just saw. Keyed on the payload's own build time so a cache hit
+  // does not enter the same observation twice and flatten a real trend.
+  function recordTrend(payload) {
+    var lane = (payload && payload.lane) || {};
+    var built = Date.parse(payload && payload.as_of_utc || '');
+    var t = Number.isFinite(built) ? built : Date.now();
+    var last = rpTrend[rpTrend.length - 1];
+    if (last && last.t === t) return;
+    rpTrend.push({
+      t: t,
+      loop: lane.control_heartbeat_age_s == null ? null : Number(lane.control_heartbeat_age_s),
+      tape: lane.tape_age_s == null ? null : Number(lane.tape_age_s),
+      verdict: String(lane.verdict || '')
+    });
+    if (rpTrend.length > RP_TREND_CAP) rpTrend.shift();
+    // Verdict duration is measured on OUR wall clock, not on the payload's
+    // as_of_utc. A server running even slightly ahead would put `since` in the
+    // future, making the elapsed time negative and the duration silently never
+    // render -- on the one widget whose job is to say how long this has been wrong.
+    if (!last || last.verdict !== rpTrend[rpTrend.length - 1].verdict) {
+      rpVerdictSince = Date.now();
+    }
+  }
+
+  // Direction over the retained window. Deliberately not a two-sample diff: the
+  // ages sawtooth by design (the heartbeat only advances every 30s), so a naive
+  // comparison flips constantly. Compare the oldest third against the newest.
+  function trendDirection(key) {
+    var pts = rpTrend.filter(function(r) { return r[key] != null; });
+    if (pts.length < 4) return 0;
+    var take = Math.max(2, Math.floor(pts.length / 3));
+    function mean(arr) {
+      return arr.reduce(function(a, r) { return a + r[key]; }, 0) / arr.length;
+    }
+    var delta = mean(pts.slice(-take)) - mean(pts.slice(0, take));
+    if (Math.abs(delta) < RP_TREND_MIN_DELTA) return 0;
+    return delta > 0 ? 1 : -1;
+  }
+
+  function trendMark(key) {
+    var d = trendDirection(key);
+    if (!d) return '';
+    // Rising age is ALWAYS the bad direction: it means the thing stopped updating.
+    return d > 0
+      ? '<i class="rp-trend is-bad" title="getting worse">\u25b2</i>'
+      : '<i class="rp-trend is-good" title="recovering">\u25bc</i>';
+  }
+
   function fmtAge(seconds) {
     if (seconds == null || !Number.isFinite(Number(seconds))) return null;
     var s = Math.max(0, Math.round(Number(seconds)));
@@ -4567,10 +4635,10 @@
     var open = !!((payload.market_session || {}).is_open);
     var parts = [];
     parts.push('<span>loop <b' + (loopBad ? ' class="rp-proof-bad"' : '') + '>' +
-      esc(loop || 'never') + '</b></span>');
+      esc(loop || 'never') + '</b>' + trendMark('loop') + '</span>');
     parts.push('<span class="rp-proof-sep">&middot;</span>');
     parts.push('<span>tape <b' + (tapeBad && open ? ' class="rp-proof-bad"' : '') + '>' +
-      esc(tape || '\u2014') + '</b></span>');
+      esc(tape || '\u2014') + '</b>' + trendMark('tape') + '</span>');
     var symbolCount = (payload.symbols || []).length;
     if (symbolCount) {
       parts.push('<span class="rp-proof-sep">&middot;</span>');
@@ -4640,6 +4708,13 @@
     }
 
     var word = rpLivePaused ? 'paused' : String(lane.verdict || 'unknown').replace(/_/g, ' ');
+    // How long this answer has held. Suppressed for healthy states -- "ok for 4m"
+    // is noise; "degraded for 6m" is the whole story.
+    var heldFor = '';
+    if (!rpLivePaused && rpVerdictSince && severity !== 'ok' && severity !== 'info') {
+      var held = (Date.now() - rpVerdictSince) / 1000;
+      if (held >= 45) heldFor = ' <span class="rp-verdict-held">for ' + esc(fmtAge(held)) + '</span>';
+    }
     var critical = severity === 'critical' && !rpLivePaused;
     var html = '<div class="rp-verdict" data-severity="' + esc(severity) + '">' +
       '<div class="rp-verdict-main">' +
@@ -4662,7 +4737,7 @@
             (market.et_clock ? ' \u00b7 ' + esc(market.et_clock) + ' ET' : '') + '</span>'
           : '') +
         '<span class="rp-verdict-state"><span class="rp-verdict-dot"></span>' +
-          esc(word) + '</span>' +
+          esc(word) + heldFor + '</span>' +
       '</div>' +
     '</div>';
 
@@ -5101,6 +5176,7 @@
     rpLastLivePayload = payload;
     // The verdict is the page's answer to "what is Chili doing right now", so it
     // renders before -- and independently of -- whether there are any symbols.
+    recordTrend(payload);
     renderVerdictBar(payload);
     renderHaltBanner(payload);
     var result = livePayloadToReplayResult(payload);
@@ -5661,6 +5737,27 @@
           symbols: rpLastLivePayload.symbols,
           market_session: rpLastLivePayload.market_session
         });
+      }
+      // Verdict duration ticks on its own, outside the poll, so a 6-minute-old
+      // incident does not read as fresh just because the payload did not change.
+      var stateEl = document.querySelector('#rp-live-verdict .rp-verdict-state');
+      var bar = document.querySelector('#rp-live-verdict .rp-verdict');
+      if (stateEl && bar && rpVerdictSince && !rpLivePaused) {
+        var sev = bar.dataset.severity;
+        var heldEl = stateEl.querySelector('.rp-verdict-held');
+        if (sev !== 'ok' && sev !== 'info') {
+          var heldS = (Date.now() - rpVerdictSince) / 1000;
+          if (heldS >= 45) {
+            if (!heldEl) {
+              heldEl = document.createElement('span');
+              heldEl.className = 'rp-verdict-held';
+              stateEl.appendChild(heldEl);
+            }
+            heldEl.textContent = ' for ' + fmtAge(heldS);
+          }
+        } else if (heldEl) {
+          heldEl.remove();
+        }
       }
       if (rpLivePaused && rpLivePausedAt) {
         var held = document.querySelector('.rp-verdict-detail');
