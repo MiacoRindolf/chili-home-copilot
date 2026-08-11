@@ -17,6 +17,7 @@ from __future__ import annotations
 import argparse
 from dataclasses import dataclass
 from datetime import datetime, time as datetime_time, timezone
+from enum import Enum
 import hashlib
 import json
 import math
@@ -64,6 +65,13 @@ class CaptureOnlySmokeError(RuntimeError):
         super().__init__(f"{code}: {message}")
         self.code = str(code)
         self.message = str(message)
+
+
+class CaptureOnlyCertificationScope(str, Enum):
+    """Typed stream coverage required by one capture-only observation."""
+
+    FULL_CAPTURE = "full_capture"
+    L1_EXACT_PRINT_PRESELECTION = "l1_exact_print_preselection"
 
 
 def _utc(value: datetime, field: str) -> datetime:
@@ -207,6 +215,7 @@ class CaptureOnlyHealthAuthority(Protocol):
         *,
         composition: Any,
         provider_health: Mapping[str, Any],
+        certification_scope: CaptureOnlyCertificationScope,
     ) -> CaptureOnlyHealthObservation: ...
 
 
@@ -333,11 +342,17 @@ class IngressCaptureOnlyHealthAuthority:
         *,
         composition: Any,
         provider_health: Mapping[str, Any],
+        certification_scope: CaptureOnlyCertificationScope,
     ) -> CaptureOnlyHealthObservation:
         from app.services.trading.momentum_neural.replay_capture_contract import (
             CaptureStream,
         )
 
+        if type(certification_scope) is not CaptureOnlyCertificationScope:
+            raise CaptureOnlySmokeError(
+                "CAPTURE_HEALTH_UNAVAILABLE",
+                "capture certification scope is unavailable",
+            )
         if provider_health.get("all_ready") is not True:
             raise CaptureOnlySmokeError(
                 "PROVIDER_HEALTH_UNAVAILABLE", "provider lanes are not jointly ready"
@@ -374,7 +389,24 @@ class IngressCaptureOnlyHealthAuthority:
                 if not exact
                 else max(event.clocks.available_at for event in exact)
             )
-            gap_count = sum(int(gap.lost_count) for gap in gaps)
+            # Exact-print preselection is a temporary L1-only probe.  A Q frame
+            # can carry a provider-clocked print while its bid/ask is correctly
+            # rejected as non-authoritative when the trade reference is older
+            # than the two-second NBBO fence.  That NBBO-only gap must not veto
+            # proof of the exact-print lane.  Full capture still certifies every
+            # stream and therefore retains the original all-gap fail-closed
+            # behavior.
+            certifying_gaps = (
+                tuple(
+                    gap
+                    for gap in gaps
+                    if gap.stream is CaptureStream.IQFEED_PRINT
+                )
+                if certification_scope
+                is CaptureOnlyCertificationScope.L1_EXACT_PRINT_PRESELECTION
+                else gaps
+            )
+            gap_count = sum(int(gap.lost_count) for gap in certifying_gaps)
             exact_inventory_sha256 = hashlib.sha256(
                 _canonical_json_bytes(
                     {
@@ -1205,9 +1237,15 @@ def run_capture_only_preactivation_smoke(
                 raise CaptureOnlySmokeError(
                     "CAPTURE_LOSS_OBSERVED", "bounded handoff recorded loss or overflow"
                 )
+            certification_scope = (
+                CaptureOnlyCertificationScope.L1_EXACT_PRINT_PRESELECTION
+                if configuration.l1_only_exact_print_preselection
+                else CaptureOnlyCertificationScope.FULL_CAPTURE
+            )
             observed = configuration.capture_health_authority.observe(
                 composition=composition,
                 provider_health=provider,
+                certification_scope=certification_scope,
             )
             now = _utc(wall_clock(), "capture-only observation clock")
             try:
@@ -1402,6 +1440,7 @@ def main(
 
 __all__ = [
     "CAPTURE_ONLY_SMOKE_SCHEMA_VERSION",
+    "CaptureOnlyCertificationScope",
     "CaptureOnlyHealthAuthority",
     "CaptureOnlyHealthObservation",
     "IngressCaptureOnlyHealthAuthority",

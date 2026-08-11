@@ -164,10 +164,13 @@ class _Health:
         self.l2_sha = l2_sha
         self.exact_print_count = exact_print_count
         self.observed_at = observed_at
+        self.certification_scopes = []
 
-    def observe(self, *, composition, provider_health):
+    def observe(self, *, composition, provider_health, certification_scope):
         assert isinstance(composition, _Composition)
         assert provider_health["all_ready"] is True
+        assert type(certification_scope) is smoke.CaptureOnlyCertificationScope
+        self.certification_scopes.append(certification_scope)
         return smoke.CaptureOnlyHealthObservation(
             observed_at=self.observed_at,
             capture_store_root=str(self.root),
@@ -296,6 +299,9 @@ def test_capture_only_smoke_binds_real_shape_checks_exact_print_and_quiesces(tmp
     }
     assert evidence.host_binding["execution_surface"] == "capture_only"
     assert evidence.host_binding["order_transport_constructed"] is False
+    assert config.capture_health_authority.certification_scopes == [
+        smoke.CaptureOnlyCertificationScope.FULL_CAPTURE
+    ]
     assert trade.bound is None and depth.bound is None
     assert trade.stopped.is_set() and depth.stopped.is_set()
     assert composition.state is IqfeedIngressCompositionState.CLOSED
@@ -418,6 +424,9 @@ def test_l1_exact_print_preselection_never_constructs_or_requires_depth_provider
         "decision_local_fail_closed"
     )
     assert evidence.provider_health["depth_provider_started"] is False
+    assert config.capture_health_authority.certification_scopes == [
+        smoke.CaptureOnlyCertificationScope.L1_EXACT_PRINT_PRESELECTION
+    ]
     assert evidence.closure["l2_opportunity_consumed"] is False
     assert evidence.closure["l2_risk_reserved"] is False
     assert trade.stopped.is_set()
@@ -502,6 +511,7 @@ def test_concrete_health_authority_uses_non_destructive_ring_and_store_marker(tm
     observed = authority.observe(
         composition=composition,
         provider_health={"all_ready": True},
+        certification_scope=smoke.CaptureOnlyCertificationScope.FULL_CAPTURE,
     )
 
     assert observed.exact_print_event_count == 1
@@ -518,6 +528,168 @@ def test_concrete_health_authority_uses_non_destructive_ring_and_store_marker(tm
     assert len(markers) == 1
     marker = json.loads(markers[0].read_text(encoding="utf-8"))
     assert marker["resource_binding_sha256"] == BINDING_SHA
+
+
+def _concrete_scoped_observation(
+    tmp_path: Path,
+    *,
+    certification_scope: smoke.CaptureOnlyCertificationScope,
+    gap_streams: tuple[CaptureStream, ...],
+) -> tuple[smoke.CaptureOnlyHealthObservation, SimpleNamespace]:
+    preflight = _preflight(tmp_path)
+
+    class Ring:
+        def begin_promotion(self, symbol, *, promoted_at, source_identity):
+            assert symbol == "VEEE"
+            assert promoted_at == NOW
+            assert source_identity == "fixture-identity"
+            return SimpleNamespace(
+                events=(
+                    SimpleNamespace(
+                        stream=CaptureStream.IQFEED_PRINT,
+                        clocks=SimpleNamespace(
+                            provider_event_at=NOW,
+                            available_at=NOW,
+                        ),
+                        event_sha256="c" * 64,
+                    ),
+                ),
+                gaps=tuple(
+                    SimpleNamespace(stream=gap_stream, lost_count=1)
+                    for gap_stream in gap_streams
+                ),
+                inventory_sha256="d" * 64,
+            )
+
+        def abort_promotion(self, _transfer):
+            return True
+
+    composition = SimpleNamespace(
+        supervisor=SimpleNamespace(
+            pretrigger_ring=Ring(),
+            identity="fixture-identity",
+        )
+    )
+    authority = smoke.IngressCaptureOnlyHealthAuthority(
+        preflight=preflight,
+        certification_symbol="veee",
+        wall_clock=lambda: NOW,
+    )
+    observed = authority.observe(
+        composition=composition,
+        provider_health={"all_ready": True},
+        certification_scope=certification_scope,
+    )
+    configuration = SimpleNamespace(
+        preflight=preflight,
+        l1_only_exact_print_preselection=(
+            certification_scope
+            is smoke.CaptureOnlyCertificationScope.L1_EXACT_PRINT_PRESELECTION
+        ),
+        activation_only_allow_closed_session_without_exact_print=False,
+    )
+    return observed, configuration
+
+
+def test_l1_exact_print_preselection_accepts_nbbo_only_gap(tmp_path):
+    observed, configuration = _concrete_scoped_observation(
+        tmp_path,
+        certification_scope=(
+            smoke.CaptureOnlyCertificationScope.L1_EXACT_PRINT_PRESELECTION
+        ),
+        gap_streams=(CaptureStream.NBBO_QUOTE,),
+    )
+
+    assert observed.dropped_event_count == 0
+    assert observed.unreported_gap_count == 0
+    assert (
+        smoke._validated_capture_observation(
+            observed,
+            configuration=configuration,
+            started_at=NOW,
+            observed_now=NOW,
+            l1_source_sha256=configuration.preflight.source_hashes[
+                "iqfeed_trade_bridge"
+            ],
+            l2_source_sha256=configuration.preflight.source_hashes[
+                "iqfeed_depth_bridge"
+            ],
+        )
+        is observed
+    )
+
+
+def test_l1_exact_print_preselection_still_rejects_print_gap(tmp_path):
+    observed, configuration = _concrete_scoped_observation(
+        tmp_path,
+        certification_scope=(
+            smoke.CaptureOnlyCertificationScope.L1_EXACT_PRINT_PRESELECTION
+        ),
+        gap_streams=(CaptureStream.IQFEED_PRINT,),
+    )
+
+    assert observed.dropped_event_count == 1
+    with pytest.raises(smoke.CaptureOnlySmokeError, match="CAPTURE_HEALTH_INVALID"):
+        smoke._validated_capture_observation(
+            observed,
+            configuration=configuration,
+            started_at=NOW,
+            observed_now=NOW,
+            l1_source_sha256=configuration.preflight.source_hashes[
+                "iqfeed_trade_bridge"
+            ],
+            l2_source_sha256=configuration.preflight.source_hashes[
+                "iqfeed_depth_bridge"
+            ],
+        )
+
+
+def test_full_capture_still_rejects_nbbo_gap(tmp_path):
+    observed, configuration = _concrete_scoped_observation(
+        tmp_path,
+        certification_scope=smoke.CaptureOnlyCertificationScope.FULL_CAPTURE,
+        gap_streams=(CaptureStream.NBBO_QUOTE,),
+    )
+
+    assert observed.dropped_event_count == 1
+    with pytest.raises(smoke.CaptureOnlySmokeError, match="CAPTURE_HEALTH_INVALID"):
+        smoke._validated_capture_observation(
+            observed,
+            configuration=configuration,
+            started_at=NOW,
+            observed_now=NOW,
+            l1_source_sha256=configuration.preflight.source_hashes[
+                "iqfeed_trade_bridge"
+            ],
+            l2_source_sha256=configuration.preflight.source_hashes[
+                "iqfeed_depth_bridge"
+            ],
+        )
+
+
+def test_l1_exact_print_preselection_rejects_mixed_nbbo_and_print_gaps(tmp_path):
+    observed, configuration = _concrete_scoped_observation(
+        tmp_path,
+        certification_scope=(
+            smoke.CaptureOnlyCertificationScope.L1_EXACT_PRINT_PRESELECTION
+        ),
+        gap_streams=(CaptureStream.NBBO_QUOTE, CaptureStream.IQFEED_PRINT),
+    )
+
+    assert observed.dropped_event_count == 1
+    with pytest.raises(smoke.CaptureOnlySmokeError, match="CAPTURE_HEALTH_INVALID"):
+        smoke._validated_capture_observation(
+            observed,
+            configuration=configuration,
+            started_at=NOW,
+            observed_now=NOW,
+            l1_source_sha256=configuration.preflight.source_hashes[
+                "iqfeed_trade_bridge"
+            ],
+            l2_source_sha256=configuration.preflight.source_hashes[
+                "iqfeed_depth_bridge"
+            ],
+        )
 
 
 def test_v3_capture_authority_accepts_only_typed_quiesced_smoke(tmp_path):
