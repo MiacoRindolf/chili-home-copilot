@@ -34,6 +34,7 @@ from datetime import datetime, timezone
 from typing import Any, Callable, Mapping
 
 from sqlalchemy import text
+from sqlalchemy.exc import SQLAlchemyError
 
 from ....config import settings
 from ....db import SessionLocal, engine
@@ -332,6 +333,9 @@ class _LiveSessionTracker:
         self._owner_generation: int | None = None
         self._captured_paper_scope = captured_paper_scope
         self._scope_breach_reason: str | None = None
+        # Monotonic stamp of when the inventory first became UNREADABLE via a
+        # DB fault. None means readable, or breached (which never waits).
+        self._inventory_unreadable_since: float | None = None
 
     def set_owner_generation(
         self,
@@ -395,19 +399,40 @@ class _LiveSessionTracker:
                     return False
                 self._sessions = new_map
                 self._scope_breach_reason = None
+                self._inventory_unreadable_since = None
             return True
         except Exception as e:
             _log.warning("[live_loop] session refresh failed: %s", e)
             if self._captured_paper_scope is not None:
                 # A dedicated service must never continue from a previously
                 # cached inventory after either a foreign session appears or
-                # the current inventory becomes unreadable.
+                # the current inventory becomes unreadable. Clearing _sessions
+                # makes the loop INERT, which is the safety property -- it acts
+                # on nothing until the inventory is readable again.
+                #
+                # But UNREADABLE and BREACHED are not the same fact, and the
+                # caller could not tell them apart. A psycopg2 blip on the 5433
+                # loopback and a foreign session appearing in the scope both
+                # arrived here as a bare False, and the caller retired the
+                # generation permanently for either. That is what killed r162:
+                # `dedicated captured PAPER inventory lost; retiring
+                # generation=1` at 04:59:03Z, seconds after Postgres logged
+                # `FATAL: canceling authentication due to timeout`. Nothing
+                # restarts the loop, so one blip cost 7.5 hours.
+                #
+                # A DB error is transient by nature; a scope breach
+                # (assert_session raises RuntimeError) is not. Record which.
                 with self._lock:
                     if self._owner_generation == int(expected_generation):
                         self._sessions = {}
                         self._scope_breach_reason = str(
                             e or "captured_paper_session_inventory_unavailable"
                         )
+                        if isinstance(e, SQLAlchemyError):
+                            if self._inventory_unreadable_since is None:
+                                self._inventory_unreadable_since = time.monotonic()
+                        else:
+                            self._inventory_unreadable_since = None
             return False
         finally:
             try:
@@ -428,6 +453,29 @@ class _LiveSessionTracker:
     def count(self) -> int:
         with self._lock:
             return len(self._sessions)
+
+    def inventory_is_unreadable(self) -> bool:
+        """Was the last failure a DB fault (transient) rather than a breach?
+
+        Separate from the duration on purpose. `time.monotonic()` has ~15.6ms
+        resolution on Windows, so a blip detected within the same tick measures
+        EXACTLY 0.0 seconds -- and a caller gating on `duration > 0` would treat
+        the freshest possible fault as no fault at all and retire anyway, which
+        is the entire bug this change exists to fix.
+        """
+
+        with self._lock:
+            return self._inventory_unreadable_since is not None
+
+    def inventory_unreadable_seconds(self) -> float:
+        """How long the inventory has been unreadable. 0.0 if it is readable.
+
+        Only meaningful alongside `inventory_is_unreadable()` -- see above.
+        """
+
+        with self._lock:
+            since = self._inventory_unreadable_since
+        return 0.0 if since is None else max(0.0, time.monotonic() - since)
 
     def scope_is_healthy(self) -> bool:
         with self._lock:
@@ -1110,6 +1158,39 @@ class LiveRunnerLoop:
             try:
                 if self._tracker.refresh(expected_generation=generation) is not True:
                     if self._captured_paper_scope is not None:
+                        # A DB blip is not a lost inventory. `refresh` already
+                        # cleared _sessions, so the loop is INERT either way --
+                        # it acts on nothing until the read succeeds. Retiring on
+                        # top of that buys no safety and costs the whole session:
+                        # nothing restarts this loop, and on 2026-08-10 one
+                        # `FATAL: canceling authentication due to timeout` on the
+                        # 5433 loopback cost 7.5 hours of lane downtime.
+                        #
+                        # Bounded by live_loop_stale_seconds() -- the same
+                        # authoritative threshold that decides this loop is stale
+                        # elsewhere, so there is no new number to tune. Past it,
+                        # retire exactly as before: an inventory that has been
+                        # unreadable that long is no longer a blip.
+                        if self._tracker.inventory_is_unreadable():
+                            unreadable = (
+                                self._tracker.inventory_unreadable_seconds()
+                            )
+                            try:
+                                from .lane_health import live_loop_stale_seconds
+
+                                budget = float(live_loop_stale_seconds())
+                            except Exception:
+                                budget = 75.0
+                            if unreadable < budget:
+                                _log.warning(
+                                    "[live_loop] captured PAPER inventory "
+                                    "unreadable for %.1fs (budget %.0fs); holding "
+                                    "inert, generation=%d",
+                                    unreadable,
+                                    budget,
+                                    generation,
+                                )
+                                continue
                         _log.critical(
                             "[live_loop] dedicated captured PAPER inventory lost; "
                             "retiring generation=%d",
