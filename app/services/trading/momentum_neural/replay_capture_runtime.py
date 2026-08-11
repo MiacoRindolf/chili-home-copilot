@@ -5524,13 +5524,58 @@ class CaptureProducerLifecycleRuntime:
                     raise CaptureContractError(
                         "promoted input differs from its retained source event"
                     )
-            if promoted_at is not None and _utc(
-                promoted_at, "promoted_at"
-            ) != recorded:
-                self._latch_failure("promotion_boundary_clock_mismatch")
-                raise CaptureContractError(
-                    "promotion boundary differs from the trusted wall clock"
-                )
+            if promoted_at is not None:
+                # BOUNDS, NOT EQUALITY.
+                #
+                # This compared the supervisor's promotion stamp against a SECOND,
+                # independent `wall_clock()` read taken here. On a real clock the two
+                # are equal only if under ~0.5ms of work separates them, and the work
+                # between them is not small: hot-symbol lease acquire, a pretrigger-ring
+                # heap scan with provenance hashing, PromotionBatch construction, a
+                # sha256_json inventory hash over every event, per-event payload
+                # re-enveloping, provider registration evidence, and full CaptureEvent
+                # construction. The guard could not be satisfied in production.
+                #
+                # Measured on this box: 20,000 back-to-back `datetime.now(UTC)` reads
+                # yielded 18 distinct values, minimum non-zero delta 521us. Reproduced
+                # in isolation against the running root -- same code, same data, only
+                # the clock differs:
+                #     [real clock]   capture_ready=False LATCH=promotion_boundary_clock_mismatch
+                #     [coarse clock] capture_ready=True  LATCH=None
+                # and, decisively, it fires ONLY when the pretrigger ring is non-empty:
+                #     pretrigger_events=0  -> admits
+                #     pretrigger_events>=1 -> latches
+                # i.e. the lane could admit nothing precisely when there was data.
+                #
+                # The operator never saw this name. `_latch_failure` runs BEFORE the
+                # raise, so `_submit_event_locked` sees the latch already set and
+                # returns accepted=False instead of re-raising -- surfacing as the
+                # generic "provider first frame was not durably admitted".
+                #
+                # PR #1008 fixed this exact shape one frame up, at live_replay_capture's
+                # `batch.promoted_at != self._observed_now()` -> `!= lease.acquired_at`,
+                # with the author's note that "calling the shared wall clock a second
+                # time here makes every real clock differ by microseconds". The defect
+                # moved a frame deeper rather than being removed.
+                #
+                # The property that actually needs enforcing is that a producer cannot
+                # FABRICATE a promotion boundary: it may not claim a moment the trusted
+                # clock has not reached, and it may not backdate ahead of the input it
+                # promotes. Both are ordering bounds -- the same idiom the two guards
+                # immediately above already use for received_at and available_at.
+                # Equality was never the security property; it was an accident of
+                # comparing one clock to itself twice.
+                promoted = _utc(promoted_at, "promoted_at")
+                if promoted > recorded:
+                    self._latch_failure("promotion_boundary_after_trusted_clock")
+                    raise CaptureContractError(
+                        "promotion boundary is later than the trusted wall clock"
+                    )
+                if promoted < clocks.received_at:
+                    self._latch_failure("promotion_boundary_precedes_received_at")
+                    raise CaptureContractError(
+                        "promotion boundary cannot precede input received_at"
+                    )
             captured_payload: Mapping[str, Any] = payload
             if original_available_at != recorded or normalized_promotion_id is not None:
                 if not isinstance(payload, Mapping):
