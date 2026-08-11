@@ -54,6 +54,9 @@ _STARTUP_ATTEMPT_RE = re.compile(
 )
 _SERVICE_HEALTH_POLL_SECONDS = 1.0
 _SERVICE_SHUTDOWN_SECONDS = 30.0
+_DATABASE_STARTUP_READINESS_TIMEOUT_SECONDS = 120.0
+_DATABASE_STARTUP_RETRY_SECONDS = 2.0
+_DATABASE_STARTUP_ATTEMPT_TIMEOUT_SECONDS = 5.0
 _MAX_STARTUP_RECONCILIATION_ROWS = 10_000
 _RESTART_GATE_SCHEMA_VERSION = "chili.captured-paper-restart-gate.v1"
 _NO_ORDER_SMOKE_SCHEMA_VERSION = "chili.captured-paper-readiness.no_order_smoke.v4"
@@ -4679,7 +4682,7 @@ class _CapturedPaperHostActivationHandshake:
         revoked_path: Path,
         stopped_path: Path,
         dispatch_lock_path: Path,
-        dispatch_lock_identity: Mapping[str, Any],
+        dispatch_lock_identity: Mapping[str, Any] | None,
         verified: activation_contract.VerifiedCapturedPaperActivation,
         process_identity: Mapping[str, Any],
         challenge_sha256: str,
@@ -4698,12 +4701,14 @@ class _CapturedPaperHostActivationHandshake:
         self.revoked_path = revoked_path
         self.stopped_path = stopped_path
         self.dispatch_lock_path = dispatch_lock_path
-        if set(dispatch_lock_identity) != _HOST_DISPATCH_LOCK_IDENTITY_KEYS:
+        if dispatch_lock_identity is not None and (
+            set(dispatch_lock_identity) != _HOST_DISPATCH_LOCK_IDENTITY_KEYS
+        ):
             raise CapturedAlpacaPaperServiceError(
                 "HOST_DISPATCH_LOCK_INVALID",
                 "host dispatch authority lock identity has an unexpected schema",
             )
-        self._dispatch_lock_identity = dict(dispatch_lock_identity)
+        self._dispatch_lock_identity = dict(dispatch_lock_identity or {})
         self._verified = verified
         self._identity = dict(process_identity)
         self._challenge_sha256 = _require_sha256(
@@ -4887,18 +4892,6 @@ class _CapturedPaperHostActivationHandshake:
                 "HOST_DISPATCH_LOCK_INVALID",
                 "host dispatch authority lock path is not a new local artifact",
             )
-        try:
-            host_cutover = importlib.import_module(
-                "scripts.captured_paper_host_cutover"
-            )
-            dispatch_lock_identity = host_cutover.create_startup_dispatch_lock(
-                dispatch_lock_path
-            )
-        except Exception as exc:
-            raise CapturedAlpacaPaperServiceError(
-                "HOST_DISPATCH_LOCK_INVALID",
-                "host dispatch authority lock could not be created and sealed",
-            ) from exc
         roots = tuple(Path(item).resolve(strict=True) for item in allowed_roots)
         return cls(
             ready_path=base,
@@ -4909,7 +4902,7 @@ class _CapturedPaperHostActivationHandshake:
             revoked_path=derived["revoked"],
             stopped_path=derived["stopped"],
             dispatch_lock_path=dispatch_lock_path,
-            dispatch_lock_identity=dispatch_lock_identity,
+            dispatch_lock_identity=None,
             verified=verified,
             process_identity=identity,
             challenge_sha256=challenge_factory(),
@@ -4920,6 +4913,57 @@ class _CapturedPaperHostActivationHandshake:
             wait=wait,
             startup_attempt_id=startup_attempt_id,
         )
+
+    def _create_dispatch_lock_unlocked(self) -> None:
+        if self._dispatch_lock_identity:
+            return
+        if os.path.lexists(self.dispatch_lock_path):
+            raise CapturedAlpacaPaperServiceError(
+                "HOST_DISPATCH_LOCK_INVALID",
+                "host dispatch authority lock path is no longer new",
+            )
+        try:
+            host_cutover = importlib.import_module(
+                "scripts.captured_paper_host_cutover"
+            )
+            identity = host_cutover.create_startup_dispatch_lock(
+                self.dispatch_lock_path
+            )
+        except Exception as exc:
+            raise CapturedAlpacaPaperServiceError(
+                "HOST_DISPATCH_LOCK_INVALID",
+                "host dispatch authority lock could not be created and sealed",
+            ) from exc
+        if set(identity) != _HOST_DISPATCH_LOCK_IDENTITY_KEYS:
+            with suppress(OSError):
+                self.dispatch_lock_path.unlink()
+            raise CapturedAlpacaPaperServiceError(
+                "HOST_DISPATCH_LOCK_INVALID",
+                "host dispatch authority lock identity has an unexpected schema",
+            )
+        self._dispatch_lock_identity = dict(identity)
+
+    def _discard_unpublished_dispatch_lock_unlocked(self) -> None:
+        if not self._dispatch_lock_identity:
+            return
+        try:
+            host_cutover = importlib.import_module(
+                "scripts.captured_paper_host_cutover"
+            )
+            observed = host_cutover._validate_dispatch_lock_identity(
+                self._dispatch_lock_identity,
+                expected_path=self.dispatch_lock_path,
+            )
+            if dict(observed) != self._dispatch_lock_identity:
+                raise OSError("dispatch lock identity changed before cleanup")
+            self.dispatch_lock_path.unlink()
+            host_cutover._fsync_parent_directory(self.dispatch_lock_path)
+        except Exception as exc:
+            raise CapturedAlpacaPaperServiceError(
+                "HOST_DISPATCH_LOCK_CLEANUP_FAILED",
+                "unpublished host dispatch lock could not be removed exactly",
+            ) from exc
+        self._dispatch_lock_identity = {}
 
     def _common_body(self) -> dict[str, Any]:
         return {
@@ -5000,6 +5044,11 @@ class _CapturedPaperHostActivationHandshake:
                     "HOST_PREPARED_EXPIRED",
                     "activation expired before host PREPARED publication",
                 )
+            # Composition performs the bounded DB readiness/reconciliation
+            # work before this point.  Create the append-only dispatch lock
+            # only at PREPARED publication so a pre-PREPARED cold-boot
+            # rejection cannot poison the next one-shot task invocation.
+            self._create_dispatch_lock_unlocked()
             body = {
                 "schema_version": _HOST_PREPARED_SCHEMA_VERSION,
                 "state": "PREPARED",
@@ -5013,7 +5062,15 @@ class _CapturedPaperHostActivationHandshake:
                 "real_money_authorized": False,
             }
             body["receipt_sha256"] = activation_contract.sha256_json(body)
-            _publish_canonical_json_once(self.ready_path, body)
+            try:
+                _publish_canonical_json_once(self.ready_path, body)
+            except BaseException:
+                # No PREPARED receipt exists, so the cutover has no durable
+                # identity with which to revoke this lock.  Remove only the
+                # exact inode/byte identity created above; otherwise surface a
+                # typed cleanup failure instead of poisoning the next run.
+                self._discard_unpublished_dispatch_lock_unlocked()
+                raise
             self._prepared_sha256 = str(body["receipt_sha256"])
             return dict(body)
 
@@ -6437,6 +6494,10 @@ def _verify_database_schema(
     engine: Any,
     *,
     migrations_module: ModuleType,
+    readiness_timeout_seconds: float = _DATABASE_STARTUP_READINESS_TIMEOUT_SECONDS,
+    retry_interval_seconds: float = _DATABASE_STARTUP_RETRY_SECONDS,
+    monotonic_clock: Callable[[], float] = time.monotonic,
+    sleep: Callable[[float], None] = time.sleep,
 ) -> Mapping[str, Any]:
     """Read-only exact-code migration fence immediately before service start."""
 
@@ -6460,35 +6521,219 @@ def _verify_database_schema(
             "MIGRATION_354_VERIFIER_UNAVAILABLE",
             "PAPER database lacks the exact migration 354 physical verifier",
         )
-    try:
-        with engine.connect() as connection:
-            rows = connection.execute(
-                migrations_module.text("SELECT version_id FROM schema_version")
-            ).fetchall()
-            table_rows = connection.execute(
-                migrations_module.text(
-                    "SELECT name, to_regclass(name) IS NOT NULL AS present "
-                    "FROM (VALUES "
-                    "('captured_paper_post_commit_outbox'),"
-                    "('captured_paper_post_commit_outbox_events'),"
-                    "('captured_paper_completed_fill_watch'),"
-                    "('captured_paper_completed_fill_watch_events'),"
-                    "('alpaca_paper_fill_activities'),"
-                    "('alpaca_paper_fill_query_observations'),"
-                    "('alpaca_paper_post_settlement_fill_contradictions'),"
-                    "('captured_paper_selection_frontiers'),"
-                    "('captured_paper_selection_frontier_events'),"
-                    "('captured_paper_selection_route_states'),"
-                    "('captured_paper_variant_application_receipts'),"
-                    "('captured_paper_variant_application_events')"
-                    ") AS required(name)"
+    timeout_seconds = float(readiness_timeout_seconds)
+    retry_seconds = float(retry_interval_seconds)
+    if not math.isfinite(timeout_seconds) or timeout_seconds <= 0.0:
+        raise ValueError("database readiness timeout must be finite and positive")
+    if not math.isfinite(retry_seconds) or retry_seconds <= 0.0:
+        raise ValueError("database readiness retry interval must be finite and positive")
+
+    # This service is installed as a deliberately one-shot scheduled task.  A
+    # host reboot can therefore start it while Postgres is still replaying its
+    # WAL; treating that narrow availability window as schema drift leaves the
+    # PAPER lane stopped until another elevated activation.  Retry only typed
+    # SQLAlchemy availability failures.  Any schema/roster/physical-contract
+    # fault remains an immediate fail-closed rejection.
+    from sqlalchemy import create_engine
+    from sqlalchemy.exc import (
+        DBAPIError,
+        InterfaceError,
+        OperationalError,
+        TimeoutError as SQLAlchemyTimeoutError,
+    )
+    from sqlalchemy.pool import NullPool
+
+    def _is_transient_database_unavailability(exc: BaseException) -> bool:
+        if isinstance(exc, (InterfaceError, SQLAlchemyTimeoutError)):
+            return True
+        if isinstance(exc, DBAPIError) and bool(
+            getattr(exc, "connection_invalidated", False)
+        ):
+            return True
+        if not isinstance(exc, OperationalError):
+            return False
+        original = getattr(exc, "orig", None)
+        sqlstate = str(
+            getattr(original, "pgcode", None)
+            or getattr(original, "sqlstate", None)
+            or ""
+        ).upper()
+        if sqlstate:
+            return sqlstate.startswith("08") or sqlstate in {
+                "53300",  # too_many_connections
+                "55P03",  # lock_not_available
+                "57014",  # query_canceled (including statement_timeout)
+                "57P01",  # admin_shutdown
+                "57P02",  # crash_shutdown
+                "57P03",  # cannot_connect_now / startup recovery
+            }
+        detail = str(original or exc).lower()
+        return any(
+            marker in detail
+            for marker in (
+                "connection already closed",
+                "connection refused",
+                "connection reset by peer",
+                "connection timed out",
+                "could not connect to server",
+                "database system is starting up",
+                "server closed the connection unexpectedly",
+                "the database system is starting up",
+                "timeout expired",
+            )
+        )
+
+    source_url = getattr(engine, "url", None)
+    dialect_name = str(getattr(getattr(engine, "dialect", None), "name", ""))
+    use_bounded_postgres_connection = bool(
+        source_url is not None and dialect_name == "postgresql"
+    )
+
+    deadline = float(monotonic_clock()) + timeout_seconds
+    last_transient_error: BaseException | None = None
+    while True:
+        attempt_started = float(monotonic_clock())
+        if attempt_started >= deadline:
+            deadline_error = last_transient_error or TimeoutError(
+                "PAPER database readiness deadline elapsed before an attempt"
+            )
+            raise CapturedAlpacaPaperServiceError(
+                "DATABASE_SCHEMA_UNREADABLE",
+                "PAPER database schema remained unavailable during bounded startup recovery",
+            ) from deadline_error
+        remaining_seconds = deadline - attempt_started
+        attempt_timeout_seconds = min(
+            _DATABASE_STARTUP_ATTEMPT_TIMEOUT_SECONDS,
+            remaining_seconds,
+        )
+        if use_bounded_postgres_connection and attempt_timeout_seconds < 1.0:
+            deadline_error = last_transient_error or TimeoutError(
+                "PAPER database readiness has no representable libpq connect budget"
+            )
+            raise CapturedAlpacaPaperServiceError(
+                "DATABASE_SCHEMA_UNREADABLE",
+                "PAPER database schema remained unavailable during bounded startup recovery",
+            ) from deadline_error
+        attempt_deadline = attempt_started + attempt_timeout_seconds
+        connection_engine = engine
+        owns_connection_engine = False
+        try:
+            if use_bounded_postgres_connection:
+                # The application pool itself has no libpq connect_timeout.
+                # Use one NullPool readiness connection per attempt so neither
+                # pool checkout nor TCP startup can outlive this attempt's
+                # fixed availability budget.
+                connection_engine = create_engine(
+                    source_url,
+                    poolclass=NullPool,
+                    connect_args={
+                        "application_name": "chili-captured-paper-schema-readiness",
+                        "connect_timeout": max(
+                            1,
+                            int(math.floor(attempt_timeout_seconds)),
+                        ),
+                        "options": (
+                            "-c statement_timeout="
+                            f"{max(1, int(attempt_timeout_seconds * 1000.0))} "
+                            "-c lock_timeout="
+                            f"{max(1, int(attempt_timeout_seconds * 1000.0))}"
+                        ),
+                    },
                 )
-            ).fetchall()
-            migration_354_verifier(connection)
-    except Exception as exc:
-        raise CapturedAlpacaPaperServiceError(
-            "DATABASE_SCHEMA_UNREADABLE", "PAPER database schema read failed"
-        ) from exc
+                owns_connection_engine = True
+            with connection_engine.connect() as connection:
+                original_execute = connection.execute
+
+                def _execute_with_remaining_budget(
+                    statement: Any,
+                    *execute_args: Any,
+                    **execute_kwargs: Any,
+                ) -> Any:
+                    remaining_attempt_seconds = (
+                        attempt_deadline - float(monotonic_clock())
+                    )
+                    if remaining_attempt_seconds <= 0.0:
+                        raise SQLAlchemyTimeoutError(
+                            "PAPER database schema readiness attempt timed out"
+                        )
+                    statement_timeout_ms = max(
+                        1,
+                        int(remaining_attempt_seconds * 1000.0),
+                    )
+                    original_execute(
+                        migrations_module.text(
+                            "SET LOCAL statement_timeout = "
+                            f"'{statement_timeout_ms}ms'"
+                        )
+                    )
+                    original_execute(
+                        migrations_module.text(
+                            "SET LOCAL lock_timeout = "
+                            f"'{statement_timeout_ms}ms'"
+                        )
+                    )
+                    return original_execute(
+                        statement,
+                        *execute_args,
+                        **execute_kwargs,
+                    )
+
+                # Keep the real SQLAlchemy Connection identity so its
+                # inspector protocol continues to work, while every explicit
+                # verifier query receives the remaining absolute attempt
+                # budget instead of a fresh per-query five seconds.
+                connection.execute = _execute_with_remaining_budget
+                try:
+                    rows = connection.execute(
+                        migrations_module.text(
+                            "SELECT version_id FROM schema_version"
+                        )
+                    ).fetchall()
+                    table_rows = connection.execute(
+                        migrations_module.text(
+                            "SELECT name, to_regclass(name) IS NOT NULL AS present "
+                            "FROM (VALUES "
+                            "('captured_paper_post_commit_outbox'),"
+                            "('captured_paper_post_commit_outbox_events'),"
+                            "('captured_paper_completed_fill_watch'),"
+                            "('captured_paper_completed_fill_watch_events'),"
+                            "('alpaca_paper_fill_activities'),"
+                            "('alpaca_paper_fill_query_observations'),"
+                            "('alpaca_paper_post_settlement_fill_contradictions'),"
+                            "('captured_paper_selection_frontiers'),"
+                            "('captured_paper_selection_frontier_events'),"
+                            "('captured_paper_selection_route_states'),"
+                            "('captured_paper_variant_application_receipts'),"
+                            "('captured_paper_variant_application_events')"
+                            ") AS required(name)"
+                        )
+                    ).fetchall()
+                    migration_354_verifier(connection)
+                finally:
+                    connection.execute = original_execute
+            if float(monotonic_clock()) >= attempt_deadline:
+                raise SQLAlchemyTimeoutError(
+                    "PAPER database schema readiness attempt exceeded its deadline"
+                )
+            break
+        except CapturedAlpacaPaperServiceError:
+            raise
+        except Exception as exc:
+            if not _is_transient_database_unavailability(exc):
+                raise CapturedAlpacaPaperServiceError(
+                    "DATABASE_SCHEMA_UNREADABLE", "PAPER database schema read failed"
+                ) from exc
+            last_transient_error = exc
+            remaining_seconds = deadline - float(monotonic_clock())
+            if remaining_seconds <= 0.0:
+                raise CapturedAlpacaPaperServiceError(
+                    "DATABASE_SCHEMA_UNREADABLE",
+                    "PAPER database schema remained unavailable during bounded startup recovery",
+                ) from exc
+            sleep(min(retry_seconds, remaining_seconds))
+        finally:
+            if owns_connection_engine:
+                connection_engine.dispose()
     applied = {str(row[0]) for row in rows}
     missing = tuple(version for version in expected_ids if version not in applied)
     unexpected = tuple(sorted(applied.difference(expected_ids)))
