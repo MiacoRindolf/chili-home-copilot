@@ -259,6 +259,12 @@ PREACTIVATION_ROLLBACK_BASELINE_MODE = "PREACTIVATION_ROLLBACK_BASELINE"
 # / 15-min manifest windows.
 STARTUP_HANDSHAKE_MAX_AGE_SECONDS = 480.0
 STARTUP_DISPATCH_LOCK_WAIT_SECONDS = 30.0
+# r166 proved that the exact sealed launcher can remain the only visible
+# candidate process for 17.219 seconds while it validates and re-hashes its
+# immutable inputs before spawning the foreground service.  The former 15s
+# call-site literal misclassified that bounded preflight as a dead service.
+# Keep the wait finite and retain the exact two-process/identity fence.
+CANDIDATE_INITIAL_PROCESS_ROSTER_WAIT_SECONDS = 60.0
 CANDIDATE_PROCESS_ROSTER_WAIT_SECONDS = 5.0
 STARTUP_DISPATCH_LOCK_BYTE = b"0"
 STARTUP_DISPATCH_LOCK_BYTE_SHA256 = hashlib.sha256(
@@ -7326,7 +7332,8 @@ class CapturedPaperHostCutoverExecutor:
             self.backend.start_task(CANDIDATE_TASK_NAME)
             mutations += 1
             processes = self.backend.await_candidate_processes(
-                self.prepared.invocation, timeout_seconds=15.0
+                self.prepared.invocation,
+                timeout_seconds=CANDIDATE_INITIAL_PROCESS_ROSTER_WAIT_SECONDS,
             )
             self._assert_candidate_process_roster(processes)
             journal.append(
@@ -7830,7 +7837,8 @@ class CapturedPaperHostCutoverExecutor:
                 self.backend.start_task(CANDIDATE_TASK_NAME)
                 mutations += 1
                 processes = self.backend.await_candidate_processes(
-                    self.prepared.invocation, timeout_seconds=15.0
+                    self.prepared.invocation,
+                    timeout_seconds=CANDIDATE_INITIAL_PROCESS_ROSTER_WAIT_SECONDS,
                 )
                 self._assert_candidate_process_roster(processes)
                 journal.append(
