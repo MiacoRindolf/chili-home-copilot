@@ -324,7 +324,7 @@ def test_pressure_feed_unreadable_health_returns_fail_closed_mapping() -> None:
         worker.close(join_timeout_seconds=1.0)
 
 
-def test_pressure_feed_runtime_sample_failure_stays_alive_and_recovers() -> None:
+def test_pressure_feed_runtime_sample_failure_suspends_and_recovers() -> None:
     failure_sampled = threading.Event()
     allow_recovery = threading.Event()
     recovery_observed = threading.Event()
@@ -354,6 +354,7 @@ def test_pressure_feed_runtime_sample_failure_stays_alive_and_recovers() -> None
                         "required_full_fidelity_admissible": True,
                         "pressure_state": "normal",
                         "rejection_reason": None,
+                        "sampling_suspended": False,
                         "sample_count": int(self.value["sample_count"]) + 1,
                         "sample_age_seconds": 0.0,
                     }
@@ -361,22 +362,22 @@ def test_pressure_feed_runtime_sample_failure_stays_alive_and_recovers() -> None
             if sample == "recovery":
                 recovery_observed.set()
 
-        def health(self) -> dict[str, object]:
-            with lock:
-                return dict(self.value)
-
-        def mark_stale(self) -> None:
+        def suspend_sampling(self) -> None:
             with lock:
                 self.value.update(
                     {
                         "required_full_fidelity_admissible": False,
-                        "pressure_state": "stale_fail_closed",
+                        "pressure_state": "unobserved_fail_closed",
                         "rejection_reason": (
-                            "capture_resource_pressure_sample_stale"
+                            "capture_resource_pressure_sample_unavailable"
                         ),
-                        "sample_age_seconds": 6.0,
+                        "sampling_suspended": True,
                     }
                 )
+
+        def health(self) -> dict[str, object]:
+            with lock:
+                return dict(self.value)
 
     controller = _Controller()
     sample_calls = 0
@@ -387,7 +388,6 @@ def test_pressure_feed_runtime_sample_failure_stays_alive_and_recovers() -> None
         if sample_calls == 1:
             return "startup"
         if sample_calls == 2:
-            controller.mark_stale()
             failure_sampled.set()
             raise TimeoutError("runtime metrics unavailable")
         assert allow_recovery.wait(timeout=2.0)
@@ -412,6 +412,14 @@ def test_pressure_feed_runtime_sample_failure_stays_alive_and_recovers() -> None
         assert degraded["ingress_admissible"] is False
         assert degraded["admission_suspended"] is True
         assert degraded["recoverable_admission_suspension"] is True
+        assert degraded["sampling_state"] == "suspended_retrying"
+        assert degraded["feed_status"] == "suspended_retrying"
+        assert degraded["sampling_healthy"] is False
+        assert degraded["sampling_overdue"] is False
+        assert degraded["operationally_healthy"] is False
+        assert degraded["degraded_reason"] == (
+            "capture_resource_pressure_sample_unavailable"
+        )
         assert degraded["sample_failure_count"] == 1
         assert degraded["consecutive_sample_failures"] == 1
         assert degraded["last_sample_error"] == (
@@ -432,9 +440,237 @@ def test_pressure_feed_runtime_sample_failure_stays_alive_and_recovers() -> None
         assert recovered["sample_failure_count"] == 1
         assert recovered["consecutive_sample_failures"] == 0
         assert recovered["last_sample_error"] is None
+        assert recovered["ingress_admissible"] is True
+        assert recovered["admission_suspended"] is False
+        assert recovered["sampling_state"] == "healthy"
+        assert recovered["sampling_healthy"] is True
+        assert recovered["sampling_overdue"] is False
+        assert recovered["operationally_healthy"] is True
+        assert recovered["degraded_reason"] is None
     finally:
         allow_recovery.set()
         worker.close(join_timeout_seconds=1.0)
+
+
+def test_pressure_feed_repeated_failures_are_visible_and_self_recover() -> None:
+    class _Clock:
+        def __init__(self) -> None:
+            self.now = 0.0
+
+        def __call__(self) -> float:
+            return self.now
+
+    class _AliveThread:
+        @staticmethod
+        def is_alive() -> bool:
+            return True
+
+    clock = _Clock()
+
+    class _Controller:
+        def __init__(self) -> None:
+            self.binding = SimpleNamespace(
+                policy=SimpleNamespace(
+                    pressure_sample_max_age_seconds=5.0
+                )
+            )
+            self.sample_count = 0
+            self.unavailable = False
+            self.last_observed = 0.0
+
+        def observe(self, _sample: object) -> None:
+            self.sample_count += 1
+            self.unavailable = False
+            self.last_observed = clock.now
+
+        def suspend_sampling(self) -> None:
+            self.unavailable = True
+
+        def health(self) -> dict[str, object]:
+            age = clock.now - self.last_observed
+            return {
+                "required_full_fidelity_admissible": not self.unavailable,
+                "pressure_state": (
+                    "unobserved_fail_closed"
+                    if self.unavailable
+                    else "normal"
+                ),
+                "rejection_reason": (
+                    "capture_resource_pressure_sample_unavailable"
+                    if self.unavailable
+                    else None
+                ),
+                "active_reasons": (),
+                "sample_count": self.sample_count,
+                "sampling_suspended": self.unavailable,
+                "sampling_suspension_count": int(self.unavailable),
+                "sampling_recovery_count": int(
+                    self.sample_count > 1 and not self.unavailable
+                ),
+                "sample_age_seconds": age,
+            }
+
+    controller = _Controller()
+    should_fail = False
+
+    def sample() -> object:
+        if should_fail:
+            raise TimeoutError("metrics source busy")
+        return object()
+
+    worker = service_module._CapturedPaperPressureFeedWorker(
+        pressure_controller=controller,
+        sampler=sample,
+        interval_seconds=2.5,
+        monotonic_clock=clock,
+    )
+    worker._feed_once(startup=True)
+    worker._thread = _AliveThread()
+    should_fail = True
+    for _ in range(2):
+        clock.now += 2.5
+        with pytest.raises(TimeoutError, match="metrics source busy"):
+            worker._feed_once(startup=False)
+
+    clock.now += 0.1
+    degraded = worker.health()
+    assert degraded["running"] is True
+    assert degraded["fatal"] is False
+    assert degraded["sample_failure_count"] == 2
+    assert degraded["consecutive_sample_failures"] == 2
+    assert degraded["last_successful_sample_age_seconds"] == 5.1
+    assert degraded["sampling_state"] == "suspended_retrying"
+    assert degraded["feed_status"] == "suspended_retrying"
+    assert degraded["sampling_healthy"] is False
+    assert degraded["sampling_overdue"] is True
+    assert degraded["operationally_healthy"] is False
+    assert degraded["admission_suspended"] is True
+
+    should_fail = False
+    clock.now += 0.1
+    worker._feed_once(startup=False)
+    recovered = worker.health()
+    assert recovered["running"] is True
+    assert recovered["consecutive_sample_failures"] == 0
+    assert recovered["sampling_state"] == "healthy"
+    assert recovered["sampling_healthy"] is True
+    assert recovered["operationally_healthy"] is True
+    assert recovered["admission_suspended"] is False
+
+
+def test_pressure_feed_runtime_clock_failure_suspends_before_thread_exit() -> None:
+    class _Clock:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def __call__(self) -> float:
+            self.calls += 1
+            if self.calls >= 2:
+                raise OSError("monotonic source unavailable")
+            return 0.0
+
+    class _Controller:
+        def __init__(self) -> None:
+            self.suspended = False
+
+        def observe(self, _sample: object) -> None:
+            self.suspended = False
+
+        def suspend_sampling(self) -> None:
+            self.suspended = True
+
+    controller = _Controller()
+    worker = service_module._CapturedPaperPressureFeedWorker(
+        pressure_controller=controller,
+        sampler=object,
+        interval_seconds=2.5,
+        monotonic_clock=_Clock(),
+    )
+
+    worker._feed_once(startup=True)
+    with pytest.raises(OSError, match="monotonic source unavailable"):
+        worker._feed_once(startup=False)
+
+    assert controller.suspended is True
+    assert worker._fatal is True
+    assert worker._sample_failure_count == 1
+    assert worker._consecutive_sample_failures == 1
+
+
+def test_pressure_feed_health_clock_failure_is_fatal_and_fail_closed() -> None:
+    class _Clock:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def __call__(self) -> float:
+            self.calls += 1
+            if self.calls >= 2:
+                raise OSError("monotonic health source unavailable")
+            return 0.0
+
+    class _AliveThread:
+        @staticmethod
+        def is_alive() -> bool:
+            return True
+
+    class _Controller:
+        def __init__(self) -> None:
+            self.binding = SimpleNamespace(
+                policy=SimpleNamespace(
+                    pressure_sample_max_age_seconds=5.0
+                )
+            )
+            self.suspended = False
+            self.samples = 0
+
+        def observe(self, _sample: object) -> None:
+            self.samples += 1
+            self.suspended = False
+
+        def suspend_sampling(self) -> None:
+            self.suspended = True
+
+        def health(self) -> dict[str, object]:
+            return {
+                "required_full_fidelity_admissible": not self.suspended,
+                "pressure_state": (
+                    "unobserved_fail_closed"
+                    if self.suspended
+                    else "normal"
+                ),
+                "rejection_reason": (
+                    "capture_resource_pressure_sample_unavailable"
+                    if self.suspended
+                    else None
+                ),
+                "active_reasons": (),
+                "sample_count": self.samples,
+                "sampling_suspended": self.suspended,
+                "sample_age_seconds": 0.0,
+            }
+
+    controller = _Controller()
+    worker = service_module._CapturedPaperPressureFeedWorker(
+        pressure_controller=controller,
+        sampler=object,
+        interval_seconds=2.5,
+        monotonic_clock=_Clock(),
+    )
+    worker._feed_once(startup=True)
+    worker._thread = _AliveThread()
+
+    health = worker.health()
+
+    assert controller.suspended is True
+    assert health["running"] is False
+    assert health["fatal"] is True
+    assert health["ingress_admissible"] is False
+    assert health["admission_suspended"] is True
+    assert health["operationally_healthy"] is False
+    assert health["pressure_state"] == "health_unavailable"
+    assert health["pressure_rejection_reason"] == (
+        "pressure_feed_monotonic_clock_unavailable:OSError"
+    )
 
 
 def test_pressure_feed_cadence_does_not_add_sampling_duration() -> None:
@@ -490,6 +726,7 @@ def test_pressure_feed_runtime_contract_failure_is_fatal(
     class _Controller:
         def __init__(self) -> None:
             self.observe_calls = 0
+            self.suspended = False
 
         def observe(self, _sample: object) -> None:
             self.observe_calls += 1
@@ -497,14 +734,26 @@ def test_pressure_feed_runtime_contract_failure_is_fatal(
                 failure_observed.set()
                 raise ValueError("pressure contract invalid")
 
+        def suspend_sampling(self) -> None:
+            self.suspended = True
+
         def health(self) -> dict[str, object]:
             return {
-                "required_full_fidelity_admissible": True,
-                "pressure_state": "normal",
-                "rejection_reason": None,
+                "required_full_fidelity_admissible": not self.suspended,
+                "pressure_state": (
+                    "unobserved_fail_closed"
+                    if self.suspended
+                    else "normal"
+                ),
+                "rejection_reason": (
+                    "capture_resource_pressure_sample_unavailable"
+                    if self.suspended
+                    else None
+                ),
                 "active_reasons": (),
                 "entry_streak": 0,
                 "sample_count": 1,
+                "sampling_suspended": self.suspended,
                 "sample_age_seconds": 0.0,
             }
 
@@ -537,6 +786,9 @@ def test_pressure_feed_runtime_contract_failure_is_fatal(
         assert health["consecutive_sample_failures"] == 1
         assert health["last_sample_error"] == (
             "ValueError: pressure contract invalid"
+        )
+        assert health["pressure_rejection_reason"] == (
+            "capture_resource_pressure_sample_unavailable"
         )
     finally:
         worker.close(join_timeout_seconds=1.0)

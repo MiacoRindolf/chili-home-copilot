@@ -577,6 +577,36 @@ def test_pressure_sample_absence_and_staleness_are_fail_closed() -> None:
     assert controller.required_full_fidelity_admissible is True
 
 
+def test_runtime_sampler_failure_invalidates_fresh_sample_until_observe() -> None:
+    binding = _binding()
+    clock = _Clock()
+    controller = CaptureAdaptivePressureController(
+        binding, monotonic_clock=clock
+    )
+
+    controller.observe(_pressure_sample(binding, 1))
+    assert controller.required_full_fidelity_admissible is True
+
+    controller.suspend_sampling()
+    invalidated = controller.health()
+    assert invalidated["pressure_state"] == "unobserved_fail_closed"
+    assert invalidated["sampling_suspended"] is True
+    assert invalidated["sampling_suspension_count"] == 1
+    assert invalidated["sampling_recovery_count"] == 0
+    controller.suspend_sampling()
+    assert controller.health()["sampling_suspension_count"] == 1
+    assert controller.rejection_reason == (
+        "capture_resource_pressure_sample_unavailable"
+    )
+
+    recovered = controller.observe(_pressure_sample(binding, 2))
+    assert recovered["sampling_suspended"] is False
+    assert recovered["sampling_suspension_count"] == 1
+    assert recovered["sampling_recovery_count"] == 1
+    assert recovered["pressure_state"] == "normal"
+    assert controller.required_full_fidelity_admissible is True
+
+
 def test_hot_symbol_capacity_is_measured_rejects_with_gap_and_releases_exactly() -> None:
     binding = _binding(calibrated_hot_symbol_bytes=4_000_000)
     assert binding.budget.derived_hot_symbol_capacity == 2

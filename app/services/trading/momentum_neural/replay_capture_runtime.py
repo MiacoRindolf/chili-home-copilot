@@ -727,6 +727,9 @@ class CaptureAdaptivePressureController:
         self._active_reasons: tuple[str, ...] = ()
         self._last_sample: CapturePressureSample | None = None
         self._last_sample_monotonic: float | None = None
+        self._sampling_suspended = False
+        self._sampling_suspension_count = 0
+        self._sampling_recovery_count = 0
         self._sample_count = 0
         self._transition_count = 0
 
@@ -783,6 +786,12 @@ class CaptureAdaptivePressureController:
                 )
             self._last_sample = sample
             self._last_sample_monotonic = observed_monotonic
+            # A fresh, contract-valid observation is the only operation that
+            # can clear an explicit sampler failure.  Thread liveness or the
+            # mere passage of time must never reopen capture admission.
+            if self._sampling_suspended:
+                self._sampling_recovery_count += 1
+            self._sampling_suspended = False
             self._sample_count += 1
             reasons = self._entry_reasons(sample)
             if not self._pressured:
@@ -825,6 +834,22 @@ class CaptureAdaptivePressureController:
                     self._transition_count += 1
             return self.health()
 
+    def suspend_sampling(self) -> None:
+        """Immediately fail closed after a runtime sampler I/O failure.
+
+        The last measured sample can remain inside its freshness window for a
+        few seconds after the sampler itself has failed.  Keeping that sample
+        admissible would create a small blind-admission window.  This explicit
+        invalidation preserves the measured sample for diagnostics but blocks
+        new capture starts until :meth:`observe` accepts a genuinely fresh
+        replacement.
+        """
+
+        with self._lock:
+            if not self._sampling_suspended:
+                self._sampling_suspension_count += 1
+            self._sampling_suspended = True
+
     @property
     def required_full_fidelity_admissible(self) -> bool:
         with self._lock:
@@ -837,6 +862,8 @@ class CaptureAdaptivePressureController:
 
     def _current_rejection_reason(self) -> str | None:
         if self._last_sample is None or self._last_sample_monotonic is None:
+            return "capture_resource_pressure_sample_unavailable"
+        if self._sampling_suspended:
             return "capture_resource_pressure_sample_unavailable"
         now = float(self._monotonic_clock())
         if not math.isfinite(now) or now < self._last_sample_monotonic:
@@ -873,6 +900,9 @@ class CaptureAdaptivePressureController:
                 "entry_streak": self._enter_streak,
                 "recovery_streak": self._recovery_streak,
                 "sample_count": self._sample_count,
+                "sampling_suspended": self._sampling_suspended,
+                "sampling_suspension_count": self._sampling_suspension_count,
+                "sampling_recovery_count": self._sampling_recovery_count,
                 "transition_count": self._transition_count,
                 "last_sample_sha256": sample.sample_sha256 if sample else None,
                 "last_observed_at": _iso(sample.observed_at) if sample else None,

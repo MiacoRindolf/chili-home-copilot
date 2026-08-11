@@ -7880,6 +7880,12 @@ class LiveReplayCaptureProcessService:
     ) -> LiveCaptureHotRunAdmission:
         normalized = _normalized_symbol(symbol, required=True)
         assert normalized is not None
+        # A known pressure-sampler suspension is availability, not a reason to
+        # allocate a writer lease and construct a doomed one-symbol lifecycle.
+        # Recheck inside Coordinator.start remains authoritative for races.
+        pressure_rejection = self.supervisor.pressure_controller.rejection_reason
+        if pressure_rejection is not None:
+            raise CaptureContractError(pressure_rejection)
         with self._lock:
             if normalized in self._run_by_symbol or normalized in self._pending_symbols:
                 raise CaptureContractError(

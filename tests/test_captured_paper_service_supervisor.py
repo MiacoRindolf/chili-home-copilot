@@ -539,6 +539,11 @@ def test_fresh_write_pressure_suspension_starts_active_without_selection_input()
                 "ingress_admissible": False,
                 "admission_suspended": True,
                 "recoverable_admission_suspension": True,
+                "sampling_healthy": True,
+                "operationally_healthy": False,
+                "degraded_reason": (
+                    "capture_resource_pressure_write_latency"
+                ),
                 "pressure_state": "failed_closed",
                 "pressure_rejection_reason": (
                     "capture_resource_pressure_write_latency"
@@ -570,6 +575,12 @@ def test_fresh_write_pressure_suspension_starts_active_without_selection_input()
     )
 
     assert health["state"] == "active"
+    assert health["operational_status"] == "degraded"
+    assert health["operationally_healthy"] is False
+    assert health["admission_suspended"] is True
+    assert health["degraded_workers"] == {
+        "pressure_feed": "capture_resource_pressure_write_latency"
+    }
     assert health["live_loop_started"] is True
     assert live["running"] is True
     assert "active_authority_consume" in events
@@ -593,14 +604,24 @@ def test_post_authority_pressure_suspension_keeps_service_alive_fail_closed():
     events = []
 
     class _PressureSuspendsAfterAuthority(_Worker):
+        def __init__(self, name, worker_events):
+            super().__init__(name, worker_events)
+            self.recovered = False
+
+        def recover(self):
+            self.recovered = True
+
         def health(self):
             health = super().health()
-            if "active_authority_consume" not in events:
+            if "active_authority_consume" not in events or self.recovered:
                 return {
                     **health,
                     "pre_authority_ready": True,
                     "ingress_admissible": True,
                     "admission_suspended": False,
+                    "sampling_healthy": True,
+                    "operationally_healthy": True,
+                    "degraded_reason": None,
                 }
             return {
                 **health,
@@ -608,6 +629,11 @@ def test_post_authority_pressure_suspension_keeps_service_alive_fail_closed():
                 "ingress_admissible": False,
                 "admission_suspended": True,
                 "recoverable_admission_suspension": False,
+                "sampling_healthy": False,
+                "operationally_healthy": False,
+                "degraded_reason": (
+                    "pressure_controller_health_unavailable:OSError"
+                ),
                 "pressure_state": "health_unavailable",
                 "pressure_rejection_reason": (
                     "pressure_controller_health_unavailable:OSError"
@@ -639,6 +665,28 @@ def test_post_authority_pressure_suspension_keeps_service_alive_fail_closed():
     ] is False
     assert "transport_start" in events
     assert "live_start" in events
+    assert live["running"] is True
+    ongoing = supervisor.assert_healthy()
+    assert ongoing["state"] == "active"
+    assert ongoing["operational_status"] == "degraded"
+    assert ongoing["operationally_healthy"] is False
+    assert ongoing["admission_suspended"] is True
+    assert ongoing["degraded_workers"] == {
+        "pressure_feed": "pressure_controller_health_unavailable:OSError"
+    }
+    assert "live_stop" not in events
+    assert not any(
+        isinstance(event, tuple) and event[0] == "transport_close"
+        for event in events
+    )
+
+    pressure.recover()
+    recovered = supervisor.assert_healthy()
+    assert recovered["state"] == "active"
+    assert recovered["operational_status"] == "healthy"
+    assert recovered["operationally_healthy"] is True
+    assert recovered["admission_suspended"] is False
+    assert recovered["degraded_workers"] == {}
     assert live["running"] is True
     supervisor.close(join_timeout_seconds=1.0, quiesce_timeout_seconds=1.0)
 
