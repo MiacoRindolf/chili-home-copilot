@@ -1807,6 +1807,37 @@ sock_lock = threading.Lock()
 _connection_state_lock = threading.Lock()
 _active_connection_generation = 0
 _last_nbbo_append_monotonic: float | None = None
+
+# Socket liveness, kept DELIBERATELY SEPARATE from quote admission.
+#
+# The half-open detector below used to read `_last_nbbo_append_monotonic`, which
+# only advances when a quote CLEARS the 2.0s trade-recency fence
+# (AUTHORITATIVE_MAX_AGE_S). That conflates two different questions:
+#
+#   "is this socket delivering?"   -- a transport property
+#   "is this quote executable?"    -- a data-quality property
+#
+# They diverge every single session. The moment prints stop -- after-hours, a
+# holiday, a weekend, or just an illiquid name -- no quote can clear the fence,
+# the clock freezes, and 45s later the bridge tears down a perfectly healthy
+# IQConnect socket. It then reconnects into the same condition and repeats,
+# forever. Measured 2026-08-10: the NBBO tape stopped at 00:00:07Z -- 20:00:07 ET,
+# the exact end of the after-hours session -- and the log then carried 192
+# consecutive "no valid IQFeed L1 BBO frames for 45.3s across 183 watched symbols;
+# reconnecting" cycles against a socket that was ESTABLISHED the whole time. L2
+# depth, which does not go through this fence, kept flowing throughout.
+#
+# This clock answers only the transport question: it advances on ANY decoded
+# frame from the socket. The data-quality fence is untouched -- a stale quote
+# still cannot be captured.
+_last_socket_frame_monotonic: float | None = None
+
+
+def _mark_socket_frame() -> None:
+    """Record that the socket delivered a frame. Transport liveness only."""
+
+    global _last_socket_frame_monotonic
+    _last_socket_frame_monotonic = time.monotonic()
 _connection_generation = 0
 _frame_sequence_by_generation: dict[int, int] = {}
 _protocol_acknowledged_generations: set[int] = set()
@@ -2857,6 +2888,11 @@ def reader(
             )
             if not line:
                 continue
+            # Transport liveness: the socket just delivered a decoded frame. This
+            # is true regardless of whether the frame is a quote, a trade, a system
+            # message, or a heartbeat, and regardless of whether any of it will
+            # pass the trade-recency fence. See _last_socket_frame_monotonic.
+            _mark_socket_frame()
             c0 = line[0]
             received_at = datetime.now(timezone.utc)
             source_frame_sha256 = hashlib.sha256(raw).hexdigest()
@@ -3226,19 +3262,32 @@ def writer(
             reconcile(allow_unwatch=True, sticky=STICKY_RESUBSCRIBE)
             last_refresh = time.monotonic()
 
-        # A connected socket with watched symbols but no valid BBO frames is not a
+        # A connected socket with watched symbols that has gone SILENT is not a
         # healthy market-data path. Reconnect so a half-open IQConnect session cannot
         # make an old quote look like the best available execution input indefinitely.
+        #
+        # Measured on frame arrival, NOT on quote admission. Quote admission is
+        # fenced on trade recency, so keying the reconnect off it made the bridge
+        # tear down a healthy socket every ~45s for the whole of every close --
+        # see _last_socket_frame_monotonic. A silent socket still gets torn down;
+        # a quiet MARKET no longer does.
         if (
             STALE_NBBO_RECONNECT_S > 0
             and watched
-            and _last_nbbo_append_monotonic is not None
-            and time.monotonic() - _last_nbbo_append_monotonic > STALE_NBBO_RECONNECT_S
+            and _last_socket_frame_monotonic is not None
+            and time.monotonic() - _last_socket_frame_monotonic > STALE_NBBO_RECONNECT_S
         ):
             log.warning(
-                "no valid IQFeed L1 BBO frames for %.1fs across %d watched symbols; reconnecting",
-                time.monotonic() - _last_nbbo_append_monotonic,
+                "no IQFeed frames at all for %.1fs across %d watched symbols; "
+                "reconnecting (last admitted BBO %s)",
+                time.monotonic() - _last_socket_frame_monotonic,
                 len(watched),
+                (
+                    "never"
+                    if _last_nbbo_append_monotonic is None
+                    else "%.1fs ago"
+                    % (time.monotonic() - _last_nbbo_append_monotonic)
+                ),
             )
             _request_connection_stop(connection_generation, stop_event)
             _close_connection_socket(connection_socket)
@@ -3432,6 +3481,11 @@ def _run_connection(
         watched.clear()
         _last_trade.clear()
         _last_nbbo_append_monotonic = time.monotonic()
+        # Arm transport liveness at connect too: without this a generation that
+        # never receives a single frame would leave the clock None and the
+        # half-open detector disabled -- silence would be indistinguishable from
+        # health, which is the failure this detector exists to catch.
+        _mark_socket_frame()
         _send(
             connection_socket,
             "S,SET PROTOCOL,6.2",
