@@ -131,20 +131,14 @@ def _submit_promoted(runtime, producer, transfer):
         promotion_source_identity_sha256=transfer.source_identity_sha256,
         promotion_resource_binding_sha256=transfer.resource_binding_sha256,
         promotion_inventory_sha256=transfer.inventory_sha256,
+        # The runtime demands the opaque transfer itself, not just its hashes --
+        # `(promotion_id is None) != (promotion_transfer is None)` is a hard
+        # symmetry check. Passing the provenance without the object is what the
+        # earlier fixture got wrong.
+        promotion_transfer=transfer,
     )
 
 
-@pytest.mark.xfail(
-    reason=(
-        "Needs the full promotion handshake -- the runtime requires its exact "
-        "opaque pre-trigger transfer (admission handoff + inventory sha256), which "
-        "this fixture does not yet reproduce. The source fix is evidenced by an "
-        "isolated repro against the running root (real clock -> latch, coarse clock "
-        "-> admit), NOT by this test. Do not merge the source change until this is "
-        "green."
-    ),
-    strict=False,
-)
 def test_promotion_microseconds_before_the_trusted_read_is_accepted():
     """THE regression.
 
@@ -164,22 +158,13 @@ def test_promotion_microseconds_before_the_trusted_read_is_accepted():
     )
 
 
-@pytest.mark.xfail(
-    reason=(
-        "Needs the full promotion handshake -- the runtime requires its exact "
-        "opaque pre-trigger transfer (admission handoff + inventory sha256), which "
-        "this fixture does not yet reproduce. The source fix is evidenced by an "
-        "isolated repro against the running root (real clock -> latch, coarse clock "
-        "-> admit), NOT by this test. Do not merge the source change until this is "
-        "green."
-    ),
-    strict=False,
-)
 def test_promotion_in_the_future_of_the_trusted_clock_is_rejected():
     """The property the guard actually exists for: no fabricated boundary."""
     clock = _AdvancingClock(BASE + timedelta(seconds=1))
+    # Ahead of the trusted clock, but still inside the ring's 3-minute horizon --
+    # an hour out would leave `begin_promotion` with zero events and test nothing.
     runtime, producer, transfer = _promotion_fixture(
-        clock, promoted_at=BASE + timedelta(hours=1)
+        clock, promoted_at=BASE + timedelta(seconds=31)
     )
 
     with pytest.raises(CaptureContractError, match="later than the trusted wall clock"):
@@ -230,17 +215,6 @@ def test_an_empty_ring_was_never_the_failing_case():
     assert runtime._submission_failure is None
 
 
-@pytest.mark.xfail(
-    reason=(
-        "Needs the full promotion handshake -- the runtime requires its exact "
-        "opaque pre-trigger transfer (admission handoff + inventory sha256), which "
-        "this fixture does not yet reproduce. The source fix is evidenced by an "
-        "isolated repro against the running root (real clock -> latch, coarse clock "
-        "-> admit), NOT by this test. Do not merge the source change until this is "
-        "green."
-    ),
-    strict=False,
-)
 def test_a_frozen_clock_would_have_hidden_this():
     """Documents why the existing suite was blind, so it is not re-introduced.
 
