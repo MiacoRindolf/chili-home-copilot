@@ -4091,6 +4091,56 @@ class CaptureProducerLifecycleRuntime:
             )
         return self._sequence + 1
 
+    def _ingress_rejection_reason(self) -> str | None:
+        """Why the ingress would reject right now, if it would. Read-only."""
+
+        controller = getattr(self.ingress, "pressure_controller", None)
+        if controller is None:
+            return None
+        try:
+            return controller.rejection_reason
+        except Exception:
+            return None
+
+    def _await_transient_ingress_pressure(self) -> None:
+        """Block briefly while a RETRYABLE ingress rejection is outstanding.
+
+        Bounded by the sampler's own freshness window, so the wait can never
+        exceed the age that made the sample stale in the first place -- there is
+        no magic number here, and no way to wait longer than the condition can
+        legitimately last. Comfortably under `heartbeat_timeout_seconds`, so
+        `_check_heartbeat_deadline` cannot fire because of this.
+
+        Non-retryable reasons return immediately: a non-monotonic sampler clock
+        is an integrity fault that waiting cannot repair, and the caller must
+        still fail closed on it.
+        """
+
+        controller = getattr(self.ingress, "pressure_controller", None)
+        if controller is None:
+            return
+        budget = 0.0
+        try:
+            budget = float(
+                controller.binding.policy.pressure_sample_max_age_seconds
+            )
+        except Exception:
+            return
+        if not (budget > 0.0):
+            return
+
+        deadline = time.monotonic() + budget
+        step = budget / 25.0
+        while True:
+            reason = self._ingress_rejection_reason()
+            if reason is None:
+                return
+            if not BoundedCaptureIngress._retained_rejection_is_retryable(reason):
+                return
+            if time.monotonic() >= deadline:
+                return
+            time.sleep(step)
+
     def _submit(self, event: CaptureEvent) -> CaptureEvent:
         if self._submission_failure is not None:
             raise CaptureContractError(
@@ -4105,8 +4155,41 @@ class CaptureProducerLifecycleRuntime:
             and event.clocks.available_at < self._last_available_at
         ):
             raise CaptureContractError("capture event availability moved backwards")
+        # WAIT FOR A TRANSIENT REJECTION TO CLEAR RATHER THAN SUBMITTING INTO IT.
+        #
+        # `submit()` returning False latches `_submission_failure`, which is
+        # write-once with no reset path anywhere in the tree -- so ONE momentary
+        # rejection makes the whole lifecycle permanently noncertifiable. On
+        # 2026-08-11 that was the entire remaining blocker: r165 logged
+        # `48 attempt, 0 admitted` with `capture_resource_pressure_sample_stale=25`
+        # as the largest bucket, and every later submit raised "capture lifecycle
+        # is already noncertifiable: ingress_rejected_sequence_N".
+        #
+        # The pressure sampler goes stale for a moment and returns; it is not a
+        # contract breach. `_retained_rejection_is_retryable` already says so, and
+        # the retained path already honours it. This one caller did not.
+        #
+        # Deliberately a PRE-CHECK, not a retry of submit(). Re-submitting would
+        # be wrong: a rejection consumes the event and records a coverage gap, by
+        # design ("bounded, aggregated overflow evidence"), so each retry would
+        # burn another sequence and another gap and `seal_run` would refuse on
+        # `submitted != sequence`. Asking the controller first costs nothing and
+        # keeps that contract exactly as it is -- we simply stop handing the
+        # ingress an event it has already told us it cannot take yet.
+        self._await_transient_ingress_pressure()
         if not self.ingress.submit(event):
-            self._latch_failure(f"ingress_rejected_sequence_{event.sequence}")
+            # Carry the reason in the latch WHEN THERE IS ONE: r165's six latches
+            # recorded only a sequence number, which made the actual branch
+            # unrecoverable from the artifacts. Append nothing when the reason is
+            # unknown -- a literal "_unknown" is noise, and the bare form is the
+            # long-standing contract. Either way the `ingress_rejected_sequence_`
+            # prefix is preserved, because the captured-paper abort path
+            # string-matches it.
+            latch = f"ingress_rejected_sequence_{event.sequence}"
+            reason = self._ingress_rejection_reason()
+            if reason:
+                latch = f"{latch}_{reason}"
+            self._latch_failure(latch)
             raise CaptureContractError(
                 "capture ingress rejected an event; lifecycle cannot certify"
             )
