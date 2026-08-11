@@ -2780,6 +2780,8 @@ def test_two_phase_host_handshake_is_prepared_permit_started(
     ) = (
         _host_handshake_fixture(tmp_path)
     )
+    assert not handshake.dispatch_lock_path.exists()
+    assert handshake._dispatch_lock_identity == {}
     prepared = handshake.publish_prepared()
     assert prepared["state"] == "PREPARED"
     assert prepared["workers_started"] is False
@@ -2838,6 +2840,43 @@ def test_two_phase_host_handshake_is_prepared_permit_started(
         "artifact_sha256"
     ]
     assert handshake.permit_path.exists()
+
+
+def test_host_handshake_prepared_rejection_leaves_no_dispatch_lock(
+    tmp_path: Path,
+) -> None:
+    handshake, *_rest = _host_handshake_fixture(
+        tmp_path,
+        wall_clock=lambda: NOW + timedelta(minutes=6),
+    )
+
+    assert not handshake.dispatch_lock_path.exists()
+    with pytest.raises(CapturedAlpacaPaperServiceError, match="PREPARED_EXPIRED"):
+        handshake.publish_prepared()
+    assert not handshake.dispatch_lock_path.exists()
+    assert handshake._dispatch_lock_identity == {}
+
+
+def test_host_handshake_prepared_publish_failure_removes_exact_dispatch_lock(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    handshake, *_rest = _host_handshake_fixture(tmp_path)
+
+    def _fail_publish(_path, _value):
+        raise OSError("simulated PREPARED publication failure")
+
+    monkeypatch.setattr(
+        service_module,
+        "_publish_canonical_json_once",
+        _fail_publish,
+    )
+    with pytest.raises(OSError, match="simulated PREPARED publication failure"):
+        handshake.publish_prepared()
+
+    assert not handshake.ready_path.exists()
+    assert not handshake.dispatch_lock_path.exists()
+    assert handshake._dispatch_lock_identity == {}
 
 
 def test_committed_host_authority_survives_startup_permit_expiry_but_not_revocation(
@@ -5453,8 +5492,10 @@ def test_database_schema_fence_rejects_future_unknown_migration() -> None:
         def __init__(self, versions, *, missing_tables=()):
             self.versions = versions
             self.missing_tables = tuple(missing_tables)
+            self.connect_calls = 0
 
         def connect(self):
+            self.connect_calls += 1
             return _Connection(
                 self.versions,
                 missing_tables=self.missing_tables,
@@ -5470,20 +5511,534 @@ def test_database_schema_fence_rejects_future_unknown_migration() -> None:
     )
     assert result["latest_migration"] == "002"
 
+    future_engine = _Engine(("001", "002", "future_999"))
     with pytest.raises(CapturedAlpacaPaperServiceError, match="exact code generation"):
         _verify_database_schema(
-            _Engine(("001", "002", "future_999")),
+            future_engine,
             migrations_module=migrations,
+        )
+    assert future_engine.connect_calls == 1
+
+    missing_table_engine = _Engine(
+        ("001", "002"),
+        missing_tables=("captured_paper_selection_route_states",),
+    )
+    with pytest.raises(CapturedAlpacaPaperServiceError, match="exact code generation"):
+        _verify_database_schema(
+            missing_table_engine,
+            migrations_module=migrations,
+        )
+    assert missing_table_engine.connect_calls == 1
+
+
+def test_database_schema_fence_retries_transient_startup_unavailability() -> None:
+    from sqlalchemy.exc import (
+        InterfaceError,
+        OperationalError,
+        TimeoutError as SQLAlchemyTimeoutError,
+    )
+
+    class _Clock:
+        def __init__(self) -> None:
+            self.now = 0.0
+            self.sleeps: list[float] = []
+
+        def __call__(self) -> float:
+            return self.now
+
+        def sleep(self, seconds: float) -> None:
+            self.sleeps.append(seconds)
+            self.now += seconds
+
+    class _Result:
+        def __init__(self, rows):
+            self.rows = rows
+
+        def fetchall(self):
+            return self.rows
+
+    class _Connection:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return None
+
+        def execute(self, statement):
+            if "schema_version" in statement:
+                return _Result([("001",), ("002",)])
+            return _Result([("required", True)])
+
+    class _Engine:
+        def __init__(self) -> None:
+            self.connect_calls = 0
+
+        def connect(self):
+            self.connect_calls += 1
+            if self.connect_calls == 1:
+                raise SQLAlchemyTimeoutError("database pool is not ready")
+            if self.connect_calls == 2:
+                raise InterfaceError(
+                    "connect",
+                    {},
+                    RuntimeError("connection already closed"),
+                )
+            if self.connect_calls == 3:
+                raise OperationalError(
+                    "connect",
+                    {},
+                    RuntimeError("database system is starting up"),
+                )
+            return _Connection()
+
+    migrations = SimpleNamespace(
+        MIGRATIONS=(("001", object()), ("002", object())),
+        text=lambda value: value,
+        _verify_migration_354_physical_contract=lambda _connection: None,
+    )
+    clock = _Clock()
+    engine = _Engine()
+    result = _verify_database_schema(
+        engine,
+        migrations_module=migrations,
+        readiness_timeout_seconds=10.0,
+        retry_interval_seconds=2.0,
+        monotonic_clock=clock,
+        sleep=clock.sleep,
+    )
+
+    assert result["latest_migration"] == "002"
+    assert engine.connect_calls == 4
+    assert clock.sleeps == [2.0, 2.0, 2.0]
+
+
+def test_database_schema_fence_transient_exhaustion_is_bounded() -> None:
+    from sqlalchemy.exc import OperationalError
+
+    class _Clock:
+        def __init__(self) -> None:
+            self.now = 0.0
+            self.sleeps: list[float] = []
+
+        def __call__(self) -> float:
+            return self.now
+
+        def sleep(self, seconds: float) -> None:
+            self.sleeps.append(seconds)
+            self.now += seconds
+
+    class _Engine:
+        def __init__(self) -> None:
+            self.connect_calls = 0
+
+        def connect(self):
+            self.connect_calls += 1
+            raise OperationalError(
+                "connect",
+                {},
+                RuntimeError("database system is starting up"),
+            )
+
+    migrations = SimpleNamespace(
+        MIGRATIONS=(("001", object()), ("002", object())),
+        text=lambda value: value,
+        _verify_migration_354_physical_contract=lambda _connection: None,
+    )
+    clock = _Clock()
+    engine = _Engine()
+    with pytest.raises(
+        CapturedAlpacaPaperServiceError,
+        match="bounded startup recovery",
+    ) as exc_info:
+        _verify_database_schema(
+            engine,
+            migrations_module=migrations,
+            readiness_timeout_seconds=5.0,
+            retry_interval_seconds=2.0,
+            monotonic_clock=clock,
+            sleep=clock.sleep,
         )
 
-    with pytest.raises(CapturedAlpacaPaperServiceError, match="exact code generation"):
+    assert exc_info.value.code == "DATABASE_SCHEMA_UNREADABLE"
+    assert engine.connect_calls == 3
+    assert clock.sleeps == [2.0, 2.0, 1.0]
+
+
+def test_database_schema_fence_rejects_success_after_readiness_deadline() -> None:
+    class _Clock:
+        def __init__(self) -> None:
+            self.now = 0.0
+
+        def __call__(self) -> float:
+            return self.now
+
+    class _Result:
+        def __init__(self, rows):
+            self.rows = rows
+
+        def fetchall(self):
+            return self.rows
+
+    class _Connection:
+        def __init__(self, clock: _Clock) -> None:
+            self.clock = clock
+
+        def __enter__(self):
+            self.clock.now = 5.0
+            return self
+
+        def __exit__(self, *_args):
+            return None
+
+        def execute(self, statement):
+            if "schema_version" in statement:
+                return _Result([("001",), ("002",)])
+            return _Result([("required", True)])
+
+    class _Engine:
+        def __init__(self, clock: _Clock) -> None:
+            self.clock = clock
+            self.connect_calls = 0
+
+        def connect(self):
+            self.connect_calls += 1
+            return _Connection(self.clock)
+
+    migrations = SimpleNamespace(
+        MIGRATIONS=(("001", object()), ("002", object())),
+        text=lambda value: value,
+        _verify_migration_354_physical_contract=lambda _connection: None,
+    )
+    clock = _Clock()
+    engine = _Engine(clock)
+    with pytest.raises(
+        CapturedAlpacaPaperServiceError,
+        match="bounded startup recovery",
+    ) as exc_info:
         _verify_database_schema(
-            _Engine(
-                ("001", "002"),
-                missing_tables=("captured_paper_selection_route_states",),
-            ),
+            engine,
             migrations_module=migrations,
+            readiness_timeout_seconds=5.0,
+            retry_interval_seconds=2.0,
+            monotonic_clock=clock,
+            sleep=lambda _seconds: None,
         )
+
+    assert exc_info.value.code == "DATABASE_SCHEMA_UNREADABLE"
+    assert engine.connect_calls == 1
+
+
+def test_database_schema_fence_does_not_retry_auth_operational_error() -> None:
+    from sqlalchemy.exc import OperationalError
+
+    class _AuthenticationFailure(RuntimeError):
+        pgcode = "28P01"
+
+    class _Engine:
+        def __init__(self) -> None:
+            self.connect_calls = 0
+
+        def connect(self):
+            self.connect_calls += 1
+            raise OperationalError(
+                "connect",
+                {},
+                _AuthenticationFailure("password authentication failed"),
+            )
+
+    migrations = SimpleNamespace(
+        MIGRATIONS=(("001", object()), ("002", object())),
+        text=lambda value: value,
+        _verify_migration_354_physical_contract=lambda _connection: None,
+    )
+    sleeps: list[float] = []
+    engine = _Engine()
+    with pytest.raises(
+        CapturedAlpacaPaperServiceError,
+        match="schema read failed",
+    ) as exc_info:
+        _verify_database_schema(
+            engine,
+            migrations_module=migrations,
+            readiness_timeout_seconds=5.0,
+            retry_interval_seconds=2.0,
+            monotonic_clock=lambda: 0.0,
+            sleep=sleeps.append,
+        )
+
+    assert exc_info.value.code == "DATABASE_SCHEMA_UNREADABLE"
+    assert engine.connect_calls == 1
+    assert sleeps == []
+
+
+def test_database_schema_fence_uses_bounded_postgres_readiness_connection(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import sqlalchemy
+    from sqlalchemy.pool import NullPool
+
+    statements: list[str] = []
+    created: list[dict[str, object]] = []
+
+    class _Result:
+        def __init__(self, rows):
+            self.rows = rows
+
+        def fetchall(self):
+            return self.rows
+
+    class _Connection:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return None
+
+        def execute(self, statement):
+            statements.append(str(statement))
+            if "schema_version" in str(statement):
+                return _Result([("001",), ("002",)])
+            if "to_regclass" in str(statement):
+                return _Result([("required", True)])
+            return _Result([])
+
+    class _BoundedEngine:
+        def __init__(self) -> None:
+            self.disposed = False
+
+        def connect(self):
+            return _Connection()
+
+        def dispose(self) -> None:
+            self.disposed = True
+
+    bounded_engine = _BoundedEngine()
+
+    def _create_engine(url, **kwargs):
+        created.append({"url": url, **kwargs})
+        return bounded_engine
+
+    monkeypatch.setattr(sqlalchemy, "create_engine", _create_engine)
+    source_engine = SimpleNamespace(
+        url="postgresql+psycopg2://paper:test@localhost/chili_test",
+        dialect=SimpleNamespace(name="postgresql"),
+        connect=lambda: pytest.fail("source application pool must not be used"),
+    )
+    migrations = SimpleNamespace(
+        MIGRATIONS=(("001", object()), ("002", object())),
+        text=lambda value: value,
+        _verify_migration_354_physical_contract=lambda _connection: None,
+    )
+
+    result = _verify_database_schema(
+        source_engine,
+        migrations_module=migrations,
+        readiness_timeout_seconds=5.0,
+        retry_interval_seconds=2.0,
+        monotonic_clock=lambda: 0.0,
+        sleep=lambda _seconds: None,
+    )
+
+    assert result["latest_migration"] == "002"
+    assert len(created) == 1
+    assert created[0]["url"] == source_engine.url
+    assert created[0]["poolclass"] is NullPool
+    assert created[0]["connect_args"] == {
+        "application_name": "chili-captured-paper-schema-readiness",
+        "connect_timeout": 5,
+        "options": "-c statement_timeout=5000 -c lock_timeout=5000",
+    }
+    assert statements[:2] == [
+        "SET LOCAL statement_timeout = '5000ms'",
+        "SET LOCAL lock_timeout = '5000ms'",
+    ]
+    assert bounded_engine.disposed is True
+
+
+def test_database_schema_fence_spent_connect_budget_skips_schema_queries(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import sqlalchemy
+
+    class _Clock:
+        def __init__(self) -> None:
+            self.now = 0.0
+
+        def __call__(self) -> float:
+            return self.now
+
+    clock = _Clock()
+    statements: list[str] = []
+
+    class _Connection:
+        def __enter__(self):
+            clock.now = 5.0
+            return self
+
+        def __exit__(self, *_args):
+            return None
+
+        def execute(self, statement):
+            statements.append(str(statement))
+            pytest.fail("schema SQL must not start after connect spent the budget")
+
+    class _BoundedEngine:
+        def __init__(self) -> None:
+            self.disposed = False
+
+        def connect(self):
+            return _Connection()
+
+        def dispose(self) -> None:
+            self.disposed = True
+
+    bounded_engine = _BoundedEngine()
+    create_calls = 0
+
+    def _create_engine(_url, **_kwargs):
+        nonlocal create_calls
+        create_calls += 1
+        return bounded_engine
+
+    monkeypatch.setattr(sqlalchemy, "create_engine", _create_engine)
+    source_engine = SimpleNamespace(
+        url="postgresql+psycopg2://paper:test@localhost/chili_test",
+        dialect=SimpleNamespace(name="postgresql"),
+        connect=lambda: pytest.fail("source application pool must not be used"),
+    )
+    migrations = SimpleNamespace(
+        MIGRATIONS=(("001", object()), ("002", object())),
+        text=lambda value: value,
+        _verify_migration_354_physical_contract=lambda _connection: None,
+    )
+
+    with pytest.raises(
+        CapturedAlpacaPaperServiceError,
+        match="bounded startup recovery",
+    ) as exc_info:
+        _verify_database_schema(
+            source_engine,
+            migrations_module=migrations,
+            readiness_timeout_seconds=5.0,
+            retry_interval_seconds=2.0,
+            monotonic_clock=clock,
+            sleep=lambda _seconds: None,
+        )
+
+    assert exc_info.value.code == "DATABASE_SCHEMA_UNREADABLE"
+    assert create_calls == 1
+    assert statements == []
+    assert bounded_engine.disposed is True
+
+
+def test_database_schema_fence_verifier_queries_share_absolute_deadline() -> None:
+    class _Clock:
+        def __init__(self) -> None:
+            self.now = 0.0
+
+        def __call__(self) -> float:
+            return self.now
+
+    clock = _Clock()
+    statements: list[str] = []
+
+    class _Result:
+        def __init__(self, rows):
+            self.rows = rows
+
+        def fetchall(self):
+            return self.rows
+
+    class _Connection:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return None
+
+        def execute(self, statement):
+            statement_text = str(statement)
+            statements.append(statement_text)
+            if "schema_version" in statement_text:
+                return _Result([("001",), ("002",)])
+            if "to_regclass" in statement_text:
+                return _Result([("required", True)])
+            if statement_text == "verifier-first-query":
+                clock.now = 5.0
+                return _Result([])
+            if statement_text == "verifier-second-query":
+                pytest.fail("second verifier query must not start past deadline")
+            return _Result([])
+
+    connection = _Connection()
+    engine = SimpleNamespace(connect=lambda: connection)
+
+    def _verify_physical_contract(active_connection) -> None:
+        active_connection.execute("verifier-first-query")
+        active_connection.execute("verifier-second-query")
+
+    migrations = SimpleNamespace(
+        MIGRATIONS=(("001", object()), ("002", object())),
+        text=lambda value: value,
+        _verify_migration_354_physical_contract=_verify_physical_contract,
+    )
+
+    with pytest.raises(
+        CapturedAlpacaPaperServiceError,
+        match="bounded startup recovery",
+    ) as exc_info:
+        _verify_database_schema(
+            engine,
+            migrations_module=migrations,
+            readiness_timeout_seconds=5.0,
+            retry_interval_seconds=2.0,
+            monotonic_clock=clock,
+            sleep=lambda _seconds: None,
+        )
+
+    assert exc_info.value.code == "DATABASE_SCHEMA_UNREADABLE"
+    assert "verifier-first-query" in statements
+    assert "verifier-second-query" not in statements
+
+
+def test_database_schema_fence_does_not_retry_permanent_sql_error() -> None:
+    from sqlalchemy.exc import ProgrammingError
+
+    class _Engine:
+        def __init__(self) -> None:
+            self.connect_calls = 0
+
+        def connect(self):
+            self.connect_calls += 1
+            raise ProgrammingError(
+                "SELECT version_id FROM schema_version",
+                {},
+                RuntimeError("schema_version does not exist"),
+            )
+
+    migrations = SimpleNamespace(
+        MIGRATIONS=(("001", object()), ("002", object())),
+        text=lambda value: value,
+        _verify_migration_354_physical_contract=lambda _connection: None,
+    )
+    sleeps: list[float] = []
+    engine = _Engine()
+    with pytest.raises(
+        CapturedAlpacaPaperServiceError,
+        match="schema read failed",
+    ) as exc_info:
+        _verify_database_schema(
+            engine,
+            migrations_module=migrations,
+            readiness_timeout_seconds=5.0,
+            retry_interval_seconds=2.0,
+            monotonic_clock=lambda: 0.0,
+            sleep=sleeps.append,
+        )
+
+    assert exc_info.value.code == "DATABASE_SCHEMA_UNREADABLE"
+    assert engine.connect_calls == 1
+    assert sleeps == []
 
 
 def test_policy_and_startup_evidence_bind_same_code_config_and_account() -> None:
