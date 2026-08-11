@@ -42,6 +42,10 @@ _MAX_ALERTS_PER_HOUR = 20
 _hourly_count = 0
 _hourly_reset_at = 0.0
 
+# Infrastructure alarm: the momentum control loop stopped beating. Not a trade
+# signal -- it means the lane is not selecting or arming and exits are unowned.
+MOMENTUM_LOOP_DEAD = "momentum_loop_dead"
+
 # Alert tiers: A = high confidence / promoted pattern, B = standard, C = speculative
 TIER_A = "A"
 TIER_B = "B"
@@ -189,6 +193,9 @@ def classify_alert_tier(
     if alert_type in (
         TARGET_HIT, STOP_HIT, POSITION_CLOSED, POSITION_OPENED,
         STOP_APPROACHING, BREAKEVEN_REACHED, STOP_TIGHTENED,
+        # A dead control loop outranks every trade signal: nothing else on
+        # this list can fire while the loop that produces them is stopped.
+        MOMENTUM_LOOP_DEAD,
     ):
         return TIER_A
     if scan_pattern_id and confidence >= 0.7:
@@ -230,6 +237,10 @@ _STOP_ALL_TYPES = frozenset({STOP_HIT, STOP_APPROACHING, BREAKEVEN_REACHED, STOP
 _INDIVIDUAL_MSG_TYPES = frozenset({
     STOP_HIT, TARGET_HIT, STOP_APPROACHING,
     POSITION_OPENED, POSITION_CLOSED,
+    # Without this the alert is routed into push_to_telegram_panel, which
+    # EDITS a pinned message in place and produces no phone notification --
+    # i.e. a fourth silent surface for the one alarm meant to be loud.
+    MOMENTUM_LOOP_DEAD,
 })
 
 _ALERT_TYPE_LABEL: dict[str, str] = {

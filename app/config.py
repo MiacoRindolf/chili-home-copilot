@@ -8087,6 +8087,17 @@ class Settings(BaseSettings):
     # the lane sat frozen ~8h before the operator noticed. This emits a LOUD signal
     # (logger.critical + a cockpit banner + an audit row) so a frozen lane is never
     # silent again. Reversible: =0 fully reverts to the prior silent behaviour.
+    # Deadman for the momentum control loop. Default True: this is a KILL
+    # switch, not an enable switch -- an alarm that ships disabled is the
+    # same silence it was written to end.
+    chili_control_loop_watchdog_enabled: bool = Field(
+        default=True,
+        description=(
+            'Page when the momentum control-loop heartbeat stops. Independent of '
+            'lane_health: it reads the heartbeat table directly, so it still fires '
+            'on hosts that do not drive the lane.'
+        ),
+    )
     chili_lane_health_alert_enabled: bool = Field(
         default=True,
         validation_alias=AliasChoices("CHILI_LANE_HEALTH_ALERT_ENABLED"),
