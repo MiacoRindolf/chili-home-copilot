@@ -616,6 +616,113 @@ def test_symbol_recovery_zero_rows_returns_none_without_delegate(monkeypatch):
     assert state == {"transaction_active": False, "delegated": 0}
 
 
+@pytest.mark.parametrize("include_active", (False, True))
+def test_symbol_recovery_ignores_terminal_rows_with_null_ended_at(
+    monkeypatch,
+    include_active,
+):
+    material = _pure_material()
+    terminal_error = _preowner_session(material, session_id=41)
+    terminal_error.state = "live_error"
+    terminal_cancelled = _preowner_session(material, session_id=42)
+    terminal_cancelled.state = "live_cancelled"
+    active = _preowner_session(material, session_id=43)
+    rows = [terminal_error, terminal_cancelled]
+    if include_active:
+        rows.append(active)
+    state = {
+        "transaction_active": False,
+        "delegated": 0,
+        "terminal_filter_seen": False,
+    }
+
+    class _Query:
+        def populate_existing(self):
+            return self
+
+        def filter(self, *criteria):
+            terminal_states = set(recovery.LIVE_RUNNER_TERMINAL_STATES)
+            for criterion in criteria:
+                left = getattr(criterion, "left", None)
+                right = getattr(criterion, "right", None)
+                values = getattr(right, "value", None)
+                if (
+                    getattr(left, "name", None) == "state"
+                    and isinstance(values, (list, tuple, set, frozenset))
+                    and set(values) == terminal_states
+                ):
+                    state["terminal_filter_seen"] = True
+            return self
+
+        def order_by(self, *_args):
+            return self
+
+        def with_for_update(self):
+            return self
+
+        def all(self):
+            if not state["terminal_filter_seen"]:
+                return rows
+            return [
+                row
+                for row in rows
+                if row.state not in recovery.LIVE_RUNNER_TERMINAL_STATES
+            ]
+
+    class _Db:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        @contextmanager
+        def begin(self):
+            state["transaction_active"] = True
+            try:
+                yield self
+            finally:
+                state["transaction_active"] = False
+
+        def query(self, *_args):
+            return _Query()
+
+    monkeypatch.setattr(recovery, "Session", lambda **_kwargs: _Db())
+    monkeypatch.setattr(
+        recovery, "acquire_adaptive_risk_account_locks", lambda *_a, **_k: None
+    )
+    expected = SimpleNamespace(receipt_sha256="b" * 64)
+
+    def _delegate(*_args, **kwargs):
+        assert state["transaction_active"] is False
+        assert kwargs["session_id"] == active.id
+        state["delegated"] += 1
+        return expected
+
+    monkeypatch.setattr(
+        recovery, "recover_captured_paper_initial_preowner", _delegate
+    )
+
+    result = recovery.recover_captured_paper_initial_symbol(
+        engine,
+        symbol=material.symbol,
+        expected_account_id=material.expected_account_id,
+        expected_runtime_generation=material.runtime_generation,
+        expected_code_build_sha256=material.code_build_sha256,
+        expected_config_sha256=material.config_sha256,
+        expected_capture_receipt_sha256=material.capture_receipt_sha256,
+        assert_service_fence_held=lambda: None,
+    )
+
+    assert state["terminal_filter_seen"] is True
+    if include_active:
+        assert result is expected
+        assert state["delegated"] == 1
+    else:
+        assert result is None
+        assert state["delegated"] == 0
+
+
 def test_symbol_recovery_delegates_exact_row_after_inventory_transaction(
     monkeypatch,
 ):

@@ -37,6 +37,7 @@ from .captured_paper_dispatcher import CapturedPaperDispatchRequest
 from . import captured_paper_initial_admission as initial
 from . import captured_paper_pending_owner as pending_owner
 from . import captured_paper_preowner_promotion as promotion
+from .live_fsm import LIVE_RUNNER_TERMINAL_STATES
 
 
 INITIAL_RECOVERY_SCHEMA_VERSION = "chili.captured-paper-initial-recovery.v1"
@@ -1087,6 +1088,9 @@ def recover_captured_paper_initial_symbol(
                     TradingAutomationSession.mode == "live",
                     TradingAutomationSession.symbol == exact_symbol,
                     TradingAutomationSession.ended_at.is_(None),
+                    TradingAutomationSession.state.notin_(
+                        tuple(sorted(LIVE_RUNNER_TERMINAL_STATES))
+                    ),
                 )
                 .order_by(TradingAutomationSession.id.asc())
                 .with_for_update()

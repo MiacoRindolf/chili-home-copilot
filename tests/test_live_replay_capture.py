@@ -1917,6 +1917,151 @@ def test_failed_shared_run_start_releases_its_writer_lease(
     shared_store.close()
 
 
+def test_ingress_poisoned_start_aborts_releases_shared_lease_and_retries_symbol(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    binding = _binding()
+    controller = CaptureAdaptivePressureController(binding)
+
+    def observe_healthy_pressure(at: datetime) -> None:
+        controller.observe(
+            CapturePressureSample(
+                observed_at=at,
+                resource_binding_sha256=binding.binding_sha256,
+                cpu_percent=20,
+                available_memory_bytes=50_000_000,
+                disk_free_bytes=900_000_000,
+                write_latency_milliseconds=5,
+            )
+        )
+
+    observe_healthy_pressure(BASE + timedelta(seconds=1))
+    clock = _WallClock(BASE + timedelta(seconds=2))
+    shared_admission = SharedCaptureAdmissionBudget.from_resource_binding(
+        binding,
+        pressure_controller=controller,
+    )
+    supervisor = LiveReplayCaptureSupervisor.create(
+        identity=_identity_and_evidence("SUPERVISOR")[0],
+        resource_binding=binding,
+        pressure_controller=controller,
+        wall_clock=clock,
+        pretrigger_horizon=timedelta(minutes=3),
+        per_symbol_pretrigger_events=8,
+        shared_admission_budget=shared_admission,
+    )
+    shared_store = SharedCaptureStoreRuntime.create(
+        tmp_path / "poisoned-start-retry",
+        resource_binding=binding,
+        shared_admission_budget=shared_admission,
+        compression_codec="zlib",
+        wall_clock=clock,
+    )
+    built: list[LiveReplayCaptureCoordinator] = []
+
+    def run_factory(symbol: str, **_kwargs):
+        identity, evidence = _identity_and_evidence(symbol)
+        producer = CaptureProducerSpec(
+            producer_id="live_fsm",
+            instance_id=str(uuid.uuid4()),
+            generation=identity.generation,
+            streams=tuple(
+                sorted(
+                    {
+                        CaptureStream.CODE_BUILD,
+                        CaptureStream.CONFIG_SNAPSHOT,
+                        CaptureStream.FEATURE_FLAG_SNAPSHOT,
+                        CaptureStream.ACCOUNT_RISK_SNAPSHOT,
+                        CaptureStream.NBBO_QUOTE,
+                    },
+                    key=lambda stream: stream.value,
+                )
+            ),
+            code_build_sha256=identity.code_build_sha256,
+            config_sha256=identity.config_sha256,
+            feature_flags_sha256=identity.feature_flags_sha256,
+            resource_binding_sha256=binding.binding_sha256,
+        )
+        coordinator = LiveReplayCaptureCoordinator.create_with_shared_store(
+            identity=identity,
+            certification_symbol=symbol,
+            resource_binding=binding,
+            pressure_controller=controller,
+            shared_store_runtime=shared_store,
+            producers=(producer,),
+            heartbeat_timeout_seconds=300,
+            wall_clock=clock,
+            pretrigger_horizon=timedelta(minutes=3),
+            per_symbol_pretrigger_events=8,
+            writer_batch_events=16,
+            writer_batch_bytes=128 * 1024,
+            writer_poll_seconds=0.001,
+            writer_flush_interval_seconds=0.01,
+        )
+        built.append(coordinator)
+        if len(built) == 1:
+            real_start = coordinator.writer.start
+
+            def start_then_suspend_pressure() -> None:
+                real_start()
+                controller.suspend_sampling()
+
+            monkeypatch.setattr(
+                coordinator.writer,
+                "start",
+                start_then_suspend_pressure,
+            )
+        return coordinator, evidence
+
+    service = LiveReplayCaptureProcessService(
+        supervisor=supervisor,
+        run_factory=run_factory,
+    )
+    quote_at = BASE + timedelta(seconds=3)
+    clock.set(quote_at)
+    service.record_broad_input(
+        stream=CaptureStream.NBBO_QUOTE,
+        provider="massive",
+        symbol="VEEE",
+        payload={"bid": 4.10, "ask": 4.12},
+        clocks=_quote_clocks(1, available=quote_at),
+    )
+
+    with pytest.raises(CaptureContractError, match="capture ingress rejected"):
+        service.admit_hot_symbol(
+            "VEEE",
+            required_stream=CaptureStream.NBBO_QUOTE,
+        )
+
+    poisoned = built[0]
+    assert poisoned.state is CaptureSessionState.ABORTED
+    assert str(
+        poisoned.health()["producer_lifecycle"]["submission_failure"]
+    ).startswith("ingress_rejected_sequence_")
+    assert poisoned.writer.lifecycle_health()["writer_alive"] is False
+    failed_health = shared_store.health()
+    assert failed_health["lease_count"] == 0
+    assert failed_health["writer_threads_in_use"] == 0
+    assert service.health()["pending_symbols"] == ()
+    assert service.health()["running_symbols"] == ()
+
+    observe_healthy_pressure(BASE + timedelta(seconds=4))
+    clock.set(BASE + timedelta(seconds=4))
+    retried = service.admit_hot_symbol(
+        "VEEE",
+        required_stream=CaptureStream.NBBO_QUOTE,
+    )
+    assert retried.capture_ready is True
+    assert retried.coordinator is built[1]
+    assert retried.coordinator is not poisoned
+    assert shared_store.health()["lease_count"] == 1
+
+    service.abort_symbol("VEEE", reason="fixture_retry_complete")
+    assert shared_store.health()["lease_count"] == 0
+    shared_store.close()
+
+
 def test_shared_stop_timeout_defers_release_until_writer_quiesces(
     tmp_path: Path,
     monkeypatch,

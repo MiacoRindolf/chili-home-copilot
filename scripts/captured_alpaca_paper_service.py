@@ -328,9 +328,9 @@ class _CapturedPaperPressureFeedWorker:
 
     def _run(self) -> None:
         # Schedule by sample *start* time.  Waiting a full interval after the
-        # sampler returns adds three serial fsync durations to every period; on
-        # the live PAPER host that pushed a nominal 2.5s cadence past the sealed
-        # 5s sample-freshness window.  If sampling itself consumes an interval,
+        # sampler returns adds the sampler duration to every period; on the live
+        # PAPER host that pushed a nominal 2.5s cadence past the sealed 5s
+        # sample-freshness window.  If sampling itself consumes an interval,
         # retry immediately after it finishes rather than manufacturing a stale
         # gap.  Admission remains fail-closed against the measured sample.
         try:
@@ -6447,31 +6447,37 @@ def _measure_capture_pressure(
     cpu_percent = float(psutil.cpu_percent(interval=0.1))
     available_memory = int(psutil.virtual_memory().available)
     disk_free = int(shutil.disk_usage(root).free)
+    # One durable probe is one controller sample.  The controller already
+    # requires three consecutive entry/recovery samples, so taking three
+    # serial fsyncs here duplicates that evidence while making one logical
+    # sample take longer than the sealed freshness window on a busy host.  That
+    # manufactured stale gaps even though every individual probe was bounded.
+    # Keep the controller hysteresis authoritative and publish each completed
+    # fsync immediately as fresh measured evidence.
     latencies: list[float] = []
-    for _index in range(3):
-        descriptor = -1
-        temporary: str | None = None
-        try:
-            descriptor, temporary = tempfile.mkstemp(
-                prefix=".chili-pressure-", suffix=".tmp", dir=str(probe_root)
-            )
-            started = float(monotonic_clock())
-            with os.fdopen(descriptor, "wb", closefd=True) as handle:
-                descriptor = -1
-                handle.write(b"\0" * 4096)
-                handle.flush()
-                os.fsync(handle.fileno())
-            completed = float(monotonic_clock())
-            latency = max(0.0, (completed - started) * 1000.0)
-            latencies.append(latency)
-        finally:
-            if descriptor >= 0:
-                with suppress(OSError):
-                    os.close(descriptor)
-            if temporary is not None:
-                with suppress(OSError):
-                    os.unlink(temporary)
-    if len(latencies) != 3:
+    descriptor = -1
+    temporary: str | None = None
+    try:
+        descriptor, temporary = tempfile.mkstemp(
+            prefix=".chili-pressure-", suffix=".tmp", dir=str(probe_root)
+        )
+        started = float(monotonic_clock())
+        with os.fdopen(descriptor, "wb", closefd=True) as handle:
+            descriptor = -1
+            handle.write(b"\0" * 4096)
+            handle.flush()
+            os.fsync(handle.fileno())
+        completed = float(monotonic_clock())
+        latency = max(0.0, (completed - started) * 1000.0)
+        latencies.append(latency)
+    finally:
+        if descriptor >= 0:
+            with suppress(OSError):
+                os.close(descriptor)
+        if temporary is not None:
+            with suppress(OSError):
+                os.unlink(temporary)
+    if len(latencies) != 1:
         raise CapturedAlpacaPaperServiceError(
             "PRESSURE_SAMPLE_UNAVAILABLE", "capture write-latency sample is incomplete"
         )

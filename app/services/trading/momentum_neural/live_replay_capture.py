@@ -4143,10 +4143,57 @@ class LiveReplayCaptureCoordinator:
             last_available_at=at,
             lost_count=1,
         )
-        self._submit_gap_locked(gap)
-        writer_stopped = self.writer.stop(timeout_seconds=10.0)
-        storage_released = self._release_storage(defer_shared_if_busy=True)
-        self._state = CaptureSessionState.ABORTED
+        abort_gap_error: BaseException | None = None
+        cleanup_error: BaseException | None = None
+        writer_stopped = False
+        storage_released = False
+        try:
+            # A rejected ingress event already recorded its exact pending gap
+            # and permanently marked this run noncertifiable.  Submitting a
+            # second abort event through that poisoned lifecycle can only raise
+            # before the writer/lease cleanup below, stranding shared capacity.
+            # Skip only that redundant evidence; unrelated abort-gap failures
+            # remain visible after physical cleanup completes.
+            lifecycle_health = self._producer_lifecycle.health()
+            submission_failure = lifecycle_health.get("submission_failure")
+            ingress_rejected_sequence = ""
+            if isinstance(submission_failure, str):
+                ingress_rejected_sequence = submission_failure.removeprefix(
+                    "ingress_rejected_sequence_"
+                )
+            ingress_rejection_already_recorded = bool(
+                isinstance(submission_failure, str)
+                and submission_failure.startswith("ingress_rejected_sequence_")
+                and ingress_rejected_sequence.isdigit()
+                and int(ingress_rejected_sequence) > 0
+            )
+            if not ingress_rejection_already_recorded:
+                try:
+                    self._submit_gap_locked(gap)
+                except BaseException as exc:
+                    abort_gap_error = exc
+        except BaseException as exc:
+            abort_gap_error = exc
+        try:
+            try:
+                writer_stopped = self.writer.stop(timeout_seconds=10.0)
+            except BaseException as exc:
+                cleanup_error = exc
+            try:
+                storage_released = self._release_storage(
+                    defer_shared_if_busy=True
+                )
+            except BaseException as exc:
+                if cleanup_error is None:
+                    cleanup_error = exc
+        finally:
+            self._state = CaptureSessionState.ABORTED
+        if cleanup_error is not None:
+            if abort_gap_error is not None:
+                raise cleanup_error from abort_gap_error
+            raise cleanup_error
+        if abort_gap_error is not None:
+            raise abort_gap_error
         return UnsealedCaptureClose(
             identity=self.identity,
             capture_root=self.capture_root,
