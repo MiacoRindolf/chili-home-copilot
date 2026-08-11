@@ -147,6 +147,12 @@ _CAPTURED_PAPER_ADMISSION_CENSUS_TICKS = 16
 # Ilang MAGKAKAIBANG hilaw na dahilan ang itatabi bilang sample. Maliit at may
 # hangganan — pagmamasid ito, hindi imbakan.
 _CAPTURED_PAPER_ADMISSION_RAW_SAMPLE_KEYS = 8
+
+# Runs of 2+ digits are identifiers (sequence numbers, ids), never the reason.
+# Two digits is the floor deliberately: single digits carry meaning in reasons
+# like "l2 depth 0", while any counter that can collide with the 8-key cap is
+# already wider than that.
+_DIGIT_RUN_RE = re.compile(r"\d{2,}")
 _CAPTURED_PAPER_ADMISSION_RAW_SAMPLE_LEN = 120
 _CAPTURED_PAPER_ADMISSION_REASON_RE = re.compile(r"^[a-z][a-z0-9_]{0,127}$")
 _CAPTURED_PAPER_ADMISSION_TYPED_PREFIX_RE = re.compile(
@@ -2277,6 +2283,21 @@ class LiveRunnerLoop:
                 ch if ch.isprintable() else " " for ch in str(raw)
             )
             clean = " ".join(clean.split())[:_CAPTURED_PAPER_ADMISSION_RAW_SAMPLE_LEN]
+            # Collapse digit runs BEFORE the top-N bookkeeping.
+            #
+            # The 2026-08-07 fix above made the raw reason visible; this one keeps
+            # it from crowding itself out. `ingress_rejected_sequence_{N}` embeds a
+            # monotonically increasing sequence number, so every rejection mints a
+            # DISTINCT key. In the 2026-08-11 r165 census that saturated the 8-key
+            # cap with eight one-hit variants (…_107, _163, _218, _302, _402,
+            # _1119, …) summing to 10, against a fallback bucket of 16 -- six
+            # rejections vanished unseen, and the eight that survived said the same
+            # thing eight times.
+            #
+            # A census whose cardinality is driven by an event counter degrades to
+            # noise exactly when volume is highest, which is when it matters. The
+            # sequence number is never the diagnosis; the reason is.
+            clean = _DIGIT_RUN_RE.sub("<n>", clean)
             if not clean:
                 return
             with self._iqfeed_admission_lock:
