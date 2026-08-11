@@ -34,7 +34,13 @@ _VIABILITY_BRIDGE_MAX_TICKERS = 30
 # processes the full universe in CHUNKS of this size, committing PER CHUNK to
 # avoid the long idle-in-transaction / deadlock class (#561/#610 lessons).
 _VIABILITY_BRIDGE_CHUNK = 32
-_BASELINE_AUDIT_SKIP_JOB_IDS = frozenset({"neural_mesh_drain"})
+_BASELINE_AUDIT_SKIP_JOB_IDS = frozenset({
+    "neural_mesh_drain",
+    # Runs every 60s = 1,440 audit rows/day written into brain_batch_jobs — the
+    # exact table the deadman READS to find the heartbeat. A watchdog must not
+    # bloat its own evidence source.
+    "control_loop_watchdog",
+})
 
 # ── S1 event-driven feeder state (docs/DESIGN/MOMENTUM_ENGINE.md §1/§5) ────────
 # In-process high-water mark for the tape-delta ignite job: only tape rows with
@@ -1268,6 +1274,48 @@ def _run_lane_health_check_job():
             db.close()
 
     run_scheduler_job_guarded("lane_health_check", _work)
+
+
+def _run_control_loop_watchdog_job():
+    """Page when the momentum control loop stops beating.
+
+    Separate from `_run_lane_health_check_job` on purpose. That job is registered
+    only under `include_momentum_exec`, whose role tuple excludes `rnd_only` —
+    the role this scheduler actually runs as — so it fires NOWHERE, and its
+    live-loop condition is additionally gated behind `driver_mode == "event_loop"`,
+    which the host-process deployment never reaches. Over the 14 days to
+    2026-08-11 the loop was dead 50.9% of the time (57 outages, 170h) and nothing
+    ever alarmed. This job is registered on the flag alone so it runs wherever the
+    scheduler runs. (trading.momentum_neural.control_loop_watchdog)"""
+
+    def _work() -> None:
+        from ..config import settings as _settings
+        from ..db import SessionLocal
+
+        if not getattr(_settings, "chili_control_loop_watchdog_enabled", True):
+            return
+
+        db = SessionLocal()
+        try:
+            from .trading.momentum_neural.control_loop_watchdog import (
+                run_control_loop_watchdog,
+            )
+
+            run_control_loop_watchdog(
+                db, user_id=getattr(_settings, "brain_default_user_id", None)
+            )
+        except Exception:
+            db.rollback()
+            logger.warning("[scheduler] control_loop_watchdog failed", exc_info=True)
+        finally:
+            # FIX 46 pattern (rollback before close).
+            try:
+                db.rollback()
+            except Exception:
+                pass
+            db.close()
+
+    run_scheduler_job_guarded("control_loop_watchdog", _work)
 
 
 def _run_momentum_post_exit_excursion_job():
@@ -7100,6 +7148,24 @@ def start_scheduler():
                 max_instances=1,
                 next_run_time=datetime.now() + timedelta(seconds=5),
             )
+
+        # Control-loop deadman. Registered on the FLAG ALONE — deliberately not
+        # under include_momentum_exec (that tuple excludes `rnd_only`, which is
+        # why the existing lane-health check runs nowhere) and not under any
+        # market-session predicate (the loop is a 24/7 exit owner; a session gate
+        # would have hidden the measured 02:05 ET outage entirely).
+        # 60s cadence against a 150s dead threshold: detection within ~3.5min.
+        _scheduler.add_job(
+            _run_control_loop_watchdog_job,
+            trigger=IntervalTrigger(seconds=60),
+            id="control_loop_watchdog",
+            name="Control-loop deadman (every 60s)",
+            replace_existing=True,
+            max_instances=1,
+            coalesce=True,
+            misfire_grace_time=120,
+            next_run_time=datetime.now() + timedelta(seconds=45),
+        )
 
         # Paper trade exit checking: every 15 min during market hours
         if include_web_light:
