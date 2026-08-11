@@ -92,6 +92,44 @@ _TRACKER_REFRESH_S = 10.0
 # inside the lane-health module's minimum adaptive 60-second grace window.
 _LANE_HEALTH_HEARTBEAT_MIN_INTERVAL_S = LIVE_LOOP_HEARTBEAT_INTERVAL_SECONDS
 _THREAD_JOIN_TIMEOUT_S = 2.0
+
+# Frames that are never the answer to "who stopped the loop?" -- stop() calls
+# itself re-entrantly under the lifecycle lock, and the module-level helper is
+# just a forwarder.
+_STOP_FRAME_NOISE = frozenset({"stop", "_stop_caller", "stop_live_runner_loop"})
+
+
+def _stop_caller() -> str:
+    """Name whoever asked the loop to retire, for the shutdown log line.
+
+    Distinguishes the two cases that look identical in the logs today:
+
+      * a deliberate in-process stop (scheduler shutdown, a restart, a
+        supervisor) -- reported as `module.func:line`, and
+      * interpreter teardown, i.e. the process itself is going away because it
+        was signalled or its parent console closed -- reported as
+        `interpreter-shutdown`. This one matters most here: the loop runs in the
+        FOREGROUND of a Task Scheduler PowerShell, so ending the task ends the
+        loop, and that path leaves no other evidence anywhere.
+
+    Best-effort by construction: this runs on the teardown path, so it must never
+    be the reason a shutdown fails.
+    """
+    try:
+        import sys as _sys
+        import traceback as _traceback
+
+        if getattr(_sys, "is_finalizing", None) and _sys.is_finalizing():
+            return "interpreter-shutdown"
+
+        for frame in reversed(_traceback.extract_stack()[:-1]):
+            if frame.name in _STOP_FRAME_NOISE:
+                continue
+            module = frame.filename.replace("\\", "/").rsplit("/", 1)[-1]
+            return f"{module}:{frame.lineno} in {frame.name}()"
+        return "unknown-caller"
+    except Exception:
+        return "unknown-caller"
 _IQFEED_AUTHORITY_BASIS = "iqfeed_q_receive_trade_reference_fenced"
 _IQFEED_AUTHORITY_MAX_AGE_S = 2.0
 _IQFEED_FUTURE_TOLERANCE_S = 1.0
@@ -919,6 +957,7 @@ class LiveRunnerLoop:
     def stop(self) -> bool:
         # Serialize the entire teardown against a quick restart. Otherwise the old
         # stop could unregister the callback just installed by the new generation.
+        # See the WARNING at the end of this method for why the caller is named.
         with self._lifecycle_lock:
             had_owner = bool(
                 self._running
@@ -968,7 +1007,20 @@ class LiveRunnerLoop:
                     )
             self._release_owner_fence()
             if had_owner:
-                _log.info("[live_loop] stopped")
+                # WHY THIS IS A WARNING WITH A CALLER, NOT A BARE INFO
+                # ---------------------------------------------------
+                # Over the 14 days to 2026-08-11 this loop was dead 50.9% of the
+                # time (57 outages, 170.0h, worst 15.58h) and not one death could
+                # be explained. The forensics kept coming back empty in the same
+                # way every time: every heartbeat row ends `ok` with no
+                # error_message, RAM/handles/threads/sockets are FLAT right up to
+                # the end, and the deaths spread evenly over all 24 ET hours. So
+                # the loop is not crashing, not leaking and not being reaped on a
+                # schedule -- it is being asked to stop, and the only trace it
+                # left was this line, which named no one.
+                #
+                # An owner that manages live exits must say who retired it.
+                _log.warning("[live_loop] stopped by %s", _stop_caller())
             return had_owner
 
     def _subscribe_active_symbols(self, *, generation: int | None = None) -> bool:
