@@ -19,6 +19,7 @@ from __future__ import annotations
 from collections import OrderedDict
 from dataclasses import dataclass
 from datetime import datetime, timezone
+import hashlib
 import json
 import math
 import queue
@@ -579,6 +580,7 @@ class BoundedIqfeedL2CaptureHandoff:
     """Hot-only nonblocking L2 ingress with explicit gap accounting."""
 
     _WORKER_POLL_SECONDS = 0.02
+    _HOT_SYMBOL_DRAIN_SECONDS = 5.0
 
     def __init__(
         self,
@@ -648,9 +650,11 @@ class BoundedIqfeedL2CaptureHandoff:
             maxsize=pending
         )
         self._condition = threading.Condition(threading.RLock())
+        self._pending_events_by_symbol: dict[str, int] = {}
         self._pending_gaps: OrderedDict[
             tuple[CaptureStream, str, str], _GapAccumulator
         ] = OrderedDict()
+        self._flushing_gap_loss_by_symbol: dict[str, int] = {}
         self._gap_ledger_overflow = False
         self._requested_hot: set[str] = set()
         # ``pending`` means the checkpoint is ordered ahead of subsequent
@@ -664,6 +668,8 @@ class BoundedIqfeedL2CaptureHandoff:
         self._started = False
         self._accepting = False
         self._terminal_error: BaseException | None = None
+        self._terminal_error_stage: str | None = None
+        self._terminal_error_reason_sha256: str | None = None
         self._unpersisted_gap_count = 0
         self._offered_hot = 0
         self._ignored_cold = 0
@@ -679,6 +685,40 @@ class BoundedIqfeedL2CaptureHandoff:
         self._active_producer_generation: (
             CaptureExternalProducerGeneration | None
         ) = None
+
+    def _set_terminal_error_locked(
+        self,
+        exc: BaseException,
+        *,
+        stage: str,
+        unpersisted_loss: int = 0,
+    ) -> None:
+        """Latch one bounded, hash-only terminal diagnostic under ``_condition``."""
+
+        if self._terminal_error is None:
+            self._terminal_error = exc
+            self._terminal_error_stage = str(stage)
+            try:
+                bounded_reason = f"{type(exc).__name__}: {str(exc)[:300]}"
+            except BaseException:  # pragma: no cover - hostile exception string
+                bounded_reason = f"{type(exc).__name__}: <unprintable>"
+            self._terminal_error_reason_sha256 = hashlib.sha256(
+                bounded_reason.encode("utf-8", "replace")
+            ).hexdigest()
+        self._accepting = False
+        self._unpersisted_gap_count += max(0, int(unpersisted_loss))
+
+    def _symbol_drain_health_locked(self, symbol: str) -> tuple[int, int]:
+        pending_events = int(self._pending_events_by_symbol.get(symbol, 0))
+        pending_gap_loss = sum(
+            row.lost_count
+            for (stream, gap_symbol, reason), row in self._pending_gaps.items()
+            if gap_symbol == symbol
+        )
+        pending_gap_loss += int(
+            self._flushing_gap_loss_by_symbol.get(symbol, 0)
+        )
+        return pending_events, pending_gap_loss
 
     @property
     def network_fallback_allowed(self) -> bool:
@@ -723,11 +763,16 @@ class BoundedIqfeedL2CaptureHandoff:
                 self._pending_checkpoint_generation.clear()
                 self._active_generation.clear()
                 self._last_enqueued_sequence.clear()
-                self._unpersisted_gap_count += gap.lost_count
                 if self._terminal_error is None:
-                    self._terminal_error = CaptureContractError(
-                        "IQFeed L2 gap ledger exhausted exact symbol keys"
+                    self._set_terminal_error_locked(
+                        CaptureContractError(
+                            "IQFeed L2 gap ledger exhausted exact symbol keys"
+                        ),
+                        stage="gap_ledger_exhausted",
+                        unpersisted_loss=gap.lost_count,
                     )
+                else:
+                    self._unpersisted_gap_count += gap.lost_count
                 self._condition.notify_all()
                 return
             self._condition.notify_all()
@@ -793,6 +838,9 @@ class BoundedIqfeedL2CaptureHandoff:
                     reason = "iqfeed_l2_capture_queue_overflow"
                 else:
                     self._pending_bytes += envelope_size
+                    self._pending_events_by_symbol[envelope.symbol] = (
+                        self._pending_events_by_symbol.get(envelope.symbol, 0) + 1
+                    )
                     self._peak_pending_bytes = max(
                         self._peak_pending_bytes, self._pending_bytes
                     )
@@ -839,18 +887,18 @@ class BoundedIqfeedL2CaptureHandoff:
 
         with self._condition:
             symbols = tuple(sorted(self._requested_hot))
-        for symbol in symbols:
-            self._fence_generation(symbol, None)
-            self._latch_gap(
-                CoverageGap(
-                    stream=stream,
-                    symbol=symbol,
-                    reason=reason,
-                    first_available_at=at,
-                    last_available_at=at,
-                    lost_count=1,
+            for symbol in symbols:
+                self._fence_generation(symbol, None)
+                self._latch_gap(
+                    CoverageGap(
+                        stream=stream,
+                        symbol=symbol,
+                        reason=reason,
+                        first_available_at=at,
+                        last_available_at=at,
+                        lost_count=1,
+                    )
                 )
-            )
         return len(symbols)
 
     def activate_hot_symbol(
@@ -1083,10 +1131,54 @@ class BoundedIqfeedL2CaptureHandoff:
                     rejected += 1
         return accepted, rejected, ignored
 
-    def deactivate_hot_symbol(self, symbol: str) -> bool:
+    def deactivate_hot_symbol(
+        self,
+        symbol: str,
+        *,
+        timeout_seconds: float = _HOT_SYMBOL_DRAIN_SECONDS,
+    ) -> bool:
+        """Drain already-offered work before detaching one producer-fenced symbol.
+
+        The depth bridge calls this while holding its producer lock after removing
+        the symbol from its hot roster.  That upstream fence is what makes the
+        per-symbol drain a finite barrier: no later frame can overtake it and hit
+        a capture run after the run has been aborted/detached.
+        """
+
         normalized = _normalized_symbol(symbol)
+        timeout = float(timeout_seconds)
+        if not math.isfinite(timeout) or timeout <= 0:
+            raise CaptureContractError(
+                "IQFeed L2 hot-symbol drain timeout must be positive"
+            )
+        deadline = time.monotonic() + timeout
         with self._condition:
             existed = normalized in self._requested_hot
+            while True:
+                pending_events, pending_gap_loss = self._symbol_drain_health_locked(
+                    normalized
+                )
+                if self._terminal_error is not None:
+                    raise CaptureContractError(
+                        "IQFeed L2 hot-symbol drain found a terminal handoff"
+                    ) from self._terminal_error
+                if pending_events == 0 and pending_gap_loss == 0:
+                    break
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    failure = CaptureContractError(
+                        "IQFeed L2 hot-symbol deactivation drain timed out"
+                    )
+                    self._set_terminal_error_locked(
+                        failure,
+                        stage="hot_symbol_deactivation_drain_timeout",
+                        unpersisted_loss=max(
+                            1, pending_events + pending_gap_loss
+                        ),
+                    )
+                    self._condition.notify_all()
+                    raise failure
+                self._condition.wait(timeout=min(self._WORKER_POLL_SECONDS, remaining))
             self._requested_hot.discard(normalized)
             self._pending_checkpoint_generation.pop(normalized, None)
             self._active_generation.pop(normalized, None)
@@ -1155,29 +1247,33 @@ class BoundedIqfeedL2CaptureHandoff:
             self._pending_checkpoint_generation.clear()
             self._active_generation.clear()
             self._last_enqueued_sequence.clear()
-        for symbol in symbols:
-            self._latch_gap(
-                CoverageGap(
-                    stream=CaptureStream.L2_DEPTH_DELTA,
-                    symbol=symbol,
-                    reason="iqfeed_l2_connection_boundary_requires_checkpoint",
-                    first_available_at=boundary,
-                    last_available_at=boundary,
-                    lost_count=1,
+            # Keep the hot-roster snapshot and both loss publications under the
+            # same reentrant condition as deactivation.  Otherwise deactivation
+            # can observe an empty drain, detach the capture run, and then have
+            # this already-observed boundary publish a late gap into no owner.
+            for symbol in symbols:
+                self._latch_gap(
+                    CoverageGap(
+                        stream=CaptureStream.L2_DEPTH_DELTA,
+                        symbol=symbol,
+                        reason="iqfeed_l2_connection_boundary_requires_checkpoint",
+                        first_available_at=boundary,
+                        last_available_at=boundary,
+                        lost_count=1,
+                    )
                 )
-            )
-            self._latch_gap(
-                CoverageGap(
-                    stream=CaptureStream.L2_DEPTH_CHECKPOINT,
-                    symbol=symbol,
-                    reason=(
-                        "iqfeed_l2_provider_snapshot_completion_boundary_unavailable"
-                    ),
-                    first_available_at=boundary,
-                    last_available_at=boundary,
-                    lost_count=1,
+                self._latch_gap(
+                    CoverageGap(
+                        stream=CaptureStream.L2_DEPTH_CHECKPOINT,
+                        symbol=symbol,
+                        reason=(
+                            "iqfeed_l2_provider_snapshot_completion_boundary_unavailable"
+                        ),
+                        first_available_at=boundary,
+                        last_available_at=boundary,
+                        lost_count=1,
+                    )
                 )
-            )
         return symbols
 
     def active_producer_generation(
@@ -1210,10 +1306,6 @@ class BoundedIqfeedL2CaptureHandoff:
                     at=at,
                 )
                 continue
-            with self._condition:
-                requested = symbol in self._requested_hot
-            if not requested:
-                continue
             generation_raw = row.get("connection_generation")
             generation = (
                 generation_raw
@@ -1222,25 +1314,45 @@ class BoundedIqfeedL2CaptureHandoff:
                 and generation_raw > 0
                 else None
             )
-            self._fence_generation(symbol, generation)
-            lost += 1
-            self._latch_gap(
-                CoverageGap(
-                    stream=CaptureStream.L2_DEPTH_DELTA,
-                    symbol=symbol,
-                    reason="iqfeed_l2_capture_release_handoff_failed",
-                    first_available_at=at,
-                    last_available_at=at,
-                    lost_count=1,
+            with self._condition:
+                if symbol not in self._requested_hot:
+                    continue
+                self._fence_generation(symbol, generation)
+                lost += 1
+                self._latch_gap(
+                    CoverageGap(
+                        stream=CaptureStream.L2_DEPTH_DELTA,
+                        symbol=symbol,
+                        reason="iqfeed_l2_capture_release_handoff_failed",
+                        first_available_at=at,
+                        last_available_at=at,
+                        lost_count=1,
+                    )
                 )
-            )
         return lost
 
     def _take_gaps(self) -> tuple[CoverageGap, ...]:
         with self._condition:
             gaps = tuple(row.freeze() for row in self._pending_gaps.values())
             self._pending_gaps.clear()
+            for gap in gaps:
+                assert gap.symbol is not None
+                self._flushing_gap_loss_by_symbol[gap.symbol] = (
+                    self._flushing_gap_loss_by_symbol.get(gap.symbol, 0)
+                    + gap.lost_count
+                )
             return gaps
+
+    def _finish_flushing_gap_locked(self, gap: CoverageGap) -> None:
+        assert gap.symbol is not None
+        remaining = (
+            self._flushing_gap_loss_by_symbol.get(gap.symbol, 0)
+            - gap.lost_count
+        )
+        if remaining > 0:
+            self._flushing_gap_loss_by_symbol[gap.symbol] = remaining
+        else:
+            self._flushing_gap_loss_by_symbol.pop(gap.symbol, None)
 
     def _flush_gaps(self) -> bool:
         gaps = self._take_gaps()
@@ -1250,13 +1362,19 @@ class BoundedIqfeedL2CaptureHandoff:
             except BaseException as exc:
                 remaining = sum(row.lost_count for row in gaps[index:])
                 with self._condition:
-                    self._terminal_error = exc
-                    self._accepting = False
-                    self._unpersisted_gap_count += remaining
+                    for unfinished in gaps[index:]:
+                        self._finish_flushing_gap_locked(unfinished)
+                    self._set_terminal_error_locked(
+                        exc,
+                        stage="gap_persist_failed",
+                        unpersisted_loss=remaining,
+                    )
                     self._condition.notify_all()
                 return False
             with self._condition:
+                self._finish_flushing_gap_locked(gap)
                 self._reported_gap_count += gap.lost_count
+                self._condition.notify_all()
         return True
 
     def _worker_loop(self) -> None:
@@ -1355,12 +1473,22 @@ class BoundedIqfeedL2CaptureHandoff:
                 self._queue.task_done()
                 with self._condition:
                     self._pending_bytes -= envelope_size
+                    symbol_pending = (
+                        self._pending_events_by_symbol.get(envelope.symbol, 0) - 1
+                    )
+                    if symbol_pending > 0:
+                        self._pending_events_by_symbol[envelope.symbol] = symbol_pending
+                    else:
+                        self._pending_events_by_symbol.pop(envelope.symbol, None)
                     if self._pending_bytes < 0:  # pragma: no cover - lock invariant
                         self._pending_bytes = 0
-                        self._terminal_error = CaptureContractError(
-                            "IQFeed L2 capture byte reservation underflow"
+                        self._set_terminal_error_locked(
+                            CaptureContractError(
+                                "IQFeed L2 capture byte reservation underflow"
+                            ),
+                            stage="byte_reservation_underflow",
+                            unpersisted_loss=1,
                         )
-                        self._accepting = False
                     self._condition.notify_all()
 
     def wait_until_idle(self, timeout_seconds: float) -> bool:
@@ -1372,7 +1500,9 @@ class BoundedIqfeedL2CaptureHandoff:
             while time.monotonic() < deadline:
                 if (
                     self._queue.unfinished_tasks == 0
+                    and not self._pending_events_by_symbol
                     and not self._pending_gaps
+                    and not self._flushing_gap_loss_by_symbol
                 ):
                     return True
                 self._condition.wait(timeout=min(0.02, deadline - time.monotonic()))
@@ -1437,12 +1567,22 @@ class BoundedIqfeedL2CaptureHandoff:
                 "reported_gap_count": self._reported_gap_count,
                 "submit_failures": self._submit_failures,
                 "pending_gap_keys": len(self._pending_gaps),
+                "pending_events_by_symbol": dict(
+                    sorted(self._pending_events_by_symbol.items())
+                ),
+                "flushing_gap_loss_by_symbol": dict(
+                    sorted(self._flushing_gap_loss_by_symbol.items())
+                ),
                 "gap_ledger_overflow": self._gap_ledger_overflow,
                 "unpersisted_gap_count": self._unpersisted_gap_count,
                 "terminal_error": (
                     None
                     if self._terminal_error is None
                     else type(self._terminal_error).__name__
+                ),
+                "terminal_error_stage": self._terminal_error_stage,
+                "terminal_error_reason_sha256": (
+                    self._terminal_error_reason_sha256
                 ),
                 "bridge_source_sha256": self.bridge_source_sha256,
                 "bridge_configuration_sha256": (

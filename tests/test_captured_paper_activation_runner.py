@@ -595,6 +595,21 @@ class FakeExecutor:
             if mode == "RecoverOnly":
                 if self.scenario.recovery_outcome == "error":
                     return runner.CommandResult(9, "", "synthetic recovery failure")
+                if self.scenario.recovery_outcome in {
+                    "applied_postcondition_recovered",
+                    "applied_postcondition_recovered_noisy",
+                }:
+                    stderr = _canonical(
+                        {
+                            "verdict": "REJECTED",
+                            "reason_code": "APPLIED_POSTCONDITION_RECOVERED",
+                            "error_detail": "exact rollback restored legacy ownership",
+                            "live_cash_authorized": False,
+                        }
+                    ).decode("utf-8")
+                    if self.scenario.recovery_outcome.endswith("_noisy"):
+                        stderr = "unexpected prefix\n" + stderr
+                    return runner.CommandResult(2, "", stderr + "\n")
                 if self.scenario.recovery_outcome == "rolled_back":
                     return runner.CommandResult(
                         0, '{"verdict":"ROLLED_BACK_EXACT"}\n', ""
@@ -1100,6 +1115,11 @@ def test_existing_paper_task_blocks_a_fresh_generation(
     ("recovery_outcome", "expected_code"),
     [
         ("rolled_back", "RECOVERY_COMPLETED_RERUN_REQUIRED"),
+        (
+            "applied_postcondition_recovered",
+            "RECOVERY_COMPLETED_RERUN_REQUIRED",
+        ),
+        ("applied_postcondition_recovered_noisy", "RECOVERY_REJECTED"),
         ("applied", "PAPER_ALREADY_ACTIVE"),
         ("error", "RECOVERY_REJECTED"),
     ],

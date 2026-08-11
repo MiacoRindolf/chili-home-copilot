@@ -881,8 +881,46 @@ class CapturedPaperServiceSupervisor:
                     or handoff.get("gap_ledger_overflow") is False
                 )
             ):
+                diagnostic_suffix = ""
+                if isinstance(handoff, Mapping):
+                    terminal_type = handoff.get("terminal_error")
+                    terminal_stage = handoff.get("terminal_error_stage")
+                    reason_sha256 = handoff.get(
+                        "terminal_error_reason_sha256"
+                    )
+                    if terminal_type not in {
+                        "CaptureContractError",
+                        "DBAPIError",
+                        "IntegrityError",
+                        "InterfaceError",
+                        "MemoryError",
+                        "OperationalError",
+                        "OSError",
+                        "RuntimeError",
+                        "TimeoutError",
+                        "ValueError",
+                    }:
+                        terminal_type = "unavailable"
+                    if terminal_stage not in {
+                        "byte_reservation_underflow",
+                        "gap_ledger_exhausted",
+                        "gap_persist_failed",
+                        "hot_symbol_deactivation_drain_timeout",
+                    }:
+                        terminal_stage = "unavailable"
+                    if not (
+                        isinstance(reason_sha256, str)
+                        and re.fullmatch(r"[0-9a-f]{64}", reason_sha256)
+                    ):
+                        reason_sha256 = None
+                    if reason_sha256 is not None:
+                        diagnostic_suffix = (
+                            f":stage={terminal_stage};type={terminal_type};"
+                            f"reason_sha256={reason_sha256}"
+                        )
                 raise CapturedPaperServiceSupervisorError(
                     f"captured_paper_{handoff_name}_capture_handoff_health_lost"
+                    + diagnostic_suffix
                 )
         capture_service = composition.get("service")
         capture_runs = (

@@ -1141,6 +1141,35 @@ def _last_json_line(value: str) -> Mapping[str, Any] | None:
     return None
 
 
+def _strict_recovery_stderr_reason_code(value: str) -> str | None:
+    """Read only the host cutover's exact, whole-stderr rejection envelope."""
+
+    candidate = str(value or "").strip()
+    if not candidate:
+        return None
+    try:
+        document = _strict_json(
+            candidate.encode("utf-8"), field="recover_only_stderr"
+        )
+    except CapturedPaperActivationRunnerError:
+        return None
+    if set(document) != {
+        "error_detail",
+        "live_cash_authorized",
+        "reason_code",
+        "verdict",
+    }:
+        return None
+    if (
+        document.get("verdict") != "REJECTED"
+        or document.get("live_cash_authorized") is not False
+        or not isinstance(document.get("error_detail"), str)
+        or not isinstance(document.get("reason_code"), str)
+    ):
+        return None
+    return str(document["reason_code"])
+
+
 def _write_once(path: Path, raw: bytes) -> None:
     if path.exists():
         if path.read_bytes() != raw:
@@ -1948,7 +1977,20 @@ def run_activation(
             recorder=recorder,
         )
         recovery_doc = _last_json_line(recovery.stdout)
-        if recovery.returncode != 0 or recovery_doc is None:
+        if recovery.returncode != 0:
+            if (
+                not recovery.stdout.strip()
+                and _strict_recovery_stderr_reason_code(recovery.stderr)
+                == "APPLIED_POSTCONDITION_RECOVERED"
+            ):
+                raise CapturedPaperActivationRunnerError(
+                    "RECOVERY_COMPLETED_RERUN_REQUIRED",
+                    "an unhealthy applied cutover was restored; rerun with fresh evidence",
+                )
+            raise CapturedPaperActivationRunnerError(
+                "RECOVERY_REJECTED", "host cutover recovery did not finish cleanly"
+            )
+        if recovery_doc is None:
             raise CapturedPaperActivationRunnerError(
                 "RECOVERY_REJECTED", "host cutover recovery did not finish cleanly"
             )
