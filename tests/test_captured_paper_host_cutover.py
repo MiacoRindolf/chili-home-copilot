@@ -2750,6 +2750,76 @@ def test_restart_only_after_clean_stop_rotates_attempt_and_preserves_applied_hos
     assert backend.execution_lane_state == "stopped"
 
 
+def test_restart_only_waits_for_slow_initial_service_after_exact_launcher(
+    prepared: cutover.PreparedCutover,
+) -> None:
+    class SlowRestartServiceHost(FakeHost):
+        candidate_start_count = 0
+        delayed_service: cutover.ProcessIdentity | None = None
+        restart_timeout_seconds: float | None = None
+
+        def start_task(self, name: str) -> None:
+            super().start_task(name)
+            if name != cutover.CANDIDATE_TASK_NAME:
+                return
+            self.candidate_start_count += 1
+            if self.candidate_start_count == 2:
+                service_pid, service = next(
+                    (pid, identity)
+                    for pid, identity in self.processes.items()
+                    if identity.role == "candidate_service"
+                )
+                self.delayed_service = service
+                self.processes.pop(service_pid)
+
+        def await_candidate_processes(
+            self,
+            invocation: cutover.CandidateInvocation,
+            *,
+            timeout_seconds: float,
+        ) -> tuple[cutover.CandidateProcessObservation, ...]:
+            current = super().await_candidate_processes(
+                invocation, timeout_seconds=timeout_seconds
+            )
+            if self.delayed_service is not None:
+                self.restart_timeout_seconds = timeout_seconds
+                if timeout_seconds > 17.219:
+                    service = self.delayed_service
+                    self.processes[service.pid] = service
+                    self.delayed_service = None
+                    return super().await_candidate_processes(
+                        invocation, timeout_seconds=timeout_seconds
+                    )
+            return current
+
+    backend = SlowRestartServiceHost(prepared)
+    executor = _executor(prepared, backend)
+    assert executor.apply().verdict == "APPLIED_ALPACA_PAPER_ONLY"
+    backend.processes = {
+        pid: value
+        for pid, value in backend.processes.items()
+        if not value.role.startswith("candidate_")
+    }
+    _publish_fake_clean_stop(prepared=prepared, executor=executor)
+    attempt_id = "45a9d0f5-bf22-4d19-8870-a7b1dbeaf519"
+    backend.prepared = cutover._restart_prepared_cutover(
+        prepared,
+        startup_attempt_id=attempt_id,
+        create_attempt_root=False,
+    )
+    backend.dispatch_lock_identity = None
+
+    report = executor.restart_only(attempt_id)
+
+    assert report.verdict == "RESTARTED_ALPACA_PAPER_ONLY"
+    assert backend.candidate_start_count == 2
+    assert (
+        backend.restart_timeout_seconds
+        == cutover.CANDIDATE_INITIAL_PROCESS_ROSTER_WAIT_SECONDS
+    )
+    assert backend.restart_timeout_seconds > 17.219
+
+
 def test_restart_only_can_rotate_again_from_the_latest_clean_attempt(
     prepared: cutover.PreparedCutover,
 ) -> None:
@@ -4211,6 +4281,108 @@ def test_two_phase_handshake_stages_exact_runtime_and_consumes_one_permit(
     assert kinds.index("activation_permit_issued") < kinds.index(
         "activation_permit_published"
     ) < kinds.index("apply_completed")
+
+
+def test_two_phase_handshake_waits_for_slow_initial_service_after_exact_launcher(
+    prepared: cutover.PreparedCutover,
+) -> None:
+    class SlowInitialServiceHost(FakeHost):
+        delayed_service: cutover.ProcessIdentity | None = None
+        initial_timeout_seconds: float | None = None
+
+        def start_task(self, name: str) -> None:
+            super().start_task(name)
+            if name == cutover.CANDIDATE_TASK_NAME:
+                service_pid, service = next(
+                    (pid, identity)
+                    for pid, identity in self.processes.items()
+                    if identity.role == "candidate_service"
+                )
+                self.delayed_service = service
+                self.processes.pop(service_pid)
+
+        def await_candidate_processes(
+            self,
+            invocation: cutover.CandidateInvocation,
+            *,
+            timeout_seconds: float,
+        ) -> tuple[cutover.CandidateProcessObservation, ...]:
+            current = super().await_candidate_processes(
+                invocation, timeout_seconds=timeout_seconds
+            )
+            if self.delayed_service is not None:
+                self.initial_timeout_seconds = timeout_seconds
+                # Exact r166 protected evidence measured 17.219 seconds from
+                # task registration to the old initial-roster rejection while
+                # the sealed launcher was still alive.  Model a service that
+                # becomes visible just after that obsolete 15-second bound.
+                if timeout_seconds > 17.219:
+                    service = self.delayed_service
+                    self.processes[service.pid] = service
+                    self.delayed_service = None
+                    return super().await_candidate_processes(
+                        invocation, timeout_seconds=timeout_seconds
+                    )
+            return current
+
+    backend = SlowInitialServiceHost(prepared)
+    report = _executor(prepared, backend).apply()
+
+    assert report.verdict == "APPLIED_ALPACA_PAPER_ONLY"
+    assert (
+        backend.initial_timeout_seconds
+        == cutover.CANDIDATE_INITIAL_PROCESS_ROSTER_WAIT_SECONDS
+    )
+    assert backend.initial_timeout_seconds > 17.219
+
+
+def test_two_phase_handshake_rejects_persistent_missing_initial_service(
+    prepared: cutover.PreparedCutover,
+) -> None:
+    class MissingInitialServiceHost(FakeHost):
+        initial_timeout_seconds: float | None = None
+
+        def start_task(self, name: str) -> None:
+            super().start_task(name)
+            if name == cutover.CANDIDATE_TASK_NAME:
+                service_pid = next(
+                    pid
+                    for pid, identity in self.processes.items()
+                    if identity.role == "candidate_service"
+                )
+                self.processes.pop(service_pid)
+
+        def await_candidate_processes(
+            self,
+            invocation: cutover.CandidateInvocation,
+            *,
+            timeout_seconds: float,
+        ) -> tuple[cutover.CandidateProcessObservation, ...]:
+            current = super().await_candidate_processes(
+                invocation, timeout_seconds=timeout_seconds
+            )
+            if (
+                self.initial_timeout_seconds is None
+                and any(item.kind == "launcher" for item in current)
+            ):
+                self.initial_timeout_seconds = timeout_seconds
+            return current
+
+    backend = MissingInitialServiceHost(prepared)
+    with pytest.raises(
+        cutover.CapturedPaperHostCutoverError,
+        match=(
+            "CANDIDATE_PROCESS_ROSTER_INVALID: candidate must have exactly one "
+            "launcher and one foreground service; observed=launcher:"
+        ),
+    ):
+        _executor(prepared, backend).apply()
+
+    assert (
+        backend.initial_timeout_seconds
+        == cutover.CANDIDATE_INITIAL_PROCESS_ROSTER_WAIT_SECONDS
+    )
+    _assert_restored(prepared, backend)
 
 
 def test_two_phase_handshake_retries_transient_postprepared_process_inventory(
