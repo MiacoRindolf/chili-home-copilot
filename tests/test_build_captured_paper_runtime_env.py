@@ -386,6 +386,12 @@ def test_all_nine_operator_kill_switches_round_trip_false(
         "CHILI_MOMENTUM_MONSTER_STRUCTURE_FLOOR_ENABLED": (
             "chili_momentum_monster_structure_floor_enabled"
         ),
+        "CHILI_MOMENTUM_SCALE_GRID_ENABLED": (
+            "chili_momentum_scale_grid_enabled"
+        ),
+        "CHILI_MOMENTUM_SYMBOL_DAY_LOSS_LOCKOUT_ENABLED": (
+            "chili_momentum_symbol_day_loss_lockout_enabled"
+        ),
     }
     strategy = {
         **ORTEX_STRATEGY_POLICY,

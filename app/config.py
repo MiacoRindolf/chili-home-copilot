@@ -6464,6 +6464,18 @@ class Settings(BaseSettings):
     # SUM of fractions is < 1.0 so a runner always remains. INVARIANT-A (ratchet stop) is
     # preserved (breakeven move unchanged). OFF => the lane takes ONE scale-out then trails
     # (today's behavior, byte-identical). docs/DESIGN/MOMENTUM_LANE.md
+    chili_momentum_symbol_day_loss_lockout_enabled: bool = Field(
+        default=True,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_SYMBOL_DAY_LOSS_LOCKOUT_ENABLED"),
+        description="L13 (2026-08-09) SYMBOL-DAY LOSS LOCKOUT sa recycle edge: kapag ang kumulatibong REALIZED na PnL ng symbol ngayong araw (session ledger + banked ng ibang session) ay bumaba sa -(r_multiple x per-trade risk cap), TERMINALIZE ang session sa halip na mag-recycle — hindi ito nalalampasan ng day-leader o fresh-ignition exemptions (COUNT-cap ang silbi ng mga iyon; LOSS-measured ito). Canon-v3 autopsy: VTAK -748/CWD -309/LHSW -252 = 84% ng gross red, lahat lampas-15-cycle na pagdurugo na hindi kailanman hinuli ng stopout-count cap (bailout/trail-class ang karamihan ng exits). Empirical sweep sa 16 fill-complete windows: +291.60 net sa K=1.5, TATLONG sakuna window lang ang natatamaan, zero epekto sa greens (13x margin) at zero recovery na naputol (pinakamalalim na nakabawi ay -1.01R). false = byte-identical legacy.",
+    )
+    chili_momentum_symbol_day_loss_lockout_r_multiple: float = Field(
+        default=1.5,
+        ge=0.5,
+        le=10.0,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_SYMBOL_DAY_LOSS_LOCKOUT_R_MULTIPLE"),
+        description="ONE documented base ng L13: ang lockout threshold = ITO x per-trade risk cap (max_loss_per_trade_usd — adaptive sa equity by construction). Ang 1.5 ay ang empirical FLOOR mula sa 16-window sweep (K∈{1.5,2,3,4}: +291.60/+277.54/+240.20/+207.96 — monotone na mas mahigpit = mas mabuti, pero ang K≲1.1 ay magpuputol ng TNMG/TVRD-class na recoveries na bumaba hanggang -1.01R bago bumawi).",
+    )
     chili_momentum_scale_grid_enabled: bool = Field(
         default=True,
         validation_alias=AliasChoices("CHILI_MOMENTUM_SCALE_GRID_ENABLED"),

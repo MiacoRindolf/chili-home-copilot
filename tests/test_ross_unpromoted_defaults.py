@@ -32,6 +32,9 @@ _USER_APPROVED_DEFAULT_ON = (
     # ng sealed replay ay sumukat ng IBANG exit configuration kaysa sa lane. Ang
     # pag-flip ng default ay PARITY CORRECTION at pag-alis ng dark flag.
     "chili_momentum_scale_grid_enabled",
+    # 2026-08-09 L13 — symbol-day loss lockout (canon-v3 autopsy: VTAK/CWD/LHSW
+    # = 84% ng gross red; empirical +291.60 sa K=1.5, zero epekto sa greens):
+    "chili_momentum_symbol_day_loss_lockout_enabled",
 )
 
 # EVIDENCE-RETIRED default-OFF levers: still in the sealed arm roster (per-lever
@@ -85,6 +88,7 @@ def test_missing_setting_fallbacks_preserve_default_on_doctrine():
         # Ang isa sa kanila ay naiwang False matapos ang 2026-08-04 parity fix —
         # ito ang pumipigil na maulit iyon.
         "chili_momentum_scale_grid_enabled": (paper_execution, live_runner),
+        "chili_momentum_symbol_day_loss_lockout_enabled": (live_runner,),
     }
     assert set(owners) == set(_USER_APPROVED_DEFAULT_ON)
     for name, modules in owners.items():
@@ -140,7 +144,7 @@ def test_replay_ab_tool_uses_the_complete_closed_operator_policy() -> None:
     ]
     assert len(assignments) == 1
     pairs = tuple(ast.literal_eval(assignments[0].value))
-    assert len(pairs) == 16
+    assert len(pairs) == 17
     # Ang arm roster = default-ON levers + evidence-retired levers: ang retired
     # flag ay nananatili sa sealed grammar (kaya nasusukat pa rin per-arm) kahit
     # OFF na ang production default.
