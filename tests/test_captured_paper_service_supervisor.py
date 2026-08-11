@@ -1226,6 +1226,37 @@ def test_active_capture_composition_and_handoffs_are_supervised(
         supervisor.assert_healthy()
 
 
+def test_l2_handoff_terminal_diagnostic_is_hash_only_and_preserved() -> None:
+    events = []
+    supervisor, host, _live = _supervisor(events)
+    supervisor.start_active(start_authority=_active_authority(events))
+    base_health = host.health()
+    composition = _healthy_capture_composition()
+    reason_sha256 = "a" * 64
+    composition["l2_handoff"].update(
+        accepting=False,
+        thread_alive=False,
+        terminal_error="CaptureContractError",
+        terminal_error_stage="gap_persist_failed",
+        terminal_error_reason_sha256=reason_sha256,
+        unpersisted_gap_count=1,
+    )
+    host.health = lambda: {
+        **base_health,
+        "composition": composition,
+    }
+
+    with pytest.raises(CapturedPaperServiceSupervisorError) as failure:
+        supervisor.assert_healthy()
+
+    detail = str(failure.value)
+    assert detail == (
+        "captured_paper_l2_capture_handoff_health_lost:"
+        "stage=gap_persist_failed;type=CaptureContractError;"
+        f"reason_sha256={reason_sha256}"
+    )
+
+
 @pytest.mark.parametrize(
     "writer_mutation",
     [

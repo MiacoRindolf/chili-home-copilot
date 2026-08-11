@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
+import hashlib
 from types import SimpleNamespace
 import threading
 import time
@@ -140,6 +141,11 @@ class _BlockingSink(_Sink):
         super().submit_envelope(envelope)
 
 
+class _GapFailingSink(_Sink):
+    def report_gap(self, gap: CoverageGap) -> None:
+        raise CaptureContractError("fixture private gap persistence detail")
+
+
 def _handoff(
     sink,
     *,
@@ -166,6 +172,97 @@ def test_handoff_health_exposes_worker_thread_liveness() -> None:
     assert handoff.health()["thread_alive"] is True
 
     assert handoff.close()["thread_alive"] is False
+
+
+def test_hot_symbol_deactivation_waits_for_already_offered_work() -> None:
+    sink = _BlockingSink()
+    handoff = _handoff(sink)
+    handoff.start()
+    assert handoff.activate_hot_symbol(
+        _checkpoint(), available_at=BASE + timedelta(seconds=2)
+    )
+    assert sink.entered.wait(timeout=1)
+    result: list[bool] = []
+    failure: list[BaseException] = []
+
+    def deactivate() -> None:
+        try:
+            result.append(
+                handoff.deactivate_hot_symbol("VEEE", timeout_seconds=1.0)
+            )
+        except BaseException as exc:  # pragma: no cover - assertion transport
+            failure.append(exc)
+
+    thread = threading.Thread(target=deactivate)
+    thread.start()
+    time.sleep(0.05)
+    assert thread.is_alive()
+    assert handoff.health()["requested_hot_symbols"] == ("VEEE",)
+
+    sink.release.set()
+    thread.join(timeout=1)
+
+    assert not thread.is_alive()
+    assert failure == []
+    assert result == [True]
+    health = handoff.health()
+    assert health["requested_hot_symbols"] == ()
+    assert health["pending_events_by_symbol"] == {}
+    assert health["terminal_error"] is None
+    handoff.close()
+
+
+def test_hot_symbol_deactivation_timeout_is_terminal_and_does_not_detach() -> None:
+    sink = _BlockingSink()
+    handoff = _handoff(sink)
+    handoff.start()
+    assert handoff.activate_hot_symbol(
+        _checkpoint(), available_at=BASE + timedelta(seconds=2)
+    )
+    assert sink.entered.wait(timeout=1)
+
+    with pytest.raises(CaptureContractError, match="deactivation drain timed out"):
+        handoff.deactivate_hot_symbol("VEEE", timeout_seconds=0.01)
+
+    health = handoff.health()
+    assert health["requested_hot_symbols"] == ("VEEE",)
+    assert health["accepting"] is False
+    assert health["terminal_error"] == "CaptureContractError"
+    assert (
+        health["terminal_error_stage"]
+        == "hot_symbol_deactivation_drain_timeout"
+    )
+    assert health["unpersisted_gap_count"] >= 1
+
+    sink.release.set()
+    assert handoff.wait_until_idle(1)
+    with pytest.raises(CaptureContractError, match="unpersisted coverage loss"):
+        handoff.close()
+
+
+def test_gap_persistence_failure_exposes_only_typed_hash_diagnostic() -> None:
+    handoff = _handoff(_GapFailingSink())
+    handoff.start()
+    assert not handoff.activate_hot_symbol(
+        {"sym": "VEEE"}, available_at=BASE + timedelta(seconds=2)
+    )
+    deadline = time.monotonic() + 1.0
+    health = handoff.health()
+    while health["terminal_error"] is None and time.monotonic() < deadline:
+        time.sleep(0.01)
+        health = handoff.health()
+
+    private_reason = (
+        "CaptureContractError: fixture private gap persistence detail"
+    )
+    assert health["terminal_error"] == "CaptureContractError"
+    assert health["terminal_error_stage"] == "gap_persist_failed"
+    assert health["terminal_error_reason_sha256"] == hashlib.sha256(
+        private_reason.encode("utf-8")
+    ).hexdigest()
+    assert "fixture private" not in repr(health)
+    with pytest.raises(CaptureContractError, match="unpersisted coverage loss"):
+        handoff.close()
 
 
 def _delta_envelope(
@@ -258,6 +355,87 @@ def test_l2_connection_boundary_exposes_only_current_hash_bound_generation():
     ) == ()
     assert handoff.active_producer_generation() is None
     assert handoff.close()["active_producer_generation"] is None
+
+
+def test_connection_boundary_gap_publication_is_atomic_with_deactivation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    sink = _Sink()
+    handoff = _handoff(sink)
+    handoff.start()
+    assert handoff.activate_hot_symbol(
+        _checkpoint(), available_at=BASE + timedelta(seconds=2)
+    )
+    assert handoff.wait_until_idle(1)
+
+    boundary_snapshot_taken = threading.Event()
+    release_boundary = threading.Event()
+    original_latch_gap = handoff._latch_gap
+    paused = False
+
+    def pause_after_snapshot(gap: CoverageGap) -> None:
+        nonlocal paused
+        if not paused:
+            paused = True
+            boundary_snapshot_taken.set()
+            assert release_boundary.wait(timeout=2)
+        original_latch_gap(gap)
+
+    monkeypatch.setattr(handoff, "_latch_gap", pause_after_snapshot)
+    boundary_result: list[tuple[str, ...]] = []
+    deactivation_result: list[bool] = []
+    failures: list[BaseException] = []
+
+    def publish_boundary() -> None:
+        try:
+            boundary_result.append(
+                handoff.record_connection_boundary(
+                    at=BASE + timedelta(seconds=3),
+                    bridge_run_id=BRIDGE_RUN_ID,
+                    connection_generation=7,
+                    active=True,
+                )
+            )
+        except BaseException as exc:  # pragma: no cover - assertion transport
+            failures.append(exc)
+
+    def deactivate() -> None:
+        try:
+            deactivation_result.append(
+                handoff.deactivate_hot_symbol("VEEE", timeout_seconds=1.0)
+            )
+        except BaseException as exc:  # pragma: no cover - assertion transport
+            failures.append(exc)
+
+    boundary_thread = threading.Thread(target=publish_boundary)
+    boundary_thread.start()
+    assert boundary_snapshot_taken.wait(timeout=1)
+
+    deactivation_thread = threading.Thread(target=deactivate)
+    deactivation_thread.start()
+    time.sleep(0.05)
+    assert deactivation_thread.is_alive()
+    assert deactivation_result == []
+
+    release_boundary.set()
+    boundary_thread.join(timeout=1)
+    deactivation_thread.join(timeout=1)
+
+    assert not boundary_thread.is_alive()
+    assert not deactivation_thread.is_alive()
+    assert failures == []
+    assert boundary_result == [("VEEE",)]
+    assert deactivation_result == [True]
+    assert handoff.wait_until_idle(1)
+    assert {gap.reason for gap in sink.gaps} == {
+        "iqfeed_l2_connection_boundary_requires_checkpoint",
+        "iqfeed_l2_provider_snapshot_completion_boundary_unavailable",
+    }
+    health = handoff.health()
+    assert health["requested_hot_symbols"] == ()
+    assert health["pending_gap_keys"] == 0
+    assert health["terminal_error"] is None
+    handoff.close()
 
 
 def test_delta_preserves_exact_provider_clock_and_immutable_payload() -> None:

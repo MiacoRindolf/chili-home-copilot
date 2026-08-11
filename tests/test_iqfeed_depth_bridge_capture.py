@@ -40,6 +40,19 @@ class _Sink:
         self.gaps.append(gap)
 
 
+class _BlockingCheckpointSink(_Sink):
+    def __init__(self) -> None:
+        super().__init__()
+        self.entered = threading.Event()
+        self.release = threading.Event()
+
+    def submit_envelope(self, envelope: IqfeedL2CaptureEnvelope) -> None:
+        if envelope.stream is CaptureStream.L2_DEPTH_CHECKPOINT:
+            self.entered.set()
+            assert self.release.wait(timeout=2)
+        super().submit_envelope(envelope)
+
+
 class _Chunks:
     def __init__(self, *chunks: bytes) -> None:
         self.chunks = list(chunks)
@@ -165,6 +178,48 @@ def test_reader_emits_checkpoint_then_exact_clock_delta_in_source_order() -> Non
     )
     assert delta.payload["venue"] == "ARCX"
     assert health["active_generations"] == {"VEEE": generation}
+
+
+def test_deactivation_holds_producer_fence_until_handoff_drain() -> None:
+    sink = _BlockingCheckpointSink()
+    handoff = _handoff(sink)
+    handoff.start()
+    bridge.bind_capture_handoff(handoff)
+    generation = bridge._begin_connection_generation()
+    result: list[bool] = []
+    failure: list[BaseException] = []
+    try:
+        with bridge.books_lock:
+            _seed_book(generation)
+        assert bridge.activate_capture_symbol(
+            "VEEE", available_at=BASE + timedelta(seconds=2)
+        )
+        assert sink.entered.wait(timeout=1)
+
+        def deactivate() -> None:
+            try:
+                result.append(bridge.deactivate_capture_symbol("VEEE"))
+            except BaseException as exc:  # pragma: no cover - assertion transport
+                failure.append(exc)
+
+        thread = threading.Thread(target=deactivate)
+        thread.start()
+        threading.Event().wait(0.05)
+        assert thread.is_alive()
+        assert handoff.health()["requested_hot_symbols"] == ("VEEE",)
+
+        sink.release.set()
+        thread.join(timeout=1)
+
+        assert not thread.is_alive()
+        assert failure == []
+        assert result == [True]
+        assert handoff.health()["requested_hot_symbols"] == ()
+    finally:
+        sink.release.set()
+        bridge._retire_connection_generation(generation)
+        bridge.unbind_capture_handoff(handoff)
+    handoff.close()
 
 
 def test_bad_provider_clock_is_explicit_gap_and_fences_capture_book() -> None:

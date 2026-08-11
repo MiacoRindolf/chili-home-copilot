@@ -1078,10 +1078,12 @@ def deactivate_capture_symbol(symbol: str) -> bool:
         _capture_checkpointed_generation.pop(normalized, None)
         handoff = _bound_capture_handoff()
         if handoff is not None:
-            try:
-                handoff.deactivate_hot_symbol(normalized)
-            except Exception:
-                log.exception("IQFeed L2 capture deactivation handoff failed")
+            # ``books_lock`` is the producer fence: after the hot-roster removal
+            # above no later frame for this symbol can enter the handoff.  The
+            # handoff must now drain everything already offered before the host
+            # is allowed to abort/detach the symbol's capture run.  Propagate a
+            # failed drain so callers cannot silently detach beneath queued L2.
+            handoff.deactivate_hot_symbol(normalized)
         return existed
 
 
