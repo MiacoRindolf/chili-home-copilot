@@ -808,9 +808,11 @@ def test_pressure_probe_does_not_poison_capture_store_resource_accounting(
     )
     original_fsync = service_module.os.fsync
     observed_during_probe = False
+    fsync_calls = 0
 
     def _observe_store_while_probe_exists(descriptor: int) -> None:
-        nonlocal observed_during_probe
+        nonlocal observed_during_probe, fsync_calls
+        fsync_calls += 1
         original_fsync(descriptor)
         if not observed_during_probe:
             observed_during_probe = True
@@ -828,6 +830,7 @@ def test_pressure_probe_does_not_poison_capture_store_resource_accounting(
         )
 
         assert observed_during_probe is True
+        assert fsync_calls == 1
         assert sample.resource_binding_sha256 == SHA_A
         store.put_payload({"event": "selection"})
         assert store.resource_health()["resource_failure_reasons"] == ()
