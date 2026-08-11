@@ -1338,6 +1338,53 @@ def test_process_service_exposes_fail_closed_live_loop_hook_sequence(
         service.config_evidence_for("VEEE")
 
 
+def test_process_service_rejects_suspended_pressure_before_run_factory(
+    tmp_path: Path,
+) -> None:
+    binding = _binding()
+    controller = CaptureAdaptivePressureController(binding)
+    controller.observe(
+        CapturePressureSample(
+            observed_at=BASE + timedelta(seconds=1),
+            resource_binding_sha256=binding.binding_sha256,
+            cpu_percent=20,
+            available_memory_bytes=50_000_000,
+            disk_free_bytes=900_000_000,
+            write_latency_milliseconds=5,
+        )
+    )
+    controller.suspend_sampling()
+    clock = _WallClock(BASE + timedelta(seconds=2))
+    supervisor = LiveReplayCaptureSupervisor.create(
+        identity=_identity_and_evidence("SUPERVISOR")[0],
+        resource_binding=binding,
+        pressure_controller=controller,
+        wall_clock=clock,
+        pretrigger_horizon=timedelta(minutes=3),
+        per_symbol_pretrigger_events=8,
+    )
+    factory_calls = 0
+
+    def run_factory(_symbol: str, **_kwargs):
+        nonlocal factory_calls
+        factory_calls += 1
+        raise AssertionError("run factory must stay untouched while suspended")
+
+    service = LiveReplayCaptureProcessService(
+        supervisor=supervisor,
+        run_factory=run_factory,
+    )
+
+    with pytest.raises(
+        CaptureContractError,
+        match="^capture_resource_pressure_sample_unavailable$",
+    ):
+        service.admit_hot_symbol("VEEE")
+
+    assert factory_calls == 0
+    assert service.health()["running_symbols"] == ()
+
+
 def test_supervised_iqfeed_promotion_registers_from_exact_print_and_gaps_prior_quote(
     tmp_path: Path,
 ) -> None:

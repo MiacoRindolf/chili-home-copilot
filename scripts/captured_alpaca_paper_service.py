@@ -232,7 +232,10 @@ class _CapturedPaperPressureFeedWorker:
         self._monotonic_clock = monotonic_clock
         self._stop_event = threading.Event()
         self._thread: threading.Thread | None = None
-        self._state_lock = threading.Lock()
+        # Controller suspension/recovery and the matching worker counters form
+        # one health transition.  A re-entrant lock lets the small recording
+        # helpers participate without exposing a mixed snapshot to health().
+        self._state_lock = threading.RLock()
         self._ever_started = False
         self._fatal = False
         self._fatal_reason: str | None = None
@@ -240,6 +243,7 @@ class _CapturedPaperPressureFeedWorker:
         self._sample_failure_count = 0
         self._consecutive_sample_failures = 0
         self._last_sample_error: str | None = None
+        self._last_successful_sample_monotonic: float | None = None
 
     def _record_sample_failure(
         self,
@@ -257,24 +261,67 @@ class _CapturedPaperPressureFeedWorker:
                 if self._fatal_reason is None:
                     self._fatal_reason = reason
 
+    def _suspend_after_runtime_failure(
+        self,
+        exc: BaseException,
+        *,
+        fatal: bool,
+    ) -> None:
+        with self._state_lock:
+            try:
+                self._controller.suspend_sampling()
+            except BaseException as invalidation_exc:
+                self._record_sample_failure(exc, fatal=True)
+                raise invalidation_exc from exc
+            self._record_sample_failure(exc, fatal=fatal)
+
+    def _checked_monotonic(self) -> float:
+        observed = float(self._monotonic_clock())
+        if not math.isfinite(observed):
+            raise ValueError("pressure feed monotonic clock is non-finite")
+        return observed
+
     def _feed_once(self, *, startup: bool) -> None:
         try:
             sample = self._sampler()
         except OSError as exc:
-            self._record_sample_failure(exc, fatal=startup)
+            if startup:
+                self._record_sample_failure(exc, fatal=True)
+                raise
+            # Do not leave the last sample admissible until its ordinary
+            # freshness window expires.  A runtime metrics I/O failure is
+            # itself enough evidence to suspend new capture starts.  Only a
+            # later contract-valid observe() may clear this marker.  Suspend
+            # first so bookkeeping cannot widen the known-failure window.
+            self._suspend_after_runtime_failure(exc, fatal=False)
             raise
         except BaseException as exc:
-            self._record_sample_failure(exc, fatal=True)
+            if startup:
+                self._record_sample_failure(exc, fatal=True)
+                raise
+            self._suspend_after_runtime_failure(exc, fatal=True)
             raise
         try:
-            self._controller.observe(sample)
+            successful_sample_monotonic = self._checked_monotonic()
         except BaseException as exc:
-            self._record_sample_failure(exc, fatal=True)
+            if startup:
+                self._record_sample_failure(exc, fatal=True)
+            else:
+                self._suspend_after_runtime_failure(exc, fatal=True)
             raise
         with self._state_lock:
+            try:
+                self._controller.observe(sample)
+            except BaseException as exc:
+                if not startup:
+                    self._suspend_after_runtime_failure(exc, fatal=True)
+                else:
+                    self._record_sample_failure(exc, fatal=True)
+                raise
             self._samples_fed += 1
             self._consecutive_sample_failures = 0
             self._last_sample_error = None
+            self._last_successful_sample_monotonic = successful_sample_monotonic
 
     def _run(self) -> None:
         # Schedule by sample *start* time.  Waiting a full interval after the
@@ -283,15 +330,27 @@ class _CapturedPaperPressureFeedWorker:
         # 5s sample-freshness window.  If sampling itself consumes an interval,
         # retry immediately after it finishes rather than manufacturing a stale
         # gap.  Admission remains fail-closed against the measured sample.
-        next_sample_at = float(self._monotonic_clock()) + self._interval
+        try:
+            next_sample_at = self._checked_monotonic() + self._interval
+        except BaseException as exc:
+            self._suspend_after_runtime_failure(exc, fatal=True)
+            return
         while True:
-            wait_seconds = max(
-                0.0,
-                next_sample_at - float(self._monotonic_clock()),
-            )
+            try:
+                wait_seconds = max(
+                    0.0,
+                    next_sample_at - self._checked_monotonic(),
+                )
+            except BaseException as exc:
+                self._suspend_after_runtime_failure(exc, fatal=True)
+                return
             if self._stop_event.wait(wait_seconds):
                 return
-            sample_started_at = float(self._monotonic_clock())
+            try:
+                sample_started_at = self._checked_monotonic()
+            except BaseException as exc:
+                self._suspend_after_runtime_failure(exc, fatal=True)
+                return
             next_sample_at = sample_started_at + self._interval
             try:
                 self._feed_once(startup=False)
@@ -299,8 +358,8 @@ class _CapturedPaperPressureFeedWorker:
                 # A runtime sampler can fail transiently (for example while the
                 # host metrics source rolls over).  Keep this broker-incapable
                 # worker alive so it can produce a later recovery sample.  The
-                # controller's bounded freshness window independently makes the
-                # last sample stale and blocks admission until that happens.
+                # explicit suspension overlay blocks admission immediately and
+                # stays closed until a later clean observation succeeds.
                 with self._state_lock:
                     if self._fatal:
                         return
@@ -339,46 +398,72 @@ class _CapturedPaperPressureFeedWorker:
                 )
 
     def health(self) -> Mapping[str, Any]:
-        pressure: dict[str, Any] = {}
-        try:
-            pressure = dict(self._controller.health())
-            active_reasons = pressure.get("active_reasons")
-            # The controller's sealed hysteresis contract is authoritative.
-            # A nonzero entry_streak remains admissible until the configured
-            # pressure_enter_samples threshold changes this published state.
-            ingress_admissible = bool(
-                pressure.get("required_full_fidelity_admissible") is True
-                and pressure.get("pressure_state") == "normal"
-                and pressure.get("rejection_reason") is None
-                and isinstance(active_reasons, (list, tuple))
-                and not active_reasons
-                and isinstance(pressure.get("sample_count"), int)
-                and not isinstance(pressure.get("sample_count"), bool)
-                and pressure["sample_count"] > 0
-            )
-            pressure_health_readable = True
-            pressure_state = pressure.get("pressure_state")
-            pressure_rejection_reason = pressure.get("rejection_reason")
-            pressure_sample_age_seconds = pressure.get("sample_age_seconds")
-            try:
-                pressure_sample_max_age_seconds = float(
-                    self._controller.binding.policy.pressure_sample_max_age_seconds
-                )
-            except (AttributeError, TypeError, ValueError):
-                pressure_sample_max_age_seconds = None
-        except Exception as exc:
-            ingress_admissible = False
-            pressure_health_readable = False
-            pressure_state = "health_unavailable"
-            pressure_rejection_reason = (
-                f"pressure_controller_health_unavailable:{type(exc).__name__}"
-            )
-            pressure_sample_age_seconds = None
-            pressure_sample_max_age_seconds = None
         with self._state_lock:
+            pressure: dict[str, Any] = {}
+            try:
+                pressure = dict(self._controller.health())
+                active_reasons = pressure.get("active_reasons")
+                # The controller's sealed hysteresis contract is authoritative.
+                # A nonzero entry_streak remains admissible until the configured
+                # pressure_enter_samples threshold changes this published state.
+                ingress_admissible = bool(
+                    pressure.get("required_full_fidelity_admissible") is True
+                    and pressure.get("pressure_state") == "normal"
+                    and pressure.get("rejection_reason") is None
+                    and isinstance(active_reasons, (list, tuple))
+                    and not active_reasons
+                    and isinstance(pressure.get("sample_count"), int)
+                    and not isinstance(pressure.get("sample_count"), bool)
+                    and pressure["sample_count"] > 0
+                )
+                pressure_health_readable = True
+                pressure_state = pressure.get("pressure_state")
+                pressure_rejection_reason = pressure.get("rejection_reason")
+                pressure_sample_age_seconds = pressure.get("sample_age_seconds")
+                try:
+                    pressure_sample_max_age_seconds = float(
+                        self._controller.binding.policy.pressure_sample_max_age_seconds
+                    )
+                except (AttributeError, TypeError, ValueError):
+                    pressure_sample_max_age_seconds = None
+            except Exception as exc:
+                ingress_admissible = False
+                pressure_health_readable = False
+                pressure_state = "health_unavailable"
+                pressure_rejection_reason = (
+                    f"pressure_controller_health_unavailable:{type(exc).__name__}"
+                )
+                pressure_sample_age_seconds = None
+                pressure_sample_max_age_seconds = None
             thread = self._thread
             running = bool(
                 thread is not None and thread.is_alive() and not self._fatal
+            )
+            try:
+                now_monotonic = self._checked_monotonic()
+            except Exception as exc:
+                if not self._fatal:
+                    self._suspend_after_runtime_failure(exc, fatal=True)
+                running = False
+                now_monotonic = math.nan
+                ingress_admissible = False
+                pressure_health_readable = False
+                pressure_state = "health_unavailable"
+                pressure_rejection_reason = (
+                    "pressure_feed_monotonic_clock_unavailable:"
+                    f"{type(exc).__name__}"
+                )
+                pressure_sample_age_seconds = None
+                pressure["sampling_suspended"] = True
+            last_successful_sample_age_seconds = (
+                max(
+                    0.0,
+                    now_monotonic - self._last_successful_sample_monotonic,
+                )
+                if self._last_successful_sample_monotonic is not None
+                and math.isfinite(now_monotonic)
+                and now_monotonic >= self._last_successful_sample_monotonic
+                else None
             )
             known_pressure_reasons = (
                 "cpu",
@@ -441,6 +526,52 @@ class _CapturedPaperPressureFeedWorker:
                 and float(pressure_sample_age_seconds)
                 > pressure_sample_max_age_seconds
             )
+            recoverable_sample_unavailable = bool(
+                running
+                and pressure_health_readable
+                and not ingress_admissible
+                and pressure.get("required_full_fidelity_admissible") is False
+                and pressure_state == "unobserved_fail_closed"
+                and pressure_rejection_reason
+                == "capture_resource_pressure_sample_unavailable"
+                and pressure.get("sampling_suspended") is True
+                and isinstance(pressure.get("sample_count"), int)
+                and not isinstance(pressure.get("sample_count"), bool)
+                and pressure["sample_count"] > 0
+                and self._consecutive_sample_failures > 0
+            )
+            recoverable_admission_suspension = bool(
+                recoverable_resource_pressure
+                or recoverable_sample_staleness
+                or recoverable_sample_unavailable
+            )
+            sampling_overdue = bool(
+                pressure_sample_max_age_seconds is not None
+                and last_successful_sample_age_seconds is not None
+                and last_successful_sample_age_seconds
+                > pressure_sample_max_age_seconds
+            )
+            sampling_healthy = bool(
+                running
+                and pressure_health_readable
+                and self._consecutive_sample_failures == 0
+                and not sampling_overdue
+            )
+            operationally_healthy = bool(
+                sampling_healthy and ingress_admissible
+            )
+            if self._fatal:
+                sampling_state = "fatal"
+            elif not running:
+                sampling_state = "stopped"
+            elif not pressure_health_readable:
+                sampling_state = "health_unavailable"
+            elif self._consecutive_sample_failures > 0:
+                sampling_state = "suspended_retrying"
+            elif sampling_overdue:
+                sampling_state = "stale"
+            else:
+                sampling_state = "healthy"
             return {
                 "ever_started": self._ever_started,
                 "running": running,
@@ -452,7 +583,33 @@ class _CapturedPaperPressureFeedWorker:
                     self._consecutive_sample_failures
                 ),
                 "last_sample_error": self._last_sample_error,
+                "last_successful_sample_age_seconds": (
+                    last_successful_sample_age_seconds
+                ),
                 "interval_seconds": self._interval,
+                "sampling_state": sampling_state,
+                "feed_status": sampling_state,
+                "sampling_healthy": sampling_healthy,
+                "sampling_overdue": sampling_overdue,
+                "operationally_healthy": operationally_healthy,
+                "degraded": not operationally_healthy,
+                "sampling_suspended": pressure.get(
+                    "sampling_suspended", False
+                ),
+                "sampling_suspension_count": pressure.get(
+                    "sampling_suspension_count", 0
+                ),
+                "sampling_recovery_count": pressure.get(
+                    "sampling_recovery_count", 0
+                ),
+                "degraded_reason": (
+                    None
+                    if operationally_healthy
+                    else pressure_rejection_reason
+                    or self._last_sample_error
+                    or self._fatal_reason
+                    or "pressure_feed_not_operational"
+                ),
                 # A valid pressure state can be non-admissible without making
                 # the broker-incapable recovery worker unsafe to keep running.
                 # Selection owns the fail-closed boundary: its deferred reader
@@ -464,15 +621,13 @@ class _CapturedPaperPressureFeedWorker:
                     and pressure_health_readable
                     and (
                         ingress_admissible
-                        or recoverable_resource_pressure
-                        or recoverable_sample_staleness
+                        or recoverable_admission_suspension
                     )
                 ),
                 "ingress_admissible": ingress_admissible,
                 "admission_suspended": not ingress_admissible,
                 "recoverable_admission_suspension": (
-                    recoverable_resource_pressure
-                    or recoverable_sample_staleness
+                    recoverable_admission_suspension
                 ),
                 "pressure_state": pressure_state,
                 "pressure_rejection_reason": pressure_rejection_reason,

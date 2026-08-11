@@ -199,7 +199,7 @@ def _sha256_json(value: Mapping[str, Any]) -> str:
 class CapturedPaperServiceSupervisor:
     """Own one process generation of the fake-money PAPER runtime."""
 
-    HEALTH_SCHEMA_VERSION = "chili.captured-paper-service-supervisor-health.v2"
+    HEALTH_SCHEMA_VERSION = "chili.captured-paper-service-supervisor-health.v3"
     _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 
     def __init__(
@@ -303,6 +303,41 @@ class CapturedPaperServiceSupervisor:
         self._post_quiesce_receipt: Mapping[str, Any] | None = None
         self._live_loop_started = False
         self._active_path_started = False
+
+    @staticmethod
+    def _pressure_feed_operational_status(
+        health: Mapping[str, Any],
+    ) -> tuple[str, str | None]:
+        """Validate the fail-closed pressure-feed state without killing recovery."""
+
+        if (
+            health.get("ingress_admissible") is True
+            and health.get("admission_suspended") is False
+            and health.get("operationally_healthy") is True
+            and health.get("sampling_healthy") is True
+            and health.get("degraded_reason") is None
+        ):
+            return "healthy", None
+
+        reason = health.get("pressure_rejection_reason")
+        exact_recoverable_suspension = (
+            health.get("ingress_admissible") is False
+            and health.get("admission_suspended") is True
+            and health.get("operationally_healthy") is False
+            and (
+                health.get("recoverable_admission_suspension") is True
+                or (
+                    health.get("pressure_state") == "health_unavailable"
+                    and reason
+                    == "pressure_controller_health_unavailable:OSError"
+                )
+            )
+            and isinstance(reason, str)
+            and bool(reason)
+        )
+        if exact_recoverable_suspension:
+            return "admission_suspended", reason
+        return "invalid", None
 
     @property
     def state(self) -> CapturedPaperServiceState:
@@ -932,6 +967,14 @@ class CapturedPaperServiceSupervisor:
                 raise CapturedPaperServiceSupervisorError(
                     f"captured_paper_{managed.name}_health_lost{fatal_suffix}"
                 )
+            if managed.name == "pressure_feed":
+                pressure_status, _pressure_reason = (
+                    self._pressure_feed_operational_status(health)
+                )
+                if pressure_status == "invalid":
+                    raise CapturedPaperServiceSupervisorError(
+                        "captured_paper_pressure_feed_operational_health_lost"
+                    )
         if self._live_loop_health() is not True:
             raise CapturedPaperServiceSupervisorError(
                 "captured_paper_live_loop_health_lost"
@@ -1193,6 +1236,20 @@ class CapturedPaperServiceSupervisor:
             managed.name: _health_mapping(managed.worker.health())
             for managed in (*self._pre_authority_workers, *self._workers)
         }
+        degraded_workers: dict[str, str] = {}
+        pressure_health = worker_health.get("pressure_feed")
+        if self._state is CapturedPaperServiceState.ACTIVE and isinstance(
+            pressure_health, Mapping
+        ):
+            pressure_status, pressure_reason = (
+                self._pressure_feed_operational_status(pressure_health)
+            )
+            if pressure_status == "admission_suspended" and pressure_reason:
+                degraded_workers["pressure_feed"] = pressure_reason
+            elif pressure_status == "invalid":
+                degraded_workers["pressure_feed"] = (
+                    "pressure_feed_operational_health_invalid"
+                )
         return MappingProxyType(
             {
                 "schema_version": self.HEALTH_SCHEMA_VERSION,
@@ -1237,6 +1294,22 @@ class CapturedPaperServiceSupervisor:
                 ),
                 "live_loop_started": self._live_loop_started,
                 "managed_workers": worker_health,
+                "operational_status": (
+                    "invalid"
+                    if "pressure_feed_operational_health_invalid"
+                    in degraded_workers.values()
+                    else "degraded"
+                    if degraded_workers
+                    else "healthy"
+                    if self._state is CapturedPaperServiceState.ACTIVE
+                    else self._state.value
+                ),
+                "operationally_healthy": bool(
+                    self._state is CapturedPaperServiceState.ACTIVE
+                    and not degraded_workers
+                ),
+                "admission_suspended": bool(degraded_workers),
+                "degraded_workers": degraded_workers,
                 "active_pre_authority_worker_names": [
                     managed.name for managed in self._pre_authority_workers
                 ],
