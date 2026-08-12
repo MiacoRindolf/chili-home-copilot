@@ -230,11 +230,29 @@ def _docker_lane_inspect(
     }
 
 
+def _docker_engine_authority(*, daemon_id: str | None = None) -> cutover.DockerEngineAuthority:
+    return cutover.DockerEngineAuthority(
+        endpoint=cutover._DOCKER_ENGINE_ENDPOINT,
+        pipe_name=cutover._DOCKER_ENGINE_PIPE,
+        server_pid=34668,
+        server_create_time_filetime=134151391962750100,
+        server_executable_path=(
+            r"C:\Program Files\Docker\Docker\resources\com.docker.backend.exe"
+        ),
+        server_executable_sha256="9" * 64,
+        daemon_id=daemon_id or "48db887a-6e27-4f02-b4a3-1c0b068a56b3",
+        daemon_name="docker-desktop",
+        daemon_version="29.5.2",
+        daemon_os_type="linux",
+    )
+
+
 def _docker_backend_with_command(command):
     backend = object.__new__(cutover.WindowsHostCutoverBackend)
     backend._docker_command = command
+    backend._docker_engine_authority = _docker_engine_authority()
     tasks = {
-        name: cutover.TaskObservation(name, _task_xml(name), True)
+        name: cutover.TaskObservation(name, _set_task_enabled(_task_xml(name), False), False)
         for name in cutover.EXECUTION_LANE_RECREATOR_TASKS
     }
 
@@ -263,6 +281,7 @@ def _docker_backend_with_command(command):
         )
 
     backend._execution_lane_recreator_probe = probe
+    backend._inspect_execution_lane_recreator_tasks = lambda **_kwargs: probe()
     backend.get_task = lambda name: tasks.get(name)
     backend.set_task_enabled = set_enabled
     backend.stop_task = lambda _name: None
@@ -302,7 +321,7 @@ def test_docker_execution_lane_stop_and_restore_use_full_container_id() -> None:
     baseline = backend.inspect_legacy_execution_lane()
     assert baseline.state == "running"
     assert backend.quiesce_legacy_execution_lane(expected=baseline) == (
-        len(cutover.EXECUTION_LANE_RECREATOR_TASKS) * 2 + 1
+        len(cutover.EXECUTION_LANE_RECREATOR_TASKS) + 1
     )
     assert state["value"] == "stopped"
     assert not any(
@@ -310,12 +329,267 @@ def test_docker_execution_lane_stop_and_restore_use_full_container_id() -> None:
         for item in backend.inspect_legacy_execution_lane().recreator_tasks
     )
     assert not any(item[0] == "pause" for item in calls)
-    assert backend.restore_legacy_execution_lane(expected=baseline) == (
-        len(cutover.EXECUTION_LANE_RECREATOR_TASKS) + 1
-    )
+    assert backend.restore_legacy_execution_lane(expected=baseline) == 1
     assert state["value"] == "running"
     assert ("stop", "d" * 64) in calls
     assert ("start", "d" * 64) in calls
+
+
+def test_quiesce_stops_late_container_restart_after_descendant_drain() -> None:
+    state = {"value": "stopped"}
+    calls: list[tuple[str, ...]] = []
+
+    def command(arguments):
+        args = tuple(arguments)
+        calls.append(args)
+        if args[0] == "stop":
+            state["value"] = "stopped"
+            return SimpleNamespace(stdout=b"", stderr=b"", returncode=0)
+        return SimpleNamespace(
+            stdout=json.dumps(_docker_lane_inspect(state=state["value"])).encode(),
+            stderr=b"",
+            returncode=0,
+        )
+
+    backend = _docker_backend_with_command(command)
+    baseline = backend.inspect_legacy_execution_lane()
+    task_name = cutover.EXECUTION_LANE_RECREATOR_TASKS[0]
+    expected = replace(
+        baseline,
+        recreator_tasks=tuple(
+            replace(item, enabled=item.name == task_name)
+            for item in baseline.recreator_tasks
+        ),
+    )
+    backend.set_task_enabled(task_name, True)
+    original_stop = backend.stop_task
+
+    def stop_task(name: str) -> None:
+        original_stop(name)
+        if name == task_name:
+            state["value"] = "running"
+
+    backend.stop_task = stop_task
+
+    backend.quiesce_legacy_execution_lane(expected=expected)
+
+    assert state["value"] == "stopped"
+    assert ("stop", "d" * 64) in calls
+
+
+def test_restore_quiesces_lane_when_recreator_reenables_at_final_read() -> None:
+    state = {"value": "running"}
+    calls: list[tuple[str, ...]] = []
+
+    def command(arguments):
+        args = tuple(arguments)
+        calls.append(args)
+        if args[0] == "stop":
+            state["value"] = "stopped"
+            return SimpleNamespace(stdout=b"", stderr=b"", returncode=0)
+        return SimpleNamespace(
+            stdout=json.dumps(_docker_lane_inspect(state=state["value"])).encode(),
+            stderr=b"",
+            returncode=0,
+        )
+
+    backend = _docker_backend_with_command(command)
+    expected = backend.inspect_legacy_execution_lane()
+    original_get_task = backend.get_task
+    calls_before_flip = {"value": 0}
+    target = expected.recreator_tasks[0].name
+
+    def get_task(name: str):
+        observed = original_get_task(name)
+        calls_before_flip["value"] += 1
+        if calls_before_flip["value"] == len(expected.recreator_tasks):
+            # The last pre-read returned disabled, then a queued scheduler
+            # action re-enabled one recreator before final lane inspection.
+            backend.set_task_enabled(target, True)
+        return observed
+
+    backend.get_task = get_task
+
+    with pytest.raises(cutover.CapturedPaperHostCutoverError) as caught:
+        backend.restore_legacy_execution_lane(expected=expected)
+
+    assert caught.value.code == "EXECUTION_LANE_RESTORE_FAILED"
+    assert state["value"] == "stopped"
+    assert ("stop", "d" * 64) in calls
+    assert not any(
+        item.enabled
+        for item in backend.inspect_legacy_execution_lane().recreator_tasks
+    )
+
+
+def test_restore_quiesces_recreator_enabled_before_restore_read() -> None:
+    state = {"value": "stopped"}
+    calls: list[tuple[str, ...]] = []
+
+    def command(arguments):
+        args = tuple(arguments)
+        calls.append(args)
+        if args[0] == "stop":
+            state["value"] = "stopped"
+            return SimpleNamespace(stdout=b"", stderr=b"", returncode=0)
+        if args[0] == "start":
+            state["value"] = "running"
+            return SimpleNamespace(stdout=b"", stderr=b"", returncode=0)
+        return SimpleNamespace(
+            stdout=json.dumps(_docker_lane_inspect(state=state["value"])).encode(),
+            stderr=b"",
+            returncode=0,
+        )
+
+    backend = _docker_backend_with_command(command)
+    expected = backend.inspect_legacy_execution_lane()
+    expected = replace(expected, state="running")
+    target = expected.recreator_tasks[0].name
+    backend.set_task_enabled(target, True)
+
+    with pytest.raises(cutover.CapturedPaperHostCutoverError) as caught:
+        backend.restore_legacy_execution_lane(expected=expected)
+
+    assert caught.value.code == "EXECUTION_LANE_RECREATOR_DRIFT"
+    assert state["value"] == "stopped"
+    assert not any(item[0] == "start" for item in calls)
+    assert not any(
+        item.enabled
+        for item in backend.inspect_legacy_execution_lane().recreator_tasks
+    )
+
+
+def test_restore_quiesces_recreator_enabled_after_container_start() -> None:
+    state = {"value": "running"}
+    calls: list[tuple[str, ...]] = []
+
+    def command(arguments):
+        args = tuple(arguments)
+        calls.append(args)
+        if args[0] == "stop":
+            state["value"] = "stopped"
+            return SimpleNamespace(stdout=b"", stderr=b"", returncode=0)
+        if args[0] == "start":
+            state["value"] = "running"
+            return SimpleNamespace(stdout=b"", stderr=b"", returncode=0)
+        return SimpleNamespace(
+            stdout=json.dumps(_docker_lane_inspect(state=state["value"])).encode(),
+            stderr=b"",
+            returncode=0,
+        )
+
+    backend = _docker_backend_with_command(command)
+    expected = backend.inspect_legacy_execution_lane()
+    state["value"] = "stopped"
+    original_get_task = backend.get_task
+    target = expected.recreator_tasks[0].name
+    injected = {"value": False}
+
+    def get_task(name: str):
+        if not injected["value"]:
+            injected["value"] = True
+            backend.set_task_enabled(target, True)
+        return original_get_task(name)
+
+    backend.get_task = get_task
+
+    with pytest.raises(cutover.CapturedPaperHostCutoverError) as caught:
+        backend.restore_legacy_execution_lane(expected=expected)
+
+    assert caught.value.code == "EXECUTION_LANE_RECREATOR_DRIFT"
+    assert ("start", "d" * 64) in calls
+    assert ("stop", "d" * 64) in calls
+    assert state["value"] == "stopped"
+    assert not any(
+        item.enabled
+        for item in backend.inspect_legacy_execution_lane().recreator_tasks
+    )
+
+
+def test_restore_stops_container_when_recreator_definition_disappears_after_start(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    state = {"value": "running"}
+    calls: list[tuple[str, ...]] = []
+
+    def command(arguments):
+        args = tuple(arguments)
+        calls.append(args)
+        if args[0] == "stop":
+            state["value"] = "stopped"
+            return SimpleNamespace(stdout=b"", stderr=b"", returncode=0)
+        if args[0] == "start":
+            state["value"] = "running"
+            return SimpleNamespace(stdout=b"", stderr=b"", returncode=0)
+        return SimpleNamespace(
+            stdout=json.dumps(_docker_lane_inspect(state=state["value"])).encode(),
+            stderr=b"",
+            returncode=0,
+        )
+
+    backend = _docker_backend_with_command(command)
+    expected = backend.inspect_legacy_execution_lane()
+    state["value"] = "stopped"
+    original_get_task = backend.get_task
+    target = expected.recreator_tasks[0].name
+    disappeared = {"value": False}
+
+    def get_task(name: str):
+        if not disappeared["value"]:
+            disappeared["value"] = True
+            return None if name == target else original_get_task(name)
+        return None if name == target else original_get_task(name)
+
+    backend.get_task = get_task
+
+    with pytest.raises(cutover.CapturedPaperHostCutoverError) as caught:
+        backend.restore_legacy_execution_lane(expected=expected)
+
+    assert caught.value.code == "EXECUTION_LANE_RECREATOR_DRIFT"
+    assert ("start", "d" * 64) in calls
+    assert ("stop", "d" * 64) in calls
+    assert state["value"] == "stopped"
+
+
+def test_force_quiesce_stops_container_before_task_query_failure() -> None:
+    state = {"value": "running"}
+    calls: list[tuple[str, ...]] = []
+
+    def command(arguments):
+        args = tuple(arguments)
+        calls.append(args)
+        if args[0] == "stop":
+            state["value"] = "stopped"
+            return SimpleNamespace(stdout=b"", stderr=b"", returncode=0)
+        return SimpleNamespace(
+            stdout=json.dumps(_docker_lane_inspect(state=state["value"])).encode(),
+            stderr=b"",
+            returncode=0,
+        )
+
+    backend = _docker_backend_with_command(command)
+    expected = backend.inspect_legacy_execution_lane()
+    query_calls = {"value": 0}
+
+    def get_task(_name: str):
+        query_calls["value"] += 1
+        if query_calls["value"] == 1:
+            # The first stop succeeded, then the queued child completed while
+            # Task Scheduler failed.  The compensator must continue far enough
+            # to issue another exact-ID stop.
+            state["value"] = "running"
+        raise OSError("injected Task Scheduler failure")
+
+    backend.get_task = get_task
+
+    with pytest.raises(
+        cutover.CapturedPaperHostCutoverError,
+        match="EXECUTION_LANE_RESTORE_COMPENSATION_FAILED",
+    ):
+        backend.force_quiesce_bound_execution_lane(expected=expected)
+
+    assert calls.count(("stop", "d" * 64)) >= 2
+    assert state["value"] == "stopped"
 
 
 def test_docker_execution_lane_identity_drift_blocks_before_stop() -> None:
@@ -350,6 +624,7 @@ def test_docker_execution_lane_identity_drift_blocks_before_stop() -> None:
             for name in sorted(cutover.EXECUTION_LANE_RECREATOR_TASKS)
         ),
         state="running",
+        docker_engine_authority=_docker_engine_authority(),
     )
     with pytest.raises(
         cutover.CapturedPaperHostCutoverError,
@@ -413,7 +688,253 @@ def test_docker_execution_lane_rejects_rollback_unsafe_lifecycle_policy(
         backend.inspect_legacy_execution_lane()
 
 
-def test_windows_backend_allows_only_recreator_query_toggle_and_end(
+def _production_docker_transport_backend(tmp_path: Path):
+    backend = object.__new__(cutover.WindowsHostCutoverBackend)
+    backend._docker = Path(r"C:\Program Files\Docker\Docker\resources\bin\docker.exe")
+    backend._docker_config_parent = tmp_path
+    backend._docker_engine_authority = None
+    backend._docker_server_process_handle = None
+    return backend
+
+
+def test_docker_transport_uses_only_fixed_host_and_absent_config_sentinel(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    backend = _production_docker_transport_backend(tmp_path)
+    observed: dict[str, object] = {}
+    system32 = tmp_path / "Windows" / "System32"
+    system32.mkdir(parents=True)
+    monkeypatch.setattr(cutover, "_native_system32_directory", lambda: system32)
+    monkeypatch.setenv("DOCKER_CONTEXT", "attacker-context")
+    monkeypatch.setenv("DOCKER_HOST", "tcp://attacker.invalid:2375")
+    monkeypatch.setenv("DOCKER_CONFIG", str(tmp_path / "attacker-config"))
+
+    def run(argv, **kwargs):
+        observed["argv"] = list(argv)
+        observed["env"] = dict(kwargs["env"])
+        return SimpleNamespace(stdout=b"{}", stderr=b"", returncode=0)
+
+    monkeypatch.setattr(cutover.subprocess, "run", run)
+    backend._docker_transport_command(("inspect", "container"))
+
+    sentinel = tmp_path / cutover._DOCKER_EMPTY_CONFIG_BASENAME
+    assert observed["argv"] == [
+        str(backend._docker),
+        "--config",
+        str(sentinel),
+        "--host",
+        cutover._DOCKER_ENGINE_ENDPOINT,
+        "inspect",
+        "container",
+    ]
+    assert not sentinel.exists()
+    assert not any(
+        key.upper().startswith("DOCKER_") for key in observed["env"]
+    )
+    assert observed["env"] == {
+        "SystemRoot": str(system32.parent),
+        "WINDIR": str(system32.parent),
+        "TEMP": str(tmp_path),
+        "TMP": str(tmp_path),
+    }
+
+
+def test_docker_transport_timeout_is_typed_and_bounded(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    backend = _production_docker_transport_backend(tmp_path)
+    observed: dict[str, object] = {}
+    system32 = tmp_path / "Windows" / "System32"
+    system32.mkdir(parents=True)
+    monkeypatch.setattr(cutover, "_native_system32_directory", lambda: system32)
+
+    def run(argv, **kwargs):
+        observed["timeout"] = kwargs["timeout"]
+        raise cutover.subprocess.TimeoutExpired(argv, kwargs["timeout"])
+
+    monkeypatch.setattr(cutover.subprocess, "run", run)
+    with pytest.raises(cutover.CapturedPaperHostCutoverError) as caught:
+        backend._docker_transport_command(("inspect", "container"))
+    assert caught.value.code == "EXECUTION_LANE_COMMAND_TIMEOUT"
+    assert observed["timeout"] == cutover._DOCKER_COMMAND_TIMEOUT_SECONDS
+
+
+def test_compose_source_binding_never_executes_compose_or_reads_dotenv(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    compose = tmp_path / "docker-compose.yml"
+    compose.write_bytes(b"services: {}\n")
+    compose_sha256 = hashlib.sha256(compose.read_bytes()).hexdigest()
+    backend = object.__new__(cutover.WindowsHostCutoverBackend)
+    backend._docker_command = lambda _args: pytest.fail(
+        "Compose and Docker must not execute while binding source provenance"
+    )
+    monkeypatch.setattr(cutover, "_EXECUTION_LANE_COMPOSE_FILE", compose)
+    monkeypatch.setattr(
+        cutover, "_EXECUTION_LANE_COMPOSE_FILE_SHA256", compose_sha256
+    )
+
+    observed = backend._execution_lane_compose_source_binding(
+        expected_image_id="sha256:" + "e" * 64
+    )
+    expected = cutover.sha256_json(
+        {
+            "schema_version": "chili.legacy-momentum-compose-source-binding.v1",
+            "compose_file_path": str(compose),
+            "compose_file_sha256": compose_sha256,
+            "container_name": cutover.LEGACY_EXECUTION_LANE_NAME,
+            "container_image_id": "sha256:" + "e" * 64,
+            "restore_mechanism": "start_exact_existing_container_only",
+            "recreator_tasks_must_remain_disabled": True,
+            "ambient_compose_env_authorized": False,
+            "live_cash_authorized": False,
+        }
+    )
+    assert observed == expected
+
+
+def test_docker_command_rejects_server_or_daemon_drift_before_return() -> None:
+    backend = object.__new__(cutover.WindowsHostCutoverBackend)
+    first = _docker_engine_authority()
+    second = _docker_engine_authority(
+        daemon_id="58db887a-6e27-4f02-b4a3-1c0b068a56b3"
+    )
+    observations = iter((first, second))
+    backend._docker_engine_authority = first
+    backend._read_docker_engine_authority = lambda: next(observations)
+    backend._docker_transport_command = lambda _arguments: SimpleNamespace(
+        stdout=b"{}", stderr=b"", returncode=0
+    )
+
+    with pytest.raises(cutover.CapturedPaperHostCutoverError) as caught:
+        backend._docker_command(("inspect", "container"))
+    assert caught.value.code == "DOCKER_ENGINE_AUTHORITY_DRIFT"
+
+
+def test_docker_lane_document_binds_server_identity() -> None:
+    backend = _docker_backend_with_command(
+        lambda _arguments: SimpleNamespace(
+            stdout=json.dumps(_docker_lane_inspect()).encode(),
+            stderr=b"",
+            returncode=0,
+        )
+    )
+    lane = backend.inspect_legacy_execution_lane()
+    document = dict(cutover._legacy_execution_lane_document(lane))
+    document["docker_engine_authority"]["server_pid"] += 1
+    drifted = cutover._parse_legacy_execution_lane(document, field="lane")
+    assert drifted.identity_key() != lane.identity_key()
+
+
+def test_docker_lane_parser_rejects_enabled_recreator_authority() -> None:
+    backend = _docker_backend_with_command(
+        lambda _arguments: SimpleNamespace(
+            stdout=json.dumps(_docker_lane_inspect()).encode(),
+            stderr=b"",
+            returncode=0,
+        )
+    )
+    document = dict(
+        cutover._legacy_execution_lane_document(
+            backend.inspect_legacy_execution_lane()
+        )
+    )
+    document["recreator_tasks"][0]["enabled"] = True
+
+    with pytest.raises(cutover.CapturedPaperHostCutoverError) as caught:
+        cutover._parse_legacy_execution_lane(document, field="old v3 journal lane")
+    assert caught.value.code == "EXECUTION_LANE_RECREATOR_ENABLED"
+
+
+def test_docker_restore_rejects_enabled_baseline_before_container_start() -> None:
+    calls: list[tuple[str, ...]] = []
+    backend = _docker_backend_with_command(
+        lambda arguments: (
+            calls.append(tuple(arguments))
+            or SimpleNamespace(
+                stdout=json.dumps(_docker_lane_inspect(state="stopped")).encode(),
+                stderr=b"",
+                returncode=0,
+            )
+        )
+    )
+    baseline = backend.inspect_legacy_execution_lane()
+    enabled = replace(
+        baseline,
+        recreator_tasks=tuple(
+            replace(item, enabled=True)
+            for item in baseline.recreator_tasks
+        ),
+        state="running",
+    )
+    calls.clear()
+
+    with pytest.raises(cutover.CapturedPaperHostCutoverError) as caught:
+        backend.restore_legacy_execution_lane(expected=enabled)
+    assert caught.value.code == "EXECUTION_LANE_RECREATOR_ENABLED"
+    assert calls == []
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("server_pid", 0x1_0000_0000),
+        ("server_create_time_filetime", 0x1_0000_0000_0000_0000),
+        ("server_executable_path", sys.executable),
+        ("daemon_name", "attacker-daemon"),
+        ("daemon_os_type", "windows"),
+    ],
+)
+def test_docker_lane_rejects_prebaseline_pipe_impostor(
+    field: str, value: object
+) -> None:
+    backend = _docker_backend_with_command(
+        lambda _arguments: SimpleNamespace(
+            stdout=json.dumps(_docker_lane_inspect()).encode(),
+            stderr=b"",
+            returncode=0,
+        )
+    )
+    document = dict(
+        cutover._legacy_execution_lane_document(
+            backend.inspect_legacy_execution_lane()
+        )
+    )
+    document["docker_engine_authority"][field] = value
+
+    with pytest.raises(
+        cutover.CapturedPaperHostCutoverError,
+        match="DOCKER_ENGINE_AUTHORITY_INVALID",
+    ):
+        cutover._parse_legacy_execution_lane(document, field="lane")
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows reparse-point identity")
+def test_docker_config_parent_rejects_lexical_junction(
+    tmp_path: Path,
+) -> None:
+    import subprocess
+
+    protected = tmp_path / "protected"
+    protected.mkdir()
+    junction = tmp_path / "junction"
+    subprocess.run(
+        ["cmd", "/c", "mklink", "/J", str(junction), str(protected)],
+        check=True,
+        capture_output=True,
+    )
+    backend = _production_docker_transport_backend(junction)
+    try:
+        with pytest.raises(
+            cutover.CapturedPaperHostCutoverError,
+            match="REPARSE_PATH",
+        ):
+            backend._docker_config_sentinel()
+    finally:
+        os.rmdir(junction)
+
+
+def test_windows_backend_allows_only_sealed_task_query_toggle_and_end(
     tmp_path: Path,
 ) -> None:
     backend = object.__new__(cutover.WindowsHostCutoverBackend)
@@ -453,10 +974,15 @@ def test_windows_backend_allows_only_recreator_query_toggle_and_end(
         ):
             backend.delete_task(name)
 
+    for name in cutover.REQUIRED_LEGACY_TASKS:
+        backend.stop_task(name)
+
     for name in cutover.EXECUTION_LANE_RECREATOR_TASKS:
         assert ("/Query", "/TN", name, "/XML") in calls
         assert ("/Change", "/TN", name, "/DISABLE") in calls
         assert ("/Change", "/TN", name, "/ENABLE") in calls
+        assert ("/End", "/TN", name) in calls
+    for name in cutover.REQUIRED_LEGACY_TASKS:
         assert ("/End", "/TN", name) in calls
 
 
@@ -941,6 +1467,74 @@ def test_recreator_inventory_detects_task_specific_script_behind_shared_wrapper(
     ) == ("4244:wscript.exe:matched",)
 
 
+@pytest.mark.parametrize(
+    ("name", "cmdline"),
+    [
+        (
+            "docker-compose.exe",
+            [
+                r"C:\Program Files\Docker\Docker\resources\cli-plugins\docker-compose.exe",
+                "--project-name",
+                "chili-home-copilot",
+                "up",
+                "--force-recreate",
+                "momentum-exec-worker",
+            ],
+        ),
+        (
+            "docker.exe",
+            [
+                r"C:\Program Files\Docker\Docker\resources\bin\docker.exe",
+                "restart",
+                cutover.LEGACY_EXECUTION_LANE_NAME,
+            ],
+        ),
+        (
+            "docker.exe",
+            [
+                r"C:\Program Files\Docker\Docker\resources\bin\docker.exe",
+                "--host",
+                cutover._DOCKER_ENGINE_ENDPOINT,
+                "start",
+                "d" * 64,
+            ],
+        ),
+        (
+            "docker-desktop.exe",
+            [
+                r"C:\Program Files\Docker\cli-plugins\docker-desktop.exe",
+                "desktop",
+                "restart",
+            ],
+        ),
+    ],
+)
+def test_recreator_inventory_detects_orphaned_docker_plugins(
+    monkeypatch: pytest.MonkeyPatch,
+    name: str,
+    cmdline: list[str],
+) -> None:
+    import psutil
+
+    class OrphanedDockerChild:
+        info = {"pid": 4245, "name": name}
+
+        @staticmethod
+        def cmdline() -> list[str]:
+            return list(cmdline)
+
+    monkeypatch.setattr(
+        psutil,
+        "process_iter",
+        lambda *_args, **_kwargs: (OrphanedDockerChild(),),
+    )
+    backend = object.__new__(cutover.WindowsHostCutoverBackend)
+
+    assert backend.await_execution_lane_recreator_processes(
+        timeout_seconds=0.0
+    ) == (f"4245:{name}:matched",)
+
+
 def _active_start_authority_fixture(
     prepared: cutover.PreparedCutover,
     *,
@@ -1041,8 +1635,9 @@ class FakeHost:
         self.execution_lane_image_id = "sha256:" + "e" * 64
         self.execution_lane_config_sha256 = "f" * 64
         self.execution_lane_scope_sha256 = "9" * 64
+        self.docker_engine_authority = _docker_engine_authority()
         self.execution_lane_recreator_states = {
-            name: True for name in cutover.EXECUTION_LANE_RECREATOR_TASKS
+            name: False for name in cutover.EXECUTION_LANE_RECREATOR_TASKS
         }
         self.iqconnect_guard_active = False
         self.iqconnect_guard_checks = 0
@@ -1393,7 +1988,24 @@ class FakeHost:
                 for name in sorted(cutover.EXECUTION_LANE_RECREATOR_TASKS)
             ),
             state=self.execution_lane_state,
+            docker_engine_authority=self.docker_engine_authority,
         )
+
+    def inspect_bound_legacy_execution_lane(
+        self, expected: cutover.LegacyExecutionLaneObservation
+    ) -> cutover.LegacyExecutionLaneObservation:
+        current = self.inspect_legacy_execution_lane()
+        if current.identity_key() != expected.identity_key():
+            raise cutover.CapturedPaperHostCutoverError(
+                "EXECUTION_LANE_IDENTITY_DRIFT",
+                "injected Docker identity drift",
+            )
+        return current
+
+    def inspect_bound_legacy_container(
+        self, expected: cutover.LegacyExecutionLaneObservation
+    ) -> cutover.LegacyExecutionLaneObservation:
+        return self.inspect_bound_legacy_execution_lane(expected)
 
     def await_execution_lane_recreator_processes(
         self, *, timeout_seconds: float
@@ -1414,6 +2026,24 @@ class FakeHost:
             if expected.state == "running"
             else "execution-lane:quiesce-authorities"
         )
+        self._maybe_fail(operation)
+        self.execution_lane_state = "stopped"
+        self.execution_lane_recreator_states = {
+            name: False for name in cutover.EXECUTION_LANE_RECREATOR_TASKS
+        }
+        self.mutations.append(operation)
+        self._maybe_fail(operation, after=True)
+        return 1
+
+    def force_quiesce_bound_execution_lane(
+        self, *, expected: cutover.LegacyExecutionLaneObservation
+    ) -> int:
+        assert self.inspect_legacy_execution_lane().identity_key() == expected.identity_key()
+        if self.execution_lane_state == "stopped" and not any(
+            self.execution_lane_recreator_states.values()
+        ):
+            return 0
+        operation = "execution-lane:force-quiesce"
         self._maybe_fail(operation)
         self.execution_lane_state = "stopped"
         self.execution_lane_recreator_states = {
@@ -1795,13 +2425,14 @@ def _seed_apply_started(
                                 source_chain_sha256=cutover.sha256_json(
                                     {"name": name, "kind": "source-chain"}
                                 ),
-                                enabled=True,
+                                enabled=False,
                             )
                             for name in sorted(
                                 cutover.EXECUTION_LANE_RECREATOR_TASKS
                             )
                         ),
                         state="running",
+                        docker_engine_authority=_docker_engine_authority(),
                     )
                 )
             ),
@@ -1820,7 +2451,7 @@ def _assert_restored(prepared: cutover.PreparedCutover, backend: FakeHost) -> No
     ) == ["iqfeed_depth_bridge", "iqfeed_trade_bridge"]
     assert backend.await_candidate_processes(prepared.invocation, timeout_seconds=0) == ()
     assert backend.execution_lane_state == backend.initial_execution_lane_state
-    assert all(backend.execution_lane_recreator_states.values())
+    assert not any(backend.execution_lane_recreator_states.values())
     assert not backend.iqconnect_guard_active
 
 
@@ -1841,6 +2472,168 @@ def test_validate_only_is_default_and_performs_no_mutation(
             "--candidate-action", "x", "--journal-root", "x",
         ]
     ).mode == cutover.MODE_VALIDATE_ONLY
+
+
+def test_validate_only_rejects_enabled_docker_recreator_before_mutation(
+    prepared: cutover.PreparedCutover,
+) -> None:
+    backend = FakeHost(prepared)
+    backend.execution_lane_recreator_states[
+        cutover.EXECUTION_LANE_RECREATOR_TASKS[0]
+    ] = True
+
+    with pytest.raises(cutover.CapturedPaperHostCutoverError) as caught:
+        _executor(prepared, backend).validate_only()
+    assert caught.value.code == "EXECUTION_LANE_RECREATOR_ENABLED"
+    assert backend.mutations == []
+
+
+def test_validate_only_rejects_live_docker_recreator_before_mutation(
+    prepared: cutover.PreparedCutover,
+) -> None:
+    class LiveRecreatorHost(FakeHost):
+        def await_execution_lane_recreator_processes(
+            self, *, timeout_seconds: float
+        ) -> tuple[str, ...]:
+            del timeout_seconds
+            return ("4246:docker-compose.exe:matched",)
+
+    backend = LiveRecreatorHost(prepared)
+
+    with pytest.raises(cutover.CapturedPaperHostCutoverError) as caught:
+        _executor(prepared, backend).validate_only()
+    assert caught.value.code == "EXECUTION_LANE_RECREATOR_STILL_RUNNING"
+    assert backend.mutations == []
+
+
+def test_apply_never_permits_or_commits_with_late_docker_recreator(
+    prepared: cutover.PreparedCutover,
+) -> None:
+    class LateRecreatorHost(FakeHost):
+        def __init__(self) -> None:
+            super().__init__(prepared)
+            self.injected = False
+
+        def await_execution_lane_recreator_processes(
+            self, *, timeout_seconds: float
+        ) -> tuple[str, ...]:
+            del timeout_seconds
+            if (
+                not self.injected
+                and cutover.CANDIDATE_TASK_NAME in self.tasks
+                and self.await_candidate_processes(
+                    self.prepared.invocation, timeout_seconds=0.0
+                )
+            ):
+                self.injected = True
+                return ("4247:docker.exe:matched",)
+            return ()
+
+    backend = LateRecreatorHost()
+    executor = _executor(prepared, backend)
+
+    with pytest.raises(cutover.CapturedPaperHostCutoverError) as caught:
+        executor.apply()
+    assert caught.value.code == "APPLIED_POSTCONDITION_FAILED"
+
+    journal = cutover.CutoverJournal(
+        root=executor.journal_root, prepared=prepared, clock=lambda: NOW
+    )
+    event_types = [item["event_type"] for item in journal.events]
+    assert "activation_permit_issued" not in event_types
+    assert "apply_completed" not in event_types
+    _assert_restored(prepared, backend)
+
+
+def test_applied_closing_fence_rejects_start_after_first_zero_inventory(
+    prepared: cutover.PreparedCutover,
+) -> None:
+    class ClosingRaceHost(FakeHost):
+        def __init__(self) -> None:
+            super().__init__(prepared)
+            self.inject_at_next_candidate_inventory = False
+
+        def await_candidate_processes(
+            self,
+            invocation: cutover.CandidateInvocation,
+            *,
+            timeout_seconds: float,
+        ) -> tuple[cutover.CandidateProcessObservation, ...]:
+            observed = super().await_candidate_processes(
+                invocation, timeout_seconds=timeout_seconds
+            )
+            if self.inject_at_next_candidate_inventory:
+                self.inject_at_next_candidate_inventory = False
+                # Model a short-lived docker.exe start command that has
+                # already exited by the closing descendant census.
+                self.execution_lane_state = "running"
+            return observed
+
+    backend = ClosingRaceHost()
+    executor = _executor(prepared, backend)
+    executor.apply()
+    prior = replace(
+        backend.inspect_legacy_execution_lane(),
+        state=backend.initial_execution_lane_state,
+    )
+    backend.inject_at_next_candidate_inventory = True
+
+    with pytest.raises(cutover.CapturedPaperHostCutoverError) as caught:
+        executor._assert_applied(prior)
+
+    assert caught.value.code == "APPLIED_POSTCONDITION_FAILED"
+
+
+def test_rollback_quarantines_recreator_appearing_at_final_assertion(
+    prepared: cutover.PreparedCutover,
+) -> None:
+    class FinalRecreatorHost(FakeHost):
+        def __init__(self) -> None:
+            super().__init__(prepared)
+            self.rollback_phase = False
+            self.rollback_inventory_calls = 0
+            self.injected_recreator = False
+
+        def await_execution_lane_recreator_processes(
+            self, *, timeout_seconds: float
+        ) -> tuple[str, ...]:
+            del timeout_seconds
+            if self.rollback_phase:
+                self.rollback_inventory_calls += 1
+                # The first two calls are the pre-restore and provider-handoff
+                # fences.  The third is `_assert_rolled_back_with` after the
+                # Docker lane and bridges are live.
+                if self.rollback_inventory_calls == 3:
+                    self.injected_recreator = True
+                    return ("4248:docker-compose.exe:matched",)
+            return ()
+
+    backend = FinalRecreatorHost()
+    executor = _executor(prepared, backend)
+    executor.apply()
+    backend.rollback_phase = True
+
+    with pytest.raises(cutover.CapturedPaperHostCutoverError) as caught:
+        executor.rollback()
+
+    assert backend.injected_recreator is True
+    assert caught.value.code == "ROLLBACK_POSTCONDITION_FAILED"
+    assert cutover.CANDIDATE_TASK_NAME not in backend.tasks
+    assert backend.execution_lane_state == "stopped", (
+        backend.rollback_inventory_calls,
+        backend.mutations,
+    )
+    assert not any(backend.execution_lane_recreator_states.values())
+    assert all(
+        not backend.tasks[name].enabled for name in cutover.REQUIRED_LEGACY_TASKS
+    )
+    assert backend.find_legacy_processes(prepared.restore_plan.bindings) == ()
+    journal = cutover.CutoverJournal(
+        root=executor.journal_root, prepared=prepared, clock=lambda: NOW
+    )
+    assert "rollback_completed" not in {
+        item["event_type"] for item in journal.events
+    }
 
 
 def test_apply_has_exact_postconditions_and_is_idempotent(
@@ -3015,6 +3808,115 @@ def test_explicit_rollback_restores_exact_tasks_and_provenance_roles(
     assert backend.mutations == before
 
 
+def test_rollback_rejects_docker_server_drift_after_candidate_stop_before_restore(
+    prepared: cutover.PreparedCutover,
+) -> None:
+    backend = FakeHost(prepared)
+    executor = _executor(prepared, backend)
+    executor.apply()
+    baseline = list(backend.mutations)
+    backend.docker_engine_authority = replace(
+        backend.docker_engine_authority,
+        daemon_id="58db887a-6e27-4f02-b4a3-1c0b068a56b3",
+    )
+
+    with pytest.raises(
+        cutover.CapturedPaperHostCutoverError,
+        match="ROLLBACK_AUTHORITY_QUARANTINE_FAILED",
+    ):
+        executor.rollback()
+
+    delta = backend.mutations[len(baseline):]
+    assert not any(
+        item == f"register:{name}" or item == f"start:{name}"
+        for item in delta
+        for name in cutover.REQUIRED_LEGACY_TASKS
+    )
+    assert cutover.CANDIDATE_TASK_NAME not in backend.tasks
+    assert not backend.await_candidate_processes(
+        prepared.invocation, timeout_seconds=0.0
+    )
+    assert all(
+        not backend.tasks[name].enabled for name in cutover.REQUIRED_LEGACY_TASKS
+    )
+    assert backend.find_legacy_processes(prepared.restore_plan.bindings) == ()
+
+
+def test_rollback_requiesces_resurrection_before_any_host_restore(
+    prepared: cutover.PreparedCutover,
+) -> None:
+    backend = FakeHost(prepared)
+    executor = _executor(prepared, backend)
+    executor.apply()
+    baseline_count = len(backend.mutations)
+    backend.execution_lane_state = "running"
+    backend.execution_lane_recreator_states[
+        cutover.EXECUTION_LANE_RECREATOR_TASKS[0]
+    ] = True
+    backend.fail_operation = "execution-lane:stop"
+    backend.fail_after_effect = False
+    backend.failed = False
+
+    with pytest.raises(RuntimeError, match="execution-lane:stop"):
+        executor.rollback()
+
+    delta = backend.mutations[baseline_count:]
+    assert not any(
+        item == f"register:{name}" or item == f"start:{name}"
+        for item in delta
+        for name in cutover.REQUIRED_LEGACY_TASKS
+    )
+    assert backend.find_legacy_processes(prepared.restore_plan.bindings) == ()
+
+
+def test_rollback_force_quiesces_recreator_definition_drift_before_restore(
+    prepared: cutover.PreparedCutover,
+) -> None:
+    class PreRestoreDriftHost(FakeHost):
+        def __init__(self) -> None:
+            super().__init__(prepared)
+            self.rollback_phase = False
+            self.injected_drift = False
+
+        def inspect_bound_legacy_execution_lane(
+            self, expected: cutover.LegacyExecutionLaneObservation
+        ) -> cutover.LegacyExecutionLaneObservation:
+            if self.rollback_phase and not self.injected_drift:
+                self.injected_drift = True
+                # Model a recreator definition disappearing after candidate
+                # revocation but before the first legacy restore mutation.
+                self.execution_lane_state = "running"
+                raise cutover.CapturedPaperHostCutoverError(
+                    "EXECUTION_LANE_RECREATOR_DRIFT",
+                    "injected missing recreator definition",
+                )
+            return super().inspect_bound_legacy_execution_lane(expected)
+
+    backend = PreRestoreDriftHost()
+    executor = _executor(prepared, backend)
+    executor.apply()
+    baseline_count = len(backend.mutations)
+    backend.rollback_phase = True
+
+    with pytest.raises(
+        cutover.CapturedPaperHostCutoverError,
+        match="EXECUTION_LANE_RECREATOR_DRIFT",
+    ):
+        executor.rollback()
+
+    assert backend.injected_drift is True
+    delta = backend.mutations[baseline_count:]
+    assert "execution-lane:force-quiesce" in delta
+    assert backend.execution_lane_state == "stopped"
+    assert cutover.CANDIDATE_TASK_NAME not in backend.tasks
+    assert backend.find_legacy_processes(prepared.restore_plan.bindings) == ()
+    assert not any(
+        item == f"register:{name}" or item == f"start:{name}"
+        for item in delta
+        for name in cutover.REQUIRED_LEGACY_TASKS
+    )
+
+
 def test_explicit_rollback_revokes_permit_before_guard_preflight_failure(
     prepared: cutover.PreparedCutover,
 ) -> None:
@@ -3117,8 +4019,10 @@ def test_foreign_candidate_task_is_never_stopped_or_deleted(
         match="FOREIGN_CANDIDATE_EXECUTION_QUARANTINED",
     ):
         executor.rollback()
-    assert not any(item.startswith("stop:") for item in backend.mutations[len(before):])
-    assert not any(item.startswith("delete:") for item in backend.mutations[len(before):])
+    delta = backend.mutations[len(before):]
+    assert f"stop:{cutover.CANDIDATE_TASK_NAME}" not in delta
+    assert f"delete:{cutover.CANDIDATE_TASK_NAME}" not in delta
+    assert backend.tasks[cutover.CANDIDATE_TASK_NAME].xml == _task_xml("foreign")
     assert all(
         not backend.tasks[name].enabled for name in cutover.REQUIRED_LEGACY_TASKS
     )
@@ -3559,7 +4463,116 @@ def test_foreign_candidate_after_docker_restore_requiesces_all_legacy_lanes(
     assert journal.events[-1]["event_type"] == "rollback_blocked_foreign_candidate"
     assert journal.events[-1]["payload"][
         "legacy_execution_remains_quiesced"
-    ] is True
+    ] is False
+
+
+def test_postrestore_candidate_and_recreator_drift_reduce_all_known_authority(
+    prepared: cutover.PreparedCutover,
+) -> None:
+    alias = "CHILI-foreign-after-drifted-docker-restore"
+
+    class CompoundPostRestoreHost(FakeHost):
+        def __init__(self) -> None:
+            super().__init__(prepared)
+            self.post_restore = False
+            self.injected_drift = False
+            self.post_restore_bound_calls = 0
+
+        def restore_legacy_execution_lane(
+            self, *, expected: cutover.LegacyExecutionLaneObservation
+        ) -> int:
+            mutations = super().restore_legacy_execution_lane(expected=expected)
+            self.tasks[alias] = cutover.TaskObservation(
+                alias, prepared.resolved_task_xml, True
+            )
+            self.post_restore = True
+            return mutations
+
+        def inspect_bound_legacy_execution_lane(
+            self, expected: cutover.LegacyExecutionLaneObservation
+        ) -> cutover.LegacyExecutionLaneObservation:
+            if self.post_restore:
+                self.post_restore_bound_calls += 1
+            if self.post_restore_bound_calls == 2 and not self.injected_drift:
+                self.injected_drift = True
+                raise cutover.CapturedPaperHostCutoverError(
+                    "EXECUTION_LANE_RECREATOR_DRIFT",
+                    "injected post-restore missing recreator definition",
+                )
+            return super().inspect_bound_legacy_execution_lane(expected)
+
+    backend = CompoundPostRestoreHost()
+    executor = _executor(prepared, backend)
+    executor.apply()
+
+    with pytest.raises(
+        cutover.CapturedPaperHostCutoverError,
+        match="ROLLBACK_AUTHORITY_QUARANTINE_FAILED",
+    ):
+        executor.rollback()
+
+    assert backend.post_restore is True
+    assert backend.post_restore_bound_calls >= 2
+    assert backend.injected_drift is True
+    assert alias in backend.tasks
+    assert cutover.CANDIDATE_TASK_NAME not in backend.tasks
+    assert backend.execution_lane_state == "stopped"
+    assert "execution-lane:force-quiesce" in backend.mutations
+    assert backend.find_legacy_processes(prepared.restore_plan.bindings) == ()
+    assert all(
+        not backend.tasks[name].enabled for name in cutover.REQUIRED_LEGACY_TASKS
+    )
+    journal = cutover.CutoverJournal(
+        root=executor.journal_root, prepared=prepared, clock=lambda: NOW
+    )
+    assert "rollback_completed" not in {
+        item["event_type"] for item in journal.events
+    }
+
+
+def test_recreator_flip_after_backend_restore_requiesces_all_legacy_lanes(
+    prepared: cutover.PreparedCutover,
+) -> None:
+    class PostRestoreFlipHost(FakeHost):
+        def __init__(self) -> None:
+            super().__init__(prepared)
+            self.flip_after_restore = False
+
+        def restore_legacy_execution_lane(
+            self, *, expected: cutover.LegacyExecutionLaneObservation
+        ) -> int:
+            mutations = super().restore_legacy_execution_lane(expected=expected)
+            self.execution_lane_recreator_states[
+                cutover.EXECUTION_LANE_RECREATOR_TASKS[0]
+            ] = True
+            self.flip_after_restore = True
+            return mutations
+
+    backend = PostRestoreFlipHost()
+    executor = _executor(prepared, backend)
+    executor.apply()
+
+    with pytest.raises(cutover.CapturedPaperHostCutoverError) as caught:
+        executor.rollback()
+
+    assert caught.value.code in {
+        "EXECUTION_LANE_RESTORE_FAILED",
+        "ROLLBACK_AUTHORITY_QUARANTINE_FAILED",
+    }
+    assert backend.flip_after_restore is True
+    assert cutover.CANDIDATE_TASK_NAME not in backend.tasks
+    assert backend.execution_lane_state == "stopped"
+    assert not any(backend.execution_lane_recreator_states.values())
+    assert backend.find_legacy_processes(prepared.restore_plan.bindings) == ()
+    assert all(
+        not backend.tasks[name].enabled for name in cutover.REQUIRED_LEGACY_TASKS
+    )
+    journal = cutover.CutoverJournal(
+        root=executor.journal_root, prepared=prepared, clock=lambda: NOW
+    )
+    assert "rollback_completed" not in {
+        item["event_type"] for item in journal.events
+    }
 
 
 def test_torn_final_journal_record_recovers_from_valid_prefix(
@@ -3608,6 +4621,38 @@ def test_rollback_uses_capsule_after_mutable_activation_artifacts_drift(
     _assert_restored(prepared, backend)
 
 
+def test_rollback_capsule_discovery_distinguishes_absent_from_ambiguous(
+    tmp_path: Path,
+) -> None:
+    manifest_sha256 = "a" * 64
+    with pytest.raises(
+        cutover.CapturedPaperHostCutoverError,
+        match="ROLLBACK_JOURNAL_ABSENT",
+    ):
+        cutover._discover_rollback_capsule(
+            journal_root=tmp_path,
+            manifest_sha256=manifest_sha256,
+            caller_roots=(tmp_path,),
+        )
+
+    for generation in (
+        "0f67a9d0-8185-43ec-952a-c0ce0f22cfc7",
+        "68b85532-cef5-4451-bf7d-9468d08f2b0f",
+    ):
+        generation_root = tmp_path / generation
+        generation_root.mkdir()
+        (generation_root / f"{manifest_sha256}.jsonl").write_bytes(b"")
+    with pytest.raises(
+        cutover.CapturedPaperHostCutoverError,
+        match="ROLLBACK_JOURNAL_AMBIGUOUS",
+    ):
+        cutover._discover_rollback_capsule(
+            journal_root=tmp_path,
+            manifest_sha256=manifest_sha256,
+            caller_roots=(tmp_path,),
+        )
+
+
 def test_content_addressed_capsule_tamper_is_rejected(
     prepared: cutover.PreparedCutover,
 ) -> None:
@@ -3631,9 +4676,8 @@ def test_content_addressed_capsule_tamper_is_rejected(
 def test_capsule_never_registers_or_starts_drifted_legacy_source(
     prepared: cutover.PreparedCutover,
 ) -> None:
-    # A drifted restore source must fail rollback BEFORE any host mutation:
-    # registering the enabled Daily/Logon task XML would hand the scheduler
-    # a trigger that can execute the drifted wrapper chain on its own.
+    # A drifted restore source must fail only after candidate and Docker
+    # authority are quiesced, but before any legacy task/process restoration.
     backend = FakeHost(prepared)
     executor = _executor(prepared, backend)
     executor.apply()
@@ -3645,14 +4689,20 @@ def test_capsule_never_registers_or_starts_drifted_legacy_source(
         match="LEGACY_RESTORE_SOURCE_DRIFT",
     ):
         executor.rollback()
-    assert backend.mutations == baseline
+    delta = backend.mutations[len(baseline):]
+    assert cutover.CANDIDATE_TASK_NAME not in backend.tasks
+    assert not backend.await_candidate_processes(
+        prepared.invocation, timeout_seconds=0.0
+    )
+    assert backend.execution_lane_state == "stopped"
+    assert not any(backend.execution_lane_recreator_states.values())
     for name, expected in prepared.task_snapshot.tasks.items():
         observed = backend.tasks[name]
         assert observed.enabled is False
         assert observed != expected
     assert not any(
         item.startswith(("register:", "start:")) or item.endswith(":enable")
-        for item in backend.mutations[len(baseline):]
+        for item in delta
     )
 
 
@@ -3673,9 +4723,10 @@ def test_rollback_revalidates_all_wrapper_sources_before_any_task_restore(
         match="LEGACY_RESTORE_SOURCE_DRIFT",
     ):
         executor.rollback()
-    assert backend.mutations == baseline
+    delta = backend.mutations[len(baseline):]
     assert not any(
-        item.startswith("register:") for item in backend.mutations[len(baseline):]
+        item.startswith("register:") or item.startswith("start:")
+        for item in delta
     )
     for name in prepared.task_snapshot.tasks:
         assert backend.tasks[name].enabled is False
@@ -3711,7 +4762,13 @@ def test_existing_exact_role_does_not_skip_wrapper_chain_revalidation(
         match="LEGACY_RESTORE_SOURCE_DRIFT",
     ):
         executor.rollback()
-    assert backend.mutations == baseline
+    delta = backend.mutations[len(baseline):]
+    assert cutover.CANDIDATE_TASK_NAME not in backend.tasks
+    assert backend.execution_lane_state == "stopped"
+    assert not any(
+        item.startswith("register:") or item.startswith("start:")
+        for item in delta
+    )
 
 
 def test_restore_plan_binds_task_action_and_full_process_argv(
@@ -4067,9 +5124,12 @@ def test_candidate_task_is_one_shot_without_restart_or_automatic_trigger(
     assert settings.find(f"{{{NS}}}RestartOnFailure") is None
 
 
-def test_real_default_cutover_probe_accepts_scheduler_reserialization_without_host_mutation(
+@pytest.mark.parametrize("inject_restart_after_first_zero", [False, True])
+def test_real_default_cutover_probe_closes_scheduler_and_docker_readback(
     prepared: cutover.PreparedCutover,
     monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    inject_restart_after_first_zero: bool,
 ) -> None:
     from scripts import captured_alpaca_paper_service as service
     import psutil
@@ -4084,21 +5144,96 @@ def test_real_default_cutover_probe_accepts_scheduler_reserialization_without_ho
         cutover.CANDIDATE_TASK_NAME, candidate_xml, True
     )
     backend.processes = {}
+    activation_root = tmp_path / "activation"
+    journal_root = tmp_path / "cutover-journal"
+    activation_root.mkdir()
+    journal_root.mkdir()
+    generation_root = journal_root / prepared.activation_generation
+    generation_root.mkdir()
+    baseline_lane = backend.inspect_legacy_execution_lane()
+    transaction_id = str(
+        cutover.uuid.uuid5(
+            cutover.uuid.NAMESPACE_URL,
+            "chili:captured-paper-cutover:"
+            f"{prepared.activation_generation}:{prepared.manifest_sha256}",
+        )
+    )
+    event_body = {
+        "schema_version": cutover.JOURNAL_EVENT_SCHEMA,
+        "transaction_id": transaction_id,
+        "sequence": 1,
+        "previous_event_sha256": "0" * 64,
+        "event_type": "apply_started",
+        "recorded_at": cutover._iso(NOW),
+        "payload": {
+            "activation_generation": prepared.activation_generation,
+            "manifest_sha256": prepared.manifest_sha256,
+            "legacy_execution_lane": dict(
+                cutover._legacy_execution_lane_document(baseline_lane)
+            )
+        },
+    }
+    event_body["event_sha256"] = cutover.sha256_json(event_body)
+    journal_path = generation_root / f"{prepared.manifest_sha256}.jsonl"
+    journal_path.write_bytes(cutover._canonical_json_bytes(event_body) + b"\n")
+    constructed: dict[str, Path] = {}
+    closed: list[bool] = []
+    backend.close = lambda: closed.append(True)
+
+    def construct_backend(*, bindings, docker_config_parent):
+        assert bindings == ()
+        constructed["docker_config_parent"] = docker_config_parent
+        return backend
+
     monkeypatch.setattr(
         cutover,
         "WindowsHostCutoverBackend",
-        lambda *, bindings: backend,
+        construct_backend,
     )
     monkeypatch.setattr(psutil, "process_iter", lambda *_args, **_kwargs: ())
     source = Path(cutover.__file__).resolve(strict=True)
     verified = SimpleNamespace(
+        activation_generation=prepared.activation_generation,
+        manifest_sha256=prepared.manifest_sha256,
         source_paths={"captured_paper_host_cutover": source},
         source_hashes={
             "captured_paper_host_cutover": hashlib.sha256(
                 source.read_bytes()
             ).hexdigest()
         },
+        manifest={
+            "cutover": {"activation_artifact_root": str(activation_root)}
+        },
     )
+
+    if inject_restart_after_first_zero:
+        original_inventory = backend.await_execution_lane_recreator_processes
+        inventory_calls = {"value": 0}
+
+        def inventory(*, timeout_seconds: float):
+            observed = original_inventory(timeout_seconds=timeout_seconds)
+            inventory_calls["value"] += 1
+            if inventory_calls["value"] == 1:
+                # Model a short-lived exact-ID start whose client exits before
+                # the closing process census but leaves the lane running.
+                backend.execution_lane_state = "running"
+            return observed
+
+        backend.await_execution_lane_recreator_processes = inventory
+
+    if inject_restart_after_first_zero:
+        with pytest.raises(
+            service.CapturedAlpacaPaperServiceError,
+            match="HOST_CUTOVER_NOT_INSPECTABLE",
+        ):
+            service._default_cutover_probe(
+                verified=verified,
+                projection={},
+                expected_parent_tail=prepared.invocation.launcher_arguments,
+                parent_executable_path=prepared.invocation.powershell_executable_path,
+            )
+        assert closed == [True]
+        return
 
     observed = service._default_cutover_probe(
         verified=verified,
@@ -4111,6 +5246,11 @@ def test_real_default_cutover_probe_accepts_scheduler_reserialization_without_ho
     assert observed["candidate_task_enabled"] is True
     assert observed["legacy_bridge_processes"] == []
     assert observed["legacy_execution_lane"]["state"] == "stopped"
+    assert observed["legacy_execution_lane"]["docker_engine_authority"] == dict(
+        cutover._docker_engine_authority_document(_docker_engine_authority())
+    )
+    assert constructed["docker_config_parent"] == journal_root
+    assert closed == [True]
     assert all(value is False for value in observed["legacy_task_enabled"].values())
     assert backend.mutations == []
 
@@ -4791,7 +5931,18 @@ def test_revocation_tombstone_precedes_failing_rollback_journal_append(
         if operation.startswith("stop-candidate:")
     ]
     assert stop_indices and disable_index < min(stop_indices)
-    _assert_restored(prepared, backend)
+    assert cutover.CANDIDATE_TASK_NAME not in backend.tasks
+    assert all(
+        not backend.tasks[name].enabled for name in cutover.REQUIRED_LEGACY_TASKS
+    )
+    assert backend.find_legacy_processes(prepared.restore_plan.bindings) == ()
+    assert backend.execution_lane_state == "stopped"
+    journal = cutover.CutoverJournal(
+        root=executor.journal_root, prepared=prepared, clock=lambda: NOW
+    )
+    assert "rollback_completed" not in {
+        item["event_type"] for item in journal.events
+    }
 
 
 def test_exact_pre_staged_sha_runtime_is_accepted_without_overwrite(

@@ -217,6 +217,8 @@ class Scenario:
     task_running_after: bool = True
     apply_outcome: str = "success"
     rollback_outcome: str = "success"
+    publish_apply_started: bool | None = None
+    apply_journal_variant: str | None = None
     publish_started: bool = True
     recovery_outcome: str = "none"
 
@@ -264,6 +266,64 @@ class FakeExecutor:
             / f"{self.next_sha}.json"
         )
         _write(self.next_command_path, raw)
+
+    def _publish_apply_journal(self, variant: str) -> None:
+        journal_path = (
+            self.request.artifact_root
+            / "cutover-journal"
+            / GENERATION
+            / f"{self.manifest_sha}.jsonl"
+        )
+        if variant == "nonfile":
+            journal_path.mkdir(parents=True)
+            return
+        if variant == "objects_only":
+            _write(
+                journal_path.parent / "objects" / "synthetic.rollback.json",
+                b"{}",
+            )
+            return
+        if variant == "malformed":
+            _write(journal_path, b"not-json\n")
+            return
+        if variant == "torn":
+            _write(journal_path, b'{"schema_version":')
+            return
+        claimed_generation = (
+            "bbbbbbbb-cccc-4ddd-8eee-ffffffffffff"
+            if variant == "wrong_generation"
+            else GENERATION
+        )
+        claimed_manifest = (
+            "f" * 64 if variant == "wrong_manifest" else self.manifest_sha
+        )
+        transaction_id = str(
+            uuid.uuid5(
+                uuid.NAMESPACE_URL,
+                "chili:captured-paper-cutover:"
+                f"{claimed_generation}:{claimed_manifest}",
+            )
+        )
+        if variant == "wrong_transaction":
+            transaction_id = "00000000-0000-4000-8000-000000000000"
+        body: dict[str, Any] = {
+            "schema_version": runner._HOST_CUTOVER_JOURNAL_EVENT_SCHEMA,
+            "transaction_id": transaction_id,
+            "sequence": 1,
+            "previous_event_sha256": "0" * 64,
+            "event_type": (
+                "apply_failed" if variant == "wrong_event" else "apply_started"
+            ),
+            "recorded_at": NOW.isoformat().replace("+00:00", "Z"),
+            "payload": {
+                "activation_generation": claimed_generation,
+                "manifest_sha256": claimed_manifest,
+            },
+        }
+        body["event_sha256"] = _sha(_canonical(body))
+        if variant == "wrong_hash":
+            body["event_sha256"] = "0" * 64
+        _write(journal_path, _canonical(body) + b"\n")
 
     def _prepare_chain_documents(self) -> None:
         self.receipt_path.parent.mkdir(parents=True, exist_ok=True)
@@ -627,6 +687,14 @@ class FakeExecutor:
                     0, '{"verdict":"VALIDATED_NO_HOST_MUTATION"}\n', ""
                 )
             if mode == "Apply":
+                journal_variant = self.scenario.apply_journal_variant
+                if journal_variant is None:
+                    publish_apply_started = self.scenario.publish_apply_started
+                    if publish_apply_started is None:
+                        publish_apply_started = self.scenario.apply_outcome == "success"
+                    journal_variant = "valid" if publish_apply_started else "absent"
+                if journal_variant != "absent":
+                    self._publish_apply_journal(journal_variant)
                 if self.scenario.apply_outcome == "timeout":
                     raise runner.CapturedPaperActivationRunnerError(
                         "STAGE_TIMEOUT", "synthetic Apply timeout"
@@ -1377,15 +1445,28 @@ def test_apply_uses_exact_isolated_stage0_issuer_envelope(
         "--",
     )
     assert apply_argv[: len(expected_prefix)] == expected_prefix
+    inner = apply_argv[apply_argv.index("--") + 1 :]
+
+    def inner_path(option: str) -> Path:
+        return Path(inner[inner.index(option) + 1])
+
     prepared = SimpleNamespace(
         invocation=SimpleNamespace(
             stage0_script_path=str(staged_stage0),
             stage0_source_path=str(stage0_source),
             stage0_source_sha256=stage0_sha,
+            launcher_arguments=(),
         ),
         manifest_path=executor.manifest_path.resolve(strict=True),
         manifest_sha256=executor.manifest_sha,
         candidate_root=request_fixture.request.candidate_root,
+        task_snapshot=SimpleNamespace(artifact_path=inner_path("--task-snapshot")),
+        process_snapshot=SimpleNamespace(
+            artifact_path=inner_path("--process-snapshot")
+        ),
+        restore_plan=SimpleNamespace(artifact_path=inner_path("--restore-plan")),
+        candidate_template_path=inner_path("--candidate-task-template"),
+        candidate_action_path=inner_path("--candidate-action"),
         allowed_read_roots=tuple(
             Path(root) for root in request_fixture.request.allowed_read_roots
         ),
@@ -1402,8 +1483,6 @@ def test_apply_uses_exact_isolated_stage0_issuer_envelope(
 @pytest.mark.parametrize(
     ("scenario", "expected_code"),
     [
-        (Scenario(apply_outcome="error"), "APPLY_REJECTED"),
-        (Scenario(apply_outcome="timeout"), "STAGE_TIMEOUT"),
         (Scenario(publish_started=False), "STARTED_RECEIPT_UNAVAILABLE"),
         (Scenario(task_exists_after=False), "PAPER_TASK_UNAVAILABLE"),
         (Scenario(task_running_after=False), "PAPER_TASK_NOT_RUNNING"),
@@ -1450,6 +1529,154 @@ def test_every_post_apply_failure_runs_exactly_one_exact_rollback(
     )
 
 
+@pytest.mark.parametrize(
+    ("apply_outcome", "expected_code"),
+    [("error", "APPLY_REJECTED"), ("timeout", "STAGE_TIMEOUT")],
+)
+def test_apply_child_preflight_failure_without_journal_skips_rollback(
+    request_fixture: RequestFixture,
+    tmp_path: Path,
+    apply_outcome: str,
+    expected_code: str,
+) -> None:
+    executor = FakeExecutor(
+        request_fixture.request,
+        tmp_path,
+        Scenario(apply_outcome=apply_outcome, publish_apply_started=False),
+    )
+
+    with pytest.raises(runner.CapturedPaperActivationRunnerError) as exc_info:
+        _run(request_fixture.request, executor, mode="ActivatePaper")
+
+    assert _error_code(exc_info) == expected_code
+    assert executor.modes == ["RecoverOnly", "Apply"]
+    assert "Rollback" not in executor.modes
+    assert runner._apply_journal_evidence_state(
+        journal_root=request_fixture.request.artifact_root / "cutover-journal",
+        activation_generation=GENERATION,
+        manifest_sha256=executor.manifest_sha,
+    ) == runner._APPLY_JOURNAL_ABSENT
+
+
+def test_precommit_rollback_objects_without_journal_still_skip_rollback(
+    request_fixture: RequestFixture,
+    tmp_path: Path,
+) -> None:
+    executor = FakeExecutor(
+        request_fixture.request,
+        tmp_path,
+        Scenario(apply_outcome="error", apply_journal_variant="objects_only"),
+    )
+
+    with pytest.raises(runner.CapturedPaperActivationRunnerError) as exc_info:
+        _run(request_fixture.request, executor, mode="ActivatePaper")
+
+    assert _error_code(exc_info) == "APPLY_REJECTED"
+    assert executor.modes == ["RecoverOnly", "Apply"]
+    assert runner._apply_journal_evidence_state(
+        journal_root=request_fixture.request.artifact_root / "cutover-journal",
+        activation_generation=GENERATION,
+        manifest_sha256=executor.manifest_sha,
+    ) == runner._APPLY_JOURNAL_ABSENT
+
+
+@pytest.mark.parametrize(
+    ("apply_outcome", "expected_code"),
+    [("error", "APPLY_REJECTED"), ("timeout", "STAGE_TIMEOUT")],
+)
+def test_apply_failure_after_durable_started_record_runs_rollback(
+    request_fixture: RequestFixture,
+    tmp_path: Path,
+    apply_outcome: str,
+    expected_code: str,
+) -> None:
+    executor = FakeExecutor(
+        request_fixture.request,
+        tmp_path,
+        Scenario(apply_outcome=apply_outcome, publish_apply_started=True),
+    )
+
+    with pytest.raises(runner.CapturedPaperActivationRunnerError) as exc_info:
+        _run(request_fixture.request, executor, mode="ActivatePaper")
+
+    assert _error_code(exc_info) == expected_code
+    assert executor.modes == ["RecoverOnly", "Apply", "Rollback"]
+    assert runner._apply_journal_evidence_state(
+        journal_root=request_fixture.request.artifact_root / "cutover-journal",
+        activation_generation=GENERATION,
+        manifest_sha256=executor.manifest_sha,
+    ) == runner._APPLY_JOURNAL_STARTED
+
+
+@pytest.mark.parametrize(
+    "journal_variant",
+    [
+        "malformed",
+        "torn",
+        "wrong_generation",
+        "wrong_manifest",
+        "wrong_transaction",
+        "wrong_event",
+        "wrong_hash",
+        "nonfile",
+    ],
+)
+def test_present_invalid_apply_journal_is_uncertain_and_runs_rollback(
+    request_fixture: RequestFixture,
+    tmp_path: Path,
+    journal_variant: str,
+) -> None:
+    executor = FakeExecutor(
+        request_fixture.request,
+        tmp_path,
+        Scenario(apply_outcome="error", apply_journal_variant=journal_variant),
+    )
+
+    with pytest.raises(runner.CapturedPaperActivationRunnerError) as exc_info:
+        _run(request_fixture.request, executor, mode="ActivatePaper")
+
+    assert _error_code(exc_info) == "APPLY_REJECTED"
+    assert executor.modes == ["RecoverOnly", "Apply", "Rollback"]
+    assert runner._apply_journal_evidence_state(
+        journal_root=request_fixture.request.artifact_root / "cutover-journal",
+        activation_generation=GENERATION,
+        manifest_sha256=executor.manifest_sha,
+    ) == runner._APPLY_JOURNAL_UNCERTAIN
+
+
+def test_reparse_apply_journal_is_uncertain_and_runs_rollback(
+    request_fixture: RequestFixture,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    executor = FakeExecutor(
+        request_fixture.request,
+        tmp_path,
+        Scenario(apply_outcome="error", apply_journal_variant="valid"),
+    )
+    journal_path = (
+        request_fixture.request.artifact_root
+        / "cutover-journal"
+        / GENERATION
+        / f"{executor.manifest_sha}.jsonl"
+    )
+    original_reject = runner._reject_reparse_chain
+
+    def reject_journal(path: Path) -> None:
+        if path == journal_path:
+            raise runner.CapturedPaperActivationRunnerError(
+                "REPARSE_PATH", "synthetic journal reparse"
+            )
+        original_reject(path)
+
+    monkeypatch.setattr(runner, "_reject_reparse_chain", reject_journal)
+    with pytest.raises(runner.CapturedPaperActivationRunnerError) as exc_info:
+        _run(request_fixture.request, executor, mode="ActivatePaper")
+
+    assert _error_code(exc_info) == "APPLY_REJECTED"
+    assert executor.modes == ["RecoverOnly", "Apply", "Rollback"]
+
+
 def test_success_result_fsync_failure_remains_inside_compensated_apply_boundary(
     request_fixture: RequestFixture,
     tmp_path: Path,
@@ -1480,7 +1707,11 @@ def test_apply_and_rollback_failure_preserves_combined_failure(
     executor = FakeExecutor(
         request_fixture.request,
         tmp_path,
-        Scenario(apply_outcome="error", rollback_outcome=rollback_outcome),
+        Scenario(
+            apply_outcome="error",
+            rollback_outcome=rollback_outcome,
+            publish_apply_started=True,
+        ),
     )
 
     with pytest.raises(runner.CapturedPaperActivationRunnerError) as exc_info:

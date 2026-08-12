@@ -49,6 +49,17 @@ SERVICE_REPORT_SCHEMA_VERSION = "chili.captured-paper-service-report.v1"
 _MODES = ("validate-only", "no-order-smoke", "activate-paper")
 _REPARSE_ATTRIBUTE = int(getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400))
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
+_DOCKER_ENGINE_ENDPOINT = "npipe:////./pipe/docker_engine_linux"
+_DOCKER_ENGINE_PIPE = r"\\.\pipe\docker_engine_linux"
+_DOCKER_BACKEND_EXECUTABLE = Path(
+    r"C:\Program Files\Docker\Docker\resources\com.docker.backend.exe"
+)
+_DOCKER_DAEMON_ID_RE = re.compile(
+    r"^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+)
+_DOCKER_SERVER_VERSION_RE = re.compile(
+    r"^[0-9]{1,3}(?:\.[0-9]{1,3}){2}(?:[-+][A-Za-z0-9_.-]+)?$"
+)
 _STARTUP_ATTEMPT_RE = re.compile(
     r"^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
 )
@@ -749,6 +760,21 @@ class _CapturedPaperLauncherCutoverAttestation:
         self._consumed = False
         self.attestation_sha256 = activation_contract.sha256_json(self._body)
 
+    @property
+    def docker_engine_authority(self) -> Mapping[str, Any]:
+        cutover = self._body.get("cutover_binding")
+        lane = (
+            cutover.get("legacy_execution_lane")
+            if isinstance(cutover, Mapping)
+            else None
+        )
+        authority = (
+            lane.get("docker_engine_authority")
+            if isinstance(lane, Mapping)
+            else None
+        )
+        return dict(_normalized_docker_engine_authority(authority))
+
     def consume(
         self,
         *,
@@ -975,33 +1001,93 @@ def _normalized_process_evidence(value: Mapping[str, Any]) -> Mapping[str, Any]:
     }
 
 
-def _normalized_cutover_evidence(value: Mapping[str, Any]) -> Mapping[str, Any]:
+def _normalized_docker_engine_authority(value: Any) -> Mapping[str, Any]:
     if not isinstance(value, Mapping):
         raise CapturedAlpacaPaperServiceError(
-            "HOST_CUTOVER_NOT_INSPECTABLE", "host cutover evidence is unavailable"
+            "HOST_CUTOVER_NOT_INSPECTABLE",
+            "fixed Docker engine authority is unavailable",
         )
-    expected_tasks = {
-        "CHILI-IQFeed-Depth-Bridge-Daily",
-        "CHILI-IQFeed-Depth-Bridge-Logon",
-        "CHILI-IQFeed-Trade-Bridge-Daily",
-        "CHILI-IQFeed-Trade-Bridge-Logon",
+    expected_keys = {
+        "schema_version",
+        "endpoint",
+        "pipe_name",
+        "server_pid",
+        "server_create_time_filetime",
+        "server_executable_path",
+        "server_executable_sha256",
+        "daemon_id",
+        "daemon_name",
+        "daemon_version",
+        "daemon_os_type",
+        "live_cash_authorized",
     }
-    legacy = value.get("legacy_task_enabled")
-    processes = value.get("legacy_bridge_processes")
-    recreator_processes = value.get("legacy_recreator_processes")
-    lane = value.get("legacy_execution_lane")
-    if (
-        not isinstance(legacy, Mapping)
-        or set(legacy) != expected_tasks
-        or any(type(legacy[name]) is not bool for name in expected_tasks)
-        or not isinstance(processes, (list, tuple))
-        or any(not isinstance(item, str) for item in processes)
-        or not isinstance(recreator_processes, (list, tuple))
-        or any(not isinstance(item, str) for item in recreator_processes)
-        or not isinstance(lane, Mapping)
+    pid = value.get("server_pid")
+    create_time = value.get("server_create_time_filetime")
+    executable_path = str(value.get("server_executable_path") or "")
+    executable_sha256 = _require_sha256(
+        value.get("server_executable_sha256"),
+        "Docker engine server executable",
+    )
+    daemon_id = str(value.get("daemon_id") or "").lower()
+    daemon_name = str(value.get("daemon_name") or "")
+    daemon_version = str(value.get("daemon_version") or "")
+    try:
+        resolved_executable = _strict_local_file(
+            executable_path, "Docker engine server executable"
+        )
+    except CapturedAlpacaPaperServiceError as exc:
+        raise CapturedAlpacaPaperServiceError(
+            "HOST_CUTOVER_NOT_INSPECTABLE",
+            "fixed Docker engine executable identity is unavailable",
+        ) from exc
+    if not (
+        set(value) == expected_keys
+        and value.get("schema_version")
+        == "chili.docker-direct-engine-authority.v1"
+        and value.get("endpoint") == _DOCKER_ENGINE_ENDPOINT
+        and value.get("pipe_name") == _DOCKER_ENGINE_PIPE
+        and type(pid) is int
+        and 0 < int(pid) <= 0xFFFFFFFF
+        and type(create_time) is int
+        and 0 < int(create_time) <= 0xFFFFFFFFFFFFFFFF
+        and os.path.normcase(str(resolved_executable))
+        == os.path.normcase(executable_path)
+        and os.path.normcase(executable_path)
+        == os.path.normcase(str(_DOCKER_BACKEND_EXECUTABLE))
+        and _sha256_file(resolved_executable) == executable_sha256
+        and _DOCKER_DAEMON_ID_RE.fullmatch(daemon_id)
+        and daemon_name == "docker-desktop"
+        and _DOCKER_SERVER_VERSION_RE.fullmatch(daemon_version)
+        and value.get("daemon_os_type") == "linux"
+        and value.get("live_cash_authorized") is False
     ):
         raise CapturedAlpacaPaperServiceError(
-            "HOST_CUTOVER_NOT_INSPECTABLE", "host cutover inventory is malformed"
+            "HOST_CUTOVER_NOT_INSPECTABLE",
+            "fixed Docker engine authority is malformed or drifted",
+        )
+    return {
+        "schema_version": "chili.docker-direct-engine-authority.v1",
+        "endpoint": _DOCKER_ENGINE_ENDPOINT,
+        "pipe_name": _DOCKER_ENGINE_PIPE,
+        "server_pid": int(pid),
+        "server_create_time_filetime": int(create_time),
+        "server_executable_path": executable_path,
+        "server_executable_sha256": executable_sha256,
+        "daemon_id": daemon_id,
+        "daemon_name": daemon_name,
+        "daemon_version": daemon_version,
+        "daemon_os_type": "linux",
+        "live_cash_authorized": False,
+    }
+
+
+def _normalized_legacy_execution_lane(
+    lane: Any, *, expected_sha256: Any
+) -> Mapping[str, Any]:
+    if not isinstance(lane, Mapping):
+        raise CapturedAlpacaPaperServiceError(
+            "HOST_CUTOVER_NOT_INSPECTABLE",
+            "legacy Docker execution lane is unavailable",
         )
     raw_recreator_tasks = lane.get("recreator_tasks")
     expected_recreator_tasks = {
@@ -1078,10 +1164,13 @@ def _normalized_cutover_evidence(value: Mapping[str, Any]) -> Mapping[str, Any]:
         ),
         "recreator_tasks": recreator_tasks,
         "state": str(lane.get("state") or ""),
+        "docker_engine_authority": _normalized_docker_engine_authority(
+            lane.get("docker_engine_authority")
+        ),
     }
     if set(lane) != set(lane_document) or not (
         lane_document["schema_version"]
-        == "chili.legacy-execution-lane-observation.v2"
+        == "chili.legacy-execution-lane-observation.v3"
         and lane_document["container_name"]
         == "chili-clean-recovery-momentum-exec"
         and lane_document["image_id"].startswith("sha256:")
@@ -1094,7 +1183,7 @@ def _normalized_cutover_evidence(value: Mapping[str, Any]) -> Mapping[str, Any]:
         == "legacy:mixed-paper-config-live-masters-disabled"
         and not any(item["enabled"] for item in recreator_tasks)
         and _require_sha256(
-            value.get("legacy_execution_lane_sha256"),
+            expected_sha256,
             "legacy Docker observation",
         )
         == activation_contract.sha256_json(lane_document)
@@ -1103,6 +1192,39 @@ def _normalized_cutover_evidence(value: Mapping[str, Any]) -> Mapping[str, Any]:
             "HOST_CUTOVER_NOT_INSPECTABLE",
             "legacy Docker execution lane identity is incomplete or runnable",
         )
+    return lane_document
+
+
+def _normalized_cutover_evidence(value: Mapping[str, Any]) -> Mapping[str, Any]:
+    if not isinstance(value, Mapping):
+        raise CapturedAlpacaPaperServiceError(
+            "HOST_CUTOVER_NOT_INSPECTABLE", "host cutover evidence is unavailable"
+        )
+    expected_tasks = {
+        "CHILI-IQFeed-Depth-Bridge-Daily",
+        "CHILI-IQFeed-Depth-Bridge-Logon",
+        "CHILI-IQFeed-Trade-Bridge-Daily",
+        "CHILI-IQFeed-Trade-Bridge-Logon",
+    }
+    legacy = value.get("legacy_task_enabled")
+    processes = value.get("legacy_bridge_processes")
+    recreator_processes = value.get("legacy_recreator_processes")
+    if (
+        not isinstance(legacy, Mapping)
+        or set(legacy) != expected_tasks
+        or any(type(legacy[name]) is not bool for name in expected_tasks)
+        or not isinstance(processes, (list, tuple))
+        or any(not isinstance(item, str) for item in processes)
+        or not isinstance(recreator_processes, (list, tuple))
+        or any(not isinstance(item, str) for item in recreator_processes)
+    ):
+        raise CapturedAlpacaPaperServiceError(
+            "HOST_CUTOVER_NOT_INSPECTABLE", "host cutover inventory is malformed"
+        )
+    lane_document = _normalized_legacy_execution_lane(
+        value.get("legacy_execution_lane"),
+        expected_sha256=value.get("legacy_execution_lane_sha256"),
+    )
     normalized = {
         "candidate_task_name": str(value.get("candidate_task_name") or ""),
         "candidate_task_enabled": value.get("candidate_task_enabled"),
@@ -1162,6 +1284,7 @@ def _default_cutover_probe(
 ) -> Mapping[str, Any]:
     """Re-inventory the applied read-only Task Scheduler/process state."""
 
+    backend: Any | None = None
     try:
         host_cutover = importlib.import_module("scripts.captured_paper_host_cutover")
         _verify_loaded_module_role(
@@ -1169,7 +1292,22 @@ def _default_cutover_probe(
             role="captured_paper_host_cutover",
             module=host_cutover,
         )
-        backend = host_cutover.WindowsHostCutoverBackend(bindings=())
+        cutover = verified.manifest.get("cutover")
+        if not isinstance(cutover, Mapping):
+            raise RuntimeError("sealed cutover authority is absent")
+        artifact_root = _strict_local_directory(
+            str(cutover.get("activation_artifact_root") or ""),
+            "sealed activation artifact root",
+        )
+        journal_root = _strict_local_directory(
+            artifact_root.parent / "cutover-journal",
+            "sealed cutover journal root",
+        )
+        if artifact_root.name.casefold() != "activation":
+            raise RuntimeError("sealed cutover journal root is unavailable")
+        backend = host_cutover.WindowsHostCutoverBackend(
+            bindings=(), docker_config_parent=journal_root
+        )
         candidate = backend.get_task(host_cutover.CANDIDATE_TASK_NAME)
         if candidate is None:
             raise RuntimeError("candidate task is absent")
@@ -1205,7 +1343,76 @@ def _default_cutover_probe(
                 raise RuntimeError(f"legacy task disappeared: {name}")
             legacy[name] = task.enabled
 
-        lane = backend.inspect_legacy_execution_lane()
+        # Apply has already durably journaled the full source-verified lane.
+        # Bind the live Docker/task readback to that exact observation instead
+        # of reopening dormant recreator sources (which this service must never
+        # execute and whose later drift must not wedge safe recovery).
+        generation_root = journal_root / verified.activation_generation
+        journal_path = _strict_local_file(
+            generation_root / f"{verified.manifest_sha256}.jsonl",
+            "host cutover journal for launcher attestation",
+        )
+        rows = _stable_canonical_json_lines(
+            journal_path, field="host cutover journal for launcher attestation"
+        )
+        transaction_id = str(
+            uuid.uuid5(
+                uuid.NAMESPACE_URL,
+                "chili:captured-paper-cutover:"
+                f"{verified.activation_generation}:{verified.manifest_sha256}",
+            )
+        )
+        previous = "0" * 64
+        for index, event in enumerate(rows):
+            claimed = _require_sha256(
+                event.get("event_sha256"),
+                f"launcher-attestation journal[{index}]",
+            )
+            body = dict(event)
+            body.pop("event_sha256", None)
+            if not (
+                set(event)
+                == {
+                    "schema_version",
+                    "transaction_id",
+                    "sequence",
+                    "previous_event_sha256",
+                    "event_type",
+                    "recorded_at",
+                    "payload",
+                    "event_sha256",
+                }
+                and event.get("schema_version")
+                == _HOST_CUTOVER_JOURNAL_EVENT_SCHEMA_VERSION
+                and event.get("transaction_id") == transaction_id
+                and event.get("sequence") == index + 1
+                and event.get("previous_event_sha256") == previous
+                and isinstance(event.get("payload"), Mapping)
+                and activation_contract.sha256_json(body) == claimed
+            ):
+                raise RuntimeError("journal-bound Docker baseline is unauthenticated")
+            _parse_utc_text(
+                event.get("recorded_at"),
+                f"launcher-attestation journal[{index}].recorded_at",
+            )
+            previous = claimed
+        apply_started = [event for event in rows if event.get("event_type") == "apply_started"]
+        if len(apply_started) != 1 or not isinstance(
+            apply_started[0].get("payload"), Mapping
+        ):
+            raise RuntimeError("journal-bound Docker baseline is unavailable")
+        apply_payload = apply_started[0]["payload"]
+        if not (
+            apply_payload.get("activation_generation")
+            == verified.activation_generation
+            and apply_payload.get("manifest_sha256") == verified.manifest_sha256
+        ):
+            raise RuntimeError("journal-bound Docker baseline has wrong authority")
+        expected_lane = host_cutover._parse_legacy_execution_lane(
+            apply_payload.get("legacy_execution_lane"),
+            field="service journal-bound legacy execution lane",
+        )
+        lane = backend.inspect_bound_legacy_execution_lane(expected_lane)
         lane_document = dict(host_cutover._legacy_execution_lane_document(lane))
         recreator_processes = list(
             backend.await_execution_lane_recreator_processes(
@@ -1242,6 +1449,21 @@ def _default_cutover_probe(
                         f"{int(process.info['pid'])}:{Path(str(token)).name.lower()}"
                     )
                     break
+        closing_before = backend.inspect_bound_legacy_execution_lane(expected_lane)
+        if closing_before != lane:
+            raise RuntimeError(
+                "journal-bound Docker lane changed during service attestation"
+            )
+        closing_recreators = list(
+            backend.await_execution_lane_recreator_processes(
+                timeout_seconds=0.0
+            )
+        )
+        closing_after = backend.inspect_bound_legacy_execution_lane(expected_lane)
+        if closing_recreators or closing_after != closing_before:
+            raise RuntimeError(
+                "journal-bound Docker lane was not quiet at service attestation"
+            )
         action_body = {
             "command": _canonical_process_path(command, "candidate task executable"),
             "arguments": arguments,
@@ -1268,6 +1490,10 @@ def _default_cutover_probe(
             "HOST_CUTOVER_NOT_INSPECTABLE",
             "applied candidate/legacy Task Scheduler state could not be verified",
         ) from exc
+    finally:
+        close = getattr(backend, "close", None)
+        if callable(close):
+            close()
 
 
 def _launcher_projection(
@@ -1553,6 +1779,19 @@ def _strict_local_file(value: str | Path, field: str) -> Path:
         raise CapturedAlpacaPaperServiceError(
             "NONLOCAL_PATH", f"{field} must be an absolute local file"
         )
+    lexical = path
+    cursor = lexical
+    while True:
+        info = os.lstat(cursor)
+        attrs = int(getattr(info, "st_file_attributes", 0) or 0)
+        if stat.S_ISLNK(info.st_mode) or attrs & _REPARSE_ATTRIBUTE:
+            raise CapturedAlpacaPaperServiceError(
+                "REPARSE_PATH", f"{field} traverses a reparse point"
+            )
+        parent = cursor.parent
+        if parent == cursor:
+            break
+        cursor = parent
     path = path.resolve(strict=True)
     cursor = path
     while True:
@@ -1569,6 +1808,45 @@ def _strict_local_file(value: str | Path, field: str) -> Path:
     if not path.is_file():
         raise CapturedAlpacaPaperServiceError(
             "INVALID_FILE", f"{field} is not a regular file"
+        )
+    return path
+
+
+def _strict_local_directory(value: str | Path, field: str) -> Path:
+    path = Path(value)
+    if not path.is_absolute() or str(path).startswith(("\\\\", "//")):
+        raise CapturedAlpacaPaperServiceError(
+            "NONLOCAL_PATH", f"{field} must be an absolute local directory"
+        )
+    lexical = path
+    cursor = lexical
+    while True:
+        info = os.lstat(cursor)
+        attrs = int(getattr(info, "st_file_attributes", 0) or 0)
+        if stat.S_ISLNK(info.st_mode) or attrs & _REPARSE_ATTRIBUTE:
+            raise CapturedAlpacaPaperServiceError(
+                "REPARSE_PATH", f"{field} traverses a reparse point"
+            )
+        parent = cursor.parent
+        if parent == cursor:
+            break
+        cursor = parent
+    path = path.resolve(strict=True)
+    cursor = path
+    while True:
+        info = os.lstat(cursor)
+        attrs = int(getattr(info, "st_file_attributes", 0) or 0)
+        if stat.S_ISLNK(info.st_mode) or attrs & _REPARSE_ATTRIBUTE:
+            raise CapturedAlpacaPaperServiceError(
+                "REPARSE_PATH", f"{field} traverses a reparse point"
+            )
+        parent = cursor.parent
+        if parent == cursor:
+            break
+        cursor = parent
+    if not path.is_dir():
+        raise CapturedAlpacaPaperServiceError(
+            "INVALID_DIRECTORY", f"{field} is not a directory"
         )
     return path
 
@@ -4683,6 +4961,7 @@ class _CapturedPaperHostActivationHandshake:
         stopped_path: Path,
         dispatch_lock_path: Path,
         dispatch_lock_identity: Mapping[str, Any] | None,
+        docker_engine_authority: Mapping[str, Any],
         verified: activation_contract.VerifiedCapturedPaperActivation,
         process_identity: Mapping[str, Any],
         challenge_sha256: str,
@@ -4709,6 +4988,9 @@ class _CapturedPaperHostActivationHandshake:
                 "host dispatch authority lock identity has an unexpected schema",
             )
         self._dispatch_lock_identity = dict(dispatch_lock_identity or {})
+        self._docker_engine_authority = dict(
+            _normalized_docker_engine_authority(docker_engine_authority)
+        )
         self._verified = verified
         self._identity = dict(process_identity)
         self._challenge_sha256 = _require_sha256(
@@ -4845,6 +5127,7 @@ class _CapturedPaperHostActivationHandshake:
         process_probe: Callable[[], Mapping[str, Any]] = (
             _current_service_process_identity
         ),
+        docker_engine_authority: Mapping[str, Any],
         issuer_process_probe: Callable[[int], Mapping[str, Any]] = (
             _host_cutover_issuer_process_identity
         ),
@@ -4903,6 +5186,7 @@ class _CapturedPaperHostActivationHandshake:
             stopped_path=derived["stopped"],
             dispatch_lock_path=dispatch_lock_path,
             dispatch_lock_identity=None,
+            docker_engine_authority=docker_engine_authority,
             verified=verified,
             process_identity=identity,
             challenge_sha256=challenge_factory(),
@@ -5935,6 +6219,20 @@ class _CapturedPaperHostActivationHandshake:
             if isinstance(payload, Mapping)
             else None
         )
+        try:
+            committed_lane = _normalized_legacy_execution_lane(
+                lane,
+                expected_sha256=(
+                    payload.get("legacy_execution_lane_sha256")
+                    if isinstance(payload, Mapping)
+                    else None
+                ),
+            )
+        except CapturedAlpacaPaperServiceError as exc:
+            raise CapturedAlpacaPaperServiceError(
+                "HOST_APPLY_COMMIT_INVALID",
+                "host apply commit lacks the exact Docker engine authority",
+            ) from exc
         committed_provider_guard = (
             payload.get("iqconnect_provider_guard")
             if isinstance(payload, Mapping)
@@ -5986,7 +6284,6 @@ class _CapturedPaperHostActivationHandshake:
             if isinstance(provider_guard_listeners, list)
             else set()
         )
-        recreators = lane.get("recreator_tasks") if isinstance(lane, Mapping) else None
         recorded_at = _parse_utc_text(
             event.get("recorded_at"), "host apply-completed recorded_at"
         )
@@ -6088,15 +6385,9 @@ class _CapturedPaperHostActivationHandshake:
             and isinstance(provider_guard_event.get("sequence"), int)
             and provider_guard_event.get("sequence")
             < self._permit_body.get("journal_authorization_sequence")
-            and isinstance(lane, Mapping)
-            and lane.get("state") == "stopped"
-            and isinstance(recreators, list)
-            and all(
-                isinstance(item, Mapping) and item.get("enabled") is False
-                for item in recreators
-            )
-            and activation_contract.sha256_json(dict(lane))
-            == payload.get("legacy_execution_lane_sha256")
+            and dict(committed_lane) == dict(lane)
+            and committed_lane.get("docker_engine_authority")
+            == self._docker_engine_authority
             and payload.get("paper_execution_committed") is True
             and payload.get("live_cash_authorized") is False
             and payload.get("real_money_authorized") is False
@@ -9077,18 +9368,6 @@ def main(argv: Sequence[str] | None = None) -> int:
             host_activation_handshake = None
             if args.mode == "activate-paper":
                 _assert_content_addressed_activation_entrypoints(verified)
-                host_activation_handshake = (
-                    _CapturedPaperHostActivationHandshake.prepare(
-                        ready_output=args.host_ready_receipt,
-                        verified=verified,
-                        allowed_roots=args.allow_read_root,
-                        startup_attempt_id=(
-                            str(args.startup_attempt_id)
-                            if args.startup_attempt_id
-                            else None
-                        ),
-                    )
-                )
             launcher_attestation = (
                 _issue_launcher_cutover_attestation(
                     verified=verified,
@@ -9097,6 +9376,27 @@ def main(argv: Sequence[str] | None = None) -> int:
                 if args.mode == "activate-paper"
                 else None
             )
+            if args.mode == "activate-paper":
+                if launcher_attestation is None:
+                    raise CapturedAlpacaPaperServiceError(
+                        "LAUNCH_ATTESTATION_REQUIRED",
+                        "active PAPER service lacks Docker-bound launcher authority",
+                    )
+                host_activation_handshake = (
+                    _CapturedPaperHostActivationHandshake.prepare(
+                        ready_output=args.host_ready_receipt,
+                        verified=verified,
+                        allowed_roots=args.allow_read_root,
+                        docker_engine_authority=(
+                            launcher_attestation.docker_engine_authority
+                        ),
+                        startup_attempt_id=(
+                            str(args.startup_attempt_id)
+                            if args.startup_attempt_id
+                            else None
+                        ),
+                    )
+                )
             # From this point construction may perform read-only DB/broker
             # preflights.  Preserve uncertainty in the rejection report if an
             # exception interrupts one of those reads.
