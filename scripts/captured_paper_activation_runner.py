@@ -3,7 +3,9 @@
 This is the only supported outer orchestration boundary.  It consumes one
 canonical, hash-bound request, owns one host-wide lock, runs every stage from
 the exact pinned files, and compensates with the exact cutover rollback after
-*any* failure once Apply begins.  It never authorizes live cash.
+a durable child Apply transaction begins.  A child preflight failure that
+never publishes the transaction journal is still pre-mutation and is not sent
+through Rollback.  It never authorizes live cash.
 
 The inner activation/cutover tools remain responsible for their detailed
 receipts.  This module is deliberately small enough to test with a fake
@@ -49,6 +51,23 @@ _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 _GIT_COMMIT_RE = re.compile(r"^[0-9a-f]{40}$")
 _MAX_REQUEST_BYTES = 1024 * 1024
 _MAX_STAGE_OUTPUT_BYTES = 16 * 1024 * 1024
+_MAX_APPLY_JOURNAL_EVIDENCE_BYTES = 16 * 1024 * 1024
+_HOST_CUTOVER_JOURNAL_EVENT_SCHEMA = (
+    "chili.captured-paper-host-cutover-journal-event.v1"
+)
+_HOST_CUTOVER_JOURNAL_EVENT_KEYS = {
+    "schema_version",
+    "transaction_id",
+    "sequence",
+    "previous_event_sha256",
+    "event_type",
+    "recorded_at",
+    "payload",
+    "event_sha256",
+}
+_APPLY_JOURNAL_ABSENT = "absent"
+_APPLY_JOURNAL_STARTED = "apply_started"
+_APPLY_JOURNAL_UNCERTAIN = "uncertain"
 _HOST_WIDE_ACTIVATION_LOCK_PATH = (
     Path(tempfile.gettempdir())
     / "chili-captured-alpaca-paper-activation-runner.v1.lock"
@@ -1467,6 +1486,76 @@ def _run_stage(
     return result
 
 
+def _apply_journal_evidence_state(
+    *,
+    journal_root: Path,
+    activation_generation: str,
+    manifest_sha256: str,
+) -> str:
+    """Classify the child's durable Apply boundary without caller intent.
+
+    ``CutoverJournal`` creates rollback objects before appending its first
+    event, but creates the exact ``.jsonl`` file only while durably appending
+    ``apply_started``.  Absence of that exact file is therefore the sole clean
+    pre-mutation state.  A present but invalid file is recovery-required
+    uncertainty, never evidence that mutation did not begin.
+    """
+
+    expected_transaction_id = str(
+        uuid.uuid5(
+            uuid.NAMESPACE_URL,
+            "chili:captured-paper-cutover:"
+            f"{activation_generation}:{manifest_sha256}",
+        )
+    )
+    journal_path = (
+        journal_root / activation_generation / f"{manifest_sha256}.jsonl"
+    )
+    try:
+        journal_path.lstat()
+    except FileNotFoundError:
+        return _APPLY_JOURNAL_ABSENT
+    except OSError:
+        return _APPLY_JOURNAL_UNCERTAIN
+    try:
+        _reject_reparse_chain(journal_path)
+        if not journal_path.is_file():
+            return _APPLY_JOURNAL_UNCERTAIN
+        size = journal_path.stat().st_size
+        if size <= 0 or size > _MAX_APPLY_JOURNAL_EVIDENCE_BYTES:
+            return _APPLY_JOURNAL_UNCERTAIN
+        raw = journal_path.read_bytes()
+        if len(raw) != size:
+            return _APPLY_JOURNAL_UNCERTAIN
+        first_line = raw.split(b"\n", 1)[0]
+        event = _strict_json(first_line, field="apply journal first record")
+        if _canonical_json_bytes(event) != first_line:
+            return _APPLY_JOURNAL_UNCERTAIN
+        if set(event) != _HOST_CUTOVER_JOURNAL_EVENT_KEYS:
+            return _APPLY_JOURNAL_UNCERTAIN
+        claimed_sha = str(event.get("event_sha256") or "")
+        body = dict(event)
+        body.pop("event_sha256", None)
+        payload = event.get("payload")
+        if not (
+            _SHA256_RE.fullmatch(claimed_sha)
+            and _sha256_bytes(_canonical_json_bytes(body)) == claimed_sha
+            and event.get("schema_version")
+            == _HOST_CUTOVER_JOURNAL_EVENT_SCHEMA
+            and event.get("transaction_id") == expected_transaction_id
+            and event.get("sequence") == 1
+            and event.get("previous_event_sha256") == "0" * 64
+            and event.get("event_type") == "apply_started"
+            and isinstance(payload, dict)
+            and payload.get("activation_generation") == activation_generation
+            and payload.get("manifest_sha256") == manifest_sha256
+        ):
+            return _APPLY_JOURNAL_UNCERTAIN
+        return _APPLY_JOURNAL_STARTED
+    except (CapturedPaperActivationRunnerError, OSError, RuntimeError):
+        return _APPLY_JOURNAL_UNCERTAIN
+
+
 def _reference_path_and_document(
     reference: Mapping[str, Any], *, field: str
 ) -> tuple[Path, Mapping[str, Any]]:
@@ -2292,9 +2381,7 @@ def run_activation(
         # Apply performs its own in-process ValidateOnly immediately before
         # mutation and rechecks the baseline again under the journal lock.
         # Avoid a duplicate full-host pass that can stale the sealed authority.
-        apply_started = False
         try:
-            apply_started = True
             apply_result = _run_stage(
                 name="apply",
                 argv=[
@@ -2350,7 +2437,12 @@ def run_activation(
             return result
         except BaseException as primary:
             rollback_error: BaseException | None = None
-            if apply_started:
+            apply_journal_state = _apply_journal_evidence_state(
+                journal_root=journal_root,
+                activation_generation=generation,
+                manifest_sha256=manifest_sha,
+            )
+            if apply_journal_state != _APPLY_JOURNAL_ABSENT:
                 try:
                     rollback = _run_stage(
                         name="rollback",

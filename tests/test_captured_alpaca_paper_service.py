@@ -60,6 +60,65 @@ SHA_B = "b" * 64
 SHA_C = "c" * 64
 
 
+@pytest.fixture(autouse=True)
+def _portable_fixed_docker_backend(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Production remains pinned to Docker Desktop's Program Files image. Keep
+    # these otherwise-portable service tests independent of host installation.
+    monkeypatch.setattr(
+        service_module,
+        "_DOCKER_BACKEND_EXECUTABLE",
+        Path(sys.executable).resolve(strict=True),
+    )
+
+
+def _docker_engine_authority_document() -> dict:
+    backend = service_module._DOCKER_BACKEND_EXECUTABLE
+    return {
+        "schema_version": "chili.docker-direct-engine-authority.v1",
+        "endpoint": service_module._DOCKER_ENGINE_ENDPOINT,
+        "pipe_name": service_module._DOCKER_ENGINE_PIPE,
+        "server_pid": 34_668,
+        "server_create_time_filetime": 134_151_391_962_750_100,
+        "server_executable_path": str(backend),
+        "server_executable_sha256": hashlib.sha256(backend.read_bytes()).hexdigest(),
+        "daemon_id": "48db887a-6e27-4f02-b4a3-1c0b068a56b3",
+        "daemon_name": "docker-desktop",
+        "daemon_version": "29.5.2",
+        "daemon_os_type": "linux",
+        "live_cash_authorized": False,
+    }
+
+
+def _legacy_execution_lane_document() -> dict:
+    return {
+        "schema_version": "chili.legacy-execution-lane-observation.v3",
+        "container_name": "chili-clean-recovery-momentum-exec",
+        "container_id": SHA_C,
+        "image_id": "sha256:" + SHA_A,
+        "config_sha256": SHA_B,
+        "execution_scope": "legacy:mixed-paper-config-live-masters-disabled",
+        "scope_sha256": SHA_C,
+        "recreator_tasks": [
+            {
+                "name": name,
+                "definition_sha256": SHA_A,
+                "action_sha256": SHA_B,
+                "source_chain_sha256": SHA_C,
+                "enabled": False,
+            }
+            for name in (
+                "CHILI-Docker-Socket-Guard",
+                "CHILI-Premarket-Readiness",
+                "CHILI-Premarket-Readiness-Recheck",
+                "CHILI-captured-paper-premarket-activation",
+                "CHILI-liveness-watchdog",
+            )
+        ],
+        "state": "stopped",
+        "docker_engine_authority": _docker_engine_authority_document(),
+    }
+
+
 def _canonical(value: object) -> str:
     return json.dumps(
         value,
@@ -2354,6 +2413,7 @@ def _host_handshake_fixture(
         allowed_roots=(tmp_path,),
         wall_clock=wall_clock,
         process_probe=lambda: identity,
+        docker_engine_authority=_docker_engine_authority_document(),
         issuer_process_probe=lambda _pid: dict(issuer_live),
         challenge_factory=lambda: SHA_C,
         startup_attempt_id=startup_attempt_id,
@@ -2643,11 +2703,7 @@ def _append_matching_apply_completed(
         for line in journal_path.read_text(encoding="utf-8").splitlines()
         if line
     ]
-    lane = {
-        "schema_version": "chili.legacy-execution-lane-observation.v2",
-        "state": "stopped",
-        "recreator_tasks": [],
-    }
+    lane = _legacy_execution_lane_document()
     payload = {
         "postcondition": "one_unified_candidate_host",
         "activation_generation": handshake._verified.activation_generation,
@@ -3032,6 +3088,30 @@ def test_host_apply_commit_identity_forgery_is_rejected(
         handshake.await_and_consume_apply_completed_authority()
 
 
+def test_host_apply_commit_rejects_valid_but_different_docker_authority(
+    tmp_path: Path,
+) -> None:
+    clock = {"now": NOW}
+    handshake, permit, _issuer_live = _published_started_handshake(
+        tmp_path, clock=clock
+    )
+    lane = _legacy_execution_lane_document()
+    lane["docker_engine_authority"][
+        "daemon_id"
+    ] = "58db887a-6e27-4f02-b4a3-1c0b068a56b3"
+    _append_matching_apply_completed(
+        handshake,
+        permit=permit,
+        payload_overrides={
+            "legacy_execution_lane": lane,
+            "legacy_execution_lane_sha256": sha256_json(lane),
+        },
+    )
+
+    with pytest.raises(CapturedAlpacaPaperServiceError, match="COMMIT_INVALID"):
+        handshake.await_and_consume_apply_completed_authority()
+
+
 def test_active_start_evidence_deletion_blocks_dispatch_before_commit(
     tmp_path: Path,
 ) -> None:
@@ -3240,6 +3320,7 @@ def test_host_handshake_rejects_preexisting_sibling_and_revocation(
             ready_output=ready,
             verified=SimpleNamespace(),
             allowed_roots=(tmp_path,),
+            docker_engine_authority=_docker_engine_authority_document(),
         )
     permit.unlink()
 
@@ -3354,7 +3435,9 @@ def test_active_failure_reports_order_and_external_state_as_unknown(
     monkeypatch.setattr(
         service_module,
         "_issue_launcher_cutover_attestation",
-        lambda **_kwargs: object(),
+        lambda **_kwargs: SimpleNamespace(
+            docker_engine_authority=_docker_engine_authority_document()
+        ),
     )
     monkeypatch.setattr(
         service_module,
@@ -3543,34 +3626,7 @@ def _launcher_attestation_fixture(monkeypatch):
             },
             "legacy_bridge_processes": [],
             "legacy_recreator_processes": [],
-            "legacy_execution_lane": {
-                "schema_version": "chili.legacy-execution-lane-observation.v2",
-                "container_name": "chili-clean-recovery-momentum-exec",
-                "container_id": SHA_C,
-                "image_id": "sha256:" + SHA_A,
-                "config_sha256": SHA_B,
-                "execution_scope": (
-                    "legacy:mixed-paper-config-live-masters-disabled"
-                ),
-                "scope_sha256": SHA_C,
-                "recreator_tasks": [
-                    {
-                        "name": name,
-                        "definition_sha256": SHA_A,
-                        "action_sha256": SHA_B,
-                        "source_chain_sha256": SHA_C,
-                        "enabled": False,
-                    }
-                    for name in (
-                        "CHILI-Docker-Socket-Guard",
-                        "CHILI-Premarket-Readiness",
-                        "CHILI-Premarket-Readiness-Recheck",
-                        "CHILI-captured-paper-premarket-activation",
-                        "CHILI-liveness-watchdog",
-                    )
-                ],
-                "state": "stopped",
-            },
+            "legacy_execution_lane": _legacy_execution_lane_document(),
         },
     }
     evidence["cutover"]["legacy_execution_lane_sha256"] = (
@@ -3621,6 +3677,104 @@ def test_launcher_cutover_attestation_rejects_docker_identity_drift(
         wall_clock=lambda: NOW,
     )
     evidence["cutover"]["legacy_execution_lane"]["container_id"] = "f" * 64
+    evidence["cutover"]["legacy_execution_lane_sha256"] = sha256_json(
+        evidence["cutover"]["legacy_execution_lane"]
+    )
+
+    with pytest.raises(
+        CapturedAlpacaPaperServiceError,
+        match="HOST_CUTOVER_BINDING_DRIFT",
+    ):
+        attestation.consume(wall_clock=lambda: NOW + timedelta(seconds=1))
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("server_pid", 0),
+        ("server_pid", 0x1_0000_0000),
+        ("server_create_time_filetime", 0),
+        ("server_create_time_filetime", 0x1_0000_0000_0000_0000),
+        ("server_executable_path", service_module.__file__),
+        ("server_executable_sha256", SHA_A),
+        ("daemon_name", "attacker-daemon"),
+        ("daemon_os_type", "windows"),
+    ],
+)
+def test_launcher_cutover_attestation_rejects_invalid_docker_server_authority(
+    monkeypatch: pytest.MonkeyPatch, field: str, value: object
+) -> None:
+    verified, args, evidence = _launcher_attestation_fixture(monkeypatch)
+    authority = evidence["cutover"]["legacy_execution_lane"][
+        "docker_engine_authority"
+    ]
+    authority[field] = value
+    evidence["cutover"]["legacy_execution_lane_sha256"] = sha256_json(
+        evidence["cutover"]["legacy_execution_lane"]
+    )
+
+    with pytest.raises(
+        CapturedAlpacaPaperServiceError,
+        match="HOST_CUTOVER_NOT_INSPECTABLE",
+    ):
+        service_module._issue_launcher_cutover_attestation(
+            verified=verified,
+            args=args,
+            process_probe=lambda: evidence,
+            cutover_probe=lambda: evidence["cutover"],
+            wall_clock=lambda: NOW,
+        )
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows reparse-point identity")
+def test_service_docker_config_parent_rejects_lexical_junction(
+    tmp_path: Path,
+) -> None:
+    import subprocess
+
+    protected = tmp_path / "protected"
+    protected.mkdir()
+    junction = tmp_path / "junction"
+    subprocess.run(
+        ["cmd", "/c", "mklink", "/J", str(junction), str(protected)],
+        check=True,
+        capture_output=True,
+    )
+    try:
+        with pytest.raises(
+            CapturedAlpacaPaperServiceError,
+            match="REPARSE_PATH",
+        ):
+            service_module._strict_local_directory(
+                junction, "sealed cutover journal root"
+            )
+    finally:
+        os.rmdir(junction)
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("server_pid", 34_669),
+        ("server_create_time_filetime", 134_151_391_962_750_101),
+        ("daemon_id", "58db887a-6e27-4f02-b4a3-1c0b068a56b3"),
+    ],
+)
+def test_launcher_cutover_attestation_rejects_docker_authority_drift(
+    monkeypatch: pytest.MonkeyPatch, field: str, value: object
+) -> None:
+    verified, args, evidence = _launcher_attestation_fixture(monkeypatch)
+    attestation = service_module._issue_launcher_cutover_attestation(
+        verified=verified,
+        args=args,
+        process_probe=lambda: evidence,
+        cutover_probe=lambda: evidence["cutover"],
+        wall_clock=lambda: NOW,
+    )
+    authority = evidence["cutover"]["legacy_execution_lane"][
+        "docker_engine_authority"
+    ]
+    authority[field] = value
     evidence["cutover"]["legacy_execution_lane_sha256"] = sha256_json(
         evidence["cutover"]["legacy_execution_lane"]
     )
