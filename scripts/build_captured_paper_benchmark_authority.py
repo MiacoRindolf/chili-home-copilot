@@ -954,6 +954,23 @@ def _dependency_path_is_excluded(relative: str) -> bool:
     return "__pycache__" in parts or relative.casefold().endswith((".pyc", ".pyo"))
 
 
+def _dependency_file_identity(item: os.stat_result) -> tuple[int, int, int, int, int]:
+    """Return metadata stable across Windows path and descriptor stat calls.
+
+    Windows synthesizes executable permission bits from path suffixes such as
+    ``.cmd`` and ``.exe``.  A descriptor has no suffix, so compare the file
+    type via ``S_IFMT`` while retaining every mutation-relevant identity field.
+    """
+
+    return (
+        int(item.st_dev),
+        int(item.st_ino),
+        int(item.st_size),
+        int(item.st_mtime_ns),
+        int(stat.S_IFMT(item.st_mode)),
+    )
+
+
 def _inventory_dependency_tree(root: Path) -> Mapping[str, Any]:
     _reject_reparse_chain(root, field="python_dependency_root")
     first_paths: list[tuple[str, Path]] = []
@@ -1008,17 +1025,16 @@ def _inventory_dependency_tree(root: Path) -> Mapping[str, Any]:
         finally:
             os.close(descriptor)
         after = os.stat(path, follow_symlinks=False)
-        identity = lambda value: (
-            int(value.st_dev),
-            int(value.st_ino),
-            int(value.st_size),
-            int(value.st_mtime_ns),
-            int(value.st_mode),
-        )
         if (
-            identity(before) != identity(opened)
-            or identity(opened) != identity(terminal)
-            or identity(terminal) != identity(after)
+            not stat.S_ISREG(opened.st_mode)
+            or not stat.S_ISREG(terminal.st_mode)
+            or not stat.S_ISREG(after.st_mode)
+            or _dependency_file_identity(before)
+            != _dependency_file_identity(opened)
+            or _dependency_file_identity(opened)
+            != _dependency_file_identity(terminal)
+            or _dependency_file_identity(terminal)
+            != _dependency_file_identity(after)
             or observed_size != int(before.st_size)
         ):
             raise CapturedPaperBenchmarkAuthorityError(
