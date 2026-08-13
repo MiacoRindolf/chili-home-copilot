@@ -3,8 +3,10 @@ from __future__ import annotations
 from dataclasses import dataclass
 import hashlib
 import json
+import os
 from pathlib import Path
 import shutil
+import stat
 import subprocess
 import sys
 from typing import Any
@@ -167,6 +169,35 @@ def _make_fixture(tmp_path: Path) -> BenchmarkAuthorityFixture:
         source_hashes=source_hashes,
         git=git,
         git_sha256=_sha(git.read_bytes()),
+    )
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows path/fd mode synthesis")
+@pytest.mark.parametrize("suffix", (".cmd", ".exe"))
+def test_dependency_inventory_accepts_windows_path_fd_permission_mode_alias(
+    tmp_path: Path, suffix: str
+) -> None:
+    dependency_root = tmp_path / "site-packages"
+    dependency_root.mkdir()
+    dependency = dependency_root / f"mode-probe{suffix}"
+    dependency.write_bytes(b"sealed\n")
+    path_metadata = os.lstat(dependency)
+    descriptor = os.open(
+        dependency, os.O_RDONLY | int(getattr(os, "O_BINARY", 0))
+    )
+    try:
+        descriptor_metadata = os.fstat(descriptor)
+    finally:
+        os.close(descriptor)
+
+    assert path_metadata.st_mode != descriptor_metadata.st_mode
+    assert stat.S_IFMT(path_metadata.st_mode) == stat.S_IFMT(
+        descriptor_metadata.st_mode
+    )
+
+    inventory = builder._inventory_dependency_tree(dependency_root)
+    assert inventory["files"][dependency.name]["sha256"] == _sha(
+        dependency.read_bytes()
     )
 
 

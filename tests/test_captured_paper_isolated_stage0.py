@@ -5,6 +5,7 @@ import json
 import os
 from pathlib import Path
 import shutil
+import stat
 import subprocess
 import sys
 from typing import Any
@@ -300,6 +301,36 @@ def test_stage0_serves_only_hash_bound_dependency_resources(tmp_path: Path) -> N
 
     assert result.returncode == 0, result.stderr
     assert bundle["marker"].read_text(encoding="utf-8") == "sealed-resource\n"
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows path/fd mode synthesis")
+@pytest.mark.parametrize("suffix", (".cmd", ".exe"))
+def test_dependency_inventory_accepts_windows_path_fd_permission_mode_alias(
+    tmp_path: Path, suffix: str
+) -> None:
+    dependency_root = tmp_path / "site-packages"
+    dependency_root.mkdir()
+    dependency = _write(dependency_root / f"mode-probe{suffix}", b"sealed\n")
+    path_metadata = os.lstat(dependency)
+    guard = stage0._open_dependency_guard(dependency)
+    try:
+        descriptor_metadata = os.fstat(guard.fileno())
+    finally:
+        guard.close()
+
+    assert path_metadata.st_mode != descriptor_metadata.st_mode
+    assert stat.S_IFMT(path_metadata.st_mode) == stat.S_IFMT(
+        descriptor_metadata.st_mode
+    )
+
+    inventory = stage0._dependency_tree_inventory(
+        dependency_root, retain_mutation_guards=True
+    )
+    try:
+        assert inventory["files"][dependency.name]["sha256"] == _sha(dependency)
+    finally:
+        for retained in inventory["guards"]:
+            retained.close()
 
 
 def test_unsealed_nonstdlib_import_cannot_fall_through_interpreter_paths(

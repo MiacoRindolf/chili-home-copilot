@@ -189,6 +189,24 @@ def _dependency_path_is_excluded(relative: str) -> bool:
     return "__pycache__" in parts or relative.casefold().endswith((".pyc", ".pyo"))
 
 
+def _dependency_file_identity(item: os.stat_result) -> tuple[int, int, int, int, int]:
+    """Return metadata stable across Windows path and descriptor stat calls.
+
+    Windows derives executable permission bits from a path's suffix, while
+    ``fstat`` has no filename from which to derive them.  Preserve the file
+    type check but do not treat those synthetic permission-bit differences as
+    dependency mutation.
+    """
+
+    return (
+        int(item.st_dev),
+        int(item.st_ino),
+        int(item.st_size),
+        int(item.st_mtime_ns),
+        int(stat.S_IFMT(item.st_mode)),
+    )
+
+
 def _open_dependency_guard(path: Path) -> Any:
     """Open one dependency file while denying mutation where the host permits it.
 
@@ -305,14 +323,13 @@ def _dependency_tree_inventory(
                 raise IsolatedStage0Error("DEPENDENCY_READ_FAILED") from exc
             after = os.stat(path, follow_symlinks=False)
             guarded = os.fstat(handle.fileno()) if retain_mutation_guards else after
-            identity = lambda item: (
-                int(item.st_dev), int(item.st_ino), int(item.st_size),
-                int(item.st_mtime_ns),
-            )
             if (
-                not stat.S_ISREG(guarded.st_mode)
-                or identity(before) != identity(after)
-                or identity(after) != identity(guarded)
+                not stat.S_ISREG(after.st_mode)
+                or not stat.S_ISREG(guarded.st_mode)
+                or _dependency_file_identity(before)
+                != _dependency_file_identity(after)
+                or _dependency_file_identity(after)
+                != _dependency_file_identity(guarded)
                 or observed_size != int(before.st_size)
             ):
                 raise IsolatedStage0Error("DEPENDENCY_TREE_DRIFT")
