@@ -98,6 +98,7 @@ _REQUIRED_CODE_ROLES = frozenset(
         "activation_launcher",
         "activation_service",
         "activation_stage0",
+        "captured_paper_pressure_probe",
         "adaptive_risk_account_lock",
         "adaptive_risk_policy",
         "adaptive_risk_request_builder",

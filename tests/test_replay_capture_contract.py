@@ -39,6 +39,7 @@ from app.services.trading.momentum_neural.replay_capture_runtime import (
     CaptureResourceMeasurement,
     CaptureWriterWorker,
     ContentAddressedCaptureStore,
+    capture_storage_volume_identity_sha256,
 )
 
 
@@ -78,7 +79,7 @@ def _identity() -> CaptureRunIdentity:
     )
 
 
-def _resource_binding() -> CaptureResourceBinding:
+def _resource_binding(capture_root=None) -> CaptureResourceBinding:
     measurement = CaptureResourceMeasurement(
         measured_at=BASE,
         sample_seconds=5,
@@ -90,6 +91,14 @@ def _resource_binding() -> CaptureResourceBinding:
         fsync_p95_milliseconds=5,
         logical_cpu_count=8,
         host_fingerprint_sha256="e" * 64,
+        write_latency_measurement_profile=(
+            "chili.capture-pressure.durable-write-fsync-helper-process.v1"
+        ),
+        write_latency_probe_volume_identity_sha256=(
+            capture_storage_volume_identity_sha256(capture_root)
+            if capture_root is not None
+            else "d" * 64
+        ),
     )
     policy = CaptureBudgetPolicy(
         memory_reserve_bytes=32_000_000,
@@ -944,9 +953,10 @@ def _sealed_passing_manifest(
             },
         )
 
-    binding = _resource_binding() if resource_bound else None
+    capture_root = tmp_path / "sealed-capture"
+    binding = _resource_binding(capture_root) if resource_bound else None
     store = ContentAddressedCaptureStore(
-        tmp_path / "sealed-capture",
+        capture_root,
         compression_codec="zlib",
         resource_binding=binding,
     )
@@ -1051,7 +1061,9 @@ def test_v4_exact_resource_hashes_remove_only_the_resource_blocker(
 
     grade = grade_replay_coverage(request, manifest)
 
-    assert verified.resource_hashes == _resource_binding().hashes
+    assert verified.resource_hashes == _resource_binding(
+        tmp_path / "sealed-capture"
+    ).hashes
     assert manifest.seal_binding is not None
     assert manifest.seal_binding.resource_hashes == verified.resource_hashes
     assert "capture_resource_binding_unverified" not in manifest.certification_blockers

@@ -156,6 +156,10 @@ def test_resource_budget_is_finite_and_derived_from_measured_headroom() -> None:
         fsync_p95_milliseconds=583,
         logical_cpu_count=32,
         host_fingerprint_sha256="e" * 64,
+        write_latency_measurement_profile=(
+            "chili.capture-pressure.durable-write-fsync-helper-process.v1"
+        ),
+        write_latency_probe_volume_identity_sha256="d" * 64,
     )
     policy = CaptureBudgetPolicy(
         memory_reserve_bytes=12 * 1024**3,

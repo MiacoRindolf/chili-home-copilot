@@ -25,6 +25,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 import hashlib
 import json
+import math
 import os
 from pathlib import Path
 import re
@@ -605,6 +606,36 @@ def _stable_read(
     return b"".join(chunks), actual
 
 
+def _load_pressure_probe_client(preflight: Any) -> type[Any]:
+    path = Path(
+        preflight.source_paths["captured_paper_pressure_probe"]
+    ).resolve(strict=True)
+    expected = str(
+        preflight.source_hashes["captured_paper_pressure_probe"]
+    )
+    raw, digest = _stable_read(path, expected_sha256=expected)
+    module_name = f"_chili_operator_pressure_probe_{digest}"
+    module = ModuleType(module_name)
+    module.__file__ = str(path)
+    module.__package__ = None
+    sys.modules[module_name] = module
+    try:
+        exec(compile(raw, str(path), "exec"), module.__dict__)
+    except BaseException as exc:
+        sys.modules.pop(module_name, None)
+        raise CapturedPaperOperatorFlowError(
+            "PRESSURE_PROBE_AUTHORITY_UNAVAILABLE",
+            "capture pressure helper could not be loaded from held sealed bytes",
+        ) from exc
+    client = getattr(module, "CapturedPaperPressureProbeClient", None)
+    if not isinstance(client, type):
+        raise CapturedPaperOperatorFlowError(
+            "PRESSURE_PROBE_AUTHORITY_UNAVAILABLE",
+            "capture pressure helper client is unavailable",
+        )
+    return client
+
+
 def _publish_new_bytes(
     root: Path,
     *,
@@ -905,55 +936,76 @@ def _measure_capture_pressure(
     preflight: Any,
     wall_clock: Callable[[], datetime],
     monotonic_clock: Callable[[], float],
+    pressure_probe: Any,
+    sample_deadline_seconds: float,
 ) -> Any:
-    """Measure the current host without importing the activation service."""
+    """Measure the current host with the same isolated live-service probe."""
 
     import psutil
     from app.services.trading.momentum_neural.replay_capture_runtime import (
+        CAPTURE_PRESSURE_WRITE_LATENCY_PROFILE,
         CapturePressureSample,
     )
 
+    started = float(monotonic_clock())
+    deadline = float(sample_deadline_seconds)
+    if (
+        not math.isfinite(started)
+        or not math.isfinite(deadline)
+        or deadline <= 0.0
+    ):
+        raise CapturedPaperOperatorFlowError(
+            "PRESSURE_SAMPLE_UNAVAILABLE", "capture pressure clock is invalid"
+        )
     root = Path(preflight.capture_store_root).resolve(strict=True)
     cpu_percent = float(psutil.cpu_percent(interval=0.1))
     available_memory = int(psutil.virtual_memory().available)
     disk_free = int(shutil.disk_usage(root).free)
-    latencies: list[float] = []
-    for _index in range(3):
-        descriptor = -1
-        temporary: str | None = None
-        try:
-            descriptor, temporary = tempfile.mkstemp(
-                prefix=".chili-operator-pressure-", suffix=".tmp", dir=str(root)
-            )
-            started = float(monotonic_clock())
-            with os.fdopen(descriptor, "wb", closefd=True) as handle:
-                descriptor = -1
-                handle.write(b"\0" * 4096)
-                handle.flush()
-                os.fsync(handle.fileno())
-            latencies.append(max(0.0, (float(monotonic_clock()) - started) * 1000.0))
-        finally:
-            if descriptor >= 0:
-                try:
-                    os.close(descriptor)
-                except OSError:
-                    pass
-            if temporary is not None:
-                try:
-                    os.unlink(temporary)
-                except OSError:
-                    pass
-    if len(latencies) != 3:
+    elapsed_before_probe = float(monotonic_clock()) - started
+    if (
+        not math.isfinite(elapsed_before_probe)
+        or elapsed_before_probe < 0.0
+        or elapsed_before_probe >= deadline
+    ):
         raise CapturedPaperOperatorFlowError(
-            "PRESSURE_SAMPLE_UNAVAILABLE", "capture pressure sample is incomplete"
+            "PRESSURE_SAMPLE_UNAVAILABLE",
+            "capture pressure sample exceeded its deadline",
+        )
+    measurement = pressure_probe.measure(
+        response_timeout_seconds=deadline - elapsed_before_probe
+    )
+    write_latency = float(
+        getattr(measurement, "latency_milliseconds", float("nan"))
+    )
+    write_profile = str(
+        getattr(measurement, "write_latency_profile", "") or ""
+    )
+    completed = float(monotonic_clock())
+    if (
+        not math.isfinite(write_latency)
+        or write_latency <= 0.0
+        or write_profile != CAPTURE_PRESSURE_WRITE_LATENCY_PROFILE
+        or type(getattr(measurement, "bytes_written", None)) is not int
+        or measurement.bytes_written != 4096
+        or getattr(measurement, "fsync_completed", None) is not True
+        or getattr(measurement, "cleanup_completed", None) is not True
+        or not math.isfinite(completed)
+        or completed < started
+        or completed - started > deadline
+    ):
+        raise CapturedPaperOperatorFlowError(
+            "PRESSURE_SAMPLE_UNAVAILABLE",
+            "capture pressure sample is incomplete or exceeded its deadline",
         )
     return CapturePressureSample(
         observed_at=_aware_utc(wall_clock(), "capture pressure clock"),
+        completed_monotonic=completed,
         resource_binding_sha256=preflight.resource_binding.binding_sha256,
         cpu_percent=cpu_percent,
         available_memory_bytes=available_memory,
         disk_free_bytes=disk_free,
-        write_latency_milliseconds=max(latencies),
+        write_latency_milliseconds=write_latency,
+        write_latency_measurement_profile=write_profile,
     )
 
 
@@ -1087,36 +1139,58 @@ def build_live_operator_composition(
             raise CapturedPaperOperatorFlowError(
                 "CAPTURE_ROOT_MISMATCH", "IQFeed preflight changed capture root"
             )
-        pressure = _measure_capture_pressure(
-            preflight=preflight,
-            wall_clock=wall_clock,
-            monotonic_clock=monotonic_clock,
+        pressure_deadline = (
+            float(preflight.resource_binding.policy.pressure_sample_max_age_seconds)
+            / 2.0
         )
-        health = IngressCaptureOnlyHealthAuthority(
-            preflight=preflight,
-            certification_symbol=config.capture_certification_symbol,
-            wall_clock=wall_clock,
+        CapturedPaperPressureProbeClient = _load_pressure_probe_client(
+            preflight
         )
-        smoke_config = CaptureOnlySmokeConfiguration(
-            preflight=preflight,
-            pressure_sample=pressure,
-            capture_health_authority=health,
-            trade_forced_symbols=(config.capture_certification_symbol,),
-            depth_forced_symbols=(config.capture_certification_symbol,),
-            activation_only_allow_closed_session_without_exact_print=(
-                not equity_extended_session_is_open(wall_clock())
-            ),
-            pressure_sampler=lambda: _measure_capture_pressure(
+        with CapturedPaperPressureProbeClient(
+            python_executable=Path(sys.executable).resolve(strict=True),
+            probe_root=preflight.capture_store_root.resolve(strict=True).parent,
+            response_timeout_seconds=pressure_deadline,
+            helper_path=preflight.source_paths[
+                "captured_paper_pressure_probe"
+            ],
+            expected_helper_sha256=preflight.source_hashes[
+                "captured_paper_pressure_probe"
+            ],
+        ) as pressure_probe:
+            pressure = _measure_capture_pressure(
                 preflight=preflight,
                 wall_clock=wall_clock,
                 monotonic_clock=monotonic_clock,
-            ),
-        )
-        return run_capture_only_preactivation_smoke(
-            smoke_config,
-            wall_clock=wall_clock,
-            monotonic_clock=monotonic_clock,
-        )
+                pressure_probe=pressure_probe,
+                sample_deadline_seconds=pressure_deadline,
+            )
+            health = IngressCaptureOnlyHealthAuthority(
+                preflight=preflight,
+                certification_symbol=config.capture_certification_symbol,
+                wall_clock=wall_clock,
+            )
+            smoke_config = CaptureOnlySmokeConfiguration(
+                preflight=preflight,
+                pressure_sample=pressure,
+                capture_health_authority=health,
+                trade_forced_symbols=(config.capture_certification_symbol,),
+                depth_forced_symbols=(config.capture_certification_symbol,),
+                activation_only_allow_closed_session_without_exact_print=(
+                    not equity_extended_session_is_open(wall_clock())
+                ),
+                pressure_sampler=lambda: _measure_capture_pressure(
+                    preflight=preflight,
+                    wall_clock=wall_clock,
+                    monotonic_clock=monotonic_clock,
+                    pressure_probe=pressure_probe,
+                    sample_deadline_seconds=pressure_deadline,
+                ),
+            )
+            return run_capture_only_preactivation_smoke(
+                smoke_config,
+                wall_clock=wall_clock,
+                monotonic_clock=monotonic_clock,
+            )
 
     test_environment = _sanitized_test_environment(target)
     return CapturedPaperOperatorComposition(

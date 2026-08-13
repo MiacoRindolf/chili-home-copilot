@@ -33,12 +33,15 @@ import psutil
 
 UTC = timezone.utc
 REPORT_SCHEMA_VERSION = "chili.alpaca-paper-operational-readiness.v1"
-CAPTURE_BENCHMARK_SCHEMA_VERSION = "chili.replay-capture-benchmark.v4"
+CAPTURE_BENCHMARK_SCHEMA_VERSION = "chili.replay-capture-benchmark.v7"
 CAPTURE_BENCHMARK_MAX_AGE_SECONDS = 3_600.0
 CAPTURE_BENCHMARK_CAPACITY_AUTHORITY = "diagnostic_only"
+PRESSURE_WRITE_LATENCY_PROFILE = (
+    "chili.capture-pressure.durable-write-fsync-helper-process.v1"
+)
 CAPTURE_SEAL_SCHEMA_VERSION = "chili-replay-capture-run-seal-v4"
 LEGACY_CAPTURE_SEAL_SCHEMA_VERSION = "chili-replay-capture-run-seal-v3"
-CAPTURE_RESOURCE_SCHEMA_VERSION = "chili-replay-capture-resource-binding-v1"
+CAPTURE_RESOURCE_SCHEMA_VERSION = "chili-replay-capture-resource-binding-v3"
 ADAPTIVE_READINESS_SCHEMA_VERSION = "chili.adaptive-risk-runtime-parity.v1"
 ROSS_COVERAGE_SCHEMA_VERSION = "chili.ross-local-capture-audit.v1"
 REPLAY_COVERAGE_REQUEST_SCHEMA_VERSION = "chili.replay-coverage-request.v1"
@@ -84,6 +87,8 @@ MEASUREMENT_FIELDS = (
     "fsync_p95_milliseconds",
     "logical_cpu_count",
     "host_fingerprint_sha256",
+    "write_latency_measurement_profile",
+    "write_latency_probe_volume_identity_sha256",
 )
 
 
@@ -578,10 +583,33 @@ def validate_capture_benchmark(
     source = payload.get("capture_runtime_source")
     if not isinstance(source, Mapping):
         raise EvidenceError("capture_benchmark_source_missing")
+    if set(source) != {
+        "benchmark_script_sha256",
+        "contract_sha256",
+        "first_dip_tape_policy_sha256",
+        "pressure_probe_sha256",
+        "replay_errors_sha256",
+        "runtime_sha256",
+        "stage0_sha256",
+    }:
+        raise EvidenceError("capture_benchmark_source_malformed")
     contract_hash = _require_sha256(source.get("contract_sha256"), "capture_contract_hash")
     runtime_hash = _require_sha256(source.get("runtime_sha256"), "capture_runtime_hash")
     benchmark_hash = _require_sha256(
         source.get("benchmark_script_sha256"), "capture_benchmark_script_hash"
+    )
+    pressure_probe_hash = _require_sha256(
+        source.get("pressure_probe_sha256"), "capture_pressure_probe_hash"
+    )
+    first_dip_policy_hash = _require_sha256(
+        source.get("first_dip_tape_policy_sha256"),
+        "capture_first_dip_tape_policy_hash",
+    )
+    replay_errors_hash = _require_sha256(
+        source.get("replay_errors_sha256"), "capture_replay_errors_hash"
+    )
+    stage0_hash = _require_sha256(
+        source.get("stage0_sha256"), "capture_benchmark_stage0_hash"
     )
     repository = Path(repo_root)
     source_root = repository / "app/services/trading/momentum_neural"
@@ -594,10 +622,26 @@ def validate_capture_benchmark(
     expected_benchmark = _sha256_bytes(
         (repository / "scripts/benchmark_replay_capture_runtime.py").read_bytes()
     )
+    expected_pressure_probe = _sha256_bytes(
+        (repository / "scripts/captured_paper_pressure_probe.py").read_bytes()
+    )
+    expected_first_dip_policy = _sha256_bytes(
+        (source_root / "first_dip_tape_policy.py").read_bytes()
+    )
+    expected_replay_errors = _sha256_bytes(
+        (source_root / "replay_errors.py").read_bytes()
+    )
+    expected_stage0 = _sha256_bytes(
+        (repository / "scripts/captured_paper_isolated_stage0.py").read_bytes()
+    )
     if (
         contract_hash != expected_contract
         or runtime_hash != expected_runtime
         or benchmark_hash != expected_benchmark
+        or pressure_probe_hash != expected_pressure_probe
+        or first_dip_policy_hash != expected_first_dip_policy
+        or replay_errors_hash != expected_replay_errors
+        or stage0_hash != expected_stage0
     ):
         raise EvidenceError("capture_benchmark_code_generation_mismatch")
 
@@ -622,6 +666,95 @@ def validate_capture_benchmark(
     measurement = payload.get("resource_measurement")
     if not isinstance(measurement, Mapping):
         raise EvidenceError("capture_benchmark_measurement_missing")
+    durable = measurement.get("durable_publication")
+    live_probe = (
+        durable.get("live_pressure_probe")
+        if isinstance(durable, Mapping)
+        else None
+    )
+    if not isinstance(live_probe, Mapping) or set(live_probe) != {
+        "all_verified",
+        "bytes_per_sample",
+        "count",
+        "helper_sha256",
+        "max_ns",
+        "mean_ns",
+        "min_ns",
+        "p50_ns",
+        "p95_ns",
+        "p99_ns",
+        "probe_root_identity_sha256",
+        "probe_volume_identity_sha256",
+        "write_latency_profile",
+    }:
+        raise EvidenceError("capture_benchmark_pressure_probe_missing")
+    if not isinstance(durable, Mapping) or set(durable) != {
+        "all_verified",
+        "file_fsync",
+        "live_pressure_probe",
+        "parent_publication",
+        "sample_count",
+        "verified_count",
+    }:
+        raise EvidenceError("capture_benchmark_durable_publication_invalid")
+    try:
+        sample_count = durable.get("sample_count")
+        verified_count = durable.get("verified_count")
+        latency_values = tuple(
+            live_probe.get(name)
+            for name in (
+                "min_ns", "p50_ns", "mean_ns", "p95_ns", "p99_ns", "max_ns"
+            )
+        )
+        live_probe_p95_ms = float(live_probe.get("p95_ns")) / 1_000_000.0
+        measured_fsync_p95_ms = float(measurement.get("fsync_p95_milliseconds"))
+    except (TypeError, ValueError) as exc:
+        raise EvidenceError("capture_benchmark_pressure_probe_invalid") from exc
+    if not (
+        durable.get("all_verified") is True
+        and type(sample_count) is int
+        and sample_count >= 2
+        and type(verified_count) is int
+        and verified_count == sample_count
+        and live_probe.get("all_verified") is True
+        and type(live_probe.get("count")) is int
+        and live_probe["count"] == sample_count
+        and type(live_probe.get("bytes_per_sample")) is int
+        and live_probe["bytes_per_sample"] == 4096
+        and all(type(value) in (int, float) and not isinstance(value, bool) for value in latency_values)
+        and all(math.isfinite(float(value)) and float(value) > 0.0 for value in latency_values)
+        and float(latency_values[0])
+        <= float(latency_values[1])
+        <= float(latency_values[3])
+        <= float(latency_values[4])
+        <= float(latency_values[5])
+        and float(latency_values[0])
+        <= float(latency_values[2])
+        <= float(latency_values[5])
+        and type(live_probe.get("p95_ns")) is int
+        and live_probe.get("helper_sha256") == pressure_probe_hash
+        and SHA256_RE.fullmatch(
+            str(live_probe.get("probe_root_identity_sha256") or "")
+        )
+        is not None
+        and SHA256_RE.fullmatch(
+            str(live_probe.get("probe_volume_identity_sha256") or "")
+        )
+        is not None
+        and live_probe.get("probe_volume_identity_sha256")
+        == measurement.get("write_latency_probe_volume_identity_sha256")
+        and live_probe.get("write_latency_profile")
+        == PRESSURE_WRITE_LATENCY_PROFILE
+        and math.isfinite(live_probe_p95_ms)
+        and live_probe_p95_ms > 0.0
+        and math.isclose(
+            measured_fsync_p95_ms,
+            live_probe_p95_ms,
+            rel_tol=0.0,
+            abs_tol=1e-12,
+        )
+    ):
+        raise EvidenceError("capture_benchmark_pressure_probe_invalid")
     measurement_core = {name: measurement.get(name) for name in MEASUREMENT_FIELDS}
     measurement_hash = _require_sha256(
         measurement.get("measurement_sha256"), "capture_measurement_hash"
@@ -686,7 +819,38 @@ def validate_capture_benchmark(
     if not isinstance(environment, Mapping):
         raise EvidenceError("capture_benchmark_environment_missing")
     if (
-        typed_measurement.host_fingerprint_sha256 != current_host
+        set(environment)
+        != {
+            "current_host_fingerprint_sha256",
+            "benchmark_authority_manifest_sha256",
+            "dependency_root_identity_sha256",
+            "host_fingerprint_matches",
+            "logical_cpu_count",
+            "measurement_host_fingerprint_sha256",
+            "platform",
+            "python",
+            "python_executable_sha256",
+            "resource_sampler_profile",
+        }
+        or _require_sha256(
+            environment.get("benchmark_authority_manifest_sha256"),
+            "capture_benchmark_authority_manifest",
+        )
+        != environment.get("benchmark_authority_manifest_sha256")
+        or _require_sha256(
+            environment.get("python_executable_sha256"),
+            "capture_benchmark_python_executable",
+        )
+        != environment.get("python_executable_sha256")
+        or _require_sha256(
+            environment.get("dependency_root_identity_sha256"),
+            "capture_benchmark_dependency_identity",
+        )
+        != environment.get("dependency_root_identity_sha256")
+        or environment.get("resource_sampler_profile")
+        != "chili.benchmark-stdlib-resource-sampler.v1"
+        or environment.get("python") != platform.python_version()
+        or typed_measurement.host_fingerprint_sha256 != current_host
         or int(typed_measurement.logical_cpu_count)
         != int(psutil.cpu_count(logical=True) or 1)
         or environment.get("measurement_host_fingerprint_sha256") != current_host
@@ -776,8 +940,11 @@ def validate_capture_benchmark(
         "measurement_sha256": measurement_hash,
         "binding_sha256": typed_binding.binding_sha256,
         "contract_sha256": contract_hash,
+        "first_dip_tape_policy_sha256": first_dip_policy_hash,
+        "replay_errors_sha256": replay_errors_hash,
         "runtime_sha256": runtime_hash,
         "benchmark_script_sha256": benchmark_hash,
+        "stage0_sha256": stage0_hash,
         "submitted_events": submitted,
         "written_events": written,
         "shared_written_events": shared_written,
@@ -937,6 +1104,11 @@ def _load_official_resource_binding_record(
         raise EvidenceError("capture_resource_binding_typed_recomputation_failed") from exc
     if measurement.measurement_sha256 != benchmark_measurement_sha256:
         raise EvidenceError("capture_resource_measurement_does_not_match_benchmark")
+    if (
+        measurement.write_latency_probe_volume_identity_sha256
+        != runtime.capture_storage_volume_identity_sha256(capture_root)
+    ):
+        raise EvidenceError("capture_resource_storage_volume_mismatch")
     if dict(benchmark_measurement) != dict(measurement_payload):
         raise EvidenceError("capture_resource_measurement_does_not_match_benchmark")
     if contract.canonical_json_bytes(binding.to_record()) != raw:

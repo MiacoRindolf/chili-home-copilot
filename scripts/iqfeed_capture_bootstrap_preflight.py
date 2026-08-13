@@ -22,6 +22,7 @@ checkpoint completion/watermark authority is still unavailable.
 from __future__ import annotations
 
 import argparse
+import ast
 from dataclasses import dataclass
 from datetime import datetime, timezone
 import hashlib
@@ -30,9 +31,12 @@ import math
 import os
 from pathlib import Path
 import platform
+import re
 import stat
+import subprocess
 import sys
-from types import ModuleType
+import tempfile
+from types import MappingProxyType, ModuleType
 from typing import Any, Callable, Iterable, Mapping, Sequence
 import uuid
 
@@ -41,7 +45,7 @@ import psutil
 
 UTC = timezone.utc
 BOOTSTRAP_MANIFEST_SCHEMA_VERSION = (
-    "chili.iqfeed-capture-bootstrap-preflight.v2"
+    "chili.iqfeed-capture-bootstrap-preflight.v3"
 )
 STARTUP_EVIDENCE_SCHEMA_VERSION = (
     "chili.iqfeed-capture-startup-evidence.v2"
@@ -50,21 +54,55 @@ CODE_BUILD_SCHEMA_VERSION = "chili.capture-code-build.v1"
 RUN_CONFIGURATION_SCHEMA_VERSION = (
     "chili.live-replay-capture-run-configuration.v1"
 )
-BENCHMARK_SCHEMA_VERSION = "chili.replay-capture-benchmark.v4"
+BENCHMARK_SCHEMA_VERSION = "chili.replay-capture-benchmark.v7"
+BENCHMARK_AUTHORITY_MANIFEST_SCHEMA_VERSION = (
+    "chili.captured-paper-benchmark-authority-manifest.v2"
+)
+BENCHMARK_RUNNER_AUTHORITY_SCHEMA_VERSION = (
+    "chili.captured-paper-benchmark-runner-authority.v1"
+)
+BENCHMARK_LAUNCH_RECEIPT_SCHEMA_VERSION = (
+    "chili.captured-paper-benchmark-authority-receipt.v2"
+)
+BENCHMARK_EXECUTION_RECEIPT_SCHEMA_VERSION = (
+    "chili.captured-paper-benchmark-execution-receipt.v2"
+)
+BENCHMARK_EXECUTION_CLAIM_SCHEMA_VERSION = (
+    "chili.captured-paper-benchmark-execution-claim.v1"
+)
+BENCHMARK_AUTHORITY_BUILDER_SHA256 = (
+    "be08b397f9473b4633b6e9497bc8426c30bccd4c4b1d5e47ba637c3e145e0d33"
+)
+BENCHMARK_AUTHORITY_RUNNER_SHA256 = (
+    "2b11a6b348b7f16fc4d4bad80922c5ad43f043380a1360fe51c6d9ac31eca349"
+)
 IQFEED_L1_CLOCK_CONTRACT_SCHEMA_VERSION = "chili.iqfeed-l1-clock-contract.v2"
 IQFEED_L2_CLOCK_CONTRACT_SCHEMA_VERSION = "chili.iqfeed-l2-clock-contract.v1"
 IQFEED_HANDOFF_BUDGET_SCHEMA_VERSION = "chili.iqfeed-capture-handoff-budget.v2"
 CAPTURE_MODE = "diagnostic_only"
+PRESSURE_WRITE_LATENCY_PROFILE = (
+    "chili.capture-pressure.durable-write-fsync-helper-process.v1"
+)
 
 _MAX_MANIFEST_BYTES = 2 * 1024 * 1024
 _MAX_STARTUP_BYTES = 8 * 1024 * 1024
 _MAX_BENCHMARK_BYTES = 32 * 1024 * 1024
+_MAX_AUTHORITY_BYTES = 8 * 1024 * 1024
+_MAX_EXECUTABLE_BYTES = 256 * 1024 * 1024
+_MAX_OWNERSHIP_MARKER_BYTES = 64 * 1024
 _MAX_SOURCE_BYTES = 32 * 1024 * 1024
+_SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 _REPARSE_ATTRIBUTE = 0x400
+try:
+    _PROCESS_PYTHON_EXECUTABLE = Path(sys.executable).resolve(strict=True)
+except OSError:
+    _PROCESS_PYTHON_EXECUTABLE = Path(sys.executable)
 
 _REQUIRED_SOURCE_ROLES = frozenset(
     {
         "benchmark_replay_capture_runtime",
+        "captured_paper_pressure_probe",
+        "captured_paper_isolated_stage0",
         "app_migrations",
         "iqfeed_capture_bootstrap",
         "iqfeed_capture_bootstrap_preflight",
@@ -75,6 +113,8 @@ _REQUIRED_SOURCE_ROLES = frozenset(
         "iqfeed_depth_bridge",
         "iqfeed_trade_bridge",
         "live_replay_capture",
+        "first_dip_tape_policy",
+        "replay_errors",
         "replay_capture_contract",
         "replay_capture_runtime",
     }
@@ -119,6 +159,17 @@ class IqfeedCaptureBootstrapPreflight:
     startup_evidence_sha256: str
     resource_benchmark_path: Path
     resource_benchmark_sha256: str
+    benchmark_authority_manifest_path: Path
+    benchmark_authority_manifest_sha256: str
+    benchmark_runner_authority_path: Path
+    benchmark_runner_authority_sha256: str
+    benchmark_launch_receipt_path: Path
+    benchmark_launch_receipt_sha256: str
+    benchmark_execution_receipt_path: Path
+    benchmark_execution_receipt_sha256: str
+    benchmark_execution_claim_path: Path
+    benchmark_execution_claim_sha256: str
+    benchmark_authority_read_roots: tuple[Path, ...]
     resource_binding: Any
     capture_store_root: Path
     run_configuration: Mapping[str, Any]
@@ -150,7 +201,7 @@ class IqfeedCaptureBootstrapPreflight:
         )
         payload: dict[str, Any] = {
             "schema_version": (
-                "chili.iqfeed-capture-bootstrap-preflight-report.v2"
+                "chili.iqfeed-capture-bootstrap-preflight-report.v3"
             ),
             "verdict": "BOOTSTRAP_PREFLIGHT_VALID",
             "preflight_valid": True,
@@ -183,6 +234,29 @@ class IqfeedCaptureBootstrapPreflight:
                 "binding_sha256": self.resource_binding.binding_sha256,
                 "resource_hashes": self.resource_binding.hashes,
             },
+            "benchmark_authority_manifest": {
+                "path": str(self.benchmark_authority_manifest_path),
+                "sha256": self.benchmark_authority_manifest_sha256,
+            },
+            "benchmark_runner_authority": {
+                "path": str(self.benchmark_runner_authority_path),
+                "sha256": self.benchmark_runner_authority_sha256,
+            },
+            "benchmark_launch_receipt": {
+                "path": str(self.benchmark_launch_receipt_path),
+                "sha256": self.benchmark_launch_receipt_sha256,
+            },
+            "benchmark_execution_receipt": {
+                "path": str(self.benchmark_execution_receipt_path),
+                "sha256": self.benchmark_execution_receipt_sha256,
+            },
+            "benchmark_execution_claim": {
+                "path": str(self.benchmark_execution_claim_path),
+                "sha256": self.benchmark_execution_claim_sha256,
+            },
+            "benchmark_authority_read_roots": [
+                str(path) for path in self.benchmark_authority_read_roots
+            ],
             "capture_store_root": str(self.capture_store_root),
             "run_configuration": dict(self.run_configuration),
             "handoff_configuration": dict(self.handoff_configuration),
@@ -593,6 +667,1260 @@ def _read_hash_bound_source(
     return path, actual
 
 
+_BENCHMARK_AUTHORITY_SOURCE_ROLES: Mapping[str, str] = MappingProxyType(
+    {
+        "benchmark": "benchmark_replay_capture_runtime",
+        "contract": "replay_capture_contract",
+        "first_dip_tape_policy": "first_dip_tape_policy",
+        "pressure_probe": "captured_paper_pressure_probe",
+        "replay_errors": "replay_errors",
+        "runtime": "replay_capture_runtime",
+        "stage0": "captured_paper_isolated_stage0",
+    }
+)
+_BENCHMARK_LOADER_ROLE_ORDER = (
+    "benchmark",
+    "contract",
+    "runtime",
+    "pressure_probe",
+    "replay_errors",
+    "first_dip_tape_policy",
+    "stage0",
+)
+_BENCHMARK_AUTHORITY_PROGRAM_PATHS: Mapping[str, str] = MappingProxyType(
+    {
+        "builder": "scripts/build_captured_paper_benchmark_authority.py",
+        "runner": "scripts/run_captured_paper_benchmark_authority.py",
+    }
+)
+
+
+def _artifact_reference(
+    value: Any,
+    artifact: HashBoundJsonArtifact,
+    field: str,
+) -> Mapping[str, Any]:
+    reference = _expect_mapping(value, field)
+    _exact_keys(reference, {"path", "sha256"}, field)
+    if reference != {"path": str(artifact.path), "sha256": artifact.sha256}:
+        raise BootstrapPreflightError(
+            "BENCHMARK_AUTHORITY_BINDING_MISMATCH",
+            f"{field} differs from its externally pinned artifact",
+        )
+    return reference
+
+
+def _held_runner_loader(path: Path, expected_sha256: str) -> str:
+    raw = _read_bytes_stable(
+        path, field="benchmark_authority_program.runner", max_bytes=_MAX_SOURCE_BYTES
+    )
+    if hashlib.sha256(raw).hexdigest() != expected_sha256:
+        raise BootstrapPreflightError(
+            "BENCHMARK_AUTHORITY_PROGRAM_MISMATCH",
+            "benchmark runner source changed before loader extraction",
+        )
+    try:
+        tree = ast.parse(raw, filename=str(path))
+    except (SyntaxError, ValueError) as exc:
+        raise BootstrapPreflightError(
+            "BENCHMARK_RUNNER_AUTHORITY_INVALID",
+            "benchmark runner source cannot be parsed",
+        ) from exc
+    candidates: list[ast.AST] = []
+    for node in tree.body:
+        if isinstance(node, ast.Assign) and any(
+            isinstance(target, ast.Name)
+            and target.id == "_HELD_BENCHMARK_AUTHORITY_RUNNER_LOADER"
+            for target in node.targets
+        ):
+            candidates.append(node.value)
+    value = candidates[0] if len(candidates) == 1 else None
+    if not (
+        isinstance(value, ast.Call)
+        and not value.args
+        and not value.keywords
+        and isinstance(value.func, ast.Attribute)
+        and value.func.attr == "strip"
+        and isinstance(value.func.value, ast.Constant)
+        and isinstance(value.func.value.value, str)
+    ):
+        raise BootstrapPreflightError(
+            "BENCHMARK_RUNNER_AUTHORITY_INVALID",
+            "held benchmark runner loader is not one literal",
+        )
+    loader = value.func.value.value.strip()
+    if not loader or len(loader.encode("utf-8")) > _MAX_SOURCE_BYTES or "\x00" in loader:
+        raise BootstrapPreflightError(
+            "BENCHMARK_RUNNER_AUTHORITY_INVALID",
+            "held benchmark runner loader is malformed",
+        )
+    return loader
+
+
+def _held_benchmark_loader(path: Path, expected_sha256: str) -> str:
+    raw = _read_bytes_stable(
+        path, field="benchmark_source.pressure_probe", max_bytes=_MAX_SOURCE_BYTES
+    )
+    if hashlib.sha256(raw).hexdigest() != expected_sha256:
+        raise BootstrapPreflightError(
+            "BENCHMARK_AUTHORITY_SOURCE_MISMATCH",
+            "benchmark pressure-probe source changed before loader extraction",
+        )
+    try:
+        tree = ast.parse(raw, filename=str(path))
+    except (SyntaxError, ValueError) as exc:
+        raise BootstrapPreflightError(
+            "BENCHMARK_LAUNCH_RECEIPT_INVALID",
+            "benchmark pressure-probe source cannot be parsed",
+        ) from exc
+    candidates: list[ast.AST] = []
+    for node in tree.body:
+        if isinstance(node, ast.Assign) and any(
+            isinstance(target, ast.Name)
+            and target.id == "_HELD_BENCHMARK_SOURCE_LOADER"
+            for target in node.targets
+        ):
+            candidates.append(node.value)
+    value = candidates[0] if len(candidates) == 1 else None
+    if not (
+        isinstance(value, ast.Call)
+        and not value.args
+        and not value.keywords
+        and isinstance(value.func, ast.Attribute)
+        and value.func.attr == "strip"
+        and isinstance(value.func.value, ast.Constant)
+        and isinstance(value.func.value.value, str)
+    ):
+        raise BootstrapPreflightError(
+            "BENCHMARK_LAUNCH_RECEIPT_INVALID",
+            "held benchmark source loader is not one literal",
+        )
+    loader = value.func.value.value.strip()
+    if not loader or len(loader.encode("utf-8")) > _MAX_SOURCE_BYTES or "\x00" in loader:
+        raise BootstrapPreflightError(
+            "BENCHMARK_LAUNCH_RECEIPT_INVALID",
+            "held benchmark source loader is malformed",
+        )
+    return loader
+
+
+def _require_authority_layout(
+    artifact: HashBoundJsonArtifact,
+    *,
+    kind: str,
+    field: str,
+) -> None:
+    path = artifact.path
+    if not (
+        path.name == f"{artifact.sha256}.json"
+        and path.parent.name == artifact.sha256[:2]
+        and path.parent.parent.name == kind
+        and path.parent.parent.parent.name == "authority"
+    ):
+        raise BootstrapPreflightError(
+            "BENCHMARK_AUTHORITY_ADDRESS_INVALID",
+            f"{field} does not have its exact authority content address",
+        )
+
+
+def _load_verified_stage0(path: Path, expected_sha256: str) -> ModuleType:
+    raw = _read_bytes_stable(
+        path, field="verified captured PAPER stage0", max_bytes=_MAX_SOURCE_BYTES
+    )
+    if hashlib.sha256(raw).hexdigest() != expected_sha256:
+        raise BootstrapPreflightError(
+            "SOURCE_CHANGED_BEFORE_IMPORT",
+            "captured PAPER stage0 changed after source-roster verification",
+        )
+    name = "_chili_iqfeed_verified_stage0_" + expected_sha256[:16]
+    existing = sys.modules.get(name)
+    if existing is not None:
+        if getattr(existing, "_verified_source_sha256", None) != expected_sha256:
+            raise BootstrapPreflightError(
+                "VERIFIED_RUNTIME_CACHE_CONFLICT",
+                "verified stage0 cache has different source bytes",
+            )
+        return existing
+    module = ModuleType(name)
+    module.__file__ = str(path)
+    module.__package__ = None
+    module._verified_source_sha256 = expected_sha256  # type: ignore[attr-defined]
+    sys.modules[name] = module
+    try:
+        exec(compile(raw, str(path), "exec", dont_inherit=True), module.__dict__)
+    except BaseException as exc:
+        sys.modules.pop(name, None)
+        raise BootstrapPreflightError(
+            "VERIFIED_STAGE0_IMPORT_FAILED",
+            "verified captured PAPER stage0 could not be loaded",
+        ) from exc
+    return module
+
+
+def _stable_executable_hash(
+    path_raw: Any,
+    expected_raw: Any,
+    field: str,
+    *,
+    roots: Sequence[Path],
+    local_drive_check: Callable[[Path], bool],
+) -> Path:
+    expected = _require_sha256(expected_raw, f"{field}.sha256")
+    path = _validated_read_path(
+        path_raw,
+        field=field,
+        roots=roots,
+        local_drive_check=local_drive_check,
+    )
+    raw = _read_bytes_stable(path, field=field, max_bytes=_MAX_EXECUTABLE_BYTES)
+    if hashlib.sha256(raw).hexdigest() != expected:
+        raise BootstrapPreflightError(
+            "BENCHMARK_AUTHORITY_EXECUTABLE_INVALID",
+            f"{field} bytes differ from their authority pin",
+        )
+    return path
+
+
+def _minimal_git_environment(sandbox: Path) -> Mapping[str, str]:
+    allowed = {
+        "COMSPEC", "LANG", "LC_ALL", "NUMBER_OF_PROCESSORS", "OS",
+        "PATH", "PATHEXT", "PROCESSOR_ARCHITECTURE", "SYSTEMROOT",
+        "TEMP", "TMP", "WINDIR",
+    }
+    environment = {
+        key: value for key, value in os.environ.items() if key.upper() in allowed
+    }
+    hooks = sandbox / "empty-hooks"
+    hooks.mkdir(mode=0o700, exist_ok=False)
+    environment.update(
+        {
+            "GIT_CONFIG_GLOBAL": "NUL" if os.name == "nt" else "/dev/null",
+            "GIT_CONFIG_NOSYSTEM": "1",
+            "GIT_CONFIG_COUNT": "6",
+            "GIT_CONFIG_KEY_0": "core.fsmonitor",
+            "GIT_CONFIG_VALUE_0": "false",
+            "GIT_CONFIG_KEY_1": "core.hooksPath",
+            "GIT_CONFIG_VALUE_1": str(hooks),
+            "GIT_CONFIG_KEY_2": "credential.helper",
+            "GIT_CONFIG_VALUE_2": "",
+            "GIT_CONFIG_KEY_3": "core.untrackedCache",
+            "GIT_CONFIG_VALUE_3": "false",
+            "GIT_CONFIG_KEY_4": "safe.directory",
+            "GIT_CONFIG_VALUE_4": "*",
+            "GIT_CONFIG_KEY_5": "protocol.allow",
+            "GIT_CONFIG_VALUE_5": "never",
+            "GIT_DISCOVERY_ACROSS_FILESYSTEM": "0",
+            "GIT_NO_REPLACE_OBJECTS": "1",
+            "GIT_OPTIONAL_LOCKS": "0",
+            "GIT_TERMINAL_PROMPT": "0",
+            "HOME": str(sandbox),
+            "PYTHONDONTWRITEBYTECODE": "1",
+            "PYTHONNOUSERSITE": "1",
+        }
+    )
+    return MappingProxyType(environment)
+
+
+def _validate_retained_benchmark_output(
+    *,
+    output_root: Path,
+    output_volume_sha256: str,
+    resource_benchmark: HashBoundJsonArtifact,
+    read_roots: Sequence[Path],
+    local_drive_check: Callable[[Path], bool],
+) -> None:
+    """Bind the terminal report to its uniquely owned retained output."""
+
+    report = resource_benchmark.document
+    output = _expect_mapping(report.get("output"), "resource benchmark output")
+    expected_output_keys = {
+        "directory",
+        "report_artifact_layout",
+        "retained",
+        "safe_cleanup_verified",
+    }
+    if set(output) != expected_output_keys:
+        raise BootstrapPreflightError(
+            "BENCHMARK_REPORT_INVALID",
+            "benchmark output projection fields differ",
+        )
+    if not (
+        output.get("retained") is True
+        and output.get("safe_cleanup_verified") is False
+        and output.get("report_artifact_layout")
+        == "reports/<canonical-sha256>.json_when_retained"
+    ):
+        raise BootstrapPreflightError(
+            "BENCHMARK_REPORT_INVALID",
+            "benchmark report was not retained exactly",
+        )
+    directory_raw = output.get("directory")
+    directory = _lexical_absolute_local_path(
+        directory_raw,
+        field="benchmark owned directory",
+        local_drive_check=local_drive_check,
+    )
+    if not (
+        isinstance(directory_raw, str)
+        and directory_raw == str(directory)
+        and _inside_any(directory, read_roots, allow_equal=False)
+    ):
+        raise BootstrapPreflightError(
+            "BENCHMARK_REPORT_PATH_INVALID",
+            "owned report directory is not one canonical allowed path",
+        )
+    _check_existing_components(
+        directory,
+        require_leaf=True,
+        field="benchmark owned directory",
+    )
+    try:
+        directory_status = directory.lstat()
+    except OSError as exc:
+        raise BootstrapPreflightError(
+            "BENCHMARK_REPORT_PATH_INVALID",
+            "owned report directory is unavailable",
+        ) from exc
+    if (
+        not stat.S_ISDIR(directory_status.st_mode)
+        or directory.parent != output_root
+        or not directory.name.startswith("chili-replay-capture-benchmark-")
+    ):
+        raise BootstrapPreflightError(
+            "BENCHMARK_REPORT_PATH_INVALID",
+            "owned report directory escaped the benchmark output root",
+        )
+    suffix = directory.name.removeprefix("chili-replay-capture-benchmark-")
+    owner_token, separator, random_tail = suffix.partition("-")
+    if (
+        not separator
+        or re.fullmatch(r"[0-9a-f]{32}", owner_token) is None
+        or not random_tail
+    ):
+        raise BootstrapPreflightError(
+            "BENCHMARK_REPORT_PATH_INVALID",
+            "owned report directory token is invalid",
+        )
+
+    marker_path = _validated_read_path(
+        directory / ".chili-replay-capture-benchmark-owner.json",
+        field="benchmark ownership marker",
+        roots=(output_root,),
+        local_drive_check=local_drive_check,
+    )
+    marker_raw = _read_bytes_stable(
+        marker_path,
+        field="benchmark ownership marker",
+        max_bytes=_MAX_OWNERSHIP_MARKER_BYTES,
+    )
+    if not marker_raw.endswith(b"\n") or marker_raw.count(b"\n") != 1:
+        raise BootstrapPreflightError(
+            "BENCHMARK_OWNERSHIP_INVALID",
+            "benchmark ownership marker is not one canonical JSON line",
+        )
+    marker = _strict_json(marker_raw[:-1], "benchmark ownership marker")
+    if marker != {
+        "benchmark_schema_version": report.get("benchmark_schema_version"),
+        "directory": str(directory),
+        "output_root": str(output_root),
+        "owner_token": owner_token,
+    }:
+        raise BootstrapPreflightError(
+            "BENCHMARK_OWNERSHIP_INVALID",
+            "benchmark ownership marker binding differs",
+        )
+
+    expected_report_path = (
+        directory / "reports" / f"{resource_benchmark.sha256}.json"
+    )
+    if resource_benchmark.path != expected_report_path:
+        raise BootstrapPreflightError(
+            "BENCHMARK_REPORT_PATH_INVALID",
+            "terminal report is outside its exact retained report path",
+        )
+    try:
+        children = tuple(output_root.iterdir())
+    except OSError as exc:
+        raise BootstrapPreflightError(
+            "BENCHMARK_OUTPUT_INVENTORY_INVALID",
+            "benchmark output inventory is unavailable",
+        ) from exc
+    if children != (directory,):
+        raise BootstrapPreflightError(
+            "BENCHMARK_OUTPUT_INVENTORY_INVALID",
+            "benchmark output root contains objects outside its owned directory",
+        )
+
+    resolved_binding = _expect_mapping(
+        report.get("resolved_resource_binding"),
+        "resource benchmark resolved binding",
+    )
+    measurement = _expect_mapping(
+        resolved_binding.get("measurement"),
+        "resource benchmark binding measurement",
+    )
+    if (
+        _require_sha256(
+            output_volume_sha256,
+            "benchmark authority output volume SHA-256",
+        )
+        != _require_sha256(
+            measurement.get("write_latency_probe_volume_identity_sha256"),
+            "benchmark measurement volume identity SHA-256",
+        )
+    ):
+        raise BootstrapPreflightError(
+            "BENCHMARK_OUTPUT_VOLUME_MISMATCH",
+            "benchmark output and measured pressure-probe volumes differ",
+        )
+
+
+def _validate_benchmark_authority_chain(
+    *,
+    authority_manifest: HashBoundJsonArtifact,
+    runner_authority: HashBoundJsonArtifact,
+    launch_receipt: HashBoundJsonArtifact,
+    execution_receipt: HashBoundJsonArtifact,
+    execution_claim: HashBoundJsonArtifact,
+    resource_benchmark: HashBoundJsonArtifact,
+    source_paths: Mapping[str, Path],
+    source_hashes: Mapping[str, str],
+    read_roots: Sequence[Path],
+    local_drive_check: Callable[[Path], bool],
+) -> None:
+    """Require one terminal, externally pinned benchmark authority chain."""
+
+    for artifact, kind, field in (
+        (authority_manifest, "manifest", "benchmark authority manifest"),
+        (runner_authority, "runner-authority", "benchmark runner authority"),
+        (launch_receipt, "receipt", "benchmark launch receipt"),
+        (execution_receipt, "execution-receipt", "benchmark execution receipt"),
+    ):
+        _require_authority_layout(artifact, kind=kind, field=field)
+    authority_root = authority_manifest.path.parents[3]
+    if not (
+        runner_authority.path.parents[3] == authority_root
+        and launch_receipt.path.parents[3] == authority_root
+        and execution_receipt.path.parents[3] == authority_root
+        and execution_claim.path.parents[2] == authority_root
+    ):
+        raise BootstrapPreflightError(
+            "BENCHMARK_AUTHORITY_ROOT_MISMATCH",
+            "benchmark authority artifacts do not share one canonical root",
+        )
+    manifest = authority_manifest.document
+    _exact_keys(
+        manifest,
+        {
+            "account_scope",
+            "authority_mode",
+            "authority_programs",
+            "benchmark_arguments",
+            "candidate_root",
+            "execution_context",
+            "expected_benchmark_schema_version",
+            "expected_git_commit",
+            "git",
+            "held_loader",
+            "output",
+            "posture",
+            "python",
+            "python_dependency_root",
+            "schema_version",
+            "source_roster",
+            "source_roster_sha256",
+        },
+        "benchmark_authority_manifest",
+    )
+    if manifest.get("schema_version") != BENCHMARK_AUTHORITY_MANIFEST_SCHEMA_VERSION:
+        raise BootstrapPreflightError(
+            "BENCHMARK_AUTHORITY_SCHEMA_MISMATCH",
+            "benchmark authority manifest schema is unsupported",
+        )
+    if not source_paths or set(source_paths) != set(source_hashes):
+        raise BootstrapPreflightError(
+            "BENCHMARK_AUTHORITY_SOURCE_MISMATCH",
+            "benchmark authority source closure is incomplete",
+        )
+    repo = source_paths["benchmark_replay_capture_runtime"].parent.parent
+    if manifest.get("candidate_root") != str(repo):
+        raise BootstrapPreflightError(
+            "BENCHMARK_AUTHORITY_BINDING_MISMATCH",
+            "benchmark authority candidate root differs from the capture sources",
+        )
+    if not (
+        manifest.get("account_scope") == "alpaca:paper"
+        and manifest.get("authority_mode")
+        == "diagnostic_capture_benchmark_only"
+        and manifest.get("expected_benchmark_schema_version")
+        == BENCHMARK_SCHEMA_VERSION
+        and isinstance(manifest.get("expected_git_commit"), str)
+        and re.fullmatch(r"[0-9a-f]{40}", manifest["expected_git_commit"])
+    ):
+        raise BootstrapPreflightError(
+            "BENCHMARK_AUTHORITY_POSTURE_INVALID",
+            "benchmark authority is not diagnostic Alpaca PAPER authority",
+        )
+    expected_manifest_posture = {
+        "benchmark_execution_authorized": True,
+        "broker_contact_authorized": False,
+        "database_access_authorized": False,
+        "host_activation_authorized": False,
+        "live_cash_authorized": False,
+        "order_submission_authorized": False,
+        "provider_contact_authorized": False,
+    }
+    if manifest.get("posture") != expected_manifest_posture:
+        raise BootstrapPreflightError(
+            "BENCHMARK_AUTHORITY_POSTURE_INVALID",
+            "benchmark authority posture is not inert outside the benchmark",
+        )
+
+    expected_rows = [
+        {
+            "path": str(source_paths[source_role]),
+            "role": authority_role,
+            "sha256": source_hashes[source_role],
+        }
+        for authority_role, source_role in sorted(
+            _BENCHMARK_AUTHORITY_SOURCE_ROLES.items()
+        )
+    ]
+    if (
+        manifest.get("source_roster") != expected_rows
+        or manifest.get("source_roster_sha256") != _sha256_json(expected_rows)
+    ):
+        raise BootstrapPreflightError(
+            "BENCHMARK_AUTHORITY_SOURCE_MISMATCH",
+            "benchmark authority source roster differs from current capture bytes",
+        )
+
+    programs = _expect_mapping(
+        manifest.get("authority_programs"),
+        "benchmark_authority_manifest.authority_programs",
+    )
+    _exact_keys(programs, {"builder", "runner"}, "benchmark authority programs")
+    expected_program_hashes = {
+        "builder": BENCHMARK_AUTHORITY_BUILDER_SHA256,
+        "runner": BENCHMARK_AUTHORITY_RUNNER_SHA256,
+    }
+    program_paths: dict[str, Path] = {}
+    for role in ("builder", "runner"):
+        row = _expect_mapping(programs.get(role), f"benchmark authority {role}")
+        _exact_keys(row, {"path", "sha256"}, f"benchmark authority {role}")
+        expected_path = repo / _BENCHMARK_AUTHORITY_PROGRAM_PATHS[role]
+        path, digest = _read_hash_bound_source(
+            row.get("path"),
+            row.get("sha256"),
+            field=f"benchmark_authority_program.{role}",
+            roots=read_roots,
+            local_drive_check=local_drive_check,
+        )
+        if (
+            path != expected_path
+            or digest != expected_program_hashes[role]
+            or dict(row) != {"path": str(expected_path), "sha256": digest}
+        ):
+            raise BootstrapPreflightError(
+                "BENCHMARK_AUTHORITY_PROGRAM_MISMATCH",
+                f"benchmark authority {role} differs from frozen producer bytes",
+            )
+        program_paths[role] = path
+
+    python = _expect_mapping(manifest.get("python"), "benchmark authority python")
+    _exact_keys(
+        python,
+        {
+            "executable_path",
+            "executable_sha256",
+            "implementation",
+            "isolation_flags",
+            "version",
+        },
+        "benchmark authority python",
+    )
+    if not (
+        python.get("implementation") == "cpython"
+        and python.get("version") == [3, 11]
+        and python.get("isolation_flags") == ["-I", "-S", "-B"]
+        and Path(str(python.get("executable_path") or "")).is_absolute()
+    ):
+        raise BootstrapPreflightError(
+            "BENCHMARK_AUTHORITY_PYTHON_INVALID",
+            "benchmark authority Python identity is unsupported",
+        )
+    python_sha256 = _require_sha256(
+        python.get("executable_sha256"), "benchmark authority Python SHA-256"
+    )
+    python_path = _stable_executable_hash(
+        python.get("executable_path"), python_sha256, "benchmark authority Python",
+        roots=read_roots,
+        local_drive_check=local_drive_check,
+    )
+    if (
+        python_path.resolve(strict=True) != _PROCESS_PYTHON_EXECUTABLE
+        or sys.implementation.name != "cpython"
+        or sys.version_info[:2] != (3, 11)
+    ):
+        raise BootstrapPreflightError(
+            "BENCHMARK_AUTHORITY_PYTHON_INVALID",
+            "benchmark authority must bind the running CPython 3.11 executable",
+        )
+    dependency = _expect_mapping(
+        manifest.get("python_dependency_root"),
+        "benchmark authority dependency root",
+    )
+    _exact_keys(
+        dependency,
+        {
+            "identity",
+            "identity_sha256",
+            "path",
+            "required_distributions",
+            "tree_sha256",
+        },
+        "benchmark authority dependency root",
+    )
+    dependency_identity = _expect_mapping(
+        dependency.get("identity"), "dependency root identity"
+    )
+    if dependency.get("identity_sha256") != _sha256_json(dependency_identity):
+        raise BootstrapPreflightError(
+            "BENCHMARK_AUTHORITY_DEPENDENCY_INVALID",
+            "benchmark dependency-root identity digest differs",
+        )
+    dependency_path = _lexical_absolute_local_path(
+        dependency.get("path"),
+        field="benchmark authority dependency root",
+        local_drive_check=local_drive_check,
+    )
+    if not _inside_any(dependency_path, read_roots, allow_equal=True):
+        raise BootstrapPreflightError(
+            "PATH_OUTSIDE_ALLOWLIST",
+            "benchmark authority dependency root is outside every read root",
+        )
+    _check_existing_components(
+        dependency_path,
+        require_leaf=True,
+        field="benchmark authority dependency root",
+    )
+    stage0 = _load_verified_stage0(
+        source_paths["captured_paper_isolated_stage0"],
+        source_hashes["captured_paper_isolated_stage0"],
+    )
+    try:
+        dependency_tree = stage0._dependency_tree_inventory(dependency_path)
+        observed_dependency_identity = stage0._dependency_root_identity_from_inventory(
+            root=dependency_path,
+            executable=python_path,
+            python_executable_sha256=python_sha256,
+            tree=dependency_tree,
+        )
+    except BaseException as exc:
+        raise BootstrapPreflightError(
+            "BENCHMARK_AUTHORITY_DEPENDENCY_INVALID",
+            "sealed dependency-root identity could not be recomputed",
+        ) from exc
+    dependency_tree_sha256 = _require_sha256(
+        dependency.get("tree_sha256"), "dependency tree SHA-256"
+    )
+    if not (
+        dict(observed_dependency_identity) == dict(dependency_identity)
+        and dependency.get("identity_sha256")
+        == _sha256_json(dict(observed_dependency_identity))
+        and dependency_tree_sha256 == dependency_tree["tree_sha256"]
+        and dependency.get("path") == str(dependency_path)
+    ):
+        raise BootstrapPreflightError(
+            "BENCHMARK_AUTHORITY_DEPENDENCY_INVALID",
+            "sealed dependency-root bytes differ from the authority identity",
+        )
+    required_distributions = dependency.get("required_distributions")
+    if not isinstance(required_distributions, list) or len(required_distributions) != 2:
+        raise BootstrapPreflightError(
+            "BENCHMARK_AUTHORITY_DEPENDENCY_INVALID",
+            "benchmark dependency distribution roster is malformed",
+        )
+    observed_distributions: list[dict[str, str]] = []
+    for index, name in enumerate(("psutil", "zstandard")):
+        row = _expect_mapping(
+            required_distributions[index],
+            f"benchmark dependency distribution {name}",
+        )
+        _exact_keys(
+            row,
+            {"import_root", "metadata_path", "metadata_sha256", "name", "version"},
+            f"benchmark dependency distribution {name}",
+        )
+        relative_raw = row.get("metadata_path")
+        import_root_raw = row.get("import_root")
+        if not (
+            row.get("name") == name
+            and import_root_raw == name
+            and isinstance(relative_raw, str)
+            and relative_raw
+            and "\\" not in relative_raw
+            and not Path(relative_raw).is_absolute()
+            and ".." not in Path(relative_raw).parts
+            and Path(relative_raw).name == "METADATA"
+            and len(relative_raw.encode("utf-8")) <= 4096
+        ):
+            raise BootstrapPreflightError(
+                "BENCHMARK_AUTHORITY_DEPENDENCY_INVALID",
+                f"sealed dependency {name} distribution row is malformed",
+            )
+        relative = Path(relative_raw).as_posix()
+        metadata_path = dependency_path / Path(relative_raw)
+        if not _inside_any(metadata_path, (dependency_path,), allow_equal=False):
+            raise BootstrapPreflightError(
+                "BENCHMARK_AUTHORITY_DEPENDENCY_INVALID",
+                f"sealed dependency {name} metadata escaped its root",
+            )
+        inventory_row = dependency_tree["files"].get(relative)
+        metadata_raw = _read_bytes_stable(
+            metadata_path,
+            field=f"benchmark dependency {name} metadata",
+            max_bytes=1024 * 1024,
+        )
+        try:
+            metadata_text = metadata_raw.decode("utf-8")
+        except UnicodeDecodeError as exc:
+            raise BootstrapPreflightError(
+                "BENCHMARK_AUTHORITY_DEPENDENCY_INVALID",
+                f"sealed dependency {name} metadata is not UTF-8",
+            ) from exc
+        names = [
+            line[6:].strip()
+            for line in metadata_text.splitlines()
+            if line.startswith("Name: ")
+        ]
+        versions = [
+            line[9:].strip()
+            for line in metadata_text.splitlines()
+            if line.startswith("Version: ")
+        ]
+        import_root = dependency_path / str(import_root_raw)
+        metadata_sha = _require_sha256(
+            row.get("metadata_sha256"),
+            f"benchmark dependency {name} metadata SHA-256",
+        )
+        if not (
+            isinstance(inventory_row, Mapping)
+            and inventory_row.get("sha256")
+            == hashlib.sha256(metadata_raw).hexdigest()
+            and metadata_sha == inventory_row.get("sha256")
+            and names == [name]
+            and len(versions) == 1
+            and re.fullmatch(r"[0-9A-Za-z][0-9A-Za-z._+!-]*", versions[0])
+            and row.get("version") == versions[0]
+            and import_root.is_dir()
+        ):
+            raise BootstrapPreflightError(
+                "BENCHMARK_AUTHORITY_DEPENDENCY_INVALID",
+                f"sealed dependency {name} distribution differs",
+            )
+        observed_distributions.append(
+            {
+                "import_root": name,
+                "metadata_path": relative,
+                "metadata_sha256": inventory_row["sha256"],
+                "name": name,
+                "version": versions[0],
+            }
+        )
+    if required_distributions != observed_distributions:
+        raise BootstrapPreflightError(
+            "BENCHMARK_AUTHORITY_DEPENDENCY_INVALID",
+            "sealed dependency distribution roster differs",
+        )
+    git = _expect_mapping(manifest.get("git"), "benchmark authority git")
+    _exact_keys(git, {"executable_path", "executable_sha256"}, "benchmark authority git")
+    git_path = _stable_executable_hash(
+        git.get("executable_path"),
+        git.get("executable_sha256"),
+        "benchmark authority Git",
+        roots=read_roots,
+        local_drive_check=local_drive_check,
+    )
+    try:
+        with tempfile.TemporaryDirectory(prefix="chili-iqfeed-git-") as raw:
+            commit_result = subprocess.run(
+                [str(git_path), "-C", str(repo), "rev-parse", "--verify", "HEAD"],
+                check=False,
+                env=dict(_minimal_git_environment(Path(raw))),
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                timeout=10,
+                shell=False,
+            )
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise BootstrapPreflightError(
+            "BENCHMARK_AUTHORITY_GIT_INVALID",
+            "benchmark Git commit could not be independently resolved",
+        ) from exc
+    if not (
+        commit_result.returncode == 0
+        and commit_result.stderr == b""
+        and commit_result.stdout.strip()
+        == str(manifest.get("expected_git_commit") or "").encode("ascii")
+    ):
+        raise BootstrapPreflightError(
+            "BENCHMARK_AUTHORITY_GIT_INVALID",
+            "benchmark candidate commit differs from Git HEAD",
+        )
+    context = _expect_mapping(
+        manifest.get("execution_context"), "benchmark authority execution context"
+    )
+    _exact_keys(
+        context,
+        {"cwd", "environment", "environment_sha256", "shell", "stderr", "stdin", "stdout", "timeout_seconds"},
+        "benchmark authority execution context",
+    )
+    if not (
+        context.get("cwd") == str(repo)
+        and context.get("shell") is False
+        and context.get("stdin") == "devnull"
+        and context.get("stderr") == "bounded_binary_pipe_1mib"
+        and context.get("stdout") == "bounded_binary_pipe_64mib"
+        and context.get("environment_sha256")
+        == _sha256_json(_expect_mapping(context.get("environment"), "benchmark environment"))
+    ):
+        raise BootstrapPreflightError(
+            "BENCHMARK_AUTHORITY_CONTEXT_INVALID",
+            "benchmark authority execution context differs",
+        )
+    output = _expect_mapping(manifest.get("output"), "benchmark authority output")
+    _exact_keys(
+        output,
+        {"root", "root_identity", "storage_volume_identity", "storage_volume_identity_sha256"},
+        "benchmark authority output",
+    )
+    output_volume = _expect_mapping(
+        output.get("storage_volume_identity"), "benchmark output volume identity"
+    )
+    output_root = _lexical_absolute_local_path(
+        output.get("root"),
+        field="benchmark output root",
+        local_drive_check=local_drive_check,
+    )
+    if not _inside_any(output_root, read_roots, allow_equal=True):
+        raise BootstrapPreflightError(
+            "PATH_OUTSIDE_ALLOWLIST",
+            "benchmark output root is outside every read root",
+        )
+    try:
+        _check_existing_components(
+            output_root, require_leaf=True, field="benchmark output root"
+        )
+        output_status = os.stat(output_root, follow_symlinks=False)
+    except OSError as exc:
+        raise BootstrapPreflightError(
+            "BENCHMARK_AUTHORITY_OUTPUT_INVALID",
+            "benchmark output root identity is unavailable",
+        ) from exc
+    expected_output_identity = _expect_mapping(
+        output.get("root_identity"), "benchmark output root identity"
+    )
+    observed_output_volume = {
+        "normalized_anchor": os.path.normcase(
+            os.path.normpath(output_root.anchor or os.sep)
+        ),
+        "schema_version": "chili.capture-storage-volume-identity.v1",
+        "st_dev": int(output_status.st_dev),
+    }
+    if not (
+        output_root.is_absolute()
+        and stat.S_ISDIR(output_status.st_mode)
+        and {
+            key: expected_output_identity.get(key)
+            for key in ("st_dev", "st_ino", "st_mode")
+        }
+        == {
+            "st_dev": int(output_status.st_dev),
+            "st_ino": int(output_status.st_ino),
+            "st_mode": int(output_status.st_mode),
+        }
+        and dict(output_volume) == observed_output_volume
+        and output.get("storage_volume_identity_sha256")
+        == _sha256_json(observed_output_volume)
+    ):
+        raise BootstrapPreflightError(
+            "BENCHMARK_AUTHORITY_OUTPUT_INVALID",
+            "benchmark output volume identity differs",
+        )
+
+    runner = runner_authority.document
+    _exact_keys(
+        runner,
+        {
+            "account_scope",
+            "authority_mode",
+            "argv_is_shell_string",
+            "execution_context",
+            "git",
+            "launch_receipt",
+            "manifest",
+            "posture",
+            "python",
+            "runner_argv",
+            "runner_loader_sha256",
+            "schema_version",
+        },
+        "benchmark_runner_authority",
+    )
+    if runner.get("schema_version") != BENCHMARK_RUNNER_AUTHORITY_SCHEMA_VERSION:
+        raise BootstrapPreflightError(
+            "BENCHMARK_RUNNER_AUTHORITY_SCHEMA_MISMATCH",
+            "benchmark runner authority schema is unsupported",
+        )
+    _artifact_reference(
+        runner.get("manifest"), authority_manifest, "benchmark runner manifest"
+    )
+    launch_ref = _artifact_reference(
+        runner.get("launch_receipt"),
+        launch_receipt,
+        "benchmark runner launch receipt",
+    )
+    expected_prelaunch_posture = {
+        "benchmark_output_written": False,
+        "broker_contacted": False,
+        "cutover_performed": False,
+        "database_accessed": False,
+        "host_activation_performed": False,
+        "live_cash_authorized": False,
+        "orders_submitted": False,
+        "provider_contacted": False,
+        "task_scheduler_mutated": False,
+    }
+    if not (
+        runner.get("account_scope") == manifest.get("account_scope")
+        and runner.get("authority_mode") == manifest.get("authority_mode")
+        and runner.get("argv_is_shell_string") is False
+        and runner.get("execution_context") == context
+        and runner.get("git") == git
+        and runner.get("posture") == expected_prelaunch_posture
+        and runner.get("python")
+        == {
+            "executable_path": python["executable_path"],
+            "executable_sha256": python["executable_sha256"],
+        }
+    ):
+        raise BootstrapPreflightError(
+            "BENCHMARK_RUNNER_AUTHORITY_INVALID",
+            "benchmark runner authority bindings differ from the manifest",
+        )
+
+    launch = launch_receipt.document
+    _exact_keys(
+        launch,
+        {
+            "account_scope", "authority_programs", "argv_is_shell_string",
+            "authority_mode", "benchmark_argv", "benchmark_completed",
+            "benchmark_report", "candidate_root", "execution_context",
+            "expected_git_commit", "git", "held_loader_sha256", "invoked",
+            "manifest", "output", "posture", "python",
+            "python_dependency_root", "schema_version", "source_roster",
+            "source_roster_sha256",
+        },
+        "benchmark_launch_receipt",
+    )
+    if launch.get("schema_version") != BENCHMARK_LAUNCH_RECEIPT_SCHEMA_VERSION:
+        raise BootstrapPreflightError(
+            "BENCHMARK_LAUNCH_RECEIPT_SCHEMA_MISMATCH",
+            "benchmark launch receipt schema is unsupported",
+        )
+    _artifact_reference(
+        launch.get("manifest"), authority_manifest, "benchmark launch manifest"
+    )
+    launch_output = _expect_mapping(
+        launch.get("output"), "benchmark launch output"
+    )
+    _exact_keys(
+        launch_output,
+        {"root", "root_identity", "storage_volume_identity_sha256"},
+        "benchmark launch output",
+    )
+    launch_python = _expect_mapping(
+        launch.get("python"), "benchmark launch Python"
+    )
+    _exact_keys(
+        launch_python,
+        {"executable_path", "executable_sha256"},
+        "benchmark launch Python",
+    )
+    launch_dependency = _expect_mapping(
+        launch.get("python_dependency_root"),
+        "benchmark launch dependency root",
+    )
+    _exact_keys(
+        launch_dependency,
+        {"identity_sha256", "path", "tree_sha256"},
+        "benchmark launch dependency root",
+    )
+    if not (
+        launch.get("account_scope") == manifest.get("account_scope")
+        and launch.get("authority_mode") == manifest.get("authority_mode")
+        and launch.get("authority_programs") == programs
+        and launch.get("argv_is_shell_string") is False
+        and launch.get("benchmark_completed") is False
+        and launch.get("benchmark_report") is None
+        and launch.get("candidate_root") == manifest.get("candidate_root")
+        and launch.get("execution_context") == context
+        and launch.get("expected_git_commit") == manifest.get("expected_git_commit")
+        and launch.get("git") == git
+        and launch.get("invoked") is False
+        and launch.get("posture") == expected_prelaunch_posture
+        and launch_python
+        == {
+            "executable_path": python["executable_path"],
+            "executable_sha256": python["executable_sha256"],
+        }
+        and launch_dependency
+        == {
+            "identity_sha256": dependency["identity_sha256"],
+            "path": dependency["path"],
+            "tree_sha256": dependency["tree_sha256"],
+        }
+        and launch_output
+        == {
+            "root": output["root"],
+            "root_identity": output["root_identity"],
+            "storage_volume_identity_sha256": output[
+                "storage_volume_identity_sha256"
+            ],
+        }
+        and launch.get("source_roster") == expected_rows
+        and launch.get("source_roster_sha256")
+        == manifest.get("source_roster_sha256")
+    ):
+        raise BootstrapPreflightError(
+            "BENCHMARK_LAUNCH_RECEIPT_INVALID",
+            "benchmark launch receipt differs from the authority manifest",
+        )
+    benchmark_arguments = manifest.get("benchmark_arguments")
+    if not isinstance(benchmark_arguments, list) or not benchmark_arguments or any(
+        type(value) is not str for value in benchmark_arguments
+    ):
+        raise BootstrapPreflightError(
+            "BENCHMARK_LAUNCH_RECEIPT_INVALID",
+            "benchmark authority arguments are malformed",
+        )
+    benchmark_loader = _held_benchmark_loader(
+        source_paths["captured_paper_pressure_probe"],
+        source_hashes["captured_paper_pressure_probe"],
+    )
+    benchmark_loader_sha = hashlib.sha256(
+        benchmark_loader.encode("utf-8")
+    ).hexdigest()
+    if (
+        manifest.get("held_loader")
+        != {
+            "sha256": benchmark_loader_sha,
+            "source_role": "pressure_probe",
+            "variable": "_HELD_BENCHMARK_SOURCE_LOADER",
+        }
+        or launch.get("held_loader_sha256") != benchmark_loader_sha
+    ):
+        raise BootstrapPreflightError(
+            "BENCHMARK_LAUNCH_RECEIPT_INVALID",
+            "benchmark held-source loader differs from the pressure-probe source",
+        )
+    authority_rows = {row["role"]: row for row in expected_rows}
+    benchmark_bootstrap: list[str] = []
+    for role in _BENCHMARK_LOADER_ROLE_ORDER:
+        benchmark_bootstrap.extend(
+            (authority_rows[role]["path"], authority_rows[role]["sha256"])
+        )
+    benchmark_bootstrap.extend(
+        (
+            dependency["path"],
+            dependency["identity_sha256"],
+            str(authority_manifest.path),
+            authority_manifest.sha256,
+            python["executable_sha256"],
+        )
+    )
+    expected_benchmark_argv = [
+        python["executable_path"], "-I", "-S", "-B", "-c",
+        benchmark_loader, *benchmark_bootstrap, "--", *benchmark_arguments,
+    ]
+    if launch.get("benchmark_argv") != expected_benchmark_argv:
+        raise BootstrapPreflightError(
+            "BENCHMARK_LAUNCH_RECEIPT_INVALID",
+            "benchmark launch argv is not derived from the sealed source closure",
+        )
+    argv = runner.get("runner_argv")
+    if not isinstance(argv, list) or len(argv) != 16 or not all(
+        isinstance(value, str) for value in argv
+    ):
+        raise BootstrapPreflightError(
+            "BENCHMARK_RUNNER_AUTHORITY_INVALID",
+            "benchmark runner argv is malformed",
+        )
+    loader = _held_runner_loader(
+        program_paths["runner"], expected_program_hashes["runner"]
+    )
+    expected_argv = [
+        python["executable_path"], "-I", "-S", "-B", "-c", loader,
+        programs["builder"]["path"], programs["builder"]["sha256"],
+        programs["runner"]["path"], programs["runner"]["sha256"],
+        python["executable_sha256"], "--", "--receipt", launch_ref["path"],
+        "--receipt-sha256", launch_ref["sha256"],
+    ]
+    if (
+        argv != expected_argv
+        or runner.get("runner_loader_sha256")
+        != hashlib.sha256(loader.encode("utf-8")).hexdigest()
+    ):
+        raise BootstrapPreflightError(
+            "BENCHMARK_RUNNER_AUTHORITY_INVALID",
+            "benchmark runner argv or held-loader digest differs",
+        )
+
+    execution = execution_receipt.document
+    _exact_keys(
+        execution,
+        {
+            "account_scope", "authority_programs", "argv_is_shell_string",
+            "authority_mode", "benchmark", "benchmark_completed",
+            "completed_at_utc", "duration_seconds", "execution_claim",
+            "execution_context", "expected_git_commit", "git", "invoked",
+            "launch_receipt", "manifest", "posture", "schema_version",
+            "started_at_utc",
+        },
+        "benchmark_execution_receipt",
+    )
+    if execution.get("schema_version") != BENCHMARK_EXECUTION_RECEIPT_SCHEMA_VERSION:
+        raise BootstrapPreflightError(
+            "BENCHMARK_EXECUTION_RECEIPT_SCHEMA_MISMATCH",
+            "a terminal benchmark execution receipt v2 is required",
+        )
+    _artifact_reference(
+        execution.get("manifest"), authority_manifest, "benchmark execution manifest"
+    )
+    _artifact_reference(
+        execution.get("launch_receipt"),
+        launch_receipt,
+        "benchmark execution launch receipt",
+    )
+    _artifact_reference(
+        execution.get("execution_claim"),
+        execution_claim,
+        "benchmark execution claim",
+    )
+    claim = execution_claim.document
+    _exact_keys(
+        claim,
+        {"launch_receipt", "manifest", "schema_version", "started_at_utc"},
+        "benchmark_execution_claim",
+    )
+    if execution_claim.path.name != f"{launch_receipt.sha256}.json":
+        raise BootstrapPreflightError(
+            "BENCHMARK_EXECUTION_CLAIM_ADDRESS_INVALID",
+            "benchmark execution claim filename does not bind the launch digest",
+        )
+    if execution_claim.path.parent.name != "execution-claim" or (
+        execution_claim.path.parent.parent.name != "authority"
+    ):
+        raise BootstrapPreflightError(
+            "BENCHMARK_EXECUTION_CLAIM_ADDRESS_INVALID",
+            "benchmark execution claim is outside its exact authority directory",
+        )
+    _artifact_reference(
+        claim.get("launch_receipt"), launch_receipt, "execution claim launch receipt"
+    )
+    _artifact_reference(
+        claim.get("manifest"), authority_manifest, "execution claim manifest"
+    )
+    if claim.get("schema_version") != BENCHMARK_EXECUTION_CLAIM_SCHEMA_VERSION:
+        raise BootstrapPreflightError(
+            "BENCHMARK_EXECUTION_CLAIM_SCHEMA_MISMATCH",
+            "benchmark execution claim schema is unsupported",
+        )
+    benchmark = _expect_mapping(execution.get("benchmark"), "benchmark execution result")
+    _exact_keys(
+        benchmark,
+        {"acceptance", "exit_code", "report", "schema_version", "stderr_bytes", "stdout_sha256", "stdout_without_newline_sha256"},
+        "benchmark execution result",
+    )
+    _artifact_reference(
+        benchmark.get("report"), resource_benchmark, "benchmark execution report"
+    )
+    report = resource_benchmark.document
+    report_raw = _canonical_json_bytes(report)
+    expected_terminal_posture = {
+        **expected_prelaunch_posture,
+        "benchmark_output_written": True,
+    }
+    if not (
+        execution.get("account_scope") == manifest.get("account_scope")
+        and execution.get("authority_mode") == manifest.get("authority_mode")
+        and execution.get("authority_programs") == programs
+        and execution.get("argv_is_shell_string") is False
+        and execution.get("execution_context") == context
+        and execution.get("expected_git_commit") == manifest.get("expected_git_commit")
+        and execution.get("git") == git
+        and execution.get("invoked") is True
+        and execution.get("benchmark_completed") is True
+        and execution.get("posture") == expected_terminal_posture
+        and benchmark.get("acceptance") == {"accepted": True, "reasons": []}
+        and benchmark.get("exit_code") == 0
+        and benchmark.get("stderr_bytes") == 0
+        and benchmark.get("schema_version") == BENCHMARK_SCHEMA_VERSION
+        and benchmark.get("stdout_without_newline_sha256") == resource_benchmark.sha256
+        and benchmark.get("stdout_sha256")
+        == hashlib.sha256(report_raw + b"\n").hexdigest()
+    ):
+        raise BootstrapPreflightError(
+            "BENCHMARK_EXECUTION_NOT_TERMINAL",
+            "benchmark execution receipt is not a successful inert terminal run",
+        )
+    started = _parse_utc(execution.get("started_at_utc"), "benchmark execution start")
+    claim_started = _parse_utc(
+        claim.get("started_at_utc"), "benchmark execution claim start"
+    )
+    completed = _parse_utc(execution.get("completed_at_utc"), "benchmark execution completion")
+    duration = execution.get("duration_seconds")
+    if (
+        claim_started != started
+        or completed < started
+        or isinstance(duration, bool)
+        or not isinstance(duration, (int, float))
+        or not math.isfinite(float(duration))
+        or float(duration) < 0.0
+        or not math.isclose(
+            float(duration), (completed - started).total_seconds(), rel_tol=0.0, abs_tol=1e-9
+        )
+    ):
+        raise BootstrapPreflightError(
+            "BENCHMARK_EXECUTION_CLOCK_INVALID",
+            "benchmark terminal receipt clocks differ",
+        )
+    environment = _expect_mapping(report.get("environment"), "resource benchmark environment")
+    if not (
+        report.get("benchmark_schema_version") == BENCHMARK_SCHEMA_VERSION
+        and report.get("acceptance") == {"accepted": True, "reasons": []}
+        and environment.get("benchmark_authority_manifest_sha256")
+        == authority_manifest.sha256
+        and environment.get("dependency_root_identity_sha256")
+        == dependency.get("identity_sha256")
+        and environment.get("python_executable_sha256")
+        == python.get("executable_sha256")
+    ):
+        raise BootstrapPreflightError(
+            "BENCHMARK_REPORT_AUTHORITY_MISMATCH",
+            "benchmark report does not bind the terminal authority environment",
+        )
+    _validate_retained_benchmark_output(
+        output_root=output_root,
+        output_volume_sha256=str(output.get("storage_volume_identity_sha256") or ""),
+        resource_benchmark=resource_benchmark,
+        read_roots=read_roots,
+        local_drive_check=local_drive_check,
+    )
+
+
 def _host_fingerprint() -> str:
     material = {
         "logical_cpu_count": psutil.cpu_count(logical=True),
@@ -721,7 +2049,7 @@ def _validate_resource_report(
     benchmark_max_age_seconds: float,
     max_future_skew_seconds: float,
     host_fingerprint_provider: Callable[[], str],
-) -> tuple[Any, tuple[str, ...]]:
+) -> tuple[Any, tuple[str, ...], ModuleType]:
     required_top = {
         "acceptance",
         "artifact_freshness",
@@ -807,7 +2135,15 @@ def _validate_resource_report(
     )
     _exact_keys(
         source,
-        {"benchmark_script_sha256", "contract_sha256", "runtime_sha256"},
+        {
+            "benchmark_script_sha256",
+            "contract_sha256",
+            "first_dip_tape_policy_sha256",
+            "pressure_probe_sha256",
+            "replay_errors_sha256",
+            "runtime_sha256",
+            "stage0_sha256",
+        },
         "resource_benchmark.capture_runtime_source",
     )
     expected_source = {
@@ -815,7 +2151,15 @@ def _validate_resource_report(
             "benchmark_replay_capture_runtime"
         ],
         "contract_sha256": source_hashes["replay_capture_contract"],
+        "first_dip_tape_policy_sha256": source_hashes[
+            "first_dip_tape_policy"
+        ],
+        "pressure_probe_sha256": source_hashes[
+            "captured_paper_pressure_probe"
+        ],
+        "replay_errors_sha256": source_hashes["replay_errors"],
         "runtime_sha256": source_hashes["replay_capture_runtime"],
+        "stage0_sha256": source_hashes["captured_paper_isolated_stage0"],
     }
     if dict(source) != expected_source:
         raise BootstrapPreflightError(
@@ -824,9 +2168,147 @@ def _validate_resource_report(
         )
 
     environment = _expect_mapping(report.get("environment"), "resource_benchmark.environment")
+    _exact_keys(
+        environment,
+        {
+            "current_host_fingerprint_sha256",
+            "benchmark_authority_manifest_sha256",
+            "dependency_root_identity_sha256",
+            "host_fingerprint_matches",
+            "logical_cpu_count",
+            "measurement_host_fingerprint_sha256",
+            "platform",
+            "python",
+            "python_executable_sha256",
+            "resource_sampler_profile",
+        },
+        "resource_benchmark.environment",
+    )
+    _require_sha256(
+        environment.get("benchmark_authority_manifest_sha256"),
+        "resource_benchmark.environment.benchmark_authority_manifest_sha256",
+    )
+    _require_sha256(
+        environment.get("python_executable_sha256"),
+        "resource_benchmark.environment.python_executable_sha256",
+    )
+    _require_sha256(
+        environment.get("dependency_root_identity_sha256"),
+        "resource_benchmark.environment.dependency_root_identity_sha256",
+    )
+    if environment.get("resource_sampler_profile") != (
+        "chili.benchmark-stdlib-resource-sampler.v1"
+    ) or environment.get("python") != platform.python_version():
+        raise BootstrapPreflightError(
+            "BENCHMARK_RESOURCE_SAMPLER_INVALID",
+            "resource benchmark sampler profile is unsupported",
+        )
     measurement = _expect_mapping(
         report.get("resource_measurement"), "resource_benchmark.resource_measurement"
     )
+    durable = _expect_mapping(
+        measurement.get("durable_publication"),
+        "resource_benchmark.resource_measurement.durable_publication",
+    )
+    live_probe = _expect_mapping(
+        durable.get("live_pressure_probe"),
+        "resource_benchmark.resource_measurement.durable_publication.live_pressure_probe",
+    )
+    _exact_keys(
+        durable,
+        {
+            "all_verified",
+            "file_fsync",
+            "live_pressure_probe",
+            "parent_publication",
+            "sample_count",
+            "verified_count",
+        },
+        "resource_benchmark.resource_measurement.durable_publication",
+    )
+    _exact_keys(
+        live_probe,
+        {
+            "all_verified",
+            "bytes_per_sample",
+            "count",
+            "helper_sha256",
+            "max_ns",
+            "mean_ns",
+            "min_ns",
+            "p50_ns",
+            "p95_ns",
+            "p99_ns",
+            "probe_root_identity_sha256",
+            "probe_volume_identity_sha256",
+            "write_latency_profile",
+        },
+        "resource_benchmark.resource_measurement.durable_publication.live_pressure_probe",
+    )
+    try:
+        sample_count = durable.get("sample_count")
+        verified_count = durable.get("verified_count")
+        latency_values = tuple(
+            live_probe.get(name)
+            for name in (
+                "min_ns", "p50_ns", "mean_ns", "p95_ns", "p99_ns", "max_ns"
+            )
+        )
+        live_probe_p95_ms = float(live_probe.get("p95_ns")) / 1_000_000.0
+        measured_fsync_p95_ms = float(measurement.get("fsync_p95_milliseconds"))
+    except (TypeError, ValueError) as exc:
+        raise BootstrapPreflightError(
+            "BENCHMARK_PRESSURE_PROBE_INVALID",
+            "resource benchmark pressure-probe latency is invalid",
+        ) from exc
+    if not (
+        durable.get("all_verified") is True
+        and type(sample_count) is int
+        and sample_count >= 2
+        and type(verified_count) is int
+        and verified_count == sample_count
+        and live_probe.get("all_verified") is True
+        and type(live_probe.get("count")) is int
+        and live_probe["count"] == sample_count
+        and type(live_probe.get("bytes_per_sample")) is int
+        and live_probe["bytes_per_sample"] == 4096
+        and all(type(value) in (int, float) and not isinstance(value, bool) for value in latency_values)
+        and all(math.isfinite(float(value)) and float(value) > 0.0 for value in latency_values)
+        and float(latency_values[0])
+        <= float(latency_values[1])
+        <= float(latency_values[3])
+        <= float(latency_values[4])
+        <= float(latency_values[5])
+        and float(latency_values[0])
+        <= float(latency_values[2])
+        <= float(latency_values[5])
+        and type(live_probe.get("p95_ns")) is int
+        and live_probe.get("helper_sha256") == source["pressure_probe_sha256"]
+        and _SHA256_RE.fullmatch(
+            str(live_probe.get("probe_root_identity_sha256") or "")
+        )
+        is not None
+        and _SHA256_RE.fullmatch(
+            str(live_probe.get("probe_volume_identity_sha256") or "")
+        )
+        is not None
+        and live_probe.get("probe_volume_identity_sha256")
+        == measurement.get("write_latency_probe_volume_identity_sha256")
+        and live_probe.get("write_latency_profile")
+        == PRESSURE_WRITE_LATENCY_PROFILE
+        and math.isfinite(live_probe_p95_ms)
+        and live_probe_p95_ms > 0.0
+        and math.isclose(
+            measured_fsync_p95_ms,
+            live_probe_p95_ms,
+            rel_tol=0.0,
+            abs_tol=1e-12,
+        )
+    ):
+        raise BootstrapPreflightError(
+            "BENCHMARK_PRESSURE_PROBE_INVALID",
+            "resource benchmark pressure-probe evidence is not exact",
+        )
     measured_fingerprint = _require_sha256(
         measurement.get("host_fingerprint_sha256"),
         "resource_benchmark.resource_measurement.host_fingerprint_sha256",
@@ -873,6 +2355,16 @@ def _validate_resource_report(
         "resource_benchmark.resolved_resource_binding",
     )
     raw_measurement = _expect_mapping(raw_binding.get("measurement"), "resource measurement")
+    expected_measurement_projection = {
+        **dict(raw_measurement),
+        "durable_publication": dict(durable),
+        "measurement_sha256": raw_binding.get("measurement_sha256"),
+    }
+    if dict(measurement) != expected_measurement_projection:
+        raise BootstrapPreflightError(
+            "BENCHMARK_MEASUREMENT_MISMATCH",
+            "resource benchmark measurement projection differs from its binding",
+        )
     raw_policy = _expect_mapping(raw_binding.get("policy"), "resource policy")
     measurement_kwargs = dict(raw_measurement)
     measurement_kwargs["measured_at"] = _parse_utc(
@@ -912,7 +2404,24 @@ def _validate_resource_report(
             "RESOURCE_MEASUREMENT_MISMATCH",
             "benchmark measurement summary differs from its binding",
         )
-    return binding, tuple(reasons_raw)
+    return binding, tuple(reasons_raw), runtime
+
+
+def _assert_capture_store_volume_binding(
+    binding: Any,
+    runtime: ModuleType,
+    capture_store_root: Path,
+) -> None:
+    if (
+        binding.measurement.write_latency_probe_volume_identity_sha256
+        != runtime.capture_storage_volume_identity_sha256(
+            capture_store_root
+        )
+    ):
+        raise BootstrapPreflightError(
+            "CAPTURE_STORAGE_VOLUME_MISMATCH",
+            "resource benchmark and capture store use different storage volumes",
+        )
 
 
 def _validate_run_configuration(
@@ -1077,6 +2586,12 @@ def load_iqfeed_capture_bootstrap_preflight(
             "execution_boundary",
             "freshness_policy",
             "resource_benchmark",
+            "benchmark_authority_manifest",
+            "benchmark_runner_authority",
+            "benchmark_launch_receipt",
+            "benchmark_execution_receipt",
+            "benchmark_execution_claim",
+            "benchmark_authority_read_roots",
             "startup_evidence",
             "capture_store_root",
             "run_configuration",
@@ -1091,6 +2606,30 @@ def load_iqfeed_capture_bootstrap_preflight(
     if raw.get("capture_mode") != CAPTURE_MODE:
         raise BootstrapPreflightError(
             "CAPTURE_MODE_MISMATCH", "bootstrap preflight is diagnostic-only"
+        )
+    authority_roots_raw = raw.get("benchmark_authority_read_roots")
+    if not isinstance(authority_roots_raw, list) or not authority_roots_raw or any(
+        type(value) is not str for value in authority_roots_raw
+    ):
+        raise BootstrapPreflightError(
+            "INVALID_AUTHORITY_ROOTS",
+            "benchmark authority read-root roster is malformed",
+        )
+    authority_read_roots = _normalized_roots(
+        tuple(authority_roots_raw),
+        field="benchmark_authority_read_roots",
+        local_drive_check=local_drive_check,
+    )
+    if (
+        len(authority_read_roots) != len(authority_roots_raw)
+        or any(
+            not _inside_any(root, read_roots, allow_equal=True)
+            for root in authority_read_roots
+        )
+    ):
+        raise BootstrapPreflightError(
+            "INVALID_AUTHORITY_ROOTS",
+            "benchmark authority read roots escape the external allowlist",
         )
     boundary = _expect_mapping(raw.get("execution_boundary"), "execution_boundary")
     _exact_keys(
@@ -1330,6 +2869,82 @@ def load_iqfeed_capture_bootstrap_preflight(
             f"source roles differ; missing={sorted(_REQUIRED_SOURCE_ROLES-set(source_paths))}",
         )
 
+    authority_manifest_ref = _expect_mapping(
+        raw.get("benchmark_authority_manifest"), "benchmark_authority_manifest"
+    )
+    runner_authority_ref = _expect_mapping(
+        raw.get("benchmark_runner_authority"), "benchmark_runner_authority"
+    )
+    execution_receipt_ref = _expect_mapping(
+        raw.get("benchmark_execution_receipt"), "benchmark_execution_receipt"
+    )
+    for field, reference in (
+        ("benchmark_authority_manifest", authority_manifest_ref),
+        ("benchmark_runner_authority", runner_authority_ref),
+        (
+            "benchmark_launch_receipt",
+            _expect_mapping(
+                raw.get("benchmark_launch_receipt"),
+                "benchmark_launch_receipt",
+            ),
+        ),
+        ("benchmark_execution_receipt", execution_receipt_ref),
+        (
+            "benchmark_execution_claim",
+            _expect_mapping(
+                raw.get("benchmark_execution_claim"),
+                "benchmark_execution_claim",
+            ),
+        ),
+    ):
+        _exact_keys(reference, {"path", "sha256"}, field)
+    authority_manifest = _read_hash_bound_json(
+        authority_manifest_ref.get("path"),
+        authority_manifest_ref.get("sha256"),
+        field="benchmark_authority_manifest",
+        roots=read_roots,
+        max_bytes=_MAX_AUTHORITY_BYTES,
+        local_drive_check=local_drive_check,
+    )
+    runner_authority = _read_hash_bound_json(
+        runner_authority_ref.get("path"),
+        runner_authority_ref.get("sha256"),
+        field="benchmark_runner_authority",
+        roots=read_roots,
+        max_bytes=_MAX_AUTHORITY_BYTES,
+        local_drive_check=local_drive_check,
+    )
+    launch_receipt_ref = _expect_mapping(
+        raw.get("benchmark_launch_receipt"), "benchmark_launch_receipt"
+    )
+    launch_receipt = _read_hash_bound_json(
+        launch_receipt_ref.get("path"),
+        launch_receipt_ref.get("sha256"),
+        field="benchmark_launch_receipt",
+        roots=read_roots,
+        max_bytes=_MAX_AUTHORITY_BYTES,
+        local_drive_check=local_drive_check,
+    )
+    execution_receipt = _read_hash_bound_json(
+        execution_receipt_ref.get("path"),
+        execution_receipt_ref.get("sha256"),
+        field="benchmark_execution_receipt",
+        roots=read_roots,
+        max_bytes=_MAX_AUTHORITY_BYTES,
+        local_drive_check=local_drive_check,
+    )
+    execution_claim_ref = _expect_mapping(
+        raw.get("benchmark_execution_claim"), "benchmark_execution_claim"
+    )
+    execution_claim = _read_hash_bound_json(
+        execution_claim_ref.get("path"),
+        execution_claim_ref.get("sha256"),
+        field="benchmark_execution_claim",
+        roots=read_roots,
+        max_bytes=_MAX_AUTHORITY_BYTES,
+        local_drive_check=local_drive_check,
+        content_addressed_filename=False,
+    )
     resource_ref = _expect_mapping(raw.get("resource_benchmark"), "resource_benchmark")
     _exact_keys(resource_ref, {"path", "sha256", "binding_sha256"}, "resource_benchmark")
     resource = _read_hash_bound_json(
@@ -1340,7 +2955,19 @@ def load_iqfeed_capture_bootstrap_preflight(
         max_bytes=_MAX_BENCHMARK_BYTES,
         local_drive_check=local_drive_check,
     )
-    binding, authority_reasons = _validate_resource_report(
+    _validate_benchmark_authority_chain(
+        authority_manifest=authority_manifest,
+        runner_authority=runner_authority,
+        launch_receipt=launch_receipt,
+        execution_receipt=execution_receipt,
+        execution_claim=execution_claim,
+        resource_benchmark=resource,
+        source_paths=source_paths,
+        source_hashes=source_hashes,
+        read_roots=authority_read_roots,
+        local_drive_check=local_drive_check,
+    )
+    binding, authority_reasons, resource_runtime = _validate_resource_report(
         resource.document,
         source_paths=source_paths,
         source_hashes=source_hashes,
@@ -1364,6 +2991,11 @@ def load_iqfeed_capture_bootstrap_preflight(
         roots=write_roots,
         local_drive_check=local_drive_check,
     )
+    _assert_capture_store_volume_binding(
+        binding,
+        resource_runtime,
+        capture_store_root,
+    )
     startup_hashes = {
         "code_build_sha256": _sha256_json(startup_doc["code_build"]),
         "effective_config_sha256": _sha256_json(startup_doc["effective_config"]),
@@ -1384,6 +3016,17 @@ def load_iqfeed_capture_bootstrap_preflight(
         startup_evidence_sha256=startup.sha256,
         resource_benchmark_path=resource.path,
         resource_benchmark_sha256=resource.sha256,
+        benchmark_authority_manifest_path=authority_manifest.path,
+        benchmark_authority_manifest_sha256=authority_manifest.sha256,
+        benchmark_runner_authority_path=runner_authority.path,
+        benchmark_runner_authority_sha256=runner_authority.sha256,
+        benchmark_launch_receipt_path=launch_receipt.path,
+        benchmark_launch_receipt_sha256=launch_receipt.sha256,
+        benchmark_execution_receipt_path=execution_receipt.path,
+        benchmark_execution_receipt_sha256=execution_receipt.sha256,
+        benchmark_execution_claim_path=execution_claim.path,
+        benchmark_execution_claim_sha256=execution_claim.sha256,
+        benchmark_authority_read_roots=authority_read_roots,
         resource_binding=binding,
         capture_store_root=capture_store_root,
         run_configuration=run_configuration,
@@ -1422,7 +3065,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     except BootstrapPreflightError as exc:
         payload = {
             "schema_version": (
-                "chili.iqfeed-capture-bootstrap-preflight-report.v2"
+                "chili.iqfeed-capture-bootstrap-preflight-report.v3"
             ),
             "verdict": "BOOTSTRAP_PREFLIGHT_REJECTED",
             "preflight_valid": False,

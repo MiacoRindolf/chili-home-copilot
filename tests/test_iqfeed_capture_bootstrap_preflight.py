@@ -5,8 +5,10 @@ from datetime import datetime, timedelta, timezone
 import hashlib
 import json
 from pathlib import Path
+import shutil
 import sys
 import threading
+import time
 from types import SimpleNamespace
 from typing import Any, Callable
 import uuid
@@ -32,6 +34,12 @@ from app.services.trading.momentum_neural.replay_capture_runtime import (
     SharedCaptureStoreRuntime,
 )
 from scripts import iqfeed_capture_bootstrap as bootstrap
+from tests.test_build_iqfeed_capture_bootstrap_bundle import (
+    _benchmark_authority_prefix,
+    _benchmark_execution_receipt,
+    _publish_ca,
+    _publish_retained_benchmark_report,
+)
 from scripts import iqfeed_capture_bootstrap_preflight as preflight
 from scripts import iqfeed_capture_host as capture_host
 
@@ -42,6 +50,22 @@ REPO = Path(__file__).resolve().parents[1]
 CAPTURE_DIR = REPO / "app" / "services" / "trading" / "momentum_neural"
 HOST_FINGERPRINT = "a" * 64
 SETTINGS_PROJECTION_SHA256 = "9" * 64
+PYTHON_EXECUTABLE = Path(sys.executable).resolve()
+
+
+def _authority_read_roots(read_root: Path) -> tuple[Path, ...]:
+    git_raw = shutil.which("git")
+    assert git_raw is not None
+    return tuple(
+        dict.fromkeys(
+            (
+                read_root,
+                REPO,
+                PYTHON_EXECUTABLE.parent,
+                Path(git_raw).resolve().parent,
+            )
+        )
+    )
 
 
 def _sha(path: Path) -> str:
@@ -67,6 +91,12 @@ def _source_rows() -> tuple[list[dict[str, str]], dict[str, Path], dict[str, str
         "benchmark_replay_capture_runtime": (
             REPO / "scripts" / "benchmark_replay_capture_runtime.py"
         ),
+        "captured_paper_pressure_probe": (
+            REPO / "scripts" / "captured_paper_pressure_probe.py"
+        ),
+        "captured_paper_isolated_stage0": (
+            REPO / "scripts" / "captured_paper_isolated_stage0.py"
+        ),
         "iqfeed_capture_bootstrap": REPO / "scripts" / "iqfeed_capture_bootstrap.py",
         "iqfeed_capture_bootstrap_preflight": (
             REPO / "scripts" / "iqfeed_capture_bootstrap_preflight.py"
@@ -80,6 +110,8 @@ def _source_rows() -> tuple[list[dict[str, str]], dict[str, Path], dict[str, str
         "iqfeed_depth_bridge": REPO / "scripts" / "iqfeed_depth_bridge.py",
         "iqfeed_trade_bridge": REPO / "scripts" / "iqfeed_trade_bridge.py",
         "live_replay_capture": CAPTURE_DIR / "live_replay_capture.py",
+        "first_dip_tape_policy": CAPTURE_DIR / "first_dip_tape_policy.py",
+        "replay_errors": CAPTURE_DIR / "replay_errors.py",
         "replay_capture_contract": CAPTURE_DIR / "replay_capture_contract.py",
         "replay_capture_runtime": CAPTURE_DIR / "replay_capture_runtime.py",
     }
@@ -91,7 +123,12 @@ def _source_rows() -> tuple[list[dict[str, str]], dict[str, Path], dict[str, str
     return rows, paths, hashes
 
 
-def _binding(paths: dict[str, Path], hashes: dict[str, str]):
+def _binding(
+    paths: dict[str, Path],
+    hashes: dict[str, str],
+    *,
+    volume_identity_sha256: str,
+):
     contract, runtime = preflight._load_verified_capture_modules(
         paths["replay_capture_contract"],
         paths["replay_capture_runtime"],
@@ -109,6 +146,12 @@ def _binding(paths: dict[str, Path], hashes: dict[str, str]):
         fsync_p95_milliseconds=10.0,
         logical_cpu_count=32,
         host_fingerprint_sha256=HOST_FINGERPRINT,
+        write_latency_measurement_profile=(
+            runtime.CAPTURE_PRESSURE_WRITE_LATENCY_PROFILE
+        ),
+        write_latency_probe_volume_identity_sha256=(
+            volume_identity_sha256
+        ),
     )
     policy = runtime.CaptureBudgetPolicy(
         memory_reserve_bytes=4 * 1024**3,
@@ -175,7 +218,22 @@ def _make_bundle(
     read_root.mkdir(parents=True)
     write_root.mkdir(parents=True)
     source_rows, source_paths, source_hashes = _source_rows()
-    binding, resolved_binding = _binding(source_paths, source_hashes)
+    authority_refs, authority_manifest = _benchmark_authority_prefix(
+        read_root, source_hashes
+    )
+    volume_identity_sha256 = (
+        preflight._load_verified_capture_modules(
+            source_paths["replay_capture_contract"],
+            source_paths["replay_capture_runtime"],
+            contract_sha256=source_hashes["replay_capture_contract"],
+            runtime_sha256=source_hashes["replay_capture_runtime"],
+        )[1].capture_storage_volume_identity_sha256(write_root)
+    )
+    binding, resolved_binding = _binding(
+        source_paths,
+        source_hashes,
+        volume_identity_sha256=volume_identity_sha256,
+    )
     resource: dict[str, Any] = {
         "acceptance": {"accepted": True, "reasons": []},
         "artifact_freshness": {
@@ -202,17 +260,38 @@ def _make_bundle(
                 "benchmark_replay_capture_runtime"
             ],
             "contract_sha256": source_hashes["replay_capture_contract"],
+            "first_dip_tape_policy_sha256": source_hashes[
+                "first_dip_tape_policy"
+            ],
+            "pressure_probe_sha256": source_hashes[
+                "captured_paper_pressure_probe"
+            ],
+            "replay_errors_sha256": source_hashes["replay_errors"],
             "runtime_sha256": source_hashes["replay_capture_runtime"],
+            "stage0_sha256": source_hashes[
+                "captured_paper_isolated_stage0"
+            ],
         },
         "enqueue": {},
         "environment": {
+            "benchmark_authority_manifest_sha256": authority_refs[
+                "benchmark_authority_manifest"
+            ]["sha256"],
             "current_host_fingerprint_sha256": HOST_FINGERPRINT,
+            "dependency_root_identity_sha256": authority_manifest[
+                "python_dependency_root"
+            ]["identity_sha256"],
             "host_fingerprint_matches": True,
             "logical_cpu_count": 32,
             "measurement_host_fingerprint_sha256": HOST_FINGERPRINT,
             "platform": "test",
-            "psutil_version": "test",
-            "python": "test",
+            "python": preflight.platform.python_version(),
+            "python_executable_sha256": authority_manifest["python"][
+                "executable_sha256"
+            ],
+            "resource_sampler_profile": (
+                "chili.benchmark-stdlib-resource-sampler.v1"
+            ),
         },
         "generated_at": _iso(NOW - timedelta(seconds=5)),
         "measurement_window": {},
@@ -222,7 +301,32 @@ def _make_bundle(
         "resolved_resource_binding": resolved_binding,
         "resource_measurement": {
             **resolved_binding["measurement"],
-            "durable_publication": {},
+            "durable_publication": {
+                "all_verified": True,
+                "file_fsync": {},
+                "live_pressure_probe": {
+                    "all_verified": True,
+                    "bytes_per_sample": 4096,
+                    "count": 8,
+                    "helper_sha256": source_hashes[
+                        "captured_paper_pressure_probe"
+                    ],
+                    "max_ns": 10_000_000,
+                    "mean_ns": 10_000_000.0,
+                    "min_ns": 10_000_000,
+                    "p50_ns": 10_000_000,
+                    "p95_ns": 10_000_000,
+                    "p99_ns": 10_000_000,
+                    "probe_root_identity_sha256": "a" * 64,
+                    "probe_volume_identity_sha256": volume_identity_sha256,
+                    "write_latency_profile": (
+                        preflight.PRESSURE_WRITE_LATENCY_PROFILE
+                    ),
+                },
+                "parent_publication": {},
+                "sample_count": 8,
+                "verified_count": 8,
+            },
             "measurement_sha256": binding.measurement.measurement_sha256,
         },
         "shared_store_validation": {},
@@ -232,7 +336,14 @@ def _make_bundle(
     }
     if mutate_resource is not None:
         mutate_resource(resource)
-    resource_path, resource_sha = _publish(read_root / "resources", resource)
+    resource_path, resource_sha = _publish_retained_benchmark_report(
+        authority_manifest,
+        resource,
+    )
+    resource_ref = {"path": str(resource_path), "sha256": resource_sha}
+    execution_refs = _benchmark_execution_receipt(
+        read_root, authority_refs, authority_manifest, resource_ref
+    )
 
     bridge_configuration = {
         "iqfeed_l1": dict(
@@ -333,6 +444,24 @@ def _make_bundle(
             "sha256": resource_sha,
             "binding_sha256": binding.binding_sha256,
         },
+        "benchmark_authority_manifest": authority_refs[
+            "benchmark_authority_manifest"
+        ],
+        "benchmark_runner_authority": authority_refs[
+            "benchmark_runner_authority"
+        ],
+        "benchmark_launch_receipt": authority_refs[
+            "benchmark_launch_receipt"
+        ],
+        "benchmark_execution_receipt": execution_refs[
+            "benchmark_execution_receipt"
+        ],
+        "benchmark_execution_claim": execution_refs[
+            "benchmark_execution_claim"
+        ],
+        "benchmark_authority_read_roots": [
+            str(path) for path in _authority_read_roots(read_root)
+        ],
         "startup_evidence": {"path": str(startup_path), "sha256": startup_sha},
         "capture_store_root": str(write_root / "capture-v4"),
         "run_configuration": {
@@ -380,11 +509,136 @@ def _load(bundle: _Bundle):
     return preflight.load_iqfeed_capture_bootstrap_preflight(
         bundle.manifest_path,
         expected_manifest_sha256=bundle.manifest_sha256,
-        allowed_read_roots=(bundle.read_root, REPO),
+        allowed_read_roots=_authority_read_roots(bundle.read_root),
         allowed_write_roots=(bundle.write_root,),
         wall_clock=lambda: NOW,
         host_fingerprint_provider=lambda: HOST_FINGERPRINT,
         local_drive_check=lambda _path: True,
+    )
+
+
+def _resign_authority(
+    bundle: _Bundle,
+    field: str,
+    mutate: Callable[[dict[str, Any]], None],
+) -> None:
+    reference = bundle.manifest[field]
+    document = json.loads(Path(reference["path"]).read_text(encoding="utf-8"))
+    mutate(document)
+    kind = {
+        "benchmark_authority_manifest": "manifest",
+        "benchmark_runner_authority": "runner-authority",
+        "benchmark_execution_receipt": "execution-receipt",
+    }[field]
+    path, digest = _publish_ca(
+        bundle.read_root / "authority" / kind, document
+    )
+    bundle.manifest[field] = {"path": str(path), "sha256": digest}
+    bundle.manifest_path, bundle.manifest_sha256 = _publish(
+        bundle.read_root / "manifests", bundle.manifest
+    )
+
+
+def _document(reference: dict[str, str]) -> dict[str, Any]:
+    return json.loads(Path(reference["path"]).read_text(encoding="utf-8"))
+
+
+def _resign_resource_graph(
+    bundle: _Bundle,
+    resource: dict[str, Any],
+    *,
+    directory: Path,
+) -> None:
+    resource_path, resource_sha = _publish(directory, resource)
+    resource_ref = {"path": str(resource_path), "sha256": resource_sha}
+    execution = _document(bundle.manifest["benchmark_execution_receipt"])
+    execution["benchmark"]["report"] = resource_ref
+    resource_raw = preflight._canonical_json_bytes(resource)
+    execution["benchmark"]["stdout_sha256"] = hashlib.sha256(
+        resource_raw + b"\n"
+    ).hexdigest()
+    execution["benchmark"]["stdout_without_newline_sha256"] = resource_sha
+    execution_path, execution_sha = _publish_ca(
+        bundle.read_root / "authority" / "execution-receipt",
+        execution,
+    )
+    binding_sha = bundle.manifest["resource_benchmark"]["binding_sha256"]
+    bundle.resource = resource
+    bundle.manifest["resource_benchmark"] = {
+        **resource_ref,
+        "binding_sha256": binding_sha,
+    }
+    bundle.manifest["benchmark_execution_receipt"] = {
+        "path": str(execution_path),
+        "sha256": execution_sha,
+    }
+    bundle.manifest_path, bundle.manifest_sha256 = _publish(
+        bundle.read_root / "manifests",
+        bundle.manifest,
+    )
+
+
+def _publish_claim(
+    bundle: _Bundle,
+    claim: dict[str, Any],
+    launch_ref: dict[str, str],
+) -> dict[str, str]:
+    raw = preflight._canonical_json_bytes(claim)
+    digest = hashlib.sha256(raw).hexdigest()
+    path = (
+        bundle.read_root
+        / "authority"
+        / "execution-claim"
+        / f"{launch_ref['sha256']}.json"
+    )
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(raw)
+    return {"path": str(path), "sha256": digest}
+
+
+def _resign_terminal_graph_for_launch(
+    bundle: _Bundle,
+    launch: dict[str, Any],
+) -> None:
+    launch_path, launch_sha = _publish_ca(
+        bundle.read_root / "authority" / "receipt", launch
+    )
+    launch_ref = {"path": str(launch_path), "sha256": launch_sha}
+
+    runner = _document(bundle.manifest["benchmark_runner_authority"])
+    runner["launch_receipt"] = launch_ref
+    runner["runner_argv"][-3] = launch_ref["path"]
+    runner["runner_argv"][-1] = launch_ref["sha256"]
+    runner_path, runner_sha = _publish_ca(
+        bundle.read_root / "authority" / "runner-authority", runner
+    )
+
+    claim = _document(bundle.manifest["benchmark_execution_claim"])
+    claim["launch_receipt"] = launch_ref
+    claim_ref = _publish_claim(bundle, claim, launch_ref)
+
+    execution = _document(bundle.manifest["benchmark_execution_receipt"])
+    execution["launch_receipt"] = launch_ref
+    execution["execution_claim"] = claim_ref
+    execution_path, execution_sha = _publish_ca(
+        bundle.read_root / "authority" / "execution-receipt", execution
+    )
+    bundle.manifest.update(
+        {
+            "benchmark_runner_authority": {
+                "path": str(runner_path),
+                "sha256": runner_sha,
+            },
+            "benchmark_launch_receipt": launch_ref,
+            "benchmark_execution_claim": claim_ref,
+            "benchmark_execution_receipt": {
+                "path": str(execution_path),
+                "sha256": execution_sha,
+            },
+        }
+    )
+    bundle.manifest_path, bundle.manifest_sha256 = _publish(
+        bundle.read_root / "manifests", bundle.manifest
     )
 
 
@@ -397,11 +651,13 @@ def _pressure_sample(
 ) -> CapturePressureSample:
     return CapturePressureSample(
         observed_at=observed_at,
+        completed_monotonic=time.monotonic(),
         resource_binding_sha256=bundle.binding.binding_sha256,
         cpu_percent=cpu_percent,
         available_memory_bytes=16 * 1024**3,
         disk_free_bytes=300 * 1024**3,
         write_latency_milliseconds=write_latency_milliseconds,
+        write_latency_measurement_profile="chili.capture-pressure.durable-write-fsync-helper-process.v1",
     )
 
 
@@ -985,7 +1241,7 @@ def test_unified_host_launch_validation_binds_exact_launcher_and_python(
         python_executable=python_fixture,
         manifest_path=bundle.manifest_path,
         manifest_sha256=bundle.manifest_sha256,
-        allowed_read_roots=(bundle.read_root, REPO),
+        allowed_read_roots=_authority_read_roots(bundle.read_root),
         allowed_write_roots=(bundle.write_root,),
         wall_clock=lambda: NOW,
         host_fingerprint_provider=lambda: HOST_FINGERPRINT,
@@ -1023,7 +1279,7 @@ def test_unified_host_launch_validation_rejects_reparse_python(
             python_executable=python_link,
             manifest_path=bundle.manifest_path,
             manifest_sha256=bundle.manifest_sha256,
-            allowed_read_roots=(bundle.read_root, REPO),
+            allowed_read_roots=_authority_read_roots(bundle.read_root),
             allowed_write_roots=(bundle.write_root,),
             wall_clock=lambda: NOW,
             host_fingerprint_provider=lambda: HOST_FINGERPRINT,
@@ -1041,7 +1297,7 @@ def test_unified_host_launch_validation_rejects_launcher_hash_forgery(tmp_path):
             python_executable=sys.executable,
             manifest_path=bundle.manifest_path,
             manifest_sha256=bundle.manifest_sha256,
-            allowed_read_roots=(bundle.read_root, REPO),
+            allowed_read_roots=_authority_read_roots(bundle.read_root),
             allowed_write_roots=(bundle.write_root,),
             wall_clock=lambda: NOW,
             host_fingerprint_provider=lambda: HOST_FINGERPRINT,
@@ -1812,7 +2068,7 @@ def test_manifest_hash_is_an_external_mandatory_pin(tmp_path):
         preflight.load_iqfeed_capture_bootstrap_preflight(
             bundle.manifest_path,
             expected_manifest_sha256="f" * 64,
-            allowed_read_roots=(bundle.read_root, REPO),
+            allowed_read_roots=_authority_read_roots(bundle.read_root),
             allowed_write_roots=(bundle.write_root,),
             wall_clock=lambda: NOW,
             host_fingerprint_provider=lambda: HOST_FINGERPRINT,
@@ -1900,6 +2156,308 @@ def test_benchmark_must_bind_the_current_capture_sources(tmp_path):
     with pytest.raises(preflight.BootstrapPreflightError) as caught:
         _load(bundle)
     assert caught.value.code == "BENCHMARK_SOURCE_MISMATCH"
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    (
+        ("min_ns", "not-a-number"),
+        ("max_ns", -1),
+        ("bytes_per_sample", 4096.0),
+        ("count", 999),
+    ),
+)
+def test_benchmark_rejects_malformed_live_pressure_probe_summary(
+    tmp_path,
+    field,
+    value,
+):
+    bundle = _make_bundle(
+        tmp_path,
+        mutate_resource=lambda row: row["resource_measurement"][
+            "durable_publication"
+        ]["live_pressure_probe"].__setitem__(field, value),
+    )
+    with pytest.raises(preflight.BootstrapPreflightError) as caught:
+        _load(bundle)
+    assert caught.value.code == "BENCHMARK_PRESSURE_PROBE_INVALID"
+
+
+def test_benchmark_rejects_probe_volume_different_from_measurement(tmp_path):
+    bundle = _make_bundle(
+        tmp_path,
+        mutate_resource=lambda row: row["resource_measurement"][
+            "durable_publication"
+        ]["live_pressure_probe"].__setitem__(
+            "probe_volume_identity_sha256", "b" * 64
+        ),
+    )
+    with pytest.raises(preflight.BootstrapPreflightError) as caught:
+        _load(bundle)
+    assert caught.value.code == "BENCHMARK_PRESSURE_PROBE_INVALID"
+
+
+def test_capture_store_must_use_benchmark_storage_volume(tmp_path):
+    binding = SimpleNamespace(
+        measurement=SimpleNamespace(
+            write_latency_probe_volume_identity_sha256="a" * 64
+        )
+    )
+    runtime = SimpleNamespace(
+        capture_storage_volume_identity_sha256=lambda _path: "b" * 64
+    )
+    with pytest.raises(preflight.BootstrapPreflightError) as caught:
+        preflight._assert_capture_store_volume_binding(
+            binding,
+            runtime,
+            tmp_path,
+        )
+    assert caught.value.code == "CAPTURE_STORAGE_VOLUME_MISMATCH"
+
+
+def test_benchmark_accepts_mean_below_median_when_quantiles_are_ordered(
+    tmp_path,
+):
+    def mutate(row):
+        probe = row["resource_measurement"]["durable_publication"][
+            "live_pressure_probe"
+        ]
+        probe.update(
+            {
+                "min_ns": 1,
+                "p50_ns": probe["p95_ns"],
+                "mean_ns": float(probe["p95_ns"]) * 0.875,
+            }
+        )
+
+    bundle = _make_bundle(tmp_path, mutate_resource=mutate)
+    assert _load(bundle).resource_binding == bundle.binding
+
+
+def test_benchmark_rejects_legacy_pressure_schema(tmp_path):
+    bundle = _make_bundle(
+        tmp_path,
+        mutate_resource=lambda row: row.__setitem__(
+            "benchmark_schema_version",
+            "chili.replay-capture-benchmark.v5",
+        ),
+    )
+    with pytest.raises(preflight.BootstrapPreflightError) as caught:
+        _load(bundle)
+    assert caught.value.code == "BENCHMARK_REPORT_AUTHORITY_MISMATCH"
+
+
+def test_terminal_benchmark_authority_fields_are_mandatory(tmp_path):
+    bundle = _make_bundle(
+        tmp_path,
+        mutate_manifest=lambda row: row.pop("benchmark_runner_authority"),
+    )
+    with pytest.raises(preflight.BootstrapPreflightError) as caught:
+        _load(bundle)
+    assert caught.value.code == "SCHEMA_MISMATCH"
+
+
+def test_runner_authority_argv_is_rederived_from_frozen_loader(tmp_path):
+    bundle = _make_bundle(tmp_path)
+    _resign_authority(
+        bundle,
+        "benchmark_runner_authority",
+        lambda row: row["runner_argv"].__setitem__(5, "pass"),
+    )
+    with pytest.raises(preflight.BootstrapPreflightError) as caught:
+        _load(bundle)
+    assert caught.value.code == "BENCHMARK_RUNNER_AUTHORITY_INVALID"
+
+
+def test_terminal_receipt_report_must_equal_external_resource_report(tmp_path):
+    bundle = _make_bundle(tmp_path)
+    _resign_authority(
+        bundle,
+        "benchmark_execution_receipt",
+        lambda row: row["benchmark"].__setitem__(
+            "report", dict(bundle.manifest["benchmark_authority_manifest"])
+        ),
+    )
+    with pytest.raises(preflight.BootstrapPreflightError) as caught:
+        _load(bundle)
+    assert caught.value.code == "BENCHMARK_AUTHORITY_BINDING_MISMATCH"
+
+
+def test_runner_and_terminal_must_bind_the_same_launch_receipt(tmp_path):
+    bundle = _make_bundle(tmp_path)
+
+    def mutate(row):
+        row["launch_receipt"]["sha256"] = "b" * 64
+        row["runner_argv"][-1] = "b" * 64
+
+    _resign_authority(bundle, "benchmark_runner_authority", mutate)
+    with pytest.raises(preflight.BootstrapPreflightError) as caught:
+        _load(bundle)
+    assert caught.value.code == "BENCHMARK_AUTHORITY_BINDING_MISMATCH"
+
+
+def test_prelaunch_receipt_cannot_substitute_for_terminal_receipt(tmp_path):
+    bundle = _make_bundle(tmp_path)
+    _resign_authority(
+        bundle,
+        "benchmark_execution_receipt",
+        lambda row: row.__setitem__(
+            "schema_version",
+            "chili.captured-paper-benchmark-authority-receipt.v2",
+        ),
+    )
+    with pytest.raises(preflight.BootstrapPreflightError) as caught:
+        _load(bundle)
+    assert caught.value.code == "BENCHMARK_EXECUTION_RECEIPT_SCHEMA_MISMATCH"
+
+
+def test_runtime_rehashes_runner_authority_before_composition(tmp_path):
+    bundle = _make_bundle(tmp_path)
+    loaded = _load(bundle)
+    Path(loaded.benchmark_runner_authority_path).write_bytes(b"{}")
+    with pytest.raises(CaptureContractError, match="drifted after preflight"):
+        bootstrap.prepare_iqfeed_capture_ingress(
+            loaded,
+            pressure_sample=_pressure_sample(bundle, observed_at=NOW),
+            wall_clock=lambda: NOW,
+        )
+
+
+def test_benchmark_report_requires_exact_retained_output_projection(tmp_path):
+    bundle = _make_bundle(tmp_path)
+    resource = json.loads(json.dumps(bundle.resource))
+    resource["output"] = {}
+    _resign_resource_graph(
+        bundle,
+        resource,
+        directory=bundle.read_root / "resources",
+    )
+    with pytest.raises(preflight.BootstrapPreflightError) as caught:
+        _load(bundle)
+    assert caught.value.code == "BENCHMARK_REPORT_INVALID"
+
+
+def test_benchmark_report_artifact_must_be_under_manifest_output_root(tmp_path):
+    bundle = _make_bundle(tmp_path)
+    _resign_resource_graph(
+        bundle,
+        json.loads(json.dumps(bundle.resource)),
+        directory=bundle.read_root / "resources",
+    )
+    with pytest.raises(preflight.BootstrapPreflightError) as caught:
+        _load(bundle)
+    assert caught.value.code == "BENCHMARK_REPORT_PATH_INVALID"
+
+
+def test_runtime_revalidates_benchmark_ownership_marker_before_composition(
+    tmp_path,
+):
+    bundle = _make_bundle(tmp_path)
+    loaded = _load(bundle)
+    marker = (
+        Path(bundle.resource["output"]["directory"])
+        / ".chili-replay-capture-benchmark-owner.json"
+    )
+    marker.write_bytes(b"{}\n")
+    with pytest.raises(preflight.BootstrapPreflightError) as caught:
+        bootstrap.prepare_iqfeed_capture_ingress(
+            loaded,
+            pressure_sample=_pressure_sample(bundle, observed_at=NOW),
+            wall_clock=lambda: NOW,
+        )
+    assert caught.value.code == "BENCHMARK_OWNERSHIP_INVALID"
+
+
+def test_nonexistent_launch_receipt_is_never_accepted(tmp_path):
+    bundle = _make_bundle(tmp_path)
+    bundle.manifest["benchmark_launch_receipt"] = {
+        "path": str(bundle.read_root / "authority" / "receipt" / "missing.json"),
+        "sha256": "a" * 64,
+    }
+    bundle.manifest_path, bundle.manifest_sha256 = _publish(
+        bundle.read_root / "manifests", bundle.manifest
+    )
+    with pytest.raises(preflight.BootstrapPreflightError) as caught:
+        _load(bundle)
+    assert caught.value.code == "MISSING_PATH"
+
+
+def test_resigned_forged_launch_receipt_fails_closed(tmp_path):
+    bundle = _make_bundle(tmp_path)
+    launch = _document(bundle.manifest["benchmark_launch_receipt"])
+    launch["invoked"] = True
+    _resign_terminal_graph_for_launch(bundle, launch)
+    with pytest.raises(preflight.BootstrapPreflightError) as caught:
+        _load(bundle)
+    assert caught.value.code == "BENCHMARK_LAUNCH_RECEIPT_INVALID"
+
+
+def test_resigned_forged_execution_claim_clock_fails_closed(tmp_path):
+    bundle = _make_bundle(tmp_path)
+    claim = _document(bundle.manifest["benchmark_execution_claim"])
+    claim["started_at_utc"] = "2026-07-16T11:59:54Z"
+    claim_ref = _publish_claim(
+        bundle, claim, bundle.manifest["benchmark_launch_receipt"]
+    )
+    execution = _document(bundle.manifest["benchmark_execution_receipt"])
+    execution["execution_claim"] = claim_ref
+    execution_path, execution_sha = _publish_ca(
+        bundle.read_root / "authority" / "execution-receipt", execution
+    )
+    bundle.manifest["benchmark_execution_claim"] = claim_ref
+    bundle.manifest["benchmark_execution_receipt"] = {
+        "path": str(execution_path),
+        "sha256": execution_sha,
+    }
+    bundle.manifest_path, bundle.manifest_sha256 = _publish(
+        bundle.read_root / "manifests", bundle.manifest
+    )
+    with pytest.raises(preflight.BootstrapPreflightError) as caught:
+        _load(bundle)
+    assert caught.value.code == "BENCHMARK_EXECUTION_CLOCK_INVALID"
+
+
+def test_authority_artifacts_cannot_be_split_across_roots(tmp_path):
+    bundle = _make_bundle(tmp_path)
+    runner_ref = bundle.manifest["benchmark_runner_authority"]
+    raw = Path(runner_ref["path"]).read_bytes()
+    copied = (
+        bundle.read_root
+        / "split"
+        / "authority"
+        / "runner-authority"
+        / runner_ref["sha256"][:2]
+        / f"{runner_ref['sha256']}.json"
+    )
+    copied.parent.mkdir(parents=True)
+    copied.write_bytes(raw)
+    bundle.manifest["benchmark_runner_authority"] = {
+        "path": str(copied),
+        "sha256": runner_ref["sha256"],
+    }
+    bundle.manifest_path, bundle.manifest_sha256 = _publish(
+        bundle.read_root / "manifests", bundle.manifest
+    )
+    with pytest.raises(preflight.BootstrapPreflightError) as caught:
+        _load(bundle)
+    assert caught.value.code == "BENCHMARK_AUTHORITY_ROOT_MISMATCH"
+
+
+def test_dependency_tree_is_recomputed_from_exact_manifest_paths(tmp_path):
+    bundle = _make_bundle(tmp_path)
+    authority = _document(bundle.manifest["benchmark_authority_manifest"])
+    dependency = Path(authority["python_dependency_root"]["path"])
+    (dependency / "forged.py").write_text("FORGED = True\n", encoding="utf-8")
+    with pytest.raises(preflight.BootstrapPreflightError) as caught:
+        _load(bundle)
+    assert caught.value.code == "BENCHMARK_AUTHORITY_DEPENDENCY_INVALID"
+
+
+def test_hostile_git_environment_is_not_inherited(tmp_path, monkeypatch):
+    bundle = _make_bundle(tmp_path)
+    monkeypatch.setenv("GIT_DIR", str(tmp_path / "forged-git-dir"))
+    monkeypatch.setenv("GIT_CONFIG_GLOBAL", str(tmp_path / "hostile.gitconfig"))
+    assert _load(bundle).manifest_sha256 == bundle.manifest_sha256
 
 
 def test_forged_resolved_budget_is_recomputed_and_rejected(tmp_path):
@@ -2019,7 +2577,7 @@ def test_artifact_outside_external_read_allowlist_is_rejected(tmp_path):
             host_fingerprint_provider=lambda: HOST_FINGERPRINT,
             local_drive_check=lambda _path: True,
         )
-    assert caught.value.code == "PATH_OUTSIDE_ALLOWLIST"
+    assert caught.value.code == "INVALID_AUTHORITY_ROOTS"
 
 
 def test_reparse_startup_artifact_is_rejected(tmp_path):
@@ -2044,7 +2602,7 @@ def test_reparse_startup_artifact_is_rejected(tmp_path):
         preflight.load_iqfeed_capture_bootstrap_preflight(
             manifest_path,
             expected_manifest_sha256=manifest_sha,
-            allowed_read_roots=(bundle.read_root, REPO),
+            allowed_read_roots=_authority_read_roots(bundle.read_root),
             allowed_write_roots=(bundle.write_root,),
             wall_clock=lambda: NOW,
             host_fingerprint_provider=lambda: HOST_FINGERPRINT,

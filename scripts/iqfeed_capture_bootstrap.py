@@ -52,6 +52,7 @@ from app.services.trading.momentum_neural.replay_capture_contract import (
     CaptureProducerSpec,
     CaptureRunIdentity,
     CaptureStream,
+    canonical_json_bytes,
     sha256_json,
 )
 from app.services.trading.momentum_neural.replay_capture_runtime import (
@@ -64,15 +65,18 @@ from app.services.trading.momentum_neural.replay_capture_runtime import (
     SharedCaptureStoreRuntime,
 )
 from scripts.iqfeed_capture_bootstrap_preflight import (
+    HashBoundJsonArtifact,
     IQFEED_HANDOFF_BUDGET_SCHEMA_VERSION,
     IqfeedCaptureBootstrapPreflight,
+    _default_local_drive_check,
+    _validate_benchmark_authority_chain,
 )
 
 
 UTC = timezone.utc
 _MAX_REHASH_BYTES = 64 * 1024 * 1024
 _REPARSE_ATTRIBUTE = 0x400
-_COMPOSITION_SCHEMA_VERSION = "chili.iqfeed-capture-ingress-composition.v1"
+_COMPOSITION_SCHEMA_VERSION = "chili.iqfeed-capture-ingress-composition.v2"
 _GENERATION_ROSTER_SCHEMA_VERSION = (
     "chili.iqfeed-external-producer-generation-roster.v1"
 )
@@ -488,6 +492,8 @@ def _strict_json(raw: bytes, field: str) -> Mapping[str, Any]:
         raise CaptureContractError(f"{field} is not strict UTF-8 JSON") from exc
     if not isinstance(value, Mapping):
         raise CaptureContractError(f"{field} root is not an object")
+    if raw != canonical_json_bytes(value):
+        raise CaptureContractError(f"{field} bytes are not canonical JSON")
     return value
 
 
@@ -530,9 +536,64 @@ def _reverify_preflight(
         ),
         "bootstrap resource benchmark",
     )
+    authority_manifest = _strict_json(
+        _stable_read(
+            Path(preflight.benchmark_authority_manifest_path),
+            preflight.benchmark_authority_manifest_sha256,
+        ),
+        "bootstrap benchmark authority manifest",
+    )
+    runner_authority = _strict_json(
+        _stable_read(
+            Path(preflight.benchmark_runner_authority_path),
+            preflight.benchmark_runner_authority_sha256,
+        ),
+        "bootstrap benchmark runner authority",
+    )
+    launch_receipt = _strict_json(
+        _stable_read(
+            Path(preflight.benchmark_launch_receipt_path),
+            preflight.benchmark_launch_receipt_sha256,
+        ),
+        "bootstrap benchmark launch receipt",
+    )
+    execution_receipt = _strict_json(
+        _stable_read(
+            Path(preflight.benchmark_execution_receipt_path),
+            preflight.benchmark_execution_receipt_sha256,
+        ),
+        "bootstrap benchmark execution receipt",
+    )
+    execution_claim = _strict_json(
+        _stable_read(
+            Path(preflight.benchmark_execution_claim_path),
+            preflight.benchmark_execution_claim_sha256,
+        ),
+        "bootstrap benchmark execution claim",
+    )
 
     startup_ref = _mapping(manifest.get("startup_evidence"), "startup reference")
     resource_ref = _mapping(manifest.get("resource_benchmark"), "resource reference")
+    authority_manifest_ref = _mapping(
+        manifest.get("benchmark_authority_manifest"),
+        "benchmark authority manifest reference",
+    )
+    runner_authority_ref = _mapping(
+        manifest.get("benchmark_runner_authority"),
+        "benchmark runner authority reference",
+    )
+    launch_receipt_ref = _mapping(
+        manifest.get("benchmark_launch_receipt"),
+        "benchmark launch receipt reference",
+    )
+    execution_receipt_ref = _mapping(
+        manifest.get("benchmark_execution_receipt"),
+        "benchmark execution receipt reference",
+    )
+    execution_claim_ref = _mapping(
+        manifest.get("benchmark_execution_claim"),
+        "benchmark execution claim reference",
+    )
     if (
         not _same_path(startup_ref.get("path"), preflight.startup_evidence_path)
         or startup_ref.get("sha256") != preflight.startup_evidence_sha256
@@ -540,9 +601,85 @@ def _reverify_preflight(
             resource_ref.get("path"), preflight.resource_benchmark_path
         )
         or resource_ref.get("sha256") != preflight.resource_benchmark_sha256
+        or not _same_path(
+            authority_manifest_ref.get("path"),
+            preflight.benchmark_authority_manifest_path,
+        )
+        or authority_manifest_ref.get("sha256")
+        != preflight.benchmark_authority_manifest_sha256
+        or not _same_path(
+            runner_authority_ref.get("path"),
+            preflight.benchmark_runner_authority_path,
+        )
+        or runner_authority_ref.get("sha256")
+        != preflight.benchmark_runner_authority_sha256
+        or not _same_path(
+            launch_receipt_ref.get("path"),
+            preflight.benchmark_launch_receipt_path,
+        )
+        or launch_receipt_ref.get("sha256")
+        != preflight.benchmark_launch_receipt_sha256
+        or not _same_path(
+            execution_receipt_ref.get("path"),
+            preflight.benchmark_execution_receipt_path,
+        )
+        or execution_receipt_ref.get("sha256")
+        != preflight.benchmark_execution_receipt_sha256
+        or not _same_path(
+            execution_claim_ref.get("path"),
+            preflight.benchmark_execution_claim_path,
+        )
+        or execution_claim_ref.get("sha256")
+        != preflight.benchmark_execution_claim_sha256
         or not _same_path(manifest.get("capture_store_root"), preflight.capture_store_root)
     ):
         raise CaptureContractError("preflight object escaped its hash-bound manifest")
+    manifest_authority_roots = manifest.get("benchmark_authority_read_roots")
+    if not isinstance(manifest_authority_roots, list) or manifest_authority_roots != [
+        str(path) for path in preflight.benchmark_authority_read_roots
+    ]:
+        raise CaptureContractError(
+            "benchmark authority read roots drifted after preflight"
+        )
+    external_manifest_ref = {
+        "path": str(preflight.benchmark_authority_manifest_path),
+        "sha256": preflight.benchmark_authority_manifest_sha256,
+    }
+    runner_launch = _mapping(
+        runner_authority.get("launch_receipt"),
+        "benchmark runner launch receipt",
+    )
+    execution_benchmark = _mapping(
+        execution_receipt.get("benchmark"),
+        "benchmark terminal result",
+    )
+    if not (
+        authority_manifest.get("schema_version")
+        == "chili.captured-paper-benchmark-authority-manifest.v2"
+        and runner_authority.get("schema_version")
+        == "chili.captured-paper-benchmark-runner-authority.v1"
+        and execution_receipt.get("schema_version")
+        == "chili.captured-paper-benchmark-execution-receipt.v2"
+        and runner_authority.get("manifest") == external_manifest_ref
+        and execution_receipt.get("manifest") == external_manifest_ref
+        and execution_receipt.get("launch_receipt") == runner_launch
+        and execution_benchmark.get("report")
+        == {
+            "path": str(preflight.resource_benchmark_path),
+            "sha256": preflight.resource_benchmark_sha256,
+        }
+        and execution_receipt.get("invoked") is True
+        and execution_receipt.get("benchmark_completed") is True
+        and execution_benchmark.get("acceptance")
+        == {"accepted": True, "reasons": []}
+        and resource.get("environment", {}).get(
+            "benchmark_authority_manifest_sha256"
+        )
+        == preflight.benchmark_authority_manifest_sha256
+    ):
+        raise CaptureContractError(
+            "terminal benchmark authority drifted after preflight"
+        )
     if dict(manifest.get("run_configuration") or {}) != dict(
         preflight.run_configuration
     ):
@@ -612,6 +749,46 @@ def _reverify_preflight(
         ):
             raise CaptureContractError(f"bootstrap source role {role} drifted")
         _stable_read(Path(preflight.source_paths[role]), preflight.source_hashes[role])
+
+    # Re-run the complete terminal authority validator against the stable bytes
+    # immediately before resource binding/store construction.  A caller cannot
+    # bypass it by directly constructing the public preflight dataclass.
+    _validate_benchmark_authority_chain(
+        authority_manifest=HashBoundJsonArtifact(
+            path=Path(preflight.benchmark_authority_manifest_path),
+            sha256=preflight.benchmark_authority_manifest_sha256,
+            document=authority_manifest,
+        ),
+        runner_authority=HashBoundJsonArtifact(
+            path=Path(preflight.benchmark_runner_authority_path),
+            sha256=preflight.benchmark_runner_authority_sha256,
+            document=runner_authority,
+        ),
+        launch_receipt=HashBoundJsonArtifact(
+            path=Path(preflight.benchmark_launch_receipt_path),
+            sha256=preflight.benchmark_launch_receipt_sha256,
+            document=launch_receipt,
+        ),
+        execution_receipt=HashBoundJsonArtifact(
+            path=Path(preflight.benchmark_execution_receipt_path),
+            sha256=preflight.benchmark_execution_receipt_sha256,
+            document=execution_receipt,
+        ),
+        execution_claim=HashBoundJsonArtifact(
+            path=Path(preflight.benchmark_execution_claim_path),
+            sha256=preflight.benchmark_execution_claim_sha256,
+            document=execution_claim,
+        ),
+        resource_benchmark=HashBoundJsonArtifact(
+            path=Path(preflight.resource_benchmark_path),
+            sha256=preflight.resource_benchmark_sha256,
+            document=resource,
+        ),
+        source_paths=preflight.source_paths,
+        source_hashes=preflight.source_hashes,
+        read_roots=preflight.benchmark_authority_read_roots,
+        local_drive_check=_default_local_drive_check,
+    )
 
     resolved = _mapping(
         resource.get("resolved_resource_binding"), "resolved resource binding"
@@ -817,6 +994,11 @@ class IqfeedIngressCompositionProvenance:
     manifest_sha256: str
     startup_evidence_sha256: str
     resource_benchmark_sha256: str
+    benchmark_authority_manifest_sha256: str
+    benchmark_runner_authority_sha256: str
+    benchmark_launch_receipt_sha256: str
+    benchmark_execution_receipt_sha256: str
+    benchmark_execution_claim_sha256: str
     resource_binding_sha256: str
     supervisor_identity_sha256: str
     l1_handoff_configuration_sha256: str
@@ -839,6 +1021,21 @@ class IqfeedIngressCompositionProvenance:
                 "manifest_sha256": self.manifest_sha256,
                 "startup_evidence_sha256": self.startup_evidence_sha256,
                 "resource_benchmark_sha256": self.resource_benchmark_sha256,
+                "benchmark_authority_manifest_sha256": (
+                    self.benchmark_authority_manifest_sha256
+                ),
+                "benchmark_runner_authority_sha256": (
+                    self.benchmark_runner_authority_sha256
+                ),
+                "benchmark_launch_receipt_sha256": (
+                    self.benchmark_launch_receipt_sha256
+                ),
+                "benchmark_execution_receipt_sha256": (
+                    self.benchmark_execution_receipt_sha256
+                ),
+                "benchmark_execution_claim_sha256": (
+                    self.benchmark_execution_claim_sha256
+                ),
                 "resource_binding_sha256": self.resource_binding_sha256,
                 "supervisor_identity_sha256": self.supervisor_identity_sha256,
                 "l1_handoff_configuration_sha256": (
@@ -1540,6 +1737,21 @@ def prepare_iqfeed_capture_ingress(
         manifest_sha256=preflight.manifest_sha256,
         startup_evidence_sha256=preflight.startup_evidence_sha256,
         resource_benchmark_sha256=preflight.resource_benchmark_sha256,
+        benchmark_authority_manifest_sha256=(
+            preflight.benchmark_authority_manifest_sha256
+        ),
+        benchmark_runner_authority_sha256=(
+            preflight.benchmark_runner_authority_sha256
+        ),
+        benchmark_launch_receipt_sha256=(
+            preflight.benchmark_launch_receipt_sha256
+        ),
+        benchmark_execution_receipt_sha256=(
+            preflight.benchmark_execution_receipt_sha256
+        ),
+        benchmark_execution_claim_sha256=(
+            preflight.benchmark_execution_claim_sha256
+        ),
         resource_binding_sha256=binding.binding_sha256,
         supervisor_identity_sha256=identity.identity_sha256,
         l1_handoff_configuration_sha256=l1_handoff.handoff_configuration_sha256,

@@ -149,6 +149,10 @@ def _resource_binding() -> CaptureResourceBinding:
         fsync_p95_milliseconds=5,
         logical_cpu_count=8,
         host_fingerprint_sha256="e" * 64,
+        write_latency_measurement_profile=(
+            "chili.capture-pressure.durable-write-fsync-helper-process.v1"
+        ),
+        write_latency_probe_volume_identity_sha256="d" * 64,
     )
     policy = CaptureBudgetPolicy(
         memory_reserve_bytes=32_000_000,

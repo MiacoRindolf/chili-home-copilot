@@ -8,7 +8,11 @@ read runtime configuration, connect to a database, or contact a provider.
 
 Example::
 
-    python scripts/benchmark_replay_capture_runtime.py \
+    python -I -S -B -c <approved-held-benchmark-loader> \
+        <benchmark-path> <benchmark-sha256> \
+        <contract-path> <contract-sha256> \
+        <runtime-path> <runtime-sha256> \
+        <pressure-probe-path> <pressure-probe-sha256> -- \
         --output-root D:\\CHILI-Docker\\chili-data\\benchmarks \
         --events 100000
 
@@ -23,26 +27,23 @@ import argparse
 from collections import Counter
 from datetime import datetime, timedelta, timezone
 import hashlib
-import importlib
 import json
 import math
 import os
 from pathlib import Path
 import platform
 import shutil
+import stat
 import sys
 import tempfile
 import threading
 import time
 from types import ModuleType
-from typing import Any, Callable, Iterator
+from typing import Any, Callable, Iterator, Mapping
 import uuid
 
-import psutil
-
-
 UTC = timezone.utc
-BENCHMARK_SCHEMA_VERSION = "chili.replay-capture-benchmark.v4"
+BENCHMARK_SCHEMA_VERSION = "chili.replay-capture-benchmark.v7"
 OWNERSHIP_MARKER = ".chili-replay-capture-benchmark-owner.json"
 OWNED_DIRECTORY_PREFIX = "chili-replay-capture-benchmark-"
 MEBIBYTE = 1024**2
@@ -53,12 +54,142 @@ CAPACITY_AUTHORITY_REASONS = (
     "writer_scaling_calibration_unavailable",
 )
 
+# This benchmark produces evidence consumed by PAPER activation.  It must be
+# compiled only after an external ``python -c`` loader has held and matched all
+# executable source closure to authority-supplied SHA-256 values.  Hashing a
+# source after Python has already executed it would be circular
+# self-attestation.  The loader also runs with ``-S`` so no site or ``.pth``
+# code can execute before this boundary.
+_HELD_BENCHMARK_SOURCES = globals().get(
+    "__chili_held_benchmark_sources__"
+)
+if not isinstance(_HELD_BENCHMARK_SOURCES, Mapping) or set(
+    _HELD_BENCHMARK_SOURCES
+) != {
+    "benchmark",
+    "contract",
+    "runtime",
+    "pressure_probe",
+    "replay_errors",
+    "first_dip_tape_policy",
+    "stage0",
+}:
+    raise RuntimeError(
+        "benchmark must execute through the approved held-source bundle loader"
+    )
+_BENCHMARK_DEPENDENCY_IDENTITY_SHA256 = globals().get(
+    "__chili_benchmark_dependency_identity_sha256__"
+)
+_BENCHMARK_AUTHORITY_MANIFEST_SHA256 = globals().get(
+    "__chili_benchmark_authority_manifest_sha256__"
+)
+_BENCHMARK_PYTHON_EXECUTABLE_SHA256 = globals().get(
+    "__chili_benchmark_python_executable_sha256__"
+)
+if (
+    not isinstance(_BENCHMARK_DEPENDENCY_IDENTITY_SHA256, str)
+    or len(_BENCHMARK_DEPENDENCY_IDENTITY_SHA256) != 64
+    or any(
+        character not in "0123456789abcdef"
+        for character in _BENCHMARK_DEPENDENCY_IDENTITY_SHA256
+    )
+):
+    raise RuntimeError("benchmark dependency identity is invalid")
+if (
+    not isinstance(_BENCHMARK_AUTHORITY_MANIFEST_SHA256, str)
+    or len(_BENCHMARK_AUTHORITY_MANIFEST_SHA256) != 64
+    or any(
+        character not in "0123456789abcdef"
+        for character in _BENCHMARK_AUTHORITY_MANIFEST_SHA256
+    )
+):
+    raise RuntimeError("benchmark authority manifest identity is invalid")
+if (
+    not isinstance(_BENCHMARK_PYTHON_EXECUTABLE_SHA256, str)
+    or len(_BENCHMARK_PYTHON_EXECUTABLE_SHA256) != 64
+    or any(
+        character not in "0123456789abcdef"
+        for character in _BENCHMARK_PYTHON_EXECUTABLE_SHA256
+    )
+):
+    raise RuntimeError("benchmark Python executable identity is invalid")
+if not (
+    sys.flags.isolated == 1
+    and sys.flags.ignore_environment == 1
+    and sys.flags.no_site == 1
+    and sys.flags.safe_path is True
+    and sys.flags.dont_write_bytecode == 1
+):
+    raise RuntimeError(
+        "benchmark held-source runtime isolation is invalid"
+    )
 
-def _load_capture_modules() -> tuple[ModuleType, ModuleType]:
+
+def _stable_source_bytes(path: Path) -> bytes:
+    resolved = path.resolve(strict=True)
+    before = resolved.stat()
+    if not stat.S_ISREG(before.st_mode):
+        raise RuntimeError("benchmark source is not a regular file")
+    flags = os.O_RDONLY | int(getattr(os, "O_BINARY", 0))
+    descriptor = os.open(resolved, flags)
+    try:
+        opened = os.fstat(descriptor)
+        identity = lambda value: (
+            int(value.st_dev),
+            int(value.st_ino),
+            int(value.st_size),
+            int(value.st_mtime_ns),
+            int(value.st_mode),
+        )
+        if identity(opened) != identity(before):
+            raise RuntimeError("benchmark source changed before open")
+        chunks: list[bytes] = []
+        while True:
+            chunk = os.read(descriptor, 1024 * 1024)
+            if not chunk:
+                break
+            chunks.append(chunk)
+    finally:
+        os.close(descriptor)
+    after = resolved.stat()
+    if identity(after) != identity(before):
+        raise RuntimeError("benchmark source changed while read")
+    return b"".join(chunks)
+
+
+def _held_source(role: str) -> tuple[Path, bytes, str]:
+    row = _HELD_BENCHMARK_SOURCES.get(role)
+    if not isinstance(row, Mapping) or set(row) != {
+        "path",
+        "sha256",
+        "source",
+    }:
+        raise RuntimeError("held benchmark source bundle is malformed")
+    path_raw = row.get("path")
+    digest = row.get("sha256")
+    source = row.get("source")
+    if (
+        not isinstance(path_raw, str)
+        or not Path(path_raw).is_absolute()
+        or not isinstance(digest, str)
+        or len(digest) != 64
+        or any(character not in "0123456789abcdef" for character in digest)
+        or type(source) is not bytes
+        or hashlib.sha256(source).hexdigest() != digest
+    ):
+        raise RuntimeError("held benchmark source bundle is invalid")
+    path = Path(path_raw).resolve(strict=True)
+    if str(path) != path_raw:
+        raise RuntimeError("held benchmark source path is not canonical")
+    return path, source, digest
+
+
+def _load_capture_modules() -> tuple[ModuleType, ModuleType, dict[str, str]]:
     """Load only the two capture modules, bypassing trading package side effects."""
 
+    benchmark_path, _, _ = _held_source("benchmark")
     module_dir = (
-        Path(__file__).resolve().parents[1]
+        benchmark_path.parents[1]
         / "app"
         / "services"
         / "trading"
@@ -66,15 +197,93 @@ def _load_capture_modules() -> tuple[ModuleType, ModuleType]:
     )
     package_name = "_chili_replay_capture_benchmark"
     package = ModuleType(package_name)
-    package.__path__ = [str(module_dir)]  # type: ignore[attr-defined]
+    # No filesystem fallback is permitted: every import needed while these
+    # benchmark modules initialize must already be present in ``sys.modules``
+    # from the externally held source bundle.
+    package.__path__ = []  # type: ignore[attr-defined]
     package.__package__ = package_name
     sys.modules[package_name] = package
-    contract = importlib.import_module(f"{package_name}.replay_capture_contract")
-    runtime = importlib.import_module(f"{package_name}.replay_capture_runtime")
-    return contract, runtime
+    contract_path, contract_raw, contract_sha = _held_source("contract")
+    runtime_path, runtime_raw, runtime_sha = _held_source("runtime")
+    errors_path, errors_raw, errors_sha = _held_source("replay_errors")
+    policy_path, policy_raw, policy_sha = _held_source("first_dip_tape_policy")
+    if (
+        contract_path != module_dir / "replay_capture_contract.py"
+        or runtime_path != module_dir / "replay_capture_runtime.py"
+        or errors_path != module_dir / "replay_errors.py"
+        or policy_path != module_dir / "first_dip_tape_policy.py"
+    ):
+        raise RuntimeError("held capture source path binding is invalid")
+    contract_name = f"{package_name}.replay_capture_contract"
+    runtime_name = f"{package_name}.replay_capture_runtime"
+    errors_name = f"{package_name}.replay_errors"
+    policy_name = f"{package_name}.first_dip_tape_policy"
+    contract = ModuleType(contract_name)
+    contract.__file__ = str(contract_path)
+    contract.__package__ = package_name
+    runtime = ModuleType(runtime_name)
+    runtime.__file__ = str(runtime_path)
+    runtime.__package__ = package_name
+    errors = ModuleType(errors_name)
+    errors.__file__ = str(errors_path)
+    errors.__package__ = package_name
+    policy = ModuleType(policy_name)
+    policy.__file__ = str(policy_path)
+    policy.__package__ = package_name
+    sys.modules[contract_name] = contract
+    sys.modules[runtime_name] = runtime
+    sys.modules[errors_name] = errors
+    sys.modules[policy_name] = policy
+    exec(compile(errors_raw, str(errors_path), "exec"), errors.__dict__)
+    exec(compile(contract_raw, str(contract_path), "exec"), contract.__dict__)
+    exec(compile(policy_raw, str(policy_path), "exec"), policy.__dict__)
+    exec(compile(runtime_raw, str(runtime_path), "exec"), runtime.__dict__)
+    return contract, runtime, {
+        "contract_sha256": contract_sha,
+        "first_dip_tape_policy_sha256": policy_sha,
+        "replay_errors_sha256": errors_sha,
+        "runtime_sha256": runtime_sha,
+    }
 
 
-CONTRACT, RUNTIME = _load_capture_modules()
+def _load_pressure_probe_module() -> tuple[ModuleType, str]:
+    """Load the shared stdlib-only durability probe without broad app imports."""
+
+    benchmark_path, _, _ = _held_source("benchmark")
+    path, raw, digest = _held_source("pressure_probe")
+    if path != benchmark_path.with_name("captured_paper_pressure_probe.py"):
+        raise RuntimeError("held pressure-probe source path binding is invalid")
+    name = "_chili_captured_paper_pressure_probe"
+    module = ModuleType(name)
+    module.__file__ = str(path)
+    module.__package__ = None
+    sys.modules[name] = module
+    exec(compile(raw, str(path), "exec"), module.__dict__)
+    return module, digest
+
+
+CONTRACT, RUNTIME, _CAPTURE_EXECUTED_SOURCE_HASHES = _load_capture_modules()
+PRESSURE_PROBE, _PRESSURE_PROBE_EXECUTED_SHA256 = _load_pressure_probe_module()
+(
+    _BENCHMARK_SCRIPT_PATH,
+    _BENCHMARK_SCRIPT_SOURCE,
+    _BENCHMARK_SCRIPT_INITIAL_SHA256,
+) = _held_source("benchmark")
+(
+    _BENCHMARK_STAGE0_PATH,
+    _BENCHMARK_STAGE0_SOURCE,
+    _BENCHMARK_STAGE0_SHA256,
+) = _held_source("stage0")
+if Path(__file__).resolve(strict=True) != _BENCHMARK_SCRIPT_PATH:
+    raise RuntimeError("held benchmark execution path is invalid")
+if _BENCHMARK_STAGE0_PATH != _BENCHMARK_SCRIPT_PATH.with_name(
+    "captured_paper_isolated_stage0.py"
+):
+    raise RuntimeError("held benchmark stage0 path binding is invalid")
+if hashlib.sha256(
+    _stable_source_bytes(_BENCHMARK_SCRIPT_PATH)
+).hexdigest() != _BENCHMARK_SCRIPT_INITIAL_SHA256:
+    raise RuntimeError("held benchmark source differs from its current path")
 CaptureClocks = CONTRACT.CaptureClocks
 CaptureEvent = CONTRACT.CaptureEvent
 CaptureRunIdentity = CONTRACT.CaptureRunIdentity
@@ -84,6 +293,9 @@ BoundedCaptureIngress = RUNTIME.BoundedCaptureIngress
 CaptureResourceMeasurement = RUNTIME.CaptureResourceMeasurement
 CaptureBudgetPolicy = RUNTIME.CaptureBudgetPolicy
 CaptureResourceBinding = RUNTIME.CaptureResourceBinding
+capture_storage_volume_identity_sha256 = (
+    RUNTIME.capture_storage_volume_identity_sha256
+)
 CaptureWriterWorker = RUNTIME.CaptureWriterWorker
 CaptureWriterPool = RUNTIME.CaptureWriterPool
 ContentAddressedCaptureStore = RUNTIME.ContentAddressedCaptureStore
@@ -273,26 +485,195 @@ def _delete_verified_owned_directory(
     shutil.rmtree(resolved)
 
 
+_RESOURCE_SAMPLER_PROFILE = "chili.benchmark-stdlib-resource-sampler.v1"
+
+
+def _logical_cpu_count() -> int:
+    if os.name == "nt":
+        import ctypes
+        from ctypes import wintypes
+
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        function = kernel32.GetActiveProcessorCount
+        function.argtypes = [wintypes.WORD]
+        function.restype = wintypes.DWORD
+        value = int(function(0xFFFF))
+        if value == 0:
+            raise OSError(ctypes.get_last_error(), "GetActiveProcessorCount failed")
+    else:
+        value = os.cpu_count()
+    if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+        raise RuntimeError("logical CPU count is unavailable")
+    return value
+
+
+def _memory_snapshot() -> dict[str, int]:
+    if os.name == "nt":
+        import ctypes
+        from ctypes import wintypes
+
+        class _MemoryStatusEx(ctypes.Structure):
+            _fields_ = (
+                ("dwLength", wintypes.DWORD),
+                ("dwMemoryLoad", wintypes.DWORD),
+                ("ullTotalPhys", ctypes.c_ulonglong),
+                ("ullAvailPhys", ctypes.c_ulonglong),
+                ("ullTotalPageFile", ctypes.c_ulonglong),
+                ("ullAvailPageFile", ctypes.c_ulonglong),
+                ("ullTotalVirtual", ctypes.c_ulonglong),
+                ("ullAvailVirtual", ctypes.c_ulonglong),
+                ("ullAvailExtendedVirtual", ctypes.c_ulonglong),
+            )
+
+        status = _MemoryStatusEx()
+        status.dwLength = ctypes.sizeof(status)
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        function = kernel32.GlobalMemoryStatusEx
+        function.argtypes = [ctypes.POINTER(_MemoryStatusEx)]
+        function.restype = wintypes.BOOL
+        if not function(ctypes.byref(status)):
+            raise OSError(ctypes.get_last_error(), "GlobalMemoryStatusEx failed")
+        total = int(status.ullTotalPhys)
+        available = int(status.ullAvailPhys)
+    else:
+        try:
+            page_size = int(os.sysconf("SC_PAGE_SIZE"))
+            total_pages = int(os.sysconf("SC_PHYS_PAGES"))
+            available_pages = int(os.sysconf("SC_AVPHYS_PAGES"))
+        except (AttributeError, OSError, TypeError, ValueError) as exc:
+            raise RuntimeError("physical memory counters are unavailable") from exc
+        total = page_size * total_pages
+        available = page_size * available_pages
+    if total <= 0 or available < 0 or available > total:
+        raise RuntimeError("physical memory counters are invalid")
+    return {"total": total, "available": available}
+
+
+def _current_process_rss_bytes() -> int:
+    if os.name == "nt":
+        import ctypes
+        from ctypes import wintypes
+
+        class _ProcessMemoryCounters(ctypes.Structure):
+            _fields_ = (
+                ("cb", wintypes.DWORD),
+                ("PageFaultCount", wintypes.DWORD),
+                ("PeakWorkingSetSize", ctypes.c_size_t),
+                ("WorkingSetSize", ctypes.c_size_t),
+                ("QuotaPeakPagedPoolUsage", ctypes.c_size_t),
+                ("QuotaPagedPoolUsage", ctypes.c_size_t),
+                ("QuotaPeakNonPagedPoolUsage", ctypes.c_size_t),
+                ("QuotaNonPagedPoolUsage", ctypes.c_size_t),
+                ("PagefileUsage", ctypes.c_size_t),
+                ("PeakPagefileUsage", ctypes.c_size_t),
+            )
+
+        counters = _ProcessMemoryCounters()
+        counters.cb = ctypes.sizeof(counters)
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        kernel32.GetCurrentProcess.restype = wintypes.HANDLE
+        psapi = ctypes.WinDLL("psapi", use_last_error=True)
+        function = psapi.GetProcessMemoryInfo
+        function.argtypes = [
+            wintypes.HANDLE,
+            ctypes.POINTER(_ProcessMemoryCounters),
+            wintypes.DWORD,
+        ]
+        function.restype = wintypes.BOOL
+        if not function(
+            kernel32.GetCurrentProcess(), ctypes.byref(counters), counters.cb
+        ):
+            raise OSError(ctypes.get_last_error(), "GetProcessMemoryInfo failed")
+        value = int(counters.WorkingSetSize)
+    else:
+        statm = Path("/proc/self/statm")
+        if statm.is_file():
+            fields = statm.read_text(encoding="ascii").split()
+            if len(fields) < 2:
+                raise RuntimeError("process RSS counter is malformed")
+            value = int(fields[1]) * int(os.sysconf("SC_PAGE_SIZE"))
+        else:
+            try:
+                import resource
+
+                raw = int(resource.getrusage(resource.RUSAGE_SELF).ru_maxrss)
+            except (ImportError, OSError, TypeError, ValueError) as exc:
+                raise RuntimeError("process RSS counter is unavailable") from exc
+            value = raw if sys.platform == "darwin" else raw * 1024
+    if value <= 0:
+        raise RuntimeError("process RSS counter is invalid")
+    return value
+
+
+def _host_cpu_snapshot() -> tuple[int, int]:
+    """Return cumulative ``(idle, total)`` scheduler ticks."""
+
+    if os.name == "nt":
+        import ctypes
+        from ctypes import wintypes
+
+        idle = wintypes.FILETIME()
+        kernel = wintypes.FILETIME()
+        user = wintypes.FILETIME()
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        function = kernel32.GetSystemTimes
+        function.argtypes = [
+            ctypes.POINTER(wintypes.FILETIME),
+            ctypes.POINTER(wintypes.FILETIME),
+            ctypes.POINTER(wintypes.FILETIME),
+        ]
+        function.restype = wintypes.BOOL
+        if not function(ctypes.byref(idle), ctypes.byref(kernel), ctypes.byref(user)):
+            raise OSError(ctypes.get_last_error(), "GetSystemTimes failed")
+
+        def _value(raw: Any) -> int:
+            return (int(raw.dwHighDateTime) << 32) | int(raw.dwLowDateTime)
+
+        idle_value = _value(idle)
+        return idle_value, _value(kernel) + _value(user)
+    stat_path = Path("/proc/stat")
+    if not stat_path.is_file():
+        raise RuntimeError("host CPU counters are unavailable")
+    fields = stat_path.read_text(encoding="ascii").splitlines()[0].split()
+    if not fields or fields[0] != "cpu" or len(fields) < 5:
+        raise RuntimeError("host CPU counters are malformed")
+    values = [int(value) for value in fields[1:]]
+    idle_value = values[3] + (values[4] if len(values) > 4 else 0)
+    return idle_value, sum(values)
+
+
+def _host_cpu_percent(before: tuple[int, int], after: tuple[int, int]) -> float:
+    idle_delta = int(after[0]) - int(before[0])
+    total_delta = int(after[1]) - int(before[1])
+    if total_delta <= 0 or idle_delta < 0 or idle_delta > total_delta:
+        raise RuntimeError("host CPU counter interval is invalid")
+    return (total_delta - idle_delta) * 100.0 / total_delta
+
+
 class PeakRssSampler:
     """Low-overhead process RSS sampler covering enqueue through writer drain."""
 
     def __init__(self, *, interval_seconds: float) -> None:
-        self._process = psutil.Process()
         self._interval = float(interval_seconds)
         self._stop = threading.Event()
+        self._lock = threading.Lock()
         self._thread: threading.Thread | None = None
-        self.baseline_bytes = int(self._process.memory_info().rss)
+        self._error: BaseException | None = None
+        self.baseline_bytes = _current_process_rss_bytes()
         self.peak_bytes = self.baseline_bytes
         self.samples = 1
 
     def _sample(self) -> None:
         while not self._stop.wait(self._interval):
             try:
-                rss = int(self._process.memory_info().rss)
-            except (psutil.NoSuchProcess, psutil.AccessDenied):
+                rss = _current_process_rss_bytes()
+            except (OSError, RuntimeError) as exc:
+                with self._lock:
+                    self._error = exc
                 return
-            self.peak_bytes = max(self.peak_bytes, rss)
-            self.samples += 1
+            with self._lock:
+                self.peak_bytes = max(self.peak_bytes, rss)
+                self.samples += 1
 
     def start(self) -> None:
         self._thread = threading.Thread(
@@ -306,14 +687,19 @@ class PeakRssSampler:
         self._stop.set()
         if self._thread is not None:
             self._thread.join(timeout=max(1.0, self._interval * 4))
+            if self._thread.is_alive():
+                raise RuntimeError("RSS sampler thread did not stop")
         try:
-            self.peak_bytes = max(
-                self.peak_bytes,
-                int(self._process.memory_info().rss),
-            )
+            terminal = _current_process_rss_bytes()
+        except (OSError, RuntimeError) as exc:
+            raise RuntimeError("terminal RSS sample is unavailable") from exc
+        with self._lock:
+            if self._error is not None:
+                raise RuntimeError("RSS sampler failed during benchmark") from self._error
+            self.peak_bytes = max(self.peak_bytes, terminal)
             self.samples += 1
-        except (psutil.NoSuchProcess, psutil.AccessDenied):
-            pass
+            if self.samples < 2:
+                raise RuntimeError("RSS sampler coverage is incomplete")
 
 
 def _identity(run_id: str) -> Any:
@@ -536,6 +922,7 @@ def _latency_summary(values: list[int]) -> dict[str, int]:
         "count": len(ordered),
         "max_ns": int(ordered[-1]) if ordered else 0,
         "mean_ns": int(sum(ordered) / len(ordered)) if ordered else 0,
+        "min_ns": int(ordered[0]) if ordered else 0,
         "p50_ns": _percentile(ordered, 0.50),
         "p95_ns": _percentile(ordered, 0.95),
         "p99_ns": _percentile(ordered, 0.99),
@@ -589,9 +976,37 @@ def _durable_publication_summary(
     probe_root = owned_root / "durability-probe"
     probe_root.mkdir(parents=True, exist_ok=False)
     file_values: list[int] = []
+    live_probe_values: list[int] = []
     parent_values: list[int] = []
     methods: set[str] = set()
     verified = 0
+    with PRESSURE_PROBE.CapturedPaperPressureProbeClient(
+        python_executable=sys.executable,
+        probe_root=probe_root,
+        response_timeout_seconds=5.0,
+        helper_path=Path(PRESSURE_PROBE.__file__).resolve(strict=True),
+        expected_helper_sha256=_PRESSURE_PROBE_EXECUTED_SHA256,
+    ) as pressure_probe:
+        pressure_probe_helper_sha256 = pressure_probe.helper_sha256
+        pressure_probe_root_identity_sha256 = (
+            pressure_probe.probe_root_identity_sha256
+        )
+        pressure_probe_volume_identity_sha256 = (
+            capture_storage_volume_identity_sha256(probe_root)
+        )
+        for _index in range(samples):
+            observed = pressure_probe.measure()
+            if (
+                observed.write_latency_profile
+                != PRESSURE_PROBE.PRESSURE_WRITE_LATENCY_PROFILE
+                or observed.bytes_written != 4096
+                or observed.fsync_completed is not True
+                or observed.cleanup_completed is not True
+            ):
+                raise RuntimeError(
+                    "capture pressure probe returned incomplete benchmark evidence"
+                )
+            live_probe_values.append(int(observed.latency_ns))
     for index in range(samples):
         raw = canonical_json_bytes(
             {
@@ -621,6 +1036,21 @@ def _durable_publication_summary(
         "sample_count": samples,
         "verified_count": verified,
         "all_verified": verified == samples,
+        "live_pressure_probe": {
+            **_latency_summary(live_probe_values),
+            "all_verified": len(live_probe_values) == samples,
+            "bytes_per_sample": 4096,
+            "helper_sha256": pressure_probe_helper_sha256,
+            "probe_root_identity_sha256": (
+                pressure_probe_root_identity_sha256
+            ),
+            "probe_volume_identity_sha256": (
+                pressure_probe_volume_identity_sha256
+            ),
+            "write_latency_profile": (
+                PRESSURE_PROBE.PRESSURE_WRITE_LATENCY_PROFILE
+            ),
+        },
         "file_fsync": _latency_summary(file_values),
         "parent_publication": {
             **_latency_summary(parent_values),
@@ -649,7 +1079,7 @@ def _persist_content_addressed_report(directory: Path, raw: bytes) -> Path:
 
 def _host_fingerprint(total_memory_bytes: int) -> str:
     material = {
-        "logical_cpu_count": psutil.cpu_count(logical=True),
+        "logical_cpu_count": _logical_cpu_count(),
         "machine": platform.machine(),
         "node": platform.node(),
         "platform": platform.platform(),
@@ -727,9 +1157,41 @@ def _capture_file_inventory(capture_root: Path) -> dict[str, Any]:
     }
 
 
-def _source_hash(module: ModuleType) -> str:
-    source = Path(str(module.__file__)).read_bytes()
-    return hashlib.sha256(source).hexdigest()
+def _verified_executed_source_hashes() -> dict[str, str]:
+    errors_path, _, _ = _held_source("replay_errors")
+    policy_path, _, _ = _held_source("first_dip_tape_policy")
+    current = {
+        "contract_sha256": hashlib.sha256(
+            _stable_source_bytes(Path(str(CONTRACT.__file__)))
+        ).hexdigest(),
+        "runtime_sha256": hashlib.sha256(
+            _stable_source_bytes(Path(str(RUNTIME.__file__)))
+        ).hexdigest(),
+        "pressure_probe_sha256": hashlib.sha256(
+            _stable_source_bytes(Path(str(PRESSURE_PROBE.__file__)))
+        ).hexdigest(),
+        "replay_errors_sha256": hashlib.sha256(
+            _stable_source_bytes(errors_path)
+        ).hexdigest(),
+        "first_dip_tape_policy_sha256": hashlib.sha256(
+            _stable_source_bytes(policy_path)
+        ).hexdigest(),
+        "benchmark_script_sha256": hashlib.sha256(
+            _stable_source_bytes(_BENCHMARK_SCRIPT_PATH)
+        ).hexdigest(),
+        "stage0_sha256": hashlib.sha256(
+            _stable_source_bytes(_BENCHMARK_STAGE0_PATH)
+        ).hexdigest(),
+    }
+    expected = {
+        **_CAPTURE_EXECUTED_SOURCE_HASHES,
+        "pressure_probe_sha256": _PRESSURE_PROBE_EXECUTED_SHA256,
+        "benchmark_script_sha256": _BENCHMARK_SCRIPT_INITIAL_SHA256,
+        "stage0_sha256": _BENCHMARK_STAGE0_SHA256,
+    }
+    if current != expected:
+        raise RuntimeError("benchmark source bytes drifted during measurement")
+    return expected
 
 
 def _resolved_binding(
@@ -899,8 +1361,8 @@ def _run_benchmark(args: argparse.Namespace, directory: Path) -> dict[str, Any]:
     capture_root = directory / "capture"
     measurement_started_at = datetime.now(UTC)
     host_sample_started = time.perf_counter()
-    memory_before = psutil.virtual_memory()
-    psutil.cpu_percent(interval=None)
+    memory_before = _memory_snapshot()
+    host_cpu_before = _host_cpu_snapshot()
     identity = _identity(str(uuid.uuid4()))
     symbols = _symbols(args.symbols)
     ingress = BoundedCaptureIngress(
@@ -929,8 +1391,7 @@ def _run_benchmark(args: argparse.Namespace, directory: Path) -> dict[str, Any]:
         writer_kwargs["workers"] = args.writers
     writer = writer_type(**writer_kwargs)
     rss = PeakRssSampler(interval_seconds=args.rss_sample_ms / 1_000)
-    process = psutil.Process()
-    cpu_before = process.cpu_times()
+    cpu_before = time.process_time()
     producer_clock: Callable[[], int]
     producer_cpu_clock = "thread_time_ns"
     if hasattr(time, "thread_time_ns"):
@@ -973,7 +1434,7 @@ def _run_benchmark(args: argparse.Namespace, directory: Path) -> dict[str, Any]:
     stopped_cleanly = writer.stop(timeout_seconds=args.stop_timeout_s)
     writer_finished = time.perf_counter()
     rss.stop()
-    cpu_after = process.cpu_times()
+    cpu_after = time.process_time()
     worker_health = writer.health()
     if not stopped_cleanly:
         raise RuntimeError(f"capture writer did not stop cleanly: {worker_health}")
@@ -985,8 +1446,17 @@ def _run_benchmark(args: argparse.Namespace, directory: Path) -> dict[str, Any]:
 
     inventory = _capture_file_inventory(capture_root)
     durable_publication = _durable_publication_summary(directory)
-    memory_after = psutil.virtual_memory()
-    average_cpu_percent = float(psutil.cpu_percent(interval=None))
+    capture_volume_identity = capture_storage_volume_identity_sha256(capture_root)
+    if (
+        durable_publication["live_pressure_probe"][
+            "probe_volume_identity_sha256"
+        ]
+        != capture_volume_identity
+    ):
+        raise RuntimeError("benchmark capture and live probe volumes differ")
+    memory_after = _memory_snapshot()
+    host_cpu_after = _host_cpu_snapshot()
+    average_cpu_percent = _host_cpu_percent(host_cpu_before, host_cpu_after)
     disk_after = shutil.disk_usage(capture_root)
     host_sample_seconds = max(
         time.perf_counter() - host_sample_started, 1e-12
@@ -994,7 +1464,7 @@ def _run_benchmark(args: argparse.Namespace, directory: Path) -> dict[str, Any]:
     producer_seconds = producer_finished - producer_started
     writer_seconds = writer_finished - benchmark_started
     process_cpu_seconds = (
-        (cpu_after.user + cpu_after.system) - (cpu_before.user + cpu_before.system)
+        cpu_after - cpu_before
     )
     compression = inventory["compression"]
     physical_capture_objects = int(
@@ -1004,9 +1474,9 @@ def _run_benchmark(args: argparse.Namespace, directory: Path) -> dict[str, Any]:
     resource_measurement = CaptureResourceMeasurement(
         measured_at=datetime.now(UTC),
         sample_seconds=host_sample_seconds,
-        total_memory_bytes=int(memory_after.total),
+        total_memory_bytes=int(memory_after["total"]),
         available_memory_bytes=int(
-            min(memory_before.available, memory_after.available)
+            min(memory_before["available"], memory_after["available"])
         ),
         disk_free_bytes=int(disk_after.free),
         average_cpu_percent=average_cpu_percent,
@@ -1014,12 +1484,19 @@ def _run_benchmark(args: argparse.Namespace, directory: Path) -> dict[str, Any]:
             float(accepted_canonical_bytes) / max(writer_seconds, 1e-12)
         ),
         fsync_p95_milliseconds=(
-            float(durable_publication["file_fsync"]["p95_ns"])
-            + float(durable_publication["parent_publication"]["p95_ns"])
+            float(durable_publication["live_pressure_probe"]["p95_ns"])
         )
         / 1_000_000,
-        logical_cpu_count=int(psutil.cpu_count(logical=True) or 1),
-        host_fingerprint_sha256=_host_fingerprint(int(memory_after.total)),
+        logical_cpu_count=_logical_cpu_count(),
+        host_fingerprint_sha256=_host_fingerprint(int(memory_after["total"])),
+        write_latency_measurement_profile=(
+            PRESSURE_PROBE.PRESSURE_WRITE_LATENCY_PROFILE
+        ),
+        write_latency_probe_volume_identity_sha256=str(
+            durable_publication["live_pressure_probe"][
+                "probe_volume_identity_sha256"
+            ]
+        ),
     )
     store.close()
     measurement_ended_at = datetime.now(UTC)
@@ -1040,7 +1517,9 @@ def _run_benchmark(args: argparse.Namespace, directory: Path) -> dict[str, Any]:
         }
     )
     generated_at = datetime.now(UTC)
-    current_host_fingerprint = _host_fingerprint(int(psutil.virtual_memory().total))
+    current_host_fingerprint = _host_fingerprint(
+        int(_memory_snapshot()["total"])
+    )
     host_match = (
         current_host_fingerprint == resource_measurement.host_fingerprint_sha256
     )
@@ -1083,6 +1562,9 @@ def _run_benchmark(args: argparse.Namespace, directory: Path) -> dict[str, Any]:
             shared_validation["accepted_events"]
         ):
             acceptance_reasons.append("shared_admission_completion_mismatch")
+    executed_source_hashes = _verified_executed_source_hashes()
+    if capture_storage_volume_identity_sha256(capture_root) != capture_volume_identity:
+        raise RuntimeError("benchmark capture volume changed during measurement")
     report = {
         "benchmark_schema_version": BENCHMARK_SCHEMA_VERSION,
         "generated_at": generated_at.isoformat().replace("+00:00", "Z"),
@@ -1115,11 +1597,7 @@ def _run_benchmark(args: argparse.Namespace, directory: Path) -> dict[str, Any]:
             "run_id": identity.run_id,
         },
         "capture_runtime_source": {
-            "contract_sha256": _source_hash(CONTRACT),
-            "runtime_sha256": _source_hash(RUNTIME),
-            "benchmark_script_sha256": hashlib.sha256(
-                Path(__file__).read_bytes()
-            ).hexdigest(),
+            **executed_source_hashes,
         },
         "enqueue": {
             "accepted": accepted,
@@ -1137,9 +1615,16 @@ def _run_benchmark(args: argparse.Namespace, directory: Path) -> dict[str, Any]:
             "submitted_per_second": _rate(args.events, producer_seconds),
         },
         "environment": {
-            "logical_cpu_count": psutil.cpu_count(logical=True),
+            "benchmark_authority_manifest_sha256": (
+                _BENCHMARK_AUTHORITY_MANIFEST_SHA256
+            ),
+            "dependency_root_identity_sha256": (
+                _BENCHMARK_DEPENDENCY_IDENTITY_SHA256
+            ),
+            "logical_cpu_count": _logical_cpu_count(),
             "platform": platform.platform(),
-            "psutil_version": psutil.__version__,
+            "python_executable_sha256": _BENCHMARK_PYTHON_EXECUTABLE_SHA256,
+            "resource_sampler_profile": _RESOURCE_SAMPLER_PROFILE,
             "python": platform.python_version(),
             "measurement_host_fingerprint_sha256": (
                 resource_measurement.host_fingerprint_sha256
@@ -1196,6 +1681,12 @@ def _run_benchmark(args: argparse.Namespace, directory: Path) -> dict[str, Any]:
             "durable_publication": durable_publication,
             "host_fingerprint_sha256": (
                 resource_measurement.host_fingerprint_sha256
+            ),
+            "write_latency_measurement_profile": (
+                resource_measurement.write_latency_measurement_profile
+            ),
+            "write_latency_probe_volume_identity_sha256": (
+                resource_measurement.write_latency_probe_volume_identity_sha256
             ),
             "measurement_sha256": resource_measurement.measurement_sha256,
         },
@@ -1273,6 +1764,11 @@ def main(argv: Iterator[str] | None = None) -> int:
             "report_artifact_layout": "reports/<canonical-sha256>.json_when_retained",
             "safe_cleanup_verified": not args.keep,
         }
+        emitted_source_hashes = _verified_executed_source_hashes()
+        if report.get("capture_runtime_source") != emitted_source_hashes:
+            raise RuntimeError(
+                "benchmark source provenance changed before report emission"
+            )
         raw = canonical_json_bytes(report)
         if args.keep:
             _persist_content_addressed_report(directory, raw)

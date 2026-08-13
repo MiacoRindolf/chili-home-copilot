@@ -33,10 +33,10 @@ from scripts import iqfeed_capture_bootstrap_preflight as preflight_module
 
 
 UTC = timezone.utc
-BUILDER_SCHEMA_VERSION = "chili.iqfeed-capture-bootstrap-bundle-builder.v1"
-BUILD_REQUEST_SCHEMA_VERSION = "chili.iqfeed-capture-bootstrap-build-request.v1"
-BUILDER_REPORT_SCHEMA_VERSION = "chili.iqfeed-capture-bootstrap-builder-report.v1"
-BUNDLE_COMMIT_SCHEMA_VERSION = "chili.iqfeed-capture-bootstrap-bundle-commit.v1"
+BUILDER_SCHEMA_VERSION = "chili.iqfeed-capture-bootstrap-bundle-builder.v2"
+BUILD_REQUEST_SCHEMA_VERSION = "chili.iqfeed-capture-bootstrap-build-request.v2"
+BUILDER_REPORT_SCHEMA_VERSION = "chili.iqfeed-capture-bootstrap-builder-report.v2"
+BUNDLE_COMMIT_SCHEMA_VERSION = "chili.iqfeed-capture-bootstrap-bundle-commit.v2"
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 _REPARSE_ATTRIBUTE = int(getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400))
 _MAX_SOURCE_BYTES = 64 * 1024 * 1024
@@ -71,6 +71,9 @@ _BUILD_REQUEST_FIELDS = frozenset(
         "artifact_root",
         "capture_store_root",
         "resource_benchmark",
+        "benchmark_authority_manifest",
+        "benchmark_runner_authority",
+        "benchmark_execution_receipt",
         "source_sha256",
         "expected_account_id",
         "account_risk_snapshot",
@@ -151,6 +154,8 @@ _SOURCE_RELATIVE_PATHS: Mapping[str, str] = MappingProxyType(
     {
         "app_migrations": "app/migrations.py",
         "benchmark_replay_capture_runtime": "scripts/benchmark_replay_capture_runtime.py",
+        "captured_paper_pressure_probe": "scripts/captured_paper_pressure_probe.py",
+        "captured_paper_isolated_stage0": "scripts/captured_paper_isolated_stage0.py",
         "iqfeed_capture_bootstrap": "scripts/iqfeed_capture_bootstrap.py",
         "iqfeed_capture_bootstrap_preflight": "scripts/iqfeed_capture_bootstrap_preflight.py",
         "iqfeed_capture_host": "scripts/iqfeed_capture_host.py",
@@ -160,6 +165,8 @@ _SOURCE_RELATIVE_PATHS: Mapping[str, str] = MappingProxyType(
         "iqfeed_l2_capture": "app/services/trading/momentum_neural/iqfeed_l2_capture.py",
         "iqfeed_trade_bridge": "scripts/iqfeed_trade_bridge.py",
         "live_replay_capture": "app/services/trading/momentum_neural/live_replay_capture.py",
+        "first_dip_tape_policy": "app/services/trading/momentum_neural/first_dip_tape_policy.py",
+        "replay_errors": "app/services/trading/momentum_neural/replay_errors.py",
         "replay_capture_contract": "app/services/trading/momentum_neural/replay_capture_contract.py",
         "replay_capture_runtime": "app/services/trading/momentum_neural/replay_capture_runtime.py",
     }
@@ -191,6 +198,16 @@ class BuiltIqfeedCaptureBootstrapBundle:
     startup_evidence_sha256: str
     resource_benchmark_path: Path
     resource_benchmark_sha256: str
+    benchmark_authority_manifest_path: Path
+    benchmark_authority_manifest_sha256: str
+    benchmark_runner_authority_path: Path
+    benchmark_runner_authority_sha256: str
+    benchmark_launch_receipt_path: Path
+    benchmark_launch_receipt_sha256: str
+    benchmark_execution_receipt_path: Path
+    benchmark_execution_receipt_sha256: str
+    benchmark_execution_claim_path: Path
+    benchmark_execution_claim_sha256: str
     commit_path: Path
     commit_sha256: str
     capture_store_root: Path
@@ -767,6 +784,14 @@ def _load_build_request(
         nonempty=True,
     )
     _exact_keys(benchmark, {"path", "sha256"}, "resource_benchmark")
+    for field in (
+        "benchmark_authority_manifest",
+        "benchmark_runner_authority",
+        "benchmark_execution_receipt",
+    ):
+        reference = _mapping(request.get(field), field, nonempty=True)
+        _exact_keys(reference, {"path", "sha256"}, field)
+        _sha(reference.get("sha256"), f"{field}.sha256")
     _source_pins(request.get("source_sha256"))
     account_id = _uuid(request.get("expected_account_id"), "expected_account_id")
     _safe_account_risk_snapshot(request.get("account_risk_snapshot"))
@@ -958,6 +983,12 @@ def build_iqfeed_capture_bootstrap_bundle(
     capture_store_root: str | Path,
     resource_benchmark_path: str | Path,
     resource_benchmark_sha256: str,
+    benchmark_authority_manifest_path: str | Path,
+    benchmark_authority_manifest_sha256: str,
+    benchmark_runner_authority_path: str | Path,
+    benchmark_runner_authority_sha256: str,
+    benchmark_execution_receipt_path: str | Path,
+    benchmark_execution_receipt_sha256: str,
     expected_source_hashes: Mapping[str, str],
     expected_account_id: str,
     account_risk_snapshot: Mapping[str, Any],
@@ -1036,6 +1067,67 @@ def build_iqfeed_capture_bootstrap_bundle(
     benchmark_path = benchmark_artifact.path
     benchmark_sha = benchmark_artifact.sha256
     benchmark = benchmark_artifact.document
+    benchmark_authority_manifest_artifact = preflight_module._read_hash_bound_json(
+        benchmark_authority_manifest_path,
+        benchmark_authority_manifest_sha256,
+        field="benchmark_authority_manifest",
+        roots=read_roots,
+        max_bytes=preflight_module._MAX_AUTHORITY_BYTES,
+        local_drive_check=local_drive_check,
+    )
+    benchmark_runner_authority_artifact = preflight_module._read_hash_bound_json(
+        benchmark_runner_authority_path,
+        benchmark_runner_authority_sha256,
+        field="benchmark_runner_authority",
+        roots=read_roots,
+        max_bytes=preflight_module._MAX_AUTHORITY_BYTES,
+        local_drive_check=local_drive_check,
+    )
+    benchmark_execution_receipt_artifact = preflight_module._read_hash_bound_json(
+        benchmark_execution_receipt_path,
+        benchmark_execution_receipt_sha256,
+        field="benchmark_execution_receipt",
+        roots=read_roots,
+        max_bytes=preflight_module._MAX_AUTHORITY_BYTES,
+        local_drive_check=local_drive_check,
+    )
+    runner_launch_ref = _mapping(
+        benchmark_runner_authority_artifact.document.get("launch_receipt"),
+        "benchmark_runner_authority.launch_receipt",
+        nonempty=True,
+    )
+    _exact_keys(
+        runner_launch_ref,
+        {"path", "sha256"},
+        "benchmark_runner_authority.launch_receipt",
+    )
+    benchmark_launch_receipt_artifact = preflight_module._read_hash_bound_json(
+        runner_launch_ref.get("path"),
+        runner_launch_ref.get("sha256"),
+        field="benchmark_launch_receipt",
+        roots=read_roots,
+        max_bytes=preflight_module._MAX_AUTHORITY_BYTES,
+        local_drive_check=local_drive_check,
+    )
+    execution_claim_ref = _mapping(
+        benchmark_execution_receipt_artifact.document.get("execution_claim"),
+        "benchmark_execution_receipt.execution_claim",
+        nonempty=True,
+    )
+    _exact_keys(
+        execution_claim_ref,
+        {"path", "sha256"},
+        "benchmark_execution_receipt.execution_claim",
+    )
+    benchmark_execution_claim_artifact = preflight_module._read_hash_bound_json(
+        execution_claim_ref.get("path"),
+        execution_claim_ref.get("sha256"),
+        field="benchmark_execution_claim",
+        roots=read_roots,
+        max_bytes=preflight_module._MAX_AUTHORITY_BYTES,
+        local_drive_check=local_drive_check,
+        content_addressed_filename=False,
+    )
     account_id = _uuid(expected_account_id, "expected_account_id")
     activation_id = _uuid(activation_generation, "activation_generation")
     if isinstance(generation, bool) or not isinstance(generation, int) or generation <= 0:
@@ -1079,6 +1171,19 @@ def build_iqfeed_capture_bootstrap_bundle(
         raise IqfeedCaptureBootstrapBundleError(
             "resource benchmark schema is unsupported"
         )
+    benchmark_environment = benchmark.get("environment")
+    if not isinstance(benchmark_environment, Mapping):
+        raise IqfeedCaptureBootstrapBundleError(
+            "resource benchmark environment is unavailable"
+        )
+    report_authority_manifest_sha256 = _sha(
+        benchmark_environment.get("benchmark_authority_manifest_sha256"),
+        "benchmark_authority_manifest_sha256",
+    )
+    benchmark_dependency_identity_sha256 = _sha(
+        benchmark_environment.get("dependency_root_identity_sha256"),
+        "benchmark_dependency_root_identity_sha256",
+    )
     resolved = benchmark.get("resolved_resource_binding")
     if not isinstance(resolved, Mapping):
         raise IqfeedCaptureBootstrapBundleError(
@@ -1104,11 +1209,35 @@ def build_iqfeed_capture_bootstrap_bundle(
             "benchmark_replay_capture_runtime"
         ],
         "contract_sha256": source_hashes["replay_capture_contract"],
+        "first_dip_tape_policy_sha256": source_hashes[
+            "first_dip_tape_policy"
+        ],
+        "pressure_probe_sha256": source_hashes[
+            "captured_paper_pressure_probe"
+        ],
+        "replay_errors_sha256": source_hashes["replay_errors"],
         "runtime_sha256": source_hashes["replay_capture_runtime"],
+        "stage0_sha256": source_hashes["captured_paper_isolated_stage0"],
     }
     if dict(benchmark_sources or {}) != expected_benchmark_sources:
         raise IqfeedCaptureBootstrapBundleError(
             "resource benchmark source bytes differ from the current capture runtime"
+        )
+    preflight_module._validate_benchmark_authority_chain(
+        authority_manifest=benchmark_authority_manifest_artifact,
+        runner_authority=benchmark_runner_authority_artifact,
+        launch_receipt=benchmark_launch_receipt_artifact,
+        execution_receipt=benchmark_execution_receipt_artifact,
+        execution_claim=benchmark_execution_claim_artifact,
+        resource_benchmark=benchmark_artifact,
+        source_paths=source_paths,
+        source_hashes=source_hashes,
+        read_roots=read_roots,
+        local_drive_check=local_drive_check,
+    )
+    if report_authority_manifest_sha256 != benchmark_authority_manifest_artifact.sha256:
+        raise IqfeedCaptureBootstrapBundleError(
+            "resource benchmark authority manifest differs from its external pin"
         )
 
     max_events = int(budget.get("max_queue_events") or 0)
@@ -1234,6 +1363,29 @@ def build_iqfeed_capture_bootstrap_bundle(
                 "sha256": benchmark_sha,
                 "binding_sha256": binding_sha256,
             },
+            "benchmark_authority_manifest": {
+                "path": str(benchmark_authority_manifest_artifact.path),
+                "sha256": benchmark_authority_manifest_artifact.sha256,
+            },
+            "benchmark_runner_authority": {
+                "path": str(benchmark_runner_authority_artifact.path),
+                "sha256": benchmark_runner_authority_artifact.sha256,
+            },
+            "benchmark_launch_receipt": {
+                "path": str(benchmark_launch_receipt_artifact.path),
+                "sha256": benchmark_launch_receipt_artifact.sha256,
+            },
+            "benchmark_execution_receipt": {
+                "path": str(benchmark_execution_receipt_artifact.path),
+                "sha256": benchmark_execution_receipt_artifact.sha256,
+            },
+            "benchmark_execution_claim": {
+                "path": str(benchmark_execution_claim_artifact.path),
+                "sha256": benchmark_execution_claim_artifact.sha256,
+            },
+            "benchmark_authority_read_roots": [
+                str(path) for path in read_roots
+            ],
             "startup_evidence": {
                 "path": str(startup_path),
                 "sha256": startup_sha,
@@ -1350,6 +1502,26 @@ def build_iqfeed_capture_bootstrap_bundle(
                 "sha256": benchmark_sha,
                 "binding_sha256": binding_sha256,
             },
+            "benchmark_authority_manifest": {
+                "path": str(benchmark_authority_manifest_artifact.path),
+                "sha256": benchmark_authority_manifest_artifact.sha256,
+            },
+            "benchmark_runner_authority": {
+                "path": str(benchmark_runner_authority_artifact.path),
+                "sha256": benchmark_runner_authority_artifact.sha256,
+            },
+            "benchmark_launch_receipt": {
+                "path": str(benchmark_launch_receipt_artifact.path),
+                "sha256": benchmark_launch_receipt_artifact.sha256,
+            },
+            "benchmark_execution_receipt": {
+                "path": str(benchmark_execution_receipt_artifact.path),
+                "sha256": benchmark_execution_receipt_artifact.sha256,
+            },
+            "benchmark_execution_claim": {
+                "path": str(benchmark_execution_claim_artifact.path),
+                "sha256": benchmark_execution_claim_artifact.sha256,
+            },
             "source_roster_sha256": _sha256_json(source_rows),
             "preflight_report_sha256": loaded.report["preflight_report_sha256"],
             "paper_order_submission_authorized": False,
@@ -1395,6 +1567,24 @@ def build_iqfeed_capture_bootstrap_bundle(
         "commit_sha256": commit_sha,
         "startup_evidence_sha256": startup_sha,
         "resource_benchmark_sha256": benchmark_sha,
+        "benchmark_authority_manifest_sha256": (
+            benchmark_authority_manifest_artifact.sha256
+        ),
+        "benchmark_runner_authority_sha256": (
+            benchmark_runner_authority_artifact.sha256
+        ),
+        "benchmark_launch_receipt_sha256": (
+            benchmark_launch_receipt_artifact.sha256
+        ),
+        "benchmark_execution_receipt_sha256": (
+            benchmark_execution_receipt_artifact.sha256
+        ),
+        "benchmark_execution_claim_sha256": (
+            benchmark_execution_claim_artifact.sha256
+        ),
+        "benchmark_dependency_root_identity_sha256": (
+            benchmark_dependency_identity_sha256
+        ),
         "resource_binding_sha256": binding_sha256,
         "capture_store_root": str(capture_store),
         "activation_generation": activation_id,
@@ -1414,6 +1604,16 @@ def build_iqfeed_capture_bootstrap_bundle(
         startup_evidence_sha256=startup_sha,
         resource_benchmark_path=benchmark_path,
         resource_benchmark_sha256=benchmark_sha,
+        benchmark_authority_manifest_path=benchmark_authority_manifest_artifact.path,
+        benchmark_authority_manifest_sha256=benchmark_authority_manifest_artifact.sha256,
+        benchmark_runner_authority_path=benchmark_runner_authority_artifact.path,
+        benchmark_runner_authority_sha256=benchmark_runner_authority_artifact.sha256,
+        benchmark_launch_receipt_path=benchmark_launch_receipt_artifact.path,
+        benchmark_launch_receipt_sha256=benchmark_launch_receipt_artifact.sha256,
+        benchmark_execution_receipt_path=benchmark_execution_receipt_artifact.path,
+        benchmark_execution_receipt_sha256=benchmark_execution_receipt_artifact.sha256,
+        benchmark_execution_claim_path=benchmark_execution_claim_artifact.path,
+        benchmark_execution_claim_sha256=benchmark_execution_claim_artifact.sha256,
         commit_path=commit_path,
         commit_sha256=commit_sha,
         capture_store_root=capture_store,
@@ -1517,12 +1717,45 @@ def build_iqfeed_capture_bootstrap_bundle_from_request(
         max_bytes=preflight_module._MAX_BENCHMARK_BYTES,
         local_drive_check=local_drive_check,
     )
+    authority_refs: dict[str, preflight_module.HashBoundJsonArtifact] = {}
+    for field in (
+        "benchmark_authority_manifest",
+        "benchmark_runner_authority",
+        "benchmark_execution_receipt",
+    ):
+        reference = _mapping(request.get(field), field, nonempty=True)
+        authority_refs[field] = preflight_module._read_hash_bound_json(
+            reference.get("path"),
+            reference.get("sha256"),
+            field=field,
+            roots=read_roots,
+            max_bytes=preflight_module._MAX_AUTHORITY_BYTES,
+            local_drive_check=local_drive_check,
+        )
     return build_iqfeed_capture_bootstrap_bundle(
         repo_root=repo,
         artifact_root=artifacts,
         capture_store_root=capture_store,
         resource_benchmark_path=benchmark.path,
         resource_benchmark_sha256=benchmark.sha256,
+        benchmark_authority_manifest_path=authority_refs[
+            "benchmark_authority_manifest"
+        ].path,
+        benchmark_authority_manifest_sha256=authority_refs[
+            "benchmark_authority_manifest"
+        ].sha256,
+        benchmark_runner_authority_path=authority_refs[
+            "benchmark_runner_authority"
+        ].path,
+        benchmark_runner_authority_sha256=authority_refs[
+            "benchmark_runner_authority"
+        ].sha256,
+        benchmark_execution_receipt_path=authority_refs[
+            "benchmark_execution_receipt"
+        ].path,
+        benchmark_execution_receipt_sha256=authority_refs[
+            "benchmark_execution_receipt"
+        ].sha256,
         expected_source_hashes=_source_pins(request.get("source_sha256")),
         expected_account_id=str(request.get("expected_account_id") or ""),
         account_risk_snapshot=_mapping(
@@ -1589,6 +1822,36 @@ def main(argv: Sequence[str] | None = None) -> int:
             "startup_evidence_sha256": built.startup_evidence_sha256,
             "resource_benchmark_path": str(built.resource_benchmark_path),
             "resource_benchmark_sha256": built.resource_benchmark_sha256,
+            "benchmark_authority_manifest_path": str(
+                built.benchmark_authority_manifest_path
+            ),
+            "benchmark_authority_manifest_sha256": (
+                built.benchmark_authority_manifest_sha256
+            ),
+            "benchmark_runner_authority_path": str(
+                built.benchmark_runner_authority_path
+            ),
+            "benchmark_runner_authority_sha256": (
+                built.benchmark_runner_authority_sha256
+            ),
+            "benchmark_launch_receipt_path": str(
+                built.benchmark_launch_receipt_path
+            ),
+            "benchmark_launch_receipt_sha256": (
+                built.benchmark_launch_receipt_sha256
+            ),
+            "benchmark_execution_receipt_path": str(
+                built.benchmark_execution_receipt_path
+            ),
+            "benchmark_execution_receipt_sha256": (
+                built.benchmark_execution_receipt_sha256
+            ),
+            "benchmark_execution_claim_path": str(
+                built.benchmark_execution_claim_path
+            ),
+            "benchmark_execution_claim_sha256": (
+                built.benchmark_execution_claim_sha256
+            ),
             "capture_store_root": str(built.capture_store_root),
             "source_sha256": dict(sorted(built.source_hashes.items())),
             "builder_receipt_sha256": _sha256_json(dict(built.builder_receipt)),

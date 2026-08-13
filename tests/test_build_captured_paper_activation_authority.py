@@ -17,6 +17,11 @@ import pytest
 from scripts import build_captured_paper_activation_authority as builder
 from scripts import captured_paper_activation_runner as runner
 from scripts import run_captured_paper_operator_chain as chain
+from tests.captured_paper_benchmark_authority_support import (
+    SyntheticBenchmarkAuthority,
+    build_test_benchmark_authority,
+    publish as publish_benchmark_authority,
+)
 
 
 REPO = Path(__file__).resolve().parents[1]
@@ -68,6 +73,7 @@ class AuthorityFixture:
     dependency: Path
     runtime_env: Path
     benchmark: Path
+    benchmark_authority: SyntheticBenchmarkAuthority
 
     def kwargs(self, **overrides: Any) -> dict[str, Any]:
         values: dict[str, Any] = {
@@ -77,6 +83,27 @@ class AuthorityFixture:
             "python_dependency_root": self.dependency,
             "runtime_env_path": self.runtime_env,
             "resource_benchmark_path": self.benchmark,
+            "resource_benchmark_sha256": (
+                self.benchmark_authority.resource_benchmark_sha256
+            ),
+            "benchmark_authority_manifest_path": (
+                self.benchmark_authority.benchmark_authority_manifest_path
+            ),
+            "benchmark_authority_manifest_sha256": (
+                self.benchmark_authority.benchmark_authority_manifest_sha256
+            ),
+            "benchmark_runner_authority_path": (
+                self.benchmark_authority.benchmark_runner_authority_path
+            ),
+            "benchmark_runner_authority_sha256": (
+                self.benchmark_authority.benchmark_runner_authority_sha256
+            ),
+            "benchmark_execution_receipt_path": (
+                self.benchmark_authority.benchmark_execution_receipt_path
+            ),
+            "benchmark_execution_receipt_sha256": (
+                self.benchmark_authority.benchmark_execution_receipt_sha256
+            ),
             "expected_account_id": ACCOUNT_ID,
             "test_database_name": "captured_paper_test",
             "bridge_configuration": BRIDGE_CONFIGURATION,
@@ -117,17 +144,17 @@ def _make_fixture(tmp_path: Path) -> AuthorityFixture:
         f"CHILI_ALPACA_EXPECTED_ACCOUNT_ID={ACCOUNT_ID}\n",
         encoding="utf-8",
     )
-    benchmark = inputs / "resource-benchmark.json"
-    benchmark.write_bytes(
-        json.dumps(
-            {
-                "benchmark_schema_version": "test.resource-benchmark.v1",
-                "measured": True,
-            },
-            sort_keys=True,
-            separators=(",", ":"),
-        ).encode("utf-8")
+    git_text = shutil.which("git.exe" if sys.platform == "win32" else "git")
+    assert git_text
+    benchmark_authority = build_test_benchmark_authority(
+        root=tmp_path,
+        candidate_root=candidate.resolve(strict=True),
+        expected_git_commit=_git(candidate, "rev-parse", "HEAD").stdout.strip(),
+        git_executable=Path(git_text),
+        python_executable=Path(sys.executable),
+        python_dependency_root=dependency.resolve(strict=True),
     )
+    benchmark = benchmark_authority.resource_benchmark_path
     return AuthorityFixture(
         root=tmp_path,
         candidate=candidate.resolve(strict=True),
@@ -136,6 +163,7 @@ def _make_fixture(tmp_path: Path) -> AuthorityFixture:
         dependency=dependency.resolve(strict=True),
         runtime_env=runtime_env.resolve(strict=True),
         benchmark=benchmark.resolve(strict=True),
+        benchmark_authority=benchmark_authority,
     )
 
 
@@ -235,6 +263,15 @@ def test_real_temp_git_builds_exact_canonical_loader_roundtrip_and_no_secret_rec
     assert receipt["broker_contacted"] is False
     assert receipt["host_state_mutated"] is False
     assert receipt["argv_is_shell_string"] is False
+    assert receipt["schema_version"] == (
+        "chili.captured-paper-activation-authority-receipt.v2"
+    )
+    assert chain_document["schema_version"] == (
+        "chili.captured-paper-operator-chain-request.v2"
+    )
+    for field, reference in authority_fixture.benchmark_authority.references().items():
+        assert chain_document[field] == reference
+        assert receipt[field] == reference
     assert built.validate_only_argv[-2:] == ("--mode", "ValidateOnly")
     assert built.validate_only_argv[:4] == (
         str(Path(sys.executable).resolve(strict=True)),
@@ -249,6 +286,48 @@ def test_real_temp_git_builds_exact_canonical_loader_roundtrip_and_no_secret_rec
         builder.ACTIVATE_CONFIRMATION,
     )
     assert _git(authority_fixture.candidate, "status", "--porcelain").stdout == ""
+
+
+def test_prelaunch_receipt_cannot_satisfy_terminal_execution_authority(
+    authority_fixture: AuthorityFixture,
+) -> None:
+    terminal = json.loads(
+        authority_fixture.benchmark_authority.benchmark_execution_receipt_path.read_bytes()
+    )
+    launch = terminal["launch_receipt"]
+
+    with pytest.raises(builder.CapturedPaperActivationAuthorityError) as caught:
+        builder.build_captured_paper_activation_authority(
+            **authority_fixture.kwargs(
+                benchmark_execution_receipt_path=Path(launch["path"]),
+                benchmark_execution_receipt_sha256=launch["sha256"],
+            )
+        )
+
+    assert caught.value.code == "BENCHMARK_AUTHORITY_REJECTED"
+    assert tuple(authority_fixture.artifact.iterdir()) == ()
+
+
+def test_runner_authority_argv_is_rederived_before_any_activation_publication(
+    authority_fixture: AuthorityFixture,
+) -> None:
+    runner_path = authority_fixture.benchmark_authority.benchmark_runner_authority_path
+    runner_document = json.loads(runner_path.read_bytes())
+    runner_document["runner_argv"][-1] = "0" * 64
+    replacement_path, replacement_sha = publish_benchmark_authority(
+        runner_path.parents[3], "runner-authority", runner_document
+    )
+
+    with pytest.raises(builder.CapturedPaperActivationAuthorityError) as caught:
+        builder.build_captured_paper_activation_authority(
+            **authority_fixture.kwargs(
+                benchmark_runner_authority_path=replacement_path,
+                benchmark_runner_authority_sha256=replacement_sha,
+            )
+        )
+
+    assert caught.value.code == "BENCHMARK_AUTHORITY_REJECTED"
+    assert tuple(authority_fixture.artifact.iterdir()) == ()
 
 
 def test_static_proof_cache_reference_is_content_addressed_and_pinned_into_chain(
@@ -459,8 +538,42 @@ def test_valid_looking_ignored_python_cache_cannot_execute_during_build(
     cached.write_bytes(header + marshal.dumps(malicious))
     assert not marker.exists()
 
+    git_text = shutil.which("git.exe" if sys.platform == "win32" else "git")
+    assert git_text
+    refreshed = build_test_benchmark_authority(
+        root=authority_fixture.root / "refreshed-benchmark",
+        candidate_root=authority_fixture.candidate,
+        expected_git_commit=_git(
+            authority_fixture.candidate, "rev-parse", "HEAD"
+        ).stdout.strip(),
+        git_executable=Path(git_text),
+        python_executable=Path(sys.executable),
+        python_dependency_root=authority_fixture.dependency,
+    )
+
     built = builder.build_captured_paper_activation_authority(
-        **authority_fixture.kwargs()
+        **authority_fixture.kwargs(
+            resource_benchmark_path=refreshed.resource_benchmark_path,
+            resource_benchmark_sha256=refreshed.resource_benchmark_sha256,
+            benchmark_authority_manifest_path=(
+                refreshed.benchmark_authority_manifest_path
+            ),
+            benchmark_authority_manifest_sha256=(
+                refreshed.benchmark_authority_manifest_sha256
+            ),
+            benchmark_runner_authority_path=(
+                refreshed.benchmark_runner_authority_path
+            ),
+            benchmark_runner_authority_sha256=(
+                refreshed.benchmark_runner_authority_sha256
+            ),
+            benchmark_execution_receipt_path=(
+                refreshed.benchmark_execution_receipt_path
+            ),
+            benchmark_execution_receipt_sha256=(
+                refreshed.benchmark_execution_receipt_sha256
+            ),
+        )
     )
 
     assert built.receipt_path.is_file()

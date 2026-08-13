@@ -40,7 +40,8 @@ from scripts.captured_paper_runtime_env import (
 )
 
 
-CHAIN_REQUEST_SCHEMA_VERSION = "chili.captured-paper-operator-chain-request.v1"
+CHAIN_REQUEST_SCHEMA_VERSION = "chili.captured-paper-operator-chain-request.v2"
+CHAIN_RESULT_SCHEMA_VERSION = "chili.captured-paper-operator-chain-result.v2"
 CHAIN_ERROR_SCHEMA_VERSION = "chili.captured-paper-operator-chain-error.v1"
 ACCOUNT_SCOPE = "alpaca:paper"
 
@@ -58,6 +59,9 @@ _CHAIN_KEYS = frozenset(
         "account_scope",
         "live_cash_authorized",
         "resource_benchmark",
+        "benchmark_authority_manifest",
+        "benchmark_runner_authority",
+        "benchmark_execution_receipt",
         "legacy_root",
         "python_dependency_root",
         "python_dependency_root_identity_sha256",
@@ -66,6 +70,40 @@ _CHAIN_KEYS = frozenset(
         "host_principal_user_id",
         "bridge_configuration",
         "static_proof_cache",
+    }
+)
+_OPERATOR_FLOW_RESULT_KEYS = frozenset(
+    {
+        "schema_version",
+        "verdict",
+        "activation_generation",
+        "account_scope",
+        "expected_account_id",
+        "code_build_sha256",
+        "static_proof_cache",
+        "probe_manifest",
+        "build_request",
+        "preactivation_manifest",
+        "next_command",
+        "host_snapshot_authority",
+        "current_host_inventory_observed",
+        "final_real_validate_only_required",
+        "paper_order_submission_authorized",
+        "paper_service_started",
+        "no_order_smoke_invoked",
+        "host_cutover_invoked",
+        "live_cash_authorized",
+    }
+)
+_CHAIN_RESULT_KEYS = frozenset(
+    {
+        *_OPERATOR_FLOW_RESULT_KEYS,
+        "activation_runner_request_sha256",
+        "operator_chain_request_sha256",
+        "resource_benchmark_sha256",
+        *activation_runner._BENCHMARK_REFERENCE_FIELDS,
+        "exact_print_preselection_evidence",
+        "exact_print_selection_receipt",
     }
 )
 
@@ -286,7 +324,7 @@ def _load_chain_request(
     value = _strict_json(raw, field="operator chain request")
     if _canonical_json_bytes(value) != raw or set(value) != set(_CHAIN_KEYS):
         raise CapturedPaperOperatorChainError(
-            "CHAIN_REQUEST_SCHEMA_INVALID", "chain request is not exact canonical v1"
+            "CHAIN_REQUEST_SCHEMA_INVALID", "chain request is not exact canonical v2"
         )
     if (
         value.get("schema_version") != CHAIN_REQUEST_SCHEMA_VERSION
@@ -694,40 +732,61 @@ def _capture_candidate_exact_print_preselection(
             )
         wall_clock = lambda: datetime.now(UTC)
         monotonic_clock = time.monotonic
-        pressure = operator_flow._measure_capture_pressure(
-            preflight=preflight,
-            wall_clock=wall_clock,
-            monotonic_clock=monotonic_clock,
+        pressure_deadline = (
+            float(preflight.resource_binding.policy.pressure_sample_max_age_seconds)
+            / 2.0
         )
-        # The first seed already has verified real-time Delay status.  Keep
-        # this preselection lane to
-        # one symbol bounds provider and depth work; the final selection still
-        # rechecks both candidate DB provenance and current real-time Delay state.
-        certification_seed = normalized[0]
-        evidence = run_capture_only_preactivation_smoke(
-            CaptureOnlySmokeConfiguration(
+        CapturedPaperPressureProbeClient = (
+            operator_flow._load_pressure_probe_client(preflight)
+        )
+        with CapturedPaperPressureProbeClient(
+            python_executable=Path(sys.executable).resolve(strict=True),
+            probe_root=preflight.capture_store_root.resolve(strict=True).parent,
+            response_timeout_seconds=pressure_deadline,
+            helper_path=preflight.source_paths[
+                "captured_paper_pressure_probe"
+            ],
+            expected_helper_sha256=preflight.source_hashes[
+                "captured_paper_pressure_probe"
+            ],
+        ) as pressure_probe:
+            pressure = operator_flow._measure_capture_pressure(
                 preflight=preflight,
-                pressure_sample=pressure,
-                capture_health_authority=IngressCaptureOnlyHealthAuthority(
+                wall_clock=wall_clock,
+                monotonic_clock=monotonic_clock,
+                pressure_probe=pressure_probe,
+                sample_deadline_seconds=pressure_deadline,
+            )
+            # The first seed already has verified real-time Delay status.  Keep
+            # this preselection lane to one symbol to bound provider and depth
+            # work; final selection still rechecks DB provenance and Delay.
+            certification_seed = normalized[0]
+            evidence = run_capture_only_preactivation_smoke(
+                CaptureOnlySmokeConfiguration(
                     preflight=preflight,
-                    certification_symbol=certification_seed,
-                    wall_clock=wall_clock,
+                    pressure_sample=pressure,
+                    capture_health_authority=IngressCaptureOnlyHealthAuthority(
+                        preflight=preflight,
+                        certification_symbol=certification_seed,
+                        wall_clock=wall_clock,
+                    ),
+                    trade_forced_symbols=(certification_seed,),
+                    depth_forced_symbols=(),
+                    l1_only_exact_print_preselection=True,
+                    activation_only_allow_closed_session_without_exact_print=(
+                        allow_closed_session_activation_only
+                    ),
+                    pressure_sampler=lambda: operator_flow._measure_capture_pressure(
+                        preflight=preflight,
+                        wall_clock=wall_clock,
+                        monotonic_clock=monotonic_clock,
+                        pressure_probe=pressure_probe,
+                        sample_deadline_seconds=pressure_deadline,
+                    ),
                 ),
-                trade_forced_symbols=(certification_seed,),
-                depth_forced_symbols=(),
-                l1_only_exact_print_preselection=True,
-                activation_only_allow_closed_session_without_exact_print=(
-                    allow_closed_session_activation_only
-                ),
-                pressure_sampler=lambda: operator_flow._measure_capture_pressure(
-                    preflight=preflight,
-                    wall_clock=wall_clock,
-                    monotonic_clock=monotonic_clock,
-                ),
-            ),
-            wall_clock=wall_clock,
-            monotonic_clock=monotonic_clock,
-        )
+                wall_clock=wall_clock,
+                monotonic_clock=monotonic_clock,
+            )
         if type(evidence) is not CaptureOnlySmokeEvidence:
             raise CapturedPaperOperatorChainError(
                 "CAPTURE_ONLY_ATTESTATION_INVALID",
@@ -973,19 +1032,38 @@ def run_operator_chain(
 ) -> Mapping[str, Any]:
     roots = tuple(Path(value).resolve(strict=True) for value in activation_request.allowed_read_roots)
     artifact_root = activation_request.artifact_root
-    benchmark_ref = chain_document.get("resource_benchmark")
-    if not isinstance(benchmark_ref, dict) or set(benchmark_ref) != {"path", "sha256"}:
+    benchmark_references = {
+        field: chain_document.get(field)
+        for field in activation_runner._BENCHMARK_REFERENCE_FIELDS
+    }
+    if benchmark_references != activation_request.benchmark_authority.references():
         raise CapturedPaperOperatorChainError(
-            "BENCHMARK_REFERENCE_INVALID", "resource benchmark reference is malformed"
+            "BENCHMARK_AUTHORITY_MISMATCH",
+            "chain terminal benchmark authority differs from the outer request",
         )
-    benchmark = _strict_path(
-        benchmark_ref.get("path"),
-        field="resource_benchmark",
-        roots=roots,
-        directory=False,
-        expected_sha256=str(benchmark_ref.get("sha256") or ""),
-        max_bytes=_MAX_BENCHMARK_BYTES,
+    benchmark_authority = activation_runner.validate_benchmark_authority_bundle(
+        references=benchmark_references,
+        allowed_read_roots=activation_request.allowed_read_roots,
+        expected_candidate_root=activation_request.candidate_root,
+        expected_git_commit=activation_request.expected_git_commit,
+        expected_git_executable=activation_request.git_executable,
+        expected_git_executable_sha256=activation_request.git_executable_sha256,
+        expected_python_executable=activation_request.python_executable,
+        expected_python_executable_sha256=(
+            activation_request.python_executable_sha256
+        ),
+        expected_python_dependency_root=activation_request.python_dependency_root,
+        expected_python_dependency_root_identity_sha256=(
+            activation_request.python_dependency_root_identity_sha256
+        ),
     )
+    if benchmark_authority != activation_request.benchmark_authority:
+        raise CapturedPaperOperatorChainError(
+            "BENCHMARK_AUTHORITY_MISMATCH",
+            "terminal benchmark authority changed after outer validation",
+        )
+    benchmark = benchmark_authority.resource_benchmark_path
+    benchmark_ref = benchmark_references["resource_benchmark"]
     static_cache_reference = chain_document.get("static_proof_cache")
     static_cache_path: Path | None = None
     static_cache_sha256: str | None = None
@@ -1101,6 +1179,15 @@ def run_operator_chain(
             "path": str(benchmark),
             "sha256": str(benchmark_ref["sha256"]),
         },
+        "benchmark_authority_manifest": dict(
+            benchmark_references["benchmark_authority_manifest"]
+        ),
+        "benchmark_runner_authority": dict(
+            benchmark_references["benchmark_runner_authority"]
+        ),
+        "benchmark_execution_receipt": dict(
+            benchmark_references["benchmark_execution_receipt"]
+        ),
         "source_sha256": _sha_source_inventory(activation_request.candidate_root),
         "expected_account_id": activation_request.expected_account_id,
         "account_risk_snapshot": account,
@@ -1265,8 +1352,32 @@ def run_operator_chain(
     )
     result = operator_flow.run_captured_paper_operator_flow(composition)
     document = result.to_dict()
+    if not (
+        isinstance(document, dict)
+        and set(document) == set(_OPERATOR_FLOW_RESULT_KEYS)
+        and document.get("schema_version")
+        == operator_flow.OPERATOR_RESULT_SCHEMA_VERSION
+        and document.get("verdict")
+        == "CAPTURED_ALPACA_PAPER_BUILD_READY_WITH_EXTERNAL_HOST_BASELINE"
+        and document.get("activation_generation") == generation
+        and document.get("account_scope") == ACCOUNT_SCOPE
+        and document.get("expected_account_id")
+        == activation_request.expected_account_id
+        and document.get("paper_order_submission_authorized") is False
+        and document.get("paper_service_started") is False
+        and document.get("no_order_smoke_invoked") is False
+        and document.get("host_cutover_invoked") is False
+        and document.get("live_cash_authorized") is False
+    ):
+        raise CapturedPaperOperatorChainError(
+            "OPERATOR_RESULT_INVALID",
+            "operator flow result schema or PAPER authority is not exact",
+        )
+    document["schema_version"] = CHAIN_RESULT_SCHEMA_VERSION
     document["activation_runner_request_sha256"] = activation_request.request_sha256
     document["operator_chain_request_sha256"] = activation_request.chain_request_sha256
+    for field, reference in benchmark_references.items():
+        document[field] = dict(reference)
     document["resource_benchmark_sha256"] = str(benchmark_ref["sha256"])
     document["exact_print_preselection_evidence"] = {
         "path": str(preselection.evidence_path),
@@ -1279,6 +1390,10 @@ def run_operator_chain(
     document["live_cash_authorized"] = False
     document["paper_order_submission_authorized"] = False
     document["paper_service_started"] = False
+    if set(document) != set(_CHAIN_RESULT_KEYS):
+        raise CapturedPaperOperatorChainError(
+            "CHAIN_RESULT_INTERNAL_ERROR", "operator chain result is not exact v2"
+        )
     print(f"PLAN: {plan_sha}")
     return document
 
@@ -1336,6 +1451,7 @@ __all__ = [
     "ACCOUNT_SCOPE",
     "CHAIN_ERROR_SCHEMA_VERSION",
     "CHAIN_REQUEST_SCHEMA_VERSION",
+    "CHAIN_RESULT_SCHEMA_VERSION",
     "CapturedPaperOperatorChainError",
     "ExactPrintPreselectionReceipt",
     "main",
