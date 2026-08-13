@@ -12,6 +12,7 @@ import uuid
 from collections import deque
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
+from unittest import mock
 
 import pytest
 import sqlalchemy as sa
@@ -69,8 +70,11 @@ def _reset_parser_state() -> None:
     with bridge._connection_state_lock:
         bridge._active_connection_generation = 0
         bridge._frame_sequence_by_generation.clear()
+        bridge._wire_chunk_sequence_by_generation.clear()
         bridge._protocol_acknowledged_generations.clear()
         bridge._selected_fields_ack_sha256_by_generation.clear()
+        bridge._selected_fields_phase_by_generation.clear()
+        bridge._selected_fields_request_chunk_fence_by_generation.clear()
     with bridge._capture_handoff_lock:
         bridge._capture_handoff = None
     with bridge._exact_print_heartbeat_lock:
@@ -880,6 +884,8 @@ def test_pending_backlog_is_refreshed_after_new_arrival():
 def test_selected_frame_enqueues_trade_and_quote_in_one_atomic_call(monkeypatch):
     generation = 17
     bridge._activate_connection_generation(generation)
+    bridge._request_selected_update_fields(mock.Mock(), generation)
+    chunk_sequence = bridge._next_wire_chunk_sequence(generation)
     ack_line = "S,CURRENT UPDATE FIELDNAMES," + ",".join(
         bridge.SELECTED_UPDATE_FIELDS
     ) + ","
@@ -888,6 +894,7 @@ def test_selected_frame_enqueues_trade_and_quote_in_one_atomic_call(monkeypatch)
         ack_line,
         connection_generation=generation,
         source_frame_sha256=ack_sha256,
+        source_chunk_sequence=chunk_sequence,
     )
     values = {
         "Symbol": "ATOMIC",
@@ -2020,7 +2027,16 @@ def test_connection_runner_waits_for_protocol_ack_before_selecting_fields(
             with self.condition:
                 self.sent.append(command)
                 if command == "S,SET PROTOCOL,6.2":
-                    self.responses.append(b"S,CURRENT PROTOCOL,6.2\r\n")
+                    self.responses.append(
+                        (
+                            "S,CURRENT PROTOCOL,6.2\r\n"
+                            "S,CURRENT UPDATE FIELDNAMES,Symbol,Most Recent Trade,"
+                            "Most Recent Trade Size,Most Recent Trade Time,"
+                            "Most Recent Trade Market Center,Total Volume,Bid,"
+                            "Bid Size,Ask,Ask Size,Open,High,Low,Close,"
+                            "Message Contents,Most Recent Trade Conditions,\r\n"
+                        ).encode("ascii")
+                    )
                 elif command == bridge.SELECT_UPDATE_FIELDS_COMMAND:
                     self.select_followed_protocol_ack = (
                         self.protocol_frame_delivered.is_set()
@@ -2074,6 +2090,323 @@ def test_connection_runner_waits_for_protocol_ack_before_selecting_fields(
         "S,SET PROTOCOL,6.2",
         bridge.SELECT_UPDATE_FIELDS_COMMAND,
     ]
+
+
+def test_pre_request_default_roster_is_ignored_then_exact_request_ack_is_ready(
+    monkeypatch,
+):
+    generation = 23
+    bridge._activate_connection_generation(generation)
+    default_line = (
+        "S,CURRENT UPDATE FIELDNAMES,Symbol,Most Recent Trade,"
+        "Most Recent Trade Size,Most Recent Trade Time,Most Recent Trade Market Center,"
+        "Total Volume,Bid,Bid Size,Ask,Ask Size,Open,High,Low,Close,"
+        "Message Contents,Most Recent Trade Conditions,"
+    )
+    default_chunk = bridge._next_wire_chunk_sequence(generation)
+    assert not bridge._observe_selected_update_fields_ack(
+        default_line,
+        connection_generation=generation,
+        source_frame_sha256=hashlib.sha256(default_line.encode()).hexdigest(),
+        source_chunk_sequence=default_chunk,
+    )
+    assert bridge._selected_fields_ack_sha256(generation) is None
+    assert not bridge._selected_fields_ack_failed(generation)
+
+    connection = mock.Mock()
+    bridge._request_selected_update_fields(connection, generation)
+    exact_chunk = bridge._next_wire_chunk_sequence(generation)
+    exact_line = "S,CURRENT UPDATE FIELDNAMES," + ",".join(
+        bridge.SELECTED_UPDATE_FIELDS
+    ) + ","
+    exact_sha = hashlib.sha256(exact_line.encode()).hexdigest()
+    assert bridge._observe_selected_update_fields_ack(
+        exact_line,
+        connection_generation=generation,
+        source_frame_sha256=exact_sha,
+        source_chunk_sequence=exact_chunk,
+    )
+    assert bridge._selected_fields_ack_sha256(generation) == exact_sha
+    assert not bridge._selected_fields_ack_failed(generation)
+
+
+def test_exact_pre_request_roster_cannot_authorize_without_post_request_ack():
+    generation = 24
+    bridge._activate_connection_generation(generation)
+    pre_request_chunk = bridge._next_wire_chunk_sequence(generation)
+    exact_line = "S,CURRENT UPDATE FIELDNAMES," + ",".join(
+        bridge.SELECTED_UPDATE_FIELDS
+    ) + ","
+    assert not bridge._observe_selected_update_fields_ack(
+        exact_line,
+        connection_generation=generation,
+        source_frame_sha256=hashlib.sha256(exact_line.encode()).hexdigest(),
+        source_chunk_sequence=pre_request_chunk,
+    )
+    assert bridge._selected_fields_ack_sha256(generation) is None
+
+
+def test_delayed_pre_request_chunk_cannot_fail_armed_generation():
+    generation = 30
+    bridge._activate_connection_generation(generation)
+    received_before_request = bridge._next_wire_chunk_sequence(generation)
+    bridge._request_selected_update_fields(mock.Mock(), generation)
+    delayed_wrong_line = "S,CURRENT UPDATE FIELDNAMES,Symbol,Bid,Ask,"
+    assert not bridge._observe_selected_update_fields_ack(
+        delayed_wrong_line,
+        connection_generation=generation,
+        source_frame_sha256=hashlib.sha256(delayed_wrong_line.encode()).hexdigest(),
+        source_chunk_sequence=received_before_request,
+    )
+    assert not bridge._selected_fields_ack_failed(generation)
+    assert bridge._selected_fields_ack_sha256(generation) is None
+
+
+def test_default_roster_after_request_is_non_authorizing_until_exact_ack():
+    generation = 31
+    bridge._activate_connection_generation(generation)
+    bridge._request_selected_update_fields(mock.Mock(), generation)
+    default_line = "S,CURRENT UPDATE FIELDNAMES," + ",".join(
+        bridge.IQFEED_DEFAULT_UPDATE_FIELDS
+    ) + ","
+    default_chunk = bridge._next_wire_chunk_sequence(generation)
+    assert not bridge._observe_selected_update_fields_ack(
+        default_line,
+        connection_generation=generation,
+        source_frame_sha256=hashlib.sha256(default_line.encode()).hexdigest(),
+        source_chunk_sequence=default_chunk,
+    )
+    assert not bridge._selected_fields_ack_failed(generation)
+    assert bridge._selected_fields_ack_sha256(generation) is None
+
+
+@pytest.mark.parametrize(
+    "fields",
+    (
+        bridge.SELECTED_UPDATE_FIELDS,
+        bridge.IQFEED_DEFAULT_UPDATE_FIELDS,
+        ("Symbol", "Bid", "Ask"),
+    ),
+    ids=("exact", "default", "wrong"),
+)
+def test_split_pre_request_roster_uses_first_byte_chunk_fence(
+    monkeypatch, fields
+):
+    generation = 33
+    bridge._activate_connection_generation(generation)
+    full_line = "S,CURRENT UPDATE FIELDNAMES," + ",".join(fields) + ","
+    split_at = max(1, len(full_line) // 2)
+    first = (
+        b"S,CURRENT PROTOCOL,6.2\r\n"
+        + full_line[:split_at].encode("ascii")
+    )
+    second = full_line[split_at:].encode("ascii") + b"\r\n"
+
+    class _SplitSocket:
+        def __init__(self):
+            self.calls = 0
+            self.release_second = bridge.threading.Event()
+
+        def recv(self, _size):
+            self.calls += 1
+            if self.calls == 1:
+                return first
+            if self.calls == 2:
+                assert self.release_second.wait(timeout=2.0)
+                return second
+            return b""
+
+    connection = _SplitSocket()
+    protocol_processed = bridge.threading.Event()
+    original_protocol_observer = bridge._observe_protocol_ack
+
+    def _observe_protocol(*args, **kwargs):
+        result = original_protocol_observer(*args, **kwargs)
+        protocol_processed.set()
+        return result
+
+    monkeypatch.setattr(bridge, "_observe_protocol_ack", _observe_protocol)
+    stop_event = bridge.threading.Event()
+    reader_thread = bridge.threading.Thread(
+        target=bridge.reader,
+        args=(connection, stop_event, generation),
+        daemon=True,
+    )
+    reader_thread.start()
+    assert protocol_processed.wait(timeout=2.0)
+    bridge._request_selected_update_fields(mock.Mock(), generation)
+    connection.release_second.set()
+    reader_thread.join(timeout=2.0)
+
+    assert not reader_thread.is_alive()
+    assert bridge._selected_fields_ack_sha256(generation) is None
+    assert not bridge._selected_fields_ack_failed(generation)
+
+
+def test_reader_does_not_recv_past_protocol_ack_before_field_request(
+    monkeypatch,
+):
+    generation = 35
+    bridge._activate_connection_generation(generation)
+    exact_line = "S,CURRENT UPDATE FIELDNAMES," + ",".join(
+        bridge.SELECTED_UPDATE_FIELDS
+    ) + ","
+
+    class _SequencedSocket:
+        def __init__(self):
+            self.calls = 0
+            self.second_recv_entered = bridge.threading.Event()
+            self.release_second_recv = bridge.threading.Event()
+
+        def recv(self, _size):
+            self.calls += 1
+            if self.calls == 1:
+                return b"S,CURRENT PROTOCOL,6.2\r\n"
+            if self.calls == 2:
+                self.second_recv_entered.set()
+                assert self.release_second_recv.wait(timeout=2.0)
+                return exact_line.encode("ascii") + b"\r\n"
+            return b""
+
+    connection = _SequencedSocket()
+    protocol_processed = bridge.threading.Event()
+    original_protocol_observer = bridge._observe_protocol_ack
+
+    def _observe_protocol(*args, **kwargs):
+        result = original_protocol_observer(*args, **kwargs)
+        protocol_processed.set()
+        return result
+
+    monkeypatch.setattr(bridge, "_observe_protocol_ack", _observe_protocol)
+    stop_event = bridge.threading.Event()
+    reader_thread = bridge.threading.Thread(
+        target=bridge.reader,
+        args=(connection, stop_event, generation),
+        daemon=True,
+    )
+    reader_thread.start()
+    try:
+        assert protocol_processed.wait(timeout=2.0)
+        assert not connection.second_recv_entered.wait(timeout=0.05)
+
+        bridge._request_selected_update_fields(mock.Mock(), generation)
+        assert connection.second_recv_entered.wait(timeout=2.0)
+        connection.release_second_recv.set()
+        reader_thread.join(timeout=2.0)
+
+        assert not reader_thread.is_alive()
+        assert bridge._selected_fields_ack_sha256(generation) == hashlib.sha256(
+            (exact_line + "\r").encode("ascii")
+        ).hexdigest()
+        assert not bridge._selected_fields_ack_failed(generation)
+    finally:
+        connection.release_second_recv.set()
+        stop_event.set()
+        reader_thread.join(timeout=2.0)
+
+
+def test_wrong_post_request_roster_is_sticky_failed_and_clears_readiness():
+    generation = 25
+    bridge._activate_connection_generation(generation)
+    bridge._request_selected_update_fields(mock.Mock(), generation)
+    wrong_chunk = bridge._next_wire_chunk_sequence(generation)
+    wrong_line = "S,CURRENT UPDATE FIELDNAMES,Symbol,Bid,Ask,"
+    assert not bridge._observe_selected_update_fields_ack(
+        wrong_line,
+        connection_generation=generation,
+        source_frame_sha256=hashlib.sha256(wrong_line.encode()).hexdigest(),
+        source_chunk_sequence=wrong_chunk,
+    )
+    assert bridge._selected_fields_ack_failed(generation)
+    assert bridge._selected_fields_ack_sha256(generation) is None
+    with pytest.raises(RuntimeError, match="phase is invalid"):
+        bridge._request_selected_update_fields(mock.Mock(), generation)
+
+
+def test_wrong_roster_after_exact_ack_revokes_selected_field_readiness():
+    generation = 26
+    bridge._activate_connection_generation(generation)
+    bridge._request_selected_update_fields(mock.Mock(), generation)
+    exact_chunk = bridge._next_wire_chunk_sequence(generation)
+    exact_line = "S,CURRENT UPDATE FIELDNAMES," + ",".join(
+        bridge.SELECTED_UPDATE_FIELDS
+    ) + ","
+    assert bridge._observe_selected_update_fields_ack(
+        exact_line,
+        connection_generation=generation,
+        source_frame_sha256=hashlib.sha256(exact_line.encode()).hexdigest(),
+        source_chunk_sequence=exact_chunk,
+    )
+    wrong_line = "S,CURRENT UPDATE FIELDNAMES,Symbol,Bid,Ask,"
+    wrong_chunk = bridge._next_wire_chunk_sequence(generation)
+    assert not bridge._observe_selected_update_fields_ack(
+        wrong_line,
+        connection_generation=generation,
+        source_frame_sha256=hashlib.sha256(wrong_line.encode()).hexdigest(),
+        source_chunk_sequence=wrong_chunk,
+    )
+    assert bridge._selected_fields_ack_failed(generation)
+    assert bridge._selected_fields_ack_sha256(generation) is None
+
+
+def test_default_roster_after_exact_ack_revokes_selected_field_readiness():
+    generation = 34
+    bridge._activate_connection_generation(generation)
+    bridge._request_selected_update_fields(mock.Mock(), generation)
+    exact_chunk = bridge._next_wire_chunk_sequence(generation)
+    exact_line = "S,CURRENT UPDATE FIELDNAMES," + ",".join(
+        bridge.SELECTED_UPDATE_FIELDS
+    ) + ","
+    assert bridge._observe_selected_update_fields_ack(
+        exact_line,
+        connection_generation=generation,
+        source_frame_sha256=hashlib.sha256(exact_line.encode()).hexdigest(),
+        source_chunk_sequence=exact_chunk,
+    )
+
+    default_line = "S,CURRENT UPDATE FIELDNAMES," + ",".join(
+        bridge.IQFEED_DEFAULT_UPDATE_FIELDS
+    ) + ","
+    default_chunk = bridge._next_wire_chunk_sequence(generation)
+    assert not bridge._observe_selected_update_fields_ack(
+        default_line,
+        connection_generation=generation,
+        source_frame_sha256=hashlib.sha256(default_line.encode()).hexdigest(),
+        source_chunk_sequence=default_chunk,
+    )
+    assert bridge._selected_fields_ack_failed(generation)
+    assert bridge._selected_fields_ack_sha256(generation) is None
+
+
+def test_stale_generation_roster_cannot_mutate_active_ack_state():
+    stale_generation = 27
+    active_generation = 28
+    bridge._activate_connection_generation(stale_generation)
+    bridge._activate_connection_generation(active_generation)
+    bridge._request_selected_update_fields(mock.Mock(), active_generation)
+    stale_chunk = bridge._next_wire_chunk_sequence(active_generation)
+    exact_line = "S,CURRENT UPDATE FIELDNAMES," + ",".join(
+        bridge.SELECTED_UPDATE_FIELDS
+    ) + ","
+    assert not bridge._observe_selected_update_fields_ack(
+        exact_line,
+        connection_generation=stale_generation,
+        source_frame_sha256=hashlib.sha256(exact_line.encode()).hexdigest(),
+        source_chunk_sequence=stale_chunk,
+    )
+    assert bridge._selected_fields_ack_sha256(active_generation) is None
+    assert not bridge._selected_fields_ack_failed(active_generation)
+
+
+def test_selected_field_send_failure_stickily_fails_generation():
+    generation = 29
+    bridge._activate_connection_generation(generation)
+    connection = mock.Mock()
+    connection.sendall.side_effect = OSError("synthetic send failure")
+    with pytest.raises(OSError, match="synthetic send failure"):
+        bridge._request_selected_update_fields(connection, generation)
+    assert bridge._selected_fields_ack_failed(generation)
+    assert bridge._selected_fields_ack_sha256(generation) is None
 
 
 def test_connection_runner_retries_field_selection_once_after_missing_ack(
@@ -2134,6 +2467,89 @@ def test_connection_runner_retries_field_selection_once_after_missing_ack(
         bridge.SELECT_UPDATE_FIELDS_COMMAND,
     ]
     assert connection.closed.is_set()
+
+
+def test_ack_landing_after_timeout_prevents_redundant_retry(monkeypatch):
+    class _BlockingSocket:
+        def __init__(self):
+            self.closed = bridge.threading.Event()
+            self.sent = []
+
+        def settimeout(self, _timeout):
+            return None
+
+        def sendall(self, payload):
+            self.sent.append(payload.decode("ascii").rstrip("\r\n"))
+
+        def recv(self, _size):
+            self.closed.wait(timeout=2.0)
+            return b""
+
+        def shutdown(self, _how):
+            self.closed.set()
+
+        def close(self):
+            self.closed.set()
+
+    connection = _BlockingSocket()
+    wait_calls = {"value": 0}
+
+    def _wait_with_late_ack(generation, _stop, **_kwargs):
+        wait_calls["value"] += 1
+        assert wait_calls["value"] == 1
+        exact_line = "S,CURRENT UPDATE FIELDNAMES," + ",".join(
+            bridge.SELECTED_UPDATE_FIELDS
+        ) + ","
+        chunk_sequence = bridge._next_wire_chunk_sequence(generation)
+        assert bridge._observe_selected_update_fields_ack(
+            exact_line,
+            connection_generation=generation,
+            source_frame_sha256=hashlib.sha256(exact_line.encode()).hexdigest(),
+            source_chunk_sequence=chunk_sequence,
+        )
+        # Model the timeout waiter returning its already-computed False just
+        # after the reader publishes the exact ACK.
+        return False
+
+    monkeypatch.setattr(
+        bridge.socket, "create_connection", lambda *_a, **_k: connection
+    )
+    monkeypatch.setattr(
+        bridge, "_record_capture_connection_boundary", lambda **_k: None
+    )
+    monkeypatch.setattr(bridge, "_wait_for_protocol_ack", lambda *_a, **_k: True)
+    monkeypatch.setattr(bridge, "_wait_for_selected_fields_ack", _wait_with_late_ack)
+    monkeypatch.setattr(bridge, "writer", lambda *_a: None)
+
+    bridge._run_connection(set(), None)
+
+    assert connection.sent.count(bridge.SELECT_UPDATE_FIELDS_COMMAND) == 1
+    assert wait_calls["value"] == 1
+    assert connection.closed.is_set()
+
+
+def test_retry_does_not_reclassify_already_received_exact_ack_chunk():
+    generation = 32
+    bridge._activate_connection_generation(generation)
+    connection = mock.Mock()
+    assert not bridge._request_selected_update_fields(connection, generation)
+    exact_chunk_received = bridge._next_wire_chunk_sequence(generation)
+
+    # The retry occurs while the reader has received, but not yet observed,
+    # the exact ACK.  Its original request fence must remain stable.
+    assert not bridge._request_selected_update_fields(connection, generation)
+    exact_line = "S,CURRENT UPDATE FIELDNAMES," + ",".join(
+        bridge.SELECTED_UPDATE_FIELDS
+    ) + ","
+    exact_sha = hashlib.sha256(exact_line.encode()).hexdigest()
+    assert bridge._observe_selected_update_fields_ack(
+        exact_line,
+        connection_generation=generation,
+        source_frame_sha256=exact_sha,
+        source_chunk_sequence=exact_chunk_received,
+    )
+    assert bridge._selected_fields_ack_sha256(generation) == exact_sha
+    assert connection.sendall.call_count == 2
 
 
 def test_nonquiescent_reader_refuses_reconnect(monkeypatch):

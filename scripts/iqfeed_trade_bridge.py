@@ -311,6 +311,28 @@ SELECTED_UPDATE_FIELDS = (
     "Message Contents",
     "Decimal Precision",
 )
+# IQConnect 6.2 publishes this legacy/default roster on a newly opened socket
+# before it processes our exact SELECT UPDATE FIELDS command.  It is never an
+# authority ACK, even if it arrives late; absence of the exact roster still
+# reaches the bounded retry/final-timeout failure below.
+IQFEED_DEFAULT_UPDATE_FIELDS = (
+    "Symbol",
+    "Most Recent Trade",
+    "Most Recent Trade Size",
+    "Most Recent Trade Time",
+    "Most Recent Trade Market Center",
+    "Total Volume",
+    "Bid",
+    "Bid Size",
+    "Ask",
+    "Ask Size",
+    "Open",
+    "High",
+    "Low",
+    "Close",
+    "Message Contents",
+    "Most Recent Trade Conditions",
+)
 SELECTED_UPDATE_FIELDS_SHA256 = hashlib.sha256(
     json.dumps(
         list(SELECTED_UPDATE_FIELDS),
@@ -2042,12 +2064,45 @@ def _wait_for_protocol_ack(
     return _protocol_acknowledged(connection_generation)
 
 
+def _wait_for_initial_selected_fields_request(
+    connection_generation: int,
+    stop_event: threading.Event,
+) -> bool:
+    """Do not receive beyond the protocol-ACK chunk before SELECT is sent.
+
+    The selected-field request fence is meaningful only if bytes returned by a
+    pre-request ``recv`` cannot be stamped after the request transition.  Once
+    the reader has observed the protocol ACK, park it between recv calls until
+    the request helper has armed *and completed* the serialized socket send.
+    """
+
+    generation = int(connection_generation)
+    while True:
+        with _connection_state_lock:
+            if _active_connection_generation != generation:
+                return False
+            protocol_acknowledged = (
+                generation in _protocol_acknowledged_generations
+            )
+            selected_phase = _selected_fields_phase_by_generation.get(
+                generation, _SELECTED_FIELDS_PRE_REQUEST
+            )
+        if (
+            not protocol_acknowledged
+            or selected_phase != _SELECTED_FIELDS_PRE_REQUEST
+        ):
+            return True
+        if stop_event.wait(0.001):
+            return False
+
+
 def _observe_selected_update_fields_ack(
     line: str,
     *,
     connection_generation: int,
     source_frame_sha256: str,
     source_frame_bytes: bytes | None = None,
+    source_chunk_sequence: int,
 ) -> bool:
     """Bind the exact provider-confirmed Q layout to this socket generation."""
 
@@ -2058,14 +2113,59 @@ def _observe_selected_update_fields_ack(
     if raw_fields and raw_fields[-1] == "":
         raw_fields = raw_fields[:-1]
     fields = tuple(raw_fields)
-    if fields != SELECTED_UPDATE_FIELDS:
-        log.critical(
-            "IQFeed selected-field acknowledgement mismatch generation=%d expected=%s observed=%s",
-            connection_generation,
-            SELECTED_UPDATE_FIELDS,
-            fields,
+    generation = int(connection_generation)
+    with _connection_state_lock:
+        if _active_connection_generation != generation:
+            return False
+        phase = _selected_fields_phase_by_generation.get(
+            generation, _SELECTED_FIELDS_PRE_REQUEST
         )
-        return False
+        if phase == _SELECTED_FIELDS_PRE_REQUEST:
+            # IQConnect can publish its default roster immediately after the
+            # socket opens.  It is useful telemetry, but it is not an ACK for
+            # this generation's still-unsent SELECT UPDATE FIELDS command.
+            log.info(
+                "IQFeed ignored pre-request update-field roster generation=%d",
+                generation,
+            )
+            return False
+        request_fence = _selected_fields_request_chunk_fence_by_generation.get(
+            generation
+        )
+        if (
+            type(source_chunk_sequence) is not int
+            or source_chunk_sequence <= 0
+            or request_fence is None
+            or source_chunk_sequence <= request_fence
+        ):
+            log.info(
+                "IQFeed ignored pre-request-chunk update-field roster generation=%d",
+                generation,
+            )
+            return False
+        if (
+            fields == IQFEED_DEFAULT_UPDATE_FIELDS
+            and phase != _SELECTED_FIELDS_ACKED
+        ):
+            log.info(
+                "IQFeed ignored default update-field roster generation=%d",
+                generation,
+            )
+            return False
+        if phase == _SELECTED_FIELDS_FAILED:
+            return False
+        if fields != SELECTED_UPDATE_FIELDS:
+            _selected_fields_phase_by_generation[generation] = (
+                _SELECTED_FIELDS_FAILED
+            )
+            _selected_fields_ack_sha256_by_generation.pop(generation, None)
+            log.critical(
+                "IQFeed selected-field acknowledgement mismatch generation=%d expected=%s observed=%s",
+                generation,
+                SELECTED_UPDATE_FIELDS,
+                fields,
+            )
+            return False
     if (
         len(source_frame_sha256) != 64
         or any(ch not in "0123456789abcdef" for ch in source_frame_sha256)
@@ -2082,12 +2182,65 @@ def _observe_selected_update_fields_ack(
     ):
         return False
     with _connection_state_lock:
-        if _active_connection_generation != int(connection_generation):
+        if (
+            _active_connection_generation != generation
+            or _selected_fields_phase_by_generation.get(generation)
+            not in {_SELECTED_FIELDS_AWAITING_ACK, _SELECTED_FIELDS_ACKED}
+        ):
             return False
-        _selected_fields_ack_sha256_by_generation[
-            int(connection_generation)
-        ] = source_frame_sha256
+        if _selected_fields_phase_by_generation[generation] == _SELECTED_FIELDS_ACKED:
+            return True
+        _selected_fields_ack_sha256_by_generation[generation] = source_frame_sha256
+        _selected_fields_phase_by_generation[generation] = _SELECTED_FIELDS_ACKED
     return True
+
+
+def _selected_fields_ack_failed(connection_generation: int) -> bool:
+    with _connection_state_lock:
+        return (
+            _selected_fields_phase_by_generation.get(int(connection_generation))
+            == _SELECTED_FIELDS_FAILED
+        )
+
+
+def _request_selected_update_fields(
+    connection_socket: socket.socket,
+    connection_generation: int,
+) -> bool:
+    """Arm and send one field request as one observer-serialized transition."""
+
+    generation = int(connection_generation)
+    with _connection_state_lock:
+        if _active_connection_generation != generation:
+            raise RuntimeError("IQFeed selected-field request generation is stale")
+        phase = _selected_fields_phase_by_generation.get(
+            generation, _SELECTED_FIELDS_PRE_REQUEST
+        )
+        if phase == _SELECTED_FIELDS_ACKED:
+            return True
+        if phase not in {
+            _SELECTED_FIELDS_PRE_REQUEST,
+            _SELECTED_FIELDS_AWAITING_ACK,
+        }:
+            raise RuntimeError("IQFeed selected-field request phase is invalid")
+        _selected_fields_phase_by_generation[generation] = (
+            _SELECTED_FIELDS_AWAITING_ACK
+        )
+        if phase == _SELECTED_FIELDS_PRE_REQUEST:
+            _selected_fields_request_chunk_fence_by_generation[generation] = (
+                _wire_chunk_sequence_by_generation.get(generation, 0)
+            )
+        elif generation not in _selected_fields_request_chunk_fence_by_generation:
+            raise RuntimeError("IQFeed selected-field request fence is absent")
+        try:
+            _send(connection_socket, SELECT_UPDATE_FIELDS_COMMAND)
+        except BaseException:
+            _selected_fields_phase_by_generation[generation] = (
+                _SELECTED_FIELDS_FAILED
+            )
+            _selected_fields_ack_sha256_by_generation.pop(generation, None)
+            raise
+        return False
 
 
 def _selected_fields_ack_sha256(connection_generation: int) -> str | None:
@@ -2110,6 +2263,8 @@ def _wait_for_selected_fields_ack(
     while time.monotonic() < deadline:
         if _selected_fields_ack_sha256(connection_generation) is not None:
             return True
+        if _selected_fields_ack_failed(connection_generation):
+            return False
         if not _connection_generation_active(connection_generation, stop_event):
             return False
         time.sleep(min(0.01, max(0.0, deadline - time.monotonic())))
@@ -2298,8 +2453,15 @@ def _mark_socket_frame() -> None:
     _last_socket_frame_monotonic = time.monotonic()
 _connection_generation = 0
 _frame_sequence_by_generation: dict[int, int] = {}
+_wire_chunk_sequence_by_generation: dict[int, int] = {}
 _protocol_acknowledged_generations: set[int] = set()
 _selected_fields_ack_sha256_by_generation: dict[int, str] = {}
+_SELECTED_FIELDS_PRE_REQUEST = "pre_request"
+_SELECTED_FIELDS_AWAITING_ACK = "awaiting_ack"
+_SELECTED_FIELDS_ACKED = "acked"
+_SELECTED_FIELDS_FAILED = "failed"
+_selected_fields_phase_by_generation: dict[int, str] = {}
+_selected_fields_request_chunk_fence_by_generation: dict[int, int] = {}
 _capture_handoff_lock = threading.Lock()
 _capture_handoff: Any | None = None
 _capture_batch_receipt_type: type | None = None
@@ -2543,8 +2705,15 @@ def _begin_connection_generation() -> int:
         _connection_generation += 1
         _active_connection_generation = _connection_generation
         _frame_sequence_by_generation[_connection_generation] = 0
+        _wire_chunk_sequence_by_generation[_connection_generation] = 0
         _protocol_acknowledged_generations.discard(_connection_generation)
         _selected_fields_ack_sha256_by_generation.pop(_connection_generation, None)
+        _selected_fields_phase_by_generation[_connection_generation] = (
+            _SELECTED_FIELDS_PRE_REQUEST
+        )
+        _selected_fields_request_chunk_fence_by_generation.pop(
+            _connection_generation, None
+        )
         return _connection_generation
 
 
@@ -2553,8 +2722,15 @@ def _activate_connection_generation(connection_generation: int) -> None:
     with _connection_state_lock:
         _active_connection_generation = int(connection_generation)
         _frame_sequence_by_generation.setdefault(int(connection_generation), 0)
+        _wire_chunk_sequence_by_generation[int(connection_generation)] = 0
         _protocol_acknowledged_generations.discard(int(connection_generation))
         _selected_fields_ack_sha256_by_generation.pop(
+            int(connection_generation), None
+        )
+        _selected_fields_phase_by_generation[int(connection_generation)] = (
+            _SELECTED_FIELDS_PRE_REQUEST
+        )
+        _selected_fields_request_chunk_fence_by_generation.pop(
             int(connection_generation), None
         )
 
@@ -2567,6 +2743,18 @@ def _next_source_frame_sequence(connection_generation: int) -> int:
         next_sequence = _frame_sequence_by_generation.get(generation, 0) + 1
         _frame_sequence_by_generation[generation] = next_sequence
         return next_sequence
+
+
+def _next_wire_chunk_sequence(connection_generation: int) -> int:
+    generation = int(connection_generation)
+    if generation <= 0:
+        raise ValueError("IQFeed wire chunk generation must be positive")
+    with _connection_state_lock:
+        if _active_connection_generation != generation:
+            raise RuntimeError("IQFeed wire chunk generation is stale")
+        sequence = _wire_chunk_sequence_by_generation.get(generation, 0) + 1
+        _wire_chunk_sequence_by_generation[generation] = sequence
+        return sequence
 
 
 def bind_capture_handoff(handoff: Any) -> None:
@@ -2735,8 +2923,13 @@ def _retire_connection_generation(connection_generation: int) -> None:
         if _active_connection_generation == int(connection_generation):
             _active_connection_generation = 0
         _frame_sequence_by_generation.pop(int(connection_generation), None)
+        _wire_chunk_sequence_by_generation.pop(int(connection_generation), None)
         _protocol_acknowledged_generations.discard(int(connection_generation))
         _selected_fields_ack_sha256_by_generation.pop(
+            int(connection_generation), None
+        )
+        _selected_fields_phase_by_generation.pop(int(connection_generation), None)
+        _selected_fields_request_chunk_fence_by_generation.pop(
             int(connection_generation), None
         )
 
@@ -3368,8 +3561,13 @@ def reader(
     connection_generation: int,
 ) -> None:
     buf = b""
+    buf_start_chunk_sequence: int | None = None
     seen = 0
     while _connection_generation_active(connection_generation, stop_event):
+        if not _wait_for_initial_selected_fields_request(
+            connection_generation, stop_event
+        ):
+            break
         try:
             chunk = connection_socket.recv(65536)
         except socket.timeout:
@@ -3379,11 +3577,18 @@ def reader(
         if not chunk:
             log.warning("server closed connection")
             break
+        source_chunk_sequence = _next_wire_chunk_sequence(connection_generation)
         if not _connection_generation_active(connection_generation, stop_event):
             break
+        if not buf:
+            buf_start_chunk_sequence = source_chunk_sequence
         buf += chunk
         while b"\n" in buf:
             raw, buf = buf.split(b"\n", 1)
+            source_frame_start_chunk_sequence = buf_start_chunk_sequence
+            buf_start_chunk_sequence = source_chunk_sequence if buf else None
+            if source_frame_start_chunk_sequence is None:
+                raise RuntimeError("IQFeed source frame start chunk is absent")
             decoded_wire = raw.decode(errors="replace")
             line = (
                 decoded_wire[:-1]
@@ -3455,11 +3660,16 @@ def reader(
                         connection_generation=connection_generation,
                         source_frame_sha256=source_frame_sha256,
                         source_frame_bytes=raw,
+                        source_chunk_sequence=source_frame_start_chunk_sequence,
                     ):
                         log.warning(
                             "IQFeed ignored non-authoritative update-field roster generation=%d",
                             connection_generation,
                         )
+                        if _selected_fields_ack_failed(connection_generation):
+                            _request_connection_stop(
+                                connection_generation, stop_event
+                            )
                 elif any(k in line.upper() for k in ("SYMBOL LIMIT", "MAX SYMBOL", "LIMIT REACHED", "TOO MANY SYMBOL")):
                     if _connection_generation_active(connection_generation, stop_event):
                         _mark_watch_limit_hit()
@@ -4095,7 +4305,9 @@ def _run_connection(
         ):
             _capture_bc("protocol-ack FAILED (6.2 not acknowledged)")
             raise RuntimeError("IQFeed protocol 6.2 was not acknowledged")
-        _send(connection_socket, SELECT_UPDATE_FIELDS_COMMAND)
+        _request_selected_update_fields(
+            connection_socket, connection_generation
+        )
         _capture_bc("field selection sent; BEGIN field-ack wait")
         selected_fields_acknowledged = _wait_for_selected_fields_ack(
             connection_generation,
@@ -4103,24 +4315,30 @@ def _run_connection(
         )
         if (
             not selected_fields_acknowledged
+            and not _selected_fields_ack_failed(connection_generation)
             and _connection_generation_active(
                 connection_generation,
                 stop_event,
             )
         ):
-            log.warning(
-                "IQFeed exact selected-field roster was not acknowledged; "
-                "retrying once generation=%d",
-                connection_generation,
+            already_acknowledged = _request_selected_update_fields(
+                connection_socket, connection_generation
             )
-            _send(connection_socket, SELECT_UPDATE_FIELDS_COMMAND)
-            _capture_bc(
-                "field selection retry sent; BEGIN final field-ack wait"
-            )
-            selected_fields_acknowledged = _wait_for_selected_fields_ack(
-                connection_generation,
-                stop_event,
-            )
+            if already_acknowledged:
+                selected_fields_acknowledged = True
+            else:
+                log.warning(
+                    "IQFeed exact selected-field roster was not acknowledged; "
+                    "retried once generation=%d",
+                    connection_generation,
+                )
+                _capture_bc(
+                    "field selection retry sent; BEGIN final field-ack wait"
+                )
+                selected_fields_acknowledged = _wait_for_selected_fields_ack(
+                    connection_generation,
+                    stop_event,
+                )
         if not selected_fields_acknowledged:
             _capture_bc("field-ack FAILED (roster not acknowledged)")
             raise RuntimeError(
