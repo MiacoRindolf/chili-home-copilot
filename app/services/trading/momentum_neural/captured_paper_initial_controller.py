@@ -4,7 +4,7 @@ This is the production composition seam for a symbol which does not yet have
 an automation session.  It deliberately performs only the bounded sequence
 needed to create a recoverable, non-executable PENDING_OWNER:
 
-``strict Q -> hot IQFeed print capture -> continuity proof -> typed material
+``strict Q -> hot IQFeed print capture -> exact membership proof -> typed material
 -> PREOWNER -> PENDING_OWNER``.
 
 Missing L2 is local coverage information and never suppresses an otherwise
@@ -54,10 +54,14 @@ from .captured_paper_preowner_promotion import (
 from .adaptive_risk_policy import AdaptiveRiskPolicySettingsReceipt
 from .replay_capture_contract import (
     CaptureContractError,
+    CaptureMicrostructureOperation,
     CaptureMicrostructureReadQuery,
     CaptureStream,
-    FSMDependencyProfile,
-    FSMStreamDependency,
+    InitialIqfeedExactMembershipSelector,
+    IQFEED_L1_SOURCE_PROVENANCE_FIELD,
+    resolve_capture_source_payload,
+    sha256_json,
+    validate_iqfeed_exact_print_source_provenance,
 )
 
 
@@ -421,25 +425,122 @@ class CapturedPaperInitialAdmissionController:
                 raise CapturedPaperInitialControllerError(
                     "initial_controller_trigger_query_invalid"
                 ) from exc
-            dependency_profile = FSMDependencyProfile(
-                required_streams=frozenset({CaptureStream.IQFEED_PRINT}),
-                required_read_ids=(receipt.read_id,),
-                stream_dependencies=(
-                    FSMStreamDependency(
-                        stream=CaptureStream.IQFEED_PRINT,
-                        exact_provider_event_at_required=True,
-                        market_reference_at_required=False,
-                        max_source_age_seconds=market_max_age,
-                        coverage_start_at=query.event_start_exclusive,
-                    ),
-                ),
+            if (
+                query.operation
+                is not CaptureMicrostructureOperation.EXACT_EVENT_MEMBERSHIP
+            ):
+                raise CapturedPaperInitialControllerError(
+                    "initial_controller_trigger_query_invalid"
+                )
+            trigger_receipt = resolution.receipt
+            assert trigger_receipt is not None
+            selected = tuple(
+                source
+                for source in captured.source_events
+                if source.event_sha256 == trigger_receipt.source_event_sha256
             )
+            if len(selected) != 1:
+                raise CapturedPaperInitialControllerError(
+                    "initial_controller_trigger_source_ambiguous"
+                )
+            selected_source = selected[0]
+            try:
+                selected_view = resolve_capture_source_payload(selected_source)
+                selected_provenance = (
+                    validate_iqfeed_exact_print_source_provenance(
+                        selected_view.payload.get(
+                            IQFEED_L1_SOURCE_PROVENANCE_FIELD
+                        ),
+                        symbol=normalized,
+                        clocks=selected_source.clocks,
+                    )
+                )
+                selector = InitialIqfeedExactMembershipSelector(
+                    decision_id=decision_id,
+                    trigger_receipt_sha256=trigger_receipt.content_sha256,
+                    notify_sha256=trigger_receipt.notify_sha256,
+                    symbol=normalized,
+                    bridge_version=trigger_receipt.bridge_version,
+                    bridge_run_id=trigger_receipt.bridge_run_id,
+                    connection_generation=(
+                        trigger_receipt.connection_generation
+                    ),
+                    source_frame_sequence=(
+                        trigger_receipt.source_frame_sequence
+                    ),
+                    source_frame_sha256=trigger_receipt.source_frame_sha256,
+                    selected_event_sha256=(
+                        trigger_receipt.source_event_sha256
+                    ),
+                    selected_event_sequence=(
+                        trigger_receipt.source_event_sequence
+                    ),
+                    selected_payload_sha256=(
+                        trigger_receipt.source_payload_sha256
+                    ),
+                    selected_provenance_sha256=(
+                        trigger_receipt.source_provenance_sha256
+                    ),
+                    provider_event_at=(
+                        trigger_receipt.source_provider_event_at
+                    ),
+                    received_at=trigger_receipt.source_received_at,
+                    original_available_at=(
+                        trigger_receipt.source_original_available_at
+                    ),
+                    durable_available_at=(
+                        trigger_receipt.source_durable_available_at
+                    ),
+                    release_kind=trigger_receipt.source_release_kind,
+                    bridge_source_sha256=str(
+                        selected_provenance.get("bridge_source_sha256") or ""
+                    ),
+                    bridge_configuration_sha256=str(
+                        selected_provenance.get(
+                            "bridge_configuration_sha256"
+                        )
+                        or ""
+                    ),
+                    capture_resource_binding_sha256=str(
+                        selected_provenance.get(
+                            "capture_resource_binding_sha256"
+                        )
+                        or ""
+                    ),
+                    handoff_configuration_sha256=str(
+                        selected_provenance.get(
+                            "handoff_configuration_sha256"
+                        )
+                        or ""
+                    ),
+                    selected_update_fields_sha256=str(
+                        selected_provenance.get(
+                            "selected_update_fields_sha256"
+                        )
+                        or ""
+                    ),
+                    selected_update_fields_ack_sha256=str(
+                        selected_provenance.get(
+                            "selected_update_fields_ack_sha256"
+                        )
+                        or ""
+                    ),
+                )
+                if selector.selected_provenance_sha256 != sha256_json(
+                    selected_provenance
+                ):
+                    raise CaptureContractError(
+                        "initial membership provenance hash mismatch"
+                    )
+            except (CaptureContractError, TypeError, ValueError) as exc:
+                raise CapturedPaperInitialControllerError(
+                    "initial_controller_trigger_source_invalid"
+                ) from exc
             coordinator = self._capture_service.coordinator_for(normalized)
-            coordinator.checkpoint_live_continuity(CaptureStream.IQFEED_PRINT)
-            proof = coordinator.attest_predecision_inputs(
-                decision_id=decision_id,
-                dependency_profile=dependency_profile,
-                captured_reads=(captured,),
+            proof = coordinator.attest_initial_iqfeed_exact_membership(
+                captured_read=captured,
+                selector=selector,
+                max_source_age_seconds=market_max_age,
             )
             provider = CaptureBackedPaperInitialSessionMaterialProvider(
                 user_id=self._user_id,
@@ -449,7 +550,7 @@ class CapturedPaperInitialAdmissionController:
                 code_build_sha256=self._code_build_sha256,
                 capture_receipt_sha256=self._capture_receipt_sha256,
                 trigger_resolution=resolution,
-                active_input_attestation=proof,
+                exact_membership_attestation=proof,
                 capture_coordinator=coordinator,
                 capture_identity_evidence=(
                     self._capture_service.identity_evidence_for(normalized)

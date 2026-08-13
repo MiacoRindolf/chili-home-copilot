@@ -2,7 +2,8 @@
 
 The controller owns every mutable step before this boundary: it resolves the
 strict IQFeed trigger, retains the exact process-private ``CapturedReadResult``,
-and asks the live capture runtime to issue an ``ActiveCaptureInputPrefixAttestation``.
+and asks the live capture runtime to issue a process-private exact-membership
+attestation.
 This module only verifies those already-issued objects and an injected
 read-only strategy/viability snapshot.  It has no database, provider, broker,
 opportunity, reservation, outbox, or order capability.
@@ -47,17 +48,24 @@ from .live_replay_capture import (
     CapturedReadResult,
 )
 from .replay_capture_contract import (
-    ActiveCaptureInputPrefixAttestation,
     CaptureContractError,
     CaptureEventRef,
+    CaptureIqfeedPrint,
     CaptureMicrostructureOperation,
     CaptureMicrostructureReadQuery,
     CaptureRunIdentity,
     CaptureStream,
+    EXACT_EVENT_MEMBERSHIP_QUERY_SCHEMA_VERSION,
+    INITIAL_IQFEED_EXACT_MEMBERSHIP_AUTHORITY_SCOPE,
+    InitialIqfeedExactMembershipAttestation,
+    IQFEED_EXACT_PRINT_SOURCE_PROVENANCE_SCHEMA_VERSION,
+    IQFEED_L1_SOURCE_PROVENANCE_FIELD,
     canonical_json_bytes,
+    captured_read_result_sha256,
     resolve_capture_source_payload,
     sha256_json,
-    verify_active_capture_input_attestation,
+    validate_iqfeed_exact_print_source_provenance,
+    verify_initial_iqfeed_exact_membership_attestation,
 )
 
 
@@ -69,10 +77,10 @@ INITIAL_PROVIDER_CONSIDERED_SET_SCHEMA_VERSION = (
     "chili.captured-paper-initial-considered-set.v1"
 )
 INITIAL_PROVIDER_SELECTION_SCHEMA_VERSION = (
-    "chili.captured-paper-initial-selection.v1"
+    "chili.captured-paper-initial-selection.v2"
 )
 INITIAL_PROVIDER_CAPTURE_CHECKPOINT_SCHEMA_VERSION = (
-    "chili.captured-paper-initial-capture-checkpoint.v1"
+    "chili.captured-paper-initial-capture-checkpoint.v2"
 )
 INITIAL_PROVIDER_STATUS_COVERAGE_UNAVAILABLE = "COVERAGE_UNAVAILABLE"
 
@@ -432,11 +440,23 @@ def _selection_rank(candidate: Mapping[str, Any]) -> tuple[float, float, int, in
 
 
 def _capture_checkpoint_body(
-    proof: ActiveCaptureInputPrefixAttestation,
+    proof: InitialIqfeedExactMembershipAttestation,
 ) -> dict[str, Any]:
     return {
         "schema_version": INITIAL_PROVIDER_CAPTURE_CHECKPOINT_SCHEMA_VERSION,
         "attestation_sha256": proof.attestation_sha256,
+        "membership_attestation_schema_version": proof.schema_version,
+        "authority_scope": proof.authority_scope,
+        "positive_local_membership": proof.positive_local_membership,
+        "provider_continuity_authority": (
+            proof.provider_continuity_authority
+        ),
+        "absence_count_order_authority": (
+            proof.absence_count_order_authority
+        ),
+        "reservation_authority": proof.reservation_authority,
+        "order_authority": proof.order_authority,
+        "risk_increase_authority": proof.risk_increase_authority,
         "run_id": proof.run_id,
         "generation": proof.generation,
         "decision_id": proof.decision_id,
@@ -445,27 +465,20 @@ def _capture_checkpoint_body(
         "input_prefix_root_sha256": proof.input_prefix_root_sha256,
         "attested_available_at": _iso(proof.attested_available_at),
         "expires_at": _iso(proof.expires_at),
-        "dependency_profile": proof.dependency_profile.to_dict(),
-        "dependency_profile_sha256": proof.dependency_profile.profile_sha256,
         "account_identity_sha256": proof.account_identity_sha256,
         "code_build_sha256": proof.code_build_sha256,
         "config_sha256": proof.config_sha256,
         "feature_flags_sha256": proof.feature_flags_sha256,
         "resource_binding_sha256": proof.resource_binding_sha256,
-        "producer_generations": dict(proof.producer_generations),
+        "producer_id": proof.producer_id,
+        "producer_generation": proof.producer_generation,
         "required_read_ids": list(proof.required_read_ids),
-        "read_evidence": [
-            evidence.to_evidence_dict() for evidence in proof.read_evidence
-        ],
+        "read_evidence": [proof.read_evidence.to_evidence_dict()],
         "read_evidence_inventory_sha256": (
             proof.read_evidence_inventory_sha256
         ),
-        "continuity_evidence": [
-            evidence.to_evidence_dict() for evidence in proof.continuity_evidence
-        ],
-        "continuity_evidence_inventory_sha256": (
-            proof.continuity_evidence_inventory_sha256
-        ),
+        "selector": proof.selector.to_dict(),
+        "selector_sha256": proof.selector.selector_sha256,
     }
 
 
@@ -482,7 +495,7 @@ class CaptureBackedPaperInitialSessionMaterialProvider:
         code_build_sha256: str,
         capture_receipt_sha256: str,
         trigger_resolution: IqfeedTriggerResolution,
-        active_input_attestation: ActiveCaptureInputPrefixAttestation,
+        exact_membership_attestation: InitialIqfeedExactMembershipAttestation,
         capture_coordinator: Any,
         capture_identity_evidence: CaptureIdentityEvidence,
         capture_config_sha256_resolver: Callable[[str], str],
@@ -514,8 +527,11 @@ class CaptureBackedPaperInitialSessionMaterialProvider:
         )
         if type(trigger_resolution) is not IqfeedTriggerResolution:
             _unavailable("initial_provider_trigger_resolution_invalid")
-        if type(active_input_attestation) is not ActiveCaptureInputPrefixAttestation:
-            _unavailable("initial_provider_input_attestation_invalid")
+        if (
+            type(exact_membership_attestation)
+            is not InitialIqfeedExactMembershipAttestation
+        ):
+            _unavailable("initial_provider_membership_attestation_invalid")
         if not callable(capture_config_sha256_resolver):
             _unavailable("initial_provider_capture_config_resolver_invalid")
         if not isinstance(candidate_reader, CapturedPaperInitialCandidateReadPort):
@@ -537,7 +553,7 @@ class CaptureBackedPaperInitialSessionMaterialProvider:
         if ttl > max_context_age:
             _unavailable("initial_provider_ttl_exceeds_policy_context_age")
         self.trigger_resolution = trigger_resolution
-        self.active_input_attestation = active_input_attestation
+        self.exact_membership_attestation = exact_membership_attestation
         self.capture_coordinator = capture_coordinator
         self.capture_identity_evidence = capture_identity_evidence
         self.capture_config_sha256_resolver = capture_config_sha256_resolver
@@ -570,7 +586,7 @@ class CaptureBackedPaperInitialSessionMaterialProvider:
     ) -> tuple[
         CapturedPaperIqfeedTriggerReceipt,
         CapturedReadResult,
-        ActiveCaptureInputPrefixAttestation,
+        InitialIqfeedExactMembershipAttestation,
         CaptureRunIdentity,
         str,
         dict[str, Any],
@@ -594,14 +610,26 @@ class CaptureBackedPaperInitialSessionMaterialProvider:
         ):
             _unavailable("initial_provider_trigger_route_mismatch")
         try:
-            proof = verify_active_capture_input_attestation(
-                self.active_input_attestation
+            proof = verify_initial_iqfeed_exact_membership_attestation(
+                self.exact_membership_attestation
             )
         except (CaptureContractError, TypeError, ValueError) as exc:
             raise CapturedPaperInitialProviderCoverageUnavailable(
-                "initial_provider_input_attestation_invalid"
+                "initial_provider_membership_attestation_invalid"
             ) from exc
         coordinator = self.capture_coordinator
+        try:
+            owned_proof = (
+                coordinator.verify_owned_initial_iqfeed_exact_membership(
+                    proof
+                )
+            )
+        except Exception as exc:
+            raise CapturedPaperInitialProviderCoverageUnavailable(
+                "initial_provider_membership_attestation_not_owned"
+            ) from exc
+        if owned_proof is not proof:
+            _unavailable("initial_provider_membership_attestation_not_owned")
         identity = getattr(coordinator, "identity", None)
         if type(identity) is not CaptureRunIdentity:
             _unavailable("initial_provider_capture_identity_invalid")
@@ -628,6 +656,14 @@ class CaptureBackedPaperInitialSessionMaterialProvider:
             or proof.resource_binding_sha256 != binding_sha256
             or proof.decision_id != trigger.decision_id
             or trigger.capture_identity_sha256 != identity.identity_sha256
+            or proof.authority_scope
+            != INITIAL_IQFEED_EXACT_MEMBERSHIP_AUTHORITY_SCOPE
+            or proof.positive_local_membership is not True
+            or proof.provider_continuity_authority is not False
+            or proof.absence_count_order_authority is not False
+            or proof.reservation_authority is not False
+            or proof.order_authority is not False
+            or proof.risk_increase_authority is not False
         ):
             _unavailable("initial_provider_capture_attestation_identity_mismatch")
         if identity.broker != "alpaca" or identity.broker_environment != "paper":
@@ -692,14 +728,9 @@ class CaptureBackedPaperInitialSessionMaterialProvider:
             or captured.receipt_submission.event is None
         ):
             _unavailable("initial_provider_trigger_read_unavailable")
-        read_evidence = tuple(
-            row
-            for row in proof.read_evidence
-            if row.receipt.read_id == trigger.captured_read_id
-        )
-        if len(read_evidence) != 1:
+        active_read = proof.read_evidence
+        if active_read.receipt.read_id != trigger.captured_read_id:
             _unavailable("initial_provider_trigger_read_attestation_missing")
-        active_read = read_evidence[0]
         receipt_event = captured.receipt_submission.event
         if (
             active_read.receipt is not captured.receipt
@@ -737,18 +768,46 @@ class CaptureBackedPaperInitialSessionMaterialProvider:
             or not captured.receipt.content_verified
         ):
             _unavailable("initial_provider_trigger_read_attestation_mismatch")
-        if len(captured.source_events) != 1 or len(active_read.source_event_refs) != 1:
+        sources = tuple(captured.source_events)
+        source_refs = tuple(active_read.source_event_refs)
+        if not sources or len(sources) != len(source_refs):
             _unavailable("initial_provider_trigger_source_ambiguous")
-        source = captured.source_events[0]
-        source_ref = active_read.source_event_refs[0]
-        expected_ref = CaptureEventRef.from_event(source)
+        try:
+            expected_refs = tuple(
+                CaptureEventRef.from_event(source) for source in sources
+            )
+        except (CaptureContractError, TypeError, ValueError) as exc:
+            raise CapturedPaperInitialProviderCoverageUnavailable(
+                "initial_provider_trigger_source_attestation_mismatch"
+            ) from exc
+        if (
+            expected_refs != source_refs
+            or tuple(ref.event_sha256 for ref in expected_refs)
+            != captured.receipt.source_event_sha256s
+            or captured_read_result_sha256(expected_refs)
+            != captured.receipt.result_sha256
+        ):
+            _unavailable("initial_provider_trigger_source_attestation_mismatch")
+        selected = tuple(
+            (source, source_ref)
+            for source, source_ref in zip(sources, source_refs, strict=True)
+            if source.event_sha256 == trigger.source_event_sha256
+        )
+        if len(selected) != 1:
+            _unavailable("initial_provider_trigger_source_ambiguous")
+        source, source_ref = selected[0]
         try:
             source_view = resolve_capture_source_payload(source)
+            exact_print = CaptureIqfeedPrint.from_event(source)
+            validated_provenance = validate_iqfeed_exact_print_source_provenance(
+                source_view.payload.get(IQFEED_L1_SOURCE_PROVENANCE_FIELD),
+                symbol=symbol,
+                clocks=source.clocks,
+            )
         except CaptureContractError:
             _unavailable("initial_provider_trigger_source_provenance_invalid")
         if (
-            source_ref != expected_ref
-            or source_ref.event_sha256 != trigger.source_event_sha256
+            source_ref.event_sha256 != trigger.source_event_sha256
             or source_ref.sequence != trigger.source_event_sequence
             or source_ref.payload_sha256 != trigger.source_payload_sha256
             or source_ref.provider_event_at
@@ -761,67 +820,121 @@ class CaptureBackedPaperInitialSessionMaterialProvider:
             != trigger.source_durable_available_at
         ):
             _unavailable("initial_provider_trigger_source_attestation_mismatch")
+        if (
+            sha256_json(validated_provenance)
+            != trigger.source_provenance_sha256
+            or validated_provenance.get("schema_version")
+            != IQFEED_EXACT_PRINT_SOURCE_PROVENANCE_SCHEMA_VERSION
+            or validated_provenance.get("bridge_run_id")
+            != trigger.bridge_run_id
+            or validated_provenance.get("connection_generation")
+            != trigger.connection_generation
+            or validated_provenance.get("bridge_version")
+            != trigger.bridge_version
+            or validated_provenance.get("message_type") != "Q"
+            or validated_provenance.get("timestamp_basis")
+            != "iqfeed_selected_trade_date_timems_exact"
+            or validated_provenance.get("source_frame_sequence")
+            != trigger.source_frame_sequence
+            or validated_provenance.get("source_frame_sha256")
+            != trigger.source_frame_sha256
+            or exact_print.event is not source
+        ):
+            _unavailable("initial_provider_trigger_source_provenance_mismatch")
+        selector = proof.selector
+        if (
+            selector.decision_id != trigger.decision_id
+            or selector.trigger_receipt_sha256 != trigger.content_sha256
+            or selector.notify_sha256 != trigger.notify_sha256
+            or selector.symbol != symbol
+            or selector.bridge_version != trigger.bridge_version
+            or selector.bridge_run_id != trigger.bridge_run_id
+            or selector.connection_generation
+            != trigger.connection_generation
+            or selector.source_frame_sequence
+            != trigger.source_frame_sequence
+            or selector.source_frame_sha256 != trigger.source_frame_sha256
+            or selector.selected_event_sha256
+            != trigger.source_event_sha256
+            or selector.selected_event_sequence
+            != trigger.source_event_sequence
+            or selector.selected_payload_sha256
+            != trigger.source_payload_sha256
+            or selector.selected_provenance_sha256
+            != trigger.source_provenance_sha256
+            or selector.provider_event_at
+            != trigger.source_provider_event_at
+            or selector.received_at != trigger.source_received_at
+            or selector.original_available_at
+            != trigger.source_original_available_at
+            or selector.durable_available_at
+            != trigger.source_durable_available_at
+            or selector.release_kind != trigger.source_release_kind
+            or selector.bridge_source_sha256
+            != validated_provenance.get("bridge_source_sha256")
+            or selector.bridge_configuration_sha256
+            != validated_provenance.get("bridge_configuration_sha256")
+            or selector.capture_resource_binding_sha256
+            != validated_provenance.get("capture_resource_binding_sha256")
+            or selector.handoff_configuration_sha256
+            != validated_provenance.get("handoff_configuration_sha256")
+            or selector.selected_update_fields_sha256
+            != validated_provenance.get("selected_update_fields_sha256")
+            or selector.selected_update_fields_ack_sha256
+            != validated_provenance.get(
+                "selected_update_fields_ack_sha256"
+            )
+        ):
+            _unavailable("initial_provider_membership_selector_mismatch")
         try:
             query = CaptureMicrostructureReadQuery.from_dict(
                 dict(captured.receipt.query or {})
             )
-            dependency = proof.dependency_profile.dependency_for(
-                CaptureStream.IQFEED_PRINT
-            )
         except (CaptureContractError, TypeError, ValueError) as exc:
             raise CapturedPaperInitialProviderCoverageUnavailable(
-                "initial_provider_trigger_dependency_profile_invalid"
+                "initial_provider_trigger_query_invalid"
             ) from exc
         policy = self.policy_receipt.policy
         market_max_age = policy.market_data_max_age_seconds
         context_max_age = policy.context_data_max_age_seconds
         if (
-            query.operation is not CaptureMicrostructureOperation.TRADE_FLOW
+            query.operation
+            is not CaptureMicrostructureOperation.EXACT_EVENT_MEMBERSHIP
+            or query.schema_version
+            != EXACT_EVENT_MEMBERSHIP_QUERY_SCHEMA_VERSION
             or query.stream is not CaptureStream.IQFEED_PRINT
             or query.provider != "iqfeed"
             or query.symbol != symbol
             or query.event_end_inclusive != trigger.source_provider_event_at
+            or query.decision_at != trigger.source_provider_event_at
             or query.available_at_most != captured.receipt.returned_at
-            or not dependency.exact_provider_event_at_required
-            or dependency.market_reference_at_required
-            or dependency.max_source_age_seconds > market_max_age
-            or dependency.coverage_start_at > query.event_start_exclusive
+            or query.source_clock_basis != "provider_event_at"
+            or query.source_frontier_sequence
+            >= active_read.receipt_event_sequence
+            or query.source_frontier_sequence
+            < max(ref.sequence for ref in source_refs)
+            or any(
+                ref.identity_sha256 != identity.identity_sha256
+                or ref.stream is not CaptureStream.IQFEED_PRINT
+                or ref.provider != "iqfeed"
+                or ref.symbol != symbol
+                or ref.provider_event_at is None
+                or ref.provider_event_at <= query.event_start_exclusive
+                or ref.provider_event_at > query.event_end_inclusive
+                or ref.available_at > query.available_at_most
+                for ref in source_refs
+            )
+            or tuple(
+                (ref.provider_event_at, ref.sequence) for ref in source_refs
+            )
+            != tuple(
+                sorted(
+                    (ref.provider_event_at, ref.sequence)
+                    for ref in source_refs
+                )
+            )
         ):
-            _unavailable("initial_provider_trigger_dependency_profile_mismatch")
-        continuity = tuple(
-            row
-            for row in proof.continuity_evidence
-            if row.coverage.stream is CaptureStream.IQFEED_PRINT
-        )
-        if len(continuity) != 1:
-            _unavailable("initial_provider_trigger_continuity_unavailable")
-        exact_continuity = continuity[0]
-        coverage = exact_continuity.coverage
-        watermark = coverage.watermark
-        if (
-            watermark is None
-            or exact_continuity.producer_id != active_read.producer_id
-            or exact_continuity.producer_generation
-            != active_read.producer_generation
-            or coverage.identity_sha256 != identity.identity_sha256
-            or coverage.provider != "iqfeed"
-            or coverage.symbol != symbol
-            or not coverage.exact_event_clock_complete
-            or not coverage.content_verified
-            or not coverage.continuity_complete
-            or coverage.event_count <= 0
-            or coverage.first_available_at > source_ref.available_at
-            or coverage.last_available_at < source_ref.available_at
-            or watermark.identity_sha256 != identity.identity_sha256
-            or watermark.provider != "iqfeed"
-            or watermark.symbol != symbol
-            or watermark.generation != active_read.producer_generation
-            or watermark.event_watermark_at < query.event_end_inclusive
-            or exact_continuity.source_frontier_sequence < source_ref.sequence
-            or exact_continuity.coverage_committed_available_at
-            > proof.attested_available_at
-        ):
-            _unavailable("initial_provider_trigger_continuity_mismatch")
+            _unavailable("initial_provider_trigger_query_mismatch")
         clocks = (
             trigger.source_provider_event_at,
             trigger.source_received_at,
@@ -837,8 +950,7 @@ class CaptureBackedPaperInitialSessionMaterialProvider:
         if any(value > decision_at for value in clocks):
             _unavailable("initial_provider_capture_clock_from_future")
         if not (
-            trigger.source_provider_event_at
-            <= trigger.source_received_at
+            trigger.source_received_at
             <= trigger.source_original_available_at
             <= trigger.source_durable_available_at
             <= trigger.read_requested_at
@@ -1260,6 +1372,17 @@ class CaptureBackedPaperInitialSessionMaterialProvider:
             or final_reader_mutation is not False
         ):
             _unavailable("initial_provider_capture_identity_drifted")
+        try:
+            final_owned_proof = (
+                self.capture_coordinator
+                .verify_owned_initial_iqfeed_exact_membership(proof)
+            )
+        except Exception as exc:
+            raise CapturedPaperInitialProviderCoverageUnavailable(
+                "initial_provider_membership_attestation_not_owned"
+            ) from exc
+        if final_owned_proof is not proof:
+            _unavailable("initial_provider_membership_attestation_not_owned")
         try:
             return CapturedPaperInitialSessionMaterial(
                 symbol=normalized_symbol,

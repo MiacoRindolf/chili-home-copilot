@@ -46,6 +46,8 @@ from .replay_capture_contract import (
     ActiveCaptureContinuityEvidence,
     ActiveCapturePrefixAttestation,
     ActiveCaptureReadEvidence,
+    InitialIqfeedExactMembershipAttestation,
+    InitialIqfeedExactMembershipSelector,
     CaptureBrokerOrderLifecycle,
     CaptureBrokerTransition,
     CaptureClocks,
@@ -57,6 +59,8 @@ from .replay_capture_contract import (
     CaptureIqfeedPrint,
     CaptureMicrostructureOperation,
     CaptureMicrostructureReadQuery,
+    EXACT_EVENT_MEMBERSHIP_QUERY_SCHEMA_VERSION,
+    MICROSTRUCTURE_READ_QUERY_SCHEMA_VERSION,
     CaptureOrderIntent,
     CaptureOrderIntentRole,
     CaptureProviderRegistrationEvidence,
@@ -64,6 +68,7 @@ from .replay_capture_contract import (
     CaptureReadReceipt,
     FirstDipTapeReceiptEvidence,
     FSMDependencyProfile,
+    IQFEED_L1_SOURCE_PROVENANCE_FIELD,
     CaptureProducerLifecycleFact,
     CaptureProducerLifecycleKind,
     CaptureProducerSpec,
@@ -83,8 +88,12 @@ from .replay_capture_contract import (
     capture_decision_output_from_payload,
     _issue_active_capture_input_attestation,
     _issue_active_capture_prefix_attestation,
+    _issue_initial_iqfeed_exact_membership_attestation,
     sha256_json,
+    resolve_capture_source_payload,
+    validate_iqfeed_exact_print_source_provenance,
     verify_active_capture_input_attestation,
+    verify_initial_iqfeed_exact_membership_attestation,
     _coverage_source_clock,
 )
 # 2026-07-17: dual-context imports. (1) Sa SEALED service, ang preflight
@@ -4035,6 +4044,9 @@ class CaptureProducerLifecycleRuntime:
         self._receipt_by_id: dict[str, CaptureReadReceipt] = {}
         self._receipt_event_owner: dict[str, str] = {}
         self._read_evidence_by_id: dict[str, ActiveCaptureReadEvidence] = {}
+        self._atomic_microstructure_read_evidence: dict[
+            str, ActiveCaptureReadEvidence
+        ] = {}
         self._first_dip_tape_by_id: dict[str, FirstDipTapeReceiptEvidence] = {}
         # Capture retains evidence per decision, not per daily opportunity.
         # Durable adaptive reservation remains the once-per-day consumer.
@@ -4047,6 +4059,9 @@ class CaptureProducerLifecycleRuntime:
         self._decision_outputs: dict[str, CaptureDecisionOutput] = {}
         self._predecision_attestations: dict[
             str, ActiveCaptureInputPrefixAttestation
+        ] = {}
+        self._initial_iqfeed_membership_attestations: dict[
+            str, InitialIqfeedExactMembershipAttestation
         ] = {}
         self._consumed_predecision_attestations: set[str] = set()
         self._final_decision_attestations: dict[
@@ -5066,6 +5081,8 @@ class CaptureProducerLifecycleRuntime:
                 not normalized_decision_id
                 or normalized_decision_id in self._decision_ids
                 or normalized_decision_id in self._predecision_attestations
+                or normalized_decision_id
+                in self._initial_iqfeed_membership_attestations
             ):
                 raise CaptureContractError(
                     "predecision input attestation decision id is invalid or reused"
@@ -5474,6 +5491,274 @@ class CaptureProducerLifecycleRuntime:
             )
             self._predecision_attestations[normalized_decision_id] = proof
             return proof
+
+    def attest_initial_iqfeed_exact_membership(
+        self,
+        *,
+        read_id: str,
+        selector: InitialIqfeedExactMembershipSelector,
+        max_source_age_seconds: float,
+    ) -> InitialIqfeedExactMembershipAttestation:
+        """Issue a non-executable proof for one exact initial PAPER wake.
+
+        This is deliberately not an ``ActiveCaptureInputPrefixAttestation`` and
+        is never inserted into the predecision inventory consumed by FSM,
+        reservation, outbox, or order APIs.  It proves only positive membership
+        of the selector's immutable event in the complete local receipt through
+        its captured source frontier; it does not claim provider continuity.
+        """
+
+        with self._lock:
+            attested_at = self._trusted_recorded_at(None)
+            normalized_read_id = str(read_id or "").strip()
+            if type(selector) is not InitialIqfeedExactMembershipSelector:
+                raise CaptureContractError(
+                    "initial IQFeed membership selector is malformed"
+                )
+            if (
+                selector.decision_id in self._decision_ids
+                or selector.decision_id in self._predecision_attestations
+                or selector.decision_id
+                in self._initial_iqfeed_membership_attestations
+            ):
+                raise CaptureContractError(
+                    "initial IQFeed membership decision id is reused"
+                )
+            if (
+                self._run_open is None
+                or self._run_close_event is not None
+                or str(self.identity.broker or "").strip().lower() != "alpaca"
+                or str(self.identity.broker_environment or "").strip().lower()
+                != "paper"
+                or set(self.producers) != self._registered
+                or self._quiescent
+                or self._closed
+                or self._submission_failure is not None
+            ):
+                raise CaptureContractError(
+                    "initial IQFeed membership requires a healthy RUNNING lifecycle"
+                )
+            for producer_id in sorted(self.producers):
+                self._check_heartbeat_deadline(producer_id, attested_at)
+            row = self._read_evidence_by_id.get(normalized_read_id)
+            atomic_row = self._atomic_microstructure_read_evidence.get(
+                normalized_read_id
+            )
+            if row is None:
+                raise CaptureContractError(
+                    "initial IQFeed membership receipt is unavailable"
+                )
+            receipt = row.receipt
+            producer = self.producers.get(row.producer_id)
+            if (
+                receipt.decision_id != selector.decision_id
+                or receipt.stream is not CaptureStream.IQFEED_PRINT
+                or receipt.provider != "iqfeed"
+                or receipt.symbol != selector.symbol
+                or row.receipt_event_sequence > self._sequence
+                or atomic_row is not row
+                or producer is None
+                or producer.generation != row.producer_generation
+                or producer.instance_id != selector.bridge_run_id
+                or producer.generation != selector.connection_generation
+                or producer.resource_binding_sha256
+                != self.resource_binding.binding_sha256
+                or selector.capture_resource_binding_sha256
+                != self.resource_binding.binding_sha256
+            ):
+                raise CaptureContractError(
+                    "initial IQFeed membership receipt identity is inconsistent"
+                )
+            try:
+                query = CaptureMicrostructureReadQuery.from_dict(
+                    receipt.query or {}
+                )
+            except (CaptureContractError, TypeError, ValueError) as exc:
+                raise CaptureContractError(
+                    "initial IQFeed membership query is invalid"
+                ) from exc
+            max_age = float(max_source_age_seconds)
+            if (
+                not math.isfinite(max_age)
+                or max_age <= 0.0
+                or query.operation
+                is not CaptureMicrostructureOperation.EXACT_EVENT_MEMBERSHIP
+                or query.event_end_inclusive != selector.provider_event_at
+            ):
+                raise CaptureContractError(
+                    "initial IQFeed membership freshness policy is invalid"
+                )
+            matching = tuple(
+                ref
+                for ref in row.source_event_refs
+                if ref.event_sha256 == selector.selected_event_sha256
+            )
+            if len(matching) != 1:
+                raise CaptureContractError(
+                    "initial IQFeed membership selected event is ambiguous"
+                )
+            selected_ref = matching[0]
+            validated_sources: list[
+                tuple[CaptureEvent, Mapping[str, Any], Any]
+            ] = []
+            try:
+                for ref in row.source_event_refs:
+                    source_event = self._recent_source_events.get(
+                        ref.event_sha256
+                    )
+                    if (
+                        source_event is None
+                        or CaptureEventRef.from_event(source_event) != ref
+                    ):
+                        raise CaptureContractError(
+                            "initial IQFeed membership source is no longer runtime-owned"
+                        )
+                    source_view = resolve_capture_source_payload(source_event)
+                    exact_print = CaptureIqfeedPrint.from_event(source_event)
+                    validated_provenance = (
+                        validate_iqfeed_exact_print_source_provenance(
+                            source_view.payload.get(
+                                IQFEED_L1_SOURCE_PROVENANCE_FIELD
+                            ),
+                            symbol=selector.symbol,
+                            clocks=source_event.clocks,
+                        )
+                    )
+                    validated_sources.append(
+                        (source_event, validated_provenance, source_view)
+                    )
+            except (CaptureContractError, TypeError, ValueError) as exc:
+                raise CaptureContractError(
+                    "initial IQFeed membership source inventory is invalid"
+                ) from exc
+            frame_matches = tuple(
+                row_value
+                for row_value in validated_sources
+                if (
+                    row_value[1].get("bridge_run_id")
+                    == selector.bridge_run_id
+                    and row_value[1].get("connection_generation")
+                    == selector.connection_generation
+                    and row_value[1].get("bridge_version")
+                    == selector.bridge_version
+                    and row_value[1].get("source_frame_sequence")
+                    == selector.source_frame_sequence
+                    and row_value[1].get("source_frame_sha256")
+                    == selector.source_frame_sha256
+                )
+            )
+            if len(frame_matches) != 1:
+                raise CaptureContractError(
+                    "initial IQFeed membership selected frame is ambiguous"
+                )
+            selected_event, validated_provenance, source_view = frame_matches[0]
+            exact_print = CaptureIqfeedPrint.from_event(selected_event)
+            if (
+                selected_event.event_sha256 != selector.selected_event_sha256
+                or selected_ref.sequence != selector.selected_event_sequence
+                or selected_ref.payload_sha256 != selector.selected_payload_sha256
+                or selected_ref.provider_event_at != selector.provider_event_at
+                or selected_ref.received_at != selector.received_at
+                or selected_ref.available_at != selector.durable_available_at
+                or source_view.original_available_at
+                != selector.original_available_at
+                or source_view.release_kind != selector.release_kind
+                or sha256_json(validated_provenance)
+                != selector.selected_provenance_sha256
+                or validated_provenance.get("bridge_run_id")
+                != selector.bridge_run_id
+                or validated_provenance.get("connection_generation")
+                != selector.connection_generation
+                or validated_provenance.get("bridge_version")
+                != selector.bridge_version
+                or validated_provenance.get("source_frame_sequence")
+                != selector.source_frame_sequence
+                or validated_provenance.get("source_frame_sha256")
+                != selector.source_frame_sha256
+                or validated_provenance.get("bridge_source_sha256")
+                != selector.bridge_source_sha256
+                or validated_provenance.get("bridge_configuration_sha256")
+                != selector.bridge_configuration_sha256
+                or validated_provenance.get("capture_resource_binding_sha256")
+                != selector.capture_resource_binding_sha256
+                or validated_provenance.get("handoff_configuration_sha256")
+                != selector.handoff_configuration_sha256
+                or validated_provenance.get("selected_update_fields_sha256")
+                != selector.selected_update_fields_sha256
+                or validated_provenance.get(
+                    "selected_update_fields_ack_sha256"
+                )
+                != selector.selected_update_fields_ack_sha256
+                or exact_print.event is not selected_event
+            ):
+                raise CaptureContractError(
+                    "initial IQFeed membership selected provenance is inconsistent"
+                )
+            expires_at = min(
+                selector.provider_event_at + timedelta(seconds=max_age),
+                selector.received_at + timedelta(seconds=max_age),
+                selector.original_available_at + timedelta(seconds=max_age),
+                receipt.returned_at + timedelta(seconds=max_age),
+            )
+            if expires_at <= attested_at:
+                raise CaptureContractError(
+                    "initial IQFeed membership evidence is stale"
+                )
+            proof = _issue_initial_iqfeed_exact_membership_attestation(
+                run_id=self.identity.run_id,
+                generation=self.identity.generation,
+                decision_id=selector.decision_id,
+                input_prefix_sequence=self._sequence,
+                input_prefix_root_sha256=self._current_prefix_root(),
+                attested_available_at=attested_at,
+                expires_at=expires_at,
+                identity_sha256=self.identity.identity_sha256,
+                account_identity_sha256=self.identity.account_identity_sha256,
+                code_build_sha256=self.identity.code_build_sha256,
+                config_sha256=self.identity.config_sha256,
+                feature_flags_sha256=self.identity.feature_flags_sha256,
+                resource_binding_sha256=self.resource_binding.binding_sha256,
+                producer_id=row.producer_id,
+                producer_generation=row.producer_generation,
+                read_evidence=row,
+                selector=selector,
+            )
+            self._initial_iqfeed_membership_attestations[
+                selector.decision_id
+            ] = proof
+            return proof
+
+    def verify_owned_initial_iqfeed_exact_membership(
+        self,
+        proof: InitialIqfeedExactMembershipAttestation,
+    ) -> InitialIqfeedExactMembershipAttestation:
+        """Reassert that a membership capability is the exact live object issued here."""
+
+        verified = verify_initial_iqfeed_exact_membership_attestation(proof)
+        with self._lock:
+            now = self._trusted_recorded_at(None)
+            owned = self._initial_iqfeed_membership_attestations.get(
+                verified.decision_id
+            )
+            if (
+                owned is not verified
+                or verified.identity_sha256 != self.identity.identity_sha256
+                or verified.resource_binding_sha256
+                != self.resource_binding.binding_sha256
+                or now >= verified.expires_at
+                or self._run_open is None
+                or self._run_close_event is not None
+                or set(self.producers) != self._registered
+                or self._quiescent
+                or self._closed
+                or self._submission_failure is not None
+            ):
+                raise CaptureContractError(
+                    "initial IQFeed membership attestation is not owned and live"
+                )
+            for producer_id in sorted(self.producers):
+                self._check_heartbeat_deadline(producer_id, now)
+            return verified
 
     def submit_input(
         self,
@@ -6442,6 +6727,12 @@ class CaptureProducerLifecycleRuntime:
                 )
             )
             query = CaptureMicrostructureReadQuery(
+                schema_version=(
+                    EXACT_EVENT_MEMBERSHIP_QUERY_SCHEMA_VERSION
+                    if resolved_operation
+                    is CaptureMicrostructureOperation.EXACT_EVENT_MEMBERSHIP
+                    else MICROSTRUCTURE_READ_QUERY_SCHEMA_VERSION
+                ),
                 operation=resolved_operation,
                 stream=resolved_stream,
                 symbol=normalized_symbol,
@@ -6477,6 +6768,14 @@ class CaptureProducerLifecycleRuntime:
                 query=query.to_dict(),
             )
             receipt_event = self.submit_read_receipt(receipt)
+            atomic_evidence = self._read_evidence_by_id.get(receipt.read_id)
+            if atomic_evidence is None:
+                raise CaptureContractError(
+                    "microstructure receipt lacks runtime evidence"
+                )
+            self._atomic_microstructure_read_evidence[
+                receipt.read_id
+            ] = atomic_evidence
             return receipt_event, receipt, expected_sources
 
     def submit_first_dip_tape_receipt(
