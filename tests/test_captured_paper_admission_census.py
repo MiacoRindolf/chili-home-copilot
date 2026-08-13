@@ -188,6 +188,10 @@ def test_ang_apat_na_dating_tahimik_ay_may_sariling_pangalan(src, expected):
     [
         ("initial_candidate_read_unavailable", "initial_candidate_read_unavailable"),
         (
+            "capture_producer_heartbeat_deadline_exceeded",
+            "capture_producer_heartbeat_deadline_exceeded",
+        ),
+        (
             "INITIAL_INGRESS_PRESSURE_UNAVAILABLE: current sample is stale",
             "initial_ingress_pressure_unavailable",
         ),

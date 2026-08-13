@@ -180,9 +180,11 @@ def _promoted_source_event(
     *,
     payload_updates: dict | None = None,
     remove_release: bool = False,
+    released_available_at: datetime | None = None,
 ) -> tuple[CaptureEvent, dict]:
     original_available_at = BASE + timedelta(milliseconds=10)
     promoted_at = BASE + timedelta(milliseconds=20)
+    released_at = released_available_at or promoted_at
     promotion_id = "4c74656f-4ec5-4c40-b37d-95063c262b17"
     source_payload = {
         "schema_version": "fixture.source.v1",
@@ -206,7 +208,7 @@ def _promoted_source_event(
             "original_available_at": (
                 original_available_at.isoformat().replace("+00:00", "Z")
             ),
-            "released_available_at": promoted_at.isoformat().replace(
+            "released_available_at": released_at.isoformat().replace(
                 "+00:00", "Z"
             ),
             "release_kind": "hot_symbol_promotion",
@@ -235,7 +237,7 @@ def _promoted_source_event(
         clocks=CaptureClocks(
             provider_event_at=BASE,
             received_at=BASE + timedelta(milliseconds=5),
-            available_at=promoted_at,
+            available_at=released_at,
         ),
         payload=payload,
     )
@@ -261,6 +263,18 @@ def test_capture_source_payload_unwraps_only_hash_bound_promotion_metadata() -> 
         view.payload["value"] = 8
 
 
+def test_capture_source_payload_accepts_causally_later_durable_release() -> None:
+    event, source_payload = _promoted_source_event(
+        released_available_at=BASE + timedelta(milliseconds=21)
+    )
+
+    view = resolve_capture_source_payload(event)
+
+    assert dict(view.payload) == source_payload
+    assert view.original_available_at == BASE + timedelta(milliseconds=10)
+    assert event.clocks.available_at == BASE + timedelta(milliseconds=21)
+
+
 @pytest.mark.parametrize(
     ("payload_updates", "remove_release", "error"),
     (
@@ -273,6 +287,39 @@ def test_capture_source_payload_unwraps_only_hash_bound_promotion_metadata() -> 
             {"_capture_release": {"source_identity_sha256": "6" * 64}},
             False,
             "provenance mismatch",
+        ),
+        (
+            {
+                "_capture_release": {
+                    "promoted_at": "2026-07-13T12:50:00.021000Z"
+                }
+            },
+            False,
+            "promotion clocks",
+        ),
+        (
+            {
+                "_capture_promotion": {
+                    "promoted_at": "2026-07-13T12:50:00.021000Z"
+                },
+                "_capture_release": {
+                    "promoted_at": "2026-07-13T12:50:00.021000Z"
+                },
+            },
+            False,
+            "promotion clocks",
+        ),
+        (
+            {
+                "_capture_promotion": {
+                    "promoted_at": "2026-07-13T12:50:00.009000Z"
+                },
+                "_capture_release": {
+                    "promoted_at": "2026-07-13T12:50:00.009000Z"
+                },
+            },
+            False,
+            "promotion clocks",
         ),
         (
             {"_capture_promotion": {"inventory_sha256": "7" * 64}},

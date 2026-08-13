@@ -63,12 +63,34 @@ from .replay_capture_contract import (
 
 UTC = timezone.utc
 _DECISION_NAMESPACE = uuid.UUID("d4044fa8-494d-49fd-8b7d-56f658a96e45")
+_CAPTURE_PRODUCER_HEARTBEAT_DEADLINE_REASON = (
+    "capture_producer_heartbeat_deadline_exceeded"
+)
+_CAPTURE_PRODUCER_HEARTBEAT_DEADLINE_PREFIXES = (
+    "capture producer heartbeat deadline exceeded:",
+    (
+        "capture lifecycle is already noncertifiable: "
+        "producer_heartbeat_deadline_exceeded:"
+    ),
+)
 
 
 class CapturedPaperInitialControllerError(RuntimeError):
     def __init__(self, reason: str):
         self.reason = str(reason or "captured_paper_initial_controller_unavailable")
         super().__init__(self.reason)
+
+
+def _captured_paper_initial_rejection_reason(exc: BaseException) -> str:
+    """Expose a bounded code while retaining the runtime's sticky raw latch."""
+
+    reason = str(getattr(exc, "reason", None) or exc)
+    if any(
+        reason.startswith(prefix)
+        for prefix in _CAPTURE_PRODUCER_HEARTBEAT_DEADLINE_PREFIXES
+    ):
+        return _CAPTURE_PRODUCER_HEARTBEAT_DEADLINE_REASON
+    return reason
 
 
 def _utc(value: Any, reason: str) -> datetime:
@@ -522,7 +544,7 @@ class CapturedPaperInitialAdmissionController:
             CapturedPaperPreownerPromotionError,
             CaptureContractError,
         ) as exc:
-            reason = str(getattr(exc, "reason", None) or exc)
+            reason = _captured_paper_initial_rejection_reason(exc)
             if hot_capture_admitted and not durable_preowner:
                 self._abort_before_durable(normalized, reason)
             return _result(

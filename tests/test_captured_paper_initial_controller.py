@@ -398,6 +398,38 @@ def test_strict_notify_preparse_rejects_before_hot_allocation_or_abort(
     _assert_no_execution_authority(result)
 
 
+@pytest.mark.parametrize(
+    "raw_reason",
+    (
+        "capture producer heartbeat deadline exceeded: iqfeed_l1",
+        (
+            "capture lifecycle is already noncertifiable: "
+            "producer_heartbeat_deadline_exceeded:iqfeed_l1"
+        ),
+    ),
+)
+def test_capture_producer_heartbeat_deadline_is_typed_at_controller_boundary(
+    monkeypatch: pytest.MonkeyPatch,
+    raw_reason: str,
+) -> None:
+    rig = _Rig()
+    instance, host, _resolution = _install_fakes(monkeypatch, rig)
+
+    def reject_hot(_symbol: str, **_kwargs: Any) -> object:
+        raise CaptureContractError(raw_reason)
+
+    monkeypatch.setattr(host, "admit_hot_symbol", reject_hot)
+    result = instance.admit(symbol=SYMBOL, payload=_notify())
+
+    assert result["admitted"] is False
+    assert result["reason"] == "capture_producer_heartbeat_deadline_exceeded"
+    assert rig.abort_calls == []
+    assert rig.resolver_kwargs == []
+    assert rig.commit_calls == []
+    assert raw_reason not in str(result)
+    _assert_no_execution_authority(result)
+
+
 def test_next_exact_q_recovers_preowner_before_new_provider_reads(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
