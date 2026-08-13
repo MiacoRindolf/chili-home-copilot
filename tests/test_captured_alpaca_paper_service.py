@@ -147,7 +147,9 @@ def test_pressure_feed_keeps_coherent_staleness_recoverable_and_suspended() -> N
                 "sample_age_seconds": 0.01,
             }
 
-        def observe(self, _sample: object) -> None:
+        def observe(
+            self, _sample: object, *, sample_monotonic: float | None = None
+        ) -> None:
             return None
 
         def health(self) -> dict[str, object]:
@@ -198,7 +200,9 @@ def test_pressure_feed_respects_controller_admissibility_during_entry_hysteresis
                 )
             )
 
-        def observe(self, _sample: object) -> None:
+        def observe(
+            self, _sample: object, *, sample_monotonic: float | None = None
+        ) -> None:
             return None
 
         def health(self) -> dict[str, object]:
@@ -251,7 +255,9 @@ def test_pressure_feed_keeps_fresh_write_pressure_recoverable_and_suspended() ->
                 "sample_age_seconds": 0.01,
             }
 
-        def observe(self, _sample: object) -> None:
+        def observe(
+            self, _sample: object, *, sample_monotonic: float | None = None
+        ) -> None:
             return None
 
         def health(self) -> dict[str, object]:
@@ -319,7 +325,9 @@ def test_pressure_feed_keeps_fresh_write_pressure_recoverable_and_suspended() ->
 
 def test_pressure_feed_startup_sample_failure_remains_fatal() -> None:
     class _Controller:
-        def observe(self, _sample: object) -> None:
+        def observe(
+            self, _sample: object, *, sample_monotonic: float | None = None
+        ) -> None:
             pytest.fail("controller must not receive a failed startup sample")
 
         def health(self) -> dict[str, object]:
@@ -357,7 +365,9 @@ def test_pressure_feed_startup_sample_failure_remains_fatal() -> None:
 
 def test_pressure_feed_unreadable_health_returns_fail_closed_mapping() -> None:
     class _Controller:
-        def observe(self, _sample: object) -> None:
+        def observe(
+            self, _sample: object, *, sample_monotonic: float | None = None
+        ) -> None:
             return None
 
         def health(self) -> dict[str, object]:
@@ -406,7 +416,9 @@ def test_pressure_feed_runtime_sample_failure_suspends_and_recovers() -> None:
                 "sample_age_seconds": 0.01,
             }
 
-        def observe(self, sample: object) -> None:
+        def observe(
+            self, sample: object, *, sample_monotonic: float | None = None
+        ) -> None:
             with lock:
                 self.value.update(
                     {
@@ -455,11 +467,13 @@ def test_pressure_feed_runtime_sample_failure_suspends_and_recovers() -> None:
     worker = service_module._CapturedPaperPressureFeedWorker(
         pressure_controller=controller,
         sampler=sample,
-        interval_seconds=0.01,
+        interval_seconds=0.5,
     )
     worker.start()
     try:
-        assert failure_sampled.wait(timeout=2.0)
+        assert failure_sampled.wait(timeout=2.0), worker.health()[
+            "last_sample_error"
+        ]
         for _ in range(200):
             degraded = worker.health()
             if degraded["sample_failure_count"] == 1:
@@ -537,7 +551,9 @@ def test_pressure_feed_repeated_failures_are_visible_and_self_recover() -> None:
             self.unavailable = False
             self.last_observed = 0.0
 
-        def observe(self, _sample: object) -> None:
+        def observe(
+            self, _sample: object, *, sample_monotonic: float | None = None
+        ) -> None:
             self.sample_count += 1
             self.unavailable = False
             self.last_observed = clock.now
@@ -632,22 +648,42 @@ def test_pressure_feed_runtime_clock_failure_suspends_before_thread_exit() -> No
         def __init__(self) -> None:
             self.suspended = False
 
-        def observe(self, _sample: object) -> None:
+        def observe(
+            self, _sample: object, *, sample_monotonic: float | None = None
+        ) -> None:
             self.suspended = False
 
         def suspend_sampling(self) -> None:
             self.suspended = True
 
+    clock = _Clock()
+
+    class _Sample:
+        def __init__(self, completed_monotonic: float) -> None:
+            self.completed_monotonic = completed_monotonic
+
+    def sample() -> _Sample:
+        try:
+            return _Sample(clock())
+        except OSError as exc:
+            raise service_module.CapturedAlpacaPaperServiceError(
+                "PRESSURE_SAMPLE_CLOCK_UNAVAILABLE",
+                "capture pressure monotonic clock is unavailable",
+            ) from exc
+
     controller = _Controller()
     worker = service_module._CapturedPaperPressureFeedWorker(
         pressure_controller=controller,
-        sampler=object,
+        sampler=sample,
         interval_seconds=2.5,
-        monotonic_clock=_Clock(),
+        monotonic_clock=clock,
     )
 
     worker._feed_once(startup=True)
-    with pytest.raises(OSError, match="monotonic source unavailable"):
+    with pytest.raises(
+        service_module.CapturedAlpacaPaperServiceError,
+        match="PRESSURE_SAMPLE_CLOCK_UNAVAILABLE",
+    ):
         worker._feed_once(startup=False)
 
     assert controller.suspended is True
@@ -682,7 +718,9 @@ def test_pressure_feed_health_clock_failure_is_fatal_and_fail_closed() -> None:
             self.suspended = False
             self.samples = 0
 
-        def observe(self, _sample: object) -> None:
+        def observe(
+            self, _sample: object, *, sample_monotonic: float | None = None
+        ) -> None:
             self.samples += 1
             self.suspended = False
 
@@ -732,9 +770,11 @@ def test_pressure_feed_health_clock_failure_is_fatal_and_fail_closed() -> None:
     )
 
 
-def test_pressure_feed_cadence_does_not_add_sampling_duration() -> None:
+def test_pressure_feed_cadence_does_not_add_in_budget_sampling_duration() -> None:
     class _Controller:
-        def observe(self, _sample: object) -> None:
+        def observe(
+            self, _sample: object, *, sample_monotonic: float | None = None
+        ) -> None:
             return None
 
     class _Clock:
@@ -750,6 +790,7 @@ def test_pressure_feed_cadence_does_not_add_sampling_duration() -> None:
 
         def wait(self, seconds: float) -> bool:
             self.waits.append(float(seconds))
+            clock.now += float(seconds)
             return len(self.waits) >= 3
 
     clock = _Clock()
@@ -758,7 +799,7 @@ def test_pressure_feed_cadence_does_not_add_sampling_duration() -> None:
     def slow_sample() -> object:
         nonlocal sample_calls
         sample_calls += 1
-        clock.now += 0.7
+        clock.now += 0.2
         return object()
 
     worker = service_module._CapturedPaperPressureFeedWorker(
@@ -773,7 +814,7 @@ def test_pressure_feed_cadence_does_not_add_sampling_duration() -> None:
     worker._run()
 
     assert sample_calls == 2
-    assert stop_event.waits == pytest.approx([0.5, 0.0, 0.0])
+    assert stop_event.waits == pytest.approx([0.5, 0.3, 0.3])
 
 
 @pytest.mark.parametrize("failure_stage", ("sampler", "controller"))
@@ -787,7 +828,9 @@ def test_pressure_feed_runtime_contract_failure_is_fatal(
             self.observe_calls = 0
             self.suspended = False
 
-        def observe(self, _sample: object) -> None:
+        def observe(
+            self, _sample: object, *, sample_monotonic: float | None = None
+        ) -> None:
             self.observe_calls += 1
             if failure_stage == "controller" and self.observe_calls == 2:
                 failure_observed.set()
@@ -829,7 +872,7 @@ def test_pressure_feed_runtime_contract_failure_is_fatal(
     worker = service_module._CapturedPaperPressureFeedWorker(
         pressure_controller=_Controller(),
         sampler=sample,
-        interval_seconds=0.01,
+        interval_seconds=0.5,
     )
     worker.start()
     try:
@@ -865,19 +908,24 @@ def test_pressure_probe_does_not_poison_capture_store_resource_accounting(
         capture_root,
         compression_codec="zlib",
     )
-    original_fsync = service_module.os.fsync
     observed_during_probe = False
-    fsync_calls = 0
 
-    def _observe_store_while_probe_exists(descriptor: int) -> None:
-        nonlocal observed_during_probe, fsync_calls
-        fsync_calls += 1
-        original_fsync(descriptor)
-        if not observed_during_probe:
+    class _Measurement:
+        latency_milliseconds = 0.75
+        bytes_written = 4096
+        fsync_completed = True
+        cleanup_completed = True
+        write_latency_profile = (
+            replay_capture_runtime.CAPTURE_PRESSURE_WRITE_LATENCY_PROFILE
+        )
+
+    class _Probe:
+        def measure(self, *, response_timeout_seconds=None) -> object:
+            nonlocal observed_during_probe
             observed_during_probe = True
             store.resource_health()
+            return _Measurement()
 
-    monkeypatch.setattr(service_module.os, "fsync", _observe_store_while_probe_exists)
     try:
         sample = service_module._measure_capture_pressure(
             preflight=SimpleNamespace(
@@ -886,15 +934,59 @@ def test_pressure_probe_does_not_poison_capture_store_resource_accounting(
             ),
             replay_runtime_module=replay_capture_runtime,
             wall_clock=lambda: NOW,
+            pressure_probe=_Probe(),
         )
 
         assert observed_during_probe is True
-        assert fsync_calls == 1
         assert sample.resource_binding_sha256 == SHA_A
+        assert sample.write_latency_milliseconds == pytest.approx(0.75)
+        assert sample.write_latency_measurement_profile == (
+            replay_capture_runtime.CAPTURE_PRESSURE_WRITE_LATENCY_PROFILE
+        )
         store.put_payload({"event": "selection"})
         assert store.resource_health()["resource_failure_reasons"] == ()
     finally:
         store.close()
+
+
+def test_pressure_probe_and_capture_store_must_match_benchmark_volume(
+    tmp_path: Path,
+) -> None:
+    from app.services.trading.momentum_neural import replay_capture_runtime
+
+    capture_root = tmp_path / "capture-store"
+    capture_root.mkdir()
+    probe_root = tmp_path / "probe-root"
+    probe_root.mkdir()
+    correct = replay_capture_runtime.capture_storage_volume_identity_sha256(
+        capture_root
+    )
+    preflight = SimpleNamespace(
+        capture_store_root=capture_root,
+        resource_binding=SimpleNamespace(
+            measurement=SimpleNamespace(
+                write_latency_probe_volume_identity_sha256=correct
+            )
+        ),
+    )
+    service_module._assert_pressure_probe_volume_binding(
+        preflight=preflight,
+        replay_runtime_module=replay_capture_runtime,
+        probe_root=probe_root,
+    )
+
+    preflight.resource_binding.measurement.write_latency_probe_volume_identity_sha256 = (
+        "f" * 64
+    )
+    with pytest.raises(
+        CapturedAlpacaPaperServiceError,
+        match="PRESSURE_PROBE_STORAGE_VOLUME_MISMATCH",
+    ):
+        service_module._assert_pressure_probe_volume_binding(
+            preflight=preflight,
+            replay_runtime_module=replay_capture_runtime,
+            probe_root=probe_root,
+        )
 
 
 def test_service_composition_binds_default_on_and_explicit_off_ortex_policy() -> None:
@@ -5347,6 +5439,7 @@ def test_service_builder_owns_callback_free_factory_and_cleans_failed_prepare(
             feature_flags={},
             feature_flags_sha256=SHA_A,
         ),
+        pressure_probe=_Closable("pressure_probe"),
     )
     verified = SimpleNamespace(settings_projection_sha256=SHA_A)
     monkeypatch.setattr(
@@ -5389,7 +5482,7 @@ def test_service_builder_owns_callback_free_factory_and_cleans_failed_prepare(
     assert observed["raw_adapter_factory"]() is adapter
     assert observed["policy_spec"] == "policy-spec"
     assert observed["operational_policy"] == "operational-policy"
-    assert closes == ["host", "store"]
+    assert closes == ["host", "store", "pressure_probe"]
 
 
 def test_service_builder_reconciles_phase_one_before_bracket_and_workers(
@@ -5498,6 +5591,9 @@ def test_service_builder_stops_owned_restart_before_worker_assembly(
             feature_flags={},
             feature_flags_sha256=SHA_A,
         ),
+        pressure_probe=SimpleNamespace(
+            close=lambda: events.append("pressure_probe_close")
+        ),
     )
     verified = SimpleNamespace(
         settings_projection_sha256=SHA_A,
@@ -5556,7 +5652,7 @@ def test_service_builder_stops_owned_restart_before_worker_assembly(
         )
 
     assert "assembled" not in events
-    assert events == ["host_close", "store_close"]
+    assert events == ["host_close", "store_close", "pressure_probe_close"]
 
 
 def test_service_start_blocks_on_missing_migration_354_or_owner_inventory_unresolved_after_bounded_recovery(

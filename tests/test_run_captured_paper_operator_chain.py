@@ -7,6 +7,7 @@ import hashlib
 import json
 from pathlib import Path
 import runpy
+import shutil
 import socket
 import sys
 from types import ModuleType, SimpleNamespace
@@ -17,6 +18,9 @@ import pytest
 
 from scripts import captured_paper_activation_runner as activation_runner
 from scripts import run_captured_paper_operator_chain as chain
+from tests.captured_paper_benchmark_authority_support import (
+    build_test_benchmark_authority,
+)
 
 
 ACCOUNT_ID = "11111111-2222-4333-8444-555555555555"
@@ -79,6 +83,13 @@ def chain_fixture(tmp_path: Path) -> ChainFixture:
     dependencies = root / "dependencies"
     for path in (candidate, artifacts, legacy, dependencies):
         path.mkdir(parents=True)
+    for relative in {
+        *activation_runner._BENCHMARK_SOURCE_PATHS.values(),
+        *activation_runner._BENCHMARK_AUTHORITY_PROGRAM_PATHS.values(),
+    }:
+        target = candidate / relative
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(Path(__file__).resolve().parents[1] / relative, target)
 
     pinned: dict[str, Path] = {}
     for name in (
@@ -97,11 +108,15 @@ def chain_fixture(tmp_path: Path) -> ChainFixture:
         _write(path, f"pinned:{name}\n".encode())
         pinned[name] = path
 
-    benchmark = root / "benchmarks" / "measured.json"
-    benchmark_sha = _write(
-        benchmark,
-        _canonical({"schema_version": "test.resource-benchmark.v1", "measured": True}),
+    benchmark_authority = build_test_benchmark_authority(
+        root=root,
+        candidate_root=candidate,
+        expected_git_commit="a" * 40,
+        git_executable=pinned["git"],
+        python_executable=pinned["python"],
+        python_dependency_root=dependencies,
     )
+    benchmark = benchmark_authority.resource_benchmark_path
     activation_path = root / "authority" / "activation-request.json"
     request_sha = _write(activation_path, b"outer activation authority\n")
     timeouts = activation_runner.RunnerTimeouts(
@@ -137,7 +152,9 @@ def chain_fixture(tmp_path: Path) -> ChainFixture:
         cutover_script=pinned["cutover"].resolve(strict=True),
         cutover_script_sha256=_sha(pinned["cutover"].read_bytes()),
         python_dependency_root=dependencies.resolve(strict=True),
-        python_dependency_root_identity_sha256="d" * 64,
+        python_dependency_root_identity_sha256=(
+            benchmark_authority.python_dependency_root_identity_sha256
+        ),
         runtime_env_path=pinned["runtime-env"].resolve(strict=True),
         runtime_env_sha256=_sha(pinned["runtime-env"].read_bytes()),
         artifact_root=artifacts.resolve(strict=True),
@@ -145,18 +162,43 @@ def chain_fixture(tmp_path: Path) -> ChainFixture:
         test_database_name="captured_paper_test",
         allowed_read_roots=(str(root.resolve(strict=True)),),
         timeouts=timeouts,
+        benchmark_authority=activation_runner.BenchmarkAuthorityBundle(
+            resource_benchmark_path=(
+                benchmark_authority.resource_benchmark_path
+            ),
+            resource_benchmark_sha256=(
+                benchmark_authority.resource_benchmark_sha256
+            ),
+            benchmark_authority_manifest_path=(
+                benchmark_authority.benchmark_authority_manifest_path
+            ),
+            benchmark_authority_manifest_sha256=(
+                benchmark_authority.benchmark_authority_manifest_sha256
+            ),
+            benchmark_runner_authority_path=(
+                benchmark_authority.benchmark_runner_authority_path
+            ),
+            benchmark_runner_authority_sha256=(
+                benchmark_authority.benchmark_runner_authority_sha256
+            ),
+            benchmark_execution_receipt_path=(
+                benchmark_authority.benchmark_execution_receipt_path
+            ),
+            benchmark_execution_receipt_sha256=(
+                benchmark_authority.benchmark_execution_receipt_sha256
+            ),
+        ),
     )
     document = {
         "schema_version": chain.CHAIN_REQUEST_SCHEMA_VERSION,
         "account_scope": chain.ACCOUNT_SCOPE,
         "live_cash_authorized": False,
-        "resource_benchmark": {
-            "path": str(benchmark.resolve(strict=True)),
-            "sha256": benchmark_sha,
-        },
+        **benchmark_authority.references(),
         "legacy_root": str(legacy.resolve(strict=True)),
         "python_dependency_root": str(dependencies.resolve(strict=True)),
-        "python_dependency_root_identity_sha256": "d" * 64,
+        "python_dependency_root_identity_sha256": (
+            benchmark_authority.python_dependency_root_identity_sha256
+        ),
         "bootstrap_stage0_script": str(pinned["stage0"].resolve(strict=True)),
         "bootstrap_stage0_script_sha256": _sha(pinned["stage0"].read_bytes()),
         "host_principal_user_id": getpass.getuser(),
@@ -356,6 +398,51 @@ def test_host_principal_must_equal_current_user(
             activation_request=chain_fixture.activation,
             chain_document=document,
         )
+
+
+def test_prelaunch_receipt_is_rejected_before_runtime_account_or_artifact_work(
+    monkeypatch: pytest.MonkeyPatch,
+    chain_fixture: ChainFixture,
+) -> None:
+    valid_bundle = chain_fixture.activation.benchmark_authority
+    terminal = json.loads(valid_bundle.benchmark_execution_receipt_path.read_bytes())
+    launch = terminal["launch_receipt"]
+    invalid_bundle = replace(
+        valid_bundle,
+        benchmark_execution_receipt_path=Path(launch["path"]),
+        benchmark_execution_receipt_sha256=launch["sha256"],
+    )
+    activation = replace(
+        chain_fixture.activation, benchmark_authority=invalid_bundle
+    )
+    document = dict(chain_fixture.document)
+    document["benchmark_execution_receipt"] = dict(launch)
+    touched = {"runtime": False, "account": False}
+
+    def forbidden_runtime(*_args: Any, **_kwargs: Any) -> Any:
+        touched["runtime"] = True
+        raise AssertionError("runtime install must follow terminal validation")
+
+    def forbidden_account(*_args: Any, **_kwargs: Any) -> Any:
+        touched["account"] = True
+        raise AssertionError("account read must follow terminal validation")
+
+    monkeypatch.setattr(
+        chain, "install_captured_paper_runtime_environment", forbidden_runtime
+    )
+    monkeypatch.setattr(chain, "_read_exact_paper_account", forbidden_account)
+
+    with pytest.raises(
+        activation_runner.CapturedPaperActivationRunnerError,
+        match="BENCHMARK_AUTHORITY_CONTENT_ADDRESS_INVALID",
+    ):
+        chain.run_operator_chain(
+            activation_request=activation,
+            chain_document=document,
+        )
+
+    assert touched == {"runtime": False, "account": False}
+    assert tuple(activation.artifact_root.iterdir()) == ()
 
 
 class _FakeAccount:
@@ -963,7 +1050,17 @@ def test_candidate_preselection_publishes_only_closed_zero_order_evidence(
     artifact_root = tmp_path / "artifacts"
     capture_root.mkdir()
     artifact_root.mkdir()
-    preflight = SimpleNamespace(capture_store_root=capture_root)
+    helper_path = tmp_path / "pressure-probe.py"
+    helper_path.write_text("# sealed helper\n", encoding="utf-8")
+    helper_sha = _sha(helper_path.read_bytes())
+    preflight = SimpleNamespace(
+        capture_store_root=capture_root,
+        resource_binding=SimpleNamespace(
+            policy=SimpleNamespace(pressure_sample_max_age_seconds=5.0)
+        ),
+        source_paths={"captured_paper_pressure_probe": helper_path},
+        source_hashes={"captured_paper_pressure_probe": helper_sha},
+    )
     monkeypatch.setattr(
         preflight_module,
         "load_iqfeed_capture_bootstrap_preflight",
@@ -976,11 +1073,15 @@ def test_candidate_preselection_publishes_only_closed_zero_order_evidence(
         preflight: object,
         wall_clock: Any,
         monotonic_clock: Any,
+        pressure_probe: Any,
+        sample_deadline_seconds: float,
     ) -> object:
         observed["measure"] = {
             "preflight": preflight,
             "wall_clock": wall_clock,
             "monotonic_clock": monotonic_clock,
+            "pressure_probe": pressure_probe,
+            "sample_deadline_seconds": sample_deadline_seconds,
         }
         return object()
 
@@ -988,6 +1089,22 @@ def test_candidate_preselection_publishes_only_closed_zero_order_evidence(
         chain.operator_flow,
         "_measure_capture_pressure",
         fake_measure,
+    )
+    class FakeProbe:
+        def __init__(self, **kwargs: Any) -> None:
+            observed["probe_init"] = kwargs
+
+        def __enter__(self) -> "FakeProbe":
+            observed["probe_entered"] = True
+            return self
+
+        def __exit__(self, *_args: Any) -> None:
+            observed["probe_closed"] = True
+
+    monkeypatch.setattr(
+        chain.operator_flow,
+        "_load_pressure_probe_client",
+        lambda _preflight: FakeProbe,
     )
 
     class FakeConfig:
@@ -1068,6 +1185,9 @@ def test_candidate_preselection_publishes_only_closed_zero_order_evidence(
     assert observed["depth_forced_symbols"] == ()
     assert observed["l1_only_exact_print_preselection"] is True
     assert observed["measure"]["preflight"] is preflight
+    assert observed["measure"]["sample_deadline_seconds"] == 2.5
+    assert observed["probe_entered"] is True
+    assert observed["probe_closed"] is True
     assert callable(observed["measure"]["wall_clock"])
     assert callable(observed["measure"]["monotonic_clock"])
     assert observed["authority"]["wall_clock"] is observed["measure"]["wall_clock"]
@@ -1095,7 +1215,17 @@ def test_candidate_preselection_rejects_execution_surface_attestation(
     artifact_root = tmp_path / "artifacts"
     capture_root.mkdir()
     artifact_root.mkdir()
-    preflight = SimpleNamespace(capture_store_root=capture_root)
+    helper_path = tmp_path / "pressure-probe.py"
+    helper_path.write_text("# sealed helper\n", encoding="utf-8")
+    helper_sha = _sha(helper_path.read_bytes())
+    preflight = SimpleNamespace(
+        capture_store_root=capture_root,
+        resource_binding=SimpleNamespace(
+            policy=SimpleNamespace(pressure_sample_max_age_seconds=5.0)
+        ),
+        source_paths={"captured_paper_pressure_probe": helper_path},
+        source_hashes={"captured_paper_pressure_probe": helper_sha},
+    )
     monkeypatch.setattr(
         preflight_module,
         "load_iqfeed_capture_bootstrap_preflight",
@@ -1105,6 +1235,21 @@ def test_candidate_preselection_rejects_execution_surface_attestation(
         chain.operator_flow,
         "_measure_capture_pressure",
         lambda **_k: object(),
+    )
+    class FakeProbe:
+        def __init__(self, **_kwargs: Any) -> None:
+            pass
+
+        def __enter__(self) -> "FakeProbe":
+            return self
+
+        def __exit__(self, *_args: Any) -> None:
+            pass
+
+    monkeypatch.setattr(
+        chain.operator_flow,
+        "_load_pressure_probe_client",
+        lambda _preflight: FakeProbe,
     )
     monkeypatch.setattr(
         smoke_module, "CaptureOnlySmokeConfiguration", lambda **_k: object()
@@ -1383,9 +1528,37 @@ def test_full_operator_chain_bootstraps_exact_print_before_selection_and_is_hash
     class Result:
         def to_dict(self) -> dict[str, Any]:
             return {
+                "schema_version": chain.operator_flow.OPERATOR_RESULT_SCHEMA_VERSION,
                 "verdict": "CAPTURED_ALPACA_PAPER_BUILD_READY_WITH_EXTERNAL_HOST_BASELINE",
+                "activation_generation": observed_plan["activation_generation"],
+                "account_scope": chain.ACCOUNT_SCOPE,
+                "expected_account_id": ACCOUNT_ID,
+                "code_build_sha256": "c" * 64,
+                "static_proof_cache": {
+                    "path": str(cache_path) if cache_path is not None else None,
+                    "sha256": cache_sha,
+                    "reused": use_static_cache,
+                    "restart_nonce": observed_plan["static_proof_restart_nonce"],
+                    "mint_status": "REUSED" if use_static_cache else "UNAVAILABLE",
+                    "reason_code": None,
+                },
+                "probe_manifest": {"path": "test", "sha256": "1" * 64},
+                "build_request": {"path": "test", "sha256": "2" * 64},
+                "preactivation_manifest": {
+                    "path": "test",
+                    "sha256": "3" * 64,
+                },
+                "next_command": {"path": "test", "sha256": "4" * 64},
+                "host_snapshot_authority": (
+                    "PREACTIVATION_BASELINE_FROM_EXTERNAL_RAW_SNAPSHOT"
+                ),
+                "current_host_inventory_observed": False,
+                "final_real_validate_only_required": True,
+                "paper_order_submission_authorized": False,
+                "paper_service_started": False,
+                "no_order_smoke_invoked": False,
                 "host_cutover_invoked": False,
-                "broker_order_calls": 0,
+                "live_cash_authorized": False,
             }
 
     def fake_operator_flow(value: object) -> Result:
@@ -1418,7 +1591,7 @@ def test_full_operator_chain_bootstraps_exact_print_before_selection_and_is_hash
     assert result["paper_order_submission_authorized"] is False
     assert result["paper_service_started"] is False
     assert result["host_cutover_invoked"] is False
-    assert result["broker_order_calls"] == 0
+    assert result["schema_version"] == chain.CHAIN_RESULT_SCHEMA_VERSION
     selection_receipt = result["exact_print_selection_receipt"]
     selection_document = json.loads(
         Path(selection_receipt["path"]).read_text(encoding="utf-8")

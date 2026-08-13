@@ -185,6 +185,12 @@ def _resource_binding(now: datetime) -> CaptureResourceBinding:
         fsync_p95_milliseconds=5,
         logical_cpu_count=8,
         host_fingerprint_sha256=sha256_json({"host": "integration"}),
+        write_latency_measurement_profile=(
+            "chili.capture-pressure.durable-write-fsync-helper-process.v1"
+        ),
+        write_latency_probe_volume_identity_sha256=sha256_json(
+            {"volume": "integration"}
+        ),
     )
     policy = CaptureBudgetPolicy(
         memory_reserve_bytes=32_000_000,
@@ -398,11 +404,13 @@ def test_real_service_selection_lifecycle_primes_reads_and_rolls_back(
     pressure_controller.observe(
         CapturePressureSample(
             observed_at=now,
+            completed_monotonic=time.monotonic(),
             resource_binding_sha256=binding.binding_sha256,
             cpu_percent=20.0,
             available_memory_bytes=192_000_000,
             disk_free_bytes=2_000_000_000,
             write_latency_milliseconds=5.0,
+            write_latency_measurement_profile="chili.capture-pressure.durable-write-fsync-helper-process.v1",
         )
     )
     admission = SharedCaptureAdmissionBudget.from_resource_binding(

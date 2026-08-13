@@ -34,9 +34,9 @@ from urllib.parse import parse_qsl, urlsplit
 import uuid
 
 
-CHAIN_SCHEMA_VERSION = "chili.captured-paper-operator-chain-request.v1"
+CHAIN_SCHEMA_VERSION = "chili.captured-paper-operator-chain-request.v2"
 REQUEST_SCHEMA_VERSION = "chili.captured-paper-activation-runner-request.v3"
-RECEIPT_SCHEMA_VERSION = "chili.captured-paper-activation-authority-receipt.v1"
+RECEIPT_SCHEMA_VERSION = "chili.captured-paper-activation-authority-receipt.v2"
 ACCOUNT_SCOPE = "alpaca:paper"
 PAPER_TASK_NAME = "CHILI-Captured-Alpaca-PAPER"
 ACTIVATE_CONFIRMATION = "CUTOVER_FAKE_MONEY_ALPACA_PAPER"
@@ -57,6 +57,9 @@ _CHAIN_KEYS = frozenset(
         "account_scope",
         "live_cash_authorized",
         "resource_benchmark",
+        "benchmark_authority_manifest",
+        "benchmark_runner_authority",
+        "benchmark_execution_receipt",
         "legacy_root",
         "python_dependency_root",
         "python_dependency_root_identity_sha256",
@@ -136,6 +139,14 @@ _CRITICAL_TRACKED = frozenset(
         *(path.as_posix() for path in _CANDIDATE_ENTRYPOINTS.values()),
         "scripts/start-captured-alpaca-paper.ps1",
         "scripts/captured_alpaca_paper_service.py",
+        "scripts/captured_paper_pressure_probe.py",
+        "scripts/benchmark_replay_capture_runtime.py",
+        "scripts/build_captured_paper_benchmark_authority.py",
+        "scripts/run_captured_paper_benchmark_authority.py",
+        "app/services/trading/momentum_neural/replay_capture_contract.py",
+        "app/services/trading/momentum_neural/replay_capture_runtime.py",
+        "app/services/trading/momentum_neural/replay_errors.py",
+        "app/services/trading/momentum_neural/first_dip_tape_policy.py",
         "scripts/captured_paper_activation_runner.py",
         "scripts/captured_paper_runtime_env.py",
         "scripts/build_captured_paper_activation_authority.py",
@@ -260,6 +271,15 @@ def _strict_json(raw: bytes, *, field: str) -> Mapping[str, Any]:
 
 def _sha256_bytes(raw: bytes) -> str:
     return hashlib.sha256(raw).hexdigest()
+
+
+def _expected_sha256(value: str, *, field: str) -> str:
+    digest = str(value or "").lower()
+    if _SHA256_RE.fullmatch(digest) is None:
+        raise CapturedPaperActivationAuthorityError(
+            "HASH_INVALID", f"{field} must be one lowercase SHA-256"
+        )
+    return digest
 
 
 def _path_key(path: Path) -> str:
@@ -1164,6 +1184,13 @@ def build_captured_paper_activation_authority(
     python_dependency_root: str | Path,
     runtime_env_path: str | Path,
     resource_benchmark_path: str | Path,
+    resource_benchmark_sha256: str,
+    benchmark_authority_manifest_path: str | Path,
+    benchmark_authority_manifest_sha256: str,
+    benchmark_runner_authority_path: str | Path,
+    benchmark_runner_authority_sha256: str,
+    benchmark_execution_receipt_path: str | Path,
+    benchmark_execution_receipt_sha256: str,
     expected_account_id: str,
     test_database_name: str,
     bridge_configuration: Mapping[str, Any],
@@ -1187,6 +1214,35 @@ def build_captured_paper_activation_authority(
     benchmark = _canonical_file(
         resource_benchmark_path, field="resource_benchmark_path"
     )
+    benchmark_manifest = _canonical_file(
+        benchmark_authority_manifest_path,
+        field="benchmark_authority_manifest_path",
+    )
+    benchmark_runner = _canonical_file(
+        benchmark_runner_authority_path,
+        field="benchmark_runner_authority_path",
+    )
+    benchmark_execution = _canonical_file(
+        benchmark_execution_receipt_path,
+        field="benchmark_execution_receipt_path",
+    )
+    expected_benchmark_hashes = {
+        "resource_benchmark": _expected_sha256(
+            resource_benchmark_sha256, field="resource_benchmark_sha256"
+        ),
+        "benchmark_authority_manifest": _expected_sha256(
+            benchmark_authority_manifest_sha256,
+            field="benchmark_authority_manifest_sha256",
+        ),
+        "benchmark_runner_authority": _expected_sha256(
+            benchmark_runner_authority_sha256,
+            field="benchmark_runner_authority_sha256",
+        ),
+        "benchmark_execution_receipt": _expected_sha256(
+            benchmark_execution_receipt_sha256,
+            field="benchmark_execution_receipt_sha256",
+        ),
+    }
     cache_path: Path | None = None
     cache_expected_sha256: str | None = None
     cache_scope_root: Path | None = None
@@ -1227,6 +1283,9 @@ def build_captured_paper_activation_authority(
     for field, input_path in (
         ("runtime_env_path", runtime),
         ("resource_benchmark_path", benchmark),
+        ("benchmark_authority_manifest_path", benchmark_manifest),
+        ("benchmark_runner_authority_path", benchmark_runner),
+        ("benchmark_execution_receipt_path", benchmark_execution),
         *((("static_proof_cache_path", cache_path),) if cache_path else ()),
     ):
         if _inside(input_path, artifact):
@@ -1283,7 +1342,28 @@ def build_captured_paper_activation_authority(
             field="resource_benchmark_path",
             max_bytes=_MAX_BENCHMARK_BYTES,
         ),
+        "benchmark_authority_manifest": _pin_file(
+            benchmark_manifest,
+            field="benchmark_authority_manifest_path",
+            max_bytes=_MAX_JSON_BYTES,
+        ),
+        "benchmark_runner_authority": _pin_file(
+            benchmark_runner,
+            field="benchmark_runner_authority_path",
+            max_bytes=_MAX_JSON_BYTES,
+        ),
+        "benchmark_execution_receipt": _pin_file(
+            benchmark_execution,
+            field="benchmark_execution_receipt_path",
+            max_bytes=_MAX_JSON_BYTES,
+        ),
     }
+    for field, expected_digest in expected_benchmark_hashes.items():
+        if pins[field].sha256 != expected_digest:
+            raise CapturedPaperActivationAuthorityError(
+                "BENCHMARK_AUTHORITY_HASH_MISMATCH",
+                f"{field} differs from its independently supplied SHA-256",
+            )
     if cache_path is not None:
         cache_pin = _pin_file(
             cache_path,
@@ -1345,19 +1425,60 @@ def build_captured_paper_activation_authority(
             legacy,
             dependency,
             runtime.parent,
-            benchmark.parent,
+            benchmark.parent.parent.parent,
+            benchmark_manifest.parent.parent.parent,
+            benchmark_runner.parent.parent.parent,
+            benchmark_execution.parent.parent.parent,
             *((cache_scope_root,) if cache_scope_root is not None else ()),
             *(path.parent for path in executables.values()),
         )
     )
-    chain_document: Mapping[str, Any] = {
-        "schema_version": CHAIN_SCHEMA_VERSION,
-        "account_scope": ACCOUNT_SCOPE,
-        "live_cash_authorized": False,
+    benchmark_references = {
         "resource_benchmark": {
             "path": str(benchmark),
             "sha256": pins["resource_benchmark"].sha256,
         },
+        "benchmark_authority_manifest": {
+            "path": str(benchmark_manifest),
+            "sha256": pins["benchmark_authority_manifest"].sha256,
+        },
+        "benchmark_runner_authority": {
+            "path": str(benchmark_runner),
+            "sha256": pins["benchmark_runner_authority"].sha256,
+        },
+        "benchmark_execution_receipt": {
+            "path": str(benchmark_execution),
+            "sha256": pins["benchmark_execution_receipt"].sha256,
+        },
+    }
+    validator = _load_exact_module(runner_pin, role="activation_runner")
+    try:
+        validator.validate_benchmark_authority_bundle(
+            references=benchmark_references,
+            allowed_read_roots=roots,
+            expected_candidate_root=candidate,
+            expected_git_commit=commit,
+            expected_git_executable=pins["git_executable"].path,
+            expected_git_executable_sha256=pins["git_executable"].sha256,
+            expected_python_executable=pins["python_executable"].path,
+            expected_python_executable_sha256=pins["python_executable"].sha256,
+            expected_python_dependency_root=dependency,
+            expected_python_dependency_root_identity_sha256=(
+                dependency_identity_sha256
+            ),
+        )
+    except Exception as exc:
+        raise CapturedPaperActivationAuthorityError(
+            "BENCHMARK_AUTHORITY_REJECTED",
+            "terminal benchmark authority closure did not validate",
+        ) from exc
+    finally:
+        _unload_exact_module(validator)
+    chain_document: Mapping[str, Any] = {
+        "schema_version": CHAIN_SCHEMA_VERSION,
+        "account_scope": ACCOUNT_SCOPE,
+        "live_cash_authorized": False,
+        **benchmark_references,
         "legacy_root": str(legacy),
         "python_dependency_root": str(dependency),
         "python_dependency_root_identity_sha256": dependency_identity_sha256,
@@ -1499,7 +1620,7 @@ def build_captured_paper_activation_authority(
         },
         "python_dependency_root_identity_sha256": dependency_identity_sha256,
         "runtime_env_sha256": pins["runtime_env"].sha256,
-        "resource_benchmark_sha256": pins["resource_benchmark"].sha256,
+        **benchmark_references,
         "static_proof_cache": chain_document["static_proof_cache"],
         "validate_only_argv": list(validate_argv),
         "activate_paper_argv": list(activate_argv),
@@ -1535,6 +1656,13 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--python-dependency-root", required=True)
     parser.add_argument("--runtime-env", required=True)
     parser.add_argument("--resource-benchmark", required=True)
+    parser.add_argument("--resource-benchmark-sha256", required=True)
+    parser.add_argument("--benchmark-authority-manifest", required=True)
+    parser.add_argument("--benchmark-authority-manifest-sha256", required=True)
+    parser.add_argument("--benchmark-runner-authority", required=True)
+    parser.add_argument("--benchmark-runner-authority-sha256", required=True)
+    parser.add_argument("--benchmark-execution-receipt", required=True)
+    parser.add_argument("--benchmark-execution-receipt-sha256", required=True)
     parser.add_argument("--expected-account-id", required=True)
     parser.add_argument("--test-database-name", required=True)
     parser.add_argument("--bridge-configuration", required=True)
@@ -1575,6 +1703,23 @@ def main(argv: Sequence[str] | None = None) -> int:
             python_dependency_root=arguments.python_dependency_root,
             runtime_env_path=arguments.runtime_env,
             resource_benchmark_path=arguments.resource_benchmark,
+            resource_benchmark_sha256=arguments.resource_benchmark_sha256,
+            benchmark_authority_manifest_path=(
+                arguments.benchmark_authority_manifest
+            ),
+            benchmark_authority_manifest_sha256=(
+                arguments.benchmark_authority_manifest_sha256
+            ),
+            benchmark_runner_authority_path=arguments.benchmark_runner_authority,
+            benchmark_runner_authority_sha256=(
+                arguments.benchmark_runner_authority_sha256
+            ),
+            benchmark_execution_receipt_path=(
+                arguments.benchmark_execution_receipt
+            ),
+            benchmark_execution_receipt_sha256=(
+                arguments.benchmark_execution_receipt_sha256
+            ),
             expected_account_id=arguments.expected_account_id,
             test_database_name=arguments.test_database_name,
             bridge_configuration=bridge,

@@ -183,10 +183,19 @@ class _CapturedPaperServiceComposition:
     phase_one_reconciliation_receipt: Mapping[str, Any]
     restart_inventory_receipt: Mapping[str, Any]
     database_engine: Any
+    pressure_probe: Any | None = None
     initial_broker_snapshot: Mapping[str, Any] | None = None
 
     def close_shared_capture_store(self) -> None:
+        pressure_error: BaseException | None = None
+        if self.pressure_probe is not None:
+            try:
+                self.pressure_probe.close()
+            except BaseException as exc:
+                pressure_error = exc
         self.shared_capture_store.close()
+        if pressure_error is not None:
+            raise pressure_error
 
 
 @dataclass(frozen=True, slots=True)
@@ -206,6 +215,7 @@ class _PreparedCapturedPaperCapture:
     adapter: Any
     broker_snapshot: Mapping[str, Any]
     policy_authority: _CapturedPaperPolicyAuthority
+    pressure_probe: Any | None = None
 
 
 class _CapturedPaperPressureFeedWorker:
@@ -233,6 +243,7 @@ class _CapturedPaperPressureFeedWorker:
         sampler: Callable[[], Any],
         interval_seconds: float,
         monotonic_clock: Callable[[], float] = time.monotonic,
+        helper_pid_provider: Callable[[], int | None] | None = None,
     ) -> None:
         interval = float(interval_seconds)
         if not math.isfinite(interval) or interval <= 0.0:
@@ -244,6 +255,7 @@ class _CapturedPaperPressureFeedWorker:
         self._sampler = sampler
         self._interval = interval
         self._monotonic_clock = monotonic_clock
+        self._helper_pid_provider = helper_pid_provider
         self._stop_event = threading.Event()
         self._thread: threading.Thread | None = None
         # Controller suspension/recovery and the matching worker counters form
@@ -295,7 +307,12 @@ class _CapturedPaperPressureFeedWorker:
             raise ValueError("pressure feed monotonic clock is non-finite")
         return observed
 
-    def _feed_once(self, *, startup: bool) -> None:
+    def _feed_once(
+        self,
+        *,
+        startup: bool,
+        completion_deadline_monotonic: float | None = None,
+    ) -> None:
         try:
             sample = self._sampler()
         except OSError as exc:
@@ -315,17 +332,54 @@ class _CapturedPaperPressureFeedWorker:
                 raise
             self._suspend_after_runtime_failure(exc, fatal=True)
             raise
-        try:
+        successful_sample_monotonic = getattr(
+            sample,
+            "completed_monotonic",
+            None,
+        )
+        # Test doubles and malformed foreign values may omit the completion
+        # field, but the production controller below accepts only the exact
+        # CapturePressureSample v3 type (where it is mandatory).  Sampling a
+        # fallback clock here therefore cannot authorize capture; it only lets
+        # the worker surface the controller's canonical type rejection.
+        if successful_sample_monotonic is None:
             successful_sample_monotonic = self._checked_monotonic()
-        except BaseException as exc:
+        if (
+            isinstance(successful_sample_monotonic, bool)
+            or not isinstance(successful_sample_monotonic, (int, float))
+            or not math.isfinite(float(successful_sample_monotonic))
+            or float(successful_sample_monotonic) < 0.0
+        ):
+            exc = ValueError(
+                "capture pressure sample completion clock is invalid"
+            )
             if startup:
                 self._record_sample_failure(exc, fatal=True)
             else:
                 self._suspend_after_runtime_failure(exc, fatal=True)
-            raise
+            raise exc
+        successful_sample_monotonic = float(successful_sample_monotonic)
+        if (
+            completion_deadline_monotonic is not None
+            and successful_sample_monotonic
+            > float(completion_deadline_monotonic)
+        ):
+            exc = OSError("capture pressure scheduled sample deadline exceeded")
+            if startup:
+                self._record_sample_failure(exc, fatal=True)
+            else:
+                self._suspend_after_runtime_failure(exc, fatal=False)
+            raise exc
         with self._state_lock:
             try:
-                self._controller.observe(sample)
+                # Bind freshness to completion of the measured sample, not to
+                # whenever this service thread happens to reacquire the GIL and
+                # publish it.  A post-sample scheduling stall must age the
+                # evidence immediately instead of manufacturing a fresh window.
+                self._controller.observe(
+                    sample,
+                    sample_monotonic=successful_sample_monotonic,
+                )
             except BaseException as exc:
                 if not startup:
                     self._suspend_after_runtime_failure(exc, fatal=True)
@@ -350,24 +404,59 @@ class _CapturedPaperPressureFeedWorker:
             self._suspend_after_runtime_failure(exc, fatal=True)
             return
         while True:
-            try:
-                wait_seconds = max(
-                    0.0,
-                    next_sample_at - self._checked_monotonic(),
+            scheduled_sample_at = next_sample_at
+            while True:
+                try:
+                    before_wait = self._checked_monotonic()
+                    wait_seconds = max(
+                        0.0,
+                        scheduled_sample_at - before_wait,
+                    )
+                except BaseException as exc:
+                    self._suspend_after_runtime_failure(exc, fatal=True)
+                    return
+                if self._stop_event.wait(wait_seconds):
+                    return
+                try:
+                    sample_started_at = self._checked_monotonic()
+                except BaseException as exc:
+                    self._suspend_after_runtime_failure(exc, fatal=True)
+                    return
+                if sample_started_at < before_wait:
+                    self._suspend_after_runtime_failure(
+                        ValueError("pressure feed clock moved backwards"),
+                        fatal=True,
+                    )
+                    return
+                if sample_started_at < scheduled_sample_at:
+                    # Windows CPython 3.11 may expose a coarser monotonic tick
+                    # than Event.wait().  A successful wait can therefore
+                    # return while the sampled monotonic value is still just
+                    # before the target boundary.  Wait the remaining bounded
+                    # interval instead of manufacturing a clock rollback or a
+                    # backdated pressure sample.
+                    continue
+                break
+            wake_lag = sample_started_at - scheduled_sample_at
+            if wake_lag >= self._interval:
+                # A whole sampling budget elapsed before Python could even
+                # start the attempt.  Keep that scheduler loss separate from
+                # durable-I/O latency and suspend immediately.  Retry from a
+                # new schedule boundary; never publish a backdated sample.
+                self._suspend_after_runtime_failure(
+                    OSError("capture pressure feed wake deadline exceeded"),
+                    fatal=False,
                 )
-            except BaseException as exc:
-                self._suspend_after_runtime_failure(exc, fatal=True)
-                return
-            if self._stop_event.wait(wait_seconds):
-                return
-            try:
-                sample_started_at = self._checked_monotonic()
-            except BaseException as exc:
-                self._suspend_after_runtime_failure(exc, fatal=True)
-                return
+                next_sample_at = sample_started_at
+                continue
             next_sample_at = sample_started_at + self._interval
             try:
-                self._feed_once(startup=False)
+                self._feed_once(
+                    startup=False,
+                    completion_deadline_monotonic=(
+                        scheduled_sample_at + self._interval
+                    ),
+                )
             except OSError:
                 # A runtime sampler can fail transiently (for example while the
                 # host metrics source rolls over).  Keep this broker-incapable
@@ -586,6 +675,17 @@ class _CapturedPaperPressureFeedWorker:
                 sampling_state = "stale"
             else:
                 sampling_state = "healthy"
+            helper_pid: int | None = None
+            if self._helper_pid_provider is not None:
+                try:
+                    candidate_pid = self._helper_pid_provider()
+                    if (
+                        type(candidate_pid) is int
+                        and candidate_pid > 0
+                    ):
+                        helper_pid = candidate_pid
+                except BaseException:
+                    helper_pid = None
             return {
                 "ever_started": self._ever_started,
                 "running": running,
@@ -646,6 +746,7 @@ class _CapturedPaperPressureFeedWorker:
                 "pressure_state": pressure_state,
                 "pressure_rejection_reason": pressure_rejection_reason,
                 "pressure_sample_age_seconds": pressure_sample_age_seconds,
+                "pressure_probe_pid": helper_pid,
             }
 
 
@@ -2246,6 +2347,7 @@ _RUNTIME_MODULE_ROSTER: Mapping[str, str] = {
     "captured_paper_initial_controller": (
         "app.services.trading.momentum_neural.captured_paper_initial_controller"
     ),
+    "captured_paper_pressure_probe": "scripts.captured_paper_pressure_probe",
     "captured_paper_initial_provider": (
         "app.services.trading.momentum_neural.captured_paper_initial_provider"
     ),
@@ -6717,17 +6819,76 @@ def _no_order_smoke_receipt(
     return body
 
 
+def _assert_pressure_probe_volume_binding(
+    *,
+    preflight: Any,
+    replay_runtime_module: ModuleType,
+    probe_root: Path,
+) -> None:
+    expected = (
+        preflight.resource_binding.measurement
+        .write_latency_probe_volume_identity_sha256
+    )
+    if (
+        replay_runtime_module.capture_storage_volume_identity_sha256(
+            preflight.capture_store_root
+        )
+        != expected
+        or replay_runtime_module.capture_storage_volume_identity_sha256(
+            probe_root
+        )
+        != expected
+    ):
+        raise CapturedAlpacaPaperServiceError(
+            "PRESSURE_PROBE_STORAGE_VOLUME_MISMATCH",
+            "capture pressure helper and capture store must use the benchmark volume",
+        )
+
+
 def _measure_capture_pressure(
     *,
     preflight: Any,
     replay_runtime_module: ModuleType,
     wall_clock: Callable[[], datetime] = lambda: datetime.now(UTC),
     monotonic_clock: Callable[[], float] = time.monotonic,
+    pressure_probe: Any | None = None,
+    sample_deadline_seconds: float | None = None,
 ) -> Any:
     """Take a bounded live-host sample; never lower capture fidelity silently."""
 
     import psutil
 
+    def _sample_monotonic() -> float:
+        try:
+            value = float(monotonic_clock())
+        except BaseException as exc:
+            if isinstance(exc, (KeyboardInterrupt, SystemExit)):
+                raise
+            raise CapturedAlpacaPaperServiceError(
+                "PRESSURE_SAMPLE_CLOCK_UNAVAILABLE",
+                "capture pressure monotonic clock is unavailable",
+            ) from exc
+        if not math.isfinite(value):
+            raise CapturedAlpacaPaperServiceError(
+                "PRESSURE_SAMPLE_CLOCK_UNAVAILABLE",
+                "capture pressure monotonic clock is invalid",
+            )
+        return value
+
+    sample_started = _sample_monotonic()
+    if not math.isfinite(sample_started):
+        raise CapturedAlpacaPaperServiceError(
+            "PRESSURE_SAMPLE_UNAVAILABLE", "capture pressure clock is invalid"
+        )
+    deadline = (
+        None
+        if sample_deadline_seconds is None
+        else float(sample_deadline_seconds)
+    )
+    if deadline is not None and (not math.isfinite(deadline) or deadline <= 0.0):
+        raise CapturedAlpacaPaperServiceError(
+            "PRESSURE_SAMPLE_UNAVAILABLE", "capture pressure deadline is invalid"
+        )
     root = Path(preflight.capture_store_root).resolve(strict=True)
     # Measure the same filesystem without creating a short-lived object inside
     # the append-only capture namespace.  A concurrent resource-health scan is
@@ -6738,40 +6899,71 @@ def _measure_capture_pressure(
     cpu_percent = float(psutil.cpu_percent(interval=0.1))
     available_memory = int(psutil.virtual_memory().available)
     disk_free = int(shutil.disk_usage(root).free)
-    # One durable probe is one controller sample.  The controller already
-    # requires three consecutive entry/recovery samples, so taking three
-    # serial fsyncs here duplicates that evidence while making one logical
-    # sample take longer than the sealed freshness window on a busy host.  That
-    # manufactured stale gaps even though every individual probe was bounded.
-    # Keep the controller hysteresis authoritative and publish each completed
-    # fsync immediately as fresh measured evidence.
-    latencies: list[float] = []
-    descriptor = -1
-    temporary: str | None = None
-    try:
-        descriptor, temporary = tempfile.mkstemp(
-            prefix=".chili-pressure-", suffix=".tmp", dir=str(probe_root)
-        )
-        started = float(monotonic_clock())
-        with os.fdopen(descriptor, "wb", closefd=True) as handle:
-            descriptor = -1
-            handle.write(b"\0" * 4096)
-            handle.flush()
-            os.fsync(handle.fileno())
-        completed = float(monotonic_clock())
-        latency = max(0.0, (completed - started) * 1000.0)
-        latencies.append(latency)
-    finally:
-        if descriptor >= 0:
-            with suppress(OSError):
-                os.close(descriptor)
-        if temporary is not None:
-            with suppress(OSError):
-                os.unlink(temporary)
-    if len(latencies) != 1:
+    # The helper owns the durability clock.  CPython releases the GIL around
+    # write/fsync; timing those calls in this heavily threaded service also
+    # measures the unrelated wait to reacquire the service interpreter's GIL.
+    # The benchmark calibrates storage durability rather than that GIL queue.
+    # A persistent, isolated single-thread helper removes only this service-GIL
+    # coupling.  Its strict response deadline still counts real OS scheduling,
+    # IPC and I/O stalls and fails the sampler closed when any is unavailable.
+    if pressure_probe is None or not callable(
+        getattr(pressure_probe, "measure", None)
+    ):
         raise CapturedAlpacaPaperServiceError(
-            "PRESSURE_SAMPLE_UNAVAILABLE", "capture write-latency sample is incomplete"
+            "PRESSURE_SAMPLE_UNAVAILABLE",
+            "capture pressure helper is unavailable",
         )
+    elapsed_before_probe = _sample_monotonic() - sample_started
+    if (
+        deadline is not None
+        and (
+            not math.isfinite(elapsed_before_probe)
+            or elapsed_before_probe < 0.0
+            or elapsed_before_probe >= deadline
+        )
+    ):
+        raise OSError("capture pressure sampling deadline exceeded")
+    remaining = (
+        None if deadline is None else deadline - elapsed_before_probe
+    )
+    measurement = pressure_probe.measure(
+        response_timeout_seconds=remaining
+    )
+    latency = float(getattr(measurement, "latency_milliseconds", math.nan))
+    measurement_profile = str(
+        getattr(measurement, "write_latency_profile", "") or ""
+    )
+    expected_profile = getattr(
+        replay_runtime_module,
+        "CAPTURE_PRESSURE_WRITE_LATENCY_PROFILE",
+        None,
+    )
+    if (
+        not math.isfinite(latency)
+        or latency <= 0.0
+        or measurement_profile != expected_profile
+        or type(getattr(measurement, "bytes_written", None)) is not int
+        or measurement.bytes_written != 4096
+        or getattr(measurement, "fsync_completed", None) is not True
+        or getattr(measurement, "cleanup_completed", None) is not True
+    ):
+        raise CapturedAlpacaPaperServiceError(
+            "PRESSURE_SAMPLE_UNAVAILABLE",
+            "capture pressure helper returned invalid evidence",
+        )
+    sample_completed = _sample_monotonic()
+    if (
+        not math.isfinite(sample_completed)
+        or sample_completed < sample_started
+    ):
+        raise CapturedAlpacaPaperServiceError(
+            "PRESSURE_SAMPLE_UNAVAILABLE", "capture pressure clock is invalid"
+        )
+    if deadline is not None and sample_completed - sample_started > deadline:
+        # This is a transient service-scheduling/IPC availability failure, not
+        # storage latency.  The feed worker maps OSError to immediate sampler
+        # suspension and retries; only a later complete fresh sample recovers.
+        raise OSError("capture pressure sampling deadline exceeded")
     sample_type = getattr(replay_runtime_module, "CapturePressureSample", None)
     if sample_type is None:
         raise CapturedAlpacaPaperServiceError(
@@ -6779,11 +6971,13 @@ def _measure_capture_pressure(
         )
     return sample_type(
         observed_at=_aware_utc(wall_clock(), "capture pressure clock"),
+        completed_monotonic=sample_completed,
         resource_binding_sha256=preflight.resource_binding.binding_sha256,
         cpu_percent=cpu_percent,
         available_memory_bytes=available_memory,
         disk_free_bytes=disk_free,
-        write_latency_milliseconds=max(latencies),
+        write_latency_milliseconds=latency,
+        write_latency_measurement_profile=measurement_profile,
     )
 
 
@@ -7218,6 +7412,7 @@ def _prepare_capture_components(
     bootstrap_module = runtime_modules["iqfeed_capture_bootstrap"]
     host_module = runtime_modules["iqfeed_capture_host"]
     replay_runtime_module = runtime_modules["replay_capture_runtime"]
+    pressure_probe_module = runtime_modules["captured_paper_pressure_probe"]
     app_db_module = runtime_modules["app_db"]
     app_config_module = importlib.import_module("app.config")
     settings = app_config_module.settings
@@ -7252,20 +7447,64 @@ def _prepare_capture_components(
             "IQFEED_PREFLIGHT_BINDING_MISMATCH",
             "IQFeed preflight escaped the activation capture binding",
         )
-    pressure = _measure_capture_pressure(
+    probe_root = Path(preflight.capture_store_root).resolve(strict=True).parent
+    _assert_pressure_probe_volume_binding(
         preflight=preflight,
         replay_runtime_module=replay_runtime_module,
-        wall_clock=wall_clock,
-        monotonic_clock=monotonic_clock,
+        probe_root=probe_root,
     )
-    host = host_module.prepare_iqfeed_capture_host(
-        preflight,
-        pressure_sample=pressure,
-        wall_clock=wall_clock,
-        monotonic_clock=monotonic_clock,
+    pressure_probe_path = verified.source_paths.get(
+        "captured_paper_pressure_probe"
     )
+    pressure_probe_sha256 = verified.source_hashes.get(
+        "captured_paper_pressure_probe"
+    )
+    if pressure_probe_path is None or pressure_probe_sha256 is None:
+        raise CapturedAlpacaPaperServiceError(
+            "PRESSURE_PROBE_AUTHORITY_UNAVAILABLE",
+            "capture pressure helper is absent from the sealed code roster",
+        )
+    pressure_probe = pressure_probe_module.CapturedPaperPressureProbeClient(
+        python_executable=Path(sys.executable).resolve(strict=True),
+        probe_root=probe_root,
+        response_timeout_seconds=(
+            float(preflight.resource_binding.policy.pressure_sample_max_age_seconds)
+            / 2.0
+        ),
+        helper_path=pressure_probe_path,
+        expected_helper_sha256=pressure_probe_sha256,
+    )
+    try:
+        pressure_probe.start()
+        pressure = _measure_capture_pressure(
+            preflight=preflight,
+            replay_runtime_module=replay_runtime_module,
+            wall_clock=wall_clock,
+            monotonic_clock=monotonic_clock,
+            pressure_probe=pressure_probe,
+            sample_deadline_seconds=(
+                float(preflight.resource_binding.policy.pressure_sample_max_age_seconds)
+                / 2.0
+            ),
+        )
+    except BaseException as original_exc:
+        try:
+            pressure_probe.close()
+        except BaseException as cleanup_exc:
+            raise CapturedAlpacaPaperServiceError(
+                "PRESSURE_PROBE_CLEANUP_INCOMPLETE",
+                "capture pressure helper did not terminate after startup failure",
+            ) from cleanup_exc
+        raise
+    host: Any | None = None
     shared_store: Any | None = None
     try:
+        host = host_module.prepare_iqfeed_capture_host(
+            preflight,
+            pressure_sample=pressure,
+            wall_clock=wall_clock,
+            monotonic_clock=monotonic_clock,
+        )
         shared_store = replay_runtime_module.SharedCaptureStoreRuntime.create(
             verified.capture_store_root,
             resource_binding=host.composition.binding,
@@ -7303,13 +7542,22 @@ def _prepare_capture_components(
             startup_input_provider=startup_provider,
             settings_projection_sha256=verified.settings_projection_sha256,
         )
-    except BaseException:
-        with suppress(BaseException):
-            host.close()
+    except BaseException as original_exc:
+        if host is not None:
+            with suppress(BaseException):
+                host.close()
         if shared_store is not None:
             with suppress(BaseException):
                 shared_store.close()
+        try:
+            pressure_probe.close()
+        except BaseException as cleanup_exc:
+            raise CapturedAlpacaPaperServiceError(
+                "PRESSURE_PROBE_CLEANUP_INCOMPLETE",
+                "capture pressure helper did not terminate after composition failure",
+            ) from cleanup_exc
         raise
+    assert host is not None
     return _PreparedCapturedPaperCapture(
         preflight=preflight,
         host=host,
@@ -7317,6 +7565,7 @@ def _prepare_capture_components(
         adapter=adapter,
         broker_snapshot=broker_snapshot,
         policy_authority=policy_authority,
+        pressure_probe=pressure_probe,
     )
 
 
@@ -8160,6 +8409,13 @@ def _assemble_service_composition(
             replay_runtime_module=replay_runtime_module,
             wall_clock=wall_clock,
             monotonic_clock=monotonic_clock,
+            pressure_probe=prepared.pressure_probe,
+            sample_deadline_seconds=(
+                float(
+                    prepared.host.composition.pressure_controller.binding.policy.pressure_sample_max_age_seconds
+                )
+                / 2.0
+            ),
         ),
         interval_seconds=(
             float(
@@ -8168,6 +8424,7 @@ def _assemble_service_composition(
             / 2.0
         ),
         monotonic_clock=monotonic_clock,
+        helper_pid_provider=lambda: prepared.pressure_probe.pid,
     )
     selection_pre_authority_workers = (
         supervisor_module.CapturedPaperManagedWorker(
@@ -8356,6 +8613,7 @@ def _assemble_service_composition(
         ),
         restart_inventory_receipt=dict(restart_inventory_receipt),
         database_engine=database_engine,
+        pressure_probe=prepared.pressure_probe,
         initial_broker_snapshot=dict(prepared.broker_snapshot),
     )
 
@@ -8519,11 +8777,19 @@ def _build_service_composition(
             wall_clock=wall_clock,
             monotonic_clock=monotonic_clock,
         )
-    except BaseException:
+    except BaseException as original_exc:
         with suppress(BaseException):
             prepared.host.close()
         with suppress(BaseException):
             prepared.shared_store.close()
+        if prepared.pressure_probe is not None:
+            try:
+                prepared.pressure_probe.close()
+            except BaseException as cleanup_exc:
+                raise CapturedAlpacaPaperServiceError(
+                    "PRESSURE_PROBE_CLEANUP_INCOMPLETE",
+                    "capture pressure helper did not terminate after service-build failure",
+                ) from cleanup_exc
         raise
 
 

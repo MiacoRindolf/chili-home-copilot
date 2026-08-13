@@ -127,6 +127,10 @@ def _binding(
         fsync_p95_milliseconds=4,
         logical_cpu_count=8,
         host_fingerprint_sha256="e" * 64,
+        write_latency_measurement_profile=(
+            "chili.capture-pressure.durable-write-fsync-helper-process.v1"
+        ),
+        write_latency_probe_volume_identity_sha256="d" * 64,
     )
     policy = CaptureBudgetPolicy(
         memory_reserve_bytes=10_000_000,
@@ -221,11 +225,13 @@ def _coordinator(
         controller.observe(
             CapturePressureSample(
                 observed_at=BASE + timedelta(seconds=1),
+                completed_monotonic=time.monotonic(),
                 resource_binding_sha256=binding.binding_sha256,
                 cpu_percent=20,
                 available_memory_bytes=50_000_000,
                 disk_free_bytes=900_000_000,
                 write_latency_milliseconds=5,
+                write_latency_measurement_profile="chili.capture-pressure.durable-write-fsync-helper-process.v1",
             )
         )
     identity, evidence = _identity_and_evidence(certification_symbol)
@@ -311,11 +317,13 @@ def test_supervised_promotion_uses_one_trusted_timestamp_with_advancing_clock(
     controller.observe(
         CapturePressureSample(
             observed_at=BASE + timedelta(seconds=1),
+            completed_monotonic=time.monotonic(),
             resource_binding_sha256=binding.binding_sha256,
             cpu_percent=20,
             available_memory_bytes=50_000_000,
             disk_free_bytes=900_000_000,
             write_latency_milliseconds=5,
+            write_latency_measurement_profile="chili.capture-pressure.durable-write-fsync-helper-process.v1",
         )
     )
     clock = _WallClock(BASE + timedelta(seconds=2))
@@ -978,11 +986,13 @@ def test_supervisor_atomically_transfers_two_symbols_under_one_global_budget(
     controller.observe(
         CapturePressureSample(
             observed_at=BASE + timedelta(seconds=1),
+            completed_monotonic=time.monotonic(),
             resource_binding_sha256=binding.binding_sha256,
             cpu_percent=20,
             available_memory_bytes=50_000_000,
             disk_free_bytes=900_000_000,
             write_latency_milliseconds=5,
+            write_latency_measurement_profile="chili.capture-pressure.durable-write-fsync-helper-process.v1",
         )
     )
     clock = _WallClock(BASE + timedelta(seconds=2))
@@ -1127,11 +1137,13 @@ def test_supervisor_scanner_change_log_deduplicates_without_a_gap() -> None:
     controller.observe(
         CapturePressureSample(
             observed_at=BASE + timedelta(seconds=1),
+            completed_monotonic=time.monotonic(),
             resource_binding_sha256=binding.binding_sha256,
             cpu_percent=20,
             available_memory_bytes=50_000_000,
             disk_free_bytes=900_000_000,
             write_latency_milliseconds=5,
+            write_latency_measurement_profile="chili.capture-pressure.durable-write-fsync-helper-process.v1",
         )
     )
     clock = _WallClock(BASE + timedelta(seconds=3))
@@ -1244,11 +1256,13 @@ def test_process_service_exposes_fail_closed_live_loop_hook_sequence(
     controller.observe(
         CapturePressureSample(
             observed_at=BASE + timedelta(seconds=1),
+            completed_monotonic=time.monotonic(),
             resource_binding_sha256=binding.binding_sha256,
             cpu_percent=20,
             available_memory_bytes=50_000_000,
             disk_free_bytes=900_000_000,
             write_latency_milliseconds=5,
+            write_latency_measurement_profile="chili.capture-pressure.durable-write-fsync-helper-process.v1",
         )
     )
     clock = _WallClock(BASE + timedelta(seconds=2))
@@ -1349,11 +1363,13 @@ def test_process_service_rejects_suspended_pressure_before_run_factory(
     controller.observe(
         CapturePressureSample(
             observed_at=BASE + timedelta(seconds=1),
+            completed_monotonic=time.monotonic(),
             resource_binding_sha256=binding.binding_sha256,
             cpu_percent=20,
             available_memory_bytes=50_000_000,
             disk_free_bytes=900_000_000,
             write_latency_milliseconds=5,
+            write_latency_measurement_profile="chili.capture-pressure.durable-write-fsync-helper-process.v1",
         )
     )
     controller.suspend_sampling()
@@ -1396,11 +1412,13 @@ def test_supervised_iqfeed_promotion_registers_from_exact_print_and_gaps_prior_q
     controller.observe(
         CapturePressureSample(
             observed_at=BASE + timedelta(seconds=1),
+            completed_monotonic=time.monotonic(),
             resource_binding_sha256=binding.binding_sha256,
             cpu_percent=20,
             available_memory_bytes=50_000_000,
             disk_free_bytes=900_000_000,
             write_latency_milliseconds=5,
+            write_latency_measurement_profile="chili.capture-pressure.durable-write-fsync-helper-process.v1",
         )
     )
     clock = _WallClock(BASE + timedelta(seconds=2))
@@ -1563,11 +1581,13 @@ def test_promoted_exact_print_resolves_with_post_run_read_clock(
     pressure.observe(
         CapturePressureSample(
             observed_at=BASE + timedelta(seconds=1),
+            completed_monotonic=time.monotonic(),
             resource_binding_sha256=binding.binding_sha256,
             cpu_percent=20,
             available_memory_bytes=50_000_000,
             disk_free_bytes=900_000_000,
             write_latency_milliseconds=5,
+            write_latency_measurement_profile="chili.capture-pressure.durable-write-fsync-helper-process.v1",
         )
     )
     clock = _WallClock(BASE + timedelta(seconds=2))
@@ -1721,11 +1741,13 @@ def test_process_service_routes_upstream_queue_gap_into_hot_promotion(
     controller.observe(
         CapturePressureSample(
             observed_at=BASE + timedelta(seconds=1),
+            completed_monotonic=time.monotonic(),
             resource_binding_sha256=binding.binding_sha256,
             cpu_percent=20,
             available_memory_bytes=50_000_000,
             disk_free_bytes=900_000_000,
             write_latency_milliseconds=5,
+            write_latency_measurement_profile="chili.capture-pressure.durable-write-fsync-helper-process.v1",
         )
     )
     clock = _WallClock(BASE + timedelta(seconds=2))
@@ -1823,11 +1845,13 @@ def test_process_runs_share_one_store_quota_and_seal_independently(
     controller.observe(
         CapturePressureSample(
             observed_at=BASE + timedelta(seconds=1),
+            completed_monotonic=time.monotonic(),
             resource_binding_sha256=binding.binding_sha256,
             cpu_percent=20,
             available_memory_bytes=50_000_000,
             disk_free_bytes=900_000_000,
             write_latency_milliseconds=5,
+            write_latency_measurement_profile="chili.capture-pressure.durable-write-fsync-helper-process.v1",
         )
     )
     clock = _WallClock(BASE + timedelta(seconds=2))
@@ -1994,11 +2018,13 @@ def test_failed_shared_run_start_releases_its_writer_lease(
     controller.observe(
         CapturePressureSample(
             observed_at=BASE + timedelta(seconds=1),
+            completed_monotonic=time.monotonic(),
             resource_binding_sha256=binding.binding_sha256,
             cpu_percent=20,
             available_memory_bytes=50_000_000,
             disk_free_bytes=900_000_000,
             write_latency_milliseconds=5,
+            write_latency_measurement_profile="chili.capture-pressure.durable-write-fsync-helper-process.v1",
         )
     )
     clock = _WallClock(BASE + timedelta(seconds=2))
@@ -2089,11 +2115,13 @@ def test_ingress_poisoned_start_aborts_releases_shared_lease_and_retries_symbol(
         controller.observe(
             CapturePressureSample(
                 observed_at=at,
+                completed_monotonic=time.monotonic(),
                 resource_binding_sha256=binding.binding_sha256,
                 cpu_percent=20,
                 available_memory_bytes=50_000_000,
                 disk_free_bytes=900_000_000,
                 write_latency_milliseconds=5,
+                write_latency_measurement_profile="chili.capture-pressure.durable-write-fsync-helper-process.v1",
             )
         )
 
@@ -2232,11 +2260,13 @@ def test_shared_stop_timeout_defers_release_until_writer_quiesces(
     controller.observe(
         CapturePressureSample(
             observed_at=BASE + timedelta(seconds=1),
+            completed_monotonic=time.monotonic(),
             resource_binding_sha256=binding.binding_sha256,
             cpu_percent=20,
             available_memory_bytes=50_000_000,
             disk_free_bytes=900_000_000,
             write_latency_milliseconds=5,
+            write_latency_measurement_profile="chili.capture-pressure.durable-write-fsync-helper-process.v1",
         )
     )
     clock = _WallClock(BASE + timedelta(seconds=2))
@@ -2323,11 +2353,13 @@ def test_shared_store_run_factory_hash_binds_every_runtime_knob(
     controller.observe(
         CapturePressureSample(
             observed_at=BASE + timedelta(seconds=1),
+            completed_monotonic=time.monotonic(),
             resource_binding_sha256=binding.binding_sha256,
             cpu_percent=20,
             available_memory_bytes=50_000_000,
             disk_free_bytes=900_000_000,
             write_latency_milliseconds=5,
+            write_latency_measurement_profile="chili.capture-pressure.durable-write-fsync-helper-process.v1",
         )
     )
     clock = _WallClock(BASE + timedelta(seconds=2))

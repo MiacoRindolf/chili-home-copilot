@@ -278,6 +278,12 @@ def _resource_binding(measured_at: datetime) -> CaptureResourceBinding:
         fsync_p95_milliseconds=5,
         logical_cpu_count=8,
         host_fingerprint_sha256=_digest("first-dip-runtime-fixture-host"),
+        write_latency_measurement_profile=(
+            "chili.capture-pressure.durable-write-fsync-helper-process.v1"
+        ),
+        write_latency_probe_volume_identity_sha256=_digest(
+            "first-dip-runtime-fixture-volume"
+        ),
     )
     policy = CaptureBudgetPolicy(
         memory_reserve_bytes=32_000_000,

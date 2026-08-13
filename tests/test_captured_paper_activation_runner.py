@@ -20,6 +20,10 @@ import pytest
 from scripts import captured_paper_activation_runner as runner
 from scripts import captured_paper_activation_contract as contract
 from scripts import captured_paper_host_cutover as host_cutover
+from tests.captured_paper_benchmark_authority_support import (
+    build_test_benchmark_authority,
+    publish as publish_benchmark_authority,
+)
 
 _REAL_ASSERT_ISOLATED_INTERPRETER = runner._assert_isolated_interpreter
 
@@ -112,25 +116,52 @@ def request_fixture(
             _write(source, f"launcher-source:{index}:{relative}\n".encode())
     dependency_root = tmp_path / "dependencies"
     dependency_root.mkdir()
+    for relative in {
+        *runner._BENCHMARK_SOURCE_PATHS.values(),
+        *runner._BENCHMARK_AUTHORITY_PROGRAM_PATHS.values(),
+    }:
+        target = candidate / relative
+        if target.exists():
+            continue
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(Path(__file__).resolve().parents[1] / relative, target)
     dependency_identity = contract.python_dependency_root_identity_sha256(
         dependency_root=dependency_root,
         python_executable=files["python_executable"],
         python_executable_sha256=hashes["python_executable"],
     )
+    benchmark_authority = build_test_benchmark_authority(
+        root=tmp_path,
+        candidate_root=candidate,
+        expected_git_commit=COMMIT,
+        git_executable=files["git_executable"],
+        python_executable=files["python_executable"],
+        python_dependency_root=dependency_root,
+    )
+    legacy_root = tmp_path / "legacy"
+    legacy_root.mkdir()
     files["chain_request_path"] = tmp_path / "pinned" / "chain-request.json"
     hashes["chain_request_path"] = _write(
         files["chain_request_path"],
         _canonical(
             {
-                "schema_version": "chili.captured-paper-operator-chain-request.v1",
+                "schema_version": runner.CHAIN_REQUEST_SCHEMA_VERSION,
                 "account_scope": runner.ACCOUNT_SCOPE,
                 "live_cash_authorized": False,
+                **benchmark_authority.references(),
+                "legacy_root": str(legacy_root),
                 "python_dependency_root": str(dependency_root),
                 "python_dependency_root_identity_sha256": dependency_identity,
                 "bootstrap_stage0_script": str(files["bootstrap_stage0_script"]),
                 "bootstrap_stage0_script_sha256": hashes[
                     "bootstrap_stage0_script"
                 ],
+                "host_principal_user_id": "test-user",
+                "bridge_configuration": {
+                    "iqfeed_l1": {"test": True},
+                    "iqfeed_l2": {"test": True},
+                },
+                "static_proof_cache": None,
             }
         ),
     )
@@ -221,6 +252,7 @@ class Scenario:
     apply_journal_variant: str | None = None
     publish_started: bool = True
     recovery_outcome: str = "none"
+    chain_result_schema: str = runner.CHAIN_RESULT_SCHEMA_VERSION
 
 
 class FakeExecutor:
@@ -537,8 +569,46 @@ class FakeExecutor:
 
     def _chain_result(self) -> runner.CommandResult:
         document = {
+            "schema_version": self.scenario.chain_result_schema,
             "verdict": "CAPTURED_ALPACA_PAPER_BUILD_READY_WITH_EXTERNAL_HOST_BASELINE",
             "activation_generation": GENERATION,
+            "account_scope": runner.ACCOUNT_SCOPE,
+            "expected_account_id": ACCOUNT_ID,
+            "code_build_sha256": "c" * 64,
+            "static_proof_cache": {
+                "path": None,
+                "sha256": None,
+                "reused": False,
+                "restart_nonce": None,
+                "mint_status": "UNAVAILABLE",
+                "reason_code": None,
+            },
+            "probe_manifest": {"path": "test", "sha256": "1" * 64},
+            "build_request": {"path": "test", "sha256": "2" * 64},
+            "host_snapshot_authority": (
+                "PREACTIVATION_BASELINE_FROM_EXTERNAL_RAW_SNAPSHOT"
+            ),
+            "current_host_inventory_observed": False,
+            "final_real_validate_only_required": True,
+            "paper_order_submission_authorized": False,
+            "paper_service_started": False,
+            "no_order_smoke_invoked": False,
+            "host_cutover_invoked": False,
+            "live_cash_authorized": False,
+            "activation_runner_request_sha256": self.request.request_sha256,
+            "operator_chain_request_sha256": self.request.chain_request_sha256,
+            "resource_benchmark_sha256": (
+                self.request.benchmark_authority.resource_benchmark_sha256
+            ),
+            **self.request.benchmark_authority.references(),
+            "exact_print_preselection_evidence": {
+                "path": "test",
+                "sha256": "3" * 64,
+            },
+            "exact_print_selection_receipt": {
+                "path": "test",
+                "sha256": "4" * 64,
+            },
             "next_command": {
                 "path": str(self.next_command_path),
                 "sha256": self.next_sha,
@@ -772,6 +842,26 @@ def _error_code(exc_info: pytest.ExceptionInfo[runner.CapturedPaperActivationRun
     return exc_info.value.code
 
 
+def _validate_benchmark_references(
+    request: runner.ActivationRunnerRequest,
+    references: Mapping[str, Any],
+) -> runner.BenchmarkAuthorityBundle:
+    return runner.validate_benchmark_authority_bundle(
+        references=references,
+        allowed_read_roots=request.allowed_read_roots,
+        expected_candidate_root=request.candidate_root,
+        expected_git_commit=request.expected_git_commit,
+        expected_git_executable=request.git_executable,
+        expected_git_executable_sha256=request.git_executable_sha256,
+        expected_python_executable=request.python_executable,
+        expected_python_executable_sha256=request.python_executable_sha256,
+        expected_python_dependency_root=request.python_dependency_root,
+        expected_python_dependency_root_identity_sha256=(
+            request.python_dependency_root_identity_sha256
+        ),
+    )
+
+
 def test_loader_accepts_only_exact_canonical_hash_bound_request(
     request_fixture: RequestFixture,
 ) -> None:
@@ -889,6 +979,138 @@ def test_loader_rejects_pinned_file_drift(request_fixture: RequestFixture) -> No
         )
 
     assert _error_code(exc_info) == "FILE_HASH_MISMATCH"
+
+
+def test_terminal_benchmark_authority_is_rehashed_before_any_artifact_creation(
+    request_fixture: RequestFixture,
+) -> None:
+    request = request_fixture.request
+    request.benchmark_authority.benchmark_runner_authority_path.write_bytes(
+        b'{"tampered":true}'
+    )
+    calls = 0
+
+    class NeverExecutor:
+        def run(self, *_args: Any, **_kwargs: Any) -> runner.CommandResult:
+            nonlocal calls
+            calls += 1
+            raise AssertionError("executor must not run before authority validation")
+
+    with pytest.raises(runner.CapturedPaperActivationRunnerError) as exc_info:
+        runner.run_activation(
+            request,
+            mode="ValidateOnly",
+            confirmation=None,
+            executor=NeverExecutor(),
+        )
+
+    assert _error_code(exc_info) == "FILE_HASH_MISMATCH"
+    assert calls == 0
+    assert not (request.artifact_root / "operator-runs").exists()
+    assert not (request.artifact_root / "operator-bootstrap").exists()
+
+
+def test_outer_runner_rejects_downgraded_chain_result_schema(
+    request_fixture: RequestFixture,
+    tmp_path: Path,
+) -> None:
+    executor = FakeExecutor(
+        request_fixture.request,
+        tmp_path,
+        Scenario(chain_result_schema="chili.captured-paper-operator-result.v1"),
+    )
+
+    with pytest.raises(runner.CapturedPaperActivationRunnerError) as exc_info:
+        _run(request_fixture.request, executor)
+
+    assert _error_code(exc_info) == "CHAIN_REJECTED"
+
+
+@pytest.mark.parametrize(
+    ("started_at", "completed_at", "duration"),
+    (
+        ("2026-08-13T12:00:00Z", "2026-08-13T12:00:01Z", -1.0),
+        ("2026-08-13T12:00:00Z", "2026-08-13T11:59:59Z", 1.0),
+        ("2026-08-13T12:00:00Z", "2026-08-13T12:00:01Z", 0.5),
+        ("2026-08-13T12:00:00Z", "2026-08-13T12:00:01Z", False),
+        ("2026-08-13T12:00:00+00:00", "2026-08-13T12:00:01Z", 1.0),
+    ),
+)
+def test_terminal_benchmark_clock_and_duration_must_be_exact_and_causal(
+    request_fixture: RequestFixture,
+    started_at: str,
+    completed_at: str,
+    duration: object,
+) -> None:
+    request = request_fixture.request
+    bundle = request.benchmark_authority
+    terminal = json.loads(bundle.benchmark_execution_receipt_path.read_bytes())
+    terminal["started_at_utc"] = started_at
+    terminal["completed_at_utc"] = completed_at
+    terminal["duration_seconds"] = duration
+    replacement_path, replacement_sha = publish_benchmark_authority(
+        bundle.benchmark_execution_receipt_path.parents[3],
+        "execution-receipt",
+        terminal,
+    )
+    references = dict(bundle.references())
+    references["benchmark_execution_receipt"] = {
+        "path": str(replacement_path),
+        "sha256": replacement_sha,
+    }
+
+    with pytest.raises(runner.CapturedPaperActivationRunnerError) as exc_info:
+        _validate_benchmark_references(request, references)
+
+    assert _error_code(exc_info) == "BENCHMARK_TERMINAL_CLOCK_INVALID"
+
+
+def test_benchmark_dependency_tree_must_be_bound_by_canonical_identity_hash(
+    request_fixture: RequestFixture,
+) -> None:
+    request = request_fixture.request
+    bundle = request.benchmark_authority
+    manifest = json.loads(bundle.benchmark_authority_manifest_path.read_bytes())
+    manifest["python_dependency_root"]["tree_sha256"] = "0" * 64
+    replacement_path, replacement_sha = publish_benchmark_authority(
+        bundle.benchmark_authority_manifest_path.parents[3],
+        "manifest",
+        manifest,
+    )
+    references = dict(bundle.references())
+    references["benchmark_authority_manifest"] = {
+        "path": str(replacement_path),
+        "sha256": replacement_sha,
+    }
+
+    with pytest.raises(runner.CapturedPaperActivationRunnerError) as exc_info:
+        _validate_benchmark_references(request, references)
+
+    assert _error_code(exc_info) == "BENCHMARK_DEPENDENCY_BINDING_INVALID"
+
+
+def test_benchmark_authority_objects_cannot_be_split_across_roots(
+    request_fixture: RequestFixture,
+    tmp_path: Path,
+) -> None:
+    request = request_fixture.request
+    bundle = request.benchmark_authority
+    runner_document = json.loads(bundle.benchmark_runner_authority_path.read_bytes())
+    split_path, split_sha = publish_benchmark_authority(
+        tmp_path / "split-authority-root",
+        "runner-authority",
+        runner_document,
+    )
+    references = dict(bundle.references())
+    references["benchmark_runner_authority"] = {
+        "path": str(split_path),
+        "sha256": split_sha,
+    }
+
+    with pytest.raises(runner.CapturedPaperActivationRunnerError) as exc_info:
+        _validate_benchmark_references(request, references)
+
+    assert _error_code(exc_info) == "BENCHMARK_AUTHORITY_ROOT_MISMATCH"
 
 
 @pytest.mark.parametrize(
@@ -1296,6 +1518,7 @@ def test_validate_only_reaches_real_validate_boundary_but_never_apply(
         "manifest_sha256": executor.manifest_sha,
         "request_sha256": request_fixture.request.request_sha256,
         "expected_git_commit": COMMIT,
+        **request_fixture.request.benchmark_authority.references(),
         "live_cash_authorized": False,
         "generated_at": "2026-07-18T17:00:00Z",
         "verdict": "VALIDATED_NO_HOST_MUTATION",

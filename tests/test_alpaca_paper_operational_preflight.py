@@ -130,17 +130,29 @@ def _fake_repo(root: Path) -> Path:
     (package / "replay_capture_runtime.py").write_text(
         "CAPTURE_RUNTIME = 'test-generation'\n", encoding="utf-8"
     )
+    (package / "first_dip_tape_policy.py").write_text(
+        "FIRST_DIP_POLICY = 'test-generation'\n", encoding="utf-8"
+    )
+    (package / "replay_errors.py").write_text(
+        "REPLAY_ERRORS = 'test-generation'\n", encoding="utf-8"
+    )
     scripts = root / "scripts"
     scripts.mkdir()
     (scripts / "benchmark_replay_capture_runtime.py").write_text(
         "BENCHMARK_RUNTIME = 'test-generation'\n", encoding="utf-8"
+    )
+    (scripts / "captured_paper_pressure_probe.py").write_text(
+        "PRESSURE_PROBE = 'test-generation'\n", encoding="utf-8"
+    )
+    (scripts / "captured_paper_isolated_stage0.py").write_text(
+        "STAGE0 = 'test-generation'\n", encoding="utf-8"
     )
     (root / "app/execution.py").write_text("READY = True\n", encoding="utf-8")
     (root / "requirements.txt").write_text("zstandard\n", encoding="utf-8")
     return root
 
 
-def _measurement() -> dict[str, object]:
+def _measurement(*, volume_identity_sha256: str) -> dict[str, object]:
     memory = preflight.psutil.virtual_memory()
     total_memory = int(memory.total)
     return {
@@ -156,6 +168,12 @@ def _measurement() -> dict[str, object]:
         "host_fingerprint_sha256": preflight._current_host_fingerprint(
             total_memory
         ),
+        "write_latency_measurement_profile": (
+            preflight.PRESSURE_WRITE_LATENCY_PROFILE
+        ),
+        "write_latency_probe_volume_identity_sha256": (
+            volume_identity_sha256
+        ),
     }
 
 
@@ -165,7 +183,11 @@ def _write_benchmark(
     from app.services.trading.momentum_neural import replay_capture_contract as contract
     from app.services.trading.momentum_neural import replay_capture_runtime as runtime
 
-    measurement = _measurement()
+    measurement = _measurement(
+        volume_identity_sha256=(
+            runtime.capture_storage_volume_identity_sha256(root)
+        )
+    )
     typed_values = dict(measurement)
     typed_values["measured_at"] = datetime.fromisoformat(
         str(measurement["measured_at"]).replace("Z", "+00:00")
@@ -192,6 +214,18 @@ def _write_benchmark(
     ).hexdigest()
     benchmark_hash = hashlib.sha256(
         (repo / "scripts/benchmark_replay_capture_runtime.py").read_bytes()
+    ).hexdigest()
+    pressure_probe_hash = hashlib.sha256(
+        (repo / "scripts/captured_paper_pressure_probe.py").read_bytes()
+    ).hexdigest()
+    first_dip_policy_hash = hashlib.sha256(
+        (source_root / "first_dip_tape_policy.py").read_bytes()
+    ).hexdigest()
+    replay_errors_hash = hashlib.sha256(
+        (source_root / "replay_errors.py").read_bytes()
+    ).hexdigest()
+    stage0_hash = hashlib.sha256(
+        (repo / "scripts/captured_paper_isolated_stage0.py").read_bytes()
     ).hexdigest()
     health = {
         "stopped_cleanly": True,
@@ -238,9 +272,15 @@ def _write_benchmark(
         "capture_runtime_source": {
             "benchmark_script_sha256": benchmark_hash,
             "contract_sha256": contract_hash,
+            "first_dip_tape_policy_sha256": first_dip_policy_hash,
+            "pressure_probe_sha256": pressure_probe_hash,
+            "replay_errors_sha256": replay_errors_hash,
             "runtime_sha256": runtime_hash,
+            "stage0_sha256": stage0_hash,
         },
         "environment": {
+            "benchmark_authority_manifest_sha256": "a" * 64,
+            "dependency_root_identity_sha256": "d" * 64,
             "logical_cpu_count": measurement["logical_cpu_count"],
             "measurement_host_fingerprint_sha256": measurement[
                 "host_fingerprint_sha256"
@@ -249,11 +289,60 @@ def _write_benchmark(
                 "host_fingerprint_sha256"
             ],
             "host_fingerprint_matches": True,
+            "platform": preflight.platform.platform(),
+            "python": preflight.platform.python_version(),
+            "python_executable_sha256": "e" * 64,
+            "resource_sampler_profile": (
+                "chili.benchmark-stdlib-resource-sampler.v1"
+            ),
         },
         "resource_measurement": {
             **measurement,
             "measurement_sha256": typed_measurement.measurement_sha256,
-            "durable_publication": {"all_verified": True},
+            "durable_publication": {
+                "all_verified": True,
+                "file_fsync": {},
+                "live_pressure_probe": {
+                    "all_verified": True,
+                    "bytes_per_sample": 4096,
+                    "count": 8,
+                    "helper_sha256": pressure_probe_hash,
+                    "max_ns": int(
+                        float(measurement["fsync_p95_milliseconds"])
+                        * 1_000_000.0
+                    ),
+                    "mean_ns": float(
+                        float(measurement["fsync_p95_milliseconds"])
+                        * 1_000_000.0
+                    ),
+                    "min_ns": int(
+                        float(measurement["fsync_p95_milliseconds"])
+                        * 1_000_000.0
+                    ),
+                    "p50_ns": int(
+                        float(measurement["fsync_p95_milliseconds"])
+                        * 1_000_000.0
+                    ),
+                    "p95_ns": int(
+                        float(measurement["fsync_p95_milliseconds"])
+                        * 1_000_000.0
+                    ),
+                    "p99_ns": int(
+                        float(measurement["fsync_p95_milliseconds"])
+                        * 1_000_000.0
+                    ),
+                    "probe_root_identity_sha256": "a" * 64,
+                    "probe_volume_identity_sha256": measurement[
+                        "write_latency_probe_volume_identity_sha256"
+                    ],
+                    "write_latency_profile": (
+                        preflight.PRESSURE_WRITE_LATENCY_PROFILE
+                    ),
+                },
+                "parent_publication": {},
+                "sample_count": 8,
+                "verified_count": 8,
+            },
         },
         "enqueue": {"submitted": 1_000, "accepted": 1_000},
         "writer": {"health": health},
@@ -685,7 +774,7 @@ def verified_capture_evidence(tmp_path: Path):
         / f"generation={verified.identity.generation}"
         / f"{verified.final_seal_sha256}.json"
     )
-    binding = _resource_binding()
+    binding = _resource_binding(capture_root)
     measurement = asdict(binding.measurement)
     measurement["measured_at"] = binding.measurement.measured_at.isoformat().replace(
         "+00:00", "Z"
@@ -728,7 +817,8 @@ def resource_bound_v4_capture(tmp_path: Path):
     )
     from tests.test_replay_capture_resource_gate import _binding
 
-    binding = _binding()
+    capture_root = tmp_path / "v4-capture"
+    binding = _binding(capture_root=capture_root)
     identity = CaptureRunIdentity(
         run_id="10000000-0000-0000-0000-000000000004",
         generation=4,
@@ -752,7 +842,6 @@ def resource_bound_v4_capture(tmp_path: Path):
         ),
         payload={"config_only": True},
     )
-    capture_root = tmp_path / "v4-capture"
     store = ContentAddressedCaptureStore(
         capture_root,
         compression_codec="zlib",
@@ -1041,6 +1130,124 @@ def test_benchmark_typed_binding_tamper_fails_closed(complete_evidence):
     ):
         _validate_benchmark_fixture(
             complete_evidence, path=path, digest=digest
+        )
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    (
+        ("min_ns", "not-a-number"),
+        ("max_ns", -1),
+        ("bytes_per_sample", 4096.0),
+        ("count", 999),
+    ),
+)
+def test_benchmark_rejects_malformed_live_pressure_probe_summary(
+    complete_evidence,
+    field,
+    value,
+):
+    def mutate(payload):
+        payload["resource_measurement"]["durable_publication"][
+            "live_pressure_probe"
+        ][field] = value
+
+    path, digest = _write_mutated_benchmark(
+        complete_evidence["benchmark"], mutate
+    )
+    with pytest.raises(
+        preflight.EvidenceError,
+        match="capture_benchmark_pressure_probe_invalid",
+    ):
+        _validate_benchmark_fixture(
+            complete_evidence,
+            path=path,
+            digest=digest,
+        )
+
+
+def test_benchmark_rejects_probe_volume_different_from_measurement(
+    complete_evidence,
+):
+    def mutate(payload):
+        payload["resource_measurement"]["durable_publication"][
+            "live_pressure_probe"
+        ]["probe_volume_identity_sha256"] = "b" * 64
+
+    path, digest = _write_mutated_benchmark(
+        complete_evidence["benchmark"], mutate
+    )
+    with pytest.raises(
+        preflight.EvidenceError,
+        match="capture_benchmark_pressure_probe_invalid",
+    ):
+        _validate_benchmark_fixture(
+            complete_evidence,
+            path=path,
+            digest=digest,
+        )
+
+
+def test_benchmark_accepts_mean_below_median_when_quantiles_are_ordered(
+    complete_evidence,
+):
+    def mutate(payload):
+        probe = payload["resource_measurement"]["durable_publication"][
+            "live_pressure_probe"
+        ]
+        probe.update(
+            {
+                "min_ns": 1,
+                "p50_ns": probe["p95_ns"],
+                "mean_ns": float(probe["p95_ns"]) * 0.875,
+            }
+        )
+
+    path, digest = _write_mutated_benchmark(
+        complete_evidence["benchmark"], mutate
+    )
+    summary, _measurement = _validate_benchmark_fixture(
+        complete_evidence,
+        path=path,
+        digest=digest,
+    )
+    assert summary["schema_version"] == preflight.CAPTURE_BENCHMARK_SCHEMA_VERSION
+
+
+def test_benchmark_rejects_legacy_pressure_and_binding_schemas(
+    complete_evidence,
+):
+    def legacy_benchmark(payload):
+        payload["benchmark_schema_version"] = (
+            "chili.replay-capture-benchmark.v5"
+        )
+
+    path, digest = _write_mutated_benchmark(
+        complete_evidence["benchmark"], legacy_benchmark
+    )
+    with pytest.raises(
+        preflight.EvidenceError,
+        match="capture_benchmark_schema_unsupported",
+    ):
+        _validate_benchmark_fixture(
+            complete_evidence,
+            path=path,
+            digest=digest,
+        )
+
+    def legacy_binding(payload):
+        payload["resolved_resource_binding"]["schema_version"] = (
+            "chili-replay-capture-resource-binding-v2"
+        )
+
+    path, digest = _write_mutated_benchmark(
+        complete_evidence["benchmark"], legacy_binding
+    )
+    with pytest.raises(preflight.EvidenceError):
+        _validate_benchmark_fixture(
+            complete_evidence,
+            path=path,
+            digest=digest,
         )
 
 

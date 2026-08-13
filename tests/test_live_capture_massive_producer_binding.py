@@ -77,6 +77,10 @@ def _binding() -> CaptureResourceBinding:
         fsync_p95_milliseconds=4,
         logical_cpu_count=8,
         host_fingerprint_sha256="e" * 64,
+        write_latency_measurement_profile=(
+            "chili.capture-pressure.durable-write-fsync-helper-process.v1"
+        ),
+        write_latency_probe_volume_identity_sha256="d" * 64,
     )
     policy = CaptureBudgetPolicy(
         memory_reserve_bytes=10_000_000,
@@ -124,11 +128,13 @@ def _run(
     controller.observe(
         CapturePressureSample(
             observed_at=BASE + timedelta(seconds=1),
+            completed_monotonic=time.monotonic(),
             resource_binding_sha256=binding.binding_sha256,
             cpu_percent=20,
             available_memory_bytes=50_000_000,
             disk_free_bytes=900_000_000,
             write_latency_milliseconds=5,
+            write_latency_measurement_profile="chili.capture-pressure.durable-write-fsync-helper-process.v1",
         )
     )
     code = {"git_commit": "massive-capture-fixture", "dirty": True}

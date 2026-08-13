@@ -9,6 +9,7 @@ from pathlib import Path
 import subprocess
 import sys
 import threading
+import time
 from types import MappingProxyType, SimpleNamespace
 
 import pytest
@@ -215,6 +216,17 @@ def _preflight(tmp_path: Path):
         startup_evidence_sha256=_sha(placeholder),
         resource_benchmark_path=placeholder,
         resource_benchmark_sha256=_sha(placeholder),
+        benchmark_authority_manifest_path=placeholder,
+        benchmark_authority_manifest_sha256=_sha(placeholder),
+        benchmark_runner_authority_path=placeholder,
+        benchmark_runner_authority_sha256=_sha(placeholder),
+        benchmark_launch_receipt_path=placeholder,
+        benchmark_launch_receipt_sha256=_sha(placeholder),
+        benchmark_execution_receipt_path=placeholder,
+        benchmark_execution_receipt_sha256=_sha(placeholder),
+        benchmark_execution_claim_path=placeholder,
+        benchmark_execution_claim_sha256=_sha(placeholder),
+        benchmark_authority_read_roots=(tmp_path,),
         resource_binding=SimpleNamespace(binding_sha256=BINDING_SHA),
         capture_store_root=capture_root,
         run_configuration={},
@@ -250,11 +262,13 @@ def _fixture(
     )
     pressure = CapturePressureSample(
         observed_at=NOW,
+        completed_monotonic=time.monotonic(),
         resource_binding_sha256=BINDING_SHA,
         cpu_percent=1.0,
         available_memory_bytes=1,
         disk_free_bytes=1,
         write_latency_milliseconds=1.0,
+        write_latency_measurement_profile="chili.capture-pressure.durable-write-fsync-helper-process.v1",
     )
     config = smoke.CaptureOnlySmokeConfiguration(
         preflight=preflight,
@@ -316,11 +330,13 @@ def test_capture_only_smoke_refreshes_pressure_before_composition(tmp_path):
     )
     fresh_pressure = CapturePressureSample(
         observed_at=NOW,
+        completed_monotonic=time.monotonic(),
         resource_binding_sha256=BINDING_SHA,
         cpu_percent=2.0,
         available_memory_bytes=2,
         disk_free_bytes=2,
         write_latency_milliseconds=2.0,
+        write_latency_measurement_profile="chili.capture-pressure.durable-write-fsync-helper-process.v1",
     )
     sampler = lambda: fresh_pressure
     config = replace(

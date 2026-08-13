@@ -276,6 +276,49 @@ def _parse_utc(value: Any, field_name: str) -> datetime:
     return _utc(parsed, field_name)
 
 
+CAPTURE_PRESSURE_WRITE_LATENCY_PROFILE = (
+    "chili.capture-pressure.durable-write-fsync-helper-process.v1"
+)
+CAPTURE_STORAGE_VOLUME_IDENTITY_SCHEMA_VERSION = (
+    "chili.capture-storage-volume-identity.v1"
+)
+
+
+def capture_storage_volume_identity_sha256(path: str | Path) -> str:
+    """Bind a capture path to its stable host-local storage volume.
+
+    The target itself may not exist yet during bootstrap.  The nearest
+    existing ancestor supplies ``st_dev`` while the normalized filesystem
+    anchor prevents a device-number collision from silently crossing drive
+    namespaces.  The resource measurement is already bound to the exact host,
+    so this identity is intentionally host-local rather than portable.
+    """
+
+    target = Path(path).expanduser().resolve(strict=False)
+    ancestor = target
+    while not ancestor.exists():
+        parent = ancestor.parent
+        if parent == ancestor:
+            raise CaptureContractError(
+                "capture storage volume has no existing ancestor"
+            )
+        ancestor = parent
+    try:
+        status = ancestor.stat()
+    except OSError as exc:
+        raise CaptureContractError(
+            "capture storage volume identity is unavailable"
+        ) from exc
+    anchor = os.path.normcase(os.path.normpath(target.anchor or os.sep))
+    return sha256_json(
+        {
+            "schema_version": CAPTURE_STORAGE_VOLUME_IDENTITY_SCHEMA_VERSION,
+            "normalized_anchor": anchor,
+            "st_dev": int(status.st_dev),
+        }
+    )
+
+
 @dataclass(frozen=True)
 class CaptureResourceMeasurement:
     """Observed host headroom used to resolve finite capture budgets.
@@ -296,6 +339,8 @@ class CaptureResourceMeasurement:
     fsync_p95_milliseconds: float
     logical_cpu_count: int
     host_fingerprint_sha256: str
+    write_latency_measurement_profile: str
+    write_latency_probe_volume_identity_sha256: str
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "measured_at", _utc(self.measured_at, "measured_at"))
@@ -331,6 +376,27 @@ class CaptureResourceMeasurement:
         if len(digest) != 64 or any(char not in "0123456789abcdef" for char in digest):
             raise CaptureContractError("host_fingerprint_sha256 must be a full SHA256")
         object.__setattr__(self, "host_fingerprint_sha256", digest)
+        if (
+            self.write_latency_measurement_profile
+            != CAPTURE_PRESSURE_WRITE_LATENCY_PROFILE
+        ):
+            raise CaptureContractError(
+                "unsupported resource-measurement write-latency profile"
+            )
+        volume_digest = str(
+            self.write_latency_probe_volume_identity_sha256 or ""
+        ).lower()
+        if len(volume_digest) != 64 or any(
+            char not in "0123456789abcdef" for char in volume_digest
+        ):
+            raise CaptureContractError(
+                "write_latency_probe_volume_identity_sha256 must be a full SHA256"
+            )
+        object.__setattr__(
+            self,
+            "write_latency_probe_volume_identity_sha256",
+            volume_digest,
+        )
 
     @property
     def measurement_sha256(self) -> str:
@@ -486,7 +552,7 @@ class ResolvedCaptureBudget:
         return sha256_json(asdict(self))
 
 
-CAPTURE_RESOURCE_BINDING_SCHEMA_VERSION = "chili-replay-capture-resource-binding-v1"
+CAPTURE_RESOURCE_BINDING_SCHEMA_VERSION = "chili-replay-capture-resource-binding-v3"
 
 
 @dataclass(frozen=True)
@@ -656,25 +722,55 @@ def resolve_capture_budget(
     )
 
 
-CAPTURE_PRESSURE_SAMPLE_SCHEMA_VERSION = "chili-replay-capture-pressure-sample-v1"
+CAPTURE_PRESSURE_SAMPLE_SCHEMA_VERSION = "chili-replay-capture-pressure-sample-v3"
 
 
 @dataclass(frozen=True)
 class CapturePressureSample:
-    """One explicit host-pressure observation tied to an exact resource binding."""
+    """One explicit host-pressure observation tied to an exact resource binding.
+
+    ``write_latency_milliseconds`` is storage durability latency measured by a
+    dedicated single-thread helper process.  Keeping the timer in that helper
+    prevents a busy service interpreter's GIL reacquisition delay from being
+    mislabeled as disk latency.  Helper response/IPC delay remains a separate
+    fail-closed sampler-availability boundary in the active service.
+    """
 
     observed_at: datetime
+    completed_monotonic: float
     resource_binding_sha256: str
     cpu_percent: float
     available_memory_bytes: int
     disk_free_bytes: int
     write_latency_milliseconds: float
+    write_latency_measurement_profile: str
     schema_version: str = CAPTURE_PRESSURE_SAMPLE_SCHEMA_VERSION
 
     def __post_init__(self) -> None:
         if self.schema_version != CAPTURE_PRESSURE_SAMPLE_SCHEMA_VERSION:
             raise CaptureContractError("unsupported capture pressure-sample schema")
+        if (
+            self.write_latency_measurement_profile
+            != CAPTURE_PRESSURE_WRITE_LATENCY_PROFILE
+        ):
+            raise CaptureContractError(
+                "unsupported capture pressure write-latency profile"
+            )
         object.__setattr__(self, "observed_at", _utc(self.observed_at, "observed_at"))
+        if isinstance(self.completed_monotonic, bool):
+            raise CaptureContractError(
+                "pressure sample completed_monotonic is invalid"
+            )
+        completed_monotonic = float(self.completed_monotonic)
+        if not math.isfinite(completed_monotonic) or completed_monotonic < 0.0:
+            raise CaptureContractError(
+                "pressure sample completed_monotonic is invalid"
+            )
+        object.__setattr__(
+            self,
+            "completed_monotonic",
+            completed_monotonic,
+        )
         object.__setattr__(
             self,
             "resource_binding_sha256",
@@ -775,15 +871,39 @@ class CaptureAdaptivePressureController:
             <= policy.pressure_write_latency_exit_milliseconds
         )
 
-    def observe(self, sample: CapturePressureSample) -> dict[str, Any]:
+    def observe(
+        self,
+        sample: CapturePressureSample,
+        *,
+        sample_monotonic: float | None = None,
+    ) -> dict[str, Any]:
         if not isinstance(sample, CapturePressureSample):
             raise CaptureContractError("pressure observation is malformed")
         if sample.resource_binding_sha256 != self.binding.binding_sha256:
             raise CaptureContractError("pressure observation binding mismatch")
         with self._lock:
-            observed_monotonic = float(self._monotonic_clock())
-            if not math.isfinite(observed_monotonic):
+            controller_monotonic = float(self._monotonic_clock())
+            if not math.isfinite(controller_monotonic):
                 raise CaptureContractError("pressure controller clock is non-finite")
+            observed_monotonic = sample.completed_monotonic
+            if sample_monotonic is not None:
+                if isinstance(sample_monotonic, bool):
+                    raise CaptureContractError(
+                        "pressure observation monotonic clock is malformed"
+                    )
+                explicit_monotonic = float(sample_monotonic)
+                if not math.isfinite(explicit_monotonic):
+                    raise CaptureContractError(
+                        "pressure observation monotonic clock is non-finite"
+                    )
+                if explicit_monotonic != observed_monotonic:
+                    raise CaptureContractError(
+                        "pressure observation monotonic clock mismatches sample"
+                    )
+            if observed_monotonic > controller_monotonic:
+                raise CaptureContractError(
+                    "pressure observation monotonic clock is future-dated"
+                )
             if (
                 self._last_sample_monotonic is not None
                 and observed_monotonic < self._last_sample_monotonic

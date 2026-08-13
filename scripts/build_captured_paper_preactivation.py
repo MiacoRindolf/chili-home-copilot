@@ -77,6 +77,9 @@ _SOURCE_RELATIVE_PATHS: Mapping[str, str] = MappingProxyType(
         "activation_launcher": "scripts/start-captured-alpaca-paper.ps1",
         "activation_service": "scripts/captured_alpaca_paper_service.py",
         "activation_stage0": "scripts/captured_paper_isolated_stage0.py",
+        "captured_paper_pressure_probe": (
+            "scripts/captured_paper_pressure_probe.py"
+        ),
         "adaptive_risk_account_lock": (
             "app/services/trading/momentum_neural/adaptive_risk_account_lock.py"
         ),

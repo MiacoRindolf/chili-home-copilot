@@ -15,6 +15,7 @@ executor and does not contact a broker or mutate host state at import time.
 from __future__ import annotations
 
 import argparse
+import ast
 import base64
 from contextlib import AbstractContextManager
 from dataclasses import dataclass
@@ -22,6 +23,7 @@ from datetime import UTC, datetime
 import hashlib
 import importlib.util
 import json
+import math
 import os
 from pathlib import Path
 import re
@@ -35,7 +37,25 @@ import uuid
 
 
 REQUEST_SCHEMA_VERSION = "chili.captured-paper-activation-runner-request.v3"
-RESULT_SCHEMA_VERSION = "chili.captured-paper-activation-runner-result.v1"
+RESULT_SCHEMA_VERSION = "chili.captured-paper-activation-runner-result.v2"
+CHAIN_REQUEST_SCHEMA_VERSION = "chili.captured-paper-operator-chain-request.v2"
+CHAIN_RESULT_SCHEMA_VERSION = "chili.captured-paper-operator-chain-result.v2"
+BENCHMARK_MANIFEST_SCHEMA_VERSION = (
+    "chili.captured-paper-benchmark-authority-manifest.v2"
+)
+BENCHMARK_LAUNCH_RECEIPT_SCHEMA_VERSION = (
+    "chili.captured-paper-benchmark-authority-receipt.v2"
+)
+BENCHMARK_RUNNER_AUTHORITY_SCHEMA_VERSION = (
+    "chili.captured-paper-benchmark-runner-authority.v1"
+)
+BENCHMARK_EXECUTION_RECEIPT_SCHEMA_VERSION = (
+    "chili.captured-paper-benchmark-execution-receipt.v2"
+)
+BENCHMARK_EXECUTION_CLAIM_SCHEMA_VERSION = (
+    "chili.captured-paper-benchmark-execution-claim.v1"
+)
+BENCHMARK_REPORT_SCHEMA_VERSION = "chili.replay-capture-benchmark.v7"
 ACCOUNT_SCOPE = "alpaca:paper"
 ACTIVATE_CONFIRMATION = "CUTOVER_FAKE_MONEY_ALPACA_PAPER"
 PAPER_TASK_NAME = "CHILI-Captured-Alpaca-PAPER"
@@ -50,6 +70,8 @@ _ROLLBACK_OK = frozenset({"ROLLED_BACK_EXACT", "ALREADY_ROLLED_BACK_EXACT"})
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 _GIT_COMMIT_RE = re.compile(r"^[0-9a-f]{40}$")
 _MAX_REQUEST_BYTES = 1024 * 1024
+_MAX_BENCHMARK_AUTHORITY_BYTES = 4 * 1024 * 1024
+_MAX_BENCHMARK_REPORT_BYTES = 64 * 1024 * 1024
 _MAX_STAGE_OUTPUT_BYTES = 16 * 1024 * 1024
 _MAX_APPLY_JOURNAL_EVIDENCE_BYTES = 16 * 1024 * 1024
 _HOST_CUTOVER_JOURNAL_EVENT_SCHEMA = (
@@ -105,6 +127,108 @@ _PYTHON_CONTROL_ENVIRONMENT = frozenset(
         "PYTHONUSERBASE",
     }
 )
+
+_BENCHMARK_REFERENCE_FIELDS = (
+    "resource_benchmark",
+    "benchmark_authority_manifest",
+    "benchmark_runner_authority",
+    "benchmark_execution_receipt",
+)
+_CHAIN_REQUEST_KEYS = frozenset(
+    {
+        "schema_version",
+        "account_scope",
+        "live_cash_authorized",
+        *_BENCHMARK_REFERENCE_FIELDS,
+        "legacy_root",
+        "python_dependency_root",
+        "python_dependency_root_identity_sha256",
+        "bootstrap_stage0_script",
+        "bootstrap_stage0_script_sha256",
+        "host_principal_user_id",
+        "bridge_configuration",
+        "static_proof_cache",
+    }
+)
+_CHAIN_RESULT_KEYS = frozenset(
+    {
+        "schema_version",
+        "verdict",
+        "activation_generation",
+        "account_scope",
+        "expected_account_id",
+        "code_build_sha256",
+        "static_proof_cache",
+        "probe_manifest",
+        "build_request",
+        "preactivation_manifest",
+        "next_command",
+        "host_snapshot_authority",
+        "current_host_inventory_observed",
+        "final_real_validate_only_required",
+        "paper_order_submission_authorized",
+        "paper_service_started",
+        "no_order_smoke_invoked",
+        "host_cutover_invoked",
+        "live_cash_authorized",
+        "activation_runner_request_sha256",
+        "operator_chain_request_sha256",
+        "resource_benchmark_sha256",
+        *_BENCHMARK_REFERENCE_FIELDS,
+        "exact_print_preselection_evidence",
+        "exact_print_selection_receipt",
+    }
+)
+_BENCHMARK_SOURCE_PATHS: Mapping[str, Path] = {
+    "benchmark": Path("scripts/benchmark_replay_capture_runtime.py"),
+    "contract": Path(
+        "app/services/trading/momentum_neural/replay_capture_contract.py"
+    ),
+    "runtime": Path(
+        "app/services/trading/momentum_neural/replay_capture_runtime.py"
+    ),
+    "pressure_probe": Path("scripts/captured_paper_pressure_probe.py"),
+    "replay_errors": Path(
+        "app/services/trading/momentum_neural/replay_errors.py"
+    ),
+    "first_dip_tape_policy": Path(
+        "app/services/trading/momentum_neural/first_dip_tape_policy.py"
+    ),
+    "stage0": Path("scripts/captured_paper_isolated_stage0.py"),
+}
+_BENCHMARK_AUTHORITY_PROGRAM_PATHS: Mapping[str, Path] = {
+    "builder": Path("scripts/build_captured_paper_benchmark_authority.py"),
+    "runner": Path("scripts/run_captured_paper_benchmark_authority.py"),
+}
+_BENCHMARK_LOADER_ROLE_ORDER = (
+    "benchmark",
+    "contract",
+    "runtime",
+    "pressure_probe",
+    "replay_errors",
+    "first_dip_tape_policy",
+    "stage0",
+)
+_BENCHMARK_AUTHORITY_MODE = "diagnostic_capture_benchmark_only"
+_BENCHMARK_HELD_LOADER_VARIABLE = "_HELD_BENCHMARK_SOURCE_LOADER"
+_BENCHMARK_RUNNER_LOADER_VARIABLE = (
+    "_HELD_BENCHMARK_AUTHORITY_RUNNER_LOADER"
+)
+_BENCHMARK_FALSE_POSTURE = {
+    "benchmark_output_written": False,
+    "broker_contacted": False,
+    "cutover_performed": False,
+    "database_accessed": False,
+    "host_activation_performed": False,
+    "live_cash_authorized": False,
+    "orders_submitted": False,
+    "provider_contacted": False,
+    "task_scheduler_mutated": False,
+}
+_BENCHMARK_TERMINAL_POSTURE = {
+    **_BENCHMARK_FALSE_POSTURE,
+    "benchmark_output_written": True,
+}
 
 _CANDIDATE_ENTRYPOINTS: Mapping[str, Path] = {
     "bootstrap_stage0_script": Path("scripts/captured_paper_isolated_stage0.py"),
@@ -426,6 +550,984 @@ def _assert_content_addressed_json_path(
 
 
 @dataclass(frozen=True, slots=True)
+class BenchmarkAuthorityBundle:
+    resource_benchmark_path: Path
+    resource_benchmark_sha256: str
+    benchmark_authority_manifest_path: Path
+    benchmark_authority_manifest_sha256: str
+    benchmark_runner_authority_path: Path
+    benchmark_runner_authority_sha256: str
+    benchmark_execution_receipt_path: Path
+    benchmark_execution_receipt_sha256: str
+
+    def references(self) -> Mapping[str, Mapping[str, str]]:
+        return {
+            "resource_benchmark": {
+                "path": str(self.resource_benchmark_path),
+                "sha256": self.resource_benchmark_sha256,
+            },
+            "benchmark_authority_manifest": {
+                "path": str(self.benchmark_authority_manifest_path),
+                "sha256": self.benchmark_authority_manifest_sha256,
+            },
+            "benchmark_runner_authority": {
+                "path": str(self.benchmark_runner_authority_path),
+                "sha256": self.benchmark_runner_authority_sha256,
+            },
+            "benchmark_execution_receipt": {
+                "path": str(self.benchmark_execution_receipt_path),
+                "sha256": self.benchmark_execution_receipt_sha256,
+            },
+        }
+
+
+def _benchmark_reject(code: str, message: str) -> CapturedPaperActivationRunnerError:
+    return CapturedPaperActivationRunnerError(code, message)
+
+
+def _read_benchmark_json_reference(
+    reference: Any,
+    *,
+    field: str,
+    roots: Sequence[Path],
+    max_bytes: int,
+    authority_kind: str | None,
+) -> tuple[Path, str, Mapping[str, Any], bytes]:
+    if not isinstance(reference, Mapping) or set(reference) != {"path", "sha256"}:
+        raise _benchmark_reject(
+            "BENCHMARK_AUTHORITY_REFERENCE_INVALID",
+            f"{field} must be one exact path/SHA-256 reference",
+        )
+    digest = str(reference.get("sha256") or "")
+    raw_path = Path(str(reference.get("path") or ""))
+    if not raw_path.is_absolute():
+        raise _benchmark_reject(
+            "BENCHMARK_AUTHORITY_REFERENCE_INVALID", f"{field} path is not absolute"
+        )
+    _reject_reparse_chain(raw_path)
+    if not raw_path.is_file() or raw_path.stat().st_size > max_bytes:
+        raise _benchmark_reject(
+            "BENCHMARK_AUTHORITY_OVERSIZED",
+            f"{field} is unavailable or exceeds its byte bound",
+        )
+    path = _strict_file(str(raw_path), digest, field=field)
+    if not any(_inside_directory(path, root) for root in roots):
+        raise _benchmark_reject(
+            "BENCHMARK_AUTHORITY_OUTSIDE_READ_ROOTS",
+            f"{field} escaped allowed_read_roots",
+        )
+    before = path.stat()
+    raw = path.read_bytes()
+    after = path.stat()
+    identity = lambda value: (
+        int(value.st_dev),
+        int(value.st_ino),
+        int(value.st_size),
+        int(value.st_mtime_ns),
+        int(value.st_mode),
+    )
+    if (
+        identity(before) != identity(after)
+        or len(raw) != int(before.st_size)
+        or _sha256_bytes(raw) != digest
+    ):
+        raise _benchmark_reject(
+            "BENCHMARK_AUTHORITY_DRIFT", f"{field} changed while it was read"
+        )
+    document = _strict_json(raw, field=field)
+    if _canonical_json_bytes(document) != raw:
+        raise _benchmark_reject(
+            "BENCHMARK_AUTHORITY_NOT_CANONICAL", f"{field} is not canonical JSON"
+        )
+    if authority_kind is None:
+        if path.name != f"{digest}.json" or path.parent.name != "reports":
+            raise _benchmark_reject(
+                "BENCHMARK_AUTHORITY_CONTENT_ADDRESS_INVALID",
+                f"{field} is not an exact retained report address",
+            )
+    elif authority_kind == "execution-claim":
+        if path.parent.name != "execution-claim":
+            raise _benchmark_reject(
+                "BENCHMARK_AUTHORITY_CONTENT_ADDRESS_INVALID",
+                f"{field} is not stored in the execution-claim authority root",
+            )
+    elif not (
+        path.name == f"{digest}.json"
+        and path.parent.name == digest[:2]
+        and path.parent.parent.name == authority_kind
+    ):
+        raise _benchmark_reject(
+            "BENCHMARK_AUTHORITY_CONTENT_ADDRESS_INVALID",
+            f"{field} is not stored at its authority content address",
+        )
+    return path, digest, document, raw
+
+
+def _benchmark_mapping(
+    value: Any, *, field: str, keys: set[str]
+) -> Mapping[str, Any]:
+    if not isinstance(value, Mapping):
+        raise _benchmark_reject(
+            "BENCHMARK_AUTHORITY_SCHEMA_INVALID", f"{field} must be an object"
+        )
+    if set(value) != keys:
+        raise _benchmark_reject(
+            "BENCHMARK_AUTHORITY_SCHEMA_INVALID", f"{field} has unexpected keys"
+        )
+    return value
+
+
+def _benchmark_utc_clock(value: Any, *, field: str) -> datetime:
+    if not isinstance(value, str) or not value.endswith("Z"):
+        raise _benchmark_reject(
+            "BENCHMARK_TERMINAL_CLOCK_INVALID",
+            f"{field} must be one canonical aware UTC clock",
+        )
+    try:
+        parsed = datetime.fromisoformat(value[:-1] + "+00:00")
+    except ValueError as exc:
+        raise _benchmark_reject(
+            "BENCHMARK_TERMINAL_CLOCK_INVALID",
+            f"{field} is not an ISO-8601 UTC clock",
+        ) from exc
+    if (
+        parsed.tzinfo is None
+        or parsed.utcoffset() != UTC.utcoffset(parsed)
+        or parsed.astimezone(UTC).isoformat().replace("+00:00", "Z") != value
+    ):
+        raise _benchmark_reject(
+            "BENCHMARK_TERMINAL_CLOCK_INVALID",
+            f"{field} is not an exact canonical UTC clock",
+        )
+    return parsed.astimezone(UTC)
+
+
+def _extract_literal_string(source: bytes, *, variable: str, field: str) -> str:
+    try:
+        tree = ast.parse(source)
+    except (SyntaxError, ValueError) as exc:
+        raise _benchmark_reject(
+            "BENCHMARK_AUTHORITY_LOADER_INVALID", f"{field} source cannot be parsed"
+        ) from exc
+    values: list[str] = []
+    for node in tree.body:
+        value_node: ast.expr | None = None
+        if isinstance(node, ast.Assign) and any(
+            isinstance(target, ast.Name) and target.id == variable
+            for target in node.targets
+        ):
+            value_node = node.value
+        elif (
+            isinstance(node, ast.AnnAssign)
+            and isinstance(node.target, ast.Name)
+            and node.target.id == variable
+        ):
+            value_node = node.value
+        if value_node is not None:
+            value: Any = None
+            if isinstance(value_node, ast.Constant) and isinstance(
+                value_node.value, str
+            ):
+                value = value_node.value
+            elif (
+                isinstance(value_node, ast.Call)
+                and not value_node.args
+                and not value_node.keywords
+                and isinstance(value_node.func, ast.Attribute)
+                and value_node.func.attr == "strip"
+                and isinstance(value_node.func.value, ast.Constant)
+                and isinstance(value_node.func.value.value, str)
+            ):
+                value = value_node.func.value.value.strip()
+            if value is None:
+                raise _benchmark_reject(
+                    "BENCHMARK_AUTHORITY_LOADER_INVALID",
+                    f"{field} loader is not a literal string",
+                )
+            if not isinstance(value, str) or not value:
+                raise _benchmark_reject(
+                    "BENCHMARK_AUTHORITY_LOADER_INVALID",
+                    f"{field} loader is empty or non-text",
+                )
+            values.append(value)
+    if len(values) != 1:
+        raise _benchmark_reject(
+            "BENCHMARK_AUTHORITY_LOADER_INVALID",
+            f"{field} must define exactly one held loader",
+        )
+    literal = values[0].strip()
+    if "\x00" in literal or len(literal.encode("utf-8")) > 4 * 1024 * 1024:
+        raise _benchmark_reject(
+            "BENCHMARK_AUTHORITY_LOADER_INVALID", f"{field} loader is oversized"
+        )
+    try:
+        compile(literal, f"<{field}-held-loader>", "exec", dont_inherit=True)
+    except (SyntaxError, ValueError) as exc:
+        raise _benchmark_reject(
+            "BENCHMARK_AUTHORITY_LOADER_INVALID", f"{field} loader cannot compile"
+        ) from exc
+    return literal
+
+
+def _read_stable_pinned_file(path: Path, sha256: str, *, field: str) -> bytes:
+    before = path.stat()
+    raw = path.read_bytes()
+    after = path.stat()
+    identity = lambda value: (
+        int(value.st_dev),
+        int(value.st_ino),
+        int(value.st_size),
+        int(value.st_mtime_ns),
+        int(value.st_mode),
+    )
+    if (
+        identity(before) != identity(after)
+        or len(raw) != int(before.st_size)
+        or _sha256_bytes(raw) != sha256
+    ):
+        raise _benchmark_reject(
+            "BENCHMARK_AUTHORITY_DRIFT", f"{field} changed while it was held"
+        )
+    return raw
+
+
+def validate_benchmark_authority_bundle(
+    *,
+    references: Mapping[str, Any],
+    allowed_read_roots: Sequence[str | Path],
+    expected_candidate_root: Path,
+    expected_git_commit: str,
+    expected_git_executable: Path,
+    expected_git_executable_sha256: str,
+    expected_python_executable: Path,
+    expected_python_executable_sha256: str,
+    expected_python_dependency_root: Path,
+    expected_python_dependency_root_identity_sha256: str,
+) -> BenchmarkAuthorityBundle:
+    """Validate the inseparable terminal benchmark authority closure.
+
+    A launch receipt is deliberately only a dependency of this closure.  It
+    can never satisfy the externally pinned terminal execution-receipt slot.
+    """
+
+    if set(references) != set(_BENCHMARK_REFERENCE_FIELDS):
+        raise _benchmark_reject(
+            "BENCHMARK_AUTHORITY_REFERENCE_INVALID",
+            "all four benchmark authority references are mandatory",
+        )
+    roots = tuple(
+        _strict_directory(str(value), field="benchmark_allowed_read_root")
+        for value in allowed_read_roots
+    )
+    report_path, report_sha, report, _report_raw = _read_benchmark_json_reference(
+        references["resource_benchmark"],
+        field="resource_benchmark",
+        roots=roots,
+        max_bytes=_MAX_BENCHMARK_REPORT_BYTES,
+        authority_kind=None,
+    )
+    manifest_path, manifest_sha, manifest, _manifest_raw = (
+        _read_benchmark_json_reference(
+            references["benchmark_authority_manifest"],
+            field="benchmark_authority_manifest",
+            roots=roots,
+            max_bytes=_MAX_BENCHMARK_AUTHORITY_BYTES,
+            authority_kind="manifest",
+        )
+    )
+    runner_path, runner_sha, runner_authority, _runner_raw = (
+        _read_benchmark_json_reference(
+            references["benchmark_runner_authority"],
+            field="benchmark_runner_authority",
+            roots=roots,
+            max_bytes=_MAX_BENCHMARK_AUTHORITY_BYTES,
+            authority_kind="runner-authority",
+        )
+    )
+    terminal_path, terminal_sha, terminal, _terminal_raw = (
+        _read_benchmark_json_reference(
+            references["benchmark_execution_receipt"],
+            field="benchmark_execution_receipt",
+            roots=roots,
+            max_bytes=_MAX_BENCHMARK_AUTHORITY_BYTES,
+            authority_kind="execution-receipt",
+        )
+    )
+
+    _benchmark_mapping(
+        manifest,
+        field="benchmark_authority_manifest",
+        keys={
+            "account_scope", "authority_mode", "benchmark_arguments",
+            "candidate_root", "expected_benchmark_schema_version",
+            "expected_git_commit", "execution_context", "git", "held_loader",
+            "authority_programs", "output", "posture", "python",
+            "python_dependency_root", "schema_version", "source_roster",
+            "source_roster_sha256",
+        },
+    )
+    if not (
+        manifest.get("schema_version") == BENCHMARK_MANIFEST_SCHEMA_VERSION
+        and manifest.get("account_scope") == ACCOUNT_SCOPE
+        and manifest.get("authority_mode") == _BENCHMARK_AUTHORITY_MODE
+        and manifest.get("expected_benchmark_schema_version")
+        == BENCHMARK_REPORT_SCHEMA_VERSION
+        and manifest.get("expected_git_commit") == expected_git_commit
+        and _same_path(manifest.get("candidate_root"), expected_candidate_root)
+        and manifest.get("posture")
+        == {
+            "benchmark_execution_authorized": True,
+            "broker_contact_authorized": False,
+            "database_access_authorized": False,
+            "host_activation_authorized": False,
+            "live_cash_authorized": False,
+            "order_submission_authorized": False,
+            "provider_contact_authorized": False,
+        }
+    ):
+        raise _benchmark_reject(
+            "BENCHMARK_MANIFEST_BINDING_INVALID",
+            "benchmark manifest escaped diagnostic PAPER/Git authority",
+        )
+    benchmark_arguments = manifest.get("benchmark_arguments")
+    if not isinstance(benchmark_arguments, list) or any(
+        not isinstance(value, str) or "\x00" in value for value in benchmark_arguments
+    ):
+        raise _benchmark_reject(
+            "BENCHMARK_MANIFEST_BINDING_INVALID",
+            "benchmark argument vector is malformed",
+        )
+    execution_context = _benchmark_mapping(
+        manifest.get("execution_context"),
+        field="benchmark_authority_manifest.execution_context",
+        keys={
+            "cwd", "environment", "environment_sha256", "shell", "stderr",
+            "stdin", "stdout", "timeout_seconds",
+        },
+    )
+    execution_environment = execution_context.get("environment")
+    if not (
+        _same_path(execution_context.get("cwd"), expected_candidate_root)
+        and isinstance(execution_environment, Mapping)
+        and all(
+            isinstance(key, str) and isinstance(value, str)
+            for key, value in execution_environment.items()
+        )
+        and execution_context.get("environment_sha256")
+        == _sha256_bytes(_canonical_json_bytes(execution_environment))
+        and execution_context.get("shell") is False
+        and execution_context.get("stdin") == "devnull"
+        and execution_context.get("stderr") == "bounded_binary_pipe_1mib"
+        and execution_context.get("stdout") == "bounded_binary_pipe_64mib"
+        and isinstance(execution_context.get("timeout_seconds"), int)
+        and not isinstance(execution_context.get("timeout_seconds"), bool)
+        and 1 <= int(execution_context["timeout_seconds"]) <= 3600
+    ):
+        raise _benchmark_reject(
+            "BENCHMARK_MANIFEST_BINDING_INVALID",
+            "benchmark execution context is malformed",
+        )
+    manifest_ref = {"path": str(manifest_path), "sha256": manifest_sha}
+    report_ref = {"path": str(report_path), "sha256": report_sha}
+
+    programs = _benchmark_mapping(
+        manifest.get("authority_programs"),
+        field="benchmark_authority_manifest.authority_programs",
+        keys={"builder", "runner"},
+    )
+    program_rows: dict[str, Mapping[str, Any]] = {}
+    program_sources: dict[str, bytes] = {}
+    for role, relative in _BENCHMARK_AUTHORITY_PROGRAM_PATHS.items():
+        row = _benchmark_mapping(
+            programs.get(role),
+            field=f"benchmark_authority_manifest.authority_programs.{role}",
+            keys={"path", "sha256"},
+        )
+        program_path = _strict_file(
+            str(row.get("path") or ""),
+            str(row.get("sha256") or ""),
+            field=f"benchmark_authority_program.{role}",
+        )
+        expected_program = _canonical_existing_path(
+            expected_candidate_root / relative,
+            field=f"benchmark_authority_program.{role}",
+        )
+        _assert_expected_path(
+            program_path, expected_program, field=f"benchmark_authority_program.{role}"
+        )
+        program_rows[role] = row
+        program_sources[role] = _read_stable_pinned_file(
+            program_path, str(row["sha256"]), field=f"benchmark_authority_program.{role}"
+        )
+
+    git_row = _benchmark_mapping(
+        manifest.get("git"),
+        field="benchmark_authority_manifest.git",
+        keys={"executable_path", "executable_sha256"},
+    )
+    git_path = _strict_file(
+        str(git_row.get("executable_path") or ""),
+        str(git_row.get("executable_sha256") or ""),
+        field="benchmark_git_executable",
+    )
+    if not (
+        _same_canonical_path(git_path, expected_git_executable)
+        and git_row.get("executable_sha256") == expected_git_executable_sha256
+    ):
+        raise _benchmark_reject(
+            "BENCHMARK_GIT_BINDING_INVALID",
+            "benchmark Git differs from activation Git authority",
+        )
+    python_row = _benchmark_mapping(
+        manifest.get("python"),
+        field="benchmark_authority_manifest.python",
+        keys={
+            "executable_path", "executable_sha256", "implementation",
+            "isolation_flags", "version",
+        },
+    )
+    python_path = _strict_file(
+        str(python_row.get("executable_path") or ""),
+        str(python_row.get("executable_sha256") or ""),
+        field="benchmark_python_executable",
+    )
+    if not (
+        _same_canonical_path(python_path, expected_python_executable)
+        and python_row.get("executable_sha256")
+        == expected_python_executable_sha256
+        and python_row.get("implementation") == "cpython"
+        and python_row.get("version") == [3, 11]
+        and python_row.get("isolation_flags") == ["-I", "-S", "-B"]
+    ):
+        raise _benchmark_reject(
+            "BENCHMARK_PYTHON_BINDING_INVALID",
+            "benchmark Python differs from activation Python authority",
+        )
+    dependency_row = _benchmark_mapping(
+        manifest.get("python_dependency_root"),
+        field="benchmark_authority_manifest.python_dependency_root",
+        keys={
+            "identity", "identity_sha256", "path", "required_distributions",
+            "tree_sha256",
+        },
+    )
+    dependency_identity = _benchmark_mapping(
+        dependency_row.get("identity"),
+        field="benchmark_authority_manifest.python_dependency_root.identity",
+        keys={
+            "path",
+            "python_executable_path",
+            "python_executable_sha256",
+            "schema_version",
+            "st_dev",
+            "st_ino",
+            "st_mode",
+            "st_mtime_ns",
+            "tree_directory_count",
+            "tree_exclusion_policy",
+            "tree_file_count",
+            "tree_sha256",
+            "tree_total_bytes",
+        },
+    )
+    dependency_identity_sha = str(dependency_row.get("identity_sha256") or "")
+    dependency_tree_sha = str(dependency_row.get("tree_sha256") or "")
+    dependency_status = expected_python_dependency_root.stat()
+    dependency_counts = tuple(
+        dependency_identity.get(field)
+        for field in (
+            "tree_directory_count",
+            "tree_file_count",
+            "tree_total_bytes",
+        )
+    )
+    if not (
+        _same_path(dependency_row.get("path"), expected_python_dependency_root)
+        and _SHA256_RE.fullmatch(dependency_identity_sha) is not None
+        and dependency_identity_sha == expected_python_dependency_root_identity_sha256
+        and dependency_identity_sha
+        == _sha256_bytes(_canonical_json_bytes(dependency_identity))
+        and _SHA256_RE.fullmatch(dependency_tree_sha) is not None
+        and dependency_tree_sha == dependency_identity.get("tree_sha256")
+        and _same_path(
+            dependency_identity.get("path"), expected_python_dependency_root
+        )
+        and _same_path(
+            dependency_identity.get("python_executable_path"), python_path
+        )
+        and dependency_identity.get("python_executable_sha256")
+        == expected_python_executable_sha256
+        and dependency_identity.get("schema_version")
+        == "chili.captured-paper-python-dependency-root-identity.v2"
+        and dependency_identity.get("tree_exclusion_policy")
+        == "exclude-__pycache__-pyc-pyo.v1"
+        and all(
+            isinstance(value, int) and not isinstance(value, bool) and value >= 0
+            for value in dependency_counts
+        )
+        and dependency_identity.get("st_dev") == int(dependency_status.st_dev)
+        and dependency_identity.get("st_ino") == int(dependency_status.st_ino)
+        and dependency_identity.get("st_mode") == int(dependency_status.st_mode)
+        and dependency_identity.get("st_mtime_ns")
+        == int(dependency_status.st_mtime_ns)
+        and isinstance(dependency_row.get("required_distributions"), list)
+    ):
+        raise _benchmark_reject(
+            "BENCHMARK_DEPENDENCY_BINDING_INVALID",
+            "benchmark dependency authority differs from activation authority",
+        )
+
+    source_rows = manifest.get("source_roster")
+    if not isinstance(source_rows, list) or len(source_rows) != len(
+        _BENCHMARK_SOURCE_PATHS
+    ):
+        raise _benchmark_reject(
+            "BENCHMARK_SOURCE_ROSTER_INVALID", "benchmark source roster is incomplete"
+        )
+    if _sha256_bytes(_canonical_json_bytes(source_rows)) != manifest.get(
+        "source_roster_sha256"
+    ):
+        raise _benchmark_reject(
+            "BENCHMARK_SOURCE_ROSTER_INVALID", "benchmark source roster hash differs"
+        )
+    source_hashes: dict[str, str] = {}
+    source_bytes: dict[str, bytes] = {}
+    observed_roles: list[str] = []
+    for row_value in source_rows:
+        row = _benchmark_mapping(
+            row_value, field="benchmark_authority_manifest.source", keys={"path", "role", "sha256"}
+        )
+        role = str(row.get("role") or "")
+        if role not in _BENCHMARK_SOURCE_PATHS:
+            raise _benchmark_reject(
+                "BENCHMARK_SOURCE_ROSTER_INVALID", "benchmark source role is unknown"
+            )
+        path = _strict_file(
+            str(row.get("path") or ""),
+            str(row.get("sha256") or ""),
+            field=f"benchmark_source.{role}",
+        )
+        expected = _canonical_existing_path(
+            expected_candidate_root / _BENCHMARK_SOURCE_PATHS[role],
+            field=f"benchmark_source.{role}",
+        )
+        _assert_expected_path(path, expected, field=f"benchmark_source.{role}")
+        observed_roles.append(role)
+        source_hashes[role] = str(row["sha256"])
+        source_bytes[role] = _read_stable_pinned_file(
+            path, str(row["sha256"]), field=f"benchmark_source.{role}"
+        )
+    if observed_roles != sorted(_BENCHMARK_SOURCE_PATHS):
+        raise _benchmark_reject(
+            "BENCHMARK_SOURCE_ROSTER_INVALID", "benchmark source roster order differs"
+        )
+
+    held_loader_row = _benchmark_mapping(
+        manifest.get("held_loader"),
+        field="benchmark_authority_manifest.held_loader",
+        keys={"sha256", "source_role", "variable"},
+    )
+    held_benchmark_loader = _extract_literal_string(
+        source_bytes["pressure_probe"],
+        variable=_BENCHMARK_HELD_LOADER_VARIABLE,
+        field="benchmark_pressure_probe",
+    )
+    if not (
+        held_loader_row.get("source_role") == "pressure_probe"
+        and held_loader_row.get("variable") == _BENCHMARK_HELD_LOADER_VARIABLE
+        and held_loader_row.get("sha256")
+        == _sha256_bytes(held_benchmark_loader.encode("utf-8"))
+    ):
+        raise _benchmark_reject(
+            "BENCHMARK_AUTHORITY_LOADER_INVALID", "held benchmark loader binding differs"
+        )
+
+    _benchmark_mapping(
+        runner_authority,
+        field="benchmark_runner_authority",
+        keys={
+            "account_scope", "authority_mode", "argv_is_shell_string",
+            "execution_context", "git", "launch_receipt", "manifest", "posture",
+            "python", "runner_argv", "runner_loader_sha256", "schema_version",
+        },
+    )
+    if runner_authority.get("schema_version") != BENCHMARK_RUNNER_AUTHORITY_SCHEMA_VERSION:
+        raise _benchmark_reject(
+            "BENCHMARK_RUNNER_AUTHORITY_INVALID", "runner authority schema is unsupported"
+        )
+
+    _benchmark_mapping(
+        terminal,
+        field="benchmark_execution_receipt",
+        keys={
+            "account_scope", "authority_programs", "argv_is_shell_string",
+            "authority_mode", "benchmark", "benchmark_completed", "completed_at_utc",
+            "duration_seconds", "execution_context", "execution_claim",
+            "expected_git_commit", "git", "invoked", "launch_receipt", "manifest",
+            "posture", "schema_version", "started_at_utc",
+        },
+    )
+    if terminal.get("schema_version") != BENCHMARK_EXECUTION_RECEIPT_SCHEMA_VERSION:
+        raise _benchmark_reject(
+            "BENCHMARK_TERMINAL_RECEIPT_REQUIRED",
+            "the externally pinned receipt is not a terminal execution receipt",
+        )
+    started_at = _benchmark_utc_clock(
+        terminal.get("started_at_utc"),
+        field="benchmark_execution_receipt.started_at_utc",
+    )
+    completed_at = _benchmark_utc_clock(
+        terminal.get("completed_at_utc"),
+        field="benchmark_execution_receipt.completed_at_utc",
+    )
+    duration = terminal.get("duration_seconds")
+    duration_value: float | None = None
+    if not isinstance(duration, bool) and isinstance(duration, (int, float)):
+        try:
+            duration_value = float(duration)
+        except (OverflowError, ValueError):
+            duration_value = None
+    if (
+        duration_value is None
+        or not math.isfinite(duration_value)
+        or duration_value < 0.0
+        or completed_at < started_at
+        or not math.isclose(
+            duration_value,
+            (completed_at - started_at).total_seconds(),
+            rel_tol=0.0,
+            abs_tol=1e-9,
+        )
+    ):
+        raise _benchmark_reject(
+            "BENCHMARK_TERMINAL_CLOCK_INVALID",
+            "terminal benchmark duration is negative, non-finite, or causally inconsistent",
+        )
+    launch_ref = terminal.get("launch_receipt")
+    launch_path, launch_sha, launch, _launch_raw = _read_benchmark_json_reference(
+        launch_ref,
+        field="benchmark_launch_receipt",
+        roots=roots,
+        max_bytes=_MAX_BENCHMARK_AUTHORITY_BYTES,
+        authority_kind="receipt",
+    )
+    authority_root = manifest_path.parents[3]
+    if not (
+        runner_path.parents[3] == authority_root
+        and terminal_path.parents[3] == authority_root
+        and launch_path.parents[3] == authority_root
+    ):
+        raise _benchmark_reject(
+            "BENCHMARK_AUTHORITY_ROOT_MISMATCH",
+            "benchmark terminal authority objects do not share one canonical root",
+        )
+    _benchmark_mapping(
+        launch,
+        field="benchmark_launch_receipt",
+        keys={
+            "account_scope", "authority_programs", "argv_is_shell_string",
+            "authority_mode", "benchmark_argv", "benchmark_completed",
+            "benchmark_report", "candidate_root", "execution_context",
+            "expected_git_commit", "git", "held_loader_sha256", "invoked",
+            "manifest", "output", "posture", "python", "python_dependency_root",
+            "schema_version", "source_roster", "source_roster_sha256",
+        },
+    )
+    launch_ref_exact = {"path": str(launch_path), "sha256": launch_sha}
+    expected_launch_python = {
+        "executable_path": str(python_path),
+        "executable_sha256": expected_python_executable_sha256,
+    }
+    expected_launch_dependency = {
+        "identity_sha256": expected_python_dependency_root_identity_sha256,
+        "path": str(expected_python_dependency_root),
+        "tree_sha256": dependency_row.get("tree_sha256"),
+    }
+    manifest_output = manifest.get("output")
+    expected_launch_output = {
+        "root": manifest_output.get("root") if isinstance(manifest_output, Mapping) else None,
+        "root_identity": (
+            manifest_output.get("root_identity")
+            if isinstance(manifest_output, Mapping)
+            else None
+        ),
+        "storage_volume_identity_sha256": (
+            manifest_output.get("storage_volume_identity_sha256")
+            if isinstance(manifest_output, Mapping)
+            else None
+        ),
+    }
+    if not (
+        launch.get("schema_version") == BENCHMARK_LAUNCH_RECEIPT_SCHEMA_VERSION
+        and launch.get("account_scope") == ACCOUNT_SCOPE
+        and launch.get("authority_mode") == _BENCHMARK_AUTHORITY_MODE
+        and launch.get("argv_is_shell_string") is False
+        and _same_path(launch.get("candidate_root"), expected_candidate_root)
+        and launch.get("expected_git_commit") == expected_git_commit
+        and launch.get("invoked") is False
+        and launch.get("benchmark_completed") is False
+        and launch.get("benchmark_report") is None
+        and launch.get("posture") == _BENCHMARK_FALSE_POSTURE
+        and launch.get("manifest") == manifest_ref
+        and launch.get("python") == expected_launch_python
+        and launch.get("python_dependency_root") == expected_launch_dependency
+        and launch.get("output") == expected_launch_output
+        and runner_authority.get("launch_receipt") == launch_ref_exact
+        and terminal.get("launch_receipt") == launch_ref_exact
+    ):
+        raise _benchmark_reject(
+            "BENCHMARK_LAUNCH_BINDING_INVALID", "prelaunch authority binding differs"
+        )
+
+    benchmark_row = _benchmark_mapping(
+        terminal.get("benchmark"),
+        field="benchmark_execution_receipt.benchmark",
+        keys={
+            "acceptance", "exit_code", "report", "schema_version", "stderr_bytes",
+            "stdout_sha256", "stdout_without_newline_sha256",
+        },
+    )
+    if not (
+        terminal.get("account_scope") == ACCOUNT_SCOPE
+        and terminal.get("authority_mode") == _BENCHMARK_AUTHORITY_MODE
+        and terminal.get("argv_is_shell_string") is False
+        and terminal.get("invoked") is True
+        and terminal.get("benchmark_completed") is True
+        and terminal.get("manifest") == manifest_ref
+        and terminal.get("posture") == _BENCHMARK_TERMINAL_POSTURE
+        and terminal.get("expected_git_commit") == expected_git_commit
+        and terminal.get("git") == manifest.get("git")
+        and terminal.get("authority_programs") == programs
+        and terminal.get("execution_context") == manifest.get("execution_context")
+        and benchmark_row.get("acceptance") == {"accepted": True, "reasons": []}
+        and benchmark_row.get("exit_code") == 0
+        and benchmark_row.get("stderr_bytes") == 0
+        and benchmark_row.get("schema_version") == BENCHMARK_REPORT_SCHEMA_VERSION
+        and benchmark_row.get("report") == report_ref
+        and benchmark_row.get("stdout_without_newline_sha256") == report_sha
+        and benchmark_row.get("stdout_sha256")
+        == _sha256_bytes(_report_raw + b"\n")
+    ):
+        raise _benchmark_reject(
+            "BENCHMARK_TERMINAL_BINDING_INVALID", "terminal benchmark binding differs"
+        )
+
+    claim_path, claim_sha, claim, _claim_raw = _read_benchmark_json_reference(
+        terminal.get("execution_claim"),
+        field="benchmark_execution_claim",
+        roots=roots,
+        max_bytes=_MAX_BENCHMARK_AUTHORITY_BYTES,
+        authority_kind="execution-claim",
+    )
+    # Claims are one-shot indexed by the launch digest, rather than by their
+    # own digest, so undo the generic content-address check above explicitly.
+    if not (
+        claim_path.name == f"{launch_sha}.json"
+        and claim_path.parent.name == "execution-claim"
+        and claim_path.parent.parent == authority_root / "authority"
+    ):
+        raise _benchmark_reject(
+            "BENCHMARK_EXECUTION_CLAIM_INVALID", "execution claim path is not exact"
+        )
+    _benchmark_mapping(
+        claim,
+        field="benchmark_execution_claim",
+        keys={"launch_receipt", "manifest", "schema_version", "started_at_utc"},
+    )
+    if not (
+        claim.get("schema_version") == BENCHMARK_EXECUTION_CLAIM_SCHEMA_VERSION
+        and claim.get("launch_receipt") == launch_ref_exact
+        and claim.get("manifest") == manifest_ref
+        and claim.get("started_at_utc") == terminal.get("started_at_utc")
+        and str(terminal.get("execution_claim", {}).get("sha256") or "") == claim_sha
+    ):
+        raise _benchmark_reject(
+            "BENCHMARK_EXECUTION_CLAIM_INVALID", "execution claim binding differs"
+        )
+
+    runner_loader = _extract_literal_string(
+        program_sources["runner"],
+        variable=_BENCHMARK_RUNNER_LOADER_VARIABLE,
+        field="benchmark_authority_runner",
+    )
+    runner_argv = runner_authority.get("runner_argv")
+    expected_runner_argv = [
+        str(python_path), "-I", "-S", "-B", "-c", runner_loader,
+        str(program_rows["builder"]["path"]), str(program_rows["builder"]["sha256"]),
+        str(program_rows["runner"]["path"]), str(program_rows["runner"]["sha256"]),
+        expected_python_executable_sha256, "--", "--receipt", str(launch_path),
+        "--receipt-sha256", launch_sha,
+    ]
+    if not (
+        runner_authority.get("account_scope") == ACCOUNT_SCOPE
+        and runner_authority.get("authority_mode") == _BENCHMARK_AUTHORITY_MODE
+        and runner_authority.get("argv_is_shell_string") is False
+        and runner_authority.get("manifest") == manifest_ref
+        and runner_authority.get("git") == manifest.get("git")
+        and runner_authority.get("execution_context") == manifest.get("execution_context")
+        and runner_authority.get("python") == launch.get("python")
+        and runner_authority.get("posture") == _BENCHMARK_FALSE_POSTURE
+        and runner_authority.get("runner_loader_sha256")
+        == _sha256_bytes(runner_loader.encode("utf-8"))
+        and runner_argv == expected_runner_argv
+    ):
+        raise _benchmark_reject(
+            "BENCHMARK_RUNNER_AUTHORITY_INVALID", "runner authority argv binding differs"
+        )
+
+    expected_bootstrap: list[str] = []
+    for role in _BENCHMARK_LOADER_ROLE_ORDER:
+        expected_bootstrap.extend(
+            (str(expected_candidate_root / _BENCHMARK_SOURCE_PATHS[role]), source_hashes[role])
+        )
+    expected_benchmark_argv = [
+        str(python_path), "-I", "-S", "-B", "-c", held_benchmark_loader,
+        *expected_bootstrap,
+        str(expected_python_dependency_root),
+        expected_python_dependency_root_identity_sha256,
+        str(manifest_path), manifest_sha, expected_python_executable_sha256,
+        "--", *list(manifest.get("benchmark_arguments") or []),
+    ]
+    if not (
+        launch.get("benchmark_argv") == expected_benchmark_argv
+        and launch.get("held_loader_sha256") == held_loader_row.get("sha256")
+        and launch.get("authority_programs") == programs
+        and launch.get("git") == manifest.get("git")
+        and launch.get("expected_git_commit") == expected_git_commit
+        and launch.get("execution_context") == manifest.get("execution_context")
+        and launch.get("source_roster") == source_rows
+        and launch.get("source_roster_sha256") == manifest.get("source_roster_sha256")
+    ):
+        raise _benchmark_reject(
+            "BENCHMARK_LAUNCH_BINDING_INVALID", "benchmark argv binding differs"
+        )
+
+    expected_report_sources = {
+        "benchmark_script_sha256": source_hashes["benchmark"],
+        "contract_sha256": source_hashes["contract"],
+        "first_dip_tape_policy_sha256": source_hashes["first_dip_tape_policy"],
+        "pressure_probe_sha256": source_hashes["pressure_probe"],
+        "replay_errors_sha256": source_hashes["replay_errors"],
+        "runtime_sha256": source_hashes["runtime"],
+        "stage0_sha256": source_hashes["stage0"],
+    }
+    report_environment = report.get("environment")
+    if not (
+        report.get("benchmark_schema_version") == BENCHMARK_REPORT_SCHEMA_VERSION
+        and report.get("acceptance") == {"accepted": True, "reasons": []}
+        and report.get("capture_runtime_source") == expected_report_sources
+        and isinstance(report_environment, Mapping)
+        and report_environment.get("benchmark_authority_manifest_sha256") == manifest_sha
+        and report_environment.get("dependency_root_identity_sha256")
+        == expected_python_dependency_root_identity_sha256
+        and report_environment.get("python_executable_sha256")
+        == expected_python_executable_sha256
+    ):
+        raise _benchmark_reject(
+            "BENCHMARK_REPORT_BINDING_INVALID", "benchmark report authority differs"
+        )
+    output = _benchmark_mapping(
+        manifest.get("output"),
+        field="benchmark_authority_manifest.output",
+        keys={
+            "root", "root_identity", "storage_volume_identity",
+            "storage_volume_identity_sha256",
+        },
+    )
+    output_root = _strict_directory(str(output.get("root") or ""), field="benchmark_output_root")
+    if not any(_inside_directory(output_root, root) for root in roots):
+        raise _benchmark_reject(
+            "BENCHMARK_AUTHORITY_OUTSIDE_READ_ROOTS",
+            "benchmark output root escaped allowed_read_roots",
+        )
+    try:
+        report_path.relative_to(output_root)
+    except ValueError as exc:
+        raise _benchmark_reject(
+            "BENCHMARK_REPORT_BINDING_INVALID", "benchmark report escaped output root"
+        ) from exc
+    output_projection = report.get("output")
+    owned_directory = report_path.parent.parent
+    if not (
+        isinstance(output_projection, Mapping)
+        and output_projection.get("retained") is True
+        and _same_path(output_projection.get("directory"), owned_directory)
+        and owned_directory.parent == output_root
+        and owned_directory.name.startswith("chili-replay-capture-benchmark-")
+    ):
+        raise _benchmark_reject(
+            "BENCHMARK_REPORT_BINDING_INVALID", "retained report output binding differs"
+        )
+    suffix = owned_directory.name.removeprefix("chili-replay-capture-benchmark-")
+    owner_token, separator, random_tail = suffix.partition("-")
+    if not (
+        separator
+        and re.fullmatch(r"[0-9a-f]{32}", owner_token) is not None
+        and random_tail
+    ):
+        raise _benchmark_reject(
+            "BENCHMARK_REPORT_BINDING_INVALID", "benchmark owned directory is malformed"
+        )
+    marker_path = _strict_file(
+        str(owned_directory / ".chili-replay-capture-benchmark-owner.json"),
+        _sha256_file(owned_directory / ".chili-replay-capture-benchmark-owner.json"),
+        field="benchmark_ownership_marker",
+    )
+    marker_raw = marker_path.read_bytes()
+    if not (marker_raw.endswith(b"\n") and marker_raw.count(b"\n") == 1):
+        raise _benchmark_reject(
+            "BENCHMARK_REPORT_BINDING_INVALID", "benchmark ownership marker is malformed"
+        )
+    marker = _strict_json(marker_raw[:-1], field="benchmark_ownership_marker")
+    if marker != {
+        "benchmark_schema_version": BENCHMARK_REPORT_SCHEMA_VERSION,
+        "directory": str(owned_directory),
+        "output_root": str(output_root),
+        "owner_token": owner_token,
+    }:
+        raise _benchmark_reject(
+            "BENCHMARK_REPORT_BINDING_INVALID", "benchmark ownership marker differs"
+        )
+    output_status = output_root.stat()
+    identity_projection = output.get("root_identity")
+    if not isinstance(identity_projection, Mapping) or any(
+        identity_projection.get(key) != observed
+        for key, observed in {
+            "st_dev": int(output_status.st_dev),
+            "st_ino": int(output_status.st_ino),
+            "st_mode": int(output_status.st_mode),
+        }.items()
+    ):
+        raise _benchmark_reject(
+            "BENCHMARK_OUTPUT_BINDING_INVALID", "benchmark output root identity changed"
+        )
+    volume_body = {
+        "normalized_anchor": os.path.normcase(os.path.normpath(output_root.anchor or os.sep)),
+        "schema_version": "chili.capture-storage-volume-identity.v1",
+        "st_dev": int(output_status.st_dev),
+    }
+    if not (
+        output.get("storage_volume_identity") == volume_body
+        and output.get("storage_volume_identity_sha256")
+        == _sha256_bytes(_canonical_json_bytes(volume_body))
+    ):
+        raise _benchmark_reject(
+            "BENCHMARK_OUTPUT_BINDING_INVALID", "benchmark output volume identity changed"
+        )
+
+    return BenchmarkAuthorityBundle(
+        resource_benchmark_path=report_path,
+        resource_benchmark_sha256=report_sha,
+        benchmark_authority_manifest_path=manifest_path,
+        benchmark_authority_manifest_sha256=manifest_sha,
+        benchmark_runner_authority_path=runner_path,
+        benchmark_runner_authority_sha256=runner_sha,
+        benchmark_execution_receipt_path=terminal_path,
+        benchmark_execution_receipt_sha256=terminal_sha,
+    )
+
+
+@dataclass(frozen=True, slots=True)
 class RunnerTimeouts:
     chain: int
     no_order_smoke: int
@@ -491,6 +1593,7 @@ class ActivationRunnerRequest:
     test_database_name: str
     allowed_read_roots: tuple[str, ...]
     timeouts: RunnerTimeouts
+    benchmark_authority: BenchmarkAuthorityBundle
 
 
 _REQUEST_KEYS = {
@@ -695,9 +1798,9 @@ def load_activation_runner_request(
             "CHAIN_REQUEST_NOT_CANONICAL",
             "operator chain request is not canonical JSON",
         )
+    _exact_keys(chain_document, set(_CHAIN_REQUEST_KEYS), "operator chain request")
     if not (
-        chain_document.get("schema_version")
-        == "chili.captured-paper-operator-chain-request.v1"
+        chain_document.get("schema_version") == CHAIN_REQUEST_SCHEMA_VERSION
         and chain_document.get("account_scope") == ACCOUNT_SCOPE
         and chain_document.get("live_cash_authorized") is False
         and _same_path(
@@ -716,6 +1819,22 @@ def load_activation_runner_request(
             "CHAIN_REQUEST_AUTHORITY_MISMATCH",
             "chain request dependency/PAPER authority differs from the outer request",
         )
+
+    benchmark_references = {
+        field: chain_document.get(field) for field in _BENCHMARK_REFERENCE_FIELDS
+    }
+    benchmark_authority = validate_benchmark_authority_bundle(
+        references=benchmark_references,
+        allowed_read_roots=roots,
+        expected_candidate_root=candidate_root,
+        expected_git_commit=commit,
+        expected_git_executable=executable_paths["git_executable"],
+        expected_git_executable_sha256=executable_hashes["git_executable"],
+        expected_python_executable=executable_paths["python_executable"],
+        expected_python_executable_sha256=executable_hashes["python_executable"],
+        expected_python_dependency_root=python_dependency_root,
+        expected_python_dependency_root_identity_sha256=dependency_identity_sha,
+    )
 
     return ActivationRunnerRequest(
         request_path=request_file,
@@ -749,6 +1868,7 @@ def load_activation_runner_request(
         test_database_name=test_database_name,
         allowed_read_roots=tuple(roots),
         timeouts=RunnerTimeouts.from_mapping(timeouts_raw),
+        benchmark_authority=benchmark_authority,
     )
 
 
@@ -1884,6 +3004,32 @@ def _revalidate_request_path_authority(request: ActivationRunnerRequest) -> None
     _assert_expected_path(
         dependency_root, request.python_dependency_root, field="python_dependency_root"
     )
+    _revalidate_benchmark_authority(request)
+
+
+def _revalidate_benchmark_authority(
+    request: ActivationRunnerRequest,
+) -> BenchmarkAuthorityBundle:
+    observed = validate_benchmark_authority_bundle(
+        references=request.benchmark_authority.references(),
+        allowed_read_roots=request.allowed_read_roots,
+        expected_candidate_root=request.candidate_root,
+        expected_git_commit=request.expected_git_commit,
+        expected_git_executable=request.git_executable,
+        expected_git_executable_sha256=request.git_executable_sha256,
+        expected_python_executable=request.python_executable,
+        expected_python_executable_sha256=request.python_executable_sha256,
+        expected_python_dependency_root=request.python_dependency_root,
+        expected_python_dependency_root_identity_sha256=(
+            request.python_dependency_root_identity_sha256
+        ),
+    )
+    if observed != request.benchmark_authority:
+        raise CapturedPaperActivationRunnerError(
+            "BENCHMARK_AUTHORITY_DRIFT",
+            "terminal benchmark authority differs from the loaded activation request",
+        )
+    return observed
 
 
 def _validate_operator_plan(
@@ -2135,11 +3281,27 @@ def run_activation(
             executor=executor,
             env=env,
             recorder=recorder,
+            prelaunch_validator=lambda: _revalidate_benchmark_authority(request),
         )
         chain_doc = _last_json_line(chain.stdout)
-        if chain.returncode != 0 or chain_doc is None or chain_doc.get("verdict") != _CHAIN_OK:
+        if (
+            chain.returncode != 0
+            or chain_doc is None
+            or set(chain_doc) != set(_CHAIN_RESULT_KEYS)
+            or chain_doc.get("schema_version") != CHAIN_RESULT_SCHEMA_VERSION
+            or chain_doc.get("verdict") != _CHAIN_OK
+        ):
             raise CapturedPaperActivationRunnerError(
                 "CHAIN_REJECTED", "fresh captured-paper operator chain rejected"
+            )
+        expected_benchmark_references = request.benchmark_authority.references()
+        if any(
+            chain_doc.get(field) != expected_benchmark_references[field]
+            for field in _BENCHMARK_REFERENCE_FIELDS
+        ):
+            raise CapturedPaperActivationRunnerError(
+                "CHAIN_RESULT_INVALID",
+                "chain did not echo the exact terminal benchmark authority",
             )
         generation = str(chain_doc.get("activation_generation") or "")
         try:
@@ -2352,6 +3514,7 @@ def run_activation(
             "manifest_sha256": manifest_sha,
             "request_sha256": request.request_sha256,
             "expected_git_commit": request.expected_git_commit,
+            **expected_benchmark_references,
             "live_cash_authorized": False,
             "generated_at": clock().astimezone(UTC).isoformat().replace("+00:00", "Z"),
         }

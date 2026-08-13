@@ -32,6 +32,7 @@ from app.services.trading.momentum_neural.replay_capture_runtime import (
     CaptureAdaptivePressureController,
     CaptureBudgetPolicy,
     CaptureColdArchiveReceipt,
+    CAPTURE_PRESSURE_WRITE_LATENCY_PROFILE,
     CapturePressureSample,
     CaptureResourceBinding,
     CaptureResourceMeasurement,
@@ -42,6 +43,7 @@ from app.services.trading.momentum_neural.replay_capture_runtime import (
     ReplayNetworkGuard,
     SharedCaptureAdmissionBudget,
     SharedCaptureStoreRuntime,
+    capture_storage_volume_identity_sha256,
     load_verified_replay_capture_v4,
 )
 
@@ -128,6 +130,7 @@ def _binding(
     average_cpu_percent: float = 20,
     store_owner_lease_seconds: float = 60,
     store_owner_heartbeat_seconds: float = 10,
+    capture_root: Path | None = None,
 ) -> CaptureResourceBinding:
     measurement = CaptureResourceMeasurement(
         measured_at=BASE,
@@ -140,6 +143,14 @@ def _binding(
         fsync_p95_milliseconds=5,
         logical_cpu_count=8,
         host_fingerprint_sha256="e" * 64,
+        write_latency_measurement_profile=(
+            CAPTURE_PRESSURE_WRITE_LATENCY_PROFILE
+        ),
+        write_latency_probe_volume_identity_sha256=(
+            capture_storage_volume_identity_sha256(capture_root)
+            if capture_root is not None
+            else "d" * 64
+        ),
     )
     policy = CaptureBudgetPolicy(
         memory_reserve_bytes=memory_reserve_bytes,
@@ -409,12 +420,33 @@ def _pressure_sample(
 ) -> CapturePressureSample:
     return CapturePressureSample(
         observed_at=BASE + timedelta(seconds=index),
+        completed_monotonic=0.0,
         resource_binding_sha256=binding.binding_sha256,
         cpu_percent=cpu_percent,
         available_memory_bytes=available_memory_bytes,
         disk_free_bytes=disk_free_bytes,
         write_latency_milliseconds=write_latency_milliseconds,
+        write_latency_measurement_profile="chili.capture-pressure.durable-write-fsync-helper-process.v1",
     )
+
+
+def test_pressure_sample_rejects_unbound_write_latency_profile() -> None:
+    binding = _binding()
+
+    with pytest.raises(
+        CaptureContractError,
+        match="unsupported capture pressure write-latency profile",
+    ):
+        CapturePressureSample(
+            observed_at=BASE,
+            completed_monotonic=0.0,
+            resource_binding_sha256=binding.binding_sha256,
+            cpu_percent=20,
+            available_memory_bytes=20_000_000,
+            disk_free_bytes=200_000_000,
+            write_latency_milliseconds=5,
+            write_latency_measurement_profile="legacy-service-thread-wall-time",
+        )
 
 
 def test_binding_factories_enforce_exact_finite_ring_queue_and_hashes() -> None:
@@ -469,8 +501,10 @@ def test_measured_cpu_headroom_derates_budget_and_saturation_refuses_start() -> 
 
 def test_adaptive_pressure_is_hysteretic_emits_gap_and_recovers() -> None:
     binding = _binding()
-    controller = CaptureAdaptivePressureController(binding)
     clock = _Clock()
+    controller = CaptureAdaptivePressureController(
+        binding, monotonic_clock=clock
+    )
     ingress = BoundedCaptureIngress.from_resource_binding(
         binding,
         pressure_controller=controller,
@@ -573,8 +607,73 @@ def test_pressure_sample_absence_and_staleness_are_fail_closed() -> None:
     clock.now += binding.policy.pressure_sample_max_age_seconds + 0.001
     assert controller.rejection_reason == "capture_resource_pressure_sample_stale"
     assert controller.health()["pressure_state"] == "stale_fail_closed"
-    controller.observe(_pressure_sample(binding, 2))
+    controller.observe(
+        replace(
+            _pressure_sample(binding, 2),
+            completed_monotonic=clock.now,
+        )
+    )
     assert controller.required_full_fidelity_admissible is True
+
+
+def test_delayed_pressure_publication_preserves_sample_completion_age() -> None:
+    binding = _binding()
+    clock = _Clock()
+    controller = CaptureAdaptivePressureController(
+        binding, monotonic_clock=clock
+    )
+    sample_completed_monotonic = clock.now
+    sample = _pressure_sample(binding, 1)
+
+    # Model a service/GIL stall after the complete measurement but before the
+    # controller can publish it.  The delayed call must not mint a new full
+    # freshness window at publication time.
+    clock.now += binding.policy.pressure_sample_max_age_seconds + 0.001
+    health = controller.observe(
+        sample,
+        sample_monotonic=sample_completed_monotonic,
+    )
+
+    assert health["sample_age_seconds"] == pytest.approx(
+        binding.policy.pressure_sample_max_age_seconds + 0.001
+    )
+    assert health["pressure_state"] == "stale_fail_closed"
+    assert health["rejection_reason"] == (
+        "capture_resource_pressure_sample_stale"
+    )
+    assert controller.required_full_fidelity_admissible is False
+
+
+def test_pressure_completion_clock_rejects_future_and_backwards_values() -> None:
+    binding = _binding()
+    clock = _Clock()
+    controller = CaptureAdaptivePressureController(
+        binding, monotonic_clock=clock
+    )
+    first = _pressure_sample(binding, 1)
+    controller.observe(first, sample_monotonic=clock.now)
+
+    with pytest.raises(CaptureContractError, match="future-dated"):
+        controller.observe(
+            replace(
+                _pressure_sample(binding, 2),
+                completed_monotonic=clock.now + 1.0,
+            ),
+        )
+    clock.now = 1.0
+    controller.observe(
+        replace(
+            _pressure_sample(binding, 2),
+            completed_monotonic=clock.now,
+        ),
+    )
+    with pytest.raises(CaptureContractError, match="moved backwards"):
+        controller.observe(
+            replace(
+                _pressure_sample(binding, 3),
+                completed_monotonic=0.5,
+            ),
+        )
 
 
 def test_runtime_sampler_failure_invalidates_fresh_sample_until_observe() -> None:
@@ -632,7 +731,10 @@ def test_hot_symbol_capacity_is_measured_rejects_with_gap_and_releases_exactly()
 
 def test_hot_symbol_pressure_rejection_is_explicit_and_does_not_consume_slot() -> None:
     binding = _binding(calibrated_hot_symbol_bytes=4_000_000)
-    controller = CaptureAdaptivePressureController(binding)
+    clock = _Clock()
+    controller = CaptureAdaptivePressureController(
+        binding, monotonic_clock=clock
+    )
     for index in range(1, binding.policy.pressure_enter_samples + 1):
         controller.observe(_pressure_sample(binding, index, cpu_percent=90))
     leases = BoundedHotSymbolLeases(
@@ -651,7 +753,10 @@ def test_hot_symbol_pressure_rejection_is_explicit_and_does_not_consume_slot() -
 
 def test_pretrigger_promotion_preserves_buffered_events_and_marks_pressure_gap() -> None:
     binding = _binding()
-    controller = CaptureAdaptivePressureController(binding)
+    clock = _Clock()
+    controller = CaptureAdaptivePressureController(
+        binding, monotonic_clock=clock
+    )
     ring = BoundedPreTriggerRing.from_resource_binding(
         binding,
         horizon=timedelta(minutes=3),
