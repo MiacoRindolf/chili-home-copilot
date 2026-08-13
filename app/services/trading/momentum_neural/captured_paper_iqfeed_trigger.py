@@ -42,7 +42,7 @@ from .replay_capture_contract import (
 
 
 IQFEED_TRIGGER_RECEIPT_SCHEMA_VERSION = (
-    "chili.captured-paper-iqfeed-trigger-receipt.v2"
+    "chili.captured-paper-iqfeed-trigger-receipt.v4"
 )
 IQFEED_Q_NOTIFY_SCHEMA_VERSION = "chili.iqfeed-q-notify-authority.v1"
 
@@ -362,6 +362,27 @@ class IqfeedTriggerResolution:
             raise CaptureContractError(
                 "ready IQFeed trigger lacks its exact process-private durable read"
             )
+        sources = tuple(captured.source_events)
+        if any(not isinstance(source, CaptureEvent) for source in sources):
+            raise CaptureContractError(
+                "ready IQFeed trigger source inventory is malformed"
+            )
+        source_refs = tuple(CaptureEventRef.from_event(source) for source in sources)
+        if (
+            not sources
+            or tuple(ref.event_sha256 for ref in source_refs)
+            != captured.receipt.source_event_sha256s
+            or captured_read_result_sha256(source_refs)
+            != captured.receipt.result_sha256
+            or sum(
+                source.event_sha256 == receipt.source_event_sha256
+                for source in sources
+            )
+            != 1
+        ):
+            raise CaptureContractError(
+                "ready IQFeed trigger lacks its exact selected source inventory"
+            )
 
     @property
     def ready(self) -> bool:
@@ -580,7 +601,6 @@ def _receipt_from_result(
         or receipt.returned_at != returned_at
         or not receipt.content_verified
         or receipt.replay_network_fallback_used
-        or receipt.empty_result
         or receipt_event.stream is not CaptureStream.READ_RECEIPT
         or receipt_event.identity.identity_sha256 != receipt.identity_sha256
         or receipt_event.provider != "iqfeed"
@@ -591,72 +611,122 @@ def _receipt_from_result(
         or receipt_event.payload != receipt.to_dict()
     ):
         return None, "iqfeed_exact_print_capture_read_mismatch"
-    if len(result.source_events) != 1 or len(receipt.source_event_sha256s) != 1:
-        return None, "iqfeed_exact_print_capture_read_ambiguous"
-    source = result.source_events[0]
-    if not isinstance(source, CaptureEvent):
+    sources = tuple(result.source_events)
+    if any(not isinstance(source, CaptureEvent) for source in sources):
         return None, "iqfeed_exact_print_source_identity_mismatch"
-    try:
-        view = resolve_capture_source_payload(source)
-    except CaptureContractError:
-        return None, "iqfeed_exact_print_provenance_invalid"
+    refs = tuple(CaptureEventRef.from_event(source) for source in sources)
     if (
-        receipt.source_event_sha256s != (source.event_sha256,)
-        or source.identity.identity_sha256 != receipt.identity_sha256
-        or source.stream is not CaptureStream.IQFEED_PRINT
-        or source.provider != "iqfeed"
-        or source.symbol != notify.symbol
-        or source.clocks.provider_event_at
-        != notify.provider_trade_reference_at
-        or source.clocks.market_reference_at is not None
-        or source.clocks.received_at != notify.received_at
-        or view.original_available_at != notify.available_at
-        or source.clocks.available_at > returned_at
-        or receipt_event.sequence <= source.sequence
+        receipt.empty_result != (not sources)
+        or tuple(ref.event_sha256 for ref in refs)
+        != receipt.source_event_sha256s
     ):
-        return None, "iqfeed_exact_print_source_identity_mismatch"
-    ref = CaptureEventRef.from_event(source)
-    if captured_read_result_sha256((ref,)) != receipt.result_sha256:
+        return None, "iqfeed_exact_print_source_inventory_mismatch"
+    if captured_read_result_sha256(refs) != receipt.result_sha256:
         return None, "iqfeed_exact_print_result_hash_mismatch"
     try:
         query = CaptureMicrostructureReadQuery.from_dict(receipt.query or {})
     except (CaptureContractError, ValueError):
         return None, "iqfeed_exact_print_query_mismatch"
     if (
-        query.operation is not CaptureMicrostructureOperation.TRADE_FLOW
+        query.operation
+        is not CaptureMicrostructureOperation.EXACT_EVENT_MEMBERSHIP
         or query.stream is not CaptureStream.IQFEED_PRINT
         or query.symbol != notify.symbol
         or query.provider != "iqfeed"
+        or query.event_start_exclusive
+        != notify.provider_trade_reference_at
+        - timedelta(seconds=window_seconds)
         or query.event_end_inclusive
         != notify.provider_trade_reference_at
+        or query.decision_at != notify.provider_trade_reference_at
         or query.available_at_most != returned_at
+        or query.source_clock_basis != "provider_event_at"
         or query.parameters != {"window_seconds": window_seconds}
     ):
         return None, "iqfeed_exact_print_query_mismatch"
-    try:
-        exact_print = CaptureIqfeedPrint.from_event(source)
-        provenance = view.payload.get(IQFEED_L1_SOURCE_PROVENANCE_FIELD)
-        validated = validate_iqfeed_exact_print_source_provenance(
-            provenance,
-            symbol=notify.symbol,
-            clocks=source.clocks,
-        )
-    except CaptureContractError:
-        return None, "iqfeed_exact_print_provenance_invalid"
+    if not sources:
+        return None, "iqfeed_exact_print_source_not_found"
     if (
-        validated.get("schema_version")
-        != IQFEED_EXACT_PRINT_SOURCE_PROVENANCE_SCHEMA_VERSION
-        or validated.get("bridge_run_id") != notify.bridge_run_id
-        or validated.get("connection_generation")
-        != notify.connection_generation
-        or validated.get("bridge_version") != notify.bridge_version
-        or validated.get("message_type") != "Q"
-        or validated.get("timestamp_basis")
-        != _IQFEED_EXACT_PRINT_TIMESTAMP_BASIS
-        or validated.get("source_frame_sequence")
-        != notify.source_frame_sequence
-        or validated.get("source_frame_sha256")
-        != notify.source_frame_sha256
+        receipt_event.sequence <= query.source_frontier_sequence
+        or query.source_frontier_sequence < max(source.sequence for source in sources)
+        or any(source.clocks.provider_event_at is None for source in sources)
+        or tuple(
+            (source.clocks.provider_event_at, source.sequence)
+            for source in sources
+        )
+        != tuple(
+            sorted(
+                (
+                    (source.clocks.provider_event_at, source.sequence)
+                    for source in sources
+                )
+            )
+        )
+    ):
+        return None, "iqfeed_exact_print_source_inventory_mismatch"
+
+    validated_sources: list[
+        tuple[CaptureEvent, CaptureIqfeedPrint, Any, Mapping[str, Any]]
+    ] = []
+    for source in sources:
+        try:
+            view = resolve_capture_source_payload(source)
+            exact_print = CaptureIqfeedPrint.from_event(source)
+            provenance = view.payload.get(IQFEED_L1_SOURCE_PROVENANCE_FIELD)
+            validated = validate_iqfeed_exact_print_source_provenance(
+                provenance,
+                symbol=notify.symbol,
+                clocks=source.clocks,
+            )
+        except CaptureContractError:
+            return None, "iqfeed_exact_print_provenance_invalid"
+        if (
+            source.identity.identity_sha256 != receipt.identity_sha256
+            or source.stream is not CaptureStream.IQFEED_PRINT
+            or source.provider != "iqfeed"
+            or source.symbol != notify.symbol
+            or source.clocks.provider_event_at is None
+            or source.clocks.market_reference_at is not None
+            or not (
+                query.event_start_exclusive
+                < source.clocks.provider_event_at
+                <= query.event_end_inclusive
+            )
+            or source.clocks.available_at > returned_at
+            or receipt_event.sequence <= source.sequence
+        ):
+            return None, "iqfeed_exact_print_source_identity_mismatch"
+        validated_sources.append((source, exact_print, view, validated))
+
+    matching = tuple(
+        row
+        for row in validated_sources
+        if (
+            row[3].get("schema_version")
+            == IQFEED_EXACT_PRINT_SOURCE_PROVENANCE_SCHEMA_VERSION
+            and row[3].get("bridge_run_id") == notify.bridge_run_id
+            and row[3].get("connection_generation")
+            == notify.connection_generation
+            and row[3].get("bridge_version") == notify.bridge_version
+            and row[3].get("message_type") == "Q"
+            and row[3].get("timestamp_basis")
+            == _IQFEED_EXACT_PRINT_TIMESTAMP_BASIS
+            and row[3].get("source_frame_sequence")
+            == notify.source_frame_sequence
+            and row[3].get("source_frame_sha256")
+            == notify.source_frame_sha256
+        )
+    )
+    if not matching:
+        return None, "iqfeed_exact_print_source_not_found"
+    if len(matching) != 1:
+        return None, "iqfeed_exact_print_capture_read_ambiguous"
+    source, exact_print, view, validated = matching[0]
+    if (
+        source.clocks.provider_event_at
+        != notify.provider_trade_reference_at
+        or source.clocks.received_at != notify.received_at
+        or view.original_available_at != notify.available_at
         or exact_print.bid != notify.bid
         or exact_print.ask != notify.ask
     ):
@@ -817,6 +887,55 @@ class CapturedPaperIqfeedTriggerResolver:
                     attempts=attempt - 1,
                     notify_sha256=notify_sha256,
                 )
+            read_boundary = max(
+                notify.provider_trade_reference_at,
+                notify.received_at,
+                notify.available_at,
+            )
+            if now < read_boundary:
+                try:
+                    self.wait((read_boundary - now).total_seconds())
+                    caught_up = _utc(
+                        self.wall_clock(),
+                        "iqfeed_trigger_wall_clock",
+                    )
+                except _NotifyRejected as exc:
+                    return _unavailable(
+                        exc.reason,
+                        attempts=attempt - 1,
+                        notify_sha256=notify_sha256,
+                    )
+                except Exception:
+                    return _unavailable(
+                        "iqfeed_trigger_clock_catchup_unavailable",
+                        attempts=attempt - 1,
+                        notify_sha256=notify_sha256,
+                    )
+                if caught_up < now:
+                    return _unavailable(
+                        "iqfeed_trigger_wall_clock_regressed",
+                        attempts=attempt - 1,
+                        notify_sha256=notify_sha256,
+                    )
+                freshness = _freshness_reason(
+                    notify,
+                    now=caught_up,
+                    max_notify_age_seconds=self.max_notify_age_seconds,
+                    future_tolerance_seconds=self.future_tolerance_seconds,
+                )
+                if freshness is not None:
+                    return _unavailable(
+                        freshness,
+                        attempts=attempt - 1,
+                        notify_sha256=notify_sha256,
+                    )
+                if caught_up < read_boundary:
+                    return _unavailable(
+                        "iqfeed_trigger_clock_catchup_unavailable",
+                        attempts=attempt - 1,
+                        notify_sha256=notify_sha256,
+                    )
+                now = caught_up
             read_id = _read_id(
                 decision_id=decision,
                 notify_sha256=notify_sha256,
@@ -825,7 +944,9 @@ class CapturedPaperIqfeedTriggerResolver:
             try:
                 captured = self.capture.capture_complete_microstructure_window(
                     decision_id=decision,
-                    operation=CaptureMicrostructureOperation.TRADE_FLOW,
+                    operation=(
+                        CaptureMicrostructureOperation.EXACT_EVENT_MEMBERSHIP
+                    ),
                     stream=CaptureStream.IQFEED_PRINT,
                     provider="iqfeed",
                     symbol=notify.symbol,
@@ -892,6 +1013,12 @@ class CapturedPaperIqfeedTriggerResolver:
                         notify_sha256=notify_sha256,
                         receipt=receipt,
                         captured_read=captured,
+                    )
+                if captured.durable:
+                    return _unavailable(
+                        last_reason,
+                        attempts=attempt,
+                        notify_sha256=notify_sha256,
                     )
             if attempt < self.max_attempts:
                 self.wait(self.retry_delay_seconds)

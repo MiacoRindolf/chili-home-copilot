@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
+import pickle
 import threading
 import time
 import uuid
@@ -47,6 +48,8 @@ from app.services.trading.momentum_neural.replay_capture_contract import (
     CaptureDecisionOutput,
     CaptureEvent,
     CaptureEventRef,
+    CaptureMicrostructureOperation,
+    CaptureMicrostructureReadQuery,
     CaptureOrderIntent,
     CaptureOrderIntentRole,
     CaptureProviderRegistrationEvidence,
@@ -60,6 +63,9 @@ from app.services.trading.momentum_neural.replay_capture_contract import (
     FSMDependencyProfile,
     FSMStreamDependency,
     IQFEED_PRINT_PAYLOAD_SCHEMA_VERSION,
+    IQFEED_EXACT_PRINT_SOURCE_PROVENANCE_SCHEMA_VERSION,
+    IQFEED_L1_SOURCE_PROVENANCE_FIELD,
+    InitialIqfeedExactMembershipSelector,
     ProviderWatermark,
     StreamCoverage,
     VerifiedReplayCapture,
@@ -70,6 +76,7 @@ from app.services.trading.momentum_neural.replay_capture_contract import (
     sha256_json,
     verify_active_capture_input_attestation,
     verify_active_capture_prefix_attestation,
+    verify_initial_iqfeed_exact_membership_attestation,
 )
 from app.services.trading.momentum_neural.replay_capture_runtime import (
     BoundedCaptureIngress,
@@ -1517,6 +1524,195 @@ def test_change_log_stage1_requires_then_accepts_watermark_checkpoint() -> None:
 
     assert verify_active_capture_input_attestation(predecision) is predecision
     assert predecision.continuity_evidence == (continuity,)
+    with pytest.raises(CaptureContractError, match="membership attestation is malformed"):
+        verify_initial_iqfeed_exact_membership_attestation(  # type: ignore[arg-type]
+            predecision
+        )
+
+
+def test_initial_exact_membership_is_atomic_non_executable_and_not_generic_predecision() -> None:
+    identity = _identity()
+    binding = _resource_binding()
+    producer = _producer(
+        identity,
+        binding,
+        streams=(CaptureStream.IQFEED_PRINT,),
+    )
+    clock = _ManualClock(BASE)
+    runtime = CaptureProducerLifecycleRuntime(
+        identity=identity,
+        ingress=BoundedCaptureIngress.from_resource_binding(binding),
+        resource_binding=binding,
+        producers=(producer,),
+        heartbeat_timeout_seconds=1.0,
+        wall_clock=clock,
+    )
+    runtime.open(opened_at=BASE)
+    runtime.register(
+        producer.producer_id,
+        recorded_at=clock.set(BASE + timedelta(milliseconds=1)),
+    )
+    source_at = clock.set(BASE + timedelta(milliseconds=2))
+    selected_fields = [
+        "Symbol",
+        "Most Recent Trade",
+        "Most Recent Trade Size",
+        "Most Recent Trade Time",
+        "Most Recent Trade Date",
+        "Most Recent Trade Market Center",
+        "Most Recent Trade Conditions",
+        "TickID",
+        "Bid",
+        "Ask",
+        "Message Contents",
+    ]
+    bridge_configuration = {"selected_fields_required": True}
+    handoff_configuration = {"bounded_queue": True}
+    provenance = {
+        "schema_version": IQFEED_EXACT_PRINT_SOURCE_PROVENANCE_SCHEMA_VERSION,
+        "symbol": "VEEE",
+        "bridge_run_id": producer.instance_id,
+        "connection_generation": producer.generation,
+        "bridge_version": "iqfeed-exact-fixture-v1",
+        "bridge_source_sha256": "1" * 64,
+        "bridge_configuration": bridge_configuration,
+        "bridge_configuration_sha256": sha256_json(bridge_configuration),
+        "capture_resource_binding_sha256": binding.binding_sha256,
+        "handoff_configuration": handoff_configuration,
+        "handoff_configuration_sha256": sha256_json(handoff_configuration),
+        "message_type": "Q",
+        "timestamp_basis": "iqfeed_selected_trade_date_timems_exact",
+        "provider_event_at": source_at.isoformat().replace("+00:00", "Z"),
+        "received_at": source_at.isoformat().replace("+00:00", "Z"),
+        "provider_trade_date": "2026-07-13",
+        "provider_trade_time": "12:50:00.002",
+        "provider_tick_id": "901",
+        "trade_market_center": "25",
+        "trade_conditions": ["@"],
+        "message_contents": "Cba",
+        "selected_update_fields": selected_fields,
+        "selected_update_fields_sha256": sha256_json(selected_fields),
+        "selected_update_fields_ack_sha256": "2" * 64,
+        "source_frame_sequence": 41,
+        "source_frame_sha256": "3" * 64,
+    }
+    source = runtime.submit_input(
+        producer.producer_id,
+        stream=CaptureStream.IQFEED_PRINT,
+        provider="iqfeed",
+        symbol="VEEE",
+        clocks=CaptureClocks(
+            provider_event_at=source_at,
+            received_at=source_at,
+            available_at=source_at,
+        ),
+        payload={
+            "schema_version": IQFEED_PRINT_PAYLOAD_SCHEMA_VERSION,
+            "symbol": "VEEE",
+            "price": 5.0,
+            "size": 100,
+            "bid": 4.99,
+            "ask": 5.01,
+            "conditions": ["@"],
+            IQFEED_L1_SOURCE_PROVENANCE_FIELD: provenance,
+        },
+        recorded_at=source_at,
+    )
+    decision_id = "initial-membership-atomic"
+    _receipt_event, receipt, sources = runtime.submit_microstructure_window_receipt(
+        decision_id=decision_id,
+        operation=CaptureMicrostructureOperation.EXACT_EVENT_MEMBERSHIP,
+        stream=CaptureStream.IQFEED_PRINT,
+        provider="iqfeed",
+        symbol="VEEE",
+        requested_at=source_at,
+        returned_at=source_at,
+        event_start_exclusive=source_at - timedelta(milliseconds=1),
+        event_end_inclusive=source_at,
+        parameters={"window_seconds": 0.001},
+    )
+    assert sources == (source,)
+
+    def selector_for(decision: str) -> InitialIqfeedExactMembershipSelector:
+        return InitialIqfeedExactMembershipSelector(
+            decision_id=decision,
+            trigger_receipt_sha256="4" * 64,
+            notify_sha256="5" * 64,
+            symbol="VEEE",
+            bridge_version=str(provenance["bridge_version"]),
+            bridge_run_id=producer.instance_id,
+            connection_generation=producer.generation,
+            source_frame_sequence=41,
+            source_frame_sha256="3" * 64,
+            selected_event_sha256=source.event_sha256,
+            selected_event_sequence=source.sequence,
+            selected_payload_sha256=source.payload_sha256,
+            selected_provenance_sha256=sha256_json(provenance),
+            provider_event_at=source_at,
+            received_at=source_at,
+            original_available_at=source_at,
+            durable_available_at=source_at,
+            release_kind=None,
+            bridge_source_sha256="1" * 64,
+            bridge_configuration_sha256=sha256_json(bridge_configuration),
+            capture_resource_binding_sha256=binding.binding_sha256,
+            handoff_configuration_sha256=sha256_json(handoff_configuration),
+            selected_update_fields_sha256=sha256_json(selected_fields),
+            selected_update_fields_ack_sha256="2" * 64,
+        )
+
+    clock.set(source_at + timedelta(microseconds=100))
+    proof = runtime.attest_initial_iqfeed_exact_membership(
+        read_id=receipt.read_id,
+        selector=selector_for(decision_id),
+        max_source_age_seconds=1.0,
+    )
+    assert verify_initial_iqfeed_exact_membership_attestation(proof) is proof
+    assert proof.positive_local_membership is True
+    assert proof.provider_continuity_authority is False
+    assert proof.absence_count_order_authority is False
+    assert proof.reservation_authority is False
+    assert proof.order_authority is False
+    assert proof.risk_increase_authority is False
+    with pytest.raises(CaptureContractError, match="active capture input attestation"):
+        verify_active_capture_input_attestation(proof)  # type: ignore[arg-type]
+    with pytest.raises(TypeError, match="process-private"):
+        pickle.dumps(proof)
+    assert runtime.verify_owned_initial_iqfeed_exact_membership(proof) is proof
+
+    forged_decision = "initial-membership-caller-selected"
+    forged_query = CaptureMicrostructureReadQuery.from_dict(receipt.query or {})
+    forged_receipt = CaptureReadReceipt(
+        read_id=str(uuid.uuid4()),
+        decision_id=forged_decision,
+        identity_sha256=identity.identity_sha256,
+        stream=CaptureStream.IQFEED_PRINT,
+        provider="iqfeed",
+        symbol="VEEE",
+        requested_at=source_at,
+        returned_at=source_at,
+        query_sha256=sha256_json(forged_query.to_dict()),
+        source_event_sha256s=(source.event_sha256,),
+        empty_result=False,
+        result_sha256=captured_read_result_sha256(
+            (CaptureEventRef.from_event(source),)
+        ),
+        content_verified=True,
+        replay_network_fallback_used=False,
+        query=forged_query.to_dict(),
+    )
+    runtime.submit_read_receipt(forged_receipt)
+    with pytest.raises(CaptureContractError, match="identity is inconsistent"):
+        runtime.attest_initial_iqfeed_exact_membership(
+            read_id=forged_receipt.read_id,
+            selector=selector_for(forged_decision),
+            max_source_age_seconds=1.0,
+        )
+
+    clock.set(source_at + timedelta(milliseconds=2))
+    runtime.quiesce(producer.producer_id)
+    with pytest.raises(CaptureContractError, match="not owned and live"):
+        runtime.verify_owned_initial_iqfeed_exact_membership(proof)
 
 
 def test_change_log_stage1_uses_source_clock_not_recent_availability() -> None:

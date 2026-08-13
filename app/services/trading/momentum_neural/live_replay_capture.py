@@ -54,6 +54,8 @@ from .replay_capture_contract import (
     CaptureEvent,
     CaptureEventRef,
     CaptureIqfeedPrint,
+    InitialIqfeedExactMembershipAttestation,
+    InitialIqfeedExactMembershipSelector,
     CaptureMicrostructureOperation,
     CaptureMicrostructureReadQuery,
     CaptureProviderRegistrationEvidence,
@@ -82,6 +84,7 @@ from .replay_capture_contract import (
     scanner_snapshot_market_reference_at,
     verify_active_capture_input_attestation,
     verify_active_capture_prefix_attestation,
+    verify_initial_iqfeed_exact_membership_attestation,
 )
 from .replay_capture_runtime import (
     BoundedCaptureIngress,
@@ -2893,6 +2896,84 @@ class LiveReplayCaptureCoordinator:
                 first_dip_tape_read_id=first_dip_id,
             )
             return verify_active_capture_input_attestation(proof)
+
+    def attest_initial_iqfeed_exact_membership(
+        self,
+        *,
+        captured_read: CapturedReadResult,
+        selector: InitialIqfeedExactMembershipSelector,
+        max_source_age_seconds: float,
+    ) -> InitialIqfeedExactMembershipAttestation:
+        """Issue the process-private, non-executable initial membership proof."""
+
+        if not isinstance(captured_read, CapturedReadResult) or not captured_read.durable:
+            raise CaptureContractError(
+                "initial IQFeed membership requires one durable typed read"
+            )
+        assert captured_read.receipt is not None
+        receipt = captured_read.receipt
+        if type(selector) is not InitialIqfeedExactMembershipSelector:
+            raise CaptureContractError(
+                "initial IQFeed membership selector is malformed"
+            )
+        with self._lock:
+            self._require_running()
+            if receipt.decision_id != selector.decision_id:
+                raise CaptureContractError(
+                    "initial IQFeed membership read belongs to another decision"
+                )
+            proof = (
+                self._producer_lifecycle
+                .attest_initial_iqfeed_exact_membership(
+                    read_id=receipt.read_id,
+                    selector=selector,
+                    max_source_age_seconds=max_source_age_seconds,
+                )
+            )
+            verified = verify_initial_iqfeed_exact_membership_attestation(proof)
+            submission = captured_read.receipt_submission
+            source_refs = tuple(
+                CaptureEventRef.from_event(source)
+                for source in captured_read.source_events
+            )
+            if (
+                submission is None
+                or submission.event is None
+                or verified.read_evidence.receipt is not receipt
+                or verified.read_evidence.source_event_refs != source_refs
+                or verified.read_evidence.receipt_event_sha256
+                != submission.event.event_sha256
+                or verified.read_evidence.receipt_event_sequence
+                != submission.event.sequence
+            ):
+                raise CaptureContractError(
+                    "initial IQFeed membership differs from the supplied durable read"
+                )
+            return verified
+
+    def verify_owned_initial_iqfeed_exact_membership(
+        self,
+        proof: InitialIqfeedExactMembershipAttestation,
+    ) -> InitialIqfeedExactMembershipAttestation:
+        """Verify one exact non-executable capability against this live coordinator."""
+
+        with self._lock:
+            self._require_running()
+            verified = (
+                self._producer_lifecycle
+                .verify_owned_initial_iqfeed_exact_membership(proof)
+            )
+            if (
+                verified.run_id != self.identity.run_id
+                or verified.generation != self.identity.generation
+                or verified.identity_sha256 != self.identity.identity_sha256
+                or verified.resource_binding_sha256
+                != self.resource_binding.binding_sha256
+            ):
+                raise CaptureContractError(
+                    "initial IQFeed membership belongs to another coordinator"
+                )
+            return verified
 
     def prepare_captured_first_dip_tape_authority(
         self,

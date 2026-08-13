@@ -35,6 +35,7 @@ from app.services.trading.momentum_neural.replay_capture_contract import (
     CaptureMicrostructureOperation,
     CaptureMicrostructureReadQuery,
     CaptureStream,
+    EXACT_EVENT_MEMBERSHIP_QUERY_SCHEMA_VERSION,
 )
 
 
@@ -114,7 +115,8 @@ def _policy_receipt() -> AdaptiveRiskPolicySettingsReceipt:
 def _read_query() -> CaptureMicrostructureReadQuery:
     decision_at = NOW - timedelta(milliseconds=100)
     return CaptureMicrostructureReadQuery(
-        operation=CaptureMicrostructureOperation.TRADE_FLOW,
+        schema_version=EXACT_EVENT_MEMBERSHIP_QUERY_SCHEMA_VERSION,
+        operation=CaptureMicrostructureOperation.EXACT_EVENT_MEMBERSHIP,
         stream=CaptureStream.IQFEED_PRINT,
         symbol=SYMBOL,
         provider="iqfeed",
@@ -163,7 +165,10 @@ class _Coordinator:
         self._rig.events.append("checkpoint")
         assert stream is CaptureStream.IQFEED_PRINT
 
-    def attest_predecision_inputs(self, **kwargs: Any) -> object:
+    def attest_predecision_inputs(self, **_kwargs: Any) -> object:
+        raise AssertionError("initial membership must not use generic predecision authority")
+
+    def attest_initial_iqfeed_exact_membership(self, **kwargs: Any) -> object:
         self._rig.events.append("attest")
         self._rig.attest_calls.append(dict(kwargs))
         if self._rig.proof_error is not None:
@@ -220,15 +225,66 @@ def _install_fakes(
     rig: _Rig,
 ) -> tuple[controller.CapturedPaperInitialAdmissionController, _Host, Any]:
     query = _read_query()
+    provider_at = NOW - timedelta(milliseconds=300)
+    received_at = NOW - timedelta(milliseconds=200)
+    original_available_at = NOW - timedelta(milliseconds=100)
+    provenance = {
+        "bridge_source_sha256": _digest("bridge-source"),
+        "bridge_configuration_sha256": _digest("bridge-config"),
+        "capture_resource_binding_sha256": _digest("resource-binding"),
+        "handoff_configuration_sha256": _digest("handoff-config"),
+        "selected_update_fields_sha256": _digest("selected-fields"),
+        "selected_update_fields_ack_sha256": _digest("selected-fields-ack"),
+    }
+    selected_source = SimpleNamespace(
+        event_sha256=_digest("source-event"),
+        clocks=SimpleNamespace(
+            provider_event_at=provider_at,
+            received_at=received_at,
+            available_at=original_available_at,
+        ),
+    )
     captured_receipt = SimpleNamespace(read_id=READ_ID, query=query.to_dict())
-    captured_read = SimpleNamespace(receipt=captured_receipt)
-    trigger_receipt = SimpleNamespace(content_sha256=_digest("trigger-receipt"))
+    captured_read = SimpleNamespace(
+        receipt=captured_receipt,
+        source_events=(selected_source,),
+    )
+    trigger_receipt = SimpleNamespace(
+        content_sha256=_digest("trigger-receipt"),
+        notify_sha256=_digest("notify"),
+        bridge_version=BRIDGE_VERSION,
+        bridge_run_id="8da0a1ed-24f3-4545-8a7a-6f582ff1acc2",
+        connection_generation=3,
+        source_frame_sequence=41,
+        source_frame_sha256=_digest("raw-iqfeed-frame"),
+        source_event_sha256=selected_source.event_sha256,
+        source_event_sequence=4,
+        source_payload_sha256=_digest("source-payload"),
+        source_provenance_sha256=controller.sha256_json(provenance),
+        source_provider_event_at=provider_at,
+        source_received_at=received_at,
+        source_original_available_at=original_available_at,
+        source_durable_available_at=original_available_at,
+        source_release_kind=None,
+    )
     resolution = SimpleNamespace(
         status=IqfeedTriggerStatus.READY,
         ready=True,
         receipt=trigger_receipt,
         captured_read=captured_read,
         reason="iqfeed_exact_print_trigger_ready",
+    )
+    monkeypatch.setattr(
+        controller,
+        "resolve_capture_source_payload",
+        lambda _source: SimpleNamespace(
+            payload={"_iqfeed_l1_capture": provenance}
+        ),
+    )
+    monkeypatch.setattr(
+        controller,
+        "validate_iqfeed_exact_print_source_provenance",
+        lambda _raw, **_kwargs: provenance,
     )
 
     class _Resolver:
@@ -488,7 +544,7 @@ def test_expired_initial_generation_is_released_then_same_q_reads_fresh_material
     _assert_no_execution_authority(result)
 
 
-def test_exact_print_success_checkpoints_before_attestation_and_ignores_local_l2_gap(
+def test_exact_print_success_attests_membership_without_synthetic_watermark_and_ignores_local_l2_gap(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     rig = _Rig()
@@ -516,24 +572,25 @@ def test_exact_print_success_checkpoints_before_attestation_and_ignores_local_l2
         {"symbol": SYMBOL, "required_l1_stream": CaptureStream.IQFEED_PRINT}
     ]
     assert rig.abort_calls == []
-    assert rig.events.index("checkpoint") < rig.events.index("attest")
+    assert "checkpoint" not in rig.events
+    assert rig.events.index("coordinator") < rig.events.index("attest")
     assert len(rig.attest_calls) == 1
     attest = rig.attest_calls[0]
-    assert attest["captured_reads"] == (resolution.captured_read,)
-    profile = attest["dependency_profile"]
-    assert profile.required_streams == frozenset({CaptureStream.IQFEED_PRINT})
-    assert profile.required_read_ids == (READ_ID,)
-    dependency = profile.dependency_for(CaptureStream.IQFEED_PRINT)
-    assert dependency.exact_provider_event_at_required is True
-    assert dependency.market_reference_at_required is False
+    assert attest["captured_read"] is resolution.captured_read
     receipt = _policy_receipt()
-    assert dependency.max_source_age_seconds == pytest.approx(
+    assert attest["max_source_age_seconds"] == pytest.approx(
         receipt.policy.market_data_max_age_seconds
     )
     query = CaptureMicrostructureReadQuery.from_dict(
         resolution.captured_read.receipt.query
     )
-    assert dependency.coverage_start_at == query.event_start_exclusive
+    assert query.operation is CaptureMicrostructureOperation.EXACT_EVENT_MEMBERSHIP
+    selector = attest["selector"]
+    assert selector.trigger_receipt_sha256 == resolution.receipt.content_sha256
+    assert selector.selected_event_sha256 == (
+        resolution.receipt.source_event_sha256
+    )
+    assert selector.notify_sha256 == resolution.receipt.notify_sha256
     assert rig.resolver_kwargs[0]["max_notify_age_seconds"] == pytest.approx(
         receipt.policy.market_data_max_age_seconds
     )

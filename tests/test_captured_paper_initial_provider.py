@@ -36,7 +36,6 @@ from app.services.trading.momentum_neural.live_replay_capture import (
     CapturedReadResult,
 )
 from app.services.trading.momentum_neural.replay_capture_contract import (
-    ActiveCaptureContinuityEvidence,
     ActiveCaptureReadEvidence,
     CaptureClocks,
     CaptureContractError,
@@ -47,11 +46,13 @@ from app.services.trading.momentum_neural.replay_capture_contract import (
     CaptureReadReceipt,
     CaptureRunIdentity,
     CaptureStream,
-    FSMDependencyProfile,
-    FSMStreamDependency,
-    ProviderWatermark,
-    StreamCoverage,
-    _issue_active_capture_input_attestation,
+    EXACT_EVENT_MEMBERSHIP_QUERY_SCHEMA_VERSION,
+    IQFEED_EXACT_PRINT_SOURCE_PROVENANCE_SCHEMA_VERSION,
+    IQFEED_L1_SOURCE_PROVENANCE_FIELD,
+    IQFEED_PRINT_PAYLOAD_SCHEMA_VERSION,
+    MICROSTRUCTURE_READ_QUERY_SCHEMA_VERSION,
+    InitialIqfeedExactMembershipSelector,
+    _issue_initial_iqfeed_exact_membership_attestation,
     captured_read_result_sha256,
     resolve_capture_source_payload,
     sha256_json,
@@ -69,14 +70,28 @@ READ_ID = "07e20956-f1b8-4890-9bea-da4aa3105cca"
 RUN_ID = "3ee3ebf6-1620-4af1-80d7-0418de6a9bd6"
 RESOURCE_SHA256 = sha256_json({"fixture": "resource-binding"})
 CAPTURE_RECEIPT_SHA256 = sha256_json({"fixture": "capture-host-receipt"})
+BRIDGE_VERSION = "iqfeed-l1-exact-print-provenance-v3+sha256:0123456789abcdef"
+BRIDGE_RUN_ID = "8da0a1ed-24f3-4545-8a7a-6f582ff1acc2"
+FRAME_SHA256 = sha256_json({"fixture": "frame"})
+SELECTED_FIELDS = [
+    "Symbol",
+    "Most Recent Trade",
+    "Most Recent Trade Size",
+    "Most Recent Trade Time",
+    "Most Recent Trade Date",
+    "Most Recent Trade Market Center",
+    "Most Recent Trade Conditions",
+    "TickID",
+    "Bid",
+    "Ask",
+    "Message Contents",
+]
 
 SOURCE_PROVIDER_AT = NOW - timedelta(seconds=1.2)
 SOURCE_RECEIVED_AT = NOW - timedelta(seconds=1.1)
 SOURCE_AVAILABLE_AT = NOW - timedelta(seconds=1.0)
 READ_RETURNED_AT = NOW - timedelta(seconds=0.8)
 RECEIPT_COMMITTED_AT = NOW - timedelta(seconds=0.7)
-WATERMARK_COMMITTED_AT = NOW - timedelta(seconds=0.6)
-COVERAGE_COMMITTED_AT = NOW - timedelta(seconds=0.5)
 ATTESTED_AT = NOW - timedelta(seconds=0.4)
 
 CODE_BUILD = {"git_sha256": sha256_json({"fixture": "git"}), "dirty": False}
@@ -160,31 +175,83 @@ def _captured_read(
     *,
     read_id: str = READ_ID,
     decision_id: str = DECISION_ID,
+    source_provider_at: datetime = SOURCE_PROVIDER_AT,
+    source_received_at: datetime = SOURCE_RECEIVED_AT,
     source_available_at: datetime = SOURCE_AVAILABLE_AT,
     source_original_available_at: datetime | None = None,
+    operation: CaptureMicrostructureOperation = (
+        CaptureMicrostructureOperation.EXACT_EVENT_MEMBERSHIP
+    ),
+    include_neighbor: bool = False,
 ) -> CapturedReadResult:
     query = CaptureMicrostructureReadQuery(
-        operation=CaptureMicrostructureOperation.TRADE_FLOW,
+        schema_version=(
+            EXACT_EVENT_MEMBERSHIP_QUERY_SCHEMA_VERSION
+            if operation
+            is CaptureMicrostructureOperation.EXACT_EVENT_MEMBERSHIP
+            else MICROSTRUCTURE_READ_QUERY_SCHEMA_VERSION
+        ),
+        operation=operation,
         stream=CaptureStream.IQFEED_PRINT,
         symbol=SYMBOL,
         provider="iqfeed",
-        event_start_exclusive=SOURCE_PROVIDER_AT - timedelta(milliseconds=1),
-        event_end_inclusive=SOURCE_PROVIDER_AT,
-        decision_at=SOURCE_PROVIDER_AT,
+        event_start_exclusive=source_provider_at - timedelta(milliseconds=1),
+        event_end_inclusive=source_provider_at,
+        decision_at=source_provider_at,
         available_at_most=READ_RETURNED_AT,
-        source_frontier_sequence=1,
+        source_frontier_sequence=2 if include_neighbor else 1,
         source_clock_basis="provider_event_at",
         parameters={"window_seconds": 0.001},
     )
     query_body = query.to_dict()
     query_sha256 = sha256_json(query_body)
+    bridge_configuration = {
+        "selected_fields_required": True,
+        "socket": "level1",
+    }
+    handoff_configuration = {
+        "bounded_queue": True,
+        "capture_stream": "iqfeed_print",
+    }
+    source_provenance = {
+        "schema_version": IQFEED_EXACT_PRINT_SOURCE_PROVENANCE_SCHEMA_VERSION,
+        "symbol": SYMBOL,
+        "bridge_run_id": BRIDGE_RUN_ID,
+        "connection_generation": 3,
+        "bridge_version": BRIDGE_VERSION,
+        "bridge_source_sha256": _digest("bridge-source"),
+        "bridge_configuration": bridge_configuration,
+        "bridge_configuration_sha256": sha256_json(bridge_configuration),
+        "capture_resource_binding_sha256": RESOURCE_SHA256,
+        "handoff_configuration": handoff_configuration,
+        "handoff_configuration_sha256": sha256_json(handoff_configuration),
+        "message_type": "Q",
+        "timestamp_basis": "iqfeed_selected_trade_date_timems_exact",
+        "provider_event_at": source_provider_at.isoformat().replace(
+            "+00:00", "Z"
+        ),
+        "received_at": source_received_at.isoformat().replace("+00:00", "Z"),
+        "provider_trade_date": "2026-07-16",
+        "provider_trade_time": "17:59:59.300",
+        "provider_tick_id": "901234",
+        "trade_market_center": "25",
+        "trade_conditions": ["@"],
+        "message_contents": "Cba",
+        "selected_update_fields": SELECTED_FIELDS,
+        "selected_update_fields_sha256": sha256_json(SELECTED_FIELDS),
+        "selected_update_fields_ack_sha256": _digest("selected-fields-ack"),
+        "source_frame_sequence": 41,
+        "source_frame_sha256": FRAME_SHA256,
+    }
     source_payload: dict[str, Any] = {
+        "schema_version": IQFEED_PRINT_PAYLOAD_SCHEMA_VERSION,
         "symbol": SYMBOL,
         "price": 4.20,
         "size": 100.0,
         "bid": 4.19,
         "ask": 4.21,
-        "provider_tick_id": "901234",
+        "conditions": ["@"],
+        IQFEED_L1_SOURCE_PROVENANCE_FIELD: source_provenance,
     }
     if source_original_available_at is not None:
         source_payload["_capture_release"] = {
@@ -200,18 +267,65 @@ def _captured_read(
         }
     source = CaptureEvent(
         identity=identity,
-        sequence=1,
+        sequence=2 if include_neighbor else 1,
         stream=CaptureStream.IQFEED_PRINT,
         provider="iqfeed",
         symbol=SYMBOL,
         clocks=CaptureClocks(
-            provider_event_at=SOURCE_PROVIDER_AT,
-            received_at=SOURCE_RECEIVED_AT,
+            provider_event_at=source_provider_at,
+            received_at=source_received_at,
             available_at=source_available_at,
         ),
         payload=source_payload,
     )
-    source_ref = CaptureEventRef.from_event(source)
+    sources = (source,)
+    if include_neighbor:
+        neighbor_provider_at = source_provider_at - timedelta(
+            microseconds=500
+        )
+        neighbor_received_at = source_received_at - timedelta(
+            microseconds=500
+        )
+        neighbor_provenance = dict(source_provenance)
+        neighbor_provenance.update(
+            {
+                "provider_event_at": neighbor_provider_at.isoformat().replace(
+                    "+00:00", "Z"
+                ),
+                "received_at": neighbor_received_at.isoformat().replace(
+                    "+00:00", "Z"
+                ),
+                "provider_trade_time": "17:59:59.299",
+                "provider_tick_id": "901233",
+                "source_frame_sequence": 40,
+                "source_frame_sha256": _digest("neighbor-frame"),
+            }
+        )
+        neighbor_payload = dict(source_payload)
+        neighbor_payload.pop("_capture_release", None)
+        neighbor_payload.update(
+            {
+                "price": 4.18,
+                "bid": 4.17,
+                "ask": 4.19,
+                IQFEED_L1_SOURCE_PROVENANCE_FIELD: neighbor_provenance,
+            }
+        )
+        neighbor = CaptureEvent(
+            identity=identity,
+            sequence=1,
+            stream=CaptureStream.IQFEED_PRINT,
+            provider="iqfeed",
+            symbol=SYMBOL,
+            clocks=CaptureClocks(
+                provider_event_at=neighbor_provider_at,
+                received_at=neighbor_received_at,
+                available_at=source_available_at,
+            ),
+            payload=neighbor_payload,
+        )
+        sources = (neighbor, source)
+    source_refs = tuple(CaptureEventRef.from_event(row) for row in sources)
     receipt = CaptureReadReceipt(
         read_id=read_id,
         decision_id=decision_id,
@@ -222,9 +336,9 @@ def _captured_read(
         requested_at=READ_RETURNED_AT,
         returned_at=READ_RETURNED_AT,
         query_sha256=query_sha256,
-        source_event_sha256s=(source.event_sha256,),
+        source_event_sha256s=tuple(row.event_sha256 for row in sources),
         empty_result=False,
-        result_sha256=captured_read_result_sha256((source_ref,)),
+        result_sha256=captured_read_result_sha256(source_refs),
         content_verified=True,
         replay_network_fallback_used=False,
         query=query_body,
@@ -243,7 +357,7 @@ def _captured_read(
     )
     return CapturedReadResult(
         receipt=receipt,
-        source_events=(source,),
+        source_events=sources,
         receipt_submission=CaptureSubmission(
             accepted=True,
             event=receipt_event,
@@ -263,23 +377,21 @@ def _trigger_resolution(
     assert captured.receipt is not None
     assert captured.receipt_submission is not None
     assert captured.receipt_submission.event is not None
-    source = captured.source_events[0]
+    source = captured.source_events[-1]
     source_view = resolve_capture_source_payload(source)
     receipt_event = captured.receipt_submission.event
     values: dict[str, Any] = {
         "decision_id": captured.receipt.decision_id,
         "notify_sha256": _digest("notify"),
         "symbol": SYMBOL,
-        "bridge_version": (
-            "iqfeed-l1-exact-print-provenance-v3+sha256:0123456789abcdef"
-        ),
-        "bridge_run_id": "8da0a1ed-24f3-4545-8a7a-6f582ff1acc2",
+        "bridge_version": BRIDGE_VERSION,
+        "bridge_run_id": BRIDGE_RUN_ID,
         "connection_generation": 3,
         "source_frame_sequence": 41,
-        "source_frame_sha256": _digest("frame"),
-        "provider_trade_reference_at": SOURCE_PROVIDER_AT,
-        "notify_received_at": SOURCE_RECEIVED_AT,
-        "notify_available_at": SOURCE_AVAILABLE_AT,
+        "source_frame_sha256": FRAME_SHA256,
+        "provider_trade_reference_at": source.clocks.provider_event_at,
+        "notify_received_at": source.clocks.received_at,
+        "notify_available_at": source_view.original_available_at,
         "capture_identity_sha256": identity.identity_sha256,
         "captured_read_id": captured.receipt.read_id,
         "captured_read_receipt_sha256": sha256_json(
@@ -292,7 +404,9 @@ def _trigger_resolution(
         "source_event_sha256": source.event_sha256,
         "source_event_sequence": source.sequence,
         "source_payload_sha256": source.payload_sha256,
-        "source_provenance_sha256": _digest("source-provenance"),
+        "source_provenance_sha256": sha256_json(
+            source_view.payload[IQFEED_L1_SOURCE_PROVENANCE_FIELD]
+        ),
         "source_provider_event_at": source.clocks.provider_event_at,
         "source_received_at": source.clocks.received_at,
         "source_original_available_at": source_view.original_available_at,
@@ -318,19 +432,13 @@ def _attestation(
     identity: CaptureRunIdentity,
     captured: CapturedReadResult,
     *,
-    decision_id: str = DECISION_ID,
     expires_at: datetime = NOW + timedelta(seconds=30),
     resource_binding_sha256: str = RESOURCE_SHA256,
-    dependency_max_age_seconds: float = 1.75,
-    dependency_coverage_start_at: datetime | None = None,
-    continuity_provider: str = "iqfeed",
-    continuity_evidence: tuple[ActiveCaptureContinuityEvidence, ...] | None = None,
 ) -> Any:
     assert captured.receipt is not None
     assert captured.receipt_submission is not None
     assert captured.receipt_submission.event is not None
     receipt_event = captured.receipt_submission.event
-    durable_available_at = captured.source_events[0].clocks.available_at
     active_read = ActiveCaptureReadEvidence(
         receipt=captured.receipt,
         receipt_sha256=sha256_json(captured.receipt.to_dict()),
@@ -343,81 +451,65 @@ def _attestation(
             CaptureEventRef.from_event(event) for event in captured.source_events
         ),
     )
-    watermark = ProviderWatermark(
-        stream=CaptureStream.IQFEED_PRINT,
-        provider=continuity_provider,
-        identity_sha256=identity.identity_sha256,
-        event_watermark_at=SOURCE_PROVIDER_AT,
-        emitted_available_at=WATERMARK_COMMITTED_AT,
-        bounded_lateness_seconds=1.0,
-        max_observed_lateness_seconds=0.1,
-        generation=identity.generation,
+    selected = captured.source_events[-1]
+    selected_view = resolve_capture_source_payload(selected)
+    provenance = selected_view.payload[IQFEED_L1_SOURCE_PROVENANCE_FIELD]
+    trigger = _trigger_resolution(identity, captured).receipt
+    assert trigger is not None
+    selector = InitialIqfeedExactMembershipSelector(
+        decision_id=captured.receipt.decision_id,
+        trigger_receipt_sha256=trigger.content_sha256,
+        notify_sha256=_digest("notify"),
         symbol=SYMBOL,
-    )
-    coverage = StreamCoverage(
-        stream=CaptureStream.IQFEED_PRINT,
-        identity_sha256=identity.identity_sha256,
-        provider=continuity_provider,
-        symbol=SYMBOL,
-        first_available_at=durable_available_at,
-        last_available_at=durable_available_at,
-        event_count=1,
-        exact_event_clock_complete=True,
-        content_verified=True,
-        continuity_complete=True,
-        watermark=watermark,
-    )
-    continuity = ActiveCaptureContinuityEvidence(
-        coverage=coverage,
-        producer_id="iqfeed_l1",
-        producer_generation=identity.generation,
-        source_frontier_sequence=1,
-        watermark_event_sha256=_digest("watermark-event"),
-        watermark_event_sequence=4,
-        watermark_committed_available_at=WATERMARK_COMMITTED_AT,
-        coverage_event_sha256=_digest("coverage-event"),
-        coverage_event_sequence=5,
-        coverage_committed_available_at=COVERAGE_COMMITTED_AT,
-    )
-    dependency = FSMStreamDependency(
-        stream=CaptureStream.IQFEED_PRINT,
-        exact_provider_event_at_required=True,
-        market_reference_at_required=False,
-        max_source_age_seconds=dependency_max_age_seconds,
-        coverage_start_at=(
-            dependency_coverage_start_at
-            if dependency_coverage_start_at is not None
-            else SOURCE_PROVIDER_AT - timedelta(milliseconds=1)
+        bridge_version=BRIDGE_VERSION,
+        bridge_run_id=BRIDGE_RUN_ID,
+        connection_generation=3,
+        source_frame_sequence=41,
+        source_frame_sha256=FRAME_SHA256,
+        selected_event_sha256=selected.event_sha256,
+        selected_event_sequence=selected.sequence,
+        selected_payload_sha256=selected.payload_sha256,
+        selected_provenance_sha256=sha256_json(provenance),
+        provider_event_at=selected.clocks.provider_event_at,
+        received_at=selected.clocks.received_at,
+        original_available_at=selected_view.original_available_at,
+        durable_available_at=selected.clocks.available_at,
+        release_kind=selected_view.release_kind,
+        bridge_source_sha256=provenance["bridge_source_sha256"],
+        bridge_configuration_sha256=(
+            provenance["bridge_configuration_sha256"]
+        ),
+        capture_resource_binding_sha256=(
+            provenance["capture_resource_binding_sha256"]
+        ),
+        handoff_configuration_sha256=(
+            provenance["handoff_configuration_sha256"]
+        ),
+        selected_update_fields_sha256=(
+            provenance["selected_update_fields_sha256"]
+        ),
+        selected_update_fields_ack_sha256=(
+            provenance["selected_update_fields_ack_sha256"]
         ),
     )
-    profile = FSMDependencyProfile(
-        required_streams=frozenset({CaptureStream.IQFEED_PRINT}),
-        required_read_ids=(captured.receipt.read_id,),
-        stream_dependencies=(dependency,),
-    )
-    return _issue_active_capture_input_attestation(
+    return _issue_initial_iqfeed_exact_membership_attestation(
         run_id=identity.run_id,
         generation=identity.generation,
-        decision_id=decision_id,
-        input_prefix_sequence=5,
+        decision_id=captured.receipt.decision_id,
+        input_prefix_sequence=receipt_event.sequence,
         input_prefix_root_sha256=_digest("input-prefix"),
         attested_available_at=ATTESTED_AT,
         expires_at=expires_at,
-        dependency_profile=profile,
         identity_sha256=identity.identity_sha256,
         account_identity_sha256=identity.account_identity_sha256,
         code_build_sha256=identity.code_build_sha256,
         config_sha256=identity.config_sha256,
         feature_flags_sha256=identity.feature_flags_sha256,
         resource_binding_sha256=resource_binding_sha256,
-        producer_generations={"iqfeed_l1": identity.generation},
-        required_read_ids=(captured.receipt.read_id,),
-        read_evidence=(active_read,),
-        continuity_evidence=(
-            (continuity,)
-            if continuity_evidence is None
-            else continuity_evidence
-        ),
+        producer_id="iqfeed_l1",
+        producer_generation=identity.generation,
+        read_evidence=active_read,
+        selector=selector,
     )
 
 
@@ -579,11 +671,19 @@ def _provider_fixture(
         effective_config_sha256=policy_receipt.settings_projection_sha256,
         feature_flags_sha256=identity.feature_flags_sha256,
     )
+    membership_verification_calls: list[Any] = []
+
+    def verify_owned_membership(proof: Any) -> Any:
+        membership_verification_calls.append(proof)
+        return proof
+
     coordinator = SimpleNamespace(
         identity=identity,
         certification_symbol=SYMBOL,
         state=CaptureSessionState.RUNNING,
         resource_binding=SimpleNamespace(binding_sha256=RESOURCE_SHA256),
+        verify_owned_initial_iqfeed_exact_membership=verify_owned_membership,
+        membership_verification_calls=membership_verification_calls,
         provider_calls=0,
         broker_calls=0,
         order_calls=0,
@@ -596,7 +696,7 @@ def _provider_fixture(
         code_build_sha256=identity.code_build_sha256,
         capture_receipt_sha256=CAPTURE_RECEIPT_SHA256,
         trigger_resolution=trigger_resolution,
-        active_input_attestation=attestation,
+        exact_membership_attestation=attestation,
         capture_coordinator=coordinator,
         capture_identity_evidence=evidence,
         capture_config_sha256_resolver=config_resolver,
@@ -672,16 +772,67 @@ def test_material_embeds_recomputable_complete_set_selected_row_and_capture_chec
     assert sha256_json(considered) == brief["considered_set_sha256"]
     assert sha256_json(selected) == brief["selected_candidate_sha256"]
     assert sha256_json(selection) == material.selection_receipt_sha256
+    assert selection["schema_version"] == (
+        "chili.captured-paper-initial-selection.v2"
+    )
     assert selection["considered_set"] == considered
     assert selection["selected_candidate"] == selected
     assert selected["variant"]["id"] == 2
     assert checkpoint["attestation_sha256"] == attestation.attestation_sha256
+    assert checkpoint["schema_version"] == (
+        "chili.captured-paper-initial-capture-checkpoint.v2"
+    )
+    assert checkpoint["authority_scope"] == (
+        "captured_paper_initial_non_executable_membership"
+    )
+    assert checkpoint["reservation_authority"] is False
+    assert checkpoint["order_authority"] is False
     assert checkpoint["required_read_ids"] == [READ_ID]
     assert checkpoint["read_evidence"][0]["receipt"]["read_id"] == READ_ID
     assert material.captured_input_attestation_sha256 == (
         attestation.attestation_sha256
     )
     assert material.config_sha256 != material.settings_projection_sha256
+
+
+def test_provider_accepts_full_multi_print_exact_membership_inventory() -> None:
+    identity = _identity()
+    captured = _captured_read(identity, include_neighbor=True)
+    resolution = _trigger_resolution(identity, captured)
+    attestation = _attestation(identity, captured)
+    provider, resolution, *_ = _provider_fixture(
+        identity=identity,
+        captured=captured,
+        trigger_resolution=resolution,
+        attestation=attestation,
+    )
+
+    material = _prepare(provider, resolution)
+    checkpoint = json.loads(
+        material.runner_risk_template.payload["execution_readiness_subset"][
+            "capture_checkpoint_canonical_json"
+        ]
+    )
+
+    assert resolution.receipt is not None
+    assert captured.receipt is not None
+    assert resolution.receipt.source_event_sha256 == (
+        captured.source_events[-1].event_sha256
+    )
+    assert captured.receipt.source_event_sha256s == tuple(
+        event.event_sha256 for event in captured.source_events
+    )
+    assert captured.receipt.result_sha256 == captured_read_result_sha256(
+        tuple(
+            CaptureEventRef.from_event(event)
+            for event in captured.source_events
+        )
+    )
+    assert len(checkpoint["read_evidence"][0]["source_event_refs"]) == 2
+    assert checkpoint["selector"]["selected_event_sha256"] == (
+        captured.source_events[-1].event_sha256
+    )
+    assert "continuity_evidence" not in checkpoint
 
 
 def test_nonselected_candidate_change_changes_full_set_selection_and_material_hashes() -> None:
@@ -821,27 +972,18 @@ def test_attestation_with_different_exact_read_cannot_substitute_for_trigger_rea
         _prepare(provider, resolution)
 
 
-def test_lax_iqfeed_dependency_max_age_is_rejected_by_provider() -> None:
+def test_exact_membership_attestation_rejects_nonmembership_read() -> None:
     identity = _identity()
-    captured = _captured_read(identity)
-    resolution = _trigger_resolution(identity, captured)
-    lax_attestation = _attestation(
+    captured = _captured_read(
         identity,
-        captured,
-        dependency_max_age_seconds=1.751,
-    )
-    provider, resolution, *_ = _provider_fixture(
-        identity=identity,
-        captured=captured,
-        trigger_resolution=resolution,
-        attestation=lax_attestation,
+        operation=CaptureMicrostructureOperation.TRADE_FLOW,
     )
 
     with pytest.raises(
-        CapturedPaperInitialProviderCoverageUnavailable,
-        match="initial_provider_trigger_dependency_profile_mismatch",
+        CaptureContractError,
+        match="membership attestation binding is inconsistent",
     ):
-        _prepare(provider, resolution)
+        _attestation(identity, captured)
 
 
 def test_exact_iqfeed_print_older_than_market_policy_is_rejected() -> None:
@@ -853,6 +995,27 @@ def test_exact_iqfeed_print_older_than_market_policy_is_rejected() -> None:
         match="initial_provider_capture_authority_stale",
     ):
         _prepare(provider, resolution)
+
+
+def test_provider_accepts_in_tolerance_provider_clock_after_receive_clock() -> None:
+    identity = _identity()
+    provider_at = SOURCE_RECEIVED_AT + timedelta(milliseconds=50)
+    captured = _captured_read(identity, source_provider_at=provider_at)
+    resolution = _trigger_resolution(identity, captured)
+    provider, resolution, *_ = _provider_fixture(
+        identity=identity,
+        captured=captured,
+        trigger_resolution=resolution,
+        attestation=_attestation(identity, captured),
+    )
+
+    material = _prepare(provider, resolution)
+
+    assert resolution.receipt is not None
+    assert resolution.receipt.source_provider_event_at > (
+        resolution.receipt.source_received_at
+    )
+    assert material.symbol == SYMBOL
 
 
 def test_released_source_keeps_original_market_ttl_and_durable_boundary() -> None:
@@ -911,102 +1074,39 @@ def test_fresh_release_cannot_extend_stale_original_market_authority() -> None:
         _prepare(provider, resolution)
 
 
-def test_iqfeed_dependency_cannot_downgrade_exact_event_clock() -> None:
-    with pytest.raises(CaptureContractError, match="cannot downgrade"):
-        FSMStreamDependency(
-            stream=CaptureStream.IQFEED_PRINT,
-            exact_provider_event_at_required=False,
-            market_reference_at_required=False,
-            max_source_age_seconds=45.0,
-            coverage_start_at=SOURCE_PROVIDER_AT - timedelta(milliseconds=1),
-        )
-
-
-def _foreign_nbbo_continuity(
-    identity: CaptureRunIdentity,
-) -> ActiveCaptureContinuityEvidence:
-    watermark = ProviderWatermark(
-        stream=CaptureStream.NBBO_QUOTE,
-        provider="iqfeed",
-        identity_sha256=identity.identity_sha256,
-        event_watermark_at=SOURCE_PROVIDER_AT,
-        emitted_available_at=WATERMARK_COMMITTED_AT,
-        bounded_lateness_seconds=1.0,
-        max_observed_lateness_seconds=0.1,
-        generation=identity.generation,
-        symbol=SYMBOL,
-    )
-    coverage = StreamCoverage(
-        stream=CaptureStream.NBBO_QUOTE,
-        identity_sha256=identity.identity_sha256,
-        provider="iqfeed",
-        symbol=SYMBOL,
-        first_available_at=SOURCE_AVAILABLE_AT,
-        last_available_at=SOURCE_AVAILABLE_AT,
-        event_count=1,
-        exact_event_clock_complete=True,
-        content_verified=True,
-        continuity_complete=True,
-        watermark=watermark,
-    )
-    return ActiveCaptureContinuityEvidence(
-        coverage=coverage,
-        producer_id="iqfeed_l1",
-        producer_generation=identity.generation,
-        source_frontier_sequence=1,
-        watermark_event_sha256=_digest("foreign-watermark-event"),
-        watermark_event_sequence=4,
-        watermark_committed_available_at=WATERMARK_COMMITTED_AT,
-        coverage_event_sha256=_digest("foreign-coverage-event"),
-        coverage_event_sequence=5,
-        coverage_committed_available_at=COVERAGE_COMMITTED_AT,
-    )
-
-
-@pytest.mark.parametrize("continuity_kind", ("missing", "foreign"))
-def test_typed_attestation_rejects_missing_or_foreign_iqfeed_continuity(
-    continuity_kind: str,
-) -> None:
-    identity = _identity()
-    captured = _captured_read(identity)
-    continuity = (
-        ()
-        if continuity_kind == "missing"
-        else (_foreign_nbbo_continuity(identity),)
-    )
-
-    with pytest.raises(
-        CaptureContractError,
-        match="continuity inventory is incomplete",
-    ):
-        _attestation(
-            identity,
-            captured,
-            continuity_evidence=continuity,
-        )
-
-
-def test_provider_rejects_foreign_provider_continuity_for_exact_iqfeed_read() -> None:
-    identity = _identity()
-    captured = _captured_read(identity)
-    resolution = _trigger_resolution(identity, captured)
-    attestation = _attestation(
-        identity,
-        captured,
-        continuity_provider="foreign-feed",
-    )
-    provider, resolution, *_ = _provider_fixture(
-        identity=identity,
-        captured=captured,
-        trigger_resolution=resolution,
-        attestation=attestation,
+def test_provider_rejects_membership_proof_not_owned_by_coordinator() -> None:
+    provider, resolution, *_ = _provider_fixture()
+    provider.capture_coordinator.verify_owned_initial_iqfeed_exact_membership = (
+        lambda _proof: object()
     )
 
     with pytest.raises(
         CapturedPaperInitialProviderCoverageUnavailable,
-        match="initial_provider_trigger_continuity_mismatch",
+        match="initial_provider_membership_attestation_not_owned",
     ):
         _prepare(provider, resolution)
+
+
+def test_provider_reverifies_same_owned_proof_immediately_before_material() -> None:
+    provider, resolution, proof, reader, *_ = _provider_fixture()
+    calls: list[Any] = []
+
+    def verify_owned(candidate: Any) -> Any:
+        calls.append(candidate)
+        return candidate if len(calls) == 1 else object()
+
+    provider.capture_coordinator.verify_owned_initial_iqfeed_exact_membership = (
+        verify_owned
+    )
+
+    with pytest.raises(
+        CapturedPaperInitialProviderCoverageUnavailable,
+        match="initial_provider_membership_attestation_not_owned",
+    ):
+        _prepare(provider, resolution)
+
+    assert calls == [proof, proof]
+    assert len(reader.calls) == 1
 
 
 @pytest.mark.parametrize(
@@ -1167,7 +1267,7 @@ def test_policy_spec_mismatch_rejects_at_constructor_before_any_read() -> None:
 
 
 def test_provider_has_only_injected_reads_and_no_forbidden_side_effects() -> None:
-    provider, resolution, _proof, reader, resolver, coordinator = (
+    provider, resolution, proof, reader, resolver, coordinator = (
         _provider_fixture()
     )
 
@@ -1184,6 +1284,7 @@ def test_provider_has_only_injected_reads_and_no_forbidden_side_effects() -> Non
     assert coordinator.provider_calls == 0
     assert coordinator.broker_calls == 0
     assert coordinator.order_calls == 0
+    assert coordinator.membership_verification_calls == [proof, proof]
     source = Path(
         "app/services/trading/momentum_neural/captured_paper_initial_provider.py"
     ).read_text(encoding="utf-8")
