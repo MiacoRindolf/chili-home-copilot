@@ -1500,9 +1500,10 @@ def resolve_capture_source_payload(event: CaptureEvent) -> CaptureSourcePayloadV
         "capture promotion original_provisional_available_at",
     )
     if (
-        promoted_at != event.clocks.available_at
-        or release_promoted_at != promoted_at
+        release_promoted_at != promoted_at
         or provisional_available_at != original_available_at
+        or promoted_at < original_available_at
+        or promoted_at > released_available_at
     ):
         raise CaptureContractError("capture promotion clocks do not match release")
     promotion_order = promotion_raw.get("promotion_order")

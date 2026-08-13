@@ -30,6 +30,9 @@ from app.services.trading.momentum_neural.replay_capture_runtime import (
     CaptureProducerLifecycleRuntime,
     CaptureStream,
 )
+from app.services.trading.momentum_neural.replay_capture_contract import (
+    resolve_capture_source_payload,
+)
 
 from tests.test_replay_capture_producer_lifecycle import (
     BASE,
@@ -124,7 +127,19 @@ def _submit_promoted(runtime, producer, transfer):
         clocks=first.clocks,
         payload={
             **dict(first.payload),
-            "_capture_promotion": {"provisional_event_sha256": first.event_sha256},
+            "_capture_promotion": {
+                "promotion_id": transfer.promotion_id,
+                "promoted_at": transfer.promoted_at.isoformat().replace(
+                    "+00:00", "Z"
+                ),
+                "promotion_order": 1,
+                "original_provisional_available_at": (
+                    first.clocks.available_at.isoformat().replace("+00:00", "Z")
+                ),
+                "provisional_event_sha256": first.event_sha256,
+                "source_identity_sha256": transfer.source_identity_sha256,
+                "inventory_sha256": transfer.inventory_sha256,
+            },
         },
         promotion_id=transfer.promotion_id,
         promoted_at=transfer.promoted_at,
@@ -156,6 +171,27 @@ def test_promotion_microseconds_before_the_trusted_read_is_accepted():
     assert runtime._submission_failure is None, (
         f"promotion latched: {runtime._submission_failure}"
     )
+
+
+def test_advancing_clock_preserves_promotion_before_durable_availability():
+    """A retained source remains readable when capture accepts it later."""
+
+    clock = _AdvancingClock(BASE + timedelta(seconds=1))
+    runtime, producer, transfer = _promotion_fixture(clock)
+
+    result = _submit_promoted(runtime, producer, transfer)
+    release = result.payload["_capture_release"]
+    view = resolve_capture_source_payload(result)
+
+    assert transfer.promoted_at < result.clocks.available_at
+    assert release["promoted_at"] == transfer.promoted_at.isoformat().replace(
+        "+00:00", "Z"
+    )
+    assert release["released_available_at"] == (
+        result.clocks.available_at.isoformat().replace("+00:00", "Z")
+    )
+    assert view.original_available_at == transfer.events[0].clocks.available_at
+    assert view.promotion_id == transfer.promotion_id
 
 
 def test_promotion_in_the_future_of_the_trusted_clock_is_rejected():

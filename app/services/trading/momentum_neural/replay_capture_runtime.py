@@ -5520,6 +5520,7 @@ class CaptureProducerLifecycleRuntime:
                     "producer input available_at is later than the trusted wall clock"
                 )
             normalized_promotion_id = str(promotion_id or "").strip() or None
+            promotion_boundary: datetime | None = None
             if normalized_promotion_id is not None:
                 try:
                     normalized_promotion_id = str(
@@ -5648,13 +5649,13 @@ class CaptureProducerLifecycleRuntime:
                 # immediately above already use for received_at and available_at.
                 # Equality was never the security property; it was an accident of
                 # comparing one clock to itself twice.
-                promoted = _utc(promoted_at, "promoted_at")
-                if promoted > recorded:
+                promotion_boundary = _utc(promoted_at, "promoted_at")
+                if promotion_boundary > recorded:
                     self._latch_failure("promotion_boundary_after_trusted_clock")
                     raise CaptureContractError(
                         "promotion boundary is later than the trusted wall clock"
                     )
-                if promoted < clocks.received_at:
+                if promotion_boundary < clocks.received_at:
                     self._latch_failure("promotion_boundary_precedes_received_at")
                     raise CaptureContractError(
                         "promotion boundary cannot precede input received_at"
@@ -5677,8 +5678,14 @@ class CaptureProducerLifecycleRuntime:
                     ),
                 }
                 if normalized_promotion_id is not None:
+                    assert promotion_boundary is not None
                     release["promotion_id"] = normalized_promotion_id
-                    release["promoted_at"] = _iso(recorded)
+                    # The immutable transfer boundary and the later durable
+                    # availability clock are distinct on a real advancing
+                    # clock.  Preserve both; backdating durable availability to
+                    # the lease instant would make the event visible before it
+                    # was actually accepted.
+                    release["promoted_at"] = _iso(promotion_boundary)
                     release["source_identity_sha256"] = _validated_sha256(
                         promotion_source_identity_sha256 or "",
                         "promotion source identity",
