@@ -285,6 +285,8 @@ def test_real_service_lock_is_continuous_through_callback_provider_and_runtime(
             "baseline_restart_gate_receipt_sha256": "c" * 64,
             "restart_gate_receipt_sha256": "d" * 64,
             "admission_inventory_sha256": "e" * 64,
+            "initial_recovery_count": 0,
+            "initial_recovery_inventory_sha256": "f" * 64,
             "durable_admission_drift": False,
             "broker_inventory_flat": True,
             "paper_execution_only": True,

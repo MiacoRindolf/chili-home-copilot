@@ -53,6 +53,7 @@ from app.services.trading.momentum_neural.replay_capture_contract import (
     StreamCoverage,
     _issue_active_capture_input_attestation,
     captured_read_result_sha256,
+    resolve_capture_source_payload,
     sha256_json,
 )
 
@@ -160,6 +161,7 @@ def _captured_read(
     read_id: str = READ_ID,
     decision_id: str = DECISION_ID,
     source_available_at: datetime = SOURCE_AVAILABLE_AT,
+    source_original_available_at: datetime | None = None,
 ) -> CapturedReadResult:
     query = CaptureMicrostructureReadQuery(
         operation=CaptureMicrostructureOperation.TRADE_FLOW,
@@ -176,6 +178,26 @@ def _captured_read(
     )
     query_body = query.to_dict()
     query_sha256 = sha256_json(query_body)
+    source_payload: dict[str, Any] = {
+        "symbol": SYMBOL,
+        "price": 4.20,
+        "size": 100.0,
+        "bid": 4.19,
+        "ask": 4.21,
+        "provider_tick_id": "901234",
+    }
+    if source_original_available_at is not None:
+        source_payload["_capture_release"] = {
+            "original_available_at": (
+                source_original_available_at.isoformat().replace(
+                    "+00:00", "Z"
+                )
+            ),
+            "released_available_at": (
+                source_available_at.isoformat().replace("+00:00", "Z")
+            ),
+            "release_kind": "observed_ingress",
+        }
     source = CaptureEvent(
         identity=identity,
         sequence=1,
@@ -187,14 +209,7 @@ def _captured_read(
             received_at=SOURCE_RECEIVED_AT,
             available_at=source_available_at,
         ),
-        payload={
-            "symbol": SYMBOL,
-            "price": 4.20,
-            "size": 100.0,
-            "bid": 4.19,
-            "ask": 4.21,
-            "provider_tick_id": "901234",
-        },
+        payload=source_payload,
     )
     source_ref = CaptureEventRef.from_event(source)
     receipt = CaptureReadReceipt(
@@ -204,7 +219,7 @@ def _captured_read(
         stream=CaptureStream.IQFEED_PRINT,
         provider="iqfeed",
         symbol=SYMBOL,
-        requested_at=source_available_at,
+        requested_at=READ_RETURNED_AT,
         returned_at=READ_RETURNED_AT,
         query_sha256=query_sha256,
         source_event_sha256s=(source.event_sha256,),
@@ -249,6 +264,7 @@ def _trigger_resolution(
     assert captured.receipt_submission is not None
     assert captured.receipt_submission.event is not None
     source = captured.source_events[0]
+    source_view = resolve_capture_source_payload(source)
     receipt_event = captured.receipt_submission.event
     values: dict[str, Any] = {
         "decision_id": captured.receipt.decision_id,
@@ -279,7 +295,12 @@ def _trigger_resolution(
         "source_provenance_sha256": _digest("source-provenance"),
         "source_provider_event_at": source.clocks.provider_event_at,
         "source_received_at": source.clocks.received_at,
-        "source_available_at": source.clocks.available_at,
+        "source_original_available_at": source_view.original_available_at,
+        "source_durable_available_at": source.clocks.available_at,
+        "source_release_kind": source_view.release_kind,
+        "read_requested_at": captured.receipt.requested_at,
+        "read_returned_at": captured.receipt.returned_at,
+        "resolved_at": RECEIPT_COMMITTED_AT,
     }
     values.update(trigger_overrides or {})
     trigger = CapturedPaperIqfeedTriggerReceipt(**values)
@@ -309,6 +330,7 @@ def _attestation(
     assert captured.receipt_submission is not None
     assert captured.receipt_submission.event is not None
     receipt_event = captured.receipt_submission.event
+    durable_available_at = captured.source_events[0].clocks.available_at
     active_read = ActiveCaptureReadEvidence(
         receipt=captured.receipt,
         receipt_sha256=sha256_json(captured.receipt.to_dict()),
@@ -337,8 +359,8 @@ def _attestation(
         identity_sha256=identity.identity_sha256,
         provider=continuity_provider,
         symbol=SYMBOL,
-        first_available_at=SOURCE_AVAILABLE_AT,
-        last_available_at=SOURCE_AVAILABLE_AT,
+        first_available_at=durable_available_at,
+        last_available_at=durable_available_at,
         event_count=1,
         exact_event_clock_complete=True,
         content_verified=True,
@@ -726,7 +748,9 @@ def test_identity_hash_and_clock_mismatches_fail_closed(case: str, reason: str) 
             identity,
             captured,
             trigger_overrides={
-                "source_available_at": SOURCE_AVAILABLE_AT + timedelta(microseconds=1)
+                "source_durable_available_at": (
+                    SOURCE_AVAILABLE_AT + timedelta(microseconds=1)
+                )
             },
         )
     elif case == "attestation_decision":
@@ -823,6 +847,62 @@ def test_lax_iqfeed_dependency_max_age_is_rejected_by_provider() -> None:
 def test_exact_iqfeed_print_older_than_market_policy_is_rejected() -> None:
     provider, resolution, *_ = _provider_fixture()
     provider.wall_clock = lambda: NOW + timedelta(seconds=0.8)
+
+    with pytest.raises(
+        CapturedPaperInitialProviderCoverageUnavailable,
+        match="initial_provider_capture_authority_stale",
+    ):
+        _prepare(provider, resolution)
+
+
+def test_released_source_keeps_original_market_ttl_and_durable_boundary() -> None:
+    identity = _identity()
+    released_at = NOW - timedelta(milliseconds=900)
+    captured = _captured_read(
+        identity,
+        source_available_at=released_at,
+        source_original_available_at=SOURCE_AVAILABLE_AT,
+    )
+    resolution = _trigger_resolution(identity, captured)
+    provider, resolution, *_ = _provider_fixture(
+        identity=identity,
+        captured=captured,
+        trigger_resolution=resolution,
+        attestation=_attestation(identity, captured),
+    )
+
+    material = _prepare(provider, resolution)
+
+    assert resolution.receipt is not None
+    assert resolution.receipt.source_original_available_at == (
+        SOURCE_AVAILABLE_AT
+    )
+    assert resolution.receipt.source_durable_available_at == released_at
+    assert resolution.receipt.source_release_kind == "observed_ingress"
+    assert material.expires_at == SOURCE_AVAILABLE_AT + timedelta(
+        seconds=1.75
+    )
+
+
+def test_fresh_release_cannot_extend_stale_original_market_authority() -> None:
+    identity = _identity()
+    released_at = NOW - timedelta(milliseconds=900)
+    captured = _captured_read(
+        identity,
+        source_available_at=released_at,
+        source_original_available_at=SOURCE_AVAILABLE_AT,
+    )
+    resolution = _trigger_resolution(identity, captured)
+    provider, resolution, *_ = _provider_fixture(
+        identity=identity,
+        captured=captured,
+        trigger_resolution=resolution,
+        attestation=_attestation(identity, captured),
+    )
+    decision_at = NOW + timedelta(milliseconds=800)
+    assert (decision_at - SOURCE_AVAILABLE_AT).total_seconds() > 1.75
+    assert (decision_at - released_at).total_seconds() <= 1.75
+    provider.wall_clock = lambda: decision_at
 
     with pytest.raises(
         CapturedPaperInitialProviderCoverageUnavailable,

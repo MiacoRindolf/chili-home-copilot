@@ -108,6 +108,7 @@ def _source_event(
     generation: int = 3,
     symbol: str = "TEST",
     price: float = 4.20,
+    released_at: datetime | None = None,
 ) -> CaptureEvent:
     bridge_configuration = {
         "selected_fields_required": True,
@@ -147,6 +148,28 @@ def _source_event(
         "source_frame_sequence": frame_sequence,
         "source_frame_sha256": frame_sha256,
     }
+    payload: dict[str, Any] = {
+        "schema_version": IQFEED_PRINT_PAYLOAD_SCHEMA_VERSION,
+        "symbol": symbol,
+        "price": price,
+        "size": 100.0,
+        "bid": 4.19,
+        "ask": 4.21,
+        "conditions": ["@"],
+        IQFEED_L1_SOURCE_PROVENANCE_FIELD: provenance,
+    }
+    available_at = AVAILABLE_AT
+    if released_at is not None:
+        available_at = released_at
+        payload["_capture_release"] = {
+            "original_available_at": AVAILABLE_AT.isoformat().replace(
+                "+00:00", "Z"
+            ),
+            "released_available_at": released_at.isoformat().replace(
+                "+00:00", "Z"
+            ),
+            "release_kind": "observed_ingress",
+        }
     return CaptureEvent(
         identity=IDENTITY,
         sequence=sequence,
@@ -157,18 +180,9 @@ def _source_event(
             provider_event_at=REFERENCE_AT,
             market_reference_at=None,
             received_at=RECEIVED_AT,
-            available_at=AVAILABLE_AT,
+            available_at=available_at,
         ),
-        payload={
-            "schema_version": IQFEED_PRINT_PAYLOAD_SCHEMA_VERSION,
-            "symbol": symbol,
-            "price": price,
-            "size": 100.0,
-            "bid": 4.19,
-            "ask": 4.21,
-            "conditions": ["@"],
-            IQFEED_L1_SOURCE_PROVENANCE_FIELD: provenance,
-        },
+        payload=payload,
     )
 
 
@@ -179,10 +193,12 @@ class _CapturePort:
         *,
         network_fallback_allowed: bool = False,
         tampered_frame: str | None = None,
+        released_source: bool = False,
     ) -> None:
         self._network_fallback_allowed = network_fallback_allowed
         self.outcomes = list(outcomes)
         self.tampered_frame = tampered_frame
+        self.released_source = released_source
         self.calls: list[dict[str, Any]] = []
         self.network_calls = 0
         self.database_calls = 0
@@ -219,7 +235,12 @@ class _CapturePort:
         if outcome == "valid":
             sources = (
                 _source_event(
-                    frame_sha256=self.tampered_frame or FRAME_SHA256
+                    frame_sha256=self.tampered_frame or FRAME_SHA256,
+                    released_at=(
+                        NOW - timedelta(milliseconds=50)
+                        if self.released_source
+                        else None
+                    ),
                 ),
             )
         elif outcome == "duplicate":
@@ -332,10 +353,52 @@ def test_exact_durable_print_mints_content_addressed_trigger_receipt() -> None:
     assert capture.calls[0]["stream"] is CaptureStream.IQFEED_PRINT
     assert capture.calls[0]["provider"] == "iqfeed"
     assert capture.calls[0]["event_end_inclusive"] == REFERENCE_AT
+    assert capture.calls[0]["requested_at"] == NOW
+    assert capture.calls[0]["requested_at"] != AVAILABLE_AT
     assert capture.calls[0]["returned_at"] == NOW
     assert capture.network_calls == 0
     assert capture.database_calls == 0
     assert capture.current_state_calls == 0
+
+
+def test_runtime_release_clock_preserves_original_notify_identity() -> None:
+    capture = _CapturePort(["valid"], released_source=True)
+
+    result = _resolver(capture).resolve(_notify(), decision_id=DECISION_ID)
+
+    assert result.ready is True
+    assert result.receipt is not None
+    assert result.receipt.notify_available_at == AVAILABLE_AT
+    assert result.receipt.source_original_available_at == AVAILABLE_AT
+    assert result.receipt.source_durable_available_at == (
+        NOW - timedelta(milliseconds=50)
+    )
+    assert result.receipt.source_release_kind == "observed_ingress"
+    assert result.receipt.read_requested_at == NOW
+    assert result.receipt.read_returned_at == NOW
+    assert result.receipt.resolved_at == NOW
+
+
+def test_read_that_finishes_after_notify_expiry_cannot_be_ready() -> None:
+    capture = _CapturePort(["valid"])
+    clocks = iter((NOW, NOW + timedelta(seconds=2.1)))
+    resolver = CapturedPaperIqfeedTriggerResolver(
+        capture=capture,
+        expected_bridge_version=BRIDGE_VERSION,
+        wall_clock=lambda: next(clocks),
+        wait=lambda _seconds: None,
+        max_attempts=1,
+        retry_delay_seconds=0.01,
+        max_notify_age_seconds=2.0,
+        future_tolerance_seconds=0.25,
+    )
+
+    result = resolver.resolve(_notify(), decision_id=DECISION_ID)
+
+    assert result.coverage_unavailable is True
+    assert result.reason == "iqfeed_notify_stale"
+    assert result.attempts == 1
+    assert result.receipt is None
 
 
 def test_ready_resolution_cannot_drop_or_move_its_process_private_read() -> None:

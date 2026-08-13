@@ -10,7 +10,9 @@ import pytest
 import scripts.iqfeed_trade_bridge as bridge
 from app.services.trading.momentum_neural.iqfeed_l1_capture import (
     BoundedIqfeedL1CaptureHandoff,
+    IqfeedL1CaptureBatchReceipt,
     IqfeedL1CaptureEnvelope,
+    IqfeedL1ExactPrintVisibility,
     IqfeedL1ProcessCaptureSink,
 )
 from app.services.trading.momentum_neural.replay_capture_contract import (
@@ -64,6 +66,40 @@ def _row(
         "source_frame_sequence": source_frame_sequence,
         "source_frame_sha256": f"{source_frame_sequence:064x}",
     }
+
+
+def _exact_row(
+    *,
+    symbol: str = "VEEE",
+    source_frame_sequence: int = 1,
+    connection_generation: int = 7,
+    received_at: datetime | None = None,
+) -> dict:
+    row = _row(
+        symbol=symbol,
+        source_frame_sequence=source_frame_sequence,
+        connection_generation=connection_generation,
+        received_at=received_at,
+    )
+    reference = row["provider_trade_reference_at"]
+    row.update(
+        {
+            "provider_at": reference,
+            "basis": bridge.EXACT_PRINT_TIMESTAMP_BASIS,
+            "provider_trade_date": "2026-07-15",
+            "provider_trade_time": "11:29:59.910000",
+            "provider_tick_id": str(1000 + source_frame_sequence),
+            "trade_market_center": "Q",
+            "trade_conditions": [],
+            "message_contents": "C",
+            "selected_update_fields": list(bridge.SELECTED_UPDATE_FIELDS),
+            "selected_update_fields_sha256": (
+                bridge.SELECTED_UPDATE_FIELDS_SHA256
+            ),
+            "selected_update_fields_ack_sha256": "a" * 64,
+        }
+    )
+    return row
 
 
 def _envelope(
@@ -330,6 +366,222 @@ def test_bounded_worker_preserves_source_frame_order_across_trade_quote_queues()
     ]
     assert health["submitted"] == 3
     assert health["reported_gap_count"] == 0
+
+
+def test_batch_ack_waits_for_exact_print_sink_and_returns_bound_visibility():
+    sink = _Sink()
+    handoff = _handoff(sink)
+    handoff.start()
+    trade = _exact_row()
+    quote = _row()
+    released_at = BASE + timedelta(seconds=1)
+
+    receipt = handoff.offer_released_rows_and_wait(
+        trade_rows=[trade],
+        quote_rows=[quote],
+        available_at=released_at,
+        timeout_seconds=0.5,
+    )
+
+    assert isinstance(receipt, IqfeedL1CaptureBatchReceipt)
+    assert receipt.total_count == 2
+    assert receipt.accepted_count == 2
+    assert receipt.rejected_count == 0
+    assert receipt.exact_print_count == 1
+    assert receipt.exact_print_submitted_count == 1
+    assert receipt.exact_print_failed_count == 0
+    assert receipt.complete is True
+    assert len(receipt.exact_print_submissions) == 1
+    visibility = receipt.exact_print_submissions[0]
+    assert isinstance(visibility, IqfeedL1ExactPrintVisibility)
+    assert visibility.source_frame_sequence == 1
+    assert visibility.source_frame_sha256 == trade["source_frame_sha256"]
+    assert visibility.provider_event_at == trade["provider_at"]
+    assert visibility.received_at == trade["received_at"]
+    assert visibility.original_available_at == released_at
+    assert visibility.bid == trade["bid"]
+    assert visibility.ask == trade["ask"]
+    assert visibility.bridge_version == bridge.BRIDGE_BUILD
+    assert handoff.wait_until_idle(2.0)
+    handoff.close()
+
+
+def test_batch_ack_does_not_wait_for_unrelated_quote_sink_completion():
+    class _BlockQuoteSink(_Sink):
+        def __init__(self):
+            super().__init__()
+            self.quote_entered = threading.Event()
+            self.quote_release = threading.Event()
+
+        def submit_envelope(self, envelope):
+            if envelope.stream is CaptureStream.NBBO_QUOTE:
+                self.quote_entered.set()
+                assert self.quote_release.wait(timeout=2.0)
+            super().submit_envelope(envelope)
+
+    sink = _BlockQuoteSink()
+    handoff = _handoff(sink)
+    handoff.start()
+    started = time.monotonic()
+    receipt = handoff.offer_released_rows_and_wait(
+        trade_rows=[_exact_row()],
+        quote_rows=[_row()],
+        available_at=BASE + timedelta(seconds=1),
+        timeout_seconds=0.5,
+    )
+
+    assert receipt.complete is True
+    assert receipt.exact_print_submitted_count == 1
+    assert len(receipt.exact_print_submissions) == 1
+    assert time.monotonic() - started < 0.25
+    assert sink.quote_entered.wait(timeout=1.0)
+    sink.quote_release.set()
+    assert handoff.wait_until_idle(2.0)
+    handoff.close()
+
+
+def test_batch_ack_timeout_never_leaks_late_completion_to_next_batch():
+    class _BlockingSink(_Sink):
+        def __init__(self):
+            super().__init__()
+            self.entered = threading.Event()
+            self.release = threading.Event()
+
+        def submit_envelope(self, envelope):
+            self.entered.set()
+            assert self.release.wait(timeout=2.0)
+            super().submit_envelope(envelope)
+
+    sink = _BlockingSink()
+    handoff = _handoff(sink)
+    handoff.start()
+    first = handoff.offer_released_rows_and_wait(
+        trade_rows=[_exact_row(source_frame_sequence=1)],
+        quote_rows=[],
+        available_at=BASE + timedelta(seconds=1),
+        timeout_seconds=0.05,
+    )
+    assert sink.entered.is_set()
+    assert first.complete is False
+    assert first.exact_print_submitted_count == 0
+    assert first.exact_print_submissions == ()
+
+    sink.release.set()
+    assert handoff.wait_until_idle(2.0)
+    second = handoff.offer_released_rows_and_wait(
+        trade_rows=[_exact_row(source_frame_sequence=2)],
+        quote_rows=[],
+        available_at=BASE + timedelta(seconds=1),
+        timeout_seconds=0.5,
+    )
+    assert second.complete is True
+    assert [
+        item.source_frame_sequence
+        for item in second.exact_print_submissions
+    ] == [2]
+    handoff.close()
+
+
+def test_batch_ack_marks_sink_failure_without_exact_visibility():
+    class _FailSink(_Sink):
+        def submit_envelope(self, _envelope):
+            raise RuntimeError("fixture sink failure")
+
+    sink = _FailSink()
+    handoff = _handoff(sink)
+    handoff.start()
+    receipt = handoff.offer_released_rows_and_wait(
+        trade_rows=[_exact_row()],
+        quote_rows=[],
+        available_at=BASE + timedelta(seconds=1),
+        timeout_seconds=0.5,
+    )
+
+    assert receipt.complete is True
+    assert receipt.exact_print_submitted_count == 0
+    assert receipt.exact_print_failed_count == 1
+    assert receipt.exact_print_submissions == ()
+    assert handoff.wait_until_idle(2.0)
+    health = handoff.close()
+    assert health["submit_failures"] == 1
+
+
+def test_batch_ack_accepts_provider_clock_inside_sealed_future_tolerance():
+    sink = _Sink()
+    handoff = _handoff(sink)
+    handoff.start()
+    received_at = BASE + timedelta(milliseconds=250)
+    trade = _exact_row(received_at=received_at)
+    provider_at = received_at + timedelta(milliseconds=500)
+    trade["provider_at"] = provider_at
+    trade["provider_trade_reference_at"] = provider_at
+    trade["at"] = provider_at.replace(tzinfo=None)
+    released_at = received_at + timedelta(seconds=1)
+
+    receipt = handoff.offer_released_rows_and_wait(
+        trade_rows=[trade],
+        quote_rows=[],
+        available_at=released_at,
+        timeout_seconds=0.5,
+    )
+
+    assert receipt.complete is True
+    assert receipt.exact_print_failed_count == 0
+    assert receipt.exact_print_submissions[0].provider_event_at == provider_at
+    assert handoff.health()["thread_alive"] is True
+    assert handoff.wait_until_idle(2.0)
+    handoff.close()
+
+
+def test_proxy_trade_is_not_counted_as_exact_print_ack_work():
+    sink = _Sink()
+    handoff = _handoff(sink)
+    handoff.start()
+
+    receipt = handoff.offer_released_rows_and_wait(
+        trade_rows=[_row()],
+        quote_rows=[],
+        available_at=BASE + timedelta(seconds=1),
+        timeout_seconds=0.5,
+    )
+
+    assert receipt.total_count == 1
+    assert receipt.exact_print_count == 0
+    assert receipt.exact_print_submitted_count == 0
+    assert receipt.complete is True
+    assert receipt.exact_print_submissions == ()
+    assert handoff.wait_until_idle(2.0)
+    handoff.close()
+
+
+def test_visibility_derivation_failure_terminal_latches_worker(monkeypatch):
+    sink = _Sink()
+    handoff = _handoff(sink)
+    handoff.start()
+    monkeypatch.setattr(
+        handoff,
+        "_exact_print_visibility",
+        lambda _envelope: (_ for _ in ()).throw(
+            CaptureContractError("fixture visibility failure")
+        ),
+    )
+
+    receipt = handoff.offer_released_rows_and_wait(
+        trade_rows=[_exact_row()],
+        quote_rows=[],
+        available_at=BASE + timedelta(seconds=1),
+        timeout_seconds=0.5,
+    )
+
+    assert receipt.complete is True
+    assert receipt.exact_print_submitted_count == 0
+    assert receipt.exact_print_failed_count == 1
+    assert receipt.exact_print_submissions == ()
+    health = handoff.health()
+    assert health["accepting"] is False
+    assert health["terminal_error"] == "CaptureContractError"
+    with pytest.raises(CaptureContractError, match="unpersisted coverage loss"):
+        handoff.close()
 
 
 def test_connection_boundary_exposes_hash_bound_generation_and_invalidates_on_close():

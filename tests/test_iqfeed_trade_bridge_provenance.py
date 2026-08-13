@@ -3,14 +3,44 @@
 from __future__ import annotations
 
 import hashlib
+import inspect
 import json
+from pathlib import Path
+import subprocess
+import sys
+import uuid
 from collections import deque
 from datetime import datetime, timedelta, timezone
+from types import SimpleNamespace
 
 import pytest
 import sqlalchemy as sa
 
 import scripts.iqfeed_trade_bridge as bridge
+from app.services.trading.momentum_neural.iqfeed_l1_capture import (
+    IqfeedL1CaptureBatchReceipt,
+    IqfeedL1ExactPrintVisibility,
+)
+
+
+def test_standalone_bridge_import_does_not_load_trading_package():
+    module_name = "app.services.trading.momentum_neural.iqfeed_l1_capture"
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            (
+                "import sys; import scripts.iqfeed_trade_bridge; "
+                f"raise SystemExit(1 if {module_name!r} in sys.modules else 0)"
+            ),
+        ],
+        cwd=Path(__file__).resolve().parents[1],
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    assert result.returncode == 0, result.stderr
 
 
 def _frame(
@@ -988,16 +1018,24 @@ def test_vectorized_db_release_has_constant_statement_count_for_full_batch(
     )
     assert len(insert_connection.calls) == 2
 
-    release_connection = _Connection(
-        [len(trade_rows), len(quote_rows), len(quote_rows)]
-    )
+    release_connection = _Connection([len(trade_rows), len(quote_rows)])
     bridge._release_pending_batch(
         release_connection,
         trade_rows=trade_rows,
         quote_rows=quote_rows,
         available_at=release_at,
     )
-    assert len(release_connection.calls) == 3
+    assert len(release_connection.calls) == 2
+    assert all("available_at" not in row for row in quote_rows)
+
+    notify_connection = _Connection([len(quote_rows)])
+    bridge._enqueue_nbbo_notifications(
+        notify_connection,
+        quote_rows=quote_rows,
+        available_at=release_at,
+    )
+    assert len(notify_connection.calls) == 1
+    assert "pg_notify" in str(notify_connection.calls[0]).lower()
     assert all(row["available_at"] == release_at for row in quote_rows)
 
     class _ReturningConnection(_Connection):
@@ -1025,9 +1063,7 @@ def test_vectorized_db_release_has_constant_statement_count_for_full_batch(
     assert len(trade_ids) == len(trade_rows)
     assert len(quote_ids) == len(quote_rows)
 
-    primary_key_release = _Connection(
-        [len(trade_rows), len(quote_rows), len(quote_rows)]
-    )
+    primary_key_release = _Connection([len(trade_rows), len(quote_rows)])
     bridge._release_pending_batch(
         primary_key_release,
         trade_rows=trade_rows,
@@ -1039,12 +1075,11 @@ def test_vectorized_db_release_has_constant_statement_count_for_full_batch(
     primary_key_sql = [
         str(statement).lower() for statement in primary_key_release.calls
     ]
-    assert len(primary_key_sql) == 3
+    assert len(primary_key_sql) == 2
     assert "where id = any(:row_ids)" in primary_key_sql[0]
     assert "where id = any(:row_ids)" in primary_key_sql[1]
     assert "source_frame_sequence" not in primary_key_sql[0]
     assert "source_frame_sequence" not in primary_key_sql[1]
-    assert "pg_notify" in primary_key_sql[2]
 
 
 def test_trade_reference_is_not_mislabeled_provider_event(monkeypatch):
@@ -1065,6 +1100,11 @@ def test_released_capture_handoff_receives_exact_commit_clock_without_db_read():
     release_at = datetime(2026, 7, 15, 15, 31, 15, tzinfo=timezone.utc)
 
     class _Handoff:
+        bridge_configuration = bridge.BRIDGE_CAPTURE_CONFIGURATION
+        bridge_configuration_sha256 = (
+            bridge.BRIDGE_CAPTURE_CONFIGURATION_SHA256
+        )
+
         def __init__(self):
             self.calls = []
 
@@ -1074,6 +1114,10 @@ def test_released_capture_handoff_receives_exact_commit_clock_without_db_read():
         def offer_released_rows(self, **kwargs):
             self.calls.append(kwargs)
             return 2, 0
+
+        def offer_released_rows_and_wait(self, **kwargs):
+            self.calls.append(kwargs)
+            return SimpleNamespace()
 
         def record_release_failure(self, **_kwargs):
             raise AssertionError("healthy fixture handoff cannot fail")
@@ -1106,6 +1150,11 @@ def test_unexpected_capture_handoff_error_is_contained_as_explicit_batch_loss():
     release_at = datetime(2026, 7, 15, 15, 31, 16, tzinfo=timezone.utc)
 
     class _FailingHandoff:
+        bridge_configuration = bridge.BRIDGE_CAPTURE_CONFIGURATION
+        bridge_configuration_sha256 = (
+            bridge.BRIDGE_CAPTURE_CONFIGURATION_SHA256
+        )
+
         def __init__(self):
             self.failure = None
 
@@ -1113,6 +1162,9 @@ def test_unexpected_capture_handoff_error_is_contained_as_explicit_batch_loss():
             return {"started": True, "accepting": True}
 
         def offer_released_rows(self, **_kwargs):
+            raise RuntimeError("fixture handoff defect")
+
+        def offer_released_rows_and_wait(self, **_kwargs):
             raise RuntimeError("fixture handoff defect")
 
         def record_release_failure(self, **kwargs):
@@ -1143,11 +1195,19 @@ def test_unexpected_capture_handoff_error_is_contained_as_explicit_batch_loss():
 
 def test_capture_handoff_cannot_bind_or_unbind_mid_connection_generation():
     class _Handoff:
+        bridge_configuration = bridge.BRIDGE_CAPTURE_CONFIGURATION
+        bridge_configuration_sha256 = (
+            bridge.BRIDGE_CAPTURE_CONFIGURATION_SHA256
+        )
+
         def health(self):
             return {"started": True, "accepting": True}
 
         def offer_released_rows(self, **_kwargs):
             return (0, 0)
+
+        def offer_released_rows_and_wait(self, **_kwargs):
+            return SimpleNamespace()
 
         def record_release_failure(self, **_kwargs):
             return 0
@@ -1171,6 +1231,700 @@ def test_capture_handoff_cannot_bind_or_unbind_mid_connection_generation():
     finally:
         bridge._retire_connection_generation(92)
     bridge.unbind_capture_handoff(handoff)
+
+
+def test_capture_handoff_rejects_stale_bridge_configuration_before_binding():
+    stale_configuration = dict(bridge.BRIDGE_CAPTURE_CONFIGURATION)
+    stale_configuration.pop("capture_notify_ack_timeout_seconds")
+    handoff = SimpleNamespace(
+        bridge_configuration=stale_configuration,
+        bridge_configuration_sha256=hashlib.sha256(
+            json.dumps(
+                stale_configuration,
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode("utf-8")
+        ).hexdigest(),
+        health=lambda: {"started": True, "accepting": True},
+        offer_released_rows=lambda **_kwargs: (0, 0),
+        offer_released_rows_and_wait=lambda **_kwargs: SimpleNamespace(),
+        record_release_failure=lambda **_kwargs: 0,
+        record_connection_boundary=lambda **_kwargs: None,
+    )
+
+    with pytest.raises(RuntimeError, match="configuration escaped"):
+        bridge.bind_capture_handoff(handoff)
+
+
+def _capture_ack_rows(
+    *,
+    sequence: int = 71,
+    symbol: str = "ACKFRAME",
+    available_at: datetime | None = None,
+) -> tuple[dict, dict, datetime]:
+    released = available_at or datetime(
+        2026,
+        8,
+        12,
+        20,
+        30,
+        0,
+        tzinfo=timezone.utc,
+    )
+    provider_at = released - timedelta(milliseconds=20)
+    received_at = released - timedelta(milliseconds=10)
+    common = {
+        "sym": symbol,
+        "at": provider_at.replace(tzinfo=None),
+        "bid": 4.11,
+        "ask": 4.12,
+        "provider_trade_reference_at": provider_at,
+        "received_at": received_at,
+        "bridge": bridge.BRIDGE_BUILD,
+        "message_type": "Q",
+        "bridge_run_id": bridge.BRIDGE_RUN_ID,
+        "connection_generation": 7,
+        "source_frame_sequence": sequence,
+        "source_frame_sha256": hashlib.sha256(
+            f"ack-frame-{sequence}".encode()
+        ).hexdigest(),
+    }
+    trade = {
+        **common,
+        "px": 4.12,
+        "sz": 100.0,
+        "provider_at": provider_at,
+        "basis": bridge.EXACT_PRINT_TIMESTAMP_BASIS,
+    }
+    quote = {
+        **common,
+        "provider_at": None,
+        "basis": bridge.AUTHORITATIVE_TIMESTAMP_BASIS,
+        "mid": 4.115,
+        "spread_bps": (0.01 / 4.115) * 10_000.0,
+    }
+    return trade, quote, released
+
+
+def _capture_visibility(trade: dict, *, available_at: datetime):
+    return IqfeedL1ExactPrintVisibility(
+        bridge_run_id=trade["bridge_run_id"],
+        connection_generation=trade["connection_generation"],
+        source_frame_sequence=trade["source_frame_sequence"],
+        source_frame_sha256=trade["source_frame_sha256"],
+        symbol=trade["sym"],
+        provider_event_at=trade["provider_at"],
+        received_at=trade["received_at"],
+        original_available_at=available_at,
+        bid=trade["bid"],
+        ask=trade["ask"],
+        bridge_version=trade["bridge"],
+    )
+
+
+def _capture_receipt(
+    *,
+    total: int,
+    exact_count: int,
+    submitted: int,
+    failed: int,
+    visibilities: tuple = (),
+    rejected: int = 0,
+    complete: bool = True,
+    released_at: datetime | None = None,
+    acknowledged_frame_keys: tuple | None = None,
+):
+    if released_at is None:
+        released_at = datetime(
+            2026,
+            8,
+            12,
+            20,
+            30,
+            0,
+            tzinfo=timezone.utc,
+        )
+    if acknowledged_frame_keys is None:
+        acknowledged_frame_keys = tuple(
+            sorted(
+                (
+                    item.bridge_run_id,
+                    item.connection_generation,
+                    item.source_frame_sequence,
+                    item.source_frame_sha256,
+                    item.symbol,
+                )
+                for item in visibilities
+            )
+        )
+        if exact_count > len(acknowledged_frame_keys):
+            # Tests that model a pending/failed frame must supply its exact key.
+            acknowledged_frame_keys = acknowledged_frame_keys + tuple(
+                (
+                    str(uuid.uuid5(uuid.NAMESPACE_DNS, f"pending-{index}")),
+                    1,
+                    10_000 + index,
+                    f"{10_000 + index:064x}",
+                    f"PEND{index}",
+                )
+                for index in range(
+                    exact_count - len(acknowledged_frame_keys)
+                )
+            )
+            acknowledged_frame_keys = tuple(sorted(acknowledged_frame_keys))
+    return IqfeedL1CaptureBatchReceipt(
+        total_count=total,
+        accepted_count=total - rejected,
+        rejected_count=rejected,
+        exact_print_count=exact_count,
+        exact_print_submitted_count=submitted,
+        exact_print_failed_count=failed,
+        complete=complete,
+        exact_print_submissions=visibilities,
+        release_available_at=released_at,
+        acknowledged_frame_keys=acknowledged_frame_keys,
+    )
+
+
+def test_capture_ack_qualifies_only_same_frame_quote_without_restamping():
+    trade, quote, released = _capture_ack_rows()
+    duplicate = dict(quote)
+    duplicate["source_frame_sequence"] += 1
+    duplicate["source_frame_sha256"] = "f" * 64
+    duplicate["received_at"] += timedelta(milliseconds=5)
+    duplicate["bid"] = 4.10
+    receipt = _capture_receipt(
+        total=3,
+        exact_count=1,
+        submitted=1,
+        failed=0,
+        visibilities=(
+            _capture_visibility(trade, available_at=released),
+        ),
+        released_at=released,
+    )
+
+    payloads = bridge._acknowledged_notification_payloads(
+        receipt,
+        trade_rows=[trade],
+        quote_rows=[quote, duplicate],
+        available_at=released,
+        now=released + timedelta(milliseconds=25),
+    )
+
+    assert len(payloads) == 1
+    payload = json.loads(payloads[0])
+    assert payload["source_frame_sequence"] == trade["source_frame_sequence"]
+    assert payload["source_frame_sha256"] == trade["source_frame_sha256"]
+    assert payload["bid"] == trade["bid"]
+    assert payload["ask"] == trade["ask"]
+    assert payload["received_at"] == trade["received_at"].isoformat()
+    assert payload["available_at"] == released.isoformat()
+    assert "available_at" not in quote
+    assert "available_at" not in duplicate
+
+
+def test_capture_ack_partial_success_does_not_veto_ready_symbol():
+    trade_a, quote_a, released = _capture_ack_rows(
+        sequence=81,
+        symbol="ACKA",
+    )
+    trade_b, quote_b, _ = _capture_ack_rows(
+        sequence=82,
+        symbol="ACKB",
+        available_at=released,
+    )
+    receipt = _capture_receipt(
+        total=4,
+        exact_count=2,
+        submitted=1,
+        failed=1,
+        visibilities=(
+            _capture_visibility(trade_a, available_at=released),
+        ),
+        released_at=released,
+        acknowledged_frame_keys=tuple(
+            sorted(
+                (
+                    bridge._capture_frame_key(trade_a),
+                    bridge._capture_frame_key(trade_b),
+                )
+            )
+        ),
+    )
+
+    payloads = bridge._acknowledged_notification_payloads(
+        receipt,
+        trade_rows=[trade_a, trade_b],
+        quote_rows=[quote_a, quote_b],
+        available_at=released,
+        now=released + timedelta(milliseconds=20),
+    )
+
+    assert [json.loads(payload)["symbol"] for payload in payloads] == ["ACKA"]
+
+
+def test_capture_ack_timeout_can_emit_completed_frame_but_not_pending_frame():
+    trade_a, quote_a, released = _capture_ack_rows(
+        sequence=91,
+        symbol="ACKC",
+    )
+    trade_b, quote_b, _ = _capture_ack_rows(
+        sequence=92,
+        symbol="ACKD",
+        available_at=released,
+    )
+    receipt = _capture_receipt(
+        total=4,
+        exact_count=2,
+        submitted=1,
+        failed=0,
+        visibilities=(
+            _capture_visibility(trade_a, available_at=released),
+        ),
+        complete=False,
+        released_at=released,
+        acknowledged_frame_keys=tuple(
+            sorted(
+                (
+                    bridge._capture_frame_key(trade_a),
+                    bridge._capture_frame_key(trade_b),
+                )
+            )
+        ),
+    )
+
+    payloads = bridge._acknowledged_notification_payloads(
+        receipt,
+        trade_rows=[trade_a, trade_b],
+        quote_rows=[quote_a, quote_b],
+        available_at=released,
+        now=released + timedelta(milliseconds=500),
+    )
+
+    assert [json.loads(payload)["symbol"] for payload in payloads] == ["ACKC"]
+
+
+def test_capture_ack_never_refreshes_stale_original_authority():
+    trade, quote, released = _capture_ack_rows()
+    receipt = _capture_receipt(
+        total=2,
+        exact_count=1,
+        submitted=1,
+        failed=0,
+        visibilities=(
+            _capture_visibility(trade, available_at=released),
+        ),
+        released_at=released,
+    )
+
+    assert bridge._acknowledged_notification_payloads(
+        receipt,
+        trade_rows=[trade],
+        quote_rows=[quote],
+        available_at=released,
+        now=released + timedelta(seconds=2, milliseconds=1),
+    ) == []
+
+
+def test_capture_ack_rejects_foreign_or_inconsistent_visibility():
+    trade, quote, released = _capture_ack_rows()
+    original = _capture_visibility(trade, available_at=released)
+    foreign = IqfeedL1ExactPrintVisibility(
+        bridge_run_id=original.bridge_run_id,
+        connection_generation=original.connection_generation,
+        source_frame_sequence=original.source_frame_sequence,
+        source_frame_sha256="0" * 64,
+        symbol=original.symbol,
+        provider_event_at=original.provider_event_at,
+        received_at=original.received_at,
+        original_available_at=original.original_available_at,
+        bid=original.bid,
+        ask=original.ask,
+        bridge_version=original.bridge_version,
+    )
+    receipt = _capture_receipt(
+        total=2,
+        exact_count=1,
+        submitted=1,
+        failed=0,
+        visibilities=(foreign,),
+        released_at=released,
+        acknowledged_frame_keys=(
+            (
+                foreign.bridge_run_id,
+                foreign.connection_generation,
+                foreign.source_frame_sequence,
+                foreign.source_frame_sha256,
+                foreign.symbol,
+            ),
+        ),
+    )
+
+    with pytest.raises(RuntimeError, match="inconsistent|foreign"):
+        bridge._acknowledged_notification_payloads(
+            receipt,
+            trade_rows=[trade],
+            quote_rows=[quote],
+            available_at=released,
+            now=released,
+        )
+
+
+def test_capture_ack_rejects_structural_forgery_without_exact_types():
+    trade, quote, released = _capture_ack_rows()
+    forged = SimpleNamespace(
+        total_count=2,
+        accepted_count=2,
+        rejected_count=0,
+        exact_print_count=1,
+        exact_print_submitted_count=1,
+        exact_print_failed_count=0,
+        complete=True,
+        exact_print_submissions=(
+            _capture_visibility(trade, available_at=released),
+        ),
+        release_available_at=released,
+        acknowledged_frame_keys=(bridge._capture_frame_key(trade),),
+    )
+
+    with pytest.raises(RuntimeError, match="type is invalid"):
+        bridge._acknowledged_notification_payloads(
+            forged,
+            trade_rows=[trade],
+            quote_rows=[quote],
+            available_at=released,
+            now=released,
+        )
+
+
+def test_acknowledged_capture_wait_is_bounded_and_bound_to_exact_release():
+    trade, quote, released = _capture_ack_rows()
+
+    class _Handoff:
+        bridge_configuration = bridge.BRIDGE_CAPTURE_CONFIGURATION
+        bridge_configuration_sha256 = (
+            bridge.BRIDGE_CAPTURE_CONFIGURATION_SHA256
+        )
+
+        def __init__(self):
+            self.calls = []
+            self.failure = None
+
+        def health(self):
+            return {"started": True, "accepting": True}
+
+        def offer_released_rows(self, **_kwargs):
+            raise AssertionError("acknowledged seam must be used")
+
+        def offer_released_rows_and_wait(self, **kwargs):
+            self.calls.append(kwargs)
+            return _capture_receipt(
+                total=2,
+                exact_count=1,
+                submitted=1,
+                failed=0,
+                visibilities=(
+                    _capture_visibility(trade, available_at=released),
+                ),
+                released_at=released,
+            )
+
+        def record_release_failure(self, **kwargs):
+            self.failure = kwargs
+            return 2
+
+        def record_connection_boundary(self, **_kwargs):
+            return None
+
+    handoff = _Handoff()
+    bridge.bind_capture_handoff(handoff)
+    try:
+        receipt = bridge._publish_released_capture_rows_and_wait(
+            trade_rows=[trade],
+            quote_rows=[quote],
+            available_at=released,
+            timeout_seconds=0.25,
+            acknowledged_frame_keys=(
+                bridge._capture_frame_key(trade),
+            ),
+        )
+    finally:
+        bridge.unbind_capture_handoff(handoff)
+
+    assert receipt is not None
+    assert handoff.failure is None
+    assert handoff.calls == [
+        {
+            "trade_rows": [trade],
+            "quote_rows": [quote],
+            "available_at": released,
+            "timeout_seconds": 0.25,
+            "acknowledged_frame_keys": (
+                bridge._capture_frame_key(trade),
+            ),
+        }
+    ]
+
+
+def test_acknowledged_capture_exception_does_not_fabricate_whole_batch_loss():
+    trade, quote, released = _capture_ack_rows()
+
+    class _Handoff:
+        bridge_configuration = bridge.BRIDGE_CAPTURE_CONFIGURATION
+        bridge_configuration_sha256 = (
+            bridge.BRIDGE_CAPTURE_CONFIGURATION_SHA256
+        )
+
+        def __init__(self):
+            self.failures = []
+
+        def health(self):
+            return {"started": True, "accepting": True}
+
+        def offer_released_rows(self, **_kwargs):
+            raise AssertionError("acknowledged seam must be used")
+
+        def offer_released_rows_and_wait(self, **_kwargs):
+            # Models an indeterminate caller-provided implementation that
+            # accepted a prefix before raising.
+            raise RuntimeError("fixture failure after partial offer")
+
+        def record_release_failure(self, **kwargs):
+            self.failures.append(kwargs)
+            return 2
+
+        def record_connection_boundary(self, **_kwargs):
+            return None
+
+    handoff = _Handoff()
+    bridge.bind_capture_handoff(handoff)
+    try:
+        receipt = bridge._publish_released_capture_rows_and_wait(
+            trade_rows=[trade],
+            quote_rows=[quote],
+            available_at=released,
+            timeout_seconds=0.25,
+            acknowledged_frame_keys=(bridge._capture_frame_key(trade),),
+        )
+    finally:
+        bridge.unbind_capture_handoff(handoff)
+
+    assert receipt is None
+    assert handoff.failures == []
+
+
+def test_writer_post_release_exception_does_not_fabricate_capture_loss(
+    monkeypatch,
+):
+    trade, quote, released = _capture_ack_rows()
+
+    class _Handoff:
+        def __init__(self):
+            self.failures = []
+
+        def record_release_failure(self, **kwargs):
+            self.failures.append(kwargs)
+            return 2
+
+    handoff = _Handoff()
+    monkeypatch.setattr(bridge, "_capture_handoff", handoff)
+
+    bridge._account_writer_batch_exception(
+        trade_rows=[trade],
+        quote_rows=[quote],
+        available_at=released,
+        release_committed=True,
+        capture_publish_entered=True,
+        error=RuntimeError("fixture failure after retained capture"),
+    )
+
+    assert handoff.failures == []
+
+
+def test_writer_pre_capture_exception_records_exact_released_batch(
+    monkeypatch,
+):
+    trade, quote, released = _capture_ack_rows()
+
+    class _Handoff:
+        def __init__(self):
+            self.failures = []
+
+        def record_release_failure(self, **kwargs):
+            self.failures.append(kwargs)
+            return 2
+
+    handoff = _Handoff()
+    monkeypatch.setattr(bridge, "_capture_handoff", handoff)
+
+    bridge._account_writer_batch_exception(
+        trade_rows=[trade],
+        quote_rows=[quote],
+        available_at=released,
+        release_committed=True,
+        capture_publish_entered=False,
+        error=RuntimeError("fixture failure before capture handoff"),
+    )
+
+    assert handoff.failures == [
+        {
+            "trade_rows": [trade],
+            "quote_rows": [quote],
+            "available_at": released,
+        }
+    ]
+
+
+def test_capture_ack_timeout_budget_never_exceeds_original_freshness():
+    released = datetime(2026, 8, 12, 20, 30, tzinfo=timezone.utc)
+
+    assert bridge._capture_ack_timeout_seconds(
+        released,
+        now=released,
+    ) == bridge.CAPTURE_NOTIFY_ACK_TIMEOUT_S
+    assert bridge._capture_ack_timeout_seconds(
+        released,
+        now=released + timedelta(seconds=1.8),
+    ) == pytest.approx(0.2)
+    assert bridge._capture_ack_timeout_seconds(
+        released,
+        now=released + timedelta(seconds=2),
+    ) == 0.0
+    _, quote, _ = _capture_ack_rows(available_at=released)
+    quote["provider_trade_reference_at"] = released - timedelta(seconds=1.9)
+    quote["received_at"] = released - timedelta(seconds=1.8)
+    assert bridge._capture_ack_timeout_seconds(
+        released,
+        now=released,
+        authority_rows=[quote],
+    ) == pytest.approx(0.1)
+
+
+def test_unrelated_exact_only_row_is_outside_notification_ack_fence():
+    trade, quote, released = _capture_ack_rows(
+        sequence=101,
+        symbol="READYQ",
+    )
+    exact_only, _unused_quote, _ = _capture_ack_rows(
+        sequence=102,
+        symbol="OLDPRINT",
+        available_at=released,
+    )
+    candidate_key = bridge._capture_frame_key(quote)
+    receipt = _capture_receipt(
+        total=3,
+        exact_count=1,
+        submitted=1,
+        failed=0,
+        visibilities=(
+            _capture_visibility(trade, available_at=released),
+        ),
+        released_at=released,
+        acknowledged_frame_keys=(candidate_key,),
+    )
+
+    payloads = bridge._acknowledged_notification_payloads(
+        receipt,
+        trade_rows=[trade, exact_only],
+        quote_rows=[quote],
+        available_at=released,
+        now=released + timedelta(milliseconds=25),
+    )
+
+    assert [json.loads(payload)["symbol"] for payload in payloads] == ["READYQ"]
+
+
+def test_notify_failure_after_capture_ack_does_not_record_capture_loss(
+    monkeypatch,
+):
+    class _FailingTransaction:
+        def __enter__(self):
+            raise RuntimeError("fixture notify database failure")
+
+        def __exit__(self, *_args):
+            return False
+
+    class _Engine:
+        def begin(self):
+            return _FailingTransaction()
+
+    class _Handoff:
+        def __init__(self):
+            self.failures = []
+
+        def record_release_failure(self, **kwargs):
+            self.failures.append(kwargs)
+
+    handoff = _Handoff()
+    monkeypatch.setattr(bridge, "engine", _Engine())
+    monkeypatch.setattr(bridge, "_capture_handoff", handoff)
+
+    assert bridge._publish_capture_acknowledged_notifications(
+        ['{"already":"captured"}']
+    ) == 0
+    assert handoff.failures == []
+
+
+def test_notify_transaction_rechecks_freshness_after_pool_checkout(monkeypatch):
+    trade, quote, released = _capture_ack_rows()
+    receipt = _capture_receipt(
+        total=2,
+        exact_count=1,
+        submitted=1,
+        failed=0,
+        visibilities=(
+            _capture_visibility(trade, available_at=released),
+        ),
+        released_at=released,
+    )
+    payloads = bridge._acknowledged_notification_payloads(
+        receipt,
+        trade_rows=[trade],
+        quote_rows=[quote],
+        available_at=released,
+        now=released + timedelta(seconds=1),
+    )
+
+    class _Connection:
+        def execute(self, *_args, **_kwargs):
+            raise AssertionError("stale payload reached pg_notify")
+
+    class _Transaction:
+        def __enter__(self):
+            return _Connection()
+
+        def __exit__(self, *_args):
+            return False
+
+    class _Engine:
+        def begin(self):
+            return _Transaction()
+
+    class _Clock:
+        @classmethod
+        def now(cls, _timezone):
+            return released + timedelta(seconds=2, milliseconds=1)
+
+    monkeypatch.setattr(bridge, "engine", _Engine())
+    monkeypatch.setattr(bridge, "datetime", _Clock)
+
+    assert bridge._publish_capture_acknowledged_notifications(payloads) == 0
+
+
+def test_writer_orders_release_commit_before_capture_ack_before_notify():
+    release_source = inspect.getsource(bridge._release_pending_batch)
+    writer_source = inspect.getsource(bridge.writer)
+
+    assert "_enqueue_nbbo_notification" not in release_source
+    release_index = writer_source.index("_release_pending_batch(")
+    ack_index = writer_source.index(
+        "_publish_released_capture_rows_and_wait("
+    )
+    notify_index = writer_source.index(
+        "_publish_capture_acknowledged_notifications("
+    )
+    assert release_index < ack_index < notify_index
 
 
 def test_old_reader_completion_cannot_stop_new_connection_generation():

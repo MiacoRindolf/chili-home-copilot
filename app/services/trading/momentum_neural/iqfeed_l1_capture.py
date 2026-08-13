@@ -22,6 +22,7 @@ import math
 import queue
 import threading
 import time
+import uuid
 from typing import Any, Mapping, Protocol, Sequence, runtime_checkable
 
 from .replay_capture_contract import (
@@ -501,6 +502,217 @@ class _GapAccumulator:
         )
 
 
+@dataclass(frozen=True, order=True)
+class IqfeedL1ExactPrintVisibility:
+    """Exact print proven accepted by the in-process capture sink."""
+
+    bridge_run_id: str
+    connection_generation: int
+    source_frame_sequence: int
+    source_frame_sha256: str
+    symbol: str
+    provider_event_at: datetime
+    received_at: datetime
+    original_available_at: datetime
+    bid: float
+    ask: float
+    bridge_version: str
+
+    def __post_init__(self) -> None:
+        try:
+            canonical_run_id = str(uuid.UUID(self.bridge_run_id))
+        except (AttributeError, TypeError, ValueError) as exc:
+            raise CaptureContractError(
+                "IQFeed exact-print visibility run id is malformed"
+            ) from exc
+        if canonical_run_id != self.bridge_run_id:
+            raise CaptureContractError(
+                "IQFeed exact-print visibility run id is non-canonical"
+            )
+        _positive_int(
+            self.connection_generation,
+            "IQFeed exact-print visibility generation",
+        )
+        _positive_int(
+            self.source_frame_sequence,
+            "IQFeed exact-print visibility frame sequence",
+        )
+        _require_sha256(
+            self.source_frame_sha256,
+            "IQFeed exact-print visibility frame hash",
+        )
+        symbol = str(self.symbol or "").strip().upper()
+        if not symbol or symbol != self.symbol:
+            raise CaptureContractError(
+                "IQFeed exact-print visibility symbol is malformed"
+            )
+        provider_at = _utc(
+            self.provider_event_at,
+            "IQFeed exact-print visibility provider event",
+        )
+        received_at = _utc(
+            self.received_at,
+            "IQFeed exact-print visibility receive boundary",
+        )
+        available_at = _utc(
+            self.original_available_at,
+            "IQFeed exact-print visibility availability boundary",
+        )
+        # IQFeed and the host clock may differ within the separately sealed
+        # future tolerance.  Only the host-observed receive/release order is a
+        # hard causal invariant at this seam.
+        if received_at > available_at:
+            raise CaptureContractError(
+                "IQFeed exact-print visibility clocks are out of order"
+            )
+        bid = _positive_number(self.bid, "IQFeed exact-print visibility bid")
+        ask = _positive_number(self.ask, "IQFeed exact-print visibility ask")
+        if ask < bid:
+            raise CaptureContractError(
+                "IQFeed exact-print visibility quote is crossed"
+            )
+        if not str(self.bridge_version or "").strip():
+            raise CaptureContractError(
+                "IQFeed exact-print visibility bridge version is missing"
+            )
+
+
+@dataclass(frozen=True)
+class IqfeedL1CaptureBatchReceipt:
+    """Bounded per-exact-print acknowledgement for one released batch."""
+
+    total_count: int
+    accepted_count: int
+    rejected_count: int
+    exact_print_count: int
+    exact_print_submitted_count: int
+    exact_print_failed_count: int
+    complete: bool
+    exact_print_submissions: tuple[IqfeedL1ExactPrintVisibility, ...]
+    release_available_at: datetime
+    acknowledged_frame_keys: tuple[tuple[str, int, int, str, str], ...]
+
+    def __post_init__(self) -> None:
+        counts = (
+            self.total_count,
+            self.accepted_count,
+            self.rejected_count,
+            self.exact_print_count,
+            self.exact_print_submitted_count,
+            self.exact_print_failed_count,
+        )
+        if any(type(value) is not int or value < 0 for value in counts):
+            raise CaptureContractError(
+                "IQFeed capture batch acknowledgement counts are malformed"
+            )
+        if (
+            self.accepted_count + self.rejected_count != self.total_count
+            or self.exact_print_count > self.total_count
+            or self.exact_print_submitted_count > self.accepted_count
+            or self.exact_print_failed_count > self.exact_print_count
+            or self.exact_print_submitted_count
+            + self.exact_print_failed_count
+            > self.exact_print_count
+            or type(self.complete) is not bool
+            or (
+                self.complete
+                and self.exact_print_submitted_count
+                + self.exact_print_failed_count
+                != self.exact_print_count
+            )
+            or not isinstance(self.exact_print_submissions, tuple)
+            or any(
+                type(item) is not IqfeedL1ExactPrintVisibility
+                for item in self.exact_print_submissions
+            )
+            or len(set(self.exact_print_submissions))
+            != len(self.exact_print_submissions)
+            or len(self.exact_print_submissions)
+            > self.exact_print_submitted_count
+        ):
+            raise CaptureContractError(
+                "IQFeed capture batch acknowledgement is inconsistent"
+            )
+        released_at = _utc(
+            self.release_available_at,
+            "IQFeed capture acknowledgement release boundary",
+        )
+        if not isinstance(self.acknowledged_frame_keys, tuple):
+            raise CaptureContractError(
+                "IQFeed capture acknowledgement frame inventory is malformed"
+            )
+        keys: list[tuple[str, int, int, str, str]] = []
+        for raw_key in self.acknowledged_frame_keys:
+            if not isinstance(raw_key, tuple) or len(raw_key) != 5:
+                raise CaptureContractError(
+                    "IQFeed capture acknowledgement frame inventory is malformed"
+                )
+            run_id, generation, sequence, frame_sha256, symbol = raw_key
+            try:
+                canonical_run_id = str(uuid.UUID(run_id))
+            except (AttributeError, TypeError, ValueError) as exc:
+                raise CaptureContractError(
+                    "IQFeed capture acknowledgement frame run id is malformed"
+                ) from exc
+            normalized = (
+                canonical_run_id,
+                _positive_int(
+                    generation,
+                    "IQFeed capture acknowledgement frame generation",
+                ),
+                _positive_int(
+                    sequence,
+                    "IQFeed capture acknowledgement frame sequence",
+                ),
+                _require_sha256(
+                    frame_sha256,
+                    "IQFeed capture acknowledgement frame hash",
+                ),
+                str(symbol or "").strip().upper(),
+            )
+            if (
+                canonical_run_id != run_id
+                or normalized[4] != symbol
+                or not normalized[4]
+            ):
+                raise CaptureContractError(
+                    "IQFeed capture acknowledgement frame identity is non-canonical"
+                )
+            keys.append(normalized)
+        if (
+            tuple(sorted(keys)) != self.acknowledged_frame_keys
+            or len(set(keys)) != len(keys)
+            or len(keys) != self.exact_print_count
+            or {
+                (
+                    item.bridge_run_id,
+                    item.connection_generation,
+                    item.source_frame_sequence,
+                    item.source_frame_sha256,
+                    item.symbol,
+                )
+                for item in self.exact_print_submissions
+            }
+            - set(keys)
+        ):
+            raise CaptureContractError(
+                "IQFeed capture acknowledgement frame inventory is inconsistent"
+            )
+        object.__setattr__(self, "release_available_at", released_at)
+
+
+@dataclass
+class _BatchState:
+    remaining: int
+    submitted: int = 0
+    failed: int = 0
+    exact_print_submissions: set[IqfeedL1ExactPrintVisibility] | None = None
+
+    def __post_init__(self) -> None:
+        if self.exact_print_submissions is None:
+            self.exact_print_submissions = set()
+
+
 class BoundedIqfeedL1CaptureHandoff:
     """Nonblocking bridge ingress with asynchronous append-only sink delivery."""
 
@@ -570,9 +782,9 @@ class BoundedIqfeedL1CaptureHandoff:
         self.handoff_configuration_sha256 = sha256_json(
             self.handoff_configuration
         )
-        self._queue: queue.Queue[tuple[IqfeedL1CaptureEnvelope, int]] = queue.Queue(
-            maxsize=self.max_pending_events
-        )
+        self._queue: queue.Queue[
+            tuple[IqfeedL1CaptureEnvelope, int, int | None]
+        ] = queue.Queue(maxsize=self.max_pending_events)
         self._condition = threading.Condition(threading.RLock())
         self._pending_gaps: OrderedDict[
             tuple[CaptureStream, str | None, str], _GapAccumulator
@@ -598,6 +810,8 @@ class BoundedIqfeedL1CaptureHandoff:
         self._active_producer_generation: (
             CaptureExternalProducerGeneration | None
         ) = None
+        self._next_batch_id = 1
+        self._batch_states: dict[int, _BatchState] = {}
 
     @property
     def network_fallback_allowed(self) -> bool:
@@ -656,7 +870,84 @@ class BoundedIqfeedL1CaptureHandoff:
                 )
             self._condition.notify_all()
 
-    def offer(self, envelope: IqfeedL1CaptureEnvelope) -> bool:
+    @staticmethod
+    def _exact_print_visibility(
+        envelope: IqfeedL1CaptureEnvelope,
+    ) -> IqfeedL1ExactPrintVisibility | None:
+        if envelope.stream is not CaptureStream.IQFEED_PRINT:
+            return None
+        payload = envelope.payload
+        provenance = payload.get(IQFEED_L1_SOURCE_PROVENANCE_FIELD)
+        if not isinstance(provenance, Mapping):
+            return None
+        provider_event_at = envelope.clocks.provider_event_at
+        bid = payload.get("bid")
+        ask = payload.get("ask")
+        if provider_event_at is None or bid is None or ask is None:
+            return None
+        return IqfeedL1ExactPrintVisibility(
+            bridge_run_id=str(provenance.get("bridge_run_id") or "").strip().lower(),
+            connection_generation=int(provenance.get("connection_generation") or 0),
+            source_frame_sequence=envelope.source_frame_sequence,
+            source_frame_sha256=str(
+                provenance.get("source_frame_sha256") or ""
+            ).strip().lower(),
+            symbol=envelope.symbol,
+            provider_event_at=provider_event_at,
+            received_at=envelope.clocks.received_at,
+            original_available_at=envelope.clocks.available_at,
+            bid=float(bid),
+            ask=float(ask),
+            bridge_version=str(provenance.get("bridge_version") or "").strip(),
+        )
+
+    def _complete_batch(
+        self,
+        batch_id: int | None,
+        envelope: IqfeedL1CaptureEnvelope | None,
+        *,
+        submitted: bool,
+    ) -> None:
+        if batch_id is None:
+            return
+        with self._condition:
+            state = self._batch_states.get(batch_id)
+            if state is None:
+                return
+            if state.remaining <= 0:
+                self._terminal_error = CaptureContractError(
+                    "IQFeed capture batch acknowledgement underflow"
+                )
+                self._accepting = False
+                self._condition.notify_all()
+                return
+            state.remaining -= 1
+            if submitted:
+                try:
+                    visibility = (
+                        None
+                        if envelope is None
+                        else self._exact_print_visibility(envelope)
+                    )
+                except BaseException as exc:
+                    state.failed += 1
+                    self._terminal_error = exc
+                    self._accepting = False
+                else:
+                    state.submitted += 1
+                    if visibility is not None:
+                        assert state.exact_print_submissions is not None
+                        state.exact_print_submissions.add(visibility)
+            else:
+                state.failed += 1
+            self._condition.notify_all()
+
+    def _offer(
+        self,
+        envelope: IqfeedL1CaptureEnvelope,
+        *,
+        batch_id: int | None,
+    ) -> bool:
         if not isinstance(envelope, IqfeedL1CaptureEnvelope):
             raise CaptureContractError("IQFeed capture offer is malformed")
         envelope_size = envelope.canonical_size_bytes
@@ -690,7 +981,7 @@ class BoundedIqfeedL1CaptureHandoff:
                 reason = "iqfeed_l1_capture_queue_byte_overflow"
             else:
                 try:
-                    self._queue.put_nowait((envelope, envelope_size))
+                    self._queue.put_nowait((envelope, envelope_size, batch_id))
                 except queue.Full:
                     self._queue_overflow_lost += 1
                     self._queue_overflow_incidents += 1
@@ -712,7 +1003,11 @@ class BoundedIqfeedL1CaptureHandoff:
                     lost_count=1,
                 )
             )
+            self._complete_batch(batch_id, envelope, submitted=False)
             return False
+
+    def offer(self, envelope: IqfeedL1CaptureEnvelope) -> bool:
+        return self._offer(envelope, batch_id=None)
 
     @staticmethod
     def _row_order(
@@ -741,12 +1036,16 @@ class BoundedIqfeedL1CaptureHandoff:
             str(row.get("sym") or "").strip().upper(),
         )
 
-    def offer_released_rows(
+    def _offer_released_rows(
         self,
         *,
         trade_rows: Sequence[Mapping[str, Any]],
         quote_rows: Sequence[Mapping[str, Any]],
         available_at: datetime,
+        batch_id: int | None,
+        acknowledged_frame_keys: (
+            frozenset[tuple[str, int, int, str, str]] | None
+        ) = None,
     ) -> tuple[int, int]:
         released_at = _utc(available_at, "IQFeed capture release boundary")
         rows = [
@@ -756,7 +1055,50 @@ class BoundedIqfeedL1CaptureHandoff:
         rows.sort(key=lambda item: self._row_order(item[0], item[1]))
         accepted = 0
         rejected = 0
+        def _contain_offer_failure(
+            stream: CaptureStream,
+            row: Mapping[str, Any],
+            exact_batch_id: int | None,
+        ) -> None:
+            nonlocal rejected
+            rejected += 1
+            self._latch_gap(
+                CoverageGap(
+                    stream=stream,
+                    symbol=str(row.get("sym") or "").strip().upper() or None,
+                    reason="iqfeed_l1_capture_envelope_invalid",
+                    first_available_at=released_at,
+                    last_available_at=released_at,
+                    lost_count=1,
+                )
+            )
+            self._complete_batch(
+                exact_batch_id,
+                None,
+                submitted=False,
+            )
+
         for stream, row in rows:
+            exact_batch_id = (
+                batch_id
+                if stream is CaptureStream.IQFEED_PRINT
+                and isinstance(row, Mapping)
+                and row.get("provider_at") is not None
+                and (
+                    acknowledged_frame_keys is None
+                    or (
+                        str(row.get("bridge_run_id") or "").strip().lower(),
+                        row.get("connection_generation"),
+                        row.get("source_frame_sequence"),
+                        str(
+                            row.get("source_frame_sha256") or ""
+                        ).strip().lower(),
+                        str(row.get("sym") or "").strip().upper(),
+                    )
+                    in acknowledged_frame_keys
+                )
+                else None
+            )
             try:
                 envelope = IqfeedL1CaptureEnvelope.from_released_row(
                     row,
@@ -776,23 +1118,177 @@ class BoundedIqfeedL1CaptureHandoff:
                     ),
                 )
             except BaseException:
+                _contain_offer_failure(stream, row, exact_batch_id)
+                continue
+            try:
+                offered = self._offer(envelope, batch_id=exact_batch_id)
+            except BaseException as exc:
+                with self._condition:
+                    self._terminal_error = exc
+                    self._accepting = False
+                    self._condition.notify_all()
                 rejected += 1
-                self._latch_gap(
-                    CoverageGap(
-                        stream=stream,
-                        symbol=str(row.get("sym") or "").strip().upper() or None,
-                        reason="iqfeed_l1_capture_envelope_invalid",
-                        first_available_at=released_at,
-                        last_available_at=released_at,
-                        lost_count=1,
-                    )
+                self._complete_batch(
+                    exact_batch_id,
+                    None,
+                    submitted=False,
                 )
                 continue
-            if self.offer(envelope):
+            if offered:
                 accepted += 1
             else:
                 rejected += 1
         return accepted, rejected
+
+    def offer_released_rows(
+        self,
+        *,
+        trade_rows: Sequence[Mapping[str, Any]],
+        quote_rows: Sequence[Mapping[str, Any]],
+        available_at: datetime,
+    ) -> tuple[int, int]:
+        return self._offer_released_rows(
+            trade_rows=trade_rows,
+            quote_rows=quote_rows,
+            available_at=available_at,
+            batch_id=None,
+            acknowledged_frame_keys=None,
+        )
+
+    def offer_released_rows_and_wait(
+        self,
+        *,
+        trade_rows: Sequence[Mapping[str, Any]],
+        quote_rows: Sequence[Mapping[str, Any]],
+        available_at: datetime,
+        timeout_seconds: float,
+        acknowledged_frame_keys: (
+            Sequence[tuple[str, int, int, str, str]] | None
+        ) = None,
+    ) -> IqfeedL1CaptureBatchReceipt:
+        """Offer one batch and wait only for its exact sink outcomes."""
+
+        if isinstance(timeout_seconds, bool):
+            raise CaptureContractError(
+                "IQFeed capture batch acknowledgement timeout is malformed"
+            )
+        try:
+            timeout = float(timeout_seconds)
+        except (TypeError, ValueError, OverflowError) as exc:
+            raise CaptureContractError(
+                "IQFeed capture batch acknowledgement timeout is malformed"
+            ) from exc
+        if not math.isfinite(timeout) or timeout <= 0 or timeout > 2.0:
+            raise CaptureContractError(
+                "IQFeed capture batch acknowledgement timeout is malformed"
+            )
+        offered_trades = tuple(trade_rows)
+        offered_quotes = tuple(quote_rows)
+        total = len(offered_trades) + len(offered_quotes)
+        requested_frames: frozenset[tuple[str, int, int, str, str]] | None = None
+        if acknowledged_frame_keys is not None:
+            try:
+                requested_frames = frozenset(
+                    tuple(key) for key in acknowledged_frame_keys
+                )
+            except (TypeError, ValueError) as exc:
+                raise CaptureContractError(
+                    "IQFeed capture acknowledgement frame inventory is malformed"
+                ) from exc
+            if len(requested_frames) != len(acknowledged_frame_keys) or any(
+                len(key) != 5 for key in requested_frames
+            ):
+                raise CaptureContractError(
+                    "IQFeed capture acknowledgement frame inventory is malformed"
+                )
+        def _row_acknowledged(row: Mapping[str, Any]) -> bool:
+            if row.get("provider_at") is None:
+                return False
+            if requested_frames is None:
+                return True
+            key = (
+                str(row.get("bridge_run_id") or "").strip().lower(),
+                row.get("connection_generation"),
+                row.get("source_frame_sequence"),
+                str(row.get("source_frame_sha256") or "").strip().lower(),
+                str(row.get("sym") or "").strip().upper(),
+            )
+            return key in requested_frames
+
+        exact_print_count = sum(
+            1
+            for row in offered_trades
+            if isinstance(row, Mapping) and _row_acknowledged(row)
+        )
+        receipt_frame_keys = tuple(
+            sorted(
+                requested_frames
+                if requested_frames is not None
+                else {
+                    (
+                        str(row.get("bridge_run_id") or "").strip().lower(),
+                        row.get("connection_generation"),
+                        row.get("source_frame_sequence"),
+                        str(
+                            row.get("source_frame_sha256") or ""
+                        ).strip().lower(),
+                        str(row.get("sym") or "").strip().upper(),
+                    )
+                    for row in offered_trades
+                    if isinstance(row, Mapping) and _row_acknowledged(row)
+                }
+            )
+        )
+        if (
+            requested_frames is not None
+            and exact_print_count != len(requested_frames)
+        ):
+            raise CaptureContractError(
+                "IQFeed capture acknowledgement frame inventory is foreign"
+            )
+        deadline = time.monotonic() + timeout
+        with self._condition:
+            batch_id = self._next_batch_id
+            self._next_batch_id += 1
+            self._batch_states[batch_id] = _BatchState(
+                remaining=exact_print_count
+            )
+        try:
+            accepted, rejected = self._offer_released_rows(
+                trade_rows=offered_trades,
+                quote_rows=offered_quotes,
+                available_at=available_at,
+                batch_id=batch_id,
+                acknowledged_frame_keys=requested_frames,
+            )
+            with self._condition:
+                state = self._batch_states[batch_id]
+                while state.remaining > 0 and time.monotonic() < deadline:
+                    self._condition.wait(
+                        timeout=min(0.02, deadline - time.monotonic())
+                    )
+                complete = state.remaining == 0
+                exact = tuple(
+                    sorted(state.exact_print_submissions or ())
+                )
+                return IqfeedL1CaptureBatchReceipt(
+                    total_count=total,
+                    accepted_count=accepted,
+                    rejected_count=rejected,
+                    exact_print_count=exact_print_count,
+                    exact_print_submitted_count=state.submitted,
+                    exact_print_failed_count=state.failed,
+                    complete=complete,
+                    exact_print_submissions=exact,
+                    release_available_at=_utc(
+                        available_at,
+                        "IQFeed capture acknowledgement release boundary",
+                    ),
+                    acknowledged_frame_keys=receipt_frame_keys,
+                )
+        finally:
+            with self._condition:
+                self._batch_states.pop(batch_id, None)
 
     def record_release_failure(
         self,
@@ -979,11 +1475,12 @@ class BoundedIqfeedL1CaptureHandoff:
                     return
                 return
             try:
-                envelope, envelope_size = self._queue.get(
+                envelope, envelope_size, batch_id = self._queue.get(
                     timeout=self._WORKER_POLL_SECONDS
                 )
             except queue.Empty:
                 continue
+            submitted = False
             try:
                 try:
                     self.sink.submit_envelope(envelope)
@@ -1017,6 +1514,7 @@ class BoundedIqfeedL1CaptureHandoff:
                 else:
                     with self._condition:
                         self._submitted += 1
+                    submitted = True
             finally:
                 self._queue.task_done()
                 with self._condition:
@@ -1028,6 +1526,11 @@ class BoundedIqfeedL1CaptureHandoff:
                         )
                         self._accepting = False
                     self._condition.notify_all()
+                self._complete_batch(
+                    batch_id,
+                    envelope,
+                    submitted=submitted,
+                )
 
     def wait_until_idle(self, timeout_seconds: float) -> bool:
         timeout = float(timeout_seconds)
@@ -1126,7 +1629,9 @@ class BoundedIqfeedL1CaptureHandoff:
 __all__ = [
     "BoundedIqfeedL1CaptureHandoff",
     "IQFEED_L1_CAPTURE_ENVELOPE_SCHEMA_VERSION",
+    "IqfeedL1CaptureBatchReceipt",
     "IqfeedL1CaptureEnvelope",
     "IqfeedL1CaptureSink",
+    "IqfeedL1ExactPrintVisibility",
     "IqfeedL1ProcessCaptureSink",
 ]
