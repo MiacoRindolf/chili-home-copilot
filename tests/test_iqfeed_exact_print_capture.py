@@ -3,6 +3,7 @@ from __future__ import annotations
 from datetime import datetime, timedelta, timezone
 import hashlib
 import threading
+from types import SimpleNamespace
 
 import pytest
 
@@ -65,8 +66,11 @@ def _reset_bridge_state(monkeypatch):
     with bridge._connection_state_lock:
         bridge._active_connection_generation = 0
         bridge._frame_sequence_by_generation.clear()
+        bridge._wire_chunk_sequence_by_generation.clear()
         bridge._protocol_acknowledged_generations.clear()
         bridge._selected_fields_ack_sha256_by_generation.clear()
+        bridge._selected_fields_phase_by_generation.clear()
+        bridge._selected_fields_request_chunk_fence_by_generation.clear()
     with bridge._capture_handoff_lock:
         bridge._capture_handoff = None
     monkeypatch.setattr(
@@ -80,8 +84,11 @@ def _reset_bridge_state(monkeypatch):
     with bridge._connection_state_lock:
         bridge._active_connection_generation = 0
         bridge._frame_sequence_by_generation.clear()
+        bridge._wire_chunk_sequence_by_generation.clear()
         bridge._protocol_acknowledged_generations.clear()
         bridge._selected_fields_ack_sha256_by_generation.clear()
+        bridge._selected_fields_phase_by_generation.clear()
+        bridge._selected_fields_request_chunk_fence_by_generation.clear()
 
 
 def _frame(
@@ -129,12 +136,17 @@ def _ack_line() -> str:
 
 def _activate_with_ack(generation: int = 7) -> str:
     bridge._activate_connection_generation(generation)
+    bridge._request_selected_update_fields(
+        SimpleNamespace(sendall=lambda _payload: None), generation
+    )
+    chunk_sequence = bridge._next_wire_chunk_sequence(generation)
     line = _ack_line()
     ack_sha256 = hashlib.sha256(line.encode("utf-8")).hexdigest()
     assert bridge._observe_selected_update_fields_ack(
         line,
         connection_generation=generation,
         source_frame_sha256=ack_sha256,
+        source_chunk_sequence=chunk_sequence,
     )
     return ack_sha256
 
@@ -275,17 +287,26 @@ def test_provider_clock_too_far_in_future_is_rejected() -> None:
 
 def test_ack_must_match_exact_ordered_field_roster() -> None:
     bridge._activate_connection_generation(4)
+    bridge._request_selected_update_fields(
+        SimpleNamespace(sendall=lambda _payload: None), 4
+    )
+    chunk_sequence = bridge._next_wire_chunk_sequence(4)
     forged = "S,CURRENT UPDATE FIELDNAMES,Symbol,Most Recent Trade,"
     assert not bridge._observe_selected_update_fields_ack(
         forged,
         connection_generation=4,
         source_frame_sha256=hashlib.sha256(forged.encode()).hexdigest(),
+        source_chunk_sequence=chunk_sequence,
     )
     assert bridge._selected_fields_ack_sha256(4) is None
 
 
 def test_ack_with_interior_empty_field_cannot_rebind_the_roster() -> None:
     bridge._activate_connection_generation(4)
+    bridge._request_selected_update_fields(
+        SimpleNamespace(sendall=lambda _payload: None), 4
+    )
+    chunk_sequence = bridge._next_wire_chunk_sequence(4)
     fields = list(bridge.SELECTED_UPDATE_FIELDS)
     fields.insert(3, "")
     forged = "S,CURRENT UPDATE FIELDNAMES," + ",".join(fields) + ","
@@ -294,12 +315,17 @@ def test_ack_with_interior_empty_field_cannot_rebind_the_roster() -> None:
         forged,
         connection_generation=4,
         source_frame_sha256=hashlib.sha256(forged.encode()).hexdigest(),
+        source_chunk_sequence=chunk_sequence,
     )
     assert bridge._selected_fields_ack_sha256(4) is None
 
 
 def test_exact_ack_bytes_must_match_the_declared_frame_hash() -> None:
     bridge._activate_connection_generation(4)
+    bridge._request_selected_update_fields(
+        SimpleNamespace(sendall=lambda _payload: None), 4
+    )
+    chunk_sequence = bridge._next_wire_chunk_sequence(4)
     line = _ack_line()
 
     assert not bridge._observe_selected_update_fields_ack(
@@ -307,6 +333,7 @@ def test_exact_ack_bytes_must_match_the_declared_frame_hash() -> None:
         connection_generation=4,
         source_frame_sha256="0" * 64,
         source_frame_bytes=line.encode(),
+        source_chunk_sequence=chunk_sequence,
     )
     assert bridge._selected_fields_ack_sha256(4) is None
 
@@ -469,6 +496,9 @@ def test_reader_without_ack_records_both_stream_gaps_and_no_rows() -> None:
 def test_reader_ack_then_q_emits_exact_rows() -> None:
     generation = 10
     bridge._activate_connection_generation(generation)
+    bridge._request_selected_update_fields(
+        SimpleNamespace(sendall=lambda _payload: None), generation
+    )
     now_et = datetime.now(UTC).astimezone(bridge._ET)
     trade_date = now_et.date().isoformat()
     trade_time = now_et.strftime("%H:%M:%S.%f")
