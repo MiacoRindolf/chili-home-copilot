@@ -55,6 +55,7 @@ from .replay_capture_contract import (
     CaptureRunIdentity,
     CaptureStream,
     canonical_json_bytes,
+    resolve_capture_source_payload,
     sha256_json,
     verify_active_capture_input_attestation,
 )
@@ -723,7 +724,15 @@ class CaptureBackedPaperInitialSessionMaterialProvider:
             or captured.receipt.stream is not CaptureStream.IQFEED_PRINT
             or captured.receipt.provider != "iqfeed"
             or captured.receipt.symbol != symbol
-            or captured.receipt.requested_at != trigger.notify_available_at
+            or captured.receipt.requested_at != trigger.read_requested_at
+            or captured.receipt.returned_at != trigger.read_returned_at
+            or trigger.provider_trade_reference_at
+            != trigger.source_provider_event_at
+            or trigger.notify_received_at != trigger.source_received_at
+            or trigger.notify_available_at
+            != trigger.source_original_available_at
+            or captured.receipt.requested_at
+            != captured.receipt.returned_at
             or captured.receipt.replay_network_fallback_used
             or not captured.receipt.content_verified
         ):
@@ -733,6 +742,10 @@ class CaptureBackedPaperInitialSessionMaterialProvider:
         source = captured.source_events[0]
         source_ref = active_read.source_event_refs[0]
         expected_ref = CaptureEventRef.from_event(source)
+        try:
+            source_view = resolve_capture_source_payload(source)
+        except CaptureContractError:
+            _unavailable("initial_provider_trigger_source_provenance_invalid")
         if (
             source_ref != expected_ref
             or source_ref.event_sha256 != trigger.source_event_sha256
@@ -741,7 +754,11 @@ class CaptureBackedPaperInitialSessionMaterialProvider:
             or source_ref.provider_event_at
             != trigger.source_provider_event_at
             or source_ref.received_at != trigger.source_received_at
-            or source_ref.available_at != trigger.source_available_at
+            or source_view.original_available_at
+            != trigger.source_original_available_at
+            or source_view.release_kind != trigger.source_release_kind
+            or source_ref.available_at
+            != trigger.source_durable_available_at
         ):
             _unavailable("initial_provider_trigger_source_attestation_mismatch")
         try:
@@ -808,9 +825,13 @@ class CaptureBackedPaperInitialSessionMaterialProvider:
         clocks = (
             trigger.source_provider_event_at,
             trigger.source_received_at,
-            trigger.source_available_at,
+            trigger.source_original_available_at,
+            trigger.source_durable_available_at,
+            trigger.read_requested_at,
+            trigger.read_returned_at,
             captured.receipt.returned_at,
             active_read.receipt_committed_available_at,
+            trigger.resolved_at,
             proof.attested_available_at,
         )
         if any(value > decision_at for value in clocks):
@@ -818,15 +839,21 @@ class CaptureBackedPaperInitialSessionMaterialProvider:
         if not (
             trigger.source_provider_event_at
             <= trigger.source_received_at
-            <= trigger.source_available_at
+            <= trigger.source_original_available_at
+            <= trigger.source_durable_available_at
+            <= trigger.read_requested_at
+            <= trigger.read_returned_at
             <= captured.receipt.returned_at
             <= active_read.receipt_committed_available_at
+            <= trigger.resolved_at
             <= proof.attested_available_at
             < proof.expires_at
         ):
             _unavailable("initial_provider_capture_clock_mismatch")
         if (
-            (decision_at - trigger.source_available_at).total_seconds()
+            (
+                decision_at - trigger.source_original_available_at
+            ).total_seconds()
             > market_max_age
             or any(
                 (decision_at - value).total_seconds() > context_max_age
@@ -1150,7 +1177,8 @@ class CaptureBackedPaperInitialSessionMaterialProvider:
         expires_at = min(
             decision_at + timedelta(seconds=self.material_ttl_seconds),
             proof.expires_at,
-            trigger.source_available_at + timedelta(seconds=market_max_age),
+            trigger.source_original_available_at
+            + timedelta(seconds=market_max_age),
             candidate_read.read_at + timedelta(seconds=context_max_age),
             selected_freshness + timedelta(seconds=context_max_age),
             selected_source_event_at + timedelta(seconds=context_max_age),

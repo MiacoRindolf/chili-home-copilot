@@ -235,16 +235,12 @@ def _make_bundle(
     resource_path, resource_sha = _publish(read_root / "resources", resource)
 
     bridge_configuration = {
-        "iqfeed_l1": {
-            "schema_version": "chili.iqfeed-l1-bridge-capture-config.v3",
-            "protocol_version": "6.2",
-            "port": 5009,
-        },
-        "iqfeed_l2": {
-            "schema_version": "chili.iqfeed-depth-bridge.capture-config.v1",
-            "protocol_version": "6.2",
-            "port": 9200,
-        },
+        "iqfeed_l1": dict(
+            capture_host.iqfeed_trade_bridge.BRIDGE_CAPTURE_CONFIGURATION
+        ),
+        "iqfeed_l2": dict(
+            capture_host.iqfeed_depth_bridge.BRIDGE_CAPTURE_CONFIGURATION
+        ),
     }
     startup: dict[str, Any] = {
         "schema_version": preflight.STARTUP_EVIDENCE_SCHEMA_VERSION,

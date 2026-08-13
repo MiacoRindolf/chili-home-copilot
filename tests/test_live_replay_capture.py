@@ -28,6 +28,9 @@ from app.services.trading.momentum_neural.first_dip_tape_policy import (
     evaluate_first_dip_tape,
     first_dip_tape_window_from_capture,
 )
+from app.services.trading.momentum_neural.captured_paper_iqfeed_trigger import (
+    CapturedPaperIqfeedTriggerResolver,
+)
 from app.services.trading.momentum_neural.live_replay_capture import (
     ChangeCaptureResult,
     CaptureIdentityEvidence,
@@ -1550,6 +1553,164 @@ def test_supervised_iqfeed_promotion_registers_from_exact_print_and_gaps_prior_q
         service.release_and_seal("VEEE")
     assert admission.coordinator.state is CaptureSessionState.ABORTED
     assert service.health()["running_symbols"] == ()
+
+
+def test_promoted_exact_print_resolves_with_post_run_read_clock(
+    tmp_path: Path,
+) -> None:
+    binding = _binding()
+    pressure = CaptureAdaptivePressureController(binding)
+    pressure.observe(
+        CapturePressureSample(
+            observed_at=BASE + timedelta(seconds=1),
+            resource_binding_sha256=binding.binding_sha256,
+            cpu_percent=20,
+            available_memory_bytes=50_000_000,
+            disk_free_bytes=900_000_000,
+            write_latency_milliseconds=5,
+        )
+    )
+    clock = _WallClock(BASE + timedelta(seconds=2))
+    supervisor_identity, _ = _identity_and_evidence("SUPERVISOR")
+    supervisor = LiveReplayCaptureSupervisor.create(
+        identity=supervisor_identity,
+        resource_binding=binding,
+        pressure_controller=pressure,
+        wall_clock=clock,
+        pretrigger_horizon=timedelta(minutes=3),
+        per_symbol_pretrigger_events=8,
+    )
+    bridge_run_id = "bbfa580c-a467-4ab9-9803-8cf5c2303658"
+    bridge_generation = 7
+    bridge_version = (
+        "iqfeed-l1-exact-print-provenance-v3+sha256:0123456789abcdef"
+    )
+
+    def run_factory(symbol: str, **kwargs):
+        identity, evidence = _identity_and_evidence(symbol)
+        producers = (
+            CaptureProducerSpec(
+                producer_id="live_fsm",
+                instance_id=str(uuid.uuid4()),
+                generation=identity.generation,
+                streams=(
+                    CaptureStream.CODE_BUILD,
+                    CaptureStream.CONFIG_SNAPSHOT,
+                    CaptureStream.FEATURE_FLAG_SNAPSHOT,
+                    CaptureStream.ACCOUNT_RISK_SNAPSHOT,
+                ),
+                code_build_sha256=identity.code_build_sha256,
+                config_sha256=identity.config_sha256,
+                feature_flags_sha256=identity.feature_flags_sha256,
+                resource_binding_sha256=binding.binding_sha256,
+            ),
+            CaptureProducerSpec(
+                producer_id="iqfeed_l1",
+                instance_id=bridge_run_id,
+                generation=bridge_generation,
+                streams=(CaptureStream.IQFEED_PRINT,),
+                code_build_sha256=identity.code_build_sha256,
+                config_sha256=identity.config_sha256,
+                feature_flags_sha256=identity.feature_flags_sha256,
+                resource_binding_sha256=binding.binding_sha256,
+            ),
+        )
+        coordinator = LiveReplayCaptureCoordinator.create(
+            tmp_path / "promoted-exact-print-trigger",
+            identity=identity,
+            certification_symbol=symbol,
+            resource_binding=binding,
+            pressure_controller=pressure,
+            producers=producers,
+            heartbeat_timeout_seconds=300,
+            wall_clock=clock,
+            pretrigger_horizon=timedelta(minutes=3),
+            per_symbol_pretrigger_events=8,
+            writer_batch_events=16,
+            writer_batch_bytes=128 * 1024,
+            writer_poll_seconds=0.01,
+            writer_flush_interval_seconds=0.02,
+            shared_admission_budget=kwargs["shared_admission_budget"],
+            compression_codec="zlib",
+            compression_level=3,
+        )
+        return coordinator, evidence
+
+    service = LiveReplayCaptureProcessService(
+        supervisor=supervisor,
+        run_factory=run_factory,
+    )
+    original_available_at = BASE + timedelta(seconds=3)
+    source_clocks, source_payload = _iqfeed_exact_print_observation(
+        binding=binding,
+        bridge_run_id=bridge_run_id,
+        generation=bridge_generation,
+        frame_sequence=2,
+        available_at=original_available_at,
+    )
+    provenance = dict(source_payload[IQFEED_L1_SOURCE_PROVENANCE_FIELD])
+    provenance["bridge_version"] = bridge_version
+    source_payload[IQFEED_L1_SOURCE_PROVENANCE_FIELD] = provenance
+    clock.set(original_available_at)
+    retained = service.record_broad_input(
+        stream=CaptureStream.IQFEED_PRINT,
+        provider="iqfeed",
+        symbol="VEEE",
+        payload=source_payload,
+        clocks=source_clocks,
+    )
+    assert retained.accepted
+
+    promoted_at = BASE + timedelta(seconds=4)
+    clock.set(promoted_at)
+    admission = service.admit_hot_symbol(
+        "VEEE", required_stream=CaptureStream.IQFEED_PRINT
+    )
+    assert admission.capture_ready
+    notify = {
+        "symbol": "VEEE",
+        "observed_at": source_clocks.provider_event_at.isoformat(),
+        "bid": 4.11,
+        "ask": 4.13,
+        "received_at": source_clocks.received_at.isoformat(),
+        "provider_event_at": None,
+        "provider_trade_reference_at": (
+            source_clocks.provider_event_at.isoformat()
+        ),
+        "timestamp_basis": "iqfeed_q_receive_trade_reference_fenced",
+        "source": "iqfeed_l1",
+        "bridge_version": bridge_version,
+        "message_type": "Q",
+        "bridge_run_id": bridge_run_id,
+        "connection_generation": bridge_generation,
+        "source_frame_sequence": 2,
+        "source_frame_sha256": "c" * 64,
+        "available_at": original_available_at.isoformat(),
+    }
+    read_at = BASE + timedelta(seconds=4, milliseconds=100)
+    clock.set(read_at)
+    resolution = CapturedPaperIqfeedTriggerResolver(
+        capture=service,
+        expected_bridge_version=bridge_version,
+        wall_clock=clock,
+        wait=lambda _seconds: None,
+        max_attempts=1,
+        retry_delay_seconds=0.01,
+        max_notify_age_seconds=2.0,
+        future_tolerance_seconds=0.25,
+    ).resolve(notify, decision_id="promoted-exact-print-decision")
+
+    assert resolution.ready
+    assert resolution.receipt is not None
+    assert resolution.captured_read is not None
+    assert resolution.captured_read.receipt is not None
+    assert resolution.captured_read.receipt.requested_at == read_at
+    assert resolution.receipt.source_original_available_at == (
+        original_available_at
+    )
+    assert resolution.receipt.source_durable_available_at == promoted_at
+    assert resolution.receipt.source_release_kind == "hot_symbol_promotion"
+    service.abort_symbol("VEEE", reason="trigger_test_complete")
 
 
 def test_process_service_routes_upstream_queue_gap_into_hot_promotion(

@@ -42,7 +42,7 @@ from .replay_capture_contract import (
 
 
 IQFEED_TRIGGER_RECEIPT_SCHEMA_VERSION = (
-    "chili.captured-paper-iqfeed-trigger-receipt.v1"
+    "chili.captured-paper-iqfeed-trigger-receipt.v2"
 )
 IQFEED_Q_NOTIFY_SCHEMA_VERSION = "chili.iqfeed-q-notify-authority.v1"
 
@@ -249,7 +249,12 @@ class CapturedPaperIqfeedTriggerReceipt:
     source_provenance_sha256: str
     source_provider_event_at: datetime
     source_received_at: datetime
-    source_available_at: datetime
+    source_original_available_at: datetime
+    source_durable_available_at: datetime
+    source_release_kind: str | None
+    read_requested_at: datetime
+    read_returned_at: datetime
+    resolved_at: datetime
     schema_version: str = IQFEED_TRIGGER_RECEIPT_SCHEMA_VERSION
 
     def to_dict(self) -> dict[str, Any]:
@@ -287,7 +292,16 @@ class CapturedPaperIqfeedTriggerReceipt:
             "source_provenance_sha256": self.source_provenance_sha256,
             "source_provider_event_at": _iso(self.source_provider_event_at),
             "source_received_at": _iso(self.source_received_at),
-            "source_available_at": _iso(self.source_available_at),
+            "source_original_available_at": _iso(
+                self.source_original_available_at
+            ),
+            "source_durable_available_at": _iso(
+                self.source_durable_available_at
+            ),
+            "source_release_kind": self.source_release_kind,
+            "read_requested_at": _iso(self.read_requested_at),
+            "read_returned_at": _iso(self.read_returned_at),
+            "resolved_at": _iso(self.resolved_at),
         }
 
     @property
@@ -329,6 +343,8 @@ class IqfeedTriggerResolution:
         captured = self.captured_read
         if (
             not isinstance(receipt, CapturedPaperIqfeedTriggerReceipt)
+            or receipt.schema_version
+            != IQFEED_TRIGGER_RECEIPT_SCHEMA_VERSION
             or not isinstance(captured, CapturedReadResult)
             or not captured.durable
             or captured.receipt is None
@@ -542,7 +558,9 @@ def _receipt_from_result(
     notify_sha256: str,
     decision_id: str,
     expected_read_id: str,
+    requested_at: datetime,
     returned_at: datetime,
+    resolved_at: datetime,
     window_seconds: float,
 ) -> tuple[CapturedPaperIqfeedTriggerReceipt | None, str]:
     if not isinstance(result, CapturedReadResult) or not result.durable:
@@ -558,7 +576,7 @@ def _receipt_from_result(
         or receipt.stream is not CaptureStream.IQFEED_PRINT
         or receipt.provider != "iqfeed"
         or receipt.symbol != notify.symbol
-        or receipt.requested_at != notify.available_at
+        or receipt.requested_at != requested_at
         or receipt.returned_at != returned_at
         or not receipt.content_verified
         or receipt.replay_network_fallback_used
@@ -569,15 +587,21 @@ def _receipt_from_result(
         or receipt_event.symbol != notify.symbol
         or receipt_event.clocks.received_at < receipt.returned_at
         or receipt_event.clocks.available_at < receipt.returned_at
+        or receipt_event.clocks.available_at > resolved_at
         or receipt_event.payload != receipt.to_dict()
     ):
         return None, "iqfeed_exact_print_capture_read_mismatch"
     if len(result.source_events) != 1 or len(receipt.source_event_sha256s) != 1:
         return None, "iqfeed_exact_print_capture_read_ambiguous"
     source = result.source_events[0]
+    if not isinstance(source, CaptureEvent):
+        return None, "iqfeed_exact_print_source_identity_mismatch"
+    try:
+        view = resolve_capture_source_payload(source)
+    except CaptureContractError:
+        return None, "iqfeed_exact_print_provenance_invalid"
     if (
-        not isinstance(source, CaptureEvent)
-        or receipt.source_event_sha256s != (source.event_sha256,)
+        receipt.source_event_sha256s != (source.event_sha256,)
         or source.identity.identity_sha256 != receipt.identity_sha256
         or source.stream is not CaptureStream.IQFEED_PRINT
         or source.provider != "iqfeed"
@@ -586,7 +610,7 @@ def _receipt_from_result(
         != notify.provider_trade_reference_at
         or source.clocks.market_reference_at is not None
         or source.clocks.received_at != notify.received_at
-        or source.clocks.available_at != notify.available_at
+        or view.original_available_at != notify.available_at
         or source.clocks.available_at > returned_at
         or receipt_event.sequence <= source.sequence
     ):
@@ -611,7 +635,6 @@ def _receipt_from_result(
         return None, "iqfeed_exact_print_query_mismatch"
     try:
         exact_print = CaptureIqfeedPrint.from_event(source)
-        view = resolve_capture_source_payload(source)
         provenance = view.payload.get(IQFEED_L1_SOURCE_PROVENANCE_FIELD)
         validated = validate_iqfeed_exact_print_source_provenance(
             provenance,
@@ -666,7 +689,12 @@ def _receipt_from_result(
             source_provenance_sha256=sha256_json(validated),
             source_provider_event_at=notify.provider_trade_reference_at,
             source_received_at=source.clocks.received_at,
-            source_available_at=source.clocks.available_at,
+            source_original_available_at=view.original_available_at,
+            source_durable_available_at=source.clocks.available_at,
+            source_release_kind=view.release_kind,
+            read_requested_at=requested_at,
+            read_returned_at=returned_at,
+            resolved_at=resolved_at,
         ),
         "iqfeed_exact_print_trigger_ready",
     )
@@ -801,7 +829,7 @@ class CapturedPaperIqfeedTriggerResolver:
                     stream=CaptureStream.IQFEED_PRINT,
                     provider="iqfeed",
                     symbol=notify.symbol,
-                    requested_at=notify.available_at,
+                    requested_at=now,
                     returned_at=now,
                     event_start_exclusive=(
                         notify.provider_trade_reference_at
@@ -816,13 +844,44 @@ class CapturedPaperIqfeedTriggerResolver:
             except CaptureContractError:
                 captured = None
             if captured is not None:
+                try:
+                    completed_at = _utc(
+                        self.wall_clock(),
+                        "iqfeed_trigger_post_read_wall_clock",
+                    )
+                except _NotifyRejected as exc:
+                    return _unavailable(
+                        exc.reason,
+                        attempts=attempt,
+                        notify_sha256=notify_sha256,
+                    )
+                if completed_at < now:
+                    return _unavailable(
+                        "iqfeed_trigger_post_read_clock_regressed",
+                        attempts=attempt,
+                        notify_sha256=notify_sha256,
+                    )
+                freshness = _freshness_reason(
+                    notify,
+                    now=completed_at,
+                    max_notify_age_seconds=self.max_notify_age_seconds,
+                    future_tolerance_seconds=self.future_tolerance_seconds,
+                )
+                if freshness is not None:
+                    return _unavailable(
+                        freshness,
+                        attempts=attempt,
+                        notify_sha256=notify_sha256,
+                    )
                 receipt, last_reason = _receipt_from_result(
                     captured,
                     notify=notify,
                     notify_sha256=notify_sha256,
                     decision_id=decision,
                     expected_read_id=read_id,
+                    requested_at=now,
                     returned_at=now,
+                    resolved_at=completed_at,
                     window_seconds=self.exact_print_window_seconds,
                 )
                 if receipt is not None:

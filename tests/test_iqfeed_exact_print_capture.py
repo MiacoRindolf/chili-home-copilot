@@ -207,6 +207,32 @@ def test_duplicate_tick_is_not_reemitted_but_new_tick_same_microsecond_is() -> N
     assert len(bridge._pending) == 2
 
 
+def test_quote_only_duplicate_has_no_same_frame_exact_print_wake_authority() -> None:
+    _activate_with_ack()
+    assert _parse(_frame()) == (True, True)
+    assert _parse(_frame(bid="4.10")) == (True, True)
+    trades = list(bridge._pending)
+    quotes = list(bridge._pending_nbbo)
+
+    exact_frames = {
+        bridge._capture_frame_key(row)
+        for row in trades
+    }
+    qualified = [
+        row
+        for row in quotes
+        if bridge._capture_frame_key(row) in exact_frames
+    ]
+
+    assert len(trades) == 1
+    assert len(quotes) == 2
+    assert qualified == [quotes[0]]
+    assert quotes[1]["provider_trade_reference_at"] == trades[0]["provider_at"]
+    assert quotes[1]["source_frame_sequence"] != trades[0][
+        "source_frame_sequence"
+    ]
+
+
 @pytest.mark.parametrize(
     "frame",
     [

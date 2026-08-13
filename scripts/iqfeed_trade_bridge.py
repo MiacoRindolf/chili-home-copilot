@@ -54,6 +54,10 @@ _REPO_ROOT = str(Path(__file__).resolve().parents[1])
 if _REPO_ROOT not in sys.path:
     sys.path.insert(0, _REPO_ROOT)
 
+_CAPTURE_HANDOFF_MODULE = (
+    "app.services.trading.momentum_neural.iqfeed_l1_capture"
+)
+
 # Keep the standalone bridge startup independent of ``app.services.trading``:
 # importing that package executes the scanner/market/ML import graph.  Tests pin
 # these wire literals to the canonical app constants consumed by lane health.
@@ -205,6 +209,10 @@ AUTHORITATIVE_TIMESTAMP_BASIS = "iqfeed_q_receive_trade_reference_fenced"
 EXACT_PRINT_TIMESTAMP_BASIS = "iqfeed_selected_trade_date_timems_exact"
 AUTHORITATIVE_MAX_AGE_S = 2.0
 AUTHORITATIVE_FUTURE_TOLERANCE_S = 1.0
+# Keep the capture-visibility wait far inside the original two-second market
+# authority window.  This is code-owned rather than an ambient operator knob:
+# widening it cannot turn an unavailable print into fresh execution evidence.
+CAPTURE_NOTIFY_ACK_TIMEOUT_S = 0.5
 EQUITY_SYMBOL_RE = re.compile(r"^[A-Z][A-Z0-9.]{0,15}$")
 READER_JOIN_TIMEOUT_S = 5.0
 SELECTED_FIELDS_ACK_TIMEOUT_S = 2.0
@@ -371,6 +379,7 @@ BRIDGE_CAPTURE_CONFIGURATION = {
     "db_release_catchup_batch_events": DB_RELEASE_CATCHUP_BATCH_EVENTS,
     "authoritative_max_age_seconds": AUTHORITATIVE_MAX_AGE_S,
     "authoritative_future_tolerance_seconds": AUTHORITATIVE_FUTURE_TOLERANCE_S,
+    "capture_notify_ack_timeout_seconds": CAPTURE_NOTIFY_ACK_TIMEOUT_S,
     "authoritative_timestamp_basis": AUTHORITATIVE_TIMESTAMP_BASIS,
     "observed_at_trade_time": OBSERVED_AT_TRADE_TIME,
     "write_nbbo_tape": WRITE_NBBO_TAPE,
@@ -902,16 +911,31 @@ def _enqueue_nbbo_notifications(
     quote_rows: list[dict],
     available_at: datetime,
 ) -> None:
-    """Enqueue quote notifications inside the row-publication transaction."""
+    """Enqueue normalized row notifications in the caller-owned transaction."""
 
     if not quote_rows or not IQFEED_NOTIFY_ENABLED:
         return
     for row in quote_rows:
         row["available_at"] = available_at
+    _enqueue_nbbo_notification_payloads(
+        connection,
+        payloads=[_notify_payload(row) for row in quote_rows],
+    )
+
+
+def _enqueue_nbbo_notification_payloads(
+    connection: Any,
+    *,
+    payloads: list[str],
+) -> None:
+    """Enqueue only capture-acknowledged immutable notification payloads."""
+
+    if not payloads or not IQFEED_NOTIFY_ENABLED:
+        return
     payload_rows = sa.values(
         sa.column("payload", sa.Text()),
         name="iqfeed_notify_rows",
-    ).data([(_notify_payload(row),) for row in quote_rows])
+    ).data([(payload,) for payload in payloads])
     result = connection.execute(
         sa.select(
             sa.func.pg_notify(
@@ -923,9 +947,73 @@ def _enqueue_nbbo_notifications(
     )
     _require_batch_rowcount(
         result,
-        len(quote_rows),
+        len(payloads),
         operation="NBBO notification enqueue",
     )
+
+
+def _fresh_notification_payloads(
+    payloads: list[str],
+    *,
+    now: datetime,
+) -> list[str]:
+    if not isinstance(now, datetime) or now.tzinfo is None:
+        return []
+    observed_at = now.astimezone(timezone.utc)
+    fresh: list[str] = []
+    for payload in payloads:
+        try:
+            raw = json.loads(payload)
+            if not isinstance(raw, dict):
+                continue
+            anchors = tuple(
+                datetime.fromisoformat(str(raw[name]).replace("Z", "+00:00"))
+                .astimezone(timezone.utc)
+                for name in (
+                    "provider_trade_reference_at",
+                    "received_at",
+                    "available_at",
+                )
+            )
+        except (KeyError, TypeError, ValueError, OverflowError):
+            continue
+        ages = tuple((observed_at - anchor).total_seconds() for anchor in anchors)
+        if all(
+            math.isfinite(age)
+            and -AUTHORITATIVE_FUTURE_TOLERANCE_S
+            <= age
+            <= AUTHORITATIVE_MAX_AGE_S
+            for age in ages
+        ):
+            fresh.append(payload)
+    return fresh
+
+
+def _publish_capture_acknowledged_notifications(payloads: list[str]) -> int:
+    """Best-effort wake delivery after capture authority already exists."""
+
+    if not payloads or not IQFEED_NOTIFY_ENABLED:
+        return 0
+    try:
+        with engine.begin() as connection:
+            fresh_payloads = _fresh_notification_payloads(
+                payloads,
+                now=datetime.now(timezone.utc),
+            )
+            if not fresh_payloads:
+                return 0
+            _enqueue_nbbo_notification_payloads(
+                connection,
+                payloads=fresh_payloads,
+            )
+    except Exception:
+        log.warning(
+            "capture-acknowledged IQFeed notify enqueue failed; wake hints "
+            "dropped without capture-loss relabeling",
+            exc_info=True,
+        )
+        return 0
+    return len(fresh_payloads)
 
 
 def _release_values(
@@ -1066,7 +1154,7 @@ def _release_pending_batch(
     trade_row_ids: tuple[int, ...] | None = None,
     quote_row_ids: tuple[int, ...] | None = None,
 ) -> None:
-    """Release one batch and enqueue its quote notifications set-wise."""
+    """Release one batch without publishing a wake ahead of capture."""
 
     if trade_rows:
         if trade_row_ids is None:
@@ -1119,11 +1207,6 @@ def _release_pending_batch(
                 available_at=available_at,
                 operation="NBBO primary-key release",
             )
-        _enqueue_nbbo_notifications(
-            connection,
-            quote_rows=quote_rows,
-            available_at=available_at,
-        )
     elif quote_row_ids:
         raise RuntimeError("IQFeed NBBO release has row IDs without rows")
 
@@ -1383,6 +1466,381 @@ def _publish_released_capture_rows(
             exc,
         )
         return 0, lost
+
+
+def _publish_released_capture_rows_and_wait(
+    *,
+    trade_rows: list[dict],
+    quote_rows: list[dict],
+    available_at: datetime,
+    timeout_seconds: float,
+    acknowledged_frame_keys: tuple[tuple[str, int, int, str, str], ...],
+) -> Any | None:
+    """Offer one release and wait only for its exact-print sink outcomes."""
+
+    with _capture_handoff_lock:
+        handoff = _capture_handoff
+    if handoff is None:
+        lost = len(trade_rows) + len(quote_rows)
+        if UNCAPTURED_DIAGNOSTIC_FLAG in sys.argv:
+            log.error(
+                "IQFeed replay coverage unavailable: %s",
+                json.dumps(
+                    {
+                        "code": "iqfeed_l1_capture_handoff_unbound_diagnostic",
+                        "lost_rows": lost,
+                        "available_at": available_at.astimezone(timezone.utc)
+                        .isoformat()
+                        .replace("+00:00", "Z"),
+                    },
+                    sort_keys=True,
+                    separators=(",", ":"),
+                ),
+            )
+            return None
+        raise RuntimeError(
+            "IQFeed L1 capture handoff is unbound; refusing silent released-row loss"
+        )
+    try:
+        return handoff.offer_released_rows_and_wait(
+            trade_rows=trade_rows,
+            quote_rows=quote_rows,
+            available_at=available_at,
+            timeout_seconds=timeout_seconds,
+            acknowledged_frame_keys=acknowledged_frame_keys,
+        )
+    except Exception as exc:
+        log.exception(
+            "IQFeed replay capture acknowledgement became indeterminate after "
+            "DB release; notification suppressed without fabricating batch loss: %s",
+            exc,
+        )
+        return None
+
+
+def _account_writer_batch_exception(
+    *,
+    trade_rows: list[dict],
+    quote_rows: list[dict],
+    available_at: datetime,
+    release_committed: bool,
+    capture_publish_entered: bool,
+    error: Exception,
+) -> None:
+    """Record loss only while capture publication is still unambiguous.
+
+    Once the capture handoff has been entered, an escaping failure cannot prove
+    that none of the released rows reached the sink.  Blanket loss accounting
+    at that point would fabricate gaps for retained events.
+    """
+
+    if release_committed and capture_publish_entered:
+        log.warning(
+            "post-release IQFeed processing failed after capture publication "
+            "became indeterminate; wake suppressed without relabeling capture: %s",
+            error,
+        )
+        return
+    with _capture_handoff_lock:
+        handoff = _capture_handoff
+    if handoff is not None:
+        try:
+            handoff.record_release_failure(
+                trade_rows=trade_rows,
+                quote_rows=quote_rows,
+                available_at=available_at,
+            )
+        except Exception:
+            log.exception(
+                "IQFeed release failure and capture loss accounting both failed"
+            )
+    log.warning(
+        "%s failed before capture publication (%d trade, %d BBO rows): %s",
+        "IQFeed DB release" if not release_committed else "IQFeed post-release",
+        len(trade_rows),
+        len(quote_rows),
+        error,
+    )
+
+
+def _capture_frame_key(row: Any) -> tuple[str, int, int, str, str] | None:
+    if not isinstance(row, dict):
+        return None
+    run_id = str(row.get("bridge_run_id") or "").strip().lower()
+    generation = row.get("connection_generation")
+    sequence = row.get("source_frame_sequence")
+    frame_sha256 = str(row.get("source_frame_sha256") or "").strip().lower()
+    symbol = str(row.get("sym") or "").strip().upper()
+    if (
+        not run_id
+        or isinstance(generation, bool)
+        or not isinstance(generation, int)
+        or generation <= 0
+        or isinstance(sequence, bool)
+        or not isinstance(sequence, int)
+        or sequence <= 0
+        or len(frame_sha256) != 64
+        or any(ch not in "0123456789abcdef" for ch in frame_sha256)
+        or EQUITY_SYMBOL_RE.fullmatch(symbol) is None
+    ):
+        return None
+    return run_id, generation, sequence, frame_sha256, symbol
+
+
+def _capture_ack_timeout_seconds(
+    available_at: datetime,
+    *,
+    now: datetime,
+    authority_rows: list[dict] | None = None,
+) -> float:
+    if (
+        not isinstance(available_at, datetime)
+        or available_at.tzinfo is None
+        or not isinstance(now, datetime)
+        or now.tzinfo is None
+    ):
+        return 0.0
+    release_remaining = AUTHORITATIVE_MAX_AGE_S - (
+        now.astimezone(timezone.utc)
+        - available_at.astimezone(timezone.utc)
+    ).total_seconds()
+    if not math.isfinite(release_remaining) or release_remaining <= 0.0:
+        return 0.0
+    candidate_remaining: list[float] = []
+    for row in authority_rows or ():
+        reference_at = row.get("provider_trade_reference_at")
+        received_at = row.get("received_at")
+        if (
+            not isinstance(reference_at, datetime)
+            or reference_at.tzinfo is None
+            or not isinstance(received_at, datetime)
+            or received_at.tzinfo is None
+        ):
+            continue
+        candidate_remaining.append(
+            min(
+                release_remaining,
+                AUTHORITATIVE_MAX_AGE_S
+                - (
+                    now.astimezone(timezone.utc)
+                    - reference_at.astimezone(timezone.utc)
+                ).total_seconds(),
+                AUTHORITATIVE_MAX_AGE_S
+                - (
+                    now.astimezone(timezone.utc)
+                    - received_at.astimezone(timezone.utc)
+                ).total_seconds(),
+            )
+        )
+    remaining = (
+        max(candidate_remaining)
+        if candidate_remaining
+        else release_remaining
+    )
+    if not math.isfinite(remaining) or remaining <= 0.0:
+        return 0.0
+    return min(CAPTURE_NOTIFY_ACK_TIMEOUT_S, remaining)
+
+
+def _acknowledged_notification_payloads(
+    receipt: Any,
+    *,
+    trade_rows: list[dict],
+    quote_rows: list[dict],
+    available_at: datetime,
+    now: datetime,
+) -> list[str]:
+    """Project only same-frame quotes whose exact print reached the sink."""
+
+    with _capture_handoff_lock:
+        receipt_type = _capture_batch_receipt_type
+        visibility_type = _capture_exact_print_visibility_type
+    if receipt_type is None or visibility_type is None:
+        capture_module = sys.modules.get(_CAPTURE_HANDOFF_MODULE)
+        if capture_module is not None:
+            receipt_type = getattr(
+                capture_module,
+                "IqfeedL1CaptureBatchReceipt",
+                None,
+            )
+            visibility_type = getattr(
+                capture_module,
+                "IqfeedL1ExactPrintVisibility",
+                None,
+            )
+    if not isinstance(receipt_type, type) or not isinstance(
+        visibility_type,
+        type,
+    ):
+        raise RuntimeError("IQFeed capture acknowledgement types are unbound")
+    if type(receipt) is not receipt_type:
+        raise RuntimeError("IQFeed capture acknowledgement type is invalid")
+    total = len(trade_rows) + len(quote_rows)
+    acknowledged_key_set = set(receipt.acknowledged_frame_keys)
+    exact_count = sum(
+        1
+        for row in trade_rows
+        if isinstance(row, dict)
+        and row.get("provider_at") is not None
+        and _capture_frame_key(row) in acknowledged_key_set
+    )
+    counts = (
+        receipt.total_count,
+        receipt.accepted_count,
+        receipt.rejected_count,
+        receipt.exact_print_count,
+        receipt.exact_print_submitted_count,
+        receipt.exact_print_failed_count,
+    )
+    if any(type(value) is not int or value < 0 for value in counts):
+        raise RuntimeError("IQFeed capture acknowledgement counts are malformed")
+    (
+        observed_total,
+        accepted,
+        rejected,
+        observed_exact_count,
+        exact_submitted,
+        exact_failed,
+    ) = counts
+    complete = receipt.complete
+    raw_visibilities = receipt.exact_print_submissions
+    if (
+        observed_total != total
+        or accepted + rejected != total
+        or observed_exact_count != exact_count
+        or exact_submitted + exact_failed > exact_count
+        or type(complete) is not bool
+        or (
+            complete
+            and exact_submitted + exact_failed != exact_count
+        )
+        or not isinstance(raw_visibilities, tuple)
+        or len(raw_visibilities) > exact_submitted
+        or receipt.release_available_at
+        != available_at.astimezone(timezone.utc)
+    ):
+        raise RuntimeError("IQFeed capture acknowledgement is inconsistent")
+
+    released_at = available_at.astimezone(timezone.utc)
+    observed_at = now.astimezone(timezone.utc)
+    trade_by_frame: dict[tuple[str, int, int, str, str], dict] = {}
+    for row in trade_rows:
+        key = _capture_frame_key(row)
+        if key is None or key in trade_by_frame:
+            raise RuntimeError("IQFeed capture trade frame inventory is malformed")
+        trade_by_frame[key] = row
+    expected_acknowledged_keys = tuple(
+        sorted(
+            key
+            for key, row in trade_by_frame.items()
+            if row.get("provider_at") is not None
+            and key in acknowledged_key_set
+        )
+    )
+    if (
+        receipt.acknowledged_frame_keys != expected_acknowledged_keys
+        or len(expected_acknowledged_keys) != exact_count
+    ):
+        raise RuntimeError(
+            "IQFeed capture acknowledgement frame inventory is foreign"
+        )
+    quote_by_frame: dict[tuple[str, int, int, str, str], dict] = {}
+    for row in quote_rows:
+        key = _capture_frame_key(row)
+        if key is None or key in quote_by_frame:
+            raise RuntimeError("IQFeed capture quote frame inventory is malformed")
+        quote_by_frame[key] = row
+
+    payload_by_frame: dict[tuple[str, int, int, str, str], str] = {}
+    for visibility in raw_visibilities:
+        if type(visibility) is not visibility_type:
+            raise RuntimeError(
+                "IQFeed capture acknowledgement visibility type is invalid"
+            )
+        key = (
+            visibility.bridge_run_id,
+            visibility.connection_generation,
+            visibility.source_frame_sequence,
+            visibility.source_frame_sha256,
+            visibility.symbol,
+        )
+        if key not in trade_by_frame or key in payload_by_frame:
+            raise RuntimeError(
+                "IQFeed capture acknowledgement names a foreign exact frame"
+            )
+        trade = trade_by_frame[key]
+        quote = quote_by_frame.get(key)
+        provider_at = visibility.provider_event_at
+        received_at = visibility.received_at
+        original_available_at = visibility.original_available_at
+        bid = visibility.bid
+        ask = visibility.ask
+        bridge_version = visibility.bridge_version
+        if (
+            quote is None
+            or not isinstance(provider_at, datetime)
+            or provider_at.tzinfo is None
+            or not isinstance(received_at, datetime)
+            or received_at.tzinfo is None
+            or not isinstance(original_available_at, datetime)
+            or original_available_at.tzinfo is None
+            or isinstance(bid, bool)
+            or not isinstance(bid, (int, float))
+            or isinstance(ask, bool)
+            or not isinstance(ask, (int, float))
+            or not math.isfinite(float(bid))
+            or not math.isfinite(float(ask))
+            or float(bid) <= 0.0
+            or float(ask) < float(bid)
+            or trade.get("provider_at") != provider_at
+            or trade.get("received_at") != received_at
+            or trade.get("bid") != bid
+            or trade.get("ask") != ask
+            or trade.get("bridge") != bridge_version
+            or quote.get("provider_at") is not None
+            or quote.get("provider_trade_reference_at") != provider_at
+            or quote.get("received_at") != received_at
+            or quote.get("bid") != bid
+            or quote.get("ask") != ask
+            or quote.get("bridge") != bridge_version
+            or original_available_at.astimezone(timezone.utc) != released_at
+        ):
+            raise RuntimeError(
+                "IQFeed capture acknowledgement/source-frame binding mismatch"
+            )
+        anchors = (
+            provider_at.astimezone(timezone.utc),
+            received_at.astimezone(timezone.utc),
+            original_available_at.astimezone(timezone.utc),
+        )
+        receive_event_delta = (anchors[1] - anchors[0]).total_seconds()
+        if not (
+            -AUTHORITATIVE_FUTURE_TOLERANCE_S
+            <= receive_event_delta
+            <= AUTHORITATIVE_MAX_AGE_S
+        ):
+            raise RuntimeError(
+                "IQFeed capture acknowledgement clock relation is invalid"
+            )
+        ages = tuple((observed_at - anchor).total_seconds() for anchor in anchors)
+        if any(
+            not math.isfinite(age)
+            or age < -AUTHORITATIVE_FUTURE_TOLERANCE_S
+            or age > AUTHORITATIVE_MAX_AGE_S
+            for age in ages
+        ):
+            continue
+        notification_row = dict(quote)
+        notification_row["available_at"] = original_available_at
+        payload_by_frame[key] = _notify_payload(notification_row)
+
+    # Preserve the released quote order. A quote-only duplicate has no exact
+    # visibility for its own source frame and is therefore intentionally silent.
+    return [
+        payload_by_frame[key]
+        for row in quote_rows
+        if (key := _capture_frame_key(row)) in payload_by_frame
+    ]
 
 
 def _record_unreleased_capture_gap(
@@ -1844,6 +2302,8 @@ _protocol_acknowledged_generations: set[int] = set()
 _selected_fields_ack_sha256_by_generation: dict[int, str] = {}
 _capture_handoff_lock = threading.Lock()
 _capture_handoff: Any | None = None
+_capture_batch_receipt_type: type | None = None
+_capture_exact_print_visibility_type: type | None = None
 _exact_print_heartbeat_lock = threading.Lock()
 _exact_print_heartbeat_event = threading.Event()
 _exact_print_heartbeat_thread: threading.Thread | None = None
@@ -2120,15 +2580,53 @@ def bind_capture_handoff(handoff: Any) -> None:
 
     if (
         not callable(getattr(handoff, "offer_released_rows", None))
+        or not callable(
+            getattr(handoff, "offer_released_rows_and_wait", None)
+        )
         or not callable(getattr(handoff, "record_release_failure", None))
         or not callable(getattr(handoff, "record_connection_boundary", None))
         or not callable(getattr(handoff, "health", None))
     ):
         raise TypeError("IQFeed capture handoff is malformed")
+    handoff_configuration = getattr(handoff, "bridge_configuration", None)
+    handoff_configuration_sha256 = str(
+        getattr(handoff, "bridge_configuration_sha256", "") or ""
+    ).strip().lower()
+    if (
+        not isinstance(handoff_configuration, dict)
+        or handoff_configuration != BRIDGE_CAPTURE_CONFIGURATION
+        or handoff_configuration_sha256
+        != BRIDGE_CAPTURE_CONFIGURATION_SHA256
+    ):
+        raise RuntimeError(
+            "IQFeed capture handoff bridge configuration escaped the loaded bridge"
+        )
     health = handoff.health()
     if not health.get("started") or not health.get("accepting"):
         raise RuntimeError("IQFeed capture handoff must be started before binding")
+    capture_module = sys.modules.get(_CAPTURE_HANDOFF_MODULE)
+    if capture_module is None:
+        raise RuntimeError(
+            "canonical IQFeed L1 capture module must be loaded before binding"
+        )
+    receipt_type = getattr(
+        capture_module,
+        "IqfeedL1CaptureBatchReceipt",
+        None,
+    )
+    visibility_type = getattr(
+        capture_module,
+        "IqfeedL1ExactPrintVisibility",
+        None,
+    )
+    if not isinstance(receipt_type, type) or not isinstance(
+        visibility_type,
+        type,
+    ):
+        raise RuntimeError("canonical IQFeed L1 capture receipt types are absent")
     global _capture_handoff
+    global _capture_batch_receipt_type
+    global _capture_exact_print_visibility_type
     with _connection_state_lock:
         if _active_connection_generation != 0:
             raise RuntimeError("IQFeed capture handoff cannot bind mid-connection")
@@ -2136,12 +2634,16 @@ def bind_capture_handoff(handoff: Any) -> None:
             if _capture_handoff is not None:
                 raise RuntimeError("IQFeed capture handoff is already bound")
             _capture_handoff = handoff
+            _capture_batch_receipt_type = receipt_type
+            _capture_exact_print_visibility_type = visibility_type
 
 
 def unbind_capture_handoff(handoff: Any) -> None:
     """Remove the exact bound handoff after its producer has quiesced."""
 
     global _capture_handoff
+    global _capture_batch_receipt_type
+    global _capture_exact_print_visibility_type
     with _connection_state_lock:
         if _active_connection_generation != 0:
             raise RuntimeError("IQFeed capture handoff cannot unbind mid-connection")
@@ -2149,6 +2651,8 @@ def unbind_capture_handoff(handoff: Any) -> None:
             if _capture_handoff is not handoff:
                 raise RuntimeError("IQFeed capture handoff ownership mismatch")
             _capture_handoff = None
+            _capture_batch_receipt_type = None
+            _capture_exact_print_visibility_type = None
 
 
 def _require_standalone_capture_posture() -> None:
@@ -3306,8 +3810,11 @@ def writer(
             hot_symbols=hot_symbols,
         )
         if rows or nbbo_rows:
+            written_quotes = nbbo_rows if WRITE_NBBO_TAPE else []
+            release_committed = False
+            capture_publish_entered = False
+            available_at = datetime.now(timezone.utc)
             try:
-                written_quotes = nbbo_rows if WRITE_NBBO_TAPE else []
                 # Persist pending rows first and retain their database primary
                 # keys. ``received_at`` may precede this commit by the flush
                 # interval and is not a strategy-availability clock.
@@ -3319,8 +3826,8 @@ def writer(
                         return_row_ids=True,
                     )
                 # Stamp the conservative post-insert publication clock and
-                # enqueue notifications in one follow-up transaction. Releasing
-                # by the returned primary keys preserves migration 318's causal
+                # release rows in one follow-up transaction. Releasing by the
+                # returned primary keys preserves migration 318's causal
                 # boundary without scanning the historical tape by frame identity.
                 # Exact print rows retain the provider Date+TimeMS event clock;
                 # quote rows keep provider_event_at NULL because the selected
@@ -3335,11 +3842,96 @@ def writer(
                         trade_row_ids=trade_row_ids,
                         quote_row_ids=quote_row_ids,
                     )
-                capture_accepted, capture_rejected = _publish_released_capture_rows(
-                    trade_rows=rows,
-                    quote_rows=written_quotes,
-                    available_at=available_at,
+                release_committed = True
+                notification_payloads: list[str] = []
+                exact_frame_keys = {
+                    key
+                    for row in rows
+                    if row.get("provider_at") is not None
+                    and (key := _capture_frame_key(row)) is not None
+                }
+                candidate_quotes = [
+                    row
+                    for row in written_quotes
+                    if _capture_frame_key(row) in exact_frame_keys
+                ]
+                candidate_frame_keys = tuple(
+                    sorted(
+                        key
+                        for row in candidate_quotes
+                        if (key := _capture_frame_key(row)) is not None
+                    )
                 )
+                same_frame_candidates = bool(candidate_frame_keys)
+                ack_timeout = _capture_ack_timeout_seconds(
+                    available_at,
+                    now=datetime.now(timezone.utc),
+                    authority_rows=candidate_quotes,
+                )
+                if (
+                    IQFEED_NOTIFY_ENABLED
+                    and same_frame_candidates
+                    and ack_timeout > 0.0
+                ):
+                    capture_publish_entered = True
+                    capture_receipt = _publish_released_capture_rows_and_wait(
+                        trade_rows=rows,
+                        quote_rows=written_quotes,
+                        available_at=available_at,
+                        timeout_seconds=ack_timeout,
+                        acknowledged_frame_keys=candidate_frame_keys,
+                    )
+                    if capture_receipt is None:
+                        capture_accepted = 0
+                        capture_rejected = len(rows) + len(written_quotes)
+                    else:
+                        try:
+                            notification_payloads = (
+                                _acknowledged_notification_payloads(
+                                    capture_receipt,
+                                    trade_rows=rows,
+                                    quote_rows=written_quotes,
+                                    available_at=available_at,
+                                    now=datetime.now(timezone.utc),
+                                )
+                            )
+                            capture_accepted = getattr(
+                                capture_receipt,
+                                "accepted_count",
+                            )
+                            capture_rejected = getattr(
+                                capture_receipt,
+                                "rejected_count",
+                            )
+                        except Exception:
+                            # Capture may already be retained.  An invalid
+                            # acknowledgement projection suppresses wake-up but
+                            # must not fabricate a second capture-loss gap.
+                            notification_payloads = []
+                            capture_accepted = 0
+                            capture_rejected = 0
+                            log.exception(
+                                "IQFeed capture acknowledgement could not be "
+                                "bound to its exact notification frames"
+                            )
+                else:
+                    capture_publish_entered = True
+                    capture_accepted, capture_rejected = (
+                        _publish_released_capture_rows(
+                            trade_rows=rows,
+                            quote_rows=written_quotes,
+                            available_at=available_at,
+                        )
+                    )
+
+                # Notification is a wake-up hint, not capture authority.  Its
+                # own transaction runs only after the exact-print sink has
+                # acknowledged the matching frame.  Failure here never rewrites
+                # already-retained capture as a false release loss.
+                if notification_payloads:
+                    _publish_capture_acknowledged_notifications(
+                        notification_payloads
+                    )
                 # Telemetry is queued only after release and capture publication.
                 # Its independent daemon writer can never stall this sole tape
                 # drain or delay PAPER's already-committed capture handoff.
@@ -3360,25 +3952,17 @@ def writer(
                         capture_accepted + capture_rejected,
                     )
             except Exception as e:
-                failure_at = datetime.now(timezone.utc)
-                with _capture_handoff_lock:
-                    handoff = _capture_handoff
-                if handoff is not None:
-                    try:
-                        handoff.record_release_failure(
-                            trade_rows=rows,
-                            quote_rows=(nbbo_rows if WRITE_NBBO_TAPE else []),
-                            available_at=failure_at,
-                        )
-                    except Exception:
-                        log.exception(
-                            "IQFeed DB release failure and capture loss accounting both failed"
-                        )
-                log.warning(
-                    "trade/BBO insert failed (%d trade, %d BBO rows): %s",
-                    len(rows),
-                    len(nbbo_rows),
-                    e,
+                _account_writer_batch_exception(
+                    trade_rows=rows,
+                    quote_rows=written_quotes,
+                    available_at=(
+                        available_at
+                        if release_committed
+                        else datetime.now(timezone.utc)
+                    ),
+                    release_committed=release_committed,
+                    capture_publish_entered=capture_publish_entered,
+                    error=e,
                 )
         # IGNITION: emit queued nominations on their own channel in their own
         # transaction — contained so a failure can never affect the tape path.
