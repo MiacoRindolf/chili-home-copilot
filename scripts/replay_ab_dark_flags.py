@@ -452,6 +452,24 @@ GOLDEN = True
 SRC_TICKS = "replay_golden_ticks"
 SRC_NBBO = "replay_golden_nbbo"
 
+# MASSIVE-SNAPSHOT QUOTE POISON (2026-08-15, VTAK 07-08 cycle-9 autopsy): ang
+# once-a-minute na Massive HTTP snapshot poller rows ay MALING time-alignment —
+# sinukat laban sa iqfeed_l1 event feed sa parehong minuto: VTAK 07-08 mean
+# divergence 6.8%, MAX 31.4% (13:45Z: massive bid/ask 1.53/1.54 habang ang
+# tunay na market at 100%-tick-embedded quotes ay 1.20/1.21). Ang isang lason
+# na row na tumama sa grid ay pinakain sa fill model ang pekeng ask → binili
+# ng mock sa 1.54 ang 1.21 na market: −425.53 sa ISANG cycle (−3.3R), ang
+# pinakamalaking per-cycle loss ng canon v3 — imposible sa live. Kumpara,
+# ang massive_ws (real-time websocket) ay 0.74% mean/0.94% max — malinis at
+# mananatili. 20/22 canon window ang may snapshot rows (400-950 bawat isa);
+# bawat window ay may dense iqfeed_l1 (7k-1.19M rows) kaya ang exclusion ay
+# purong poison removal — kung sakaling starved ang matira, ang umiiral na
+# NBBO_STARVATION fallback (L10) ang sasalo. Ang golden ARCHIVE rows mismo ay
+# hindi ginagalaw (tapat na record ng na-capture); ang READER ang may maling
+# tiwala sa delayed poll source.
+NBBO_POISON_SOURCES = ("massive_snapshot",)
+_NBBO_SOURCE_FILTER_SQL = "AND source NOT IN ('massive_snapshot') "
+
 # NBBO-STARVATION FALLBACK (2026-08-04, L10/HYFM): kapag ang na-capture na NBBO ay
 # starved (HYFM 08-03: 173 quotes sa 2h45m — subscribe-hint starvation bago ang L9
 # C1), ang quote-driven decision grid ay bumabagsak sa ~minutong cadence at ang
@@ -511,6 +529,7 @@ def load_prod():
         nbbo = pd.read_sql(text(
             "SELECT observed_at, bid, ask, mid FROM " + SRC_NBBO + " "
             "WHERE symbol=:s AND observed_at>=:a AND observed_at<:b AND bid>0 AND ask>=bid "
+            + _NBBO_SOURCE_FILTER_SQL +
             "ORDER BY observed_at ASC, id ASC"), c, params={"s": SYMBOL, "a": WIN_START, "b": WIN_END})
         # downsample ticks at the SQL level (keep every TICK_STRIDE-th) — the full CLRO run
         # window is 200k+ ticks (OOM risk); every 8th keeps ~30k, plenty for the 1m/5m resample
@@ -635,7 +654,9 @@ def mirror_nbbo_streaming(sim_engine):
     scur.execute(
         "SELECT observed_at, bid, ask, mid, spread_bps, day_volume, source "
         "FROM " + SRC_NBBO + " "
-        "WHERE symbol=%s AND observed_at>=%s AND observed_at<%s ORDER BY observed_at ASC, id ASC",
+        "WHERE symbol=%s AND observed_at>=%s AND observed_at<%s "
+        + _NBBO_SOURCE_FILTER_SQL +
+        "ORDER BY observed_at ASC, id ASC",
         (SYMBOL, OHLCV_START, WIN_END))
     dst = sim_engine.raw_connection()
     dcur = dst.cursor()
