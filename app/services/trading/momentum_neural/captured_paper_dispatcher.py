@@ -1115,6 +1115,58 @@ def dispatch_live_runner_tick(
         raise CapturedPaperExecutionProhibitedError(
             "captured_paper_non_equity_execution_prohibited"
         )
+    # LEGACY TIME-SHARE DISPATCH (2026-08-14, operator-approved dual-track):
+    # kapag ang operator mode switch ay ON, ang isang alpaca_spot na session na
+    # WALANG durable captured-paper owner marker ay dumadaan sa ordinaryong
+    # runner — ang parehong absence-preserves-the-pre-bind-path na semantics ng
+    # revalidate_captured_paper_session_owner, itinaas lang sa dispatch
+    # boundary. Ang sesyong PAG-AARI ng captured service (may marker) ay hindi
+    # kailanman nililiko dito, at ang dedicated (captured_paper_only) na proseso
+    # ay hindi kailanman gumagamit ng escape na ito. Default OFF ang switch:
+    # operational posture flag ito (sino ang may kontrol sa paper account),
+    # hindi strategy lever — ang pag-ON ay desisyon ng operator sa time-share
+    # window habang naka-pause ang captured service.
+    if (
+        not captured_paper_only
+        and bool(
+            getattr(
+                settings,
+                "chili_momentum_legacy_alpaca_dispatch_enabled",
+                False,
+            )
+        )
+    ):
+        locked = _load_ordinary_live_session_for_update(db, int(session_id))
+        if locked is None:
+            raise CapturedPaperRuntimeUnavailableError(
+                "captured_paper_ordinary_route_drift"
+            )
+        locked_family = normalize_execution_family(
+            getattr(locked, "execution_family", None)
+        )
+        locked_symbol = str(
+            getattr(locked, "symbol", "") or ""
+        ).strip().upper()
+        locked_snapshot = getattr(locked, "risk_snapshot_json", None)
+        locked_marker = (
+            locked_snapshot.get(_SESSION_OWNER_KEY)
+            if type(locked_snapshot) is dict
+            else None
+        )
+        if (
+            int(getattr(locked, "id", 0) or 0) == int(session_id)
+            and locked_family == EXECUTION_FAMILY_ALPACA_SPOT
+            and locked_symbol == symbol
+            and locked_marker is None
+        ):
+            return _ordinary_tick(
+                db,
+                int(session_id),
+                non_paper_tick=non_paper_tick,
+            )
+        # May marker o nag-drift ang row — bumalik sa captured na landas
+        # (ang runtime-unavailable na error sa ibaba ang tamang kalabasan
+        # kapag patay ang captured service at may-ari pa rin ito ng session).
     snapshot = getattr(sess, "risk_snapshot_json", None)
     snapshot = snapshot if isinstance(snapshot, dict) else {}
 
