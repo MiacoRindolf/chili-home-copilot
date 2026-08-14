@@ -6464,6 +6464,11 @@ class Settings(BaseSettings):
     # SUM of fractions is < 1.0 so a runner always remains. INVARIANT-A (ratchet stop) is
     # preserved (breakeven move unchanged). OFF => the lane takes ONE scale-out then trails
     # (today's behavior, byte-identical). docs/DESIGN/MOMENTUM_LANE.md
+    chili_momentum_legacy_alpaca_dispatch_enabled: bool = Field(
+        default=False,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_LEGACY_ALPACA_DISPATCH_ENABLED"),
+        description="OPERATOR MODE SWITCH (2026-08-14 dual-track time-share), HINDI strategy lever: kapag ON, ang alpaca_spot na session na WALANG durable captured-paper owner marker ay dini-dispatch sa ordinaryong legacy runner sa halip na hingan ng CapturedPaperRuntime. Para sa napagkasunduang time-share windows habang naka-pause ang captured service ni Codex — ang sesyong may owner marker ay hindi kailanman nililiko. Default OFF: ang pag-ON ay tahasang desisyon ng operator kung sino ang may kontrol sa iisang Alpaca paper account; HUWAG i-ON habang tumatakbo ang captured service (advisory-lock at orphan-reconciler na banggaan).",
+    )
     chili_momentum_symbol_day_loss_lockout_enabled: bool = Field(
         default=True,
         validation_alias=AliasChoices("CHILI_MOMENTUM_SYMBOL_DAY_LOSS_LOCKOUT_ENABLED"),
