@@ -32676,6 +32676,50 @@ def _migration_358_trading_session_capture_lookup_index(conn) -> None:
         raise RuntimeError("migration 358 capture lookup index contract differs")
 
 
+def _migration_359_terminalize_legacy_live_error_sessions(conn) -> None:
+    """Backfill ``ended_at`` for pre-2026-08 ``live_error`` zombie sessions.
+
+    814 alpaca_spot sessions from the 2026-06-12..07-10 old-lane era died in
+    ``live_error`` with ``ended_at`` NULL. The stale-session reaper cannot
+    terminalize them (broker terminal-truth verification fails for ancient
+    sessions) but still bumps ``updated_at`` on every pass — and the loss-guard
+    history reader uses ``coalesce(ended_at, updated_at)`` as the terminal
+    clock, so the whole cohort re-enters EVERY current ET day's terminal
+    inventory. They carry no account-generation stamp (pre-stamping era), so
+    the reader fail-closes with ``loss_guard_account_generation_unknown`` and
+    the auto-arm never arms (2026-08-14 window: 146 passes, all skipped).
+
+    The true death times were lost to the daily ``updated_at`` bumps; pinning
+    ``ended_at = started_at + 1 day`` is the tightest honest bound (every such
+    session was dead within its own trading day) and permanently removes the
+    cohort from any current-day window while preserving the rows for audit.
+    """
+
+    if "trading_automation_sessions" not in _tables(conn):
+        conn.commit()
+        return
+    conn.execute(
+        text(
+            "UPDATE trading_automation_sessions "
+            "SET ended_at = started_at + interval '1 day' "
+            "WHERE state = 'live_error' "
+            "AND ended_at IS NULL "
+            "AND started_at < '2026-08-01'"
+        )
+    )
+    remaining = conn.execute(
+        text(
+            "SELECT count(*) FROM trading_automation_sessions "
+            "WHERE state = 'live_error' AND ended_at IS NULL "
+            "AND started_at < '2026-08-01'"
+        )
+    ).scalar()
+    if int(remaining or 0) != 0:
+        raise RuntimeError(
+            "migration 359 left legacy live_error sessions unterminalized"
+        )
+
+
 MIGRATIONS = [
     ("001_add_email", _migration_001_add_email),
     ("002_add_image_path", _migration_002_add_image_path),
@@ -33152,6 +33196,8 @@ MIGRATIONS = [
      _migration_357_momentum_viability_index_dedupe_and_autovacuum),
     ("358_trading_session_capture_lookup_index",
      _migration_358_trading_session_capture_lookup_index),
+    ("359_terminalize_legacy_live_error_sessions",
+     _migration_359_terminalize_legacy_live_error_sessions),
 ]
 
 
