@@ -98,7 +98,13 @@ ROSS_PHASE_XREF = {
                              "ohlcv_start": "2026-07-07T11:40:00", "prepend": False},
 }
 
-BASELINE_TARGET = 22          # legacy tie-backs + top-gold fill
+# 2026-08-15: 22 -> 48. Ang canon-v3 cohort (22 windows, Hun-Hul) ay natabunan
+# ng 16+ bagong higanteng pins (08-06..08-13, 600k-1.2M ticks) sa largest-N
+# promotion — bumagsak sa 'library' tier at HINDI na runnable ng batch runner
+# ("only the content-hashed baseline tier is runnable"), kaya imposible ang
+# canon re-run/reprice sa sariwang manifest. 48 = tiebacks + canon cohort +
+# bagong pins + margin; ang MAX_PER_DAY=2 ay eksaktong kasya sa canon days.
+BASELINE_TARGET = 48          # legacy tie-backs + top-gold fill
 MAX_PER_DAY = 2               # diversity: no single day monopolizes the baseline
 
 
