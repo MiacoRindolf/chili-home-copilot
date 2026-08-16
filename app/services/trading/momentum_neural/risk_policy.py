@@ -3721,6 +3721,64 @@ def fresh_ignition_reentry_allowed(
     return True, "ignition_exempt"
 
 
+def bailout_maker_reentry_decision(
+    *,
+    enabled: bool,
+    last_exit_reason: str | None,
+    last_exit_return_bps: float | None,
+    last_exit_at_utc: str | None,
+    now_utc: Any,
+    window_seconds: float,
+) -> tuple[bool, str]:
+    """L14 — POST-BAILOUT MAKER RE-ENTRY (pure, zero-I/O; 2026-08-16 L2a autopsy).
+
+    Ang churn class (~-450 ng canon-v4 -492 net) ay sunud-sunod na LOSING
+    bailouts na may 0-16s na re-entry gaps (TVRD median 3s/hold 1s), bawat isa
+    tumatawid sa ask = bayad ang spread bawat attempt. Ang time-spacing ay
+    NAPATUNAYANG winner-killer (101-cycle sukat: panalo median gap 4s, 71% <20s
+    — mas mabilis pa sa mga talo), kaya ang lever ay hindi bumabawas ng
+    attempts kundi ng HALAGA per attempt: ang rapid re-attempt pagkatapos ng
+    LOSING bailout ay nag-po-POST sa BID (maker/join) sa halip na tumawid sa
+    guarded ask. Fill = mas murang entry sa pullback; non-fill = "a missed
+    fill, not a chase" (ang umiiral na ack-timeout/rest-bars cancel). Ross-
+    faithful: pagkatapos ng failed break, binibid niya ang pullback.
+
+    True LANG kapag: enabled AND ang huling exit ay bailout-class AND talo
+    (rb<0; ang breakeven/profit bailout ay malayang mag-marketable ulit) AND
+    nasa loob ng ``window_seconds`` mula sa exit. Anumang sira/kulang na input
+    ⇒ False (ang marketable guarded-ask ang dating daan — fail-toward-legacy).
+    """
+    if not enabled:
+        return False, "flag_off"
+    reason = str(last_exit_reason or "").strip().lower()
+    if not reason.startswith("bailout"):
+        return False, "not_bailout_exit"
+    try:
+        rb = float(last_exit_return_bps) if last_exit_return_bps is not None else None
+    except (TypeError, ValueError):
+        rb = None
+    if rb is None or rb >= 0:
+        return False, "not_a_loss"
+    if not last_exit_at_utc:
+        return False, "no_exit_timestamp"
+    try:
+        exit_dt = datetime.fromisoformat(str(last_exit_at_utc))
+        now = now_utc
+        if getattr(exit_dt, "tzinfo", None) is not None:
+            exit_dt = exit_dt.replace(tzinfo=None)
+        if getattr(now, "tzinfo", None) is not None:
+            now = now.replace(tzinfo=None)
+        age_s = (now - exit_dt).total_seconds()
+        win = float(window_seconds)
+    except (TypeError, ValueError):
+        return False, "bad_timestamp"
+    if not math.isfinite(age_s) or age_s < 0 or win <= 0:
+        return False, "bad_timestamp"
+    if age_s > win:
+        return False, "outside_window"
+    return True, "maker_reentry"
+
+
 def symbol_day_loss_lockout_decision(
     *,
     enabled: bool,

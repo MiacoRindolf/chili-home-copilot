@@ -6469,6 +6469,18 @@ class Settings(BaseSettings):
         validation_alias=AliasChoices("CHILI_MOMENTUM_LEGACY_ALPACA_DISPATCH_ENABLED"),
         description="OPERATOR MODE SWITCH (2026-08-14 dual-track time-share), HINDI strategy lever: kapag ON, ang alpaca_spot na session na WALANG durable captured-paper owner marker ay dini-dispatch sa ordinaryong legacy runner sa halip na hingan ng CapturedPaperRuntime. Para sa napagkasunduang time-share windows habang naka-pause ang captured service ni Codex — ang sesyong may owner marker ay hindi kailanman nililiko. Default OFF: ang pag-ON ay tahasang desisyon ng operator kung sino ang may kontrol sa iisang Alpaca paper account; HUWAG i-ON habang tumatakbo ang captured service (advisory-lock at orphan-reconciler na banggaan).",
     )
+    chili_momentum_bailout_maker_reentry_enabled: bool = Field(
+        default=True,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_BAILOUT_MAKER_REENTRY_ENABLED"),
+        description="L14 (2026-08-16, L2a churn autopsy sa canon v4): ang EQUITY re-attempt sa loob ng window pagkatapos ng LOSING bailout exit ay nag-po-POST ng entry limit sa BID (maker/join) sa halip na tumawid sa guarded ask. Ang churn class (~-450 ng canon-v4 -492 net) ay 0-16s bailout->re-entry loops (TVRD median gap 3s/hold 1s, 20/29 exits bailout) na nagbabayad ng spread bawat attempt; ang time-spacing ay NAPATUNAYANG winner-killer sa 101-cycle na sukat (panalo median gap 4s, 71% <20s), kaya ang HALAGA per attempt ang binabawasan, hindi ang bilang. Fill = mas murang pullback entry; non-fill = missed-not-chased (umiiral na ack-timeout/rest-bars cancel; walang repeg anchor). Profit/breakeven bailout = malayang marketable ulit. false = byte-identical legacy (laging marketable guarded-ask).",
+    )
+    chili_momentum_bailout_maker_reentry_window_seconds: float = Field(
+        default=90.0,
+        ge=0.0,
+        le=600.0,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_BAILOUT_MAKER_REENTRY_WINDOW_SECONDS"),
+        description="L14: ang bintana (segundo mula sa losing-bailout exit, replay-aware clock) kung kailan maker-posted ang re-attempt. ANG ISANG dokumentadong base: 90s ang sumasaklaw sa sinukat na churn regime (TVRD 24/28 gaps <=60s, VTAK 14/17) nang may margin; lampas doon ay panibagong setup na at nagma-marketable ulit. 0 = epektibong OFF.",
+    )
     chili_momentum_symbol_day_loss_lockout_enabled: bool = Field(
         default=True,
         validation_alias=AliasChoices("CHILI_MOMENTUM_SYMBOL_DAY_LOSS_LOCKOUT_ENABLED"),
