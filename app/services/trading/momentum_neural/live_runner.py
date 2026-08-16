@@ -16544,6 +16544,10 @@ def _complete_confirmed_live_exit(
             ),
         )
     le["last_exit_reason"] = reason
+    # L14 (post-bailout maker re-entry): ang replay-aware exit clock — ang
+    # rapid-re-attempt window ay sinusukat mula rito (sim clock sa replay,
+    # wall UTC sa live; parehong _utcnow chokepoint).
+    le["last_exit_at_utc"] = _utcnow().isoformat()
     # Shake-out learning: stash the inputs (incl. the REAL momentum stop/target,
     # still on the position here) so a deferred job can judge whether the thesis
     # worked AFTER we exited — was the stop too tight? — instead of the learner
@@ -31985,9 +31989,53 @@ def tick_live_session(
             and bid is not None
             and float(bid) > 0
         )
+        # L14 — POST-BAILOUT MAKER RE-ENTRY (2026-08-16, L2a churn autopsy):
+        # ang rapid re-attempt (loob ng window mula sa LOSING bailout exit) ay
+        # nag-po-POST sa BID sa halip na tumawid sa guarded ask — ang churn
+        # class (~-450 ng canon-v4 net) ay 0-16s bailout->re-entry loops na
+        # nagbabayad ng spread bawat attempt, habang ang time-spacing ay
+        # napatunayang winner-killer (panalo median gap 4s). Fill = mas murang
+        # pullback entry; non-fill = missed-not-chased (umiiral na ack-timeout/
+        # rest-bars cancel; WALANG repeg anchor kaya hindi ito hahabulin
+        # pataas). Ang pure decision ay bailout_maker_reentry_decision
+        # (risk_policy) — fail-toward-legacy marketable sa anumang sirang input.
+        _bailout_maker = False
+        if (
+            not _maker_entry
+            and not str(sess.symbol or "").upper().endswith("-USD")
+            and bid is not None
+            and float(bid) > 0
+        ):
+            from .risk_policy import bailout_maker_reentry_decision
+
+            _bailout_maker, _bm_reason = bailout_maker_reentry_decision(
+                enabled=bool(getattr(settings, "chili_momentum_bailout_maker_reentry_enabled", True)),
+                last_exit_reason=le.get("last_exit_reason"),
+                last_exit_return_bps=_float_or_none(le.get("last_exit_return_bps")),
+                last_exit_at_utc=le.get("last_exit_at_utc"),
+                now_utc=_utcnow(),
+                window_seconds=float(
+                    getattr(settings, "chili_momentum_bailout_maker_reentry_window_seconds", 90.0) or 90.0
+                ),
+            )
+            if _bailout_maker:
+                _emit(db, sess, "live_entry_bailout_maker_reentry", {
+                    "reason": _bm_reason,
+                    "bid": float(bid),
+                    "guarded_ask": guarded_ask,
+                    "last_exit_reason": le.get("last_exit_reason"),
+                    "last_exit_return_bps": _float_or_none(le.get("last_exit_return_bps")),
+                })
         if _maker_entry:
             entry_limit_px = float(bid)
             entry_limit_str = f"{entry_limit_px:.6f}".rstrip("0").rstrip(".")
+        elif _bailout_maker:
+            entry_limit_px = float(bid)
+            entry_limit_str = (
+                quantize_alpaca_equity_limit_price(entry_limit_px, "buy")
+                if normalize_execution_family(ef) in ALPACA_EXECUTION_FAMILIES
+                else _fmt_limit_price_buy(entry_limit_px)
+            )
         else:
             entry_limit_px = guarded_ask
             entry_limit_str = (
