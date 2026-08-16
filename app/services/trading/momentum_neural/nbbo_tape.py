@@ -439,27 +439,52 @@ def _tape_running_up_records(db: Session, *, now_utc: Optional[datetime] = None)
     min_pct = float(getattr(settings, "chili_momentum_running_up_min_pct", 3.0) or 3.0)
     max_symbols = int(getattr(settings, "chili_momentum_running_up_max_symbols", 6) or 6)
     _MIN_SAMPLES = 3  # one stale print must not read as a burst
+
+    # SOURCE PREFERENCE (2026-08-16, canon-v4 poison autopsy): ang
+    # 'massive_snapshot' rows (1-min delayed HTTP poll) ay sinukat na 17.27% MAX
+    # divergence vs iqfeed_l1 sa parehong minuto sa live 08-14 RTH tape (0.83%
+    # mean, p95 3.34%) — at pinakamalala mismo sa mabibilis na mover na
+    # binabantayan ng detector na ito. Isang lasong first/last mid ay
+    # nakakagawa ng PHANTOM burst (nagpapagana ng ignition exemption) o
+    # nakakalunod ng tunay. Kaya: kapag ang symbol ay may sapat na event-grade
+    # rows (hindi massive_snapshot) sa window, event-grade LANG ang basehan ng
+    # burst nito; ang mga symbol na WALANG event coverage (ang SKYQ-class na
+    # dahilan kung bakit umiiral ang sampler) ay nananatili sa snapshot rows —
+    # walang nawawalang coverage, nawawala lang ang phantom evidence.
+    _RUNUP_SQL = (
+        "WITH recent AS ("
+        "  SELECT symbol, mid, day_volume,"
+        "         row_number() OVER (PARTITION BY symbol ORDER BY observed_at ASC) rn_a,"
+        "         row_number() OVER (PARTITION BY symbol ORDER BY observed_at DESC) rn_d,"
+        "         count(*) OVER (PARTITION BY symbol) n"
+        "  FROM momentum_nbbo_spread_tape"
+        "  WHERE observed_at >= :since AND observed_at <= :now AND mid > 0 AND symbol NOT LIKE '%-USD'"
+        "  {source_clause}"
+        ") "
+        "SELECT a.symbol, a.mid AS first_mid, d.mid AS last_mid, d.day_volume AS last_vol "
+        "FROM recent a JOIN recent d ON d.symbol = a.symbol AND d.rn_d = 1 "
+        "WHERE a.rn_a = 1 AND a.n >= :min_n"
+    )
+    params = {
+        "since": (now_utc.replace(tzinfo=None) - timedelta(minutes=lookback_min)),
+        "now": now_utc.replace(tzinfo=None),
+        "min_n": _MIN_SAMPLES,
+    }
     try:
-        rows = db.execute(
-            text(
-                "WITH recent AS ("
-                "  SELECT symbol, mid, day_volume,"
-                "         row_number() OVER (PARTITION BY symbol ORDER BY observed_at ASC) rn_a,"
-                "         row_number() OVER (PARTITION BY symbol ORDER BY observed_at DESC) rn_d,"
-                "         count(*) OVER (PARTITION BY symbol) n"
-                "  FROM momentum_nbbo_spread_tape"
-                "  WHERE observed_at >= :since AND observed_at <= :now AND mid > 0 AND symbol NOT LIKE '%-USD'"
-                ") "
-                "SELECT a.symbol, a.mid AS first_mid, d.mid AS last_mid, d.day_volume AS last_vol "
-                "FROM recent a JOIN recent d ON d.symbol = a.symbol AND d.rn_d = 1 "
-                "WHERE a.rn_a = 1 AND a.n >= :min_n"
-            ),
-            {
-                "since": (now_utc.replace(tzinfo=None) - timedelta(minutes=lookback_min)),
-                "now": now_utc.replace(tzinfo=None),
-                "min_n": _MIN_SAMPLES,
-            },
+        event_rows = db.execute(
+            text(_RUNUP_SQL.format(
+                source_clause="AND (source IS NULL OR source <> 'massive_snapshot')"
+            )),
+            params,
         ).fetchall()
+        all_rows = db.execute(
+            text(_RUNUP_SQL.format(source_clause="")),
+            params,
+        ).fetchall()
+        event_syms = {str(r[0]).strip().upper() for r in event_rows}
+        rows = list(event_rows) + [
+            r for r in all_rows if str(r[0]).strip().upper() not in event_syms
+        ]
     except Exception as exc:
         logger.debug("[nbbo_tape] running-up read failed: %s", exc)
         return []

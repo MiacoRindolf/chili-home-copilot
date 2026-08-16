@@ -19555,15 +19555,32 @@ def _micro_bar_df_from_session(db, symbol: str, *, bar_seconds: int, lookback_mi
     # preloaded tape extends past sim-now and an unbounded read would look ahead.
     _mb_now = _utcnow()
     since = _mb_now - _td(minutes=float(lookback_minutes))
+    # SOURCE PREFERENCE (2026-08-16, canon-v4 poison autopsy): ang delayed-poll
+    # 'massive_snapshot' rows ay hanggang 17.27% ang layo sa tunay na market sa
+    # parehong minuto (live 08-14 sukat) — isang lasong row sa loob ng micro-bar
+    # frame ay pekeng wick/spike sa mismong entry/trail/veto na desisyon.
+    # Event-grade rows muna; kapag KULANG ang event coverage (<2 rows — ang mga
+    # name na snapshot lang ang tape), bumalik sa lahat ng rows: ang coverage
+    # fallback ay eksaktong dating behavior, walang nawawalang symbol.
+    _mb_sql = (
+        "SELECT observed_at, bid, ask FROM momentum_nbbo_spread_tape "
+        "WHERE symbol = :s AND observed_at >= :since AND observed_at <= :now "
+        "AND bid > 0 AND ask > 0 "
+        "{source_clause}"
+        "ORDER BY observed_at ASC"
+    )
+    _mb_params = {"s": str(symbol).upper(), "since": since, "now": _mb_now}
     rows = db.execute(
-        _text(
-            "SELECT observed_at, bid, ask FROM momentum_nbbo_spread_tape "
-            "WHERE symbol = :s AND observed_at >= :since AND observed_at <= :now "
-            "AND bid > 0 AND ask > 0 "
-            "ORDER BY observed_at ASC"
-        ),
-        {"s": str(symbol).upper(), "since": since, "now": _mb_now},
+        _text(_mb_sql.format(
+            source_clause="AND (source IS NULL OR source <> 'massive_snapshot') "
+        )),
+        _mb_params,
     ).fetchall()
+    if not rows or len(rows) < 2:
+        rows = db.execute(
+            _text(_mb_sql.format(source_clause="")),
+            _mb_params,
+        ).fetchall()
     if not rows or len(rows) < 2:
         return None
     # F1 (capture-g fix): REAL per-bucket volume from the trade tape (iqfeed_trade_ticks
