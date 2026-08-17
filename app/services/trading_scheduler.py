@@ -5199,6 +5199,76 @@ def _run_equity_viability_refresh_job():
         write_db.close()
 
 
+def _run_hot_mover_subscribe_hint_job() -> None:
+    """HOT-MOVER SUBSCRIBE HINTS (2026-08-17, MNDR/WETO L1 subscription lag).
+
+    Ang universe funnel (float gate sa shares-OUTSTANDING, circular na premarket
+    $1M floor, RVOL fail-closed sa bagong listing) ay 5–10 minuto bago maipasa
+    ang isang BAGONG sumulpot na mover sa IQFeed bridge — habang nakikita ito ng
+    Warrior scanners sa loob ng segundo. PERO ang bridge ay may 3-segundong
+    fast-poll sa ``momentum_bridge_subscribe_requests`` (HINT, priority #2).
+
+    Ang tulay: ang ``_ross_row`` snapshot poller ay NAGSUSULAT na ng
+    ``source='massive_snapshot'`` tape rows para sa bawat pangalang pumasa sa
+    payak na Ross screen (presyo/dolyar-volume/porsyento) — WALANG float/RVOL
+    gate. Kaya ang "may sariwang snapshot rows PERO walang iqfeed_l1 rows" ay
+    ang eksaktong subscription-gap class. Bawat pass: hanapin ang gap, magsulat
+    ng subscribe HINT (cap na maliit kada pass; idempotent sa read side).
+    Sariling short-lived session; rollback-in-finally; hindi kailanman
+    nagra-raise. Kill-switch: chili_momentum_hot_mover_subscribe_hints_enabled.
+    """
+    from ..config import settings
+    from ..db import SessionLocal
+    from sqlalchemy import text as _sql_text
+
+    if not bool(
+        getattr(settings, "chili_momentum_hot_mover_subscribe_hints_enabled", True)
+    ):
+        return
+    db = SessionLocal()
+    try:
+        rows = db.execute(
+            _sql_text(
+                "SELECT t.symbol FROM ("
+                "  SELECT DISTINCT symbol FROM momentum_nbbo_spread_tape"
+                "  WHERE source = 'massive_snapshot'"
+                "    AND observed_at > now() - interval '10 minutes'"
+                ") t LEFT JOIN ("
+                "  SELECT DISTINCT symbol FROM momentum_nbbo_spread_tape"
+                "  WHERE source = 'iqfeed_l1'"
+                "    AND observed_at > now() - interval '10 minutes'"
+                ") c ON c.symbol = t.symbol "
+                "WHERE c.symbol IS NULL LIMIT 20"
+            )
+        ).fetchall()
+        if rows:
+            from .trading.momentum_neural.bridge_subscribe import (
+                request_bridge_subscription,
+            )
+
+            wrote = 0
+            for (sym,) in rows:
+                if request_bridge_subscription(
+                    db, str(sym), reason="hot_mover_snapshot_gap"
+                ):
+                    wrote += 1
+            if wrote:
+                db.commit()
+                logger.info(
+                    "[scheduler] hot-mover subscribe hints: %d gap symbol(s) hinted (%s)",
+                    wrote,
+                    ", ".join(str(r[0]) for r in rows[:6]),
+                )
+    except Exception:
+        logger.debug("[scheduler] hot-mover subscribe hint job skipped", exc_info=True)
+    finally:
+        try:
+            db.rollback()
+        except Exception:
+            pass
+        db.close()
+
+
 def _run_tape_delta_ignite_job():
     """S1 EVENT-DRIVEN FEEDER — Trigger B (docs/DESIGN/MOMENTUM_ENGINE.md §1/§5).
 
@@ -6847,6 +6917,29 @@ def start_scheduler():
                     coalesce=True,
                     misfire_grace_time=5,
                     next_run_time=datetime.now() + timedelta(seconds=40),
+                )
+
+            # HOT-MOVER SUBSCRIBE HINTS (2026-08-17, MNDR/WETO subscription lag):
+            # snapshot-covered-pero-walang-L1 na mga pangalan ay hini-hint sa
+            # bridge fast path (3s poll) — nilalampasan ang 5-10 min universe
+            # funnel para sa DISCOVERY (ang admission gates ay buo pa rin sa
+            # arm/entry). Job ay no-op kapag off ang kill-switch.
+            if bool(
+                getattr(
+                    _cvr_settings,
+                    "chili_momentum_hot_mover_subscribe_hints_enabled",
+                    True,
+                )
+            ):
+                _scheduler.add_job(
+                    _run_hot_mover_subscribe_hint_job,
+                    trigger=IntervalTrigger(seconds=30),
+                    id="momentum_hot_mover_subscribe_hints",
+                    name="Hot-mover subscribe hints (snapshot->L1 gap, 30s)",
+                    replace_existing=True,
+                    max_instances=1,
+                    coalesce=True,
+                    next_run_time=datetime.now() + timedelta(seconds=45),
                 )
 
             # Phase 0 crypto L2 writer: persist the warmed Coinbase full-book ring

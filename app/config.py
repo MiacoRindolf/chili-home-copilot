@@ -7029,6 +7029,11 @@ class Settings(BaseSettings):
         validation_alias=AliasChoices("CHILI_MOMENTUM_EXIT_LADDER_ENABLED"),
         description="Master gate / kill-switch for the v2 sell-into-strength layer. ON = the ladder read + decision run and emit live_sell_into_strength with the pure-hold counterfactual on every armed tick, AND the INVARIANT-A stop-ratchet applies (can only help). The size-MOVING resting limit is separately gated by chili_momentum_exit_ladder_live.",
     )
+    chili_momentum_hot_mover_subscribe_hints_enabled: bool = Field(
+        default=True,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_HOT_MOVER_SUBSCRIBE_HINTS_ENABLED"),
+        description="Kill-switch para sa hot-mover subscribe hint job (2026-08-17 MNDR/WETO subscription lag): mga pangalang may sariwang massive_snapshot tape rows pero WALANG iqfeed_l1 rows (ang subscription-gap class) ay hini-hint sa IQFeed bridge fast path (momentum_bridge_subscribe_requests, 3s poll) kada 30s — nilalampasan ang 5-10 min universe funnel para sa DISCOVERY lamang; lahat ng admission/arm/entry gates ay hindi ginagalaw.",
+    )
     chili_momentum_halt_trigger_suppression_enabled: bool = Field(
         default=True,
         validation_alias=AliasChoices("CHILI_MOMENTUM_HALT_TRIGGER_SUPPRESSION_ENABLED"),
