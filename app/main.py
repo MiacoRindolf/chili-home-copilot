@@ -697,7 +697,21 @@ def _run_deferred_startup() -> None:
             _recompute_all_ticker_scopes()
         if _sched_role != "none":
             _prewarm_market_context()
+        # 2026-08-17 (Window-2 py-spy autopsy): ang pattern-backtest backfill
+        # thread ay tumatakbo dati sa LAHAT ng role maliban sa "none" — kaya sa
+        # momentum_exec_only na trading window, ang 25-ticker-per-insight na
+        # backfill (BTC/ETH/... pattern backtests, thread pool) ay kumakain ng
+        # CPU nang ORAS-ORAS at pinapabagal ang every-10s auto-arm pass papunta
+        # sa 4-6 MINUTO (ito rin ang sanhi ng healthz timeouts). Ang backfill ay
+        # pattern-LANE maintenance — sa heavy/maintenance roles lang ito dapat.
+        if _sched_role in ("all", "worker", "cron_only", "rnd_only"):
             threading.Thread(target=_backfill_backtests, daemon=True).start()
+        elif _sched_role != "none":
+            _log.info(
+                "[startup] role=%s: skipping backtest backfill thread "
+                "(pattern-lane maintenance; hindi kailangan ng exec-only na window)",
+                _sched_role,
+            )
         else:
             _log.info(
                 "[startup] CHILI_SCHEDULER_ROLE=none: skipping dedup_backtests, cross-asset cleanup, reinfer, "
