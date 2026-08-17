@@ -129,6 +129,49 @@ def topping_tail_from_df(df: Any, **kw: Any) -> bool:
     return False if ohlc is None else is_topping_tail(*ohlc, **kw)
 
 
+def red_candle_volume_ratio_from_df(df: Any, *, lookback_bars: int = 10) -> float | None:
+    """DISTRIBUTION TELL (Ross 2026-08-17 Aral #18: "Higher volume on the red
+    candle"): sa huling ``lookback_bars`` na bar, ang ratio ng kabuuang volume sa
+    PULANG bar (close < open) laban sa kabuuang volume sa BERDENG bar. >1.0 =
+    mas malakas ang benta kaysa bili sa kamakailang tape = distribution warning.
+
+    None (fail-open) kapag walang volume column / kulang na bars / puro
+    doji-o-berde (walang red volume ⇒ 0.0 ang isusukat kung may green volume).
+    Pure, telemetry-first: sinusukat muna ang discrimination bago maging
+    exit-tilt input. [[feedback_evolve_not_devolve]]"""
+    try:
+        if df is None or getattr(df, "empty", True) or len(df) < 2:
+            return None
+        cols = {x.lower(): x for x in df.columns}
+        if "volume" not in cols or "open" not in cols or "close" not in cols:
+            return None
+        tail = df.tail(int(max(2, lookback_bars)))
+        red_vol = 0.0
+        green_vol = 0.0
+        for o, c, v in zip(
+            tail[cols["open"]].tolist(),
+            tail[cols["close"]].tolist(),
+            tail[cols["volume"]].tolist(),
+        ):
+            try:
+                o_f, c_f, v_f = float(o), float(c), float(v)
+            except (TypeError, ValueError):
+                continue
+            if not (v_f >= 0.0):
+                continue
+            if c_f < o_f:
+                red_vol += v_f
+            elif c_f > o_f:
+                green_vol += v_f
+        if green_vol <= 0.0 and red_vol <= 0.0:
+            return None
+        if green_vol <= 0.0:
+            return float("inf") if red_vol > 0 else None
+        return red_vol / green_vol
+    except Exception:
+        return None
+
+
 def _ema(values: list[float], span: int) -> list[float]:
     """Recursive EWM (``adjust=False``, seeded with the first value) — matches
     pandas ``Series.ewm(span=span, adjust=False).mean()`` so replay/live agree.
