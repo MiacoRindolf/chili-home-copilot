@@ -892,6 +892,14 @@ def _legacy_alpaca_timeshare_sizing_active() -> bool:
         getattr(settings, "chili_momentum_legacy_alpaca_dispatch_enabled", False)
     ):
         return False
+    # SEALED-REPLAY INERTNESS: ang replay_v3 ay nagba-balot ng BAWAT decision tick
+    # sa replay_ortex_selection_provider — sa loob nito ang escape ay laging OFF
+    # para ang certification verdict ay hindi kailanman umasa sa operator env flag.
+    try:
+        if _REPLAY_ORTEX_DECISION_STATE.get() is not None:
+            return False
+    except Exception:
+        pass
     try:
         from .adaptive_risk_request_builder import (
             adaptive_risk_capture_provider_installed,
@@ -900,6 +908,35 @@ def _legacy_alpaca_timeshare_sizing_active() -> bool:
         return not adaptive_risk_capture_provider_installed()
     except Exception:
         return False
+
+
+def _session_captured_paper_marked(sess: Any) -> bool:
+    """True kapag ang session ay may ANUMANG captured-paper ownership marker —
+    FINAL (`captured_paper_session_owner`) o PENDING
+    (`captured_paper_session_pending_owner`). Ang mga session na ito ay pag-aari
+    ng sealed lane generation; ang time-share escape ay hindi kailanman
+    dapat mag-post ng order sa kanila (kahit madaanan nila ang dispatch
+    boundary bilang 'ordinary' dahil ang pending key ay hindi ang final key).
+    Fail-CLOSED: hindi mabasa ang snapshot → ituring na marked."""
+    try:
+        snap = getattr(sess, "risk_snapshot_json", None)
+        if not isinstance(snap, dict):
+            return True
+        return (
+            snap.get("captured_paper_session_owner") is not None
+            or snap.get("captured_paper_session_pending_owner") is not None
+        )
+    except Exception:
+        return True
+
+
+def _legacy_alpaca_timeshare_escape(sess: Any) -> bool:
+    """Session-aware na escape check: process-level escape AKTIBO at ang session
+    ay HINDI captured-paper-marked (final man o pending). Ito ang tanging porma
+    na dapat gamitin sa entry/claim/place seams."""
+    return _legacy_alpaca_timeshare_sizing_active() and not _session_captured_paper_marked(
+        sess
+    )
 
 
 def _alpaca_session_is_premarket_now(sess: Any) -> bool:
@@ -3715,7 +3752,7 @@ def _prepare_alpaca_place_claim(
         or adaptive_request_payload is not None
     )
     if not adaptive_pair_present:
-        if not _legacy_alpaca_timeshare_sizing_active():
+        if not _legacy_alpaca_timeshare_escape(sess):
             return None, cid, {
                 "ok": False,
                 "error": "builder_missing_capture_binding",
@@ -3852,10 +3889,22 @@ def _prepare_alpaca_place_claim(
         role_metadata={
             **dict(role_metadata or {}),
             "alpaca_account_id": account_id,
+            # Escape marker para tanggapin ng reservation seam ang pair-less
+            # legacy-sized commit (at doon i-enforce ang per_symbol_cap_usd).
+            **(
+                {"legacy_timeshare_sizing": True}
+                if not adaptive_pair_present
+                else {}
+            ),
         },
         account_scope=account_scope,
-        per_symbol_cap_usd=alpaca_paper_hard_loss_cap_usd(
-            getattr(sess, "execution_family", None)
+        # Ang legacy per-symbol hard cap ay para LANG sa escape (pair-less) na
+        # reservation; sa adaptive path ang resolver packet ang may-ari ng caps —
+        # ang dollar re-clamp dito ay parity break (orihinal na deprecation note).
+        per_symbol_cap_usd=(
+            alpaca_paper_hard_loss_cap_usd(getattr(sess, "execution_family", None))
+            if not adaptive_pair_present
+            else None
         ),
     )
     if not acquired.get("ok"):
@@ -5580,7 +5629,7 @@ def _governed_place(
         # it is explicitly unavailable; it may never inherit primary economics or
         # fall back to legacy sizing.  SELL-to-close/protection does not satisfy
         # `_alpaca_risk_increasing_place` and remains untouched.
-        if not _adaptive_risk_pair and not _legacy_alpaca_timeshare_sizing_active():
+        if not _adaptive_risk_pair and not _legacy_alpaca_timeshare_escape(sess):
             return {
                 "ok": False,
                 "error": "builder_missing_capture_binding",
@@ -5700,6 +5749,32 @@ def _governed_place(
                 ),
             }
             return False
+        if _alpaca_claim.get("_legacy_timeshare_sizing"):
+            # TIME-SHARE ESCAPE: ang marker check ay UNA — huwag kailanman
+            # bumasa ng (posibleng STALE, retained-after-release) lifecycle
+            # binding para sa escape claim; legacy-only release lamang
+            # (parehong helper na ginagamit ng adaptive-reservation-failure
+            # cleanup sa claim prep).
+            legacy_released = bool(
+                release_entry_claim_pre_post_committed(
+                    symbol=_alpaca_claim["symbol"],
+                    claim_token=_alpaca_claim["claim_token"],
+                    owner_session_id=int(sess.id),
+                    client_order_id=_alpaca_cid,
+                    post_bind_token=binder,
+                    account_scope=_alpaca_claim["account_scope"],
+                    alpaca_account_id=account_id,
+                    reason=reason,
+                )
+            )
+            _alpaca_pre_http_release_detail = {
+                "confirmed": legacy_released,
+                "adaptive_released": True,  # walang adaptive footprint
+                "legacy_released": legacy_released,
+                "reason": reason,
+                "legacy_timeshare_sizing": True,
+            }
+            return legacy_released
         snapshot = getattr(sess, "risk_snapshot_json", None)
         snapshot = snapshot if isinstance(snapshot, dict) else {}
         live_exec = snapshot.get(KEY_LIVE_EXEC)
@@ -5714,30 +5789,6 @@ def _governed_place(
             or ""
         ).strip()
         if not reservation_id:
-            if _alpaca_claim.get("_legacy_timeshare_sizing"):
-                # TIME-SHARE ESCAPE: walang adaptive reservation na ire-release —
-                # ang legacy claim + risk ledger lamang (parehong helper na
-                # ginagamit ng adaptive-reservation-failure cleanup sa claim prep).
-                legacy_released = bool(
-                    release_entry_claim_pre_post_committed(
-                        symbol=_alpaca_claim["symbol"],
-                        claim_token=_alpaca_claim["claim_token"],
-                        owner_session_id=int(sess.id),
-                        client_order_id=_alpaca_cid,
-                        post_bind_token=binder,
-                        account_scope=_alpaca_claim["account_scope"],
-                        alpaca_account_id=account_id,
-                        reason=reason,
-                    )
-                )
-                _alpaca_pre_http_release_detail = {
-                    "confirmed": legacy_released,
-                    "adaptive_released": True,  # walang adaptive footprint
-                    "legacy_released": legacy_released,
-                    "reason": reason,
-                    "legacy_timeshare_sizing": True,
-                }
-                return legacy_released
             _alpaca_pre_http_release_detail = {
                 "confirmed": False,
                 "adaptive_released": False,
@@ -5797,7 +5848,7 @@ def _governed_place(
                 "alpaca_account_identity": _account_identity,
             }
         _legacy_escape = (
-            not _adaptive_risk_pair and _legacy_alpaca_timeshare_sizing_active()
+            not _adaptive_risk_pair and _legacy_alpaca_timeshare_escape(sess)
         )
         if _legacy_escape:
             # TIME-SHARE ESCAPE: walang adaptive packet na ibe-verify — pero ang
@@ -6373,13 +6424,19 @@ def _governed_place(
                     dict(_alpaca_claim.get("_frozen_order_request") or {}),
                 )
             ):
-                lifecycle = _sync_adaptive_alpaca_order_lifecycle(
-                    sess,
-                    live_exec,
-                    order=submitted_order,
-                    claim=_alpaca_claim,
-                    adapter=adapter,
-                )
+                if _alpaca_claim.get("_legacy_timeshare_sizing"):
+                    # Escape claim: walang adaptive lifecycle na isi-sync BY
+                    # DESIGN — huwag tatakan ng reconciliation_required ang
+                    # bawat matagumpay na legacy trade (maling forensics).
+                    lifecycle = {"ok": True, "legacy_timeshare_sizing": True}
+                else:
+                    lifecycle = _sync_adaptive_alpaca_order_lifecycle(
+                        sess,
+                        live_exec,
+                        order=submitted_order,
+                        claim=_alpaca_claim,
+                        adapter=adapter,
+                    )
                 if not lifecycle.get("ok"):
                     out["adaptive_risk_reconciliation_required"] = True
                     out["adaptive_risk_lifecycle_error"] = lifecycle.get("error")
@@ -18653,9 +18710,10 @@ def _build_adaptive_alpaca_primary_before_legacy_sizing(
         return None, None, None
     if normalize_execution_family(execution_family) != "alpaca_spot" or not _le_side_long(le):
         raise AdaptiveRiskBuilderError("adaptive_risk_long_alpaca_spot_only")
-    if _legacy_alpaca_timeshare_sizing_active():
+    if _legacy_alpaca_timeshare_escape(sess):
         # TIME-SHARE ESCAPE: walang capture provider sa ordinary lane — ang entry
-        # ay dadaan sa legacy sizing (see _legacy_alpaca_timeshare_sizing_active).
+        # ay dadaan sa legacy sizing (see _legacy_alpaca_timeshare_sizing_active;
+        # ang captured-paper-marked na session ay HINDI kailanman dadaan dito).
         return None, None, None
     place_n = int(le.get("entry_place_count", 0) or 0) + 1
     cid = _entry_client_order_id(
@@ -32386,6 +32444,7 @@ def tick_live_session(
         if (
             normalize_execution_family(sess.execution_family)
             in ALPACA_EXECUTION_FAMILIES
+            and _adaptive_primary_build is None
         ):
             _qty_whole = float(math.floor(float(qty)))
             if _qty_whole < 1.0:
