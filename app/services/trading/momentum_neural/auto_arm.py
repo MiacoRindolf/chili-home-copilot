@@ -1230,6 +1230,21 @@ def _reap_cooldown_active(sym_u: str, now: datetime) -> bool:
     return at is not None and (now - at).total_seconds() < cd_sec
 
 
+def _reap_cooldown_blocks(sym_u: str, now: datetime, *, exempt_sym: str) -> bool:
+    """True when the reap cooldown should keep ``sym_u`` (UPPER) out of the arm queue.
+
+    LEADER EXEMPTION (2026-08-17, IVF premarket starvation): the reap cooldown is an
+    oscillation damper for mid-pack churn — it must never sit out the board's CURRENT #1
+    (``exempt_sym``: candidates[0] after the symbol-of-the-day hoist). The hoist + the
+    displacement victim-veto already guaranteed the leader its slot, but a REAPED leader
+    still sat out the 300–1800s cooldown at the arm gate while weaker names held slots
+    (IVF +190% led the board through its whole sit-out). The #1 re-arms immediately;
+    every other name keeps the damper unchanged."""
+    if not _reap_cooldown_active(sym_u, now):
+        return False
+    return not (sym_u and sym_u == exempt_sym)
+
+
 def _write_reap_cooldown(sym_u: str, now: datetime) -> None:
     """Record a pre-entry reap/displacement of ``sym_u`` (UPPER) so the name sits out
     its effective reap cooldown before it can re-arm — the oscillation damper.
@@ -4078,6 +4093,10 @@ def _try_displacement_for_full_slots(
     # A3: in a WILDCARD regime the breadth-dominant lone mover is the protected leader (its watch
     # slot is never the eviction victim) — concentrate the lane on it. Otherwise the normal leader.
     _leader = _effective_session_leader(db, cands) if _symbol_of_day_focus_enabled() else None
+    # Board #1 is exempt from the newcomer cooldown skip (see _reap_cooldown_blocks) —
+    # a reaped leader must be able to displace its way back in, not just re-arm on an
+    # open slot.
+    _top_sym = str(getattr(cands[0], "symbol", "") or "").upper()
     newcomer = None
     for c in cands:
         su = str(c.symbol or "").upper()
@@ -4089,7 +4108,7 @@ def _try_displacement_for_full_slots(
             continue
         if not _symbol_market_open(c.symbol):
             continue
-        if _reap_cooldown_active(su, _utcnow()):
+        if _reap_cooldown_blocks(su, _utcnow(), exempt_sym=_top_sym):
             continue
         newcomer = c
         break
@@ -4630,6 +4649,10 @@ def run_auto_arm_pass(
     if not candidates:
         out["skipped"] = "no_fresh_live_eligible"
         return out
+    # The board's #1 (hoisted symbol-of-the-day leader when identified, else the top
+    # (tier, ross, viability) name) is exempt from the reap-cooldown skip below — see
+    # _reap_cooldown_blocks. Computed once per pass off the already-ranked list.
+    _cooldown_exempt_sym = str(getattr(candidates[0], "symbol", "") or "").upper()
 
     # Guard 6: NO-A-SETUP SESSION SIT-CASH (NEW INITIATION ONLY, kill-switch
     # chili_momentum_no_asetup_sit_cash_enabled, default OFF => byte-identical: the gate is
@@ -4800,8 +4823,15 @@ def run_auto_arm_pass(
             out["loss_guard_skipped"] += 1
             continue  # 2-strike / post-loss cooldown — walk away like Ross does
         if _reap_cooldown_active(_sym_u, pass_as_of):
-            out["reap_cooldown_skipped"] += 1
-            continue  # just churned/displaced the slot without firing — let a different mover watch
+            if _reap_cooldown_blocks(_sym_u, pass_as_of, exempt_sym=_cooldown_exempt_sym):
+                out["reap_cooldown_skipped"] += 1
+                continue  # just churned/displaced the slot without firing — let a different mover watch
+            out["reap_cooldown_leader_exempt"] = out.get("reap_cooldown_leader_exempt", 0) + 1
+            logger.warning(
+                "[auto_arm] reap-cooldown EXEMPT for board #1 %s — the current leader re-arms "
+                "instead of sitting out its churn damper",
+                _sym_u,
+            )
         if _entry_reject_cooldown_active(_sym_u, pass_as_of):
             out["entry_reject_cooldown_skipped"] += 1
             continue  # broker REFUSED this name's entry recently (suitability/untradable) — don't loop on it
