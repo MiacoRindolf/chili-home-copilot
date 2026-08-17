@@ -32720,6 +32720,34 @@ def _migration_359_terminalize_legacy_live_error_sessions(conn) -> None:
         )
 
 
+def _migration_360_backfill_terminal_ended_at(conn) -> None:
+    """Backfill ``ended_at`` para sa TERMINAL-state sessions na NULL ang ended_at.
+
+    2026-08-17 audit: 527 ``live_cancelled`` + 23 ``live_finished`` + 38
+    ``expired`` + 2 ``cancelled`` na row (06-10..08-17) ang may NULL na
+    ``ended_at`` — mga transition sa ``_safe_transition`` (na hindi nagse-stamp
+    ng ended_at; ang cancel chokepoint sa automation_query lang ang nagse-stamp).
+    Ang mga NULL-ended terminal row ay pumapasok sa mga ``ended_at IS NULL``
+    census/inventory query at nagpaparumi sa active-set reads. Kasabay nito ang
+    code fix sa ``_safe_transition`` (stamp sa terminal transition); ang
+    migration na ito ang backfill ng naipon. ``updated_at`` ang pinakamalapit
+    na tapat na death time (huling state write); fallback ``created_at``.
+    Idempotent by construction (WHERE ended_at IS NULL)."""
+
+    if "trading_automation_sessions" not in _tables(conn):
+        conn.commit()
+        return
+    conn.execute(
+        text(
+            "UPDATE trading_automation_sessions "
+            "SET ended_at = coalesce(updated_at, created_at) "
+            "WHERE ended_at IS NULL "
+            "AND state IN ('live_cancelled','live_finished','live_error',"
+            "'cancelled','expired','failed','completed','live_arm_expired')"
+        )
+    )
+
+
 MIGRATIONS = [
     ("001_add_email", _migration_001_add_email),
     ("002_add_image_path", _migration_002_add_image_path),
@@ -33198,6 +33226,8 @@ MIGRATIONS = [
      _migration_358_trading_session_capture_lookup_index),
     ("359_terminalize_legacy_live_error_sessions",
      _migration_359_terminalize_legacy_live_error_sessions),
+    ("360_backfill_terminal_ended_at",
+     _migration_360_backfill_terminal_ended_at),
 ]
 
 

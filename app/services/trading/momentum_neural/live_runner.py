@@ -17749,6 +17749,18 @@ def _safe_transition(db: Session, sess: TradingAutomationSession, new_state: str
     )
     sess.state = new_state
     sess.updated_at = _utcnow()
+    # ENDED_AT HYGIENE (2026-08-17): 527 live_cancelled + 23 live_finished rows na
+    # NULL ang ended_at ang naipon mula sa mga transition dito (ang buong cancel
+    # chokepoint sa automation_query ay nagse-stamp; ang _safe_transition ay hindi).
+    # Ang mga NULL-ended terminal row ay nagpaparumi sa census/inventory queries.
+    # Stamp sa TERMINAL transition kapag wala pa; hindi ginagalaw ang umiiral.
+    try:
+        from .live_fsm import LIVE_RUNNER_TERMINAL_STATES as _LR_TERMINAL
+
+        if new_state in _LR_TERMINAL and sess.ended_at is None:
+            sess.ended_at = sess.updated_at
+    except Exception:
+        pass
     from .feedback_emit import emit_feedback_after_terminal_transition
     from .outcome_extract import session_terminal_for_feedback
 
