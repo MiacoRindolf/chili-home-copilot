@@ -868,6 +868,40 @@ def _fast_ack_poll_entry(adapter, oid, *, sess, interval_window_s: float):
     return no, fr
 
 
+def _legacy_alpaca_timeshare_sizing_active() -> bool:
+    """TIME-SHARE RUNNER ESCAPE (2026-08-17, tahasang desisyon ng operator, Option C).
+
+    Ang alpaca_spot adaptive-risk sizing ay nangangailangan ng capture provider na
+    ang SEALED captured-paper service lamang ang nakakapag-install (process-private
+    HMAC attestation; walang fallback by design). Ang time-share escape flag
+    (``chili_momentum_legacy_alpaca_dispatch_enabled``) ay pinapadaan ang mga
+    ordinary session sa dispatch boundary, pero ang runner-level requirement ay
+    naiwan — kaya ang ordinaryong lane ay istrukturang hindi makapag-post ng entry
+    (``builder_missing_capture_binding`` sa bawat attempt, 2026-08-17 buong umaga).
+
+    Kapag True: ang lane ay tumatakbo sa LEGACY sizing para sa alpaca_spot —
+    (a) nilalampasan ang adaptive builder (walang raise), (b) tinatanggap ng claim
+    prep at ng governed-place choke point ang kawalan ng adaptive triple, at
+    (c) ang ``alpaca_paper_hard_loss_cap_usd`` ay nagbabalik ng TUNAY na per-trade
+    dollar cap (equity-relative) bilang kapalit na ceiling. Ang sealed lane ay
+    hindi dumadaan dito (mas maaga itong bumabalik sa captured branch), at kapag
+    MAY installed provider (sealed/replay/tests) ang adaptive path ang laging
+    mananaig — ang escape ay para LANG sa provider-less na ordinary context.
+    Papalitan ito ng tamang capture integration sa Codex reseal (2026-08-19+)."""
+    if not bool(
+        getattr(settings, "chili_momentum_legacy_alpaca_dispatch_enabled", False)
+    ):
+        return False
+    try:
+        from .adaptive_risk_request_builder import (
+            adaptive_risk_capture_provider_installed,
+        )
+
+        return not adaptive_risk_capture_provider_installed()
+    except Exception:
+        return False
+
+
 def _alpaca_session_is_premarket_now(sess: Any) -> bool:
     """True kapag ang KASALUKUYANG local session ng symbol ay premarket. Fail-CLOSED
     (False sa anumang error) — ang premarket carve-out sa instruction certification
@@ -3681,13 +3715,17 @@ def _prepare_alpaca_place_claim(
         or adaptive_request_payload is not None
     )
     if not adaptive_pair_present:
-        return None, cid, {
-            "ok": False,
-            "error": "builder_missing_capture_binding",
-            "deferred": True,
-            "pre_place_blocked": True,
-            "client_order_id": cid,
-        }
+        if not _legacy_alpaca_timeshare_sizing_active():
+            return None, cid, {
+                "ok": False,
+                "error": "builder_missing_capture_binding",
+                "deferred": True,
+                "pre_place_blocked": True,
+                "client_order_id": cid,
+            }
+        # TIME-SHARE ESCAPE: legacy-sized entry — walang adaptive triple by design;
+        # tuloy sa generic reserved-risk computation + risk-reservation commit sa
+        # ibaba (kasama ang restored per-symbol hard cap sa reservation).
     if adaptive_pair_present:
         if not isinstance(adaptive_packet, dict) or not isinstance(
             adaptive_claim_payload, dict
@@ -3868,6 +3906,34 @@ def _prepare_alpaca_place_claim(
     except Exception:
         pass
 
+    if not adaptive_pair_present:
+        # TIME-SHARE ESCAPE: walang adaptive reservation na itatali — ang legacy
+        # claim + account-risk reservation (kasama ang restored per-symbol hard
+        # cap) ang buong ledger footprint. Ang release seam ay may kaparehong
+        # escape branch (legacy-only release). Itala ang mode sa claim para sa
+        # forensics.
+        claim["_legacy_timeshare_sizing"] = True
+        update_action_claim_phase_committed(
+            symbol=claim["symbol"],
+            claim_token=claim["claim_token"],
+            phase=ALPACA_CLAIMED,
+            client_order_id=cid,
+            broker_order_id=claim.get("broker_order_id"),
+            metadata={"legacy_timeshare_sizing": True},
+            account_scope=claim["account_scope"],
+        )
+        if exact_creator_generation:
+            return claim, cid, None
+        # Retry/rebound generation sa escape mode: walang adaptive lifecycle
+        # reconciliation — fail-CLOSED sa operator recovery (huwag kailanman
+        # mag-blind-POST ng lumang bound CID).
+        return claim, cid, {
+            "ok": False,
+            "error": "alpaca_bound_entry_cid_absent_operator_recovery_required",
+            "deferred": True,
+            "pre_place_blocked": True,
+            "client_order_id": cid,
+        }
     live_exec = snap.get(KEY_LIVE_EXEC)
     live_exec = dict(live_exec) if isinstance(live_exec, dict) else {}
     adaptive_binding = _ensure_adaptive_alpaca_reservation(
@@ -5514,7 +5580,7 @@ def _governed_place(
         # it is explicitly unavailable; it may never inherit primary economics or
         # fall back to legacy sizing.  SELL-to-close/protection does not satisfy
         # `_alpaca_risk_increasing_place` and remains untouched.
-        if not _adaptive_risk_pair:
+        if not _adaptive_risk_pair and not _legacy_alpaca_timeshare_sizing_active():
             return {
                 "ok": False,
                 "error": "builder_missing_capture_binding",
@@ -5523,6 +5589,9 @@ def _governed_place(
                 "pre_place_blocked": True,
                 "client_order_id": kwargs.get("client_order_id"),
             }
+        # TIME-SHARE ESCAPE: sa legacy mode, ang exposure-increase ay dumadaan sa
+        # claim-prep na nag-commit na ng risk reservation na may restored per-trade
+        # hard cap (alpaca_paper_hard_loss_cap_usd) — hindi ito walang-ceiling.
         # The triplet is reloaded canonically and then independently reserved at
         # the final boundary below.  A caller-supplied "ready" boolean is never
         # consulted; only the committed reservation ID can cross transport.
@@ -5645,6 +5714,30 @@ def _governed_place(
             or ""
         ).strip()
         if not reservation_id:
+            if _alpaca_claim.get("_legacy_timeshare_sizing"):
+                # TIME-SHARE ESCAPE: walang adaptive reservation na ire-release —
+                # ang legacy claim + risk ledger lamang (parehong helper na
+                # ginagamit ng adaptive-reservation-failure cleanup sa claim prep).
+                legacy_released = bool(
+                    release_entry_claim_pre_post_committed(
+                        symbol=_alpaca_claim["symbol"],
+                        claim_token=_alpaca_claim["claim_token"],
+                        owner_session_id=int(sess.id),
+                        client_order_id=_alpaca_cid,
+                        post_bind_token=binder,
+                        account_scope=_alpaca_claim["account_scope"],
+                        alpaca_account_id=account_id,
+                        reason=reason,
+                    )
+                )
+                _alpaca_pre_http_release_detail = {
+                    "confirmed": legacy_released,
+                    "adaptive_released": True,  # walang adaptive footprint
+                    "legacy_released": legacy_released,
+                    "reason": reason,
+                    "legacy_timeshare_sizing": True,
+                }
+                return legacy_released
             _alpaca_pre_http_release_detail = {
                 "confirmed": False,
                 "adaptive_released": False,
@@ -5703,45 +5796,66 @@ def _governed_place(
                 "client_order_id": kwargs.get("client_order_id"),
                 "alpaca_account_identity": _account_identity,
             }
-        try:
-            _adaptive_packet_at_boundary = dict(
-                (alpaca_role_metadata or {})["adaptive_risk_decision_packet"]
-            )
-            _adaptive_claim_at_boundary = load_and_verify_adaptive_risk_reservation_claim(
-                _adaptive_packet_at_boundary,
-                (alpaca_role_metadata or {})["adaptive_risk_reservation_claim"],
-            )
-            _adaptive_inputs_at_boundary = _adaptive_packet_at_boundary[
-                "input_snapshot"
-            ]
-            _observed_account_id = str(_account_identity.get("account_id") or "")
-            _observed_account_identity_sha = (
-                alpaca_paper_account_identity_sha256(_observed_account_id)
-            )
-            _observed_equity = float(_account_identity.get("equity"))
-            _observed_buying_power = float(_account_identity.get("buying_power"))
-            _packet_equity = float(_adaptive_inputs_at_boundary["equity_usd"])
-            _packet_buying_power = float(
-                _adaptive_inputs_at_boundary["buying_power_usd"]
-            )
-            if not (
-                _observed_account_identity_sha
-                == _adaptive_claim_at_boundary.account_identity_sha256
-                and math.isfinite(_observed_equity)
-                and math.isfinite(_observed_buying_power)
-            ):
-                raise AdaptiveRiskContractError(
-                    "adaptive account generation changed before reservation"
+        _legacy_escape = (
+            not _adaptive_risk_pair and _legacy_alpaca_timeshare_sizing_active()
+        )
+        if _legacy_escape:
+            # TIME-SHARE ESCAPE: walang adaptive packet na ibe-verify — pero ang
+            # sariwang broker equity ay kailangan pa rin (fail-CLOSED kapag
+            # hindi mababasa: walang equity = walang cap basis = walang entry).
+            try:
+                _observed_equity = float(_account_identity.get("equity"))
+                if not (math.isfinite(_observed_equity) and _observed_equity > 0):
+                    raise ValueError("equity")
+                _alpaca_account_equity = _observed_equity
+            except (TypeError, ValueError):
+                return {
+                    "ok": False,
+                    "error": "adaptive_risk_daily_account_truth_unavailable",
+                    "deferred": True,
+                    "pre_place_blocked": True,
+                    "client_order_id": kwargs.get("client_order_id"),
+                }
+        else:
+            try:
+                _adaptive_packet_at_boundary = dict(
+                    (alpaca_role_metadata or {})["adaptive_risk_decision_packet"]
                 )
-            _alpaca_account_equity = _observed_equity
-        except (AdaptiveRiskContractError, KeyError, TypeError, ValueError):
-            return {
-                "ok": False,
-                "error": "adaptive_risk_account_snapshot_mismatch",
-                "deferred": True,
-                "pre_place_blocked": True,
-                "client_order_id": kwargs.get("client_order_id"),
-            }
+                _adaptive_claim_at_boundary = load_and_verify_adaptive_risk_reservation_claim(
+                    _adaptive_packet_at_boundary,
+                    (alpaca_role_metadata or {})["adaptive_risk_reservation_claim"],
+                )
+                _adaptive_inputs_at_boundary = _adaptive_packet_at_boundary[
+                    "input_snapshot"
+                ]
+                _observed_account_id = str(_account_identity.get("account_id") or "")
+                _observed_account_identity_sha = (
+                    alpaca_paper_account_identity_sha256(_observed_account_id)
+                )
+                _observed_equity = float(_account_identity.get("equity"))
+                _observed_buying_power = float(_account_identity.get("buying_power"))
+                _packet_equity = float(_adaptive_inputs_at_boundary["equity_usd"])
+                _packet_buying_power = float(
+                    _adaptive_inputs_at_boundary["buying_power_usd"]
+                )
+                if not (
+                    _observed_account_identity_sha
+                    == _adaptive_claim_at_boundary.account_identity_sha256
+                    and math.isfinite(_observed_equity)
+                    and math.isfinite(_observed_buying_power)
+                ):
+                    raise AdaptiveRiskContractError(
+                        "adaptive account generation changed before reservation"
+                    )
+                _alpaca_account_equity = _observed_equity
+            except (AdaptiveRiskContractError, KeyError, TypeError, ValueError):
+                return {
+                    "ok": False,
+                    "error": "adaptive_risk_account_snapshot_mismatch",
+                    "deferred": True,
+                    "pre_place_blocked": True,
+                    "client_order_id": kwargs.get("client_order_id"),
+                }
         _rth_ok, _rth_evidence = _strict_alpaca_rth_entry_window(adapter, sess)
         if not _rth_ok:
             return {
@@ -5832,17 +5946,27 @@ def _governed_place(
                 "pre_place_blocked": True,
                 "client_order_id": kwargs.get("client_order_id"),
             }
-        _daily_loss_ok, _daily_loss_admission = (
-            _adaptive_alpaca_daily_risk_admission(
-                dict(
-                    (alpaca_role_metadata or {})[
-                        KEY_ADAPTIVE_RISK_RESERVATION_REQUEST
-                    ]
-                ),
-                _risk_account_identity,
-                require_captured_economics=True,
+        if _legacy_escape:
+            # TIME-SHARE ESCAPE: ang adaptive equity-fraction daily budget ay
+            # nakatali sa adaptive request payload na wala rito. Ang daily-loss
+            # proteksyon sa legacy mode ay ang umiiral nang loss guards (2-strike
+            # + post-loss cooldown + preflight loss_guard) at ang drawdown
+            # breaker/kill switch; ang per-trade ceiling ay ang restored
+            # alpaca_paper_hard_loss_cap_usd sa reservation commit.
+            _daily_loss_ok = True
+            _daily_loss_admission = {"skipped": "legacy_timeshare_escape"}
+        else:
+            _daily_loss_ok, _daily_loss_admission = (
+                _adaptive_alpaca_daily_risk_admission(
+                    dict(
+                        (alpaca_role_metadata or {})[
+                            KEY_ADAPTIVE_RISK_RESERVATION_REQUEST
+                        ]
+                    ),
+                    _risk_account_identity,
+                    require_captured_economics=True,
+                )
             )
-        )
         if not _daily_loss_ok:
             return {
                 "ok": False,
@@ -5854,16 +5978,20 @@ def _governed_place(
                 "broker_daily_loss_admission": dict(_daily_loss_admission),
             }
         _alpaca_account_equity = float(_risk_account_identity["equity"])
-        _first_dip_ok, _first_dip_evidence = (
-            _final_first_dip_adaptive_confirmation(
-                sess,
-                dict(
-                    (alpaca_role_metadata or {})[
-                        KEY_ADAPTIVE_RISK_RESERVATION_REQUEST
-                    ]
-                ),
+        if _legacy_escape:
+            _first_dip_ok = True
+            _first_dip_evidence = {"skipped": "legacy_timeshare_escape"}
+        else:
+            _first_dip_ok, _first_dip_evidence = (
+                _final_first_dip_adaptive_confirmation(
+                    sess,
+                    dict(
+                        (alpaca_role_metadata or {})[
+                            KEY_ADAPTIVE_RISK_RESERVATION_REQUEST
+                        ]
+                    ),
+                )
             )
-        )
         if not _first_dip_ok:
             return {
                 "ok": False,
@@ -5938,17 +6066,22 @@ def _governed_place(
                 "alpaca_account_identity": _literal_account_identity,
                 "entry_claim_pre_post_released": _released,
             }
-        _literal_daily_ok, _literal_daily = (
-            _adaptive_alpaca_daily_risk_admission(
-                dict(
-                    (alpaca_role_metadata or {})[
-                        KEY_ADAPTIVE_RISK_RESERVATION_REQUEST
-                    ]
-                ),
-                _literal_account_identity,
-                require_captured_economics=False,
+        if _legacy_escape:
+            _literal_daily_ok, _literal_daily = True, {
+                "skipped": "legacy_timeshare_escape"
+            }
+        else:
+            _literal_daily_ok, _literal_daily = (
+                _adaptive_alpaca_daily_risk_admission(
+                    dict(
+                        (alpaca_role_metadata or {})[
+                            KEY_ADAPTIVE_RISK_RESERVATION_REQUEST
+                        ]
+                    ),
+                    _literal_account_identity,
+                    require_captured_economics=False,
+                )
             )
-        )
         if not _literal_daily_ok:
             _released = _release_bound_entry_before_http(
                 "adaptive_daily_budget_changed_pre_post"
@@ -6056,15 +6189,20 @@ def _governed_place(
                 "alpaca_account_identity": _final_account_identity,
                 "entry_claim_pre_post_released": _released,
             }
-        _final_daily_ok, _final_daily = _adaptive_alpaca_daily_risk_admission(
-            dict(
-                (alpaca_role_metadata or {})[
-                    KEY_ADAPTIVE_RISK_RESERVATION_REQUEST
-                ]
-            ),
-            _final_account_identity,
-            require_captured_economics=False,
-        )
+        if _legacy_escape:
+            _final_daily_ok, _final_daily = True, {
+                "skipped": "legacy_timeshare_escape"
+            }
+        else:
+            _final_daily_ok, _final_daily = _adaptive_alpaca_daily_risk_admission(
+                dict(
+                    (alpaca_role_metadata or {})[
+                        KEY_ADAPTIVE_RISK_RESERVATION_REQUEST
+                    ]
+                ),
+                _final_account_identity,
+                require_captured_economics=False,
+            )
         if not _final_daily_ok:
             _released = _release_bound_entry_before_http(
                 "adaptive_daily_budget_changed_during_pre_post_truth"
@@ -18515,6 +18653,10 @@ def _build_adaptive_alpaca_primary_before_legacy_sizing(
         return None, None, None
     if normalize_execution_family(execution_family) != "alpaca_spot" or not _le_side_long(le):
         raise AdaptiveRiskBuilderError("adaptive_risk_long_alpaca_spot_only")
+    if _legacy_alpaca_timeshare_sizing_active():
+        # TIME-SHARE ESCAPE: walang capture provider sa ordinary lane — ang entry
+        # ay dadaan sa legacy sizing (see _legacy_alpaca_timeshare_sizing_active).
+        return None, None, None
     place_n = int(le.get("entry_place_count", 0) or 0) + 1
     cid = _entry_client_order_id(
         session_id=sess.id,
@@ -32236,6 +32378,30 @@ def tick_live_session(
         except Exception:
             _entry_overnight = False
         le["entry_session_overnight"] = bool(_entry_overnight)
+        # WHOLE-SHARE FLOOR para sa Alpaca (time-share escape / legacy sizing):
+        # ang adapter entry certification ay whole-shares-only; ang legacy sizing
+        # ay maaaring mag-produce ng fractional qty na ire-reject bilang
+        # alpaca_fractional_entry_not_certified. I-floor dito; kulang sa 1 share
+        # → laktawan ang entry (masyadong maliit ang sizing sa presyong ito).
+        if (
+            normalize_execution_family(sess.execution_family)
+            in ALPACA_EXECUTION_FAMILIES
+        ):
+            _qty_whole = float(math.floor(float(qty)))
+            if _qty_whole < 1.0:
+                _emit(db, sess, "live_entry_skipped", {
+                    "reason": "alpaca_whole_share_qty_below_one",
+                    "raw_qty": float(qty),
+                })
+                _safe_transition(db, sess, STATE_WATCHING_LIVE)
+                db.flush()
+                return {
+                    "ok": True,
+                    "session_id": sess.id,
+                    "state": sess.state,
+                    "skipped": "alpaca_whole_share_qty_below_one",
+                }
+            qty = _qty_whole
         _entry_kwargs = dict(
             product_id=product_id,
             # SHORT LANE P1b-2: a short session ENTERS with a sell (SELL_TO_OPEN).

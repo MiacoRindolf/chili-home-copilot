@@ -3004,6 +3004,14 @@ def adaptive_risk_source_provider(
         _runtime_source_provider.reset(token)
 
 
+def adaptive_risk_capture_provider_installed() -> bool:
+    """True kapag may naka-install na runtime capture-source provider sa KASALUKUYANG
+    context. Read-only introspection para sa time-share runner escape ng live_runner
+    (ang eskape ay aktibo LANG kapag walang provider — kapag may provider, ang
+    adaptive path ang laging mananaig). Hindi nito ginagalaw ang provider/lease."""
+    return _runtime_source_provider.get() is not None
+
+
 def runtime_adaptive_risk_capture_material(
     **boundary: Any,
 ) -> AdaptiveRiskRuntimeCaptureMaterial:
