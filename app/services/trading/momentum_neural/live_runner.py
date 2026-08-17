@@ -26828,6 +26828,36 @@ def tick_live_session(
             db.flush()
             return {"ok": True, "blocked": True, "reason": quote_block.get("reason")}
 
+    # HALT-AWARE ENTRY SUPPRESSION (2026-08-17, IPST 13:07 phantom fire): habang
+    # may suspected halt na HINDI pa nagre-resume, ang tick-window stats (tick_rate,
+    # n_ticks, recent_high) ay STALE — mga print BAGO pa ang halt — kaya ang
+    # continuation/break/pullback fires sa panahong ito ay phantom (ang IPST
+    # continuation fire ay pumutok 20s pagkatapos ng suspected_halt_detected na may
+    # 136s nang walang print). ENTRY-side lamang: ang selector ay ang parehong
+    # _live_entry_quote_gate_applies na ginagamit ng quote blocks (False sa held/
+    # submitted na session — ang position management at halt-exit lifecycle ay hindi
+    # ginagalaw). Ang sanctioned na entry pagkatapos ng halt ay ang
+    # halt_resume_dip_trigger na tumatakbo sa RESUME — na siyang nagbubura ng
+    # suspected_halt_since_utc marker, kaya kusang bumubukas ulit ang evaluation.
+    if (
+        le.get("suspected_halt_since_utc")
+        and _live_entry_quote_gate_applies(sess, le)
+        and bool(
+            getattr(settings, "chili_momentum_halt_trigger_suppression_enabled", True)
+        )
+    ):
+        _halt_block = {
+            "reason": "suspected_halt_active",
+            "suspected_halt_since_utc": le.get("suspected_halt_since_utc"),
+        }
+        _emit(db, sess, "live_blocked_by_risk", _halt_block)
+        le["last_quote_quality_gate"] = _halt_block
+        _commit_le(sess, le)
+        if sess.state in (STATE_LIVE_ENTRY_CANDIDATE, STATE_LIVE_PENDING_ENTRY) and not le.get("entry_submitted"):
+            _safe_transition(db, sess, STATE_WATCHING_LIVE)
+        db.flush()
+        return {"ok": True, "blocked": True, "reason": "suspected_halt_active"}
+
     mid = float(tick.mid)
     bid = float(tick.bid or mid)
     ask = float(tick.ask or mid)

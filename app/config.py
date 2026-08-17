@@ -7029,6 +7029,11 @@ class Settings(BaseSettings):
         validation_alias=AliasChoices("CHILI_MOMENTUM_EXIT_LADDER_ENABLED"),
         description="Master gate / kill-switch for the v2 sell-into-strength layer. ON = the ladder read + decision run and emit live_sell_into_strength with the pure-hold counterfactual on every armed tick, AND the INVARIANT-A stop-ratchet applies (can only help). The size-MOVING resting limit is separately gated by chili_momentum_exit_ladder_live.",
     )
+    chili_momentum_halt_trigger_suppression_enabled: bool = Field(
+        default=True,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_HALT_TRIGGER_SUPPRESSION_ENABLED"),
+        description="Kill-switch para sa halt-aware ENTRY trigger suppression (2026-08-17 IPST: ang continuation fire ay pumutok habang suspected-halt — stale ang tick-window stats). ON = habang may suspected_halt_since_utc na hindi pa nagre-resume, ang pre-entry trigger evaluation ay naka-block (reason: suspected_halt_active); ang position management, halt-exit lifecycle, at ang sanctioned halt_resume_dip_trigger sa resume ay HINDI ginagalaw.",
+    )
     chili_momentum_alpaca_premarket_entries_enabled: bool = Field(
         default=True,
         validation_alias=AliasChoices("CHILI_MOMENTUM_ALPACA_PREMARKET_ENTRIES_ENABLED"),
