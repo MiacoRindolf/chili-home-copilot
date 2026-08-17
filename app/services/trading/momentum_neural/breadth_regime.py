@@ -35,7 +35,7 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from ....config import settings
 from .market_calendar import is_pre_holiday
@@ -112,7 +112,54 @@ def _percentile(sorted_vals: list[float], q: float) -> float | None:
     return float(sorted_vals[lo] * (1.0 - frac) + sorted_vals[hi] * frac)
 
 
+# PER-MINUTE MEMO (2026-08-17, Window-2 py-spy autopsy): ang regime na ito ay
+# MARKET-WIDE at tinatawag mula sa 3+ site (auto_arm wildcard, live_runner,
+# risk_policy) — ang dalawang trailing-history query nito ay full-scan sa
+# milyon-milyong momentum_viability_history rows, at ito ang #1 na dahilan
+# kaya ang every-10s arm pass ay tumatagal ng 8+ MINUTO. Ang mga baseline ay
+# per-date/per-hour lang magbago, kaya ang per-MINUTO na memo ay semantically
+# lossless. Ang susi ay ang IPINASANG clock (hindi wall) para sa replay:
+# sa sim time, bawat sim-minuto ay sariwang compute pa rin.
+_REGIME_MEMO: dict[str, Any] = {"key": None, "value": None}
+
+
 def compute_breadth_regime(
+    db: "Session | None",
+    *,
+    now: datetime | None = None,
+) -> BreadthRegime:
+    """TTL-memoized (60s monotonic) na harap ng :func:`_compute_breadth_regime_uncached`.
+
+    Ang regime ay market-wide at mabagal magbago (per-hour baselines), kaya
+    ang 60s TTL sa kabuuan ng LAHAT ng call site (auto_arm/live_runner/
+    risk_policy) ay semantically lossless sa live. BYPASS ang memo kapag
+    GOLDEN=1 (replay — pinapanatili ang A/A byte-identical determinism ng
+    #970) o CHILI_PYTEST (tests — walang cross-test leak); pareho silang
+    eksaktong pre-memo behavior."""
+    if db is None:
+        return _NEUTRAL
+    if not bool(getattr(settings, "chili_momentum_wildcard_breadth_regime_enabled", True)):
+        return _NEUTRAL
+    import os as _os
+    import time as _time
+
+    if _os.environ.get("GOLDEN") == "1" or _os.environ.get("CHILI_PYTEST"):
+        return _compute_breadth_regime_uncached(db, now=now)
+    _t = _time.monotonic()
+    _at = _REGIME_MEMO.get("computed_at_monotonic")
+    if (
+        _REGIME_MEMO.get("value") is not None
+        and _at is not None
+        and (_t - float(_at)) < 60.0
+    ):
+        return _REGIME_MEMO["value"]
+    result = _compute_breadth_regime_uncached(db, now=now)
+    _REGIME_MEMO["computed_at_monotonic"] = _time.monotonic()
+    _REGIME_MEMO["value"] = result
+    return result
+
+
+def _compute_breadth_regime_uncached(
     db: "Session | None",
     *,
     now: datetime | None = None,
@@ -159,17 +206,24 @@ def compute_breadth_regime(
         # count DISTINCT freshness-valid live_eligible equity symbols per prior session, in the
         # SAME ±1h time-of-day window, over the trailing N sessions. p20 of that = the floor.
         hour = now_utc.hour
+        # 2026-08-17 perf: range predicates sa observed_at (index-usable) sa
+        # halip na ::date cast na nagpi-pilit ng full scan sa milyon-milyong
+        # history rows; ang 45-araw na sahig ay sagana para sa trailing
+        # _TRAILING_SESSIONS na sesyon kahit may holidays.
+        _today_start = datetime(now_utc.year, now_utc.month, now_utc.day)
+        _hist_floor = _today_start - timedelta(days=45)
         hist = db.execute(
             text(
                 "SELECT observed_at::date AS d, COUNT(DISTINCT symbol) AS n "
                 "FROM momentum_viability_history "
                 "WHERE live_eligible = true AND symbol NOT LIKE '%-USD%' "
-                "AND observed_at::date < :today "
+                "AND observed_at >= :hist_floor AND observed_at < :today_start "
                 "AND EXTRACT(HOUR FROM observed_at) BETWEEN :h_lo AND :h_hi "
                 "GROUP BY observed_at::date ORDER BY d DESC LIMIT :lim"
             ),
             {
-                "today": now_utc.date(),
+                "hist_floor": _hist_floor,
+                "today_start": _today_start,
                 "h_lo": max(0, hour - 1),
                 "h_hi": min(23, hour + 1),
                 "lim": _TRAILING_SESSIONS,
@@ -194,12 +248,14 @@ def compute_breadth_regime(
                 "MAX(viability_score) - percentile_cont(0.5) WITHIN GROUP (ORDER BY viability_score) AS dom "
                 "FROM momentum_viability_history "
                 "WHERE live_eligible = true AND symbol NOT LIKE '%-USD%' "
-                "AND observed_at::date < :today AND viability_score IS NOT NULL "
+                "AND observed_at >= :hist_floor AND observed_at < :today_start "
+                "AND viability_score IS NOT NULL "
                 "AND EXTRACT(HOUR FROM observed_at) BETWEEN :h_lo AND :h_hi "
                 "GROUP BY observed_at::date ORDER BY d DESC LIMIT :lim"
             ),
             {
-                "today": now_utc.date(),
+                "hist_floor": _hist_floor,
+                "today_start": _today_start,
                 "h_lo": max(0, hour - 1),
                 "h_hi": min(23, hour + 1),
                 "lim": _TRAILING_SESSIONS,
