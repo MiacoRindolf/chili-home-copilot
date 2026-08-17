@@ -1230,6 +1230,63 @@ def _reap_cooldown_active(sym_u: str, now: datetime) -> bool:
     return at is not None and (now - at).total_seconds() < cd_sec
 
 
+_LOSS_CF_EMITTED: dict[str, str] = {}
+
+
+def _emit_loss_cooldown_leader_counterfactual(
+    db: Session,
+    *,
+    symbol: str,
+    cooldown_until: "datetime | None",
+    pass_as_of: datetime,
+) -> None:
+    """Durable counterfactual record: ang board #1 ay naka-loss-cooldown habang
+    lider pa rin — ang eksaktong klase ng Ross IPST −12.8k → dip re-entry →
+    +63k (2026-08-17). Isang event kada (symbol, cooldown window) — in-process
+    dedupe. Nakakabit sa PINAKAHULING terminal session ng symbol (ang session
+    na ang exit ang nagpasimula ng cooldown) para tama ang lineage. Ang scoring
+    ay hihila ng dip/peak mula sa momentum_nbbo_spread_tape sa susunod na 60min.
+    Telemetry lamang — hindi binabago ang anumang gating. [[feedback_evolve_not_devolve]]"""
+    from sqlalchemy import text as sa_text
+
+    cd_key = cooldown_until.isoformat() if cooldown_until is not None else "?"
+    if _LOSS_CF_EMITTED.get(symbol) == cd_key:
+        return
+    row = db.execute(
+        sa_text(
+            "SELECT id FROM trading_automation_sessions "
+            "WHERE upper(symbol) = :sym AND mode = 'live' AND ended_at IS NOT NULL "
+            "ORDER BY ended_at DESC LIMIT 1"
+        ),
+        {"sym": symbol},
+    ).fetchone()
+    if row is None:
+        return
+    px = db.execute(
+        sa_text(
+            "SELECT mid FROM momentum_nbbo_spread_tape "
+            "WHERE symbol = :sym ORDER BY observed_at DESC LIMIT 1"
+        ),
+        {"sym": symbol},
+    ).fetchone()
+    from .persistence import append_trading_automation_event
+
+    append_trading_automation_event(
+        db,
+        session_id=int(row[0]),
+        event_type="arm_loss_cooldown_leader_counterfactual",
+        payload_json={
+            "symbol": symbol,
+            "cooldown_until_utc": cd_key,
+            "pass_as_of_utc": pass_as_of.isoformat(),
+            "price_at_skip": (float(px[0]) if px and px[0] is not None else None),
+        },
+    )
+    _LOSS_CF_EMITTED[symbol] = cd_key
+    if len(_LOSS_CF_EMITTED) > 200:
+        _LOSS_CF_EMITTED.clear()
+
+
 def _reap_cooldown_blocks(sym_u: str, now: datetime, *, exempt_sym: str) -> bool:
     """True when the reap cooldown should keep ``sym_u`` (UPPER) out of the arm queue.
 
@@ -4821,6 +4878,26 @@ def run_auto_arm_pass(
         _sym_u = c.symbol.upper()
         if _sym_u in loss_blocked or pass_as_of < loss_cooldown_until.get(_sym_u, _EPOCH):
             out["loss_guard_skipped"] += 1
+            # COUNTERFACTUAL TELEMETRY (2026-08-17, Ross study Aral #23): kapag ang
+            # skip ay COOLDOWN-ONLY (hindi 2-strike — iyon ay disiplina ni Ross
+            # mismo at absolute) AT ang symbol ay ang KASALUKUYANG board #1
+            # (parehong _cooldown_exempt_sym primitive ng #1036), itala nang
+            # durable ang na-miss na arm window para masukat ang missed-re-entry
+            # class (JZXN proof case: +49% pagkatapos ng exit) BAGO magpasya ng
+            # anumang luwag. Telemetry LANG — walang binabagong gating.
+            if _sym_u not in loss_blocked and _sym_u == _cooldown_exempt_sym:
+                try:
+                    _emit_loss_cooldown_leader_counterfactual(
+                        db,
+                        symbol=_sym_u,
+                        cooldown_until=loss_cooldown_until.get(_sym_u),
+                        pass_as_of=pass_as_of,
+                    )
+                except Exception:
+                    logger.debug(
+                        "[auto_arm] loss-cooldown counterfactual emit skipped",
+                        exc_info=True,
+                    )
             continue  # 2-strike / post-loss cooldown — walk away like Ross does
         if _reap_cooldown_active(_sym_u, pass_as_of):
             if _reap_cooldown_blocks(_sym_u, pass_as_of, exempt_sym=_cooldown_exempt_sym):
