@@ -449,7 +449,20 @@ def resolve_subscription_target(
     add_protected(ranked_by_cause.get(TargetCause.ACTIVE, ()))
     add_protected(ranked_by_cause.get(TargetCause.FORCED, ()))
     if retain_all_prior:
-        add_protected(sorted(previous))
+        # R7 (2026-08-17): mag-reserve ng slot para sa bawat SARIWANG HINT bago
+        # i-protekta ang buong lumang roster — kung hindi, sa isang transient
+        # source failure ang retained-prior ay pumupuno ng capacity at ang
+        # first-alert na mover ay tumatanggap ng capacity_eviction sa mismong
+        # sandaling mahalaga ito. Adaptive: ang reserve ay eksaktong bilang ng
+        # kasalukuyang hints na hindi pa protektado (walang bagong constant);
+        # ang ACTIVE/FORCED ay nananatiling una at hindi kailanman napuputol.
+        _fresh_hints = [
+            s
+            for s in ranked_by_cause.get(TargetCause.HINT, ())
+            if s not in protected_seen
+        ]
+        _room = max(0, capacity - len(protected) - len(_fresh_hints))
+        add_protected(sorted(previous)[:_room])
 
     # Deterministic priority is deliberate: load-bearing active/held first,
     # newest-first fresh hints next, then the current Ross universe before the
