@@ -708,11 +708,19 @@ def equity_relative_notional_cap(fixed_fallback_usd: float, execution_family: st
 def alpaca_paper_hard_loss_cap_usd(
     execution_family: str | None,
 ) -> float | None:
-    """Deprecated activation-only cap hook.
+    """Per-trade dollar loss ceiling para sa alpaca paper — escape-mode lamang.
 
-    Adaptive paper sizing is owned by the content-addressed resolver packet and
-    its structural-R/portfolio reservation.  Returning a dollar ceiling here
-    would silently re-clamp that quantity and break replay/paper parity.
+    ADAPTIVE path (may capture provider): laging ``None`` — ang sizing ay pag-aari
+    ng content-addressed resolver packet at ng structural-R/portfolio reservation;
+    ang dollar re-clamp dito ay sisira sa replay/paper parity (ang orihinal na
+    deprecation rationale, buo pa rin).
+
+    TIME-SHARE ESCAPE (2026-08-17, Option C): kapag ang ordinary lane ay tumatakbo
+    sa LEGACY sizing (walang capture provider + escape flag ON), ang legacy path ay
+    walang dollar ceiling — ibinabalik dito ang TUNAY na cap gamit ang UMIIRAL nang
+    documented per-trade max-loss knob (``equity_relative_loss_cap`` /
+    ``chili_momentum_risk_loss_fraction_of_equity``) — walang bagong constant,
+    equity-adaptive. [[feedback_adaptive_no_magic]]
     """
     try:
         from ..execution_family_registry import normalize_execution_family
@@ -722,7 +730,22 @@ def alpaca_paper_hard_loss_cap_usd(
             return None
         if not bool(getattr(settings, "chili_alpaca_paper", True)):
             return None
-        return None
+        try:
+            from .live_runner import _legacy_alpaca_timeshare_sizing_active
+        except Exception:
+            return None
+        if not _legacy_alpaca_timeshare_sizing_active():
+            return None
+        # POSITIBONG fixed fallback ang kailangan para sa equity x fraction path
+        # (ang 0.0 ay short-circuit sa _equity_relative_cap) — PERO ang tahasang
+        # 0/negatibong setting ng operator ay DISABLE at dapat igalang: None dito
+        # → ang escape reservation ay tatanggi (fail-closed, walang tahimik na 50).
+        _raw_base = getattr(settings, "chili_momentum_risk_max_loss_per_trade_usd", 50.0)
+        base = float(50.0 if _raw_base is None else _raw_base)
+        if not math.isfinite(base) or base <= 0.0:
+            return None
+        cap = equity_relative_loss_cap(base, execution_family)
+        return float(cap) if cap and math.isfinite(float(cap)) and cap > 0 else None
     except (TypeError, ValueError, OverflowError):
         return None
 

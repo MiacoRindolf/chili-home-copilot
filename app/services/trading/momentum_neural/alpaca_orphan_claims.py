@@ -5868,28 +5868,77 @@ def _reserve_alpaca_entry_risk(
         or adaptive_claim_payload is not None
         or adaptive_request_payload is not None
     )
-    if not adaptive_pair_present:
+    # TIME-SHARE ESCAPE (2026-08-17, operator decision Option C): ang legacy-sized
+    # na reservation ay tinatanggap LANG kapag tahasang minarkahan ng claim prep
+    # (`legacy_timeshare_sizing` sa role_metadata — nangangahulugang aktibo ang
+    # escape flag at walang capture provider) AT walang anumang adaptive payload.
+    # Sa mode na ito ang serial posture ay bumibigkis (isang posisyon/entry claim
+    # lang sa buong account — ang adaptive_claim=None branches sa ibaba) at ang
+    # per_symbol_cap_usd ang tunay na symbol ceiling.
+    # DEPTH-OF-DEFENSE (N1): ang seam mismo ay nagre-re-check ng escape
+    # preconditions — hindi lang ang caller marker: kailangang ON ang flag at
+    # WALANG installed capture provider sa context na ito (parehong thread ang
+    # claim prep at ang short-session commit, kaya makabuluhan ang check).
+    def _escape_preconditions_hold() -> bool:
+        if not bool(
+            getattr(settings, "chili_momentum_legacy_alpaca_dispatch_enabled", False)
+        ):
+            return False
+        try:
+            from .adaptive_risk_request_builder import (
+                adaptive_risk_capture_provider_installed,
+            )
+
+            return not adaptive_risk_capture_provider_installed()
+        except Exception:
+            return False
+
+    legacy_timeshare = (
+        bool(role_meta.get("legacy_timeshare_sizing"))
+        and not adaptive_pair_present
+        and _escape_preconditions_hold()
+    )
+    if not adaptive_pair_present and not legacy_timeshare:
         return {"ok": False, "reason": "adaptive_risk_request_packet_claim_required"}
-    if not (
-        isinstance(adaptive_packet, dict)
-        and isinstance(adaptive_claim_payload, dict)
-        and isinstance(adaptive_request_payload, dict)
-    ):
-        return {"ok": False, "reason": "adaptive_risk_request_packet_claim_incomplete"}
-    try:
-        adaptive_claim = load_and_verify_adaptive_risk_reservation_claim(
-            adaptive_packet,
-            adaptive_claim_payload,
-        )
-        adaptive_request = load_adaptive_risk_reservation_request(
-            adaptive_request_payload
-        )
-        request_resolution = resolve_adaptive_risk(
-            adaptive_request.policy,
-            adaptive_request.inputs,
-        )
-    except AdaptiveRiskContractError:
-        return {"ok": False, "reason": "adaptive_risk_request_packet_claim_invalid"}
+    if legacy_timeshare:
+        # FAIL-CLOSED CEILING (N2): ang escape reservation ay nangangailangan ng
+        # TUNAY na per-symbol cap — kapag None/hindi finite/hindi positibo ang
+        # caller-supplied cap (equity unreadable, operator disable, import
+        # failure), TANGGIHAN sa halip na tumakbo sa inf na ceiling.
+        try:
+            _escape_cap = (
+                float(per_symbol_cap_usd)
+                if per_symbol_cap_usd is not None
+                else float("nan")
+            )
+        except (TypeError, ValueError):
+            _escape_cap = float("nan")
+        if not math.isfinite(_escape_cap) or _escape_cap <= 0.0:
+            return {"ok": False, "reason": "legacy_timeshare_cap_unavailable"}
+    adaptive_claim = None
+    adaptive_request = None
+    request_resolution = None
+    if adaptive_pair_present:
+        if not (
+            isinstance(adaptive_packet, dict)
+            and isinstance(adaptive_claim_payload, dict)
+            and isinstance(adaptive_request_payload, dict)
+        ):
+            return {"ok": False, "reason": "adaptive_risk_request_packet_claim_incomplete"}
+        try:
+            adaptive_claim = load_and_verify_adaptive_risk_reservation_claim(
+                adaptive_packet,
+                adaptive_claim_payload,
+            )
+            adaptive_request = load_adaptive_risk_reservation_request(
+                adaptive_request_payload
+            )
+            request_resolution = resolve_adaptive_risk(
+                adaptive_request.policy,
+                adaptive_request.inputs,
+            )
+        except AdaptiveRiskContractError:
+            return {"ok": False, "reason": "adaptive_risk_request_packet_claim_invalid"}
     if (
         not sym
         or alpaca_symbol_is_crypto_like(sym)
@@ -5984,45 +6033,50 @@ def _reserve_alpaca_entry_risk(
     )
     if not request_ok:
         return {"ok": False, "reason": "invalid_order_request"}
-    try:
-        adaptive_request_ok = bool(
-            adaptive_claim.execution_surface == "alpaca_paper"
-            and adaptive_claim.execution_family == "alpaca_spot"
-            and adaptive_claim.venue == "alpaca"
-            and adaptive_claim.broker_environment == "paper"
-            and adaptive_claim.symbol == sym
-            and adaptive_claim.side == "long"
-            and adaptive_claim.claim_id == cid
-            and adaptive_claim.quantity_shares == int(request_qty)
-            and abs(request_qty - float(adaptive_claim.quantity_shares)) <= 1e-9
-            and adaptive_claim.structural_risk_usd > 0.0
-            and adaptive_claim.gross_notional_usd > 0.0
-            and adaptive_claim.buying_power_impact_usd > 0.0
-            and adaptive_request.client_order_id == cid
-            and adaptive_request.account_scope == scope
-            and adaptive_request.inputs.symbol == sym
-            and adaptive_request.inputs.execution_surface == "alpaca_paper"
-            and adaptive_request.inputs.execution_family == "alpaca_spot"
-            and adaptive_request.inputs.venue == "alpaca"
-            and adaptive_request.inputs.broker_environment == "paper"
-            and request_resolution.valid
-            and request_resolution.decision_packet_sha256
-            == adaptive_claim.decision_packet_sha256
-            and (
-                request_type != "limit"
-                or math.isclose(
-                    adaptive_request.entry_limit_price,
-                    float(request_limit),
-                    rel_tol=1e-12,
-                    abs_tol=1e-9,
+    if adaptive_claim is None:
+        # Escape mode: ang candidate ay ang legacy reserved_risk_usd (na-validate
+        # na sa itaas bilang finite at positibo) — walang adaptive overwrite.
+        adaptive_request_ok = True
+    else:
+        try:
+            adaptive_request_ok = bool(
+                adaptive_claim.execution_surface == "alpaca_paper"
+                and adaptive_claim.execution_family == "alpaca_spot"
+                and adaptive_claim.venue == "alpaca"
+                and adaptive_claim.broker_environment == "paper"
+                and adaptive_claim.symbol == sym
+                and adaptive_claim.side == "long"
+                and adaptive_claim.claim_id == cid
+                and adaptive_claim.quantity_shares == int(request_qty)
+                and abs(request_qty - float(adaptive_claim.quantity_shares)) <= 1e-9
+                and adaptive_claim.structural_risk_usd > 0.0
+                and adaptive_claim.gross_notional_usd > 0.0
+                and adaptive_claim.buying_power_impact_usd > 0.0
+                and adaptive_request.client_order_id == cid
+                and adaptive_request.account_scope == scope
+                and adaptive_request.inputs.symbol == sym
+                and adaptive_request.inputs.execution_surface == "alpaca_paper"
+                and adaptive_request.inputs.execution_family == "alpaca_spot"
+                and adaptive_request.inputs.venue == "alpaca"
+                and adaptive_request.inputs.broker_environment == "paper"
+                and request_resolution.valid
+                and request_resolution.decision_packet_sha256
+                == adaptive_claim.decision_packet_sha256
+                and (
+                    request_type != "limit"
+                    or math.isclose(
+                        adaptive_request.entry_limit_price,
+                        float(request_limit),
+                        rel_tol=1e-12,
+                        abs_tol=1e-9,
+                    )
                 )
             )
-        )
-    except (TypeError, ValueError):
-        adaptive_request_ok = False
-    if not adaptive_request_ok:
-        return {"ok": False, "reason": "adaptive_risk_order_request_mismatch"}
-    candidate = float(adaptive_claim.structural_risk_usd)
+        except (TypeError, ValueError):
+            adaptive_request_ok = False
+        if not adaptive_request_ok:
+            return {"ok": False, "reason": "adaptive_risk_order_request_mismatch"}
+        candidate = float(adaptive_claim.structural_risk_usd)
 
     db.execute(
         text("SELECT pg_advisory_xact_lock(:key)"),
@@ -6362,6 +6416,20 @@ def _reserve_alpaca_entry_risk(
         open_symbol_risk = pending_symbol_risk = 0.0
         projected_account = candidate
         projected_symbol = candidate
+        # TIME-SHARE ESCAPE: ang per_symbol_cap_usd (restored equity-relative na
+        # per-trade hard cap mula sa risk_policy) ang TUNAY na symbol ceiling ng
+        # legacy-mode reservation — dating dead parameter, ngayon ENFORCED bilang
+        # veto sa symbol_risk_cap_exceeded check sa ibaba.
+        try:
+            _psc = (
+                float(per_symbol_cap_usd)
+                if per_symbol_cap_usd is not None
+                else None
+            )
+        except (TypeError, ValueError):
+            _psc = None
+        if _psc is not None and math.isfinite(_psc) and _psc > 0.0:
+            symbol_cap = min(symbol_cap, _psc)
     detail = {
         "reserved_risk_usd": candidate,
         "account_open_risk_usd": open_account_risk,
