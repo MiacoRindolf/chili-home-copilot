@@ -1533,6 +1533,42 @@ def run_replay(date: str, *, persist: bool = True, armed_source: str = "live") -
                             p["stop"] = _ls  # INVARIANT A: ratchet-only
                     except Exception:
                         pass
+                # v1.5 tape_accel_reversal_exit — tape-primary reversal (ang live_runner
+                # sibling ng OFI lock; sinasakop ang equity names na walang L2 depth).
+                # MINANANG PARITY GAP (naitala sa #1037 3-lens verification: ang live ay
+                # nagra-ratchet dito nang WALANG replay mirror — ang buong exit stack ay
+                # nag-diverge sa equities). AS-OF reads (lookahead-free); ratchet-only.
+                if bool(getattr(settings, "chili_momentum_exit_tape_accel_reversal_enabled", True)):
+                    try:
+                        from .entry_gates import signed_tape_accel_features
+                        from .paper_execution import tape_accel_reversal_exit
+
+                        _taf = signed_tape_accel_features(s, db=_l2db, as_of=_as_of)
+                        _accel = None
+                        if _taf is not None:
+                            try:
+                                _raw_accel = _taf.get("signed_tape_accel")
+                                _accel = (
+                                    float(_raw_accel) if _raw_accel is not None else None
+                                )
+                            except (TypeError, ValueError):
+                                _accel = None
+                        _ar = tape_accel_reversal_exit(
+                            high_water_mark=p["hwm"], entry_price=p["entry"], bid=bid,
+                            atr_pct=p["atrp"], stop_atr_mult=STOP_ATR_MULT,
+                            reward_risk=class_aware_reward_risk(s),
+                            current_stop=p["stop"],
+                            breakeven_floor=(p["entry"] if p["scaled"] else p["stop0"]),
+                            signed_tape_accel=_accel,
+                            prev_signed_tape_accel=p.get("prev_signed_tape_accel"),
+                            side_long=True)
+                        if _accel is not None:
+                            p["prev_signed_tape_accel"] = _accel
+                        _ars = _ar.get("new_stop_floor")
+                        if _ar.get("fired") and _ars is not None and _ars > p["stop"]:
+                            p["stop"] = _ars  # INVARIANT A: ratchet-only
+                    except Exception:
+                        pass
                 # v2 sell_into_strength_ladder — distribution-aware ratchet (live_runner
                 # 3932-4045). Action A (stop ratchet) only; the size-MOVING resting limit
                 # is gated live by exit_ladder_live (default False), so the replay
