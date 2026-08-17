@@ -7029,6 +7029,11 @@ class Settings(BaseSettings):
         validation_alias=AliasChoices("CHILI_MOMENTUM_EXIT_LADDER_ENABLED"),
         description="Master gate / kill-switch for the v2 sell-into-strength layer. ON = the ladder read + decision run and emit live_sell_into_strength with the pure-hold counterfactual on every armed tick, AND the INVARIANT-A stop-ratchet applies (can only help). The size-MOVING resting limit is separately gated by chili_momentum_exit_ladder_live.",
     )
+    chili_momentum_alpaca_premarket_entries_enabled: bool = Field(
+        default=True,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_ALPACA_PREMARKET_ENTRIES_ENABLED"),
+        description="Kill-switch para sa Alpaca-paper PREMARKET entries (2026-08-17 Ross live study: ang buong +$63k niya ay premarket habang hard-RTH-only ang lane). ON = ang _strict_alpaca_rth_entry_window ay tumatanggap din ng local_session='premarket' (kailangan pa rin ang fresh broker clock ok+paper), at ang instruction certification ay pumapayag sa literal na extended_hours=True + time_in_force='day' HABANG premarket pa ang kasalukuyang session (pagsapit ng 09:30 ay sarado ulit ang carve-out — walang silent crossover). Kaakibat na tighten: ang skip-spread-gate-for-limit-entry exemption ay RTH-only na (premarket = laging apply ang spread gate). Afterhours/overnight entries ay mananatiling blocked.",
+    )
     chili_momentum_exit_ask_pressure_enabled: bool = Field(
         default=True,
         validation_alias=AliasChoices("CHILI_MOMENTUM_EXIT_ASK_PRESSURE_ENABLED"),

@@ -868,6 +868,23 @@ def _fast_ack_poll_entry(adapter, oid, *, sess, interval_window_s: float):
     return no, fr
 
 
+def _alpaca_session_is_premarket_now(sess: Any) -> bool:
+    """True kapag ang KASALUKUYANG local session ng symbol ay premarket. Fail-CLOSED
+    (False sa anumang error) — ang premarket carve-out sa instruction certification
+    ay hindi kailanman bubukas sa hindi mapatunayang clock state."""
+    try:
+        from .market_profile import market_session_now
+
+        return (
+            str(
+                market_session_now(str(getattr(sess, "symbol", "") or ""), now=_utcnow_aware())
+            ).strip().lower()
+            == "premarket"
+        )
+    except Exception:
+        return False
+
+
 def _alpaca_place_instruction_kind(sess: Any, kwargs: dict[str, Any]) -> str:
     """Classify the only Alpaca instructions certified at the submit boundary.
 
@@ -893,7 +910,29 @@ def _alpaca_place_instruction_kind(sess: Any, kwargs: dict[str, Any]) -> str:
         # and silently become an RTH order that remains eligible again postmarket.
         # Require the literal frozen value; missing/truthy values are both a new
         # instruction and must be regenerated upstream.
-        if kwargs.get("extended_hours") is not False:
+        #
+        # PREMARKET CARVE-OUT (2026-08-17): kapag ON ang premarket flag AT ang
+        # KASALUKUYANG session ay premarket mismo, ang literal na
+        # ``extended_hours=True`` + ``time_in_force="day"`` ay certified din —
+        # ito ang eksaktong extended shape na tinatanggap ng adapter. Ang
+        # freeze-intent ay buo: pagsapit ng 09:30 ang session ay "regular" na,
+        # kaya ang premarket-shaped instruction ay hindi na makakalusot dito
+        # (walang silent crossover), at DAY tif = mamamatay ito ngayong araw.
+        _ext = kwargs.get("extended_hours")
+        if _ext is not False:
+            if (
+                _ext is True
+                and tif == "day"
+                and bool(
+                    getattr(
+                        settings,
+                        "chili_momentum_alpaca_premarket_entries_enabled",
+                        True,
+                    )
+                )
+                and _alpaca_session_is_premarket_now(sess)
+            ):
+                return "entry"
             return "invalid_entry_extended_hours"
         return "entry"
     return "invalid"
@@ -2890,11 +2929,29 @@ def _strict_alpaca_rth_entry_window(
             **clock_evidence,
             "local_market_session": local_session,
         }
-    if not (
-        local_session == "regular"
+    # PREMARKET ENTRY WINDOW (2026-08-17 Ross live study): ang BUONG kita ni Ross
+    # ngayong araw (+$63k IPST) ay premarket, habang ang lane ay hard-RTH-only.
+    # Kapag ON ang flag, ang PREMARKET (hindi afterhours/overnight) ay tinatanggap
+    # din — kailangan pa rin ang fresh broker clock (ok+paper; is_open ay False
+    # premarket by definition, kaya regular-only ang is_open requirement). Ang
+    # extended order shape (limit + DAY + extended_hours=True) ay ini-enforce sa
+    # _alpaca_place_instruction_kind at ng adapter certification.
+    _premarket_window_ok = (
+        local_session == "premarket"
         and clock.get("ok") is True
         and clock.get("paper") is True
-        and clock.get("is_open") is True
+        and bool(
+            getattr(settings, "chili_momentum_alpaca_premarket_entries_enabled", True)
+        )
+    )
+    if not (
+        (
+            local_session == "regular"
+            and clock.get("ok") is True
+            and clock.get("paper") is True
+            and clock.get("is_open") is True
+        )
+        or _premarket_window_ok
     ):
         return False, {
             "reason": "alpaca_new_entries_rth_only",
@@ -26452,6 +26509,21 @@ def tick_live_session(
     # rejects) — stale_bbo + invalid_bbo reliability checks inside _quote_quality_block ALWAYS
     # apply regardless. Spread becomes a sized COST (L2.2) + the bounded limit, not a veto.
     _skip_spread_gate = bool(getattr(settings, "chili_momentum_skip_spread_gate_for_limit_entry", True))
+    # PREMARKET TIGHTEN (2026-08-17, kasabay ng premarket entry window): ang
+    # skip-for-limits exemption ay RTH-only — sa premarket na manipis ang book,
+    # ang adaptive wide-spread gate ay LAGING ina-apply sa entry (higpitan, huwag
+    # luwagan; ang ceiling/floors ay hindi ginalaw). Fail-open sa unknown session
+    # (kapareho ng dating gawi para hindi maapektuhan ang RTH).
+    if _skip_spread_gate:
+        try:
+            from .market_profile import market_session_now as _msn_spread
+
+            if str(
+                _msn_spread(str(sess.symbol), now=_utcnow_aware())
+            ).strip().lower() == "premarket":
+                _skip_spread_gate = False
+        except Exception:
+            pass
     if _skip_spread_gate:
         # BROKEN-QUOTE ceiling (VIVS 2026-07-15): the raw fixed abs_cap has no
         # price-granularity term — a 3-7 CENT flare on a sub-$2.50 name exceeds
@@ -32177,7 +32249,19 @@ def tick_live_session(
             # -21.9% dump. Equity adapters map this to RH 'gfd'; crypto ignores.
             # Overnight keeps 'gfd': RH day-orders in the 24h session expire at the
             # 24h-session boundary (acceptable; a resting overnight GTC is the KMRK risk).
-            time_in_force="gfd",
+            # PREMARKET (2026-08-17): ang Alpaca extended-hours entry certification ay
+            # nangangailangan ng LITERAL na "day" (hindi "gfd") kasama ng
+            # extended_hours=True — ang "gfd" ay ibang vocabulary (RH) at ire-reject
+            # ng adapter bilang alpaca_extended_hours_entry_not_certified.
+            time_in_force=(
+                "day"
+                if (
+                    _entry_extended
+                    and normalize_execution_family(sess.execution_family)
+                    in ALPACA_EXECUTION_FAMILIES
+                )
+                else "gfd"
+            ),
         )
         if normalize_execution_family(sess.execution_family) in ALPACA_EXECUTION_FAMILIES:
             _entry_kwargs["position_intent"] = (
