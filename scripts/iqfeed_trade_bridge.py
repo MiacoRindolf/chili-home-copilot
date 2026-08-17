@@ -2382,8 +2382,14 @@ def _refresh_ross_universe_cache() -> None:
     error_detail: str | None = None
     try:
         symbols, max_age_s = _load_ross_universe_symbols()
+        # R6 (2026-08-17): ang WALANG-LAMAN na Ross universe ay HINDI failure —
+        # normal ito premarket/after-hours (walang qualifying mover). Ang dating
+        # error_code dito ay nagti-trigger ng retain_all_prior sa policy, na
+        # nagpo-protekta sa BUONG lumang roster at ginagawang capacity_eviction
+        # ang bawat sariwang HINT — 20s ng starvation kada silent na premarket
+        # refresh. Ang tunay na QUERY failure (except sa ibaba) ay failure pa rin.
         if not symbols:
-            error_code = "ross_universe_empty_or_unavailable"
+            log.info("ross universe empty (valid premarket/off-hours state)")
     except Exception as exc:
         error_code = "ross_query_failed"
         error_detail = str(exc)[:512]

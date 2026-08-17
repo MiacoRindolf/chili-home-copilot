@@ -932,3 +932,42 @@ def test_lifecycle_record_is_content_addressed_and_never_claims_ack_or_fidelity(
     assert record.fidelity_claim == "not_certified"
     assert record.coverage_state == "coverage_unavailable"
     assert record.parent_hashes == ("sha256:parent",)
+
+
+def test_r7_fresh_hints_get_slots_under_retain_all_prior() -> None:
+    """R7 (2026-08-17): sa isang source failure (retain_all_prior), ang mga
+    SARIWANG hint ay dapat may nakareserbang slot — hindi kinakain ng buong
+    lumang roster ang capacity at binibigyan ng capacity_eviction ang
+    first-alert na mover (ang MNDR-class na sandali)."""
+    prior = {f"OLD{i}": (TargetCause.ELIGIBLE,) for i in range(10)}
+    reads = [
+        SourceRead.success(TargetCause.ACTIVE, ()),
+        SourceRead.success(TargetCause.HINT, ("FRESH1", "FRESH2")),
+        SourceRead.success(TargetCause.ELIGIBLE, tuple(prior)),
+        SourceRead.failure(TargetCause.ROSS, error_code="ross_query_failed"),
+    ]
+    resolution = resolve_subscription_target(
+        reads=reads, prior_causes=prior, capacity=10,
+    )
+    selected = set(resolution.symbols)
+    assert "FRESH1" in selected and "FRESH2" in selected, (
+        "ang sariwang hints ay dapat napili kahit retain_all_prior"
+    )
+
+
+def test_r7_active_and_forced_never_cut_by_hint_reserve() -> None:
+    """Ang ACTIVE ay non-evictable pa rin — ang hint reserve ay hindi
+    pumuputol sa load-bearing coverage."""
+    prior = {f"OLD{i}": (TargetCause.ELIGIBLE,) for i in range(8)}
+    reads = [
+        SourceRead.success(TargetCause.ACTIVE, ("HELD1", "HELD2")),
+        SourceRead.success(TargetCause.HINT, ("FRESH1",)),
+        SourceRead.success(TargetCause.ELIGIBLE, tuple(prior)),
+        SourceRead.failure(TargetCause.ROSS, error_code="ross_query_failed"),
+    ]
+    resolution = resolve_subscription_target(
+        reads=reads, prior_causes=prior, capacity=6,
+    )
+    selected = set(resolution.symbols)
+    assert {"HELD1", "HELD2"} <= selected
+    assert "FRESH1" in selected
