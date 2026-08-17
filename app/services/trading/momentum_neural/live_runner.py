@@ -17737,6 +17737,39 @@ def _retire_confirmed_pre_http_alpaca_claim_before_terminal(
             raise RuntimeError("alpaca_pre_http_claim_terminalization_unverified")
 
 
+def _stamp_level_set_at(le: dict, key: str, value: float) -> None:
+    """Itak ang ``<key>_set_at_utc`` kapag BAGO o materially nagbago (>0.1%) ang
+    level — ang EDAD ng level ang consolidation-duration proxy (Ross 2026-08-17
+    Aral #14: "the longer consolidated without rolling over, it's good"; ang
+    bigong unang IPST entry niya ay kulang sa consolidation). Telemetry-first:
+    ang edad ay sinusukat sa fire/candidate events bago pa maging tilt.
+    Ang muling paglapat ng PAREHONG level ay HINDI nagre-reset ng edad."""
+    prev = le.get(key)
+    try:
+        changed = prev is None or abs(float(prev) - float(value)) > max(
+            1e-9, 0.001 * abs(float(value))
+        )
+    except (TypeError, ValueError):
+        changed = True
+    le[key] = float(value)
+    if changed or not le.get(f"{key}_set_at_utc"):
+        le[f"{key}_set_at_utc"] = _utcnow().isoformat()
+
+
+def _level_age_seconds(le: dict, key: str) -> float | None:
+    """Edad (segundo) ng level sa ``le`` mula sa set-at stamp; None kapag wala/basura."""
+    raw = le.get(f"{key}_set_at_utc")
+    if not raw:
+        return None
+    try:
+        ts = datetime.fromisoformat(str(raw))
+        if ts.tzinfo is not None:
+            ts = ts.astimezone(timezone.utc).replace(tzinfo=None)
+        return max(0.0, (_utcnow() - ts).total_seconds())
+    except (TypeError, ValueError):
+        return None
+
+
 def _safe_transition(db: Session, sess: TradingAutomationSession, new_state: str) -> None:
     old = sess.state
     if old == new_state:
@@ -28518,7 +28551,9 @@ def tick_live_session(
                 # shortly after entry. Cleared on the momentum_volume fallback (which
                 # has no structural level). (docs/DESIGN/MOMENTUM_LANE.md §8)
                 if _pb_debug.get("pullback_high"):
-                    le["breakout_level_price"] = float(_pb_debug["pullback_high"])
+                    _stamp_level_set_at(
+                        le, "breakout_level_price", float(_pb_debug["pullback_high"])
+                    )
                 else:
                     le.pop("breakout_level_price", None)
             else:
@@ -28592,6 +28627,11 @@ def tick_live_session(
                 db, sess, "live_entry_candidate_detected",
                 {"viability_score": via.viability_score, "trigger": _trigger_reason,
                  "structural_stop": le.get("structural_stop_price"),
+                 # CONSOLIDATION-AGE TELEMETRY (Ross Aral #14): edad ng level sa
+                 # sandali ng fire — mas matagal na consolidation = mas hinog na
+                 # setup. Sinusukat muna bago maging tilt.
+                 "breakout_level_age_s": _level_age_seconds(le, "breakout_level_price"),
+                 "watch_level_age_s": _level_age_seconds(le, "watch_break_level"),
                  "l2": _l2},
             )
         elif _score_ok and not _mkt_open:
@@ -28686,7 +28726,11 @@ def tick_live_session(
                             # breakout-or-bailout level), so sizing/placement/bailout are identical.
                             le["structural_stop_price"] = float(_th_sdbg["pullback_low"])
                             if _th_sdbg.get("pullback_high"):
-                                le["breakout_level_price"] = float(_th_sdbg["pullback_high"])
+                                _stamp_level_set_at(
+                                    le,
+                                    "breakout_level_price",
+                                    float(_th_sdbg["pullback_high"]),
+                                )
                             else:
                                 le.pop("breakout_level_price", None)
                             _l2 = _entry_pricebook_snapshot(sess.symbol)
@@ -28869,7 +28913,11 @@ def tick_live_session(
                                 # -> LIVE_PENDING_ENTRY veto chain.
                                 le["structural_stop_price"] = float(_mc_dbg["pullback_low"])
                                 if _mc_dbg.get("pullback_high"):
-                                    le["breakout_level_price"] = float(_mc_dbg["pullback_high"])
+                                    _stamp_level_set_at(
+                                        le,
+                                        "breakout_level_price",
+                                        float(_mc_dbg["pullback_high"]),
+                                    )
                                 else:
                                     le.pop("breakout_level_price", None)
                                 _l2 = _entry_pricebook_snapshot(sess.symbol)
@@ -28921,7 +28969,7 @@ def tick_live_session(
             _wl = _pb_debug.get("pullback_high") if isinstance(_pb_debug, dict) else None
             if _trigger_reason in TICK_ARMED_WAIT_REASONS and _wl:
                 if le.get("watch_break_level") != float(_wl):
-                    le["watch_break_level"] = float(_wl)
+                    _stamp_level_set_at(le, "watch_break_level", float(_wl))
                     _commit_le(sess, le)
             elif le.pop("watch_break_level", None) is not None:
                 _commit_le(sess, le)
