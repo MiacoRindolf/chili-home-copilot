@@ -1555,6 +1555,28 @@ def run_replay(date: str, *, persist: bool = True, armed_source: str = "live") -
                             p["stop"] = _ss  # INVARIANT A: ratchet-only
                     except Exception:
                         pass
+                # v3 ask_side_pressure_lock — book-structure sibling (live_runner mirror).
+                # Ang ask WALL na kumakapal habang hindi nare-refill ang bid; ratchet-only.
+                if (s.endswith("-USD") or bool(getattr(settings, "chili_momentum_exit_adaptive_equity_enabled", True))) \
+                        and bool(getattr(settings, "chili_momentum_exit_ask_pressure_enabled", True)):
+                    try:
+                        from .paper_execution import ask_side_pressure_lock
+
+                        _asp_ladder_r = read_ladder_distribution(s, db=_l2db, as_of=_as_of)
+                        _asp_band_r = ((p["hwm"] - p["stop"]) / p["hwm"] * 10_000.0) if p["hwm"] > 0 else 0.0
+                        _asp_r = ask_side_pressure_lock(
+                            high_water_mark=p["hwm"], entry_price=p["entry"], bid=bid,
+                            atr_pct=p["atrp"], stop_atr_mult=STOP_ATR_MULT,
+                            reward_risk=class_aware_reward_risk(s),
+                            current_stop=p["stop"],
+                            breakeven_floor=(p["entry"] if p["scaled"] else p["stop0"]),
+                            current_band_bps=_asp_band_r,
+                            ladder=_asp_ladder_r, side_long=True)
+                        _as_stop = _asp_r.get("new_stop_floor")
+                        if _asp_r.get("fired") and _as_stop is not None and _as_stop > p["stop"]:
+                            p["stop"] = _as_stop  # INVARIANT A: ratchet-only
+                    except Exception:
+                        pass
                 # RISK-NEUTRAL CONFIRMATION PYRAMID (replay mirror of live_runner's
                 # add-decision block). Gated on the SAME flag => OFF is byte-identical
                 # in replay too. Same cushion+confirm predicate as live: cushion banked

@@ -37096,6 +37096,72 @@ def tick_live_session(
                 except Exception:
                     pass
 
+            # ── ASK-SIDE PRESSURE LOCK (v3; Ross 2026-08-17: "fixated on the level 2,
+            # specifically the ASK price"). BOOK-STRUCTURE sibling ng OFI lock: ang v1
+            # ay FLOW (OFI/micro rollover); ito ang WALL (Σask5 building habang hindi
+            # nare-refill ang bid — sellers winning). Ratchet-only Action A, identical
+            # write shape sa OFI lock; hindi dumadaan sa _g4_clamp (flow/book-confirmed
+            # locks are documented bypasses, see the G4 note above). Ginagamit muli ang
+            # _ladder read ng sell-into-strength block kapag mayroon (zero extra I/O);
+            # nagbabasa mismo kapag hindi tumakbo ang ladder block.
+            if (
+                sess.symbol.endswith("-USD")
+                or bool(getattr(settings, "chili_momentum_exit_adaptive_equity_enabled", True))
+            ) and bool(getattr(settings, "chili_momentum_exit_ask_pressure_enabled", True)):
+                try:
+                    from .paper_execution import ask_side_pressure_lock
+
+                    try:
+                        _asp_ladder = _ladder
+                    except NameError:
+                        from .pipeline import read_ladder_distribution
+
+                        _asp_ladder = read_ladder_distribution(
+                            sess.symbol, db=db, as_of=_replay_l2_as_of_or_none()
+                        )
+                    _asp_band = (
+                        ((_hwm_trail - stop_px) / _hwm_trail * 10_000.0) if _hwm_trail > 0 else 0.0
+                    )
+                    _asp = ask_side_pressure_lock(
+                        high_water_mark=_hwm_trail,
+                        entry_price=avg,
+                        bid=bid,
+                        atr_pct=_atr_pct_trail,
+                        stop_atr_mult=_sm,
+                        reward_risk=class_aware_reward_risk(sess.symbol),
+                        current_stop=stop_px,
+                        breakeven_floor=_be_floor,
+                        current_band_bps=_asp_band,
+                        ladder=_asp_ladder,
+                        side_long=_le_side_long(le),
+                    )
+                    # A/B telemetry on every ARMED tick — the counterfactual that proves
+                    # capture vs the band-only baseline before the signal earns more.
+                    if _asp.get("armed"):
+                        _emit(db, sess, "live_ask_side_pressure", {
+                            "fired": bool(_asp.get("fired")),
+                            "trigger": _asp.get("trigger"),
+                            "reason": _asp.get("reason"),
+                            "peak_r": _asp.get("peak_r"),
+                            "lock_bps": _asp.get("lock_bps"),
+                            "band_bps": round(_asp_band, 2),
+                            "ask_build": _asp.get("ask_build"),
+                            "bid_refill": _asp.get("bid_refill"),
+                            "adaptive_stop": _asp.get("new_stop_floor"),
+                            "counterfactual_band_stop": _asp.get("counterfactual_band_stop"),
+                            "bid": bid,
+                            "high_water_mark": _hwm_trail,
+                        })
+                    # Action A: ratchet-only stop write (belt-and-suspenders > guard).
+                    _asp_stop = _float_or_none(_asp.get("new_stop_floor"))
+                    if _asp.get("fired") and _asp_stop is not None and _asp_stop > stop_px:
+                        pos["stop_price"] = _asp_stop
+                        stop_px = _asp_stop
+                        le["position"] = pos
+                        _commit_le(sess, le)
+                except Exception:
+                    pass
+
             # ── ANTICIPATION STARTER REMAINDER (item 1, DEFAULT OFF ⇒ byte-identical) ──
             # The entry placed only the PROBE leg; once the probe CONFIRMS (a real held
             # position = the break is real) add the stashed remainder ONCE, reusing the

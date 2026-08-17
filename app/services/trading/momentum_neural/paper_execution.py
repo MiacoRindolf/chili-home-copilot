@@ -3299,6 +3299,177 @@ def grind_effective_max_adds(
     return max(base, int(cr // per))
 
 
+def ask_side_pressure_lock(
+    *,
+    high_water_mark: float,
+    entry_price: float,
+    bid: float,
+    atr_pct: float,
+    stop_atr_mult: float,
+    reward_risk: float,
+    current_stop: float,
+    breakeven_floor: float,
+    current_band_bps: float,
+    ladder: Any,
+    side_long: bool = True,
+) -> dict[str, Any]:
+    """Ross-style ASK-SIDE PRESSURE lock (2026-08-17 live-stream study): "when I'm in
+    a position I am focused almost exclusively with my eye on the level two and
+    specifically the ASK price... completely fixated on the level 2."
+
+    BOOK-STRUCTURE sibling ng v1 ``ofi_exhaustion_lock``: ang v1 ay FLOW (OFI/micro
+    rollover); ito ang mismong ask-side tell ni Ross — ang ask WALL na kumakapal sa
+    unahan ng presyo (``ladder.ask_build``: Δ(Σask5)/prior sa 30s window) habang HINDI
+    na ito nauubos ng absorption (``bid_refill`` ≤ 0). Stacked offer + walang bumibili
+    sa laki = sellers winning → i-lock ang panalo bago ang giveback.
+
+    Confluence-AND (kailanman hindi single-signal):
+      1. profit-arm   peak_r ≥ arm_frac·rr        — only ever lock a WINNER
+      2. wall         ladder.ask_build ≥ T        — Σask5 growing across the window
+      3. stall        ladder.bid_refill ≤ 0       — bids not refilling (no absorption)
+      4. roll         micro_edge < 0 OR depth_imbal < 0 — book/price bid-favored
+
+    Data-quality HOLD: ``n_snaps < 3`` o ``snapshot_age_s`` na mas luma sa L2 freshness
+    window ⇒ no-op (never decides on thin/stale book).
+
+    ADAPTIVE / walang bagong numero: T = ``chili_momentum_ofi_threshold`` (entry-tuned);
+    arm_frac = ``chili_momentum_exit_ofi_arm_frac``; base lock =
+    ``chili_momentum_exit_ofi_base_lock_bps``; freshness = ``chili_crypto_l2_ofi_window_s``
+    — lahat REUSED mula sa v1/entry na pamilya ([[feedback_adaptive_no_magic]]).
+
+    RATCHET-ONLY (Invariant A, kapareho ng v1): ``new_stop_floor`` ay unconditionally
+    ``max(current_stop, breakeven_floor, candidate)`` at ang candidate ay clamped na
+    hindi mas maluwag kaysa ``current_band_bps`` — it can only EQUAL or TIGHTEN the
+    trail, never widen/null it. Pure (no I/O) para sa live/replay parity. Fail-safe:
+    missing/NaN ladder fields → no-op. Carries the band-only counterfactual for A/B.
+    """
+    out: dict[str, Any] = {
+        "new_stop_floor": current_stop,
+        "armed": False,
+        "fired": False,
+        "trigger": None,
+        "peak_r": None,
+        "lock_bps": None,
+        "ask_build": None,
+        "bid_refill": None,
+        "counterfactual_band_stop": current_stop,  # band-only stop, lock OFF
+        "reason": None,
+    }
+    if not side_long:
+        out["reason"] = "not_long"
+        return out
+    if ladder is None:
+        out["reason"] = "no_ladder"
+        return out
+    try:
+        hwm = float(high_water_mark)
+        entry = float(entry_price)
+        b = float(bid)
+        cs = float(current_stop)
+        be = float(breakeven_floor)
+        band_bps = float(current_band_bps)
+    except (TypeError, ValueError):
+        out["reason"] = "bad_inputs"
+        return out
+    if not (math.isfinite(hwm) and math.isfinite(entry) and math.isfinite(b) and math.isfinite(cs)):
+        out["reason"] = "non_finite"
+        return out
+    if entry <= 0 or hwm <= 0:
+        out["reason"] = "non_positive"
+        return out
+
+    # The trade's own risk unit, frozen at entry (same formula the stop used).
+    risk_dist = entry * max(0.003, float(atr_pct or 0.0) * float(stop_atr_mult or 0.0))
+    if not (math.isfinite(risk_dist) and risk_dist > 0):
+        out["reason"] = "bad_risk_dist"
+        return out
+    peak_r = max(0.0, (hwm - entry) / risk_dist)
+    out["peak_r"] = round(peak_r, 4)
+
+    # ---- data-quality HOLD (never decide on a thin/stale book) ----
+    try:
+        n_snaps = int(getattr(ladder, "n_snaps", 0) or 0)
+        _age = getattr(ladder, "snapshot_age_s", None)
+        fresh_s = float(getattr(settings, "chili_crypto_l2_ofi_window_s", 15.0) or 15.0)
+    except (TypeError, ValueError):
+        out["reason"] = "bad_ladder"
+        return out
+    if n_snaps < 3 or _age is None:
+        out["reason"] = "stale_or_thin"
+        return out
+    try:
+        if not math.isfinite(float(_age)) or float(_age) > fresh_s:
+            out["reason"] = "stale_or_thin"
+            return out
+    except (TypeError, ValueError):
+        out["reason"] = "stale_or_thin"
+        return out
+
+    # ---- knobs (LAHAT reused; walang bagong constant) ----
+    try:
+        rr = float(reward_risk) if math.isfinite(float(reward_risk)) and float(reward_risk) > 0 else 2.0
+    except (TypeError, ValueError):
+        rr = 2.0
+    try:
+        thr = abs(float(getattr(settings, "chili_momentum_ofi_threshold", 0.25) or 0.25))
+    except (TypeError, ValueError):
+        thr = 0.25
+    try:
+        arm_frac = float(getattr(settings, "chili_momentum_exit_ofi_arm_frac", 0.5) or 0.5)
+    except (TypeError, ValueError):
+        arm_frac = 0.5
+    try:
+        base_lock_bps = float(
+            getattr(settings, "chili_momentum_exit_ofi_base_lock_bps", 120.0) or 120.0
+        )
+    except (TypeError, ValueError):
+        base_lock_bps = 120.0
+
+    # 1. profit-arm — only ever lock a winner.
+    arm_r = arm_frac * rr
+    if peak_r < arm_r:
+        out["reason"] = "below_arm"
+        return out
+    out["armed"] = True
+
+    ab = getattr(ladder, "ask_build", None)
+    br = getattr(ladder, "bid_refill", None)
+    me = getattr(ladder, "micro_edge", None)
+    di = getattr(ladder, "depth_imbal", None)
+    out["ask_build"] = ab
+    out["bid_refill"] = br
+
+    def _fin(v: Any) -> float | None:
+        try:
+            f = float(v)
+        except (TypeError, ValueError):
+            return None
+        return f if math.isfinite(f) else None
+
+    _ab, _br, _me, _di = _fin(ab), _fin(br), _fin(me), _fin(di)
+    # 2. wall: ask side building across the window. 3. stall: bids not refilling.
+    # 4. roll: book/price already bid-favored (spoof-resistant corroborant).
+    wall = _ab is not None and _ab >= thr
+    stall = _br is not None and _br <= 0.0
+    roll = (_me is not None and _me < 0.0) or (_di is not None and _di < 0.0)
+    if not (wall and stall and roll):
+        out["reason"] = "no_confluence"
+        return out
+
+    # Lock tightness: v1 shape — tighter as the move nears its own target, and never
+    # looser than the cushion band already realized this tick.
+    lock_bps = base_lock_bps * max(0.5, 1.0 - 0.5 * min(peak_r / rr, 1.0))
+    if math.isfinite(band_bps) and band_bps > 0:
+        lock_bps = min(lock_bps, band_bps)
+    candidate = hwm * (1.0 - lock_bps / 10_000.0)
+    out["lock_bps"] = round(lock_bps, 2)
+    out["fired"] = True
+    out["trigger"] = "ask_wall_stall"
+    _floors = [c for c in (cs, be, candidate) if math.isfinite(c)]
+    out["new_stop_floor"] = max(_floors) if _floors else cs
+    return out
+
+
 def sell_into_strength_ladder(
     *,
     high_water_mark: float,
