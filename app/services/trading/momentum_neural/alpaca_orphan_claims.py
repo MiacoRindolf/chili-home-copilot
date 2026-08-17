@@ -5875,11 +5875,46 @@ def _reserve_alpaca_entry_risk(
     # Sa mode na ito ang serial posture ay bumibigkis (isang posisyon/entry claim
     # lang sa buong account — ang adaptive_claim=None branches sa ibaba) at ang
     # per_symbol_cap_usd ang tunay na symbol ceiling.
-    legacy_timeshare = bool(role_meta.get("legacy_timeshare_sizing")) and (
-        not adaptive_pair_present
+    # DEPTH-OF-DEFENSE (N1): ang seam mismo ay nagre-re-check ng escape
+    # preconditions — hindi lang ang caller marker: kailangang ON ang flag at
+    # WALANG installed capture provider sa context na ito (parehong thread ang
+    # claim prep at ang short-session commit, kaya makabuluhan ang check).
+    def _escape_preconditions_hold() -> bool:
+        if not bool(
+            getattr(settings, "chili_momentum_legacy_alpaca_dispatch_enabled", False)
+        ):
+            return False
+        try:
+            from .adaptive_risk_request_builder import (
+                adaptive_risk_capture_provider_installed,
+            )
+
+            return not adaptive_risk_capture_provider_installed()
+        except Exception:
+            return False
+
+    legacy_timeshare = (
+        bool(role_meta.get("legacy_timeshare_sizing"))
+        and not adaptive_pair_present
+        and _escape_preconditions_hold()
     )
     if not adaptive_pair_present and not legacy_timeshare:
         return {"ok": False, "reason": "adaptive_risk_request_packet_claim_required"}
+    if legacy_timeshare:
+        # FAIL-CLOSED CEILING (N2): ang escape reservation ay nangangailangan ng
+        # TUNAY na per-symbol cap — kapag None/hindi finite/hindi positibo ang
+        # caller-supplied cap (equity unreadable, operator disable, import
+        # failure), TANGGIHAN sa halip na tumakbo sa inf na ceiling.
+        try:
+            _escape_cap = (
+                float(per_symbol_cap_usd)
+                if per_symbol_cap_usd is not None
+                else float("nan")
+            )
+        except (TypeError, ValueError):
+            _escape_cap = float("nan")
+        if not math.isfinite(_escape_cap) or _escape_cap <= 0.0:
+            return {"ok": False, "reason": "legacy_timeshare_cap_unavailable"}
     adaptive_claim = None
     adaptive_request = None
     request_resolution = None

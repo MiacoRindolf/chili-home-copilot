@@ -263,6 +263,88 @@ def test_escape_reservation_enforces_per_symbol_cap(db, monkeypatch):
     assert result.get("symbol_cap_usd") == 100.0
 
 
+def test_escape_reservation_rejects_when_cap_unavailable(db, monkeypatch):
+    """N2 fail-closed: walang tunay na per-symbol cap → walang escape reservation
+    (hindi kailanman tatakbo sa inf na ceiling)."""
+    import uuid as _uuid
+
+    from app.services.trading.momentum_neural.alpaca_orphan_claims import (
+        reserve_alpaca_entry_risk_committed,
+    )
+
+    monkeypatch.setattr(settings, "chili_momentum_legacy_alpaca_dispatch_enabled", True)
+    owner_id, _req = _seed_owner(db, "ESCD")
+    cid = f"cid-esc-{_uuid.uuid4().hex[:10]}"
+    result = reserve_alpaca_entry_risk_committed(
+        symbol="ESCD",
+        claim_token=f"esc-{_uuid.uuid4().hex[:10]}",
+        owner_session_id=owner_id,
+        client_order_id=cid,
+        post_bind_token=f"binder-{cid}",
+        order_request=_req("ESCD", cid, qty="10"),
+        order_role="primary",
+        reserved_risk_usd=50.0,
+        account_equity_usd=100_000.0,
+        account_scope="alpaca:paper",
+        role_metadata={"legacy_timeshare_sizing": True},
+        per_symbol_cap_usd=None,
+    )
+    assert result.get("ok") is False
+    assert result.get("reason") == "legacy_timeshare_cap_unavailable"
+
+
+def test_escape_reservation_rejects_marker_when_flag_off(db, monkeypatch):
+    """N1 depth-of-defense: ang marker lang ay HINDI sapat — ang seam mismo ay
+    nagre-re-check ng flag; caller na nagsisinungaling ay tinatanggihan."""
+    import uuid as _uuid
+
+    from app.services.trading.momentum_neural.alpaca_orphan_claims import (
+        reserve_alpaca_entry_risk_committed,
+    )
+
+    monkeypatch.setattr(settings, "chili_momentum_legacy_alpaca_dispatch_enabled", False)
+    owner_id, _req = _seed_owner(db, "ESCE")
+    cid = f"cid-esc-{_uuid.uuid4().hex[:10]}"
+    result = reserve_alpaca_entry_risk_committed(
+        symbol="ESCE",
+        claim_token=f"esc-{_uuid.uuid4().hex[:10]}",
+        owner_session_id=owner_id,
+        client_order_id=cid,
+        post_bind_token=f"binder-{cid}",
+        order_request=_req("ESCE", cid, qty="10"),
+        order_role="primary",
+        reserved_risk_usd=50.0,
+        account_equity_usd=100_000.0,
+        account_scope="alpaca:paper",
+        role_metadata={"legacy_timeshare_sizing": True},
+        per_symbol_cap_usd=100.0,
+    )
+    assert result.get("ok") is False
+    assert result.get("reason") == "adaptive_risk_request_packet_claim_required"
+
+
+def test_hard_loss_cap_honors_operator_disable(monkeypatch):
+    """N3: tahasang 0 sa per-trade loss knob = disable → None (na, kasama ng N2,
+    ay nagba-block ng escape entries — hindi tahimik na 50)."""
+    monkeypatch.setattr(settings, "chili_momentum_legacy_alpaca_dispatch_enabled", True)
+    monkeypatch.setattr(settings, "chili_momentum_risk_max_loss_per_trade_usd", 0.0)
+    assert rp.alpaca_paper_hard_loss_cap_usd("alpaca_spot") is None
+
+
+def test_marked_session_with_null_marker_is_still_fenced(monkeypatch):
+    """Presence-based fence semantics: null/partial marker write = fenced pa rin
+    (tugma sa canonical fence); kasama ang preowner stage key."""
+    monkeypatch.setattr(settings, "chili_momentum_legacy_alpaca_dispatch_enabled", True)
+    null_owner = SimpleNamespace(
+        risk_snapshot_json={"captured_paper_session_owner": None}
+    )
+    preowner = SimpleNamespace(
+        risk_snapshot_json={"captured_paper_session_preowner": {"x": 1}}
+    )
+    assert lr._legacy_alpaca_timeshare_escape(null_owner) is False
+    assert lr._legacy_alpaca_timeshare_escape(preowner) is False
+
+
 def test_reservation_still_rejects_unmarked_pairless_commit(db, monkeypatch):
     """Walang marker → ang orihinal na adaptive hard requirement ay BUO."""
     import uuid as _uuid

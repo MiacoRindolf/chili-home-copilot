@@ -922,9 +922,13 @@ def _session_captured_paper_marked(sess: Any) -> bool:
         snap = getattr(sess, "risk_snapshot_json", None)
         if not isinstance(snap, dict):
             return True
+        # PRESENCE-based (`in`), hindi is-not-None — tugma sa canonical fence sa
+        # automation_query: ang null/partial na marker write ay FENCE pa rin.
+        # Kasama ang LAHAT ng tatlong stage key (preowner/pending/final).
         return (
-            snap.get("captured_paper_session_owner") is not None
-            or snap.get("captured_paper_session_pending_owner") is not None
+            "captured_paper_session_owner" in snap
+            or "captured_paper_session_pending_owner" in snap
+            or "captured_paper_session_preowner" in snap
         )
     except Exception:
         return True

@@ -736,13 +736,14 @@ def alpaca_paper_hard_loss_cap_usd(
             return None
         if not _legacy_alpaca_timeshare_sizing_active():
             return None
-        # POSITIBONG fixed fallback ang kailangan: ang 0.0 ay "deliberate operator
-        # disable" sa _equity_relative_cap at nagshi-short-circuit BAGO ang
-        # equity x fraction — parehong dahilan ng in-flight fallback sa live_runner.
-        base = float(
-            getattr(settings, "chili_momentum_risk_max_loss_per_trade_usd", 50.0)
-            or 50.0
-        )
+        # POSITIBONG fixed fallback ang kailangan para sa equity x fraction path
+        # (ang 0.0 ay short-circuit sa _equity_relative_cap) — PERO ang tahasang
+        # 0/negatibong setting ng operator ay DISABLE at dapat igalang: None dito
+        # → ang escape reservation ay tatanggi (fail-closed, walang tahimik na 50).
+        _raw_base = getattr(settings, "chili_momentum_risk_max_loss_per_trade_usd", 50.0)
+        base = float(50.0 if _raw_base is None else _raw_base)
+        if not math.isfinite(base) or base <= 0.0:
+            return None
         cap = equity_relative_loss_cap(base, execution_family)
         return float(cap) if cap and math.isfinite(float(cap)) and cap > 0 else None
     except (TypeError, ValueError, OverflowError):
