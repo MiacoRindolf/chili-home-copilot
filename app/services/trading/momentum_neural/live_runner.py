@@ -37108,6 +37108,24 @@ def tick_live_session(
                                         else False
                                     )
                                     _candle_exh = bool(_tt1 or _mh1)
+                                    # DISTRIBUTION TELL (Ross Aral #18): red-candle
+                                    # volume ratio sa PAREHONG cached 1m frame —
+                                    # telemetry-first, sinusukat sa lock event bago
+                                    # maging exit-tilt input.
+                                    try:
+                                        from .candles import (
+                                            red_candle_volume_ratio_from_df,
+                                        )
+
+                                        _rcv = red_candle_volume_ratio_from_df(_df1)
+                                        le["exit_candle1m_red_vol_ratio"] = (
+                                            round(float(_rcv), 4)
+                                            if _rcv is not None
+                                            and math.isfinite(float(_rcv))
+                                            else None
+                                        )
+                                    except Exception:
+                                        le["exit_candle1m_red_vol_ratio"] = None
                                 le["exit_candle1m_min"] = _cc_key
                                 le["exit_candle1m_exh"] = _candle_exh
                                 _commit_le(sess, le)
@@ -37152,6 +37170,8 @@ def tick_live_session(
                             "candle_ok": _lock.get("candle_ok"),
                             "candle_gate_live": _lock.get("candle_gate_live"),
                             "candle_would_suppress": _lock.get("candle_would_suppress"),
+                            # Ross Aral #18 distribution tell (telemetry-first)
+                            "red_vol_ratio": le.get("exit_candle1m_red_vol_ratio"),
                             "bid": bid,
                             "high_water_mark": _hwm_trail,
                         })
