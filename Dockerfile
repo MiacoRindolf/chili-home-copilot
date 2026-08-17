@@ -6,8 +6,14 @@ RUN apt-get update && \
     apt-get install -y --no-install-recommends build-essential openssl git && \
     rm -rf /var/lib/apt/lists/*
 
-COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
+# constraints.txt pins the exact resolved set the live containers run.
+# Without it an unrelated rebuild silently upgrades whatever has moved on
+# PyPI since the last one -- on 2026-08-14 that was 19 packages including
+# alpaca-py 0.43.5 -> 0.44.0 (the broker SDK) and starlette 1.4.1 -> 1.6.0
+# (under a live FastAPI app), none of it asked for and none of it visible
+# in the diff. A code-only rebuild should change only code.
+COPY requirements.txt constraints.txt ./
+RUN pip install --no-cache-dir -c constraints.txt -r requirements.txt
 
 COPY . .
 
