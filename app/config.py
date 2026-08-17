@@ -7029,6 +7029,11 @@ class Settings(BaseSettings):
         validation_alias=AliasChoices("CHILI_MOMENTUM_EXIT_LADDER_ENABLED"),
         description="Master gate / kill-switch for the v2 sell-into-strength layer. ON = the ladder read + decision run and emit live_sell_into_strength with the pure-hold counterfactual on every armed tick, AND the INVARIANT-A stop-ratchet applies (can only help). The size-MOVING resting limit is separately gated by chili_momentum_exit_ladder_live.",
     )
+    chili_momentum_exit_ask_pressure_enabled: bool = Field(
+        default=True,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_EXIT_ASK_PRESSURE_ENABLED"),
+        description="Kill-switch for the v3 ASK-SIDE PRESSURE lock (Ross 2026-08-17: 'fixated on the level 2, specifically the ask price'). ON = reads the same ladder distribution as v2, fires an INVARIANT-A (ratchet-only) stop tighten when the ask wall is building (ask_build >= ofi threshold) while bids stop refilling and the book/price rolls bid-favored, and emits live_ask_side_pressure with the band-only counterfactual on every armed tick. Reuses the v1 knobs (arm_frac, base_lock_bps, ofi_threshold, L2 freshness window) — no new numbers. Can only tighten a stop on a winner; never loosens, never sells size.",
+    )
     chili_momentum_exit_ladder_live: bool = Field(
         default=False,
         validation_alias=AliasChoices("CHILI_MOMENTUM_EXIT_LADDER_LIVE"),
