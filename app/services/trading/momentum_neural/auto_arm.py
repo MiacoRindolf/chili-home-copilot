@@ -4930,28 +4930,63 @@ def run_auto_arm_pass(
             continue  # already have a live session for this symbol — rotate to the next setup
         _sym_u = c.symbol.upper()
         if _sym_u in loss_blocked or pass_as_of < loss_cooldown_until.get(_sym_u, _EPOCH):
-            out["loss_guard_skipped"] += 1
-            # COUNTERFACTUAL TELEMETRY (2026-08-17, Ross study Aral #23): kapag ang
-            # skip ay COOLDOWN-ONLY (hindi 2-strike — iyon ay disiplina ni Ross
-            # mismo at absolute) AT ang symbol ay ang KASALUKUYANG board #1
-            # (parehong _cooldown_exempt_sym primitive ng #1036), itala nang
-            # durable ang na-miss na arm window para masukat ang missed-re-entry
-            # class (JZXN proof case: +49% pagkatapos ng exit) BAGO magpasya ng
-            # anumang luwag. Telemetry LANG — walang binabagong gating.
-            if _sym_u not in loss_blocked and _sym_u == _cooldown_exempt_sym:
-                try:
-                    _emit_loss_cooldown_leader_counterfactual(
-                        db,
-                        symbol=_sym_u,
-                        cooldown_until=loss_cooldown_until.get(_sym_u),
-                        pass_as_of=pass_as_of,
+            # LEADER RETRY EXEMPTION (2026-08-18 Ross recap "I Was Red -$12k
+            # Before My Big Winner": ang unang breakout ng leading gainer ay
+            # PUMALYA (−$12k stop) pero HINDI namatay — ang RETRY ng parehong
+            # setup ay pinasok niya nang MAS MALAKI: "it didn't die... I had
+            # even more conviction". Ang TIMER na bahagi ng loss-cooldown ang
+            # kumakain mismo ng retry window na iyon). Kapag ang simbolo ay ang
+            # KASALUKUYANG board #1 (parehong `_cooldown_exempt_sym` primitive
+            # ng reap-exemption) at TIMER LANG ang pumipigil — HINDI ang
+            # 2-strike day block (`loss_blocked`), na disiplina ni Ross mismo
+            # at nananatiling absolute — payagan ang arm. Ang trigger seam ay
+            # may sariling structure gates pa rin (G4 escalation: structural
+            # trigger + reclaim + tape hold) bago ito makapasok muli, kaya ang
+            # exemption ay nagbubukas lang ng PAGKAKATAON, hindi ng entry.
+            if (
+                _sym_u not in loss_blocked
+                and _sym_u == _cooldown_exempt_sym
+                and bool(
+                    getattr(
+                        settings,
+                        "chili_momentum_loss_cooldown_leader_exemption_enabled",
+                        True,
                     )
-                except Exception:
-                    logger.debug(
-                        "[auto_arm] loss-cooldown counterfactual emit skipped",
-                        exc_info=True,
-                    )
-            continue  # 2-strike / post-loss cooldown — walk away like Ross does
+                )
+            ):
+                out["loss_cooldown_leader_exempt"] = (
+                    out.get("loss_cooldown_leader_exempt", 0) + 1
+                )
+                logger.warning(
+                    "[auto_arm] loss-cooldown EXEMPT for board #1 %s — the "
+                    "leading gainer's retry window stays open (2-strike day "
+                    "block untouched; trigger structure gates still apply)",
+                    _sym_u,
+                )
+            else:
+                out["loss_guard_skipped"] += 1
+                # COUNTERFACTUAL TELEMETRY (2026-08-17, Ross study Aral #23): kapag ang
+                # skip ay COOLDOWN-ONLY (hindi 2-strike — iyon ay disiplina ni Ross
+                # mismo at absolute) AT ang symbol ay ang KASALUKUYANG board #1
+                # (parehong _cooldown_exempt_sym primitive ng #1036), itala nang
+                # durable ang na-miss na arm window para masukat ang missed-re-entry
+                # class (JZXN proof case: +49% pagkatapos ng exit) BAGO magpasya ng
+                # anumang luwag. Telemetry LANG — walang binabagong gating.
+                # (Naabot na rin ito kapag naka-OFF ang leader exemption.)
+                if _sym_u not in loss_blocked and _sym_u == _cooldown_exempt_sym:
+                    try:
+                        _emit_loss_cooldown_leader_counterfactual(
+                            db,
+                            symbol=_sym_u,
+                            cooldown_until=loss_cooldown_until.get(_sym_u),
+                            pass_as_of=pass_as_of,
+                        )
+                    except Exception:
+                        logger.debug(
+                            "[auto_arm] loss-cooldown counterfactual emit skipped",
+                            exc_info=True,
+                        )
+                continue  # 2-strike / post-loss cooldown — walk away like Ross does
         if _reap_cooldown_active(_sym_u, pass_as_of):
             if _reap_cooldown_blocks(_sym_u, pass_as_of, exempt_sym=_cooldown_exempt_sym):
                 out["reap_cooldown_skipped"] += 1

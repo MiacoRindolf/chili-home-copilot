@@ -131,3 +131,23 @@ def test_multiplier_is_size_down_only_bounded(monkeypatch):
         monkeypatch.setattr(rp, "_count_real_entries_today", lambda db, _e=entries, **k: _e)
         mult, _ = day_open_risk_ramp_multiplier(_StubDB(), execution_family=EF)
         assert 0.0 < mult <= 1.0
+
+
+def test_ramp_reapplied_after_paper_floor_in_sizing_source():
+    """2026-08-18 (Ross -$12k unang trade): ang day-open ramp sa pre-floor
+    product ay BINUBURA ng paper full-size floor — kaya INERT ito sa paper lane.
+    Control-flow pin: may post-floor re-apply block, PAGKATAPOS ng floor at
+    BAGO ang time-of-day derate, na naka-gate sa _paper_floor_fired (walang
+    double-apply sa real-money path)."""
+    import inspect
+
+    import app.services.trading.momentum_neural.live_runner as lr
+
+    source = inspect.getsource(lr.tick_live_session)
+    i_floor = source.index('"paper_full_size_floor"')
+    i_ramp = source.index('"day_open_risk_ramp_post_floor"')
+    i_tod = source.index('"time_of_day_risk"')
+    assert i_floor < i_ramp < i_tod
+    ramp_block = source[i_floor:i_ramp]
+    assert "_paper_floor_fired" in ramp_block
+    assert "chili_momentum_day_open_ramp_binds_on_paper" in ramp_block

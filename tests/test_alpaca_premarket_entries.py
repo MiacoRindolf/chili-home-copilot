@@ -43,11 +43,18 @@ def _clock(*, is_open: bool):
     )
 
 
-def _window(session: str, *, is_open: bool):
+def _window(session: str, *, is_open: bool, at_utc=None, sess=None):
+    # Naka-pin ang clock sa 12:00 UTC = 08:00 ET (EDT) — LABAS ng 07:00 ET
+    # seller-unlock guard window, para ang mga window test ay hindi kailanman
+    # maging time-of-day dependent sa wall clock ng test run.
+    from datetime import datetime as _dt
+
+    pinned = at_utc if at_utc is not None else _dt(2026, 8, 18, 12, 0, 0)
     with patch.object(lr, "_strict_alpaca_clock_truth", return_value=_clock(is_open=is_open)), \
+         patch.object(lr, "_utcnow", return_value=pinned), \
          patch("app.services.trading.momentum_neural.market_profile.market_session_now",
                return_value=session):
-        return lr._strict_alpaca_rth_entry_window(adapter=object(), sess=_sess())
+        return lr._strict_alpaca_rth_entry_window(adapter=object(), sess=sess or _sess())
 
 
 def test_premarket_window_open_when_flag_on(monkeypatch):
@@ -129,3 +136,64 @@ def test_regular_entry_shape_unchanged(monkeypatch):
 def test_missing_extended_still_invalid(monkeypatch):
     assert _kind(ext=None, tif="day", premarket_now=True, flag=True,
                  monkeypatch=monkeypatch) == "invalid_entry_extended_hours"
+
+
+# ── 07:00 ET SELLER-UNLOCK GUARD (2026-08-18 Ross recap) ─────────────────────
+
+def _sess_vwap(above: bool):
+    return SimpleNamespace(
+        execution_family="alpaca_spot",
+        symbol="IPST",
+        risk_snapshot_json={
+            lr.KEY_LIVE_EXEC: {
+                "effective_max_hold_seconds": 900.0,
+                "entry_above_vwap": above,
+            }
+        },
+    )
+
+
+def _et(hour, minute):
+    # 2026-08-18 ay EDT (UTC-4).
+    from datetime import datetime as _dt
+
+    return _dt(2026, 8, 18, hour + 4, minute, 0)
+
+
+def test_seller_unlock_window_defers_without_vwap_evidence(monkeypatch):
+    monkeypatch.setattr(settings, "chili_momentum_alpaca_premarket_entries_enabled", True)
+    ok, ev = _window("premarket", is_open=False, at_utc=_et(6, 55))
+    assert ok is False
+    assert ev["reason"] == "premarket_seller_unlock_wait"
+
+
+def test_seller_unlock_window_passes_with_vwap_above(monkeypatch):
+    monkeypatch.setattr(settings, "chili_momentum_alpaca_premarket_entries_enabled", True)
+    ok, ev = _window(
+        "premarket", is_open=False, at_utc=_et(7, 5), sess=_sess_vwap(True)
+    )
+    assert ok is True
+
+
+def test_seller_unlock_below_vwap_defers_in_window(monkeypatch):
+    monkeypatch.setattr(settings, "chili_momentum_alpaca_premarket_entries_enabled", True)
+    ok, ev = _window(
+        "premarket", is_open=False, at_utc=_et(7, 2), sess=_sess_vwap(False)
+    )
+    assert ok is False
+    assert ev["reason"] == "premarket_seller_unlock_wait"
+
+
+def test_outside_unlock_window_no_vwap_needed(monkeypatch):
+    monkeypatch.setattr(settings, "chili_momentum_alpaca_premarket_entries_enabled", True)
+    ok, ev = _window("premarket", is_open=False, at_utc=_et(7, 30))
+    assert ok is True
+
+
+def test_seller_unlock_guard_zero_disables(monkeypatch):
+    monkeypatch.setattr(settings, "chili_momentum_alpaca_premarket_entries_enabled", True)
+    monkeypatch.setattr(
+        settings, "chili_momentum_premarket_seller_unlock_guard_min", 0.0
+    )
+    ok, ev = _window("premarket", is_open=False, at_utc=_et(6, 55))
+    assert ok is True
