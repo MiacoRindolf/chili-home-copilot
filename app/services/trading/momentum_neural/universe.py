@@ -988,14 +988,29 @@ def build_equity_universe(
     _float_budget = 0
     if _float_gate_on:
         try:
+            # UNIVERSE = coarse pre-filter: prune at the HARD MAX (the widest
+            # float any downstream gate can ever admit — the rotation exemption
+            # tops out there), not at the fine A-setup ceiling. Pruning at the
+            # ceiling here would kill rotation-class 20-50M floats (AIXC
+            # 2026-08-18) before viability could ever apply the exemption.
+            _fx_raw_hard = getattr(
+                _settings,
+                "chili_momentum_a_setup_float_hard_max_shares",
+                50_000_000.0,
+            )
+            _fx_hard = 50_000_000.0 if _fx_raw_hard is None else float(_fx_raw_hard)
             _float_max = (
                 float(profile.float_shares_max)
                 if getattr(profile, "float_shares_max", None) is not None
-                else float(getattr(
-                    _settings,
-                    "chili_momentum_a_setup_quality_floor_float_ceiling_shares",
-                    20_000_000.0,
-                ) or 20_000_000.0)
+                else (
+                    _fx_hard
+                    if _fx_hard > 0
+                    else float(getattr(
+                        _settings,
+                        "chili_momentum_a_setup_quality_floor_float_ceiling_shares",
+                        20_000_000.0,
+                    ) or 20_000_000.0)
+                )
             )
         except (TypeError, ValueError):
             _float_max = None

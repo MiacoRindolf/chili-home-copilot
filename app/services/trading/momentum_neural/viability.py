@@ -36,6 +36,8 @@ class ViabilitySettingsProjection:
     chili_momentum_trade_flow_agreement_gain: Any
     chili_momentum_trade_flow_threshold: Any
     chili_momentum_a_setup_quality_floor_float_ceiling_shares: Any
+    chili_momentum_a_setup_float_rvol_exemption_mult: Any
+    chili_momentum_a_setup_float_hard_max_shares: Any
     chili_momentum_explosive_rvol_floor: Any
     chili_momentum_a_setup_quality_floor_change_pct_min: Any
     chili_momentum_exclude_leveraged_etfs: Any
@@ -68,6 +70,8 @@ class ViabilitySettingsProjection:
             "chili_momentum_trade_flow_agreement_gain": 0.5,
             "chili_momentum_trade_flow_threshold": 0.25,
             "chili_momentum_a_setup_quality_floor_float_ceiling_shares": 20_000_000.0,
+            "chili_momentum_a_setup_float_rvol_exemption_mult": 2.0,
+            "chili_momentum_a_setup_float_hard_max_shares": 50_000_000.0,
             "chili_momentum_explosive_rvol_floor": 3.0,
             "chili_momentum_a_setup_quality_floor_change_pct_min": 10.0,
             "chili_momentum_exclude_leveraged_etfs": True,
@@ -1051,8 +1055,43 @@ def score_viability_explicit(
                 if _float_a is None or not (_float_a > 0):
                     _reason = "no-float"
                 # (1) LOW FLOAT — the primary discriminator (AREC 107M fails).
+                # FLOAT-ROTATION EXEMPTION (2026-08-18 AIXC: float 20.23M = 1.17%
+                # over the 20M ceiling -> 1,440 straight vetoes on a +315% runner
+                # that turned its float over 2.25x; 26 symbols cliffed that day).
+                # Ross-mechanical: a 20-50M float trading at rotation-class RVOL
+                # behaves like a low-float name. Admit ABOVE the ceiling only on
+                # AFFIRMATIVE rvol evidence (None never exempts) at >= mult x the
+                # explosive floor, bounded by the hard max (AREC-class 107M can
+                # never enter). mult 0 or hard-max 0 = exemption off (pure cliff).
                 elif _ceil > 0 and _float_a > _ceil:
-                    _reason = f"float {_float_a:,.0f} > ceiling {_ceil:,.0f}"
+                    _fx_raw_mult = getattr(
+                        settings,
+                        "chili_momentum_a_setup_float_rvol_exemption_mult",
+                        2.0,
+                    )
+                    _fx_mult = 2.0 if _fx_raw_mult is None else float(_fx_raw_mult)
+                    _fx_raw_hard = getattr(
+                        settings,
+                        "chili_momentum_a_setup_float_hard_max_shares",
+                        50_000_000.0,
+                    )
+                    _fx_hard = (
+                        50_000_000.0 if _fx_raw_hard is None else float(_fx_raw_hard)
+                    )
+                    if (
+                        _fx_mult > 0
+                        and _fx_hard > 0
+                        and _float_a <= _fx_hard
+                        and _rvol_a is not None
+                        and _rvol_a >= _rvol_min * _fx_mult
+                    ):
+                        warnings.append(
+                            f"A-setup float {_float_a:,.0f} above ceiling "
+                            f"{_ceil:,.0f} admitted on rotation-class rvol "
+                            f"{_rvol_a:g} (>= {_rvol_min * _fx_mult:g})"
+                        )
+                    else:
+                        _reason = f"float {_float_a:,.0f} > ceiling {_ceil:,.0f}"
                 # (2) RVOL. LEVER 1 win-win: distinguish AFFIRMATIVELY-LOW rvol (a real
                 # non-mover -> reject) from a MERELY-MISSING rvol datum (None). The old
                 # code failed CLOSED on None, blanket-blocking the day-monster (UPC live

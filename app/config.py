@@ -10037,7 +10037,24 @@ class Settings(BaseSettings):
         default=20_000_000.0,
         ge=0.0,
         validation_alias=AliasChoices("CHILI_MOMENTUM_A_SETUP_QUALITY_FLOOR_FLOAT_CEILING_SHARES"),
-        description="Max float_shares for an A-setup LIVE name (~20M): rejects AREC-class 107M, passes UPC/SDOT/WSHP. ONE documented ceiling.",
+        description="Max float_shares for an A-setup LIVE name (~20M): rejects AREC-class 107M, passes UPC/SDOT/WSHP. ONE documented ceiling. Floats ABOVE it up to the hard max are admitted only via the rotation exemption (see chili_momentum_a_setup_float_rvol_exemption_mult).",
+    )
+    # FLOAT-ROTATION EXEMPTION (2026-08-18 AIXC: 20.23M float = 1.17% over the
+    # ceiling -> 1,440 straight vetoes on a +315% runner; 26 symbols cliffed that
+    # day). A float above the ceiling is admitted ONLY on affirmative
+    # rotation-class rvol (>= this multiple of the explosive rvol floor; a
+    # missing rvol never exempts), bounded by the hard max. 0 on either = off.
+    chili_momentum_a_setup_float_rvol_exemption_mult: float = Field(
+        default=2.0,
+        ge=0.0,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_A_SETUP_FLOAT_RVOL_EXEMPTION_MULT"),
+        description="Float-rotation exemption: a float above the A-setup ceiling is admitted when rvol >= chili_momentum_explosive_rvol_floor x this multiple (affirmative evidence only), up to the hard max. 0 = exemption off (pure ceiling).",
+    )
+    chili_momentum_a_setup_float_hard_max_shares: float = Field(
+        default=50_000_000.0,
+        ge=0.0,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_A_SETUP_FLOAT_HARD_MAX_SHARES"),
+        description="Absolute float bound for the rotation exemption (Ross's broad low-float definition, ~50M): no float above this ever enters regardless of rvol. Also the universe pre-filter band. 0 = exemption off.",
     )
     chili_momentum_a_setup_quality_floor_change_pct_min: float = Field(
         default=10.0,

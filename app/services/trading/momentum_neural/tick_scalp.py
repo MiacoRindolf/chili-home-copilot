@@ -228,6 +228,8 @@ def ross_tick_scalp_evidence_ok(
     max_float_shares: float = 20_000_000.0,
     min_price: float = ROSS_TICK_SCALP_MIN_PRICE,
     max_price: float = ROSS_TICK_SCALP_MAX_PRICE,
+    float_rvol_exemption_mult: float = 2.0,
+    float_hard_max_shares: float = 50_000_000.0,
 ) -> tuple[bool, str, dict[str, Any]]:
     """Return whether scanner evidence is strong enough for tick scalp watching.
 
@@ -313,12 +315,34 @@ def ross_tick_scalp_evidence_ok(
         if price < min_price and not source_support:
             return False, "price_below_scalp_range", debug
 
-    if float_shares is not None and float_shares > max_float_shares:
+    # FLOAT-ROTATION EXEMPTION (2026-08-18 AIXC): a float above the ceiling is
+    # admitted ONLY on affirmative rotation-class rvol (>= mult x min_rvol; a
+    # missing rvol never exempts) and never past the hard max (AREC-class 107M
+    # stays out). mult 0 or hard-max 0 = exemption off (pure cliff).
+    _float_rvol_exempt = bool(
+        float_shares is not None
+        and float_shares > max_float_shares
+        and float_rvol_exemption_mult > 0
+        and float_hard_max_shares > 0
+        and float_shares <= float_hard_max_shares
+        and rvol is not None
+        and rvol >= float(min_rvol) * float(float_rvol_exemption_mult)
+    )
+    debug["float_rvol_exempt"] = _float_rvol_exempt
+    if (
+        float_shares is not None
+        and float_shares > max_float_shares
+        and not _float_rvol_exempt
+    ):
         return False, "float_too_large", debug
 
     change_ok = change_pct is not None and change_pct >= min_change_pct
     rvol_ok = rvol is not None and rvol >= min_rvol
-    float_ok = float_shares is None or float_shares <= max_float_shares
+    float_ok = (
+        float_shares is None
+        or float_shares <= max_float_shares
+        or _float_rvol_exempt
+    )
     catalyst_ok = bool(debug.get("has_catalyst_text"))
     direct_trade_ok = bool(debug.get("direct_ross_trade"))
     daily_break_ok = bool(debug.get("daily_breaking_major"))
