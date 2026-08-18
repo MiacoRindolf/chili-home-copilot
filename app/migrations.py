@@ -32748,6 +32748,20 @@ def _migration_360_backfill_terminal_ended_at(conn) -> None:
     )
 
 
+def _migration_361_drop_duplicate_viability_history_id_index(conn) -> None:
+    """I-drop ang byte-duplicate na ``ix_momentum_viability_history_id``.
+
+    2026-08-17 retention audit: ang index na ito ay eksaktong duplicate ng
+    ``momentum_viability_history_pkey`` (parehong ``btree (id)``) mula sa
+    ``index=True`` + ``primary_key=True`` sa model — 691MB na may ZERO scans
+    kailanman. Ang model ay inayos na (tinanggal ang index=True); ito ang
+    backfill para sa umiiral na DBs. Idempotent (IF EXISTS)."""
+
+    conn.execute(text(
+        "DROP INDEX IF EXISTS ix_momentum_viability_history_id"
+    ))
+
+
 MIGRATIONS = [
     ("001_add_email", _migration_001_add_email),
     ("002_add_image_path", _migration_002_add_image_path),
@@ -33228,6 +33242,8 @@ MIGRATIONS = [
      _migration_359_terminalize_legacy_live_error_sessions),
     ("360_backfill_terminal_ended_at",
      _migration_360_backfill_terminal_ended_at),
+    ("361_drop_duplicate_viability_history_id_index",
+     _migration_361_drop_duplicate_viability_history_id_index),
 ]
 
 

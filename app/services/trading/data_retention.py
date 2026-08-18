@@ -122,9 +122,20 @@ def run_retention_policy(
         db,
         table="momentum_viability_history",
         ts_col="observed_at",
-        retain_days=getattr(settings, "brain_retention_viability_history_days", 30),
+        retain_days=getattr(settings, "brain_retention_viability_history_days", 35),
         batch_size=DEFAULT_OPERATIONAL_LOG_DELETE_BATCH_SIZE,
         dry_run=dry_run,
+        # DRAIN LOOP (2026-08-17): ang ingestion (~508k/araw) ay 10x sa dating
+        # isang-batch-kada-araw na prune — ang cap na ito ang nagpapahintulot
+        # sa sweep na humabol (backlog ~14.5M ⇒ ~3 gabi sa 5M/sweep).
+        max_rows_per_sweep=int(
+            getattr(
+                settings,
+                "brain_retention_viability_history_max_rows_per_sweep",
+                5_000_000,
+            )
+            or 0
+        ),
     )
     results["viability_snapshots"] = _slim_stale_viability_snapshots(
         db,
@@ -963,8 +974,23 @@ def _prune_operational_time_log(
     retain_days: int,
     batch_size: int,
     dry_run: bool,
+    max_rows_per_sweep: int | None = None,
 ) -> dict[str, int]:
-    """Batch-delete old operational rows once a timestamp+id index exists."""
+    """Batch-delete old operational rows once a timestamp+id index exists.
+
+    DRAIN LOOP (2026-08-17, momentum_viability_history 11GB/29.8M autopsy):
+    ang lumang hugis ay EKSAKTONG ISANG ``DELETE ... LIMIT batch`` kada sweep —
+    sa ingestion na ~508k rows/araw laban sa 50k/araw na prune, permanenteng
+    deficit na hindi kailanman nakakahabol (parehong bug na naayos na sa
+    ``_prune_exit_parity_log``; hindi na-backport dito kahit ang config at
+    migration comments ay nangangako ng "batched drain... cannot balloon").
+
+    Kapag may ``max_rows_per_sweep`` (>0): naglo-loop ang batch delete sa loob
+    ng IISANG sweep — bawat batch ay COMMIT agad (bounded transaction/lock;
+    walang idle-in-transaction laban sa multi-GB table) — hanggang maubos ang
+    eligible set o maabot ang cap (backstop para ang isang malaking backlog ay
+    hindi maging isang oras na WAL/dead-tuple spike). ``None``/<=0 ⇒ ang
+    orihinal na isang-batch na gawi (byte-identical para sa ibang tables)."""
     if not _retention_has_leading_time_index(
         db, table, ts_col, require_id_second=True,
     ):
@@ -979,6 +1005,10 @@ def _prune_operational_time_log(
     resolved_batch = _safe_positive_int(
         batch_size, DEFAULT_OPERATIONAL_LOG_DELETE_BATCH_SIZE,
     )
+    try:
+        sweep_cap = int(max_rows_per_sweep) if max_rows_per_sweep else 0
+    except (TypeError, ValueError):
+        sweep_cap = 0
     quoted_table = _quote_ident(table)
     quoted_ts = _quote_ident(ts_col)
     params = {"cutoff": cutoff, "limit": resolved_batch}
@@ -997,25 +1027,35 @@ def _prune_operational_time_log(
         return {"retain_days": retain_days, "eligible_batch": 0, "deleted": 0}
 
     deleted = 0
+    batches = 0
     if not dry_run and eligible_batch > 0:
-        result = db.execute(text(f"""
-            WITH doomed AS (
-                SELECT ctid
-                FROM {quoted_table}
-                WHERE {quoted_ts} < :cutoff
-                ORDER BY {quoted_ts} ASC, id ASC
-                LIMIT :limit
-            )
-            DELETE FROM {quoted_table} t
-            USING doomed
-            WHERE t.ctid = doomed.ctid
-        """), params)
-        deleted = int(result.rowcount or 0)
+        while True:
+            result = db.execute(text(f"""
+                WITH doomed AS (
+                    SELECT ctid
+                    FROM {quoted_table}
+                    WHERE {quoted_ts} < :cutoff
+                    ORDER BY {quoted_ts} ASC, id ASC
+                    LIMIT :limit
+                )
+                DELETE FROM {quoted_table} t
+                USING doomed
+                WHERE t.ctid = doomed.ctid
+            """), params)
+            batch_deleted = int(result.rowcount or 0)
+            deleted += batch_deleted
+            batches += 1
+            if sweep_cap <= 0:
+                break  # orihinal na isang-batch na gawi
+            db.commit()  # bounded per-batch transaction (drain-loop shape)
+            if batch_deleted < resolved_batch or deleted >= sweep_cap:
+                break
 
     return {
         "retain_days": retain_days,
         "eligible_batch": eligible_batch,
         "deleted": deleted,
+        "batches": batches,
     }
 
 

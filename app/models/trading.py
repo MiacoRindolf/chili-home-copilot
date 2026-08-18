@@ -3955,7 +3955,10 @@ class MomentumViabilityHistory(Base):
 
     __tablename__ = "momentum_viability_history"
 
-    id: int = Column(BigInteger, primary_key=True, index=True)
+    # index=True sa primary key ay gumawa ng BYTE-DUPLICATE na btree(id) index
+    # (691MB, 0 scans kailanman) sa tabi ng pkey — tinanggal (mig361 ang
+    # nagba-backfill ng DROP sa umiiral na DBs). 2026-08-17 retention audit.
+    id: int = Column(BigInteger, primary_key=True)
     symbol: str = Column(String(36), nullable=False, index=True)
     variant_id: int = Column(Integer, nullable=False, index=True)
     scope: Optional[str] = Column(String(16), nullable=True)
