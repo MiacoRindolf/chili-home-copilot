@@ -1676,3 +1676,115 @@ def test_a4_watching_state_not_rescored(monkeypatch, db: Session) -> None:
     did = _lr._maybe_rescore_eligibility_block(db, s, _elig_only_ev())
     assert did is False
     assert calls["n"] == 0  # only ARMED/QUEUED are re-scored here
+
+
+def _stale() -> FreshnessMeta:
+    return FreshnessMeta(
+        retrieved_at_utc=datetime.now(timezone.utc),
+        provider_time_utc=datetime.now(timezone.utc) - timedelta(hours=14),
+        max_age_seconds=60.0,
+    )
+
+
+def _rescue_tick(spread_bps: float, source: str = "polygon") -> NormalizedTicker:
+    mid = 13.0
+    half = (spread_bps / 10_000.0) * mid / 2.0
+    return NormalizedTicker(
+        product_id="PFSA",
+        bid=mid - half,
+        ask=mid + half,
+        mid=mid,
+        spread_bps=spread_bps,
+        freshness=FreshnessMeta(retrieved_at_utc=datetime.now(timezone.utc)),
+        raw={"source": source},
+    )
+
+
+def test_quote_rescue_hands_validated_secondary_tick_to_caller(monkeypatch) -> None:
+    """2026-08-18 hole (b): the stale-path refetch unblocked the gate but the
+    runner kept pricing off the stale primary (frozen mid=4.575 while PFSA
+    traded 10-15). A rescued pass must hand the validated tick back."""
+    import app.services.trading.momentum_neural.live_runner as lr
+
+    fresh_good = _rescue_tick(40.0)
+    monkeypatch.setattr(lr, "_refetch_bbo_secondary", lambda s: (fresh_good, "polygon"))
+    stale_meta = _stale()
+    primary = NormalizedTicker(
+        product_id="PFSA", bid=4.55, ask=4.60, mid=4.575, spread_bps=109.0,
+        freshness=stale_meta, raw={"feed": "iex"},
+    )
+
+    rescued: list = []
+    gate = _quote_quality_block(
+        primary, stale_meta, max_spread_bps=150.0, symbol="PFSA",
+        rescued_out=rescued,
+    )
+
+    assert gate is None
+    assert rescued and rescued[-1] is fresh_good
+
+
+def test_wide_garbage_iex_book_is_rescued_by_tight_secondary(monkeypatch) -> None:
+    """2026-08-18: 878/907 wide_bbo_spread blocks came from a fresh-looking
+    NON-L1 primary with a garbage book (source=None, spread 1500-3000bps).
+    A one-shot secondary refetch with a REAL tighter book must unblock."""
+    import app.services.trading.momentum_neural.live_runner as lr
+
+    tight = _rescue_tick(60.0)
+    monkeypatch.setattr(lr, "_refetch_bbo_secondary", lambda s: (tight, "polygon"))
+    fresh_meta = _fresh()
+    garbage = NormalizedTicker(
+        product_id="SLE", bid=4.94, ask=6.62, mid=5.78, spread_bps=2906.0,
+        freshness=fresh_meta, raw={"feed": "iex"},
+    )
+
+    rescued: list = []
+    gate = _quote_quality_block(
+        garbage, fresh_meta, max_spread_bps=300.0, symbol="SLE",
+        rescued_out=rescued,
+    )
+
+    assert gate is None
+    assert rescued and rescued[-1] is tight
+
+
+def test_wide_book_rescue_still_blocks_when_secondary_is_also_wide(monkeypatch) -> None:
+    import app.services.trading.momentum_neural.live_runner as lr
+
+    wide2 = _rescue_tick(900.0)
+    monkeypatch.setattr(lr, "_refetch_bbo_secondary", lambda s: (wide2, "polygon"))
+    fresh_meta = _fresh()
+    garbage = NormalizedTicker(
+        product_id="SLE", bid=4.94, ask=6.62, mid=5.78, spread_bps=2906.0,
+        freshness=fresh_meta, raw={"feed": "iex"},
+    )
+
+    rescued: list = []
+    gate = _quote_quality_block(
+        garbage, fresh_meta, max_spread_bps=300.0, symbol="SLE",
+        rescued_out=rescued,
+    )
+
+    assert gate is not None and gate["reason"] == "wide_bbo_spread"
+    assert gate["spread_bps"] == 2906.0  # the primary book's verdict stands
+    assert rescued == []
+
+
+def test_wide_iqfeed_l1_book_is_the_real_market_and_never_refetched(monkeypatch) -> None:
+    import app.services.trading.momentum_neural.live_runner as lr
+
+    def _boom(_s):  # a refetch attempt here would be a design regression
+        raise AssertionError("iqfeed_l1 wide book must not trigger a secondary refetch")
+
+    monkeypatch.setattr(lr, "_refetch_bbo_secondary", _boom)
+    fresh_meta = _fresh()
+    real_wide = NormalizedTicker(
+        product_id="PFSA", bid=12.80, ask=13.30, mid=13.05, spread_bps=383.0,
+        freshness=fresh_meta, raw={"source": "iqfeed_l1"},
+    )
+
+    gate = _quote_quality_block(
+        real_wide, fresh_meta, max_spread_bps=300.0, symbol="PFSA",
+    )
+
+    assert gate is not None and gate["reason"] == "wide_bbo_spread"

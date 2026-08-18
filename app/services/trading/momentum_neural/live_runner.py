@@ -20775,6 +20775,7 @@ def _refetch_bbo_secondary(symbol: str) -> tuple[Any, str] | None:
 def _quote_quality_block(
     tick: Any, freshness: Any, max_spread_bps: float | None = None,
     *, symbol: str | None = None, db: Any = None,
+    rescued_out: list[Any] | None = None,
 ) -> dict[str, Any] | None:
     meta = getattr(tick, "freshness", None) or freshness
     # FIX B2 telemetry: set when a secondary refetch replaced a stale primary tick; stamped
@@ -20896,6 +20897,50 @@ def _quote_quality_block(
     except (TypeError, ValueError):
         max_spread = 12.0
     if spread_bps > max_spread:
+        # WIDE-BOOK RESCUE (2026-08-18 zero-trade autopsy): 878/907 wide blocks
+        # that day came from a NON-L1 primary (Alpaca-IEX cache, source=None)
+        # whose book is not the real market for low-float movers. Mirror the
+        # stale-path FIX-B2 exactly once: refetch from the secondary chain and
+        # re-validate the SAME checks — only a REAL tighter book unblocks; a
+        # wide IQFeed-L1 book is the real market and still blocks unrescued.
+        if (
+            _refetched_meta is None
+            and symbol
+            and bool(getattr(settings, "chili_momentum_entry_quote_refetch_enabled", True))
+        ):
+            _src0 = None
+            _raw0 = getattr(tick, "raw", None)
+            if isinstance(_raw0, dict):
+                _src0 = _raw0.get("source")
+            if _src0 != "iqfeed_l1":
+                try:
+                    _rf2 = _refetch_bbo_secondary(str(symbol))
+                except Exception:
+                    _rf2 = None
+                if _rf2 is not None:
+                    _rf2_tick, _rf2_source = _rf2
+                    try:
+                        _b2 = float(getattr(_rf2_tick, "bid", 0.0) or 0.0)
+                        _a2 = float(getattr(_rf2_tick, "ask", 0.0) or 0.0)
+                        _m2 = float(getattr(_rf2_tick, "mid", 0.0) or 0.0)
+                    except (TypeError, ValueError):
+                        _b2 = _a2 = _m2 = 0.0
+                    if _b2 > 0 and _a2 > 0 and _m2 > 0 and _a2 >= _b2:
+                        try:
+                            _s2 = float(getattr(_rf2_tick, "spread_bps", None))
+                        except (TypeError, ValueError):
+                            _s2 = (_a2 - _b2) / _m2 * 10_000.0
+                        if not math.isfinite(_s2):
+                            _s2 = (_a2 - _b2) / _m2 * 10_000.0
+                        if _s2 <= max_spread:
+                            _refetched_meta = {
+                                "refetch_source": _rf2_source,
+                                "rescued_from": "wide_bbo_spread",
+                                "primary_spread_bps": round(spread_bps, 4),
+                            }
+                            tick = _rf2_tick
+                            bid, ask, mid, spread_bps = _b2, _a2, _m2, _s2
+    if spread_bps > max_spread:
         _ws = {
             "reason": "wide_bbo_spread",
             "spread_bps": round(spread_bps, 4),
@@ -20944,6 +20989,13 @@ def _quote_quality_block(
             )
         except Exception:
             pass
+        # DOWNSTREAM PROPAGATION (2026-08-18): the gate validated a refetched
+        # SECONDARY quote — hand it to the caller so pricing/sizing/placement
+        # act on the validated book instead of the stale/garbage primary (the
+        # 08-18 frozen mid=4.575 while PFSA traded 10-15 was exactly this hole:
+        # the rescue unblocked the gate but the runner kept the stale tick).
+        if rescued_out is not None:
+            rescued_out.append(tick)
     return None
 
 
@@ -26816,9 +26868,16 @@ def tick_live_session(
         )
     else:
         _entry_spread_ceiling = _adaptive_max_spread
+    _rescued_entry_ticks: list[Any] = []
     quote_block = _quote_quality_block(
-        tick, _fr, max_spread_bps=_entry_spread_ceiling, symbol=sess.symbol, db=db
+        tick, _fr, max_spread_bps=_entry_spread_ceiling, symbol=sess.symbol, db=db,
+        rescued_out=_rescued_entry_ticks,
     )
+    if quote_block is None and _rescued_entry_ticks:
+        # The gate validated a refetched SECONDARY quote — rebind so every
+        # downstream consumer (halt tracking, pricing, sizing, placement) sees
+        # the validated book, not the stale/garbage primary tick.
+        tick = _rescued_entry_ticks[-1]
     # Halt tracking: a SUSTAINED stale-quote streak = suspected LULD halt; quotes
     # returning = resume (starts the entry whipsaw-cooldown). A wide-but-live quote
     # is NOT a halt signal — only staleness is.
