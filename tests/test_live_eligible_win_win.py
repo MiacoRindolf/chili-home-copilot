@@ -238,3 +238,57 @@ def test_normal_vol_clean_mover_not_risk_bounded(monkeypatch):
     )
     assert vr.live_eligible is True
     assert vr.extreme_vol_risk_bounded is False
+
+
+# ── FLOAT-ROTATION EXEMPTION (2026-08-18 AIXC) ───────────────────────────────
+
+def _aixc_signal(rvol):
+    sig = {"float_shares": 20_234_993.0, "daily_change_pct": 37.8}
+    if rvol is not None:
+        sig["vol_ratio"] = rvol
+    return sig
+
+
+def test_float_rotation_exemption_admits_aixc_class(monkeypatch):
+    """AIXC 2026-08-18: float 1.17% over the 20M ceiling on a +315% runner ->
+    1,440 straight vetoes. Rotation-class rvol must exempt the overage."""
+    monkeypatch.setattr(settings, "chili_momentum_a_setup_quality_floor_enabled", True)
+    monkeypatch.setattr(settings, "chili_momentum_live_eligible_allow_extreme_explosive", True)
+    vr = score_viability(
+        "UPC", _fam(), _ctx(_NORMAL_ATR), _feats(ross_signals={"UPC": _aixc_signal(12.0)})
+    )
+    assert vr.live_eligible is True
+    assert any("rotation-class" in w for w in vr.warnings)
+
+
+def test_float_rotation_exemption_needs_affirmative_high_rvol(monkeypatch):
+    monkeypatch.setattr(settings, "chili_momentum_a_setup_quality_floor_enabled", True)
+    monkeypatch.setattr(settings, "chili_momentum_live_eligible_allow_extreme_explosive", True)
+    # rvol 4 < 2 x explosive floor (3.0) = 6 -> the ceiling stands.
+    vr = score_viability(
+        "DULL", _fam(), _ctx(_NORMAL_ATR), _feats(ross_signals={"DULL": _aixc_signal(4.0)})
+    )
+    assert vr.live_eligible is False
+    # missing rvol NEVER exempts an oversize float (fail toward the cliff).
+    vr2 = score_viability(
+        "NOFLT", _fam(), _ctx(_NORMAL_ATR), _feats(ross_signals={"NOFLT": _aixc_signal(None)})
+    )
+    assert vr2.live_eligible is False
+
+
+def test_float_rotation_exemption_hard_max_still_rejects_arec(monkeypatch):
+    monkeypatch.setattr(settings, "chili_momentum_a_setup_quality_floor_enabled", True)
+    monkeypatch.setattr(settings, "chili_momentum_live_eligible_allow_extreme_explosive", True)
+    sig = {"float_shares": 107_000_000.0, "daily_change_pct": 18.0, "vol_ratio": 50.0}
+    vr = score_viability("AREC", _fam(), _ctx(_NORMAL_ATR), _feats(ross_signals={"AREC": sig}))
+    assert vr.live_eligible is False
+
+
+def test_float_rotation_exemption_mult_zero_restores_pure_cliff(monkeypatch):
+    monkeypatch.setattr(settings, "chili_momentum_a_setup_quality_floor_enabled", True)
+    monkeypatch.setattr(settings, "chili_momentum_live_eligible_allow_extreme_explosive", True)
+    monkeypatch.setattr(settings, "chili_momentum_a_setup_float_rvol_exemption_mult", 0.0)
+    vr = score_viability(
+        "BIGF", _fam(), _ctx(_NORMAL_ATR), _feats(ross_signals={"BIGF": _aixc_signal(12.0)})
+    )
+    assert vr.live_eligible is False

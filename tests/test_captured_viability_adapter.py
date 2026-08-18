@@ -465,17 +465,27 @@ def test_typed_and_serialized_paths_are_identical_and_lossless() -> None:
     # live=False, policy_parity=True. Ang mga assertion na iyon ay nauuna sa apat na
     # root sa ibaba, kaya sila ang patunay: kung nagbago ang ekonomiya, doon muna
     # babagsak, hindi sa hash.
+    # ROTATED 2026-08-18 (float-rotation exemption): dalawang bagong field sa
+    # ViabilitySettingsProjection — `chili_momentum_a_setup_float_rvol_exemption_mult`
+    # (2.0) at `chili_momentum_a_setup_float_hard_max_shares` (50M) — para sa
+    # AIXC-class na admission (float 1.17% lampas sa 20M ceiling sa +315% runner,
+    # 1,440 straight vetoes; 26 simbolo ang na-cliff noong araw na iyon). SCHEMA
+    # rotation lang, HINDI economic: ang fixture ay ≤20M float kaya hindi
+    # tumatama ang exemption — bawat desisyon sa itaas ay pareho pa rin
+    # (viability 0.5665, scorer paper=True/live=False, observation paper=False/
+    # live=False, policy_parity=True). Ang mga economic assertion sa itaas ang
+    # patunay: kung nagbago ang ekonomiya, doon muna babagsak, hindi sa hash.
     assert bundle.bundle_sha256 == (
-        "6cc25432e45585e699a21414823ba5d7a0178712dd0bf295761777094618ebbd"
+        "08ea50da407939d20399565b3c5ac1b3dd0f0e271b5b504889cf93c723504d39"
     )
     assert authority.authority_sha256 == (
-        "f8bb414941e7e4a1d636bc8c9b7ff7191b62ba7784ef01f2d0e258f0dc0bfee8"
+        "2f9245eab2141d077547850c40392b30d93394910892536301fae8272218b64f"
     )
     assert bundle.dependency_inventory.inventory_sha256 == (
-        "978955a2a8d85f22da554e9fdc172274995f72cec93f4fc4b3f74ec9a4b0f3c5"
+        "f4bf0b9c0e522993839864a81dd19ebdb16adea2e0f33b3b0abf1bb36254188d"
     )
     assert typed.observation.observation_sha256 == (
-        "64278ffa7c8a620865d6cafd3fa1398de0e890649007390af46e208ef8f439a9"
+        "2bc193deb27251506c09eb7a1df0b1345eca5675ce3cac7ee4dd798db3f8d85b"
     )
 
 

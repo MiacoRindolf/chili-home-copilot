@@ -445,3 +445,43 @@ def test_equity_extended_hours_are_explicit() -> None:
     assert open_ext["market_session"] == "pre_market"
     assert open_ext["is_tradable"] is True
     assert market_open_now("CANF", now=premarket, allow_extended_hours=True) is True
+
+
+# ── FLOAT-ROTATION EXEMPTION (2026-08-18 AIXC) ───────────────────────────────
+
+def test_tick_scalp_float_rotation_exemption():
+    from app.services.trading.momentum_neural.tick_scalp import ross_tick_scalp_evidence_ok
+
+    base = {"daily_change_pct": 37.8, "source": "5 pillars hod"}
+
+    # AIXC-shape: 1.17% over the ceiling with rotation-class rvol -> hindi float_too_large.
+    ok, reason, dbg = ross_tick_scalp_evidence_ok(
+        {**base, "float_shares": 20_234_993.0, "vol_ratio": 12.0}
+    )
+    assert reason != "float_too_large"
+    assert dbg.get("float_rvol_exempt") is True
+
+    # Mababang rvol -> nananatili ang cliff.
+    ok2, reason2, _ = ross_tick_scalp_evidence_ok(
+        {**base, "float_shares": 20_234_993.0, "vol_ratio": 4.0}
+    )
+    assert (ok2, reason2) == (False, "float_too_large")
+
+    # Nawawalang rvol -> hindi kailanman exempt.
+    ok3, reason3, _ = ross_tick_scalp_evidence_ok(
+        {**base, "float_shares": 20_234_993.0}
+    )
+    assert (ok3, reason3) == (False, "float_too_large")
+
+    # AREC-class 107M -> hard max, kahit anong rvol.
+    ok4, reason4, _ = ross_tick_scalp_evidence_ok(
+        {**base, "float_shares": 107_000_000.0, "vol_ratio": 50.0}
+    )
+    assert (ok4, reason4) == (False, "float_too_large")
+
+    # mult 0 -> purong cliff.
+    ok5, reason5, _ = ross_tick_scalp_evidence_ok(
+        {**base, "float_shares": 20_234_993.0, "vol_ratio": 12.0},
+        float_rvol_exemption_mult=0.0,
+    )
+    assert (ok5, reason5) == (False, "float_too_large")
