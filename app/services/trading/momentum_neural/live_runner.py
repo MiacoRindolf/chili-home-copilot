@@ -27263,6 +27263,22 @@ def tick_live_session(
         _safe_transition(db, sess, STATE_WATCHING_LIVE)
         _emit(db, sess, "live_runner_started", {"mid": mid})
         _emit(db, sess, "live_watch_started", {"product_id": product_id})
+        # SHELF-REGISTRATION PRIME (2026-08-18 Ross recaps): punuin ang EDGAR
+        # cache sa WATCH-start sa isang daemon thread (zero latency sa batch;
+        # minsanan bawat simbolo bawat TTL) — ang sizing seam ay CACHE LANG
+        # ang binabasa at hindi kailanman nag-nenetwork. Fail-open sa lahat.
+        try:
+            if not str(sess.symbol or "").upper().endswith("-USD"):
+                from .shelf_registration import prime_shelf_cache
+
+                threading.Thread(
+                    target=prime_shelf_cache,
+                    args=(str(sess.symbol),),
+                    daemon=True,
+                    name=f"shelf-prime-{sess.symbol}",
+                ).start()
+        except Exception:
+            pass
         db.flush()
         return {"ok": True, "session_id": sess.id, "state": sess.state}
 
@@ -32178,6 +32194,35 @@ def tick_live_session(
                     "effective_usd": round(float(_eff_max_loss), 2),
                 }
         except (TypeError, ValueError):
+            pass
+        # SHELF-REGISTRATION DAMPER (2026-08-18 Ross recaps: PFSA 179M registered
+        # vs 605K displayed float; "a little heavier than I thought" sa big
+        # winner niya). Aktibong shelf = OFFERING SUPPLY na sumisipsip sa
+        # short-cover bid — SUPPLY PHYSICS, hindi psychology, kaya kapareho ng
+        # time-of-day/spread derates: binds on paper (post-floor). CACHE-ONLY
+        # read (ang prime ay sa watch-start daemon thread) — hindi kailanman
+        # nag-nenetwork dito. Fail-open: walang cache/inactive = 1.0.
+        try:
+            if not str(sess.symbol or "").upper().endswith("-USD"):
+                from .shelf_registration import (
+                    cached_shelf_state,
+                    shelf_damper_multiplier,
+                )
+
+                _shelf_raw_frac = getattr(
+                    settings, "chili_momentum_shelf_active_size_fraction", 0.75
+                )
+                _shelf_frac = (
+                    0.75 if _shelf_raw_frac is None else float(_shelf_raw_frac)
+                )
+                _shelf_mult, _shelf_dbg = shelf_damper_multiplier(
+                    cached_shelf_state(str(sess.symbol)),
+                    fraction=_shelf_frac,
+                )
+                if 0.0 < float(_shelf_mult) < 1.0:
+                    _eff_max_loss = float(_eff_max_loss) * float(_shelf_mult)
+                    le["shelf_registration_damper"] = _shelf_dbg
+        except Exception:
             pass
         # TIME-OF-DAY risk curve (2026-07-10, greenlit #1): a MARKET-STRUCTURE derate
         # applied AFTER the paper floor (like the spread derate) — validated discipline,
