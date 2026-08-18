@@ -3035,6 +3035,59 @@ def _strict_alpaca_rth_entry_window(
             "broker_is_open": clock.get("is_open"),
             "broker_timestamp": clock.get("timestamp"),
         }
+    # 07:00 ET SELLER-UNLOCK GUARD (2026-08-18 Ross recap, $2k challenge):
+    # maraming broker ang naka-lock sa clients mula 4:00-7:00 ET, kaya ang mga
+    # overnight holder ng isang after-hours runner ay sabay-sabay na nagiging
+    # SELLERS sa eksaktong 7:00 — tinatrato ni Ross ang pre-7:00 continuation
+    # nang may duda hangga't hindi ito nagpapatunay pagkatapos ng unlock. Sa
+    # loob ng ±guard window sa paligid ng 07:00 ET, ang premarket entry ay
+    # nangangailangan ng POSITIBONG VWAP-side na ebidensya mula sa trigger
+    # (le["entry_above_vwap"] is True — naka-stamp na ng detector seam);
+    # kung wala o hindi True, mag-defer (bawat tick ito muling sinusuri, kaya
+    # WAIT ito, hindi lockout). 0 = guard off. Fail-suspicious sa loob lang ng
+    # maliit na window na ito — labas doon, walang pagbabago.
+    if _premarket_window_ok and local_session == "premarket":
+        try:
+            _su_raw = getattr(
+                settings,
+                "chili_momentum_premarket_seller_unlock_guard_min",
+                10.0,
+            )
+            _su_min = 10.0 if _su_raw is None else float(_su_raw)
+        except (TypeError, ValueError):
+            _su_min = 10.0
+        if _su_min > 0:
+            try:
+                from zoneinfo import ZoneInfo as _SuZone
+
+                _su_now = (
+                    _utcnow()
+                    .replace(tzinfo=timezone.utc)
+                    .astimezone(_SuZone("America/New_York"))
+                )
+                _su_minutes = _su_now.hour * 60.0 + _su_now.minute + _su_now.second / 60.0
+                if abs(_su_minutes - 7 * 60.0) <= _su_min:
+                    _su_snapshot = getattr(sess, "risk_snapshot_json", None)
+                    _su_snapshot = (
+                        _su_snapshot if isinstance(_su_snapshot, dict) else {}
+                    )
+                    _su_live = _su_snapshot.get(KEY_LIVE_EXEC)
+                    _su_live = _su_live if isinstance(_su_live, dict) else {}
+                    if _su_live.get("entry_above_vwap") is not True:
+                        return False, {
+                            "reason": "premarket_seller_unlock_wait",
+                            "local_market_session": local_session,
+                            "et_minutes_from_0700": round(
+                                _su_minutes - 7 * 60.0, 2
+                            ),
+                            "guard_min": round(_su_min, 1),
+                            "entry_above_vwap": _su_live.get("entry_above_vwap"),
+                        }
+            except Exception:
+                # Ang clock/snapshot read na pumalya sa loob ng guard ay hindi
+                # dapat pumatay ng entries sa labas ng disenyo nito — ang
+                # premarket window mismo ay na-validate na sa itaas.
+                pass
     try:
         broker_now = clock["_broker_now"]
         next_close = clock["_next_close"]
@@ -32080,6 +32133,7 @@ def tick_live_session(
         # MARKET-PHYSICS derates stay live even on paper (they model fill reality):
         # tape-speed cap, spread-cost derate, liquidity participation, notional
         # ceiling, aggregate risk budget, max-loss circuit, daily-loss caps.
+        _paper_floor_fired = False
         try:
             if (
                 str(ef or "") == "alpaca_spot"
@@ -32091,6 +32145,38 @@ def tick_live_session(
                     "restored_base_usd": round(float(_base_max_loss), 2),
                 }
                 _eff_max_loss = float(_base_max_loss)
+                _paper_floor_fired = True
+        except (TypeError, ValueError):
+            pass
+        # FIRST-TRADES-OF-DAY RAMP BINDS ON PAPER TOO (2026-08-18, Ross main-acct
+        # recap): ang −$12k ay full-size sa UNANG trade ng araw habang nasa
+        # drawdown — at ang kanyang sariling 1-big-trade-vs-10-medium argument:
+        # ang isang max-loss sa unang trade ay pumapatay sa option value ng
+        # buong sesyon. MECHANICAL na disiplina ito (option-value arithmetic),
+        # hindi psychology — kaya kapareho ng time-of-day curve, dumadaan ito
+        # sa paper floor (na siyang bumura rito dati: ang day_open_ramp_mult sa
+        # product sa itaas ay na-restore ng floor pabalik sa base, kaya INERT
+        # ito sa paper lane mula nang isilang). Re-apply lang kapag ang floor
+        # ang bumura (walang double-apply sa real-money path na hindi
+        # dumadaan sa floor). Green start / entry-N release ay nasa loob na ng
+        # multiplier mismo (day_open_risk_ramp_multiplier).
+        try:
+            if (
+                _paper_floor_fired
+                and bool(
+                    getattr(
+                        settings,
+                        "chili_momentum_day_open_ramp_binds_on_paper",
+                        True,
+                    )
+                )
+                and 0.0 < float(_day_open_ramp_mult) < 1.0
+            ):
+                _eff_max_loss = float(_eff_max_loss) * float(_day_open_ramp_mult)
+                le["day_open_risk_ramp_post_floor"] = {
+                    "mult": round(float(_day_open_ramp_mult), 4),
+                    "effective_usd": round(float(_eff_max_loss), 2),
+                }
         except (TypeError, ValueError):
             pass
         # TIME-OF-DAY risk curve (2026-07-10, greenlit #1): a MARKET-STRUCTURE derate

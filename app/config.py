@@ -2810,6 +2810,16 @@ class Settings(BaseSettings):
         le=20,
         validation_alias=AliasChoices("CHILI_MOMENTUM_DAY_OPEN_RAMP_ENTRIES_BASE"),
     )
+    # 2026-08-18 (Ross main-acct recap −$12k unang trade): ang day-open ramp ay
+    # MECHANICAL option-value discipline (isang max-loss sa unang trade ay
+    # pumapatay sa natitirang session), hindi psychology — kaya kapareho ng
+    # time-of-day curve, dumadaan ito sa paper full-size floor (na dating
+    # bumubura rito → INERT sa paper lane mula nang isilang ang floor).
+    chili_momentum_day_open_ramp_binds_on_paper: bool = Field(
+        default=True,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_DAY_OPEN_RAMP_BINDS_ON_PAPER"),
+        description="Re-apply the day-open risk ramp AFTER the paper full-size floor (the floor otherwise erases it on the alpaca paper lane). Mechanical first-trades-of-day discipline (Ross 2026-08-18 -$12k lesson), not psychology. OFF = pre-floor-only (inert on paper).",
+    )
     chili_momentum_vwap_reclaim_enabled: bool = Field(
         default=True,
         validation_alias=AliasChoices("CHILI_MOMENTUM_VWAP_RECLAIM_ENABLED"),
@@ -3677,6 +3687,16 @@ class Settings(BaseSettings):
     chili_momentum_symbol_loss_cooldown_min: float = Field(
         default=5.0,
         validation_alias=AliasChoices("CHILI_MOMENTUM_SYMBOL_LOSS_COOLDOWN_MIN"),
+    )
+    # LEADER RETRY EXEMPTION (2026-08-18 Ross recap: ang pumalyang unang breakout
+    # ng leading gainer na HINDI namatay ay mas mataas na conviction sa retry —
+    # ang cooldown TIMER ang kumakain ng retry window). Board #1 lang, timer
+    # lang (ang 2-strike day block ay absolute pa rin), at ang trigger seam ay
+    # may sariling structure gates (G4 escalation) bago makapasok muli.
+    chili_momentum_loss_cooldown_leader_exemption_enabled: bool = Field(
+        default=True,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_LOSS_COOLDOWN_LEADER_EXEMPTION_ENABLED"),
+        description="Exempt the CURRENT board #1 from the post-loss cooldown TIMER at arm time (the 2-strike daily stopout block still applies, and the trigger-side G4 escalation still demands structural reclaim). Ross 2026-08-18: the leading gainer's failed-then-retried breakout was the +$74k winner.",
     )
     # ADAPTIVE POST-LOSS COOLDOWN (2026-06-16, Ross-discipline / the CCTG re-entry):
     # CCTG took a −159bps scratch then re-armed 11min later into a −892bps bailout —
@@ -7056,6 +7076,17 @@ class Settings(BaseSettings):
         default=True,
         validation_alias=AliasChoices("CHILI_MOMENTUM_ALPACA_PREMARKET_ENTRIES_ENABLED"),
         description="Kill-switch para sa Alpaca-paper PREMARKET entries (2026-08-17 Ross live study: ang buong +$63k niya ay premarket habang hard-RTH-only ang lane). ON = ang _strict_alpaca_rth_entry_window ay tumatanggap din ng local_session='premarket' (kailangan pa rin ang fresh broker clock ok+paper), at ang instruction certification ay pumapayag sa literal na extended_hours=True + time_in_force='day' HABANG premarket pa ang kasalukuyang session (pagsapit ng 09:30 ay sarado ulit ang carve-out — walang silent crossover). Kaakibat na tighten: ang skip-spread-gate-for-limit-entry exemption ay RTH-only na (premarket = laging apply ang spread gate). Afterhours/overnight entries ay mananatiling blocked.",
+    )
+    # 07:00 ET SELLER-UNLOCK GUARD (2026-08-18 Ross $2k-challenge recap: maraming
+    # broker ang naka-lock 4:00-7:00 ET, kaya ang overnight holders ng isang
+    # after-hours runner ay sabay-sabay na nagbebenta sa eksaktong 7:00 — dinududa
+    # niya ang pre-7:00 continuation hangga't hindi napapatunayan post-unlock).
+    chili_momentum_premarket_seller_unlock_guard_min: float = Field(
+        default=10.0,
+        ge=0.0,
+        le=60.0,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_PREMARKET_SELLER_UNLOCK_GUARD_MIN"),
+        description="Within +/- this many minutes of 07:00 ET, a premarket entry requires POSITIVE VWAP-side evidence from the trigger (entry_above_vwap True) — else it defers (re-checked every tick; a WAIT, not a lockout). 0 = guard off.",
     )
     chili_momentum_exit_ask_pressure_enabled: bool = Field(
         default=True,
