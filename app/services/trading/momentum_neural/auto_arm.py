@@ -1230,6 +1230,50 @@ def _reap_cooldown_active(sym_u: str, now: datetime) -> bool:
     return at is not None and (now - at).total_seconds() < cd_sec
 
 
+_PREV_BOARD_LEADER: dict[str, str] = {}
+
+
+def _emit_leader_rotation_if_changed(db: Session, leader_sym: str) -> None:
+    """Durable event kapag nagbago ang board #1 sa pagitan ng arm passes.
+
+    Ross Aral #16 (attention rotation: ang bagong pinakamalakas na mover ay
+    'nagnanakaw ng attention' sa iba) at #25 (process-of-elimination conviction).
+    Ang leader-focus machinery ay may hoist/veto/exemptions na; ang KULANG ay ang
+    sukat ng rotation mismo — gaano kadalas, anong oras ng araw, at gaano
+    katagal bago ito ma-reflect ng lane. Telemetry lamang; walang gating.
+    Nakakabit sa pinakabagong session ng BAGONG leader (fallback: lumang leader);
+    in-process ang prev state (per-process; reset sa restart — katanggap-tanggap
+    para sa frequency measurement)."""
+    if not leader_sym:
+        return
+    prev = _PREV_BOARD_LEADER.get("leader")
+    if prev == leader_sym:
+        return
+    _PREV_BOARD_LEADER["leader"] = leader_sym
+    if prev is None:
+        return  # unang pass pagkatapos ng restart — walang rotation na itatala
+    from sqlalchemy import text as sa_text
+
+    row = db.execute(
+        sa_text(
+            "SELECT id FROM trading_automation_sessions "
+            "WHERE upper(symbol) IN (:new, :old) AND mode = 'live' "
+            "ORDER BY created_at DESC LIMIT 1"
+        ),
+        {"new": leader_sym, "old": prev},
+    ).fetchone()
+    if row is None:
+        return
+    from .persistence import append_trading_automation_event
+
+    append_trading_automation_event(
+        db,
+        session_id=int(row[0]),
+        event_type="arm_leader_rotation",
+        payload_json={"old_leader": prev, "new_leader": leader_sym},
+    )
+
+
 _LOSS_CF_EMITTED: dict[str, str] = {}
 
 
@@ -4710,6 +4754,15 @@ def run_auto_arm_pass(
     # (tier, ross, viability) name) is exempt from the reap-cooldown skip below — see
     # _reap_cooldown_blocks. Computed once per pass off the already-ranked list.
     _cooldown_exempt_sym = str(getattr(candidates[0], "symbol", "") or "").upper()
+    # LEADER-ROTATION TELEMETRY (2026-08-17, Ross Aral #16/#25: "attention is on
+    # other stocks" / "UCL had failed... this was still the leading gainer"):
+    # kapag NAGBAGO ang board #1 sa pagitan ng mga pass, itala nang durable —
+    # ang rotation frequency/timing ang susukat kung kailangan ng tahasang
+    # rotation-aware na lohika (telemetry-first). Hindi nagbabago ng gating.
+    try:
+        _emit_leader_rotation_if_changed(db, _cooldown_exempt_sym)
+    except Exception:
+        logger.debug("[auto_arm] leader-rotation emit skipped", exc_info=True)
 
     # Guard 6: NO-A-SETUP SESSION SIT-CASH (NEW INITIATION ONLY, kill-switch
     # chili_momentum_no_asetup_sit_cash_enabled, default OFF => byte-identical: the gate is
