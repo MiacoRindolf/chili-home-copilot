@@ -1919,25 +1919,43 @@ class MassiveWSClient:
             if not self._stop_event.is_set():
                 time.sleep(2)
 
+    # The socket greets with a standalone {"status":"connected"} frame BEFORE the
+    # auth ack, so the handshake must scan a few frames, not one. Bounded: no
+    # data frames can arrive pre-subscribe, so anything past a handful of status
+    # frames is a genuinely unacknowledged auth.
+    _AUTH_HANDSHAKE_MAX_FRAMES = 5
+
     def _authenticate(self):
         auth_msg = json.dumps({"action": "auth", "params": settings.massive_api_key})
         self._ws.send(auth_msg)
-        resp = self._ws.recv()
-        try:
-            rows = json.loads(resp)
-        except (TypeError, json.JSONDecodeError) as exc:
-            raise RuntimeError("Massive authentication response was malformed") from exc
-        if not isinstance(rows, list):
-            rows = [rows]
-        authenticated = any(
-            isinstance(row, dict)
-            and str(row.get("status") or "").strip().lower() == "auth_success"
-            for row in rows
-        )
-        if not authenticated:
-            raise RuntimeError("Massive authentication was not acknowledged")
-        self._authenticated_generation = self._connection_generation
-        logger.debug("[massive-ws] authentication acknowledged")
+        # 2026-08-18: the single-recv handshake read the "connected" greeting,
+        # declared "not acknowledged", and reconnect-looped every ~2.5s ALL DAY
+        # (32,203 sub-minute connections on the provider dashboard) — the WS
+        # feed was down while the key and entitlement were fine. Verified live:
+        # the greeting and the auth ack arrive as SEPARATE frames.
+        for _ in range(self._AUTH_HANDSHAKE_MAX_FRAMES):
+            resp = self._ws.recv()
+            try:
+                rows = json.loads(resp)
+            except (TypeError, json.JSONDecodeError) as exc:
+                raise RuntimeError(
+                    "Massive authentication response was malformed"
+                ) from exc
+            if not isinstance(rows, list):
+                rows = [rows]
+            statuses = {
+                str(row.get("status") or "").strip().lower()
+                for row in rows
+                if isinstance(row, dict)
+            }
+            if "auth_success" in statuses:
+                self._authenticated_generation = self._connection_generation
+                logger.debug("[massive-ws] authentication acknowledged")
+                return
+            if "auth_failed" in statuses or "auth_timeout" in statuses:
+                raise RuntimeError("Massive authentication was rejected")
+            # e.g. the "connected" greeting — keep reading for the ack.
+        raise RuntimeError("Massive authentication was not acknowledged")
 
     def _subscribe_all(self):
         with self._capture_sinks_lock:
