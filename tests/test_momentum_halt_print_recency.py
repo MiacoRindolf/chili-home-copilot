@@ -184,3 +184,53 @@ def test_already_halted_is_noop():
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
+
+
+# --------------------------------------------------------------------------- #
+# FEED-STALL GUARD (2026-08-18): whole-tape silence is a feed stall, not a halt #
+# --------------------------------------------------------------------------- #
+def _run_with_global_age(recency_state, global_age, *, flag_overrides=None):
+    sess = _sess()
+    le = {}
+    with patch.object(LR, "settings", SimpleNamespace(**_flags(**(flag_overrides or {})))), \
+        patch.object(LR, "_emit"), \
+        patch("app.services.trading.momentum_neural.nbbo_tape.print_recency_state",
+              return_value=recency_state), \
+        patch("app.services.trading.momentum_neural.nbbo_tape.global_print_recency_age_s",
+              return_value=global_age), \
+        patch("app.services.trading.momentum_neural.market_profile.is_data_session_now",
+              return_value=True):
+        LR._register_print_recency_halt_check(None, sess, le, _Tick(bid=10.0))
+    return le
+
+
+def test_feed_stall_suppresses_print_recency_halt():
+    """195 phantom halts on 2026-08-18: the WHOLE tape stalled 35-297s and six
+    symbols 'halted' in the same second. When the newest print across all
+    symbols is older than half this name's window, skip the inference."""
+    st = {"last_print_age_s": 300.0, "recent_print_count": 40, "median_gap_s": 2.0}
+    le = _run_with_global_age(st, 200.0)  # global also silent >> 0.5*30s
+    assert "suspected_halt_since_utc" not in le, "feed-wide silence must not read as a LULD halt"
+
+
+def test_real_halt_with_streaming_feed_still_marks():
+    st = {"last_print_age_s": 300.0, "recent_print_count": 40, "median_gap_s": 2.0}
+    le = _run_with_global_age(st, 1.0)  # rest of the tape is streaming
+    assert le.get("suspected_halt_since_utc"), "a single-name halt with a live feed must still mark"
+
+
+def test_feed_stall_guard_ratio_zero_disables():
+    st = {"last_print_age_s": 300.0, "recent_print_count": 40, "median_gap_s": 2.0}
+    le = _run_with_global_age(
+        st, 200.0,
+        flag_overrides={"chili_momentum_halt_feed_stall_global_age_ratio": 0.0},
+    )
+    assert le.get("suspected_halt_since_utc"), "ratio 0 must restore pre-guard behavior"
+
+
+def test_global_age_unreadable_keeps_inference():
+    """A failed global read (None) must not swallow the halt inference — the
+    guard only suppresses on POSITIVE evidence of a feed stall."""
+    st = {"last_print_age_s": 300.0, "recent_print_count": 40, "median_gap_s": 2.0}
+    le = _run_with_global_age(st, None)
+    assert le.get("suspected_halt_since_utc")

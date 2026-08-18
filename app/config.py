@@ -3508,6 +3508,19 @@ class Settings(BaseSettings):
         validation_alias=AliasChoices("CHILI_MOMENTUM_HALT_PRINT_RECENT_ACTIVE_MIN_PRINTS"),
         description="R6: minimum prints within the recent-active window required to treat the name as recently active (activity floor). Below it ⇒ no print-recency halt inference (fail-closed).",
     )
+    # FEED-STALL GUARD (2026-08-18): a print-recency halt is only credible when the
+    # REST of the tape is still streaming. When the freshest print across ALL
+    # symbols is itself older than this fraction of the name's no-print window,
+    # the silence belongs to the FEED (2026-08-18: 195 phantom halts, six symbols
+    # in the same second), not the name — the inference is skipped for that tick.
+    # 0 disables the guard (pre-guard behavior).
+    chili_momentum_halt_feed_stall_global_age_ratio: float = Field(
+        default=0.5,
+        ge=0.0,
+        le=1.0,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_HALT_FEED_STALL_GLOBAL_AGE_RATIO"),
+        description="Print-recency halt feed-stall guard: skip the halt inference when the newest print across the WHOLE tape is older than this fraction of the symbol's adaptive no-print window (whole-feed silence = feed stall, not a LULD halt). 0 = guard off.",
+    )
     # HOT-tape regime floor: this many simultaneous LULD-scale movers (>=30% day
     # move among the bridge's scanned candidates) flips the catalyst tilt to the
     # no-news read (Ross 2026-06-10: hot days = no-news foreign small caps run;
