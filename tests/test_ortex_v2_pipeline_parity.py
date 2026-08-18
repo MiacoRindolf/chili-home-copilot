@@ -1378,3 +1378,104 @@ def test_real_live_fsm_consumes_incomplete_sealed_ortex_at_entry_guard(
     assert session.state == STATE_WATCHING_LIVE
     adapter.place_market_order.assert_not_called()
     adapter.place_limit_order_gtc.assert_not_called()
+
+
+def test_ortex_neutral_fallback_scope() -> None:
+    """Tilt-not-veto (2026-08-18): operational admission failures proceed
+    tilt-neutral ONLY for ordinary sessions — sealed replay and captured-paper
+    marked sessions (any of the 3 marker keys, even null-valued) stay
+    fail-closed, as does an unreadable snapshot."""
+    import app.services.trading.momentum_neural.live_runner as lr
+
+    plain = SimpleNamespace(risk_snapshot_json={})
+    assert lr._ortex_neutral_fallback_applies(plain) is True
+
+    for marker in (
+        "captured_paper_session_owner",
+        "captured_paper_session_pending_owner",
+        "captured_paper_session_preowner",
+    ):
+        marked = SimpleNamespace(risk_snapshot_json={marker: None})
+        assert lr._ortex_neutral_fallback_applies(marked) is False
+
+    unreadable = SimpleNamespace(risk_snapshot_json=None)
+    assert lr._ortex_neutral_fallback_applies(unreadable) is False
+
+    token = lr._REPLAY_ORTEX_DECISION_STATE.set(
+        SimpleNamespace(consumed=False, selection=None)
+    )
+    try:
+        assert lr._ortex_neutral_fallback_applies(plain) is False
+    finally:
+        lr._REPLAY_ORTEX_DECISION_STATE.reset(token)
+
+
+def test_strip_squeeze_fuel_projection_neutralizes_only_target_symbol() -> None:
+    import app.services.trading.momentum_neural.live_runner as lr
+
+    readiness = {
+        "slippage_estimate_bps": 12.5,
+        "extra": {
+            "ross_signals": {
+                "aaa": {
+                    "squeeze_fuel_pct": 0.9,
+                    "squeeze_fuel_rank_pct": 0.95,
+                    "ortex_selection_reference": "ref-a",
+                    "rvol": 8.0,
+                },
+                "BBB": {
+                    "squeeze_fuel_pct": 0.5,
+                    "squeeze_fuel_rank_pct": 0.4,
+                    "ortex_selection_reference": "ref-b",
+                },
+            },
+            "other_key": {"keep": True},
+        },
+    }
+
+    out = lr._strip_squeeze_fuel_projection(readiness, symbol="AAA")
+
+    aaa = out["extra"]["ross_signals"]["aaa"]
+    assert "squeeze_fuel_pct" not in aaa
+    assert "squeeze_fuel_rank_pct" not in aaa
+    assert "ortex_selection_reference" not in aaa
+    assert aaa["rvol"] == 8.0  # non-tilt evidence is untouched
+    # The other symbol and unrelated extras are untouched.
+    assert out["extra"]["ross_signals"]["BBB"]["squeeze_fuel_pct"] == 0.5
+    assert out["extra"]["other_key"] == {"keep": True}
+    assert out["slippage_estimate_bps"] == 12.5
+    # Deep copy: the caller's original object is never mutated.
+    assert readiness["extra"]["ross_signals"]["aaa"]["squeeze_fuel_pct"] == 0.9
+    # Tolerates degenerate shapes without raising.
+    assert lr._strip_squeeze_fuel_projection({}, symbol="AAA") == {}
+    assert lr._strip_squeeze_fuel_projection(
+        {"extra": {"ross_signals": None}}, symbol="AAA"
+    ) == {"extra": {"ross_signals": None}}
+
+
+def test_tick_source_wires_neutral_fallback() -> None:
+    """The fallback seam must live at the single admission call site inside
+    tick_live_session — stripping economics, emitting the neutral telemetry
+    event, and clearing the blocker — so the fail-closed defer below it only
+    fires for sealed replay / captured-paper sessions."""
+    source = __import__("inspect").getsource(
+        __import__(
+            "app.services.trading.momentum_neural.live_runner",
+            fromlist=["tick_live_session"],
+        ).tick_live_session
+    )
+    assert "_ortex_neutral_fallback_applies(sess)" in source
+    assert "_strip_squeeze_fuel_projection(ex_live" in source
+    assert '"live_entry_ortex_neutral_fallback"' in source
+    assert '"live_entry_ortex_coverage_unavailable"' in source
+    # Control-flow pinning, not just presence: the fallback must (a) run BEFORE
+    # the fail-closed defer emit and (b) CLEAR the blocker so the defer below
+    # never fires for a rescued ordinary session.
+    assert source.index('"live_entry_ortex_neutral_fallback"') < source.index(
+        '"live_entry_ortex_coverage_unavailable"'
+    )
+    fallback_block = source[
+        source.index("_ortex_neutral_fallback_applies(sess)"):
+        source.index('"live_entry_ortex_coverage_unavailable"')
+    ]
+    assert "_ortex_blocker = None" in fallback_block

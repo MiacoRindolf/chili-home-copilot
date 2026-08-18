@@ -24632,6 +24632,57 @@ def _live_ortex_entry_readiness_reason(
         return "ortex_batch_readiness_validation_failed"
 
 
+def _ortex_neutral_fallback_applies(sess: Any) -> bool:
+    """Whether an OPERATIONAL Ortex admission failure may proceed tilt-neutral.
+
+    The squeeze-fuel tilt SIZES an entry; it must never veto one (the
+    meta-label doctrine). That softening is only sound where no sealed
+    contract depends on the admission verdict: inside sealed replay the
+    consumed receipt IS the decision evidence, and a captured-paper-owned
+    session belongs to the sealed lane's stricter admission — both stay
+    fail-closed. Ordinary LIVE/PAPER time-share sessions fall back to a
+    neutral (no-tilt) entry instead of deferring. Unknown session shape
+    stays fail-closed (defer), matching the marker helper's posture.
+    """
+    if _REPLAY_ORTEX_DECISION_STATE.get() is not None:
+        return False
+    try:
+        return not _session_captured_paper_marked(sess)
+    except Exception:
+        return False
+
+
+def _strip_squeeze_fuel_projection(
+    execution_readiness: dict[str, Any], *, symbol: str
+) -> dict[str, Any]:
+    """Return a deep copy with this symbol's Ortex tilt economics removed.
+
+    With squeeze_fuel_pct / squeeze_fuel_rank_pct absent, the sizing policy's
+    evidence_complete check fails and the entry sizes at BASE (neutral) — the
+    unverified economics can neither tilt the size nor block the entry.
+    """
+    import copy as _copy
+
+    out = _copy.deepcopy(execution_readiness)
+    extra = out.get("extra")
+    if isinstance(extra, dict):
+        signals = extra.get("ross_signals")
+        if isinstance(signals, dict):
+            wanted = str(symbol or "").strip().upper()
+            for raw_symbol, signal in signals.items():
+                if (
+                    str(raw_symbol or "").strip().upper() == wanted
+                    and isinstance(signal, dict)
+                ):
+                    for field in (
+                        "squeeze_fuel_pct",
+                        "squeeze_fuel_rank_pct",
+                        "ortex_selection_reference",
+                    ):
+                        signal.pop(field, None)
+    return out
+
+
 def _overlay_replay_ortex_selection(
     execution_readiness: dict[str, Any],
     *,
@@ -30482,6 +30533,23 @@ def tick_live_session(
             read_at=_utcnow_aware(),
             locked_session=sess,
         )
+        if _ortex_blocker is not None and _ortex_neutral_fallback_applies(sess):
+            # TILT-NOT-VETO (2026-08-18 zero-trade autopsy): 116/134 place
+            # attempts died here when the hub manifest rotated between
+            # decision-build and placement — reference equality includes
+            # decision_at/batch_sha256, so ANY rebuild invalidates every
+            # in-flight decision. An operational admission failure on an
+            # ordinary session now proceeds at NEUTRAL size with the
+            # unverified economics stripped; sealed replay and captured-paper
+            # sessions keep the fail-closed defer below.
+            ex_live = _strip_squeeze_fuel_projection(ex_live, symbol=sess.symbol)
+            _emit(
+                db,
+                sess,
+                "live_entry_ortex_neutral_fallback",
+                {"reason": _ortex_blocker, "tilt": "neutral"},
+            )
+            _ortex_blocker = None
         if _ortex_blocker is not None:
             _emit(
                 db,
