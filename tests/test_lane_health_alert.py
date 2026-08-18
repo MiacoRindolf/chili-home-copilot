@@ -1205,3 +1205,58 @@ def test_run_recovery_resets(db, caplog):
     assert r["frozen"] is False
     assert lh._last_alert_signature is None
     assert any("RECOVERED" in rec.message for rec in caplog.records)
+
+
+def test_exact_print_fresh_receipt_ahead_of_stale_sweep_clock_stays_healthy(
+    db,
+    monkeypatch,
+):
+    """2026-08-18 false-freeze: evaluate_lane_health snapshots `now` at the top
+    of a >10s multi-probe sweep, so on a HEALTHY tape (commits every ~1s) the
+    just-fetched receipt is stamped AFTER the snapshot and the future guard
+    froze entries all morning. The age math must anchor to a clock read taken
+    after the fetch."""
+    _enable_equity_event_lane(monkeypatch)
+    monkeypatch.setattr(lh, "_iqfeed_data_session_age_seconds", lambda: 601.0)
+    monkeypatch.setattr(
+        lh,
+        "_latest_exact_iqfeed_print_status",
+        lambda _db: {
+            "ok": True,
+            "provider_event_at": datetime.utcnow() - timedelta(seconds=1),
+            "received_at": datetime.utcnow() - timedelta(seconds=1),
+            "available_at": datetime.utcnow() - timedelta(seconds=1),
+        },
+    )
+
+    stale_sweep_now = datetime.utcnow() - timedelta(seconds=10)
+    cond = lh._equity_exact_print_tape_condition(db, now=stale_sweep_now)
+
+    assert cond is None
+
+
+def test_exact_print_genuinely_future_receipt_still_trips_guard(
+    db,
+    monkeypatch,
+):
+    """A receipt stamped ahead of BOTH clocks (host clock step backwards /
+    forged availability) must still freeze loudly — the anchor is a floor,
+    not a bypass of the future guard."""
+    _enable_equity_event_lane(monkeypatch)
+    monkeypatch.setattr(lh, "_iqfeed_data_session_age_seconds", lambda: 601.0)
+    monkeypatch.setattr(
+        lh,
+        "_latest_exact_iqfeed_print_status",
+        lambda _db: {
+            "ok": True,
+            "provider_event_at": datetime.utcnow() - timedelta(seconds=1),
+            "received_at": datetime.utcnow() - timedelta(seconds=1),
+            "available_at": datetime.utcnow() + timedelta(seconds=10),
+        },
+    )
+
+    cond = lh._equity_exact_print_tape_condition(db, now=datetime.utcnow())
+
+    assert cond is not None
+    assert cond["reason"] == "iqfeed_exact_print_available_future"
+    assert cond["frozen"] is True

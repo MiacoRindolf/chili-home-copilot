@@ -791,8 +791,17 @@ def _equity_exact_print_tape_condition(
         elapsed = session_age
         since = None
     else:
-        provider_age = (now - provider_event_at).total_seconds()
-        available_age = (now - available_at).total_seconds()
+        # The caller snapshots `now` at the top of a multi-probe sweep that can
+        # run for >10s, while the receipt above was fetched just now. On a
+        # healthy tape (commits every ~1s) the latest available_at is then
+        # almost always AHEAD of the stale snapshot, tripping the future guard
+        # and freezing entries precisely when the feed is at its best. Anchor
+        # the age math to a clock read taken after the fetch; keep the caller's
+        # `now` only as a floor so a backwards host-clock step still trips the
+        # future guard.
+        anchor = max(now, datetime.utcnow())
+        provider_age = (anchor - provider_event_at).total_seconds()
+        available_age = (anchor - available_at).total_seconds()
         if provider_age < -_IQFEED_EXACT_PRINT_FUTURE_TOLERANCE_SECONDS:
             reason = "iqfeed_exact_print_provider_future"
             elapsed = provider_age
