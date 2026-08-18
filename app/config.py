@@ -7077,6 +7077,23 @@ class Settings(BaseSettings):
         validation_alias=AliasChoices("CHILI_MOMENTUM_ALPACA_PREMARKET_ENTRIES_ENABLED"),
         description="Kill-switch para sa Alpaca-paper PREMARKET entries (2026-08-17 Ross live study: ang buong +$63k niya ay premarket habang hard-RTH-only ang lane). ON = ang _strict_alpaca_rth_entry_window ay tumatanggap din ng local_session='premarket' (kailangan pa rin ang fresh broker clock ok+paper), at ang instruction certification ay pumapayag sa literal na extended_hours=True + time_in_force='day' HABANG premarket pa ang kasalukuyang session (pagsapit ng 09:30 ay sarado ulit ang carve-out — walang silent crossover). Kaakibat na tighten: ang skip-spread-gate-for-limit-entry exemption ay RTH-only na (premarket = laging apply ang spread gate). Afterhours/overnight entries ay mananatiling blocked.",
     )
+    # SHELF-REGISTRATION DAMPER (2026-08-18 Ross recaps: PFSA may 179M registered
+    # sa likod ng 605K displayed float; sinisi niya ang muted HOD-break squeeze
+    # sa posibleng shelf tapping). Aktibong registration = supply na sumisipsip
+    # sa short-cover bid — EXPECTATION damper (size-down), hindi veto.
+    chili_momentum_shelf_active_size_fraction: float = Field(
+        default=0.75,
+        ge=0.0,
+        le=1.0,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_SHELF_ACTIVE_SIZE_FRACTION"),
+        description="Risk-budget fraction kapag may AKTIBONG shelf/registration ang simbolo (EDGAR S-1/S-3/F-1/F-3/424B sa loob ng lookback). Supply physics — binds on paper. 1.0 o 0 = damper off. Fail-open: walang EDGAR data = walang damper.",
+    )
+    chili_momentum_shelf_lookback_days: float = Field(
+        default=365.0,
+        gt=0.0,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_SHELF_LOOKBACK_DAYS"),
+        description="Gaano kalayo pabalik ang EDGAR filing scan para ituring na AKTIBO ang shelf/registration.",
+    )
     # 07:00 ET SELLER-UNLOCK GUARD (2026-08-18 Ross $2k-challenge recap: maraming
     # broker ang naka-lock 4:00-7:00 ET, kaya ang overnight holders ng isang
     # after-hours runner ay sabay-sabay na nagbebenta sa eksaktong 7:00 — dinududa
