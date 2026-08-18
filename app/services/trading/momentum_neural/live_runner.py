@@ -21944,6 +21944,36 @@ def _register_print_recency_halt_check(db, sess, le: dict, tick: Any = None) -> 
             _window = _gap_floor
         if float(last_age) < _window:
             return  # tape is still printing within the adaptive window — not halted.
+        # FEED-STALL GUARD (2026-08-18): 195 phantom halts fired in clusters —
+        # up to SIX symbols in the same second — because the WHOLE tape went
+        # silent (feed stall 35-297s), and per-symbol silence is
+        # indistinguishable from a halt without a feed-health cross-check. A
+        # real LULD halt leaves the rest of the tape streaming (global age
+        # ~0-2s); when the freshest print across ALL symbols is itself older
+        # than the guard fraction of this name's window, the silence is the
+        # FEED's, not the name's — skip the inference (fail toward not
+        # blocking entries; the inference re-runs next tick).
+        try:
+            # A 0.0 ratio is a deliberate "guard off" and is preserved; only
+            # None / NaN / unparseable values fall back to the default.
+            _fs_raw = getattr(settings, "chili_momentum_halt_feed_stall_global_age_ratio", 0.5)
+            _fs_ratio = 0.5 if _fs_raw is None else float(_fs_raw)
+            if not math.isfinite(_fs_ratio):
+                _fs_ratio = 0.5
+        except (TypeError, ValueError):
+            _fs_ratio = 0.5
+        if _fs_ratio > 0:
+            from .nbbo_tape import global_print_recency_age_s
+
+            _global_age = global_print_recency_age_s(db, now_utc=_utcnow())
+            if _global_age is not None and float(_global_age) >= _window * _fs_ratio:
+                _log.info(
+                    "[momentum_live] print-recency halt SKIPPED (feed stall) "
+                    "symbol=%s last_print_age=%.1fs window=%.1fs global_age=%.1fs — "
+                    "the whole tape is silent, not this name.",
+                    sym, float(last_age), _window, float(_global_age),
+                )
+                return
         _mark_suspected_halt(
             db, sess, le, tick,
             detail={

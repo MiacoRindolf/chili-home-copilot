@@ -857,6 +857,48 @@ def print_recency_state(
     }
 
 
+def global_print_recency_age_s(
+    db: Session,
+    *,
+    now_utc: Optional[datetime] = None,
+    lookback_s: float = 600.0,
+) -> Optional[float]:
+    """Seconds since the newest print on the WHOLE equity tape (any symbol).
+
+    The feed-stall discriminator for print-recency halt inference (2026-08-18:
+    195 phantom halts — the entire tape went silent 35-297s at once, so
+    per-symbol silence read as a LULD halt on six symbols in the same second).
+    A real single-name halt leaves the rest of the tape streaming (age ~0-2s);
+    a feed stall silences everything. Bounded scan (BRIN-friendly lookback);
+    None ⇒ no tape rows in the lookback / read failure — the caller decides
+    fail-closed semantics.
+    """
+    now_utc = now_utc or datetime.now(timezone.utc)
+    now_naive = now_utc.replace(tzinfo=None) if now_utc.tzinfo is not None else now_utc
+    since = now_naive - timedelta(seconds=max(1.0, float(lookback_s)))
+    try:
+        with db.begin_nested():
+            row = db.execute(
+                text(
+                    "SELECT EXTRACT(EPOCH FROM (:now_naive - max(observed_at))) "
+                    "FROM iqfeed_trade_ticks "
+                    # AS-OF bound: same replay-safety contract as
+                    # print_recency_state — never read past sim-now.
+                    "WHERE observed_at >= :since AND observed_at <= :now_naive"
+                ),
+                {"since": since, "now_naive": now_naive},
+            ).fetchone()
+    except Exception as exc:
+        logger.debug("[nbbo_tape] global print-recency read failed: %s", exc)
+        return None
+    if not row or row[0] is None:
+        return None
+    try:
+        return float(row[0])
+    except (TypeError, ValueError):
+        return None
+
+
 def recent_spread_median_bps(
     db: Session, symbol: str, *, window_s: float, now_utc: Optional[datetime] = None,
 ) -> tuple[float, int] | None:
