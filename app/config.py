@@ -13379,10 +13379,15 @@ class Settings(BaseSettings):
     brain_retention_bracket_reconciliation_days: int = 30
     brain_retention_execution_event_days: int = 180
     # Replay v3 R1: TTL for the append-only momentum_viability_history (mig311). The
-    # eligibility series is only needed for recent-day replay/incident reconstruction;
-    # 30d keeps the table small (one row per viable name per tick). Pruned by the same
-    # batched _prune_operational_time_log drain the other operational logs use.
-    brain_retention_viability_history_days: int = 30
+    # eligibility series is only needed for recent-day replay/incident reconstruction.
+    # 35d (2026-08-17 audit): ang breadth_regime ay nangangailangan ng 20 trading
+    # session (~28 calendar days) — ang dating 30d ay ~21 session lang, halos walang
+    # holiday margin; ang 45d na query floor sa breadth_regime ay index hint, hindi
+    # requirement. Pruned via _prune_operational_time_log DRAIN LOOP (dating isang
+    # 50k batch/araw laban sa ~508k/araw ingestion = 11GB balloon; ang cap sa ibaba
+    # ang nagpapahabol sa sweep).
+    brain_retention_viability_history_days: int = 35
+    brain_retention_viability_history_max_rows_per_sweep: int = 5_000_000
     # Staleness window after which momentum_symbol_viability rows get their four
     # JSONB snapshot columns slimmed to '{}' (rows are KEPT — scalar score/
     # eligibility/timestamps survive; the upsert fully repopulates the JSONB the
