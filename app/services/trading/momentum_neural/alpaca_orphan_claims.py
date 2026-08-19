@@ -12,6 +12,7 @@ import json
 import hashlib
 import logging
 import math
+import time
 import uuid
 from datetime import datetime, timedelta, timezone
 from typing import Any, Callable
@@ -6078,10 +6079,47 @@ def _reserve_alpaca_entry_risk(
             return {"ok": False, "reason": "adaptive_risk_order_request_mismatch"}
         candidate = float(adaptive_claim.structural_risk_usd)
 
-    db.execute(
-        text("SELECT pg_advisory_xact_lock(:key)"),
-        {"key": alpaca_account_risk_lock_key(scope)},
+    # BOUNDED WAIT (2026-08-19 AZI hang). This used to be a bare
+    # ``pg_advisory_xact_lock``, which in PostgreSQL blocks INDEFINITELY — and no
+    # lock_timeout is set on these sessions. The key is ACCOUNT-scoped, so every
+    # session on the same Alpaca paper account serialises on ONE lock; if the
+    # holder is mid network call, everyone behind it waits with zero logging.
+    # Observed live: session 14440 (AZI) sat in live_pending_entry from 12:01:38
+    # to 12:12:27 PT — 648 seconds inside a single tick, emitting NOTHING. Because
+    # the live-runner job is max_instances=1, that froze the whole lane, so no
+    # HELD position was managed either.
+    #
+    # ``pg_try_advisory_xact_lock`` is used deliberately instead of SET LOCAL
+    # lock_timeout: a lock_timeout raises, which ABORTS the transaction and would
+    # poison every later statement on this session (InFailedSqlTransaction). The
+    # try-variant returns a boolean, leaves the transaction healthy, and lets us
+    # fall through to the SAME fail-closed shape the unreadable-ledger path
+    # already uses — the caller simply does not place on this tick and retries on
+    # the next one. Lock semantics once acquired are identical (xact-scoped).
+    _lock_wait_s = float(
+        getattr(settings, "chili_momentum_alpaca_risk_lock_max_wait_seconds", 5.0)
+        or 0.0
     )
+    _lock_key = alpaca_account_risk_lock_key(scope)
+    if _lock_wait_s <= 0:
+        db.execute(text("SELECT pg_advisory_xact_lock(:key)"), {"key": _lock_key})
+    else:
+        _deadline = time.monotonic() + _lock_wait_s
+        while True:
+            _got = db.execute(
+                text("SELECT pg_try_advisory_xact_lock(:key)"), {"key": _lock_key}
+            ).scalar()
+            if bool(_got):
+                break
+            if time.monotonic() >= _deadline:
+                _log.warning(
+                    "[alpaca_risk] account risk lock busy for %.1fs (scope=%s "
+                    "symbol=%s) — failing CLOSED for this tick instead of blocking "
+                    "the runner; will retry next tick",
+                    _lock_wait_s, scope, sym,
+                )
+                return {"ok": False, "reason": "risk_ledger_lock_unavailable"}
+            time.sleep(0.05)
     readable, existing = read_action_claim(
         db,
         symbol=sym,

@@ -8712,6 +8712,15 @@ class Settings(BaseSettings):
         le=3600,
         validation_alias=AliasChoices("CHILI_MOMENTUM_LIVE_RUNNER_SCHEDULER_INTERVAL_SECONDS"),
     )
+    chili_momentum_alpaca_risk_lock_max_wait_seconds: float = Field(
+        default=5.0,
+        ge=0.0,
+        le=120.0,
+        validation_alias=AliasChoices(
+            "CHILI_MOMENTUM_ALPACA_RISK_LOCK_MAX_WAIT_SECONDS"
+        ),
+        description="Bounded wait for the ACCOUNT-scoped Alpaca risk advisory lock in the order-placement path. This was a bare pg_advisory_xact_lock, which blocks INDEFINITELY in PostgreSQL with no lock_timeout set — and the key is account-scoped, so every session on the same paper account serialises on ONE lock. Observed 2026-08-19: session 14440 (AZI) sat in live_pending_entry for 648 seconds inside a single tick emitting zero log lines, freezing the whole max_instances=1 runner and with it the stop/trail management of every held position. On timeout the caller fails CLOSED for that tick (risk_ledger_lock_unavailable) and retries next tick — it never places without the lock. 0 restores the unbounded blocking wait.",
+    )
     chili_momentum_live_runner_batch_budget_seconds: float = Field(
         default=60.0,
         ge=0.0,
