@@ -19,6 +19,7 @@ import json
 import logging
 import math
 import threading
+import time
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
@@ -666,6 +667,45 @@ def live_ohlcv_capture_sink(
         _LIVE_OHLCV_CAPTURE_SINK.reset(token)
 
 
+# PER-TICK OHLCV COST METER (2026-08-19). A SINGLE tick_live_session was measured
+# at 6.5-14.8s against a 10s scheduler interval — which is why 62% of runner ticks
+# were skipped and the entry trigger was only sampled every 30.6s (median) on a
+# 1-minute-bar setup. This wrapper is the ONE choke point for all 12 runner OHLCV
+# read sites, so metering it here says whether those reads ARE the cost before
+# anyone tunes a pool width or an interval. Thread-local: ticks run on a pool.
+_TICK_OHLCV = threading.local()
+
+
+def reset_tick_ohlcv_meter() -> None:
+    """Start a fresh per-tick OHLCV cost measurement on this thread."""
+    _TICK_OHLCV.calls = 0
+    _TICK_OHLCV.seconds = 0.0
+    _TICK_OHLCV.cache_hits = 0
+
+
+def read_tick_ohlcv_meter() -> tuple[int, float, int]:
+    """(calls, seconds, cache_hits) since the last reset on this thread."""
+    return (
+        int(getattr(_TICK_OHLCV, "calls", 0) or 0),
+        float(getattr(_TICK_OHLCV, "seconds", 0.0) or 0.0),
+        int(getattr(_TICK_OHLCV, "cache_hits", 0) or 0),
+    )
+
+
+def _meter_tick_ohlcv(elapsed: float, df: Any) -> None:
+    try:
+        _TICK_OHLCV.calls = int(getattr(_TICK_OHLCV, "calls", 0) or 0) + 1
+        _TICK_OHLCV.seconds = (
+            float(getattr(_TICK_OHLCV, "seconds", 0.0) or 0.0) + float(elapsed)
+        )
+        if bool((getattr(df, "attrs", None) or {}).get("cache_hit")):
+            _TICK_OHLCV.cache_hits = (
+                int(getattr(_TICK_OHLCV, "cache_hits", 0) or 0) + 1
+            )
+    except Exception:
+        pass
+
+
 def _replay_aware_fetch_ohlcv_df(
     ticker: str, interval: str = "1d", period: str = "6mo"
 ) -> Any:
@@ -693,11 +733,14 @@ def _replay_aware_fetch_ohlcv_df(
 
     sink = _LIVE_OHLCV_CAPTURE_SINK.get()
     requested_at = datetime.now(timezone.utc)
+    _meter_t0 = time.monotonic()
     try:
         result = _real_fetch_ohlcv_df(
             ticker, interval=interval, period=period
         )
+        _meter_tick_ohlcv(time.monotonic() - _meter_t0, result)
     except Exception as exc:
+        _meter_tick_ohlcv(time.monotonic() - _meter_t0, None)
         failed_at = datetime.now(timezone.utc)
         if sink is not None:
             try:

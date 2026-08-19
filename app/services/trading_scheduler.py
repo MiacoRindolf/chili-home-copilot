@@ -1016,6 +1016,15 @@ def _run_momentum_live_runner_batch_job():
 
         def _tick_one_pass(sid: int) -> bool:
             """ONE FSM invocation on its OWN DB Session. Returns ok."""
+            try:
+                from .trading.momentum_neural.live_runner import (
+                    read_tick_ohlcv_meter,
+                    reset_tick_ohlcv_meter,
+                )
+
+                reset_tick_ohlcv_meter()
+            except Exception:
+                read_tick_ohlcv_meter = None  # type: ignore[assignment]
             db_s = SessionLocal()
             ok = False
             phase_one_committed = False
@@ -1053,6 +1062,22 @@ def _run_momentum_live_runner_batch_job():
                     except Exception:
                         pass
                 db_s.close()
+            # WHERE THE TICK TIME GOES (2026-08-19): a single tick measured 6.5-14.8s
+            # against a 10s interval, which is what skipped 62% of ticks and left the
+            # 1-minute entry trigger sampled only every 30.6s. The 12 runner OHLCV read
+            # sites all funnel through one wrapper, so this says whether they ARE the
+            # cost — before anyone tunes a pool width, an interval, or a cache.
+            try:
+                if read_tick_ohlcv_meter is not None:
+                    _oc, _os, _oh = read_tick_ohlcv_meter()
+                    if _oc:
+                        logger.info(
+                            "[scheduler] tick ohlcv session=%s calls=%d seconds=%.2f "
+                            "cache_hits=%d",
+                            sid, _oc, _os, _oh,
+                        )
+            except Exception:
+                pass
             return ok
 
         _wall0 = time.monotonic()

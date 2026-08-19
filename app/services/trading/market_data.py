@@ -522,7 +522,18 @@ def fetch_ohlcv_df(
         if not result.empty or _is_quality_rejected_df(result):
             with _ohlcv_df_lock:
                 if len(_ohlcv_df_cache) >= _OHLCV_DF_MAX:
-                    _ohlcv_df_cache.clear()
+                    # OLDEST-FIRST eviction (2026-08-19). This used to `.clear()` the
+                    # WHOLE cache on overflow, so one overflow evicted the live
+                    # runner's hot 1m/15m frames along with everything else and every
+                    # subsequent call became a network fetch. The lane keys on
+                    # (ticker, interval, period), and a day with ~90 watchers plus the
+                    # auto-arm probe wave crosses 300 keys easily — turning a bounded
+                    # cache into a periodic full flush. Evict a quarter, keep the rest.
+                    _evict = max(1, len(_ohlcv_df_cache) // 4)
+                    for _k, _ in sorted(
+                        _ohlcv_df_cache.items(), key=lambda kv: kv[1][0]
+                    )[:_evict]:
+                        _ohlcv_df_cache.pop(_k, None)
                 _ohlcv_df_cache[_cache_key] = (_time.time(), result)
         return result
 
