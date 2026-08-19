@@ -331,6 +331,60 @@ def tick_stream_volume_confirmation(
     )
 
 
+def _forming_bar_elapsed_fraction(df: "pd.DataFrame", as_of: Any = None) -> float | None:
+    """How much of the LAST bar has actually elapsed, as a fraction in (0, 1].
+
+    THE 2026-08-19 YJ MEASUREMENT BUG. The volume gate below compares the last
+    bar's volume against the mean of the 20 COMPLETE bars before it — but the
+    last bar is usually still FORMING, so a bar that is 27 seconds into its
+    minute carries ~45% of the volume it will finish with. Comparing that
+    half-baked bar against finished ones understates volume by exactly the
+    fraction of the bar remaining, and it is worst at the START of each bar,
+    which is precisely when a momentum entry fires.
+
+    Proved against the recorded IQFeed tape for YJ (the symbol Ross made his
+    profitable curl on while CHILI refused it three times):
+        bar    full-bar ratio   elapsed   what the gate saw
+        09:10      2.60x         27/60         1.17x  -> refused
+        09:12      1.51x         36/60         0.91x  -> refused
+        09:07      0.45x         43/60         0.32x  -> refused
+    All three logged refusals reproduce exactly. The tape shows the volume WAS
+    there: 09:11 alone traded 3.35M shares at 6.36x.
+
+    Returns None when the frame's timestamps cannot establish a bar width or the
+    last bar is already complete — callers then use the raw (legacy) comparison.
+    """
+    try:
+        idx = getattr(df, "index", None)
+        if idx is None or len(idx) < 3:
+            return None
+        _last = idx[-1]
+        _prev = idx[-2]
+        _width = (_last - _prev).total_seconds()
+        if not math.isfinite(_width) or _width <= 0:
+            return None
+        _now = as_of if as_of is not None else _utcnow_for_bars(_last)
+        _elapsed = (_now - _last).total_seconds()
+        if not math.isfinite(_elapsed):
+            return None
+        if _elapsed <= 0:
+            return None
+        if _elapsed >= _width:
+            return None  # bar is complete (or the frame is stale) — compare as-is
+        return float(_elapsed) / float(_width)
+    except Exception:
+        return None
+
+
+def _utcnow_for_bars(sample: Any) -> Any:
+    """``now`` in the same tz-awareness as the frame's index, so the subtraction
+    above never raises on naive/aware mismatch."""
+    from datetime import datetime, timezone
+
+    _tz = getattr(sample, "tzinfo", None)
+    return datetime.now(timezone.utc) if _tz is not None else datetime.utcnow()
+
+
 def momentum_volume_confirmation(
     df: pd.DataFrame,
     *,
@@ -387,9 +441,44 @@ def momentum_volume_confirmation(
     ema_f = float(ema)
     if price <= ema_f:
         return False, "price_below_ema9"
+    # FORMING-BAR RATE NORMALISATION (2026-08-19). See
+    # _forming_bar_elapsed_fraction: the last bar is usually still forming, so
+    # comparing its partial volume against 20 COMPLETE bars understates it by the
+    # fraction of the bar remaining. We compare the current bar's RATE instead —
+    # apples to apples — which is what "volume is surging" was always meant to
+    # measure. This does NOT loosen the 1.5x floor; the floor is unchanged. It
+    # only stops the floor from being applied to a half-measured bar.
+    #
+    # GUARD: extrapolating from a sliver is noise (two prints in the first second
+    # would imply an enormous rate), so we only normalise once at least
+    # ``min_elapsed_fraction`` of the bar has passed; below that the raw legacy
+    # comparison stands. Flag OFF ⇒ byte-identical to the legacy path.
+    _rate_frac: float | None = None
+    if bool(
+        getattr(
+            settings,
+            "chili_momentum_entry_volume_rate_normalization_enabled",
+            True,
+        )
+    ):
+        _f = _forming_bar_elapsed_fraction(df, as_of)
+        _min_f = float(
+            getattr(
+                settings,
+                "chili_momentum_entry_volume_rate_min_elapsed_fraction",
+                0.25,
+            )
+            or 0.0
+        )
+        if _f is not None and _min_f > 0 and _f >= _min_f:
+            _rate_frac = _f
     vr_v = vr[idx] if idx < len(vr) and vr[idx] is not None else None
-    if vr_v is not None and float(vr_v) >= 1.5:
-        return True, "momentum_ok_rel_vol"
+    if vr_v is not None:
+        _vr_eff = float(vr_v) / _rate_frac if _rate_frac else float(vr_v)
+        if _vr_eff >= 1.5:
+            return True, (
+                "momentum_ok_rel_vol_rate" if _rate_frac else "momentum_ok_rel_vol"
+            )
     win = vol.tail(21)
     if len(win) < 5:
         return False, "volume_window_short"
@@ -397,9 +486,12 @@ def momentum_volume_confirmation(
     cur_v = float(vol.iloc[-1])
     if not math.isfinite(avg_v) or avg_v <= 0:
         return False, "volume_avg_zero"
-    if not math.isfinite(cur_v) or cur_v < 1.5 * avg_v:
+    _cur_eff = cur_v / _rate_frac if _rate_frac else cur_v
+    if not math.isfinite(_cur_eff) or _cur_eff < 1.5 * avg_v:
         return False, "volume_below_1p5x_avg"
-    return True, "momentum_ok_abs_vol"
+    return True, (
+        "momentum_ok_abs_vol_rate" if _rate_frac else "momentum_ok_abs_vol"
+    )
 
 
 def _sustained_rvol(vr: list[Any], cur: int, lookback: int) -> float | None:
