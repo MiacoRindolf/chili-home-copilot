@@ -3283,6 +3283,36 @@ class Settings(BaseSettings):
         validation_alias=AliasChoices("CHILI_MOMENTUM_TAPE_DELTA_MIN_SECONDS"),
         description="The ONE documented adaptive FLOOR (seconds) for the tape-delta ignite job's cadence. The job runs at clamp(p50 tape inter-row gap, this floor, 15s) — adaptive to how fast the tape is actually filling, never below this floor (so it can't hammer the DB on a dense tape) and never above 15s (so a cold igniter is caught within one cadence). A floor / reference point, not a fixed clock.",
     )
+    # ── IGNITION→ARM BRIDGE (the 2026-08-19 YJ miss) ────────────────────────────
+    # The ignite job put YJ on the board in seconds, but ARMING waited for the next
+    # FULL auto-arm pass — measured passes stalled 300-1200s against a 10s cadence,
+    # so the 12:28Z ignition leg ran with no live session watching it. The bridge
+    # runs the SAME run_auto_arm_pass scoped to the just-ignited symbols (every
+    # account guard + per-symbol gate intact; only the heavy board build, the
+    # watching-reaper, displacement, and board-leader privileges are skipped —
+    # all strictly risk-reducing omissions).
+    chili_momentum_ignition_arm_bridge_enabled: bool = Field(
+        default=True,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_IGNITION_ARM_BRIDGE_ENABLED"),
+        description="Enable the ignition→arm bridge: after the tape-delta ignite job scores a crosser into viability, immediately run a SCOPED auto-arm pass (only_symbols=) for it instead of waiting for the next full pass. Every account-level guard (kill switch, lockout, loss history, concurrency, daily caps, giveback/green-to-red/consecutive-loss/win-cycle/no-trade-regime) and every per-symbol arm gate still runs; the scoped pass only skips the full-market snapshot build (replaced by a tighter row-freshness bound), the watching-reaper + rank-displacement (fewer free slots visible, never more), and the board-leader cooldown-exemption/rotation-telemetry privileges. OFF ⇒ the ignite job never invokes the pass (byte-identical to pre-bridge).",
+    )
+    chili_momentum_ignition_bridge_debounce_seconds: float = Field(
+        default=30.0,
+        ge=5.0,
+        validation_alias=AliasChoices(
+            "CHILI_MOMENTUM_IGNITION_BRIDGE_DEBOUNCE_SECONDS"
+        ),
+        description="Per-symbol debounce (seconds) between scoped bridge ATTEMPTS — a symbol that re-crosses the tape-delta threshold every ignite cadence (5-15s) gets at most one scoped pass per window, and a begin_blocked symbol doesn't hammer the pass (the full pass keeps covering it). Stamped on attempt, not on success.",
+    )
+    chili_momentum_ignition_bridge_row_max_age_seconds: float = Field(
+        default=90.0,
+        ge=5.0,
+        le=600.0,
+        validation_alias=AliasChoices(
+            "CHILI_MOMENTUM_IGNITION_BRIDGE_ROW_MAX_AGE_SECONDS"
+        ),
+        description="Scoped-fetch viability row freshness ceiling (seconds) for bridge arms. This TIGHTENS (min with, never replaces) the normal chili_momentum_risk_viability_max_age_seconds bound and REPLACES the full-market ross-universe membership filter for the scoped path: only a row the ignite scorer just wrote — ranked within the real tape field — can qualify, so a stale residual row can never arm through the bridge. Ceiling 600s = the normal risk gate (the override can never loosen anything).",
+    )
     # ── HOT-MOVER RE-CATCH + sub-$1 explosive exemption (the NEXR late-surge miss) ─
     # ROOT CAUSE (verified live 2026-06-24): a name that FADED midday (low pos_in_range)
     # then SURGED late ranks #51+ in build_equity_universe's freshness×move sort, is
