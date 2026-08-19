@@ -389,6 +389,41 @@ def squeeze_entry_size_multiplier(
     }
 
 
+def squeeze_easy_borrow_damper(
+    cost_to_borrow: float | None,
+    is_easy_to_borrow: object,
+    *,
+    fraction: float,
+) -> tuple[float, dict | None]:
+    """EASY-TO-BORROW SIZE DAMPER (2026-08-19 Ross live watch, FEMY skip):
+    "it's EASY TO BORROW — generally something that's easy to borrow, I just
+    leave it alone." Ang murang borrow ay nangangahulugang malayang makapag-
+    short ang mga short — WALANG squeeze fuel na magtutulak ng cover bid.
+
+    Bago ito, ang easy-borrow ay SELECTION-score cap lang (min(score, 0.40)
+    sa squeeze_fuel_signal) at ang lahat ng squeeze sizing legs ay UPWARD-only
+    ([1.0, max]); ito ang unang low-end leg: kapag AFFIRMATIVE ang
+    easy-to-borrow na ebidensya (``is_easy_to_borrow is True``, o may sukat na
+    ``cost_to_borrow`` na ≤ EASY_TO_BORROW threshold na naka-embed na sa
+    boolean), ang risk budget ay pumapasok sa ``fraction``. FAIL-OPEN: walang
+    CTB data (None) = walang damper — ang nawawalang datum ay hindi kailanman
+    nagpaparusa. 0/1 fraction = sadyang off. Pure.
+    """
+    try:
+        f = float(fraction)
+    except (TypeError, ValueError):
+        return 1.0, None
+    if not (0.0 < f < 1.0):
+        return 1.0, None
+    if is_easy_to_borrow is not True:
+        return 1.0, None
+    ctb = _to_float(cost_to_borrow)
+    return f, {
+        "mult": round(f, 4),
+        "cost_to_borrow": (round(ctb, 4) if ctb is not None else None),
+    }
+
+
 def squeeze_exit_band_widen(
     squeeze_rank_pct: float | None,
     *,

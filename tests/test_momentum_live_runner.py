@@ -1848,3 +1848,41 @@ def test_starter_size_wired_post_floor_in_sizing_source() -> None:
     assert "starter_size_multiplier" in starter_block
     assert "structural_trigger_reasons()" in starter_block
     assert 'le.get("entry_trigger_reason")' in starter_block
+
+
+def test_squeeze_easy_borrow_damper_matrix() -> None:
+    """2026-08-19 FEMY skip: affirmative easy-borrow = damper; nawawalang CTB
+    data = fail-open; 0/1 fraction = sadyang off."""
+    from app.services.trading.momentum_neural.ross_momentum import (
+        squeeze_easy_borrow_damper,
+    )
+
+    # Affirmative easy-borrow -> damper na may CTB telemetry.
+    mult, dbg = squeeze_easy_borrow_damper(0.4, True, fraction=0.5)
+    assert mult == 0.5 and dbg["cost_to_borrow"] == 0.4
+
+    # Hindi easy (False) o hindi alam (None) -> walang damper.
+    assert squeeze_easy_borrow_damper(45.0, False, fraction=0.5) == (1.0, None)
+    assert squeeze_easy_borrow_damper(None, None, fraction=0.5) == (1.0, None)
+    # Kahit non-bool truthy ang field (defensive) -> walang damper maliban sa literal True.
+    assert squeeze_easy_borrow_damper(0.4, 1, fraction=0.5) == (1.0, None)
+
+    # Sadyang off.
+    assert squeeze_easy_borrow_damper(0.4, True, fraction=0.0) == (1.0, None)
+    assert squeeze_easy_borrow_damper(0.4, True, fraction=1.0) == (1.0, None)
+    mult_nan, _ = squeeze_easy_borrow_damper(0.4, True, fraction=float("nan"))
+    assert mult_nan == 1.0
+
+
+def test_easy_borrow_damper_wired_post_floor() -> None:
+    import inspect
+
+    import app.services.trading.momentum_neural.live_runner as lr
+
+    source = inspect.getsource(lr.tick_live_session)
+    i_starter = source.index('"starter_size_trigger_class"')
+    i_eb = source.index('"easy_borrow_size_damper"')
+    assert i_starter < i_eb
+    eb_block = source[i_starter:i_eb]
+    assert "squeeze_easy_borrow_damper" in eb_block
+    assert '"is_easy_to_borrow"' in eb_block
