@@ -2477,6 +2477,8 @@ def _fresh_live_eligible_candidates(
     limit: int,
     ross_universe_symbols: set[str] | None = None,
     as_of_utc: datetime | None = None,
+    only_symbols: frozenset[str] | None = None,
+    viability_max_age_override: float | None = None,
 ) -> list[MomentumSymbolViability]:
     """Top live-eligible candidates (distinct symbols) fresh within the LIVE risk
     gate (600s).
@@ -2495,13 +2497,33 @@ def _fresh_live_eligible_candidates(
     stale rows here.
     """
     max_age = float(getattr(settings, "chili_momentum_risk_viability_max_age_seconds", 600.0) or 600.0)
+    if viability_max_age_override is not None:
+        # IGNITION→ARM BRIDGE scoped fetch: the override may only TIGHTEN the
+        # freshness bound (min, never replace) — the bridge vouches solely for
+        # rows the ignite scorer just wrote, and a loosened bound would erode
+        # the staleness protection documented above.
+        max_age = min(max_age, float(viability_max_age_override))
     cutoff = _decision_as_of_naive_utc(as_of_utc) - timedelta(seconds=max_age)
     q = db.query(MomentumSymbolViability).filter(
         MomentumSymbolViability.scope == "symbol",
         MomentumSymbolViability.live_eligible.is_(True),
         MomentumSymbolViability.freshness_ts >= cutoff,
     )
-    if _auto_arm_crypto_only():
+    if only_symbols is not None:
+        # IGNITION→ARM BRIDGE (2026-08-19 YJ miss): restrict the fetch to the
+        # just-ignited symbols and SKIP the full-market ross-universe snapshot
+        # build (the measured 300-1200s pass stall). Universe-membership
+        # protection is replaced by the TIGHTER freshness bound above: only a
+        # row the ignite scorer wrote seconds ago (ranked within the real tape
+        # field) can qualify. Venue-mode symbol-shape filters still apply.
+        if not only_symbols:
+            return []
+        q = q.filter(MomentumSymbolViability.symbol.in_(sorted(only_symbols)))
+        if _auto_arm_crypto_only():
+            q = q.filter(MomentumSymbolViability.symbol.like("%-USD%"))
+        elif _auto_arm_equity_only():
+            q = q.filter(~MomentumSymbolViability.symbol.like("%-USD%"))
+    elif _auto_arm_crypto_only():
         # Exclude equities (ARKK, CLSK...) that go live-eligible at US market open —
         # the coinbase_spot lane cannot trade them. Crypto pairs carry "-USD".
         q = q.filter(MomentumSymbolViability.symbol.like("%-USD%"))
@@ -2612,9 +2634,11 @@ def _fresh_live_eligible_candidates(
     # their normal rank right behind it (no over-concentration). Flag-OFF => no-op (the
     # ordering above is returned byte-identical). Run BEFORE dedupe so the leader survives
     # the per-symbol dedupe at the front; the displacement victim-veto protects it too.
-    if _symbol_of_day_focus_enabled() and rows:
+    if _symbol_of_day_focus_enabled() and rows and only_symbols is None:
         # A3: in a WILDCARD regime the breadth-dominant lone mover is the leader to hoist
         # (concentrate the lane on it); otherwise the normal explosive symbol-of-day leader.
+        # SCOPED (only_symbols): skipped — leader identification needs the FULL board,
+        # and ordering a <=N-row scoped list grants no slot advantage anyway.
         rows = _hoist_leader(rows, _effective_session_leader(db, rows))
     return _dedupe_by_symbol(rows, limit=int(limit))
 
@@ -4255,8 +4279,27 @@ def run_auto_arm_pass(
     decision_at: datetime | None = None,
     loss_guard_account_scope: str | None = None,
     loss_guard_account_identity: str | None = None,
+    only_symbols: frozenset[str] | set[str] | None = None,
 ) -> dict[str, Any]:
-    """Single auto-arm pass. Returns a summary dict (armed 0/1)."""
+    """Single auto-arm pass. Returns a summary dict (armed 0/1).
+
+    ``only_symbols`` (IGNITION→ARM BRIDGE, 2026-08-19 YJ miss): a SCOPED pass that
+    considers only the given just-ignited symbols. EVERY account-level guard (kill
+    switch, lockout, loss history/scope, concurrency, daily-loss/giveback/green-to-
+    red/consecutive-loss/win-cycle/no-trade-regime) and every per-symbol gate in
+    the arm loop still runs. What a scoped pass SKIPS is strictly risk-reducing:
+    the full-market ross snapshot build (replaced by a tighter row-freshness bound
+    in the scoped fetch), the heavy watching-reaper + rank-displacement (a scoped
+    pass may see FEWER free slots, never more), and the board-leader privileges
+    (TOP-2 loss-cooldown exemption + rotation telemetry — an ignited symbol is not
+    proven board #1, so it gets NO exemption and stamps NO leader change).
+
+    ⚠️ Guards 6/7 (sit-cash + time-of-day fade, both default OFF) read regime
+    breadth off the SCOPED 1-row board here, so a just-ignited symbol reads "hot"
+    and those gates are effectively neutral for bridge arms. The flag-independent
+    A2 late-window equity block in _live_armable is the real late-day backstop —
+    keep it flag-independent.
+    """
     # PHASE TIMING (2026-08-19 YJ miss): ang mga pass ay tumagal ng 300-1200s
     # kontra 10s cadence buong umaga — ang 12:28 ignition ay nahulog sa LOOB
     # ng naka-stall na pass. Ang timing na ito ang magtuturo kung aling phase
@@ -4266,6 +4309,16 @@ def run_auto_arm_pass(
     _phase_t0 = _phase_time.monotonic()
     _phase_board_done: float | None = None
     out: dict[str, Any] = {"checked": 0, "scanned": 0, "armed": 0, "skipped": None}
+
+    _scoped_syms: frozenset[str] | None = None
+    if only_symbols is not None:
+        _scoped_syms = frozenset(
+            s for s in (str(x or "").strip().upper() for x in only_symbols) if s
+        )
+        if not _scoped_syms:
+            out["skipped"] = "scoped_no_symbols"
+            return out
+        out["scoped_ignition"] = sorted(_scoped_syms)
 
     if not bool(getattr(settings, "chili_momentum_auto_arm_live_enabled", True)):
         out["skipped"] = "flag_off"
@@ -4330,7 +4383,14 @@ def run_auto_arm_pass(
 
     # Reap stale pre-entry sessions FIRST so a faded leftover (e.g. a name armed
     # long ago whose intraday move never triggered) does not pin the only slot.
-    reaped = _reap_stale_watching_sessions(db, user_id=uid, now=pass_as_of)
+    # SCOPED: skip the WATCHING-reaper only — it is the heavy sweep (board fetch +
+    # conviction index) and pre-entry sessions hold no position, so skipping it can
+    # never hide a loss from the history freeze below. Every outcome-mutating sweep
+    # (finalize / expire / stale-live reap) still runs. Risk-reducing: a scoped
+    # pass may see FEWER free slots than a full pass, never more.
+    reaped = 0
+    if _scoped_syms is None:
+        reaped = _reap_stale_watching_sessions(db, user_id=uid, now=pass_as_of)
     try:
         _finalized = _finalize_stale_exited_sessions(db, user_id=uid, now=pass_as_of)
         if _finalized:
@@ -4499,7 +4559,11 @@ def run_auto_arm_pass(
         if _watch_ct >= _fanout:
             # RANK-DISPLACEMENT: rather than skip, try to evict the worst inert watcher so
             # a higher-ranked newcomer can take the slot. Parity: flag-off -> byte-identical.
-            if not _try_displacement_for_full_slots(db, uid=uid, out=out):
+            # SCOPED: never displace — eviction needs full-board rank context to pick a
+            # fair victim; the scoped pass just skips and the full pass keeps covering.
+            if _scoped_syms is not None or not _try_displacement_for_full_slots(
+                db, uid=uid, out=out
+            ):
                 out["skipped"] = "watch_fanout_full"
                 out["watching"] = _watch_ct
                 return out
@@ -4521,7 +4585,10 @@ def run_auto_arm_pass(
         active = _active_live_session_count(db, user_id=uid)
         if active >= _max_live_sessions():
             # RANK-DISPLACEMENT (legacy single-cap path): same as the decoupled path above.
-            if not _try_displacement_for_full_slots(db, uid=uid, out=out):
+            # SCOPED: never displace (see the decoupled path's note).
+            if _scoped_syms is not None or not _try_displacement_for_full_slots(
+                db, uid=uid, out=out
+            ):
                 out["skipped"] = "live_session_active"
                 out["active"] = active
                 return out
@@ -4754,13 +4821,30 @@ def run_auto_arm_pass(
     _ross_universe_symbols: set[str] = set()
     ross_required = _ross_equity_universe_required()
     _ross_filter_active = _auto_arm_equity_only() or (ross_required and not _auto_arm_crypto_only())
-    if _auto_arm_equity_only() or ross_required:
+    if (_auto_arm_equity_only() or ross_required) and _scoped_syms is None:
         _ross_snapshot_rows = _ross_snapshot_rows_by_symbol()
         _ross_universe_symbols = _ross_universe_symbols_from_snapshot_rows(_ross_snapshot_rows)
         out["ross_snapshot_symbols"] = len(_ross_snapshot_rows)
         out["ross_universe_symbols"] = len(_ross_universe_symbols)
 
-    if _ross_filter_active and not _ross_universe_symbols:
+    if _scoped_syms is not None:
+        # IGNITION→ARM BRIDGE: no full-market snapshot build — the scoped fetch
+        # tightens the row-freshness bound instead (only a row the ignite scorer
+        # just wrote qualifies). See _fresh_live_eligible_candidates.
+        candidates = _fresh_live_eligible_candidates(
+            db,
+            limit=_scan_limit(),
+            only_symbols=_scoped_syms,
+            viability_max_age_override=float(
+                getattr(
+                    settings,
+                    "chili_momentum_ignition_bridge_row_max_age_seconds",
+                    90.0,
+                )
+                or 90.0
+            ),
+        )
+    elif _ross_filter_active and not _ross_universe_symbols:
         logger.warning(
             "[auto_arm] Ross equity universe empty; refusing generic broad-equity fallback"
         )
@@ -4786,17 +4870,26 @@ def run_auto_arm_pass(
     # exempt from the cooldown skips below. Computed once per pass off the
     # already-ranked list. Ang rotation telemetry ay nananatiling naka-key sa
     # slot-0 lang (ang hoisted leader ang "board #1").
-    _cooldown_exempt_syms = _board_exempt_syms(candidates)
-    _cooldown_exempt_sym = str(getattr(candidates[0], "symbol", "") or "").upper()
-    # LEADER-ROTATION TELEMETRY (2026-08-17, Ross Aral #16/#25: "attention is on
-    # other stocks" / "UCL had failed... this was still the leading gainer"):
-    # kapag NAGBAGO ang board #1 sa pagitan ng mga pass, itala nang durable —
-    # ang rotation frequency/timing ang susukat kung kailangan ng tahasang
-    # rotation-aware na lohika (telemetry-first). Hindi nagbabago ng gating.
-    try:
-        _emit_leader_rotation_if_changed(db, _cooldown_exempt_sym)
-    except Exception:
-        logger.debug("[auto_arm] leader-rotation emit skipped", exc_info=True)
+    if _scoped_syms is None:
+        _cooldown_exempt_syms = _board_exempt_syms(candidates)
+        _cooldown_exempt_sym = str(getattr(candidates[0], "symbol", "") or "").upper()
+        # LEADER-ROTATION TELEMETRY (2026-08-17, Ross Aral #16/#25: "attention is on
+        # other stocks" / "UCL had failed... this was still the leading gainer"):
+        # kapag NAGBAGO ang board #1 sa pagitan ng mga pass, itala nang durable —
+        # ang rotation frequency/timing ang susukat kung kailangan ng tahasang
+        # rotation-aware na lohika (telemetry-first). Hindi nagbabago ng gating.
+        try:
+            _emit_leader_rotation_if_changed(db, _cooldown_exempt_sym)
+        except Exception:
+            logger.debug("[auto_arm] leader-rotation emit skipped", exc_info=True)
+    else:
+        # SCOPED: ang ignited symbol ay HINDI napatunayang board #1 — ang TOP-2
+        # loss-cooldown exemption dito ay magpapa-re-arm sa isang naka-cooldown na
+        # pangalan sa pamamagitan lang ng re-ignition (bypass ng cooldown), at ang
+        # pag-stamp nito sa rotation telemetry ay gagawa ng pekeng leader changes.
+        # Parehong FULL-PASS-ONLY na pribilehiyo.
+        _cooldown_exempt_syms = frozenset()
+        _cooldown_exempt_sym = ""
 
     # Guard 6: NO-A-SETUP SESSION SIT-CASH (NEW INITIATION ONLY, kill-switch
     # chili_momentum_no_asetup_sit_cash_enabled, default OFF => byte-identical: the gate is
@@ -5557,4 +5650,80 @@ def run_auto_arm_pass(
             )
     except Exception:
         pass
+    return out
+
+
+# IGNITION→ARM BRIDGE debounce state (in-process, per scheduler worker). Keyed by
+# UPPER symbol → monotonic seconds of the last ATTEMPT (not last success): a
+# begin_blocked symbol must not re-run the scoped pass every ignite cadence; the
+# FULL pass keeps covering it in the meantime.
+_IGNITION_BRIDGE_LAST_ATTEMPT: dict[str, float] = {}
+_ignition_bridge_lock = threading.Lock()
+
+
+def run_scoped_ignition_arm(db: Session, symbols: Any) -> dict[str, Any] | None:
+    """IGNITION→ARM BRIDGE (2026-08-19 YJ miss): give JUST-ignited symbols an arm
+    attempt within the ignite cadence (5-15s) instead of waiting for the next FULL
+    auto-arm pass — measured passes stalled 300-1200s against a 10s cadence, so the
+    12:28Z YJ ignition leg ran with no live session watching it.
+
+    This is the ONLY entry point the ignite job calls. It invokes the SAME
+    run_auto_arm_pass with ``only_symbols=`` (every guard + per-symbol gate intact;
+    see that docstring for exactly what a scoped pass skips), debounced per symbol
+    so tape-delta re-crossings don't hammer the pass. Flag OFF ⇒ returns None
+    without invoking the pass (byte-identical to pre-bridge behavior).
+    """
+    if not bool(
+        getattr(settings, "chili_momentum_ignition_arm_bridge_enabled", True)
+    ):
+        return None
+    syms = frozenset(
+        s for s in (str(x or "").strip().upper() for x in (symbols or [])) if s
+    )
+    if not syms:
+        return None
+    import time as _time
+
+    debounce = float(
+        getattr(settings, "chili_momentum_ignition_bridge_debounce_seconds", 30.0)
+        or 30.0
+    )
+    now_mono = _time.monotonic()
+    with _ignition_bridge_lock:
+        due = frozenset(
+            s
+            for s in syms
+            if (now_mono - _IGNITION_BRIDGE_LAST_ATTEMPT.get(s, float("-inf")))
+            >= debounce
+        )
+        for s in due:
+            _IGNITION_BRIDGE_LAST_ATTEMPT[s] = now_mono
+        # Bounded state: drop entries idle for >=10 debounce windows (floor 600s)
+        # once the map grows past a day's worth of distinct ignitions. HARD cap
+        # underneath (oldest-first evict) so an operator-configured huge debounce
+        # can never make the staleness prune ineffective.
+        if len(_IGNITION_BRIDGE_LAST_ATTEMPT) > 512:
+            _stale_before = now_mono - max(debounce * 10.0, 600.0)
+            for k in [
+                k
+                for k, v in _IGNITION_BRIDGE_LAST_ATTEMPT.items()
+                if v < _stale_before
+            ]:
+                _IGNITION_BRIDGE_LAST_ATTEMPT.pop(k, None)
+            if len(_IGNITION_BRIDGE_LAST_ATTEMPT) > 1024:
+                for k, _v in sorted(
+                    _IGNITION_BRIDGE_LAST_ATTEMPT.items(), key=lambda kv: kv[1]
+                )[: len(_IGNITION_BRIDGE_LAST_ATTEMPT) - 512]:
+                    _IGNITION_BRIDGE_LAST_ATTEMPT.pop(k, None)
+    if not due:
+        return None
+    out = run_auto_arm_pass(db, only_symbols=due)
+    logger.info(
+        "[auto_arm] ignition→arm bridge: symbols=%s armed=%s skipped=%s "
+        "phase_seconds=%s",
+        sorted(due),
+        out.get("armed"),
+        out.get("skipped"),
+        out.get("phase_seconds"),
+    )
     return out

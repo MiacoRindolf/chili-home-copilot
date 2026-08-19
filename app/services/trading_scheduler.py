@@ -5365,6 +5365,7 @@ def _run_tape_delta_ignite_job():
         from .trading.momentum_neural.pipeline import run_momentum_neural_tick
 
         _scored = 0
+        _scored_syms: list[str] = []
         for c in crossers:
             sym = c["symbol"]
             # Build the single-symbol ross_signals: prefer the cached batch signal (full
@@ -5416,6 +5417,7 @@ def _run_tape_delta_ignite_job():
                 )
                 db.commit()
                 _scored += 1
+                _scored_syms.append(sym)
                 # S1 INSTRUMENT: the event path put a name on the board within one cadence.
                 logger.info(
                     "[momentum_event_select] path=tape_delta symbol=%s move_pct=%.2f "
@@ -5436,6 +5438,26 @@ def _run_tape_delta_ignite_job():
                 "[momentum_event_select] path=tape_delta scored=%d/%d crossers (cadence=%.1fs)",
                 _scored, len(crossers), _cadence,
             )
+        if _scored_syms:
+            # IGNITION→ARM BRIDGE (2026-08-19 YJ miss): give the just-scored crossers
+            # an immediate SCOPED arm attempt (every guard intact — see
+            # run_scoped_ignition_arm) instead of waiting out a full 300-1200s pass.
+            # Debounce + flag live inside the helper; failure never poisons the
+            # ignite job (own rollback, same session).
+            try:
+                from .trading.momentum_neural.auto_arm import run_scoped_ignition_arm
+
+                run_scoped_ignition_arm(db, _scored_syms)
+                db.commit()
+            except Exception:
+                logger.warning(
+                    "[momentum_event_select] ignition→arm bridge failed",
+                    exc_info=True,
+                )
+                try:
+                    db.rollback()
+                except Exception:
+                    pass
     except Exception as e:
         logger.warning("[momentum_event_select] tape-delta ignite job failed: %s", e)
         try:
