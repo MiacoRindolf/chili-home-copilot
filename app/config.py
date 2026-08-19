@@ -7094,6 +7094,19 @@ class Settings(BaseSettings):
         validation_alias=AliasChoices("CHILI_MOMENTUM_SHELF_LOOKBACK_DAYS"),
         description="Gaano kalayo pabalik ang EDGAR filing scan para ituring na AKTIBO ang shelf/registration.",
     )
+    # RECYCLED-RUNNER (STALE-FADE) SIZE DAMPER (2026-08-18/19 Ross: "history
+    # of making a big move then GIVING BACK most of the gains" — SKK/YJ
+    # history-distrust; ang SLE loss niya 08-18 ay popped-and-failed days
+    # bago). Ang A5 freshness STALE read ay nasa selection rank na; ito ang
+    # sizing leg. 0.6 (mas magaan kaysa 0.5 legs — nag-re-engage si Ross
+    # kapag pinatunayan ng structure, kaya damper hindi半-veto).
+    chili_momentum_stale_fade_size_fraction: float = Field(
+        default=0.6,
+        ge=0.0,
+        le=1.0,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_STALE_FADE_SIZE_FRACTION"),
+        description="Risk-budget fraction kapag STALE ang A5 symbol-freshness read (kamakailang explosive daily move na ibinigay pabalik sa ilalim ng pre-move base). Affirmative evidence lang; fail-open sa manipis na history. 0 o 1 = off.",
+    )
     # EASY-TO-BORROW SIZE DAMPER (2026-08-19 Ross, FEMY skip: "it's easy to
     # borrow — I just leave it alone"). Murang borrow = walang squeeze fuel na
     # magtutulak ng short-cover bid. Unang low-end squeeze sizing leg.

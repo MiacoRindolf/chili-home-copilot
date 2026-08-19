@@ -32294,6 +32294,34 @@ def tick_live_session(
                         le["easy_borrow_size_damper"] = _eb_dbg
         except Exception:
             pass
+        # RECYCLED-RUNNER (STALE-FADE) DAMPER (2026-08-18/19 Ross: SKK/YJ
+        # history-distrust; SLE ang tanging loser niya 08-18 = popped-and-
+        # failed days bago). Ang A5 freshness read (STALE = kamakailang
+        # explosive daily move na IBINIGAY PABALIK) ay nasa selection rank
+        # na; ito ang sizing leg. Binabasa ang CACHED DailyContext (zero
+        # bagong fetch), post-floor (market-structure memory, binds on paper).
+        try:
+            if not str(sess.symbol or "").upper().endswith("-USD"):
+                from .risk_policy import stale_fade_size_multiplier
+
+                _sf_ctx = _daily_ctx_cached(sess.symbol, price=guarded_ask)
+                if _sf_ctx is not None:
+                    _sf_raw_frac = getattr(
+                        settings,
+                        "chili_momentum_stale_fade_size_fraction",
+                        0.6,
+                    )
+                    _sf_frac = 0.6 if _sf_raw_frac is None else float(_sf_raw_frac)
+                    _sf_mult, _sf_dbg = stale_fade_size_multiplier(
+                        getattr(_sf_ctx, "freshness_tilt_sign", None),
+                        getattr(_sf_ctx, "days_since_last_explosive_move", None),
+                        fraction=_sf_frac,
+                    )
+                    if 0.0 < float(_sf_mult) < 1.0:
+                        _eff_max_loss = float(_eff_max_loss) * float(_sf_mult)
+                        le["stale_fade_size_damper"] = _sf_dbg
+        except Exception:
+            pass
         # TIME-OF-DAY risk curve (2026-07-10, greenlit #1): a MARKET-STRUCTURE derate
         # applied AFTER the paper floor (like the spread derate) — validated discipline,
         # not psychology, so it binds on paper too. Our own 30d curve: 09:00 ET +25.1R,
