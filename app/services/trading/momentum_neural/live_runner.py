@@ -27064,6 +27064,19 @@ def tick_live_session(
         # Structured A/B counterfactual: the operator can read how often the cold-frame
         # fallback engaged and how much it raised the cap above the collapse-floor.
         _collapse_floor = _adaptive_live_max_spread_bps(_expected_move_bps)
+        # ENTRY-REGION TIMER (2026-08-19). A single tick measured 6.5-14.8s against a
+        # 10s scheduler interval, which is what skipped 62% of runner ticks. Reading
+        # the live log line-by-line localised ALL of it to the stretch between this
+        # log and the entry_branch log below: every other logged step lands in the
+        # same second, while this gap ran 8s, 10s, 10s, 14s, 15s on consecutive AZI
+        # ticks. Local benchmarks then cleared the obvious suspects on a QUIET
+        # database — OHLCV 0.3-0.6s cold and 0.000s cached, the 13 L2 ladder reads
+        # ~0.016s each, adapter quotes ~0.08s, and there is no external HTTP call in
+        # the region at all. The remaining hypothesis is DB read latency under
+        # market-hours tape-write load, which cannot be reproduced after the close.
+        # This stamps the real number on the existing entry_branch line so tomorrow
+        # answers it instead of another night of inference.
+        _entry_region_t0 = time.monotonic()
         _log.info(
             "[momentum_live] adaptive_spread symbol=%s state=%s expected_move_bps=%s "
             "em_fallback_bps=%s max_spread_bps=%.2f collapse_floor_bps=%.2f "
@@ -28865,9 +28878,25 @@ def tick_live_session(
         except Exception:
             _mkt_open = True
         try:
+            # ``entry_region_s`` closes the 2026-08-19 measurement gap: it is the
+            # wall time from the adaptive_spread log to here, i.e. the stretch that
+            # carries the whole per-tick cost (see the note at that log site). It
+            # also carries the per-tick OHLCV meter so a slow region can be split
+            # into "bars" vs "everything else" without another deploy.
+            try:
+                _er_s = round(time.monotonic() - _entry_region_t0, 2)
+            except Exception:
+                _er_s = None
+            try:
+                _oc, _os_, _oh = read_tick_ohlcv_meter()
+            except Exception:
+                _oc, _os_, _oh = 0, 0.0, 0
             _log.info(
-                "[momentum_live] entry_branch symbol=%s state=%s mkt_open=%s score_ok=%s trigger_ok=%s trigger_reason=%s",
-                sess.symbol, sess.state, _mkt_open, _score_ok, _trigger_ok, _trigger_reason,
+                "[momentum_live] entry_branch symbol=%s state=%s mkt_open=%s score_ok=%s "
+                "trigger_ok=%s trigger_reason=%s entry_region_s=%s ohlcv_calls=%s "
+                "ohlcv_s=%.2f ohlcv_cache_hits=%s",
+                sess.symbol, sess.state, _mkt_open, _score_ok, _trigger_ok,
+                _trigger_reason, _er_s, _oc, _os_, _oh,
             )
         except Exception:
             pass
