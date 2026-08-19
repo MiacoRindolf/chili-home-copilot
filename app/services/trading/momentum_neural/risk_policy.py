@@ -3642,6 +3642,51 @@ def starter_size_multiplier(
     return f, {"mult": round(f, 4), "trigger_reason": reason[:48]}
 
 
+def stale_fade_size_multiplier(
+    freshness_tilt_sign: object,
+    days_since_last_explosive_move: object,
+    *,
+    fraction: float,
+) -> tuple[float, dict[str, object] | None]:
+    """RECYCLED-RUNNER (STALE-FADE) SIZE DAMPER (2026-08-18/19 Ross recaps +
+    live watch): "a stock that's had a HISTORY of making a big move, but then
+    GAVE BACK most of those gains" (SKK skip), "big move from August 7th...
+    I just left it alone" (YJ), at ang SLE — ang tanging loser niya 08-18 —
+    ay isang popped-and-failed days bago. Ang A5 symbol-freshness read ay
+    kinukuwenta NA ang eksaktong senyales na ito (STALE = kamakailang
+    explosive daily move na bumagsak pabalik sa ilalim ng pre-move base) at
+    naka-fold na sa SELECTION rank — ito ang nawawalang SIZING leg.
+
+    Pure; AFFIRMATIVE evidence lang: sign == -1 (STALE) ⇒ ``fraction`` ng
+    risk budget; +1/0/None ⇒ 1.0. Fraction labas sa (0,1) = sadyang off.
+    """
+    try:
+        f = float(fraction)
+    except (TypeError, ValueError):
+        return 1.0, None
+    if not (0.0 < f < 1.0):
+        return 1.0, None
+    try:
+        sign = int(freshness_tilt_sign) if freshness_tilt_sign is not None else 0
+    except (TypeError, ValueError):
+        return 1.0, None
+    if sign != -1:
+        return 1.0, None
+    days = None
+    try:
+        days = (
+            int(days_since_last_explosive_move)
+            if days_since_last_explosive_move is not None
+            else None
+        )
+    except (TypeError, ValueError):
+        days = None
+    return f, {
+        "mult": round(f, 4),
+        "days_since_last_explosive_move": days,
+    }
+
+
 def adaptive_reentry_cooldown_seconds(
     *,
     base_seconds: int,

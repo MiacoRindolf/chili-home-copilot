@@ -1886,3 +1886,36 @@ def test_easy_borrow_damper_wired_post_floor() -> None:
     eb_block = source[i_starter:i_eb]
     assert "squeeze_easy_borrow_damper" in eb_block
     assert '"is_easy_to_borrow"' in eb_block
+
+
+def test_stale_fade_size_multiplier_matrix() -> None:
+    """2026-08-18/19: STALE (-1) = damper; FRESH (+1) / neutral (0) / unknown
+    (None) = walang derate; 0/1 fraction = sadyang off."""
+    from app.services.trading.momentum_neural.risk_policy import (
+        stale_fade_size_multiplier,
+    )
+
+    mult, dbg = stale_fade_size_multiplier(-1, 5, fraction=0.6)
+    assert mult == 0.6 and dbg["days_since_last_explosive_move"] == 5
+
+    assert stale_fade_size_multiplier(1, 20, fraction=0.6) == (1.0, None)
+    assert stale_fade_size_multiplier(0, None, fraction=0.6) == (1.0, None)
+    assert stale_fade_size_multiplier(None, None, fraction=0.6) == (1.0, None)
+    assert stale_fade_size_multiplier("x", 5, fraction=0.6) == (1.0, None)
+
+    assert stale_fade_size_multiplier(-1, 5, fraction=0.0) == (1.0, None)
+    assert stale_fade_size_multiplier(-1, 5, fraction=1.0) == (1.0, None)
+
+
+def test_stale_fade_damper_wired_post_floor_cached_ctx() -> None:
+    import inspect
+
+    import app.services.trading.momentum_neural.live_runner as lr
+
+    source = inspect.getsource(lr.tick_live_session)
+    i_eb = source.index('"easy_borrow_size_damper"')
+    i_sf = source.index('"stale_fade_size_damper"')
+    assert i_eb < i_sf
+    sf_block = source[i_eb:i_sf]
+    assert "stale_fade_size_multiplier" in sf_block
+    assert "_daily_ctx_cached" in sf_block  # cached read — zero bagong fetch
