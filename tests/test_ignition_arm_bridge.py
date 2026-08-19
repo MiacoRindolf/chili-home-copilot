@@ -39,6 +39,9 @@ class _FakeDB:
     def rollback(self) -> None:
         pass
 
+    def close(self) -> None:
+        pass
+
     def expunge_all(self) -> None:
         pass
 
@@ -319,6 +322,244 @@ def test_bridge_debounce_stamped_on_attempt_even_if_blocked(monkeypatch):
     assert aa.run_scoped_ignition_arm(_FakeDB(), ["YJ"]) is not None
     assert aa.run_scoped_ignition_arm(_FakeDB(), ["YJ"]) is None
     assert calls["pass"] == 1
+
+
+def test_bridge_accepts_bare_string_symbol(monkeypatch):
+    """Ang WS ignition scorer ay isang simbolo lang ang ipinapasa — ang bare
+    string ay HINDI dapat i-iterate nang paisa-isang letra (C/O/I/W)."""
+    _reset_debounce(monkeypatch)
+    monkeypatch.setattr(
+        aa.settings, "chili_momentum_ignition_arm_bridge_enabled", True, raising=False
+    )
+    seen: list[frozenset] = []
+    monkeypatch.setattr(
+        aa, "run_auto_arm_pass",
+        lambda db, *, only_symbols=None, **k: seen.append(only_symbols) or {"armed": 0},
+    )
+    aa.run_scoped_ignition_arm(_FakeDB(), "coiw")
+    assert seen == [frozenset({"COIW"})], seen
+
+
+def test_bridge_single_flight_blocks_concurrent_pass(monkeypatch):
+    """3-worker ang WS ignition pool — isang scoped pass lang ang dapat tumakbo
+    nang sabay-sabay sa buong proseso."""
+    _reset_debounce(monkeypatch)
+    monkeypatch.setattr(
+        aa.settings, "chili_momentum_ignition_arm_bridge_enabled", True, raising=False
+    )
+    inner: list[str] = []
+
+    def _reentrant_pass(db, *, only_symbols=None, **k):
+        # Habang tumatakbo ang unang pass, ang pangalawang caller ay dapat ma-skip.
+        inner.append("outer")
+        assert aa.run_scoped_ignition_arm(_FakeDB(), ["RDAC"]) is None
+        return {"armed": 0}
+
+    monkeypatch.setattr(aa, "run_auto_arm_pass", _reentrant_pass)
+    assert aa.run_scoped_ignition_arm(_FakeDB(), ["YJ"]) is not None
+    assert inner == ["outer"]
+    # Ang natalong caller ay WALANG iniwang debounce stamp -> eligible pa rin.
+    assert "RDAC" not in aa._IGNITION_BRIDGE_LAST_ATTEMPT
+
+
+def test_bridge_lock_released_after_pass_raises(monkeypatch):
+    """Ang single-flight lock ay dapat bumitaw kahit sumabog ang pass."""
+    _reset_debounce(monkeypatch)
+    monkeypatch.setattr(
+        aa.settings, "chili_momentum_ignition_arm_bridge_enabled", True, raising=False
+    )
+
+    def _boom(db, **k):
+        raise RuntimeError("pass exploded")
+
+    monkeypatch.setattr(aa, "run_auto_arm_pass", _boom)
+    try:
+        aa.run_scoped_ignition_arm(_FakeDB(), ["YJ"])
+    except RuntimeError:
+        pass
+    assert aa._ignition_bridge_inflight.acquire(blocking=False) is True
+    aa._ignition_bridge_inflight.release()
+
+
+# ─────────────────── WS ignition loop hook (ang LIVE na path) ───────────────────
+
+
+def test_ws_ignition_scorer_invokes_bridge_after_commit(monkeypatch):
+    """Ang WS ignition loop ang aktwal na nag-i-ignite sa lane (COIW/MSTX/BMNG
+    08-19) — kailangan nitong tawagin ang bridge PAGKATAPOS ng commit."""
+    from app.services.trading.momentum_neural import ignition_loop as IL
+    from app.services.trading.momentum_neural import pipeline as P
+
+    events: list[str] = []
+
+    class _Rec:
+        def commit(self):
+            events.append("commit")
+
+        def rollback(self):
+            events.append("rollback")
+
+        def close(self):
+            events.append("close")
+
+    monkeypatch.setattr(IL, "SessionLocal", _Rec, raising=False)
+    monkeypatch.setattr(
+        P, "run_momentum_neural_tick", lambda db, *, meta=None, **_k: {}, raising=False
+    )
+    seen: list = []
+    monkeypatch.setattr(
+        aa, "run_scoped_ignition_arm",
+        lambda db, syms: seen.append(list(syms)) or {"armed": 0},
+    )
+
+    IL.IgnitionScoringLoop()._score_symbol("COIW", 13.23)
+
+    assert seen == [["COIW"]], seen
+    # Ang bridge ay tumatawag PAGKATAPOS ng score commit, at nagsasara pa rin nang malinis.
+    assert events[0] == "commit", events
+    assert events[-1] == "close", events
+
+
+def test_ws_ignition_scorer_survives_bridge_failure(monkeypatch):
+    """INVARIANT: ang pagpalya ng bridge ay hindi dapat sumira sa scoring path."""
+    from app.services.trading.momentum_neural import ignition_loop as IL
+    from app.services.trading.momentum_neural import pipeline as P
+
+    class _Rec:
+        def __init__(self):
+            self.events = []
+
+        def commit(self):
+            self.events.append("commit")
+
+        def rollback(self):
+            self.events.append("rollback")
+
+        def close(self):
+            self.events.append("close")
+
+    rec = _Rec()
+    monkeypatch.setattr(IL, "SessionLocal", lambda: rec, raising=False)
+    monkeypatch.setattr(
+        P, "run_momentum_neural_tick", lambda db, *, meta=None, **_k: {}, raising=False
+    )
+
+    def _boom(db, syms):
+        raise RuntimeError("bridge exploded")
+
+    monkeypatch.setattr(aa, "run_scoped_ignition_arm", _boom)
+
+    loop = IL.IgnitionScoringLoop()
+    loop._score_symbol("COIW", 13.23)  # dapat HINDI mag-raise
+
+    assert "commit" in rec.events
+    assert rec.events[-1] == "close"
+    assert "COIW" not in loop._inflight
+
+
+def test_ws_ignition_signal_carries_price_and_volume(monkeypatch):
+    """BLOCKING FIX (napatunayan sa live board 08-19): ang ws_ignition signal ay
+    walang price/volume, kaya BAWAT ws_ignition row ay bumabagsak sa Ross universe
+    evidence gate (`ross_universe_missing_price`) — hindi kailanman makaka-arm ang
+    bridge ng WS-ignited na pangalan. Dapat naka-stamp ang dalawang axis."""
+    from app.services.trading.momentum_neural import ignition_loop as IL
+    from app.services.trading.momentum_neural import pipeline as P
+
+    metas: list[dict] = []
+    monkeypatch.setattr(
+        P, "run_momentum_neural_tick",
+        lambda db, *, meta=None, **_k: metas.append(dict(meta or {})) or {},
+        raising=False,
+    )
+    monkeypatch.setattr(IL, "SessionLocal", _FakeDB, raising=False)
+    monkeypatch.setattr(aa, "run_scoped_ignition_arm", lambda db, syms: None)
+
+    loop = IL.IgnitionScoringLoop()
+    loop._tracker._shares = {"BMNG": 4_000_000.0}
+    loop._score_symbol("BMNG", 23.27, 2.5)
+
+    sig = metas[0]["ross_signals"]["BMNG"]
+    assert sig["price"] == 2.5, sig
+    assert sig["volume"] == 4_000_000.0, sig
+    # dollar_volume ay dini-derive ng gate mula sa price × volume.
+    assert sig["price"] * sig["volume"] == 10_000_000.0
+
+
+def test_ws_ignition_signal_omits_missing_axes(monkeypatch):
+    """FAIL-OPEN: walang price/shares -> hindi na lang isini-stamp (parehong hugis
+    ng lumang signal), hindi nagsa-stamp ng zero/None."""
+    from app.services.trading.momentum_neural import ignition_loop as IL
+    from app.services.trading.momentum_neural import pipeline as P
+
+    metas: list[dict] = []
+    monkeypatch.setattr(
+        P, "run_momentum_neural_tick",
+        lambda db, *, meta=None, **_k: metas.append(dict(meta or {})) or {},
+        raising=False,
+    )
+    monkeypatch.setattr(IL, "SessionLocal", _FakeDB, raising=False)
+    monkeypatch.setattr(aa, "run_scoped_ignition_arm", lambda db, syms: None)
+
+    loop = IL.IgnitionScoringLoop()
+    loop._score_symbol("NOPX", 11.0, None)
+
+    sig = metas[0]["ross_signals"]["NOPX"]
+    assert "price" not in sig, sig
+    assert "volume" not in sig, sig
+
+
+def test_probe_candidate_uses_pass_local_rows(monkeypatch):
+    """BLOCKING FIX: ang candidate map ay PASS-LOCAL na. Ang isang scoped bridge
+    pass ay hindi na dapat makabura ng candidate row ng KASABAY na full pass."""
+    seen: list = []
+    monkeypatch.setattr(
+        aa, "_entry_trigger_fires",
+        lambda sym, row=None: seen.append((sym, row)) or (True, "ok"),
+    )
+    monkeypatch.setattr(aa, "_candidate_freshness", lambda sym: None)
+
+    full_rows = {"AAAA": "full-row"}
+    # Ginagaya ang scoped pass na nagpapalit ng module global habang may laman ito.
+    aa._PASS_CANDIDATE_ROWS = {"BBBB": "scoped-row"}
+
+    aa._probe_candidate("AAAA", rows=full_rows)
+    assert seen[-1] == ("AAAA", "full-row"), seen
+    # Back-compat: walang rows -> babalik sa module global (para sa 1-arg monkeypatch).
+    aa._probe_candidate("BBBB")
+    assert seen[-1] == ("BBBB", "scoped-row"), seen
+
+
+def test_bridge_loser_work_is_picked_up_by_next_winner(monkeypatch):
+    """BLOCKING FIX: ang natalo sa single-flight ay HINDI nawawalan ng trabaho —
+    naka-queue ito at inuunyon ng susunod na winner. (Ang tape-delta job ay
+    sumusulong na ng high-water mark, kaya ang nalaglag ay tuluyang nawawala.)"""
+    _reset_debounce(monkeypatch)
+    monkeypatch.setattr(aa, "_IGNITION_BRIDGE_PENDING", set())
+    monkeypatch.setattr(
+        aa.settings, "chili_momentum_ignition_arm_bridge_enabled", True, raising=False
+    )
+    batches: list[frozenset] = []
+
+    def _pass_that_loses_a_caller(db, *, only_symbols=None, **k):
+        batches.append(only_symbols)
+        # Habang tumatakbo ito, dumating ang tape-delta batch at natalo.
+        assert aa.run_scoped_ignition_arm(_FakeDB(), ["SLE", "WFF"]) is None
+        return {"armed": 0}
+
+    monkeypatch.setattr(aa, "run_auto_arm_pass", _pass_that_loses_a_caller)
+    aa.run_scoped_ignition_arm(_FakeDB(), ["COIW"])
+    assert batches == [frozenset({"COIW"})], batches
+    # Ang natalong simbolo ay naka-queue pa rin, hindi nalaglag.
+    assert aa._IGNITION_BRIDGE_PENDING == {"SLE", "WFF"}, aa._IGNITION_BRIDGE_PENDING
+
+    # Ang susunod na winner ay inuunyon ang naka-pending sa sariling batch.
+    monkeypatch.setattr(
+        aa, "run_auto_arm_pass",
+        lambda db, *, only_symbols=None, **k: batches.append(only_symbols) or {"armed": 0},
+    )
+    aa.run_scoped_ignition_arm(_FakeDB(), ["MSTX"])
+    assert batches[-1] == frozenset({"SLE", "WFF", "MSTX"}), batches[-1]
+    assert aa._IGNITION_BRIDGE_PENDING == set()
 
 
 def test_bridge_empty_and_blank_symbols_noop(monkeypatch):
