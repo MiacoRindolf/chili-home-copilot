@@ -7094,6 +7094,16 @@ class Settings(BaseSettings):
         validation_alias=AliasChoices("CHILI_MOMENTUM_SHELF_LOOKBACK_DAYS"),
         description="Gaano kalayo pabalik ang EDGAR filing scan para ituring na AKTIBO ang shelf/registration.",
     )
+    # EASY-TO-BORROW SIZE DAMPER (2026-08-19 Ross, FEMY skip: "it's easy to
+    # borrow — I just leave it alone"). Murang borrow = walang squeeze fuel na
+    # magtutulak ng short-cover bid. Unang low-end squeeze sizing leg.
+    chili_momentum_squeeze_easy_borrow_size_fraction: float = Field(
+        default=0.5,
+        ge=0.0,
+        le=1.0,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_SQUEEZE_EASY_BORROW_SIZE_FRACTION"),
+        description="Risk-budget fraction kapag AFFIRMATIVE ang easy-to-borrow (Ortex ctb <= 1% threshold sa is_easy_to_borrow). Walang CTB data = walang damper (fail-open). 0 o 1 = off.",
+    )
     # STARTER-SIZE BY TRIGGER CLASS (2026-08-19 Ross live watch): starter sa
     # anticipation/non-structural triggers ("squeeze through the high"), buong
     # laki sa structural (5m pullback + 1m ABCD class). Ang 09:11 YJ verdict:

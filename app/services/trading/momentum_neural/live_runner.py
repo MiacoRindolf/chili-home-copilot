@@ -32251,6 +32251,49 @@ def tick_live_session(
                     le["starter_size_trigger_class"] = _st_dbg
         except Exception:
             pass
+        # EASY-TO-BORROW SIZE DAMPER (2026-08-19 Ross, FEMY skip: "easy to
+        # borrow — I just leave it alone"): murang borrow = walang squeeze
+        # fuel. Unang low-end squeeze leg (lahat ng iba ay upward-only);
+        # AFFIRMATIVE evidence lang (is_easy_to_borrow is True mula sa Ortex
+        # ctb/all na kinukuha na natin); walang CTB data = walang damper.
+        # Post-floor (supply physics, binds on paper).
+        try:
+            if not str(sess.symbol or "").upper().endswith("-USD"):
+                from .ross_momentum import squeeze_easy_borrow_damper
+
+                _eb_sig = None
+                _eb_extra = ex_live.get("extra") if isinstance(ex_live, dict) else None
+                _eb_signals = (
+                    _eb_extra.get("ross_signals")
+                    if isinstance(_eb_extra, dict)
+                    else None
+                )
+                if isinstance(_eb_signals, dict):
+                    for _eb_raw_sym, _eb_val in _eb_signals.items():
+                        if (
+                            str(_eb_raw_sym or "").strip().upper()
+                            == str(sess.symbol or "").upper()
+                            and isinstance(_eb_val, dict)
+                        ):
+                            _eb_sig = _eb_val
+                            break
+                if _eb_sig is not None:
+                    _eb_raw_frac = getattr(
+                        settings,
+                        "chili_momentum_squeeze_easy_borrow_size_fraction",
+                        0.5,
+                    )
+                    _eb_frac = 0.5 if _eb_raw_frac is None else float(_eb_raw_frac)
+                    _eb_mult, _eb_dbg = squeeze_easy_borrow_damper(
+                        _eb_sig.get("cost_to_borrow"),
+                        _eb_sig.get("is_easy_to_borrow"),
+                        fraction=_eb_frac,
+                    )
+                    if 0.0 < float(_eb_mult) < 1.0:
+                        _eff_max_loss = float(_eff_max_loss) * float(_eb_mult)
+                        le["easy_borrow_size_damper"] = _eb_dbg
+        except Exception:
+            pass
         # TIME-OF-DAY risk curve (2026-07-10, greenlit #1): a MARKET-STRUCTURE derate
         # applied AFTER the paper floor (like the spread derate) — validated discipline,
         # not psychology, so it binds on paper too. Our own 30d curve: 09:00 ET +25.1R,
