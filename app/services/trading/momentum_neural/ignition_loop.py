@@ -77,6 +77,15 @@ class _UniverseTracker:
         # ross_signals as ``vol_ratio`` so the explosive scorer's CORE is no longer
         # rvol-None -> 0.0 -> tilt-penalised for every ws_ignition mover.
         self._rvol: dict[str, float] = {}
+        # Today's accumulated SHARES per watched name (same snapshot, same helper the
+        # universe screen uses). Stamped onto the ws_ignition signal as ``volume`` so
+        # the Ross universe evidence gate can derive dollar_volume = price × volume.
+        # Without it, every ws_ignition-sourced viability row failed that gate closed
+        # (`ross_universe_missing_price`) — proved live 2026-08-19 against the running
+        # board: BMNG/CONX/MSTX/COIW/YJ all ok=False, while premarket_gap-sourced rows
+        # (AZI/SKK) passed. That kept the scoped ignition→arm bridge from EVER arming a
+        # WS-ignited name, and it also degraded any row the WS path overwrote.
+        self._shares: dict[str, float] = {}
 
     def refresh(self) -> set[str]:
         """Re-screen the universe; return the CURRENT watch set (uppercased)."""
@@ -103,6 +112,7 @@ class _UniverseTracker:
         # snapshot screen). Built from the SAME snapshot — no extra fetch.
         baseline: dict[str, float] = {}
         rvol: dict[str, float] = {}
+        shares: dict[str, float] = {}
         for s in snapshot or []:
             try:
                 if not isinstance(s, dict):
@@ -120,9 +130,12 @@ class _UniverseTracker:
                 # Reuses the universe screen's own helpers so the value AGREES with the
                 # screen. Fail-open: missing either side -> _intraday_rvol returns None ->
                 # the name simply has no rvol fed (the A2 scorer guard handles that name).
-                _rv = _intraday_rvol(_snapshot_today_shares(s), _snapshot_adv_shares(s))
+                _today_shares = _snapshot_today_shares(s)
+                _rv = _intraday_rvol(_today_shares, _snapshot_adv_shares(s))
                 if _rv is not None and _rv > 0:
                     rvol[t] = float(_rv)
+                if _today_shares is not None and float(_today_shares) > 0:
+                    shares[t] = float(_today_shares)
             except Exception:
                 continue
 
@@ -130,6 +143,7 @@ class _UniverseTracker:
             self._symbols = want
             self._baseline = baseline
             self._rvol = rvol
+            self._shares = shares
         return set(want)
 
     def get_symbols(self) -> set[str]:
@@ -144,6 +158,11 @@ class _UniverseTracker:
         """FIX A1: last-snapshot intraday RVOL for this name (None if unknown)."""
         with self._lock:
             return self._rvol.get(symbol.upper())
+
+    def shares_for(self, symbol: str) -> float | None:
+        """Today's accumulated shares from the last snapshot (None if unknown)."""
+        with self._lock:
+            return self._shares.get(symbol.upper())
 
     def count(self) -> int:
         with self._lock:
@@ -336,10 +355,12 @@ class IgnitionScoringLoop:
                 sym, rvol=_rv, move_pct=move_pct, gap_pct=move_pct, price=_px
             ):
                 return  # no Ross axis crossed — dead tape, ignore
+            _tick_price = _px
         else:
             floor = float(getattr(settings, "chili_momentum_ignition_min_pct", 3.0))
             if move_pct < floor:
                 return  # below the adaptive ignition floor — dead tape, ignore
+            _tick_price = self._quote_price(quote)
         # DEDUP: one score per cooldown window + an inflight guard so two ticks
         # arriving together don't double-dispatch the same symbol.
         now = time.monotonic()
@@ -357,14 +378,16 @@ class IgnitionScoringLoop:
                 self._inflight.discard(sym)
             return
         try:
-            pool.submit(self._score_symbol, sym, move_pct)
+            pool.submit(self._score_symbol, sym, move_pct, _tick_price)
         except Exception:
             with self._inflight_lock:
                 self._inflight.discard(sym)
 
     # ── scoring (runs on the pool — owns its own DB session) ─────────────────
 
-    def _score_symbol(self, symbol: str, move_pct: float) -> None:
+    def _score_symbol(
+        self, symbol: str, move_pct: float, price: float | None = None
+    ) -> None:
         """Score ONE igniting symbol into momentum_symbol_viability.
 
         Reuses the bridge's single-symbol path: a direct ``run_momentum_neural_tick``
@@ -389,6 +412,19 @@ class IgnitionScoringLoop:
                     "source": "ws_ignition",
                 }
             }
+            # INSTRUMENT-CLASS AXES (2026-08-19): stamp the tick PRICE and today's
+            # SHARES so the persisted row carries what the Ross universe evidence gate
+            # needs (it derives dollar_volume = price × volume). Proved live against
+            # the running board: every ws_ignition-sourced row failed that gate closed
+            # with `ross_universe_missing_price`, so the scoped ignition→arm bridge
+            # could never arm a WS-ignited name — and a WS re-score DEGRADED a name
+            # whose row had richer snapshot provenance. Both axes fail-open: a missing
+            # value is simply not stamped (byte-identical to the old signal shape).
+            if price is not None and float(price) > 0:
+                ross_signals[symbol]["price"] = float(price)
+            _shares = self._tracker.shares_for(symbol)
+            if _shares is not None and float(_shares) > 0:
+                ross_signals[symbol]["volume"] = float(_shares)
             # FIX A1 (kill-switch chili_momentum_ross_rvol_feed_enabled, default ON):
             # feed the REAL intraday RVOL the tracker captured from the screen snapshot
             # into the scorer's rvol pillar (``vol_ratio`` is the first key _extract_pillars
@@ -431,11 +467,56 @@ class IgnitionScoringLoop:
             except Exception:
                 pass
             db.close()
-        # A/B LOG: queryable proof the ignition path put a name on the board.
+        # IGNITION→ARM BRIDGE (2026-08-19 YJ miss): give this just-ignited name a SCOPED
+        # arm attempt inside the ignition cadence instead of waiting out a full
+        # 300-1200s auto-arm pass. Deliberately runs AFTER the score session is closed
+        # and AFTER _inflight is released, on its OWN short-lived session:
+        #   - the scorer's session is never handed to the arm pass (which flushes,
+        #     commits, expunges and rolls back on its own schedule);
+        #   - the symbol is re-scorable while the arm attempt runs, so the name most
+        #     likely to be moving is not the one whose scoring is frozen.
+        bridge_state = "off"
+        if scored_ok:
+            bridge_state = self._bridge_arm(symbol)
+        # A/B LOG: queryable proof the ignition path put a name on the board — and what
+        # the bridge then did with it (armed / no-arm / skipped-busy / off / error), so
+        # a silently starved bridge cannot look identical to a healthy one.
         _log.info(
-            "[momentum_ws_ignition] symbol=%s move_pct=%.2f scored_ok=%s",
-            symbol, float(move_pct), scored_ok,
+            "[momentum_ws_ignition] symbol=%s move_pct=%.2f scored_ok=%s bridge=%s",
+            symbol, float(move_pct), scored_ok, bridge_state,
         )
+
+    def _bridge_arm(self, symbol: str) -> str:
+        """Scoped ignition→arm attempt for a just-scored symbol. Own session,
+        rollback-in-finally. Returns a short outcome tag for the A/B log line;
+        NEVER raises (a bridge failure must not touch the scoring path)."""
+        db = SessionLocal()
+        try:
+            from .auto_arm import run_scoped_ignition_arm
+
+            out = run_scoped_ignition_arm(db, [symbol])
+            db.commit()
+            if out is None:
+                return "skipped"  # flag off, debounced, or lost the single-flight
+            if int(out.get("armed") or 0) > 0:
+                return "armed"
+            return "no_arm:" + str(out.get("skipped") or "unknown")
+        except Exception:
+            _log.warning(
+                "[momentum_ws_ignition] ignition→arm bridge failed for %s",
+                symbol, exc_info=True,
+            )
+            try:
+                db.rollback()
+            except Exception:
+                pass
+            return "error"
+        finally:
+            try:
+                db.rollback()
+            except Exception:
+                pass
+            db.close()
 
 
 # ---------------------------------------------------------------------------

@@ -3843,17 +3843,26 @@ def _candidate_freshness(symbol: str):
         return None
 
 
-def _probe_candidate(symbol: str) -> tuple[bool, str, Any]:
+def _probe_candidate(symbol: str, rows: dict[str, Any] | None = None) -> tuple[bool, str, Any]:
     """One network-bound pass per candidate: (trigger fires?, reason, freshness).
 
-    Signature UNCHANGED (a bare symbol string) so the concurrent submit + the existing
-    test monkeypatches stay byte-compatible. The candidate ROW (carrying the name's OWN
-    persisted high-conviction scanner signal — ross_score / RVOL / daily_breaking_major)
-    is resolved from the per-pass ``_PASS_CANDIDATE_ROWS`` map the pass populated BEFORE
-    the probe wave, then handed to ``_entry_trigger_fires`` for the momentum-continuation
-    active-trigger branch. No new fetch (the row is already loaded). Row absent ⇒ None ⇒
-    the continuation branch is simply skipped (pullback-only)."""
-    row = _PASS_CANDIDATE_ROWS.get(str(symbol or "").upper())
+    The candidate ROW (carrying the name's OWN persisted high-conviction scanner
+    signal — ross_score / RVOL / daily_breaking_major) comes from ``rows``, the
+    PASS-LOCAL map bound by the caller, then handed to ``_entry_trigger_fires``
+    for the momentum-continuation active-trigger branch. No new fetch (the row is
+    already loaded). Row absent ⇒ None ⇒ the continuation branch is simply skipped
+    (pullback-only).
+
+    ⚠️ ``rows`` MUST be pass-local. It used to be the module global
+    ``_PASS_CANDIDATE_ROWS``, which the ignition→arm bridge broke: a scoped bridge
+    pass reassigned the global to its 1-symbol dict mid-flight, so every probe of a
+    CONCURRENT full pass that started after that instant read None and silently lost
+    its continuation evidence (and vice-versa). The global remains only as the
+    fallback for 1-arg test monkeypatches; live callers always bind explicitly.
+    """
+    if rows is None:
+        rows = _PASS_CANDIDATE_ROWS
+    row = rows.get(str(symbol or "").upper())
     try:
         fires, reason = _entry_trigger_fires(symbol, row)
     except TypeError:
@@ -5208,15 +5217,32 @@ def run_auto_arm_pass(
 
         # Snapshot {UPPER symbol -> detached candidate row} for the probe threads so the
         # momentum-continuation arm-time trigger can read each name's OWN persisted
-        # high-conviction signal without a new fetch. Reassign a FRESH dict (never mutate
-        # in place) so an overlapping pass only ever sees a complete map. The rows are
-        # already expunged but their loaded attrs (symbol / execution_readiness_json /
-        # viability_score) stay readable (the #561/#563 read-release pattern, same as the
-        # arm loop below). Module global so the 1-arg _probe_candidate signature is unchanged.
-        global _PASS_CANDIDATE_ROWS
-        _PASS_CANDIDATE_ROWS = {
+        # high-conviction signal without a new fetch. The rows are already expunged but
+        # their loaded attrs (symbol / execution_readiness_json / viability_score) stay
+        # readable (the #561/#563 read-release pattern, same as the arm loop below).
+        #
+        # PASS-LOCAL, bound explicitly into every probe call: this used to be a module
+        # global, which the ignition→arm bridge broke — a scoped bridge pass running on
+        # the ignition thread reassigned it to a 1-symbol dict mid-flight, so a
+        # CONCURRENT full pass's later probes read None and silently lost the
+        # continuation branch (and the bridge's own pass lost it to the full pass in
+        # turn). Passes now overlap safely by construction.
+        _cand_rows = {
             str(getattr(c, "symbol", "") or "").upper(): c for c in eligible
         }
+        # Mirror onto the legacy global purely so a monkeypatched 1-arg probe (tests)
+        # still resolves rows; never READ by the live path below.
+        global _PASS_CANDIDATE_ROWS
+        _PASS_CANDIDATE_ROWS = _cand_rows
+
+        def _probe_bound(_sym: str):
+            """Probe with the PASS-LOCAL rows bound. Falls back to the 1-arg call for a
+            monkeypatched ``_probe_candidate`` (same back-compat shape as the
+            ``_entry_trigger_fires`` TypeError fallback inside the probe itself)."""
+            try:
+                return _probe_candidate(_sym, rows=_cand_rows)
+            except TypeError:
+                return _probe_candidate(_sym)
         _workers = min(
             len(eligible),
             max(1, int(getattr(settings, "chili_momentum_auto_arm_trigger_workers", 8))),
@@ -5235,7 +5261,7 @@ def run_auto_arm_pass(
         _probe_candidates = [c for c in eligible if c.symbol not in _results]
         _ex = concurrent.futures.ThreadPoolExecutor(max_workers=_workers)
         try:
-            _futs = {_ex.submit(_probe_candidate, c.symbol): c.symbol for c in _probe_candidates}
+            _futs = {_ex.submit(_probe_bound, c.symbol): c.symbol for c in _probe_candidates}
             # Bound the whole wave by wall-clock so a WIDE candidate net never pushes a pass
             # past the scheduler cadence: arm from whatever COMPLETED within the budget;
             # un-probed names defer to the next tick. This is what lets a fresh #11+ name
@@ -5259,7 +5285,7 @@ def run_auto_arm_pass(
                 if _time.monotonic() >= _deadline:
                     break
                 if c.symbol not in _results:
-                    _results[c.symbol] = _probe_candidate(c.symbol)
+                    _results[c.symbol] = _probe_bound(c.symbol)
         finally:
             # Never block the pass on stragglers: cancel queued probes and DON'T wait on the
             # running ones (they finish in background threads and are discarded). This is what
@@ -5659,6 +5685,22 @@ def run_auto_arm_pass(
 # FULL pass keeps covering it in the meantime.
 _IGNITION_BRIDGE_LAST_ATTEMPT: dict[str, float] = {}
 _ignition_bridge_lock = threading.Lock()
+# PROCESS-WIDE SINGLE-FLIGHT: the WS ignition loop scores on a 3-worker pool, so
+# three crossers landing together would otherwise start three concurrent scoped
+# passes (each opening its own probe wave) on top of the full pass. Non-blocking
+# acquire — a losing caller does NOT drop its work: it leaves its symbols in
+# _IGNITION_BRIDGE_PENDING, which the next winner unions into its own batch.
+# Without that hand-off the two producers race winner-take-all, and the
+# high-frequency WS producer would starve the low-frequency tape-delta job whose
+# high-water mark has already advanced past the batch (work lost outright).
+_ignition_bridge_inflight = threading.Lock()
+_IGNITION_BRIDGE_PENDING: set[str] = set()
+# (thread name, monotonic acquire time) of the current single-flight holder, or
+# None. The holder runs unbounded network-bound work (broker round-trips, the
+# OHLCV probe wave, an advisory-lock wait); if it ever WEDGES, the bridge is dead
+# process-wide for both producers. Tracked so the losing branch can say so out
+# loud instead of failing silently at DEBUG.
+_ignition_bridge_holder: tuple[str, float] | None = None
 
 
 def run_scoped_ignition_arm(db: Session, symbols: Any) -> dict[str, Any] | None:
@@ -5667,16 +5709,23 @@ def run_scoped_ignition_arm(db: Session, symbols: Any) -> dict[str, Any] | None:
     auto-arm pass — measured passes stalled 300-1200s against a 10s cadence, so the
     12:28Z YJ ignition leg ran with no live session watching it.
 
-    This is the ONLY entry point the ignite job calls. It invokes the SAME
+    This is the ONLY entry point the ignition paths call (the tape-delta ignite job
+    and the WS ignition loop's per-symbol scorer). It invokes the SAME
     run_auto_arm_pass with ``only_symbols=`` (every guard + per-symbol gate intact;
     see that docstring for exactly what a scoped pass skips), debounced per symbol
-    so tape-delta re-crossings don't hammer the pass. Flag OFF ⇒ returns None
+    so re-crossings don't hammer the pass, and single-flighted process-wide so the
+    WS scorer's worker pool can't stack concurrent passes. Flag OFF ⇒ returns None
     without invoking the pass (byte-identical to pre-bridge behavior).
+
+    ``symbols`` accepts an iterable or a single symbol string (a bare string is NOT
+    iterated character-by-character).
     """
     if not bool(
         getattr(settings, "chili_momentum_ignition_arm_bridge_enabled", True)
     ):
         return None
+    if isinstance(symbols, str):
+        symbols = [symbols]
     syms = frozenset(
         s for s in (str(x or "").strip().upper() for x in (symbols or [])) if s
     )
@@ -5688,11 +5737,62 @@ def run_scoped_ignition_arm(db: Session, symbols: Any) -> dict[str, Any] | None:
         getattr(settings, "chili_momentum_ignition_bridge_debounce_seconds", 30.0)
         or 30.0
     )
+    # HAND OFF FIRST, then race for the single-flight: whatever happens next, these
+    # symbols are queued, so a caller that loses the race drops NO work (the winner
+    # unions the pending set into its own batch) and leaves NO debounce stamp.
+    global _ignition_bridge_holder
+    with _ignition_bridge_lock:
+        _IGNITION_BRIDGE_PENDING.update(syms)
+        if len(_IGNITION_BRIDGE_PENDING) > 1024:
+            # Runaway guard: keep the newest work, drop the oldest arbitrary excess.
+            # Only reachable if the bridge is wedged (see the holder warning below).
+            for _s in list(_IGNITION_BRIDGE_PENDING)[:-512]:
+                _IGNITION_BRIDGE_PENDING.discard(_s)
+    if not _ignition_bridge_inflight.acquire(blocking=False):
+        _holder = _ignition_bridge_holder
+        _age = (_time.monotonic() - _holder[1]) if _holder else 0.0
+        if _holder and _age > max(debounce * 5.0, 120.0):
+            # A holder this old means the bridge is effectively DEAD process-wide for
+            # both producers — the exact stall class the bridge exists to work around.
+            logger.warning(
+                "[auto_arm] ignition→arm bridge HELD %.0fs by %s — %d symbol(s) "
+                "pending, nothing bridging. Full auto-arm pass is the only cover.",
+                _age, _holder[0], len(_IGNITION_BRIDGE_PENDING),
+            )
+        else:
+            logger.info(
+                "[auto_arm] ignition→arm bridge busy (%.0fs) — queued %s",
+                _age, sorted(syms),
+            )
+        return None
+    _ignition_bridge_holder = (threading.current_thread().name, _time.monotonic())
+    try:
+        return _run_scoped_ignition_arm_locked(db, debounce=debounce)
+    finally:
+        _ignition_bridge_holder = None
+        _ignition_bridge_inflight.release()
+
+
+def _run_scoped_ignition_arm_locked(
+    db: Session, *, debounce: float
+) -> dict[str, Any] | None:
+    """Bridge body — runs with the process-wide single-flight lock HELD.
+
+    Drains the WHOLE pending set (this caller's symbols plus everything queued by
+    callers that lost the race), so no producer's work is silently dropped.
+    """
+    import time as _time
+
     now_mono = _time.monotonic()
     with _ignition_bridge_lock:
+        # Drain: every queued symbol is consumed here. Ones held back by the debounce
+        # are dropped rather than re-queued — they were attempted seconds ago, and the
+        # next ignition tick re-queues them naturally if they are still igniting.
+        drained = frozenset(_IGNITION_BRIDGE_PENDING)
+        _IGNITION_BRIDGE_PENDING.clear()
         due = frozenset(
             s
-            for s in syms
+            for s in drained
             if (now_mono - _IGNITION_BRIDGE_LAST_ATTEMPT.get(s, float("-inf")))
             >= debounce
         )
