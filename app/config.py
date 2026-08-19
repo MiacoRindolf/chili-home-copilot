@@ -8712,6 +8712,22 @@ class Settings(BaseSettings):
         le=3600,
         validation_alias=AliasChoices("CHILI_MOMENTUM_LIVE_RUNNER_SCHEDULER_INTERVAL_SECONDS"),
     )
+    chili_momentum_entry_volume_rate_normalization_enabled: bool = Field(
+        default=True,
+        validation_alias=AliasChoices(
+            "CHILI_MOMENTUM_ENTRY_VOLUME_RATE_NORMALIZATION_ENABLED"
+        ),
+        description="Compare the FORMING bar's volume RATE against the trailing average instead of its partial total. The entry gate measures the last bar against 20 COMPLETE bars, but the last bar is usually still forming — a bar 27 seconds into its minute carries ~45% of its eventual volume, so the comparison understates volume by exactly the fraction remaining, worst at the START of a bar where momentum entries fire. Proved against the recorded YJ tape on 2026-08-19: full-bar ratios of 2.60x / 1.51x / 0.45x at 27s / 36s / 43s elapsed reproduce all three logged volume_below_1p5x_avg refusals (1.17x / 0.91x / 0.32x), while the tape shows 09:11 alone traded 3.35M shares at 6.36x. This does NOT loosen the 1.5x floor — the floor is unchanged; it stops the floor being applied to a half-measured bar. OFF ⇒ byte-identical legacy comparison.",
+    )
+    chili_momentum_entry_volume_rate_min_elapsed_fraction: float = Field(
+        default=0.25,
+        ge=0.0,
+        le=1.0,
+        validation_alias=AliasChoices(
+            "CHILI_MOMENTUM_ENTRY_VOLUME_RATE_MIN_ELAPSED_FRACTION"
+        ),
+        description="Minimum fraction of the forming bar that must have elapsed before its volume is extrapolated to a full-bar rate. Extrapolating from a sliver is noise — two prints in the first second would imply an enormous rate — so below this fraction the raw legacy comparison stands. 0.25 = 15 seconds of a 1-minute bar. Set 0 to disable normalisation entirely (equivalent to the flag being off).",
+    )
     chili_momentum_entry_execution_bbo_ceiling_defer_enabled: bool = Field(
         default=False,
         validation_alias=AliasChoices(
