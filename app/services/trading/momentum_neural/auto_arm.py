@@ -1331,19 +1331,38 @@ def _emit_loss_cooldown_leader_counterfactual(
         _LOSS_CF_EMITTED.clear()
 
 
-def _reap_cooldown_blocks(sym_u: str, now: datetime, *, exempt_sym: str) -> bool:
+def _reap_cooldown_blocks(
+    sym_u: str, now: datetime, *, exempt_syms: frozenset[str] | set[str]
+) -> bool:
     """True when the reap cooldown should keep ``sym_u`` (UPPER) out of the arm queue.
 
     LEADER EXEMPTION (2026-08-17, IVF premarket starvation): the reap cooldown is an
-    oscillation damper for mid-pack churn — it must never sit out the board's CURRENT #1
-    (``exempt_sym``: candidates[0] after the symbol-of-the-day hoist). The hoist + the
-    displacement victim-veto already guaranteed the leader its slot, but a REAPED leader
-    still sat out the 300–1800s cooldown at the arm gate while weaker names held slots
-    (IVF +190% led the board through its whole sit-out). The #1 re-arms immediately;
-    every other name keeps the damper unchanged."""
+    oscillation damper for mid-pack churn — it must never sit out the board's leaders.
+
+    TOP-2 KEY (2026-08-19, ang YJ re-arm miss): ang dating exempt key ay
+    candidates[0] LANG — pero pagkatapos ng symbol-of-the-day HOIST, ang
+    slot-0 ay ang hoisted leader (noong 08-19: RDAC, isang benched name na
+    hino-hoist mula rank #20-31) habang ang TUNAY na armed-first (YJ,
+    liquidity-bias top, $338M dvol) ay nasa slot 1 — kaya ang keep-lapse
+    reap ng YJ 12:22Z ay nag-stamp ng 600s cooldown na WALANG exemption, at
+    na-miss ang 12:28 ignition leg (4.80→6.05). Ang exemption ay ang TOP-2
+    na ngayon (ang hoisted leader AT ang na-displace nitong armed-first; sa
+    walang-hoist na pass, top-2 by rank) — ang damper ay nananatili para sa
+    mid-pack (slots 2+), na siyang tunay na oscillator population."""
     if not _reap_cooldown_active(sym_u, now):
         return False
-    return not (sym_u and sym_u == exempt_sym)
+    return not (sym_u and sym_u in exempt_syms)
+
+
+def _board_exempt_syms(cands: list) -> frozenset[str]:
+    """Top-2 board symbols (UPPER) para sa cooldown exemptions — tingnan ang
+    _reap_cooldown_blocks TOP-2 KEY na tala."""
+    out: set[str] = set()
+    for c in cands[:2]:
+        su = str(getattr(c, "symbol", "") or "").strip().upper()
+        if su:
+            out.add(su)
+    return frozenset(out)
 
 
 def _write_reap_cooldown(sym_u: str, now: datetime) -> None:
@@ -4194,10 +4213,10 @@ def _try_displacement_for_full_slots(
     # A3: in a WILDCARD regime the breadth-dominant lone mover is the protected leader (its watch
     # slot is never the eviction victim) — concentrate the lane on it. Otherwise the normal leader.
     _leader = _effective_session_leader(db, cands) if _symbol_of_day_focus_enabled() else None
-    # Board #1 is exempt from the newcomer cooldown skip (see _reap_cooldown_blocks) —
-    # a reaped leader must be able to displace its way back in, not just re-arm on an
-    # open slot.
-    _top_sym = str(getattr(cands[0], "symbol", "") or "").upper()
+    # Board top-2 are exempt from the newcomer cooldown skip (see
+    # _reap_cooldown_blocks TOP-2 KEY) — a reaped leader/armed-first must be
+    # able to displace its way back in, not just re-arm on an open slot.
+    _top_syms = _board_exempt_syms(cands)
     newcomer = None
     for c in cands:
         su = str(c.symbol or "").upper()
@@ -4209,7 +4228,7 @@ def _try_displacement_for_full_slots(
             continue
         if not _symbol_market_open(c.symbol):
             continue
-        if _reap_cooldown_blocks(su, _utcnow(), exempt_sym=_top_sym):
+        if _reap_cooldown_blocks(su, _utcnow(), exempt_syms=_top_syms):
             continue
         newcomer = c
         break
@@ -4238,6 +4257,14 @@ def run_auto_arm_pass(
     loss_guard_account_identity: str | None = None,
 ) -> dict[str, Any]:
     """Single auto-arm pass. Returns a summary dict (armed 0/1)."""
+    # PHASE TIMING (2026-08-19 YJ miss): ang mga pass ay tumagal ng 300-1200s
+    # kontra 10s cadence buong umaga — ang 12:28 ignition ay nahulog sa LOOB
+    # ng naka-stall na pass. Ang timing na ito ang magtuturo kung aling phase
+    # (board build vs gate loop) ang kumakain, bago ang anumang perf surgery.
+    import time as _phase_time
+
+    _phase_t0 = _phase_time.monotonic()
+    _phase_board_done: float | None = None
     out: dict[str, Any] = {"checked": 0, "scanned": 0, "armed": 0, "skipped": None}
 
     if not bool(getattr(settings, "chili_momentum_auto_arm_live_enabled", True)):
@@ -4746,13 +4773,20 @@ def run_auto_arm_pass(
         )
     else:
         candidates = _fresh_live_eligible_candidates(db, limit=_scan_limit())
+    _phase_board_done = _phase_time.monotonic()
+    out["phase_seconds"] = {
+        "board_build": round(_phase_board_done - _phase_t0, 2),
+    }
     out["scanned"] = len(candidates)
     if not candidates:
         out["skipped"] = "no_fresh_live_eligible"
         return out
-    # The board's #1 (hoisted symbol-of-the-day leader when identified, else the top
-    # (tier, ross, viability) name) is exempt from the reap-cooldown skip below — see
-    # _reap_cooldown_blocks. Computed once per pass off the already-ranked list.
+    # The board's TOP-2 (hoisted symbol-of-the-day leader + the armed-first it
+    # displaced — see _reap_cooldown_blocks TOP-2 KEY, 2026-08-19 YJ miss) are
+    # exempt from the cooldown skips below. Computed once per pass off the
+    # already-ranked list. Ang rotation telemetry ay nananatiling naka-key sa
+    # slot-0 lang (ang hoisted leader ang "board #1").
+    _cooldown_exempt_syms = _board_exempt_syms(candidates)
     _cooldown_exempt_sym = str(getattr(candidates[0], "symbol", "") or "").upper()
     # LEADER-ROTATION TELEMETRY (2026-08-17, Ross Aral #16/#25: "attention is on
     # other stocks" / "UCL had failed... this was still the leading gainer"):
@@ -4945,7 +4979,7 @@ def run_auto_arm_pass(
             # exemption ay nagbubukas lang ng PAGKAKATAON, hindi ng entry.
             if (
                 _sym_u not in loss_blocked
-                and _sym_u == _cooldown_exempt_sym
+                and _sym_u in _cooldown_exempt_syms
                 and bool(
                     getattr(
                         settings,
@@ -4973,7 +5007,7 @@ def run_auto_arm_pass(
                 # class (JZXN proof case: +49% pagkatapos ng exit) BAGO magpasya ng
                 # anumang luwag. Telemetry LANG — walang binabagong gating.
                 # (Naabot na rin ito kapag naka-OFF ang leader exemption.)
-                if _sym_u not in loss_blocked and _sym_u == _cooldown_exempt_sym:
+                if _sym_u not in loss_blocked and _sym_u in _cooldown_exempt_syms:
                     try:
                         _emit_loss_cooldown_leader_counterfactual(
                             db,
@@ -4988,7 +5022,7 @@ def run_auto_arm_pass(
                         )
                 continue  # 2-strike / post-loss cooldown — walk away like Ross does
         if _reap_cooldown_active(_sym_u, pass_as_of):
-            if _reap_cooldown_blocks(_sym_u, pass_as_of, exempt_sym=_cooldown_exempt_sym):
+            if _reap_cooldown_blocks(_sym_u, pass_as_of, exempt_syms=_cooldown_exempt_syms):
                 out["reap_cooldown_skipped"] += 1
                 continue  # just churned/displaced the slot without firing — let a different mover watch
             out["reap_cooldown_leader_exempt"] = out.get("reap_cooldown_leader_exempt", 0) + 1
@@ -5504,4 +5538,23 @@ def run_auto_arm_pass(
         out.pop("skipped", None)
         out.pop("begin_error", None)
         out.pop("confirm_error", None)
+    try:
+        _phase_end = _phase_time.monotonic()
+        _phases = out.get("phase_seconds")
+        _phases = _phases if isinstance(_phases, dict) else {}
+        if _phase_board_done is not None:
+            _phases["gate_loop"] = round(_phase_end - _phase_board_done, 2)
+        _phases["total"] = round(_phase_end - _phase_t0, 2)
+        out["phase_seconds"] = _phases
+        if _phases["total"] > 60.0:
+            logger.warning(
+                "[auto_arm] SLOW PASS %.1fs (board_build=%s gate_loop=%s) — "
+                "ang cadence ay 10s; ang ignition na tumama sa loob ng pass "
+                "na ito ay naghintay nang ganito katagal",
+                _phases["total"],
+                _phases.get("board_build"),
+                _phases.get("gate_loop"),
+            )
+    except Exception:
+        pass
     return out

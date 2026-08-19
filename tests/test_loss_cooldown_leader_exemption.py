@@ -140,10 +140,13 @@ def test_two_strike_block_still_absolute_for_leader(monkeypatch):
 
 
 def test_timer_cooldown_still_blocks_non_leader(monkeypatch):
-    """Ang exemption ay para LANG sa board #1 — ang pangalawang kandidato sa
-    timer cooldown ay nananatiling naka-skip."""
+    """Ang exemption ay para sa board TOP-2 lang — ang slot-3 na kandidato sa
+    timer cooldown ay nananatiling naka-skip (mid-pack damper)."""
+    # TOP-2 na ang exemption (2026-08-19 YJ miss) — ang cooled na simbolo ay
+    # kailangang nasa slot 2+ para masubok ang mid-pack damper.
     leader = SimpleNamespace(symbol="AAAA-USD", variant_id=8, viability_score=0.80)
-    _happy_path(monkeypatch, candidates=[leader, _lgvn()])
+    second = SimpleNamespace(symbol="BBBB-USD", variant_id=8, viability_score=0.75)
+    _happy_path(monkeypatch, candidates=[leader, second, _lgvn()])
     monkeypatch.setattr(
         aa, "_symbol_loss_guards",
         lambda db, **kwargs: (set(), {"LGVN-USD": _far_future()}),
