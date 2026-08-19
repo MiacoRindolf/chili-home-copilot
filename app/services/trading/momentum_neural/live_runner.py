@@ -523,20 +523,80 @@ def _decision_runtime_clock_seconds(*, explicit: float | None = None) -> float:
     return float(_time.monotonic())
 
 
-def _schedule_entry_fsm_continuation(session_id: int) -> bool:
-    """Request one post-commit event-loop tick for a mechanical entry transition.
+# SCHEDULER-MODE ENTRY FSM CONTINUATION (2026-08-19 zero-fill root cause).
+# The entry FSM advances ONE mechanical state per invocation and returns:
+#   watching_live -> live_entry_candidate -> live_pending_entry -> place order
+# so an entry needs THREE invocations. The event-loop driver has always had a
+# fast path for this (schedule_live_runner_entry_continuation), but its docstring
+# is literal: when the loop is not the owner it is a NO-OP — and the deployed
+# window runs LOOP_ENABLED=false + SCHEDULER_ENABLED=true. Every transition
+# therefore waited for the next scheduler tick, nominally 10s but MEASURED at a
+# 30.6s median with 62% of ticks skipped (the pass runs longer than its own
+# interval). Result on 2026-08-19: a median of 408s — SEVEN MINUTES — between
+# "this is a good entry" and the pre-submit quote check, so the planned limit was
+# minutes stale by the time it was compared to a fresh ask. That is what produced
+# 14 execution_bbo_above_planned_limit defers and ZERO live_entry_submitted on a
+# day with 53 pending_place attempts.
+#
+# This registry lets the SCHEDULER driver honour the same request the loop driver
+# already honours: the tick dispatcher drains it and re-invokes the FSM for that
+# session immediately, within the same batch, instead of waiting a full cycle.
+# It records ONLY when the loop path declined, so loop-mode behaviour is
+# byte-identical. It grants no new authority: each re-invocation re-runs the full
+# state-specific freshness, eligibility, risk, broker-owner and order-idempotency
+# checks exactly as a next-tick invocation would.
+_PENDING_ENTRY_FSM_CONTINUATION: set[int] = set()
+_entry_fsm_continuation_lock = threading.Lock()
 
-    When the event loop is not the configured owner (including offline ReplayV3
-    and legacy scheduler tests), this is a no-op.  The next invocation still
-    re-runs the full state-specific freshness, eligibility, risk, broker-owner,
-    and order-idempotency checks; this helper never performs or authorizes an
-    order itself.
+
+def _schedule_entry_fsm_continuation(session_id: int) -> bool:
+    """Request one post-commit tick for a mechanical entry transition.
+
+    Prefers the event-loop driver when it owns live ticks. When it does not
+    (scheduler mode, offline ReplayV3, legacy tests) the request is recorded for
+    the scheduler tick dispatcher to drain via
+    :func:`consume_entry_fsm_continuation`. The next invocation still re-runs the
+    full state-specific freshness, eligibility, risk, broker-owner, and
+    order-idempotency checks; this helper never performs or authorizes an order
+    itself.
     """
 
     try:
         from .live_runner_loop import schedule_live_runner_entry_continuation
 
-        return bool(schedule_live_runner_entry_continuation(int(session_id)))
+        if bool(schedule_live_runner_entry_continuation(int(session_id))):
+            return True
+    except Exception:
+        pass
+    if not bool(
+        getattr(
+            settings,
+            "chili_momentum_entry_fsm_scheduler_continuation_enabled",
+            True,
+        )
+    ):
+        return False
+    try:
+        with _entry_fsm_continuation_lock:
+            _PENDING_ENTRY_FSM_CONTINUATION.add(int(session_id))
+        return True
+    except Exception:
+        return False
+
+
+def consume_entry_fsm_continuation(session_id: int) -> bool:
+    """Pop a pending scheduler-mode entry-FSM continuation for ``session_id``.
+
+    Returns True exactly once per recorded request. Draining is the caller's
+    signal to re-invoke the FSM for that session NOW rather than next tick.
+    """
+
+    try:
+        with _entry_fsm_continuation_lock:
+            if int(session_id) in _PENDING_ENTRY_FSM_CONTINUATION:
+                _PENDING_ENTRY_FSM_CONTINUATION.discard(int(session_id))
+                return True
+            return False
     except Exception:
         return False
 
@@ -19002,7 +19062,44 @@ def _final_entry_bbo(
             "error_type": type(exc).__name__,
         }
     if tick is None:
-        return None, {"ok": False, "reason": "execution_bbo_unavailable"}
+        # WHY it is unavailable (2026-08-19): this branch used to discard the
+        # adapter's metadata entirely, collapsing FOUR physically different adapter
+        # outcomes into one opaque string while every other branch of this function
+        # emits source/age/max_age. All 25 of the day's unavailable events were
+        # therefore unattributable, and the distinction is decision-grade: a quote
+        # that EXISTS but is older than the ceiling ("stale") means the feed works
+        # and the ceiling binds, while NO quote ("absent") means the venue has no
+        # book for this name at all — only the latter is fixed by changing feeds.
+        # Instrumentation only: keys added to the emitted payload, no gate change.
+        _why: dict[str, Any] = {"ok": False, "reason": "execution_bbo_unavailable"}
+        try:
+            _prov = getattr(meta, "provider_time_utc", None)
+            _recv = getattr(meta, "retrieved_at_utc", None)
+            _cap = getattr(meta, "max_age_seconds", None)
+            if meta is None:
+                _why["unavailable_kind"] = "no_meta"
+            elif not isinstance(_prov, datetime):
+                # Request completion proves when WE got the response, not when the
+                # venue generated the quote — the adapter refuses to age it.
+                _why["unavailable_kind"] = (
+                    "absent_quote" if _recv is None else "no_provider_timestamp"
+                )
+            else:
+                _p = _prov if _prov.tzinfo else _prov.replace(tzinfo=timezone.utc)
+                _age = (_utcnow_aware() - _p.astimezone(timezone.utc)).total_seconds()
+                _why["age_seconds"] = round(float(_age), 3)
+                _why["provider_event_at_utc"] = _p.astimezone(timezone.utc).isoformat()
+                _cap_f = float(_cap) if _cap is not None else float(max_age_seconds)
+                _why["max_age_seconds"] = _cap_f
+                _why["unavailable_kind"] = (
+                    "stale_beyond_ceiling" if _age > _cap_f else "rejected_other"
+                )
+            _src = getattr(meta, "source", None) or getattr(meta, "feed", None)
+            if _src is not None:
+                _why["source"] = str(_src)
+        except Exception:
+            _why["unavailable_kind"] = "attribution_error"
+        return None, _why
     # The just-before-place seam re-checks ``tick.freshness``.  Validate that
     # exact object here as well; accepting only a separate tuple-level metadata
     # object could prove one clock fresh and then silently skip/re-check another.

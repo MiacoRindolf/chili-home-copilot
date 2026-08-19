@@ -8712,6 +8712,32 @@ class Settings(BaseSettings):
         le=3600,
         validation_alias=AliasChoices("CHILI_MOMENTUM_LIVE_RUNNER_SCHEDULER_INTERVAL_SECONDS"),
     )
+    # ── ENTRY-FSM CONTINUATION IN SCHEDULER MODE (2026-08-19 zero-fill root cause) ──
+    # The entry FSM advances ONE mechanical state per invocation (watching_live ->
+    # live_entry_candidate -> live_pending_entry -> place), so an entry needs THREE.
+    # The event-loop driver already has a fast path for this; in SCHEDULER mode that
+    # path is a documented no-op, so every step waited a full tick. Measured on
+    # 2026-08-19: 30.6s median between ticks (nominal 10s) with 62% of ticks skipped,
+    # producing a 408s MEDIAN between "good entry detected" and the pre-submit quote
+    # check — which is why 14 entries deferred on execution_bbo_above_planned_limit
+    # (a limit planned seven minutes earlier) and ZERO orders were submitted against
+    # 53 pending_place attempts. These let the scheduler honour the SAME continuation
+    # request the loop driver honours. No new authority: each pass re-runs the full
+    # freshness / eligibility / risk / broker-owner / idempotency checks.
+    chili_momentum_entry_fsm_scheduler_continuation_enabled: bool = Field(
+        default=True,
+        validation_alias=AliasChoices(
+            "CHILI_MOMENTUM_ENTRY_FSM_SCHEDULER_CONTINUATION_ENABLED"
+        ),
+        description="Let the SCHEDULER-mode live-runner drain the entry FSM's own continuation request and re-invoke the FSM for that session immediately (same batch) instead of waiting a full scheduler tick per mechanical state transition. OFF ⇒ the request is not recorded and each transition waits for the next tick (the pre-2026-08-19 behaviour that produced a 408s median plan-to-check gap). Loop mode is unaffected either way — the request is only recorded when the loop driver declines it.",
+    )
+    chili_momentum_entry_fsm_continuation_max_steps: int = Field(
+        default=3,
+        ge=1,
+        le=10,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_ENTRY_FSM_CONTINUATION_MAX_STEPS"),
+        description="Hard ceiling on FSM invocations for ONE session within a single scheduler tick. The entry path needs 3 (watching -> candidate -> pending_entry -> place); the ceiling stops a state that re-requests continuation from spinning inside one tick and starving the other sessions in the batch. Reaching the ceiling is not an error — the session simply continues on the next tick, exactly as before.",
+    )
     # The live-runner batch ticks each open live session on a small bounded pool
     # so the batch wall-time is ~the slowest single session, not the SERIAL SUM
     # of every session's network I/O (Coinbase quote/product + OHLCV trigger
