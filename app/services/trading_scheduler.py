@@ -965,8 +965,57 @@ def _run_momentum_live_runner_batch_job():
         workers = max(1, min(_cap, len(session_ids)))
 
         def _tick_one(sid: int) -> tuple[bool, int]:
-            """Tick one live session on its OWN DB Session. Returns (ok, dur_ms)."""
+            """Tick one live session on its OWN DB Session. Returns (ok, dur_ms).
+
+            ENTRY-FSM CONTINUATION (2026-08-19 zero-fill root cause): the entry FSM
+            advances ONE mechanical state per invocation (watching -> candidate ->
+            pending_entry -> place), so an entry needs THREE. The loop driver has a
+            fast path for that; in SCHEDULER mode it is a documented no-op, so each
+            step waited a full tick — measured 30.6s median, 62% of ticks skipped,
+            for a 408s median between "good entry" and the pre-submit quote check.
+            We now drain the SAME continuation request the FSM already emits and
+            re-invoke immediately, bounded, each pass on its own DB session with the
+            identical commit/rollback hygiene. No new authority: every pass re-runs
+            the full freshness / eligibility / risk / idempotency checks.
+            """
             _t0 = time.monotonic()
+            _ok_any = False
+            _steps = 0
+            _max_steps = max(
+                1,
+                int(
+                    getattr(
+                        _settings,
+                        "chili_momentum_entry_fsm_continuation_max_steps",
+                        3,
+                    )
+                    or 3
+                ),
+            )
+            while True:
+                _ok_any = _tick_one_pass(sid) or _ok_any
+                _steps += 1
+                if _steps >= _max_steps:
+                    break
+                try:
+                    from .trading.momentum_neural.live_runner import (
+                        consume_entry_fsm_continuation,
+                    )
+
+                    if not consume_entry_fsm_continuation(sid):
+                        break
+                except Exception:
+                    break
+            if _steps > 1:
+                logger.info(
+                    "[scheduler] entry-FSM continuation session=%s passes=%d "
+                    "(same tick; would have been %d scheduler cycles)",
+                    sid, _steps, _steps,
+                )
+            return _ok_any, int((time.monotonic() - _t0) * 1000)
+
+        def _tick_one_pass(sid: int) -> bool:
+            """ONE FSM invocation on its OWN DB Session. Returns ok."""
             db_s = SessionLocal()
             ok = False
             phase_one_committed = False
@@ -1004,7 +1053,7 @@ def _run_momentum_live_runner_batch_job():
                     except Exception:
                         pass
                 db_s.close()
-            return ok, int((time.monotonic() - _t0) * 1000)
+            return ok
 
         _wall0 = time.monotonic()
         ticked, timings = _dispatch_live_runner_ticks(
