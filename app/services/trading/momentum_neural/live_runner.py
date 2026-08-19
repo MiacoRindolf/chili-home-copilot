@@ -33849,20 +33849,84 @@ def tick_live_session(
                 _final_bbo["planned_limit_price"] = _planned_limit_str
                 _final_bbo["execution_ask"] = _final_ask
                 if _final_limit_px > _planned_limit_px:
-                    _final_bbo["ok"] = False
-                    _final_bbo["reason"] = "execution_bbo_above_planned_limit"
+                    # CROSS-SOURCE CEILING (2026-08-19). This defer compares two
+                    # DIFFERENT books. On this launcher the PLANNED limit is built
+                    # from the IQFeed consolidated NBBO (get_best_bid_ask prefers
+                    # _iqfeed_l1_quote when chili_alpaca_quotes_via_iqfeed is on and
+                    # the bridge build is pinned — both true on the time-share
+                    # window), while _final_ask here comes from get_execution_bbo,
+                    # which is Alpaca-IEX only. On thin small caps the IEX "offer"
+                    # sits 11-18% above the true national best offer — measured the
+                    # same instant: ZSTK IEX 9.15/12.28 (3013 bps) vs the real book
+                    # 10.61/10.62 (9 bps). So the ceiling reads a phantom price as
+                    # "the market ran away" and refuses. Six of the day's fourteen
+                    # planned limits were AT OR ABOVE the true ask, i.e. fully
+                    # marketable, and were refused anyway.
+                    #
+                    # What the ceiling defends against — "do not turn a delayed
+                    # refetch into a chase" — is already guaranteed by the ORDER
+                    # TYPE: this is a LIMIT order. It can never fill above
+                    # limit_price no matter what any feed claims. If the market
+                    # genuinely did run away, the order simply rests unfilled. The
+                    # ceiling was added 2026-08-11, AFTER the last successful
+                    # Alpaca fill (2026-07-13), so it has never coexisted with a
+                    # working fill — and the venue demonstrably CAN fill this
+                    # universe (53 realized outcomes on names like VRAX/NVVE/SKYQ,
+                    # VRAX itself filling on 07-09 and phantom-blocked on 08-19).
+                    #
+                    # So: keep the PLANNED limit (the price every earlier risk,
+                    # sizing and extension check was computed against), place it,
+                    # and record the gap. Worst case is a non-fill — which is
+                    # exactly today's outcome — and it is observable within a day.
                     _final_bbo["required_limit_price"] = _final_limit_str
-                    le["entry_final_bbo"] = _final_bbo
-                    _commit_le(sess, le)
-                    _emit(db, sess, "live_entry_deferred_final_bbo", _final_bbo)
-                    _safe_transition(db, sess, STATE_WATCHING_LIVE)
-                    db.flush()
-                    return {
-                        "ok": True,
-                        "session_id": sess.id,
-                        "state": sess.state,
-                        "skipped": "execution_bbo_above_planned_limit",
-                    }
+                    _final_bbo["planned_vs_execution_gap_bps"] = (
+                        round(
+                            (_final_limit_px - _planned_limit_px)
+                            / _planned_limit_px
+                            * 10000.0,
+                            1,
+                        )
+                        if _planned_limit_px > 0
+                        else None
+                    )
+                    if bool(
+                        getattr(
+                            settings,
+                            "chili_momentum_entry_execution_bbo_ceiling_defer_enabled",
+                            False,
+                        )
+                    ):
+                        _final_bbo["ok"] = False
+                        _final_bbo["reason"] = "execution_bbo_above_planned_limit"
+                        le["entry_final_bbo"] = _final_bbo
+                        _commit_le(sess, le)
+                        _emit(db, sess, "live_entry_deferred_final_bbo", _final_bbo)
+                        _safe_transition(db, sess, STATE_WATCHING_LIVE)
+                        db.flush()
+                        return {
+                            "ok": True,
+                            "session_id": sess.id,
+                            "state": sess.state,
+                            "skipped": "execution_bbo_above_planned_limit",
+                        }
+                    _final_bbo["reason"] = "execution_bbo_above_planned_limit_placed"
+                    _final_bbo["placed_at_planned_limit"] = True
+                    _log.info(
+                        "[momentum_live] execution BBO (%s) ask %s is above the "
+                        "planned limit %s (%s bps) — PLACING at the planned limit "
+                        "anyway: a limit order cannot fill above it, and the two "
+                        "prices come from different books. sym=%s",
+                        _final_bbo.get("source"), _final_limit_str,
+                        _planned_limit_str,
+                        _final_bbo.get("planned_vs_execution_gap_bps"),
+                        sess.symbol,
+                    )
+                    _emit(db, sess, "live_entry_execution_bbo_above_planned_limit", _final_bbo)
+                    # Fall through with _entry_kwargs["limit_price"] UNCHANGED (the
+                    # planned ceiling). The price-improvement branch below only
+                    # applies when the fresh ask is BELOW it.
+                    _final_limit_str = _planned_limit_str
+                    _final_limit_px = _planned_limit_px
 
                 # The actual adapter kwargs, the later submitted event, and the
                 # persisted entry limit must all agree on the fresh marketable ask.

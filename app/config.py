@@ -8712,6 +8712,13 @@ class Settings(BaseSettings):
         le=3600,
         validation_alias=AliasChoices("CHILI_MOMENTUM_LIVE_RUNNER_SCHEDULER_INTERVAL_SECONDS"),
     )
+    chili_momentum_entry_execution_bbo_ceiling_defer_enabled: bool = Field(
+        default=False,
+        validation_alias=AliasChoices(
+            "CHILI_MOMENTUM_ENTRY_EXECUTION_BBO_CEILING_DEFER_ENABLED"
+        ),
+        description="Legacy behaviour: DEFER the entry when the execution-venue ask sits above the planned limit. OFF (default) places at the PLANNED limit instead and records the gap. The ceiling compares two different books — on this launcher the planned limit is built from the IQFeed consolidated NBBO while the final ask is Alpaca-IEX only, and on thin small caps the IEX offer runs 11-18% above the true national best offer (measured same-instant: ZSTK IEX 9.15/12.28 = 3013 bps vs the real 10.61/10.62 = 9 bps). Six of the fourteen 2026-08-19 defers were already marketable at the true ask. The chase it guards against is impossible anyway: this is a LIMIT order and cannot fill above limit_price whatever a feed claims — worst case is a non-fill, which is the current outcome. Added 2026-08-11, after the last successful Alpaca fill (2026-07-13), so it has never coexisted with a working fill. Set True to restore the defer.",
+    )
     chili_momentum_alpaca_risk_lock_max_wait_seconds: float = Field(
         default=5.0,
         ge=0.0,
