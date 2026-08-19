@@ -7094,6 +7094,18 @@ class Settings(BaseSettings):
         validation_alias=AliasChoices("CHILI_MOMENTUM_SHELF_LOOKBACK_DAYS"),
         description="Gaano kalayo pabalik ang EDGAR filing scan para ituring na AKTIBO ang shelf/registration.",
     )
+    # STARTER-SIZE BY TRIGGER CLASS (2026-08-19 Ross live watch): starter sa
+    # anticipation/non-structural triggers ("squeeze through the high"), buong
+    # laki sa structural (5m pullback + 1m ABCD class). Ang 09:11 YJ verdict:
+    # ang starter ay disiplina PAGKATAPOS pumasa ang volume/pace floors,
+    # hindi kailanman bypass ng mga iyon.
+    chili_momentum_starter_size_nonstructural_fraction: float = Field(
+        default=0.5,
+        ge=0.0,
+        le=1.0,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_STARTER_SIZE_NONSTRUCTURAL_FRACTION"),
+        description="Risk-budget fraction para sa NON-structural trigger classes (wala sa structural_trigger_reasons) — starter entry; ang pyramid adds ang nagdadala ng natitirang laki kapag kumpirmado. 0 o 1 = off.",
+    )
     # 07:00 ET SELLER-UNLOCK GUARD (2026-08-18 Ross $2k-challenge recap: maraming
     # broker ang naka-lock 4:00-7:00 ET, kaya ang overnight holders ng isang
     # after-hours runner ay sabay-sabay na nagbebenta sa eksaktong 7:00 — dinududa
