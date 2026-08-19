@@ -860,14 +860,50 @@ def _dispatch_live_runner_ticks(
     else:
         import concurrent.futures
 
-        with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as _ex:
+        # WALL-CLOCK BUDGET (2026-08-19). Measured on the live window: batch wall
+        # p50 10.2s, p90 14.8s — and a MAX of 648s, where a single session
+        # (sid=14440/AZI) blocked for 10.8 minutes with ZERO log output, i.e. a
+        # network read with no deadline, not a slow loop. Because the job runs
+        # max_instances=1, that one session froze the ENTIRE runner: for eleven
+        # minutes no other session was ticked at all — including any HELD position
+        # whose stop/trail/scale-out is managed only inside tick_live_session. The
+        # straggler is left to finish in its own thread (Python cannot kill it) and
+        # its per-session with_for_update(nowait=True) row lock still prevents a
+        # concurrent re-tick; we simply stop WAITING for it. Same bounded-wave
+        # pattern the auto-arm probe wave already uses. 0 ⇒ unbounded (legacy).
+        from ..config import settings as _bb_settings
+
+        _budget = float(
+            getattr(
+                _bb_settings,
+                "chili_momentum_live_runner_batch_budget_seconds",
+                60.0,
+            )
+            or 0.0
+        )
+        _ex = concurrent.futures.ThreadPoolExecutor(max_workers=workers)
+        try:
             _futs = {_ex.submit(tick_one, sid): sid for sid in session_ids}
-            for _fut in concurrent.futures.as_completed(_futs):
-                _sid = _futs[_fut]
-                try:
-                    results[_sid] = _fut.result()
-                except Exception:
-                    results[_sid] = (False, 0)
+            try:
+                for _fut in concurrent.futures.as_completed(
+                    _futs, timeout=(_budget if _budget > 0 else None)
+                ):
+                    _sid = _futs[_fut]
+                    try:
+                        results[_sid] = _fut.result()
+                    except Exception:
+                        results[_sid] = (False, 0)
+            except concurrent.futures.TimeoutError:
+                _stalled = [s for s in session_ids if s not in results]
+                logger.warning(
+                    "[scheduler] live runner batch budget %.0fs exceeded — %d "
+                    "session(s) still running (%s); returning so the next tick is "
+                    "not blocked. Stragglers finish in background; their row lock "
+                    "prevents a concurrent re-tick.",
+                    _budget, len(_stalled), _stalled[:5],
+                )
+        finally:
+            _ex.shutdown(wait=False, cancel_futures=True)
     ticked = sum(1 for _ok, _ in results.values() if _ok)
     timings = {sid: ms for sid, (_ok, ms) in results.items()}
     return ticked, timings

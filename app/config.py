@@ -8712,6 +8712,15 @@ class Settings(BaseSettings):
         le=3600,
         validation_alias=AliasChoices("CHILI_MOMENTUM_LIVE_RUNNER_SCHEDULER_INTERVAL_SECONDS"),
     )
+    chili_momentum_live_runner_batch_budget_seconds: float = Field(
+        default=60.0,
+        ge=0.0,
+        le=600.0,
+        validation_alias=AliasChoices(
+            "CHILI_MOMENTUM_LIVE_RUNNER_BATCH_BUDGET_SECONDS"
+        ),
+        description="Wall-clock ceiling for ONE live-runner batch. Measured 2026-08-19: batch wall p50 10.2s / p90 14.8s, but a MAX of 648s where a single session blocked for 10.8 minutes with zero log output (a network read with no deadline). Because the job is max_instances=1, that froze the entire runner — no other session ticked for eleven minutes, including HELD positions whose stop/trail/scale-out is managed only inside tick_live_session. On timeout the batch returns and the straggler finishes in its own thread; its per-session with_for_update(nowait=True) row lock still prevents a concurrent re-tick. 0 disables the bound (legacy unbounded wait).",
+    )
     # ── ENTRY-FSM CONTINUATION IN SCHEDULER MODE (2026-08-19 zero-fill root cause) ──
     # The entry FSM advances ONE mechanical state per invocation (watching_live ->
     # live_entry_candidate -> live_pending_entry -> place), so an entry needs THREE.
