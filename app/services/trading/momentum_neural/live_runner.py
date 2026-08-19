@@ -32224,6 +32224,33 @@ def tick_live_session(
                     le["shelf_registration_damper"] = _shelf_dbg
         except Exception:
             pass
+        # STARTER-SIZE BY TRIGGER CLASS (2026-08-19 Ross live watch): starter
+        # sa non-structural/anticipation triggers, buong laki sa structural
+        # (5m pullback + 1m ABCD class); ang pyramid adds ang nagdadala ng
+        # natitirang laki kapag kumpirmado. Post-floor (mechanical discipline
+        # na binds on paper, gaya ng ramp/ToD/shelf) at HINDI kasama sa
+        # pre-floor product kaya iisang beses ito nag-a-apply sa lahat ng path.
+        # HINDI ito bypass ng volume/pace gates — tumakbo na ang mga iyon.
+        try:
+            if not str(sess.symbol or "").upper().endswith("-USD"):
+                from .risk_policy import starter_size_multiplier
+
+                _st_raw = getattr(
+                    settings,
+                    "chili_momentum_starter_size_nonstructural_fraction",
+                    0.5,
+                )
+                _st_frac = 0.5 if _st_raw is None else float(_st_raw)
+                _st_mult, _st_dbg = starter_size_multiplier(
+                    le.get("entry_trigger_reason"),
+                    structural_reasons=structural_trigger_reasons(),
+                    fraction=_st_frac,
+                )
+                if 0.0 < float(_st_mult) < 1.0:
+                    _eff_max_loss = float(_eff_max_loss) * float(_st_mult)
+                    le["starter_size_trigger_class"] = _st_dbg
+        except Exception:
+            pass
         # TIME-OF-DAY risk curve (2026-07-10, greenlit #1): a MARKET-STRUCTURE derate
         # applied AFTER the paper floor (like the spread derate) — validated discipline,
         # not psychology, so it binds on paper too. Our own 30d curve: 09:00 ET +25.1R,

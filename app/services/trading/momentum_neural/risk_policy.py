@@ -3603,6 +3603,45 @@ def max_loss_circuit_decision(
     }
 
 
+def starter_size_multiplier(
+    trigger_reason: object,
+    *,
+    structural_reasons: tuple[str, ...],
+    fraction: float,
+) -> tuple[float, dict[str, object] | None]:
+    """STARTER-SIZE BY TRIGGER CLASS (2026-08-19 Ross live watch).
+
+    Si Ross ay pumapasok ng STARTER (bahagi ng buong laki) kapag ang trigger
+    ay ANTICIPATION class ("squeeze through the high" bago ang confirmation),
+    at nagfu-full-size lamang sa structural setups (5m pullback + 1m ABCD).
+    Ang mirror nito sa makina: ang mga NON-STRUCTURAL na trigger reason
+    (momentum/velocity/score-only class — wala sa ``structural_trigger_reasons``)
+    ay pumapasok sa ``fraction`` ng risk budget; ang structural ay buo. Ang
+    pyramid/add machinery ang nagdadala ng natitirang laki KAPAG kumpirmado.
+
+    ⚠️ HINDI ito bypass ng volume/pace floors — ang mga gate ay tumatakbo
+    BAGO ito (ang 09:11 YJ verdict: ang starter ni Ross na binalewala ang
+    "moving slower than I'd like" ay natalo; ang volume floor natin ang
+    tama). Ito ay DAGDAG na disiplina sa mga pumasang mahinang-klaseng
+    trigger, hindi pampaluwag.
+
+    Pure; fail-open: walang reason / structural / fraction labas sa (0,1) ⇒
+    (1.0, None). A 0.0/1.0 fraction is a deliberate OFF and is preserved.
+    """
+    try:
+        f = float(fraction)
+    except (TypeError, ValueError):
+        return 1.0, None
+    if not (0.0 < f < 1.0):
+        return 1.0, None
+    reason = str(trigger_reason or "").strip().lower()
+    if not reason:
+        return 1.0, None
+    if reason in tuple(str(r).strip().lower() for r in structural_reasons):
+        return 1.0, None
+    return f, {"mult": round(f, 4), "trigger_reason": reason[:48]}
+
+
 def adaptive_reentry_cooldown_seconds(
     *,
     base_seconds: int,

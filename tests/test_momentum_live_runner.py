@@ -1788,3 +1788,63 @@ def test_wide_iqfeed_l1_book_is_the_real_market_and_never_refetched(monkeypatch)
     )
 
     assert gate is not None and gate["reason"] == "wide_bbo_spread"
+
+
+def test_starter_size_multiplier_trigger_class_matrix() -> None:
+    """2026-08-19 Ross live watch: starter sa anticipation/non-structural,
+    buong laki sa structural; fail-open sa walang reason / off fractions."""
+    from app.services.trading.momentum_neural.risk_policy import starter_size_multiplier
+
+    structural = ("pullback_break_ok", "vwap_reclaim", "orb_ihs_break")
+
+    # Non-structural (momentum class) -> starter fraction.
+    mult, dbg = starter_size_multiplier(
+        "momentum_ok_rel_vol", structural_reasons=structural, fraction=0.5
+    )
+    assert mult == 0.5 and dbg["trigger_reason"] == "momentum_ok_rel_vol"
+
+    # Structural -> buong laki.
+    assert starter_size_multiplier(
+        "pullback_break_ok", structural_reasons=structural, fraction=0.5
+    ) == (1.0, None)
+    # Case-insensitive sa magkabilang panig.
+    assert starter_size_multiplier(
+        "VWAP_RECLAIM", structural_reasons=structural, fraction=0.5
+    ) == (1.0, None)
+
+    # Walang reason -> fail-open (walang derate sa hindi alam).
+    assert starter_size_multiplier(
+        None, structural_reasons=structural, fraction=0.5
+    ) == (1.0, None)
+    assert starter_size_multiplier(
+        "", structural_reasons=structural, fraction=0.5
+    ) == (1.0, None)
+
+    # 0 / 1 / NaN fraction = deliberate off.
+    assert starter_size_multiplier(
+        "momentum_ok_rel_vol", structural_reasons=structural, fraction=0.0
+    ) == (1.0, None)
+    assert starter_size_multiplier(
+        "momentum_ok_rel_vol", structural_reasons=structural, fraction=1.0
+    ) == (1.0, None)
+    assert starter_size_multiplier(
+        "momentum_ok_rel_vol", structural_reasons=structural, fraction=float("nan")
+    ) == (1.0, None)
+
+
+def test_starter_size_wired_post_floor_in_sizing_source() -> None:
+    """Control-flow pin: ang starter derate ay post-floor (pagkatapos ng shelf
+    damper), gumagamit ng structural_trigger_reasons + entry_trigger_reason,
+    at hindi kasama sa pre-floor product (iisang apply sa lahat ng path)."""
+    import inspect
+
+    import app.services.trading.momentum_neural.live_runner as lr
+
+    source = inspect.getsource(lr.tick_live_session)
+    i_shelf = source.index('"shelf_registration_damper"')
+    i_starter = source.index('"starter_size_trigger_class"')
+    assert i_shelf < i_starter
+    starter_block = source[i_shelf:i_starter]
+    assert "starter_size_multiplier" in starter_block
+    assert "structural_trigger_reasons()" in starter_block
+    assert 'le.get("entry_trigger_reason")' in starter_block
