@@ -32762,6 +32762,52 @@ def _migration_361_drop_duplicate_viability_history_id_index(conn) -> None:
     ))
 
 
+def _migration_362_quarantine_uncertified_position_markers(conn) -> None:
+    """I-quarantine ang mga pre-certification na position marker na lumalason
+    sa risk-ledger scan.
+
+    2026-08-20: ang `_reserve_alpaca_entry_risk` pending-session scan ay bumabasa
+    ng BAWAT live alpaca row anuman ang estado ("terminal state is not proof of
+    flatness") at nagre-raise ng `persisted_position_direction_not_certified`
+    kapag may position marker na WALANG certification fields — na siyang hugis
+    ng 14 na row mula 2026-06-12..07-13 (kasama ang crypto-sa-alpaca_spot na
+    TRUMP-USD, sid 1198), na isinulat BAGO pa idagdag ang mga field na iyon sa
+    schema. Isang ganoong row = "risk_ledger_unreadable" = walang entry buong
+    araw, at PASULPOT-SULPOT pa (walang ORDER BY ang scan, kaya nagbabago ang
+    heap order). Root-caused sa pamamagitan ng attribution logging (#1078)
+    dalawampung minuto pagkatapos itong i-deploy.
+
+    Ang broker ang awtoridad sa posisyon, at ang account ay FLAT — kumpirmado ng
+    bawat broker census receipt. Ang mga marker ay lipas na ebidensiya mula sa
+    lumang schema-era, hindi tunay na exposure. Inililipat (hindi binubura) ang
+    marker sa `position_quarantined_uncertified` sa loob ng parehong snapshot —
+    buo ang audit trail, at hindi na ito nakikita ng scan. Idempotent: ang
+    quarantined na row ay walang `position` key kaya hindi na tumutugma.
+    Saklaw: TERMINAL na estado lang, mas luma sa 7 araw, at walang
+    `alpaca_account_scope` — ang mga sariwang row ay hindi ginagalaw at
+    nananatiling fail-closed ang scan para sa kanila."""
+
+    conn.execute(text(
+        """
+        UPDATE trading_automation_sessions
+        SET risk_snapshot_json = jsonb_set(
+            risk_snapshot_json::jsonb #- '{momentum_live_execution,position}',
+            '{momentum_live_execution,position_quarantined_uncertified}',
+            (risk_snapshot_json::jsonb #> '{momentum_live_execution,position}')
+        )
+        WHERE mode = 'live'
+          AND execution_family IN ('alpaca_spot', 'alpaca_short')
+          AND state IN ('cancelled','expired','error','archived','finished',
+                        'live_finished','live_cancelled','live_error',
+                        'live_arm_expired')
+          AND started_at < now() - interval '7 days'
+          AND risk_snapshot_json::jsonb #> '{momentum_live_execution,position}'
+              IS NOT NULL
+          AND (risk_snapshot_json::jsonb ->> 'alpaca_account_scope') IS NULL
+        """
+    ))
+
+
 MIGRATIONS = [
     ("001_add_email", _migration_001_add_email),
     ("002_add_image_path", _migration_002_add_image_path),
@@ -33244,6 +33290,8 @@ MIGRATIONS = [
      _migration_360_backfill_terminal_ended_at),
     ("361_drop_duplicate_viability_history_id_index",
      _migration_361_drop_duplicate_viability_history_id_index),
+    ("362_quarantine_uncertified_position_markers",
+     _migration_362_quarantine_uncertified_position_markers),
 ]
 
 
