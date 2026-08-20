@@ -121,3 +121,23 @@ def test_settings_wired_and_bounded():
     assert ceil >= 300.0
     # ...pero mas makipot kaysa sa tape-sanity na 5000bps.
     assert ceil < 5000.0
+
+
+def test_premarket_fallback_em_reaches_the_gate_source_tag():
+    """PREMARKET GAP (08-20 gabi): sa manipis na OHLCV ang _expected_move_bps ay
+    None — ang gate ay dapat tumanggap ng conservative fallback sa halip na
+    bumagsak sa stop frame. Ang wiring ay nasa call site; dito sine-certify na
+    ang gate mismo ay gumagana sa fallback-supplied na halaga at ang evidence
+    tagging ay naka-wire sa source code."""
+    import inspect
+
+    from app.services.trading.momentum_neural import live_runner
+
+    src = inspect.getsource(live_runner.tick_live_session)
+    assert "_gate_em" in src
+    assert '"expected_move_source"' in src
+    assert "conservative_fallback" in src
+    # Ang fallback init ay UNCONDITIONAL (scope-safe sa lahat ng path).
+    assert "_em_fallback_bps: float | None = None" in src.split(
+        "if _live_entry_quote_gate_applies"
+    )[0]

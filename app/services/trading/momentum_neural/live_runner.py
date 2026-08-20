@@ -27321,6 +27321,7 @@ def tick_live_session(
     # (docs/DESIGN/MOMENTUM_LANE.md)
     _entry_df = None
     _expected_move_bps: float | None = None
+    _em_fallback_bps: float | None = None
     _adaptive_max_spread: float | None = None
     if _live_entry_quote_gate_applies(sess, le):
         try:
@@ -27335,7 +27336,6 @@ def tick_live_session(
         # a CONSERVATIVE name-own-data fallback so the cap scales appropriately. Flag-gated
         # inside _adaptive_live_max_spread_bps; the win-win invariant (under-estimate +
         # abs_cap + small-move names still block) holds.
-        _em_fallback_bps: float | None = None
         if _expected_move_bps is None and bool(
             getattr(settings, "chili_momentum_spread_cap_em_fallback_enabled", True)
         ):
@@ -34413,15 +34413,33 @@ def tick_live_session(
                                     _gate_book = "massive_sip_reference"
                 except Exception:
                     pass
+                # PREMARKET GAP (2026-08-20 gabi): sa manipis na OHLCV (premarket)
+                # ang _expected_move_bps ay None, kaya ang expected-move frame ay
+                # babalik sa lumang stop-frame — ang mismong veto class na pumatay
+                # sa BTMD/CJMB — at pinalala pa ng stop cap (mas makipot na stop =
+                # mas maliit na denominator). Ang _em_fallback_bps ay ang PAREHONG
+                # conservative name-own-data estimate na pinapakain na sa spread
+                # cap (dokumentado ang win-win invariant nito); dito rin ito
+                # pumapasok sa gate, na may tapat na marka kung aling EM source.
+                _gate_em = (
+                    _expected_move_bps
+                    if _expected_move_bps is not None
+                    else _em_fallback_bps
+                )
                 _spread_ok, _spread_gate = _entry_spread_risk_decision(
                     bid=_gate_bid,
                     ask=_gate_ask,
                     quantity=_spread_full_qty,
                     stop_distance=_spread_stop_dist,
                     max_fraction=_max_spread_fraction,
-                    expected_move_bps=_expected_move_bps,
+                    expected_move_bps=_gate_em,
                 )
                 _spread_gate["gate_book"] = _gate_book
+                _spread_gate["expected_move_source"] = (
+                    "ohlcv"
+                    if _expected_move_bps is not None
+                    else ("conservative_fallback" if _em_fallback_bps is not None else "none")
+                )
                 if _ref_spread_bps is not None:
                     _spread_gate["reference_spread_bps"] = round(
                         _ref_spread_bps, 4
