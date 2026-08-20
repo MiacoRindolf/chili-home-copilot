@@ -28361,14 +28361,83 @@ def tick_live_session(
                             **_bench_dbg,
                         })
                     if _trigger_ok:
-                        # VETO the fired trigger — the name is benched on the back side.
                         _prev_trigger = _trigger_reason
-                        _trigger_ok = False
-                        _trigger_reason = "backside_benched"
-                        _emit(db, sess, "live_entry_backside_bench_veto", {
-                            "blocked_trigger": _prev_trigger, "reason": _bench_reason,
-                            "benched_at_hod": le.get("benched_backside_hod"), **_bench_dbg,
-                        })
+                        # STRUCTURE-AFTER-PULLBACK EXCEPTION (2026-08-19 YJ). The
+                        # sticky bench latches at the high to stop us CHASING a name
+                        # that already ran — correct. But it then also vetoes the
+                        # PULLBACK entry, which is the setup Ross actually trades,
+                        # and the only existing escape needs a full VWAP round-trip.
+                        # Replayed on the recorded tape for YJ 13:13-13:22Z: 519
+                        # steps, ZERO entries, 460 bench vetoes, payload
+                        #   reason=benched_backside_chasing_top benched_at_hod=6.30
+                        #   blocked_trigger=double_bottom_break_tick_ok
+                        # i.e. a genuine STRUCTURE trigger fired and the bench ate
+                        # it, while vwap_reclaim_not_below_enough fired 518 times
+                        # because the curl never dipped far enough under VWAP to
+                        # earn the existing exception. That was Ross's +$3,000.
+                        #
+                        # So: preserve the trigger when BOTH hold —
+                        #   (a) it is a STRUCTURAL trigger (carries pullback_low, so
+                        #       the structural stop + bailout machinery applies), and
+                        #   (b) price has genuinely RETRACED off the benched high,
+                        #       which is what separates a pullback from a chase.
+                        # This is a SAVE, not an entry: the bench marker STAYS
+                        # latched, and every downstream chase-guard, extension veto,
+                        # bid-prop confirmer, spread and risk gate still runs. OFF ⇒
+                        # byte-identical veto.
+                        _unbench = False
+                        _unbench_dbg: dict[str, Any] = {}
+                        try:
+                            if bool(getattr(
+                                settings,
+                                "chili_momentum_backside_structure_unbench_enabled",
+                                True,
+                            )) and _prev_trigger in structural_trigger_reasons():
+                                _u_hod = le.get("benched_backside_hod")
+                                _u_px = _bench_px
+                                if _u_hod and _u_px and float(_u_hod) > 0:
+                                    _u_retrace = (
+                                        (float(_u_hod) - float(_u_px))
+                                        / float(_u_hod) * 100.0
+                                    )
+                                    _u_min = float(getattr(
+                                        settings,
+                                        "chili_momentum_backside_unbench_min_retrace_pct",
+                                        3.0,
+                                    ) or 0.0)
+                                    _unbench_dbg = {
+                                        "retrace_pct": round(_u_retrace, 2),
+                                        "min_retrace_pct": _u_min,
+                                        "benched_at_hod": float(_u_hod),
+                                        "price": float(_u_px),
+                                    }
+                                    _unbench = _u_retrace >= _u_min
+                        except Exception:
+                            _unbench = False  # fail-closed: keep the veto
+                        if _unbench:
+                            _emit(db, sess, "live_entry_backside_structure_exception", {
+                                "preserved_trigger": _prev_trigger,
+                                "reason": _bench_reason,
+                                **_unbench_dbg, **_bench_dbg,
+                            })
+                            _log.info(
+                                "[momentum_live] backside STRUCTURE exception %s: %s "
+                                "preserved (retraced %.2f%% off benched HOD %.4f) — a "
+                                "pullback into structure is the setup, not a chase; "
+                                "every downstream guard still gates the fill",
+                                sess.symbol, _prev_trigger,
+                                _unbench_dbg.get("retrace_pct", -1.0),
+                                _unbench_dbg.get("benched_at_hod", -1.0),
+                            )
+                        else:
+                            # VETO the fired trigger — the name is benched on the back side.
+                            _trigger_ok = False
+                            _trigger_reason = "backside_benched"
+                            _emit(db, sess, "live_entry_backside_bench_veto", {
+                                "blocked_trigger": _prev_trigger, "reason": _bench_reason,
+                                "benched_at_hod": le.get("benched_backside_hod"),
+                                **_unbench_dbg, **_bench_dbg,
+                            })
                 elif _prev_benched:
                     # MANDATORY UN-BENCH: a genuine new high OR (WAVE-4 ITEM-5) a fresh VWAP-
                     # reclaim CROSS-from-below cleared the bench -> drop the marker so the name

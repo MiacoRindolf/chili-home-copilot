@@ -8712,6 +8712,22 @@ class Settings(BaseSettings):
         le=3600,
         validation_alias=AliasChoices("CHILI_MOMENTUM_LIVE_RUNNER_SCHEDULER_INTERVAL_SECONDS"),
     )
+    chili_momentum_backside_structure_unbench_enabled: bool = Field(
+        default=True,
+        validation_alias=AliasChoices(
+            "CHILI_MOMENTUM_BACKSIDE_STRUCTURE_UNBENCH_ENABLED"
+        ),
+        description="Preserve a STRUCTURAL entry trigger that fires while a name is sticky-benched on the back side, provided price has genuinely retraced off the benched high. The bench latches at the high to stop us CHASING a name that already ran — correct — but it then also vetoes the PULLBACK entry, which is the setup Ross actually trades, and the only existing escape requires a full VWAP round-trip. Replayed on the recorded tape for YJ 13:13-13:22Z: 519 steps, ZERO entries, 460 bench vetoes, with payload blocked_trigger=double_bottom_break_tick_ok against benched_at_hod=6.30 while vwap_reclaim_not_below_enough fired 518 times because the curl never dipped far enough under VWAP. That was Ross's +$3,000 trade. This is a SAVE, not an entry: the bench marker stays latched and every downstream chase-guard, extension veto, bid-prop confirmer, spread and risk gate still runs. OFF ⇒ byte-identical veto.",
+    )
+    chili_momentum_backside_unbench_min_retrace_pct: float = Field(
+        default=3.0,
+        ge=0.0,
+        le=90.0,
+        validation_alias=AliasChoices(
+            "CHILI_MOMENTUM_BACKSIDE_UNBENCH_MIN_RETRACE_PCT"
+        ),
+        description="Minimum retracement off the benched high, in percent, before a structural trigger may be preserved through the back-side bench. This is what separates a PULLBACK from a CHASE: without it the exception would fire a tick below the high. YJ's curl sat ~12.7% below its 6.30 benched high, so the default admits a real pullback while still refusing a trigger that fires right at the top.",
+    )
     chili_momentum_symbol_of_day_leader_watch_seconds: float = Field(
         default=3600.0,
         ge=0.0,
