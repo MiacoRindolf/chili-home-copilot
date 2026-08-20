@@ -32808,6 +32808,56 @@ def _migration_362_quarantine_uncertified_position_markers(conn) -> None:
     ))
 
 
+def _migration_363_breadth_scan_partial_covering_index(conn) -> None:
+    """Partial covering index para sa breadth-regime history scans.
+
+    2026-08-20: ang `_compute_breadth_regime_uncached` ay nagsa-scan ng
+    `momentum_viability_history` (31M row / 11GB) na may predicate na
+    `live_eligible = true AND symbol NOT LIKE '%-USD%'` sa isang 30-araw na
+    saklaw ng `observed_at` — pero ang tanging usable index (observed_at) ay
+    nagpipilit ng heap fetch sa BAWAT row sa saklaw para lang i-check ang
+    `live_eligible`, na karamihan ay false ⇒ 100-180s kada compute sa ilalim ng
+    market-hours load. Sa lumang scheduler image (walang #1078 single-flight)
+    ang mga scan na ito ay nag-hold pa ng locks nang minu-minuto.
+
+    Ang partial covering index ay maliit (eligible rows lang) at ginagawang
+    index-only scan ang query. IF NOT EXISTS: sa prod ito ay itinayo nang
+    CONCURRENTLY bago pa ang migration na ito, kaya no-op doon; sa sariwang
+    env (maliit na table) ang non-concurrent build sa startup ay mabilis."""
+
+    conn.execute(text(
+        """
+        CREATE INDEX IF NOT EXISTS ix_mvh_live_eligible_observed
+        ON momentum_viability_history (observed_at)
+        INCLUDE (symbol, viability_score)
+        WHERE live_eligible = true AND symbol NOT LIKE '%-USD%'
+        """
+    ))
+
+
+def _migration_364_active_sessions_partial_index(conn) -> None:
+    """Partial index sa mga AKTIBONG automation session.
+
+    2026-08-20 pg_stat_user_tables: ang trading_automation_sessions (14k rows)
+    ay na-seq-scan ng 332,687 beses = 4.59 BILYONG tuple ang nabasa — bawat
+    risk-evaluator query ay nagfa-full-scan dahil walang index sa
+    (mode, execution_family, state), at ang evaluator ay ~40%% ng 5-7s entry
+    region (py-spy). Ang partial index sa hindi-terminal na estado ay ilang
+    sampung row lang; parehong hugis ng query (NOT IN terminal at IN active)
+    ay napatunayang lumilipat dito: 13.8k-row scans -> 1.0ms / 0.13ms.
+    Pure plan improvement — walang pagbabago sa code o pag-uugali."""
+
+    conn.execute(text(
+        """
+        CREATE INDEX IF NOT EXISTS ix_tas_live_active
+        ON trading_automation_sessions (mode, execution_family, symbol)
+        WHERE state NOT IN ('cancelled','expired','error','archived','finished',
+                            'live_finished','live_cancelled','live_error',
+                            'live_arm_expired')
+        """
+    ))
+
+
 MIGRATIONS = [
     ("001_add_email", _migration_001_add_email),
     ("002_add_image_path", _migration_002_add_image_path),
@@ -33292,6 +33342,10 @@ MIGRATIONS = [
      _migration_361_drop_duplicate_viability_history_id_index),
     ("362_quarantine_uncertified_position_markers",
      _migration_362_quarantine_uncertified_position_markers),
+    ("363_breadth_scan_partial_covering_index",
+     _migration_363_breadth_scan_partial_covering_index),
+    ("364_active_sessions_partial_index",
+     _migration_364_active_sessions_partial_index),
 ]
 
 
