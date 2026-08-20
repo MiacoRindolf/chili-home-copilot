@@ -145,35 +145,55 @@ def mirror_ticks(db, ticks):
 
 
 def mirror_ticks_streaming(sim_engine):
-    """FULL-DENSITY mirror WITHOUT loading all ticks into memory: a server-side cursor on the
-    SOURCE (chili) reads batches, inserted into chili_test in batches, each batch freed. The
-    cadence classifier + forward-momentum reads need FULL tick density (downsampling makes the
-    tape look slow -> UNCERTAIN cadence + a broken 5m higher-low). No pandas, bounded memory."""
+    """FULL-DENSITY mirror WITHOUT loading all ticks into memory.
+
+    GOTCHA 11 (2026-08-20): the original single server-side cursor held ONE
+    read-only transaction on the SOURCE for the whole minutes-long mirror, and
+    its ``query_start`` never advanced — so the window app's db_watchdog
+    (kills idle-in-transaction > 10 min measured from query_start) TERMINATED
+    the mirror mid-run twice ("administrator command"). The mirror now walks
+    the window in 5-minute time slices, each in its OWN short transaction on
+    both ends (commit after every slice), so no connection ever shows an old
+    idle transaction. Same rows, same order (slices are contiguous and each is
+    ORDER BY observed_at ASC), bounded memory per slice.
+    """
     import psycopg2
+    from psycopg2.extras import execute_values as _ev
+    from datetime import timedelta as _td
     src = psycopg2.connect(PROD)
     src.set_session(readonly=True)
-    scur = src.cursor(name="mirror_stream")  # server-side cursor (streams, no full materialize)
-    scur.itersize = 10000
-    scur.execute(
-        "SELECT observed_at, price, size, bid, ask FROM iqfeed_trade_ticks "
-        "WHERE symbol=%s AND observed_at>=%s AND observed_at<%s AND price>0 ORDER BY observed_at ASC",
-        (SYMBOL, OHLCV_START, WIN_END))
     dst = sim_engine.raw_connection()
     dcur = dst.cursor()
+    # GOTCHA 11b (2026-08-20): row-by-row executemany took 15+ min for 164k
+    # rows — long enough for an as-yet-unidentified backend terminator to kill
+    # the mirror four times ("administrator command", no janitor logged it).
+    # execute_values batches the VALUES lists (~10-50x faster), so the whole
+    # mirror finishes in well under a minute and outruns whatever kills
+    # long-lived replay connections.
     ins = ("INSERT INTO iqfeed_trade_ticks (symbol, observed_at, price, size, bid, ask, source) "
-           "VALUES (%s,%s,%s,%s,%s,%s,'replay_v3')")
+           "VALUES %s")
     total = 0
-    while True:
-        batch = scur.fetchmany(10000)
-        if not batch:
-            break
-        rows = [(SYMBOL, r[0], float(r[1]), float(r[2] or 0), r[3], r[4]) for r in batch]
-        dcur.executemany(ins, rows)
-        total += len(rows)
-        del batch, rows
-    dst.commit()
+    slice_start = OHLCV_START
+    while slice_start < WIN_END:
+        slice_end = min(slice_start + _td(minutes=5), WIN_END)
+        scur = src.cursor()
+        scur.execute(
+            "SELECT observed_at, price, size, bid, ask FROM iqfeed_trade_ticks "
+            "WHERE symbol=%s AND observed_at>=%s AND observed_at<%s AND price>0 ORDER BY observed_at ASC",
+            (SYMBOL, slice_start, slice_end))
+        batch = scur.fetchall()
+        scur.close()
+        src.commit()  # isara ang read tx — sariwa ang query_start sa susunod
+        if batch:
+            rows = [(SYMBOL, r[0], float(r[1]), float(r[2] or 0), r[3], r[4], 'replay_v3') for r in batch]
+            _ev(dcur, ins, rows, page_size=5000)
+            dst.commit()  # maiksi ang bawat SIM tx din
+            total += len(rows)
+            del rows
+        del batch
+        slice_start = slice_end
     dcur.close(); dst.close()
-    scur.close(); src.close()
+    src.close()
     return total
 
 
