@@ -19286,8 +19286,25 @@ def _entry_spread_risk_decision(
     quantity: float,
     stop_distance: float,
     max_fraction: float,
+    expected_move_bps: float | None = None,
 ) -> tuple[bool, dict[str, Any]]:
-    """Bound spread-crossing cost as a fraction of structural trade risk."""
+    """Bound the spread-crossing cost of an entry.
+
+    FRAMES (2026-08-20 doctrine change, operator-decided). The original test
+    compared the spread to the STOP distance — but a momentum entry's stop is
+    deliberately tight, so on breakout names the gate refused entries whose
+    spread was completely ordinary for the expected move. Measured live with
+    REAL (non-phantom) books: BTMD spread cost $5.16 vs structural risk $4.67,
+    CJMB $13.4 vs $18.58 — both vetoed at max_fraction=0.25, both names Ross
+    trades by paying ~1-3%% spreads against 10-20%% expected moves. His
+    arithmetic prices the spread against the EXPECTED PROFIT, not the stop.
+
+    So: when the caller supplies ``expected_move_bps`` (and the flag is on),
+    the spread passes when it is a bounded fraction of the expected move AND
+    under an absolute sanity ceiling. Without an expected move — or with the
+    flag off — the original stop-based test runs byte-identically (fail-closed:
+    an unknown move never loosens the gate).
+    """
     try:
         qty = float(quantity)
         risk_usd = float(stop_distance) * qty
@@ -19297,6 +19314,73 @@ def _entry_spread_risk_decision(
         risk_usd = 0.0
         spread_cost_usd = 0.0
         fraction = math.inf
+    _mid = None
+    spread_bps = None
+    try:
+        _mid = (float(ask) + float(bid)) / 2.0
+        if _mid > 0 and float(ask) >= float(bid):
+            spread_bps = (float(ask) - float(bid)) / _mid * 10_000.0
+    except (TypeError, ValueError):
+        spread_bps = None
+
+    _move_frame_on = bool(
+        getattr(
+            settings,
+            "chili_momentum_entry_spread_vs_expected_move_enabled",
+            True,
+        )
+    )
+    _em = None
+    try:
+        if expected_move_bps is not None and float(expected_move_bps) > 0:
+            _em = float(expected_move_bps)
+    except (TypeError, ValueError):
+        _em = None
+
+    if _move_frame_on and _em is not None and spread_bps is not None:
+        _move_frac = float(
+            getattr(
+                settings,
+                "chili_momentum_entry_spread_max_fraction_of_expected_move",
+                0.15,
+            )
+            or 0.0
+        )
+        _abs_ceiling = float(
+            getattr(
+                settings,
+                "chili_momentum_entry_spread_abs_ceiling_bps",
+                500.0,
+            )
+            or 0.0
+        )
+        _budget_bps = min(_abs_ceiling, _move_frac * _em)
+        ok = bool(
+            spread_cost_usd >= 0
+            and math.isfinite(spread_bps)
+            and _budget_bps > 0
+            and spread_bps <= _budget_bps
+        )
+        return ok, {
+            "spread_cost_usd": round(spread_cost_usd, 2),
+            "structural_risk_usd": round(risk_usd, 2),
+            "spread_fraction_of_risk": (
+                round(fraction, 6) if math.isfinite(fraction) else None
+            ),
+            "gate_frame": "expected_move",
+            "gate_spread_bps": round(spread_bps, 4),
+            "expected_move_bps": round(_em, 1),
+            "spread_fraction_of_expected_move": (
+                round(spread_bps / _em, 6) if _em > 0 else None
+            ),
+            "max_fraction_of_expected_move": _move_frac,
+            "abs_ceiling_bps": _abs_ceiling,
+            "spread_budget_bps": round(_budget_bps, 1),
+            "reason": (
+                "within_budget" if ok else "spread_exceeds_expected_move_budget"
+            ),
+        }
+
     ok = bool(
         risk_usd > 0
         and spread_cost_usd >= 0
@@ -19308,6 +19392,7 @@ def _entry_spread_risk_decision(
         "structural_risk_usd": round(risk_usd, 2),
         "spread_fraction_of_risk": round(fraction, 6) if math.isfinite(fraction) else None,
         "max_spread_fraction_of_risk": float(max_fraction),
+        "gate_frame": "structural_risk",
         "reason": (
             "within_budget"
             if ok
@@ -34167,13 +34252,50 @@ def tick_live_session(
                     ),
                 }
             else:
+                # THE GATE MEASURES MARKET STRUCTURE, so feed it the truest
+                # available book. Alpaca-IEX single-venue quotes on thin names
+                # read 7-11x wider than the consolidated book measured the same
+                # instant (BTMD 1449bps vs 189; CJMB 3168 vs ~280), so when a
+                # fresh SIP reference row exists AND is tighter, the gate reads
+                # it instead. REFERENCE ONLY: order pricing is untouched — the
+                # planned limit and the execution BBO evidence keep the venue
+                # book, and both spreads are recorded for honest expectancy.
+                _gate_bid, _gate_ask = _final_bid, _final_ask
+                _gate_book = "execution_bbo"
+                _ref_spread_bps = None
+                try:
+                    _ref_getter = getattr(adapter, "get_reference_bbo", None)
+                    if callable(_ref_getter) and str(
+                        _final_bbo.get("quote_authority") or ""
+                    ) == "alpaca_direct":
+                        _ref_tick, _ = _ref_getter(product_id)
+                        if _ref_tick is not None:
+                            _rb = float(_ref_tick.bid)
+                            _ra = float(_ref_tick.ask)
+                            _rm = (_rb + _ra) / 2.0
+                            if _rm > 0 and _ra >= _rb:
+                                _ref_spread_bps = (_ra - _rb) / _rm * 10_000.0
+                                _exec_spread = float(
+                                    _final_bbo.get("spread_bps") or math.inf
+                                )
+                                if _ref_spread_bps < _exec_spread:
+                                    _gate_bid, _gate_ask = _rb, _ra
+                                    _gate_book = "massive_sip_reference"
+                except Exception:
+                    pass
                 _spread_ok, _spread_gate = _entry_spread_risk_decision(
-                    bid=_final_bid,
-                    ask=_final_ask,
+                    bid=_gate_bid,
+                    ask=_gate_ask,
                     quantity=_spread_full_qty,
                     stop_distance=_spread_stop_dist,
                     max_fraction=_max_spread_fraction,
+                    expected_move_bps=_expected_move_bps,
                 )
+                _spread_gate["gate_book"] = _gate_book
+                if _ref_spread_bps is not None:
+                    _spread_gate["reference_spread_bps"] = round(
+                        _ref_spread_bps, 4
+                    )
             _spread_gate.update({
                 "source": _final_bbo.get("source"),
                 "tape_row_id": _final_bbo.get("tape_row_id"),

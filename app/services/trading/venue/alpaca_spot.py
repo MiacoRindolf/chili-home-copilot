@@ -1192,6 +1192,38 @@ class AlpacaSpotAdapter:
         )
         return tick, meta
 
+    def get_reference_bbo(self, product_id: str, *, max_age_seconds: float | None = None):
+        """A fresh consolidated-book REFERENCE quote, or (None, None).
+
+        Reference only — never execution authority and never a price source.
+        Exists for gates that measure market STRUCTURE (crossing cost, spread
+        sanity): Alpaca-IEX single-venue quotes on thin names read 7-11x wider
+        than the consolidated book measured the same instant (2026-08-20: BTMD
+        IEX 1.60/1.85 = 1449bps vs SIP 1.57/1.60 = 189bps; CJMB 3168bps vs
+        ~280bps), so a protective gate fed the IEX book vetoes real entries on
+        a market that does not exist.
+        """
+        if _is_crypto_pid(product_id):
+            return None, None
+        ceiling = float(
+            getattr(
+                settings,
+                "chili_alpaca_execution_bbo_massive_sip_max_age_seconds",
+                10.0,
+            )
+            or 0.0
+        )
+        if max_age_seconds is not None:
+            ceiling = min(ceiling, float(max_age_seconds))
+        if ceiling <= 0:
+            return None, None
+        result = self._massive_sip_quote(
+            _to_symbol(product_id), max_age_seconds=ceiling
+        )
+        if not isinstance(result, tuple) or len(result) != 2:
+            return None, None
+        return result
+
     def _execution_bbo_from_direct(self, tick, meta, max_age_seconds: float):
         """Validate the direct Alpaca quote, or None when it cannot authorize."""
         if tick is None or not isinstance(meta, FreshnessMeta):
