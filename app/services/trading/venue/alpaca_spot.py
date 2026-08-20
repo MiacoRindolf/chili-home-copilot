@@ -67,6 +67,16 @@ _IQFEED_FUTURE_TOLERANCE_S = 1.0
 _IQFEED_BUILD_RE = re.compile(
     r"^iqfeed-l1-exact-print-provenance-v3\+sha256:[0-9a-f]{16}$"
 )
+# Massive SIP quote clock (2026-08-20). Unlike the IQFeed frame — which has no
+# quote-event clock at all and therefore can never authorize an order — the Massive
+# websocket carries the SIP event time, and the recorder only stamps this basis when
+# that field is actually present (else "local_receive_only"). That makes the basis a
+# real discriminator rather than a label, so these rows are the one tape source that
+# can stand as execution authority.
+_MASSIVE_SIP_BASIS = "massive_sip_unix_ms"
+_MASSIVE_SIP_BRIDGE_VERSION = "massive_ws_v2_sip_clock"
+_MASSIVE_SIP_SOURCE_PREFIX = "massive_ws"
+_MASSIVE_SIP_FUTURE_TOLERANCE_S = 1.0
 # Alpaca order statuses -> the lowercase vocabulary the runner's _order_done_for_entry /
 # _order_open helpers understand (#550/#551). Working states map to "open" so the fill
 # poll keeps going; terminal states map to their canonical terminal words.
@@ -934,6 +944,120 @@ class AlpacaSpotAdapter:
             logger.debug("[alpaca_spot] _iqfeed_l1_quote(%s) failed: %s", sym, exc)
             return None
 
+    def _massive_sip_quote(self, sym: str, *, max_age_seconds: float):
+        """One SIP-clocked Massive BBO, or None.
+
+        Both the SIP event clock and the local receive clock must independently be
+        fresh and chronologically possible, so a replayed or last-known row cannot
+        pass by carrying an old-but-non-null timestamp.
+        """
+        try:
+            from ....db import SessionLocal
+            from sqlalchemy import text
+
+            ceiling = float(
+                getattr(
+                    settings,
+                    "chili_alpaca_execution_bbo_massive_sip_max_age_seconds",
+                    5.0,
+                )
+                or 0.0
+            )
+            requested = float(max_age_seconds or 0.0)
+            if ceiling <= 0 or requested <= 0:
+                return None
+            max_age = min(requested, ceiling)
+            with SessionLocal() as _db:
+                row = _db.execute(text(
+                    "SELECT id, bid, ask, mid, spread_bps, source, provider_event_at, "
+                    "received_at, timestamp_basis, bridge_version, message_type "
+                    "FROM momentum_nbbo_spread_tape "
+                    "WHERE symbol = :s AND source LIKE :src AND mid > 0 "
+                    "AND provider_event_at IS NOT NULL AND received_at IS NOT NULL "
+                    "ORDER BY observed_at DESC, id DESC LIMIT 1"
+                ), {
+                    "s": str(sym or "").upper(),
+                    "src": f"{_MASSIVE_SIP_SOURCE_PREFIX}%",
+                }).fetchone()
+            if row is None:
+                return None
+            bid = _f(row[1]); ask = _f(row[2]); mid = _f(row[3])
+            if (
+                bid is None
+                or ask is None
+                or mid is None
+                or not all(math.isfinite(value) for value in (bid, ask, mid))
+                or bid <= 0
+                or ask <= 0
+                or mid <= 0
+                or ask < bid
+            ):
+                return None
+            if not str(row[5] or "").startswith(_MASSIVE_SIP_SOURCE_PREFIX):
+                return None
+            if str(row[8] or "") != _MASSIVE_SIP_BASIS:
+                return None
+            if str(row[9] or "") != _MASSIVE_SIP_BRIDGE_VERSION:
+                return None
+            if str(row[10] or "") != "Q":
+                return None
+
+            def _aware_utc(value):
+                if not isinstance(value, datetime):
+                    return None
+                if value.tzinfo is None:
+                    return None
+                offset = value.utcoffset()
+                if offset is None or offset != timezone.utc.utcoffset(value):
+                    return None
+                return value.astimezone(timezone.utc)
+
+            provider_at = _aware_utc(row[6])
+            received_at = _aware_utc(row[7])
+            if provider_at is None or received_at is None:
+                return None
+            # The SIP stamps the event before we can receive it; the reverse is a
+            # broken clock, and a receive far behind the event is a replayed row.
+            receive_delta = (received_at - provider_at).total_seconds()
+            if not (-_MASSIVE_SIP_FUTURE_TOLERANCE_S <= receive_delta <= max_age):
+                return None
+            now_utc = _now()
+            provider_age = (now_utc - provider_at).total_seconds()
+            received_age = (now_utc - received_at).total_seconds()
+            if (
+                provider_age < -_MASSIVE_SIP_FUTURE_TOLERANCE_S
+                or received_age < -_MASSIVE_SIP_FUTURE_TOLERANCE_S
+                or provider_age > max_age
+                or received_age > max_age
+            ):
+                return None
+            spread_bps = _f(row[4])
+            if spread_bps is None and mid > 0:
+                spread_bps = (ask - bid) / mid * 10_000.0
+            meta = FreshnessMeta(
+                retrieved_at_utc=received_at,
+                provider_time_utc=provider_at,
+                max_age_seconds=max_age,
+            )
+            return NormalizedTicker(
+                product_id=sym, bid=bid, ask=ask, mid=mid, spread_bps=spread_bps,
+                bid_size=None,
+                ask_size=None,
+                freshness=meta,
+                raw={
+                    "feed": str(row[5] or _MASSIVE_SIP_SOURCE_PREFIX),
+                    "tape_row_id": int(row[0]),
+                    "provider_event_at_utc": provider_at.isoformat(),
+                    "received_at_utc": received_at.isoformat(),
+                    "timestamp_basis": str(row[8] or ""),
+                    "bridge_version": str(row[9] or ""),
+                    "message_type": str(row[10] or ""),
+                },
+            ), meta
+        except Exception as exc:
+            logger.debug("[alpaca_spot] _massive_sip_quote(%s) failed: %s", sym, exc)
+            return None
+
     def _alpaca_latest_quote(self, product_id: str):
         """Direct Alpaca quote with the provider timestamp preserved."""
         sym = _to_symbol(product_id)
@@ -993,22 +1117,75 @@ class AlpacaSpotAdapter:
     def get_execution_bbo(self, product_id: str, *, max_age_seconds: float = 2.0):
         """Authoritative pre-submit BBO.
 
-        Execution authority always comes from a fresh direct Alpaca data request
-        carrying Alpaca's exact quote-event timestamp.  IQFeed Q/reference rows
-        deliberately keep ``provider_event_at`` null and are useful diagnostics,
-        but a trade-time proxy can never authorize an Alpaca order.
+        Execution authority prefers a fresh direct Alpaca data request carrying
+        Alpaca's exact quote-event timestamp.  When that request yields no usable
+        quote clock, a SIP-clocked Massive row may stand in (``_massive_sip_quote``).
+
+        WHY the stand-in exists (2026-08-20): this method used to accept the direct
+        Alpaca quote and nothing else, on the premise that no tape row carries a
+        quote-event clock.  That premise is now stale — the Massive websocket
+        recorder stamps the SIP event time — and the old rule silently cost us every
+        pre-market entry.  Measured this morning, the account is entitled to IEX
+        only, and IEX has no early session before 08:00 ET, so a direct request
+        returns nothing at all: SGLY and even AAPL came back empty, BTCT came back
+        with the prior afternoon's close.  Every ``live_entry_final_bbo`` failed
+        ``no_provider_timestamp`` and the lane placed zero orders on a day whose
+        setups are pre-market.  IQFeed Q/reference rows still cannot stand in: they
+        carry no quote-event clock at all, and a trade-time proxy cannot authorize
+        an order.
         """
         direct = self._alpaca_latest_quote(product_id)
-        if not isinstance(direct, tuple) or len(direct) != 2:
-            return None, _fresh(max_age_seconds)
-        tick, meta = direct
+        tick = meta = None
+        if isinstance(direct, tuple) and len(direct) == 2:
+            tick, meta = direct
+        resolved = self._execution_bbo_from_direct(tick, meta, max_age_seconds)
+        if resolved is not None:
+            return resolved
+        stand_in = self._massive_sip_execution_bbo(product_id, max_age_seconds)
+        if stand_in is not None:
+            return stand_in
+        # No stand-in: hand back the direct metadata unchanged so the caller's
+        # unavailable_kind attribution still reports the real adapter outcome.
+        return None, (meta if isinstance(meta, FreshnessMeta) else _fresh(max_age_seconds))
+
+    def _massive_sip_execution_bbo(self, product_id: str, max_age_seconds: float):
+        """The SIP-clocked stand-in, or None when it may not be used."""
+        if _is_crypto_pid(product_id):
+            return None
+        if not bool(
+            getattr(
+                settings,
+                "chili_alpaca_execution_bbo_massive_sip_fallback_enabled",
+                True,
+            )
+        ):
+            return None
+        result = self._massive_sip_quote(
+            _to_symbol(product_id), max_age_seconds=float(max_age_seconds)
+        )
+        if not isinstance(result, tuple) or len(result) != 2:
+            return None
+        tick, meta = result
         if tick is None or not isinstance(meta, FreshnessMeta):
-            return None, meta
+            return None
+        logger.info(
+            "[alpaca_spot] execution BBO stand-in %s bid=%.4f ask=%.4f "
+            "provider_age=%.3fs basis=%s",
+            _to_symbol(product_id), float(tick.bid), float(tick.ask),
+            (_now() - meta.provider_time_utc).total_seconds(),
+            _MASSIVE_SIP_BASIS,
+        )
+        return tick, meta
+
+    def _execution_bbo_from_direct(self, tick, meta, max_age_seconds: float):
+        """Validate the direct Alpaca quote, or None when it cannot authorize."""
+        if tick is None or not isinstance(meta, FreshnessMeta):
+            return None
         provider_at = meta.provider_time_utc
         if not isinstance(provider_at, datetime):
             # Request completion only proves when we received the response, not
             # when Alpaca's cached quote was generated.
-            return None, meta
+            return None
         if provider_at.tzinfo is None:
             provider_at = provider_at.replace(tzinfo=timezone.utc)
         else:
@@ -1016,7 +1193,7 @@ class AlpacaSpotAdapter:
         now_utc = _now()
         provider_age = (now_utc - provider_at).total_seconds()
         if provider_age < -1.0 or provider_age > float(max_age_seconds):
-            return None, meta
+            return None
         execution_meta = FreshnessMeta(
             retrieved_at_utc=meta.retrieved_at_utc,
             provider_time_utc=provider_at,
