@@ -10531,6 +10531,32 @@ class Settings(BaseSettings):
         default=True,
         validation_alias=AliasChoices("CHILI_ALPACA_QUOTES_VIA_IQFEED"),
     )
+    # PRE-MARKET EXECUTION BBO (2026-08-20): the account is entitled to Alpaca-IEX only, and IEX
+    # has no early session before 08:00 ET, so a direct pre-submit quote request returns nothing
+    # at all before then — measured empty for SGLY AND for AAPL, while BTCT returned the prior
+    # afternoon's close. Every live_entry_final_bbo failed no_provider_timestamp and the lane
+    # placed zero orders on a day whose setups are pre-market. The Massive websocket recorder
+    # already stamps the SIP event clock (timestamp_basis='massive_sip_unix_ms', 100% coverage,
+    # ~0.26s lag, ~1.8s cadence on the day's leader), so those rows — and ONLY those — may stand
+    # in as execution authority. IQFeed rows still may not: they carry no quote-event clock.
+    # OFF restores direct-Alpaca-only (and with it, no pre-market entries).
+    chili_alpaca_execution_bbo_massive_sip_fallback_enabled: bool = Field(
+        default=True,
+        validation_alias=AliasChoices(
+            "CHILI_ALPACA_EXECUTION_BBO_MASSIVE_SIP_FALLBACK_ENABLED"
+        ),
+    )
+    # Hard ceiling on the stand-in's age, applied to BOTH the SIP event clock and the local
+    # receive clock. The recorder de-duplicates unchanged quotes, so a quiet book legitimately
+    # produces older rows; this fails closed on them rather than guessing the book still stands.
+    chili_alpaca_execution_bbo_massive_sip_max_age_seconds: float = Field(
+        default=5.0,
+        ge=0.0,
+        le=60.0,
+        validation_alias=AliasChoices(
+            "CHILI_ALPACA_EXECUTION_BBO_MASSIVE_SIP_MAX_AGE_SECONDS"
+        ),
+    )
     # PRIMARY EQUITY -> ALPACA PAPER routing (2026-07-07): when ON, the momentum lane routes the
     # PRIMARY equity arm to alpaca_spot (Alpaca PAPER, fake money) instead of the RH live rail —
     # for running the lane on Alpaca paper during the RH->Alpaca cash transfer (no real-money RH

@@ -19085,18 +19085,30 @@ def _final_entry_bbo(
     product_id: str,
     *,
     max_age_seconds: float,
+    allow_stand_in: bool = False,
 ) -> tuple[NormalizedTicker | None, dict[str, Any]]:
     """Fetch and validate the exact BBO used at the broker submit boundary.
 
     This is deliberately stricter than the setup/scoring quote.  A quote without
     explicit source, time, symbol, or a sane uncrossed market is not evidence that
     an order is safe to send.
+
+    ``allow_stand_in`` is ENTRY-ONLY and defaults to False.  The exit
+    marketability refresh and the extended-hours orphan close share this helper,
+    and a cross-source bid is systematically permissive in the unsafe direction
+    for them — it would judge an exit marketable, or price one, above the book the
+    venue can actually reach.
     """
     getter = getattr(adapter, "get_execution_bbo", None)
     if not callable(getter):
         return None, {"ok": False, "reason": "execution_bbo_capability_missing"}
     try:
-        result = getter(product_id, max_age_seconds=float(max_age_seconds))
+        _kwargs: dict[str, Any] = {"max_age_seconds": float(max_age_seconds)}
+        if allow_stand_in:
+            # Opt in only when asked, so an adapter that predates the parameter
+            # keeps working unchanged rather than raising TypeError.
+            _kwargs["allow_stand_in"] = True
+        result = getter(product_id, **_kwargs)
         tick, meta = result if isinstance(result, tuple) else (result, None)
     except Exception as exc:
         return None, {
@@ -19208,6 +19220,14 @@ def _final_entry_bbo(
         "capture_content_sha256": raw.get("capture_content_sha256"),
         "capture_sequence": raw.get("capture_sequence"),
         "timestamp_basis": raw.get("timestamp_basis"),
+        # Provenance stays explicit end to end. A cross-source stand-in must never
+        # read as an Alpaca quote downstream: replay, parity and promotion all
+        # segregate on this, and the limit seam refuses to price off it.
+        "quote_authority": (
+            "stand_in_massive_sip"
+            if str(raw.get("timestamp_basis") or "") == "massive_sip_unix_ms"
+            else "alpaca_direct"
+        ),
         "age_seconds": round(age_s, 6),
         "max_age_seconds": float(max_age_seconds),
         "bid": bid,
@@ -33863,6 +33883,11 @@ def tick_live_session(
                 adapter,
                 product_id,
                 max_age_seconds=_final_bbo_max_age,
+                # ENTRY-ONLY. This is the one seam where a cross-source quote is
+                # safe: the worst case is a limit that does not fill. Every other
+                # caller of this helper is protective (exit marketability, orphan
+                # close) and keeps the direct-Alpaca-only contract.
+                allow_stand_in=True,
             )
             le["entry_final_bbo"] = _final_bbo
             _commit_le(sess, le)
@@ -33946,6 +33971,29 @@ def tick_live_session(
                 _final_limit_px = float(_final_limit_str)
                 _final_bbo["planned_limit_price"] = _planned_limit_str
                 _final_bbo["execution_ask"] = _final_ask
+                if str(_final_bbo.get("quote_authority") or "") != "alpaca_direct":
+                    # A STAND-IN PROVES THE MARKET EXISTS — IT DOES NOT PRICE THE
+                    # ORDER. The ceiling below already refuses to let a cross-source
+                    # ask RAISE the limit; this refuses to let one LOWER it either.
+                    # A stand-in ask under the planned limit is not improvement we
+                    # can verify at the venue, and quietly shaving the limit is how
+                    # a placed order becomes a permanent non-fill. So keep the
+                    # planned limit — the price every earlier risk, sizing and
+                    # extension check was computed against — and record the gap.
+                    _final_bbo["stand_in_limit_pinned_to_planned"] = True
+                    _final_bbo["stand_in_execution_ask"] = _final_ask
+                    _final_bbo["planned_vs_execution_gap_bps"] = (
+                        round(
+                            (_final_limit_px - _planned_limit_px)
+                            / _planned_limit_px
+                            * 10000.0,
+                            1,
+                        )
+                        if _planned_limit_px > 0
+                        else None
+                    )
+                    _final_limit_str = _planned_limit_str
+                    _final_limit_px = _planned_limit_px
                 if _final_limit_px > _planned_limit_px:
                     # CROSS-SOURCE CEILING (2026-08-19). This defer compares two
                     # DIFFERENT books. On this launcher the PLANNED limit is built
