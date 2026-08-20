@@ -8712,6 +8712,15 @@ class Settings(BaseSettings):
         le=3600,
         validation_alias=AliasChoices("CHILI_MOMENTUM_LIVE_RUNNER_SCHEDULER_INTERVAL_SECONDS"),
     )
+    chili_momentum_structural_stop_vol_floor_cap_mult: float = Field(
+        default=1.25,
+        ge=0.0,
+        le=5.0,
+        validation_alias=AliasChoices(
+            "CHILI_MOMENTUM_STRUCTURAL_STOP_VOL_FLOOR_CAP_MULT"
+        ),
+        description="Ceiling on how far the volatility floor may push the stop BEYOND the structural level, as a multiple of the structural distance. When the structure is tighter than the vol floor the floor still wins — that is the shake-out guard and it stays — but it was unbounded, so on a high-expected-move name the stop can sit at nearly twice the distance the pattern requires, and every extra point is paid twice: it shrinks the R-multiple AND, under risk-first sizing, shrinks the position. Measured on the recorded YJ tape: entry 5.75 with a double-bottom low at ~5.37 (6.6% structural) but expected_move 1950 bps forced 0.5 x 19.5% = 9.75%, i.e. stop 5.1894; price never revisited 5.37 after entry, so the extra 3.2% bought nothing and cut the trade from ~3.4R to 1.30R. Default 1.25 leaves 25% of wick room beyond what the pattern needs. Set <= 1.0 to restore the unbounded floor (byte-identical); the floor still owns the no-structure case entirely.",
+    )
     chili_momentum_backside_structure_unbench_enabled: bool = Field(
         default=True,
         validation_alias=AliasChoices(
