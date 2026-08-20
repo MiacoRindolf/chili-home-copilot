@@ -242,6 +242,21 @@ def run_arm(label, grid, ticks, g4_on):
     lr._refetch_bbo_secondary = lambda symbol: None
     _uni.snapshot_dollar_volumes = lambda syms: {}
     _ef.macro_regime_features = lambda *a, **k: {}
+    # GOTCHA 10 (2026-08-19): the shelf-registration damper primes its cache from
+    # SEC EDGAR over HTTP. In a live lane that is a watch-start daemon thread, but
+    # inside ReplayV3 the network guard blocks it, the module swallows the raised
+    # ReplayNetworkAccessError, and the driver then aborts the whole run on the
+    # bumped attempt_count — which is what broke this harness entirely:
+    #   prime_shelf_cache -> _fetch_state -> _load_ticker_map -> _http_get_json
+    # Neutralise the PRIMER only. cached_shelf_state stays untouched: it is
+    # cache-only by construction, so it correctly returns "unknown" here and the
+    # damper fails open exactly as it does live on a cold cache.
+    try:
+        from app.services.trading.momentum_neural import shelf_registration as _shelf
+
+        _shelf.prime_shelf_cache = lambda *a, **k: None
+    except Exception:
+        pass
     # THE placement blocker: schedule_window_now() defaults to datetime.now() (REAL wall-clock),
     # so during replay it returns "afterhours/closed" => sched_mult 0.0 => entry placement is
     # SKIPPED (live_entry_wait_late_window). Re-point it at the SIM clock (lr._utcnow(), frozen
