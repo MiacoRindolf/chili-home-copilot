@@ -6305,7 +6305,16 @@ def _reserve_alpaca_entry_risk(
                 ):
                     raise ValueError("legacy_pending_direction_not_certified")
                 pending_sessions.append((int(sid), str(row_symbol), live, snap))
-    except Exception:
+    except Exception as exc:
+        # WHICH row/check poisoned the scan (2026-08-20): this except used to be
+        # silent, so an INTERMITTENT failure (XRPZ 14:29 deferred, CJMB 14:31
+        # passed) was unattributable — a transient mid-write row from a
+        # concurrent tick is indistinguishable from real corruption. Logging
+        # only; the fail-closed shape is unchanged.
+        _log.warning(
+            "[alpaca_risk] pending-session scan unreadable (sym=%s sid=%s): %s",
+            sym, locals().get("sid"), exc, exc_info=True,
+        )
         return {"ok": False, "reason": "risk_ledger_unreadable"}
 
     claim_owner_cids: set[tuple[int, str]] = set()
@@ -6383,7 +6392,11 @@ def _reserve_alpaca_entry_risk(
                 "blocking_claim_symbol": str(row_symbol),
                 "blocking_claim_client_order_id": str(row_cid or ""),
             }
-    except Exception:
+    except Exception as exc:
+        _log.warning(
+            "[alpaca_risk] risk-ledger scan unreadable (sym=%s): %s",
+            sym, exc, exc_info=True,
+        )
         return {"ok": False, "reason": "risk_ledger_unreadable"}
 
     try:
@@ -6410,7 +6423,11 @@ def _reserve_alpaca_entry_risk(
                 "blocking_session_id": sid,
                 "blocking_symbol": row_symbol,
             }
-    except Exception:
+    except Exception as exc:
+        _log.warning(
+            "[alpaca_risk] risk-ledger scan unreadable (sym=%s): %s",
+            sym, exc, exc_info=True,
+        )
         return {"ok": False, "reason": "risk_ledger_unreadable"}
 
     if adaptive_ledger is not None:

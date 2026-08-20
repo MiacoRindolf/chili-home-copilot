@@ -25049,6 +25049,17 @@ def tick_live_session(
             .one_or_none()
         )
     except Exception:
+        # NOWAIT losing the row race raises LockNotAvailable, and the raise
+        # ABORTS the transaction. Swallowing it without a rollback hands the
+        # dispatcher a poisoned session — every later statement in the same
+        # dispatch (packet execution intent, event emits) dies with
+        # InFailedSqlTransaction, so a benign "someone else holds this row"
+        # skip turned into a failed tick (measured live 2026-08-20: batch-budget
+        # straggler overlap). Roll back so the session is clean for the caller.
+        try:
+            db.rollback()
+        except Exception:
+            pass
         return {"ok": True, "skipped": "concurrent_tick"}
     if sess is None:
         return {"ok": False, "error": "not_found"}
