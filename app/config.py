@@ -10549,8 +10549,15 @@ class Settings(BaseSettings):
     # Hard ceiling on the stand-in's age, applied to BOTH the SIP event clock and the local
     # receive clock. The recorder de-duplicates unchanged quotes, so a quiet book legitimately
     # produces older rows; this fails closed on them rather than guessing the book still stands.
+    # 10.0 (2026-08-20, first live session): the recorder BATCHES rows to Postgres every 5s
+    # (_FLUSH_INTERVAL_S) on top of a 1s per-symbol spacing floor, so a provider-fresh quote is
+    # DB-visible up to ~6s late — measured live: SNSC blocked stale_beyond_ceiling while its
+    # newest tape row was 4.9s old (provider-fresh, flush-late). A 5.0 ceiling therefore fired
+    # only when a row happened to land just before a flush. 10.0 covers the visibility lag while
+    # a genuinely quiet book (IPST, 162s) still fails closed — and the stand-in never PRICES the
+    # order (planned-limit pin), so the marginal staleness cannot move the limit.
     chili_alpaca_execution_bbo_massive_sip_max_age_seconds: float = Field(
-        default=5.0,
+        default=10.0,
         ge=0.0,
         le=60.0,
         validation_alias=AliasChoices(

@@ -33,6 +33,7 @@ docs/DESIGN/MOMENTUM_LANE.md; see [[project_momentum_lane]].
 from __future__ import annotations
 
 import logging
+import threading
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import TYPE_CHECKING, Any
@@ -121,6 +122,15 @@ def _percentile(sorted_vals: list[float], q: float) -> float | None:
 # lossless. Ang susi ay ang IPINASANG clock (hindi wall) para sa replay:
 # sa sim time, bawat sim-minuto ay sariwang compute pa rin.
 _REGIME_MEMO: dict[str, Any] = {"key": None, "value": None}
+# SINGLE-FLIGHT sa recompute (2026-08-20 bridge starvation): sa ilalim ng market-
+# hours load ang uncached compute ay umabot ng 100-180s — mas mahaba kaysa sa 60s
+# TTL — kaya bawat caller pagkatapos mag-expire ay nagsimula ng SARILING scan
+# (stampede), at ang ignition→arm bridge ay natigil nang 175-344s sa ilalim ng
+# process-wide lock nito habang naghihintay dito ⇒ 6 arms vs 107 kahapon. Iisang
+# thread na lang ang nagre-recompute; ang matatalo sa lock ay nagsisilbi ng STALE
+# na memo (ang regime ay per-hour ang bilis magbago, kaya semantically lossless)
+# o _NEUTRAL kapag wala pang unang value (ang parehong fail-closed na hugis).
+_REGIME_RECOMPUTE_LOCK = threading.Lock()
 
 
 def compute_breadth_regime(
@@ -153,10 +163,19 @@ def compute_breadth_regime(
         and (_t - float(_at)) < 60.0
     ):
         return _REGIME_MEMO["value"]
-    result = _compute_breadth_regime_uncached(db, now=now)
-    _REGIME_MEMO["computed_at_monotonic"] = _time.monotonic()
-    _REGIME_MEMO["value"] = result
-    return result
+    # Isang thread lang ang nagre-recompute; ang iba ay nagsisilbi ng stale (o
+    # _NEUTRAL bago ang unang compute) sa halip na dumagdag sa stampede — tingnan
+    # ang komento sa _REGIME_RECOMPUTE_LOCK.
+    if not _REGIME_RECOMPUTE_LOCK.acquire(blocking=False):
+        _stale = _REGIME_MEMO.get("value")
+        return _stale if _stale is not None else _NEUTRAL
+    try:
+        result = _compute_breadth_regime_uncached(db, now=now)
+        _REGIME_MEMO["computed_at_monotonic"] = _time.monotonic()
+        _REGIME_MEMO["value"] = result
+        return result
+    finally:
+        _REGIME_RECOMPUTE_LOCK.release()
 
 
 def _compute_breadth_regime_uncached(
@@ -208,10 +227,13 @@ def _compute_breadth_regime_uncached(
         hour = now_utc.hour
         # 2026-08-17 perf: range predicates sa observed_at (index-usable) sa
         # halip na ::date cast na nagpi-pilit ng full scan sa milyon-milyong
-        # history rows; ang 45-araw na sahig ay sagana para sa trailing
-        # _TRAILING_SESSIONS na sesyon kahit may holidays.
+        # history rows. 2026-08-20: 45d -> 30d — ang table ay 43 araw / 11 GB
+        # ang laman kaya ang 45-araw na sahig ay nagbabasa ng HALOS LAHAT ng
+        # pahina; ang 30 araw ay sagana pa rin para sa _TRAILING_SESSIONS (20)
+        # na sesyon kahit may holidays, at direktang pinuputol ang scan na
+        # nagpapatagal sa compute (100-180s) sa ilalim ng bridge lock.
         _today_start = datetime(now_utc.year, now_utc.month, now_utc.day)
-        _hist_floor = _today_start - timedelta(days=45)
+        _hist_floor = _today_start - timedelta(days=30)
         hist = db.execute(
             text(
                 "SELECT observed_at::date AS d, COUNT(DISTINCT symbol) AS n "

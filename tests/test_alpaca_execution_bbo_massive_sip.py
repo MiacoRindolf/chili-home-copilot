@@ -383,8 +383,10 @@ def test_settings_are_wired_and_bounded():
     v = float(getattr(
         settings, "chili_alpaca_execution_bbo_massive_sip_max_age_seconds", -1
     ))
-    # Dapat saklawin ang tunay na ~1.8s cadence ng leader...
-    assert v >= 2.0
+    # Dapat saklawin ang tunay na ~1.8s cadence ng leader PLUS ang ~6s na
+    # DB-visibility lag ng recorder (5s flush + 1s spacing) — sinukat live 08-20:
+    # SNSC na-block sa 4.9s na row sa ilalim ng 5.0 ceiling.
+    assert v >= 8.0
     # ...pero hindi kasing-luwag na tumanggap ng quote mula sa ibang market regime.
     assert v <= 15.0
 
