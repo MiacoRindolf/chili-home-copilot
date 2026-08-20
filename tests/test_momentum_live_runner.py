@@ -1918,4 +1918,57 @@ def test_stale_fade_damper_wired_post_floor_cached_ctx() -> None:
     assert i_eb < i_sf
     sf_block = source[i_eb:i_sf]
     assert "stale_fade_size_multiplier" in sf_block
-    assert "_daily_ctx_cached" in sf_block  # cached read — zero bagong fetch
+    assert "_tick_local_sizing_daily_context" in sf_block
+
+
+def test_sizing_daily_context_memo_shares_none_only_within_one_tick(
+    monkeypatch,
+) -> None:
+    """Daily-room and stale-fade share one miss; a later tick retries once."""
+
+    calls: list[tuple[str, float | None]] = []
+
+    def missing_daily_context(symbol: str, *, price: float | None = None):
+        calls.append((symbol, price))
+        return None
+
+    monkeypatch.setattr(_lr, "_daily_ctx_cached", missing_daily_context)
+
+    first_tick = {}
+    daily_room = _lr._tick_local_sizing_daily_context(
+        first_tick,
+        "VEEE",
+        price=10.01,
+    )
+    stale_fade = _lr._tick_local_sizing_daily_context(
+        first_tick,
+        "veee",
+        price=10.01,
+    )
+
+    assert daily_room is None
+    assert stale_fade is None
+    assert calls == [("VEEE", 10.01)]
+
+    # A materially different price has different DailyContext distance fields,
+    # so it is a separate exact read even inside the same tick.
+    assert (
+        _lr._tick_local_sizing_daily_context(
+            first_tick,
+            "VEEE",
+            price=10.02,
+        )
+        is None
+    )
+    assert calls == [("VEEE", 10.01), ("VEEE", 10.02)]
+
+    second_tick = {}
+    assert (
+        _lr._tick_local_sizing_daily_context(
+            second_tick,
+            "VEEE",
+            price=10.01,
+        )
+        is None
+    )
+    assert calls == [("VEEE", 10.01), ("VEEE", 10.02), ("VEEE", 10.01)]

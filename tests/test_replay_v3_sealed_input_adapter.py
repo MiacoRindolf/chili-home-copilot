@@ -2736,6 +2736,19 @@ def test_sealed_real_alpaca_step_keeps_adaptive_qty_and_requires_durable_admissi
             refill_rps=2.0,
         ),
     )
+    full_market_calls: list[float | None] = []
+
+    def guarded_full_market_snapshot(*, max_age_seconds: float | None):
+        full_market_calls.append(max_age_seconds)
+        # Exercise the actual ReplayNetworkGuard deterministically. The guard
+        # raises before this documentation-only address can reach the network.
+        assert network_guard._active is True
+        return socket.create_connection(("203.0.113.1", 443), timeout=0.01)
+
+    monkeypatch.setattr(
+        "app.services.massive_client.get_full_market_snapshot",
+        guarded_full_market_snapshot,
+    )
     final_breaker_phases: list[str] = []
 
     def captured_final_breaker(_session, *, phase: str):
@@ -2805,16 +2818,22 @@ def test_sealed_real_alpaca_step_keeps_adaptive_qty_and_requires_durable_admissi
         sealed_inputs=adapter,
     )
     driver._sealed_run_active = True
-    driver._run_network_guard_active = True
-
-    with pytest.raises(
-        rv3.SealedReplayInputError,
-        match="FSM state differs from captured decision output",
-    ):
-        driver._advance_sealed_boundary(
-            checkpoint.decision_at,
-            sequence_at_most=checkpoint.input_prefix_sequence,
-        )
+    network_guard = rv3.ReplayNetworkGuard(
+        allowed_endpoints=driver._database_guard_endpoints()
+    )
+    try:
+        with network_guard:
+            driver._run_network_guard_active = True
+            with pytest.raises(
+                rv3.SealedReplayInputError,
+                match="FSM state differs from captured decision output",
+            ):
+                driver._advance_sealed_boundary(
+                    checkpoint.decision_at,
+                    sequence_at_most=checkpoint.input_prefix_sequence,
+                )
+    finally:
+        driver._run_network_guard_active = False
 
     assert len(built_requests) == 1
     built = built_requests[0]
@@ -2834,10 +2853,17 @@ def test_sealed_real_alpaca_step_keeps_adaptive_qty_and_requires_durable_admissi
     assert final_breaker_phases == ["pre_reservation"]
     assert current_ortex_reads == []
     assert adapter.network_attempt_count == 0
+    # The unchanged FSM's liquidity-cap path still asks for a live full-market
+    # snapshot. Production ``run`` rejects this swallowed attempt after the
+    # boundary; this focused diagnostic enters the same guard and pins it rather
+    # than merely pretending the guard is active (which could reach the network).
+    assert full_market_calls == [300.0]
+    assert network_guard.attempt_count == 1
     # This deliberately diagnostic fixture reaches the pre-commit boundary
     # before the captured output diverges.  Its real FSM also makes two
-    # provider reads that are absent from the fixture; the sealed adapter
-    # rejects both locally and never falls back to the network.
+    # distinct OHLCV reads that are absent from the fixture. Daily-room and
+    # stale-fade share the same tick-local 1d/max result, so the adapter rejects
+    # that exact call once rather than turning one missing fact into a retry.
     assert adapter.rejected_provider_request_count == 2
 
 

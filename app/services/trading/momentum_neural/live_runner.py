@@ -6714,6 +6714,35 @@ def _daily_ctx_cached(symbol: str, *, price: float | None = None) -> Any:
         return None
 
 
+def _tick_local_sizing_daily_context(
+    memo: dict[tuple[str, float | None], Any],
+    symbol: str,
+    *,
+    price: float | None = None,
+) -> Any:
+    """Share one daily-context read across sizing consumers in one FSM tick.
+
+    ``memo`` is created inside ``tick_live_session`` and is never retained across
+    decision boundaries. Presence, rather than truthiness, is authoritative so
+    a same-tick failed/empty read (``None``) is not immediately retried by the
+    next sizing feature. The key includes the exact finite price because the
+    derived distance fields are price-relative. A later tick receives a fresh
+    memo and may retry the underlying fixed ``1d``/``max`` read normally.
+    """
+
+    normalized_price: float | None
+    try:
+        normalized_price = None if price is None else float(price)
+    except (TypeError, ValueError):
+        normalized_price = None
+    if normalized_price is not None and not math.isfinite(normalized_price):
+        normalized_price = None
+    key = (str(symbol or "").strip().upper(), normalized_price)
+    if key not in memo:
+        memo[key] = _daily_ctx_cached(symbol, price=price)
+    return memo[key]
+
+
 def _recent_mfe_samples(db: Any, setup_family: Any, *, limit: int = 200) -> list[float]:
     """Recent realized MFE_R samples for the DATA-DERIVED exit-target shadow. Reads the
     momentum_mfe_realized events (newest-first), filters to the given setup family (all
@@ -32295,6 +32324,11 @@ def tick_live_session(
         # crypto -USD names skip it). Flag OFF / no DailyContext / no overhead distance ⇒ mult 1.0
         # (byte-identical, fail-OPEN). docs/DESIGN/MOMENTUM_LANE.md
         _daily_room_mult = 1.0
+        # One decision-local memo shared by every sizing feature below. It is
+        # intentionally recreated on every ``tick_live_session`` invocation so
+        # a transient miss can retry on the next tick, while a ``None`` result
+        # cannot cause duplicate 1d/max provider attempts inside this tick.
+        _sizing_daily_contexts: dict[tuple[str, float | None], Any] = {}
         if (
             bool(getattr(settings, "chili_momentum_daily_room_size_down_enabled", True))
             and not str(sess.symbol or "").upper().endswith("-USD")
@@ -32302,7 +32336,11 @@ def tick_live_session(
             try:
                 from .risk_policy import daily_room_size_down_multiplier as _drm
 
-                _dr_ctx = _daily_ctx_cached(sess.symbol, price=guarded_ask)
+                _dr_ctx = _tick_local_sizing_daily_context(
+                    _sizing_daily_contexts,
+                    sess.symbol,
+                    price=guarded_ask,
+                )
                 _dr_d200 = _float_or_none(getattr(_dr_ctx, "dist_to_sma_200_atr", None)) if _dr_ctx is not None else None
                 _dr_dres = _float_or_none(getattr(_dr_ctx, "dist_to_resistance_atr", None)) if _dr_ctx is not None else None
                 _daily_room_mult, _dr_meta = _drm(_dr_d200, _dr_dres)
@@ -32543,7 +32581,11 @@ def tick_live_session(
             if not str(sess.symbol or "").upper().endswith("-USD"):
                 from .risk_policy import stale_fade_size_multiplier
 
-                _sf_ctx = _daily_ctx_cached(sess.symbol, price=guarded_ask)
+                _sf_ctx = _tick_local_sizing_daily_context(
+                    _sizing_daily_contexts,
+                    sess.symbol,
+                    price=guarded_ask,
+                )
                 if _sf_ctx is not None:
                     _sf_raw_frac = getattr(
                         settings,
