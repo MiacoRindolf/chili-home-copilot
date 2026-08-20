@@ -24839,6 +24839,7 @@ def _live_ortex_entry_readiness_reason(
         manifest, resolve_reason = resolve_ortex_batch_manifest_from_hub(
             db,
             batch_reference=reference,
+            read_at=read_at,
         )
         if resolve_reason is not None:
             return resolve_reason

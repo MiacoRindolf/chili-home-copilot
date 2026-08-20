@@ -131,7 +131,7 @@ def test_ross_universe_refresh_never_blocks_writer_and_singleflights(monkeypatch
     assert fetch_calls == [universe.EQUITY_ROSS_SMALLCAP]
 
 
-def test_ross_universe_refresh_failure_never_erases_last_success(monkeypatch):
+def test_empty_ross_universe_refresh_is_valid_empty_snapshot(monkeypatch):
     from app.services.trading.momentum_neural import universe
 
     clock = _reset_ross_refresh_state(monkeypatch)
@@ -164,21 +164,64 @@ def test_ross_universe_refresh_failure_never_erases_last_success(monkeypatch):
     refresh_thread.join(timeout=1.0)
     assert not refresh_thread.is_alive()
 
+    empty = trade_bridge._ross_universe_symbols_read(10)
+    assert empty.ok is True
+    assert empty.symbols == ()
+    assert empty.error_code is None
+    assert trade_bridge._ross_universe_cache_symbols == ()
+
+    # A valid empty snapshot follows the normal refresh cadence; before that
+    # boundary, reads remain valid-empty and do not start a second provider
+    # attempt.
+    first_refresh_thread = trade_bridge._ross_universe_refresh_thread
+    clock["now"] = 119.0
+    still_empty = trade_bridge._ross_universe_symbols_read(10)
+    assert still_empty.ok is True
+    assert still_empty.symbols == ()
+    assert trade_bridge._ross_universe_refresh_thread is first_refresh_thread
+    assert trade_bridge._ross_universe_refresh_due_at == 120.0
+    assert fetch_calls == 1
+
+
+def test_ross_universe_query_failure_preserves_last_success(monkeypatch):
+    from app.services.trading.momentum_neural import universe
+
+    _reset_ross_refresh_state(monkeypatch)
+    monkeypatch.setattr(
+        trade_bridge, "_ross_universe_cache_symbols", ("CACHED",), raising=False
+    )
+    monkeypatch.setattr(
+        trade_bridge, "_ross_universe_cache_success_at", 99.0, raising=False
+    )
+    monkeypatch.setattr(
+        trade_bridge, "_ross_universe_cache_max_age_s", 300.0, raising=False
+    )
+    fetch_entered = threading.Event()
+    release_fetch = threading.Event()
+
+    def failing_fetch(_profile):
+        fetch_entered.set()
+        assert release_fetch.wait(timeout=2.0)
+        raise RuntimeError("fixture provider failure")
+
+    monkeypatch.setattr(universe, "build_equity_universe", failing_fetch)
+    pending = trade_bridge._ross_universe_symbols_read(10)
+    assert fetch_entered.wait(timeout=0.5)
+    assert pending.ok is True
+    assert pending.symbols == ("CACHED",)
+
+    release_fetch.set()
+    refresh_thread = trade_bridge._ross_universe_refresh_thread
+    assert refresh_thread is not None
+    refresh_thread.join(timeout=1.0)
+    assert not refresh_thread.is_alive()
+
     failed = trade_bridge._ross_universe_symbols_read(10)
     assert failed.ok is False
-    assert failed.error_code == "ross_universe_empty_or_unavailable"
+    assert failed.error_code == "ross_query_failed"
     assert trade_bridge._ross_universe_cache_symbols == ("CACHED",)
-
-    # The builder's 30-second timeout may leave its own provider daemon alive.
-    # Do not create another provider attempt just REFRESH_S later; the profile's
-    # semantic snapshot TTL is the conservative failure retry boundary.
-    first_refresh_thread = trade_bridge._ross_universe_refresh_thread
-    clock["now"] = 121.0
-    still_failed = trade_bridge._ross_universe_symbols_read(10)
-    assert still_failed.ok is False
-    assert trade_bridge._ross_universe_refresh_thread is first_refresh_thread
-    assert trade_bridge._ross_universe_refresh_due_at == 400.0
-    assert fetch_calls == 1
+    assert trade_bridge._ross_universe_cache_success_at == 99.0
+    assert trade_bridge._ross_universe_cache_max_age_s == 300.0
 
 
 def test_trade_writer_drains_while_ross_refresh_is_blocked(monkeypatch):

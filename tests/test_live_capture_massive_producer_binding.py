@@ -812,7 +812,7 @@ def test_massive_authentication_requires_provider_ack() -> None:
             return self.response
 
     client._ws = _AuthSocket('[{"ev":"status","status":"auth_failed"}]')
-    with pytest.raises(RuntimeError, match="not acknowledged"):
+    with pytest.raises(RuntimeError, match="rejected"):
         client._authenticate()
     assert client.capture_source_identity["authenticated"] is False
 

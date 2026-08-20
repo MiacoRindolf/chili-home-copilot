@@ -26,6 +26,15 @@ from .context import build_momentum_regime_context
 
 from .evolution import record_evolution_trace
 from .features import ExecutionReadinessFeatures
+from .ortex_handoff_history import (
+    OrtexHandoffHistoryError,
+    OrtexHandoffReason,
+    lookup_ortex_handoff_manifest,
+    note_ortex_handoff_cap_reject,
+    note_ortex_handoff_lookup,
+    preserve_ortex_handoff_state,
+    stage_ortex_handoff_publication,
+)
 from .replay_capture_contract import (
     CaptureContractError,
     CaptureMicrostructureOperation,
@@ -1526,12 +1535,13 @@ def resolve_ortex_batch_manifest_from_hub(
     db: Session,
     *,
     batch_reference: object,
+    read_at: datetime | None = None,
 ) -> tuple[dict[str, Any] | None, str | None]:
-    """Resolve the current live-cache manifest without creating hub state.
+    """Resolve an exact current or bounded-recent manifest without creating state.
 
     Captured PAPER expands and fsyncs the manifest into its append-only
     ``ORTEX_SNAPSHOT`` event before a decision may act. The hub is therefore a
-    same-transaction live cache, not historical replay authority.
+    same-transaction/bounded-handoff cache, not historical replay authority.
     """
 
     if (
@@ -1557,7 +1567,23 @@ def resolve_ortex_batch_manifest_from_hub(
         if hub is not None and isinstance(hub.local_state, dict)
         else {}
     )
-    manifest = local_state.get(ORTEX_SQUEEZE_BATCH_STATUS_KEY)
+    lookup = lookup_ortex_handoff_manifest(
+        local_state,
+        batch_sha256=batch_reference.get("batch_sha256"),
+        observed_at=(read_at or datetime.now(timezone.utc)),
+    )
+    note_ortex_handoff_lookup(lookup.reason)
+    if lookup.reason is OrtexHandoffReason.HISTORY_INVALID:
+        return None, "ortex_batch_handoff_history_invalid"
+    if lookup.reason is OrtexHandoffReason.HISTORY_EXPIRED:
+        return None, "ortex_batch_handoff_history_expired"
+    if lookup.reason is OrtexHandoffReason.MISSING:
+        if lookup.current_present:
+            return None, "ortex_batch_manifest_reference_mismatch"
+        return None, "ortex_batch_manifest_missing"
+    if lookup.reason is OrtexHandoffReason.REFERENCE_INVALID:
+        return None, "ortex_batch_reference_invalid"
+    manifest = lookup.manifest
     if not isinstance(manifest, dict):
         return None, "ortex_batch_manifest_missing"
     for key in (
@@ -1569,7 +1595,26 @@ def resolve_ortex_batch_manifest_from_hub(
     ):
         if batch_reference.get(key) != manifest.get(key):
             return None, "ortex_batch_manifest_reference_mismatch"
-    return copy.deepcopy(manifest), None
+    return manifest, None
+
+
+def _get_or_create_hub_state_for_update(db: Session) -> Any:
+    """Return a fresh hub row held under ``FOR UPDATE`` for this transaction."""
+
+    from ....models.trading import BrainNodeState
+
+    # The graph seed normally guarantees this row.  Creating/flushing first
+    # also keeps isolated/test databases compatible, then the second query
+    # obtains the row lock and refreshes JSONB after any competing writer.
+    get_or_create_state(db, HUB_NODE_ID)
+    db.flush()
+    return (
+        db.query(BrainNodeState)
+        .populate_existing()
+        .filter(BrainNodeState.node_id == HUB_NODE_ID)
+        .with_for_update()
+        .one()
+    )
 
 
 def _validate_ortex_batch_status(
@@ -2025,12 +2070,19 @@ def run_momentum_neural_tick(
         getattr(settings, "chili_momentum_squeeze_fuel_tilt_enabled", True)
     )
     prepared_ortex_status = meta.get(ORTEX_SQUEEZE_BATCH_STATUS_KEY)
+    validated_ortex_status_snapshot: dict[str, Any] | None = None
     if not squeeze_enabled:
         if isinstance(meta.get("ross_signals"), dict):
             _sanitize_ortex_signal_values(meta["ross_signals"])
         meta.pop(ORTEX_SQUEEZE_BATCH_STATUS_KEY, None)
         prepared_ortex_status = None
     elif prepared_ortex_status is not None:
+        try:
+            prepared_ortex_status = copy.deepcopy(dict(prepared_ortex_status))
+        except Exception as exc:
+            raise ReplayPipelineInputUnavailableError(
+                "ortex_batch_status_snapshot_invalid"
+            ) from exc
         prepared_ok, prepared_reason = _validate_ortex_batch_status(
             prepared_ortex_status,
             ross_signals=(
@@ -2042,6 +2094,11 @@ def run_momentum_neural_tick(
         )
         if not prepared_ok:
             raise ReplayPipelineInputUnavailableError(prepared_reason)
+        # Keep one caller-detached, validated snapshot as the sole authority
+        # for both the compact viability-row ref and locked-hub publication.
+        # The scheduler may reuse/mutate its source mapping after this call.
+        validated_ortex_status_snapshot = prepared_ortex_status
+        meta[ORTEX_SQUEEZE_BATCH_STATUS_KEY] = prepared_ortex_status
     elif isinstance(meta.get("ross_signals"), dict):
         # Clear inherited values before Hurst, provider, or any other fallible
         # feature work. A later failure can therefore persist only an explicit
@@ -2431,9 +2488,16 @@ def run_momentum_neural_tick(
                     _ross_signals = _prepared_signals
                     meta["ross_signals"] = _prepared_signals
                     if _built_status is not None:
-                        meta[ORTEX_SQUEEZE_BATCH_STATUS_KEY] = _built_status
+                        validated_ortex_status_snapshot = copy.deepcopy(
+                            dict(_built_status)
+                        )
+                        meta[ORTEX_SQUEEZE_BATCH_STATUS_KEY] = (
+                            validated_ortex_status_snapshot
+                        )
                         _ortex_available_at = datetime.fromisoformat(
-                            str(_built_status["decision_at"]).replace(
+                            str(
+                                validated_ortex_status_snapshot["decision_at"]
+                            ).replace(
                                 "Z",
                                 "+00:00",
                             )
@@ -3152,7 +3216,7 @@ def run_momentum_neural_tick(
         meta=ctx_meta,
     )
     persisted_meta = dict(meta)
-    full_ortex_batch_status = meta.get(ORTEX_SQUEEZE_BATCH_STATUS_KEY)
+    full_ortex_batch_status = validated_ortex_status_snapshot
     if isinstance(full_ortex_batch_status, Mapping):
         persisted_meta[ORTEX_SQUEEZE_BATCH_STATUS_KEY] = (
             _ortex_batch_reference(full_ortex_batch_status)
@@ -3224,10 +3288,6 @@ def run_momentum_neural_tick(
         "symbols_evaluated": symbols,
         "top_preview": rows[:8],
     }
-    if isinstance(full_ortex_batch_status, Mapping):
-        hub_payload[ORTEX_SQUEEZE_BATCH_STATUS_KEY] = copy.deepcopy(
-            dict(full_ortex_batch_status)
-        )
     viability_payload = {
         "momentum_neural_version": 1,
         "last_tick_utc": now,
@@ -3242,44 +3302,89 @@ def run_momentum_neural_tick(
     except Exception:
         _log.debug("[momentum_neural] pre-persistence rollback skipped", exc_info=True)
 
-    hub = get_or_create_state(db, HUB_NODE_ID)
-    hub.local_state = hub_payload
-    hub.last_activated_at = decision_at
-    hub.updated_at = decision_at
-
-    pool = get_or_create_state(db, VIABILITY_NODE_ID)
-    pool.local_state = viability_payload
-    pool.last_activated_at = decision_at
-    pool.updated_at = decision_at
-
-    record_evolution_trace(
-        db,
-        snapshot={
-            "top_family_id": top.get("family_id"),
-            "top_viability": top.get("viability"),
-            "session_label": ctx.session_label,
-        },
-        observed_at=decision_at,
-    )
-
+    is_ortex_publication = isinstance(full_ortex_batch_status, Mapping)
     persistence_ok = True
     try:
-        from .persistence import persist_neural_momentum_tick
+        hub = _get_or_create_hub_state_for_update(db)
+        hub_payload = preserve_ortex_handoff_state(
+            hub.local_state if isinstance(hub.local_state, Mapping) else {},
+            hub_payload,
+        )
+        if is_ortex_publication:
+            publication = stage_ortex_handoff_publication(
+                hub_payload,
+                manifest=full_ortex_batch_status,
+                displaced_at=decision_at.replace(tzinfo=timezone.utc),
+            )
+            hub_payload = publication.local_state
+        hub.local_state = hub_payload
+        hub.last_activated_at = decision_at
+        hub.updated_at = decision_at
 
-        n = persist_neural_momentum_tick(
+        pool = get_or_create_state(db, VIABILITY_NODE_ID)
+        pool.local_state = viability_payload
+        pool.last_activated_at = decision_at
+        pool.updated_at = decision_at
+
+        record_evolution_trace(
             db,
-            row_dicts=rows,
-            regime_snapshot=ctx.to_public_dict(),
-            features=feats,
-            correlation_id=correlation_id,
-            source_node_id=HUB_NODE_ID,
+            snapshot={
+                "top_family_id": top.get("family_id"),
+                "top_viability": top.get("viability"),
+                "session_label": ctx.session_label,
+            },
             observed_at=decision_at,
         )
-        if n:
-            log_tick("persisted viability rows=%s", n)
-    except Exception as e:
-        _log.warning("[momentum_neural] viability persistence failed: %s", e)
-        persistence_ok = False
+
+        try:
+            from .persistence import persist_neural_momentum_tick
+
+            n = persist_neural_momentum_tick(
+                db,
+                row_dicts=rows,
+                regime_snapshot=ctx.to_public_dict(),
+                features=feats,
+                correlation_id=correlation_id,
+                source_node_id=HUB_NODE_ID,
+                observed_at=decision_at,
+            )
+            if is_ortex_publication and (
+                isinstance(n, bool) or not isinstance(n, int) or n <= 0
+            ):
+                raise OrtexHandoffHistoryError(
+                    OrtexHandoffReason.VIABILITY_PUBLICATION_EMPTY
+                )
+            if n:
+                log_tick("persisted viability rows=%s", n)
+        except Exception as exc:
+            _log.warning(
+                "[momentum_neural] viability persistence failed: %s",
+                exc,
+            )
+            if is_ortex_publication:
+                raise
+            persistence_ok = False
+    except Exception as exc:
+        if is_ortex_publication:
+            # From the first locked-hub mutation through the final compact-ref
+            # viability write, this is one fail-closed publication unit.  The
+            # activation runner may catch and flush later, so rollback here.
+            if isinstance(exc, OrtexHandoffHistoryError):
+                note_ortex_handoff_cap_reject(exc.reason)
+                failure_reason = exc.reason.value
+            else:
+                failure_reason = type(exc).__name__
+            _log.error(
+                "[momentum_neural] Ortex atomic publication rejected: %s",
+                failure_reason,
+            )
+            try:
+                db.rollback()
+            except Exception:
+                _log.exception(
+                    "[momentum_neural] Ortex atomic persistence rollback failed"
+                )
+        raise
 
     log_tick(
         "tick symbols=%s families=%s top=%s corr=%s",

@@ -68,6 +68,11 @@ from .context import (
 )
 from .features import ExecutionReadinessFeatures
 from .leveraged_etf import is_excluded_fund_name, is_leveraged_etf_name
+from .ortex_handoff_history import (
+    OrtexHandoffReason,
+    lookup_ortex_handoff_manifest,
+    note_ortex_handoff_lookup,
+)
 from .replay_capture_contract import (
     CaptureClocks,
     CaptureContractError,
@@ -297,11 +302,12 @@ def _ortex_global_batch_inventory(
 
     Scheduler persistence is intentionally chunked while Ortex percentile
     ranks are computed against the complete field.  The full manifest is
-    stored once on ``BrainNodeState(HUB_NODE_ID)``; each viability row carries
-    only a compact content-addressed pointer plus its chunk-local signal.  Both
-    rows are read inside the caller's existing repeatable-read, read-only
-    transaction.  Durable provider-attempt rows are still reconstructed below
-    before any member becomes economic evidence.
+    stored as current (with a bounded recent handoff history) on
+    ``BrainNodeState(HUB_NODE_ID)``; each viability row carries only a compact
+    content-addressed pointer plus its chunk-local signal.  Both rows are read
+    inside the caller's existing repeatable-read, read-only transaction.
+    Durable provider-attempt rows are still reconstructed below before any
+    member becomes economic evidence.
     """
 
     raw_reference = feature_meta.get(ORTEX_BATCH_STATUS_KEY)
@@ -325,7 +331,23 @@ def _ortex_global_batch_inventory(
         )
         if hub_row is None or not isinstance(hub_row.local_state, Mapping):
             return None, "ortex_selection_batch_hub_missing"
-        raw_manifest = hub_row.local_state.get(ORTEX_BATCH_STATUS_KEY)
+        lookup = lookup_ortex_handoff_manifest(
+            hub_row.local_state,
+            batch_sha256=typed_reference.batch_sha256,
+            observed_at=read_at,
+        )
+        note_ortex_handoff_lookup(lookup.reason)
+        if lookup.reason is OrtexHandoffReason.HISTORY_INVALID:
+            return None, "ortex_selection_batch_handoff_history_invalid"
+        if lookup.reason is OrtexHandoffReason.HISTORY_EXPIRED:
+            return None, "ortex_selection_batch_handoff_history_expired"
+        if lookup.reason is OrtexHandoffReason.MISSING:
+            if lookup.current_present:
+                return None, "ortex_selection_batch_hub_reference_mismatch"
+            return None, "ortex_selection_batch_hub_missing"
+        if lookup.reason is OrtexHandoffReason.REFERENCE_INVALID:
+            return None, "ortex_selection_batch_reference_invalid"
+        raw_manifest = lookup.manifest
         if not isinstance(raw_manifest, Mapping):
             return None, "ortex_selection_batch_hub_missing"
         try:

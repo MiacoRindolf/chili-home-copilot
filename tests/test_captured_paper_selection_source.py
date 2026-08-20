@@ -52,6 +52,12 @@ from app.services.trading.momentum_neural.replay_capture_contract import (
     CaptureStream,
     sha256_json,
 )
+from app.services.trading.momentum_neural.ortex_handoff_history import (
+    ORTEX_HANDOFF_HISTORY_KEY,
+    ORTEX_HANDOFF_RETENTION_SECONDS,
+    ortex_handoff_runtime_metrics,
+    stage_ortex_handoff_publication,
+)
 from app.services.trading.momentum_neural.short_mechanics import (
     OrtexShortMechanicsOutcome,
     OrtexOutcomeKind,
@@ -1192,6 +1198,133 @@ def test_ortex_chunk_row_materializes_the_complete_global_batch(db) -> None:
         snapshot.source_payload["ortex_selection_batch_sha256"]
         == sha256_json(ortex_event.payload)
     )
+
+
+def test_ortex_row_resolves_handoff_and_rejects_future_retention_clock(db) -> None:
+    material = _seed_source(db)
+    reference, _rows = _seed_ortex_success_reference(
+        db,
+        symbol="ACTU",
+        observed_at=material["tick_at"],
+        source_received_at=material["tick_at"] - timedelta(seconds=5),
+    )
+    _set_ortex_signal(db, reference=reference, rank_pct=1.0)
+    hub = db.get(BrainNodeState, HUB_NODE_ID)
+    assert hub is not None
+    original_state = copy.deepcopy(dict(hub.local_state or {}))
+    original = copy.deepcopy(
+        dict(original_state["ortex_squeeze_fuel_batch"])
+    )
+    newer = copy.deepcopy(original)
+    newer["decision_at"] = (
+        datetime.fromisoformat(original["decision_at"])
+        + timedelta(seconds=1)
+    ).isoformat()
+    unsigned = dict(newer)
+    unsigned.pop("batch_sha256")
+    newer["batch_sha256"] = sha256_json(unsigned)
+    publication = stage_ortex_handoff_publication(
+        original_state,
+        manifest=newer,
+        displaced_at=material["tick_at"],
+    )
+    hub.local_state = publication.local_state
+    db.commit()
+
+    source = _source(
+        material,
+        fundamentals_reader=lambda symbol: _fresh_fundamentals(symbol),
+        ortex_enabled=True,
+    )
+    before_metrics = ortex_handoff_runtime_metrics()
+    snapshot = source.read_snapshot()[0]
+    after_metrics = ortex_handoff_runtime_metrics()
+
+    assert snapshot.ortex_coverage_reason is None
+    assert after_metrics.history_hits == before_metrics.history_hits + 1
+    assert (
+        hub.local_state[ORTEX_HANDOFF_HISTORY_KEY]["entries"]
+        [original["batch_sha256"]]["manifest"]
+        == original
+    )
+
+    tampered = copy.deepcopy(dict(hub.local_state or {}))
+    tampered[ORTEX_HANDOFF_HISTORY_KEY]["entries"][
+        original["batch_sha256"]
+    ]["displaced_at"] = (material["tick_at"] + timedelta(days=1)).isoformat()
+    hub.local_state = tampered
+    db.commit()
+    tampered_source = _source(
+        material,
+        fundamentals_reader=lambda symbol: _fresh_fundamentals(symbol),
+        ortex_enabled=True,
+    )
+
+    tampered_snapshot = tampered_source.read_snapshot()[0]
+
+    assert (
+        tampered_snapshot.ortex_coverage_reason
+        == "ortex_selection_batch_handoff_history_invalid"
+    )
+
+
+def test_captured_ortex_handoff_history_expiry_is_typed_and_read_only(db) -> None:
+    material = _seed_source(db)
+    reference, _rows = _seed_ortex_success_reference(
+        db,
+        symbol="ACTU",
+        observed_at=material["tick_at"],
+        source_received_at=material["tick_at"] - timedelta(seconds=5),
+    )
+    _set_ortex_signal(db, reference=reference, rank_pct=1.0)
+    row = (
+        db.query(MomentumSymbolViability)
+        .filter(MomentumSymbolViability.symbol == "ACTU")
+        .one()
+    )
+    feature_meta = copy.deepcopy(
+        dict((row.execution_readiness_json or {})["extra"])
+    )
+    hub = db.get(BrainNodeState, HUB_NODE_ID)
+    assert hub is not None
+    original_state = copy.deepcopy(dict(hub.local_state or {}))
+    original = copy.deepcopy(
+        dict(original_state["ortex_squeeze_fuel_batch"])
+    )
+    newer = copy.deepcopy(original)
+    newer["decision_at"] = (
+        datetime.fromisoformat(original["decision_at"])
+        + timedelta(seconds=1)
+    ).isoformat()
+    unsigned = dict(newer)
+    unsigned.pop("batch_sha256")
+    newer["batch_sha256"] = sha256_json(unsigned)
+    displaced_at = material["tick_at"] + timedelta(seconds=1)
+    hub.local_state = stage_ortex_handoff_publication(
+        original_state,
+        manifest=newer,
+        displaced_at=displaced_at,
+    ).local_state
+    db.commit()
+    before = copy.deepcopy(dict(hub.local_state or {}))
+
+    resolved, reason = selection_source_module._ortex_global_batch_inventory(
+        db,
+        feature_meta,
+        required_symbol="ACTU",
+        read_at=(
+            displaced_at
+            + timedelta(seconds=ORTEX_HANDOFF_RETENTION_SECONDS + 1)
+        ),
+        public_policy_sha256=sha256_json(ortex_public_policy()),
+        freshness_ttl_seconds=60.0,
+        manifest_cache={},
+    )
+
+    assert resolved is None
+    assert reason == "ortex_selection_batch_handoff_history_expired"
+    assert dict(hub.local_state or {}) == before
+    assert not db.dirty
 
 
 def test_optional_ortex_event_uses_nonoverlapping_global_sequence_slots(db) -> None:

@@ -12,6 +12,9 @@ import pytest
 
 from app.services.trading.momentum_neural import pipeline
 from app.services.trading.momentum_neural import short_mechanics as sm
+from app.services.trading.momentum_neural.ortex_handoff_history import (
+    ORTEX_HANDOFF_RETENTION_SECONDS,
+)
 from app.services.trading.momentum_neural.ross_momentum import (
     ROSS_PILLAR_WEIGHTS_LIQUIDITY_BIASED,
 )
@@ -767,8 +770,8 @@ def test_live_guard_binds_hub_manifest_before_entry_side_effects(
     monkeypatch.setattr(
         pipeline,
         "resolve_ortex_batch_manifest_from_hub",
-        lambda db, *, batch_reference: (
-            calls.append(("resolve", batch_reference)) or manifest,
+        lambda db, *, batch_reference, read_at: (
+            calls.append(("resolve", (batch_reference, read_at))) or manifest,
             None,
         ),
     )
@@ -803,6 +806,10 @@ def test_live_guard_binds_hub_manifest_before_entry_side_effects(
         is None
     )
     assert [name for name, _value in calls] == ["resolve", "validate"]
+    assert calls[0][1] == (
+        readiness["extra"][pipeline.ORTEX_SQUEEZE_BATCH_STATUS_KEY],
+        NOW,
+    )
     assert calls[1][1] == (readiness, "AAA", manifest, NOW, False)
     source = inspect.getsource(live_runner.tick_live_session)
     guard_index = source.index("_live_ortex_entry_readiness_reason")
@@ -914,6 +921,82 @@ def test_live_hub_manifest_resolver_is_read_only_exact_and_deep_copied() -> None
     assert resolved is not None
     resolved["members"].append({"symbol": "MUTATED"})
     assert manifest["members"] == [{"symbol": "AAA"}]
+
+
+def test_live_hub_manifest_resolver_finds_exact_displaced_history() -> None:
+    first = {
+        "schema_version": "chili.ortex.squeeze-fuel-batch.v1",
+        "batch_sha256": "a" * 64,
+        "decision_at": NOW.isoformat(),
+        "complete": True,
+        "quota_policy_sha256": "b" * 64,
+        "members_sha256": "c" * 64,
+        "members": [{"symbol": "AAA"}],
+    }
+    second = {
+        **first,
+        "batch_sha256": "d" * 64,
+        "decision_at": (NOW + timedelta(seconds=1)).isoformat(),
+    }
+    state = pipeline.stage_ortex_handoff_publication(
+        {}, manifest=first, displaced_at=NOW
+    ).local_state
+    state = pipeline.stage_ortex_handoff_publication(
+        state,
+        manifest=second,
+        displaced_at=NOW + timedelta(seconds=1),
+    ).local_state
+
+    class _Query:
+        def populate_existing(self) -> "_Query":
+            return self
+
+        def filter(self, *_args: object) -> "_Query":
+            return self
+
+        def one_or_none(self) -> object:
+            return SimpleNamespace(local_state=state)
+
+    class _Db:
+        def query(self, *_args: object) -> _Query:
+            return _Query()
+
+    resolved, reason = pipeline.resolve_ortex_batch_manifest_from_hub(
+        _Db(),  # type: ignore[arg-type]
+        batch_reference=pipeline._ortex_batch_reference(first),
+        read_at=NOW + timedelta(seconds=1),
+    )
+
+    assert reason is None
+    assert resolved == first
+    assert resolved is not first
+
+    at_boundary = pipeline.resolve_ortex_batch_manifest_from_hub(
+        _Db(),  # type: ignore[arg-type]
+        batch_reference=pipeline._ortex_batch_reference(first),
+        read_at=(
+            NOW
+            + timedelta(
+                seconds=1 + ORTEX_HANDOFF_RETENTION_SECONDS
+            )
+        ),
+    )
+    after_boundary = pipeline.resolve_ortex_batch_manifest_from_hub(
+        _Db(),  # type: ignore[arg-type]
+        batch_reference=pipeline._ortex_batch_reference(first),
+        read_at=(
+            NOW
+            + timedelta(
+                seconds=2 + ORTEX_HANDOFF_RETENTION_SECONDS
+            )
+        ),
+    )
+    assert at_boundary[0] == first
+    assert at_boundary[1] is None
+    assert after_boundary == (
+        None,
+        "ortex_batch_handoff_history_expired",
+    )
 
 
 @pytest.mark.parametrize(

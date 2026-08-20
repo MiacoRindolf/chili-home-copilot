@@ -3159,7 +3159,12 @@ def _ross_universe_symbols_read(limit: int) -> SourceRead:
             error_code=error_code,
             error_detail=error_detail,
         )
-    if symbols and success_at is not None and max_age_s is not None:
+    # A completed provider read is authoritative even when it returns no
+    # qualifying ROSS movers.  ``success_at`` distinguishes that valid-empty
+    # snapshot from the initial/unavailable cache state; requiring ``symbols``
+    # here would turn #1049's normal premarket/off-hours result back into a
+    # source failure and re-enable retain-all-prior hint starvation.
+    if success_at is not None and max_age_s is not None:
         age_s = max(0.0, now - success_at)
         if age_s <= max_age_s:
             return SourceRead.success(TargetCause.ROSS, symbols[: int(limit)])
