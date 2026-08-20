@@ -6135,6 +6135,42 @@ def _governed_place(
                 _approved_age = float("inf")
                 _approved_max = 0.0
                 _final_bbo_ok = False
+            if not _final_bbo_ok:
+                # THE APPROVED QUOTE AGED IN-TICK, NOT THE MARKET (GYGY and
+                # TETH both died here 2026-08-20 with sub-second-fresh quotes
+                # at approval). Same doctrine as the two later seams: re-fetch
+                # one fresh BBO — direct at its 2.0s contract, stand-in at its
+                # own flush-aware bound — and only defer when the market
+                # genuinely has nothing fresh. The limit is pinned; the fresh
+                # tick never reprices the order.
+                _reuse_refetch_tick, _reuse_refetch_ev = _final_entry_bbo(
+                    adapter,
+                    str(kwargs.get("product_id") or ""),
+                    max_age_seconds=_approved_max,
+                    allow_stand_in=True,
+                    stand_in_max_age_seconds=float(
+                        getattr(
+                            settings,
+                            "chili_alpaca_execution_bbo_massive_sip_max_age_seconds",
+                            10.0,
+                        )
+                        or 0.0
+                    ),
+                )
+                if _reuse_refetch_tick is not None:
+                    execution_bbo_freshness = _reuse_refetch_tick.freshness
+                    _approved_age = float(
+                        execution_bbo_freshness.age_seconds(now=_utcnow_aware())
+                    )
+                    _final_bbo_ok = True
+                    _log.info(
+                        "[momentum_live] reuse-seam BBO refetch %s: approved "
+                        "quote aged in-tick, fresh %s quote %.3fs old "
+                        "authorizes the place (limit unchanged)",
+                        kwargs.get("product_id"),
+                        _reuse_refetch_ev.get("quote_authority"),
+                        _approved_age,
+                    )
             _final_bbo_meta = {
                 "reason": (
                     None if _final_bbo_ok else "alpaca_final_bbo_stale_at_place"
@@ -6387,6 +6423,17 @@ def _governed_place(
                 str(kwargs.get("product_id") or ""),
                 max_age_seconds=_literal_max,
                 allow_stand_in=True,
+                # The stand-in is judged by ITS contract, not the direct 2.0s —
+                # a SIP row is DB-visible up to ~6s late (BRLS died here with
+                # the bound missing).
+                stand_in_max_age_seconds=float(
+                    getattr(
+                        settings,
+                        "chili_alpaca_execution_bbo_massive_sip_max_age_seconds",
+                        10.0,
+                    )
+                    or 0.0
+                ),
             )
             if _refetched_tick is not None:
                 _alpaca_final_freshness = _refetched_tick.freshness
@@ -6568,6 +6615,14 @@ def _governed_place(
                 str(kwargs.get("product_id") or ""),
                 max_age_seconds=_post_seam_bbo_max,
                 allow_stand_in=True,
+                stand_in_max_age_seconds=float(
+                    getattr(
+                        settings,
+                        "chili_alpaca_execution_bbo_massive_sip_max_age_seconds",
+                        10.0,
+                    )
+                    or 0.0
+                ),
             )
             if _post_refetch_tick is not None:
                 _alpaca_final_freshness = _post_refetch_tick.freshness
@@ -19186,6 +19241,7 @@ def _final_entry_bbo(
     *,
     max_age_seconds: float,
     allow_stand_in: bool = False,
+    stand_in_max_age_seconds: float | None = None,
 ) -> tuple[NormalizedTicker | None, dict[str, Any]]:
     """Fetch and validate the exact BBO used at the broker submit boundary.
 
@@ -19208,6 +19264,10 @@ def _final_entry_bbo(
             # Opt in only when asked, so an adapter that predates the parameter
             # keeps working unchanged rather than raising TypeError.
             _kwargs["allow_stand_in"] = True
+            if stand_in_max_age_seconds is not None:
+                _kwargs["stand_in_max_age_seconds"] = float(
+                    stand_in_max_age_seconds
+                )
         result = getter(product_id, **_kwargs)
         tick, meta = result if isinstance(result, tuple) else (result, None)
     except Exception as exc:
@@ -19303,11 +19363,20 @@ def _final_entry_bbo(
     except Exception:
         return None, {"ok": False, "reason": "execution_bbo_time_invalid", "source": source}
     spread_bps = (ask - bid) / mid * 10_000.0
+    _validate_max_age = float(max_age_seconds)
+    if (
+        stand_in_max_age_seconds is not None
+        and str(raw.get("timestamp_basis") or "") == "massive_sip_unix_ms"
+    ):
+        # The stand-in was fetched under its own bound; judge it by the same.
+        _validate_max_age = max(
+            _validate_max_age, float(stand_in_max_age_seconds)
+        )
     snapshot = {
-        "ok": age_s <= float(max_age_seconds),
+        "ok": age_s <= _validate_max_age,
         "reason": (
             "execution_bbo_ok"
-            if age_s <= float(max_age_seconds)
+            if age_s <= _validate_max_age
             else "execution_bbo_stale"
         ),
         "symbol": observed,
@@ -19329,7 +19398,7 @@ def _final_entry_bbo(
             else "alpaca_direct"
         ),
         "age_seconds": round(age_s, 6),
-        "max_age_seconds": float(max_age_seconds),
+        "max_age_seconds": _validate_max_age,
         "bid": bid,
         "ask": ask,
         "mid": mid,
