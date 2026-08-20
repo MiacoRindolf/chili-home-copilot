@@ -1114,12 +1114,26 @@ class AlpacaSpotAdapter:
             logger.debug("[alpaca_spot] direct latest quote(%s) failed: %s", sym, exc)
             return None, _fresh()
 
-    def get_execution_bbo(self, product_id: str, *, max_age_seconds: float = 2.0):
+    def get_execution_bbo(
+        self,
+        product_id: str,
+        *,
+        max_age_seconds: float = 2.0,
+        allow_stand_in: bool = False,
+    ):
         """Authoritative pre-submit BBO.
 
         Execution authority prefers a fresh direct Alpaca data request carrying
         Alpaca's exact quote-event timestamp.  When that request yields no usable
-        quote clock, a SIP-clocked Massive row may stand in (``_massive_sip_quote``).
+        quote clock AND the caller opts in via ``allow_stand_in``, a SIP-clocked
+        Massive row may stand in (``_massive_sip_quote``).
+
+        ``allow_stand_in`` defaults to False so every existing caller keeps
+        byte-identical behaviour.  Only the ENTRY seam may opt in.  The exit
+        marketability refresh and the extended-hours orphan close must not: a
+        national best bid is by construction >= any single venue's bid, so a
+        stand-in bid would judge an exit marketable, or price one, above what the
+        venue can actually reach — turning "no entries" into "entered and stuck".
 
         WHY the stand-in exists (2026-08-20): this method used to accept the direct
         Alpaca quote and nothing else, on the premise that no tape row carries a
@@ -1141,9 +1155,10 @@ class AlpacaSpotAdapter:
         resolved = self._execution_bbo_from_direct(tick, meta, max_age_seconds)
         if resolved is not None:
             return resolved
-        stand_in = self._massive_sip_execution_bbo(product_id, max_age_seconds)
-        if stand_in is not None:
-            return stand_in
+        if allow_stand_in:
+            stand_in = self._massive_sip_execution_bbo(product_id, max_age_seconds)
+            if stand_in is not None:
+                return stand_in
         # No stand-in: hand back the direct metadata unchanged so the caller's
         # unavailable_kind attribution still reports the real adapter outcome.
         return None, (meta if isinstance(meta, FreshnessMeta) else _fresh(max_age_seconds))

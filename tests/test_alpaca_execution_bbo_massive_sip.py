@@ -285,10 +285,40 @@ def test_stand_in_fires_when_direct_has_no_clock(monkeypatch):
             provider_time_utc=None, max_age_seconds=2.0)),
     )
     _install_row(monkeypatch, _sip_row())
-    tick, meta = adapter.get_execution_bbo("SGLY", max_age_seconds=5.0)
+    tick, meta = adapter.get_execution_bbo(
+        "SGLY", max_age_seconds=5.0, allow_stand_in=True
+    )
     assert tick is not None
     assert tick.raw["timestamp_basis"] == _BASIS
     assert isinstance(meta.provider_time_utc, datetime)
+
+
+def test_default_is_direct_only_so_exit_paths_are_untouched(monkeypatch):
+    """ANG PINAKAMAHALAGANG GUARD: shared primitive ang get_execution_bbo — ginagamit
+    din ng exit-marketability refresh at ng extended-hours orphan close. Ang NBBO bid
+    ay laging >= bid ng iisang venue, kaya ang stand-in ay magpapasyang marketable (o
+    magpepresyo) ng EXIT nang mas mataas kaysa kayang abutin ng venue: 'pasok tapos
+    ipit'. Kaya ang default ay DIRECT-ONLY, at ang entry lang ang puwedeng mag-opt-in."""
+    adapter = AlpacaSpotAdapter()
+    direct_meta = FreshnessMeta(
+        retrieved_at_utc=datetime.now(timezone.utc),
+        provider_time_utc=None, max_age_seconds=2.0,
+    )
+    monkeypatch.setattr(adapter, "_alpaca_latest_quote", lambda pid: (None, direct_meta))
+
+    def _boom(*_a, **_k):
+        raise AssertionError("hindi dapat kinakausap ang stand-in kapag walang opt-in")
+
+    monkeypatch.setattr(adapter, "_massive_sip_quote", _boom)
+    # WALANG allow_stand_in -> dating ugali, byte-identical.
+    tick, meta = adapter.get_execution_bbo("SGLY", max_age_seconds=5.0)
+    assert tick is None
+    assert meta is direct_meta
+    # ...at kahit tahasang False.
+    tick2, _ = adapter.get_execution_bbo(
+        "SGLY", max_age_seconds=5.0, allow_stand_in=False
+    )
+    assert tick2 is None
 
 
 def test_flag_off_restores_direct_only_and_keeps_attribution(monkeypatch):
@@ -305,7 +335,9 @@ def test_flag_off_restores_direct_only_and_keeps_attribution(monkeypatch):
     )
     monkeypatch.setattr(adapter, "_alpaca_latest_quote", lambda pid: (None, direct_meta))
     _install_row(monkeypatch, _sip_row())
-    tick, meta = adapter.get_execution_bbo("SGLY", max_age_seconds=5.0)
+    tick, meta = adapter.get_execution_bbo(
+        "SGLY", max_age_seconds=5.0, allow_stand_in=True
+    )
     assert tick is None
     assert meta is direct_meta          # -> unavailable_kind='no_provider_timestamp'
 
@@ -323,7 +355,9 @@ def test_crypto_never_uses_the_stand_in(monkeypatch):
         raise AssertionError("equities lang ang tape na ito")
 
     monkeypatch.setattr(adapter, "_massive_sip_quote", _boom)
-    tick, _ = adapter.get_execution_bbo("BTC-USD", max_age_seconds=5.0)
+    tick, _ = adapter.get_execution_bbo(
+        "BTC-USD", max_age_seconds=5.0, allow_stand_in=True
+    )
     assert tick is None
 
 
@@ -335,7 +369,9 @@ def test_no_row_at_all_returns_direct_meta(monkeypatch):
     )
     monkeypatch.setattr(adapter, "_alpaca_latest_quote", lambda pid: (None, direct_meta))
     _install_row(monkeypatch, None)
-    tick, meta = adapter.get_execution_bbo("SGLY", max_age_seconds=5.0)
+    tick, meta = adapter.get_execution_bbo(
+        "SGLY", max_age_seconds=5.0, allow_stand_in=True
+    )
     assert tick is None
     assert meta is direct_meta
 
@@ -351,3 +387,83 @@ def test_settings_are_wired_and_bounded():
     assert v >= 2.0
     # ...pero hindi kasing-luwag na tumanggap ng quote mula sa ibang market regime.
     assert v <= 15.0
+
+
+# ─────────────── ang entry-only wiring sa live_runner ───────────────
+
+
+class _StubAdapter:
+    """Itinatala kung ANO ang ipinasa — dito nabubuhay o namamatay ang guard."""
+
+    def __init__(self, tick=None, meta=None):
+        self.calls = []
+        self._tick = tick
+        self._meta = meta
+
+    def get_execution_bbo(self, product_id, **kwargs):
+        self.calls.append(kwargs)
+        return self._tick, self._meta
+
+
+def _stand_in_tick(basis=_BASIS, feed="massive_ws_universe"):
+    now = datetime.now(timezone.utc)
+    meta = FreshnessMeta(
+        retrieved_at_utc=now,
+        provider_time_utc=now - timedelta(milliseconds=300),
+        max_age_seconds=5.0,
+    )
+    return NormalizedTicker(
+        product_id="SGLY", bid=7.07, ask=7.09, mid=7.08, spread_bps=28.2,
+        bid_size=None, ask_size=None, freshness=meta,
+        raw={"feed": feed, "timestamp_basis": basis,
+             "provider_event_at_utc": meta.provider_time_utc.isoformat()},
+    ), meta
+
+
+def test_exit_callers_do_not_opt_in():
+    """ANG BUONG PUNTO NG GUARD: ang default ay hindi humihingi ng stand-in, kaya
+    ang exit-marketability at ang orphan close ay nananatiling direct-Alpaca."""
+    from app.services.trading.momentum_neural.live_runner import _final_entry_bbo
+    tick, meta = _stand_in_tick()
+    ad = _StubAdapter(tick, meta)
+    _final_entry_bbo(ad, "SGLY", max_age_seconds=2.0)
+    assert ad.calls == [{"max_age_seconds": 2.0}]
+    assert "allow_stand_in" not in ad.calls[0]
+
+
+def test_entry_caller_opts_in():
+    from app.services.trading.momentum_neural.live_runner import _final_entry_bbo
+    tick, meta = _stand_in_tick()
+    ad = _StubAdapter(tick, meta)
+    _final_entry_bbo(ad, "SGLY", max_age_seconds=5.0, allow_stand_in=True)
+    assert ad.calls[0]["allow_stand_in"] is True
+
+
+def test_quote_authority_is_tagged_honestly():
+    """Hindi dapat mabasa ang stand-in bilang Alpaca quote sa downstream."""
+    from app.services.trading.momentum_neural.live_runner import _final_entry_bbo
+    tick, meta = _stand_in_tick()
+    _, snap = _final_entry_bbo(
+        _StubAdapter(tick, meta), "SGLY", max_age_seconds=5.0, allow_stand_in=True
+    )
+    assert snap["quote_authority"] == "stand_in_massive_sip"
+    assert snap["timestamp_basis"] == _BASIS
+
+    direct_tick, direct_meta = _stand_in_tick(basis="provider_event_at", feed="alpaca")
+    _, snap2 = _final_entry_bbo(
+        _StubAdapter(direct_tick, direct_meta), "SGLY", max_age_seconds=5.0
+    )
+    assert snap2["quote_authority"] == "alpaca_direct"
+
+
+def test_adapter_without_the_parameter_still_works():
+    """Ang adapter na mas luma kaysa sa parameter ay hindi dapat sumabog kapag
+    hindi humihingi ng opt-in ang caller."""
+    from app.services.trading.momentum_neural.live_runner import _final_entry_bbo
+
+    class _Legacy:
+        def get_execution_bbo(self, product_id, *, max_age_seconds):
+            return _stand_in_tick(basis="provider_event_at", feed="alpaca")
+
+    tick, snap = _final_entry_bbo(_Legacy(), "SGLY", max_age_seconds=5.0)
+    assert snap["quote_authority"] == "alpaca_direct"
