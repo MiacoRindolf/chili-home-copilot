@@ -10540,6 +10540,39 @@ class Settings(BaseSettings):
     # ~0.26s lag, ~1.8s cadence on the day's leader), so those rows — and ONLY those — may stand
     # in as execution authority. IQFeed rows still may not: they carry no quote-event clock.
     # OFF restores direct-Alpaca-only (and with it, no pre-market entries).
+    # SPREAD GATE FRAME (2026-08-20, operator-decided doctrine change): the entry spread gate
+    # used to bound the spread against the STOP distance — but a momentum entry's stop is
+    # deliberately tight, so on breakout names it refused spreads completely ordinary for the
+    # expected move (measured with REAL books: BTMD $5.16 vs $4.67, CJMB $13.4 vs $18.58 —
+    # both vetoed; Ross pays ~1-3% spreads against 10-20% expected moves). ON = the spread
+    # passes when spread_bps <= min(abs_ceiling, fraction * expected_move_bps); when the
+    # expected move is unavailable the ORIGINAL stop-based test runs unchanged (fail-closed).
+    chili_momentum_entry_spread_vs_expected_move_enabled: bool = Field(
+        default=True,
+        validation_alias=AliasChoices(
+            "CHILI_MOMENTUM_ENTRY_SPREAD_VS_EXPECTED_MOVE_ENABLED"
+        ),
+    )
+    # Ross reference: ~200bps paid against ~2000bps expected = 10%; 0.15 leaves headroom
+    # without accepting a spread that eats the move. This is a FLOOR-style reference point.
+    chili_momentum_entry_spread_max_fraction_of_expected_move: float = Field(
+        default=0.15,
+        ge=0.0,
+        le=1.0,
+        validation_alias=AliasChoices(
+            "CHILI_MOMENTUM_ENTRY_SPREAD_MAX_FRACTION_OF_EXPECTED_MOVE"
+        ),
+    )
+    # Absolute sanity ceiling regardless of expected move — a 5%+ round-trip is a broken or
+    # untradeable book (tape sanity bound is 5000bps), not a cost worth paying.
+    chili_momentum_entry_spread_abs_ceiling_bps: float = Field(
+        default=500.0,
+        ge=0.0,
+        le=5000.0,
+        validation_alias=AliasChoices(
+            "CHILI_MOMENTUM_ENTRY_SPREAD_ABS_CEILING_BPS"
+        ),
+    )
     chili_alpaca_execution_bbo_massive_sip_fallback_enabled: bool = Field(
         default=True,
         validation_alias=AliasChoices(
