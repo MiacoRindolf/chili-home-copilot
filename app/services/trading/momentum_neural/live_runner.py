@@ -6373,19 +6373,52 @@ def _governed_place(
             _literal_age = float("inf")
             _literal_max = 0.0
         if not math.isfinite(_literal_age) or _literal_age > _literal_max:
-            _released = _release_bound_entry_before_http(
-                "alpaca_final_bbo_stale_after_reservation"
+            # THE QUOTE DID NOT GO STALE — THE RESERVATION DID (2026-08-20,
+            # XRPI 15:47): the approved BBO was 0.12s old, then the adaptive
+            # reservation path spent 10.4s before this seam, so re-aging the
+            # OLD freshness answers the wrong question. What place-safety
+            # actually needs is "does a fresh sane market exist NOW?" — so
+            # re-fetch at the last instruction instead of deferring. The limit
+            # is already pinned (the fresh tick never reprices the order), the
+            # fetch is entry-only by construction here, and a failed re-fetch
+            # falls through to the exact defer this branch always produced.
+            _refetched_tick, _refetched_ev = _final_entry_bbo(
+                adapter,
+                str(kwargs.get("product_id") or ""),
+                max_age_seconds=_literal_max,
+                allow_stand_in=True,
             )
-            return {
-                "ok": False,
-                "error": "alpaca_final_bbo_stale_after_reservation",
-                "deferred": True,
-                "pre_place_blocked": True,
-                "execution_bbo_age_seconds": _literal_age,
-                "execution_bbo_max_age_seconds": _literal_max,
-                "client_order_id": _alpaca_cid,
-                "entry_claim_pre_post_released": _released,
-            }
+            if _refetched_tick is not None:
+                _alpaca_final_freshness = _refetched_tick.freshness
+                _literal_age = float(
+                    _alpaca_final_freshness.age_seconds(now=_utcnow_aware())
+                )
+                _log.info(
+                    "[momentum_live] literal-seam BBO refetch %s: approved "
+                    "quote aged out during reservation, fresh %s quote %.3fs "
+                    "old authorizes the place (limit unchanged)",
+                    kwargs.get("product_id"),
+                    _refetched_ev.get("quote_authority"),
+                    _literal_age,
+                )
+            else:
+                _released = _release_bound_entry_before_http(
+                    "alpaca_final_bbo_stale_after_reservation"
+                )
+                return {
+                    "ok": False,
+                    "error": "alpaca_final_bbo_stale_after_reservation",
+                    "deferred": True,
+                    "pre_place_blocked": True,
+                    "execution_bbo_age_seconds": _literal_age,
+                    "execution_bbo_max_age_seconds": _literal_max,
+                    "literal_refetch_attempted": True,
+                    "literal_refetch_reason": (
+                        (_refetched_ev or {}).get("reason")
+                    ),
+                    "client_order_id": _alpaca_cid,
+                    "entry_claim_pre_post_released": _released,
+                }
         # The reservation transaction deliberately does not hold a database lock
         # across broker I/O.  Re-read account-wide exposure at the literal POST
         # seam so a manual position/order created after the preliminary posture
@@ -6525,19 +6558,47 @@ def _governed_place(
             not math.isfinite(_post_seam_bbo_age)
             or _post_seam_bbo_age > _post_seam_bbo_max
         ):
-            _released = _release_bound_entry_before_http(
-                "alpaca_final_bbo_stale_at_literal_post"
+            # Same shape as the after-reservation seam above: the posture /
+            # daily-loss / UUID network calls aged the quote, not the market.
+            # One fresh re-fetch (entry-only, limit already pinned) answers the
+            # question this gate actually asks; a failed re-fetch defers
+            # exactly as before.
+            _post_refetch_tick, _post_refetch_ev = _final_entry_bbo(
+                adapter,
+                str(kwargs.get("product_id") or ""),
+                max_age_seconds=_post_seam_bbo_max,
+                allow_stand_in=True,
             )
-            return {
-                "ok": False,
-                "error": "alpaca_final_bbo_stale_after_reservation",
-                "deferred": True,
-                "pre_place_blocked": True,
-                "execution_bbo_age_seconds": _post_seam_bbo_age,
-                "execution_bbo_max_age_seconds": _post_seam_bbo_max,
-                "client_order_id": _alpaca_cid,
-                "entry_claim_pre_post_released": _released,
-            }
+            if _post_refetch_tick is not None:
+                _alpaca_final_freshness = _post_refetch_tick.freshness
+                _post_seam_bbo_age = float(
+                    _alpaca_final_freshness.age_seconds(now=_utcnow_aware())
+                )
+                _log.info(
+                    "[momentum_live] literal-POST BBO refetch %s: fresh %s "
+                    "quote %.3fs old authorizes the post (limit unchanged)",
+                    kwargs.get("product_id"),
+                    _post_refetch_ev.get("quote_authority"),
+                    _post_seam_bbo_age,
+                )
+            else:
+                _released = _release_bound_entry_before_http(
+                    "alpaca_final_bbo_stale_at_literal_post"
+                )
+                return {
+                    "ok": False,
+                    "error": "alpaca_final_bbo_stale_after_reservation",
+                    "deferred": True,
+                    "pre_place_blocked": True,
+                    "execution_bbo_age_seconds": _post_seam_bbo_age,
+                    "execution_bbo_max_age_seconds": _post_seam_bbo_max,
+                    "literal_refetch_attempted": True,
+                    "literal_refetch_reason": (
+                        (_post_refetch_ev or {}).get("reason")
+                    ),
+                    "client_order_id": _alpaca_cid,
+                    "entry_claim_pre_post_released": _released,
+                }
         binder = str(_alpaca_claim.get("_post_bind_token") or "").strip()
         account_id = _frozen_alpaca_account_id(sess)
         if not (
