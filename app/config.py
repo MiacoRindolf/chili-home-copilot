@@ -8712,6 +8712,15 @@ class Settings(BaseSettings):
         le=3600,
         validation_alias=AliasChoices("CHILI_MOMENTUM_LIVE_RUNNER_SCHEDULER_INTERVAL_SECONDS"),
     )
+    chili_momentum_symbol_of_day_leader_watch_seconds: float = Field(
+        default=3600.0,
+        ge=0.0,
+        le=23400.0,
+        validation_alias=AliasChoices(
+            "CHILI_MOMENTUM_SYMBOL_OF_DAY_LEADER_WATCH_SECONDS"
+        ),
+        description="Dedicated watch budget for the symbol-of-the-day leader before the stale-watcher reaper may cancel it. The focus tilt previously used the shared 600s extend cutoff, which is far too short for the stock of the day — and what actually kept a leader alive was the event-based 'still high-conviction AND still front-side' keep, which has exactly the wrong shape: it holds the name while it RUNS (when we cannot enter, because it is extended) and drops it the moment it dips off the high, which is when the entry sets up. Measured 2026-08-19: YJ started at 08:43:33, was cancelled at 09:12:37 after fading 6.30 -> ~5.7, and Ross bought that very dip at ~5.5 and sold into 6.50 for +$3,000; our re-arm (09:21:32) and runner start (09:26:25) both landed after the move. A watcher is $0-risk — it charges the funnel cap, never the risk budget — so a longer leader budget costs a slot, not exposure. Still bounded, and still only while the name IS the leader. 0 falls back to the shared extend cutoff (legacy).",
+    )
     chili_momentum_entry_volume_rate_normalization_enabled: bool = Field(
         default=True,
         validation_alias=AliasChoices(

@@ -1882,8 +1882,46 @@ def _reap_stale_watching_sessions(db: Session, *, user_id: int | None, now: date
         # without a forming break level — so a transient dip never rotates the stock of the
         # day out before its setup plays out. Bounded by extend_cutoff (still reaps a dead
         # leader). Checked first so it composes with (does not bypass) the hard upper bound.
-        if _focus_leader and str(s.symbol or "").upper() == _focus_leader and s.started_at >= extend_cutoff:
-            continue
+        # LEADER WATCH BUDGET (2026-08-19 YJ). The focus tilt above used the same
+        # 600s extend cutoff every watcher gets, which is far too short for the
+        # stock of the day: YJ started at 08:43:33 and Ross bought its curl at
+        # ~09:15 — 32 minutes in. What actually kept YJ alive that long was the
+        # event-based "still high-conviction AND still front-side" keep, and that
+        # is exactly the wrong shape for this: it holds the name while it RUNS
+        # (when we cannot enter, because it is extended) and drops it the moment
+        # it dips off the high — which is when the entry sets up. YJ was cancelled
+        # at 09:12:37 after fading from 6.30 to ~5.7; Ross bought that dip at ~5.5
+        # and sold into 6.50 for +$3,000, and by the time we re-armed (09:21:32)
+        # and the runner started (09:26:25) the move was over.
+        #
+        # So the leader gets its OWN budget, and it is NOT conditioned on staying
+        # front-side — a pullback is the setup, not a reason to walk away. Still
+        # bounded (a dead leader reaps at the ceiling), still only while it IS the
+        # leader, and a watcher is $0-risk: it charges the funnel cap, never the
+        # risk budget. 0 ⇒ fall back to the shared extend cutoff (legacy).
+        if _focus_leader and str(s.symbol or "").upper() == _focus_leader:
+            _leader_sec = float(
+                getattr(
+                    settings,
+                    "chili_momentum_symbol_of_day_leader_watch_seconds",
+                    3600.0,
+                )
+                or 0.0
+            )
+            _leader_cutoff = (
+                now - timedelta(seconds=_leader_sec)
+                if _leader_sec > 0
+                else extend_cutoff
+            )
+            if s.started_at >= _leader_cutoff:
+                logger.info(
+                    "[auto_arm] leader watch KEEP %s session=%s (age=%.0fs budget=%.0fs) "
+                    "— stock of the day holds its slot through the pullback",
+                    s.symbol, s.id,
+                    (now - s.started_at).total_seconds() if s.started_at else -1.0,
+                    _leader_sec,
+                )
+                continue
         try:
             _snap = s.risk_snapshot_json or {}
             _le = _snap.get("momentum_live_execution") if isinstance(_snap, dict) else None
