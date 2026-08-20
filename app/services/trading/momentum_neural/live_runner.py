@@ -5403,6 +5403,44 @@ def _recover_owner_alpaca_entry_claim(
     }
 
 
+def _pre_place_bbo_age_ceiling(
+    configured_max_age: Any,
+    quote_authority: str | None,
+) -> float:
+    """The just-before-place BBO age ceiling, authority-aware.
+
+    The 2.0s hard cap encodes "an Alpaca quote older than 2s may have moved".
+    A SIP stand-in quote physically cannot meet it: the tape recorder batches
+    rows to Postgres every 5s, so a provider-fresh row is DB-visible up to ~6s
+    late — measured live 2026-08-20 14:43: the IPST stand-in PASSED the entry
+    final-BBO check at 3.39s and then died here against the 2.0s re-check
+    (alpaca_final_bbo_stale_at_place), so every stand-in entry would fail at
+    the last instruction before the broker. For stand-in authority the ceiling
+    is the stand-in's own configured ceiling (the same bound the adapter
+    enforced at fetch) — safe because the stand-in never prices the order: the
+    planned limit is pinned, so a marginally older quote can only affirm that a
+    market exists, never move the price.
+    """
+    try:
+        configured = (
+            float(configured_max_age) if configured_max_age is not None else 2.0
+        )
+    except (TypeError, ValueError):
+        configured = 2.0
+    if str(quote_authority or "") == "stand_in_massive_sip":
+        ceiling = float(
+            getattr(
+                settings,
+                "chili_alpaca_execution_bbo_massive_sip_max_age_seconds",
+                10.0,
+            )
+            or 0.0
+        )
+    else:
+        ceiling = 2.0
+    return min(ceiling, max(0.0, configured))
+
+
 def _final_alpaca_execution_bbo_check(
     adapter: Any,
     kwargs: dict[str, Any],
@@ -5661,6 +5699,7 @@ def _governed_place(
     rail_reservation=None,
     execution_bbo_freshness=None,
     execution_bbo_max_age_seconds=None,
+    execution_bbo_quote_authority=None,
     alpaca_order_role: str | None = None,
     alpaca_role_metadata: dict[str, Any] | None = None,
     alpaca_risk_stop_price: float | None = None,
@@ -6085,9 +6124,9 @@ def _governed_place(
                 _approved_age = float(
                     execution_bbo_freshness.age_seconds(now=_utcnow_aware())
                 )
-                _approved_max = min(
-                    2.0,
-                    max(0.0, float(execution_bbo_max_age_seconds)),
+                _approved_max = _pre_place_bbo_age_ceiling(
+                    execution_bbo_max_age_seconds,
+                    execution_bbo_quote_authority,
                 )
                 _final_bbo_ok = bool(
                     math.isfinite(_approved_age) and _approved_age <= _approved_max
@@ -33868,6 +33907,7 @@ def tick_live_session(
         _entry_rail_reservation = None
         _entry_execution_bbo_freshness = None
         _entry_execution_bbo_max_age = None
+        _entry_execution_bbo_quote_authority = ""
         if str(ef or "").lower() in ("alpaca_spot", "alpaca_short"):
             from .rail_governor import acquire_rail
 
@@ -34159,6 +34199,9 @@ def tick_live_session(
             slip_ref = max(float(slip_ref), spread_bps_live / 2.0)
             _entry_execution_bbo_freshness = _final_tick.freshness
             _entry_execution_bbo_max_age = _final_bbo_max_age
+            _entry_execution_bbo_quote_authority = str(
+                _final_bbo.get("quote_authority") or ""
+            )
             le["entry_final_bbo"] = _final_bbo
             _commit_le(sess, le)
         # CHUNK 3-C — RAIL-GOVERNED PLACE: the token bucket shared with every other lane
@@ -34208,6 +34251,11 @@ def tick_live_session(
             rail_reservation=_entry_rail_reservation,
             execution_bbo_freshness=_entry_execution_bbo_freshness,
             execution_bbo_max_age_seconds=_entry_execution_bbo_max_age,
+            # Authority-aware pre-place ceiling: a SIP stand-in quote cannot
+            # meet the 2.0s direct-Alpaca re-check (tape flush lag ~1-6s), and
+            # it never prices the order, so it re-validates against its own
+            # configured ceiling instead. alpaca_direct keeps the 2.0s cap.
+            execution_bbo_quote_authority=_entry_execution_bbo_quote_authority,
             **_entry_kwargs,
         )
         _adaptive_lifecycle_refreshed = (
