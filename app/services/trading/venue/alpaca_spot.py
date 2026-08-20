@@ -1120,6 +1120,7 @@ class AlpacaSpotAdapter:
         *,
         max_age_seconds: float = 2.0,
         allow_stand_in: bool = False,
+        stand_in_max_age_seconds: float | None = None,
     ):
         """Authoritative pre-submit BBO.
 
@@ -1156,7 +1157,22 @@ class AlpacaSpotAdapter:
         if resolved is not None:
             return resolved
         if allow_stand_in:
-            stand_in = self._massive_sip_execution_bbo(product_id, max_age_seconds)
+            # EACH SOURCE IS HELD TO ITS OWN CONTRACT (2026-08-20, GYGY/TETH/
+            # BRLS): the direct quote validates against the caller's cap above,
+            # but a SIP stand-in row is DB-visible up to ~6s late (5s tape
+            # flush + 1s spacing), so validating it against a 2.0s direct cap
+            # means the stand-in can NEVER fire at the tight seams — the exact
+            # authority-aware-ceiling lesson of the pre-place seam, applied at
+            # the root so every caller inherits it. The stand-in's own hard
+            # ceiling still bounds it inside _massive_sip_quote.
+            stand_in = self._massive_sip_execution_bbo(
+                product_id,
+                (
+                    float(stand_in_max_age_seconds)
+                    if stand_in_max_age_seconds is not None
+                    else max_age_seconds
+                ),
+            )
             if stand_in is not None:
                 return stand_in
         # No stand-in: hand back the direct metadata unchanged so the caller's
