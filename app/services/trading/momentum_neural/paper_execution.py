@@ -93,6 +93,43 @@ def structural_or_vol_floored_atr_pct(
         if struct_atr_pct > eff:
             eff = struct_atr_pct
             model = "structural_pullback"
+        else:
+            # STRUCTURE-CAPPED VOL FLOOR (2026-08-19 YJ). When the structure is
+            # TIGHTER than the vol floor, the floor wins — that is the shake-out
+            # guard and it stays. But it was unbounded, so on a high-expected-move
+            # name it can sit at nearly twice the distance the structure actually
+            # requires, and every extra point of stop distance is paid twice: it
+            # shrinks the R-multiple AND (risk-first sizing) shrinks the position.
+            #
+            # Measured on the recorded YJ tape: entry 5.75 with a double-bottom low
+            # at ~5.37 (6.6% structural), but expected_move was 1950 bps so the
+            # floor forced 0.5 x 19.5% = 9.75% -> stop 5.1894. Price never revisited
+            # 5.37 after entry, so the extra 3.2% of stop bought nothing and cut the
+            # realised trade from ~3.4R to 1.30R.
+            #
+            # So the floor may still widen past the structure — just not without
+            # limit. It is capped at ``structure x cap`` (default 1.25 = 25% of wick
+            # room beyond what the pattern needs). cap <= 1.0 or a missing setting
+            # leaves the floor untouched (byte-identical), and the floor still owns
+            # the no-structure case entirely.
+            try:
+                from ....config import settings as _s
+
+                _cap = float(
+                    getattr(
+                        _s,
+                        "chili_momentum_structural_stop_vol_floor_cap_mult",
+                        1.25,
+                    )
+                    or 0.0
+                )
+            except Exception:
+                _cap = 0.0
+            if _cap > 1.0 and struct_atr_pct > 0.0:
+                _capped = struct_atr_pct * _cap
+                if _capped < eff:
+                    eff = _capped
+                    model = "structure_capped_vol_floor"
     return eff, model
 
 
