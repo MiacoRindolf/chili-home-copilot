@@ -62,8 +62,8 @@ OHLCV_START = datetime.fromisoformat(os.environ.get("OHLCV_START", "2026-06-30T1
 GRID_STEP_S = float(os.environ.get("GRID_STEP_S", "1.5"))
 DIAG = os.environ.get("DIAG", "0") == "1"
 ENTRY_DIAG = os.environ.get("ENTRY_DIAG", "0") == "1"
-EQUITY = 13000.0
-RISK = 130.0
+EQUITY = float(os.environ.get("EQUITY", "13000"))
+RISK = float(os.environ.get("RISK", "130"))
 
 
 def _naive(t):
@@ -343,6 +343,20 @@ def run_arm(label, grid, ticks, g4_on):
     arm = rv3.RecordedArm(symbol=SYMBOL, live_eligible_at_utc=WIN_START.isoformat(),
                           viability_score=0.9, atr_pct=0.05)
     seed = rv3.seed_replay_session(db, arm=arm, execution_family="robinhood_agentic_mcp")
+    # MAXLOSS_USD: experiment knob — the diagnostic seed freezes LEGACY_DIAGNOSTIC_POLICY_CAPS
+    # ($50/trade) into the session snapshot; no setting reaches it. Rewriting the frozen cap
+    # post-seed is the only lever that scales per-trade size without touching equity. Results
+    # stay non-certifying (legacy_config_diagnostic) — dollar-scale exploration only.
+    _maxloss_env = os.environ.get("MAXLOSS_USD")
+    if _maxloss_env:
+        _sess = db.get(TradingAutomationSession, seed.session_id)
+        _rs = dict(_sess.risk_snapshot_json or {})
+        _caps = dict(_rs.get("momentum_policy_caps") or {})
+        _caps["max_loss_per_trade_usd"] = float(_maxloss_env)
+        _rs["momentum_policy_caps"] = _caps
+        _sess.risk_snapshot_json = _rs
+        db.commit()
+        print(f"[harness] MAXLOSS_USD override: frozen max_loss_per_trade_usd -> {float(_maxloss_env)}")
     # FULL-density streaming mirror (cadence + 5m higher-low need real tick density); falls back
     # to the in-memory downsampled mirror only if FULL_MIRROR=0.
     if os.environ.get("FULL_MIRROR", "1") == "1":

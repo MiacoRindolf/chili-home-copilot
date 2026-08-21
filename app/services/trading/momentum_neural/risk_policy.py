@@ -3795,6 +3795,32 @@ def reentry_after_stop_allowed(
     return True, "allowed"
 
 
+def stopout_cycles_after_recycle(
+    *,
+    prev_stopout_cycles: int,
+    recycle_was_stopout: bool,
+) -> int:
+    """Pure bookkeeping for the loss-recycle strike counter (no I/O).
+
+    Ross RETRY doctrine (HUIZ 2026-08-20 second-leg lockout): a GREEN recycle
+    RESETS the strike count — the counter's purpose is CONSECUTIVE futility on a
+    chopper, and a banked winner proves the chop regime ended, so the strikes
+    accumulated before it must not lock the continuation leg (HUIZ: 3 chop
+    stopouts 12:03-12:08 froze the session at 12:14 with the 12:20 second leg to
+    $4.18 six minutes away, AFTER the vertical had just paid). This mirrors the
+    G4 escalation-level rule beside it ("a GREEN BANKED round RESETS it") that
+    the hard counter never followed. A name that alternates win/loss forever is
+    still bounded by symbol_day_loss_lockout (net dollars) — that guard, not
+    this streak counter, is the real damage bound."""
+    try:
+        prev = max(0, int(prev_stopout_cycles or 0))
+    except (TypeError, ValueError):
+        prev = 0
+    if recycle_was_stopout:
+        return prev + 1
+    return 0
+
+
 def fresh_ignition_reentry_allowed(
     *,
     enabled: bool,
