@@ -5940,6 +5940,13 @@ def ross_abcd_confirmation(
                     return True, "abcd_break_tick_ok", debug
         if cur_hi <= level:
             return False, "waiting_for_break", debug  # tick-armable (pullback_high set)
+        # BREAK = EVENT, not state (HUIZ 2026-08-20): the L1 hardening gave the TICK path
+        # its thrust+tape confirms but left this completed-bar path a naked state check —
+        # with a 40-minute-old B->C swing high it re-fired forever at +55% extension and
+        # fed the chase-veto (18 vetoes at level 1.87 vs entry ~2.9-3.1 in the A/B).
+        debug["break_is_fresh"] = _level_break_is_fresh(low, close, cur, level)
+        if not debug["break_is_fresh"]:
+            return False, "abcd_break_stale", debug
         # A completed bar broke D -> require a VOLUME spike on the break bar (real demand).
         arrays_v = compute_all_from_df(df, needed={"volume_ratio"})
         vr = arrays_v.get("volume_ratio") or []
@@ -7461,6 +7468,27 @@ def premarket_pivot_macd_entry(
         return False, "premarket_pivot_error", {"entry_interval": entry_interval}
 
 
+def _level_break_is_fresh(low: Any, close: Any, cur: int, level: float) -> bool:
+    """BREAK = EVENT, not state (HUIZ 2026-08-20 second-leg lockout).
+
+    Ang long-lookback pattern detectors (abcd, double-bottom, ...) ay nakakahanap ng
+    SINAUNANG istruktura, at ang hubad na `price > level` ay nananatiling totoo
+    kailanman kapag matagal nang lampas ang presyo — kaya pumuputok sila nang
+    degenerate, tinatabunan ang sariwang-shelf triggers, at pinapatay ng chase-veto
+    ang bawat pagsubok (HUIZ: level 1.87 vs entry ~2.9-3.4, 56 veto). Ang tunay na
+    break ay PAGTAWID ngayon: ang bar na ito (o ang nakaraang close) ay dumampi sa
+    level; ang gap-over ay nananatiling sariwa sa pamamagitan ng nakaraang close.
+    Fail-OPEN sa data bug (huwag kailanman harangan ang entry dahil sa sira)."""
+    try:
+        if float(low.iloc[cur]) <= float(level):
+            return True
+        if cur >= 1 and float(close.iloc[cur - 1]) <= float(level):
+            return True
+        return False
+    except (TypeError, ValueError, IndexError):
+        return True
+
+
 def ross_double_bottom_confirmation(
     df: pd.DataFrame,
     *,
@@ -7574,16 +7602,29 @@ def ross_double_bottom_confirmation(
             return False, f"double_bottom_{_reason}", debug
 
         # ── TRIGGER: the break above the intervening swing high (the neckline) ───────────
+        # BREAK = EVENT, not state (HUIZ 2026-08-20 second-leg lockout): with the pattern's
+        # lows 40 minutes old and price already +55% over the 1.87 neckline, bare
+        # `price > level` stayed true FOREVER — this fired every tick, shadowed the
+        # fresh-shelf triggers for the 12:20 second leg, and the chase-veto rightly killed
+        # each degenerate attempt (56 extension-vetoes, level 1.87 vs entry ~2.9-3.4).
+        # A real break is CROSSING the level now: this bar, or the prior bar's close,
+        # must have been at-or-below it (gap-overs stay valid via the prior close).
         cur_hi = float(high.iloc[cur])
+        _break_is_fresh = _level_break_is_fresh(low, close, cur, level)
+        debug["break_is_fresh"] = bool(_break_is_fresh)
         if (
             live_price is not None and float(live_price) > 0
             and float(live_price) > level
         ):
+            if not _break_is_fresh:
+                return False, "double_bottom_break_stale", debug
             debug["tick_break"] = True
             debug["live_price"] = float(live_price)
             return True, "double_bottom_break_tick_ok", debug
         if cur_hi <= level:
             return False, "waiting_for_break", debug  # tick-armable (pullback_high set)
+        if not _break_is_fresh:
+            return False, "double_bottom_break_stale", debug
         arrays_v = compute_all_from_df(df, needed={"volume_ratio"})
         vr = arrays_v.get("volume_ratio") or []
         vol_ratio = None

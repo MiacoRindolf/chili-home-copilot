@@ -166,6 +166,7 @@ from .risk_policy import (
     chase_defer_decision,
     rapid_whipsaw_cadence_update,
     reentry_after_stop_allowed,
+    stopout_cycles_after_recycle,
     symbol_day_loss_lockout_decision,
     reentry_escalation_decision,
     reentry_escalation_level_update,
@@ -41375,9 +41376,16 @@ def tick_live_session(
         if (not _timer_gate_on) or (_utcnow() >= until):
             le.pop("cooldown_until_utc", None)
             le["trade_cycles"] = int(le.get("trade_cycles") or 0) + 1
-            # Count LOSS recycles separately (a profit recycle is a free re-scalp).
-            if bool(le.pop("last_recycle_was_stopout", False)):
-                le["stopout_cycles"] = int(le.get("stopout_cycles") or 0) + 1
+            # Count LOSS recycles separately (a profit recycle is a free re-scalp);
+            # a GREEN recycle RESETS the strike count (Ross RETRY doctrine — the
+            # counter bounds CONSECUTIVE futility, and a banked winner proves the
+            # chop ended; HUIZ 2026-08-20: 3 chop strikes froze the session between
+            # the vertical and its 12:20 second leg). Damage stays bounded by
+            # symbol_day_loss_lockout below (net dollars, unaffected).
+            le["stopout_cycles"] = stopout_cycles_after_recycle(
+                prev_stopout_cycles=int(le.get("stopout_cycles") or 0),
+                recycle_was_stopout=bool(le.pop("last_recycle_was_stopout", False)),
+            )
             # BOUNDED RE-ENTRY AFTER STOP-OUT: a chopper must not re-arm forever. When
             # the loss-recycle count hits the cap, TERMINALIZE (FINISHED) instead of
             # recycling to WATCHING. Flag OFF => unlimited (byte-identical legacy).
