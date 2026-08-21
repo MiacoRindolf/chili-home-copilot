@@ -32858,6 +32858,25 @@ def _migration_364_active_sessions_partial_index(conn) -> None:
     ))
 
 
+def _migration_365_outcomes_breaker_index(conn) -> None:
+    """Composite index para sa breaker/streak queries sa momentum_automation_outcomes.
+
+    2026-08-20 pg_stat: 15,779 seq scans / 207M tuples ang nabasa sa 13.5k-row
+    table — ang daily-loss/giveback/green-to-red na mga query (na tumatakbo 3+
+    beses kada entry evaluation sa loob ng risk evaluator, ~40%% ng entry
+    region) ay nagfu-full-scan dahil walang index sa (execution_family, mode,
+    terminal_at). Sinukat pagkatapos: 0.093ms ang daily-pnl shape. Itinayo
+    nang CONCURRENTLY sa prod bago ang migration na ito (IF NOT EXISTS = no-op
+    doon); pure plan improvement, walang pagbabago sa behavior."""
+
+    conn.execute(text(
+        """
+        CREATE INDEX IF NOT EXISTS ix_mao_family_mode_terminal
+        ON momentum_automation_outcomes (execution_family, mode, terminal_at DESC)
+        """
+    ))
+
+
 MIGRATIONS = [
     ("001_add_email", _migration_001_add_email),
     ("002_add_image_path", _migration_002_add_image_path),
@@ -33346,6 +33365,8 @@ MIGRATIONS = [
      _migration_363_breadth_scan_partial_covering_index),
     ("364_active_sessions_partial_index",
      _migration_364_active_sessions_partial_index),
+    ("365_outcomes_breaker_index",
+     _migration_365_outcomes_breaker_index),
 ]
 
 

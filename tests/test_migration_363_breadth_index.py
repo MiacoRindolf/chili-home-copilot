@@ -48,3 +48,18 @@ def test_migration_364_registered_and_creates_the_sessions_index(db):
     assert "WHERE" in row[0] and "live_arm_expired" in row[0]
     # IDEMPOTENT
     _migration_364_active_sessions_partial_index(conn)
+
+
+def test_migration_365_registered_and_creates_the_outcomes_index(db):
+    from app.migrations import _migration_365_outcomes_breaker_index
+
+    ids = [m[0] for m in MIGRATIONS]
+    assert ids.count("365_outcomes_breaker_index") == 1
+    conn = db.connection()
+    _migration_365_outcomes_breaker_index(conn)
+    row = db.execute(text(
+        "select indexdef from pg_indexes where indexname='ix_mao_family_mode_terminal'"
+    )).fetchone()
+    assert row is not None
+    assert "execution_family" in row[0] and "terminal_at" in row[0]
+    _migration_365_outcomes_breaker_index(conn)  # idempotent
