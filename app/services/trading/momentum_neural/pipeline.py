@@ -53,6 +53,16 @@ VIABILITY_NODE_ID = "nm_momentum_viability_pool"
 _log = logging.getLogger(__name__)
 
 ORTEX_SQUEEZE_BATCH_STATUS_KEY = "ortex_squeeze_fuel_batch"
+# Bounded EXACT-manifest retention (task #10, 2026-08-21): ang hub manifest ay
+# umiikot kada field-prep (~5-15s) habang ang entry ay dumarating segundo-minuto
+# pagkatapos ng decision-build — ang 5-field reference equality ay nabibigo sa
+# HALOS LAHAT ng in-flight na desisyon (116/134 sa 08-18 autopsy) kaya ang
+# squeeze-fuel tilt ay epektibong laging neutral. Ang lunas ay HINDI pagluwag ng
+# equality kundi pagtigil ng pag-evict: iniingatan ang huling N na manifest sa
+# hub at ang resolver ay naghahanap ng EKSAKTONG 5-field match doon. Walang
+# quota cost (hub cache lang); ang sealed lane ay parehong exact-match pa rin.
+ORTEX_SQUEEZE_BATCH_STATUS_HISTORY_KEY = "ortex_squeeze_fuel_batch_history"
+_ORTEX_BATCH_HISTORY_MAX = 12
 _ORTEX_SQUEEZE_BATCH_SCHEMA = ORTEX_SQUEEZE_FUEL_BATCH_SCHEMA_VERSION
 _ORTEX_SQUEEZE_BATCH_REF_SCHEMA = (
     ORTEX_SQUEEZE_FUEL_BATCH_REF_SCHEMA_VERSION
@@ -1560,16 +1570,32 @@ def resolve_ortex_batch_manifest_from_hub(
     manifest = local_state.get(ORTEX_SQUEEZE_BATCH_STATUS_KEY)
     if not isinstance(manifest, dict):
         return None, "ortex_batch_manifest_missing"
-    for key in (
+
+    _ref_keys = (
         "batch_sha256",
         "decision_at",
         "complete",
         "quota_policy_sha256",
         "members_sha256",
-    ):
-        if batch_reference.get(key) != manifest.get(key):
-            return None, "ortex_batch_manifest_reference_mismatch"
-    return copy.deepcopy(manifest), None
+    )
+
+    def _exact_match(candidate: dict) -> bool:
+        return all(
+            batch_reference.get(key) == candidate.get(key) for key in _ref_keys
+        )
+
+    if _exact_match(manifest):
+        return copy.deepcopy(manifest), None
+    # EXACT-manifest history (task #10): ang desisyong na-build laban sa batch N
+    # ay nagba-bind pa rin sa N kahit may N+1 na sa current slot — parehong
+    # 5-field equality, walang niluwagan; ang readiness TTL ang bumubound sa
+    # edad. Kapag wala sa history → ang dating mismatch semantics.
+    history = local_state.get(ORTEX_SQUEEZE_BATCH_STATUS_HISTORY_KEY)
+    if isinstance(history, list):
+        for candidate in history:
+            if isinstance(candidate, dict) and _exact_match(candidate):
+                return copy.deepcopy(candidate), None
+    return None, "ortex_batch_manifest_reference_mismatch"
 
 
 def _validate_ortex_batch_status(
@@ -3272,6 +3298,33 @@ def run_momentum_neural_tick(
         _log.debug("[momentum_neural] pre-persistence rollback skipped", exc_info=True)
 
     hub = get_or_create_state(db, HUB_NODE_ID)
+    # EXACT-manifest history carry-forward (ang local_state ay GANAP na
+    # pinapalitan kada tick, kaya tahasang dinadala ang history): ang papalitang
+    # current manifest ay pumapasok sa unahan ng history, dedup sa
+    # (batch_sha256, decision_at), putol sa _ORTEX_BATCH_HISTORY_MAX.
+    try:
+        _prior = hub.local_state if isinstance(hub.local_state, dict) else {}
+        _hist = [
+            h for h in (_prior.get(ORTEX_SQUEEZE_BATCH_STATUS_HISTORY_KEY) or [])
+            if isinstance(h, dict)
+        ]
+        _outgoing = _prior.get(ORTEX_SQUEEZE_BATCH_STATUS_KEY)
+        if isinstance(_outgoing, dict):
+            _hist.insert(0, _outgoing)
+        _seen: set[tuple] = set()
+        _dedup: list[dict] = []
+        for h in _hist:
+            _key = (h.get("batch_sha256"), h.get("decision_at"))
+            if _key in _seen:
+                continue
+            _seen.add(_key)
+            _dedup.append(h)
+        if _dedup:
+            hub_payload[ORTEX_SQUEEZE_BATCH_STATUS_HISTORY_KEY] = copy.deepcopy(
+                _dedup[:_ORTEX_BATCH_HISTORY_MAX]
+            )
+    except Exception:
+        _log.debug("[momentum_neural] ortex history carry skipped", exc_info=True)
     hub.local_state = hub_payload
     hub.last_activated_at = decision_at
     hub.updated_at = decision_at
