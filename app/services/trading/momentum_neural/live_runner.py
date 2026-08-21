@@ -1275,6 +1275,27 @@ def _adaptive_alpaca_connection_generation(sess: Any) -> str:
     return "alpaca-arm:" + hashlib.sha256(encoded).hexdigest()
 
 
+def _legacy_timeshare_claim(claim: dict[str, Any] | None) -> bool:
+    """True kapag ang claim ay gawa ng LEGACY TIME-SHARE escape (pair-less sizing).
+
+    P0 BCCQ 2026-08-21: ang legacy escape ay sumusulat lang ng
+    ``legacy_timeshare_sizing`` sa role_metadata — SADYANG walang
+    ``adaptive_risk_reservation_request`` (:4050-4060). Ang owner-claim recovery
+    ay dating nagba-block nang deterministic sa kawalan ng payload na iyon, kaya
+    ang sariling na-fill na entry ng session ay hindi kailanman na-adopt (92sh
+    napabayaan 2h40m). Ang mirror ng access pattern ay
+    ``_adaptive_alpaca_request_payload_from_claim``."""
+    claim = claim if isinstance(claim, dict) else {}
+    metadata = claim.get("metadata")
+    metadata = metadata if isinstance(metadata, dict) else {}
+    role_metadata = metadata.get("role_metadata")
+    role_metadata = role_metadata if isinstance(role_metadata, dict) else {}
+    return bool(
+        role_metadata.get("legacy_timeshare_sizing")
+        or metadata.get("legacy_timeshare_sizing")
+    )
+
+
 def _adaptive_alpaca_request_payload_from_claim(
     claim: dict[str, Any] | None,
 ) -> dict[str, Any] | None:
@@ -5075,6 +5096,20 @@ def _recover_owner_alpaca_entry_claim(
         pass
     adaptive_request_payload = _adaptive_alpaca_request_payload_from_claim(claim)
     if not isinstance(adaptive_request_payload, dict):
+        if _legacy_timeshare_claim(claim):
+            # LEGACY TIME-SHARE claim: walang adaptive reservation na dapat
+            # bawiin — ang claim MISMO ang legacy sizing record. Ang pagharang
+            # dito ay pumipigil sa SARILING fill-poll ng session (P0 BCCQ
+            # 2026-08-21: order filled 60s pagkatapos ng submit, hindi kailanman
+            # na-adopt). Pass-through: ang normal pending-entry poll (CHUNK 3-B)
+            # ang mag-a-adopt at magre-resolve ng claim; ang double-place ay
+            # hinaharangan pa rin ng entry_submitted + unresolved-order guards.
+            return {
+                "active": False,
+                "block_new_entries": False,
+                "legacy_timeshare_claim": True,
+                "reason": "legacy_timeshare_claim_pass_through",
+            }
         return {
             "active": True,
             "block_new_entries": True,
@@ -25686,6 +25721,23 @@ def tick_live_session(
         and sess.state not in _HELD_LIVE_STATES
         and not _owner_recovery.get("attached")
     ):
+        # OBSERVABILITY (P0 BCCQ 2026-08-21): ang return na ito ay dating GANAP
+        # na tahimik — 2h40m ng mga tick na walang event/log habang napapabayaan
+        # ang na-fill na order. Mag-emit MINSAN kada dahilan (sa unang tama at sa
+        # bawat pagbabago), hindi kada tick, para kitang-kita ang stall class na
+        # ito sa events nang walang event-spam.
+        _orb_sig = str(_owner_recovery.get("reason") or "unknown")
+        if le.get("owner_recovery_block_sig") != _orb_sig:
+            le["owner_recovery_block_sig"] = _orb_sig
+            _commit_le(sess, le)
+            _emit(db, sess, "live_entry_owner_claim_reconcile_block", {
+                "reason": _orb_sig,
+                "owner_recovery": {
+                    k: _owner_recovery.get(k)
+                    for k in ("active", "block_new_entries", "reason", "order_role")
+                },
+                "state": sess.state,
+            })
         db.flush()
         return {
             "ok": True,
