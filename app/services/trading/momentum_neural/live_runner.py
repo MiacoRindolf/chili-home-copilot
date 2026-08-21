@@ -19777,6 +19777,55 @@ def _live_entry_quote_gate_applies(sess: TradingAutomationSession, le: dict[str,
     return state == STATE_LIVE_PENDING_ENTRY and not le.get("entry_submitted")
 
 
+# PUNCH-WINDOW RETRY HOLD (2026-08-21): ang mga quote-block reason na tungkol sa BOOK
+# (hindi sa setup) — retryable sa loob ng dip punch window dahil ang susunod na tick ay
+# muling nagpapatakbo ng buong quote gate KASAMA ang secondary NBBO refetch/rescue.
+# Ang late_window / suspected_halt / boundary-risk / revalidation-floor na demote ay
+# HINDI kasama (minuto-scale o setup-level ang mga iyon; nagde-demote gaya ng dati).
+_PUNCH_RETRYABLE_QUOTE_REASONS = frozenset(
+    {"wide_bbo_spread", "stale_bbo", "unstable_spread", "invalid_bbo"}
+)
+
+
+def _dip_punch_window_hold_active(
+    le: dict[str, Any], quote_block: dict[str, Any] | None, tick: Any
+) -> bool:
+    """True kapag ang na-fire na dip-family candidate ay dapat MAG-HOLD sa isang
+    transient book-quality veto sa halip na ma-demote sa WATCHING (2026-08-21
+    flush_dip_buy audit: ang one-shot wide_bbo_spread demote ang pumatay sa mga
+    sariwang flush candidate — pagbalik sa trigger_wait, nabubulok na ang setup).
+
+    Kondisyon: (1) retryable BOOK-quality reason; (2) dip-family ang na-persist na
+    trigger; (3) buhay pa ang ATR-scaled punch window (itinatak sa fire); at (4) HINDI
+    pa bumagsak ang flush structure — kapag ang mid ay bumaba sa structural stop,
+    patay na ang setup at tuloy ang legacy demote. Fail-toward-legacy: anumang
+    error/missing marker ⇒ False (demote gaya ng dati)."""
+    try:
+        if not isinstance(quote_block, dict):
+            return False
+        if str(quote_block.get("reason") or "") not in _PUNCH_RETRYABLE_QUOTE_REASONS:
+            return False
+        from .entry_gates import DIP_FAMILY_TRIGGER_REASONS
+
+        if str(le.get("entry_trigger_reason") or "") not in DIP_FAMILY_TRIGGER_REASONS:
+            return False
+        until_iso = le.get("dip_punch_window_until")
+        if not until_iso:
+            return False
+        until = datetime.fromisoformat(str(until_iso))
+        if until.tzinfo is None:
+            until = until.replace(tzinfo=timezone.utc)
+        if _utcnow_aware() >= until:
+            return False
+        stop = _float_or_none(le.get("structural_stop_price"))
+        mid = _float_or_none(getattr(tick, "mid", None)) if tick is not None else None
+        if stop is not None and mid is not None and mid > 0 and mid < stop:
+            return False
+        return True
+    except Exception:
+        return False
+
+
 _HELD_LIVE_STATES = frozenset(
     {STATE_LIVE_ENTERED, STATE_LIVE_SCALING_OUT, STATE_LIVE_TRAILING, STATE_LIVE_BAILOUT}
 )
@@ -27552,7 +27601,23 @@ def tick_live_session(
         le["last_quote_quality_gate"] = quote_block
         _commit_le(sess, le)
         if sess.state in (STATE_LIVE_ENTRY_CANDIDATE, STATE_LIVE_PENDING_ENTRY) and not le.get("entry_submitted"):
-            _safe_transition(db, sess, STATE_WATCHING_LIVE)
+            # PUNCH-WINDOW RETRY HOLD (2026-08-21 flush_dip_buy audit): ang dip-family
+            # candidate sa loob ng ATR-scaled punch window nito ay HINDI dine-demote sa
+            # isang transient BOOK-quality veto — mananatili sa candidate/pending state
+            # para ang SUSUNOD na tick ay muling patakbuhin ang buong quote gate kasama
+            # ang secondary NBBO refetch/rescue (ang phantom 3131bps book ng WYHG 14675
+            # ay isang cache artifact na nalilinis ng refetch). Namamatay nang maaga ang
+            # hold kapag bumagsak ang flush structure (mid < structural stop) at
+            # nag-e-expire kasama ng window; lahat ng ibang veto ay nagde-demote
+            # eksaktong gaya ng dati.
+            if _dip_punch_window_hold_active(le, quote_block, tick):
+                _emit(db, sess, "live_entry_punch_window_hold", {
+                    "reason": quote_block.get("reason"),
+                    "trigger": le.get("entry_trigger_reason"),
+                    "until": le.get("dip_punch_window_until"),
+                })
+            else:
+                _safe_transition(db, sess, STATE_WATCHING_LIVE)
         if _live_entry_quote_gate_applies(sess, le):
             db.flush()
             return {"ok": True, "blocked": True, "reason": quote_block.get("reason")}
@@ -29388,11 +29453,9 @@ def tick_live_session(
             # mult); cleared on a non-dip fire so it cannot leak. Flag OFF / non-dip / no ROC
             # ⇒ mult 1.0 / key absent ⇒ byte-identical. docs/DESIGN/MOMENTUM_LANE.md
             le.pop("dip_velocity_size_mult", None)
-            if _trigger_reason in (
-                "flush_dip_buy", "vwap_reclaim", "wick_reclaim",
-                "ask_thins_dip", "ask_thins_dip_tick",
-                "sub_vwap_trap", "sub_vwap_trap_tick",
-            ):
+            from .entry_gates import DIP_FAMILY_TRIGGER_REASONS as _DIP_FAMILY
+
+            if _trigger_reason in _DIP_FAMILY:
                 try:
                     from .entry_gates import _dip_velocity_size_mult
 
@@ -29426,6 +29489,57 @@ def tick_live_session(
                 le["entry_l2_snapshot"] = _l2
             else:
                 le.pop("entry_l2_snapshot", None)
+            # PUNCH-WINDOW RETRY HOLD stamp (2026-08-21 flush_dip_buy audit: 39 fires →
+            # 33 pending_place → 2 trades): sa isang dip-family fire, itatak ang ATR-
+            # scaled retry window para ang isang TRANSIENT book-quality veto (wide/
+            # stale/unstable BBO — kasama ang phantom 3131bps book ng WYHG 14675) ay
+            # mag-HOLD sa candidate na may NBBO refetch kada tick sa halip na i-demote
+            # sa trigger_wait kung saan nabubulok ang flush setup. Ang hold mismo ay
+            # nasa quote-block path; dito lang ang stamp. Non-dip fire ⇒ pop (hindi
+            # maaaring mag-leak ang lumang window sa ibang setup). Fail-toward-legacy:
+            # error ⇒ walang stamp ⇒ legacy one-shot demote.
+            le.pop("dip_punch_window_until", None)
+            le.pop("dip_bid_stack_tilt_mult", None)
+            if _trigger_reason in _DIP_FAMILY:
+                try:
+                    from .entry_gates import _dip_punch_window_seconds_from_settings
+
+                    _punch_s = _dip_punch_window_seconds_from_settings(
+                        atr_pct=(
+                            _float_or_none(_pb_debug.get("atr_pct"))
+                            if isinstance(_pb_debug, dict) else None
+                        ),
+                    )
+                    if _punch_s > 0:
+                        le["dip_punch_window_until"] = (
+                            _utcnow_aware() + timedelta(seconds=float(_punch_s))
+                        ).isoformat()
+                except Exception:
+                    le.pop("dip_punch_window_until", None)
+                # L2 BID-STACK CONFIRM TILT (B2 kabilang kalahati): ang decision-time
+                # imbalance5 na bid-stacked (≥ +0.4, ang sinukat na threshold baligtad
+                # ang sign) sa isang dip-family fire = kumpirmasyong may bumibili sa
+                # flush → bounded (≥1.0) conviction boost, kinokonsumo ng sizing path
+                # katabi ng dip_velocity lever sa ilalim ng PAREHONG 3x clamp +
+                # max_notional ceiling. Walang snapshot / flag OFF / error ⇒ key absent
+                # ⇒ 1.0 (byte-identical).
+                try:
+                    from .entry_gates import _dip_bid_stack_tilt_mult
+
+                    _bs_imb = (
+                        _float_or_none(_l2.get("imbalance5"))
+                        if isinstance(_l2, dict) else None
+                    )
+                    _bs_mult = _dip_bid_stack_tilt_mult(imbalance5=_bs_imb)
+                    if _bs_mult > 1.0:
+                        le["dip_bid_stack_tilt_mult"] = float(_bs_mult)
+                        _emit(db, sess, "live_entry_dip_bid_stack_tilt", {
+                            "trigger": _trigger_reason,
+                            "imbalance5": _bs_imb,
+                            "size_mult": round(float(_bs_mult), 4),
+                        })
+                except Exception:
+                    le.pop("dip_bid_stack_tilt_mult", None)
             # Persist the FIRED trigger identity so the entry-sizing path (which runs on a
             # LATER tick in LIVE_ENTRY_CANDIDATE, where the local detector result is no
             # longer in scope) can recover the exact setup family and opportunity key.
@@ -31969,13 +32083,17 @@ def tick_live_session(
             # nag-timeout sa unang proof attempt (JEM 100% AH = fetch kada tick).
             try:
                 from .entry_gates import (
+                    DIP_FAMILY_TRIGGER_REASONS,
                     _LATE_AH_STRUCTURAL_REASONS,
+                    _batch_c_atr_pct,
+                    _late_window_dip_fresh_hod_mult_from_settings,
                     _late_window_monster_placement_mult_from_settings,
                     _today_session_frame,
                 )
 
                 _l8_trig = str(le.get("entry_trigger_reason") or "")
-                if _l8_trig not in _LATE_AH_STRUCTURAL_REASONS:
+                _l8_is_dip = _l8_trig in DIP_FAMILY_TRIGGER_REASONS
+                if _l8_trig not in _LATE_AH_STRUCTURAL_REASONS and not _l8_is_dip:
                     raise LookupError("non_structural_trigger")  # cheap skip, walang fetch
                 _l8_minute = _utcnow_aware().strftime("%Y-%m-%dT%H:%M")
                 _l8_memo = le.get("l8_session_low_memo") or {}
@@ -31984,10 +32102,27 @@ def tick_live_session(
                         getattr(settings, "chili_momentum_pullback_entry_interval", "5m") or "5m"
                     )
                     _l8_df = _replay_aware_fetch_ohlcv_df(sess.symbol, interval=_l8_iv, period="5d")
-                    _l8_lo = float(
-                        _today_session_frame(_l8_df)["Low"].astype(float).min()
-                    )
-                    _l8_memo = {"m": _l8_minute, "lo": _l8_lo}
+                    _l8_frame = _today_session_frame(_l8_df)
+                    _l8_lo = float(_l8_frame["Low"].astype(float).min())
+                    # LATE-WINDOW DIP EXEMPTION inputs (2026-08-21; PAREHONG fetch,
+                    # PAREHONG per-minute memo — walang bagong I/O): session high, ang
+                    # recent-N-bar high (fresh-HOD evidence), at ang frame ATR% na
+                    # nagsu-scale ng proximity threshold.
+                    _l8_hi = float(_l8_frame["High"].astype(float).max())
+                    _l8_nbars = max(1, int(getattr(
+                        settings, "chili_momentum_late_dip_fresh_hod_recent_bars", 4
+                    ) or 4))
+                    _l8_rhi = float(_l8_frame["High"].astype(float).tail(_l8_nbars).max())
+                    try:
+                        _l8_atr, _ = _batch_c_atr_pct(
+                            _l8_frame, _l8_frame["Close"].astype(float), len(_l8_frame) - 1
+                        )
+                    except Exception:
+                        _l8_atr = None
+                    _l8_memo = {
+                        "m": _l8_minute, "lo": _l8_lo, "hi": _l8_hi,
+                        "rhi": _l8_rhi, "atr": _l8_atr,
+                    }
                     le["l8_session_low_memo"] = _l8_memo
                 _l8_mult, _l8_dbg = _late_window_monster_placement_mult_from_settings(
                     window=_win,
@@ -31995,12 +32130,34 @@ def tick_live_session(
                     live_price=guarded_ask,
                     session_low=_l8_memo.get("lo"),
                 )
+                _l8_src = "late_ah_monster"
+                if _l8_mult <= 0.0 and _l8_is_dip:
+                    # LATE-WINDOW DIP EXEMPTION (2026-08-21): ang L8 monster path ay
+                    # nangangailangan ng 1.5× off-the-low; ang WYHG 08-20 flush_dip_buy
+                    # fire (18:41Z = 14:41 ET) ay pinatay ng live_entry_wait_late_window
+                    # ×80 kahit kasisipa lang ng pangalan sa HOD (5.88 vs 6.04) bago ang
+                    # flush — tapos bumertikal sa 6.92 sa 19:00Z. Dip-family fire na may
+                    # FRESH HOD (recent-bar high sa loob ng k×ATR ng session high) ⇒
+                    # reduced-size placement sa halip na zero; lahat ng ibang veto ay
+                    # tumatakbo pa rin pagkatapos nito.
+                    _l8_mult, _l8_dbg = _late_window_dip_fresh_hod_mult_from_settings(
+                        window=_win,
+                        trigger_reason=_l8_trig,
+                        recent_high=_l8_memo.get("rhi"),
+                        session_high=_l8_memo.get("hi"),
+                        atr_pct=_l8_memo.get("atr"),
+                    )
+                    _l8_src = "late_dip_fresh_hod"
                 if _l8_mult > 0.0:
                     _sched_mult = float(_l8_mult)
                     le["schedule_risk"] = {
-                        "window": _win, "mult": _sched_mult, "late_ah_monster": True,
+                        "window": _win, "mult": _sched_mult, _l8_src: True,
                     }
-                    _emit(db, sess, "live_entry_late_window_monster_placement", {
+                    _emit(db, sess, (
+                        "live_entry_late_window_monster_placement"
+                        if _l8_src == "late_ah_monster"
+                        else "live_entry_late_window_dip_fresh_hod_placement"
+                    ), {
                         "window": _win, "mult": _sched_mult, **_l8_dbg,
                     })
             except Exception:
@@ -32235,6 +32392,20 @@ def tick_live_session(
                 _dip_velocity_mult = float(_dvm)
         except Exception:
             _dip_velocity_mult = 1.0
+        # L2 BID-STACK CONFIRM TILT lever (2026-08-21, B2 kabilang kalahati): ang
+        # dip-family fire na ang DECISION-TICK book ay bid-stacked (imbalance5 ≥ +0.4,
+        # ang sinukat na B2 threshold baligtad ang sign) ay may bounded (≥1.0) confirm
+        # boost (_dip_bid_stack_tilt_mult, itinatak sa fire). Composes multiplicatively
+        # sa ilalim ng PAREHONG 3x clamp + hard max_notional ceiling, kaya HINDI nito
+        # kailanman malalampasan ang anumang ceiling. Default (non-dip / walang
+        # snapshot / flag OFF ⇒ key absent) => 1.0 (byte-identical).
+        _bid_stack_tilt_mult = 1.0
+        try:
+            _bst = _float_or_none(le.get("dip_bid_stack_tilt_mult"))
+            if _bst is not None and _bst > 0:
+                _bid_stack_tilt_mult = float(_bst)
+        except Exception:
+            _bid_stack_tilt_mult = 1.0
         # CATALYST-CONVICTION lever (Ross E2): a STRONG, credible catalyst (the deployed
         # strong/weak/fake news grade — no new feed) carries a bounded (>=1.0) UPWARD size
         # multiplier. It composes multiplicatively under the SAME min(..., base*3.0) clamp +
@@ -32747,7 +32918,7 @@ def tick_live_session(
         # whole budget and silently kill the fill. The 3x clamp + max_notional ceiling below are
         # unchanged; a valid product is byte-identical.
         _eff_max_loss = min(
-            float(_base_max_loss) * _safe_mult(_streak_mult) * _safe_mult(_graduation_mult) * _safe_mult(_cushion_mult) * _safe_mult(_l2_mult) * _safe_mult(_sched_mult) * _safe_mult(_liq_mult) * _safe_mult(_meta_mult) * _safe_mult(_prior_day_mult) * _safe_mult(_overnight_mult) * _safe_mult(_fatigue_mult) * _safe_mult(_sym_fatigue_mult) * _safe_mult(_hot_cold_mult) * _safe_mult(_time_fatigue_mult) * _safe_mult(_halt_size_mult) * _safe_mult(_dip_velocity_mult) * _safe_mult(_catalyst_conviction_mult) * _safe_mult(_prime_window_mult) * _safe_mult(_extreme_vol_mult) * _safe_mult(_squeeze_size_mult) * _safe_mult(_kelly_conviction_mult) * _safe_mult(_frontside_mult) * _safe_mult(_daily_room_mult) * _safe_mult(_red_intraday_mult) * _safe_mult(_perf_size_mult) * _safe_mult(_day_open_ramp_mult) * _safe_mult(_wildcard_bgrade_mult),
+            float(_base_max_loss) * _safe_mult(_streak_mult) * _safe_mult(_graduation_mult) * _safe_mult(_cushion_mult) * _safe_mult(_l2_mult) * _safe_mult(_sched_mult) * _safe_mult(_liq_mult) * _safe_mult(_meta_mult) * _safe_mult(_prior_day_mult) * _safe_mult(_overnight_mult) * _safe_mult(_fatigue_mult) * _safe_mult(_sym_fatigue_mult) * _safe_mult(_hot_cold_mult) * _safe_mult(_time_fatigue_mult) * _safe_mult(_halt_size_mult) * _safe_mult(_dip_velocity_mult) * _safe_mult(_bid_stack_tilt_mult) * _safe_mult(_catalyst_conviction_mult) * _safe_mult(_prime_window_mult) * _safe_mult(_extreme_vol_mult) * _safe_mult(_squeeze_size_mult) * _safe_mult(_kelly_conviction_mult) * _safe_mult(_frontside_mult) * _safe_mult(_daily_room_mult) * _safe_mult(_red_intraday_mult) * _safe_mult(_perf_size_mult) * _safe_mult(_day_open_ramp_mult) * _safe_mult(_wildcard_bgrade_mult),
             float(_base_max_loss) * 3.0,  # hard combined-multiplier ceiling (quant pass v2)
         )
         # PAPER-LANE FULL-SIZE (2026-07-09 operator directive): the size-DOWN stack

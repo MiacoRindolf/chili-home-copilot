@@ -5209,6 +5209,46 @@ class Settings(BaseSettings):
         validation_alias=AliasChoices("CHILI_MOMENTUM_LATE_WINDOW_REFIRE_COOLDOWN_SECONDS"),
         description="L8b: tagal ng refire cooldown pagkatapos ng late_window demote. Worst case ay naaantala ang isang L8-eligible fire nang ganito katagal sa loob ng zero band. ONE documented base = 20s. Band [0,300]; 0 = walang cooldown.",
     )
+    chili_momentum_late_dip_fresh_hod_enabled: bool = Field(
+        default=True,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_LATE_DIP_FRESH_HOD_ENABLED"),
+        description="LATE-WINDOW DIP EXEMPTION (2026-08-21 flush_dip_buy audit): ang L8 monster path ay nangangailangan ng px/session_low ≥ 1.5; ang WYHG 08-20 flush_dip_buy fire (18:41Z = 14:41 ET late band) ay pinatay ng live_entry_wait_late_window ×80 kahit kasisipa lang sa HOD (5.88 vs 6.04) bago ang flush — tapos bumertikal sa 6.92 sa 19:00Z. Dip-family fire na FRESH ang HOD (recent-bar high sa loob ng k×ATR ng session high) ⇒ reduced-size placement sa halip na zero; lahat ng ibang proteksyon tumatakbo pa rin.",
+    )
+    chili_momentum_late_dip_fresh_hod_mult: float = Field(
+        default=0.5,
+        ge=0.0,
+        le=2.0,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_LATE_DIP_FRESH_HOD_MULT"),
+        description="LATE-DIP: ang schedule multiplier na ipapalit sa ×0.0 kapag pumasa ang dip fresh-HOD conditions — ang PAREHONG kalahating-size convention ng L8 monster (manipis ang late book). ONE documented base = 0.5. Band [0,2].",
+    )
+    chili_momentum_late_dip_hod_slack_base_frac: float = Field(
+        default=0.10,
+        ge=0.0,
+        le=1.0,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_LATE_DIP_HOD_SLACK_BASE_FRAC"),
+        description="LATE-DIP fresh-HOD test: recent_high/session_high ≥ 1 − slack, kung saan slack = min(max_frac, max(ITO, k×ATR%)). Ang 0.10 ang dokumentadong 'near the highs' base (FLOOR per doctrine — ang ATR ay nagpapalawak lang para sa mas marahas na tape). WYHG 08-20 measured: recent 5.74-5.88 vs HOD 6.04 = 0.95-0.91 proximity → bukas; backside na hapon (0.84) → sarado. Band [0,1].",
+    )
+    chili_momentum_late_dip_hod_slack_atr_k: float = Field(
+        default=1.0,
+        ge=0.0,
+        le=10.0,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_LATE_DIP_HOD_SLACK_ATR_K"),
+        description="LATE-DIP fresh-HOD test: ang ATR multiplier na nagpapalawak ng slack sa hyper-volatile na pangalan (slack = max(base, k×ATR%) — self-scaling, hindi fixed na porsyento). ONE documented base = 1.0 ATR. Band [0,10].",
+    )
+    chili_momentum_late_dip_hod_slack_max_frac: float = Field(
+        default=0.25,
+        ge=0.0,
+        le=1.0,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_LATE_DIP_HOD_SLACK_MAX_FRAC"),
+        description="LATE-DIP fresh-HOD test: ang absolute cap ng slack — kahit gaano kalaki ang ATR, ang recent high ay dapat ≥ (1−ITO) × session high, para hindi maging backside pass ang exemption. Band [0,1].",
+    )
+    chili_momentum_late_dip_fresh_hod_recent_bars: int = Field(
+        default=4,
+        ge=1,
+        le=20,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_LATE_DIP_FRESH_HOD_RECENT_BARS"),
+        description="LATE-DIP fresh-HOD test: ilang huling bar ng entry interval ang binubuo ng 'recent high'. Ang dip-family fire ay pumuputok PAGKATAPOS ng flush (2-3 bar), kaya ang lookback ay dapat umabot LAMPAS sa dip papunta sa pre-flush leg high (WYHG: leg high 5.74-5.88 sa 18:20-18:25Z, fire 18:41Z). ONE documented base = 4 (20 min sa 5m). Band [1,20].",
+    )
     chili_momentum_latest_rvol_memo_seconds: float = Field(
         default=5.0,
         ge=0.0,
@@ -9694,6 +9734,44 @@ class Settings(BaseSettings):
         default=True,
         validation_alias=AliasChoices("CHILI_MOMENTUM_SUB_VWAP_TRAP_ENTRY_ENABLED"),
         description="User-approved default-ON sub-VWAP-trap entry with the existing chase, tape, and L2 guards. False disables only this entry family.",
+    )
+    chili_momentum_dip_punch_window_enabled: bool = Field(
+        default=True,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_DIP_PUNCH_WINDOW_ENABLED"),
+        description="PUNCH-WINDOW RETRY HOLD (2026-08-21 flush_dip_buy audit: 39 fires → 33 pending_place → 2 trades): pagkatapos ng dip-family candidate fire, ang isang TRANSIENT book-quality veto (wide/stale/unstable/invalid BBO — kasama ang phantom 3131bps cache book ng WYHG 14675) ay HINDI na one-shot na nagde-demote sa trigger_wait; ang candidate ay naka-HOLD sa loob ng ATR-scaled window habang ang bawat tick ay muling nagpapatakbo ng buong quote gate KASAMA ang secondary NBBO refetch/rescue. Namamatay nang maaga kapag bumagsak ang flush structure (mid < structural stop). Lahat ng ibang veto (late window/halt/boundary/revalidation) nagde-demote gaya ng dati.",
+    )
+    chili_momentum_dip_punch_window_min_seconds: float = Field(
+        default=60.0,
+        ge=0.0,
+        le=600.0,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_DIP_PUNCH_WINDOW_MIN_SECONDS"),
+        description="PUNCH-WINDOW: ang pinakamaikling hold (marahas na tape, atr ≥ 3× ref — mabilis mapawalang-bisa ang setup). ONE documented base = 60s (operator brief). Band [0,600].",
+    )
+    chili_momentum_dip_punch_window_max_seconds: float = Field(
+        default=120.0,
+        ge=0.0,
+        le=1200.0,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_DIP_PUNCH_WINDOW_MAX_SECONDS"),
+        description="PUNCH-WINDOW: ang pinakamahabang hold (kalmadong pangalan, atr ≤ 1× ref — matagal manatiling valid ang dip structure). ONE documented base = 120s (operator brief). Band [0,1200].",
+    )
+    chili_momentum_dip_punch_window_ref_atr_pct: float = Field(
+        default=0.01,
+        ge=0.0001,
+        le=1.0,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_DIP_PUNCH_WINDOW_REF_ATR_PCT"),
+        description="PUNCH-WINDOW: ang ATR% reference ng 1×..3× interpolation band — ang PAREHONG 1% base na ginagamit ng _dip_velocity_size_mult kapag walang ATR (iisang dip-family vocabulary, hindi bagong magic). Band [0.0001,1].",
+    )
+    chili_momentum_dip_bid_stack_tilt_enabled: bool = Field(
+        default=True,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_DIP_BID_STACK_TILT_ENABLED"),
+        description="L2 BID-STACK CONFIRM TILT (2026-08-21, B2 kabilang kalahati): ang 2026-06-12 study ay sumukat ng imbalance5 < −0.4 sa decision tick = ask-stacked ⇒ size-down ×0.5 (deployed). Ang PAREHONG decision-time snapshot na BID-stacked (imbalance5 ≥ +0.4 — parehong threshold, baligtad ang sign) sa isang dip-family fire = kumpirmasyong may bumibili sa flush ⇒ bounded (≥1.0) conviction boost sa sizing, sa ilalim ng 3x clamp + max_notional. Hindi kailanman veto o shrink; walang snapshot ⇒ 1.0.",
+    )
+    chili_momentum_dip_bid_stack_tilt_max_boost: float = Field(
+        default=0.25,
+        ge=0.0,
+        le=0.5,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_DIP_BID_STACK_TILT_MAX_BOOST"),
+        description="BID-STACK TILT: ang maximum fractional size boost sa fully bid-stacked na book (imbalance5 = 1.0, ang sariling bound ng metric). Interpolates 1.0..1+this mula +0.4; clamped dito (kapareho ng dip-velocity 0.25/0.5 convention) para hindi makatakbo. Band [0,0.5].",
     )
     chili_momentum_pulling_away_roc_entry_enabled: bool = Field(
         default=False,
