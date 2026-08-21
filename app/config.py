@@ -9831,6 +9831,25 @@ class Settings(BaseSettings):
     # to (0, 1.0] (never > 1.0), composes multiplicatively under the existing 3x clamp, and the
     # equity-relative notional ceiling + liquidity cap still bound qty — so it can ONLY shrink size.
     # OFF (default) => multiplier forced to 1.0 => byte-identical.
+    # TIME-OF-DAY ENTRY-QUALITY BAR (audit 2026-08-21): per-ET-hour expectancy sa
+    # 162 entered equity trades — PREMARKET +$3,305 PF 20.1 (n=20) vs OPEN/MIDDAY
+    # gross −$12.5k PF ~0.07 (n=124; negatibo pa rin kahit alisin ang 07-10
+    # incident day). Pagkatapos ng cutoff (minuto mula 09:30 ET open), ang mga
+    # GENERIC volume trigger (momentum_ok*) ay hindi na tinatanggap sa bagong
+    # entry; ang structural/explosive pattern ay tuloy buong araw. Ross: full
+    # aggression early, layo sa midday churn.
+    chili_momentum_postopen_generic_trigger_bar_enabled: bool = Field(
+        default=True,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_POSTOPEN_GENERIC_TRIGGER_BAR_ENABLED"),
+    )
+    # Ang ISANG dokumentadong boundary: 30 min pagkatapos ng open = 10:00 ET —
+    # ang hangganan kung saan bumaligtad ang audit expectancy (hour 9 +$167,
+    # hour 10 onwards negatibo) at ang dulo ng pinakamalakas na Ross window.
+    chili_momentum_postopen_generic_trigger_cutoff_min: float = Field(
+        default=30.0,
+        ge=0.0,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_POSTOPEN_GENERIC_TRIGGER_CUTOFF_MIN"),
+    )
     chili_momentum_fatigue_derate_enabled: bool = Field(
         default=False,
         validation_alias=AliasChoices("CHILI_MOMENTUM_FATIGUE_DERATE_ENABLED"),
