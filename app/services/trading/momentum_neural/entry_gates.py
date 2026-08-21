@@ -4753,6 +4753,7 @@ def flush_dip_buy_confirmation(
     db: Any = None,
     l2_as_of: Any = None,
     first_dip_execution_surface: str | None = None,
+    known_levels: list[float] | None = None,
 ) -> tuple[bool, str, dict[str, Any]]:
     """AS101 algo-flush V-bounce dip-buy (flag ``chili_momentum_flush_dip_buy_enabled``).
 
@@ -5007,7 +5008,23 @@ def flush_dip_buy_confirmation(
             support = float(vwap_flush)
         elif e9_flush is not None and float(e9_flush) > 0:
             support = float(e9_flush)
-        if support is not None and f_l > support * (1.0 + max(0.0, a * 0.5)):
+        # PRIOR-LEVEL SUPPORT (Ross 08-21 JUNS): ang flush PAPUNTA sa KILALANG
+        # prior level (resistance-turned-support — watch/breakout levels na
+        # stamped na sa session) ay kasing-balido ng VWAP touch; ang JUNS punch
+        # niya ay flush sa 8.75 prior resistance, hindi sa VWAP. ATR-scaled ang
+        # tolerance; fail-open kapag walang levels.
+        _prior_level_touch = None
+        for _kl in (known_levels or []):
+            try:
+                _klf = float(_kl)
+            except (TypeError, ValueError):
+                continue
+            if _klf > 0 and abs(f_l - _klf) <= _klf * max(0.005, a * 0.5):
+                _prior_level_touch = _klf
+                break
+        if _prior_level_touch is not None:
+            debug["flush_prior_level_touch"] = round(_prior_level_touch, 6)
+        elif support is not None and f_l > support * (1.0 + max(0.0, a * 0.5)):
             return False, "flush_dip_no_support_touch", debug  # never reached support
 
         dip_low = f_l
@@ -5031,8 +5048,18 @@ def flush_dip_buy_confirmation(
         if c_l < dip_low * (1.0 - max(0.0, a * 0.5)):
             return False, "flush_dip_undercut", debug
         # Per-bar conviction: a green bounce-curl candle (close in the upper part of range).
+        # DOUBLE-BOTTOM ACCEPTANCE (Ross 08-21 JUNS: "whoa, double bottom... I
+        # punched it"): kapag mahina ang curl SHAPE pero ang bar na ito ay
+        # PANGALAWANG dampi sa flush-low zone na HUMAWAK (pasado na ang undercut
+        # guard sa itaas) at ang presyo ay nasa green side, ang 2-touch hold ay
+        # kasing-lakas ng single-bar curl — iyan mismo ang hugis ng punch niya.
         if not is_bounce_curl_candle(c_o, c_h, c_l, c_c):
-            return False, "flush_dip_weak_curl", debug
+            _second_touch = c_l <= dip_low * (1.0 + max(0.005, a * 0.5))
+            _green_side = px >= c_o
+            if _second_touch and _green_side:
+                debug["double_bottom_touch"] = True
+            else:
+                return False, "flush_dip_weak_curl", debug
 
         # Level = the curl bar's own high (the reclaim's break level); stop = the dip low.
         level = max(c_h, f_h)
