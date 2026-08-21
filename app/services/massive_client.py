@@ -2693,6 +2693,12 @@ def get_recent_reverse_split_dates(*, max_age_days: int = 30, limit: int = 1000)
             continue
         if not tk or sto <= 0 or sfrom <= 0 or xdate < cutoff:
             continue
+        # ANNOUNCED-BUT-FUTURE exclusion (audit 2026-08-21): ang API ay nagbabalik
+        # din ng mga HINDI PA nagaganap na execution date (hal. DPU exec 12-17 sa
+        # 08-21) — hindi pa bumabagsak ang float, kaya mali itong ituring na
+        # "recent". Ang xdate > today ay laktawan.
+        if xdate > date.today().isoformat():
+            continue
         if sto < sfrom and tk not in out:  # reverse split, keep the freshest (sort desc)
             out[tk] = xdate
     _cache_set(cache_key, out)

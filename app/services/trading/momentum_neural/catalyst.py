@@ -557,6 +557,40 @@ def _float_at_or_below(sym: str, floats: dict[str, float] | None, cut: float) ->
         return False
 
 
+def reverse_split_recency_viability_delta(
+    symbol: str,
+    *,
+    recent_split_symbols: list[str] | set[str] | None,
+    floats: dict[str, float] | None,
+) -> float:
+    """FACT-BASED reverse-split recency bonus (Ross 08-21 JUNS: "float under 20
+    million... because it's a recent reverse split, which is a bonus").
+
+    Ang lumang landas (``recent_reverse_split_squeeze_symbols``) ay nangangailangan
+    ng SARIWANG "reverse split" na headline sa loob ng news window — na halos hindi
+    kailanman tumatama sa mismong squeeze day (zero runtime fires kailanman). Ang
+    delta na ito ay FACT-based: ang pagiging kasapi sa recent-split set (tunay na
+    execution dates mula sa splits reference API, hindi headlines) ang batayan.
+
+      +CATALYST_VIABILITY_TILT/2 (=+0.05 default; ang confirming-signal scale ng
+        strong-catalyst/sympathy) kapag recent-split AT batch-adaptive LOW float
+      +0.03 (top-gainer scale) kapag recent-split pero walang float data
+      0.0 kapag hindi kasapi / crypto / flag OFF. Pure; hindi kailanman negative."""
+    if not bool(getattr(settings, "chili_momentum_reverse_split_recency_enabled", True)):
+        return 0.0
+    raw = str(symbol or "").upper().strip()
+    if not raw or raw.endswith("-USD"):  # crypto BAGO ang _norm (tinatanggal nito ang -USD)
+        return 0.0
+    sym = _norm(raw)
+    members = {_norm(s) for s in (recent_split_symbols or [])}
+    if sym not in members:
+        return 0.0
+    low_float_cut = _low_float_threshold(floats) if floats else None
+    if low_float_cut is not None and _float_at_or_below(sym, floats, low_float_cut):
+        return _catalyst_tilt() * 0.5
+    return 0.03
+
+
 def recent_reverse_split_squeeze_symbols(
     *,
     recent_split_symbols: set[str] | None = None,
