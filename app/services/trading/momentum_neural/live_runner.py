@@ -28002,6 +28002,14 @@ def tick_live_session(
                                     first_dip_execution_surface=(
                                         _first_dip_evidence_surface
                                     ),
+                                    # Ross 08-21: kilalang prior levels (resistance-
+                                    # turned-support) para sa flush-into-level punch.
+                                    known_levels=[
+                                        _kl for _kl in (
+                                            _float_or_none(le.get("watch_break_level")),
+                                            _float_or_none(le.get("breakout_level_price")),
+                                        ) if _kl
+                                    ],
                                 )
                                 _fd_is_first_dip = (
                                     isinstance(_fd_debug, dict)
