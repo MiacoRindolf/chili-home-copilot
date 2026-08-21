@@ -3012,6 +3012,33 @@ def run_momentum_neural_tick(
     except Exception:
         pass
 
+    # FACT-BASED reverse-split recency (Ross 08-21 JUNS: "recent reverse split =
+    # bonus" — walang kailangang sariwang headline): ipersist ang membership +
+    # floats sa meta para makapagbigay ang scorer ng fact-bonus kahit tahimik
+    # ang balita. Ang headline-squeeze fold-in sa itaas ay hiwalay at unchanged.
+    if _rs_flag and _recent_splits:
+        meta["recent_reverse_split_symbols"] = sorted(_recent_splits)
+        # Ang delta ay KINOKOMPUTE DITO (hindi sa scorer core): ang explicit core
+        # ay bawal mag-import o bumasa ng global settings (capture determinism) —
+        # parehong disenyo ng catalyst_action_deltas: plain per-symbol dict sa
+        # meta, pure lookup lang sa core.
+        try:
+            from .catalyst import reverse_split_recency_viability_delta
+
+            _rs_deltas = {
+                _s: float(reverse_split_recency_viability_delta(
+                    _s,
+                    recent_split_symbols=_recent_splits,
+                    floats=_floats or None,
+                ))
+                for _s in _recent_splits
+            }
+            _rs_deltas = {k: v for k, v in _rs_deltas.items() if v > 0}
+            if _rs_deltas:
+                meta["reverse_split_recency_deltas"] = _rs_deltas
+        except Exception:
+            pass
+
     if _strong:
         meta["strong_catalyst_symbols"] = sorted(_strong)
 
@@ -3139,6 +3166,8 @@ def run_momentum_neural_tick(
             "theme_sympathy_symbols",
             "top_market_gainers",
             "dilution_symbols",
+            "recent_reverse_split_symbols",
+            "reverse_split_recency_deltas",
             "close_strength_priors",
             "hot_tape",
             "symbol_countries",

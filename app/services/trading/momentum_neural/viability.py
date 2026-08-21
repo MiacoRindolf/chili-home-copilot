@@ -1253,6 +1253,31 @@ def score_viability_explicit(
     except (TypeError, ValueError, AttributeError):
         pass
 
+    # Ross 08-21 (JUNS): FACT-BASED recent-reverse-split bonus. Ang kasapian sa
+    # recent-split set (tunay na execution dates mula sa splits reference API,
+    # HINDI headlines — ang headline-squeeze fold-in sa strong set ay hiwalay at
+    # nag-i-stack) na may batch-adaptive LOW float ay confirming signal. Sinusunod
+    # ang top-gainer meta-driven pattern (walang external-inputs schema change —
+    # ang captured-viability bundle contract ay hindi ginagalaw; ang lumang
+    # bundles na walang meta key ay natural na 0). Hindi kailanman negative.
+    _rs_fact_delta = 0.0
+    try:
+        _rs_meta = ctx.meta if isinstance(getattr(ctx, "meta", None), dict) else {}
+        _rs_map = _rs_meta.get("reverse_split_recency_deltas")
+        if _rs_map and "-USD" not in str(symbol or "").upper():
+            _rs_fact_delta = float(
+                _rs_map.get(str(symbol or "").strip().upper()) or 0.0
+            )
+        if _rs_fact_delta > 0:
+            base += _rs_fact_delta
+            warnings.append(
+                "Recent reverse split (fresh low-float reset) — Ross SS101 bonus"
+            )
+        else:
+            _rs_fact_delta = 0.0
+    except (TypeError, ValueError, AttributeError):
+        _rs_fact_delta = 0.0
+
     # A10 (Ross CLRO-lesson 2026-07-02): OWN-HEADLINE DILUTION-HISTORY DERATE. A symbol our own
     # catalyst headlines have flagged as a diluter on >= adaptive-K distinct days in the trailing
     # window (persisted to momentum_dilution_history) is a WHLR-class serial diluter Ross has
@@ -1266,6 +1291,10 @@ def score_viability_explicit(
             _meta_a10 = ctx.meta if isinstance(getattr(ctx, "meta", None), dict) else {}
             _strong_a10 = _meta_a10.get("strong_catalyst_symbols")
             _is_fresh_squeeze = bool(_strong_a10 and str(symbol or "").strip().upper() in set(_strong_a10))
+            # Ross 08-21: ang FACT-BASED recent-reverse-split bonus ay kwalipikado
+            # rin sa carve-out — sariwang float reset > lumang dilution memory.
+            if not _is_fresh_squeeze and _rs_fact_delta:
+                _is_fresh_squeeze = True
             if not _is_fresh_squeeze:  # carve-out: a fresh squeeze / strong catalyst today wins
                 _dil_derate = external.dilution_history_derate
                 if _dil_derate > 0:
