@@ -3980,6 +3980,199 @@ def _late_window_monster_placement_mult_from_settings(
     )
 
 
+# DIP-FAMILY trigger reasons — ang mga detector na ang fire ay DIP-BUY sa isang marahas
+# na flush/pullback (flush low + reclaim structure). Shared vocabulary ng (1) runner
+# dip-velocity conviction lever, (2) punch-window retry hold, (3) late-window fresh-HOD
+# placement, at (4) L2 bid-stack confirm tilt — iisang listahan para hindi mag-drift ang
+# apat na consumer (2026-08-21 flush_dip_buy audit).
+#
+# KASAMA ang double_bottom_break(+_tick_ok): mula #1093 (flush dip-buy double-bottom
+# acceptance) ang flush-low-retest ay pumuputok bilang double-bottom — ang detector
+# mismo ay dip-buy ang semantiko (second-low BOTTOMING-TAIL na "flush that got bought
+# back up — the V-bounce signature"; stop = ang flush low). Ang WYHG 08-20 replay ng
+# audit window ay nagpaputok ng double_bottom_break_tick_ok sa mismong flush na
+# nag-fire ng flush_dip_buy sa live noong 08-20 (bago ang #1093). No-op sa
+# dip-velocity lever (walang dip_roc_per_bar ang detector debug ⇒ mult 1.0).
+DIP_FAMILY_TRIGGER_REASONS: tuple[str, ...] = (
+    "flush_dip_buy",
+    "vwap_reclaim",
+    "wick_reclaim",
+    "ask_thins_dip",
+    "ask_thins_dip_tick",
+    "sub_vwap_trap",
+    "sub_vwap_trap_tick",
+    "double_bottom_break",
+    "double_bottom_break_tick_ok",
+)
+
+
+def dip_punch_window_seconds(
+    *,
+    atr_pct: float | None,
+    enabled: bool,
+    min_seconds: float,
+    max_seconds: float,
+    ref_atr_pct: float,
+) -> float:
+    """PUNCH-WINDOW RETRY HOLD length para sa isang dip-family candidate fire
+    (2026-08-21 flush_dip_buy audit: 39 fires → 33 pending_place → 2 trades LANG;
+    ang one-shot na wide_bbo_spread block — kasama ang phantom 3131bps book ng WYHG
+    session 14675 — ay nag-demote ng SARIWANG dip candidate pabalik sa trigger_wait,
+    kung saan nabubulok ang setup bago pa makabalik ang totoong book).
+
+    ATR-scaled sa loob ng ``[min_seconds, max_seconds]``: ang kalmadong pangalan
+    (atr_pct ≤ 1× ``ref_atr_pct``) ay nananatiling valid ang dip structure nang mas
+    matagal → hold malapit sa ``max_seconds``; ang marahas na tape (≥ 3× ref) ay
+    mabilis mapawalang-bisa ang setup → hold malapit sa ``min_seconds``. Ang 1×..3×
+    reference band + ang 1% na ``ref_atr_pct`` base ay ang PAREHONG convention ng
+    :func:`_dip_velocity_size_mult` (iisang dip-family lever vocabulary, hindi bagong
+    magic). PURE SCALARS. Disabled/error ⇒ 0.0 (walang hold — legacy demote)."""
+    if not bool(enabled):
+        return 0.0
+    try:
+        lo = max(0.0, float(min_seconds))
+        hi = max(lo, float(max_seconds))
+        r = float(ref_atr_pct)
+        if not (math.isfinite(r) and r > 0):
+            return 0.0
+        a = float(atr_pct) if (atr_pct is not None and float(atr_pct) > 0) else r
+        frac = min(1.0, max(0.0, (a - r) / (2.0 * r)))  # 1x ref -> 0, 3x ref -> 1
+        return hi - frac * (hi - lo)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def _dip_punch_window_seconds_from_settings(*, atr_pct: float | None) -> float:
+    """Settings-bound wrapper ng :func:`dip_punch_window_seconds` (verbatim reads)."""
+    return dip_punch_window_seconds(
+        atr_pct=atr_pct,
+        enabled=bool(getattr(
+            settings, "chili_momentum_dip_punch_window_enabled", True
+        )),
+        min_seconds=float(getattr(
+            settings, "chili_momentum_dip_punch_window_min_seconds", 60.0
+        )),
+        max_seconds=float(getattr(
+            settings, "chili_momentum_dip_punch_window_max_seconds", 120.0
+        )),
+        ref_atr_pct=float(getattr(
+            settings, "chili_momentum_dip_punch_window_ref_atr_pct", 0.01
+        )),
+    )
+
+
+def late_window_dip_fresh_hod_mult(
+    *,
+    window: str | None,
+    trigger_reason: str | None,
+    recent_high: float | None,
+    session_high: float | None,
+    atr_pct: float | None,
+    enabled: bool,
+    hod_slack_base_frac: float,
+    hod_slack_atr_k: float,
+    hod_slack_max_frac: float,
+    dip_mult: float,
+) -> tuple[float, dict[str, Any]]:
+    """LATE-WINDOW DIP EXEMPTION (2026-08-21) — ang L8 monster path ay nangangailangan
+    ng ``px/session_low ≥ 1.5``; ang WYHG 08-20 flush_dip_buy fire (18:41Z = 14:41 ET,
+    late band) ay pinatay ng ``live_entry_wait_late_window`` ×80 kahit KASISIPA lang ng
+    pangalan malapit sa HOD nito (18:20-18:25Z leg → 5.74-5.88 vs HOD 6.04) bago ang
+    flush — tapos bumertikal sa 6.92 sa 19:00Z. Ang dip-family fire na FRESH ang HOD
+    (ang recent-bar high ay NASA LOOB ng slack ng session high — buhay NGAYON ang
+    momentum, hindi backside na hapon) ay nagpa-place sa reduced ``dip_mult`` sa halip
+    na zero.
+
+    Threshold = ``1 − min(max_frac, max(base_frac, k×atr_pct))``: ang dokumentadong
+    base slack (10% — ang "near the highs" na kahulugan; FLOOR per doctrine) ang
+    namamahala sa karaniwang pangalan, ang k×ATR ang NAGPAPALAWAK lang nito para sa
+    hyper-volatile na tape, at ang max_frac ang absolute cap para hindi ito maging
+    backside pass. Ang lahat ng IBANG proteksyon (chase/L2/spread/bench/max-loss) ay
+    tumatakbo pa rin — placement multiplier lamang ito, kapareho ng L8 monster
+    convention. PURE SCALARS (ang caller ang nagme-memoize ng frame inputs kada
+    minuto). Fail-toward-legacy: error/missing ⇒ 0.0 (blocked)."""
+    debug: dict[str, Any] = {"opened": False, "path": "late_dip_fresh_hod"}
+    if not bool(enabled):
+        return 0.0, debug
+    try:
+        _win = str(window or "")
+        if _win not in ("late", "afterhours"):
+            debug["reject"] = "not_late_ah_window"
+            return 0.0, debug
+        _trig = str(trigger_reason or "")
+        debug["trigger"] = _trig
+        if _trig not in DIP_FAMILY_TRIGGER_REASONS:
+            debug["reject"] = "non_dip_trigger"
+            return 0.0, debug
+        rhi = float(recent_high)
+        shi = float(session_high)
+        if not (math.isfinite(rhi) and rhi > 0 and math.isfinite(shi) and shi > 0):
+            debug["reject"] = "bad_highs"
+            return 0.0, debug
+        a = (
+            float(atr_pct)
+            if (atr_pct is not None and math.isfinite(float(atr_pct)) and float(atr_pct) > 0)
+            else 0.01  # ang parehong 1% ATR base ng dip-family lever vocabulary
+        )
+        slack = min(
+            float(hod_slack_max_frac),
+            max(float(hod_slack_base_frac), float(hod_slack_atr_k) * a),
+        )
+        threshold = 1.0 - slack
+        proximity = min(rhi / shi, 1.0)
+        debug.update({
+            "recent_high": round(rhi, 6), "session_high": round(shi, 6),
+            "proximity": round(proximity, 6), "threshold": round(threshold, 6),
+            "atr_pct": round(a, 6), "window": _win,
+        })
+        if proximity < threshold:
+            debug["reject"] = "hod_not_fresh"
+            return 0.0, debug
+        m = float(dip_mult)
+        if not (math.isfinite(m) and m > 0):
+            debug["reject"] = "bad_mult"
+            return 0.0, debug
+        debug["opened"] = True
+        return m, debug
+    except (TypeError, ValueError):
+        debug["reject"] = "late_dip_fresh_hod_error"
+        return 0.0, debug
+
+
+def _late_window_dip_fresh_hod_mult_from_settings(
+    *,
+    window: str | None,
+    trigger_reason: str | None,
+    recent_high: float | None,
+    session_high: float | None,
+    atr_pct: float | None,
+) -> tuple[float, dict[str, Any]]:
+    """Settings-bound wrapper ng :func:`late_window_dip_fresh_hod_mult` (verbatim
+    reads; ang mult base 0.5 ay ang parehong reduced-size convention ng L8 monster)."""
+    return late_window_dip_fresh_hod_mult(
+        window=window,
+        trigger_reason=trigger_reason,
+        recent_high=recent_high,
+        session_high=session_high,
+        atr_pct=atr_pct,
+        enabled=bool(getattr(
+            settings, "chili_momentum_late_dip_fresh_hod_enabled", True
+        )),
+        hod_slack_base_frac=float(getattr(
+            settings, "chili_momentum_late_dip_hod_slack_base_frac", 0.10
+        )),
+        hod_slack_atr_k=float(getattr(
+            settings, "chili_momentum_late_dip_hod_slack_atr_k", 1.0
+        )),
+        hod_slack_max_frac=float(getattr(
+            settings, "chili_momentum_late_dip_hod_slack_max_frac", 0.25
+        )),
+        dip_mult=float(getattr(
+            settings, "chili_momentum_late_dip_fresh_hod_mult", 0.5
+        )),
+    )
+
+
 def refire_cooldown_active(
     *,
     now: datetime,
@@ -6822,6 +7015,39 @@ def _dip_velocity_size_mult(
             return 1.0
         frac = min(1.0, (roc - floor) / (ceil - floor))
         max_boost = float(getattr(settings_obj, "chili_momentum_dip_velocity_conviction_max_boost", 0.25) or 0.0)
+        max_boost = max(0.0, min(0.5, max_boost))
+        return 1.0 + frac * max_boost
+    except (TypeError, ValueError):
+        return 1.0
+
+
+def _dip_bid_stack_tilt_mult(
+    *, imbalance5: float | None, settings_obj: Any = settings,
+) -> float:
+    """L2 BID-STACK CONFIRM TILT (2026-08-21) — ang kabilang kalahati ng B2: ang
+    2026-06-12 entry study ay sumukat ng ``imbalance5 < −0.4`` sa decision tick =
+    ask-stacked book ⇒ size-DOWN ×0.5 (nakalagay na sa sizing path). Ang PAREHONG
+    decision-time snapshot (kinukuha na sa candidate fire; telemetry-only ang positive
+    side hanggang ngayon) na BID-stacked (``imbalance5 ≥ +0.4`` — ang parehong sinukat
+    na threshold, baligtad ang sign) sa isang dip-family fire ay KUMPIRMASYON na may
+    bumibili sa flush → bounded conviction boost sa ``[1.0, 1+max_boost]``.
+
+    Interpolation mula 0 (sa +0.4) hanggang max_boost (sa +1.0 — ang sariling bound ng
+    metric, hindi bagong magic). NEVER < 1.0 (hindi kailanman veto o shrink); composes
+    multiplicatively sa ilalim ng 3x clamp + max_notional ceiling kapareho ng
+    :func:`_dip_velocity_size_mult`. Pure; fail-neutral sa 1.0 (flag off / walang
+    snapshot / error)."""
+    try:
+        if not bool(getattr(settings_obj, "chili_momentum_dip_bid_stack_tilt_enabled", True)):
+            return 1.0
+        if imbalance5 is None:
+            return 1.0
+        imb = float(imbalance5)
+        thr = 0.4  # ang sinukat na |imbalance5| threshold ng B2 study (documented constant)
+        if not (imb == imb and imb > thr):
+            return 1.0
+        frac = min(1.0, (imb - thr) / (1.0 - thr))
+        max_boost = float(getattr(settings_obj, "chili_momentum_dip_bid_stack_tilt_max_boost", 0.25) or 0.0)
         max_boost = max(0.0, min(0.5, max_boost))
         return 1.0 + frac * max_boost
     except (TypeError, ValueError):
