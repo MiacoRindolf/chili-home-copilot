@@ -2475,6 +2475,45 @@ def _minutes_since_rth_open_et() -> float | None:
         return None
 
 
+def generic_trigger_postopen_deferred(
+    trigger_reason: str | None,
+    minutes_since_rth_open: float | None,
+    *,
+    enabled: bool,
+    cutoff_min_after_open: float,
+) -> bool:
+    """Time-of-day ENTRY-QUALITY bar (audit 2026-08-21, ebidensya sa memory):
+
+    Per-ET-hour expectancy sa 162 entered equity trades: PREMARKET n=20
+    gross +$3,305 PF 20.1; OPEN 9-11 n=62 gross -$9,379 PF 0.07 (kahit
+    alisin ang 07-10 incident day, ~-$5.1k / 19% win pa rin); MIDDAY 11-14
+    n=62 gross -$3,162 PF 0.06. Ang buong makasaysayang kita ng lane ay
+    PREMARKET; ang mga generic volume trigger (``momentum_ok*`` — bare
+    rel-vol/abs-vol/tick-stream, WALANG istruktura) ang bumubuo ng post-open
+    churn. Ross doctrine: full aggression early, layo sa midday.
+
+    Pagkatapos ng ``cutoff_min_after_open`` minuto mula sa 09:30 ET open,
+    ang mga GENERIC trigger ay hindi na tinatanggap para sa BAGONG entry —
+    ang mga structural/explosive pattern (pullback break, double bottom,
+    abcd, halt-resume, flush-dip, ...) ay TULOY na pumuputok buong araw.
+    ``minutes_since_rth_open=None`` (premarket) => hindi kailanman dine-defer.
+    Pure; fail-OPEN (never defer) sa masamang basis."""
+    if not enabled:
+        return False
+    if minutes_since_rth_open is None:
+        return False  # premarket / unknown clock -> buong repertoire
+    try:
+        mins = float(minutes_since_rth_open)
+        cutoff = float(cutoff_min_after_open)
+    except (TypeError, ValueError):
+        return False
+    if not (mins == mins and cutoff == cutoff) or cutoff < 0:
+        return False
+    if mins < cutoff:
+        return False
+    return str(trigger_reason or "").startswith("momentum_ok")
+
+
 def fatigue_derate_multiplier(
     *,
     trade_count_today: int,

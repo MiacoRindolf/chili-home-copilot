@@ -29273,6 +29273,34 @@ def tick_live_session(
                 _emit(db, sess, "live_entry_bid_prop_unconfirmed", {
                     "blocked_trigger": _prev_reason, **_bp_dbg,
                 })
+        # TIME-OF-DAY ENTRY-QUALITY BAR (audit 2026-08-21): post-open ang mga
+        # generic volume trigger (momentum_ok*) ay churn — PF ~0.07 sa n=124
+        # laban sa premarket PF 20.1 (n=20). Pagkatapos ng cutoff (default 30min
+        # post-open = 10:00 ET), structural/explosive pattern lang ang pumuputok;
+        # premarket at unang kalahating-oras = buong repertoire (None minutes =>
+        # never deferred). Ebidensya at derivation: config.py sa tabi ng setting.
+        if _trigger_ok:
+            from .risk_policy import (
+                _minutes_since_rth_open_et as _pq_minutes,
+                generic_trigger_postopen_deferred as _pq_deferred,
+            )
+
+            if _pq_deferred(
+                _trigger_reason,
+                _pq_minutes(),
+                enabled=bool(getattr(
+                    settings,
+                    "chili_momentum_postopen_generic_trigger_bar_enabled", True)),
+                cutoff_min_after_open=float(getattr(
+                    settings,
+                    "chili_momentum_postopen_generic_trigger_cutoff_min", 30.0) or 30.0),
+            ):
+                _prev_reason = _trigger_reason
+                _trigger_ok = False
+                _trigger_reason = "postopen_generic_trigger_wait"
+                _emit(db, sess, "live_entry_postopen_quality_bar", {
+                    "blocked_trigger": _prev_reason,
+                })
         # E3: equities ENTER across the EXTENDED session (pre-market → after-hours,
         # per config) so the lane catches Ross's pre-market gap-and-go; crypto is 24/7.
         # Outside-RTH entries are flagged extended_hours at placement (below) so the
