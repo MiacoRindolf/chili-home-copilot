@@ -8806,6 +8806,15 @@ class Settings(BaseSettings):
         ),
         description="Let the SCHEDULER-mode live-runner drain the entry FSM's own continuation request and re-invoke the FSM for that session immediately (same batch) instead of waiting a full scheduler tick per mechanical state transition. OFF ⇒ the request is not recorded and each transition waits for the next tick (the pre-2026-08-19 behaviour that produced a 408s median plan-to-check gap). Loop mode is unaffected either way — the request is only recorded when the loop driver declines it.",
     )
+    # ARM->RUNNER WAKE (2026-08-21): pagkatapos armahan ng ignition bridge ang
+    # session, agarang runner tick sa sariling daemon thread sa halip na
+    # hintayin ang susunod na scheduler batch (~23s ang sinukat na gap; ang
+    # benchmark ay <10s signal->posisyon). Ligtas sa sabayan: FOR UPDATE NOWAIT
+    # ang session row kaya benign concurrent_tick skip ang anumang karera.
+    chili_momentum_arm_wake_runner_enabled: bool = Field(
+        default=True,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_ARM_WAKE_RUNNER_ENABLED"),
+    )
     chili_momentum_entry_fsm_continuation_max_steps: int = Field(
         default=3,
         ge=1,

@@ -169,6 +169,78 @@ class _UniverseTracker:
             return len(self._symbols)
 
 
+
+# ---------------------------------------------------------------------------
+# Arm -> runner WAKE (2026-08-21). Ang armado ay dating naghihintay sa susunod
+# na scheduler batch cycle — sinukat na ~23s arm->unang-tick kahit may FSM
+# continuation. Ang benchmark (Ross 08-20 HUIZ): <10s mula signal hanggang
+# posisyon. Ang wake ay nagpapatakbo ng AGARANG runner tick para sa kaka-armang
+# session sa sariling daemon thread: (a) hindi hinaharangan ang scoring worker,
+# (b) ligtas sa sabayan — ang session row ay FOR UPDATE NOWAIT sa dispatcher
+# kaya ang karera laban sa scheduler batch ay nagiging benign na
+# concurrent_tick skip, (c) single-flight kada session para hindi magtambak.
+# Kill switch: chili_momentum_arm_wake_runner_enabled=false.
+_wake_inflight: set[int] = set()
+_wake_inflight_lock = threading.Lock()
+
+
+def _wake_runner_tick(session_id: int) -> None:
+    try:
+        from .live_runner import consume_entry_fsm_continuation as _consume
+    except Exception:
+        _consume = None
+    try:
+        from .captured_paper_dispatcher import dispatch_live_runner_tick
+        from ....db import SessionLocal as _SL
+        from ....config import settings as _st
+
+        max_steps = int(getattr(_st, "chili_momentum_entry_fsm_continuation_max_steps", 3) or 3)
+        for _step in range(max(1, max_steps)):
+            db = _SL()
+            try:
+                dispatch_live_runner_tick(db, int(session_id))
+                db.commit()
+            except Exception:
+                try:
+                    db.rollback()
+                except Exception:
+                    pass
+                break
+            finally:
+                try:
+                    db.rollback()
+                except Exception:
+                    pass
+                db.close()
+            if _consume is None or not _consume(int(session_id)):
+                break
+    except Exception:
+        _log.debug("[momentum_ws_ignition] arm wake tick failed for session=%s", session_id, exc_info=True)
+    finally:
+        with _wake_inflight_lock:
+            _wake_inflight.discard(int(session_id))
+
+
+def _spawn_arm_wake(session_id: Any) -> bool:
+    try:
+        sid = int(session_id)
+    except (TypeError, ValueError):
+        return False
+    from ....config import settings as _st
+
+    if not bool(getattr(_st, "chili_momentum_arm_wake_runner_enabled", True)):
+        return False
+    with _wake_inflight_lock:
+        if sid in _wake_inflight:
+            return False
+        _wake_inflight.add(sid)
+    threading.Thread(
+        target=_wake_runner_tick, args=(sid,),
+        name=f"arm-wake-{sid}", daemon=True,
+    ).start()
+    return True
+
+
 class IgnitionScoringLoop:
     """Bridges price-bus ticks to a direct single-symbol viability score."""
 
@@ -499,7 +571,11 @@ class IgnitionScoringLoop:
             if out is None:
                 return "skipped"  # flag off, debounced, or lost the single-flight
             if int(out.get("armed") or 0) > 0:
-                return "armed"
+                # WAKE: agarang runner tick para sa kaka-armang session sa
+                # halip na hintayin ang susunod na scheduler batch (~23s ang
+                # sinukat na gap). Fire-and-forget; benign ang anumang karera.
+                _woke = _spawn_arm_wake(out.get("session_id"))
+                return "armed+wake" if _woke else "armed"
             return "no_arm:" + str(out.get("skipped") or "unknown")
         except Exception:
             _log.warning(
