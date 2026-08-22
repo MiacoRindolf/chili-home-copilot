@@ -75,6 +75,7 @@ _CPU_COUNT = _os.cpu_count() or 4
 # cgroup-EFFECTIVE CPUs, not host cpu_count, which oversubscribes a CPU-limited
 # container. Preserves the prior ~16-worker magnitude at the current CPU budget.
 from .brain_io_concurrency import cpu_workers as _cpu_workers
+from .stop_distance_guard import bound_stop_distance
 _MAX_SCAN_WORKERS = _cpu_workers(None, multiplier=2.0, floor=16, ceiling=64)
 
 _top_picks_cache: dict[str, Any] = {"picks": [], "ts": 0.0}
@@ -447,6 +448,19 @@ def _long_atr_trade_levels(
     entry = smart_round(price, crypto=crypto)
     stop = smart_round(price - stop_m * atr_f, crypto=crypto)
     target = smart_round(price + target_m * atr_f, crypto=crypto)
+    # QTEX guard (2026-06-15, trade 2338): bound the stop DISTANCE so a
+    # hyper-mover's huge daily ATR can't anchor the stop ~83% below entry
+    # (whole-position risk). Tightens (never widens) and scales the target to
+    # preserve R:R. Normal swing setups (stop << ceiling) pass through
+    # unchanged. See stop_distance_guard for the adaptive env-knob/kill-switch.
+    bounded_stop, bounded_target, _clamp = bound_stop_distance(
+        entry=entry, stop=stop, target=target, is_long=True, crypto=crypto,
+        context="scanner._long_atr_trade_levels",
+    )
+    if _clamp is not None:
+        stop = smart_round(bounded_stop, crypto=crypto)
+        if bounded_target is not None:
+            target = smart_round(bounded_target, crypto=crypto)
     if stop <= 0.0 or stop >= entry or target <= entry:
         return None
     return entry, stop, target
