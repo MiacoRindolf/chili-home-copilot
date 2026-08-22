@@ -34653,6 +34653,15 @@ def tick_live_session(
             _emit(db, sess, "live_entry_deferred_final_bbo", _at_place)
             _safe_transition(db, sess, STATE_WATCHING_LIVE)
             db.flush()
+            # ENTRY-REGION LATENCY (#7, BCCQ/ADXN 2026-08-21): ang stale-at-seam
+            # na quote ay agarang naaayos ng sariwang refetch — pero ang re-climb
+            # (watching -> candidate -> pending -> place) ay dating naghihintay ng
+            # 10-15s scheduler cadence BAWAT baitang (58-117s na butas sa sukat).
+            # Ang continuation chain ay nagpapatakbo ng re-climb SA LOOB ng tick,
+            # bounded ng continuation max-steps + buong re-checks bawat pass. Ang
+            # governor defer sa ibaba ay SADYANG walang continuation (bucket
+            # refill ay clock-bound — ang instant retry ay hot spin lang).
+            _schedule_entry_fsm_continuation(sess.id)
             return {
                 "ok": True,
                 "session_id": sess.id,
