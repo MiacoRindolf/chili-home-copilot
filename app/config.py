@@ -2461,6 +2461,17 @@ class Settings(BaseSettings):
         default=True,
         validation_alias=AliasChoices("CHILI_MOMENTUM_FTD_INGEST_ENABLED"),
     )
+    # S6 suppression/squeeze regime index (Ross "Forcing a Crash" 08-21): daily
+    # na +50%/+100% mover hold-vs-fade aggregates (momentum_viability_history) +
+    # FTD aggregate → momentum_squeeze_regime_daily; ang label (suppression|
+    # neutral|squeeze) ay nakalakip sa breadth-regime context at sa viability
+    # regime snapshots. OBSERVABILITY-ONLY sa phase na ito — walang sizing/
+    # selection na gumagamit; ang tilt wiring ay hiwalay na phase. Kill-switch
+    # =False: walang daily job, walang stamp, neutral ang label.
+    chili_momentum_squeeze_regime_enabled: bool = Field(
+        default=True,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_SQUEEZE_REGIME_ENABLED"),
+    )
     chili_momentum_reverse_split_recency_enabled: bool = Field(
         default=True,
         validation_alias=AliasChoices("CHILI_MOMENTUM_REVERSE_SPLIT_RECENCY_ENABLED"),

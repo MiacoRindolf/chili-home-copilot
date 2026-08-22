@@ -578,6 +578,29 @@ def persist_neural_momentum_tick(
 
     exec_json = features.to_public_dict()
 
+    # S6 (Ross "Forcing a Crash" 08-21) — OBSERVABILITY stamp: ang suppression/
+    # squeeze daily label ay isinusulat sa regime snapshot ng BAWAT viability row,
+    # kaya dumadaloy ito sa entry_regime_snapshot_json sa fill (meta-label dataset)
+    # nang WALANG decision path na nagbabasa nito. Ang read ay LIMIT-25 na PK probe
+    # ng 1-row-per-day na table (memoized) — hindi kailanman scan. Fail-open.
+    try:
+        from ....config import settings as _settings
+        from .squeeze_regime import read_squeeze_regime
+
+        if bool(getattr(_settings, "chili_momentum_squeeze_regime_enabled", True)):
+            _sq = read_squeeze_regime(db)
+            regime_snapshot = dict(regime_snapshot)
+            regime_snapshot["squeeze_regime"] = {
+                "label": _sq.label,
+                "reason": _sq.reason,
+                "as_of_day": _sq.as_of_day,
+                "hold_ratio": _sq.window_hold_ratio,
+                "window_movers_50": _sq.window_movers_50,
+                "window_movers_100": _sq.window_movers_100,
+            }
+    except Exception:
+        _log.debug("squeeze-regime snapshot stamp skipped (fail-open)", exc_info=True)
+
     def _row_execution_readiness(symbol: str) -> dict[str, Any]:
         """Persist only this row's scanner member, not the whole field N times."""
 

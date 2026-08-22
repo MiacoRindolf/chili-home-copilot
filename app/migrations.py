@@ -32908,6 +32908,50 @@ def _migration_368_sec_fails_to_deliver(conn) -> None:
     ))
 
 
+def _migration_369_squeeze_regime_daily(conn) -> None:
+    """S6 suppression/squeeze regime index (Ross "Forcing a Crash" 08-21).
+
+    Isang row kada UTC na araw: bilang ng +50%/+100% movers sa
+    momentum_viability_history at ilan doon ang NAG-HOLD vs NAG-FADE (round
+    trip), + opsyonal na FTD aggregate (sec_fails_to_deliver, mig368). Ang
+    label (suppression|neutral|squeeze) ay binabasa mula rito ng
+    breadth-regime context — observability-first, walang decision path pa.
+
+    Ang partial covering index ang ginagawang index-only ang per-day mover
+    scan ng batch refresh (mig363 pattern — ang buong-araw na heap scan ng
+    31M-row history ay ang klase ng scan na nagdulot ng 08-20 bridge
+    starvation). Ang predicate literal na 50.0 ay dapat TUMUGMA sa
+    squeeze_regime._MOVER_PCT. Sa prod, itayo muna nang CONCURRENTLY bago ang
+    deploy kung mainit ang table; IF NOT EXISTS = no-op pagkatapos."""
+
+    conn.execute(text(
+        """
+        CREATE TABLE IF NOT EXISTS momentum_squeeze_regime_daily (
+            day DATE PRIMARY KEY,
+            movers_50 INTEGER NOT NULL DEFAULT 0,
+            movers_100 INTEGER NOT NULL DEFAULT 0,
+            held_50 INTEGER NOT NULL DEFAULT 0,
+            faded_50 INTEGER NOT NULL DEFAULT 0,
+            unresolved_50 INTEGER NOT NULL DEFAULT 0,
+            ftd_settlement_date DATE,
+            ftd_total_qty BIGINT,
+            ftd_symbols INTEGER,
+            ftd_mover_qty BIGINT,
+            detail_json JSONB NOT NULL DEFAULT '{}'::jsonb,
+            computed_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        )
+        """
+    ))
+    conn.execute(text(
+        """
+        CREATE INDEX IF NOT EXISTS ix_mvh_mover_scan
+        ON momentum_viability_history (observed_at)
+        INCLUDE (symbol, change_pct)
+        WHERE change_pct >= 50.0 AND symbol NOT LIKE '%-USD%'
+        """
+    ))
+
+
 MIGRATIONS = [
     ("001_add_email", _migration_001_add_email),
     ("002_add_image_path", _migration_002_add_image_path),
@@ -33400,6 +33444,8 @@ MIGRATIONS = [
      _migration_365_outcomes_breaker_index),
     ("368_sec_fails_to_deliver",
      _migration_368_sec_fails_to_deliver),
+    ("369_squeeze_regime_daily",
+     _migration_369_squeeze_regime_daily),
 ]
 
 
