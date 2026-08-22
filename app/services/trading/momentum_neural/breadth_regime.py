@@ -74,6 +74,17 @@ class BreadthRegime:
     breadth_floor: float          # the p20 baseline breadth this session was measured against
     is_pre_holiday: bool
     reason: str
+    # ── S6 (Ross "Forcing a Crash" 08-21) — SUPPRESSION/SQUEEZE axis ─────────────────────────
+    # Hiwalay na MARKET-LEVEL axis mula sa daily mover hold-vs-fade aggregates (squeeze_regime
+    # module, momentum_squeeze_regime_daily). OBSERVABILITY-ONLY sa phase na ito: naka-log at
+    # naka-persist, magagamit ng sizing/selection bilang tilt sa SUSUNOD na phase — walang
+    # decision path na nagbabasa nito ngayon. Defaults sa dulo = ang mga umiiral na positional
+    # construction (kasama ang mga test) ay nananatiling byte-identical na neutral.
+    squeeze_label: str = "neutral"           # "suppression" | "neutral" | "squeeze"
+    squeeze_reason: str = "no_daily_rows"
+    squeeze_hold_ratio: float | None = None
+    squeeze_window_movers_50: int = 0
+    squeeze_window_movers_100: int = 0
 
     def b_grade_size_tilt(self) -> float:
         """The size-tilt multiplier to apply to a NON-dominant (B-grade) admission. 1.0 when not
@@ -154,7 +165,7 @@ def compute_breadth_regime(
     import time as _time
 
     if _os.environ.get("GOLDEN") == "1" or _os.environ.get("CHILI_PYTEST"):
-        return _compute_breadth_regime_uncached(db, now=now)
+        return _attach_squeeze_axis(db, _compute_breadth_regime_uncached(db, now=now))
     _t = _time.monotonic()
     _at = _REGIME_MEMO.get("computed_at_monotonic")
     if (
@@ -170,12 +181,37 @@ def compute_breadth_regime(
         _stale = _REGIME_MEMO.get("value")
         return _stale if _stale is not None else _NEUTRAL
     try:
-        result = _compute_breadth_regime_uncached(db, now=now)
+        result = _attach_squeeze_axis(db, _compute_breadth_regime_uncached(db, now=now))
         _REGIME_MEMO["computed_at_monotonic"] = _time.monotonic()
         _REGIME_MEMO["value"] = result
         return result
     finally:
         _REGIME_RECOMPUTE_LOCK.release()
+
+
+def _attach_squeeze_axis(db: "Session | None", base: BreadthRegime) -> BreadthRegime:
+    """S6: ilakip ang suppression/squeeze axis sa breadth regime context. Ang read
+    ay LIMIT-25 na PK probe ng 1-row-per-day na ``momentum_squeeze_regime_daily``
+    (may sariling memo) — ligtas sa ilalim ng recompute lock (HINDI ito ang klase
+    ng scan na nagdulot ng 08-20 bridge starvation). FAIL-OPEN: anumang error =>
+    ``base`` nang walang pagbabago (neutral ang axis defaults)."""
+    try:
+        from dataclasses import replace as _dc_replace
+
+        from .squeeze_regime import read_squeeze_regime
+
+        sq = read_squeeze_regime(db)
+        return _dc_replace(
+            base,
+            squeeze_label=sq.label,
+            squeeze_reason=sq.reason,
+            squeeze_hold_ratio=sq.window_hold_ratio,
+            squeeze_window_movers_50=sq.window_movers_50,
+            squeeze_window_movers_100=sq.window_movers_100,
+        )
+    except Exception:
+        logger.debug("[breadth_regime] squeeze-axis attach failed (fail-open)", exc_info=True)
+        return base
 
 
 def _compute_breadth_regime_uncached(

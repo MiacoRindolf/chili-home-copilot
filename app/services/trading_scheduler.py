@@ -6582,6 +6582,32 @@ def start_scheduler():
                 max_instances=1,
             )
 
+        # S6 suppression/squeeze regime daily refresh (Ross "Forcing a Crash"
+        # 08-21): per-day mover hold-vs-fade aggregates + FTD aggregate →
+        # momentum_squeeze_regime_daily. 3:10 LA (pagkatapos ng FTD ingest 3:00
+        # para makuha ng daily row ang pinakabagong settlement data). Idempotent
+        # (nire-recompute lang ang nawawala + kahapon); fail-open kada araw.
+        if include_web_light and getattr(settings, "chili_momentum_squeeze_regime_enabled", True):
+            def _run_squeeze_regime_refresh_job() -> None:
+                from ..db import SessionLocal
+                from .trading.momentum_neural.squeeze_regime import refresh_squeeze_regime_daily
+
+                db = SessionLocal()
+                try:
+                    report = refresh_squeeze_regime_daily(db)
+                    logger.info("[scheduler] squeeze-regime daily refresh: %s", report)
+                finally:
+                    db.close()
+
+            _scheduler.add_job(
+                _run_squeeze_regime_refresh_job,
+                trigger=CronTrigger(hour=3, minute=10, timezone="America/Los_Angeles"),
+                id="momentum_squeeze_regime_refresh",
+                name="Suppression/squeeze regime daily refresh (3:10 America/Los_Angeles)",
+                replace_existing=True,
+                max_instances=1,
+            )
+
         if include_web_light and getattr(settings, "chili_daily_trading_brief_enabled", False):
             _scheduler.add_job(
                 _run_daily_trading_brief_job,
