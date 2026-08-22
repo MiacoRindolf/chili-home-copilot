@@ -143,6 +143,19 @@ def prime_shelf_cache(symbol: str) -> None:
     """Tawagin sa WATCH-start (latency-tolerant): pinupuno ang cache nang
     minsanan bawat TTL; ang kabiguan ay naka-cache din (negative cache) para
     hindi mag-loop ng network calls."""
+    # HERMETIC REPLAY/TEST GUARD (golden-batch triage 2026-08-21): ang EDGAR
+    # prime thread na ito ang bumagsak sa replay network fence — bawat window
+    # ay namamatay sa "swallowed forbidden network attempt". Sa replay/test,
+    # laktawan ang prime: ang sizing ay cache-read lang at fail-open (walang
+    # positibong shelf evidence = walang damper) — ang mismong disenyo ng
+    # module. Walang pagbabago sa live.
+    import os
+
+    if (
+        os.environ.get("CHILI_DIAGNOSTIC_REPLAY_ISOLATED") == "true"
+        or os.environ.get("CHILI_PYTEST") == "1"
+    ):
+        return
     sym = str(symbol or "").strip().upper()
     if not sym or sym.endswith("-USD"):
         return
