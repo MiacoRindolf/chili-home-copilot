@@ -9303,6 +9303,29 @@ def pullback_break_confirmation(
                 "effective_floor": round(_bv_relaxed, 3),
             }
             _vol_floor = _bv_relaxed
+    # VERTICAL-CONTAMINATION RELIEF (HUIZ 2026-08-20 second leg, diag replay
+    # 2026-08-21): ang rolling-MEAN denominator ng vol_ratio ay pinalobo ng
+    # kakatatapos lang na vertical (41k-tick monster bars sa trailing 20) kaya
+    # ang malaki-pa-ring shelf-break bar ay nagbasa ng "break_low_volume" — ang
+    # dahilan kung bakit hindi nakukuha ang bawat post-vertical second leg. Ang
+    # MEDIAN ng parehong window ay immune sa monster bars: pumasa kung malinis
+    # sa ALINMAN sa dalawang basa. RELIEF LANG (hindi kailanman nagpapahigpit);
+    # fail-open sa anumang frame error.
+    if not _tick_break and vol_ratio is not None and vol_ratio < _vol_floor:
+        try:
+            _vol_series = df["Volume"].astype(float)
+            _win = _vol_series.tail(21)
+            _med = float(_win.iloc[:-1].median()) if len(_win) > 1 else 0.0
+            _robust_ratio = (float(_win.iloc[-1]) / _med) if _med > 0 else None
+            if _robust_ratio is not None and _robust_ratio >= _vol_floor:
+                debug["break_volume_median_relief"] = {
+                    "mean_ratio": round(float(vol_ratio), 3),
+                    "median_ratio": round(_robust_ratio, 3),
+                    "floor": round(_vol_floor, 3),
+                }
+                vol_ratio = _robust_ratio
+        except Exception:
+            pass
     # F1: vol_ratio None = volume UNKNOWN (micro frame outside trade-tape coverage) -> the
     # per-bar spike gate fails OPEN (documented); a real computed ratio still gates as before.
     if not _tick_break and vol_ratio is not None and vol_ratio < _vol_floor:
