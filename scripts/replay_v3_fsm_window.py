@@ -19,9 +19,10 @@ window and diff PnL / entries / escalation count:
     conda run -n chili-env python scripts/replay_v3_fsm_window.py
 
 Env knobs: SYMBOL, WIN_START/WIN_END (replayed window, UTC-naive), OHLCV_START (as-of OHLCV
-warm-up), TICK_STRIDE (downsample tape 1/N), GRID_STEP_S (sim grid), FULL_MIRROR (1=full-density
-streaming mirror — needed for cadence + 5m higher-low), ARM (on/off/both), DIAG/ENTRY_DIAG/
-GRIND_DIAG (diagnostics).
+warm-up), FRAME_WARMUP_MIN (minutes of pre-WIN_START tape resampled into the OHLCV frames;
+default 5d = the period the runner requests live; tape-bounded), TICK_STRIDE (downsample tape
+1/N), GRID_STEP_S (sim grid), FULL_MIRROR (1=full-density streaming mirror — needed for
+cadence + 5m higher-low), ARM (on/off/both), DIAG/ENTRY_DIAG/GRIND_DIAG (diagnostics).
 
 ⚠️ NINE GOTCHA-LAYERS cracked for parity (do NOT remove without re-checking): schedule_window_now
 real-clock -> sim clock; signed_tape_accel_features as_of -> sim clock (else the mirrored tape
@@ -59,6 +60,18 @@ SYMBOL = os.environ.get("SYMBOL", "CELZ")
 WIN_START = datetime.fromisoformat(os.environ.get("WIN_START", "2026-06-30T12:35:00"))
 WIN_END = datetime.fromisoformat(os.environ.get("WIN_END", "2026-06-30T14:30:00"))
 OHLCV_START = datetime.fromisoformat(os.environ.get("OHLCV_START", "2026-06-30T12:35:00"))
+# P1 FRAME WARM-UP (2026-08-21 HUIZ shelf diagnostics): the OHLCV frames used to be
+# resampled from ticks loaded at OHLCV_START (usually == WIN_START), so every frame started
+# the window at ZERO bars — pullback_break_confirmation (10 bars) and the 25-bar
+# momentum_volume ladder sat in "insufficient_bars" for most/all of the window and only the
+# tick-stream fallback ever ran, while LIVE gets period="5d" frames from the providers with
+# a full session (plus prior days) of depth. Frames now resample from a WIDER tick load that
+# reaches back FRAME_WARMUP_MIN minutes before WIN_START (default = the 5d period the runner
+# actually requests; tape-bounded — a symbol subscribed at ignition simply yields what
+# exists). Printed volume, the SIM tick mirror and the driver grid are UNTOUCHED (still
+# OHLCV_START/WIN_START-bounded); only the OHLCV provider seam gains depth.
+FRAME_WARMUP_MIN = float(os.environ.get("FRAME_WARMUP_MIN", str(5 * 24 * 60)))
+FRAME_START = min(OHLCV_START, WIN_START - timedelta(minutes=FRAME_WARMUP_MIN))
 GRID_STEP_S = float(os.environ.get("GRID_STEP_S", "1.5"))
 DIAG = os.environ.get("DIAG", "0") == "1"
 ENTRY_DIAG = os.environ.get("ENTRY_DIAG", "0") == "1"
@@ -90,7 +103,20 @@ def load_prod():
             "  WHERE symbol=:s AND observed_at>=:a AND observed_at<:b AND price>0"
             ") q WHERE mod(rn, :st) = 0 ORDER BY observed_at ASC"),
             c, params={"s": SYMBOL, "a": OHLCV_START, "b": WIN_END, "st": stride})
-    return nbbo, ticks
+        # P1 FRAME WARM-UP: the wider (stride-downsampled) load that feeds ONLY the
+        # OHLCV provider, so frames carry real pre-window depth like live's 5d fetch.
+        if FRAME_START < OHLCV_START:
+            frame_ticks = pd.read_sql(text(
+                "SELECT observed_at, price, size*:st AS size FROM ("
+                "  SELECT observed_at, price, size, "
+                "         row_number() OVER (ORDER BY observed_at) AS rn "
+                "  FROM iqfeed_trade_ticks "
+                "  WHERE symbol=:s AND observed_at>=:a AND observed_at<:b AND price>0"
+                ") q WHERE mod(rn, :st) = 0 ORDER BY observed_at ASC"),
+                c, params={"s": SYMBOL, "a": FRAME_START, "b": WIN_END, "st": stride})
+        else:
+            frame_ticks = ticks
+    return nbbo, ticks, frame_ticks
 
 
 def build_grid(nbbo):
@@ -198,7 +224,17 @@ def mirror_ticks_streaming(sim_engine):
 
 
 class AsOfProvider:
-    """As-of-t OHLCV from real ticks (no lookahead) — reads the sim clock via lr._utcnow()."""
+    """As-of-t OHLCV from real ticks (no lookahead) — reads the sim clock via lr._utcnow().
+
+    P1 PRODUCTION-PARITY FRAMES (2026-08-21 HUIZ shelf diagnostics), two fixes:
+      * DEPTH — construct with the FRAME-warm-up tick load (see FRAME_WARMUP_MIN) so the
+        1m/5m/15m frames carry the pre-window session depth live gets from period="5d",
+        instead of starting the window at zero bars (insufficient_bars everywhere).
+      * INDEX — keep the naive-UTC DatetimeIndex on the served frame. Live provider frames
+        are datetime-indexed; reset_index(drop=True) silently disabled every timestamp read
+        downstream — the forming-bar elapsed fraction (the 08-19 YJ volume-rate fix), the
+        _today_session_frame session slice, bar-width detection — all fell back to their
+        degraded paths ONLY in replay. As-of safety is unchanged (index <= sim-now)."""
     def __init__(self, ticks):
         t = ticks.copy()
         if not t.empty:
@@ -226,12 +262,12 @@ class AsOfProvider:
         if bars.empty:
             return empty
         bars = bars.rename(columns={"open": "Open", "high": "High", "low": "Low", "close": "Close"})
-        bars = bars[["Open", "High", "Low", "Close", "Volume"]].reset_index(drop=True)
+        bars = bars[["Open", "High", "Low", "Close", "Volume"]]
         self._cache[ck] = bars
         return bars.copy()
 
 
-def run_arm(label, grid, ticks, g4_on):
+def run_arm(label, grid, ticks, frame_ticks, g4_on):
     """Seed a fresh queued_live CLRO session + real ticks in SIM, run the REAL FSM over the
     grid with G4 flags on/off, mine the fills -> PnL + the grind/escalation event evidence."""
     settings.chili_momentum_g4_grind_exit_enabled = g4_on
@@ -297,6 +333,13 @@ def run_arm(label, grid, ticks, g4_on):
         return _o(symbol, db=db, window_s=window_s,
                   as_of=(as_of if as_of is not None else lr._utcnow()))
     _eg.signed_tape_accel_features = _staf_simclock
+    # P1 FORMING-BAR CLOCK (2026-08-21): _forming_bar_elapsed_fraction measures how much of
+    # the LAST bar has elapsed via entry_gates._utcnow_for_bars = the REAL wall clock. In
+    # replay the frame's last bar sits at the RECORDED instant, so real-now reads every bar
+    # as long complete and the volume-rate normalization (the 08-19 YJ measurement fix)
+    # silently disables — replay then re-runs the exact bug live was cured of. Re-point it
+    # at the SIM clock (naive UTC, the same awareness as the recorded frame index).
+    _eg._utcnow_for_bars = lambda sample: lr._utcnow()
     # PROPOSED G4 FIX validation (GRIND_FIX=1): align grind ACTIVATION with MAINTENANCE + the
     # classifier's own semantics — accept UNCERTAIN cadence (which the classifier defaults to
     # "FAST/normal, no modulation" and which maintenance keeps as "NOT SLOW_CHOPPER"). Only
@@ -390,7 +433,7 @@ def run_arm(label, grid, ticks, g4_on):
         except Exception:
             pass
     mock.set_quote = _set_quote_and_vol
-    provider = AsOfProvider(ticks)
+    provider = AsOfProvider(frame_ticks)
     driver = rv3.ReplayV3Driver(
         db, seed, mock=mock, ohlcv_provider=provider, grid=grid,
         risk_gate_allows=True,                 # short-circuit ONLY the pre-entry risk gate
@@ -499,23 +542,24 @@ def run_arm(label, grid, ticks, g4_on):
 
 def main():
     print(f"Loading {SYMBOL} tape ({WIN_START}..{WIN_END})...")
-    nbbo, ticks = load_prod()
-    print(f"  nbbo_rows={len(nbbo)}  tick_rows={len(ticks)}")
+    nbbo, ticks, frame_ticks = load_prod()
+    print(f"  nbbo_rows={len(nbbo)}  tick_rows={len(ticks)}  "
+          f"frame_tick_rows={len(frame_ticks)} (warmup from {FRAME_START})")
     grid = build_grid(nbbo)
     print(f"  grid_steps(after {GRID_STEP_S}s downsample)={len(grid)}")
     if not grid:
         print("NO GRID — tape missing. Abort."); return
     arm = os.environ.get("ARM", "both")
     if arm == "on":
-        on = run_arm(SYMBOL, grid, ticks, g4_on=True)
+        on = run_arm(SYMBOL, grid, ticks, frame_ticks, g4_on=True)
         print(f"\n[ARM=on] G4 ON PnL {on[0]:+.2f} entries={on[1]} exits={on[2]} grind={on[3]} esc={on[4]}")
         return
     if arm == "off":
-        off = run_arm(SYMBOL, grid, ticks, g4_on=False)
+        off = run_arm(SYMBOL, grid, ticks, frame_ticks, g4_on=False)
         print(f"\n[ARM=off] G4 OFF PnL {off[0]:+.2f} entries={off[1]} exits={off[2]} grind={off[3]} esc={off[4]}")
         return
-    on = run_arm(SYMBOL, grid, ticks, g4_on=True)
-    off = run_arm(SYMBOL, grid, ticks, g4_on=False)
+    on = run_arm(SYMBOL, grid, ticks, frame_ticks, g4_on=True)
+    off = run_arm(SYMBOL, grid, ticks, frame_ticks, g4_on=False)
     print(f"\n================ FSM A/B RESULT ({SYMBOL}) ================")
     print(f"  G4 ON : PnL {on[0]:+.2f}  entries={on[1]} exits={on[2]} grind_evts={on[3]} esc_evts={on[4]}")
     print(f"  G4 OFF: PnL {off[0]:+.2f}  entries={off[1]} exits={off[2]} grind_evts={off[3]} esc_evts={off[4]}")
