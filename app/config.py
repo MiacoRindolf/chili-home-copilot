@@ -9405,6 +9405,16 @@ class Settings(BaseSettings):
     # _NULL read ⇒ NEVER veto. Class-aware (equity iqfeed / crypto fast_orderbook).
     # OFF ⇒ branch skipped ⇒ byte-identical. The absorption side reuses
     # chili_momentum_ofi_threshold (no new OFI knob).
+    # Repeg spoof-wall detector (Ross "Forcing a Crash" 2026-08-21, MEMX
+    # suppression-algo court-doc signature): inuuri ang malalaking ask wall sa
+    # depth window bilang SPOOF_WALL_ACTIVE (cancel-and-repeg pataas = phantom
+    # supply -> sariling defer reason) / WALL_EATEN (tinuluyan ng tunay na
+    # prints -> HINDI na vine-veto ng big/hidden-seller reads) / ICEBERG_REAL
+    # (tunay na supply -> existing semantics). Fail-open sa lahat ng error.
+    chili_momentum_repeg_wall_detector_enabled: bool = Field(
+        default=True,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_REPEG_WALL_DETECTOR_ENABLED"),
+    )
     chili_momentum_entry_l2_veto_enabled: bool = Field(
         default=False,
         validation_alias=AliasChoices("CHILI_MOMENTUM_ENTRY_L2_VETO_ENABLED"),
