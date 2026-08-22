@@ -13134,6 +13134,18 @@ class ReplayNetworkGuard(AbstractContextManager["ReplayNetworkGuard"]):
     def _blocked(self, *_args: Any, **_kwargs: Any) -> Any:
         with self._attempt_lock:
             self.attempt_count += 1
+        # DIAGNOSTIC TRACE (2026-08-21 golden-batch triage): ang fence ay dating
+        # bulag sa KUNG SINO ang tumawag — ang swallowed attempt ay walang caller
+        # evidence kaya hindi ma-root-cause. Opt-in env flag; unang attempt lang
+        # bawat guard (hindi spam); walang epekto kapag hindi naka-set.
+        if os.environ.get("REPLAY_NETWORK_GUARD_TRACE") == "1" and self.attempt_count == 1:
+            import logging
+            import traceback
+
+            logging.getLogger(__name__).warning(
+                "[replay_network_guard] UNANG network attempt — caller stack:\n%s",
+                "".join(traceback.format_stack(limit=25)),
+            )
         raise ReplayNetworkAccessError("ReplayV3 network fallback is forbidden")
 
     @staticmethod
