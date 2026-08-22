@@ -2088,6 +2088,43 @@ def _l2_entry_veto(
         if is_ssr is None:
             is_ssr = _resolve_is_ssr(symbol)
 
+        # REPEG-WALL DISAMBIGUATION (Ross "Forcing a Crash" 2026-08-21, MEMX
+        # suppression-algo signature): uriin muna ang wall behavior sa parehong
+        # window BAGO ang big/hidden-seller reads —
+        #   * SPOOF_WALL_ACTIVE: kinakansela't inaakyat ang pader (phantom
+        #     supply, suppression umaandar) — IWAS MUNA (sariling veto reason,
+        #     hindi pinaghahalo sa tunay na seller semantics);
+        #   * WALL_EATEN: tinuluyan ng TUNAY na prints ang pader at walang
+        #     kapalit sa itaas — napatunayan na ng tape ang demand; ang
+        #     big/hidden-seller vetoes ay HINDI na dapat pumatay sa entry na
+        #     ito (ang lumang basa ay phantom ang makikita);
+        #   * ICEBERG_REAL / WALL_NONE: ang mga umiiral na leg sa ibaba ang
+        #     tumatakbo nang walang pagbabago. Fail-open kailanman.
+        _repeg_state = None
+        if bool(getattr(settings, "chili_momentum_repeg_wall_detector_enabled", True)):
+            try:
+                from .repeg_wall import (
+                    SPOOF_WALL_ACTIVE,
+                    WALL_EATEN,
+                    read_repeg_wall_state,
+                )
+
+                _rw_as_of = l2_as_of or datetime.utcnow()
+                _repeg_state, _repeg_dbg = read_repeg_wall_state(
+                    db, symbol, as_of=_rw_as_of,
+                )
+                if _repeg_state == SPOOF_WALL_ACTIVE:
+                    return "l2_spoof_wall_active", {
+                        "repeg_wall": _repeg_state, **{
+                            k: _repeg_dbg.get(k)
+                            for k in ("repeg_events", "wall_price", "size_floor")
+                        },
+                    }
+                if _repeg_state == WALL_EATEN:
+                    return None  # ang tape na mismo ang nagpatunay — walang veto
+            except Exception:
+                _repeg_state = None
+
         # (a) BIG-SELLER wall: the newest book is ask-heavy relative to its own recent
         #     window — depth-imbalance percentile at/below the floor. Self-relative
         #     percentile (no absolute threshold a single spoof can trip). Fail-open
