@@ -3639,7 +3639,21 @@ def sell_into_strength_ladder(
     except (TypeError, ValueError):
         drain_s = 5.0
 
-    arm_r = max(0.5, arm_frac * rr)
+    # FIRST-PARTIAL 1R ARM CAP (MFE exit audit 2026-08-22): ang arm bar ay dating
+    # arm_frac*rr — sa 6R na family target, hindi nag-a-arm ang ladder hanggang 3R,
+    # at ang gitnang-saklaw na runners (1-4R MFE) ay bumabalik sa pula nang hindi
+    # man lang ELIGIBLE ang partial (63 realized events: median capture 9%, 68.8R
+    # ang naiwan; captures ng -47%/-133%/-252% sa mga umabot ng 1R+). Ang cap sa
+    # ~1R (ANG risk unit — definitional, hindi magic) ay ginagawang eligible ang
+    # maliit na unang increment mula 1R; ang distribution confluence AT ang
+    # continuation veto ay nananatiling buo, kaya ang tunay na runner ay hindi
+    # maagang binibitawan (ang unfilled sell-into-strength limit ay libreng opsyon).
+    try:
+        _arm_cap = float(getattr(
+            settings, "chili_momentum_exit_first_partial_arm_r_cap", 1.0) or 1.0)
+    except (TypeError, ValueError):
+        _arm_cap = 1.0
+    arm_r = max(0.5, min(arm_frac * rr, max(0.5, _arm_cap)))
     harvest_gap_r = 0.5 * max(0.0, rr - arm_r)          # only harvest a genuine runner
     ofi_exit_thr = 2.0 * thr                            # exit conviction = 2× entry
     # GUARD #4: the CONTINUATION VETO uses its OWN threshold pinned to the UNLOOSENED
