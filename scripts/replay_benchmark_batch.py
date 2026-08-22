@@ -1840,10 +1840,25 @@ def main() -> int:
                     deadline_at=stop_at,
                 )
             except Exception as exc:
-                raise SystemExit(
-                    "[batch] COVERAGE_UNAVAILABLE: bounded pre-run source "
-                    f"verification failed for {key}: {type(exc).__name__}: {exc}"
-                ) from exc
+                # 2026-08-21: dating BATCH-FATAL — isang mabagal/na-timeout na
+                # verification query (hal. transient contention sa 700k-tick
+                # window) ay pumapatay sa BUONG natitirang pila. Ngayon: itala
+                # ang window bilang coverage_unavailable, ituloy ang batch. Ang
+                # receipt-MISMATCH sa ibaba ay nananatiling mahigpit (integrity,
+                # hindi transient).
+                print(
+                    "[batch] COVERAGE_UNAVAILABLE (window skipped, batch continues): "
+                    f"{key}: {type(exc).__name__}: {exc}",
+                    flush=True,
+                )
+                with open(results_path, "a", encoding="utf-8") as f:
+                    f.write(json.dumps({
+                        "key": key, "symbol": w.get("symbol"),
+                        "day": w.get("day"),
+                        "status": "coverage_unavailable",
+                        "error": f"{type(exc).__name__}: {exc}"[:400],
+                    }, allow_nan=False) + "\n")
+                continue
             if (
                 pre_source["source_content_receipt"]
                 != w["source_content_receipt"]
@@ -1908,6 +1923,15 @@ def main() -> int:
                         "RISK": str(args.equity * args.risk_fraction),
                         "EXEC_FAMILY": args.exec_family,
                         "ENTRY_DIAG": "1", "DATABASE_URL": sink, "TEST_DATABASE_URL": sink,
+                        # PRODUCTION PARITY (2026-08-21): ang deployed window ay
+                        # 1m pullback interval; ang config default (5m) ay
+                        # nagpapatulog sa 25-bar structural ladder sa replays
+                        # (insufficient_bars sa lahat) — tick-fallback lang ang
+                        # gumagana at hindi masusukat ang structural fixes.
+                        "CHILI_MOMENTUM_PULLBACK_ENTRY_INTERVAL": "1m",
+                        # Caller-stack trace sa unang forbidden network attempt
+                        # (kung wala nito, walang ebidensya kung SINO ang tumawag).
+                        "REPLAY_NETWORK_GUARD_TRACE": "1",
                         "PYTHONPATH": BUILD, "PYTHONUNBUFFERED": "1",
                         "PYTHONIOENCODING": "utf-8",
                         "CHILI_CAPTURED_PAPER_CONFIG_ISOLATED": "true",
