@@ -3065,6 +3065,32 @@ def run_momentum_neural_tick(
         except Exception:
             pass
 
+    # FTD SQUEEZE-FUEL EVIDENCE (Ross "Forcing a Crash" 08-21): per-symbol delta
+    # dict sa meta (parehong import-free-core contract ng reverse_split_recency_
+    # deltas) — mataas na fails relative sa float = phantom-supply hard evidence.
+    # Ang floats ay mula sa ross_signals (walang bagong HTTP). Fail-open.
+    if bool(getattr(settings, "chili_momentum_ftd_ingest_enabled", True)):
+        try:
+            from .ftd_ingest import ftd_squeeze_viability_delta
+
+            _ftd_deltas: dict[str, float] = {}
+            for _fsym, _fsig in (ross_signals or {}).items():
+                _ffloat = (
+                    _fsig.get("float_shares")
+                    if isinstance(_fsig, dict) else None
+                )
+                if not _ffloat:
+                    continue
+                _fd = float(ftd_squeeze_viability_delta(
+                    _fsym, float_shares=float(_ffloat), db=db,
+                ))
+                if _fd > 0:
+                    _ftd_deltas[str(_fsym).strip().upper()] = _fd
+            if _ftd_deltas:
+                meta["ftd_squeeze_deltas"] = _ftd_deltas
+        except Exception:
+            _log.debug("[pipeline] ftd delta pass skipped", exc_info=True)
+
     if _strong:
         meta["strong_catalyst_symbols"] = sorted(_strong)
 
@@ -3194,6 +3220,7 @@ def run_momentum_neural_tick(
             "dilution_symbols",
             "recent_reverse_split_symbols",
             "reverse_split_recency_deltas",
+            "ftd_squeeze_deltas",
             "close_strength_priors",
             "hot_tape",
             "symbol_countries",

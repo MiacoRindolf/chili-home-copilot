@@ -32877,6 +32877,37 @@ def _migration_365_outcomes_breaker_index(conn) -> None:
     ))
 
 
+def _migration_368_sec_fails_to_deliver(conn) -> None:
+    """SEC fails-to-deliver ingestion table (Ross "Forcing a Crash" 08-21).
+
+    Ang FTD counts ay LIBRENG SEC hard evidence ng phantom supply (naked
+    shorting) sa mga low-float na pangalang tina-trade ng lane — ang LNAI case
+    ay may 6.6M/5.6M shares FTD bago sumabog ang lawsuit. Semimonthly files
+    (~30-araw lag), immutable historical rows; ang selection delta ay babasa ng
+    pinakabagong fail_qty relative sa float. 368 (366/367 ay nakalaan sa
+    kasalukuyang captured-paper branch — mig-356 lesson: huwag banggain)."""
+
+    conn.execute(text(
+        """
+        CREATE TABLE IF NOT EXISTS sec_fails_to_deliver (
+            settlement_date DATE NOT NULL,
+            symbol VARCHAR(16) NOT NULL,
+            cusip VARCHAR(12) NOT NULL,
+            fail_qty BIGINT NOT NULL,
+            price DOUBLE PRECISION,
+            ingested_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+            PRIMARY KEY (settlement_date, symbol, cusip)
+        )
+        """
+    ))
+    conn.execute(text(
+        """
+        CREATE INDEX IF NOT EXISTS ix_ftd_symbol_date
+        ON sec_fails_to_deliver (symbol, settlement_date DESC)
+        """
+    ))
+
+
 MIGRATIONS = [
     ("001_add_email", _migration_001_add_email),
     ("002_add_image_path", _migration_002_add_image_path),
@@ -33367,6 +33398,8 @@ MIGRATIONS = [
      _migration_364_active_sessions_partial_index),
     ("365_outcomes_breaker_index",
      _migration_365_outcomes_breaker_index),
+    ("368_sec_fails_to_deliver",
+     _migration_368_sec_fails_to_deliver),
 ]
 
 

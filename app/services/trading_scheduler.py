@@ -6558,6 +6558,30 @@ def start_scheduler():
                 max_instances=1,
             )
 
+        # SEC FTD ingestion (Ross "Forcing a Crash" 08-21): semimonthly files na
+        # may ~30-araw lag — isang beses kada araw sapat na; idempotent (nagche-check
+        # muna kung nai-ingest na ang period bago mag-download). Fail-open.
+        if include_web_light and getattr(settings, "chili_momentum_ftd_ingest_enabled", True):
+            def _run_ftd_ingest_job() -> None:
+                from ..db import SessionLocal
+                from .trading.momentum_neural.ftd_ingest import ingest_latest_ftd_files
+
+                db = SessionLocal()
+                try:
+                    report = ingest_latest_ftd_files(db)
+                    logger.info("[scheduler] FTD ingest: %s", report)
+                finally:
+                    db.close()
+
+            _scheduler.add_job(
+                _run_ftd_ingest_job,
+                trigger=CronTrigger(hour=3, minute=0, timezone="America/Los_Angeles"),
+                id="sec_ftd_ingest",
+                name="SEC fails-to-deliver ingest (3:00 America/Los_Angeles)",
+                replace_existing=True,
+                max_instances=1,
+            )
+
         if include_web_light and getattr(settings, "chili_daily_trading_brief_enabled", False):
             _scheduler.add_job(
                 _run_daily_trading_brief_job,

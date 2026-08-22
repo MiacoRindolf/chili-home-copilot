@@ -2453,6 +2453,14 @@ class Settings(BaseSettings):
         validation_alias=AliasChoices("CHILI_MOMENTUM_OVERHEAD_VETO_ATR"),
         description="The ONE documented knob for the overhead veto: a breakout whose nearest overhead-supply level sits within this many DAILY-ATR units is vetoed (a wall the price must fight through). Adaptive (ATR-relative). A true blue-sky/clear-room break (room beyond this) passes.",
     )
+    # SEC fails-to-deliver ingestion + squeeze-fuel evidence delta (Ross
+    # "Forcing a Crash" 08-21): libreng semimonthly SEC data; mataas na FTD
+    # relative sa float = hard evidence ng phantom supply. Daily ingest job +
+    # meta-driven selection delta (+0.03/+0.05, never negative). Fail-open.
+    chili_momentum_ftd_ingest_enabled: bool = Field(
+        default=True,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_FTD_INGEST_ENABLED"),
+    )
     chili_momentum_reverse_split_recency_enabled: bool = Field(
         default=True,
         validation_alias=AliasChoices("CHILI_MOMENTUM_REVERSE_SPLIT_RECENCY_ENABLED"),
