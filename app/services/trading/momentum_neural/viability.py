@@ -1278,6 +1278,25 @@ def score_viability_explicit(
     except (TypeError, ValueError, AttributeError):
         _rs_fact_delta = 0.0
 
+    # FTD SQUEEZE-FUEL EVIDENCE (Ross "Forcing a Crash" 08-21): pipeline-computed
+    # per-symbol dict (import-free/settings-free ang core — parehong contract ng
+    # reverse-split block sa itaas). Mataas na SEC fails-to-deliver relative sa
+    # float = hard evidence ng phantom supply = gatong sa squeeze. Never negative.
+    try:
+        _ftd_meta = ctx.meta if isinstance(getattr(ctx, "meta", None), dict) else {}
+        _ftd_map = _ftd_meta.get("ftd_squeeze_deltas")
+        if _ftd_map and "-USD" not in str(symbol or "").upper():
+            _ftd_delta = float(
+                _ftd_map.get(str(symbol or "").strip().upper()) or 0.0
+            )
+            if _ftd_delta > 0:
+                base += _ftd_delta
+                warnings.append(
+                    "SEC fails-to-deliver elevated vs float — phantom-supply squeeze fuel"
+                )
+    except (TypeError, ValueError, AttributeError):
+        pass
+
     # A10 (Ross CLRO-lesson 2026-07-02): OWN-HEADLINE DILUTION-HISTORY DERATE. A symbol our own
     # catalyst headlines have flagged as a diluter on >= adaptive-K distinct days in the trailing
     # window (persisted to momentum_dilution_history) is a WHLR-class serial diluter Ross has
