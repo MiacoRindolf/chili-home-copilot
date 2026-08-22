@@ -2457,6 +2457,16 @@ class Settings(BaseSettings):
     # "Forcing a Crash" 08-21): libreng semimonthly SEC data; mataas na FTD
     # relative sa float = hard evidence ng phantom supply. Daily ingest job +
     # meta-driven selection delta (+0.03/+0.05, never negative). Fail-open.
+    # FIRST-PARTIAL ARM CAP (MFE exit audit 2026-08-22: median exit capture 9%
+    # ng MFE, 68.8R naiwan sa 20 runners — ang ladder arm ay naka-scale sa
+    # family target kaya 3R+ bago mag-arm sa malalayong target). Ang cap ay ANG
+    # risk unit (1R, definitional): ang unang maliit na partial ay eligible mula
+    # 1R; ang continuation veto/distribution firewall ay hindi ginagalaw.
+    chili_momentum_exit_first_partial_arm_r_cap: float = Field(
+        default=1.0,
+        ge=0.5,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_EXIT_FIRST_PARTIAL_ARM_R_CAP"),
+    )
     chili_momentum_ftd_ingest_enabled: bool = Field(
         default=True,
         validation_alias=AliasChoices("CHILI_MOMENTUM_FTD_INGEST_ENABLED"),
