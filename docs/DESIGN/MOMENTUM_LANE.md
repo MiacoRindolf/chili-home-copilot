@@ -437,3 +437,38 @@ class R:R floor → PASS (never tighten the stop to manufacture R:R).
 `…_stop_buffer_bps` (10). Class-aware (crypto inherits the 24/7 reclaim window + crypto
 R:R); only helps the **buyable-depth class** (≤25% dips). Tests:
 `tests/test_dipbuy_deep_reclaim.py`.
+
+## 12. Ross TOP-GAINER CONCENTRATION (2026-08-23)
+
+**Doctrine (Ross 08-20 recap, his own post-mortem):** momentum setups work ONLY on the
+day's top-2/3 leading gainers; on dispersed-attention names they lose. Evidence: the
+08-21 morning logs armed rank #11/#16 names on bare rel_vol (SDOT/COIW — both losers)
+while every profit in the time-of-day audit came from premarket A-names.
+
+**Mechanism.** Outside PREMARKET (the measured profitable window, deliberately exempt),
+a **NEW equity live arm** must be one of the day's **top-N market-wide %-gainers**
+(`chili_momentum_top_gainer_concentration_n`, default 3, THE one knob; 0 = kill-switch).
+Enforced at the live-pick stage (`_live_armable`) and mirrored in the rank-displacement
+newcomer walk (never evict a watcher for a newcomer the arm stage would then block).
+Membership sources, all zero-new-network, in order: (1) the full-market snapshot already
+fetched for Ross-universe proof, ranked by change-pct; (2) the candidate board's own
+per-row scanner signals aggregated across rows (persistence subsets `ross_signals` to
+each row's own symbol — a single row's dict must never rank alone); (3) the persisted
+batch-level `top_market_gainers` membership meta (top-5). Unknown data ⇒ **fail-open**.
+
+**Concentration, NOT starvation** (CLRO lesson 2026-07-02, #1036): the board TOP-2
+(hoisted symbol-of-day leader + the armed-first it displaced — the same primitive as the
+cooldown exemptions) always pass; and a **structural bypass** admits a name whose OWN
+persisted Ross/5-Pillars evidence clears the tick-scalp shape gate AND whose viability is
+at/above the board's within-pass p90 (the A1 adaptive-percentile primitive — no second
+magic number). Bare rel_vol / high score without shape evidence never bypasses — that is
+exactly the churn class being removed. Paper shadow arms, exits, stops, and open-position
+management are untouched by construction.
+
+**Decision-level A/B (7d of live arms, 08-17→08-21, read-only):** all 1,093 live equity
+arms that week were `cancelled_pre_entry` churn (zero fills lost by blocking). Outside
+premarket, even the most conservative membership bound (batch top-5) hard-blocks 109/693
+arms (16%) with another 255 gated behind the structural-p90 bypass; exactly one batch-#1
+leader proxy would have been membership-blocked and the TOP-2 exemption passes it (zero
+leader starvation). Live full passes use the snapshot source at true N=3 — stricter.
+Tests: `tests/test_top_gainer_concentration.py`.

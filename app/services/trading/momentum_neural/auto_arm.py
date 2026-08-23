@@ -2509,6 +2509,176 @@ def _hoist_leader(rows: list[Any], leader: str | None) -> list[Any]:
     return hoisted
 
 
+def _top_gainer_concentration_n() -> int:
+    """ROSS TOP-GAINER CONCENTRATION (2026-08-23): how many of the day's top market-wide
+    %-gainers NEW equity arms concentrate on outside premarket (Ross 08-20 recap: momentum
+    setups work ONLY on the top-2/3 leading gainers; dispersed-attention names lose — the
+    SDOT/COIW midday churn class). The ONE documented knob; 0 = kill-switch (no gate)."""
+    try:
+        return max(0, int(getattr(settings, "chili_momentum_top_gainer_concentration_n", 3)))
+    except (TypeError, ValueError):
+        return 3
+
+
+def _top_gainer_concentration_active(*, now: "datetime | None" = None) -> bool:
+    """True when the concentration gate applies right now: knob > 0 AND the equity clock is
+    NOT premarket. Premarket is deliberately exempt — the time-of-day audit shows the lane's
+    profits are premarket A-names (proven window, untouched); the doctrine targets the
+    regular/afternoon churn. Unreadable clock => False (fail-open, no gate)."""
+    if _top_gainer_concentration_n() <= 0:
+        return False
+    try:
+        from .market_profile import market_session_now
+
+        return market_session_now("SPY", now=now) != "premarket"
+    except Exception:
+        logger.debug("[auto_arm] concentration clock read failed (fail-open)", exc_info=True)
+        return False
+
+
+def _market_top_gainers(
+    rows: "list[Any] | None",
+    *,
+    n: int,
+    snapshot_rows: "dict[str, dict] | None" = None,
+) -> tuple[frozenset[str] | None, str]:
+    """(the day's top-``n`` market-wide EQUITY %-gainers (UPPER), source) — or (None,
+    "unavailable") when no readable source exists, in which case the caller FAILS OPEN
+    (a name is never blocked on absent data). ZERO new network — every source is data the
+    pass already loaded:
+
+      1. ``snapshot_rows`` — the full-market snapshot fetched for Ross-universe proof
+         (market-wide truth), ranked by the same change-pct field chain
+         ``universe._signal_change_pct`` reads;
+      2. the candidate BOARD itself — each row contributes its OWN persisted scanner
+         signal's momentum pillar (``_row_ross_signal`` + ``_extract_pillars``; the
+         persisted ``ross_signals`` dict is SUBSETTED to the row's own symbol by
+         ``persistence._row_execution_readiness``, so ranking must aggregate ACROSS
+         rows — a single row's dict alone would degenerate to a 1-name set). The board
+         is the market-wide scanner's top slice, so board-top-N-by-pct is the natural
+         market proxy when no snapshot exists (e.g. the displacement hook);
+      3. the persisted ``top_market_gainers`` membership meta (batch-level top-5,
+         stored sorted alphabetically — rank order is lost, so the WHOLE membership
+         set is the coarse fallback: still a 5-name concentration).
+    Only positive movers rank (a high-RVOL dump is not a gainer)."""
+    if n <= 0:
+        return None, "disabled"
+    try:
+        if snapshot_rows:
+            from .universe import _signal_change_pct
+
+            ranked: list[tuple[str, float]] = []
+            for sym, srow in snapshot_rows.items():
+                su = str(sym or "").strip().upper()
+                if not su or su.endswith("-USD") or not isinstance(srow, dict):
+                    continue
+                chg = _signal_change_pct(srow)
+                if chg is not None and float(chg) > 0.0:
+                    ranked.append((su, float(chg)))
+            if ranked:
+                ranked.sort(key=lambda x: (-x[1], x[0]))
+                return frozenset(su for su, _ in ranked[:n]), "snapshot"
+    except Exception:
+        logger.debug("[auto_arm] top-gainer snapshot ranking failed", exc_info=True)
+    try:
+        from .ross_momentum import _extract_pillars
+
+        ranked = []
+        seen: set[str] = set()
+        for r in rows or []:
+            su = str(getattr(r, "symbol", "") or "").strip().upper()
+            if not su or su.endswith("-USD") or su in seen:
+                continue
+            seen.add(su)
+            sig = _row_ross_signal(r)
+            if not isinstance(sig, dict):
+                continue
+            _, mom, _, _ = _extract_pillars(sig)
+            if mom is not None and float(mom) > 0.0:
+                ranked.append((su, float(mom)))
+        # A 1-name ranking carries no concentration information (it would just be
+        # whichever row happened to rank first) — require at least 2 ranked movers
+        # before trusting the board source; otherwise fall through to the meta.
+        if len(ranked) >= 2:
+            ranked.sort(key=lambda x: (-x[1], x[0]))
+            return frozenset(su for su, _ in ranked[:n]), "board_signals"
+    except Exception:
+        logger.debug("[auto_arm] top-gainer board ranking failed", exc_info=True)
+    try:
+        for r in rows or []:
+            extra = (getattr(r, "execution_readiness_json", None) or {}).get("extra") or {}
+            tg = extra.get("top_market_gainers")
+            if isinstance(tg, (list, tuple)) and tg:
+                out = frozenset(
+                    str(s or "").strip().upper() for s in tg if str(s or "").strip()
+                )
+                if out:
+                    return out, "membership_meta"
+    except Exception:
+        logger.debug("[auto_arm] top-gainer membership meta read failed", exc_info=True)
+    return None, "unavailable"
+
+
+def _board_viability_p90(rows: "list[Any] | None") -> float | None:
+    """Within-pass p90 of the board's viability scores — the A1 top-rank primitive
+    (adaptive within-day percentile, no absolute magic threshold). None on empty/error."""
+    try:
+        from .risk_policy import _percentile
+
+        vals = sorted(
+            float(getattr(r, "viability_score", 0.0) or 0.0) for r in (rows or [])
+        )
+        return _percentile(vals, 0.90) if vals else None
+    except Exception:
+        return None
+
+
+def _top_gainer_concentration_blocks(
+    candidate: Any,
+    *,
+    top_gainers: frozenset[str] | None,
+    exempt_syms: "frozenset[str] | set[str] | None",
+    board_p90_viability: float | None,
+) -> tuple[bool, str]:
+    """ROSS TOP-GAINER CONCENTRATION decision for ONE equity candidate: (blocks?, reason).
+
+    Blocks a NEW live arm when the name is NOT one of the day's top-N market-wide
+    %-gainers, UNLESS:
+      * ``top_gainers`` is None — unknown membership, FAIL-OPEN (never block on absent
+        data);
+      * the name is a board-top exempt symbol (the hoisted leader / displaced armed-first
+        — the same TOP-2 primitive as the cooldown exemptions): concentration must NEVER
+        starve the #1 name (CLRO lesson 2026-07-02, leader-starvation #1036);
+      * STRUCTURAL BYPASS: the candidate's OWN persisted Ross/5-Pillars evidence clears
+        the tick-scalp shape gate (a structural A-setup, not bare rel_vol) AND its
+        viability is at/above the board's within-pass p90 (adaptive, no magic absolute).
+
+    ARM-STAGE ONLY by construction: callers consult this solely for NEW live picks —
+    paper shadow arms, exits, stops, and open-position management never touch it."""
+    if top_gainers is None:
+        return False, "unknown_top_gainers_fail_open"
+    su = str(getattr(candidate, "symbol", "") or "").strip().upper()
+    if not su:
+        return False, "no_symbol"
+    if su in top_gainers:
+        return False, "top_gainer"
+    if exempt_syms and su in exempt_syms:
+        return False, "board_top_exempt"
+    try:
+        structural_ok = bool(_candidate_ross_tick_evidence(candidate)[0])
+    except Exception:
+        structural_ok = False
+    if structural_ok and board_p90_viability is not None:
+        try:
+            if float(getattr(candidate, "viability_score", 0.0) or 0.0) >= float(
+                board_p90_viability
+            ):
+                return False, "structural_p90_bypass"
+        except (TypeError, ValueError):
+            pass
+    return True, "not_top_gainer"
+
+
 def _fresh_live_eligible_candidates(
     db: Session,
     *,
@@ -4288,6 +4458,14 @@ def _try_displacement_for_full_slots(
     # _reap_cooldown_blocks TOP-2 KEY) — a reaped leader/armed-first must be
     # able to displace its way back in, not just re-arm on an open slot.
     _top_syms = _board_exempt_syms(cands)
+    # ROSS TOP-GAINER CONCENTRATION: never evict a watcher for a newcomer the arm-stage
+    # gate would then block (reap-then-blocked churn burns the victim for nothing). Same
+    # decision inputs as the live-pick stage; equity-only; unknown membership fails open.
+    _conc_top: frozenset[str] | None = None
+    _conc_p90: float | None = None
+    if _top_gainer_concentration_active():
+        _conc_top, _ = _market_top_gainers(cands, n=_top_gainer_concentration_n())
+        _conc_p90 = _board_viability_p90(cands)
     newcomer = None
     for c in cands:
         su = str(c.symbol or "").upper()
@@ -4300,6 +4478,20 @@ def _try_displacement_for_full_slots(
         if not _symbol_market_open(c.symbol):
             continue
         if _reap_cooldown_blocks(su, _utcnow(), exempt_syms=_top_syms):
+            continue
+        if (
+            _conc_top is not None
+            and not _is_coinbase_tradeable_symbol(c.symbol)
+            and _top_gainer_concentration_blocks(
+                c,
+                top_gainers=_conc_top,
+                exempt_syms=_top_syms,
+                board_p90_viability=_conc_p90,
+            )[0]
+        ):
+            out["top_gainer_concentration_displacement_skipped"] = (
+                out.get("top_gainer_concentration_displacement_skipped", 0) + 1
+            )
             continue
         newcomer = c
         break
@@ -5350,6 +5542,28 @@ def run_auto_arm_pass(
             key=lambda c: _freshness_rank(_r(c)[2]),
             reverse=True,
         )
+        # ROSS TOP-GAINER CONCENTRATION (2026-08-23): outside premarket, a NEW equity
+        # live arm concentrates on the day's top-N market-wide %-gainers. Inputs are
+        # computed ONCE per pass from data already loaded (market snapshot / row
+        # extras) — unknown membership => None => fail-open. The per-name exemptions
+        # (board TOP-2 + structural-p90 bypass) live in _top_gainer_concentration_blocks
+        # — CONCENTRATION, not starvation. Live-pick stage only: the paper shadow list,
+        # exits, and open-position management are untouched.
+        _conc_top: frozenset[str] | None = None
+        _conc_p90: float | None = None
+        if _top_gainer_concentration_active(now=pass_as_of):
+            _conc_top, _conc_source = _market_top_gainers(
+                candidates,
+                n=_top_gainer_concentration_n(),
+                snapshot_rows=_ross_snapshot_rows or None,
+            )
+            _conc_p90 = _board_viability_p90(candidates)
+            out["top_gainer_concentration"] = {
+                "n": _top_gainer_concentration_n(),
+                "source": _conc_source,
+                "top": sorted(_conc_top) if _conc_top is not None else None,
+            }
+
         def _live_armable(_c) -> bool:
             """Live-pick gates that must NOT starve the paper shadow list:
             crypto pauses during the US equity session, and live crypto arming
@@ -5366,6 +5580,28 @@ def run_auto_arm_pass(
                         return False
                 except Exception:
                     pass
+                # ROSS TOP-GAINER CONCENTRATION: outside premarket a NEW equity arm
+                # must be a top-N market-wide %-gainer (board TOP-2 + structural-p90
+                # bypass exempt; unknown membership fails open above via _conc_top=None).
+                if _conc_top is not None:
+                    _cg_blocked, _cg_reason = _top_gainer_concentration_blocks(
+                        _c,
+                        top_gainers=_conc_top,
+                        exempt_syms=_cooldown_exempt_syms,
+                        board_p90_viability=_conc_p90,
+                    )
+                    if _cg_blocked:
+                        out["top_gainer_concentration_skipped"] = (
+                            out.get("top_gainer_concentration_skipped", 0) + 1
+                        )
+                        logger.info(
+                            "[auto_arm] top-gainer concentration skip %s (%s) — outside "
+                            "premarket, NEW arms concentrate on the day's top gainers %s",
+                            str(getattr(_c, "symbol", "") or "").upper(),
+                            _cg_reason,
+                            sorted(_conc_top),
+                        )
+                        return False
                 return True
             if not bool(getattr(settings, "chili_momentum_crypto_live_arm_enabled", False)):
                 out["crypto_live_disabled_skipped"] = out.get("crypto_live_disabled_skipped", 0) + 1
