@@ -1231,6 +1231,17 @@ def mine_sink(
                  "payload_json": r[4]} for r in cur.fetchall()]
         # the PURE audit fn (not the limit=1000 wrapper) — a 2h window emits thousands of events
         sys.path.insert(0, BUILD)
+        # IMPORT-TIME SETTINGS TRAP (2026-08-22 batch-wide coverage_unavailable).
+        # This import pulls in the whole ``app`` package, which constructs
+        # ``Settings()`` at import time. Since #1024 ``database_url`` is REQUIRED
+        # with no default and normally arrives from a ``.env`` — which the batch
+        # HOST worktree does not have. The resulting ValidationError was caught
+        # by the blanket ``except`` below and recorded as ``mine_error``, so
+        # EVERY window scored ``coverage_unavailable`` even when the replay
+        # itself had run perfectly (entries placed, ``final_state=live_finished``).
+        # The child processes already bind DATABASE_URL in their env; the SINK
+        # mining path never did. Bind it to the sink we are already connected to.
+        os.environ.setdefault("DATABASE_URL", sink_url)
         from app.services.trading.momentum_neural.setup_trace_audit import audit_setup_trace_events
         if datetime.now() >= deadline_at:
             raise TimeoutError("sink mining deadline exhausted before audit")
@@ -1801,11 +1812,51 @@ def main() -> int:
         lock_conn.close()
         raise SystemExit("[batch] another replay batch holds the sink advisory lock — aborting")
 
+    def assert_batch_lock_still_held() -> None:
+        """Prove THIS process still owns the sink before touching it again.
+
+        LOCK-LIVENESS (2026-08-22 mutual-destruction incident). The advisory
+        lock lives on its own connection. That connection died silently
+        mid-batch (a 10053 abort), which released the lock without releasing
+        anything else — so a second replay process acquired it and the two runs
+        proceeded to clear each other's boards. ``trading_automation_events``
+        cascades on session delete, so the moment a board-clear hit the other
+        run's live session, that session AND all of its forensics vanished in
+        one statement: the ``final_state=<gone>`` with zero events that was
+        misread for a day as a code regression.
+
+        A held lock is not a fact you can assume for hours; it is a fact you
+        re-establish. This is checked at every window boundary and FAILS CLOSED
+        — a batch that cannot prove exclusivity must stop, not race.
+        """
+        try:
+            with lock_conn.cursor() as probe:
+                probe.execute(
+                    "SELECT count(*) FROM pg_locks "
+                    "WHERE locktype = 'advisory' AND pid = pg_backend_pid() "
+                    "AND granted"
+                )
+                held = int(probe.fetchone()[0] or 0)
+        except Exception as exc:
+            raise SystemExit(
+                "[batch] REFUSING to continue: the sink advisory-lock connection "
+                f"is unusable ({type(exc).__name__}: {exc}). Another batch may "
+                "already own the sink; continuing would let two runs clear each "
+                "other's boards."
+            ) from exc
+        if held < 1:
+            raise SystemExit(
+                "[batch] REFUSING to continue: this process no longer holds the "
+                "sink advisory lock (connection survived but the lock is gone). "
+                "Another batch may already own the sink."
+            )
+
     print(f"[batch] {len(specs)} windows queued (tiers={sorted(tiers)}), "
           f"{len(done)} already done, sha={build_sha[:9]}, stop_at={args.stop_at}", flush=True)
     ran = 0
     try:
         for w in specs:
+            assert_batch_lock_still_held()
             key = result_key(
                 w["symbol"],
                 w["day"],
