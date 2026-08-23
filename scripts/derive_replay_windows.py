@@ -30,6 +30,7 @@ import json
 import os
 import subprocess
 import sys
+import time
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 
@@ -285,7 +286,34 @@ def main() -> int:
             raise RuntimeError("source session timezone is not UTC")
         cur.execute(CENSUS_SQL)
         census = cur.fetchall()
+        # PROGRESS (2026-08-23). This loop runs two per-(symbol, day) queries
+        # over the whole golden archive and takes ~15 minutes, during which the
+        # script printed NOTHING. A silent quarter hour is indistinguishable
+        # from a hang: it has been killed by an operator timeout set to roughly
+        # its own runtime, and mistaken for dead more than once. Progress goes
+        # to STDERR so stdout stays exactly the BASELINE lines any caller parses.
+        _t0 = time.monotonic()
+        _total = len(census)
+        _done = 0
+        _last_report = _t0
+        print(
+            f"[derive] census: {_total} (symbol, day) pairs to walk "
+            f"(2 queries each) — this normally takes 10-20 minutes",
+            file=sys.stderr, flush=True,
+        )
         for sym, day, ticks, nbbo in census:
+            _done += 1
+            _now_mono = time.monotonic()
+            if _now_mono - _last_report >= 15.0 or _done == _total:
+                _last_report = _now_mono
+                _elapsed = _now_mono - _t0
+                _rate = _done / _elapsed if _elapsed > 0 else 0.0
+                _eta = (_total - _done) / _rate if _rate > 0 else 0.0
+                print(
+                    f"[derive] {_done}/{_total} pairs  elapsed={_elapsed:.0f}s "
+                    f"eta={_eta:.0f}s  (last={sym} {day})",
+                    file=sys.stderr, flush=True,
+                )
             if ticks == 0:
                 continue
             if args.rossxref and (sym, day) not in ROSS_PHASE_XREF:
