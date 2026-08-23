@@ -108,5 +108,7 @@ def test_bridge_arm_reports_wake(monkeypatch):
     import inspect
 
     src = inspect.getsource(il.IgnitionScoringLoop._bridge_arm)
-    assert "_spawn_arm_wake" in src
+    # wake_armed_sessions ang ginagamit: ang session_id ay last-writer-wins at
+    # hindi kasama ang Alpaca twin (2026-08-23 arm-wake coverage).
+    assert "wake_armed_sessions" in src
     assert "armed+wake" in src

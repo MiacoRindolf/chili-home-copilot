@@ -4548,6 +4548,13 @@ def run_auto_arm_pass(
     _phase_t0 = _phase_time.monotonic()
     _phase_board_done: float | None = None
     out: dict[str, Any] = {"checked": 0, "scanned": 0, "armed": 0, "skipped": None}
+    # EVERY session this pass actually armed (2026-08-23 arm-wake). ``session_id``
+    # is LAST-WRITER-WINS — a later deduped/already-active candidate overwrites
+    # it (see the ``deduped`` branch below), and a pass may arm more than one
+    # name plus an Alpaca twin per name. A waker keying off ``session_id`` would
+    # therefore wake the wrong (already running) session while the freshly armed
+    # one waits for the batch. This list is append-only on CONFIRMED arms.
+    out["armed_session_ids"] = []
 
     _scoped_syms: frozenset[str] | None = None
     if only_symbols is not None:
@@ -5803,6 +5810,8 @@ def run_auto_arm_pass(
             out["armed"] += 1
             _armed_syms.append(chosen.symbol)
             out["session_id"] = begin.get("session_id")
+            if begin.get("session_id"):
+                out["armed_session_ids"].append(int(begin.get("session_id")))
             out["state"] = confirm.get("state")
             logger.warning(
                 "[auto_arm] ARMED live %s session=%s state=%s trigger=%s viability=%.3f",
@@ -5864,6 +5873,13 @@ def run_auto_arm_pass(
                         )
                         if _tc.get("ok"):
                             out["alpaca_twin_session_id"] = _tb.get("session_id")
+                            # The twin is the session that actually places orders
+                            # on the Alpaca PAPER endpoint — it needs the wake
+                            # most of all.
+                            if _tb.get("session_id"):
+                                out["armed_session_ids"].append(
+                                    int(_tb.get("session_id"))
+                                )
                             logger.info(
                                 "[auto_arm] alpaca twin armed %s session=%s (paper endpoint)",
                                 chosen.symbol, _tb.get("session_id"),
@@ -6041,7 +6057,55 @@ def run_scoped_ignition_arm(db: Session, symbols: Any) -> dict[str, Any] | None:
         return None
     _ignition_bridge_holder = (threading.current_thread().name, _time.monotonic())
     try:
-        return _run_scoped_ignition_arm_locked(db, debounce=debounce)
+        out = _run_scoped_ignition_arm_locked(db, debounce=debounce)
+        # LOOP-DRAIN (2026-08-23): the pending set is drained ONCE, at entry. A
+        # symbol enqueued WHILE this pass is running — and a pass runs for
+        # seconds (broker round-trips, the OHLCV probe wave, advisory-lock
+        # waits) — was therefore stranded until some later ignition tick
+        # happened to win the lock, or until the full auto-arm pass came round.
+        # In a multi-igniter burst at the open, that is exactly the moment the
+        # stranded name matters most. Keep draining while STILL HOLDING the
+        # single flight (no release/re-acquire race), bounded by a small pass
+        # cap. The per-symbol debounce stamps applied by each pass guarantee
+        # termination: a re-queued symbol is filtered out and the drain returns
+        # None.
+        _extra_cap = max(
+            0,
+            int(
+                getattr(
+                    settings, "chili_momentum_ignition_bridge_drain_passes", 2
+                )
+                or 0
+            ),
+        )
+        for _ in range(_extra_cap):
+            with _ignition_bridge_lock:
+                if not _IGNITION_BRIDGE_PENDING:
+                    break
+            # Re-stamp so the HELD-too-long warning measures the CURRENT pass
+            # rather than the whole chain (a chain of legitimate passes must not
+            # look like a wedged bridge).
+            _ignition_bridge_holder = (
+                threading.current_thread().name,
+                _time.monotonic(),
+            )
+            extra = _run_scoped_ignition_arm_locked(db, debounce=debounce)
+            if extra is None:
+                break
+            if out is None:
+                out = extra
+            else:
+                out["armed"] = int(out.get("armed") or 0) + int(
+                    extra.get("armed") or 0
+                )
+                out["armed_session_ids"] = list(
+                    out.get("armed_session_ids") or []
+                ) + list(extra.get("armed_session_ids") or [])
+                out["armed_symbols"] = list(out.get("armed_symbols") or []) + list(
+                    extra.get("armed_symbols") or []
+                )
+                out["drain_passes"] = int(out.get("drain_passes") or 1) + 1
+        return out
     finally:
         _ignition_bridge_holder = None
         _ignition_bridge_inflight.release()

@@ -342,24 +342,35 @@ def test_bridge_accepts_bare_string_symbol(monkeypatch):
 
 def test_bridge_single_flight_blocks_concurrent_pass(monkeypatch):
     """3-worker ang WS ignition pool — isang scoped pass lang ang dapat tumakbo
-    nang sabay-sabay sa buong proseso."""
+    nang sabay-sabay sa buong proseso.
+
+    LOOP-DRAIN (2026-08-23): ang natalong caller ay TINATANGGIHAN pa rin habang
+    tumatakbo ang pass (ang invariant na binabantayan dito), pero ang trabaho
+    niya ay dine-drain na ng PAREHONG holder sa isang sumusunod na pass sa halip
+    na maghintay ng ibang winner. Sunud-sunod, hindi sabay — buo ang single
+    flight.
+    """
     _reset_debounce(monkeypatch)
+    monkeypatch.setattr(aa, "_IGNITION_BRIDGE_PENDING", set())
     monkeypatch.setattr(
         aa.settings, "chili_momentum_ignition_arm_bridge_enabled", True, raising=False
     )
-    inner: list[str] = []
+    inner: list[frozenset] = []
+    concurrent_refusals: list = []
 
     def _reentrant_pass(db, *, only_symbols=None, **k):
         # Habang tumatakbo ang unang pass, ang pangalawang caller ay dapat ma-skip.
-        inner.append("outer")
-        assert aa.run_scoped_ignition_arm(_FakeDB(), ["RDAC"]) is None
+        inner.append(only_symbols)
+        if len(inner) == 1:
+            concurrent_refusals.append(aa.run_scoped_ignition_arm(_FakeDB(), ["RDAC"]))
         return {"armed": 0}
 
     monkeypatch.setattr(aa, "run_auto_arm_pass", _reentrant_pass)
     assert aa.run_scoped_ignition_arm(_FakeDB(), ["YJ"]) is not None
-    assert inner == ["outer"]
-    # Ang natalong caller ay WALANG iniwang debounce stamp -> eligible pa rin.
-    assert "RDAC" not in aa._IGNITION_BRIDGE_LAST_ATTEMPT
+    # INVARIANT: ang sabay na caller ay tinanggihan (walang parallel pass).
+    assert concurrent_refusals == [None]
+    # ...at ang trabaho niya ay hindi naiwan — dinrain ng parehong holder.
+    assert inner == [frozenset({"YJ"}), frozenset({"RDAC"})], inner
 
 
 def test_bridge_lock_released_after_pass_raises(monkeypatch):
@@ -542,7 +553,37 @@ def test_bridge_loser_work_is_picked_up_by_next_winner(monkeypatch):
 
     def _pass_that_loses_a_caller(db, *, only_symbols=None, **k):
         batches.append(only_symbols)
-        # Habang tumatakbo ito, dumating ang tape-delta batch at natalo.
+        if len(batches) == 1:
+            # Habang tumatakbo ito, dumating ang tape-delta batch at natalo.
+            assert aa.run_scoped_ignition_arm(_FakeDB(), ["SLE", "WFF"]) is None
+        return {"armed": 0}
+
+    monkeypatch.setattr(aa, "run_auto_arm_pass", _pass_that_loses_a_caller)
+    aa.run_scoped_ignition_arm(_FakeDB(), ["COIW"])
+    # LOOP-DRAIN: ang trabaho ng natalo ay hindi na naghihintay ng SUSUNOD na
+    # winner — dinrain ito ng parehong holder sa isang sumusunod na pass.
+    assert batches == [frozenset({"COIW"}), frozenset({"SLE", "WFF"})], batches
+    # ...kaya walang natirang naka-queue: nabayaran na ang trabaho ng natalo.
+    assert aa._IGNITION_BRIDGE_PENDING == set(), aa._IGNITION_BRIDGE_PENDING
+
+
+def test_bridge_loser_work_unions_into_next_winner_without_drain(monkeypatch):
+    """Kapag naka-0 ang drain-pass cap (lumang behavior / kill switch), ang
+    trabaho ng natalo ay HINDI pa rin nawawala — inuunyon ito ng susunod na
+    winner sa sariling batch. Ito ang saligang safety net sa ilalim ng
+    loop-drain."""
+    _reset_debounce(monkeypatch)
+    monkeypatch.setattr(aa, "_IGNITION_BRIDGE_PENDING", set())
+    monkeypatch.setattr(
+        aa.settings, "chili_momentum_ignition_arm_bridge_enabled", True, raising=False
+    )
+    monkeypatch.setattr(
+        aa.settings, "chili_momentum_ignition_bridge_drain_passes", 0, raising=False
+    )
+    batches: list[frozenset] = []
+
+    def _pass_that_loses_a_caller(db, *, only_symbols=None, **k):
+        batches.append(only_symbols)
         assert aa.run_scoped_ignition_arm(_FakeDB(), ["SLE", "WFF"]) is None
         return {"armed": 0}
 
