@@ -642,15 +642,27 @@ def _stop_confirm_wake_tick(session_id: int) -> None:
             _stop_confirm_wake_inflight.discard(int(session_id))
 
 
-def _schedule_dispatch_wake(session_id: int, *, delay_s: float, name: str) -> bool:
+def _schedule_dispatch_wake(
+    session_id: int, *, delay_s: float, name: str, enabled: bool
+) -> bool:
     """Bounded redispatch of one session, regardless of driver mode.
 
     Prefers the event-loop timer (loop mode — byte-identical dito). Kapag
     tumanggi iyon (scheduler/batch mode), mag-armado ng sariling bounded daemon
     Timer. Hint lamang: ang na-dispatch na tick ay muling nagbabasa ng sariwang
     quote at pinapatakbo ang buong FSM — walang bagong awtoridad dito.
+
+    ⚠️ ``enabled`` ay ipinapasa ng CALLER, hindi binabasa dito. Nang gawing
+    generic ang helper na ito para sa exit continuation (#1111), naiwan sa loob
+    ang tsek ng stop-confirm kill switch — kaya ang pagpatay sa switch na iyon
+    ay tahimik ding pumapatay sa exit-continuation wake. Dalawang magkahiwalay
+    na feature sa iisang switch ang eksaktong uri ng bagay na sasakit sa gitna
+    ng insidente: pinapatay mo ang isa, mawawala ang dalawa, at walang
+    magsasabi sa iyo. Bawat waker ang may hawak ng sarili niyang switch.
     """
 
+    if not enabled:
+        return False
     sid = int(session_id)
     try:
         from .live_runner_loop import schedule_live_runner_stop_confirmation
@@ -659,8 +671,6 @@ def _schedule_dispatch_wake(session_id: int, *, delay_s: float, name: str) -> bo
             return True
     except Exception:
         pass
-    if not bool(getattr(settings, "chili_momentum_stop_confirm_wake_enabled", True)):
-        return False
     import os as _os
 
     if _os.environ.get("CHILI_PYTEST") == "1" or _os.environ.get(
@@ -692,6 +702,9 @@ def _schedule_stop_confirm_dispatch(session_id: int) -> bool:
         int(session_id),
         delay_s=_STOP_CONFIRM_WAKE_DELAY_S,
         name="stop-confirm-wake",
+        enabled=bool(
+            getattr(settings, "chili_momentum_stop_confirm_wake_enabled", True)
+        ),
     )
 
 
@@ -714,14 +727,13 @@ _EXIT_CONTINUATION_WAKE_DELAY_S = 0.5
 def _schedule_exit_continuation(session_id: int) -> bool:
     """Wake the next exit pulse now instead of at the next scheduler cadence."""
 
-    if not bool(
-        getattr(settings, "chili_momentum_exit_continuation_wake_enabled", True)
-    ):
-        return False
     return _schedule_dispatch_wake(
         int(session_id),
         delay_s=_EXIT_CONTINUATION_WAKE_DELAY_S,
         name="exit-continuation-wake",
+        enabled=bool(
+            getattr(settings, "chili_momentum_exit_continuation_wake_enabled", True)
+        ),
     )
 
 
