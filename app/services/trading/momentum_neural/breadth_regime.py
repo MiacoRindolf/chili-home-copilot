@@ -236,14 +236,17 @@ def _compute_breadth_regime_uncached(
         cutoff = now_utc - timedelta(seconds=max_age)
 
         # (1) CURRENT breadth + the eligible score distribution (EQUITY snapshot, freshness-valid).
-        rows = db.execute(
+        from .optional_db_read import optional_fetchall
+
+        rows = optional_fetchall(
+            db,
             text(
                 "SELECT symbol, viability_score FROM momentum_symbol_viability "
                 "WHERE scope = 'symbol' AND live_eligible = true "
                 "AND freshness_ts >= :cutoff AND symbol NOT LIKE '%-USD%'"
             ),
             {"cutoff": cutoff},
-        ).fetchall()
+        )
         breadth = len(rows)
         if breadth <= 0:
             return BreadthRegime(False, None, 0, 0.0, 0.0, pre_hol, "empty_snapshot")
@@ -270,7 +273,8 @@ def _compute_breadth_regime_uncached(
         # nagpapatagal sa compute (100-180s) sa ilalim ng bridge lock.
         _today_start = datetime(now_utc.year, now_utc.month, now_utc.day)
         _hist_floor = _today_start - timedelta(days=30)
-        hist = db.execute(
+        hist = optional_fetchall(
+            db,
             text(
                 "SELECT observed_at::date AS d, COUNT(DISTINCT symbol) AS n "
                 "FROM momentum_viability_history "
@@ -286,7 +290,7 @@ def _compute_breadth_regime_uncached(
                 "h_hi": min(23, hour + 1),
                 "lim": _TRAILING_SESSIONS,
             },
-        ).fetchall()
+        )
         session_breadths = sorted(float(r[1] or 0) for r in hist)
         # FAIL-CLOSED: need a real baseline (>= a handful of prior sessions) to call a day "thin".
         if len(session_breadths) < 5:
@@ -300,7 +304,8 @@ def _compute_breadth_regime_uncached(
         # trailing sessions' dominance. We approximate the trailing dominance distribution from
         # the same history rows' per-session score spread when available; when the history lacks
         # viability_score, fall back to requiring a strictly-positive dominance (a real gap).
-        dom_rows = db.execute(
+        dom_rows = optional_fetchall(
+            db,
             text(
                 "SELECT observed_at::date AS d, "
                 "MAX(viability_score) - percentile_cont(0.5) WITHIN GROUP (ORDER BY viability_score) AS dom "
@@ -318,7 +323,7 @@ def _compute_breadth_regime_uncached(
                 "h_hi": min(23, hour + 1),
                 "lim": _TRAILING_SESSIONS,
             },
-        ).fetchall()
+        )
         dom_vals = sorted(float(r[1] or 0.0) for r in dom_rows if r[1] is not None)
         dom_floor = _percentile(dom_vals, _DOMINANCE_PCTL_FLOOR) if len(dom_vals) >= 5 else 0.0
         if dom_floor is None:
