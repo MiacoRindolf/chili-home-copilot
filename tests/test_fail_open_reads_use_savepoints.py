@@ -21,7 +21,11 @@ import inspect
 
 import pytest
 
-from app.services.trading.momentum_neural import ftd_ingest, squeeze_regime
+from app.services.trading.momentum_neural import (
+    ftd_ingest,
+    repeg_wall,
+    squeeze_regime,
+)
 
 
 # ── ang pattern ay nasa code ────────────────────────────────────────────────
@@ -36,20 +40,37 @@ def _code_only(text: str) -> str:
     return "\n".join(out)
 
 
-def test_squeeze_regime_read_is_wrapped_in_a_savepoint():
+def test_squeeze_regime_read_goes_through_the_helper():
     src = _code_only(inspect.getsource(squeeze_regime.read_squeeze_regime))
-    assert "with db.begin_nested():" in src
-    lo = src.index("with db.begin_nested():")
-    hi = src.index("momentum_squeeze_regime_daily")
-    assert lo < hi, "ang SELECT ay dapat NASA LOOB ng nested transaction"
+    assert "optional_fetchall(" in src
+    assert "db.execute(" not in src, "walang hubad na execute sa session ng caller"
 
 
-def test_ftd_delta_read_is_wrapped_in_a_savepoint():
+def test_ftd_delta_read_goes_through_the_helper():
     src = _code_only(inspect.getsource(ftd_ingest.ftd_squeeze_viability_delta))
-    assert "with db.begin_nested():" in src
-    lo = src.index("with db.begin_nested():")
-    hi = src.index("sec_fails_to_deliver")
-    assert lo < hi
+    assert "optional_fetchone(" in src
+    assert "db.execute(" not in src
+
+
+def test_repeg_wall_read_goes_through_the_helper():
+    """Ang #1096 ay nagbabasa ng iqfeed_depth_snapshots — WALA sa replay sink —
+    mula sa loob ng _l2_entry_veto, isang LIVE ENTRY GATE."""
+    src = _code_only(inspect.getsource(repeg_wall.read_repeg_wall_state))
+    assert src.count("optional_fetchall(") == 2, "parehong read ay dapat dumaan"
+    assert "db.execute(" not in src
+
+
+def test_no_bare_execute_left_in_these_fail_open_readers():
+    """Ang buong punto: walang raw db.execute sa session ng caller sa loob ng
+    isang 'fail-open' na except. Isang idiom lang: optional_db_read."""
+    for fn in (
+        squeeze_regime.read_squeeze_regime,
+        ftd_ingest.ftd_squeeze_viability_delta,
+        repeg_wall.read_repeg_wall_state,
+    ):
+        src = _code_only(inspect.getsource(fn))
+        assert "db.execute(" not in src, fn.__name__
+        assert "optional_" in src, fn.__name__
 
 
 def test_both_still_fail_open_to_a_neutral_value():

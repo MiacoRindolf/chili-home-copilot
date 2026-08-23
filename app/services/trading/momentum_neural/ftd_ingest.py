@@ -153,17 +153,18 @@ def ftd_squeeze_viability_delta(
             return 0.0
         if float_shares is None or float(float_shares) <= 0:
             return 0.0
-        # SAVEPOINT — see squeeze_regime.read_squeeze_regime for the full
-        # rationale. This read runs on the CALLER'S session, so a failure (the
-        # sink has no ``sec_fails_to_deliver``; migrations do not run there)
-        # aborts the caller's whole transaction. The ``except`` below then
-        # returns 0.0 as if nothing happened while every later statement dies
-        # with InFailedSqlTransaction. Roll back only this probe.
-        with db.begin_nested():
-            row = db.execute(text(
-                "SELECT settlement_date, fail_qty FROM sec_fails_to_deliver "
-                "WHERE symbol = :s ORDER BY settlement_date DESC LIMIT 1"
-            ), {"s": sym}).fetchone()
+        from .optional_db_read import optional_fetchone
+
+        # See squeeze_regime.read_squeeze_regime for the full rationale. This
+        # read runs on the CALLER'S session, so a failure (the sink has no
+        # ``sec_fails_to_deliver``; migrations do not run there) aborts the
+        # caller's whole transaction — the ``except`` below then returns 0.0 as
+        # if nothing happened while every later statement dies with
+        # InFailedSqlTransaction. The helper SAVEPOINTs the read.
+        row = optional_fetchone(db, text(
+            "SELECT settlement_date, fail_qty FROM sec_fails_to_deliver "
+            "WHERE symbol = :s ORDER BY settlement_date DESC LIMIT 1"
+        ), {"s": sym})
         if row is None:
             return 0.0
         sd, qty = row[0], float(row[1] or 0)
