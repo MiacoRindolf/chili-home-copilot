@@ -9967,8 +9967,13 @@ class Settings(BaseSettings):
         ge=0.0,
         validation_alias=AliasChoices("CHILI_MOMENTUM_POSTOPEN_GENERIC_TRIGGER_CUTOFF_MIN"),
     )
+    # 2026-08-22: DEFAULT ON — ang time-of-day audit (162 entered equity trades)
+    # ay nagpakita ng PREMARKET +$3,305 PF 20.1 vs OPEN/MIDDAY −$12.5k PF ~0.07;
+    # ang #1091 bar ay humaharang na sa post-open GENERIC entries, at ang derate
+    # na ito ang nagpapaliit ng size ng mga STRUCTURAL post-open entry habang
+    # tumatanda ang session (Ross: trades best early). Risk-reducing only.
     chili_momentum_fatigue_derate_enabled: bool = Field(
-        default=False,
+        default=True,
         validation_alias=AliasChoices("CHILI_MOMENTUM_FATIGUE_DERATE_ENABLED"),
         description="GAP 2 (RISK): derate the per-trade risk budget DOWN as the session lengthens (minutes since 09:30 ET open) and/or today's entered-trade count grows (Ross trades best early). Multiplier in [floor, 1.0]; composes under the existing 3x clamp. RISK-REDUCING ONLY (<= 1.0, only shrinks size). false (default) = 1.0 = byte-identical.",
     )
