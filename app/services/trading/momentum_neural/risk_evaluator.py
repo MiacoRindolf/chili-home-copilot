@@ -1254,6 +1254,7 @@ def evaluate_profit_giveback_halt(
     user_id: int,
     execution_family: str = "coinbase_spot",
     as_of_utc: datetime | None = None,
+    peak_and_current: tuple[float, float] | None = None,
 ) -> dict[str, Any]:
     """Ross-style profit-giveback session halt for the momentum LIVE lane.
 
@@ -1289,11 +1290,15 @@ def evaluate_profit_giveback_halt(
         float(getattr(settings, "chili_momentum_risk_max_daily_loss_usd", 250.0)),
         execution_family,
     )
-    peak, current = _daily_realized_pnl_peak_and_current(
-        db,
-        int(user_id),
-        execution_family=execution_family,
-        as_of_utc=as_of_utc,
+    peak, current = (
+        peak_and_current
+        if peak_and_current is not None
+        else _daily_realized_pnl_peak_and_current(
+            db,
+            int(user_id),
+            execution_family=execution_family,
+            as_of_utc=as_of_utc,
+        )
     )
     giveback_floor = peak * (1.0 - frac)
     armed = bool(frac > 0.0 and activation > 0.0 and peak >= activation)
@@ -1322,6 +1327,7 @@ def evaluate_green_to_red_halt(
     user_id: int,
     execution_family: str = "coinbase_spot",
     as_of_utc: datetime | None = None,
+    peak_and_current: tuple[float, float] | None = None,
 ) -> dict[str, Any]:
     """Ross green-to-red session breaker (gap #8, videos 37/38): going from green on the
     day back to <= $0 is the emotional-hijack trigger — walk away. The profit-giveback
@@ -1336,11 +1342,15 @@ def evaluate_green_to_red_halt(
         float(getattr(settings, "chili_momentum_risk_max_daily_loss_usd", 250.0)),
         execution_family,
     )
-    peak, current = _daily_realized_pnl_peak_and_current(
-        db,
-        int(user_id),
-        execution_family=execution_family,
-        as_of_utc=as_of_utc,
+    peak, current = (
+        peak_and_current
+        if peak_and_current is not None
+        else _daily_realized_pnl_peak_and_current(
+            db,
+            int(user_id),
+            execution_family=execution_family,
+            as_of_utc=as_of_utc,
+        )
     )
     armed = bool(activation > 0.0 and peak >= activation)
     halted = bool(armed and current <= 0.0)
@@ -2247,12 +2257,24 @@ def evaluate_proposed_momentum_automation(
             )
 
     # ── Daily loss cap (momentum-local) ───────────────────────────────────
-    daily_pnl = _daily_realized_pnl(
+    # ONE outcome scan for all three day-state gates (2026-08-23 tick cost).
+    # The daily-loss cap, the profit-giveback halt and the green-to-red breaker
+    # each used to walk today's outcome rows themselves — three identical
+    # queries plus three ORM hydrations plus three passes of
+    # authoritative_label_for_outcome, per evaluation, at the SAME causal
+    # frontier. ``_daily_realized_pnl_peak_and_current`` already returns both
+    # values from one walk and its ``current`` is numerically identical to
+    # ``_daily_realized_pnl`` (same filters and scope; None-pnl is skipped in
+    # one and added as 0.0 in the other; row ORDER cannot change a sum). This
+    # matters more now that the wake rails run the FSM every ~2s instead of
+    # every 10-30s.
+    _day_peak, daily_pnl = _daily_realized_pnl_peak_and_current(
         db,
         user_id,
         execution_family=ef,
         as_of_utc=decision_as_of,
     )
+    _day_state = (_day_peak, daily_pnl)
     # Equity-relative daily-loss circuit-breaker (no fixed-$ magic); falls back to
     # the fixed cap when equity is unavailable. [[feedback_adaptive_no_magic]]
     max_daily_loss = equity_relative_daily_loss_cap(policy.max_daily_loss_usd, ef)
@@ -2279,6 +2301,7 @@ def evaluate_proposed_momentum_automation(
         user_id=user_id,
         execution_family=ef,
         as_of_utc=decision_as_of,
+        peak_and_current=_day_state,
     )
     checks.append(
         _check(
@@ -2309,6 +2332,7 @@ def evaluate_proposed_momentum_automation(
         user_id=user_id,
         execution_family=ef,
         as_of_utc=decision_as_of,
+        peak_and_current=_day_state,
     )
     checks.append(
         _check(
