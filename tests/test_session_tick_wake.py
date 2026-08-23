@@ -81,6 +81,63 @@ def test_bad_quote_returns_empty():
     assert t.crossed("SDOT", SimpleNamespace(bid="junk", mid=None, last=None)) == []
 
 
+# ── bagong-high wake (trail/ladder gap) ─────────────────────────────────────
+
+def test_new_high_first_observation_is_seed_only():
+    t = _tracker_with("HUIZ", [
+        {"session_id": 11, "state": STATE_LIVE_ENTERED, "stop_px": 5.0, "target_px": 100.0},
+    ])
+    # unang tick: seed lang, walang wake (stop/target di tumawid)
+    assert t.crossed("HUIZ", _quote(bid=9.00, mid=9.02)) == []
+    # pag-akyat: bagong high => wake (para tumakbo ang ratchet/ladder ngayon)
+    assert t.crossed("HUIZ", _quote(bid=9.10, mid=9.12)) == [11]
+    # flat/pababa: walang wake
+    assert t.crossed("HUIZ", _quote(bid=9.05, mid=9.07)) == []
+    # lampas sa dating high: wake ulit
+    assert t.crossed("HUIZ", _quote(bid=9.20, mid=9.22)) == [11]
+
+
+def test_stop_cross_takes_priority_over_new_high():
+    t = _tracker_with("SDOT", [
+        {"session_id": 12, "state": STATE_LIVE_ENTERED, "stop_px": 16.76, "target_px": 0.0},
+    ])
+    t._hi[12] = 17.0
+    # breach: iisang hit lang (hindi dinodoble ng new-high branch)
+    assert t.crossed("SDOT", _quote(bid=16.70, mid=16.72)) == [12]
+
+
+def test_refresh_prunes_high_of_departed_sessions():
+    t = il._SessionCrossTracker()
+    t._hi[99] = 5.0
+    with patch.object(il, "SessionLocal") as mock_sl:
+        mock_sl.return_value.query.return_value.filter.return_value.all.return_value = []
+        t.refresh()
+    assert 99 not in t._hi
+
+
+def test_session_refresh_faster_than_universe():
+    """Ang session inventory ay hindi dapat maging bulag nang 20s — hiwalay na
+    ~5s cadence; ang universe ay nananatili sa ~20s ritmo."""
+    assert il._SESSION_REFRESH_S < il._UNIVERSE_REFRESH_S
+    assert il._SESSION_REFRESH_S <= 5.0
+
+
+def test_post_wake_refresh_hook_called():
+    calls: list[str] = []
+    old = il._post_wake_session_refresh
+    il._post_wake_session_refresh = lambda: calls.append("refreshed")
+    try:
+        with patch(
+            "app.services.trading.momentum_neural.captured_paper_dispatcher."
+            "dispatch_live_runner_tick",
+            side_effect=lambda db, sid: None,
+        ):
+            il._wake_runner_tick(77)
+        assert calls == ["refreshed"]
+    finally:
+        il._post_wake_session_refresh = old
+
+
 # ── _spawn_session_wake spacing + kill switch ───────────────────────────────
 
 def test_session_wake_spacing_dedups():
