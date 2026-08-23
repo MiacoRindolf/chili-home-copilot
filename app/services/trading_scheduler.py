@@ -5185,6 +5185,25 @@ def _run_equity_viability_refresh_job():
     # profile against the live snapshot; the per-ticker enrichment below + the Ross
     # score then rank within it. Fail-safe: empty -> tickers=None -> scans use their
     # own default universe (no regression). docs/DESIGN/MOMENTUM_LANE.md
+    # HOW LONG DOES THIS ACTUALLY TAKE (2026-08-23)? This job carries the
+    # PREMARKET GAP SCAN, and premarket is the only session the lane earns in.
+    # Its body is two SERIAL per-ticker provider loops over the same list — one
+    # OHLCV fetch and one quote fetch each — over a universe whose ceiling is
+    # 1500 names, and the file already admits it "can run for minutes". It has
+    # no wall-clock budget (the live-runner batch is the only job in this file
+    # that has one) and runs with max_instances=1, so a body that overruns its
+    # own interval silently pushes the next fire out: the effective premarket
+    # selection cadence is the BODY DURATION, and nobody has ever measured it.
+    # This is that measurement, and nothing more.
+    #
+    # ⚠️ A budget is the obvious next step and is NOT safe as-is: the scan list
+    # is built by ``_merge_equity_refresh_universe``, which returns
+    # ``sorted(...)`` — ALPHABETICAL order. Cutting the loop on a deadline would
+    # drop the same tail of the alphabet on EVERY cycle, turning a slow-but-
+    # complete scan into a fast one with a permanent blind spot. Order the list
+    # by relevance (or rotate the start offset per cycle) BEFORE adding any
+    # deadline.
+    _evr_t0 = time.monotonic()
     try:
         ross_tickers = build_equity_universe(EQUITY_ROSS_SMALLCAP)
     except Exception:
@@ -5296,9 +5315,21 @@ def _run_equity_viability_refresh_job():
     write_db = SessionLocal()  # FRESH connection for the write (the scan's may be dead)
     try:
         _bridge_scanner_to_viability(write_db, movers, source="equity_viability_refresh")
+        _evr_dur = time.monotonic() - _evr_t0
+        _evr_interval = _momentum_viability_refresh_interval_seconds(settings)
         logger.info(
-            "[scheduler] equity viability refresh: %d movers -> viability (crypto-parity cadence)",
+            "[scheduler] equity viability refresh: %d movers -> viability "
+            "(crypto-parity cadence) dur_s=%.1f scanned=%d interval_s=%d%s",
             len(movers),
+            _evr_dur,
+            len(scan_tickers or []),
+            _evr_interval,
+            (
+                "  OVERRUN: the next fire is skipped, so the real premarket "
+                "selection cadence is this duration"
+                if _evr_dur > _evr_interval
+                else ""
+            ),
         )
         # L9-C1 (2026-08-03): SUBSCRIBE-HINT WIRING — ang HYFM 500% day ay
         # na-detect at naging eligible sa loob ng 10 min, pero ang TRADES
