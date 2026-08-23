@@ -7595,21 +7595,27 @@ def start_scheduler():
                         logger.info("[scheduler] WS ignition scorer started")
                     except Exception as e:
                         logger.warning("[scheduler] WS ignition scorer failed to start: %s", e)
-                # QUIET-TAPE WAKE RAIL: the tick-cross wake rides the Massive bus,
-                # so a thin premarket name with no bus tick had no waker at all.
-                # The host IQFeed bridge pg_notify's every L1 quote and is the
-                # lane's earliest (often only) premarket tick authority; the
-                # event loop consumed that channel but does not run here.
-                try:
-                    from .trading.momentum_neural.iqfeed_wake_listener import (
-                        start_iqfeed_wake_listener,
-                    )
+            # QUIET-TAPE WAKE RAIL: the tick-cross wake rides the Massive bus, so
+            # a thin premarket name with no bus tick had no waker at all. The
+            # host IQFeed bridge pg_notify's every L1 quote and is the lane's
+            # earliest (often only) premarket tick authority; the event loop
+            # consumed that channel but does not run here.
+            #
+            # Started OUTSIDE the price-bus branch on purpose: a rail whose whole
+            # job is to cover a quiet or absent bus must not be switched off by
+            # the bus flag, and it must not inherit the WS-ignition flag either.
+            # It owns its own threshold inventory refresh when nothing else is
+            # refreshing one (see IqfeedWakeListener._tracker).
+            try:
+                from .trading.momentum_neural.iqfeed_wake_listener import (
+                    start_iqfeed_wake_listener,
+                )
 
-                    start_iqfeed_wake_listener()
-                except Exception as e:
-                    logger.warning(
-                        "[scheduler] IQFeed wake listener failed to start: %s", e
-                    )
+                start_iqfeed_wake_listener()
+            except Exception as e:
+                logger.warning(
+                    "[scheduler] IQFeed wake listener failed to start: %s", e
+                )
 
         # Canonical event-only path. The loop used to start only inside the legacy
         # scheduler-enabled branch above, so the health-required configuration

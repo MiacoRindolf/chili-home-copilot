@@ -43,6 +43,9 @@ _DEFAULT_CHANNEL = "momentum_iqfeed_l1"
 _CHANNEL_RE = re.compile(r"^[a-z_][a-z0-9_]{0,62}$")
 _SELECT_TIMEOUT_S = 1.0
 _RECONNECT_BACKOFF_S = (1.0, 2.0, 5.0, 10.0, 30.0)
+# Same cadence the ignition loop uses for its own session inventory; only used
+# when that loop is not running and nothing else is refreshing it.
+_TRACKER_REFRESH_S = 5.0
 
 
 def _duck_quote(payload: dict) -> Any | None:
@@ -77,6 +80,54 @@ class IqfeedWakeListener:
         self._last_notify_at: float = 0.0
         self._notifies = 0
         self._wakes = 0
+        self._last_tracker_refresh: float = 0.0
+        self._self_refreshing = False
+
+    # ── threshold inventory ──────────────────────────────────────────────
+
+    def _tracker(self):
+        """The session-threshold inventory, refreshed by SOMETHING.
+
+        The inventory normally belongs to the WS ignition loop, which refreshes
+        it every 5s. But that loop is behind its own flag and its own price-bus
+        branch — and this rail exists precisely to cover the case where the bus
+        path is not carrying the lane. If the ignition loop is not running, its
+        tracker is never refreshed, so ``crossed()`` would return nothing for
+        every symbol and this rail would be a SILENT no-op. That failure mode is
+        indistinguishable from a quiet tape, which is exactly the condition the
+        rail is supposed to handle.
+
+        So: share the loop's tracker when the loop is live (one inventory, one
+        query), and refresh it here on the same cadence when it is not.
+        """
+
+        from .ignition_loop import get_ignition_loop
+
+        loop = get_ignition_loop()
+        tracker = loop._sessions
+        loop_live = bool(getattr(loop, "_running", False))
+        if loop_live:
+            if self._self_refreshing:
+                self._self_refreshing = False
+                _log.info(
+                    "[iqfeed_wake] ignition loop is live again — sharing its "
+                    "session inventory refresh"
+                )
+            return tracker
+        now = time.monotonic()
+        if now - self._last_tracker_refresh >= _TRACKER_REFRESH_S:
+            self._last_tracker_refresh = now
+            if not self._self_refreshing:
+                self._self_refreshing = True
+                _log.info(
+                    "[iqfeed_wake] ignition loop is not running — refreshing the "
+                    "session inventory from this rail so wakes still fire"
+                )
+            try:
+                tracker.refresh()
+            except Exception:
+                _log.debug("[iqfeed_wake] tracker refresh failed", exc_info=True)
+        return tracker
 
     # ── lifecycle ────────────────────────────────────────────────────────
 
@@ -112,6 +163,9 @@ class IqfeedWakeListener:
             ),
             "notifies": self._notifies,
             "wakes": self._wakes,
+            # True = the ignition loop is not running and this rail owns the
+            # session-threshold inventory refresh (standalone mode).
+            "self_refreshing_inventory": self._self_refreshing,
         }
 
     # ── internals ────────────────────────────────────────────────────────
@@ -203,11 +257,12 @@ class IqfeedWakeListener:
         self._notifies += len(latest)
         self._last_notify_at = time.monotonic()
 
-        from .ignition_loop import _spawn_session_wake, get_ignition_loop
+        from .ignition_loop import _spawn_session_wake
 
         try:
-            tracker = get_ignition_loop()._sessions
+            tracker = self._tracker()
         except Exception:
+            _log.debug("[iqfeed_wake] session inventory unavailable", exc_info=True)
             return
         for symbol, payload in latest.items():
             try:
