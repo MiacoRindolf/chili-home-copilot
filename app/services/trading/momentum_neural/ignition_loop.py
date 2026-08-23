@@ -36,6 +36,15 @@ from concurrent.futures import ThreadPoolExecutor
 
 from ....config import settings
 from ....db import SessionLocal
+from .live_fsm import (
+    LIVE_RUNNER_RUNNABLE_STATES,
+    STATE_LIVE_BAILOUT,
+    STATE_LIVE_ENTERED,
+    STATE_LIVE_PENDING_ENTRY,
+    STATE_LIVE_SCALING_OUT,
+    STATE_LIVE_TRAILING,
+    STATE_WATCHING_LIVE,
+)
 from .universe import (
     EQUITY_ROSS_SMALLCAP,
     UniverseProfile,
@@ -169,6 +178,167 @@ class _UniverseTracker:
             return len(self._symbols)
 
 
+_KEY_LIVE_EXEC = "momentum_live_execution"
+_SESSION_POSITION_STATES = frozenset(
+    {STATE_LIVE_ENTERED, STATE_LIVE_SCALING_OUT, STATE_LIVE_TRAILING, STATE_LIVE_BAILOUT}
+)
+
+
+class _SessionCrossTracker:
+    """Thread-safe: symbol -> runnable LIVE-session thresholds for tick-cross wakes.
+
+    TICK-SPEED OPEN/CLOSE (2026-08-23). Sa batch/scheduler window ang bawat
+    entry/exit state ay umuusad LANG sa scheduler cadence (nominal 10s, sukat na
+    10–30s kada pass) — ang loop-mode tick bridge na nagdi-dispatch sa sandaling
+    tumawid ang presyo sa stop/target/watch-break ay RETIRED noong 08-17 cutover.
+    Ang tracker na ito ang batch-mode mirror ng ``live_runner_loop`` inventory
+    read: kapag may tick na tumawid sa naka-imbak na threshold, gumigising ito ng
+    AGARANG runner tick via ``dispatch_live_runner_tick`` (FOR UPDATE NOWAIT sa
+    dispatcher kaya benign ang karera vs batch). DISPATCH HINT LAMANG ang bawat
+    wake — ang FSM pa rin ang nagbabasa ng sariwang quote at nagpapasya.
+    """
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._by_symbol: dict[str, list[dict]] = {}
+
+    def refresh(self) -> None:
+        from ....models.trading import TradingAutomationSession
+
+        db = SessionLocal()
+        try:
+            rows = (
+                db.query(TradingAutomationSession)
+                .filter(
+                    TradingAutomationSession.mode == "live",
+                    TradingAutomationSession.state.in_(LIVE_RUNNER_RUNNABLE_STATES),
+                )
+                .all()
+            )
+            new_map: dict[str, list[dict]] = {}
+            for sess in rows:
+                sym = str(sess.symbol or "").strip().upper()
+                if not sym:
+                    continue
+                snap = sess.risk_snapshot_json if isinstance(sess.risk_snapshot_json, dict) else {}
+                le = snap.get(_KEY_LIVE_EXEC) if isinstance(snap.get(_KEY_LIVE_EXEC), dict) else {}
+                pos = le.get("position") if isinstance(le.get("position"), dict) else None
+                entry: dict = {"session_id": int(sess.id), "state": str(sess.state or "")}
+                if pos and sess.state in _SESSION_POSITION_STATES:
+                    try:
+                        entry["stop_px"] = float(pos.get("stop_price") or 0)
+                        entry["target_px"] = float(pos.get("target_price") or 0)
+                    except (TypeError, ValueError):
+                        pass
+                if sess.state == STATE_WATCHING_LIVE:
+                    try:
+                        wl = le.get("watch_break_level")
+                        if wl:
+                            entry["watch_break_level"] = float(wl)
+                    except (TypeError, ValueError):
+                        pass
+                new_map.setdefault(sym, []).append(entry)
+            with self._lock:
+                self._by_symbol = new_map
+        except Exception:
+            _log.debug("[momentum_ws_ignition] session-cross refresh failed", exc_info=True)
+        finally:
+            try:
+                db.rollback()
+            except Exception:
+                pass
+            db.close()
+
+    def symbols(self) -> set[str]:
+        with self._lock:
+            return set(self._by_symbol)
+
+    def crossed(self, symbol: str, quote) -> list[int]:
+        """Session ids whose stored threshold this tick crossed (hint lamang).
+
+        Parehong semantics ng loop-mode ``_on_tick``: exit ref = bid (fallback
+        mid) vs stop/target; entry ref = mid (fallback bid) vs watch_break_level;
+        ang PENDING_ENTRY ay ginigising kada tick (spacing-bound) para sa
+        tick-speed fill resolution.
+        """
+        sym = str(symbol or "").strip().upper()
+        with self._lock:
+            entries = self._by_symbol.get(sym)
+            entries = list(entries) if entries else []
+        if not entries:
+            return []
+        try:
+            bid_raw = getattr(quote, "bid", None)
+            mid_raw = (
+                getattr(quote, "mid", None)
+                or getattr(quote, "price", None)
+                or getattr(quote, "last", None)
+            )
+            bid = float(bid_raw) if bid_raw else 0.0
+            mid = float(mid_raw) if mid_raw else 0.0
+        except (TypeError, ValueError):
+            return []
+        exit_ref = bid if bid > 0 else mid
+        hits: list[int] = []
+        for s in entries:
+            state = s.get("state")
+            if state in _SESSION_POSITION_STATES:
+                stop_px = float(s.get("stop_px") or 0.0)
+                target_px = float(s.get("target_px") or 0.0)
+                if exit_ref > 0 and (
+                    (stop_px > 0 and exit_ref <= stop_px)
+                    or (target_px > 0 and exit_ref >= target_px * 0.995)
+                ):
+                    hits.append(int(s["session_id"]))
+            elif state == STATE_LIVE_PENDING_ENTRY:
+                hits.append(int(s["session_id"]))
+            elif state == STATE_WATCHING_LIVE:
+                wl = float(s.get("watch_break_level") or 0.0)
+                ref = mid if mid > 0 else bid
+                if wl > 0 and ref > wl:
+                    hits.append(int(s["session_id"]))
+        return hits
+
+
+# Per-session minimum spacing between tick-cross wakes: a collapsing tape prints
+# many ticks below the stop; one wake ticks the FSM, the spacing bounds the rest.
+# The scheduler batch stays the safety net for anything the spacing skips.
+_session_wake_last: dict[int, float] = {}
+_session_wake_lock = threading.Lock()
+
+
+def _spawn_session_wake(session_id) -> bool:
+    """Single-flight, spacing-bound wake for one tracked session (tick cross)."""
+    try:
+        sid = int(session_id)
+    except (TypeError, ValueError):
+        return False
+    from ....config import settings as _st
+
+    if not bool(getattr(_st, "chili_momentum_session_tick_wake_enabled", True)):
+        return False
+    spacing = float(
+        getattr(_st, "chili_momentum_session_tick_wake_min_spacing_s", 2.0) or 2.0
+    )
+    now = time.monotonic()
+    with _session_wake_lock:
+        if now - _session_wake_last.get(sid, 0.0) < spacing:
+            return False
+        _session_wake_last[sid] = now
+        if len(_session_wake_last) > 512:
+            stale = [k for k, v in _session_wake_last.items() if now - v > 600.0]
+            for k in stale:
+                _session_wake_last.pop(k, None)
+    with _wake_inflight_lock:
+        if sid in _wake_inflight:
+            return False
+        _wake_inflight.add(sid)
+    threading.Thread(
+        target=_wake_runner_tick, args=(sid,),
+        name=f"session-wake-{sid}", daemon=True,
+    ).start()
+    return True
+
 
 # ---------------------------------------------------------------------------
 # Arm -> runner WAKE (2026-08-21). Ang armado ay dating naghihintay sa susunod
@@ -246,6 +416,7 @@ class IgnitionScoringLoop:
 
     def __init__(self) -> None:
         self._tracker = _UniverseTracker()
+        self._sessions = _SessionCrossTracker()
         self._running = False
         self._refresher: threading.Thread | None = None
         self._pool: ThreadPoolExecutor | None = None
@@ -263,6 +434,7 @@ class IgnitionScoringLoop:
         self._running = True
         self._pool = ThreadPoolExecutor(max_workers=3, thread_name_prefix="ws-ignition")
         self._tracker.refresh()
+        self._sessions.refresh()
         self._sync_subscriptions()
         self._refresher = threading.Thread(
             target=self._refresh_loop, daemon=True, name="ws-ignition-refresh"
@@ -310,7 +482,9 @@ class IgnitionScoringLoop:
             bus = get_price_bus()
         except Exception:
             return
-        current = self._tracker.get_symbols()
+        # Session symbols ride the same subscription: a held/watching name must
+        # keep its tick feed even after it falls off the screened universe.
+        current = self._tracker.get_symbols() | self._sessions.symbols()
         new = current - self._subscribed
         gone = self._subscribed - current
         _densify = bool(
@@ -352,6 +526,7 @@ class IgnitionScoringLoop:
                 break
             try:
                 self._tracker.refresh()
+                self._sessions.refresh()
                 self._sync_subscriptions()
             except Exception:
                 pass
@@ -409,6 +584,15 @@ class IgnitionScoringLoop:
         sym = str(symbol or "").strip().upper()
         if not sym:
             return
+        # TICK-SPEED OPEN/CLOSE: session-threshold crossings wake the runner
+        # BEFORE any ignition filtering — a held name below the ignition floor
+        # (a collapsing stop) must still dispatch. Cheap for untracked symbols
+        # (one dict lookup); any wake runs off-thread.
+        try:
+            for _sid in self._sessions.crossed(sym, quote):
+                _spawn_session_wake(_sid)
+        except Exception:
+            pass
         move_pct = self._move_pct(sym, quote)
         if move_pct is None:
             return

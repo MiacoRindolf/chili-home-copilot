@@ -8884,6 +8884,29 @@ class Settings(BaseSettings):
         default=True,
         validation_alias=AliasChoices("CHILI_MOMENTUM_ARM_WAKE_RUNNER_ENABLED"),
     )
+    # TICK-SPEED OPEN/CLOSE (2026-08-23): sa batch/scheduler window, ang
+    # session-threshold crossing (stop/target/watch-break) sa isang WS tick ay
+    # gumigising ng AGARANG runner tick sa halip na maghintay ng scheduler
+    # cadence (nominal 10s, sukat na 10–30s). Dispatch hint lamang — ang FSM ang
+    # nagpapasya. Spacing = bounded quote/broker work kada session sa tick storm.
+    chili_momentum_session_tick_wake_enabled: bool = Field(
+        default=True,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_SESSION_TICK_WAKE_ENABLED"),
+    )
+    chili_momentum_session_tick_wake_min_spacing_s: float = Field(
+        default=2.0,
+        ge=0.5,
+        le=30.0,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_SESSION_TICK_WAKE_MIN_SPACING_S"),
+    )
+    # Batch-mode mirror ng event-loop stop-confirm timer: ang >=1s flicker guard
+    # ay nakakakuha ng pangalawang read pagkatapos ng ~1.1s sa halip na sa
+    # susunod na buong scheduler pass (dating DALAWANG cadence bawat software
+    # stop exit). Walang epekto sa loop mode / replay / pytest.
+    chili_momentum_stop_confirm_wake_enabled: bool = Field(
+        default=True,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_STOP_CONFIRM_WAKE_ENABLED"),
+    )
     chili_momentum_entry_fsm_continuation_max_steps: int = Field(
         default=3,
         ge=1,
