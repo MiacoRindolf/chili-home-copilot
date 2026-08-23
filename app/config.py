@@ -8907,6 +8907,15 @@ class Settings(BaseSettings):
         default=True,
         validation_alias=AliasChoices("CHILI_MOMENTUM_STOP_CONFIRM_WAKE_ENABLED"),
     )
+    # Ang exit submit path ay may sadyang deferred na hakbang (deadman handoff
+    # phase 1, cancel-not-terminal, literal-BBO refresh, unconfirmed scale-limit
+    # release) na naghihintay ng "susunod na pulse" = 10-30s sa batch mode. Ang
+    # two-phase durability boundary ay hindi ginagalaw; ang susunod na pulse
+    # lang ang ginigising agad. Iginagalang ang armadong exit_next_retry_at_utc.
+    chili_momentum_exit_continuation_wake_enabled: bool = Field(
+        default=True,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_EXIT_CONTINUATION_WAKE_ENABLED"),
+    )
     chili_momentum_entry_fsm_continuation_max_steps: int = Field(
         default=3,
         ge=1,

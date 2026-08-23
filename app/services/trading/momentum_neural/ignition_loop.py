@@ -238,6 +238,19 @@ class _SessionCrossTracker:
                 le = snap.get(_KEY_LIVE_EXEC) if isinstance(snap.get(_KEY_LIVE_EXEC), dict) else {}
                 pos = le.get("position") if isinstance(le.get("position"), dict) else None
                 entry: dict = {"session_id": int(sess.id), "state": str(sess.state or "")}
+                # PENDING-EXIT wake (2026-08-23): matapos ang exit POST, ang fill
+                # resolution at ang limit repeg ay isang poll KADA PULSE — at ang
+                # tipikal na hugis ng stop-out ay flush-tapos-bounce, kaya ang
+                # presyo ay bumabalik sa IBABAW ng stop: walang cross, walang
+                # bagong high, kaya WALANG wake sa ilalim ng threshold-only na
+                # modelo. Ang isang exit na may nakabinbing broker order (o isang
+                # deferred deadman handoff phase) ay ginigising kada tick tulad ng
+                # PENDING_ENTRY — mas maagang flat = mas maagang re-entry slot.
+                if isinstance(le, dict) and (
+                    le.get("pending_exit_reason")
+                    or isinstance(le.get("deadman_released_for_close"), dict)
+                ):
+                    entry["pending_exit"] = True
                 if pos and sess.state in _SESSION_POSITION_STATES:
                     try:
                         entry["stop_px"] = float(pos.get("stop_price") or 0)
@@ -301,6 +314,10 @@ class _SessionCrossTracker:
         hits: list[int] = []
         for s in entries:
             state = s.get("state")
+            if s.get("pending_exit"):
+                # in-flight exit: resolve the fill / repeg at tick speed
+                hits.append(int(s["session_id"]))
+                continue
             if state in _SESSION_POSITION_STATES:
                 sid = int(s["session_id"])
                 stop_px = float(s.get("stop_px") or 0.0)
@@ -400,28 +417,18 @@ def _wake_runner_tick(session_id: int) -> None:
     except Exception:
         _consume = None
     try:
-        from .captured_paper_dispatcher import dispatch_live_runner_tick
+        from .captured_paper_dispatcher import run_live_runner_tick_two_phase
         from ....db import SessionLocal as _SL
         from ....config import settings as _st
 
         max_steps = int(getattr(_st, "chili_momentum_entry_fsm_continuation_max_steps", 3) or 3)
         for _step in range(max(1, max_steps)):
-            db = _SL()
             try:
-                dispatch_live_runner_tick(db, int(session_id))
-                db.commit()
+                # Two-phase: a staged sealed-lane POST is dispatched after the
+                # phase-one commit instead of being dropped on the floor.
+                run_live_runner_tick_two_phase(_SL, int(session_id))
             except Exception:
-                try:
-                    db.rollback()
-                except Exception:
-                    pass
                 break
-            finally:
-                try:
-                    db.rollback()
-                except Exception:
-                    pass
-                db.close()
             if _consume is None or not _consume(int(session_id)):
                 break
     except Exception:

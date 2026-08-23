@@ -986,6 +986,54 @@ def dispatch_captured_paper_post_commit(
         return handler(verified)
 
 
+def run_live_runner_tick_two_phase(session_factory: Callable[[], Any], session_id: int) -> bool:
+    """One COMPLETE tick for an out-of-band waker: phase one, then phase two.
+
+    WAKE-PATH POST-COMMIT HOLE (2026-08-23). ``dispatch_live_runner_tick`` may
+    return a :class:`CapturedPaperPostCommitRequest` — the sealed lane's phase
+    two, the step that actually reaches the broker.  The scheduler batch honours
+    it (trading_scheduler.py: type-check, commit, then
+    ``dispatch_captured_paper_post_commit``) and so does the event loop, but the
+    out-of-band wakers (arm wake, session tick-cross wake, stop-confirm wake)
+    DISCARDED the return value.  A wake could therefore stage phase one and drop
+    the POST, leaving the order to wait for a whole scheduler pass to restage it
+    — the exact 10–30s hole those wakers exist to remove, reappearing on the
+    close path where it costs the most.
+
+    This helper is the ONE two-phase seam every waker calls.  It preserves the
+    batch's ordering exactly: the phase-one transaction commits and the DB
+    session is closed BEFORE phase two runs, so no row lock crosses the commit
+    boundary.  Returns True when phase one committed.
+    """
+
+    db = session_factory()
+    completion_request = None
+    committed = False
+    try:
+        result = dispatch_live_runner_tick(db, int(session_id))
+        if type(result) is CapturedPaperPostCommitRequest:
+            completion_request = result
+        db.commit()
+        committed = True
+    except Exception:
+        try:
+            db.rollback()
+        except Exception:
+            pass
+        raise
+    finally:
+        try:
+            db.rollback()
+        except Exception:
+            pass
+        db.close()
+    if committed and completion_request is not None:
+        # Phase one is already durable; a phase-two failure is retry-required,
+        # never a rollback. The scheduler pass restages it on the next pulse.
+        dispatch_captured_paper_post_commit(completion_request)
+    return committed
+
+
 def _ordinary_tick(
     db: Any,
     session_id: int,
