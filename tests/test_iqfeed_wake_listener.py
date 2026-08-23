@@ -107,7 +107,7 @@ def test_handle_batch_wakes_crossing_session():
     ]}
     woken: list[int] = []
     with patch.object(il, "get_ignition_loop",
-                      return_value=SimpleNamespace(_sessions=tracker)), \
+                      return_value=SimpleNamespace(_sessions=tracker, _running=True)), \
          patch.object(il, "_spawn_session_wake",
                       side_effect=lambda sid: woken.append(sid) or True):
         listener._handle_batch([
@@ -122,7 +122,7 @@ def test_handle_batch_ignores_untracked_symbol():
     tracker = il._SessionCrossTracker()
     woken: list[int] = []
     with patch.object(il, "get_ignition_loop",
-                      return_value=SimpleNamespace(_sessions=tracker)), \
+                      return_value=SimpleNamespace(_sessions=tracker, _running=True)), \
          patch.object(il, "_spawn_session_wake",
                       side_effect=lambda sid: woken.append(sid) or True):
         listener._handle_batch([
@@ -142,7 +142,7 @@ def test_handle_batch_coalesces_storm_to_newest_per_symbol():
             return []
 
     with patch.object(il, "get_ignition_loop",
-                      return_value=SimpleNamespace(_sessions=_Tracker())), \
+                      return_value=SimpleNamespace(_sessions=_Tracker(), _running=True)), \
          patch.object(il, "_spawn_session_wake", return_value=True):
         listener._handle_batch([
             _note('{"symbol":"HUIZ","bid":9.0,"ask":9.1}'),
@@ -160,7 +160,7 @@ def test_handle_batch_survives_malformed_payloads():
     ]}
     woken: list[int] = []
     with patch.object(il, "get_ignition_loop",
-                      return_value=SimpleNamespace(_sessions=tracker)), \
+                      return_value=SimpleNamespace(_sessions=tracker, _running=True)), \
          patch.object(il, "_spawn_session_wake",
                       side_effect=lambda sid: woken.append(sid) or True):
         listener._handle_batch([
@@ -202,11 +202,88 @@ def test_reconnect_backoff_is_bounded_and_increasing():
     assert iwl._RECONNECT_BACKOFF_S[-1] <= 60.0
 
 
-def test_scheduler_starts_listener_in_batch_branch():
+def test_scheduler_starts_listener_outside_the_price_bus_branch():
+    """Ang rail na ang trabaho ay saluhin ang tahimik/wala na bus ay HINDI dapat
+    patayin ng bus flag, at hindi rin dapat magmana ng WS-ignition flag."""
     from app.services import trading_scheduler as ts
 
     src = inspect.getsource(ts)
     lo = src.index("start_iqfeed_wake_listener")
-    seg = src[max(0, lo - 1500):lo]
-    # dapat nasa parehong batch branch kung saan sinisimulan ang ignition scorer
-    assert "start_ignition_loop" in seg
+    seg = src[max(0, lo - 1200):lo]
+    assert "if _bus_on:" not in seg.split("QUIET-TAPE")[-1]
+    assert "chili_momentum_ws_ignition_enabled" not in seg.split("QUIET-TAPE")[-1]
+
+
+# ── standalone inventory (ang silent-no-op na failure mode) ────────────────
+
+def test_tracker_shared_when_ignition_loop_is_live():
+    listener = iwl.IqfeedWakeListener()
+    tracker = il._SessionCrossTracker()
+    refreshed: list[int] = []
+    tracker.refresh = lambda: refreshed.append(1)
+    loop = SimpleNamespace(_sessions=tracker, _running=True)
+    with patch.object(il, "get_ignition_loop", return_value=loop):
+        got = listener._tracker()
+    assert got is tracker
+    assert refreshed == []  # ang loop ang nagre-refresh, huwag dobluhin
+    assert listener.health()["self_refreshing_inventory"] is False
+
+
+def test_tracker_self_refreshes_when_ignition_loop_is_down():
+    """Kung hindi tumatakbo ang ignition loop, ang inventory ay hindi
+    nagre-refresh — kaya ang rail ay magiging TAHIMIK na no-op na kamukha ng
+    tahimik na tape. Dapat siyang mag-refresh mismo."""
+    listener = iwl.IqfeedWakeListener()
+    tracker = il._SessionCrossTracker()
+    refreshed: list[int] = []
+    tracker.refresh = lambda: refreshed.append(1)
+    loop = SimpleNamespace(_sessions=tracker, _running=False)
+    with patch.object(il, "get_ignition_loop", return_value=loop):
+        listener._tracker()
+    assert refreshed == [1]
+    assert listener.health()["self_refreshing_inventory"] is True
+
+
+def test_self_refresh_is_cadence_bound():
+    listener = iwl.IqfeedWakeListener()
+    tracker = il._SessionCrossTracker()
+    refreshed: list[int] = []
+    tracker.refresh = lambda: refreshed.append(1)
+    loop = SimpleNamespace(_sessions=tracker, _running=False)
+    with patch.object(il, "get_ignition_loop", return_value=loop):
+        listener._tracker()
+        listener._tracker()  # agad — sa loob ng cadence
+        listener._tracker()
+    assert refreshed == [1]  # isa lang, hindi kada notify
+
+
+def test_self_refresh_stops_when_loop_comes_back():
+    listener = iwl.IqfeedWakeListener()
+    tracker = il._SessionCrossTracker()
+    tracker.refresh = lambda: None
+    down = SimpleNamespace(_sessions=tracker, _running=False)
+    up = SimpleNamespace(_sessions=tracker, _running=True)
+    with patch.object(il, "get_ignition_loop", return_value=down):
+        listener._tracker()
+    assert listener.health()["self_refreshing_inventory"] is True
+    with patch.object(il, "get_ignition_loop", return_value=up):
+        listener._tracker()
+    assert listener.health()["self_refreshing_inventory"] is False
+
+
+def test_wake_still_fires_with_ignition_loop_down():
+    """End-to-end ng failure mode: patay ang ignition loop pero may crossing
+    pa rin — dapat may wake."""
+    listener = iwl.IqfeedWakeListener()
+    tracker = il._SessionCrossTracker()
+    tracker._by_symbol = {"SDOT": [
+        {"session_id": 12, "state": STATE_LIVE_ENTERED, "stop_px": 16.76},
+    ]}
+    tracker.refresh = lambda: None
+    loop = SimpleNamespace(_sessions=tracker, _running=False)
+    woken: list[int] = []
+    with patch.object(il, "get_ignition_loop", return_value=loop), \
+         patch.object(il, "_spawn_session_wake",
+                      side_effect=lambda sid: woken.append(sid) or True):
+        listener._handle_batch([_note('{"symbol":"SDOT","bid":16.70,"ask":16.80}')])
+    assert woken == [12]
