@@ -92,12 +92,17 @@ def _literal_assignment(relative: str, name: str):
 
 def test_resolved_strategy_policy_binds_all_operator_flags():
     # 9 weekend levers + the two 2026-07-27 autopsy levers (chase-defer,
-    # whipsaw-escalation) — the roster IS the per-lever A/B surface, so a new
-    # approved lever lands here deliberately, never via FLAGS_JSON.
+    # whipsaw-escalation) + later approved levers, most recently
+    # ``symbol-day-loss-lockout`` — the roster IS the per-lever A/B surface, so
+    # a new approved lever lands here deliberately, never via FLAGS_JSON.
+    #
+    # This count is the guard that makes that deliberate: it went red when the
+    # 17th lever shipped and the assertion was left at 16, which is exactly what
+    # it is for. Update it WITH the roster, in the same change.
     pairs = batch.APPROVED_STRATEGY_FLAGS_BY_SLUG
-    assert len(pairs) == 16
-    assert len({slug for slug, _ in pairs}) == 16
-    assert len({flag for _, flag in pairs}) == 16
+    assert len(pairs) == 17
+    assert len({slug for slug, _ in pairs}) == 17
+    assert len({flag for _, flag in pairs}) == 17
 
     intended = batch.resolve_strategy_policy("intended")
     baseline = batch.resolve_strategy_policy("base")
@@ -118,7 +123,11 @@ def test_resolved_strategy_policy_binds_all_operator_flags():
         assert doc["flags"][flag] is False
         assert sum(value is False for value in doc["flags"].values()) == 1
         hashes.add(batch.strategy_policy_sha256(doc))
-    assert len(hashes) == 17
+    # DERIVED, not a second magic number: the intended policy plus one distinct
+    # hash per lever arm. Expressed against the roster so it cannot drift out of
+    # step with it — the explicit counts above are the deliberate-change guard;
+    # this one is the "every arm is distinct" invariant.
+    assert len(hashes) == len(pairs) + 1
 
     # COMPOUND arms stay CLOSED: exactly one operator-approved multi-flag-off
     # vector (the 2026-07-27 parity arm), each named flag drawn from the
@@ -137,7 +146,8 @@ def test_resolved_strategy_policy_binds_all_operator_flags():
     assert parity["flags"]["chili_momentum_whipsaw_rapid_escalation_enabled"] is False
     assert sum(v is False for v in parity["flags"].values()) == 2
     batch.require_scoreable_post_selection_arm("intended-minus-autopsy-0727")
-    assert len(hashes) == 18
+    # DERIVED: intended + one per lever arm + one per compound arm, all distinct.
+    assert len(hashes) == len(pairs) + 1 + len(batch.COMPOUND_STRATEGY_ARMS)
 
 
 @pytest.mark.parametrize(
