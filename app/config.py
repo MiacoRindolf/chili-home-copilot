@@ -8921,6 +8921,14 @@ class Settings(BaseSettings):
     # naiiwan hanggang may ibang ignition tick na manalo ng lock. Ito ang bilang
     # ng dagdag na drain pass habang hawak pa ang single-flight; 0 = lumang
     # behavior. Ang per-symbol debounce ang garantiya ng pagtatapos.
+    # Batch-mode pg-LISTEN consumer sa momentum_iqfeed_l1: ang tick-cross wake
+    # ay sumasakay sa Massive bus, kaya ang manipis na premarket na pangalan na
+    # walang bus tick ay walang waker. Ang IQFeed bridge ang pinaka-maagang
+    # (madalas nag-iisang) premarket tick authority. Dispatch hint lamang.
+    chili_momentum_iqfeed_wake_listener_enabled: bool = Field(
+        default=True,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_IQFEED_WAKE_LISTENER_ENABLED"),
+    )
     chili_momentum_ignition_bridge_drain_passes: int = Field(
         default=2,
         ge=0,
