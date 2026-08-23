@@ -208,3 +208,73 @@ def test_pending_exit_marker_read_from_le():
     assert 'le.get("pending_exit_reason")' in src
     assert 'le.get("deadman_released_for_close")' in src
     assert '"pending_exit"' in src
+
+
+# ── ang dalawang kill switch ay dapat MAGKAHIWALAY ─────────────────────────
+
+def _wake_calls(monkeypatch, *, stop_on: bool, exit_on: bool):
+    """Anong wake ang aabot sa timer, sa bawat kumbinasyon ng switch."""
+    from app.config import settings as real_settings
+
+    monkeypatch.setattr(
+        real_settings, "chili_momentum_stop_confirm_wake_enabled", stop_on,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        real_settings, "chili_momentum_exit_continuation_wake_enabled", exit_on,
+        raising=False,
+    )
+    monkeypatch.delenv("CHILI_PYTEST", raising=False)
+    monkeypatch.delenv("CHILI_DIAGNOSTIC_REPLAY_ISOLATED", raising=False)
+    armed: list[str] = []
+
+    class _T:
+        def __init__(self, delay, fn, args=()):
+            self._n = ""
+
+        def start(self):
+            armed.append(self.name)
+
+    # ang pangalan ay itinatakda pagkatapos ng construct; kunin ito sa attribute
+    class _Timer(_T):
+        @property
+        def name(self):
+            return self._n
+
+        @name.setter
+        def name(self, v):
+            self._n = v
+
+    with patch(
+        "app.services.trading.momentum_neural.live_runner_loop."
+        "schedule_live_runner_stop_confirmation",
+        return_value=False,
+    ), patch.object(lr.threading, "Timer", _Timer):
+        stop = lr._schedule_stop_confirm_dispatch(8801)
+        with lr._stop_confirm_wake_lock:
+            lr._stop_confirm_wake_inflight.discard(8801)
+        exitc = lr._schedule_exit_continuation(8802)
+        with lr._stop_confirm_wake_lock:
+            lr._stop_confirm_wake_inflight.discard(8802)
+    return stop, exitc
+
+
+def test_switches_are_independent(monkeypatch):
+    """⚠️ REGRESSION GUARD: ang stop-confirm switch ay dating pumapatay DIN sa
+    exit continuation dahil ang shared helper ang nagbabasa nito."""
+    assert _wake_calls(monkeypatch, stop_on=True, exit_on=True) == (True, True)
+    # patayin LANG ang stop-confirm: dapat BUHAY pa rin ang exit continuation
+    assert _wake_calls(monkeypatch, stop_on=False, exit_on=True) == (False, True)
+    # patayin LANG ang exit continuation: dapat BUHAY pa rin ang stop-confirm
+    assert _wake_calls(monkeypatch, stop_on=True, exit_on=False) == (True, False)
+    assert _wake_calls(monkeypatch, stop_on=False, exit_on=False) == (False, False)
+
+
+def test_shared_helper_does_not_read_any_switch():
+    """Ang helper ay dapat tumanggap ng `enabled`, hindi magbasa ng flag —
+    doon nagmula ang coupling."""
+    src = inspect.getsource(lr._schedule_dispatch_wake)
+    assert "enabled: bool" in src
+    assert "if not enabled:" in src
+    assert "chili_momentum_stop_confirm_wake_enabled" not in src
+    assert "chili_momentum_exit_continuation_wake_enabled" not in src
