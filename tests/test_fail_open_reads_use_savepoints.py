@@ -163,3 +163,64 @@ def test_caller_transaction_survives_a_missing_table_read(db):
         pass
 
     assert db.execute(text("SELECT 1")).fetchone()[0] == 1
+
+
+# ── ang buong sweep: walang hubad na execute sa fail-open readers ──────────
+
+def test_live_path_fail_open_readers_all_use_the_helper():
+    """Ang bawat 'fail-open' na reader sa LIVE path ay dapat dumaan sa helper.
+
+    Ang mga table na binabasa nila ay umiiral sa sink, kaya hindi sila
+    pumapatay ng replay — pero ang exposure ay totoo pa rin sa LIVE: isang
+    type error (hal. ang `(payload_json->>'realized_r')::numeric` cast sa
+    SIZING path), isang column drop, o isang lock timeout ay mag-aabort ng
+    transaction ng caller at ang 'fail-open' na default ay magiging kasinungalingan.
+    """
+    from app.services.trading.momentum_neural import (
+        breadth_regime,
+        eligibility_lease,
+        live_runner,
+        risk_policy,
+        spread_cost_veto,
+    )
+
+    # (function, helper, pinapayagang natitirang bare execute)
+    # ⚠️ Ang WRITE ay HINDI dapat balutin ng savepoint — kailangan nitong
+    # mag-commit sa transaction ng caller. Ang savepoint ay para sa mga
+    # OPTIONAL na READ lang.
+    checks = [
+        (risk_policy.time_of_day_risk_multiplier, "optional_fetchall", 0),
+        (breadth_regime._compute_breadth_regime_uncached, "optional_fetchall", 0),
+        (spread_cost_veto.name_spread_percentiles, "optional_fetchone", 0),
+        # ang natitirang execute dito ay ang bounded UPDATE drain (write)
+        (eligibility_lease.expire_stale_equity_eligibility, "optional_scalar", 1),
+        (live_runner._recent_mfe_samples, "optional_fetchall", 0),
+    ]
+    for fn, helper, allowed_writes in checks:
+        src = _code_only(inspect.getsource(fn))
+        assert helper in src, f"{fn.__name__} ay hindi gumagamit ng {helper}"
+        assert src.count("db.execute(") == allowed_writes, (
+            f"{fn.__name__}: inaasahan {allowed_writes} bare execute (write lang), "
+            f"nakita {src.count('db.execute(')}"
+        )
+
+
+def test_the_only_bare_execute_left_in_eligibility_lease_is_a_write():
+    """Tiyakin na WRITE nga ang pinayagan, hindi isang nakalimutang read."""
+    from app.services.trading.momentum_neural import eligibility_lease
+
+    src = _code_only(
+        inspect.getsource(eligibility_lease.expire_stale_equity_eligibility)
+    )
+    seg = src[src.index("db.execute("):src.index("db.execute(") + 200]
+    assert "UPDATE" in seg.upper(), seg[:120]
+
+
+def test_breadth_regime_converted_all_three_reads():
+    """Tatlong magkakahiwalay na SELECT — lahat sa iisang transaction."""
+    from app.services.trading.momentum_neural import breadth_regime
+
+    src = _code_only(
+        inspect.getsource(breadth_regime._compute_breadth_regime_uncached)
+    )
+    assert src.count("optional_fetchall(") == 3

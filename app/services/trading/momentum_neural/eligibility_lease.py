@@ -127,10 +127,16 @@ def expire_stale_equity_eligibility(
         return {"demoted": 0, "reason": "lease_disabled", "lease_seconds": lease}
 
     try:
-        silence_row = db.execute(text(
+        # SAVEPOINT (2026-08-23): ang producer-liveness read ay nauuna sa
+        # bounded na UPDATE drain sa PAREHONG table at PAREHONG session. Kung
+        # mamatay ang read nang walang savepoint, nalulunok ang exception —
+        # pero patay na ang transaction bago pa marating ang mga write.
+        from .optional_db_read import optional_scalar
+
+        silence_row = optional_scalar(db, text(
             "SELECT EXTRACT(EPOCH FROM (:now - max(freshness_ts))) "
             "FROM momentum_symbol_viability WHERE symbol NOT LIKE '%-%'"
-        ), {"now": now}).scalar()
+        ), {"now": now})
         producer_silence = float(silence_row) if silence_row is not None else None
     except Exception:
         logger.debug("[eligibility_lease] producer-liveness read failed", exc_info=True)

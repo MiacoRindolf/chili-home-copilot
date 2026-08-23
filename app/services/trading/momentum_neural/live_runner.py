@@ -7144,7 +7144,10 @@ def _recent_mfe_samples(db: Any, setup_family: Any, *, limit: int = 200) -> list
         except Exception:
             _epoch = None
         if _epoch is not None:
-            rows = db.execute(
+            from .optional_db_read import optional_fetchall
+
+            rows = optional_fetchall(
+                db,
                 _sql(
                     "SELECT payload_json FROM trading_automation_events "
                     "WHERE event_type='momentum_mfe_realized' AND ts >= :epoch "
@@ -7156,16 +7159,17 @@ def _recent_mfe_samples(db: Any, setup_family: Any, *, limit: int = 200) -> list
                     "epoch": _epoch,
                     "as_of_utc": _as_of_utc,
                 },
-            ).fetchall()
+            )
         else:
-            rows = db.execute(
+            rows = optional_fetchall(
+                db,
                 _sql(
                     "SELECT payload_json FROM trading_automation_events "
                     "WHERE event_type='momentum_mfe_realized' AND ts <= :as_of_utc "
                     "ORDER BY id DESC LIMIT :lim"
                 ),
                 {"lim": int(max(1, min(2000, limit * 4))), "as_of_utc": _as_of_utc},
-            ).fetchall()
+            )
         out: list[float] = []
         for (pj,) in rows:
             try:
@@ -20391,7 +20395,9 @@ def _recent_scalp_median_hold_s(
             sql += "AND execution_family = :execution_family "
             params["execution_family"] = normalize_execution_family(execution_family)
         sql += "ORDER BY terminal_at DESC, id DESC LIMIT 50"
-        rows = db.execute(_sql(sql), params).fetchall()
+        from .optional_db_read import optional_fetchall
+
+        rows = optional_fetchall(db, _sql(sql), params)
         vals = sorted(float(r[0]) for r in rows if r[0] is not None)
         if vals:
             n = len(vals)
@@ -21064,7 +21070,9 @@ def _smart_hold_time_floor_s(
             sql += "AND execution_family = :execution_family "
             params["execution_family"] = normalize_execution_family(execution_family)
         sql += "ORDER BY terminal_at DESC, id DESC LIMIT 50"
-        rows = db.execute(_sql(sql), params).fetchall()
+        from .optional_db_read import optional_fetchall
+
+        rows = optional_fetchall(db, _sql(sql), params)
         vals = [float(r[0]) for r in rows if r[0] is not None]
         if len(vals) >= max(1, min_n):
             v = _percentile(vals, q)

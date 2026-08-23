@@ -4687,14 +4687,23 @@ def time_of_day_risk_multiplier(db: Any, *, now_et_hour_frac: float | None = Non
         if cached is None or (_now_mono - _TOD_CACHE.get("at", 0.0)) > 600.0:
             from sqlalchemy import text as _sql
 
-            rows = db.execute(_sql(
+            from .optional_db_read import optional_fetchall
+
+            # SAVEPOINT (2026-08-23): ito ay tumatakbo sa session ng CALLER sa
+            # loob ng SIZING path. Ang ``(payload_json->>'realized_r')::numeric``
+            # ay isang cast sa libreng-anyong JSON — isang row na may
+            # hindi-numeric na realized_r ay nagpapatumba ng buong statement,
+            # at kasama niyon ang BUONG transaction ng caller. Ang ``except``
+            # sa ibaba ay masayang magbabalik ng 1.0 habang ang bawat sumunod
+            # na sizing/entry statement ay namamatay sa InFailedSqlTransaction.
+            rows = optional_fetchall(db, _sql(
                 "SELECT extract(hour FROM (ts AT TIME ZONE 'UTC') AT TIME ZONE 'America/New_York')::int AS h, "
                 "       count(*) AS n, avg((payload_json->>'realized_r')::numeric) AS avg_r "
                 "FROM trading_automation_events "
                 "WHERE event_type='momentum_mfe_realized' "
                 "AND ts > :as_of_utc - interval '30 days' AND ts <= :as_of_utc "
                 "GROUP BY 1"
-            ), {"as_of_utc": _as_of_utc}).fetchall()
+            ), {"as_of_utc": _as_of_utc})
             cached = {int(r[0]): (int(r[1]), float(r[2])) for r in rows}
             if not _is_replay:
                 _TOD_CACHE["buckets"] = cached

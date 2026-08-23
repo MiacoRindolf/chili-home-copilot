@@ -126,7 +126,15 @@ def name_spread_percentiles(
     now_utc = now_utc or datetime.now(timezone.utc)
     since = now_utc.replace(tzinfo=None) - timedelta(days=float(lookback_days))
     try:
-        row = db.execute(
+        # SAVEPOINT (2026-08-23): tumatakbo ito sa session ng CALLER sa loob ng
+        # entry gate. Ang hubad na try/except ay hindi fail-open — ang nabigong
+        # SELECT ay nag-aabort ng buong transaction, kaya ang `return None` sa
+        # ibaba ay magmumukhang maayos habang ang bawat sumunod na entry
+        # statement ay namamatay sa InFailedSqlTransaction.
+        from .optional_db_read import optional_fetchone
+
+        row = optional_fetchone(
+            db,
             text(
                 "SELECT "
                 "  percentile_cont(0.5) WITHIN GROUP (ORDER BY spread_bps), "
@@ -138,7 +146,7 @@ def name_spread_percentiles(
                 "  AND observed_at >= :since"
             ),
             {"s": sym, "since": since},
-        ).fetchone()
+        )
     except Exception as exc:  # pragma: no cover - DB/network
         logger.debug("[spread_cost_veto] percentile read failed for %s: %s", sym, exc)
         return None
