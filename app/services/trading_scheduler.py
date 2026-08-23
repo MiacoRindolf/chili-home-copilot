@@ -1315,6 +1315,18 @@ def _run_momentum_auto_arm_live_job():
             record_auto_arm_run()
             summary = run_auto_arm_pass(db)
             db.commit()
+            # ARM WAKE (2026-08-23): a name armed by THIS pass used to wait for
+            # the next live-runner batch before its first WATCHING tick. Wake
+            # every confirmed arm (primary + Alpaca twin) right after the commit
+            # — same treatment the ignition→arm bridge arms have had since 08-21.
+            try:
+                from .trading.momentum_neural.ignition_loop import wake_armed_sessions
+
+                _woke = wake_armed_sessions(summary.get("armed_session_ids"))
+                if _woke:
+                    logger.info("[scheduler] auto_arm: woke %d armed session(s)", _woke)
+            except Exception:
+                logger.debug("[scheduler] auto_arm arm-wake failed", exc_info=True)
             if summary.get("armed") or summary.get("begin_error") or summary.get("confirm_error"):
                 logger.info("[scheduler] auto_arm: %s", summary)
             else:
@@ -5557,8 +5569,22 @@ def _run_tape_delta_ignite_job():
             try:
                 from .trading.momentum_neural.auto_arm import run_scoped_ignition_arm
 
-                run_scoped_ignition_arm(db, _scored_syms)
+                _arm_out = run_scoped_ignition_arm(db, _scored_syms)
                 db.commit()
+                # The tape-delta path is the price-bus-INDEPENDENT feeder (the
+                # one that still ignites when the WS bus is quiet), so its arms
+                # are exactly the ones that must not wait for a batch pass.
+                try:
+                    from .trading.momentum_neural.ignition_loop import (
+                        wake_armed_sessions,
+                    )
+
+                    if isinstance(_arm_out, dict):
+                        wake_armed_sessions(_arm_out.get("armed_session_ids"))
+                except Exception:
+                    logger.debug(
+                        "[momentum_event_select] arm-wake failed", exc_info=True
+                    )
             except Exception:
                 logger.warning(
                     "[momentum_event_select] ignition→arm bridge failed",

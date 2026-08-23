@@ -8916,6 +8916,17 @@ class Settings(BaseSettings):
         default=True,
         validation_alias=AliasChoices("CHILI_MOMENTUM_EXIT_CONTINUATION_WAKE_ENABLED"),
     )
+    # Ang ignition→arm bridge ay nagda-drain ng pending set MINSAN, sa entry. Ang
+    # symbol na na-enqueue HABANG tumatakbo ang pass (segundo ang haba) ay
+    # naiiwan hanggang may ibang ignition tick na manalo ng lock. Ito ang bilang
+    # ng dagdag na drain pass habang hawak pa ang single-flight; 0 = lumang
+    # behavior. Ang per-symbol debounce ang garantiya ng pagtatapos.
+    chili_momentum_ignition_bridge_drain_passes: int = Field(
+        default=2,
+        ge=0,
+        le=5,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_IGNITION_BRIDGE_DRAIN_PASSES"),
+    )
     chili_momentum_entry_fsm_continuation_max_steps: int = Field(
         default=3,
         ge=1,

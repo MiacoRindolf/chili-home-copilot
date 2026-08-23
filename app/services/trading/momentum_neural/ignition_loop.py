@@ -444,6 +444,32 @@ def _wake_runner_tick(session_id: int) -> None:
                 pass
 
 
+def wake_armed_sessions(session_ids: Any) -> int:
+    """Public: run an IMMEDIATE runner tick for each freshly armed session.
+
+    ARM-WAKE COVERAGE (2026-08-23). The ignition→arm bridge has woken its own
+    arms since 08-21, but the FULL scheduler auto-arm pass and the tape-delta
+    ignition path never did — an arm from either waited for the next live-runner
+    batch (10s nominal, 10–30s measured) before its first WATCHING tick, which
+    is exactly the window a Ross-speed break lives in. Same single-flight,
+    spacing and kill switch as every other wake; the FSM still decides.
+    Returns how many wakes were actually spawned.
+    """
+
+    if not session_ids:
+        return 0
+    if isinstance(session_ids, (int, float)) or not hasattr(session_ids, "__iter__"):
+        session_ids = [session_ids]
+    woken = 0
+    for sid in session_ids:
+        try:
+            if _spawn_arm_wake(sid):
+                woken += 1
+        except Exception:
+            _log.debug("[momentum_ws_ignition] arm wake spawn failed sid=%s", sid, exc_info=True)
+    return woken
+
+
 def _spawn_arm_wake(session_id: Any) -> bool:
     try:
         sid = int(session_id)
@@ -489,7 +515,10 @@ class IgnitionScoringLoop:
         self._tracker.refresh()
         self._sessions.refresh()
         global _post_wake_session_refresh
-        _post_wake_session_refresh = self._sessions.refresh
+        # Refresh the threshold inventory AND the bus subscriptions: a session
+        # armed on a name that is not in the screened universe would otherwise
+        # receive no ticks (and therefore no wakes) until the next 5s pass.
+        _post_wake_session_refresh = self._refresh_sessions_and_subscriptions
         self._sync_subscriptions()
         self._refresher = threading.Thread(
             target=self._refresh_loop, daemon=True, name="ws-ignition-refresh"
@@ -575,6 +604,14 @@ class IgnitionScoringLoop:
         # Keep tracking only what is currently subscribed (drop departed names even
         # if the bus has no unregister, so they are re-subscribed if they return).
         self._subscribed = (self._subscribed | new) - gone
+
+    def _refresh_sessions_and_subscriptions(self) -> None:
+        """Post-wake freshness: new thresholds AND a tick feed for new names."""
+        self._sessions.refresh()
+        try:
+            self._sync_subscriptions()
+        except Exception:
+            _log.debug("[momentum_ws_ignition] post-wake subscribe sync failed", exc_info=True)
 
     def _refresh_loop(self) -> None:
         # Dalawang cadence sa iisang thread: sessions kada ~5s (maliit na query,
@@ -821,7 +858,11 @@ class IgnitionScoringLoop:
                 # WAKE: agarang runner tick para sa kaka-armang session sa
                 # halip na hintayin ang susunod na scheduler batch (~23s ang
                 # sinukat na gap). Fire-and-forget; benign ang anumang karera.
-                _woke = _spawn_arm_wake(out.get("session_id"))
+                # Ang armed_session_ids ang ginagamit, HINDI ang session_id:
+                # ang huli ay last-writer-wins (naa-overwrite ng deduped na
+                # kandidato) at hindi kasama ang Alpaca twin — samantalang ang
+                # twin mismo ang naglalagay ng order sa paper endpoint.
+                _woke = wake_armed_sessions(out.get("armed_session_ids"))
                 return "armed+wake" if _woke else "armed"
             return "no_arm:" + str(out.get("skipped") or "unknown")
         except Exception:
