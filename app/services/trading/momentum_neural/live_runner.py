@@ -603,6 +603,99 @@ def consume_entry_fsm_continuation(session_id: int) -> bool:
         return False
 
 
+# BATCH-SAFE STOP-CONFIRM REDISPATCH (2026-08-23 instant-close). Ang >=1s
+# stop-breach flicker guard ay umaasa noon nang EKSKLUSIBO sa event-loop timer
+# (schedule_live_runner_stop_confirmation) para sa pangalawang read — pero sa
+# deployed batch window (LOOP_ENABLED=false) ang timer na iyon ay tahimik na
+# False (`_loop is None`), kaya ang confirm ay naghihintay ng BUONG susunod na
+# scheduler pass. Kabuuan: DALAWANG buong cadence (nominal 10s bawat isa, sukat
+# na hanggang 30.6s median kapag overrun ang pass) mula breach hanggang exit
+# submit — sa bumabagsak na low-float iyon ang pinakamalaking natitirang
+# slippage term. Ang fallback na ito ang batch-mode mirror ng loop timer:
+# isang bounded daemon Timer na nagpapatakbo ng dispatch_live_runner_tick
+# pagkatapos ng ~1.1s (lampas sa 1.0s guard). Ang dispatcher ay nagla-lock at
+# muling nagba-validate ng row (FOR UPDATE NOWAIT) kaya benign concurrent_tick
+# skip ang karera vs scheduler batch; ang FSM pa rin ang tanging nagpapasya.
+# WALANG timer sa replay/pytest (wall-clock ito, sisira sa determinism) — ang
+# replay grid ay 1s kaya hindi nito kailangan ang wake.
+_STOP_CONFIRM_WAKE_DELAY_S = 1.1
+_stop_confirm_wake_inflight: set[int] = set()
+_stop_confirm_wake_lock = threading.Lock()
+
+
+def _stop_confirm_wake_tick(session_id: int) -> None:
+    """Pangalawang stop-breach read para sa batch mode (mirror ng loop timer)."""
+    try:
+        from ....db import SessionLocal as _SL
+        from .captured_paper_dispatcher import dispatch_live_runner_tick
+
+        db = _SL()
+        try:
+            dispatch_live_runner_tick(db, int(session_id))
+            db.commit()
+        except Exception:
+            try:
+                db.rollback()
+            except Exception:
+                pass
+        finally:
+            try:
+                db.rollback()
+            except Exception:
+                pass
+            db.close()
+    except Exception:
+        _log.debug(
+            "[momentum_live] stop-confirm wake failed sid=%s", session_id, exc_info=True
+        )
+    finally:
+        with _stop_confirm_wake_lock:
+            _stop_confirm_wake_inflight.discard(int(session_id))
+
+
+def _schedule_stop_confirm_dispatch(session_id: int) -> bool:
+    """Guarantee the second stop-breach read regardless of driver mode.
+
+    Prefers the event-loop timer (loop mode — byte-identical dito). Kapag
+    tumanggi iyon (scheduler/batch mode), mag-armado ng sariling bounded daemon
+    Timer sa parehong ~1.1s delay. Hint lamang: ang na-dispatch na tick ay
+    muling nagbabasa ng sariwang quote at pinapatakbo ang buong stop FSM.
+    """
+
+    sid = int(session_id)
+    try:
+        from .live_runner_loop import schedule_live_runner_stop_confirmation
+
+        if bool(schedule_live_runner_stop_confirmation(sid)):
+            return True
+    except Exception:
+        pass
+    if not bool(getattr(settings, "chili_momentum_stop_confirm_wake_enabled", True)):
+        return False
+    import os as _os
+
+    if _os.environ.get("CHILI_PYTEST") == "1" or _os.environ.get(
+        "CHILI_DIAGNOSTIC_REPLAY_ISOLATED"
+    ):
+        return False
+    with _stop_confirm_wake_lock:
+        if sid in _stop_confirm_wake_inflight:
+            return False
+        _stop_confirm_wake_inflight.add(sid)
+    try:
+        timer = threading.Timer(
+            _STOP_CONFIRM_WAKE_DELAY_S, _stop_confirm_wake_tick, args=(sid,)
+        )
+        timer.daemon = True
+        timer.name = f"stop-confirm-wake-{sid}"
+        timer.start()
+        return True
+    except Exception:
+        with _stop_confirm_wake_lock:
+            _stop_confirm_wake_inflight.discard(sid)
+        return False
+
+
 # ── REPLAY v3 P1 — RECORDED-OHLCV PROVIDER SEAM (the one heavy NETWORK read) ──────
 # ``fetch_ohlcv_df`` is the single heavy external read inside ``tick_live_session`` (15m
 # ATR / expected-move / the pullback + volume triggers — ~13 call sites). To replay the
@@ -41111,9 +41204,7 @@ def tick_live_session(
                 _commit_le(sess, le)
                 _emit(db, sess, "stop_breach_pending_confirm", {"bid": bid, "stop_price": stop_px})
                 try:
-                    from .live_runner_loop import schedule_live_runner_stop_confirmation
-
-                    schedule_live_runner_stop_confirmation(int(sess.id))
+                    _schedule_stop_confirm_dispatch(int(sess.id))
                 except Exception:
                     _log.debug(
                         "[momentum_live] stop-confirm dispatch schedule failed sid=%s",
@@ -41181,9 +41272,7 @@ def tick_live_session(
                         "max_ticks": _l2_max_ticks, "held_s": round(_held_s, 2),
                     })
                     try:
-                        from .live_runner_loop import schedule_live_runner_stop_confirmation
-
-                        schedule_live_runner_stop_confirmation(int(sess.id))
+                        _schedule_stop_confirm_dispatch(int(sess.id))
                     except Exception:
                         _log.debug(
                             "[momentum_live] L2 stop-hold redispatch schedule failed sid=%s",
