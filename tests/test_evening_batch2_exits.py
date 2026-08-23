@@ -41,7 +41,9 @@ def test_ema5m_ignored_before_one_r():
 
 
 def test_exit_ladder_structure():
-    src = inspect.getsource(live_runner._submit_live_market_exit)
+    # _submit_live_market_exit is now a thin continuation-wake seam; the ladder
+    # structure this smoke test follows lives in the implementation.
+    src = inspect.getsource(live_runner._submit_live_market_exit_impl)
     # Durable outbox/deadman checks made this function much larger; inspect the whole
     # function so this smoke test follows structure rather than a brittle char window.
     assert "EXIT LADDER (2026-06-12" in src

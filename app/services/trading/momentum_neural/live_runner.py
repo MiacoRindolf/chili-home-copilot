@@ -627,23 +627,12 @@ def _stop_confirm_wake_tick(session_id: int) -> None:
     """Pangalawang stop-breach read para sa batch mode (mirror ng loop timer)."""
     try:
         from ....db import SessionLocal as _SL
-        from .captured_paper_dispatcher import dispatch_live_runner_tick
+        from .captured_paper_dispatcher import run_live_runner_tick_two_phase
 
-        db = _SL()
-        try:
-            dispatch_live_runner_tick(db, int(session_id))
-            db.commit()
-        except Exception:
-            try:
-                db.rollback()
-            except Exception:
-                pass
-        finally:
-            try:
-                db.rollback()
-            except Exception:
-                pass
-            db.close()
+        # Two-phase: a staged sealed-lane POST is dispatched after the phase-one
+        # commit instead of being dropped (the close path cannot afford to wait
+        # a full scheduler pass for the POST to be restaged).
+        run_live_runner_tick_two_phase(_SL, int(session_id))
     except Exception:
         _log.debug(
             "[momentum_live] stop-confirm wake failed sid=%s", session_id, exc_info=True
@@ -653,13 +642,13 @@ def _stop_confirm_wake_tick(session_id: int) -> None:
             _stop_confirm_wake_inflight.discard(int(session_id))
 
 
-def _schedule_stop_confirm_dispatch(session_id: int) -> bool:
-    """Guarantee the second stop-breach read regardless of driver mode.
+def _schedule_dispatch_wake(session_id: int, *, delay_s: float, name: str) -> bool:
+    """Bounded redispatch of one session, regardless of driver mode.
 
     Prefers the event-loop timer (loop mode — byte-identical dito). Kapag
     tumanggi iyon (scheduler/batch mode), mag-armado ng sariling bounded daemon
-    Timer sa parehong ~1.1s delay. Hint lamang: ang na-dispatch na tick ay
-    muling nagbabasa ng sariwang quote at pinapatakbo ang buong stop FSM.
+    Timer. Hint lamang: ang na-dispatch na tick ay muling nagbabasa ng sariwang
+    quote at pinapatakbo ang buong FSM — walang bagong awtoridad dito.
     """
 
     sid = int(session_id)
@@ -684,16 +673,75 @@ def _schedule_stop_confirm_dispatch(session_id: int) -> bool:
         _stop_confirm_wake_inflight.add(sid)
     try:
         timer = threading.Timer(
-            _STOP_CONFIRM_WAKE_DELAY_S, _stop_confirm_wake_tick, args=(sid,)
+            float(delay_s), _stop_confirm_wake_tick, args=(sid,)
         )
         timer.daemon = True
-        timer.name = f"stop-confirm-wake-{sid}"
+        timer.name = f"{name}-{sid}"
         timer.start()
         return True
     except Exception:
         with _stop_confirm_wake_lock:
             _stop_confirm_wake_inflight.discard(sid)
         return False
+
+
+def _schedule_stop_confirm_dispatch(session_id: int) -> bool:
+    """Guarantee the second stop-breach read regardless of driver mode."""
+
+    return _schedule_dispatch_wake(
+        int(session_id),
+        delay_s=_STOP_CONFIRM_WAKE_DELAY_S,
+        name="stop-confirm-wake",
+    )
+
+
+# EXIT-SIDE CONTINUATION (2026-08-23) — ang tunay na kapatid ng #1097.
+# Ang exit submit path ay may mga SADYANG deferred na hakbang na naghihintay ng
+# "susunod na pulse": ang deadman handoff PHASE 1 (durable successor-intent
+# freeze, tapos `deadman_successor_intent_frozen_for_next_pulse`), ang
+# cancel-not-terminal na boundary, ang literal-BBO refresh block, at ang
+# scale-limit release na hindi nakumpirma. Ang two-phase durability boundary ay
+# TAMA at hindi dapat pagsamahin — ang mali ay ang HABA ng paghihintay: sa batch
+# mode ang "susunod na pulse" ay 10–30s, at ang Alpaca stop-out ay GARANTISADONG
+# tumatawid ng phase-1 freeze (kaya +1 pulse), madalas pati cancel-not-terminal
+# (+1 pa). Ang mga block na ito ay tahasang nagpo-pop ng `exit_next_retry_at_utc`
+# — walang backoff na utang — kaya ang agarang redispatch ay legal na sa umiiral
+# na semantics; ang kulang lang ay ang gising. Kapag ARMADO ang backoff (tunay na
+# broker failure/rate limit), iginagalang ito: walang wake.
+_EXIT_CONTINUATION_WAKE_DELAY_S = 0.5
+
+
+def _schedule_exit_continuation(session_id: int) -> bool:
+    """Wake the next exit pulse now instead of at the next scheduler cadence."""
+
+    if not bool(
+        getattr(settings, "chili_momentum_exit_continuation_wake_enabled", True)
+    ):
+        return False
+    return _schedule_dispatch_wake(
+        int(session_id),
+        delay_s=_EXIT_CONTINUATION_WAKE_DELAY_S,
+        name="exit-continuation-wake",
+    )
+
+
+def _exit_result_wants_continuation(result: Any, le: Any) -> bool:
+    """True kapag ang exit ay na-defer BAGO ang broker seam at walang backoff.
+
+    Ang `pre_place_blocked` ay nangangahulugang WALANG exit instruction ang
+    tumawid sa transport — walang order sa broker na hinihintay, isang
+    mekanikal na hakbang lang ang natitira. Ang armadong
+    `exit_next_retry_at_utc` ay tunay na broker-rate-limited na backoff at
+    hindi dapat lampasan.
+    """
+
+    if not isinstance(result, dict):
+        return False
+    if not (result.get("deferred") and result.get("pre_place_blocked")):
+        return False
+    if isinstance(le, dict) and le.get("exit_next_retry_at_utc"):
+        return False
+    return True
 
 
 # ── REPLAY v3 P1 — RECORDED-OHLCV PROVIDER SEAM (the one heavy NETWORK read) ──────
@@ -12134,6 +12182,34 @@ def _record_live_exit_intent_safe(
 
 
 def _submit_live_market_exit(
+    db: Session,
+    sess: TradingAutomationSession,
+    adapter: Any,
+    **kwargs: Any,
+) -> dict[str, Any]:
+    """Submit one live exit, then wake the next pulse if it deferred pre-place.
+
+    ONE seam for every exit call site: the implementation is unchanged, but a
+    deferred PRE-PLACE block (deadman handoff phase 1, cancel-not-terminal,
+    literal-BBO refresh, unconfirmed scale-limit release) no longer waits a full
+    scheduler cadence for its next mechanical step. See
+    :func:`_schedule_exit_continuation` for why that is safe here.
+    """
+
+    result = _submit_live_market_exit_impl(db, sess, adapter, **kwargs)
+    try:
+        if _exit_result_wants_continuation(result, kwargs.get("le")):
+            _schedule_exit_continuation(int(sess.id))
+    except Exception:
+        _log.debug(
+            "[momentum_live] exit continuation schedule failed sid=%s",
+            getattr(sess, "id", None),
+            exc_info=True,
+        )
+    return result
+
+
+def _submit_live_market_exit_impl(
     db: Session,
     sess: TradingAutomationSession,
     adapter: Any,
