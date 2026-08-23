@@ -5719,6 +5719,22 @@ def build_event_grid(
 
 
 # ── the driver ───────────────────────────────────────────────────────────────────
+class ReplaySessionRowVanishedError(RuntimeError):
+    """The driver's own session row disappeared while the run was in flight.
+
+    Nothing in the replay process tree deletes ``trading_automation_sessions``,
+    so this can only mean ANOTHER process cleared the board underneath this run
+    — in practice a second replay/batch that acquired the sink after this one's
+    advisory-lock connection died. ``trading_automation_events`` cascades on
+    that delete, so the session and every event it ever emitted are gone in the
+    same statement: the run silently degrades to ``final_state=<gone>``,
+    ``entries=0`` and NO forensics to explain it. That exact signature cost a
+    day of misdiagnosis as a code regression.
+
+    Failing loudly here converts a poisoned, plausible-looking zero into a stop.
+    """
+
+
 class ReplayV3Driver:
     """Step the REAL ``tick_live_session`` across an event grid with a mock broker + sim clock.
 
@@ -5845,7 +5861,21 @@ class ReplayV3Driver:
 
     def _state(self) -> str:
         s = self._session()
-        return str(s.state) if s is not None else "<gone>"
+        if s is not None:
+            # Remember that the row was real, so a later disappearance is
+            # provably a deletion rather than a seed that never existed.
+            self._session_row_seen = True
+            return str(s.state)
+        if getattr(self, "_session_row_seen", False):
+            raise ReplaySessionRowVanishedError(
+                f"replay session {self.seed.session_id} ({self.seed.symbol}) was "
+                "DELETED mid-run — no replay code path deletes it, so another "
+                "process cleared the board on this sink. Its events cascaded "
+                "away with it; this run's results are unrecoverable and any "
+                "zero it reports is an artefact. Check for a concurrent batch/"
+                "bisect on the same sink."
+            )
+        return "<gone>"
 
     def _database_guard_endpoints(self) -> tuple[tuple[str, int], ...]:
         """Resolve only the already-configured replay DB before fencing sockets."""
