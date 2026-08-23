@@ -63,6 +63,10 @@ _log = logging.getLogger(__name__)
 # the scheduled batch + the auto-arm refresh keep it warm thereafter).
 _UNIVERSE_REFRESH_S = 20.0
 _SCORE_COOLDOWN_S = 20.0
+# Ang session-threshold inventory ay mas maliit (iilang row) at mas time-critical
+# kaysa sa universe screen: ang na-ratchet na trail stop o kaka-armang session ay
+# hindi dapat maging bulag sa bridge nang 20s. Hiwalay na mabilis na cadence.
+_SESSION_REFRESH_S = 5.0
 
 
 class _UniverseTracker:
@@ -201,6 +205,16 @@ class _SessionCrossTracker:
     def __init__(self) -> None:
         self._lock = threading.Lock()
         self._by_symbol: dict[str, list[dict]] = {}
+        # Running HIGH kada held session (TRAIL/LADDER GAP 2026-08-23): ang trail
+        # ratchet, breakeven ratchet, at 1R partial arm ay lahat nag-e-evaluate
+        # LOOB ng FSM tick — ang stop/target crossing lang ang ginigising noon,
+        # kaya ang mga ito ay sumasakay pa rin sa 10s cadence. Ang bagong-high na
+        # wake ang tumatapos doon: habang UMAAKYAT ang presyo (eksaktong sandali
+        # ng sell-into-strength at ng ratchet), bawat bagong high ay gumigising
+        # (spacing-bound sa ~2s) kaya ang ladder/trail ay tumatakbo sa tick-speed
+        # nang HINDI kinokopya ang ladder math dito. Ang unang obserbasyon ay
+        # SEED lamang (walang wake) para hindi sumabog ang bridge start.
+        self._hi: dict[int, float] = {}
 
     def refresh(self) -> None:
         from ....models.trading import TradingAutomationSession
@@ -240,6 +254,11 @@ class _SessionCrossTracker:
                 new_map.setdefault(sym, []).append(entry)
             with self._lock:
                 self._by_symbol = new_map
+                tracked = {
+                    int(e["session_id"]) for lst in new_map.values() for e in lst
+                }
+                for sid in [k for k in self._hi if k not in tracked]:
+                    self._hi.pop(sid, None)
         except Exception:
             _log.debug("[momentum_ws_ignition] session-cross refresh failed", exc_info=True)
         finally:
@@ -283,13 +302,28 @@ class _SessionCrossTracker:
         for s in entries:
             state = s.get("state")
             if state in _SESSION_POSITION_STATES:
+                sid = int(s["session_id"])
                 stop_px = float(s.get("stop_px") or 0.0)
                 target_px = float(s.get("target_px") or 0.0)
                 if exit_ref > 0 and (
                     (stop_px > 0 and exit_ref <= stop_px)
                     or (target_px > 0 and exit_ref >= target_px * 0.995)
                 ):
-                    hits.append(int(s["session_id"]))
+                    hits.append(sid)
+                    continue
+                # BAGONG-HIGH wake (trail/ladder gap): ang pag-akyat ang
+                # nagpapagalaw ng ratchet at nagpapa-arm ng partial — patakbuhin
+                # ang FSM habang nangyayari ito, hindi 10s pagkatapos. Ang unang
+                # tick pagkatapos ma-track ay seed lamang.
+                px = mid if mid > 0 else bid
+                if px > 0:
+                    with self._lock:
+                        prior = self._hi.get(sid)
+                        if prior is None:
+                            self._hi[sid] = px
+                        elif px > prior:
+                            self._hi[sid] = px
+                            hits.append(sid)
             elif state == STATE_LIVE_PENDING_ENTRY:
                 hits.append(int(s["session_id"]))
             elif state == STATE_WATCHING_LIVE:
@@ -353,6 +387,12 @@ def _spawn_session_wake(session_id) -> bool:
 _wake_inflight: set[int] = set()
 _wake_inflight_lock = threading.Lock()
 
+# POST-WAKE FRESHNESS (2026-08-23): pagkatapos ng wake, ang FSM ay maaaring
+# nag-ratchet ng stop, nag-transition ng state, o kaka-arm lang ng bagong
+# session — ang bridge tracker ay dapat makakita agad, hindi sa susunod na 5s
+# refresh. Ang loop instance ang nagre-rehistro ng refresh hook nito sa start().
+_post_wake_session_refresh = None
+
 
 def _wake_runner_tick(session_id: int) -> None:
     try:
@@ -389,6 +429,12 @@ def _wake_runner_tick(session_id: int) -> None:
     finally:
         with _wake_inflight_lock:
             _wake_inflight.discard(int(session_id))
+        _refresh = _post_wake_session_refresh
+        if _refresh is not None:
+            try:
+                _refresh()
+            except Exception:
+                pass
 
 
 def _spawn_arm_wake(session_id: Any) -> bool:
@@ -435,6 +481,8 @@ class IgnitionScoringLoop:
         self._pool = ThreadPoolExecutor(max_workers=3, thread_name_prefix="ws-ignition")
         self._tracker.refresh()
         self._sessions.refresh()
+        global _post_wake_session_refresh
+        _post_wake_session_refresh = self._sessions.refresh
         self._sync_subscriptions()
         self._refresher = threading.Thread(
             target=self._refresh_loop, daemon=True, name="ws-ignition-refresh"
@@ -467,6 +515,8 @@ class IgnitionScoringLoop:
         except Exception:
             pass
         self._subscribed = set()
+        global _post_wake_session_refresh
+        _post_wake_session_refresh = None
         if self._pool is not None:
             self._pool.shutdown(wait=False)
             self._pool = None
@@ -520,13 +570,19 @@ class IgnitionScoringLoop:
         self._subscribed = (self._subscribed | new) - gone
 
     def _refresh_loop(self) -> None:
+        # Dalawang cadence sa iisang thread: sessions kada ~5s (maliit na query,
+        # time-critical ang freshness ng ratcheted stop / bagong armado), universe
+        # kada ~20s (mabigat na full-market snapshot — di binago ang ritmo).
+        _last_universe = time.monotonic()
         while self._running:
-            time.sleep(_UNIVERSE_REFRESH_S)
+            time.sleep(_SESSION_REFRESH_S)
             if not self._running:
                 break
             try:
-                self._tracker.refresh()
                 self._sessions.refresh()
+                if time.monotonic() - _last_universe >= _UNIVERSE_REFRESH_S:
+                    _last_universe = time.monotonic()
+                    self._tracker.refresh()
                 self._sync_subscriptions()
             except Exception:
                 pass
