@@ -207,13 +207,24 @@ def read_squeeze_regime(db: "Session | None") -> SqueezeRegime:
     try:
         from sqlalchemy import text
 
-        rows = db.execute(
-            text(
-                "SELECT day, movers_50, movers_100, held_50, faded_50 "
-                "FROM momentum_squeeze_regime_daily ORDER BY day DESC LIMIT :lim"
-            ),
-            {"lim": _WINDOW_DAYS + _TRAILING_DAYS},
-        ).fetchall()
+        # SAVEPOINT — a "fail-open" read is only fail-open if a failure cannot
+        # poison the CALLER'S transaction (2026-08-23). This runs on the
+        # caller's session; when the SELECT fails, PostgreSQL aborts the whole
+        # transaction, and while the ``except`` below happily returns neutral,
+        # every later statement in that transaction dies with
+        # InFailedSqlTransaction. That is not fail-open — it is fail-closed
+        # with collateral damage, and it silently killed entire golden replay
+        # runs whose sink simply had no ``momentum_squeeze_regime_daily`` table
+        # (migrations do not run there). The nested transaction rolls back only
+        # this probe.
+        with db.begin_nested():
+            rows = db.execute(
+                text(
+                    "SELECT day, movers_50, movers_100, held_50, faded_50 "
+                    "FROM momentum_squeeze_regime_daily ORDER BY day DESC LIMIT :lim"
+                ),
+                {"lim": _WINDOW_DAYS + _TRAILING_DAYS},
+            ).fetchall()
         result = label_from_daily_rows([
             {
                 "day": r[0], "movers_50": r[1], "movers_100": r[2],
