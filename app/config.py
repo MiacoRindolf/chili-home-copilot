@@ -9325,6 +9325,23 @@ class Settings(BaseSettings):
         default=True,
         validation_alias=AliasChoices("CHILI_MOMENTUM_SYMBOL_OF_DAY_FOCUS_ENABLED"),
     )
+    # ROSS TOP-GAINER CONCENTRATION (2026-08-23, Ross 08-20 recap doctrine: momentum setups
+    # work ONLY on the day's top leading gainers — dispersed-attention names lose). Outside
+    # PREMARKET (the measured profitable window, left untouched), a NEW equity live arm must
+    # be one of the day's top-N market-wide %-gainers. Exemptions keep this CONCENTRATION,
+    # not starvation (CLRO lesson / #1036): the board's top-2 (hoisted leader + armed-first)
+    # always pass, and a STRUCTURAL bypass admits a name whose own persisted Ross/5-Pillars
+    # evidence clears the tick-scalp shape gate AND whose viability is at/above the board's
+    # within-pass p90 (adaptive percentile — no second magic number). Membership set is
+    # computed from data already in the pass (market snapshot / batch ross_signals / persisted
+    # top_market_gainers meta) — zero new network; unknown data FAILS OPEN (no gate).
+    # This is the ONE documented knob: N names. 0 = kill-switch (byte-identical behavior).
+    chili_momentum_top_gainer_concentration_n: int = Field(
+        default=3,
+        ge=0,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_TOP_GAINER_CONCENTRATION_N"),
+        description="Outside premarket, NEW equity live arms concentrate on the day's top-N market-wide %-gainers (Ross top-2/3 doctrine). Board top-2 + structural-p90 bypass exempt. 0 disables.",
+    )
     # A3 (Ross CLRO-lesson 2026-07-02): SCANNER-BREADTH WILDCARD REGIME. When the scanner is
     # DEAD (bottom-decile breadth vs the trailing-20-session same-time-of-day p20) but ONE mover
     # dominates (dominance >= its own trailing percentile) — the wildcard effect ("one stock
