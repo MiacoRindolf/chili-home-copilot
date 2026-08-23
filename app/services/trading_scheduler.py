@@ -1107,10 +1107,27 @@ def _run_momentum_live_runner_batch_job():
                 if read_tick_ohlcv_meter is not None:
                     _oc, _os, _oh = read_tick_ohlcv_meter()
                     if _oc:
+                        # BAR AGE (2026-08-23): how OLD were the bars this tick
+                        # decided on. cache_age_seconds cannot answer that — it
+                        # is stamped 0.0 on every store, including one served
+                        # from the hour-TTL aggregate layer — so this measures
+                        # the distance to the last bar's own timestamp instead.
+                        # Observability only; nothing decides on it.
+                        _bmax = _bmean = -1.0
+                        try:
+                            from .trading.momentum_neural.live_runner import (
+                                read_tick_bar_age_meter,
+                            )
+
+                            _bm, _bsum, _bn = read_tick_bar_age_meter()
+                            if _bn:
+                                _bmax, _bmean = _bm, (_bsum / _bn)
+                        except Exception:
+                            pass
                         logger.info(
                             "[scheduler] tick ohlcv session=%s calls=%d seconds=%.2f "
-                            "cache_hits=%d",
-                            sid, _oc, _os, _oh,
+                            "cache_hits=%d bar_age_max=%.0fs bar_age_mean=%.0fs",
+                            sid, _oc, _os, _oh, _bmax, _bmean,
                         )
             except Exception:
                 pass

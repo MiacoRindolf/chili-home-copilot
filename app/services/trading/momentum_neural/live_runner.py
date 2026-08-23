@@ -823,6 +823,9 @@ def reset_tick_ohlcv_meter() -> None:
     _TICK_OHLCV.calls = 0
     _TICK_OHLCV.seconds = 0.0
     _TICK_OHLCV.cache_hits = 0
+    _TICK_OHLCV.bar_age_max = 0.0
+    _TICK_OHLCV.bar_age_sum = 0.0
+    _TICK_OHLCV.bar_age_n = 0
 
 
 def read_tick_ohlcv_meter() -> tuple[int, float, int]:
@@ -832,6 +835,54 @@ def read_tick_ohlcv_meter() -> tuple[int, float, int]:
         float(getattr(_TICK_OHLCV, "seconds", 0.0) or 0.0),
         int(getattr(_TICK_OHLCV, "cache_hits", 0) or 0),
     )
+
+
+def read_tick_bar_age_meter() -> tuple[float, float, int]:
+    """(max bar age s, worst-offending frame's age, n frames measured).
+
+    BAR AGE, NOT CACHE AGE (2026-08-23). Freshness of the frames the structural
+    exits decide on has never been measurable here. The one attribute that looks
+    like it would answer the question, ``cache_age_seconds``, cannot: it is set
+    to 0.0 on EVERY store, including a store whose payload was just served from
+    the second-layer aggregate cache — so a frame carrying hour-old bars reports
+    an age of zero. The only honest measure is the distance from now to the LAST
+    BAR'S TIMESTAMP, which is what this records.
+
+    Observability only: nothing reads this to make a decision. It exists so the
+    next change to the OHLCV path is argued from a measured distribution instead
+    of from a code-derived ceiling.
+    """
+    return (
+        float(getattr(_TICK_OHLCV, "bar_age_max", 0.0) or 0.0),
+        float(getattr(_TICK_OHLCV, "bar_age_sum", 0.0) or 0.0),
+        int(getattr(_TICK_OHLCV, "bar_age_n", 0) or 0),
+    )
+
+
+def _frame_bar_age_seconds(df: Any) -> float | None:
+    """Seconds between now and the frame's last bar. None if unreadable.
+
+    Deliberately total: an unparseable or empty index yields None rather than an
+    exception, because this runs inside the hot read path and must never be able
+    to fail a tick.
+    """
+    try:
+        idx = getattr(df, "index", None)
+        if idx is None or len(idx) == 0:
+            return None
+        last = idx[-1]
+        ts = getattr(last, "to_pydatetime", None)
+        last_dt = ts() if callable(ts) else last
+        if not isinstance(last_dt, datetime):
+            return None
+        if last_dt.tzinfo is None:
+            last_dt = last_dt.replace(tzinfo=timezone.utc)
+        age = (datetime.now(timezone.utc) - last_dt).total_seconds()
+        # A frame stamped in the future is a provider/clock artefact, not a
+        # freshness signal; report it as fresh rather than as a negative age.
+        return max(0.0, age)
+    except Exception:
+        return None
 
 
 def _meter_tick_ohlcv(elapsed: float, df: Any) -> None:
@@ -844,6 +895,14 @@ def _meter_tick_ohlcv(elapsed: float, df: Any) -> None:
             _TICK_OHLCV.cache_hits = (
                 int(getattr(_TICK_OHLCV, "cache_hits", 0) or 0) + 1
             )
+        age = _frame_bar_age_seconds(df)
+        if age is not None:
+            _TICK_OHLCV.bar_age_sum = (
+                float(getattr(_TICK_OHLCV, "bar_age_sum", 0.0) or 0.0) + age
+            )
+            _TICK_OHLCV.bar_age_n = int(getattr(_TICK_OHLCV, "bar_age_n", 0) or 0) + 1
+            if age > float(getattr(_TICK_OHLCV, "bar_age_max", 0.0) or 0.0):
+                _TICK_OHLCV.bar_age_max = age
     except Exception:
         pass
 
