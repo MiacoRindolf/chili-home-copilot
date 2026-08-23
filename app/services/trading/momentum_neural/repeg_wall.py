@@ -190,27 +190,42 @@ def read_repeg_wall_state(
     window_seconds: float = 120.0,
     atr_pct: float | None = None,
 ) -> tuple[str, dict[str, Any]]:
-    """Bounded DB read (<=3 min — ang iqfeed recency rule) + classify. Fail-open."""
+    """Bounded DB read (<=3 min — ang iqfeed recency rule) + classify. Fail-open.
+
+    Ang dalawang read ay dumadaan sa ``optional_db_read`` — ang mga table na ito
+    ay pag-aari ng HOST IQFeed bridge at maaaring wala (ang replay sink ay walang
+    ``iqfeed_depth_snapshots``; hindi tumatakbo doon ang migrations). Ang hubad
+    na try/except sa paligid ng ganoong read ay HINDI fail-open: inaabort ng
+    PostgreSQL ang buong transaction, kaya nalulunok ang exception habang ang
+    bawat sumunod na statement ng CALLER ay namamatay sa InFailedSqlTransaction.
+    Ito ang tumatakbo sa loob ng ``_l2_entry_veto`` — isang live entry gate —
+    kaya ang isang nawawalang table ay makakalason sa buong FSM tick.
+    Ang helper ang nag-aalaga ng SAVEPOINT (at may fallback para sa test fake na
+    walang ``begin_nested``); ito rin ang daan ng lahat ng ibang mambabasa ng
+    ``iqfeed_depth_snapshots`` sa repo.
+    """
     try:
         from sqlalchemy import text
+
+        from .optional_db_read import optional_fetchall
 
         win = min(float(window_seconds), 180.0)
         lo = as_of - timedelta(seconds=win)
         sym = str(symbol or "").strip().upper()
         if not sym or db is None:
             return WALL_NONE, {"reason": "no_input"}
-        snaps = db.execute(text(
+        snaps = optional_fetchall(db, text(
             "SELECT observed_at, ask_top, asks_json FROM iqfeed_depth_snapshots "
             "WHERE symbol = :s AND observed_at > :lo AND observed_at <= :hi "
             "AND asks_json IS NOT NULL ORDER BY observed_at ASC LIMIT 400"
-        ), {"s": sym, "lo": lo, "hi": as_of}).fetchall()
+        ), {"s": sym, "lo": lo, "hi": as_of})
         if len(snaps) < 2:
             return WALL_NONE, {"reason": "insufficient_snapshots", "n": len(snaps)}
-        ticks = db.execute(text(
+        ticks = optional_fetchall(db, text(
             "SELECT observed_at, price, size FROM iqfeed_trade_ticks "
             "WHERE symbol = :s AND observed_at > :lo AND observed_at <= :hi "
             "ORDER BY observed_at ASC LIMIT 20000"
-        ), {"s": sym, "lo": lo, "hi": as_of}).fetchall()
+        ), {"s": sym, "lo": lo, "hi": as_of})
         snapshots = [
             {"observed_at": r[0], "ask_top": r[1], "asks": r[2]}
             for r in snaps
