@@ -3554,6 +3554,25 @@ class Settings(BaseSettings):
     # halt_resume_dip (ang sanctioned na post-resume entry, ginawa mula sa audited na
     # trades ni Ross) ay HINDI KAILANMAN naging primary trigger sa 521 candidate /
     # 30 araw -- ang 600s na dip window ay nauubos habang HALTED PA ang pangalan.
+    # LONG-HALT ACTIVITY LOOKBACK (2026-08-24, sinukat).
+    # Ang activity gate ay dating nagbabasa ng prints sa loob LAMANG ng
+    # chili_momentum_halt_print_recent_active_seconds (300s). Ang LULD halt ay
+    # MAS MAHABA kaysa doon, kaya habang halted ang pangalan ay nauubos ang window,
+    # bumabagsak ang recent_print_count sa 0, at NABUBULAG ang detector -- lagi
+    # itong isang halt na huli. SINUKAT (56 na halt, 6 na simbolo, 2026-08-24):
+    #     p50 397s · p75 681s · p90 1306s · p95 1577s · max 3466s
+    # Ang 1800s ay sumasaklaw sa p95 na may ~14% na headroom.
+    # ⚠️ Ang DENSITY ay hindi niluluwagan: ang minimum na bilang ay ini-scale ng
+    # PAREHONG proporsyon (min_prints * wide/tight), kaya ang isang tumutulong
+    # pangalan ay hindi pa rin kailanman maiimpluwensyang halted -- mas malawak
+    # lang ang ebidensya, hindi mas mahina.
+    chili_momentum_halt_print_activity_lookback_seconds: float = Field(
+        default=1800.0,
+        validation_alias=AliasChoices(
+            "CHILI_MOMENTUM_HALT_PRINT_ACTIVITY_LOOKBACK_SECONDS"
+        ),
+        description="Lookback for the print-recency halt inference's RECENTLY-ACTIVE gate. Must exceed a real LULD halt or the window empties mid-halt and the detector goes blind (measured 2026-08-24: halt p95 = 1577s, max 3466s, vs the old 300s gate → 44-minute detection lag on DAIC). The minimum print count is scaled by the same ratio so the required DENSITY is unchanged. Set to 0 or below the tight window to disable (falls back to chili_momentum_halt_print_recent_active_seconds ⇒ byte-identical).",
+    )
     chili_momentum_halt_print_resume_symmetry_enabled: bool = Field(
         default=True,
         validation_alias=AliasChoices(
