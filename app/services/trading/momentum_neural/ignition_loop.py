@@ -479,6 +479,17 @@ def _spawn_arm_wake(session_id: Any) -> bool:
 
     if not bool(getattr(_st, "chili_momentum_arm_wake_runner_enabled", True)):
         return False
+    # ROLE GATE (2026-08-24). Ang job na nagdadala rito ay naka-register sa
+    # ilalim ng `include_heavy`, na KASAMA ang `rnd_only` -- ang role ng R&D
+    # scheduler container. Kung walang tsek na ito, ang container na iyon ay
+    # magpapatakbo ng buong live FSM tick sa loob ng sarili nitong proseso,
+    # kahit ang mismong layunin ng `rnd_only` ay para hindi kailanman i-restart
+    # ng R&D deploy ang prosesong may hawak na buhay na posisyon. Tingnan ang
+    # `wake_ownership` para sa buong pangangatwiran.
+    from .wake_ownership import process_owns_momentum_execution
+
+    if not process_owns_momentum_execution():
+        return False
     with _wake_inflight_lock:
         if sid in _wake_inflight:
             return False
