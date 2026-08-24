@@ -450,21 +450,37 @@ class Book:
             if now - level.updated_monotonic > STALE_VENUE_ROW_S or level.size <= 0:
                 continue
             active_venues.add(venue)
-            (bids if side == "B" else asks).append((level.price, level.size))
+            (bids if side == "B" else asks).append(
+                (level.price, level.size, level.provider_at)
+            )
         if not bids or not asks:
             return None
         bids.sort(key=lambda x: -x[0])
         asks.sort(key=lambda x: x[0])
         if bids[0][0] >= asks[0][0] * 1.05:  # crossed >5% = ghost venue rows
             return None
-        b5 = sum(sz for _, sz in bids[:DEPTH_LEVELS])
-        a5 = sum(sz for _, sz in asks[:DEPTH_LEVELS])
+        b5 = sum(sz for _, sz, _pa in bids[:DEPTH_LEVELS])
+        a5 = sum(sz for _, sz, _pa in asks[:DEPTH_LEVELS])
         tot = b5 + a5
-        bids_json = [[round(px, 6), round(sz, 4)] for px, sz in bids[:DEPTH_LEVELS]]
-        asks_json = [[round(px, 6), round(sz, 4)] for px, sz in asks[:DEPTH_LEVELS]]
+        bids_json = [[round(px, 6), round(sz, 4)] for px, sz, _pa in bids[:DEPTH_LEVELS]]
+        asks_json = [[round(px, 6), round(sz, 4)] for px, sz, _pa in asks[:DEPTH_LEVELS]]
+        # QUOTE-EVENT CLOCK (2026-08-24). Ang observed_at ng snapshot ay oras ng
+        # BRIDGE; ito ang oras ng EXCHANGE, pinar-parse mula sa sariling date+time
+        # field ng L2 line. Kung wala ito ay hindi maaaring maging execution
+        # stand-in ang IQFeed (tingnan ang docstring ng get_execution_bbo).
+        #
+        # ⚠️ Ang MAS LUMA sa dalawang top-of-book leg ang isinusulat. Ang BBO ay
+        # isang PARES; ito ay kasing-sariwa lamang ng pinakamatanda nitong bahagi.
+        # Ang pagsulat ng mas bago ay magpapalabas na mas sariwa ang pares kaysa
+        # sa totoo -- fail-OPEN sa isang freshness gate. Ang mas luma ay
+        # fail-CLOSED, at iyon ang tamang direksyon para sa isang gate na
+        # nagpapahintulot ng order.
+        _pa = [pa for pa in (bids[0][2], asks[0][2]) if pa is not None]
+        provider_at = min(_pa) if len(_pa) == 2 else None
         return {
             "bid_top": bids[0][0], "ask_top": asks[0][0],
             "bid_top_size": bids[0][1], "ask_top_size": asks[0][1],
+            "provider_at": provider_at,
             "bid5_size": b5, "ask5_size": a5,
             "imbalance5": round((b5 - a5) / tot, 4) if tot > 0 else None,
             "venues": len(active_venues),
@@ -1433,9 +1449,9 @@ def writer(
     ins = sa.text(
         "INSERT INTO iqfeed_depth_snapshots (symbol, observed_at, bid_top, ask_top, "
         "bid_top_size, ask_top_size, bid5_size, ask5_size, imbalance5, venues, "
-        "bids_json, asks_json) "
+        "bids_json, asks_json, provider_at) "
         "VALUES (:sym, :at, :bt, :at2, :bts, :ats, :b5, :a5, :imb, :v, "
-        "CAST(:bids AS JSONB), CAST(:asks AS JSONB))"
+        "CAST(:bids AS JSONB), CAST(:asks AS JSONB), :pat)"
     )
     prior_causes: dict[str, frozenset[TargetCause]] = {
         symbol: frozenset({TargetCause.RETAINED}) for symbol in watched
@@ -1629,7 +1645,8 @@ def writer(
                          "b5": snap["bid5_size"], "a5": snap["ask5_size"],
                          "imb": snap["imbalance5"], "v": snap["venues"],
                          "bids": json.dumps(snap["bids_json"]),
-                         "asks": json.dumps(snap["asks_json"])})
+                         "asks": json.dumps(snap["asks_json"]),
+                         "pat": snap.get("provider_at")})
         if rows:
             try:
                 with engine.begin() as c:
