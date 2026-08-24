@@ -184,6 +184,35 @@ def _assert_migration_ids_unique() -> None:
             "app/migrations.py."
         )
 
+    # NUMERIC-PREFIX COLLISION (2026-08-24). Ang tseke sa itaas ay naghahambing
+    # ng BUONG string, kaya ang dalawang MAGKAIBANG pangalan na may parehong
+    # numero ay dumadaan nang TAHIMIK::
+    #
+    #     370_depth_snapshot_provider_at
+    #     370_captured_paper_shadow_latency_telemetry
+    #
+    # Eksaktong nangyari iyan noong 2026-08-24: dalawang branch ang parehong
+    # kumuha ng 370, at pareho silang tinanggap ng schema_version dahil
+    # magkaiba ang buong string. Walang exception, walang babala -- dalawang
+    # migration na lang na parehong "370" magpakailanman.
+    #
+    # Ang contract sa itaas ng file na ito ay nagsasabing SEQUENTIAL at HINDI
+    # kailanman muling ginagamit ang mga ID. Ipatupad ANG NUMERO, hindi lamang
+    # ang eksaktong pagkakapareho ng pangalan -- ang numero ang tunay na ID;
+    # ang natitira ay label lang para sa tao.
+    by_number: dict[str, list[str]] = {}
+    for vid in ids:
+        by_number.setdefault(vid.split("_", 1)[0], []).append(vid)
+    numeric_dupes = {num: sorted(v) for num, v in by_number.items() if len(v) > 1}
+    if numeric_dupes:
+        raise RuntimeError(
+            "Migration NUMBER reuse detected in MIGRATIONS list: "
+            f"{numeric_dupes}. Two migrations share a numeric ID even though "
+            "their full names differ. Migration IDs are sequential and never "
+            "reused -- renumber the newer one to the next free number. See "
+            "the Migration ID contract at the top of app/migrations.py."
+        )
+
 
 def _tables(conn) -> set:
     return set(sa_inspect(conn).get_table_names())
@@ -32952,7 +32981,7 @@ def _migration_369_squeeze_regime_daily(conn) -> None:
     ))
 
 
-def _migration_370_depth_snapshot_provider_at(conn) -> None:
+def _migration_371_depth_snapshot_provider_at(conn) -> None:
     """Quote-event clock para sa iqfeed_depth_snapshots (2026-08-24).
 
     ANG PUWANG. Ang ``observed_at`` sa table na ito ay ang oras ng BRIDGE
@@ -33486,8 +33515,8 @@ MIGRATIONS = [
      _migration_368_sec_fails_to_deliver),
     ("369_squeeze_regime_daily",
      _migration_369_squeeze_regime_daily),
-    ("370_depth_snapshot_provider_at",
-     _migration_370_depth_snapshot_provider_at),
+    ("371_depth_snapshot_provider_at",
+     _migration_371_depth_snapshot_provider_at),
 ]
 
 

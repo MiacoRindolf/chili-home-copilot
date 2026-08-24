@@ -122,7 +122,7 @@ def test_the_insert_names_the_column(bridge):
     assert '"pat": snap.get("provider_at")' in src
 
 
-def test_migration_370_is_registered_and_additive():
+def test_migration_371_is_registered_and_additive():
     """Nullable + walang default ⇒ metadata-only sa PG11+, kaya INSTANT sa
     2.2 GB / 3.04M na row. Walang table rewrite sa isang buhay na tape."""
     import inspect
@@ -130,10 +130,10 @@ def test_migration_370_is_registered_and_additive():
     from app import migrations as mg
 
     ids = [mid for mid, _fn in mg.MIGRATIONS]
-    assert "370_depth_snapshot_provider_at" in ids
+    assert "371_depth_snapshot_provider_at" in ids
     assert len(ids) == len(set(ids)), "ang mga migration ID ay dapat natatangi"
 
-    src = inspect.getsource(mg._migration_370_depth_snapshot_provider_at)
+    src = inspect.getsource(mg._migration_371_depth_snapshot_provider_at)
     # SQL LANG ang suriin -- ang docstring ay nagpapaliwanag KUNG BAKIT walang
     # NOT NULL/DEFAULT, kaya ang paghahanap ng mga salitang iyon sa buong source
     # ay tumutugma sa paliwanag mismo.
