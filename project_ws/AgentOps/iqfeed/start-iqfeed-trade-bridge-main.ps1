@@ -31,6 +31,8 @@
 # Logs: parehong lugar (D:\CHILI-Docker\chili-data\iqfeed_trades\bridge.log).
 
 $ErrorActionPreference = 'SilentlyContinue'
+$bridge = 'E:\dev\wt-window2\scripts\iqfeed_trade_bridge.py'
+$python = 'C:\Users\rindo\miniconda3\envs\chili-env\python.exe'
 
 # 1) IQConnect (auto-login sa saved credentials; ang CHARTS auto-login ang tamang
 #    manual relogin kapag na-logout — tingnan ang memory notes)
@@ -93,7 +95,7 @@ except Exception:
 '@
 $dbReady = $false
 for ($i = 0; $i -lt 60; $i++) {
-    $dbProbe | & 'C:\Users\rindo\miniconda3\envs\chili-env\python.exe' - 2>$null
+    $dbProbe | & $python - 2>$null
     if ($LASTEXITCODE -eq 0) { $dbReady = $true; break }
     Start-Sleep -Seconds 3
 }
@@ -125,5 +127,15 @@ $env:DATABASE_URL = 'postgresql://chili:chili@localhost:5433/chili'
 #    (SELECTED_FIELDS_ACK_TIMEOUT_S, PR #1024) -> walang katapusang reconnect,
 #    ZERO ticks. Sa .cmd: 0.04s hanggang READY, 0 failure, generation=1.
 #    Ang > at 2> ng cmd ay TUNAY na file handle -- walang pump, hindi bumabara.
+
+# PARITY SA DEPTH (2026-08-24): mabilis na kabiguan kapag wala ang bridge source.
+# Pinapangalanan din nito ang BUONG path ng bridge sa starter, na siyang
+# hinahanap ng host-snapshot collector para patunayan na ang starter at ang
+# tumatakbong proseso ay tumutukoy sa IISANG script
+# (`wrapper_target_matches_running_process`).
+if (-not (Test-Path $bridge)) {
+    Add-Content -Path $err -Value "$(Get-Date -Format o) LAUNCHER: WALA ang bridge source $bridge -- hindi maglalaunch"
+    exit 1
+}
 
 Start-Process -FilePath 'E:\dev\wt-window2\project_ws\AgentOps\iqfeed\run-trade-bridge.cmd' -WindowStyle Hidden

@@ -37,6 +37,7 @@
 $ErrorActionPreference = 'SilentlyContinue'
 
 $bridge = 'E:\dev\wt-window2\scripts\iqfeed_depth_bridge.py'
+$python = 'C:\Users\rindo\miniconda3\envs\chili-env\python.exe'
 
 # 1) IQConnect. KAILANGAN NITO ANG DALAWA (natutunan 2026-08-23):
 #    a) credentials sa registry -- kung wala, titigil ito sa GUI login dialog
@@ -86,7 +87,7 @@ except Exception:
 '@
 $dbReady = $false
 for ($i = 0; $i -lt 60; $i++) {
-    $dbProbe | & 'C:\Users\rindo\miniconda3\envs\chili-env\python.exe' - 2>$null
+    $dbProbe | & $python - 2>$null
     if ($LASTEXITCODE -eq 0) { $dbReady = $true; break }
     Start-Sleep -Seconds 3
 }
