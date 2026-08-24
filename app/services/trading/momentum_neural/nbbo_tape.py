@@ -62,7 +62,8 @@ def _in_sampling_window(now_utc: datetime) -> bool:
     # entry (operator 2026-06-11: preparation time before the open). Holidays
     # aren't excluded — stale quotes fail the per-row sanity filters.
     #
-    # TIER-2 (chili_momentum_overnight_tape_enabled, DEFAULT OFF): is_sample_session_now
+    # TIER-2 (chili_momentum_overnight_tape_enabled, DEFAULT ON mula 2026-08-24;
+    # dating OFF, na-flip sa ac850b1b7 / #1024): is_sample_session_now
     # also opens overnight (20:00-04:00 ET) when that flag is ON; the per-row overnight
     # whitelist + cadence cap are applied in sample_universe_nbbo_spreads. Flag OFF =>
     # is_sample_session_now == is_data_session_now (byte-identical to the prior gate).
