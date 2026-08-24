@@ -1000,6 +1000,146 @@ def retire_deadman_close_handoff(
     return int(row.rowcount or 0) == 1
 
 
+def supersede_unsent_deadman_close_handoff(
+    db: Session,
+    *,
+    symbol: str,
+    claim_token: str,
+    owner_session_id: int,
+    account_scope: str,
+    alpaca_account_id: str,
+    handoff_token: str,
+    frozen_order_type: str,
+    superseding_order_type: str,
+) -> bool:
+    """Retire a frozen-but-NEVER-TRANSMITTED close handoff so the next pulse may
+    freeze the verb the CURRENT exit decision actually requires.
+
+    ANG DEADLOCK NA TINATAPOS NITO (sinukat 2026-08-24, session 15152 / XPON,
+    340 block sa isang araw). Ang dalawang literal-submit na seam ay nag-a-assert
+    ng magkaibang successor verb: ang limit-close ay nagpapasa ng
+    successor_order_type="limit", ang market-close ng "market". Kung alin ang
+    tumakbo MUNA ang nagfi-freeze ng envelope; hinihingi pagkatapos ng
+    _apply_frozen_successor na tumugma ang naka-freeze na order_type sa
+    KASALUKUYANG derivation. Kapag ang bailout ay nag-freeze ng "limit" at ang
+    susunod na pulse ay nag-derive ng "market" (operator_flatten), permanente
+    ang mismatch:
+
+        qty=51.0  attempts=0  env_phase=intent_frozen
+        env_verb=limit  successor_order_request=NULL  huling_verb=market
+        -> deadman_close_handoff_identity_mismatch, walang hanggan
+
+    Hindi makakatulong ang prepare_deadman_close_handoff: ang successor_intent ay
+    nasa immutable_keys nito, kaya ang muling pag-freeze ay nagbabalik ng
+    deadman_close_handoff_generation_mismatch. Hindi rin makakatulong ang
+    retire_deadman_close_handoff: hinihingi nito ang TERMINAL na successor
+    generation, at ang successor ay hindi kailanman naipadala -- iyon mismo ang
+    na-block. Walang legal na labasan.
+
+    BAKIT LIGTAS ANG SUPERSESSION -- ito ang buong argumento. Iginigiit ang lahat
+    ng sumusunod bago sumulat:
+
+      * phase == "intent_frozen" -- hindi kailanman umusad ang generation;
+      * successor_order_request is None -- WALANG order request na na-finalize
+        kailanman, kaya walang CID na naipadala sa broker;
+      * ang owner transport ay ang PAREHONG deadman pa rin (magkatugmang
+        client/broker order id) at HINDI resolved -- protektado pa rin ang
+        posisyon habang tayo ay nagpapalit;
+      * ang claim ay ang parehong hindi-resolved na entry claim ng parehong
+        session.
+
+    Sa ilalim ng lahat ng iyon ay WALANG successor order na umabot sa broker,
+    kaya ang pagpapalit ng naka-freeze na intent ay hindi maaaring mag-double-fill.
+    Isang HANGARIN lang na hindi pa naipapadala ang pinapalitan.
+
+    NAAAUDIT: ang lumang envelope ay itinatala sa history na may phase="superseded"
+    kasama ang parehong verb. Ang bagong envelope ay ipi-freeze ng susunod na
+    pulse sa ordinaryong prepare path na may SARILING handoff_token at CID.
+
+    Nagbabalik ng True kapag tunay ngang na-supersede ang envelope.
+    """
+    scope = str(account_scope or "").strip().lower()
+    sym = _symbol(symbol)
+    account_id = str(alpaca_account_id or "").strip()
+    token = str(handoff_token or "").strip()
+    frozen_verb = str(frozen_order_type or "").strip().lower()
+    new_verb = str(superseding_order_type or "").strip().lower()
+    # Huwag mag-churn: para LANG sa tunay na pagbabago ng verb ang supersession.
+    if not frozen_verb or not new_verb or frozen_verb == new_verb:
+        return False
+    if new_verb not in {"limit", "market"} or frozen_verb not in {"limit", "market"}:
+        return False
+    readable, claim = read_action_claim(
+        db, symbol=sym, account_scope=scope, for_update=True
+    )
+    if not readable or claim is None or not (
+        claim.get("phase") != RESOLVED
+        and claim.get("action") == "entry"
+        and claim.get("claim_token") == str(claim_token)
+        and claim.get("owner_session_id") == int(owner_session_id)
+    ):
+        return False
+    metadata = dict(claim.get("metadata") or {})
+    handoff = metadata.get(_DEADMAN_CLOSE_HANDOFF_METADATA_KEY)
+    if not isinstance(handoff, dict):
+        return False
+    current = metadata.get(_OWNER_TRANSPORT_METADATA_KEY)
+    current = dict(current) if isinstance(current, dict) else {}
+    if not (
+        handoff.get("identity_contract") == "alpaca_deadman_close_handoff_v1"
+        and str(handoff.get("handoff_token") or "") == token
+        and str(handoff.get("alpaca_account_id") or "") == account_id
+        and int(handoff.get("owner_session_id") or 0) == int(owner_session_id)
+        and _symbol(handoff.get("symbol") or "") == sym
+    ):
+        return False
+    # ---- ANG DALAWANG GATE NA GUMAGAWA NITONG LIGTAS ----
+    if str(handoff.get("phase") or "").strip().lower() != "intent_frozen":
+        return False
+    if handoff.get("successor_order_request") is not None:
+        return False
+    # ---- ang deadman ay dapat AKTIBO PA RIN na nagbabantay sa posisyon ----
+    if not (
+        str(current.get("transport_kind") or "").strip().lower() == "deadman"
+        and str(current.get("phase") or "").strip().lower() != "resolved"
+        and str(current.get("client_order_id") or "").strip()
+        == str(handoff.get("deadman_client_order_id") or "").strip()
+        and str(current.get("broker_order_id") or "").strip()
+        == str(handoff.get("deadman_broker_order_id") or "").strip()
+    ):
+        return False
+    # Ang naka-freeze na intent ay dapat tunay ngang nagdadala ng lumang verb --
+    # kung hindi, hindi ito ang deadlock na inaakala natin at hindi tayo susulat.
+    frozen_intent = handoff.get("successor_intent")
+    frozen_intent = dict(frozen_intent) if isinstance(frozen_intent, dict) else {}
+    if str(frozen_intent.get("order_type") or "").strip().lower() != frozen_verb:
+        return False
+    superseded = {
+        **handoff,
+        "phase": "superseded",
+        "supersession_reason": "successor_order_type_changed",
+        "superseded_frozen_order_type": frozen_verb,
+        "superseded_by_order_type": new_verb,
+        "superseded_at_utc": datetime.now(timezone.utc).isoformat(),
+    }
+    history = metadata.get(_DEADMAN_CLOSE_HANDOFF_HISTORY_KEY)
+    history = list(history) if isinstance(history, list) else []
+    history.append(superseded)
+    metadata[_DEADMAN_CLOSE_HANDOFF_HISTORY_KEY] = history[-20:]
+    metadata.pop(_DEADMAN_CLOSE_HANDOFF_METADATA_KEY, None)
+    row = db.execute(text(
+        "UPDATE broker_symbol_action_claims SET metadata_json = CAST(:metadata AS jsonb),"
+        " updated_at = NOW() WHERE account_scope = :scope AND symbol = :symbol"
+        " AND claim_token = :claim_token AND action = 'entry' AND phase <> 'resolved'"
+    ), {
+        "metadata": json.dumps(metadata, separators=(",", ":"), default=str),
+        "scope": scope,
+        "symbol": sym,
+        "claim_token": str(claim_token),
+    })
+    return int(row.rowcount or 0) == 1
+
+
 def retire_deadman_handoff_for_fractional_day_close(
     db: Session,
     *,
@@ -6626,6 +6766,21 @@ def retire_deadman_close_handoff_committed(**kwargs: Any) -> bool:
         )
     except Exception:
         _log.warning("[alpaca_claim] deadman close handoff retire failed", exc_info=True)
+        return False
+
+
+def supersede_unsent_deadman_close_handoff_committed(**kwargs) -> bool:
+    try:
+        return bool(
+            _with_short_session(
+                lambda db: supersede_unsent_deadman_close_handoff(db, **kwargs)
+            )
+        )
+    except Exception:
+        _log.warning(
+            "[alpaca_claim] unsent deadman close handoff supersede failed",
+            exc_info=True,
+        )
         return False
 
 
