@@ -6,26 +6,30 @@ SINUKAT (2026-08-24, 20:0x UTC = 16:0x ET, after-hours)::
     iqfeed_trade_ticks         2.5s                        <- BUHAY
     momentum_nbbo_spread_tape  342s                        <- PATAY
 
-DALAWA ang manunulat ng tape, at PAREHO silang naka-tali sa lane:
+ANG TUNAY NA MEKANISMO (sinukat, pagkatapos ng dalawang maling pagbasa):
 
-1. ``tape_ws_recorder`` -- nasa loob ng proseso ng lane (``source='iqfeed_l1'``)
-2. ang 1-min sampler (``source='massive_snapshot'``) -- naka-gate sa
-   ``include_momentum_exec``, at ang lane ay tumatakbo sa ``momentum_exec_only``
+- ``source='iqfeed_l1'``        -- galing sa ``scripts/iqfeed_trade_bridge.py``,
+  isang HOST na proseso. Nagpapatuloy ito pagkatapos ng close.
+- ``source='massive_snapshot'`` -- ang 1-min sampler, naka-gate sa scheduler.
 
-Kapag nagsara ang lane, PAREHO silang namamatay -- at ang tanging natitirang
-scheduler container ay tumatakbo sa ``rnd_only``, na hindi nagre-register ng
-alinman. Samantala ang sariling gate ng sampler (``is_sample_session_now``) ay
-sumasaklaw na sa BUONG 04:00-20:00 ET na data session: *premarket hanggang
-afterhours*.
+Ang sampler ay dating naka-gate sa ``include_momentum_exec``. Ang lane ay
+tumatakbo sa ``momentum_exec_only``, kaya nagre-register ito habang bukas ang
+lane at tumitigil kapag sarado. Ang tanging scheduler container ay ``rnd_only``
+-- wala sa listahan ⇒ **walang massive_snapshot sampling pagkatapos ng close**,
+kahit na ang ``is_sample_session_now`` ay sumasaklaw sa buong 04:00-20:00 ET na
+data session, premarket hanggang afterhours.
 
-⚠️ PAGWAWASTO. Inangkin ko noong "hindi kailanman naka-register" ang sampler,
-batay sa huling 20,000 na row na 100% ``iqfeed_l1``. Mali iyon: sa 174 row/s,
-ang 20,000 na row ay mga dalawang minuto lang -- masyadong makitid para makita
-ang 1 row/min/symbol. May ``massive_snapshot`` na row ngayong araw.
+NAPATUNAYAN pagkatapos ng ayos, 20:41:38 UTC (16:41 ET)::
 
-⚠️ Hindi ito kayang ayusin sa pamamagitan ng pagpapatakbo ng ``momentum_exec_only``
-na container: sinubukan iyon noong 2026-08-24 at ang dobleng viability refresh
-ay nagpabagal sa trading loop mula 3,984ms tungong **44,858ms**.
+    [nbbo_tape] sampled 366 Ross-universe NBBO spreads
+
+⚠️ DALAWANG PAGWAWASTO KO, nakatala para hindi maulit:
+
+1. "Hindi kailanman naka-register" -- MALI. Ang huling 20,000 row ay 2 MINUTO
+   lang sa 174 row/s. I-normalize ang sample window sa BILIS NG PAGSULAT.
+2. "Namamatay ang tape sa close" -- MALI. Ang ``iqfeed_l1`` mirror ay galing sa
+   trade bridge (host) at nagpapatuloy; 5,000-15,000 row/min mula 20:18. Ang
+   "342s stale" ay isang 17-minutong PUWANG. Kumuha ng SERYE, hindi snapshot.
 
 Runnable: pytest tests/test_afterhours_tape_recording.py -v
 """
@@ -127,6 +131,11 @@ def test_the_measured_evidence_is_recorded_in_the_source():
     """Ang susunod na tao ay dapat makita KUNG BAKIT, hindi lang ANO."""
     src = _src()
     i = src.index("include_data_recording =")
-    block = src[max(0, i - 2600):i]
+    # Ang buong komentong bloke, hindi isang nahulaang bilang ng char -- lumalaki
+    # ito habang naitatama ang mga natuklasan.
+    j = src.index("# DATA RECORDING (2026-08-24)")
+    block = src[j:i]
     assert "momentum_nbbo_spread_tape" in block
-    assert "after-hours" in block or "afterhours" in block
+    assert "afterhours" in block or "after-hours" in block
+    assert "iqfeed_trade_bridge" in block, "dapat pangalanan kung SINO ang sumusulat"
+    assert "sampled 366" in block, "dapat may napatunayang ebidensya pagkatapos ng ayos"
