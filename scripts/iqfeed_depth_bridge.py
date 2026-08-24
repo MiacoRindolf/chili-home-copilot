@@ -149,6 +149,38 @@ READER_JOIN_TIMEOUT_S = float(
 BRIDGE_VERSION = "iqfeed-l2-exact-frame-capture-v1"
 BRIDGE_RUN_ID = str(uuid.uuid4())
 UNCAPTURED_DIAGNOSTIC_FLAG = "--allow-uncaptured-diagnostic"
+
+# UNCAPTURED-DIAGNOSTIC LOG THROTTLE (2026-08-24, sinukat sa live market open).
+# Ang coverage-unavailable na diagnostic ay ini-emit KADA release batch. Sa
+# premarket ay bihira iyon; sa 09:30 open ay umabot ito sa 18,283 -> 29,562
+# error KADA MINUTO, nagpalaki ng log tungong 275 MB, kumain ng 66% ng isang
+# core, at ang tick-write path ay TUMIGIL NANG TULUYAN (0 tick sa 5 minuto
+# habang buhay ang proseso at "Connected" ang feed).
+# Ang diagnostic ay hindi nawawala -- ini-emit isang beses kada window na may
+# pinagsama-samang bilang, kaya buo pa rin ang ebidensya nang walang storm.
+_UNCAPTURED_LOG_THROTTLE_S = float(
+    os.environ.get("CHILI_IQFEED_UNCAPTURED_LOG_THROTTLE_SECONDS", "30") or 30.0
+)
+_uncaptured_log_state = {"next_at": 0.0, "suppressed": 0, "lost_rows": 0}
+
+
+def _uncaptured_should_log(lost: int) -> tuple[bool, int, int]:
+    """(mag-log ba, na-suppress na bilang, pinagsamang lost rows). Total: walang raise."""
+    try:
+        st = _uncaptured_log_state
+        st["lost_rows"] = int(st.get("lost_rows", 0)) + int(lost)
+        now = time.monotonic()
+        if now >= float(st.get("next_at", 0.0)):
+            sup = int(st.get("suppressed", 0))
+            agg = int(st.get("lost_rows", 0))
+            st["next_at"] = now + _UNCAPTURED_LOG_THROTTLE_S
+            st["suppressed"] = 0
+            st["lost_rows"] = 0
+            return True, sup, agg
+        st["suppressed"] = int(st.get("suppressed", 0)) + 1
+        return False, 0, 0
+    except Exception:
+        return True, 0, int(lost)
 _CHECKPOINT_COMPLETION_BASIS = (
     "provider_snapshot_completion_boundary_unavailable"
 )
@@ -1168,20 +1200,28 @@ def _publish_capture_delta_locked(
         return (0, 0, 1)
     if handoff is None:
         if UNCAPTURED_DIAGNOSTIC_FLAG in sys.argv:
-            log.error(
-                "IQFeed L2 delta coverage unavailable: %s",
-                json.dumps(
-                    {
-                        "code": "iqfeed_l2_delta_unbound_diagnostic",
-                        "symbol": symbol,
-                        "available_at": available_at.astimezone(timezone.utc)
-                        .isoformat()
-                        .replace("+00:00", "Z"),
-                    },
-                    sort_keys=True,
-                    separators=(",", ":"),
-                ),
-            )
+            # THROTTLED (2026-08-24): ito ay tumatakbo KADA FRAME. Sa uri-6 lang
+            # ay ~3 frame/s; pagkabukas ng uri-4 streaming ay ~230/s kada
+            # simbolo. Ang parehong hubad na log.error sa TRADE bridge ay
+            # gumawa ng 275 MB na log at PUMATAY ng tick writes sa open.
+            should_log, suppressed, agg_lost = _uncaptured_should_log(1)
+            if should_log:
+                log.error(
+                    "IQFeed L2 delta coverage unavailable: %s",
+                    json.dumps(
+                        {
+                            "code": "iqfeed_l2_delta_unbound_diagnostic",
+                            "symbol": symbol,
+                            "suppressed": suppressed,
+                            "agg_lost": agg_lost,
+                            "available_at": available_at.astimezone(timezone.utc)
+                            .isoformat()
+                            .replace("+00:00", "Z"),
+                        },
+                        sort_keys=True,
+                        separators=(",", ":"),
+                    ),
+                )
             return (0, 1, 0)
         raise RuntimeError(
             "IQFeed L2 capture handoff is unbound; refusing silent delta loss"
@@ -1253,7 +1293,21 @@ def reader(
                 log.info("raw[%d]: %s", frames, line[:140])
             if not line or line[0] in ("T",):
                 continue
-            if line[0] == "6":
+            if line[0] in ("4", "6"):
+                # SINUKAT SA LIVE MARKET (2026-08-24 10:22 ET, AAPL + SGLY):
+                #   uri '6' = LARAWAN-SA-PAG-SUBSCRIBE lang. Lahat ng 122 frame
+                #             ay dumating sa UNANG SEGUNDO, tapos ZERO magpakailanman.
+                #   uri '4' = ang TUNAY na streaming update: 2,760 frame sa 12s
+                #             (~230/s), eksaktong PAREHONG 12-field na hugis.
+                # Ang pagbabasa ng '6' lang ay nangangahulugang ang libro ay
+                # nagbabago LAMANG kapag pumuputok ang re-subscribe (~21s).
+                # Iyon ang dahilan kung bakit ang buong 39-venue na libro ay
+                # nagbago lang ng 10% ng 2s na sample, kung bakit patay ang OFI,
+                # kung bakit naka-pin sa 1.0 ang depth_imbal_pctile, at kung
+                # bakit 97.3% na duplicate ang iqfeed_depth_snapshots.
+                # Magkapareho ang field position, kaya iisang parse path.
+                #   6,AAPL,,EDGX,A,312.8500,40,,4,10:22:21.212553,2026-08-24,
+                #   4,AAPL,,EDGX,A,312.8500,40,,4,10:22:21.774268,2026-08-24,
                 received_at = datetime.now(timezone.utc)
                 try:
                     source_frame_sequence = _next_source_frame_sequence(
