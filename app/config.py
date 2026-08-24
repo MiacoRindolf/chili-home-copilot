@@ -3546,6 +3546,31 @@ class Settings(BaseSettings):
     # flags the quote path sets). FAIL-CLOSED: no tape data / not recently active ⇒ NO
     # inference (never false-halt a quiet name). The existing false_halt_avoid guard still
     # applies at the resume read. OFF ⇒ this path is never consulted ⇒ byte-identical.
+    # SYMMETRY (2026-08-24). Ang halt na nakita ng PRINT clock ay dapat kanselahin
+    # lamang ng PRINT clock. Kung wala ito, ang resume path (na nanonood ng QUOTES)
+    # ay naglilinis ng halt marker sa bawat sariwang quote -- at ang mga quote ay
+    # tumatakbo sa BUONG LULD halt -- kaya ibinabalik ito agad ng print-recency check
+    # sa mismong susunod na linya. Sinukat: 939-1021 na halt event kada araw, at ang
+    # halt_resume_dip (ang sanctioned na post-resume entry, ginawa mula sa audited na
+    # trades ni Ross) ay HINDI KAILANMAN naging primary trigger sa 521 candidate /
+    # 30 araw -- ang 600s na dip window ay nauubos habang HALTED PA ang pangalan.
+    chili_momentum_halt_print_resume_symmetry_enabled: bool = Field(
+        default=True,
+        validation_alias=AliasChoices(
+            "CHILI_MOMENTUM_HALT_PRINT_RESUME_SYMMETRY_ENABLED"
+        ),
+        description="A halt inferred by the PRINT-RECENCY path is only cleared when the TRADE TAPE returns (same adaptive window the detect side used), not when a QUOTE looks fresh — quotes stream through a real LULD halt, so the quote-clocked resume fired on every pulse and re-halted on the next line, burning the halt_resume_dip window while the name was still halted. Fail-open everywhere: unknown source / no tape state / any error ⇒ prior behaviour. OFF ⇒ byte-identical.",
+    )
+    # Hard ceiling: hinding-hindi dapat ma-trap ang isang lane sa permanenteng
+    # "halted" na estado dahil sa sirang tape. Lampas dito ay hinahayaan nating
+    # mag-resume ang quote clock gaya ng dati.
+    chili_momentum_halt_print_resume_max_hold_seconds: float = Field(
+        default=3600.0,
+        validation_alias=AliasChoices(
+            "CHILI_MOMENTUM_HALT_PRINT_RESUME_MAX_HOLD_SECONDS"
+        ),
+        description="Safety ceiling for the print-clock resume symmetry: once a suspected halt has been in force this long, the quote-clocked resume is allowed again so a broken/absent tape can never trap a lane in a permanent halted state. Only consulted when chili_momentum_halt_print_resume_symmetry_enabled is ON.",
+    )
     chili_momentum_halt_print_recency_enabled: bool = Field(
         default=True,
         validation_alias=AliasChoices("CHILI_MOMENTUM_HALT_PRINT_RECENCY_ENABLED"),
