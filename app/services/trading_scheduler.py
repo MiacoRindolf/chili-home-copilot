@@ -6535,6 +6535,42 @@ def start_scheduler():
         include_momentum_exec = role in (
             "all", "web", "worker", "cron_only", "momentum_exec_only",
         )
+        # DATA RECORDING (2026-08-24). Ang pagtatala ng tape ay HINDI execution.
+        # Ang mga job na ito ay SUMUSULAT LANG ng market data -- walang order,
+        # walang posisyon, walang broker call. Ang paggamit ng
+        # ``include_momentum_exec`` para sa kanila ay pinagsasama ang "nakakapag-
+        # trade" at "nagtatala ng datos", at ang bunga ay nasukat::
+        #
+        #     2026-08-24 20:0x UTC (16:0x ET, after-hours)
+        #       iqfeed_depth_snapshots   0.4s   <- BUHAY
+        #       iqfeed_trade_ticks       2.5s   <- BUHAY
+        #       momentum_nbbo_spread_tape  342s <- PATAY
+        #
+        # Ang huling 20,000 na row ng tape ay 100% ``source='iqfeed_l1'`` at
+        # ZERO ``massive_snapshot`` -- ang 1-min sampler ay HINDI KAILANMAN
+        # naka-register, dahil ang tanging scheduler container ay tumatakbo sa
+        # ``rnd_only``. Ang tape ay umiiral lamang dahil isinusulat ito ng
+        # ``tape_ws_recorder`` NG LANE, at namamatay iyon kasabay ng lane sa
+        # pagsasara -- kahit na ang sariling gate ng sampler
+        # (``is_sample_session_now``) ay sumasaklaw sa BUONG 04:00-20:00 ET na
+        # data session, premarket HANGGANG afterhours.
+        #
+        # Pangalawang bunga: sinasabi ng ``tape_ws_recorder`` na ini-re-anchor
+        # nito ang ``day_volume`` baseline sa mga awtoritatibong row ng sampler.
+        # Kung hindi tumatakbo ang sampler, WALANG ina-anchor -- kaya ang
+        # sampler ay isang nawawalang DEPENDENCY, hindi lang karagdagan.
+        #
+        # Sabi mismo ng komento sa registration site: "Independent of live
+        # trading (useful in paper/observation too)". Ang gate ang naiwan, hindi
+        # ang layunin.
+        #
+        # Idinadagdag ang ``rnd_only``: ayon sa sariling depinisyon nito
+        # ("cron_only MINUS this set", para HINDI kailanman i-restart ng R&D
+        # deploy ang prosesong may hawak na buhay na posisyon), ang isang job na
+        # sumusulat lang ng datos ay nabibilang dito. HINDI ito nagdaragdag ng
+        # order-capable na surface, kaya hindi nito ginagalaw ang time-share
+        # census contract.
+        include_data_recording = include_momentum_exec or role == "rnd_only"
         _hb_env = os.environ.get("CHILI_SCHEDULER_EMIT_HEARTBEAT", "").strip().lower()
         # FIX C5 (2026-04-29 third-pass audit): the container-split (FIX 45a/b)
         # introduced role='cron_only' for the scheduler-worker container and
@@ -7810,7 +7846,7 @@ def start_scheduler():
         # replay uses REAL spreads (the proxy read PAVS at 53bps vs the 317bps the
         # lane saw). Independent of live trading (useful in paper/observation too);
         # RTH-gating + best-effort live in the sampler. (nbbo_tape.py)
-        if include_momentum_exec and getattr(settings, "chili_momentum_nbbo_tape_enabled", True):
+        if include_data_recording and getattr(settings, "chili_momentum_nbbo_tape_enabled", True):
             _nbbo_secs = max(15, int(getattr(settings, "chili_momentum_nbbo_tape_sample_seconds", 60) or 60))
             _scheduler.add_job(
                 _run_nbbo_spread_sample_job,
