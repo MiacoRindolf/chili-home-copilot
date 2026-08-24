@@ -47,6 +47,8 @@ OFF, ``adaptive_spread_cost_veto_derate`` returns the byte-identical pass-throug
 """
 from __future__ import annotations
 
+import threading
+import time
 import logging
 import math
 from datetime import datetime, timedelta, timezone
@@ -104,6 +106,90 @@ def _f(v: Any) -> Optional[float]:
         return None
 
 
+# ── NAME-SPREAD PERCENTILE CACHE (2026-08-24) ──────────────────────────────
+# BAKIT ITO UMIIRAL, SINUKAT. Ang `name_spread_percentiles` ay nagpapatakbo ng
+# `percentile_cont` sa LAHAT ng row ng simbolo sa loob ng
+# `chili_momentum_spread_norm_lookback_days` (**20 araw**) ng
+# `momentum_nbbo_spread_tape` -- isang **26 GB / 41.8M row** na table na
+# isinusulat sa TICK SPEED (41,525 sample kada 15 minuto para sa isang mainit na
+# pangalan). Ang percentile ay nangangailangan ng buong sort ng tumugmang set.
+#
+# Nasukat sa produksyon (2026-08-24 18:00 UTC): TATLONG sabay na kopya ng query
+# na ito, bawat isa ay **67 segundo**, IO-bound -- habang ang `momentum_live_
+# runner_batch` (dapat kada 10s) ay umabot sa **28.5 segundo**. Ang entry path ay
+# tumatawag nito kada evaluation.
+#
+# Nasukat na epekto sa trigger latency: candidate -> pending_place p50 12.1s,
+# tapos pending_place -> final_bbo p50 **110.0s** (p90 622s). Halos dalawang
+# minuto mula trigger hanggang paglalagay -- at doon namamatay ang scalp: ang
+# `bid_prop` veto ay 98.6% TUMPAK; lumalala na talaga ang libro pagdating natin.
+#
+# Ang distribution ng spread sa 20 ARAW ay halos hindi nagbabago kada minuto,
+# kaya ito ay perpektong kandidato sa cache. WALANG NAGBABAGONG SEMANTIKO: pareho
+# pa ring query, pareho ang resulta -- kinukuwenta lang nang bihira.
+#
+# Hard TTL + hard max size (CLAUDE.md: "Caches must have hard max size + TTL").
+_SPREAD_PCT_CACHE: dict[str, tuple[float, Optional[dict[str, float]]]] = {}
+_SPREAD_PCT_CACHE_LOCK = threading.Lock()
+_SPREAD_PCT_CACHE_MAX = 512
+
+
+def _spread_pct_cache_ttl_s() -> float:
+    """0 o mas mababa ⇒ naka-disable ang cache (byte-identical sa dati)."""
+    try:
+        return float(
+            getattr(settings, "chili_momentum_spread_norm_cache_ttl_seconds", 600.0)
+            or 0.0
+        )
+    except (TypeError, ValueError):
+        return 600.0
+
+
+def _spread_pct_cache_key(sym: str, lookback_days: float) -> str:
+    """⚠️ Ang KEY ay dapat kasama ang LOOKBACK. Dalawang caller na may magkaibang
+    window ay MAGKAIBANG statistic; ang pag-key sa simbolo lang ay magsisilbi ng
+    maling distribution sa isa sa kanila."""
+    try:
+        lb = round(float(lookback_days), 3)
+    except (TypeError, ValueError):
+        lb = -1.0
+    return f"{sym}|{lb}"
+
+
+def _spread_pct_cache_get(key: str, ttl_s: float):
+    """(hit, value). Ang hit ay True kahit ang naka-cache na halaga ay None --
+    ang isang manipis na pangalan ay hindi dapat muling mag-scan ng 20 araw kada tick."""
+    if ttl_s <= 0:
+        return False, None
+    now = time.monotonic()
+    with _SPREAD_PCT_CACHE_LOCK:
+        hit = _SPREAD_PCT_CACHE.get(key)
+        if hit is None:
+            return False, None
+        stamped, value = hit
+        if (now - stamped) > ttl_s:
+            _SPREAD_PCT_CACHE.pop(key, None)
+            return False, None
+    return True, (dict(value) if isinstance(value, dict) else None)
+
+
+def _spread_pct_cache_put(key: str, value, ttl_s: float) -> None:
+    if ttl_s <= 0:
+        return
+    now = time.monotonic()
+    with _SPREAD_PCT_CACHE_LOCK:
+        # Hard cap: itapon muna ang mga expired, saka ang pinakaluma kung puno pa.
+        if len(_SPREAD_PCT_CACHE) >= _SPREAD_PCT_CACHE_MAX:
+            for k in [
+                k for k, (t, _v) in _SPREAD_PCT_CACHE.items() if (now - t) > ttl_s
+            ]:
+                _SPREAD_PCT_CACHE.pop(k, None)
+        while len(_SPREAD_PCT_CACHE) >= _SPREAD_PCT_CACHE_MAX:
+            oldest = min(_SPREAD_PCT_CACHE.items(), key=lambda kv: kv[1][0])[0]
+            _SPREAD_PCT_CACHE.pop(oldest, None)
+        _SPREAD_PCT_CACHE[key] = (now, dict(value) if isinstance(value, dict) else None)
+
+
 def name_spread_percentiles(
     db: Session,
     symbol: str,
@@ -111,6 +197,7 @@ def name_spread_percentiles(
     lookback_days: float,
     now_utc: Optional[datetime] = None,
     min_samples: int = 8,
+    use_cache: bool = False,
 ) -> Optional[dict[str, float]]:
     """The name's OWN recent spread distribution (p50/p75/p90 bps) over the last
     ``lookback_days`` of its ``momentum_nbbo_spread_tape`` history.
@@ -123,8 +210,22 @@ def name_spread_percentiles(
     sym = str(symbol or "").strip().upper()
     if not sym or lookback_days <= 0:
         return None
+    # ⚠️ AS-OF / REPLAY: kapag ang caller ay nagbigay ng TAHASANG now_utc, ito ay
+    # historical na pagbabasa. Ang cache ay naka-index sa WALL CLOCK (time.monotonic),
+    # kaya ang pagsilbi mula rito ay magpapakain ng live-time na distribution sa isang
+    # as-of na desisyon -- katahimikang pagsira sa replay. Live lang ang naka-cache.
+    _as_of = now_utc is not None
     now_utc = now_utc or datetime.now(timezone.utc)
     since = now_utc.replace(tzinfo=None) - timedelta(days=float(lookback_days))
+    # OPT-IN LANG. Ang function na ito ay isang PURONG query helper at ang
+    # kontrata nito ay isang sariwang basa kada tawag; ang pag-cache sa loob ay
+    # tahimik na magbabago niyon para sa BAWAT caller at test. Ang HOT na caller
+    # (ang entry-path derate) ang nag-o-opt-in, dahil doon binabayaran ang 67s.
+    _ttl = 0.0 if (_as_of or not use_cache) else _spread_pct_cache_ttl_s()
+    _ckey = _spread_pct_cache_key(sym, lookback_days)
+    _cached_hit, _cached_val = _spread_pct_cache_get(_ckey, _ttl)
+    if _cached_hit:
+        return _cached_val
     try:
         # SAVEPOINT (2026-08-23): tumatakbo ito sa session ng CALLER sa loob ng
         # entry gate. Ang hubad na try/except ay hindi fail-open — ang nabigong
@@ -151,21 +252,26 @@ def name_spread_percentiles(
         logger.debug("[spread_cost_veto] percentile read failed for %s: %s", sym, exc)
         return None
     if not row or row[0] is None:
+        _spread_pct_cache_put(_ckey, None, _ttl)
         return None
     n = int(row[3] or 0)
     if n < int(min_samples):
+        _spread_pct_cache_put(_ckey, None, _ttl)
         return None
     p50 = _f(row[0])
     p75 = _f(row[1])
     p90 = _f(row[2])
     if p50 is None or p50 <= 0:
+        _spread_pct_cache_put(_ckey, None, _ttl)
         return None
-    return {
+    out = {
         "p50": p50,
         "p75": p75 if (p75 is not None and p75 > 0) else p50,
         "p90": p90 if (p90 is not None and p90 > 0) else (p75 or p50),
         "n": float(n),
     }
+    _spread_pct_cache_put(_ckey, out, _ttl)
+    return dict(out)
 
 
 def adaptive_spread_cost_veto_derate(
@@ -277,7 +383,11 @@ def adaptive_spread_cost_veto_derate(
     cost_of_r = spread_dollars / sd if sd > 0 else float("inf")
 
     # ── (a) Name-relative anomaly: spread vs the name's OWN rolling distribution ──
-    pct = name_spread_percentiles(db, symbol, lookback_days=lookback_days, now_utc=now_utc)
+    # use_cache=True: ito ang per-tick na entry path — tingnan ang tala ng cache
+    # sa itaas (67s kada scan, 3 sabay, tick 28.5s).
+    pct = name_spread_percentiles(
+        db, symbol, lookback_days=lookback_days, now_utc=now_utc, use_cache=True
+    )
     meta: dict[str, Any] = {
         "symbol": str(symbol or "").upper(),
         "spread_bps": round(sb, 1),
