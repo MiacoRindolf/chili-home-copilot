@@ -28,3 +28,12 @@
 *.7z binary
 *.db binary
 *.sqlite binary
+
+# WINDOWS BATCH (2026-08-24). Ang `* text=auto eol=lf` sa itaas ay nagno-normalize
+# ng LAHAT sa LF sa checkout. Para sa .cmd/.bat iyon ay panganib, hindi kagustuhan:
+# ang `run-*-bridge.cmd` ay may supervisor restart loop na nakasalalay sa
+# `:bridge_loop` / `goto bridge_loop`, at ang cmd.exe ay may kilalang
+# label-resolution na kapritso sa mga LF-only na file. Ang buhay na gumaganang
+# kopya ay CRLF (54 CRLF, 0 LF-lang) -- panatilihin iyon nang eksakto.
+*.cmd text eol=crlf
+*.bat text eol=crlf
