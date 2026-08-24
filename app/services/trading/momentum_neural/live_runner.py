@@ -22779,12 +22779,46 @@ def _register_print_recency_halt_check(db, sess, le: dict, tick: Any = None) -> 
         except (TypeError, ValueError):
             _active_min = 5
 
+        # LONG-HALT ACTIVITY LOOKBACK (2026-08-24). Ang activity gate ay dating
+        # nagbabasa ng prints sa loob LAMANG ng _active_window (300s). Ang LULD
+        # halt ay MAS MAHABA kaysa doon -- sinukat ngayong araw sa 56 na halt:
+        # p50 397s, p90 1306s, p95 1577s, max 3466s -- kaya habang halted ang
+        # pangalan ay nauubos ang window, bumabagsak ang recent_print_count sa 0,
+        # at NABUBULAG ang detector. Sinukat na bunga: 44 MINUTONG lag sa unang
+        # tunay na resume ng DAIC (09:40:21 laban sa 10:24:53), 14 min sa BTCT.
+        # Pagdating ni CHILI ay tapos na ang HOD at bumagsak na ito ng -35%.
+        #
+        # ⚠️ ANG DENSITY AY HINDI NILULUWAGAN. Ang required na bilang ay
+        # ini-scale ng PAREHONG proporsyon, kaya ang kinakailangang prints/segundo
+        # ay EKSAKTONG pareho -- mas malawak lang ang ebidensya, hindi mas mahina.
+        # Ang tumutulo-tulong pangalan ay hindi pa rin kailanman maiimpluwensyang
+        # halted. Fail-open: anumang masamang halaga ⇒ ang lumang tight window.
+        _lookback = _active_window
+        _lookback_min = _active_min
+        try:
+            _cand = float(
+                getattr(
+                    settings,
+                    "chili_momentum_halt_print_activity_lookback_seconds",
+                    1800.0,
+                )
+                or 0.0
+            )
+            if _cand > _active_window:
+                _lookback = _cand
+                _lookback_min = max(
+                    _active_min, int(round(_active_min * (_lookback / _active_window)))
+                )
+        except (TypeError, ValueError, ZeroDivisionError):
+            _lookback = _active_window
+            _lookback_min = _active_min
+
         from .nbbo_tape import print_recency_state
 
         st = print_recency_state(
             db,
             sym,
-            recent_active_window_s=_active_window,
+            recent_active_window_s=_lookback,
             gap_sample_window_s=max(_active_window, _gap_floor * _gap_mult),
             now_utc=_utcnow(),
         )
@@ -22797,7 +22831,7 @@ def _register_print_recency_halt_check(db, sess, le: dict, tick: Any = None) -> 
             return
         # FAIL-CLOSED activity requirement: the name must have been RECENTLY ACTIVE (enough
         # prints in the lookback) — a quiet never-active name is never inferred as halted.
-        if recent_n < _active_min:
+        if recent_n < _lookback_min:
             return
         # ADAPTIVE no-print window: a multiple of the recent median gap, floored. A name
         # that normally prints every 2s halts far faster than one printing every 20s.
@@ -23051,26 +23085,38 @@ def _register_fresh_quote_tick(db, sess, le: dict, tick: Any = None) -> None:
             # self-sufficient under the master, independent of the sub-flag) — capture it
             # when EITHER the standalone chain gate OR the add-into-halt master is ON. Both
             # OFF ⇒ the counter is never touched ⇒ byte-identical.
-            if bool(getattr(settings, "chili_momentum_halt_chain_risk_gate_enabled", False)) or bool(
-                getattr(settings, "chili_momentum_add_into_halt_enabled", False)
-            ):
-                _hl = _float_or_none(le.get("halt_level"))
-                _resume_px = None
-                if tick is not None:
-                    try:
-                        _resume_px = float(getattr(tick, "bid", None) or getattr(tick, "mid", None) or 0) or None
-                    except (TypeError, ValueError):
-                        _resume_px = None
-                _prev = int(le.get("halt_chain_up_count") or 0)
-                if _hl is not None and _resume_px is not None and _hl > 0:
-                    if _resume_px >= _hl * (1.0 - 1e-9):
-                        le["halt_chain_up_count"] = _prev + 1
-                    else:
-                        le["halt_chain_up_count"] = 0  # resumed down/fade ends the up-chain
-                else:
-                    # No directional read available ⇒ count it as a halt-up (conservative:
-                    # an unclassified halt still extends the chain → tighter, not looser).
+            # OBSERVATION-ONLY (2026-08-24). Dati ay flag-gated ito, at PAREHONG
+            # flag ay OFF sa produksyon -- kaya ang halt_chain_up_count ay NULL sa
+            # BAWAT halt_resumed event na naitala natin. Ang chain position ANG
+            # pangunahing signal ng halt game: sinukat ngayong araw (n=18, ISANG
+            # araw, kaya LEAD hindi patunay) ang median 5m MFE ay +7.0% sa chain
+            # 1-3 laban sa +0.9% sa chain 4+. Hindi natin iyon mapapatunayan nang
+            # walang bilang, at hindi tayo makakakuha ng bilang habang naka-gate.
+            #
+            # Isinusulat na ngayon nang walang kondisyon. PURONG OBSERBASYON: ang
+            # TANGING consumer ay ang halt_chain_risk_gate, na OFF -- kaya walang
+            # desisyong nagbabago dito. Fail-open pa rin ang buong block.
+            #
+            # ⚠️ HUWAG buksan ang halt_chain_risk_gate para "gamitin" ito. Iyon ay
+            # DEFENSIBO (halt_chain_block_count=3) at hahadlang EKSAKTO sa
+            # pinakamagandang bucket na nasukat (chain 3: MFE +7.0%, MAE -0.4%).
+            _hl = _float_or_none(le.get("halt_level"))
+            _resume_px = None
+            if tick is not None:
+                try:
+                    _resume_px = float(getattr(tick, "bid", None) or getattr(tick, "mid", None) or 0) or None
+                except (TypeError, ValueError):
+                    _resume_px = None
+            _prev = int(le.get("halt_chain_up_count") or 0)
+            if _hl is not None and _resume_px is not None and _hl > 0:
+                if _resume_px >= _hl * (1.0 - 1e-9):
                     le["halt_chain_up_count"] = _prev + 1
+                else:
+                    le["halt_chain_up_count"] = 0  # resumed down/fade ends the up-chain
+            else:
+                # No directional read available ⇒ count it as a halt-up (conservative:
+                # an unclassified halt still extends the chain → tighter, not looser).
+                le["halt_chain_up_count"] = _prev + 1
         except Exception:
             pass
         # Capture the RESUMPTION price (the first fresh price on resume) so the
