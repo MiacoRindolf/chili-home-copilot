@@ -6546,19 +6546,31 @@ def start_scheduler():
         #       iqfeed_trade_ticks       2.5s   <- BUHAY
         #       momentum_nbbo_spread_tape  342s <- PATAY
         #
-        # Ang huling 20,000 na row ng tape ay 100% ``source='iqfeed_l1'`` at
-        # ZERO ``massive_snapshot`` -- ang 1-min sampler ay HINDI KAILANMAN
-        # naka-register, dahil ang tanging scheduler container ay tumatakbo sa
-        # ``rnd_only``. Ang tape ay umiiral lamang dahil isinusulat ito ng
-        # ``tape_ws_recorder`` NG LANE, at namamatay iyon kasabay ng lane sa
-        # pagsasara -- kahit na ang sariling gate ng sampler
-        # (``is_sample_session_now``) ay sumasaklaw sa BUONG 04:00-20:00 ET na
-        # data session, premarket HANGGANG afterhours.
+        # SINO ANG SUMUSULAT NITO, AT KAILAN SILA NAMAMATAY. Dalawang manunulat
+        # ang mayroon ang tape, at PAREHO silang naka-tali sa lane::
         #
-        # Pangalawang bunga: sinasabi ng ``tape_ws_recorder`` na ini-re-anchor
-        # nito ang ``day_volume`` baseline sa mga awtoritatibong row ng sampler.
-        # Kung hindi tumatakbo ang sampler, WALANG ina-anchor -- kaya ang
-        # sampler ay isang nawawalang DEPENDENCY, hindi lang karagdagan.
+        #   1. ``tape_ws_recorder``  -- nasa loob ng proseso ng lane, sumusulat
+        #      kada quote change (``source='iqfeed_l1'``, ~174/s)
+        #   2. ang 1-min sampler sa ibaba (``source='massive_snapshot'``) --
+        #      naka-register sa pamamagitan ng ``include_momentum_exec``, at ang
+        #      lane mismo ay tumatakbo sa role na ``momentum_exec_only``
+        #
+        # Kaya kapag nagsara ang lane, PAREHONG manunulat ang namamatay, at ang
+        # tanging natitirang scheduler container (``rnd_only``) ay hindi
+        # nagre-register ng alinman. WALA nang nagtatala.
+        #
+        # Ito ay kahit na ang sariling gate ng sampler
+        # (``is_sample_session_now``) ay sumasaklaw na sa BUONG 04:00-20:00 ET
+        # na data session -- premarket HANGGANG afterhours. Tama ang layunin;
+        # ang role gate ang humaharang dito.
+        #
+        # ⚠️ PAGWAWASTO SA UNANG PAGSUSURI (2026-08-24). Inangkin ko noong
+        # "hindi kailanman naka-register" ang sampler, batay sa huling 20,000 na
+        # row na 100% ``iqfeed_l1``. MALI ang pagbasang iyon: sa 174 row/s ng WS
+        # recorder, ang 20,000 na row ay mga DALAWANG MINUTO lang -- masyadong
+        # makitid para makita ang isang sampler na sumusulat ng 1 row/min/symbol.
+        # Ang tamang sukat ay nagpapakita ng mga ``massive_snapshot`` na row
+        # ngayong araw. Tumatakbo ang sampler; namamatay lang ito kasama ng lane.
         #
         # Sabi mismo ng komento sa registration site: "Independent of live
         # trading (useful in paper/observation too)". Ang gate ang naiwan, hindi

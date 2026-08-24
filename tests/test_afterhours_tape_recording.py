@@ -6,15 +6,22 @@ SINUKAT (2026-08-24, 20:0x UTC = 16:0x ET, after-hours)::
     iqfeed_trade_ticks         2.5s                        <- BUHAY
     momentum_nbbo_spread_tape  342s                        <- PATAY
 
-Ang huling **20,000** na row ng tape ay 100% ``source='iqfeed_l1'`` at **ZERO**
-``massive_snapshot``: ang 1-min sampler ay hindi kailanman naka-register. Ang
-gate nito ay ``include_momentum_exec``, at ang tanging scheduler container ay
-tumatakbo sa ``rnd_only``.
+DALAWA ang manunulat ng tape, at PAREHO silang naka-tali sa lane:
 
-Kaya ang tape ay umiiral lamang dahil isinusulat ito ng ``tape_ws_recorder`` ng
-LANE -- at namamatay iyon kasabay ng lane sa pagsasara. Samantala ang sariling
-gate ng sampler (``is_sample_session_now``) ay sumasaklaw sa BUONG 04:00-20:00
-ET na data session: *premarket hanggang afterhours*.
+1. ``tape_ws_recorder`` -- nasa loob ng proseso ng lane (``source='iqfeed_l1'``)
+2. ang 1-min sampler (``source='massive_snapshot'``) -- naka-gate sa
+   ``include_momentum_exec``, at ang lane ay tumatakbo sa ``momentum_exec_only``
+
+Kapag nagsara ang lane, PAREHO silang namamatay -- at ang tanging natitirang
+scheduler container ay tumatakbo sa ``rnd_only``, na hindi nagre-register ng
+alinman. Samantala ang sariling gate ng sampler (``is_sample_session_now``) ay
+sumasaklaw na sa BUONG 04:00-20:00 ET na data session: *premarket hanggang
+afterhours*.
+
+⚠️ PAGWAWASTO. Inangkin ko noong "hindi kailanman naka-register" ang sampler,
+batay sa huling 20,000 na row na 100% ``iqfeed_l1``. Mali iyon: sa 174 row/s,
+ang 20,000 na row ay mga dalawang minuto lang -- masyadong makitid para makita
+ang 1 row/min/symbol. May ``massive_snapshot`` na row ngayong araw.
 
 ⚠️ Hindi ito kayang ayusin sa pamamagitan ng pagpapatakbo ng ``momentum_exec_only``
 na container: sinubukan iyon noong 2026-08-24 at ang dobleng viability refresh
