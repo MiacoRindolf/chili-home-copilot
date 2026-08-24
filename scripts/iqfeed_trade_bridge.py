@@ -1378,23 +1378,34 @@ def _publish_released_capture_rows(
     if handoff is None:
         lost = len(trade_rows) + len(quote_rows)
         _emit_ok, _sup, _agg = _uncaptured_should_log(lost)
-        if UNCAPTURED_DIAGNOSTIC_FLAG in sys.argv and _emit_ok:
-            log.error(
-                "IQFeed replay coverage unavailable (suppressed=%d agg_lost=%d): %s",
-                _sup,
-                _agg,
-                json.dumps(
-                    {
-                        "code": "iqfeed_l1_capture_handoff_unbound_diagnostic",
-                        "lost_rows": lost,
-                        "available_at": available_at.astimezone(timezone.utc)
-                        .isoformat()
-                        .replace("+00:00", "Z"),
-                    },
-                    sort_keys=True,
-                    separators=(",", ":"),
-                ),
-            )
+        # ⚠️ ANG THROTTLE AY NAGPAPASYA LAMANG KUNG MAG-LO-LOG (2026-08-24).
+        # Ang unang bersyon ng throttle na ito ay naglagay ng `and _emit_ok` sa
+        # kondisyon at iniwan ang `return` SA LOOB nito -- kaya sa 29 sa bawat 30
+        # segundo ay dumadaloy ang daan patungo sa `raise` KAHIT nakatakda ang
+        # diagnostic flag. Ang bunga ay hindi tahimik: ang BUONG batch na sulat ay
+        # nawawala ("trade/BBO insert failed (43 trade, 71 BBO rows)"), kaya ang L1
+        # tape ay bumaba sa ~1 matagumpay na batch kada 30s. Nagmukha iyong mga
+        # print burst na pinaghihiwalay ng mahahabang gap -- at 52 sa 56 na
+        # suspected-halt detection ngayong araw ay artifact ng butas na ito.
+        # Ang flag ANG nagpapasya ng fail-open; ang throttle ay tungkol sa INGAY.
+        if UNCAPTURED_DIAGNOSTIC_FLAG in sys.argv:
+            if _emit_ok:
+                log.error(
+                    "IQFeed replay coverage unavailable (suppressed=%d agg_lost=%d): %s",
+                    _sup,
+                    _agg,
+                    json.dumps(
+                        {
+                            "code": "iqfeed_l1_capture_handoff_unbound_diagnostic",
+                            "lost_rows": lost,
+                            "available_at": available_at.astimezone(timezone.utc)
+                            .isoformat()
+                            .replace("+00:00", "Z"),
+                        },
+                        sort_keys=True,
+                        separators=(",", ":"),
+                    ),
+                )
             return 0, lost
         raise RuntimeError(
             "IQFeed L1 capture handoff is unbound; refusing silent released-row loss"
@@ -1434,28 +1445,31 @@ def _record_unreleased_capture_gap(
     if handoff is None:
         lost = max(1, len(streams))
         _emit_ok, _sup, _agg = _uncaptured_should_log(lost)
-        if UNCAPTURED_DIAGNOSTIC_FLAG in sys.argv and _emit_ok:
-            log.error(
-                "IQFeed replay coverage unavailable (suppressed=%d agg_lost=%d): %s",
-                _sup,
-                _agg,
-                json.dumps(
-                    {
-                        "code": "iqfeed_l1_source_frame_unbound_diagnostic",
-                        "symbol": symbol,
-                        "streams": sorted(
-                            str(getattr(stream, "value", stream)) for stream in streams
-                        ),
-                        "reason": reason,
-                        "lost_count": lost,
-                        "available_at": available_at.astimezone(timezone.utc)
-                        .isoformat()
-                        .replace("+00:00", "Z"),
-                    },
-                    sort_keys=True,
-                    separators=(",", ":"),
-                ),
-            )
+        # Tingnan ang parehong tala sa itaas: ang flag ANG nagpapasya ng fail-open,
+        # ang throttle ay tungkol lamang sa INGAY. Hinding-hindi dapat sila pagsamahin.
+        if UNCAPTURED_DIAGNOSTIC_FLAG in sys.argv:
+            if _emit_ok:
+                log.error(
+                    "IQFeed replay coverage unavailable (suppressed=%d agg_lost=%d): %s",
+                    _sup,
+                    _agg,
+                    json.dumps(
+                        {
+                            "code": "iqfeed_l1_source_frame_unbound_diagnostic",
+                            "symbol": symbol,
+                            "streams": sorted(
+                                str(getattr(stream, "value", stream)) for stream in streams
+                            ),
+                            "reason": reason,
+                            "lost_count": lost,
+                            "available_at": available_at.astimezone(timezone.utc)
+                            .isoformat()
+                            .replace("+00:00", "Z"),
+                        },
+                        sort_keys=True,
+                        separators=(",", ":"),
+                    ),
+                )
             return lost
         raise RuntimeError(
             "IQFeed L1 capture handoff is unbound; refusing silent source-frame loss"
