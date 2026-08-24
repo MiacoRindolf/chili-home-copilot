@@ -92,6 +92,7 @@ from .alpaca_orphan_claims import (
     resolve_action_claim_committed,
     resolve_owner_transport_terminal_committed,
     retire_deadman_close_handoff_committed,
+    supersede_unsent_deadman_close_handoff_committed,
     retire_deadman_handoff_for_fractional_day_close_committed,
     update_action_claim_phase_committed,
 )
@@ -13700,6 +13701,59 @@ def _submit_live_market_exit_impl(
             frozen_request = (
                 dict(frozen_request) if isinstance(frozen_request, dict) else {}
             )
+            # ── VERB-ONLY DEADLOCK ESCAPE (2026-08-24) ──────────────────
+            # Ang dalawang literal-submit na seam ay nag-a-assert ng magkaibang
+            # successor verb (limit-close -> "limit", market-close -> "market").
+            # Kung alin ang tumakbo MUNA ang nagfi-freeze; hinihingi pagkatapos
+            # ng _apply_frozen_successor na tumugma ang naka-freeze na order_type
+            # sa KASALUKUYANG derivation. Kapag nagbago ang exit decision --
+            # bailout nag-freeze ng "limit", tapos operator_flatten nag-derive ng
+            # "market" -- PERMANENTE ang mismatch. Sinukat sa session 15152/XPON:
+            # 340 block sa isang araw, qty=51 na hindi kailanman nailabas,
+            # attempts na naka-pin sa 0, successor_order_request na NULL magpakailanman.
+            #
+            # Walang legal na labasan sa dati: tinatanggihan ng prepare ang muling
+            # pag-freeze (immutable successor_intent) at hinihingi ng retire ang
+            # isang TERMINAL na successor -- na hindi kailanman naipadala.
+            #
+            # LIGTAS dahil sa isang katotohanan: phase=="intent_frozen" AT
+            # successor_order_request is None ay nangangahulugang WALANG order na
+            # umabot sa broker para sa envelope na ito, kaya ang pagpapalit ng
+            # HANGARIN ay hindi maaaring mag-double-fill. Ang deadman ay
+            # nagbabantay pa rin sa posisyon habang tayo ay nagpapalit; iginigiit
+            # iyon ng durable primitive bago sumulat. Ang susunod na pulse ay
+            # nag-fi-freeze nang malinis sa pamamagitan ng ordinaryong prepare path.
+            if (
+                exact_handoff
+                and handoff.get("successor_order_request") is None
+                and owner_context is not None
+            ):
+                _frozen_verb = str(
+                    frozen_request.get("order_type") or ""
+                ).strip().lower()
+                _current_verb = str(successor_order_type or "").strip().lower()
+                if (
+                    _frozen_verb
+                    and _current_verb
+                    and _frozen_verb != _current_verb
+                    and supersede_unsent_deadman_close_handoff_committed(
+                        **owner_context,
+                        handoff_token=str(handoff.get("handoff_token") or ""),
+                        frozen_order_type=_frozen_verb,
+                        superseding_order_type=_current_verb,
+                    )
+                ):
+                    le.pop("deadman_released_for_close", None)
+                    _commit_le(sess, le)
+                    _emit(db, sess, "deadman_close_handoff_superseded", {
+                        "frozen_order_type": _frozen_verb,
+                        "superseding_order_type": _current_verb,
+                        "reason": str(reason),
+                        "handoff_token": str(handoff.get("handoff_token") or ""),
+                    })
+                    return _block(
+                        "deadman_close_handoff_superseded_for_new_order_type"
+                    )
             if not exact_handoff or _apply_frozen_successor(frozen_request) is None:
                 return _block("deadman_close_handoff_identity_mismatch")
 
