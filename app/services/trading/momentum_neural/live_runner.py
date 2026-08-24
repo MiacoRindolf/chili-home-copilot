@@ -22549,6 +22549,15 @@ def _mark_suspected_halt(db, sess, le: dict, tick: Any = None, *, detail: dict |
     if le.get("suspected_halt_since_utc"):
         return
     le["suspected_halt_since_utc"] = _utcnow().isoformat()
+    # WHICH CLOCK SAW THIS HALT (2026-08-24). Ang dalawang inference path ay
+    # nanonood ng MAGKAIBANG orasan: ang quote-staleness path ay nanonood ng
+    # QUOTES, ang R6 print-recency path ng trade PRINTS. Ang resume ay dapat
+    # basahin ang PAREHONG orasan na nakakita ng halt -- kung hindi, ang isang
+    # print-detected na halt ay malilinis ng isang sariwang quote habang ang
+    # tape ay tahimik pa rin. Itinatala dito para masabi ng resume ang kaibahan.
+    le["suspected_halt_source"] = str(
+        (detail or {}).get("source") or "stale_quote"
+    ).strip().lower()
     # MED-3 fail-SAFE: clear any PRIOR resume markers at the onset of a NEW halt so a
     # RE-HALT does not read stale resume data (halt_resumed_at_utc / halt_resumption_open
     # are stamped on resume but were never cleared at a fresh halt onset). The resume-stamp
@@ -22901,6 +22910,116 @@ def _entry_pricebook_snapshot(symbol: str) -> dict | None:
         return None
 
 
+def _print_detected_halt_tape_still_silent(db, sess, le: dict) -> bool:
+    """True kapag ang halt na ito ay nakita ng PRINT clock at ang tape ay TAHIMIK PA RIN.
+
+    ANG BUG NA TINATAPOS NITO (sinukat live, 2026-08-24, DAIC). Dalawang
+    magkasunod na linya sa green-tick path ay nanonood ng magkaibang orasan::
+
+        _register_fresh_quote_tick(...)          <- RESUME sa sariwang QUOTE
+        _register_print_recency_halt_check(...)  <- HALT sa tahimik na PRINT
+
+    Sa tunay na LULD halt ay humihinto ang mga PRINT habang **patuloy** ang mga
+    QUOTE -- iyon mismo ang dahilan kung bakit idinagdag ang R6 print-recency
+    path (tingnan ang docstring nito: ang quote path ay nagutom mula 2026-06-26).
+    Pero ang RESUME side ay naiwan sa quote clock, kaya ang unang linya ay
+    naglilinis ng halt marker na ibinabalik agad ng pangalawa -- isang flip-flop
+    kada lane pulse (~9-10s)::
+
+        10:59:41  TUNAY NA PRINT      <- huling print bago ang halt
+        11:00:49  suspected_halt      <- tama
+        11:00:58  halt_resumed        <- MALI, zero print
+        11:01:48  halt_resumed        <- MALI
+        11:02:58  halt_resumed        <- MALI
+        11:05:25  TUNAY NA PRINT      <- ang tunay na resume: WALANG event
+
+    Sinukat: 939-1021 na halt event kada araw, at ang ``halt_resume_dip`` --
+    ang sanctioned na post-resume entry, na ginawa mula sa audited na trades ni
+    Ross -- ay **hindi kailanman naging primary trigger sa 521 candidate / 30
+    araw**. Ang naka-stamp na ``halt_resumed_at_utc`` ay galing sa phantom, kaya
+    ang 600s na dip window ay nauubos habang HALTED PA ang pangalan.
+
+    Ang gate na ito ay ginagaya ang EKSAKTONG threshold ng detect side
+    (``max(gap_floor, median_gap * gap_mult)``) kaya simetriko ang lifecycle:
+    ang halt na nakita ng prints ay kinakansela lamang ng prints.
+
+    FAIL-OPEN sa bawat sulok. Anumang kawalan ng katiyakan -- ibang source, walang
+    tape state, error -- ay nagbabalik ng False (payagan ang lumang gawi). Mayroon
+    ding HARD CEILING: lampas sa ``chili_momentum_halt_print_resume_max_hold_seconds``
+    ay hinahayaan nating mag-resume ang quote clock, para hindi kailanman ma-trap
+    ang isang lane sa permanenteng "halted" na estado dahil sa sirang tape.
+    """
+    try:
+        if not bool(
+            getattr(settings, "chili_momentum_halt_print_resume_symmetry_enabled", True)
+        ):
+            return False
+        # Ang quote-detected na halt ay pag-aari ng quote clock -- huwag galawin.
+        if str(le.get("suspected_halt_source") or "").strip().lower() != "print_recency":
+            return False
+        sym = (getattr(sess, "symbol", None) or "").strip().upper()
+        if not sym or sym.endswith("-USD"):
+            return False
+        # HARD CEILING -- huwag kailanman mag-trap ng lane nang habambuhay.
+        try:
+            _ceiling = float(
+                getattr(settings, "chili_momentum_halt_print_resume_max_hold_seconds", 3600.0)
+                or 3600.0
+            )
+        except (TypeError, ValueError):
+            _ceiling = 3600.0
+        since_raw = le.get("suspected_halt_since_utc")
+        if since_raw:
+            try:
+                _since = datetime.fromisoformat(str(since_raw))
+                _now = _utcnow()
+                if _since.tzinfo is None and _now.tzinfo is not None:
+                    _now = _now.replace(tzinfo=None)
+                elif _since.tzinfo is not None and _now.tzinfo is None:
+                    _since = _since.replace(tzinfo=None)
+                if (_now - _since).total_seconds() >= _ceiling:
+                    return False
+            except (TypeError, ValueError):
+                pass
+        try:
+            _gap_mult = max(1.0, float(getattr(settings, "chili_momentum_halt_print_gap_multiple", 8.0) or 8.0))
+        except (TypeError, ValueError):
+            _gap_mult = 8.0
+        try:
+            _gap_floor = max(1.0, float(getattr(settings, "chili_momentum_halt_print_gap_floor_seconds", 30.0) or 30.0))
+        except (TypeError, ValueError):
+            _gap_floor = 30.0
+        try:
+            _active_window = max(1.0, float(getattr(settings, "chili_momentum_halt_print_recent_active_seconds", 300.0) or 300.0))
+        except (TypeError, ValueError):
+            _active_window = 300.0
+
+        from .nbbo_tape import print_recency_state
+
+        st = print_recency_state(
+            db,
+            sym,
+            recent_active_window_s=_active_window,
+            gap_sample_window_s=max(_active_window, _gap_floor * _gap_mult),
+            now_utc=_utcnow(),
+        )
+        if not st:
+            return False  # walang tape state ⇒ fail-open (lumang gawi).
+        last_age = st.get("last_print_age_s")
+        if last_age is None:
+            return False
+        median_gap = st.get("median_gap_s")
+        # EKSAKTONG parehong window na ginamit ng detect side.
+        if median_gap is not None and float(median_gap) > 0:
+            window = max(_gap_floor, float(median_gap) * _gap_mult)
+        else:
+            window = _gap_floor
+        # Tahimik pa rin ⇒ HINDI ito resume, gaano man kasariwa ang quote.
+        return bool(float(last_age) >= window)
+    except Exception:
+        return False
+
+
 def _register_fresh_quote_tick(db, sess, le: dict, tick: Any = None) -> None:
     """Quote is live again: clear the streak; if a suspected halt was in force, mark
     the RESUME (starts the entry cooldown) so the lane does not buy the whipsaw.
@@ -22914,6 +23033,16 @@ def _register_fresh_quote_tick(db, sess, le: dict, tick: Any = None) -> None:
     is never touched ⇒ byte-identical."""
     le["halt_stale_streak"] = 0
     if le.get("suspected_halt_since_utc"):
+        # SYMMETRY GATE (2026-08-24) — ang halt na nakita ng PRINT clock ay
+        # kinakansela lamang ng PRINT clock. Kung wala pa ring print, ang
+        # sariwang quote na ito ay HINDI resume: ang mga quote ay tumatakbo sa
+        # buong LULD halt. Kung wala ito, ang linyang ito ay naglilinis ng halt
+        # marker na ibinabalik agad ng print-recency check ng SUSUNOD na linya
+        # sa tumatawag -- isang flip-flop kada pulse na sumunog ng 600s na
+        # halt_resume_dip window habang halted pa ang pangalan.
+        # Fail-open sa bawat sulok, at may hard ceiling para hindi ma-trap.
+        if _print_detected_halt_tape_still_silent(db, sess, le):
+            return
         # GAP 1 — update the consecutive halt-UP chain counter (flag-gated). Read the
         # captured halt_level (GAP 2/3 capture) and the resumption price; up ⇒ +1, else
         # reset. Fail-open: any miss leaves the counter unchanged (never blocks on a bug).
