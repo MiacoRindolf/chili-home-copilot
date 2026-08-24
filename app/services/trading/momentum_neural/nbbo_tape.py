@@ -857,6 +857,89 @@ def print_recency_state(
     }
 
 
+def tape_ingest_recency_age_s(
+    db: Session,
+    *,
+    now_utc: Optional[datetime] = None,
+    lookback_s: float = 600.0,
+) -> Optional[float]:
+    """Seconds since the newest equity-tape row LANDED (``available_at``).
+
+    WRITER liveness, not market activity -- and that distinction is the whole
+    point of this function.
+
+    ANG BUG NA TINATAPOS NITO (sinukat 2026-08-24). Ang feed-stall guard ay
+    gumagamit ng ``global_print_recency_age_s``, na nagbabasa ng
+    ``max(observed_at)`` -- ang oras ng PANGYAYARI ng pinakabagong NAKA-COMMIT
+    na row. Ang sukat na iyon ay pinagsasama ang dalawang magkaibang bagay:
+
+      * tahimik ang market / patay ang feed   (ang gusto nitong makita)
+      * nahuhuli ang WRITER                    (ang aktwal nitong nasusukat)
+
+    Noong 13:30-13:47 UTC ay tumaas ang write lag tungong 201->333 segundo
+    habang ang tape ay malusog na 12,890-22,514 row/min sa 41-46 simbolo. Ang
+    pinakabagong naka-commit na ``observed_at`` ay laging minuto nang luma, kaya
+    ang guard ay nag-ulat ng ``global_age=215.9s`` at nagpasyang "the whole tape
+    is silent" -- at **sinupil ang halt inference sa DALAWANG TUNAY na LULD
+    halt** sa isang +62.7% na galaw. 382 na skip sa 16 na simbolo sa isang araw.
+
+    Ang ``available_at`` ay ang oras ng PAGDATING. Nananatili itong sariwa
+    hangga't may row na dumarating, gaano man kalayo ang backlog ng
+    ``observed_at``. Kaya:
+
+      * writer buhay + tahimik ang pangalan + nagpi-print ang iba ⇒ TUNAY na halt
+      * walang dumarating na row                                  ⇒ ingest stall
+
+    Iyon mismo ang orihinal na hangarin ng guard (2026-08-18: 195 phantom halt
+    nang mawala ang buong tape) nang hindi nagkakamali sa backlog bilang
+    katahimikan.
+
+    Bounded scan; None ⇒ walang row sa lookback / nabigong read -- ang caller
+    ang magpapasya ng fail-closed na semantiko (at may fallback sa lumang sukat).
+    """
+    now_utc = now_utc or datetime.now(timezone.utc)
+    now_aware = (
+        now_utc if now_utc.tzinfo is not None else now_utc.replace(tzinfo=timezone.utc)
+    )
+    try:
+        with db.begin_nested():
+            # ⚠️ INDEX-ONLY: walang index ang available_at (tanging ang partial
+            # ix_iqt_pending_release para sa IS NULL), kaya ang max(available_at)
+            # ay FULL SCAN -- hindi katanggap-tanggap sa isang per-tick na guard
+            # (sinukat: >120s). Ang `id` ay ang PRIMARY KEY at monotonic sa insert
+            # order, kaya ang PINAKABAGONG NAIPASOK na row ay ang max(id) -- isang
+            # pkey index lookup, sub-millisecond. Iyon mismo ang gusto natin:
+            # kailan HULING may dumating na row.
+            #
+            # AS-OF bound: hindi tulad ng print_recency_state ay walang look-ahead
+            # na panganib dito -- ang available_at ay oras ng PAGDATING, at ang
+            # replay ay nagpi-preload nang may sarili nitong arrival clock; ang
+            # tahasang <= now_aware ang nagpapanatili ng parehong kontrata.
+            row = db.execute(
+                text(
+                    "SELECT EXTRACT(EPOCH FROM (:now_aware - available_at)) "
+                    "FROM iqfeed_trade_ticks "
+                    "WHERE available_at IS NOT NULL AND available_at <= :now_aware "
+                    "ORDER BY id DESC LIMIT 1"
+                ),
+                {"now_aware": now_aware},
+            ).fetchone()
+    except Exception as exc:
+        logger.debug("[nbbo_tape] tape ingest recency read failed: %s", exc)
+        return None
+    if not row or row[0] is None:
+        return None
+    try:
+        age = float(row[0])
+    except (TypeError, ValueError):
+        return None
+    # Lampas sa lookback ay walang sinasabi ang sukat na ito kundi "matagal nang
+    # walang dumarating" -- iulat pa rin ito; ang caller ang may threshold.
+    if age < 0:
+        return 0.0
+    return age
+
+
 def global_print_recency_age_s(
     db: Session,
     *,

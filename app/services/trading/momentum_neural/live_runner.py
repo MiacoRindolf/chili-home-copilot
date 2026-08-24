@@ -22860,15 +22860,35 @@ def _register_print_recency_halt_check(db, sess, le: dict, tick: Any = None) -> 
         except (TypeError, ValueError):
             _fs_ratio = 0.5
         if _fs_ratio > 0:
-            from .nbbo_tape import global_print_recency_age_s
+            from .nbbo_tape import (
+                global_print_recency_age_s,
+                tape_ingest_recency_age_s,
+            )
 
-            _global_age = global_print_recency_age_s(db, now_utc=_utcnow())
-            if _global_age is not None and float(_global_age) >= _window * _fs_ratio:
+            # ⚠️ SUKATIN ANG PAGDATING, HINDI ANG ORAS NG PANGYAYARI (2026-08-24).
+            # Ang guard na ito ay dating gumagamit ng max(observed_at) -- ang oras
+            # ng PANGYAYARI ng pinakabagong naka-commit na row. Pinagsasama niyon
+            # ang "tahimik ang tape" at "nahuhuli ang writer". Noong 13:30-13:47
+            # UTC ay umabot ang write lag sa 201->333s habang ang tape ay malusog
+            # na 12,890-22,514 row/min sa 41-46 simbolo; nag-ulat ang guard ng
+            # global_age=215.9s at **sinupil ang halt inference sa DALAWANG TUNAY
+            # na LULD halt** sa isang +62.7% na galaw (382 skip / 16 simbolo).
+            # Ang available_at ay ang oras ng PAGDATING: sariwa hangga't may
+            # dumarating na row, gaano man kalaki ang backlog. Iyon ang eksaktong
+            # tanong ng guard -- "may dumarating pa bang data?" -- at immune ito
+            # sa lag. Fallback sa lumang sukat kapag walang available_at coverage
+            # (lumang row / ibang bridge build) ⇒ byte-identical doon.
+            _ingest_age = tape_ingest_recency_age_s(db, now_utc=_utcnow())
+            _age_basis = "ingest_available_at"
+            if _ingest_age is None:
+                _ingest_age = global_print_recency_age_s(db, now_utc=_utcnow())
+                _age_basis = "legacy_observed_at"
+            if _ingest_age is not None and float(_ingest_age) >= _window * _fs_ratio:
                 _log.info(
                     "[momentum_live] print-recency halt SKIPPED (feed stall) "
-                    "symbol=%s last_print_age=%.1fs window=%.1fs global_age=%.1fs — "
-                    "the whole tape is silent, not this name.",
-                    sym, float(last_age), _window, float(_global_age),
+                    "symbol=%s last_print_age=%.1fs window=%.1fs tape_age=%.1fs "
+                    "basis=%s — no rows are ARRIVING, not just this name.",
+                    sym, float(last_age), _window, float(_ingest_age), _age_basis,
                 )
                 return
         _mark_suspected_halt(
