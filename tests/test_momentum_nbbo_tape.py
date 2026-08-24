@@ -83,7 +83,20 @@ def test_sampling_window_covers_data_session() -> None:
     assert _in_sampling_window(datetime(2026, 6, 9, 14, 0, tzinfo=timezone.utc)) is True   # Tue 10:00 ET
     assert _in_sampling_window(datetime(2026, 6, 9, 9, 0, tzinfo=timezone.utc)) is True    # 05:00 ET premarket
     assert _in_sampling_window(datetime(2026, 6, 9, 22, 0, tzinfo=timezone.utc)) is True   # 18:00 ET afterhours
-    assert _in_sampling_window(datetime(2026, 6, 9, 7, 0, tzinfo=timezone.utc)) is False   # 03:00 ET overnight
+    # OVERNIGHT (2026-08-24): ang 03:00 ET ay nakadepende ngayon sa TIER-2 na
+    # `chili_momentum_overnight_tape_enabled`, na na-flip patungong default=True
+    # sa `ac850b1b7` (#1024). Nang mangyari iyon, ang assertion na ito ay tahimik
+    # nang naging mali at nanatiling pula. Itali ito sa FLAG, hindi sa isang
+    # nakapirming inaasahan, para tumpak ito sa magkabilang setting.
+    from app.config import settings as _settings
+
+    _overnight = bool(
+        getattr(_settings, "chili_momentum_overnight_tape_enabled", False)
+    )
+    assert (
+        _in_sampling_window(datetime(2026, 6, 9, 7, 0, tzinfo=timezone.utc))
+        is _overnight
+    )  # 03:00 ET overnight — in-window IFF ang tier-2 flag ay ON
     assert _in_sampling_window(datetime(2026, 6, 13, 14, 0, tzinfo=timezone.utc)) is False  # Saturday
 
 

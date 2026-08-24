@@ -6506,7 +6506,7 @@ class Settings(BaseSettings):
     chili_momentum_overnight_tape_enabled: bool = Field(
         default=True,
         validation_alias=AliasChoices("CHILI_MOMENTUM_OVERNIGHT_TAPE_ENABLED"),
-        description="Tier 2: sample the NBBO tape overnight for the 24h-eligible whitelist only (bounds DB growth). DEFAULT FALSE. false = overnight arming falls back to the last extended-hours tape row + a live quote probe.",
+        description="Tier 2: sample the NBBO tape overnight for the 24h-eligible whitelist only (bounds DB growth). DEFAULT TRUE mula 2026-08-24 -- ang default ay na-flip sa ac850b1b7 (#1024) at ang teksto na ito ay nanatiling nagsasabing FALSE, kaya tahimik na naging pula ang test_sampling_window_covers_data_session. false = overnight arming falls back to the last extended-hours tape row + a live quote probe.",
     )
     chili_momentum_overnight_size_fraction: float = Field(
         default=0.5,

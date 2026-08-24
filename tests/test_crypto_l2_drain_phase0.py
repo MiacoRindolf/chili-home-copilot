@@ -233,6 +233,35 @@ def test_no_equity_keys_enter_ring(clean_ring):
     assert "AAPL" not in pids and "TSLA" not in pids
 
 
+def _code_without_prose(source: str) -> str:
+    """Ibalik ang source na WALANG komento at docstring; iba pang string ay nananatili.
+
+    Ang mga import-guard sa ibaba ay dapat tumingin sa TUNAY NA CODE. Ang isang
+    modulong nagpapaliwanag ng crypto branch sa sarili nitong docstring ay hindi
+    nagbabasa ng crypto sink -- inilalarawan lang nito ito.
+    """
+    import io as _io
+    import tokenize as _tok
+
+    out: list[str] = []
+    try:
+        tokens = list(_tok.generate_tokens(_io.StringIO(source).readline))
+    except (_tok.TokenError, IndentationError, SyntaxError):
+        return source  # fail-CLOSED: hindi ma-parse => panatilihin ang lahat
+    prev_meaningful = None
+    for tok in tokens:
+        if tok.type == _tok.COMMENT:
+            continue
+        if tok.type == _tok.STRING:
+            # Docstring = isang bare string expression sa simula ng isang bloke.
+            if prev_meaningful in (None, _tok.INDENT, _tok.NEWLINE, _tok.NL, _tok.DEDENT):
+                continue
+        out.append(tok.string)
+        if tok.type not in (_tok.NL, _tok.COMMENT):
+            prev_meaningful = tok.type
+    return chr(10).join(out)
+
+
 def test_momentum_neural_equity_path_isolated_from_crypto_l2_sink():
     """Equity decisions must never be perturbed by crypto rows. The crypto L2 sink
     table (``fast_orderbook``) may be READ only in ``pipeline.py`` and only inside
@@ -256,7 +285,19 @@ def test_momentum_neural_equity_path_isolated_from_crypto_l2_sink():
             or "trading_microstructure_log" in txt
         ):
             writepath_offenders.append(py.name)
-        if "fast_orderbook" in txt and py.name != "pipeline.py":
+        # ⚠️ CODE LANG, hindi prosa (2026-08-24). Ang bantay na ito ay dating
+        # bare-substring at bumagsak sa `entry_gates.py` + `live_runner.py` --
+        # pero ang TATLONG hit ay pawang KOMENTO at DOCSTRING na naglalarawan ng
+        # crypto branch ("crypto -> in-process Coinbase L2 ring + fast_orderbook
+        # fallback"), hindi tunay na pagbasa. Eksaktong parehong false positive
+        # na dati nang inayos sa itaas para sa `crypto_l2_drain` laban sa config
+        # key na `chili_crypto_l2_drain_seconds`.
+        #
+        # Ang mga komento at docstring lang ang inaalis -- ang IBANG string ay
+        # NANATILI, dahil ang tunay na pagbasa ay nabubuhay sa loob ng isang SQL
+        # string (`text("... FROM fast_orderbook ...")`). Ang pag-alis ng lahat
+        # ng string ay magtatago ng eksaktong bagay na binabantayan nito.
+        if "fast_orderbook" in _code_without_prose(txt) and py.name != "pipeline.py":
             sink_offenders.append(py.name)
     assert writepath_offenders == [], (
         f"momentum_neural imports the crypto L2 write path/audit log: {writepath_offenders}"
