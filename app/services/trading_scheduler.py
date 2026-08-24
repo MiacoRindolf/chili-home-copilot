@@ -6539,38 +6539,61 @@ def start_scheduler():
         # Ang mga job na ito ay SUMUSULAT LANG ng market data -- walang order,
         # walang posisyon, walang broker call. Ang paggamit ng
         # ``include_momentum_exec`` para sa kanila ay pinagsasama ang "nakakapag-
-        # trade" at "nagtatala ng datos", at ang bunga ay nasukat::
+        # trade" at "nagtatala ng datos".
         #
-        #     2026-08-24 20:0x UTC (16:0x ET, after-hours)
-        #       iqfeed_depth_snapshots   0.4s   <- BUHAY
-        #       iqfeed_trade_ticks       2.5s   <- BUHAY
-        #       momentum_nbbo_spread_tape  342s <- PATAY
+        # ANG NASUKAT NA BUNGA: pagkatapos ng close, WALANG ``massive_snapshot``
+        # na sampling ang nangyayari sa ``momentum_nbbo_spread_tape`` -- ang
+        # 1-min sampler ay naka-gate palabas ng tanging scheduler container.
         #
-        # SINO ANG SUMUSULAT NITO, AT KAILAN SILA NAMAMATAY. Dalawang manunulat
-        # ang mayroon ang tape, at PAREHO silang naka-tali sa lane::
+        # ⚠️ Ang UNANG bersyon ng komentong ito ay may talahanayan ng recency na
+        # nagmamarka sa tape bilang "PATAY sa 342s". Inalis iyon: isa iyong
+        # SNAPSHOT na nabasa sa loob ng 17-minutong puwang, at ang serye ay
+        # nagpapakitang tuloy-tuloy ang pagsulat sa 5,000-15,000 row/min. Ang
+        # nawawala ay ang ``massive_snapshot`` na sampling, HINDI ang buong tape.
         #
-        #   1. ``tape_ws_recorder``  -- nasa loob ng proseso ng lane, sumusulat
-        #      kada quote change (``source='iqfeed_l1'``, ~174/s)
-        #   2. ang 1-min sampler sa ibaba (``source='massive_snapshot'``) --
-        #      naka-register sa pamamagitan ng ``include_momentum_exec``, at ang
-        #      lane mismo ay tumatakbo sa role na ``momentum_exec_only``
+        # SINO ANG SUMUSULAT NG TAPE (naitama 2026-08-24 pagkatapos ng dalawang
+        # maling pagbasa -- ang bawat pahayag dito ay sinukat, hindi hinuha)::
         #
-        # Kaya kapag nagsara ang lane, PAREHONG manunulat ang namamatay, at ang
-        # tanging natitirang scheduler container (``rnd_only``) ay hindi
-        # nagre-register ng alinman. WALA nang nagtatala.
+        #   source='iqfeed_l1'        -> scripts/iqfeed_trade_bridge.py:384,
+        #                                isang HOST na proseso. Sinasalamin nito
+        #                                ang bawat wastong quote tick sa tape.
+        #                                HINDI ito naka-tali sa lane at
+        #                                nagpapatuloy pagkatapos ng close.
+        #   source='massive_snapshot' -> ang 1-min sampler sa ibaba, na naka-gate
+        #                                dito sa scheduler.
+        #
+        # Ang sampler ay dating naka-gate sa ``include_momentum_exec``. Ang lane
+        # ay tumatakbo sa ``momentum_exec_only`` (timeshare_supervisor.py:61),
+        # kaya nagre-register ito HABANG bukas ang lane -- at tumitigil kapag
+        # sarado. Ang tanging natitirang scheduler container ay ``rnd_only``, na
+        # wala sa listahan, kaya WALANG ``massive_snapshot`` na sampling
+        # pagkatapos ng close.
         #
         # Ito ay kahit na ang sariling gate ng sampler
         # (``is_sample_session_now``) ay sumasaklaw na sa BUONG 04:00-20:00 ET
         # na data session -- premarket HANGGANG afterhours. Tama ang layunin;
         # ang role gate ang humaharang dito.
         #
-        # ⚠️ PAGWAWASTO SA UNANG PAGSUSURI (2026-08-24). Inangkin ko noong
-        # "hindi kailanman naka-register" ang sampler, batay sa huling 20,000 na
-        # row na 100% ``iqfeed_l1``. MALI ang pagbasang iyon: sa 174 row/s ng WS
-        # recorder, ang 20,000 na row ay mga DALAWANG MINUTO lang -- masyadong
-        # makitid para makita ang isang sampler na sumusulat ng 1 row/min/symbol.
-        # Ang tamang sukat ay nagpapakita ng mga ``massive_snapshot`` na row
-        # ngayong araw. Tumatakbo ang sampler; namamatay lang ito kasama ng lane.
+        # NAPATUNAYAN pagkatapos ng ayos, 20:41:38 UTC (16:41 ET, after-hours)::
+        #
+        #     [nbbo_tape] sampled 366 Ross-universe NBBO spreads
+        #
+        # ⚠️ DALAWANG PAGWAWASTO SA SARILING PAGSUSURI, para hindi ito maulit:
+        #
+        #   1. Inangkin kong "hindi kailanman naka-register" ang sampler, batay
+        #      sa huling 20,000 row na 100% ``iqfeed_l1``. MALI: sa ~174 row/s,
+        #      ang 20,000 row ay DALAWANG MINUTO lang -- masyadong makitid para
+        #      makita ang 1 row/min/symbol. ARAL: i-normalize ang sample window
+        #      sa BILIS NG PAGSULAT bago magbasa ng "wala".
+        #
+        #   2. Inangkin kong PAREHONG manunulat ay naka-tali sa lane at ang tape
+        #      ay "namamatay sa close". MALI: ang ``iqfeed_l1`` mirror ay galing
+        #      sa TRADE BRIDGE (host) at nagpapatuloy -- sinukat na 5,000-15,000
+        #      row/min mula 20:18 pataas, matagal bago ang pagbabagong ito. Ang
+        #      "342s stale" kong nabasa ay isang 17-minutong PUWANG (20:01-20:18)
+        #      na hindi ko natukoy ang sanhi; hindi nag-restart ang bridge.
+        #      ARAL: ang isang snapshot ng recency ay HINDI kamatayan -- kumuha
+        #      ng SERYE bago magdeklara.
         #
         # Sabi mismo ng komento sa registration site: "Independent of live
         # trading (useful in paper/observation too)". Ang gate ang naiwan, hindi
