@@ -285,10 +285,17 @@ class WindowsReadOnlyHostProbe:
         # The currently supported legacy identity has no hidden argv in which
         # a secret could be serialized.  Anything else is a new launch policy
         # and must be reviewed before it can become rollback authority.
-        if len(cmdline) != 2 or script_index != 1:
+        # Tingnan ang SUPPORTED_LEGACY_BRIDGE_FLAGS sa host_cutover para sa buong
+        # pagsusuri. Buod: ang bantay na ito ay tungkol sa MGA LIHIM sa argv,
+        # hindi sa BILANG ng token. Ang bawat token na lampas sa script ay dapat
+        # naka-allowlist; ang isang hindi kilalang flag ay tinatanggihan pa rin.
+        if script_index != 1 or not host_cutover.legacy_bridge_flags_supported(
+            cmdline
+        ):
             raise CapturedPaperHostSnapshotError(
                 "PROCESS_ARGV_UNSUPPORTED",
-                f"{role} must have exactly executable + bridge-script argv",
+                f"{role} must be executable + bridge script, then only "
+                f"allowlisted launch flags",
             )
         _assert_secret_free(cmdline, field=f"process {pid} argv")
         executable_path, executable_sha = _stable_hash_unrooted(
@@ -704,10 +711,13 @@ def _validate_process_files(
 ) -> None:
     for item in processes:
         _assert_secret_free(item.cmdline, field=f"{item.role} argv")
-        if len(item.cmdline) != 2:
+        if len(item.cmdline) < 2 or not host_cutover.legacy_bridge_flags_supported(
+            item.cmdline
+        ):
             raise CapturedPaperHostSnapshotError(
                 "PROCESS_ARGV_UNSUPPORTED",
-                f"{item.role} must have exactly executable + bridge-script argv",
+                f"{item.role} must be executable + bridge script, then only "
+                f"allowlisted launch flags",
             )
         executable, executable_sha = _stable_hash_unrooted(
             item.executable_path, field=f"{item.role} executable"
@@ -723,7 +733,11 @@ def _validate_process_files(
             and os.path.normcase(str(script))
             == os.path.normcase(item.bridge_script_path or "")
             and script_sha == item.bridge_script_sha256
-            and item.cmdline == (str(executable), str(script))
+            # Ang mga naka-allowlist na flag ay itinatala nang BUO: ang
+            # cmdline_sha256 ay humahalo sa buong tuple, kaya ibinabalik ng
+            # rollback ang eksaktong argv na naobserbahan -- hindi pinutol.
+            and tuple(item.cmdline)[:2] == (str(executable), str(script))
+            and host_cutover.legacy_bridge_flags_supported(item.cmdline)
             and item.cmdline_sha256 == host_cutover.sha256_json(list(item.cmdline))
         ):
             raise CapturedPaperHostSnapshotError(
