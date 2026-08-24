@@ -32952,6 +32952,46 @@ def _migration_369_squeeze_regime_daily(conn) -> None:
     ))
 
 
+def _migration_370_depth_snapshot_provider_at(conn) -> None:
+    """Quote-event clock para sa iqfeed_depth_snapshots (2026-08-24).
+
+    ANG PUWANG. Ang ``observed_at`` sa table na ito ay ang oras ng BRIDGE
+    (``datetime.now()`` sa snapshot writer), hindi ng exchange. Tama ang
+    docstring ng ``get_execution_bbo``: *"IQFeed rows carry no quote-event
+    clock at all, and a trade-time proxy cannot authorize an order."* Kaya
+    ang IQFeed ay HINDI maaaring maging execution stand-in, gaano man ito
+    kayaman.
+
+    PERO ang ``BookLevel`` sa ``scripts/iqfeed_depth_bridge.py`` ay MAY tunay
+    na ``provider_at``, pinar-parse mula sa sariling date+time field ng L2
+    line (``p[10], p[9]``) -- hindi lang ito naisusulat. Ang column na ito ang
+    naglalabas nito.
+
+    BAKIT ITO MAHALAGA, SINUKAT (2026-08-24): sa 136 na entry-side na BBO
+    block, **127 (93.4%)** ay may sariwang IQFeed depth quote sa **1.3s** na
+    average edad. Ang IQFeed ay 26-39 venue laban sa IEX-only na entitlement
+    ng Alpaca account. Ang BBO block ay puro PREMARKET -- eksaktong session
+    kung saan kumikita si Ross.
+
+    NULLABLE at walang default: sa PostgreSQL 11+ ito ay metadata-only, kaya
+    INSTANT kahit sa 2.2 GB / 3.04M na row -- walang table rewrite, walang
+    exclusive lock na hawak habang nagko-copy.
+
+    ⚠️ Ang column na ito ay EBIDENSYA, hindi authority. Ang paggamit nito
+    bilang execution stand-in ay hiwalay na trabaho at ENTRY-ONLY: ang
+    consolidated best bid ay >= bid ng anumang isang venue, kaya ang
+    stand-in sa EXIT seam ay maghuhusga ng exit na marketable sa itaas ng
+    kayang abutin ng venue -- "pasok tapos ipit". Tingnan ang #1077.
+    """
+
+    conn.execute(text(
+        """
+        ALTER TABLE iqfeed_depth_snapshots
+        ADD COLUMN IF NOT EXISTS provider_at TIMESTAMPTZ
+        """
+    ))
+
+
 MIGRATIONS = [
     ("001_add_email", _migration_001_add_email),
     ("002_add_image_path", _migration_002_add_image_path),
@@ -33446,6 +33486,8 @@ MIGRATIONS = [
      _migration_368_sec_fails_to_deliver),
     ("369_squeeze_regime_daily",
      _migration_369_squeeze_regime_daily),
+    ("370_depth_snapshot_provider_at",
+     _migration_370_depth_snapshot_provider_at),
 ]
 
 
