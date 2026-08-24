@@ -134,37 +134,32 @@ def _identity(
 
 
 def _approved_starter_source(*, role: str, executable: Path, script: Path) -> str:
-    basename = script.name
-    common = [
-        "$ErrorActionPreference = 'SilentlyContinue'",
-        "if (-not (Get-Process iqconnect -ErrorAction SilentlyContinue)) {",
-        "    Start-Process -FilePath 'E:\\DTN\\IQFeed\\iqconnect.exe' -WorkingDirectory 'E:\\DTN\\IQFeed'",
-        "    Start-Sleep -Seconds 20",
-        "}",
-        '$existing = Get-CimInstance Win32_Process -Filter "Name = \'python.exe\'" |',
-        f"    Where-Object {{ $_.CommandLine -like '*{basename}*' }}",
-        "if ($existing) { exit 0 }",
-    ]
-    if role == "iqfeed_depth_bridge":
-        tail = [
-            "$log = 'D:\\CHILI-Docker\\chili-data\\iqfeed_depth\\bridge.log'",
-            "$err = 'D:\\CHILI-Docker\\chili-data\\iqfeed_depth\\bridge.err.log'",
-        ]
-    else:
-        tail = [
-            "$dir = 'D:\\CHILI-Docker\\chili-data\\iqfeed_trades'",
-            "if (-not (Test-Path $dir)) { New-Item -ItemType Directory -Force -Path $dir | Out-Null }",
-            "$log = Join-Path $dir 'bridge.log'",
-            "$err = Join-Path $dir 'bridge.err.log'",
-        ]
-    tail.extend(
-        [
-            f"Start-Process -FilePath '{executable.resolve()}' `",
-            f"    -ArgumentList '{script.resolve()}' `",
-            "    -WindowStyle Hidden -RedirectStandardOutput $log -RedirectStandardError $err",
-        ]
+    """Buuin ang fixture mula mismo sa APPROVED PROFILE, hindi sa isang kopya.
+
+    Dating hard-coded dito ang starter source, kaya may dalawang pinagmumulan
+    ng katotohanan: nang ma-update ang approved profile noong 2026-08-24 (ang
+    luma ay naglalarawan ng `Start-Process -Redirect*` na hugis, na NASUKAT na
+    sira -- 28/28 handshake failure mula sa pipe na walang pump), siyam na test
+    ang nabigo laban sa isang starter na wala nang umiiral.
+
+    Ang pagbuo mula sa konstant ay nangangahulugang hindi na maaaring maghiwalay
+    ang dalawa. Ang mga linya ng profile ay NORMALIZED NA, kaya ang pagsasama-
+    sama sa kanila ay muling nagno-normalize pabalik sa sarili nila.
+    """
+    from scripts import captured_paper_host_cutover as _hc
+
+    template = (
+        _hc._APPROVED_DEPTH_STARTER_LINES
+        if role == "iqfeed_depth_bridge"
+        else _hc._APPROVED_TRADE_STARTER_LINES
     )
-    return "\n".join([*common, *tail, ""])
+    lines = [
+        line.replace("{BRIDGE}", str(script.resolve())).replace(
+            "{PYEXE}", str(executable.resolve())
+        )
+        for line in template
+    ]
+    return chr(10).join([*lines, ""])
 
 
 class FakeReadOnlyProbe:

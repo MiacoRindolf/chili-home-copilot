@@ -61,6 +61,50 @@ _SECRET_ARGUMENT_RE = re.compile(
     r"(?i)(?:api[-_]?key|access[-_]?key|private[-_]?key|authorization|bearer|"
     r"credential|password|passwd|secret|token)"
 )
+# DECLARED-BRIDGE FALLBACK (2026-08-24). Ang pattern sa ibaba ay umaasa na
+# DIREKTANG naglulunsad ng python ang starter. Ang kasalukuyang starter ay
+# naglulunsad ng `.cmd` runner -- sinasadya: ang `Start-Process -Redirect*`
+# sa scheduled task ay pipe na walang pump (28/28 handshake failure), at
+# ang `.cmd` ang nagdadala ng `cd /d %REPO%` para makita ang `.env` at ng
+# supervisor restart loop.
+#
+# Pero TAHASANG ipinapahayag pa rin ng starter kung aling bridge ang
+# pag-aari nito sa pamamagitan ng `$bridge = '<...>.py'`, na ginagamit din
+# nito sa sariling Test-Path na guard. DIAGNOSTIC lamang ito -- ang mga
+# rooted path na nagpapasya ng rollback authority ay galing pa rin sa task
+# at sa tumatakbong proseso.
+_PS_DECLARED_BRIDGE_RE = re.compile(
+    '^\\s*\\$bridge\\s*=\\s*(?P<q>[\'"])(?P<script>[A-Za-z]:\\\\[^\'"]+\\.py)(?P=q)\\s*$',
+    flags=re.IGNORECASE | re.MULTILINE,
+)
+
+_PS_DECLARED_PYTHON_RE = re.compile(
+    '^\\s*\\$python\\s*=\\s*(?P<q>[\'"])(?P<exe>[A-Za-z]:\\\\[^\'"]+)(?P=q)\\s*$',
+    flags=re.IGNORECASE | re.MULTILINE,
+)
+
+
+class _DeclaredStarterTarget:
+    """Isang match-like na tingin sa `$python` + `$bridge` na deklarasyon.
+
+    Ang nasa ibaba ay umaasa sa isang regex match na may `exe` at `script`
+    na grupo. Ang starter ay nagpapahayag ng dalawang halagang iyon nang
+    hiwalay, kaya ito ang nagbibigkis sa kanila nang hindi kinakailangang
+    isang regex ang tumugma sa buong file.
+    """
+
+    class _Re:
+        groupindex = {"exe": 1, "script": 2}
+
+    re = _Re()
+
+    def __init__(self, exe: str, script: str) -> None:
+        self._values = {'exe': exe, 'script': script}
+
+    def group(self, name: str) -> str:
+        return self._values[name]
+
+
 _PS_BRIDGE_START_RE = re.compile(
     r"Start-Process\s+-FilePath\s+(?P<eq>['\"])(?P<exe>[A-Za-z]:\\[^'\"]+)"
     r"(?P=eq)\s*`?\s*(?:\r?\n\s*)?-ArgumentList\s+"
@@ -469,6 +513,24 @@ def _power_shell_bridge_projection(
         if Path(item.group("script")).name.casefold()
         == _ROLE_TO_SCRIPT[role].casefold()
     ]
+    if not matches:
+        # Walang direktang python launch: basahin ang tahasang deklarasyon
+        # ng starter. Kailangan ang DALAWA -- ang interpreter at ang bridge --
+        # dahil ang projection ay walang saysay kung wala ang alinman.
+        _declared_bridges = [
+            item
+            for item in _PS_DECLARED_BRIDGE_RE.finditer(text)
+            if Path(item.group("script")).name.casefold()
+            == _ROLE_TO_SCRIPT[role].casefold()
+        ]
+        _declared_pythons = list(_PS_DECLARED_PYTHON_RE.finditer(text))
+        if len(_declared_bridges) == 1 and len(_declared_pythons) == 1:
+            matches = [
+                _DeclaredStarterTarget(
+                    _declared_pythons[0].group("exe"),
+                    _declared_bridges[0].group("script"),
+                )
+            ]
     if len(matches) != 1:
         return MappingProxyType(
             {
@@ -486,6 +548,15 @@ def _power_shell_bridge_projection(
     bridge_path: str | None = None
     bridge_sha: str | None = None
     try:
+        # Ang declared-bridge fallback ay walang "exe" na grupo: ang starter
+        # ay nagpapahayag ng BRIDGE nito, hindi ng interpreter (hawak iyon ng
+        # .cmd runner). Iulat nang tapat sa umiiral na unresolved path imbes
+        # na mag-imbento ng interpreter identity.
+        if "exe" not in (match.re.groupindex or {}):
+            raise CapturedPaperHostSnapshotError(
+                "STARTER_PYTHON_NOT_DECLARED",
+                f"{role} starter declares its bridge but not its interpreter",
+            )
         resolved_python, python_sha = _stable_hash_unrooted(
             match.group("exe"), field=f"{role} starter Python executable"
         )

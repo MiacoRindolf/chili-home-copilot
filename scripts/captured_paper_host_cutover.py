@@ -222,8 +222,8 @@ SINGLETON_POLICY = "one_unified_candidate_host"
 LEGACY_DIRECT_LAUNCH_KIND = "direct_python_v1"
 LEGACY_WRAPPER_LAUNCH_KIND = "wscript_vbs_powershell_starter_v1"
 RUN_HIDDEN_SEMANTIC_PROFILE = "chili_run_hidden_forward_wait_exit_v1"
-DEPTH_STARTER_SEMANTIC_PROFILE = "chili_iqfeed_depth_bridge_starter_v1"
-TRADE_STARTER_SEMANTIC_PROFILE = "chili_iqfeed_trade_bridge_starter_v1"
+DEPTH_STARTER_SEMANTIC_PROFILE = "chili_iqfeed_depth_bridge_starter_v2"
+TRADE_STARTER_SEMANTIC_PROFILE = "chili_iqfeed_trade_bridge_starter_v2"
 MANIFEST_PATH_TOKEN = "@verified:content-addressed-manifest-path"
 MANIFEST_SHA256_TOKEN = "@verified:manifest-file-sha256"
 
@@ -289,6 +289,125 @@ _LEGACY_ROLE_SCRIPT = MappingProxyType(
         "iqfeed_trade_bridge": "iqfeed_trade_bridge.py",
     }
 )
+# APPROVED LEGACY STARTER SOURCE (muling sinuri 2026-08-24).
+#
+# Ang naunang naka-hard-code na profile ay naglalarawan ng isang starter na
+# direktang naglulunsad ng python na may `-RedirectStandardOutput` /
+# `-RedirectStandardError`. Ang hugis na iyon ay NASUKAT na sira: sa isang
+# scheduled task ang `Start-Process -Redirect*` ay isang pipe na walang pump --
+# lumalabas agad ang magulang, namamatay ang pump, at bumabara ang bawat sulat
+# sa stderr nang ~1s, kaya lumalampas ang handshake sa 2.00s ack deadline.
+# SINUKAT: 4.14s -> 0.04s, 28/28 na failure -> 0 nang ilipat ang paglulunsad sa
+# isang `.cmd` runner.
+#
+# Ang kasalukuyang starter ay dinadala rin ang tatlong bagay na wala sa lumang
+# profile at load-bearing lahat::
+#
+#   * `cd /d %REPO%` sa loob ng .cmd -- kung wala ito ay HINDI nakikita ang
+#     `.env` at NAWAWALA ang lahat ng market-data API key (sinukat 2026-08-23:
+#     CWD=C:\ -> massive/polygon/alpaca/ortex LAHAT wala -> WALANG LAMAN ang
+#     ROSS band)
+#   * isang supervisor restart loop (`:bridge_loop` / `goto bridge_loop`)
+#   * isang bounded na postgres-readiness probe bago ang paglulunsad
+#
+# Kaya ang profile ang luma, hindi ang starter. Ito ang na-update na approved
+# source. Ang MEKANISMO ay hindi nagbabago -- byte-exact pa rin ang paghahambing
+# pagkatapos ng semantic normalization, kaya ang anumang pagbabago sa launcher
+# ay MAGDUDULOT PA RIN ng LEGACY_STARTER_SEMANTICS_INVALID at kailangang muling
+# suriin nang sinasadya. Ang na-update ay KUNG ANO ang kinikilala nito.
+#
+# ⚠️ Ang dalawang role ay MAGKAIBA (35 vs 36 na linya): ang depth starter ay may
+# `$bridge` na variable, ang trade starter ay nagtatakda ng mga env var sa
+# watch-window. Huwag silang pagsamahin.
+#
+# Ang `{BRIDGE}` at `{PYEXE}` ay pinapalitan ng mga path na napatunayan na ng
+# tumatawag, kaya hindi maaaring ipuslit ang isang path sa pamamagitan ng
+# approved source.
+
+_APPROVED_DEPTH_STARTER_LINES : tuple[str, ...] = (
+    "$ErrorActionPreference = 'SilentlyContinue'",
+    "$bridge = '{BRIDGE}'",
+    "$python = '{PYEXE}'",
+    'if (-not (Get-Process iqconnect -ErrorAction SilentlyContinue)) {',
+    "Start-Process -FilePath 'E:\\DTN\\IQFeed\\iqconnect.exe' -WorkingDirectory 'E:\\DTN\\IQFeed' -ArgumentList '-product','IQFEED_CHARTS','-version','1.8.0.0'",
+    'Start-Sleep -Seconds 20',
+    '}',
+    '$existing = @(Get-CimInstance Win32_Process -Filter "Name = \'python.exe\' OR Name = \'cmd.exe\'" |',
+    "Where-Object { $_.CommandLine -like '*iqfeed_depth_bridge.py*' -or",
+    "$_.CommandLine -like '*run-depth-bridge.cmd*' })",
+    'if ($existing.Count -gt 0) { exit 0 }',
+    "$log = 'D:\\CHILI-Docker\\chili-data\\iqfeed_depth\\bridge.log'",
+    "$err = 'D:\\CHILI-Docker\\chili-data\\iqfeed_depth\\bridge.err.log'",
+    "$dbProbe = @'",
+    'import psycopg2, sys',
+    'try:',
+    'psycopg2.connect("postgresql://chili:chili@localhost:5433/chili", connect_timeout=3).close()',
+    'sys.exit(0)',
+    'except Exception:',
+    'sys.exit(1)',
+    "'@",
+    '$dbReady = $false',
+    'for ($i = 0; $i -lt 60; $i++) {',
+    '$dbProbe | & $python - 2>$null',
+    'if ($LASTEXITCODE -eq 0) { $dbReady = $true; break }',
+    'Start-Sleep -Seconds 3',
+    '}',
+    'if (-not $dbReady) {',
+    'Add-Content -Path $err -Value "$(Get-Date -Format o) LAUNCHER: postgres hindi handa pagkatapos ng 180s; itutuloy pa rin"',
+    '}',
+    'if (-not (Test-Path $bridge)) {',
+    'Add-Content -Path $err -Value "$(Get-Date -Format o) LAUNCHER: WALA ang bridge source $bridge -- hindi maglalaunch"',
+    'exit 1',
+    '}',
+    "$env:DATABASE_URL = 'postgresql://chili:chili@localhost:5433/chili'",
+    "Start-Process -FilePath 'E:\\dev\\wt-window2\\project_ws\\AgentOps\\iqfeed\\run-depth-bridge.cmd' -WindowStyle Hidden",
+)
+
+_APPROVED_TRADE_STARTER_LINES : tuple[str, ...] = (
+    "$ErrorActionPreference = 'SilentlyContinue'",
+    "$bridge = '{BRIDGE}'",
+    "$python = '{PYEXE}'",
+    'if (-not (Get-Process iqconnect -ErrorAction SilentlyContinue)) {',
+    "Start-Process -FilePath 'E:\\DTN\\IQFeed\\iqconnect.exe' -WorkingDirectory 'E:\\DTN\\IQFeed' -ArgumentList '-product','IQFEED_CHARTS','-version','1.8.0.0'",
+    'Start-Sleep -Seconds 20',
+    '}',
+    '$existing = @(Get-CimInstance Win32_Process -Filter "Name = \'python.exe\' OR Name = \'cmd.exe\'" |',
+    "Where-Object { $_.CommandLine -like '*iqfeed_trade_bridge.py*' -or",
+    "$_.CommandLine -like '*run-trade-bridge.cmd*' })",
+    'if ($existing.Count -gt 0) { exit 0 }',
+    "$env:IQFEED_WATCH_HARD_MAX = '480'",
+    "$env:IQFEED_WATCH_FLOOR = '400'",
+    "$env:IQFEED_SUBSCRIBE_FRESH_WINDOW_S = '600'",
+    "$env:IQFEED_ELIGIBLE_FRESH_SECONDS = '3600'",
+    "$dir = 'D:\\CHILI-Docker\\chili-data\\iqfeed_trades'",
+    'if (-not (Test-Path $dir)) { New-Item -ItemType Directory -Force -Path $dir | Out-Null }',
+    "$log = Join-Path $dir 'bridge.log'",
+    "$err = Join-Path $dir 'bridge.err.log'",
+    "$dbProbe = @'",
+    'import psycopg2, sys',
+    'try:',
+    'psycopg2.connect("postgresql://chili:chili@localhost:5433/chili", connect_timeout=3).close()',
+    'sys.exit(0)',
+    'except Exception:',
+    'sys.exit(1)',
+    "'@",
+    '$dbReady = $false',
+    'for ($i = 0; $i -lt 60; $i++) {',
+    '$dbProbe | & $python - 2>$null',
+    'if ($LASTEXITCODE -eq 0) { $dbReady = $true; break }',
+    'Start-Sleep -Seconds 3',
+    '}',
+    'if (-not $dbReady) {',
+    'Add-Content -Path $err -Value "$(Get-Date -Format o) LAUNCHER: postgres hindi handa pagkatapos ng 180s; itutuloy pa rin"',
+    '}',
+    "$env:DATABASE_URL = 'postgresql://chili:chili@localhost:5433/chili'",
+    'if (-not (Test-Path $bridge)) {',
+    'Add-Content -Path $err -Value "$(Get-Date -Format o) LAUNCHER: WALA ang bridge source $bridge -- hindi maglalaunch"',
+    'exit 1',
+    '}',
+    "Start-Process -FilePath 'E:\\dev\\wt-window2\\project_ws\\AgentOps\\iqfeed\\run-trade-bridge.cmd' -WindowStyle Hidden",
+)
+
 _LEGACY_ROLE_STARTER_PROFILE = MappingProxyType(
     {
         "iqfeed_depth_bridge": DEPTH_STARTER_SEMANTIC_PROFILE,
@@ -2312,44 +2431,23 @@ def _validate_starter_semantics(
         raise CapturedPaperHostCutoverError(
             "LEGACY_SOURCE_SEMANTICS_INVALID", "starter role/bridge target is inconsistent"
         )
-    common = (
-        "$ErrorActionPreference = 'SilentlyContinue'",
-        "if (-not (Get-Process iqconnect -ErrorAction SilentlyContinue)) {",
-        "Start-Process -FilePath 'E:\\DTN\\IQFeed\\iqconnect.exe' -WorkingDirectory 'E:\\DTN\\IQFeed'",
-        "Start-Sleep -Seconds 20",
-        "}",
-        '$existing = Get-CimInstance Win32_Process -Filter "Name = \'python.exe\'" |',
-        f"Where-Object {{ $_.CommandLine -like '*{basename}*' }}",
-        "if ($existing) { exit 0 }",
-    )
     if role == "iqfeed_depth_bridge":
-        expected = common + (
-            "$log = 'D:\\CHILI-Docker\\chili-data\\iqfeed_depth\\bridge.log'",
-            "$err = 'D:\\CHILI-Docker\\chili-data\\iqfeed_depth\\bridge.err.log'",
-            (
-                f"Start-Process -FilePath '{expected_executable_path}' "
-                f"-ArgumentList '{expected_bridge_script_path}' "
-                "-WindowStyle Hidden -RedirectStandardOutput $log "
-                "-RedirectStandardError $err"
-            ),
-        )
+        template = _APPROVED_DEPTH_STARTER_LINES
     elif role == "iqfeed_trade_bridge":
-        expected = common + (
-            "$dir = 'D:\\CHILI-Docker\\chili-data\\iqfeed_trades'",
-            "if (-not (Test-Path $dir)) { New-Item -ItemType Directory -Force -Path $dir | Out-Null }",
-            "$log = Join-Path $dir 'bridge.log'",
-            "$err = Join-Path $dir 'bridge.err.log'",
-            (
-                f"Start-Process -FilePath '{expected_executable_path}' "
-                f"-ArgumentList '{expected_bridge_script_path}' "
-                "-WindowStyle Hidden -RedirectStandardOutput $log "
-                "-RedirectStandardError $err"
-            ),
-        )
+        template = _APPROVED_TRADE_STARTER_LINES
     else:
         raise CapturedPaperHostCutoverError(
             "LEGACY_SOURCE_SEMANTICS_INVALID", "starter role is unsupported"
         )
+    # Ang mga path ay ipinapasok sa pamamagitan ng replace, hindi str.format:
+    # ang PowerShell source ay puno ng literal na `{` at `}`, at ang format()
+    # ay magpapakahulugan sa mga iyon bilang field.
+    expected = tuple(
+        line.replace("{BRIDGE}", expected_bridge_script_path).replace(
+            "{PYEXE}", expected_executable_path
+        )
+        for line in template
+    )
     if _normalized_semantic_lines(raw, language="PowerShell") != expected:
         raise CapturedPaperHostCutoverError(
             "LEGACY_STARTER_SEMANTICS_INVALID",
