@@ -664,6 +664,18 @@ def _schedule_dispatch_wake(
 
     if not enabled:
         return False
+    # ROLE GATE (2026-08-24). Kapag tumanggi ang loop timer sa ibaba (walang
+    # event loop), ang helper na ito ay nag-a-arm ng SARILING daemon Timer na
+    # nagpapatakbo ng buong FSM tick. Sa isang prosesong hindi nagmamay-ari ng
+    # momentum execution -- gaya ng `rnd_only` na R&D scheduler container --
+    # iyon ay pagpapatakbo ng live FSM sa maling proseso, at ang bawat deferral
+    # ay muling nag-a-arm ng timer, kaya nagpapatuloy ito nang mag-isa. Ang
+    # batch/loop driver ng may-ari na lane ay tumutugon pa rin sa session sa
+    # normal nitong cadence: LATENCY ang nawawala, hindi saklaw.
+    from .wake_ownership import process_owns_momentum_execution
+
+    if not process_owns_momentum_execution():
+        return False
     sid = int(session_id)
     try:
         from .live_runner_loop import schedule_live_runner_stop_confirmation

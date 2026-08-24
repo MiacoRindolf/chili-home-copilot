@@ -6,6 +6,7 @@ gumigising sa runner para sa kaka-armang session.
 """
 from __future__ import annotations
 
+import pytest
 import threading
 import time
 
@@ -16,6 +17,19 @@ from app.services.trading.momentum_neural import ignition_loop as il
 def _drain_inflight():
     with il._wake_inflight_lock:
         il._wake_inflight.clear()
+
+
+@pytest.fixture(autouse=True)
+def _owning_process_role(monkeypatch):
+    """Ang wake ay may ROLE GATE mula 2026-08-24 (tingnan ang `wake_ownership`).
+
+    Ang `tests/conftest.py:87` ay nagtatakda ng `CHILI_SCHEDULER_ROLE="none"` --
+    ang role ng web container, na tahasang WALANG APScheduler at kaya hindi
+    nagmamay-ari ng momentum execution. Ang suite na ito ay sumusubok sa
+    MEKANISMO ng wake, hindi sa gate, kaya ito ay tumatakbo bilang may-ari.
+    Ang gate mismo ay sinasaklaw ng `tests/test_wake_role_ownership.py`.
+    """
+    monkeypatch.setenv("CHILI_SCHEDULER_ROLE", "momentum_exec_only")
 
 
 def test_spawn_wake_dispatches_immediate_tick(monkeypatch):
