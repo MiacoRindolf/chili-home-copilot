@@ -38,6 +38,9 @@ from ....config import settings
 _log = logging.getLogger(__name__)
 
 _DEFAULT_CHANNEL = "momentum_iqfeed_l1"
+# Gaano kadalas ilabas ang rail counters. Isang linya kada window; ang rail ay
+# tumatanggap ng ~174 notify/s, kaya ang per-event logging ay isang storm.
+_REPORT_EVERY_S = 60.0
 # Same refusal pattern the loop consumer uses: the channel is interpolated into
 # a LISTEN statement, which cannot be parameterised, so it is validated first.
 _CHANNEL_RE = re.compile(r"^[a-z_][a-z0-9_]{0,62}$")
@@ -80,6 +83,8 @@ class IqfeedWakeListener:
         self._last_notify_at: float = 0.0
         self._notifies = 0
         self._wakes = 0
+        self._last_report_at = 0.0
+        self._started_at = time.monotonic()
         self._last_tracker_refresh: float = 0.0
         self._self_refreshing = False
 
@@ -238,6 +243,43 @@ class IqfeedWakeListener:
                     except Exception:
                         pass
 
+    def _maybe_report(self) -> None:
+        """Panaka-nakang ilabas ang notifies/wakes/tracked — walang ito ay BULAG ang rail.
+
+        NASUKAT NA PUWANG (2026-08-24). Ang rail na ito ay buhay sa TRANSPORT
+        level -- sinukat ko ang **174 notification/segundo** sa
+        ``momentum_iqfeed_l1``, at ang listener ay tumatakbo
+        (``[iqfeed_wake] started -- LISTEN``). Pero ang aktwal na tick cadence
+        ng bawat session ay **10.4s p50** (DAIC 10.4 / NTRB 10.3 / GGR 10.4),
+        na EKSAKTONG scheduler-batch interval -- hindi kailanman ang 2s na wake
+        spacing. Kaya walang nagigising.
+
+        Hindi masabi KUNG BAKIT: ang ``_notifies``/``_wakes`` ay binibilang pero
+        WALANG endpoint, WALANG log, at WALANG consumer ng ``stats()``. Ang unang
+        pangangailangan ay hindi isang hula kundi isang NUMERO: ilang notify ang
+        dumarating, ilang session ang nasa tracker, at ilan ang tunay na nagigising.
+
+        Isang linya kada ``_REPORT_EVERY_S``; walang storm.
+        """
+        now = time.monotonic()
+        if (now - self._last_report_at) < _REPORT_EVERY_S:
+            return
+        self._last_report_at = now
+        tracked = -1
+        try:
+            t = self._tracker()
+            by_sym = getattr(t, "_by_symbol", None)
+            if isinstance(by_sym, dict):
+                tracked = sum(len(v or ()) for v in by_sym.values())
+        except Exception:
+            tracked = -1
+        _log.info(
+            "[iqfeed_wake] rail notifies=%d wakes=%d tracked_sessions=%d "
+            "since_start=%.0fs — wakes==0 with notifies>0 means the rail is "
+            "HEARING but nothing is CROSSING (empty tracker / unset levels).",
+            self._notifies, self._wakes, tracked, now - self._started_at,
+        )
+
     def _handle_batch(self, notifications: list) -> None:
         """Coalesce a storm to the NEWEST payload per symbol, then wake."""
         latest: dict[str, dict] = {}
@@ -256,6 +298,7 @@ class IqfeedWakeListener:
             return
         self._notifies += len(latest)
         self._last_notify_at = time.monotonic()
+        self._maybe_report()
 
         from .ignition_loop import _spawn_session_wake
 
