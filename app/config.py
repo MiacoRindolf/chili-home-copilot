@@ -6439,6 +6439,29 @@ class Settings(BaseSettings):
         validation_alias=AliasChoices("CHILI_MOMENTUM_SPREAD_COST_DERATE_ENGAGE_FRAC"),
         description="Dead-band: the cost-of-R size-down only ENGAGES once the round-trip spread cost reaches this fraction of the max-fraction-of-R cap (e.g. 0.5 = the upper half). Below it, a cheap-vs-R spread passes at mult=1.0 — this is what keeps a tight/typical low-float spread from over-restricting (the no-0-fills guarantee). Then linear to the floor at the cap.",
     )
+    # ── SPREAD-PERCENTILE CACHE (2026-08-24, sinukat sa produksyon) ──────────
+    # Ang name_spread_percentiles ay nagpapatakbo ng percentile_cont sa LAHAT ng
+    # row ng simbolo sa loob ng spread_norm_lookback_days (20 ARAW) ng
+    # momentum_nbbo_spread_tape -- 26 GB / 41.8M row, isinusulat sa TICK SPEED
+    # (41,525 sample kada 15 min para sa isang mainit na pangalan). Ang percentile
+    # ay nangangailangan ng buong sort.
+    #
+    # SINUKAT 2026-08-24 18:00 UTC: TATLONG sabay na kopya, bawat isa 67 SEGUNDO,
+    # IO-bound, habang ang momentum_live_runner_batch (dapat kada 10s) ay umabot
+    # sa 28.5s. Nasukat na trigger latency: candidate -> pending_place p50 12.1s,
+    # tapos pending_place -> final_bbo p50 110.0s (p90 622s) -- halos DALAWANG
+    # MINUTO mula trigger hanggang paglalagay. Doon namamatay ang scalp.
+    #
+    # Ang 20-ARAW na distribution ay halos hindi nagbabago kada minuto. WALANG
+    # NAGBABAGONG SEMANTIKO -- pareho pa ring query at resulta, kinukuwenta lang
+    # nang bihira. 0 o mas mababa ⇒ naka-disable ang cache (byte-identical).
+    chili_momentum_spread_norm_cache_ttl_seconds: float = Field(
+        default=600.0,
+        validation_alias=AliasChoices(
+            "CHILI_MOMENTUM_SPREAD_NORM_CACHE_TTL_SECONDS"
+        ),
+        description="TTL for the per-symbol name-spread percentile cache. The underlying percentile_cont scans up to chili_momentum_spread_norm_lookback_days (20d) of a tick-speed 26GB tape and was measured at 67s per call, three concurrent, stalling the live runner tick to 28.5s. The 20-day distribution is effectively static minute-to-minute, so the cache changes no semantics — only how often the scan runs. Hard max 512 symbols, LRU-by-age eviction. Set to 0 to disable (byte-identical to the pre-cache path).",
+    )
     chili_momentum_spread_norm_lookback_days: float = Field(
         default=20.0,
         gt=0.0,
