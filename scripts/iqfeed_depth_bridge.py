@@ -1309,6 +1309,47 @@ def reader(
                 log.info("raw[%d]: %s", frames, line[:140])
             if not line or line[0] in ("T",):
                 continue
+            if line[0] == "5":
+                # URI-5 = PAGBURA NG LEVEL (2026-08-24). 8 field, walang presyo
+                # at walang laki -- ang venue ay tinatanggal ang quote nito::
+                #
+                #     5,AAPL,,WCHV,B,,2026-08-24,
+                #
+                # Kung hindi ito hahawakan, ang level ay nananatili sa libro
+                # hanggang sa STALE_VENUE_ROW_S (900s) -- isang MULTO na venue na
+                # nagpapalaki ng bid5/ask5 at nagpapabaluktot sa top-of-book.
+                # Bihira (1 sa 12s na sinukat) pero permanenteng mali.
+                #
+                # Ipinapadala ito sa PAREHONG validated na Book.update() path na
+                # may size=0, gamit ang PRESYO NG UMIIRAL NA LEVEL: ang update()
+                # ay pumo-pop na kapag size == 0, kaya minamana nito ang buong
+                # provenance bookkeeping (generation guard, monotonic sequence
+                # guard, sha256) nang walang pangalawang code path na maaaring
+                # mag-drift mula sa una.
+                p5 = line.split(",")
+                if len(p5) >= 5:
+                    sym5 = str(p5[1] or "").strip().upper()
+                    venue5 = str(p5[3] or "").strip().upper()
+                    side5 = str(p5[4] or "").strip().upper()
+                    if sym5 and venue5 and side5 in ("A", "B"):
+                        try:
+                            seq5 = _next_source_frame_sequence(connection_generation)
+                        except ValueError:
+                            stop_event.set()
+                            break
+                        with books_lock:
+                            _lvl = books[sym5].levels.get((venue5, side5))
+                            if _lvl is not None:
+                                books[sym5].update(
+                                    venue5, side5, _lvl.price, 0.0,
+                                    provider_at=None,
+                                    received_at=datetime.now(timezone.utc),
+                                    connection_generation=connection_generation,
+                                    source_frame_sequence=seq5,
+                                    source_frame_sha256=hashlib.sha256(raw).hexdigest(),
+                                    condition_code="level_delete",
+                                )
+                continue
             if line[0] in ("4", "6"):
                 # SINUKAT SA LIVE MARKET (2026-08-24 10:22 ET, AAPL + SGLY):
                 #   uri '6' = LARAWAN-SA-PAG-SUBSCRIBE lang. Lahat ng 122 frame
