@@ -210,6 +210,38 @@ READER_JOIN_TIMEOUT_S = 5.0
 SELECTED_FIELDS_ACK_TIMEOUT_S = 2.0
 UNCAPTURED_DIAGNOSTIC_FLAG = "--allow-uncaptured-diagnostic"
 
+# UNCAPTURED-DIAGNOSTIC LOG THROTTLE (2026-08-24, sinukat sa live market open).
+# Ang coverage-unavailable na diagnostic ay ini-emit KADA release batch. Sa
+# premarket ay bihira iyon; sa 09:30 open ay umabot ito sa 18,283 -> 29,562
+# error KADA MINUTO, nagpalaki ng log tungong 275 MB, kumain ng 66% ng isang
+# core, at ang tick-write path ay TUMIGIL NANG TULUYAN (0 tick sa 5 minuto
+# habang buhay ang proseso at "Connected" ang feed).
+# Ang diagnostic ay hindi nawawala -- ini-emit isang beses kada window na may
+# pinagsama-samang bilang, kaya buo pa rin ang ebidensya nang walang storm.
+_UNCAPTURED_LOG_THROTTLE_S = float(
+    os.environ.get("CHILI_IQFEED_UNCAPTURED_LOG_THROTTLE_SECONDS", "30") or 30.0
+)
+_uncaptured_log_state = {"next_at": 0.0, "suppressed": 0, "lost_rows": 0}
+
+
+def _uncaptured_should_log(lost: int) -> tuple[bool, int, int]:
+    """(mag-log ba, na-suppress na bilang, pinagsamang lost rows). Total: walang raise."""
+    try:
+        st = _uncaptured_log_state
+        st["lost_rows"] = int(st.get("lost_rows", 0)) + int(lost)
+        now = time.monotonic()
+        if now >= float(st.get("next_at", 0.0)):
+            sup = int(st.get("suppressed", 0))
+            agg = int(st.get("lost_rows", 0))
+            st["next_at"] = now + _UNCAPTURED_LOG_THROTTLE_S
+            st["suppressed"] = 0
+            st["lost_rows"] = 0
+            return True, sup, agg
+        st["suppressed"] = int(st.get("suppressed", 0)) + 1
+        return False, 0, 0
+    except Exception:
+        return True, 0, int(lost)
+
 
 def _bridge_build_id(path: str | Path = __file__) -> str:
     """Runtime-identifiable source build; persisted with every bridge row."""
@@ -1345,9 +1377,12 @@ def _publish_released_capture_rows(
         handoff = _capture_handoff
     if handoff is None:
         lost = len(trade_rows) + len(quote_rows)
-        if UNCAPTURED_DIAGNOSTIC_FLAG in sys.argv:
+        _emit_ok, _sup, _agg = _uncaptured_should_log(lost)
+        if UNCAPTURED_DIAGNOSTIC_FLAG in sys.argv and _emit_ok:
             log.error(
-                "IQFeed replay coverage unavailable: %s",
+                "IQFeed replay coverage unavailable (suppressed=%d agg_lost=%d): %s",
+                _sup,
+                _agg,
                 json.dumps(
                     {
                         "code": "iqfeed_l1_capture_handoff_unbound_diagnostic",
@@ -1398,9 +1433,12 @@ def _record_unreleased_capture_gap(
         handoff = _capture_handoff
     if handoff is None:
         lost = max(1, len(streams))
-        if UNCAPTURED_DIAGNOSTIC_FLAG in sys.argv:
+        _emit_ok, _sup, _agg = _uncaptured_should_log(lost)
+        if UNCAPTURED_DIAGNOSTIC_FLAG in sys.argv and _emit_ok:
             log.error(
-                "IQFeed replay coverage unavailable: %s",
+                "IQFeed replay coverage unavailable (suppressed=%d agg_lost=%d): %s",
+                _sup,
+                _agg,
                 json.dumps(
                     {
                         "code": "iqfeed_l1_source_frame_unbound_diagnostic",
