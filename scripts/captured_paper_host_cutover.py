@@ -791,6 +791,54 @@ class LegacyExecutionLaneObservation:
         )
 
 
+# LEGACY BRIDGE LAUNCH POLICY (sinuri 2026-08-24).
+#
+# Ang orihinal na kontrata ay tumatanggap ng EKSAKTONG dalawang argv token --
+# executable + bridge script -- na may nakasulat na dahilan: "The currently
+# supported legacy identity has no hidden argv in which a secret could be
+# serialized.  Anything else is a new launch policy and must be reviewed before
+# it can become rollback authority."
+#
+# Ito ang pagsusuring iyon. Ang tunay na host ay nagpapatakbo ng::
+#
+#     python.exe  scripts/iqfeed_trade_bridge.py  --allow-uncaptured-diagnostic
+#     python.exe  scripts/iqfeed_depth_bridge.py  --allow-uncaptured-diagnostic
+#
+# ...at ang flag na iyon ay lumilikha ng DEADLOCK sa capture rail::
+#
+#     hindi nakabuklod ang capture host
+#       -> kailangan ng bridges ang diagnostic flag para hindi mag-fail-closed
+#         -> tatlong token ang argv, kaya PROCESS_ARGV_UNSUPPORTED
+#           -> hindi makolekta ang host snapshot
+#             -> walang rollback authority ang cutover
+#               -> hindi maaaring mag-Apply ang cutover
+#                 -> nananatiling hindi nakabuklod ang capture host
+#
+# SINUKAT noong 2026-08-24: 34,780 na "X of X" na babala at **5,302,433 na row**
+# ang tinanggihan sa isang session -- 100% ang rate ng pagtanggi, zero partial.
+#
+# ANG PAGPAPASYA. Ang bantay na iyon ay tungkol sa MGA LIHIM sa argv, hindi sa
+# BILANG ng token. Kaya ang lunas ay isang TAHASANG ALLOWLIST, hindi pagluluwag
+# ng bilang: ang bawat token na lampas sa script ay dapat nasa listahang ito, at
+# ang ``_assert_secret_free`` ay nananatiling ipinapatupad sa buong cmdline. Ang
+# isang HINDI KILALANG flag ay tinatanggihan pa rin bilang bagong launch policy
+# na kailangang suriin -- eksakto ang orihinal na hangarin.
+#
+# Naitatala nang TAPAT ang mga flag: ang ``cmdline`` ay ``tuple[str, ...]`` at
+# ang ``cmdline_sha256`` ay humahalo sa BUONG cmdline, kaya ibinabalik ng
+# rollback ang eksaktong argv na naobserbahan nito -- hindi isang pinutol na
+# bersyon na tahimik na mag-aalis ng flag sa isang bridge na nangangailangan
+# nito para mabuhay.
+SUPPORTED_LEGACY_BRIDGE_FLAGS: tuple[str, ...] = ("--allow-uncaptured-diagnostic",)
+
+
+def legacy_bridge_flags_supported(cmdline: Sequence[str]) -> bool:
+    """True kapag ang bawat token pagkatapos ng bridge script ay naka-allowlist."""
+    return all(
+        str(token) in SUPPORTED_LEGACY_BRIDGE_FLAGS for token in tuple(cmdline)[2:]
+    )
+
+
 @dataclass(frozen=True, slots=True)
 class ProcessIdentity:
     pid: int
@@ -2533,7 +2581,8 @@ def build_legacy_wrapper_launch_contracts(
             field=f"{role} bridge script",
         )
         if not (
-            process.cmdline == (str(executable_path), str(bridge_path))
+            tuple(process.cmdline)[:2] == (str(executable_path), str(bridge_path))
+            and legacy_bridge_flags_supported(process.cmdline)
             and process.cmdline_sha256 == sha256_json(list(process.cmdline))
             and executable_sha == process.executable_sha256
             and bridge_sha == process.bridge_script_sha256
