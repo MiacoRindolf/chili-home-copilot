@@ -6833,6 +6833,22 @@ class Settings(BaseSettings):
     # ⚠️ BILANG, HINDI ORASAN: nire-reset sa unang tick na hindi naka-block, kaya ang
     # PAULIT-ULIT lang na block ang nagreretiro. Pre-entry ang mga ito kaya walang
     # posisyong nakataya. Ang 0 ay nagpapanumbalik ng lumang gawi.
+    # ── ANG RVOL AY WALANG TANDA (2026-08-25) ──
+    # Ang `_ross_threshold_crossed` ay nagbabalik ng True sa RVOL LAMANG, nang hindi
+    # tinitingnan ang direksyon -- gayong ang docstring nito ay nagsasabing
+    # "AFFIRMATIVELY crosses" at ang dalawang change floor sa ilalim nito ay may
+    # tanda. Ang dami ng kalakalan ay sumasabog sa MAGKABILANG direksyon.
+    # NASUKAT (buong araw ng 08-25): 418 arm -> 376 confirmed -> 309 declined ->
+    # 67 watching -> 1 filled. Sa 309 na declined, 268 (87%) ay IISANG simbolo:
+    # WVVIP, rvol 911.8, todays_change_perc -54.08, zero tick sa 45 min, at
+    # ina-arm bilang LONG tuwing 84 segundo mula 08:12 hanggang 14:48.
+    # ⚠️ Hindi nito ipinapataw ang +10% na palapag sa RVOL na daan; ang
+    # ipinagbabawal lang ay ang BUMABAGSAK. Walang alam na direksyon = walang pagbabago.
+    chili_momentum_ross_rvol_requires_nonnegative_move: bool = Field(
+        default=True,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_ROSS_RVOL_REQUIRES_NONNEGATIVE_MOVE"),
+        description="RVOL alone may fire the Ross long-ignite predicate only when the directional evidence we hold (intraday move, else gap) is non-negative. RVOL is unsigned and volume explodes in BOTH directions; the two change floors beside it are already signed. false restores the old sign-blind behaviour byte-identically.",
+    )
     chili_momentum_paper_risk_block_retire_after: int = Field(
         default=20,
         ge=0,
