@@ -2353,6 +2353,10 @@ def sync_positions_to_db(db: Session, user_id: int | None) -> dict[str, int]:
     # Applies to any open trade source (Robinhood, manual, other brokers) so Monitor can score health.
     try:
         from ..models.trading import BreakoutAlert
+        # Lokal na import: ang scope filter ang nag-iisang pinagmumulan ng
+        # katotohanan kung ANO ang pinamamahalaan ng live executor.
+        from .trading.autopilot_scope import live_autopilot_trade_filter
+
         _link_cutoff = datetime.utcnow() - timedelta(days=14)
         _open_unlinked = (
             db.query(Trade)
@@ -2360,6 +2364,42 @@ def sync_positions_to_db(db: Session, user_id: int | None) -> dict[str, int]:
                 Trade.user_id == user_id,
                 Trade.status == "open",
                 Trade.related_alert_id.is_(None),
+                # ⚠️ HUWAG MAG-ENROLL, MAG-ATTRIBUTE LAMANG (2026-08-24).
+                #
+                # Ang layunin ng bloke na ito ay ATTRIBUTION -- sabi ng sariling
+                # komento nito: "so Monitor can score health". Pero ang
+                # `related_alert_id` at `scan_pattern_id` ay DALAWA sa limang
+                # OR-branch ng `autopilot_scope.live_autopilot_trade_filter()`,
+                # at iyon mismo ang scope na ginagamit ng
+                # `auto_trader_monitor.py:603` para pumili ng mga row na
+                # IBEBENTA nito sa merkado (`:854 qty = float(t.quantity or 0)`
+                # -- ang BUONG posisyon).
+                #
+                # Kaya ang pagsulat na ito ay TAHIMIK na naglilipat ng isang
+                # posisyon mula sa labas ng live execution monitor patungo sa
+                # LOOB nito. At tumutugma ito sa TICKER LAMANG, kinukuha ang
+                # PINAKAMATAAS ANG SCORE na alert sa 14 araw -- hindi ang
+                # pinakamalapit sa oras o presyo -- at walang wrong-side check.
+                # Tumatakbo ito kada 2 minuto, 24/7, walang flag.
+                #
+                # Kongkreto: isang manu-manong binili na 200 share ng SOFI sa
+                # $6.00 (walang alert link, walang stop) ay nasa LABAS ng scope.
+                # Pumutok ang isang pattern_imminent na alert sa SOFI sa $14.00;
+                # sa loob ng 2 minuto ay naka-link na ang row, ang
+                # `_seed_missing_levels` ay nagtatatak ng stop=13.20 mula sa
+                # alert, at ang monitor ay magbebenta ng LAHAT ng 200 share sa
+                # isang "stop" na 120% sa ITAAS ng cost basis ng operator.
+                #
+                # ANG AYOS: mag-link LAMANG ng mga row na NASA LOOB NA ng live
+                # scope sa ibang batayan. Ang attribution ay nananatiling buo
+                # para sa lahat ng pinamamahalaang row ng CHILI; ang isang row
+                # na hindi pinamamahalaan ay HINDI kailanman magiging
+                # pinamamahalaan bilang epekto ng isang backfill.
+                #
+                # (Kapatid ng #1145, na nag-bound sa HALAGA na isinusulat ng
+                # maintenance sweep sa `stop_loss` -- ang IBANG branch ng
+                # parehong filter, ibang writer, at pareho ring hindi bantay.)
+                live_autopilot_trade_filter(),
             )
             .all()
         )
