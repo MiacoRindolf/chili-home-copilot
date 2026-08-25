@@ -357,6 +357,100 @@ def _build_brain_context(trade, db: Session | None) -> BrainContext:
     return ctx
 
 
+def _bound_maintenance_stop_distance(
+    *, entry: float, direction: str, sl: float, tp: float, is_crypto: bool
+) -> tuple[float, float]:
+    """Bound ``(entry - stop) / entry`` to the SAME asset-aware cap the entry path uses.
+
+    WHY THIS EXISTS, and why it is NOT the clamp that PR #732 proposed.
+
+    ``_compute_initial_stop`` is the single producer of a stop for a trade that has
+    none, and it is reached from a LIVE 5-minute sweep
+    (``trading_scheduler`` -> ``broker_position_price_monitor``, enabled by default;
+    ``evaluate_all`` filters only on ``Trade.status == "open"`` -- no lane filter,
+    no pattern-link filter). It writes an unbounded ATR-multiple stop, and NOTHING
+    between here and a resting broker order re-checks the fractional cap this
+    codebase already enforces at entry
+    (``auto_trader_rules._max_execution_stop_loss_fraction`` -> the
+    ``execution_stop_loss_too_wide`` veto). ``bracket_intent_writer.clamp_stop_geometry``
+    is a MINIMUM-distance floor plus a wrong-side fix, not a maximum.
+
+    TWO CONFIRMED HARMS, and both are SIZING-INDEPENDENT -- which is exactly why
+    "risk-first sizing already absorbs a far stop" does not dispose of them. These
+    rows are ALREADY-OPEN positions (orphan / broker-adopted); no sizer is involved.
+
+      1. SCOPE ENROLLMENT. ``autopilot_scope.live_autopilot_trade_filter`` is an
+         ``or_(...)`` containing ``Trade.stop_loss.isnot(None)``. A broker-adopted row
+         with ``related_alert_id`` / ``stop_loss`` NULL sits OUTSIDE the live execution
+         monitor. The instant this sweep persists a stop, the row ENTERS scope and that
+         number becomes its operative live exit level. And ``_apply_stop_to_trade``'s
+         never-widen guard is ``if is_pattern_linked and trade.stop_loss is not None:``
+         -- both false for exactly these rows, so the write is unconditional.
+
+      2. R-DENOMINATOR COLLAPSE. ``R = abs(entry - stop)``;
+         ``current_r = (price - entry) / R``; ``BREAKEVEN_R = 1.0``; ``TRAILING_R = 2.0``.
+         At a 54% stop, break-even needs +54% and the chandelier trail needs +109%.
+         The position is structurally unmanaged for its entire life.
+
+    ⚠️ THE DISTINCTION FROM #732. On the ENTRY path a clamp is harmful: sizing is
+    risk-first (``qty = max_loss / stop_distance``), so tightening the stop BUYS size --
+    clamping an 84% stop to 25% more than triples the position on the most volatile
+    name in the book. That is why #732 was closed. Here the position ALREADY EXISTS,
+    so clamping cannot increase exposure; it only makes the stop a level the manager
+    can actually reach.
+
+    No new constant: the cap is the one already shipped and already tested
+    (stock 30% / crypto 60%; ``0`` disables, e.g. options). Fail-OPEN on any unusable
+    input -- this must never be the reason a stop fails to be written.
+    """
+    try:
+        # ⚠️ Ang `settings` ay HINDI nasa module scope dito -- lokal itong
+        # ini-import sa ibang function. Kung wala ito, ang NameError ay lalamunin
+        # ng fail-open sa ibaba at TAHIMIK na hindi gagana ang bound. Nahuli ito
+        # sa pagsubok, hindi sa pagbabasa.
+        from ...config import settings as _settings
+        from .auto_trader_rules import _max_execution_stop_loss_fraction
+
+        max_frac = _max_execution_stop_loss_fraction(
+            _settings, "crypto" if is_crypto else "stock"
+        )
+    except Exception:  # pragma: no cover - never block the stop write
+        return sl, tp
+    if not max_frac or max_frac <= 0:
+        return sl, tp  # cap disabled for this asset class
+    try:
+        e = float(entry)
+        s_ = float(sl)
+        t_ = float(tp)
+    except (TypeError, ValueError):
+        return sl, tp
+    if e <= 0 or s_ <= 0:
+        return sl, tp
+    long_side = str(direction or "long").strip().lower() != "short"
+    dist = (e - s_) if long_side else (s_ - e)
+    if dist <= 0:
+        return sl, tp  # wrong-sided stop is a different bug; do not mask it
+    if dist / e <= max_frac:
+        return sl, tp  # the 99% path: untouched
+    # Preserve reward:risk by scaling the target with the same factor.
+    scale = (max_frac * e) / dist
+    bounded_sl = e * (1.0 - max_frac) if long_side else e * (1.0 + max_frac)
+    reward = (t_ - e) if long_side else (e - t_)
+    bounded_tp = (e + reward * scale) if long_side else (e - reward * scale)
+    logger.warning(
+        "[stop_engine] maintenance stop distance %.1f%% exceeded the %.1f%% "
+        "%s cap; bounded to keep the position manageable (R denominator, "
+        "autopilot scope). entry=%.6f stop=%.6f -> %.6f",
+        (dist / e) * 100.0,
+        max_frac * 100.0,
+        "crypto" if is_crypto else "stock",
+        e,
+        s_,
+        bounded_sl,
+    )
+    return bounded_sl, (bounded_tp if reward > 0 else t_)
+
+
 def _compute_initial_stop(
     entry: float, direction: str, atr: float | None, price: float,
     stop_model: str | None, is_crypto: bool, brain: BrainContext | None = None,
@@ -424,6 +518,9 @@ def _compute_initial_stop(
     # asset_class explicitly because this function only has the bool;
     # tick_normalizer's asset_class override skips the ticker pattern test.
     asset = "crypto" if is_crypto else "equity"
+    sl, tp = _bound_maintenance_stop_distance(
+        entry=entry, direction=direction, sl=sl, tp=tp, is_crypto=is_crypto
+    )
     return (
         _norm_price(sl, "", asset_class=asset),
         _norm_price(tp, "", asset_class=asset),
