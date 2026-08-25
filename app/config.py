@@ -5756,10 +5756,34 @@ class Settings(BaseSettings):
         validation_alias=AliasChoices("CHILI_MOMENTUM_MICROPULL_ENABLED"),
         description="Run the first-pullback entry on tick-built 15s micro-bars (sub-minute entry). FAIL-SAFE: insufficient tick density ⇒ _build_micro_bar_df returns None ⇒ fall back to 1m (byte-identical) — a thin/sparse name can NEVER fabricate 15s bars that arm a junk break. CAPTURE-G1(a) 2026-07-03: flipped False->True (paired with chili_momentum_first_pullback_interval='15s' so the first-pullback ARM engages on the micro-frame). SVRE 2026-06-30 replay-verified: the micro path reaches waiting_for_break at 12:45:25Z with pullback_high=6.89 (Ross's exact 6.98 entry) where the 1m path stays pullback_too_deep the whole window; the extended_verticality anti-chase guard still correctly takes over on the later +6%/s vertical.",
     )
+    # 15s -> 10s (2026-08-25). Si Ross mismo, sa buhay na stream ngayong umaga, habang
+    # ipinapaliwanag ang isang micro-pullback na kinuha niya sa DAIC matapos ang break
+    # ng 3.75:
+    #
+    #     "the 10 SECOND does kind of show that pattern, but not sure that many
+    #      people would notice that"
+    #
+    # Iyon ang tinitingnan niyang frame para sa geometry na hinahabol din natin. Ang
+    # 15s ay pinili noong 2026-06-15 nang ang reklamo ay "1m too slow"; ito ang
+    # susunod na hakbang ng parehong lohika, at ngayon ay may pangalan na ang layunin.
+    #
+    # ⚠️ FAIL-SAFE ANG PAGPAPALIIT, HINDI MAPANGANIB. Ang `_build_micro_bar_df` ay
+    # nagbabalik ng None kapag ang tick density ay nagbubunga ng <2 micro-bar, at ang
+    # tumatawag ay bumabalik sa 1m nang byte-identical. Ang isang MANIPIS na pangalan
+    # ay hindi makakagawa ng 10s na bar na wala talaga -- mas mabilis lang itong
+    # bumabalik sa 1m kaysa dati. Ang mga siksik na mover -- ang tanging pangalang
+    # tinatrade natin -- ay nagbibigay ng ~168 tick/segundo, kaya sagana ang 10s.
+    #
+    # ⚠️ HINDI LUMILIIT ANG MGA COOLDOWN. Kinukwenta sila bilang
+    # `max(30.0, 2 * micropull_bar_seconds)` (live_runner.py:4988), kaya sa 15s sila
+    # ay max(30,30)=30 at sa 10s sila ay max(30,20)=30 -- hindi nagbabago. Ang
+    # 30-segundong sahig ang naghahawak, hindi ang 2x na termino. Ang ari-arian na
+    # "isang wiggle ay hindi maaaring magpaputok ng dalawang add bago muling mabuo
+    # ang istruktura" ay buo pa rin, at ngayon ay tatlong bar na ito imbes na dalawa.
     chili_momentum_micropull_bar_seconds: int = Field(
-        default=15, ge=5, le=30,
+        default=10, ge=5, le=30,
         validation_alias=AliasChoices("CHILI_MOMENTUM_MICROPULL_BAR_SECONDS"),
-        description="THE single base knob for micro-bar width (seconds) — the tick tape is bucketed into OHLC bars of this size for the sub-minute first-pullback trigger.",
+        description="THE single base knob for micro-bar width (seconds) — the tick tape is bucketed into OHLC bars of this size for the sub-minute first-pullback trigger. 10s per Ross 2026-08-25 (\"the 10 second does kind of show that pattern\"); 15 restores the prior width.",
     )
     # WAVE-4 ITEM-7 F2: when the micro-bar build (from the in-DB tick tape) raises, RETRY
     # ONCE on a FRESH short-lived SessionLocal before falling back — the tape is in-DB, so a
