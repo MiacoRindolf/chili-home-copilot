@@ -12,6 +12,8 @@ connection nor contacts a broker/provider until an explicit ``acquire`` call.
 
 from __future__ import annotations
 
+import re
+
 from contextlib import suppress
 from dataclasses import dataclass
 import hashlib
@@ -33,11 +35,40 @@ _ACCOUNT_SCOPE = "alpaca:paper"
 CAPTURED_PAPER_SERVICE_FENCE_CLASS_ID = 0x43504653
 CAPTURED_PAPER_SERVICE_FENCE_OBJECT_ID = 1
 
+# Ang irreducible base para sa bounded wait, sa millisecond. Sapat para tumawid sa
+# nasukat na 6s na arm transaction sa dalawang pagtatangka; malayo pa rin sa ilalim
+# ng anumang wake cadence kaya walang pulse na natatagalan.
+_DEFAULT_ARM_FENCE_WAIT_MS = 2500
+_MAX_ARM_FENCE_WAIT_MS = 15000
+_LOCK_TIMEOUT_TOKEN = re.compile(r"[0-9]+(us|ms|s|min|h|d)?")
+
 _TRY_SESSION_LOCK_SQL = """
 SELECT pg_try_advisory_lock(:class_id, :object_id)
 """
 _TRY_TRANSACTION_LOCK_SQL = """
 SELECT pg_try_advisory_xact_lock(:class_id, :object_id)
+"""
+# ANG BOUNDED WAIT (2026-08-25). Ang pg_try_* ay HINDI naghihintay: kung hawak ng
+# KAPWA lane connection ang fence, agad na bumabagsak ang arm na ito. Hindi na
+# teoretikal iyon -- NASUKAT sa buhay na premarket:
+#
+#   fence hawak sa 14/25 -> 22/25 na sample (56-88%), lahat mula 172.18.0.1
+#   ang may hawak ay may xact na 6s ang tanda, nagpapatakbo ng arm-path query
+#   [auto_arm] begin_live_arm blocked AIXI/RCON/SWVL/BDRX/WVVIP -> armed=0
+#
+# Isang mabagal na arm transaction ang humahawak sa pandaigdigang mutex nang ilang
+# segundo, at ang bawat kasabay na arm ay namamatay agad. Sa 5 kandidato,
+# garantisadong 4 ang mawawala -- kasama ang pinakamataas sa viability.
+#
+# ⚠️ ANG PAG-AARI NG FENCE AY HINDI NAGBABAGO. Ang layunin nito ay ihiwalay ang
+# DEDIKADONG captured-paper SERVICE, at nananatili iyon: kung hawak ng service ang
+# session lock nito, mag-e-expire ang hintay na ito at fail-closed pa rin. Ang
+# ipinagkakaiba lang ay pumipila na ang KAPWA lane transaction sa halip na mamatay.
+_WAIT_TRANSACTION_LOCK_SQL = """
+SELECT pg_advisory_xact_lock(:class_id, :object_id)
+"""
+_READ_LOCK_TIMEOUT_SQL = """
+SELECT current_setting('lock_timeout')
 """
 _ASSERT_SESSION_LOCK_SQL = """
 SELECT EXISTS (
@@ -158,18 +189,87 @@ def try_acquire_generic_alpaca_arm_fence(
 
     if str(account_scope or "").strip().lower() != _ACCOUNT_SCOPE:
         return False
+    params = {
+        "class_id": CAPTURED_PAPER_SERVICE_FENCE_CLASS_ID,
+        "object_id": CAPTURED_PAPER_SERVICE_FENCE_OBJECT_ID,
+    }
     try:
         _postgresql_bind(db)
-        result = db.execute(
-            text(_TRY_TRANSACTION_LOCK_SQL),
-            {
-                "class_id": CAPTURED_PAPER_SERVICE_FENCE_CLASS_ID,
-                "object_id": CAPTURED_PAPER_SERVICE_FENCE_OBJECT_ID,
-            },
-        )
-        return _scalar_bool(result)
+        if _scalar_bool(db.execute(text(_TRY_TRANSACTION_LOCK_SQL), params)):
+            return True
     except Exception:
         return False
+
+    wait_ms = _generic_arm_fence_wait_ms()
+    if wait_ms <= 0:
+        return False
+    return _wait_for_generic_alpaca_arm_fence(db, params, wait_ms)
+
+
+def _generic_arm_fence_wait_ms() -> int:
+    """ISANG dokumentadong knob: gaano katagal pipila ang isang arm sa KAPWA nito.
+
+    Ang 0 ay nagpapanumbalik ng eksaktong lumang gawi (try-once, fail-closed)."""
+    try:
+        from app.config import settings as _settings
+
+        raw = getattr(_settings, "chili_momentum_alpaca_arm_fence_wait_ms", _DEFAULT_ARM_FENCE_WAIT_MS)
+        value = int(raw if raw is not None else _DEFAULT_ARM_FENCE_WAIT_MS)
+    except Exception:
+        return _DEFAULT_ARM_FENCE_WAIT_MS
+    return max(0, min(_MAX_ARM_FENCE_WAIT_MS, value))
+
+
+def _wait_for_generic_alpaca_arm_fence(db: Any, params: Mapping[str, Any], wait_ms: int) -> bool:
+    """Bounded na hintay sa loob ng SAVEPOINT.
+
+    ⚠️ ANG SAVEPOINT ANG BUONG PUNTO. Kapag nag-expire ang lock_timeout ay
+    NAGTATAAS ng error ang PostgreSQL, at ang isang error na hindi nakakulong ay
+    umaabort sa BUONG transaction ng tumawag -- ang eksaktong transaction-poison
+    na klase kung saan ang isang fail-open na basa ay pumapatay sa lahat ng
+    sumusunod dito. Ang subtransaction ay naglalaman ng abort na iyon, kaya ang
+    isang na-expire na hintay ay nagbabalik lang ng False at nananatiling
+    magagamit ang transaction ng tumawag.
+
+    Ang isang lock na nakuha sa loob ng isang subtransaction na nag-commit ay
+    hawak hanggang sa katapusan ng PANGUNAHING transaction, kaya hindi nagbabago
+    ang buhay ng fence.
+
+    ⚠️ IBINABALIK ANG lock_timeout sa daan ng TAGUMPAY. Ang SET LOCAL ay
+    umuurong lamang kapag NAG-ABORT ang subtransaction; sa isang release ay
+    tumatagos ito hanggang sa katapusan ng nakapaloob na transaction, at ang
+    isang tumagas na 2.5s na timeout ay magpapabagsak sa mga susunod na
+    pahayag ng tumawag sa unang tunay na paghihintay sa lock."""
+    nested = None
+    prior = None
+    try:
+        prior = _sanitized_lock_timeout(db.execute(text(_READ_LOCK_TIMEOUT_SQL)).scalar())
+        nested = db.begin_nested()
+        # Ang SET LOCAL ay hindi tumatanggap ng bind parameter; ang wait_ms ay isang
+        # na-clamp na int at ang prior ay na-sanitize, kaya walang naipapasok na teksto.
+        db.execute(text("SET LOCAL lock_timeout = '" + str(int(wait_ms)) + "ms'"))
+        db.execute(text(_WAIT_TRANSACTION_LOCK_SQL), dict(params))
+        nested.commit()
+    except Exception:
+        try:
+            if nested is not None and nested.is_active:
+                nested.rollback()
+        except Exception:
+            pass
+        return False
+    try:
+        db.execute(text("SET LOCAL lock_timeout = '" + (prior or "0") + "'"))
+    except Exception:
+        pass
+    return True
+
+
+def _sanitized_lock_timeout(value: Any) -> str:
+    """Payagan lamang ang isang PostgreSQL interval-ish na token ('0', '2s', '250ms')."""
+    token = str(value or "0").strip().lower()
+    if not token or len(token) > 16 or not _LOCK_TIMEOUT_TOKEN.fullmatch(token):
+        return "0"
+    return token
 
 
 def read_captured_paper_prestart_admission_inventory(
