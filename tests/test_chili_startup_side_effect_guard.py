@@ -4,6 +4,11 @@ from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
 
+# Ang TUNAY na hangganan ng function, hindi isang nakapirming bilang ng
+# character. Ang lumang `src[idx:idx+6200]` ay sumasaklaw lamang ng 5.3%
+# ng `start_scheduler` noong 2026-08-25 at tumigil na sa pagbabantay.
+from tests.source_region import function_body
+
 
 class _Settings:
     def __init__(self, role: str | None, runs_externally: bool) -> None:
@@ -60,10 +65,7 @@ def test_scheduler_worker_broker_restore_only_for_broker_roles(monkeypatch) -> N
 
 
 def test_deferred_startup_checks_side_effect_guard_before_broker_restore() -> None:
-    src = (REPO / "app/main.py").read_text(encoding="utf-8")
-    idx = src.find("def _run_deferred_startup()")
-    assert idx > 0
-    body = src[idx : idx + 2500]
+    body = function_body(REPO / "app/main.py", "_run_deferred_startup")
     guard_pos = body.find("_deferred_startup_side_effects_disabled(")
     broker_guard_pos = body.find("_startup_broker_restore_enabled(")
     restore_pos = body.find("_restore_broker_sessions()")
@@ -75,10 +77,7 @@ def test_deferred_startup_checks_side_effect_guard_before_broker_restore() -> No
 
 
 def test_app_startup_restores_durable_circuit_breaker_after_kill_switch() -> None:
-    src = (REPO / "app/main.py").read_text(encoding="utf-8")
-    idx = src.find("def _run_deferred_startup()")
-    assert idx > 0
-    body = src[idx : idx + 3600]
+    body = function_body(REPO / "app/main.py", "_run_deferred_startup")
     kill_pos = body.find("restore_kill_switch_from_db()")
     breaker_pos = body.find("restore_breaker_from_db()")
     assert kill_pos > 0
@@ -88,10 +87,7 @@ def test_app_startup_restores_durable_circuit_breaker_after_kill_switch() -> Non
 
 
 def test_scheduler_startup_restores_durable_circuit_breaker() -> None:
-    src = (REPO / "app/services/trading_scheduler.py").read_text(encoding="utf-8")
-    idx = src.find("def start_scheduler(")
-    assert idx > 0
-    body = src[idx : idx + 6200]
+    body = function_body(REPO / "app/services/trading_scheduler.py", "start_scheduler")
     kill_pos = body.find("restore_kill_switch_from_db()")
     breaker_pos = body.find("restore_breaker_from_db()")
     assert kill_pos > 0
@@ -101,10 +97,7 @@ def test_scheduler_startup_restores_durable_circuit_breaker() -> None:
 
 
 def test_scheduler_worker_restores_durable_circuit_breaker() -> None:
-    src = (REPO / "scripts/scheduler_worker.py").read_text(encoding="utf-8")
-    idx = src.find("def main()")
-    assert idx > 0
-    body = src[idx : idx + 4200]
+    body = function_body(REPO / "scripts/scheduler_worker.py", "main")
     kill_pos = body.find("restore_kill_switch_from_db()")
     breaker_pos = body.find("restore_breaker_from_db()")
     assert kill_pos > 0
@@ -114,10 +107,7 @@ def test_scheduler_worker_restores_durable_circuit_breaker() -> None:
 
 
 def test_scheduler_worker_checks_role_before_broker_session_restore() -> None:
-    src = (REPO / "scripts/scheduler_worker.py").read_text(encoding="utf-8")
-    idx = src.find("def main()")
-    assert idx > 0
-    body = src[idx : idx + 1800]
+    body = function_body(REPO / "scripts/scheduler_worker.py", "main")
     role_pos = body.find("role = _scheduler_worker_role()")
     gate_pos = body.find("_scheduler_worker_broker_restore_enabled(role)")
     restore_pos = body.find("broker_service.try_restore_session()")

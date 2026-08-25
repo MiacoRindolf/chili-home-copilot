@@ -1,4 +1,4 @@
-"""Ang buong IQFeed launch chain ay dapat nasa ILALIM NG IISANG ROOT.
+r"""Ang buong IQFeed launch chain ay dapat nasa ILALIM NG IISANG ROOT.
 
 BAKIT. Ang ``scripts/collect_captured_paper_host_snapshot.py`` ay nagpapatunay
 ng TATLONG path laban sa isang ``--legacy-root``::
@@ -65,7 +65,7 @@ def test_run_hidden_vbs_is_in_the_repo():
 def test_no_executable_line_points_at_the_old_D_root(name):
     """⚠️ ANG PANGUNAHING BANTAY. Ang isang natirang D: na reference ay
     magbabalik ng tatlong-drive na hati at muling magre-reject ng collector."""
-    bad = [ln for ln in _code_lines(_IQ / name) if "D:\dev\chili-home-copilot" in ln]
+    bad = [ln for ln in _code_lines(_IQ / name) if r"D:\dev\chili-home-copilot" in ln]
     assert not bad, f"{name} ay tumuturo pa rin sa lumang root: {bad}"
 
 
@@ -92,7 +92,10 @@ def test_the_runner_keeps_its_repo_cd_and_supervisor_loop(name):
     root ay hindi nakikita ang `.env` -> WALA ang market-data API key -> WALANG
     LAMAN ang ROSS band. May supervisor restart loop din ito."""
     src = _text(_IQ / name)
-    assert 'set "REPO=E:\dev\wt-window2"' in src
+    # ⚠️ RAW STRING. Ang '\d' at '\w' ay hindi kilalang escape: pinapanatili
+    # sila ng Python nang literal ngayon, kaya gumagana ito sa aksidente -- pero
+    # DeprecationWarning na ito at magiging SyntaxError.
+    assert r'set "REPO=E:\dev\wt-window2"' in src
     assert "cd /d " in src
     assert ":bridge_loop" in src and "goto bridge_loop" in src
 
@@ -100,7 +103,7 @@ def test_the_runner_keeps_its_repo_cd_and_supervisor_loop(name):
 @pytest.mark.parametrize("name", _RUNNERS)
 def test_the_runner_still_runs_the_bridge_from_the_same_root(name):
     src = _text(_IQ / name)
-    assert "%REPO%\scripts\iqfeed_" in src and "_bridge.py" in src
+    assert r"%REPO%\scripts\iqfeed_" in src and "_bridge.py" in src
 
 
 def test_the_starter_is_valid_powershell():
