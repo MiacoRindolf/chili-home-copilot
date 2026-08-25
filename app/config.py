@@ -6790,6 +6790,22 @@ class Settings(BaseSettings):
     # ENTRIES ONLY — held positions NEVER consult it; every exit/stop/scale-out/bailout stays
     # allowed (the veto is a pre-position arm-gate skip; the down-size is at entry-fill sizing).
     # OFF => no count, no down-size, no veto (byte-identical). docs/DESIGN/MOMENTUM_LANE.md
+    # ── ALPACA ARM FENCE: BOUNDED WAIT (2026-08-25) ──
+    # Ang captured-paper fence ay isang pandaigdigang mutex sa Alpaca arm path. Ang
+    # lane ay umaarm ng maraming simbolo nang SABAY, at ang pg_try_advisory_xact_lock
+    # ay hindi naghihintay -- kaya ang bawat kasabay na arm maliban sa isa ay agad na
+    # bumabagsak. NASUKAT sa buhay na premarket (08-25): hawak ang fence sa 56-88% ng
+    # sample, may hawak na may 6s na xact, at armed=0 sa 5 magandang kandidato
+    # (AIXI/RCON/SWVL/BDRX/WVVIP) -- kasama ang pinakamataas sa viability.
+    # ⚠️ WALANG NAGBABAGO SA PAG-AARI: kung hawak ng dedikadong service ang session
+    # lock nito, mag-e-expire ang hintay at fail-closed pa rin. 0 = lumang gawi.
+    chili_momentum_alpaca_arm_fence_wait_ms: int = Field(
+        default=2500,
+        ge=0,
+        le=15000,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_ALPACA_ARM_FENCE_WAIT_MS"),
+        description="ONE documented knob: how long a generic Alpaca arm queues behind a SIBLING lane transaction holding the captured-paper fence, in ms. The dedicated captured-paper service still fails closed after the bound (ownership unchanged). 0 restores the old try-once behaviour byte-identically.",
+    )
     chili_momentum_per_symbol_fatigue_enabled: bool = Field(
         default=False,
         validation_alias=AliasChoices("CHILI_MOMENTUM_PER_SYMBOL_FATIGUE_ENABLED"),
