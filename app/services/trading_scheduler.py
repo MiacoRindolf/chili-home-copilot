@@ -8884,11 +8884,47 @@ def start_scheduler():
             _registered_ids = {str(j.id) for j in _scheduler.get_jobs()}
         except Exception:
             _registered_ids = set()
+        # ⚠️ ANG MAPA AY DAPAT SAKLAWIN ANG BAWAT NAKA-DEPLOY NA ROLE.
+        #
+        # Hanggang 2026-08-25 ay tatlong key lamang ang nasa mapang ito --
+        # worker / cron_only / all -- at WALA NI ISA sa mga iyon ang aktuwal na
+        # naka-deploy. Ang lane ay `momentum_exec_only`, ang scheduler container
+        # ay `rnd_only`, ang web ay `none`. Para sa lahat ng iyon ay nagbabalik
+        # ng [] ang `.get(role, [])`, kaya walang laman ang `_missing` at ang
+        # assertion ay nag-uulat ng OK habang WALA PALANG SINUSURI.
+        #
+        # Hindi ito teoretikal. Habang tahimik na "pasado" ang tsekeng ito, ang
+        # `chili-clean-recovery-broker-sync` at `-autotrader` ay Exited(137) nang
+        # PITONG LINGGO -- walang broker-DB sync, walang stuck-order canceller,
+        # walang disconnect alarm. Ito mismo ang tsekeng dapat sanang sumigaw.
         _expected_per_role: dict[str, list[str]] = {
             "worker": ["scheduler_worker_heartbeat"],
             "cron_only": ["scheduler_worker_heartbeat"],
             "all": ["scheduler_worker_heartbeat"],
+            # Idinagdag 2026-08-25 -- dinerive mula sa mismong include_* gates,
+            # bawat isa ay napatunayang umiiral bilang id sa file na ito.
+            "rnd_only": ["neural_mesh_drain", "momentum_scanner"],
+            "momentum_exec_only": ["equity_viability_refresh"],
+            "broker_sync_only": ["broker_sync"],
+            "autotrader_only": ["auto_trader_tick"],
+            "market_snapshot_only": ["brain_market_snapshots"],
+            "web": ["broker_sync"],
+            # ⚠️ TAHASANG WALANG LAMAN, hindi nawawala. Ang `none` ay SADYANG
+            # hindi nagpaparehistro ng anuman (napatunayan: 0 job sa web
+            # container). Ang pagkakaiba sa pagitan ng "sinuri, walang inaasahan"
+            # at "hindi sinuri" ang mismong bagay na nawala dati.
+            "none": [],
         }
+        if role not in _expected_per_role:
+            # Ang tunay na ayos. Ang isang hindi kilalang role ay dating dumudulas
+            # bilang tahimik na OK; ngayon ay sumisigaw ito. Ang bagong role na
+            # naidagdag nang walang entry dito ay hindi na magiging bulag na puwang.
+            logger.error(
+                "[scheduler] FIX C5: role=%s ay WALA sa canonical-job map -- "
+                "HINDI SINUSURI ang startup nito. %d job ang naka-register. "
+                "Magdagdag ng entry (kahit walang laman) sa _expected_per_role.",
+                role, len(_registered_ids),
+            )
         _missing = [
             j for j in _expected_per_role.get(role, [])
             if j not in _registered_ids
