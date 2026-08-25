@@ -6822,6 +6822,24 @@ class Settings(BaseSettings):
     # na hintay ay magpapasali sa max_instances=1 na runner sa pilang laging punô --
     # ang eksaktong 648-segundong pagka-freeze ng session 14440. Muling pagtatangka
     # ang solusyon, hindi pagpila. Ang 0 ay try-once.
+    # ── PAPER ZOMBIE RETIREMENT (2026-08-25) ──
+    # Ang risk-block handler ng paper runner ay may branch para sa QUEUED (-> ERROR)
+    # at ENTERED (-> palabasin), pero WALA para sa WATCHING at ENTRY_CANDIDATE: nag-
+    # e-emit ito ng event at walang ginagawa, kaya bumabalik ang session sa susunod
+    # na tick at muling nabablock -- HABAMBUHAY.
+    # NASUKAT: session 14504 (CDTG, entry_candidate) 5,569 block mula 08-20; BEEM
+    # 5,298; XRP 5,286. 64,719 na paper_blocked_by_risk mula 07-01. Iisa ang dahilan
+    # sa lahat: "Not paper-eligible per neural viability."
+    # ⚠️ BILANG, HINDI ORASAN: nire-reset sa unang tick na hindi naka-block, kaya ang
+    # PAULIT-ULIT lang na block ang nagreretiro. Pre-entry ang mga ito kaya walang
+    # posisyong nakataya. Ang 0 ay nagpapanumbalik ng lumang gawi.
+    chili_momentum_paper_risk_block_retire_after: int = Field(
+        default=20,
+        ge=0,
+        le=5000,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_PAPER_RISK_BLOCK_RETIRE_AFTER"),
+        description="ONE documented knob: consecutive risk blocks before a PRE-ENTRY paper session (watching / entry_candidate) is retired to error. Reset on the first unblocked tick, so only persistent blocks retire. 0 restores the old never-retire behaviour.",
+    )
     chili_momentum_ordinary_route_lock_retry_budget_ms: int = Field(
         default=400,
         ge=0,

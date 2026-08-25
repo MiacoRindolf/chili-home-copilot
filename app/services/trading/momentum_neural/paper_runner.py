@@ -2193,6 +2193,28 @@ def _finalize_paper_decision_after_exit(
         _log.debug("decision packet finalize skipped session=%s", sess.id, exc_info=True)
 
 
+# Ang irreducible base: ilang MAGKAKASUNOD na risk block bago iretiro ang isang
+# pre-entry na paper session. Nasukat ang bilis: ~46 block kada oras sa mga zombie
+# ng 08-20, kaya ang 20 ay humigit-kumulang 26 minuto -- mahaba para makabawi ang
+# isang panandaliang puwang sa datos, maikli para hindi na maulit ang 5-araw na
+# ikot. Ang 0 ay nagpapanumbalik ng lumang gawi (walang pagreretiro).
+_DEFAULT_PAPER_RISK_BLOCK_RETIRE_AFTER = 20
+_MAX_PAPER_RISK_BLOCK_RETIRE_AFTER = 5000
+
+
+def _paper_risk_block_retire_after() -> int:
+    try:
+        raw = getattr(
+            settings,
+            "chili_momentum_paper_risk_block_retire_after",
+            _DEFAULT_PAPER_RISK_BLOCK_RETIRE_AFTER,
+        )
+        value = int(raw if raw is not None else _DEFAULT_PAPER_RISK_BLOCK_RETIRE_AFTER)
+    except Exception:
+        return _DEFAULT_PAPER_RISK_BLOCK_RETIRE_AFTER
+    return max(0, min(_MAX_PAPER_RISK_BLOCK_RETIRE_AFTER, value))
+
+
 def _safe_transition(db: Session, sess: TradingAutomationSession, new_state: str) -> None:
     old = sess.state
     if old == new_state:
@@ -2450,7 +2472,51 @@ def tick_paper_session(
                 "evaluated_at_utc": ev.get("evaluated_at_utc"),
             },
         )
-        if sess.state == STATE_QUEUED:
+        if sess.state in (STATE_WATCHING, STATE_ENTRY_CANDIDATE):
+            # ⚠️ ANG BUTAS NA WALANG DULO (2026-08-25). Ang QUEUED ay napupunta sa
+            # ERROR at ang ENTERED ay pinapalabas, PERO ang dalawang PRE-ENTRY na
+            # state ay walang branch: nag-e-emit ito ng event at WALANG ginagawa,
+            # kaya bumabalik ang session sa susunod na tick at muli itong
+            # nabablock -- HABAMBUHAY.
+            #
+            # NASUKAT (08-25):
+            #   session 14504 CDTG entry_candidate  5,569 block simula 08-20
+            #   session 14511 BEEM watching         5,298
+            #   session 14509 XRP  watching         5,286
+            #   64,719 na paper_blocked_by_risk mula 07-01
+            #   dahilan sa bawat isa: "Not paper-eligible per neural viability."
+            #
+            # Ang mga session na ito ay HINDI NA maaaring mag-trade -- hindi na sila
+            # viable -- pero ineevaluate sila kada tick nang LIMANG ARAW. Dalawa
+            # ang pinsala: nasasayang na cycle, at nalulunod ang action history na
+            # binabasa ng operator.
+            #
+            # ⚠️ BILANG, HINDI ORASAN. Ang isang panandaliang block (puwang sa
+            # datos, sandaling pagkawala ng viability) ay dapat MAKABAWI. Ang
+            # bilang ay nire-reset sa unang tick na hindi naka-block sa ibaba, kaya
+            # ang PAULIT-ULIT lang na block ang nagreretiro. Walang orasan ⇒ walang
+            # pag-asa sa tick cadence, na iba-iba.
+            #
+            # ⚠️ WALANG POSISYON DITO. Ang mga ito ay PRE-entry, kaya walang
+            # ilalabas at walang perang nakataya sa pagreretiro.
+            pe_blk = _paper_exec(snap)
+            _streak = int(pe_blk.get("consecutive_risk_blocks") or 0) + 1
+            pe_blk["consecutive_risk_blocks"] = _streak
+            _commit_pe(sess, pe_blk)
+            _retire_after = _paper_risk_block_retire_after()
+            if _retire_after > 0 and _streak >= _retire_after:
+                _safe_transition(db, sess, STATE_ERROR)
+                _emit(
+                    db,
+                    sess,
+                    "paper_retired_after_persistent_risk_block",
+                    {
+                        "consecutive_risk_blocks": _streak,
+                        "retire_after": _retire_after,
+                        "errors": ev.get("errors"),
+                    },
+                )
+        elif sess.state == STATE_QUEUED:
             _safe_transition(db, sess, STATE_ERROR)
         elif sess.state == STATE_ENTERED and _paper_exec(snap).get("position"):
             pe = _paper_exec(snap)
@@ -2504,6 +2570,11 @@ def tick_paper_session(
         return {"ok": True, "blocked": True, "risk_evaluation": ev}
 
     pe = _paper_exec(snap)
+    # Nakalampas sa boundary risk => panandalian lang ang anumang naunang block.
+    # Ang pag-reset dito ang nagpapasigurong ang PAULIT-ULIT lang na block ang
+    # nagreretiro ng session, hindi ang isang bugso ng ingay.
+    if pe.get("consecutive_risk_blocks"):
+        pe["consecutive_risk_blocks"] = 0
     pe["tick_count"] = int(pe.get("tick_count") or 0) + 1
     pe["last_mid"] = mid
     pe["last_quote_source"] = quote_src
