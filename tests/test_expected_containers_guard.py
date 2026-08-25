@@ -98,3 +98,41 @@ def test_the_name_filter_is_anchored(guard, monkeypatch):
     guard.status_of("chili-clean-recovery-broker-sync")
     joined = " ".join(seen[-1])
     assert "name=^chili-clean-recovery-broker-sync$" in joined
+
+
+def test_a_replacement_container_counts_as_running(guard, monkeypatch):
+    """⚠️ Ang serbisyo ay maaaring tumakbo sa ilalim ng KAHALILING pangalan.
+
+    Noong 2026-08-25 ay pinalitan ang patay na ``chili-clean-recovery-broker-sync``
+    ng ``chili-broker-sync-w0`` -- parehong image at env, isang flag lang ang
+    binago. Kung wala ang alias ay iuulat ng tseke ang serbisyong BUHAY bilang
+    patay, at ang bantay na paulit-ulit na nagkakamali ay sinasanay ang lahat na
+    huwag ito pansinin. Iyon nga ang paraan kung paano namatay nang pitong linggo
+    ang orihinal nang walang nakapansin.
+    """
+    up = set(guard.EXPECTED) - {"chili-clean-recovery-broker-sync"}
+    up.add("chili-broker-sync-w0")
+    listing = chr(10).join(sorted(up)) + chr(10)
+    monkeypatch.setattr(
+        guard, "_run",
+        lambda a: listing if "-a" not in a else "Up 1 hour" + chr(10),
+    )
+    assert guard.main(["--json"]) == 0, "ang kapalit ay dapat mabilang na tumatakbo"
+
+
+def test_the_substitution_is_reported_not_silent(guard):
+    """Ang tahimik na pagtanggap ay magtatago ng pagkakaiba ng NAKA-DEPLOY at
+    NAKASULAT. Dapat itong lumitaw sa output."""
+    import inspect
+
+    src = inspect.getsource(guard.main)
+    assert "substituted" in src and "[kapalit]" in src
+
+
+def test_an_unknown_name_is_still_missing(guard, monkeypatch):
+    """Kontrol: ang alias ay hindi dapat gawing 'lahat pumapasa'."""
+    monkeypatch.setattr(
+        guard, "_run",
+        lambda a: ("isang-random-na-container" + chr(10)) if "-a" not in a else ("Up" + chr(10)),
+    )
+    assert guard.main(["--json"]) == 1
