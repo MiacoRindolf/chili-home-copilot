@@ -16,8 +16,28 @@ from .pattern_validation_projection import read_pattern_validation_projection, w
 logger = logging.getLogger(__name__)
 
 ALLOCATION_STATE_VERSION = 1
+# ⚠️ ANG `live_arm_expired` AY TERMINAL (2026-08-25). Nawawala ito sa listahang ito
+# habang isinasama ito ng `operator_actions._TERMINAL_OPERATOR_STATES`. Ang isang
+# arm na nag-expire ay HINDI kailanman naging posisyon -- walang exposure, walang
+# maiiwan -- pero binibilang ito rito bilang buhay na incumbent.
+#
+# NASUKAT (2026-08-25, buhay na DB, user 1, mode=live):
+#     binibilang bilang buhay:  200
+#     tunay na buhay:             6
+#     multong live_arm_expired: 194
+#
+# DALAWA ANG PINSALA. Una, ang bawat multo ay isang CONFLICT na hilera laban sa
+# bawat bagong kandidato. Pangalawa, at mas tahimik: ang parehong hanay ang
+# nagpapakain sa `portfolio_heat`, at
+#     portfolio_heat_score = max(0.2, 1.0 - min(0.8, heat * 0.08))
+# kaya sa 200 ito ay max(0.2, 1.0-0.8) = 0.2 -- ANG SAHIG -- samantalang sa 6 ito
+# ay 0.52. Permanenteng naka-pin sa minimum ang capacity term ng allocator dahil sa
+# mga arm na matagal nang patay.
 _LIVE_TERMINAL_SESSION_STATES = frozenset(
-    {"cancelled", "expired", "error", "archived", "finished", "live_finished", "live_cancelled", "live_error"}
+    {
+        "cancelled", "expired", "error", "archived", "finished",
+        "live_finished", "live_cancelled", "live_error", "live_arm_expired",
+    }
 )
 
 
@@ -239,7 +259,23 @@ def _collect_live_session_conflicts(
     sector: str,
     correlation_bucket: str,
     hypothesis_family: str | None,
+    exclude_session_id: int | None = None,
 ) -> list[dict[str, Any]]:
+    """⚠️ ANG KANDIDATO AY HINDI SARILING INCUMBENT (2026-08-25).
+
+    Kapag ang pagsusuring ito ay tumatakbo PARA SA isang session na umiiral na, ang
+    sariling hilera ng session na iyon ay lumilitaw sa scan at nagbubunga ng isang
+    `same_ticker` na conflict laban sa sarili nito. Nasukat: 282 sa 282 na live na
+    momentum-entry packet sa 30 araw ang may EKSAKTONG ISANG conflict na ang
+    `session_id` ay katumbas ng sariling `automation_session_id` ng packet.
+
+    Ang sariling `count_concurrent_automation_sessions` ng codebase ay tumatanggap
+    ng exclusion, kaya ito ay pagkukulang at hindi kombensiyon -- walang komentong
+    nagtatanggol dito.
+
+    ⚠️ Ang `None` ay nagpapanatili ng eksaktong lumang gawi para sa bawat tumatawag
+    na walang hawak na session (ang purong pre-arm na pagsusuri).
+    """
     from ...models.trading import MomentumStrategyVariant, TradingAutomationSession
 
     rows = (
@@ -258,7 +294,10 @@ def _collect_live_session_conflicts(
             variants[int(variant.id)] = variant
     out: list[dict[str, Any]] = []
     candidate_family = str(hypothesis_family or "").strip().lower()
+    _exclude = int(exclude_session_id) if exclude_session_id else None
     for sess in rows:
+        if _exclude is not None and int(getattr(sess, "id", 0) or 0) == _exclude:
+            continue
         sess_sector = _symbol_asset_family(sess.symbol)
         sess_corr = _correlation_bucket(sess.symbol, asset_class=sess_sector)
         buckets: list[str] = []
@@ -520,6 +559,7 @@ def evaluate_allocation_candidate(
     context: str,
     execution_mode: str | None = None,
     intended_notional_usd: float | None = None,
+    exclude_session_id: int | None = None,
 ) -> dict[str, Any]:
     if user_id is None:
         return {
@@ -577,6 +617,7 @@ def evaluate_allocation_candidate(
             sector=sector,
             correlation_bucket=corr_bucket,
             hypothesis_family=hypothesis_family,
+            exclude_session_id=exclude_session_id,
         )
     )
     exposure = _portfolio_exposure_snapshot(
@@ -797,6 +838,8 @@ def build_session_allocation_decision(
         context=context,
         execution_mode=getattr(session, "mode", None),
         intended_notional_usd=intended_notional_usd,
+        # Ang session na ito ang MISMONG kandidato -- hindi ito sarili nitong kalaban.
+        exclude_session_id=int(getattr(session, "id", 0) or 0) or None,
     )
     decision.setdefault("score_inputs", {})["confidence_input"] = confidence_input
     session.allocation_decision_json = dict(decision)
