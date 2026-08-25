@@ -74,6 +74,10 @@ _IQFEED_BUILD_RE = re.compile(
 # real discriminator rather than a label, so these rows are the one tape source that
 # can stand as execution authority.
 _MASSIVE_SIP_BASIS = "massive_sip_unix_ms"
+# IQFeed L2 depth: ang provider_at ay pinar-parse mula sa sariling date+time
+# field ng L2 line (migration 371) -- isang tunay na quote-event clock.
+_IQFEED_DEPTH_BASIS = "iqfeed_l2_provider_at"
+_IQFEED_DEPTH_FUTURE_TOLERANCE_S = 1.5
 _MASSIVE_SIP_BRIDGE_VERSION = "massive_ws_v2_sip_clock"
 _MASSIVE_SIP_SOURCE_PREFIX = "massive_ws"
 _MASSIVE_SIP_FUTURE_TOLERANCE_S = 1.0
@@ -1148,6 +1152,16 @@ class AlpacaSpotAdapter:
         setups are pre-market.  IQFeed Q/reference rows still cannot stand in: they
         carry no quote-event clock at all, and a trade-time proxy cannot authorize
         an order.
+
+        THAT LAST SENTENCE IS NOW HALF-STALE (2026-08-25).  It remains true of the
+        Q/reference rows, but migration 371 gave ``iqfeed_depth_snapshots`` a
+        ``provider_at`` parsed from the L2 line's OWN date+time fields — a real
+        quote-event clock, not a trade-time proxy — and the bridge writes the OLDER
+        leg of the pair so a BBO can never read fresher than its stalest half.  A
+        THIRD tier now follows the Massive SIP stand-in, behind the same
+        ``allow_stand_in`` opt-in and its own ceiling.  Measured live: 102 of 121
+        symbols carry an IQFeed quote inside the 60s entry ceiling, median age 8.8s,
+        against an account entitled to IEX alone.
         """
         direct = self._alpaca_latest_quote(product_id)
         tick = meta = None
@@ -1175,9 +1189,191 @@ class AlpacaSpotAdapter:
             )
             if stand_in is not None:
                 return stand_in
+            # PANGATLONG TIER: IQFeed L2 depth (2026-08-25). Ang Massive SIP na
+            # daan ay nangunguna -- ito ang pinagsama-samang tape at ang mas
+            # mahigpit na 5s na kontrata. Kapag walang SIP na hilera, ang IQFeed
+            # depth ay may TUNAY na quote-event clock mula sa migration 371, at
+            # 26-39 venue laban sa IEX-lamang na karapatan ng account.
+            iqfeed_stand_in = self._iqfeed_depth_execution_bbo(
+                product_id,
+                (
+                    float(stand_in_max_age_seconds)
+                    if stand_in_max_age_seconds is not None
+                    else max_age_seconds
+                ),
+            )
+            if iqfeed_stand_in is not None:
+                return iqfeed_stand_in
         # No stand-in: hand back the direct metadata unchanged so the caller's
         # unavailable_kind attribution still reports the real adapter outcome.
         return None, (meta if isinstance(meta, FreshnessMeta) else _fresh(max_age_seconds))
+
+    def _iqfeed_depth_quote(self, sym: str, *, max_age_seconds: float):
+        """Isang BBO mula sa IQFeed L2 depth, may TUNAY na quote-event clock, o None.
+
+        ⚠️ ITO ANG SUMISIRA SA ISANG NAKASULAT NA PREMISE. Ang docstring ng
+        ``get_execution_bbo`` ay nagsasabi:
+
+            "IQFeed Q/reference rows still cannot stand in: they carry no
+             quote-event clock at all, and a trade-time proxy cannot authorize
+             an order."
+
+        Totoo iyon noong isinulat. Hindi na ngayon: idinagdag ng migration 371 ang
+        ``provider_at`` sa ``iqfeed_depth_snapshots``, na pinar-parse ng depth
+        bridge mula sa SARILING date+time field ng L2 line -- isang tunay na
+        quote-event clock, hindi trade-time proxy. Ang mga hilera ay nagdadala rin
+        ng MAS LUMANG binti ng pares, kaya ang isang pares ay hindi kailanman
+        lilitaw na mas sariwa kaysa sa pinakamatanda nitong bahagi.
+
+        NASUKAT (2026-08-25, buhay na RTH, bounded 5 min):
+            bridge lag observed_at-provider_at: p10 0.51s  p50 7.03s  p90 63.96s
+            per-simbolo na pinakabagong quote: 102 sa 121 (84%) ay <60s
+            median na edad kada simbolo: 8.8s
+
+        Ang Alpaca ay may karapatan sa IEX LAMANG. Ang IQFeed ay 26-39 venue. Sa
+        mga entry-side na BBO block na nasukat noong 08-24, 127 sa 136 (93.4%) ay
+        may sariwang IQFeed depth quote sa average na 1.3s.
+
+        ⚠️ EBIDENSYA ITO, HINDI AUTHORITY, at ENTRY-ONLY. Ang tumatawag lamang na
+        tahasang nag-opt in sa pamamagitan ng ``allow_stand_in`` ang nakakakita
+        nito -- hindi kailanman ang exit, hindi kailanman ang orphan close. Ang
+        dahilan ay nakasulat na sa ``get_execution_bbo``: ang isang mas malawak na
+        pinagsama-samang bid ay hahatol na marketable ang isang exit sa presyong
+        hindi kayang abutin ng venue.
+
+        ⚠️ SARILING CEILING. Ang bawat pinagmumulan ay hawak sa SARILING kontrata:
+        ang 2.0s na cap ng direktang quote ay imposible para sa isang tape na may
+        7s na median na bridge lag, kaya ang pagsukat dito sa cap na iyon ay
+        nangangahulugang hindi ito kailanman papuputok -- ang eksaktong aral ng
+        authority-aware ceiling na natutunan na sa SIP na daan.
+        """
+        try:
+            from ....db import SessionLocal
+            from sqlalchemy import text
+
+            ceiling = float(
+                getattr(
+                    settings,
+                    "chili_alpaca_execution_bbo_iqfeed_depth_max_age_seconds",
+                    20.0,
+                )
+                or 0.0
+            )
+            requested = float(max_age_seconds or 0.0)
+            if ceiling <= 0 or requested <= 0:
+                return None
+            max_age = min(requested, ceiling)
+            with SessionLocal() as _db:
+                row = _db.execute(text(
+                    "SELECT id, bid_top, ask_top, bid_top_size, ask_top_size, "
+                    "venues, source, provider_at, observed_at "
+                    "FROM iqfeed_depth_snapshots "
+                    "WHERE symbol = :s AND provider_at IS NOT NULL "
+                    "AND bid_top > 0 AND ask_top > 0 "
+                    "AND observed_at > (now() at time zone 'utc') - interval '10 minutes' "
+                    "ORDER BY observed_at DESC, id DESC LIMIT 1"
+                ), {"s": str(sym or "").upper()}).fetchone()
+            if row is None:
+                return None
+            bid = _f(row[1]); ask = _f(row[2])
+            if (
+                bid is None
+                or ask is None
+                or not all(math.isfinite(v) for v in (bid, ask))
+                or bid <= 0
+                or ask <= 0
+                or ask < bid
+            ):
+                return None
+            mid = (bid + ask) / 2.0
+            if mid <= 0:
+                return None
+
+            provider_at = row[7]
+            observed_at = row[8]
+            if not isinstance(provider_at, datetime) or not isinstance(observed_at, datetime):
+                return None
+            if provider_at.tzinfo is None:
+                provider_at = provider_at.replace(tzinfo=timezone.utc)
+            else:
+                provider_at = provider_at.astimezone(timezone.utc)
+            # ⚠️ Ang observed_at ay `timestamp WITHOUT time zone` na isinusulat sa UTC.
+            received_at = (
+                observed_at.replace(tzinfo=timezone.utc)
+                if observed_at.tzinfo is None
+                else observed_at.astimezone(timezone.utc)
+            )
+
+            # Ang venue ay nagse-stamp ng kaganapan bago natin ito matanggap; ang
+            # kabaligtaran ay sirang orasan, at ang pagtanggap na malayo sa likod ng
+            # kaganapan ay isang na-replay na hilera.
+            receive_delta = (received_at - provider_at).total_seconds()
+            if not (-_IQFEED_DEPTH_FUTURE_TOLERANCE_S <= receive_delta <= max_age):
+                return None
+            now_utc = _now()
+            provider_age = (now_utc - provider_at).total_seconds()
+            received_age = (now_utc - received_at).total_seconds()
+            if (
+                provider_age < -_IQFEED_DEPTH_FUTURE_TOLERANCE_S
+                or received_age < -_IQFEED_DEPTH_FUTURE_TOLERANCE_S
+                or provider_age > max_age
+                or received_age > max_age
+            ):
+                return None
+
+            meta = FreshnessMeta(
+                retrieved_at_utc=received_at,
+                provider_time_utc=provider_at,
+                max_age_seconds=max_age,
+            )
+            return NormalizedTicker(
+                product_id=sym, bid=bid, ask=ask, mid=mid,
+                spread_bps=(ask - bid) / mid * 10_000.0,
+                bid_size=_f(row[3]),
+                ask_size=_f(row[4]),
+                freshness=meta,
+                raw={
+                    "feed": str(row[6] or _IQFEED_DEPTH_BASIS),
+                    "depth_row_id": int(row[0]),
+                    "provider_event_at_utc": provider_at.isoformat(),
+                    "received_at_utc": received_at.isoformat(),
+                    "timestamp_basis": _IQFEED_DEPTH_BASIS,
+                    "venues": int(row[5]) if row[5] is not None else None,
+                },
+            ), meta
+        except Exception as exc:
+            logger.debug("[alpaca_spot] _iqfeed_depth_quote(%s) failed: %s", sym, exc)
+            return None
+
+    def _iqfeed_depth_execution_bbo(self, product_id: str, max_age_seconds: float):
+        """Ang IQFeed-depth na stand-in, o None kapag hindi ito maaaring gamitin."""
+        if _is_crypto_pid(product_id):
+            return None
+        if not bool(
+            getattr(
+                settings,
+                "chili_alpaca_execution_bbo_iqfeed_depth_fallback_enabled",
+                True,
+            )
+        ):
+            return None
+        result = self._iqfeed_depth_quote(
+            _to_symbol(product_id), max_age_seconds=float(max_age_seconds)
+        )
+        if not isinstance(result, tuple) or len(result) != 2:
+            return None
+        tick, meta = result
+        if tick is None or not isinstance(meta, FreshnessMeta):
+            return None
+        logger.info(
+            "[alpaca_spot] execution BBO stand-in %s bid=%.4f ask=%.4f "
+            "provider_age=%.3fs venues=%s basis=%s",
+            _to_symbol(product_id), float(tick.bid), float(tick.ask),
+            (_now() - meta.provider_time_utc).total_seconds(),
+            (tick.raw or {}).get("venues"),
+            _IQFEED_DEPTH_BASIS,
+        )
+        return tick, meta
 
     def _massive_sip_execution_bbo(self, product_id: str, max_age_seconds: float):
         """The SIP-clocked stand-in, or None when it may not be used."""
