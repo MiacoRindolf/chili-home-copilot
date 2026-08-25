@@ -144,9 +144,27 @@ def _loop_armed_for_tick(monkeypatch, dispatched: list[str]):
     """An IgnitionScoringLoop wired so _on_tick can dispatch (running, pooled, baseline)."""
     loop = IL.IgnitionScoringLoop()
     loop._running = True
-    loop._pool = SimpleNamespace(submit=lambda fn, sym, mv: dispatched.append(sym))
-    # baseline 100.0 for SYM so move% is derivable from the quote price
-    loop._tracker._baseline = {"SYM": 100.0}
+    # ⚠️ APAT NA ARGUMENTO. Ang tunay na tawag ay
+    #     pool.submit(self._score_symbol, sym, move_pct, _tick_price)
+    # Ang lumang peke ay tumatanggap lang ng tatlo, kaya nagre-raise ito ng
+    # TypeError -- at NILALAMON iyon ng `except Exception` sa paligid ng
+    # submit sa `_on_tick`. Walang dispatch, walang error, walang bakas:
+    # ang test ay nagre-report ng "hindi nag-dispatch" gayong ang pekeng
+    # pool ang sira, hindi ang code.
+    loop._pool = SimpleNamespace(
+        submit=lambda fn, sym, mv, px=None: dispatched.append(sym)
+    )
+    # ⚠️ BASELINE 10.0, HINDI 100.0. Ang default na landas ngayon ay ang S1
+    # event feeder (`chili_momentum_event_select_primary_enabled`, default
+    # True), na dumaraan sa `_ross_threshold_crossed` -- at may AND-gate iyon
+    # na price band na [1.0, 20.0], ang low-float proxy ng codebase.
+    #
+    # Sa lumang baseline na 100.0 ay nasa 101-120 ang bawat tick: LABAS SA
+    # BAND. Ang dalawang dispatch test ay bumagsak, at -- mas malala -- ang
+    # "silent below floor" na test ay PUMASA NANG WALANG LAMAN: tama ang
+    # sagot nito sa maling dahilan (tinanggihan dahil sa band, hindi dahil sa
+    # floor), kaya tumigil itong bantayan ang floor nang hindi napapansin.
+    loop._tracker._baseline = {"SYM": 10.0}
     loop._tracker._symbols = {"SYM"}
     return loop
 
@@ -155,8 +173,8 @@ def test_on_tick_fires_above_floor(monkeypatch):
     monkeypatch.setattr(settings, "chili_momentum_ignition_min_pct", 3.0, raising=False)
     dispatched: list[str] = []
     loop = _loop_armed_for_tick(monkeypatch, dispatched)
-    # 100 -> 110 == +10% (>= 3% floor)
-    loop._on_tick("SYM", SimpleNamespace(last=110.0, mid=110.0, bid=109.9))
+    # 10 -> 11 == +10% (>= 3% floor), at ang 11.0 ay NASA LOOB ng [1, 20]
+    loop._on_tick("SYM", SimpleNamespace(last=11.0, mid=11.0, bid=10.99))
     assert dispatched == ["SYM"]
 
 
@@ -164,8 +182,9 @@ def test_on_tick_silent_below_floor(monkeypatch):
     monkeypatch.setattr(settings, "chili_momentum_ignition_min_pct", 3.0, raising=False)
     dispatched: list[str] = []
     loop = _loop_armed_for_tick(monkeypatch, dispatched)
-    # 100 -> 101 == +1% (< 3% floor)
-    loop._on_tick("SYM", SimpleNamespace(last=101.0, mid=101.0, bid=100.9))
+    # 10 -> 10.1 == +1% (< floor). ⚠️ Nasa loob ng band ang presyo, kaya ang
+    # FLOOR ang tumatanggi -- iyon ang sinusubok ng test na ito.
+    loop._on_tick("SYM", SimpleNamespace(last=10.1, mid=10.1, bid=10.09))
     assert dispatched == []
 
 
@@ -176,7 +195,7 @@ def test_two_ticks_within_cooldown_dispatch_once(monkeypatch):
     monkeypatch.setattr(settings, "chili_momentum_ignition_min_pct", 3.0, raising=False)
     dispatched: list[str] = []
     loop = _loop_armed_for_tick(monkeypatch, dispatched)
-    q = SimpleNamespace(last=120.0, mid=120.0, bid=119.9)  # +20%
+    q = SimpleNamespace(last=12.0, mid=12.0, bid=11.99)  # +20%, nasa band
 
     loop._on_tick("SYM", q)
     # second tick immediately after (well within _SCORE_COOLDOWN_S) must not re-dispatch
@@ -191,7 +210,7 @@ def test_inflight_guard_blocks_concurrent_dispatch(monkeypatch):
     dispatched: list[str] = []
     loop = _loop_armed_for_tick(monkeypatch, dispatched)
     loop._inflight.add("SYM")  # simulate an in-progress score
-    loop._on_tick("SYM", SimpleNamespace(last=120.0, mid=120.0, bid=119.9))
+    loop._on_tick("SYM", SimpleNamespace(last=12.0, mid=12.0, bid=11.99))
     assert dispatched == []
 
 
@@ -331,3 +350,48 @@ def test_loop_start_is_noop_when_disabled(monkeypatch):
     loop.start()
     assert loop._running is False
     assert loop._pool is None
+
+
+# ── (e) ang price band ay bahagi ng predicate, hindi aksidente ───────────────
+
+
+def test_a_name_above_the_ross_band_never_ignites(monkeypatch):
+    """⚠️ ITO ANG NAGPABAGSAK SA MGA TEST SA ITAAS, at TAMA ang gawi.
+
+    Ang S1 event feeder ay dumaraan sa ``_ross_threshold_crossed``, na may
+    AND-gate na price band na ``[1.0, 20.0]`` -- ang low-float proxy ng
+    codebase. Ang isang $110 na pangalan ay hindi Ross small-cap, kaya hindi ito
+    dapat mag-ignite gaano man kalaki ang move.
+
+    Ang mga test sa itaas ay gumagamit ng baseline na 100.0 at nagpapadala ng
+    tick sa 101-120: labas sa band ang bawat isa. Ang code ang tama; ang mga
+    test ang lipas na. Pinipin ito rito para hindi na maulit ang parehong
+    pagkalito.
+    """
+    monkeypatch.setattr(settings, "chili_momentum_ignition_min_pct", 3.0, raising=False)
+    dispatched: list[str] = []
+    loop = _loop_armed_for_tick(monkeypatch, dispatched)
+    loop._tracker._baseline = {"SYM": 100.0}
+    loop._on_tick("SYM", SimpleNamespace(last=110.0, mid=110.0, bid=109.9))
+    assert dispatched == [], "ang $110 na pangalan ay nasa labas ng Ross band"
+
+
+def test_a_name_below_the_ross_band_never_ignites(monkeypatch):
+    """Ang kabilang gilid: ang sub-dollar ay hindi rin dapat mag-ignite."""
+    monkeypatch.setattr(settings, "chili_momentum_ignition_min_pct", 3.0, raising=False)
+    dispatched: list[str] = []
+    loop = _loop_armed_for_tick(monkeypatch, dispatched)
+    loop._tracker._baseline = {"SYM": 0.50}
+    loop._on_tick("SYM", SimpleNamespace(last=0.90, mid=0.90, bid=0.89))
+    assert dispatched == [], "ang sub-dollar ay nasa labas ng Ross band"
+
+
+def test_an_absent_price_fails_open(monkeypatch):
+    """⚠️ FAIL-OPEN sa NAWAWALANG datos, hindi fail-closed. Ang band ay isang
+    AND-gate na tumatanggi LAMANG sa presyong nagpapatunay na labas ito -- ang
+    isang pangalang walang quote price ay hindi dapat tahimik na maharangan."""
+    from app.services.trading.momentum_neural.nbbo_tape import _ross_threshold_crossed
+
+    assert _ross_threshold_crossed(
+        "SYM", rvol=None, move_pct=10.0, gap_pct=10.0, price=None
+    ) is True
