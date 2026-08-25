@@ -29817,7 +29817,31 @@ def tick_live_session(
         # ONLY (crypto L1 lives elsewhere). FAIL-OPEN on thin/absent L1 (never blocks).
         # Flag-off ⇒ no-op, byte-identical.
         if (
-            _trigger_ok
+            # ⚠️ _score_ok MUNA. Ang `_trigger_ok` ay sinisimulan bilang True na may
+            # reason na "score_only" (linya 28423), at ang trigger ladder na dapat
+            # pumalit doon ay naaabot lamang sa loob ng `if _score_ok`. Kapag False
+            # ang `_score_ok` ay nananatiling True ang `_trigger_ok` na may
+            # placeholder na reason — kaya tumatakbo ang confirmer na ito sa BAWAT
+            # tick ng BAWAT session na hindi naman admissible.
+            #
+            # SINUKAT (2026-08-25, 30 araw): 274 sa 292 na `live_entry_bid_prop_
+            # unconfirmed` na event ang nag-uulat ng `blocked_trigger="score_only"`
+            # — 93.8%. Ang linya 28423 ang TANGING pinagmumulan ng string na iyon sa
+            # file na ito, kaya patunay ito at hindi hinuha. ~18 lang sa 30 araw ang
+            # humarang ng tunay na detector.
+            #
+            # Bunga: isang per-tick na pagbasa sa 26 GB na `momentum_nbbo_spread_tape`
+            # at isang event row para sa bawat session na maghihintay lang naman. At
+            # ang istatistikang "bid_prop ang dominanteng pumapatay ng candidate" ay
+            # artifact — itinuro nito ang atensyon sa maling gate sa loob ng ilang
+            # linggo.
+            #
+            # Ligtas: hinihingi na ng admission ang `_score_ok and _trigger_ok` sa
+            # 29925 at 29934, kaya WALANG session na kayang mag-submit ngayon ang
+            # nagbabago. Ito ang parehong idiom na ginagamit na ng backside-bench
+            # block sa 29227.
+            _score_ok
+            and _trigger_ok
             and not str(sess.symbol or "").upper().endswith("-USD")
             and bool(getattr(settings, "chili_momentum_bid_prop_confirmer_enabled", True))
         ):
