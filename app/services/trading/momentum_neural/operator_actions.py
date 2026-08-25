@@ -718,11 +718,26 @@ def begin_live_arm(
             "error": _quarantine_reason,
             "message": "This Alpaca execution posture is quarantined pending certification.",
         }
-    if not _generic_alpaca_arm_process_fence_acquired(
-        db,
-        execution_family=_ef_norm,
-    ):
-        return _captured_paper_service_fence_rejection()
+    # ⚠️ ANG PROCESS FENCE AY KINUKUHA SA IBABA, HINDI DITO (2026-08-25). Dating
+    # nakukuha ito sa puntong ito -- 303 linya ng purong GATING bago ang unang
+    # pagsulat -- at ang isang advisory XACT lock ay hawak hanggang sa mag-commit
+    # ang transaction ng TUMAWAG. Kaya hawak ng isang arm ang PANDAIGDIGANG mutex
+    # sa buong mabagal na trabaho nito, at ang bawat KAPWA arm ay bumabagsak.
+    #
+    # NASUKAT sa buhay na premarket (08-25):
+    #   phase_seconds={'board_build': 7.56, 'gate_loop': 70.76, 'total': 78.33}
+    #   may hawak na may xact na 6s ang tanda; fence hawak sa 56-88% ng sample
+    #   begin_live_arm blocked AIXI/RCON/SWVL/BDRX/WVVIP -> armed=0 (lima sa lima)
+    #
+    # Ang layunin ng fence ay nakasaad nang eksakto sa docstring nito: "a captured
+    # service cannot start halfway through an arm/promote MUTATION." Ang gating ay
+    # hindi mutation. Ang paglipat ng pagkuha sa mismong bingit ng unang pagsulat
+    # (ang action claim) ay nagpapanatili ng ARI-ARIANG IYON NANG BUO habang
+    # tinatanggal ang 303 linya mula sa critical section.
+    #
+    # ⚠️ NANANATILI ANG PER-SYMBOL LOCK DITO. Iba ito: isang NAGHIHINTAY na
+    # per-symbol advisory lock na pumipigil sa double-arm, at gusto natin itong
+    # hawak habang tumatakbo ang mga gate para hindi makapasok ang kambal.
     if not _live_symbol_arm_lock_acquired(
         db,
         user_id=int(user_id),
@@ -1021,6 +1036,23 @@ def begin_live_arm(
                 "no arm or broker-action claim was created."
             ),
         }
+    # ── ANG CRITICAL SECTION AY NAGSISIMULA DITO ──────────────────────────────
+    # Ito ang unang pagsulat sa daan ng arm. Mula dito hanggang sa commit ng
+    # tumawag ay dapat walang captured-paper service na makapagsimula, kaya DITO
+    # kinukuha ang process fence -- hindi 303 linya sa itaas kung saan wala pa
+    # itong pinoprotektahan.
+    #
+    # ⚠️ FAIL-CLOSED PA RIN, at walang nagbago sa pag-aari: kung hawak ng
+    # dedikadong service ang session lock nito ay tumatanggi pa rin tayo, ngayon
+    # lang ito nangyayari BAGO ang unang mutation sa halip na bago ang unang gate.
+    # Ang gastos ay ang nasayang na gating sa bihirang kaso ng pagkatalo; ang
+    # nakukuha ay isang critical section na sinusukat sa millisecond, hindi sa
+    # sampung segundo.
+    if not _generic_alpaca_arm_process_fence_acquired(
+        db,
+        execution_family=_ef_norm,
+    ):
+        return _captured_paper_service_fence_rejection()
     if _ef_norm in ALPACA_EXECUTION_FAMILIES:
         _claim = acquire_action_claim(
             db,
