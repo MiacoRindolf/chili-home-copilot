@@ -195,7 +195,33 @@ def _candidate_asset_family(symbol: str | None, asset_class: str | None) -> str:
     return family or _symbol_asset_family(symbol)
 
 
-def _venue_readiness_score(symbol: str | None) -> float:
+def _venue_readiness_score(symbol: str | None, *, execution_family: str | None = None) -> float:
+    """Handa ba ang venue na TATAKBUHAN ng kandidato?
+
+    ⚠️ SINUSUKAT NITO ANG MALING BROKER (2026-08-25). Para sa equity ay
+    tinatanong nito ang ROBINHOOD -- pero ang buong lane ay tumatakbo sa ALPACA.
+    Napatunayan sa buhay na DB: lahat ng 498 live session ngayong araw ay
+    `alpaca_spot`. At ang `get_all_broker_statuses()` ay may alam lamang sa
+    coinbase / robinhood / metamask -- WALANG alpaca -- kaya ang termino ay
+    hindi kailanman naging sukat ng venue na aktwal nating pinagpapadalhan.
+
+    Ang bunga ay tahimik: nakaupo ang venue term sa 0.5 na neutral, isa sa
+    limang input ng allocator score na walang dalang tunay na ebidensya, at
+    magkasamang ginagawa nilang eksaktong 0.4580 na constant ang score.
+    Mas masahol pa: kung MAKONEKTA ang Robinhood ay tataas ito sa 1.0 -- MALING
+    impormasyon, hindi tama.
+
+    ⚠️ ANG PAG-UULAT NG "HINDI ALAM" AY MAS TAPAT KAYSA SA PAG-UULAT NG IBANG
+    BROKER. Kapag ang execution family ay isang bagay na hindi kayang sabihin ng
+    broker-status na mapa, ibinabalik natin ang neutral na 0.5 -- ang parehong
+    halaga gaya ng dati -- pero ngayon ay SADYA na ito at hindi nagkataon.
+    """
+    family = str(execution_family or "").strip().lower()
+    if family.startswith("alpaca"):
+        # Walang alpaca sa broker-status na mapa. Ang neutral ay ang TAPAT na sagot
+        # hanggang may tunay na Alpaca readiness signal na maiulat -- ang pag-uulat
+        # ng katayuan ng Robinhood dito ay magsasabi tungkol sa ibang brokerage.
+        return 0.5
     brokers = get_all_broker_statuses()
     sym = (symbol or "").strip().upper()
     if sym.endswith("-USD"):
@@ -617,6 +643,7 @@ def evaluate_allocation_candidate(
     execution_mode: str | None = None,
     intended_notional_usd: float | None = None,
     exclude_session_id: int | None = None,
+    execution_family: str | None = None,
 ) -> dict[str, Any]:
     if user_id is None:
         return {
@@ -638,7 +665,7 @@ def evaluate_allocation_candidate(
     corr_bucket = _correlation_bucket(symbol, asset_class=sector)
     live_drift_score = _tier_score(live_drift_contract or {})
     execution_score = _tier_score(execution_contract or {})
-    venue_score = _venue_readiness_score(symbol)
+    venue_score = _venue_readiness_score(symbol, execution_family=execution_family)
 
     from ...models.trading import Trade, TradingAutomationSession
 
@@ -897,6 +924,8 @@ def build_session_allocation_decision(
         intended_notional_usd=intended_notional_usd,
         # Ang session na ito ang MISMONG kandidato -- hindi ito sarili nitong kalaban.
         exclude_session_id=int(getattr(session, "id", 0) or 0) or None,
+        # ⚠️ Ang execution_mode ay live/paper; ang VENUE ay nakasalalay sa FAMILY.
+        execution_family=getattr(session, "execution_family", None),
     )
     decision.setdefault("score_inputs", {})["confidence_input"] = confidence_input
     session.allocation_decision_json = dict(decision)
