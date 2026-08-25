@@ -7156,8 +7156,15 @@ def _recent_mfe_samples(db: Any, setup_family: Any, *, limit: int = 200) -> list
                 _epoch = _dt.fromisoformat(_epoch_s.replace("Z", "+00:00")).replace(tzinfo=None)
         except Exception:
             _epoch = None
+        # ⚠️ ANG IMPORT AY DAPAT NASA LABAS NG IF/ELSE. Ang function-scoped na
+        # import ay gumagawa ng LOKAL na pangalan para sa BUONG function, kaya
+        # kapag nasa loob lang ito ng if-arm ay UnboundLocalError ang else-arm --
+        # at nilalamon iyon ng try/except sa paligid, kaya TAHIMIK na [] ang
+        # ibinabalik. Ang else-arm ang LIVE path (walang replay epoch), kaya ang
+        # live na MFE sampling ay walang laman magpakailanman.
+        from .optional_db_read import optional_fetchall
+
         if _epoch is not None:
-            from .optional_db_read import optional_fetchall
 
             rows = optional_fetchall(
                 db,
