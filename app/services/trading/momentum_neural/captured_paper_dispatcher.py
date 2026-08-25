@@ -22,6 +22,7 @@ import hashlib
 import json
 import re
 import threading
+import time as _time
 import uuid
 from typing import Any, Callable, Iterator, Mapping, Protocol
 
@@ -807,33 +808,115 @@ def _load_live_session(db: Any, session_id: int) -> Any | None:
         ) from exc
 
 
+# ── BOUNDED RETRY SA ORDINARY ROUTE LOCK (2026-08-25) ────────────────────────
+# Ang irreducible base: isang KABUUANG badyet sa millisecond. Hinahati ito ng isang
+# nakapirming pagitan para makuha ang bilang ng pagtatangka -- isang bilang na
+# hawak ng operator, hindi dalawa.
+_ORDINARY_ROUTE_LOCK_RETRY_INTERVAL_MS = 120
+_DEFAULT_ORDINARY_ROUTE_LOCK_RETRY_BUDGET_MS = 400
+_MAX_ORDINARY_ROUTE_LOCK_RETRY_BUDGET_MS = 3000
+
+
+def _ordinary_route_lock_retry_budget_ms() -> int:
+    try:
+        raw = getattr(
+            settings,
+            "chili_momentum_ordinary_route_lock_retry_budget_ms",
+            _DEFAULT_ORDINARY_ROUTE_LOCK_RETRY_BUDGET_MS,
+        )
+        value = int(raw if raw is not None else _DEFAULT_ORDINARY_ROUTE_LOCK_RETRY_BUDGET_MS)
+    except Exception:
+        return _DEFAULT_ORDINARY_ROUTE_LOCK_RETRY_BUDGET_MS
+    return max(0, min(_MAX_ORDINARY_ROUTE_LOCK_RETRY_BUDGET_MS, value))
+
+
 def _load_ordinary_live_session_for_update(
     db: Any,
     session_id: int,
 ) -> Any | None:
-    """Preserve the existing ordinary runner's locked route classification."""
+    """Preserve the existing ordinary runner's locked route classification.
 
+    BOUNDED RETRY, HINDI ISANG HUMAHARANG NA HINTAY (2026-08-25). Ito ay isang
+    `FOR UPDATE NOWAIT`: kapag may ibang transaction na hawak ang row ay AGAD
+    itong bumabagsak, at ang session ay naiiwang hindi natitikan. Ang bunga ay
+    nasukat nang buhay sa premarket::
+
+        psycopg2.errors.LockNotAvailable: could not obtain lock on row in
+            relation "trading_automation_sessions"
+        [scheduler] live runner tick failed session=15676
+
+        session 15676 (AIXI) sa live_pending_entry nang 650 SEGUNDO
+        runner tick failed: 9 sa 35 na live_runner na linya (26%)
+
+    ⚠️ AT SADYANG NOWAIT ITO, KAYA NANATILI ITONG NOWAIT. Sa 60 mabilisang probe
+    ng `pg_locks` ay may naghihintay na row lock sa **60 sa 60** (129 waiter sa
+    kabuuan, ~2 sabay-sabay). Ang pagpapalit nito sa isang humaharang na hintay ay
+    magpapasali sa runner sa isang pilang laging punô -- at ang runner ay
+    `max_instances=1`, kaya ang isang mahabang harang doon ay nagpapatigil sa
+    stop/trail management ng BAWAT hawak na posisyon. Iyon ang eksaktong 648
+    segundong pagka-freeze ng session 14440.
+
+    Kaya: NOWAIT pa rin, pero may nakatakdang bilang ng MULING PAGTATANGKA. Hindi
+    ito pumipila kailanman; nirerecover lang nito ang panandaliang banggaan.
+
+    ⚠️ SAVEPOINT KADA PAGTATANGKA. Ang isang nabigong `FOR UPDATE NOWAIT` ay
+    NAGTATAAS at umaabort sa transaction na tumatakbo nito. Kung walang savepoint
+    ay walang saysay ang muling pagtatangka -- patay na ang transaction -- at ang
+    pagkakamali ay tumatagos sa lahat ng sumusunod dito.
+
+    ⚠️ ANG NAKUHANG LOCK AY NABUBUHAY. Ang lock na nakuha sa isang subtransaction
+    na NAG-COMMIT ay hawak hanggang sa katapusan ng PANGUNAHING transaction, kaya
+    ang kontratang inaasahan ng tumawag (naka-lock ang row pagbalik) ay hindi
+    nagbabago.
+    """
+
+    budget_ms = _ordinary_route_lock_retry_budget_ms()
+    interval_s = _ORDINARY_ROUTE_LOCK_RETRY_INTERVAL_MS / 1000.0
+    attempts = 1 + (budget_ms // _ORDINARY_ROUTE_LOCK_RETRY_INTERVAL_MS)
+    last_exc: Exception | None = None
+
+    for attempt in range(int(attempts)):
+        nested = None
+        try:
+            nested = db.begin_nested()
+            row = (
+                db.query(
+                    TradingAutomationSession.id,
+                    TradingAutomationSession.symbol,
+                    TradingAutomationSession.execution_family,
+                    TradingAutomationSession.risk_snapshot_json,
+                )
+                .filter(
+                    TradingAutomationSession.id == int(session_id),
+                    TradingAutomationSession.mode == "live",
+                )
+                .with_for_update(nowait=True)
+                .one_or_none()
+            )
+            nested.commit()
+            return row
+        except CapturedPaperDispatchError:
+            _rollback_nested_quietly(nested)
+            raise
+        except Exception as exc:
+            last_exc = exc
+            _rollback_nested_quietly(nested)
+            if attempt + 1 >= attempts:
+                break
+            _time.sleep(interval_s)
+
+    raise CapturedPaperRuntimeUnavailableError(
+        "captured_paper_ordinary_route_lock_unavailable"
+    ) from last_exc
+
+
+def _rollback_nested_quietly(nested: Any) -> None:
+    """Ibalik ang savepoint nang hindi kailanman nagtatapon ng pangalawang error."""
     try:
-        return (
-            db.query(
-                TradingAutomationSession.id,
-                TradingAutomationSession.symbol,
-                TradingAutomationSession.execution_family,
-                TradingAutomationSession.risk_snapshot_json,
-            )
-            .filter(
-                TradingAutomationSession.id == int(session_id),
-                TradingAutomationSession.mode == "live",
-            )
-            .with_for_update(nowait=True)
-            .one_or_none()
-        )
-    except CapturedPaperDispatchError:
-        raise
-    except Exception as exc:
-        raise CapturedPaperRuntimeUnavailableError(
-            "captured_paper_ordinary_route_lock_unavailable"
-        ) from exc
+        if nested is not None and nested.is_active:
+            nested.rollback()
+    except Exception:
+        pass
 
 
 def revalidate_captured_paper_route_token(
