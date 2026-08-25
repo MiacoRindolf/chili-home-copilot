@@ -201,6 +201,59 @@ def invalidate_agg_cache_for_ticker(ticker: str) -> int:
     return len(keys)
 
 
+# Segundo bawat timespan unit ng _TIMESPAN_MAP. Walang bagong threshold --
+# dinederive lang ang tagal ng interval na ipinahayag na ng mapa sa itaas.
+_UNIT_SECONDS: dict[str, int] = {
+    "minute": 60, "hour": 3600, "day": 86400, "week": 604800, "month": 2592000,
+}
+
+# Pinakamababang TTL ng bar. Ang isang 1m na bar ay hindi nagbabago nang mas
+# mabilis kaysa dito, kaya walang naidaragdag na katumpakan ang paglampas --
+# tumataas lang ang bilang ng tawag sa upstream.
+_TTL_BARS_FLOOR = 180.0
+
+
+def _bar_cache_ttl(key: str) -> float:
+    """TTL para sa isang agg cache key, batay sa interval NITO.
+
+    BAKIT ITO UMIIRAL. Ang ``_TTL_BARS`` ay 3600 -- isang oras -- para sa BAWAT
+    bar interval. Katanggap-tanggap iyon para sa daily bar at nakamamatay para
+    sa 1m.
+
+    May umiiral nang mitigation: ang ``CandleAggregator._emit`` ay tumatawag sa
+    ``invalidate_agg_cache_for_ticker`` tuwing magsasara ang isang WS candle, at
+    sinasabi mismo ng komento nito na kung wala iyon ay "left 'live' triggers
+    reading bars up to an hour old -- fatal for a 1m entry timeframe".
+
+    ⚠️ HINDI ITO NAAABOT SA PROSESONG NANGANGALAKAL. Ang ``_emit`` ay tumatakbo
+    lamang kapag may ginawang aggregator; ang ``get_candle_aggregator`` ay may
+    IISANG tumatawag sa buong repo (``register_candle_listener``, linya 1363),
+    at iyon naman ay tinatawag lamang mula sa ``app/routers/trading.py:1871`` --
+    ang WEB container, na ang ``CHILI_SCHEDULER_ROLE`` ay ``none``. Sa host exec
+    lane ay walang aggregator na nalilikha, kaya walang tumatawag sa ``_emit``,
+    kaya walang nag-i-invalidate: ang 3600 ang TUNAY na hangganan doon.
+
+    Ang tamang ayos ay magparehistro ng candle listener sa exec process. Ito ang
+    makitid na panangga habang wala pa iyon: ginagawa lang nitong mas sariwa ang
+    datos, at ang failure mode ay dami ng tawag sa upstream, hindi maling presyo.
+
+    ⚠️ Sinusuri ang BAWAT field, hindi ang isang nakapirming index. Ang crypto ay
+    naka-key bilang ``X:BTCUSD``, na MAY COLON, kaya lumilipat ang lahat ng
+    posisyon pagkatapos ng ticker. Ang interval ay laging nauuna sa period sa
+    key, kaya tama ang unang tugma sa ``_TIMESPAN_MAP``.
+    """
+    for field in key.split(":")[2:]:
+        span = _TIMESPAN_MAP.get(field)
+        if span is None:
+            continue
+        unit, multiplier = span
+        secs = _UNIT_SECONDS.get(unit)
+        if not secs:
+            break
+        return min(float(_TTL_BARS), max(_TTL_BARS_FLOOR, float(secs * multiplier * 3)))
+    return float(_TTL_BARS)
+
+
 def _cache_get(key: str) -> Any | None:
     with _cache_lock:
         entry = _cache.get(key)
@@ -208,7 +261,8 @@ def _cache_get(key: str) -> Any | None:
             _bump("cache_misses")
             return None
         ts, val = entry
-        ttl = _TTL_QUOTE if ":quote:" in key else (_TTL_SNAPSHOT if ":snap:" in key else _TTL_BARS)
+        ttl = _TTL_QUOTE if ":quote:" in key else (
+            _TTL_SNAPSHOT if ":snap:" in key else _bar_cache_ttl(key))
         if time.time() - ts > ttl:
             del _cache[key]
             _bump("cache_misses")
