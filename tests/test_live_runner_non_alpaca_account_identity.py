@@ -14,12 +14,35 @@ class _Db:
     def flush(self):
         self.flushes += 1
 
+    def rollback(self):
+        # Production's locked-row read wraps its own `db.rollback()` in a
+        # bare try/except, so a missing method here was invisible. Modelling
+        # it keeps the fake honest about what tick_live_session actually
+        # calls on the failure path this test must NOT take.
+        return None
+
 
 class _Query:
     def __init__(self, session):
         self.session = session
 
     def filter(self, *_args, **_kwargs):
+        return self
+
+    def populate_existing(self, *_args, **_kwargs):
+        # What rotted: tick_live_session builds the locked-row read as
+        #   db.query(TradingAutomationSession).populate_existing().filter(...)
+        #     .with_for_update(nowait=True).one_or_none()
+        # (app/services/trading/momentum_neural/live_runner.py:25888-25897).
+        # This stub lacked populate_existing, so the AttributeError was eaten
+        # by the LockNotAvailable handler and the tick returned
+        # {"ok": True, "skipped": "concurrent_tick"} -- the account-identity
+        # fence was never reached at all.
+        # Why it cannot rot the same way silently: the swallow path yields
+        # skipped == "concurrent_tick", and the test below asserts
+        # skipped == "non_alpaca_account_identity_quarantined", so any future
+        # drift in that query chain fails this test loudly instead of turning
+        # it green-but-empty.
         return self
 
     def with_for_update(self, **_kwargs):

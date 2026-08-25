@@ -760,6 +760,22 @@ def test_replay_reachable_detector_and_l2_calls_thread_explicit_boundaries():
         actual = {keyword.arg for keyword in node.keywords if keyword.arg}
         assert expected <= actual, (name, expected - actual, node.lineno)
 
+    # WHAT ROTTED: this pinned count is a review tripwire, not the guard itself --
+    # the real guard is the per-call `expected <= actual` assert above, which fires
+    # for EVERY site found. The pin only forces a human to look when a new call
+    # appears. `read_ladder_distribution` was pinned at 2 and PR #1037 (52d3840c8,
+    # 2026-08-17, "feat(momentum): v3 ask_side_pressure_lock") added a compliant
+    # THIRD site without bumping it, so the tripwire failed on the count while the
+    # boundary it protects was never actually violated.
+    #
+    # WHY THIS CANNOT ROT THE SAME WAY: the three sites are now named, so the next
+    # bump is an attribution exercise rather than a blind increment. If a FOURTH
+    # appears, name it here after checking it threads `as_of=` -- and if it does
+    # not, the per-call assert has already failed before this line is reached.
+    #   1. live_runner.tick_live_session -> sell_into_strength_ladder read
+    #   2. live_runner.tick_live_session -> ask_side_pressure_lock fallback read
+    #      (only taken when the ladder above was never bound: `except NameError`)
+    #   3. live_runner.tick_live_session -> classify_stop_breach (stop-breach L2)
     assert seen == {
         "momentum_pullback_trigger": 1,
         "micro_pullback_primary_confirmation": 1,
@@ -767,7 +783,7 @@ def test_replay_reachable_detector_and_l2_calls_thread_explicit_boundaries():
         "blue_sky_break_confirmation": 1,
         "_bc_fn": 1,
         "_l2_entry_confirm": 1,
-        "read_ladder_distribution": 2,
+        "read_ladder_distribution": 3,
     }
 
 

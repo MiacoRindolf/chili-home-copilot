@@ -794,22 +794,72 @@ def test_first_quote_does_not_acknowledge_trade_producer(
 
 
 def test_massive_authentication_requires_provider_ack() -> None:
+    # ANO ANG NABULOK: bago ang PR #1056 (2026-08-18) ang _authenticate() ay
+    # bumabasa ng EKSAKTONG ISANG frame at nag-raise ng iisang "not acknowledged"
+    # para sa lahat ng hindi-ack.  Hinati ito ng #1056 sa dalawang magkaibang
+    # error -- "rejected" para sa tahasang auth_failed/auth_timeout, at "not
+    # acknowledged" LAMANG kapag naubos na ang _AUTH_HANDSHAKE_MAX_FRAMES na
+    # frames nang walang ack -- pero ang bagong test file lang ang inupdate.
+    # Kaya nagpapakain pa rin dito ng auth_failed habang nagma-match sa mensahe
+    # ng exhaustion: tumatama pa rin ang raise, sa MALING dahilan.
+    #
+    # HINDI ITO PWEDENG MABULOK ULIT SA PAREHONG PARAAN: bawat sanga ngayon ay
+    # nagpi-pin ng BILANG NG RECV laban sa mismong constant ng production
+    # (_AUTH_HANDSHAKE_MAX_FRAMES), kaya hindi na maaaring magpalitan ang dalawang
+    # sanga nang tahimik -- iba ang bilang ng basa ng agarang reject (1) sa
+    # naubos na scan (buong bound).  Ang sinusubaybayan ng file na ito ay ang
+    # CAPTURE-IDENTITY na idineklara ng producer spec, hindi ang mekanika ng
+    # handshake (nasa tests/test_massive_ws_auth_handshake.py iyon), kaya bawat
+    # sanga ay nag-a-assert ng capture_source_identity["authenticated"].
     client = massive.MassiveWSClient()
     client._connection_generation = 4
 
     class _AuthSocket(_Socket):
-        def __init__(self, response: str) -> None:
+        """Ibinabalik ang `frames` sa pagkakasunod, tapos uulitin ang huli."""
+
+        def __init__(self, *frames: str) -> None:
             super().__init__()
-            self.response = response
+            self.frames = list(frames)
+            self.reads = 0
 
         def recv(self) -> str:
-            return self.response
+            self.reads += 1
+            if len(self.frames) > 1:
+                return self.frames.pop(0)
+            return self.frames[0]
 
+    greeting = '[{"ev":"status","status":"connected"}]'
+    bound = massive.MassiveWSClient._AUTH_HANDSHAKE_MAX_FRAMES
+
+    # Tahasang tinanggihan ng provider: sariling error, at hindi na nagbabasa pa.
     client._ws = _AuthSocket('[{"ev":"status","status":"auth_failed"}]')
-    with pytest.raises(RuntimeError, match="not acknowledged"):
+    with pytest.raises(RuntimeError, match="rejected"):
         client._authenticate()
+    assert client._ws.reads == 1
     assert client.capture_source_identity["authenticated"] is False
 
-    client._ws = _AuthSocket('[{"ev":"status","status":"auth_success"}]')
+    # Walang dumadating na ack kailanman: bounded ang scan (hindi nakabitin), at
+    # tumatangging i-attest ang identity.
+    client._ws = _AuthSocket(greeting)
+    with pytest.raises(RuntimeError, match="not acknowledged"):
+        client._authenticate()
+    assert client._ws.reads == bound
+    assert len(client._ws.sent) == 1  # isang auth send kada handshake, hindi kada frame
+    assert client.capture_source_identity["authenticated"] is False
+
+    # Maaaring sumunod ang ack sa hiwalay na greeting -- iyon ang outage na
+    # inayos ng #1056.  DITO babagsak ang pagbalik sa single-recv na handshake;
+    # hindi ito kayang hulihin ng exhaustion na sanga sa itaas mag-isa (parehong
+    # "not acknowledged" ang itinatapon ng greeting-only socket sa dalawang anyo).
+    client._ws = _AuthSocket(
+        greeting, '[{"ev":"status","status":"auth_success"}]'
+    )
     client._authenticate()
+    assert client._ws.reads == 2
     assert client.capture_source_identity["authenticated"] is True
+
+    # Nakatali ang attestation sa koneksyong pinagkitaan nito: ang reconnect ay
+    # nagtataas ng generation, at dapat bumalik sa hindi-attested ang producer
+    # spec hangga't hindi na-ack ang BAGONG koneksyon.
+    client._connection_generation = 5
+    assert client.capture_source_identity["authenticated"] is False

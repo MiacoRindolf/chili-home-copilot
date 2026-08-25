@@ -15,6 +15,7 @@ import pytest
 from sqlalchemy.orm import Session
 
 from app.config import settings
+import app.services.trading.momentum_neural.live_runner as lr
 from app.services.trading import governance as gov
 from app.services.trading.momentum_neural import automation_query as aq
 from app.services.trading.momentum_neural.live_fsm import (
@@ -299,7 +300,21 @@ def test_governed_place_blocks_quote_that_expires_during_rail_wait(
     clock = {"age_seconds": 1.25}
 
     class _AdvancingFreshness:
-        def age_seconds(self) -> float:
+        # ANO ANG NABULOK: ang fake na ito ay may `age_seconds(self)` na walang
+        # parametro, samantalang tinatawag ito ng seam bilang
+        # `execution_bbo_freshness.age_seconds(now=_utcnow_aware())`
+        # (live_runner._governed_place). Ang TypeError ay nilalamon ng
+        # `except Exception:` doon, kaya ang tick ay nagbabalik ng
+        # `execution_bbo_time_invalid_at_place` — HINDI ang stale-guard na
+        # sinusukat ng test na ito.
+        # BAKIT HINDI NA MAUULIT: eksaktong kinopya ang keyword-only na
+        # kontrata ng TUNAY na producer,
+        # app/services/trading/venue/protocol.py:27
+        # `def age_seconds(self, *, now: datetime | None = None) -> float:`
+        # — anumang pagbabago sa arity doon ay sasabog dito rin, at ang
+        # assertion sa ibaba ay nagpapaiba ng stale-veto sa time-invalid-veto.
+        def age_seconds(self, *, now: datetime | None = None) -> float:
+            assert now is None or isinstance(now, datetime)
             return float(clock["age_seconds"])
 
     def _wait_then_acquire(_settings, *, lane_key):
@@ -463,6 +478,35 @@ def _mk_pending_entry_session(
     return sess
 
 
+def _enable_legacy_alpaca_timeshare(monkeypatch) -> None:
+    """Buksan ang LEGACY (time-share) alpaca_spot dispatch lane para sa tick.
+
+    ANO ANG NABULOK (2026-08-17, #1024+): ginawang MANDATORY ng runner ang
+    adaptive-risk builder para sa ``alpaca_spot``.  Ang builder na iyon ay
+    nangangailangan ng capture provider na TANGING ang sealed captured-paper
+    service ang nakakapag-install (``adaptive_risk_capture_provider_installed``)
+    — walang fallback by design.  Sa isang ordinaryong pytest process ay walang
+    provider, kaya ang entry tick ay namamatay bago pa ang broker POST:
+      * ``_build_adaptive_alpaca_primary_before_legacy_sizing`` -> raise ->
+        ``skipped="adaptive_risk_builder_source_invalid"`` (live_runner.py:32199)
+      * at kung nakalusot man, ``_governed_place`` -> ``builder_missing_capture_binding``
+    Ang mga test sa ibaba ay tungkol sa CID/claim/submit-recovery seam, hindi sa
+    sizing model — parehong lane ay dumadaan sa seam na iyon, kaya ang tamang
+    ayos ay buksan ang lane na TALAGANG nagpo-post sa ordinaryong konteksto.
+
+    BAKIT HINDI NA MAUULIT NANG TAHIMIK: ``monkeypatch.setattr`` ay
+    ``raising=True`` (default) kaya ang pagpalit/pagtanggal ng pangalan ng
+    setting ay agad na AttributeError; at ang assertion sa ibaba ay
+    nagpapatunay na ang escape ay TALAGANG aktibo — kung tanggalin ang
+    time-share lane sa produksyon, ito ang sasabog nang may malinaw na dahilan
+    sa halip na dumaan bilang tahimik na "no POST" na pagkabigo.
+    """
+    monkeypatch.setattr(
+        settings, "chili_momentum_legacy_alpaca_dispatch_enabled", True
+    )
+    assert lr._legacy_alpaca_timeshare_sizing_active() is True
+
+
 def _prepare_alpaca_submit_recovery_case(
     monkeypatch,
     db: Session,
@@ -470,6 +514,7 @@ def _prepare_alpaca_submit_recovery_case(
     symbol: str,
 ):
     reset_duplicate_client_order_guard_for_tests()
+    _enable_legacy_alpaca_timeshare(monkeypatch)
     monkeypatch.setattr(settings, "chili_momentum_live_runner_enabled", True)
     monkeypatch.setattr(settings, "brain_enable_decision_ledger", False)
     monkeypatch.setattr(settings, "brain_decision_packet_required_for_runners", False)
@@ -1241,6 +1286,7 @@ def test_duplicate_client_id_retries_lookup_without_resubmit(monkeypatch, db: Se
     monkeypatch.setattr(settings, "chili_momentum_live_runner_enabled", True)
     monkeypatch.setattr(settings, "brain_decision_packet_required_for_runners", False)
     monkeypatch.setattr(settings, "chili_momentum_decouple_watching_enabled", False)
+    _enable_legacy_alpaca_timeshare(monkeypatch)
     sess = _mk_pending_entry_session(db, "ACTU", execution_family="alpaca_spot")
     monkeypatch.setattr(
         "app.services.trading.momentum_neural.live_runner._venue_broker_connected",

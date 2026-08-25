@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import base64
 from dataclasses import dataclass, replace
+import inspect
 from datetime import datetime, timedelta, timezone
 from copy import deepcopy
 import hashlib
@@ -55,6 +56,7 @@ from app.services.trading.momentum_neural.live_replay_capture import (
     FirstDipFinalCaptureFrontier,
 )
 from app.services.trading.momentum_neural import live_runner as lr
+from app.services.trading.venue.alpaca_spot import AlpacaSpotAdapter
 from app.services.trading.momentum_neural import market_profile as market_profile
 from app.services.trading.momentum_neural import risk_evaluator as risk_evaluator
 from app.services.trading.momentum_neural.replay_mock_broker import (
@@ -2435,6 +2437,7 @@ class _RecordedAlpacaReplayMock(MockBrokerAdapter):
         self._paper_account_id = account_id
         self._bbo_content_sha256 = bbo_content_sha256
         self.place_limit_calls: list[dict[str, object]] = []
+        self.execution_bbo_calls: list[dict[str, object]] = []
 
     def bind_account_id(self, account_id: str) -> bool:
         return str(account_id or "").strip() == self._paper_account_id
@@ -2460,13 +2463,36 @@ class _RecordedAlpacaReplayMock(MockBrokerAdapter):
             "next_close": (now + timedelta(hours=7)).isoformat(),
         }
 
+    # ANO ANG NABULOK (2026-08-20): ang pekeng ito ay `(product_id, *,
+    # max_age_seconds)` lang.  Nang dagdagan ng `allow_stand_in` /
+    # `stand_in_max_age_seconds` ang tunay na AlpacaSpotAdapter at nag-opt-in ang
+    # ENTRY seam (live_runner.tick_live_session -> _final_entry_bbo(...,
+    # allow_stand_in=True)), ang tawag dito ay TypeError na — at NILALAMON ito ng
+    # `except Exception` sa loob ng _final_entry_bbo bilang tahimik na
+    # "execution_bbo_read_failed".  Walang ingay, basta hindi na naabot ang entry.
+    # BAKIT HINDI NA ITO MABUBULOK ULIT: (1) eksaktong kinokopya ng lagda ang
+    # AlpacaSpotAdapter.get_execution_bbo, at binabantayan ito ng
+    # test_recorded_alpaca_replay_mock_tracks_real_execution_bbo_signature sa
+    # ibaba; (2) itinatala ang bawat tawag sa `execution_bbo_calls`, kaya
+    # ipinipilit ng test na TALAGANG naabot ang seam na ito na may
+    # allow_stand_in=True — hindi na puwedeng pumasa nang walang ginagawa.
     def get_execution_bbo(
         self,
         product_id: str,
         *,
-        max_age_seconds: float,
+        max_age_seconds: float = 2.0,
+        allow_stand_in: bool = False,
+        stand_in_max_age_seconds: float | None = None,
     ):
-        del max_age_seconds
+        self.execution_bbo_calls.append(
+            {
+                "product_id": product_id,
+                "max_age_seconds": float(max_age_seconds),
+                "allow_stand_in": bool(allow_stand_in),
+                "stand_in_max_age_seconds": stand_in_max_age_seconds,
+            }
+        )
+        del max_age_seconds, allow_stand_in, stand_in_max_age_seconds
         ticker, freshness = self.get_best_bid_ask(product_id)
         assert ticker is not None
         observed_at = self._clock.replace(tzinfo=UTC).isoformat()
@@ -2498,6 +2524,29 @@ class _RecordedAlpacaReplayMock(MockBrokerAdapter):
     def place_limit_order_gtc(self, **kwargs):
         self.place_limit_calls.append(dict(kwargs))
         return super().place_limit_order_gtc(**kwargs)
+
+
+def test_recorded_alpaca_replay_mock_tracks_real_execution_bbo_signature() -> None:
+    """Ang pekeng Alpaca BBO surface ay dapat tanggapin ang LAHAT ng ipinapasa
+    ng tunay na entry seam.
+
+    Ito ang bantay laban sa tahimik na pagkabulok: kinukuha ng
+    ``_final_entry_bbo`` ang lahat ng exception mula sa adapter at ibinabalik
+    ito bilang ``execution_bbo_read_failed`` — kaya ang isang lumang lagda sa
+    peke ay HINDI sumasabog, kundi tahimik na nagpapalampas sa entry.  Kapag
+    nagdagdag ng bagong keyword ang ``AlpacaSpotAdapter``, dito ito babagsak
+    nang may malinaw na mensahe.
+    """
+
+    real = inspect.signature(AlpacaSpotAdapter.get_execution_bbo)
+    fake = inspect.signature(_RecordedAlpacaReplayMock.get_execution_bbo)
+    missing = sorted(set(real.parameters) - set(fake.parameters))
+    assert not missing, (
+        "_RecordedAlpacaReplayMock.get_execution_bbo is missing parameters that "
+        f"AlpacaSpotAdapter.get_execution_bbo accepts: {missing}"
+    )
+    for name, real_param in real.parameters.items():
+        assert fake.parameters[name].kind == real_param.kind, name
 
 
 @pytest.mark.parametrize(
@@ -2815,6 +2864,21 @@ def test_sealed_real_alpaca_step_keeps_adaptive_qty_and_requires_durable_admissi
             checkpoint.decision_at,
             sequence_at_most=checkpoint.input_prefix_sequence,
         )
+
+    # ANTI-VACUITY: ang `pytest.raises` sa itaas ay pumapasa RIN kapag nag-defer
+    # ang FSM bago pa ang economics (ang deferral ay isa ring state mismatch), kaya
+    # hindi ito patunay na naabot ang entry seam.  Ito ang mismong butas na
+    # nagtago sa bulok na lagda ng peke nang tatlong araw: ang TypeError ay
+    # nilamon ng `except Exception` sa loob ng `_final_entry_bbo`, kaya
+    # `execution_bbo_read_failed` -> WATCHING_LIVE -> walang economics.  Ipilit na
+    # TALAGANG tinawag ang ENTRY-ONLY seam (ang nag-iisang `_final_entry_bbo` na
+    # nag-o-opt-in sa `allow_stand_in`).
+    assert mock.execution_bbo_calls, (
+        "real Alpaca entry seam never reached the adapter BBO surface"
+    )
+    assert any(
+        bool(call["allow_stand_in"]) for call in mock.execution_bbo_calls
+    ), mock.execution_bbo_calls
 
     assert len(built_requests) == 1
     built = built_requests[0]

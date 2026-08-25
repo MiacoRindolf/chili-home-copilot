@@ -98,6 +98,23 @@ def _enable_runner(monkeypatch):
         False,
         raising=False,
     )
+    # ROTTED 2026-08-21 (PR #1091, "time-of-day entry-quality bar"): production grew
+    # a gate that DEFERS generic ``momentum_ok*`` volume triggers more than
+    # ``chili_momentum_postopen_generic_trigger_cutoff_min`` (30) minutes after the
+    # 09:30 ET open (live_runner.py -> risk_policy.generic_trigger_postopen_deferred).
+    # This suite's replay clock is ``_BASE`` = 10:30 ET (60 min post-open) and its
+    # synthetic uptrend frame can only raise a GENERIC trigger, so the grace-ON arm
+    # stopped entering for a reason that has NOTHING to do with eligibility recency —
+    # the bar sits DOWNSTREAM of the boundary-risk gate this suite measures.
+    # Disabled here beside the other two "this suite isolates the eligibility-recency
+    # grace" levers, so the suite's time-of-day dependence is explicit, not incidental.
+    # WHY IT CANNOT ROT THE SAME WAY: (a) ``raising`` is left at its default True, so a
+    # rename/removal of the flag fails this fixture LOUDLY instead of silently no-op'ing;
+    # (b) the A/B below now pins WHICH check blocked the OFF arm, so no future gate can
+    # make it pass by suppressing both arms.
+    monkeypatch.setattr(
+        settings, "chili_momentum_postopen_generic_trigger_bar_enabled", False
+    )
     monkeypatch.setattr(lr, "_venue_broker_connected", lambda ef: True)
     monkeypatch.setattr(lr, "is_kill_switch_active", lambda: False)
     # The risk evaluator imports is_kill_switch_active + get_kill_switch_status; neutralize.
@@ -126,6 +143,25 @@ def _equity_provider():
     admission + equity-relative caps don't bounce the entry on ``equity_unavailable``. Mirrors
     a stable ~$100k account; returned for every (family, flags) call shape."""
     return lambda *a, **k: 100000.0
+
+
+def _blocking_check_ids(result) -> set[str]:
+    """The risk-check ids that actually BLOCKED during a run (severity=block AND not ok).
+
+    ``result.events`` carries event *names* only: it proves that SOME block happened, not
+    WHICH one — so an assertion built on it alone goes green under any unrelated future
+    veto. The runner returns the whole evaluation on a boundary block
+    (``live_runner.runner_boundary_risk_ok`` caller: ``{"ok": True, "blocked": True,
+    "risk_evaluation": ev}``) and every check carries a stable ``id``
+    (``risk_evaluator._check``), so the grace A/B can pin its OFF arm to the
+    ``live_eligible`` check itself."""
+    ids: set[str] = set()
+    for trace in result.ticks:
+        ev = trace.result.get("risk_evaluation") or {}
+        for check in ev.get("checks") or []:
+            if check.get("severity") == "block" and not check.get("ok"):
+                ids.add(str(check.get("id")))
+    return ids
 
 
 def _build_driver(db, monkeypatch, symbol, *, grace_enabled: bool):
@@ -219,8 +255,10 @@ def test_replay_v3_p2_grace_OFF_flicker_blocks_entry(db, monkeypatch, _enable_ru
     assert STATE_LIVE_ENTERED not in result.states_visited, result.states_visited
     assert "live_entered" not in result.events, result.events
     assert "live_entry_filled" not in result.events, result.events
-    # a risk block WAS emitted (the eligibility flicker)
+    # a risk block WAS emitted AND it is the eligibility flicker specifically — not
+    # some other veto that would let this test pass while measuring nothing.
     assert "live_blocked_by_risk" in result.events, result.events
+    assert "live_eligible" in _blocking_check_ids(result), _blocking_check_ids(result)
     # no entry fill
     assert result.entry_fill_price is None, result.entry_fill_price
     # the eligibility replayer used the degenerate/scripted tier and actually flipped False
@@ -271,6 +309,17 @@ def test_replay_v3_p2_grace_AB_opposite_outcomes(db, monkeypatch, _enable_runner
     assert entered_off is False, ("grace OFF must NOT enter", res_off.states_visited)
     assert entered_on is True, ("grace ON must enter", res_on.states_visited)
     assert entered_off != entered_on, (entered_off, entered_on)
+    # NON-VACUITY GUARD: "did not enter" is the weakest possible evidence — ANY veto
+    # anywhere in the entry path satisfies it (this is exactly how the 2026-08-21
+    # post-open trigger bar hid inside this assertion: it deferred BOTH arms, so the
+    # OFF arm still "passed" while the A/B it exists to measure had stopped running).
+    # Pin the OFF arm to the live_eligible check, and require the ON arm to have taken
+    # the SAME flicker without that check blocking — i.e. the grace really downgraded it.
+    off_blocks = _blocking_check_ids(res_off)
+    on_blocks = _blocking_check_ids(res_on)
+    assert "live_eligible" in off_blocks, ("grace OFF must block ON ELIGIBILITY", off_blocks)
+    assert "live_eligible" not in on_blocks, ("grace ON must downgrade the flicker", on_blocks)
+    assert "live_entry_filled" in res_on.events, res_on.events
 
 
 def test_replay_v3_p2_equity_seam_prod_byte_identical():
