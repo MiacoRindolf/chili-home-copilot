@@ -552,6 +552,31 @@ def tape_running_up_symbols(db: Session, *, now_utc: Optional[datetime] = None) 
     return [str(rec["symbol"]) for rec in _tape_running_up_records(db, now_utc=now_utc)]
 
 
+def _rvol_alone_may_fire(
+    move_pct: Optional[float],
+    gap_pct: Optional[float],
+) -> bool:
+    """Maaari bang magpaputok ng LONG trigger ang RVOL nang mag-isa?
+
+    Oo, maliban kung ang ebidensya sa direksyon na hawak natin ay NEGATIBO. Ang
+    intraday move ang mas gusto kaysa sa gap: ito ang mas bago at siyang tunay na
+    sinusukat ng ignition path.
+
+    ⚠️ Ang pagbabalik ng True kapag WALANG alam na direksyon ay sinadya -- iyon ang
+    dating gawi, at ang pagbabawal doon ay magpapaliit ng admission nang lampas sa
+    depektong ito.
+    """
+    if not bool(
+        getattr(settings, "chili_momentum_ross_rvol_requires_nonnegative_move", True)
+    ):
+        return True
+    for candidate in (move_pct, gap_pct):
+        value = _f(candidate)
+        if value is not None:
+            return value >= 0.0
+    return True
+
+
 def _ross_threshold_crossed(
     symbol: str,
     *,
@@ -613,7 +638,37 @@ def _ross_threshold_crossed(
         _RVOL_FLOOR, _CHG_FLOOR = 5.0, 10.0
     rv = _f(rvol)
     if rv is not None and rv >= float(_RVOL_FLOOR):
-        return True
+        # ⚠️ ANG RVOL AY WALANG TANDA (2026-08-25). Ang dami ng kalakalan ay
+        # sumasabog sa MAGKABILANG direksyon, kaya ang RVOL nang mag-isa ay hindi
+        # kailanman naging AFFIRMATIVE na senyales -- na siyang eksaktong salitang
+        # ginagamit ng docstring sa itaas. Ang dalawang change floor sa ibaba ay
+        # may tanda (`>= _CHG_FLOOR`); ang sangay na ito lamang ang wala.
+        #
+        # NASUKAT SA BUHAY NA LANE (2026-08-25, buong araw ng kalakalan):
+        #
+        #   live_arm_requested  418
+        #   live_arm_confirmed  376
+        #   live_declined       309   <- WVVIP lamang: 268  (87%)
+        #   live_watch_started   67
+        #   live_entry_filled     1
+        #
+        #   WVVIP: rvol 911.8, todays_change_perc -54.08, live_eligible=t,
+        #          at ang ignition_loop ay nagse-stamp ng direction="long".
+        #          Zero tick sa nakaraang 45 minuto -- walang libro na maka-fill.
+        #          284 arm mula 08:12 hanggang 14:48, tig-84 segundo ang agwat,
+        #          bawat isa ay namamatay sa `no_bbo` matapos ang ~13 segundo.
+        #
+        # Ang ISANG bumabagsak na preferred share ang kumain ng 87% ng buong
+        # decline funnel sa buong araw, at ina-arm ito bilang LONG.
+        #
+        # ANG AYOS AY MAKITID SA SADYA. Hindi nito ipinapataw ang +10% na palapag
+        # sa RVOL na daan -- iyon ay magpapaliit ng lehitimong admission. Ang
+        # ipinagbabawal lang ay ang bumabagsak: kung may ebidensya tayo sa
+        # direksyon at NEGATIBO ito, hindi maaaring maging long trigger ang RVOL
+        # nang mag-isa. Kapag walang ebidensya sa direksyon ay hindi nagbabago
+        # ang gawi.
+        if _rvol_alone_may_fire(move_pct, gap_pct):
+            return True
     g = _f(gap_pct)
     if g is not None and g >= float(_CHG_FLOOR):
         return True
