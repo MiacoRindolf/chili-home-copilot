@@ -2887,14 +2887,84 @@ class AlpacaSpotAdapter:
             logger.debug("[alpaca_spot] get_position_quantity(%s) failed: %s", symbol, exc)
             return None
 
+    # ⚠️ Ang EXTENDED-HOURS na crossing multiple: gaano kalalim tumawid ang
+    # marketable limit para makatiyak ng fill sa manipis na premarket na libro.
+    # Isang dokumentadong base: 1.5% mula sa kabilang panig. Sapat para tumawid
+    # sa spread na hanggang ~150 bps (ang nasukat na premarket na spread sa mga
+    # low-float mover ay 65-330 bps sa pagitan ng ilang minuto), at makitid
+    # pa rin para hindi magmukhang market order sa isang gapping na libro.
+    _EXT_HOURS_CROSS_FRAC = 0.015
+
     def place_market_order(self, *, product_id: str, side: str, base_size: str,
                            client_order_id: Optional[str] = None,
                            position_intent: Optional[str] = None,
                            time_in_force: Optional[str] = None,
+                           extended_hours: bool = False,
+                           limit_price: Any = None,
                            asset_class: Any = None, **_ignored) -> dict[str, Any]:
-        return self._submit(product_id, side, base_size, client_order_id, limit_price=None,
-                            position_intent=position_intent, time_in_force=time_in_force,
-                            asset_class=asset_class)
+        """Market exit -- o ang MARKETABLE-LIMIT na katumbas nito sa extended hours.
+
+        ⚠️ HINDI TUMATANGGAP ANG ALPACA NG MARKET ORDER SA LABAS NG RTH. Limit +
+        DAY + `extended_hours=true` lamang. Ang market order na isinumite sa
+        premarket ay tahimik na nakakansela -- napatunayan 2026-08-25: pitong
+        magkakasunod na market sell, lahat `canceled`, habang ang IISANG order na
+        na-fill ay ang limit na may `extended_hours=True`.
+
+        ⚠️ AT ANG PARAMETER AY NILULUNOK DATI. Ang `extended_hours` ay nasa
+        `**_ignored` at hindi kailanman naabot ang `_submit`, kahit maingat itong
+        kinukwenta ng exit path sa `live_runner.py` (na ang komento mismo ay
+        nagbababala tungkol sa "premarket/after-hours STOP-OUT could not flatten
+        -> naked stranded long"). Ginawa ang ayos doon; hindi ito umabot dito.
+
+        Bunga: ang isang posisyong nasa premarket ay HINDI KAYANG I-FLATTEN ng
+        lane. Iyon ang mismong bitag na ipinapangalagaan sana ng nakasulat na
+        babala.
+
+        Kapag `extended_hours=True`, ang order ay nagiging MARKETABLE LIMIT:
+        tumatawid ito sa kabilang panig ng ``_EXT_HOURS_CROSS_FRAC`` para
+        makatiyak ng fill. Fail-CLOSED: kung walang mapagkukunang presyo ay
+        nagbabalik ng malinaw na error sa halip na magpadala ng order na alam
+        nating tatanggihan.
+        """
+        if not extended_hours:
+            return self._submit(product_id, side, base_size, client_order_id,
+                                limit_price=None, position_intent=position_intent,
+                                time_in_force=time_in_force, asset_class=asset_class)
+
+        px = None
+        try:
+            px = None if limit_price is None else float(limit_price)
+        except (TypeError, ValueError):
+            px = None
+        if px is None or not math.isfinite(px) or px <= 0.0:
+            # Walang ibinigay na presyo -- kunin ang sariling libro at tumawid.
+            try:
+                ticker, _freshness = self.get_best_bid_ask(product_id)
+                bid = float(getattr(ticker, "bid", None) or 0.0)
+                ask = float(getattr(ticker, "ask", None) or 0.0)
+            except Exception:
+                bid = ask = 0.0
+            side_key = str(getattr(side, "value", side) or "").strip().lower()
+            frac = float(self._EXT_HOURS_CROSS_FRAC)
+            if side_key == "sell" and bid > 0.0:
+                px = bid * (1.0 - frac)
+            elif side_key == "buy" and ask > 0.0:
+                px = ask * (1.0 + frac)
+            else:
+                return {
+                    "ok": False,
+                    "error": "extended_hours_marketable_limit_requires_a_price",
+                    "submit_outcome": "not_submitted",
+                    "reason": "no_usable_bbo_for_extended_hours_exit",
+                }
+        return self._submit(
+            product_id, side, base_size, client_order_id,
+            limit_price=px,
+            extended_hours=True,
+            position_intent=position_intent,
+            time_in_force=(time_in_force or "day"),
+            asset_class=asset_class,
+        )
 
     def place_limit_order_gtc(self, *, product_id: str, side: str, base_size: str,
                               limit_price: str, client_order_id: Optional[str] = None,
