@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 import logging
+import re as _re
 import math
 import uuid
 from datetime import datetime, timedelta
 from typing import Any, Optional
 
+from sqlalchemy import text as _sql_text
 from sqlalchemy.orm import Session
 
 from ....config import settings
@@ -475,11 +477,132 @@ def _lock_live_symbol_arm(db: Session, *, user_id: int, symbol: str) -> bool:
         from sqlalchemy import text as _sql_text
 
         key = f"momentum_live_arm:{int(user_id)}:{str(symbol or '').strip().upper()}"
-        db.execute(_sql_text("select pg_advisory_xact_lock(hashtext(:key))"), {"key": key})
-        return True
+        # ── BOUNDED + SAVEPOINT-CONTAINED (2026-08-25) ───────────────────────
+        # Ito ay dating bare `pg_advisory_xact_lock`: WALANG lock_timeout at
+        # WALANG savepoint, nakabalot sa `except -> return False`.
+        #
+        # DALAWANG bagay ang dinadala niyon, at parehong nangyari na:
+        #
+        # 1. WALANG HANGGANANG PAGHARANG. Ang bare xact lock ay naghihintay nang
+        #    TULUYAN. Dokumentado sa config.py ang bunga: naiwan ang session
+        #    14440 (AZI) sa live_pending_entry nang 648 SEGUNDO sa loob ng
+        #    IISANG tick, "freezing the whole max_instances=1 runner and with it
+        #    the stop/trail management of every held position."
+        #
+        # 2. TAHIMIK NA PAGLASON NG TRANSACTION. Mula nang lumipat pababa ang
+        #    process fence (#1164), ang begin_live_arm ay kumukuha ng SYMBOL
+        #    tapos FENCE samantalang ang confirm/promote ay FENCE tapos SYMBOL --
+        #    isang tunay na ABBA. Ang deadlock detector ng PostgreSQL ay pumuputok
+        #    sa ~1s at nagtataas ng 40P01; nilulunok iyon ng `except` sa ibaba at
+        #    nagbabalik ng maayos na `live_arm_generation_lock_unavailable`. Pero
+        #    ABORTED na ang transaction: nagpapatuloy ang auto_arm pass, bawat
+        #    kasunod na pahayag ay nagtataas ng InFailedSqlTransaction, at ang
+        #    `db.commit()` sa dulo ay NAWAWALA ANG BUONG PASS -- kasama ang mga
+        #    arm na nagawa na.
+        #
+        # ⚠️ ANG SAVEPOINT ANG NAG-AALIS NG #2. Ang isang na-abort na
+        #    subtransaction ay hindi umaabot sa transaction ng tumawag, kaya ang
+        #    isang natalong deadlock o na-expire na hintay ay nagbabalik lamang ng
+        #    False -- ang eksaktong kontratang inaasahan na ng mga tumatawag.
+        #
+        # ⚠️ HINDI NAGBABAGO ANG KONTRATA. Ang pag-uuna pa rin ay
+        #    pg_try_advisory_xact_lock, kaya ang walang-kalabang daan ay
+        #    kapareho. Ang isang nakuhang lock ay hawak pa rin hanggang sa
+        #    mag-commit ang PANGUNAHING transaction (nabubuhay ang lock sa
+        #    isang subtransaction na nag-commit), kaya nananatiling imposible
+        #    ang double-arm sa pagkakabuo.
+        if _scalar_is_true(db.execute(_sql_text(_LIVE_SYMBOL_ARM_TRY_LOCK_SQL), {"key": key})):
+            return True
+        wait_ms = _live_symbol_arm_lock_wait_ms()
+        if wait_ms <= 0:
+            return False
+        return _wait_for_live_symbol_arm_lock(db, key, wait_ms)
     except Exception:
         _log.debug("[operator_actions] live symbol advisory lock unavailable", exc_info=True)
         return False
+
+
+_LIVE_SYMBOL_ARM_TRY_LOCK_SQL = "select pg_try_advisory_xact_lock(hashtext(:key))"
+_LIVE_SYMBOL_ARM_WAIT_LOCK_SQL = "select pg_advisory_xact_lock(hashtext(:key))"
+_LIVE_SYMBOL_ARM_READ_LOCK_TIMEOUT_SQL = "select current_setting('lock_timeout')"
+# Ang irreducible base, sa millisecond. Mas maikli kaysa sa fence wait (2500ms)
+# para ang panig na ito ang unang sumuko sa isang kaguluhan sa pagkakasunod-sunod.
+_DEFAULT_LIVE_SYMBOL_ARM_LOCK_WAIT_MS = 2000
+_MAX_LIVE_SYMBOL_ARM_LOCK_WAIT_MS = 15000
+_LIVE_SYMBOL_ARM_LOCK_TIMEOUT_TOKEN = _re.compile(r"[0-9]+(us|ms|s|min|h|d)?")
+
+
+def _scalar_is_true(result: Any) -> bool:
+    try:
+        return result.scalar() is True
+    except Exception:
+        return False
+
+
+def _live_symbol_arm_lock_wait_ms() -> int:
+    """ISANG dokumentadong knob: gaano katagal pipila ang isang arm sa kapwa nito
+    para sa PAREHONG (user, symbol). Ang 0 ay nangangahulugang try-once."""
+    try:
+        raw = getattr(
+            settings,
+            "chili_momentum_live_symbol_arm_lock_wait_ms",
+            _DEFAULT_LIVE_SYMBOL_ARM_LOCK_WAIT_MS,
+        )
+        value = int(raw if raw is not None else _DEFAULT_LIVE_SYMBOL_ARM_LOCK_WAIT_MS)
+    except Exception:
+        return _DEFAULT_LIVE_SYMBOL_ARM_LOCK_WAIT_MS
+    return max(0, min(_MAX_LIVE_SYMBOL_ARM_LOCK_WAIT_MS, value))
+
+
+def _sanitized_live_symbol_arm_lock_timeout(value: Any) -> str:
+    """Payagan lamang ang isang PostgreSQL interval-ish na token ('0', '2s', '250ms')."""
+    token = str(value or "0").strip().lower()
+    if not token or len(token) > 16 or not _LIVE_SYMBOL_ARM_LOCK_TIMEOUT_TOKEN.fullmatch(token):
+        return "0"
+    return token
+
+
+def _wait_for_live_symbol_arm_lock(db: Session, key: str, wait_ms: int) -> bool:
+    """Nakatakdang hintay para sa per-(user, symbol) na arm lock, nakakulong sa
+    isang SAVEPOINT.
+
+    ⚠️ ANG PAGKAKAKULONG ANG BUONG PUNTO. Ang isang deadlock (40P01) o na-expire
+    na lock_timeout (55P03) ay NAG-AABORT sa transaction na tumatakbo nito. Kung
+    hindi nakakulong, ang buong auto-arm pass ay nawawala sa commit -- kasama ang
+    mga arm na nagawa na -- habang ang tumawag ay nakakakita lang ng maayos na
+    False at nagpapatuloy.
+
+    ⚠️ IBINABALIK ANG lock_timeout sa daan ng TAGUMPAY. Ang SET LOCAL ay umuurong
+    lamang kapag NAG-ABORT ang subtransaction; sa isang release ay tumatagos ito
+    hanggang katapusan ng nakapaloob na transaction."""
+    nested = None
+    prior = None
+    try:
+        prior = _sanitized_live_symbol_arm_lock_timeout(
+            db.execute(_sql_text(_LIVE_SYMBOL_ARM_READ_LOCK_TIMEOUT_SQL)).scalar()
+        )
+        nested = db.begin_nested()
+        # Hindi tumatanggap ng bind parameter ang SET LOCAL; na-clamp na int ang
+        # wait_ms at na-sanitize ang prior, kaya walang naipapasok na teksto.
+        db.execute(_sql_text("SET LOCAL lock_timeout = '" + str(int(wait_ms)) + "ms'"))
+        db.execute(_sql_text(_LIVE_SYMBOL_ARM_WAIT_LOCK_SQL), {"key": key})
+        nested.commit()
+    except Exception:
+        try:
+            if nested is not None and nested.is_active:
+                nested.rollback()
+        except Exception:
+            pass
+        _log.debug(
+            "[operator_actions] live symbol arm lock wait expired or deadlocked",
+            exc_info=True,
+        )
+        return False
+    try:
+        db.execute(_sql_text("SET LOCAL lock_timeout = '" + (prior or "0") + "'"))
+    except Exception:
+        pass
+    return True
 
 
 def _generic_alpaca_arm_process_fence_acquired(

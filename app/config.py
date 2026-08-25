@@ -6799,6 +6799,26 @@ class Settings(BaseSettings):
     # (AIXI/RCON/SWVL/BDRX/WVVIP) -- kasama ang pinakamataas sa viability.
     # ⚠️ WALANG NAGBABAGO SA PAG-AARI: kung hawak ng dedikadong service ang session
     # lock nito, mag-e-expire ang hintay at fail-closed pa rin. 0 = lumang gawi.
+    # ── PER-SYMBOL ARM LOCK: BOUNDED WAIT (2026-08-25) ──
+    # Ang `_lock_live_symbol_arm` ay bare `pg_advisory_xact_lock`: naghihintay
+    # nang TULUYAN at walang savepoint. Dalawang bagay ang dinala niyon:
+    #   1. Naiwan ang session 14440 (AZI) sa live_pending_entry nang 648 SEGUNDO
+    #      sa iisang tick, na nagpa-freeze sa max_instances=1 runner at kasama
+    #      niyon ang stop/trail management ng BAWAT hawak na posisyon.
+    #   2. Mula nang lumipat pababa ang process fence (#1164), ang begin_live_arm
+    #      ay SYMBOL-tapos-FENCE samantalang ang confirm/promote ay FENCE-tapos-
+    #      SYMBOL -- isang tunay na ABBA. Nilulunok ng `except` ang 40P01 at
+    #      tahimik na nalalason ang transaction, kaya NAWAWALA ANG BUONG
+    #      auto-arm pass sa commit, pati ang mga arm na nagawa na.
+    # Ang 0 ay nagpapanumbalik ng try-once. Sadyang mas maikli ito kaysa sa
+    # arm fence wait (2500ms) para ang panig na ito ang unang sumuko.
+    chili_momentum_live_symbol_arm_lock_wait_ms: int = Field(
+        default=2000,
+        ge=0,
+        le=15000,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_LIVE_SYMBOL_ARM_LOCK_WAIT_MS"),
+        description="ONE documented knob: bounded wait for the per-(user,symbol) live-arm advisory lock in operator_actions._lock_live_symbol_arm, in ms. This was a bare pg_advisory_xact_lock which blocks INDEFINITELY and whose deadlock/timeout error silently poisoned the caller's transaction. 0 restores try-once.",
+    )
     chili_momentum_alpaca_arm_fence_wait_ms: int = Field(
         default=2500,
         ge=0,
