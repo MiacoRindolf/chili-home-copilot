@@ -41,7 +41,9 @@ spread a reclaim DERATES LESS than a non-reclaim. This is now a derates-less til
 hard-veto exemption (since NOTHING hard-vetoes anymore). The name-relative p50/p75/p90
 anomaly logic (the derate MAGNITUDE) is unchanged.
 
-Flag: ``chili_momentum_adaptive_spread_cost_veto_enabled`` (default False). When
+Flag: ``chili_momentum_adaptive_spread_cost_veto_enabled`` (default TRUE
+-- naitama 2026-08-24; ang docstring na ito ay nagsasabi ng False mula pa noong
+ac850b1b7 / #1024, kung saan dumating ang flag nang naka-ON). When
 OFF, ``adaptive_spread_cost_veto_derate`` returns the byte-identical pass-through
 ``(True, 1.0, "flag_off", {})`` and the caller's sizing path is unchanged.
 """

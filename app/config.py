@@ -2441,7 +2441,7 @@ class Settings(BaseSettings):
     chili_momentum_bull_flag_entry_enabled: bool = Field(
         default=True,
         validation_alias=AliasChoices("CHILI_MOMENTUM_BULL_FLAG_ENTRY_ENABLED"),
-        description="Ross BULL FLAG (SS101 #012) ALL-DAY entry: 1-3 green-candle impulse, then a 2-3 candle DEEPER pullback (50-70% retrace -- DEEPER than the shallow first_pullback cap, riding the 9-EMA band) that holds, then FIRE the first candle to break the prior pullback swing high. DISTINCT from first_pullback (shallow only) and deep_reclaim (morning-only). Reuses the anti-chase guards (explosive/first-pullback/backside/L2/overhead) + volume-profile (light-pull dry-up + high-vol-red distribution veto). Ship DARK (default FALSE -- NEW + never-run; operator ramps). OFF => no-op, byte-identical. docs/DESIGN/MOMENTUM_LANE.md",
+        description="Ross BULL FLAG (SS101 #012) ALL-DAY entry: 1-3 green-candle impulse, then a 2-3 candle DEEPER pullback (50-70% retrace -- DEEPER than the shallow first_pullback cap, riding the 9-EMA band) that holds, then FIRE the first candle to break the prior pullback swing high. DISTINCT from first_pullback (shallow only) and deep_reclaim (morning-only). Reuses the anti-chase guards (explosive/first-pullback/backside/L2/overhead) + volume-profile (light-pull dry-up + high-vol-red distribution veto). Ship DARK (default FALSE -- NEW + never-run; operator ramps). ⚠️ PAGWAWASTO 2026-08-24: ang tunay na default ay TRUE. Dumating ang flag na ito nang default=True sa ac850b1b7 (#1024, isang 13,817-linyang muling pagsulat ng config.py) habang ang tekstong ito ay isinulat para sa isang dark ship na hindi nangyari. Ang teksto ang mali, hindi ang default -- ang patakarang 'no dark flags' ay LIVE + ON. Huwag baligtarin ang default para tumugma sa lumang teksto. OFF => no-op, byte-identical. docs/DESIGN/MOMENTUM_LANE.md",
     )
     chili_momentum_overhead_veto_enabled: bool = Field(
         default=True,
@@ -6397,7 +6397,7 @@ class Settings(BaseSettings):
     chili_momentum_adaptive_spread_cost_veto_enabled: bool = Field(
         default=True,
         validation_alias=AliasChoices("CHILI_MOMENTUM_ADAPTIVE_SPREAD_COST_VETO_ENABLED"),
-        description="Kill-switch for the adaptive spread-cost veto/derate at entry sizing. DEFAULT FALSE = byte-identical (no new gate/derate). When ON: judge the live spread vs the name's OWN rolling spread distribution + vs expected-R; graceful size-down for moderate cases, hard veto only at the extreme. Adaptive (name-relative + R-relative), no flat bps.",
+        description="Kill-switch for the adaptive spread-cost veto/derate at entry sizing. DEFAULT FALSE = byte-identical (no new gate/derate). ⚠️ PAGWAWASTO 2026-08-24: ang tunay na default ay TRUE. Dumating ang flag na ito nang default=True sa ac850b1b7 (#1024, isang 13,817-linyang muling pagsulat ng config.py) habang ang tekstong ito ay isinulat para sa isang dark ship na hindi nangyari. Ang teksto ang mali, hindi ang default -- ang patakarang 'no dark flags' ay LIVE + ON. Huwag baligtarin ang default para tumugma sa lumang teksto. When ON: judge the live spread vs the name's OWN rolling spread distribution + vs expected-R; graceful size-down for moderate cases, hard veto only at the extreme. Adaptive (name-relative + R-relative), no flat bps.",
     )
     chili_momentum_spread_cost_max_fraction_of_r: float = Field(
         default=0.25,
@@ -7408,7 +7408,7 @@ class Settings(BaseSettings):
     chili_momentum_pullback_raw_break_when_explosive: bool = Field(
         default=True,
         validation_alias=AliasChoices("CHILI_MOMENTUM_PULLBACK_RAW_BREAK_WHEN_EXPLOSIVE"),
-        description="ADAPTIVE-RETEST: when require_retest is True, allow a GUARDED raw-break entry (instead of waiting_for_retest) on a clearly EXPLOSIVE break (RVOL>=explosive_floor x mult AND tape-confirmed thrust). Default OFF (touches live retest discipline); flag-OFF is byte-identical.",
+        description="ADAPTIVE-RETEST: when require_retest is True, allow a GUARDED raw-break entry (instead of waiting_for_retest) on a clearly EXPLOSIVE break (RVOL>=explosive_floor x mult AND tape-confirmed thrust). Default OFF (touches live retest discipline) ⚠️ PAGWAWASTO 2026-08-24: ang tunay na default ay TRUE (ac850b1b7 / #1024). Ang teksto ang mali, hindi ang default -- ang patakarang 'no dark flags' ay LIVE + ON.; flag-OFF is byte-identical.",
     )
     chili_momentum_pullback_raw_break_rvol_mult: float = Field(
         default=1.0,
@@ -7680,7 +7680,7 @@ class Settings(BaseSettings):
     chili_momentum_explosive_recalibration_enabled: bool = Field(
         default=True,
         validation_alias=AliasChoices("CHILI_MOMENTUM_EXPLOSIVE_RECALIBRATION_ENABLED"),
-        description="MASTER kill-switch for the explosive-mover recalibration (bid-prop exempt, fast-bail lock-in, extension/flow RVOL carve-outs, pyramid eligibility-flicker skip). ON (2026-07-07) to activate the fast-bail LOCK-IN; other carve-outs remain gated by their own sub-flags (all default off). False => every carve-out no-op, lane byte-identical.",
+        description="MASTER kill-switch for the explosive-mover recalibration (bid-prop exempt, fast-bail lock-in, extension/flow RVOL carve-outs, pyramid eligibility-flicker skip). ON (2026-07-07) to activate the fast-bail LOCK-IN; other carve-outs remain gated by their own sub-flags (all default off) ⚠️ PAGWAWASTO 2026-08-24: ang tunay na default ay TRUE (ac850b1b7 / #1024). Ang teksto ang mali, hindi ang default -- ang patakarang 'no dark flags' ay LIVE + ON.. False => every carve-out no-op, lane byte-identical.",
     )
     chili_momentum_explosive_atr_pct_floor: float = Field(
         default=0.045,
