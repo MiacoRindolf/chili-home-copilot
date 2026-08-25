@@ -1710,7 +1710,25 @@ def test_captured_paper_start_rejects_missing_or_noncallable_admitter(
     monkeypatch,
     admitter,
 ):
+    # What rotted (this test was GREEN but vacuous): the call below omitted the
+    # exit completion and exit transport handlers, and production refuses a
+    # start when EITHER of those is missing -- so `is False` was satisfied by a
+    # later guard and the admitter guard this test names was never the reason.
+    # Deleting `if not callable(captured_paper_symbol_admitter)` from
+    # production would not have failed this test.
+    # Why it cannot rot the same way: both sibling handlers are now supplied as
+    # valid callables, so the ONLY remaining refusal reason is the admitter,
+    # and `LiveRunnerLoop.start` is stubbed at class level so that if the guard
+    # ever disappears the entry point reaches `start()` -> True and BOTH the
+    # `is False` assertion and `starts == []` fail (without spinning a real
+    # loop).
     monkeypatch.setattr(loop_mod, "_loop", None)
+    starts = []
+    monkeypatch.setattr(
+        loop_mod.LiveRunnerLoop,
+        "start",
+        lambda _self: starts.append("start") or True,
+    )
     monkeypatch.setattr(
         loop_mod.settings,
         "chili_autopilot_price_bus_enabled",
@@ -1738,10 +1756,13 @@ def test_captured_paper_start_rejects_missing_or_noncallable_admitter(
             runtime_generation=_CAPTURED_PAPER_GENERATION,
             broker_connection_generation=_CAPTURED_PAPER_CONNECTION_GENERATION,
             captured_paper_symbol_admitter=admitter,
+            captured_paper_exit_completion_handler=lambda _request: None,
+            captured_paper_exit_transport_handler=lambda _request: None,
         )
         is False
     )
     assert loop_mod._loop is None
+    assert starts == []
 
 
 @pytest.mark.parametrize(
@@ -2104,10 +2125,26 @@ def test_captured_paper_singleton_retry_requires_exact_handler_identity(
     )
     admitter = lambda **_kwargs: {"ok": True}
     completion_handler = lambda _request: None
+    # What rotted: production grew a THIRD mandatory post-commit handler,
+    # `captured_paper_exit_transport_handler`, and now hard-refuses any start
+    # that omits it (live_runner_loop.py `if not callable(...)` -> return
+    # False).  The test still passed only the two older handlers, so EVERY
+    # call below returned False and the first assertion died long before the
+    # singleton identity fence was ever exercised.
+    # Why it cannot rot the same way: one shared transport handler is threaded
+    # through the pre-seeded singleton AND through every retry, and the retry
+    # block below now varies each of the three handlers in turn -- one retry
+    # per `is not` comparison in start_captured_paper_live_runner_loop().  If a
+    # future handler is added and left un-threaded, the FIRST assertion fails
+    # again (loudly) rather than passing vacuously; and if any one identity
+    # comparison were dropped from production, exactly one of the three False
+    # assertions flips to True.
+    transport_handler = lambda _request: None
     selected = LiveRunnerLoop(
         captured_paper_scope=scope,
         captured_paper_symbol_admitter=admitter,
         captured_paper_exit_completion_handler=completion_handler,
+        captured_paper_exit_transport_handler=transport_handler,
     )
     starts = []
     monkeypatch.setattr(selected, "start", lambda: starts.append("start") or True)
@@ -2133,6 +2170,8 @@ def test_captured_paper_singleton_retry_requires_exact_handler_identity(
         False,
     )
 
+    # Exact identity on all three handlers -> the singleton is adopted and
+    # started exactly once.
     assert (
         loop_mod.start_captured_paper_live_runner_loop(
             expected_account_id=_CAPTURED_PAPER_ACCOUNT_ID,
@@ -2140,9 +2179,11 @@ def test_captured_paper_singleton_retry_requires_exact_handler_identity(
             broker_connection_generation=_CAPTURED_PAPER_CONNECTION_GENERATION,
             captured_paper_symbol_admitter=admitter,
             captured_paper_exit_completion_handler=completion_handler,
+            captured_paper_exit_transport_handler=transport_handler,
         )
         is True
     )
+    # A foreign ADMITTER (equal behaviour, different object) is refused.
     assert (
         loop_mod.start_captured_paper_live_runner_loop(
             expected_account_id=_CAPTURED_PAPER_ACCOUNT_ID,
@@ -2152,9 +2193,11 @@ def test_captured_paper_singleton_retry_requires_exact_handler_identity(
                 lambda **_kwargs: {"ok": True}
             ),
             captured_paper_exit_completion_handler=completion_handler,
+            captured_paper_exit_transport_handler=transport_handler,
         )
         is False
     )
+    # A foreign exit COMPLETION handler is refused.
     assert (
         loop_mod.start_captured_paper_live_runner_loop(
             expected_account_id=_CAPTURED_PAPER_ACCOUNT_ID,
@@ -2162,6 +2205,20 @@ def test_captured_paper_singleton_retry_requires_exact_handler_identity(
             broker_connection_generation=_CAPTURED_PAPER_CONNECTION_GENERATION,
             captured_paper_symbol_admitter=admitter,
             captured_paper_exit_completion_handler=lambda _request: None,
+            captured_paper_exit_transport_handler=transport_handler,
+        )
+        is False
+    )
+    # A foreign exit TRANSPORT handler is refused too -- this is the newest
+    # identity dimension and the one the stale test had no coverage for.
+    assert (
+        loop_mod.start_captured_paper_live_runner_loop(
+            expected_account_id=_CAPTURED_PAPER_ACCOUNT_ID,
+            runtime_generation=_CAPTURED_PAPER_GENERATION,
+            broker_connection_generation=_CAPTURED_PAPER_CONNECTION_GENERATION,
+            captured_paper_symbol_admitter=admitter,
+            captured_paper_exit_completion_handler=completion_handler,
+            captured_paper_exit_transport_handler=lambda _request: None,
         )
         is False
     )

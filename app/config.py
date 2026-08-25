@@ -4030,6 +4030,20 @@ class Settings(BaseSettings):
     # Broker-boundary quote truth. The setup quote can be minutes old after the
     # scoring/risk pipeline; an Alpaca entry must be re-priced from a BBO no older
     # than this immediately before submit.
+    chili_momentum_held_stand_in_max_age_seconds: float = Field(
+        default=15.0, ge=1.0, le=60.0,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_HELD_STAND_IN_MAX_AGE_SECONDS"),
+        description=(
+            "Pinakamatandang stand-in quote na tinatanggap ng HELD-tick BBO kapag "
+            "WALANG ibinigay ang mahigpit na direktang landas. Ginagamit LAMANG "
+            "bilang fallback: kapag may buhay na direktang book (RTH) ay iyon ang "
+            "nananalo at hindi ito naaabot. Umiiral ito dahil walang premarket "
+            "book ang Alpaca -- sinukat 2026-08-25, 1,625 sunod-sunod na harang "
+            "sa isang buhay na posisyon habang ang IQFeed provider_at ay 7.1s "
+            "lamang ang edad. 15s: sapat para makakita sa premarket, masyadong "
+            "maikpit para makapagpasya sa patay na libro."
+        ),
+    )
     chili_momentum_entry_bbo_max_age_seconds: float = Field(
         default=2.0,
         gt=0.0,

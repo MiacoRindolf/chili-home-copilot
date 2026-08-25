@@ -49,7 +49,21 @@ from app.services.trading.momentum_neural.replay_errors import (
 )
 from app.services.trading.venue.account_identity import NON_ALPACA_ACCOUNT_IDENTITY_KEY
 
-_BASE = datetime(2026, 6, 29, 14, 30, 0)  # 10:30 ET, RTH (naive-UTC, the _utcnow shape)
+# ROT REPAIR 2026-08-25 — the fixture clock used to sit at 14:30Z (10:30 ET), i.e. 60
+# minutes after the 09:30 ET open. PR #1091 (2026-08-21) shipped the time-of-day
+# entry-quality bar DEFAULT ON: after ``chili_momentum_postopen_generic_trigger_cutoff_min``
+# (30.0) minutes post-open, GENERIC ``momentum_ok*`` triggers are deferred with
+# ``postopen_generic_trigger_wait``.  This fixture's synthetic uptrend tape can only ever
+# produce a generic volume trigger (``synthetic_uptrend_ohlcv`` = monotone rise + a
+# last-bar volume surge; there is no pullback, so no structural trigger), so from #1091
+# onward the FSM could never reach ``live_entered`` here and the e2e test went red.
+# The repair moves the CLOCK into the production window instead of weakening the bar.
+# 2026-06-29 is a Monday; 13:35Z = 09:35 ET => minutes_since_rth_open = 5.0 < 30.0.
+# It cannot rot silently the same way: ``test_replay_v3_p1_base_clock_sits_inside_the_
+# postopen_generic_trigger_window`` (below) recomputes this offset through the SAME
+# production helper + the SAME production setting, so if the cutoff ever narrows past
+# _BASE the suite fails LOUDLY on that guard instead of quietly ceasing to test entry.
+_BASE = datetime(2026, 6, 29, 13, 35, 0)  # 09:35 ET, RTH (naive-UTC, the _utcnow shape)
 
 
 class _NetworkGuard:
@@ -163,6 +177,59 @@ def _enable_runner(monkeypatch):
     monkeypatch.setattr(_rp, "_account_equity_usd", lambda *a, **k: 100000.0)
 
 
+def _base_minutes_since_rth_open() -> float | None:
+    """``_BASE`` expressed as minutes since the 09:30 ET open, computed by the SAME
+    production helper the entry-quality bar itself calls (bound to the replay risk clock),
+    so the fixture instant and production can never silently disagree."""
+    from app.services.trading.momentum_neural import risk_policy as _rp
+
+    with _rp.replay_risk_clock(_BASE):
+        return _rp._minutes_since_rth_open_et()
+
+
+def test_replay_v3_p1_base_clock_sits_inside_the_postopen_generic_trigger_window():
+    """ANTI-ROT GUARD for the whole module's ``_BASE`` constant.
+
+    Every DB-backed test here drives the synthetic uptrend tape, which can only produce a
+    GENERIC ``momentum_ok*`` trigger.  Production defers exactly that class more than
+    ``chili_momentum_postopen_generic_trigger_cutoff_min`` minutes after the 09:30 ET open
+    (PR #1091).  When ``_BASE`` drifted outside that window the e2e test simply stopped
+    reaching ``live_entered`` — and the identity-rotation test's ``fills == []`` quietly
+    became true for the WRONG reason.  This guard makes that drift a loud, self-describing
+    failure by re-deriving the offset from production rather than restating a magic number.
+    """
+    from app.services.trading.momentum_neural.risk_policy import (
+        generic_trigger_postopen_deferred,
+    )
+
+    cutoff = float(
+        getattr(settings, "chili_momentum_postopen_generic_trigger_cutoff_min", 30.0) or 30.0
+    )
+    mins = _base_minutes_since_rth_open()
+    assert mins is not None, (
+        "_BASE must be an RTH instant for this suite (premarket yields None); got None"
+    )
+    assert mins < cutoff, (
+        f"_BASE is {mins:.1f} min after the 09:30 ET open but production defers generic "
+        f"momentum_ok* triggers from {cutoff:.1f} min onward — move _BASE EARLIER (or to "
+        "premarket) instead of loosening the entry assertions."
+    )
+    # The generic trigger this suite's tape produces must NOT be deferred at _BASE …
+    assert (
+        generic_trigger_postopen_deferred(
+            "momentum_ok_rel_vol", mins, enabled=True, cutoff_min_after_open=cutoff
+        )
+        is False
+    )
+    # … and the predicate must still discriminate at the cutoff, so this guard is not vacuous.
+    assert (
+        generic_trigger_postopen_deferred(
+            "momentum_ok_rel_vol", cutoff, enabled=True, cutoff_min_after_open=cutoff
+        )
+        is True
+    )
+
+
 def test_replay_v3_p1_drives_one_session_end_to_end(db, monkeypatch, _enable_runner):
     symbol = "RPLY"
     guard = _install_network_guard(monkeypatch)
@@ -203,6 +270,12 @@ def test_replay_v3_p1_drives_one_session_end_to_end(db, monkeypatch, _enable_run
         "entry_risk_gate_bypassed",
         "recorded_eligibility_stream_missing",
     ]
+
+    # The #1091 time-of-day entry-quality bar must NOT have fired: _BASE sits inside the
+    # post-open window (see the guard test above).  Asserting the ABSENCE of this event
+    # names the exact regression that broke this test in 2026-08, so a future recurrence
+    # reports itself instead of surfacing as a bare "live_entered not in visited".
+    assert "live_entry_postopen_quality_bar" not in result.events, result.events
 
     # (1) FSM advanced through the expected states (queued → watching → entered → exit).
     visited = result.states_visited
@@ -347,6 +420,11 @@ def test_replay_account_identity_rotation_quarantines_before_any_order(
         scanner_snapshot_provider=recorded_scanner,
     ).run()
 
+    # NOTE (2026-08-25): this assertion is only load-bearing because ``_BASE`` sits inside
+    # the post-open generic-trigger window — the SAME grid enters and fills in the e2e test
+    # above.  While _BASE was at 10:30 ET the #1091 bar suppressed the entry outright, so
+    # "no fills" was true for the wrong reason and this test proved nothing about the
+    # identity fence.  The _BASE guard test keeps that precondition honest.
     fills, _ = mock.get_fills(limit=1000)
     assert fills == []
     assert remaining.entry_fill_price is None

@@ -46,10 +46,41 @@ import pytest
 
 from app.config import settings
 from app.services.trading.momentum_neural import entry_gates as eg
+from app.services.trading.momentum_neural import spread_cost_veto as scv
 from app.services.trading.momentum_neural.spread_cost_veto import (
     _is_reclaim_family,
     adaptive_spread_cost_veto_derate,
 )
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# ANO ANG NABULOK (2026-08-24, commit 539f0ffee / #1131): a PROCESS-GLOBAL
+# percentile cache was added to production —
+# ``spread_cost_veto._SPREAD_PCT_CACHE``, keyed ``f"{symbol}|{lookback_days}"``
+# with a 600s TTL — and the entry-path derate opts in (``use_cache=True``).
+# ``name_spread_percentiles`` returns the CACHED value before it ever touches
+# ``db``, and it caches the None of a thin name too.
+#
+# The concrete damage here: ``test_cheap_spread_passes_at_mult_one`` runs
+# ``symbol="PLSM"`` through ``_FakeNoHistoryDB`` and poisons key ``"PLSM|20.0"``
+# with None. Every LATER PLSM test in this module then got that None back and its
+# ``_FakeDistDB`` was NEVER READ — so the two name-relative tests silently stopped
+# exercising the anomaly / extreme-floor branches they are named for.
+#
+# BAKIT HINDI ITO MAAARING MABULOK MULI SA PARAAN NA ITO: the fixture is AUTOUSE
+# and clears BOTH before and after every test in this module, so no test in this
+# file (and no test in ANY other module sharing the process) can hand a stale or
+# poisoned distribution to the next one. It clears the real production dict —
+# if that dict is ever renamed or removed, this fixture raises AttributeError at
+# collection rather than going quietly green.
+# ─────────────────────────────────────────────────────────────────────────────
+@pytest.fixture(autouse=True)
+def _clear_spread_pct_cache():
+    with scv._SPREAD_PCT_CACHE_LOCK:
+        scv._SPREAD_PCT_CACHE.clear()
+    yield
+    with scv._SPREAD_PCT_CACHE_LOCK:
+        scv._SPREAD_PCT_CACHE.clear()
 
 
 # ─────────────────────────────────────────────────────────────────────────────

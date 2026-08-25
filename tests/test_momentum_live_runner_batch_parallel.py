@@ -305,6 +305,29 @@ def test_batch_single_session_uses_one_worker(monkeypatch):
 
 
 def _captured_completion_request():
+    """Buuin ang EKSAKTONG typed post-commit payload na hinahanap ng scheduler.
+
+    ANO ANG NABULOK: itinayo ng builder na ito ang ``CapturedPaperEntryIntent`` sa
+    lumang 13-field na hugis.  Nadagdagan ang kontrata ng apat pang REQUIRED na
+    field (``confirmed_arm_generation``, ``symbol_claim_token``, ``binder_id``,
+    ``opportunity_key``) at hinihingi na rin nito ngayon na
+    ``decision_id == client_order_id`` — kaya ``TypeError`` na lang ang lumalabas
+    bago pa man tumakbo ang tick.
+
+    BAKIT MAHALAGA ANG PAGIGING TUNAY NITO: eksaktong tseke ang ginagamit ng
+    produksyon — ``if type(result) is CapturedPaperPostCommitRequest`` sa
+    app/services/trading_scheduler.py:1070.  Kung mali o peke ang payload na ito,
+    HINDI kailanman papasok sa post-commit branch ang tick at magiging BAKANTE
+    (vacuously green o kaya'y maling-dahilan na pula) ang dalawang test sa ibaba.
+
+    BAKIT HINDI NA ITO MABUBULOK NANG GANITO ULIT: pinagtutugma namin ang mga
+    ipinapasang kwarg laban sa aktuwal na ``dataclasses.fields(...)`` ng kontrata,
+    kaya ang susunod na pagdagdag/pagtanggal ng field ay lalabas bilang isang
+    PINANGALANANG AssertionError dito mismo sa builder — hindi bilang malabong
+    ``TypeError`` sa loob ng dalawang scheduler test na walang kinalaman sa
+    contract shape.
+    """
+    import dataclasses
     from datetime import datetime, timezone
 
     from app.services.trading.momentum_neural import (
@@ -323,12 +346,40 @@ def _captured_completion_request():
         runtime_generation="f6ef5ba0-5b91-49bf-a2f5-e71e8e270eb3",
         first_dip_policy_mode="candidate",
     )
-    intent = contract.CapturedPaperEntryIntent(
-        route_token=route,
-        intent_generation="39f55a65-e6f2-4ccc-bd02-f50dc9c27c69",
-        decision_id="captured-paper-decision-100",
-        client_order_id="chili_ml_ACTU_100_1",
+    # Ang arm generation ay dapat kapareho ng route sa session/scope/account, at
+    # ang symbol_claim_token ay laging eksaktong f"arm-{arm_token}".
+    arm_token = "8d7e932b-77ec-4752-b5f7-19370cd65104"
+    arm = contract.CapturedPaperConfirmedArmGeneration(
+        session_id=route.session_id,
+        arm_token=arm_token,
+        expires_at=datetime(2026, 7, 15, 17, 0, tzinfo=timezone.utc),
+        symbol_claim_token=f"arm-{arm_token}",
+        account_scope=route.account_scope,
+        expected_account_id=route.expected_account_id,
+        confirmed_at=datetime(2026, 7, 15, 16, 0, tzinfo=timezone.utc),
+    )
+    # setup_family == "first_dip_reclaim" => REQUIRED ang opportunity key, at
+    # kailangang tugma ang scope/symbol/setup_family nito sa route token.
+    opportunity = contract.CapturedPaperOpportunityKey(
+        account_scope=route.account_scope,
+        symbol=route.symbol,
+        trading_date=datetime(2026, 7, 15).date(),
         setup_family="first_dip_reclaim",
+    )
+    # Iisang identidad ang decision_id at client_order_id sa kontrata
+    # (`decision_client_order_id_mismatch`), kaya isang halaga lang ang pinagmulan.
+    client_order_id = "chili_ml_ACTU_100_1"
+    intent_kwargs = dict(
+        route_token=route,
+        confirmed_arm_generation=arm,
+        symbol_claim_token=arm.symbol_claim_token,
+        binder_id="2c92c330-9f73-49bb-ae47-f4806fe90290",
+        opportunity_key=opportunity,
+        intent_generation="39f55a65-e6f2-4ccc-bd02-f50dc9c27c69",
+        decision_id=client_order_id,
+        client_order_id=client_order_id,
+        setup_family="first_dip_reclaim",
+        # Dapat nasa loob ng [arm.confirmed_at, arm.expires_at] ang decision_at.
         decision_at=datetime(2026, 7, 15, 16, 30, tzinfo=timezone.utc),
         structural_stop_price="2.50",
         entry_limit_ceiling_price="3.00",
@@ -338,6 +389,19 @@ def _captured_completion_request():
         policy_sha256="1" * 64,
         feature_flags_sha256="2" * 64,
     )
+    # ANTI-ROT: ihambing sa TUNAY na init fields ng kontrata bago mag-construct.
+    contract_fields = {
+        f.name
+        for f in dataclasses.fields(contract.CapturedPaperEntryIntent)
+        if f.init
+    }
+    missing = sorted(contract_fields - set(intent_kwargs))
+    extra = sorted(set(intent_kwargs) - contract_fields)
+    assert not missing and not extra, (
+        "CapturedPaperEntryIntent contract drifted away from this test builder: "
+        f"missing={missing} extra={extra}"
+    )
+    intent = contract.CapturedPaperEntryIntent(**intent_kwargs)
     return contract.CapturedPaperPostCommitRequest(
         intent=intent,
         completion_generation="73dbcf92-94ea-436e-978c-b0e31ce7252d",
