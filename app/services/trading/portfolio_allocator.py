@@ -16,6 +16,10 @@ from .pattern_validation_projection import read_pattern_validation_projection, w
 logger = logging.getLogger(__name__)
 
 ALLOCATION_STATE_VERSION = 1
+# Ang dating hardcoded na lakas ng incumbent para sa isang BUHAY na session.
+# Pinananatili bilang no-evidence na base para ang isang session na walang
+# pattern ay kumilos nang eksaktong gaya ng dati.
+_LIVE_SESSION_INCUMBENT_SCORE_WITHOUT_EVIDENCE = 0.55
 # ⚠️ ANG `live_arm_expired` AY TERMINAL (2026-08-25). Nawawala ito sa listahang ito
 # habang isinasama ito ng `operator_actions._TERMINAL_OPERATOR_STATES`. Ang isang
 # arm na nag-expire ay HINDI kailanman naging posisyon -- walang exposure, walang
@@ -276,7 +280,7 @@ def _collect_live_session_conflicts(
     ⚠️ Ang `None` ay nagpapanatili ng eksaktong lumang gawi para sa bawat tumatawag
     na walang hawak na session (ang purong pre-arm na pagsusuri).
     """
-    from ...models.trading import MomentumStrategyVariant, TradingAutomationSession
+    from ...models.trading import MomentumStrategyVariant, ScanPattern, TradingAutomationSession
 
     rows = (
         db.query(TradingAutomationSession)
@@ -292,6 +296,16 @@ def _collect_live_session_conflicts(
     if variant_ids:
         for variant in db.query(MomentumStrategyVariant).filter(MomentumStrategyVariant.id.in_(tuple(variant_ids))).all():
             variants[int(variant.id)] = variant
+    # Isang batch na pag-load ng pattern para sa incumbent score sa ibaba -- walang N+1.
+    pattern_ids = {
+        int(v.scan_pattern_id)
+        for v in variants.values()
+        if getattr(v, "scan_pattern_id", None)
+    }
+    patterns: dict[int, Any] = {}
+    if pattern_ids:
+        for pattern in db.query(ScanPattern).filter(ScanPattern.id.in_(tuple(pattern_ids))).all():
+            patterns[int(pattern.id)] = pattern
     out: list[dict[str, Any]] = []
     candidate_family = str(hypothesis_family or "").strip().lower()
     _exclude = int(exclude_session_id) if exclude_session_id else None
@@ -320,10 +334,53 @@ def _collect_live_session_conflicts(
                 "ticker": sess.symbol,
                 "variant_id": sess.variant_id,
                 "buckets": sorted(set(buckets)),
-                "incumbent_score": 0.55,
+                "incumbent_score": _live_session_incumbent_score(
+                    patterns.get(int(variant.scan_pattern_id))
+                    if variant and getattr(variant, "scan_pattern_id", None)
+                    else None
+                ),
             }
         )
     return out
+
+
+def _live_session_incumbent_score(pattern: Any) -> float:
+    """Ang lakas ng isang BUHAY NA SESSION bilang incumbent, mula sa ebidensya.
+
+    ⚠️ HARDCODED ITO SA 0.55 (2026-08-25) habang ang open-trade na conflict sa
+    IISANG file ay kumukwenta ng sarili nito::
+
+        incumbent_score = confidence*0.6 + _pattern_win_rate_score(incumbent)*0.4
+
+    Hindi iyon kombensiyon -- asimetriya. At ito ang naging bunga:
+
+        threshold = best_incumbent (0.55) + margin (0.08) = 0.63
+        kandidato = research*0.36 + drift*0.18 + exec*0.18 + venue*0.14 + heat*0.14
+
+    Sa PANG-ARAW-ARAW na kaso ay neutral ang apat sa limang input ng kandidato
+    (0.5) at naka-sahig ang heat, kaya ang score ay EKSAKTONG 0.4580 sa lahat ng
+    391 packet -- live at paper. Sa 0.63 na hindi maaabot, ang gate ay
+    HINDI MAPAPANALUNAN SA PAGKAKABUO: bawat same-ticker na conflict ay humaharang,
+    at ang paghahambing sa margin ay walang bisa.
+
+    Ang paggamit ng PAREHONG formula ng open-trade na daan ay ginagawang tunay na
+    paghahambing ang paghahambing: ang isang mahinang incumbent ay maaaring
+    matalo, ang isang malakas ay hindi.
+
+    ⚠️ WALANG EBIDENSYA => 0.55, ang dating halaga. Ang isang session na walang
+    pattern ay eksaktong kumikilos gaya ng dati, kaya ang pagbabago ay
+    PAGPAPALIT LAMANG ng constant kung saan may TUNAY na ebidensya.
+    """
+    if pattern is None:
+        return _LIVE_SESSION_INCUMBENT_SCORE_WITHOUT_EVIDENCE
+    confidence_score, _ = _normalize_confidence_evidence(
+        getattr(pattern, "confidence", None),
+        source_surface="portfolio_allocator.live_session_incumbent_confidence",
+    )
+    return round(
+        (confidence_score * 0.6) + (_pattern_win_rate_score(pattern) * 0.4),
+        4,
+    )
 
 
 def _trade_notional_usd(trade: Any) -> float:
