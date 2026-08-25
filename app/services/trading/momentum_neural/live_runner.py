@@ -33928,8 +33928,44 @@ def tick_live_session(
                 "skipped": "alpaca_risk_sizing_unavailable",
             }
         else:
-            qty = _round_base_size(max_notional / guarded_ask, inc, mn)
-            le["entry_sizing"] = {"model": "notional_first_fallback", "reason": _rf_meta.get("reason")}
+            # ⚠️ TRAPDOOR NA NAAYOS (2026-08-24). Dating bumabagsak ito sa BUONG
+            # notional ceiling (~15% ng equity) kapag TUMANGGI ang risk-first
+            # sizing -- ibig sabihin ang "hindi ko ito kayang sukatin nang
+            # ligtas" ay nagiging isang MAXIMUM-SIZE na order sa robinhood_spot,
+            # robinhood_agentic_mcp, at coinbase_spot. Ang mga rail na iyon ay
+            # LIVE. Ang direksyon ng kabiguan ang pinakamasama: mas malayong
+            # stop o na-zero na budget -> mas maliit na risk-first qty -> umabot
+            # sa 0 -> TUMATALON ang qty sa maximum.
+            #
+            # Naaabot ito sa pamamagitan ng `max_loss_nonpositive` (isang
+            # negatibo/NaN na budget mula sa nakasalansang na derate chain) at
+            # `stop_distance_invalid` -- hindi lamang sa mga sukdulang presyo.
+            #
+            # Pangalawang pinsala: ang `entry_sizing` ay hindi na nagdadala ng
+            # `stop_distance`, kaya ang #769 max-loss circuit ay bumabagsak sa
+            # `avg - pos['stop_price']` at ang threshold nito ay nagiging mga
+            # 7x ng dinisenyong per-trade budget bago ito pumutok.
+            #
+            # PARITY: ang replay (replay_v2.py:2120) ay UMAABSTAIN nang walang
+            # kundisyon sa parehong kalagayan -- `if not want_qty ...: continue`
+            # -- kaya hindi kailanman kayang gayahin ng replay ang over-size.
+            # Ang butas sa parity ay nasa direksyong NAGTATAGO ng bug.
+            #
+            # Ang pag-abstain ay tumutugma na ngayon sa Alpaca AT sa replay.
+            le["entry_sizing"] = {
+                "model": "risk_first_required",
+                "reason": (_rf_meta or {}).get("reason"),
+                "execution_family": ef,
+            }
+            _emit(db, sess, "live_entry_risk_sizing_unavailable", le["entry_sizing"])
+            _safe_transition(db, sess, STATE_WATCHING_LIVE)
+            db.flush()
+            return {
+                "ok": True,
+                "session_id": sess.id,
+                "state": sess.state,
+                "skipped": "risk_sizing_unavailable",
+            }
         if qty <= 0:
             _emit(db, sess, "live_error", {"reason": "size_zero_after_rounding"})
             _safe_transition(db, sess, STATE_LIVE_ERROR)
