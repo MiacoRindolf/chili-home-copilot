@@ -6812,6 +6812,23 @@ class Settings(BaseSettings):
     #      auto-arm pass sa commit, pati ang mga arm na nagawa na.
     # Ang 0 ay nagpapanumbalik ng try-once. Sadyang mas maikli ito kaysa sa
     # arm fence wait (2500ms) para ang panig na ito ang unang sumuko.
+    # ── ORDINARY ROUTE LOCK: BOUNDED RETRY (2026-08-25) ──
+    # Ang `_load_ordinary_live_session_for_update` ay FOR UPDATE NOWAIT: kapag may
+    # ibang transaction na hawak ang row ay agad itong bumabagsak at ang session ay
+    # naiiwang hindi natitikan. NASUKAT: session 15676 (AIXI) sa live_pending_entry
+    # nang 650 SEGUNDO; runner tick failed sa 9 ng 35 na live_runner na linya (26%).
+    # ⚠️ SADYANG NOWAIT, KAYA NANATILING NOWAIT: sa 60 probe ng pg_locks ay may
+    # naghihintay na row lock sa 60/60 (129 waiter). Ang paggawa nitong humaharang
+    # na hintay ay magpapasali sa max_instances=1 na runner sa pilang laging punô --
+    # ang eksaktong 648-segundong pagka-freeze ng session 14440. Muling pagtatangka
+    # ang solusyon, hindi pagpila. Ang 0 ay try-once.
+    chili_momentum_ordinary_route_lock_retry_budget_ms: int = Field(
+        default=400,
+        ge=0,
+        le=3000,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_ORDINARY_ROUTE_LOCK_RETRY_BUDGET_MS"),
+        description="ONE documented knob: total retry budget in ms for the ordinary live-runner FOR UPDATE NOWAIT row lock. Divided by a fixed 120ms interval to get the attempt count. It NEVER queues on the lock (still NOWAIT) so the max_instances=1 runner can never be frozen by a long holder. 0 restores try-once.",
+    )
     chili_momentum_live_symbol_arm_lock_wait_ms: int = Field(
         default=2000,
         ge=0,
