@@ -563,6 +563,27 @@ def _event_detail(payload: dict[str, Any]) -> str | None:
         value = payload.get(key)
         if value is not None and str(value).strip():
             return str(value).strip()[:120]
+    # ⚠️ ANG RISK EVALUATION AY GUMAGAMIT NG `errors`, HINDI `reason` (2026-08-25).
+    # Ang live-side na block ay nag-e-emit ng {"reason": "wide bbo spread"} at
+    # lumalabas iyon; ang boundary-risk na block ay nag-e-emit ng
+    # {"severity": "block", "errors": ["Not paper-eligible per neural viability."]}
+    # at WALANG lumalabas -- walang susi rito ang tumutugma sa listahan sa itaas.
+    #
+    # Ang bunga ay nakita mismo ng operator: sa action history ay may walong linyang
+    # "paper blocked by risk" na walang anumang dahilan, katabi ng "live blocked by
+    # risk · wide bbo spread" na may dahilan. Mukhang misteryo ang isang PERPEKTONG
+    # LEGITIMONG block, at kinailangan ng paghukay sa DB para lang makita ang
+    # dahilang nandoon na pala sa buong panahon.
+    #
+    # ⚠️ ANG DATOS AY HINDI NAGBABAGO. Ito ay purong DISPLAY -- ang payload ay
+    # naglalaman na ng `errors`; hindi lang ito binabasa dito.
+    errors = payload.get("errors")
+    if isinstance(errors, (list, tuple)) and errors:
+        joined = "; ".join(str(e).strip() for e in errors if str(e or "").strip())
+        if joined:
+            return joined[:120]
+    elif isinstance(errors, str) and errors.strip():
+        return errors.strip()[:120]
     rejects = payload.get("detector_rejects")
     if isinstance(rejects, dict) and rejects:
         key, value = next(iter(rejects.items()))
