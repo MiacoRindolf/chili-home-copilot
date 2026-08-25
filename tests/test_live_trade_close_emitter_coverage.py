@@ -39,7 +39,7 @@ REPO = Path(__file__).resolve().parent.parent
 def test_patched_site_references_on_live_trade_closed(path, site):
     """The 3 patched sites must reference on_live_trade_closed by name.
     If a future edit deletes the wiring, this guard makes it audible."""
-    src = (REPO / path).read_text()
+    src = (REPO / path).read_text(encoding="utf-8")
     assert "on_live_trade_closed" in src, (
         f"{site} ({path}) lost the on_live_trade_closed wiring"
     )
@@ -68,7 +68,7 @@ def test_pre_existing_broker_sync_emitter_still_wired(path, site):
     """The brief listed broker_sync as a 4th bypass site, but inspection
     found it already calls on_broker_reconciled_close. Pin the wiring
     with a regression guard so a future edit can't silently lose it."""
-    src = (REPO / path).read_text()
+    src = (REPO / path).read_text(encoding="utf-8")
     assert "on_broker_reconciled_close" in src, (
         f"{site} ({path}) lost the on_broker_reconciled_close wiring"
     )
@@ -87,7 +87,7 @@ def test_emitter_call_is_wrapped_in_try_except(path):
     """A broken emit must not break the close transaction. Each patched
     site wraps the on_live_trade_closed call in try/except. Source-text
     pin so future edits can't silently remove the guard."""
-    src = (REPO / path).read_text()
+    src = (REPO / path).read_text(encoding="utf-8")
     # Find the on_live_trade_closed call site, walk back for `try:`.
     idx = src.find("on_live_trade_closed(")
     assert idx >= 0, f"no on_live_trade_closed call in {path}"

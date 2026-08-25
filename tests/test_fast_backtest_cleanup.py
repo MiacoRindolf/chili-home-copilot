@@ -19,7 +19,7 @@ REPO = Path(__file__).resolve().parent.parent
 
 def test_run_dynamic_pattern_slice_calls_cleanup_on_success_path():
     """The cleanup helper must be called after _drain_backtest_parity_sink."""
-    src = (REPO / "app/services/backtest_service.py").read_text()
+    src = (REPO / "app/services/backtest_service.py").read_text(encoding="utf-8")
     # Find _run_dynamic_pattern_slice + check the success path wires cleanup.
     idx = src.find("def _run_dynamic_pattern_slice(")
     assert idx > 0
@@ -38,7 +38,7 @@ def test_run_dynamic_pattern_slice_calls_cleanup_on_success_path():
 
 def test_run_dynamic_pattern_slice_calls_cleanup_on_budget_exceeded_path():
     """Cleanup must also run when the budget watchdog aborts the bt.run."""
-    src = (REPO / "app/services/backtest_service.py").read_text()
+    src = (REPO / "app/services/backtest_service.py").read_text(encoding="utf-8")
     idx = src.find("def _run_dynamic_pattern_slice(")
     end = src.find("\ndef ", idx + 1)
     body = src[idx:end]
@@ -59,7 +59,7 @@ def test_cleanup_clears_all_four_heavy_attrs():
     _atr_array, _swing_low_array. Each must be reset by the cleanup
     helper. Source-text guard against accidental future shrinkage of
     the cleanup set."""
-    src = (REPO / "app/services/backtest_service.py").read_text()
+    src = (REPO / "app/services/backtest_service.py").read_text(encoding="utf-8")
     # Find the cleanup helper definition body.
     idx = src.find("def _cleanup_strat_cls()")
     assert idx > 0
@@ -80,7 +80,7 @@ def test_cleanup_clears_all_four_heavy_attrs():
 def test_cleanup_swallows_exceptions():
     """The cleanup helper must NOT raise into the return path. Pin the
     try/except guard so a future refactor can't accidentally remove it."""
-    src = (REPO / "app/services/backtest_service.py").read_text()
+    src = (REPO / "app/services/backtest_service.py").read_text(encoding="utf-8")
     idx = src.find("def _cleanup_strat_cls()")
     body = src[idx:idx + 600]
     assert "try:" in body

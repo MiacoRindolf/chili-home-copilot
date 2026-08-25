@@ -42,14 +42,14 @@ def test_execution_robustness_handler_imports_cleanly():
 # ---------------------------------------------------------------------------
 
 def test_live_drift_uses_absolute_imports():
-    src = (REPO / "app/services/trading/brain_work/handlers/live_drift.py").read_text()
+    src = (REPO / "app/services/trading/brain_work/handlers/live_drift.py").read_text(encoding="utf-8")
     assert "from app.db import SessionLocal" in src
     assert "from app.services.trading.live_drift import" in src
     assert "from ....db" not in src
 
 
 def test_execution_robustness_uses_absolute_imports():
-    src = (REPO / "app/services/trading/brain_work/handlers/execution_robustness.py").read_text()
+    src = (REPO / "app/services/trading/brain_work/handlers/execution_robustness.py").read_text(encoding="utf-8")
     assert "from app.db import SessionLocal" in src
     assert "from app.services.trading.execution_robustness import" in src
     assert "from ....db" not in src
@@ -62,7 +62,7 @@ def test_execution_robustness_uses_absolute_imports():
 def test_dispatcher_wires_both_handlers_in_close_branch():
     """Source guard: both handlers are dispatched in the close-event
     branch alongside pattern_stats / demote / regime_ledger."""
-    src = (REPO / "app/services/trading/brain_work/dispatcher.py").read_text()
+    src = (REPO / "app/services/trading/brain_work/dispatcher.py").read_text(encoding="utf-8")
     # The fanout must reference both modules + import their three close-event
     # handler names.
     assert "from .handlers.live_drift import" in src
@@ -74,7 +74,7 @@ def test_dispatcher_handlers_run_after_demote():
     demote so the EV-gate has already run before drift/robustness see
     the close. They're observability, not lifecycle gates -- order
     correct prevents drift/robustness from racing the gate."""
-    src = (REPO / "app/services/trading/brain_work/dispatcher.py").read_text()
+    src = (REPO / "app/services/trading/brain_work/dispatcher.py").read_text(encoding="utf-8")
     demote_pos = src.find("from .handlers.demote import handle_trade_closed")
     drift_pos = src.find("from .handlers.live_drift import")
     robustness_pos = src.find("from .handlers.execution_robustness import")
@@ -100,7 +100,7 @@ def test_handlers_have_try_except_inside_helper():
         "app/services/trading/brain_work/handlers/live_drift.py",
         "app/services/trading/brain_work/handlers/execution_robustness.py",
     ):
-        src = (REPO / path).read_text()
+        src = (REPO / path).read_text(encoding="utf-8")
         assert "def _run_refresh(" in src
         idx = src.find("def _run_refresh(")
         body = src[idx:idx + 1200]

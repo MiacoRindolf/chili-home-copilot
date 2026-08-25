@@ -1499,7 +1499,7 @@ def test_slow_no_order_smoke_requires_and_accepts_post_shutdown_refresh(
     # bounded receipt window) are no longer current activation authority.
     assert all(
         datetime.fromisoformat(
-            json.loads(Path(bundle.preactivation["readiness_receipts"][kind]["path"]).read_text())["expires_at"]
+            json.loads(Path(bundle.preactivation["readiness_receipts"][kind]["path"]).read_text(encoding="utf-8"))["expires_at"]
         )
         < stale_probe_horizon
         for kind in ("broker_account", "kill_switch")

@@ -32,6 +32,42 @@ from .asset_class import PATTERN_ASSET_CLASS_OPTIONS, normalize_pattern_asset_cl
 # ---------------------------------------------------------------------------
 
 
+# Ang mga field na ang PAGKAKAROON ng halaga ay naglalagay ng row sa live scope.
+# Iisang listahan para sa SQL filter at sa row-level na tseke -- may test na
+# nagbabantay na hindi sila maghiwalay.
+LIVE_SCOPE_PRESENCE_FIELDS: tuple[str, ...] = (
+    "scan_pattern_id",
+    "related_alert_id",
+    "stop_loss",
+    "take_profit",
+)
+
+
+def trade_is_in_live_autopilot_scope(trade: object) -> bool:
+    """Row-level na katumbas ng ``live_autopilot_trade_filter()``.
+
+    BAKIT ITO KAILANGAN. Ang SQL filter ay para sa PAGPILI; ito ay para sa
+    PAGSULAT. Ang bawat writer ng alinman sa limang branch ng filter ay isang
+    ENROLLMENT path: ang pagsulat ng halaga sa isang dating walang-laman na
+    field ay naglilipat ng row mula sa labas ng live execution monitor patungo
+    sa loob nito, bilang epekto.
+
+    Dalawa nang ganitong enrollment ang naayos (2026-08-24)::
+
+        broker-sync backfill  -> scan_pattern_id / related_alert_id   (#1149)
+        maintenance sweep     -> stop_loss / take_profit              (ito)
+
+    Ang tamang tanong bago magsulat ay hindi "wasto ba ang halagang ito" kundi
+    **"gagawin ba nitong pinamamahalaan ang isang hindi pinamamahalaang row"**.
+    """
+    if getattr(trade, "auto_trader_version", None) == "v1":
+        return True
+    for field in LIVE_SCOPE_PRESENCE_FIELDS:
+        if getattr(trade, field, None) is not None:
+            return True
+    return False
+
+
 def live_autopilot_trade_filter():
     """SQLAlchemy filter for live trades surfaced on the Autopilot desk.
 

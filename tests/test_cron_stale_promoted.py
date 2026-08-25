@@ -80,7 +80,7 @@ def test_latest_exit_dates_by_pattern_skips_empty_lookup():
 def test_uses_with_sessionlocal_in_wrapper():
     """Source guard: the scheduler wrapper opens SessionLocal via
     `with` so the session always closes (no leak)."""
-    src = (REPO / "app/services/trading_scheduler.py").read_text()
+    src = (REPO / "app/services/trading_scheduler.py").read_text(encoding="utf-8")
     idx = src.find("def _run_stale_promoted_sweep_job")
     assert idx > 0
     body = src[idx:idx + 1500]
@@ -92,7 +92,7 @@ def test_uses_with_sessionlocal_in_wrapper():
 def test_cron_registration_exists():
     """Source guard: the APScheduler add_job call for the sweep is
     registered with a weekly cron trigger."""
-    src = (REPO / "app/services/trading_scheduler.py").read_text()
+    src = (REPO / "app/services/trading_scheduler.py").read_text(encoding="utf-8")
     assert 'id="stale_promoted_sweep"' in src
     assert "_run_stale_promoted_sweep_job" in src
     assert 'day_of_week="sun"' in src
@@ -102,7 +102,7 @@ def test_sweep_module_uses_absolute_imports():
     """Source guard: the sweep module imports via absolute paths
     (the depth-5 cron_jobs/ subdirectory has the same import-depth
     risk as handlers/)."""
-    src = (REPO / "app/services/trading/cron_jobs/stale_promoted_sweep.py").read_text()
+    src = (REPO / "app/services/trading/cron_jobs/stale_promoted_sweep.py").read_text(encoding="utf-8")
     assert "from app.models.trading import" in src
     assert "from app.services.trading.realized_ev_gate import" in src
 
@@ -111,7 +111,7 @@ def test_sweep_returns_three_count_keys():
     """Contract guard: the sweep returns the standard
     {patterns_checked, patterns_skipped_recent, patterns_demoted}
     shape so the scheduler log can show progress."""
-    src = (REPO / "app/services/trading/cron_jobs/stale_promoted_sweep.py").read_text()
+    src = (REPO / "app/services/trading/cron_jobs/stale_promoted_sweep.py").read_text(encoding="utf-8")
     for key in (
         "patterns_checked",
         "patterns_skipped_recent",
@@ -125,7 +125,7 @@ def test_sweep_returns_three_count_keys():
 def test_sweep_skips_patterns_with_recent_trades():
     """Source guard: patterns with a trade in the last 7 days are
     skipped (handler covers them). Pin the cutoff + comparison logic."""
-    src = (REPO / "app/services/trading/cron_jobs/stale_promoted_sweep.py").read_text()
+    src = (REPO / "app/services/trading/cron_jobs/stale_promoted_sweep.py").read_text(encoding="utf-8")
     assert "timedelta(days=7)" in src, (
         "stale cutoff must be 7 days (per the design)"
     )

@@ -35,7 +35,7 @@ def test_lifespan_calls_eager_rebuild():
     """Source-text guard: the lifespan context manager must call the
     eager rebuild. Pin it so a future refactor can't silently remove
     the wiring."""
-    src = (REPO / "app/main.py").read_text()
+    src = (REPO / "app/main.py").read_text(encoding="utf-8")
     # Find lifespan, then look for the rebuild call within ~3000 chars.
     idx = src.find("async def lifespan(app: FastAPI):")
     assert idx > 0
@@ -50,7 +50,7 @@ def test_eager_rebuild_swallows_per_model_failures():
     """Source guard: per-model rebuild errors must be swallowed
     (continue) so a single broken model can't break startup. Pin the
     try/except inside the model loop."""
-    src = (REPO / "app/main.py").read_text()
+    src = (REPO / "app/main.py").read_text(encoding="utf-8")
     idx = src.find("def _eager_pydantic_model_rebuild()")
     assert idx > 0
     body = src[idx:idx + 3000]
@@ -64,7 +64,7 @@ def test_eager_rebuild_swallows_per_model_failures():
 def test_lifespan_swallows_eager_rebuild_failure():
     """Source guard: even if _eager_pydantic_model_rebuild itself
     raises, startup must not abort. Pin the outer try/except."""
-    src = (REPO / "app/main.py").read_text()
+    src = (REPO / "app/main.py").read_text(encoding="utf-8")
     idx = src.find("async def lifespan(app: FastAPI):")
     body = src[idx:idx + 3000]
     rebuild_pos = body.find("_eager_pydantic_model_rebuild()")

@@ -2212,7 +2212,7 @@ def test_no_order_execution_refreshes_broker_and_kill_after_shutdown(
         "broker_read",
         "kill_read",
     ]
-    receipt = json.loads(Path(result["no_order_smoke_path"]).read_text())
+    receipt = json.loads(Path(result["no_order_smoke_path"]).read_text(encoding="utf-8"))
     assert receipt["schema_version"].endswith("no_order_smoke.v4")
     assert set(receipt["refreshed_readiness"]) == {
         "broker_account",

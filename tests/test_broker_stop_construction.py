@@ -53,7 +53,7 @@ def test_normalize_price_subdollar_uses_four_decimals():
 def test_place_stop_loss_sell_order_emits_normalized_stop_log_line():
     """Source guard: the rounded log line must precede submission so
     operators can see the on-wire value."""
-    src = (REPO / "app/services/broker_service.py").read_text()
+    src = (REPO / "app/services/broker_service.py").read_text(encoding="utf-8")
     assert "stop_price rounded to broker tick" in src, (
         "INFO-level normalization log line missing from broker_service.py"
     )
@@ -62,14 +62,14 @@ def test_place_stop_loss_sell_order_emits_normalized_stop_log_line():
 def test_place_stop_loss_sell_order_emits_pre_submit_log_line():
     """Source guard: pre-submit INFO log so operators can see the body
     that's about to hit the wire."""
-    src = (REPO / "app/services/broker_service.py").read_text()
+    src = (REPO / "app/services/broker_service.py").read_text(encoding="utf-8")
     assert "[broker] SELL_STOP submitting:" in src
 
 
 def test_place_stop_loss_sell_order_emits_full_diagnostic_on_rejection():
     """Source guard: on no-order-id rejection, WARNING log includes the
     normalized stop, session flags, and (truncated) response body."""
-    src = (REPO / "app/services/broker_service.py").read_text()
+    src = (REPO / "app/services/broker_service.py").read_text(encoding="utf-8")
     assert "SELL_STOP rejected (full diagnostic)" in src
     # The diagnostic must include the normalized_stop value, not just
     # the raw trigger_price.
@@ -94,7 +94,7 @@ def test_submit_passes_normalized_value_to_rh():
     """Source guard: the rh.orders.order call must use the
     normalized_stop variable, not trigger_price directly. Catches a
     future refactor that re-introduces the unrounded path."""
-    src = (REPO / "app/services/broker_service.py").read_text()
+    src = (REPO / "app/services/broker_service.py").read_text(encoding="utf-8")
     # Find the SELL_STOP submission block.
     idx = src.find("def _do_stop_sell():")
     assert idx > 0

@@ -224,7 +224,7 @@ def test_dispatcher_imports_pattern_stats_for_close_events():
     that audible."""
     from pathlib import Path
 
-    src = Path("app/services/trading/brain_work/dispatcher.py").read_text()
+    src = Path("app/services/trading/brain_work/dispatcher.py").read_text(encoding="utf-8")
     for name in (
         "handle_paper_trade_closed",
         "handle_live_trade_closed",

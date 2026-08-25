@@ -135,7 +135,7 @@ def test_safe_order_state_normalizes_malformed_broker_values():
 
 
 def test_execute_proposal_does_not_zero_fill_proven_quantity_fields():
-    source = Path(alerts.__file__).read_text()
+    source = Path(alerts.__file__).read_text(encoding="utf-8")
     start = source.index("def _execute_proposal(")
     end = source.index("\ndef _safe_float", start)
     assert "float(quantity or 0)" not in source[start:end]
