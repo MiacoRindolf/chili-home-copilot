@@ -60,7 +60,7 @@ def test_scheduler_worker_broker_restore_only_for_broker_roles(monkeypatch) -> N
 
 
 def test_deferred_startup_checks_side_effect_guard_before_broker_restore() -> None:
-    src = (REPO / "app/main.py").read_text()
+    src = (REPO / "app/main.py").read_text(encoding="utf-8")
     idx = src.find("def _run_deferred_startup()")
     assert idx > 0
     body = src[idx : idx + 2500]
@@ -75,7 +75,7 @@ def test_deferred_startup_checks_side_effect_guard_before_broker_restore() -> No
 
 
 def test_app_startup_restores_durable_circuit_breaker_after_kill_switch() -> None:
-    src = (REPO / "app/main.py").read_text()
+    src = (REPO / "app/main.py").read_text(encoding="utf-8")
     idx = src.find("def _run_deferred_startup()")
     assert idx > 0
     body = src[idx : idx + 3600]
@@ -88,7 +88,7 @@ def test_app_startup_restores_durable_circuit_breaker_after_kill_switch() -> Non
 
 
 def test_scheduler_startup_restores_durable_circuit_breaker() -> None:
-    src = (REPO / "app/services/trading_scheduler.py").read_text()
+    src = (REPO / "app/services/trading_scheduler.py").read_text(encoding="utf-8")
     idx = src.find("def start_scheduler(")
     assert idx > 0
     body = src[idx : idx + 6200]
@@ -101,7 +101,7 @@ def test_scheduler_startup_restores_durable_circuit_breaker() -> None:
 
 
 def test_scheduler_worker_restores_durable_circuit_breaker() -> None:
-    src = (REPO / "scripts/scheduler_worker.py").read_text()
+    src = (REPO / "scripts/scheduler_worker.py").read_text(encoding="utf-8")
     idx = src.find("def main()")
     assert idx > 0
     body = src[idx : idx + 4200]
@@ -114,7 +114,7 @@ def test_scheduler_worker_restores_durable_circuit_breaker() -> None:
 
 
 def test_scheduler_worker_checks_role_before_broker_session_restore() -> None:
-    src = (REPO / "scripts/scheduler_worker.py").read_text()
+    src = (REPO / "scripts/scheduler_worker.py").read_text(encoding="utf-8")
     idx = src.find("def main()")
     assert idx > 0
     body = src[idx : idx + 1800]

@@ -424,7 +424,7 @@ def test_option_terminal_zero_fill_records_shadow_observation(monkeypatch):
 
 
 def test_option_entry_rejects_invalid_contract_quantity_instead_of_defaulting_to_one():
-    src = (REPO / "app/services/trading/auto_trader.py").read_text()
+    src = (REPO / "app/services/trading/auto_trader.py").read_text(encoding="utf-8")
 
     assert "parse_contract_quantity(_opt_meta.get(\"quantity\"))" in src
     assert "options_meta_invalid_quantity" in src

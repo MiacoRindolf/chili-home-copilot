@@ -35,7 +35,7 @@ def test_learning_py_no_longer_imports_cycle_report():
     """learning.py's run_learning_cycle had the only call site. After
     the cleanup the import + call must be gone (the cleanup marker
     comment is allowed to mention the dropped names for traceability)."""
-    src = (REPO / "app/services/trading/learning.py").read_text()
+    src = (REPO / "app/services/trading/learning.py").read_text(encoding="utf-8")
     assert "from .learning_cycle_report" not in src, (
         "import statement must be gone"
     )
@@ -53,7 +53,7 @@ def test_architecture_metadata_dropped_cycle_report_step():
     """The CycleStepDef for cycle_report was removed from the
     architecture metadata; the f-cleanup-cycle-report marker comment
     is in its place."""
-    src = (REPO / "app/services/trading/learning_cycle_architecture.py").read_text()
+    src = (REPO / "app/services/trading/learning_cycle_architecture.py").read_text(encoding="utf-8")
     assert 'sid="cycle_report"' not in src, (
         "cycle_report CycleStepDef should have been dropped"
     )

@@ -87,7 +87,7 @@ def test_robinhood_sell_event_writes_are_committed():
     explicit commit here, Phase 4 can reopen an economically closed trade
     because the position-level sell row vanishes when the session closes.
     """
-    text = Path("app/services/trading/robinhood_exit_execution.py").read_text()
+    text = Path("app/services/trading/robinhood_exit_execution.py").read_text(encoding="utf-8")
     lines = text.splitlines()
     call_lines = [
         i
@@ -102,7 +102,7 @@ def test_robinhood_sell_event_writes_are_committed():
 
 def test_robinhood_sell_event_write_failures_rollback():
     """A failed sell-event audit write should not poison the DB session."""
-    text = Path("app/services/trading/robinhood_exit_execution.py").read_text()
+    text = Path("app/services/trading/robinhood_exit_execution.py").read_text(encoding="utf-8")
     lines = text.splitlines()
     call_lines = [
         i

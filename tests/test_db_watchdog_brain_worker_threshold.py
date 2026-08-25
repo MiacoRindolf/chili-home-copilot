@@ -19,7 +19,7 @@ def test_brain_worker_default_threshold_is_now_600():
     """Source guard: the env-var default for the brain-worker kill
     threshold is 600s (down from 1800s). Pinning the value catches a
     future revert."""
-    src = (REPO / "app/services/db_watchdog.py").read_text()
+    src = (REPO / "app/services/db_watchdog.py").read_text(encoding="utf-8")
     # Find the bw_kill_sec assignment.
     idx = src.find("bw_kill_sec = _env_int")
     assert idx > 0

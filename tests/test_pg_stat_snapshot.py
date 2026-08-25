@@ -44,7 +44,7 @@ def test_snapshot_writes_file_and_returns_metadata(tmp_path, monkeypatch):
     assert result["rows_captured"] == 2
     written = Path(result["path"])
     assert written.exists()
-    content = written.read_text()
+    content = written.read_text(encoding="utf-8")
     assert "# pg_stat_activity snapshot" in content
     assert "pid=11111" in content
     assert "pid=22222" in content
@@ -54,28 +54,28 @@ def test_snapshot_writes_file_and_returns_metadata(tmp_path, monkeypatch):
 def test_snapshot_filter_uses_chili_prefix():
     """Source guard: query filter is `application_name LIKE 'chili%'`
     so foreign apps don't pollute the snapshot."""
-    src = (REPO / "app/services/trading/cron_jobs/pg_stat_snapshot.py").read_text()
+    src = (REPO / "app/services/trading/cron_jobs/pg_stat_snapshot.py").read_text(encoding="utf-8")
     assert "application_name LIKE 'chili%'" in src
 
 
 def test_snapshot_top_30_by_held_s():
     """Source guard: ORDER BY held_s DESC + LIMIT 30 so the slowest
     sessions land first."""
-    src = (REPO / "app/services/trading/cron_jobs/pg_stat_snapshot.py").read_text()
+    src = (REPO / "app/services/trading/cron_jobs/pg_stat_snapshot.py").read_text(encoding="utf-8")
     assert "ORDER BY held_s DESC" in src
     assert "LIMIT 30" in src
 
 
 def test_cron_registration_exists():
     """Source guard: 5-minute IntervalTrigger registration."""
-    src = (REPO / "app/services/trading_scheduler.py").read_text()
+    src = (REPO / "app/services/trading_scheduler.py").read_text(encoding="utf-8")
     assert 'id="pg_stat_snapshot"' in src
     assert "_run_pg_stat_snapshot_job" in src
     assert "IntervalTrigger(minutes=5)" in src
 
 
 def test_wrapper_uses_with_sessionlocal():
-    src = (REPO / "app/services/trading_scheduler.py").read_text()
+    src = (REPO / "app/services/trading_scheduler.py").read_text(encoding="utf-8")
     idx = src.find("def _run_pg_stat_snapshot_job")
     assert idx > 0
     body = src[idx:idx + 1200]
@@ -83,6 +83,6 @@ def test_wrapper_uses_with_sessionlocal():
 
 
 def test_module_uses_absolute_imports():
-    src = (REPO / "app/services/trading/cron_jobs/pg_stat_snapshot.py").read_text()
+    src = (REPO / "app/services/trading/cron_jobs/pg_stat_snapshot.py").read_text(encoding="utf-8")
     # No 4-dot relative imports.
     assert "from ....db" not in src

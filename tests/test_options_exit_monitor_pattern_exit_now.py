@@ -30,9 +30,9 @@ def test_three_lanes_import_shared_helper():
     """Source guard: equity, crypto, and options all reference the
     shared ``_exit_monitor_common`` module. Catches the next time
     someone re-introduces a local copy."""
-    equity_src = (REPO / "app/services/trading/auto_trader_monitor.py").read_text()
-    crypto_src = (REPO / "app/services/trading/crypto/exit_monitor.py").read_text()
-    options_src = (REPO / "app/services/trading/options/exit_monitor.py").read_text()
+    equity_src = (REPO / "app/services/trading/auto_trader_monitor.py").read_text(encoding="utf-8")
+    crypto_src = (REPO / "app/services/trading/crypto/exit_monitor.py").read_text(encoding="utf-8")
+    options_src = (REPO / "app/services/trading/options/exit_monitor.py").read_text(encoding="utf-8")
 
     for src, label in [
         (equity_src, "equity (auto_trader_monitor)"),
@@ -66,7 +66,7 @@ def test_options_no_longer_grep_clean():
     """Phase 1 found ZERO references; Phase 3 added them. Pin that
     options now references the shared module + handles the
     pattern_exit_now branch."""
-    options_src = (REPO / "app/services/trading/options/exit_monitor.py").read_text()
+    options_src = (REPO / "app/services/trading/options/exit_monitor.py").read_text(encoding="utf-8")
     assert "latest_monitor_decisions_by_trade" in options_src
     assert "fresh_monitor_exit_meta" in options_src
     assert "pattern_exit_now" in options_src
@@ -268,7 +268,7 @@ def test_options_exit_quote_snapshot_uses_contract_metadata(monkeypatch):
 
 
 def test_options_exit_submission_persists_pending_context_and_finalizes_filled():
-    options_src = (REPO / "app/services/trading/options/exit_monitor.py").read_text()
+    options_src = (REPO / "app/services/trading/options/exit_monitor.py").read_text(encoding="utf-8")
 
     assert "_finalize_filled_exit" in options_src
     assert "pending_exit_status = :state" in options_src
@@ -295,7 +295,7 @@ def test_options_exit_user_scope_resolves_autotrader_then_brain(monkeypatch):
 
 
 def test_options_exit_pass_is_scoped_to_configured_autopilot_user():
-    options_src = (REPO / "app/services/trading/options/exit_monitor.py").read_text()
+    options_src = (REPO / "app/services/trading/options/exit_monitor.py").read_text(encoding="utf-8")
 
     assert "skipped_no_user_scope" in options_src
     assert "chili_autotrader_user_id" in options_src
@@ -449,7 +449,7 @@ def test_options_exit_rejects_nonfinite_quote_prices_as_untrusted():
 
 
 def test_options_exit_never_defaults_contract_quantity_to_one():
-    options_src = (REPO / "app/services/trading/options/exit_monitor.py").read_text()
+    options_src = (REPO / "app/services/trading/options/exit_monitor.py").read_text(encoding="utf-8")
 
     assert "quantity=int(t.quantity or 0) or 1" not in options_src
     assert "refusing to synthesize quantity=1" in options_src
@@ -488,7 +488,7 @@ def test_case4_native_dte_trigger_wins():
     Source-level guard: the assignment ``reason = "pattern_exit_now"``
     must be inside an ``if not reason:`` block so native triggers
     take precedence."""
-    options_src = (REPO / "app/services/trading/options/exit_monitor.py").read_text()
+    options_src = (REPO / "app/services/trading/options/exit_monitor.py").read_text(encoding="utf-8")
     idx = options_src.find('reason = "pattern_exit_now"')
     assert idx > 0, "pattern_exit_now assignment must exist in options lane"
     surrounding = options_src[max(0, idx - 800):idx]
@@ -517,7 +517,7 @@ def test_case5_pending_exit_reason_canonical_pattern_exit_now():
     """Source guard: pending_exit_reason set by the lane is the
     canonical 'pattern_exit_now' literal, NOT a concatenated
     audit-detail string. Audit detail goes in the log line."""
-    options_src = (REPO / "app/services/trading/options/exit_monitor.py").read_text()
+    options_src = (REPO / "app/services/trading/options/exit_monitor.py").read_text(encoding="utf-8")
     # The reason variable is set to "pattern_exit_now" (no concat).
     assert 'reason = "pattern_exit_now"' in options_src
     # The log line for monitor-driven exits includes the audit metadata.
@@ -570,7 +570,7 @@ def test_options_call_site_gates_monitor_on_abstained_implausible():
     ``should_consult_monitor_after_refusal`` helper allows it. Catches
     future refactors that drop the gate or re-introduce an inline copy.
     """
-    options_src = (REPO / "app/services/trading/options/exit_monitor.py").read_text()
+    options_src = (REPO / "app/services/trading/options/exit_monitor.py").read_text(encoding="utf-8")
     assert "abstained_implausible" in options_src
     # After f-exit-monitor-quote-guard-unification (2026-05-06), the
     # gate routes through the shared helper. The helper is imported

@@ -31,7 +31,7 @@ def test_emit_backtest_completed_outcome_exists():
 # ---------------------------------------------------------------------------
 
 def test_completion_site_references_emit():
-    src = (REPO / "app/services/trading/backtest_queue_worker.py").read_text()
+    src = (REPO / "app/services/trading/backtest_queue_worker.py").read_text(encoding="utf-8")
     assert "emit_backtest_completed_outcome" in src, (
         "backtest_queue_worker.py must reference emit_backtest_completed_outcome"
     )
@@ -49,13 +49,13 @@ def test_completion_site_references_emit():
 # ---------------------------------------------------------------------------
 
 def test_cpcv_gate_still_subscribes_to_backtest_completed():
-    src = (REPO / "app/services/trading/brain_work/dispatcher.py").read_text()
+    src = (REPO / "app/services/trading/brain_work/dispatcher.py").read_text(encoding="utf-8")
     assert "\"backtest_completed\"" in src, (
         "dispatcher.py must still dispatch backtest_completed events"
     )
     src2 = (
         REPO / "app/services/trading/brain_work/handlers/cpcv_gate.py"
-    ).read_text()
+    ).read_text(encoding="utf-8")
     assert "handle_backtest_completed" in src2
     assert "promotion_gate_passed" in src2
 

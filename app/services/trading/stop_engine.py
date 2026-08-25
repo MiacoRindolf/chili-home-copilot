@@ -1371,6 +1371,35 @@ def _apply_stop_to_trade(db: Session, trade, result: StopDecisionResult) -> None
     the engine will never WIDEN the stop — only tighten it.  This preserves
     adjustments made by the pattern position monitor.
     """
+    # ⚠️ HUWAG MAG-ENROLL SA PAMAMAGITAN NG PAGSULAT (2026-08-24).
+    #
+    # Ang `stop_loss` at `take_profit` ay DALAWA sa limang OR-branch ng
+    # `autopilot_scope.live_autopilot_trade_filter()` -- ang mismong scope na
+    # ginagamit ng `auto_trader_monitor.py:603` para pumili ng mga row na
+    # IBEBENTA nito sa merkado (`:854 qty = float(t.quantity or 0)` -- ang
+    # BUONG posisyon).
+    #
+    # Ang function na ito ay naaabot mula sa BUHAY na 5-minutong
+    # `broker_position_price_monitor`, na ang `evaluate_all` ay sinasala LAMANG
+    # sa `Trade.status == "open"` -- walang lane, walang pattern-link. Kaya ang
+    # pagsulat ng stop sa isang orphan / broker-adopted / manu-manong row ay
+    # naglilipat nito PAPASOK sa live sell scope, bilang epekto.
+    #
+    # ⚠️ Ang #1145 ay nag-bound sa HALAGA na isinusulat dito (para hindi
+    # bumagsak ang R denominator). HINDI nito pinigilan ang ENROLLMENT. Ito ang
+    # natitirang kalahati, at kapatid ng #1149 na nagsara sa
+    # scan_pattern_id / related_alert_id na mga branch.
+    #
+    # Ang attribution-style na pag-update ay nananatili para sa bawat row na
+    # PINAMAMAHALAAN NA; ang hindi pinamamahalaan ay hindi na magiging
+    # pinamamahalaan dahil lang dumaan ang isang sweep.
+    # Lokal na import: ang module na ito ay iniiwasan ang mga import cycle,
+    # at ang natitirang bahagi ng file ay ganito rin ang ginagawa.
+    from .autopilot_scope import trade_is_in_live_autopilot_scope
+
+    if not trade_is_in_live_autopilot_scope(trade):
+        return
+
     changed = False
     if result.new_stop is not None and result.new_stop != trade.stop_loss:
         is_pattern_linked = getattr(trade, "related_alert_id", None) is not None
@@ -1724,7 +1753,7 @@ def _result_has_trade_state_change(trade, result: StopDecisionResult) -> bool:
 
 def _is_option_trade_for_stop_engine(trade: Any) -> bool:
     try:
-        from .autopilot_scope import is_option_trade
+        from .autopilot_scope import is_option_trade, trade_is_in_live_autopilot_scope
 
         return bool(is_option_trade(trade))
     except Exception:

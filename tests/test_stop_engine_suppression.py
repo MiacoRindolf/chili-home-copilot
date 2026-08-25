@@ -394,7 +394,7 @@ def test_repeated_stop_hit_has_no_trade_state_change():
 
 
 def test_suppression_is_checked_before_stop_decision_insert():
-    text = (ROOT / "app/services/trading/stop_engine.py").read_text()
+    text = (ROOT / "app/services/trading/stop_engine.py").read_text(encoding="utf-8")
     body = text[text.index("def evaluate_all("):]
 
     assert body.index("result_suppressed = _should_suppress_alert") < body.index(

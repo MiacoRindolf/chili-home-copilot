@@ -975,7 +975,7 @@ def test_paper_branch_does_not_call_shadow_helper():
     must not reference _maybe_open_paper_shadow. If a future edit adds
     it there, shadow + paper-direct would create duplicate paper trades
     for the same alert."""
-    src = (REPO / "app/services/trading/auto_trader.py").read_text()
+    src = (REPO / "app/services/trading/auto_trader.py").read_text(encoding="utf-8")
     paper_marker = src.find("\n    # Paper\n")
     assert paper_marker > 0, "expected '# Paper' marker"
     paper_branch = src[paper_marker:]
@@ -1540,7 +1540,7 @@ def test_live_branch_calls_shadow_at_all_three_terminal_points():
     branches in the live path must each precede a
     `_maybe_open_paper_shadow(...)` call. Catches accidental future
     deletion of one of the three wirings."""
-    src = (REPO / "app/services/trading/auto_trader.py").read_text()
+    src = (REPO / "app/services/trading/auto_trader.py").read_text(encoding="utf-8")
     # All three shadow calls in the live branch carry one of these
     # decision strings.
     for dec in ("placed", "blocked_pdt", "blocked_no_order_id"):
