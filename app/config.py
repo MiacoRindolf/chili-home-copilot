@@ -6868,6 +6868,35 @@ class Settings(BaseSettings):
     # ina-arm bilang LONG tuwing 84 segundo mula 08:12 hanggang 14:48.
     # ⚠️ Hindi nito ipinapataw ang +10% na palapag sa RVOL na daan; ang
     # ipinagbabawal lang ay ang BUMABAGSAK. Walang alam na direksyon = walang pagbabago.
+    # ── IQFEED DEPTH EXECUTION STAND-IN (2026-08-25) ──
+    # Ang docstring ng get_execution_bbo ay nagsasabing "IQFeed rows still cannot
+    # stand in: they carry no quote-event clock at all". TOTOO IYON NOON. Idinagdag
+    # ng migration 371 ang provider_at sa iqfeed_depth_snapshots, pinar-parse mula sa
+    # SARILING date+time field ng L2 line -- tunay na quote-event clock -- at ang
+    # bridge ay nagsusulat ng MAS LUMANG binti ng pares.
+    # NASUKAT (buhay na RTH, bounded 5 min): bridge lag p50 7.03s; 102 sa 121 na
+    # simbolo (84%) ay may quote sa loob ng 60s na entry ceiling; median edad 8.8s.
+    # Ang account ay may karapatan sa IEX LAMANG; ang IQFeed ay 26-39 venue.
+    # ⚠️ ENTRY-ONLY: nakikita lang ito ng tumatawag na nag-opt in sa allow_stand_in --
+    # hindi kailanman ang exit. Ang mas malawak na pinagsamang bid ay hahatol na
+    # marketable ang isang exit sa presyong hindi kayang abutin ng venue.
+    chili_alpaca_execution_bbo_iqfeed_depth_fallback_enabled: bool = Field(
+        default=True,
+        validation_alias=AliasChoices("CHILI_ALPACA_EXECUTION_BBO_IQFEED_DEPTH_FALLBACK_ENABLED"),
+        description="Allow an IQFeed L2 depth row (quote-event clocked via migration 371 provider_at) to stand in for the pre-submit BBO, as the THIRD tier after the direct Alpaca quote and the Massive SIP row. ENTRY-ONLY: only callers passing allow_stand_in see it. false restores the two-tier behaviour byte-identically.",
+    )
+    # ⚠️ SARILING CEILING, hindi ang 2.0s na cap ng direktang quote. Ang tape na ito
+    # ay may 7s na median na bridge lag, kaya ang pagsukat dito sa cap ng direktang
+    # quote ay nangangahulugang hindi ito kailanman papuputok -- ang authority-aware
+    # ceiling na aral na natutunan na sa Massive SIP na daan. Mas mahigpit pa rin
+    # kaysa sa 60s na entry ceiling na ipinapatupad ng tumatawag.
+    chili_alpaca_execution_bbo_iqfeed_depth_max_age_seconds: float = Field(
+        default=20.0,
+        ge=0.0,
+        le=60.0,
+        validation_alias=AliasChoices("CHILI_ALPACA_EXECUTION_BBO_IQFEED_DEPTH_MAX_AGE_SECONDS"),
+        description="Hard ceiling (seconds) on the IQFeed depth stand-in's own quote-event age. BOTH the provider clock and the local receive clock must independently sit inside it. 20s sits well above the measured 8.8s median symbol age and well under the 60s entry ceiling. 0 disables the tier.",
+    )
     chili_momentum_ross_rvol_requires_nonnegative_move: bool = Field(
         default=True,
         validation_alias=AliasChoices("CHILI_MOMENTUM_ROSS_RVOL_REQUIRES_NONNEGATIVE_MOVE"),
