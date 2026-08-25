@@ -20178,6 +20178,40 @@ def _live_tick_bbo(
             product_id,
             max_age_seconds=max_age_seconds,
         )
+        # ⚠️ STAND-IN FALLBACK, MAHIGPIT MUNA (2026-08-25).
+        #
+        # Ang direktang Alpaca BBO ay WALANG PREMARKET BOOK. Sinukat sa buhay na
+        # trade (BDRX, session 15344): 1,625 sunod-sunod na tick ang naharang na
+        # may `execution_bbo_unavailable`, `age_seconds` 47,021 -> 51,737, at
+        # `provider_event_at_utc` na nakapirmi sa close ng nakaraang araw. Ang
+        # `tick_live_session` ay bumabalik dito -- BAGO ang HWM ratchet, bago ang
+        # held-state branch, bago ang exit ladder.
+        #
+        # Bunga: nanatiling 1.51 ang `high_water_mark` habang umabot ang bid sa
+        # 1.71 (+4.0R). Naniniwala ang engine na hindi kailanman naging berde ang
+        # posisyon, kaya `peak_r = 0.0` magpakailanman at ZERO exit event ang
+        # pumutok sa buong 75-minutong hold.
+        #
+        # ⚠️ Hindi kawalan ng datos ito. Sa MISMONG sandali ng unang harang, ang
+        # kaparehong DB ay may hawak na BDRX row sa `iqfeed_depth_snapshots` na
+        # ang `provider_at` ay 7.1 SEGUNDO ang edad. Source-routing artifact ito.
+        #
+        # ANG DISENYO: mahigpit pa rin ang UNA. Kapag may buhay na direktang book
+        # -- ibig sabihin RTH -- iyon ang mananalo at walang nagbabago. Ang
+        # stand-in ay ginagamit LAMANG kapag walang naibigay ang mahigpit na
+        # landas, na sa praktika ay premarket/after-hours lamang. Kaya hindi
+        # nagluluwag ng anuman ang pagbabagong ito sa regular session; binibigyan
+        # lang nito ng PANINGIN ang lane sa oras na kasalukuyan itong bulag.
+        if tick is None:
+            tick, snapshot = _final_entry_bbo(
+                adapter,
+                product_id,
+                max_age_seconds=max_age_seconds,
+                allow_stand_in=True,
+                stand_in_max_age_seconds=float(getattr(
+                    settings,
+                    "chili_momentum_held_stand_in_max_age_seconds", 15.0) or 15.0),
+            )
         return tick, getattr(tick, "freshness", None), snapshot
 
     tick, freshness = adapter.get_best_bid_ask(product_id)
