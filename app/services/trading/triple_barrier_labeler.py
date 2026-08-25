@@ -17,7 +17,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass, field
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, timedelta, timezone
 from typing import Any, Iterable, Sequence
 
 from sqlalchemy import func, text
@@ -252,16 +252,42 @@ def _fetch_forward_bars(
 
     out: list[dict[str, Any]] = []
     for b in bars or []:
-        # market_data returns dicts with ISO 'date' or 'timestamp' fields
-        raw_date = b.get("date") or b.get("timestamp") or b.get("t")
-        try:
-            bar_date = (
-                datetime.fromisoformat(str(raw_date)[:10]).date()
-                if raw_date is not None
-                else None
-            )
-        except Exception:
-            bar_date = None
+        # ⚠️ ANG KEY AY "time", AT ITO AY EPOCH INT (naitama 2026-08-24).
+        #
+        # Ang komentong nandito dati ay nagsasabing "market_data returns dicts
+        # with ISO 'date' or 'timestamp' fields". DALAWANG beses itong mali:
+        #
+        #     aktuwal na keys : ['close','high','low','open','time','volume']
+        #     aktuwal na halaga: time=1786680000  (epoch SECONDS, int)
+        #
+        # Wala ang 'date'/'timestamp'/'t', at kahit basahin mo ang 'time' ay
+        # sumasabog ang `datetime.fromisoformat("1786680000")`. Alinman sa
+        # dalawang kabiguan ay nagbibigay ng bar_date=None, at itinatapon ng
+        # `continue` sa ibaba ang BAWAT bar -- kaya LAGING [] ang helper na ito.
+        #
+        # Sinukat 2026-08-24: `requested: 500, written: 0, missing_data: 500`
+        # kada takbo, ~259 segundo ng DB at API churn kada oras. Ang
+        # `promotion_gate.py:395` ay ibinabagsak ang missing_data, kaya
+        # tumatakbo ito nang WALANG triple-barrier na ebidensya kailanman.
+        raw_date = (
+            b.get("time")
+            or b.get("date")
+            or b.get("timestamp")
+            or b.get("t")
+        )
+        bar_date = None
+        if raw_date is not None:
+            try:
+                if isinstance(raw_date, (int, float)) and not isinstance(raw_date, bool):
+                    # epoch: segundo, o milisegundo para sa ibang provider
+                    epoch = float(raw_date)
+                    if epoch > 1e11:
+                        epoch /= 1000.0
+                    bar_date = datetime.fromtimestamp(epoch, tz=timezone.utc).date()
+                else:
+                    bar_date = datetime.fromisoformat(str(raw_date)[:10]).date()
+            except (ValueError, OSError, OverflowError):
+                bar_date = None
         if bar_date is None or bar_date <= from_date:
             continue
         out.append(b)
