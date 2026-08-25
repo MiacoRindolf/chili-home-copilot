@@ -6847,6 +6847,19 @@ def start_scheduler():
                     replace_existing=True,
                     max_instances=1,
                     coalesce=True,
+                    # ⚠️ KUNG WALA ITO AY UNANG PUPUTOK LAMANG ITO PAGKARAAN NG
+                    # 4 NA ORAS. Ang IntervalTrigger na walang start_date ay
+                    # kumukuha ng "ngayon" sa oras ng paggawa, at ang unang
+                    # pagputok ay start_date + interval -- hindi ang startup.
+                    # Kaya BINUBURA NG BAWAT RESTART ANG ORASAN: sa isang araw ng
+                    # rebuild na mas madalas kaysa 4 na oras ay HINDI ITO
+                    # TUMATAKBO KAILANMAN. Tatlong beses na-restart ang scheduler
+                    # noong gabi ng 2026-08-24, at 0 pa rin ang laman ng
+                    # trading_triple_barrier_labels kinaumagahan -- makalipas ang
+                    # #1148, na siyang nag-ayos ng labeler para makapagsulat ito.
+                    # 52 sa 61 na IntervalTrigger dito ang nagtatakda nito na;
+                    # ito ang isa sa dalawang naiwan.
+                    next_run_time=datetime.now() + timedelta(seconds=90),
                 )
 
                 # f-add-pg-stat-snapshot-logger (2026-05-06): 5-minute
@@ -7504,6 +7517,11 @@ def start_scheduler():
                 name="Pattern monitor decision review (hourly)",
                 replace_existing=True,
                 max_instances=1,
+                # Tulad ng sa itaas: kung wala ito ay hindi tumatakbo ang unang
+                # oras pagkatapos ng bawat restart. Purong backfill ito ng
+                # price_after_1h/4h at was_beneficial -- walang order -- kaya
+                # ligtas itong tumakbo malapit sa startup.
+                next_run_time=datetime.now() + timedelta(seconds=110),
             )
 
         if include_web_light:
