@@ -20847,6 +20847,23 @@ def _micro_bar_df_from_session(db, symbol: str, *, bar_seconds: int, lookback_mi
     return df
 
 
+def _micropull_bar_seconds() -> int:
+    """Ang micro-bar width, mula sa ISANG knob.
+
+    ⚠️ DATI ITONG NAKA-HARDCODE SA 15 sa ilang call site habang ang knob ay
+    umiiral na. Ang isang naka-hardcode na kopya ay tahimik na naghihiwalay sa
+    sandaling baguhin ng operator ang knob -- at iyon ang eksaktong nangyari nang
+    ang default ay maging 10: ang dalawang site na ito ay mananatili sana sa 15
+    habang ang lahat ng iba ay lumipat na.
+    """
+    try:
+        raw = getattr(settings, "chili_momentum_micropull_bar_seconds", 10)
+        value = int(raw if raw is not None else 10)
+    except Exception:
+        return 10
+    return max(5, min(30, value))
+
+
 def _build_micro_bar_df(db, symbol: str, *, bar_seconds: int, lookback_minutes: float = 30.0, meta: dict | None = None):
     """15s MICRO-PULLBACK (2026-06-15, "1m too slow"): build an OHLC micro-bar df
     from the densified tick tape (``momentum_nbbo_spread_tape`` rows for ``symbol``,
@@ -21087,7 +21104,7 @@ def _latest_rvol(db, symbol: str) -> float | None:
     try:
         from ..indicator_core import compute_all_from_df as _rv_compute
 
-        _df = _build_micro_bar_df(db, symbol, bar_seconds=15)
+        _df = _build_micro_bar_df(db, symbol, bar_seconds=_micropull_bar_seconds())
         if _df is not None and not getattr(_df, "empty", True) and len(_df) >= 10:
             arrays = _rv_compute(_df, needed={"volume_ratio"})
             vr = arrays.get("volume_ratio") or []
@@ -38680,7 +38697,7 @@ def tick_live_session(
                 )) and not le.get("suspected_halt_since_utc"):
                     _sf_bucket = int(_utcnow_aware().timestamp() // 15)
                     if le.get("l10_sf_bucket") != _sf_bucket:
-                        _mb15 = _build_micro_bar_df(db, sess.symbol, bar_seconds=15)
+                        _mb15 = _build_micro_bar_df(db, sess.symbol, bar_seconds=_micropull_bar_seconds())
                         _sf_last = _sf_prev = _sf_amp = None
                         _sf_day_hi = _sf_day_lo = None
                         if _mb15 is not None and len(_mb15) >= 3:
