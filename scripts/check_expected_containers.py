@@ -67,8 +67,30 @@ def _run(args: list[str]) -> str:
     return out.stdout or ""
 
 
+# Ang isang serbisyo ay maaaring tumakbo sa ilalim ng KAHALILING pangalan. Noong
+# 2026-08-25 ay pinalitan ang patay na ``chili-clean-recovery-broker-sync`` ng
+# ``chili-broker-sync-w0`` (parehong image at env, isang flag lang ang binago).
+# Kung wala ito ay iuulat ng tseke ang serbisyong BUHAY bilang patay -- at ang
+# bantay na paulit-ulit na nagkakamali ay sinasanay ang lahat na huwag ito
+# pansinin. Iyon nga ang paraan kung paano namatay nang pitong linggo ang
+# orihinal nang walang nakapansin.
+ALIASES: dict[str, tuple[str, ...]] = {
+    "chili-clean-recovery-broker-sync": ("chili-broker-sync-w0",),
+}
+
+
 def running() -> set[str]:
     return {n.strip() for n in _run(["docker", "ps", "--format", "{{.Names}}"]).splitlines() if n.strip()}
+
+
+def _is_up(name: str, up: set[str]) -> str | None:
+    """Ibinabalik ang PANGALANG aktuwal na tumatakbo, o None kung wala."""
+    if name in up:
+        return name
+    for alt in ALIASES.get(name, ()):
+        if alt in up:
+            return alt
+    return None
 
 
 def status_of(name: str) -> str:
@@ -82,7 +104,9 @@ def main(argv: list[str] | None = None) -> int:
     args = ap.parse_args(argv)
 
     up = running()
-    missing = [(n, why) for n, why in EXPECTED.items() if n not in up]
+    resolved = {n: _is_up(n, up) for n in EXPECTED}
+    missing = [(n, why) for n, why in EXPECTED.items() if resolved[n] is None]
+    substituted = [(n, resolved[n]) for n in EXPECTED if resolved[n] not in (None, n)]
 
     if args.json:
         print(json.dumps({
@@ -95,6 +119,11 @@ def main(argv: list[str] | None = None) -> int:
             print(f"  [PATAY ] {name}")
             print(f"           {status_of(name)}")
             print(f"           nawawala: {why}")
+        for name, actual in substituted:
+            # Ipakita ang kapalit nang tahasan: ang tahimik na pagtanggap ay
+            # magtatago ng pagkakaiba ng NAKA-DEPLOY at NAKASULAT.
+            print(f"  [kapalit] {name}")
+            print(f"           tumatakbo bilang: {actual}")
         if not missing:
             print("  lahat ay nasa itaas")
 
