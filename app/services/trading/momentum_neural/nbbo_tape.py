@@ -906,8 +906,78 @@ def print_recency_state(
         median_gap = float(row[2]) if row[2] is not None else None
     except (TypeError, ValueError):
         median_gap = None
+    # ⚠️ ANG HALT AY RELATIBONG KATAHIMIKAN, HINDI ABSOLUTONG EDAD (2026-08-26).
+    #
+    # Ang `last_age` sa itaas ay sinusukat mula sa WALL CLOCK papunta sa
+    # pinakabagong print. Pinagsasama niyon ang dalawang magkaibang bagay:
+    #
+    #     tumigil ang simbolong ito        (ang gusto nating makita)
+    #     nahuhuli ang buong PIPELINE      (ang aktwal na nasusukat)
+    #
+    # NASUKAT SA BUHAY (2026-08-26 14:27Z, RTH, habang 409s ang likod ng tape):
+    #
+    #     simbolo   laban sa WALL   laban sa FRONTIER
+    #     CRE            408.7            0.0
+    #     DAIC           408.8            0.0
+    #     YYGH           409.0            0.3
+    #     RDIB           409.2            0.5
+    #     MSS            409.6            0.9
+    #     XPON           582.4          173.7
+    #     VCIG           612.1          203.4
+    #
+    # Laban sa wall clock ay LAHAT mukhang 400s tahimik at LAHAT ay minarkahang
+    # naka-halt -- anim na pangalan sa loob ng 7 segundo sa isa't isa. Laban sa
+    # frontier ay lima sa kanila ang AKTIBONG NAGPI-PRINT (0.0-0.9s) at dalawa
+    # lang ang tunay na tahimik. 93 sa 130 na `live_blocked_by_risk` ngayong
+    # umaga ay `suspected_halt_active` -- halos lahat ay peke.
+    #
+    # ⚠️ PAREHONG BUG NA NAAYOS NA SA `tape_ingest_recency_age_s` (2026-08-24),
+    # kung saan ang parehong pagsasama ng WRITER lag at MARKET na katahimikan ay
+    # sumupil sa halt inference sa DALAWANG TUNAY na LULD halt. Ang landas na ito
+    # ay hindi naabot noon.
+    #
+    # ⚠️ HINDI ITO FAIL-OPEN. Kung ang frontier MISMO ay lampas na sa
+    # `pipeline_dead_seconds` ay hindi na lang nahuhuli ang pipeline -- hindi na
+    # ito mapagkakatiwalaan, at UMAABSTAIN tayo (None), na siyang parehong
+    # kontrata ng "walang tape, walang hinuha".
+    _frontier_age: Optional[float] = None
+    _pipeline_lag: Optional[float] = None
+    try:
+        from app.config import settings as _hset
+
+        if bool(getattr(_hset, "chili_momentum_halt_print_frontier_relative", True)):
+            with db.begin_nested():
+                _fr = db.execute(
+                    text(
+                        "SELECT max(observed_at) FROM iqfeed_trade_ticks "
+                        "WHERE observed_at >= :gap_since AND observed_at <= :now_naive"
+                    ),
+                    {"gap_since": gap_since, "now_naive": now_naive},
+                ).scalar()
+            if _fr is not None:
+                _pipeline_lag = float((now_naive - _fr).total_seconds())
+                _dead = float(getattr(
+                    _hset, "chili_momentum_halt_print_pipeline_dead_seconds", 900.0
+                ) or 900.0)
+                if _pipeline_lag > _dead:
+                    # Hindi na mapagkakatiwalaan ang pipeline -- walang hinuha.
+                    return None
+                # Ang edad na nakikita ng frontier ay hindi kailanman negatibo.
+                _frontier_age = max(0.0, last_age - max(0.0, _pipeline_lag))
+    except Exception:
+        # Ang isang nabigong frontier read ay hindi dapat magpabago ng gawi;
+        # bumabalik tayo sa sukat na laban sa wall clock.
+        _frontier_age = None
+
     return {
-        "last_print_age_s": last_age,
+        "last_print_age_s": (
+            _frontier_age if _frontier_age is not None else last_age
+        ),
+        # Ang DALAWA ay dinadala para makita ng operator ang pagkakaiba na siyang
+        # buong punto -- ang isang numero lamang ang nagtago nito nang ilang linggo.
+        "last_print_age_wall_s": last_age,
+        "pipeline_lag_s": _pipeline_lag,
+        "frontier_relative": _frontier_age is not None,
         "recent_print_count": recent_n,
         "median_gap_s": median_gap,
     }
