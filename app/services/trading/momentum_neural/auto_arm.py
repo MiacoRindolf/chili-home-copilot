@@ -2679,6 +2679,76 @@ def _top_gainer_concentration_blocks(
     return True, "not_top_gainer"
 
 
+def _empty_board_diagnosis(
+    db,
+    *,
+    as_of_utc=None,
+    viability_max_age_override: float | None = None,
+    only_symbols=None,
+) -> tuple[str, dict]:
+    """BAKIT walang laman ang board -- freshness ba o eligibility?
+
+    ⚠️ ANG DATING ISANG PANGALAN AY NAGSISINUNGALING SA TATLO SA APAT NA KASO.
+    Ang `_fresh_live_eligible_candidates` ay may TATLONG kondisyon sa IISANG query
+    (scope, live_eligible, freshness_ts >= cutoff). Kapag walang laman ang resulta
+    ay iniuulat natin ang `no_fresh_live_eligible` -- na parang STALENESS ang
+    problema. Kadalasan ay hindi.
+
+    NASUKAT NANG BUHAY (2026-08-26, premarket, YYGH):
+        [auto_arm] symbols=['YYGH'] armed=0 skipped=no_fresh_live_eligible
+        viability row ng YYGH: 20 SEGUNDO ang tanda  -- SARIWA
+        live_eligible = f                            -- ito ang tunay na dahilan
+
+    Ang pangalan ay nagturo sa akin ng isang oras na paghahanap ng staleness gayong
+    eligibility pala. Ang bawat magbabasa ng log na iyon ay malilinlang din.
+
+    Nagbabalik ng (reason, counts). Ang bilang ay ISINASAMA sa telemetry kaya
+    nakikita ang HUGIS ng kakulangan, hindi lang ang pangalan nito.
+
+    ⚠️ TUMATAKBO LAMANG ITO SA WALANG-LAMAN NA DAAN -- ang bihira at pang-diagnose
+    na sangay -- kaya dalawang COUNT lang ang gastos, at hindi sa mainit na daan.
+    """
+    from datetime import timedelta as _td
+
+    from sqlalchemy import func as _sa_func
+
+    counts = {"fresh_rows": None, "eligible_rows": None}
+    try:
+        max_age = float(
+            getattr(settings, "chili_momentum_risk_viability_max_age_seconds", 600.0) or 600.0
+        )
+        if viability_max_age_override is not None:
+            max_age = min(max_age, float(viability_max_age_override))
+        cutoff = _decision_as_of_naive_utc(as_of_utc) - _td(seconds=max_age)
+
+        def _count(*conds):
+            q = db.query(_sa_func.count(MomentumSymbolViability.id)).filter(
+                MomentumSymbolViability.scope == "symbol", *conds
+            )
+            if only_symbols:
+                q = q.filter(MomentumSymbolViability.symbol.in_(sorted(only_symbols)))
+            return int(q.scalar() or 0)
+
+        fresh = _count(MomentumSymbolViability.freshness_ts >= cutoff)
+        eligible = _count(MomentumSymbolViability.live_eligible.is_(True))
+        counts["fresh_rows"] = fresh
+        counts["eligible_rows"] = eligible
+    except Exception:
+        # Ang diagnosis ay hindi kailanman dapat magpabagsak ng pass. Kung hindi
+        # ito masukat ay ibinabalik natin ang lumang pangalan nang tapat.
+        return "no_fresh_live_eligible", counts
+
+    if fresh == 0 and eligible == 0:
+        return "no_viability_rows", counts
+    if fresh == 0:
+        return "viability_rows_all_stale", counts
+    if eligible == 0:
+        return "none_live_eligible", counts
+    # Parehong may laman ngunit walang tumatawid -- ito ang TANGING kaso kung saan
+    # tumpak ang orihinal na pangalan.
+    return "no_fresh_live_eligible", counts
+
+
 def _fresh_live_eligible_candidates(
     db: Session,
     *,
@@ -5109,7 +5179,14 @@ def run_auto_arm_pass(
     }
     out["scanned"] = len(candidates)
     if not candidates:
-        out["skipped"] = "no_fresh_live_eligible"
+        # Sabihin kung ALIN ang kulang -- freshness o eligibility -- sa halip na
+        # isang pangalang nagsasabi ng "stale" sa isang sariwang hilera.
+        _reason, _counts = _empty_board_diagnosis(
+            db,
+            only_symbols=_scoped_syms,
+        )
+        out["skipped"] = _reason
+        out["board_empty_counts"] = _counts
         return out
     # The board's TOP-2 (hoisted symbol-of-the-day leader + the armed-first it
     # displaced — see _reap_cooldown_blocks TOP-2 KEY, 2026-08-19 YJ miss) are
