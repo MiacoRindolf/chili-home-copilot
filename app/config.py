@@ -4044,6 +4044,22 @@ class Settings(BaseSettings):
             "maikpit para makapagpasya sa patay na libro."
         ),
     )
+    chili_momentum_float_rotation_rvol_override: float = Field(
+        default=1.0, ge=0.0, le=50.0,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_FLOAT_ROTATION_RVOL_OVERRIDE"),
+        description=(
+            "Float rotation (volume / float) kung saan ang RVOL leg ng Ross "
+            "explosiveness floor ay hindi na maituturing na affirmative na "
+            "ebidensya ng KAWALAN ng pagsabog. 0 = patayin ang override "
+            "(gawi bago ang 2026-08-26). Umiiral ito dahil sinukat na "
+            "SISTEMIKONG mali ang `vol_ratio` ng ws_ignition: 2026-08-26 "
+            "11:40Z, LAHAT ng sampung explosive na pangalan ay may vol_ratio "
+            "na malayo sa ilalim ng 5.0 na floor -- kasama ang LBGJ na 0.93 sa "
+            "33.71 na float rotation -- habang ang TANGING pumasa ay ang RDIB "
+            "na may 3,074.05, na basura rin. 1.0 = kahit isang beses na buong "
+            "pag-ikot ng float sa araw na iyon."
+        ),
+    )
     chili_momentum_preentry_direct_max_age_seconds: float = Field(
         default=10.0, ge=1.0, le=60.0,
         validation_alias=AliasChoices("CHILI_MOMENTUM_PREENTRY_DIRECT_MAX_AGE_SECONDS"),
