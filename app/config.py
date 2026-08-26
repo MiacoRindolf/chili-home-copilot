@@ -4044,6 +4044,20 @@ class Settings(BaseSettings):
             "maikpit para makapagpasya sa patay na libro."
         ),
     )
+    chili_broker_dead_refresh_breaker_enabled: bool = Field(
+        default=True,
+        validation_alias=AliasChoices("CHILI_BROKER_DEAD_REFRESH_BREAKER_ENABLED"),
+        description=(
+            "Huwag nang subukan muli ang isang OAuth refresh token na TERMINAL "
+            "nang tinanggihan (`invalid_grant`) hangga't hindi nagbabago ang "
+            "kredensyal. NASUKAT 2026-08-26: 2,439 na tinanggihang refresh sa "
+            "isang log window at 22.4 KADA AUTO-ARM PASS -- humigit-kumulang 20 "
+            "SEGUNDO ng bawat pass na ginugol sa HTTP na garantisadong mabibigo, "
+            "para sa rail na hindi nagpapadala ng order sa lane na ito "
+            "(alpaca_spot / alpaca:paper). Ang mga lumilipas na pagkabigo "
+            "(timeout, 5xx, network) ay muling sinusubukan gaya ng dati."
+        ),
+    )
     chili_momentum_halt_print_frontier_relative: bool = Field(
         default=True,
         validation_alias=AliasChoices("CHILI_MOMENTUM_HALT_PRINT_FRONTIER_RELATIVE"),
