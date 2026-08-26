@@ -4616,6 +4616,23 @@ def run_auto_arm_pass(
     import time as _phase_time
 
     _phase_t0 = _phase_time.monotonic()
+    # ⚠️ PANGALANAN ANG MABAGAL NA HAKBANG (2026-08-26). Ang `board_build` ay
+    # sinusukat bilang ISANG numero, at ang numerong iyon ay umabot sa 237
+    # SEGUNDO laban sa isang 10-segundong cadence (5 SLOW PASS sa 15:28-15:43Z;
+    # p50 ng buong pass = 31s, p90 = 244s). Alam natin KUNG GAANO ito kabagal at
+    # hindi KUNG SAAN. Ang bawat ignition na tumama sa loob ng pass ay
+    # naghihintay ng buong tagal na iyon bago ma-arm -- at ang edge ni Ross ay
+    # nasa unang mga segundo.
+    #
+    # Purong instrumentasyon: walang binabagong daloy, walang bagong tawag.
+    _phase_marks: list[tuple[str, float]] = []
+
+    def _mark(_name: str) -> None:
+        try:
+            _phase_marks.append((_name, _phase_time.monotonic()))
+        except Exception:
+            pass
+
     _phase_board_done: float | None = None
     out: dict[str, Any] = {"checked": 0, "scanned": 0, "armed": 0, "skipped": None}
     # EVERY session this pass actually armed (2026-08-23 arm-wake). ``session_id``
@@ -4705,8 +4722,10 @@ def run_auto_arm_pass(
     # (finalize / expire / stale-live reap) still runs. Risk-reducing: a scoped
     # pass may see FEWER free slots than a full pass, never more.
     reaped = 0
+    _mark("pre_reap")
     if _scoped_syms is None:
         reaped = _reap_stale_watching_sessions(db, user_id=uid, now=pass_as_of)
+    _mark("watching_reaper")
     try:
         _finalized = _finalize_stale_exited_sessions(db, user_id=uid, now=pass_as_of)
         if _finalized:
@@ -4829,6 +4848,7 @@ def run_auto_arm_pass(
             "replay_certifiable": False,
         }
         return out
+    _mark("loss_history")
     _loss_history_entries, _loss_history_meta = _current_live_loss_history
     out["loss_guard_history"] = dict(_loss_history_meta)
     if (
@@ -5173,6 +5193,7 @@ def run_auto_arm_pass(
         )
     else:
         candidates = _fresh_live_eligible_candidates(db, limit=_scan_limit())
+    _mark("board_done")
     _phase_board_done = _phase_time.monotonic()
     out["phase_seconds"] = {
         "board_build": round(_phase_board_done - _phase_t0, 2),
@@ -6031,6 +6052,15 @@ def run_auto_arm_pass(
         if _phase_board_done is not None:
             _phases["gate_loop"] = round(_phase_end - _phase_board_done, 2)
         _phases["total"] = round(_phase_end - _phase_t0, 2)
+        # Ang DELTA sa pagitan ng magkasunod na marka -- ito ang nagpapangalan sa
+        # hakbang na kumakain ng oras, na hindi kayang gawin ng iisang numero.
+        try:
+            _prev_name, _prev_t = "start", _phase_t0
+            for _mname, _mt in _phase_marks:
+                _phases["d_%s" % _mname] = round(_mt - _prev_t, 2)
+                _prev_name, _prev_t = _mname, _mt
+        except Exception:
+            pass
         out["phase_seconds"] = _phases
         if _phases["total"] > 60.0:
             logger.warning(
