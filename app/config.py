@@ -4044,6 +4044,22 @@ class Settings(BaseSettings):
             "maikpit para makapagpasya sa patay na libro."
         ),
     )
+    chili_momentum_prior_day_close_daily_cache: bool = Field(
+        default=True,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_PRIOR_DAY_CLOSE_DAILY_CACHE"),
+        description=(
+            "I-cache ang prior-day close kada (simbolo, araw ng kalakalan) sa "
+            "halip na hayaan itong sumakay sa 30-segundong TTL ng buhay na "
+            "quote. Ang halagang ito ay HINDI nagbabago sa buong araw, pero "
+            "ang bawat pag-expire ay nagpapadala ng `GET /v2/snapshot/...` na "
+            "may `timeout=15` SA LOOB ng entry evaluation. Nahuli ng tape "
+            "replay, na nagbabawal ng network: tick_live_session -> "
+            "red_to_green_confirmation -> _prior_day_close -> get_last_quote "
+            "-> requests.get. Dalawang pinsala: latency sa mainit na daan, at "
+            "ang replay ay hindi deterministiko kaya hindi masusubok ang mga "
+            "pagbabago laban sa tape."
+        ),
+    )
     chili_broker_dead_refresh_breaker_enabled: bool = Field(
         default=True,
         validation_alias=AliasChoices("CHILI_BROKER_DEAD_REFRESH_BREAKER_ENABLED"),
