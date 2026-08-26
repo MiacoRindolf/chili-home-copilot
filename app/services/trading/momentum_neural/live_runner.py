@@ -3331,6 +3331,49 @@ def _strict_alpaca_clock_truth(
     }
 
 
+def _deadman_protection_is_live(sess: Any) -> tuple[bool, dict[str, Any]]:
+    """MAKAKAPUTOK BA TALAGA NGAYON ang broker-side na deadman stop?
+
+    ⚠️ SA PREMARKET, HINDI -- AT SINUKAT ITO SA BUHAY NA POSISYON (2026-08-26).
+
+    Ang deadman ay isinusumite bilang `order_type="stop"`, `time_in_force="gtc"`,
+    `extended_hours=False`. Ang Alpaca ay tumatanggap LAMANG ng `limit` na order
+    sa extended hours, kaya ang isang `stop` ay hinding-hindi lalahok doon: ito
+    ay nakaupo sa `status="new"` at nagiging buhay lamang sa susunod na regular
+    open.
+
+    NASUKAT (session 16534, CDTG):
+
+        11:41:24  live_deadman_stop_placed  {"ok": true, "stop_price": 1.31}
+        11:47Z    broker: sell 191 stop=1.31 status=new ext=False
+                  presyo 1.26 -- LIMA NA SENTIMO SA IBABA NG STOP, hindi pumutok
+
+    ⚠️ ANG PANGANIB AY HINDI ANG INERT NA ORDER -- ITO AY ANG ULAT. Ang event ay
+    nagsasabing `ok: true` na may presyo ng stop, kaya ang bawat magbabasa --
+    tao man o makina -- ay maniniwalang protektado ang posisyon. Sa premarket,
+    ang runner LAMANG ang proteksyon; kapag patay ang runner ay wala talaga.
+
+    Nagbabalik ng (live, evidence). Fail-SUSPICIOUS: kapag hindi maiuri ang
+    session ay iniuulat itong HINDI buhay, dahil ang maling pag-aakalang
+    protektado ang eksaktong pagkakamaling pinipigilan nito.
+    """
+    try:
+        from .market_profile import market_session_now
+
+        _session = str(
+            market_session_now(str(getattr(sess, "symbol", "") or ""), now=_utcnow_aware())
+        ).strip().lower()
+    except Exception:
+        _session = "unknown"
+    return _session == "regular", {
+        "market_session": _session,
+        "broker_stop_can_trigger": _session == "regular",
+        "sole_protection": (
+            "broker_stop" if _session == "regular" else "runner_software_stop"
+        ),
+    }
+
+
 def _strict_alpaca_rth_entry_window(
     adapter: Any,
     sess: Any,
@@ -12100,13 +12143,44 @@ def _ensure_alpaca_deadman_stop(
         )
         if not (certified.get("ok") and certified.get("protected")):
             return certified
+        # ⚠️ SABIHIN KUNG MAKAKAPUTOK BA ITO, hindi lang kung naipadala ba.
+        _dm_live, _dm_ev = _deadman_protection_is_live(sess)
         _emit(db, sess, "live_deadman_stop_placed", {
             "ok": True,
             "order_id": oid,
             "client_order_id": cid,
             "stop_price": float(request["stop_price"]),
             "qty": float(request["base_size"]),
+            "protection_active": _dm_live,
+            **_dm_ev,
         })
+        if not _dm_live:
+            # Hiwalay na event dahil ito ay ibang KALAGAYAN, hindi isang detalye
+            # ng isang matagumpay na paglalagay. Ang isang naka-place na deadman
+            # na hindi makakaputok ay hindi proteksyon.
+            le["deadman_inert"] = {
+                "recorded_at_utc": _utcnow().isoformat(),
+                "stop_price": float(request["stop_price"]),
+                "client_order_id": cid,
+                **_dm_ev,
+            }
+            _commit_le(sess, le)
+            _emit(db, sess, "live_deadman_stop_inert_until_rth", {
+                "order_id": oid,
+                "client_order_id": cid,
+                "stop_price": float(request["stop_price"]),
+                "qty": float(request["base_size"]),
+                "note": (
+                    "Ang Alpaca ay tumatanggap lamang ng limit na order sa "
+                    "extended hours; ang isang stop ay nakaupo sa status=new "
+                    "hanggang sa regular open. Ang runner ang TANGING proteksyon "
+                    "hanggang doon."
+                ),
+                **_dm_ev,
+            })
+        else:
+            le.pop("deadman_inert", None)
+            _commit_le(sess, le)
         return certified
 
     strict_state, known = _strict_client_order_id_truth(adapter, cid)
