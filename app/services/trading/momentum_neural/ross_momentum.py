@@ -775,7 +775,53 @@ def below_explosive_floor(
     a name is never benched on absent data, only on data that AFFIRMATIVELY shows it is
     not explosive. Caller is responsible for applying this to equities only."""
     rvol, momentum, _liq, _tl = _extract_pillars(signal)
-    if rvol is not None and float(rvol) < float(rvol_floor):
+    # ⚠️ FLOAT-ROTATION OVERRIDE SA RVOL LEG (2026-08-26).
+    #
+    # Ang kontrata ng function na ito ay: mag-bench LAMANG sa datos na
+    # AFFIRMATIVELY nagpapakitang hindi explosive ang pangalan; fail-open sa
+    # kulang. Ang `vol_ratio` mula sa `ws_ignition` ay HINDI nakakatugon doon --
+    # sinukat na sistemikong mali ito.
+    #
+    # NASUKAT SA BUONG BOARD (2026-08-26 11:40Z, premarket):
+    #
+    #     simbolo  vol_ratio   float_rotation  chg%    live_eligible
+    #     LBGJ          0.93            33.71   12.9   f
+    #     YYGH          1.30            12.69   89.6   f
+    #     DAIC          0.09            10.92   63.4   f
+    #     SMTK          1.88             5.05   20.8   f
+    #     CDTG          3.38             4.38   38.3   f
+    #     RDIB       3074.05             2.10   35.3   t   <-- ANG TANGING PUMASA
+    #
+    # Ang TANGING pangalang nakalusot sa 5.0 na floor ay ang isa na ang
+    # `vol_ratio` ay basura sa KABILANG direksyon. Ang umikot nang 33.7 BESES ay
+    # na-bench sa 0.93. Baligtad ang gate sa praktika.
+    #
+    # ⚠️ ANG `float_rotation` AY PANLOOB NA MAGKAKATUGMA at direktang sinusukat:
+    # sa DAIC, 13,208,232 / 1,210,000 = 10.9159 -- eksaktong tugma sa naitalang
+    # volume at float. Ito ang mismong dami na inilalarawan ni Ross ("umikot ang
+    # float nang X beses ngayong araw"), at hindi ito umaasa sa sirang average.
+    #
+    # ⚠️ HINDI ITO NAGPAPALUWAG NG GATE. Ang RVOL leg LAMANG ang nilalaktawan
+    # nito; TUMATAKBO PA RIN ang change floor sa ibaba, kaya ang pangalang
+    # umikot nang marami ngunit halos hindi gumagalaw ay na-bench pa rin. Sa
+    # nasukat na board ay pinapasok nito ang LBGJ/YYGH/DAIC/SMTK/CDTG/XPON at
+    # PINANANATILING benched ang SDOT (0.37), WVVIP (0.26), at BRNX (0.25).
+    #
+    # ⚠️ HINDI SINASAKLAW ang salungat na depekto: ang 3,074.05 ng RDIB ay
+    # nagpapapasa ng pangalan sa basurang datos. Ang pagdaragdag ng itaas na
+    # hangganan ay MAGBE-BENCH ng pangalan (isang paghihigpit) at nangangailangan
+    # ng sariling ebidensya -- naitala, hindi ginawa rito.
+    _rot = _first_float(signal, "float_rotation")
+    try:
+        from app.config import settings as _fset
+        _rot_floor = float(getattr(
+            _fset, "chili_momentum_float_rotation_rvol_override", 1.0) or 0.0)
+    except Exception:
+        _rot_floor = 1.0
+    _rvol_leg_trusted = not (
+        _rot_floor > 0 and _rot is not None and float(_rot) >= _rot_floor
+    )
+    if _rvol_leg_trusted and rvol is not None and float(rvol) < float(rvol_floor):
         return True
     # COILING-SQUEEZE EXEMPTION (2026-06-26): EXTREME relative volume = accumulation/coiling
     # BEFORE the pop, even while the %-change is still modest. SDOT (65x RVOL, 744K float,
