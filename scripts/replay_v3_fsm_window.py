@@ -223,6 +223,91 @@ def mirror_ticks_streaming(sim_engine):
     return total
 
 
+def mirror_depth_streaming(sim_engine):
+    """FULL-DENSITY mirror ng L2 DEPTH -- ang nawawalang kalahati ng harness na ito.
+
+    ⚠️ BAKIT ITO UMIIRAL (2026-08-26). Ang replay ay nagmi-mirror ng TRADE tape at
+    NBBO, pero KAILANMAN ay hindi ng libro. Kaya ang buong pamilya ng exit lever na
+    nagbabasa ng depth ay HINDI MASUSUKAT dito -- at LAHAT ng natitirang naka-OFF na
+    exit lever ay nasa pamilyang iyon::
+
+        exit_ladder_live             (ang "Ross ladder read")
+        exit_ofi_hidden_seller_enabled
+        exit_ofi_lock_partial_enabled
+        exit_candle_confirm_live
+
+    Napatunayan: ang isang A/B ng `exit_ladder_live` 0 laban sa 1 sa XPON 08-24 ay
+    nagbigay ng EKSAKTONG parehong fill at parehong -67.74 -- ang flag ay walang
+    kayang basahin, kaya wala itong magagawa.
+
+    ANG DEADLOCK NA BINABASAG NITO: ang exit ladder ay naka-OFF sa live dahil
+    "naghihintay ng A/B proof", at ang A/B harness ay hindi makapagbigay ng proof
+    dahil walang depth. Nananatili itong naka-off nang hindi dahil pumalpak kundi
+    dahil walang paraan para subukan -- habang ang nasukat na capture ratio ay
+    18.5% (+108.35R na naabot, +20.02R lang ang nakuha sa 5 araw).
+
+    ⚠️ KAPAREHONG DALAWANG GOTCHA ng tick mirror, at sinasadya iyon:
+      * GOTCHA 11  -- 5-minutong slice, bawat isa sa SARILING maikling transaction
+        sa magkabilang dulo, kaya walang koneksyon na nagpapakita ng lumang
+        idle transaction sa db_watchdog (na pumapatay ng >10 min mula query_start).
+      * GOTCHA 11b -- `execute_values` na batched, hindi row-by-row executemany.
+
+    ⚠️ DALA ANG `provider_at` (migration 371) -- ang quote-event clock. Kung wala
+    ito, ang anumang gate na sumusuri ng freshness ng libro ay makakakita ng NULL
+    at fail-closed, at muli tayong susukat ng katahimikan sa halip na gawi.
+    """
+    import psycopg2
+    from psycopg2.extras import execute_values as _ev, Json as _Json
+    from datetime import timedelta as _td
+    src = psycopg2.connect(PROD)
+    src.set_session(readonly=True)
+    dst = sim_engine.raw_connection()
+    dcur = dst.cursor()
+    ins = (
+        "INSERT INTO iqfeed_depth_snapshots "
+        "(symbol, observed_at, bid_top, ask_top, bid_top_size, ask_top_size, "
+        " bid5_size, ask5_size, imbalance5, venues, source, bids_json, asks_json, provider_at) "
+        "VALUES %s"
+    )
+    total = 0
+    slice_start = OHLCV_START
+    while slice_start < WIN_END:
+        slice_end = min(slice_start + _td(minutes=5), WIN_END)
+        scur = src.cursor()
+        scur.execute(
+            "SELECT observed_at, bid_top, ask_top, bid_top_size, ask_top_size, "
+            "       bid5_size, ask5_size, imbalance5, venues, bids_json, asks_json, provider_at "
+            "FROM iqfeed_depth_snapshots "
+            "WHERE symbol=%s AND observed_at>=%s AND observed_at<%s "
+            "  AND bid_top>0 AND ask_top>0 ORDER BY observed_at ASC",
+            (SYMBOL, slice_start, slice_end))
+        batch = scur.fetchall()
+        scur.close()
+        src.commit()  # isara ang read tx -- sariwa ang query_start sa susunod
+        if batch:
+            rows = [
+                # ⚠️ Ang bids_json/asks_json ay JSONB. Ibinabalik sila ng psycopg2
+                # bilang Python list, at kung walang balot ay iniaadapt niya sila
+                # bilang PG ARRAY -> DatatypeMismatch. Ang Json() ang nagsasabi
+                # sa driver na jsonb ang patutunguhan.
+                (SYMBOL, r[0], r[1], r[2], r[3], r[4], r[5], r[6], r[7], r[8],
+                 'replay_v3',
+                 _Json(r[9]) if r[9] is not None else None,
+                 _Json(r[10]) if r[10] is not None else None,
+                 r[11])
+                for r in batch
+            ]
+            _ev(dcur, ins, rows, page_size=5000)
+            dst.commit()
+            total += len(rows)
+            del rows
+        del batch
+        slice_start = slice_end
+    dcur.close(); dst.close()
+    src.close()
+    return total
+
+
 class AsOfProvider:
     """As-of-t OHLCV from real ticks (no lookahead) — reads the sim clock via lr._utcnow().
 
@@ -405,6 +490,10 @@ def run_arm(label, grid, ticks, frame_ticks, g4_on):
     if os.environ.get("FULL_MIRROR", "1") == "1":
         db.commit()  # commit the seed first (streaming mirror uses its own raw connection)
         mirrored = mirror_ticks_streaming(eng)
+        # ANG LIBRO (2026-08-26). Walang ito, ang bawat depth-reading na exit lever
+        # ay tahimik na no-op at ang A/B ay sumusukat ng katahimikan.
+        mirrored_depth = mirror_depth_streaming(eng)
+        print("  mirrored_depth_rows=%s" % mirrored_depth)
     else:
         mirrored = mirror_ticks(db, ticks)
     db.commit()
