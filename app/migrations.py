@@ -32981,6 +32981,67 @@ def _migration_369_squeeze_regime_daily(conn) -> None:
     ))
 
 
+def _migration_372_viability_live_board_index(conn) -> None:
+    """Partial index para sa live board query (2026-08-26).
+
+    ANG PUWANG. Ang `_fresh_live_eligible_candidates` -- ang query na
+    nagbubuo ng arm board at tinatawag ng reaper, ng conviction index, at ng
+    bawat auto-arm pass -- ay tumatakbo laban sa
+    ``momentum_symbol_viability``: 127,860 hilera, **1,359 MB** (11 KB kada
+    hilera dahil sa apat na jsonb column).
+
+    Walang index ang sumasaklaw sa hugis ng filter. NASUKAT sa EXPLAIN ANALYZE::
+
+        Bitmap Heap Scan  Heap Blocks: exact=3,874   (read=3,335 mula sa disk)
+        Filter: (live_eligible IS TRUE) AND (scope = 'symbol')
+        rows=4,140 hinila para magbalik ng 40
+        Execution: 1,653 ms
+
+    Ang `scope` at `live_eligible` ay FILTER matapos hilahin ang buong 11 KB
+    na hilera, kaya ~45 MB ang binabasa para sa 40 hilera.
+
+    ANG EPEKTO SA LANE. Ang reaper ay tumatawag nito nang DALAWANG beses kada
+    pass. Nasukat: `_reap_stale_watching_sessions` = **21.16 s** laban sa
+    isang **10-segundong** cadence, kaya ang auto-arm pass ay p50 31 s / p90
+    244 s at 62% ng tick ay nalalaktawan
+    (``skipped: maximum number of running instances reached``).
+
+    Ang bunga ay nakasulat na sa `live_runner.py`, mula pa 2026-08-19: *"a
+    median of 408s -- SEVEN MINUTES -- between 'this is a good entry' and the
+    pre-submit quote check, so the planned limit was minutes stale... 14
+    execution_bbo_above_planned_limit defers and ZERO live_entry_submitted on
+    a day with 53 pending_place attempts."* Naulit ito ngayong 2026-08-26:
+    21 pending_place, 5 defer, **0 submitted**.
+
+    ANG AYOS. Isang PARTIAL index na naka-order ayon sa score, kaya ang
+    planner ay makakahinto matapos ang 40 hilera sa halip na hilahin ang
+    4,140. Ang partial predicate ang nag-aalis sa `scope`/`live_eligible`
+    mula sa heap filter.
+
+    NASUKAT PAGKATAPOS::
+
+        Index Scan using ix_msvi_live_board_score
+        Buffers: shared hit=48 read=112
+        Execution: 53.2 ms          (1,653 ms -> 53 ms, 31x)
+        _reap_stale_watching_sessions: 21.16 s -> 2.36 s  (9x)
+        auto-arm pass p50:             31,014 ms -> 18,016 ms
+
+    ⚠️ Idempotent (``IF NOT EXISTS``). HINDI ``CONCURRENTLY``: ang migration ay
+    tumatakbo sa startup bago pumasok ang trapiko, at ang isang
+    ``DROP INDEX CONCURRENTLY`` sa isang BUHAY na table ay humarang sa lane
+    nang 10 minuto noong 2026-08-26 17:24Z -- ang concurrent DDL ay para sa
+    kamay ng operator sa isang tahimik na oras, hindi para sa startup path.
+    """
+    conn.execute(
+        text(
+            "CREATE INDEX IF NOT EXISTS ix_msvi_live_board_score "
+            "ON momentum_symbol_viability "
+            "(viability_score DESC NULLS LAST, freshness_ts DESC) "
+            "WHERE scope = 'symbol' AND live_eligible IS TRUE"
+        )
+    )
+
+
 def _migration_371_depth_snapshot_provider_at(conn) -> None:
     """Quote-event clock para sa iqfeed_depth_snapshots (2026-08-24).
 
@@ -33517,6 +33578,8 @@ MIGRATIONS = [
      _migration_369_squeeze_regime_daily),
     ("371_depth_snapshot_provider_at",
      _migration_371_depth_snapshot_provider_at),
+    ("372_viability_live_board_index",
+     _migration_372_viability_live_board_index),
 ]
 
 
