@@ -20283,6 +20283,77 @@ def _live_tick_bbo(
     return tick, freshness, None
 
 
+def _lifecycle_bid_ask(
+    adapter: Any,
+    product_id: str,
+    *,
+    execution_family: str | None,
+) -> tuple[Any, Any]:
+    """Ang quote na pinapayagang KUMANSELA ng nakapatong nang order.
+
+    ⚠️ ITO ANG NAGPAPATAY NG TUNAY NA ORDER (2026-08-26). Ang pending-entry na
+    lifecycle at ang inline repeg ay parehong nagbabasa ng hilaw na
+    ``adapter.get_best_bid_ask``, na may 60s na hangganan na HINDI ipinapatupad
+    laban sa provider clock. Sa premarket ay ibinabalik nito ang saradong libro
+    ng KAHAPON bilang buhay.
+
+    NASUKAT SA BUHAY NA ORDER (session 16510, RDIB, 2026-08-26)::
+
+        11:19:05  live_entry_final_bbo    bid 12.66 / ask 12.78
+                                          source=massive_ws_universe   -- TAMA
+        11:19:12  live_entry_submitted    limit 12.54, status=open, RTT 0.078s
+        11:19:21  entry_ack_timeout       reason=entry_invalidated_stop_breach
+                                          bid=7.31, structural_stop=12.39
+
+    Ang 7.31 ay HINDI presyo ng umagang iyon. Ito ang eksaktong bid na ibinabalik
+    ng hilaw na landas para sa RDIB na may ``provider_time`` na 2026-08-25 20:00
+    -- 15 ORAS ang tanda, katabi ng 20.75 na ask (9,579 bps). Nag-imbento ang
+    engine ng stop breach mula sa saradong libro ng kahapon at kinansela ang
+    sarili nitong buhay na order 9 segundo matapos itong ipadala.
+
+    ⚠️ MAS LIGTAS ITO SA MAGKABILANG DIREKSYON, hindi mas maluwag. Ang
+    ``_pending_entry_cancel_reason`` ay nagbabalik ng None kapag ``bid is None``
+    -- ibig sabihin "manatiling nakapatong". Kaya ang pagbabalik ng WALA kapag
+    walang mapagkakatiwalaang quote ay nangangahulugang "huwag kumansela batay sa
+    ebidensyang wala tayo", samantalang ang dating gawi ay kumakansela batay sa
+    ebidensyang GAWA-GAWA.
+
+    Kaparehong hugis ng ``_live_tick_bbo``: mahigpit muna sa sariling hangganan,
+    stand-in lamang kapag walang naibigay ang mahigpit -- kaya sa RTH, kung saan
+    may buhay na direktang book, walang nagbabago.
+    """
+    family = str(execution_family or "").strip().lower()
+    if family not in ("alpaca_spot", "alpaca_short"):
+        return adapter.get_best_bid_ask(product_id)
+    try:
+        _direct_max_age = float(getattr(
+            settings, "chili_momentum_preentry_direct_max_age_seconds", 10.0) or 10.0)
+    except (TypeError, ValueError):
+        _direct_max_age = 10.0
+    tick, _snap = _final_entry_bbo(
+        adapter,
+        product_id,
+        max_age_seconds=_direct_max_age,
+    )
+    if tick is None and bool(getattr(
+        settings, "chili_momentum_preentry_stand_in_enabled", True
+    )):
+        try:
+            _si_max_age = float(getattr(
+                settings,
+                "chili_momentum_preentry_stand_in_max_age_seconds", 15.0) or 15.0)
+        except (TypeError, ValueError):
+            _si_max_age = 15.0
+        tick, _snap = _final_entry_bbo(
+            adapter,
+            product_id,
+            max_age_seconds=_direct_max_age,
+            allow_stand_in=True,
+            stand_in_max_age_seconds=_si_max_age,
+        )
+    return tick, getattr(tick, "freshness", None)
+
+
 def _stop_vol_floor_mult() -> float:
     """Fraction of the live expected-move the stop must clear to sit outside the
     noise (default 0.5). One documented knob; everything else derived."""
@@ -31123,7 +31194,11 @@ def tick_live_session(
                 #      construction (2 bars @1m = 120s >> the ~13s review that
                 #      killed the CPSH/SNDG submits at the old 10s window).
                 try:
-                    _ptick, _pfr = adapter.get_best_bid_ask(product_id)
+                    # Ang quote na ito ay KUMAKANSELA ng nakapatong na order -- hindi
+                    # ito dapat manggaling sa saradong libro ng kahapon (RDIB 11:19,
+                    # bid 7.31 laban sa tunay na 12.66).
+                    _ptick, _pfr = _lifecycle_bid_ask(
+                        adapter, product_id, execution_family=ef)
                     _pbid = float(_ptick.bid) if (_ptick is not None and _ptick.bid) else None
                     _pask = float(_ptick.ask) if (_ptick is not None and _ptick.ask) else None
                 except Exception:
@@ -31721,7 +31796,8 @@ def tick_live_session(
                                 if _delay > 0:
                                     _t_inline.sleep(_delay)
                                 try:
-                                    _itick, _rp_fr = adapter.get_best_bid_ask(product_id)
+                                    _itick, _rp_fr = _lifecycle_bid_ask(
+                                        adapter, product_id, execution_family=ef)
                                     _rp_bid = float(_itick.bid) if (_itick is not None and _itick.bid) else None
                                     _rp_ask = float(_itick.ask) if (_itick is not None and _itick.ask) else None
                                 except Exception:

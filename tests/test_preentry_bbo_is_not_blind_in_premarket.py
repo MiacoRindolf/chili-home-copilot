@@ -212,9 +212,14 @@ def test_the_submit_boundary_stand_in_set_did_not_grow():
     nito para sa quote na SUMUSUKAT lang ng tick ay mas maliit na panganib,
     hindi mas malaki."""
     tree = ast.parse(_SRC.read_text(encoding="utf-8"))
-    fn = next(n for n in ast.walk(tree)
-              if isinstance(n, ast.FunctionDef) and n.name == "_live_tick_bbo")
-    lo, hi = fn.lineno, fn.end_lineno
+    # ⚠️ DALAWA ANG RUTER (2026-08-26, ikalawang PR). Nahuli ako ng bantay na ito
+    # nang idagdag ang `_lifecycle_bid_ask` -- tama iyon: BAGO iyon at kailangang
+    # tingnan. Sinasadya ang pagbubukod dahil ruter din ito ng KAPAREHONG
+    # kontrata, hindi isang bagong seam na nagpepresyo ng order.
+    spans = [(n.lineno, n.end_lineno) for n in ast.walk(tree)
+             if isinstance(n, ast.FunctionDef)
+             and n.name in ("_live_tick_bbo", "_lifecycle_bid_ask")]
+    assert len(spans) == 2, "dapat dalawa ang ruter"
     outside_total = 0
     outside_stand_in = []
     for node in ast.walk(tree):
@@ -222,7 +227,7 @@ def test_the_submit_boundary_stand_in_set_did_not_grow():
             continue
         if getattr(node.func, "id", None) != "_final_entry_bbo":
             continue
-        if lo <= node.lineno <= hi:
+        if any(lo <= node.lineno <= hi for lo, hi in spans):
             continue
         outside_total += 1
         if any(k.arg == "allow_stand_in" and
