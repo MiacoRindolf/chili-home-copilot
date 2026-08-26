@@ -13,6 +13,7 @@ Includes order placement for approved strategy proposals.
 """
 from __future__ import annotations
 
+import hashlib
 import logging
 import threading
 import time
@@ -380,6 +381,62 @@ def try_restore_session() -> bool:
         return False
 
 
+# ⚠️ ANG PATAY NA REFRESH TOKEN AY 20 SEGUNDO KADA ARM PASS (2026-08-26).
+#
+# Ang `invalid_grant` ay TERMINAL: sinasabi ng Robinhood na patay na ang refresh
+# token at hinding-hindi na ito magtatagumpay hangga't hindi nagbabago ang
+# kredensyal. Wala tayong ganoong kaalaman noon, kaya ang bawat tumatawag ay
+# sumusubok ulit.
+#
+# NASUKAT (2026-08-26, buhay na lane): **2,439** na tinanggihang refresh sa isang
+# log window, at **22.4 kada auto-arm pass** sa 102 pass. Ang mga timestamp sa
+# loob ng isang pass ay 12:27:19 -> 12:27:38 -- humigit-kumulang **20 SEGUNDO**
+# ng pass na ginugol sa HTTP na garantisadong mabibigo.
+#
+# ⚠️ AT ANG LANE NA ITO AY HINDI GUMAGAMIT NG ROBINHOOD. Ang execution family ay
+# `alpaca_spot` at ang account scope ay `alpaca:paper`. Ang buong 20 segundo ay
+# para sa isang rail na hindi nagpapadala ng order dito.
+#
+# ANG EPEKTO SA KALAKALAN: ang auto-arm ay naka-schedule kada 10s pero p50 25.8s
+# ang tagal, kaya 81 tick ang nalaktawan
+# (`skipped: maximum number of running instances reached`). Ang session ay
+# tinitick kada ~7 minuto, kaya ang planadong limit ay luma na sa pagpapadala at
+# hindi nakikita ng lane ang sariling fill.
+#
+# ⚠️ HINDI NITO PINIPIGIL ANG PAGBAWI. Ang TERMINAL lamang na pagtanggi ang
+# naka-cache; ang timeout, 5xx, at network error ay muling sinusubukan gaya ng
+# dati. Ang cache ay naka-key sa HASH ng token, kaya ang isang bagong
+# kredensyal ay hindi kailanman naaapektuhan -- at hindi kailanman naitatala ang
+# token mismo.
+_TERMINAL_REFRESH_REJECTIONS: set[str] = set()
+_terminal_refresh_lock = threading.Lock()
+
+# Ang mga pagtanggi na nangangahulugang "hindi na ito gagana", laban sa mga
+# lumilipas na pagkabigo.
+_TERMINAL_OAUTH_ERRORS = frozenset({"invalid_grant", "invalid_request", "unauthorized_client"})
+
+
+def _refresh_token_fingerprint(refresh_token: str) -> str:
+    """Matatag na key na hindi kailanman naglalantad ng token mismo."""
+    return hashlib.sha256((refresh_token or "").encode("utf-8")).hexdigest()[:16]
+
+
+def refresh_token_is_known_dead(refresh_token: str) -> bool:
+    """True kapag ang token na ito ay tinanggihan nang TERMINAL."""
+    if not refresh_token:
+        return False
+    with _terminal_refresh_lock:
+        return _refresh_token_fingerprint(refresh_token) in _TERMINAL_REFRESH_REJECTIONS
+
+
+def reset_dead_refresh_tokens() -> int:
+    """Linisin ang breaker (halimbawa matapos maglagay ng bagong kredensyal)."""
+    with _terminal_refresh_lock:
+        n = len(_TERMINAL_REFRESH_REJECTIONS)
+        _TERMINAL_REFRESH_REJECTIONS.clear()
+    return n
+
+
 def _refresh_oauth_token(refresh_token: str, scope: str | None = None) -> dict | None:
     """POST /oauth2/token/ with grant_type=refresh_token.
 
@@ -388,6 +445,18 @@ def _refresh_oauth_token(refresh_token: str, scope: str | None = None) -> dict |
     refresh (typical after ~5 days of idle — refresh tokens age out).
     """
     import requests
+
+    # Ang naunang TERMINAL na pagtanggi ay sumasagot na para sa atin -- walang HTTP.
+    try:
+        from app.config import settings as _bset
+
+        _breaker_on = bool(getattr(
+            _bset, "chili_broker_dead_refresh_breaker_enabled", True))
+    except Exception:
+        _breaker_on = True
+    if _breaker_on and refresh_token_is_known_dead(refresh_token):
+        return None
+
     REFRESH_URL = "https://api.robinhood.com/oauth2/token/"
     payload = {
         "client_id": "c82SH0WZOsabOXGP2sxqcj34FxkvfnWRZBKlBjFS",
@@ -404,10 +473,31 @@ def _refresh_oauth_token(refresh_token: str, scope: str | None = None) -> dict |
                 err = r.json()
             except Exception:
                 err = r.text[:200]
-            logger.info(
-                "[broker] refresh_token rejected by Robinhood (status=%s body=%s)",
-                r.status_code, err,
-            )
+            _code = ""
+            if isinstance(err, dict):
+                _code = str(err.get("error") or "").strip().lower()
+            _terminal = _code in _TERMINAL_OAUTH_ERRORS
+            if _terminal and _breaker_on:
+                _fp = _refresh_token_fingerprint(refresh_token)
+                with _terminal_refresh_lock:
+                    _first = _fp not in _TERMINAL_REFRESH_REJECTIONS
+                    _TERMINAL_REFRESH_REJECTIONS.add(_fp)
+                if _first:
+                    # ISANG BESES kada token. Ang dating anyo ay nag-log nito
+                    # 2,439 na beses at nagbayad ng HTTP sa bawat isa.
+                    logger.warning(
+                        "[broker] refresh_token TERMINALLY rejected by Robinhood "
+                        "(status=%s error=%s fp=%s) — hindi na ito muling "
+                        "susubukan hangga't hindi nagbabago ang kredensyal; "
+                        "tumawag ng reset_dead_refresh_tokens() pagkatapos "
+                        "mag-relink",
+                        r.status_code, _code or "unknown", _fp,
+                    )
+            else:
+                logger.info(
+                    "[broker] refresh_token rejected by Robinhood (status=%s body=%s)",
+                    r.status_code, err,
+                )
             return None
         body = r.json()
         if not isinstance(body, dict) or not body.get("access_token"):
