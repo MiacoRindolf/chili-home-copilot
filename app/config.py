@@ -4044,6 +4044,31 @@ class Settings(BaseSettings):
             "maikpit para makapagpasya sa patay na libro."
         ),
     )
+    chili_momentum_halt_print_frontier_relative: bool = Field(
+        default=True,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_HALT_PRINT_FRONTIER_RELATIVE"),
+        description=(
+            "Sukatin ang katahimikan ng print ng isang simbolo laban sa FRONTIER "
+            "ng tape (ang pinakabagong observed_at sa LAHAT ng simbolo) sa halip "
+            "na sa wall clock. Ang halt ay isang tanong tungkol sa RELATIBONG "
+            "katahimikan -- tumigil ba ang pangalang ito habang nagpi-print pa "
+            "ang iba -- at ang pagsukat nito laban sa wall clock ay nagpapalit "
+            "ng lag ng pipeline tungo sa isang halt sa BAWAT pangalan nang "
+            "sabay-sabay. false => gawi bago ang 2026-08-26."
+        ),
+    )
+    chili_momentum_halt_print_pipeline_dead_seconds: float = Field(
+        default=900.0, ge=60.0, le=7200.0,
+        validation_alias=AliasChoices(
+            "CHILI_MOMENTUM_HALT_PRINT_PIPELINE_DEAD_SECONDS"),
+        description=(
+            "Kapag ang frontier ng tape mismo ay mas luma pa rito, ang pipeline "
+            "ay hindi lamang nahuhuli -- hindi na ito mapagkakatiwalaan, at "
+            "ang halt inference ay UMAABSTAIN (walang datos, walang hinuha). "
+            "Ito ang pumipigil sa frontier-relative na sukat na maging "
+            "fail-OPEN kapag nag-freeze ang writer."
+        ),
+    )
     chili_momentum_loss_guard_alpaca_broker_truth_enabled: bool = Field(
         default=True,
         validation_alias=AliasChoices(
