@@ -4044,6 +4044,39 @@ class Settings(BaseSettings):
             "maikpit para makapagpasya sa patay na libro."
         ),
     )
+    chili_momentum_preentry_direct_max_age_seconds: float = Field(
+        default=10.0, ge=1.0, le=60.0,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_PREENTRY_DIRECT_MAX_AGE_SECONDS"),
+        description=(
+            "Pinakamatandang DIREKTANG (Alpaca) quote na pinapayagang magpatakbo ng "
+            "PRE-ENTRY na tick. Umiiral ito dahil ang ordinaryong landas ay may "
+            "60s na hangganan na HINDI ipinapatupad laban sa provider clock: "
+            "sinukat 2026-08-26 11:15Z, ibinalik nito ang RDIB na may "
+            "provider_time 2026-08-25 20:00 -- 15 ORAS ang tanda -- bilang buhay, "
+            "kasama ang 9,579 bps na spread. 10s: maluwag para sa anumang tunay "
+            "na buhay na RTH quote, masikip para sa sarang libro ng kahapon."
+        ),
+    )
+    chili_momentum_preentry_stand_in_enabled: bool = Field(
+        default=True,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_PREENTRY_STAND_IN_ENABLED"),
+        description=(
+            "Payagan ang PRE-ENTRY na tick na gumamit ng stand-in quote kapag "
+            "WALANG naibigay ang mahigpit na direktang landas -- ang kaparehong "
+            "tier na buhay na sa HELD path mula 2026-08-25. Gaya doon, fallback "
+            "LAMANG ito: kapag may buhay na direktang book (RTH) ay iyon ang "
+            "nananalo at hindi ito naaabot, kaya walang niluluwagan sa regular "
+            "session. I-off para bumalik sa gawi bago ang 2026-08-26."
+        ),
+    )
+    chili_momentum_preentry_stand_in_max_age_seconds: float = Field(
+        default=15.0, ge=1.0, le=60.0,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_PREENTRY_STAND_IN_MAX_AGE_SECONDS"),
+        description=(
+            "Pinakamatandang stand-in quote na tinatanggap ng PRE-ENTRY na tick. "
+            "Katumbas ng held na hangganan (15s) sa disenyo."
+        ),
+    )
     chili_momentum_entry_bbo_max_age_seconds: float = Field(
         default=2.0,
         gt=0.0,
