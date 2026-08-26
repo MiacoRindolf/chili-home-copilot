@@ -947,12 +947,36 @@ def print_recency_state(
 
         if bool(getattr(_hset, "chili_momentum_halt_print_frontier_relative", True)):
             with db.begin_nested():
+                # ⚠️ ANG UNANG ANYO NG QUERY NA ITO AY NAG-SCAN NG 73 GB (2026-08-26).
+                #
+                # `WHERE observed_at >= :gap_since` ay mukhang bounded, pero ang
+                # `iqfeed_trade_ticks` ay 211M na hilera at ang bitmap scan ay
+                # naging LOSSY: 467,161 heap block, 5,100,637 na hilerang
+                # inalis ng index recheck. NASUKAT: **420,716 ms** kada tawag,
+                # at APAT ang sabay na tumatakbo -- humaharang sa buhay na lane
+                # sa gitna ng session.
+                #
+                # ⚠️ SARILI KONG TALA ANG BINALEWALA KO: bounded queries lamang sa
+                # `iqfeed_trade_ticks`; ang walang SYMBOL filter ay hindi
+                # kailanman mura, gaano man kaikli ang window.
+                #
+                # ANG MURANG ANYO: ang `id` ay monotonic sa pagkakasunod ng
+                # insert, kaya ang pinakabagong naipasok na hilera ay ang max(id)
+                # -- isang backward index scan sa PK. Ang max ng huling 500 ay
+                # matibay sa out-of-order na pagdating nang hindi nagbabayad ng
+                # scan. KAPAREHONG PATTERN na ginagamit na ng
+                # `tape_ingest_recency_age_s` sa file na ito.
+                #
+                # NASUKAT: 420,716 ms -> **0.556 ms**, at EKSAKTONG PAREHO ang
+                # ibinabalik na timestamp.
                 _fr = db.execute(
                     text(
-                        "SELECT max(observed_at) FROM iqfeed_trade_ticks "
-                        "WHERE observed_at >= :gap_since AND observed_at <= :now_naive"
+                        "SELECT max(observed_at) FROM ("
+                        "  SELECT observed_at FROM iqfeed_trade_ticks"
+                        "  ORDER BY id DESC LIMIT :probe"
+                        ") t"
                     ),
-                    {"gap_since": gap_since, "now_naive": now_naive},
+                    {"probe": 500},
                 ).scalar()
             if _fr is not None:
                 _pipeline_lag = float((now_naive - _fr).total_seconds())
