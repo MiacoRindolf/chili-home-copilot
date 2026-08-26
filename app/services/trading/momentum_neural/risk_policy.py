@@ -1396,6 +1396,53 @@ def _loss_history_generation_state(
     return "current" if stored_identity == account_identity else "other"
 
 
+def _alpaca_loss_history_broker_truth(outcome: Any) -> bool:
+    """MAY buong broker truth ba ang alpaca na outcome na ito?
+
+    ⚠️ BAKIT ITO UMIIRAL (2026-08-26). Ang branch sa ibaba ay dating
+    WALANG-KONDISYON: tinatanggihan nito ang BAWAT alpaca na sesyon na pumasok,
+    nang hindi tumitingin ng anumang ebidensya. Ang nakasulat na dahilan ay ang
+    PEKENG ZERO na bayarin na inilalagay ng legacy reconciler -- na maaaring
+    mag-label ng `reconciled` dahil lamang sa isang ginawa-gawang zero na hindi
+    NULL.
+
+    Ang alalahaning iyon ay tungkol sa PINAGMULAN ng numero, hindi sa pamilya ng
+    venue. Ang hilerang nagdadala ng aktwal na presyo ng fill mula sa broker --
+    reconciled, may finite na pnl, may POSITIBONG notional basis, at may tunay na
+    orasan -- ay hindi ang kasong iyon.
+
+    ⚠️ NANANATILING FAIL-CLOSED. Kulang ang kahit isa sa apat ⇒ False ⇒ ang
+    parehong gap gaya ng dati. At ang mga tseke sa IBABA ng branch na ito ay
+    inuulit ang lahat ng ito at nagdadagdag pa ng sign at bps/notional na
+    pagkakatugma, kaya hindi ito nagiging tanging tanod.
+
+    ⚠️ NASUKAT: sa 14 na araw ay IISA lamang ang alpaca na outcome na may
+    klasipikasyong `entered` -- kaya ang branch na ito ay tahimik na natutulog.
+    Ang unang tapat na hilera ay siyang nagpaharang sa buong lane.
+    """
+    try:
+        from app.config import settings as _lset
+
+        if not bool(getattr(
+            _lset, "chili_momentum_loss_guard_alpaca_broker_truth_enabled", True
+        )):
+            return False
+    except Exception:
+        return False
+    if str(getattr(outcome, "broker_recon_status", "") or "").strip().lower() != "reconciled":
+        return False
+    if not isinstance(getattr(outcome, "broker_reconciled_at", None), datetime):
+        return False
+    if _loss_history_finite_float(getattr(outcome, "broker_realized_pnl_usd", None)) is None:
+        return False
+    _notional = _loss_history_finite_float(
+        getattr(outcome, "broker_notional_basis_usd", None)
+    )
+    # Ang positibong notional basis ang nagpapatunay na may SUKAT ang cycle --
+    # ito mismo ang hindi kayang gawin ng ginawa-gawang zero.
+    return _notional is not None and _notional > 0.0
+
+
 def _loss_history_entry_classification(
     outcome: Any,
     session: Any,
@@ -1720,7 +1767,9 @@ def load_current_live_loss_history(
         # row.  Neither condition may authorize another PAPER entry.  Keep the
         # current session reader explicitly unavailable until the immutable
         # reservation-scoped fill/cycle settlement ledger supersedes this branch.
-        if family in {"alpaca_spot", "alpaca_short"}:
+        if family in {"alpaca_spot", "alpaca_short"} and not (
+            _alpaca_loss_history_broker_truth(outcome)
+        ):
             _gap("loss_guard_alpaca_cycle_settlement_unavailable", session_id)
             continue
 
