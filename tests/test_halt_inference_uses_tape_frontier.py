@@ -182,3 +182,36 @@ def test_the_frontier_age_is_never_negative():
     """Ang simbolong nagpi-print SA MISMONG frontier ay 0.0, hindi negatibo."""
     st = print_recency_state(_Db(408.7, frontier_lag=500.0), "AHEAD", now_utc=NOW)
     assert st["last_print_age_s"] >= 0.0
+
+
+def test_the_frontier_probe_never_scans_the_whole_tape():
+    """ANG REGRESSION NA IPINADALA KO AT INAYOS (2026-08-26).
+
+    Ang unang anyo ng frontier query ay `WHERE observed_at >= gap_since`, na
+    mukhang bounded. Ang tape ay 211M na hilera at ang bitmap scan ay naging
+    LOSSY: 467,161 heap block, 5,100,637 na hilerang inalis ng index recheck.
+    NASUKAT: 420,716 ms kada tawag, APAT na sabay na tumatakbo, humaharang sa
+    buhay na lane sa gitna ng session.
+
+    Ang murang anyo -- isang backward scan sa PK -- ay 0.556 ms at nagbabalik ng
+    EKSAKTONG PAREHONG timestamp.
+
+    Panghabambuhay na bantay: hindi ito dapat bumalik.
+    """
+    import pathlib
+
+    from app.services.trading.momentum_neural import nbbo_tape as NT
+
+    src = pathlib.Path(NT.__file__).read_text(encoding="utf-8")
+    # Suriin ang KODIGO, hindi ang komento -- ang paliwanag sa itaas ng ayos ay
+    # sumisipi ng lumang anyo, at nahuli ako ng sarili kong bantay dahil doon.
+    code_lines = [ln for ln in src.splitlines() if not ln.lstrip().startswith("#")]
+    code = chr(10).join(code_lines)
+    i = code.find("chili_momentum_halt_print_frontier_relative")
+    assert i > 0, "dapat umiiral ang frontier block"
+    window = code[i: i + 1200]
+    assert "ORDER BY id DESC LIMIT" in window, (
+        "ang frontier probe ay dapat isang backward PK scan")
+    assert "WHERE observed_at >= :gap_since" not in window, (
+        "ang frontier probe ay hindi dapat mag-filter sa observed_at -- iyon ang "
+        "eksaktong anyo na nag-scan ng buong tape at humarang sa lane")
