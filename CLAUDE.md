@@ -46,6 +46,10 @@ FastAPI app is `app.main:app`. Default URL: `https://localhost:8000/chat`. Certs
 
 ### Run the app (Docker)
 
+⚠️ **Check `docker ps` first.** The live stack runs under `chili-clean-recovery-*` names, NOT
+the compose service names — `docker compose up chili` starts a SECOND stack beside it. See
+[Runtime topology](#runtime-topology-what-is-actually-running).
+
 ```bash
 docker compose up chili           # main FastAPI service (HTTPS, 8000)
 docker compose up brain-worker    # neural learning cycle (every 5s)
@@ -54,6 +58,9 @@ docker compose --profile workers up    # mining/backtest/fast-scan workers
 ```
 
 Postgres is mapped to **5433** (not 5432). Ollama on 11434.
+
+⚠️ Rebuilding a container does not update the trading lane — that runs on the HOST from
+`E:\dev\wt-window2`. Rebuilding the lane is a `git merge --ff-only` there plus a restart.
 
 ### Tests
 
@@ -91,16 +98,16 @@ Custom, **not Alembic**. Located in `app/migrations.py`, auto-run at app startup
 - `config.py` — pydantic Settings
 - `deps.py` — `get_identity_ctx(request, db)` resolves user via `chili_device_token` cookie (never trust the client)
 - `migrations.py` — versioned DB migrations
-- `models/` — SQLAlchemy ORM split by domain (`trading.py`, `chat.py`, `household.py`, `planner.py`, `code_brain.py`, `core.py`)
-- `routers/` — API surfaces: `chat`, `trading` (+ `trading_sub/`), `brain`, `brain_project`, `planner_coding`, `admin`, `pages`, `health_routes`
-- `services/trading/` — the bulk of the trading brain (~60 files)
-- `services/trading/venue/` — broker adapters: `coinbase_spot.py`, `robinhood_spot.py`
+- `models/` — 17 files, SQLAlchemy ORM split by domain (`trading.py`, `chat.py`, `household.py`, `planner.py`, `code_brain.py`, `core.py`, `projects.py`, `marketplace.py`, `intercom.py`, `reasoning_brain.py`, `project_brain.py`, …)
+- `routers/` — 22 files. API surfaces: `chat` (+ `chat_streaming`), `trading` (+ `trading_sub/`), `brain` (+ `brain_project`, `brain_v1_compat`), `planner` / `planner_coding`, `admin`, `auth`, `pages`, `projects`, `marketplace`, `jobs`, `voice`, `intercom`, `dev_terminal`, `dispatch_status`, `health_routes`, `code_brain_status`, `context_brain_status`
+- `services/trading/` — the bulk of the trading brain (**267 files**, plus **155 in `momentum_neural/`** — `live_runner.py` alone is ~42k lines and holds the entry/exit FSM)
+- `services/trading/venue/` — 19 files. **`alpaca_spot.py` is the PAPER lane's execution venue and the one the momentum lane actually trades through** (`execution_family="alpaca_spot"`, `account_scope="alpaca:paper"`). Also `coinbase_spot.py` (crypto), `robinhood_spot.py` / `robinhood_mcp.py` (equity live), plus `factory.py`, `order_state_machine.py`, `idempotency_store.py`, `account_identity.py`, `venue_health.py`.
 
 ### Trading pipeline (signal → fill)
 
 1. **Mine**: `services/trading/learning.py` runs the learning cycle (13 steps) — mines patterns from `trading_snapshots`, backtests, evolves.
 2. **Decide**: `services/trading/auto_trader.py` consumes pattern-imminent alerts, applies rule gates, LLM revalidation, scale-in logic.
-3. **Execute**: `venue/robinhood_spot.py` or `venue/coinbase_spot.py` places the order; `bracket_intent_writer.py` records stop/target intent.
+3. **Execute**: for the PAPER momentum lane this is `venue/alpaca_spot.py` (limit + `time_in_force="day"` + `extended_hours=True` outside RTH — Alpaca rejects market and stop orders in extended hours). `venue/robinhood_spot.py` / `venue/coinbase_spot.py` serve the live equity / crypto rails. `bracket_intent_writer.py` records stop/target intent.
 4. **Reconcile**: `bracket_reconciler.py` + broker-sync (every 2min) reconciles DB against broker truth.
 5. **Audit**: `execution_audit.py` logs expected-vs-realized cost gaps to `trading_venue_truth_log` (shadow mode).
 
@@ -116,6 +123,53 @@ Phased (2 through 8) migration to persist predictions authoritatively in DB. **T
 
 **Release blocker**: Do not ship if any `[chili_prediction_ops]` log line has `read=auth_mirror` AND `explicit_api_tickers=false` together. Authoritative mirror reads are only valid for explicit, non-empty ticker intent.
 
+## Runtime topology (what is ACTUALLY running)
+
+⚠️ **The compose service names are not the running container names.** `docker compose up chili`
+would start a SECOND stack alongside the live one. Read `docker ps` first.
+
+| running container | compose service | role |
+|---|---|---|
+| `chili-clean-recovery-web` | `chili` | FastAPI, `CHILI_SCHEDULER_ROLE=none` |
+| `chili-clean-recovery-scheduler` | `scheduler-worker` | `CHILI_SCHEDULER_ROLE=rnd_only` |
+| `chili-clean-recovery-brain` | `brain` | pinned image |
+| `chili-home-copilot-postgres-1` | `postgres` | port **5433** |
+| `chili-home-copilot-ollama-1` | `ollama` | 11434 |
+| `chili-cloudflare-origin-bridge` | — | edge |
+
+**Dead and NOT restarted** (both `Exited (137)`, 7+ weeks): `chili-clean-recovery-broker-sync`
+and `chili-clean-recovery-autotrader`. Consequences that bite in practice:
+- nothing reconciles a closed position back out of `trading_automation_sessions.risk_snapshot_json`,
+  so a stale persisted `position` can block every later entry via the serial-recertification
+  guard in `alpaca_orphan_claims.py` (`account_position_exposure_present`);
+- `run_crypto_exit_pass` does not run, so crypto software stops are not evaluated.
+
+### The trading lane runs on the HOST, not in a container
+
+The momentum PAPER lane is a host `uvicorn app.main:app` on **port 8010** with
+`CHILI_SCHEDULER_ROLE=momentum_exec_only`, started by
+`project_ws/AgentOps/timeshare/timeshare_supervisor.py` (untracked operator tooling).
+
+- **Deploy tree** (what the lane executes): `E:\dev\wt-window2` — `git merge --ff-only origin/main`
+  there, then restart the lane. A merge to `main` does NOT reach it by itself.
+- **Containers are baked images** and need a rebuild + manual swap; they lag `main`.
+- The supervisor holds a PG advisory lock and its ACCEPT gate is **fail-closed**: it refuses to
+  start unless the lease is held, all six prestart counters are 0, the broker census is clean
+  (**account FLAT — no adopt path**), and the producer census is clean.
+- ⚠️ **Do not kill the lane while it holds a position.** `_preshutdown_flatten` runs only on a
+  NORMAL shutdown; the fail-closed ACCEPT returns before it, so a force-kill leaves the position
+  unmanaged AND the lane unable to restart until the account is flat again.
+- The scheduler jobs take **~4 minutes** after startup before the first arm.
+
+### Market-data bridges (host, alongside the lane)
+
+`scripts/iqfeed_trade_bridge.py` (trade prints) and `scripts/iqfeed_depth_bridge.py` (L2).
+⚠️ At the RTH open the trade bridge ingests 30–49k rows/min and the frontier falls behind
+real time. **Measure the FRONTIER (`max(observed_at)`), never a relative window** — a
+`WHERE observed_at > now() - interval '60 seconds'` count reads ZERO whenever the pipeline is
+behind, which looks like a dead feed and is not. Anything that judges "silence" must compare
+against the tape frontier, not the wall clock.
+
 ## Hard rules (violating these breaks prod)
 
 These come from `.cursor/rules/` and are non-negotiable:
@@ -125,7 +179,7 @@ These come from `.cursor/rules/` and are non-negotiable:
 3. **Data-first, code-second.** When symptoms look like wrong FKs / contaminated linkage, fix the DB + add a migration. Do **not** paper over it with a router/service filter — that hides corruption from other consumers.
 4. **Tests must use a `_test`-suffixed DB.** The guard in `conftest.py` is there because fixtures TRUNCATE. Do not bypass it.
 5. **Prediction mirror authority is frozen** (see above). See [docs/PHASE_ROLLBACK_RUNBOOK.md](docs/PHASE_ROLLBACK_RUNBOOK.md) for rollback procedures when a phase flag misbehaves (rollback only — forward migrations need a new phase).
-6. **Migrations are sequential and idempotent.** Check the last `_migration_NNN_` number before adding; never reuse IDs. Enforced at app startup by `_assert_migration_ids_unique` in `app/migrations.py`; run `.\scripts\verify-migration-ids.ps1` to check ahead of merge.
+6. **Migrations are sequential and idempotent.** Check the last `_migration_NNN_` number before adding (**highest is 371 as of 2026-08-26**); never reuse IDs. Enforced at app startup by `_assert_migration_ids_unique` in `app/migrations.py`; run `.\scripts\verify-migration-ids.ps1` to check ahead of merge.
 
 ## Workflow rules
 
