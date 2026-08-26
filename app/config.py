@@ -4044,6 +4044,22 @@ class Settings(BaseSettings):
             "maikpit para makapagpasya sa patay na libro."
         ),
     )
+    chili_momentum_loss_guard_alpaca_broker_truth_enabled: bool = Field(
+        default=True,
+        validation_alias=AliasChoices(
+            "CHILI_MOMENTUM_LOSS_GUARD_ALPACA_BROKER_TRUTH_ENABLED"),
+        description=(
+            "Payagan ang isang alpaca na outcome na MAY buong broker truth "
+            "(reconciled + finite broker pnl + positibong notional basis + "
+            "tunay na reconciled_at) na magbilang sa loss history, sa halip na "
+            "tanggihan ang LAHAT ng alpaca. Ang alalahanin ng orihinal na "
+            "branch ay ang PEKENG ZERO na bayarin na inilalagay ng legacy "
+            "reconciler; hindi iyon nalalapat sa isang hilerang nagdadala ng "
+            "aktwal na presyo ng fill mula sa broker. Kulang ang KAHIT ISA sa "
+            "apat => nananatiling fail-closed gaya ng dati. false => gawi bago "
+            "ang 2026-08-26 (tanggihan ang lahat ng alpaca)."
+        ),
+    )
     chili_momentum_spread_floor_allows_one_tick: bool = Field(
         default=True,
         validation_alias=AliasChoices("CHILI_MOMENTUM_SPREAD_FLOOR_ALLOWS_ONE_TICK"),
