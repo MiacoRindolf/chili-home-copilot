@@ -4044,6 +4044,21 @@ class Settings(BaseSettings):
             "maikpit para makapagpasya sa patay na libro."
         ),
     )
+    chili_momentum_spread_floor_allows_one_tick: bool = Field(
+        default=True,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_SPREAD_FLOOR_ALLOWS_ONE_TICK"),
+        description=(
+            "Huwag kailanman tanggihan bilang MALAPAD ang spread na kasing-sikip "
+            "na ng pinakamaliit na maipa-quote ng instrumento. Ang 12 bps na "
+            "fallback ay hindi maaabot ng anumang stock sa ilalim ng ~$8.33, "
+            "dahil ang isang sentimo doon ay lagpas na sa 12 bps -- ang mismong "
+            "banda ng presyo na tinatrade ni Ross. Nasukat 2026-08-26: 26 na "
+            "harang sa EKSAKTONG isang sentimo na spread (bid 1.29 / ask 1.30 = "
+            "77.2 bps). Hindi nito ginagalaw ang ADAPTIVE na tolerance kapag may "
+            "expected-move; ang fallback lamang. Ang sadyang 0.0 na cap "
+            "(block-all) ay iginagalang pa rin."
+        ),
+    )
     chili_momentum_float_rotation_rvol_override: float = Field(
         default=1.0, ge=0.0, le=50.0,
         validation_alias=AliasChoices("CHILI_MOMENTUM_FLOAT_ROTATION_RVOL_OVERRIDE"),

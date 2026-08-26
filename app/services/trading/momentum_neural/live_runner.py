@@ -22030,6 +22030,49 @@ def _quote_quality_block(
             max_spread = 12.0
     except (TypeError, ValueError):
         max_spread = 12.0
+    # ⚠️ ANG PINAKAMALIIT NA MAIPA-QUOTE NA SPREAD AY HINDI KAILANMAN "MALAPAD"
+    # (2026-08-26).
+    #
+    # Ang 12 bps na fallback ay isang PORSIYENTONG hangganan na ipinapataw sa
+    # isang bagay na may DISKRETONG hakbang. Ang minimum na tick ng US equity ay
+    # isang sentimo sa itaas ng $1.00, kaya ang pinakamasikip na posibleng
+    # merkado sa isang $1.30 na stock ay 77 bps ayon lamang sa aritmetika. Sa
+    # ilalim ng ~$8.33 ay HINDI KAILANMAN maaabot ang 12 bps -- at iyon ang
+    # mismong banda ng presyo na tinatrade ni Ross.
+    #
+    # NASUKAT (2026-08-26, premarket):
+    #   32 wide_bbo_spread na harang sa 12.0 na fallback, avg mid $2.05
+    #   26 sa mga iyon ay may spread na EKSAKTONG $0.0100 -- ang literal na
+    #      minimum. Halimbawa: {"bid": 1.29, "ask": 1.30, "spread_bps": 77.2201,
+    #      "max_spread_bps": 12.0, "expected_move_bps": null}
+    #
+    # ⚠️ HINDI NITO GINAGALAW ANG ADAPTIVE NA LANDAS. Kapag may expected-move ang
+    # tumatawag, ang tolerance nito ang ginagamit (nasukat: 134.28 bps, na tama
+    # namang tumatanggap sa 77 at tumatanggi sa 297). Ang WALANG-DATOS na
+    # fallback lamang ang inaayos rito.
+    #
+    # ⚠️ IGINAGALANG ANG SADYANG 0.0 NA CAP -- block-all ang ibig sabihin niyon,
+    # at hindi ito dapat maging isang tick.
+    if (
+        max_spread > 0
+        and bool(getattr(settings, "chili_momentum_spread_floor_allows_one_tick", True))
+    ):
+        try:
+            _mid_f = float(mid or 0.0)
+            if _mid_f > 0:
+                # Sub-$1 ay nagta-trade sa apat na decimal; sa itaas nito ay sentimo.
+                _tick = 0.01 if _mid_f >= 1.0 else 0.0001
+                # ⚠️ ANG EPSILON AY HINDI KOSMETIKO. Ang `ask - bid` na galing sa
+                # feed ay may float na representasyon: ang 1.30 - 1.29 ay
+                # 0.010000000000000009, kaya ang sinusukat na spread ay isang ULP
+                # na mas malaki kaysa sa isang nominal na tick at ang eksaktong
+                # tabla ay bumabagsak. Isang bahagi kada milyon -- walang
+                # kahulugang pang-ekonomiya, sapat para tanggalin ang tabla.
+                _one_tick_bps = (_tick / _mid_f) * 10_000.0 * (1.0 + 1e-6)
+                if math.isfinite(_one_tick_bps) and _one_tick_bps > max_spread:
+                    max_spread = _one_tick_bps
+        except (TypeError, ValueError, ZeroDivisionError):
+            pass
     if spread_bps > max_spread:
         # WIDE-BOOK RESCUE (2026-08-18 zero-trade autopsy): 878/907 wide blocks
         # that day came from a NON-L1 primary (Alpaca-IEX cache, source=None)
