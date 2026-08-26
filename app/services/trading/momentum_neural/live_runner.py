@@ -20214,6 +20214,71 @@ def _live_tick_bbo(
             )
         return tick, getattr(tick, "freshness", None), snapshot
 
+    # ⚠️ ANG PRE-ENTRY AY BULAG DIN SA PREMARKET (2026-08-26).
+    #
+    # Ang held path sa itaas ay nakakuha ng stand-in noong 2026-08-25. Ang
+    # PRE-ENTRY ay hindi -- bumabagsak ito sa ordinaryong `get_best_bid_ask`,
+    # na may 60s na hangganan na HINDI ipinapatupad laban sa provider clock.
+    # Dalawang magkaibang paraan ito ng pagkabulag, at NASUKAT ang pareho sa
+    # buhay na premarket (11:15Z, ang mismong mga pangalan sa scanner ni Ross):
+    #
+    #   DAIC  ordinaryo -> None                      => `no_bbo`
+    #         stand-in  -> 6.51/6.54, 0.6s ang tanda
+    #   RDIB  ordinaryo -> 7.31/20.75, provider_time 2026-08-25 20:00
+    #                      (15 ORAS), spread 9,579 bps
+    #         stand-in  -> 12.38/12.40, 0.24s, 16 bps
+    #   YYGH  ordinaryo -> 1.56/1.59, provider_time 2026-08-25 20:59 (14 ORAS)
+    #         stand-in  -> 2.13/2.13, 0.43s  => 36% MALI ang presyo
+    #
+    # ⚠️ ANG PANGALAWA ANG MAS MALALA. Ang `no_bbo` ay bumabagsak nang MALAKAS --
+    # at sa `tick_live_session` ay tinetermina pa nito ang armed session. Ngunit
+    # ang quote ng KAHAPON na ipinapasa bilang buhay ay TAHIMIK na lumalason sa
+    # bawat sumusunod na kalkulasyon: ang mid, ang spread gate, ang trigger eval,
+    # at ang high-water mark.
+    #
+    # ANG DISENYO, KAPAREHO NG HELD: mahigpit muna. Kapag may buhay na direktang
+    # book -- ibig sabihin RTH -- iyon ang nananalo at walang nagbabago. Ang
+    # 10s na hangganan ay maluwag para sa anumang tunay na buhay na quote pero
+    # masikip para sa sarang libro ng kahapon, kaya premarket/after-hours lamang
+    # ang aabot sa stand-in.
+    #
+    # ⚠️ HINDI NITO GINAGALAW ANG SUBMIT BOUNDARY. Ang re-price bago mag-order ay
+    # may sariling mahigpit na `_final_entry_bbo` sa ibang mga call site; ang
+    # binabago rito ay ang quote na NAGPAPATAKBO ng tick, hindi ang nagpepresyo
+    # ng order.
+    if family in ("alpaca_spot", "alpaca_short"):
+        try:
+            _direct_max_age = float(getattr(
+                settings, "chili_momentum_preentry_direct_max_age_seconds", 10.0) or 10.0)
+        except (TypeError, ValueError):
+            _direct_max_age = 10.0
+        tick, snapshot = _final_entry_bbo(
+            adapter,
+            product_id,
+            max_age_seconds=_direct_max_age,
+        )
+        if tick is None and bool(getattr(
+            settings, "chili_momentum_preentry_stand_in_enabled", True
+        )):
+            try:
+                _si_max_age = float(getattr(
+                    settings,
+                    "chili_momentum_preentry_stand_in_max_age_seconds", 15.0) or 15.0)
+            except (TypeError, ValueError):
+                _si_max_age = 15.0
+            tick, snapshot = _final_entry_bbo(
+                adapter,
+                product_id,
+                max_age_seconds=_direct_max_age,
+                allow_stand_in=True,
+                stand_in_max_age_seconds=_si_max_age,
+            )
+        # Ibinabalik ang snapshot para ang harang ay magdala ng EBIDENSYA. Ang
+        # dating payload ay `{"reason": "no_bbo"}` lamang -- walang simbolo,
+        # walang edad, walang pinagmulan -- kaya walang masasagot ang log kung
+        # bakit tumahimik ang lane.
+        return tick, getattr(tick, "freshness", None), snapshot
+
     tick, freshness = adapter.get_best_bid_ask(product_id)
     return tick, freshness, None
 
