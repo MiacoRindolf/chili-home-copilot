@@ -92,12 +92,13 @@ def test_a_dead_book_with_no_stand_in_still_returns_none(calls):
 
 
 @pytest.mark.parametrize("family,state", [
-    ("alpaca_spot", "watching_live"),
     ("coinbase_spot", "live_entered"),
+    ("robinhood_spot", "watching_live"),
+    ("", "watching_live"),
 ])
-def test_non_held_and_non_alpaca_paths_are_untouched(monkeypatch, family, state):
-    """Ang pre-entry at ang crypto ay may sariling quote path. Hindi sila dapat
-    dumaan sa execution-BBO contract kahit kailan."""
+def test_non_alpaca_paths_are_untouched(monkeypatch, family, state):
+    """Ang crypto at ang ibang pamilya ay may sariling quote path at sariling
+    kontrata. Hindi sila dapat dumaan sa execution-BBO contract kahit kailan."""
     called = []
     monkeypatch.setattr(LR, "_final_entry_bbo",
                         lambda *a, **k: called.append(k) or (None, {}))
@@ -110,3 +111,38 @@ def test_non_held_and_non_alpaca_paths_are_untouched(monkeypatch, family, state)
         _A(), "X", execution_family=family, state=state)
     assert tick.bid == 5.0 and freshness == "ordinary" and snap is None
     assert called == [], "hindi dapat naabot ang execution-BBO contract"
+
+
+def test_alpaca_PRE_ENTRY_is_now_routed_too(monkeypatch):
+    """⚠️ ITINATAMA ANG INVARIANT NA ITO (2026-08-26).
+
+    Ang orihinal na anyo ng testong ito ay nagsasabing ang alpaca PRE-ENTRY ay
+    "hindi dapat dumaan sa execution-BBO contract kahit kailan". Iyon ay tumpak
+    noong 2026-08-25, nang ang HELD na landas lamang ang niruruta.
+
+    Ito ay hindi na totoo, at ang pagiging hindi-totoo nito ang buong punto ng
+    PR #1177. Ang pre-entry na landas ay bumabagsak dati sa hilaw na
+    `get_best_bid_ask`, na sa premarket ay nagbabalik ng saradong libro ng
+    KAHAPON bilang buhay -- nasukat: RDIB bid 7.31 / ask 20.75 na may
+    `provider_time` 2026-08-25 20:00, 15 ORAS ang tanda, 9,579 bps. Ang quote na
+    iyon ang kumansela ng isang buhay na order 9 segundo matapos itong ipadala.
+
+    ⚠️ ANG MAS MAHALAGANG ARAL: hindi nahuli ng regression run ng #1177 ang
+    testong ito, dahil pumili ako ng listahan ng file sa kamay sa halip na
+    patakbuhin ang lahat ng tumutukoy sa `_live_tick_bbo`. Ang pulang test na
+    nag-eengkoda ng maling invariant ay mas masama kaysa sa walang test.
+    """
+    called = []
+    monkeypatch.setattr(LR, "_final_entry_bbo",
+                        lambda *a, **k: called.append(k) or (None, {}))
+
+    class _A:
+        def get_best_bid_ask(self, pid):
+            raise AssertionError("hindi dapat maabot ang lasong landas")
+
+    tick, freshness, snap = LR._live_tick_bbo(
+        _A(), "X", execution_family="alpaca_spot", state="watching_live")
+    assert tick is None
+    assert len(called) == 2, "mahigpit muna, tapos stand-in"
+    assert called[0].get("allow_stand_in") in (False, None)
+    assert called[1].get("allow_stand_in") is True

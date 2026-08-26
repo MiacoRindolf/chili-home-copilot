@@ -28217,7 +28217,22 @@ def tick_live_session(
             if _quote_reason == "execution_bbo_stale":
                 _register_stale_quote_tick(db, sess, le)
             _commit_le(sess, le)
-            _emit(db, sess, "live_held_execution_bbo_blocked", _held_execution_bbo)
+            # ⚠️ HINDI NA ITO "HELD" LAMANG (2026-08-26). Bago ang PR #1177 ay
+            # ang HELD na landas lamang ang nagbabalik ng snapshot, kaya tumpak
+            # ang pangalan. Ngayon ay nagbabalik na rin ang PRE-ENTRY, kaya
+            # pumuputok ang parehong event para sa dalawang magkaibang bagay.
+            # Nasukat 2026-08-26 12:59Z: 18 event sa 2 minuto, LAHAT mula sa
+            # mga sesyong `watching_live` -- wala ni isa mula sa hawak na
+            # posisyon. Kaparehong depekto ng #1176: pangalang nagsasabi ng
+            # maling bagay. Pinapanatili ang pangalan para sa pagkakatugma at
+            # dinadala ang KATOTOHANAN sa payload.
+            _emit(db, sess, "live_held_execution_bbo_blocked", {
+                **_held_execution_bbo,
+                "phase": (
+                    "held" if sess.state in _HELD_LIVE_STATES else "pre_entry"
+                ),
+                "session_state": str(sess.state or ""),
+            })
         _emit(db, sess, "live_blocked_by_risk", _quote_block_payload)
         if sess.state in (STATE_ARMED_PENDING_RUNNER, STATE_QUEUED_LIVE):
             # A persistently quoteless name (thin/non-common-stock — the RVMDW warrant
@@ -30760,6 +30775,39 @@ def tick_live_session(
             _wait_payload: dict[str, Any] = {"reason": _trigger_reason}
             if _reject_map:
                 _wait_payload["detector_rejects"] = dict(_reject_map)
+            # ⚠️ ANG EDAD NG FRAME NA PINAGPASYAHAN (2026-08-26).
+            #
+            # Ang bawat detector sa mapa sa itaas ay nagbabasa ng BARS. Ang
+            # reject ay walang paraan para sabihin kung ang larawang tinitingnan
+            # nito ay ilang segundo o ILANG MINUTO ang tanda -- kaya ang
+            # "waiting_for_vwap_reclaim" ay maaaring mangahulugang hindi pa
+            # nangyayari ang reclaim, O nangyari na ito at hindi pa lang ito
+            # nakikita ng frame.
+            #
+            # NASUKAT SA BUHAY (2026-08-26, 121 sample sa premarket):
+            #     bar_age_max  min=353s  p50=634s  p90=1152s  max=119,180s
+            # Ang PINAKASARIWANG frame na nakita ng entry path ay 5.9 MINUTO ang
+            # tanda; ang median ay 10.6 minuto -- sa mga pangalang gumagalaw ng
+            # 20%+ kada minuto. Ang nangingibabaw na reject ngayong araw ay
+            # `waiting_for_vwap_reclaim` (114), `flush_dip_not_front_side` (92),
+            # at `reclaim_forming` (67): lahat ay tanong tungkol sa KUNG SAAN NA
+            # ANG PRESYO NGAYON.
+            #
+            # ⚠️ TELEMETRY LAMANG -- walang binabagong pasya. Umiiral ito para
+            # ang susunod na pagbabago sa OHLCV path ay maipaglaban mula sa
+            # NASUKAT na kaugnayan sa pagitan ng edad at ng reject, sa halip na
+            # mula sa isang hinuha. Ang `read_tick_bar_age_meter` (#1116) ay
+            # sumusukat ng buong pass; ito ang nag-uugnay ng edad sa MISMONG
+            # rejection.
+            try:
+                _wp_age = _frame_bar_age_seconds(_df_trig)
+                if _wp_age is not None:
+                    _wait_payload["bar_age_seconds"] = round(float(_wp_age), 1)
+                    _wait_payload["bar_interval"] = str(_iv_trig)
+            except Exception:
+                # Ang frame ay maaaring unbound sa ilang sangay; ang isang
+                # nawawalang susi ay tapat, ang isang hulang numero ay hindi.
+                pass
             _emit(db, sess, "live_entry_trigger_wait", _wait_payload)
         elif _midday_lull and via.live_eligible and float(via.viability_score or 0) >= _flat_min:
             # Forward A/B observability: this equity WOULD have advanced at the flat
