@@ -7399,9 +7399,9 @@ class Settings(BaseSettings):
         description="OFI (normalized [-1,1]) below this = sell-side exhaustion rollover -> dispatch hint. Loose by design: the runner's real exit gate decides.",
     )
     chili_momentum_exit_ofi_lock_partial_enabled: bool = Field(
-        default=False,
+        default=True,
         validation_alias=AliasChoices("CHILI_MOMENTUM_EXIT_OFI_LOCK_PARTIAL_ENABLED"),
-        description="Action B: arm the early PARTIAL (scale-out → breakeven) on strong exhaustion. Default OFF = log-would-fire-first; the ratchet-tighten (Action A) still applies. Promote after the counterfactual proves net-positive.",
+        description="⚠️ BINUKSAN 2026-08-26 (paper lane). Ang \"A/B proof\" na hinihintay nito ay hindi kailanman darating: ZERO counterfactual event sa 30 araw, dahil walang trade na maoobserbahan -- bilog ang deadlock. Ang depth na binabasa nito ay BUHAY na ngayon (nasukat 15:39Z: 118 hilera/5min kada simbolo, 100% may provider_at, 100% may bid5/ask5, 100% may imbalance5). Ang capture ratio ay 18.5% (+108.35R naabot, +20.02R nakuha). Sa isang PAPER account na may tunay na fill, ang pagpapatakbo NITO ang A/B. Early PARTIAL scale-out sa exhaustion -- doktrina rin ni Ross. Action B: arm the early PARTIAL (scale-out → breakeven) on strong exhaustion. Default OFF = log-would-fire-first; the ratchet-tighten (Action A) still applies. Promote after the counterfactual proves net-positive.",
     )
     chili_momentum_exit_ofi_arm_frac: float = Field(
         default=0.5,
@@ -7417,9 +7417,9 @@ class Settings(BaseSettings):
         description="The ONE irreducible knob: base lock tightness (bps below the high-water mark). Scaled tighter by move strength (peak_r/rr) and flow magnitude, clamped no looser than the cushion band already is and no tighter than 0.25× the base.",
     )
     chili_momentum_exit_ofi_hidden_seller_enabled: bool = Field(
-        default=False,
+        default=True,
         validation_alias=AliasChoices("CHILI_MOMENTUM_EXIT_OFI_HIDDEN_SELLER_ENABLED"),
-        description="Accelerant: hidden-seller absorption at the highs arms the lock on profit-arm + micro-rollover alone (distribution is the one LEADING signal). OFF at ship — promote only after OFI+micro proves net-positive (log-only-first).",
+        description="⚠️ BINUKSAN 2026-08-26 (paper lane). Ang \"A/B proof\" na hinihintay nito ay hindi kailanman darating: ZERO counterfactual event sa 30 araw, dahil walang trade na maoobserbahan -- bilog ang deadlock. Ang depth na binabasa nito ay BUHAY na ngayon (nasukat 15:39Z: 118 hilera/5min kada simbolo, 100% may provider_at, 100% may bid5/ask5, 100% may imbalance5). Ang capture ratio ay 18.5% (+108.35R naabot, +20.02R nakuha). Sa isang PAPER account na may tunay na fill, ang pagpapatakbo NITO ang A/B. Hidden-seller absorption sa highs -- nagpapaaga ng lock sa distribusyon. Accelerant: hidden-seller absorption at the highs arms the lock on profit-arm + micro-rollover alone (distribution is the one LEADING signal). OFF at ship — promote only after OFI+micro proves net-positive (log-only-first).",
     )
     # ── Tape-acceleration reversal exit (sell-into-strength climax lock) ──────────
     # Sibling of the OFI exhaustion lock for the names the lock MISSES. The OFI lock
@@ -7571,9 +7571,9 @@ class Settings(BaseSettings):
         description="Kill-switch for the v3 ASK-SIDE PRESSURE lock (Ross 2026-08-17: 'fixated on the level 2, specifically the ask price'). ON = reads the same ladder distribution as v2, fires an INVARIANT-A (ratchet-only) stop tighten when the ask wall is building (ask_build >= ofi threshold) while bids stop refilling and the book/price rolls bid-favored, and emits live_ask_side_pressure with the band-only counterfactual on every armed tick. Reuses the v1 knobs (arm_frac, base_lock_bps, ofi_threshold, L2 freshness window) — no new numbers. Can only tighten a stop on a winner; never loosens, never sells size.",
     )
     chili_momentum_exit_ladder_live: bool = Field(
-        default=False,
+        default=True,
         validation_alias=AliasChoices("CHILI_MOMENTUM_EXIT_LADDER_LIVE"),
-        description="The size-moving gate: when ON, a fired distribution read posts the small resting sell-into-strength limit live. Default OFF — a DELIBERATE staged step: the armed-tick counterfactual + INVARIANT-A stop-ratchet (exit_ladder_ENABLED) are already live, but the size-moving sell is not yet A/B-proven net-positive (2026-07-06: a premature default-ON was reverted — the BJDX/LUCY give-backs were the dup-Reference 409 orphan bug, fixed independently, NOT a missing harvest). Flip ON (or set CHILI_MOMENTUM_EXIT_LADDER_LIVE=true) to promote once the counterfactual proves out.",
+        description="⚠️ BINUKSAN 2026-08-26 (paper lane). Ang \"A/B proof\" na hinihintay nito ay hindi kailanman darating: ZERO counterfactual event sa 30 araw, dahil walang trade na maoobserbahan -- bilog ang deadlock. Ang depth na binabasa nito ay BUHAY na ngayon (nasukat 15:39Z: 118 hilera/5min kada simbolo, 100% may provider_at, 100% may bid5/ask5, 100% may imbalance5). Ang capture ratio ay 18.5% (+108.35R naabot, +20.02R nakuha). Sa isang PAPER account na may tunay na fill, ang pagpapatakbo NITO ang A/B. Sell-into-strength -- ang mismong doktrina ni Ross (partials INTO strength). The size-moving gate: when ON, a fired distribution read posts the small resting sell-into-strength limit live. Default OFF — a DELIBERATE staged step: the armed-tick counterfactual + INVARIANT-A stop-ratchet (exit_ladder_ENABLED) are already live, but the size-moving sell is not yet A/B-proven net-positive (2026-07-06: a premature default-ON was reverted — the BJDX/LUCY give-backs were the dup-Reference 409 orphan bug, fixed independently, NOT a missing harvest). Flip ON (or set CHILI_MOMENTUM_EXIT_LADDER_LIVE=true) to promote once the counterfactual proves out.",
     )
     # Class gate: extend the adaptive exit (v1 exhaustion lock + v2 sell-into-strength)
     # to the EQUITY lane too (using equity L2 from iqfeed_depth_snapshots). The helpers
