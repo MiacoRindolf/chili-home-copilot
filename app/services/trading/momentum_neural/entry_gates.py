@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import logging
 import math
+import threading
 from datetime import datetime, timezone
 from typing import Any
 
@@ -2026,6 +2027,50 @@ def _resolve_is_ssr(symbol: str | None) -> bool:
         return False
 
 
+# ⚠️ ANG PRIOR-DAY CLOSE AY BUHAY NA HTTP SA LOOB NG TICK (2026-08-26).
+#
+# Ang halagang ito ay HINDI NAGBABAGO sa buong araw ng kalakalan -- pero
+# nakasakay ito sa `massive:quote:` cache, na may `_TTL_QUOTE = 30` segundo
+# dahil iyon ay para sa BUHAY na quote. Kada 30 segundo kada simbolo ay
+# nag-e-expire ito at nagpapadala ng bagong `GET /v2/snapshot/...` na may
+# `timeout=15` -- sa loob mismo ng entry evaluation.
+#
+# PAANO ITO NAHULI: ang tape replay ay nagbabawal ng network at itinuro ang
+# eksaktong daan --
+#     tick_live_session -> red_to_green_confirmation -> _prior_day_close
+#       -> get_last_quote -> _get_stock_snapshot -> requests.get(timeout=15)
+# Hindi ito makikita sa log; ang replay lamang ang makakakita nito.
+#
+# ⚠️ DALAWANG PINSALA: (1) latency sa mainit na daan -- isang round trip kada
+# simbolo kada 30s, na may 15s na timeout kapag mabagal ang provider; at
+# (2) ang replay ay HINDI DETERMINISTIKO, kaya hindi natin maisusubok ang
+# mga pagbabago laban sa tape at kailangan pang maghintay ng buhay na araw.
+#
+# Ang cache na ito ay naka-key sa (SIMBOLO, PETSA NG KALAKALAN), kaya tama itong
+# nag-e-expire sa hangganan ng araw -- hindi kada 30 segundo.
+_PRIOR_DAY_CLOSE_CACHE: dict[tuple[str, str], float | None] = {}
+_prior_day_close_lock = threading.Lock()
+
+
+def _prior_day_close_cache_key(symbol: str) -> tuple[str, str]:
+    """(SIMBOLO, petsa ng kalakalan sa ET). Ang petsa ang nagpapaso nito."""
+    try:
+        from zoneinfo import ZoneInfo
+
+        day = datetime.now(ZoneInfo("America/New_York")).date().isoformat()
+    except Exception:
+        day = datetime.now(timezone.utc).date().isoformat()
+    return (symbol, day)
+
+
+def reset_prior_day_close_cache() -> int:
+    """Linisin ang cache (para sa test at para sa manu-manong pag-refresh)."""
+    with _prior_day_close_lock:
+        n = len(_PRIOR_DAY_CLOSE_CACHE)
+        _PRIOR_DAY_CLOSE_CACHE.clear()
+    return n
+
+
 def _prior_day_close(symbol: str | None) -> float | None:
     """R8 (WAVE-4 ITEM-3) — the PRIOR-DAY CLOSE for an equity name (Ross's red-to-green
     anchor). Reuses the cached Massive last-quote (``prevDay.c`` -> ``previous_close``), the
@@ -2036,14 +2081,37 @@ def _prior_day_close(symbol: str | None) -> float | None:
         s = (symbol or "").strip().upper()
         if not s or s.endswith("-USD") or "-" in s or "/" in s:
             return None
+        try:
+            from app.config import settings as _egset
+
+            _cache_on = bool(getattr(
+                _egset, "chili_momentum_prior_day_close_daily_cache", True))
+        except Exception:
+            _cache_on = True
+
+        _key = _prior_day_close_cache_key(s) if _cache_on else None
+        if _key is not None:
+            with _prior_day_close_lock:
+                if _key in _PRIOR_DAY_CLOSE_CACHE:
+                    # Kabilang ang naka-cache na None: ang pangalang walang
+                    # prior close ay hindi dapat tanungin muli kada 30 segundo.
+                    return _PRIOR_DAY_CLOSE_CACHE[_key]
+
         from ...massive_client import get_last_quote
 
         q = get_last_quote(s)
         if not isinstance(q, dict):
+            if _key is not None:
+                with _prior_day_close_lock:
+                    _PRIOR_DAY_CLOSE_CACHE[_key] = None
             return None
         pc = q.get("previous_close") or q.get("prev_close")
         pc = float(pc) if pc is not None else None
-        return pc if (pc is not None and pc > 0) else None
+        _out = pc if (pc is not None and pc > 0) else None
+        if _key is not None:
+            with _prior_day_close_lock:
+                _PRIOR_DAY_CLOSE_CACHE[_key] = _out
+        return _out
     except Exception:
         return None
 
