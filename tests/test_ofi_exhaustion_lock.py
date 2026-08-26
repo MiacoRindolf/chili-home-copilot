@@ -192,18 +192,37 @@ def test_strong_flow_arms_partial_weak_does_not() -> None:
     assert weak["partial_arm"] is False
 
 
-def test_hidden_seller_accelerant_off_by_default() -> None:
-    # absorption alone (no OFI flip / no giveback) must NOT fire while the
-    # hidden-seller flag ships OFF (default).
+def test_hidden_seller_accelerant_is_gated_by_its_flag(monkeypatch) -> None:
+    """⚠️ ITINATAMA ANG INVARIANT NA ITO (2026-08-26).
+
+    Ang orihinal na anyo ng testong ito ay nag-aasert na ang accelerant ay
+    "off by default". Tumpak iyon nang ipadala ito, ngunit ang default ay
+    SADYANG binuksan noong 2026-08-26: ZERO counterfactual event ang naipon sa
+    30 araw (walang trade na maoobserbahan), kaya ang "promote only after OFI+
+    micro proves net-positive" ay isang bilog na hindi kailanman masasara.
+    Samantala ang capture ratio ay 18.5%.
+
+    Ang IMBARIANTENG mahalaga ay hindi ang default -- ito ay na ang accelerant ay
+    NAKA-GATE SA BANDILA NITO sa magkabilang direksyon. Iyon ang sinusuri ngayon.
+    """
+    from app.config import settings
+
     hwm = _ENTRY + 2.0 * _RD
-    r = ofi_exhaustion_lock(
+    kwargs = dict(
         high_water_mark=hwm, entry_price=_ENTRY, bid=hwm,  # zero giveback
         atr_pct=_ATR, stop_atr_mult=_MULT,
         ofi=+0.5, micro_edge=-30.0, hidden_seller=5.0,  # strong absorption + micro roll
         reward_risk=3.0, current_stop=0.99, breakeven_floor=1.00,
         current_band_bps=800.0, side_long=True,
     )
-    assert r["fired"] is False  # accelerant gated behind its flag
+    monkeypatch.setattr(
+        settings, "chili_momentum_exit_ofi_hidden_seller_enabled", False, raising=False)
+    assert ofi_exhaustion_lock(**kwargs)["fired"] is False, (
+        "naka-OFF ang bandila: ang absorption lamang ay hindi dapat pumutok")
+    monkeypatch.setattr(
+        settings, "chili_momentum_exit_ofi_hidden_seller_enabled", True, raising=False)
+    assert ofi_exhaustion_lock(**kwargs)["fired"] is True, (
+        "naka-ON ang bandila: ang absorption lamang ay dapat pumutok")
 
 
 def test_hidden_seller_accelerant_fires_when_enabled(monkeypatch) -> None:
