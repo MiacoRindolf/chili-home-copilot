@@ -3134,9 +3134,9 @@ class Settings(BaseSettings):
     #     data relabel. Operator flips READ only after inspecting the divergence distribution
     #     + day-net cross-check from the WRITE pass.
     chili_momentum_broker_truth_reconciliation_enabled: bool = Field(
-        default=False,
+        default=True,
         validation_alias=AliasChoices("CHILI_MOMENTUM_BROKER_TRUTH_RECONCILIATION_ENABLED"),
-        description="Kill-switch: True => the reconcile pass writes the authoritative broker-truth label columns on momentum_automation_outcomes (additive, never overwrites legacy fields). Default OFF (pass is a no-op).",
+        description="⚠️ BINUKSAN 2026-08-26. Ang pass na ito ay ADDITIVE (hindi kailanman nag-o-overwrite ng legacy field), kaya ang pananatiling OFF nito ay walang naiingatan at may ipinagkakait. NASUKAT: nang isara ang CDTG (session 16534) nang wala ang pass na ito, ang persisted na posisyon ay nanatili sa snapshot at ang serial-recertification guard ay nag-defer ng 15 entry sa buong hapon (`account_position_exposure_present`). Kinailangan kong linisin ang hilera sa kamay. Wala ring reconciler ang container (broker-sync Exited 137, 7 linggo). Kill-switch: True => the reconcile pass writes the authoritative broker-truth label columns on momentum_automation_outcomes (additive, never overwrites legacy fields). Default OFF (pass is a no-op).",
     )
     chili_momentum_broker_truth_label_enabled: bool = Field(
         default=False,
