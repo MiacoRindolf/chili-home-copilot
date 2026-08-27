@@ -61,6 +61,13 @@ $env:IQFEED_WATCH_HARD_MAX = '480'
 $env:IQFEED_WATCH_FLOOR = '400'
 $env:IQFEED_SUBSCRIBE_FRESH_WINDOW_S = '600'
 $env:IQFEED_ELIGIBLE_FRESH_SECONDS = '3600'
+# CATCHUP (2026-08-27): ang knob na ito ay dating itinakda LAMANG sa env ng isang
+# buhay na proseso at nawala sa 03:56 na restart -- kinabukasan mismo ay bumagsak
+# ang frontier nang ~50 MINUTO sa open habang default 2048 ang drain. Sinukat
+# 2026-08-24: sa 30-49k rows/min na open ay lumalayo ang frontier nang 0.35-0.66
+# s/s. Ceiling: CATCHUP_BATCH_EVENTS x 18 < 65,535 => max 3,640; ang 3600 ang
+# napatunayang halaga. Ang isang lever na hindi naka-persist ay hindi lever.
+$env:IQFEED_DB_RELEASE_CATCHUP_BATCH_EVENTS = '3600'
 
 $dir = 'D:\CHILI-Docker\chili-data\iqfeed_trades'
 if (-not (Test-Path $dir)) { New-Item -ItemType Directory -Force -Path $dir | Out-Null }
