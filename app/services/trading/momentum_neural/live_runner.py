@@ -28679,7 +28679,28 @@ def tick_live_session(
             # class) is a DETERMINISTIC policy decline, not a runner error: terminalize
             # cleanly (live_cancelled) so the recurring no_bbo noise stops masking REAL
             # errors. Still blocks entry; only the terminal label changes.
-            _decline_terminal(db, sess, reason="no_bbo")
+            #
+            # DEBOUNCE (2026-08-27): ang "persistently" ay nangangailangan ng
+            # PAGPAPATULOY -- ang lumang code ay nag-terminal sa UNANG
+            # quoteless tick. Nasukat sa tape-freeze ngayong hapon: 28 session
+            # ang namatay nang instant sa unang tick (tunay na pangalan, hindi
+            # warrant), tapos muling in-arm = puro churn. Ngayon: kailangan ng
+            # N sunud-sunod na quoteless PRE-ENTRY tick (default 3, ~30s sa
+            # 10s cadence) bago mag-terminal; ang isang magandang quote sa
+            # susunod na tick ay nagre-reset (tingnan ang reset sa ibaba ng
+            # quote-ok na landas ng parehong tick function). Ang RVMDW-class
+            # na tunay na quoteless ay mate-terminal pa rin sa ~30s.
+            try:
+                _nb_need = int(getattr(
+                    settings, "chili_momentum_no_bbo_decline_consecutive_ticks", 3
+                ) or 1)
+            except (TypeError, ValueError):
+                _nb_need = 3
+            _nb_seen = int(le.get("no_bbo_consecutive_ticks") or 0) + 1
+            le["no_bbo_consecutive_ticks"] = _nb_seen
+            _commit_le(sess, le)
+            if _nb_seen >= max(1, _nb_need):
+                _decline_terminal(db, sess, reason="no_bbo")
         db.flush()
         return {
             "ok": True,
@@ -28688,6 +28709,11 @@ def tick_live_session(
                 _quote_reason if _held_execution_bbo is not None else "no_quote"
             ),
         }
+    if le.get("no_bbo_consecutive_ticks"):
+        # May quote na ulit — ang debounce counter ay nagre-reset (ang
+        # "persistent" ay sunud-sunod, hindi kabuuang bilang).
+        le.pop("no_bbo_consecutive_ticks", None)
+        _commit_le(sess, le)
 
     # Adaptive spread tolerance (no magic 12 bps): the BBO spread is a round-trip
     # cost, so gate it relative to how far THIS instrument actually moves (its
