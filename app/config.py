@@ -8464,6 +8464,23 @@ class Settings(BaseSettings):
         validation_alias=AliasChoices("CHILI_MOMENTUM_REENTRY_AFTER_STOP_BOUND_ENABLED"),
         description="TASK#8: kill-switch for the bounded re-entry-after-stop-out cap. True => after max_stopout_reentries LOSS recycles the session terminalizes. OFF ⇒ byte-identical unlimited recycle.",
     )
+    chili_momentum_exit_stand_in_after_defers: int = Field(
+        default=3,
+        ge=0,
+        le=100,
+        validation_alias=AliasChoices(
+            "CHILI_MOMENTUM_EXIT_STAND_IN_AFTER_DEFERS"
+        ),
+        description=(
+            "2026-08-27 (AEMD bailout): ang ordinaryong PROTECTIVE exit "
+            "(stop/bailout/trail/eod) sa EXTENDED hours ay nagse-stand-in na "
+            "pagkatapos ng ganitong bilang ng sunud-sunod na BBO deferral "
+            "(ang AEMD quote ay 2.4 ORAS na luma; ang #1224 ay emergency "
+            "branch lamang at nanatiling deadlocked ang ordinaryong pinto). "
+            "Parehong konserbatibong haircut pababa. Sa RTH laging strict. "
+            "0 => patay ang escalation (legacy defer-forever)."
+        ),
+    )
     chili_momentum_emergency_exit_stand_in_enabled: bool = Field(
         default=True,
         validation_alias=AliasChoices(

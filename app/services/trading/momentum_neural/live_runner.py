@@ -12689,6 +12689,57 @@ def _submit_live_market_exit_impl(
             max_age_seconds=max_age_seconds,
         )
         le["exit_final_bbo"] = final_bbo
+        _exit_si_used = False
+        if final_tick is None:
+            # STAND-IN ESCALATION SA EXTENDED HOURS (2026-08-27 AEMD bailout).
+            # Ang AEMD 18035 ay pumasok sa live_bailout (protective out-now
+            # signal) pero ang exit ay na-defer nang paulit-ulit -- ang huling
+            # AEMD quote ay 8,679s (2.4 ORAS) na luma; walang IEX quote sa
+            # late afterhours. Ang #1224 stand-in ay emergency-branch lamang;
+            # ang ordinaryong exit door ay nanatiling deadlocked. Ang bawat
+            # exit na dumadaan dito ay PROTECTIVE (stop/bailout/trail/eod) --
+            # out-now semantics. Kaya: sa EXTENDED hours lamang, pagkatapos ng
+            # N sunud-sunod na deferral (default 3 -- hindi unang tick), ang
+            # stand-in ay sinusubukan nang may PAREHONG konserbatibong haircut
+            # pababa. Sa RTH laging strict (sariwa naman lagi ang quotes doon).
+            _exit_defer_n = int(le.get("exit_bbo_defer_count") or 0) + 1
+            le["exit_bbo_defer_count"] = _exit_defer_n
+            _si_after = int(getattr(
+                settings, "chili_momentum_exit_stand_in_after_defers", 3
+            ) or 0)
+            _exit_extended_now = False
+            if _si_after > 0 and _exit_defer_n >= _si_after:
+                try:
+                    from .market_profile import market_session_now as _si_msn
+
+                    _exit_extended_now = _si_msn(
+                        sess.symbol, now=_utcnow_aware()
+                    ) != "regular"
+                except Exception:
+                    _exit_extended_now = False
+            if _exit_extended_now:
+                _si_age2 = float(getattr(
+                    settings,
+                    "chili_momentum_emergency_exit_stand_in_max_age_seconds",
+                    900.0,
+                ) or 0.0)
+                if _si_age2 > 0:
+                    _si_tick2, _si_bbo2 = _final_entry_bbo(
+                        adapter,
+                        product_id,
+                        max_age_seconds=max_age_seconds,
+                        allow_stand_in=True,
+                        stand_in_max_age_seconds=_si_age2,
+                    )
+                    if _si_tick2 is not None:
+                        final_tick, final_bbo = _si_tick2, _si_bbo2
+                        le["exit_final_bbo"] = final_bbo
+                        _exit_si_used = True
+                        _emit(db, sess, "live_exit_stand_in_pricing", {
+                            "reason": reason,
+                            "defer_count": _exit_defer_n,
+                            "execution_bbo": final_bbo,
+                        })
         if final_tick is None:
             _commit_le(sess, le)
             _emit(db, sess, "live_exit_deferred_final_bbo", {
@@ -12701,9 +12752,25 @@ def _submit_live_market_exit_impl(
                 "deferred": True,
                 "pre_place_blocked": True,
             }
+        le.pop("exit_bbo_defer_count", None)
         bid = float(final_tick.bid)
         ask = float(final_tick.ask)
         mid = float(final_tick.mid)
+        if _exit_si_used:
+            # Parehong konserbatibong haircut ng #1224: pababa = mas
+            # marketable = ligtas sa long-only protective exit.
+            try:
+                _si_hc2 = float(getattr(
+                    settings,
+                    "chili_momentum_emergency_exit_stand_in_haircut_pct",
+                    1.0,
+                ) or 0.0) / 100.0
+            except (TypeError, ValueError):
+                _si_hc2 = 0.01
+            _si_hc2 = max(0.0, min(0.10, _si_hc2))
+            bid *= (1.0 - _si_hc2)
+            ask *= (1.0 - _si_hc2)
+            mid *= (1.0 - _si_hc2)
         exit_execution_bbo_freshness = getattr(final_tick, "freshness", None)
         exit_execution_bbo_max_age = max_age_seconds
 
