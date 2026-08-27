@@ -209,3 +209,86 @@ def test_the_tick_stride_is_overridable(monkeypatch):
     magaspang na stride para matapos."""
     mod = _load(monkeypatch, {"NIGHTLY_REPLAY_TICK_STRIDE": "16"})
     assert mod.TICK_STRIDE == "16"
+
+
+# ── Ang ulat ay nagpapakita ng maling field (2026-08-27) ────────────────────
+
+
+def test_the_report_reads_the_GATE_not_only_the_detector_detail(monkeypatch):
+    """ANG IKA-LIMANG BUG. Ang `_top_rejects` ay nag-a-aggregate ng
+    `detector_rejects` -- isang telemetry-only na side-map na isinusulat LAMANG ng
+    pullback ladder. Ang gate na TUMANGGI ay nasa `payload_json->>'reason'`.
+
+    NASUKAT 2026-08-26: para sa XPON (225 wait) at OLOX (74 wait) ang tumanggi ay
+    ang 15m fallback leg na `momentum_volume_confirmation`
+    (live_runner.py:29608), at ang call site na iyon ay HINDI KAILANMAN sumusulat
+    sa `_reject_map`. Kaya kapag ang fallback leg ang tumanggi, ang
+    `detector_rejects` ay HINDI KAYANG maglaman ng tunay na dahilan:
+
+        naiulat  premarket_tickbreak_unconfirmed x102
+        totoo    volume_below_1p5x_avg 225 sa 225  (100%)
+    """
+    mod = _load(monkeypatch)
+    assert hasattr(mod, "_binding_gates"), (
+        "ang ulat ay dapat may query para sa gate mismo"
+    )
+    import ast as _ast
+    fn = next(
+        n for n in _ast.walk(_tree())
+        if isinstance(n, _ast.FunctionDef) and n.name == "_binding_gates"
+    )
+    src = _ast.unparse(fn)
+    assert "'reason'" in src or '"reason"' in src
+    assert "detector_rejects" not in src.split('"""')[-1], (
+        "ang gate query ay hindi dapat bumasa ng detector_rejects"
+    )
+
+
+def test_the_gate_is_rendered_before_the_detector_detail():
+    """⚠️ Ang pagkakasunod ANG lunas. Ang pagpapakita ng detector detail nang
+    mag-isa ay binabaligtad ang causal order at itinuturo ang tuning sa mga
+    detector na hindi kailanman ang binding constraint."""
+    src = _SCRIPT.read_text(encoding="utf-8")
+    i_gate = src.index("ANG GATE NA TUMANGGI")
+    i_detail = src.index("Upstream na detalye ng detector")
+    assert i_gate < i_detail
+
+
+def test_the_detector_sql_has_no_bare_percent_literal():
+    """⚠️ ANG BUG NA GINAWA KO MISMO HABANG INAAYOS ITO. Ang psycopg2 ay
+    binabasa ang `%` bilang placeholder; ang paghahalo nito sa `%(s)s` ay
+    nagdudulot ng `argument formats can't be mixed` at TAHIMIK na nagbabalik ng
+    walang laman na listahan sa pamamagitan ng `except Exception` sa ibaba.
+    Isang komentong may porsyentong simbolo ay sapat na."""
+    import ast as _ast
+    fn = next(
+        n for n in _ast.walk(_tree())
+        if isinstance(n, _ast.FunctionDef) and n.name == "_top_rejects"
+    )
+    for node in _ast.walk(fn):
+        if isinstance(node, _ast.Assign) and isinstance(node.value, _ast.Constant):
+            q = str(node.value.value or "")
+            if "detector_rejects" not in q:
+                continue
+            stripped = q.replace("%(s)s", "")
+            assert "%" not in stripped, (
+                "walang hubad na `%` sa SQL na may naka-pangalang params"
+            )
+
+
+def test_both_symbols_gates_are_readable_from_the_sink():
+    """Buhay na tseke laban sa aktuwal na replay sink, kung mayroon."""
+    import importlib.util as _iu
+    import sys as _sys
+
+    spec = _iu.spec_from_file_location("_nightly_live", _SCRIPT)
+    mod = _iu.module_from_spec(spec)
+    _sys.modules["_nightly_live"] = mod
+    spec.loader.exec_module(mod)
+    for sym in ("XPON", "OLOX"):
+        rows = mod._binding_gates(sym)
+        if not rows:
+            pytest.skip("walang laman ang replay sink para sa %s" % sym)
+        reason, n, pct = rows[0]
+        assert n > 0 and 0 < pct <= 100.0
+        assert reason and reason != "(walang reason)"

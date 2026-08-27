@@ -161,8 +161,54 @@ def run_replay(day: str, mover: dict) -> dict:
             except ValueError:
                 pass
     rejects = _top_rejects(sym)
+    gates = _binding_gates(sym)
     return {"symbol": sym, "pnl": pnl, "fills": fills, "rejects": rejects,
+            "gates": gates,
             "exit_code": p.returncode}
+
+
+def _binding_gates(symbol: str) -> list[tuple[str, int, float]]:
+    """Ang gate na TUMANGGI, mula sa pinakabagong replay session sa sink.
+
+    ⚠️ ITO ANG FIELD NA MAHALAGA, at hindi ito ipinapakita ng ulat hanggang
+    2026-08-27. Ang `payload_json->>'reason'` ang nagdadala ng `_trigger_reason`
+    -- ang halagang kapares ng `_trigger_ok == False` sa sandaling kinuha ang wait
+    branch. Ang `detector_rejects` ay isang telemetry-only na side-map na
+    isinusulat LAMANG ng pullback ladder.
+
+    NASUKAT 2026-08-26: para sa XPON (225 wait) at OLOX (74 wait) ang tumanggi ay
+    ang 15m fallback leg na `momentum_volume_confirmation`
+    (live_runner.py:29608) -- at ang call site na iyon ay HINDI KAILANMAN
+    sumusulat sa `_reject_map`. Kaya kapag ang fallback leg ang tumanggi, ang
+    `detector_rejects` ay HINDI KAYANG maglaman ng tunay na dahilan. Hindi ito
+    paminsan-minsang nakaliligaw; sa dalawang session na iyon ay 100% itong mali:
+    naiulat na `premarket_tickbreak_unconfirmed x102` gayong ang totoo ay
+    `volume_below_1p5x_avg` sa 225 sa 225.
+    """
+    q = """
+        WITH sess AS (
+            SELECT max(id) AS sid FROM trading_automation_sessions WHERE symbol = %(s)s
+        ),
+        w AS (
+            SELECT e.payload_json->>'reason' AS reason
+            FROM trading_automation_events e, sess
+            WHERE e.session_id = sess.sid AND e.event_type = 'live_entry_trigger_wait'
+        )
+        SELECT coalesce(reason, '(walang reason)') AS reason,
+               count(*) AS n,
+               100.0 * count(*) / NULLIF(sum(count(*)) OVER (), 0) AS pct
+        FROM w GROUP BY 1 ORDER BY 2 DESC LIMIT 5
+    """
+    try:
+        conn = psycopg2.connect(SINK)
+        cur = conn.cursor()
+        cur.execute(q, {"s": symbol})
+        rows = cur.fetchall()
+        conn.close()
+        return [(r[0], int(r[1]), float(r[2] or 0.0)) for r in rows]
+    except Exception as exc:
+        _log(f"gate read failed for {symbol}: {exc}")
+        return []
 
 
 def _top_rejects(symbol: str) -> list[tuple[str, int]]:
@@ -177,6 +223,11 @@ def _top_rejects(symbol: str) -> list[tuple[str, int]]:
              sess
         WHERE e.session_id = sess.sid AND e.event_type = 'live_entry_trigger_wait'
         GROUP BY 1 ORDER BY 2 DESC LIMIT 5
+        -- NOTE: ang isang wait ay nag-e-emit ng ~3 detector reject, kaya ang raw
+        -- na "x102" ay mukhang mayorya gayong halos kalahati lang ito ng mga
+        -- wait. Ang render ang naghahati laban sa bilang ng WAIT, hindi sa
+        -- kabuuan ng mga reject. (Walang porsyentong simbolo rito: binabasa iyon
+        -- ng psycopg2 bilang placeholder at sasabog ang naka-pangalang params.)
     """
     try:
         conn = psycopg2.connect(SINK)
@@ -212,15 +263,32 @@ def main() -> None:
                          f"  (fills: {len(r.get('fills') or [])})")
             for f in (r.get("fills") or [])[:10]:
                 lines.append(f"    - {f}")
+            _gates = r.get("gates") or []
+            _waits = sum(int(g[1]) for g in _gates) or 0
+            if _gates:
+                lines.append(
+                    f"- **ANG GATE NA TUMANGGI** (`reason`, {_waits} wait):")
+                for gate, n, pct in _gates:
+                    lines.append(f"    - **{gate}** ×{n}  ({pct:.0f}%)")
             if r.get("rejects"):
-                lines.append("- Top binding rejects (bakit hindi/naantala ang entry):")
+                lines.append(
+                    "- Upstream na detalye ng detector (`detector_rejects` — BAKIT "
+                    "hindi pumutok ang pullback ladder, kaya ang fallback leg ang "
+                    "nagpasya; HINDI ito ang gate sa itaas):")
                 for rej, n in r["rejects"]:
-                    lines.append(f"    - {rej} ×{n}")
+                    _p = (100.0 * n / _waits) if _waits else 0.0
+                    lines.append(f"    - {rej} ×{n}  ({_p:.0f}% ng wait)")
         lines.append("")
     lines.append(f"**TOTAL replay PnL sa {len(movers)} movers: {total:+.2f} USD**")
     lines.append("")
-    lines.append("_Basahin: ang malaking mover na maliit/negatibo ang replay PnL + "
-                 "isang nangingibabaw na reject = ang susunod na gate na susuriin._")
+    lines.append(
+        "_Basahin: ang malaking mover na maliit/negatibo ang replay PnL + isang "
+        "nangingibabaw na **GATE** = ang susunod na susuriin. Ang gate ang "
+        "tumanggi; ang detector detail sa ilalim nito ay nagsasabi kung bakit "
+        "hindi pumutok ang ladder. Hanggang 2026-08-27 ay ang detalye LAMANG ang "
+        "ipinapakita ng ulat, at para sa XPON/OLOX noong 08-26 ay 100% itong "
+        "mali -- naiulat na `premarket_tickbreak_unconfirmed` gayong ang totoong "
+        "gate ay `volume_below_1p5x_avg` sa 225 sa 225._")
     report = OUT_DIR / f"{day}.md"
     report.write_text("\n".join(lines), encoding="utf-8")
     _log(f"report: {report}")
