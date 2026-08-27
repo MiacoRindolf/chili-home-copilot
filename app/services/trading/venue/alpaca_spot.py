@@ -1808,8 +1808,12 @@ class AlpacaSpotAdapter:
             # ordinaryong order ito ay walang epekto (legs=[]).
             from alpaca.trading.requests import GetOrderByIdRequest
 
+            # ⚠️ `filter=` ang parameter ng SDK, HINDI `options=`. Ang maling
+            # kwarg (2026-08-27, ~4 na oras na deployed) ay nagpa-TypeError sa
+            # BAWAT get_order => None => ang CELU fill ay hindi nakita ng
+            # confirm loop nang ~55 minuto habang bumabagsak ang presyo -12%.
             o = self._account_client().get_order_by_id(
-                str(order_id), options=GetOrderByIdRequest(nested=True)
+                str(order_id), filter=GetOrderByIdRequest(nested=True)
             )
             return self._normalize_order(o), _fresh(5.0)
         except Exception as exc:
@@ -1824,7 +1828,7 @@ class AlpacaSpotAdapter:
             from alpaca.trading.requests import GetOrderByIdRequest
 
             order = self._account_client().get_order_by_id(
-                str(order_id), options=GetOrderByIdRequest(nested=True)
+                str(order_id), filter=GetOrderByIdRequest(nested=True)
             )
             return {
                 "readable": True,
