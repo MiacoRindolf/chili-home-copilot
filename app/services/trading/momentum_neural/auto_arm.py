@@ -5725,6 +5725,7 @@ def run_auto_arm_pass(
                 "source": _conc_source,
                 "top": sorted(_conc_top) if _conc_top is not None else None,
             }
+        _mark("concentration")
 
         def _live_armable(_c) -> bool:
             """Live-pick gates that must NOT starve the paper shadow list:
@@ -5843,6 +5844,7 @@ def run_auto_arm_pass(
     from ..execution_family_registry import resolve_execution_family_for_symbol
     from .operator_actions import begin_live_arm, confirm_live_arm
 
+    _mark("selection")
     _picks = [(chosen, chosen_reason)] + list(_more_picks)
     # A6: Direct Alpaca paper spends CURRENT operational headroom instead of an
     # arbitrary three-arms-per-pass constant. The transparent budget composes
@@ -5863,6 +5865,7 @@ def run_auto_arm_pass(
         out["skipped"] = "arm_capacity_unavailable"
         out["arm_capacity_error_type"] = type(exc).__name__
         return out
+    _mark("capacity")
     out["arm_capacity"] = _arm_capacity
     logger.info(
         "[auto_arm] resolved arm capacity family=%s budget=%s policy=%s "
@@ -5879,7 +5882,9 @@ def run_auto_arm_pass(
         return out
     out["armed"] = 0
     _armed_syms: list[str] = []
+    _arm_attempt_secs: list[float] = []
     for chosen, chosen_reason in _picks:
+        _att_t0 = _phase_time.monotonic()
         if out["armed"] >= _max_arms:
             break
         _exec_family = resolve_execution_family_for_symbol(chosen.symbol)
@@ -5919,6 +5924,9 @@ def run_auto_arm_pass(
         except Exception:
             pass
 
+        _arm_attempt_secs.append(
+            round(_phase_time.monotonic() - _att_t0, 2)
+        )
         begin = begin_live_arm(
             db,
             user_id=int(uid),
@@ -6103,6 +6111,11 @@ def run_auto_arm_pass(
         out.pop("begin_error", None)
         out.pop("confirm_error", None)
     try:
+        try:
+            if _arm_attempt_secs:
+                out["arm_attempt_pregate_seconds"] = list(_arm_attempt_secs)
+        except Exception:
+            pass
         _phase_end = _phase_time.monotonic()
         _phases = out.get("phase_seconds")
         _phases = _phases if isinstance(_phases, dict) else {}
