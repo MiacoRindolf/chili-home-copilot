@@ -8464,6 +8464,30 @@ class Settings(BaseSettings):
         validation_alias=AliasChoices("CHILI_MOMENTUM_REENTRY_AFTER_STOP_BOUND_ENABLED"),
         description="TASK#8: kill-switch for the bounded re-entry-after-stop-out cap. True => after max_stopout_reentries LOSS recycles the session terminalizes. OFF ⇒ byte-identical unlimited recycle.",
     )
+    chili_momentum_tick_surge_admits_any_frame: bool = Field(
+        default=True,
+        validation_alias=AliasChoices(
+            "CHILI_MOMENTUM_TICK_SURGE_ADMITS_ANY_FRAME"
+        ),
+        description=(
+            "2026-08-27 BUG FIX (shipped ON; this knob only reverts it). "
+            "tick_stream_volume_confirmation -- a 60s dollar-volume surge + 10s "
+            "print-rate surge off iqfeed_trade_ticks against a 300s self-baseline "
+            "-- was reachable ONLY when the bar frame had <25 rows. The frame the "
+            "live entry path passes is a 15-MINUTE provider frame (live_runner.py"
+            ":28268, consumed :29608) and the provider always returns a full 5-day "
+            "frame, so the tick path was DEAD CODE on the live path even for a "
+            "symbol whose own tape was 30 seconds old (CRE 2026-08-26 armed with "
+            "0.5 minutes of tape; XPON had 5.8 HOURS and still never used it). "
+            "MEASURED: the XPON ignition was a THREE-SECOND spike -- 13:46:52 at "
+            "7.55x the 20s baseline while price was 7.58, high 7.7057 at 13:46:54, "
+            "back to 7.4750 by 13:47:19. +1.65% in two seconds; no bar frame can "
+            "see it. ON => after a bar-gate DECLINE the tape is consulted as an "
+            "ADMIT-ONLY override (it cannot add a block, cannot change a pass, and "
+            "its own bar is STRICTER: 4x dollar surge AND 4x print surge AND price "
+            "> 60s VWAP AND price > 60s low). OFF => byte-identical."
+        ),
+    )
     chili_momentum_stopout_cap_stop_class_only: bool = Field(
         default=True,
         validation_alias=AliasChoices(

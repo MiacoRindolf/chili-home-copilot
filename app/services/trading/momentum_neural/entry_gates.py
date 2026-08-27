@@ -394,6 +394,79 @@ def momentum_volume_confirmation(
     db: Any = None,
     as_of: Any = None,
 ) -> tuple[bool, str]:
+    """Bar-frame volume confirmation, with a TICK-SPEED admit-only override.
+
+    THE DEFECT THIS FIXES (2026-08-27). ``tick_stream_volume_confirmation`` --
+    a 60s dollar-volume surge + 10s print-rate surge measured straight off
+    ``iqfeed_trade_ticks`` against a 300s self-baseline -- existed but was
+    reachable ONLY from the cold-start branch below, i.e. only when the bar
+    frame had fewer than 25 rows. The bar frame handed to this function on the
+    live entry path is ``_entry_df``, a 15-MINUTE provider frame fetched for the
+    adaptive spread cap and reused here (``live_runner.py:28268``, consumed at
+    ``:29608``). The provider always returns a full 5-day frame, so
+    ``len(df) >= 25`` is ALWAYS true and the tick path was DEAD CODE on the live
+    path -- even for a symbol whose own tape was 30 seconds old.
+
+    WHY THAT COSTS MONEY, MEASURED ON THE RECORDED TAPE (XPON 2026-08-26)::
+
+        segundo    volume   presyo   ratio vs 20s baseline
+        13:46:51      990   7.5500      --
+        13:46:52    7,470   7.5801    7.55x   <- detectable HERE
+        13:46:54    5,581   7.7057    1.71    <- the high, 2 seconds later
+        13:47:00              7.5793          <- already given back
+        13:47:19              7.4750          <- below where it started
+
+    The whole move was +1.65% in TWO SECONDS. A 15-minute bar cannot see it; a
+    1-minute bar cannot see it. The tape resolves it in one second, and the tape
+    was already there -- XPON had 5.8 HOURS of recorded ticks before ignition.
+
+    ⚠️ STRICTLY ADMIT-ONLY. The bar decision is computed EXACTLY as before and
+    returned unchanged whenever it admits. The tick consult runs only after a
+    DECLINE and can only turn that decline into an admit -- it can never add a
+    block, never change an existing pass, and never fire on a thin or unreadable
+    tape (``_tick_stream_volume_decision`` is fail-CLOSED on every missing
+    input). Flag OFF => byte-identical.
+
+    Its own quality bar is STRICTER than the bar path's 1.5x: it requires a 4x
+    dollar-volume surge AND a 4x print-rate surge AND price above the 60s VWAP
+    (buyers in control) AND price above the 60s low (a real up-move, so a
+    monotonic flush is rejected).
+    """
+    _bar_ok, _bar_reason = _momentum_volume_confirmation_bars(
+        df, symbol=symbol, db=db, as_of=as_of
+    )
+    if _bar_ok:
+        return _bar_ok, _bar_reason
+    # `insufficient_bars` means the cold-start branch inside ALREADY consulted the
+    # tape and it declined -- do not pay for the same query twice.
+    if _bar_reason == "insufficient_bars":
+        return _bar_ok, _bar_reason
+    if not bool(getattr(
+        settings, "chili_momentum_tick_surge_admits_any_frame", True
+    )):
+        return _bar_ok, _bar_reason
+    try:
+        _tk_ok, _tk_reason, _tk_dbg = tick_stream_volume_confirmation(
+            symbol, db=db, as_of=as_of
+        )
+    except Exception:
+        return _bar_ok, _bar_reason
+    if _tk_ok:
+        _log.info(
+            "[entry_gates] TICK-SURGE admit sym=%s bar_said=%s dbg=%s",
+            symbol, _bar_reason, _tk_dbg,
+        )
+        return True, "momentum_ok_tick_surge"
+    return _bar_ok, _bar_reason
+
+
+def _momentum_volume_confirmation_bars(
+    df: pd.DataFrame,
+    *,
+    symbol: str | None = None,
+    db: Any = None,
+    as_of: Any = None,
+) -> tuple[bool, str]:
     """Price above EMA-9 and volume above 1.5x recent average (last bar).
 
     COLD-START TICK FALLBACK (2026-07-18, VIVS 2026-07-15): when the frame has
