@@ -8464,6 +8464,22 @@ class Settings(BaseSettings):
         validation_alias=AliasChoices("CHILI_MOMENTUM_REENTRY_AFTER_STOP_BOUND_ENABLED"),
         description="TASK#8: kill-switch for the bounded re-entry-after-stop-out cap. True => after max_stopout_reentries LOSS recycles the session terminalizes. OFF ⇒ byte-identical unlimited recycle.",
     )
+    chili_momentum_micro_frame_memo_seconds: float = Field(
+        default=1.0,
+        ge=0.0,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_MICRO_FRAME_MEMO_SECONDS"),
+        description=(
+            "2026-08-27 PERF (cost half ng tick-first audit). Per-bucket memo sa "
+            "_build_micro_bar_df -- APAT na site ang nagre-rebuild ng parehong "
+            "micro frame kada tick, at sa dense tape ang isang rebuild ay 3.5s "
+            "(bago ang shared_buffers=4GB) / ~100-300ms (pagkatapos). Parehong "
+            "kombensyon ng chili_momentum_latest_rvol_memo_seconds (L8b, 28.7% "
+            "ng runtime): sim-anchored clock bucket, None kine-cache, KOPYA sa "
+            "hit para walang cross-consumer mutation. 1.0s default = within-tick "
+            "dedup lamang -- mas maiksi kaysa sa 10s bar granularity kaya walang "
+            "staleness na epekto sa desisyon. 0 => OFF (byte-identical legacy)."
+        ),
+    )
     chili_momentum_tick_surge_admits_any_frame: bool = Field(
         default=True,
         validation_alias=AliasChoices(
