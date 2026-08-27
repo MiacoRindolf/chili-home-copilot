@@ -47,8 +47,10 @@ strike — ang session sana ay buhay pa sa 13:46 ignition.
    ang panuntunan ay EV +0.02%/trade gross, ≤0 pagkatapos ng frictions. Flip
    kapag ang **admitted-set winner rate sa nightly replay ≥ ~25%.**
 2. Ang 4 na dark bailout sibling ay dapat manatiling OFF (may guard test).
-3. Sukatin muna ang viability-floor bailout (live_runner.py:38447) na firing rate
-   sa winner retests — unwrapped na landas na nakakapag-bail pa rin.
+3. ~~Sukatin muna ang viability-floor bailout na firing rate~~ **NASUKAT NA
+   (2026-08-27): 4 na beses sa buong kasaysayan, lahat noong 2026-06-23, ZERO sa
+   huling 2 buwan** (floor 0.38 mula strategy_params). Hindi ito winner-killer sa
+   praktika — HINDI blocker ng flip.
 4. Soak instrumentation: exit-fill slip lampas sa −2% backstop (p95 −3.0 hanggang
    −3.3%, worst −8.5%) at per-symbol-day pnl delta — **hindi katanggap-tanggap
    ang pooled means bilang acceptance** (DAIC-0825-chop day = −55% cumulative).
