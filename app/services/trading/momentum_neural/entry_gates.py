@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import logging
 import math
+import sys
 import threading
 from datetime import datetime, timezone
 from typing import Any
@@ -2071,7 +2072,80 @@ def reset_prior_day_close_cache() -> int:
     return n
 
 
-def _prior_day_close(symbol: str | None) -> float | None:
+def _replay_forbids_network() -> bool:
+    """True kapag tumatakbo tayo sa LOOB ng isang replay.
+
+    ⚠️ Ipinagbabawal ng replay ang LAHAT ng network, at ang isang NALAMONG
+    pagtatangka ay nakamamatay pa rin::
+
+        ReplayNetworkAccessError: diagnostic ReplayV3 provider swallowed a
+        forbidden network attempt
+
+    Sinasadya iyon: ang tahimik na nalamong tawag ay nangangahulugang lumihis ang
+    replay sa buhay na gawi nang walang nakakaalam.
+
+    ⚠️ KAYA HINDI SAPAT ANG PAG-CACHE. Ang PR #1193 ay naglagay ng araw-araw na
+    cache sa ``_prior_day_close`` at ang mensahe nito ay nagsabing inaayos nito
+    ang tape replay. Hindi. Ang cache ay tumutulong lang sa PANGALAWANG tawag;
+    ang UNA ay HTTP pa rin, at isa ay sapat na para mamatay ang buong takbo.
+    Napatunayan 2026-08-27: ang nightly replay ay bumagsak sa 2 sa 2 mover
+    dito mismo, at TAHIMIK itong iniulat bilang "fills: 0".
+
+    Ang signal ay ang clock domain ng bound decision runtime, na itinatakda ng
+    ReplayV3 sa pamamagitan ng ``live_runner.decision_runtime_state``. Binabasa
+    ito nang HINDI ini-import ang live_runner: ang live_runner ang nag-i-import
+    NG entry_gates, kaya ang tuwirang import ay magiging pabilog. Kapag hindi pa
+    naka-load ang live_runner ay wala tayo sa replay -- fail-open sa network,
+    na siyang gawi ngayon.
+    """
+    try:
+        _lr = sys.modules.get("app.services.trading.momentum_neural.live_runner")
+        if _lr is None:
+            return False
+        _state = _lr._current_decision_runtime_state()
+        return str(getattr(_state, "clock_domain", "")) == "replay_utc"
+    except Exception:
+        return False
+
+
+def _prior_day_close_from_frame(df: Any) -> float | None:
+    """Ang prior-day close na hinango sa OHLCV frame MISMO.
+
+    Ito ang tumatanggal sa puwang sa katapatan. Kapag walang network ang replay
+    at bumabalik tayo ng ``None`` ay hindi kailanman pumuputok ang red-to-green
+    gate doon, kaya hindi masusuri ng replay ang isang buhay na landas ng entry.
+    Pero ang frame ay MAY dalang nakaraang araw kapag malalim ang warmup (ang
+    ``FRAME_WARMUP_MIN`` ng replay_v3 ay 5 araw bilang default, katumbas ng
+    ``period="5d"`` na hinihingi ng buhay na runner sa provider nito), kaya
+    nariyan na ang sagot -- kailangan lang itong basahin.
+
+    Ang araw ay tinutukoy sa US/Eastern, tulad ng ``_prior_day_close_cache_key``.
+    ``None`` kapag walang naunang araw sa frame -- pagkatapos ay lalaktaw ang
+    tumatawag, gaya ng dati.
+    """
+    try:
+        import pandas as _pd
+
+        if df is None or "Close" not in getattr(df, "columns", []):
+            return None
+        idx = getattr(df, "index", None)
+        if idx is None or len(idx) < 2:
+            return None
+        et = _pd.DatetimeIndex(idx)
+        et = et.tz_localize("UTC") if et.tz is None else et.tz_convert("UTC")
+        et = et.tz_convert("America/New_York")
+        days = et.normalize()
+        last_day = days[-1]
+        prior = days < last_day
+        if not bool(prior.any()):
+            return None
+        val = float(df["Close"].to_numpy()[prior][-1])
+        return val if val > 0 else None
+    except Exception:
+        return None
+
+
+def _prior_day_close(symbol: str | None, *, df: Any = None) -> float | None:
     """R8 (WAVE-4 ITEM-3) — the PRIOR-DAY CLOSE for an equity name (Ross's red-to-green
     anchor). Reuses the cached Massive last-quote (``prevDay.c`` -> ``previous_close``), the
     same source ``_resolve_is_ssr`` reads. FAIL-CLOSED to ``None`` on crypto / missing data /
@@ -2096,6 +2170,16 @@ def _prior_day_close(symbol: str | None) -> float | None:
                     # Kabilang ang naka-cache na None: ang pangalang walang
                     # prior close ay hindi dapat tanungin muli kada 30 segundo.
                     return _PRIOR_DAY_CLOSE_CACHE[_key]
+
+        if _replay_forbids_network():
+            # Sa replay ay ang frame ang pinagmulan ng katotohanan. Ang paghinga
+            # ng network dito ay pumapatay sa BUONG takbo, kahit nalamon ang
+            # eksepsiyon -- kaya huwag itong hipuin.
+            _fr = _prior_day_close_from_frame(df)
+            if _key is not None:
+                with _prior_day_close_lock:
+                    _PRIOR_DAY_CLOSE_CACHE[_key] = _fr
+            return _fr
 
         from ...massive_client import get_last_quote
 
@@ -10737,7 +10821,7 @@ def red_to_green_confirmation(
 
         # ── ANCHOR = the PRIOR-DAY CLOSE (Ross's red-to-green level). FAIL-CLOSED: no prior
         # close -> SKIP (never fall back to the intraday open — that is not a red-to-green). ──
-        prior_close = _prior_day_close(symbol)
+        prior_close = _prior_day_close(symbol, df=df)
         if prior_close is None or not (prior_close > 0):
             return False, "red_to_green_no_prior_close", debug
         anchor = float(prior_close)
