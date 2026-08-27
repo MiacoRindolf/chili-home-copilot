@@ -26330,16 +26330,35 @@ def tick_live_session(
         return {"ok": True, "skipped": "live_runner_disabled"}
 
     try:
-        sess = (
+        # BOUNDED LOCK WAIT (2026-08-27, BRNX -$82). Sa NOWAIT, kahit 100ms na
+        # row lock ng research job (ang docker scheduler ay nagsusulat sa
+        # session snapshots na may savepoint churn) ay kumakain ng BUONG tick --
+        # at ang tick na nakain sa BRNX ay ang mismong magpoproseso sana ng
+        # fill: 20 shares ang naiwang walang stop nang 56 minuto sa isang -47%
+        # na collapse. Ang 10s ang cadence ng tick; ang paghihintay ng hanggang
+        # 800ms sa isang panandaliang lock ay libre kumpara sa nawalang tick.
+        # 0 => legacy NOWAIT (byte-identical).
+        _lock_wait_ms = 0
+        try:
+            _lock_wait_ms = int(getattr(
+                settings, "chili_momentum_tick_row_lock_wait_ms", 800) or 0)
+        except (TypeError, ValueError):
+            _lock_wait_ms = 0
+        _q = (
             db.query(TradingAutomationSession)
             .populate_existing()
             .filter(
                 TradingAutomationSession.id == int(session_id),
                 TradingAutomationSession.mode == "live",
             )
-            .with_for_update(nowait=True)
-            .one_or_none()
         )
+        if _lock_wait_ms > 0:
+            from sqlalchemy import text as _lk_text
+
+            db.execute(_lk_text("SET LOCAL lock_timeout = :ms"), {"ms": f"{_lock_wait_ms}ms"})
+            sess = _q.with_for_update().one_or_none()
+        else:
+            sess = _q.with_for_update(nowait=True).one_or_none()
     except Exception:
         # NOWAIT losing the row race raises LockNotAvailable, and the raise
         # ABORTS the transaction. Swallowing it without a rollback hands the
@@ -26695,6 +26714,22 @@ def tick_live_session(
         _owner_recovery.get("block_new_entries")
     )
     if _owner_recovery.get("must_return_early"):
+        # BCCQ TREATMENT (2026-08-27, BRNX). Ang return na ito ay dating GANAP
+        # na tahimik -- ang 17370 ay umikot dito kada tick nang walang event,
+        # walang log, habang ang na-fill na order nito ay nakaupo sa broker.
+        # Parehong sakit ng P0 BCCQ 2026-08-21 sa kabilang branch; parehong
+        # lunas: mag-emit MINSAN kada dahilan (sa unang tama at sa bawat
+        # pagbabago), hindi kada tick.
+        _mre_sig = "mre:" + str(_owner_recovery.get("reason") or "unknown")
+        if le.get("owner_recovery_block_sig") != _mre_sig:
+            le["owner_recovery_block_sig"] = _mre_sig
+            _commit_le(sess, le)
+            _emit(db, sess, "live_entry_owner_claim_reconcile_block", {
+                "reason": _mre_sig,
+                "must_return_early": True,
+                "order_role": _owner_recovery.get("order_role"),
+                "state": sess.state,
+            })
         db.flush()
         return {
             "ok": True,
@@ -26758,6 +26793,41 @@ def tick_live_session(
 
     # C2: Orphaned order recovery — reconcile with venue (rate-limited)
     _reconcile_venue_position(adapter, db, sess, product_id)
+
+    # EARLY LATE-FILL SWEEP (2026-08-27, BRNX -$82). Ang orihinal na sweep sa
+    # ibaba ay nakaupo sa LIKOD ng quote/boundary/eligibility gates -- kaya ang
+    # simbolong hindi na live-eligible (ang BRNX matapos itong bumagsak) ay
+    # HINDI KAILANMAN nakakaabot sa sweep at hindi nakakapag-adopt ng SARILING
+    # na-fill na order. Ang fill ng broker ay outranks ang eligibility (ang
+    # prinsipyo ng #1194): ang pag-a-adopt ay hindi bagong panganib, ito ay
+    # pagkilala sa panganib na HAWAK NA natin. Ang tawag ay mumurahin --
+    # tumatakbo lamang kapag may hindi-nalutas na id sa history at walang
+    # aktibong pointer; kung hindi ay isang dict lookup lang ito. Ang orihinal
+    # na sweep sa ibaba ay nananatili bilang backstop (idempotent ang helper).
+    if bool(getattr(settings, "chili_momentum_early_late_fill_sweep_enabled", True)):
+        try:
+            _early_le = _live_exec(dict(sess.risk_snapshot_json or {}))
+            if (
+                sess.state in (
+                    STATE_WATCHING_LIVE,
+                    STATE_LIVE_ENTRY_CANDIDATE,
+                    STATE_LIVE_PENDING_ENTRY,
+                )
+                and not _early_le.get("entry_order_id")
+                and _unresolved_entry_order_ids(_early_le)
+                and _sweep_unresolved_entry_orders(adapter, db, sess, _early_le)
+            ):
+                return {
+                    "ok": True,
+                    "session_id": sess.id,
+                    "state": sess.state,
+                    "pending": "late_fill_repointed_early",
+                }
+        except Exception:
+            _log.warning(
+                "[live_runner] early late-fill sweep failed sid=%s",
+                sess.id, exc_info=True,
+            )
 
     if RISK_SNAPSHOT_KEY not in snap and not _owner_recovery.get("adopted_fill"):
         _emit(db, sess, "live_error", {"reason": "missing_frozen_risk_snapshot"})

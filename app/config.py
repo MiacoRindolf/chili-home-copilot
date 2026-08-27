@@ -8464,6 +8464,34 @@ class Settings(BaseSettings):
         validation_alias=AliasChoices("CHILI_MOMENTUM_REENTRY_AFTER_STOP_BOUND_ENABLED"),
         description="TASK#8: kill-switch for the bounded re-entry-after-stop-out cap. True => after max_stopout_reentries LOSS recycles the session terminalizes. OFF ⇒ byte-identical unlimited recycle.",
     )
+    chili_momentum_tick_row_lock_wait_ms: int = Field(
+        default=800,
+        ge=0,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_TICK_ROW_LOCK_WAIT_MS"),
+        description=(
+            "2026-08-27 BUG FIX (BRNX -$82). Sa NOWAIT, kahit panandaliang row "
+            "lock ng research job sa session row ay kumakain ng buong tick -- at "
+            "ang tick na nakain ay ang magpoproseso sana ng fill: 20 shares ang "
+            "naiwang walang stop nang 56 minuto sa -47% collapse. Bounded na "
+            "paghihintay (SET LOCAL lock_timeout) bago sumuko sa concurrent_tick "
+            "skip. 0 => legacy NOWAIT."
+        ),
+    )
+    chili_momentum_early_late_fill_sweep_enabled: bool = Field(
+        default=True,
+        validation_alias=AliasChoices(
+            "CHILI_MOMENTUM_EARLY_LATE_FILL_SWEEP_ENABLED"
+        ),
+        description=(
+            "2026-08-27 BUG FIX (BRNX -$82). Ang late-fill sweep ay nakaupo sa "
+            "likod ng quote/boundary/eligibility gates, kaya ang simbolong hindi "
+            "na live-eligible ay hindi kailanman nakakapag-adopt ng sariling "
+            "na-fill na order. ON => tumatakbo rin ang sweep NANG MAAGA sa tick, "
+            "bago ang lahat ng entry gates -- ang fill ng broker ay outranks ang "
+            "eligibility (#1194 principle). Ang orihinal na sweep ay nananatili "
+            "bilang backstop. OFF => byte-identical."
+        ),
+    )
     chili_momentum_bailout_dwell_confirm_enabled: bool = Field(
         default=False,
         validation_alias=AliasChoices(
