@@ -8464,6 +8464,24 @@ class Settings(BaseSettings):
         validation_alias=AliasChoices("CHILI_MOMENTUM_REENTRY_AFTER_STOP_BOUND_ENABLED"),
         description="TASK#8: kill-switch for the bounded re-entry-after-stop-out cap. True => after max_stopout_reentries LOSS recycles the session terminalizes. OFF ⇒ byte-identical unlimited recycle.",
     )
+    chili_momentum_no_bbo_decline_consecutive_ticks: int = Field(
+        default=3,
+        ge=1,
+        le=30,
+        validation_alias=AliasChoices(
+            "CHILI_MOMENTUM_NO_BBO_DECLINE_CONSECUTIVE_TICKS"
+        ),
+        description=(
+            "2026-08-27: ang pre-entry no_bbo terminal decline ay "
+            "nangangailangan na ng ganitong bilang ng SUNUD-SUNOD na "
+            "quoteless tick (dating 1 = instant sa unang tick). Nasukat sa "
+            "tape freeze: 28 tunay na pangalan ang namatay nang instant "
+            "tapos muling in-arm = churn na nagpabagal pa sa drain. Ang "
+            "RVMDW-class na tunay na quoteless ay mate-terminal pa rin sa "
+            "~30s (3 tick sa 10s cadence). Magandang quote = reset. "
+            "1 => legacy instant."
+        ),
+    )
     chili_alpaca_http_timeout_seconds: float = Field(
         default=10.0,
         ge=0.0,
