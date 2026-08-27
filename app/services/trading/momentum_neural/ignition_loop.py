@@ -804,6 +804,33 @@ class IgnitionScoringLoop:
                 _rv = self._tracker.rvol_for(symbol)
                 if _rv is not None and _rv > 0:
                     ross_signals[symbol]["vol_ratio"] = float(_rv)
+            # FIX A2 (2026-08-27, kill-switch chili_momentum_ignition_float_feed_enabled,
+            # default ON): feed the REAL share count into the scorer's float pillar.
+            # Without this, the ws_ignition signal reaches the A-setup quality floor
+            # with float_shares=None -> leg-4 is fail-closed on missing float ->
+            # live_eligible=false -- and the ONLY writer that could fill the datum is
+            # the 300s equity_viability_refresh batch. Measured 2026-08-27 afternoon:
+            # arm lag was BIMODAL (5/17 armed <=7s with a pre-existing full-pillar
+            # row; 12/17 at 64s-2.85h, median 399s = the batch wait), at 37 min of
+            # ZERO arms post-restart while the float cache was empty. The lookup is
+            # process-cached on success and 300s-TTL on None (massive_client #1215),
+            # so a new symbol pays ONE ~200ms reference call at first ignition --
+            # inside the same envelope as the board work this path already does.
+            # Fail-open: on None the key is simply not stamped (byte-identical old
+            # shape) and the batch refresh remains the backfill. The leg-4 gate
+            # itself is untouched -- this FILLS the datum, never bypasses the check.
+            if bool(getattr(settings, "chili_momentum_ignition_float_feed_enabled", True)):
+                try:
+                    from ...massive_client import get_ticker_float
+
+                    _fl = get_ticker_float(symbol)
+                    if _fl is not None and float(_fl) > 0:
+                        ross_signals[symbol]["float_shares"] = float(_fl)
+                except Exception:
+                    _log.debug(
+                        "[momentum_ws_ignition] float feed failed for %s",
+                        symbol, exc_info=True,
+                    )
             run_momentum_neural_tick(
                 db, meta={"tickers": [symbol], "ross_signals": ross_signals}
             )

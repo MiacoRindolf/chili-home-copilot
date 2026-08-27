@@ -8464,6 +8464,24 @@ class Settings(BaseSettings):
         validation_alias=AliasChoices("CHILI_MOMENTUM_REENTRY_AFTER_STOP_BOUND_ENABLED"),
         description="TASK#8: kill-switch for the bounded re-entry-after-stop-out cap. True => after max_stopout_reentries LOSS recycles the session terminalizes. OFF ⇒ byte-identical unlimited recycle.",
     )
+    chili_momentum_ignition_float_feed_enabled: bool = Field(
+        default=True,
+        validation_alias=AliasChoices(
+            "CHILI_MOMENTUM_IGNITION_FLOAT_FEED_ENABLED"
+        ),
+        description=(
+            "2026-08-27 FIX A2: ang ws_ignition signal ay walang float_shares, "
+            "kaya ang leg-4 ng A-setup quality floor (fail-closed sa missing "
+            "float) ay nagpapa-false ng live_eligible sa BAWAT bagong igniter "
+            "hanggang sa 300s batch refresh. Sinukat: bimodal arm lag (5/17 "
+            "<=7s, 12/17 median 399s), 28/45 na-skip na simbolo hindi na-arm "
+            "buong araw (kasama JFB +20%, TJGC +25%). ON => kinukuha ang share "
+            "count mula sa Polygon reference (process-cached success, 300s-TTL "
+            "None) at ista-stamp sa signal para makapag-evaluate ang gate nang "
+            "TOTOO sa sandali ng ignition. Hindi nito binabago ang gate -- "
+            "pinupunan lang ang datum. OFF/None => byte-identical na signal."
+        ),
+    )
     chili_momentum_alpaca_protected_partial_enabled: bool = Field(
         default=True,
         validation_alias=AliasChoices(
