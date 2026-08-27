@@ -193,6 +193,17 @@ STALE_NBBO_RECONNECT_S = float(
     os.environ.get("IQFEED_STALE_NBBO_RECONNECT_SECONDS", "45") or 45
 )
 STICKY_RESUBSCRIBE = os.environ.get("CHILI_IQFEED_STICKY_RESUBSCRIBE", "1") != "0"
+# A-2 (2026-08-27 close burst): sa ilalim ng NAPATUNAYANG backlog, ang HOT-symbol
+# quotes sa QUOTE-ONLY frames ay kina-collapse tulad ng cold (newest kada symbol).
+# Sinukat: sa huling minuto bago 20:00Z ang tape ay ~3,285 trades/s pero ang
+# committed rate ay ~330/s dahil ang quotes ang kumain ng 74% ng batch budget --
+# 16 na minutong lag => FROZEN lane sa mismong power hour. Ang quotes sa frames
+# na MAY trades ay MANDATORY pa rin (bahagi ng exact-print provenance pairing);
+# tanging ang quote-only frames ang kina-collapse, at kapag walang backlog ay
+# byte-identical ang gawi. Kill-switch: 0.
+BACKLOG_HOT_QUOTE_COLLAPSE = os.environ.get(
+    "IQFEED_BACKLOG_HOT_QUOTE_COLLAPSE", "1"
+) != "0"
 IQFEED_NOTIFY_ENABLED = os.environ.get("IQFEED_NOTIFY_ENABLED", "1").strip().lower() not in (
     "0", "false", "no",
 )
@@ -1180,6 +1191,7 @@ def _drain_pending_write_batch(
     max_events: int = DB_RELEASE_BATCH_EVENTS,
     max_scan_events: int | None = None,
     hot_symbols: set[str] | None = None,
+    collapse_hot_quotes: bool = False,
 ) -> tuple[list[dict], list[dict], bool]:
     """Drain a bounded raw prefix under a retained-event commit cap.
 
@@ -1260,7 +1272,13 @@ def _drain_pending_write_batch(
             frame_cold_quotes: dict[str, dict] = {}
             for row in frame_quotes:
                 symbol = str(row.get("sym") or "").strip().upper()
-                if not sample_cold_quotes or frame_trades or symbol in hot:
+                # A-2: sa ilalim ng napatunayang backlog, ang hot membership ay
+                # HINDI na nagpapa-mandatory sa isang quote-only frame -- ang
+                # BBO consumer ay ang PINAKABAGONG quote lang ang kailangan, at
+                # ang trade-frame quotes (provenance pairing) ay mandatory pa
+                # rin sa pamamagitan ng frame_trades na sangay.
+                _hot_keeps = (symbol in hot) and not collapse_hot_quotes
+                if not sample_cold_quotes or frame_trades or _hot_keeps:
                     frame_mandatory_quotes.append(row)
                 else:
                     frame_cold_quotes[symbol] = row
@@ -3356,6 +3374,11 @@ def writer(
                 pending_backlog=pending_backlog,
             ),
             hot_symbols=hot_symbols,
+            # A-2: parehong napatunayang-backlog signal na nagpapalaki ng
+            # batch -- kapag walang backlog, byte-identical ang gawi.
+            collapse_hot_quotes=(
+                BACKLOG_HOT_QUOTE_COLLAPSE and pending_backlog
+            ),
         )
         if rows or nbbo_rows:
             try:
