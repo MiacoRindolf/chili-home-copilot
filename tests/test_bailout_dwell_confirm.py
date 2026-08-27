@@ -84,7 +84,13 @@ def test_the_flag_ships_ON_with_the_oos_evidence_recorded():
     assert "25%" in desc, "dapat nakasulat ang criterion"
     assert "38.7%" in desc, "dapat nakasulat ang nasukat na OOS na numero"
     assert "nightly replay" in desc, "dapat nakaturo sa patuloy na sumusukat"
-    assert "False" in desc, "dapat nakasulat ang un-flip condition"
+    # 4/4 + survivorship update (2026-08-27 hapon): ang un-flip ay dalawang
+    # konkretong kondisyon na, hindi isang pangkalahatang pangungusap.
+    assert "44.3%" in desc, "dapat nakasulat ang ika-4 na araw (08-24)"
+    assert "ZERO admits" in desc, "dapat nakasulat ang survivorship na resulta"
+    assert "HIGPIT" in desc and "I-UNFLIP" in desc, (
+        "dapat nakasulat ang parehong tighten at un-flip na kondisyon"
+    )
 
 
 # ── Ang dwell state machine ──────────────────────────────────────────────────
