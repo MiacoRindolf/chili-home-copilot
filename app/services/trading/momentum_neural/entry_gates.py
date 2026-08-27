@@ -2099,11 +2099,9 @@ def _replay_forbids_network() -> bool:
     na siyang gawi ngayon.
     """
     try:
-        _lr = sys.modules.get("app.services.trading.momentum_neural.live_runner")
-        if _lr is None:
-            return False
-        _state = _lr._current_decision_runtime_state()
-        return str(getattr(_state, "clock_domain", "")) == "replay_utc"
+        from .replay_capture_runtime import replay_forbids_network
+
+        return replay_forbids_network()
     except Exception:
         return False
 
