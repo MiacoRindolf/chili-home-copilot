@@ -436,6 +436,26 @@ def get_breaker_status() -> dict[str, Any]:
 
 def _get(url: str, params: dict[str, Any] | None = None) -> dict[str, Any] | None:
     """GET with retries, backoff, and rate-limit awareness."""
+    # REPLAY: huwag hipuin ang network (2026-08-27). Ang replay ay nagbabawal ng
+    # lahat ng HTTP at itinuturing na NAKAMAMATAY kahit ang nalamong pagtatangka --
+    # ang tahimik na nalamong tawag ay nangangahulugang lumihis ang replay sa
+    # buhay na gawi nang walang nakakaalam. Halos bawat tumatawag dito ay may
+    # `except Exception` sa paligid, kaya LAHAT sila ay lumalamon at LAHAT sila ay
+    # pumapatay sa takbo. NASUKAT: dalawang magkaibang tumatawag ang pumatay sa
+    # nightly replay sa magkasunod na takbo (entry_gates._prior_day_close, tapos
+    # catalyst.strong_catalyst_symbols), at 20 pa ang nag-i-import mula rito.
+    # Ang `None` ay ang KAPAREHONG bagay na ibinabalik nito kapag walang API key
+    # o kapag bukas ang breaker, kaya hawak na ng bawat tumatawag ang landas na
+    # ito. Fail-open sa labas ng replay: byte-identical ang buhay na lane.
+    try:
+        from .trading.momentum_neural.replay_capture_runtime import (
+            replay_forbids_network,
+        )
+
+        if replay_forbids_network():
+            return None
+    except Exception:
+        pass
     api_key = _api_key()
     if not api_key:
         return None

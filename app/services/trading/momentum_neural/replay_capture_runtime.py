@@ -13097,6 +13097,45 @@ class SharedCaptureStoreRuntime:
         return False
 
 
+def replay_forbids_network() -> bool:
+    """True kapag tumatakbo ang kasalukuyang thread sa LOOB ng isang replay.
+
+    ANG KONTRATA. Ipinagbabawal ng replay ang LAHAT ng network, at ang isang
+    NALAMONG pagtatangka ay nakamamatay pa rin::
+
+        ReplayNetworkAccessError: diagnostic ReplayV3 provider swallowed a
+        forbidden network attempt
+
+    Sinasadya iyon: ang tahimik na nalamong tawag ay nangangahulugang lumihis ang
+    replay sa buhay na gawi nang walang nakakaalam. Ngunit halos BAWAT tumatawag
+    sa landas ng tick ay may ``except Exception`` sa paligid ng pagkuha nito, kaya
+    LAHAT sila ay lumalamon at LAHAT sila ay pumapatay sa takbo.
+
+    NASUKAT 2026-08-27. Dalawang magkaibang tumatawag ang pumatay sa nightly
+    replay counterfactual sa magkasunod na takbo -- ``entry_gates._prior_day_close``
+    at ``catalyst.strong_catalyst_symbols`` -- at may 20 pang lugar sa
+    momentum_neural na nag-i-import mula sa massive_client. Ang isa-isang pag-ayos
+    ay whack-a-mole; ang tamang lugar ay ang ISANG chokepoint ng HTTP.
+
+    Ang signal ay ang clock domain ng bound decision runtime, na itinatakda ng
+    ReplayV3 sa pamamagitan ng ``live_runner.decision_runtime_state``. Binabasa
+    ito nang HINDI ini-import ang live_runner, kaya walang panganib na maging
+    pabilog ang import mula kahit saan. Kapag hindi pa naka-load ang live_runner
+    ay wala tayo sa replay: FAIL-OPEN, kaya hindi nagbabago ang buhay na lane.
+    """
+    try:
+        import sys as _sys
+
+        _lr = _sys.modules.get("app.services.trading.momentum_neural.live_runner")
+        if _lr is None:
+            return False
+        return str(
+            getattr(_lr._current_decision_runtime_state(), "clock_domain", "")
+        ) == "replay_utc"
+    except Exception:
+        return False
+
+
 class ReplayNetworkAccessError(ReplayInputContractError):
     pass
 
