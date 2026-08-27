@@ -10053,7 +10053,26 @@ def _ensure_alpaca_deadman_stop(
         return {"ok": False, "unprotected": True, "full_close_queued": True, "error": error}
 
     if le.get("scale_limit_order_id"):
-        return _queue_full_close("alpaca_legacy_scale_order_conflicts_with_deadman")
+        if le.get("scale_limit_is_oco") and bool(getattr(
+            settings, "chili_momentum_alpaca_protected_partial_enabled", True
+        )):
+            # TRANCHE SPLIT (2026-08-27): ang OCO(f) ay may SARILING stop, kaya
+            # ang deadman ay sumasakop LAMANG sa runner R = Q - f. R + f = Q --
+            # walang overlap, at ang guard na ito ay nasa ulo ng function kaya
+            # ang BAWAT landas (unang lagay + re-arm pagkatapos ng terminal) ay
+            # dumadaan dito. Kapag hindi wasto ang aritmetika => full close
+            # (fail-closed, gaya ng dati).
+            _tr_qty = _float_or_none(le.get("scale_limit_qty")) or 0.0
+            if 0.0 < _tr_qty < float(quantity):
+                quantity = float(quantity) - _tr_qty
+            else:
+                return _queue_full_close(
+                    "tranche_oco_split_arithmetic_invalid",
+                    tranche_qty=_tr_qty,
+                    position_qty=float(quantity),
+                )
+        else:
+            return _queue_full_close("alpaca_legacy_scale_order_conflicts_with_deadman")
     context = _alpaca_owner_transport_context(sess)
     if context is None:
         return _queue_full_close("alpaca_deadman_owner_context_missing")
@@ -18029,6 +18048,38 @@ def _scale_out_grid_step(
     return pnl
 
 
+def _scale_order_total_fill(order: Any, le: dict[str, Any]) -> tuple[float, float, str]:
+    """(fill_qty, fill_px, source) ng scale order — parent O OCO stop leg.
+
+    Sa Alpaca OCO, ang PARENT mismo ang take-profit limit at ang stop ay
+    ``raw.legs[0]`` (#1204 normalization). Kapag ang STOP leg ang nag-fill, ang
+    parent ay lumalabas na canceled na may zero fill — ang lumang pagbasa
+    (parent.filled_size lamang) ay magbu-book ng WALA habang ang f shares ay
+    naibenta na: maling ledger, oversell risk sa susunod na exit. Ang stop-leg
+    na fill ay ibinu-book sa SARILING presyo ng leg na may reason na
+    ``tranche_oco_stop_fill`` — hindi bilang scale-out sa target (utos ng OCO
+    audit item 4)."""
+    _pf = float(getattr(order, "filled_size", 0.0) or 0.0)
+    if _pf > 0.0:
+        _px = float(getattr(order, "average_filled_price", 0.0) or 0.0) or float(
+            le.get("scale_limit_px") or 0.0
+        )
+        return _pf, _px, "parent"
+    if le.get("scale_limit_is_oco"):
+        try:
+            _legs = (getattr(order, "raw", None) or {}).get("legs") or []
+            for _leg in _legs:
+                _lf = float(_leg.get("filled_qty") or 0.0)
+                if _lf > 0.0:
+                    _lpx = float(_leg.get("filled_avg_price") or 0.0) or float(
+                        _leg.get("stop_price") or 0.0
+                    )
+                    return _lf, _lpx, "stop_leg"
+        except Exception:
+            pass
+    return 0.0, 0.0, "none"
+
+
 def _fmt_limit_price_sell(p: float) -> str:
     """Penny-FLOOR for sell limits >= $1 (never ask above the intended level)."""
     if p >= 1.0:
@@ -18053,9 +18104,119 @@ def _place_scale_out_limit(
     trigger (which pays the give-back). Fail-open: any failure here leaves the
     reactive market scale-out path fully in charge."""
     if normalize_execution_family(sess.execution_family) in ALPACA_EXECUTION_FAMILIES:
-        # Recertification posture: Alpaca has no OCO contract here. A resting
-        # partial SELL and a full-qty deadman would reserve overlapping shares;
-        # keep the broker stop and use only full-position software exits.
+        # PROTECTED PARTIAL VIA OCO (2026-08-27). Ang lumang komento rito ay
+        # "Alpaca has no OCO contract here" -- totoo sa KODIGO, mali sa API
+        # (OrderClass.OCO ay nasa SDK; zero hits ang order_class sa buong repo
+        # bago ang #1195). Ang nasukat na halaga: DAIC 08-26 ay umabot sa
+        # PAREHONG rung (6.3675 sa 13:30:04, 622k shares; 6.50 sa 13:30:21,
+        # 283k shares) at ang isang gumaganang partial ay ~+$19 sa halip na
+        # -$11.58. Ang suppression ay pumutok sa 5 sa 5 na live fill.
+        #
+        # ANG DISENYO (mula sa OCO audit): sa FILL tick, ang scale order ay
+        # nauuna sa deadman -- kaya OCO(f) muna (may SARILING stop ang tranche
+        # mula sa sandaling umiral), tapos ang deadman ay lalagyan ng R = Q - f
+        # ng guard sa _ensure_alpaca_deadman_stop. R + f = Q: walang overlap,
+        # WALANG unprotected window, WALANG resize ng frozen request. Sa Alpaca,
+        # ang OCO parent MISMO ang TP limit (ang stop ay legs[0]), kaya ang
+        # BUONG umiiral na scale_limit_* lifecycle (poll / adopt / oversell
+        # clamp) ay gumagana nang halos walang pagbabago -- ang pag-cancel sa
+        # parent ay nagkakansela sa parehong leg (linked).
+        #
+        # FAIL-SAFE: anumang kakulangan (walang stop px, hindi split, tumanggi
+        # ang broker, walang OCO method) => ang lumang suppression, buo. Ang
+        # unang tunay na fill sa PAPER ang cert (#1185 doctrine: sa paper na may
+        # tunay na fill, ang pagpapatakbo NITO ang A/B).
+        if bool(getattr(
+            settings, "chili_momentum_alpaca_protected_partial_enabled", True
+        )):
+            try:
+                _oco_place = getattr(adapter, "place_protected_partial_oco", None)
+                _pos_oco = le.get("position") if isinstance(le.get("position"), dict) else {}
+                _oco_stop = _float_or_none(_pos_oco.get("stop_price"))
+                _eqs = not str(sess.symbol or "").upper().endswith("-USD")
+                _oco_inc = prod.base_increment if prod else (1.0 if _eqs else None)
+                _oco_mn = prod.base_min_size if prod else (1.0 if _eqs else None)
+                _oco_frac = scale_out_fraction(
+                    symbol=sess.symbol, vol_pctl=_adaptive_scale_vol_pctl(le))
+                _oco_px = float(target_px)
+                try:
+                    _oco_grid = _resolve_scale_grid(_pos_oco, sess.symbol)
+                    if len(_oco_grid) >= 2:
+                        _oco_frac = float(_oco_grid[0][1])
+                        _oco_px = float(_oco_grid[0][0])
+                except Exception:
+                    pass
+                _oco_qty, _oco_runner, _oco_split = scale_out_quantity(
+                    current_qty=float(filled),
+                    original_qty=float(filled),
+                    fraction=_oco_frac,
+                    base_increment=_oco_inc,
+                    base_min_size=_oco_mn,
+                )
+                if (
+                    callable(_oco_place)
+                    and _oco_split
+                    and _oco_qty > 0
+                    and _oco_runner > 0
+                    and _oco_stop is not None
+                    and _oco_stop > 0
+                    and float(_oco_px) > float(_oco_stop)
+                ):
+                    _oco_ext = False
+                    try:
+                        from .market_profile import market_session_now
+
+                        _oco_ext = market_session_now(
+                            sess.symbol, now=_utcnow_aware()
+                        ) != "regular"
+                    except Exception:
+                        _oco_ext = False
+                    _oco_cid = f"chili_ml_toco_{sess.id}_{uuid.uuid4().hex[:12]}"
+                    _oco_res = _oco_place(
+                        product_id=product_id,
+                        base_size=_fmt_base_size(_oco_qty),
+                        take_profit_price=_fmt_limit_price_sell(float(_oco_px)),
+                        stop_price=float(_oco_stop),
+                        client_order_id=_oco_cid,
+                        extended_hours=_oco_ext,
+                    ) or {}
+                    if _oco_res.get("ok") and _oco_res.get("order_id"):
+                        # ⚠️ Ang adapter ay nag-quantize ng TP/stop; ang strict
+                        # identity gate sa clamp ay naghahambing ng limit_price
+                        # ng broker laban sa scale_limit_px -- itala ang
+                        # QUANTIZED (broker-truth) na presyo, hindi ang hiniling.
+                        le["scale_limit_order_id"] = str(_oco_res["order_id"])
+                        le["scale_limit_px"] = float(
+                            _oco_res.get("take_profit_price") or _oco_px)
+                        le["scale_limit_qty"] = float(_oco_qty)
+                        le["scale_limit_adopted_qty"] = 0.0
+                        le["scale_limit_is_oco"] = True
+                        le["scale_limit_oco_stop"] = float(
+                            _oco_res.get("stop_price") or _oco_stop)
+                        le["scale_limit_oco_legs"] = _oco_res.get("legs") or []
+                        le["scale_limit_client_order_id"] = _oco_cid
+                        _commit_le(sess, le)
+                        _emit(db, sess, "tranche_oco_placed", {
+                            "order_id": le["scale_limit_order_id"],
+                            "qty": float(_oco_qty),
+                            "runner_qty": float(_oco_runner),
+                            "take_profit": float(_oco_px),
+                            "stop": float(_oco_stop),
+                            "legs": le["scale_limit_oco_legs"],
+                            "extended_hours": _oco_ext,
+                        })
+                        return
+                    _emit(db, sess, "tranche_oco_place_failed", {
+                        "error": str(_oco_res.get("error"))[:140],
+                        "fallback": "legacy_suppression_full_deadman",
+                    })
+            except Exception:
+                _log.warning(
+                    "[live_runner] tranche OCO placement failed sess=%s "
+                    "(legacy suppression covers)", sess.id, exc_info=True,
+                )
+        # Legacy suppression (fallback at kapag OFF ang flag): buong deadman,
+        # full-position software exits lamang.
         le["alpaca_scale_out_suppressed_for_deadman"] = {
             "reason": "single_resting_sell_serialization",
             "recorded_at_utc": _utcnow().isoformat(),
@@ -18270,14 +18431,12 @@ def _cancel_scale_limit_and_clamp(
                 }
                 _commit_le(sess, le)
                 return None
-        filled = float(getattr(exact, "filled_size", 0.0) or 0.0)
+        filled, _fill_px, _fill_src = _scale_order_total_fill(exact, le)
         adopted = float(le.get("scale_limit_adopted_qty") or 0.0)
         new_fill = max(0.0, filled - adopted)
         if new_fill > 0.0:
             pos = le.get("position") if isinstance(le.get("position"), dict) else {}
-            px = float(getattr(exact, "average_filled_price", 0.0) or 0.0) or float(
-                le.get("scale_limit_px") or 0.0
-            )
+            px = _fill_px or float(le.get("scale_limit_px") or 0.0)
             le["last_exit_fee_usd"] = _order_total_fees_usd(exact)
             _apply_confirmed_live_partial_exit(
                 db,
@@ -18286,7 +18445,11 @@ def _cancel_scale_limit_and_clamp(
                 filled_quantity=new_fill,
                 entry_price=float(pos.get("avg_entry_price") or 0.0),
                 fill_price=px,
-                reason="legacy_alpaca_scale_out_limit_fill",
+                reason=(
+                    "tranche_oco_stop_fill"
+                    if _fill_src == "stop_leg"
+                    else "legacy_alpaca_scale_out_limit_fill"
+                ),
             )
             le["scale_limit_adopted_qty"] = adopted + new_fill
         le.pop("scale_limit_order_id", None)
@@ -18302,19 +18465,26 @@ def _cancel_scale_limit_and_clamp(
         except Exception:
             pass
         no, _ = adapter.get_order(str(oid))
-        filled = float(getattr(no, "filled_size", 0) or 0) if no is not None else 0.0
+        filled, _fill_px2, _fill_src2 = (
+            _scale_order_total_fill(no, le) if no is not None else (0.0, 0.0, "none")
+        )
         adopted = float(le.get("scale_limit_adopted_qty") or 0.0)
         new_fill = max(0.0, filled - adopted)
         if new_fill > 0:
             pos = le.get("position") if isinstance(le.get("position"), dict) else {}
-            px = float(getattr(no, "average_filled_price", 0) or 0) or float(le.get("scale_limit_px") or 0)
+            px = _fill_px2 or float(le.get("scale_limit_px") or 0)
             # Fee truth: this adopt path never goes through the exit poll, so
             # stash the order's commission for the partial bookkeeping here.
             le["last_exit_fee_usd"] = _order_total_fees_usd(no)
             _apply_confirmed_live_partial_exit(
                 db, sess, le=le, filled_quantity=new_fill,
                 entry_price=float(pos.get("avg_entry_price") or 0),
-                fill_price=px, reason="scale_out_limit_fill",
+                fill_price=px,
+                reason=(
+                    "tranche_oco_stop_fill"
+                    if _fill_src2 == "stop_leg"
+                    else "scale_out_limit_fill"
+                ),
             )
             le["scale_limit_adopted_qty"] = adopted + new_fill
         _emit(db, sess, "scale_out_limit_cancelled", {

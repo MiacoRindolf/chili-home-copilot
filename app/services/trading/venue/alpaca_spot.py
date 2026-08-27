@@ -1757,7 +1757,16 @@ class AlpacaSpotAdapter:
 
     def get_order(self, order_id: str):
         try:
-            o = self._account_client().get_order_by_id(str(order_id))
+            # nested=True (2026-08-27): kung wala nito, ang OCO parent ay
+            # bumabalik na WALANG legs -- ang stop-leg fill ay hindi makikita
+            # ng adopt path kailanman (ang #1204 normalization ay laging
+            # nag-e-emit ng legs key, pero walang lamang ita-normalize). Para sa
+            # ordinaryong order ito ay walang epekto (legs=[]).
+            from alpaca.trading.requests import GetOrderByIdRequest
+
+            o = self._account_client().get_order_by_id(
+                str(order_id), options=GetOrderByIdRequest(nested=True)
+            )
             return self._normalize_order(o), _fresh(5.0)
         except Exception as exc:
             logger.debug("[alpaca_spot] get_order(%s) failed: %s", order_id, exc)
@@ -1766,7 +1775,13 @@ class AlpacaSpotAdapter:
     def get_order_truth(self, order_id: str) -> dict[str, Any]:
         """Strict broker-id lookup: explicit 404 is absence; all else is unknown."""
         try:
-            order = self._account_client().get_order_by_id(str(order_id))
+            # nested=True: parehong dahilan ng get_order -- kung wala nito ang
+            # OCO stop leg ay invisible sa strict truth reads.
+            from alpaca.trading.requests import GetOrderByIdRequest
+
+            order = self._account_client().get_order_by_id(
+                str(order_id), options=GetOrderByIdRequest(nested=True)
+            )
             return {
                 "readable": True,
                 "found": True,
