@@ -32,6 +32,11 @@ import math
 from dataclasses import dataclass, field
 
 logger = logging.getLogger(__name__)
+import time as _time_mod
+
+# Shadow memo ng demoted static floor (2026-08-27): once kada symbol kada 15
+# min ang log; hard cap + clear-on-overflow (CLAUDE.md cache rule).
+_STATIC_FLOOR_SHADOW_MEMO: dict[str, float] = {}
 
 # Ross's stated 5-pillar priority, normalised to the screen-able structural
 # pillars. RVOL is his explicit #1 ("at a minimum I need a relative volume of
@@ -868,7 +873,46 @@ def below_explosive_floor(
         except Exception:
             pass
     if _rvol_leg_trusted and rvol is not None and float(rvol) < float(rvol_floor):
-        return True
+        # ⚠️ STATIC FLOOR DEMOTION (2026-08-27, R-weighted GO verdict).
+        #
+        # Ang WR case (#1228) at ngayon ang R case: sa 4 OOS days, ang mga
+        # trade na IDADAGDAG ng demotion (accel-pass/static-fail) ay
+        # +54.39% sum / 48.5% WR (positibo sa BAWAT araw, robust sa outlier
+        # removal), habang ang MAWAWALA (static-pass/accel-fail) ay -9.77% /
+        # 16.7% WR (negatibo sa bawat araw na may admit; may buong araw na
+        # ZERO static admits -- starvation). Disjoint ang dalawang set: ang
+        # demotion ay literal na pagpapalit ng -9.77% ng +54.39%.
+        #
+        # ON => ang static rvol leg ay HINDI na nagbe-bench; ang change floor
+        # ay tumatakbo pa rin (sa ibaba), at ang accel/rotation overrides ang
+        # tunay na quality signal. Ang SHADOW log (once kada symbol kada ~15
+        # min) ay nagtatala kung ano sana ang bine-bench ng lumang floor --
+        # unang linggo ng regime-change na bantay, hiling ng verdict.
+        try:
+            from app.config import settings as _demote_set
+
+            if bool(getattr(
+                _demote_set, "chili_momentum_static_rvol_floor_demoted", True
+            )):
+                _sym_sh = str(
+                    signal.get("ticker") or signal.get("symbol") or "?"
+                ).strip().upper()
+                _now_sh = _time_mod.monotonic()
+                _last_sh = _STATIC_FLOOR_SHADOW_MEMO.get(_sym_sh, 0.0)
+                if _now_sh - _last_sh > 900.0:
+                    if len(_STATIC_FLOOR_SHADOW_MEMO) > 2048:
+                        _STATIC_FLOOR_SHADOW_MEMO.clear()
+                    _STATIC_FLOOR_SHADOW_MEMO[_sym_sh] = _now_sh
+                    logger.info(
+                        "[ross_momentum] static_rvol_shadow_bench %s rvol=%.2f "
+                        "floor=%.1f (demoted -- hindi na nagbe-bench)",
+                        _sym_sh, float(rvol), float(rvol_floor),
+                    )
+            else:
+                return True
+        except Exception:
+            return True
+
     # COILING-SQUEEZE EXEMPTION (2026-06-26): EXTREME relative volume = accumulation/coiling
     # BEFORE the pop, even while the %-change is still modest. SDOT (65x RVOL, 744K float,
     # +4.4%) was wrongly benched by the 10% change floor though it is a textbook Ross squeeze
