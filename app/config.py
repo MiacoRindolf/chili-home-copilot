@@ -8464,6 +8464,23 @@ class Settings(BaseSettings):
         validation_alias=AliasChoices("CHILI_MOMENTUM_REENTRY_AFTER_STOP_BOUND_ENABLED"),
         description="TASK#8: kill-switch for the bounded re-entry-after-stop-out cap. True => after max_stopout_reentries LOSS recycles the session terminalizes. OFF ⇒ byte-identical unlimited recycle.",
     )
+    chili_alpaca_execution_bbo_junk_spread_bps: float = Field(
+        default=1000.0,
+        ge=0.0,
+        validation_alias=AliasChoices("CHILI_ALPACA_EXECUTION_BBO_JUNK_SPREAD_BPS"),
+        description=(
+            "2026-08-27 BUG FIX (BRNX). Ang direct IEX na quote sa low-float ay "
+            "maaaring basura ang lapad habang sariwa ang edad -- BRNX 15:28:30Z "
+            "bid 7.14/ask 8.93 = 2,227 bps habang ang tunay na tape ay 7.76-7.79 "
+            "nang makitid. Pumasa ito sa execution_bbo_ok (edad lang ang gate) at "
+            "ang basurang ask ang nag-defer ng entry na 14% sa itaas ng tunay na "
+            "market. Nasukat na paghihiwalay: basura 2,200-3,300 bps laban sa "
+            "tunay 100-161 bps -- ang 1,000 ay naghahati nang malinis. Kapag "
+            "lampas dito ang direct at allow_stand_in, lumilipat sa SIP -> IQFeed "
+            "depth; kapag walang maibigay ang mga tier, ibinabalik ang direct "
+            "nang buo (byte-identical sa dati). 0 => OFF."
+        ),
+    )
     chili_momentum_micro_frame_memo_seconds: float = Field(
         default=1.0,
         ge=0.0,

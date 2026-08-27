@@ -1179,6 +1179,51 @@ class AlpacaSpotAdapter:
         if isinstance(direct, tuple) and len(direct) == 2:
             tick, meta = direct
         resolved = self._execution_bbo_from_direct(tick, meta, max_age_seconds)
+        # JUNK-WIDE DIRECT QUOTE (2026-08-27, BRNX). Ang IEX na quote sa isang
+        # low-float ay maaaring basura ang LAPAD habang "sariwa" ang edad: BRNX
+        # 15:28:30Z bid 7.14 / ask 8.93 = 2,227 bps habang ang tunay na tape ay
+        # nagpi-print nang makitid sa 7.76-7.79. Pumasa ito sa execution_bbo_ok
+        # (edad 13.8s < 30s) at ang basurang ask ang nagpasya ng
+        # `above_planned_limit` na defer -- 14% sa itaas ng tunay na market.
+        # Ang parehong araw: XPON 3,344 bps, RDIB ~2,700 bps, habang ang mga
+        # TUNAY na quote ay 100-161 bps. Kapag lampas sa junk ceiling ang direct
+        # at pinapayagan ang stand-in, ituloy sa SIP -> IQFeed depth tiers --
+        # sila ang tunay na larawan ng pinagsama-samang market. Kapag WALANG
+        # maibigay ang mga tier, ibalik ang direct nang hindi ginagalaw:
+        # byte-identical sa dati, hindi kailanman mas mahigpit.
+        _junk_direct = None
+        if resolved is not None:
+            _junk_bps = 0.0
+            try:
+                _junk_bps = float(getattr(
+                    settings,
+                    "chili_alpaca_execution_bbo_junk_spread_bps",
+                    1000.0,
+                ) or 0.0)
+            except (TypeError, ValueError):
+                _junk_bps = 0.0
+            _res_tick = resolved[0] if isinstance(resolved, tuple) else resolved
+            _spread_bps = None
+            try:
+                _b = float(getattr(_res_tick, "bid", 0.0) or 0.0)
+                _a = float(getattr(_res_tick, "ask", 0.0) or 0.0)
+                if _b > 0 and _a >= _b:
+                    _spread_bps = (_a - _b) / ((_a + _b) / 2.0) * 10_000.0
+            except (TypeError, ValueError, ZeroDivisionError):
+                _spread_bps = None
+            if (
+                allow_stand_in
+                and _junk_bps > 0
+                and _spread_bps is not None
+                and _spread_bps > _junk_bps
+            ):
+                logger.info(
+                    "[alpaca_spot] junk-wide direct quote sym=%s spread=%.0fbps "
+                    "> %.0fbps — sinusubukan ang stand-in tiers",
+                    product_id, _spread_bps, _junk_bps,
+                )
+                _junk_direct = resolved
+                resolved = None
         if resolved is not None:
             return resolved
         if allow_stand_in:
@@ -1215,6 +1260,12 @@ class AlpacaSpotAdapter:
             )
             if iqfeed_stand_in is not None:
                 return iqfeed_stand_in
+        if _junk_direct is not None:
+            # Walang naibigay ang bawat stand-in tier: ibalik ang basurang-lapad
+            # na direct nang buo -- ang gawi bago ang 2026-08-27, hindi mas
+            # mahigpit kailanman. Ang downstream na entry-quality spread gate pa
+            # rin ang huhusga rito.
+            return _junk_direct
         # No stand-in: hand back the direct metadata unchanged so the caller's
         # unavailable_kind attribution still reports the real adapter outcome.
         return None, (meta if isinstance(meta, FreshnessMeta) else _fresh(max_age_seconds))
