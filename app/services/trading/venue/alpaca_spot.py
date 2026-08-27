@@ -1664,6 +1664,34 @@ class AlpacaSpotAdapter:
                     str(getattr(time_in_force, "value", time_in_force) or "").lower()
                     or None
                 ),
+                # OCO SUBSTRATE (2026-08-27, item 1 ng SAFE_WITH_CHANGES list).
+                # Ang OCO child legs ay WALANG client_order_id (parent lamang ang
+                # binibigyan ng Alpaca), kaya ang TANGING identity chain ng stop
+                # leg ay parent_cid -> parent_oid -> leg_id. Kung hindi nakikita
+                # ng normalization ang legs, ang bawat downstream na sertipikasyon
+                # ay bulag sa kanila -- "Nothing else in this list is
+                # implementable without it." Laging naka-emit (kahit walang OCO:
+                # order_class=None, legs=[]) para ang mambabasa ay hindi
+                # kailanman kailangang hulaan kung ang pagkawala ay "walang legs"
+                # o "lumang normalization".
+                "order_class": _text_echo(
+                    getattr(o, "order_class", None), lower=True
+                ),
+                "legs": [
+                    {
+                        "id": _text_echo(getattr(_leg, "id", None)),
+                        "status": _text_echo(getattr(_leg, "status", None), lower=True),
+                        "order_type": _text_echo(
+                            getattr(_leg, "order_type", None), lower=True
+                        ),
+                        "qty": _f(getattr(_leg, "qty", None)),
+                        "filled_qty": _f(getattr(_leg, "filled_qty", None)),
+                        "filled_avg_price": _f(getattr(_leg, "filled_avg_price", None)),
+                        "stop_price": _f(getattr(_leg, "stop_price", None)),
+                        "limit_price": _f(getattr(_leg, "limit_price", None)),
+                    }
+                    for _leg in (getattr(o, "legs", None) or [])
+                ],
                 "extended_hours": (
                     bool(extended_hours) if extended_hours is not None else None
                 ),
