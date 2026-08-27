@@ -1072,9 +1072,29 @@ def _run_momentum_live_runner_batch_job():
                 db_s.commit()
                 phase_one_committed = True
                 ok = True
-            except Exception:
+            except Exception as _tick_exc:
                 db_s.rollback()
-                logger.warning("[scheduler] live runner tick failed session=%s", sid, exc_info=True)
+                # LOCK-BUSY ay HINDI stack-trace (2026-08-27): sa lock storm,
+                # ~2,000 traceback lines ang nagbaon sa mga TUNAY na failure.
+                # Ang CapturedPaperRuntimeUnavailableError ay "busy, susunod na
+                # tick" semantics -- isang kompaktong linya. Lahat ng iba ay
+                # nananatiling buong traceback.
+                try:
+                    from .trading.momentum_neural.captured_paper_dispatcher import (
+                        CapturedPaperRuntimeUnavailableError as _CPBusy,
+                    )
+                except Exception:
+                    _CPBusy = ()
+                if _CPBusy and isinstance(_tick_exc, _CPBusy):
+                    logger.warning(
+                        "[scheduler] live runner tick busy session=%s: %s",
+                        sid, _tick_exc,
+                    )
+                else:
+                    logger.warning(
+                        "[scheduler] live runner tick failed session=%s",
+                        sid, exc_info=True,
+                    )
             else:
                 if completion_request is not None:
                     try:
