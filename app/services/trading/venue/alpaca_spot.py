@@ -437,6 +437,45 @@ def _expected_account_id() -> str:
     ).strip()
 
 
+def _bound_client_http_deadline(client) -> None:
+    """Lagyan ng DEFAULT HTTP deadline ang session ng isang alpaca-py client.
+
+    ANG DAHILAN (2026-08-27 lock storm): ang alpaca-py RESTClient ay WALANG
+    timeout parameter at ang ``requests`` na walang timeout ay naghihintay
+    nang WALANG HANGGANAN sa isang nakabiting koneksyon. Ang isang straggler
+    na ``tick_live_session`` ay nahuli nang may hawak na session row lock
+    nang MINUTO (648s historical max) habang ang exit management ng HELD na
+    posisyon ay nakatira mismo sa tick na iyon — ang BDRX-class na panganib.
+
+    Ang timeout ay isang DINISENYUHANG failure mode dito: ang buong
+    claim/outbox architecture ay itinayo sa "a timed-out first submit may
+    have reached Alpaca" — ginagawa lang nating tunay na BOUNDED ang
+    paghihintay. Idempotent (hindi dadalawahin ang balot). Fail-open: kapag
+    walang _session ang client, walang gagawin."""
+    try:
+        _to = float(getattr(
+            settings, "chili_alpaca_http_timeout_seconds", 10.0) or 0.0)
+    except Exception:
+        _to = 10.0
+    if _to <= 0:
+        return
+    sess = getattr(client, "_session", None)
+    req = getattr(sess, "request", None)
+    if sess is None or req is None or getattr(req, "_chili_deadline_wrapped", False):
+        return
+
+    def _bounded_request(method, url, **kwargs):
+        if kwargs.get("timeout") is None:
+            kwargs["timeout"] = (5.0, _to)
+        return req(method, url, **kwargs)
+
+    _bounded_request._chili_deadline_wrapped = True
+    try:
+        sess.request = _bounded_request
+    except Exception:
+        pass
+
+
 def _raw_trading_client():
     _require_paper_posture()
     key, secret = _keys()
@@ -450,6 +489,7 @@ def _raw_trading_client():
         ):
             from alpaca.trading.client import TradingClient
             client = TradingClient(key, secret, paper=True)
+            _bound_client_http_deadline(client)
             account = client.get_account()
             observed = str(getattr(account, "id", "") or "").strip()
             if not observed:
@@ -487,7 +527,9 @@ def _data_client():
     if "data:paper" not in _clients:
         from alpaca.data.historical import StockHistoricalDataClient
         key, secret = _keys()
-        _clients["data:paper"] = StockHistoricalDataClient(key, secret)
+        _c = StockHistoricalDataClient(key, secret)
+        _bound_client_http_deadline(_c)
+        _clients["data:paper"] = _c
     return _clients["data:paper"]
 
 
@@ -496,7 +538,9 @@ def _crypto_data_client():
     if "crypto_data:paper" not in _clients:
         from alpaca.data.historical import CryptoHistoricalDataClient
         key, secret = _keys()
-        _clients["crypto_data:paper"] = CryptoHistoricalDataClient(key, secret)
+        _c = CryptoHistoricalDataClient(key, secret)
+        _bound_client_http_deadline(_c)
+        _clients["crypto_data:paper"] = _c
     return _clients["crypto_data:paper"]
 
 
