@@ -86,10 +86,20 @@ def _probe_time_budget() -> float:
     """Wall-clock budget (seconds) for the concurrent entry-trigger probe wave. Auto-arm
     arms from whatever probes COMPLETE within it; un-probed candidates defer to the next
     tick. The adaptive control on probe breadth (breadth = as many as finish in the budget,
-    not a magic candidate count) and the belt that keeps a wide net inside the cadence."""
+    not a magic candidate count) and the belt that keeps a wide net inside the cadence.
+
+    2026-08-27: default 18.0 -> 8.0. Ang 18s na budget sa 10s na cadence ay
+    aritmetikang garantisadong overrun: bawat pass na gumamit ng buong budget ay
+    nagpapalaktaw sa susunod na tick (apscheduler max_instances) -- SINUKAT:
+    passes 13-29s, 33 max_instances skips sa isang hapon, efektibong cadence
+    20-30s sa 3-SEGUNDONG ignition spikes. Sa 8s ang pass ay kasya sa cadence,
+    ZERO skips, at ang hindi na-probe ay nase-serbisyuhan ng SUSUNOD na pass na
+    10s na ang layo (dati 20-30s) -- mas mataas ang per-minute throughput AT mas
+    mababa ang latency. Ang "arm from whatever completed" na disenyo ang
+    ginagawang ligtas ang mas maliit na budget."""
     return max(
         1.0,
-        float(getattr(settings, "chili_momentum_auto_arm_probe_time_budget_seconds", 18.0) or 18.0),
+        float(getattr(settings, "chili_momentum_auto_arm_probe_time_budget_seconds", 8.0) or 8.0),
     )
 
 
@@ -5674,6 +5684,7 @@ def run_auto_arm_pass(
             _ex.shutdown(wait=False, cancel_futures=True)
         out["probed"] = len(_results)
         out["eligible_probed_of"] = len(eligible)
+        _mark("probe_wave")
 
         # SELECTION->ENTRY ALIGNMENT (M4 keystone). The viability board ranks the day's
         # 24h-cumulative movers, but many have FADED into a deep intraday retrace by the
@@ -6116,6 +6127,16 @@ def run_auto_arm_pass(
                 _phases["total"],
                 _phases.get("board_build"),
                 _phases.get("gate_loop"),
+            )
+        elif _phases["total"] >= 10.0:
+            # 2026-08-27: ang 13-29s na pass ay dating GANAP na tahimik (ang
+            # threshold ay 60s lang) -- imposibleng pangalanan ang kumakain ng
+            # oras. Isang kompaktong linya kada lampas-sa-cadence na pass; sa
+            # 8s probe budget ito ay dapat maging bihira, kaya hindi spam.
+            logger.info(
+                "[auto_arm] pass lampas sa 10s cadence: %.1fs %s",
+                _phases["total"],
+                {k: v for k, v in sorted(_phases.items()) if k != "total"},
             )
     except Exception:
         pass
