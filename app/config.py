@@ -8590,6 +8590,22 @@ class Settings(BaseSettings):
             "bagong nasukat na positibong AH record."
         ),
     )
+    chili_momentum_static_rvol_floor_demoted: bool = Field(
+        default=True,
+        validation_alias=AliasChoices(
+            "CHILI_MOMENTUM_STATIC_RVOL_FLOOR_DEMOTED"
+        ),
+        description=(
+            "2026-08-27 R-weighted GO verdict (930 events, 4 OOS days): ang "
+            "demotion ng static rvol>=5.0 floor ay nagpapalit ng -9.77% sum / "
+            "16.7% WR (ang static-only admits) ng +54.39% sum / 48.5% WR (ang "
+            "accel-pass adds), disjoint sets, positibo sa bawat araw. ON => "
+            "hindi na nagbe-bench ang static rvol leg (ang change floor ay "
+            "tumatakbo pa rin; ang accel override #1228 ang quality signal); "
+            "may SHADOW log (static_rvol_shadow_bench, once/symbol/15min) "
+            "bilang unang-linggong regime bantay. OFF => legacy veto."
+        ),
+    )
     chili_momentum_accel_ignition_override_enabled: bool = Field(
         default=True,
         validation_alias=AliasChoices(
