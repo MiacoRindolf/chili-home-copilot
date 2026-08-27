@@ -182,10 +182,35 @@ def test_missing_tape_fail_closed():
 # (2) Adaptive floors — the base is a FLOOR, the symbol's own baseline raises it
 # ──────────────────────────────────────────────────────────────────────────────
 
-def test_established_baseline_raises_floor_adaptively():
-    """A name that already traded $1M over its 240s pre-surge baseline needs a
-    genuine 4x surge (threshold $1M/60s), so a $300k/60s window — above the base
-    floor but NOT a surge for THIS name — must wait. Floors, not ceilings."""
+def test_an_active_tape_is_NOT_penalized_by_default():
+    """⚠️ SIGN-FLIP (2026-08-27, 1,155 labelled ignitions sa 2 araw ng tape).
+
+    Ang lumang test dito ay nagpatibay ng adaptive raise: ang pangalang may $1M
+    na baseline ay nangangailangan ng $1M/60s. PINABULAANAN iyon ng sukat: ang
+    continuation ay 27.8% sa AKTIBONG tape laban sa 4.7% sa patay -- ang lumang
+    panuntunan ay nagpapataas ng bar mismo kung saan pinakamataas ang tsansang
+    manalo. DAIC 13:16 (2026-08-26): kailangan $515,616/60s laban sa $56k na
+    tape, kaya BAWAT CONTINUED na ignition ay tinanggihan; ang XPON dead-tape
+    pop ay pumasok nang buong laki. Ang surge multiple ay ANTI-panghuhula
+    (FAILED median 9.3x vs CONTINUED 6.1x; AUC 0.637 -> 0.485 kapag
+    na-normalize). Kaya ang parehong senaryo ay INAADMIT na ngayon: $300k/60s
+    laban sa $150k na floor."""
+    ok, reason, dbg = _decide({
+        "last_price": 5.20, "vwap_60": 5.05, "min_60": 4.95,
+        "dollar_60": 300_000.0, "prints_10": 200,
+        "base_dollar": 1_000_000.0, "base_prints": 100, "span_s": 300.0,
+    })
+    assert ok is True
+    assert reason == "momentum_ok_tick_stream"
+    assert dbg["dollar_vol_threshold"] == 150_000.0
+
+
+def test_the_knob_restores_the_old_adaptive_raise(monkeypatch):
+    """Ang lumang gawi ay nababalik nang walang deploy -- ang eksaktong lumang
+    assertion, sa ilalim ng flag."""
+    from app.config import settings as _s
+    monkeypatch.setattr(
+        _s, "chili_momentum_tick_vol_adaptive_raise_enabled", True, raising=False)
     ok, reason, dbg = _decide({
         "last_price": 5.20, "vwap_60": 5.05, "min_60": 4.95,
         "dollar_60": 300_000.0, "prints_10": 200,

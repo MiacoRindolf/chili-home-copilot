@@ -8464,6 +8464,26 @@ class Settings(BaseSettings):
         validation_alias=AliasChoices("CHILI_MOMENTUM_REENTRY_AFTER_STOP_BOUND_ENABLED"),
         description="TASK#8: kill-switch for the bounded re-entry-after-stop-out cap. True => after max_stopout_reentries LOSS recycles the session terminalizes. OFF ⇒ byte-identical unlimited recycle.",
     )
+    chili_momentum_tick_vol_adaptive_raise_enabled: bool = Field(
+        default=False,
+        validation_alias=AliasChoices(
+            "CHILI_MOMENTUM_TICK_VOL_ADAPTIVE_RAISE_ENABLED"
+        ),
+        description=(
+            "2026-08-27 SIGN-FLIP (ipinadalang OFF; ang knob na ito ay "
+            "NAGBABALIK ng lumang gawi). Ang adaptive raise ng tick volume gate "
+            "(max(floor, surge_mult x baseline)) ay nagtataas ng bar sa MAINGAY "
+            "na tape -- pero sa 1,155 labelled ignition sa 2 araw, ang "
+            "continuation ay TUMATAAS sa maingay na tape (27.8% vs 4.7% patay). "
+            "DAIC 13:16: kailangan $515,616/60s laban sa $56k na tape -- bawat "
+            "CONTINUED na ignition tinanggihan; ang XPON dead-tape pop ay "
+            "pumasok nang buong laki. Ang surge multiple ay ANTI-panghuhula "
+            "(FAILED median 9.3x vs CONTINUED 6.1x; AUC bumabagsak 0.637->0.485 "
+            "kapag na-normalize). OFF (default) => absolute floors lamang "
+            "($150k/60s, 20 prints/10s) + VWAP + uptick. ON => ibinabalik ang "
+            "lumang adaptive raise."
+        ),
+    )
     chili_alpaca_execution_bbo_junk_spread_bps: float = Field(
         default=1000.0,
         ge=0.0,
