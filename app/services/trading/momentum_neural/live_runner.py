@@ -18294,6 +18294,18 @@ def _place_scale_out_limit(
                         ) != "regular"
                     except Exception:
                         _oco_ext = False
+                    if _oco_ext:
+                        # NAPATUNAYAN SA BROKER (2026-08-27 22:37Z, AEMD 18035,
+                        # ang UNANG tunay na OCO attempt): Alpaca 40310000 --
+                        # "oco orders do not support extended hours trading".
+                        # RTH-LAMANG ang OCO; sa extended ang tamang landas ay
+                        # ang legacy suppression (full deadman + software
+                        # exits), kaya laktawan ang tiyak-na-reject na API call
+                        # at dumiretso sa fallback nang may sariling marker.
+                        _emit(db, sess, "tranche_oco_skipped_extended_hours", {
+                            "alpaca_constraint": "40310000_oco_rth_only",
+                        })
+                        raise LookupError("oco_rth_only")
                     _oco_cid = f"chili_ml_toco_{sess.id}_{uuid.uuid4().hex[:12]}"
                     _oco_res = _oco_place(
                         product_id=product_id,
@@ -18333,6 +18345,14 @@ def _place_scale_out_limit(
                         "error": str(_oco_res.get("error"))[:140],
                         "fallback": "legacy_suppression_full_deadman",
                     })
+            except LookupError as _oco_skip:
+                # oco_rth_only: normal na landas sa extended hours (may
+                # sariling event na) -- walang stack trace.
+                if str(_oco_skip) != "oco_rth_only":
+                    _log.warning(
+                        "[live_runner] tranche OCO placement failed sess=%s "
+                        "(legacy suppression covers)", sess.id, exc_info=True,
+                    )
             except Exception:
                 _log.warning(
                     "[live_runner] tranche OCO placement failed sess=%s "
