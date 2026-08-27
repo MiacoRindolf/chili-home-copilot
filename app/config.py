@@ -9596,10 +9596,19 @@ class Settings(BaseSettings):
     # on probe breadth (breadth = as many as finish in the budget — no magic candidate count)
     # AND the safety belt that keeps a wide net inside the scheduler cadence. Kept < 30s.
     chili_momentum_auto_arm_probe_time_budget_seconds: float = Field(
-        default=18.0,
+        default=8.0,
         ge=1.0,
         le=29.0,
         validation_alias=AliasChoices("CHILI_MOMENTUM_AUTO_ARM_PROBE_TIME_BUDGET_SECONDS"),
+        description=(
+            "2026-08-27: 18.0 -> 8.0. Ang 18s budget sa 10s auto-arm cadence "
+            "ay aritmetikang overrun: sinukat na 13-29s passes, 33 apscheduler "
+            "max_instances skips sa isang hapon, efektibong cadence 20-30s sa "
+            "3-segundong ignition spikes. Sa 8s: kasya sa cadence, zero skips, "
+            "ang hindi na-probe ay nase-serbisyuhan ng susunod na pass na 10s "
+            "na lang ang layo (arm-from-whatever-completed ang disenyo ng "
+            "probe wave, kaya ligtas ang mas maliit na budget)."
+        ),
     )
     # Selection->entry alignment (M4 keystone): the viability board ranks 24h movers,
     # but many FADE into a deep intraday retrace before the pullback gate sees them
