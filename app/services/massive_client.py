@@ -2698,6 +2698,16 @@ def get_ticker_sector(ticker: str) -> str | None:
 
 
 _FLOAT_CACHE: dict[str, float | None] = {}
+# 2026-08-27: ang None ay HINDI na habambuhay. Dati, ang isang transient na
+# pagkabigo (rate-limit, network) ay nagka-cache ng None sa buong buhay ng
+# proseso -- at ang leg-4 ng A-setup quality floor ay fail-closed sa missing
+# float, kaya ang simbolo ay nananatiling live_eligible=false HANGGANG restart.
+# Sinukat 2026-08-27 hapon: pagkatapos ng 18:31Z restart (walang laman ang
+# cache, burst ng lookups sa ilalim ng rate pressure), 37 minutong ZERO arms sa
+# 2,226 ignition attempts. Ang tagumpay ay nananatiling process-lifetime
+# (~static ang share count); ang None lamang ang nag-e-expire para makapag-retry.
+_FLOAT_NONE_AT: dict[str, float] = {}
+_FLOAT_NONE_TTL_SEC = 300.0
 
 
 def get_ticker_float(ticker: str) -> float | None:
@@ -2705,13 +2715,25 @@ def get_ticker_float(ticker: str) -> float | None:
     ``/v3/reference/tickers/{t}`` endpoint as ``get_ticker_sector``:
     ``share_class_shares_outstanding`` (fallback ``weighted_shares_outstanding``). This is
     the actual SHARE COUNT the pillar wants — not the market_cap ``$`` proxy it currently
-    falls back to. Cached for the process lifetime (~static; reverse-splits are rare).
-    ``None`` when the ticker / field is unavailable (caller keeps the proxy; fail-open)."""
+    falls back to. A successful value is cached for the process lifetime (~static;
+    reverse-splits are rare); a ``None`` (miss/failure) is cached only for
+    ``_FLOAT_NONE_TTL_SEC`` so a transient provider failure cannot blind the
+    low-float pillar until restart. ``None`` when the ticker / field is unavailable
+    (caller keeps the proxy; fail-open)."""
     tk = str(ticker or "").upper().strip()
     if not tk:
         return None
     if tk in _FLOAT_CACHE:
-        return _FLOAT_CACHE[tk]
+        _hit = _FLOAT_CACHE[tk]
+        if _hit is not None:
+            return _hit
+        import time as _t
+
+        if (_t.monotonic() - _FLOAT_NONE_AT.get(tk, 0.0)) < _FLOAT_NONE_TTL_SEC:
+            return None
+        # expired na ang None -- tanggalin at subukang muli sa ibaba
+        _FLOAT_CACHE.pop(tk, None)
+        _FLOAT_NONE_AT.pop(tk, None)
     val: float | None = None
     try:
         d = _get(f"{_base()}/v3/reference/tickers/{tk}", {})
@@ -2731,6 +2753,10 @@ def get_ticker_float(ticker: str) -> float | None:
     except Exception:
         val = None
     _FLOAT_CACHE[tk] = val
+    if val is None:
+        import time as _t
+
+        _FLOAT_NONE_AT[tk] = _t.monotonic()
     return val
 
 
