@@ -22,18 +22,60 @@ import psycopg2
 
 PROD = "postgresql://chili:chili@localhost:5433/chili"
 SINK = "postgresql://chili:chili@localhost:5433/chili_replay2_test"
-BUILD = os.environ.get("CHILI_REPLAY_BUILD", r"D:\dev\chili-home-copilot")
+# ⚠️ Ang default ay dating D:\dev\chili-home-copilot -- ang Codex branch, na huling
+# na-commit noong 2026-07-16. Ang TUMATAKBONG lane ay nasa E:\dev\wt-window2, kaya
+# sinusuri ng ulat ang anim-na-linggong lumang kodigo (2026-08-27).
+BUILD = os.environ.get("CHILI_REPLAY_BUILD", r"E:\dev\wt-window2")
+# ⚠️ Ang default ay dating replay_window.py -- isang PURPOSE-BUILT na CLRO G4 exit
+# A/B script (tingnan ang docstring nito) na ginamit bilang pangkalahatang driver.
+# Sa run ng 2026-08-26 ay gumawa ito ng session para sa 4 sa 5 mover na may ZERO
+# event. Ang kasalukuyang FSM window driver ay replay_v3_fsm_window.py -- parehong
+# env contract (SYMBOL/WIN_START/WIN_END/OHLCV_START/TICK_STRIDE/EQUITY/RISK).
 DRIVER = os.environ.get(
     "CHILI_REPLAY_DRIVER",
-    str(Path(BUILD) / "scripts" / "replay_window.py"),
+    str(Path(BUILD) / "scripts" / "replay_v3_fsm_window.py"),
 )
 PYEXE = sys.executable
 OUT_DIR = Path(r"D:\CHILI-Docker\chili-data\nightly_replay")
 TOP_N = int(os.environ.get("NIGHTLY_REPLAY_TOP_N", "5"))
 MIN_TICKS = 20_000          # kailangan ng totoong tape para may masuri
 MIN_MOVE_PCT = 20.0         # Ross-class movers lang
-WIN_START_UTC = "11:30:00"  # 07:30 ET — ang discovery window
-WIN_END_UTC = "15:30:00"    # 11:30 ET — hanggang matapos ang umaga
+# ⚠️ Ang window ay dating nakapirming 4 na oras (11:30-15:30Z). Ang replay_v3 ay
+# nasa pagitan ng 30-45 minutong takbo para sa isang 60-minutong window, kaya ang
+# BAWAT simbolo ay lalampas sa 30-minutong timeout. Ang default ngayon ay ang ORAS
+# NG OPEN -- doon nangyayari ang ignition (ang DAIC entry ng 2026-08-26 ay 13:16Z)
+# -- at ang lahat ay ma-o-override na.
+WIN_START_UTC = os.environ.get("NIGHTLY_REPLAY_WIN_START", "13:00:00")  # 09:00 ET
+WIN_END_UTC = os.environ.get("NIGHTLY_REPLAY_WIN_END", "14:00:00")      # 10:00 ET
+# Ang v3 ay mas mabagal kaysa sa lumang driver at ang CRE (841k tick) ay lumampas
+# na sa 1800s kahit sa mabilis na driver.
+REPLAY_TIMEOUT_S = int(os.environ.get("NIGHTLY_REPLAY_TIMEOUT_S", "3600"))
+TICK_STRIDE = os.environ.get("NIGHTLY_REPLAY_TICK_STRIDE", "8")
+# ⚠️ ITO ANG NAGPAPATAY SA ULAT. Kapag OHLCV_START == WIN_START ay nagsisimula ang
+# frame sa ZERO bar, kaya lahat ay `insufficient_bars` at walang trigger na
+# pumuputok kailanman. NASUKAT 2026-08-26: insufficient_bars x1328, 0 fill sa 5
+# mover -- isang ARTIFACT NG HARNESS, hindi natuklasan tungkol sa lane. Ang v3 ay
+# may FRAME_WARMUP_MIN na naghihila ng mas malawak na tick load para sa OHLCV seam
+# LAMANG (ang mirror at ang grid ay nananatiling nakatali sa window).
+FRAME_WARMUP_MIN = os.environ.get("NIGHTLY_REPLAY_FRAME_WARMUP_MIN", "7200")
+
+
+def _trading_day_et() -> str:
+    """Ang petsa ng KALAKALAN sa US/Eastern, hindi ang petsa sa UTC.
+
+    ⚠️ Ang task ay tumatakbo sa 17:30 PT = 00:30Z, kaya LAGPAS NA ang UTC date at
+    hinahanap ng ulat ang movers ng BUKAS -- laging "0 qualifying movers"
+    (napatunayan 2026-08-27: ET 08-26 21:25 laban sa UTC 08-27 01:25). Ang araw ng
+    kalakalan ay tinutukoy ng ET, kaya doon dapat magmula ang petsa.
+    """
+    try:
+        from zoneinfo import ZoneInfo
+
+        return datetime.now(ZoneInfo("America/New_York")).strftime("%Y-%m-%d")
+    except Exception:
+        # Fail-safe: ET ay UTC-4/-5, kaya ang pagbawas ng 5 oras ay hindi kailanman
+        # umaabante nang lampas sa araw ng kalakalan.
+        return (datetime.now(timezone.utc) - timedelta(hours=5)).strftime("%Y-%m-%d")
 
 
 def _log(msg: str) -> None:
@@ -95,16 +137,18 @@ def run_replay(day: str, mover: dict) -> dict:
         "WIN_START": f"{day}T{WIN_START_UTC}",
         "WIN_END": f"{day}T{WIN_END_UTC}",
         "OHLCV_START": f"{day}T{WIN_START_UTC}",
-        "ARM": "on", "TICK_STRIDE": "8", "PREPEND_OHLCV": "1",
+        "ARM": "on", "TICK_STRIDE": TICK_STRIDE, "PREPEND_OHLCV": "1",
+        "FRAME_WARMUP_MIN": FRAME_WARMUP_MIN,
         "EQUITY": "100000", "RISK": "4000", "EXEC_FAMILY": "alpaca_spot",
     })
     _log(f"replay {sym} ({mover['up_pct']}% mover, {mover['ticks']} ticks)")
     try:
         p = subprocess.run([PYEXE, DRIVER], env=env, cwd=BUILD,
-                           capture_output=True, text=True, timeout=1800)
+                           capture_output=True, text=True,
+                           timeout=REPLAY_TIMEOUT_S)
         out = (p.stdout or "") + (p.stderr or "")
     except subprocess.TimeoutExpired:
-        return {"symbol": sym, "error": "timeout_30m"}
+        return {"symbol": sym, "error": f"timeout_{REPLAY_TIMEOUT_S}s"}
     pnl = None
     fills: list[str] = []
     for line in out.splitlines():
@@ -147,7 +191,7 @@ def _top_rejects(symbol: str) -> list[tuple[str, int]]:
 
 
 def main() -> None:
-    day = os.environ.get("NIGHTLY_REPLAY_DAY") or datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    day = os.environ.get("NIGHTLY_REPLAY_DAY") or _trading_day_et()
     OUT_DIR.mkdir(parents=True, exist_ok=True)
     movers = top_movers(day)
     _log(f"{day}: {len(movers)} qualifying movers")
