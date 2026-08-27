@@ -8590,6 +8590,48 @@ class Settings(BaseSettings):
             "bagong nasukat na positibong AH record."
         ),
     )
+    chili_momentum_accel_ignition_override_enabled: bool = Field(
+        default=True,
+        validation_alias=AliasChoices(
+            "CHILI_MOMENTUM_ACCEL_IGNITION_OVERRIDE_ENABLED"
+        ),
+        description=(
+            "2026-08-27 (927 labelled ignitions, 4 OOS days): ang static rvol "
+            "floor ay nag-bench ng 319/328 winners (97.3%, 4/4 araw); ang mga "
+            "panalo ay nag-i-ignite mula sa IBABA ng sariling baseline. ON => "
+            "ang ws_ignition scorer ay nagsta-stamp ng accel_20s_dv (dv huling "
+            "20s / dv 20s bago noon, bounded 40s query) at ang "
+            "below_explosive_floor ay nilalaktawan ang RVOL leg kapag "
+            "accel>=min_ratio AT prev20>=min_prev_dv (ang $1k floor ay "
+            "load-bearing vs manipis-na-tape na ratio explosions). Ang change "
+            "floor ay tumatakbo pa rin; fail-open sa kulang na datos. Ito ang "
+            "binabasa ni Ross (PPCB 2026-08-27: low rvol RISING FAST)."
+        ),
+    )
+    chili_momentum_accel_ignition_min_ratio: float = Field(
+        default=3.0,
+        ge=0.0,
+        le=100.0,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_ACCEL_IGNITION_MIN_RATIO"),
+        description=(
+            "Minimum dv acceleration ratio para sa override. 3.0 ang tanging "
+            "matatag-sa-4-na-araw na halaga (39.2% admitted WR); ang 1.5-2.0 "
+            "at lahat ng 60s frames ay HINDI stable — huwag ibaba nang walang "
+            "bagong ebidensya."
+        ),
+    )
+    chili_momentum_accel_ignition_min_prev_dv_usd: float = Field(
+        default=1000.0,
+        ge=0.0,
+        validation_alias=AliasChoices(
+            "CHILI_MOMENTUM_ACCEL_IGNITION_MIN_PREV_DV_USD"
+        ),
+        description=(
+            "Absolute dollar-flow floor sa denominator window bago tanggapin "
+            "ang ratio — load-bearing laban sa manipis-na-tape na pekeng "
+            "ratios (0824: 7/11 na prev20~$0 na event ay FAILED)."
+        ),
+    )
     chili_momentum_ignition_float_feed_enabled: bool = Field(
         default=True,
         validation_alias=AliasChoices(

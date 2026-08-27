@@ -821,6 +821,52 @@ def below_explosive_floor(
     _rvol_leg_trusted = not (
         _rot_floor > 0 and _rot is not None and float(_rot) >= _rot_floor
     )
+    # ⚠️ ACCEL-IGNITION OVERRIDE (2026-08-27, pangalawang override leg).
+    #
+    # SINUKAT SA 927 LABELLED IGNITIONS (4 na OOS na araw, 11 simbolo): ang
+    # static rvol floor ay nag-bench ng 319/328 CONTINUED winners (97.3%) --
+    # 4/4 araw na replikado; ang median rvol proxy ng mga PANALO ay <1.0 sa
+    # BAWAT araw (nag-i-ignite sila mula sa ibaba ng sariling baseline). Ang
+    # ACCEL20>=3.0 (dv sa huling 20s / dv sa 20s bago noon) ay ang tanging
+    # matatag-sa-lahat-ng-araw na signal: 125 admits / 49 winners / 39.2%
+    # admitted WR (vs ~25% malinis na static, 35.4% base) at hindi bumagsak
+    # nang >2pts sa ilalim ng base sa alinmang araw.
+    #
+    # ⚠️ ANG $1K PREV-WINDOW FLOOR AY LOAD-BEARING: sa manipis na tape ang
+    # ratio ay sumasabog (11 event sa 0824 ay may prev20 ~ $0 at 4-5 digit na
+    # PEKENG ratio; 7 sa 11 ay FAILED). Walang ratio kung walang tunay na
+    # daloy sa denominator.
+    #
+    # Tulad ng float_rotation: ang RVOL LEG LAMANG ang nilalaktawan; ang
+    # change floor ay tumatakbo pa rin. Fail-open sa kulang na datos (walang
+    # stamp => walang override => legacy).
+    if _rvol_leg_trusted:
+        try:
+            from app.config import settings as _a3set
+
+            if bool(getattr(
+                _a3set, "chili_momentum_accel_ignition_override_enabled", True
+            )):
+                _a20 = _first_float(signal, "accel_20s_dv")
+                _p20 = _first_float(signal, "prev_20s_dv_usd")
+                _a20_min = float(getattr(
+                    _a3set, "chili_momentum_accel_ignition_min_ratio", 3.0
+                ) or 0.0)
+                _p20_min = float(getattr(
+                    _a3set,
+                    "chili_momentum_accel_ignition_min_prev_dv_usd",
+                    1000.0,
+                ) or 0.0)
+                if (
+                    _a20_min > 0
+                    and _a20 is not None
+                    and _p20 is not None
+                    and float(_p20) >= _p20_min
+                    and float(_a20) >= _a20_min
+                ):
+                    _rvol_leg_trusted = False
+        except Exception:
+            pass
     if _rvol_leg_trusted and rvol is not None and float(rvol) < float(rvol_floor):
         return True
     # COILING-SQUEEZE EXEMPTION (2026-06-26): EXTREME relative volume = accumulation/coiling
