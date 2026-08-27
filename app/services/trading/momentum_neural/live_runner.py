@@ -167,6 +167,7 @@ from .risk_policy import (
     chase_defer_decision,
     rapid_whipsaw_cadence_update,
     reentry_after_stop_allowed,
+    stop_class_exit_reason,
     stopout_cycles_after_recycle,
     symbol_day_loss_lockout_decision,
     reentry_escalation_decision,
@@ -42542,7 +42543,64 @@ def tick_live_session(
         # in COOLDOWN). A profit/target recycle is free; only loss recycles count.
         _rb = _float_or_none(le.get("last_exit_return_bps"))
         _was_loss = bool(_rb is not None and _rb <= 0)
-        le["last_recycle_was_stopout"] = _was_loss
+        # STOP-CLASS GATING FOR THE TERMINAL CAP (2026-08-27).
+        #
+        # The strike counter fed from here TERMINALIZES the session at
+        # `max_stopout_reentries` (default 3) and `live_finished` is ABSORBING --
+        # nothing re-examines the symbol for the rest of the day. Until today the
+        # counter classified a recycle by the SIGN OF THE RETURN alone, so ANY red
+        # exit was a "stop-out".
+        #
+        # That contradicts the rule stated three lines below for the G4 escalation
+        # level, and `stop_class_exit_reason`'s own docstring calls itself "the ONE
+        # stop-class classifier ... callers gating cadence bookkeeping must use the
+        # SAME predicate the escalation rule uses so both ends of the 'consecutive
+        # stop-class losses' contract share one definition." The terminal cap --
+        # the one that ENDS the session -- was the caller that never did.
+        # `stopout_cycles_after_recycle`'s docstring already noticed ONE divergence
+        # ("this mirrors the G4 escalation-level rule beside it ... that the hard
+        # counter never followed") and fixed the green-reset half; this is the
+        # other half.
+        #
+        # MEASURED 2026-08-26 (XPON, a +58.5% mover, replayed 2026-08-27): three
+        # exits, ALL with `last_exit_reason: "bailout"`, each merely red. The
+        # escalation rule does not count a bailout as an entry-level failure; the
+        # cap counted all three. `live_reentry_capped
+        # {"reason": "max_stopout_reentries_reached", "stopout_cycles": 3}` at
+        # ended_at 13:18:05 -- and XPON then ran 6.52 -> 10.13 between 13:36 and
+        # 13:56 with the entry volume gate passing every minute of it (measured
+        # ratios 3.84 / 80.64 / 14.15 / 11.15 / 3.22 / 8.72 / 7.28). CHILI was in
+        # the right name at the right price and was terminated 28 minutes before
+        # the move by a counter that had mislabelled its own exits.
+        #
+        # The operator's rule is "stop when it is no longer going up", not "stop
+        # after three red exits of any kind". This does not remove the cap -- a
+        # genuine stop-class chopper still terminalizes at 3, and
+        # symbol_day_loss_lockout still bounds the dollars.
+        _recycle_prior = (
+            le.get("g4_prior_trade")
+            if isinstance(le.get("g4_prior_trade"), dict) else {}
+        )
+        _recycle_reason = (
+            _recycle_prior.get("exit_reason") or le.get("last_exit_reason")
+        )
+        _cap_counts_it = _was_loss
+        if _was_loss and bool(getattr(
+            settings, "chili_momentum_stopout_cap_stop_class_only", True
+        )):
+            _cap_counts_it = bool(stop_class_exit_reason(_recycle_reason))
+            if not _cap_counts_it:
+                _emit(db, sess, "stopout_cap_skipped_non_stop_class", {
+                    "exit_reason": _recycle_reason,
+                    "return_bps": _rb,
+                    "stopout_cycles": int(le.get("stopout_cycles") or 0),
+                })
+        le["last_recycle_was_stopout"] = _cap_counts_it
+        # HOLD, NOT RESET. The counter is a CONSECUTIVE streak: passing False
+        # CLEARS it (that is the green-recycle rule -- "a banked winner proves the
+        # chop regime ended"). A RED non-stop exit proves no such thing, so it must
+        # not earn a chopper a clean slate either. It holds the streak instead.
+        le["last_recycle_holds_streak"] = bool(_was_loss and not _cap_counts_it)
         # G4 P2: same-symbol re-entry ESCALATION level (persists across recycle). Only a
         # genuine STOP-class loss raises it (review M1: kill_switch_flatten / bailout /
         # max_hold / target exits that close red are NOT entry-level failures and do not
@@ -42653,6 +42711,7 @@ def tick_live_session(
             le["stopout_cycles"] = stopout_cycles_after_recycle(
                 prev_stopout_cycles=int(le.get("stopout_cycles") or 0),
                 recycle_was_stopout=bool(le.pop("last_recycle_was_stopout", False)),
+                recycle_holds_streak=bool(le.pop("last_recycle_holds_streak", False)),
             )
             # BOUNDED RE-ENTRY AFTER STOP-OUT: a chopper must not re-arm forever. When
             # the loss-recycle count hits the cap, TERMINALIZE (FINISHED) instead of
