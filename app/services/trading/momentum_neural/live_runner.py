@@ -21096,10 +21096,41 @@ def _build_micro_bar_df(db, symbol: str, *, bar_seconds: int, lookback_minutes: 
     ``chili_momentum_micro_fallback_1m_from_ticks_enabled`` (default True); OFF ⇒ the
     legacy single-attempt swallow (byte-identical).
     """
+    _memo_bucket: int | None = None
+    _memo_key: tuple[str, int, int] | None = None
     try:
-        return _micro_bar_df_from_session(
+        _memo_s = float(getattr(
+            settings, "chili_momentum_micro_frame_memo_seconds", 1.0
+        ) or 0.0)
+        if _memo_s > 0:
+            _memo_bucket = int(_utcnow_aware().timestamp() // _memo_s)
+            _memo_key = (
+                str(symbol or "").upper(), int(bar_seconds), int(lookback_minutes)
+            )
+            with _MICRO_FRAME_MEMO_LOCK:
+                _hit = _MICRO_FRAME_MEMO.get(_memo_key)
+            if _hit is not None and _hit[0] == _memo_bucket:
+                _cached = _hit[1]
+                # KOPYA sa hit: ang mutation ng isang consumer ay hindi dapat
+                # makahawa sa susunod. Maliit ang frame (30min ng 10s bucket =
+                # ~180 row) kaya <1ms ang kopya laban sa 100ms-3.5s na rebuild.
+                return _cached.copy() if _cached is not None else None
+    except Exception:
+        _memo_bucket = None
+    try:
+        _built = _micro_bar_df_from_session(
             db, symbol, bar_seconds=bar_seconds, lookback_minutes=lookback_minutes
         )
+        if _memo_bucket is not None and _memo_key is not None:
+            with _MICRO_FRAME_MEMO_LOCK:
+                if len(_MICRO_FRAME_MEMO) > _MICRO_FRAME_MEMO_MAX:
+                    _MICRO_FRAME_MEMO.clear()
+                # KOPYA sa pag-store: ang unang caller ay nakakakuha ng orihinal
+                # (malaya itong mag-mutate); ang naka-imbak ay laging malinis.
+                _MICRO_FRAME_MEMO[_memo_key] = (
+                    _memo_bucket, _built.copy() if _built is not None else None
+                )
+        return _built
     except Exception as exc:
         # F1: surface the swallowed error (log + meta), never re-raise into the tick loop.
         if isinstance(meta, dict):
@@ -21281,6 +21312,18 @@ def _squeeze_exit_band_widen_factor(via: Any, symbol: str) -> float:
 
 _LATEST_RVOL_MEMO: dict[str, tuple[int, float | None]] = {}
 _LATEST_RVOL_MEMO_MAX = 512  # hard max size (conventions: caches = max size + TTL)
+
+# MICRO-FRAME MEMO (2026-08-27). Ang audit ng tick-first restructure ay sumukat:
+# ang micro-bar full rebuild sa dense tape ay 3.5s at APAT na site ang tumatawag
+# nito kada tick (pullback trigger, rvol, at dalawa pa) -- parehong aral ng L8b
+# (28.7% ng runtime sa JEM replay) na naayos na para sa _latest_rvol pero hindi
+# para sa ibang tumatawag. Per-bucket memo keyed sa SIM-ANCHORED clock
+# (_utcnow_aware -- replay-correct); ang df ay ibinabalik bilang KOPYA sa hit
+# para hindi makahawa ang mutation ng isang consumer sa iba. Ang None (thin
+# tape) ay kine-cache din. 0 ⇒ OFF (byte-identical legacy).
+_MICRO_FRAME_MEMO: dict[tuple[str, int, int], tuple[int, Any]] = {}
+_MICRO_FRAME_MEMO_MAX = 512
+_MICRO_FRAME_MEMO_LOCK = threading.Lock()
 
 
 def _latest_rvol(db, symbol: str) -> float | None:
