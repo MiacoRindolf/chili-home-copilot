@@ -831,6 +831,41 @@ class IgnitionScoringLoop:
                         "[momentum_ws_ignition] float feed failed for %s",
                         symbol, exc_info=True,
                     )
+            # FIX A3 (2026-08-27, kill-switch chili_momentum_accel_ignition_
+            # override_enabled): i-stamp ang dollar-volume ACCELERATION sa
+            # signal. Sinukat sa 927 labelled ignitions (4 OOS days): ang
+            # static rvol>=5.0 floor ay nag-bench ng 319/328 panalo (97.3%) --
+            # ang mga panalo ay nag-i-ignite mula sa IBABA ng sariling
+            # baseline; ang ACCEL20>=3.0 ay 5.4x ang panalo sa mas mataas na
+            # malinis na precision (39.2% vs ~25%). Ross mismo (PPCB video
+            # 2026-08-27): "low relative volume RISING FAST" ang unang alert.
+            # Isang bounded na 40s query sa parehong bukas na session;
+            # fail-open sa anumang kakulangan.
+            if bool(getattr(
+                settings, "chili_momentum_accel_ignition_override_enabled", True
+            )):
+                try:
+                    from sqlalchemy import text as _a3_text
+
+                    _a3 = db.execute(_a3_text(
+                        "SELECT "
+                        " COALESCE(SUM(CASE WHEN observed_at >= now() at time zone 'utc' - interval '20 seconds' THEN price*size END),0) AS dv_recent,"
+                        " COALESCE(SUM(CASE WHEN observed_at < now() at time zone 'utc' - interval '20 seconds' THEN price*size END),0) AS dv_prev "
+                        "FROM iqfeed_trade_ticks "
+                        "WHERE symbol = :s "
+                        " AND observed_at >= now() at time zone 'utc' - interval '40 seconds'"
+                    ), {"s": symbol}).one()
+                    _dv_recent = float(_a3.dv_recent or 0.0)
+                    _dv_prev = float(_a3.dv_prev or 0.0)
+                    ross_signals[symbol]["prev_20s_dv_usd"] = _dv_prev
+                    ross_signals[symbol]["accel_20s_dv"] = (
+                        _dv_recent / _dv_prev if _dv_prev > 0 else None
+                    )
+                except Exception:
+                    _log.debug(
+                        "[momentum_ws_ignition] accel feed failed for %s",
+                        symbol, exc_info=True,
+                    )
             run_momentum_neural_tick(
                 db, meta={"tickers": [symbol], "ross_signals": ross_signals}
             )
