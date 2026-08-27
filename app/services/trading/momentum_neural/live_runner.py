@@ -28557,11 +28557,51 @@ def tick_live_session(
                 if post is not None and float(
                     getattr(post, "filled_size", 0.0) or 0.0
                 ) > 0.0:
+                    # RACED FILL -- WE OWN SHARES THE RISK GATE REFUSED.
+                    # Until 2026-08-27 this returned a `pending` string that
+                    # CONTAINED THE WORD "adopt" and adopted nothing. The session
+                    # stayed in LIVE_PENDING_ENTRY with the pointer set and no
+                    # position, so every later tick re-entered this same branch,
+                    # re-cancelled an already-filled order and returned again --
+                    # while the shares sat with no stop, no target, no deadman.
+                    # A broker fill OUTRANKS an entry-risk refusal; that is the
+                    # same principle _held_position_keeps_exit_on_boundary_fail
+                    # applies a few lines below. Adopt into a managed record and
+                    # let the quote-independent flatten take it off.
+                    # Adoption needs TERMINAL truth, so while the remainder is
+                    # still open we keep the pointer and retry on the next tick
+                    # exactly as before -- the shares stay owned either way.
+                    _raced_oid = str(le.get("entry_order_id") or "")
+                    _raced_filled = float(getattr(post, "filled_size", 0.0) or 0.0)
+                    _raced_adopted = False
+                    if bool(getattr(
+                        settings,
+                        "chili_momentum_orphan_entry_fill_adoption_enabled",
+                        True,
+                    )):
+                        _raced_adopted = _adopt_recovered_primary_fill_for_safety(
+                            db,
+                            sess,
+                            adapter,
+                            le=le,
+                            order=post,
+                            product_id=product_id,
+                        )
+                        _emit(db, sess, "risk_block_cancel_raced_fill", {
+                            "order_id": _raced_oid,
+                            "filled_size": _raced_filled,
+                            "venue_status": getattr(post, "status", None),
+                            "adopted": bool(_raced_adopted),
+                        })
                     db.flush()
                     return {
                         "ok": True,
                         "blocked": True,
-                        "pending": "risk_block_cancel_raced_fill_adopt",
+                        "pending": (
+                            "risk_block_cancel_raced_fill_adopted"
+                            if _raced_adopted
+                            else "risk_block_cancel_raced_fill_adopt_pending"
+                        ),
                         "risk_evaluation": ev,
                     }
                 if not exact_cancel.get("ok"):
@@ -28574,6 +28614,37 @@ def tick_live_session(
                     }
             else:
                 adapter.cancel_order(str(le["entry_order_id"]))
+            # HAND THE ORDER BACK TO THE SWEEP BEFORE LEAVING PENDING_ENTRY.
+            # Until 2026-08-27 this transitioned to WATCHING_LIVE with
+            # `entry_order_id` STILL SET, and nothing could ever resolve it:
+            #   * the late-fill sweep is gated on `not le.get("entry_order_id")`
+            #   * `_unresolved_entry_order_ids` deliberately EXCLUDES the active
+            #     pointer -- "the normal pending-entry handler owns that one"
+            #   * but that handler only runs while the state IS pending-entry,
+            #     and we are leaving it on the very next line.
+            # So the order was invisible to BOTH: never adopted, never voided.
+            # Measured 2026-08-26: 18 sessions in 90 days carried a live pointer
+            # with no position and no resolution -- including RDIB 16759, whose
+            # limit BUY 9sh @ 16.15 rested against an ask of 14.91 (-767.8 bps
+            # through it) and could not not fill; those 9 shares went unmanaged
+            # for 16m08s while the session emitted PRE-ENTRY vetoes.
+            # Clearing the pointer IS the whole fix: the id is already in
+            # `entry_order_ids_all`, so the EXISTING sweep resolves it on the very
+            # next pass (adopt a late fill / void a clean cancel). No new
+            # adoption path is introduced here.
+            _released_oid = str(le.get("entry_order_id") or "")
+            if _released_oid and bool(getattr(
+                settings,
+                "chili_momentum_orphan_entry_fill_adoption_enabled",
+                True,
+            )):
+                le["entry_order_id"] = None
+                _commit_le(sess, le)
+                _emit(db, sess, "entry_order_released_to_sweep", {
+                    "order_id": _released_oid,
+                    "reason": "risk_block_cancel",
+                    "from_state": STATE_LIVE_PENDING_ENTRY,
+                })
             _safe_transition(db, sess, STATE_WATCHING_LIVE)
             db.flush()
             return {"ok": True, "blocked": True, "risk_evaluation": ev}
