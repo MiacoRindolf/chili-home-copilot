@@ -8464,6 +8464,23 @@ class Settings(BaseSettings):
         validation_alias=AliasChoices("CHILI_MOMENTUM_REENTRY_AFTER_STOP_BOUND_ENABLED"),
         description="TASK#8: kill-switch for the bounded re-entry-after-stop-out cap. True => after max_stopout_reentries LOSS recycles the session terminalizes. OFF ⇒ byte-identical unlimited recycle.",
     )
+    chili_alpaca_http_timeout_seconds: float = Field(
+        default=10.0,
+        ge=0.0,
+        le=120.0,
+        validation_alias=AliasChoices("CHILI_ALPACA_HTTP_TIMEOUT_SECONDS"),
+        description=(
+            "2026-08-27 (lock storm root cause, C-c1): ang alpaca-py SDK ay "
+            "WALANG timeout at ang requests na walang timeout ay naghihintay "
+            "nang walang hanggan -- isang straggler tick na may hawak na "
+            "session row lock nang 648s (historical max) habang ang HELD-"
+            "position exit management ay nakatira sa tick na iyon. Default "
+            "read deadline sa BAWAT alpaca HTTP call (connect 5s, read ITO). "
+            "Ang timeout ay dinisenyuhang failure mode na ng claim/outbox "
+            "architecture ('a timed-out first submit may have reached "
+            "Alpaca'). 0 => walang balot (legacy unbounded)."
+        ),
+    )
     chili_momentum_alpaca_afterhours_entries_enabled: bool = Field(
         default=True,
         validation_alias=AliasChoices(
