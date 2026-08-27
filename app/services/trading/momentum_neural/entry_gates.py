@@ -209,9 +209,27 @@ def _tick_stream_volume_decision(
         _mult = max(1.0, float(surge_mult))
     except (TypeError, ValueError):
         return False, "tick_fallback_config_invalid", {}
-    # Adaptive raise: only once the tape actually spans the baseline minimum —
-    # a 30s-old cold tape keeps the documented floors (floors, not ceilings).
-    if span_s >= _TICK_VOL_BASELINE_MIN_SPAN_S:
+    # ⚠️ ANG ADAPTIVE RAISE AY BALIKTAD ANG SIGN (2026-08-27, 1,155 labelled
+    # ignitions sa 2 araw ng tape). Ang lumang panuntunan ay nagtataas ng bar
+    # kapag MAINGAY ang baseline tape -- pero ang nasukat na continuation ay
+    # TUMATAAS sa maingay na tape (27.8% aktibo vs 4.7% patay). Konkretong
+    # bunga: DAIC 13:16 (base_rate $2,148/s) ay nangailangan ng $515,616/60s
+    # laban sa tape na $56k/60s -- istrukturang hindi maaabot, kaya BAWAT
+    # CONTINUED na ignition ng DAIC mula 13:06-13:25 ay tinanggihan magpakailan-
+    # man; samantalang ang XPON dead-tape pop ay pumasok sa 4 segundo nang buong
+    # laki. Tatlong hiwalay na sukat ang nagpabagsak sa surge multiple bilang
+    # panghula: FAILED median 9.3x vs CONTINUED 6.1x; ang 4-10x band ay 26%
+    # continuation laban sa 13% ng 30-100x; at ang pag-normalize ng dv_1s sa
+    # sariling liquidity ay nagpapabagsak ng AUC 0.637 -> 0.485. ANG ABSOLUTONG
+    # DOLYAR ANG NANGHUHULA; ANG MULTIPLE AY ANTI-NANGHUHULA.
+    #
+    # Kaya: ang mga dokumentadong floor na lang ang gate (dollar_vol_base /
+    # prints_base) -- hindi nagbabago ang gawi sa patay na tape (ang floor pa
+    # rin ang naghahari doon), bumubukas lang ang aktibong tape. Ang knob ay
+    # nagbabalik ng lumang adaptive raise nang walang deploy.
+    if span_s >= _TICK_VOL_BASELINE_MIN_SPAN_S and bool(getattr(
+        settings, "chili_momentum_tick_vol_adaptive_raise_enabled", False
+    )):
         pre_span = max(span_s - _TICK_VOL_SURGE_WINDOW_S, 1.0)
         vol_thr = max(vol_thr, _mult * base_dollar / pre_span * _TICK_VOL_SURGE_WINDOW_S)
         prints_thr = max(prints_thr, _mult * base_prints / pre_span * _TICK_VOL_PRINTS_WINDOW_S)
