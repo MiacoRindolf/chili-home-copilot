@@ -8464,6 +8464,43 @@ class Settings(BaseSettings):
         validation_alias=AliasChoices("CHILI_MOMENTUM_REENTRY_AFTER_STOP_BOUND_ENABLED"),
         description="TASK#8: kill-switch for the bounded re-entry-after-stop-out cap. True => after max_stopout_reentries LOSS recycles the session terminalizes. OFF ⇒ byte-identical unlimited recycle.",
     )
+    chili_momentum_bailout_dwell_confirm_enabled: bool = Field(
+        default=False,
+        validation_alias=AliasChoices(
+            "CHILI_MOMENTUM_BAILOUT_DWELL_CONFIRM_ENABLED"
+        ),
+        description=(
+            "2026-08-27 (1,206 labelled ignitions): ang entry-price fast-bailout "
+            "ay pumapatalsik ng 86-96% ng panalo (95% ng CONTINUED ay "
+            "nagre-retest sa loob ng 60s) -- ang pinakamasamang panuntunan sa "
+            "bawat nasukat na table. ON => ang fast-bail (breakout_failed / "
+            "lost_vwap) ay nag-a-arm ng pending stamp at lumalabas LAMANG "
+            "kapag 60s na TULOY-TULOY na dwell sa ilalim ng entry AT lalim "
+            ">=1% (panalo natatalsik 16.3% vs pagkabigo 63.0%), may 2% hard "
+            "backstop. ⚠️ SINADYANG OFF na may NAKASULAT NA FLIP CRITERION "
+            "(utos ng adversarial audit): i-flip LANG kasabay ng conditional "
+            "admission gate, kapag ang admitted-set winner rate sa nightly "
+            "replay ay >= ~25% -- sa unconditioned na daloy ang panuntunang "
+            "ito ay EV ~0 pagkatapos ng frictions. HINDI ito 'naghihintay ng "
+            "A/B na di darating': ang nightly replay counterfactual ay "
+            "GUMAGANA na (naayos 2026-08-27) at ito mismo ang sumusukat."
+        ),
+    )
+    chili_momentum_bailout_dwell_confirm_seconds: float = Field(
+        default=60.0, ge=1.0,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_BAILOUT_DWELL_CONFIRM_SECONDS"),
+        description="Tuloy-tuloy na segundo sa ilalim ng entry bago payagan ang fast-bail (nasukat: panalo p90 contiguous run = 99s vs pagkabigo p50 = 116s).",
+    )
+    chili_momentum_bailout_min_depth_pct: float = Field(
+        default=0.01, ge=0.0,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_BAILOUT_MIN_DEPTH_PCT"),
+        description="Minimum na lalim sa ilalim ng entry (fraction) para sa kumpirmadong fast-bail.",
+    )
+    chili_momentum_bailout_hold_max_depth_pct: float = Field(
+        default=0.02, ge=0.0,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_BAILOUT_HOLD_MAX_DEPTH_PCT"),
+        description="Hard backstop: lalim na nagpapalabas AGAD kahit hindi pa tapos ang dwell (rip-then-collapse bound; nasa LOOB ng sized stop na median 3.0%).",
+    )
     chili_momentum_tick_vol_adaptive_raise_enabled: bool = Field(
         default=False,
         validation_alias=AliasChoices(
