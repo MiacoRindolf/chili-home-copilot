@@ -8464,6 +8464,38 @@ class Settings(BaseSettings):
         validation_alias=AliasChoices("CHILI_MOMENTUM_REENTRY_AFTER_STOP_BOUND_ENABLED"),
         description="TASK#8: kill-switch for the bounded re-entry-after-stop-out cap. True => after max_stopout_reentries LOSS recycles the session terminalizes. OFF ⇒ byte-identical unlimited recycle.",
     )
+    chili_momentum_alpaca_afterhours_entries_enabled: bool = Field(
+        default=True,
+        validation_alias=AliasChoices(
+            "CHILI_MOMENTUM_ALPACA_AFTERHOURS_ENTRIES_ENABLED"
+        ),
+        description=(
+            "2026-08-27, tahasang utos ng operator: buksan ang afterhours "
+            "(16:00-19:59 ET) na entries sa Alpaca paper. Parehong hugis ng "
+            "premarket carve-out: LIMIT + DAY + extended_hours=True, fresh "
+            "broker clock, fail-closed session proof; ang exit path ay sakop "
+            "na ang afterhours mula pa noon. Nasukat na konteksto: 11 triggers "
+            "ang pumutok afterhours 2026-08-27 nang zero submits (AEMD, INHD, "
+            "LGPS); ang lumang 14d AH record (1W/11L -$72.65) ang dahilan kung "
+            "bakit REDUCED size ang default (tingnan ang "
+            "chili_momentum_afterhours_schedule_mult). OFF => balik sa "
+            "premarket-only carve-out."
+        ),
+    )
+    chili_momentum_afterhours_schedule_mult: float = Field(
+        default=0.5,
+        ge=0.0,
+        le=1.5,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_AFTERHOURS_SCHEDULE_MULT"),
+        description=(
+            "2026-08-27: ang afterhours schedule risk multiplier (dating "
+            "hard-coded 0.0 mula WAVE-1 FIX-8). Default 0.5 = kapareho ng "
+            "midday treatment -- bukas ang pinto pero kalahating laki, dahil "
+            "ang 14d AH record ay 1W/11L. Ang late window (14:30-16:00 ET) ay "
+            "HINDI sakop nito at nananatiling 0.0. Itaas lamang kapag may "
+            "bagong nasukat na positibong AH record."
+        ),
+    )
     chili_momentum_ignition_float_feed_enabled: bool = Field(
         default=True,
         validation_alias=AliasChoices(
