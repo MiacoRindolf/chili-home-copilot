@@ -8515,6 +8515,32 @@ class Settings(BaseSettings):
         validation_alias=AliasChoices("CHILI_MOMENTUM_G4_GRIND_EXIT_ENABLED"),
         description="G4 P1: GRIND/TREND exit mode on the held runner. When the position's symbol is the day leader (top-ranked/p90/wildcard-dominant), cadence is FAST, >=1R peak and a confirmed HIGHER-LOW above entry has formed, the exit machinery switches to STRUCTURE-trailing: climax-lock ratchets are clamped to the 5m-EMA9/higher-low structure floor (candidates only — the placed stop NEVER loosens, INVARIANT-A), the topping-tail full-flatten defers to the structure trail, and the pyramid re-add cap becomes cushion-adaptive. Fail-CLOSED: any missing/uncertain input ⇒ scalp behavior byte-identical. OFF ⇒ byte-identical.",
     )
+    chili_momentum_orphan_entry_fill_adoption_enabled: bool = Field(
+        default=True,
+        validation_alias=AliasChoices(
+            "CHILI_MOMENTUM_ORPHAN_ENTRY_FILL_ADOPTION_ENABLED"
+        ),
+        description=(
+            "2026-08-27 BUG FIX (shipped ON; this knob only reverts it). The "
+            "boundary-risk block in live_runner.tick_live_session used to leave "
+            "PENDING_ENTRY for WATCHING_LIVE with `entry_order_id` STILL SET, and "
+            "on a cancel that RACED A FILL it returned a `pending` string "
+            "containing the word 'adopt' while adopting nothing. Both leave real "
+            "shares unmanaged: the late-fill sweep is gated on "
+            "`not le['entry_order_id']` and `_unresolved_entry_order_ids` excludes "
+            "the active pointer, so a dangling pointer is invisible to every "
+            "resolver. MEASURED 2026-08-26: 18 live sessions in 90 days carried a "
+            "pointer with no position and no resolution; RDIB 16759 rested a limit "
+            "BUY 9sh @ 16.15 against a 14.91 ask (-767.8 bps through it) and held "
+            "those shares for 16m08s with no stop, no target and no deadman while "
+            "emitting PRE-ENTRY vetoes. ON => a raced fill is adopted via "
+            "_adopt_recovered_primary_fill_for_safety (a broker fill outranks an "
+            "entry-risk refusal, the same principle as "
+            "_held_position_keeps_exit_on_boundary_fail) and a clean cancel "
+            "releases the pointer so the EXISTING sweep resolves it. OFF => "
+            "byte-identical to the pre-2026-08-27 behaviour, including the leak."
+        ),
+    )
     chili_momentum_g4_reentry_escalation_enabled: bool = Field(
         default=True,
         validation_alias=AliasChoices("CHILI_MOMENTUM_G4_REENTRY_ESCALATION_ENABLED"),
