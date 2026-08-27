@@ -114,6 +114,17 @@ _STATUS_MAP = {
 }
 
 
+def _leg_price(leg: Any, field: str) -> Optional[str]:
+    """One OCO child-leg price as a plain string, or None when absent."""
+    v = getattr(leg, field, None)
+    if v is None:
+        return None
+    try:
+        return str(v)
+    except Exception:
+        return None
+
+
 def quantize_alpaca_equity_sell_stop_price(price: Any) -> str:
     """Return the exact Alpaca-valid tick for a protective equity sell stop.
 
@@ -3258,6 +3269,188 @@ class AlpacaSpotAdapter:
                 "ok": False,
                 "error": str(exc),
                 "client_order_id": client_order_id,
+                "stop_price": quantized_stop,
+                **_submit_failure_metadata(exc),
+            }
+
+    def place_protected_partial_oco(
+        self,
+        *,
+        product_id: str,
+        base_size: str,
+        take_profit_price: Any,
+        stop_price: Any,
+        client_order_id: Optional[str] = None,
+        extended_hours: bool = False,
+        asset_class: Any = None,
+    ) -> dict[str, Any]:
+        """One OCO sell that BOTH harvests a tranche and protects it.
+
+        WHY THIS EXISTS (2026-08-27). ``live_runner`` suppressed every partial on
+        Alpaca with the comment "Alpaca has no OCO contract here. A resting
+        partial SELL and a full-qty deadman would reserve overlapping shares;
+        keep the broker stop and use only full-position software exits."
+        That is true of THIS CODE and false of the API: ``OrderClass.OCO``,
+        ``TakeProfitRequest`` and ``StopLossRequest`` are all in the SDK, and a
+        repo-wide search for ``order_class`` returned ZERO hits -- CHILI had
+        simply never implemented it, for any venue.
+
+        MEASURED COST OF NOT HAVING IT (2026-08-26, DAIC): entry 6.14 x 95sh,
+        scale-grid rungs 6.3675 (50%) and 6.5000 (25%). BOTH were touched --
+        13:30:04.66 and 13:30:21.04 -- with 622,528 and 283,554 shares printing
+        at or above them against the 47 and 24 shares CHILI needed. Liquidity was
+        never the constraint. A working partial was worth about +$19 instead of
+        the realised -$11.58. ``alpaca_scale_out_suppressed_for_deadman`` fired
+        on 5 of 5 live fills since 2026-08-21.
+
+        WHY OCO AND NOT A BARE LIMIT: a bare resting limit leaves the tranche
+        with NO stop while it rests. An OCO carries its own stop, so the tranche
+        is protected from the instant it exists. Quantities never overlap:
+        deadman(Q-f) + oco(f) = Q exactly, so nothing is over-reserved.
+
+        WARNING -- THE CALLER OWNS THE ORDERING. This places ONE order; it does
+        not shrink the deadman. Placing it while a FULL-quantity deadman rests
+        will be rejected by the broker for over-reservation, which is the correct
+        fail-safe outcome, not a bug.
+
+        WARNING -- NOT YET PROVEN AGAINST A LIVE BROKER. Every field follows the
+        documented contract but no order has been placed with it. ``ok: False``
+        carrying the broker's own text is a first-class result: a caller MUST
+        treat a rejection as "fall back to the full-position behaviour", never as
+        a reason to leave shares unprotected.
+        """
+        quantized_stop = None
+        quantized_tp = None
+        try:
+            qty = float(base_size)
+            stop = float(stop_price)
+            tp = float(take_profit_price)
+            quantized_stop = quantize_alpaca_equity_sell_stop_price(stop_price)
+            quantized_tp = quantize_alpaca_equity_limit_price(take_profit_price, "sell")
+        except (TypeError, ValueError):
+            qty = stop = tp = float("nan")
+        fractional_qty = bool(math.isfinite(qty) and abs(qty - round(qty)) > 1e-9)
+        # A take-profit at or below the stop is not a harvest, it is a race to
+        # sell into the flush. Refuse the instruction rather than express it.
+        inverted = bool(math.isfinite(tp) and math.isfinite(stop) and tp <= stop)
+        if (
+            _is_crypto_pid(product_id)
+            or _is_crypto_asset_class(asset_class)
+            or not _to_symbol(product_id)
+            or not str(client_order_id or "").strip()
+            or not math.isfinite(qty)
+            or qty <= 0.0
+            or fractional_qty
+            or not math.isfinite(stop)
+            or stop <= 0.0
+            or not math.isfinite(tp)
+            or tp <= 0.0
+            or inverted
+        ):
+            return {
+                "ok": False,
+                "error": (
+                    "alpaca_fractional_partial_not_certified"
+                    if fractional_qty
+                    else "alpaca_partial_take_profit_not_above_stop"
+                    if inverted
+                    else "alpaca_partial_oco_instruction_not_certified"
+                ),
+                "client_order_id": client_order_id,
+                "pre_submit_blocked": True,
+            }
+        try:
+            from alpaca.trading.enums import (
+                OrderClass,
+                OrderSide,
+                PositionIntent,
+                TimeInForce,
+            )
+            from alpaca.trading.requests import (
+                LimitOrderRequest,
+                StopLossRequest,
+                TakeProfitRequest,
+            )
+
+            # Alpaca rejects extended_hours unless the order is a LIMIT with a DAY
+            # tif -- the same rule ``_submit`` follows. The lane deliberately
+            # trades premarket (the 2026-08-26 DAIC entry was 09:16 ET), and
+            # premarket is exactly where a resting limit is the ONLY instrument
+            # that works: a market order is silently cancelled and the deadman
+            # STOP carries no extended_hours field at all, so it sits inert.
+            _tif = TimeInForce.DAY if extended_hours else TimeInForce.GTC
+            req = LimitOrderRequest(
+                symbol=_to_symbol(product_id),
+                qty=base_size,
+                side=OrderSide.SELL,
+                time_in_force=_tif,
+                client_order_id=client_order_id,
+                extended_hours=True if extended_hours else None,
+                order_class=OrderClass.OCO,
+                take_profit=TakeProfitRequest(limit_price=float(quantized_tp)),
+                stop_loss=StopLossRequest(stop_price=float(quantized_stop)),
+                position_intent=PositionIntent.SELL_TO_CLOSE,
+            )
+            AlpacaSpotAdapter._record_order_submission_attempt(
+                self,
+                surface="place_protected_partial_oco",
+                symbol=_to_symbol(product_id),
+                side="sell",
+                position_intent="sell_to_close",
+                client_order_id=str(client_order_id),
+                request_type="oco",
+            )
+            o = self._account_client().submit_order(req)
+            # DURABLE NAMING OF THE CHILD LEGS. This is the objection that killed
+            # every earlier partial design: CHILI's whole safety model is strict
+            # client-order-id identity, and OCO child legs carry broker-assigned
+            # ids CHILI never chose. Capture them AT PLACEMENT so the session can
+            # persist them; without this the stop leg is unnameable and therefore
+            # un-re-adoptable after a restart -- and this lane HAS been restarted
+            # while holding a position.
+            legs = []
+            for _leg in (getattr(o, "legs", None) or []):
+                legs.append({
+                    "order_id": str(getattr(_leg, "id", "") or ""),
+                    "client_order_id": str(getattr(_leg, "client_order_id", "") or ""),
+                    "order_type": str(
+                        getattr(getattr(_leg, "order_type", None), "value", "") or ""
+                    ),
+                    "limit_price": _leg_price(_leg, "limit_price"),
+                    "stop_price": _leg_price(_leg, "stop_price"),
+                })
+            return {
+                "ok": True,
+                "order_id": str(getattr(o, "id", "") or ""),
+                "status": str(getattr(getattr(o, "status", None), "value", "") or ""),
+                "client_order_id": client_order_id,
+                "take_profit_price": quantized_tp,
+                "stop_price": quantized_stop,
+                "legs": legs,
+                "order_request": {
+                    "product_id": _to_symbol(product_id),
+                    "base_size": str(base_size),
+                    "side": "sell",
+                    "position_intent": "sell_to_close",
+                    "order_type": "limit",
+                    "order_class": "oco",
+                    "time_in_force": "day" if extended_hours else "gtc",
+                    "extended_hours": bool(extended_hours),
+                    "take_profit_price": quantized_tp,
+                    "stop_price": quantized_stop,
+                    "client_order_id": client_order_id,
+                },
+            }
+        except Exception as exc:
+            logger.warning(
+                "[alpaca_spot] protected partial OCO place failed for %s: %s",
+                product_id, exc,
+            )
+            return {
+                "ok": False,
+                "error": str(exc),
+                "client_order_id": client_order_id,
+                "take_profit_price": quantized_tp,
                 "stop_price": quantized_stop,
                 **_submit_failure_metadata(exc),
             }
