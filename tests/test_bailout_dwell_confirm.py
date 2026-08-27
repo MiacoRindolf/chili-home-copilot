@@ -72,15 +72,19 @@ def test_flag_off_is_byte_identical(monkeypatch):
         object(), _Sess(), _le(), bid=5.0, trigger="x") is True
 
 
-def test_the_flag_ships_OFF_with_the_flip_criterion_written():
-    """⚠️ Hindi ito 'dark flag na naghihintay ng A/B na di darating' — ang
-    nightly replay na sumusukat sa criterion ay GUMAGANA na. Ang criterion ay
-    dapat nakasulat sa description."""
-    assert settings.chili_momentum_bailout_dwell_confirm_enabled is False
+def test_the_flag_ships_ON_with_the_oos_evidence_recorded():
+    """FLIPPED 2026-08-27: ang nakasulat na criterion (admitted-set winner rate
+    >= ~25% kasabay ng conditional gate) ay NASUKAT at pumasa sa 3/3 OOS
+    recorded days (08-19/20/21, 836 ignitions): 41.6%/36.2%/42.0% winner rate
+    at +0.75/+0.69/+0.92pp dwell delta. Ang ebidensya at ang un-flip condition
+    ay dapat nakasulat sa description — hindi hubad na True."""
+    assert settings.chili_momentum_bailout_dwell_confirm_enabled is True
     desc = str(type(settings).model_fields[
         "chili_momentum_bailout_dwell_confirm_enabled"].description or "")
-    assert "25%" in desc, "dapat nakasulat ang flip criterion"
-    assert "nightly replay" in desc, "dapat nakaturo sa gumaganang evidence machine"
+    assert "25%" in desc, "dapat nakasulat ang criterion"
+    assert "38.7%" in desc, "dapat nakasulat ang nasukat na OOS na numero"
+    assert "nightly replay" in desc, "dapat nakaturo sa patuloy na sumusukat"
+    assert "False" in desc, "dapat nakasulat ang un-flip condition"
 
 
 # ── Ang dwell state machine ──────────────────────────────────────────────────

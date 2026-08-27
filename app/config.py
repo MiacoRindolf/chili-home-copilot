@@ -8516,7 +8516,7 @@ class Settings(BaseSettings):
         ),
     )
     chili_momentum_bailout_dwell_confirm_enabled: bool = Field(
-        default=False,
+        default=True,
         validation_alias=AliasChoices(
             "CHILI_MOMENTUM_BAILOUT_DWELL_CONFIRM_ENABLED"
         ),
@@ -8528,13 +8528,18 @@ class Settings(BaseSettings):
             "lost_vwap) ay nag-a-arm ng pending stamp at lumalabas LAMANG "
             "kapag 60s na TULOY-TULOY na dwell sa ilalim ng entry AT lalim "
             ">=1% (panalo natatalsik 16.3% vs pagkabigo 63.0%), may 2% hard "
-            "backstop. ⚠️ SINADYANG OFF na may NAKASULAT NA FLIP CRITERION "
-            "(utos ng adversarial audit): i-flip LANG kasabay ng conditional "
-            "admission gate, kapag ang admitted-set winner rate sa nightly "
-            "replay ay >= ~25% -- sa unconditioned na daloy ang panuntunang "
-            "ito ay EV ~0 pagkatapos ng frictions. HINDI ito 'naghihintay ng "
-            "A/B na di darating': ang nightly replay counterfactual ay "
-            "GUMAGANA na (naayos 2026-08-27) at ito mismo ang sumusukat."
+            "backstop. FLIP CRITERION MET 2026-08-27 sa OOS (3 recorded na "
+            "araw 08-19/20/21, 836 ignitions, 613 GATE_NEW admits): "
+            "admitted-set winner rate 41.6%/36.2%/42.0% (pooled 38.7%, "
+            "threshold >=25%, 3/3 PASS) AT dwell delta +0.75/+0.69/+0.92pp "
+            "(pooled +0.75pp/trade, positibo 3/3, 7/9 symbol-days). Ang "
+            "conditional admission gate (#1206 floors-only GATE_NEW) ay LIVE "
+            "na. ⚠️ Tapat na caveats: mover-conditional universe (survivorship "
+            "=> 38.7% ay upper bound; ang 13.7pp margin ang buffer), at ang "
+            "0.7xMFE timeout fallback ay bahagyang nagpapalobo ng delta "
+            "magnitude -- ang SIGN (positibo 3/3) ang matibay. Ang nightly "
+            "replay ang patuloy na sumusukat; ibalik sa False kapag ang "
+            "admitted-set rate ay bumagsak sa ilalim ng ~25%."
         ),
     )
     chili_momentum_bailout_dwell_confirm_seconds: float = Field(
