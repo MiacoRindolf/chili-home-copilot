@@ -8464,6 +8464,48 @@ class Settings(BaseSettings):
         validation_alias=AliasChoices("CHILI_MOMENTUM_REENTRY_AFTER_STOP_BOUND_ENABLED"),
         description="TASK#8: kill-switch for the bounded re-entry-after-stop-out cap. True => after max_stopout_reentries LOSS recycles the session terminalizes. OFF ⇒ byte-identical unlimited recycle.",
     )
+    chili_momentum_emergency_exit_stand_in_enabled: bool = Field(
+        default=True,
+        validation_alias=AliasChoices(
+            "CHILI_MOMENTUM_EMERGENCY_EXIT_STAND_IN_ENABLED"
+        ),
+        description=(
+            "2026-08-27 (CELU): ang quote-independent EMERGENCY flatten sa "
+            "extended hours ay na-block ng 30+ tick dahil WALANG sariwang "
+            "quote kahit saan (Alpaca IEX 66 min luma afterhours) habang -12% "
+            "ang walang-proteksyong posisyon. ON => kapag bigo ang strict "
+            "BBO, ang emergency branch LAMANG ay sumusubok ng stand-in quote "
+            "(bounded age) at nagpepresyo nang KONSERBATIBO PABABA (haircut) "
+            "-- mas marketable, hindi mas mataas; ang repeg ladder ang "
+            "naghahatid pababa kung stale-high. Ang ordinaryong exit ay "
+            "strict pa rin (ang asimetriya doon ay sinadya at nananatili)."
+        ),
+    )
+    chili_momentum_emergency_exit_stand_in_max_age_seconds: float = Field(
+        default=900.0,
+        ge=0.0,
+        le=7200.0,
+        validation_alias=AliasChoices(
+            "CHILI_MOMENTUM_EMERGENCY_EXIT_STAND_IN_MAX_AGE_SECONDS"
+        ),
+        description=(
+            "Pinakamatandang tatanggaping stand-in quote para sa emergency "
+            "extended-hours flatten pricing. 0 => patay ang stand-in retry."
+        ),
+    )
+    chili_momentum_emergency_exit_stand_in_haircut_pct: float = Field(
+        default=1.0,
+        ge=0.0,
+        le=10.0,
+        validation_alias=AliasChoices(
+            "CHILI_MOMENTUM_EMERGENCY_EXIT_STAND_IN_HAIRCUT_PCT"
+        ),
+        description=(
+            "Porsyentong ibinababa ang stand-in pricing inputs bago ang "
+            "emergency sell-limit ladder (pababa = mas marketable = ligtas "
+            "sa long-only flatten)."
+        ),
+    )
     chili_momentum_no_bbo_decline_consecutive_ticks: int = Field(
         default=3,
         ge=1,

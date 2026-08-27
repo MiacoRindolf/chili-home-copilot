@@ -12746,6 +12746,45 @@ def _submit_live_market_exit_impl(
                 max_age_seconds=max_age_seconds,
             )
             le["emergency_exit_extended_bbo"] = final_bbo
+            _si_used = False
+            if final_tick is None and bool(getattr(
+                settings, "chili_momentum_emergency_exit_stand_in_enabled", True
+            )):
+                # STAND-IN PARA SA EMERGENCY LAMANG (2026-08-27 CELU). Ang
+                # asimetriya (stand-in sa ENTRY, wala sa EXIT) ay sinadya --
+                # ang cross-source bid ay maaaring magpresyo ng sell nang mas
+                # mataas kaysa maabot ng venue book. PERO ang kabaligtaran ay
+                # nasukat ngayong araw: ang CELU emergency flatten ay na-block
+                # ng 30+ tick nang WALANG sariwang quote KAHIT SAAN afterhours
+                # (pati Alpaca IEX ay 66 min luma) habang -12% ang posisyon.
+                # Sa isang OUT-NOW na emergency, ang tamang trade-off ay
+                # kabaligtaran: tanggapin ang stand-in at magpresyo nang
+                # KONSERBATIBO PABABA (haircut sa ibaba) -- mas marketable,
+                # hindi mas mataas; ang repeg ladder ang maghahatid pababa
+                # kung stale-high pa rin. EMERGENCY (quote_independent) branch
+                # LAMANG ito -- ang ordinaryong exit ay strict pa rin.
+                _si_age = float(getattr(
+                    settings,
+                    "chili_momentum_emergency_exit_stand_in_max_age_seconds",
+                    900.0,
+                ) or 0.0)
+                if _si_age > 0:
+                    _si_tick, _si_bbo = _final_entry_bbo(
+                        adapter,
+                        product_id,
+                        max_age_seconds=max_age_seconds,
+                        allow_stand_in=True,
+                        stand_in_max_age_seconds=_si_age,
+                    )
+                    if _si_tick is not None:
+                        final_tick, final_bbo = _si_tick, _si_bbo
+                        le["emergency_exit_extended_bbo"] = final_bbo
+                        _si_used = True
+                        _emit(db, sess, "live_emergency_exit_stand_in_pricing", {
+                            "reason": reason,
+                            "execution_bbo": final_bbo,
+                            "stand_in_max_age_seconds": _si_age,
+                        })
             if final_tick is None:
                 _commit_le(sess, le)
                 _emit(db, sess, "live_emergency_exit_extended_bbo_blocked", {
@@ -12761,6 +12800,23 @@ def _submit_live_market_exit_impl(
             bid = float(final_tick.bid)
             ask = float(final_tick.ask)
             mid = float(final_tick.mid)
+            if _si_used:
+                # KONSERBATIBONG HAIRCUT: ibaba ang pricing inputs para ang
+                # sell limit (bid - guard sa ladder) ay mas malamang na NASA
+                # LOOB ng tunay na book. Sell-side lamang ang emergency
+                # flatten na ito (long-only lane) kaya pababa = ligtas.
+                try:
+                    _si_hc = float(getattr(
+                        settings,
+                        "chili_momentum_emergency_exit_stand_in_haircut_pct",
+                        1.0,
+                    ) or 0.0) / 100.0
+                except (TypeError, ValueError):
+                    _si_hc = 0.01
+                _si_hc = max(0.0, min(0.10, _si_hc))
+                bid *= (1.0 - _si_hc)
+                ask *= (1.0 - _si_hc)
+                mid *= (1.0 - _si_hc)
             exit_execution_bbo_freshness = getattr(final_tick, "freshness", None)
             exit_execution_bbo_max_age = max_age_seconds
             alpaca_extended_bbo_required = True
