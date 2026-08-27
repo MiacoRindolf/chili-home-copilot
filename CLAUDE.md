@@ -156,6 +156,11 @@ The momentum PAPER lane is a host `uvicorn app.main:app` on **port 8010** with
 - The supervisor holds a PG advisory lock and its ACCEPT gate is **fail-closed**: it refuses to
   start unless the lease is held, all six prestart counters are 0, the broker census is clean
   (**account FLAT — no adopt path**), and the producer census is clean.
+- ⚠️ **The flat check reads `risk_snapshot_json->'momentum_live_execution'->'position'`** —
+  NOT `live_exec` (a similarly-named key that does not exist; a check against it is
+  vacuously "flat"). Measured 2026-08-27: every flat gate that day used the wrong key and
+  passed by luck (the broker census at ACCEPT was the real proof). The broker census in the
+  ACCEPT receipt is the authority; the session-side check is the pre-check.
 - ⚠️ **Do not kill the lane while it holds a position.** `_preshutdown_flatten` runs only on a
   NORMAL shutdown; the fail-closed ACCEPT returns before it, so a force-kill leaves the position
   unmanaged AND the lane unable to restart until the account is flat again.
