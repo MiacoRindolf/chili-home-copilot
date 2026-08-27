@@ -1866,6 +1866,52 @@ def _reap_stale_watching_sessions(db: Session, *, user_id: int | None, now: date
 
     reaped = 0
     for s in rows:
+        # ⚠️ ANG BROKER ORDER GUARD (2026-08-27, BRNX 17370). Ang docstring sa
+        # itaas ay nangangako: "Never touches a session that holds a position" --
+        # pero WALANG tseke para sa buhay na SUBMITTED ORDER na hindi pa
+        # na-attribute ang fill. Nangyari: ang 17370 ay nag-submit ng BUY 20 BRNX
+        # sa 16:38:24Z (order 20c15aab), ang order ay NAG-FILL sa loob ng ilang
+        # segundo, pero ang tik na magpoproseso sana ng fill ay bumagsak sa
+        # LockNotAvailable (row lock ng docker scheduler) -- kaya walang position
+        # record. Ang reaper ay nag-reap ng "never entered" kada 10s habang ang
+        # 20 shares ay nakaupo sa broker nang WALANG STOP nang halos isang oras.
+        #
+        # Ang panuntunan: ang session na may (a) aktibong entry_order_id, (b)
+        # entry_submitted na hindi pa nalulutas, o (c) hindi-nalutas na order sa
+        # history ay HINDI "never entered" -- ito ay "entered at hindi pa alam".
+        # Ang pag-reap dito ay nagkakansela ng may-ari ng isang buhay/na-fill na
+        # broker order. Laktawan; ang recovery/sweep machinery ang hahawak.
+        # Fail-CLOSED sa hindi mabasang snapshot: laktawan din (huwag mag-reap
+        # ng hindi mo naiintindihan).
+        try:
+            _rg_snap = s.risk_snapshot_json if isinstance(s.risk_snapshot_json, dict) else {}
+            _rg_le = _rg_snap.get("momentum_live_execution")
+            _rg_le = _rg_le if isinstance(_rg_le, dict) else {}
+            _rg_ids = [str(x) for x in (_rg_le.get("entry_order_ids_all") or [])]
+            _rg_resolved = _rg_le.get("entry_orders_resolved") or {}
+            _rg_unresolved = [x for x in _rg_ids if x not in _rg_resolved]
+            if (
+                _rg_le.get("entry_order_id")
+                or _rg_le.get("entry_submitted")
+                or _rg_unresolved
+            ):
+                logger.warning(
+                    "[auto_arm] reap SKIPPED session=%s %s: may buhay na broker "
+                    "order (oid=%s submitted=%s unresolved=%s) — hindi ito "
+                    "'never entered'",
+                    s.id, s.symbol,
+                    str(_rg_le.get("entry_order_id") or "")[:8] or None,
+                    bool(_rg_le.get("entry_submitted")),
+                    len(_rg_unresolved),
+                )
+                continue
+        except Exception:
+            logger.warning(
+                "[auto_arm] reap SKIPPED session=%s %s: hindi mabasa ang "
+                "snapshot — hindi magre-reap nang bulag",
+                getattr(s, "id", None), getattr(s, "symbol", None),
+            )
+            continue
         # PROGRESSING setups earn the extended watch: a tick-armed session
         # (watch_break_level set = a reclaim/break is actually forming) keeps
         # its slot to the extend cutoff; a watch that never produced a level
