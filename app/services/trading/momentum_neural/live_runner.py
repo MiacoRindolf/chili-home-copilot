@@ -21374,6 +21374,95 @@ def _latest_rvol(db, symbol: str) -> float | None:
     return v_out
 
 
+def _bailout_dwell_confirm_holds(
+    db: Session,
+    sess: Any,
+    le: dict[str, Any],
+    *,
+    bid: float | None,
+    trigger: str,
+) -> bool:
+    """DWELL-CONFIRM para sa fast-bail (2026-08-27). True = maaaring mag-exit.
+
+    ANG SUKAT (1,206 labelled ignition, 2 araw ng tape): ang entry-price
+    fast-bailout ay ang PINAKAMASAMANG panuntunan sa bawat table -- pinapatalsik
+    nito ang 86-96% ng panalo (95% ng CONTINUED ay nagre-retest sa/mababa sa
+    entry sa loob ng 60s) at ito lang ang uniporme-negatibong cell. Ang
+    pinakamahusay na nasukat na kombinasyon: 60s na TULOY-TULOY na dwell sa
+    ilalim ng entry AT lalim >= 1% -- panalo natatalsik 16.3%, pagkabigo
+    natatalsik 63.0%. May 2% na hard backstop para sa 77 rip-then-collapse
+    (mean -2.42% sa ilalim ng panuntunan), nakaupo sa LOOB ng sized stop
+    (median 3.0%, p75 4.8%) kaya hindi ginagalaw ang sizing/R reservation.
+
+    Kinokopya nang eksakto ang stop-side flicker-confirm pattern (pending stamp /
+    flicker-dodge / redispatch -- live_runner.py:42140-42175). Ang dwell clock ay
+    TULOY-TULOY: ang reclaim (bid >= entry) ay naglilinis ng stamp -- iyon ang
+    nasukat na variable (panalo: pinakamahabang tuloy-tuloy na run sa ilalim ng
+    entry p50 10s / p90 99s; pagkabigo p50 116s).
+
+    ⚠️ IPINADALANG OFF. Utos ng adversarial audit: i-ship LANG bilang pakete
+    kasama ang conditional admission gate -- sa unconditioned corpus ang
+    panuntunang ito ay EV +0.02%/trade gross, <=0 pagkatapos ng frictions. Ang
+    flip criterion ay nasa description ng flag. Flag OFF => True agad
+    (byte-identical sa dati). Anumang nawawalang input => True (bumabalik sa
+    gawi ngayon -- ang exit ay HINDI kailanman naha-harang ng sirang datos).
+    """
+    if not bool(getattr(settings, "chili_momentum_bailout_dwell_confirm_enabled", False)):
+        return True
+    try:
+        _pos = le.get("position") if isinstance(le.get("position"), dict) else {}
+        _entry = _float_or_none(_pos.get("avg_entry_price"))
+        _bid = _float_or_none(bid)
+        if _entry is None or _entry <= 0 or _bid is None or _bid <= 0:
+            return True
+        if _bid >= _entry:
+            # Reclaim: linisin ang stamp -- ang dwell ay tuloy-tuloy.
+            if le.pop("bailout_breach_pending_utc", None) is not None:
+                le.pop("bailout_breach_trigger", None)
+                _commit_le(sess, le)
+                _emit(db, sess, "bailout_breach_flicker_dodged", {
+                    "bid": _bid, "entry": _entry, "trigger": trigger,
+                })
+            return False
+        _hold_max = float(getattr(
+            settings, "chili_momentum_bailout_hold_max_depth_pct", 0.02) or 0.02)
+        if _bid <= _entry * (1.0 - _hold_max):
+            # Hard backstop: rip-then-collapse -- labas AGAD.
+            return True
+        _pend_raw = le.get("bailout_breach_pending_utc")
+        if not _pend_raw:
+            le["bailout_breach_pending_utc"] = _utcnow().isoformat()
+            le["bailout_breach_trigger"] = trigger
+            _commit_le(sess, le)
+            _emit(db, sess, "bailout_breach_pending_confirm", {
+                "bid": _bid, "entry": _entry, "trigger": trigger,
+            })
+            try:
+                _schedule_stop_confirm_dispatch(int(sess.id))
+            except Exception:
+                _log.debug(
+                    "[momentum_live] bailout dwell dispatch failed sid=%s",
+                    sess.id, exc_info=True,
+                )
+            return False
+        try:
+            _pend_t = datetime.fromisoformat(
+                str(_pend_raw).replace("Z", "+00:00")
+            ).replace(tzinfo=None)
+            _dwell_s = (_utcnow() - _pend_t).total_seconds()
+        except (TypeError, ValueError):
+            return True  # sirang stamp => gawi ngayon
+        _need_s = float(getattr(
+            settings, "chili_momentum_bailout_dwell_confirm_seconds", 60.0) or 60.0)
+        _min_depth = float(getattr(
+            settings, "chili_momentum_bailout_min_depth_pct", 0.01) or 0.01)
+        if _dwell_s >= _need_s and _bid <= _entry * (1.0 - _min_depth):
+            return True
+        return False
+    except Exception:
+        return True  # anumang error => gawi ngayon; hindi naha-harang ang exit
+
+
 def _breakout_bailout_lock_in_seconds(*, explosive: bool) -> float:
     """Lock-in floor (seconds) for the fast-bail — BELOW which a momentary sub-level
     dip is NOT treated as a failed breakout. Master-gated: returns 0.0 (byte-identical,
@@ -38180,6 +38269,12 @@ def tick_live_session(
                 lock_in_seconds=_bb_lock_in,
             )
         ):
+            if not _bailout_dwell_confirm_holds(
+                db, sess, le, bid=bid, trigger="breakout_failed_to_hold"
+            ):
+                db.flush()
+                return {"ok": True, "session_id": sess.id, "state": sess.state,
+                        "bailout_dwell_pending": True}
             le["last_bailout_trigger"] = "breakout_failed_to_hold"
             _commit_le(sess, le)
             _safe_transition(db, sess, STATE_LIVE_BAILOUT)
@@ -38671,6 +38766,15 @@ def tick_live_session(
                                 _lv_flow_pos = True
                     except Exception:
                         _lv_flow_pos = False
+                    if (
+                        _lv_closed_below and _lv_bid_below_margin and not _lv_flow_pos
+                        and not _bailout_dwell_confirm_holds(
+                            db, sess, le, bid=bid, trigger="lost_vwap_flatten"
+                        )
+                    ):
+                        db.flush()
+                        return {"ok": True, "session_id": sess.id,
+                                "state": sess.state, "bailout_dwell_pending": True}
                     if _lv_closed_below and _lv_bid_below_margin and not _lv_flow_pos:
                         le["last_bailout_trigger"] = "lost_vwap_flatten"
                         _commit_le(sess, le)
