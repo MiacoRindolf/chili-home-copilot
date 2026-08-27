@@ -8464,6 +8464,29 @@ class Settings(BaseSettings):
         validation_alias=AliasChoices("CHILI_MOMENTUM_REENTRY_AFTER_STOP_BOUND_ENABLED"),
         description="TASK#8: kill-switch for the bounded re-entry-after-stop-out cap. True => after max_stopout_reentries LOSS recycles the session terminalizes. OFF ⇒ byte-identical unlimited recycle.",
     )
+    chili_momentum_alpaca_protected_partial_enabled: bool = Field(
+        default=True,
+        validation_alias=AliasChoices(
+            "CHILI_MOMENTUM_ALPACA_PROTECTED_PARTIAL_ENABLED"
+        ),
+        description=(
+            "2026-08-27: ang Ross partial (sell INTO strength) sa Alpaca sa "
+            "pamamagitan ng OCO. Ang lumang suppression (\"Alpaca has no OCO "
+            "contract here\") ay totoo sa kodigo, mali sa API. Sa FILL tick: "
+            "OCO(f, tp=unang rung, stop=structural stop) MUNA -- may sariling "
+            "stop ang tranche mula sa sandaling umiral -- tapos ang deadman ay "
+            "R = Q - f (ang tranche-aware guard sa _ensure_alpaca_deadman_stop). "
+            "R + f = Q: walang overlap, walang unprotected window, walang resize "
+            "ng frozen request. Ang buong scale_limit_* lifecycle (poll/adopt/"
+            "oversell clamp) ay muling ginagamit; ang stop-leg fill ay ibinu-"
+            "book sa sariling presyo ng leg (tranche_oco_stop_fill). FAIL-SAFE "
+            "sa bawat kakulangan => ang lumang suppression, buo. Sa PAPER na may "
+            "tunay na fill, ang pagpapatakbo NITO ang A/B (#1185 doctrine); ang "
+            "unang fill ang cert. NASUKAT na halaga: DAIC 08-26 ~+$19 sa halip "
+            "na -$11.58; ang suppression ay pumutok sa 5 sa 5 live fill. "
+            "OFF => byte-identical na suppression."
+        ),
+    )
     chili_momentum_tick_row_lock_wait_ms: int = Field(
         default=800,
         ge=0,
