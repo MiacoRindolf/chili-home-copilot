@@ -8464,6 +8464,29 @@ class Settings(BaseSettings):
         validation_alias=AliasChoices("CHILI_MOMENTUM_REENTRY_AFTER_STOP_BOUND_ENABLED"),
         description="TASK#8: kill-switch for the bounded re-entry-after-stop-out cap. True => after max_stopout_reentries LOSS recycles the session terminalizes. OFF ⇒ byte-identical unlimited recycle.",
     )
+    chili_momentum_stopout_cap_stop_class_only: bool = Field(
+        default=True,
+        validation_alias=AliasChoices(
+            "CHILI_MOMENTUM_STOPOUT_CAP_STOP_CLASS_ONLY"
+        ),
+        description=(
+            "2026-08-27 BUG FIX (shipped ON; this knob only reverts it). The "
+            "terminal re-entry cap counted ANY red exit as a stop-out, while the "
+            "G4 escalation rule three lines away counts only genuine STOP-class "
+            "exits (kill_switch_flatten / bailout / max_hold / a target that "
+            "closes red are NOT entry-level failures). stop_class_exit_reason's "
+            "own docstring calls itself 'the ONE stop-class classifier' whose "
+            "callers 'must use the SAME predicate the escalation rule uses' -- "
+            "the cap that ENDS the session was the caller that never did. "
+            "MEASURED 2026-08-26 (XPON, +58.5% mover): three exits, all "
+            "last_exit_reason='bailout', each merely red; cap hit at "
+            "stopout_cycles=3 and the session went live_finished (ABSORBING) at "
+            "13:18:05 -- then XPON ran 6.52 to 10.13 between 13:36 and 13:56 "
+            "with the entry volume gate passing every minute (ratios 3.84 to "
+            "80.64). ON => only stop-class red exits advance the cap. OFF => "
+            "byte-identical to the pre-2026-08-27 behaviour, including the leak."
+        ),
+    )
     chili_momentum_max_stopout_reentries: int = Field(
         default=3,
         ge=1,

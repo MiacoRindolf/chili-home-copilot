@@ -3887,6 +3887,7 @@ def stopout_cycles_after_recycle(
     *,
     prev_stopout_cycles: int,
     recycle_was_stopout: bool,
+    recycle_holds_streak: bool = False,
 ) -> int:
     """Pure bookkeeping for the loss-recycle strike counter (no I/O).
 
@@ -3899,13 +3900,30 @@ def stopout_cycles_after_recycle(
     G4 escalation-level rule beside it ("a GREEN BANKED round RESETS it") that
     the hard counter never followed. A name that alternates win/loss forever is
     still bounded by symbol_day_loss_lockout (net dollars) — that guard, not
-    this streak counter, is the real damage bound."""
+    this streak counter, is the real damage bound.
+
+    THREE STATES (2026-08-27). ``recycle_was_stopout`` advances the streak,
+    ``recycle_holds_streak`` leaves it exactly where it is, and neither flag set
+    (a GREEN recycle) clears it. The middle state exists because a RED exit that
+    is not STOP-class is not evidence about the entry level in either direction --
+    see ``_is_stop_class_exit_reason``, the one classifier both this counter and
+    the G4 escalation rule must share."""
     try:
         prev = max(0, int(prev_stopout_cycles or 0))
     except (TypeError, ValueError):
         prev = 0
     if recycle_was_stopout:
         return prev + 1
+    if recycle_holds_streak:
+        # HOLD (2026-08-27). A RED exit that is not STOP-class -- a bailout, a
+        # kill-switch flatten, a max-hold timeout, a target that happened to close
+        # red -- is neither a strike NOR proof the chop regime ended. Counting it
+        # terminalizes a session that never failed at the entry level (XPON,
+        # 2026-08-26: three bailouts, cap hit, session absorbing 28 minutes before
+        # a +58% run). RESETTING it would be the opposite error: a red exit does
+        # not earn a chopper a clean slate the way a BANKED WINNER does. So it
+        # holds: the streak neither advances nor clears.
+        return prev
     return 0
 
 
