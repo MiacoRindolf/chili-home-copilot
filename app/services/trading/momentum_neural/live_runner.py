@@ -1290,6 +1290,23 @@ def _alpaca_session_is_premarket_now(sess: Any) -> bool:
         return False
 
 
+def _alpaca_session_is_afterhours_now(sess: Any) -> bool:
+    """True kapag ang KASALUKUYANG local session ng symbol ay afterhours. Fail-CLOSED
+    (False sa anumang error) — kapareho ng premarket helper: ang carve-out ay hindi
+    kailanman bubukas sa hindi mapatunayang clock state."""
+    try:
+        from .market_profile import market_session_now
+
+        return (
+            str(
+                market_session_now(str(getattr(sess, "symbol", "") or ""), now=_utcnow_aware())
+            ).strip().lower()
+            == "afterhours"
+        )
+    except Exception:
+        return False
+
+
 def _alpaca_place_instruction_kind(sess: Any, kwargs: dict[str, Any]) -> str:
     """Classify the only Alpaca instructions certified at the submit boundary.
 
@@ -1325,17 +1342,55 @@ def _alpaca_place_instruction_kind(sess: Any, kwargs: dict[str, Any]) -> str:
         # (walang silent crossover), at DAY tif = mamamatay ito ngayong araw.
         _ext = kwargs.get("extended_hours")
         if _ext is not False:
+            # AFTERHOURS CARVE-OUT (2026-08-27, tahasang utos ng operator):
+            # parehong extended shape (LIMIT + DAY + ext=True), parehong
+            # fail-closed session proof. Ang exit path ay sakop NA ang
+            # afterhours (_exit_extended sa premarket+afterhours), kaya ang
+            # proteksyon semantics ay pareho ng premarket. Nasukat na
+            # konteksto: 11 triggers ang pumutok afterhours 2026-08-27 nang
+            # ZERO submits; ang lumang 14d AH record (1W/11L) ay nasa REDUCED
+            # size na ngayon (schedule mult knob), hindi full.
             if (
                 _ext is True
                 and tif == "day"
-                and bool(
-                    getattr(
-                        settings,
-                        "chili_momentum_alpaca_premarket_entries_enabled",
-                        True,
+                and (
+                    (
+                        bool(
+                            getattr(
+                                settings,
+                                "chili_momentum_alpaca_premarket_entries_enabled",
+                                True,
+                            )
+                        )
+                        and _alpaca_session_is_premarket_now(sess)
+                    )
+                    or (
+                        bool(
+                            getattr(
+                                settings,
+                                "chili_momentum_alpaca_afterhours_entries_enabled",
+                                True,
+                            )
+                        )
+                        and _alpaca_session_is_afterhours_now(sess)
+                        # ONE-WAY DOOR: ang afterhours ay tumatanggap LAMANG ng
+                        # instruction na binuo SA afterhours mismo (generation
+                        # stamp) -- kung wala o "premarket" ang stamp, ito ay
+                        # stale na premarket generation na sinusubukang mabuhay
+                        # muli pagkatapos ng 16:00: tanggihan (fail-closed),
+                        # magre-regenerate ang upstream sa susunod na tick.
+                        and str(
+                            (
+                                (getattr(sess, "risk_snapshot_json", None) or {}).get(
+                                    KEY_LIVE_EXEC
+                                )
+                                or {}
+                            ).get("entry_extended_session")
+                            or ""
+                        ).strip().lower()
+                        == "afterhours"
                     )
                 )
-                and _alpaca_session_is_premarket_now(sess)
             ):
                 return "entry"
             return "invalid_entry_extended_hours"
@@ -3413,6 +3468,17 @@ def _strict_alpaca_rth_entry_window(
             getattr(settings, "chili_momentum_alpaca_premarket_entries_enabled", True)
         )
     )
+    # AFTERHOURS ENTRY WINDOW (2026-08-27, utos ng operator): parehong hugis ng
+    # premarket window — fresh broker clock (ok+paper; is_open ay False afterhours
+    # by definition). Ang extended order shape ay ine-enforce ng certifier.
+    _afterhours_window_ok = (
+        local_session == "afterhours"
+        and clock.get("ok") is True
+        and clock.get("paper") is True
+        and bool(
+            getattr(settings, "chili_momentum_alpaca_afterhours_entries_enabled", True)
+        )
+    )
     if not (
         (
             local_session == "regular"
@@ -3421,6 +3487,7 @@ def _strict_alpaca_rth_entry_window(
             and clock.get("is_open") is True
         )
         or _premarket_window_ok
+        or _afterhours_window_ok
     ):
         return False, {
             "reason": "alpaca_new_entries_rth_only",
@@ -28703,7 +28770,9 @@ def tick_live_session(
 
             if str(
                 _msn_spread(str(sess.symbol), now=_utcnow_aware())
-            ).strip().lower() == "premarket":
+            ).strip().lower() in ("premarket", "afterhours"):
+                # afterhours idinagdag 2026-08-27 kasabay ng AH entry window --
+                # parehong manipis na book, parehong higpit.
                 _skip_spread_gate = False
         except Exception:
             pass
@@ -33402,8 +33471,20 @@ def tick_live_session(
                 # wall clock, so making the dependency explicit is behavior
                 # preserving there and removes a wall-clock leak in replay.
                 _win = schedule_window_now(now=_utcnow_aware())
+                # AFTERHOURS: 0.0 -> knob (2026-08-27, utos ng operator na
+                # buksan ang AH entries). Default 0.5 (kapareho ng midday
+                # treatment) HINDI 1.0 -- ang 14d AH record ay 1W/11L -$72.65
+                # kaya reduced size ang pagbubukas. Ang late (14:30-16:00) ay
+                # nananatiling 0.0 (sariling nasukat na buckets: -$169/-$322).
+                try:
+                    _ah_mult = float(getattr(
+                        settings, "chili_momentum_afterhours_schedule_mult", 0.5
+                    ) or 0.0)
+                except (TypeError, ValueError):
+                    _ah_mult = 0.0
                 _sched_mult = {
-                    "hot": 1.5, "midday": 0.5, "late": 0.0, "afterhours": 0.0,
+                    "hot": 1.5, "midday": 0.5, "late": 0.0,
+                    "afterhours": _ah_mult,
                 }.get(_win, 0.0)
                 if _sched_mult != 1.0:
                     le["schedule_risk"] = {"window": _win, "mult": _sched_mult}
@@ -35054,12 +35135,21 @@ def tick_live_session(
         try:
             from .market_profile import market_session_now
 
-            _entry_extended = (
-                market_session_now(sess.symbol, now=_utcnow_aware()) != "regular"
-            )
+            _entry_session_now = str(
+                market_session_now(sess.symbol, now=_utcnow_aware())
+            ).strip().lower()
+            _entry_extended = _entry_session_now != "regular"
         except Exception:
+            _entry_session_now = "unknown"
             _entry_extended = False
         le["entry_session_extended"] = bool(_entry_extended)
+        # ONE-WAY DOOR STAMP (2026-08-27): itala KUNG ALING session ang
+        # bumuo ng extended instruction. Ang afterhours certification sa
+        # _alpaca_place_instruction_kind ay nangangailangan na ang stamp ay
+        # "afterhours" mismo -- kaya ang stale na PREMARKET-generated na
+        # instruction ay HINDI nabubuhay muli pagsapit ng 16:00 (ang
+        # freeze-intent ng certifier ay buo pa rin sa dalawang bintana).
+        le["entry_extended_session"] = _entry_session_now
         # TIER-2 OVERNIGHT signal: when the master flag is ON and the clock is in the RH
         # overnight band, mark the entry overnight so the RH adapter routes it to
         # ``all_day_hours`` (the 24-hour market). The name reached here only via
