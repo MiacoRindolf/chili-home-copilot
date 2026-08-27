@@ -218,3 +218,20 @@ def test_single_order_truth_reads_are_nested():
         assert "GetOrderByIdRequest(nested=True)" in fsrc, (
             f"{name} ay dapat nested=True"
         )
+
+
+# ── RTH-only (napatunayan sa broker 2026-08-27) ──────────────────────────────
+
+
+def test_extended_hours_skips_the_oco_attempt_with_its_own_marker():
+    """NAPATUNAYAN SA UNANG TUNAY NA ATTEMPT (AEMD 18035, 22:37Z): Alpaca
+    40310000 'oco orders do not support extended hours trading'. Sa extended:
+    laktawan ang tiyak-na-reject na API call, sariling event, dumiretso sa
+    legacy suppression."""
+    src = ast.unparse(_fn("_place_scale_out_limit"))
+    i = src.index("tranche_oco_skipped_extended_hours")
+    assert "40310000" in src[i:i + 300]
+    i_skip = src.index("tranche_oco_skipped_extended_hours")
+    i_call = src.index("_oco_res = _oco_place(")
+    assert i_skip < i_call, "ang skip ay dapat BAGO ang API call"
+    assert "oco_rth_only" in src
