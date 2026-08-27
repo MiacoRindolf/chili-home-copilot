@@ -8537,9 +8537,17 @@ class Settings(BaseSettings):
             "na. ⚠️ Tapat na caveats: mover-conditional universe (survivorship "
             "=> 38.7% ay upper bound; ang 13.7pp margin ang buffer), at ang "
             "0.7xMFE timeout fallback ay bahagyang nagpapalobo ng delta "
-            "magnitude -- ang SIGN (positibo 3/3) ang matibay. Ang nightly "
-            "replay ang patuloy na sumusukat; ibalik sa False kapag ang "
-            "admitted-set rate ay bumagsak sa ilalim ng ~25%."
+            "magnitude -- ang SIGN (positibo 3/3) ang matibay. UPDATE mamaya "
+            "sa 2026-08-27: 4/4 na (08-24 XPON+BTCT: WR 44.3%, delta +0.11pp) "
+            "at ang survivorship probe sa 13 dead symbol-days ay ZERO admits "
+            "sa 97 dead-tape ignitions -- hindi nagf-fire ang setup sa patay "
+            "na pangalan, kaya maliit ang entry-side survivorship risk. "
+            "BABALA: ang dwell delta ay humihina sa NAMAMATAY na momentum "
+            "(BTCT-0824 flat -0.02pp; YJ mover-tail -1.73pp n=4). Ang nightly "
+            "replay ang patuloy na sumusukat. HIGPIT (per-symbol/momentum-state "
+            "gate) kapag: isang mover day na pooled delta < -0.10pp, o 2+ "
+            "symbol-days na delta < -0.2pp sa n>=10. I-UNFLIP review kapag: "
+            "pooled admitted-set WR < 25% sa alinmang bagong mover day."
         ),
     )
     chili_momentum_bailout_dwell_confirm_seconds: float = Field(
