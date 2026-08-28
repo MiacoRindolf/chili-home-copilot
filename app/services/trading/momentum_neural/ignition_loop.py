@@ -50,7 +50,9 @@ from .universe import (
     UniverseProfile,
     _f,
     _intraday_rvol,
+    _normalize_ross_common_stock_symbol,
     _snapshot_adv_shares,
+    _snapshot_price,
     _snapshot_today_shares,
     build_equity_universe,
 )
@@ -99,6 +101,16 @@ class _UniverseTracker:
         # (AZI/SKK) passed. That kept the scoped ignition→arm bridge from EVER arming a
         # WS-ignited name, and it also degraded any row the WS path overwrote.
         self._shares: dict[str, float] = {}
+        # VELOCITY INTAKE (2026-08-28, ang XLAB blindspot): short-horizon na
+        # pagtaas ng presyo sa pagitan ng mga snapshot refresh (~20s cadence),
+        # HIWALAY sa day change. Sinukat: ang #1 play ni Ross (XLAB, SPAC day-2)
+        # ay −2.4% sa araw pero +12% sa loob ng minutos — ang day-change na
+        # screen (min_change_pct=5 vs prev close) ay bulag dito, kaya ZERO tape,
+        # zero viability, invisible. Ang "Running Up" scanner ni Ross ay puro
+        # velocity. Itinatago rito ang (monotonic_ts, {sym: px}) na kasaysayan sa
+        # loob ng window at ang pinakamataas na %rise kada pangalan.
+        self._price_history: list[tuple[float, dict[str, float]]] = []
+        self._velocity: dict[str, float] = {}
 
     def refresh(self) -> set[str]:
         """Re-screen the universe; return the CURRENT watch set (uppercased)."""
@@ -119,6 +131,99 @@ class _UniverseTracker:
             _log.debug("[momentum_ws_ignition] universe build failed", exc_info=True)
             universe = []
         want = {str(s).strip().upper() for s in universe if str(s or "").strip()}
+
+        # ── VELOCITY INTAKE (2026-08-28): day-change-independent na admission ──
+        # Monotonic OR-leg: NAKAKADAGDAG lamang sa `want`, hindi nakakabawas, kaya
+        # ang day-change na universe ay byte-identical kapag walang qualifier o
+        # kapag naka-off ang flag. Hygiene sa admission: common-stock symbol
+        # (walang warrant/unit/leveraged-ETP), presyo sa loob ng profile band, at
+        # ang PAREHONG $-volume floor ng screen (day.v/min.av — ext-hours-aware).
+        velocity: dict[str, float] = {}
+        if snapshot and bool(getattr(
+            settings, "chili_momentum_velocity_intake_enabled", True
+        )):
+            try:
+                _vel_floor = float(getattr(
+                    settings, "chili_momentum_velocity_intake_min_pct", 7.0
+                ) or 7.0)
+            except (TypeError, ValueError):
+                _vel_floor = 7.0
+            try:
+                _vel_window = float(getattr(
+                    settings,
+                    "chili_momentum_velocity_intake_window_seconds", 180.0
+                ) or 180.0)
+            except (TypeError, ValueError):
+                _vel_window = 180.0
+            _now_mono = time.monotonic()
+            _cur: dict[str, float] = {}
+            _row_by_sym: dict[str, dict] = {}
+            for s in snapshot:
+                try:
+                    if not isinstance(s, dict):
+                        continue
+                    _t = _normalize_ross_common_stock_symbol(s.get("ticker"))
+                    if not _t:
+                        continue
+                    _px = _snapshot_price(s)
+                    if _px is None or float(_px) <= 0:
+                        continue
+                    _cur[_t] = float(_px)
+                    _row_by_sym[_t] = s
+                except Exception:
+                    continue
+            for _hist_ts, _hist_px in self._price_history:
+                if _now_mono - _hist_ts > _vel_window:
+                    continue
+                for _t, _px in _cur.items():
+                    _old = _hist_px.get(_t)
+                    if _old and _old > 0:
+                        _rise = (_px - _old) / _old * 100.0
+                        if _rise > velocity.get(_t, 0.0):
+                            velocity[_t] = _rise
+            _admits: set[str] = set()
+            for _t, _rise in velocity.items():
+                if _rise < _vel_floor or _t in want:
+                    continue
+                _px = _cur.get(_t)
+                _row = _row_by_sym.get(_t)
+                if _px is None or _row is None:
+                    continue
+                if (
+                    self._profile.price_min is not None
+                    and _px < float(self._profile.price_min)
+                ) or (
+                    self._profile.price_max is not None
+                    and _px > float(self._profile.price_max)
+                ):
+                    continue
+                if self._profile.min_dollar_volume is not None:
+                    _day = _row.get("day") or {}
+                    _minute = _row.get("min") or {}
+                    _vol = max(
+                        _f(_day.get("v")) or 0.0,
+                        _f(_minute.get("av")) or 0.0,
+                    )
+                    if _px * _vol < float(self._profile.min_dollar_volume):
+                        continue
+                _admits.add(_t)
+            if _admits:
+                want |= _admits
+                _log.info(
+                    "[momentum_ws_ignition] velocity intake admitted %s "
+                    "(>=%.1f%% sa loob ng %.0fs, hiwalay sa day change)",
+                    sorted(_admits), _vel_floor, _vel_window,
+                )
+            self._price_history.append((_now_mono, _cur))
+            self._price_history = [
+                (ts, p) for ts, p in self._price_history
+                if _now_mono - ts <= _vel_window
+            ][-12:]
+            # Ang velocity ay itinatabi para sa LAHAT ng nasa final watch set —
+            # nagsisilbi itong pang-apat na ignite axis sa _on_tick, kaya kahit
+            # ang day-change na miyembro na bumubulusok NGAYON ay makaka-ignite
+            # nang hindi hinihintay ang 10% day floor.
+            velocity = {t: v for t, v in velocity.items() if t in want}
 
         # Day baseline for each watched name: today's open, else prev-day close
         # (same base as universe._premarket_change_pct, so move% agrees with the
@@ -157,6 +262,7 @@ class _UniverseTracker:
             self._baseline = baseline
             self._rvol = rvol
             self._shares = shares
+            self._velocity = velocity
         return set(want)
 
     def get_symbols(self) -> set[str]:
@@ -176,6 +282,11 @@ class _UniverseTracker:
         """Today's accumulated shares from the last snapshot (None if unknown)."""
         with self._lock:
             return self._shares.get(symbol.upper())
+
+    def velocity_for(self, symbol: str) -> float | None:
+        """VELOCITY INTAKE: pinakamataas na %rise sa loob ng window (None kung wala)."""
+        with self._lock:
+            return self._velocity.get(symbol.upper())
 
     def count(self) -> int:
         with self._lock:
@@ -705,7 +816,15 @@ class IgnitionScoringLoop:
         except Exception:
             pass
         move_pct = self._move_pct(sym, quote)
-        if move_pct is None:
+        _vel = self._tracker.velocity_for(sym)
+        # VELOCITY INTAKE (2026-08-28): ang day-1 na listing ay maaaring WALANG
+        # day baseline (walang day.o/prev.c sa snapshot) — dati ay tahimik na
+        # nalalaglag dito kahit velocity-admitted. Kapag may sukat na velocity,
+        # TULOY nang move_pct=None — HINDI pineke bilang 0.0 (napatunayan ng
+        # review: ang pekeng 0.0 ay nagiging "totoong" ebidensya downstream at
+        # nagbe-bench sa below_explosive_floor na fail-open sana sa None). Ang
+        # legacy branch sa ibaba ay nananatiling byte-identical (None ⇒ balik).
+        if move_pct is None and _vel is None:
             return
         # S1 EVENT FEEDER (docs/DESIGN/MOMENTUM_ENGINE.md §1/§5): when the master flag is
         # ON, use the BASIS-COMPLETE Ross predicate (RVOL OR gap OR move% crosses a Ross
@@ -719,11 +838,14 @@ class IgnitionScoringLoop:
             _rv = self._tracker.rvol_for(sym)
             _px = self._quote_price(quote)
             if not _ross_threshold_crossed(
-                sym, rvol=_rv, move_pct=move_pct, gap_pct=move_pct, price=_px
+                sym, rvol=_rv, move_pct=move_pct, gap_pct=move_pct, price=_px,
+                velocity_pct=_vel,
             ):
                 return  # no Ross axis crossed — dead tape, ignore
             _tick_price = _px
         else:
+            if move_pct is None:
+                return  # legacy gate: walang baseline ⇒ dating gawi, balik
             floor = float(getattr(settings, "chili_momentum_ignition_min_pct", 3.0))
             if move_pct < floor:
                 return  # below the adaptive ignition floor — dead tape, ignore
@@ -745,7 +867,7 @@ class IgnitionScoringLoop:
                 self._inflight.discard(sym)
             return
         try:
-            pool.submit(self._score_symbol, sym, move_pct, _tick_price)
+            pool.submit(self._score_symbol, sym, move_pct, _tick_price, _vel)
         except Exception:
             with self._inflight_lock:
                 self._inflight.discard(sym)
@@ -753,7 +875,11 @@ class IgnitionScoringLoop:
     # ── scoring (runs on the pool — owns its own DB session) ─────────────────
 
     def _score_symbol(
-        self, symbol: str, move_pct: float, price: float | None = None
+        self,
+        symbol: str,
+        move_pct: float | None,
+        price: float | None = None,
+        velocity_pct: float | None = None,
     ) -> None:
         """Score ONE igniting symbol into momentum_symbol_viability.
 
@@ -774,11 +900,24 @@ class IgnitionScoringLoop:
                 symbol: {
                     "ticker": symbol,
                     "direction": "long",
-                    "todays_change_perc": float(move_pct),
                     "signal_type": "ws_ignition",
                     "source": "ws_ignition",
                 }
             }
+            # TAPAT NA STAMPING (2026-08-28, review finding): ang HINDI ALAM na
+            # day move ay HINDI itina-stamp — dating pineke bilang 0.0 para sa
+            # baseline-less na day-1 listing, na nagbe-bench sa
+            # below_explosive_floor (0.0 < 10) samantalang ang None ay fail-open
+            # ayon sa sariling kontrata ng floor. Kapareho ng price/volume/rvol
+            # discipline sa ibaba: ang nawawala ay nananatiling nawawala.
+            if move_pct is not None:
+                ross_signals[symbol]["todays_change_perc"] = float(move_pct)
+            # VELOCITY INTAKE: dalhin ang sinukat na short-horizon velocity sa
+            # persisted signal — ito ang binabasa ng ross_smallcap_profile_evidence
+            # bilang alternatibong "already-moving" na patunay sa arm gate (ang
+            # eksaktong 2026-08-19 na pattern: i-stamp ang kailangan ng gate).
+            if velocity_pct is not None and float(velocity_pct) > 0:
+                ross_signals[symbol]["velocity_pct"] = float(velocity_pct)
             # INSTRUMENT-CLASS AXES (2026-08-19): stamp the tick PRICE and today's
             # SHARES so the persisted row carries what the Ross universe evidence gate
             # needs (it derives dollar_volume = price × volume). Proved live against
@@ -911,8 +1050,10 @@ class IgnitionScoringLoop:
         # the bridge then did with it (armed / no-arm / skipped-busy / off / error), so
         # a silently starved bridge cannot look identical to a healthy one.
         _log.info(
-            "[momentum_ws_ignition] symbol=%s move_pct=%.2f scored_ok=%s bridge=%s",
-            symbol, float(move_pct), scored_ok, bridge_state,
+            "[momentum_ws_ignition] symbol=%s move_pct=%s scored_ok=%s bridge=%s",
+            symbol,
+            ("%.2f" % float(move_pct)) if move_pct is not None else "unknown",
+            scored_ok, bridge_state,
         )
 
     def _bridge_arm(self, symbol: str) -> str:

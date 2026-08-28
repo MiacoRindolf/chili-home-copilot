@@ -489,6 +489,37 @@ def ross_smallcap_profile_evidence(
     if profile.min_dollar_volume is not None and dollar_volume < profile.min_dollar_volume:
         return False, "ross_universe_dollar_volume_below_profile", debug
 
+    # VELOCITY LEG (2026-08-28, ang XLAB blindspot): ang layunin ng change floor
+    # ay "already-moving / in play" — si Ross ay hindi pumapasok sa patay na
+    # pangalan. Ang short-horizon velocity (+X% sa loob ng ~3 min, sinukat ng
+    # snapshot-delta intake at dala ng signal bilang ``velocity_pct``) ay
+    # PAREHONG patunay sa mas maikling horizon: ang XLAB (−2.4% sa araw, +12% sa
+    # minutos — ang #1 play ni Ross) ay in-play sa bawat makabuluhang kahulugan
+    # pero bagsak sa day-change na sukat. Ang leg na ito ay bumubukas LAMANG
+    # kapag ang day-change na tseke ay babagsak sana (missing o ilalim ng
+    # floor) — ang dating landas ay byte-identical para sa lahat ng pumapasa na.
+    # Ang price band + $-volume floor sa itaas ay nanatiling nakaharang.
+    _sig_velocity = (
+        _f(signal.get("velocity_pct")) if isinstance(signal, dict) else None
+    )
+    debug["velocity_pct"] = _sig_velocity
+    _change_fails = change_pct is None or (
+        profile.min_change_pct is not None
+        and change_pct < profile.min_change_pct
+    )
+    if _change_fails and _sig_velocity is not None:
+        try:
+            from ....config import settings as _settings
+
+            _vel_floor = float(getattr(
+                _settings, "chili_momentum_velocity_intake_min_pct", 7.0
+            ) or 7.0)
+        except Exception:
+            _vel_floor = 7.0
+        if _sig_velocity >= _vel_floor:
+            debug["change_leg"] = "velocity"
+            return True, "ross_universe_profile_ok", debug
+
     if change_pct is None:
         return False, "ross_universe_missing_change_pct", debug
     if profile.min_change_pct is not None and change_pct < profile.min_change_pct:
