@@ -87,7 +87,21 @@ def _trading_day_et() -> str:
 
 
 def _log(msg: str) -> None:
-    print(f"[nightly_replay] {datetime.now():%H:%M:%S} {msg}", flush=True)
+    line = f"[nightly_replay] {datetime.now():%H:%M:%S} {msg}"
+    print(line, flush=True)
+    # SELF-LOGGING (2026-08-27): ang task chain (wscript -> powershell *>> log
+    # -> python) ay nag-zombie -- ang mga anak ng replay ay may hawak ng
+    # redirected pipe handle kaya hindi nagsara ang powershell, naghintay ang
+    # vbs magpakailanman, at ang KINABUKASANG trigger ay TINANGGIHAN (4320).
+    # Dalawang zombie wscript ang natagpuan (Aug 26 AT Aug 27). Ang script na
+    # mismo ang nag-a-append sa runner.log (open-append-close kada linya --
+    # walang hawak na handle pagkatapos), kaya ang launcher ay walang
+    # redirect at ang chain ay nagsasara nang malinis.
+    try:
+        with open(OUT_DIR / "runner.log", "a", encoding="utf-8") as _lf:
+            _lf.write(line + chr(10))
+    except Exception:
+        pass
 
 
 def top_movers(day: str) -> list[dict]:
