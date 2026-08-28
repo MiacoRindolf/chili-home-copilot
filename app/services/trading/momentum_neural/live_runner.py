@@ -20175,7 +20175,12 @@ def _final_entry_bbo(
     if (
         stand_in_max_age_seconds is not None
         and str(raw.get("timestamp_basis") or "")
-        in ("massive_sip_unix_ms", "iqfeed_l2_provider_at")
+        in (
+            "massive_sip_unix_ms",
+            "iqfeed_l2_provider_at",
+            # #1236: ang L1 own-clock tier ay may sariling kontrata rin.
+            "iqfeed_q_bid_ask_time_clock",
+        )
     ):
         # The stand-in was fetched under its own bound; judge it by the same.
         # ⚠️ Ang IQFeed L2 tier ay dating hinuhusgahan ng DIREKTANG cap:
@@ -20216,6 +20221,9 @@ def _final_entry_bbo(
             # ng limit sa planned, gaya ng disenyo.
             else "stand_in_iqfeed_l2"
             if str(raw.get("timestamp_basis") or "") == "iqfeed_l2_provider_at"
+            # #1236: ang L1 own-clock ay cross-source din — pin sa planned.
+            else "stand_in_iqfeed_l1"
+            if str(raw.get("timestamp_basis") or "") == "iqfeed_q_bid_ask_time_clock"
             else "alpaca_direct"
         ),
         "age_seconds": round(age_s, 6),

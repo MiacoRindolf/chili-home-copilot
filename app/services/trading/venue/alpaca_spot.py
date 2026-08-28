@@ -1289,6 +1289,20 @@ class AlpacaSpotAdapter:
             )
             if stand_in is not None:
                 return stand_in
+            # TIER 2.5 (#1236, 2026-08-28): IQFeed L1 own-clock BBO — direktang
+            # top-of-book (26-39 venue) na may totoong Bid/Ask Time event clock.
+            # Nauuna sa depth dahil ang depth BBO ay derived mula sa book levels
+            # habang ito ay ang mismong inilathalang top-of-book quote.
+            l1_stand_in = self._iqfeed_l1_own_clock_execution_bbo(
+                product_id,
+                (
+                    float(stand_in_max_age_seconds)
+                    if stand_in_max_age_seconds is not None
+                    else max_age_seconds
+                ),
+            )
+            if l1_stand_in is not None:
+                return l1_stand_in
             # PANGATLONG TIER: IQFeed L2 depth (2026-08-25). Ang Massive SIP na
             # daan ay nangunguna -- ito ang pinagsama-samang tape at ang mas
             # mahigpit na 5s na kontrata. Kapag walang SIP na hilera, ang IQFeed
@@ -1450,6 +1464,129 @@ class AlpacaSpotAdapter:
         except Exception as exc:
             logger.debug("[alpaca_spot] _iqfeed_depth_quote(%s) failed: %s", sym, exc)
             return None
+
+    def _iqfeed_l1_own_clock_quote(self, sym: str, *, max_age_seconds: float):
+        """Isang IQFeed L1 own-clock BBO (Bid/Ask Time event clock), o None.
+
+        #1236 (2026-08-28): ang trade bridge ay naghahatid na ng quote rows na
+        may TOTOONG quote-event clock (basis ``iqfeed_q_bid_ask_time_clock``,
+        ``provider_event_at`` mula sa sariling Bid/Ask Time ng frame). Direktang
+        top-of-book ito ng 26-39 venue — mas pino kaysa sa depth-derived na BBO
+        at may parehong dalawang-orasan na disiplina ng SIP tier: parehong
+        provider at receive clock ay kailangang sariwa at posible, kaya ang
+        replayed/last-known na row ay hindi makakalusot.
+        """
+        try:
+            from ....db import SessionLocal
+            from sqlalchemy import text
+
+            requested = float(max_age_seconds or 0.0)
+            if requested <= 0:
+                return None
+            with SessionLocal() as _db:
+                row = _db.execute(text(
+                    "SELECT id, bid, ask, mid, spread_bps, source, provider_event_at, "
+                    "received_at, timestamp_basis, bridge_version, message_type "
+                    "FROM momentum_nbbo_spread_tape "
+                    "WHERE symbol = :s AND source = 'iqfeed_l1' "
+                    "AND timestamp_basis = 'iqfeed_q_bid_ask_time_clock' "
+                    "AND mid > 0 AND provider_event_at IS NOT NULL "
+                    "AND received_at IS NOT NULL "
+                    "ORDER BY observed_at DESC, id DESC LIMIT 1"
+                ), {"s": str(sym or "").upper()}).fetchone()
+            if row is None:
+                return None
+            bid = _f(row[1]); ask = _f(row[2]); mid = _f(row[3])
+            if (
+                bid is None or ask is None or mid is None
+                or not all(math.isfinite(v) for v in (bid, ask, mid))
+                or bid <= 0 or ask <= 0 or mid <= 0 or ask < bid
+            ):
+                return None
+            if not str(row[9] or "").startswith("iqfeed-l1-exact-print-provenance-v3"):
+                return None
+            if str(row[10] or "") != "Q":
+                return None
+
+            def _aware_utc(value):
+                if not isinstance(value, datetime) or value.tzinfo is None:
+                    return None
+                return value.astimezone(timezone.utc)
+
+            provider_at = _aware_utc(row[6])
+            received_at = _aware_utc(row[7])
+            if provider_at is None or received_at is None:
+                return None
+            receive_delta = (received_at - provider_at).total_seconds()
+            if not (-_MASSIVE_SIP_FUTURE_TOLERANCE_S <= receive_delta <= requested):
+                return None
+            now_utc = _now()
+            provider_age = (now_utc - provider_at).total_seconds()
+            received_age = (now_utc - received_at).total_seconds()
+            if (
+                provider_age < -_MASSIVE_SIP_FUTURE_TOLERANCE_S
+                or received_age < -_MASSIVE_SIP_FUTURE_TOLERANCE_S
+                or provider_age > requested
+                or received_age > requested
+            ):
+                return None
+            spread_bps = _f(row[4])
+            if spread_bps is None and mid > 0:
+                spread_bps = (ask - bid) / mid * 10_000.0
+            meta = FreshnessMeta(
+                retrieved_at_utc=received_at,
+                provider_time_utc=provider_at,
+                max_age_seconds=requested,
+            )
+            return NormalizedTicker(
+                product_id=str(sym or "").upper(), bid=bid, ask=ask, mid=mid,
+                spread_bps=spread_bps, bid_size=None, ask_size=None,
+                freshness=meta,
+                raw={
+                    "feed": "iqfeed_l1",
+                    "tape_row_id": int(row[0]),
+                    "provider_event_at_utc": provider_at.isoformat(),
+                    "received_at_utc": received_at.isoformat(),
+                    "timestamp_basis": str(row[8] or ""),
+                    "bridge_version": str(row[9] or ""),
+                    "message_type": str(row[10] or ""),
+                },
+            ), meta
+        except Exception as exc:
+            logger.debug(
+                "[alpaca_spot] _iqfeed_l1_own_clock_quote(%s) failed: %s", sym, exc
+            )
+            return None
+
+    def _iqfeed_l1_own_clock_execution_bbo(
+        self, product_id: str, max_age_seconds: float
+    ):
+        """Ang L1 own-clock na stand-in, o None kapag hindi maaaring gamitin."""
+        if _is_crypto_pid(product_id):
+            return None
+        if not bool(
+            getattr(
+                settings,
+                "chili_alpaca_execution_bbo_iqfeed_l1_own_clock_enabled",
+                True,
+            )
+        ):
+            return None
+        result = self._iqfeed_l1_own_clock_quote(
+            _to_symbol(product_id), max_age_seconds=float(max_age_seconds)
+        )
+        if not isinstance(result, tuple) or len(result) != 2:
+            return None
+        tick, meta = result
+        if tick is None or not isinstance(meta, FreshnessMeta):
+            return None
+        logger.info(
+            "[alpaca_spot] execution BBO stand-in %s bid=%.4f ask=%.4f "
+            "provider_age=%.3fs basis=iqfeed_q_bid_ask_time_clock",
+            _to_symbol(product_id), float(tick.bid), float(tick.ask),
+            (_now() - meta.provider_time_utc).total_seconds(),
+        )
+        return tick, meta
 
     def _iqfeed_depth_execution_bbo(self, product_id: str, max_age_seconds: float):
         """Ang IQFeed-depth na stand-in, o None kapag hindi ito maaaring gamitin."""
