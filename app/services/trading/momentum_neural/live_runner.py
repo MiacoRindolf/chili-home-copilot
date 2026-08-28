@@ -20174,9 +20174,15 @@ def _final_entry_bbo(
     _validate_max_age = float(max_age_seconds)
     if (
         stand_in_max_age_seconds is not None
-        and str(raw.get("timestamp_basis") or "") == "massive_sip_unix_ms"
+        and str(raw.get("timestamp_basis") or "")
+        in ("massive_sip_unix_ms", "iqfeed_l2_provider_at")
     ):
         # The stand-in was fetched under its own bound; judge it by the same.
+        # ⚠️ Ang IQFeed L2 tier ay dating hinuhusgahan ng DIREKTANG cap:
+        # sinukat 2026-08-28 premarket, 13/13 na L2-stale block (8 session,
+        # WHLR/XPON-class) ay age 10-15s laban sa 10s na direct cap — ang
+        # sariling 15s na kontrata ng stand-in, na pinili laban sa p50 7s na
+        # L2 bridge lag, ay hindi kailanman umabot sa validation na ito.
         _validate_max_age = max(
             _validate_max_age, float(stand_in_max_age_seconds)
         )
@@ -20203,6 +20209,13 @@ def _final_entry_bbo(
         "quote_authority": (
             "stand_in_massive_sip"
             if str(raw.get("timestamp_basis") or "") == "massive_sip_unix_ms"
+            # Ang L2 stand-in ay dating nagsusuot ng "alpaca_direct" — kaya
+            # nakakalusot ito sa final-seam na limit adjustment na tahasang
+            # tumatangging magpa-presyo sa cross-source na quote. Ngayon ay
+            # dala nito ang totoong pinagmulan at ang final seam ay nagpi-pin
+            # ng limit sa planned, gaya ng disenyo.
+            else "stand_in_iqfeed_l2"
+            if str(raw.get("timestamp_basis") or "") == "iqfeed_l2_provider_at"
             else "alpaca_direct"
         ),
         "age_seconds": round(age_s, 6),
