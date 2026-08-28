@@ -6347,3 +6347,28 @@ class TradingPositionEvent(Base):
         DateTime, server_default=text("CURRENT_TIMESTAMP"), default=datetime.utcnow,
         nullable=False
     )
+
+
+class DbPaperAccountIdentity(Base):
+    """Singleton identity ng instance-local DB-paper simulated account.
+
+    Ang row (singleton_id=1) ang AUTHORITY; ang current_database() ay ginagamit
+    lamang sa unang mint (db_paper_identity.resolve_db_paper_account_binding).
+    Kailangan ang ORM model dahil ang tests (CHILI_PYTEST=1) ay lumalaktaw sa
+    migrations at umaasa sa Base.metadata.create_all.
+    """
+
+    __tablename__ = "db_paper_account_identity"
+
+    singleton_id: int = Column(Integer, primary_key=True, autoincrement=False)
+    account_id: str = Column(String(63), nullable=False)
+    account_identity_sha256: str = Column(String(64), nullable=False)
+    schema_version: str = Column(String(64), nullable=False)
+    created_at: datetime = Column(
+        DateTime(timezone=True), server_default=text("CURRENT_TIMESTAMP"),
+        nullable=False,
+    )
+
+    __table_args__ = (
+        CheckConstraint("singleton_id = 1", name="ck_db_paper_identity_singleton"),
+    )

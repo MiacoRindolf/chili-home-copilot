@@ -33082,6 +33082,117 @@ def _migration_371_depth_snapshot_provider_at(conn) -> None:
     ))
 
 
+def _migration_373_db_paper_account_identity(conn) -> None:
+    """DB-paper account identity singleton + FLAT-only session binding backfill.
+
+    ANG PUWANG (2026-08-28, kinumpirma ni Codex): ang paper execution lane ay
+    nangangailangan ng ``risk_snapshot_json['db_paper_account_binding']``
+    (``db-paper:`` scope + 64-hex identity) pero WALANG production author —
+    consumers/loaders lamang ang umiiral, tests ang nagse-seed nang mano-mano.
+    Sinukat live: 10 paper entry submits sa 2026-08-28, lahat fail-closed sa
+    ``db_paper_account_binding_missing``. Ang seremonya:
+
+    1. ``db_paper_account_identity`` singleton table (idempotent CREATE).
+    2. Mint ang IISANG instance account mula sa ``current_database()``
+       (ON CONFLICT DO NOTHING — ang row ang authority pagkatapos).
+    3. FLAT-ONLY backfill: ang mga buhay na paper session na WALANG binding at
+       WALANG posisyon ay binibigyan ng binding. Ang may posisyon ay HINDI
+       ginagalaw (ang rebind doon ay nagpapalala: 'unledgered' sa halip na
+       self-draining na 'unscoped') — inililista sila sa log bilang drain
+       worklist ng operator.
+
+    Ang sha derivation ay INLINED (self-contained ang migrations file) at
+    kailangang byte-identical sa
+    ``db_paper_identity.db_paper_account_identity_sha256``: sha256 ng
+    canonical JSON (sort_keys, separators=(',',':'), ensure_ascii=False) ng
+    ``{"broker":"db_paper","environment":"paper","account_id":<id>}``.
+    """
+    import hashlib as _hashlib
+    import json as _json
+
+    logger = logging.getLogger(__name__)
+    conn.execute(text(
+        """
+        CREATE TABLE IF NOT EXISTS db_paper_account_identity (
+            singleton_id smallint PRIMARY KEY CHECK (singleton_id = 1),
+            account_id varchar(63) NOT NULL,
+            account_identity_sha256 varchar(64) NOT NULL,
+            schema_version varchar(64) NOT NULL,
+            created_at timestamptz NOT NULL DEFAULT CURRENT_TIMESTAMP
+        )
+        """
+    ))
+    row = conn.execute(text("SELECT current_database()")).fetchone()
+    account_id = str(row[0] if row else "").strip().lower()
+    if not re.fullmatch(r"^[a-z0-9_-]{1,63}$", account_id or ""):
+        logger.warning(
+            "[migration_373] hindi ma-canonicalize ang db name %r — laktawan "
+            "ang mint (mamimint ang unang resolve_db_paper_account_binding)",
+            account_id,
+        )
+        return
+    payload = {"broker": "db_paper", "environment": "paper", "account_id": account_id}
+    identity_sha = _hashlib.sha256(
+        _json.dumps(
+            payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False
+        ).encode("utf-8")
+    ).hexdigest()
+    conn.execute(text(
+        "INSERT INTO db_paper_account_identity "
+        "(singleton_id, account_id, account_identity_sha256, schema_version) "
+        "VALUES (1, :aid, :sha, 'chili.db-paper-account-identity.v1') "
+        "ON CONFLICT (singleton_id) DO NOTHING"
+    ), {"aid": account_id, "sha": identity_sha})
+    auth = conn.execute(text(
+        "SELECT account_id, account_identity_sha256 "
+        "FROM db_paper_account_identity WHERE singleton_id = 1"
+    )).fetchone()
+    if auth is None:
+        logger.warning("[migration_373] singleton mint failed — walang backfill")
+        return
+    binding = _json.dumps({
+        "account_scope": "db-paper:" + str(auth[0]),
+        "account_identity_sha256": str(auth[1]),
+        "schema_version": "chili.db-paper-account-identity.v1",
+    })
+    terminal = (
+        "'cancelled','expired','error','archived','finished',"
+        "'live_finished','live_cancelled','live_error','live_arm_expired'"
+    )
+    bound = conn.execute(text(
+        f"""
+        UPDATE trading_automation_sessions SET risk_snapshot_json =
+            jsonb_set(coalesce(risk_snapshot_json, '{{}}'::jsonb),
+                      '{{db_paper_account_binding}}', CAST(:b AS jsonb), true)
+        WHERE id IN (
+            SELECT id FROM trading_automation_sessions
+            WHERE mode = 'paper'
+              AND state NOT IN ({terminal})
+              AND (risk_snapshot_json -> 'db_paper_account_binding') IS NULL
+              AND (
+                  risk_snapshot_json #> '{{momentum_paper_execution,position}}' IS NULL
+                  OR risk_snapshot_json #> '{{momentum_paper_execution,position}}'
+                      = 'null'::jsonb
+              )
+            FOR UPDATE
+        )
+        """
+    ), {"b": binding}).rowcount
+    positioned = conn.execute(text(
+        f"""
+        SELECT id FROM trading_automation_sessions
+        WHERE mode = 'paper' AND state NOT IN ({terminal})
+          AND (risk_snapshot_json -> 'db_paper_account_binding') IS NULL
+        """
+    )).fetchall()
+    logger.info(
+        "[migration_373] db-paper binding backfill: bound=%d "
+        "skipped_positioned=%d ids=%s (drain worklist — haharang sila sa "
+        "admission bilang 'unscoped open DB-paper position' hanggang mag-flat)",
+        int(bound or 0), len(positioned), [r[0] for r in positioned][:20],
+    )
+
+
 MIGRATIONS = [
     ("001_add_email", _migration_001_add_email),
     ("002_add_image_path", _migration_002_add_image_path),
@@ -33580,6 +33691,8 @@ MIGRATIONS = [
      _migration_371_depth_snapshot_provider_at),
     ("372_viability_live_board_index",
      _migration_372_viability_live_board_index),
+    ("373_db_paper_account_identity",
+     _migration_373_db_paper_account_identity),
 ]
 
 
