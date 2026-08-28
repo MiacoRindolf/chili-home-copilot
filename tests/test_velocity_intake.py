@@ -80,7 +80,14 @@ def test_falling_names_never_qualify():
     assert "DUMP" not in got
 
 
-def test_price_band_and_dollar_volume_hygiene():
+def test_price_band_and_dollar_volume_hygiene(monkeypatch):
+    from app.config import settings
+
+    # Ang sub-$1 ay pinamamahalaan na ng paper-lane flag (2026-08-28) — dito
+    # OFF para ang lumang buong-exclusion na gawi ang sinusubok.
+    monkeypatch.setattr(
+        settings, "chili_momentum_subdollar_paper_enabled", False, raising=False
+    )
     tr = _UniverseTracker()
     _refresh(tr, [
         _row("PENNY", 0.40, prev_c=0.40),
@@ -93,6 +100,22 @@ def test_price_band_and_dollar_volume_hygiene():
         _row("THIN", 5.60, prev_c=5.00, vol=50_000),  # +12% pero manipis
     ])
     assert got == set()
+
+
+def test_subdollar_velocity_admitted_when_paper_flag_on(monkeypatch):
+    """SUB-$1 PAPER LANE (default ON): ang FNGR/CHAI-class na sub-dollar
+    velocity mover ay pumapasok na sa watch set."""
+    from app.config import settings
+
+    monkeypatch.setattr(
+        settings, "chili_momentum_subdollar_paper_enabled", True, raising=False
+    )
+    tr = _UniverseTracker()
+    _refresh(tr, [_row("CHAI", 0.40, prev_c=0.40, vol=6_000_000)])
+    got = _refresh(tr, [_row("CHAI", 0.48, prev_c=0.40, vol=6_000_000)])  # +20%, $2.9M vol
+    assert "CHAI" in got
+    v = tr.velocity_for("CHAI")
+    assert v is not None and v > 15.0
 
 
 def test_warrant_class_symbols_are_excluded():

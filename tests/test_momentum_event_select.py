@@ -52,9 +52,14 @@ def test_threshold_crossed_fires_on_move_axis() -> None:
     assert _ross_threshold_crossed("CCC", move_pct=5.0, price=5.0) is False
 
 
-def test_threshold_crossed_rejects_out_of_band_price() -> None:
+def test_threshold_crossed_rejects_out_of_band_price(monkeypatch) -> None:
     # A genuine RVOL cross is vetoed when price is affirmatively out of the 1-20 band.
     assert _ross_threshold_crossed("DDD", rvol=50.0, move_pct=200.0, price=25.0) is False  # >$20
+    # Sub-\$1: pinamamahalaan na ng paper-lane flag (2026-08-28, default ON) —
+    # OFF dito para ang lumang exclusion ang sinusubok.
+    from app.config import settings as _s
+
+    monkeypatch.setattr(_s, "chili_momentum_subdollar_paper_enabled", False, raising=False)
     assert _ross_threshold_crossed("DDD", rvol=50.0, move_pct=200.0, price=0.5) is False   # <$1
     # In-band passes.
     assert _ross_threshold_crossed("DDD", rvol=50.0, move_pct=200.0, price=8.0) is True

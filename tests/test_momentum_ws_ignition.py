@@ -379,7 +379,11 @@ def test_a_name_above_the_ross_band_never_ignites(monkeypatch):
 
 
 def test_a_name_below_the_ross_band_never_ignites(monkeypatch):
-    """Ang kabilang gilid: ang sub-dollar ay hindi rin dapat mag-ignite."""
+    """Ang kabilang gilid: ang sub-dollar ay hindi mag-i-ignite kapag SARADO
+    ang sub-\$1 paper lane (2026-08-28: default ON na ang flag — dito OFF para
+    ang lumang buong-exclusion ang sinusubok; tingnan ang
+    test_subdollar_paper_lane.py para sa bagong gawi)."""
+    monkeypatch.setattr(settings, "chili_momentum_subdollar_paper_enabled", False, raising=False)
     monkeypatch.setattr(settings, "chili_momentum_ignition_min_pct", 3.0, raising=False)
     dispatched: list[str] = []
     loop = _loop_armed_for_tick(monkeypatch, dispatched)
