@@ -5404,6 +5404,9 @@ def run_auto_arm_pass(
     out["asset_type_skipped"] = 0
     out["ross_universe_skipped"] = 0
     _ross_universe_skip_reasons: dict[str, int] = {}
+    # SUB-$1 PAPER LANE: mga simbolong pumasa sa eligible NA PAPER LANG —
+    # ang live pick (_live_armable) ay tumatanggi sa kanila magpakailanman.
+    _subdollar_paper_only: set[str] = set()
     # TIER-2 OVERNIGHT: resolve the clock + flags ONCE per pass. When overnight trading is
     # active, proactively probe 24h-eligibility for the equity candidates (batched <=10) so
     # ineligible names are SKIPPED at the gate below — never order-rejected (no spam).
@@ -5443,15 +5446,41 @@ def run_auto_arm_pass(
                 )
             )
             if not _ross_universe_ok:
-                out["ross_universe_skipped"] += 1
-                _ross_universe_skip_reasons[_ross_universe_reason] = (
-                    _ross_universe_skip_reasons.get(_ross_universe_reason, 0) + 1
-                )
-                logger.info(
-                    "[auto_arm] skip %s: ross universe rejected (%s) %s",
-                    c.symbol, _ross_universe_reason, _ross_universe_debug,
-                )
-                continue
+                # SUB-$1 PAPER LANE (2026-08-28, utos ng operator): tatlong
+                # sub-dollar monster sa iisang araw (FNGR +242%, CHAI +29.5%,
+                # DUO +27.4%) ang ganap na hindi natin makuha. Kapag ang TANGING
+                # dahilan ng pagbagsak ay ang presyo sa ilalim ng profile floor,
+                # ang pangalan ay NANANATILI sa eligible bilang PAPER-ONLY:
+                # ang `_live_armable` sa ibaba ay tatanggi (hindi ito makakakuha
+                # ng LIVE slot kailanman), pero ang `_paper_shadow_arm` — na
+                # kumukuha sa BAWAT eligible na hindi nanalo ng live slot — ay
+                # gagawa ng paper session para makapag-ipon tayo ng datos sa
+                # klase nang zero na panganib sa (pekeng) pera ng live rail.
+                if (
+                    _ross_universe_reason == "ross_universe_price_below_profile"
+                    and bool(getattr(
+                        settings, "chili_momentum_subdollar_paper_enabled", True
+                    ))
+                ):
+                    _subdollar_paper_only.add(str(c.symbol or "").strip().upper())
+                    out["subdollar_paper_only"] = (
+                        out.get("subdollar_paper_only", 0) + 1
+                    )
+                    logger.info(
+                        "[auto_arm] %s sub-$1: PAPER-ONLY pass-through "
+                        "(live slot refused, paper shadow allowed)",
+                        c.symbol,
+                    )
+                else:
+                    out["ross_universe_skipped"] += 1
+                    _ross_universe_skip_reasons[_ross_universe_reason] = (
+                        _ross_universe_skip_reasons.get(_ross_universe_reason, 0) + 1
+                    )
+                    logger.info(
+                        "[auto_arm] skip %s: ross universe rejected (%s) %s",
+                        c.symbol, _ross_universe_reason, _ross_universe_debug,
+                    )
+                    continue
         if c.symbol.upper() in busy_symbols:
             out["busy_skipped"] += 1
             continue  # already have a live session for this symbol — rotate to the next setup
@@ -5731,6 +5760,11 @@ def run_auto_arm_pass(
             """Live-pick gates that must NOT starve the paper shadow list:
             crypto pauses during the US equity session, and live crypto arming
             stays off entirely while the realized record is 0/17 (A4)."""
+            # SUB-$1 PAPER LANE: ang sub-dollar na pass-through ay HINDI
+            # kailanman puwedeng manalo ng LIVE slot — paper shadow lamang.
+            if str(getattr(_c, "symbol", "") or "").strip().upper() in _subdollar_paper_only:
+                out["subdollar_live_refused"] = out.get("subdollar_live_refused", 0) + 1
+                return False
             if not _is_coinbase_tradeable_symbol(_c.symbol):
                 # A2 schedule (quant pass v2): no NEW equity arms in the late
                 # window (>=14:30 ET) — freed-slot signals there lose money

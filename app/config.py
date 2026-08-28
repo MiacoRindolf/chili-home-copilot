@@ -3295,6 +3295,11 @@ class Settings(BaseSettings):
     # puro short-horizon velocity. Ang intake na ito ay (a) nag-a-admit ng velocity
     # movers sa WS watch universe bilang monotonic OR-leg (nakakadagdag lamang) at
     # (b) nagsisilbing pang-apat na ignite axis sa _ross_threshold_crossed.
+    chili_momentum_subdollar_paper_enabled: bool = Field(
+        default=True,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_SUBDOLLAR_PAPER_ENABLED"),
+        description="SUB-\$1 PAPER LANE (2026-08-28, utos ng operator): payagan ang sub-dollar na pangalan sa selection (ignite predicate, velocity intake) at sa PAPER shadow arms LAMANG — tatlong sub-dollar monster sa iisang araw (FNGR +242%, CHAI +29.5%, DUO +27.4%) ang ganap na invisible. Ang LIVE slot ay tumatanggi pa rin (auto_arm _subdollar_paper_only + ross_smallcap_profile_evidence na hindi ginalaw) — halt-prone/manipulative ang penny tape kaya datos muna bago live. OFF => byte-identical sa dating buong exclusion.",
+    )
     chili_momentum_velocity_intake_enabled: bool = Field(
         default=True,
         validation_alias=AliasChoices("CHILI_MOMENTUM_VELOCITY_INTAKE_ENABLED"),

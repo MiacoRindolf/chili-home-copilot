@@ -190,11 +190,19 @@ class _UniverseTracker:
                 if _px is None or _row is None:
                     continue
                 if (
-                    self._profile.price_min is not None
-                    and _px < float(self._profile.price_min)
-                ) or (
                     self._profile.price_max is not None
                     and _px > float(self._profile.price_max)
+                ):
+                    continue
+                # SUB-$1 PAPER LANE: kapag bukas ang paper flag, ang sub-dollar
+                # velocity mover ay pumapasok sa watch set (FNGR/CHAI/DUO-class)
+                # — ang LIVE arm ay nakakandado pa rin sa auto_arm.
+                if (
+                    self._profile.price_min is not None
+                    and _px < float(self._profile.price_min)
+                    and not bool(getattr(
+                        settings, "chili_momentum_subdollar_paper_enabled", True
+                    ))
                 ):
                     continue
                 if self._profile.min_dollar_volume is not None:

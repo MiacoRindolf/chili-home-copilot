@@ -614,8 +614,24 @@ def _ross_threshold_crossed(
         return False
     # Within-band AND-gates (fail-open on absent data).
     p = _f(price)
-    if p is not None and not (_PRICE_MIN <= p <= _PRICE_MAX):
+    if p is not None and p > _PRICE_MAX:
         return False
+    if p is not None and p < _PRICE_MIN:
+        # SUB-$1 PAPER LANE (2026-08-28, utos ng operator): ang predicate na ito
+        # ay SELECECTION feeder lamang ("never an entry decision") — kapag bukas
+        # ang paper flag, ang sub-dollar igniter (FNGR/CHAI/DUO-class) ay
+        # pinapayagang mag-score sa viability para sa PAPER shadow lane. Ang
+        # LIVE arm ay nakakandado pa rin sa auto_arm (_subdollar_paper_only) at
+        # sa ross_smallcap_profile_evidence na hindi ginalaw.
+        try:
+            from ....config import settings as _sd_settings
+
+            if not bool(getattr(
+                _sd_settings, "chili_momentum_subdollar_paper_enabled", True
+            )):
+                return False
+        except Exception:
+            return False
     dv = _f(dollar_volume)
     if dv is not None and dv < _MIN_DOLLAR_VOLUME:
         return False
