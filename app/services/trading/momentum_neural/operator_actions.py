@@ -406,12 +406,21 @@ def create_paper_draft_session(
     rs = _readiness_subset(row) if row else None
 
     ef = normalize_execution_family(execution_family)
+    # DB-PAPER ATOMIC BINDING (2026-08-28, Codex item #1): ang bawat paper
+    # session ay ipinapanganak na may db_paper_account_binding sa PAREHONG
+    # INSERT — hindi kailanman umiiral nang unbound ang row. Sinukat: 10 paper
+    # submits nag-fail-closed sa db_paper_account_binding_missing dahil walang
+    # production author. Ang extra ay minemerge MUNA ng
+    # build_session_risk_snapshot kaya kasama ito sa iisang ORM INSERT.
+    from .db_paper_identity import resolve_db_paper_account_binding
+
+    _db_paper_binding = resolve_db_paper_account_binding(db)
     snap = build_session_risk_snapshot(
         policy_full=policy_full,
         evaluation=ev,
         viability_brief=vb,
         readiness_subset=rs,
-        extra=None,
+        extra={"db_paper_account_binding": _db_paper_binding},
         execution_family=ef,
         db=db,
     )

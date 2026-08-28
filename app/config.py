@@ -3300,6 +3300,16 @@ class Settings(BaseSettings):
         validation_alias=AliasChoices("CHILI_ALPACA_EXECUTION_BBO_IQFEED_L1_OWN_CLOCK_ENABLED"),
         description="TIER 2.5 ng execution BBO stand-in (#1236): IQFeed L1 own-clock top-of-book (basis iqfeed_q_bid_ask_time_clock, totoong Bid/Ask Time event clock, 26-39 venue). Nauuna sa depth tier dahil direktang published quote ito, hindi derived. Parehong dalawang-orasan na disiplina ng SIP tier. OFF => tumalon diretso sa depth tier (dating gawi).",
     )
+    chili_db_paper_equity_usd: float = Field(
+        default=13000.0, gt=0.0,
+        validation_alias=AliasChoices("CHILI_DB_PAPER_EQUITY_USD"),
+        description="Equity ng instance-local DB-paper simulated account (2026-08-28 admission ceremony). 13000 = golden-batch canonical. Parametro, hindi gate.",
+    )
+    chili_db_paper_buying_power_usd: float = Field(
+        default=0.0, ge=0.0,
+        validation_alias=AliasChoices("CHILI_DB_PAPER_BUYING_POWER_USD"),
+        description="Buying power ng DB-paper account; 0.0 => katumbas ng equity (cash, walang margin fiction).",
+    )
     chili_momentum_subdollar_paper_enabled: bool = Field(
         default=True,
         validation_alias=AliasChoices("CHILI_MOMENTUM_SUBDOLLAR_PAPER_ENABLED"),

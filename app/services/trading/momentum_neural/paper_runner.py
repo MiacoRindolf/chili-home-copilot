@@ -399,6 +399,15 @@ def _final_revalidate_adaptive_db_paper_entry(
             fee_to_target_ratio=float(requested_fee_ratio),
         )
     except AdaptiveRiskBuilderError as exc:
+        # HINDI NA TAHIMIK (2026-08-28): ang fail-closed loop na ito ay dating
+        # event row + pe json LAMANG — ganap na di-nakikita sa logs, kaya 10
+        # submits/araw ang nawala nang walang nakakapansin.
+        _log.warning(
+            "[paper_runner] adaptive final admission veto session=%s sym=%s "
+            "reason=%s detail=%s",
+            getattr(sess, "id", None), getattr(sess, "symbol", None),
+            exc.reason, exc.detail,
+        )
         return {
             "ok": False,
             "veto": True,
@@ -686,6 +695,10 @@ def _final_revalidate_adaptive_db_paper_entry(
             ),
         )
     except AdaptiveRiskBuilderError as exc:
+        _log.warning(
+            "[paper_runner] adaptive BUNDLE veto reason=%s detail=%s",
+            exc.reason, getattr(exc, "detail", None),
+        )
         return {
             "ok": False,
             "veto": True,
@@ -1031,6 +1044,10 @@ def _reserve_adaptive_db_paper_entry(
         result["final_admission_receipt_sha256"] = receipt.content_sha256
         return result
     except AdaptiveRiskBuilderError as exc:
+        _log.warning(
+            "[paper_runner] adaptive RESERVE veto reason=%s detail=%s",
+            exc.reason, getattr(exc, "detail", None),
+        )
         return {"ok": False, "reason": exc.reason}
     except (AdaptiveRiskContractError, AdaptiveReservationError, TypeError, ValueError):
         return {"ok": False, "reason": "adaptive_risk_request_invalid"}
@@ -2336,15 +2353,110 @@ def run_paper_runner_batch(
     return out
 
 
+def _ensure_db_paper_session_binding(db: Session, sess: TradingAutomationSession) -> None:
+    """Tick-time self-heal (Codex item #3, Layer 2): FLAT na session lamang.
+
+    Tumatakbo sa ilalim ng with_for_update row lock na hawak na ng tick.
+    HINDI kailanman binabago ang umiiral na binding (ang maling scope ay
+    dapat manatiling kita bilang mismatch veto) at HINDI ginagalaw ang may
+    posisyon (ang rebind doon ay ginagawang 'unledgered' ang self-draining
+    na 'unscoped' — mas malala; tingnan ang migration 373 census).
+    """
+
+    try:
+        snap = sess.risk_snapshot_json if isinstance(sess.risk_snapshot_json, dict) else {}
+        if isinstance(snap.get("db_paper_account_binding"), dict):
+            return
+        pe = snap.get(KEY_PAPER_EXEC) if isinstance(snap.get(KEY_PAPER_EXEC), dict) else {}
+        if pe.get("position") not in (None,):
+            return
+        if pe.get("adaptive_risk_account_scope") or pe.get("adaptive_risk_reservation_id"):
+            return
+        from .db_paper_identity import resolve_db_paper_account_binding
+
+        binding = resolve_db_paper_account_binding(db)
+        new_snap = dict(snap)
+        new_snap["db_paper_account_binding"] = binding
+        sess.risk_snapshot_json = new_snap
+        try:
+            flag_modified(sess, "risk_snapshot_json")
+        except Exception:
+            pass
+        _log.info(
+            "[paper_runner] db-paper binding self-healed session=%s scope=%s",
+            sess.id, binding.get("account_scope"),
+        )
+    except Exception:
+        _log.warning(
+            "[paper_runner] db-paper binding self-heal failed session=%s",
+            getattr(sess, "id", None), exc_info=True,
+        )
+
+
 def tick_paper_session(
     db: Session,
     session_id: int,
     *,
     quote_fn: Optional[QuoteFn] = None,
 ) -> dict[str, Any]:
-    """Advance one paper automation session by one step."""
+    """Advance one paper automation session by one step.
+
+    PRODUCTION PROVIDER INSTALL (2026-08-28, Codex item #2): ito ang nag-iisang
+    choke point ng lahat ng tick path (loop pool, heartbeat, batch, scheduler,
+    manual) — kaya dito naka-install ang production
+    ``db_paper_final_admission_provider`` kada tick/kada thread (ContextVar ang
+    seam; ang loop ay nagdi-dispatch sa ThreadPoolExecutor). Walang flag: ang
+    provider ay laging naka-install; ang bawat veto ay nananatiling typed at
+    tapat.
+    """
     if not settings.chili_momentum_paper_runner_enabled:
         return {"ok": True, "skipped": "paper_runner_disabled"}
+
+    from .adaptive_risk_request_builder import db_paper_final_admission_provider
+
+    def _production_provider(**boundary: Any):
+        from .db_paper_final_admission_producer import (
+            build_db_paper_final_admission_material,
+        )
+
+        _sess = (
+            db.query(TradingAutomationSession)
+            .filter(TradingAutomationSession.id == int(session_id))
+            .one_or_none()
+        )
+        if _sess is None:
+            return None
+        _via = (
+            db.query(MomentumSymbolViability)
+            .filter(
+                MomentumSymbolViability.symbol == _sess.symbol,
+                MomentumSymbolViability.variant_id == int(_sess.variant_id),
+            )
+            .one_or_none()
+        )
+        _variant = variant_for_id(db, int(_sess.variant_id))
+        return build_db_paper_final_admission_material(
+            db,
+            sess=_sess,
+            variant=_variant,
+            quote_fn=quote_fn,
+            regime_snapshot=(
+                dict(_via.regime_snapshot_json or {}) if _via is not None else {}
+            ),
+            **boundary,
+        )
+
+    with db_paper_final_admission_provider(_production_provider):
+        return _tick_paper_session_impl(db, session_id, quote_fn=quote_fn)
+
+
+def _tick_paper_session_impl(
+    db: Session,
+    session_id: int,
+    *,
+    quote_fn: Optional[QuoteFn] = None,
+) -> dict[str, Any]:
+    """Ang orihinal na tick body — tumatakbo na may naka-install na provider."""
 
     try:
         sess = (
@@ -2366,6 +2478,9 @@ def tick_paper_session(
         return {"ok": True, "skipped": "not_runnable", "state": sess.state}
     if is_operator_paused(sess.risk_snapshot_json):
         return {"ok": True, "skipped": "operator_paused", "state": sess.state}
+
+    # DB-PAPER SELF-HEAL (Layer 2): sa ilalim ng hawak nang row lock.
+    _ensure_db_paper_session_binding(db, sess)
 
     ef = normalize_execution_family(sess.execution_family)
     if not momentum_runner_supports_execution_family(ef):
