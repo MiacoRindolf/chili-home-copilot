@@ -216,6 +216,19 @@ AUTHORITATIVE_TIMESTAMP_BASIS = "iqfeed_q_receive_trade_reference_fenced"
 EXACT_PRINT_TIMESTAMP_BASIS = "iqfeed_selected_trade_date_timems_exact"
 AUTHORITATIVE_MAX_AGE_S = 2.0
 AUTHORITATIVE_FUTURE_TOLERANCE_S = 1.0
+# QUOTE OWN-CLOCK (2026-08-28): ang dating quote fence ay nag-a-age ng quote
+# laban sa timestamp ng HULING TRADE (walang sariling quote clock ang lumang
+# basa ng layout) na may 2.0s na ceiling — kaya sa 480-symbol na watch, LAHAT
+# ng quote update ng pangalang hindi pumiprint kada 2s ay ITINATAPON. SINUKAT
+# 2026-08-28: 2.4-3.9 MILYONG quote frame/oras ang "nawawala", ang premarket
+# BBO ay 15-ORAS na luma (BDRX/RDIB class), at ang manipis na pangalan (AREN)
+# ay naharangan sa entry nang 171×/40min. PERO ang "Bid Time"/"Ask Time" ay
+# NASA selected fields na — totoong quote-event clock. Ang or-leg sa ibaba ay
+# nag-a-age ng quote laban sa SARILING clock nito; ang trade-fenced na landas
+# ay byte-identical. Ang mga row na huli sa own-clock ay may dalang totoong
+# provider_at at sariling basis — walang pekeng orasan kailanman.
+QUOTE_EVENT_TIMESTAMP_BASIS = "iqfeed_q_bid_ask_time_clock"
+QUOTE_OWN_CLOCK_MAX_AGE_S = 2.0
 EQUITY_SYMBOL_RE = re.compile(r"^[A-Z][A-Z0-9.]{0,15}$")
 READER_JOIN_TIMEOUT_S = 5.0
 SELECTED_FIELDS_ACK_TIMEOUT_S = 2.0
@@ -1590,6 +1603,42 @@ def _exact_trade_datetime_utc(date_text: str, time_text: str) -> datetime | None
         return None
 
 
+def _quote_event_datetime_utc(
+    bid_time_text: str,
+    ask_time_text: str,
+    received_at: datetime,
+) -> datetime | None:
+    """Ang totoong quote-event clock mula sa Bid Time/Ask Time ng frame mismo.
+
+    Time-of-day (ET) ang mga field na ito (kapareho ng trade-time encoding,
+    microsecond precision); isinasama sa petsa ng received_at sa ET na may
+    midnight-rollover guard (oras na "hinaharap" nang lampas sa tolerance =
+    kagabi). Ibinabalik ang MAS BAGO sa dalawang panig; None kapag walang
+    mabasang panig — ang tumatawag ay babagsak sa dating trade-fenced na gawi.
+    """
+
+    if _ET is None or not isinstance(received_at, datetime):
+        return None
+    recv_et = received_at.astimezone(_ET)
+    best: datetime | None = None
+    for raw in (bid_time_text, ask_time_text):
+        raw = str(raw or "").strip()
+        if not re.fullmatch(r"\d{2}:\d{2}:\d{2}(?:\.\d{1,6})?", raw):
+            continue
+        time_format = "%H:%M:%S.%f" if "." in raw else "%H:%M:%S"
+        try:
+            provider_time = datetime.strptime(raw, time_format).time()
+        except ValueError:
+            continue
+        local = datetime.combine(recv_et.date(), provider_time).replace(tzinfo=_ET)
+        if (local - recv_et).total_seconds() > AUTHORITATIVE_FUTURE_TOLERANCE_S:
+            local -= timedelta(days=1)
+        utc = local.astimezone(timezone.utc)
+        if best is None or utc > best:
+            best = utc
+    return best
+
+
 def _decoded_source_frame_line(source_frame_bytes: bytes) -> str | None:
     """Decode one newline-delimited wire frame without erasing payload bytes."""
 
@@ -2697,23 +2746,53 @@ def _parse_selected_l1(
             and bid > 0
             and ask >= bid
         )
-        quote_captured = bool(
+        _trade_fenced = bool(
             quote_valid and receive_event_delta <= AUTHORITATIVE_MAX_AGE_S
         )
+        # QUOTE OWN-CLOCK or-leg: kapag babagsak sana ang trade fence, subukan
+        # ang SARILING Bid Time/Ask Time ng frame. Ang purong trade-update na
+        # frame na may lumang bid/ask time ay natural na hindi papasa rito —
+        # walang message-contents na hula, ang clock mismo ang nagpapasya.
+        _quote_event_at: datetime | None = None
+        if quote_valid and not _trade_fenced:
+            _quote_event_at = _quote_event_datetime_utc(
+                str(p[_SELECTED_FIELD_INDEX["Bid Time"]] or ""),
+                str(p[_SELECTED_FIELD_INDEX["Ask Time"]] or ""),
+                received,
+            )
+            if _quote_event_at is not None:
+                _q_age = (received - _quote_event_at).total_seconds()
+                if not (
+                    -AUTHORITATIVE_FUTURE_TOLERANCE_S
+                    <= _q_age
+                    <= QUOTE_OWN_CLOCK_MAX_AGE_S
+                ):
+                    _quote_event_at = None
+        quote_captured = bool(_trade_fenced or _quote_event_at is not None)
         if quote_captured:
             assert bid is not None and ask is not None
             mid = (bid + ask) / 2.0
             quote_row = {
                 "sym": sym,
-                "at": provider_event_at.replace(tzinfo=None),
+                "at": (
+                    provider_event_at.replace(tzinfo=None)
+                    if _trade_fenced
+                    else _quote_event_at.replace(tzinfo=None)
+                ),
                 "bid": bid,
                 "ask": ask,
                 "mid": mid,
                 "spread_bps": (ask - bid) / mid * 10_000.0,
-                "provider_at": None,
+                # Ang own-clock na row ay may TOTOONG provider clock; ang
+                # trade-fenced na row ay nananatiling None (dating gawi).
+                "provider_at": None if _trade_fenced else _quote_event_at,
                 "provider_trade_reference_at": provider_event_at,
                 "received_at": received,
-                "basis": AUTHORITATIVE_TIMESTAMP_BASIS,
+                "basis": (
+                    AUTHORITATIVE_TIMESTAMP_BASIS
+                    if _trade_fenced
+                    else QUOTE_EVENT_TIMESTAMP_BASIS
+                ),
                 "bridge": BRIDGE_BUILD,
                 "message_type": message_type,
                 "bridge_run_id": BRIDGE_RUN_ID,
@@ -3398,8 +3477,9 @@ def writer(
                 # by the returned primary keys preserves migration 318's causal
                 # boundary without scanning the historical tape by frame identity.
                 # Exact print rows retain the provider Date+TimeMS event clock;
-                # quote rows keep provider_event_at NULL because the selected
-                # L1 layout still exposes no exact quote-event timestamp.
+                # trade-fenced quote rows keep provider_event_at NULL (dating
+                # gawi), habang ang own-clock quote rows (2026-08-28) ay may
+                # dalang TOTOONG Bid/Ask Time event clock at sariling basis.
                 available_at = datetime.now(timezone.utc)
                 with engine.begin() as c:
                     _release_pending_batch(
