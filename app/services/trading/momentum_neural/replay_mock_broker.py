@@ -1612,7 +1612,25 @@ class MockBrokerAdapter:
 
     def get_order(self, order_id: str) -> tuple[Optional[NormalizedOrder], FreshnessMeta]:
         o = self._orders.get(str(order_id))
-        return (o.to_normalized() if o is not None else None), self._freshness()
+        n = o.to_normalized() if o is not None else None
+        meta = getattr(self, "_oco", {}).get(str(order_id)) if n is not None else None
+        if meta is not None and isinstance(n.raw, dict):
+            # #1204 normalized shape: ang adopt path ay nagbabasa ng
+            # raw["legs"][i]["filled_qty"/"filled_avg_price"/"stop_price"].
+            n.raw["order_class"] = "oco"
+            n.raw["legs"] = [{
+                "id": meta["leg_id"],
+                "status": meta["leg_status"],
+                "order_type": "stop",
+                "qty": float(meta["qty"]),
+                "filled_qty": float(meta["leg_filled"]),
+                "filled_avg_price": (
+                    float(meta["leg_fill_px"]) if meta["leg_fill_px"] is not None else None
+                ),
+                "stop_price": float(meta["stop_price"]),
+                "limit_price": None,
+            }]
+        return n, self._freshness()
 
     def get_order_truth(self, order_id: str) -> dict[str, Any]:
         order, freshness = self.get_order(order_id)
@@ -1696,7 +1714,93 @@ class MockBrokerAdapter:
             extended_hours=bool(extended_hours),
         )
 
+    def place_protected_partial_oco(
+        self,
+        *,
+        product_id: str,
+        base_size: str,
+        take_profit_price: Any,
+        stop_price: Any,
+        client_order_id: Optional[str] = None,
+        extended_hours: bool = False,
+        asset_class: Any = None,
+    ) -> dict[str, Any]:
+        """OCO sa simulasyon (2026-08-27): ang parent ay ang TP SELL limit (ang
+        umiiral nang resting machinery ang bahala), at ang stop ay isang leg na
+        may sariling fill ledger. Kapag ang bid ay bumagsak sa stop -> ang LEG
+        ang nagfi-fill (konserbatibo: sa mas mababa sa stop/bid) at ang parent
+        ay nagiging canceled na may zero fill -- ang EKSAKTONG hugis na
+        binabasa ng live adopt path (raw.legs, #1204). Kapag ang TP ang tumama
+        -> normal na parent fill at ang leg ay canceled. Ang mga tseke ay
+        katugma ng tunay na adapter (fractional refuse, tp>stop)."""
+        try:
+            qty = float(base_size)
+            tp = float(take_profit_price)
+            stp = float(stop_price)
+        except (TypeError, ValueError):
+            return {"ok": False, "error": "alpaca_partial_oco_instruction_not_certified"}
+        if qty <= 0 or abs(qty - round(qty)) > 1e-9:
+            return {"ok": False, "error": "alpaca_fractional_partial_not_certified"}
+        if not (tp > stp > 0):
+            return {"ok": False, "error": "alpaca_partial_take_profit_not_above_stop"}
+        placed = self.place_limit_order_gtc(
+            product_id=product_id,
+            side="sell",
+            base_size=base_size,
+            limit_price=f"{tp:.4f}",
+            client_order_id=client_order_id,
+            extended_hours=extended_hours,
+        )
+        if not placed.get("ok") or not placed.get("order_id"):
+            return {"ok": False, "error": str(placed.get("error") or "mock_oco_parent_place_failed")}
+        parent_id = str(placed["order_id"])
+        if not hasattr(self, "_oco"):
+            self._oco = {}
+        leg_id = f"{parent_id}-stopleg"
+        self._oco[parent_id] = {
+            "leg_id": leg_id,
+            "stop_price": stp,
+            "qty": qty,
+            "leg_status": "open",
+            "leg_filled": 0.0,
+            "leg_fill_px": None,
+        }
+        legs = [{
+            "order_id": leg_id,
+            "client_order_id": "",
+            "order_type": "stop",
+            "limit_price": None,
+            "stop_price": stp,
+        }]
+        return {
+            "ok": True,
+            "order_id": parent_id,
+            "status": "new",
+            "client_order_id": client_order_id,
+            "take_profit_price": f"{tp:.2f}",
+            "stop_price": f"{stp:.2f}",
+            "legs": legs,
+            "order_request": {
+                "product_id": str(product_id).upper(),
+                "base_size": str(base_size),
+                "side": "sell",
+                "position_intent": "sell_to_close",
+                "order_type": "limit",
+                "order_class": "oco",
+                "time_in_force": "day" if extended_hours else "gtc",
+                "extended_hours": bool(extended_hours),
+                "take_profit_price": f"{tp:.2f}",
+                "stop_price": f"{stp:.2f}",
+                "client_order_id": client_order_id,
+            },
+        }
+
     def cancel_order(self, order_id: str) -> dict[str, Any]:
+        _oco_meta = getattr(self, "_oco", {}).get(str(order_id))
+        if _oco_meta is not None and _oco_meta.get("leg_status") == "open":
+            # LINKED CANCEL: ang pagkansela sa OCO parent ay nagkakansela rin
+            # sa stop leg -- ang oversell invariant ng clamp ay nakasalalay dito.
+            _oco_meta["leg_status"] = "canceled"
         # Always accept (mirrors protocol.cancel_order). In resting mode an ``open`` order is
         # marked ``cancelled`` so a later cross can't fill an order the runner abandoned (the
         # ack-timeout → re-watch path); a partial keeps its already-filled size.
@@ -2002,6 +2106,57 @@ class MockBrokerAdapter:
         return max(0.0, allowed_total - float(ro.filled_size))
 
     def _maybe_cross(self, ro: _RestingOrder, q: Optional[RecordedQuote]) -> None:
+        _oco_meta = getattr(self, "_oco", {}).get(ro.order_id)
+        if _oco_meta is not None:
+            self._maybe_cross_oco(ro, q, _oco_meta)
+            return
+        self._maybe_cross_core(ro, q)
+
+    def _maybe_cross_oco(
+        self, ro: _RestingOrder, q: Optional[RecordedQuote], meta: dict
+    ) -> None:
+        """OCO semantics: STOP muna ang tsine-tseke (konserbatibo -- kapag ang
+        parehong panig ay tatamaan sa iisang quote, ang stop ang mananalo),
+        tapos ang normal na TP cross; ang natitirang panig ay kinakansela."""
+        if ro.status == "open" and q is not None and q.is_valid():
+            if meta.get("leg_status") == "open":
+                try:
+                    bid = float(q.bid)
+                except (TypeError, ValueError):
+                    bid = None
+                if bid is not None and bid <= float(meta["stop_price"]):
+                    qty = float(meta["qty"])
+                    px = min(float(meta["stop_price"]), bid)
+                    meta["leg_status"] = "filled"
+                    meta["leg_filled"] = qty
+                    meta["leg_fill_px"] = px
+                    notional = abs(px * qty)
+                    fill_fee = modeled_fill_leg_fee_usd(
+                        notional, self._fee_to_target_ratio,
+                        venue_rt_bps=self._venue_rt_bps,
+                    )
+                    self._fills.append(
+                        NormalizedFill(
+                            fill_id=f"{meta['leg_id']}-f1",
+                            order_id=meta["leg_id"],
+                            product_id=ro.product_id,
+                            side="sell",
+                            size=qty,
+                            price=px,
+                            fee=float(fill_fee),
+                            trade_time=self._clock.replace(
+                                tzinfo=timezone.utc
+                            ).isoformat(),
+                            raw={"venue": _VENUE, "oco_stop_leg": True},
+                        )
+                    )
+                    ro.status = "canceled"
+                    return
+        self._maybe_cross_core(ro, q)
+        if ro.status in ("filled", "canceled") and meta.get("leg_status") == "open":
+            meta["leg_status"] = "canceled"
+
+    def _maybe_cross_core(self, ro: _RestingOrder, q: Optional[RecordedQuote]) -> None:
         """Advance one resting order against the current quote: respect the ack delay, then
         fill (or partial-fill) when the limit crosses, capped by the observed printed volume.
         Idempotent on terminal orders."""
