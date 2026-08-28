@@ -71,7 +71,15 @@ def _trading_day_et() -> str:
     try:
         from zoneinfo import ZoneInfo
 
-        return datetime.now(ZoneInfo("America/New_York")).strftime("%Y-%m-%d")
+        _et = datetime.now(ZoneInfo("America/New_York"))
+        # ⚠️ ET-MIDNIGHT CLAMP (2026-08-27): ang manual run sa 21:12 PT kagabi
+        # ay 00:12 ET KINABUKASAN -- naghanap ng movers ng araw na hindi pa
+        # nangyayari => "0 qualifying movers" na stub. Walang trading day na
+        # nagsisimula bago ang 04:00 ET (premarket open), kaya ang oras bago
+        # niyon ay pag-aari pa ng NAKARAANG araw ng kalakalan.
+        if _et.hour < 4:
+            _et = _et - timedelta(days=1)
+        return _et.strftime("%Y-%m-%d")
     except Exception:
         # Fail-safe: ET ay UTC-4/-5, kaya ang pagbawas ng 5 oras ay hindi kailanman
         # umaabante nang lampas sa araw ng kalakalan.
