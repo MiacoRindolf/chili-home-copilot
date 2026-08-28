@@ -586,6 +586,7 @@ def _ross_threshold_crossed(
     price: Optional[float] = None,
     dollar_volume: Optional[float] = None,
     float_shares: Optional[float] = None,
+    velocity_pct: Optional[float] = None,
 ) -> bool:
     """True when a name AFFIRMATIVELY crosses ANY Ross explosiveness axis while sitting
     inside the small-cap band — the basis-complete ignite predicate (docs/DESIGN/
@@ -675,6 +676,25 @@ def _ross_threshold_crossed(
     mv = _f(move_pct)
     if mv is not None and mv >= float(_CHG_FLOOR):
         return True
+    # PANG-APAT NA AXIS — VELOCITY (2026-08-28, ang XLAB blindspot): short-horizon
+    # na %rise sa pagitan ng mga snapshot refresh, hiwalay sa day change. Ang #1
+    # play ni Ross (XLAB: −2.4% sa araw, +12% sa minutos) ay hindi kailanman
+    # nakalampas sa mga day-change floor sa itaas — ang "Running Up" scanner niya
+    # ay puro velocity. May tanda ito (pagtaas lamang), at ang parehong
+    # within-band AND-gates sa itaas ang bantay. Iisa ang floor knob ng admission
+    # at ng axis para walang drift.
+    vel = _f(velocity_pct)
+    if vel is not None:
+        try:
+            from ....config import settings as _settings
+
+            _vel_floor = float(getattr(
+                _settings, "chili_momentum_velocity_intake_min_pct", 7.0
+            ) or 7.0)
+        except Exception:
+            _vel_floor = 7.0
+        if vel >= _vel_floor:
+            return True
     return False
 
 

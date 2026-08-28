@@ -152,7 +152,9 @@ def _loop_armed_for_tick(monkeypatch, dispatched: list[str]):
     # ang test ay nagre-report ng "hindi nag-dispatch" gayong ang pekeng
     # pool ang sira, hindi ang code.
     loop._pool = SimpleNamespace(
-        submit=lambda fn, sym, mv, px=None: dispatched.append(sym)
+        # LIMANG argumento na ngayon (2026-08-28 velocity intake):
+        #     pool.submit(self._score_symbol, sym, move_pct, _tick_price, _vel)
+        submit=lambda fn, sym, mv, px=None, vel=None: dispatched.append(sym)
     )
     # ⚠️ BASELINE 10.0, HINDI 100.0. Ang default na landas ngayon ay ang S1
     # event feeder (`chili_momentum_event_select_primary_enabled`, default

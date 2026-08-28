@@ -3287,6 +3287,33 @@ class Settings(BaseSettings):
         validation_alias=AliasChoices("CHILI_MOMENTUM_IGNITION_MIN_PCT"),
         description="The single adaptive FLOOR knob for the WS ignition scorer: the minimum intraday move% (live price vs today's open / prev-close) for a tick to be treated as an ignition worth scoring into viability. A FLOOR / reference point, not a ceiling — the downstream Ross percentile re-rank does the real selection above it. Sized to drop dead tape while still catching the real igniters early.",
     )
+    # ── VELOCITY INTAKE (2026-08-28, ang XLAB blindspot) ──────────────────────────
+    # SINUKAT: ang #1 play ni Ross (XLAB, SPAC day-2) ay −2.4% sa araw pero +12% sa
+    # loob ng minutos — LAHAT ng intake noon ay day-change-based (universe
+    # min_change_pct=5, hot-mover _change_floor=20, ignite floors=10), kaya ZERO
+    # tape, zero viability, ganap na invisible. Ang "Running Up" scanner ni Ross ay
+    # puro short-horizon velocity. Ang intake na ito ay (a) nag-a-admit ng velocity
+    # movers sa WS watch universe bilang monotonic OR-leg (nakakadagdag lamang) at
+    # (b) nagsisilbing pang-apat na ignite axis sa _ross_threshold_crossed.
+    chili_momentum_velocity_intake_enabled: bool = Field(
+        default=True,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_VELOCITY_INTAKE_ENABLED"),
+        description="Payagan ang snapshot-delta VELOCITY intake: ang pangalang tumaas nang >= chili_momentum_velocity_intake_min_pct sa loob ng window (anuman ang day change) ay ina-admit sa WS watch universe at nakaka-ignite sa velocity axis. Hygiene sa admission: common-stock symbol lamang, presyo sa profile band, at ang parehong $-volume floor ng screen. OFF => byte-identical sa day-change-only na intake.",
+    )
+    chili_momentum_velocity_intake_min_pct: float = Field(
+        default=7.0,
+        ge=1.0,
+        le=50.0,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_VELOCITY_INTAKE_MIN_PCT"),
+        description="Minimum na %rise sa loob ng velocity window para ma-admit/ma-ignite. 7%: ang XLAB burst ay +10.8% sa isang 20s refresh at +14-18% sa 3-min window; ang 1-sentimong ingay sa $1+ na pangalan na may $1M+ turnover ay hindi aabot dito. IISANG knob para sa admission at sa ignite axis — walang drift.",
+    )
+    chili_momentum_velocity_intake_window_seconds: float = Field(
+        default=180.0,
+        ge=20.0,
+        le=900.0,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_VELOCITY_INTAKE_WINDOW_SECONDS"),
+        description="Gaano kalayo pabalik ang paghahambing ng presyo para sa velocity (~9 snapshot refresh sa 20s cadence kapag 180). Ang kasaysayan ay naka-bound sa window at sa hard cap na 12 na retained snapshot.",
+    )
     # ── S1 EVENT-DRIVEN FEEDER (docs/DESIGN/MOMENTUM_ENGINE.md §1, §5) ────────────
     # A cold new explosive mover today waits up to ~300s for the next viability-refresh
     # batch (_run_equity_viability_refresh_job, ~half the 600s freshness gate) before it
