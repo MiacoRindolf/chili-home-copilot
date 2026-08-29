@@ -1017,7 +1017,18 @@ def pyramid_blend_on_fill(
     _Pa = float(Pa_f)
     q1 = _q0 + _qa
     a1 = (_a0 * _q0 + _Pa * _qa) / q1 if q1 > 0 else _a0
-    s1 = max(float(stop_px), a1)
+    if _q0 > 0:
+        s1 = max(float(stop_px), a1)
+    else:
+        # DEGENERATE BLEND (sinukat: XPON 2026-08-26 replay, C7 −10.57). Kapag
+        # naubos na ng scale-outs ang starter (q0=0), ang "blended breakeven"
+        # ay ang SARILING fill price ng add — stop sa mismong entry, zero
+        # cushion, instant breach sa unang tick pababa (bid 8.28 vs stop 8.40,
+        # exit 8 segundo pagkatapos ng add). Walang position na pinoprotektahan
+        # ang BE ratchet dito; ang add ay epektibong bagong entry, kaya ang
+        # stop ay ang dala nang freshly-ratcheted stop_px ng trail logic
+        # (tighten-only pa rin: s1 == stop_px).
+        s1 = float(stop_px)
     assert s1 >= float(stop_px) - 1e-9, "INVARIANT-A violated: pyramid stop loosened"
     orig = (float(original_quantity) if original_quantity is not None else _q0) + _qa
     return {"q1": q1, "a1": a1, "s1": s1, "original_quantity": orig}
