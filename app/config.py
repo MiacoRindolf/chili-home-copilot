@@ -6928,9 +6928,9 @@ class Settings(BaseSettings):
         description="ONE documented base: comma-separated tranche fractions of the ORIGINAL position sold at successive ladder targets (1R, 2R, ...). The runner = 1 - sum; the SUM is clamped < 1.0 so a runner always remains (no oversell, never strand 0 shares). e.g. '0.5,0.25' -> half at 1R, quarter at 2R, quarter runs.",
     )
     chili_momentum_scale_grid_r_multiples: str = Field(
-        default="1.0,2.0",
+        default="0.6,1.2",
         validation_alias=AliasChoices("CHILI_MOMENTUM_SCALE_GRID_R_MULTIPLES"),
-        description="Comma-separated R-multiples for the ladder targets (reward = R x stop-distance). Paired positionally with the fractions; a round number above entry that sits below the next R level pulls that tranche IN (Ross sells into the level where sellers stack). Adaptive: levels are R-multiples / the existing round-number grid, no fixed $.",
+        description="Comma-separated R-multiples for the ladder targets (reward = R x stop-distance). Paired positionally with the fractions; a round number above entry that sits below the next R level pulls that tranche IN (Ross sells into the level where sellers stack). DEFAULT 0.6,1.2 (2026-08-29, dating 1.0,2.0): sa CLEAN-SINK 5-window A/B ang 0.6R first rung ay NET +14.58 (XLAB +16.94 — ang partial ay nagfi-fill sa burst na namamatay sa ilalim ng 1R; MIMI runner −0.16 lamang — HINDI pinuputol ang panalo; BRNX −2.20). Ang orihinal na 'MIMI kill' na nagpatanggi rito noong 08-28 hapon ay napatunayang replay-sink contamination artifact. Unang live session = cert; ibalik sa 1.0,2.0 via env kung lumitaw ang runner harm sa live.",
     )
     # ── MEASURED-MOVE SCALE TARGET + DOUBLE-TOP EXHAUSTION (winner-management).
     # WINNER-SAFE / RATCHET-ONLY. (1) Measure the name's OWN first impulse leg
