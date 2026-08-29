@@ -4063,6 +4063,41 @@ def evaluate_sticky_backside_bench(
         if not getattr(_fs, "is_backside", False):
             return False, "front_side", None, debug
         _reason = getattr(_fs, "reason", "backside")
+        # ── MIN FADE DEPTH (2026-08-28, SWVL/BRNX bench-quality study) ──────────
+        # Ang "backside" ay NANGANGAILANGAN ng tunay na fade ayon sa depinisyon.
+        # SINUKAT sa 14 na live episode: ang LAHAT ng tamang bench ay 15-40% ang
+        # lalim mula sa HOD; ang 2 maling bench (SWVL, lumampas sa HOD sa loob
+        # ng 30 min) ay 1-1.3% LANG ang "fade" — nasa mismong high ang pangalan.
+        # Ang BRNX replay (848 veto habang tumatakbo +29%) ay parehong klase.
+        # Kaya: huwag mag-latch kapag ang presyo ay nasa loob ng min_fade_pct ng
+        # HOD — front-side iyon sa lalim, anuman ang sabi ng bar shape. Walang
+        # tamang bench ngayong araw ang maaapektuhan (lahat lampas-lampas sa 5%).
+        try:
+            _min_fade = float(getattr(
+                settings, "chili_momentum_backside_bench_min_fade_pct", 5.0
+            ) or 5.0)
+        except (TypeError, ValueError):
+            _min_fade = 5.0
+        if _min_fade > 0 and cur_hod is not None and float(cur_hod) > 0:
+            _depth_px = None
+            if live_price is not None:
+                try:
+                    _lp = float(live_price)
+                    if math.isfinite(_lp) and _lp > 0:
+                        _depth_px = _lp
+                except (TypeError, ValueError):
+                    _depth_px = None
+            if _depth_px is None:
+                try:
+                    _depth_px = float(_sess["Close"].astype(float).iloc[-1])
+                except (TypeError, ValueError, KeyError, IndexError):
+                    _depth_px = None
+            if _depth_px is not None and _depth_px > 0:
+                _fade_pct = (float(cur_hod) - _depth_px) / float(cur_hod) * 100.0
+                if _fade_pct < _min_fade:
+                    debug["shallow_fade_pct"] = round(_fade_pct, 2)
+                    debug["min_fade_pct"] = _min_fade
+                    return False, "front_side_shallow_fade", None, debug
         # chasing_top with a LIVE NEW HIGH is front-side RIGHT NOW (the completed-bar
         # rolled-over read is stale) -> do NOT latch (mirrors the per-tick carve-out).
         if _reason == "chasing_top" and live_price is not None and cur_hod is not None:
