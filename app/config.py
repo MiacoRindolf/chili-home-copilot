@@ -3310,6 +3310,11 @@ class Settings(BaseSettings):
         validation_alias=AliasChoices("CHILI_DB_PAPER_BUYING_POWER_USD"),
         description="Buying power ng DB-paper account; 0.0 => katumbas ng equity (cash, walang margin fiction).",
     )
+    chili_momentum_backside_bench_min_fade_pct: float = Field(
+        default=5.0, ge=0.0, le=50.0,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_BACKSIDE_BENCH_MIN_FADE_PCT"),
+        description="MIN FADE DEPTH bago mag-latch ang sticky backside bench (2026-08-28 study): ang pangalang nasa loob nito ng %-distansya mula sa HOD ay front-side sa lalim at HINDI bine-bench. Sinukat: lahat ng tamang bench ay 15-40% ang lalim; ang mga maling bench (SWVL +5% lampas-HOD pagkatapos, BRNX 848-veto habang +29%) ay 1-1.3% lang. 0 = patay ang tseke (dating gawi).",
+    )
     chili_momentum_subdollar_paper_enabled: bool = Field(
         default=True,
         validation_alias=AliasChoices("CHILI_MOMENTUM_SUBDOLLAR_PAPER_ENABLED"),
