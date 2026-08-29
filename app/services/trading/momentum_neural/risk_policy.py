@@ -4075,6 +4075,7 @@ def reentry_escalation_decision(
     prior_risk_dist: float | None,
     tape_accel: float | None,
     is_day_leader: bool | None = None,
+    tape_back_buy_share: float | None = None,
 ) -> tuple[bool, dict[str, Any]]:
     """G4 P2 — SAME-SYMBOL re-entry escalation after a stop-out (PURE, no I/O).
 
@@ -4119,6 +4120,7 @@ def reentry_escalation_decision(
         "prior_exit_price": prior_exit_price,
         "prior_risk_dist": prior_risk_dist,
         "tape_accel": tape_accel,
+        "tape_back_buy_share": tape_back_buy_share,
         "required_reclaim": None,
     }
     if not enabled:
@@ -4172,15 +4174,35 @@ def reentry_escalation_decision(
         except (TypeError, ValueError):
             return False
 
-    def _tape_positive() -> bool:
+    def _tape_majority_buy() -> bool:
+        # MAJORITY-BUY na kahulugan ng "positibo ang tape" (sinukat: XPON
+        # 2026-08-26 post-halt). Ang hilaw na back−front accel ay GARANTISADONG
+        # negatibo sa buong burst-decay pagkatapos ng resume — ang reopening
+        # cross + unang burst seconds ay nasa front half ng bawat window — kaya
+        # binasa ng gate ang +17%-sa-69s na at-ask rip bilang "not confirming"
+        # nang 21 sunod-sunod. Kapag ang back half ay buyer-DOMINADO (share ng
+        # aggressor buy volume > kalahati — ang natural na midpoint, hindi
+        # tuned), ang tape ay confirming kahit bumabagal ang hilaw na volume.
         try:
             return (
-                tape_accel is not None
-                and math.isfinite(float(tape_accel))
-                and float(tape_accel) > 0.0
+                tape_back_buy_share is not None
+                and math.isfinite(float(tape_back_buy_share))
+                and float(tape_back_buy_share) > 0.5
             )
         except (TypeError, ValueError):
             return False
+
+    def _tape_positive() -> bool:
+        try:
+            if (
+                tape_accel is not None
+                and math.isfinite(float(tape_accel))
+                and float(tape_accel) > 0.0
+            ):
+                return True
+        except (TypeError, ValueError):
+            return False
+        return _tape_majority_buy()
 
     # 1) structural trigger class required at any escalation level.
     if not structural_trigger:
@@ -4240,11 +4262,16 @@ def reentry_escalation_decision(
             # anchored, prior_risk_dist-scaled cap could do from inside this helper.
     else:
         dbg["reason"] = "no_reclaim_reference"
-    # 3) tape hold when readable.
+    # 3) tape hold when readable. Ang accel <= 0 ay humaharang LAMANG kapag ang
+    # back half ay HINDI buyer-dominado — ang decelerating-pero-majority-buy na
+    # tape (post-halt resume rip) ay confirming (tingnan ang _tape_majority_buy).
     try:
         if tape_accel is not None and math.isfinite(float(tape_accel)) and float(tape_accel) <= 0.0:
-            dbg["reason"] = "tape_not_confirming"
-            return False, dbg
+            if _tape_majority_buy():
+                dbg["reason"] = "tape_majority_buy_confirms"
+            else:
+                dbg["reason"] = "tape_not_confirming"
+                return False, dbg
     except (TypeError, ValueError):
         pass
     return True, dbg

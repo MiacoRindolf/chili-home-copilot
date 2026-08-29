@@ -24060,6 +24060,33 @@ def _register_fresh_quote_tick(db, sess, le: dict, tick: Any = None) -> None:
         _commit_le(sess, le)
 
 
+def halt_resume_drive_release_decision(
+    *,
+    enabled: bool,
+    already_released: bool,
+    back_buy_share: float | None,
+) -> str:
+    """PURE (no I/O) — desisyon ng halt-resume DRIVE RELEASE (XPON 2026-08-26).
+
+    "already" ⇒ sticky na release na (huwag nang mag-fetch ng tape);
+    "release" ⇒ nababasa ang post-resume tape at buyer-dominado (share > 0.5 —
+    ang natural na midpoint, hindi tuned) — ang whipsaw premise ng cooldown ay
+    napatunayang mali, i-stamp at palampasin;
+    "hold" ⇒ hindi nababasa / seller-dominado / naka-off — manatili ang
+    wall-clock cooldown (KMRK 06-10 behavior).
+    """
+    if not enabled:
+        return "hold"
+    if already_released:
+        return "already"
+    try:
+        if back_buy_share is not None and math.isfinite(float(back_buy_share))                 and float(back_buy_share) > 0.5:
+            return "release"
+    except (TypeError, ValueError):
+        return "hold"
+    return "hold"
+
+
 def _halt_resume_cooldown_active(le: dict) -> bool:
     """True while we are inside the post-resume whipsaw window (entries blocked)."""
     raw = le.get("halt_resumed_at_utc")
@@ -30605,6 +30632,7 @@ def tick_live_session(
                 except Exception:
                     _g4e_px = None
                 _g4e_tape_accel = None
+                _g4e_buy_share = None
                 try:
                     if not str(sess.symbol or "").upper().endswith("-USD"):
                         from .entry_gates import signed_tape_accel_features as _g4e_tape_fn
@@ -30612,8 +30640,10 @@ def tick_live_session(
                         _g4e_tape = _g4e_tape_fn(sess.symbol, db=db)
                         if _g4e_tape is not None:
                             _g4e_tape_accel = _float_or_none(_g4e_tape.get("signed_tape_accel"))
+                            _g4e_buy_share = _float_or_none(_g4e_tape.get("back_buy_share"))
                 except Exception:
                     _g4e_tape_accel = None
+                    _g4e_buy_share = None
                 # Review m2: the day-leader must not be permanently WAIT-blocked when
                 # its entries fire via non-structural (volume-confirmation) reasons.
                 # Reuse the ~1min-cached leader read (same g4_leader_min/g4_leader_is
@@ -30682,6 +30712,7 @@ def tick_live_session(
                         prior_risk_dist=_float_or_none(_g4e_prior.get("risk_dist")),
                         tape_accel=_g4e_tape_accel,
                         is_day_leader=(_g4e_leader if isinstance(_g4e_leader, bool) else None),
+                        tape_back_buy_share=_g4e_buy_share,
                     )
                 except Exception:
                     _g4e_ok, _g4e_dbg = True, {"reason": "g4_escalation_error_fail_open"}
@@ -30977,13 +31008,63 @@ def tick_live_session(
         # (dip+hold+reclaim structure) — it may enter inside the cooldown.
         if (_score_ok and _trigger_ok and _mkt_open and _halt_resume_cooldown_active(le)
                 and _trigger_reason != "halt_resume_dip_ok"):
-            _emit(db, sess, "live_blocked_by_risk", {
-                "reason": "halt_resume_cooldown",
-                "halt_resumed_at_utc": le.get("halt_resumed_at_utc"),
-                "cooldown_seconds": _halt_resume_cooldown_seconds(),
-            })
-            db.flush()
-            return {"ok": True, "blocked": True, "reason": "halt_resume_cooldown"}
+            # DRIVE RELEASE (sinukat: XPON 2026-08-26). Ang cooldown ay panangga
+            # sa whipsaw resume (KMRK 06-10) — pero ang XPON ay nag-resume nang
+            # ISANG DIREKSYON (43,998-share cross, +17% sa 69s sa at-ask na
+            # pagbili) at ang tanging escape (halt_resume_dip_ok) ay imposible
+            # sa straight-up resume: apat na ganap na armadong entry ang
+            # hinarang at ang buong 8.67→10.13 na leg ay lumipas SA LOOB ng
+            # 120s na wall clock. Kapag ang post-resume tape ay nababasa at
+            # buyer-DOMINADO (back_buy_share > 0.5 — natural na midpoint, hindi
+            # tuned; sa loob ng 15s window pagkatapos ng ≥5-min halt gap ay
+            # puro post-resume prints lamang ang laman), ang whipsaw premise ay
+            # napatunayang mali — STICKY na i-release ang cooldown at hayaang
+            # magpatuloy ang normal na entry path. Hindi nababasa / seller-
+            # dominado ⇒ nananatili ang wall-clock cooldown (KMRK behavior).
+            _drv_enabled = bool(getattr(
+                settings, "chili_momentum_halt_resume_drive_release_enabled", True
+            ))
+            _drv_share = None
+            _drv_accel = None
+            if _drv_enabled and not le.get("halt_resume_drive_released_at_utc"):
+                try:
+                    if not str(sess.symbol or "").upper().endswith("-USD"):
+                        from .entry_gates import (
+                            signed_tape_accel_features as _drv_tape_fn,
+                        )
+
+                        _drv_tape = _drv_tape_fn(sess.symbol, db=db)
+                        if _drv_tape is not None:
+                            _drv_share = _float_or_none(
+                                _drv_tape.get("back_buy_share")
+                            )
+                            _drv_accel = _float_or_none(
+                                _drv_tape.get("signed_tape_accel")
+                            )
+                except Exception:
+                    _drv_share = None
+            _drv_verdict = halt_resume_drive_release_decision(
+                enabled=_drv_enabled,
+                already_released=bool(le.get("halt_resume_drive_released_at_utc")),
+                back_buy_share=_drv_share,
+            )
+            _drive_released = _drv_verdict in ("release", "already")
+            if _drv_verdict == "release":
+                le["halt_resume_drive_released_at_utc"] = _utcnow().isoformat()
+                _emit(db, sess, "halt_resume_cooldown_drive_release", {
+                    "back_buy_share": _drv_share,
+                    "signed_tape_accel": _drv_accel,
+                    "halt_resumed_at_utc": le.get("halt_resumed_at_utc"),
+                })
+                _commit_le(sess, le)
+            if not _drive_released:
+                _emit(db, sess, "live_blocked_by_risk", {
+                    "reason": "halt_resume_cooldown",
+                    "halt_resumed_at_utc": le.get("halt_resumed_at_utc"),
+                    "cooldown_seconds": _halt_resume_cooldown_seconds(),
+                })
+                db.flush()
+                return {"ok": True, "blocked": True, "reason": "halt_resume_cooldown"}
         if _score_ok and _trigger_ok and _mkt_open:
             # Ross structural stop: when the pullback-break trigger fired, stash the
             # pullback low so sizing + placement can stop just UNDER the structure

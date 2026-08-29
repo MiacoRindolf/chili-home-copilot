@@ -2526,6 +2526,11 @@ def _signed_tape_features(
           "tick_rate_floor": float,     # self-relative floor: the ``floor_pctile`` percentile
                                         #   of the per-half tick rates (adaptive, no magic rate)
           "n_ticks": int,
+          "front_buy_share": float|None, # aggressor buy vol / total vol kada kalahati —
+          "back_buy_share": float|None,  #   scale-free na "sino ang may hawak ng tape";
+                                         #   hindi nalalason ng burst decay (XPON 08-26)
+          "gap_restricted": bool,        # True kapag may internal gap > window/2 at ang
+                                         #   tuloy-tuloy na post-gap segment lamang ang sinukat
         }
 
     Aggressor classification is identical to ``_aggressor_imbalance``: QUOTE RULE
@@ -2583,6 +2588,35 @@ def _signed_tape_features(
         if ts is not None:
             t_min = ts if t_min is None else min(t_min, ts)
             t_max = ts if t_max is None else max(t_max, ts)
+    # HALT-GAP RESTRICTION (sinukat: XPON 2026-08-26 LULD halt, 21 sunod-sunod
+    # na tape_not_confirming veto sa +17% post-resume rip). Kapag ang window ay
+    # may internal na inter-tick gap na mas malaki sa KALAHATI ng window (ang
+    # sariling split granularity ng metric — walang bagong magic number), ang
+    # front-vs-back na paghahambing ay tumatawid sa isang discontinuity (halt /
+    # tape outage) at sinusukat ang gap, hindi ang tape. Panatilihin lamang ang
+    # TULOY-TULOY na segment pagkatapos ng HULING ganoong gap; kapag kulang na
+    # ang natira (< 3 ticks) ⇒ None (existing fail-open contract ng caller).
+    gap_restricted = False
+    if len(parsed) >= 2:
+        half_window = max(1e-6, float(window_s)) / 2.0
+        last_gap_idx = None
+        prev_ts = None
+        for i, pt in enumerate(parsed):
+            ts_i = pt[0]
+            if ts_i is None:
+                continue
+            if prev_ts is not None and (ts_i - prev_ts) > half_window:
+                last_gap_idx = i
+            prev_ts = ts_i
+        if last_gap_idx is not None:
+            parsed = parsed[last_gap_idx:]
+            gap_restricted = True
+            t_min = None
+            t_max = None
+            for pt in parsed:
+                if pt[0] is not None:
+                    t_min = pt[0] if t_min is None else min(t_min, pt[0])
+                    t_max = pt[0] if t_max is None else max(t_max, pt[0])
     n = len(parsed)
     if n < 3:
         return None
@@ -2631,6 +2665,17 @@ def _signed_tape_features(
     front_buy = sum(p[1] for p in front if p[1] > 0)
     back_buy = sum(p[1] for p in back if p[1] > 0)
     signed_tape_accel = back_buy - front_buy
+    # Buy SHARE kada kalahati (aggressor buy volume / total volume) — scale-free
+    # na "sino ang may hawak ng tape" na hindi nalalason ng burst decay: ang
+    # bumabagal-pero-buyer-dominated na resume rip ay nagbabasa ng malaking
+    # negatibong ACCEL (back_buy − front_buy sa hilaw na volume) kahit ang
+    # presyo ay +17% sa at-ask na pagbili. Ang share ang tamang sukat ng
+    # "confirming" para sa mga consumer na iyon; ang accel ay nananatiling ang
+    # rate-of-change na sukat para sa mga consumer na iyon.
+    front_total = sum(p[2] for p in front)
+    back_total = sum(p[2] for p in back)
+    front_buy_share = (front_buy / front_total) if front_total > 0 else None
+    back_buy_share = (back_buy / back_total) if back_total > 0 else None
     tick_rate = len(back) / back_secs if back_secs > 0 else 0.0
     # Self-relative floor: the per-half tick rates (front + back) form the symbol's OWN
     # recent activity sample; the floor is the configured percentile of those rates.
@@ -2653,6 +2698,13 @@ def _signed_tape_features(
         "tick_rate": float(tick_rate),
         "tick_rate_floor": float(tick_rate_floor),
         "n_ticks": int(n),
+        "front_buy_share": (
+            float(front_buy_share) if front_buy_share is not None else None
+        ),
+        "back_buy_share": (
+            float(back_buy_share) if back_buy_share is not None else None
+        ),
+        "gap_restricted": bool(gap_restricted),
     }
 
 
