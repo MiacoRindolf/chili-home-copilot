@@ -3461,6 +3461,13 @@ def writer(
         )
         if rows or nbbo_rows:
             try:
+                # DRAIN PROFILE (2026-08-29): per-stage timing para sa Monday
+                # open — bago ang anumang structural surgery, sukatin kung
+                # SAAN talaga napupunta ang oras ng nag-iisang drain loop
+                # (naobserbahan: ~680 rows/s effective sa burst, freeze kada
+                # ~25 min bago ang CATCHUP=3600). Isang WARNING line lamang
+                # kada MABAGAL na batch (>1s) — walang ingay sa malusog.
+                _prof_t0 = time.monotonic()
                 written_quotes = nbbo_rows if WRITE_NBBO_TAPE else []
                 # Persist pending rows first and retain their database primary
                 # keys. ``received_at`` may precede this commit by the flush
@@ -3472,6 +3479,7 @@ def writer(
                         quote_rows=written_quotes,
                         return_row_ids=True,
                     )
+                _prof_t1 = time.monotonic()
                 # Stamp the conservative post-insert publication clock and
                 # enqueue notifications in one follow-up transaction. Releasing
                 # by the returned primary keys preserves migration 318's causal
@@ -3490,11 +3498,24 @@ def writer(
                         trade_row_ids=trade_row_ids,
                         quote_row_ids=quote_row_ids,
                     )
+                _prof_t2 = time.monotonic()
                 capture_accepted, capture_rejected = _publish_released_capture_rows(
                     trade_rows=rows,
                     quote_rows=written_quotes,
                     available_at=available_at,
                 )
+                _prof_t3 = time.monotonic()
+                _prof_total = _prof_t3 - _prof_t0
+                if _prof_total > 1.0:
+                    log.warning(
+                        "[drain-profile] rows=%d quotes=%d total=%.0fms "
+                        "insert=%.0fms release=%.0fms capture=%.0fms backlog=%s",
+                        len(rows), len(written_quotes), _prof_total * 1000,
+                        (_prof_t1 - _prof_t0) * 1000,
+                        (_prof_t2 - _prof_t1) * 1000,
+                        (_prof_t3 - _prof_t2) * 1000,
+                        pending_backlog,
+                    )
                 # Telemetry is queued only after release and capture publication.
                 # Its independent daemon writer can never stall this sole tape
                 # drain or delay PAPER's already-committed capture handoff.
