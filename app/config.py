@@ -3527,6 +3527,16 @@ class Settings(BaseSettings):
         default=120.0,
         validation_alias=AliasChoices("CHILI_MOMENTUM_HALT_RESUME_COOLDOWN_SECONDS"),
     )
+    # DRIVE RELEASE ng cooldown sa itaas (XPON 2026-08-26): kapag ang post-resume
+    # tape ay nababasa at buyer-dominado (back_buy_share > 0.5), ang whipsaw
+    # premise ng cooldown ay napatunayang mali — sticky na i-release at hayaang
+    # pumasok ang normal na trigger ladder. Ang XPON ay nag-resume one-directional
+    # (43,998-share cross, +17% sa 69s) at ang buong leg ay lumipas sa loob ng
+    # 120s wall clock habang apat na armadong entry ang nakaharang.
+    chili_momentum_halt_resume_drive_release_enabled: bool = Field(
+        default=True,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_HALT_RESUME_DRIVE_RELEASE_ENABLED"),
+    )
     # Window after a halt RESUMES in which the specialized halt_resume_dip entry
     # pattern owns the tape (Ross 2026-06-10 DSY: "it drops and on the resumption I
     # bought the dip"). The dip trigger demands dip+hold+reclaim STRUCTURE — strictly
