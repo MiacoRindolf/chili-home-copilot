@@ -17780,6 +17780,10 @@ def _complete_confirmed_live_exit(
             "risk_dist": _g4_rd,
             "was_loss": bool(_whole_trade_pnl <= 0),
             "exit_reason": reason,
+            # Ordering datum para sa halt re-anchor ng chase cap: kapag may halt
+            # na nag-resume PAGKATAPOS ng exit na ito, ang HWM sa itaas ay hindi
+            # na ang buhay na resistensya (nag-reprice ang market sa auction).
+            "exited_at_utc": _utcnow().isoformat(),
         }
     except Exception:
         pass
@@ -24058,6 +24062,44 @@ def _register_fresh_quote_tick(db, sess, le: dict, tick: Any = None) -> None:
                 "trigger": "on_fresh_after_dark",
             })
         _commit_le(sess, le)
+
+
+def chase_cap_halt_reanchor(
+    *,
+    anchor: float | None,
+    resumption_open: float | None,
+    resumed_at_utc: str | None,
+    prior_exited_at_utc: str | None,
+) -> float | None:
+    """PURE (no I/O) — halt re-anchor ng anti-chase cap (XPON 2026-08-26).
+
+    Ibinabalik ang anchor na gagamitin ng cap. Kapag may halt na nag-resume
+    PAGKATAPOS ng prior exit at ang resumption open ay MAS MATAAS sa lumang
+    anchor (halt-UP repricing), ang resumption open ang bagong reference —
+    ang maagang resume drive ay pumapasok pero ang parabolic top na malayo
+    sa itaas ng resume ay hinaharang pa rin ng parehong cap*ATR ceiling.
+    Kulang ang datos / resume bago ang exit / resume pababa ⇒ lumang anchor.
+    """
+    if anchor is None:
+        return None
+    try:
+        ro = float(resumption_open) if resumption_open is not None else None
+    except (TypeError, ValueError):
+        ro = None
+    if not ro or ro <= float(anchor) or not resumed_at_utc or not prior_exited_at_utc:
+        return float(anchor)
+    try:
+        res_dt = datetime.fromisoformat(
+            str(resumed_at_utc).replace("Z", "+00:00")
+        ).replace(tzinfo=None)
+        exit_dt = datetime.fromisoformat(
+            str(prior_exited_at_utc).replace("Z", "+00:00")
+        ).replace(tzinfo=None)
+    except (TypeError, ValueError):
+        return float(anchor)
+    if res_dt > exit_dt:
+        return ro
+    return float(anchor)
 
 
 def halt_resume_drive_release_decision(
@@ -30771,6 +30813,25 @@ def tick_live_session(
                         _cc_px = float(tick.ask or tick.mid or 0) or None
                 except Exception:
                     _cc_px = None
+                # HALT RE-ANCHOR (sinukat: XPON 2026-08-26). Ang anchor ng cap
+                # ay "ang resistensyang itinatag ng talunang attempt" — pero ang
+                # LULD halt ay muling nagpresyo ng pangalan sa auction: 43,998-
+                # share cross sa 8.67 laban sa prior HWM 8.31, tapos +17% sa
+                # 69s; BAWAT post-resume tick ay nabasa bilang "chase" at ang
+                # buong leg ay na-veto (dominanteng harang pagkatapos ng drive
+                # release). Kapag may halt na nag-resume PAGKATAPOS ng prior
+                # exit, ang bagong reference ay ang resumption open — ang
+                # ceiling ay tumataas sa max(anchor, resumption_open) + cap*ATR,
+                # kaya ang MAAGANG resume drive ay pumapasok pero ang parabolic
+                # top (JEM/SVRE fade-chase class, malayo sa itaas ng resume) ay
+                # hinaharang pa rin ng parehong cap.
+                if _cc_anchor:
+                    _cc_anchor = chase_cap_halt_reanchor(
+                        anchor=_cc_anchor,
+                        resumption_open=_float_or_none(le.get("halt_resumption_open")),
+                        resumed_at_utc=le.get("halt_resumed_at_utc"),
+                        prior_exited_at_utc=_cc_prior.get("exited_at_utc"),
+                    )
                 if _cc_anchor and _cc_risk and _cc_risk > 0 and _cc_px:
                     _cc_ceiling = float(_cc_anchor) + _cc_cap * float(_cc_risk)
                     if _cc_px > _cc_ceiling:
