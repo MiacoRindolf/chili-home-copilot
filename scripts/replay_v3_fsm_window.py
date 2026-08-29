@@ -629,7 +629,47 @@ def run_arm(label, grid, ticks, frame_ticks, g4_on):
     return pnl, len(buys), len(sells), len(grind_evts), len(esc_evts)
 
 
+def _reset_sim_sink() -> None:
+    """CLEAN-SINK PROTOCOL (2026-08-29, sink-contamination incident).
+
+    Ang naipong sessions/lockouts/viability ng mga naunang replay sa PAREHONG
+    sink ay bumabago sa mga sumunod na run — SINUKAT: ang MIMI "baseline" ay
+    gumalaw +60.60→+46.59 nang walang code change, at isang tamang eksperimento
+    (0.6R rung, #1240) ay halos tuluyang natanggihan dahil sa multong "MIMI
+    kill". Bawat invocation ay nagsisimula na ngayon sa malinis na sink — ang
+    determinism ay napatunayan ng byte-identical na double-run. Ang _test
+    suffix guard sa itaas ang pumipigil na matamaan ang prod. Opt-out (para sa
+    sadyang multi-run accumulation studies): REPLAY_KEEP_SINK=1.
+    """
+    if os.environ.get("REPLAY_KEEP_SINK", "").strip() == "1":
+        print("  [sink] REPLAY_KEEP_SINK=1 — hindi nireset ang sink")
+        return
+    import sqlalchemy as _sa
+
+    _eng = _sa.create_engine(SIM)
+    _tables = (
+        "trading_automation_events", "trading_automation_sessions",
+        "trading_automation_simulated_fills", "momentum_symbol_viability",
+        "adaptive_risk_reservations", "adaptive_risk_opportunity_claims",
+    )
+    with _eng.begin() as _c:
+        _have = {
+            r[0] for r in _c.execute(_sa.text(
+                "SELECT table_name FROM information_schema.tables "
+                "WHERE table_name = ANY(:t)"
+            ), {"t": list(_tables)})
+        }
+        _hit = [t for t in _tables if t in _have]
+        if _hit:
+            _c.execute(_sa.text(
+                "TRUNCATE " + ", ".join(_hit) + " RESTART IDENTITY CASCADE"
+            ))
+    _eng.dispose()
+    print(f"  [sink] clean-sink reset: {len(_hit)} tables")
+
+
 def main():
+    _reset_sim_sink()
     print(f"Loading {SYMBOL} tape ({WIN_START}..{WIN_END})...")
     nbbo, ticks, frame_ticks = load_prod()
     print(f"  nbbo_rows={len(nbbo)}  tick_rows={len(ticks)}  "
