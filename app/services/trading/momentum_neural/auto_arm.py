@@ -2867,7 +2867,7 @@ def _fresh_live_eligible_candidates(
         if ross_universe_symbols is None:
             ross_universe_symbols = _ross_universe_symbols_from_snapshot_rows(
                 _ross_snapshot_rows_by_symbol()
-            )
+            ) | _velocity_qualified_symbols(db)
         if not ross_universe_symbols:
             logger.warning(
                 "[auto_arm] Ross equity universe empty; refusing generic broad-equity fallback"
@@ -4268,6 +4268,34 @@ def _ross_universe_symbols_from_snapshot_rows(rows_by_symbol: dict[str, dict]) -
     return out
 
 
+def _velocity_qualified_symbols(db: Session) -> set[str]:
+    """BATCH-ARM VELOCITY UNION (2026-08-29): ang snapshot-only prefilter ay
+    bulag sa velocity-admitted na pangalan (#1234 — negatibo ang day change
+    nila kaya bagsak sila sa snapshot screen), kaya ang BATCH arm pass ay
+    hindi sila makikita kailanman; tanging ang scoped ignition→arm bridge ang
+    nagsisilbi. Ang DB-visible na bakas ng velocity admission ay ang
+    ``velocity_pct`` na stamp sa persisted ws_ignition signal — kunin ang mga
+    SARIWANG row na may dala nito at i-union sa prefilter set. Bounded ng
+    freshness index (parehong 600s class na bound ng candidates query);
+    fail-open sa [] para hindi kailanman masira ang batch pass."""
+    try:
+        from sqlalchemy import text as sa_text
+
+        cutoff = _decision_as_of_naive_utc(None) - timedelta(seconds=600)
+        rows = db.execute(
+            sa_text(
+                "SELECT DISTINCT symbol FROM momentum_symbol_viability "
+                "WHERE scope = 'symbol' AND freshness_ts >= :cutoff "
+                "AND execution_readiness_json::text LIKE '%velocity_pct%'"
+            ),
+            {"cutoff": cutoff},
+        ).fetchall()
+        return {str(r[0] or "").strip().upper() for r in rows if r[0]}
+    except Exception:
+        logger.debug("[auto_arm] velocity-qualified read failed", exc_info=True)
+        return set()
+
+
 def _candidate_ross_universe_evidence(
     candidate: MomentumSymbolViability,
     *,
@@ -5215,7 +5243,10 @@ def run_auto_arm_pass(
     _ross_filter_active = _auto_arm_equity_only() or (ross_required and not _auto_arm_crypto_only())
     if (_auto_arm_equity_only() or ross_required) and _scoped_syms is None:
         _ross_snapshot_rows = _ross_snapshot_rows_by_symbol()
-        _ross_universe_symbols = _ross_universe_symbols_from_snapshot_rows(_ross_snapshot_rows)
+        _ross_universe_symbols = (
+            _ross_universe_symbols_from_snapshot_rows(_ross_snapshot_rows)
+            | _velocity_qualified_symbols(db)
+        )
         out["ross_snapshot_symbols"] = len(_ross_snapshot_rows)
         out["ross_universe_symbols"] = len(_ross_universe_symbols)
 
