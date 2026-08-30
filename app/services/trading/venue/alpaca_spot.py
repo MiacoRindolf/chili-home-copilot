@@ -1303,6 +1303,21 @@ class AlpacaSpotAdapter:
             )
             if l1_stand_in is not None:
                 return l1_stand_in
+            # TIER 2.75: embedded bid/ask ng pinakabagong trade tick (2026-08-30).
+            # Ang mga trades-only-watch na pangalan (AREN-class: 66k live ticks,
+            # zero quote rows, provider stale nang oras-oras) ay may tunay na
+            # top-of-book sa BAWAT print — parehong dual-clock na kontrata,
+            # bumabagsak nang sarado kapag nahuhuli ang bridge drain.
+            trade_embedded = self._iqfeed_trade_embedded_execution_bbo(
+                product_id,
+                (
+                    float(stand_in_max_age_seconds)
+                    if stand_in_max_age_seconds is not None
+                    else max_age_seconds
+                ),
+            )
+            if trade_embedded is not None:
+                return trade_embedded
             # PANGATLONG TIER: IQFeed L2 depth (2026-08-25). Ang Massive SIP na
             # daan ay nangunguna -- ito ang pinagsama-samang tape at ang mas
             # mahigpit na 5s na kontrata. Kapag walang SIP na hilera, ang IQFeed
@@ -1583,6 +1598,130 @@ class AlpacaSpotAdapter:
         logger.info(
             "[alpaca_spot] execution BBO stand-in %s bid=%.4f ask=%.4f "
             "provider_age=%.3fs basis=iqfeed_q_bid_ask_time_clock",
+            _to_symbol(product_id), float(tick.bid), float(tick.ask),
+            (_now() - meta.provider_time_utc).total_seconds(),
+        )
+        return tick, meta
+
+    def _iqfeed_trade_embedded_bbo(self, sym: str, *, max_age_seconds: float):
+        """Embedded bid/ask ng PINAKABAGONG trade tick, o None.
+
+        SINUKAT (2026-08-30): execution_bbo_unavailable x12,979 sa 5 araw —
+        78% ng lahat ng risk block. AREN: 991 block habang RTH na may 66,080
+        LIVE na trade ticks sa parehong oras, bawat isa may embedded bid/ask
+        (1.19/1.20 — isang sentimong spread) at exact-print provider clock.
+        Ang mga pangalang ito ay trades-only ang IQFeed watch kaya walang
+        quote (Q) rows — ang quote-tape tier sa itaas ay walang makita, ang
+        massive provider ay oras-oras nang stale, ang depth ay mas makitid pa
+        ang saklaw. PERO ang bawat trade print ay isang tunay na top-of-book
+        na obserbasyon sa sandali ng trade. Parehong dalawang-orasan na
+        disiplina ng mga tier sa itaas: provider at receive clock ay parehong
+        dapat sariwa — kapag nahuhuli ang bridge drain (received_at lag), ang
+        tier na ito ay TAMANG bumabagsak nang sarado.
+        """
+        try:
+            from ....db import SessionLocal
+            from sqlalchemy import text
+
+            requested = float(max_age_seconds or 0.0)
+            if requested <= 0:
+                return None
+            with SessionLocal() as _db:
+                row = _db.execute(text(
+                    "SELECT id, bid, ask, provider_event_at, received_at, "
+                    "timestamp_basis, price "
+                    "FROM iqfeed_trade_ticks "
+                    "WHERE symbol = :s AND source = 'iqfeed_l1' "
+                    "AND bid IS NOT NULL AND ask IS NOT NULL "
+                    "AND provider_event_at IS NOT NULL "
+                    "AND received_at IS NOT NULL "
+                    "ORDER BY observed_at DESC, id DESC LIMIT 1"
+                ), {"s": str(sym or "").upper()}).fetchone()
+            if row is None:
+                return None
+            bid = _f(row[1]); ask = _f(row[2])
+            if (
+                bid is None or ask is None
+                or not all(math.isfinite(v) for v in (bid, ask))
+                or bid <= 0 or ask <= 0 or ask < bid
+            ):
+                return None
+            mid = (bid + ask) / 2.0
+            if mid <= 0:
+                return None
+
+            def _aware_utc(value):
+                if not isinstance(value, datetime) or value.tzinfo is None:
+                    return None
+                return value.astimezone(timezone.utc)
+
+            provider_at = _aware_utc(row[3])
+            received_at = _aware_utc(row[4])
+            if provider_at is None or received_at is None:
+                return None
+            receive_delta = (received_at - provider_at).total_seconds()
+            if not (-_MASSIVE_SIP_FUTURE_TOLERANCE_S <= receive_delta <= requested):
+                return None
+            now_utc = _now()
+            provider_age = (now_utc - provider_at).total_seconds()
+            received_age = (now_utc - received_at).total_seconds()
+            if (
+                provider_age < -_MASSIVE_SIP_FUTURE_TOLERANCE_S
+                or received_age < -_MASSIVE_SIP_FUTURE_TOLERANCE_S
+                or provider_age > requested
+                or received_age > requested
+            ):
+                return None
+            spread_bps = (ask - bid) / mid * 10_000.0
+            meta = FreshnessMeta(
+                retrieved_at_utc=received_at,
+                provider_time_utc=provider_at,
+                max_age_seconds=requested,
+            )
+            return NormalizedTicker(
+                product_id=str(sym or "").upper(), bid=bid, ask=ask, mid=mid,
+                spread_bps=spread_bps, bid_size=None, ask_size=None,
+                freshness=meta,
+                raw={
+                    "feed": "iqfeed_trade_embedded",
+                    "tick_row_id": int(row[0]),
+                    "provider_event_at_utc": provider_at.isoformat(),
+                    "received_at_utc": received_at.isoformat(),
+                    "timestamp_basis": str(row[5] or ""),
+                    "trade_price": _f(row[6]),
+                },
+            ), meta
+        except Exception as exc:
+            logger.debug(
+                "[alpaca_spot] _iqfeed_trade_embedded_bbo(%s) failed: %s", sym, exc
+            )
+            return None
+
+    def _iqfeed_trade_embedded_execution_bbo(
+        self, product_id: str, max_age_seconds: float
+    ):
+        """Ang trade-embedded na stand-in, o None kapag hindi maaaring gamitin."""
+        if _is_crypto_pid(product_id):
+            return None
+        if not bool(
+            getattr(
+                settings,
+                "chili_alpaca_execution_bbo_trade_embedded_enabled",
+                True,
+            )
+        ):
+            return None
+        result = self._iqfeed_trade_embedded_bbo(
+            _to_symbol(product_id), max_age_seconds=float(max_age_seconds)
+        )
+        if not isinstance(result, tuple) or len(result) != 2:
+            return None
+        tick, meta = result
+        if tick is None or not isinstance(meta, FreshnessMeta):
+            return None
+        logger.info(
+            "[alpaca_spot] execution BBO stand-in %s bid=%.4f ask=%.4f "
+            "provider_age=%.3fs basis=iqfeed_trade_embedded",
             _to_symbol(product_id), float(tick.bid), float(tick.ask),
             (_now() - meta.provider_time_utc).total_seconds(),
         )
