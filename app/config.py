@@ -7859,6 +7859,16 @@ class Settings(BaseSettings):
     # Dimensional note (the exit reviewer's correction, applied identically): rv_live is the
     # PER-GRID-STEP stdev, so band_frac = k*rv_live*sqrt(N), N = expected_hold_s/grid_secs
     # (GRID STEPS), NOT tick_rate*hold (a tick count).
+    # IGNITION WAKE NG NAGBABANTAY (2026-08-30): sinukat na ang WATCHING na
+    # session ay tumitibok sa p50 11.2s habang ang ignition ay 3-segundong
+    # spike (candidate->submit p50 ~64s vs Ross ~4s). Kapag ON: bawat tick na
+    # pumasa sa MISMONG Ross ignition floor ay gumigising sa mga WATCHING
+    # session ng symbol (spacing-bound 2s, single-flight) — walang bagong
+    # threshold, mana ang existing floors.
+    chili_momentum_ignition_wake_watching_enabled: bool = Field(
+        default=True,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_IGNITION_WAKE_WATCHING_ENABLED"),
+    )
     chili_momentum_smart_hold_enabled: bool = Field(
         default=False,
         validation_alias=AliasChoices("CHILI_MOMENTUM_SMART_HOLD_ENABLED"),
