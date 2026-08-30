@@ -404,6 +404,19 @@ class _SessionCrossTracker:
         with self._lock:
             return set(self._by_symbol)
 
+    def watching(self, symbol: str) -> list[int]:
+        """Session ids sa STATE_WATCHING_LIVE para sa symbol na ito — ang mga
+        matang dapat gisingin kapag umiignite ang pangalan (hindi lamang kapag
+        may level cross). Mura: isang dict lookup sa ilalim ng lock."""
+        sym = str(symbol or "").strip().upper()
+        with self._lock:
+            entries = self._by_symbol.get(sym)
+            entries = list(entries) if entries else []
+        return [
+            int(e["session_id"]) for e in entries
+            if e.get("state") == STATE_WATCHING_LIVE
+        ]
+
     def crossed(self, symbol: str, quote) -> list[int]:
         """Session ids whose stored threshold this tick crossed (hint lamang).
 
@@ -858,6 +871,24 @@ class IgnitionScoringLoop:
             if move_pct < floor:
                 return  # below the adaptive ignition floor — dead tape, ignore
             _tick_price = self._quote_price(quote)
+        # IGNITION WAKE NG NAGBABANTAY (2026-08-30). SINUKAT: ang WATCHING na
+        # session ay tumitibok sa p50 11.2s (scheduler batch) — ang ignition ay
+        # 3-SEGUNDONG spike, kaya ang mata ay 1-2 tick na huli bago pa man ang
+        # gates (candidate→submit p50 ~64s, si Ross ~4s). Ang level-cross wake
+        # sa itaas ay para lamang sa may watch_break_level; ang velocity/volume/
+        # vwap na trigger classes ay walang gumigising. DITO — pagkatapos
+        # pumasa ang MISMONG Ross ignition floor (walang bagong threshold) —
+        # gisingin ang bawat WATCHING session ng symbol na ito. Ang
+        # _spawn_session_wake ay spacing-bound (2s) + single-flight kada
+        # session, kaya ang mainit na tape ay ≤1 wake/2s/session lamang.
+        if bool(getattr(
+            settings, "chili_momentum_ignition_wake_watching_enabled", True
+        )):
+            try:
+                for _wsid in self._sessions.watching(sym):
+                    _spawn_session_wake(_wsid)
+            except Exception:
+                pass
         # DEDUP: one score per cooldown window + an inflight guard so two ticks
         # arriving together don't double-dispatch the same symbol.
         now = time.monotonic()
