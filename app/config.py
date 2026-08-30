@@ -7865,6 +7865,14 @@ class Settings(BaseSettings):
     # pumasa sa MISMONG Ross ignition floor ay gumigising sa mga WATCHING
     # session ng symbol (spacing-bound 2s, single-flight) — walang bagong
     # threshold, mana ang existing floors.
+    # EXECUTION BBO TIER 2.75 (2026-08-30): embedded bid/ask ng pinakabagong
+    # trade tick para sa trades-only-watch na pangalan (AREN: 991 block habang
+    # 66k live ticks na may 1-sentimong spread ang nakaupo sa tape). Dual-clock
+    # na disiplina — bumabagsak nang sarado kapag nahuhuli ang bridge drain.
+    chili_alpaca_execution_bbo_trade_embedded_enabled: bool = Field(
+        default=True,
+        validation_alias=AliasChoices("CHILI_ALPACA_EXECUTION_BBO_TRADE_EMBEDDED_ENABLED"),
+    )
     chili_momentum_ignition_wake_watching_enabled: bool = Field(
         default=True,
         validation_alias=AliasChoices("CHILI_MOMENTUM_IGNITION_WAKE_WATCHING_ENABLED"),
