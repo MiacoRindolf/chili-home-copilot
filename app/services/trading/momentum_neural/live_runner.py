@@ -24064,6 +24064,41 @@ def _register_fresh_quote_tick(db, sess, le: dict, tick: Any = None) -> None:
         _commit_le(sess, le)
 
 
+def bailout_depth_guard_holds(
+    *,
+    enabled: bool,
+    avg_entry: float | None,
+    bid: float | None,
+    stop_price: float | None,
+    min_frac: float,
+) -> tuple[bool, float | None]:
+    """PURE (no I/O) — depth guard ng fast-bail (corpus 2026-08-29: 27/36 na
+    bailout ay SHAKEOUT, avg dip 150bps lang vs 261bps sa mga tama; 21/27 ay
+    mula sa legacy 10bps fixed-buffer bail).
+
+    Ibinabalik ang (dapat_HUMAWAK, depth_frac). Ang dip ay dapat maubos ang
+    ≥``min_frac`` ng entry→stop na distansya (ang sariling planadong risk ng
+    trade ang noise unit — walang bagong magic; 0.5 = natural na midpoint)
+    bago payagan ang fast-bail. Mababaw na dip ⇒ HUMAWAK — ang hard stop at
+    ang #769 max-loss circuit ay nananatiling sahig sa ilalim. Kulang ang
+    datos / stop hindi mas mababa sa entry ⇒ (False, None) = lumang gawi.
+    """
+    if not enabled:
+        return False, None
+    try:
+        a = float(avg_entry) if avg_entry is not None else None
+        b = float(bid) if bid is not None else None
+        sp = float(stop_price) if stop_price is not None else None
+    except (TypeError, ValueError):
+        return False, None
+    if not a or not b or not sp or sp >= a:
+        return False, None
+    depth = (a - b) / (a - sp)
+    if depth < float(min_frac):
+        return True, depth
+    return False, depth
+
+
 def chase_cap_halt_reanchor(
     *,
     anchor: float | None,
@@ -38937,6 +38972,28 @@ def tick_live_session(
                 db.flush()
                 return {"ok": True, "session_id": sess.id, "state": sess.state,
                         "bailout_dwell_pending": True}
+            _dg_pos = le.get("position") if isinstance(le.get("position"), dict) else {}
+            _dg_hold, _dg_depth = bailout_depth_guard_holds(
+                enabled=bool(getattr(
+                    settings, "chili_momentum_bailout_depth_guard_enabled", True
+                )),
+                avg_entry=_float_or_none(_dg_pos.get("avg_entry_price")),
+                bid=_float_or_none(bid),
+                stop_price=_float_or_none(_dg_pos.get("stop_price")),
+                min_frac=float(getattr(
+                    settings, "chili_momentum_bailout_depth_guard_min_frac", 0.5
+                ) or 0.5),
+            )
+            if _dg_hold:
+                _emit(db, sess, "bailout_depth_guard_hold", {
+                    "trigger": "breakout_failed_to_hold",
+                    "depth_frac": round(_dg_depth, 4) if _dg_depth is not None else None,
+                    "bid": bid,
+                    "held_seconds": held,
+                })
+                db.flush()
+                return {"ok": True, "session_id": sess.id, "state": sess.state,
+                        "bailout_depth_guard_hold": True}
             le["last_bailout_trigger"] = "breakout_failed_to_hold"
             _commit_le(sess, le)
             _safe_transition(db, sess, STATE_LIVE_BAILOUT)

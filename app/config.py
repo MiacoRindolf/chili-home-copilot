@@ -7859,6 +7859,24 @@ class Settings(BaseSettings):
     # Dimensional note (the exit reviewer's correction, applied identically): rv_live is the
     # PER-GRID-STEP stdev, so band_frac = k*rv_live*sqrt(N), N = expected_hold_s/grid_secs
     # (GRID STEPS), NOT tick_rate*hold (a tick count).
+    # BAILOUT DEPTH GUARD (corpus 2026-08-29, 26 windows): 27/36 fast-bail ay
+    # SHAKEOUT (binenta ang ilalim, na-reclaim ang entry <5min; damage -$165),
+    # avg dip 150bps lamang vs 261bps sa mga tamang bail; 21/27 mula sa legacy
+    # 10bps fixed-buffer. Ang guard: ang dip ay dapat maubos ang >=min_frac ng
+    # entry->stop distance (sariling planadong risk = noise unit) bago payagan
+    # ang fast-bail. Ang hard stop + #769 circuit ay nananatiling sahig. Ang
+    # smart_hold flip ay REJECTED sa parehong corpus (net -70.74) — ito ang
+    # surgical na kapalit.
+    chili_momentum_bailout_depth_guard_enabled: bool = Field(
+        default=True,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_BAILOUT_DEPTH_GUARD_ENABLED"),
+    )
+    chili_momentum_bailout_depth_guard_min_frac: float = Field(
+        default=0.5,
+        ge=0.0,
+        le=1.0,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_BAILOUT_DEPTH_GUARD_MIN_FRAC"),
+    )
     chili_momentum_smart_hold_enabled: bool = Field(
         default=False,
         validation_alias=AliasChoices("CHILI_MOMENTUM_SMART_HOLD_ENABLED"),
