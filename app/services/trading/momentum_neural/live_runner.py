@@ -30491,6 +30491,46 @@ def tick_live_session(
                                         "price": float(_u_px),
                                     }
                                     _unbench = _u_retrace >= _u_min
+                                    # VWAP-HOLD LEG (#1256, LIVE 08-31: AEHL 11:55
+                                    # at MOVE#2 13:16 — 2 sa 4 na trade ng araw ay
+                                    # backside bounce na pumasok DITO). Ang retrace
+                                    # floor ay one-sided: habang mas wasak ang
+                                    # galaw, mas madali itong pasado (15% fade =
+                                    # "15% retrace"). Ang tunay na pullback ay
+                                    # HAWAK ang session VWAP; ang parehong talo ay
+                                    # 3.1%/5.4% sa ILALIM nito nang pumasa ang
+                                    # exception. Parehong buffer base ng vwap-hold
+                                    # gate (isang dokumentadong tolerance). Ang YJ
+                                    # #1076 save (curl NA HAWAK ang VWAP —
+                                    # vwap_reclaim_not_below_enough x518) ay
+                                    # pasado pa rin. Walang mabasang VWAP ⇒
+                                    # dating gawi (walang bagong harang sa
+                                    # kulang na datos).
+                                    if _unbench:
+                                        try:
+                                            _u_vwap = None
+                                            _vrd = (_bench_dbg or {}).get(
+                                                "vwap_reclaim_declined"
+                                            )
+                                            if isinstance(_vrd, dict):
+                                                _u_vwap = _float_or_none(
+                                                    _vrd.get("session_vwap")
+                                                )
+                                            if _u_vwap and _u_vwap > 0:
+                                                _u_buf = max(0.0, float(getattr(
+                                                    settings,
+                                                    "chili_momentum_entry_vwap_hold_buffer",
+                                                    0.0,
+                                                ) or 0.0))
+                                                _u_holds_vwap = float(_u_px) >= (
+                                                    _u_vwap * (1.0 - _u_buf)
+                                                )
+                                                _unbench_dbg["session_vwap"] = _u_vwap
+                                                _unbench_dbg["vwap_hold"] = _u_holds_vwap
+                                                if not _u_holds_vwap:
+                                                    _unbench = False
+                                        except Exception:
+                                            pass
                         except Exception:
                             _unbench = False  # fail-closed: keep the veto
                         if _unbench:
