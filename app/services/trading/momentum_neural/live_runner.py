@@ -13637,11 +13637,50 @@ def _submit_live_market_exit_impl(
                 max_age = min(2.0, max(0.0, configured))
             except Exception:
                 max_age = 2.0
-            final_tick, evidence = _final_entry_bbo(
-                adapter,
-                product_id,
-                max_age_seconds=max_age,
-            )
+            # STOP-CLASS FAIL-OPEN sa literal seam (#1258, audit HOLE 1):
+            # ang #1255 ay nagtaas lamang ng ceiling sa NAUNANG seam; DITO sa
+            # literal-post refresh ay 2.0s strict pa rin nang WALANG stand-in —
+            # kaya sa bumabagsak na pangalan: kanselahin ang deadman → bagsak
+            # dito → i-re-arm ang deadman → ulit (saglit na hubad kada ikot,
+            # hindi kailanman nakaka-post). Parehong lunas: stop-class ⇒
+            # emergency max age + stand-in pinapayagan.
+            _lit_stop_class = False
+            try:
+                if bool(getattr(
+                    settings,
+                    "chili_momentum_exit_stop_class_fail_open_enabled",
+                    True,
+                )):
+                    from .risk_policy import stop_class_exit_reason as _lit_sc
+
+                    _lit_stop_class = bool(
+                        _lit_sc(reason)
+                        or str(reason or "") in (
+                            "stop", "bailout", "deadman_stop",
+                            "operator_flatten", "kill_switch_flatten",
+                        )
+                    )
+            except Exception:
+                _lit_stop_class = False
+            if _lit_stop_class:
+                _lit_si_age = float(getattr(
+                    settings,
+                    "chili_momentum_emergency_exit_stand_in_max_age_seconds",
+                    900.0,
+                ) or 900.0)
+                final_tick, evidence = _final_entry_bbo(
+                    adapter,
+                    product_id,
+                    max_age_seconds=max(_lit_si_age, max_age),
+                    allow_stand_in=True,
+                    stand_in_max_age_seconds=_lit_si_age,
+                )
+            else:
+                final_tick, evidence = _final_entry_bbo(
+                    adapter,
+                    product_id,
+                    max_age_seconds=max_age,
+                )
         if final_tick is not None:
             frozen_request = _owner_transport_post.get("order_request")
             frozen_request = (
@@ -16324,6 +16363,32 @@ def _promote_alpaca_retry_cap_to_emergency(
     )
     if not open_orders_ok:
         return _block(open_orders_error)
+    # SARILING DEADMAN AY HINDI "COMPETING" (#1258, audit HOLE 3): ang abort/
+    # reprotect na landas ay nagre-re-arm ng deadman stop pagkatapos ng bawat
+    # bigong rung — tapos DITO, ang mismong proteksyong iyon ang bumablock sa
+    # retry-cap promotion bilang "competing order", kaya ang capped-out na
+    # posisyon ay umiikot nang tahimik magpakailanman. Ang order na IDENTITY-
+    # PROVEN na sariling deadman ng session (eksaktong tugma sa le deadman
+    # order_id/client_order_id) ay hindi kalaban — proteksyon ito.
+    try:
+        _own_dm = le.get("deadman_stop")
+        _own_dm = _own_dm if isinstance(_own_dm, dict) else {}
+        _own_dm_oid = str(_own_dm.get("order_id") or "").strip()
+        _own_dm_cid = str(_own_dm.get("client_order_id") or "").strip()
+        if _own_dm_oid or _own_dm_cid:
+            open_orders = [
+                o for o in open_orders
+                if not (
+                    (_own_dm_oid and str(
+                        getattr(o, "order_id", "") or ""
+                    ).strip() == _own_dm_oid)
+                    or (_own_dm_cid and str(
+                        getattr(o, "client_order_id", "") or ""
+                    ).strip() == _own_dm_cid)
+                )
+            ]
+    except Exception:
+        pass
     if actionable_authority is None:
         if open_orders:
             return _block("competing_open_order_present")
@@ -16807,6 +16872,40 @@ def _live_exit_submit_succeeded(
             # Both outcomes remain in a held, runner-serviceable state. A blocked
             # certification is retried read-only; it is never permission to
             # terminalize real local exposure or to infer a generic position.
+            if promotion == "blocked":
+                # INGAY SA BLOCKED PROMOTION (#1258, audit HOLE 3): ang
+                # "blocked" ay dating ganap na tahimik — walang event, walang
+                # log — habang may hawak na tunay na posisyon na capped-out na
+                # ang exit. Rate-limited na LOUD event para may makakita.
+                try:
+                    _pb_last = le.get("promotion_blocked_alarm_at_utc")
+                    _pb_now = _utcnow()
+                    _pb_due = True
+                    if _pb_last:
+                        _pb_due = (
+                            _pb_now - datetime.fromisoformat(str(_pb_last))
+                        ).total_seconds() >= 60.0
+                    if _pb_due:
+                        le["promotion_blocked_alarm_at_utc"] = _pb_now.isoformat()
+                        _commit_le(sess, le)
+                        _emit(db, sess, "live_exit_promotion_blocked", {
+                            "severity": "critical",
+                            "reason": reason,
+                            "symbol": sess.symbol,
+                            "attempts": result.get("attempts"),
+                            "block": le.get("retry_cap_promotion_block"),
+                            "note": (
+                                "retry-cap promotion BLOCKED habang may hawak "
+                                "na posisyon — bantayan/i-eskala"
+                            ),
+                        })
+                        _log.warning(
+                            "[momentum_live] RETRY-CAP PROMOTION BLOCKED %s "
+                            "(reason=%s) — may hawak na posisyon",
+                            sess.symbol, reason,
+                        )
+                except Exception:
+                    pass
             return False
         # GENUINELY STRANDED POSITION (2026-06-16): the exit hit the retry cap AND
         # the broker still HOLDS the position (not zero/dust) — a real naked long with
