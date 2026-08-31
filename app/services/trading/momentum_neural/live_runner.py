@@ -30661,6 +30661,33 @@ def tick_live_session(
         if _trigger_ok and bool(
             getattr(settings, "chili_momentum_g4_reentry_escalation_enabled", True)
         ):
+            # CROSS-DAY REJECTION SEED (#1252, doktrina mula sa stream 08-31):
+            # "This is the one on Friday that I tried to trade and it popped up
+            # and then rejected, so I don't really trust it" — si Ross ay may
+            # PANG-ARAW na memorya: ang pangalang pumalpak KAHAPON ay may mas
+            # mataas na confirmation bar NGAYON. Ang intraday g4 escalation ay
+            # nagre-reset kada session; dito, ang unang basa ng session ay
+            # sine-seed sa level 1 kapag ang symbol ay may pulang stop-class/
+            # bailout exit sa NAKARAANG ET trading day. Level 1 = ang parehong
+            # bar ng intraday rule (structural trigger + positibong tape;
+            # walang reclaim reference kaya hindi lockout kailanman). Fail-open
+            # sa 0 sa anumang error.
+            if "g4_reentry_escalation" not in le and bool(getattr(
+                settings, "chili_momentum_g4_cross_day_rejection_seed_enabled", True
+            )):
+                try:
+                    from .risk_policy import prior_day_rejection_seed as _pdr_fn
+
+                    _pdr = int(_pdr_fn(db, sess.symbol) or 0)
+                    if _pdr > 0:
+                        le["g4_reentry_escalation"] = _pdr
+                        _commit_le(sess, le)
+                        _emit(db, sess, "g4_cross_day_rejection_seed", {
+                            "symbol": str(sess.symbol or ""),
+                            "seed_level": _pdr,
+                        })
+                except Exception:
+                    pass
             try:
                 _g4e_level = int(le.get("g4_reentry_escalation") or 0)
             except (TypeError, ValueError):
@@ -36217,6 +36244,11 @@ def tick_live_session(
             le["entry_final_bbo"] = _final_bbo
             _commit_le(sess, le)
             _emit(db, sess, "live_entry_final_bbo", _final_bbo)
+            # PLACE PROFILE (#1253, sinukat 08-31: final_bbo->submitted = 13.7s
+            # sa unang tunay na submit; Biyernes 8.7s). Sukatin kung SAAN —
+            # prep (reservation/gates) vs broker call vs post — bago ang
+            # anumang surgery. Isang WARNING kada mabagal (>2s) na place chain.
+            _pp_t0 = time.monotonic()
             if _final_tick is None:
                 _safe_transition(db, sess, STATE_WATCHING_LIVE)
                 db.flush()
@@ -36540,6 +36572,7 @@ def tick_live_session(
         # is byte-identical to `adapter.place_limit_order_gtc(**_entry_kwargs)`. A
         # governor DEFER returns ok=False/error=rail_governor_deferred -> the existing
         # not-ok branch below re-watches / retries next tick (never a silent drop).
+        _pp_t_place = time.monotonic()
         res = _governed_place(
             adapter,
             adapter.place_limit_order_gtc,
@@ -36743,11 +36776,29 @@ def tick_live_session(
             le["entry_chunk_order_ids"] = [str(o) for o in res.get("chunk_order_ids")]
         le["entry_place_result"] = {"ok": res.get("ok"), "error": res.get("error")}
         _commit_le(sess, le)
+        try:
+            _pp_now = time.monotonic()
+            _pp_total = _pp_now - _pp_t0
+            _pp_prep = _pp_t_place - _pp_t0
+            _pp_broker = _pp_now - _pp_t_place
+            if _pp_total > 2.0:
+                _log.warning(
+                    "[place-profile] %s total=%.0fms prep=%.0fms broker+post=%.0fms",
+                    sess.symbol, _pp_total * 1000, _pp_prep * 1000,
+                    _pp_broker * 1000,
+                )
+        except (NameError, TypeError, ValueError):
+            _pp_total = _pp_prep = _pp_broker = None
         _emit(db, sess, "live_entry_submitted", {
             "client_order_id": le["entry_client_order_id"],
             "order_type": "limit",
             "limit_price": entry_limit_str,
             "result": res,
+            "place_profile_ms": {
+                "total": round(_pp_total * 1000, 1) if _pp_total else None,
+                "prep": round(_pp_prep * 1000, 1) if _pp_prep else None,
+                "broker_post": round(_pp_broker * 1000, 1) if _pp_broker else None,
+            },
         })
         if not res.get("ok"):
             # ACK-LOST / DUP-REFERENCE RECONCILE: a duplicate-id response confirms an

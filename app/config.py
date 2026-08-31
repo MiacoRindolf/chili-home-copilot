@@ -7873,6 +7873,14 @@ class Settings(BaseSettings):
     # prefilter mula sa bayad na Warrior Day-Trade-Dash ng operator (browser
     # monitor ang sumusulat ng JSON). Karagdagang MATA lamang — buong gates pa
     # rin ang dadaanan ng bawat pangalan; fail-open kapag walang/lumang file.
+    # CROSS-DAY REJECTION SEED (#1252): doktrina mula sa stream ni Ross
+    # (08-31, LGPS): ang pangalang pumalpak kahapon ay may mas mataas na
+    # confirmation bar ngayon — seed g4 level 1 sa bagong session kapag may
+    # pulang stop/bailout exit ang symbol sa nakaraang ET trading day.
+    chili_momentum_g4_cross_day_rejection_seed_enabled: bool = Field(
+        default=True,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_G4_CROSS_DAY_REJECTION_SEED_ENABLED"),
+    )
     chili_momentum_ross_dash_mirror_enabled: bool = Field(
         default=True,
         validation_alias=AliasChoices("CHILI_MOMENTUM_ROSS_DASH_MIRROR_ENABLED"),
