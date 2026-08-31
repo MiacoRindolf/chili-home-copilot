@@ -42,7 +42,7 @@ from datetime import datetime, timedelta, timezone
 from decimal import Decimal, ROUND_CEILING, ROUND_FLOOR
 from typing import Any
 
-from sqlalchemy import select, text
+from sqlalchemy import bindparam, select, text
 from sqlalchemy.orm import Session
 
 from ....config import settings
@@ -299,8 +299,55 @@ def _managed_and_recent_symbols(db: Session) -> tuple[set[str], set[str]] | None
         ), {"fams": list(_ALPACA_FAMILIES), "g": grace}).fetchall()
         active: set[str] = set()
         recent: set[str] = set()
+        # STALLED-OWNER RULE (#1259, LIVE 08-31 MOVE#2): ang "active" ay dapat
+        # UMUUSAD, hindi lamang non-terminal. Ang 119-share na posisyon ay 18
+        # minutong hubad habang ang may-ari nitong session ay tahimik na
+        # deadlocked sa pre-place block — at ang reconciler ay "hands off"
+        # dahil non-terminal ang session. Kapag ang non-terminal na LIVE
+        # session ay may operator-flatten na hiniling nang mas matanda sa
+        # stalled bound at WALANG naitala na exit fill, HINDI na ito
+        # nagpapa-hands-off — bumabalik ang symbol sa saklaw ng reconciler.
+        try:
+            _stall_s = float(getattr(
+                settings,
+                "chili_alpaca_reconcile_stalled_owner_seconds",
+                180.0,
+            ) or 180.0)
+        except (TypeError, ValueError):
+            _stall_s = 180.0
+        _stalled: set[str] = set()
+        try:
+            if _stall_s > 0:
+                srws = db.execute(text(
+                    "SELECT upper(symbol) FROM trading_automation_sessions "
+                    "WHERE execution_family = ANY(:fams) AND mode='live' "
+                    "AND state NOT IN :terms "
+                    "AND (risk_snapshot_json->'momentum_live_execution'->>"
+                    "'operator_flatten_requested_utc') IS NOT NULL "
+                    "AND (risk_snapshot_json->'momentum_live_execution'->>"
+                    "'operator_flatten_requested_utc')::timestamptz "
+                    "  < (now() - (:st * interval '1 second')) "
+                    "AND (risk_snapshot_json->'momentum_live_execution'->>"
+                    "'last_exit_reason') IS NULL"
+                ).bindparams(bindparam("terms", expanding=True)), {
+                    "fams": list(_ALPACA_FAMILIES),
+                    "terms": list(_TERMINAL_OPERATOR_STATES),
+                    "st": _stall_s,
+                }).fetchall()
+                _stalled = {r[0] for r in srws}
+                if _stalled:
+                    logger.warning(
+                        "[alpaca_reconcile] STALLED OWNERS — ibinabalik sa "
+                        "saklaw: %s", sorted(_stalled),
+                    )
+        except Exception:
+            _stalled = set()  # fail-open sa dating gawi (hands-off)
         for s, state, mode, is_recent in rows:
-            if str(state or "") not in _TERMINAL_OPERATOR_STATES and str(mode or "") == "live":
+            if (
+                str(state or "") not in _TERMINAL_OPERATOR_STATES
+                and str(mode or "") == "live"
+                and s not in _stalled
+            ):
                 active.add(s)
             if bool(is_recent):
                 recent.add(s)
