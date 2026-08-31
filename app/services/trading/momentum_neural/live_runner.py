@@ -13007,7 +13007,38 @@ def _submit_live_market_exit_impl(
                 "pre_place_blocked": True,
             }
         else:
-            if age_seconds <= exit_execution_bbo_max_age:
+            _place_max_age = float(exit_execution_bbo_max_age)
+            # STOP-CLASS AT-PLACE FAIL-OPEN (#1255, LIVE 08-31 MOVE #2, -$364):
+            # ang 2.0s freshness ceiling sa seam ay humarang sa emergency exit
+            # ng bumabagsak na pangalan (age 3.4s — sa mabilis na pagbagsak,
+            # LAGING lampas 2s ang quote) — ang stand-in pricing ay pumasa na
+            # (#1254) pero dito namatay ang order; ang session cancel cleanup ay
+            # umikot nang 20+ segundo tapos sumuko, iniwan ang 119-share na
+            # posisyon nang walang stop hanggang manu-manong pinutol (-$364 sa
+            # halip na ~-$60 sa unang breach). Ang PROTECTIVE exit ay hindi
+            # pinipigilan ng staleness — ang marketable limit na may haircut
+            # ang price protection nito; gamitin ang emergency stand-in max
+            # age bilang ceiling ng seam para sa stop-class na dahilan.
+            try:
+                if bool(getattr(
+                    settings,
+                    "chili_momentum_exit_stop_class_fail_open_enabled",
+                    True,
+                )):
+                    from .risk_policy import stop_class_exit_reason as _sc2_fn
+
+                    if _sc2_fn(reason) or str(reason or "") in (
+                        "stop", "bailout", "deadman_stop", "operator_flatten",
+                        "kill_switch_flatten",
+                    ):
+                        _place_max_age = max(_place_max_age, float(getattr(
+                            settings,
+                            "chili_momentum_emergency_exit_stand_in_max_age_seconds",
+                            900.0,
+                        ) or 900.0))
+            except Exception:
+                pass
+            if age_seconds <= _place_max_age:
                 return None
             block = {
                 "ok": False,
@@ -13015,7 +13046,7 @@ def _submit_live_market_exit_impl(
                 "deferred": True,
                 "pre_place_blocked": True,
                 "execution_bbo_age_seconds": age_seconds,
-                "execution_bbo_max_age_seconds": exit_execution_bbo_max_age,
+                "execution_bbo_max_age_seconds": _place_max_age,
             }
         # No broker transport occurred, so this must not consume an attempt or
         # impose a retry backoff.  The next pulse may use a newly fetched BBO.
