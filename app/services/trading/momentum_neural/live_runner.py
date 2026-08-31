@@ -8174,7 +8174,7 @@ def _stage_captured_paper_exit_transport_request(
         quote_independent_authority=bool(quote_independent_authority),
         bbo_required=bool(bbo_required),
         bbo_max_age_seconds=str(
-            min(2.0, max(0.0, float(bbo_max_age_seconds)))
+            _captured_exit_bbo_ceiling(exit_reason, bbo_max_age_seconds)
         ),
     )
     retained = le.get(_CAPTURED_PAPER_EXIT_TRANSPORT_MARKER_KEY)
@@ -20230,6 +20230,37 @@ def _recover_entry_order_by_client_id(
     return no
 
 
+def _captured_exit_bbo_ceiling(exit_reason: Any, bbo_max_age_seconds: Any) -> float:
+    """#1259 (audit HOLE 2): ang captured-paper executor ay nagpapatupad muli ng
+    2.0s ceiling sa staged na exit — sa stop-class, ang ceiling ay ang
+    emergency stand-in max age (parehong doktrina ng #1254/#1255/#1258:
+    entries fail closed, exits fail open)."""
+    try:
+        base = min(2.0, max(0.0, float(bbo_max_age_seconds)))
+    except (TypeError, ValueError):
+        base = 2.0
+    try:
+        if not bool(getattr(
+            settings, "chili_momentum_exit_stop_class_fail_open_enabled", True
+        )):
+            return base
+        from .risk_policy import stop_class_exit_reason as _sc
+
+        r = str(exit_reason or "")
+        if _sc(r) or r in (
+            "stop", "bailout", "deadman_stop", "operator_flatten",
+            "kill_switch_flatten",
+        ):
+            return max(base, float(getattr(
+                settings,
+                "chili_momentum_emergency_exit_stand_in_max_age_seconds",
+                900.0,
+            ) or 900.0))
+    except Exception:
+        pass
+    return base
+
+
 def _final_entry_bbo(
     adapter: Any,
     product_id: str,
@@ -26125,10 +26156,18 @@ def build_captured_paper_exit_transport_post_commit_handler(
     ) -> str | None:
         if not request.bbo_required:
             return None
+        _req_max_age = float(request.bbo_max_age_seconds)
+        # #1259: kapag stop-class ang staging (> 2.0s ang ceiling), payagan
+        # ang stand-in sources sa parehong ceiling — ang protective exit ay
+        # hindi namamatay sa kawalan ng perpektong direct quote.
         tick, evidence = _final_entry_bbo(
             adapter,
             request.symbol,
-            max_age_seconds=float(request.bbo_max_age_seconds),
+            max_age_seconds=_req_max_age,
+            allow_stand_in=bool(_req_max_age > 2.0),
+            stand_in_max_age_seconds=(
+                _req_max_age if _req_max_age > 2.0 else None
+            ),
         )
         if tick is None:
             return str(
