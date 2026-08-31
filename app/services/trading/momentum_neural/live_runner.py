@@ -14474,12 +14474,35 @@ def _submit_live_market_exit_impl(
             }
         existing = authority.get("order_request")
         if isinstance(existing, dict) and existing != request:
-            return {
-                "ok": False,
-                "error": "alpaca_emergency_close_request_immutable_mismatch",
-                "deferred": True,
-                "pre_place_blocked": True,
-            }
+            # FROZEN-REQUEST REPLAY (#1257, LIVE 08-31 MOVE#2 -364): MUTUAL
+            # DEADLOCK — ang freshness seam ay humihingi ng kasalukuyang presyo
+            # habang dito ay immutable ang unang na-freeze na request; 16 na
+            # minutong walang-event na block (28154 branch) hanggang manu-
+            # manong pinutol. Ang frozen request MISMO ang idempotency
+            # contract: i-REPLAY ito verbatim — kapag may naunang matagumpay
+            # na POST, ang parehong CID ay magde-dedupe; kapag wala, ang order
+            # ay papasok sa book (hindi na hubad ang posisyon; ang repeg/
+            # escalation machinery ay may TUNAY nang order na hahawakan).
+            if bool(getattr(
+                settings,
+                "chili_momentum_exit_stop_class_fail_open_enabled",
+                True,
+            )):
+                _emit(db, sess, "live_emergency_frozen_request_replayed", {
+                    "frozen_client_order_id": str(
+                        (existing.get("client_order_id") or "")
+                    ),
+                    "frozen_limit_price": existing.get("limit_price"),
+                    "requested_limit_price": request.get("limit_price"),
+                })
+                request = dict(existing)
+            else:
+                return {
+                    "ok": False,
+                    "error": "alpaca_emergency_close_request_immutable_mismatch",
+                    "deferred": True,
+                    "pre_place_blocked": True,
+                }
         close_only_marker, close_only_error = _validated_alpaca_close_only_marker(sess)
         if _alpaca_close_only_marker(sess) is not None:
             if close_only_error is not None or close_only_marker is None:
@@ -28162,6 +28185,34 @@ def tick_live_session(
                         "recorded_at_utc": _utcnow().isoformat(),
                     }
                     _commit_le(sess, le)
+                    # ALARM (#1257): ito ang TANGING walang-event na deferral
+                    # sa buong exit path — ang 16-minutong dilim ng MOVE#2 ay
+                    # dito nabuhay. Rate-limited na event + WARNING kada
+                    # na-block na emergency pulse na may hawak na dami.
+                    try:
+                        _ap_last = le.get("emergency_preplace_alarm_at_utc")
+                        _ap_now = _utcnow()
+                        _ap_due = True
+                        if _ap_last:
+                            _ap_due = (
+                                _ap_now - datetime.fromisoformat(str(_ap_last))
+                            ).total_seconds() >= 30.0
+                        if _ap_due:
+                            le["emergency_preplace_alarm_at_utc"] = (
+                                _ap_now.isoformat()
+                            )
+                            _commit_le(sess, le)
+                            _emit(db, sess, "live_emergency_exit_pre_place_blocked", {
+                                "error": sr.get("error"),
+                                "phase": "prepared",
+                            })
+                            _log.warning(
+                                "[momentum_live] EMERGENCY EXIT BLOCKED %s: %s "
+                                "(may hawak na posisyon; pre-place block)",
+                                sess.symbol, sr.get("error"),
+                            )
+                    except Exception:
+                        pass
                     return False
                 recovered = _exact_emergency_exit_order(
                     adapter,
