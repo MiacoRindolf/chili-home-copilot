@@ -4064,6 +4064,51 @@ def symbol_day_loss_lockout_decision(
     return False, "above_lockout_threshold", threshold
 
 
+def prior_day_rejection_seed(db: Any, symbol: str) -> int:
+    """#1252 — Cross-day rejection memory (Ross 08-31: "popped up and then
+    rejected [Friday], so I don't really trust it").
+
+    Ibinabalik ang panimulang g4 escalation level para sa BAGONG session ng
+    symbol: 1 kapag ang NAKARAANG ET trading day ay may pulang stop-class o
+    bailout na live exit sa pangalang ito (nabigo ang pop), 0 kung wala.
+    Level 1 lamang kailanman — quality bar, hindi lockout (sa fresh session ay
+    walang reclaim reference, kaya ang hinihingi lamang ay structural trigger
+    + positibong tape). Bounded, isang query; fail-open sa 0.
+    """
+    try:
+        sym = str(symbol or "").strip().upper()
+        if not sym or sym.endswith("-USD") or db is None:
+            return 0
+        from datetime import datetime, timedelta
+        from zoneinfo import ZoneInfo
+        from sqlalchemy import text as _sql
+
+        _et = ZoneInfo("America/New_York")
+        today_et = datetime.now(_et).date()
+        # nakaraang ET TRADING day: laktawan ang Sabado/Linggo (ang holiday ay
+        # magbabalik lamang ng walang-laman na araw — fail-open sa 0, tama).
+        prev = today_et - timedelta(days=1)
+        while prev.weekday() >= 5:
+            prev -= timedelta(days=1)
+        # UTC bounds ng ET day (naive UTC ang events.ts)
+        start_utc = datetime.combine(prev, datetime.min.time(), _et).astimezone(
+            ZoneInfo("UTC")
+        ).replace(tzinfo=None)
+        end_utc = start_utc + timedelta(hours=32)
+        row = db.execute(_sql(
+            "SELECT count(*) FROM trading_automation_events e "
+            "JOIN trading_automation_sessions s ON s.id = e.session_id "
+            "WHERE s.symbol = :sym AND e.event_type = 'live_exit_filled' "
+            "AND e.ts >= :a AND e.ts < :b "
+            "AND (e.payload_json->>'pnl_usd')::float < 0 "
+            "AND (e.payload_json->>'reason' LIKE '%stop%' "
+            "     OR e.payload_json->>'reason' LIKE '%bailout%')"
+        ), {"sym": sym, "a": start_utc, "b": end_utc}).scalar()
+        return 1 if int(row or 0) > 0 else 0
+    except Exception:
+        return 0
+
+
 def reentry_escalation_decision(
     *,
     enabled: bool,
