@@ -165,3 +165,22 @@ def test_lane_helper_flag_off_is_empty(tmp_path, monkeypatch):
     monkeypatch.setattr(settings, "chili_momentum_ross_dash_mirror_path", path, raising=False)
     monkeypatch.setattr(settings, "chili_momentum_ross_dash_mirror_enabled", False, raising=False)
     assert _ross_dash_mirror_symbols() == set()
+
+
+def test_mirror_rvol_lookup(tmp_path, monkeypatch):
+    """#1251: rvol rescue — ang pinakamataas na sariwang rvol_daily ng symbol."""
+    import json as _json
+    from app.services.trading.momentum_neural.auto_arm import _ross_dash_mirror_rvol
+
+    p = tmp_path / "m.json"
+    gen = datetime.now(timezone.utc).isoformat()
+    p.write_text(_json.dumps({
+        "generated_at_utc": gen,
+        "hod_alerts": [{"symbol": "AEHL", "rvol_daily": 103.08}],
+        "top_gainers": [{"symbol": "AEHL", "rvol_daily": 146.48},
+                         {"symbol": "MIMI", "rvol_daily": None}],
+    }), encoding="utf-8")
+    monkeypatch.setattr(settings, "chili_momentum_ross_dash_mirror_path", str(p), raising=False)
+    assert _ross_dash_mirror_rvol("AEHL") == 146.48
+    assert _ross_dash_mirror_rvol("MIMI") is None
+    assert _ross_dash_mirror_rvol("WALA") is None

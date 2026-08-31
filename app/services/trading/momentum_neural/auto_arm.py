@@ -4315,6 +4315,56 @@ def _ross_dash_mirror_symbols() -> set[str]:
         return set()
 
 
+def _ross_dash_mirror_rvol(symbol: str) -> float | None:
+    """RVOL evidence mula sa dash mirror (#1251): ang rvol_daily ng HOD/gainer
+    row para sa symbol, o None. Parehong freshness/flag discipline ng
+    _ross_dash_mirror_symbols; fail-open sa None."""
+    try:
+        if not bool(getattr(
+            settings, "chili_momentum_ross_dash_mirror_enabled", True
+        )):
+            return None
+        import json as _json
+        import io as _io
+        from datetime import datetime as _dt, timezone as _tz
+
+        path = str(getattr(
+            settings, "chili_momentum_ross_dash_mirror_path",
+            "D:/CHILI-Docker/chili-data/ross_dash_mirror.json",
+        ) or "")
+        if not path:
+            return None
+        max_age = float(getattr(
+            settings, "chili_momentum_ross_dash_mirror_max_age_s", 900.0
+        ) or 900.0)
+        with _io.open(path, encoding="utf-8") as f:
+            mirror = _json.load(f)
+        gen = _dt.fromisoformat(
+            str(mirror.get("generated_at_utc") or "").replace("Z", "+00:00")
+        )
+        if gen.tzinfo is None:
+            gen = gen.replace(tzinfo=_tz.utc)
+        if not (0 <= (_dt.now(_tz.utc) - gen).total_seconds() <= max_age):
+            return None
+        sym = str(symbol or "").strip().upper()
+        best = None
+        for row in list(mirror.get("hod_alerts") or []) + list(
+            mirror.get("top_gainers") or []
+        ):
+            if str(row.get("symbol") or "").upper() != sym:
+                continue
+            rv = row.get("rvol_daily")
+            try:
+                rv = float(rv) if rv is not None else None
+            except (TypeError, ValueError):
+                rv = None
+            if rv is not None and rv > 0 and (best is None or rv > best):
+                best = rv
+        return best
+    except Exception:
+        return None
+
+
 def _velocity_qualified_symbols(db: Session) -> set[str]:
     """BATCH-ARM VELOCITY UNION (2026-08-29): ang snapshot-only prefilter ay
     bulag sa velocity-admitted na pangalan (#1234 — negatibo ang day change
