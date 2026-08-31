@@ -7877,6 +7877,13 @@ class Settings(BaseSettings):
     # (08-31, LGPS): ang pangalang pumalpak kahapon ay may mas mataas na
     # confirmation bar ngayon — seed g4 level 1 sa bagong session kapag may
     # pulang stop/bailout exit ang symbol sa nakaraang ET trading day.
+    # EXIT STOP-CLASS FAIL-OPEN (#1254, LIVE 08-31 MOVE): ang protective exit
+    # ay hindi naghihintay ng perpektong BBO — stand-in agad sa unang defer,
+    # anumang session. Entries fail closed; exits fail open.
+    chili_momentum_exit_stop_class_fail_open_enabled: bool = Field(
+        default=True,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_EXIT_STOP_CLASS_FAIL_OPEN_ENABLED"),
+    )
     chili_momentum_g4_cross_day_rejection_seed_enabled: bool = Field(
         default=True,
         validation_alias=AliasChoices("CHILI_MOMENTUM_G4_CROSS_DAY_REJECTION_SEED_ENABLED"),

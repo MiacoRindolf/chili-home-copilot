@@ -12717,7 +12717,37 @@ def _submit_live_market_exit_impl(
                     ) != "regular"
                 except Exception:
                     _exit_extended_now = False
-            if _exit_extended_now:
+            # STOP-CLASS FAIL-OPEN (#1254, LIVE 08-31 MOVE): ang deadman handoff
+            # ay nag-freeze sa phase 1 (12:42:40) at ang phase-2 na mga pulse
+            # (:44, :48) ay NAMATAY dito sa BBO defer — ang defer counter ay
+            # nagre-reset kada tagumpay kaya bawat pulse ay nangangailangan
+            # ulit ng 3 defer bago makakuha ng stand-in, at ang cancel ay hindi
+            # kailanman naabot: 18 minutong nakabitin ang exit hanggang manu-
+            # manong pinutol ng operator (+3.90 mula sa naka-lock sana na +19).
+            # Ang PROTECTIVE (stop-class) na exit ay hindi dapat maghintay ng
+            # perpektong BBO: entries fail CLOSED, exits fail OPEN. Kapag
+            # stop-class ang dahilan O nasa intent_frozen na ang handoff,
+            # stand-in AGAD (unang defer, anumang session) — ang haircut
+            # pababa ang nagbabayad ng konserbatismo, hindi ang paghihintay.
+            _exit_stop_class_now = False
+            if bool(getattr(
+                settings, "chili_momentum_exit_stop_class_fail_open_enabled", True
+            )):
+                try:
+                    from .risk_policy import stop_class_exit_reason as _sc_fn
+
+                    _hf = le.get("deadman_released_for_close")
+                    _exit_stop_class_now = bool(
+                        _sc_fn(reason)
+                        or str(reason or "") in ("stop", "bailout", "deadman_stop")
+                        or (
+                            isinstance(_hf, dict)
+                            and _hf.get("phase") == "intent_frozen"
+                        )
+                    )
+                except Exception:
+                    _exit_stop_class_now = False
+            if _exit_extended_now or _exit_stop_class_now:
                 _si_age2 = float(getattr(
                     settings,
                     "chili_momentum_emergency_exit_stand_in_max_age_seconds",

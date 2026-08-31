@@ -46,14 +46,25 @@ def _variant_id(db):
     return int(v.id)
 
 
+def _user_id(db):
+    from app.models.core import User
+
+    u = User(name="xday-test-user")
+    db.add(u)
+    db.flush()
+    return int(u.id)
+
+
 def _seed_session_with_exit(db, sym, *, pnl, reason, ts):
+    uid = _user_id(db)
     sid = db.execute(text(
         "INSERT INTO trading_automation_sessions "
         "(user_id, symbol, mode, state, execution_family, venue, variant_id, "
-        " created_at, updated_at) "
-        "VALUES (1, :s, 'live', 'live_cancelled', 'alpaca_spot', 'alpaca', :v, :t, :t) "
+        " risk_snapshot_json, started_at, created_at, updated_at) "
+        "VALUES (:u, :s, 'live', 'live_cancelled', 'alpaca_spot', 'alpaca', :v, "
+        " '{}'::jsonb, :t, :t, :t) "
         "RETURNING id"
-    ), dict(s=sym, t=ts, v=_variant_id(db))).scalar()
+    ), dict(s=sym, t=ts, v=_variant_id(db), u=uid)).scalar()
     db.execute(text(
         "INSERT INTO trading_automation_events (session_id, ts, event_type, payload_json) "
         "VALUES (:sid, :t, 'live_exit_filled', "
