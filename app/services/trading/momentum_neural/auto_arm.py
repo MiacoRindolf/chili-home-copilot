@@ -2867,7 +2867,7 @@ def _fresh_live_eligible_candidates(
         if ross_universe_symbols is None:
             ross_universe_symbols = _ross_universe_symbols_from_snapshot_rows(
                 _ross_snapshot_rows_by_symbol()
-            ) | _velocity_qualified_symbols(db)
+            ) | _velocity_qualified_symbols(db) | _ross_dash_mirror_symbols()
         if not ross_universe_symbols:
             logger.warning(
                 "[auto_arm] Ross equity universe empty; refusing generic broad-equity fallback"
@@ -4268,6 +4268,53 @@ def _ross_universe_symbols_from_snapshot_rows(rows_by_symbol: dict[str, dict]) -
     return out
 
 
+def _ross_dash_mirror_symbols() -> set[str]:
+    """ROSS DASH MIRROR UNION (#1250, 2026-08-30): ang operator ay may bayad
+    na Warrior Day-Trade-Dash — ang MISMONG mata ni Ross (HOD Momentum na may
+    kanyang strategy labels, Top Gainers, 5 Pillars). Ang browser monitor ang
+    nagsusulat ng JSON mirror file (scripts/ross_dash_mirror_parse.py); dito
+    ito ini-union sa arm prefilter, kapareho ng velocity union — karagdagang
+    MATA lamang: bawat pangalan ay dadaan pa rin sa buong viability/scoring/
+    gates. Freshness-gated sa payload timestamp; fail-open sa set() kapag
+    walang file / luma / patay ang knob — hindi kailanman masisira ang batch
+    pass."""
+    try:
+        if not bool(getattr(
+            settings, "chili_momentum_ross_dash_mirror_enabled", True
+        )):
+            return set()
+        import json as _json
+        import io as _io
+        from datetime import datetime as _dt, timezone as _tz
+
+        path = str(getattr(
+            settings, "chili_momentum_ross_dash_mirror_path",
+            "D:/CHILI-Docker/chili-data/ross_dash_mirror.json",
+        ) or "")
+        if not path:
+            return set()
+        max_age = float(getattr(
+            settings, "chili_momentum_ross_dash_mirror_max_age_s", 900.0
+        ) or 900.0)
+        with _io.open(path, encoding="utf-8") as f:
+            mirror = _json.load(f)
+        gen_raw = str(mirror.get("generated_at_utc") or "")
+        gen = _dt.fromisoformat(gen_raw.replace("Z", "+00:00"))
+        if gen.tzinfo is None:
+            gen = gen.replace(tzinfo=_tz.utc)
+        age = (_dt.now(_tz.utc) - gen).total_seconds()
+        if not (0 <= age <= max_age):
+            return set()
+        return {
+            str(x or "").strip().upper()
+            for x in (mirror.get("symbols") or [])
+            if str(x or "").strip() and "-" not in str(x)
+        }
+    except Exception:
+        logger.debug("[auto_arm] ross-dash-mirror read failed", exc_info=True)
+        return set()
+
+
 def _velocity_qualified_symbols(db: Session) -> set[str]:
     """BATCH-ARM VELOCITY UNION (2026-08-29): ang snapshot-only prefilter ay
     bulag sa velocity-admitted na pangalan (#1234 — negatibo ang day change
@@ -5246,6 +5293,7 @@ def run_auto_arm_pass(
         _ross_universe_symbols = (
             _ross_universe_symbols_from_snapshot_rows(_ross_snapshot_rows)
             | _velocity_qualified_symbols(db)
+            | _ross_dash_mirror_symbols()
         )
         out["ross_snapshot_symbols"] = len(_ross_snapshot_rows)
         out["ross_universe_symbols"] = len(_ross_universe_symbols)

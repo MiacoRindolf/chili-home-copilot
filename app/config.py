@@ -7869,6 +7869,23 @@ class Settings(BaseSettings):
     # trade tick para sa trades-only-watch na pangalan (AREN: 991 block habang
     # 66k live ticks na may 1-sentimong spread ang nakaupo sa tape). Dual-clock
     # na disiplina — bumabagsak nang sarado kapag nahuhuli ang bridge drain.
+    # ROSS DASH MIRROR (#1250, 2026-08-30): file-based na union sa arm
+    # prefilter mula sa bayad na Warrior Day-Trade-Dash ng operator (browser
+    # monitor ang sumusulat ng JSON). Karagdagang MATA lamang — buong gates pa
+    # rin ang dadaanan ng bawat pangalan; fail-open kapag walang/lumang file.
+    chili_momentum_ross_dash_mirror_enabled: bool = Field(
+        default=True,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_ROSS_DASH_MIRROR_ENABLED"),
+    )
+    chili_momentum_ross_dash_mirror_path: str = Field(
+        default="D:/CHILI-Docker/chili-data/ross_dash_mirror.json",
+        validation_alias=AliasChoices("CHILI_MOMENTUM_ROSS_DASH_MIRROR_PATH"),
+    )
+    chili_momentum_ross_dash_mirror_max_age_s: float = Field(
+        default=900.0,
+        ge=30.0,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_ROSS_DASH_MIRROR_MAX_AGE_S"),
+    )
     chili_alpaca_execution_bbo_trade_embedded_enabled: bool = Field(
         default=True,
         validation_alias=AliasChoices("CHILI_ALPACA_EXECUTION_BBO_TRADE_EMBEDDED_ENABLED"),
