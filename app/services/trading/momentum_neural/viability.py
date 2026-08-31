@@ -1028,6 +1028,27 @@ def score_viability_explicit(
                 )
             ):
                 _rvol_a = external.ross_rvol
+                # MIRROR RVOL RESCUE (#1251, 2026-08-31 LIVE incident): AEHL
+                # +91% / 1.31M float / TUNAY na rvol 146 sa Warrior dash — pero
+                # ang provider snapshot rvol ay STALE 1.35, kaya "affirmatively
+                # low" ang basa ng floor at na-veto ang araw na monster habang
+                # kumikita si Ross dito. Ang operator's paid dash mirror
+                # (#1250, freshness-gated 900s) ay may dalang rvol_daily —
+                # kunin ang MAX ng dalawang ebidensya: ang mas mataas na
+                # sariwang read ang totoo (ang stale ay hindi affirmative).
+                try:
+                    from .auto_arm import _ross_dash_mirror_rvol as _mirror_rvol_fn
+
+                    _mrv = _mirror_rvol_fn(str(symbol or "").upper())
+                    if _mrv is not None and (_rvol_a is None or _mrv > _rvol_a):
+                        warnings.append(
+                            f"A-setup rvol rescued by dash mirror: provider "
+                            f"{_rvol_a if _rvol_a is not None else 'none'} -> "
+                            f"mirror {_mrv:g}"
+                        )
+                        _rvol_a = _mrv
+                except Exception:
+                    pass
                 _chg_a = external.ross_change_pct
                 _float_a = external.ross_float_shares
                 _ceil = float(
