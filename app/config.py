@@ -7896,6 +7896,22 @@ class Settings(BaseSettings):
     # sariling tape ay nagpapakitang aktibo ang pangalan, ang datum ay
     # UNKNOWN (None) — hindi mataas, hindi mababa; dumadaan sa umiiral nang
     # missing-rvol na landas (genuine-explosive + risk-bounded sizing).
+    # FAILED-POP MOMENTUM-BREAK EXIT (#1261): doktrina ni Ross 08-31 —
+    # tuloy-tuloy na GREEN 10s candle = hawak; ang unang PULANG bar na
+    # bumabasag sa LOW ng naunang bar = tapos na ang leg. SINUKAT sa 6 tunay
+    # na trade: +448.99 vs aktwal (lower-high +419.63; +L2 filter +356.28 —
+    # ang L2 ay nagpapabagal). DEFAULT OFF hanggang makapasa sa replay A/B
+    # (aral ng smart_hold/depth-guard: huwag mag-enable nang walang A/B).
+    chili_momentum_failed_pop_break_exit_enabled: bool = Field(
+        default=False,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_FAILED_POP_BREAK_EXIT_ENABLED"),
+    )
+    chili_momentum_failed_pop_break_min_green_run: int = Field(
+        default=2,
+        ge=1,
+        le=10,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_FAILED_POP_BREAK_MIN_GREEN_RUN"),
+    )
     chili_momentum_premarket_rvol_stale_guard_enabled: bool = Field(
         default=True,
         validation_alias=AliasChoices("CHILI_MOMENTUM_PREMARKET_RVOL_STALE_GUARD_ENABLED"),
