@@ -4953,8 +4953,34 @@ class Settings(BaseSettings):
     # Reward:risk multiple — the TARGET is set this many x the actual stop distance
     # (Ross-style 2:1 floor; the per-instrument/regime learner can raise it). Fixes
     # the old ~1.3-1.5:1 that sat below Ross's strict 2:1. One documented R:R knob.
+    #
+    # 2.0 -> 2.5 (#1271, 2026-09-01). INTERLEAVED na A/B sa 10 window x 3 arm
+    # (arms magkakasunod KADA window, hindi lahat-ng-arm-A-tapos-lahat-ng-arm-B:
+    # ang baseline ay gumagalaw sa paglipas ng ORAS dahil buhay ang source DB sa
+    # ilalim ng 120-oras na warmup — sinukat, at bitag ito ng unang pagtatangka):
+    #
+    #        RR 2.0 = +160.47   RR 2.5 = +185.21   RR 3.0 = +151.91
+    #
+    # Ang 2.5 ay +24.74 (+15.4%) laban sa 2.0, at ang 3.0 ay MAS MASAMA kaysa
+    # pareho — PEAK ito, hindi monotone. Sinadyang idinagdag ang 3.0 arm bilang
+    # pagsubok sa premise: kung patuloy pang gumaganda ang 3.0, ang trail ang
+    # gumagawa ng trabaho at mali ang buong ideya ng target. Bumagsak ang XPON
+    # +44.66 -> +23.77 sa 3.0 at nawalan ng isang entry, kaya may tunay na optimum.
+    #
+    # WALANG WINDOW ANG NASIRA sa 2.5: 3 ang gumanda (CELU -5.76 -> +17.83,
+    # PMI +32.14 -> +33.16, XPON +44.53 -> +44.66), 7 ang LITERAL na magkapareho
+    # kasama ang dalawang pinakamalaking panalo (SLE +107.81 at CAPR +29.10,
+    # pati ang bilang ng entry/exit/grind/escalation). Puro taas, walang baba.
+    #
+    # ⚠️ TAPAT NA HANGGANAN: 95% ng bentahe ay ISANG window (CELU +23.59 sa
+    # +24.74). Ang PANGANIB ay malawak na nasubukan at zero; ang PAKINABANG ay
+    # makitid ang ebidensya. Ang mekanismo ay nagpapaliwanag nito — ang mas
+    # malayong target ay tumatama LAMANG sa trade na umaabot sa lumang target
+    # tapos ay patuloy pang tumataas, at wala niyon sa 7 sa 10 window.
+    # Sumasang-ayon ang malayang backtest sa sarili nating tape (5 tunay na
+    # trade): 1.5R = -1.67 · 2.0R = +13.62 · 2.5R = +30.86.
     chili_momentum_risk_reward_risk_ratio: float = Field(
-        default=2.0,
+        default=2.5,
         ge=0.0,
         validation_alias=AliasChoices("CHILI_MOMENTUM_RISK_REWARD_RISK_RATIO"),
     )
