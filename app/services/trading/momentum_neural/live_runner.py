@@ -20341,8 +20341,32 @@ def _final_entry_bbo(
                 _age = (_utcnow_aware() - _p.astimezone(timezone.utc)).total_seconds()
                 _why["age_seconds"] = round(float(_age), 3)
                 _why["provider_event_at_utc"] = _p.astimezone(timezone.utc).isoformat()
-                _cap_f = float(_cap) if _cap is not None else float(max_age_seconds)
+                # #1268 (telemetry): humati laban sa cap na TALAGANG NAGPASYA,
+                # hindi sa halagang tinatak ng adapter. Ang meta.max_age_seconds
+                # ay `chili_alpaca_quote_max_age_seconds` (60.0) na nakadikit sa
+                # raw direct meta; ang tunay na binding na cap ay ang IPINASA ng
+                # caller, itinaas sa stand-in bound kapag inalok ang stand-in.
+                # NASUKAT 2026-09-01: 1,733 block ang naglathala ng 60.0 habang
+                # ang tunay na cap ay 10.0/2.0, kaya ang mga TUNAY NA STALE na
+                # quote ay lumitaw bilang "rejected_other" (= sariwa pero
+                # tinanggihan) at itinuro ang diagnosis sa maling direksyon.
+                _decisive_cap = float(max_age_seconds)
+                if allow_stand_in and stand_in_max_age_seconds is not None:
+                    try:
+                        _decisive_cap = max(
+                            _decisive_cap, float(stand_in_max_age_seconds)
+                        )
+                    except (TypeError, ValueError):
+                        pass
+                _cap_f = _decisive_cap
                 _why["max_age_seconds"] = _cap_f
+                if _cap is not None:
+                    # Panatilihin ang halaga ng adapter, may sariling pangalan,
+                    # para hindi mawala ang impormasyon — nagkakaiba lang sila.
+                    try:
+                        _why["adapter_quote_max_age_seconds"] = float(_cap)
+                    except (TypeError, ValueError):
+                        pass
                 _why["unavailable_kind"] = (
                     "stale_beyond_ceiling" if _age > _cap_f else "rejected_other"
                 )
@@ -20409,6 +20433,19 @@ def _final_entry_bbo(
             "iqfeed_l2_provider_at",
             # #1236: ang L1 own-clock tier ay may sariling kontrata rin.
             "iqfeed_q_bid_ask_time_clock",
+            # #1268: ang Tier-2.75 trade-embedded BBO (idinagdag ng #1249,
+            # 2026-08-30) ay KINUKUHA sa ilalim ng sarili nitong 15s kontrata
+            # sa alpaca_spot.py pero nawawala rito, kaya hinuhusgahan ito ng
+            # DIREKTANG cap ng caller. NASUKAT sa prod 2026-09-01 — perpektong
+            # kontrol sa iisang talahanayan ng event:
+            #   iqfeed_trade_embedded / ..._timems_exact -> cap 10.0  (127 blocks)
+            #   iqfeed_l1            / ...bid_ask_time_clock -> cap 15.0  (1 block)
+            # Ang payload mismo ang nag-iimbak ng `_validate_max_age`, kaya ito
+            # ay tuwirang patunay ng sanhi, hindi pagkakaugnay lamang. 150 block
+            # sa 7 araw, 149 ang papasa sa sariling kontrata (age 10.010-16.239s).
+            # ITO ANG PANGATLONG PAG-ULIT ng parehong depekto: naayos para sa L2
+            # noong 2026-08-28 (#1233, 831 block -> 0), muling ipinasok ng #1249.
+            "iqfeed_selected_trade_date_timems_exact",
         )
     ):
         # The stand-in was fetched under its own bound; judge it by the same.
@@ -20453,6 +20490,14 @@ def _final_entry_bbo(
             # #1236: ang L1 own-clock ay cross-source din — pin sa planned.
             else "stand_in_iqfeed_l1"
             if str(raw.get("timestamp_basis") or "") == "iqfeed_q_bid_ask_time_clock"
+            # #1268: ang trade-embedded tier ay CROSS-SOURCE DIN. Nakasuot ito ng
+            # "alpaca_direct" sa 131 block ngayong 2026-09-01 — ang eksaktong
+            # pagkukunwari na inalis ng #1233 sa L2. Kung ang allow-list lamang
+            # ang aayusin, ang mga quote na ito ay AAAMININ habang nagsisinungaling
+            # tungkol sa pinagmulan, at magpe-presyo ang final seam off sa kanila.
+            else "stand_in_iqfeed_trade_embedded"
+            if str(raw.get("timestamp_basis") or "")
+            == "iqfeed_selected_trade_date_timems_exact"
             else "alpaca_direct"
         ),
         "age_seconds": round(age_s, 6),
