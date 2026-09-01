@@ -990,6 +990,100 @@ def pyramid_add_decision(
     return out
 
 
+def failed_pop_momentum_break_exit(
+    *,
+    enabled: bool,
+    bar_closes_opens: list[tuple[float, float]] | None,
+    made_new_high: bool,
+    current_price: float | None,
+    avg_entry: float | None,
+    stop_price: float | None,
+    prior_bar_low: float | None,
+    min_green_run: int,
+) -> tuple[bool, dict]:
+    """PURE (no I/O) — FAILED-POP MOMENTUM-BREAK EXIT (#1261).
+
+    Doktrina ni Ross (binigkas 2026-08-31): *"once you have a stock that's gone
+    up but is not moving higher, usually it's because sellers have come in"* —
+    at ang aktwal niyang tinitingnan ay ang TULOY-TULOY na GREEN na 10-segundong
+    candle. Habang berde ang cadence, hawak; ang UNANG pulang bar pagkatapos ng
+    green run ang nagsasabing tapos na ang leg.
+
+    SINUKAT sa 6 na tunay na trade (08-31/09-01), tatlong kandidato:
+        mekanikal na lower-high      +419.63
+        10s green-run break          +448.99   <- ito
+        green-run break + L2 filter  +356.28   (ang L2 ay NAGPAPABAGAL: ang
+                                                paghihintay ng bid<ask ay
+                                                nagbebenta nang mas mababa)
+    Halimbawa (SSM 09-01): lower-high ay lumabas agad sa 4.01 (+0); ang green
+    break ay humawak sa 4 na green bar at lumabas sa 4.12 (+47.63) laban sa
+    aktwal na −25.98.
+
+    RUNNER PROTECTION: ang lahat ng 6 sa sample ay talo/scratch, kaya may
+    PROFIT GATE — pumuputok lamang kapag HINDI PA lampas sa unang scale rung
+    (failed pop). Ang kumikitang runner ay iniiwan sa trail/scale ladder (ang
+    aral ng static-rung 08-28: ang blangkong rule ay pumapatay ng runner).
+
+    ``bar_closes_opens`` = pinakabago-ang-huli na (close, open) ng 10s bars.
+    Kulang na datos ⇒ (False, {}) — fail-open, hindi kailanman bagong harang.
+    """
+    dbg: dict = {}
+    if not enabled or not made_new_high:
+        return False, dbg
+    if not bar_closes_opens or len(bar_closes_opens) < (min_green_run + 1):
+        return False, dbg
+    try:
+        px = float(current_price) if current_price is not None else None
+        avg = float(avg_entry) if avg_entry is not None else None
+        stop = float(stop_price) if stop_price is not None else None
+    except (TypeError, ValueError):
+        return False, dbg
+    if px is None or avg is None:
+        return False, dbg
+    try:
+        last_c, last_o = float(bar_closes_opens[-1][0]), float(bar_closes_opens[-1][1])
+    except (TypeError, ValueError, IndexError):
+        return False, dbg
+    # Ang HULING bar ay dapat PULA (o flat-pababa) — ang pagbasag ng cadence.
+    if last_c > last_o:
+        return False, dbg
+    # Bilangin ang green run na KAAGAD bago nito.
+    run = 0
+    for c_px, o_px in reversed(bar_closes_opens[:-1]):
+        try:
+            if float(c_px) > float(o_px):
+                run += 1
+            else:
+                break
+        except (TypeError, ValueError):
+            break
+    dbg["green_run"] = run
+    dbg["min_green_run"] = int(min_green_run)
+    if run < int(min_green_run):
+        return False, dbg
+    # STRUCTURE BREAK, HINDI PROFIT GATE (itinama 2026-09-01 matapos mahuli ng
+    # sariling test): ang unang disenyo ay may profit gate ("kapag kumikita,
+    # huwag lumabas") — BALIGTAD iyon. Sa SSM, ang +2.75R sa 4.12 ay tinuring
+    # na "runner" kaya hindi lumabas, tapos umikot pabalik sa stop (−25.98).
+    # Ang tunay na proteksyon ng runner ay HINDI ang pagpigil sa exit kapag
+    # kumikita — kundi ang paghingi ng TUNAY na pagbasag ng istruktura bago
+    # tumawag ng tapos: ang pulang bar ay dapat magsara sa IBABA ng LOW ng
+    # naunang bar. Ang isang pulang bar sa loob ng malakas na run (na hindi
+    # bumabasag ng prior low) ay ingay — hawak pa rin. Ito ang mas malapit sa
+    # 9-EMA trail ni Ross kaysa sa anumang fixed rung.
+    if prior_bar_low is not None:
+        try:
+            _plow = float(prior_bar_low)
+            dbg["prior_bar_low"] = _plow
+            if float(last_c) >= _plow:
+                dbg["skipped"] = "red_bar_did_not_break_prior_low"
+                return False, dbg
+        except (TypeError, ValueError):
+            pass
+    dbg["fire"] = True
+    return True, dbg
+
+
 def pyramid_blend_on_fill(
     *,
     q0: float,
