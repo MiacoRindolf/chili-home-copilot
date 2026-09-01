@@ -32390,6 +32390,14 @@ def tick_live_session(
                     reward_risk=(_dd_rr if (_dd_rr is not None and _dd_rr > 0) else _base_rr),
                     realized_high=(None if (_dd_rr is not None and _dd_rr > 0)
                                    else _float_or_none(le.get("entry_realized_high"))),
+                    # #1264: ang Alpaca lane ay hindi makakapag-partial (ang
+                    # resting deadman ay kumukonsumo ng buong qty_available),
+                    # kaya walang round-number pull-in — huwag i-cap ang BUONG
+                    # trade sa ~1R kung walang runner na maiiwan.
+                    partial_capable=(
+                        normalize_execution_family(sess.execution_family)
+                        not in ALPACA_EXECUTION_FAMILIES
+                    ),
                 )
                 le["position"]["stop_price"] = stop_px
                 le["position"]["target_price"] = target_px
