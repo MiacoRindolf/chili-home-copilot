@@ -405,6 +405,64 @@ def _utcnow_for_bars(sample: Any) -> Any:
     return datetime.now(timezone.utc) if _tz is not None else datetime.utcnow()
 
 
+def bottom_of_range_entry_veto(
+    *,
+    enabled: bool,
+    price: float | None,
+    day_low: float | None,
+    day_high: float | None,
+    min_range_pct: float,
+    pos_floor: float,
+) -> tuple[bool, dict]:
+    """PURE (no I/O) — BOTTOM-OF-RANGE ENTRY VETO (#1262).
+
+    Doktrina ni Ross (binigkas 2026-09-01 07:11 ET, tungkol sa WETO — isang
+    pangalang pinasok natin at natalo): *"popped up yesterday and then sold
+    off. Went red on the day and it's just popping up again off the low.
+    THERE'S NOTHING THERE."*
+
+    SINUKAT sa LAHAT ng 4 na live entry natin (08-31..09-01): ang bawat isa ay
+    pumasok sa ILALIM NA KWARTO ng day range ng pangalan —
+        RDHL 0.23 (−2.05) · GYGY 0.28 (−29.20) ·
+        SSM  0.25 (−25.98) · AUUD 0.21 (−44.01)
+    4/4 talo, kabuuang −101.24. Bumibili tayo malapit sa MABABA ng araw; si
+    Ross ay bumibili malapit sa TAAS (breakout) at tahasang iniiwasan ang
+    bounce mula sa mababa.
+
+    Ang range ay dapat MAKAHULUGAN na bago tumawag ng "ilalim" — kaya kapag
+    ang day range ay mas maliit pa sa ``min_range_pct``, WALANG veto (maagang
+    bahagi ng galaw: ang posisyon sa loob ng maliit na range ay ingay). Kulang
+    na datos ⇒ walang veto (fail-open — hindi kailanman bagong harang sa
+    kulang na ebidensya).
+
+    Ibinabalik ang (veto, debug).
+    """
+    dbg: dict = {}
+    if not enabled:
+        return False, dbg
+    try:
+        px = float(price) if price is not None else None
+        lo = float(day_low) if day_low is not None else None
+        hi = float(day_high) if day_high is not None else None
+    except (TypeError, ValueError):
+        return False, dbg
+    if px is None or lo is None or hi is None or hi <= lo or lo <= 0:
+        return False, dbg
+    range_pct = (hi - lo) / lo * 100.0
+    dbg["day_range_pct"] = round(range_pct, 2)
+    dbg["min_range_pct"] = min_range_pct
+    if range_pct < float(min_range_pct):
+        dbg["skipped"] = "range_not_meaningful_yet"
+        return False, dbg
+    pos = (px - lo) / (hi - lo)
+    dbg["pos_in_range"] = round(pos, 3)
+    dbg["pos_floor"] = pos_floor
+    if pos < float(pos_floor):
+        dbg["veto"] = True
+        return True, dbg
+    return False, dbg
+
+
 def momentum_volume_confirmation(
     df: pd.DataFrame,
     *,
