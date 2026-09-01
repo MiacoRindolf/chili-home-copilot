@@ -19111,6 +19111,75 @@ def _clean_decline_terminal_enabled() -> bool:
         return True
 
 
+_RISK_BLOCK_EVIDENCE_MAX_CHECKS = 4
+_RISK_BLOCK_EVIDENCE_MAX_KEYS = 14
+
+
+def _risk_block_evidence(ev: Any) -> dict[str, Any]:
+    """Hanguin ang DETALYE ng mga check na BUMARA, hindi lamang ang mensahe (#1272).
+
+    NASUKAT 2026-09-01. Ang `live_blocked_by_risk` na payload ay
+    ``{"severity", "errors"}`` LAMANG -- puro string ng mensahe. Ngunit ang
+    `ev` na kakabuo pa lang ay may dalang buong ``checks`` na listahan, at may
+    ``detail`` ang BAWAT check. Itinatapon ito sa emit.
+
+    Ang pinakamalaking halimbawa ngayong araw: **250 harang sa 22 sesyon** na
+    "Alpaca paper watcher resource headroom is unavailable." Ang
+    `risk_evaluator.py:2143-2155` ay nagtatakda ng ``available: False`` sa
+    DALAWANG magkaibang daan --
+
+        (a) tunay ngang punong kapasidad, at
+        (b) SUMABOG ang kalkulasyon (``except Exception`` -> fail-closed, at
+            ang ``error_type`` lamang ang nagsasabi niyon).
+
+    Magkaiba silang problema at magkapareho ang hitsura sa log. Ang
+    ``error_type`` at ang mga numero ng kapasidad ay nasa ``detail`` na
+    kinakalkula na -- kailangan lang itong ipasa.
+
+    Bounded: hanggang 4 na bumarang check, at ang detalye ay pinipiga sa mga
+    scalar (kasama ang ISANG antas ng nested dict) na may takip sa bilang ng
+    susi, para hindi lumobo ang payload sa isang mahabang sesyon.
+    """
+    out: dict[str, Any] = {}
+    try:
+        checks = (ev or {}).get("checks")
+        if not isinstance(checks, list):
+            return out
+
+        def _squeeze(d: Any, depth: int = 0) -> Any:
+            if isinstance(d, (str, int, float, bool)) or d is None:
+                return d
+            if isinstance(d, dict) and depth < 2:
+                kept: dict[str, Any] = {}
+                for k, v in d.items():
+                    if len(kept) >= _RISK_BLOCK_EVIDENCE_MAX_KEYS:
+                        kept["(pinutol)"] = True
+                        break
+                    sv = _squeeze(v, depth + 1)
+                    if sv is not None or v is None:
+                        kept[str(k)] = sv
+                return kept
+            return None
+
+        blocking: dict[str, Any] = {}
+        for c in checks:
+            if not isinstance(c, dict):
+                continue
+            if c.get("ok") or c.get("severity") != "block":
+                continue
+            if len(blocking) >= _RISK_BLOCK_EVIDENCE_MAX_CHECKS:
+                out["blocking_checks_truncated"] = True
+                break
+            name = str(c.get("name") or "(walang pangalan)")
+            blocking[name] = _squeeze(c.get("detail"))
+        if blocking:
+            out["blocking_checks"] = blocking
+            out["blocking_check_names"] = sorted(blocking)
+    except Exception:
+        _log.debug("[momentum_live] risk block evidence failed", exc_info=True)
+    return out
+
+
 def _decline_terminal(
     db: Session,
     sess: TradingAutomationSession,
@@ -29843,11 +29912,16 @@ def tick_live_session(
             "reason": "eligibility_rescore_deferred",
         }
     if not ok_b:
+        # #1272: dalhin ang DETALYE ng bumarang check, hindi lamang ang mensahe.
         _emit(
             db,
             sess,
             "live_blocked_by_risk",
-            {"severity": ev.get("severity"), "errors": ev.get("errors")},
+            {
+                "severity": ev.get("severity"),
+                "errors": ev.get("errors"),
+                **_risk_block_evidence(ev),
+            },
         )
         if sess.state in (STATE_ARMED_PENDING_RUNNER, STATE_QUEUED_LIVE):
             # A freshly-armed session whose ONLY boundary-risk failure is a TRANSIENT
@@ -29870,7 +29944,11 @@ def tick_live_session(
                     db,
                     sess,
                     reason="risk_block",
-                    detail={"severity": ev.get("severity"), "errors": ev.get("errors")},
+                    detail={
+                        "severity": ev.get("severity"),
+                        "errors": ev.get("errors"),
+                        **_risk_block_evidence(ev),
+                    },
                 )
             db.flush()
             return {"ok": True, "blocked": True, "risk_evaluation": ev}
