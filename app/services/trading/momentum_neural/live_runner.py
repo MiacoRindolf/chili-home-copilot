@@ -21694,6 +21694,56 @@ def _micropull_bar_seconds() -> int:
     return max(5, min(30, value))
 
 
+def _failed_pop_break_fires(db, sess, le, *, bid, avg) -> bool:
+    """#1261 — 10s green-run break, bucketed (L8b: bawal ang per-tick frame
+    fetch). Nagsusulat ng debug sa ``le['failed_pop_break_dbg']``. Fail-open
+    sa False sa anumang error/kulang na datos."""
+    try:
+        from .paper_execution import failed_pop_momentum_break_exit
+
+        _bucket = int(_utcnow_aware().timestamp() // 10)
+        if le.get("fpb_bucket") == _bucket:
+            return bool(le.get("fpb_fire"))
+        le["fpb_bucket"] = _bucket
+        le["fpb_fire"] = False
+        pos = le.get("position") if isinstance(le.get("position"), dict) else {}
+        _hwm = _float_or_none(pos.get("high_water_mark"))
+        _avg = _float_or_none(avg)
+        _made_high = bool(_hwm is not None and _avg is not None and _hwm > _avg)
+        if not _made_high:
+            return False
+        _df = _build_micro_bar_df(db, sess.symbol, bar_seconds=10)
+        if _df is None or len(_df) < 4:
+            return False
+        # index -1 ay FORMING; gamitin ang mga kumpletong bar lamang
+        _co = [
+            (float(_df["Close"].iloc[i]), float(_df["Open"].iloc[i]))
+            for i in range(-7, 0)
+            if -len(_df) <= i - 1
+        ]
+        _co = _co[:-1] if len(_co) > 1 else _co
+        if len(_co) < 3:
+            return False
+        _prior_low = float(_df["Low"].iloc[-3])
+        fire, dbg = failed_pop_momentum_break_exit(
+            enabled=True,
+            bar_closes_opens=_co,
+            made_new_high=True,
+            current_price=_float_or_none(bid),
+            avg_entry=_avg,
+            stop_price=_float_or_none(pos.get("stop_price")),
+            prior_bar_low=_prior_low,
+            min_green_run=int(getattr(
+                settings, "chili_momentum_failed_pop_break_min_green_run", 2
+            ) or 2),
+        )
+        le["failed_pop_break_dbg"] = dbg
+        le["fpb_fire"] = bool(fire)
+        return bool(fire)
+    except Exception:
+        return False
+
+
 def _build_micro_bar_df(db, symbol: str, *, bar_seconds: int, lookback_minutes: float = 30.0, meta: dict | None = None):
     """15s MICRO-PULLBACK (2026-06-15, "1m too slow"): build an OHLC micro-bar df
     from the densified tick tape (``momentum_nbbo_spread_tape`` rows for ``symbol``,
@@ -39260,6 +39310,28 @@ def tick_live_session(
                 _sh_fired = False
             if _sh_fired:
                 return {"ok": True, "session_id": sess.id, "state": sess.state}
+        elif (
+            st == STATE_LIVE_ENTERED
+            and bool(getattr(
+                settings, "chili_momentum_failed_pop_break_exit_enabled", False
+            ))
+            and _failed_pop_break_fires(db, sess, le, bid=bid, avg=avg)
+        ):
+            # FAILED-POP MOMENTUM BREAK (#1261). Doktrina ni Ross: habang
+            # tuloy-tuloy ang GREEN na 10s candle, hawak; ang unang PULANG bar
+            # na bumabasag sa LOW ng naunang bar ay nagsasabing tapos na ang
+            # leg. Ang reason ay may `stop` token para awtomatikong saklaw ng
+            # lahat ng stop-class fail-open na exit guards (#1254/#1255/#1258).
+            _emit(db, sess, "live_momentum_break_exit", {
+                **(le.get("failed_pop_break_dbg") or {}),
+                "bid": bid,
+            })
+            le["pending_exit_reason"] = "momentum_break_stop"
+            _commit_le(sess, le)
+            return _submit_live_market_exit(
+                db, sess, adapter, le=le, reason="momentum_break_stop",
+                product_id=product_id, quantity=float(pos.get("quantity") or 0.0),
+            )
         elif (
             st == STATE_LIVE_ENTERED
             and bool(getattr(settings, "chili_momentum_breakout_bailout_enabled", True))
