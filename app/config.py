@@ -7902,6 +7902,26 @@ class Settings(BaseSettings):
     # na trade: +448.99 vs aktwal (lower-high +419.63; +L2 filter +356.28 —
     # ang L2 ay nagpapabagal). DEFAULT OFF hanggang makapasa sa replay A/B
     # (aral ng smart_hold/depth-guard: huwag mag-enable nang walang A/B).
+    # BOTTOM-OF-RANGE ENTRY VETO (#1262): doktrina ni Ross 09-01 07:11 ET
+    # ("popping up again off the low — THERE'S NOTHING THERE"). SINUKAT: 4/4
+    # ng live entries natin (08-31..09-01) ay nasa ILALIM NA KWARTO ng day
+    # range, lahat talo, -101.24 kabuuan. Day hi/lo ay mula sa SARILING tape.
+    # DEFAULT OFF hanggang makapasa sa replay A/B.
+    chili_momentum_bottom_of_range_veto_enabled: bool = Field(
+        default=False,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_BOTTOM_OF_RANGE_VETO_ENABLED"),
+    )
+    chili_momentum_bottom_of_range_pos_floor: float = Field(
+        default=0.35,
+        ge=0.0,
+        le=1.0,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_BOTTOM_OF_RANGE_POS_FLOOR"),
+    )
+    chili_momentum_bottom_of_range_min_range_pct: float = Field(
+        default=8.0,
+        ge=0.0,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_BOTTOM_OF_RANGE_MIN_RANGE_PCT"),
+    )
     chili_momentum_failed_pop_break_exit_enabled: bool = Field(
         default=False,
         validation_alias=AliasChoices("CHILI_MOMENTUM_FAILED_POP_BREAK_EXIT_ENABLED"),

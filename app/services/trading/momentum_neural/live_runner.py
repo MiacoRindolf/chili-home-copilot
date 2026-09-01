@@ -31299,6 +31299,66 @@ def tick_live_session(
                                 "chase_cap_r": _cc_cap,
                                 "prior_exit_reason": _cc_prior.get("exit_reason"),
                             })
+        # BOTTOM-OF-RANGE ENTRY VETO (#1262). Doktrina ni Ross 09-01 07:11 ET
+        # tungkol sa WETO — isang pangalang pinasok natin at natalo: "popped up
+        # yesterday and then sold off. Went red on the day and it's just
+        # popping up again off the low. THERE'S NOTHING THERE."
+        # SINUKAT: LAHAT ng 4 na live entry natin (08-31..09-01) ay pumasok sa
+        # ILALIM NA KWARTO ng day range — RDHL 0.23 (-2.05), GYGY 0.28
+        # (-29.20), SSM 0.25 (-25.98), AUUD 0.21 (-44.01). 4/4 talo, -101.24.
+        # Ang day hi/lo ay galing sa SARILING TAPE (ang snapshot day.h/l ay
+        # kasama sa premarket-blind na day.* fields — tingnan ang #1260).
+        # RISK-REDUCING ONLY: makakapag-VETO lamang, hindi makakapagpahintulot.
+        if (
+            _trigger_ok
+            and bool(getattr(
+                settings, "chili_momentum_bottom_of_range_veto_enabled", False
+            ))
+            and not str(sess.symbol or "").upper().endswith("-USD")
+        ):
+            try:
+                from .entry_gates import bottom_of_range_entry_veto as _bor_fn
+                from sqlalchemy import text as _bor_sql
+
+                _bor_bucket = int(_utcnow_aware().timestamp() // 15)
+                if le.get("bor_bucket") != _bor_bucket:
+                    le["bor_bucket"] = _bor_bucket
+                    _bor_start = _utcnow().replace(
+                        hour=8, minute=0, second=0, microsecond=0
+                    )
+                    if _utcnow() < _bor_start:
+                        _bor_start -= timedelta(days=1)
+                    _bor_row = db.execute(_bor_sql(
+                        "SELECT min(price), max(price) FROM iqfeed_trade_ticks "
+                        "WHERE symbol = :s AND observed_at >= :a AND observed_at <= :b"
+                    ), {"s": str(sess.symbol or "").upper(),
+                        "a": _bor_start, "b": _utcnow()}).fetchone()
+                    le["bor_lo"] = _float_or_none(_bor_row[0]) if _bor_row else None
+                    le["bor_hi"] = _float_or_none(_bor_row[1]) if _bor_row else None
+                _bor_veto, _bor_dbg = _bor_fn(
+                    enabled=True,
+                    price=_float_or_none(
+                        getattr(tick, "ask", None) or getattr(tick, "mid", None)
+                    ) if tick is not None else None,
+                    day_low=le.get("bor_lo"),
+                    day_high=le.get("bor_hi"),
+                    min_range_pct=float(getattr(
+                        settings, "chili_momentum_bottom_of_range_min_range_pct", 8.0
+                    ) or 8.0),
+                    pos_floor=float(getattr(
+                        settings, "chili_momentum_bottom_of_range_pos_floor", 0.35
+                    ) or 0.35),
+                )
+                if _bor_veto:
+                    _bor_prev = _trigger_reason
+                    _trigger_ok = False
+                    _trigger_reason = "bottom_of_range_wait"
+                    _emit(db, sess, "live_entry_bottom_of_range_veto", {
+                        "blocked_trigger": _bor_prev, **_bor_dbg,
+                    })
+            except Exception:
+                pass
+
         # HVM101 (B): BID-PROP / SPREAD-TIGHTENING CONFIRMER — confirm a fired break
         # only when, over the last few L1 samples, the best-bid is non-decreasing AND
         # the spread is at/below its short trailing median (genuine backing). Equity/RH
