@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from typing import TYPE_CHECKING, Any
 
 from sqlalchemy import desc
@@ -61,6 +61,9 @@ class ViabilitySettingsProjection:
     chili_momentum_explosive_prequal_bar_ref: Any
     chili_momentum_explosive_prequal_margin: Any
     chili_momentum_paper_setup_quality_gate_enabled: Any
+    chili_momentum_premarket_rvol_stale_guard_enabled: Any = True
+    chili_momentum_premarket_rvol_tape_window_s: Any = 600.0
+    chili_momentum_premarket_rvol_tape_min_shares: Any = 25_000.0
 
     @classmethod
     def from_runtime(cls, source: Any) -> "ViabilitySettingsProjection":
@@ -73,6 +76,9 @@ class ViabilitySettingsProjection:
             "chili_momentum_a_setup_float_rvol_exemption_mult": 2.0,
             "chili_momentum_a_setup_float_hard_max_shares": 50_000_000.0,
             "chili_momentum_explosive_rvol_floor": 3.0,
+            "chili_momentum_premarket_rvol_stale_guard_enabled": True,
+            "chili_momentum_premarket_rvol_tape_window_s": 600.0,
+            "chili_momentum_premarket_rvol_tape_min_shares": 25_000.0,
             "chili_momentum_a_setup_quality_floor_change_pct_min": 10.0,
             "chili_momentum_exclude_leveraged_etfs": True,
             "chili_momentum_exclude_fund_structures_enabled": True,
@@ -351,6 +357,63 @@ def _resolve_viability_external_inputs(
         except (TypeError, ValueError, AttributeError, ImportError):
             rvol = change = float_shares = squeeze_rank = None
             below_floor = False
+
+    # PREMARKET RVOL BLINDNESS (#1260, SINUKAT 2026-09-01 10:20Z): ang provider
+    # snapshot ay nagbibigay ng `day.v = 0` para sa BAWAT pangalan sa
+    # premarket (napatunayan sa LABT/AEHL/FLYE/WETO nang sabay) — at ang rvol
+    # ay today_shares / prevDay.v, kaya ang buong premarket ay may rvol na
+    # zero-o-halos-zero. Sa A-setup floor, ang MALIIT-PERO-HINDI-ZERO na basa
+    # (LABT 0.064, AEHL 1.35 kahapon) ay binibilang na "affirmatively low" at
+    # HARD REJECT — samantalang ang totoo ay 350 at 146. Iyon ang pumatay sa
+    # dalawang tunay na A-setup sa dalawang magkasunod na araw.
+    #
+    # ANG HUKOM AY ANG SARILING TAPE: kung ang pangalan ay AKTIBONG nagta-trade
+    # sa iqfeed_trade_ticks natin sa nakaraang ilang minuto, ang mababang
+    # provider rvol ay STALE-FIELD, hindi ebidensya ng katahimikan — kaya ito
+    # ay ginagawang UNKNOWN (None), na dumadaan sa umiiral nang
+    # missing-rvol na landas (genuine-explosive + RISK-BOUNDED sizing), hindi
+    # sa isang pekeng mataas na numero. Hindi kailanman NAGTATAAS ng rvol;
+    # nag-aalis lamang ng maling "affirmative low". Equity-only; fail-open
+    # (anumang error/db=None ⇒ dating gawi).
+    try:
+        if (
+            rvol is not None
+            and db is not None
+            and float(rvol) < float(getattr(
+                settings_projection, "chili_momentum_explosive_rvol_floor", 3.0
+            ) or 3.0)
+            and "-USD" not in str(symbol or "").upper()
+            and bool(getattr(
+                settings_projection,
+                "chili_momentum_premarket_rvol_stale_guard_enabled",
+                True,
+            ))
+        ):
+            from sqlalchemy import text as _sql_text
+
+            _win_s = float(getattr(
+                settings_projection,
+                "chili_momentum_premarket_rvol_tape_window_s",
+                600.0,
+            ) or 600.0)
+            _min_sh = float(getattr(
+                settings_projection,
+                "chili_momentum_premarket_rvol_tape_min_shares",
+                25000.0,
+            ) or 25000.0)
+            _as_of = decision_as_of or datetime.now(timezone.utc).replace(tzinfo=None)
+            _own = db.execute(_sql_text(
+                "SELECT coalesce(sum(size), 0) FROM iqfeed_trade_ticks "
+                "WHERE symbol = :s AND observed_at > :a AND observed_at <= :b"
+            ), {
+                "s": str(symbol or "").strip().upper(),
+                "a": _as_of - timedelta(seconds=_win_s),
+                "b": _as_of,
+            }).scalar()
+            if _own is not None and float(_own) >= _min_sh:
+                rvol = None
+    except Exception:
+        pass
 
     ross_quality_tilt = 0.0
     try:
