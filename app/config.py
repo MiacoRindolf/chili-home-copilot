@@ -7888,6 +7888,28 @@ class Settings(BaseSettings):
         default=True,
         validation_alias=AliasChoices("CHILI_MOMENTUM_G4_CROSS_DAY_REJECTION_SEED_ENABLED"),
     )
+    # PREMARKET RVOL STALE GUARD (#1260, sinukat 2026-09-01): ang provider
+    # snapshot ay `day.v = 0` para sa LAHAT ng pangalan sa premarket, kaya ang
+    # rvol (today/prevDay) ay zero-o-halos-zero — at ang A-setup floor ay
+    # nagbibilang niyan na "affirmatively low" = hard reject (LABT 0.064 vs
+    # totoong 350; AEHL 1.35 vs 146). Kapag mababa ang provider rvol PERO ang
+    # sariling tape ay nagpapakitang aktibo ang pangalan, ang datum ay
+    # UNKNOWN (None) — hindi mataas, hindi mababa; dumadaan sa umiiral nang
+    # missing-rvol na landas (genuine-explosive + risk-bounded sizing).
+    chili_momentum_premarket_rvol_stale_guard_enabled: bool = Field(
+        default=True,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_PREMARKET_RVOL_STALE_GUARD_ENABLED"),
+    )
+    chili_momentum_premarket_rvol_tape_window_s: float = Field(
+        default=600.0,
+        ge=60.0,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_PREMARKET_RVOL_TAPE_WINDOW_S"),
+    )
+    chili_momentum_premarket_rvol_tape_min_shares: float = Field(
+        default=25000.0,
+        ge=0.0,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_PREMARKET_RVOL_TAPE_MIN_SHARES"),
+    )
     chili_momentum_ross_dash_mirror_enabled: bool = Field(
         default=True,
         validation_alias=AliasChoices("CHILI_MOMENTUM_ROSS_DASH_MIRROR_ENABLED"),
