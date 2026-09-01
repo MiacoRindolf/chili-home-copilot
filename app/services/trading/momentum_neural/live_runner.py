@@ -20898,6 +20898,150 @@ _HELD_LIVE_STATES = frozenset(
 )
 
 
+_NO_BBO_HISTOGRAM_MAX_KEYS = 12
+
+
+def _no_bbo_run_observe(le: dict, *, quote_reason: str, snapshot: dict | None) -> None:
+    """Itala ang ISANG quoteless na tick sa kasalukuyang sunud-sunod na takbo (#1269).
+
+    Ang debounce ay nangangailangan ng N magkakasunod na quoteless na tick bago
+    mag-terminal, pero ang huling tick LAMANG ang dating naiiwan sa payload. Ang
+    tanong na hindi nito kayang sagutin ay ang MAHALAGA: sa loob ng ~30 segundong
+    tahimik ang pangalan, ano ang sinabi ng BAWAT tier, at gaano katagal talaga?
+    Isang bounded na histogram ang sagot -- hindi isang listahan na lumalaki nang
+    walang hangganan sa isang sesyong tumatagal ng oras.
+    """
+    try:
+        hist = le.get("no_bbo_reason_counts")
+        if not isinstance(hist, dict):
+            hist = {}
+        kinds = le.get("no_bbo_kind_counts")
+        if not isinstance(kinds, dict):
+            kinds = {}
+        srcs = le.get("no_bbo_source_counts")
+        if not isinstance(srcs, dict):
+            srcs = {}
+
+        def _bump(d: dict, key) -> None:
+            k = str(key or "").strip() or "-"
+            if k not in d and len(d) >= _NO_BBO_HISTOGRAM_MAX_KEYS:
+                k = "(iba pa)"
+            d[k] = int(d.get(k) or 0) + 1
+
+        _bump(hist, quote_reason)
+        if isinstance(snapshot, dict):
+            _bump(kinds, snapshot.get("unavailable_kind"))
+            _bump(srcs, snapshot.get("source"))
+        else:
+            # Ang landas na WALANG snapshot -- ito ang tunay na hindi
+            # maiuugnay na klase. 466/466 noong 2026-08-25, 12 noong 08-26,
+            # at ZERO mula 08-27 (naibalik ng #1177 ang pre-entry snapshot).
+            # Kung muli itong lilitaw, may nabalik na regresyon.
+            _bump(kinds, "evidence_absent")
+            _bump(srcs, "evidence_absent")
+
+        le["no_bbo_reason_counts"] = hist
+        le["no_bbo_kind_counts"] = kinds
+        le["no_bbo_source_counts"] = srcs
+        if not le.get("no_bbo_first_ts_utc"):
+            le["no_bbo_first_ts_utc"] = _utcnow_aware().isoformat()
+    except Exception:
+        _log.debug("[momentum_live] no_bbo run observe failed", exc_info=True)
+
+
+def _no_bbo_run_reset(le: dict) -> None:
+    """Kalimutan ang takbo. Ang "persistent" ay SUNUD-SUNOD, hindi kabuuan."""
+    for k in (
+        "no_bbo_consecutive_ticks", "no_bbo_reason_counts",
+        "no_bbo_kind_counts", "no_bbo_source_counts", "no_bbo_first_ts_utc",
+    ):
+        le.pop(k, None)
+
+
+def _no_bbo_decline_detail(
+    le: dict,
+    sess,
+    *,
+    quote_reason: str,
+    snapshot: dict | None,
+    seen: int,
+    need: int,
+    execution_family,
+    held_states,
+) -> dict:
+    """Ang EBIDENSYA na dapat sanang dala ng terminal decline mula pa noon (#1269).
+
+    ⚠️ NASUKAT 2026-09-01, at ito ang buong dahilan ng pagbabagong ito. Sa 1,518
+    na sesyong nag-terminal bilang `live_declined:no_bbo` mula 2026-08-25:
+
+        709  ang huling block ay execution_bbo_unavailable / stale_beyond_ceiling
+        478  tunay ngang walang ebidensya  -- LAHAT 08-25/08-26 (bago ang #1177)
+        234  execution_bbo_unavailable / no_provider_timestamp
+         58  execution_bbo_unavailable / rejected_other
+         39  execution_bbo_stale mula sa iqfeed_l2
+
+    **1,040 sa 1,518 (68.5%) ay may TUMPAK NANG dahilan** na itinapon ng
+    hard-coded na `reason="no_bbo"` sa terminal seam. Kada araw: 08-25 = 466/466
+    na walang ebidensya, 08-26 = 12/296, at **08-27 pasulong = 0**. Ang
+    "misteryosong pinakamalaking bucket" ay hindi kailanman naging misteryo --
+    isa itong depekto sa PAGLA-LABEL. Ang isang `GROUP BY reason` sa
+    live_declined ay nagsasabi ng tatlong magkakaibang bagay bilang iisa, at
+    ipinadala nito ang pagsusuri sa maling direksyon nang anim na araw.
+
+    Pinapanatili ang `decline_class="no_bbo"` para hindi masira ang anumang
+    kasaysayan o consumer na nagbibilang ayon sa klase; ang `reason` ang
+    nagsasabi na ngayon ng KATOTOHANAN.
+    """
+    detail: dict = {
+        "decline_class": "no_bbo",
+        "quote_reason": str(quote_reason or ""),
+        "consecutive_ticks": int(seen),
+        "required_ticks": int(need),
+        "execution_family": str(execution_family or ""),
+        "session_state": str(getattr(sess, "state", "") or ""),
+        "phase": (
+            "held" if getattr(sess, "state", None) in held_states else "pre_entry"
+        ),
+        "evidence_present": bool(isinstance(snapshot, dict)),
+    }
+    try:
+        first = le.get("no_bbo_first_ts_utc")
+        if isinstance(first, str) and first:
+            detail["first_quoteless_at_utc"] = first
+            try:
+                _f = datetime.fromisoformat(first)
+                if _f.tzinfo is None:
+                    _f = _f.replace(tzinfo=timezone.utc)
+                detail["quoteless_span_seconds"] = round(
+                    (_utcnow_aware() - _f).total_seconds(), 3
+                )
+            except (TypeError, ValueError):
+                pass
+        for key, src in (
+            ("reason_histogram", "no_bbo_reason_counts"),
+            ("unavailable_kind_histogram", "no_bbo_kind_counts"),
+            ("quote_source_histogram", "no_bbo_source_counts"),
+        ):
+            _h = le.get(src)
+            if isinstance(_h, dict) and _h:
+                detail[key] = dict(_h)
+    except Exception:
+        _log.debug("[momentum_live] no_bbo detail rollup failed", exc_info=True)
+
+    if isinstance(snapshot, dict):
+        # Ang HULING snapshot nang buo-buo sa mga field na desisyon-grado. Hindi
+        # ang buong dict: ang capture sha at tape row id ay hindi nagsasabi kung
+        # BAKIT tahimik ang pangalan.
+        for k in (
+            "unavailable_kind", "source", "age_seconds", "max_age_seconds",
+            "adapter_quote_max_age_seconds", "provider_event_at_utc",
+            "timestamp_basis", "quote_authority", "spread_bps", "feed",
+        ):
+            if k in snapshot and snapshot.get(k) is not None:
+                detail[f"last_{k}"] = snapshot.get(k)
+    return detail
+
+
 def _live_tick_bbo(
     adapter: Any,
     product_id: str,
@@ -29392,9 +29536,33 @@ def tick_live_session(
                 _nb_need = 3
             _nb_seen = int(le.get("no_bbo_consecutive_ticks") or 0) + 1
             le["no_bbo_consecutive_ticks"] = _nb_seen
+            # #1269: itala ang BAWAT tick ng takbo, hindi ang huli lamang.
+            _no_bbo_run_observe(
+                le, quote_reason=_quote_reason, snapshot=_held_execution_bbo,
+            )
             _commit_le(sess, le)
             if _nb_seen >= max(1, _nb_need):
-                _decline_terminal(db, sess, reason="no_bbo")
+                _nb_detail = _no_bbo_decline_detail(
+                    le, sess,
+                    quote_reason=_quote_reason,
+                    snapshot=_held_execution_bbo,
+                    seen=_nb_seen,
+                    need=max(1, _nb_need),
+                    execution_family=ef,
+                    held_states=_HELD_LIVE_STATES,
+                )
+                # #1269: ang `reason` ay nagsasabi na ng KATOTOHANAN. Ang
+                # `decline_class` ang nagdadala ng lumang pangalan para
+                # manatiling maihahambing ang kasaysayan. Walang consumer na
+                # sumasala ayon sa string na ito (ang live_replay_audit.py:263
+                # ay BUMIBILANG lamang ng event), kaya ligtas ang paglilinaw --
+                # at kung hindi ito lilinawin, ang 68.5% ng bucket na ito ay
+                # patuloy na magsisinungaling tungkol sa sarili nito.
+                _decline_terminal(
+                    db, sess,
+                    reason=str(_quote_reason or "no_bbo"),
+                    detail=_nb_detail,
+                )
         db.flush()
         return {
             "ok": True,
@@ -29405,8 +29573,10 @@ def tick_live_session(
         }
     if le.get("no_bbo_consecutive_ticks"):
         # May quote na ulit — ang debounce counter ay nagre-reset (ang
-        # "persistent" ay sunud-sunod, hindi kabuuang bilang).
-        le.pop("no_bbo_consecutive_ticks", None)
+        # "persistent" ay sunud-sunod, hindi kabuuang bilang). #1269: ang
+        # histogram ng takbo ay nagre-reset KASAMA nito, kung hindi ay
+        # magdadala ang susunod na takbo ng ebidensya ng nakaraang takbo.
+        _no_bbo_run_reset(le)
         _commit_le(sess, le)
 
     # Adaptive spread tolerance (no magic 12 bps): the BBO spread is a round-trip
