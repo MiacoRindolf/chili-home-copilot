@@ -303,6 +303,7 @@ def stop_target_prices(
     target_atr_mult: float = 0.90,  # legacy; superseded by reward_risk below
     reward_risk: float | None = None,
     realized_high: float | None = None,
+    partial_capable: bool = True,
 ) -> tuple[float, float]:
     """ATR-scaled STOP + a reward:risk-anchored TARGET (Ross-style, >= 2:1).
 
@@ -337,7 +338,23 @@ def stop_target_prices(
         # one sits between 1R and the R:R target — Ross sells half into the level where
         # sellers stack rather than waiting for a far fixed R:R that trails back. No-op
         # (rr_target) when no round number qualifies; the runner trails from the partial.
-        target = round_number_first_scale_target(entry, stop, rr_target, side_long=True)
+        #
+        # ⚠️ PARTIAL-CAPABLE LAMANG (#1264, sinukat 2026-09-01). Ang pull-in ay
+        # tama para sa PARTIAL — "benta ng kalahati sa level kung saan
+        # nagsisiksik ang sellers, hawak ang runner". Pero sa lane na HINDI
+        # makakapag-partial (Alpaca: ang resting deadman stop ay kumukonsumo ng
+        # buong qty_available, kaya ang "partial" ay nagiging BUONG-posisyong
+        # flatten — live_runner.py:43676), ang pull-in ay nagka-cap sa BUONG
+        # trade sa ~1R. SSM 09-01: entry 4.01, stop 3.9725 (R=0.0375),
+        # rr_target 4.085 (2R) — hinila sa 4.05 = 1.07R. Ang backtest sa
+        # sariling tape (5 trade): 1.5R = -1.67 · 2.0R = +13.62 · 2.5R = +30.86.
+        # Kapag walang runner na maiiwan, ang malapit na target ay puro bawas.
+        if partial_capable:
+            target = round_number_first_scale_target(
+                entry, stop, rr_target, side_long=True
+            )
+        else:
+            target = rr_target
     else:
         stop = entry * (1.0 + max(0.003, atr_pct * float(stop_atr_mult)))
         target = entry - rr * (stop - entry)
