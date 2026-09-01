@@ -31877,11 +31877,46 @@ def tick_live_session(
                 })
                 _commit_le(sess, le)
             if not _drive_released:
-                _emit(db, sess, "live_blocked_by_risk", {
+                # #1270: DALHIN ANG EBIDENSYA NG DRIVE-RELEASE SA HARANG.
+                #
+                # NASUKAT 2026-09-01. Ang halt_resume_dip trigger -- ang tanging
+                # ibang sanctioned na post-resume na entry -- ay tumatanggi nang
+                # `resume_dip_forming` sa **1,387 sa 1,549 (89.5%)** na
+                # ebalwasyon sa 102 sesyon, at ito ay ISTRUKTURAL:
+                # `entry_gates.py:12101` ay nagbabalik ng "forming" kapag
+                # `ref_pos >= len(post) - 1`, ibig sabihin habang ang
+                # post-resume na HIGH ay siya pa ring HULING bar. Sa isang
+                # straight-up na resume ay hindi ito kailanman puputok --
+                # itinala mismo ng #1245: "ang tanging escape
+                # (halt_resume_dip_ok) ay imposible sa straight-up resume".
+                #
+                # Kaya ANG DRIVE-RELEASE NA ITO ang NAG-IISANG landas papasok sa
+                # isang one-directional na resume -- ang mismong hugis ng XPON
+                # (+17% sa 69s) at ng GPRO reopening (10.6M share). At ito ay
+                # nailunsad lamang noong 2026-08-29 (d54e3603c), kaya sa buong
+                # kasaysayan ay TATLONG PAGKAKATAON pa lang ito nabigyan.
+                #
+                # Sa tatlong sample, ang payload ay hindi nagsasabi kung BAKIT
+                # ito humawak: walang back_buy_share, walang verdict, walang
+                # tanda kung nabasa man lang ang tape. Ang pagkakaiba ng
+                # "seller-dominado" (tama ang hawak) at "walang nabasang tape"
+                # (sira ang feed) ay hindi masasagot -- at iyon mismo ang
+                # tanong. Purong telemetry; walang desisyon na nagbabago.
+                _cd_payload = {
                     "reason": "halt_resume_cooldown",
                     "halt_resumed_at_utc": le.get("halt_resumed_at_utc"),
                     "cooldown_seconds": _halt_resume_cooldown_seconds(),
-                })
+                    "drive_release_enabled": bool(_drv_enabled),
+                    "drive_release_verdict": str(_drv_verdict),
+                    "back_buy_share": _drv_share,
+                    "signed_tape_accel": _drv_accel,
+                    # Ang pagkakaiba ng None at 0.0 ang buong punto: ang None ay
+                    # "walang nabasang tape" (sirang feed / walang print sa
+                    # window), ang 0.0 ay "nabasa at puro seller".
+                    "tape_read": _drv_share is not None,
+                    "trigger_reason": str(_trigger_reason or ""),
+                }
+                _emit(db, sess, "live_blocked_by_risk", _cd_payload)
                 db.flush()
                 return {"ok": True, "blocked": True, "reason": "halt_resume_cooldown"}
         if _score_ok and _trigger_ok and _mkt_open:
