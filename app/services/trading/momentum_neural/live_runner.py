@@ -12734,12 +12734,9 @@ def _submit_live_market_exit_impl(
                 settings, "chili_momentum_exit_stop_class_fail_open_enabled", True
             )):
                 try:
-                    from .risk_policy import stop_class_exit_reason as _sc_fn
-
                     _hf = le.get("deadman_released_for_close")
                     _exit_stop_class_now = bool(
-                        _sc_fn(reason)
-                        or str(reason or "") in ("stop", "bailout", "deadman_stop")
+                        _exit_reason_fails_open(reason)
                         or (
                             isinstance(_hf, dict)
                             and _hf.get("phase") == "intent_frozen"
@@ -13025,12 +13022,7 @@ def _submit_live_market_exit_impl(
                     "chili_momentum_exit_stop_class_fail_open_enabled",
                     True,
                 )):
-                    from .risk_policy import stop_class_exit_reason as _sc2_fn
-
-                    if _sc2_fn(reason) or str(reason or "") in (
-                        "stop", "bailout", "deadman_stop", "operator_flatten",
-                        "kill_switch_flatten",
-                    ):
+                    if _exit_reason_fails_open(reason):
                         _place_max_age = max(_place_max_age, float(getattr(
                             settings,
                             "chili_momentum_emergency_exit_stand_in_max_age_seconds",
@@ -13651,15 +13643,7 @@ def _submit_live_market_exit_impl(
                     "chili_momentum_exit_stop_class_fail_open_enabled",
                     True,
                 )):
-                    from .risk_policy import stop_class_exit_reason as _lit_sc
-
-                    _lit_stop_class = bool(
-                        _lit_sc(reason)
-                        or str(reason or "") in (
-                            "stop", "bailout", "deadman_stop",
-                            "operator_flatten", "kill_switch_flatten",
-                        )
-                    )
+                    _lit_stop_class = _exit_reason_fails_open(reason)
             except Exception:
                 _lit_stop_class = False
             if _lit_stop_class:
@@ -20244,13 +20228,7 @@ def _captured_exit_bbo_ceiling(exit_reason: Any, bbo_max_age_seconds: Any) -> fl
             settings, "chili_momentum_exit_stop_class_fail_open_enabled", True
         )):
             return base
-        from .risk_policy import stop_class_exit_reason as _sc
-
-        r = str(exit_reason or "")
-        if _sc(r) or r in (
-            "stop", "bailout", "deadman_stop", "operator_flatten",
-            "kill_switch_flatten",
-        ):
+        if _exit_reason_fails_open(exit_reason):
             return max(base, float(getattr(
                 settings,
                 "chili_momentum_emergency_exit_stand_in_max_age_seconds",
@@ -20259,6 +20237,39 @@ def _captured_exit_bbo_ceiling(exit_reason: Any, bbo_max_age_seconds: Any) -> fl
     except Exception:
         pass
     return base
+
+
+# EXIT REASONS NA HINDI DAPAT MAHARANG NG FRESHNESS SEAMS (#1263).
+# Ang #1254/#1255/#1258/#1259 ay nagbukas ng landas para sa mga exit na
+# PUMUPUTOL NG TALO (stop-class) — pero ang mga exit na KUMUKUHA NG TUBO
+# (`target`, `scale_out*`, `momentum_break*`) ay naiwang nakakulong sa 2.0s
+# ceiling. SINUKAT (SSM 2026-09-01, session 19315): 31 sunod-sunod na
+# `live_exit_deferred_final_bbo` na reason=target; ang pinakamaliit na
+# nasukat na age ay 2.165s laban sa 2.0 ceiling — KULANG NG 165 MILLISECONDS.
+# Sa 7 araw: 77 target-deferrals, at `live_partial_exit_filled` = 0 —
+# WALANG kahit isang share na naibenta sa itaas ng entry ng anumang partial
+# path. Ang exit na kumukuha ng tubo ay may PAREHONG karapatan sa stand-in
+# pricing gaya ng exit na pumuputol ng talo: pareho silang naglalabas ng
+# panganib; ang haircut ang nagbabayad ng konserbatismo, hindi ang paghihintay.
+_FRESHNESS_FAIL_OPEN_EXIT_REASONS = frozenset({
+    # protective (dating #1254/#1255)
+    "stop", "bailout", "deadman_stop", "operator_flatten", "kill_switch_flatten",
+    # profit-taking (bago sa #1263)
+    "target", "scale_out_target", "scale_out_limit", "momentum_break_stop",
+    "trail_stop", "grind_trail_stop",
+})
+
+
+def _exit_reason_fails_open(reason) -> bool:
+    """TRUE kapag ang exit ay hindi dapat maharang ng quote-freshness seam."""
+    try:
+        from .risk_policy import stop_class_exit_reason as _sc
+
+        if _sc(reason):
+            return True
+    except Exception:
+        pass
+    return str(reason or "").strip() in _FRESHNESS_FAIL_OPEN_EXIT_REASONS
 
 
 def _final_entry_bbo(
