@@ -2952,6 +2952,146 @@ def _submit_handoff_close(
     }
 
 
+def _sweep_unmanaged_positions(db: Session, adapter: Any) -> dict[str, Any]:
+    """HULING KALASAG (#1266): i-flatten ang PAPER na posisyon na WALANG
+    nagmamay-ari at WALANG proteksyon.
+
+    LIVE 2026-09-01: ang session 19338 ay may naka-fill nang 331 GYGY nang
+    markahan ito ng lane-restart cleanup bilang `live_arm_expired`. Terminal na
+    ang may-ari, kaya walang naglagay ng deadman stop at walang FSM na
+    nagbabantay — 30 minutong hubad hanggang manu-manong pinutol (-27). Ang
+    exact-claims-only na saklaw ng reconciler ay hindi umabot dito.
+
+    Ang sweep na ito ay tumitingin sa BROKER TRUTH at kumikilos lamang kapag
+    LAHAT ay totoo:
+      * napatunayang tamang PAPER account (nauna nang beripikado ng caller),
+      * WALANG non-terminal na session (live O paper) na may hawak sa symbol,
+      * WALANG bukas na order para sa symbol (kaya walang stop/exit na
+        nakaupo — kung may proteksyon, hayaan iyon),
+      * lampas na sa grace window ang posisyon (hindi bagong fill na
+        kasalukuyang pinoproseso pa lang).
+    Bawat aksyon ay may audit event. Bounded sa ilang symbol kada pass.
+    RISK-REDUCING LAMANG: nagsasara ng exposure, hindi kailanman nagbubukas.
+    """
+    out: dict[str, Any] = {"unmanaged_scanned": 0, "unmanaged_flattened": 0}
+    try:
+        if not bool(getattr(
+            settings, "chili_alpaca_unmanaged_position_flatten_enabled", True
+        )):
+            out["unmanaged_skipped"] = "flag_off"
+            return out
+        positions, pos_meta = adapter.list_positions()
+        if positions is None:
+            out["unmanaged_skipped"] = "positions_unreadable"
+            return out
+        if not positions:
+            return out
+        orders, _om = adapter.list_open_orders(strict=True)
+        if orders is None:
+            out["unmanaged_skipped"] = "open_orders_unreadable"
+            return out
+        protected = {
+            str(getattr(o, "product_id", "") or "").strip().upper()
+            for o in orders
+        }
+        managed = _managed_and_recent_symbols(db)
+        if managed is None:
+            out["unmanaged_skipped"] = "session_view_unreadable"
+            return out
+        active_syms, recent_syms = managed
+        try:
+            max_flat = int(getattr(
+                settings, "chili_alpaca_unmanaged_flatten_max_per_pass", 3
+            ) or 3)
+        except (TypeError, ValueError):
+            max_flat = 3
+        for pos in positions:
+            sym = str(pos.get("product_id") or "").strip().upper()
+            if not sym:
+                continue
+            out["unmanaged_scanned"] += 1
+            try:
+                qty = abs(float(pos.get("qty") or 0.0))
+            except (TypeError, ValueError):
+                continue
+            if qty <= 0:
+                continue
+            if sym in active_syms:
+                continue          # may buhay na may-ari — hayaan
+            if sym in recent_syms:
+                continue          # kasisimula pa lang; grace window
+            if sym in protected:
+                continue          # may nakaupong order (stop/exit) — protektado
+            if out["unmanaged_flattened"] >= max_flat:
+                out["unmanaged_truncated"] = True
+                break
+            evidence = {
+                "symbol": sym,
+                "quantity": qty,
+                "avg_entry_price": pos.get("avg_entry_price"),
+                "unrealized_pl": pos.get("unrealized_pl"),
+                "reason": "unmanaged_position_no_owner_no_protection",
+                "owner_scan": {
+                    "active_symbols": len(active_syms),
+                    "recent_symbols": len(recent_syms),
+                    "open_order_symbols": sorted(protected)[:8],
+                },
+                "positions_age_seconds": float(
+                    pos_meta.age_seconds(now=datetime.now(timezone.utc))
+                ) if pos_meta is not None else None,
+            }
+            try:
+                # Market sell ng eksaktong hawak — ang tanging risk-reducing
+                # na aksyon. Extended hours ay hindi tumatanggap ng market
+                # order, kaya doon ay marketable limit ang gamit.
+                # Extended hours: ang adapter mismo ang gumagawa ng marketable
+                # limit mula sa sariling BBO kapag walang ibinigay na presyo.
+                _ext_now = False
+                try:
+                    from .market_profile import market_session_now as _msn
+
+                    _ext_now = _msn(sym, now=datetime.now(timezone.utc)) != "regular"
+                except Exception:
+                    _ext_now = False
+                _mkt = adapter.place_market_order(
+                    product_id=sym, side="sell", base_size=str(qty),
+                    position_intent="sell_to_close",
+                    extended_hours=bool(_ext_now),
+                )
+                evidence["extended_hours"] = bool(_ext_now)
+                res = _mkt if isinstance(_mkt, dict) else {"ok": False}
+                evidence["flatten_result"] = {
+                    "ok": bool(res.get("ok")),
+                    "error": res.get("error"),
+                    "order_id": res.get("order_id"),
+                }
+                if res.get("ok"):
+                    out["unmanaged_flattened"] += 1
+            except Exception as exc:
+                evidence["flatten_result"] = {"ok": False, "error": str(exc)[:180]}
+            logger.warning(
+                "[alpaca_reconcile] UNMANAGED POSITION FLATTEN %s qty=%s -> %s",
+                sym, qty, evidence.get("flatten_result"),
+            )
+            try:
+                db.execute(text(
+                    "INSERT INTO trading_automation_events "
+                    "(session_id, ts, event_type, payload_json) "
+                    "SELECT id, (now() at time zone 'utc'), "
+                    "  'alpaca_unmanaged_position_flattened', CAST(:p AS jsonb) "
+                    "FROM trading_automation_sessions "
+                    "WHERE symbol = :s ORDER BY id DESC LIMIT 1"
+                ), {"p": json.dumps(evidence), "s": sym})
+                db.commit()
+            except Exception:
+                db.rollback()
+    except Exception:
+        logger.warning(
+            "[alpaca_reconcile] unmanaged sweep failed (fail-open)", exc_info=True
+        )
+    return out
+
+
 def _sweep_detached_entry_claims(db: Session, adapter: Any) -> dict[str, int]:
     """Recover entry permits whose owner is terminal or missing."""
     readable, claims = list_unresolved_action_claims(db, action="entry")
@@ -4103,9 +4243,16 @@ def run_alpaca_orphan_reconcile(db: Session) -> dict[str, Any]:
     # symbol permit's close authority before any new orphan decision.
     out.update(_sweep_detached_entry_claims(db, adapter))
     out.update(_sweep_active_orphan_claims(db, adapter))
+    # #1266 (utos ng operator 2026-09-01): ang exact-claims-only na saklaw ay
+    # hindi umaabot sa posisyong ang may-ari ay TERMINAL na — iyon mismo ang
+    # 30-minutong hubad na GYGY. Ang sweep na ito ang huling kalasag:
+    # broker-truth, walang may-ari, walang proteksyon, lampas sa grace.
+    out.update(_sweep_unmanaged_positions(db, adapter))
 
-    # Certification scope is deliberately exact-claim-only. No broad account
-    # inventory shape may mint close/cancel authority in this reconciler.
-    out["reconcile_scope"] = "exact_claims_only"
-    out["generic_inventory_mutation_enabled"] = False
+    # Certification scope: exact claims PLUS the unmanaged-position backstop.
+    # Walang ibang broad inventory shape ang makakapag-mint ng authority dito.
+    out["reconcile_scope"] = "exact_claims_plus_unmanaged_backstop"
+    out["generic_inventory_mutation_enabled"] = bool(getattr(
+        settings, "chili_alpaca_unmanaged_position_flatten_enabled", True
+    ))
     return out

@@ -7907,6 +7907,31 @@ class Settings(BaseSettings):
     # ng live entries natin (08-31..09-01) ay nasa ILALIM NA KWARTO ng day
     # range, lahat talo, -101.24 kabuuan. Day hi/lo ay mula sa SARILING tape.
     # DEFAULT OFF hanggang makapasa sa replay A/B.
+    # UNMANAGED-POSITION FLATTEN BACKSTOP (#1266, utos ng operator 09-01):
+    # ang huling kalasag laban sa naked position. LIVE incident: ang session
+    # 19338 ay may naka-fill nang 331 GYGY nang markahan itong terminal ng
+    # lane-restart cleanup — walang may-ari, walang stop, 30 minutong hubad.
+    # Ang reconciler ay exact-claims-only kaya hindi ito naabot. PAPER-only,
+    # risk-reducing lamang, bounded kada pass, may audit event bawat aksyon.
+    # ENTRY FILL SELF-HEAL (#1267): ang session na may naisumiteng entry pero
+    # walang naitalang posisyon ay muling tinatanong ang broker tungkol sa
+    # eksaktong order na iyon; kapag FILLED, ibinabalik sa pending_entry para
+    # ma-adopt at malagyan ng deadman stop. TATLONG naked position (AEHL/GYGY/
+    # INBS, 08-31..09-01) ang nagmula sa kawalan nito.
+    chili_momentum_entry_fill_self_heal_enabled: bool = Field(
+        default=True,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_ENTRY_FILL_SELF_HEAL_ENABLED"),
+    )
+    chili_alpaca_unmanaged_position_flatten_enabled: bool = Field(
+        default=True,
+        validation_alias=AliasChoices("CHILI_ALPACA_UNMANAGED_POSITION_FLATTEN_ENABLED"),
+    )
+    chili_alpaca_unmanaged_flatten_max_per_pass: int = Field(
+        default=3,
+        ge=1,
+        le=20,
+        validation_alias=AliasChoices("CHILI_ALPACA_UNMANAGED_FLATTEN_MAX_PER_PASS"),
+    )
     chili_momentum_bottom_of_range_veto_enabled: bool = Field(
         default=False,
         validation_alias=AliasChoices("CHILI_MOMENTUM_BOTTOM_OF_RANGE_VETO_ENABLED"),

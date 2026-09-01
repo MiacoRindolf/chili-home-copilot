@@ -27073,6 +27073,107 @@ def _overlay_replay_ortex_selection(
     return projected
 
 
+_TERMINAL_ISH_FOR_HEAL = frozenset({
+    "cancelled", "expired", "error", "archived", "finished",
+    "live_finished", "live_cancelled", "live_error", "live_arm_expired",
+    "live_exited",
+})
+
+
+def _heal_unrecognized_entry_fill(db, sess, adapter, *, le, product_id) -> dict:
+    """SELF-HEAL: ang session na may naisumiteng entry PERO walang naitalang
+    posisyon ay muling kinukumpirma sa BROKER TRUTH (#1267).
+
+    LIVE 2026-09-01 — TATLONG BESES (AEHL 08-31 11:55, GYGY 11:25:58,
+    INBS 12:35:06): pagkatapos ng `live_entry_submitted`, ang order ay
+    NA-FILL sa broker pero ang session ay hindi kailanman naglabas ng
+    `live_entry_filled`; ang susunod na tick ay muling pumasok sa entry path
+    at binlock ng SARILI niyang exposure
+    (`alpaca_account_position_exposure_present`), tapos bumalik sa
+    watching_live. Resulta: posisyong WALANG may-ari at WALANG deadman stop —
+    30 minutong hubad, manu-manong pinutol. Intermittent: ang SSM/WETO/AUUD sa
+    parehong araw ay nakakuha ng stop sa loob ng 4 segundo, kaya ito ay
+    RACE sa pagitan ng commit ng submit at ng susunod na tick, hindi isang
+    permanenteng maling landas.
+
+    Sa halip na hulaan ang bawat sangay ng state machine, ito ay isang
+    KONDISYON-BATAY na panlunas na tumatakbo sa simula ng bawat tick:
+        may `entry_submitted` + `entry_order_id`, WALANG `position`  ⇒
+        tanungin ang broker tungkol sa EKSAKTONG order na iyon.
+    Kapag ito ay FILLED, ibinabalik ang session sa LIVE_PENDING_ENTRY para
+    ang normal na fill-adoption path (na naglalagay ng deadman stop) ang
+    tumakbo sa parehong tick. Hindi kailanman gumagawa ng bagong order,
+    hindi kailanman nagbabago ng dami — pagbabalik lamang ng pagmamay-ari.
+    Fail-open: anumang error/kulang na datos ⇒ walang ginagawa.
+    """
+    out: dict = {}
+    try:
+        if not bool(getattr(
+            settings, "chili_momentum_entry_fill_self_heal_enabled", True
+        )):
+            return out
+        if not le.get("entry_submitted"):
+            return out
+        if isinstance(le.get("position"), dict) and le.get("position"):
+            return out
+        _oid = str(le.get("entry_order_id") or "").strip()
+        _cid = str(le.get("entry_client_order_id") or "").strip()
+        if not _oid and not _cid:
+            return out
+        if str(sess.state) in _TERMINAL_ISH_FOR_HEAL:
+            return out
+        no = None
+        if _cid:
+            try:
+                no = _recover_entry_order_by_client_id(adapter, _cid)
+            except Exception:
+                no = None
+        if no is None and _oid:
+            try:
+                no = adapter.get_order(_oid)
+            except Exception:
+                no = None
+        if no is None:
+            return out
+        try:
+            filled = float(getattr(no, "filled_size", 0.0) or 0.0)
+        except (TypeError, ValueError):
+            return out
+        if filled <= 0.0:
+            return out
+        # May TUNAY na fill na hindi naitala. Ibalik ang pagmamay-ari.
+        _bind_recovered_entry_order(le, no, client_order_id=_cid or None)
+        _commit_le(sess, le)
+        if str(sess.state) != STATE_LIVE_PENDING_ENTRY:
+            _safe_transition(db, sess, STATE_LIVE_PENDING_ENTRY)
+        db.flush()
+        _emit(db, sess, "live_entry_fill_self_healed", {
+            "severity": "critical",
+            "order_id": str(getattr(no, "order_id", "") or ""),
+            "client_order_id": _cid,
+            "filled_size": filled,
+            "average_filled_price": _float_or_none(
+                getattr(no, "average_filled_price", None)
+            ),
+            "state_before": str(sess.state or ""),
+            "note": (
+                "naisumiteng entry na may broker fill pero walang naitalang "
+                "posisyon — ibinalik sa pending_entry para ma-adopt at "
+                "malagyan ng deadman stop"
+            ),
+        })
+        _log.warning(
+            "[momentum_live] ENTRY FILL SELF-HEAL %s: %s shares na hindi "
+            "naitala — ibinalik sa pending_entry",
+            sess.symbol, filled,
+        )
+        out["healed"] = True
+        out["filled_size"] = filled
+    except Exception:
+        _log.debug("[momentum_live] entry fill self-heal failed", exc_info=True)
+    return out
+
+
 def tick_live_session(
     db: Session,
     session_id: int,
@@ -27415,6 +27516,10 @@ def tick_live_session(
 
     snap = dict(sess.risk_snapshot_json or {})
     le = _live_exec(snap)
+    # #1267: bago ang anumang desisyon, siguraduhing pagmamay-ari ng session
+    # ang anumang fill na naganap na sa broker (tatlong naked position 08-31/
+    # 09-01 ang nagmula sa pagkawala nito).
+    _heal_unrecognized_entry_fill(db, sess, adapter, le=le, product_id=product_id)
     _resolve_committed_alpaca_entry_claim_pending(sess, le)
     _owner_recovery = _recover_owner_alpaca_entry_claim(
         db,
