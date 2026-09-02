@@ -12093,6 +12093,24 @@ class Settings(BaseSettings):
         validation_alias=AliasChoices("CHILI_MOMENTUM_SHORT_LANE_ENABLED"),
         description="Master gate for the Alpaca SHORT lane. Default OFF (paper-first, un-soaked, no triggers wired yet). OFF ⇒ byte-identical long-only lane.",
     )
+    # UNSTOPPED SHORT risk bound (risk_evaluator.aggregate_open_risk_usd, 2026-09-02).
+    # An unstopped LONG is charged its full notional (its worst case is known). A
+    # short has no algebraic worst case, and the old fail-closed raise
+    # (``position_risk_fields_invalid``) blocked EVERY Alpaca submit account-wide
+    # while such a row existed — the same landmine class as the 806x long case.
+    # ONE documented base: charge notional x THIS multiple, i.e. cover an adverse
+    # move of +100% x multiple against the short (2.0 = the price TRIPLES before
+    # the bound is exceeded — beyond every single-leg squeeze the lane's own
+    # corpus has recorded). >= 1.0 so the bound is never looser than a doubling.
+    # Only a row whose direction is PROVABLY short on every marker gets this
+    # bound; contradictory/unreadable direction still raises.
+    chili_momentum_short_unstopped_notional_multiple: float = Field(
+        default=2.0,
+        ge=1.0,
+        le=10.0,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_SHORT_UNSTOPPED_NOTIONAL_MULTIPLE"),
+        description="At-risk charge for an UNSTOPPED short = notional x this (adverse move covered = +100% x multiple). 2.0 = price triples. Bounded instead of raising so one unmanaged short cannot fail-close every Alpaca submit.",
+    )
     # Shake-out learning: how long after an exit to watch the price path to judge
     # whether the thesis would have worked (was the stop too tight?). 30min.
     chili_momentum_post_exit_horizon_seconds: int = Field(

@@ -404,10 +404,12 @@ def _alpaca_position_certified_long(sess: Any, le: Any, pos: Any) -> bool:
     ``position_intent`` / ``intent`` on either container — plus the
     ``alpaca_short`` family. Used ONLY to admit the full-notional bound for an
     unstopped position: notional bounds a LONG's loss, never a SHORT's, so any
-    short, contradictory or unreadable marker => not certified => the caller
-    fails closed (``position_risk_fields_invalid``). A row adopted under an
-    operator repair carries ``position.side`` and no ``side_long`` key; it must
-    not be priced as a long by omission.
+    short, contradictory or unreadable marker => not certified. A provably
+    SHORT row gets the separate multiple bound
+    (``_alpaca_position_certified_short``); anything else fails closed
+    (``position_risk_fields_invalid``). A row adopted under an operator repair
+    carries ``position.side`` and no ``side_long`` key; it must not be priced
+    as a long by omission.
     """
     if str(getattr(sess, "execution_family", "") or "") == "alpaca_short":
         return False
@@ -425,6 +427,64 @@ def _alpaca_position_certified_long(sess: Any, le: Any, pos: Any) -> bool:
             if intent is not None and str(intent).strip().lower() not in _LONG_INTENT_MARKERS:
                 return False
     return True
+
+
+_SHORT_SIDE_MARKERS = frozenset({"short", "sell"})
+_SHORT_INTENT_MARKERS = frozenset({"sell_to_open", "buy_to_close"})
+
+
+def _alpaca_position_certified_short(sess: Any, le: Any, pos: Any) -> bool:
+    """True only when EVERY direction marker on the row says SHORT and at least
+    one explicit short marker exists (the ``alpaca_short`` family, or
+    ``side_long=False`` / ``side`` / ``position_intent`` / ``intent`` on the
+    envelope or the position). Mirrors ``_le_side_long``'s vocabulary. Any long,
+    contradictory or unreadable marker => not certified => the caller keeps the
+    fail-closed raise. Used ONLY to admit the documented notional-multiple bound
+    for an UNSTOPPED short (2026-09-02: the raise for that shape blocked every
+    Alpaca submit account-wide, same landmine class as the unstopped long).
+    """
+    explicit = str(getattr(sess, "execution_family", "") or "") == "alpaca_short"
+    for container in (le, pos):
+        if not isinstance(container, Mapping):
+            return False
+        flag = container.get("side_long")
+        if flag is not None:
+            if flag is not False:
+                return False
+            explicit = True
+        side = container.get("side")
+        if side is not None:
+            if str(side).strip().lower() not in _SHORT_SIDE_MARKERS:
+                return False
+            explicit = True
+        for key in ("position_intent", "intent"):
+            intent = container.get(key)
+            if intent is not None:
+                if str(intent).strip().lower() not in _SHORT_INTENT_MARKERS:
+                    return False
+                explicit = True
+    return explicit
+
+
+_SHORT_UNSTOPPED_NOTIONAL_MULTIPLE_DEFAULT = 2.0
+
+
+def _short_unstopped_notional_multiple() -> float:
+    """ONE documented base (config: chili_momentum_short_unstopped_notional_multiple).
+    Unreadable/non-finite/<1.0 => the documented default, never a looser bound."""
+    try:
+        value = float(
+            getattr(
+                settings,
+                "chili_momentum_short_unstopped_notional_multiple",
+                _SHORT_UNSTOPPED_NOTIONAL_MULTIPLE_DEFAULT,
+            )
+        )
+    except (TypeError, ValueError):
+        return _SHORT_UNSTOPPED_NOTIONAL_MULTIPLE_DEFAULT
+    if not math.isfinite(value) or value < 1.0:
+        return _SHORT_UNSTOPPED_NOTIONAL_MULTIPLE_DEFAULT
+    return value
 
 
 def _raise_unknown_alpaca_risk(
@@ -714,28 +774,42 @@ def aggregate_open_risk_usd(
                 qty = _positive_finite_number(pos.get("quantity"))
                 entry = _positive_finite_number(pos.get("avg_entry_price"))
                 stop = _positive_finite_number(pos.get("stop_price"))
-                _certified_long = _alpaca_position_certified_long(sess, le, pos)
-                if qty is None or entry is None or (stop is None and not _certified_long):
-                    # Nothing can be priced, or an unstopped position that is
-                    # not provably LONG on every marker (notional is NOT an
-                    # upper bound on a short's loss).
+                if qty is None or entry is None:
+                    # Nothing can be priced: unreadable quantity / basis stays
+                    # fail-closed (no bound can be derived from nothing).
                     _raise_unknown_alpaca_risk(
                         "position_risk_fields_invalid",
                         session_id=sess.id,
                     )
                 if stop is None:
-                    # Unstopped emergency LONG (adopt-for-safety / kill-switch
+                    # Unstopped emergency position (adopt-for-safety / kill-switch
                     # paths write stop_price=None). 806x
                     # ``position_risk_fields_invalid`` blocked EVERY Alpaca submit
-                    # on 09-01/09-02 for a row whose worst case is fully known:
-                    # charge FULL NOTIONAL (>= any real stop distance) instead of
-                    # declaring the whole account unknown.
-                    at_risk = entry * qty
+                    # on 09-01/09-02 for a LONG whose worst case is fully known:
+                    # charge FULL NOTIONAL (>= any real stop distance). A provably
+                    # SHORT row (2026-09-02, same account-wide landmine class) is
+                    # charged notional x the documented multiple instead of
+                    # declaring the whole account unknown. A row whose direction
+                    # is contradictory/unreadable on any marker still raises.
+                    if _alpaca_position_certified_long(sess, le, pos):
+                        at_risk = entry * qty
+                        note = "stop_unknown_full_notional_bound"
+                        row_extra: dict[str, Any] = {}
+                    elif _alpaca_position_certified_short(sess, le, pos):
+                        multiple = _short_unstopped_notional_multiple()
+                        at_risk = entry * qty * multiple
+                        note = "stop_unknown_short_notional_multiple_bound"
+                        row_extra = {"notional_multiple": multiple}
+                    else:
+                        _raise_unknown_alpaca_risk(
+                            "position_risk_fields_invalid",
+                            session_id=sess.id,
+                        )
                     total += at_risk
                     rows.append({"symbol": sess.symbol, "session_id": sess.id,
                                  "execution_family": sess.execution_family,
                                  "at_risk_usd": round(at_risk, 2),
-                                 "note": "stop_unknown_full_notional_bound"})
+                                 "note": note, **row_extra})
                     continue
             else:
                 qty = abs(float(pos.get("quantity") or 0.0))
