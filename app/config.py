@@ -10288,6 +10288,17 @@ class Settings(BaseSettings):
         ge=60,
         validation_alias=AliasChoices("CHILI_MOMENTUM_AUTO_ARM_WATCH_EXTEND_SECONDS"),
     )
+    # DEFERRED-CANCEL RETRY CADENCE (2026-09-02, JLHL 19463). When the watching-
+    # reaper's cancel comes back DEFERRED (broker truth pending), the row is left
+    # operator-paused with resume_state == its state and the pause stamp is the
+    # durable record of that deferral. The reaper re-asks the cancel no more often
+    # than this while that stamp is fresh — not on every 10s pass (19463: 883
+    # cancel attempts in ~3h, each re-stamping the pause). ONE documented cadence.
+    chili_momentum_reap_deferred_retry_seconds: int = Field(
+        default=300,
+        ge=30,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_REAP_DEFERRED_RETRY_SECONDS"),
+    )
     # ADAPTIVE MAX-WATCH (2026-06-25, operator "gawin mong adaptive — no magic wall clock"):
     # the effective watch deadline adapts to whether the watcher is BUILDING a setup or
     # DEAD, derived from signals ALREADY on the session snapshot (no new data source):

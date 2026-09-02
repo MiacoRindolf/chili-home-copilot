@@ -46,6 +46,13 @@ def _build_robinhood_agentic_mcp() -> VenueAdapter:
     return RobinhoodAgenticMcpAdapter()
 
 
+def _build_alpaca_paper() -> VenueAdapter:
+    # Imported at call time (house style) so a test that forbids any Alpaca
+    # build by patching ``alpaca_spot.AlpacaSpotAdapter`` still fails loudly.
+    from .alpaca_spot import AlpacaSpotAdapter
+    return AlpacaSpotAdapter()
+
+
 _BUILDERS: dict[str, Callable[[], VenueAdapter]] = {
     "robinhood": _build_robinhood,
     "coinbase": _build_coinbase,
@@ -59,6 +66,23 @@ _BUILDERS: dict[str, Callable[[], VenueAdapter]] = {
     # so an operator-cancel that raced a fill is adopted and resting orders cancelled,
     # instead of leaving an unmanaged naked long (the CRVO/FTHM orphan class).
     "robinhood_agentic_mcp": _build_robinhood_agentic_mcp,
+    # Alpaca PAPER — the momentum lane's execution families (2026-09-02, JLHL
+    # 19463). Every Alpaca broker-truth read in momentum_neural/automation_query
+    # (``_reaper_broker_position_truth``, ``_reaper_has_working_entry_order``,
+    # ``_try_adopt_filled_entry_on_cancel``) resolves its adapter HERE by
+    # ``execution_family`` and only then binds it to the session's frozen account
+    # generation. With no builder registered, ``get_adapter("alpaca_spot")`` was
+    # ``None`` for every caller — inside the lane process too, not just from an
+    # external shell — so the reaper's cancel of a recycled, broker-flat watcher
+    # answered ``broker_position_unknown`` on every pass: 19463 was "reaped" and
+    # re-paused every 10s for ~3h (883 passes) without ever terminalizing. The
+    # adapter is paper-only and account-pinned by construction
+    # (``_require_paper_posture`` / ``_trading_client``); a build failure still
+    # returns ``None`` (unknown, fail-closed). Not added to
+    # SUPPORTED_BROKER_SOURCES: that set filters ``Trade.broker_source`` rows
+    # (robinhood / coinbase), and Alpaca sessions never write those.
+    "alpaca_spot": _build_alpaca_paper,
+    "alpaca_short": _build_alpaca_paper,
 }
 
 
