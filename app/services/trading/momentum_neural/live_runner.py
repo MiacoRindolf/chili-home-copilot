@@ -5116,6 +5116,134 @@ def _adopt_recovered_primary_fill_for_safety(
     return True
 
 
+def _adopt_submitted_entry_fill_while_paused(
+    db: Session,
+    sess: TradingAutomationSession,
+    adapter: Any,
+    *,
+    le: dict[str, Any],
+    product_id: str,
+) -> dict[str, Any]:
+    """Pause = no strategy work; a fill that already happened is exposure, not work.
+
+    2026-09-02 CANF 19471 (Bug B3): ``cancel_automation_session`` hit the
+    durable-claim branch, wrote ``entry_submitted=True`` + pointers and applied
+    ``operator_pause`` (resume_state=live_pending_entry), returning
+    non-terminal. The tick preamble then returned SILENTLY every tick
+    ("operator_paused"; the legacy time-share claim passes through with
+    active=False), so the pending-branch poll/adopt never ran and the filled
+    165 sh sat unowned. This helper mirrors the adaptive-claim path
+    (``_recover_owner_alpaca_entry_claim`` -> adopt-for-safety) for that
+    legacy pass-through: ADOPT-ONLY. It never places or cancels an order.
+
+    Outcomes (``reason``):
+      not_submitted / position_present / state_not_pre_entry /
+      no_order_identity / order_not_visible      -> nothing to do
+      order_open_leave_paused                    -> resting, unfilled; leave it
+      order_open_partial_fill_unowned            -> resting WITH fills; named,
+                                                    still no cancel (operator owns it)
+      adopted                                    -> LIVE_ENTERED + flatten flag
+      adopt_helper_refused                       -> adopt-for-safety said no
+      terminal_zero_fill_voided                  -> claim durably resolved, pointers cleared
+      terminal_zero_fill_claim_unresolved        -> claim NOT resolved: le untouched
+                                                    (popping pointers would let the
+                                                    next cancel re-write them from the
+                                                    claim -> void ping-pong forever)
+    """
+    if not le.get("entry_submitted"):
+        return {"adopted": False, "reason": "not_submitted"}
+    if isinstance(le.get("position"), dict) and le["position"]:
+        return {"adopted": False, "reason": "position_present"}
+    if str(sess.state) not in _HEALABLE_PRE_ENTRY_STATES:
+        return {"adopted": False, "reason": "state_not_pre_entry"}
+    _oid = str(le.get("entry_order_id") or "").strip()
+    _cid = str(le.get("entry_client_order_id") or "").strip()
+    if not _oid and not _cid:
+        return {"adopted": False, "reason": "no_order_identity"}
+    no = None
+    if _cid:
+        try:
+            no = _recover_entry_order_by_client_id(adapter, _cid)
+        except Exception:
+            no = None
+    if no is None and _oid:
+        try:
+            _res = adapter.get_order(_oid)
+            no = _res[0] if isinstance(_res, tuple) else _res
+        except Exception:
+            no = None
+    if no is None:
+        return {"adopted": False, "reason": "order_not_visible"}
+    try:
+        filled = float(getattr(no, "filled_size", 0.0) or 0.0)
+    except (TypeError, ValueError):
+        filled = 0.0
+    if _order_open(no):
+        # No cancel, no place — pause semantics; operator cancel/flatten own it.
+        return {
+            "adopted": False,
+            "reason": (
+                "order_open_partial_fill_unowned" if filled > 1e-12
+                else "order_open_leave_paused"
+            ),
+            "filled_size": filled,
+        }
+    if filled > 1e-12:
+        ok = _adopt_recovered_primary_fill_for_safety(
+            db, sess, adapter, le=le, order=no, product_id=product_id,
+        )
+        if ok:
+            _emit(db, sess, "live_entry_fill_adopted_while_paused", {
+                "severity": "critical",
+                "order_id": str(getattr(no, "order_id", "") or ""),
+                "client_order_id": _cid,
+                "filled_size": filled,
+                "average_filled_price": _float_or_none(
+                    getattr(no, "average_filled_price", None)
+                ),
+                "safety_action": "quote_independent_flatten",
+                "note": (
+                    "paused session na may naisumiteng entry na NAG-FILL — "
+                    "inampon at ipina-flatten (quote-independent); walang "
+                    "bagong order"
+                ),
+            })
+        return {"adopted": ok, "reason": "adopted" if ok else "adopt_helper_refused"}
+    # Terminal zero fill: void the pointer ONLY after the durable claim is resolved.
+    _void_oid = str(getattr(no, "order_id", "") or _oid)
+    resolved = _resolve_alpaca_entry_claim_from_terminal_order(
+        sess, no, le=le, durable_adopted=False,
+    )
+    if resolved is not True:
+        if le.get("entry_void_blocked_sig") != _void_oid:
+            le["entry_void_blocked_sig"] = _void_oid
+            _commit_le(sess, le)
+            _emit(db, sess, "live_entry_void_while_paused_blocked", {
+                "reason": "claim_unresolved",
+                "order_id": _void_oid,
+                "client_order_id": _cid,
+                "order_status": getattr(no, "status", None),
+            })
+        return {"adopted": False, "reason": "terminal_zero_fill_claim_unresolved"}
+    _mark_entry_order_resolved(le, _void_oid, "void")
+    for k in (
+        "entry_order_id",
+        "entry_client_order_id",
+        "entry_reconcile_pending_client_order_id",
+    ):
+        le.pop(k, None)
+    le["entry_submitted"] = False
+    if le.get("entry_void_sig") != _void_oid:
+        le["entry_void_sig"] = _void_oid
+        _emit(db, sess, "live_entry_void_while_paused", {
+            "order_id": _void_oid,
+            "client_order_id": _cid,
+            "order_status": getattr(no, "status", None),
+        })
+    _commit_le(sess, le)
+    return {"adopted": False, "reason": "terminal_zero_fill_voided"}
+
+
 def _adopt_recovered_terminal_add(
     db: Session,
     sess: TradingAutomationSession,
@@ -27711,7 +27839,20 @@ def _overlay_replay_ortex_selection(
 _TERMINAL_ISH_FOR_HEAL = frozenset({
     "cancelled", "expired", "error", "archived", "finished",
     "live_finished", "live_cancelled", "live_error", "live_arm_expired",
-    "live_exited",
+    "live_exited", STATE_LIVE_COOLDOWN,
+})
+
+# The ONLY states in which "entry_submitted + no position" can mean an
+# unowned fill. A completed trade leaves entry_submitted/entry_order_id set
+# with position=None until recycle (cooldown, then held states on the way
+# out) — none of those are healable, and treating them as such produced a
+# false CRITICAL on every finished trade in the first draft of this fix.
+_HEALABLE_PRE_ENTRY_STATES = frozenset({
+    STATE_ARMED_PENDING_RUNNER,
+    STATE_QUEUED_LIVE,
+    STATE_WATCHING_LIVE,
+    STATE_LIVE_ENTRY_CANDIDATE,
+    STATE_LIVE_PENDING_ENTRY,
 })
 
 
@@ -27739,9 +27880,23 @@ def _heal_unrecognized_entry_fill(db, sess, adapter, *, le, product_id) -> dict:
     ang normal na fill-adoption path (na naglalagay ng deadman stop) ang
     tumakbo sa parehong tick. Hindi kailanman gumagawa ng bagong order,
     hindi kailanman nagbabago ng dami — pagbabalik lamang ng pagmamay-ari.
-    Fail-open: anumang error/kulang na datos ⇒ walang ginagawa.
+
+    2026-09-02 CANF 19471 (Bug B2): ang unang bersyon ay tumawag ng
+    ``_safe_transition(watching_live -> live_pending_entry)`` — HINDI legal
+    na live_fsm edge — at nilunok ang ValueError sa DEBUG. Resulta: 12
+    minutong WALANG event habang ang 165 sh ay nakaupo sa broker nang walang
+    stop. Ngayon: (a) pre-entry allowlist lang (``_HEALABLE_PRE_ENTRY_STATES``);
+    (b) ang order na nasa ``entry_orders_resolved`` na ay hindi na hine-heal;
+    (c) LEGAL CHAIN MUNA (``_transition_recovered_primary_to_pending``) bago
+    ang bind — kapag walang legal na daan, walang half-state; (d) isang
+    ``live_entry_fill_self_healed`` kada order id, hindi kada state hop;
+    (e) ang kabiguan ay MALAKAS: WARNING na may traceback at
+    ``live_entry_fill_self_heal_failed`` (severity critical) minsan kada
+    signature.
     """
     out: dict = {}
+    _oid = ""
+    _cid = ""
     try:
         if not bool(getattr(
             settings, "chili_momentum_entry_fill_self_heal_enabled", True
@@ -27757,6 +27912,16 @@ def _heal_unrecognized_entry_fill(db, sess, adapter, *, le, product_id) -> dict:
             return out
         if str(sess.state) in _TERMINAL_ISH_FOR_HEAL:
             return out
+        if str(sess.state) not in _HEALABLE_PRE_ENTRY_STATES:
+            return out
+        # Already-recognised order (adopted / void / any outcome): nothing to heal.
+        _resolved = le.get("entry_orders_resolved") or {}
+        if _oid and _oid in _resolved:
+            return out
+        if not _oid:
+            _hist = [str(x) for x in (le.get("entry_order_ids_all") or [])]
+            if _hist and all(x in _resolved for x in _hist):
+                return out
         no = None
         if _cid:
             try:
@@ -27765,7 +27930,8 @@ def _heal_unrecognized_entry_fill(db, sess, adapter, *, le, product_id) -> dict:
                 no = None
         if no is None and _oid:
             try:
-                no = adapter.get_order(_oid)
+                _res = adapter.get_order(_oid)
+                no = _res[0] if isinstance(_res, tuple) else _res
             except Exception:
                 no = None
         if no is None:
@@ -27776,11 +27942,28 @@ def _heal_unrecognized_entry_fill(db, sess, adapter, *, le, product_id) -> dict:
             return out
         if filled <= 0.0:
             return out
-        # May TUNAY na fill na hindi naitala. Ibalik ang pagmamay-ari.
+        _sig = str(getattr(no, "order_id", "") or _oid)
+        if (
+            le.get("entry_fill_self_heal_sig") == _sig
+            and str(sess.state) == STATE_LIVE_PENDING_ENTRY
+        ):
+            # Already healed this order and the session is where the
+            # fill-adoption path reads it. One event per order, not per tick.
+            out["healed"] = True
+            out["repeat"] = True
+            out["filled_size"] = filled
+            return out
+        # May TUNAY na fill na hindi naitala. LEGAL CHAIN MUNA, saka bind —
+        # kapag walang daan papuntang pending, walang nababago sa le.
+        state_before = str(sess.state)
+        if (
+            state_before != STATE_LIVE_PENDING_ENTRY
+            and not _transition_recovered_primary_to_pending(db, sess)
+        ):
+            raise RuntimeError(f"no_legal_chain_to_pending:{state_before}")
         _bind_recovered_entry_order(le, no, client_order_id=_cid or None)
+        le["entry_fill_self_heal_sig"] = _sig
         _commit_le(sess, le)
-        if str(sess.state) != STATE_LIVE_PENDING_ENTRY:
-            _safe_transition(db, sess, STATE_LIVE_PENDING_ENTRY)
         db.flush()
         _emit(db, sess, "live_entry_fill_self_healed", {
             "severity": "critical",
@@ -27790,7 +27973,8 @@ def _heal_unrecognized_entry_fill(db, sess, adapter, *, le, product_id) -> dict:
             "average_filled_price": _float_or_none(
                 getattr(no, "average_filled_price", None)
             ),
-            "state_before": str(sess.state or ""),
+            "state_before": state_before,
+            "chain_from": state_before,
             "note": (
                 "naisumiteng entry na may broker fill pero walang naitalang "
                 "posisyon — ibinalik sa pending_entry para ma-adopt at "
@@ -27799,13 +27983,41 @@ def _heal_unrecognized_entry_fill(db, sess, adapter, *, le, product_id) -> dict:
         })
         _log.warning(
             "[momentum_live] ENTRY FILL SELF-HEAL %s: %s shares na hindi "
-            "naitala — ibinalik sa pending_entry",
-            sess.symbol, filled,
+            "naitala — ibinalik sa pending_entry (chain_from=%s)",
+            sess.symbol, filled, state_before,
         )
         out["healed"] = True
         out["filled_size"] = filled
-    except Exception:
-        _log.debug("[momentum_live] entry fill self-heal failed", exc_info=True)
+    except Exception as exc:
+        # MALAKAS na kabiguan (dating DEBUG na nilunok — 12 min na katahimikan
+        # sa 19471). Minsan kada signature para hindi mag-spam kada tick.
+        _log.warning(
+            "[momentum_live] ENTRY FILL SELF-HEAL FAILED %s state=%s oid=%s: %s",
+            getattr(sess, "symbol", None), getattr(sess, "state", None),
+            _oid[:8] or None, exc, exc_info=True,
+        )
+        out["heal_failed"] = True
+        out["exception_class"] = type(exc).__name__
+        try:
+            _fsig = f"{type(exc).__name__}:{sess.state}:{_oid}"
+            if le.get("entry_fill_self_heal_failed_sig") != _fsig:
+                le["entry_fill_self_heal_failed_sig"] = _fsig
+                _commit_le(sess, le)
+                _emit(db, sess, "live_entry_fill_self_heal_failed", {
+                    "severity": "critical",
+                    "exception_class": type(exc).__name__,
+                    "error": str(exc)[:300],
+                    "state": str(sess.state or ""),
+                    "order_id": _oid,
+                    "client_order_id": _cid,
+                    "note": (
+                        "may naisumiteng entry na may fill pero hindi "
+                        "naibalik ang pagmamay-ari — kailangan ng operator"
+                    ),
+                })
+                db.flush()
+        except Exception:
+            _log.warning("[momentum_live] self-heal failure event emit failed", exc_info=True)
     return out
 
 
@@ -28234,7 +28446,50 @@ def tick_live_session(
     if _operator_paused and not (
         _paused_session_has_exit_authority(sess) or _owner_recovery.get("active")
     ):
-        return {"ok": True, "skipped": "operator_paused", "state": sess.state}
+        # 2026-09-02 CANF 19471 (Bug B3): this return was GANAP na tahimik —
+        # walang event, walang log — kada tick, habang ang naisumiteng entry
+        # ay NAG-FILL sa broker. Ang legacy time-share claim ay pass-through
+        # (active=False), kaya walang owner recovery; ang pending-branch
+        # poll/adopt ay hindi kailanman tumakbo. Adopt-only attempt (walang
+        # place/cancel), tapos MINSAN kada signature na event (BCCQ treatment).
+        try:
+            _pa = _adopt_submitted_entry_fill_while_paused(
+                db, sess, adapter, le=le, product_id=product_id,
+            )
+        except Exception as _pa_exc:
+            _log.warning(
+                "[momentum_live] paused adoption attempt failed session=%s",
+                sess.id, exc_info=True,
+            )
+            _pa = {"adopted": False, "reason": f"adopt_exception:{type(_pa_exc).__name__}"}
+        if not _pa.get("adopted"):
+            _pb_sig = "paused:{}:{}:{}".format(
+                sess.state,
+                "submitted" if le.get("entry_submitted") else "idle",
+                _pa.get("reason"),
+            )
+            if le.get("operator_paused_block_sig") != _pb_sig:
+                le["operator_paused_block_sig"] = _pb_sig
+                _commit_le(sess, le)
+                _emit(db, sess, "live_tick_operator_paused_block", {
+                    "reason": _pb_sig,
+                    "state": sess.state,
+                    "entry_submitted": bool(le.get("entry_submitted")),
+                    "entry_order_id": le.get("entry_order_id"),
+                    "adopt_attempt": _pa,
+                    "owner_recovery_reason": _owner_recovery.get("reason"),
+                })
+                db.flush()
+            return {
+                "ok": True,
+                "skipped": "operator_paused",
+                "state": sess.state,
+                "paused_block": _pb_sig,
+            }
+        # ADOPTED: the session is now LIVE_ENTERED with operator_flatten_requested_utc
+        # => _paused_session_has_exit_authority is True => fall through to the
+        # quote-independent emergency exit below. No entry branch can run: every
+        # one is st-gated on a pre-entry state.
     if sess.state not in LIVE_RUNNER_RUNNABLE_STATES:
         return {
             "ok": True,
@@ -29901,7 +30156,27 @@ def tick_live_session(
     if _emergency_result is not None:
         return _emergency_result
     if _operator_paused:
-        return {"ok": True, "skipped": "operator_paused", "state": sess.state}
+        # Twin of the preamble block (2026-09-02): observable, once per signature.
+        _pb_sig = "paused_post_emergency:{}:{}".format(
+            sess.state,
+            "submitted" if le.get("entry_submitted") else "idle",
+        )
+        if le.get("operator_paused_block_sig") != _pb_sig:
+            le["operator_paused_block_sig"] = _pb_sig
+            _commit_le(sess, le)
+            _emit(db, sess, "live_tick_operator_paused_block", {
+                "reason": _pb_sig,
+                "state": sess.state,
+                "entry_submitted": bool(le.get("entry_submitted")),
+                "entry_order_id": le.get("entry_order_id"),
+            })
+            db.flush()
+        return {
+            "ok": True,
+            "skipped": "operator_paused",
+            "state": sess.state,
+            "paused_block": _pb_sig,
+        }
 
     via = (
         db.query(MomentumSymbolViability)
@@ -45213,6 +45488,11 @@ def tick_live_session(
             _recycle_reset_keys: list[str] = []
             if bool(getattr(settings, "chili_momentum_recycle_entry_state_reset_enabled", True)):
                 _recycle_reset_keys = _reset_entry_state_on_recycle(le)
+            # WATCH-AGE ANCHOR (2026-09-02 CANF 19471): the auto-arm reaper
+            # measures "watched > Ns, never entered" from THIS instant, not from
+            # started_at (which is never advanced). NOT in
+            # _RECYCLE_ENTRY_STATE_KEYS — it must survive the reset above.
+            le["last_recycled_at_utc"] = _utcnow().isoformat()
             _commit_le(sess, le)
             _safe_transition(db, sess, STATE_WATCHING_LIVE)
             _emit(db, sess, "live_recycled", {

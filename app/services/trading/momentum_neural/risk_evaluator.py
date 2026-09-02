@@ -392,6 +392,41 @@ def _positive_finite_number(value: Any) -> float | None:
     return parsed if math.isfinite(parsed) and parsed > 0.0 else None
 
 
+_LONG_SIDE_MARKERS = frozenset({"long", "buy"})
+_LONG_INTENT_MARKERS = frozenset({"buy_to_open", "sell_to_close"})
+
+
+def _alpaca_position_certified_long(sess: Any, le: Any, pos: Any) -> bool:
+    """True only when EVERY direction marker on the row says LONG.
+
+    Honours the same evidence the runner's canonical ``_le_side_long`` reads —
+    ``side_long`` on the envelope AND the position, ``side``,
+    ``position_intent`` / ``intent`` on either container — plus the
+    ``alpaca_short`` family. Used ONLY to admit the full-notional bound for an
+    unstopped position: notional bounds a LONG's loss, never a SHORT's, so any
+    short, contradictory or unreadable marker => not certified => the caller
+    fails closed (``position_risk_fields_invalid``). A row adopted under an
+    operator repair carries ``position.side`` and no ``side_long`` key; it must
+    not be priced as a long by omission.
+    """
+    if str(getattr(sess, "execution_family", "") or "") == "alpaca_short":
+        return False
+    for container in (le, pos):
+        if not isinstance(container, Mapping):
+            return False
+        flag = container.get("side_long")
+        if flag is not None and flag is not True:
+            return False
+        side = container.get("side")
+        if side is not None and str(side).strip().lower() not in _LONG_SIDE_MARKERS:
+            return False
+        for key in ("position_intent", "intent"):
+            intent = container.get(key)
+            if intent is not None and str(intent).strip().lower() not in _LONG_INTENT_MARKERS:
+                return False
+    return True
+
+
 def _raise_unknown_alpaca_risk(
     reason: str,
     *,
@@ -453,6 +488,34 @@ def _alpaca_claims_by_owner(
             continue
         owners.setdefault(int(claim.owner_session_id), []).append(claim)
     return owners
+
+
+def _alpaca_pending_pre_transport(
+    sess: Any,
+    le: Any,
+    claims_by_owner: Mapping[int, Any],
+) -> bool:
+    """True for a non-holding alpaca row that provably never crossed the broker
+    HTTP boundary: no unresolved entry claim for this owner AND
+    ``entry_submitted`` is not True.
+
+    2026-09-02 CANF 19471: the old ``pending_entry_evidence_missing`` raise
+    treated this shape as UNKNOWN exposure and blocked every Alpaca submit
+    (1,186 tick failures / 21 sessions; 83% cross-session; 19471 raised on
+    ITSELF 12x while CANF ran 4.40->4.62).  But the claim row is committed in
+    its own short transaction BEFORE any POST (alpaca_orphan_claims.py
+    ``acquire_action_claim_committed`` / ``mark_entry_transport_started``), and
+    a claim that reached transport can never be silently released, so the
+    absence of BOTH signals is proof of $0 exposure, not unknown exposure.
+
+    Callers MUST read the session rows BEFORE the claim ledger: Alpaca takes no
+    advisory lock in the decouple block, so a sibling whose claim commits
+    between the two statements must be seen as claim-present, never as
+    pre-transport.
+    """
+    if claims_by_owner.get(int(sess.id)):
+        return False
+    return not (isinstance(le, dict) and le.get("entry_submitted") is True)
 
 
 def _scope_account_risk_query(query: Any, execution_family: str | None) -> Any:
@@ -571,10 +634,6 @@ def aggregate_open_risk_usd(
     family = normalize_execution_family(execution_family) if execution_family else None
     alpaca_scope = family in _ALPACA_PAPER_RISK_FAMILIES
     claims_by_owner: dict[int, list[BrokerSymbolActionClaim]] = {}
-    if alpaca_scope:
-        claims_by_owner = _alpaca_claims_by_owner(
-            _alpaca_unresolved_entry_claims(db)
-        )
     risk_states = tuple(LIVE_POSITION_HOLDING_STATES)
     if alpaca_scope:
         # A fill can commit before the outer FSM transaction advances out of
@@ -600,7 +659,15 @@ def aggregate_open_risk_usd(
         )
     # Unknown ledger state is not proof of zero exposure. Propagate read failure
     # so the broker-submit boundary fails closed.
+    #
+    # ORDER MATTERS (2026-09-02): session rows FIRST, claim ledger AFTER. A
+    # sibling whose claim commits between the two statements is then seen as
+    # claim-present (charged via the claim), never as pre-transport ($0).
     held = held_q.all()
+    if alpaca_scope:
+        claims_by_owner = _alpaca_claims_by_owner(
+            _alpaca_unresolved_entry_claims(db)
+        )
     for sess in held:
         try:
             snap = sess.risk_snapshot_json or {}
@@ -612,11 +679,14 @@ def aggregate_open_risk_usd(
                         "held_live_execution_missing",
                         session_id=sess.id,
                     )
-                if alpaca_scope and not claims_by_owner.get(int(sess.id)):
-                    _raise_unknown_alpaca_risk(
-                        "pending_entry_evidence_missing",
-                        session_id=sess.id,
-                    )
+                if alpaca_scope and _alpaca_pending_pre_transport(
+                    sess, le, claims_by_owner
+                ):
+                    # Pending row that never reached broker HTTP: $0, not unknown.
+                    rows.append({"symbol": sess.symbol, "session_id": sess.id,
+                                 "execution_family": sess.execution_family,
+                                 "at_risk_usd": 0.0,
+                                 "note": "pre_transport_pending"})
                 continue
             pos = le.get("position")
             if pos is None:
@@ -625,15 +695,13 @@ def aggregate_open_risk_usd(
                         "held_position_missing",
                         session_id=sess.id,
                     )
-                if (
-                    alpaca_scope
-                    and le.get("entry_submitted") is not True
-                    and not claims_by_owner.get(int(sess.id))
+                if alpaca_scope and _alpaca_pending_pre_transport(
+                    sess, le, claims_by_owner
                 ):
-                    _raise_unknown_alpaca_risk(
-                        "pending_entry_evidence_missing",
-                        session_id=sess.id,
-                    )
+                    rows.append({"symbol": sess.symbol, "session_id": sess.id,
+                                 "execution_family": sess.execution_family,
+                                 "at_risk_usd": 0.0,
+                                 "note": "pre_transport_pending"})
                 continue
             if not isinstance(pos, dict):
                 if alpaca_scope:
@@ -646,11 +714,29 @@ def aggregate_open_risk_usd(
                 qty = _positive_finite_number(pos.get("quantity"))
                 entry = _positive_finite_number(pos.get("avg_entry_price"))
                 stop = _positive_finite_number(pos.get("stop_price"))
-                if qty is None or entry is None or stop is None:
+                _certified_long = _alpaca_position_certified_long(sess, le, pos)
+                if qty is None or entry is None or (stop is None and not _certified_long):
+                    # Nothing can be priced, or an unstopped position that is
+                    # not provably LONG on every marker (notional is NOT an
+                    # upper bound on a short's loss).
                     _raise_unknown_alpaca_risk(
                         "position_risk_fields_invalid",
                         session_id=sess.id,
                     )
+                if stop is None:
+                    # Unstopped emergency LONG (adopt-for-safety / kill-switch
+                    # paths write stop_price=None). 806x
+                    # ``position_risk_fields_invalid`` blocked EVERY Alpaca submit
+                    # on 09-01/09-02 for a row whose worst case is fully known:
+                    # charge FULL NOTIONAL (>= any real stop distance) instead of
+                    # declaring the whole account unknown.
+                    at_risk = entry * qty
+                    total += at_risk
+                    rows.append({"symbol": sess.symbol, "session_id": sess.id,
+                                 "execution_family": sess.execution_family,
+                                 "at_risk_usd": round(at_risk, 2),
+                                 "note": "stop_unknown_full_notional_bound"})
+                    continue
             else:
                 qty = abs(float(pos.get("quantity") or 0.0))
                 entry = float(pos.get("avg_entry_price") or 0.0)
@@ -780,6 +866,11 @@ def count_inflight_entry_orders(
     n = 0
     claim_owner_cids: set[tuple[int, str]] = set()
     claim_owner_ids: set[int] = set()
+    # An unreadable pending-order ledger must block admission, never look empty.
+    # Session rows FIRST, claim ledger AFTER (2026-09-02): a sibling whose claim
+    # commits between the two reads is counted via the claim, never dropped as
+    # pre-transport.
+    rows = q.all()
     if family in _ALPACA_PAPER_RISK_FAMILIES:
         claims = _alpaca_unresolved_entry_claims(db)
         for claim in claims:
@@ -796,8 +887,6 @@ def count_inflight_entry_orders(
                 claim_owner_cids.add(
                     (int(claim.owner_session_id), str(claim.client_order_id))
                 )
-    # An unreadable pending-order ledger must block admission, never look empty.
-    rows = q.all()
     for s in rows:
         try:
             snap = s.risk_snapshot_json or {}
@@ -812,10 +901,9 @@ def count_inflight_entry_orders(
                 and not (isinstance(le, dict) and le.get("position") is not None)
                 and int(s.id) not in claim_owner_ids
             ):
-                _raise_unknown_alpaca_risk(
-                    "pending_entry_evidence_missing",
-                    session_id=s.id,
-                )
+                # Pending, no position, no unresolved claim, not submitted:
+                # provably never crossed broker HTTP => not an in-flight order.
+                continue
         except (TypeError, ValueError, AttributeError):
             if family in _ALPACA_PAPER_RISK_FAMILIES:
                 _raise_unknown_alpaca_risk(
@@ -871,6 +959,11 @@ def sum_inflight_entry_risk_usd(
     total = 0.0
     claim_owner_cids: set[tuple[int, str]] = set()
     claim_owner_ids: set[int] = set()
+    # Unknown in-flight dollars are not zero dollars. Let the caller fail closed.
+    # Session rows FIRST, claim ledger AFTER (2026-09-02): a sibling whose claim
+    # commits between the two reads is charged via the claim, never dropped as
+    # pre-transport.
+    rows = q.all()
     if family in _ALPACA_PAPER_RISK_FAMILIES:
         claims = _alpaca_unresolved_entry_claims(db)
         for claim in claims:
@@ -895,22 +988,14 @@ def sum_inflight_entry_risk_usd(
                 claim_owner_cids.add(
                     (int(claim.owner_session_id), str(claim.client_order_id))
                 )
-    # Unknown in-flight dollars are not zero dollars. Let the caller fail closed.
-    rows = q.all()
     for s in rows:
         try:
             snap = s.risk_snapshot_json or {}
             le = snap.get("momentum_live_execution") if isinstance(snap, dict) else None
             if not (isinstance(le, dict) and le.get("entry_submitted") and not le.get("position")):
-                if (
-                    family in _ALPACA_PAPER_RISK_FAMILIES
-                    and not (isinstance(le, dict) and le.get("position") is not None)
-                    and int(s.id) not in claim_owner_ids
-                ):
-                    _raise_unknown_alpaca_risk(
-                        "pending_entry_evidence_missing",
-                        session_id=s.id,
-                    )
+                # Pending with no position and no unresolved claim (and not
+                # submitted): provably never crossed broker HTTP => $0 in flight.
+                # A claim-owning row is already charged via the claim loop.
                 continue
             legacy_cid = str(le.get("entry_client_order_id") or "").strip()
             if legacy_cid and (int(s.id), legacy_cid) in claim_owner_cids:
@@ -1495,7 +1580,8 @@ def _enqueue_risk_envelope_displacement(
         return meta
     # Largest at-risk open position first (the two dying IPW losers on 07-02).
     rows = sorted(
-        [r for r in (open_rows or []) if isinstance(r, dict) and float(r.get("at_risk_usd") or 0.0) > 0.0],
+        [r for r in (open_rows or []) if isinstance(r, dict) and not r.get("note")
+         and float(r.get("at_risk_usd") or 0.0) > 0.0],
         key=lambda r: float(r.get("at_risk_usd") or 0.0),
         reverse=True,
     )

@@ -31,8 +31,10 @@ from ....models.trading import MomentumSymbolViability, TradingAutomationSession
 from .crypto_liquidity import crypto_liquidity_ok
 from .live_fsm import (
     LIVE_RUNNER_ACTIVE_FOR_CONCURRENCY,
+    LIVE_RUNNER_TERMINAL_STATES,
     LIVE_WATCHING_PREFILL_STATES,
     STATE_ARMED_PENDING_RUNNER,
+    STATE_LIVE_CANCELLED,
     STATE_QUEUED_LIVE,
     STATE_WATCHING_LIVE,
 )
@@ -1825,10 +1827,106 @@ def _probe_24h_eligibility(symbols: list[str]) -> None:
             _TRADABILITY_24H.pop(_k, None)
 
 
+def _reap_in_flight_reason(state: Any, le: Any) -> str | None:
+    """Why a pre-entry row must NOT be reaped, or None when it is truly idle.
+
+    2026-09-02 CANF 19471: the reaper cancelled a session in the SAME second its
+    entry order filled. The unlocked guard above the loop had read a snapshot
+    from BEFORE the runner's SELECT FOR UPDATE; by the time
+    ``cancel_automation_session`` took the row lock the session was in
+    ``live_pending_entry`` with a submitted order. This predicate is evaluated a
+    second time on the LOCKED row (see the NOWAIT probe in the loop) so the
+    decision is made against the state the runner actually committed.
+
+    Pure: no DB, no clock. Any signal of entry work in flight => a reason.
+
+    The signals are exactly the ones the unlocked guard and the rank-displacement
+    lock-time guard (``_guarded_displacement_reap``) honour — state, an active
+    entry order id, ``entry_submitted``, an unresolved order in history — plus a
+    durable-claim reconcile still pending on a CID. Deliberately NOT a signal:
+    ``entry_place_count``. That counter is only cleared by a RECYCLE
+    (``_RECYCLE_ENTRY_STATE_KEYS``) and survives every intra-cycle return to
+    watching (entry_ack_timeout, terminal zero-fill, a pre-HTTP
+    live_blocked_by_risk / adaptive-builder bounce), so a watcher that ever
+    attempted one entry this cycle would pass the unlocked guard, win the NOWAIT
+    probe and abort here on every pass — never reaped, slot never freed (224 such
+    rows in 14d on the live DB were reaped by the pre-lock reaper). Same for a
+    bare ``entry_client_order_id``: a CID that reached the durable claim ledger
+    is handled by ``cancel_automation_session`` under this very lock; a CID left
+    behind by a cancelled attempt is not entry work. A row that is mid-place
+    holds this lock across broker HTTP, so the NOWAIT probe — not a counter —
+    is what excludes it.
+    """
+    if str(state or "") not in _REAPABLE_PRE_ENTRY_STATES:
+        return f"state_not_reapable:{state}"
+    le = le if isinstance(le, dict) else {}
+    if le.get("entry_order_id"):
+        return "entry_order_id"
+    if le.get("entry_submitted"):
+        return "entry_submitted"
+    ids = [str(x) for x in (le.get("entry_order_ids_all") or [])]
+    resolved = le.get("entry_orders_resolved") or {}
+    if any(x not in resolved for x in ids):
+        return "unresolved_entry_order"
+    if le.get("entry_reconcile_pending_client_order_id"):
+        return "entry_reconcile_pending_client_order_id"
+    return None
+
+
+def _reap_age_anchor(row: Any, le: Any) -> datetime | None:
+    """The instant the watch clock starts: the LAST recycle, not the original arm.
+
+    19471 was armed 11:03:23, traded once, recycled 11:11:10 and was reaped at
+    11:19:10 as "watched > 300s, never entered" — 16 minutes from the arm, but
+    8 minutes (and one completed trade) from the recycle. ``started_at`` is
+    never advanced, so a recycled watcher measured from it is always "stale".
+    Prefers ``last_recycled_at_utc`` (stamped by the recycle branch), then
+    ``last_exit_at_utc`` (rows recycled before that stamp existed), then
+    ``started_at``. Naive UTC throughout (matches the pass clock).
+    """
+    le = le if isinstance(le, dict) else {}
+    for key in ("last_recycled_at_utc", "last_exit_at_utc"):
+        raw = le.get(key)
+        if not raw:
+            continue
+        try:
+            parsed = datetime.fromisoformat(str(raw))
+        except (TypeError, ValueError):
+            continue
+        if parsed.tzinfo is not None:
+            parsed = parsed.astimezone(timezone.utc).replace(tzinfo=None)
+        return parsed
+    started = getattr(row, "started_at", None)
+    return started if isinstance(started, datetime) else None
+
+
 def _reap_stale_watching_sessions(db: Session, *, user_id: int | None, now: datetime) -> int:
     """Cancel PRE-ENTRY live sessions that have watched too long without entering,
     freeing the concurrency slot for a fresher surging candidate — Ross moves on
     when a setup never triggers. Never touches a session that holds a position.
+
+    2026-09-02 (CANF 19471, naked 165 sh for 15 min): three reaper defects
+    closed here, zero new flags —
+      (1) the reap decision is re-made UNDER the row lock (FOR UPDATE NOWAIT in
+          a savepoint; a busy row = a live tick is submitting = skip, never wait);
+      (2) watch age is anchored at the LAST RECYCLE (``_reap_age_anchor``), not
+          ``started_at``;
+      (3) only a TERMINAL cancel counts as a reap. A DEFERRED cancel (durable
+          claim with a CID, non-Alpaca quarantine) wrote a pause + entry
+          pointers that MUST persist: ``run_auto_arm_pass`` commits only when
+          ``reaped > 0`` and otherwise rolls the read txn back before the probe
+          phase, which would erase those writes and re-run the cancel every
+          pass. Such a cancel is committed here, immediately, and not counted.
+          A CID-bearing deferral writes ``entry_submitted=True`` + pointers, so
+          the unlocked guard skips the row on later passes (no repeat). The
+          CID-LESS durable-claim branch writes ONLY the operator pause (no
+          pointers), so that row is re-cancelled — and its pause re-committed —
+          on every pass until the claim reconciles: benign (the branch never
+          reaches broker HTTP; same cadence as the pre-lock reaper), so a
+          repeating ``reap DEFERRED`` for one session with
+          ``terminalization_deferred=True`` is expected, not an alert. A cancel
+          that FAILS (``ok=False`` / ``None``) commits nothing and logs
+          ``reap FAILED`` (distinct from DEFERRED); it also repeats each pass.
     """
     base_sec = _max_watch_seconds()
     cutoff = now - timedelta(seconds=base_sec)
@@ -1875,6 +1973,7 @@ def _reap_stale_watching_sessions(db: Session, *, user_id: int | None, now: date
     from .automation_query import cancel_automation_session
 
     reaped = 0
+    deferred = 0
     for s in rows:
         # ⚠️ ANG BROKER ORDER GUARD (2026-08-27, BRNX 17370). Ang docstring sa
         # itaas ay nangangako: "Never touches a session that holds a position" --
@@ -1920,6 +2019,17 @@ def _reap_stale_watching_sessions(db: Session, *, user_id: int | None, now: date
                 "[auto_arm] reap SKIPPED session=%s %s: hindi mabasa ang "
                 "snapshot — hindi magre-reap nang bulag",
                 getattr(s, "id", None), getattr(s, "symbol", None),
+            )
+            continue
+        # WATCH AGE FROM THE LAST RECYCLE (2026-09-02). The SQL prefilter on
+        # started_at is a cheap superset; a watcher that recycled recently is
+        # fresh again and keeps its slot to the base cutoff from THAT instant.
+        _anchor = _reap_age_anchor(s, _rg_le)
+        if _anchor is not None and _anchor >= cutoff:
+            logger.info(
+                "[auto_arm] reap KEEP session=%s %s: fresh since last recycle "
+                "(anchor=%s cutoff=%s)",
+                s.id, s.symbol, _anchor.isoformat(), cutoff.isoformat(),
             )
             continue
         # PROGRESSING setups earn the extended watch: a tick-armed session
@@ -1969,12 +2079,12 @@ def _reap_stale_watching_sessions(db: Session, *, user_id: int | None, now: date
                 if _leader_sec > 0
                 else extend_cutoff
             )
-            if s.started_at >= _leader_cutoff:
+            if _anchor is not None and _anchor >= _leader_cutoff:
                 logger.info(
                     "[auto_arm] leader watch KEEP %s session=%s (age=%.0fs budget=%.0fs) "
                     "— stock of the day holds its slot through the pullback",
                     s.symbol, s.id,
-                    (now - s.started_at).total_seconds() if s.started_at else -1.0,
+                    (now - _anchor).total_seconds(),
                     _leader_sec,
                 )
                 continue
@@ -1985,14 +2095,16 @@ def _reap_stale_watching_sessions(db: Session, *, user_id: int | None, now: date
                 if (
                     isinstance(_le, dict)
                     and _watcher_is_building(_le, base_sec=base_sec)
-                    and s.started_at >= extend_cutoff
+                    and _anchor is not None
+                    and _anchor >= extend_cutoff
                 ):
                     continue
             else:
                 if (
                     isinstance(_le, dict)
                     and _le.get("watch_break_level")
-                    and s.started_at >= extend_cutoff
+                    and _anchor is not None
+                    and _anchor >= extend_cutoff
                 ):
                     continue
         except Exception:
@@ -2010,8 +2122,8 @@ def _reap_stale_watching_sessions(db: Session, *, user_id: int | None, now: date
                 _su = str(s.symbol or "").upper()
                 _past_ceiling = (
                     _event_ceiling_cutoff is not None
-                    and s.started_at is not None
-                    and s.started_at < _event_ceiling_cutoff
+                    and _anchor is not None
+                    and _anchor < _event_ceiling_cutoff
                 )
                 # The session's OWN cached last_mid (already loaded above — zero new
                 # fetch) lets the conviction check re-derive a dropped daily-breaking
@@ -2031,25 +2143,148 @@ def _reap_stale_watching_sessions(db: Session, *, user_id: int | None, now: date
                 # Fail-SAFE: any error in the keep evaluation falls through to the normal
                 # fixed-clock reap below (never a leak; never blocks the authoritative cancel).
                 logger.debug("[auto_arm] event-based keep eval failed session=%s", getattr(s, "id", None), exc_info=True)
+        # ── DECIDE UNDER THE ROW LOCK (2026-09-02, CANF 19471) ──────────────
+        # Everything above read a snapshot from the pass's read txn. The runner
+        # tick that submits the entry holds this row FOR UPDATE across broker
+        # HTTP; a NOWAIT probe therefore answers "is a tick submitting RIGHT
+        # NOW?" without ever parking the auto-arm pass behind it. Lock refusal
+        # => skip. Lock won => re-run the in-flight predicate + age anchor on
+        # the FRESH row (populate_existing) and abort if anything changed. The
+        # savepoint commit keeps the lock until the outer txn ends, so the
+        # cancel below runs against a row nobody else can advance.
+        _nested = None
         try:
-            cancel_automation_session(db, user_id=int(user_id), session_id=int(s.id))
-            reaped += 1
-            # Cool this name down so it doesn't immediately re-arm the slot it just
-            # churned without firing (PROGRESSING tick-armed setups are already excluded
-            # above via watch_break_level). CLASS-AGNOSTIC (2026-06-17): now damps
-            # equities too (was '-USD'-only) so the rank-displacement loop can't
-            # oscillate on an equity it just freed.
+            if callable(getattr(db, "begin_nested", None)):
+                _nested = db.begin_nested()
+                _locked = (
+                    db.query(TradingAutomationSession)
+                    .filter(TradingAutomationSession.id == int(s.id))
+                    .with_for_update(nowait=True)
+                    .populate_existing()
+                    .one_or_none()
+                )
+                if _locked is None:
+                    _nested.rollback()
+                    continue
+                _l_snap = (
+                    _locked.risk_snapshot_json
+                    if isinstance(_locked.risk_snapshot_json, dict)
+                    else {}
+                )
+                _l_le = _l_snap.get("momentum_live_execution")
+                _l_reason = _reap_in_flight_reason(_locked.state, _l_le)
+                _l_anchor = _reap_age_anchor(_locked, _l_le)
+                if _l_reason is not None or (
+                    _l_anchor is not None and _l_anchor >= cutoff
+                ):
+                    _nested.rollback()
+                    logger.warning(
+                        "[auto_arm] reap ABORTED under lock session=%s %s: "
+                        "state=%s reason=%s anchor=%s — ang locked row ay hindi "
+                        "'never entered'",
+                        s.id, s.symbol, _locked.state,
+                        _l_reason or "fresh_since_recycle",
+                        _l_anchor.isoformat() if _l_anchor is not None else None,
+                    )
+                    continue
+                _nested.commit()
+        except Exception as exc:
             try:
-                _write_reap_cooldown(str(s.symbol or "").upper(), now)
+                if _nested is not None and _nested.is_active:
+                    _nested.rollback()
             except Exception:
                 pass
             logger.warning(
-                "[auto_arm] reaped stale pre-entry session=%s %s state=%s "
-                "(watched > %ss, never entered) — freeing slot for a fresher mover",
-                s.id, s.symbol, s.state, _max_watch_seconds(),
+                "[auto_arm] reap SKIPPED session=%s %s: row locked by a live "
+                "tick (%s) — hindi magre-reap laban sa nagsu-submit na tick",
+                s.id, s.symbol, type(exc).__name__,
             )
+            continue
+        try:
+            _res = cancel_automation_session(
+                db, user_id=int(user_id), session_id=int(s.id)
+            ) or {}
         except Exception:
             logger.debug("[auto_arm] reap failed session=%s", getattr(s, "id", None), exc_info=True)
+            continue
+        _res_state = str(_res.get("state") or STATE_LIVE_CANCELLED)
+        _terminal = (
+            bool(_res.get("ok"))
+            and not _res.get("pending")
+            and not _res.get("terminalization_deferred")
+            and _res_state in LIVE_RUNNER_TERMINAL_STATES
+        )
+        if not _terminal:
+            if _res.get("ok"):
+                # DEFERRED (durable-claim branch wrote entry_submitted/pointers/
+                # pause; non-Alpaca quarantine wrote its marker). Those writes
+                # MUST persist: run_auto_arm_pass commits only when reaped>0 and
+                # otherwise ROLLS BACK before the probe phase, which would erase
+                # the pause/pointer, re-run this cancel every pass, and keep a
+                # crash-after-HTTP fill unowned (the heal + paused adoption need
+                # entry_submitted=True). Commit here — this also releases the
+                # NOWAIT-held row lock immediately. Never clear_operator_pause
+                # here: a pause the reaper did not apply may be a human's.
+                try:
+                    db.commit()
+                except Exception:
+                    # Never let a transient PG error escape the reaper: the
+                    # unguarded call in run_auto_arm_pass would abandon the
+                    # WHOLE pass (no arming on this cadence). The failed COMMIT
+                    # already aborted the txn, so every uncommitted write of
+                    # this pass — including earlier TERMINAL reaps — is gone:
+                    # reset the session and the count (cooldowns for those
+                    # symbols were already written; harmless). The deferred
+                    # cancel simply re-runs next pass, as before this commit.
+                    logger.warning(
+                        "[auto_arm] reap DEFERRED commit failed session=%s — "
+                        "txn reset, %s earlier reap(s) this pass discarded; "
+                        "cancel re-runs next pass",
+                        s.id, reaped, exc_info=True,
+                    )
+                    try:
+                        db.rollback()
+                    except Exception:
+                        pass
+                    reaped = 0
+                    continue
+                deferred += 1
+                logger.warning(
+                    "[auto_arm] reap DEFERRED session=%s %s state=%s result=%s — hindi "
+                    "na-terminalize; walang cooldown, slot hindi pinalaya; writes committed",
+                    s.id, s.symbol, s.state,
+                    {k: _res.get(k) for k in (
+                        "ok", "error", "pending", "terminalization_deferred", "state"
+                    )},
+                )
+                continue
+            # ok=False / None: nothing was written, nothing committed. Distinct
+            # line so the DEFERRED watch never conflates a failed cancel (which
+            # legitimately repeats every pass) with a committed deferral.
+            logger.warning(
+                "[auto_arm] reap FAILED session=%s %s state=%s result=%s — cancel "
+                "hindi tinanggap; walang write, walang commit, walang cooldown",
+                s.id, s.symbol, s.state,
+                {k: _res.get(k) for k in ("ok", "error", "pending", "state")},
+            )
+            continue
+        reaped += 1
+        # Cool this name down so it doesn't immediately re-arm the slot it just
+        # churned without firing (PROGRESSING tick-armed setups are already excluded
+        # above via watch_break_level). CLASS-AGNOSTIC (2026-06-17): now damps
+        # equities too (was '-USD'-only) so the rank-displacement loop can't
+        # oscillate on an equity it just freed.
+        try:
+            _write_reap_cooldown(str(s.symbol or "").upper(), now)
+        except Exception:
+            pass
+        logger.warning(
+            "[auto_arm] reaped stale pre-entry session=%s %s state=%s "
+            "(watched > %ss, never entered) — freeing slot for a fresher mover",
+            s.id, s.symbol, s.state, _max_watch_seconds(),
+        )
+    if reaped or deferred:
+        logger.info("[auto_arm] reap pass reaped=%s deferred=%s", reaped, deferred)
     return reaped
 
 

@@ -666,9 +666,12 @@ def test_reaper_cancels_stale_pre_entry_sessions(monkeypatch):
         "app.services.trading.momentum_neural.automation_query.cancel_automation_session",
         lambda db, *, user_id, session_id: cancelled.append(session_id) or {"ok": True},
     )
+    # risk_snapshot_json={} : the 2026-08-27 broker-order guard reads the snapshot
+    # and SKIPS (fail-closed) a row it cannot read — a bare SimpleNamespace was
+    # being skipped, so this test was red on main until 2026-09-02.
     rows = [
-        SimpleNamespace(id=8, symbol="RSC-USD", state="watching_live"),
-        SimpleNamespace(id=9, symbol="FIDA-USD", state="queued_live"),
+        SimpleNamespace(id=8, symbol="RSC-USD", state="watching_live", risk_snapshot_json={}),
+        SimpleNamespace(id=9, symbol="FIDA-USD", state="queued_live", risk_snapshot_json={}),
     ]
     n = aa._reap_stale_watching_sessions(_DBWithRows(rows), user_id=1, now=datetime.utcnow())
     assert n == 2
