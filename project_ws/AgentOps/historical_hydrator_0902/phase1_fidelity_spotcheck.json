@@ -1,0 +1,56 @@
+{
+  "started_utc": "2026-09-02T23:15:46.383488Z",
+  "recorded_survey": [
+    {
+      "symbol": "CANF",
+      "latest_recorded_et": "2026-09-02 23:00:43.899887"
+    },
+    {
+      "symbol": "SSM",
+      "latest_recorded_et": "2026-09-02 21:58:16.920220"
+    },
+    {
+      "symbol": "BIAF",
+      "latest_recorded_et": "2026-09-02 23:15:43.752288"
+    },
+    {
+      "symbol": "JLHL",
+      "latest_recorded_et": "2026-09-02 23:15:20.486103"
+    },
+    {
+      "symbol": "FLYE",
+      "latest_recorded_et": "2026-09-02 23:15:01.298399"
+    },
+    {
+      "symbol": "LIDR",
+      "latest_recorded_et": "2026-09-02 14:23:29.846052"
+    }
+  ],
+  "window": {
+    "symbol": "CANF",
+    "start_et": "2026-09-02 22:45:43.899887",
+    "end_et": "2026-09-02 22:55:43.899887",
+    "start_et_converted": "2026-09-02 18:45:43.899887",
+    "end_et_converted": "2026-09-02 18:55:43.899887"
+  },
+  "recorded_count": 29,
+  "hydrated_count": 29,
+  "exact_triplet_matches": 29,
+  "recorded_only": 0,
+  "hydrated_only": 0,
+  "recorded_only_samples": [],
+  "hydrated_only_samples": [],
+  "ts_matched": 29,
+  "max_abs_price_diff": 0.0,
+  "max_abs_bid_diff": 0.0,
+  "max_abs_ask_diff": 0.0,
+  "recorded_first_last": [
+    "2026-09-02 22:45:47.206197",
+    "2026-09-02 22:55:34.964895"
+  ],
+  "hydrated_first_last": [
+    "2026-09-02 22:45:47.206197",
+    "2026-09-02 22:55:34.964895"
+  ],
+  "finished_utc": "2026-09-02T23:15:46.975132Z"
+}
