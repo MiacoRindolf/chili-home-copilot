@@ -3195,6 +3195,23 @@ class Settings(BaseSettings):
             "CHILI_MOMENTUM_OUTCOME_RECON_BROKER_ATTRIBUTION_NO_FILL_BACKOFF_SECONDS"
         ),
     )
+    # ⚠️ ANG IKALAWANG HORIZON. Ang mahabang backoff sa itaas ay para LAMANG sa
+    # hilerang HINDI kayang harangan ang loss guard (isang `not_entered` na klase
+    # na nilalaktawan mismo ng guard). Kapag ang hilera ay maaaring humarang —
+    # `entered` / `unknown` / `conflict` — ang bawat segundo ng backoff ay isang
+    # segundo ng `loss_guard_history_unavailable` para sa BUONG account. Ang
+    # 30-minutong backoff doon ay muling nag-aarma ng landmine ng 09-02 na may
+    # 30-minutong mitsa. Kaya maikli ito: sapat para hindi maubos ang budget,
+    # sapat na maikli para ang lane ay bumalik agad kapag lumitaw na ang fill.
+    chili_momentum_outcome_recon_broker_attribution_blocking_retry_seconds: int = Field(
+        default=120,
+        ge=0,
+        le=3600,
+        validation_alias=AliasChoices(
+            "CHILI_MOMENTUM_OUTCOME_RECON_BROKER_ATTRIBUTION_BLOCKING_RETRY_SECONDS"
+        ),
+        description="Retry horizon for an outcome whose unresolved broker label can disarm the whole account (loss guard `entered`/`unknown`/`conflict`). Short by design: a long backoff here converts a transient listing gap into a guaranteed arming outage of exactly that length.",
+    )
     chili_momentum_broker_truth_label_enabled: bool = Field(
         default=False,
         validation_alias=AliasChoices("CHILI_MOMENTUM_BROKER_TRUTH_LABEL_ENABLED"),

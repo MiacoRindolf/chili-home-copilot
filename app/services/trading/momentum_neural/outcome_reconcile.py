@@ -61,6 +61,7 @@ from sqlalchemy.orm import Session
 
 from ....config import settings
 from ....models.trading import MomentumAutomationOutcome, TradingAutomationSession
+from .outcome_labels import NEVER_ENTERED_OUTCOMES
 
 logger = logging.getLogger(__name__)
 
@@ -119,10 +120,24 @@ ATTR_TRUNCATED = "truncated"
 # The listing is readable but provably does not cover this session (it is missing
 # the session's own ledger legs) → nothing it says may certify anything.
 ATTR_LISTING_INCOMPLETE = "listing_incomplete"
-# No broker read was spent: the session has no entry evidence at all, so no fill
-# can exist for it (budget protection, not a verdict about the broker).
+# No broker read was spent: the session has no entry evidence AND one readable
+# listing already proved the broker owns nothing for it (budget protection, not a
+# verdict about the broker). NEVER asserted before that proof read — see
+# `broker_read_plan`: an envelope that LOST its order id is exactly the shape this
+# PR exists to fix, and a permanent skip would make its loss invisible forever.
 ATTR_SKIPPED_NO_ENTRY_EVIDENCE = "skipped_no_entry_evidence"
 ATTR_SKIPPED_BACKOFF = "skipped_no_owned_fills_backoff"
+# No broker read was spent: the session window cannot be derived at all, so the
+# reader would be called with a null bound and the branch would bail WITHOUT an
+# HTTP call. Charging a budget slot for a read that provably cannot happen is a
+# pure leak, and the resulting `unreadable` verdict stamps no version — i.e. the
+# row repeats that leak every 60 s forever.
+ATTR_SKIPPED_NO_WINDOW = "skipped_no_session_window"
+_EPOCH_NAIVE = datetime(1970, 1, 1)
+# The listing is readable and complete, but a whole cycle's envelope anchors (an
+# entry-side AND an exit-side order id the session recorded) are absent from it —
+# the only shape that can fabricate a FLAT verdict out of a partial listing.
+ATTR_ANCHORS_MISSING = "envelope_anchors_missing"
 
 BrokerOrdersReader = Callable[[str, datetime, datetime], dict]
 
@@ -328,14 +343,146 @@ def _owned_order_ids_from_le(le: dict) -> set:
     return out
 
 
-def _attribution_backoff_seconds() -> int:
+def _envelope_anchor_ids(le: dict) -> tuple[set, set]:
+    """``(entry_side_anchors, exit_side_anchors)`` — order ids the session itself
+    recorded, split by which side of the round-trip they opened or closed.
+
+    These are the completeness anchors for a session whose FSM ledger is EMPTY
+    (the ledger-derived guard has nothing to work with there). Every one of them
+    was submitted for this symbol inside the session's own life, so a readable
+    ``status=all`` listing for [started_at−120 s, ended_at+grace] MUST contain it.
+
+    Deliberately EXCLUDES ``orphan_reconcile_truth`` and ``emergency_exit_authority``:
+    an orphan repair by construction references an order from an EARLIER window,
+    so demanding it would fabricate a permanent incompleteness — and a row that can
+    never certify pins the whole account at `loss_guard_history_unavailable`,
+    which is a worse outage than the mispriced label it would prevent."""
+    entry: set[str] = set()
+    exit_: set[str] = set()
+    if not isinstance(le, dict):
+        return entry, exit_
+
+    def _add(dst: set, v: Any) -> None:
+        s = str(v or "").strip()
+        if s:
+            dst.add(s)
+
+    _add(entry, le.get("entry_order_id"))
+    ids_all = le.get("entry_order_ids_all")
+    if isinstance(ids_all, (list, tuple, set)):
+        for v in ids_all:
+            _add(entry, v)
+    resolved = le.get("entry_orders_resolved")
+    if isinstance(resolved, dict):
+        for v in resolved.keys():
+            _add(entry, v)
+    for key in ("last_exit_order_id", "exit_order_id", "scale_limit_order_id"):
+        _add(exit_, le.get(key))
+    for leg in _unpriced_emergency_legs(le):
+        _add(exit_, (leg or {}).get("broker_order_id"))
+    return entry, exit_
+
+
+def _loss_guard_label_usable(outcome: Any) -> bool:
+    """Does THIS row satisfy the loss guard's broker-truth admission? (pure)
+
+    Mirrors ``risk_policy._alpaca_loss_history_broker_truth`` minus its feature
+    flag. A row that fails this — for an entered session — makes the guard emit
+    ``loss_guard_history_unavailable`` for the WHOLE account, which is the
+    85-minute arming outage of 2026-09-02. It is therefore the only correct
+    definition of "the loss guard is waiting on this row", and it is what the
+    batch ordering and the retry horizon must both key on.
+    """
+    if str(getattr(outcome, "broker_recon_status", "") or "").strip().lower() != STATUS_RECONCILED:
+        return False
+    if not isinstance(getattr(outcome, "broker_reconciled_at", None), datetime):
+        return False
+    if _f(getattr(outcome, "broker_realized_pnl_usd", None)) is None:
+        return False
+    notional = _f(getattr(outcome, "broker_notional_basis_usd", None))
+    return notional is not None and notional > 0.0
+
+
+def _loss_guard_can_block(outcome: Any, sess: Any) -> bool:
+    """Can an unresolved label on this row block the WHOLE account? (pure, fail-closed)
+
+    ``risk_policy.load_current_live_loss_history`` skips exactly ONE class of row:
+    the one ``_loss_history_entry_classification`` calls ``not_entered`` (a
+    never-entered outcome class with no durable and no economic evidence).
+    Everything else — ``entered``, ``unknown``, ``conflict`` — gaps the day and
+    disarms the lane.
+
+    This returns True unless the row PROVABLY lands in that one skipped class, so
+    an unrecognised shape errs toward "keep retrying" rather than toward a long
+    backoff on a row the lane is disarmed behind.
+    """
+    cls = str(getattr(outcome, "outcome_class", "") or "").strip().lower()
+    if cls not in NEVER_ENTERED_OUTCOMES:
+        return True
+    # Any economic signal on a never-entered class is a `conflict` for the guard.
+    for attr in ("realized_pnl_usd", "return_bps", "broker_realized_pnl_usd", "broker_return_bps"):
+        raw = getattr(outcome, attr, None)
+        if raw is None:
+            continue
+        val = _f(raw)
+        if val is None or abs(val) > 1e-12:
+            return True
+    notional = _f(getattr(outcome, "broker_notional_basis_usd", None))
+    if notional is not None and notional > 0.0:
+        return True
+    le = _le_of(sess)
+    pos = le.get("position")
+    if isinstance(pos, dict) and (_f(pos.get("quantity")) or 0.0) > 0:
+        return True
+    for key in ("entry_filled_qty", "entry_fill_price", "emergency_position_truth", "orphan_reconcile_truth"):
+        if le.get(key):
+            return True
+    return bool(_unpriced_emergency_legs(le))
+
+
+def _attribution_backoff_seconds(*, blocking: bool = False) -> int:
+    """Seconds until this row may spend another broker read.
+
+    TWO horizons, because one number cannot serve both shapes:
+      * ``blocking`` (the loss guard is disarmed behind this row) — SHORT. A long
+        backoff here converts a transient invisibility (the fill has not
+        propagated into the listing yet; the operator sell landed after the grace
+        window) into a GUARANTEED account-wide arming outage of exactly that
+        length. The 09-02 landmine was 85 minutes; a 30-minute backoff on a
+        blocking row re-arms it with a 30-minute fuse.
+      * everything else (a cancelled-pre-entry row the guard skips outright) —
+        LONG, because re-listing an immutable empty answer every 60 s is pure
+        budget burn.
+    """
+    key = (
+        "chili_momentum_outcome_recon_broker_attribution_blocking_retry_seconds"
+        if blocking
+        else "chili_momentum_outcome_recon_broker_attribution_no_fill_backoff_seconds"
+    )
+    default = 120 if blocking else 1800
     try:
-        return max(
-            0,
-            int(getattr(settings, "chili_momentum_outcome_recon_broker_attribution_no_fill_backoff_seconds", 1800) or 0),
-        )
+        return max(0, int(getattr(settings, key, default) or 0))
     except (TypeError, ValueError):
-        return 1800
+        return default
+
+
+def _session_attribution_window(sess: Any, outcome: Any) -> tuple:
+    """The ``[after, until]`` bound the broker listing is read with, or ``(None, None)``.
+
+    Shared by ``broker_read_plan`` and ``reconcile_one_outcome`` so the budget is
+    never charged for a read the reconciler will refuse to make: a row with no
+    derivable window used to burn one of the 20 slots every single pass and land
+    ``unreadable`` (no ``attribution_version``) forever.
+    """
+    w_start = _naive_utc(getattr(sess, "started_at", None))
+    w_end = _naive_utc(getattr(sess, "ended_at", None)) or _naive_utc(getattr(outcome, "terminal_at", None))
+    if w_start is None or w_end is None:
+        return None, None
+    try:
+        grace = int(getattr(settings, "chili_momentum_outcome_recon_broker_attribution_grace_seconds", 900) or 0)
+    except (TypeError, ValueError):
+        grace = 900
+    return w_start - timedelta(seconds=120), w_end + timedelta(seconds=grace)
 
 
 def broker_read_plan(outcome: Any, sess: Any, *, now: Optional[datetime] = None) -> dict:
@@ -347,51 +494,104 @@ def broker_read_plan(outcome: Any, sess: Any, *, now: Optional[datetime] = None)
     if not (_attribution_enabled() and _is_alpaca_family(sess)):
         return {"read": False, "reason": "not_alpaca_attribution"}
     le = _le_of(sess)
-    if not _has_entry_evidence(le):
-        return {"read": False, "reason": ATTR_SKIPPED_NO_ENTRY_EVIDENCE}
     detail = getattr(outcome, "broker_recon_detail_json", None)
     detail = detail if isinstance(detail, dict) else {}
     prior = detail.get("broker_attribution")
     prior = prior if isinstance(prior, dict) else {}
-    # ATTR_SKIPPED_BACKOFF is the marker a previously-skipped pass wrote; it
-    # carries the SAME `attribution_next_retry_utc` forward verbatim, so the
-    # horizon is fixed once by the readable no_owned_fills read and never pushed
-    # out again by the skips themselves.
-    if prior.get("attr_status") in (ATTR_NO_OWNED_FILLS, ATTR_SKIPPED_BACKOFF):
-        # The broker was READABLE and owned nothing. Re-listing every 60 s can only
-        # produce the same empty answer (broker fills are immutable) while eating
-        # the budget a newly terminal FILLED session needs.
+    w_start, w_end = _session_attribution_window(sess, outcome)
+    if w_start is None or w_end is None:
+        # `reconcile_one_outcome` would bail with `unreadable` WITHOUT calling the
+        # reader — charging a budget slot for a read that provably cannot happen.
+        return {"read": False, "reason": ATTR_SKIPPED_NO_WINDOW}
+    if not _has_entry_evidence(le):
+        # The envelope shows nothing that could have filled — but "the envelope
+        # shows nothing" is exactly what an entry whose adoption write was LOST
+        # looks like (CANF 19471 cycle 2), and such a session is classified
+        # `entered` by the loss guard, so a permanent skip pins the whole account
+        # at `loss_guard_history_unavailable` forever. Spend ONE proof read; only
+        # a readable listing that owned nothing earns the permanent skip.
+        clock = now or datetime.utcnow()
+        if detail.get("attribution_no_entry_evidence_proven_empty"):
+            stamped_terminal = _naive_utc(detail.get("attribution_terminal_at"))
+            cur_terminal = _naive_utc(getattr(outcome, "terminal_at", None))
+            if stamped_terminal is not None and cur_terminal is not None and stamped_terminal != cur_terminal:
+                return {"read": True, "reason": "terminal_at_changed"}
+            return {"read": False, "reason": ATTR_SKIPPED_NO_ENTRY_EVIDENCE}
         retry_at = _naive_utc(detail.get("attribution_next_retry_utc"))
+        if retry_at is not None and clock < retry_at:
+            return {"read": False, "reason": ATTR_SKIPPED_BACKOFF, "next_retry_utc": retry_at.isoformat()}
+        return {"read": True, "reason": "no_entry_evidence_proof_read"}
+    # RETRY HORIZON — honoured for EVERY armed verdict, not just `no_owned_fills`.
+    # `unreadable` / `truncated` / `listing_incomplete` / `residual_open` /
+    # `oversold` never stamp an attribution_version, so under the first cut each
+    # one re-listed the broker every 60 s FOREVER while sitting in the top
+    # ordering class — an unbounded set of permanently stuck rows that holds the
+    # whole 20-read budget and starves every row below it. The horizon is written
+    # by `_arm_attribution_retry` (short when the loss guard is blocked behind the
+    # row, long when it is not) and carried forward verbatim by the skips, so a
+    # skip can never push its own horizon out.
+    retry_at = _naive_utc(detail.get("attribution_next_retry_utc"))
+    if retry_at is not None:
         stamped_terminal = _naive_utc(detail.get("attribution_terminal_at"))
         cur_terminal = _naive_utc(getattr(outcome, "terminal_at", None))
         if stamped_terminal is not None and cur_terminal is not None and stamped_terminal != cur_terminal:
             return {"read": True, "reason": "terminal_at_changed"}
         clock = now or datetime.utcnow()
-        if retry_at is not None and clock < retry_at:
+        if clock < retry_at:
             return {"read": False, "reason": ATTR_SKIPPED_BACKOFF, "next_retry_utc": retry_at.isoformat()}
     return {"read": True, "reason": "attribute"}
 
 
 def _attribution_priority(outcome: Any, sess: Any) -> int:
-    """Batch ordering class. 0 = the loss guard is waiting on this row."""
-    status = getattr(outcome, "broker_recon_status", None)
-    if status is None:
-        return 0
-    if status in _TERMINAL_RECON_STATUSES:
-        detail = getattr(outcome, "broker_recon_detail_json", None)
-        detail = detail if isinstance(detail, dict) else {}
-        try:
-            if int(detail.get("attribution_version") or 0) < ATTRIBUTION_VERSION:
-                return 0
-        except (TypeError, ValueError):
-            return 0
+    """Batch ordering class — the budget is spent strictly in this order.
+
+    The class must be "how badly is the LOSS GUARD waiting on this row", not "how
+    old is the attribution stamp". The first cut ranked by the stamp, so:
+      * a backfill row the guard can ALREADY use (`reconciled` with a finite pnl
+        and a positive notional, merely missing an ``attribution_version``) sat in
+        the top class — an unbounded queue of them on a cold deploy; while
+      * a newly terminal FILLED row that lost its first read to a transient Alpaca
+        error dropped to `unreconciled_broker_unavailable` and therefore BELOW
+        every one of them, with no way back up. That row is precisely the one the
+        guard emits ``loss_guard_history_unavailable`` for, account-wide.
+
+      0  the guard cannot use this row and it has never been attributed  (blind, new)
+      1  the guard cannot use this row and it HAS been attributed        (blind, converged)
+      2  the guard can already use this row (backfill / version upgrade only)
+      3  no entry evidence: the one-time proof read (see `broker_read_plan`) —
+         it must happen, but never before a row that could carry a fill.
+    """
+    if not _has_entry_evidence(_le_of(sess)):
+        return 3
+    if _loss_guard_label_usable(outcome):
         return 2
-    return 1
+    detail = getattr(outcome, "broker_recon_detail_json", None)
+    detail = detail if isinstance(detail, dict) else {}
+    try:
+        attributed = int(detail.get("attribution_version") or 0) >= ATTRIBUTION_VERSION
+    except (TypeError, ValueError):
+        attributed = False
+    return 1 if attributed else 0
 
 
 def _oco_legs_of(o: Any) -> list[dict]:
+    """Child legs whose side is PROVABLY the parent's side — i.e. OCO only.
+
+    The normalized leg dict (alpaca_spot._normalize_order) carries no ``side``, so
+    the walker can only infer it from the parent. That inference holds for
+    ``order_class=oco`` (take-profit limit + stop-loss, both reducing the same
+    position, both the parent's side) and is FALSE for ``bracket``/``oto``, whose
+    parent is the ENTRY and whose legs are the opposite side. Walking a bracket
+    would book a protective SELL as a second opening BUY — measured: a 165-share
+    entry with a filled 165-share stop leg came out ``open_qty=330, close_qty=0``
+    and a fabricated −$1,415.70. CHILI only ever submits ``OrderClass.OCO``
+    (alpaca_spot.py:3964), so anything else is either a hand-placed order or a
+    future code path: fail closed and let the parent stand on its own economics.
+    """
     raw = _order_field(o, "raw") if isinstance(o, dict) else getattr(o, "raw", None)
     raw = raw if isinstance(raw, dict) else {}
+    if str(raw.get("order_class") or "").strip().lower() != "oco":
+        return []
     legs = raw.get("legs")
     return [l for l in (legs or []) if isinstance(l, dict)]
 
@@ -408,6 +608,8 @@ def attribute_session_broker_orders(
     ledger_order_ids: Optional[set] = None,
     owned_order_ids: Optional[set] = None,
     expected_listing_order_ids: Optional[set] = None,
+    entry_anchor_ids: Optional[set] = None,
+    exit_anchor_ids: Optional[set] = None,
 ) -> dict:
     """PURE attribution of a session's broker fills (no DB, no HTTP).
 
@@ -483,7 +685,11 @@ def attribute_session_broker_orders(
                     "side": side,
                     "qty": float(lq),
                     "price": float(lpx),
+                    # The leg payload has no clock of its own; this is the
+                    # PARENT's. Marked so nothing downstream mistakes it for the
+                    # leg's real fill time (it is excluded from `earliest_open`).
                     "filled_at_utc": t.isoformat() if t is not None else None,
+                    "filled_at_source": "parent_order",
                     "status": str(child.get("status") or ""),
                 }
                 if in_window:
@@ -529,6 +735,7 @@ def attribute_session_broker_orders(
         _naive_utc(l["filled_at_utc"])
         for l in legs
         if l.get("attribution") and l["side"] == open_side and l.get("filled_at_utc")
+        and l.get("filled_at_source") != "parent_order"  # inherited clock, not leg truth
     ]
     owned_open_times = [t for t in owned_open_times if t is not None]
     earliest_open = min(owned_open_times) if owned_open_times else None
@@ -596,6 +803,18 @@ def attribute_session_broker_orders(
     # such a read says may certify a label.
     expected = {str(x) for x in (expected_listing_order_ids if expected_listing_order_ids is not None else ledger_ids)}
     ledger_missing_from_broker = sorted(expected - listing_ids)
+    # ENVELOPE ANCHORS: the ledger-derived guard above is blind for a session whose
+    # FSM ledger is EMPTY — precisely the sessions this attribution exists for.
+    # A listing that drops ONE side lands residual_open/oversold on its own; the
+    # only way a partial listing fabricates a FLAT is by dropping a WHOLE cycle,
+    # i.e. an entry-side AND an exit-side anchor together. That paired condition is
+    # the gate; a single stale anchor is reported but never blocks (a row that can
+    # never certify pins the account at `loss_guard_history_unavailable`).
+    entry_anchors = {str(x) for x in (entry_anchor_ids or set()) if str(x or "").strip()}
+    exit_anchors = {str(x) for x in (exit_anchor_ids or set()) if str(x or "").strip()}
+    entry_anchors_missing = sorted(entry_anchors - listing_ids)
+    exit_anchors_missing = sorted(exit_anchors - listing_ids)
+    anchors_missing_both_sides = bool(entry_anchors_missing) and bool(exit_anchors_missing)
 
     if ledger_missing_from_broker:
         status = ATTR_LISTING_INCOMPLETE
@@ -604,7 +823,7 @@ def attribute_session_broker_orders(
     elif not attributed:
         status = ATTR_NO_OWNED_FILLS
     elif abs(open_qty - close_qty) <= 1e-9:
-        status = ATTR_FLAT
+        status = ATTR_ANCHORS_MISSING if anchors_missing_both_sides else ATTR_FLAT
     elif open_qty > close_qty:
         status = ATTR_RESIDUAL_OPEN
     else:
@@ -623,6 +842,8 @@ def attribute_session_broker_orders(
         "legs_missing_from_ledger": missing,
         "closing_legs_missing_from_ledger": missing_closing,
         "ledger_ids_missing_from_broker": ledger_missing_from_broker,
+        "entry_anchors_missing_from_broker": entry_anchors_missing,
+        "exit_anchors_missing_from_broker": exit_anchors_missing,
         "listing_order_ids_seen": len(listing_ids),
         "foreign_session_orders_ignored": foreign_owned,
         "unpriced_legs_considered": len(unpriced_legs or []),
@@ -949,6 +1170,14 @@ def reconcile_one_outcome(
     le = _le_of(sess)
     legacy_pnl = _f(outcome.realized_pnl_usd)
     detail: dict[str, Any] = {"reconciled_at_utc": datetime.utcnow().isoformat()}
+    # STICKY across every pass: the divergence event's idempotency marker. A pass
+    # that finds no missing legs (an unreadable broker, a backoff skip) returns
+    # early from `_emit_divergence_event` and would otherwise drop the marker from
+    # the json it writes — the pass after that would then emit a SECOND event for
+    # the same outcome. Carry it before anything else can overwrite `detail`.
+    _prior_detail_in = getattr(outcome, "broker_recon_detail_json", None)
+    if isinstance(_prior_detail_in, dict) and _prior_detail_in.get("divergence_event_emitted"):
+        detail["divergence_event_emitted"] = True
 
     status: str
     broker_pnl: Optional[float] = None
@@ -1035,13 +1264,9 @@ def reconcile_one_outcome(
         ledger_pnl_snapshot = broker_pnl
         ledger_notional_snapshot = broker_notional
         unpriced = _unpriced_emergency_legs(le)
-        grace = int(getattr(settings, "chili_momentum_outcome_recon_broker_attribution_grace_seconds", 900) or 0)
-        w_start = _naive_utc(getattr(sess, "started_at", None))
-        w_end = _naive_utc(getattr(sess, "ended_at", None)) or _naive_utc(getattr(outcome, "terminal_at", None))
-        if w_start is not None:
-            w_start = w_start - timedelta(seconds=120)
-        if w_end is not None:
-            w_end = w_end + timedelta(seconds=grace)
+        # ONE definition of the window, shared with `broker_read_plan`, so the
+        # budget is never charged for a read this branch would refuse to make.
+        w_start, w_end = _session_attribution_window(sess, outcome)
         reader = broker_orders_reader or _default_alpaca_orders_reader
         # The batch loop already charged (or refused) the budget from THIS plan —
         # reuse it verbatim so the two can never disagree across a clock tick.
@@ -1071,6 +1296,7 @@ def reconcile_one_outcome(
                     oid for oid, ts in ledger_legs
                     if ts is None or (w_start <= ts <= w_end)
                 }
+                entry_anchors, exit_anchors = _envelope_anchor_ids(le)
                 attr = attribute_session_broker_orders(
                     session_id=int(outcome.session_id),
                     symbol=str(sess.symbol or ""),
@@ -1082,6 +1308,8 @@ def reconcile_one_outcome(
                     ledger_order_ids=ledger_ids,
                     owned_order_ids=_owned_order_ids_from_le(le),
                     expected_listing_order_ids=expected_ids,
+                    entry_anchor_ids=entry_anchors,
+                    exit_anchor_ids=exit_anchors,
                 )
                 # A readable listing that owns NOTHING while the session's ledger
                 # holds broker-confirmed legs is the same inconsistency as a
@@ -1090,11 +1318,18 @@ def reconcile_one_outcome(
                     attr["attr_status"] = ATTR_LISTING_INCOMPLETE
                     attr["ledger_ids_missing_from_broker"] = sorted(expected_ids)
                     attr["no_owned_fills_with_ledger_legs"] = True
-                # CROSS-SESSION GUARD: never stamp an unpriced-leg match on a
-                # broker order id another outcome already claims.
+                # CROSS-SESSION GUARD: never stamp a NON-CID attribution on a
+                # broker order id another outcome already claims. A cid names
+                # exactly one session and is exempt; an unpriced-leg qty match and
+                # an envelope-id match are both guesses about WHICH session an
+                # anonymous fill belongs to, and two overlapping same-symbol
+                # sessions can each hold the same id (an emergency leg or an
+                # orphan-repair close recorded on both envelopes) — attributing it
+                # twice double counts it straight into the loss guard's day total.
+                _NON_CID_ATTRIBUTIONS = ("unpriced_emergency_leg_match", "session_broker_order_id")
                 fallback_ids = [
                     l["broker_order_id"] for l in attr.get("legs") or []
-                    if l.get("attribution") == "unpriced_emergency_leg_match"
+                    if l.get("attribution") in _NON_CID_ATTRIBUTIONS
                 ]
                 if fallback_ids:
                     probe = _broker_order_ids_attributed_elsewhere(
@@ -1137,6 +1372,41 @@ def reconcile_one_outcome(
             fees_status = "prior_label_preserved"
             detail[marker] = True
 
+        def _arm_attribution_retry() -> None:
+            """Every verdict that did NOT converge must say when it may read again.
+
+            Without this, `unreadable` / `truncated` / `listing_incomplete` /
+            `residual_open` / `oversold` re-listed the broker every 60 s forever
+            (they never stamp an `attribution_version`, so `needs_reconcile` keeps
+            admitting them). An unbounded set of such rows — one credential
+            rotation, one delisted symbol, one never-closing residual — holds the
+            entire 20-read budget every pass and starves everything below it.
+
+            The horizon is SHORT while the loss guard is disarmed behind the row
+            (retrying is the only way the account gets its arming back) and LONG
+            when the guard skips the row outright.
+            """
+            blocking = _loss_guard_can_block(outcome, sess)
+            try:
+                attempts = int(
+                    (getattr(outcome, "broker_recon_detail_json", None) or {}).get("attribution_attempts") or 0
+                )
+            except (TypeError, ValueError, AttributeError):
+                attempts = 0
+            attempts += 1
+            base = _attribution_backoff_seconds(blocking=blocking)
+            if not blocking:
+                # A row the guard ignores may escalate; capped at an hour so the
+                # backoff can never become an effectively permanent stop.
+                base = min(base * max(1, min(attempts, 4)), 3600)
+            detail["attribution_attempts"] = attempts
+            detail["attribution_retry_blocking"] = blocking
+            detail["attribution_next_retry_utc"] = (
+                datetime.utcnow() + timedelta(seconds=base)
+            ).isoformat()
+            t_at = _naive_utc(getattr(outcome, "terminal_at", None))
+            detail["attribution_terminal_at"] = t_at.isoformat() if t_at else None
+
         if a_status == ATTR_FLAT:
             broker_pnl = _f(attr.get("broker_pnl_usd"))
             broker_notional = _f(attr.get("open_notional_usd"))
@@ -1154,6 +1424,10 @@ def reconcile_one_outcome(
             else:
                 status = STATUS_RECONCILED
             detail["attribution_version"] = ATTRIBUTION_VERSION
+            # Converged: drop any horizon a previous non-converged pass armed so a
+            # stale one can never hold a settled row out of a later re-touch.
+            for _k in ("attribution_next_retry_utc", "attribution_attempts", "attribution_retry_blocking"):
+                detail.pop(_k, None)
             if attr.get("legs_missing_from_ledger"):
                 logger.warning(
                     "[broker_truth_recon] session=%s symbol=%s: %d broker fill(s) missing from "
@@ -1162,14 +1436,19 @@ def reconcile_one_outcome(
                     outcome.session_id, sess.symbol, len(attr["legs_missing_from_ledger"]),
                     broker_pnl or 0.0, attr.get("ledger_pnl_usd"),
                 )
-        elif a_status == ATTR_LISTING_INCOMPLETE:
-            # HEADLINE: the listing is missing this session's OWN ledger legs →
-            # wrong bound account generation / wrong window / empty page. Never
-            # certify, never stamp attribution_version (retry next pass).
+        elif a_status in (ATTR_LISTING_INCOMPLETE, ATTR_ANCHORS_MISSING):
+            # HEADLINE: the listing is missing this session's OWN ledger legs (or a
+            # whole cycle's envelope anchors) → wrong bound account generation /
+            # wrong window / empty page. Never certify, never stamp
+            # attribution_version (retry next pass).
             logger.warning(
-                "[broker_truth_recon] ledger ids missing from listing session=%s symbol=%s ids=%s "
-                "window=%s..%s — read does NOT cover the session; refusing to certify",
-                outcome.session_id, sess.symbol, attr.get("ledger_ids_missing_from_broker"),
+                "[broker_truth_recon] ledger ids missing from listing session=%s symbol=%s "
+                "reason=%s ledger_ids=%s entry_anchors=%s exit_anchors=%s window=%s..%s — read "
+                "does NOT cover the session; refusing to certify",
+                outcome.session_id, sess.symbol, a_status,
+                attr.get("ledger_ids_missing_from_broker"),
+                attr.get("entry_anchors_missing_from_broker"),
+                attr.get("exit_anchors_missing_from_broker"),
                 attr.get("window_start_utc"), attr.get("window_end_utc"),
             )
             if _demotion_allowed():
@@ -1179,6 +1458,7 @@ def reconcile_one_outcome(
                 source = "broker_orders_attributed"
             else:
                 _keep_prior_label("attribution_listing_incomplete_label_preserved")
+            _arm_attribution_retry()
         elif a_status == ATTR_RESIDUAL_OPEN:
             if _demotion_allowed():
                 status = STATUS_RESIDUAL_OPEN
@@ -1189,6 +1469,11 @@ def reconcile_one_outcome(
             else:
                 _keep_prior_label("attribution_residual_open_label_preserved")
                 detail["attribution_version"] = ATTRIBUTION_VERSION
+            # `residual_open` is NOT converged — it is "the close is not visible
+            # yet" and the row is re-read until it is. Bound that: an OCO leg the
+            # walker cannot see, or a genuinely never-closed session, would
+            # otherwise hold a budget slot every 60 s for the whole lookback.
+            _arm_attribution_retry()
         elif a_status in (ATTR_OVERSOLD, ATTR_AMBIGUOUS):
             if _demotion_allowed():
                 status = STATUS_AMBIGUOUS_TRADE
@@ -1199,35 +1484,77 @@ def reconcile_one_outcome(
             else:
                 _keep_prior_label("attribution_ambiguous_label_preserved")
                 detail["attribution_version"] = ATTRIBUTION_VERSION
+            _arm_attribution_retry()
         elif a_status == ATTR_NO_OWNED_FILLS:
             # Broker READABLE and the ledger has no legs to contradict it: nothing
             # was ever filled for this session. Stamp the version AND a retry
             # horizon so the row stops burning a broker read every 60 s.
             detail["attribution_version"] = ATTRIBUTION_VERSION
-            detail["attribution_next_retry_utc"] = (
-                datetime.utcnow() + timedelta(seconds=_attribution_backoff_seconds())
-            ).isoformat()
-            t_at = _naive_utc(getattr(outcome, "terminal_at", None))
-            detail["attribution_terminal_at"] = t_at.isoformat() if t_at else None
-        elif a_status in (ATTR_SKIPPED_NO_ENTRY_EVIDENCE, ATTR_SKIPPED_BACKOFF):
-            # No read spent. Keep the ledger verdict exactly; do NOT stamp
-            # attribution_version (the row was never attributed).
+            _arm_attribution_retry()
+            # Envelope shows nothing AND the broker owned nothing: two independent
+            # negatives. THAT earns the permanent skip — never the envelope alone.
+            if not _has_entry_evidence(le):
+                detail["attribution_no_entry_evidence_proven_empty"] = True
+        elif a_status in (ATTR_SKIPPED_NO_ENTRY_EVIDENCE, ATTR_SKIPPED_BACKOFF, ATTR_SKIPPED_NO_WINDOW):
+            # No read spent. Keep the ledger verdict exactly.
             detail["attribution_read_skipped"] = a_status
-            if a_status == ATTR_SKIPPED_BACKOFF:
-                prior_detail = getattr(outcome, "broker_recon_detail_json", None)
-                prior_detail = prior_detail if isinstance(prior_detail, dict) else {}
-                for k in ("attribution_next_retry_utc", "attribution_terminal_at", "attribution_version"):
+            # The skip reasons carry their sticky markers forward verbatim.
+            # `attribution_no_entry_evidence_proven_empty` in particular: dropping
+            # it would make the next pass read the row again, re-stamp it, and skip
+            # again — an every-other-pass read loop, which is the budget churn the
+            # skip exists to prevent. The retry horizon is carried, never
+            # recomputed, so the skips can never push it further out.
+            #
+            # ⚠️ `attribution_version` is NOT in that list, and must never be. A
+            # skip attributes NOTHING, and the version is what makes a TERMINAL
+            # status immutable (`needs_reconcile`). Carrying it meant: arm a
+            # 30-minute backoff off an empty listing while the ledger is still
+            # empty → the exit leg settles inside that window → the next skip
+            # writes `reconciled` (from the ledger alone) AND the inherited
+            # version → the row is terminal forever, never attributed. That is the
+            # CANF-19471 −78.13-instead-of-−186.98 undercount, minted by the very
+            # mechanism added to protect the budget.
+            prior_detail = getattr(outcome, "broker_recon_detail_json", None)
+            prior_detail = prior_detail if isinstance(prior_detail, dict) else {}
+            prior_attr = prior_detail.get("broker_attribution")
+            prior_attr = prior_attr if isinstance(prior_attr, dict) else {}
+            # Only a FLAT verdict earns its version off ACTUALLY attributed broker
+            # legs. Any other stamped version is a "nothing to attribute (yet)"
+            # verdict and must not survive the ledger becoming a closed round-trip.
+            earned_on_broker_legs = prior_attr.get("attr_status") == ATTR_FLAT
+            ledger_now_terminal = status in _TERMINAL_RECON_STATUSES
+            already_attributed = earned_on_broker_legs
+            if ledger_now_terminal and not earned_on_broker_legs:
+                # The ledger settled into a closed round-trip while the row was
+                # backed off. That is exactly the state that MUST be checked
+                # against broker truth, so release the horizon and read next pass.
+                detail["attribution_backoff_released"] = "ledger_settled_terminal"
+                for k in ("attribution_terminal_at", "attribution_no_entry_evidence_proven_empty"):
                     if prior_detail.get(k) is not None:
                         detail[k] = prior_detail[k]
+                detail.pop("attribution_next_retry_utc", None)
+            else:
+                for k in (
+                    "attribution_next_retry_utc",
+                    "attribution_terminal_at",
+                    "attribution_attempts",
+                    "attribution_retry_blocking",
+                    "attribution_no_entry_evidence_proven_empty",
+                ):
+                    if prior_detail.get(k) is not None:
+                        detail[k] = prior_detail[k]
+                if already_attributed and prior_detail.get("attribution_version") is not None:
+                    detail["attribution_version"] = prior_detail["attribution_version"]
         else:
-            # unreadable / truncated / no window: transient. If there is evidence
-            # of legs the ledger never saw, the ledger label is KNOWN-wrong → do
-            # not certify it; retry next pass. Otherwise keep the ledger verdict
-            # (no attribution_version → re-attempted next pass).
+            # unreadable / truncated: transient. If there is evidence of legs the
+            # ledger never saw, the ledger label is KNOWN-wrong → do not certify
+            # it; retry next pass. Otherwise keep the ledger verdict (no
+            # attribution_version → re-attempted after the armed horizon).
             if evidence_of_missing_legs and status in _TERMINAL_RECON_STATUSES:
                 status = STATUS_BROKER_UNAVAILABLE
                 broker_pnl = None
                 broker_notional = None
+            _arm_attribution_retry()
 
     broker_return_bps = _broker_true_return_bps(broker_pnl, broker_notional)
     # A reconciled row whose broker_notional is untrustworthy cannot yield a true
@@ -1317,21 +1644,31 @@ def reconcile_momentum_outcomes_to_broker_truth(
     except (TypeError, ValueError):
         budget = 20
     broker_reads = 0
+    proof_reads = 0
     skipped_no_read_needed = 0
-    # ORDERING (never heap order): the rows the loss guard is waiting on — never
-    # reconciled, or terminal-without-attribution — take the budget FIRST, newest
-    # first. The unordered `.all()` let ~115 no-fill rows shuffle a newly terminal
-    # FILLED session out of the 20-read budget for minutes at a time.
+    starved_blind = 0
+    # ORDERING (never heap order): the rows the LOSS GUARD is waiting on take the
+    # budget FIRST, newest first. The unordered `.all()` let ~115 no-fill rows
+    # shuffle a newly terminal FILLED session out of the 20-read budget.
+    #
+    # The key must be TOTAL — the previous `try/except: pass` around the sort meant
+    # any single bad row silently reverted the whole pass to SQL order, i.e. the
+    # prioritisation this fix exists for could vanish with no log line.
+    # `datetime.timestamp()` on a naive datetime is exactly such a hazard on
+    # Windows (it goes through the platform localtime conversion), so the key is
+    # computed by subtraction instead.
     def _sort_key(pair):
         outcome, sess = pair
         t = getattr(outcome, "terminal_at", None)
-        t_key = t.timestamp() if isinstance(t, datetime) else 0.0
+        if isinstance(t, datetime):
+            if t.tzinfo is not None:
+                t = t.astimezone(timezone.utc).replace(tzinfo=None)
+            t_key = (t - _EPOCH_NAIVE).total_seconds()
+        else:
+            t_key = 0.0
         return (_attribution_priority(outcome, sess), -t_key)
 
-    try:
-        rows = sorted(rows, key=_sort_key)
-    except Exception:  # pragma: no cover - defensive (never lose the pass to sorting)
-        pass
+    rows = sorted(rows, key=_sort_key)
     for outcome, sess in rows:
         checked += 1
         if not needs_reconcile(outcome, sess):
@@ -1342,8 +1679,17 @@ def reconcile_momentum_outcomes_to_broker_truth(
         if plan.get("read"):
             if broker_reads >= budget:
                 skipped_budget += 1
+                # THE gauge that matters: a row the loss guard cannot use that
+                # lost its read. `skipped_broker_budget` alone is benign (the
+                # backfill class queues there by design); this counter is not.
+                if not _loss_guard_label_usable(outcome):
+                    starved_blind += 1
                 continue
             broker_reads += 1
+            if plan.get("reason") == "no_entry_evidence_proof_read":
+                # One-time, lowest priority. Visible so the operator can watch it
+                # drain instead of mistaking it for the starvation it replaced.
+                proof_reads += 1
         elif plan.get("reason") not in ("not_alpaca_attribution",):
             # Alpaca row that spends NO broker read this pass (no entry evidence /
             # backoff). It is still reconciled from the ledger — it just does not
@@ -1378,8 +1724,10 @@ def reconcile_momentum_outcomes_to_broker_truth(
         "written": written,
         "skipped_terminal": skipped_terminal,
         "skipped_broker_budget": skipped_budget,
+        "loss_guard_blind_starved": starved_blind,
         "skipped_no_broker_read_needed": skipped_no_read_needed,
         "broker_reads": broker_reads,
+        "broker_proof_reads": proof_reads,
         "by_status": by_status,
         "reconciled_legacy_sum": round(legacy_sum, 2),
         "reconciled_broker_sum": round(broker_sum, 2),
@@ -1392,6 +1740,18 @@ def reconcile_momentum_outcomes_to_broker_truth(
         result["day_net_advisory"] = (
             "ADVISORY ONLY — not a label input; shared-account manual trades + "
             "ET/naive-UTC day boundary make this diverge by design"
+        )
+    if starved_blind:
+        # HEADLINE: rows the loss guard cannot use lost their broker read to the
+        # per-pass budget. Every one of them is an account-wide
+        # `loss_guard_history_unavailable` for as long as it stays unresolved —
+        # the 85-minute arming outage of 2026-09-02.
+        logger.warning(
+            "[broker_truth_recon] LOSS-GUARD ROWS STARVED BY THE READ BUDGET: %d row(s) the guard "
+            "cannot use lost their broker read (budget=%d, reads=%d). Raise "
+            "chili_momentum_outcome_recon_broker_attribution_max_per_pass or investigate the rows "
+            "holding the slots.",
+            starved_blind, budget, broker_reads,
         )
     logger.info("[broker_truth_recon] pass complete: %s", result)
     return result

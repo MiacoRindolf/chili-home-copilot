@@ -523,23 +523,80 @@ def _no_fill_pair(idx):
     return outcome, sess
 
 
-def test_no_entry_evidence_rows_never_spend_a_broker_read():
+def test_no_entry_evidence_rows_get_exactly_one_proof_read_then_never_again():
     """THE #1287 LANDMINE SHAPE: `needs_reconcile` admits every non-terminal row
     each 60 s pass and the old loop charged ONE broker GET per Alpaca row — 115
     no-fill rows against a 20-read budget starve the one row the loss guard
-    needs, forever (~95 `skipped_broker_budget` per pass by construction)."""
+    needs, forever (~95 `skipped_broker_budget` per pass by construction).
+
+    But the OPPOSITE failure is worse: "the envelope shows no order id" is
+    EXACTLY what a lost entry-adoption write looks like (CANF 19471 cycle 2), and
+    such a session is classified `entered` by the loss guard, so a permanent skip
+    on the envelope alone pins the whole ACCOUNT at
+    `loss_guard_history_unavailable` forever. The skip must be earned by TWO
+    independent negatives: no envelope evidence AND one readable listing that
+    owned nothing."""
     for i in range(3):
         o, s = _no_fill_pair(i)
         assert orc.needs_reconcile(o, s) is True, "still reconciled from the ledger"
+        # never attributed yet → ONE proof read, at the tail of the budget
         plan = orc.broker_read_plan(o, s)
-        assert plan["read"] is False
-        assert plan["reason"] == orc.ATTR_SKIPPED_NO_ENTRY_EVIDENCE
+        assert plan["read"] is True
+        assert plan["reason"] == "no_entry_evidence_proof_read"
+        assert orc._attribution_priority(o, s) == 3, "never takes a slot from a fill-bearing row"
+
+        # the proof read comes back empty → NOW the permanent skip is earned
+        orc.reconcile_one_outcome(
+            _FakeDb([]), o, s,
+            broker_orders_reader=lambda *a: {"readable": True, "orders": [], "truncated": False})
+        d = o.broker_recon_detail_json
+        assert d["attribution_no_entry_evidence_proven_empty"] is True
+        plan2 = orc.broker_read_plan(o, s)
+        assert plan2["read"] is False
+        assert plan2["reason"] == orc.ATTR_SKIPPED_NO_ENTRY_EVIDENCE
+
+        # …and the marker survives its OWN skip pass (which rewrites the json),
+        # otherwise the row reads again next pass: an every-other-pass read loop.
+        calls = []
+        orc.reconcile_one_outcome(
+            _FakeDb([]), o, s,
+            broker_orders_reader=lambda *a: calls.append(a) or {"readable": True, "orders": []})
+        assert calls == []
+        assert o.broker_recon_detail_json["attribution_no_entry_evidence_proven_empty"] is True
+        assert orc.broker_read_plan(o, s)["read"] is False
+
+
+def test_a_lost_entry_adoption_write_is_still_read_and_certified():
+    """The regression the proof read exists to prevent: the FSM never adopted the
+    fill, so the envelope carries NO order id and the ledger is empty — but the
+    broker holds a complete round trip under this session's cid. A permanent
+    envelope-only skip would leave this loss out of the day total forever."""
+    le = {"trade_cycles": 1}  # adoption write lost: no entry_order_id, no position
+    sess = SimpleNamespace(
+        id=SID, symbol="CANF", execution_family="alpaca_spot", mode="live",
+        state="live_finished", started_at=datetime(2026, 9, 2, 11, 3, 22),
+        ended_at=datetime(2026, 9, 2, 13, 41, 8),
+        risk_snapshot_json={"momentum_live_execution": le},
+    )
+    o = SimpleNamespace(
+        id=1, session_id=SID, symbol="CANF", mode="live", execution_family="alpaca_spot",
+        terminal_at=datetime(2026, 9, 2, 13, 41, 8), realized_pnl_usd=None, return_bps=None,
+        broker_recon_status=None, broker_realized_pnl_usd=None, broker_return_bps=None,
+        broker_notional_basis_usd=None, broker_win=None, broker_divergence_usd=None,
+        broker_reconciled_at=None, broker_recon_detail_json=None,
+    )
+    assert orc.broker_read_plan(o, sess)["read"] is True
+    orc.reconcile_one_outcome(_FakeDb([]), o, sess, broker_orders_reader=_reader_ok)
+    assert o.broker_recon_status == orc.STATUS_RECONCILED
+    assert o.broker_realized_pnl_usd == pytest.approx(BROKER_PNL, abs=1e-6)
+    assert rp._alpaca_loss_history_broker_truth(o) is True
 
 
 def test_115_no_fill_rows_do_not_starve_a_new_reconciled_row(monkeypatch):
     """The refuter's exact census: 115 no-fill rows + 1 newly terminal row that
     the loss guard is waiting on, budget 20. The new row must be read on the
-    FIRST pass and the no-fill rows must consume ZERO reads."""
+    FIRST pass; the no-fill rows drain their ONE proof read each behind it and
+    then consume ZERO reads forever."""
     monkeypatch.setattr(orc.settings, "chili_momentum_broker_truth_reconciliation_enabled", True, raising=False)
     monkeypatch.setattr(orc.settings, "chili_momentum_outcome_recon_broker_attribution_max_per_pass", 20, raising=False)
     rows = [_no_fill_pair(i) for i in range(115)]
@@ -558,36 +615,80 @@ def test_115_no_fill_rows_do_not_starve_a_new_reconciled_row(monkeypatch):
         def commit(self): pass
         def rollback(self): pass
 
-    read_sessions = []
+    passes = []
 
-    def _one(db, outcome, sess, **kw):
-        if orc.broker_read_plan(outcome, sess).get("read"):
-            read_sessions.append(outcome.session_id)
+    def _one(db, outcome, sess, read_plan=None, **kw):
+        plan = read_plan or orc.broker_read_plan(outcome, sess)
+        if plan.get("read"):
+            passes[-1].append(outcome.session_id)
+            d = dict(outcome.broker_recon_detail_json or {})
+            if plan.get("reason") == "no_entry_evidence_proof_read":
+                # what the real reconcile stamps after a readable-empty listing
+                d["attribution_no_entry_evidence_proven_empty"] = True
+            else:
+                d["attribution_version"] = orc.ATTRIBUTION_VERSION
+            outcome.broker_recon_detail_json = d
         outcome.broker_recon_status = outcome.broker_recon_status or orc.STATUS_NO_FILLS
         return {"status": outcome.broker_recon_status}
 
     monkeypatch.setattr(orc, "reconcile_one_outcome", _one)
-    out = orc.reconcile_momentum_outcomes_to_broker_truth(_Db(), lookback_days=2.0, day_net_advisory=False)
-    assert out["ok"] is True
-    assert out["broker_reads"] == 1, out
-    assert out["skipped_broker_budget"] == 0, "nothing is starved"
+    reads = []
+    for _ in range(8):
+        passes.append([])
+        out = orc.reconcile_momentum_outcomes_to_broker_truth(_Db(), lookback_days=2.0, day_net_advisory=False)
+        assert out["ok"] is True
+        reads.append(out["broker_reads"])
+
+    # PASS 1 — the loss-guard row is served FIRST, ahead of all 115 proof reads.
+    assert passes[0][0] == SID, "the loss-guard row got the budget on pass 1"
+    assert reads[0] == 20 and passes[0].count(SID) == 1
+    # …and it is never re-read: it is terminal WITH an attribution after pass 1.
+    assert all(SID not in p for p in passes[1:])
+    # The proof reads drain monotonically (115 rows / 20 per pass) and then STOP.
+    assert sum(reads) == 116, reads
+    assert reads[-1] == 0, "steady state spends ZERO broker reads on no-fill rows"
+    assert out["skipped_broker_budget"] == 0
     assert out["skipped_no_broker_read_needed"] == 115
-    assert read_sessions == [SID], "the loss-guard row got the budget on pass 1"
+    assert out["broker_proof_reads"] == 0
+
+
+def _make_loss_guard_usable(pair):
+    """The four fields `risk_policy._alpaca_loss_history_broker_truth` demands."""
+    outcome, sess = pair
+    outcome.broker_recon_status = orc.STATUS_RECONCILED
+    outcome.broker_reconciled_at = datetime(2026, 9, 2, 14, 0, 0)
+    outcome.broker_realized_pnl_usd = -186.98
+    outcome.broker_notional_basis_usd = 2303.0
+    return outcome, sess
 
 
 def test_the_loss_guard_row_is_ordered_first(monkeypatch):
-    """Never unordered `.all()`: the batch query has no natural order and the
-    per-pass UPDATEs reshuffle the heap."""
+    """Never unordered `.all()`, and never ordered by the ATTRIBUTION STAMP.
+
+    The class has to be "how badly is the loss guard waiting", because the guard
+    disarms the WHOLE account for any entered row it cannot use. Ranking by the
+    stamp put a backfill row the guard can ALREADY use in the top class, while a
+    newly terminal FILLED row that lost its first read to a transient Alpaca error
+    (now `unreconciled_broker_unavailable`) sat BELOW every one of them."""
     never = _outcome_and_session(recon_status=None)
     upgrade = _outcome_and_session(recon_status="reconciled", detail={"status": "reconciled"})
-    attributed = _outcome_and_session(
-        recon_status="reconciled",
-        detail={"status": "reconciled", "attribution_version": orc.ATTRIBUTION_VERSION})
-    non_terminal = _outcome_and_session(recon_status=orc.STATUS_RESIDUAL_OPEN, detail={})
+    blind_converged = _outcome_and_session(
+        recon_status=orc.STATUS_RESIDUAL_OPEN,
+        detail={"status": orc.STATUS_RESIDUAL_OPEN, "attribution_version": orc.ATTRIBUTION_VERSION})
+    transient = _outcome_and_session(recon_status=orc.STATUS_BROKER_UNAVAILABLE, detail={})
+    backfill = _make_loss_guard_usable(
+        _outcome_and_session(recon_status="reconciled", detail={"status": "reconciled"}))
+    no_evidence = _no_fill_pair(0)
+
     assert orc._attribution_priority(*never) == 0
-    assert orc._attribution_priority(*upgrade) == 0
-    assert orc._attribution_priority(*non_terminal) == 1
-    assert orc._attribution_priority(*attributed) == 2
+    assert orc._attribution_priority(*transient) == 0, "the row the guard is blind on"
+    assert orc._attribution_priority(*upgrade) == 0, "reconciled but NO broker pnl → still blind"
+    assert orc._attribution_priority(*blind_converged) == 1
+    assert orc._attribution_priority(*backfill) == 2, "the guard already has this number"
+    assert orc._attribution_priority(*no_evidence) == 3
+
+    # THE REGRESSION: a usable backfill row must never outrank a blind one.
+    assert orc._attribution_priority(*backfill) > orc._attribution_priority(*transient)
 
 
 def test_no_owned_fills_backs_off_instead_of_re_reading_every_pass():
@@ -634,7 +735,14 @@ def test_backoff_expires_and_a_skipped_row_keeps_its_ledger_label():
     }
     assert orc.broker_read_plan(o, s)["read"] is True
 
+    # A no-evidence row that has ALREADY spent its one proof read (the marker is
+    # only ever written after a READABLE listing owned nothing) spends no more.
     o2, s2 = _no_fill_pair(1)
+    o2.broker_recon_detail_json = {
+        **(o2.broker_recon_detail_json or {}),
+        "attribution_no_entry_evidence_proven_empty": True,
+        "attribution_terminal_at": o2.terminal_at.isoformat(),
+    }
     calls = []
     orc.reconcile_one_outcome(_FakeDb([]), o2, s2,
                               broker_orders_reader=lambda *a: calls.append(a) or {"readable": True, "orders": []})
@@ -642,6 +750,7 @@ def test_backoff_expires_and_a_skipped_row_keeps_its_ledger_label():
     assert o2.broker_recon_status == orc.STATUS_NO_FILLS
     assert "attribution_version" not in o2.broker_recon_detail_json
     assert o2.broker_recon_detail_json["broker_attribution"]["broker_read"] is False
+    assert o2.broker_recon_detail_json["attribution_no_entry_evidence_proven_empty"] is True
 
 
 # ── (B) a PARTIAL listing never certifies ────────────────────────────────────
@@ -975,3 +1084,236 @@ def test_the_new_db_reads_are_selects_only():
         for verb in ("INSERT ", "UPDATE ", "DELETE ", "TRUNCATE", "ALTER ", "DROP "):
             assert verb not in upper, (fn.__name__, verb)
         assert "SELECT" in upper
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# CERTIFICATION-CORRECTNESS REVIEW (2026-09-02, second pass over the hardening).
+# Four holes the first hardening left open; each test is the measured failure.
+# ═══════════════════════════════════════════════════════════════════════════════
+
+# ── (F2) a NON-CID attribution must never claim an id another outcome holds ──
+def test_an_envelope_id_owned_close_is_collision_checked_like_an_unpriced_match():
+    """The cross-session guard only covered `unpriced_emergency_leg_match`, so the
+    OTHER anonymous-fill guess — `session_broker_order_id` — walked straight past
+    it. Two overlapping same-symbol sessions can each carry the same close id on
+    their envelope (an emergency leg or an orphan-repair close recorded on both);
+    both would attribute it and the loss guard would count the loss TWICE."""
+    SHARED = "ddba3ed2-6854-4c34-92be-7efdd1926fa4"  # the cycle-2 operator sell
+    le_extra = {
+        "emergency_exit_accounting_pending": None,
+        # recorded on THIS envelope by broker id — the cid is broker-generated
+        "last_exit_order_id": SHARED,
+    }
+    o, s = _outcome_and_session(le_extra=le_extra)
+
+    def _listing(symbol, after, until):
+        # complete for the session (both ledger legs present, balanced qty) so the
+        # ONLY thing under test is how the id-owned close is treated
+        out = []
+        for x in _canf_orders():
+            if x.order_id == SHARED:
+                x = _o(SHARED, "3f9c0b12-broker-generated", "sell", "filled",
+                       165, 3.960303, "2026-09-02 11:34:31.991961+00:00")
+            out.append(x)
+        return {"readable": True, "truncated": False, "orders": out}
+
+    # 1. no other outcome holds it → attributed by id, certified
+    db = _FakeDb(_LEDGER_19471)
+    orc.reconcile_one_outcome(db, o, s, broker_orders_reader=_listing)
+    leg = [l for l in o.broker_recon_detail_json["broker_attribution"]["legs"]
+           if l["broker_order_id"] == SHARED][0]
+    assert leg["attribution"] == "session_broker_order_id"
+    assert o.broker_recon_status == orc.STATUS_RECONCILED
+
+    # 2. an overlapping session already attributes that id → NEVER a second claim
+    o2, s2 = _outcome_and_session(le_extra=le_extra)
+    db2 = _FakeDb(_LEDGER_19471, collisions=[(19999, SHARED)])
+    orc.reconcile_one_outcome(db2, o2, s2, broker_orders_reader=_listing)
+    assert o2.broker_recon_status == orc.STATUS_AMBIGUOUS_TRADE
+    assert o2.broker_realized_pnl_usd is None
+    assert o2.broker_recon_detail_json["broker_attribution"]["unpriced_collision"] == {
+        SHARED: 19999}
+    assert rp._alpaca_loss_history_broker_truth(o2) is False
+
+    # 3. probe unreadable → fail closed, never a guess
+    o3, s3 = _outcome_and_session(le_extra=le_extra)
+    orc.reconcile_one_outcome(_FakeDb(_LEDGER_19471, probe_raises=True), o3, s3,
+                              broker_orders_reader=_listing)
+    assert o3.broker_recon_status == orc.STATUS_AMBIGUOUS_TRADE
+
+
+def test_a_cid_owned_leg_is_exempt_from_the_collision_probe():
+    """A session cid names exactly ONE session — it is proof, not a guess — so it
+    must not be forced through a probe that can only fail closed."""
+    o, s = _outcome_and_session(le_extra={"emergency_exit_accounting_pending": None})
+    db = _FakeDb(_LEDGER_19471)
+    orc.reconcile_one_outcome(db, o, s, broker_orders_reader=_reader_ok)
+    assert o.broker_recon_status == orc.STATUS_RECONCILED
+    assert not any("momentum_automation_outcomes" in q for q in db.sql), \
+        "no collision probe is spent when every leg is cid-owned"
+
+
+# ── (F3) the divergence event's idempotency marker must be sticky ────────────
+def test_an_unreadable_pass_cannot_resurrect_the_divergence_event(monkeypatch):
+    """`_emit_divergence_event` returns early when a pass sees no missing legs (an
+    unreadable broker, a backoff skip), so the marker never reached the json that
+    pass wrote — and the NEXT readable pass emitted a second event for the same
+    outcome. The marker has to be carried before anything else writes `detail`."""
+    from app.services.trading.momentum_neural import persistence as _p
+
+    events = []
+    monkeypatch.setattr(
+        _p, "append_trading_automation_event",
+        lambda db, sid, et, payload, **kw: events.append(et), raising=False)
+
+    # a residual_open row: non-terminal, so it is re-touched every pass
+    o, s = _outcome_and_session(le_extra={"emergency_exit_accounting_pending": None})
+
+    def _entry_and_a_partial_close(symbol, after, until):
+        # every LEDGER leg is present (so the completeness guard is satisfied);
+        # cycle 2's entry is visible but its close is NOT ⇒ residual_open, with a
+        # cycle-2 entry leg the ledger never held ⇒ one divergence event.
+        keep = {"552efe43-395a-4f76-836a-7be3d30a8689",
+                "af3a4b0c-d7fc-4379-8b25-ddc50ab82a31",
+                "f3ed508d-e441-47b3-b76b-2449b6f0a133"}
+        return {"readable": True, "truncated": False,
+                "orders": [x for x in _canf_orders() if x.order_id in keep]}
+
+    orc.reconcile_one_outcome(_FakeDb(_LEDGER_19471), o, s,
+                              broker_orders_reader=_entry_and_a_partial_close)
+    assert o.broker_recon_status == orc.STATUS_RESIDUAL_OPEN
+    assert events == ["broker_truth_attribution_divergence"]
+    assert o.broker_recon_detail_json["divergence_event_emitted"] is True
+
+    # a pass where the broker is unreadable finds no missing legs …
+    orc.reconcile_one_outcome(_FakeDb(_LEDGER_19471), o, s,
+                              broker_orders_reader=lambda *a: {"readable": False, "orders": [], "error": "boom"})
+    assert o.broker_recon_detail_json["divergence_event_emitted"] is True, \
+        "the marker survives a pass that had nothing to report"
+
+    # … and the pass after it must NOT emit a second event
+    orc.reconcile_one_outcome(_FakeDb(_LEDGER_19471), o, s,
+                              broker_orders_reader=_entry_and_a_partial_close)
+    assert len(events) == 1, "exactly one divergence event per outcome, ever"
+
+
+# ── (F4) only an OCO parent's legs share the parent's side ───────────────────
+def test_a_bracket_parents_legs_are_never_walked():
+    """The leg payload carries no `side`, so the walker infers the PARENT's. That
+    holds for order_class=oco (TP + stop, both reducing, both the parent's side)
+    and is FALSE for a bracket, whose parent is the ENTRY and whose legs are the
+    opposite side. Measured on the unguarded walker: a 165-share entry with a
+    filled 165-share protective leg came out open_qty=330, close_qty=0 and a
+    fabricated −$1,415.70."""
+    parent = _o("P1", "chili_ml_toco_19471_x", "buy", "filled", 165, 4.62,
+                "2026-09-02 11:19:12.223684+00:00")
+    parent.raw["order_class"] = "bracket"
+    parent.raw["legs"] = [{"id": "L1", "status": "filled", "filled_qty": 165.0,
+                           "filled_avg_price": 3.96}]
+    a = orc.attribute_session_broker_orders(
+        session_id=SID, symbol="CANF", side_long=True, orders=[parent],
+        window_start=W_START, window_end=W_END)
+    assert [l["broker_order_id"] for l in a["legs"]] == ["P1"]
+    assert a["open_qty"] == 165.0 and a["close_qty"] == 0
+    assert a["attr_status"] == orc.ATTR_RESIDUAL_OPEN, "fail closed, never a fabricated pnl"
+
+    # …and an order with no order_class at all (a plain limit) is likewise safe
+    plain = _o("P2", "chili_ml_e_19471_y", "buy", "filled", 10, 1.0,
+               "2026-09-02 11:19:12.223684+00:00")
+    plain.raw["legs"] = [{"id": "L2", "status": "filled", "filled_qty": 10.0,
+                          "filled_avg_price": 2.0}]
+    b = orc.attribute_session_broker_orders(
+        session_id=SID, symbol="CANF", side_long=True, orders=[plain],
+        window_start=W_START, window_end=W_END)
+    assert [l["broker_order_id"] for l in b["legs"]] == ["P2"]
+
+
+def test_an_oco_parents_legs_are_still_walked():
+    """Regression fence on the guard: the shipping path (OrderClass.OCO) is untouched."""
+    parent = _o("P1", "chili_ml_toco_19471_x", "sell", "canceled", 0, None,
+                "2026-09-02 11:30:00+00:00")
+    parent.raw["order_class"] = "oco"
+    parent.raw["legs"] = [{"id": "STOPLEG", "status": "filled", "filled_qty": 165.0,
+                           "filled_avg_price": 3.96}]
+    entry = _o("E1", "chili_ml_e_19471_a", "buy", "filled", 165, 4.62,
+               "2026-09-02 11:19:12.223684+00:00")
+    a = orc.attribute_session_broker_orders(
+        session_id=SID, symbol="CANF", side_long=True, orders=[entry, parent],
+        window_start=W_START, window_end=W_END)
+    assert a["attr_status"] == orc.ATTR_FLAT
+    leg = [l for l in a["legs"] if l["broker_order_id"] == "STOPLEG"][0]
+    assert leg["attribution"] == "session_cid_oco_leg"
+    # the leg has no clock of its own — the inherited one is labelled as such
+    assert leg["filled_at_source"] == "parent_order"
+
+
+# ── (F5) envelope anchors close the gap for a session with an EMPTY ledger ───
+def _no_ledger_pair(le_extra=None):
+    """A 19471-shaped session whose FSM ledger is EMPTY — the ledger-derived
+    completeness guard has nothing to work with, which is exactly the session
+    shape this attribution exists for."""
+    le = {
+        "trade_cycles": 2,
+        "entry_order_id": "f3ed508d-e441-47b3-b76b-2449b6f0a133",
+        "entry_order_ids_all": ["552efe43-395a-4f76-836a-7be3d30a8689",
+                                "f3ed508d-e441-47b3-b76b-2449b6f0a133"],
+        "last_exit_order_id": "af3a4b0c-d7fc-4379-8b25-ddc50ab82a31",
+        "emergency_exit_accounting_pending": None,
+    }
+    le.update(le_extra or {})
+    o, s = _outcome_and_session(le_extra={})
+    s.risk_snapshot_json = {"momentum_live_execution": le}
+    return o, s
+
+
+def test_a_listing_that_drops_a_whole_cycle_is_not_certified_flat():
+    """A partial listing that drops ONE side lands residual_open/oversold on its
+    own. The one shape that fabricates a FLAT is dropping a WHOLE CYCLE — and with
+    an empty ledger nothing caught it. Cycle 1's entry AND exit anchors are both
+    absent here, so the balanced cycle-2 pair must not be stamped reconciled."""
+    o, s = _no_ledger_pair()
+
+    def _cycle2_only(symbol, after, until):
+        keep = {"f3ed508d-e441-47b3-b76b-2449b6f0a133", "ddba3ed2-6854-4c34-92be-7efdd1926fa4"}
+        return {"readable": True, "truncated": False,
+                "orders": [x for x in _canf_orders() if x.order_id in keep]}
+
+    orc.reconcile_one_outcome(_FakeDb([]), o, s, broker_orders_reader=_cycle2_only)
+    d = o.broker_recon_detail_json
+    assert d["broker_attribution"]["attr_status"] == orc.ATTR_ANCHORS_MISSING
+    assert d["broker_attribution"]["entry_anchors_missing_from_broker"] == [
+        "552efe43-395a-4f76-836a-7be3d30a8689"]
+    assert d["broker_attribution"]["exit_anchors_missing_from_broker"] == [
+        "af3a4b0c-d7fc-4379-8b25-ddc50ab82a31"]
+    assert o.broker_recon_status == orc.STATUS_BROKER_UNAVAILABLE
+    assert o.broker_realized_pnl_usd is None
+    assert "attribution_version" not in d, "never terminal off a whole-cycle gap"
+    assert rp._alpaca_loss_history_broker_truth(o) is False
+
+
+def test_one_stale_anchor_alone_never_blocks_certification():
+    """The other direction is the worse outage: a row that can NEVER certify pins
+    the whole account at `loss_guard_history_unavailable`. A single missing anchor
+    (a stale/replaced id) is reported but must not block — only the paired
+    entry-AND-exit gap can fabricate a FLAT."""
+    o, s = _no_ledger_pair(le_extra={"scale_limit_order_id": "long-dead-replaced-id"})
+    orc.reconcile_one_outcome(_FakeDb([]), o, s, broker_orders_reader=_reader_ok)
+    d = o.broker_recon_detail_json["broker_attribution"]
+    assert d["attr_status"] == orc.ATTR_FLAT
+    assert d["exit_anchors_missing_from_broker"] == ["long-dead-replaced-id"]
+    assert d["entry_anchors_missing_from_broker"] == []
+    assert o.broker_recon_status == orc.STATUS_RECONCILED
+    assert o.broker_realized_pnl_usd == pytest.approx(BROKER_PNL, abs=1e-6)
+
+
+def test_orphan_repair_anchors_are_excluded_from_the_completeness_gate():
+    """An orphan repair by construction references an order from an EARLIER
+    window, so demanding it in this session's listing would fabricate a permanent
+    incompleteness — the arming outage, not the mispriced label."""
+    entry, exit_ = orc._envelope_anchor_ids({
+        "entry_order_id": "e1",
+        "orphan_reconcile_truth": {"entry_order_id": "old-e", "exit_order_id": "old-x"},
+        "emergency_exit_authority": {"order_id": "auth"},
+        "last_exit_order_id": "x1",
+    })
+    assert entry == {"e1"} and exit_ == {"x1"}
