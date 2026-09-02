@@ -4192,7 +4192,11 @@ def prior_day_rejection_seed(db: Any, symbol: str) -> int:
 # 1, the #1252 cross-day seed's slot) and hands the session HOD to
 # reentry_escalation_decision as the reclaim reference, so the same WAIT that
 # already governs re-entries governs the first entry on a spent leg: the WAIT
-# clears the moment price prints at/above the top (or the top itself moves).
+# clears the moment price prints at/above the top, the top itself moves, or
+# the pullback shallows back under min_dd_pct (review 2026-09-02: the corpus
+# was measured at the FILL instant, so the live marker must not be path-
+# dependent — RKTO/LHAI dipped ~7% then filled 3.7% under, FREE by evidence).
+# Flag OFF unwinds an active marker on the next tick (a KILL that kills).
 #
 # HONEST COST: at level 1 _reclaim_required() = HOD + 0, so non-leader
 # STRUCTURAL pullback triggers are ALSO blocked below the HOD; only the day
@@ -4366,12 +4370,40 @@ def apply_spent_leg_tick(
     Order on EVERY score-ok tick (not only trigger ticks — a bench veto, the
     halt-chain / opening-bell / burst / red-candle gates all run AFTER this and
     must not hide a re-take from the clear):
+      0. an ACTIVE marker from another ET day is UNWOUND (``session_rollover``
+         clear: the level delta it added is removed / the key it created is
+         deleted) — a WAIT must never outlive the session that seeded it, and
+         the level it wrote must never orphan (review 2026-09-02 M15).
       1. tick-running session high ``le["spent_leg_tick_hod"]`` (ask-or-mid,
          the same read the bench / g4 use) — session-scoped by ET date; the
          effective top is max(frame HOD, tick HOD) with the SOURCE recorded.
-      2. CLEAR an active marker when px >= marker.hod OR the effective top
-         moved above marker.hod (a new high printed on ANY tick, whichever
-         tick sees it). Level accounting removes only the seed's own +1
+         Coverage is CONTINUOUS: ``first_tick_ts`` is the start of the current
+         run of priced ticks no more than T apart (T = max(2*interval,
+         max_frame_age_s)); a longer hole (bench-out, score flicker, host
+         stall) restarts the run, so a stale frame is bridged only by ticks
+         that actually watched the gap (review M2/M12/M18).
+      2. CLEAR an active marker, ``clear_reason`` recorded, when:
+           disabled          ``enabled`` is False (the KILL: flag OFF unwinds
+                             on the next score-ok tick — never a stranded WAIT)
+           retop             the effective top moved above marker.hod (a new
+                             high printed on ANY tick, whichever tick sees it)
+           hit_top           px >= marker.hod
+           shallowed         the pullback is no longer >= min_dd_pct under the
+                             top (px above HOD*(1 - P/100)). This makes the LIVE
+                             rule equal to the FILL-INSTANT predicate the corpus
+                             was measured on (fills_study.csv: age x depth AT
+                             the fill) — without it the marker was path-
+                             dependent and blocked RKTO 07-09 (+74.52, 6.98%
+                             dip at 08:31, 3.77% under at the 08:41 fill, no
+                             re-take between) and LHAI 07-08 (+48.07, 7.41% dip
+                             at 08:28, 3.70% under at the fill), which the
+                             evidence counts as FREE (review 2026-09-02 M8).
+         Only ``hit_top`` / ``retop`` RETIRE the top (``cleared_hod``: a re-take
+         that then fades never re-seeds on it); a ``shallowed`` / ``disabled``
+         / ``session_rollover`` clear leaves the top re-seedable, so a name
+         that bounces to 4% under and then dumps 5%+ again is seeded again —
+         exactly what the fill-instant predicate says.
+         Level accounting removes only the seed's own +1
          (``seed_level_delta``); when the level returns to 0 and the key was
          absent at seed time the key is DELETED so the #1252 cross-day seed
          (which runs only when the key is absent) still gets its first read.
@@ -4380,7 +4412,8 @@ def apply_spent_leg_tick(
          the predicate holds against the effective top. A fresh new top (age
          < min) is NOT re-seeded — the next trigger is admitted.
     A marker / tick-hod whose ``session_date_et`` != today is treated as
-    absent. Fail-open by construction: unreadable data never seeds.
+    absent (after step 0). Fail-open by construction: unreadable data never
+    seeds; ``enabled`` False never seeds but ALWAYS clears.
     """
     updates: dict[str, Any] = {}
     actions: list[tuple[str, dict[str, Any]]] = []
@@ -4391,14 +4424,96 @@ def apply_spent_leg_tick(
     if now_dt is None or not day:
         return updates, actions
     now_iso = now_dt.isoformat()
+    try:
+        _min_dd_f = float(min_dd_pct)
+        if not math.isfinite(_min_dd_f):
+            _min_dd_f = 0.0
+    except (TypeError, ValueError):
+        _min_dd_f = 0.0
+    _iv_f = _spent_leg_pos_float(interval_s) or 60.0
+    try:
+        _cov_t = max(2.0 * _iv_f, float(max_frame_age_s))
+    except (TypeError, ValueError):
+        _cov_t = 2.0 * _iv_f
+    if not math.isfinite(_cov_t):
+        _cov_t = 2.0 * _iv_f
+    px_f = _spent_leg_pos_float(px)
 
-    # ── current marker / tick-hod, scoped to TODAY ──
+    def _level_now() -> int:
+        # a level the caller ALREADY changed this tick (an earlier clear) is the true "now".
+        if _SPENT_LEG_LEVEL_KEY in updates:
+            _u = updates[_SPENT_LEG_LEVEL_KEY]
+            return int(_u) if isinstance(_u, int) else 0
+        try:
+            return int(le.get(_SPENT_LEG_LEVEL_KEY) or 0)
+        except (TypeError, ValueError):
+            return 0
+
+    def _clear(m: dict[str, Any], *, reason: str, new_top: float | None, retopped: bool) -> None:
+        """Retire the WAIT ``m`` (in place): level accounting + action. ``new_top``
+        None ⇒ the seeded top itself; ``retopped`` ⇒ the caller may re-seed."""
+        m_hod_c = _spent_leg_pos_float(m.get("hod"))
+        level_now = _level_now()
+        try:
+            delta = int(m.get("seed_level_delta") or 0)
+        except (TypeError, ValueError):
+            delta = 0
+        level_after = max(0, level_now - delta)
+        if level_after == 0 and bool(m.get("key_absent_at_seed")):
+            updates[_SPENT_LEG_LEVEL_KEY] = None  # delete -> cross-day seed re-evaluates
+            level_after_recorded: int | None = None
+        else:
+            updates[_SPENT_LEG_LEVEL_KEY] = level_after
+            level_after_recorded = level_after
+        seeded_dt = _spent_leg_aware_utc(m.get("seeded_at"))
+        minutes_waited = (
+            round((now_dt - seeded_dt).total_seconds() / 60.0, 3)
+            if seeded_dt is not None else None
+        )
+        retires_top = reason in ("hit_top", "retop")
+        m.update({
+            "active": False,
+            "clear_reason": reason,
+            # cleared_hod = the SEEDED top, set ONLY when the top is retired (a re-take
+            # that then fades never re-seeds on it; only a strictly HIGHER top can) —
+            # a shallowed / disabled / rollover clear leaves the top re-seedable.
+            "cleared_hod": (m_hod_c if retires_top else None),
+            "cleared_px": px_f,
+            "cleared_at": now_iso,
+            "retopped": bool(retopped),
+            "new_hod": (new_top if new_top is not None else m_hod_c),
+            "minutes_waited": minutes_waited,
+            "level_after": level_after_recorded,
+        })
+        actions.append(("g4_spent_leg_cleared", {
+            "symbol": sym,
+            "hod": m_hod_c,
+            "hod_source": m.get("hod_source"),
+            "clear_reason": reason,
+            "clear_px": px_f,
+            "retopped": bool(retopped),
+            "new_hod": (new_top if new_top is not None else m_hod_c),
+            "minutes_waited": minutes_waited,
+            "blocks_while_seeded": int(m.get("blocks_while_seeded") or 0),
+            "level_before": level_now,
+            "level_after": level_after_recorded,
+            "seed_level_delta": delta,
+            "marker_session_date_et": str(m.get("session_date_et") or ""),
+        }))
+
+    # ── 0. / current marker, scoped to TODAY (a stale ACTIVE marker is unwound) ──
     marker_raw = le.get(_SPENT_LEG_MARKER_KEY)
-    marker = (
-        dict(marker_raw)
-        if isinstance(marker_raw, dict) and str(marker_raw.get("session_date_et") or "") == day
-        else None
-    )
+    marker: dict[str, Any] | None = None
+    if isinstance(marker_raw, dict):
+        if str(marker_raw.get("session_date_et") or "") == day:
+            marker = dict(marker_raw)
+        elif marker_raw.get("active") is True:
+            stale = dict(marker_raw)
+            if _spent_leg_pos_float(stale.get("hod")) is None:
+                updates[_SPENT_LEG_MARKER_KEY] = None  # corrupt: drop (fail-open)
+            else:
+                _clear(stale, reason="session_rollover", new_top=None, retopped=False)
+                updates[_SPENT_LEG_MARKER_KEY] = stale
     th_raw = le.get(_SPENT_LEG_TICK_HOD_KEY)
     tick_hod = (
         dict(th_raw)
@@ -4406,21 +4521,36 @@ def apply_spent_leg_tick(
         else None
     )
 
-    # ── 1. tick-running session high ──
-    px_f = _spent_leg_pos_float(px)
+    # ── 1. tick-running session high + CONTINUOUS coverage run ──
     if px_f is not None and tick_dt is not None:
         prev_px = _spent_leg_pos_float(tick_hod.get("px")) if tick_hod else None
+        first_iso = (
+            str(tick_hod.get("first_tick_ts")) if tick_hod and tick_hod.get("first_tick_ts")
+            else tick_dt.isoformat()
+        )
+        try:
+            breaks = int(tick_hod.get("coverage_breaks") or 0) if tick_hod else 0
+        except (TypeError, ValueError):
+            breaks = 0
+        last_dt = _spent_leg_aware_utc(tick_hod.get("last_tick_ts")) if tick_hod else None
+        if last_dt is not None and (tick_dt - last_dt).total_seconds() > _cov_t:
+            # a hole longer than the staleness threshold: the run restarts HERE —
+            # whatever printed inside the hole was never seen by this session.
+            first_iso = tick_dt.isoformat()
+            breaks += 1
         if tick_hod is None or prev_px is None or px_f > prev_px:
-            tick_hod = {
-                "px": px_f,
-                "ts": tick_dt.isoformat(),
-                "first_tick_ts": (
-                    str(tick_hod.get("first_tick_ts")) if tick_hod and tick_hod.get("first_tick_ts")
-                    else tick_dt.isoformat()
-                ),
-                "session_date_et": day,
-            }
-            updates[_SPENT_LEG_TICK_HOD_KEY] = tick_hod
+            hi_px, hi_ts = px_f, tick_dt.isoformat()
+        else:
+            hi_px, hi_ts = prev_px, str(tick_hod.get("ts") or tick_dt.isoformat())
+        tick_hod = {
+            "px": hi_px,
+            "ts": hi_ts,
+            "first_tick_ts": first_iso,
+            "last_tick_ts": tick_dt.isoformat(),
+            "coverage_breaks": breaks,
+            "session_date_et": day,
+        }
+        updates[_SPENT_LEG_TICK_HOD_KEY] = tick_hod
 
     # ── effective top ──
     f_hod = _spent_leg_pos_float(frame_hod)
@@ -4455,57 +4585,25 @@ def apply_spent_leg_tick(
         else:
             hit_top = px_f is not None and px_f >= m_hod
             moved = eff_hod is not None and eff_hod > m_hod
-            if hit_top or moved:
+            shallowed = (
+                px_f is not None
+                and not hit_top
+                and ((m_hod - px_f) / m_hod * 100.0) < _min_dd_f
+            )
+            clear_reason: str | None = None
+            new_top: float | None = None
+            retopped = False
+            if not bool(enabled):
+                clear_reason = "disabled"
+            elif hit_top or moved:
                 new_top = eff_hod if eff_hod is not None else m_hod
                 retopped = bool(moved and (px_f is None or px_f < new_top))
-                try:
-                    level_now = int(le.get(_SPENT_LEG_LEVEL_KEY) or 0)
-                except (TypeError, ValueError):
-                    level_now = 0
-                try:
-                    delta = int(marker.get("seed_level_delta") or 0)
-                except (TypeError, ValueError):
-                    delta = 0
-                level_after = max(0, level_now - delta)
-                if level_after == 0 and bool(marker.get("key_absent_at_seed")):
-                    updates[_SPENT_LEG_LEVEL_KEY] = None  # delete -> cross-day seed re-evaluates
-                    level_after_recorded: int | None = None
-                else:
-                    updates[_SPENT_LEG_LEVEL_KEY] = level_after
-                    level_after_recorded = level_after
-                seeded_dt = _spent_leg_aware_utc(marker.get("seeded_at"))
-                minutes_waited = (
-                    round((now_dt - seeded_dt).total_seconds() / 60.0, 3)
-                    if seeded_dt is not None else None
-                )
-                marker.update({
-                    "active": False,
-                    # cleared_hod = the SEEDED top: that top is retired (a re-take
-                    # that then fades never re-seeds on it); only a strictly HIGHER
-                    # top can re-seed — same tick on a re-top (below), or later once
-                    # the new top is itself >= min age / >= min depth away.
-                    "cleared_hod": m_hod,
-                    "cleared_px": px_f,
-                    "cleared_at": now_iso,
-                    "retopped": retopped,
-                    "new_hod": new_top,
-                    "minutes_waited": minutes_waited,
-                    "level_after": level_after_recorded,
-                })
+                clear_reason = "retop" if retopped else "hit_top"
+            elif shallowed:
+                clear_reason = "shallowed"
+            if clear_reason is not None:
+                _clear(marker, reason=clear_reason, new_top=new_top, retopped=retopped)
                 updates[_SPENT_LEG_MARKER_KEY] = marker
-                actions.append(("g4_spent_leg_cleared", {
-                    "symbol": sym,
-                    "hod": m_hod,
-                    "hod_source": marker.get("hod_source"),
-                    "clear_px": px_f,
-                    "retopped": retopped,
-                    "new_hod": new_top,
-                    "minutes_waited": minutes_waited,
-                    "blocks_while_seeded": int(marker.get("blocks_while_seeded") or 0),
-                    "level_before": level_now,
-                    "level_after": level_after_recorded,
-                    "seed_level_delta": delta,
-                }))
                 retopped_this_tick = retopped
 
     # ── 3. SEED ──
@@ -4563,6 +4661,7 @@ def apply_spent_leg_tick(
         "blocks_while_seeded": 0,
         "frame_age_s": fa,
         "coverage_gap_s": coverage_gap_s,
+        "coverage_breaks": (tick_hod.get("coverage_breaks") if tick_hod else None),
         "retop_reseed": bool(retopped_this_tick),
     }
     updates[_SPENT_LEG_MARKER_KEY] = new_marker
@@ -4580,6 +4679,7 @@ def apply_spent_leg_tick(
         "seed_level_delta": delta,
         "frame_age_s": fa,
         "coverage_gap_s": coverage_gap_s,
+        "coverage_breaks": (tick_hod.get("coverage_breaks") if tick_hod else None),
         "retop_reseed": bool(retopped_this_tick),
     }))
     return updates, actions

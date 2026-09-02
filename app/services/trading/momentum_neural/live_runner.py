@@ -358,6 +358,12 @@ AdapterFactory = Callable[[], Any]
 # returns the real ``datetime.utcnow()`` on the EXACT same code path as before, so prod
 # is BYTE-IDENTICAL. The ContextVar resets automatically on block/exception exit, so it
 # can never leak a frozen clock into a real lane. See docs/DESIGN/REPLAY_V3_LIVE_FSM_SIM.md §3.1.
+# g4 re-entry-escalation BLOCKED telemetry cadence (2026-09-02 review M16): while one
+# (trigger, reason, level, reclaim, spent-hod) WAIT key holds, at most one event row per
+# this many seconds; the repeats in between are counted on the next row. Telemetry
+# cadence only — it never gates a decision.
+_G4_BLOCKED_HEARTBEAT_S: float = 60.0
+
 _SIM_NOW: contextvars.ContextVar[Optional[datetime]] = contextvars.ContextVar(
     "_chili_replay_sim_now", default=None
 )
@@ -31958,12 +31964,26 @@ def tick_live_session(
         # re-topped name is re-seeded against the NEW top the same tick. Reads
         # the bench debug (frame HOD, bar END stamp, frame age) plus the
         # session's own tick-running high; fail-open on stale frame / HOD not
-        # today / unreadable. Flag OFF or bench flag OFF ⇒ no seed (the frame
-        # is absent) ⇒ byte-identical. Any error ⇒ pass (a bug must never bench
-        # a fresh breakout). risk_policy.apply_spent_leg_tick is the pure rule.
+        # today / unreadable. Bench flag OFF ⇒ no seed (the frame is absent) ⇒
+        # byte-identical. KILL SWITCH (review 2026-09-02 M1/M14): the block runs
+        # whenever the flag is ON *or a marker is still on the ledger*, and the
+        # flag is passed through as ``enabled`` — flag OFF never seeds but the
+        # pure rule UNWINDS an active marker (clear_reason=disabled) on the next
+        # score-ok tick, so flipping the flag can never strand a seeded name at
+        # level 1 with the session HOD as an unclearable reference. Any error ⇒
+        # pass (a bug must never bench a fresh breakout).
+        # risk_policy.apply_spent_leg_tick is the pure rule.
         if _score_ok:
             try:
-                if bool(getattr(settings, "chili_momentum_g4_spent_leg_seed_enabled", True)) and (
+                _spent_flag = bool(
+                    getattr(settings, "chili_momentum_g4_spent_leg_seed_enabled", True)
+                )
+                _spent_marker_raw = le.get("g4_spent_leg")
+                _spent_marker_active = (
+                    isinstance(_spent_marker_raw, dict)
+                    and _spent_marker_raw.get("active") is True
+                )
+                if (_spent_flag or _spent_marker_active) and (
                     not str(sess.symbol or "").upper().endswith("-USD")
                 ):
                     from zoneinfo import ZoneInfo as _SpentZone
@@ -31980,7 +32000,7 @@ def tick_live_session(
                     _spent_updates, _spent_actions = apply_spent_leg_tick(
                         le,
                         symbol=str(sess.symbol or ""),
-                        enabled=True,
+                        enabled=_spent_flag,
                         px=_spent_px,
                         tick_ts=_spent_now,
                         now_utc=_utcnow_aware(),
@@ -31995,6 +32015,15 @@ def tick_live_session(
                         min_dd_pct=float(getattr(settings, "chili_momentum_g4_spent_leg_min_drawdown_pct", 5.0) or 0.0),
                         max_frame_age_s=float(getattr(settings, "chili_momentum_g4_spent_leg_max_frame_age_s", 120.0) or 120.0),
                     )
+                    # EMIT FIRST, then apply + commit (review M7): if the event
+                    # insert raises (poisoned transaction), nothing is applied and
+                    # the next tick recomputes — a marker / level must never persist
+                    # without its event trail.
+                    for _spent_ev, _spent_payload in _spent_actions:
+                        if _spent_ev == "g4_spent_leg_seed":
+                            _emit(db, sess, "g4_spent_leg_seed", _spent_payload)
+                        elif _spent_ev == "g4_spent_leg_cleared":
+                            _emit(db, sess, "g4_spent_leg_cleared", _spent_payload)
                     if _spent_updates:
                         for _sk, _sv in _spent_updates.items():
                             if _sv is None:
@@ -32002,11 +32031,6 @@ def tick_live_session(
                             else:
                                 le[_sk] = _sv
                         _commit_le(sess, le)
-                    for _spent_ev, _spent_payload in _spent_actions:
-                        if _spent_ev == "g4_spent_leg_seed":
-                            _emit(db, sess, "g4_spent_leg_seed", _spent_payload)
-                        elif _spent_ev == "g4_spent_leg_cleared":
-                            _emit(db, sess, "g4_spent_leg_cleared", _spent_payload)
             except Exception:
                 pass  # fail-open: never seed / never strand on a bug
         # SHELF-REGISTRATION STATE — PER-CANDIDATE RECORD (2026-09-02 telemetry
@@ -32014,33 +32038,42 @@ def tick_live_session(
         # names that reach sizing; armed-but-unfilled names (BIAF-class open
         # drives, CANF-class fresh registrations) leave no trace, and the EDGAR
         # cache is process-local (24 h TTL). Emit the cached state ONCE per
-        # session on the first score-ok tick it is readable. Cache-only read —
-        # never network (the prime thread at watch-start is untouched).
-        if _score_ok and not le.get("shelf_state_emitted"):
+        # session per ET DAY (the flag stores the ET date, review M17 — a
+        # session that spans the day boundary records day 2 too) on the first
+        # score-ok tick it is readable; the flag is set AFTER the emit (review
+        # M7) so a failed insert is retried next tick instead of silently
+        # leaving no record. Cache-only read — never network (the prime thread
+        # at watch-start is untouched).
+        if _score_ok:
             try:
                 if not str(sess.symbol or "").upper().endswith("-USD"):
-                    from .shelf_registration import (
-                        cached_shelf_state as _shelf_cand_state,
-                        shelf_state_telemetry as _shelf_cand_tel,
-                    )
+                    from zoneinfo import ZoneInfo as _ShelfZone
 
-                    _shelf_cand = _shelf_cand_state(str(sess.symbol))
-                    if _shelf_cand is not None:
-                        _shelf_cand_frac = getattr(
-                            settings, "chili_momentum_shelf_active_size_fraction", 0.75
+                    _shelf_cand_day = _now_in_tz(_ShelfZone("America/New_York")).date().isoformat()
+                    if str(le.get("shelf_state_emitted") or "") != _shelf_cand_day:
+                        from .shelf_registration import (
+                            cached_shelf_state as _shelf_cand_state,
+                            shelf_state_telemetry as _shelf_cand_tel,
                         )
-                        _shelf_cand_rec = _shelf_cand_tel(
-                            _shelf_cand,
-                            fraction=(0.75 if _shelf_cand_frac is None else float(_shelf_cand_frac)),
-                            now_utc=_utcnow_aware(),
-                        )
-                        if _shelf_cand_rec is not None:
-                            le["shelf_state_emitted"] = True
-                            _commit_le(sess, le)
-                            _emit(db, sess, "shelf_registration_state", {
-                                "symbol": str(sess.symbol or ""),
-                                **_shelf_cand_rec,
-                            })
+
+                        _shelf_cand = _shelf_cand_state(str(sess.symbol))
+                        if _shelf_cand is not None:
+                            _shelf_cand_frac = getattr(
+                                settings, "chili_momentum_shelf_active_size_fraction", 0.75
+                            )
+                            _shelf_cand_rec = _shelf_cand_tel(
+                                _shelf_cand,
+                                fraction=(0.75 if _shelf_cand_frac is None else float(_shelf_cand_frac)),
+                                now_utc=_utcnow_aware(),
+                            )
+                            if _shelf_cand_rec is not None:
+                                _emit(db, sess, "shelf_registration_state", {
+                                    "symbol": str(sess.symbol or ""),
+                                    "session_date_et": _shelf_cand_day,
+                                    **_shelf_cand_rec,
+                                })
+                                le["shelf_state_emitted"] = _shelf_cand_day
+                                _commit_le(sess, le)
             except Exception:
                 pass  # telemetry only — never touches the fill path
         # GAP 1 + GAP 2 (Warrior re-audit) — HALT-CHAIN RISK GATE + RESUMPTION SIZE
@@ -32244,7 +32277,14 @@ def tick_live_session(
                 _g4e_spent_active = False
                 _g4e_spent_hod = None
                 try:
-                    if _g4e_spent is not None and _g4e_spent.get("active") is True:
+                    # Flag-gated (review M14): with the seed flag OFF the marker is
+                    # unwound by the spent-leg block above on the same tick; never
+                    # hand a disabled feature's reference to the decision.
+                    if (
+                        _g4e_spent is not None
+                        and _g4e_spent.get("active") is True
+                        and bool(getattr(settings, "chili_momentum_g4_spent_leg_seed_enabled", True))
+                    ):
                         from zoneinfo import ZoneInfo as _G4eZone
 
                         _g4e_today_et = _now_in_tz(_G4eZone("America/New_York")).date().isoformat()
@@ -32357,20 +32397,67 @@ def tick_live_session(
                                 _g4e_spent.get("blocks_while_seeded") or 0
                             ) + 1
                             le["g4_spent_leg"] = _g4e_spent
-                            _commit_le(sess, le)
                         except Exception:
                             pass
-                    _emit(db, sess, "g4_reentry_escalation_blocked", {
-                        "blocked_trigger": _prev_reason,
-                        "escalation_level": _g4e_level,
-                        "spent_leg_seed": bool(_g4e_spent_active),
-                        "spent_leg_hod": _g4e_spent_hod,
-                        "hod_source": (
-                            _g4e_spent.get("hod_source")
-                            if (_g4e_spent_active and isinstance(_g4e_spent, dict)) else None
-                        ),
-                        **_g4e_dbg,
-                    })
+                    # ONCE-PER-REASON emit (review 2026-09-02 M16): a WAIT whose
+                    # trigger re-fires every loop pass emitted one event row per
+                    # tick (live 09-02: 175 rows in 7 min on ONE session, ~0.4/s)
+                    # and the spent-leg seed widens the level>=1 population to most
+                    # first entries. Emit when the (trigger, reason, level,
+                    # reclaim, spent-hod) key CHANGES or at most once per heartbeat
+                    # while it holds; the repeats in between are counted on the
+                    # next row (``suppressed_repeats``) and, for a seeded WAIT, in
+                    # the marker's ``blocks_while_seeded`` (carried on the clear).
+                    _g4e_blk_key = "|".join(str(x) for x in (
+                        _prev_reason, _g4e_dbg.get("reason"), _g4e_level,
+                        _g4e_dbg.get("required_reclaim"), _g4e_spent_hod,
+                    ))
+                    _g4e_blk_prev = (
+                        le.get("g4_blocked_emit")
+                        if isinstance(le.get("g4_blocked_emit"), dict) else {}
+                    )
+                    _g4e_blk_now = _utcnow_aware()
+                    _g4e_blk_last = None
+                    try:
+                        if _g4e_blk_prev.get("ts"):
+                            _g4e_blk_last = datetime.fromisoformat(str(_g4e_blk_prev.get("ts")))
+                            if _g4e_blk_last.tzinfo is None:
+                                _g4e_blk_last = _g4e_blk_last.replace(tzinfo=timezone.utc)
+                    except Exception:
+                        _g4e_blk_last = None
+                    try:
+                        _g4e_blk_repeats = int(_g4e_blk_prev.get("repeats") or 0)
+                    except (TypeError, ValueError):
+                        _g4e_blk_repeats = 0
+                    _g4e_blk_emit = (
+                        _g4e_blk_prev.get("key") != _g4e_blk_key
+                        or _g4e_blk_last is None
+                        or (_g4e_blk_now - _g4e_blk_last).total_seconds() >= _G4_BLOCKED_HEARTBEAT_S
+                    )
+                    if _g4e_blk_emit:
+                        le["g4_blocked_emit"] = {
+                            "key": _g4e_blk_key, "ts": _g4e_blk_now.isoformat(), "repeats": 0,
+                        }
+                    else:
+                        le["g4_blocked_emit"] = {
+                            "key": _g4e_blk_key,
+                            "ts": str(_g4e_blk_prev.get("ts") or _g4e_blk_now.isoformat()),
+                            "repeats": _g4e_blk_repeats + 1,
+                        }
+                    _commit_le(sess, le)
+                    if _g4e_blk_emit:
+                        _emit(db, sess, "g4_reentry_escalation_blocked", {
+                            "blocked_trigger": _prev_reason,
+                            "escalation_level": _g4e_level,
+                            "spent_leg_seed": bool(_g4e_spent_active),
+                            "spent_leg_hod": _g4e_spent_hod,
+                            "hod_source": (
+                                _g4e_spent.get("hod_source")
+                                if (_g4e_spent_active and isinstance(_g4e_spent, dict)) else None
+                            ),
+                            "suppressed_repeats": _g4e_blk_repeats,
+                            **_g4e_dbg,
+                        })
         # ANTI-CHASE re-entry guard: after a LOSING exit on this symbol, do NOT
         # re-buy far ABOVE where the last attempt failed. This is the same-symbol
         # loss-chase the escalation ladder is meant to gate — but the ladder's own

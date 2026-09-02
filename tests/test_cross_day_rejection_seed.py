@@ -60,9 +60,9 @@ def _seed_session_with_exit(db, sym, *, pnl, reason, ts):
     sid = db.execute(text(
         "INSERT INTO trading_automation_sessions "
         "(user_id, symbol, mode, state, execution_family, venue, variant_id, "
-        " risk_snapshot_json, started_at, created_at, updated_at) "
+        " risk_snapshot_json, allocation_decision_json, started_at, created_at, updated_at) "
         "VALUES (:u, :s, 'live', 'live_cancelled', 'alpaca_spot', 'alpaca', :v, "
-        " '{}'::jsonb, :t, :t, :t) "
+        " '{}'::jsonb, '{}'::jsonb, :t, :t, :t) "
         "RETURNING id"
     ), dict(s=sym, t=ts, v=_variant_id(db), u=uid)).scalar()
     db.execute(text(

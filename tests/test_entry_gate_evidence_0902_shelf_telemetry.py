@@ -216,8 +216,10 @@ def test_candidate_state_is_emitted_exactly_once_and_never_networks():
     assert len(sites) == 1
     tests = _ancestor_if_tests(sites[0], parents)
     assert any("shelf_state_emitted" in t for t in tests), tests
+    # once per session per ET DAY (review 2026-09-02 M17): the flag holds the ET date
+    assert any(t == "_score_ok" for t in tests), tests
     assert any(
-        t.startswith("_score_ok and") and "not le.get('shelf_state_emitted')" in t for t in tests
+        "shelf_state_emitted" in t and "_shelf_cand_day" in t and "!=" in t for t in tests
     ), tests
     # cache-only: the candidate block imports cached_shelf_state, never the prime
     seg_start = ast.unparse(fn).index("shelf_registration_state")

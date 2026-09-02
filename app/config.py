@@ -8069,7 +8069,7 @@ class Settings(BaseSettings):
     chili_momentum_g4_spent_leg_seed_enabled: bool = Field(
         default=True,
         validation_alias=AliasChoices("CHILI_MOMENTUM_G4_SPENT_LEG_SEED_ENABLED"),
-        description="Seed g4 level 1 (reclaim reference = session HOD) on the FIRST entry of a name whose session HOD is >= min_hod_age_min old AND >= min_drawdown_pct above price. WAIT, not veto: clears when price prints at/above the top or the top moves. Fail-open on stale frame / no tick coverage / HOD not today.",
+        description="Seed g4 level 1 (reclaim reference = session HOD) on the FIRST entry of a name whose session HOD is >= min_hod_age_min old AND >= min_drawdown_pct above price. WAIT, not veto: clears when price prints at/above the top, the top moves, OR the pullback shallows under min_drawdown_pct (so the live rule equals the fill-instant predicate the corpus was measured on; a marker that only cleared on a re-take blocked RKTO 07-09 / LHAI 07-08, review 2026-09-02). Fail-open on stale frame / no continuous tick coverage / HOD not today. KILL: flag OFF never seeds AND unwinds any active marker on the next score-ok tick (clear_reason=disabled).",
     )
     chili_momentum_g4_spent_leg_min_hod_age_min: float = Field(
         default=5.0,
@@ -8082,7 +8082,7 @@ class Settings(BaseSettings):
         ge=0.0,
         le=50.0,
         validation_alias=AliasChoices("CHILI_MOMENTUM_G4_SPENT_LEG_MIN_DRAWDOWN_PCT"),
-        description="Percent under the session HOD before a pullback counts as a spent leg. 5 = CANF 12% / JLHL 6.6% seed; UPC 3.6% (documented miss), RKTO +75 at 3.77% and LHAI +48 at 3.7% do NOT (swept P in {3,4,5}; never tuned to UPC).",
+        description="Percent under the session HOD before a pullback counts as a spent leg, measured at EVERY score-ok tick: at/above this depth (and >= min age) the marker is active, under it the marker clears (clear_reason=shallowed) — the fill-instant predicate of the corpus. 5 = CANF 12% / JLHL 6.6% seed; UPC 3.6% (documented miss), RKTO +75 at 3.77% and LHAI +48 at 3.7% at the fill do NOT (both dipped ~7% >= 5 min after the HOD earlier — seeded, then cleared as the pullback shallowed before the fill; swept P in {3,4,5}; never tuned to UPC).",
     )
     chili_momentum_g4_spent_leg_max_frame_age_s: float = Field(
         default=120.0,

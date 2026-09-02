@@ -7,10 +7,16 @@ Walang network sa tests — mocked ang _http_get_json.
 """
 from __future__ import annotations
 
+import os
 from datetime import datetime, timedelta, timezone
 from unittest.mock import patch
 
 import app.services.trading.momentum_neural.shelf_registration as sr
+
+# prime_shelf_cache short-circuits under CHILI_PYTEST=1 (network fence #1101,
+# 2026-08-21) — these tests mock the HTTP layer, so lift the fence for the
+# prime call only (the two active/old-filing cases were red since #1101).
+_LIFT_FENCE = {"CHILI_PYTEST": "0", "CHILI_DIAGNOSTIC_REPLAY_ISOLATED": "false"}
 
 
 def _fresh(days_ago: float) -> str:
@@ -39,7 +45,7 @@ def _prime(subs_payload):
             return _TICKER_MAP
         return subs_payload
 
-    with patch.object(sr, "_http_get_json", side_effect=fake_get):
+    with patch.object(sr, "_http_get_json", side_effect=fake_get), patch.dict(os.environ, _LIFT_FENCE):
         sr.prime_shelf_cache("PFSA")
     return sr.cached_shelf_state("PFSA")
 
@@ -68,9 +74,10 @@ def test_network_failure_is_fail_open_and_negative_cached():
         calls["n"] += 1
         raise RuntimeError("edgar down")
 
-    with patch.object(sr, "_http_get_json", side_effect=boom):
+    with patch.object(sr, "_http_get_json", side_effect=boom), patch.dict(os.environ, _LIFT_FENCE):
         sr.prime_shelf_cache("PFSA")
         first_calls = calls["n"]
+        assert first_calls >= 1  # the fence is lifted: the network WAS attempted once
         sr.prime_shelf_cache("PFSA")  # negative-cached — walang bagong network
     assert calls["n"] == first_calls
     assert sr.cached_shelf_state("PFSA") is None

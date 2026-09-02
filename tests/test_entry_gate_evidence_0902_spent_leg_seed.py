@@ -251,12 +251,21 @@ REAL_FILLS = [
 
 
 def _replay(rows):
+    """FILL-INSTANT predicate on each fill. The CSV ages are measured from the HOD
+    bar START (idxmax); the shipped age is from the bar END (entry_gates.py
+    session_frame_hod_debug, 1m bench interval) — one bar YOUNGER — so the replay
+    feeds the live basis (age - 1 min), not the ablation's (review 2026-09-02 M11;
+    nothing flips at M=5: AUUD 6.9->5.9, XPON 7.4->6.4, BDRX 7.6->6.6).
+    The LIVE marker lifecycle equals this fill-instant read by construction: the
+    marker clears when the pullback shallows under P% (see the RKTO lifecycle
+    test below), so 'seeded here' == 'blocked at the fill' and vice versa."""
     seeded, not_seeded = [], []
     for sym, day, et_time, entry, pnl, hod, age, dd in rows:
         h, m = (int(x) for x in et_time.split(":"))
         now = datetime.fromisoformat(f"{day}T{h:02d}:{m:02d}:00-04:00").astimezone(UTC)
+        age_bar_end = max(0.0, float(age) - 1.0)
         seed, dbg = spent_leg_seed_decision(
-            cur_hod=hod, hod_ts=now - timedelta(minutes=age), hod_date_et=day,
+            cur_hod=hod, hod_ts=now - timedelta(minutes=age_bar_end), hod_date_et=day,
             live_px=entry, now_utc=now, session_date_et=day,
             frame_age_s=0.0, coverage_gap_s=0.0, interval_s=60.0,
         )
@@ -282,7 +291,12 @@ def test_table_driven_replay_of_the_real_fills():
     assert {k.split("@")[0] for k, _, _ in cur_not} == {"SDOT", "COIW", "AEMD", "LIDR", "UPC"}
     # every current-era P&L that seeds is a loss or unbooked; no current-era winner is blocked.
     assert all((pnl is None) or (pnl < 0) for _, pnl, _ in cur_seeded)
-    # July winners the 5-min / 5% floors protect: VEEE, VRAX, LUCY, SKYQ, RKTO, LHAI stay free.
+    # July winners the 5-min / 5% floors protect AT THE FILL: VEEE, VRAX, LUCY, SKYQ, RKTO,
+    # LHAI stay free. RKTO / LHAI both dipped ~7% >= 5 min after their HOD EARLIER (RKTO
+    # 08:31 close 0.986 under 1.06; LHAI 08:28 close 1.50 under 1.62, 1m bars re-fetched
+    # 2026-09-02) with no re-take before the fill: a marker that only cleared on a re-take
+    # would have blocked both. The shipped marker clears when the pullback shallows
+    # under P% (test_rkto_shape_shallowed_clear_admits_the_fill), so they stay free live.
     july_not = {k.split("@")[0] for k, _, _ in _replay([r for r in REAL_FILLS if r[1] < "2026-08-01"])[1]}
     assert {"VEEE", "VRAX", "LUCY", "SKYQ", "RKTO", "LHAI", "SOBR"} <= july_not
     # and the HONEST cost: JZXN (+182.16, 16.4R) IS seeded on bars — only its HOD re-take
@@ -485,10 +499,111 @@ def test_stale_session_date_marker_is_treated_as_absent():
     }
     up, acts = _tick(le, px=4.34, now=T0 + timedelta(minutes=10), frame_hod=4.9297,
                      hod_end=T0 + timedelta(minutes=3))
-    assert _events(acts) == ["g4_spent_leg_seed"]  # no phantom clear of yesterday's marker
+    # yesterday's ACTIVE marker is UNWOUND (session_rollover), never cleared as a
+    # re-take of 9.99 by today's price, then today's spent leg seeds on 4.9297.
+    assert _events(acts) == ["g4_spent_leg_cleared", "g4_spent_leg_seed"]
+    assert acts[0][1]["clear_reason"] == "session_rollover"
+    assert acts[0][1]["marker_session_date_et"] == "2026-09-01"
+    assert acts[0][1]["retopped"] is False and acts[0][1]["hod"] == 9.99
     _apply(le, up)
     assert le["g4_spent_leg"]["hod"] == 4.9297 and le["g4_spent_leg"]["session_date_et"] == DAY
     assert le["spent_leg_tick_hod"]["session_date_et"] == DAY
+    assert le["g4_reentry_escalation"] == 1  # today's seed, not an orphan of yesterday's
+
+
+def test_session_rollover_unwinds_the_orphaned_level():
+    """Review M15: a day-1 seed (level 1, key created by the seed) that never
+    re-took its top survives the ET rollover as an orphaned level-1 with no
+    reference — the day-2 tick must unwind it (key deleted -> the #1252
+    cross-day seed gets its first read again) and emit the clear."""
+    le = {
+        "g4_spent_leg": {"active": True, "hod": 4.9297, "session_date_et": "2026-09-01",
+                         "seed_level_delta": 1, "key_absent_at_seed": True,
+                         "seeded_at": (T0 - timedelta(days=1)).isoformat(),
+                         "blocks_while_seeded": 7, "hod_source": "frame"},
+        "g4_reentry_escalation": 1,
+    }
+    day2 = T0 + timedelta(days=1)
+    # day 2, price at the (young, 2 min) new HOD: nothing to seed, only the unwind.
+    up, acts = _tick(le, px=5.00, now=day2 + timedelta(minutes=5), frame_hod=5.00,
+                     hod_end=day2 + timedelta(minutes=3), session_date_et="2026-09-03",
+                     hod_date_et="2026-09-03")
+    assert _events(acts) == ["g4_spent_leg_cleared"]
+    p = acts[0][1]
+    assert p["clear_reason"] == "session_rollover" and p["blocks_while_seeded"] == 7
+    assert p["level_before"] == 1 and p["level_after"] is None
+    assert up["g4_reentry_escalation"] is None
+    _apply(le, up)
+    assert "g4_reentry_escalation" not in le
+    assert le["g4_spent_leg"]["active"] is False
+    # a real-loss level (delta 0) is left alone by the rollover unwind
+    le2 = {
+        "g4_spent_leg": {"active": True, "hod": 4.9297, "session_date_et": "2026-09-01",
+                         "seed_level_delta": 0, "key_absent_at_seed": False},
+        "g4_reentry_escalation": 2,
+    }
+    up, acts = _tick(le2, px=5.00, now=day2 + timedelta(minutes=5), frame_hod=5.00,
+                     hod_end=day2 + timedelta(minutes=3), session_date_et="2026-09-03",
+                     hod_date_et="2026-09-03")
+    assert acts[0][1]["clear_reason"] == "session_rollover" and up["g4_reentry_escalation"] == 2
+
+
+def test_rkto_shape_shallowed_clear_admits_the_fill():
+    """Review M8 (blocker): RKTO 07-09 — HOD 1.06 @ 08:25, 08:31 close 0.986
+    (6.98% under, 6 min after the bar END) then the +74.52 fill at 1.02 (3.77%
+    under) with NO re-take in between. The fill-instant predicate (the corpus)
+    says FREE; a marker that only cleared on a re-take said BLOCKED. Live: seed
+    at the dip, CLEAR when the pullback shallows under P% (same tick, before
+    the g4 block reads the marker) -> the fill is admitted at level 0."""
+    hod_end = datetime(2026, 7, 9, 12, 26, 0, tzinfo=UTC)  # 08:25 ET bar END
+    le: dict = {}
+    up, acts = _tick(le, px=0.986, now=hod_end + timedelta(minutes=6), frame_hod=1.06,
+                     hod_end=hod_end, session_date_et="2026-07-09", hod_date_et="2026-07-09")
+    _apply(le, up)
+    assert _events(acts) == ["g4_spent_leg_seed"] and le["g4_reentry_escalation"] == 1
+    # 08:41 ET: 1.02 = 3.77% under -> shallowed clear, key deleted, top NOT retired
+    up, acts = _tick(le, px=1.02, now=hod_end + timedelta(minutes=15), frame_hod=1.06,
+                     hod_end=hod_end, session_date_et="2026-07-09", hod_date_et="2026-07-09")
+    assert _events(acts) == ["g4_spent_leg_cleared"]
+    p = acts[0][1]
+    assert p["clear_reason"] == "shallowed" and p["retopped"] is False
+    assert p["clear_px"] == 1.02 and p["level_after"] is None
+    _apply(le, up)
+    assert "g4_reentry_escalation" not in le
+    assert le["g4_spent_leg"]["active"] is False and le["g4_spent_leg"]["cleared_hod"] is None
+    ok, dbg = reentry_escalation_decision(
+        enabled=True, escalation_level=int(le.get("g4_reentry_escalation") or 0),
+        structural_trigger=False, live_price=1.02, prior_hwm=1.06, prior_exit_price=None,
+        prior_risk_dist=None, tape_accel=1.0,
+    )
+    assert ok is True and dbg["reason"] == "no_escalation"
+    # the SAME top goes spent again 10 min later (5.7% under) -> re-seeded (not retired)
+    up, acts = _tick(le, px=1.00, now=hod_end + timedelta(minutes=25), frame_hod=1.06,
+                     hod_end=hod_end, session_date_et="2026-07-09", hod_date_et="2026-07-09")
+    assert _events(acts) == ["g4_spent_leg_seed"] and acts[0][1]["hod"] == 1.06
+    # ... whereas a re-take (hit_top) RETIRES the top: a later 10% fade never re-seeds on it
+    _apply(le, up)
+    up, acts = _tick(le, px=1.06, now=hod_end + timedelta(minutes=30), frame_hod=1.06,
+                     hod_end=hod_end, session_date_et="2026-07-09", hod_date_et="2026-07-09")
+    assert acts[0][1]["clear_reason"] == "hit_top"
+    _apply(le, up)
+    assert le["g4_spent_leg"]["cleared_hod"] == 1.06
+    _u, acts = _tick(le, px=0.95, now=hod_end + timedelta(minutes=60), frame_hod=1.06,
+                     hod_end=hod_end, session_date_et="2026-07-09", hod_date_et="2026-07-09")
+    assert acts == []
+
+
+def test_shallow_threshold_is_the_seed_threshold():
+    """The clear fires exactly where the seed predicate stops holding (dd < P%)."""
+    le: dict = {}
+    _apply(le, _tick(le, px=94.0, now=T0 + timedelta(minutes=10), frame_hod=100.0,
+                     hod_end=T0 + timedelta(minutes=3))[0])
+    _u, acts = _tick(le, px=95.0, now=T0 + timedelta(minutes=11), frame_hod=100.0,
+                     hod_end=T0 + timedelta(minutes=3))
+    assert acts == []  # exactly 5% under: still a spent leg (seed holds at the floor)
+    _u, acts = _tick(le, px=95.01, now=T0 + timedelta(minutes=12), frame_hod=100.0,
+                     hod_end=T0 + timedelta(minutes=3))
+    assert _events(acts) == ["g4_spent_leg_cleared"] and acts[0][1]["clear_reason"] == "shallowed"
 
 
 def test_seed_level_delta_is_zero_when_a_real_loss_level_exists():
@@ -521,17 +636,32 @@ def test_seed_then_stop_loss_then_retake_leaves_the_loss_level():
     assert le["g4_reentry_escalation"] == 1 and acts[0][1]["level_after"] == 1
 
 
-def test_disabled_flag_still_clears_but_never_seeds():
+def test_disabled_flag_unwinds_immediately_and_never_seeds():
+    """Review M1/M14 (the KILL): flag OFF must unwind an active marker on the
+    very next score-ok tick — price still 12% under the top, no re-take — so
+    the KILL itself can never leave a session-long WAIT behind."""
     le: dict = {}
     _apply(le, _tick(le, px=4.34, now=T0 + timedelta(minutes=10), frame_hod=4.9297,
                      hod_end=T0 + timedelta(minutes=3))[0])
-    up, acts = _tick(le, px=4.95, now=T0 + timedelta(minutes=14), frame_hod=4.9297,
+    assert le["g4_reentry_escalation"] == 1
+    up, acts = _tick(le, px=4.34, now=T0 + timedelta(minutes=11), frame_hod=4.9297,
                      hod_end=T0 + timedelta(minutes=3), enabled=False)
     assert _events(acts) == ["g4_spent_leg_cleared"]  # flipping OFF never strands a name
+    assert acts[0][1]["clear_reason"] == "disabled" and up["g4_reentry_escalation"] is None
+    _apply(le, up)
+    assert le["g4_spent_leg"]["active"] is False and "g4_reentry_escalation" not in le
+    # still OFF: nothing seeds, no further events
+    _u, acts = _tick(le, px=4.34, now=T0 + timedelta(minutes=12), frame_hod=4.9297,
+                     hod_end=T0 + timedelta(minutes=3), enabled=False)
+    assert acts == []
     le2: dict = {}
     up, acts = _tick(le2, px=4.34, now=T0 + timedelta(minutes=10), frame_hod=4.9297,
                      hod_end=T0 + timedelta(minutes=3), enabled=False)
     assert acts == [] and "g4_spent_leg" not in up
+    # flag back ON: the same (un-retired) top re-seeds — the disable was not a retirement
+    up, acts = _tick(le, px=4.34, now=T0 + timedelta(minutes=13), frame_hod=4.9297,
+                     hod_end=T0 + timedelta(minutes=3), enabled=True)
+    assert _events(acts) == ["g4_spent_leg_seed"]
 
 
 def test_crypto_and_missing_frame_never_seed():
@@ -566,6 +696,47 @@ def test_stale_frame_is_bridged_only_by_tick_coverage():
                      frame_age_s=900.0)
     assert _events(acts) == ["g4_spent_leg_seed"]
     assert acts[0][1]["coverage_gap_s"] == 0.0 and acts[0][1]["frame_age_s"] == 900.0
+
+
+def test_coverage_run_restarts_after_a_hole():
+    """Review M2/M12/M18: the coverage proof is a CONTINUOUS run of priced ticks
+    no more than T apart (T = max(2*interval, max_frame_age_s) = 120 s here).
+    A session that ticked at 11:05 and then went dark until 11:25 (benched
+    out, score flicker, host stall) has NOT covered the 11:10 -> 11:25 gap:
+    a frame whose last bar ended 11:10 stays STALE for it (no seed), and the
+    hole is counted; once the run is continuous again the frame is bridged."""
+    le: dict = {}
+    stale = dict(frame_hod=4.9297, hod_end=T0 + timedelta(minutes=3),
+                 frame_last_end=T0 + timedelta(minutes=10), frame_age_s=900.0)
+    # first priced tick at 11:05 (before the frame's last bar) — the run starts
+    _u, acts = _tick(le, px=4.50, now=T0 + timedelta(minutes=5), frame_hod=4.9297,
+                     hod_end=T0 + timedelta(minutes=3), frame_last_end=T0 + timedelta(minutes=6),
+                     frame_age_s=0.0)
+    _apply(le, _u)
+    assert acts == [] and le["spent_leg_tick_hod"]["coverage_breaks"] == 0
+    # 20 min hole, then a tick at 11:25 against the stale frame: the run RESTARTS at 11:25
+    _u, acts = _tick(le, px=4.34, now=T0 + timedelta(minutes=25), **stale)
+    _apply(le, _u)
+    assert acts == []  # coverage_gap 15 min > 120 s -> frame_stale -> no seed
+    th = le["spent_leg_tick_hod"]
+    assert th["coverage_breaks"] == 1
+    assert th["first_tick_ts"] == (T0 + timedelta(minutes=25)).isoformat()
+    assert th["px"] == 4.50  # the running high itself survives the hole
+    # continuous ticks from 11:25 on cannot bridge a bar that ended 11:10 either
+    _u, acts = _tick(le, px=4.34, now=T0 + timedelta(minutes=26), **stale)
+    _apply(le, _u)
+    assert acts == [] and le["spent_leg_tick_hod"]["coverage_breaks"] == 1
+    # the same shape with NO hole (ticks every minute since 11:05) is bridged
+    le2: dict = {}
+    for k in range(5, 26):
+        _u, acts = _tick(le2, px=4.50 if k < 20 else 4.34, now=T0 + timedelta(minutes=k),
+                         frame_hod=4.9297, hod_end=T0 + timedelta(minutes=3),
+                         frame_last_end=T0 + timedelta(minutes=10), frame_age_s=max(0.0, (k - 10) * 60.0))
+        _apply(le2, _u)
+        if acts:
+            break
+    assert _events(acts) == ["g4_spent_leg_seed"] and acts[0][1]["coverage_breaks"] == 0
+    assert le2["spent_leg_tick_hod"]["first_tick_ts"] == (T0 + timedelta(minutes=5)).isoformat()
 
 
 def test_corrupt_marker_is_dropped_fail_open():
@@ -670,24 +841,115 @@ def test_call_sites_pass_the_aware_clock():
         assert "_utcnow()" not in ast.unparse(call)
 
 
+def _assigns_to(fn, name: str) -> list[ast.Assign]:
+    return [
+        n for n in ast.walk(fn)
+        if isinstance(n, ast.Assign)
+        and any(isinstance(t, ast.Name) and t.id == name for t in n.targets)
+    ]
+
+
+def _names_in(node: ast.AST) -> set[str]:
+    return {n.id for n in ast.walk(node) if isinstance(n, ast.Name)}
+
+
 def test_g4_block_hands_the_marker_top_to_the_decision_and_annotates_the_block():
+    """Structural (review M21), not a string pin: the prior_hwm handed to the
+    decision is the name whose LAST assignment before the call is a max() over
+    the prior HWM and the marker top, and that assignment is reachable (guarded
+    only by the marker-active test, never by a constant-false branch)."""
     fn = _tick_fn()
-    src = ast.unparse(fn)
+    parents = _with_parents(fn)
     g4_call = _calls_named(fn, "reentry_escalation_decision")[0]
     hwm_kw = [kw for kw in g4_call.keywords if kw.arg == "prior_hwm"][0]
-    assert ast.unparse(hwm_kw.value) == "_g4e_prior_hwm"
-    assert "_g4e_prior_hwm = max(float(_g4e_prior_hwm or 0.0), float(_g4e_spent_hod))" in src
+    assert isinstance(hwm_kw.value, ast.Name)
+    hwm_name = hwm_kw.value.id
+    assigns = [a for a in _assigns_to(fn, hwm_name) if a.lineno < g4_call.lineno]
+    assert assigns, hwm_name
+    last = assigns[-1]
+    assert isinstance(last.value, ast.Call) and isinstance(last.value.func, ast.Name)
+    assert last.value.func.id == "max", ast.unparse(last)
+    assert {"_g4e_spent_hod", hwm_name} <= _names_in(last.value), ast.unparse(last)
+    guards = _ancestor_if_tests(last, parents)
+    assert not any(g in ("False", "0", "None") for g in guards), guards
+    assert any("_g4e_spent_active" in g for g in guards), guards
+    # the marker-active read is flag-gated (review M14): OFF ⇒ no hand-off
+    active_assigns = [a for a in _assigns_to(fn, "_g4e_spent_active") if a.lineno < g4_call.lineno]
+    active_guards = [t for a in active_assigns for t in _ancestor_if_tests(a, parents)]
+    assert any("chili_momentum_g4_spent_leg_seed_enabled" in g for g in active_guards), active_guards
     blocked = _emit_sites(fn, "g4_reentry_escalation_blocked")
     assert len(blocked) == 1
     payload_src = ast.unparse(blocked[0].args[3])
-    for key in ("spent_leg_seed", "spent_leg_hod", "hod_source"):
+    for key in ("spent_leg_seed", "spent_leg_hod", "hod_source", "suppressed_repeats"):
         assert f"'{key}'" in payload_src, key
+    # once-per-reason (review M16): the emit is guarded by the dedupe decision
+    blk_guards = _ancestor_if_tests(blocked[0], parents)
+    assert any(g == "_g4e_blk_emit" for g in blk_guards), blk_guards
+
+
+def test_runner_wiring_keys_and_kill_switch():
+    """Review M18 / M1: (a) every ``_bench_dbg.get('<key>')`` the runner hands to
+    apply_spent_leg_tick is a key session_frame_hod_debug actually emits — a
+    rename would otherwise pass None on every tick and make the feature
+    silently inert; (b) ``enabled`` is the FLAG (never the constant True) and
+    the block also runs when a marker is present, so flag OFF still unwinds."""
+    fn = _tick_fn()
+    parents = _with_parents(fn)
+    call = _calls_named(fn, "apply_spent_leg_tick")[0]
+    emitted = set(session_frame_hod_debug(pd.DataFrame()).keys())
+    handed = set()
+    for kw in call.keywords:
+        for n in ast.walk(kw.value):
+            if (
+                isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute)
+                and n.func.attr == "get" and isinstance(n.func.value, ast.Name)
+                and n.func.value.id == "_bench_dbg" and n.args
+                and isinstance(n.args[0], ast.Constant)
+            ):
+                handed.add(str(n.args[0].value))
+    assert handed, "runner reads no _bench_dbg keys"
+    assert handed <= emitted, handed - emitted
+    enabled_kw = [kw for kw in call.keywords if kw.arg == "enabled"][0]
+    assert not isinstance(enabled_kw.value, ast.Constant), ast.unparse(enabled_kw.value)
+    assert isinstance(enabled_kw.value, ast.Name)
+    flag_assigns = _assigns_to(fn, enabled_kw.value.id)
+    assert any("chili_momentum_g4_spent_leg_seed_enabled" in ast.unparse(a.value) for a in flag_assigns)
+    guards = _ancestor_if_tests(call, parents)
+    assert any("_spent_marker_active" in g and enabled_kw.value.id in g for g in guards), guards
+    # emit BEFORE apply (review M7): the first _emit of the seed/clear precedes the le writes
+    seed_site = _emit_sites(fn, "g4_spent_leg_seed")[0]
+    commit_after = [
+        c for c in _calls_named(fn, "_commit_le")
+        if c.lineno > seed_site.lineno and c.lineno < _calls_named(fn, "reentry_escalation_decision")[0].lineno
+    ]
+    assert commit_after and min(c.lineno for c in commit_after) > seed_site.lineno
 
 
 def test_marker_keys_survive_recycle():
     assert "g4_spent_leg" not in lr._RECYCLE_ENTRY_STATE_KEYS
     assert "spent_leg_tick_hod" not in lr._RECYCLE_ENTRY_STATE_KEYS
     assert "g4_reentry_escalation" not in lr._RECYCLE_ENTRY_STATE_KEYS
+
+
+def test_shelf_candidate_record_is_et_day_scoped_and_emits_before_the_flag():
+    """Review M17 / M7: the per-candidate shelf record is once per session per
+    ET DAY (the flag stores the date), and the flag is written AFTER the emit."""
+    fn = _tick_fn()
+    sites = _emit_sites(fn, "shelf_registration_state")
+    assert len(sites) == 1
+    site = sites[0]
+    flag_writes = [
+        n for n in ast.walk(fn)
+        if isinstance(n, ast.Assign)
+        and any(
+            isinstance(t, ast.Subscript) and isinstance(t.slice, ast.Constant)
+            and t.slice.value == "shelf_state_emitted" for t in n.targets
+        )
+    ]
+    assert len(flag_writes) == 1
+    assert flag_writes[0].lineno > site.lineno
+    assert isinstance(flag_writes[0].value, ast.Name)  # the ET date, not True
+    assert "'session_date_et'" in ast.unparse(site.args[3])
 
 
 def test_ships_on():
