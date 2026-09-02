@@ -273,7 +273,17 @@ def test_chain_precedes_bind_and_the_swallow_is_gone():
     src = _fn_body_src(LR._heal_unrecognized_entry_fill)
     assert src.index("_transition_recovered_primary_to_pending") < src.index("_bind_recovered_entry_order")
     assert "_HEALABLE_PRE_ENTRY_STATES" in src
-    assert src.index("entry_orders_resolved") < src.index("_recover_entry_order_by_client_id")
+    # The already-resolved-order guard now lives in the shared predicate that
+    # dispatch admission also uses (_unadopted_entry_order_signature); the
+    # invariant it protects is unchanged — it must still run BEFORE any broker
+    # lookup, so a finished trade never costs a round-trip.
+    assert (
+        src.index("_unadopted_entry_order_signature")
+        < src.index("_recover_entry_order_by_client_id")
+    )
+    assert "entry_orders_resolved" in inspect.getsource(
+        LR._unadopted_entry_order_signature
+    )
     assert "live_entry_fill_self_heal_failed" in src
     i_exc = src.index("except Exception as exc")
     assert "_log.debug(" not in src[i_exc:]

@@ -28531,6 +28531,50 @@ _HEALABLE_PRE_ENTRY_STATES = frozenset({
 })
 
 
+def _heal_ts(raw: Any) -> datetime | None:
+    """Naive-UTC datetime from a stored ISO stamp; None when unusable.
+
+    ``_utcnow()`` is naive-UTC, so a tz-aware stamp is normalized rather than
+    compared (a naive/aware subtraction raises, and an exception here would put
+    the caller back on the unbounded path this helper exists to bound)."""
+    if not raw:
+        return None
+    try:
+        dt = datetime.fromisoformat(str(raw).replace("Z", "+00:00"))
+    except (TypeError, ValueError):
+        return None
+    return dt.replace(tzinfo=None) if dt.tzinfo is not None else dt
+
+
+def _heal_probe_interval_s() -> float:
+    try:
+        return max(0.0, float(getattr(
+            settings, "chili_momentum_entry_fill_self_heal_probe_interval_s", 5.0,
+        ) or 0.0))
+    except (TypeError, ValueError):
+        return 5.0
+
+
+def _heal_max_attempts() -> int:
+    try:
+        return max(1, int(getattr(
+            settings, "chili_momentum_entry_fill_self_heal_max_attempts", 6,
+        ) or 6))
+    except (TypeError, ValueError):
+        return 6
+
+
+def _heal_reprobe_interval_s() -> float:
+    try:
+        return max(1.0, float(getattr(
+            settings,
+            "chili_momentum_entry_fill_self_heal_unconverged_reprobe_s",
+            60.0,
+        ) or 60.0))
+    except (TypeError, ValueError):
+        return 60.0
+
+
 def _heal_unrecognized_entry_fill(db, sess, adapter, *, le, product_id) -> dict:
     """SELF-HEAL: ang session na may naisumiteng entry PERO walang naitalang
     posisyon ay muling kinukumpirma sa BROKER TRUTH (#1267).
@@ -28568,6 +28612,22 @@ def _heal_unrecognized_entry_fill(db, sess, adapter, *, le, product_id) -> dict:
     (e) ang kabiguan ay MALAKAS: WARNING na may traceback at
     ``live_entry_fill_self_heal_failed`` (severity critical) minsan kada
     signature.
+
+    2026-09-02 CANF 19471 (Q2, CONVERGENCE): 3,373 event sa 108 minuto,
+    ~33/min, at 3,373 broker ``get_order`` — dahil ang postcondition nito ay
+    SUPERSET ng sariling precondition (muli nitong itinatakda ang
+    ``entry_submitted``/order id at hindi kailanman sumusulat ng ``position``),
+    habang ang tunay na adoption ay nasa libu-libong linya sa IBABA, sa likod
+    ng bawat gate ng tick. Ang unang dedupe ay nagpatahimik lang ng emit at
+    nakakabit pa sa ``state == live_pending_entry`` gayong LEGAL ang
+    ``live_pending_entry -> watching_live``. Ngayon ay may TATLONG hangganan:
+    (f) throttle BAGO ang broker probe (``entry_fill_self_heal_last_utc``);
+    (g) bilang ng tangka kada order (``entry_fill_self_heal_attempts``); at
+    (h) kapag umabot sa cap nang hindi pa rin na-a-adopt, ISANG malakas na
+    ``live_entry_fill_self_heal_unconverged`` (severity critical + ERROR log)
+    at mabagal na re-probe — hindi tahimik na pag-ikot. Ang chain ay muli pa
+    ring nilalakad kahit repeat, kaya ang umaandap na state ay naaayos; ang
+    EVENT lang ang minsan kada order.
     """
     out: dict = {}
     _oid = ""
@@ -28590,13 +28650,48 @@ def _heal_unrecognized_entry_fill(db, sess, adapter, *, le, product_id) -> dict:
         if str(sess.state) not in _HEALABLE_PRE_ENTRY_STATES:
             return out
         # Already-recognised order (adopted / void / any outcome): nothing to heal.
-        _resolved = le.get("entry_orders_resolved") or {}
-        if _oid and _oid in _resolved:
+        # Shared with the dispatch predicate so "the heal could act" and "the
+        # session gets dispatched" can never disagree.
+        _pending_sig = _unadopted_entry_order_signature(le)
+        if not _pending_sig:
             return out
-        if not _oid:
-            _hist = [str(x) for x in (le.get("entry_order_ids_all") or [])]
-            if _hist and all(x in _resolved for x in _hist):
-                return out
+
+        # ── CONVERGENCE GATE (2026-09-02 CANF 19471: 3,374 events, 108 min) ──
+        # This function's postcondition is a SUPERSET of its own precondition —
+        # it re-asserts ``entry_submitted``/``entry_order_id`` and never writes
+        # ``position`` — so convergence is owned entirely by the fill-adoption
+        # path thousands of lines DOWNSTREAM, behind every gate in the tick.
+        # Whenever one of those gates returns early the next wake finds
+        # byte-identical inputs and the heal re-fires, forever (measured: 1.93s
+        # mean gap, 33/min, until a human flattened).  #1285 deduped the EMIT
+        # only, and conditioned even that on ``state == live_pending_entry``
+        # although ``live_pending_entry -> watching_live`` is a LEGAL edge, so an
+        # oscillating session re-armed it; the broker probe was never bounded at
+        # all.  Bound both: throttle the probe BEFORE issuing it, count the
+        # attempts per order, and escalate exactly ONCE, loudly, instead of
+        # looping silently.
+        _healed_sig = str(le.get("entry_fill_self_heal_sig") or "")
+        _same_order = bool(_healed_sig) and _healed_sig in {_pending_sig, _oid, _cid}
+        _attempts = int(le.get("entry_fill_self_heal_attempts") or 0) if _same_order else 0
+        _cap = _heal_max_attempts()
+        _unconverged = _same_order and _attempts >= _cap
+        _last_probe = _heal_ts(le.get("entry_fill_self_heal_last_utc")) if _same_order else None
+        _interval = _heal_reprobe_interval_s() if _unconverged else _heal_probe_interval_s()
+        _now = _utcnow()
+        if (
+            _last_probe is not None
+            and (_now - _last_probe).total_seconds() < _interval
+        ):
+            # Nothing changed and it is not time to ask the broker again. The
+            # OLD code fell through to ``adapter.get_order`` here on every one
+            # of 3,373 wakes.
+            out["healed"] = True
+            out["repeat"] = True
+            out["throttled"] = True
+            out["attempts"] = _attempts
+            if _unconverged:
+                out["unconverged"] = True
+            return out
         no = None
         if _cid:
             try:
@@ -28617,19 +28712,17 @@ def _heal_unrecognized_entry_fill(db, sess, adapter, *, le, product_id) -> dict:
             return out
         if filled <= 0.0:
             return out
-        _sig = str(getattr(no, "order_id", "") or _oid)
-        if (
-            le.get("entry_fill_self_heal_sig") == _sig
-            and str(sess.state) == STATE_LIVE_PENDING_ENTRY
-        ):
-            # Already healed this order and the session is where the
-            # fill-adoption path reads it. One event per order, not per tick.
-            out["healed"] = True
-            out["repeat"] = True
-            out["filled_size"] = filled
-            return out
+        _sig = str(getattr(no, "order_id", "") or _oid or _cid)
+        # A different order id than the one we last healed starts a fresh budget.
+        _repeat = bool(_healed_sig) and _healed_sig == _sig
+        if not _repeat:
+            _attempts = 0
+        _attempts += 1
         # May TUNAY na fill na hindi naitala. LEGAL CHAIN MUNA, saka bind —
         # kapag walang daan papuntang pending, walang nababago sa le.
+        # The chain is re-walked even on a repeat (``live_pending_entry ->
+        # watching_live`` is legal, so the session CAN fall back out of the
+        # state the adoption path reads); only the EVENT is once per order.
         state_before = str(sess.state)
         if (
             state_before != STATE_LIVE_PENDING_ENTRY
@@ -28638,31 +28731,79 @@ def _heal_unrecognized_entry_fill(db, sess, adapter, *, le, product_id) -> dict:
             raise RuntimeError(f"no_legal_chain_to_pending:{state_before}")
         _bind_recovered_entry_order(le, no, client_order_id=_cid or None)
         le["entry_fill_self_heal_sig"] = _sig
+        le["entry_fill_self_heal_attempts"] = _attempts
+        le["entry_fill_self_heal_last_utc"] = _now.isoformat()
+        if _attempts == 1:
+            le["entry_fill_self_heal_first_utc"] = _now.isoformat()
+            le.pop("entry_fill_self_heal_unconverged_sig", None)
         _commit_le(sess, le)
         db.flush()
-        _emit(db, sess, "live_entry_fill_self_healed", {
-            "severity": "critical",
-            "order_id": str(getattr(no, "order_id", "") or ""),
-            "client_order_id": _cid,
-            "filled_size": filled,
-            "average_filled_price": _float_or_none(
-                getattr(no, "average_filled_price", None)
-            ),
-            "state_before": state_before,
-            "chain_from": state_before,
-            "note": (
-                "naisumiteng entry na may broker fill pero walang naitalang "
-                "posisyon — ibinalik sa pending_entry para ma-adopt at "
-                "malagyan ng deadman stop"
-            ),
-        })
-        _log.warning(
-            "[momentum_live] ENTRY FILL SELF-HEAL %s: %s shares na hindi "
-            "naitala — ibinalik sa pending_entry (chain_from=%s)",
-            sess.symbol, filled, state_before,
-        )
         out["healed"] = True
         out["filled_size"] = filled
+        out["attempts"] = _attempts
+        if _repeat:
+            out["repeat"] = True
+        else:
+            _emit(db, sess, "live_entry_fill_self_healed", {
+                "severity": "critical",
+                "order_id": str(getattr(no, "order_id", "") or ""),
+                "client_order_id": _cid,
+                "filled_size": filled,
+                "average_filled_price": _float_or_none(
+                    getattr(no, "average_filled_price", None)
+                ),
+                "state_before": state_before,
+                "chain_from": state_before,
+                "note": (
+                    "naisumiteng entry na may broker fill pero walang naitalang "
+                    "posisyon — ibinalik sa pending_entry para ma-adopt at "
+                    "malagyan ng deadman stop"
+                ),
+            })
+            _log.warning(
+                "[momentum_live] ENTRY FILL SELF-HEAL %s: %s shares na hindi "
+                "naitala — ibinalik sa pending_entry (chain_from=%s)",
+                sess.symbol, filled, state_before,
+            )
+        # ESCALATION: the heal has now run ``_cap`` times on this exact order and
+        # the adoption path still has not written a position. More heals cannot
+        # help — the blocker is downstream. Page ONCE, loudly, then fall back to
+        # the slow re-probe cadence. Silence here is what made #1285's dedupe
+        # dangerous: it muted the storm without converging it.
+        if _attempts >= _cap and le.get("entry_fill_self_heal_unconverged_sig") != _sig:
+            le["entry_fill_self_heal_unconverged_sig"] = _sig
+            _commit_le(sess, le)
+            _first_utc = str(le.get("entry_fill_self_heal_first_utc") or "")
+            _first_dt = _heal_ts(_first_utc)
+            _elapsed = (
+                (_now - _first_dt).total_seconds() if _first_dt is not None else None
+            )
+            _emit(db, sess, "live_entry_fill_self_heal_unconverged", {
+                "severity": "critical",
+                "order_id": _sig,
+                "client_order_id": _cid,
+                "filled_size": filled,
+                "attempts": _attempts,
+                "max_attempts": _cap,
+                "first_heal_utc": _first_utc or None,
+                "elapsed_s": _elapsed,
+                "state": str(sess.state or ""),
+                "note": (
+                    "ang entry fill ay paulit-ulit na na-heal pero hindi "
+                    "kailanman na-adopt ng fill-adoption path — malamang may "
+                    "gate sa ibaba ng tick na bumabalik nang maaga; posisyong "
+                    "WALANG stop, kailangan ng operator"
+                ),
+            })
+            db.flush()
+            _log.error(
+                "[momentum_live] ENTRY FILL SELF-HEAL NOT CONVERGING %s: %s shares, "
+                "%s attempts on order %s, still unadopted after %ss — position has "
+                "NO software stop",
+                getattr(sess, "symbol", None), filled, _attempts, _sig[:8], _elapsed,
+            )
+            out["unconverged"] = True
+            out["escalated"] = True
     except Exception as exc:
         # MALAKAS na kabiguan (dating DEBUG na nilunok — 12 min na katahimikan
         # sa 19471). Minsan kada signature para hindi mag-spam kada tick.
