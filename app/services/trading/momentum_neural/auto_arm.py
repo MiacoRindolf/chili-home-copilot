@@ -1900,6 +1900,76 @@ def _reap_age_anchor(row: Any, le: Any) -> datetime | None:
     return started if isinstance(started, datetime) else None
 
 
+def _reap_deferred_retry_seconds() -> float:
+    """Bounded cadence for re-asking a DEFERRED cancel (settings, default 300s)."""
+    try:
+        return max(
+            30.0,
+            float(getattr(settings, "chili_momentum_reap_deferred_retry_seconds", 300) or 300),
+        )
+    except (TypeError, ValueError):
+        return 300.0
+
+
+# Key of the persisted operator pause (session_lifecycle.OPERATOR_PAUSE_KEY;
+# literal here so this module keeps importing only live_fsm).
+_OPERATOR_PAUSE_KEY = "operator_pause"
+
+
+def _reap_deferred_hold_remaining(
+    state: Any, snap: Any, now: datetime, retry_seconds: float
+) -> float | None:
+    """Seconds left before a paused row's cancel may be re-asked; None = ask now.
+
+    Every DEFERRED result of ``cancel_automation_session`` persists the operator
+    pause with ``resume_state`` == the row's state and (re)stamps
+    ``paused_at_utc``. That stamp IS the durable record of the last deferred
+    cancel -- the hold reads it, so it survives a restart and needs no in-memory
+    ledger. JLHL 19463 (2026-09-02): the pass re-ran the cancel every 10s for
+    ~3h (883 passes), re-stamping the pause each time, because
+    ``_reaper_broker_position_truth`` had no adapter and answered UNKNOWN.
+
+    Hold while the stamp is younger than the retry cadence. An inactive pause, a
+    ``resume_state`` that no longer matches the row's state (it moved), or a
+    missing / garbage stamp => None (ask now: re-asking is the fail-closed
+    direction -- the cancel itself never terminalizes without broker-flat proof).
+    A stamp in the future (clock skew) counts as age 0. Pure: no DB, no clock.
+    """
+    snap = snap if isinstance(snap, dict) else {}
+    pause = snap.get(_OPERATOR_PAUSE_KEY)
+    if not isinstance(pause, dict) or not pause.get("active"):
+        return None
+    if str(pause.get("resume_state") or "") != str(state or ""):
+        return None
+    try:
+        stamped = datetime.fromisoformat(str(pause.get("paused_at_utc")))
+    except (TypeError, ValueError):
+        return None
+    if stamped.tzinfo is not None:
+        stamped = stamped.astimezone(timezone.utc).replace(tzinfo=None)
+    age = max(0.0, (now - stamped).total_seconds())
+    remaining = float(retry_seconds) - age
+    return remaining if remaining > 0.0 else None
+
+
+# session_id -> when its FIRST "reap HELD" line was logged (naive UTC). The hold
+# itself is data-driven (see _reap_deferred_hold_remaining); this only keeps the
+# log to one line per session. Bounded prune, same shape as _REAP_COOLDOWN.
+_REAP_HOLD_LOGGED: dict[int, datetime] = {}
+
+
+def _note_reap_hold(session_id: int, now: datetime) -> bool:
+    """True the FIRST time a session is held (caller logs); False afterwards."""
+    if session_id in _REAP_HOLD_LOGGED:
+        return False
+    _REAP_HOLD_LOGGED[session_id] = now
+    if len(_REAP_HOLD_LOGGED) > 500:
+        _stale = now - timedelta(days=1)
+        for _k in [k for k, v in _REAP_HOLD_LOGGED.items() if v < _stale]:
+            _REAP_HOLD_LOGGED.pop(_k, None)
+    return True
+
+
 def _reap_stale_watching_sessions(db: Session, *, user_id: int | None, now: datetime) -> int:
     """Cancel PRE-ENTRY live sessions that have watched too long without entering,
     freeing the concurrency slot for a fresher surging candidate — Ross moves on
@@ -1918,15 +1988,20 @@ def _reap_stale_watching_sessions(db: Session, *, user_id: int | None, now: date
           phase, which would erase those writes and re-run the cancel every
           pass. Such a cancel is committed here, immediately, and not counted.
           A CID-bearing deferral writes ``entry_submitted=True`` + pointers, so
-          the unlocked guard skips the row on later passes (no repeat). The
-          CID-LESS durable-claim branch writes ONLY the operator pause (no
-          pointers), so that row is re-cancelled — and its pause re-committed —
-          on every pass until the claim reconciles: benign (the branch never
-          reaches broker HTTP; same cadence as the pre-lock reaper), so a
-          repeating ``reap DEFERRED`` for one session with
-          ``terminalization_deferred=True`` is expected, not an alert. A cancel
-          that FAILS (``ok=False`` / ``None``) commits nothing and logs
-          ``reap FAILED`` (distinct from DEFERRED); it also repeats each pass.
+          the unlocked guard skips the row on later passes (no repeat). Every
+          other deferral (CID-less durable claim, broker-flat unconfirmed,
+          quarantine) writes ONLY the operator pause — and that pause is what
+          bounds the retry: while ``operator_pause`` is active with
+          ``resume_state`` == the row's state and ``paused_at_utc`` younger
+          than ``chili_momentum_reap_deferred_retry_seconds`` (300s), the row
+          is HELD (``_reap_deferred_hold_remaining``) — no lock probe, no
+          cancel, one ``reap HELD`` line per session — and the cancel is
+          re-asked once per cadence (2026-09-02 JLHL 19463: 883 cancels in
+          ~3h, one every pass, each re-stamping the pause). A ``reap DEFERRED``
+          line therefore recurs at most once per cadence per session. A cancel
+          that FAILS (``ok=False`` / ``None``) commits nothing, writes no
+          pause, and logs ``reap FAILED`` (distinct from DEFERRED); it repeats
+          each pass, as before.
     """
     base_sec = _max_watch_seconds()
     cutoff = now - timedelta(seconds=base_sec)
@@ -1972,8 +2047,10 @@ def _reap_stale_watching_sessions(db: Session, *, user_id: int | None, now: date
         return 0
     from .automation_query import cancel_automation_session
 
+    _retry_sec = _reap_deferred_retry_seconds()
     reaped = 0
     deferred = 0
+    held = 0
     for s in rows:
         # ⚠️ ANG BROKER ORDER GUARD (2026-08-27, BRNX 17370). Ang docstring sa
         # itaas ay nangangako: "Never touches a session that holds a position" --
@@ -2020,6 +2097,29 @@ def _reap_stale_watching_sessions(db: Session, *, user_id: int | None, now: date
                 "snapshot — hindi magre-reap nang bulag",
                 getattr(s, "id", None), getattr(s, "symbol", None),
             )
+            continue
+        # DEFERRED-CANCEL CADENCE (2026-09-02, JLHL 19463). A row whose last
+        # cancel was DEFERRED sits operator-paused with resume_state == its
+        # state and a fresh pause stamp. Re-asking every 10s cannot change the
+        # answer faster than the broker/claim reconciles, and it re-stamps the
+        # pause (and, pre-#1285, wrote a reap cooldown) on every pass. Hold it
+        # for the cadence — no lock probe, no cancel — then re-ask. Read from
+        # the persisted pause (survives restart); log ONCE per session.
+        _hold = _reap_deferred_hold_remaining(s.state, _rg_snap, now, _retry_sec)
+        if _hold is not None:
+            held += 1
+            if _note_reap_hold(int(s.id), now):
+                _pause = _rg_snap.get(_OPERATOR_PAUSE_KEY)
+                _pause = _pause if isinstance(_pause, dict) else {}
+                logger.warning(
+                    "[auto_arm] reap HELD session=%s %s state=%s: operator pause "
+                    "active (paused_at=%s resume_state=%s) — huling cancel ay "
+                    "DEFERRED; susubukan muli sa %.0fs at kada %.0fs pagkatapos, "
+                    "hindi kada pass",
+                    s.id, s.symbol, s.state,
+                    _pause.get("paused_at_utc"), _pause.get("resume_state"),
+                    _hold, _retry_sec,
+                )
             continue
         # WATCH AGE FROM THE LAST RECYCLE (2026-09-02). The SQL prefilter on
         # started_at is a cheap superset; a watcher that recycled recently is
@@ -2249,13 +2349,19 @@ def _reap_stale_watching_sessions(db: Session, *, user_id: int | None, now: date
                     reaped = 0
                     continue
                 deferred += 1
+                _why = _res.get("cancel_reconcile")
+                _why = _why if isinstance(_why, dict) else {}
                 logger.warning(
-                    "[auto_arm] reap DEFERRED session=%s %s state=%s result=%s — hindi "
-                    "na-terminalize; walang cooldown, slot hindi pinalaya; writes committed",
+                    "[auto_arm] reap DEFERRED session=%s %s state=%s result=%s "
+                    "why=%s — hindi na-terminalize; walang cooldown, slot hindi "
+                    "pinalaya; writes committed; susunod na cancel sa ~%.0fs",
                     s.id, s.symbol, s.state,
                     {k: _res.get(k) for k in (
                         "ok", "error", "pending", "terminalization_deferred", "state"
                     )},
+                    {k: _why.get(k) for k in ("action", "pending", "broker_truth")
+                     if _why.get(k) is not None},
+                    _retry_sec,
                 )
                 continue
             # ok=False / None: nothing was written, nothing committed. Distinct
@@ -2283,8 +2389,10 @@ def _reap_stale_watching_sessions(db: Session, *, user_id: int | None, now: date
             "(watched > %ss, never entered) — freeing slot for a fresher mover",
             s.id, s.symbol, s.state, _max_watch_seconds(),
         )
-    if reaped or deferred:
-        logger.info("[auto_arm] reap pass reaped=%s deferred=%s", reaped, deferred)
+    if reaped or deferred or held:
+        logger.info(
+            "[auto_arm] reap pass reaped=%s deferred=%s held=%s", reaped, deferred, held
+        )
     return reaped
 
 

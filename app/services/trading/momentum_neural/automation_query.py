@@ -837,13 +837,16 @@ def _reaper_broker_position_truth(
             from ...coinbase_service import get_accounts_raw
 
             if not get_accounts_raw():
-                return None, {"reason": "broker_position_unknown"}
+                return None, {
+                    "reason": "broker_position_unknown",
+                    "cause": "accounts_unreadable",
+                }
             return (
                 True if _broker_balance_confirms_zero(sym) else False,
                 {"reason": "coinbase_balance_truth"},
             )
         except Exception:
-            return None, {"reason": "broker_position_unknown"}
+            return None, {"reason": "broker_position_unknown", "cause": "read_raised"}
     # Robinhood spot: open-position quantity (None=unknown / 0=flat / >0=held).
     if fam == EXECUTION_FAMILY_ROBINHOOD_SPOT:
         try:
@@ -851,19 +854,33 @@ def _reaper_broker_position_truth(
 
             q = get_open_position_quantity(sym)
         except Exception:
-            return None, {"reason": "broker_position_unknown"}
+            return None, {"reason": "broker_position_unknown", "cause": "read_raised"}
         if q is None:
-            return None, {"reason": "broker_position_unknown"}
+            return None, {"reason": "broker_position_unknown", "cause": "read_unreadable"}
         return _normalize_reaper_position_quantity(sess, q)
     # Robinhood agentic MCP (the live rail) + any adapter with get_position_quantity.
+    # Alpaca families resolve here too: the factory serves ``alpaca_spot`` /
+    # ``alpaca_short`` (2026-09-02 — before that registration this branch was
+    # ``None`` for every Alpaca session, in-process included, so a recycled
+    # broker-flat watcher could never be terminalized). ``cause`` separates the
+    # four UNKNOWN shapes so the next forensics does not need a code read; the
+    # ``reason`` string is unchanged for every caller that keys on it.
     try:
         from ..venue.factory import get_adapter
 
         adapter = get_adapter(sess.execution_family)
     except Exception:
         adapter = None
-    if adapter is None or not hasattr(adapter, "get_position_quantity"):
-        return None, {"reason": "broker_position_unknown"}
+    if adapter is None:
+        return None, {
+            "reason": "broker_position_unknown",
+            "cause": "adapter_unavailable",
+        }
+    if not hasattr(adapter, "get_position_quantity"):
+        return None, {
+            "reason": "broker_position_unknown",
+            "cause": "adapter_lacks_position_read",
+        }
     if not _bind_persisted_alpaca_adapter(sess, adapter):
         return None, {
             "reason": "alpaca_adapter_account_generation_bind_failed",
@@ -880,9 +897,9 @@ def _reaper_broker_position_truth(
     try:
         q = adapter.get_position_quantity(sym)
     except Exception:
-        return None, {"reason": "broker_position_unknown"}
+        return None, {"reason": "broker_position_unknown", "cause": "read_raised"}
     if q is None:
-        return None, {"reason": "broker_position_unknown"}
+        return None, {"reason": "broker_position_unknown", "cause": "read_unreadable"}
     return _normalize_reaper_position_quantity(sess, q)
 
 
