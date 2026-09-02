@@ -32009,6 +32009,40 @@ def tick_live_session(
                             _emit(db, sess, "g4_spent_leg_cleared", _spent_payload)
             except Exception:
                 pass  # fail-open: never seed / never strand on a bug
+        # SHELF-REGISTRATION STATE — PER-CANDIDATE RECORD (2026-09-02 telemetry
+        # only). The sizing seam records the shelf damper ledger key only for
+        # names that reach sizing; armed-but-unfilled names (BIAF-class open
+        # drives, CANF-class fresh registrations) leave no trace, and the EDGAR
+        # cache is process-local (24 h TTL). Emit the cached state ONCE per
+        # session on the first score-ok tick it is readable. Cache-only read —
+        # never network (the prime thread at watch-start is untouched).
+        if _score_ok and not le.get("shelf_state_emitted"):
+            try:
+                if not str(sess.symbol or "").upper().endswith("-USD"):
+                    from .shelf_registration import (
+                        cached_shelf_state as _shelf_cand_state,
+                        shelf_state_telemetry as _shelf_cand_tel,
+                    )
+
+                    _shelf_cand = _shelf_cand_state(str(sess.symbol))
+                    if _shelf_cand is not None:
+                        _shelf_cand_frac = getattr(
+                            settings, "chili_momentum_shelf_active_size_fraction", 0.75
+                        )
+                        _shelf_cand_rec = _shelf_cand_tel(
+                            _shelf_cand,
+                            fraction=(0.75 if _shelf_cand_frac is None else float(_shelf_cand_frac)),
+                            now_utc=_utcnow_aware(),
+                        )
+                        if _shelf_cand_rec is not None:
+                            le["shelf_state_emitted"] = True
+                            _commit_le(sess, le)
+                            _emit(db, sess, "shelf_registration_state", {
+                                "symbol": str(sess.symbol or ""),
+                                **_shelf_cand_rec,
+                            })
+            except Exception:
+                pass  # telemetry only — never touches the fill path
         # GAP 1 + GAP 2 (Warrior re-audit) — HALT-CHAIN RISK GATE + RESUMPTION SIZE
         # MODIFIER, applied ONLY to a halt-resume-dip entry that fired (it shares ALL the
         # existing chase-guards — the bench veto above, the bid-prop confirmer + opening-
@@ -36493,6 +36527,7 @@ def tick_live_session(
                 from .shelf_registration import (
                     cached_shelf_state,
                     shelf_damper_multiplier,
+                    shelf_state_telemetry,
                 )
 
                 _shelf_raw_frac = getattr(
@@ -36501,13 +36536,26 @@ def tick_live_session(
                 _shelf_frac = (
                     0.75 if _shelf_raw_frac is None else float(_shelf_raw_frac)
                 )
+                _shelf_state = cached_shelf_state(str(sess.symbol))
                 _shelf_mult, _shelf_dbg = shelf_damper_multiplier(
-                    cached_shelf_state(str(sess.symbol)),
+                    _shelf_state,
                     fraction=_shelf_frac,
                 )
+                # TELEMETRY-ALWAYS (2026-09-02): record the EDGAR read whenever
+                # state is present (age bucket / days_since_newest / newest_form /
+                # fetched_at), fired or not — 14/67 fills the flat damper did NOT
+                # touch left no trace. The multiplier itself is byte-identical
+                # (sizing regrade DROPPED: >60 d up-size counterfactual -$1,737,
+                # <=7 d deepening fitted to n=5 / one symbol).
+                _shelf_tel = shelf_state_telemetry(
+                    _shelf_state, fraction=_shelf_frac, now_utc=_utcnow_aware(),
+                )
+                if _shelf_tel is not None:
+                    le["shelf_registration_damper"] = _shelf_tel
                 if 0.0 < float(_shelf_mult) < 1.0:
                     _eff_max_loss = float(_eff_max_loss) * float(_shelf_mult)
-                    le["shelf_registration_damper"] = _shelf_dbg
+                    if _shelf_tel is None:
+                        le["shelf_registration_damper"] = _shelf_dbg
         except Exception:
             pass
         # STARTER-SIZE BY TRIGGER CLASS (2026-08-19 Ross live watch): starter
