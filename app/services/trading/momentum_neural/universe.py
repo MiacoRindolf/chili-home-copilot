@@ -219,7 +219,11 @@ def _premarket_change_pct(s: dict) -> float | None:
         return None
     day = s.get("day") or {}
     prev = s.get("prevDay") or {}
-    base = _f(day.get("o")) or _f(prev.get("c"))
+    # #1284 (2026-09-02): prev close MUNA, saka ang open — pareho ng kahulugan
+    # ng vendor `todaysChangePerc` na pinapalitan nito, at pareho ng ignition
+    # tracker (ignition_loop.py) na dating open-anchored pagkatapos ng 13:30Z
+    # (BIAF +67% → +0.13%). Premarket ay byte-identical (zero ang `day`).
+    base = _f(prev.get("c")) or _f(day.get("o"))
     if base is None or base <= 0:
         return None
     return (price - base) / base * 100.0

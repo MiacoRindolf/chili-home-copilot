@@ -310,7 +310,10 @@ def _ross_row(s: dict[str, Any]) -> Optional[dict[str, Any]]:
         return None
     chg = _f(s.get("todaysChangePerc"))  # vendor change vs prev close — valid pre-market
     if chg is None:
-        base = _f(day.get("o")) or _f(prev.get("c"))
+        # #1284 (2026-09-02): prev close MUNA — ang fallback ay dapat parehong
+        # kahulugan ng vendor field na pinapalitan nito (change vs PREV CLOSE),
+        # hindi move-since-open. Premarket ay byte-identical (zero ang `day`).
+        base = _f(prev.get("c")) or _f(day.get("o"))
         chg = ((px - base) / base * 100.0) if (base and base > 0) else 0.0
     if abs(chg) < _MIN_ABS_CHANGE_PCT:
         return None

@@ -250,7 +250,22 @@ class _UniverseTracker:
                     continue
                 day = s.get("day") or {}
                 prev = s.get("prevDay") or {}
-                base = _f(day.get("o")) or _f(prev.get("c"))
+                # BASIS INTEGRITY (2026-09-02, #1284). Dating `day.o or prev.c`:
+                # premarket ay zero ang `day` kaya prev close ang base, pero sa
+                # 13:30Z ay lumilipat ito sa OPENING PRINT — at ang move% na
+                # itina-stamp sa :1136 bilang `todays_change_perc` (na binabasa
+                # ng viability A-setup floor at ng Ross-universe check bilang
+                # change-vs-PREV-CLOSE) ay bumabagsak sa ~0. BIAF 09-01: prev
+                # close 4.56, open 7.63 → +67% ay nabasang +0.13% → "Below
+                # A-setup quality floor" × 15 row, hinarang sa 13:31-13:37Z
+                # habang bumubuo ng bagong HOD (8.585 @13:38). Sa 3 araw: BIAF,
+                # FLYE, GYGY (09-01, 45/45 row ≥10% sa tamang basis) + 08-28/
+                # 08-31. Ang vendor na `todaysChangePerc` ng screen at ng tape
+                # ay prev-close-based; ang `day.o` ay fallback lang doon. Kaya
+                # prev close MUNA dito rin — iisa ang kahulugan ng datum sa
+                # buong araw. Ang `day.o` ay natitira bilang fallback para sa
+                # day-1 listing na walang prev close.
+                base = _f(prev.get("c")) or _f(day.get("o"))
                 if base and base > 0:
                     baseline[t] = float(base)
                 # FIX A1: REAL intraday relative-volume from the SAME snapshot — today's
