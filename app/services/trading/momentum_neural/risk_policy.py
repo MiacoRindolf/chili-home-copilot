@@ -4257,12 +4257,21 @@ def _spent_leg_nonneg_float(value: Any) -> float | None:
         return None
 
 
-def _spent_leg_window_start(session_start: Any, observed_since: Any) -> datetime | None:
-    """The session/replay window start for the cold-start guard: the EARLIER of
-    the session's arm instant and the first tick of the current observation run.
-    Unreadable arm instant ⇒ None (the predicate then refuses: fail-open)."""
+def _spent_leg_window_start(session_start: Any, session_first_tick: Any) -> datetime | None:
+    """The session/replay WINDOW start for the cold-start guard: the earlier of
+    the session's arm instant and the FIRST tick the session ever saw today.
+
+    ``session_first_tick`` is deliberately the SESSION-scoped stamp, not the
+    current continuous run's — a coverage hole restarts the run, and a top the
+    session's own tape already recorded must not become "unobserved" because
+    the runner later went dark for two minutes (measured: JLHL 2026-09-02 arm B
+    booked 3 coverage breaks and its run started 10:44:30, four minutes AFTER
+    its own 7.92 tick high at 10:40:23). The run start still governs the
+    uptime/tick floor — that is the separate "is this runner live right now"
+    question. Unreadable arm instant ⇒ None (the predicate refuses: fail-open).
+    """
     s = _spent_leg_aware_utc(session_start)
-    o = _spent_leg_aware_utc(observed_since)
+    o = _spent_leg_aware_utc(session_first_tick)
     if s is None:
         return None
     return min(s, o) if o is not None else s
@@ -4616,6 +4625,16 @@ def apply_spent_leg_tick(
             str(tick_hod.get("first_tick_ts")) if tick_hod and tick_hod.get("first_tick_ts")
             else tick_dt.isoformat()
         )
+        # SESSION-scoped first tick: unlike ``first_tick_ts`` this NEVER restarts
+        # on a coverage hole — it is the window the cold-start guard measures a
+        # HOD's bar END against.
+        sess_first_dt = (
+            _spent_leg_aware_utc(tick_hod.get("session_first_tick_ts")) if tick_hod else None
+        )
+        sess_first_iso = (
+            min(sess_first_dt, tick_dt).isoformat() if sess_first_dt is not None
+            else tick_dt.isoformat()
+        )
         try:
             breaks = int(tick_hod.get("coverage_breaks") or 0) if tick_hod else 0
         except (TypeError, ValueError):
@@ -4644,6 +4663,9 @@ def apply_spent_leg_tick(
             "coverage_breaks": breaks,
             # priced ticks observed in the CURRENT continuous run (cold-start guard)
             "run_ticks": run_ticks,
+            # first tick of the SESSION (survives coverage holes) — the window
+            # the cold-start guard measures a HOD's bar END against.
+            "session_first_tick_ts": sess_first_iso,
             "session_date_et": day,
         }
         updates[_SPENT_LEG_TICK_HOD_KEY] = tick_hod
@@ -4741,7 +4763,7 @@ def apply_spent_leg_tick(
         # a knob ends up inert (#1170). Taking the earlier of the two makes the
         # replay measure the rule and changes nothing live.
         session_start_utc=_spent_leg_window_start(
-            session_start_utc, (tick_hod.get("first_tick_ts") if tick_hod else None)
+            session_start_utc, (tick_hod.get("session_first_tick_ts") if tick_hod else None)
         ),
         observed_since_utc=(tick_hod.get("first_tick_ts") if tick_hod else None),
         observed_ticks=(tick_hod.get("run_ticks") if tick_hod else None),

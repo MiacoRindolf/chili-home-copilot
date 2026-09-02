@@ -408,6 +408,7 @@ def _warm(le, *, now, session_date_et, warm_s=600.0):
     start = now - timedelta(seconds=warm_s)
     le["spent_leg_tick_hod"] = {
         "px": 0.01, "ts": start.isoformat(), "first_tick_ts": start.isoformat(),
+        "session_first_tick_ts": start.isoformat(),
         "last_tick_ts": (now - timedelta(seconds=1)).isoformat(),
         "coverage_breaks": 0, "run_ticks": 100, "session_date_et": session_date_et,
     }
@@ -1191,6 +1192,32 @@ def test_window_start_is_the_earlier_of_arm_time_and_first_observed_tick():
     assert _spent_leg_window_start(late, early) == early          # replay shape: normalised
     assert _spent_leg_window_start(early, None) == early
     assert _spent_leg_window_start(None, early) is None           # fail-open, still refuses
+    # MEASURED (JLHL arm B, 2026-09-02): the run restarted at 10:44:30 after 3
+    # coverage breaks, four minutes AFTER the session's own 7.92 tick high at
+    # 10:40:23. The window is the SESSION's first tick, which survives holes —
+    # a top this session's own tape recorded must never become "unobserved".
+    sess_first = datetime(2026, 9, 2, 10, 2, 0, tzinfo=UTC)
+    tick_high = datetime(2026, 9, 2, 10, 40, 23, tzinfo=UTC)
+    le0: dict = {}
+    for k in range(0, 3):  # a continuous run from 10:02
+        _apply(le0, _tick(le0, px=7.01, now=sess_first + timedelta(seconds=k),
+                          frame_hod=7.10, hod_end=sess_first - timedelta(minutes=30),
+                          session_start=sess_first, warm=False)[0])
+    # ...a 20-minute hole restarts the RUN but not the session stamp
+    _apply(le0, _tick(le0, px=7.39, now=tick_high + timedelta(minutes=4),
+                      frame_hod=7.10, hod_end=sess_first - timedelta(minutes=30),
+                      session_start=sess_first, warm=False)[0])
+    th = le0["spent_leg_tick_hod"]
+    assert th["coverage_breaks"] == 1
+    assert th["first_tick_ts"] == (tick_high + timedelta(minutes=4)).isoformat()
+    assert th["session_first_tick_ts"] == sess_first.isoformat()
+    # the session's own earlier top is still inside the window and seeds once the
+    # NEW run is warm again (60 s / 1 tick — ticks 60 s apart keep it continuous)
+    up, acts = _tick(le0, px=7.39, now=tick_high + timedelta(minutes=5), frame_hod=7.92,
+                     hod_end=tick_high, session_start=sess_first, warm=False)
+    assert _events(acts) == ["g4_spent_leg_seed"], acts
+    assert acts[0][1]["hod"] == 7.92 and acts[0][1]["session_uptime_s"] == 60.0
+    assert acts[0][1]["coverage_breaks"] == 1  # the hole is recorded, not fatal
     # end to end: a wall-clock started_at 9 h in the sim future must NOT make the
     # seed inert — the run's own first tick is the window the session observed.
     le: dict = {}
