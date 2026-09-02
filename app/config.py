@@ -10094,6 +10094,16 @@ class Settings(BaseSettings):
         le=50.0,
         validation_alias=AliasChoices("CHILI_MOMENTUM_ENTRY_ADVANCE_WAKE_MAX_PER_SECOND"),
     )
+    # Hangganan ng SABAY na tumatakbong advance wakes. Ang rate cap ay hindi
+    # humahangga sa concurrency: sa 8.9s na place path × 3 continuation step,
+    # ang 6/s ay aabot sa 40 daemon thread na may hawak na pooled connection —
+    # ang read-side starvation regime ng PG na nasukat na (08-26).
+    chili_momentum_entry_advance_wake_max_inflight: int = Field(
+        default=8,
+        ge=1,
+        le=64,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_ENTRY_ADVANCE_WAKE_MAX_INFLIGHT"),
+    )
     # Batch-mode mirror ng event-loop stop-confirm timer: ang >=1s flicker guard
     # ay nakakakuha ng pangalawang read pagkatapos ng ~1.1s sa halip na sa
     # susunod na buong scheduler pass (dating DALAWANG cadence bawat software
