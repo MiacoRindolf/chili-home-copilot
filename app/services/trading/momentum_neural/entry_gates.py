@@ -4045,11 +4045,106 @@ def _today_session_frame(df):
     return df
 
 
+def _utc_timestamp(value: Any) -> "pd.Timestamp | None":
+    """tz-AWARE UTC ``pd.Timestamp`` from a datetime / Timestamp / ISO string.
+    Naive values are read as UTC (the codebase convention — Massive/yfinance
+    frames arrive naive-UTC, ``_utcnow()`` is naive UTC). None on anything
+    unparseable (the caller treats that as unreadable, never as fresh)."""
+    try:
+        if value is None:
+            return None
+        ts = pd.Timestamp(value)
+        if ts is pd.NaT:
+            return None
+        if ts.tzinfo is None:
+            return ts.tz_localize("UTC")
+        return ts.tz_convert("UTC")
+    except (TypeError, ValueError, AttributeError):
+        return None
+
+
+def session_frame_hod_debug(sess_df, *, now_utc: Any = None) -> dict[str, Any]:
+    """HOD-age / frame-freshness telemetry for the SESSION frame (pure, total).
+
+    Spent-leg evidence 2026-09-02: every loss of 09-01/09-02 was an entry on a
+    name whose session HOD was minutes old and percent away (CANF 4.9297 @
+    07:02 ET, entry 4.34 @ 07:10 = ~8 min / 12%; JLHL 7.92, 7.6 min / 6.6%).
+    Nothing in the bench debug carried HOW OLD the HOD was, so no existing
+    mechanism could measure it. This helper adds that read to the bench debug
+    WITHOUT touching the bench decision.
+
+    Returns (all tz-aware UTC ISO strings; every key present, None when
+    unreadable):
+      frame_hod            max High of the session frame
+      hod_bar_ts           stamp of the FIRST bar that printed frame_hod
+      hod_bar_end_ts       hod_bar_ts + interval (age is measured against the
+                           bar END — errs YOUNGER ⇒ fewer seeds, never more)
+      hod_bar_date_et      ET calendar date of the HOD bar (the caller scopes
+                           the read to TODAY; yesterday's frame must never seed)
+      frame_last_bar_end_ts / frame_age_s   freshness of the frame vs now_utc
+      interval_s           median index spacing (fallback 60 s)
+      hod_age_min          minutes from hod_bar_end_ts to now_utc (>= 0)
+
+    ``now_utc`` None ⇒ the frame's own last-bar END (deterministic in tests;
+    frame_age_s = 0). A naive ``now_utc`` is read as UTC. Never raises.
+    """
+    out: dict[str, Any] = {
+        "frame_hod": None,
+        "hod_bar_ts": None,
+        "hod_bar_end_ts": None,
+        "hod_bar_date_et": None,
+        "frame_last_bar_end_ts": None,
+        "frame_age_s": None,
+        "interval_s": None,
+        "hod_age_min": None,
+    }
+    try:
+        idx = getattr(sess_df, "index", None)
+        if not isinstance(idx, pd.DatetimeIndex) or len(idx) == 0:
+            return out
+        idx_utc = idx.tz_convert("UTC") if idx.tz is not None else idx.tz_localize("UTC")
+        interval_s = 60.0
+        if len(idx_utc) >= 2:
+            try:
+                _d = (idx_utc[1:] - idx_utc[:-1]).total_seconds()
+                _med = float(pd.Series(_d).median())
+                if math.isfinite(_med) and _med > 0:
+                    interval_s = _med
+            except (TypeError, ValueError, AttributeError):
+                interval_s = 60.0
+        out["interval_s"] = round(interval_s, 3)
+        highs = sess_df["High"].astype(float).reset_index(drop=True)
+        pos = int(highs.idxmax())  # first occurrence of the max; NaN skipped
+        frame_hod = float(highs.iloc[pos])
+        if not (math.isfinite(frame_hod) and frame_hod > 0):
+            return out
+        hod_bar_ts = idx_utc[pos]
+        hod_bar_end_ts = hod_bar_ts + pd.Timedelta(seconds=interval_s)
+        last_end = idx_utc[-1] + pd.Timedelta(seconds=interval_s)
+        now_ts = _utc_timestamp(now_utc) if now_utc is not None else None
+        if now_ts is None:
+            now_ts = last_end
+        out["frame_hod"] = frame_hod
+        out["hod_bar_ts"] = hod_bar_ts.isoformat()
+        out["hod_bar_end_ts"] = hod_bar_end_ts.isoformat()
+        out["hod_bar_date_et"] = hod_bar_ts.tz_convert("America/New_York").date().isoformat()
+        out["frame_last_bar_end_ts"] = last_end.isoformat()
+        out["frame_age_s"] = round(max(0.0, float((now_ts - last_end).total_seconds())), 3)
+        out["hod_age_min"] = round(
+            max(0.0, float((now_ts - hod_bar_end_ts).total_seconds()) / 60.0), 3
+        )
+    except Exception:
+        # total by contract: a degenerate frame yields the None-filled dict.
+        pass
+    return out
+
+
 def evaluate_sticky_backside_bench(
     df,
     *,
     benched_at_hod: float | None,
     live_price: float | None = None,
+    now_utc: Any = None,
 ) -> tuple[bool, str, float | None, dict[str, Any]]:
     """STICKY BACK-SIDE BENCH (BATCH B FIX 1) — the SESSION-LEVEL latch the per-tick
     front_side_state veto cannot give on its own.
@@ -4075,6 +4170,11 @@ def evaluate_sticky_backside_bench(
 
     Pure + side-effect-free (the caller owns the persisted marker). Fail-OPEN on any error /
     thin data: returns ``benched=False`` so a bug can never bench (or strand) a name.
+
+    ``now_utc`` (2026-09-02): the tick clock (``_utcnow_aware()`` in the live runner —
+    tz-AWARE; a naive value is read as UTC) used ONLY for the HOD-age / frame-age debug
+    fields (``session_frame_hod_debug``); None ⇒ the frame's own last-bar end. The
+    decision never reads it.
     """
     debug: dict[str, Any] = {}
     try:
@@ -4095,6 +4195,30 @@ def evaluate_sticky_backside_bench(
             except (TypeError, ValueError):
                 pass
         debug["cur_hod"] = cur_hod
+        # ── HOD-AGE / FRESHNESS TELEMETRY (2026-09-02 spent-leg evidence) ────────────
+        # Debug-only: the (benched, reason, anchor) decision below is byte-identical.
+        # Carried so the spent-leg seed (risk_policy.apply_spent_leg_tick) can read
+        # how OLD the session HOD is and how STALE the frame is on every tick.
+        try:
+            debug.update(session_frame_hod_debug(_sess, now_utc=now_utc))
+            _dd_px = None
+            if live_price is not None:
+                try:
+                    _dd_lp = float(live_price)
+                    if math.isfinite(_dd_lp) and _dd_lp > 0:
+                        _dd_px = _dd_lp
+                except (TypeError, ValueError):
+                    _dd_px = None
+            if _dd_px is None:
+                _dd_px = float(_sess["Close"].astype(float).iloc[-1])
+            if cur_hod is not None and float(cur_hod) > 0 and _dd_px > 0:
+                debug["dd_from_hod_pct"] = round(
+                    (float(cur_hod) - _dd_px) / float(cur_hod) * 100.0, 4
+                )
+            else:
+                debug["dd_from_hod_pct"] = None
+        except Exception:
+            debug.setdefault("dd_from_hod_pct", None)
 
         # ── MANDATORY UN-BENCH: a genuine NEW HIGH above the benched-at HOD clears it ───
         if benched_at_hod is not None:
