@@ -17,6 +17,8 @@ from typing import Any, Optional
 
 from sqlalchemy.orm import Session
 
+from .day_basis_guard import DAY_BASIS_REJECTED, classify_day_basis
+
 logger = logging.getLogger(__name__)
 
 DEFAULT_PREMARKET_GAP_TICKER_LIMIT = 50
@@ -236,6 +238,21 @@ def scan_premarket_gaps(
             price = q.get("price", 0)
             prev_close = q.get("previous_close") or q.get("regularMarketPreviousClose", 0)
             if not price or not prev_close or prev_close <= 0:
+                continue
+            # BASIS PLAUSIBILITY (2026-09-02). This is the SECOND independent
+            # producer of the same corrupt number: HOS 2026-09-02 was persisted
+            # as {"price": 10.33, "gap_pct": 3345.63, "prev_close": 0.3,
+            # "signal_type": "premarket_gap"} and, because the list below is
+            # sorted by |gap_pct| and then TRUNCATED to `cap`, that one
+            # fictional row took rank #1 and evicted real gappers. Reject the
+            # basis rather than rank on it.
+            _basis, _verdict = classify_day_basis(prev_close, price=price)
+            if _verdict in DAY_BASIS_REJECTED:
+                logger.warning(
+                    "[intraday_signals] premarket gap basis REJECTED %s "
+                    "(verdict=%s prev_close=%r price=%r) — row dropped",
+                    ticker, _verdict, prev_close, price,
+                )
                 continue
             gap_pct = (price - prev_close) / prev_close * 100
             if abs(gap_pct) >= min_gap_pct:

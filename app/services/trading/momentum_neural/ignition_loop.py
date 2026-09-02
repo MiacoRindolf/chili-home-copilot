@@ -33,9 +33,17 @@ import logging
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
+from datetime import datetime
+from zoneinfo import ZoneInfo
 
 from ....config import settings
 from ....db import SessionLocal
+from ..day_basis_guard import (
+    DAY_BASIS_OK,
+    DAY_BASIS_REJECTED,
+    basis_continuity_broken,
+    classify_day_basis,
+)
 from .live_fsm import (
     LIVE_RUNNER_RUNNABLE_STATES,
     STATE_LIVE_BAILOUT,
@@ -60,6 +68,8 @@ from .universe import (
 )
 
 _log = logging.getLogger(__name__)
+
+_ET = ZoneInfo("America/New_York")
 
 # Universe rebuild + per-symbol score cooldown share the same adaptive rhythm:
 # the universe is re-screened every ~20s, and a name is re-scored at most once per
@@ -152,11 +162,30 @@ class _UniverseTracker:
         self._last_outcome: str = _UNIVERSE_OK
         self._last_screened_size: int = 0
         self._retaining_since: float | None = None
+        # BASIS INTEGRITY (2026-09-02): the accepted prev close per name for the
+        # CURRENT ET session, plus once-per-session alarm memory so a corrupt
+        # row logs one line rather than one per 20s refresh (HOS produced 798
+        # observations in a single session). Cleared on the ET date rollover —
+        # a prev close is fixed within a session and legitimately changes
+        # between them. Touched only by the refresh thread.
+        self._basis_held: dict[str, float] = {}
+        self._basis_rejected: set[str] = set()
+        self._basis_drifted: set[str] = set()
+        self._basis_session_date: str | None = None
 
     def last_outcome(self) -> str:
         """Outcome of the most recent refresh (see the `_UNIVERSE_*` constants)."""
         with self._lock:
             return self._last_outcome
+
+    def _roll_basis_session(self) -> None:
+        """Drop the frozen-basis memory on the ET trading-date rollover."""
+        today = datetime.now(_ET).date().isoformat()
+        if today != self._basis_session_date:
+            self._basis_session_date = today
+            self._basis_held = {}
+            self._basis_rejected = set()
+            self._basis_drifted = set()
 
     def refresh(self) -> set[str]:
         """Re-screen the universe; return the CURRENT watch set (uppercased).
@@ -167,6 +196,7 @@ class _UniverseTracker:
         change is logged at WARNING/INFO with a DISTINCT line — an empty screen
         on a healthy snapshot reads differently from a provider outage.
         """
+        self._roll_basis_session()
         outcome = _UNIVERSE_OK
         snapshot = None
         try:
@@ -331,9 +361,56 @@ class _UniverseTracker:
                 # prev close MUNA dito rin — iisa ang kahulugan ng datum sa
                 # buong araw. Ang `day.o` ay natitira bilang fallback para sa
                 # day-1 listing na walang prev close.
-                base = _f(prev.get("c")) or _f(day.get("o"))
+                # BASIS PLAUSIBILITY (2026-09-02). The division below is only as
+                # honest as `prev.c`, which nothing validated. HOS 2026-09-02
+                # arrived with prev.c=0.30 against a $10.33 stock and produced
+                # move_pct=3462.37 across 798 observations and 9,290 persisted
+                # viability rows — the #1 ross_score on the board, for a name
+                # that moved 4.75% all day. A rejected basis yields NO baseline,
+                # never a substitute: an unknown change is fail-closed at the
+                # arm gate, a fictional one is fail-open into the top of the
+                # ranking. See ..day_basis_guard for what this does and does not
+                # catch.
+                _prev_c, _verdict = classify_day_basis(
+                    prev.get("c"),
+                    open_price=day.get("o"),
+                    price=_snapshot_price(s),
+                    prev_high=prev.get("h"),
+                    prev_low=prev.get("l"),
+                )
+                if _verdict in DAY_BASIS_REJECTED:
+                    if t not in self._basis_rejected:
+                        self._basis_rejected.add(t)
+                        _log.warning(
+                            "[momentum_ws_ignition] basis REJECTED %s "
+                            "(verdict=%s prev_close=%r open=%r) — no day change "
+                            "will be stamped for this name",
+                            t, _verdict, prev.get("c"), day.get("o"),
+                        )
+                    base = None
+                elif _verdict == DAY_BASIS_OK:
+                    base = _prev_c
+                else:
+                    # No prev close at all (day-1 listing). Unchanged fallback.
+                    base = _f(day.get("o"))
+                # CONTINUITY (2026-09-02). A previous close is fixed for the
+                # session; the tracker re-reads it every 20s and silently
+                # re-based on whatever arrived. Freeze the first accepted value
+                # and say so once, rather than reporting several mutually
+                # inconsistent day changes for one name in one session.
+                _held = self._basis_held.get(t)
+                if base and base > 0 and _held and basis_continuity_broken(_held, base):
+                    if t not in self._basis_drifted:
+                        self._basis_drifted.add(t)
+                        _log.warning(
+                            "[momentum_ws_ignition] basis DRIFTED mid-session %s "
+                            "(held=%.4f candidate=%.4f) — FREEZING the held value",
+                            t, _held, float(base),
+                        )
+                    base = _held
                 if base and base > 0:
                     baseline[t] = float(base)
+                    self._basis_held[t] = float(base)
                 open_base = _f(day.get("o"))
                 if open_base and open_base > 0:
                     open_baseline[t] = float(open_base)
@@ -1297,6 +1374,15 @@ class IgnitionScoringLoop:
 
     # ── scoring (runs on the pool — owns its own DB session) ─────────────────
 
+    def _tracker_open_move(self, symbol: str, price: float | None) -> float | None:
+        """Since-OPEN move% from the cached open baseline (None when unknown)."""
+        if price is None or float(price) <= 0:
+            return None
+        base = self._tracker.open_baseline_for(symbol)
+        if base is None or float(base) <= 0:
+            return None
+        return (float(price) - float(base)) / float(base) * 100.0
+
     def _score_symbol(
         self,
         symbol: str,
@@ -1335,6 +1421,19 @@ class IgnitionScoringLoop:
             # discipline sa ibaba: ang nawawala ay nananatiling nawawala.
             if move_pct is not None:
                 ross_signals[symbol]["todays_change_perc"] = float(move_pct)
+            # RUN-UP AXIS, RECORDED ONLY (2026-09-02). `todays_change_perc` is
+            # gap + run-up vs the previous close, which is not the axis the lane
+            # is trying to buy: over 1,032 equity mover symbol-days it agrees
+            # with the reachable low-to-high run within +/-25% only 43.7% of the
+            # time (understates by >2.5x on 27.0%). SGLD 2026-09-02 logged a
+            # peak move_pct of 293.70 against an 89.6% reachable intraday run
+            # off a 525.6% gap. Ranking on the run-up instead would be a TRADING
+            # OPINION and is deliberately not made here; this stamps the second
+            # axis so the divergence is measurable from the record for the first
+            # time. Nothing reads it yet, by design.
+            _open_move = self._tracker_open_move(symbol, price)
+            if _open_move is not None:
+                ross_signals[symbol]["since_open_change_perc"] = float(_open_move)
             # VELOCITY INTAKE: dalhin ang sinukat na short-horizon velocity sa
             # persisted signal — ito ang binabasa ng ross_smallcap_profile_evidence
             # bilang alternatibong "already-moving" na patunay sa arm gate (ang
