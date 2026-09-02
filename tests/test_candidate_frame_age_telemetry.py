@@ -16,7 +16,10 @@ Ang payload ng candidate fire ngayon ay nagdadala ng::
     frame_trig_last_bar_age_s  edad ng huling bar ng _df_trig
     frame_trig_rows            len(_df_trig)
     micro_frame_used           bool: naipalit ba ang micro-bar frame
-    tick_ohlcv_bar_age_max_s   cross-check: max ng thread-local meter sa pass na ito
+
+(Walang cross-check mula sa thread-local OHLCV meter: nire-reset lamang ito sa
+scheduler `_tick_one_pass`, kaya sa lane host ito ay thread-lifetime na
+cumulative max — review finding.)
 
 ⚠️ TELEMETRY LAMANG. Zero decision change. Ang orasan ay ang orasan ng TICK
 (`_utcnow_aware()` ⇒ sim clock sa replay), hindi ang wall clock.
@@ -142,8 +145,7 @@ def test_builder_reports_the_auud_shape_stale_15m_fresh_trigger_frame():
     assert out["frame_trig_last_bar_age_s"] == 75.0
     assert out["frame_trig_rows"] == 40
     assert out["micro_frame_used"] is False
-    # walang OHLCV read sa thread na ito ⇒ walang cross-check na numero
-    assert out["tick_ohlcv_bar_age_max_s"] is None
+    assert "tick_ohlcv_bar_age_max_s" not in out, "tinanggal: hindi per-tick ang meter"
 
 
 def test_builder_marks_the_micro_frame_swap():
@@ -174,27 +176,29 @@ def test_builder_reports_None_for_unknown_frames_not_a_guessed_zero():
     assert out["micro_frame_used"] is False
 
 
-def test_builder_carries_the_tick_meter_max_as_a_cross_check():
-    LR.reset_tick_ohlcv_meter()
-    try:
-        wall = datetime.now(timezone.utc)
-        LR._meter_tick_ohlcv(0.01, _df(wall - timedelta(minutes=9)))
-        out = LR._candidate_frame_age_telemetry(
-            entry_df=None, df_trig=None, iv_trig=None, micro_frame_used=False, now=NOW
-        )
-        assert out["tick_ohlcv_bar_age_max_s"] is not None
-        assert 535 < out["tick_ohlcv_bar_age_max_s"] < 545
-    finally:
-        LR.reset_tick_ohlcv_meter()
+def test_nat_last_stamp_yields_None_not_a_fresh_zero():
+    """Review finding: ang NaT ay pumapasa sa datetime isinstance, nagiging nan
+    ang age, at ang max(0.0, nan) ay 0.0 — mukhang SARIWA. Dapat None."""
+    idx = pd.DatetimeIndex([NOW - timedelta(minutes=15), pd.NaT])
+    df = pd.DataFrame({"close": [1.0, 1.0]}, index=idx)
+    assert LR._frame_last_bar_age_seconds(df, NOW) is None
 
 
 def test_builder_never_raises_on_garbage():
+    import numpy as np
+
     out = LR._candidate_frame_age_telemetry(
         entry_df=object(), df_trig=SimpleNamespace(index=None),
         iv_trig=object(), micro_frame_used=None, now="bad",
     )
     assert set(KEYS) <= set(out)
     assert out["micro_frame_used"] is False
+    # ambiguous array sa bool(): dating nagra-raise sa labas ng try (review)
+    out2 = LR._candidate_frame_age_telemetry(
+        entry_df=None, df_trig=None, iv_trig=None,
+        micro_frame_used=np.array([1, 2]), now=NOW,
+    )
+    assert out2["micro_frame_used"] is False
 
 
 # ── bantay sa wiring ─────────────────────────────────────────────────────────
@@ -253,7 +257,8 @@ def test_no_decision_reads_the_new_keys():
     end = src.find("\ndef ", start + 10)
     assert 0 < start < end
     builder, rest = src[start:end], src[:start] + src[end:]
-    for k in KEYS + ("tick_ohlcv_bar_age_max_s",):
+    assert "tick_ohlcv_bar_age_max_s" not in builder, "tinanggal na 6th key"
+    for k in KEYS:
         # sa builder: init sa dict + isang assignment lamang (walang pagbasa)
         assert 1 <= builder.count('"%s"' % k) <= 2, k
         assert 'out["%s"] =' % k in builder or ('"%s": ' % k) in builder, k

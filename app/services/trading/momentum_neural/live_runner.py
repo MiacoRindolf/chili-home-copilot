@@ -962,6 +962,11 @@ def _frame_last_bar_age_seconds(df: Any, now: datetime | None) -> float | None:
         if now.tzinfo is None:
             now = now.replace(tzinfo=timezone.utc)
         age = (now - last_dt).total_seconds()
+        # NaT last stamp (Massive builds the index with to_datetime; a null bar
+        # time becomes NaT, which still passes the datetime isinstance check)
+        # yields nan here — report None, never a "fresh" 0.0 (review finding).
+        if age != age:
+            return None
         # A frame stamped in the future is a provider/clock artefact, not a
         # freshness signal; report it as fresh rather than as a negative age.
         return max(0.0, age)
@@ -1001,13 +1006,16 @@ def _candidate_frame_age_telemetry(
     Telemetry lamang: walang nagbabasa nito para magpasya. Bawat susi ay None
     kapag hindi mabasa; hindi kailanman nag-ra-raise.
     """
+    try:
+        _micro = bool(micro_frame_used)
+    except Exception:
+        _micro = False
     out: dict[str, Any] = {
         "frame_15m_last_bar_age_s": None,
         "frame_trig_interval": None,
         "frame_trig_last_bar_age_s": None,
         "frame_trig_rows": None,
-        "micro_frame_used": bool(micro_frame_used),
-        "tick_ohlcv_bar_age_max_s": None,
+        "micro_frame_used": _micro,
     }
     try:
         a15 = _frame_last_bar_age_seconds(entry_df, now)
@@ -1031,15 +1039,10 @@ def _candidate_frame_age_telemetry(
             out["frame_trig_rows"] = int(len(df_trig))
     except Exception:
         pass
-    try:
-        # Cross-check laban sa wall-clock meter ng buong pass: kung ang
-        # entry_df ay None (di-applicable ang quote gate) ay ito pa rin ang
-        # nagsasabi kung may lumang frame na nabasa sa tick na ito.
-        _bmax, _bsum, _bn = read_tick_bar_age_meter()
-        if int(_bn) > 0:
-            out["tick_ohlcv_bar_age_max_s"] = round(float(_bmax), 1)
-    except Exception:
-        pass
+    # WALANG cross-check mula sa thread-local OHLCV meter dito (review finding):
+    # ang meter ay nire-reset lamang sa scheduler `_tick_one_pass`; sa lane host,
+    # runner loop, captured-paper at replay driver ito ay thread-lifetime na
+    # cumulative max — magsisinungaling sa mismong tanong na sinusukat nito.
     return out
 
 
