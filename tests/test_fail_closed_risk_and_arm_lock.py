@@ -197,6 +197,17 @@ def test_alpaca_held_and_pending_positions_reject_unknown_risk_fields(
                     row,
                     {"side_long": True, "position": position},
                 )
+                if field == "stop_price":
+                    # 2026-09-02: an unstopped LONG is bounded by FULL NOTIONAL
+                    # (entry * qty >= any real stop distance), never "unknown".
+                    total, rows = aggregate_open_risk_usd(
+                        db,
+                        user_id=int(user.id),
+                        execution_family="alpaca_spot",
+                    )
+                    assert total == pytest.approx(100.0)
+                    assert rows[0]["note"] == "stop_unknown_full_notional_bound"
+                    continue
                 with pytest.raises(
                     RuntimeError,
                     match="alpaca_risk_ledger_unavailable",
@@ -206,6 +217,43 @@ def test_alpaca_held_and_pending_positions_reject_unknown_risk_fields(
                         user_id=int(user.id),
                         execution_family="alpaca_spot",
                     )
+
+
+def test_alpaca_short_with_unknown_stop_still_fails_closed(db: Session) -> None:
+    """Notional is NOT an upper bound for a short; an unstopped short stays unknown."""
+    user, variant = _user_and_variant(db, execution_family="alpaca_short")
+    row = _session(
+        db,
+        user_id=int(user.id),
+        variant_id=int(variant.id),
+        symbol="SHRT",
+        state="live_trailing",
+        execution_family="alpaca_short",
+        live_execution={
+            "position": {"quantity": 10, "avg_entry_price": 10.0, "stop_price": None},
+        },
+    )
+    with pytest.raises(RuntimeError, match="position_risk_fields_invalid"):
+        aggregate_open_risk_usd(
+            db,
+            user_id=int(user.id),
+            execution_family="alpaca_spot",
+        )
+    row.execution_family = "alpaca_spot"
+    _set_live_execution(
+        db,
+        row,
+        {
+            "side_long": False,
+            "position": {"quantity": 10, "avg_entry_price": 10.0, "stop_price": None},
+        },
+    )
+    with pytest.raises(RuntimeError, match="position_risk_fields_invalid"):
+        aggregate_open_risk_usd(
+            db,
+            user_id=int(user.id),
+            execution_family="alpaca_spot",
+        )
 
 
 def test_alpaca_zero_risk_and_no_exposure_rows_remain_zero(db: Session) -> None:
@@ -283,11 +331,15 @@ def test_alpaca_zero_risk_and_no_exposure_rows_remain_zero(db: Session) -> None:
     ) == 0.0
 
 
-def test_alpaca_pending_without_claim_or_transport_proof_fails_closed(
+def test_alpaca_pending_without_claim_or_transport_is_zero_not_unknown(
     db: Session,
 ) -> None:
+    """2026-09-02 CANF 19471: the claim row is committed BEFORE broker HTTP, so a
+    pending row with no unresolved claim and no ``entry_submitted`` provably
+    never crossed the broker boundary — $0 exposure, not unknown exposure.
+    (Was ``pending_entry_evidence_missing``: 1,186 tick failures / 21 sessions.)"""
     user, variant = _user_and_variant(db, execution_family="alpaca_spot")
-    _session(
+    row = _session(
         db,
         user_id=int(user.id),
         variant_id=int(variant.id),
@@ -297,27 +349,32 @@ def test_alpaca_pending_without_claim_or_transport_proof_fails_closed(
         live_execution={},
     )
 
-    readers = (
-        lambda: aggregate_open_risk_usd(
-            db,
-            user_id=int(user.id),
-            execution_family="alpaca_spot",
-        ),
-        lambda: count_inflight_entry_orders(
-            db,
-            user_id=int(user.id),
-            execution_family="alpaca_spot",
-        ),
-        lambda: sum_inflight_entry_risk_usd(
-            db,
-            user_id=int(user.id),
-            execution_family="alpaca_spot",
-            per_trade_fallback_usd=50.0,
-        ),
+    total, rows = aggregate_open_risk_usd(
+        db,
+        user_id=int(user.id),
+        execution_family="alpaca_spot",
     )
-    for reader in readers:
-        with pytest.raises(RuntimeError, match="pending_entry_evidence_missing"):
-            reader()
+    assert total == 0.0
+    assert rows == [
+        {
+            "symbol": "MISS",
+            "session_id": int(row.id),
+            "execution_family": "alpaca_spot",
+            "at_risk_usd": 0.0,
+            "note": "pre_transport_pending",
+        }
+    ]
+    assert count_inflight_entry_orders(
+        db,
+        user_id=int(user.id),
+        execution_family="alpaca_spot",
+    ) == 0
+    assert sum_inflight_entry_risk_usd(
+        db,
+        user_id=int(user.id),
+        execution_family="alpaca_spot",
+        per_trade_fallback_usd=50.0,
+    ) == 0.0
 
 
 def test_real_risk_scope_sql_keeps_unknown_null_family(db: Session) -> None:
