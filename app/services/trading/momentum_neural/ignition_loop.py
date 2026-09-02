@@ -40,9 +40,11 @@ from .live_fsm import (
     LIVE_RUNNER_RUNNABLE_STATES,
     STATE_LIVE_BAILOUT,
     STATE_LIVE_ENTERED,
+    STATE_LIVE_ENTRY_CANDIDATE,
     STATE_LIVE_PENDING_ENTRY,
     STATE_LIVE_SCALING_OUT,
     STATE_LIVE_TRAILING,
+    STATE_QUEUED_LIVE,
     STATE_WATCHING_LIVE,
 )
 from .universe import (
@@ -305,6 +307,139 @@ _KEY_LIVE_EXEC = "momentum_live_execution"
 _SESSION_POSITION_STATES = frozenset(
     {STATE_LIVE_ENTERED, STATE_LIVE_SCALING_OUT, STATE_LIVE_TRAILING, STATE_LIVE_BAILOUT}
 )
+# ENTRY-ADVANCE WAKE (2026-09-02, #1282). Ang mga pre-entry state na umuusad
+# LANG sa 10s batch cadence noon: tatlo sa kanila ay hindi magigising ng tick
+# kailanman, at ang WATCHING ay sa `watch_break_level` cross lamang (na wala
+# sa velocity/volume/VWAP na trigger). Ang momentum entry ay pumuputok habang
+# UMAAKYAT ang presyo, kaya ang parehong bagong-high na wake ng held position
+# (seed muna, saka bawat bagong high, 2s spacing kada session) ay ginagamit na
+# rin dito. Dispatch hint lamang — ang FSM ang nagpapasya. Ang budget ay sa
+# `_spawn_session_wake` (tingnan ang `_advance_admit`).
+# Ang ARMED_PENDING_RUNNER ay SADYANG wala rito: ginigising na ito sa sandali
+# ng arm (`wake_armed_sessions`), at ang tick-wake nito ay magbabayad ng buong
+# quote gate para sa isang one-line na state bump.
+_SESSION_PRE_ENTRY_STATES = frozenset(
+    {STATE_QUEUED_LIVE, STATE_WATCHING_LIVE, STATE_LIVE_ENTRY_CANDIDATE}
+)
+
+
+def _entry_advance_wake_enabled() -> bool:
+    return bool(getattr(settings, "chili_momentum_entry_advance_wake_enabled", True))
+
+
+def _entry_advance_wakes_per_second() -> float:
+    try:
+        cap = float(
+            getattr(settings, "chili_momentum_entry_advance_wake_max_per_second", 6.0)
+            or 6.0
+        )
+    except (TypeError, ValueError):
+        cap = 6.0
+    return cap if cap > 0 else 6.0
+
+
+def _entry_advance_max_inflight() -> int:
+    try:
+        cap = int(
+            getattr(settings, "chili_momentum_entry_advance_wake_max_inflight", 8) or 8
+        )
+    except (TypeError, ValueError):
+        cap = 8
+    return cap if cap > 0 else 8
+
+
+# ADVANCE-WAKE ADMISSION (#1282, pagkatapos ng adversarial review). Ang budget
+# ay kinukuha LAMANG pagkatapos pumasa ang spacing at single-flight sa
+# `_spawn_session_wake` — kung sa `crossed` ito kinuha, ang isang mainit na
+# pangalang nagpi-print ng 10 uptick/s ay uubos ng buong budget nang walang
+# isa mang spawn (spacing ang tumatanggi) at magugutom ang 39 pang session.
+# Ang tracker ay nagmamarka lang ng HINT kada sid; ang spawn ang kumokonsumo.
+# Token bucket (rate = cap/s, burst = max(1, cap)) + hangganan ng SABAY na
+# tumatakbo (ang rate cap ay hindi humahangga sa concurrency: sa 8.9s na
+# place path × 3 continuation step ay 40 thread ang aabutin ng rate lang).
+_ADVANCE_HINT_TTL_S = 2.0
+_ADVANCE_REFRESH_DEBOUNCE_S = 1.0
+_advance_hint: dict[int, float] = {}
+_adv_lock = threading.Lock()
+_adv_tokens: float = -1.0          # -1 = hindi pa nasisimulan (puno sa unang gamit)
+_adv_last_refill: float = 0.0
+_adv_running: set[int] = set()
+_adv_stats = {"admitted": 0, "rejected_budget": 0, "rejected_inflight": 0}
+_adv_last_stats_log: float = 0.0
+_adv_last_refresh: float = 0.0
+
+
+def _mark_advance_hint(sid: int, now: float) -> None:
+    with _adv_lock:
+        _advance_hint[sid] = now
+        if len(_advance_hint) > 512:
+            stale = [k for k, v in _advance_hint.items() if now - v > _ADVANCE_HINT_TTL_S]
+            for k in stale:
+                _advance_hint.pop(k, None)
+
+
+def _take_advance_hint(sid: int, now: float) -> bool:
+    """Kinokonsumo sa BAWAT pagtatangkang mag-spawn, pumasa man o hindi."""
+    with _adv_lock:
+        marked = _advance_hint.pop(sid, None)
+    return marked is not None and (now - marked) <= _ADVANCE_HINT_TTL_S
+
+
+def _advance_admit(sid: int, now: float) -> bool:
+    """Isang token + isang slot para sa advance wake; False = hayaan sa batch."""
+    global _adv_tokens, _adv_last_refill, _adv_last_stats_log
+    rate = _entry_advance_wakes_per_second()
+    burst = max(1.0, rate)
+    snap = None
+    with _adv_lock:
+        if _adv_tokens < 0:
+            _adv_tokens = burst
+        else:
+            _adv_tokens = min(burst, _adv_tokens + max(0.0, now - _adv_last_refill) * rate)
+        _adv_last_refill = now
+        if len(_adv_running) >= _entry_advance_max_inflight():
+            _adv_stats["rejected_inflight"] += 1
+            ok = False
+        elif _adv_tokens < 1.0:
+            _adv_stats["rejected_budget"] += 1
+            ok = False
+        else:
+            _adv_tokens -= 1.0
+            _adv_running.add(sid)
+            _adv_stats["admitted"] += 1
+            ok = True
+        if now - _adv_last_stats_log >= 60.0:
+            _adv_last_stats_log = now
+            snap = (dict(_adv_stats), len(_adv_running))
+    if snap is not None:
+        _log.info(
+            "[momentum_ws_ignition] advance-wake admitted=%d rejected_budget=%d "
+            "rejected_inflight=%d running=%d",
+            snap[0]["admitted"], snap[0]["rejected_budget"],
+            snap[0]["rejected_inflight"], snap[1],
+        )
+    return ok
+
+
+def _advance_done(sid: int) -> None:
+    with _adv_lock:
+        _adv_running.discard(sid)
+
+
+def _advance_refresh_due(now: float) -> bool:
+    """Debounce ng post-wake inventory reload para sa advance wakes: isa kada ~1s.
+
+    Ang bawat wake ay nagre-reload ng BUONG runnable inventory (SQL + JSON
+    snapshot kada session) + subscription sync; sa 6 wake/s iyon ay 6 na
+    buong reload kada segundo para sa walang bagong impormasyon. Ang 5s
+    refresher at ang batch ang sumasaklaw sa natitira.
+    """
+    global _adv_last_refresh
+    with _adv_lock:
+        if now - _adv_last_refresh < _ADVANCE_REFRESH_DEBOUNCE_S:
+            return False
+        _adv_last_refresh = now
+        return True
 
 
 class _SessionCrossTracker:
@@ -475,11 +610,39 @@ class _SessionCrossTracker:
                             hits.append(sid)
             elif state == STATE_LIVE_PENDING_ENTRY:
                 hits.append(int(s["session_id"]))
-            elif state == STATE_WATCHING_LIVE:
-                wl = float(s.get("watch_break_level") or 0.0)
-                ref = mid if mid > 0 else bid
-                if wl > 0 and ref > wl:
-                    hits.append(int(s["session_id"]))
+            elif state in _SESSION_PRE_ENTRY_STATES:
+                sid = int(s["session_id"])
+                # Ang running high ay nagra-ratchet PALAGI — kahit level-cross
+                # ang gumising — para ang held branch pagkatapos ng fill ay
+                # magmana ng TUNAY na high, hindi ng lumang seed (kung hindi,
+                # bawat uptick sa ILALIM ng entry ay "bagong high" hanggang
+                # umabot ito).
+                px = mid if mid > 0 else bid
+                is_new_high = False
+                if px > 0:
+                    with self._lock:
+                        prior = self._hi.get(sid)
+                        if prior is None:
+                            self._hi[sid] = px
+                        elif px > prior:
+                            self._hi[sid] = px
+                            is_new_high = True
+                if state == STATE_WATCHING_LIVE:
+                    wl = float(s.get("watch_break_level") or 0.0)
+                    ref = mid if mid > 0 else bid
+                    if wl > 0 and ref > wl:
+                        hits.append(sid)
+                        continue
+                # ENTRY-ADVANCE wake (#1282): ang parehong bagong-high na wake ng
+                # held position, para sa pre-entry. Seed ang unang obserbasyon;
+                # bawat bagong high pagkatapos ay gumigising. HINT lang dito —
+                # ang budget at concurrency cap ay sa _spawn_session_wake,
+                # PAGKATAPOS ng spacing at single-flight. Ang pullback at pantay
+                # na tick ay tahimik; ang level reclaim sa ilalim ng high ay ang
+                # level-cross sa itaas.
+                if is_new_high and _entry_advance_wake_enabled():
+                    _mark_advance_hint(sid, time.monotonic())
+                    hits.append(sid)
         return hits
 
 
@@ -498,12 +661,16 @@ def _spawn_session_wake(session_id) -> bool:
         return False
     from ....config import settings as _st
 
+    now = time.monotonic()
+    # Ang advance hint (#1282) ay kinokonsumo sa BAWAT pagtatangka, pumasa man
+    # o hindi ang spacing — hindi ito dapat dumikit sa ibang wake ng parehong
+    # session mamaya. Ang token ay kinukuha LAMANG kapag tunay na magsi-spawn.
+    advance = _take_advance_hint(sid, now)
     if not bool(getattr(_st, "chili_momentum_session_tick_wake_enabled", True)):
         return False
     spacing = float(
         getattr(_st, "chili_momentum_session_tick_wake_min_spacing_s", 2.0) or 2.0
     )
-    now = time.monotonic()
     with _session_wake_lock:
         if now - _session_wake_last.get(sid, 0.0) < spacing:
             return False
@@ -516,8 +683,18 @@ def _spawn_session_wake(session_id) -> bool:
         if sid in _wake_inflight:
             return False
         _wake_inflight.add(sid)
+    if advance and not _advance_admit(sid, now):
+        # Walang token o puno ang slots: bawiin ang inflight AT ang spacing
+        # stamp — hindi dapat maparusahan ang session ng 2s dahil sa budget;
+        # ang batch ang safety net at ang susunod na bagong high ay susubok ulit.
+        with _wake_inflight_lock:
+            _wake_inflight.discard(sid)
+        with _session_wake_lock:
+            if _session_wake_last.get(sid) == now:
+                _session_wake_last.pop(sid, None)
+        return False
     threading.Thread(
-        target=_wake_runner_tick, args=(sid,),
+        target=_wake_runner_tick, args=(sid,), kwargs={"advance": advance},
         name=f"session-wake-{sid}", daemon=True,
     ).start()
     return True
@@ -543,7 +720,7 @@ _wake_inflight_lock = threading.Lock()
 _post_wake_session_refresh = None
 
 
-def _wake_runner_tick(session_id: int) -> None:
+def _wake_runner_tick(session_id: int, advance: bool = False) -> None:
     try:
         from .live_runner import consume_entry_fsm_continuation as _consume
     except Exception:
@@ -568,8 +745,14 @@ def _wake_runner_tick(session_id: int) -> None:
     finally:
         with _wake_inflight_lock:
             _wake_inflight.discard(int(session_id))
+        if advance:
+            _advance_done(int(session_id))
         _refresh = _post_wake_session_refresh
-        if _refresh is not None:
+        # Ang advance wakes ay maaaring 6/s: ang buong inventory reload kada
+        # wake ay puro aksaya — debounce sa ~1s. Ang ibang wake ay hindi ginalaw.
+        if _refresh is not None and (
+            not advance or _advance_refresh_due(time.monotonic())
+        ):
             try:
                 _refresh()
             except Exception:
