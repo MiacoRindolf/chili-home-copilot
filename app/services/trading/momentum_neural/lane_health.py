@@ -46,8 +46,11 @@ from sqlalchemy import text
 from ....config import settings
 from ....models.trading import BrainBatchJob
 from ..batch_job_constants import (
+    IQFEED_DRAIN_METRICS_HEARTBEAT_SCHEMA,
+    IQFEED_DRAIN_METRICS_HEARTBEAT_SCOPE,
     IQFEED_EXACT_PRINT_HEARTBEAT_SCHEMA,
     IQFEED_EXACT_PRINT_HEARTBEAT_SCOPE,
+    JOB_IQFEED_DRAIN_METRICS_HEARTBEAT,
     JOB_IQFEED_EXACT_PRINT_HEARTBEAT,
     JOB_MOMENTUM_LIVE_LOOP_HEARTBEAT,
 )
@@ -109,6 +112,32 @@ _IQFEED_EXACT_PRINT_META_KEYS = frozenset(
         "source_frame_sequence",
         "source_frame_sha256",
         "committed_print_count",
+        "content_sha256",
+    }
+)
+_IQFEED_DRAIN_METRICS_META_KEYS = frozenset(
+    {
+        "schema",
+        "scope",
+        "window_started_at_utc",
+        "window_ended_at_utc",
+        "bridge_version",
+        "bridge_run_id",
+        "connection_generation",
+        "pending_trades",
+        "pending_quotes",
+        "oldest_pending_received_age_s",
+        "batches",
+        "events_per_s",
+        "batch_p50_ms",
+        "batch_p90_ms",
+        "batch_max_ms",
+        "insert_execute_p50_ms",
+        "release_ms",
+        "notify_count",
+        "write_mode",
+        "write_mode_fallbacks",
+        "pending_bound_drops",
         "content_sha256",
     }
 )
@@ -475,6 +504,111 @@ def _strict_aware_utc(value: Any) -> datetime | None:
     ):
         return None
     return parsed.astimezone(timezone.utc).replace(tzinfo=None)
+
+
+def _validated_iqfeed_drain_metrics_row(row: Any) -> dict[str, Any] | None:
+    """Validate one IQFeed writer-drain telemetry receipt.
+
+    Deliberately a SEPARATE job type and key set from the exact-print
+    heartbeat: that body is matched key-set-exactly and its content_sha256
+    covers the body, so adding keys there would make every exact-print receipt
+    unparseable and take the tape-liveness diagnostic dark.  This receipt
+    carries the one number the committed-row receipt cannot express -- the age
+    of the OLDEST UNWRITTEN arrival still sitting in the bridge's deques.
+    """
+
+    if str(getattr(row, "status", "") or "").strip().lower() != "ok":
+        return None
+    started_at = _utc_naive_datetime(getattr(row, "started_at", None))
+    ended_at = _utc_naive_datetime(getattr(row, "ended_at", None))
+    meta = getattr(row, "meta_json", None)
+    if (
+        started_at is None
+        or ended_at is None
+        or ended_at < started_at
+        or not isinstance(meta, dict)
+        or set(meta) != _IQFEED_DRAIN_METRICS_META_KEYS
+        or meta.get("schema") != IQFEED_DRAIN_METRICS_HEARTBEAT_SCHEMA
+        or meta.get("scope") != IQFEED_DRAIN_METRICS_HEARTBEAT_SCOPE
+    ):
+        return None
+    supplied_sha256 = str(meta.get("content_sha256") or "").strip()
+    if (
+        len(supplied_sha256) != 64
+        or supplied_sha256 != supplied_sha256.lower()
+        or any(char not in "0123456789abcdef" for char in supplied_sha256)
+        or supplied_sha256 != _heartbeat_content_sha256(meta)
+    ):
+        return None
+    try:
+        bridge_run_id = str(uuid.UUID(str(meta.get("bridge_run_id") or "")))
+    except (AttributeError, TypeError, ValueError):
+        return None
+    window_started_at = _strict_aware_utc(meta.get("window_started_at_utc"))
+    window_ended_at = _strict_aware_utc(meta.get("window_ended_at_utc"))
+    if (
+        window_started_at is None
+        or window_ended_at is None
+        or window_ended_at < window_started_at
+    ):
+        return None
+    numeric: dict[str, float] = {}
+    for key in (
+        "oldest_pending_received_age_s",
+        "events_per_s",
+        "batch_p50_ms",
+        "batch_p90_ms",
+        "batch_max_ms",
+        "insert_execute_p50_ms",
+        "release_ms",
+    ):
+        value = meta.get(key)
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            return None
+        numeric[key] = float(value)
+    counters: dict[str, int] = {}
+    for key in (
+        "pending_trades",
+        "pending_quotes",
+        "batches",
+        "notify_count",
+        "write_mode_fallbacks",
+        "pending_bound_drops",
+        "connection_generation",
+    ):
+        value = meta.get(key)
+        if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+            return None
+        counters[key] = value
+    write_mode = str(meta.get("write_mode") or "").strip()
+    if write_mode not in ("copy", "execute_values", "values"):
+        return None
+    return {
+        "bridge_run_id": bridge_run_id,
+        "bridge_version": str(meta.get("bridge_version") or "").strip(),
+        "window_started_at": window_started_at,
+        "window_ended_at": window_ended_at,
+        "write_mode": write_mode,
+        **counters,
+        **numeric,
+    }
+
+
+def latest_iqfeed_drain_metrics(db) -> dict[str, Any] | None:
+    """Newest parseable writer-drain receipt, or ``None`` when there is none."""
+
+    rows = (
+        db.query(BrainBatchJob)
+        .filter(BrainBatchJob.job_type == JOB_IQFEED_DRAIN_METRICS_HEARTBEAT)
+        .order_by(BrainBatchJob.started_at.desc(), BrainBatchJob.id.desc())
+        .limit(8)
+        .all()
+    )
+    for row in rows:
+        parsed = _validated_iqfeed_drain_metrics_row(row)
+        if parsed is not None:
+            return parsed
+    return None
 
 
 def _validated_exact_iqfeed_print_row(row: Any) -> dict[str, Any] | None:

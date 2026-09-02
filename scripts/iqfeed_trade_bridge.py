@@ -22,6 +22,7 @@ Usage: python scripts/iqfeed_trade_bridge.py [--seconds N] [--selftest] [SYM ...
 from __future__ import annotations
 
 import hashlib
+import io
 import json
 import logging
 import math
@@ -60,6 +61,12 @@ if _REPO_ROOT not in sys.path:
 JOB_IQFEED_EXACT_PRINT_HEARTBEAT = "iqfeed_exact_print_heartbeat"
 IQFEED_EXACT_PRINT_HEARTBEAT_SCHEMA = "iqfeed_exact_print_heartbeat_v1"
 IQFEED_EXACT_PRINT_HEARTBEAT_SCOPE = "committed_exact_print_release"
+# SEPARATE job type (2026-09-02): the exact-print body above is frozen by an
+# exact key-set match in lane_health plus a content_sha256 over the body, so
+# writer-drain telemetry gets its own type and its own frozen key set.
+JOB_IQFEED_DRAIN_METRICS_HEARTBEAT = "iqfeed_drain_metrics_heartbeat"
+IQFEED_DRAIN_METRICS_HEARTBEAT_SCHEMA = "iqfeed_drain_metrics_heartbeat_v1"
+IQFEED_DRAIN_METRICS_HEARTBEAT_SCOPE = "writer_drain_window"
 
 try:
     from scripts.iqfeed_subscription_policy import (
@@ -137,6 +144,23 @@ DB_URL = os.environ.get("DATABASE_URL", "postgresql://chili:chili@localhost:5433
 # One latest quote row per symbol per flush bounds tape growth while still keeping
 # the execution-age contract below two seconds. Operators can lower this explicitly.
 FLUSH_INTERVAL_S = float(os.environ.get("IQFEED_TRADE_FLUSH_INTERVAL_S", "1.0") or 1.0)
+
+# TAPE WRITE MODE (2026-09-02 open-throughput seam).  The legacy ``values`` mode
+# is the byte-identical SQLAlchemy ``INSERT ... SELECT FROM (VALUES ...)`` path
+# whose client-side statement build measured 1.5-2.0 s per 3,600-event batch.
+# It is read here (before the batch-size guards below) because only ``values``
+# is subject to PostgreSQL's 65,535 bind-parameter ceiling.
+TAPE_WRITE_MODES = ("copy", "execute_values", "values")
+
+
+def _normalized_tape_write_mode(value: Any, *, default: str = "copy") -> str:
+    text = str(value or "").strip().lower()
+    return text if text in TAPE_WRITE_MODES else default
+
+
+IQFEED_TAPE_WRITE_MODE = _normalized_tape_write_mode(
+    os.environ.get("IQFEED_TAPE_WRITE_MODE", "copy")
+)
 try:
     DB_RELEASE_BATCH_EVENTS = int(
         os.environ.get("IQFEED_DB_RELEASE_BATCH_EVENTS", "256") or 256
@@ -161,10 +185,22 @@ if DB_RELEASE_CATCHUP_BATCH_EVENTS < DB_RELEASE_BATCH_EVENTS:
 # The widest vectorized VALUES statement has 18 bind parameters per event.
 # Stay below PostgreSQL's 65,535 bind-parameter ceiling even when a catch-up
 # batch contains only that wider row type.
+#
+# 2026-09-02: this used to RAISE at import.  That turned the legacy ``values``
+# write mode into a startup trap: an operator who raised the catch-up env for
+# the COPY path and then flipped IQFEED_TAPE_WRITE_MODE=values as the day-1
+# kill switch would get no bridge at all (run-trade-bridge.cmd respawns every
+# 20 s).  The budget is now CLAMPED with a WARNING and enforced per batch by
+# ``_batch_event_ceiling`` only while ``values`` is the effective mode; the
+# COPY / execute_values paths bind nothing per row and are unaffected.
+VALUES_MODE_BIND_BUDGET_EVENTS = 65_535 // 18
 if DB_RELEASE_CATCHUP_BATCH_EVENTS * 18 >= 65_535:
-    raise RuntimeError(
-        "IQFEED_DB_RELEASE_CATCHUP_BATCH_EVENTS exceeds the safe PostgreSQL "
-        "bind-parameter budget"
+    log.warning(
+        "IQFEED_DB_RELEASE_CATCHUP_BATCH_EVENTS=%d exceeds the PostgreSQL "
+        "bind-parameter budget; the legacy `values` write mode is clamped to "
+        "%d retained events per batch",
+        DB_RELEASE_CATCHUP_BATCH_EVENTS,
+        VALUES_MODE_BIND_BUDGET_EVENTS,
     )
 # A broad IQFeed watch roster can emit many quote-only Q frames for the same
 # cold symbols between commits.  Those frames are collapsed to the newest quote
@@ -229,6 +265,67 @@ AUTHORITATIVE_FUTURE_TOLERANCE_S = 1.0
 # provider_at at sariling basis — walang pekeng orasan kailanman.
 QUOTE_EVENT_TIMESTAMP_BASIS = "iqfeed_q_bid_ask_time_clock"
 QUOTE_OWN_CLOCK_MAX_AGE_S = 2.0
+
+
+def _env_int(name: str, default: int) -> int:
+    try:
+        return int(os.environ.get(name, str(default)) or default)
+    except (TypeError, ValueError):
+        log.warning("%s is not an integer; using %d", name, default)
+        return default
+
+
+def _env_float(name: str, default: float) -> float:
+    try:
+        return float(os.environ.get(name, str(default)) or default)
+    except (TypeError, ValueError):
+        log.warning("%s is not a number; using %s", name, default)
+        return default
+
+
+def _env_flag(name: str, default: str = "1") -> bool:
+    return os.environ.get(name, default).strip().lower() not in ("0", "false", "no")
+
+
+# OPEN-THROUGHPUT KNOBS (2026-09-02).  Every one of these is a CODE default —
+# the launcher's frozen env snapshot is the COLD path only.  The HOT path is
+# ``bridge_overrides.json`` (see ``_reload_overrides``), stat()-checked once per
+# writer iteration, because the running bridge chain (run-trade-bridge.cmd ->
+# python) respawns with the cmd's frozen environment and there is NO scheduled
+# restart that would pick up a new env.
+#
+# P1 NOTIFY: class-aware per-symbol coalescing inside one release batch.  The
+# age filter defaults OFF because ``iqfeed_wake_listener`` has no age gate of
+# its own — dropping stale rows bridge-side would silence the quiet-tape wake
+# rail for the entire duration of any backlog.
+IQFEED_NOTIFY_COALESCE_PER_SYMBOL = _env_flag(
+    "IQFEED_NOTIFY_COALESCE_PER_SYMBOL", "1"
+)
+IQFEED_NOTIFY_MAX_AGE_S = _env_float("IQFEED_NOTIFY_MAX_AGE_S", 0.0)
+# P3 batch controller: bound a batch by WALL TIME first.  ``received_age`` at
+# the consumer is measured at consume time (flush wait + insert + release +
+# delivery), so a batch whose wall exceeds ~0.9 s makes every notify fail the
+# consumer's 2.0 s authority gate even when the bridge is caught up.
+IQFEED_DB_BATCH_ADAPTIVE = _env_flag("IQFEED_DB_BATCH_ADAPTIVE", "1")
+IQFEED_DB_BATCH_TARGET_MS = _env_float("IQFEED_DB_BATCH_TARGET_MS", 600.0)
+IQFEED_DB_BATCH_HARD_STOP_MS = _env_float("IQFEED_DB_BATCH_HARD_STOP_MS", 900.0)
+IQFEED_DB_BATCH_MAX_BYTES = _env_int("IQFEED_DB_BATCH_MAX_BYTES", 8 * 1024 * 1024)
+# The event ceiling is NOT raised in this PR.  Raising it is gated on day-1
+# [drain-metrics] showing batch p90 < 0.6 s at 3,600.
+BATCH_EVENT_HARD_CEILING = 3_600
+# Estimated retained bytes per event for the byte SAFETY cap.  Deliberately a
+# constant: measuring the real buffer would cost more than the cap saves, and
+# the cap exists to stop a pathological wide batch, not to size normal ones.
+ESTIMATED_EVENT_BYTES = 320
+IQFEED_DRAIN_METRICS_EVERY_S = _env_float("IQFEED_DRAIN_METRICS_EVERY_S", 10.0)
+# 0 = unbounded (today).  When set, the OLDEST quote-only frames are dropped
+# first and every dropped frame latches a replay CoverageGap; trades are never
+# dropped.  Setting this changes durability from crash-only to deterministic.
+IQFEED_PENDING_MAX_EVENTS = _env_int("IQFEED_PENDING_MAX_EVENTS", 0)
+IQFEED_BRIDGE_OVERRIDES_PATH = os.environ.get(
+    "IQFEED_BRIDGE_OVERRIDES_PATH",
+    str(Path("D:/CHILI-Docker/chili-data/iqfeed_trades/bridge_overrides.json")),
+)
 EQUITY_SYMBOL_RE = re.compile(r"^[A-Z][A-Z0-9.]{0,15}$")
 READER_JOIN_TIMEOUT_S = 5.0
 SELECTED_FIELDS_ACK_TIMEOUT_S = 2.0
@@ -380,6 +477,34 @@ _SELECTED_FIELD_INDEX = {
 
 engine = sa.create_engine(DB_URL, pool_pre_ping=True)
 
+
+def _set_bridge_session_utc(dbapi_connection: Any, _connection_record: Any = None) -> None:
+    """Pin every bridge session to UTC.
+
+    ``momentum_nbbo_spread_tape.at`` is written NAIVE into a timestamptz column
+    (and ``iqfeed_trade_ticks.observed_at`` is a naive timestamp), so BOTH the
+    legacy CAST bind path and the COPY text path resolve those values against
+    the SESSION time zone.  Measured 2026-09-02: the same naive text landed 7 h
+    off under ``America/Los_Angeles``.  This is a correctness pin, not a
+    preference.
+    """
+
+    cursor = dbapi_connection.cursor()
+    try:
+        cursor.execute("SET TIME ZONE 'UTC'")
+    finally:
+        try:
+            cursor.close()
+        except Exception:  # pragma: no cover - driver-specific
+            pass
+
+
+sa.event.listens_for(engine, "connect")(_set_bridge_session_utc)
+
+# Reference row shape for the single-row trade INSERT.  Kept as documentation
+# of the column order the vectorized/bulk paths reproduce; the selftest now
+# writes through the SELECTED write mode instead, so a broken mode fails at
+# startup rather than at 13:30Z.
 INS = sa.text(
     "INSERT INTO iqfeed_trade_ticks "
     "(symbol, observed_at, price, size, bid, ask, provider_event_at, received_at, "
@@ -429,6 +554,11 @@ BRIDGE_CAPTURE_CONFIGURATION = {
     "authoritative_future_tolerance_seconds": AUTHORITATIVE_FUTURE_TOLERANCE_S,
     "authoritative_timestamp_basis": AUTHORITATIVE_TIMESTAMP_BASIS,
     "observed_at_trade_time": OBSERVED_AT_TRADE_TIME,
+    # Only the write MODE is echoed here: it is the one open-throughput knob
+    # that changes how tape content is produced. The runtime knobs (notify
+    # coalescing, batch bounds, drain metrics) do not change tape content and
+    # are deliberately NOT part of the capture configuration.
+    "tape_write_mode": IQFEED_TAPE_WRITE_MODE,
     "write_nbbo_tape": WRITE_NBBO_TAPE,
     "hot_full_fidelity": HOT_FULL_FIDELITY,
     "selected_update_fields": list(SELECTED_UPDATE_FIELDS),
@@ -604,6 +734,7 @@ def _verify_bridge_schema() -> None:
     """Read-only migration/schema gate which runs before any provider socket."""
 
     global _exact_print_heartbeat_capable
+    global _TAPE_SEQUENCES_RESOLVED
 
     required = {
         "iqfeed_trade_ticks": _TRADE_REQUIRED_COLUMNS,
@@ -615,6 +746,14 @@ def _verify_bridge_schema() -> None:
         )
     try:
         with engine.connect() as connection:
+            session_timezone = str(
+                connection.execute(sa.text("SHOW TimeZone")).scalar() or ""
+            ).strip()
+            if session_timezone.upper() not in ("UTC", "ETC/UTC"):
+                raise RuntimeError(
+                    "IQFeed bridge session time zone is not UTC: "
+                    f"{session_timezone!r}"
+                )
             migrated = bool(connection.execute(
                 sa.text(
                     "SELECT EXISTS ("
@@ -660,6 +799,34 @@ def _verify_bridge_schema() -> None:
                     "IQFeed exact-print health receipts disabled; "
                     "brain_batch_jobs is missing: %s",
                     ", ".join(heartbeat_missing),
+                )
+            # COPY needs explicit primary keys, which needs each tape's own
+            # sequence.  A NULL or failing resolution DEGRADES the effective
+            # write mode to execute_values -- it never refuses startup, because
+            # run-trade-bridge.cmd would then respawn a crash loop every 20 s
+            # and there would be no tape at all.
+            for table_name in (_TRADE_TAPE, _NBBO_TAPE):
+                try:
+                    sequence = connection.execute(
+                        sa.text(
+                            "SELECT pg_get_serial_sequence(:table_name, 'id')"
+                        ),
+                        {"table_name": table_name},
+                    ).scalar()
+                except Exception:
+                    sequence = None
+                _TAPE_SEQUENCES[table_name] = (
+                    str(sequence) if sequence else None
+                )
+            _TAPE_SEQUENCES_RESOLVED = all(
+                _TAPE_SEQUENCES.get(table_name)
+                for table_name in (_TRADE_TAPE, _NBBO_TAPE)
+            )
+            if not _TAPE_SEQUENCES_RESOLVED:
+                log.warning(
+                    "IQFeed tape id sequences unresolved (%s); the COPY write "
+                    "mode degrades to execute_values",
+                    _TAPE_SEQUENCES,
                 )
     except RuntimeError:
         raise
@@ -952,22 +1119,552 @@ def _insert_pending_batch(
     return trade_row_ids, quote_row_ids
 
 
+# --- P2: bulk write paths ------------------------------------------------
+# The legacy ``_insert_pending_batch`` above is FROZEN and byte-identical: it
+# stays the last link of the fallback chain, so no batch is ever dropped
+# because a new write mode misbehaves.
+
+_TRADE_TAPE = "iqfeed_trade_ticks"
+_NBBO_TAPE = "momentum_nbbo_spread_tape"
+
+_TRADE_INSERT_COLUMNS = (
+    "symbol",
+    "observed_at",
+    "price",
+    "size",
+    "bid",
+    "ask",
+    "provider_event_at",
+    "received_at",
+    "timestamp_basis",
+    "bridge_version",
+    "provider_trade_reference_at",
+    "message_type",
+    "bridge_run_id",
+    "connection_generation",
+    "source_frame_sequence",
+    "source_frame_sha256",
+)
+_NBBO_INSERT_COLUMNS = (
+    "symbol",
+    "observed_at",
+    "bid",
+    "ask",
+    "mid",
+    "spread_bps",
+    "day_volume",
+    "source",
+    "provider_event_at",
+    "received_at",
+    "timestamp_basis",
+    "bridge_version",
+    "provider_trade_reference_at",
+    "message_type",
+    "bridge_run_id",
+    "connection_generation",
+    "source_frame_sequence",
+    "source_frame_sha256",
+)
+
+# Resolved once by ``_verify_bridge_schema``.  A NULL/failed resolution NEVER
+# refuses startup — the effective mode degrades to ``execute_values`` instead.
+_TAPE_SEQUENCES: dict[str, str | None] = {}
+_TAPE_SEQUENCES_RESOLVED = False
+_write_mode_fallbacks: dict[str, int] = {}
+# Selftest-only: force a mode to fail so the fallback chain is proven live
+# before the provider socket opens.
+_FORCED_WRITE_MODE_FAILURES: set[str] = set()
+
+
+def _trade_insert_values(row: dict) -> tuple:
+    return (
+        row.get("sym"),
+        row.get("at"),
+        row.get("px"),
+        row.get("sz"),
+        row.get("bid"),
+        row.get("ask"),
+        row.get("provider_at"),
+        row.get("received_at"),
+        row.get("basis"),
+        row.get("bridge"),
+        row.get("provider_trade_reference_at"),
+        row.get("message_type"),
+        row.get("bridge_run_id"),
+        row.get("connection_generation"),
+        row.get("source_frame_sequence"),
+        row.get("source_frame_sha256"),
+    )
+
+
+def _nbbo_insert_values(row: dict) -> tuple:
+    return (
+        row.get("sym"),
+        row.get("at"),
+        row.get("bid"),
+        row.get("ask"),
+        row.get("mid"),
+        row.get("spread_bps"),
+        None,
+        "iqfeed_l1",
+        row.get("provider_at"),
+        row.get("received_at"),
+        row.get("basis"),
+        row.get("bridge"),
+        row.get("provider_trade_reference_at"),
+        row.get("message_type"),
+        row.get("bridge_run_id"),
+        row.get("connection_generation"),
+        row.get("source_frame_sequence"),
+        row.get("source_frame_sha256"),
+    )
+
+
+_TAPE_WRITE_SPECS = (
+    (_TRADE_TAPE, _TRADE_INSERT_COLUMNS, _trade_insert_values),
+    (_NBBO_TAPE, _NBBO_INSERT_COLUMNS, _nbbo_insert_values),
+)
+
+
+def _copy_text_value(value: Any) -> str:
+    """Render one cell for ``COPY ... FROM STDIN WITH (FORMAT text)``.
+
+    Datetimes are emitted in ISO form exactly as the column type declares:
+    aware for the timestamptz columns, NAIVE for ``iqfeed_trade_ticks``'s
+    ``observed_at``.  The naive nbbo ``at`` value lands in a timestamptz column
+    and is therefore interpreted in the SESSION time zone — which is why every
+    bridge connection is pinned to UTC and ``_verify_bridge_schema`` fails
+    closed when it is not.
+    """
+
+    if value is None:
+        return "\\N"
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    if isinstance(value, datetime):
+        return value.isoformat()
+    if isinstance(value, float):
+        return repr(value)
+    if isinstance(value, int):
+        return str(value)
+    return (
+        str(value)
+        .replace("\\", "\\\\")
+        .replace("\t", "\\t")
+        .replace("\n", "\\n")
+        .replace("\r", "\\r")
+    )
+
+
+def _copy_buffer(row_ids: tuple[int, ...], values_by_row: list[tuple]) -> io.StringIO:
+    buffer = io.StringIO()
+    for row_id, values in zip(row_ids, values_by_row):
+        buffer.write(
+            "\t".join(_copy_text_value(value) for value in (row_id, *values))
+        )
+        buffer.write("\n")
+    buffer.seek(0)
+    return buffer
+
+
+def _dbapi_cursor(connection: Any) -> Any:
+    raw = getattr(connection, "connection", None)
+    if raw is None:
+        raise RuntimeError("IQFeed bulk write requires a DBAPI connection")
+    return raw.cursor()
+
+
+def _preallocate_row_ids(
+    connection: Any,
+    *,
+    table_name: str,
+    count: int,
+) -> tuple[int, ...]:
+    """Burn ``count`` ids from the tape's own sequence, in order.
+
+    A fallback INSERT after a failed COPY relies on the column DEFAULT
+    ``nextval``, which is already past the burned range, so burned ids can
+    never collide with a retry.
+    """
+
+    sequence = _TAPE_SEQUENCES.get(table_name)
+    if not sequence:
+        raise RuntimeError(
+            f"IQFeed {table_name} id sequence is unresolved; COPY is unavailable"
+        )
+    result = connection.execute(
+        sa.text("SELECT nextval(:sequence) FROM generate_series(1, :count)"),
+        {"sequence": sequence, "count": count},
+    )
+    return _returned_row_ids(
+        result,
+        count,
+        operation=f"{table_name} id pre-allocation",
+    )
+
+
+def _insert_pending_batch_copy(
+    connection: Any,
+    *,
+    trade_rows: list[dict],
+    quote_rows: list[dict],
+) -> tuple[tuple[int, ...], tuple[int, ...], float, float]:
+    """COPY FROM STDIN with pre-allocated primary keys.
+
+    The release contract is unchanged: the returned ids go through the same
+    ``MARK_*_IDS_AVAILABLE`` statements, and ``_require_release_identity`` is
+    still evaluated on every row before persistence.
+    """
+
+    for row in (*trade_rows, *quote_rows):
+        _require_release_identity(row)
+    row_ids_by_tape: dict[str, tuple[int, ...]] = {}
+    build_ms = 0.0
+    execute_ms = 0.0
+    for table_name, columns, builder in _TAPE_WRITE_SPECS:
+        rows = trade_rows if table_name == _TRADE_TAPE else quote_rows
+        if not rows:
+            row_ids_by_tape[table_name] = ()
+            continue
+        started = time.monotonic()
+        row_ids = _preallocate_row_ids(
+            connection,
+            table_name=table_name,
+            count=len(rows),
+        )
+        allocated = time.monotonic()
+        buffer = _copy_buffer(row_ids, [builder(row) for row in rows])
+        built = time.monotonic()
+        cursor = _dbapi_cursor(connection)
+        try:
+            cursor.copy_expert(
+                f"COPY {table_name} (id, {', '.join(columns)}) "
+                "FROM STDIN WITH (FORMAT text)",
+                buffer,
+            )
+            rowcount = getattr(cursor, "rowcount", -1)
+        finally:
+            try:
+                cursor.close()
+            except Exception:  # pragma: no cover - driver-specific
+                pass
+        finished = time.monotonic()
+        if rowcount not in (-1, len(rows)):
+            raise RuntimeError(
+                f"IQFeed {table_name} COPY row-count mismatch: "
+                f"expected={len(rows)} affected={rowcount}"
+            )
+        build_ms += (built - allocated) * 1000.0
+        execute_ms += ((allocated - started) + (finished - built)) * 1000.0
+        row_ids_by_tape[table_name] = row_ids
+    return (
+        row_ids_by_tape.get(_TRADE_TAPE, ()),
+        row_ids_by_tape.get(_NBBO_TAPE, ()),
+        build_ms,
+        execute_ms,
+    )
+
+
+def _insert_pending_batch_execute_values(
+    connection: Any,
+    *,
+    trade_rows: list[dict],
+    quote_rows: list[dict],
+) -> tuple[tuple[int, ...], tuple[int, ...], float, float]:
+    """psycopg2 ``execute_values`` with RETURNING id — no SQLAlchemy compile."""
+
+    from psycopg2.extras import execute_values  # local: keep import optional
+
+    for row in (*trade_rows, *quote_rows):
+        _require_release_identity(row)
+    row_ids_by_tape: dict[str, tuple[int, ...]] = {}
+    build_ms = 0.0
+    execute_ms = 0.0
+    for table_name, columns, builder in _TAPE_WRITE_SPECS:
+        rows = trade_rows if table_name == _TRADE_TAPE else quote_rows
+        if not rows:
+            row_ids_by_tape[table_name] = ()
+            continue
+        started = time.monotonic()
+        data = [builder(row) for row in rows]
+        built = time.monotonic()
+        cursor = _dbapi_cursor(connection)
+        try:
+            returned = execute_values(
+                cursor,
+                f"INSERT INTO {table_name} ({', '.join(columns)}) "
+                "VALUES %s RETURNING id",
+                data,
+                page_size=len(data),
+                fetch=True,
+            )
+        finally:
+            try:
+                cursor.close()
+            except Exception:  # pragma: no cover - driver-specific
+                pass
+        finished = time.monotonic()
+        row_ids = tuple(int(entry[0]) for entry in returned)
+        if (
+            len(row_ids) != len(rows)
+            or len(set(row_ids)) != len(row_ids)
+            or any(row_id <= 0 for row_id in row_ids)
+        ):
+            raise RuntimeError(
+                f"IQFeed {table_name} execute_values returned-row identity "
+                f"mismatch: expected={len(rows)} returned={len(row_ids)}"
+            )
+        build_ms += (built - started) * 1000.0
+        execute_ms += (finished - built) * 1000.0
+        row_ids_by_tape[table_name] = row_ids
+    return (
+        row_ids_by_tape.get(_TRADE_TAPE, ()),
+        row_ids_by_tape.get(_NBBO_TAPE, ()),
+        build_ms,
+        execute_ms,
+    )
+
+
+def _insert_pending_batch_values(
+    connection: Any,
+    *,
+    trade_rows: list[dict],
+    quote_rows: list[dict],
+) -> tuple[tuple[int, ...], tuple[int, ...], float, float]:
+    """Legacy path, unchanged — timed only."""
+
+    started = time.monotonic()
+    trade_row_ids, quote_row_ids = _insert_pending_batch(
+        connection,
+        trade_rows=trade_rows,
+        quote_rows=quote_rows,
+        return_row_ids=True,
+    )
+    finished = time.monotonic()
+    return trade_row_ids, quote_row_ids, 0.0, (finished - started) * 1000.0
+
+
+_WRITE_MODE_INSERTERS = {
+    "copy": _insert_pending_batch_copy,
+    "execute_values": _insert_pending_batch_execute_values,
+    "values": _insert_pending_batch_values,
+}
+# Any failure of a bulk mode retries the SAME batch through the next link.  The
+# existing "trade/BBO insert failed" loss path is reached only after all three.
+_WRITE_MODE_CHAIN = {
+    "copy": ("copy", "execute_values", "values"),
+    "execute_values": ("execute_values", "values"),
+    "values": ("values",),
+}
+
+
+def _effective_tape_write_mode() -> str:
+    mode = _normalized_tape_write_mode(IQFEED_TAPE_WRITE_MODE)
+    if mode == "copy" and not _TAPE_SEQUENCES_RESOLVED:
+        return "execute_values"
+    return mode
+
+
+def _write_pending_batch(
+    connection_factory: Any,
+    *,
+    trade_rows: list[dict],
+    quote_rows: list[dict],
+    mode: str | None = None,
+) -> tuple[tuple[int, ...], tuple[int, ...], str, dict[str, float]]:
+    """Persist one batch through the selected mode with a bounded fallback."""
+
+    chain = _WRITE_MODE_CHAIN[
+        _normalized_tape_write_mode(mode or _effective_tape_write_mode())
+    ]
+    last_error: Exception | None = None
+    for index, attempt_mode in enumerate(chain):
+        try:
+            if attempt_mode in _FORCED_WRITE_MODE_FAILURES:
+                raise RuntimeError(
+                    f"IQFeed forced {attempt_mode} write-mode failure"
+                )
+            inserter = _WRITE_MODE_INSERTERS[attempt_mode]
+            opened = time.monotonic()
+            with connection_factory() as connection:
+                (
+                    trade_row_ids,
+                    quote_row_ids,
+                    build_ms,
+                    execute_ms,
+                ) = inserter(
+                    connection,
+                    trade_rows=trade_rows,
+                    quote_rows=quote_rows,
+                )
+                inserted = time.monotonic()
+            committed = time.monotonic()
+            return (
+                trade_row_ids,
+                quote_row_ids,
+                attempt_mode,
+                {
+                    "insert_client_build_ms": build_ms,
+                    "insert_execute_ms": execute_ms,
+                    "insert_commit_ms": (committed - inserted) * 1000.0,
+                    "insert_total_ms": (committed - opened) * 1000.0,
+                },
+            )
+        except Exception as exc:
+            last_error = exc
+            if index + 1 >= len(chain):
+                raise
+            fallback = chain[index + 1]
+            _write_mode_fallbacks[fallback] = (
+                _write_mode_fallbacks.get(fallback, 0) + 1
+            )
+            log.warning(
+                "IQFeed tape write mode %s failed (%s: %s); retrying the same "
+                "batch of %d trade / %d quote rows via %s",
+                attempt_mode,
+                type(exc).__name__,
+                exc,
+                len(trade_rows),
+                len(quote_rows),
+                fallback,
+            )
+    raise cast(Exception, last_error)
+
+
+def _notify_row_class(row: dict) -> str:
+    """Name the authority class a quote row belongs to.
+
+    ``trade_fenced`` rows (``AUTHORITATIVE_TIMESTAMP_BASIS`` with no provider
+    quote clock) are the ONLY class both v3 envelope consumers accept as
+    authority.  ``own_clock`` rows carry a real Bid/Ask Time and are rejected
+    outright for authority by ``captured_paper_iqfeed_trigger`` and
+    ``live_runner_loop``; they still feed the basis-agnostic wake listener.
+    """
+
+    basis = str(row.get("basis") or "")
+    if basis == AUTHORITATIVE_TIMESTAMP_BASIS and row.get("provider_at") is None:
+        return "trade_fenced"
+    if basis == QUOTE_EVENT_TIMESTAMP_BASIS:
+        return "own_clock"
+    return "other"
+
+
+def _notify_row_age_s(row: dict, *, available_at: datetime | None = None) -> float:
+    reference = (
+        available_at
+        if isinstance(available_at, datetime)
+        else row.get("available_at")
+    )
+    received_at = row.get("received_at")
+    if (
+        not isinstance(reference, datetime)
+        or not isinstance(received_at, datetime)
+        or reference.tzinfo is None
+        or received_at.tzinfo is None
+    ):
+        return 0.0
+    return (reference - received_at).total_seconds()
+
+
+def _select_notify_rows(
+    quote_rows: list[dict],
+    trade_rows: list[dict] | None = None,
+    *,
+    coalesce: bool | None = None,
+    max_age_s: float | None = None,
+    available_at: datetime | None = None,
+) -> list[dict]:
+    """Choose which released quote rows carry a NOTIFY payload.
+
+    Selection is a FILTER over the already frame-key-sorted ``quote_rows``, so
+    the result is always a subsequence: emitted notifies stay monotonic in
+    ``source_frame_sequence`` per symbol, exactly as today.
+
+    Rules, in order:
+      1. A quote whose frame key also produced a TRADE row is ALWAYS notified.
+         The captured-PAPER trigger matches a notify against the captured
+         exact-print source by equal ``source_frame_sequence`` AND equal
+         bid/ask — it needs precisely that provenance quote.
+      2. Coalescing keeps the NEWEST row per symbol WITHIN a class.  An
+         own-clock row can therefore never suppress a trade-fenced one.
+      3. The optional age filter (default OFF) drops rows older than
+         ``max_age_s`` at publication; rule-1 rows are never dropped.
+    """
+
+    rows = list(quote_rows or [])
+    if not rows:
+        return []
+    if coalesce is None:
+        coalesce = IQFEED_NOTIFY_COALESCE_PER_SYMBOL
+    if max_age_s is None:
+        max_age_s = IQFEED_NOTIFY_MAX_AGE_S
+    age_filter = bool(max_age_s and max_age_s > 0)
+    if not coalesce and not age_filter:
+        return rows
+
+    trade_frame_keys: set[tuple[int, int]] = set()
+    for row in trade_rows or []:
+        generation = row.get("connection_generation")
+        sequence = row.get("source_frame_sequence")
+        if (
+            isinstance(generation, int)
+            and not isinstance(generation, bool)
+            and isinstance(sequence, int)
+            and not isinstance(sequence, bool)
+        ):
+            trade_frame_keys.add((generation, sequence))
+
+    keep = [False] * len(rows)
+    newest_index: dict[tuple[str, str], int] = {}
+    for index, row in enumerate(rows):
+        frame_key = (
+            row.get("connection_generation"),
+            row.get("source_frame_sequence"),
+        )
+        if frame_key in trade_frame_keys:
+            keep[index] = True
+            continue
+        if age_filter and _notify_row_age_s(
+            row, available_at=available_at
+        ) > max_age_s:
+            continue
+        row_class = _notify_row_class(row)
+        if not coalesce or row_class == "other":
+            keep[index] = True
+            continue
+        symbol = str(row.get("sym") or "").strip().upper()
+        previous = newest_index.get((row_class, symbol))
+        if previous is not None:
+            keep[previous] = False
+        newest_index[(row_class, symbol)] = index
+        keep[index] = True
+    return [row for index, row in enumerate(rows) if keep[index]]
+
+
 def _enqueue_nbbo_notifications(
     connection: Any,
     *,
     quote_rows: list[dict],
     available_at: datetime,
-) -> None:
+    trade_rows: list[dict] | None = None,
+) -> int:
     """Enqueue quote notifications inside the row-publication transaction."""
 
     if not quote_rows or not IQFEED_NOTIFY_ENABLED:
-        return
+        return 0
     for row in quote_rows:
         row["available_at"] = available_at
+    selected = _select_notify_rows(
+        quote_rows,
+        trade_rows,
+        available_at=available_at,
+    )
+    if not selected:
+        return 0
     payload_rows = sa.values(
         sa.column("payload", sa.Text()),
         name="iqfeed_notify_rows",
-    ).data([(_notify_payload(row),) for row in quote_rows])
+    ).data([(_notify_payload(row),) for row in selected])
     result = connection.execute(
         sa.select(
             sa.func.pg_notify(
@@ -979,9 +1676,10 @@ def _enqueue_nbbo_notifications(
     )
     _require_batch_rowcount(
         result,
-        len(quote_rows),
+        len(selected),
         operation="NBBO notification enqueue",
     )
+    return len(selected)
 
 
 def _release_values(
@@ -1121,9 +1819,10 @@ def _release_pending_batch(
     available_at: datetime,
     trade_row_ids: tuple[int, ...] | None = None,
     quote_row_ids: tuple[int, ...] | None = None,
-) -> None:
+) -> int:
     """Release one batch and enqueue its quote notifications set-wise."""
 
+    notify_count = 0
     if trade_rows:
         if trade_row_ids is None:
             incoming = _release_values(
@@ -1175,13 +1874,15 @@ def _release_pending_batch(
                 available_at=available_at,
                 operation="NBBO primary-key release",
             )
-        _enqueue_nbbo_notifications(
+        notify_count = _enqueue_nbbo_notifications(
             connection,
             quote_rows=quote_rows,
             available_at=available_at,
+            trade_rows=trade_rows,
         )
     elif quote_row_ids:
         raise RuntimeError("IQFeed NBBO release has row IDs without rows")
+    return notify_count
 
 
 def _pending_frame_key(row: dict) -> tuple[int, int]:
@@ -1205,6 +1906,7 @@ def _drain_pending_write_batch(
     max_scan_events: int | None = None,
     hot_symbols: set[str] | None = None,
     collapse_hot_quotes: bool = False,
+    max_bytes: int | None = None,
 ) -> tuple[list[dict], list[dict], bool]:
     """Drain a bounded raw prefix under a retained-event commit cap.
 
@@ -1310,9 +2012,15 @@ def _drain_pending_write_batch(
                 + len(frame_mandatory_quotes)
                 + len(projected_cold_symbols)
             )
-            if (
-                retained_events
-                and projected_retained_events > max_events
+            # The byte bound is a SAFETY cap only: it stops a pathologically
+            # wide batch, and like the event cap it never splits a frame.
+            if retained_events and (
+                projected_retained_events > max_events
+                or (
+                    max_bytes is not None
+                    and projected_retained_events * ESTIMATED_EVENT_BYTES
+                    > max_bytes
+                )
             ):
                 break
             trade_rows.extend(frame_trades)
@@ -1340,14 +2048,334 @@ def _drain_pending_write_batch(
         return trade_rows, quote_rows, bool(_pending or _pending_nbbo)
 
 
-def _release_batch_event_limit(*, pending_backlog: bool) -> int:
-    """Use the larger bounded batch only after a prior drain proved backlog."""
+def _batch_event_ceiling(mode: str | None = None) -> int:
+    """Largest retained-event batch this process will ever commit at once."""
 
+    ceiling = min(DB_RELEASE_CATCHUP_BATCH_EVENTS, BATCH_EVENT_HARD_CEILING)
+    if _normalized_tape_write_mode(
+        mode or _effective_tape_write_mode()
+    ) == "values":
+        ceiling = min(ceiling, VALUES_MODE_BIND_BUDGET_EVENTS)
+    return max(DB_RELEASE_BATCH_EVENTS, ceiling)
+
+
+class BatchController:
+    """Size the catch-up batch by measured WALL TIME, not by event count.
+
+    The consumer measures ``received_age`` at consume time — flush wait plus
+    insert plus release plus delivery — so the batch WALL is the constraint,
+    not the frontier.  A batch over ``hard_stop_ms`` halves immediately; a fast
+    batch grows by at most 2x toward ``target_ms``.  The event ceiling is not
+    raised above ``BATCH_EVENT_HARD_CEILING`` here.
+    """
+
+    def __init__(
+        self,
+        *,
+        floor: int,
+        ceil: int,
+        target_ms: float,
+        hard_stop_ms: float,
+        max_bytes: int,
+    ) -> None:
+        if floor <= 0 or ceil < floor:
+            raise ValueError("IQFeed batch controller bounds are malformed")
+        self.floor = floor
+        self.ceil = ceil
+        self.target_ms = float(target_ms)
+        self.hard_stop_ms = float(hard_stop_ms)
+        self.max_bytes = int(max_bytes)
+        self.max_events = floor
+
+    def rebind_ceiling(self, ceil: int) -> None:
+        self.ceil = max(self.floor, int(ceil))
+        self.max_events = max(self.floor, min(self.ceil, self.max_events))
+
+    def observe(self, measured_ms: float) -> int:
+        previous = self.max_events
+        if measured_ms > self.hard_stop_ms:
+            scaled = previous // 2
+        elif measured_ms <= 0:
+            scaled = previous * 2
+        else:
+            scaled = int(previous * (self.target_ms / measured_ms))
+        scaled = min(scaled, previous * 2)
+        scaled = max(scaled, max(1, previous // 2))
+        self.max_events = max(self.floor, min(self.ceil, scaled))
+        return self.max_events
+
+
+def _release_batch_event_limit(
+    *,
+    pending_backlog: bool,
+    controller: BatchController | None = None,
+) -> int:
+    """Use the larger bounded batch only after a prior drain proved backlog.
+
+    With the adaptive controller bound (production writer) the catch-up size is
+    whatever the last measured batch wall justifies.  ``IQFEED_DB_BATCH_ADAPTIVE
+    =0`` — or any direct caller that passes no controller — keeps the fixed
+    two-level limit, clamped to the bind budget under the legacy ``values``
+    write mode.
+    """
+
+    if controller is None or not IQFEED_DB_BATCH_ADAPTIVE:
+        limit = (
+            DB_RELEASE_CATCHUP_BATCH_EVENTS
+            if pending_backlog
+            else DB_RELEASE_BATCH_EVENTS
+        )
+        if _effective_tape_write_mode() == "values":
+            limit = min(limit, VALUES_MODE_BIND_BUDGET_EVENTS)
+        return limit
     return (
-        DB_RELEASE_CATCHUP_BATCH_EVENTS
+        controller.max_events
         if pending_backlog
-        else DB_RELEASE_BATCH_EVENTS
+        else min(controller.max_events, DB_RELEASE_BATCH_EVENTS)
     )
+
+
+def _oldest_pending_received_age_s(*, now: datetime | None = None) -> float:
+    """Age of the OLDEST unwritten arrival, read off the in-memory deques.
+
+    Deliberately never touches the 90 GB tape: this is the number the exact
+    print heartbeat cannot express (it only sees rows that already committed).
+    """
+
+    reference = now if isinstance(now, datetime) else datetime.now(timezone.utc)
+    oldest: datetime | None = None
+    with _pending_lock:
+        for queue in (_pending, _pending_nbbo):
+            if not queue:
+                continue
+            received_at = queue[0].get("received_at")
+            if not isinstance(received_at, datetime) or received_at.tzinfo is None:
+                continue
+            if oldest is None or received_at < oldest:
+                oldest = received_at
+    if oldest is None:
+        return 0.0
+    return max(0.0, (reference - oldest).total_seconds())
+
+
+def _enforce_pending_bound(
+    *,
+    max_events: int,
+    available_at: datetime,
+) -> int:
+    """Drop the OLDEST quote-only frames once the backlog exceeds the bound.
+
+    Trades are NEVER dropped, and a quote frame that shares its frame key with
+    a pending trade is never split away from it.  Every dropped frame latches a
+    replay ``CoverageGap`` so the mirror can never believe coverage is complete
+    while frames are missing.  Default 0 = unbounded (today's behaviour).
+    """
+
+    if max_events <= 0:
+        return 0
+    dropped: list[dict] = []
+    with _pending_lock:
+        total = len(_pending) + len(_pending_nbbo)
+        if total <= max_events:
+            return 0
+        trade_frame_keys = {_pending_frame_key(row) for row in _pending}
+        while total > max_events and _pending_nbbo:
+            frame_key = _pending_frame_key(_pending_nbbo[0])
+            if frame_key in trade_frame_keys:
+                break
+            frame_rows: list[dict] = []
+            while (
+                _pending_nbbo
+                and _pending_frame_key(_pending_nbbo[0]) == frame_key
+            ):
+                frame_rows.append(_pending_nbbo.popleft())
+            dropped.extend(frame_rows)
+            total -= len(frame_rows)
+    for row in dropped:
+        _record_unreleased_capture_gap(
+            symbol=str(row.get("sym") or "").strip().upper() or None,
+            streams=("nbbo_quote",),
+            available_at=available_at,
+            reason="iqfeed_l1_pending_bound_drop",
+        )
+    if dropped:
+        log.warning(
+            "IQFeed pending bound dropped %d quote-only rows "
+            "(IQFEED_PENDING_MAX_EVENTS=%d); replay coverage gap latched",
+            len(dropped),
+            max_events,
+        )
+    return len(dropped)
+
+
+# --- P3: hot override file ------------------------------------------------
+# The launcher's cmd wrapper respawns python with a FROZEN env snapshot and no
+# scheduled restart exists, so an env-only kill switch is inert on the day it
+# is needed.  This file is the hot path; env stays the cold path.
+
+def _override_write_mode(value: Any) -> str:
+    text = str(value or "").strip().lower()
+    if text not in TAPE_WRITE_MODES:
+        raise ValueError(f"unknown tape write mode {value!r}")
+    return text
+
+
+def _override_flag(value: Any) -> bool:
+    if isinstance(value, bool):
+        return value
+    return str(value).strip().lower() not in ("0", "false", "no", "")
+
+
+_OVERRIDE_COERCERS: dict[str, Any] = {
+    "IQFEED_TAPE_WRITE_MODE": _override_write_mode,
+    "IQFEED_NOTIFY_COALESCE_PER_SYMBOL": _override_flag,
+    "IQFEED_NOTIFY_MAX_AGE_S": lambda value: max(0.0, float(value)),
+    "IQFEED_DB_BATCH_ADAPTIVE": _override_flag,
+    "IQFEED_DB_BATCH_TARGET_MS": lambda value: max(1.0, float(value)),
+    "IQFEED_DB_BATCH_HARD_STOP_MS": lambda value: max(1.0, float(value)),
+    "IQFEED_DB_BATCH_MAX_BYTES": lambda value: max(1, int(value)),
+    "IQFEED_DRAIN_METRICS_EVERY_S": lambda value: max(0.0, float(value)),
+    "IQFEED_PENDING_MAX_EVENTS": lambda value: max(0, int(value)),
+}
+_override_state: dict[str, Any] = {"mtime_ns": None, "reloads": 0}
+
+
+def _reload_overrides(path: str | None = None) -> int:
+    """Apply a whitelisted subset of knobs from the override file, if changed."""
+
+    target = path or IQFEED_BRIDGE_OVERRIDES_PATH
+    try:
+        mtime_ns = os.stat(target).st_mtime_ns
+    except OSError:
+        return 0
+    if _override_state.get("mtime_ns") == mtime_ns:
+        return 0
+    _override_state["mtime_ns"] = mtime_ns
+    try:
+        with open(target, "r", encoding="utf-8") as handle:
+            document = json.load(handle)
+        if not isinstance(document, dict):
+            raise ValueError("override document is not an object")
+    except Exception as exc:
+        log.warning(
+            "IQFeed bridge override file %s is malformed; keeping the last "
+            "good values: %s",
+            target,
+            exc,
+        )
+        return 0
+    changed = 0
+    for key, raw_value in document.items():
+        coercer = _OVERRIDE_COERCERS.get(str(key))
+        if coercer is None:
+            log.warning("IQFeed bridge override key %r is not whitelisted", key)
+            continue
+        try:
+            value = coercer(raw_value)
+        except Exception as exc:
+            log.warning(
+                "IQFeed bridge override %s=%r rejected: %s", key, raw_value, exc
+            )
+            continue
+        previous = globals().get(key)
+        if previous == value:
+            continue
+        globals()[key] = value
+        log.info("IQFeed bridge override %s: %r -> %r", key, previous, value)
+        changed += 1
+    if changed:
+        _override_state["reloads"] = int(_override_state.get("reloads", 0)) + 1
+    return changed
+
+
+class _DrainMetrics:
+    """Accumulate one [drain-metrics] window on the writer thread."""
+
+    def __init__(self) -> None:
+        self.reset()
+
+    def reset(self) -> None:
+        self.batches = 0
+        self.events = 0
+        self.notifies = 0
+        self.batch_ms: list[float] = []
+        self.insert_client_build_ms = 0.0
+        self.insert_execute_ms: list[float] = []
+        self.insert_commit_ms = 0.0
+        self.release_ms = 0.0
+        self.capture_ms = 0.0
+        self.pending_bound_drops = 0
+
+    def observe(
+        self,
+        *,
+        events: int,
+        batch_ms: float,
+        insert: dict[str, float],
+        release_ms: float,
+        capture_ms: float,
+        notifies: int,
+    ) -> None:
+        self.batches += 1
+        self.events += events
+        self.notifies += notifies
+        self.batch_ms.append(batch_ms)
+        self.insert_client_build_ms += insert.get("insert_client_build_ms", 0.0)
+        self.insert_execute_ms.append(insert.get("insert_execute_ms", 0.0))
+        self.insert_commit_ms += insert.get("insert_commit_ms", 0.0)
+        self.release_ms += release_ms
+        self.capture_ms += capture_ms
+
+    @staticmethod
+    def _percentile(values: list[float], fraction: float) -> float:
+        if not values:
+            return 0.0
+        ordered = sorted(values)
+        index = min(
+            len(ordered) - 1,
+            max(0, int(round(fraction * (len(ordered) - 1)))),
+        )
+        return ordered[index]
+
+    def report(self, *, window_s: float) -> dict[str, Any]:
+        with _pending_lock:
+            pending_trades = len(_pending)
+            pending_quotes = len(_pending_nbbo)
+        return {
+            "pending_trades": pending_trades,
+            "pending_quotes": pending_quotes,
+            "oldest_pending_received_age_s": round(
+                _oldest_pending_received_age_s(), 3
+            ),
+            "batches": self.batches,
+            "events_per_s": round(
+                self.events / window_s if window_s > 0 else 0.0, 1
+            ),
+            "batch_p50_ms": round(self._percentile(self.batch_ms, 0.5), 1),
+            "batch_p90_ms": round(self._percentile(self.batch_ms, 0.9), 1),
+            "batch_max_ms": round(max(self.batch_ms) if self.batch_ms else 0.0, 1),
+            "insert_client_build_ms": round(self.insert_client_build_ms, 1),
+            "insert_execute_p50_ms": round(
+                self._percentile(self.insert_execute_ms, 0.5), 1
+            ),
+            "insert_commit_ms": round(self.insert_commit_ms, 1),
+            "release_ms": round(self.release_ms, 1),
+            "capture_ms": round(self.capture_ms, 1),
+            "notify_count": self.notifies,
+            "write_mode": _effective_tape_write_mode(),
+            "write_mode_fallbacks": sum(_write_mode_fallbacks.values()),
+            "pending_bound_drops": self.pending_bound_drops,
+            "override_reloads": int(_override_state.get("reloads", 0)),
+        }
+
+
+def _emit_drain_metrics(metrics: _DrainMetrics, *, window_s: float) -> dict[str, Any]:
+    report = metrics.report(window_s=window_s)
+    log.info(
+        "[drain-metrics] %s",
+        " ".join(f"{key}={value}" for key, value in report.items()),
+    )
+    return report
 
 
 def _pending_write_backlog() -> bool:
@@ -1968,6 +2996,8 @@ _exact_print_heartbeat_event = threading.Event()
 _exact_print_heartbeat_thread: threading.Thread | None = None
 _pending_exact_print_heartbeat: dict[str, Any] | None = None
 _last_exact_print_heartbeat_attempt_monotonic: float | None = None
+_pending_drain_metrics_heartbeat: dict[str, Any] | None = None
+_last_drain_metrics_heartbeat_attempt_monotonic: float | None = None
 
 
 def _canonical_exact_print_heartbeat_body(
@@ -2051,15 +3081,77 @@ def _canonical_exact_print_heartbeat_body(
     return body
 
 
-def _append_exact_print_heartbeat(body: dict[str, Any]) -> None:
-    """Append one receipt off the critical tape writer path."""
+def _canonical_drain_metrics_body(
+    report: dict[str, Any],
+    *,
+    window_started_at: datetime,
+    window_ended_at: datetime,
+    connection_generation: int,
+) -> dict[str, Any] | None:
+    """Frozen key set for the writer-drain receipt (own job type, own schema)."""
 
+    if (
+        not isinstance(window_started_at, datetime)
+        or not isinstance(window_ended_at, datetime)
+        or window_started_at.tzinfo is None
+        or window_ended_at.tzinfo is None
+        or window_ended_at < window_started_at
+        or not isinstance(connection_generation, int)
+        or isinstance(connection_generation, bool)
+        or connection_generation <= 0
+    ):
+        return None
+    body: dict[str, Any] = {
+        "schema": IQFEED_DRAIN_METRICS_HEARTBEAT_SCHEMA,
+        "scope": IQFEED_DRAIN_METRICS_HEARTBEAT_SCOPE,
+        "window_started_at_utc": (
+            window_started_at.astimezone(timezone.utc)
+            .isoformat()
+            .replace("+00:00", "Z")
+        ),
+        "window_ended_at_utc": (
+            window_ended_at.astimezone(timezone.utc)
+            .isoformat()
+            .replace("+00:00", "Z")
+        ),
+        "bridge_version": BRIDGE_BUILD,
+        "bridge_run_id": BRIDGE_RUN_ID,
+        "connection_generation": int(connection_generation),
+        "pending_trades": int(report.get("pending_trades", 0)),
+        "pending_quotes": int(report.get("pending_quotes", 0)),
+        "oldest_pending_received_age_s": float(
+            report.get("oldest_pending_received_age_s", 0.0)
+        ),
+        "batches": int(report.get("batches", 0)),
+        "events_per_s": float(report.get("events_per_s", 0.0)),
+        "batch_p50_ms": float(report.get("batch_p50_ms", 0.0)),
+        "batch_p90_ms": float(report.get("batch_p90_ms", 0.0)),
+        "batch_max_ms": float(report.get("batch_max_ms", 0.0)),
+        "insert_execute_p50_ms": float(report.get("insert_execute_p50_ms", 0.0)),
+        "release_ms": float(report.get("release_ms", 0.0)),
+        "notify_count": int(report.get("notify_count", 0)),
+        "write_mode": str(report.get("write_mode") or ""),
+        "write_mode_fallbacks": int(report.get("write_mode_fallbacks", 0)),
+        "pending_bound_drops": int(report.get("pending_bound_drops", 0)),
+    }
+    canonical = json.dumps(
+        body,
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=False,
+        allow_nan=False,
+    )
+    body["content_sha256"] = hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+    return body
+
+
+def _append_heartbeat_row(body: dict[str, Any], *, job_type: str) -> None:
     with engine.begin() as connection:
         connection.execute(
             _INSERT_EXACT_PRINT_HEARTBEAT,
             {
                 "id": str(uuid.uuid4()),
-                "job_type": JOB_IQFEED_EXACT_PRINT_HEARTBEAT,
+                "job_type": job_type,
                 "meta_json": json.dumps(
                     body,
                     sort_keys=True,
@@ -2071,25 +3163,43 @@ def _append_exact_print_heartbeat(body: dict[str, Any]) -> None:
         )
 
 
+def _append_exact_print_heartbeat(body: dict[str, Any]) -> None:
+    """Append one receipt off the critical tape writer path."""
+
+    _append_heartbeat_row(body, job_type=JOB_IQFEED_EXACT_PRINT_HEARTBEAT)
+
+
 def _exact_print_heartbeat_worker_main() -> None:
     """Drain the latest receipt without ever blocking exact-print persistence."""
 
     global _pending_exact_print_heartbeat
+    global _pending_drain_metrics_heartbeat
     while True:
         _exact_print_heartbeat_event.wait()
         _exact_print_heartbeat_event.clear()
         with _exact_print_heartbeat_lock:
             body = _pending_exact_print_heartbeat
             _pending_exact_print_heartbeat = None
-        if body is None:
-            continue
-        try:
-            _append_exact_print_heartbeat(body)
-        except Exception:
-            log.warning(
-                "exact-print heartbeat append failed after tape commit",
-                exc_info=True,
-            )
+            drain_body = _pending_drain_metrics_heartbeat
+            _pending_drain_metrics_heartbeat = None
+        if body is not None:
+            try:
+                _append_exact_print_heartbeat(body)
+            except Exception:
+                log.warning(
+                    "exact-print heartbeat append failed after tape commit",
+                    exc_info=True,
+                )
+        if drain_body is not None:
+            try:
+                _append_heartbeat_row(
+                    drain_body,
+                    job_type=JOB_IQFEED_DRAIN_METRICS_HEARTBEAT,
+                )
+            except Exception:
+                log.warning(
+                    "drain-metrics heartbeat append failed", exc_info=True
+                )
 
 
 def _ensure_exact_print_heartbeat_worker_locked() -> None:
@@ -2137,6 +3247,41 @@ def _record_committed_exact_print_heartbeat(
             return False
         _last_exact_print_heartbeat_attempt_monotonic = now_mono
         _pending_exact_print_heartbeat = dict(body)
+        _ensure_exact_print_heartbeat_worker_locked()
+    _exact_print_heartbeat_event.set()
+    return True
+
+
+def _record_drain_metrics_heartbeat(
+    report: dict[str, Any],
+    *,
+    window_started_at: datetime,
+    window_ended_at: datetime,
+    connection_generation: int,
+    monotonic_now: float | None = None,
+) -> bool:
+    """Enqueue one writer-drain receipt on the SAME 60 s off-thread cadence."""
+
+    global _last_drain_metrics_heartbeat_attempt_monotonic
+    global _pending_drain_metrics_heartbeat
+
+    if not _exact_print_heartbeat_capable:
+        return False
+    now_mono = time.monotonic() if monotonic_now is None else float(monotonic_now)
+    body = _canonical_drain_metrics_body(
+        report,
+        window_started_at=window_started_at,
+        window_ended_at=window_ended_at,
+        connection_generation=connection_generation,
+    )
+    if body is None:
+        return False
+    with _exact_print_heartbeat_lock:
+        last = _last_drain_metrics_heartbeat_attempt_monotonic
+        if last is not None and now_mono - last < _EXACT_PRINT_HEARTBEAT_INTERVAL_S:
+            return False
+        _last_drain_metrics_heartbeat_attempt_monotonic = now_mono
+        _pending_drain_metrics_heartbeat = dict(body)
         _ensure_exact_print_heartbeat_worker_locked()
     _exact_print_heartbeat_event.set()
     return True
@@ -3247,6 +4392,16 @@ def writer(
     }
     pending_backlog = False
     capacity_pressure = False
+    batch_controller = BatchController(
+        floor=DB_RELEASE_BATCH_EVENTS,
+        ceil=_batch_event_ceiling(),
+        target_ms=IQFEED_DB_BATCH_TARGET_MS,
+        hard_stop_ms=IQFEED_DB_BATCH_HARD_STOP_MS,
+        max_bytes=IQFEED_DB_BATCH_MAX_BYTES,
+    )
+    drain_metrics = _DrainMetrics()
+    drain_metrics_window_started = time.monotonic()
+    drain_metrics_window_started_at = datetime.now(timezone.utc)
 
     def reconcile(*, allow_unwatch: bool, sticky: bool = False) -> None:
         nonlocal prior_causes, hot_symbols, capacity_pressure
@@ -3340,6 +4495,18 @@ def writer(
         # bounded batch so incoming tape cannot amplify transaction latency.
         if stop_event.wait(0.0 if pending_backlog else FLUSH_INTERVAL_S):
             break
+        # HOT knobs before anything else in the iteration: the day-1 kill
+        # switch has to reach a process whose environment is frozen.
+        _reload_overrides()
+        batch_controller.target_ms = IQFEED_DB_BATCH_TARGET_MS
+        batch_controller.hard_stop_ms = IQFEED_DB_BATCH_HARD_STOP_MS
+        batch_controller.max_bytes = IQFEED_DB_BATCH_MAX_BYTES
+        batch_controller.rebind_ceiling(_batch_event_ceiling())
+        if IQFEED_PENDING_MAX_EVENTS > 0:
+            drain_metrics.pending_bound_drops += _enforce_pending_bound(
+                max_events=IQFEED_PENDING_MAX_EVENTS,
+                available_at=datetime.now(timezone.utc),
+            )
         # CAPTURE-G3 FAST PATH: subscribe first-alert names IMMEDIATELY (short poll), additive to
         # the slow REFRESH_S set below — closes the ~2.7-min Gate-0 blind window. Runs BEFORE the
         # slow refresh so a fresh mover is watched within ~SUBSCRIBE_FAST_POLL_S of its first alert.
@@ -3451,7 +4618,9 @@ def writer(
         rows, nbbo_rows, pending_backlog = _drain_pending_write_batch(
             max_events=_release_batch_event_limit(
                 pending_backlog=pending_backlog,
+                controller=batch_controller,
             ),
+            max_bytes=batch_controller.max_bytes,
             hot_symbols=hot_symbols,
             # A-2: parehong napatunayang-backlog signal na nagpapalaki ng
             # batch -- kapag walang backlog, byte-identical ang gawi.
@@ -3472,13 +4641,16 @@ def writer(
                 # Persist pending rows first and retain their database primary
                 # keys. ``received_at`` may precede this commit by the flush
                 # interval and is not a strategy-availability clock.
-                with engine.begin() as c:
-                    trade_row_ids, quote_row_ids = _insert_pending_batch(
-                        c,
-                        trade_rows=rows,
-                        quote_rows=written_quotes,
-                        return_row_ids=True,
-                    )
+                (
+                    trade_row_ids,
+                    quote_row_ids,
+                    write_mode_used,
+                    insert_timings,
+                ) = _write_pending_batch(
+                    engine.begin,
+                    trade_rows=rows,
+                    quote_rows=written_quotes,
+                )
                 _prof_t1 = time.monotonic()
                 # Stamp the conservative post-insert publication clock and
                 # enqueue notifications in one follow-up transaction. Releasing
@@ -3490,7 +4662,7 @@ def writer(
                 # dalang TOTOONG Bid/Ask Time event clock at sariling basis.
                 available_at = datetime.now(timezone.utc)
                 with engine.begin() as c:
-                    _release_pending_batch(
+                    notify_count = _release_pending_batch(
                         c,
                         trade_rows=rows,
                         quote_rows=written_quotes,
@@ -3509,13 +4681,30 @@ def writer(
                 if _prof_total > 1.0:
                     log.warning(
                         "[drain-profile] rows=%d quotes=%d total=%.0fms "
-                        "insert=%.0fms release=%.0fms capture=%.0fms backlog=%s",
+                        "insert=%.0fms release=%.0fms capture=%.0fms "
+                        "build=%.0fms execute=%.0fms commit=%.0fms mode=%s "
+                        "notify=%d backlog=%s",
                         len(rows), len(written_quotes), _prof_total * 1000,
                         (_prof_t1 - _prof_t0) * 1000,
                         (_prof_t2 - _prof_t1) * 1000,
                         (_prof_t3 - _prof_t2) * 1000,
+                        insert_timings.get("insert_client_build_ms", 0.0),
+                        insert_timings.get("insert_execute_ms", 0.0),
+                        insert_timings.get("insert_commit_ms", 0.0),
+                        write_mode_used,
+                        notify_count,
                         pending_backlog,
                     )
+                # The batch WALL is what the consumer's received_age gate sees.
+                batch_controller.observe(_prof_total * 1000.0)
+                drain_metrics.observe(
+                    events=len(rows) + len(written_quotes),
+                    batch_ms=_prof_total * 1000.0,
+                    insert=insert_timings,
+                    release_ms=(_prof_t2 - _prof_t1) * 1000.0,
+                    capture_ms=(_prof_t3 - _prof_t2) * 1000.0,
+                    notifies=notify_count,
+                )
                 # Telemetry is queued only after release and capture publication.
                 # Its independent daemon writer can never stall this sole tape
                 # drain or delay PAPER's already-committed capture handoff.
@@ -3568,41 +4757,99 @@ def writer(
                     log.info("ignition notify emitted=%d channel=%s", emitted, IGNITION_CHANNEL)
             except Exception as e:
                 log.warning("ignition notify emit failed (nominations dropped): %s", e)
+        if IQFEED_DRAIN_METRICS_EVERY_S > 0:
+            _window_s = time.monotonic() - drain_metrics_window_started
+            if _window_s >= IQFEED_DRAIN_METRICS_EVERY_S:
+                _window_ended_at = datetime.now(timezone.utc)
+                _report = _emit_drain_metrics(drain_metrics, window_s=_window_s)
+                try:
+                    _record_drain_metrics_heartbeat(
+                        _report,
+                        window_started_at=drain_metrics_window_started_at,
+                        window_ended_at=_window_ended_at,
+                        connection_generation=connection_generation,
+                    )
+                except Exception:
+                    log.warning("drain-metrics heartbeat enqueue failed", exc_info=True)
+                drain_metrics.reset()
+                drain_metrics_window_started = time.monotonic()
+                drain_metrics_window_started_at = _window_ended_at
         pending_backlog = _pending_write_backlog()
     _request_connection_stop(connection_generation, stop_event)
 
 
-def _selftest() -> int:
-    """Verify the DB path WITHOUT IQFeed: write a synthetic row, read it back."""
-    _verify_bridge_schema()
+def _selftest_row(sequence: int) -> dict:
     now_aware = datetime.now(timezone.utc)
-    now = now_aware.replace(tzinfo=None)
-    with engine.begin() as c:
-        c.execute(INS, [{
-            "sym": "_SELFTEST",
-            "at": now,
-            "px": 1.23,
-            "sz": 100.0,
-            "bid": 1.22,
-            "ask": 1.24,
-            "provider_at": None,
-            "provider_trade_reference_at": now_aware,
-            "received_at": now_aware,
-            "basis": "iqfeed_trade_reference_date_inferred",
-            "bridge": BRIDGE_BUILD,
-            "message_type": "Q",
-            "bridge_run_id": BRIDGE_RUN_ID,
-            "connection_generation": 1,
-            "source_frame_sequence": 1,
-            "source_frame_sha256": hashlib.sha256(
-                b"iqfeed-bridge-selftest-source-frame"
-            ).hexdigest(),
-        }])
+    return {
+        "sym": "_SELFTEST",
+        "at": now_aware.replace(tzinfo=None),
+        "px": 1.23,
+        "sz": 100.0,
+        "bid": 1.22,
+        "ask": 1.24,
+        "provider_at": None,
+        "provider_trade_reference_at": now_aware,
+        "received_at": now_aware,
+        "basis": "iqfeed_trade_reference_date_inferred",
+        "bridge": BRIDGE_BUILD,
+        "message_type": "Q",
+        "bridge_run_id": BRIDGE_RUN_ID,
+        "connection_generation": 1,
+        "source_frame_sequence": sequence,
+        "source_frame_sha256": hashlib.sha256(
+            f"iqfeed-bridge-selftest-source-frame-{sequence}".encode()
+        ).hexdigest(),
+    }
+
+
+def _selftest() -> int:
+    """Verify the DB path WITHOUT IQFeed, THROUGH THE SELECTED WRITE MODE.
+
+    A broken write mode has to fail here — before the provider socket opens —
+    not at 13:30Z.  The fallback chain is exercised once in the same pass, so
+    its code path is proven live rather than only in unit tests.
+    """
+
+    _verify_bridge_schema()
+    mode = _effective_tape_write_mode()
+    written = 0
+    for sequence, forced in ((1, ()), (2, (mode,) if mode != "values" else ())):
+        row = _selftest_row(sequence)
+        _FORCED_WRITE_MODE_FAILURES.clear()
+        _FORCED_WRITE_MODE_FAILURES.update(forced)
+        try:
+            trade_row_ids, _quote_row_ids, used_mode, _timings = (
+                _write_pending_batch(
+                    engine.begin,
+                    trade_rows=[row],
+                    quote_rows=[],
+                )
+            )
+        finally:
+            _FORCED_WRITE_MODE_FAILURES.clear()
+        available_at = datetime.now(timezone.utc)
+        with engine.begin() as connection:
+            _release_inserted_row_ids(
+                connection,
+                statement=MARK_TRADE_IDS_AVAILABLE,
+                row_ids=trade_row_ids,
+                expected=1,
+                available_at=available_at,
+                operation="selftest trade primary-key release",
+            )
+        written += 1
+        log.info(
+            "selftest: wrote+released 1 synthetic row via %s (requested %s%s)",
+            used_mode,
+            mode,
+            ", forced fallback" if forced else "",
+        )
     with engine.connect() as c:
         n = c.execute(sa.text("SELECT count(*) FROM iqfeed_trade_ticks WHERE symbol='_SELFTEST'")).scalar()
-        c2 = c.execute(sa.text("DELETE FROM iqfeed_trade_ticks WHERE symbol='_SELFTEST'"))  # noqa: F841
+    with engine.begin() as c:
+        c.execute(sa.text("DELETE FROM iqfeed_trade_ticks WHERE symbol='_SELFTEST'"))
     log.info("selftest: wrote+read %s synthetic row(s), table OK", n)
-    return 0 if n and n >= 1 else 1
+    return 0 if n and n >= written else 1
 
 
 def _run_connection(
