@@ -3691,6 +3691,89 @@ class AlpacaSpotAdapter:
                 **_submit_failure_metadata(exc),
             }
 
+    def replace_order_qty(self, *, order_id: str, new_qty: str,
+                          client_order_id: Optional[str] = None) -> dict[str, Any]:
+        """Bawasan ang qty ng isang nakaupong SELL order sa pamamagitan ng PATCH (#1276).
+
+        ANG DAHILAN NG PAG-IRAL (2026-09-01): ang buong-qty na resting deadman
+        stop ay kumukonsumo ng buong ``qty_available``, kaya ang PARTIAL exit ay
+        imposible — `live_partial_exit_filled` = ZERO mula 2026-08-01, at LAHAT
+        ng 6 fill ng 2026-09-01 ay premarket kung saan ang OCO tranche na landas
+        (#1212) ay haharangin ng broker (40310000 oco_rth_only). Ang tanging
+        paraan para makapag-partial nang HINDI binibitawan ang buong floor ay
+        ang PAGBABAWAS ng qty ng stop sa mismong sandali ng partial.
+
+        MGA NASUKAT NA KATOTOHANAN (probe 2026-09-01, paper account):
+          * PATCH round-trip ~260ms.
+          * Ang PATCH ay TINATANGGIHAN (422) habang ang order ay nasa
+            ``accepted`` (naka-queue, sarado ang market). Ayon sa docs, bawal
+            din sa pending_new / pending_cancel / pending_replace. Ang isang
+            WORKING (``new``) na order lamang ang mapapalitan.
+          * Ang replace ay HINDI atomic: may dokumentadong stuck-pending_replace
+            na kaso. Ang lumang order ay nananatiling nakalagay hanggang
+            matanggap ang kapalit, kaya WALANG bintanang walang proteksyon —
+            ngunit ang reservation habang lumilipat ay ang MAS MALAKI sa
+            dalawa, kaya ang napalayang qty ay hindi magagamit hangga't hindi
+            TERMINAL ang replace. Ang caller ay DAPAT maghintay ng kumpirmasyon
+            bago magsumite ng partial sell.
+
+        Nagbabalik ng ``{"ok", "order_id" (BAGO — ang PATCH ay gumagawa ng
+        bagong order id), "status", "replaced_order_id"}`` o ``{"ok": False,
+        "error", ...}``. Ang mga hindi sertipikadong input ay tinatanggihan
+        BAGO ang transport, kapareho ng disiplina ng place_deadman_stop.
+        """
+        try:
+            qty = float(new_qty)
+        except (TypeError, ValueError):
+            qty = float("nan")
+        fractional_qty = bool(
+            math.isfinite(qty) and abs(qty - round(qty)) > 1e-9
+        )
+        if (
+            not str(order_id or "").strip()
+            or not math.isfinite(qty)
+            or qty <= 0.0
+            or fractional_qty
+        ):
+            return {
+                "ok": False,
+                "error": (
+                    "alpaca_fractional_replace_not_certified"
+                    if fractional_qty
+                    else "alpaca_replace_instruction_not_certified"
+                ),
+                "order_id": None,
+                "replaced_order_id": str(order_id or "") or None,
+                "pre_submit_blocked": True,
+            }
+        try:
+            from alpaca.trading.requests import ReplaceOrderRequest
+
+            kwargs: dict[str, Any] = {"qty": int(round(qty))}
+            if str(client_order_id or "").strip():
+                kwargs["client_order_id"] = str(client_order_id)
+            o = self._account_client().replace_order_by_id(
+                str(order_id), ReplaceOrderRequest(**kwargs)
+            )
+            return {
+                "ok": True,
+                "order_id": str(getattr(o, "id", "") or ""),
+                "status": str(getattr(getattr(o, "status", None), "value", "") or ""),
+                "replaced_order_id": str(order_id),
+                "new_qty": str(int(round(qty))),
+            }
+        except Exception as exc:
+            logger.warning(
+                "[alpaca_spot] order replace failed for %s: %s", order_id, exc
+            )
+            return {
+                "ok": False,
+                "error": str(exc),
+                "order_id": None,
+                "replaced_order_id": str(order_id),
+                **_submit_failure_metadata(exc),
+            }
+
     def place_protected_partial_oco(
         self,
         *,
