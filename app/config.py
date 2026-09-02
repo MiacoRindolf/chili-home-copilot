@@ -5042,6 +5042,42 @@ class Settings(BaseSettings):
     # PANALO sa halip na hayaang mag-crash — ito mismo ang hinihinging gawi.
     # Ang apat na "stop muna" ay mga pasok na deretsong bumaba (MFE ~0);
     # walang exit rule ang makapagliligtas doon at hindi ito nagpapanggap.
+    # ── STOP-VS-NOISE FLOOR (#1278) ──────────────────────────────────────────
+    #
+    # NASUKAT 2026-09-01 (forensics ng 4 talo): ang AUUD ay pumasok na may stop
+    # na 1.19 sentimo (1.07%) sa pangalang ang MEDIAN 30-SEGUNDONG high-low
+    # range ay 4.0 sentimo — ang stop ay 0.30x ng sariling ingay, 11/11 bucket
+    # ang lampas: NAKA-ISKEDYUL na exit. Pinalala ng risk-first sizing: ang
+    # masikip na stop ay BUMILI ng laki ($6.54 / $0.0119 = 551sh; sa 4c floor =
+    # ~163sh), kaya ang -6.54 na binalak ay naging -44.01. Ang LIDR#1 stop ay
+    # 1.2x ng ingay — na-stop sa 12.1s.
+    #
+    # MAY vol floor NA (effective_stop_atr_pct) pero ang pinagmumulan nito ay
+    # ang 15m expected-move frame — mabagal at BULAG sa pangalang 5 minuto pa
+    # lang ang kilalang tape (AUUD: pre-11:05 ay WALA sa tape). Ang floor na ito
+    # ay mula sa SARILING 30s tick buckets — mabilis at self-scaling.
+    #
+    # ⚠️ HINDI ITO REJECT-GATE, BY CONSTRUCTION: kapag ang stop ay masikip
+    # laban sa ingay, PINALAPAD ang stop sa floor at ang risk-first math na
+    # mismo ang nagpapaliit ng qty sa parehong dolyar na risk. Ang pinakamasamang
+    # epekto sa isang panalo ay mas malapad na stop + mas maliit na size. Ang
+    # kulang na tape (<6 nonempty bucket) ⇒ walang pagbabago (dating gawi).
+    chili_momentum_stop_noise_floor_enabled: bool = Field(
+        default=False,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_STOP_NOISE_FLOOR_ENABLED"),
+    )
+    # Median ng 30s high-low range sa 10 pinakabagong NONEMPTY bucket (>=2 print)
+    # sa loob ng lookback; nonempty = trading-time, kaya hindi nabubulok sa halt.
+    chili_momentum_stop_noise_floor_lookback_seconds: float = Field(
+        default=900.0,
+        ge=120.0,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_STOP_NOISE_FLOOR_LOOKBACK_SECONDS"),
+    )
+    chili_momentum_stop_noise_floor_min_buckets: int = Field(
+        default=6,
+        ge=3,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_STOP_NOISE_FLOOR_MIN_BUCKETS"),
+    )
     chili_momentum_burst_exit_enabled: bool = Field(
         default=True,
         validation_alias=AliasChoices("CHILI_MOMENTUM_BURST_EXIT_ENABLED"),

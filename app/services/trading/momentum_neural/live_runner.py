@@ -160,6 +160,7 @@ from .risk_policy import (
     equity_relative_notional_cap,
     liquidity_capped_notional,
     max_loss_circuit_decision,
+    stop_noise_floor_decision,
     policy_float_cap,
     policy_int_cap,
     adaptive_reentry_cooldown_seconds,
@@ -21174,6 +21175,60 @@ def backside_unbench_retrace_window(
     return True, dbg
 
 
+def _own_tape_noise_floor_pct(db, symbol: str, *, entry_price: float) -> tuple[float | None, int]:
+    """Median 30s high-low range ng SARILING tape, bilang fraction ng entry (#1278).
+
+    Bounded, symbol-first, replay-aware (ang `_utcnow_aware` ay sim-clock sa
+    replay v3, kaya pare-pareho ang basa sa prod at sa harness). Nagbabalik ng
+    ``(range_pct | None, qualifying_buckets)``; ang bucket ay kwalipikado kapag
+    may >=2 print (kailangan ng range) — trading-time ito, kaya ang halt gap ay
+    hindi bumubuo ng mga pekeng zero-range na bucket.
+    """
+    sym = (symbol or "").strip().upper()
+    if not sym or db is None or sym.endswith("-USD"):
+        return None, 0
+    try:
+        e = float(entry_price)
+        if not math.isfinite(e) or e <= 0:
+            return None, 0
+    except (TypeError, ValueError):
+        return None, 0
+    try:
+        look = float(getattr(
+            settings, "chili_momentum_stop_noise_floor_lookback_seconds", 900.0
+        ) or 900.0)
+        from sqlalchemy import text as _sql
+        from .optional_db_read import optional_fetchall
+
+        _ao = _utcnow_aware().replace(tzinfo=None)
+        rows = optional_fetchall(db, _sql(
+            "SELECT floor(EXTRACT(EPOCH FROM observed_at) / 30) AS b, "
+            "       max(price) - min(price) AS rng, count(*) AS n "
+            "FROM iqfeed_trade_ticks "
+            "WHERE symbol = :s "
+            "  AND observed_at > :as_of - make_interval(secs => :w) "
+            "  AND observed_at <= :as_of "
+            "GROUP BY 1 HAVING count(*) >= 2 ORDER BY 1 DESC LIMIT 10"
+        ), {"s": sym, "w": look, "as_of": _ao})
+    except Exception:
+        return None, 0
+    if not rows:
+        return None, 0
+    try:
+        ranges = sorted(
+            float(r[1]) for r in rows
+            if r[1] is not None and math.isfinite(float(r[1])) and float(r[1]) >= 0.0
+        )
+    except (TypeError, ValueError):
+        return None, 0
+    if not ranges:
+        return None, 0
+    med = ranges[len(ranges) // 2]
+    if med <= 0.0:
+        return None, len(ranges)
+    return med / e, len(ranges)
+
+
 def _live_tick_bbo(
     adapter: Any,
     product_id: str,
@@ -34691,6 +34746,43 @@ def tick_live_session(
             regime_atr_pct(_regime), _expected_move_bps,
             stop_atr_mult=_stop_atr_mult, vol_floor_mult=_stop_vol_floor_mult(),
         )
+        # #1278 — PANGALAWANG floor mula sa SARILING 30s tick noise. Ang vol
+        # floor sa itaas ay mula sa 15m expected-move frame — mabagal at BULAG
+        # sa pangalang bago pa lang sa tape (AUUD 09-01: 5 min lang ang kilala,
+        # stop 1.19c = 0.30x ng median 30s range na 4.0c, 551sh via risk-first,
+        # -44.01 sa binalak na -6.54). Ang floor ay nagpapalapad LANG ng stop
+        # (liliit ang qty sa risk-first) — hindi kailanman humaharang ng entry.
+        # Ito ang parehong _eff_atr_pct na pinagmumulan ng SIZING at ng
+        # inilalagay na stop, kaya magkasama silang gumagalaw.
+        if bool(getattr(settings, "chili_momentum_stop_noise_floor_enabled", False)):
+            try:
+                _nf_pct, _nf_buckets = _own_tape_noise_floor_pct(
+                    db, sess.symbol, entry_price=guarded_ask,
+                )
+                _eff_atr_pct, _nf_meta = stop_noise_floor_decision(
+                    atr_pct=_eff_atr_pct,
+                    stop_atr_mult=_stop_atr_mult,
+                    noise_range_pct=_nf_pct,
+                    buckets_used=_nf_buckets,
+                    min_buckets=int(getattr(
+                        settings, "chili_momentum_stop_noise_floor_min_buckets", 6
+                    ) or 6),
+                )
+                if _nf_meta.get("applied"):
+                    le["entry_stop_noise_floor"] = _nf_meta
+                    _emit(db, sess, "live_entry_stop_noise_floored", _nf_meta)
+                    _log.info(
+                        "[momentum_live] stop-noise floor %s: stop %.4f%% -> %.4f%% "
+                        "(median 30s range %.4f%%, %s buckets) — lalapad ang stop, "
+                        "liliit ang qty sa risk-first",
+                        sess.symbol,
+                        _nf_meta.get("stop_pct_before", 0.0) * 100,
+                        _nf_meta.get("stop_pct_after", 0.0) * 100,
+                        _nf_meta.get("noise_range_pct", 0.0) * 100,
+                        _nf_meta.get("buckets_used"),
+                    )
+            except Exception:
+                _log.debug("[momentum_live] stop noise floor failed", exc_info=True)
         # Ross structural stop: if the pullback-break captured a pullback low, stop
         # just UNDER that structure instead of a noise-tight ATR — but never TIGHTER
         # than the vol floor (shake-out guard). Risk-first sizing then trims qty
