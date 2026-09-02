@@ -752,8 +752,17 @@ def build_equity_universe(
             or _snap_box.get("error")
             or not _snap_box.get("value")
         ):
-            logger.debug(
-                "[universe] snapshot fetch slow/failed; fail-open to []",
+            # WARNING, not DEBUG (2026-09-02). app/main.py:8-9 pins the root
+            # logger at INFO, so this branch was unreachable in the record: a
+            # scan of all 3,603,800 lines of the lane log found 0 occurrences of
+            # "fail-open to []". The fail-open contract stays exactly as it was;
+            # only its visibility changes.
+            logger.warning(
+                "[universe] snapshot fetch slow/failed; fail-open to [] "
+                "(alive=%s error=%s) — the CALLER must not treat this as a "
+                "quiet market",
+                _fetch_thread.is_alive(),
+                bool(_snap_box.get("error")),
                 exc_info=bool(_snap_box.get("error")),
             )
             return []

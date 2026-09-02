@@ -3327,6 +3327,24 @@ class Settings(BaseSettings):
         validation_alias=AliasChoices("CHILI_MOMENTUM_UNIVERSE_HARD_CEILING"),
         description="DB-safety backstop for the uncapped universe — the absolute max number of screen-passers surfaced per build (so a runaway snapshot can't flood viability). This is NOT a quality cap (the adaptive screen does the real selection); it exists only to bound the row count. Only consulted when chili_momentum_universe_uncapped_enabled is on.",
     )
+    # UNIVERSE FAIL-OPEN TO ZERO (2026-09-02). KILL switch, not an enable
+    # switch: default True because installing an empty watch set on a provider
+    # outage is the defect. =0 restores the prior behaviour (the empty list
+    # becomes the watch set immediately).
+    chili_momentum_universe_retain_on_provider_failure_enabled: bool = Field(
+        default=True,
+        validation_alias=AliasChoices(
+            "CHILI_MOMENTUM_UNIVERSE_RETAIN_ON_PROVIDER_FAILURE_ENABLED"
+        ),
+        description=(
+            "When the full-market snapshot fails or returns an empty body, keep the "
+            "previously screened ignition watch set (bounded to 300s) instead of "
+            "installing an empty one, and log the degraded outcome distinctly from a "
+            "legitimately empty screen. Measured 2026-08-28: 705 empty snapshot bodies "
+            "across two ~15-minute windows, with no line, metric or row recording that "
+            "the lane was watching nothing. 0 = prior behaviour."
+        ),
+    )
     chili_momentum_ws_ignition_enabled: bool = Field(
         default=True,
         validation_alias=AliasChoices("CHILI_MOMENTUM_WS_IGNITION_ENABLED"),

@@ -67,6 +67,36 @@ _log = logging.getLogger(__name__)
 # the scheduled batch + the auto-arm refresh keep it warm thereafter).
 _UNIVERSE_REFRESH_S = 20.0
 _SCORE_COOLDOWN_S = 20.0
+
+# ── UNIVERSE FAIL-OPEN TO ZERO (2026-09-02) ─────────────────────────────────
+# `build_equity_universe` documents a fail-open contract: "any error / empty
+# snapshot -> [] so the caller falls back to its default universe (no
+# regression)". `trading_scheduler` honours it (`scan_tickers = merged or None`).
+# This module did NOT: it installed the empty list AS the watch set, so a
+# provider outage silently converted the screen into one that watches nothing
+# while still logging normally. Measured on 2026-08-28: the Massive full-market
+# snapshot returned an empty body 705 times across two windows,
+# 16:07:17-16:22:13 PT and 20:46:43-21:01:16 PT. Both landed after the RTH
+# close, so nothing tradable was lost — but the path is live, not theoretical,
+# and nothing in the log, the code, or the DB distinguished it from a quiet
+# market (`trading_universe_snapshots` holds 0 rows; the two failure branches
+# below logged at DEBUG under a root logger pinned to INFO in app/main.py:8-9).
+#
+# The retention below is deliberately BOUNDED. A stale watch set is better than
+# an empty one for a few minutes and worse than one after many, so the outage
+# is ridden out and then surrendered — loudly, in both directions.
+_UNIVERSE_RETAIN_MAX_S = 300.0
+
+# Refresh outcomes. Only `ok` and `screen_empty` are the screen speaking; the
+# other three are the provider failing, and the two must never look alike.
+_UNIVERSE_OK = "ok"
+_UNIVERSE_SCREEN_EMPTY = "screen_empty"
+_UNIVERSE_SNAPSHOT_EMPTY = "snapshot_empty"
+_UNIVERSE_SNAPSHOT_ERROR = "snapshot_error"
+_UNIVERSE_BUILD_ERROR = "build_error"
+_UNIVERSE_DEGRADED = frozenset(
+    {_UNIVERSE_SNAPSHOT_EMPTY, _UNIVERSE_SNAPSHOT_ERROR, _UNIVERSE_BUILD_ERROR}
+)
 # Ang session-threshold inventory ay mas maliit (iilang row) at mas time-critical
 # kaysa sa universe screen: ang na-ratchet na trail stop o kaka-armang session ay
 # hindi dapat maging bulag sa bridge nang 20s. Hiwalay na mabilis na cadence.
@@ -117,9 +147,27 @@ class _UniverseTracker:
         # loob ng window at ang pinakamataas na %rise kada pangalan.
         self._price_history: list[tuple[float, dict[str, float]]] = []
         self._velocity: dict[str, float] = {}
+        # UNIVERSE FAIL-OPEN TO ZERO: the last refresh's outcome + the retention
+        # clock, so an empty watch set is never confused with a quiet market.
+        self._last_outcome: str = _UNIVERSE_OK
+        self._last_screened_size: int = 0
+        self._retaining_since: float | None = None
+
+    def last_outcome(self) -> str:
+        """Outcome of the most recent refresh (see the `_UNIVERSE_*` constants)."""
+        with self._lock:
+            return self._last_outcome
 
     def refresh(self) -> set[str]:
-        """Re-screen the universe; return the CURRENT watch set (uppercased)."""
+        """Re-screen the universe; return the CURRENT watch set (uppercased).
+
+        A degraded provider must NOT be able to empty the watch set silently. The
+        outcome is classified, an empty result from a degraded provider retains
+        the previous set for up to ``_UNIVERSE_RETAIN_MAX_S``, and every state
+        change is logged at WARNING/INFO with a DISTINCT line — an empty screen
+        on a healthy snapshot reads differently from a provider outage.
+        """
+        outcome = _UNIVERSE_OK
         snapshot = None
         try:
             from ...massive_client import get_full_market_snapshot
@@ -128,15 +176,27 @@ class _UniverseTracker:
                 max_age_seconds=self._profile.snapshot_max_age_seconds
             ) or []
         except Exception:
-            _log.debug("[momentum_ws_ignition] snapshot fetch failed", exc_info=True)
+            # Was `_log.debug`, which app/main.py:8-9 (root logger pinned to
+            # INFO) discards outright: a full-file scan of the 3.6M-line lane log
+            # found 0 occurrences of this message, ever.
+            _log.warning("[momentum_ws_ignition] snapshot fetch failed", exc_info=True)
             snapshot = []
+            outcome = _UNIVERSE_SNAPSHOT_ERROR
+        if outcome == _UNIVERSE_OK and not snapshot:
+            outcome = _UNIVERSE_SNAPSHOT_EMPTY
 
         try:
             universe = build_equity_universe(self._profile, snapshot=snapshot or None)
         except Exception:
-            _log.debug("[momentum_ws_ignition] universe build failed", exc_info=True)
+            _log.warning("[momentum_ws_ignition] universe build failed", exc_info=True)
             universe = []
+            outcome = _UNIVERSE_BUILD_ERROR
         want = {str(s).strip().upper() for s in universe if str(s or "").strip()}
+        if not want and outcome == _UNIVERSE_OK:
+            # Healthy snapshot, nothing cleared the bands. This is the screen
+            # speaking, and it is legitimate (03:52 ET, before the premarket
+            # session, produced exactly this on 08-18/08-19/08-20/08-22).
+            outcome = _UNIVERSE_SCREEN_EMPTY
 
         # ── VELOCITY INTAKE (2026-08-28): day-change-independent na admission ──
         # Monotonic OR-leg: NAKAKADAGDAG lamang sa `want`, hindi nakakabawas, kaya
@@ -291,7 +351,57 @@ class _UniverseTracker:
             except Exception:
                 continue
 
+        screened_size = len(want)
+        now_mono = time.monotonic()
         with self._lock:
+            prev_symbols = set(self._symbols)
+            retain = (
+                not want
+                and outcome in _UNIVERSE_DEGRADED
+                and bool(prev_symbols)
+                and bool(getattr(
+                    settings,
+                    "chili_momentum_universe_retain_on_provider_failure_enabled",
+                    True,
+                ))
+            )
+            if retain:
+                if self._retaining_since is None:
+                    self._retaining_since = now_mono
+                held_for = now_mono - self._retaining_since
+                if held_for > _UNIVERSE_RETAIN_MAX_S:
+                    retain = False
+            else:
+                held_for = 0.0
+
+            if retain:
+                # Keep the whole cached screen — symbols AND their baselines — so
+                # the retained names still score correctly while the provider is
+                # down. Nothing else in this method touched `self`.
+                self._last_outcome = outcome
+                self._last_screened_size = screened_size
+                _log.warning(
+                    "[momentum_ws_ignition] universe RETAINED — provider degraded "
+                    "(outcome=%s), screen returned 0; holding %d cached symbols "
+                    "for %.0fs (max %.0fs). THIS IS NOT A QUIET MARKET.",
+                    outcome, len(prev_symbols), held_for, _UNIVERSE_RETAIN_MAX_S,
+                )
+                return set(prev_symbols)
+
+            if (
+                not want
+                and outcome in _UNIVERSE_DEGRADED
+                and self._retaining_since is not None
+            ):
+                _log.warning(
+                    "[momentum_ws_ignition] universe SURRENDERED to empty — "
+                    "provider degraded (outcome=%s) for %.0fs, past the %.0fs "
+                    "retention bound; the lane is now watching NOTHING.",
+                    outcome, now_mono - self._retaining_since, _UNIVERSE_RETAIN_MAX_S,
+                )
+            self._retaining_since = None
+            self._last_outcome = outcome
+            self._last_screened_size = screened_size
             self._symbols = want
             self._baseline = baseline
             self._open_baseline = open_baseline
@@ -881,9 +991,11 @@ class IgnitionScoringLoop:
         )
         self._refresher.start()
         _log.info(
-            "[momentum_ws_ignition] started — %d universe symbols watched (floor=%.2f%%)",
+            "[momentum_ws_ignition] started — %d universe symbols watched "
+            "(floor=%.2f%%, outcome=%s)",
             self._tracker.count(),
             float(getattr(settings, "chili_momentum_ignition_min_pct", 3.0)),
+            self._tracker.last_outcome(),
         )
 
     def stop(self) -> None:
@@ -974,6 +1086,17 @@ class IgnitionScoringLoop:
         # time-critical ang freshness ng ratcheted stop / bagong armado), universe
         # kada ~20s (mabigat na full-market snapshot — di binago ang ritmo).
         _last_universe = time.monotonic()
+        # UNIVERSE TELEMETRY (2026-09-02). The only universe-size line this
+        # module ever emitted was the one-shot at start(): over the 11 sessions
+        # 2026-08-19..09-02 the lane performed ~23,990 rebuilds and logged 74 of
+        # them (0.31%), all at process start. Nothing sampled the watch set
+        # mid-session and nothing persisted it, so an empty universe was not
+        # distinguishable from a quiet market ANYWHERE. Log on CHANGE only (size
+        # delta or a non-ok outcome) so a steady state stays silent instead of
+        # adding 4,320 lines/day.
+        _last_logged_size: int | None = None
+        _last_logged_outcome: str | None = None
+        _consecutive_failures = 0
         while self._running:
             time.sleep(_SESSION_REFRESH_S)
             if not self._running:
@@ -983,9 +1106,34 @@ class IgnitionScoringLoop:
                 if time.monotonic() - _last_universe >= _UNIVERSE_REFRESH_S:
                     _last_universe = time.monotonic()
                     self._tracker.refresh()
+                    _size = self._tracker.count()
+                    _outcome = self._tracker.last_outcome()
+                    if _size != _last_logged_size or _outcome != _last_logged_outcome:
+                        _log.log(
+                            logging.INFO if _outcome == _UNIVERSE_OK else logging.WARNING,
+                            "[momentum_ws_ignition] universe %d symbols "
+                            "(was %s, outcome=%s)",
+                            _size,
+                            "n/a" if _last_logged_size is None else _last_logged_size,
+                            _outcome,
+                        )
+                        _last_logged_size = _size
+                        _last_logged_outcome = _outcome
                 self._sync_subscriptions()
+                _consecutive_failures = 0
             except Exception:
-                pass
+                # Was a bare `except Exception: pass`. That is the THIRD silent
+                # state: when refresh() raises, the watch set FREEZES at its last
+                # value and the lane watches a stale universe forever with no
+                # trace at any log level. Distinct from empty, equally unreported.
+                _consecutive_failures += 1
+                _log.warning(
+                    "[momentum_ws_ignition] refresh loop iteration failed "
+                    "(consecutive=%d) — watch set is FROZEN at %d symbols",
+                    _consecutive_failures,
+                    self._tracker.count(),
+                    exc_info=True,
+                )
 
     # ── tick handler (runs on the WS receive thread — keep it cheap) ─────────
 
