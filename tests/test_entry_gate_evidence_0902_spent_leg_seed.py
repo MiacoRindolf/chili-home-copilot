@@ -50,16 +50,23 @@ from app.services.trading.momentum_neural.risk_policy import (
 )
 
 UTC = timezone.utc
+_UNSET = object()
 DAY = "2026-09-02"
 # 07:10 ET on 2026-09-02 (the CANF#1 entry instant)
 NOW = datetime(2026, 9, 2, 11, 10, 0, tzinfo=UTC)
 
 
 def _decide(*, hod, age_min, px, now=NOW, hod_date=DAY, sess_date=DAY,
-            frame_age_s=0.0, coverage_gap_s=None, interval_s=60.0, **kw):
+            frame_age_s=0.0, coverage_gap_s=None, interval_s=60.0,
+            session_start=_UNSET, observed_since=_UNSET, observed_ticks=100, **kw):
+    """Predicate fixture. COLD-START GUARD (A/B 2026-09-02): unless a case is
+    ABOUT that guard, the session is stated as having opened 1 min before the
+    HOD's bar END and to have been ticking for 10 min — i.e. this is a HOD the
+    session watched print, which is what every named fixture below assumes."""
+    _hod_ts = (now or NOW) - timedelta(minutes=age_min)
     return spent_leg_seed_decision(
         cur_hod=hod,
-        hod_ts=(now or NOW) - timedelta(minutes=age_min),
+        hod_ts=_hod_ts,
         hod_date_et=hod_date,
         live_px=px,
         now_utc=now,
@@ -67,6 +74,13 @@ def _decide(*, hod, age_min, px, now=NOW, hod_date=DAY, sess_date=DAY,
         frame_age_s=frame_age_s,
         coverage_gap_s=coverage_gap_s,
         interval_s=interval_s,
+        session_start_utc=(
+            _hod_ts - timedelta(minutes=1) if session_start is _UNSET else session_start
+        ),
+        observed_since_utc=(
+            (now or NOW) - timedelta(minutes=10) if observed_since is _UNSET else observed_since
+        ),
+        observed_ticks=observed_ticks,
         **kw,
     )
 
@@ -165,6 +179,8 @@ def test_iso_string_and_naive_clocks_are_read_as_utc():
         cur_hod=4.93, hod_ts=hod_ts_iso, hod_date_et=DAY, live_px=4.34,
         now_utc=NOW.replace(tzinfo=None), session_date_et=DAY,
         frame_age_s=0.0, coverage_gap_s=0.0, interval_s=60.0,
+        session_start_utc=(NOW - timedelta(minutes=20)).replace(tzinfo=None).isoformat(),
+        observed_since_utc=NOW - timedelta(minutes=10), observed_ticks=100,
     )
     assert seed is True and abs(dbg["hod_age_min"] - 8.0) < 1e-6
 
@@ -200,6 +216,7 @@ def test_aware_frame_and_aware_now_give_finite_age():
         cur_hod=dbg["frame_hod"], hod_ts=dbg["hod_bar_end_ts"], hod_date_et=dbg["hod_bar_date_et"],
         live_px=4.34, now_utc=now, session_date_et=DAY,
         frame_age_s=dbg["frame_age_s"], coverage_gap_s=None, interval_s=dbg["interval_s"],
+        session_start_utc=df.index[0], observed_since_utc=df.index[0], observed_ticks=100,
     )
     assert seed is True and np.isfinite(sdbg["hod_age_min"])
     # the bench debug carries the same fields (the live runner's source)
@@ -264,10 +281,17 @@ def _replay(rows):
         h, m = (int(x) for x in et_time.split(":"))
         now = datetime.fromisoformat(f"{day}T{h:02d}:{m:02d}:00-04:00").astimezone(UTC)
         age_bar_end = max(0.0, float(age) - 1.0)
+        _hod_end = now - timedelta(minutes=age_bar_end)
         seed, dbg = spent_leg_seed_decision(
-            cur_hod=hod, hod_ts=now - timedelta(minutes=age_bar_end), hod_date_et=day,
+            cur_hod=hod, hod_ts=_hod_end, hod_date_et=day,
             live_px=entry, now_utc=now, session_date_et=day,
             frame_age_s=0.0, coverage_gap_s=0.0, interval_s=60.0,
+            # the corpus is a FILL-INSTANT read: every one of these fills happened
+            # on a name CHILI was already watching, so the cold-start guard's two
+            # conjuncts (HOD bar END inside the window, session warm) hold by
+            # construction. The guard is measured on its own fixtures below.
+            session_start_utc=_hod_end - timedelta(minutes=1),
+            observed_since_utc=now - timedelta(minutes=10), observed_ticks=100,
         )
         key = f"{sym}@{day} {et_time}"
         (seeded if seed else not_seeded).append((key, pnl, dbg["reason"]))
@@ -369,15 +393,49 @@ def test_cleared_level_0_is_no_escalation():
 T0 = datetime(2026, 9, 2, 11, 0, 0, tzinfo=UTC)  # 07:00 ET
 
 
+def _warm(le, *, now, session_date_et, warm_s=600.0):
+    """State a session that has ALREADY been observing priced ticks for 10 min
+    (cold-start guard, A/B 2026-09-02). Only installed when the ledger has no
+    tick-hod run for TODAY, so an explicitly-built coverage run is never
+    overwritten. px is 0.01 so it can never be the effective top. On later
+    calls it only keeps the run CONTINUOUS across the fixture's deliberately
+    sparse ticks (a real runner ticks every loop pass; a fixture that jumps 20
+    minutes would otherwise book a coverage break and go cold again)."""
+    th = le.get("spent_leg_tick_hod")
+    if isinstance(th, dict) and str(th.get("session_date_et") or "") == session_date_et:
+        th["last_tick_ts"] = (now - timedelta(seconds=1)).isoformat()
+        return
+    start = now - timedelta(seconds=warm_s)
+    le["spent_leg_tick_hod"] = {
+        "px": 0.01, "ts": start.isoformat(), "first_tick_ts": start.isoformat(),
+        "last_tick_ts": (now - timedelta(seconds=1)).isoformat(),
+        "coverage_breaks": 0, "run_ticks": 100, "session_date_et": session_date_et,
+    }
+
+
 def _tick(le, *, px, now, frame_hod, hod_end, frame_last_end=None, frame_age_s=0.0,
-          enabled=True, symbol="CANF", session_date_et=DAY, hod_date_et=DAY):
+          enabled=True, symbol="CANF", session_date_et=DAY, hod_date_et=DAY,
+          warm=True, session_start=_UNSET, min_uptime_s=60.0, min_ticks=1,
+          clear_dd=3.5, dwell_s=20.0):
+    """SHIPPED defaults: hysteresis (arm 5%, clear 3.5%, 20 s dwell) and the
+    cold-start floors (60 s uptime, 1 tick). ``warm=False`` opts a case out of
+    the pre-observed session so it can measure the cold start itself."""
+    if warm:
+        _warm(le, now=now, session_date_et=session_date_et)
     return apply_spent_leg_tick(
         le, symbol=symbol, enabled=enabled, px=px, tick_ts=now, now_utc=now,
         session_date_et=session_date_et,
         frame_hod=frame_hod, frame_hod_ts=hod_end, frame_hod_date_et=hod_date_et,
         frame_last_bar_end_ts=(frame_last_end if frame_last_end is not None else now),
         frame_age_s=frame_age_s, interval_s=60.0,
+        session_start_utc=(
+            ((hod_end - timedelta(minutes=1)) if hod_end is not None
+             else now - timedelta(hours=1))
+            if session_start is _UNSET else session_start
+        ),
         min_age_min=5.0, min_dd_pct=5.0, max_frame_age_s=120.0,
+        min_session_uptime_s=min_uptime_s, min_observed_ticks=min_ticks,
+        clear_dd_pct=clear_dd, clear_min_dwell_s=dwell_s,
     )
 
 
@@ -548,22 +606,38 @@ def test_session_rollover_unwinds_the_orphaned_level():
     assert acts[0][1]["clear_reason"] == "session_rollover" and up["g4_reentry_escalation"] == 2
 
 
-def test_rkto_shape_shallowed_clear_admits_the_fill():
-    """Review M8 (blocker): RKTO 07-09 — HOD 1.06 @ 08:25, 08:31 close 0.986
-    (6.98% under, 6 min after the bar END) then the +74.52 fill at 1.02 (3.77%
-    under) with NO re-take in between. The fill-instant predicate (the corpus)
-    says FREE; a marker that only cleared on a re-take said BLOCKED. Live: seed
-    at the dip, CLEAR when the pullback shallows under P% (same tick, before
-    the g4 block reads the marker) -> the fill is admitted at level 0."""
+def test_rkto_shape_hysteresis_now_holds_the_fill_the_corpus_calls_free():
+    """MEASURED COST of CHANGE 2, stated not hidden. RKTO 07-09 — HOD 1.06 @
+    08:25, 08:31 close 0.986 (6.98% under) then the +74.52 fill at 1.02 (3.77%
+    under) with NO re-take between. At the PR's original single 5% line that
+    fill cleared the WAIT (review M8); at the shipped 3.5% clear band 3.77% is
+    INSIDE the dead band, so the marker holds and the fill is blocked. LHAI
+    07-08 (+48.07, 3.70% under) is the same shape. Setting
+    chili_momentum_g4_spent_leg_clear_drawdown_pct = 5.0 restores the exact
+    fill-instant equality — the rest of this test pins that."""
     hod_end = datetime(2026, 7, 9, 12, 26, 0, tzinfo=UTC)  # 08:25 ET bar END
+    le0: dict = {}
+    _apply(le0, _tick(le0, px=0.986, now=hod_end + timedelta(minutes=6), frame_hod=1.06,
+                      hod_end=hod_end, session_date_et="2026-07-09",
+                      hod_date_et="2026-07-09")[0])
+    _u, acts = _tick(le0, px=1.02, now=hod_end + timedelta(minutes=15), frame_hod=1.06,
+                     hod_end=hod_end, session_date_et="2026-07-09", hod_date_et="2026-07-09")
+    assert acts == []  # 3.77% > the 3.5% clear band: still seeded (the cost)
+    assert le0["g4_spent_leg"]["active"] is True
+    # LHAI's 3.70% is held too
+    _u, acts = _tick(le0, px=1.0208, now=hod_end + timedelta(minutes=16), frame_hod=1.06,
+                     hod_end=hod_end, session_date_et="2026-07-09", hod_date_et="2026-07-09")
+    assert acts == []
+    # ── with the hysteresis turned off (clear_dd = min_dd) the M8 behaviour is exact ──
+    _rk = dict(clear_dd=5.0, session_date_et="2026-07-09", hod_date_et="2026-07-09")
     le: dict = {}
     up, acts = _tick(le, px=0.986, now=hod_end + timedelta(minutes=6), frame_hod=1.06,
-                     hod_end=hod_end, session_date_et="2026-07-09", hod_date_et="2026-07-09")
+                     hod_end=hod_end, **_rk)
     _apply(le, up)
     assert _events(acts) == ["g4_spent_leg_seed"] and le["g4_reentry_escalation"] == 1
     # 08:41 ET: 1.02 = 3.77% under -> shallowed clear, key deleted, top NOT retired
     up, acts = _tick(le, px=1.02, now=hod_end + timedelta(minutes=15), frame_hod=1.06,
-                     hod_end=hod_end, session_date_et="2026-07-09", hod_date_et="2026-07-09")
+                     hod_end=hod_end, **_rk)
     assert _events(acts) == ["g4_spent_leg_cleared"]
     p = acts[0][1]
     assert p["clear_reason"] == "shallowed" and p["retopped"] is False
@@ -593,17 +667,77 @@ def test_rkto_shape_shallowed_clear_admits_the_fill():
     assert acts == []
 
 
-def test_shallow_threshold_is_the_seed_threshold():
-    """The clear fires exactly where the seed predicate stops holding (dd < P%)."""
+def test_shallow_clear_uses_the_lower_hysteresis_band():
+    """CHANGE 2 (A/B verdict 2026-09-02). The marker ARMS at dd >= 5% but the
+    'shallowed' clear now fires only under the SEPARATE 3.5% band, so price
+    oscillating across the arm line no longer re-arms/disarms every tick (36 of
+    36 A/B clears were 'shallowed'; CANF produced 7 seed/clear pairs inside
+    ~2 sim minutes). Setting clear_dd == min_dd restores the old equality."""
     le: dict = {}
     _apply(le, _tick(le, px=94.0, now=T0 + timedelta(minutes=10), frame_hod=100.0,
                      hod_end=T0 + timedelta(minutes=3))[0])
-    _u, acts = _tick(le, px=95.0, now=T0 + timedelta(minutes=11), frame_hod=100.0,
-                     hod_end=T0 + timedelta(minutes=3))
-    assert acts == []  # exactly 5% under: still a spent leg (seed holds at the floor)
-    _u, acts = _tick(le, px=95.01, now=T0 + timedelta(minutes=12), frame_hod=100.0,
-                     hod_end=T0 + timedelta(minutes=3))
-    assert _events(acts) == ["g4_spent_leg_cleared"] and acts[0][1]["clear_reason"] == "shallowed"
+    for px in (95.0, 95.01, 96.4, 96.5):  # 5.00 / 4.99 / 3.60 / 3.50 % under
+        _u, acts = _tick(le, px=px, now=T0 + timedelta(minutes=12), frame_hod=100.0,
+                         hod_end=T0 + timedelta(minutes=3))
+        assert acts == [], (px, acts)  # inside the dead band: the WAIT holds
+    _u, acts = _tick(le, px=96.51, now=T0 + timedelta(minutes=13), frame_hod=100.0,
+                     hod_end=T0 + timedelta(minutes=3))  # 3.49% under
+    assert _events(acts) == ["g4_spent_leg_cleared"]
+    assert acts[0][1]["clear_reason"] == "shallowed" and acts[0][1]["clear_dd_pct"] == 3.5
+    # no hysteresis (clear_dd == min_dd) is the PR's original fill-instant rule
+    le2: dict = {}
+    _apply(le2, _tick(le2, px=94.0, now=T0 + timedelta(minutes=10), frame_hod=100.0,
+                      hod_end=T0 + timedelta(minutes=3), clear_dd=5.0)[0])
+    _u, acts = _tick(le2, px=95.01, now=T0 + timedelta(minutes=12), frame_hod=100.0,
+                     hod_end=T0 + timedelta(minutes=3), clear_dd=5.0)
+    assert _events(acts) == ["g4_spent_leg_cleared"]
+    # a clear band ABOVE the arm band is clamped: it must never clear the tick it armed
+    le3: dict = {}
+    up, acts = _tick(le3, px=94.0, now=T0 + timedelta(minutes=10), frame_hod=100.0,
+                     hod_end=T0 + timedelta(minutes=3), clear_dd=9.0)
+    _apply(le3, up)
+    assert _events(acts) == ["g4_spent_leg_seed"]
+    _u, acts = _tick(le3, px=94.0, now=T0 + timedelta(minutes=11), frame_hod=100.0,
+                     hod_end=T0 + timedelta(minutes=3), clear_dd=9.0)
+    assert acts == []
+
+
+def test_shallowed_clear_waits_out_the_dwell_but_retop_and_kill_never_do():
+    """CHANGE 2, second half: 15 of the A/B's 36 clears fired with
+    minutes_waited 0.017-0.06 (under 4 s). A 'shallowed' clear may not fire
+    before ``clear_min_dwell_s``; hit_top / retop / disabled / session_rollover
+    are NEVER delayed — a re-take and the kill switch must be instant."""
+    le: dict = {}
+    _apply(le, _tick(le, px=94.0, now=T0 + timedelta(minutes=10), frame_hod=100.0,
+                     hod_end=T0 + timedelta(minutes=3))[0])
+    _u, acts = _tick(le, px=97.0, now=T0 + timedelta(minutes=10, seconds=4),
+                     frame_hod=100.0, hod_end=T0 + timedelta(minutes=3))
+    assert acts == []  # 3.0% under (past the band) but only 4 s seeded
+    _u, acts = _tick(le, px=97.0, now=T0 + timedelta(minutes=10, seconds=20),
+                     frame_hod=100.0, hod_end=T0 + timedelta(minutes=3))
+    assert _events(acts) == ["g4_spent_leg_cleared"]
+    assert acts[0][1]["clear_reason"] == "shallowed" and acts[0][1]["clear_min_dwell_s"] == 20.0
+    # a re-take 1 s after the seed clears IMMEDIATELY
+    le2: dict = {}
+    _apply(le2, _tick(le2, px=94.0, now=T0 + timedelta(minutes=10), frame_hod=100.0,
+                      hod_end=T0 + timedelta(minutes=3))[0])
+    _u, acts = _tick(le2, px=100.0, now=T0 + timedelta(minutes=10, seconds=1),
+                     frame_hod=100.0, hod_end=T0 + timedelta(minutes=3))
+    assert _events(acts) == ["g4_spent_leg_cleared"] and acts[0][1]["clear_reason"] == "hit_top"
+    # ...and so does the KILL (flag OFF), still deep under the top
+    le3: dict = {}
+    _apply(le3, _tick(le3, px=94.0, now=T0 + timedelta(minutes=10), frame_hod=100.0,
+                      hod_end=T0 + timedelta(minutes=3))[0])
+    _u, acts = _tick(le3, px=94.0, now=T0 + timedelta(minutes=10, seconds=1),
+                     frame_hod=100.0, hod_end=T0 + timedelta(minutes=3), enabled=False)
+    assert _events(acts) == ["g4_spent_leg_cleared"] and acts[0][1]["clear_reason"] == "disabled"
+    # a retop 1 s after the seed also clears immediately
+    le4: dict = {}
+    _apply(le4, _tick(le4, px=94.0, now=T0 + timedelta(minutes=10), frame_hod=100.0,
+                      hod_end=T0 + timedelta(minutes=3))[0])
+    _u, acts = _tick(le4, px=97.0, now=T0 + timedelta(minutes=10, seconds=1),
+                     frame_hod=101.0, hod_end=T0 + timedelta(minutes=9))
+    assert acts[0][1]["clear_reason"] == "retop"
 
 
 def test_seed_level_delta_is_zero_when_a_real_loss_level_exists():
@@ -678,14 +812,14 @@ def test_stale_frame_is_bridged_only_by_tick_coverage():
     # first tick arrives with a frame whose last bar ended 10 min ago: stale, no coverage yet
     _u, acts = _tick(le, px=4.34, now=T0 + timedelta(minutes=20), frame_hod=4.9297,
                      hod_end=T0 + timedelta(minutes=3), frame_last_end=T0 + timedelta(minutes=10),
-                     frame_age_s=600.0)
+                     frame_age_s=600.0, warm=False)
     _apply(le, _u)
     assert acts == []
     # same stale frame, but the session's first tick was at 11:20 (10 min after the last bar):
     # gap 600 s > 120 s -> still stale
     _u, acts = _tick(le, px=4.34, now=T0 + timedelta(minutes=25), frame_hod=4.9297,
                      hod_end=T0 + timedelta(minutes=3), frame_last_end=T0 + timedelta(minutes=10),
-                     frame_age_s=900.0)
+                     frame_age_s=900.0, warm=False)
     assert acts == []
     # a session that has ticked since BEFORE the frame's last bar bridges it
     le2 = {"spent_leg_tick_hod": {"px": 4.50, "ts": (T0 + timedelta(minutes=5)).isoformat(),
@@ -693,7 +827,7 @@ def test_stale_frame_is_bridged_only_by_tick_coverage():
                                   "session_date_et": DAY}}
     _u, acts = _tick(le2, px=4.34, now=T0 + timedelta(minutes=25), frame_hod=4.9297,
                      hod_end=T0 + timedelta(minutes=3), frame_last_end=T0 + timedelta(minutes=10),
-                     frame_age_s=900.0)
+                     frame_age_s=900.0, warm=False)
     assert _events(acts) == ["g4_spent_leg_seed"]
     assert acts[0][1]["coverage_gap_s"] == 0.0 and acts[0][1]["frame_age_s"] == 900.0
 
@@ -707,11 +841,12 @@ def test_coverage_run_restarts_after_a_hole():
     hole is counted; once the run is continuous again the frame is bridged."""
     le: dict = {}
     stale = dict(frame_hod=4.9297, hod_end=T0 + timedelta(minutes=3),
-                 frame_last_end=T0 + timedelta(minutes=10), frame_age_s=900.0)
+                 frame_last_end=T0 + timedelta(minutes=10), frame_age_s=900.0,
+                 warm=False)
     # first priced tick at 11:05 (before the frame's last bar) — the run starts
     _u, acts = _tick(le, px=4.50, now=T0 + timedelta(minutes=5), frame_hod=4.9297,
                      hod_end=T0 + timedelta(minutes=3), frame_last_end=T0 + timedelta(minutes=6),
-                     frame_age_s=0.0)
+                     frame_age_s=0.0, warm=False)
     _apply(le, _u)
     assert acts == [] and le["spent_leg_tick_hod"]["coverage_breaks"] == 0
     # 20 min hole, then a tick at 11:25 against the stale frame: the run RESTARTS at 11:25
@@ -731,7 +866,8 @@ def test_coverage_run_restarts_after_a_hole():
     for k in range(5, 26):
         _u, acts = _tick(le2, px=4.50 if k < 20 else 4.34, now=T0 + timedelta(minutes=k),
                          frame_hod=4.9297, hod_end=T0 + timedelta(minutes=3),
-                         frame_last_end=T0 + timedelta(minutes=10), frame_age_s=max(0.0, (k - 10) * 60.0))
+                         frame_last_end=T0 + timedelta(minutes=10),
+                         frame_age_s=max(0.0, (k - 10) * 60.0), warm=False)
         _apply(le2, _u)
         if acts:
             break
@@ -750,7 +886,7 @@ def test_le_is_not_mutated_by_the_pure_rule():
     le: dict = {"g4_reentry_escalation": 0}
     snapshot = dict(le)
     _tick(le, px=4.34, now=T0 + timedelta(minutes=10), frame_hod=4.9297,
-          hod_end=T0 + timedelta(minutes=3))
+          hod_end=T0 + timedelta(minutes=3), warm=False)
     assert le == snapshot
 
 
@@ -952,6 +1088,227 @@ def test_shelf_candidate_record_is_et_day_scoped_and_emits_before_the_flag():
     assert "'session_date_et'" in ast.unparse(site.args[3])
 
 
+# ── CHANGE 1: COLD-START GUARD (A/B verdict 2026-09-02, JLHL w6) ─────────────
+
+def test_hod_whose_bar_ended_before_the_window_is_unobserved():
+    """The predicate half of CHANGE 1: a HOD bar that ENDED before the session /
+    replay window opened is a price this session never watched."""
+    seed, dbg = _decide(hod=4.9297, age_min=8.3, px=4.34,
+                        session_start=NOW - timedelta(minutes=8.0))  # window opens AFTER the bar
+    assert (seed, dbg["reason"]) == (False, "spent_leg_hod_unobserved")
+    assert dbg["session_start_utc"] is not None
+    # the same HOD one second INSIDE the window seeds normally
+    seed, dbg = _decide(hod=4.9297, age_min=8.3, px=4.34,
+                        session_start=NOW - timedelta(minutes=8.3, seconds=1))
+    assert (seed, dbg["reason"]) == (True, "spent_leg_seed")
+    # an unreadable / absent window start can never prove observation -> no seed
+    for bad in (None, "", "not-a-time"):
+        seed, dbg = _decide(hod=4.9297, age_min=8.3, px=4.34, session_start=bad)
+        assert (seed, dbg["reason"]) == (False, "spent_leg_hod_unobserved"), bad
+
+
+def test_a_cold_session_cannot_arm_until_it_is_warm():
+    """The uptime / tick half of CHANGE 1."""
+    seed, dbg = _decide(hod=4.9297, age_min=8.3, px=4.34, observed_since=NOW)
+    assert (seed, dbg["reason"]) == (False, "spent_leg_session_cold_start")
+    assert dbg["session_uptime_s"] == 0.0 and dbg["min_session_uptime_s"] == 60.0
+    seed, _ = _decide(hod=4.9297, age_min=8.3, px=4.34,
+                      observed_since=NOW - timedelta(seconds=59.9))
+    assert seed is False
+    seed, _ = _decide(hod=4.9297, age_min=8.3, px=4.34,
+                      observed_since=NOW - timedelta(seconds=60))
+    assert seed is True  # the floor binds verbatim
+    # never having processed a priced tick is also cold
+    seed, dbg = _decide(hod=4.9297, age_min=8.3, px=4.34, observed_ticks=0)
+    assert (seed, dbg["reason"]) == (False, "spent_leg_session_cold_start")
+    seed, dbg = _decide(hod=4.9297, age_min=8.3, px=4.34, observed_since=None)
+    assert (seed, dbg["reason"]) == (False, "spent_leg_session_cold_start")
+    # floors of 0 disable the guard (the escape hatch the config documents)
+    seed, _ = _decide(hod=4.9297, age_min=8.3, px=4.34, observed_since=NOW,
+                      observed_ticks=0, min_session_uptime_s=0.0, min_observed_ticks=0)
+    assert seed is True
+
+
+def test_jlhl_cold_start_regression_no_seed_at_the_first_grid_step():
+    """THE regression the A/B measured. JLHL 2026-09-02 window 10:02-11:48Z:
+    arm B armed the WAIT at the FIRST grid step off a frame HOD 7.70 whose bar
+    ENDED 09:25:00Z — 37.0 min before the window opened, inherited from the
+    7200-minute warm-up, before the runner had seen a single live tick. It held
+    25.35 min with blocks_while_seeded=122 and blocked a STRUCTURAL
+    double_bottom_break_tick_ok: arm A's 10:20:04Z @7.09 entry, +28.10 USD /
+    +1.515R, the best trade in the whole A/B set. Shape reproduced exactly:
+    frame HOD 37 min old at session start, uptime 0."""
+    win_start = datetime(2026, 9, 2, 10, 2, 0, tzinfo=UTC)
+    hod_bar_end = datetime(2026, 9, 2, 9, 25, 0, tzinfo=UTC)  # 37.0 min before the window
+    le: dict = {}
+    up, acts = _tick(le, px=7.01, now=win_start + timedelta(seconds=1), frame_hod=7.70,
+                     hod_end=hod_bar_end, frame_last_end=win_start,
+                     session_start=win_start, warm=False)
+    assert acts == [], acts               # NO seed at grid step 1
+    _apply(le, up)
+    assert "g4_spent_leg" not in le and "g4_reentry_escalation" not in le
+    assert le["spent_leg_tick_hod"]["run_ticks"] == 1
+    # and it stays refused for as long as that stale top is the effective HOD:
+    # at +30 min the session is warm, but the 09:25 bar is still outside the window
+    for secs in (60, 120, 1800):
+        up, acts = _tick(le, px=7.01, now=win_start + timedelta(seconds=secs),
+                         frame_hod=7.70, hod_end=hod_bar_end, frame_last_end=win_start,
+                         session_start=win_start, warm=False)
+        _apply(le, up)
+        assert acts == [], (secs, acts)
+    seed, dbg = spent_leg_seed_decision(
+        cur_hod=7.70, hod_ts=hod_bar_end, hod_date_et=DAY, live_px=7.01,
+        now_utc=win_start + timedelta(seconds=1), session_date_et=DAY,
+        frame_age_s=0.0, coverage_gap_s=0.0, interval_s=60.0,
+        session_start_utc=win_start, observed_since_utc=win_start + timedelta(seconds=1),
+        observed_ticks=1,
+    )
+    assert (seed, dbg["reason"]) == (False, "spent_leg_hod_unobserved")
+    assert "hod_age_min" not in dbg  # refused BEFORE the age/depth arithmetic
+    # a top the session DID watch print (10:41 bar, seen at 10:50) still seeds
+    le2: dict = {}
+    up, acts = _tick(le2, px=7.39, now=win_start + timedelta(minutes=48), frame_hod=7.92,
+                     hod_end=win_start + timedelta(minutes=39),
+                     frame_last_end=win_start + timedelta(minutes=47),
+                     session_start=win_start)
+    assert _events(acts) == ["g4_spent_leg_seed"]
+    assert acts[0][1]["hod"] == 7.92 and acts[0][1]["observed_ticks"] >= 1
+    assert acts[0][1]["session_uptime_s"] >= 60.0
+
+
+def test_run_ticks_reset_with_the_coverage_run_so_a_hole_re_arms_the_cold_start():
+    """The uptime the guard measures is the CURRENT continuous run — the same
+    run that bridges a stale frame — so a host stall / bench-out makes the
+    session cold again instead of inheriting a stale warm clock."""
+    le: dict = {}
+    for k in range(0, 4):
+        _apply(le, _tick(le, px=4.50, now=T0 + timedelta(seconds=30 * k), frame_hod=4.9297,
+                         hod_end=T0 - timedelta(minutes=1), warm=False)[0])
+    assert le["spent_leg_tick_hod"]["run_ticks"] == 4
+    # 20 min hole -> run (and its tick count) restarts here
+    _apply(le, _tick(le, px=4.34, now=T0 + timedelta(minutes=20), frame_hod=4.9297,
+                     hod_end=T0 - timedelta(minutes=1), warm=False)[0])
+    th = le["spent_leg_tick_hod"]
+    assert th["coverage_breaks"] == 1 and th["run_ticks"] == 1
+    assert th["first_tick_ts"] == (T0 + timedelta(minutes=20)).isoformat()
+
+
+# ── CHANGE 3: STRUCTURAL OVERRIDE (A/B verdict 2026-09-02) ───────────────────
+
+def test_structural_override_emit_site_lets_the_trigger_through():
+    """CHANGE 3, AST (source, not regex): the override branch must (a) test the
+    structural class and the marker, (b) NOT set _trigger_ok False, (c) leave
+    the blocked path as the else, and (d) be gated on the seed having CREATED
+    the level (seed_level_delta), so a real stop-out's ladder is untouched."""
+    fn = _tick_fn()
+    parents = _with_parents(fn)
+    sites = _emit_sites(fn, "g4_spent_leg_seed_structural_override")
+    assert len(sites) == 1
+    site = sites[0]
+    payload = ast.unparse(site.args[3])
+    for key in ("blocked_trigger", "spent_leg_hod", "hod_source", "hod_age_min", "dd_pct"):
+        assert f"'{key}'" in payload, key
+    guards = _ancestor_if_tests(site, parents)
+    assert any(g == "_g4e_override" for g in guards), guards
+    # the branch that DOES block is the sibling else-if of the override branch
+    blocked = _emit_sites(fn, "g4_reentry_escalation_blocked")[0]
+    blk_guards = _ancestor_if_tests(blocked, parents)
+    assert any("not _g4e_ok" in g for g in blk_guards), blk_guards
+    # the override decision reads the structural class, the marker and the delta
+    def _assigns_override(node: ast.AST) -> bool:
+        return any(
+            isinstance(n, ast.Assign)
+            and any(isinstance(t, ast.Name) and t.id == "_g4e_override" for t in n.targets)
+            for n in ast.walk(node)
+        )
+
+    src = " ".join(
+        [
+            ast.unparse(n.test) for n in ast.walk(fn)
+            if isinstance(n, ast.If) and _assigns_override(n)
+            and ast.unparse(n.test) != "_g4e_override"
+        ] + [
+            ast.unparse(n) for n in ast.walk(fn)
+            if isinstance(n, ast.Assign)
+            and any(isinstance(t, ast.Name) and t.id == "_g4e_override" for t in n.targets)
+        ]
+    )
+    assert "structural_trigger_reasons()" in src
+    assert "_g4e_spent_active" in src
+    assert "seed_level_delta" in src
+    assert "chili_momentum_g4_spent_leg_structural_override_enabled" in src
+    # nothing in the override branch flips the trigger off
+    branch = [
+        n for n in ast.walk(fn)
+        if isinstance(n, ast.If) and ast.unparse(n.test) == "_g4e_override"
+    ]
+    assert len(branch) == 1
+    body_src = "\n".join(ast.unparse(s) for s in branch[0].body)
+    assert "_trigger_ok" not in body_src and "g4_reentry_escalation_wait" not in body_src
+
+
+def test_structural_override_is_exactly_the_block_the_seed_created():
+    """The override's precondition, priced on the decision itself: at level 1
+    (which ONLY the seed can create — seed_level_delta 1) a structural trigger
+    under the seeded top is refused by reentry_escalation_decision, and WITHOUT
+    the seed the same trigger reads level 0 = no_escalation = admitted. So
+    letting it through restores arm A exactly and erodes nothing."""
+    blocked, dbg_b = reentry_escalation_decision(
+        enabled=True, escalation_level=1, structural_trigger=True, live_price=7.09,
+        prior_hwm=7.70, prior_exit_price=None, prior_risk_dist=None, tape_accel=1.0,
+    )
+    assert blocked is False and dbg_b["reason"] != "no_escalation"
+    arm_a, dbg_a = reentry_escalation_decision(
+        enabled=True, escalation_level=0, structural_trigger=True, live_price=7.09,
+        prior_hwm=None, prior_exit_price=None, prior_risk_dist=None, tape_accel=1.0,
+    )
+    assert arm_a is True and dbg_a["reason"] == "no_escalation"
+    # a REAL stop-out level (the seed added nothing: delta 0) is NOT overridden —
+    # the runner's guard is `seed_level_delta >= 1`, which is false here.
+    le: dict = {"g4_reentry_escalation": 1}
+    up, _acts = _tick(le, px=4.34, now=T0 + timedelta(minutes=10), frame_hod=4.9297,
+                      hod_end=T0 + timedelta(minutes=3))
+    _apply(le, up)
+    assert le["g4_spent_leg"]["seed_level_delta"] == 0
+    assert le["g4_spent_leg"]["structural_overrides"] == 0
+    # ...whereas a seed on a clean ledger owns its level
+    le2: dict = {}
+    up, _acts = _tick(le2, px=4.34, now=T0 + timedelta(minutes=10), frame_hod=4.9297,
+                      hod_end=T0 + timedelta(minutes=3))
+    _apply(le2, up)
+    assert le2["g4_spent_leg"]["seed_level_delta"] == 1
+
+
+def test_structural_override_count_is_carried_out_on_the_clear():
+    le: dict = {}
+    _apply(le, _tick(le, px=4.34, now=T0 + timedelta(minutes=10), frame_hod=4.9297,
+                     hod_end=T0 + timedelta(minutes=3))[0])
+    le["g4_spent_leg"]["structural_overrides"] = 3  # what the runner increments
+    _u, acts = _tick(le, px=4.95, now=T0 + timedelta(minutes=14), frame_hod=4.9297,
+                     hod_end=T0 + timedelta(minutes=3))
+    assert acts[0][1]["structural_overrides"] == 3
+
+
+def test_runner_passes_the_cold_start_and_hysteresis_knobs():
+    """Wiring guard: a knob the runner never hands down is a knob that ships
+    inert. Every new config key must appear in the apply_spent_leg_tick call."""
+    fn = _tick_fn()
+    call = _calls_named(fn, "apply_spent_leg_tick")[0]
+    src = ast.unparse(call)
+    for key in (
+        "chili_momentum_g4_spent_leg_min_session_uptime_s",
+        "chili_momentum_g4_spent_leg_min_observed_ticks",
+        "chili_momentum_g4_spent_leg_clear_drawdown_pct",
+        "chili_momentum_g4_spent_leg_clear_min_dwell_s",
+    ):
+        assert key in src, key
+    kw = {k.arg for k in call.keywords}
+    assert {"session_start_utc", "min_session_uptime_s", "min_observed_ticks",
+            "clear_dd_pct", "clear_min_dwell_s"} <= kw, kw
+    start_kw = [k for k in call.keywords if k.arg == "session_start_utc"][0]
+    assert "started_at" in ast.unparse(start_kw.value)
+
+
 def test_ships_on():
     s = Settings()
     assert s.chili_momentum_g4_spent_leg_seed_enabled is True
@@ -960,3 +1317,14 @@ def test_ships_on():
         s.chili_momentum_g4_spent_leg_min_drawdown_pct,
         s.chili_momentum_g4_spent_leg_max_frame_age_s,
     ) == (5.0, 5.0, 120.0)
+    # CHANGE 1 / 2 / 3 — LIVE + ON, no dark flags
+    assert (
+        s.chili_momentum_g4_spent_leg_min_session_uptime_s,
+        s.chili_momentum_g4_spent_leg_min_observed_ticks,
+    ) == (60.0, 1)
+    assert (
+        s.chili_momentum_g4_spent_leg_clear_drawdown_pct,
+        s.chili_momentum_g4_spent_leg_clear_min_dwell_s,
+    ) == (3.5, 20.0)
+    assert s.chili_momentum_g4_spent_leg_clear_drawdown_pct < s.chili_momentum_g4_spent_leg_min_drawdown_pct
+    assert s.chili_momentum_g4_spent_leg_structural_override_enabled is True

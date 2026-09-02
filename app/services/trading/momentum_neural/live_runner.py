@@ -32011,9 +32011,19 @@ def tick_live_session(
                         frame_last_bar_end_ts=_bench_dbg.get("frame_last_bar_end_ts"),
                         frame_age_s=_bench_dbg.get("frame_age_s"),
                         interval_s=_bench_dbg.get("interval_s"),
+                        # COLD-START GUARD (A/B verdict 2026-09-02): the session /
+                        # replay window start. ``started_at`` is the arm instant and
+                        # is never advanced, so a HOD bar that ended before it is a
+                        # price this session never watched (JLHL: bar END 09:25Z vs
+                        # window start 10:02Z) and can never seed.
+                        session_start_utc=getattr(sess, "started_at", None),
                         min_age_min=float(getattr(settings, "chili_momentum_g4_spent_leg_min_hod_age_min", 5.0) or 0.0),
                         min_dd_pct=float(getattr(settings, "chili_momentum_g4_spent_leg_min_drawdown_pct", 5.0) or 0.0),
                         max_frame_age_s=float(getattr(settings, "chili_momentum_g4_spent_leg_max_frame_age_s", 120.0) or 120.0),
+                        min_session_uptime_s=float(getattr(settings, "chili_momentum_g4_spent_leg_min_session_uptime_s", 60.0) or 0.0),
+                        min_observed_ticks=int(getattr(settings, "chili_momentum_g4_spent_leg_min_observed_ticks", 1) or 0),
+                        clear_dd_pct=float(getattr(settings, "chili_momentum_g4_spent_leg_clear_drawdown_pct", 3.5) or 0.0),
+                        clear_min_dwell_s=float(getattr(settings, "chili_momentum_g4_spent_leg_clear_min_dwell_s", 20.0) or 0.0),
                     )
                     # EMIT FIRST, then apply + commit (review M7): if the event
                     # insert raises (poisoned transaction), nothing is applied and
@@ -32387,7 +32397,58 @@ def tick_live_session(
                     )
                 except Exception:
                     _g4e_ok, _g4e_dbg = True, {"reason": "g4_escalation_error_fail_open"}
-                if not _g4e_ok:
+                # STRUCTURAL OVERRIDE (A/B verdict 2026-09-02). The whole measured
+                # cost of the spent-leg seed across the 4-window interleaved A/B
+                # was ONE structural block: JLHL 10:20:04Z double_bottom_break_tick_ok,
+                # arm A's +28.10 USD / +1.515R entry at 7.09, blocked 25.4 min by a
+                # cold-start marker. The feature exists to suppress NON-structural
+                # re-entry chatter on a spent leg, so a trigger in
+                # structural_trigger_reasons() is let through whenever the escalation
+                # level exists ONLY because the seed created it (seed_level_delta >= 1
+                # ⇒ without the marker the decision reads level 0 = no_escalation =
+                # admitted). A level a REAL stop-out loss put there is UNTOUCHED — that
+                # ladder is pre-existing (arm A) behaviour and this must not erode it.
+                _g4e_override = False
+                if (
+                    not _g4e_ok
+                    and _g4e_spent_active
+                    and isinstance(_g4e_spent, dict)
+                    and bool(getattr(
+                        settings,
+                        "chili_momentum_g4_spent_leg_structural_override_enabled",
+                        True,
+                    ))
+                    and _trigger_reason in structural_trigger_reasons()
+                ):
+                    try:
+                        _g4e_override = int(_g4e_spent.get("seed_level_delta") or 0) >= 1
+                    except (TypeError, ValueError):
+                        _g4e_override = False
+                if _g4e_override:
+                    # let it through: _trigger_ok / _trigger_reason are UNCHANGED.
+                    try:
+                        _g4e_ovr_n = int(_g4e_spent.get("structural_overrides") or 0)
+                    except (TypeError, ValueError):
+                        _g4e_ovr_n = 0
+                    _g4e_spent["structural_overrides"] = _g4e_ovr_n + 1
+                    le["g4_spent_leg"] = _g4e_spent
+                    _commit_le(sess, le)
+                    # ONCE per marker (the rest are counted on the marker and
+                    # carried out on its clear as ``structural_overrides``).
+                    if _g4e_ovr_n == 0:
+                        _emit(db, sess, "g4_spent_leg_seed_structural_override", {
+                            "blocked_trigger": _trigger_reason,
+                            "escalation_level": _g4e_level,
+                            "spent_leg_hod": _g4e_spent_hod,
+                            "hod_source": _g4e_spent.get("hod_source"),
+                            "hod_age_min": _g4e_spent.get("hod_age_min"),
+                            "dd_pct": _g4e_spent.get("dd_pct"),
+                            "seeded_at": _g4e_spent.get("seeded_at"),
+                            "seed_level_delta": _g4e_spent.get("seed_level_delta"),
+                            "blocks_while_seeded": _g4e_spent.get("blocks_while_seeded"),
+                            **_g4e_dbg,
+                        })
+                elif not _g4e_ok:
                     _prev_reason = _trigger_reason
                     _trigger_ok = False
                     _trigger_reason = "g4_reentry_escalation_wait"

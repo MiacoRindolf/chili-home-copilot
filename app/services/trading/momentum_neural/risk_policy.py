@@ -4268,9 +4268,14 @@ def spent_leg_seed_decision(
     frame_age_s: Any,
     coverage_gap_s: Any,
     interval_s: Any,
+    session_start_utc: Any = None,
+    observed_since_utc: Any = None,
+    observed_ticks: Any = None,
     min_age_min: float = 5.0,
     min_dd_pct: float = 5.0,
     max_frame_age_s: float = 120.0,
+    min_session_uptime_s: float = 60.0,
+    min_observed_ticks: int = 1,
 ) -> tuple[bool, dict[str, Any]]:
     """PURE spent-leg predicate — TRUE iff the FIRST entry on this name should be
     seeded into g4 level 1 with ``cur_hod`` as the reclaim reference.
@@ -4284,10 +4289,24 @@ def spent_leg_seed_decision(
           frame's last bar — cache_age_seconds is 0.0 on every store and cannot
           be used; the 08-26 entry-path frame age was p50 10.6 min, so a frame
           guard alone would make the seed near-inert)
+      HOD bar END before the session window      -> spent_leg_hod_unobserved
+      session not yet warm                       -> spent_leg_session_cold_start
       price at/above the top                    -> spent_leg_at_or_above_hod
       HOD younger than min_age_min (bar END)    -> spent_leg_too_young
       drawdown under min_dd_pct                 -> spent_leg_too_shallow
       else                                      -> spent_leg_seed
+
+    COLD-START GUARD (A/B verdict 2026-09-02, the only measured loss this
+    feature caused). ``session_start_utc`` is the session/replay window start
+    (``sess.started_at``) and ``observed_since_utc`` / ``observed_ticks``
+    describe the CURRENT continuous coverage run — the same run that bridges a
+    stale frame. A HOD whose bar ENDED before the window opened is a price this
+    session never watched (JLHL 2026-09-02: frame HOD 7.70, bar END 09:25Z,
+    window start 10:02Z, seed armed at grid step 1 with hod_age_min 37.0 and
+    held 25.4 min, blocking a structural double_bottom_break_tick_ok worth
+    +1.515R); and a runner that has not been ticking for
+    ``min_session_uptime_s`` has no session of its own to reason about. Both
+    are unreadable-is-no-seed: a caller that passes neither never seeds.
     Returns ``(seed, debug)``; debug always carries ``reason``."""
     dbg: dict[str, Any] = {"reason": None}
     hod = _spent_leg_pos_float(cur_hod)
@@ -4300,9 +4319,13 @@ def spent_leg_seed_decision(
         _min_age = float(min_age_min)
         _min_dd = float(min_dd_pct)
         _max_age = float(max_frame_age_s)
+        _min_up = float(min_session_uptime_s)
+        _min_ticks = int(min_observed_ticks)
     except (TypeError, ValueError):
         dbg["reason"] = "spent_leg_unreadable"
         return False, dbg
+    if not math.isfinite(_min_up):
+        _min_up = 0.0
     if (
         hod is None or px is None or hod_dt is None or now_dt is None
         or not hod_day or not sess_day
@@ -4323,6 +4346,32 @@ def spent_leg_seed_decision(
     dbg.update({"frame_age_s": _fa, "coverage_gap_s": _cg, "stale_threshold_s": round(_t, 3)})
     if _fa_eff > _t and _cg_eff > _t:
         dbg["reason"] = "spent_leg_frame_stale"
+        return False, dbg
+    # ── COLD-START GUARD (A/B verdict 2026-09-02) ──
+    sess_start_dt = _spent_leg_aware_utc(session_start_utc)
+    obs_since_dt = _spent_leg_aware_utc(observed_since_utc)
+    try:
+        _obs_ticks = int(observed_ticks) if observed_ticks is not None else 0
+    except (TypeError, ValueError):
+        _obs_ticks = 0
+    uptime_s = (
+        (now_dt - obs_since_dt).total_seconds() if obs_since_dt is not None else None
+    )
+    dbg.update({
+        "session_start_utc": (sess_start_dt.isoformat() if sess_start_dt is not None else None),
+        "observed_since_utc": (obs_since_dt.isoformat() if obs_since_dt is not None else None),
+        "session_uptime_s": (round(uptime_s, 3) if uptime_s is not None else None),
+        "observed_ticks": _obs_ticks,
+        "min_session_uptime_s": _min_up,
+        "min_observed_ticks": _min_ticks,
+    })
+    # A HOD the session never watched is not this session's HOD. Unreadable
+    # window start ⇒ cannot prove observation ⇒ no seed (fail-open).
+    if sess_start_dt is None or hod_dt < sess_start_dt:
+        dbg["reason"] = "spent_leg_hod_unobserved"
+        return False, dbg
+    if uptime_s is None or uptime_s < _min_up or _obs_ticks < _min_ticks:
+        dbg["reason"] = "spent_leg_session_cold_start"
         return False, dbg
     if px >= hod:
         dbg["reason"] = "spent_leg_at_or_above_hod"
@@ -4355,9 +4404,14 @@ def apply_spent_leg_tick(
     frame_last_bar_end_ts: Any,
     frame_age_s: Any,
     interval_s: Any,
+    session_start_utc: Any = None,
     min_age_min: float = 5.0,
     min_dd_pct: float = 5.0,
     max_frame_age_s: float = 120.0,
+    min_session_uptime_s: float = 60.0,
+    min_observed_ticks: int = 1,
+    clear_dd_pct: float = 3.5,
+    clear_min_dwell_s: float = 20.0,
 ) -> tuple[dict[str, Any], list[tuple[str, dict[str, Any]]]]:
     """PURE spent-leg marker lifecycle for ONE ``_score_ok`` tick (no I/O).
 
@@ -4388,16 +4442,21 @@ def apply_spent_leg_tick(
            retop             the effective top moved above marker.hod (a new
                              high printed on ANY tick, whichever tick sees it)
            hit_top           px >= marker.hod
-           shallowed         the pullback is no longer >= min_dd_pct under the
-                             top (px above HOD*(1 - P/100)). This makes the LIVE
-                             rule equal to the FILL-INSTANT predicate the corpus
-                             was measured on (fills_study.csv: age x depth AT
-                             the fill) — without it the marker was path-
-                             dependent and blocked RKTO 07-09 (+74.52, 6.98%
-                             dip at 08:31, 3.77% under at the 08:41 fill, no
-                             re-take between) and LHAI 07-08 (+48.07, 7.41% dip
-                             at 08:28, 3.70% under at the fill), which the
-                             evidence counts as FREE (review 2026-09-02 M8).
+           shallowed         the pullback rose above the SEPARATE, LOWER
+                             ``clear_dd_pct`` band (HYSTERESIS, A/B verdict
+                             2026-09-02) AND the marker has been seeded at
+                             least ``clear_min_dwell_s``. Arming and clearing
+                             on the same 5% line made 36 of 36 A/B clears
+                             'shallowed', 15 of them inside 4 seconds (CANF: 7
+                             seed/clear pairs in ~2 sim minutes). ONLY this
+                             reason is dwell-delayed — hit_top / retop /
+                             disabled / session_rollover always fire on the
+                             tick that sees them. COST, stated not hidden: at
+                             clear_dd 3.5 the RKTO 07-09 (+74.52, 3.77% under
+                             at the 08:41 fill) and LHAI 07-08 (+48.07, 3.70%)
+                             fills the fill-instant corpus counts as FREE stay
+                             SEEDED; clear_dd_pct = min_dd_pct restores the
+                             exact fill-instant equality (review M8).
          Only ``hit_top`` / ``retop`` RETIRE the top (``cleared_hod``: a re-take
          that then fades never re-seeds on it); a ``shallowed`` / ``disabled``
          / ``session_rollover`` clear leaves the top re-seedable, so a name
@@ -4430,6 +4489,21 @@ def apply_spent_leg_tick(
             _min_dd_f = 0.0
     except (TypeError, ValueError):
         _min_dd_f = 0.0
+    # HYSTERESIS: the clear band is SEPARATE and never above the arm band (a
+    # higher clear threshold would clear the marker on the tick that armed it).
+    try:
+        _clear_dd_f = float(clear_dd_pct)
+        if not math.isfinite(_clear_dd_f):
+            _clear_dd_f = _min_dd_f
+    except (TypeError, ValueError):
+        _clear_dd_f = _min_dd_f
+    _clear_dd_f = min(_clear_dd_f, _min_dd_f)
+    try:
+        _dwell_f = float(clear_min_dwell_s)
+        if not math.isfinite(_dwell_f) or _dwell_f < 0.0:
+            _dwell_f = 0.0
+    except (TypeError, ValueError):
+        _dwell_f = 0.0
     _iv_f = _spent_leg_pos_float(interval_s) or 60.0
     try:
         _cov_t = max(2.0 * _iv_f, float(max_frame_age_s))
@@ -4495,6 +4569,9 @@ def apply_spent_leg_tick(
             "new_hod": (new_top if new_top is not None else m_hod_c),
             "minutes_waited": minutes_waited,
             "blocks_while_seeded": int(m.get("blocks_while_seeded") or 0),
+            "structural_overrides": int(m.get("structural_overrides") or 0),
+            "clear_dd_pct": _clear_dd_f,
+            "clear_min_dwell_s": _dwell_f,
             "level_before": level_now,
             "level_after": level_after_recorded,
             "seed_level_delta": delta,
@@ -4532,12 +4609,18 @@ def apply_spent_leg_tick(
             breaks = int(tick_hod.get("coverage_breaks") or 0) if tick_hod else 0
         except (TypeError, ValueError):
             breaks = 0
+        try:
+            run_ticks = int(tick_hod.get("run_ticks") or 0) if tick_hod else 0
+        except (TypeError, ValueError):
+            run_ticks = 0
         last_dt = _spent_leg_aware_utc(tick_hod.get("last_tick_ts")) if tick_hod else None
         if last_dt is not None and (tick_dt - last_dt).total_seconds() > _cov_t:
             # a hole longer than the staleness threshold: the run restarts HERE —
             # whatever printed inside the hole was never seen by this session.
             first_iso = tick_dt.isoformat()
             breaks += 1
+            run_ticks = 0
+        run_ticks += 1
         if tick_hod is None or prev_px is None or px_f > prev_px:
             hi_px, hi_ts = px_f, tick_dt.isoformat()
         else:
@@ -4548,6 +4631,8 @@ def apply_spent_leg_tick(
             "first_tick_ts": first_iso,
             "last_tick_ts": tick_dt.isoformat(),
             "coverage_breaks": breaks,
+            # priced ticks observed in the CURRENT continuous run (cold-start guard)
+            "run_ticks": run_ticks,
             "session_date_et": day,
         }
         updates[_SPENT_LEG_TICK_HOD_KEY] = tick_hod
@@ -4585,11 +4670,19 @@ def apply_spent_leg_tick(
         else:
             hit_top = px_f is not None and px_f >= m_hod
             moved = eff_hod is not None and eff_hod > m_hod
+            # HYSTERESIS: the shallowed clear uses the LOWER band, not the arm band.
             shallowed = (
                 px_f is not None
                 and not hit_top
-                and ((m_hod - px_f) / m_hod * 100.0) < _min_dd_f
+                and ((m_hod - px_f) / m_hod * 100.0) < _clear_dd_f
             )
+            # ...and may not fire before the dwell floor. hit_top / retop /
+            # disabled / session_rollover are NEVER delayed by it.
+            m_seeded_dt = _spent_leg_aware_utc(marker.get("seeded_at"))
+            dwell_s = (
+                (now_dt - m_seeded_dt).total_seconds() if m_seeded_dt is not None else None
+            )
+            dwell_ok = dwell_s is None or dwell_s >= _dwell_f
             clear_reason: str | None = None
             new_top: float | None = None
             retopped = False
@@ -4599,7 +4692,7 @@ def apply_spent_leg_tick(
                 new_top = eff_hod if eff_hod is not None else m_hod
                 retopped = bool(moved and (px_f is None or px_f < new_top))
                 clear_reason = "retop" if retopped else "hit_top"
-            elif shallowed:
+            elif shallowed and dwell_ok:
                 clear_reason = "shallowed"
             if clear_reason is not None:
                 _clear(marker, reason=clear_reason, new_top=new_top, retopped=retopped)
@@ -4626,9 +4719,14 @@ def apply_spent_leg_tick(
         frame_age_s=fa,
         coverage_gap_s=coverage_gap_s,
         interval_s=interval_s,
+        session_start_utc=session_start_utc,
+        observed_since_utc=(tick_hod.get("first_tick_ts") if tick_hod else None),
+        observed_ticks=(tick_hod.get("run_ticks") if tick_hod else None),
         min_age_min=min_age_min,
         min_dd_pct=min_dd_pct,
         max_frame_age_s=max_frame_age_s,
+        min_session_uptime_s=min_session_uptime_s,
+        min_observed_ticks=min_observed_ticks,
     )
     if not seed:
         return updates, actions
@@ -4659,6 +4757,11 @@ def apply_spent_leg_tick(
         "key_absent_at_seed": bool(key_absent),
         "seed_level_delta": delta,
         "blocks_while_seeded": 0,
+        "structural_overrides": 0,
+        "session_start_utc": sdbg.get("session_start_utc"),
+        "observed_since_utc": sdbg.get("observed_since_utc"),
+        "session_uptime_s": sdbg.get("session_uptime_s"),
+        "observed_ticks": sdbg.get("observed_ticks"),
         "frame_age_s": fa,
         "coverage_gap_s": coverage_gap_s,
         "coverage_breaks": (tick_hod.get("coverage_breaks") if tick_hod else None),
@@ -4677,6 +4780,8 @@ def apply_spent_leg_tick(
         "seed_level": seed_level,
         "level_before": level_before,
         "seed_level_delta": delta,
+        "session_uptime_s": sdbg.get("session_uptime_s"),
+        "observed_ticks": sdbg.get("observed_ticks"),
         "frame_age_s": fa,
         "coverage_gap_s": coverage_gap_s,
         "coverage_breaks": (tick_hod.get("coverage_breaks") if tick_hod else None),
