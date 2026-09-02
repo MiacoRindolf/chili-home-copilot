@@ -187,17 +187,61 @@ def test_certified_short_helper_vocabulary():
     assert RE._alpaca_position_certified_short(SimpleNamespace(execution_family="alpaca_spot"), "bad", {}) is False
 
 
-def test_aggregate_source_keeps_the_raise_and_both_bounds():
-    src = inspect.getsource(RE.aggregate_open_risk_usd)
-    # qty/basis + UNSTOPPED direction + STOPPED direction (2026-09-02 hardening)
-    assert src.count('"position_risk_fields_invalid"') == 3
-    assert "stop_unknown_full_notional_bound" in src
-    assert "stop_unknown_short_notional_multiple_bound" in src
-    assert "_alpaca_position_certified_short(" in src
-    assert "_short_unstopped_notional_multiple()" in src
-    # The STOPPED alpaca branch no longer reads direction from `le` alone.
-    assert src.count('side_long = le.get("side_long") is not False') == 1, \
-        "exactly ONE le-only direction read remains: the NON-alpaca branch"
+def test_every_fail_closed_raise_site_is_reachable_by_behaviour():
+    """Was three `src.count(...)` assertions on the literal shape of
+    `aggregate_open_risk_usd`. A source count proves a STRING exists, not that the
+    arithmetic holds: hoisting the three raises into one helper turns it red with
+    the numbers unchanged, while inverting a comparison on the certified-SHORT arm
+    leaves it green with every stopped short charged $0. Assert the three
+    fail-closed BRANCHES instead, one row shape each."""
+    # (a) qty / basis unreadable
+    with pytest.raises(RuntimeError, match="position_risk_fields_invalid"):
+        _agg(_FakeDb([_sess(1, le={"position": {"quantity": 100, "avg_entry_price": 0.0,
+                                                "stop_price": None}})]))
+    # (b) UNSTOPPED, direction not certified either way
+    with pytest.raises(RuntimeError, match="position_risk_fields_invalid"):
+        _agg(_FakeDb([_sess(1, le={"side_long": True,
+                                   "position": {"quantity": 100, "avg_entry_price": 10.0,
+                                                "stop_price": None, "side": "short"}})]))
+    # (c) STOPPED, direction not certified either way (the 09-02 hardening)
+    with pytest.raises(RuntimeError, match="position_risk_fields_invalid"):
+        _agg(_FakeDb([_sess(1, le={"side_long": True,
+                                   "position": {"quantity": 100, "avg_entry_price": 10.0,
+                                                "stop_price": 10.5, "side": "short"}})]))
+
+
+def test_both_unstopped_bounds_are_produced_not_merely_spelled():
+    """The two documented bounds, by the number each yields."""
+    long_total, long_rows = _agg(_FakeDb([_sess(1, le={"position": dict(_UNSTOPPED)})]))
+    assert long_total == pytest.approx(177 * 9.91)
+    assert long_rows[0]["note"] == "stop_unknown_full_notional_bound"
+
+    short_total, short_rows = _agg(_FakeDb([
+        _sess(1, le={"side_long": False, "position": dict(_UNSTOPPED)})]))
+    assert short_total == pytest.approx(177 * 9.91 * 2.0)
+    assert short_rows[0]["note"] == "stop_unknown_short_notional_multiple_bound"
+    assert short_rows[0]["notional_multiple"] == 2.0
+
+
+def test_the_non_alpaca_branch_still_reads_direction_from_le_alone():
+    """Was `src.count('side_long = le.get("side_long") is not False') == 1`. The
+    certified-direction requirement is an ALPACA-scope rule: a non-Alpaca family
+    keeps the old `le`-only read, and a position-only short marker there is still
+    priced as a long. Pin that by the NUMBER, so the two branches cannot silently
+    converge."""
+    le = {"position": {"quantity": 100, "avg_entry_price": 10.0,
+                       "stop_price": 10.5, "side": "short"}}
+    total, rows = RE.aggregate_open_risk_usd(
+        _FakeDb([_sess(1, le=le, family="robinhood_spot")]),
+        user_id=1, execution_family="robinhood_spot")
+    # le-only direction ⇒ read as a LONG ⇒ max(0, 10.0 - 10.5) * 100 == 0 ⇒ no row
+    assert total == pytest.approx(0.0)
+    assert rows == []
+    # …while the SAME shape under Alpaca scope reads the position marker and
+    # charges the real short distance. Two different numbers from one row shape is
+    # what "exactly one le-only direction read remains" actually means.
+    alpaca_total, _ = _agg(_FakeDb([_sess(1, le=le)]))
+    assert alpaca_total == pytest.approx(50.0)  # (10.5 - 10.0) * 100
 
 
 # ── STOPPED rows: direction from the SAME certified evidence (MUST CHANGE 4) ──

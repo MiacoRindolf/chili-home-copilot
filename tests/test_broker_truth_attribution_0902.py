@@ -1317,3 +1317,93 @@ def test_orphan_repair_anchors_are_excluded_from_the_completeness_gate():
         "last_exit_order_id": "x1",
     })
     assert entry == {"e1"} and exit_ == {"x1"}
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# SECOND-FIXER BLOCKER: the OTHER half of "ownership by broker order id".
+# The envelope half alone is not enough — `last_exit_order_id` has NO writer
+# anywhere in app/, and `exit_order_id` is POPPED off the envelope by the runner
+# on the repeg / terminal-no-fill paths (live_runner.py:17731, :17896, :17918).
+# The session's own FSM ledger (`momentum_fill_outcomes.session_id`) is the
+# reliable record of which broker orders it closed with.
+# ═══════════════════════════════════════════════════════════════════════════════
+_BROKER_CID_EXIT_OID = "9f0c2c1a-4d55-4a1e-9f7e-2b3c4d5e6f70"
+
+
+def _ledger_owned_exit_case():
+    """A complete round trip the FSM ledger records in full, whose CLOSE carries a
+    BROKER-generated client_order_id (a replace successor, or a UI sell the FSM
+    adopted) and which appears on NO envelope key."""
+    ledger = [
+        ("entry", 0, "broker_confirmed", 4.34, 355.0, 0.0, None, None, None, None,
+         "552efe43-395a-4f76-836a-7be3d30a8689", _ENTRY_FILL_TS),
+        ("exit", 0, "broker_confirmed", 4.119915, 355.0, 0.0, None, None, -78.130175, 4.34,
+         _BROKER_CID_EXIT_OID, _EXIT_FILL_TS),
+    ]
+    orders = [
+        _o("552efe43-395a-4f76-836a-7be3d30a8689", "chili_ml_e_19471_a7c3e32c_9523138f65",
+           "buy", "filled", 355, 4.34, "2026-09-02 11:10:19.535053+00:00"),
+        # the close: broker-generated cid, NOT derivable from the envelope
+        _o(_BROKER_CID_EXIT_OID, "9f0c2c1a-4d55-4a1e-9f7e-2b3c4d5e6f70",
+           "sell", "filled", 355, 4.119915, "2026-09-02 11:11:05.100000+00:00"),
+    ]
+    o, s = _outcome_and_session(le_extra={
+        "entry_order_id": "552efe43-395a-4f76-836a-7be3d30a8689",
+        "entry_order_ids_all": ["552efe43-395a-4f76-836a-7be3d30a8689"],
+        "entry_orders_resolved": {"552efe43-395a-4f76-836a-7be3d30a8689": "adopted"},
+        "emergency_exit_accounting_pending": None,
+    })
+    return o, s, ledger, (lambda symbol, after, until: {
+        "readable": True, "truncated": False, "orders": list(orders)})
+
+
+def test_a_ledger_recorded_close_with_a_broker_cid_is_owned_not_demoted():
+    """THE HOLE: ownership was built ONLY from the envelope. A close the session's
+    own ledger records, carrying a broker-generated cid, was seen as NON-owned →
+    open 355 / close 0 → `residual_open` → the row the LEDGER alone labels
+    `reconciled` is written `unreconciled_residual_open` with a NULL
+    broker_realized_pnl_usd. `_alpaca_loss_history_broker_truth` then fails, which
+    gaps the day and disarms the WHOLE account with
+    `loss_guard_history_unavailable` — the 85-minute outage of 2026-09-02,
+    reachable from a path origin/main labelled `reconciled`."""
+    o, s, ledger, reader = _ledger_owned_exit_case()
+    orc.reconcile_one_outcome(_FakeDb(ledger), o, s, broker_orders_reader=reader)
+
+    d = o.broker_recon_detail_json["broker_attribution"]
+    assert d["attr_status"] == orc.ATTR_FLAT, d
+    assert d["close_qty"] == pytest.approx(355.0)
+    by_attr = {l["broker_order_id"]: l.get("attribution") for l in d["legs"]}
+    assert by_attr[_BROKER_CID_EXIT_OID] == "session_ledger_order_id"
+    assert o.broker_recon_status == orc.STATUS_RECONCILED
+    assert o.broker_realized_pnl_usd is not None
+    assert rp._alpaca_loss_history_broker_truth(o) is True, \
+        "the loss guard must be able to use this row — otherwise the account is disarmed"
+
+
+def test_a_ledger_owned_close_is_collision_checked_like_any_other_non_cid_guess():
+    """`momentum_fill_outcomes` is per-session, but an orphan repair can record ONE
+    broker order under TWO sessions. Attributing it twice double counts a real loss
+    into the day total, so the ledger half fails closed exactly like the envelope
+    half — it is NOT exempt the way a session cid is."""
+    o, s, ledger, reader = _ledger_owned_exit_case()
+    db = _FakeDb(ledger, collisions=[(19999, _BROKER_CID_EXIT_OID)])
+    orc.reconcile_one_outcome(db, o, s, broker_orders_reader=reader)
+
+    d = o.broker_recon_detail_json["broker_attribution"]
+    assert d["attr_status"] == orc.ATTR_AMBIGUOUS
+    assert o.broker_recon_status == orc.STATUS_AMBIGUOUS_TRADE
+    assert o.broker_realized_pnl_usd is None
+
+    o2, s2, ledger2, reader2 = _ledger_owned_exit_case()
+    orc.reconcile_one_outcome(_FakeDb(ledger2, probe_raises=True), o2, s2,
+                              broker_orders_reader=reader2)
+    assert o2.broker_recon_status == orc.STATUS_AMBIGUOUS_TRADE, "unreadable probe fails CLOSED"
+
+
+def test_a_fully_cid_owned_session_still_spends_no_collision_probe():
+    """The probe is one bounded DB read. A session whose every leg is owned by its
+    OWN cid names exactly one session and must not pay for it."""
+    o, s = _outcome_and_session(le_extra={"emergency_exit_accounting_pending": None})
+    db = _FakeDb(_LEDGER_19471)
+    orc.reconcile_one_outcome(db, o, s, broker_orders_reader=_reader_ok)
+    assert not any("momentum_automation_outcomes" in q for q in db.sql), db.sql

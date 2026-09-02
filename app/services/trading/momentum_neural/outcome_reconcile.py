@@ -607,6 +607,7 @@ def attribute_session_broker_orders(
     window_end: Optional[datetime] = None,
     ledger_order_ids: Optional[set] = None,
     owned_order_ids: Optional[set] = None,
+    ledger_owned_order_ids: Optional[set] = None,
     expected_listing_order_ids: Optional[set] = None,
     entry_anchor_ids: Optional[set] = None,
     exit_anchor_ids: Optional[set] = None,
@@ -616,7 +617,11 @@ def attribute_session_broker_orders(
     ``orders`` are NormalizedOrder objects (or equivalent dicts) for the session's
     symbol. A filled order is attributed when
       (a) its client_order_id carries THIS session id (any CHILI prefix), or
-      (b) it is a closing-side fill NOT owned by any CHILI session id that
+      (b) its broker order id is one the session itself recorded — on its envelope
+          (``owned_order_ids``) or, decisively, in its OWN FSM ledger
+          (``ledger_owned_order_ids``, i.e. ``momentum_fill_outcomes.session_id``),
+          or
+      (c) it is a closing-side fill NOT owned by any CHILI session id that
           UNIQUELY matches an unpriced emergency leg by qty inside the window
           (an operator/UI sell with a broker-generated cid).
     Foreign-session cids are never attributed. Returns the leg list, the summed
@@ -631,7 +636,19 @@ def attribute_session_broker_orders(
     sym = str(symbol or "").strip().upper()
     open_side = "buy" if side_long else "sell"
     close_side = "sell" if side_long else "buy"
-    owned_ids = {str(x) for x in (owned_order_ids or set()) if str(x or "").strip()}
+    # OWNERSHIP, two independent records. The envelope half is WEAKER than it
+    # looks: `last_exit_order_id` has no writer anywhere in the repo, and
+    # `exit_order_id` is POPPED off the envelope by the runner on the repeg and
+    # terminal-no-fill paths (live_runner.py:17731/17896/17918). The session's own
+    # FSM ledger (`momentum_fill_outcomes.session_id`) is therefore the reliable
+    # record of which broker orders a session closed with. Without it, a close
+    # whose client_order_id is BROKER-generated (a replace successor, a UI sell the
+    # FSM later adopted) is seen as non-owned → `residual_open` → a row the ledger
+    # alone would have labelled `reconciled` is DEMOTED, and every demoted Alpaca
+    # row pins the whole account at `loss_guard_history_unavailable`
+    # (risk_policy.py:1432) — the 85-minute arming outage of 2026-09-02.
+    ledger_owned = {str(x) for x in (ledger_owned_order_ids or set()) if str(x or "").strip()}
+    owned_ids = {str(x) for x in (owned_order_ids or set()) if str(x or "").strip()} | ledger_owned
     legs: list[dict] = []
     seen: set[str] = set()
     listing_ids: set[str] = set()
@@ -720,7 +737,12 @@ def attribute_session_broker_orders(
                 legs.append(leg)
                 seen.add(oid)
                 continue
-            leg["attribution"] = "session_cid" if owner == int(session_id) else "session_broker_order_id"
+            if owner == int(session_id):
+                leg["attribution"] = "session_cid"
+            elif oid in ledger_owned:
+                leg["attribution"] = "session_ledger_order_id"
+            else:
+                leg["attribution"] = "session_broker_order_id"
             legs.append(leg)
             seen.add(oid)
         elif owner is not None:
@@ -1307,6 +1329,7 @@ def reconcile_one_outcome(
                     window_end=w_end,
                     ledger_order_ids=ledger_ids,
                     owned_order_ids=_owned_order_ids_from_le(le),
+                    ledger_owned_order_ids=ledger_ids,
                     expected_listing_order_ids=expected_ids,
                     entry_anchor_ids=entry_anchors,
                     exit_anchor_ids=exit_anchors,
@@ -1326,7 +1349,15 @@ def reconcile_one_outcome(
                 # sessions can each hold the same id (an emergency leg or an
                 # orphan-repair close recorded on both envelopes) — attributing it
                 # twice double counts it straight into the loss guard's day total.
-                _NON_CID_ATTRIBUTIONS = ("unpriced_emergency_leg_match", "session_broker_order_id")
+                # `session_ledger_order_id` is included: `momentum_fill_outcomes`
+                # is per-session, but an orphan repair can record ONE broker order
+                # under two sessions, and that would double count it into the day
+                # total exactly like an envelope-id collision.
+                _NON_CID_ATTRIBUTIONS = (
+                    "unpriced_emergency_leg_match",
+                    "session_broker_order_id",
+                    "session_ledger_order_id",
+                )
                 fallback_ids = [
                     l["broker_order_id"] for l in attr.get("legs") or []
                     if l.get("attribution") in _NON_CID_ATTRIBUTIONS
