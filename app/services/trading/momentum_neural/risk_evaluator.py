@@ -392,6 +392,41 @@ def _positive_finite_number(value: Any) -> float | None:
     return parsed if math.isfinite(parsed) and parsed > 0.0 else None
 
 
+_LONG_SIDE_MARKERS = frozenset({"long", "buy"})
+_LONG_INTENT_MARKERS = frozenset({"buy_to_open", "sell_to_close"})
+
+
+def _alpaca_position_certified_long(sess: Any, le: Any, pos: Any) -> bool:
+    """True only when EVERY direction marker on the row says LONG.
+
+    Honours the same evidence the runner's canonical ``_le_side_long`` reads —
+    ``side_long`` on the envelope AND the position, ``side``,
+    ``position_intent`` / ``intent`` on either container — plus the
+    ``alpaca_short`` family. Used ONLY to admit the full-notional bound for an
+    unstopped position: notional bounds a LONG's loss, never a SHORT's, so any
+    short, contradictory or unreadable marker => not certified => the caller
+    fails closed (``position_risk_fields_invalid``). A row adopted under an
+    operator repair carries ``position.side`` and no ``side_long`` key; it must
+    not be priced as a long by omission.
+    """
+    if str(getattr(sess, "execution_family", "") or "") == "alpaca_short":
+        return False
+    for container in (le, pos):
+        if not isinstance(container, Mapping):
+            return False
+        flag = container.get("side_long")
+        if flag is not None and flag is not True:
+            return False
+        side = container.get("side")
+        if side is not None and str(side).strip().lower() not in _LONG_SIDE_MARKERS:
+            return False
+        for key in ("position_intent", "intent"):
+            intent = container.get(key)
+            if intent is not None and str(intent).strip().lower() not in _LONG_INTENT_MARKERS:
+                return False
+    return True
+
+
 def _raise_unknown_alpaca_risk(
     reason: str,
     *,
@@ -679,13 +714,11 @@ def aggregate_open_risk_usd(
                 qty = _positive_finite_number(pos.get("quantity"))
                 entry = _positive_finite_number(pos.get("avg_entry_price"))
                 stop = _positive_finite_number(pos.get("stop_price"))
-                _short = (
-                    str(sess.execution_family or "") == "alpaca_short"
-                    or le.get("side_long") is False
-                )
-                if qty is None or entry is None or (stop is None and _short):
-                    # Nothing can be priced, or an unstopped SHORT (notional is
-                    # NOT an upper bound on a short's loss).
+                _certified_long = _alpaca_position_certified_long(sess, le, pos)
+                if qty is None or entry is None or (stop is None and not _certified_long):
+                    # Nothing can be priced, or an unstopped position that is
+                    # not provably LONG on every marker (notional is NOT an
+                    # upper bound on a short's loss).
                     _raise_unknown_alpaca_risk(
                         "position_risk_fields_invalid",
                         session_id=sess.id,

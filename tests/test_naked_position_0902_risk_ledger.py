@@ -249,6 +249,47 @@ def test_held_stop_unknown_short_still_raises(monkeypatch):
         RE.aggregate_open_risk_usd(db, user_id=1, execution_family="alpaca_spot")
 
 
+@pytest.mark.parametrize("le_extra,pos_extra", [
+    ({}, {"side": "short"}),
+    ({}, {"side": "sell"}),
+    ({}, {"side_long": False}),
+    ({}, {"position_intent": "sell_to_open"}),
+    ({}, {"intent": "buy_to_close"}),
+    ({}, {"side": "sideways"}),          # unreadable marker => not certified
+    ({"side": "short"}, {}),
+    ({"position_intent": "sell_to_open"}, {}),
+    ({"side_long": True}, {"side": "short"}),  # contradictory => not certified
+])
+def test_held_stop_unknown_short_shaped_position_still_raises(monkeypatch, le_extra, pos_extra):
+    """Ang full-notional bound ay para LANG sa posisyong provably LONG sa bawat
+    marker na binabasa ng runner (`_le_side_long`): `position.side`,
+    `position_intent`/`intent`, nested `side_long`. Ang row na inampon sa
+    ilalim ng operator repair ay may `position.side` at WALANG `side_long`
+    key — hindi ito dapat singilin bilang long by omission."""
+    _patch_claims(monkeypatch, [])
+    pos = {"quantity": 100, "avg_entry_price": 5.0, "stop_price": None, **pos_extra}
+    db = _FakeDb([_sess(1, state="live_entered", family="alpaca_spot",
+                        le={**le_extra, "position": pos})])
+    with pytest.raises(RuntimeError, match="position_risk_fields_invalid"):
+        RE.aggregate_open_risk_usd(db, user_id=1, execution_family="alpaca_spot")
+
+
+@pytest.mark.parametrize("le_extra,pos_extra", [
+    ({}, {}),
+    ({}, {"side": "long"}),
+    ({}, {"side": "buy", "position_intent": "buy_to_open"}),
+    ({"side_long": True}, {"side_long": True, "intent": "sell_to_close"}),
+])
+def test_held_stop_unknown_long_shaped_position_is_full_notional(monkeypatch, le_extra, pos_extra):
+    _patch_claims(monkeypatch, [])
+    pos = {"quantity": 100, "avg_entry_price": 5.0, "stop_price": None, **pos_extra}
+    db = _FakeDb([_sess(1, state="live_entered", family="alpaca_spot",
+                        le={**le_extra, "position": pos})])
+    total, rows = RE.aggregate_open_risk_usd(db, user_id=1, execution_family="alpaca_spot")
+    assert total == pytest.approx(500.0)
+    assert rows[0]["note"] == "stop_unknown_full_notional_bound"
+
+
 def test_note_rows_are_never_a_displacement_target():
     """Ang note row ay bookkeeping, hindi posisyong maaaring i-tighten."""
     open_rows = [
@@ -294,16 +335,21 @@ def test_rows_read_before_claims_runtime(monkeypatch):
 
 
 def _first_call_index(fn, *, attr=None, name=None) -> int:
+    """Lineno of the FIRST matching call in SOURCE order (ast.walk is
+    breadth-first, so the first-visited node is not the first-in-source one)."""
     tree = ast.parse(inspect.getsource(fn))
-    for idx, node in enumerate(ast.walk(tree)):
+    linenos: list[int] = []
+    for node in ast.walk(tree):
         if not isinstance(node, ast.Call):
             continue
         f = node.func
         if attr is not None and isinstance(f, ast.Attribute) and f.attr == attr:
-            return node.lineno
+            linenos.append(node.lineno)
         if name is not None and isinstance(f, ast.Name) and f.id == name:
-            return node.lineno
-    raise AssertionError(f"no call attr={attr} name={name}")
+            linenos.append(node.lineno)
+    if not linenos:
+        raise AssertionError(f"no call attr={attr} name={name}")
+    return min(linenos)
 
 
 @pytest.mark.parametrize("fn", [

@@ -164,16 +164,55 @@ def _patch_cancel(monkeypatch, result, calls=None):
      "unresolved_entry_order"),
     ("watching_live", {"entry_order_ids_all": ["a"], "entry_orders_resolved": {"a": "void"}},
      None),
-    ("watching_live", {"entry_place_count": 1}, "entry_place_count"),
-    ("watching_live", {"entry_place_count": "x"}, "entry_place_count_unreadable"),
-    ("watching_live", {"entry_client_order_id": "chili-1"}, "entry_client_order_id"),
+    # entry_place_count survives every intra-cycle return to watching (only a
+    # RECYCLE clears it): a declined/cancelled attempt is NOT entry in flight.
+    ("watching_live", {"entry_place_count": 1}, None),
+    ("watching_live", {"entry_place_count": "x"}, None),
+    # a bare CID left by a cancelled attempt is not entry work either — a CID
+    # that reached the durable claim ledger is handled by the cancel itself.
+    ("watching_live", {"entry_client_order_id": "chili-1"}, None),
     ("watching_live", {"entry_reconcile_pending_client_order_id": "chili-1"},
-     "entry_client_order_id"),
-    ("watching_live", {"entry_order_request": {"x": 1}}, "entry_order_request"),
+     "entry_reconcile_pending_client_order_id"),
+    ("watching_live", {"entry_order_request": {"x": 1}}, None),
     ("watching_live", "garbage", None),
 ])
 def test_reap_in_flight_reason_table(state, le, expected):
     assert AA._reap_in_flight_reason(state, le) == expected
+
+
+def test_in_flight_predicate_matches_the_displacement_lock_guard():
+    """Ang locked predicate ay dapat kapareho ng guard sa
+    _guarded_displacement_reap (submitted / oid / unresolved ids) — hindi mas
+    mahigpit sa paraang nagpa-park ng session magpakailanman."""
+    src = inspect.getsource(AA._reap_in_flight_reason)
+    body = src[src.index('"""', src.index('"""') + 3) + 3:]  # after the docstring
+    assert "entry_place_count" not in body
+    assert '"entry_client_order_id"' not in body
+    assert "entry_order_request" not in body
+
+
+# ── T1b: the declined-place shape IS reaped (224 rows / 14d on the live DB) ──
+
+
+@pytest.mark.parametrize("le", [
+    {"entry_place_count": 1},
+    {"entry_place_count": 3, "entry_client_order_id": "chili-19424-1"},
+    {"entry_place_count": 1, "entry_order_ids_all": ["a"],
+     "entry_orders_resolved": {"a": "void"}},
+])
+def test_watcher_that_bounced_pre_http_is_reaped(quiet, monkeypatch, le):
+    """WETO 19424: pending_place -> execution_bbo_stale -> back to watching,
+    place_count=1, walang order, walang claim. Dapat ma-reap sa base cutoff —
+    hindi 'reap ABORTED under lock' kada pass hanggang EOD."""
+    calls: list[int] = []
+    _patch_cancel(monkeypatch, {"ok": True, "state": "live_cancelled"}, calls)
+    row = _row(state="watching_live", le=le)
+    db = _LockingDb([row], locked_row=_row(state="watching_live", le=dict(le)))
+    assert AA._reap_stale_watching_sessions(db, user_id=1, now=datetime.utcnow()) == 1
+    assert calls == [19471]
+    assert db.nested_commits == 1
+    assert db.nested_rollbacks == 0
+    assert quiet == ["CANF"]
 
 
 # ── T2: the pure age anchor ──────────────────────────────────────────────────
@@ -317,12 +356,111 @@ def test_terminal_cancel_counts_and_writes_cooldown(quiet, monkeypatch, result):
     assert db.commits == 0, "ang terminal reap ay kino-commit ng caller (reaped>0)"
 
 
-def test_failed_cancel_is_neither_committed_nor_counted(quiet, monkeypatch):
+def test_failed_cancel_is_neither_committed_nor_counted(quiet, monkeypatch, caplog):
     _patch_cancel(monkeypatch, {"ok": False, "error": "not_cancellable"})
     db = _LockingDb([_row()])
-    assert AA._reap_stale_watching_sessions(db, user_id=1, now=datetime.utcnow()) == 0
+    with caplog.at_level("WARNING", logger=AA.logger.name):
+        assert AA._reap_stale_watching_sessions(db, user_id=1, now=datetime.utcnow()) == 0
     assert db.commits == 0
     assert quiet == []
+    # a failed cancel is logged as FAILED, never as a committed DEFERRED
+    msgs = [r.getMessage() for r in caplog.records]
+    assert any("reap FAILED" in m and "not_cancellable" in m for m in msgs), msgs
+    assert not any("reap DEFERRED" in m for m in msgs), msgs
+
+
+def test_deferred_cancel_logs_deferred_not_failed(quiet, monkeypatch, caplog):
+    _patch_cancel(monkeypatch, {"ok": True, "pending": "durable_alpaca_entry_claim_reconcile"})
+    db = _LockingDb([_row()])
+    with caplog.at_level("WARNING", logger=AA.logger.name):
+        AA._reap_stale_watching_sessions(db, user_id=1, now=datetime.utcnow())
+    msgs = [r.getMessage() for r in caplog.records]
+    assert any("reap DEFERRED" in m and "writes committed" in m for m in msgs), msgs
+    assert not any("reap FAILED" in m for m in msgs), msgs
+
+
+def test_cid_less_deferral_repeats_next_pass_by_design(quiet, monkeypatch):
+    """Ang CID-less durable-claim branch ay nagsusulat LANG ng pause (walang
+    pointers), kaya malinis pa rin ang le sa susunod na pass at uulit ang
+    cancel + commit hanggang mag-reconcile ang claim. Benign at sinasadya —
+    dokumentado sa docstring ng reaper; hindi alert condition."""
+    calls: list[int] = []
+    _patch_cancel(monkeypatch, {
+        "ok": True, "pending": "durable_alpaca_entry_claim_reconcile",
+        "terminalization_deferred": True, "state": "watching_live",
+    }, calls)
+    row = _row()
+    db = _LockingDb([row])
+    now = datetime.utcnow()
+    assert AA._reap_stale_watching_sessions(db, user_id=1, now=now) == 0
+    assert AA._reap_stale_watching_sessions(db, user_id=1, now=now + timedelta(seconds=10)) == 0
+    assert calls == [19471, 19471]
+    assert db.commits == 2
+    assert quiet == []
+
+
+class _CommitFailsOnceDb(_LockingDb):
+    """The mid-loop deferred commit hits a transient PG error exactly once."""
+
+    def __init__(self, rows, *, fail_on_session):
+        super().__init__(rows)
+        self._fail_on = fail_on_session
+        self._current = None
+        self.rollbacks = 0
+
+    def query(self, *_a, **_k):
+        return _RowAwareQuery(self)
+
+    def commit(self):
+        if self._current == self._fail_on:
+            self._fail_on = None
+            raise RuntimeError("SSL SYSCALL error: EOF detected")
+        self.commits += 1
+
+    def rollback(self):
+        self.rollbacks += 1
+
+
+class _RowAwareQuery(_LockedQuery):
+    def filter(self, *a, **_k):
+        # the locked probe filters by id: remember which row is being handled
+        for crit in a:
+            try:
+                self._db._current = int(crit.right.value)
+            except Exception:
+                pass
+        return self
+
+    def one_or_none(self):
+        return next((r for r in self._db.rows if r.id == self._db._current), None)
+
+
+def test_deferred_commit_failure_does_not_escape_the_pass(quiet, monkeypatch):
+    """Isang transient PG error sa deferred commit ay HINDI dapat lumabas sa
+    reaper (dating `raise` → run_auto_arm_pass abandoned, walang arming sa
+    cadence na iyon). Ang txn ay ni-reset; ang naunang terminal reap ay
+    nawala kasama ng txn kaya hindi na binibilang; tuloy sa susunod na row."""
+    results = {
+        1: {"ok": True, "state": "live_cancelled"},
+        2: {"ok": True, "pending": "durable_alpaca_entry_claim_reconcile"},
+        3: {"ok": True, "state": "live_cancelled"},
+    }
+    calls: list[int] = []
+
+    def _cancel(db, *, user_id, session_id):
+        calls.append(session_id)
+        return results[session_id]
+    monkeypatch.setattr(
+        "app.services.trading.momentum_neural.automation_query.cancel_automation_session",
+        _cancel,
+    )
+    rows = [_row(1, symbol="AAA"), _row(2, symbol="BBB"), _row(3, symbol="CCC")]
+    db = _CommitFailsOnceDb(rows, fail_on_session=2)
+    n = AA._reap_stale_watching_sessions(db, user_id=1, now=datetime.utcnow())
+    assert calls == [1, 2, 3], "ang pass ay dapat magpatuloy pagkatapos ng commit failure"
+    assert db.rollbacks == 1
+    assert n == 1, "ang reap ng AAA ay nawala sa failed txn; CCC lang ang bilang"
+    assert quiet == ["AAA", "CCC"]
 
 
 def test_cancel_returning_none_is_deferred_not_reaped(quiet, monkeypatch):

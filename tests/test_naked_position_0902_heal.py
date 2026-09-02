@@ -19,6 +19,7 @@ Runnable: pytest tests/test_naked_position_0902_heal.py -v
 """
 from __future__ import annotations
 
+import ast
 import inspect
 from types import SimpleNamespace
 
@@ -245,8 +246,31 @@ def test_no_legal_chain_fails_loudly_once_and_leaves_le_untouched(harness, monke
 # ── 9: AST / structure guards ────────────────────────────────────────────────
 
 
+def _fn_body_src(fn) -> str:
+    """Source of the function BODY without its docstring — the docstring names
+    the very identifiers these guards order, so searching it would satisfy the
+    asserts with prose instead of code."""
+    tree = ast.parse(inspect.getsource(fn))
+    node = next(n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef))
+    body = list(node.body)
+    if (
+        body
+        and isinstance(body[0], ast.Expr)
+        and isinstance(getattr(body[0], "value", None), ast.Constant)
+        and isinstance(body[0].value.value, str)
+    ):
+        body = body[1:]
+    return ast.unparse(ast.Module(body=body, type_ignores=[]))
+
+
+def test_fn_body_src_strips_the_docstring():
+    body = _fn_body_src(LR._heal_unrecognized_entry_fill)
+    assert "Bug B2" not in body
+    assert "LEGAL CHAIN MUNA" not in body
+
+
 def test_chain_precedes_bind_and_the_swallow_is_gone():
-    src = inspect.getsource(LR._heal_unrecognized_entry_fill)
+    src = _fn_body_src(LR._heal_unrecognized_entry_fill)
     assert src.index("_transition_recovered_primary_to_pending") < src.index("_bind_recovered_entry_order")
     assert "_HEALABLE_PRE_ENTRY_STATES" in src
     assert src.index("entry_orders_resolved") < src.index("_recover_entry_order_by_client_id")

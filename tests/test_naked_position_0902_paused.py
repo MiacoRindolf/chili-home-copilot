@@ -278,8 +278,70 @@ def test_preamble_paused_return_attempts_adoption_and_emits_once():
     assert "live_tick_operator_paused_block" in before2
 
 
+def _strip_docstring(tree: ast.AST) -> ast.AST:
+    """Drop the FunctionDef docstring so the string guards below match CODE,
+    not the prose that names the same outcomes."""
+    node = next(n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef))
+    if (
+        node.body
+        and isinstance(node.body[0], ast.Expr)
+        and isinstance(getattr(node.body[0], "value", None), ast.Constant)
+        and isinstance(node.body[0].value.value, str)
+    ):
+        node.body = node.body[1:]
+    return tree
+
+
+def test_paused_seam_binds_every_argument_before_the_call_and_matches_the_signature():
+    """#1283 lesson: helper tests green, seam inert. The seam in
+    tick_live_session must pass EXACTLY the helper's parameters, and every
+    name it passes must be bound (a parameter of tick_live_session or an
+    assignment) BEFORE the call — a later refactor that moves `adapter =` /
+    `le =` below the pause check, or renames a kwarg, fails here instead of
+    turning every paused tick into `adopt_exception:NameError`."""
+    tick_tree = ast.parse(inspect.getsource(LR.tick_live_session))
+    tick_fn = next(n for n in ast.walk(tick_tree) if isinstance(n, ast.FunctionDef))
+    calls = [
+        n for n in ast.walk(tick_fn)
+        if isinstance(n, ast.Call)
+        and isinstance(n.func, ast.Name)
+        and n.func.id == "_adopt_submitted_entry_fill_while_paused"
+    ]
+    assert len(calls) == 1, "the seam is wired exactly once"
+    call = calls[0]
+    sig = inspect.signature(LR._adopt_submitted_entry_fill_while_paused)
+    params = sig.parameters
+    positional = [p for p in params.values() if p.kind is p.POSITIONAL_OR_KEYWORD]
+    kw_only = {p.name for p in params.values() if p.kind is p.KEYWORD_ONLY}
+    assert len(call.args) == len(positional), (len(call.args), [p.name for p in positional])
+    assert {k.arg for k in call.keywords} == kw_only, ({k.arg for k in call.keywords}, kw_only)
+    # every Name the call passes is bound before the call line
+    bound_params = {a.arg for a in tick_fn.args.args + tick_fn.args.kwonlyargs}
+    assigned_before: set[str] = set()
+    for node in ast.walk(tick_fn):
+        if isinstance(node, (ast.Assign, ast.AnnAssign, ast.NamedExpr)) and node.lineno < call.lineno:
+            targets = node.targets if isinstance(node, ast.Assign) else [node.target]
+            for t in targets:
+                for leaf in ast.walk(t):
+                    if isinstance(leaf, ast.Name):
+                        assigned_before.add(leaf.id)
+    passed = [a for a in call.args if isinstance(a, ast.Name)] + [
+        k.value for k in call.keywords if isinstance(k.value, ast.Name)
+    ]
+    assert len(passed) == len(call.args) + len(call.keywords), "every argument is a plain name"
+    for name_node in passed:
+        assert name_node.id in bound_params or name_node.id in assigned_before, (
+            f"{name_node.id} is not bound before the paused-adoption seam (line {call.lineno})"
+        )
+    # the seam sits inside the operator-pause branch, and its result gates the return
+    src = ast.unparse(tick_fn)
+    i_call = src.index("_adopt_submitted_entry_fill_while_paused(")
+    i_ret = src.index("'skipped': 'operator_paused'")
+    assert i_call < src.index("if not _pa.get('adopted')") < i_ret
+
+
 def test_helper_never_places_or_cancels_and_voids_only_after_resolution():
-    tree = ast.parse(inspect.getsource(LR._adopt_submitted_entry_fill_while_paused))
+    tree = _strip_docstring(ast.parse(inspect.getsource(LR._adopt_submitted_entry_fill_while_paused)))
     called = set()
     for node in ast.walk(tree):
         if isinstance(node, ast.Call):

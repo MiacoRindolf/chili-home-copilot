@@ -1839,6 +1839,23 @@ def _reap_in_flight_reason(state: Any, le: Any) -> str | None:
     decision is made against the state the runner actually committed.
 
     Pure: no DB, no clock. Any signal of entry work in flight => a reason.
+
+    The signals are exactly the ones the unlocked guard and the rank-displacement
+    lock-time guard (``_guarded_displacement_reap``) honour — state, an active
+    entry order id, ``entry_submitted``, an unresolved order in history — plus a
+    durable-claim reconcile still pending on a CID. Deliberately NOT a signal:
+    ``entry_place_count``. That counter is only cleared by a RECYCLE
+    (``_RECYCLE_ENTRY_STATE_KEYS``) and survives every intra-cycle return to
+    watching (entry_ack_timeout, terminal zero-fill, a pre-HTTP
+    live_blocked_by_risk / adaptive-builder bounce), so a watcher that ever
+    attempted one entry this cycle would pass the unlocked guard, win the NOWAIT
+    probe and abort here on every pass — never reaped, slot never freed (224 such
+    rows in 14d on the live DB were reaped by the pre-lock reaper). Same for a
+    bare ``entry_client_order_id``: a CID that reached the durable claim ledger
+    is handled by ``cancel_automation_session`` under this very lock; a CID left
+    behind by a cancelled attempt is not entry work. A row that is mid-place
+    holds this lock across broker HTTP, so the NOWAIT probe — not a counter —
+    is what excludes it.
     """
     if str(state or "") not in _REAPABLE_PRE_ENTRY_STATES:
         return f"state_not_reapable:{state}"
@@ -1851,15 +1868,8 @@ def _reap_in_flight_reason(state: Any, le: Any) -> str | None:
     resolved = le.get("entry_orders_resolved") or {}
     if any(x not in resolved for x in ids):
         return "unresolved_entry_order"
-    try:
-        if int(le.get("entry_place_count") or 0) > 0:
-            return "entry_place_count"
-    except (TypeError, ValueError):
-        return "entry_place_count_unreadable"
-    if le.get("entry_client_order_id") or le.get("entry_reconcile_pending_client_order_id"):
-        return "entry_client_order_id"
-    if le.get("entry_order_request"):
-        return "entry_order_request"
+    if le.get("entry_reconcile_pending_client_order_id"):
+        return "entry_reconcile_pending_client_order_id"
     return None
 
 
@@ -1907,6 +1917,16 @@ def _reap_stale_watching_sessions(db: Session, *, user_id: int | None, now: date
           ``reaped > 0`` and otherwise rolls the read txn back before the probe
           phase, which would erase those writes and re-run the cancel every
           pass. Such a cancel is committed here, immediately, and not counted.
+          A CID-bearing deferral writes ``entry_submitted=True`` + pointers, so
+          the unlocked guard skips the row on later passes (no repeat). The
+          CID-LESS durable-claim branch writes ONLY the operator pause (no
+          pointers), so that row is re-cancelled — and its pause re-committed —
+          on every pass until the claim reconciles: benign (the branch never
+          reaches broker HTTP; same cadence as the pre-lock reaper), so a
+          repeating ``reap DEFERRED`` for one session with
+          ``terminalization_deferred=True`` is expected, not an alert. A cancel
+          that FAILS (``ok=False`` / ``None``) commits nothing and logs
+          ``reap FAILED`` (distinct from DEFERRED); it also repeats each pass.
     """
     base_sec = _max_watch_seconds()
     cutoff = now - timedelta(seconds=base_sec)
@@ -2208,19 +2228,44 @@ def _reap_stale_watching_sessions(db: Session, *, user_id: int | None, now: date
                 try:
                     db.commit()
                 except Exception:
+                    # Never let a transient PG error escape the reaper: the
+                    # unguarded call in run_auto_arm_pass would abandon the
+                    # WHOLE pass (no arming on this cadence). The failed COMMIT
+                    # already aborted the txn, so every uncommitted write of
+                    # this pass — including earlier TERMINAL reaps — is gone:
+                    # reset the session and the count (cooldowns for those
+                    # symbols were already written; harmless). The deferred
+                    # cancel simply re-runs next pass, as before this commit.
                     logger.warning(
-                        "[auto_arm] reap DEFERRED commit failed session=%s",
-                        s.id, exc_info=True,
+                        "[auto_arm] reap DEFERRED commit failed session=%s — "
+                        "txn reset, %s earlier reap(s) this pass discarded; "
+                        "cancel re-runs next pass",
+                        s.id, reaped, exc_info=True,
                     )
-                    raise
+                    try:
+                        db.rollback()
+                    except Exception:
+                        pass
+                    reaped = 0
+                    continue
                 deferred += 1
+                logger.warning(
+                    "[auto_arm] reap DEFERRED session=%s %s state=%s result=%s — hindi "
+                    "na-terminalize; walang cooldown, slot hindi pinalaya; writes committed",
+                    s.id, s.symbol, s.state,
+                    {k: _res.get(k) for k in (
+                        "ok", "error", "pending", "terminalization_deferred", "state"
+                    )},
+                )
+                continue
+            # ok=False / None: nothing was written, nothing committed. Distinct
+            # line so the DEFERRED watch never conflates a failed cancel (which
+            # legitimately repeats every pass) with a committed deferral.
             logger.warning(
-                "[auto_arm] reap DEFERRED session=%s %s state=%s result=%s — hindi "
-                "na-terminalize; walang cooldown, slot hindi pinalaya; writes committed",
+                "[auto_arm] reap FAILED session=%s %s state=%s result=%s — cancel "
+                "hindi tinanggap; walang write, walang commit, walang cooldown",
                 s.id, s.symbol, s.state,
-                {k: _res.get(k) for k in (
-                    "ok", "error", "pending", "terminalization_deferred", "state"
-                )},
+                {k: _res.get(k) for k in ("ok", "error", "pending", "state")},
             )
             continue
         reaped += 1
