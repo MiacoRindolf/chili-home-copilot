@@ -41,6 +41,19 @@ from tests.test_momentum_paper_runner import _seed_live_eligible_row
 # Harness
 # ---------------------------------------------------------------------------
 
+@pytest.fixture(autouse=True)
+def _frozen_account_identity(stable_non_alpaca_account_identity):
+    """Every family driven here is NON-Alpaca, and since #1024 (2026-08-11) the tick
+    runs ``_non_alpaca_account_identity_fence`` at ``tick_start`` BEFORE any FSM branch:
+    a session with no frozen ``non_alpaca_account_identity`` is quarantined
+    (``skipped=non_alpaca_account_identity_quarantined``,
+    ``reason=non_alpaca_account_identity_unfrozen``) and the circuit is never reached —
+    the session stays ``live_entered``. This suite tests the CIRCUIT wiring, not the
+    identity fence (that lives in ``tests/test_live_runner_non_alpaca_account_identity.py``),
+    so it runs behind the shared conftest fixture that pins a stable identity."""
+    return stable_non_alpaca_account_identity
+
+
 def _fresh() -> FreshnessMeta:
     return FreshnessMeta(retrieved_at_utc=datetime.now(timezone.utc), max_age_seconds=120.0)
 

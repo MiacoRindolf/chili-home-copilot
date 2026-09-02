@@ -2,9 +2,11 @@
 
 OPTION A fix (2026-06-30 premarket-freeze root): a max-loss-circuit fire is the bot's
 own mechanical per-trade stop doing its job on ONE position — it is NOT the PSY101
-human-tilt signature, so it must NOT arm the cross-day no-arm lockout. The two genuine
-arming sites survive: a GLOBAL daily-loss breach (governance.set_next_day_trading_lockout
-called from global_daily_loss_breached) and the daily-trade-count budget (live_runner).
+human-tilt signature, so it must NOT arm the cross-day no-arm lockout. ONE genuine arming
+site survives: a GLOBAL daily-loss breach (governance.set_next_day_trading_lockout called
+from check_daily_loss_breach). The daily-trade-count budget arm in live_runner was ALSO
+removed (A1(c), #1024, 2026-08-11) — a per-day trade-count ceiling on a BOT is a
+quality-aware budget block, not a broken-discipline event.
 
 These tests pin:
   1. PROTECTION-PRESERVED: a genuine daily_loss_breach STILL arms the carryover lockout
@@ -13,7 +15,8 @@ These tests pin:
   2. CIRCUIT-DOES-NOT-ARM (the fix): the circuit-breach branch writes NO lockout row for
      reason=max_loss_circuit (source has no such call; an explicit max_loss_circuit arm is
      never written) -> next-ET-session check is False and Guard 1b does NOT skip.
-  3. count-budget arming UNCHANGED (regression guard on the surviving site).
+  3. count-budget arming REMOVED from live_runner (A1(c)); the governance helper itself
+     still writes a correct carryover row for that reason when called directly.
   4. today-unblock RESET semantics (the id=151-shaped row is cleared by the flag / a
      breaker_tripped=FALSE row, NOT by the code edit).
   5. flag-OFF parity: check() is byte-identical not-locked.
@@ -102,10 +105,14 @@ def test_genuine_daily_loss_breach_still_arms_nextday_lockout(db, monkeypatch):
     # A small absolute USD cap and a large simulated realized loss -> genuine breach.
     monkeypatch.setattr(settings, "chili_global_max_daily_loss_usd", 100.0, raising=False)
     monkeypatch.setattr(settings, "chili_global_max_daily_loss_pct_of_equity", 0.0, raising=False)
+    # ``global_realized_pnl_today_et`` gained a keyword-only ``as_of_utc`` (#1024,
+    # 2026-08-11) that ``check_daily_loss_breach`` always forwards — accept it.
     monkeypatch.setattr(
         governance,
         "global_realized_pnl_today_et",
-        lambda _db, user_id=None: {"total_usd": -500.0, "autotrader_usd": -500.0, "momentum_usd": 0.0},
+        lambda _db, user_id=None, **_kw: {
+            "total_usd": -500.0, "autotrader_usd": -500.0, "momentum_usd": 0.0,
+        },
         raising=True,
     )
     _reset_kill_switch()
@@ -213,12 +220,16 @@ def test_circuit_breach_path_writes_no_lockout_row_and_does_not_lock_next_sessio
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# 3. count-budget arming UNCHANGED — regression guard on the surviving site.
+# 3. count-budget arming REMOVED from live_runner (A1(c)) — the helper still carries over.
 # ─────────────────────────────────────────────────────────────────────────────
-def test_daily_trade_count_budget_still_arms_nextday_lockout(db, monkeypatch):
-    """The daily_trade_count_budget arming site (live_runner.py:9531) is UNTOUCHED: it
-    still calls set_next_day_trading_lockout('daily_trade_count_budget'). Drive that arm
-    and assert it writes the carryover row + locks the next ET session."""
+def test_daily_trade_count_budget_no_longer_arms_from_runner_but_helper_carries_over(db, monkeypatch):
+    """A1(c) (#1024, 2026-08-11): the live_runner daily_trade_count_budget block no longer
+    calls set_next_day_trading_lockout — the 07-02 landmine fired it 98x and armed a
+    next-day lockout for what is a normal quality-aware budget block on a BOT. Pin BOTH
+    halves: (a) the runner source carries no such arm and keeps the A1(c) rationale;
+    (b) the governance helper, called directly with that reason, still writes the
+    carryover row and locks the next ET session (a deliberate future re-arm keeps its
+    semantics)."""
     monkeypatch.setattr(settings, _FLAG, True, raising=False)
 
     armed = set_next_day_trading_lockout("daily_trade_count_budget")
@@ -230,13 +241,17 @@ def test_daily_trade_count_budget_still_arms_nextday_lockout(db, monkeypatch):
     assert rows[0].d == tomorrow
     assert rows[0].breaker_tripped is True
 
-    # And the surviving call site still references the reason in source.
+    # (a) The runner no longer arms the lockout for this reason, and says why.
     from app.services.trading.momentum_neural import live_runner
 
     src = inspect.getsource(live_runner)
-    assert 'set_next_day_trading_lockout("daily_trade_count_budget")' in src
+    assert 'set_next_day_trading_lockout("daily_trade_count_budget")' not in src
+    assert "set_next_day_trading_lockout('daily_trade_count_budget')" not in src
+    assert "A1(c): the NEXT-day-lockout arming call is REMOVED" in src
+    # The budget block itself is still wired (it blocks the entry; it just does not lock).
+    assert '"skipped": "daily_trade_count_budget"' in src
 
-    # Roll the eff-day to TODAY ET and confirm it locks.
+    # (b) Roll the eff-day to TODAY ET and confirm the helper-written row locks.
     today, _tom = _et_today_tomorrow()
     db.execute(
         text(
