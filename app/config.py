@@ -10085,6 +10085,18 @@ class Settings(BaseSettings):
         default=True,
         validation_alias=AliasChoices("CHILI_MOMENTUM_EXIT_CONTINUATION_WAKE_ENABLED"),
     )
+    # BAILOUT WAKE (2026-09-02, #1281). Ang bawat paglipat sa BAILOUT (max-loss
+    # circuit, stop breach, viability, breakout-fail) ay BUMABALIK mula sa tick;
+    # ang exit submit ay nasa SUSUNOD na invocation, na sa batch mode ay 10-30s.
+    # AUUD 09-01: live_bailout 11:11:31.7 -> unang exit pricing +4.1s -> fill
+    # 14.4s pagkatapos, 5.17% sa ilalim ng floor (-44.01 sa -6.54 na plano).
+    # Ang tick-cross tracker ay gumigising lang sa bagong stop cross/bagong
+    # high, hindi dahil pumutok ang circuit. Sariling switch, gaya ng dalawang
+    # waker sa itaas -- ang pagpatay sa isa ay hindi pumapatay sa iba.
+    chili_momentum_bailout_wake_enabled: bool = Field(
+        default=True,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_BAILOUT_WAKE_ENABLED"),
+    )
     # Ang ignition→arm bridge ay nagda-drain ng pending set MINSAN, sa entry. Ang
     # symbol na na-enqueue HABANG tumatakbo ang pass (segundo ang haba) ay
     # naiiwan hanggang may ibang ignition tick na manalo ng lock. Ito ang bilang

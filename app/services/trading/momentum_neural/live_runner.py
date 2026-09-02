@@ -771,6 +771,52 @@ def _exit_result_wants_continuation(result: Any, le: Any) -> bool:
     return True
 
 
+# BAILOUT WAKE (2026-09-02, #1281) — ang kapatid ng exit continuation sa
+# KABILANG dulo ng parehong puwang. Ang bawat paglipat sa BAILOUT (max-loss
+# circuit, stop breach, viability, breakout-fail — 13 site) ay BUMABALIK mula
+# sa tick; ang mismong exit submit ay nasa `st == STATE_LIVE_BAILOUT` na sangay
+# ng SUSUNOD na invocation, na sa batch mode ay 10–30s ang layo. Sukat AUUD
+# 2026-09-01: live_bailout 11:11:31.7 → unang exit pricing +4.1s → deadman
+# freeze → +2.0s (ang continuation sa itaas) → fill 11:11:46.1: 14.4s mula
+# circuit hanggang fill, 5.17% sa ilalim ng floor. Ang tick-cross tracker ay
+# gumigising lang sa bagong stop cross o bagong high — hindi dahil pumutok ang
+# circuit — kaya ang +4.1s ay swerte pa. Walang bagong awtoridad dito: ang
+# na-dispatch na tick ay muling nagbabasa ng sariwang quote, dumadaan sa halt
+# gate ng BAILOUT handler, at ang FSM pa rin ang nagpapasya. Sariling switch.
+_BAILOUT_WAKE_DELAY_S = 0.5
+
+
+def _schedule_bailout_wake(session_id: int) -> bool:
+    """Wake the pulse that submits the bailout exit now, not at the next cadence."""
+
+    return _schedule_dispatch_wake(
+        int(session_id),
+        delay_s=_BAILOUT_WAKE_DELAY_S,
+        name="bailout-wake",
+        enabled=bool(
+            getattr(settings, "chili_momentum_bailout_wake_enabled", True)
+        ),
+    )
+
+
+def _transition_to_bailout(db: Session, sess: TradingAutomationSession) -> None:
+    """Lumipat sa BAILOUT at gisingin agad ang pulse na magsusumite ng exit.
+
+    Ang transition ay nauuna (naitala na ang state bago ang gising); ang gising
+    ay hint lamang at hindi kailanman makakapigil sa transition.
+    """
+
+    _safe_transition(db, sess, STATE_LIVE_BAILOUT)
+    try:
+        _schedule_bailout_wake(int(sess.id))
+    except Exception:
+        _log.debug(
+            "[momentum_live] bailout wake schedule failed sid=%s",
+            getattr(sess, "id", None),
+            exc_info=True,
+        )
+
+
 # ── REPLAY v3 P1 — RECORDED-OHLCV PROVIDER SEAM (the one heavy NETWORK read) ──────
 # ``fetch_ohlcv_df`` is the single heavy external read inside ``tick_live_session`` (15m
 # ATR / expected-move / the pullback + volume triggers — ~13 call sites). To replay the
@@ -39785,7 +39831,7 @@ def tick_live_session(
                 _commit_le(sess, le)
                 _threshold = int(getattr(settings, "chili_momentum_halt_down_cascade_threshold", 2) or 2)
                 if _cnt >= max(2, _threshold) and st != STATE_LIVE_BAILOUT:
-                    _safe_transition(db, sess, STATE_LIVE_BAILOUT)
+                    _transition_to_bailout(db, sess)
                     _emit(db, sess, "live_bailout", {
                         "reason": "halt_down_cascade_liquidate",
                         "consecutive_halt_downs": _cnt,
@@ -39854,7 +39900,7 @@ def tick_live_session(
                             "cross_check": _c1_iq_dbg,
                         })
                 if not _c1_phantom:
-                    _safe_transition(db, sess, STATE_LIVE_BAILOUT)
+                    _transition_to_bailout(db, sess)
                     _emit(db, sess, "live_bailout", {"reason": "max_loss_per_trade", "unrealized_pnl": unrealized_pnl})
                     db.flush()
                     return {"ok": True, "session_id": sess.id, "state": sess.state}
@@ -39936,7 +39982,7 @@ def tick_live_session(
                         ):
                             le["exit_floor_anchored"] = True
                         _commit_le(sess, le)
-                        _safe_transition(db, sess, STATE_LIVE_BAILOUT)
+                        _transition_to_bailout(db, sess)
                         _emit(db, sess, "live_bailout", {
                             "reason": "max_loss_circuit",
                             "unrealized_pnl": _circuit["unrealized_pnl"],
@@ -40115,7 +40161,7 @@ def tick_live_session(
                 if _sh.cut:
                     le["last_bailout_trigger"] = "smart_hold_cut"
                     _commit_le(sess, le)
-                    _safe_transition(db, sess, STATE_LIVE_BAILOUT)
+                    _transition_to_bailout(db, sess)
                     _emit(db, sess, "live_bailout", {
                         "reason": "smart_hold_fast_bail",
                         "smart_hold_reason": _sh.reason,
@@ -40202,7 +40248,7 @@ def tick_live_session(
                         "bailout_dwell_pending": True}
             le["last_bailout_trigger"] = "breakout_failed_to_hold"
             _commit_le(sess, le)
-            _safe_transition(db, sess, STATE_LIVE_BAILOUT)
+            _transition_to_bailout(db, sess)
             _emit(db, sess, "live_bailout", {
                 "reason": "breakout_failed_fast_bail",
                 "breakout_level": le.get("breakout_level_price"),
@@ -40239,7 +40285,7 @@ def tick_live_session(
         ):
             le["last_bailout_trigger"] = "instant_bid_below_fill"
             _commit_le(sess, le)
-            _safe_transition(db, sess, STATE_LIVE_BAILOUT)
+            _transition_to_bailout(db, sess)
             _emit(db, sess, "live_bailout", {
                 "reason": "instant_bid_below_fill_cut",
                 "entry_price": avg,
@@ -40277,7 +40323,7 @@ def tick_live_session(
         ):
             le["last_bailout_trigger"] = "instant_bid_above_fill_unconfirmed"
             _commit_le(sess, le)
-            _safe_transition(db, sess, STATE_LIVE_BAILOUT)
+            _transition_to_bailout(db, sess)
             _emit(db, sess, "live_bailout", {
                 "reason": "instant_bid_above_fill_unconfirmed",
                 "entry_price": avg,
@@ -40315,7 +40361,7 @@ def tick_live_session(
             if _scalp_max_min > 0.0 and held >= _scalp_max_min * 60.0:
                 le["last_bailout_trigger"] = "sub5min_scalp_timestop"
                 _commit_le(sess, le)
-                _safe_transition(db, sess, STATE_LIVE_BAILOUT)
+                _transition_to_bailout(db, sess)
                 _emit(db, sess, "live_bailout", {
                     "reason": "sub5min_scalp_bailout",
                     "entry_price": avg,
@@ -40364,7 +40410,7 @@ def tick_live_session(
             ):
                 le["last_bailout_trigger"] = "no_confirmation"
                 _commit_le(sess, le)
-                _safe_transition(db, sess, STATE_LIVE_BAILOUT)
+                _transition_to_bailout(db, sess)
                 _emit(db, sess, "live_bailout", {
                     "reason": "bail_on_no_confirmation",
                     "entry_price": avg,
@@ -40464,7 +40510,7 @@ def tick_live_session(
             return {"ok": True, "session_id": sess.id, "state": sess.state}
 
         if float(via.viability_score or 0) < float(params["bailout_viability_floor"]):
-            _safe_transition(db, sess, STATE_LIVE_BAILOUT)
+            _transition_to_bailout(db, sess)
             _emit(db, sess, "live_bailout", {"viability_score": via.viability_score})
             db.flush()
             return {"ok": True, "session_id": sess.id, "state": sess.state}
@@ -40703,7 +40749,7 @@ def tick_live_session(
                     if _lv_closed_below and _lv_bid_below_margin and not _lv_flow_pos:
                         le["last_bailout_trigger"] = "lost_vwap_flatten"
                         _commit_le(sess, le)
-                        _safe_transition(db, sess, STATE_LIVE_BAILOUT)
+                        _transition_to_bailout(db, sess)
                         _emit(db, sess, "live_lost_vwap_flatten", {
                             "reason": "lost_vwap_confirmed",
                             "bid": float(bid),
@@ -40759,7 +40805,7 @@ def tick_live_session(
                     if _bos_fn(_bos_df, current_close=_bos_close, buffer_pct=_bos_buf):
                         le["last_bailout_trigger"] = "bos_exit_live"
                         _commit_le(sess, le)
-                        _safe_transition(db, sess, STATE_LIVE_BAILOUT)
+                        _transition_to_bailout(db, sess)
                         _emit(db, sess, "live_bos_exit", {
                             "reason": "close_below_structure",
                             "bid": float(bid),
@@ -40938,7 +40984,7 @@ def tick_live_session(
                         else:
                             le["last_bailout_trigger"] = "topping_tail_runner"
                             _commit_le(sess, le)
-                            _safe_transition(db, sess, STATE_LIVE_BAILOUT)
+                            _transition_to_bailout(db, sess)
                             _emit(db, sess, "live_bailout", {
                                 "reason": "topping_tail_runner_exit", "bid": bid,
                                 "high_water_mark": _float_or_none(pos.get("high_water_mark")),
