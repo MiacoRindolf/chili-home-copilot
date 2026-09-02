@@ -12,6 +12,7 @@ import statistics
 from dataclasses import asdict, dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Any, Callable, Iterator, Optional
+from zoneinfo import ZoneInfo
 
 from sqlalchemy import and_, func
 
@@ -4175,6 +4176,413 @@ def prior_day_rejection_seed(db: Any, symbol: str) -> int:
         return 1 if int(row or 0) > 0 else 0
     except Exception:
         return 0
+
+
+# ── SPENT-LEG SEED (2026-09-02 evidence, Alpaca momentum lane) ────────────────
+# Every loss of 09-01/09-02 was a SPENT-LEG entry: a name whose session HOD was
+# already minutes old and percent away when the trigger fired (CANF 4.9297 @
+# 07:02 ET, entry 4.34 @ 07:10 — ~8 min / 12%, MFE 0.13R, -78.13; JLHL 7.92,
+# entry 7.396 7.6 min later, 6.6% under, -18.83; Ross on CANF at 07:15: "this
+# is a stock that is just no good"). Nothing in main measures HOD age x depth on
+# the FIRST entry: the sticky bench needs a confirmed backside shape (8 above-
+# VWAP spent legs never latched), the g4 escalation only starts after a
+# stop-out, retrace_veto is blind to a 5-12% pullback on a +30% day.
+#
+# This is NOT a new gate. It SEEDS the EXISTING g4 re-entry escalation (level
+# 1, the #1252 cross-day seed's slot) and hands the session HOD to
+# reentry_escalation_decision as the reclaim reference, so the same WAIT that
+# already governs re-entries governs the first entry on a spent leg: the WAIT
+# clears the moment price prints at/above the top (or the top itself moves).
+#
+# HONEST COST: at level 1 _reclaim_required() = HOD + 0, so non-leader
+# STRUCTURAL pullback triggers are ALSO blocked below the HOD; only the day
+# leader with positive tape passes via leader_ignition_bypass. Evidence:
+# C67 (67 live fills 06-12..09-02) hard-veto form blocks 33 L / 2 W (JZXN
+# +182 = 16.4R, VTAK +4); July half as a HARD veto is net -2.3R (winner R
+# blocked +16.6 vs loser R -14.3) — only the WAIT form (JZXN re-took its HOD 4
+# min after entry ⇒ cleared) is defensible, and only the interleaved replay
+# A/B can price the re-admissions. Current-era entry-quality dollars uniquely
+# prevented: CANF#1 -78.13, JLHL -18.83, LIDR#2 -2.86 (3 outcomes). Documented
+# misses: UPC (3.6% under), AUUD (borderline by source). Fixture notes in
+# tests/test_entry_gate_evidence_0902_spent_leg_seed.py.
+_SPENT_LEG_MARKER_KEY = "g4_spent_leg"
+_SPENT_LEG_TICK_HOD_KEY = "spent_leg_tick_hod"
+_SPENT_LEG_LEVEL_KEY = "g4_reentry_escalation"
+_SPENT_LEG_ET = ZoneInfo("America/New_York")
+
+
+def _spent_leg_aware_utc(value: Any) -> datetime | None:
+    """tz-AWARE UTC datetime from datetime / ISO string; naive read as UTC;
+    None on anything unparseable."""
+    try:
+        if value is None:
+            return None
+        if isinstance(value, datetime):
+            dt = value
+        else:
+            s = str(value).strip()
+            if not s:
+                return None
+            if s.endswith("Z"):
+                s = s[:-1] + "+00:00"
+            dt = datetime.fromisoformat(s)
+        if dt.tzinfo is None:
+            return dt.replace(tzinfo=timezone.utc)
+        return dt.astimezone(timezone.utc)
+    except (TypeError, ValueError, AttributeError):
+        return None
+
+
+def _spent_leg_pos_float(value: Any) -> float | None:
+    try:
+        if value is None:
+            return None
+        f = float(value)
+        return f if (math.isfinite(f) and f > 0.0) else None
+    except (TypeError, ValueError):
+        return None
+
+
+def _spent_leg_nonneg_float(value: Any) -> float | None:
+    try:
+        if value is None:
+            return None
+        f = float(value)
+        return f if (math.isfinite(f) and f >= 0.0) else None
+    except (TypeError, ValueError):
+        return None
+
+
+def spent_leg_seed_decision(
+    *,
+    cur_hod: Any,
+    hod_ts: Any,
+    hod_date_et: Any,
+    live_px: Any,
+    now_utc: Any,
+    session_date_et: Any,
+    frame_age_s: Any,
+    coverage_gap_s: Any,
+    interval_s: Any,
+    min_age_min: float = 5.0,
+    min_dd_pct: float = 5.0,
+    max_frame_age_s: float = 120.0,
+) -> tuple[bool, dict[str, Any]]:
+    """PURE spent-leg predicate — TRUE iff the FIRST entry on this name should be
+    seeded into g4 level 1 with ``cur_hod`` as the reclaim reference.
+
+    Order (every early exit is FAIL-OPEN = no seed):
+      unreadable inputs                         -> spent_leg_unreadable
+      HOD bar not from today's ET session       -> spent_leg_hod_not_today
+      frame stale AND no tick coverage          -> spent_leg_frame_stale
+         (T = max(2*interval_s, max_frame_age_s); the tick-running high bridges
+          a stale frame when the session has been ticking since before the
+          frame's last bar — cache_age_seconds is 0.0 on every store and cannot
+          be used; the 08-26 entry-path frame age was p50 10.6 min, so a frame
+          guard alone would make the seed near-inert)
+      price at/above the top                    -> spent_leg_at_or_above_hod
+      HOD younger than min_age_min (bar END)    -> spent_leg_too_young
+      drawdown under min_dd_pct                 -> spent_leg_too_shallow
+      else                                      -> spent_leg_seed
+    Returns ``(seed, debug)``; debug always carries ``reason``."""
+    dbg: dict[str, Any] = {"reason": None}
+    hod = _spent_leg_pos_float(cur_hod)
+    px = _spent_leg_pos_float(live_px)
+    hod_dt = _spent_leg_aware_utc(hod_ts)
+    now_dt = _spent_leg_aware_utc(now_utc)
+    hod_day = str(hod_date_et or "").strip()
+    sess_day = str(session_date_et or "").strip()
+    try:
+        _min_age = float(min_age_min)
+        _min_dd = float(min_dd_pct)
+        _max_age = float(max_frame_age_s)
+    except (TypeError, ValueError):
+        dbg["reason"] = "spent_leg_unreadable"
+        return False, dbg
+    if (
+        hod is None or px is None or hod_dt is None or now_dt is None
+        or not hod_day or not sess_day
+        or not (math.isfinite(_min_age) and math.isfinite(_min_dd) and math.isfinite(_max_age))
+    ):
+        dbg["reason"] = "spent_leg_unreadable"
+        return False, dbg
+    dbg.update({"cur_hod": hod, "live_px": px, "hod_date_et": hod_day, "session_date_et": sess_day})
+    if hod_day != sess_day:
+        dbg["reason"] = "spent_leg_hod_not_today"
+        return False, dbg
+    _iv = _spent_leg_pos_float(interval_s) or 60.0
+    _t = max(2.0 * _iv, _max_age)
+    _fa = _spent_leg_nonneg_float(frame_age_s)
+    _cg = _spent_leg_nonneg_float(coverage_gap_s)
+    _fa_eff = _fa if _fa is not None else float("inf")
+    _cg_eff = _cg if _cg is not None else float("inf")
+    dbg.update({"frame_age_s": _fa, "coverage_gap_s": _cg, "stale_threshold_s": round(_t, 3)})
+    if _fa_eff > _t and _cg_eff > _t:
+        dbg["reason"] = "spent_leg_frame_stale"
+        return False, dbg
+    if px >= hod:
+        dbg["reason"] = "spent_leg_at_or_above_hod"
+        return False, dbg
+    hod_age_min = (now_dt - hod_dt).total_seconds() / 60.0
+    dd_pct = (hod - px) / hod * 100.0
+    dbg.update({"hod_age_min": round(hod_age_min, 3), "dd_pct": round(dd_pct, 4)})
+    if hod_age_min < _min_age:
+        dbg["reason"] = "spent_leg_too_young"
+        return False, dbg
+    if dd_pct < _min_dd:
+        dbg["reason"] = "spent_leg_too_shallow"
+        return False, dbg
+    dbg["reason"] = "spent_leg_seed"
+    return True, dbg
+
+
+def apply_spent_leg_tick(
+    le: dict[str, Any],
+    *,
+    symbol: str,
+    enabled: bool,
+    px: Any,
+    tick_ts: Any,
+    now_utc: Any,
+    session_date_et: str,
+    frame_hod: Any,
+    frame_hod_ts: Any,
+    frame_hod_date_et: Any,
+    frame_last_bar_end_ts: Any,
+    frame_age_s: Any,
+    interval_s: Any,
+    min_age_min: float = 5.0,
+    min_dd_pct: float = 5.0,
+    max_frame_age_s: float = 120.0,
+) -> tuple[dict[str, Any], list[tuple[str, dict[str, Any]]]]:
+    """PURE spent-leg marker lifecycle for ONE ``_score_ok`` tick (no I/O).
+
+    Returns ``(le_updates, actions)``: ``le_updates`` maps ledger keys to their
+    new values (``None`` value = DELETE the key); ``actions`` is an ordered list
+    of ``(event_type, payload)`` the caller emits (``g4_spent_leg_seed`` /
+    ``g4_spent_leg_cleared``). The caller applies, commits, emits. ``le`` is
+    NOT mutated.
+
+    Order on EVERY score-ok tick (not only trigger ticks — a bench veto, the
+    halt-chain / opening-bell / burst / red-candle gates all run AFTER this and
+    must not hide a re-take from the clear):
+      1. tick-running session high ``le["spent_leg_tick_hod"]`` (ask-or-mid,
+         the same read the bench / g4 use) — session-scoped by ET date; the
+         effective top is max(frame HOD, tick HOD) with the SOURCE recorded.
+      2. CLEAR an active marker when px >= marker.hod OR the effective top
+         moved above marker.hod (a new high printed on ANY tick, whichever
+         tick sees it). Level accounting removes only the seed's own +1
+         (``seed_level_delta``); when the level returns to 0 and the key was
+         absent at seed time the key is DELETED so the #1252 cross-day seed
+         (which runs only when the key is absent) still gets its first read.
+      3. SEED, same tick, when no marker (or the marker just cleared on a
+         RE-TOP, so a re-topped name is never left on the old reference) and
+         the predicate holds against the effective top. A fresh new top (age
+         < min) is NOT re-seeded — the next trigger is admitted.
+    A marker / tick-hod whose ``session_date_et`` != today is treated as
+    absent. Fail-open by construction: unreadable data never seeds.
+    """
+    updates: dict[str, Any] = {}
+    actions: list[tuple[str, dict[str, Any]]] = []
+    sym = str(symbol or "").strip().upper()
+    day = str(session_date_et or "").strip()
+    now_dt = _spent_leg_aware_utc(now_utc)
+    tick_dt = _spent_leg_aware_utc(tick_ts) or now_dt
+    if now_dt is None or not day:
+        return updates, actions
+    now_iso = now_dt.isoformat()
+
+    # ── current marker / tick-hod, scoped to TODAY ──
+    marker_raw = le.get(_SPENT_LEG_MARKER_KEY)
+    marker = (
+        dict(marker_raw)
+        if isinstance(marker_raw, dict) and str(marker_raw.get("session_date_et") or "") == day
+        else None
+    )
+    th_raw = le.get(_SPENT_LEG_TICK_HOD_KEY)
+    tick_hod = (
+        dict(th_raw)
+        if isinstance(th_raw, dict) and str(th_raw.get("session_date_et") or "") == day
+        else None
+    )
+
+    # ── 1. tick-running session high ──
+    px_f = _spent_leg_pos_float(px)
+    if px_f is not None and tick_dt is not None:
+        prev_px = _spent_leg_pos_float(tick_hod.get("px")) if tick_hod else None
+        if tick_hod is None or prev_px is None or px_f > prev_px:
+            tick_hod = {
+                "px": px_f,
+                "ts": tick_dt.isoformat(),
+                "first_tick_ts": (
+                    str(tick_hod.get("first_tick_ts")) if tick_hod and tick_hod.get("first_tick_ts")
+                    else tick_dt.isoformat()
+                ),
+                "session_date_et": day,
+            }
+            updates[_SPENT_LEG_TICK_HOD_KEY] = tick_hod
+
+    # ── effective top ──
+    f_hod = _spent_leg_pos_float(frame_hod)
+    f_hod_dt = _spent_leg_aware_utc(frame_hod_ts)
+    f_hod_day = str(frame_hod_date_et or "").strip()
+    f_last_end = _spent_leg_aware_utc(frame_last_bar_end_ts)
+    t_hod = _spent_leg_pos_float(tick_hod.get("px")) if tick_hod else None
+    t_hod_dt = _spent_leg_aware_utc(tick_hod.get("ts")) if tick_hod else None
+    t_first_dt = _spent_leg_aware_utc(tick_hod.get("first_tick_ts")) if tick_hod else None
+    eff_hod: float | None = None
+    eff_hod_ts: datetime | None = None
+    eff_hod_day: str = ""
+    hod_source: str | None = None
+    if f_hod is not None:
+        eff_hod, eff_hod_ts, eff_hod_day, hod_source = f_hod, f_hod_dt, f_hod_day, "frame"
+    if t_hod is not None and t_hod_dt is not None and (eff_hod is None or t_hod > eff_hod):
+        eff_hod, eff_hod_ts, hod_source = t_hod, t_hod_dt, "tick"
+        eff_hod_day = t_hod_dt.astimezone(_SPENT_LEG_ET).date().isoformat()
+    coverage_gap_s: float | None = None
+    if t_first_dt is not None and f_last_end is not None:
+        coverage_gap_s = max(0.0, (t_first_dt - f_last_end).total_seconds())
+    fa = _spent_leg_nonneg_float(frame_age_s)
+
+    # ── 2. CLEAR ──
+    retopped_this_tick = False
+    if marker is not None and marker.get("active") is True:
+        m_hod = _spent_leg_pos_float(marker.get("hod"))
+        if m_hod is None:
+            # corrupt marker: drop it (fail-open) — never latch on garbage.
+            updates[_SPENT_LEG_MARKER_KEY] = None
+            marker = None
+        else:
+            hit_top = px_f is not None and px_f >= m_hod
+            moved = eff_hod is not None and eff_hod > m_hod
+            if hit_top or moved:
+                new_top = eff_hod if eff_hod is not None else m_hod
+                retopped = bool(moved and (px_f is None or px_f < new_top))
+                try:
+                    level_now = int(le.get(_SPENT_LEG_LEVEL_KEY) or 0)
+                except (TypeError, ValueError):
+                    level_now = 0
+                try:
+                    delta = int(marker.get("seed_level_delta") or 0)
+                except (TypeError, ValueError):
+                    delta = 0
+                level_after = max(0, level_now - delta)
+                if level_after == 0 and bool(marker.get("key_absent_at_seed")):
+                    updates[_SPENT_LEG_LEVEL_KEY] = None  # delete -> cross-day seed re-evaluates
+                    level_after_recorded: int | None = None
+                else:
+                    updates[_SPENT_LEG_LEVEL_KEY] = level_after
+                    level_after_recorded = level_after
+                seeded_dt = _spent_leg_aware_utc(marker.get("seeded_at"))
+                minutes_waited = (
+                    round((now_dt - seeded_dt).total_seconds() / 60.0, 3)
+                    if seeded_dt is not None else None
+                )
+                marker.update({
+                    "active": False,
+                    # cleared_hod = the SEEDED top: that top is retired (a re-take
+                    # that then fades never re-seeds on it); only a strictly HIGHER
+                    # top can re-seed — same tick on a re-top (below), or later once
+                    # the new top is itself >= min age / >= min depth away.
+                    "cleared_hod": m_hod,
+                    "cleared_px": px_f,
+                    "cleared_at": now_iso,
+                    "retopped": retopped,
+                    "new_hod": new_top,
+                    "minutes_waited": minutes_waited,
+                    "level_after": level_after_recorded,
+                })
+                updates[_SPENT_LEG_MARKER_KEY] = marker
+                actions.append(("g4_spent_leg_cleared", {
+                    "symbol": sym,
+                    "hod": m_hod,
+                    "hod_source": marker.get("hod_source"),
+                    "clear_px": px_f,
+                    "retopped": retopped,
+                    "new_hod": new_top,
+                    "minutes_waited": minutes_waited,
+                    "blocks_while_seeded": int(marker.get("blocks_while_seeded") or 0),
+                    "level_before": level_now,
+                    "level_after": level_after_recorded,
+                    "seed_level_delta": delta,
+                }))
+                retopped_this_tick = retopped
+
+    # ── 3. SEED ──
+    if not bool(enabled) or not sym or sym.endswith("-USD"):
+        return updates, actions
+    can_seed = marker is None or (
+        marker.get("active") is not True
+        and eff_hod is not None
+        and (_spent_leg_pos_float(marker.get("cleared_hod")) or 0.0) < eff_hod
+    )
+    if not can_seed or eff_hod is None or px_f is None:
+        return updates, actions
+    seed, sdbg = spent_leg_seed_decision(
+        cur_hod=eff_hod,
+        hod_ts=eff_hod_ts,
+        hod_date_et=eff_hod_day,
+        live_px=px_f,
+        now_utc=now_dt,
+        session_date_et=day,
+        frame_age_s=fa,
+        coverage_gap_s=coverage_gap_s,
+        interval_s=interval_s,
+        min_age_min=min_age_min,
+        min_dd_pct=min_dd_pct,
+        max_frame_age_s=max_frame_age_s,
+    )
+    if not seed:
+        return updates, actions
+    try:
+        level_before = int(le.get(_SPENT_LEG_LEVEL_KEY) or 0)
+    except (TypeError, ValueError):
+        level_before = 0
+    # a level the caller ALREADY lowered this tick (a clear above) is the true "before".
+    if _SPENT_LEG_LEVEL_KEY in updates:
+        _u = updates[_SPENT_LEG_LEVEL_KEY]
+        level_before = int(_u) if isinstance(_u, int) else 0
+        key_absent = _u is None
+    else:
+        key_absent = _SPENT_LEG_LEVEL_KEY not in le
+    delta = 1 if level_before <= 0 else 0
+    seed_level = max(level_before, 1)
+    new_marker = {
+        "active": True,
+        "hod": eff_hod,
+        "hod_ts": eff_hod_ts.isoformat() if eff_hod_ts is not None else None,
+        "hod_source": hod_source,
+        "hod_age_min": sdbg.get("hod_age_min"),
+        "dd_pct": sdbg.get("dd_pct"),
+        "seed_px": px_f,
+        "seeded_at": now_iso,
+        "session_date_et": day,
+        "level_before": level_before,
+        "key_absent_at_seed": bool(key_absent),
+        "seed_level_delta": delta,
+        "blocks_while_seeded": 0,
+        "frame_age_s": fa,
+        "coverage_gap_s": coverage_gap_s,
+        "retop_reseed": bool(retopped_this_tick),
+    }
+    updates[_SPENT_LEG_MARKER_KEY] = new_marker
+    updates[_SPENT_LEG_LEVEL_KEY] = seed_level
+    actions.append(("g4_spent_leg_seed", {
+        "symbol": sym,
+        "hod": eff_hod,
+        "hod_ts": new_marker["hod_ts"],
+        "hod_source": hod_source,
+        "hod_age_min": sdbg.get("hod_age_min"),
+        "dd_pct": sdbg.get("dd_pct"),
+        "seed_px": px_f,
+        "seed_level": seed_level,
+        "level_before": level_before,
+        "seed_level_delta": delta,
+        "frame_age_s": fa,
+        "coverage_gap_s": coverage_gap_s,
+        "retop_reseed": bool(retopped_this_tick),
+    }))
+    return updates, actions
 
 
 def reentry_escalation_decision(

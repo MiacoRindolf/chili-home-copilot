@@ -31691,6 +31691,9 @@ def tick_live_session(
         # a tick that produced no trigger); only VETOES when a trigger actually fired. Flag
         # OFF -> the marker is never set/read -> byte-identical. Fail-OPEN (never benches on a
         # bug). docs/STRATEGY/CC_REPORTS/2026-06-25_batch-b.md
+        # Hoisted (2026-09-02): the spent-leg seed block below reads the bench debug
+        # (session HOD age / frame age) on every score-ok tick, bench veto or not.
+        _bench_dbg: dict[str, Any] = {}
         if _score_ok and bool(
             getattr(settings, "chili_momentum_sticky_backside_bench_enabled", True)
         ):
@@ -31732,6 +31735,10 @@ def tick_live_session(
                     _bench_df,
                     benched_at_hod=_bench_anchor,
                     live_price=_bench_px,
+                    # tz-AWARE tick clock (the live 1m index is aware UTC; a naive
+                    # _utcnow() would TypeError inside the age read and silently
+                    # blank the HOD-age telemetry the spent-leg seed depends on).
+                    now_utc=_utcnow_aware(),
                 )
                 _prev_benched = _bench_anchor is not None
                 if _benched:
@@ -31939,6 +31946,69 @@ def tick_live_session(
                     "[momentum_live] sticky backside-bench read failed sym=%s (fail-open, count=%d): %s",
                     sess.symbol, _bench_err_n, _bench_exc,
                 )
+        # SPENT-LEG SEED (2026-09-02 evidence). Every loss of 09-01/09-02 was an
+        # entry on a name whose session HOD was already minutes old and percent
+        # away (CANF 8 min / 12%, JLHL 7.6 min / 6.6%). Nothing above measures
+        # HOD age x depth on the FIRST entry. This block SEEDS the EXISTING g4
+        # re-entry escalation (level 1, the #1252 slot) with the session top as
+        # the reclaim reference — a WAIT the g4 block below already knows how to
+        # clear. It runs on EVERY score-ok tick (sibling of the bench block, not
+        # inside the trigger-gated g4 block) so a re-take / new high on a benched
+        # or non-trigger tick clears the marker the moment it prints, and a
+        # re-topped name is re-seeded against the NEW top the same tick. Reads
+        # the bench debug (frame HOD, bar END stamp, frame age) plus the
+        # session's own tick-running high; fail-open on stale frame / HOD not
+        # today / unreadable. Flag OFF or bench flag OFF ⇒ no seed (the frame
+        # is absent) ⇒ byte-identical. Any error ⇒ pass (a bug must never bench
+        # a fresh breakout). risk_policy.apply_spent_leg_tick is the pure rule.
+        if _score_ok:
+            try:
+                if bool(getattr(settings, "chili_momentum_g4_spent_leg_seed_enabled", True)) and (
+                    not str(sess.symbol or "").upper().endswith("-USD")
+                ):
+                    from zoneinfo import ZoneInfo as _SpentZone
+
+                    from .risk_policy import apply_spent_leg_tick
+
+                    _spent_px = None
+                    try:
+                        if tick is not None:
+                            _spent_px = float(tick.ask or tick.mid or 0) or None
+                    except Exception:
+                        _spent_px = None
+                    _spent_now = _utcnow_aware()
+                    _spent_updates, _spent_actions = apply_spent_leg_tick(
+                        le,
+                        symbol=str(sess.symbol or ""),
+                        enabled=True,
+                        px=_spent_px,
+                        tick_ts=_spent_now,
+                        now_utc=_utcnow_aware(),
+                        session_date_et=_now_in_tz(_SpentZone("America/New_York")).date().isoformat(),
+                        frame_hod=_bench_dbg.get("frame_hod"),
+                        frame_hod_ts=_bench_dbg.get("hod_bar_end_ts"),
+                        frame_hod_date_et=_bench_dbg.get("hod_bar_date_et"),
+                        frame_last_bar_end_ts=_bench_dbg.get("frame_last_bar_end_ts"),
+                        frame_age_s=_bench_dbg.get("frame_age_s"),
+                        interval_s=_bench_dbg.get("interval_s"),
+                        min_age_min=float(getattr(settings, "chili_momentum_g4_spent_leg_min_hod_age_min", 5.0) or 0.0),
+                        min_dd_pct=float(getattr(settings, "chili_momentum_g4_spent_leg_min_drawdown_pct", 5.0) or 0.0),
+                        max_frame_age_s=float(getattr(settings, "chili_momentum_g4_spent_leg_max_frame_age_s", 120.0) or 120.0),
+                    )
+                    if _spent_updates:
+                        for _sk, _sv in _spent_updates.items():
+                            if _sv is None:
+                                le.pop(_sk, None)
+                            else:
+                                le[_sk] = _sv
+                        _commit_le(sess, le)
+                    for _spent_ev, _spent_payload in _spent_actions:
+                        if _spent_ev == "g4_spent_leg_seed":
+                            _emit(db, sess, "g4_spent_leg_seed", _spent_payload)
+                        elif _spent_ev == "g4_spent_leg_cleared":
+                            _emit(db, sess, "g4_spent_leg_cleared", _spent_payload)
+            except Exception:
+                pass  # fail-open: never seed / never strand on a bug
         # GAP 1 + GAP 2 (Warrior re-audit) — HALT-CHAIN RISK GATE + RESUMPTION SIZE
         # MODIFIER, applied ONLY to a halt-resume-dip entry that fired (it shares ALL the
         # existing chase-guards — the bench veto above, the bid-prop confirmer + opening-
@@ -32132,6 +32202,26 @@ def tick_live_session(
                 _g4e_level = 0
             if _g4e_level > 0:
                 _g4e_prior = le.get("g4_prior_trade") if isinstance(le.get("g4_prior_trade"), dict) else {}
+                # SPENT-LEG SEED hand-off (2026-09-02): while the marker is active,
+                # the session top is the reclaim reference — max() with the prior
+                # trade's HWM so a real loss's reference is never LOWERED (CANF#2:
+                # level 2, ref 4.35 admitted 4.40; 4.9297 + 1 x 0.075 blocks it).
+                _g4e_spent = le.get("g4_spent_leg") if isinstance(le.get("g4_spent_leg"), dict) else None
+                _g4e_spent_active = False
+                _g4e_spent_hod = None
+                try:
+                    if _g4e_spent is not None and _g4e_spent.get("active") is True:
+                        from zoneinfo import ZoneInfo as _G4eZone
+
+                        _g4e_today_et = _now_in_tz(_G4eZone("America/New_York")).date().isoformat()
+                        if str(_g4e_spent.get("session_date_et") or "") == _g4e_today_et:
+                            _g4e_spent_hod = _float_or_none(_g4e_spent.get("hod"))
+                            _g4e_spent_active = _g4e_spent_hod is not None and _g4e_spent_hod > 0
+                except Exception:
+                    _g4e_spent_active, _g4e_spent_hod = False, None
+                _g4e_prior_hwm = _float_or_none(_g4e_prior.get("high_water_mark"))
+                if _g4e_spent_active:
+                    _g4e_prior_hwm = max(float(_g4e_prior_hwm or 0.0), float(_g4e_spent_hod))
                 _g4e_px = None
                 try:
                     if tick is not None:
@@ -32214,7 +32304,7 @@ def tick_live_session(
                         escalation_level=_g4e_level,
                         structural_trigger=(_trigger_reason in structural_trigger_reasons()),
                         live_price=_g4e_px,
-                        prior_hwm=_float_or_none(_g4e_prior.get("high_water_mark")),
+                        prior_hwm=_g4e_prior_hwm,
                         prior_exit_price=_float_or_none(_g4e_prior.get("exit_price")),
                         prior_risk_dist=_float_or_none(_g4e_prior.get("risk_dist")),
                         tape_accel=_g4e_tape_accel,
@@ -32227,9 +32317,24 @@ def tick_live_session(
                     _prev_reason = _trigger_reason
                     _trigger_ok = False
                     _trigger_reason = "g4_reentry_escalation_wait"
+                    if _g4e_spent_active and isinstance(_g4e_spent, dict):
+                        try:
+                            _g4e_spent["blocks_while_seeded"] = int(
+                                _g4e_spent.get("blocks_while_seeded") or 0
+                            ) + 1
+                            le["g4_spent_leg"] = _g4e_spent
+                            _commit_le(sess, le)
+                        except Exception:
+                            pass
                     _emit(db, sess, "g4_reentry_escalation_blocked", {
                         "blocked_trigger": _prev_reason,
                         "escalation_level": _g4e_level,
+                        "spent_leg_seed": bool(_g4e_spent_active),
+                        "spent_leg_hod": _g4e_spent_hod,
+                        "hod_source": (
+                            _g4e_spent.get("hod_source")
+                            if (_g4e_spent_active and isinstance(_g4e_spent, dict)) else None
+                        ),
                         **_g4e_dbg,
                     })
         # ANTI-CHASE re-entry guard: after a LOSING exit on this symbol, do NOT

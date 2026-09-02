@@ -8050,6 +8050,46 @@ class Settings(BaseSettings):
         default=True,
         validation_alias=AliasChoices("CHILI_MOMENTUM_G4_CROSS_DAY_REJECTION_SEED_ENABLED"),
     )
+    # SPENT-LEG SEED (2026-09-02 evidence; PAPER lane 09-01/09-02): bawat talo
+    # ng dalawang araw ay SPENT-LEG entry — CANF 4.34 @ 07:10 ET, 8 min / 12%
+    # sa ilalim ng 4.9297 HOD (-78.13, MFE 0.13R; si Ross 07:15: "just no
+    # good"); JLHL 7.396, 7.6 min / 6.6% sa ilalim ng 7.92 (-18.83). Walang
+    # umiiral na mekanismo ang sumusukat ng HOD age x depth sa UNANG entry.
+    # HINDI bagong gate: sine-seed ang UMIIRAL na g4 re-entry escalation (level
+    # 1, ang slot ng #1252) na may session HOD bilang reclaim reference — WAIT
+    # na kumikalas sa sandaling mag-print ang presyo sa/lampas ng top (o
+    # gumalaw ang top). EBIDENSYA: 3 current-era entry-quality outcome (~-$100:
+    # CANF#1, JLHL, LIDR#2); July split p=0.020 sa win rate PERO ang HARD-veto
+    # anyo ay net -2.3R (JZXN +182 = 16.4R ang naharang) — kaya WAIT lang ang
+    # ipinapadala (JZXN re-took HOD 4 min pagkatapos ⇒ cleared). DOKUMENTADONG
+    # miss: UPC (3.6% lang sa ilalim), AUUD (source-dependent). TAPAT NA
+    # GASTOS: sa level 1 ang non-leader STRUCTURAL pullback trigger ay
+    # naharang din sa ilalim ng HOD (reclaim = HOD + 0); leader lang ang may
+    # bypass. Merge gate = interleaved replay A/B (JZXN/VEEE windows).
+    chili_momentum_g4_spent_leg_seed_enabled: bool = Field(
+        default=True,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_G4_SPENT_LEG_SEED_ENABLED"),
+        description="Seed g4 level 1 (reclaim reference = session HOD) on the FIRST entry of a name whose session HOD is >= min_hod_age_min old AND >= min_drawdown_pct above price. WAIT, not veto: clears when price prints at/above the top or the top moves. Fail-open on stale frame / no tick coverage / HOD not today.",
+    )
+    chili_momentum_g4_spent_leg_min_hod_age_min: float = Field(
+        default=5.0,
+        ge=0.0,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_G4_SPENT_LEG_MIN_HOD_AGE_MIN"),
+        description="Minutes from the HOD bar END before a pullback counts as a spent leg. 5 = JLHL 7.6 / CANF 8.3 seed; VEEE (+445, 4.7 min) and VRAX (+371, 3.6 min) first pullbacks do NOT (18 s margin on VEEE — swept in the replay A/B M in {5,6,8}).",
+    )
+    chili_momentum_g4_spent_leg_min_drawdown_pct: float = Field(
+        default=5.0,
+        ge=0.0,
+        le=50.0,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_G4_SPENT_LEG_MIN_DRAWDOWN_PCT"),
+        description="Percent under the session HOD before a pullback counts as a spent leg. 5 = CANF 12% / JLHL 6.6% seed; UPC 3.6% (documented miss), RKTO +75 at 3.77% and LHAI +48 at 3.7% do NOT (swept P in {3,4,5}; never tuned to UPC).",
+    )
+    chili_momentum_g4_spent_leg_max_frame_age_s: float = Field(
+        default=120.0,
+        gt=0.0,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_G4_SPENT_LEG_MAX_FRAME_AGE_S"),
+        description="Freshness guard (fail-open): the seed evaluates only when the bench frame's last bar END is within max(2*interval, this) of the tick clock OR the session's own tick-running high has covered the gap since that bar. The 08-26 measured entry-path frame age was p50 10.6 min, so without the tick coverage the seed would be near-inert; raise only with the measured false-seed rate in the fresh bucket.",
+    )
     # PREMARKET RVOL STALE GUARD (#1260, sinukat 2026-09-01): ang provider
     # snapshot ay `day.v = 0` para sa LAHAT ng pangalan sa premarket, kaya ang
     # rvol (today/prevDay) ay zero-o-halos-zero — at ang A-setup floor ay
