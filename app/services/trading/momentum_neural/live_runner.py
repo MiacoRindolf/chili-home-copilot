@@ -5116,6 +5116,134 @@ def _adopt_recovered_primary_fill_for_safety(
     return True
 
 
+def _adopt_submitted_entry_fill_while_paused(
+    db: Session,
+    sess: TradingAutomationSession,
+    adapter: Any,
+    *,
+    le: dict[str, Any],
+    product_id: str,
+) -> dict[str, Any]:
+    """Pause = no strategy work; a fill that already happened is exposure, not work.
+
+    2026-09-02 CANF 19471 (Bug B3): ``cancel_automation_session`` hit the
+    durable-claim branch, wrote ``entry_submitted=True`` + pointers and applied
+    ``operator_pause`` (resume_state=live_pending_entry), returning
+    non-terminal. The tick preamble then returned SILENTLY every tick
+    ("operator_paused"; the legacy time-share claim passes through with
+    active=False), so the pending-branch poll/adopt never ran and the filled
+    165 sh sat unowned. This helper mirrors the adaptive-claim path
+    (``_recover_owner_alpaca_entry_claim`` -> adopt-for-safety) for that
+    legacy pass-through: ADOPT-ONLY. It never places or cancels an order.
+
+    Outcomes (``reason``):
+      not_submitted / position_present / state_not_pre_entry /
+      no_order_identity / order_not_visible      -> nothing to do
+      order_open_leave_paused                    -> resting, unfilled; leave it
+      order_open_partial_fill_unowned            -> resting WITH fills; named,
+                                                    still no cancel (operator owns it)
+      adopted                                    -> LIVE_ENTERED + flatten flag
+      adopt_helper_refused                       -> adopt-for-safety said no
+      terminal_zero_fill_voided                  -> claim durably resolved, pointers cleared
+      terminal_zero_fill_claim_unresolved        -> claim NOT resolved: le untouched
+                                                    (popping pointers would let the
+                                                    next cancel re-write them from the
+                                                    claim -> void ping-pong forever)
+    """
+    if not le.get("entry_submitted"):
+        return {"adopted": False, "reason": "not_submitted"}
+    if isinstance(le.get("position"), dict) and le["position"]:
+        return {"adopted": False, "reason": "position_present"}
+    if str(sess.state) not in _HEALABLE_PRE_ENTRY_STATES:
+        return {"adopted": False, "reason": "state_not_pre_entry"}
+    _oid = str(le.get("entry_order_id") or "").strip()
+    _cid = str(le.get("entry_client_order_id") or "").strip()
+    if not _oid and not _cid:
+        return {"adopted": False, "reason": "no_order_identity"}
+    no = None
+    if _cid:
+        try:
+            no = _recover_entry_order_by_client_id(adapter, _cid)
+        except Exception:
+            no = None
+    if no is None and _oid:
+        try:
+            _res = adapter.get_order(_oid)
+            no = _res[0] if isinstance(_res, tuple) else _res
+        except Exception:
+            no = None
+    if no is None:
+        return {"adopted": False, "reason": "order_not_visible"}
+    try:
+        filled = float(getattr(no, "filled_size", 0.0) or 0.0)
+    except (TypeError, ValueError):
+        filled = 0.0
+    if _order_open(no):
+        # No cancel, no place — pause semantics; operator cancel/flatten own it.
+        return {
+            "adopted": False,
+            "reason": (
+                "order_open_partial_fill_unowned" if filled > 1e-12
+                else "order_open_leave_paused"
+            ),
+            "filled_size": filled,
+        }
+    if filled > 1e-12:
+        ok = _adopt_recovered_primary_fill_for_safety(
+            db, sess, adapter, le=le, order=no, product_id=product_id,
+        )
+        if ok:
+            _emit(db, sess, "live_entry_fill_adopted_while_paused", {
+                "severity": "critical",
+                "order_id": str(getattr(no, "order_id", "") or ""),
+                "client_order_id": _cid,
+                "filled_size": filled,
+                "average_filled_price": _float_or_none(
+                    getattr(no, "average_filled_price", None)
+                ),
+                "safety_action": "quote_independent_flatten",
+                "note": (
+                    "paused session na may naisumiteng entry na NAG-FILL — "
+                    "inampon at ipina-flatten (quote-independent); walang "
+                    "bagong order"
+                ),
+            })
+        return {"adopted": ok, "reason": "adopted" if ok else "adopt_helper_refused"}
+    # Terminal zero fill: void the pointer ONLY after the durable claim is resolved.
+    _void_oid = str(getattr(no, "order_id", "") or _oid)
+    resolved = _resolve_alpaca_entry_claim_from_terminal_order(
+        sess, no, le=le, durable_adopted=False,
+    )
+    if resolved is not True:
+        if le.get("entry_void_blocked_sig") != _void_oid:
+            le["entry_void_blocked_sig"] = _void_oid
+            _commit_le(sess, le)
+            _emit(db, sess, "live_entry_void_while_paused_blocked", {
+                "reason": "claim_unresolved",
+                "order_id": _void_oid,
+                "client_order_id": _cid,
+                "order_status": getattr(no, "status", None),
+            })
+        return {"adopted": False, "reason": "terminal_zero_fill_claim_unresolved"}
+    _mark_entry_order_resolved(le, _void_oid, "void")
+    for k in (
+        "entry_order_id",
+        "entry_client_order_id",
+        "entry_reconcile_pending_client_order_id",
+    ):
+        le.pop(k, None)
+    le["entry_submitted"] = False
+    if le.get("entry_void_sig") != _void_oid:
+        le["entry_void_sig"] = _void_oid
+        _emit(db, sess, "live_entry_void_while_paused", {
+            "order_id": _void_oid,
+            "client_order_id": _cid,
+            "order_status": getattr(no, "status", None),
+        })
+    _commit_le(sess, le)
+    return {"adopted": False, "reason": "terminal_zero_fill_voided"}
+
+
 def _adopt_recovered_terminal_add(
     db: Session,
     sess: TradingAutomationSession,
@@ -28318,7 +28446,50 @@ def tick_live_session(
     if _operator_paused and not (
         _paused_session_has_exit_authority(sess) or _owner_recovery.get("active")
     ):
-        return {"ok": True, "skipped": "operator_paused", "state": sess.state}
+        # 2026-09-02 CANF 19471 (Bug B3): this return was GANAP na tahimik —
+        # walang event, walang log — kada tick, habang ang naisumiteng entry
+        # ay NAG-FILL sa broker. Ang legacy time-share claim ay pass-through
+        # (active=False), kaya walang owner recovery; ang pending-branch
+        # poll/adopt ay hindi kailanman tumakbo. Adopt-only attempt (walang
+        # place/cancel), tapos MINSAN kada signature na event (BCCQ treatment).
+        try:
+            _pa = _adopt_submitted_entry_fill_while_paused(
+                db, sess, adapter, le=le, product_id=product_id,
+            )
+        except Exception as _pa_exc:
+            _log.warning(
+                "[momentum_live] paused adoption attempt failed session=%s",
+                sess.id, exc_info=True,
+            )
+            _pa = {"adopted": False, "reason": f"adopt_exception:{type(_pa_exc).__name__}"}
+        if not _pa.get("adopted"):
+            _pb_sig = "paused:{}:{}:{}".format(
+                sess.state,
+                "submitted" if le.get("entry_submitted") else "idle",
+                _pa.get("reason"),
+            )
+            if le.get("operator_paused_block_sig") != _pb_sig:
+                le["operator_paused_block_sig"] = _pb_sig
+                _commit_le(sess, le)
+                _emit(db, sess, "live_tick_operator_paused_block", {
+                    "reason": _pb_sig,
+                    "state": sess.state,
+                    "entry_submitted": bool(le.get("entry_submitted")),
+                    "entry_order_id": le.get("entry_order_id"),
+                    "adopt_attempt": _pa,
+                    "owner_recovery_reason": _owner_recovery.get("reason"),
+                })
+                db.flush()
+            return {
+                "ok": True,
+                "skipped": "operator_paused",
+                "state": sess.state,
+                "paused_block": _pb_sig,
+            }
+        # ADOPTED: the session is now LIVE_ENTERED with operator_flatten_requested_utc
+        # => _paused_session_has_exit_authority is True => fall through to the
+        # quote-independent emergency exit below. No entry branch can run: every
+        # one is st-gated on a pre-entry state.
     if sess.state not in LIVE_RUNNER_RUNNABLE_STATES:
         return {
             "ok": True,
@@ -29985,7 +30156,27 @@ def tick_live_session(
     if _emergency_result is not None:
         return _emergency_result
     if _operator_paused:
-        return {"ok": True, "skipped": "operator_paused", "state": sess.state}
+        # Twin of the preamble block (2026-09-02): observable, once per signature.
+        _pb_sig = "paused_post_emergency:{}:{}".format(
+            sess.state,
+            "submitted" if le.get("entry_submitted") else "idle",
+        )
+        if le.get("operator_paused_block_sig") != _pb_sig:
+            le["operator_paused_block_sig"] = _pb_sig
+            _commit_le(sess, le)
+            _emit(db, sess, "live_tick_operator_paused_block", {
+                "reason": _pb_sig,
+                "state": sess.state,
+                "entry_submitted": bool(le.get("entry_submitted")),
+                "entry_order_id": le.get("entry_order_id"),
+            })
+            db.flush()
+        return {
+            "ok": True,
+            "skipped": "operator_paused",
+            "state": sess.state,
+            "paused_block": _pb_sig,
+        }
 
     via = (
         db.query(MomentumSymbolViability)
