@@ -8149,6 +8149,15 @@ class Settings(BaseSettings):
         default=True,
         validation_alias=AliasChoices("CHILI_MOMENTUM_ENTRY_FILL_SELF_HEAL_ENABLED"),
     )
+    # Ang session na may naisumiteng entry order na WALANG naitalang posisyon
+    # ay maaaring may hawak na hubad na fill sa broker. Dapat itong ma-dispatch
+    # KAHIT naka-pause — ang pause ay hindi kailanman dahilan para walang stop.
+    chili_momentum_unadopted_entry_dispatch_priority_enabled: bool = Field(
+        default=True,
+        validation_alias=AliasChoices(
+            "CHILI_MOMENTUM_UNADOPTED_ENTRY_DISPATCH_PRIORITY_ENABLED"
+        ),
+    )
     chili_alpaca_unmanaged_position_flatten_enabled: bool = Field(
         default=True,
         validation_alias=AliasChoices("CHILI_ALPACA_UNMANAGED_POSITION_FLATTEN_ENABLED"),

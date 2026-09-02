@@ -25829,6 +25829,79 @@ def summarize_live_execution(snap: Any) -> dict[str, Any]:
     return out
 
 
+def _unadopted_entry_order_signature(le: dict) -> str:
+    """The order id (or client id) of a submitted entry this session has NOT adopted.
+
+    Empty string when there is nothing unadopted.  This is the EXACT precondition
+    of ``_heal_unrecognized_entry_fill`` — snapshot-only, venue-agnostic, no DB and
+    no broker call — so that "the heal could act" and "the session gets dispatched"
+    can never disagree.  Callers must treat a non-empty return as *possible naked
+    broker exposure*: a filled order the FSM does not own, hence no software stop
+    and no deadman stop.
+    """
+    if not isinstance(le, dict):
+        return ""
+    if not le.get("entry_submitted"):
+        return ""
+    pos = le.get("position")
+    if isinstance(pos, dict) and pos:
+        return ""
+    oid = str(le.get("entry_order_id") or "").strip()
+    cid = str(le.get("entry_client_order_id") or "").strip()
+    if not oid and not cid:
+        return ""
+    resolved = le.get("entry_orders_resolved") or {}
+    if oid and oid in resolved:
+        return ""
+    if not oid:
+        hist = [str(x) for x in (le.get("entry_order_ids_all") or [])]
+        if hist and all(x in resolved for x in hist):
+            return ""
+    return oid or cid
+
+
+def _session_has_unadopted_entry_order(sess: TradingAutomationSession) -> bool:
+    """Dispatch authority for a session that may be holding an unowned broker fill.
+
+    2026-09-02 CANF 19471 (Q1, 12m49s naked).  The stale-watch reaper's cancel
+    could not terminalize a session that owned a durable entry claim, so it took
+    the DEFERRED branch, which writes an ``operator_pause`` and emits NOTHING.
+    ``list_runnable_live_sessions`` then dropped the row into NEITHER lane: it was
+    paused (so not "normal"), it was ``watching_live`` (so
+    ``_paused_session_has_exit_authority`` returned False at its first line), and
+    the durable-claim priority read is the only other admission — an Alpaca-only
+    net that also empties itself whenever the claim read fails.  No tick meant no
+    ``_heal_unrecognized_entry_fill``, no adoption, no stop, for 12m49s.
+
+    This predicate closes that hole from the other side: a session whose snapshot
+    says a submitted entry order is still unadopted is ALWAYS dispatchable —
+    paused or not, any venue, claim table readable or not.  It grants DISPATCH
+    only.  It deliberately does NOT grant ``_paused_session_has_exit_authority``:
+    the heal and the paused adopt-only branch both run ABOVE the operator-pause
+    gate, so bounding detection never re-opens the entry path on a paused row.
+    """
+    try:
+        if not bool(getattr(
+            settings,
+            "chili_momentum_unadopted_entry_dispatch_priority_enabled",
+            True,
+        )):
+            return False
+        if str(getattr(sess, "state", "") or "") not in _HEALABLE_PRE_ENTRY_STATES:
+            return False
+        snap = dict(getattr(sess, "risk_snapshot_json", None) or {})
+        le = dict(snap.get("momentum_live_execution") or {})
+        return bool(_unadopted_entry_order_signature(le))
+    except Exception:
+        # Fail OPEN: an unreadable snapshot must never be the reason a possibly
+        # naked position stops being looked at.
+        _log.warning(
+            "[live_runner] unadopted-entry dispatch probe failed session=%s",
+            getattr(sess, "id", None), exc_info=True,
+        )
+        return True
+
+
 def list_runnable_live_sessions(db: Session, *, limit: int = 25) -> list[TradingAutomationSession]:
     lim = max(1, min(int(limit), 200))
     rows = (
@@ -25881,7 +25954,17 @@ def list_runnable_live_sessions(db: Session, *, limit: int = 25) -> list[Trading
         paused = is_operator_paused(row.risk_snapshot_json)
         has_claim = int(row.id) in claim_owner_ids
         has_exit_authority = _paused_session_has_exit_authority(row)
-        if has_claim or has_exit_authority:
+        # A submitted-but-unadopted entry order is possible NAKED exposure and
+        # outranks the batch cap, the pause flag and the claim table alike
+        # (CANF 19471: 12m49s undispatched behind a machine-written pause).
+        has_unadopted_entry = _session_has_unadopted_entry_order(row)
+        if has_claim or has_exit_authority or has_unadopted_entry:
+            if has_unadopted_entry and not (has_claim or has_exit_authority):
+                _log.debug(
+                    "[live_runner] priority dispatch session=%s %s: submitted entry "
+                    "order not adopted (paused=%s) — bounding fill detection",
+                    row.id, row.symbol, paused,
+                )
             priority.append(row)
         elif not paused and claim_truth_readable:
             normal.append(row)
