@@ -60,6 +60,64 @@ auto-arm admission uses):
 * driver is the batch scheduler (not the event loop) → the heartbeat cannot
   prove anything; `--execute` proceeds, `--inline-tick` is refused.
 
+## `--inline-tick` admission is OBSERVED lane truth only (2026-09-02 hardening)
+
+`lane_status()` derives `ok` partly from `live_runner_driver_configuration()`,
+which reads **this process's own `settings`** — i.e. the `.env` sitting next to
+the script, not the scheduler-worker's. A stale local `.env` (runner disabled,
+both drivers enabled, price bus off) makes `ok` False while the Docker lane is
+alive and ticking; the only thing then between two tickers and one row is the
+tick's 800 ms `SET LOCAL lock_timeout`.
+
+**Therefore `--inline-tick` is admitted ONLY when all of these hold:**
+
+| condition | refusal reason when it fails |
+| --- | --- |
+| `lane["driver"] == "event_loop"` | `inline_tick_refused_lane_driver_not_event_loop:<driver>` |
+| `lane["ok"] is not True` | `inline_tick_refused_lane_heartbeat_fresh` |
+| `lane["reason"] == "live_runner_loop_heartbeat_stale"` | `inline_tick_refused_lane_state_unprovable:<reason>` |
+| numeric `heartbeat_age_seconds > stale_seconds` | `inline_tick_refused_heartbeat_age_unprovable` |
+
+`live_runner_loop_heartbeat_unreadable`, `live_runner_no_driver_enabled`,
+`live_runner_batch_and_event_loop_both_enabled` and
+`live_runner_event_loop_price_bus_disabled` all mean **lane state unprovable
+from this process; fix the env or use `--allow-lane-down`** — they never license
+an inline tick.
+
+**Operator precondition:** before using `--inline-tick`, confirm the script's
+`.env` driver flags (`CHILI_MOMENTUM_LIVE_RUNNER_ENABLED`,
+`..._LOOP_ENABLED`, `..._SCHEDULER_ENABLED`, `CHILI_AUTOPILOT_PRICE_BUS_ENABLED`)
+match the scheduler-worker container's. A mismatch is env rot, not a dead lane.
+
+## `--stop-only` requires `--execute` and an EXITED row
+
+`stop_automation_session` is **not** inert. For a held / `live_pending_entry`
+Alpaca row with no durable claim it runs `_flatten_live_session_for_stop`
+(`automation_query.py` ~:4181): it writes `operator_flatten_requested_utc` +
+`operator_stop_reconcile_requested_utc` + `operator_stop_requested`, applies the
+operator pause, and calls `tick_live_session` **in this process** →
+`_handle_kill_switch_mid_run` → entry cancel / broker exit submit.
+
+So `--stop-only`:
+
+* **requires `--execute`** (without it: prints the eligibility verdict and exits
+  0 having called nothing);
+* is **refused on a held / `live_pending_entry` row** (`stop_only_requires_exited_row:<state>`)
+  — such a row must go through the flatten-key path, which locks the row and lets
+  the lane's own tick execute;
+* is refused when the row has no `user_id`.
+
+## DB bounds are connection-level
+
+The script opens its **own** engine with
+`options=-c statement_timeout=30000 -c lock_timeout=5000`. A `SET
+statement_timeout` issued inside SQLAlchemy's autobegun transaction is reverted
+by the first `db.rollback()` — and `wait_for_execution` rolls back on every
+poll, so the bound used to evaporate exactly where the script blocks.
+`stop_automation_session` takes `with_for_update()` **without** `nowait`, so
+without a server-side `lock_timeout` the script would wait forever behind a
+wedged lane tick holding the row.
+
 ## Never
 
 * Sell/cancel at the broker (app, MCP, curl). If it already happened: the

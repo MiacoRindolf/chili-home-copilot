@@ -1366,9 +1366,16 @@ def _run_momentum_outcome_broker_recon_job():
             )
             db.commit()
             if int((out or {}).get("written") or 0):
+                # skipped_broker_budget is the STARVATION gauge: a persistently
+                # non-zero value means loss-guard-relevant rows are queueing
+                # behind the per-pass broker-read budget (the #1287 shape).
                 logger.info(
-                    "[scheduler] outcome broker recon: checked=%s written=%s by_status=%s",
+                    "[scheduler] outcome broker recon: checked=%s written=%s reads=%s "
+                    "skipped_budget=%s skipped_no_read=%s by_status=%s",
                     (out or {}).get("checked"), (out or {}).get("written"),
+                    (out or {}).get("broker_reads"),
+                    (out or {}).get("skipped_broker_budget"),
+                    (out or {}).get("skipped_no_broker_read_needed"),
                     (out or {}).get("by_status"),
                 )
         except Exception:

@@ -3181,6 +3181,20 @@ class Settings(BaseSettings):
         le=86400,
         validation_alias=AliasChoices("CHILI_MOMENTUM_OUTCOME_RECON_BROKER_ATTRIBUTION_GRACE_SECONDS"),
     )
+    # BUDGET GUARD (2026-09-02 adversarial review). Kapag ang broker ay MABASA at
+    # WALA siyang pag-aari na fill para sa session (`no_owned_fills`), ang muling
+    # pag-list kada 60s ay hindi kayang magbago ng sagot (immutable ang broker
+    # fills) — kinakain lang nito ang budget na kailangan ng bagong-terminal na
+    # FILLED session ng loss guard. Ito ang retry horizon ng ganoong hilera.
+    # 0 => walang backoff (bawat pass, ang lumang gawi na nagdulot ng starvation).
+    chili_momentum_outcome_recon_broker_attribution_no_fill_backoff_seconds: int = Field(
+        default=1800,
+        ge=0,
+        le=86400,
+        validation_alias=AliasChoices(
+            "CHILI_MOMENTUM_OUTCOME_RECON_BROKER_ATTRIBUTION_NO_FILL_BACKOFF_SECONDS"
+        ),
+    )
     chili_momentum_broker_truth_label_enabled: bool = Field(
         default=False,
         validation_alias=AliasChoices("CHILI_MOMENTUM_BROKER_TRUTH_LABEL_ENABLED"),

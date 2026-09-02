@@ -83,7 +83,26 @@ logger = logging.getLogger(__name__)
 # chili_ml_bw_<sid>_, chili_ops_flat_<sid>_, …) plus any closing fill that
 # uniquely matches an unpriced emergency leg by symbol / qty / time. broker_* then
 # reflects the WHOLE session; broker_divergence_usd = broker − lane self-report.
-ATTRIBUTION_VERSION = 1
+#
+# HARDENING (2026-09-02, adversarial review of the first cut):
+#   * A no-fill row with ZERO entry evidence never spends a broker read, and a
+#     `no_owned_fills` verdict backs off — otherwise ~115 cancelled-pre-entry rows
+#     re-read every 60 s pass against a 20-read budget and STARVE the newly
+#     terminal FILLED session the loss guard needs (the 85-minute arming outage
+#     shape of project_loss_guard_broker_recon_landmine_0902.md). The batch is
+#     ordered loss-guard-first, never heap order.
+#   * A listing that does not contain the session's OWN ledger legs never
+#     certifies anything (wrong account generation / wrong window / empty page).
+#   * OCO child legs carry NO client_order_id — the stop leg's fill lives in
+#     raw.legs[0] under a parent that reads canceled/filled 0. Walk them, or every
+#     stop-leg exit is a permanent `residual_open` and the account's loss history
+#     goes unavailable.
+#   * Ownership is by broker_order_id too (orphan-repair `orphrec-*` closes and
+#     broker-cid replace successors), and a terminal label is never demoted
+#     without POSITIVE evidence of an owned fill the ledger never saw.
+#   * The unpriced-leg fallback is time-ordered, skips legs already attributed by
+#     cid, and refuses a broker_order_id another outcome already claims.
+ATTRIBUTION_VERSION = 2
 _ALPACA_ATTRIBUTION_FAMILIES = frozenset({"alpaca_spot", "alpaca_short"})
 # First numeric segment after the alphabetic prefix tokens is the session id:
 #   chili_ml_e_19471_a7c3e32c_9738f4d973 → 19471
@@ -97,6 +116,13 @@ ATTR_AMBIGUOUS = "ambiguous_unpriced_match"
 ATTR_NO_OWNED_FILLS = "no_owned_fills"
 ATTR_UNREADABLE = "unreadable"
 ATTR_TRUNCATED = "truncated"
+# The listing is readable but provably does not cover this session (it is missing
+# the session's own ledger legs) → nothing it says may certify anything.
+ATTR_LISTING_INCOMPLETE = "listing_incomplete"
+# No broker read was spent: the session has no entry evidence at all, so no fill
+# can exist for it (budget protection, not a verdict about the broker).
+ATTR_SKIPPED_NO_ENTRY_EVIDENCE = "skipped_no_entry_evidence"
+ATTR_SKIPPED_BACKOFF = "skipped_no_owned_fills_backoff"
 
 BrokerOrdersReader = Callable[[str, datetime, datetime], dict]
 
@@ -221,6 +247,155 @@ def _unpriced_emergency_legs(le: dict) -> list[dict]:
     return out
 
 
+_ENTRY_EVIDENCE_KEYS = (
+    "entry_order_id",
+    "entry_client_order_id",
+    "entry_reconcile_pending_client_order_id",
+    "last_exit_order_id",
+    "exit_order_id",
+    "scale_limit_order_id",
+)
+
+
+def _has_entry_evidence(le: dict) -> bool:
+    """True when this session can POSSIBLY have a broker fill.
+
+    Every order the lane (or an operator, or an orphan repair) ever placed for a
+    session leaves at least one of these markers on the envelope. A row carrying
+    NONE of them cannot have a fill at the broker, so listing its symbol is a
+    guaranteed-empty read — and ~115 such rows per pass are exactly what starved
+    the 20-read budget and left the loss guard blind for 85 minutes.
+    """
+    if not isinstance(le, dict):
+        return False
+    for key in _ENTRY_EVIDENCE_KEYS:
+        if str(le.get(key) or "").strip():
+            return True
+    ids_all = le.get("entry_order_ids_all")
+    if isinstance(ids_all, (list, tuple, set)) and any(str(x or "").strip() for x in ids_all):
+        return True
+    resolved = le.get("entry_orders_resolved")
+    if isinstance(resolved, dict) and resolved:
+        return True
+    pos = le.get("position")
+    if isinstance(pos, dict) and (_f(pos.get("quantity")) or 0.0) > 0:
+        return True
+    for key in ("emergency_exit_authority", "orphan_reconcile_truth", "emergency_position_truth"):
+        if isinstance(le.get(key), dict) and le.get(key):
+            return True
+    if _unpriced_emergency_legs(le):
+        return True
+    return False
+
+
+def _owned_order_ids_from_le(le: dict) -> set:
+    """Broker order ids this session PROVABLY owns, independent of the cid.
+
+    An orphan-repair close (`orphrec-<symbol>-<digest>`) and a broker-cid replace
+    successor carry a client_order_id the session-cid regex cannot own; without
+    this set the attribution sees a non-owned close, lands `residual_open`, and
+    demotes an already-labelled row.
+    """
+    out: set[str] = set()
+    if not isinstance(le, dict):
+        return out
+
+    def _add(v: Any) -> None:
+        s = str(v or "").strip()
+        if s:
+            out.add(s)
+
+    for key in ("entry_order_id", "last_exit_order_id", "exit_order_id", "scale_limit_order_id"):
+        _add(le.get(key))
+    ids_all = le.get("entry_order_ids_all")
+    if isinstance(ids_all, (list, tuple, set)):
+        for v in ids_all:
+            _add(v)
+    resolved = le.get("entry_orders_resolved")
+    if isinstance(resolved, dict):
+        for v in resolved.keys():
+            _add(v)
+    truth = le.get("orphan_reconcile_truth")
+    if isinstance(truth, dict):
+        _add(truth.get("exit_order_id"))
+        _add(truth.get("entry_order_id"))
+    auth = le.get("emergency_exit_authority")
+    if isinstance(auth, dict):
+        _add(auth.get("order_id"))
+        _add(auth.get("broker_order_id"))
+    for leg in _unpriced_emergency_legs(le):
+        _add((leg or {}).get("broker_order_id"))
+    return out
+
+
+def _attribution_backoff_seconds() -> int:
+    try:
+        return max(
+            0,
+            int(getattr(settings, "chili_momentum_outcome_recon_broker_attribution_no_fill_backoff_seconds", 1800) or 0),
+        )
+    except (TypeError, ValueError):
+        return 1800
+
+
+def broker_read_plan(outcome: Any, sess: Any, *, now: Optional[datetime] = None) -> dict:
+    """Should THIS pass spend a broker listing read on this row? (pure)
+
+    Used by the batch loop (to charge the budget) AND by ``reconcile_one_outcome``
+    (to call the reader) so the two can never disagree. ``{"read": bool, "reason": str}``.
+    """
+    if not (_attribution_enabled() and _is_alpaca_family(sess)):
+        return {"read": False, "reason": "not_alpaca_attribution"}
+    le = _le_of(sess)
+    if not _has_entry_evidence(le):
+        return {"read": False, "reason": ATTR_SKIPPED_NO_ENTRY_EVIDENCE}
+    detail = getattr(outcome, "broker_recon_detail_json", None)
+    detail = detail if isinstance(detail, dict) else {}
+    prior = detail.get("broker_attribution")
+    prior = prior if isinstance(prior, dict) else {}
+    # ATTR_SKIPPED_BACKOFF is the marker a previously-skipped pass wrote; it
+    # carries the SAME `attribution_next_retry_utc` forward verbatim, so the
+    # horizon is fixed once by the readable no_owned_fills read and never pushed
+    # out again by the skips themselves.
+    if prior.get("attr_status") in (ATTR_NO_OWNED_FILLS, ATTR_SKIPPED_BACKOFF):
+        # The broker was READABLE and owned nothing. Re-listing every 60 s can only
+        # produce the same empty answer (broker fills are immutable) while eating
+        # the budget a newly terminal FILLED session needs.
+        retry_at = _naive_utc(detail.get("attribution_next_retry_utc"))
+        stamped_terminal = _naive_utc(detail.get("attribution_terminal_at"))
+        cur_terminal = _naive_utc(getattr(outcome, "terminal_at", None))
+        if stamped_terminal is not None and cur_terminal is not None and stamped_terminal != cur_terminal:
+            return {"read": True, "reason": "terminal_at_changed"}
+        clock = now or datetime.utcnow()
+        if retry_at is not None and clock < retry_at:
+            return {"read": False, "reason": ATTR_SKIPPED_BACKOFF, "next_retry_utc": retry_at.isoformat()}
+    return {"read": True, "reason": "attribute"}
+
+
+def _attribution_priority(outcome: Any, sess: Any) -> int:
+    """Batch ordering class. 0 = the loss guard is waiting on this row."""
+    status = getattr(outcome, "broker_recon_status", None)
+    if status is None:
+        return 0
+    if status in _TERMINAL_RECON_STATUSES:
+        detail = getattr(outcome, "broker_recon_detail_json", None)
+        detail = detail if isinstance(detail, dict) else {}
+        try:
+            if int(detail.get("attribution_version") or 0) < ATTRIBUTION_VERSION:
+                return 0
+        except (TypeError, ValueError):
+            return 0
+        return 2
+    return 1
+
+
+def _oco_legs_of(o: Any) -> list[dict]:
+    raw = _order_field(o, "raw") if isinstance(o, dict) else getattr(o, "raw", None)
+    raw = raw if isinstance(raw, dict) else {}
+    legs = raw.get("legs")
+    return [l for l in (legs or []) if isinstance(l, dict)]
+
+
 def attribute_session_broker_orders(
     *,
     session_id: int,
@@ -231,6 +406,8 @@ def attribute_session_broker_orders(
     window_start: Optional[datetime] = None,
     window_end: Optional[datetime] = None,
     ledger_order_ids: Optional[set] = None,
+    owned_order_ids: Optional[set] = None,
+    expected_listing_order_ids: Optional[set] = None,
 ) -> dict:
     """PURE attribution of a session's broker fills (no DB, no HTTP).
 
@@ -252,8 +429,10 @@ def attribute_session_broker_orders(
     sym = str(symbol or "").strip().upper()
     open_side = "buy" if side_long else "sell"
     close_side = "sell" if side_long else "buy"
+    owned_ids = {str(x) for x in (owned_order_ids or set()) if str(x or "").strip()}
     legs: list[dict] = []
     seen: set[str] = set()
+    listing_ids: set[str] = set()
     candidates_non_owned: list[dict] = []
     foreign_owned = 0
 
@@ -264,15 +443,13 @@ def attribute_session_broker_orders(
         o_sym = str(_order_field(o, "product_id") or _order_field(o, "symbol") or "").strip().upper()
         if o_sym and sym and o_sym != sym:
             continue
-        filled = _f(_order_field(o, "filled_size", "filled_qty")) or 0.0
-        px = _f(_order_field(o, "average_filled_price", "filled_avg_price"))
-        if filled <= 1e-12 or px is None or px <= 0:
-            continue  # unfilled / cancelled-unfilled orders carry no economics
+        listing_ids.add(oid)
         side = str(_order_field(o, "side") or "").strip().lower()
-        if side not in ("buy", "sell"):
-            continue
         cid = _order_field(o, "client_order_id")
         owner = session_id_from_client_order_id(cid)
+        # Ownership is cid FIRST (a foreign session's cid is never ours, whatever
+        # the id set says), then the session's own recorded broker order ids.
+        owned = (owner == int(session_id)) or (owner is None and oid in owned_ids)
         t = _order_fill_time(o)
         in_window = True
         if t is not None:
@@ -280,6 +457,48 @@ def attribute_session_broker_orders(
                 in_window = False
             if window_end is not None and t > window_end:
                 in_window = False
+
+        # ── OCO CHILD LEGS ──────────────────────────────────────────────────
+        # Alpaca gives NO client_order_id to a child leg: the parent
+        # (`chili_ml_toco_<sid>_…`) is the take-profit limit, and when the STOP
+        # leg fires the parent reads canceled with filled_qty 0 while the fill
+        # lives in raw.legs[0]. Both legs of an OCO are the SAME side as the
+        # parent. Missing them makes every stop-leg exit a permanent
+        # `residual_open` → loss-guard history unavailable account-wide.
+        if owned and side in ("buy", "sell"):
+            for child in _oco_legs_of(o):
+                leg_id = str(child.get("id") or "")
+                if not leg_id or leg_id in seen or leg_id in listing_ids:
+                    continue
+                listing_ids.add(leg_id)
+                lq = _f(child.get("filled_qty")) or 0.0
+                lpx = _f(child.get("filled_avg_price"))
+                if lq <= 1e-12 or lpx is None or lpx <= 0:
+                    continue
+                child_leg = {
+                    "broker_order_id": leg_id,
+                    "client_order_id": None,
+                    "parent_broker_order_id": oid,
+                    "parent_client_order_id": str(cid) if cid else None,
+                    "side": side,
+                    "qty": float(lq),
+                    "price": float(lpx),
+                    "filled_at_utc": t.isoformat() if t is not None else None,
+                    "status": str(child.get("status") or ""),
+                }
+                if in_window:
+                    child_leg["attribution"] = "session_cid_oco_leg"
+                else:
+                    child_leg["note"] = "owned_cid_outside_window"
+                legs.append(child_leg)
+                seen.add(leg_id)
+
+        filled = _f(_order_field(o, "filled_size", "filled_qty")) or 0.0
+        px = _f(_order_field(o, "average_filled_price", "filled_avg_price"))
+        if filled <= 1e-12 or px is None or px <= 0:
+            continue  # unfilled / cancelled-unfilled orders carry no economics
+        if side not in ("buy", "sell"):
+            continue
         leg = {
             "broker_order_id": oid,
             "client_order_id": str(cid) if cid else None,
@@ -289,13 +508,13 @@ def attribute_session_broker_orders(
             "filled_at_utc": t.isoformat() if t is not None else None,
             "status": str(_order_field(o, "status") or ""),
         }
-        if owner == int(session_id):
+        if owned:
             if not in_window:
                 leg["note"] = "owned_cid_outside_window"
                 legs.append(leg)
                 seen.add(oid)
                 continue
-            leg["attribution"] = "session_cid"
+            leg["attribution"] = "session_cid" if owner == int(session_id) else "session_broker_order_id"
             legs.append(leg)
             seen.add(oid)
         elif owner is not None:
@@ -303,10 +522,35 @@ def attribute_session_broker_orders(
         elif side == close_side and in_window:
             candidates_non_owned.append(leg)
 
+    # Earliest OWNED opening fill: a close that filled BEFORE this session ever
+    # opened cannot be this session's close (overlapping same-symbol sessions are
+    # routine — ADXN 08-21 had 30 overlapping pairs).
+    owned_open_times = [
+        _naive_utc(l["filled_at_utc"])
+        for l in legs
+        if l.get("attribution") and l["side"] == open_side and l.get("filled_at_utc")
+    ]
+    owned_open_times = [t for t in owned_open_times if t is not None]
+    earliest_open = min(owned_open_times) if owned_open_times else None
+    owned_cids_seen = {
+        str(l.get("client_order_id") or "")
+        for l in legs
+        if l.get("attribution") and l.get("client_order_id")
+    }
+
     ambiguous = False
     for uleg in unpriced_legs or []:
         uq = _f((uleg or {}).get("quantity")) or 0.0
         if uq <= 1e-12:
+            continue
+        # This unpriced leg already has a priced, attributed twin in the listing
+        # (its own cid was found) — matching a stranger's same-qty sell on top of
+        # it would double count. Live rows carry `chili_ml_x_<sid>_` here.
+        uleg_cid = str((uleg or {}).get("client_order_id") or "").strip()
+        if uleg_cid and uleg_cid in owned_cids_seen:
+            continue
+        uleg_oid = str((uleg or {}).get("broker_order_id") or "").strip()
+        if uleg_oid and uleg_oid in seen:
             continue
         rec_at = _naive_utc((uleg or {}).get("recorded_at_utc"))
         matches = []
@@ -318,6 +562,8 @@ def attribute_session_broker_orders(
             ct = _naive_utc(c["filled_at_utc"])
             if rec_at is not None and ct is not None and ct > rec_at + timedelta(seconds=120):
                 continue
+            if earliest_open is not None and ct is not None and ct < earliest_open:
+                continue  # closed before this session opened → another session's
             matches.append(c)
         if len(matches) == 1:
             m = dict(matches[0])
@@ -336,8 +582,24 @@ def attribute_session_broker_orders(
     pnl = (close_notional - open_notional) if side_long else (open_notional - close_notional)
     ledger_ids = {str(x) for x in (ledger_order_ids or set())}
     missing = [l["broker_order_id"] for l in attributed if l["broker_order_id"] not in ledger_ids]
+    # A missing CLOSING fill is the only thing that positively proves an existing
+    # terminal label's economics are wrong. A missing opening fill (or simply not
+    # seeing a close) is an ABSENCE of evidence — never grounds to knock a
+    # labelled row down to a non-terminal status.
+    missing_closing = [
+        l["broker_order_id"] for l in attributed
+        if l["side"] == close_side and l["broker_order_id"] not in ledger_ids
+    ]
+    # COMPLETENESS (the converse direction, previously never computed): a ledger
+    # leg the listing does not contain proves the listing does NOT cover this
+    # session — wrong bound account generation, wrong window, empty page. Nothing
+    # such a read says may certify a label.
+    expected = {str(x) for x in (expected_listing_order_ids if expected_listing_order_ids is not None else ledger_ids)}
+    ledger_missing_from_broker = sorted(expected - listing_ids)
 
-    if ambiguous:
+    if ledger_missing_from_broker:
+        status = ATTR_LISTING_INCOMPLETE
+    elif ambiguous:
         status = ATTR_AMBIGUOUS
     elif not attributed:
         status = ATTR_NO_OWNED_FILLS
@@ -359,6 +621,9 @@ def attribute_session_broker_orders(
         "close_notional_usd": close_notional,
         "broker_pnl_usd": pnl if attributed else None,
         "legs_missing_from_ledger": missing,
+        "closing_legs_missing_from_ledger": missing_closing,
+        "ledger_ids_missing_from_broker": ledger_missing_from_broker,
+        "listing_order_ids_seen": len(listing_ids),
         "foreign_session_orders_ignored": foreign_owned,
         "unpriced_legs_considered": len(unpriced_legs or []),
     }
@@ -377,18 +642,76 @@ def _default_alpaca_orders_reader(symbol: str, after: datetime, until: datetime)
         return {"readable": False, "orders": [], "error": str(ex)[:200]}
 
 
-def _ledger_order_ids(db: Session, session_id: int) -> set:
+def _ledger_legs_for_attribution(db: Session, session_id: int) -> list:
+    """``[(broker_order_id, fill_ts_naive_utc|None), …]`` for the session's ledger.
+
+    The fill time is what makes the completeness guard precise: only a ledger leg
+    whose fill falls INSIDE the queried window is expected in the listing, so a
+    legitimately out-of-window leg never fabricates an "incomplete read"."""
     try:
         rows = db.execute(
             _text(
-                "SELECT broker_order_id FROM momentum_fill_outcomes "
+                "SELECT broker_order_id, fill_ts FROM momentum_fill_outcomes "
                 "WHERE session_id = :sid AND broker_order_id IS NOT NULL"
             ),
             {"sid": int(session_id)},
         ).fetchall()
     except Exception:
-        return set()
-    return {str(r[0]) for r in rows if r and r[0]}
+        return []
+    out = []
+    for r in rows or []:
+        if not r or not r[0]:
+            continue
+        ts = _naive_utc(r[1]) if len(r) > 1 else None
+        out.append((str(r[0]), ts))
+    return out
+
+
+def _ledger_order_ids(db: Session, session_id: int) -> set:
+    return {oid for oid, _ts in _ledger_legs_for_attribution(db, session_id)}
+
+
+def _broker_order_ids_attributed_elsewhere(
+    db: Session,
+    *,
+    session_id: int,
+    symbol: str,
+    order_ids: list,
+    terminal_at: Optional[datetime],
+) -> dict:
+    """ONE bounded read: does another outcome already attribute these order ids?
+
+    Two overlapping same-symbol sessions each holding an equal-qty unpriced leg
+    would otherwise BOTH claim one UI/orphan sell and the loss guard would double
+    count it. Unreadable ⇒ ``readable=False`` ⇒ the caller fails closed."""
+    ids = [str(x) for x in (order_ids or []) if str(x or "").strip()]
+    if not ids:
+        return {"readable": True, "collisions": {}}
+    anchor = terminal_at if isinstance(terminal_at, datetime) else datetime.utcnow()
+    lo = anchor - timedelta(days=2)
+    hi = anchor + timedelta(days=2)
+    try:
+        rows = db.execute(
+            _text(
+                "SELECT o.session_id, l ->> 'broker_order_id' AS oid FROM ("
+                "  SELECT session_id, broker_recon_detail_json -> 'broker_attribution' -> 'legs' AS legs"
+                "  FROM momentum_automation_outcomes"
+                "  WHERE session_id <> :sid AND symbol = :symbol"
+                "    AND terminal_at >= :lo AND terminal_at < :hi"
+                "    AND jsonb_typeof(broker_recon_detail_json -> 'broker_attribution' -> 'legs') = 'array'"
+                ") o CROSS JOIN LATERAL jsonb_array_elements(o.legs) AS l"
+                " WHERE l ->> 'broker_order_id' = ANY(:oids) LIMIT 20"
+            ),
+            {"sid": int(session_id), "symbol": str(symbol or ""), "lo": lo, "hi": hi, "oids": ids},
+        ).fetchall()
+    except Exception as ex:
+        logger.warning(
+            "[broker_truth_recon] unpriced-leg collision probe unreadable session=%s: %s",
+            session_id, ex,
+        )
+        return {"readable": False, "collisions": {}}
+    collisions = {str(r[1]): int(r[0]) for r in (rows or []) if r and r[1] is not None}
+    return {"readable": True, "collisions": collisions}
 
 
 def _attribution_enabled() -> bool:
@@ -557,6 +880,56 @@ def _trade_row_fallback(db: Session, le: dict) -> dict:
     return {"status": STATUS_RECONCILED, "pnl": pnl, "notional": notional}
 
 
+_DIVERGENCE_EVENT = "broker_truth_attribution_divergence"
+
+
+def _emit_divergence_event(
+    db: Session,
+    outcome: Any,
+    sess: Any,
+    *,
+    detail: dict,
+    divergence: Optional[float],
+) -> None:
+    """Append ONE `broker_truth_attribution_divergence` event per outcome.
+
+    Fires only when the attribution actually found broker fills the FSM ledger
+    never held. Best-effort: an audit event must never fail a reconcile pass."""
+    attr = detail.get("broker_attribution")
+    attr = attr if isinstance(attr, dict) else {}
+    missing = attr.get("legs_missing_from_ledger") or []
+    if not missing:
+        return
+    prior = getattr(outcome, "broker_recon_detail_json", None)
+    prior = prior if isinstance(prior, dict) else {}
+    if prior.get("divergence_event_emitted") or detail.get("divergence_event_emitted"):
+        return
+    detail["divergence_event_emitted"] = True
+    try:
+        from .persistence import append_trading_automation_event
+
+        append_trading_automation_event(
+            db,
+            int(outcome.session_id),
+            _DIVERGENCE_EVENT,
+            {
+                "outcome_id": getattr(outcome, "id", None),
+                "symbol": getattr(sess, "symbol", None),
+                "attr_status": attr.get("attr_status"),
+                "legs_missing_from_ledger": list(missing)[:20],
+                "broker_pnl_usd": attr.get("broker_pnl_usd"),
+                "ledger_pnl_usd": attr.get("ledger_pnl_usd"),
+                "divergence_usd": divergence,
+            },
+            correlation_id=getattr(sess, "correlation_id", None),
+            source_node_id="outcome_reconcile_broker_attribution",
+        )
+    except Exception as ex:
+        detail["divergence_event_emitted"] = False
+        logger.debug("[broker_truth_recon] divergence event not appended session=%s: %s",
+                     getattr(outcome, "session_id", None), ex)
+
+
 # ── per-session reconcile (computes the label; no commit) ──────────────────────
 def reconcile_one_outcome(
     db: Session,
@@ -564,6 +937,7 @@ def reconcile_one_outcome(
     sess: TradingAutomationSession,
     *,
     broker_orders_reader: Optional[BrokerOrdersReader] = None,
+    read_plan: Optional[dict] = None,
 ) -> dict:
     """Compute the broker-truth label for one closed session and stamp the mig309
     columns on ``outcome`` (caller commits). Returns the audit dict written to
@@ -653,6 +1027,13 @@ def reconcile_one_outcome(
     # order list scoped to this session: every session-cid fill + unpriced-leg
     # matches. Whole-session broker_* is what the loss guard must consume.
     if _attribution_enabled() and _is_alpaca_family(sess):
+        prior_status = getattr(outcome, "broker_recon_status", None)
+        prior_was_terminal = prior_status in _TERMINAL_RECON_STATUSES
+        prior_pnl = _f(getattr(outcome, "broker_realized_pnl_usd", None))
+        prior_notional = _f(getattr(outcome, "broker_notional_basis_usd", None))
+        ledger_status = status
+        ledger_pnl_snapshot = broker_pnl
+        ledger_notional_snapshot = broker_notional
         unpriced = _unpriced_emergency_legs(le)
         grace = int(getattr(settings, "chili_momentum_outcome_recon_broker_attribution_grace_seconds", 900) or 0)
         w_start = _naive_utc(getattr(sess, "started_at", None))
@@ -662,8 +1043,14 @@ def reconcile_one_outcome(
         if w_end is not None:
             w_end = w_end + timedelta(seconds=grace)
         reader = broker_orders_reader or _default_alpaca_orders_reader
+        # The batch loop already charged (or refused) the budget from THIS plan —
+        # reuse it verbatim so the two can never disagree across a clock tick.
+        plan = read_plan if isinstance(read_plan, dict) else broker_read_plan(outcome, sess)
         attr: dict[str, Any]
-        if w_start is None or w_end is None:
+        if not plan.get("read"):
+            # NO broker read is spent on this row this pass (see broker_read_plan).
+            attr = {"attr_status": str(plan.get("reason") or ATTR_SKIPPED_NO_ENTRY_EVIDENCE), "broker_read": False}
+        elif w_start is None or w_end is None:
             attr = {"attr_status": ATTR_UNREADABLE, "error": "session_window_unavailable"}
         else:
             try:
@@ -678,6 +1065,12 @@ def reconcile_one_outcome(
                 side_long = (str(getattr(sess, "execution_family", "") or "") != "alpaca_short") and (
                     le.get("side_long") is not False
                 )
+                ledger_legs = _ledger_legs_for_attribution(db, int(outcome.session_id))
+                ledger_ids = {oid for oid, _ts in ledger_legs}
+                expected_ids = {
+                    oid for oid, ts in ledger_legs
+                    if ts is None or (w_start <= ts <= w_end)
+                }
                 attr = attribute_session_broker_orders(
                     session_id=int(outcome.session_id),
                     symbol=str(sess.symbol or ""),
@@ -686,16 +1079,64 @@ def reconcile_one_outcome(
                     unpriced_legs=unpriced,
                     window_start=w_start,
                     window_end=w_end,
-                    ledger_order_ids=_ledger_order_ids(db, int(outcome.session_id)),
+                    ledger_order_ids=ledger_ids,
+                    owned_order_ids=_owned_order_ids_from_le(le),
+                    expected_listing_order_ids=expected_ids,
                 )
+                # A readable listing that owns NOTHING while the session's ledger
+                # holds broker-confirmed legs is the same inconsistency as a
+                # missing id: the read does not cover the session.
+                if attr.get("attr_status") == ATTR_NO_OWNED_FILLS and expected_ids:
+                    attr["attr_status"] = ATTR_LISTING_INCOMPLETE
+                    attr["ledger_ids_missing_from_broker"] = sorted(expected_ids)
+                    attr["no_owned_fills_with_ledger_legs"] = True
+                # CROSS-SESSION GUARD: never stamp an unpriced-leg match on a
+                # broker order id another outcome already claims.
+                fallback_ids = [
+                    l["broker_order_id"] for l in attr.get("legs") or []
+                    if l.get("attribution") == "unpriced_emergency_leg_match"
+                ]
+                if fallback_ids:
+                    probe = _broker_order_ids_attributed_elsewhere(
+                        db,
+                        session_id=int(outcome.session_id),
+                        symbol=str(sess.symbol or ""),
+                        order_ids=fallback_ids,
+                        terminal_at=_naive_utc(getattr(outcome, "terminal_at", None)),
+                    )
+                    if not probe.get("readable"):
+                        attr["attr_status"] = ATTR_AMBIGUOUS
+                        attr["unpriced_collision_probe"] = "unreadable"
+                    elif probe.get("collisions"):
+                        attr["attr_status"] = ATTR_AMBIGUOUS
+                        attr["unpriced_collision"] = probe["collisions"]
         attr["window_start_utc"] = w_start.isoformat() if w_start else None
         attr["window_end_utc"] = w_end.isoformat() if w_end else None
-        attr["ledger_pnl_usd"] = broker_pnl
-        attr["ledger_notional_usd"] = broker_notional
-        attr["ledger_status"] = status
+        attr["ledger_pnl_usd"] = ledger_pnl_snapshot
+        attr["ledger_notional_usd"] = ledger_notional_snapshot
+        attr["ledger_status"] = ledger_status
         detail["broker_attribution"] = attr
         a_status = attr.get("attr_status")
-        evidence_of_missing_legs = bool(unpriced) or bool(attr.get("legs_missing_from_ledger"))
+        # POSITIVE evidence that the ledger label is wrong: an owned CLOSING fill
+        # the ledger never recorded, or an unpriced emergency leg still unbooked.
+        # "I could not see a close" is an absence of evidence and never demotes.
+        evidence_of_missing_legs = bool(unpriced) or bool(attr.get("closing_legs_missing_from_ledger"))
+
+        def _demotion_allowed() -> bool:
+            """A terminal label (`reconciled` / `fee_unconfirmed` — the orphan-repair
+            shape) is never knocked down to a non-terminal status on a re-touch
+            unless something positively says it is wrong."""
+            return (not prior_was_terminal) or evidence_of_missing_legs
+
+        def _keep_prior_label(marker: str) -> None:
+            nonlocal status, broker_pnl, broker_notional, fees_status, source
+            status = str(prior_status)
+            broker_pnl = prior_pnl if prior_pnl is not None else ledger_pnl_snapshot
+            broker_notional = prior_notional if prior_notional is not None else ledger_notional_snapshot
+            source = "prior_label_preserved"
+            fees_status = "prior_label_preserved"
+            detail[marker] = True
+
         if a_status == ATTR_FLAT:
             broker_pnl = _f(attr.get("broker_pnl_usd"))
             broker_notional = _f(attr.get("open_notional_usd"))
@@ -704,35 +1145,80 @@ def reconcile_one_outcome(
             # commission-free and the ledger path already labels its 0.0 fees
             # `known`. Same posture here — gross == net for this venue.
             fees_status = "alpaca_commission_free_gross"
-            status = STATUS_RECONCILED
+            if prior_status == STATUS_FEE_UNCONFIRMED:
+                # An orphan-repair / fee-unconfirmed row keeps its EXCLUDED label;
+                # attribution only sharpens its numbers, it never promotes a row
+                # whose fee truth was deliberately marked unsettled.
+                status = STATUS_FEE_UNCONFIRMED
+                detail["prior_label_preserved_fee_unconfirmed"] = True
+            else:
+                status = STATUS_RECONCILED
             detail["attribution_version"] = ATTRIBUTION_VERSION
             if attr.get("legs_missing_from_ledger"):
                 logger.warning(
                     "[broker_truth_recon] session=%s symbol=%s: %d broker fill(s) missing from "
-                    "the FSM ledger attributed by session cid/unpriced-leg match; broker pnl=%.2f "
-                    "vs ledger pnl=%s",
+                    "the FSM ledger attributed by session cid/oco leg/unpriced-leg match; broker "
+                    "pnl=%.2f vs ledger pnl=%s",
                     outcome.session_id, sess.symbol, len(attr["legs_missing_from_ledger"]),
                     broker_pnl or 0.0, attr.get("ledger_pnl_usd"),
                 )
+        elif a_status == ATTR_LISTING_INCOMPLETE:
+            # HEADLINE: the listing is missing this session's OWN ledger legs →
+            # wrong bound account generation / wrong window / empty page. Never
+            # certify, never stamp attribution_version (retry next pass).
+            logger.warning(
+                "[broker_truth_recon] ledger ids missing from listing session=%s symbol=%s ids=%s "
+                "window=%s..%s — read does NOT cover the session; refusing to certify",
+                outcome.session_id, sess.symbol, attr.get("ledger_ids_missing_from_broker"),
+                attr.get("window_start_utc"), attr.get("window_end_utc"),
+            )
+            if _demotion_allowed():
+                status = STATUS_BROKER_UNAVAILABLE
+                broker_pnl = None
+                broker_notional = None
+                source = "broker_orders_attributed"
+            else:
+                _keep_prior_label("attribution_listing_incomplete_label_preserved")
         elif a_status == ATTR_RESIDUAL_OPEN:
-            status = STATUS_RESIDUAL_OPEN
-            broker_pnl = None
-            broker_notional = None
-            source = "broker_orders_attributed"
-            detail["attribution_version"] = ATTRIBUTION_VERSION
+            if _demotion_allowed():
+                status = STATUS_RESIDUAL_OPEN
+                broker_pnl = None
+                broker_notional = None
+                source = "broker_orders_attributed"
+                detail["attribution_version"] = ATTRIBUTION_VERSION
+            else:
+                _keep_prior_label("attribution_residual_open_label_preserved")
+                detail["attribution_version"] = ATTRIBUTION_VERSION
         elif a_status in (ATTR_OVERSOLD, ATTR_AMBIGUOUS):
-            status = STATUS_AMBIGUOUS_TRADE
-            broker_pnl = None
-            broker_notional = None
-            source = "broker_orders_attributed"
-            detail["attribution_version"] = ATTRIBUTION_VERSION
+            if _demotion_allowed():
+                status = STATUS_AMBIGUOUS_TRADE
+                broker_pnl = None
+                broker_notional = None
+                source = "broker_orders_attributed"
+                detail["attribution_version"] = ATTRIBUTION_VERSION
+            else:
+                _keep_prior_label("attribution_ambiguous_label_preserved")
+                detail["attribution_version"] = ATTRIBUTION_VERSION
         elif a_status == ATTR_NO_OWNED_FILLS:
-            # Broker readable, nothing owned. Keep the ledger verdict; if the
-            # ledger claimed broker-confirmed legs this is a real inconsistency
-            # (recorded, and the row stays terminal so it does not spin).
+            # Broker READABLE and the ledger has no legs to contradict it: nothing
+            # was ever filled for this session. Stamp the version AND a retry
+            # horizon so the row stops burning a broker read every 60 s.
             detail["attribution_version"] = ATTRIBUTION_VERSION
-            if status in _USABLE_FOR_LEARNING and agg is not None and agg["entry_legs"] > 0:
-                detail["attribution_inconsistent_with_ledger"] = True
+            detail["attribution_next_retry_utc"] = (
+                datetime.utcnow() + timedelta(seconds=_attribution_backoff_seconds())
+            ).isoformat()
+            t_at = _naive_utc(getattr(outcome, "terminal_at", None))
+            detail["attribution_terminal_at"] = t_at.isoformat() if t_at else None
+        elif a_status in (ATTR_SKIPPED_NO_ENTRY_EVIDENCE, ATTR_SKIPPED_BACKOFF):
+            # No read spent. Keep the ledger verdict exactly; do NOT stamp
+            # attribution_version (the row was never attributed).
+            detail["attribution_read_skipped"] = a_status
+            if a_status == ATTR_SKIPPED_BACKOFF:
+                prior_detail = getattr(outcome, "broker_recon_detail_json", None)
+                prior_detail = prior_detail if isinstance(prior_detail, dict) else {}
+                for k in ("attribution_next_retry_utc", "attribution_terminal_at", "attribution_version"):
+                    if prior_detail.get(k) is not None:
+                        detail[k] = prior_detail[k]
         else:
             # unreadable / truncated / no window: transient. If there is evidence
             # of legs the ledger never saw, the ledger label is KNOWN-wrong → do
@@ -754,6 +1240,12 @@ def reconcile_one_outcome(
     divergence = None
     if broker_pnl is not None and legacy_pnl is not None:
         divergence = broker_pnl - legacy_pnl
+
+    # GAP B: ONE audit event per outcome when broker truth supersedes the lane's
+    # self-report with fills the FSM ledger never saw. Idempotency guard: the
+    # marker rides in the detail json the same pass writes, so a re-touch (or a
+    # replayed pass) can never emit a second event for the same outcome.
+    _emit_divergence_event(db, outcome, sess, detail=detail, divergence=divergence)
 
     detail["source"] = source
     detail["fees_status"] = fees_status
@@ -805,6 +1297,7 @@ def reconcile_momentum_outcomes_to_broker_truth(
                 MomentumAutomationOutcome.terminal_at >= cutoff,
                 MomentumAutomationOutcome.mode == "live",
             )
+            .order_by(MomentumAutomationOutcome.terminal_at.desc())
             .all()
         )
     except Exception as ex:
@@ -824,19 +1317,40 @@ def reconcile_momentum_outcomes_to_broker_truth(
     except (TypeError, ValueError):
         budget = 20
     broker_reads = 0
+    skipped_no_read_needed = 0
+    # ORDERING (never heap order): the rows the loss guard is waiting on — never
+    # reconciled, or terminal-without-attribution — take the budget FIRST, newest
+    # first. The unordered `.all()` let ~115 no-fill rows shuffle a newly terminal
+    # FILLED session out of the 20-read budget for minutes at a time.
+    def _sort_key(pair):
+        outcome, sess = pair
+        t = getattr(outcome, "terminal_at", None)
+        t_key = t.timestamp() if isinstance(t, datetime) else 0.0
+        return (_attribution_priority(outcome, sess), -t_key)
+
+    try:
+        rows = sorted(rows, key=_sort_key)
+    except Exception:  # pragma: no cover - defensive (never lose the pass to sorting)
+        pass
     for outcome, sess in rows:
         checked += 1
         if not needs_reconcile(outcome, sess):
             skipped_terminal += 1
             by_status[str(outcome.broker_recon_status)] = by_status.get(str(outcome.broker_recon_status), 0) + 1
             continue
-        if _attribution_enabled() and _is_alpaca_family(sess):
+        plan = broker_read_plan(outcome, sess)
+        if plan.get("read"):
             if broker_reads >= budget:
                 skipped_budget += 1
                 continue
             broker_reads += 1
+        elif plan.get("reason") not in ("not_alpaca_attribution",):
+            # Alpaca row that spends NO broker read this pass (no entry evidence /
+            # backoff). It is still reconciled from the ledger — it just does not
+            # compete for the budget.
+            skipped_no_read_needed += 1
         try:
-            detail = reconcile_one_outcome(db, outcome, sess)
+            detail = reconcile_one_outcome(db, outcome, sess, read_plan=plan)
             written += 1
             st = detail.get("status", "?")
             by_status[st] = by_status.get(st, 0) + 1
@@ -864,6 +1378,7 @@ def reconcile_momentum_outcomes_to_broker_truth(
         "written": written,
         "skipped_terminal": skipped_terminal,
         "skipped_broker_budget": skipped_budget,
+        "skipped_no_broker_read_needed": skipped_no_read_needed,
         "broker_reads": broker_reads,
         "by_status": by_status,
         "reconciled_legacy_sum": round(legacy_sum, 2),

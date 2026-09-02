@@ -47,11 +47,24 @@ SAFETY POSTURE:
     (AlpacaSpotAdapter GETs). Never prints credentials.
   * Never clears the operator pause, never pops ``entry_*`` keys, never writes
     a synthetic position (all three re-open the naked-position door).
+  * ``--stop-only`` REQUIRES ``--execute`` and an already-EXITED row.
+    ``stop_automation_session`` is NOT inert: for a held / ``live_pending_entry``
+    Alpaca row with no durable claim it runs ``_flatten_live_session_for_stop``
+    -> ``tick_live_session`` IN-PROCESS (entry cancel / broker exit submit). That
+    path must go through the flatten key, never around it.
+  * ``--inline-tick`` is admitted ONLY on the durable numeric proof that the
+    event loop's heartbeat is STALE. An unreadable heartbeat, a driver-config
+    error, or "no driver enabled" all mean the lane's state is unprovable from
+    this process's ``.env`` — refused, because the Docker lane may be ticking.
+  * DB bounds are CONNECTION-STARTUP options (statement_timeout 30 s,
+    lock_timeout 5 s) on the script's own engine — a ``SET`` inside the autobegun
+    transaction is reverted by the first ``rollback()``.
 
 Usage:
     conda run -n chili-env python scripts/operator_flatten_session.py --session-id 19471
     conda run -n chili-env python scripts/operator_flatten_session.py --session-id 19471 --execute
     conda run -n chili-env python scripts/operator_flatten_session.py --session-id 19471 --stop-only
+    conda run -n chili-env python scripts/operator_flatten_session.py --session-id 19471 --stop-only --execute
 
 Exit codes: 0 done / dry-run; 1 refused or error; 2 flatten executed but stop
 deferred (re-run --stop-only); 3 request parked (lane down); 4 wait timed out.
@@ -111,6 +124,15 @@ LE_KEYS_OF_INTEREST = (
     "last_recycled_at_utc",
 )
 STATEMENT_TIMEOUT_MS = 30_000
+# A wedged lane tick holds the session row; `stop_automation_session` takes
+# `with_for_update()` with NO nowait, so without a server-side lock_timeout the
+# script blocks FOREVER behind it (the exact 19471 "FSM wedged" scenario).
+LOCK_TIMEOUT_MS = 5_000
+# The ONE lane reason that PROVES the event loop is not ticking. Anything else
+# ("unreadable", a driver-configuration error, no driver enabled) means the lane's
+# state is unprovable from THIS process's env — never an inline-tick licence.
+LANE_STALE_REASON = "live_runner_loop_heartbeat_stale"
+STOP_ONLY_REQUIRED_NON_STATES = frozenset(HELD_STATES | {"live_pending_entry"})
 DEFAULT_WAIT_SECONDS = 90
 DEFAULT_POLL_SECONDS = 2.0
 DEFAULT_INLINE_TICKS = 6
@@ -132,6 +154,66 @@ def pause_info_of(sess: Any) -> dict[str, Any]:
     return operator_pause_info(getattr(sess, "risk_snapshot_json", None))
 
 
+def inline_tick_admission(lane: Mapping[str, Any] | None) -> tuple[bool, str | None]:
+    """May THIS process drive ``tick_live_session``? OBSERVED lane truth only.
+
+    ``lane_status()`` derives ``ok`` partly from ``live_runner_driver_configuration()``,
+    which reads THIS process's settings (the script's own ``.env`` copy). A stale
+    local env with the runner disabled, both drivers on, or the price bus off makes
+    ``ok`` False while the Docker lane is alive and ticking — and the only thing
+    then standing between two tickers and one row is an 800 ms ``lock_timeout``.
+    So an inline tick is admitted ONLY on the durable, numeric proof that the
+    event loop's heartbeat is stale.
+    """
+    if not isinstance(lane, Mapping):
+        return False, "inline_tick_refused_lane_state_unprovable:lane_unread"
+    if lane.get("ok") is True:
+        return False, "inline_tick_refused_lane_heartbeat_fresh"
+    driver = lane.get("driver")
+    if driver != "event_loop":
+        return False, f"inline_tick_refused_lane_driver_not_event_loop:{driver or 'none'}"
+    reason = str(lane.get("reason") or "")
+    if reason != LANE_STALE_REASON:
+        return False, f"inline_tick_refused_lane_state_unprovable:{reason or 'unknown'}"
+    age = lane.get("heartbeat_age_seconds")
+    stale = lane.get("stale_seconds")
+    try:
+        age_f = float(age)
+        stale_f = float(stale)
+    except (TypeError, ValueError):
+        return False, "inline_tick_refused_heartbeat_age_unprovable"
+    if not (age_f > stale_f):
+        return False, "inline_tick_refused_heartbeat_age_unprovable"
+    return True, None
+
+
+def evaluate_stop_only_eligibility(
+    sess: Any,
+    *,
+    lane: Mapping[str, Any] | None,
+) -> tuple[bool, list[str]]:
+    """``--stop-only`` guard. ``stop_automation_session`` is NOT inert.
+
+    For a held / ``live_pending_entry`` Alpaca row with no durable claim it runs
+    ``_flatten_live_session_for_stop`` -> ``tick_live_session`` IN-PROCESS, i.e.
+    an entry cancel / broker exit submit. That path must go through the flatten
+    key (locked row, lane's own tick), never through ``--stop-only``, and never
+    without ``--execute``."""
+    reasons: list[str] = []
+    if sess is None:
+        return False, ["session_not_found"]
+    if getattr(sess, "user_id", None) is None:
+        reasons.append("user_id_missing_stop_would_be_refused")
+    state = str(getattr(sess, "state", "") or "")
+    if state in STOP_ONLY_REQUIRED_NON_STATES:
+        reasons.append(f"stop_only_requires_exited_row:{state}")
+        # Defence in depth: even if the state set ever widens, a held row whose
+        # lane is not provably running must never be terminalized from here.
+        if not (isinstance(lane, Mapping) and lane.get("ok") is True):
+            reasons.append("stop_only_refused_held_row_lane_not_running")
+    return not reasons, reasons
+
+
 def evaluate_eligibility(
     sess: Any,
     *,
@@ -139,12 +221,15 @@ def evaluate_eligibility(
     lane_ok: bool | None,
     allow_lane_down: bool,
     inline_tick: bool,
+    lane: Mapping[str, Any] | None = None,
 ) -> tuple[bool, list[str]]:
     """Decide whether ``--execute`` may set the flatten key.
 
     ``lane_ok``: True = fresh live-loop heartbeat, False = stale/missing/error,
     None = driver is not the event loop (batch scheduler) -> cannot be proven
     from the DB; treated as running unless ``--inline-tick`` is requested.
+    ``lane``: the full ``lane_status()`` dict — REQUIRED for ``--inline-tick``
+    (see ``inline_tick_admission``); its absence refuses the inline tick.
     """
     reasons: list[str] = []
     if sess is None:
@@ -164,10 +249,9 @@ def evaluate_eligibility(
     if getattr(sess, "user_id", None) is None:
         reasons.append("user_id_missing_stop_would_be_refused")
     if inline_tick:
-        if lane_ok is True:
-            reasons.append("inline_tick_refused_lane_heartbeat_fresh")
-        if lane_ok is None:
-            reasons.append("inline_tick_refused_lane_driver_not_event_loop")
+        admitted, why = inline_tick_admission(lane)
+        if not admitted and why:
+            reasons.append(why)
     elif lane_ok is False and not allow_lane_down:
         reasons.append("lane_down_use_allow_lane_down_or_inline_tick")
     return not reasons, reasons
@@ -229,13 +313,45 @@ def _print(label: str, obj: Any = None) -> None:
 # ── DB / broker readers ───────────────────────────────────────────────────────
 
 
-def open_db():
+def _connect_options() -> str:
+    """CONNECTION-STARTUP bounds. A `SET` issued inside SQLAlchemy's autobegun
+    transaction is REVERTED by the first ``db.rollback()`` (verified: SHOW returns
+    `30s` in-txn, `0` after rollback) — every poll in ``wait_for_execution`` rolls
+    back, so the bound evaporated exactly where the script blocks. Startup options
+    are part of the connection and survive rollback/commit."""
+    return f"-c statement_timeout={int(STATEMENT_TIMEOUT_MS)} -c lock_timeout={int(LOCK_TIMEOUT_MS)}"
+
+
+def assert_statement_bounds(db) -> None:
+    """Belt-and-braces re-assert after a rollback/commit for any connection that
+    did not get the startup options (non-PG URL, pooled foreign connection)."""
     from sqlalchemy import text
 
-    from app.db import SessionLocal
+    try:
+        db.execute(text(f"SET statement_timeout = {int(STATEMENT_TIMEOUT_MS)}"))
+        db.execute(text(f"SET lock_timeout = {int(LOCK_TIMEOUT_MS)}"))
+    except Exception:
+        pass
 
-    db = SessionLocal()
-    db.execute(text(f"SET statement_timeout = {int(STATEMENT_TIMEOUT_MS)}"))
+
+def open_db():
+    """A DEDICATED engine/session so the bounds are connection-level, not
+    transaction-level (and so the script never borrows the app's pool)."""
+    from sqlalchemy import create_engine
+    from sqlalchemy.orm import sessionmaker
+
+    from app.db import DATABASE_URL
+
+    url = str(DATABASE_URL)
+    kwargs: dict[str, Any] = {"pool_pre_ping": True, "future": True}
+    if url.startswith("postgres"):
+        kwargs["connect_args"] = {
+            "options": _connect_options(),
+            "application_name": "chili-operator-flatten",
+        }
+    engine = create_engine(url, **kwargs)
+    db = sessionmaker(bind=engine, autoflush=False, expire_on_commit=False)()
+    assert_statement_bounds(db)
     return db
 
 
@@ -450,6 +566,7 @@ def wait_for_execution(
     status: str | None = None
     while True:
         db.rollback()  # fresh snapshot each poll (READ COMMITTED)
+        assert_statement_bounds(db)
         new = recent_events(db, session_id, after_id=last_id if last_id is not None else 0)
         for ev in new:
             if ev.event_type in WATCH_EVENTS:
@@ -473,6 +590,7 @@ def run_inline_ticks(db, session_id: int, *, max_ticks: int, sleep: Callable[[fl
     from app.services.trading.momentum_neural.live_runner import tick_live_session
 
     for i in range(max(1, int(max_ticks))):
+        assert_statement_bounds(db)
         try:
             result = tick_live_session(db, int(session_id))
             db.commit()
@@ -480,6 +598,7 @@ def run_inline_ticks(db, session_id: int, *, max_ticks: int, sleep: Callable[[fl
             db.rollback()
             _print(f"  inline tick {i + 1} raised {type(exc).__name__}: {exc}")
             result = None
+        assert_statement_bounds(db)
         if isinstance(result, dict):
             _print(f"  inline tick {i + 1}", result)
             if result.get("operator_flatten") is True or result.get("flattened") is True:
@@ -494,6 +613,9 @@ def run_inline_ticks(db, session_id: int, *, max_ticks: int, sleep: Callable[[fl
 def stop_session(db, sess) -> dict[str, Any]:
     from app.services.trading.momentum_neural.automation_query import stop_automation_session
 
+    # stop_automation_session takes with_for_update() WITHOUT nowait: the bound
+    # must be live on THIS connection or a wedged lane tick blocks us forever.
+    assert_statement_bounds(db)
     result = stop_automation_session(db, user_id=int(sess.user_id), session_id=int(sess.id))
     if result.get("ok"):
         db.commit()
@@ -509,7 +631,11 @@ def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     p.add_argument("--session-id", type=int, required=True)
     p.add_argument("--execute", action="store_true", help="set the flatten key (default: dry-run)")
-    p.add_argument("--stop-only", action="store_true", help="skip the request; only call stop_automation_session")
+    p.add_argument(
+        "--stop-only",
+        action="store_true",
+        help="skip the request; only call stop_automation_session (REQUIRES --execute; exited rows only)",
+    )
     p.add_argument("--no-stop", action="store_true", help="after operator_flatten_executed, do not terminalize")
     p.add_argument("--wait-seconds", type=float, default=DEFAULT_WAIT_SECONDS)
     p.add_argument("--poll-seconds", type=float, default=DEFAULT_POLL_SECONDS)
@@ -527,8 +653,8 @@ def main(argv: list[str] | None = None) -> int:
     if args.inline_tick and not args.execute:
         print("refused: --inline-tick requires --execute")
         return 1
-    if args.stop_only and args.execute:
-        print("refused: --stop-only and --execute are mutually exclusive")
+    if args.stop_only and args.inline_tick:
+        print("refused: --stop-only and --inline-tick are mutually exclusive")
         return 1
 
     from app.services.trading.momentum_neural.operator_actions import (
@@ -561,11 +687,19 @@ def main(argv: list[str] | None = None) -> int:
         if not args.skip_broker:
             _print("broker_truth", broker_truth(sess, le))
         db.rollback()
+        assert_statement_bounds(db)
 
         if args.stop_only:
-            if sess.user_id is None:
-                print("refused: session has no user_id; stop_automation_session needs one")
+            ok, reasons = evaluate_stop_only_eligibility(sess, lane=lane)
+            _print("stop_only_eligibility", {"ok": ok, "reasons": reasons})
+            if not ok:
+                print("refused: " + ", ".join(reasons))
                 return 1
+            if not args.execute:
+                print("DRY-RUN (default). --stop-only is NOT inert: for a held row "
+                      "stop_automation_session ticks the FSM in-process. Re-run with "
+                      "--stop-only --execute to terminalize this exited row.")
+                return 0
             result = stop_session(db, sess)
             _print("stop_automation_session", result)
             return stop_outcome_exit_code(result)
@@ -573,6 +707,7 @@ def main(argv: list[str] | None = None) -> int:
         ok, reasons = evaluate_eligibility(
             sess, quarantine_reason=quarantine, lane_ok=lane.get("ok"),
             allow_lane_down=args.allow_lane_down, inline_tick=args.inline_tick,
+            lane=lane,
         )
         _print("eligibility", {"ok": ok, "reasons": reasons, "already_requested": bool(le.get(FLATTEN_KEY))})
         if not args.execute:

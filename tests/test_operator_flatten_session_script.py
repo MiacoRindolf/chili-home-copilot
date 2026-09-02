@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import ast
 import importlib.util
+import os
 import sys
 from datetime import datetime
 from pathlib import Path
@@ -111,19 +112,66 @@ def test_lane_down_needs_an_explicit_choice(mod):
     ok, r = mod.evaluate_eligibility(s, quarantine_reason=None, lane_ok=False,
                                      allow_lane_down=True, inline_tick=False)
     assert ok, r
-    ok, r = mod.evaluate_eligibility(s, quarantine_reason=None, lane_ok=False,
-                                     allow_lane_down=False, inline_tick=True)
+    ok, r = mod.evaluate_eligibility(
+        s, quarantine_reason=None, lane_ok=False, allow_lane_down=False,
+        inline_tick=True,
+        lane={"ok": False, "reason": "live_runner_loop_heartbeat_stale",
+              "driver": "event_loop", "heartbeat_age_seconds": 900.0, "stale_seconds": 75.0},
+    )
     assert ok, r
 
 
 def test_inline_tick_is_refused_while_a_lane_heartbeat_is_fresh(mod):
     """Two tickers on one row is the reaper-race shape all over again."""
-    ok, r = mod.evaluate_eligibility(_sess(), quarantine_reason=None, lane_ok=True,
-                                     allow_lane_down=False, inline_tick=True)
+    ok, r = mod.evaluate_eligibility(
+        _sess(), quarantine_reason=None, lane_ok=True, allow_lane_down=False, inline_tick=True,
+        lane={"ok": True, "reason": None, "driver": "event_loop",
+              "heartbeat_age_seconds": 2.0, "stale_seconds": 75.0},
+    )
     assert not ok and "inline_tick_refused_lane_heartbeat_fresh" in r
-    ok, r = mod.evaluate_eligibility(_sess(), quarantine_reason=None, lane_ok=None,
-                                     allow_lane_down=False, inline_tick=True)
-    assert not ok and "inline_tick_refused_lane_driver_not_event_loop" in r
+    ok, r = mod.evaluate_eligibility(
+        _sess(), quarantine_reason=None, lane_ok=None, allow_lane_down=False, inline_tick=True,
+        lane={"ok": None, "reason": "driver_not_event_loop", "driver": "scheduled_auto_arm"},
+    )
+    assert not ok and any(x.startswith("inline_tick_refused_lane_driver_not_event_loop") for x in r)
+
+
+# ── MUST CHANGE 3: inline-tick admission is OBSERVED lane truth only ─────────
+@pytest.mark.parametrize("lane,expect", [
+    # the heartbeat probe itself failed → the lane's state is UNPROVABLE, and the
+    # Docker lane may be alive and ticking (the script reads its OWN .env)
+    ({"ok": False, "reason": "live_runner_loop_heartbeat_unreadable", "driver": "event_loop",
+      "heartbeat_age_seconds": None, "stale_seconds": 75.0},
+     "inline_tick_refused_lane_state_unprovable:live_runner_loop_heartbeat_unreadable"),
+    # a driver-CONFIGURATION verdict from this process's settings, not lane truth
+    ({"ok": False, "reason": "live_runner_no_driver_enabled", "driver": None},
+     "inline_tick_refused_lane_driver_not_event_loop:none"),
+    ({"ok": False, "reason": "live_runner_batch_and_event_loop_both_enabled", "driver": None},
+     "inline_tick_refused_lane_driver_not_event_loop:none"),
+    ({"ok": False, "reason": "live_runner_event_loop_price_bus_disabled", "driver": None},
+     "inline_tick_refused_lane_driver_not_event_loop:none"),
+    # stale reason but the age cannot be compared → unprovable
+    ({"ok": False, "reason": "live_runner_loop_heartbeat_stale", "driver": "event_loop",
+      "heartbeat_age_seconds": None, "stale_seconds": 75.0},
+     "inline_tick_refused_heartbeat_age_unprovable"),
+    ({"ok": False, "reason": "live_runner_loop_heartbeat_stale", "driver": "event_loop",
+      "heartbeat_age_seconds": 10.0, "stale_seconds": 75.0},
+     "inline_tick_refused_heartbeat_age_unprovable"),
+    # a future/malformed heartbeat is not proof the loop stopped
+    ({"ok": False, "reason": "live_runner_loop_heartbeat_future", "driver": "event_loop",
+      "heartbeat_age_seconds": -50.0, "stale_seconds": 75.0},
+     "inline_tick_refused_lane_state_unprovable:live_runner_loop_heartbeat_future"),
+    # no lane dict at all
+    (None, "inline_tick_refused_lane_state_unprovable:lane_unread"),
+])
+def test_inline_tick_refused_unless_the_heartbeat_proves_the_loop_is_stale(mod, lane, expect):
+    ok, r = mod.evaluate_eligibility(
+        _sess(), quarantine_reason=None, lane_ok=False, allow_lane_down=False,
+        inline_tick=True, lane=lane,
+    )
+    assert not ok and expect in r, r
+    admitted, why = mod.inline_tick_admission(lane)
+    assert admitted is False and why == expect
 
 
 # ── the single-key write ─────────────────────────────────────────────────────
@@ -295,15 +343,30 @@ def test_default_is_dry_run_and_flag_shapes(mod):
 def test_inline_tick_without_execute_is_refused_before_any_db(mod, monkeypatch):
     monkeypatch.setattr(mod, "open_db", lambda: (_ for _ in ()).throw(AssertionError("db opened")))
     assert mod.main(["--session-id", "1", "--inline-tick"]) == 1
-    assert mod.main(["--session-id", "1", "--stop-only", "--execute"]) == 1
+    assert mod.main(["--session-id", "1", "--stop-only", "--inline-tick"]) == 1
 
 
-def _wire_main(mod, monkeypatch, sess, *, lane_ok=True, request_result=None,
+def _lane(ok, *, driver="event_loop", reason=None, age=None, stale=75.0):
+    """A COMPLETE lane_status() dict. --inline-tick admission needs the driver, the
+    exact stale reason AND a numeric heartbeat age > stale_seconds."""
+    if ok:
+        return {"ok": True, "reason": None, "driver": driver,
+                "heartbeat_age_seconds": 3.0, "stale_seconds": stale}
+    return {
+        "ok": False,
+        "reason": reason or "live_runner_loop_heartbeat_stale",
+        "driver": driver,
+        "heartbeat_age_seconds": 900.0 if age is None else age,
+        "stale_seconds": stale,
+    }
+
+
+def _wire_main(mod, monkeypatch, sess, *, lane_ok=True, lane=None, request_result=None,
                wait_status="executed", stop_result=None, log=None):
     log = log if log is not None else []
     monkeypatch.setattr(mod, "open_db", lambda: _Db())
     monkeypatch.setattr(mod, "load_session", lambda db, sid, for_update=False: sess)
-    monkeypatch.setattr(mod, "lane_status", lambda db: {"ok": lane_ok, "reason": None if lane_ok else "live_runner_loop_heartbeat_stale"})
+    monkeypatch.setattr(mod, "lane_status", lambda db: (lane if lane is not None else _lane(lane_ok)))
     monkeypatch.setattr(mod, "read_claim", lambda db, s: {"readable": True, "claim": None})
     monkeypatch.setattr(mod, "read_outcome", lambda db, sid: None)
     monkeypatch.setattr(mod, "recent_events", lambda db, sid, *, limit=15, after_id=None: [_ev(5, "live_entry_pending_place")])
@@ -383,8 +446,46 @@ def test_main_execute_inline_tick_only_when_lane_down(mod, monkeypatch):
 
 def test_main_stop_only(mod, monkeypatch):
     log = _wire_main(mod, monkeypatch, _sess(state="live_exited"))
-    assert mod.main(["--session-id", "19471", "--stop-only", "--skip-broker"]) == 0
+    assert mod.main(["--session-id", "19471", "--stop-only", "--execute", "--skip-broker"]) == 0
     assert log == [("stop", 19471)]
+
+
+# ── MUST CHANGE 1: --stop-only is NOT inert ──────────────────────────────────
+def test_stop_only_without_execute_calls_nothing(mod, monkeypatch, capsys):
+    """`stop_automation_session` → `_flatten_live_session_for_stop` →
+    `tick_live_session` IN-PROCESS for a held row. It must never run on a flag
+    that has no --execute gate."""
+    log = _wire_main(mod, monkeypatch, _sess(state="live_exited"))
+    assert mod.main(["--session-id", "19471", "--stop-only", "--skip-broker"]) == 0
+    assert log == [], "no stop, no request, no tick"
+    assert "DRY-RUN" in capsys.readouterr().out
+
+
+@pytest.mark.parametrize("state", ["live_entered", "live_pending_entry", "live_scaling_out",
+                                   "live_trailing", "live_bailout"])
+def test_stop_only_refuses_a_held_row_even_with_execute(mod, monkeypatch, state):
+    """A held row must go through the flatten KEY (locked row, the lane's own
+    tick), never through stop_automation_session's in-process tick."""
+    log = _wire_main(mod, monkeypatch, _sess(state=state))
+    assert mod.main(["--session-id", "19471", "--stop-only", "--execute", "--skip-broker"]) == 1
+    assert log == []
+    log2 = _wire_main(mod, monkeypatch, _sess(state=state))
+    assert mod.main(["--session-id", "19471", "--stop-only", "--skip-broker"]) == 1
+    assert log2 == []
+
+
+def test_stop_only_eligibility_reasons(mod):
+    fresh = _lane(True)
+    ok, r = mod.evaluate_stop_only_eligibility(_sess(state="live_exited"), lane=fresh)
+    assert ok, r
+    ok, r = mod.evaluate_stop_only_eligibility(_sess(state="live_entered"), lane=fresh)
+    assert not ok and "stop_only_requires_exited_row:live_entered" in r
+    ok, r = mod.evaluate_stop_only_eligibility(_sess(state="live_entered"), lane=_lane(False))
+    assert not ok and "stop_only_refused_held_row_lane_not_running" in r
+    ok, r = mod.evaluate_stop_only_eligibility(_sess(state="live_exited", user_id=None), lane=fresh)
+    assert not ok and "user_id_missing_stop_would_be_refused" in r
+    ok, r = mod.evaluate_stop_only_eligibility(None, lane=fresh)
+    assert not ok and r == ["session_not_found"]
 
 
 def test_main_refuses_ineligible_on_execute(mod, monkeypatch):
@@ -456,7 +557,42 @@ def test_script_locks_the_row_and_terminalizes_only_via_stop_automation_session(
     assert "with_for_update(nowait=True)" in src
     assert src.count("stop_automation_session(") == 1
     assert "SET statement_timeout" in src
+    # The REAL bound is a connection-startup option (a SET inside the autobegun
+    # transaction is reverted by the first rollback) — see the DB-backed test.
+    assert "statement_timeout={int(STATEMENT_TIMEOUT_MS)} -c lock_timeout=" in src
     assert "_safe_transition" not in src and ".state = " not in src
+
+
+# ── MUST CHANGE 2: the statement/lock bound is REAL, not a string in the source ──
+def test_open_db_bounds_survive_a_rollback(mod):
+    """`SET statement_timeout` inside SQLAlchemy's autobegun transaction is
+    REVERTED by `db.rollback()` — and `wait_for_execution` rolls back on EVERY
+    poll, so the 30 s bound evaporated exactly where the script blocks. The bound
+    must be a connection-startup option."""
+    url = os.environ.get("TEST_DATABASE_URL", "")
+    if not url.startswith("postgres"):
+        pytest.skip("needs a postgres TEST_DATABASE_URL")
+    if not url.rsplit("/", 1)[-1].endswith("_test"):
+        pytest.skip("refusing a non-_test database")
+    import app.db as _appdb
+
+    prev = _appdb.DATABASE_URL
+    _appdb.DATABASE_URL = url
+    try:
+        db = mod.open_db()
+        try:
+            from sqlalchemy import text as _t
+
+            db.rollback()  # the exact call that used to drop the bound
+            assert db.execute(_t("SHOW statement_timeout")).scalar() == "30s"
+            assert db.execute(_t("SHOW lock_timeout")).scalar() not in ("0", None)
+            db.rollback()
+            db.commit()
+            assert db.execute(_t("SHOW statement_timeout")).scalar() == "30s"
+        finally:
+            db.close()
+    finally:
+        _appdb.DATABASE_URL = prev
 
 
 def test_script_imports_no_secret_surface():

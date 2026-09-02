@@ -189,11 +189,66 @@ def test_certified_short_helper_vocabulary():
 
 def test_aggregate_source_keeps_the_raise_and_both_bounds():
     src = inspect.getsource(RE.aggregate_open_risk_usd)
-    assert src.count('"position_risk_fields_invalid"') == 2, "qty/basis + direction raises"
+    # qty/basis + UNSTOPPED direction + STOPPED direction (2026-09-02 hardening)
+    assert src.count('"position_risk_fields_invalid"') == 3
     assert "stop_unknown_full_notional_bound" in src
     assert "stop_unknown_short_notional_multiple_bound" in src
     assert "_alpaca_position_certified_short(" in src
     assert "_short_unstopped_notional_multiple()" in src
+    # The STOPPED alpaca branch no longer reads direction from `le` alone.
+    assert src.count('side_long = le.get("side_long") is not False') == 1, \
+        "exactly ONE le-only direction read remains: the NON-alpaca branch"
+
+
+# ── STOPPED rows: direction from the SAME certified evidence (MUST CHANGE 4) ──
+def _short_shaped(marker: dict, *, stop):
+    """A short-shaped row whose direction markers live ONLY on `position` — the
+    shape the FSM's own adopt-for-safety writes (live_runner:5085 stamps
+    `position["side"]`, never `side_long`)."""
+    return {"position": {"quantity": 100, "avg_entry_price": 10.0, "stop_price": stop, **marker}}
+
+
+@pytest.mark.parametrize("marker", [
+    {"side": "short"},
+    {"side_long": False},
+    {"position_intent": "sell_to_open"},
+])
+def test_stopped_short_marked_only_on_position_is_charged_the_short_distance(marker):
+    """THE HOLE: `le.get("side_long") is not False` ignored position-only markers,
+    so a stopped short was priced as a long — max(0, entry-stop) = $0 with a stop
+    ABOVE entry. Attaching a stop to a short-shaped row DROPPED its charge from
+    2x notional to zero: looser than the raise the bound replaced."""
+    db = _FakeDb([_sess(1, le=_short_shaped(marker, stop=10.5))])
+    total, rows = RE.aggregate_open_risk_usd(db, user_id=1, execution_family="alpaca_spot")
+    assert total == pytest.approx(50.0), rows  # (10.5 - 10.0) * 100
+    assert rows and rows[0]["at_risk_usd"] == pytest.approx(50.0)
+
+
+def test_stopped_long_is_unchanged():
+    db = _FakeDb([_sess(1, le={"position": {"quantity": 100, "avg_entry_price": 10.0,
+                                            "stop_price": 9.6}})])
+    total, _rows = RE.aggregate_open_risk_usd(db, user_id=1, execution_family="alpaca_spot")
+    assert total == pytest.approx(40.0)
+    db2 = _FakeDb([_sess(1, le={"side_long": True,
+                                "position": {"quantity": 100, "avg_entry_price": 10.0,
+                                             "stop_price": 9.6, "side": "long"}})])
+    total2, _r2 = RE.aggregate_open_risk_usd(db2, user_id=1, execution_family="alpaca_spot")
+    assert total2 == pytest.approx(40.0)
+
+
+def test_stopped_contradictory_direction_raises():
+    le = {"side_long": True, "position": {"quantity": 100, "avg_entry_price": 10.0,
+                                          "stop_price": 10.5, "side": "short"}}
+    db = _FakeDb([_sess(1, le=le)])
+    with pytest.raises(RuntimeError, match="position_risk_fields_invalid"):
+        RE.aggregate_open_risk_usd(db, user_id=1, execution_family="alpaca_spot")
+
+
+def test_stopped_short_family_row_is_unchanged():
+    db = _FakeDb([_sess(1, le={"position": {"quantity": 100, "avg_entry_price": 10.0,
+                                            "stop_price": 10.5}}, family="alpaca_short")])
+    total, _rows = RE.aggregate_open_risk_usd(db, user_id=1, execution_family="alpaca_short")
+    assert total == pytest.approx(50.0)
 
 
 def test_short_bound_row_is_a_note_row_not_a_displacement_target():

@@ -26,7 +26,7 @@ from __future__ import annotations
 import ast
 import inspect
 import textwrap
-from datetime import datetime
+from datetime import datetime, timedelta
 from types import SimpleNamespace
 
 import pytest
@@ -233,26 +233,37 @@ class _Res:
 
 
 class _FakeDb:
-    """Serves the two ledger queries; anything else is a test failure."""
+    """Serves the ledger queries + the cross-outcome collision probe; anything
+    else is a test failure."""
 
-    def __init__(self, ledger_rows):
+    def __init__(self, ledger_rows, *, collisions=None, probe_raises=False):
         self.ledger_rows = ledger_rows
+        self.collisions = collisions or []      # [(other_session_id, broker_order_id)]
+        self.probe_raises = probe_raises
         self.sql = []
 
     def execute(self, stmt, params=None):
         sql = " ".join(str(stmt).split())
         self.sql.append(sql)
         if "broker_order_id IS NOT NULL" in sql:
-            return _Res([(r[10],) for r in self.ledger_rows if r[10]])
+            return _Res([(r[10], r[11]) for r in self.ledger_rows if r[10]])
         if "FROM momentum_fill_outcomes" in sql:
             return _Res([r[:10] for r in self.ledger_rows])
+        if "momentum_automation_outcomes" in sql:
+            if self.probe_raises:
+                raise RuntimeError("probe unreadable")
+            return _Res(list(self.collisions))
         raise AssertionError(f"unexpected SQL in DB-free test: {sql}")
 
 
-# (side, leg_seq, fill_source, broker_fill_price, qty, fees_usd, settled_pnl, settled_fees, realized_pnl, entry_price, broker_order_id)
+_ENTRY_FILL_TS = datetime(2026, 9, 2, 11, 10, 19)
+_EXIT_FILL_TS = datetime(2026, 9, 2, 11, 11, 5)
+# (side, leg_seq, fill_source, broker_fill_price, qty, fees_usd, settled_pnl, settled_fees, realized_pnl, entry_price, broker_order_id, fill_ts)
 _LEDGER_19471 = [
-    ("entry", 0, "broker_confirmed", 4.34, 355.0, 0.0, None, None, None, None, "552efe43-395a-4f76-836a-7be3d30a8689"),
-    ("exit", 0, "broker_confirmed", 4.119915, 355.0, 0.0, None, None, -78.130175, 4.34, "af3a4b0c-d7fc-4379-8b25-ddc50ab82a31"),
+    ("entry", 0, "broker_confirmed", 4.34, 355.0, 0.0, None, None, None, None,
+     "552efe43-395a-4f76-836a-7be3d30a8689", _ENTRY_FILL_TS),
+    ("exit", 0, "broker_confirmed", 4.119915, 355.0, 0.0, None, None, -78.130175, 4.34,
+     "af3a4b0c-d7fc-4379-8b25-ddc50ab82a31", _EXIT_FILL_TS),
 ]
 
 
@@ -356,10 +367,13 @@ def test_unreadable_broker_without_evidence_keeps_the_ledger_verdict_for_retry()
 def test_residual_open_at_the_broker_fails_closed():
     o, s = _outcome_and_session()
 
-    def _buys_only(symbol, after, until):
-        return {"readable": True, "orders": [x for x in _canf_orders() if x.side == "buy"], "truncated": False}
+    def _no_closing_sell(symbol, after, until):
+        # cycle-2 sell never appears; BOTH ledger legs are present so the read is
+        # complete — the session really is 165 shares open.
+        keep = [x for x in _canf_orders() if not x.client_order_id.startswith("chili_ops_flat_")]
+        return {"readable": True, "orders": keep, "truncated": False}
 
-    orc.reconcile_one_outcome(_FakeDb(_LEDGER_19471), o, s, broker_orders_reader=_buys_only)
+    orc.reconcile_one_outcome(_FakeDb(_LEDGER_19471), o, s, broker_orders_reader=_no_closing_sell)
     assert o.broker_recon_status == orc.STATUS_RESIDUAL_OPEN
     assert o.broker_realized_pnl_usd is None
     assert rp._alpaca_loss_history_broker_truth(o) is False
@@ -409,6 +423,7 @@ def test_batch_pass_honors_the_broker_read_budget(monkeypatch):
     class _Q:
         def join(self, *a, **k): return self
         def filter(self, *a, **k): return self
+        def order_by(self, *a, **k): return self
         def all(self): return rows
 
     class _Db:
@@ -478,3 +493,485 @@ def test_settings_ship_on():
     assert s.chili_momentum_outcome_recon_broker_attribution_enabled is True
     assert s.chili_momentum_outcome_recon_broker_attribution_max_per_pass == 20
     assert s.chili_momentum_outcome_recon_broker_attribution_grace_seconds == 900
+    assert s.chili_momentum_outcome_recon_broker_attribution_no_fill_backoff_seconds == 1800
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# ADVERSARIAL-REVIEW HARDENING (2026-09-02). One test per MUST CHANGE.
+# ═══════════════════════════════════════════════════════════════════════════════
+
+# ── (A) BUDGET: a no-fill row must never starve a newly terminal FILLED session ──
+def _no_fill_pair(idx):
+    """A `cancelled_pre_entry` shape: NO entry evidence anywhere on the envelope.
+    115 of these were live in a 2-day lookback on 09-02."""
+    le = {"trade_cycles": 0, "position": None}
+    sess = SimpleNamespace(
+        id=90000 + idx, symbol="AAME", execution_family="alpaca_spot", mode="live",
+        state="live_cancelled", started_at=datetime(2026, 9, 2, 10, 0, 0),
+        ended_at=datetime(2026, 9, 2, 10, 5, 0),
+        risk_snapshot_json={"momentum_live_execution": le},
+    )
+    outcome = SimpleNamespace(
+        id=700000 + idx, session_id=90000 + idx, symbol="AAME", mode="live",
+        execution_family="alpaca_spot", terminal_at=datetime(2026, 9, 2, 10, 5, 0),
+        realized_pnl_usd=None, return_bps=None,
+        broker_recon_status=orc.STATUS_NO_FILLS, broker_realized_pnl_usd=None,
+        broker_return_bps=None, broker_notional_basis_usd=None, broker_win=None,
+        broker_divergence_usd=None, broker_reconciled_at=None,
+        broker_recon_detail_json={"status": orc.STATUS_NO_FILLS, "source": "ledger"},
+    )
+    return outcome, sess
+
+
+def test_no_entry_evidence_rows_never_spend_a_broker_read():
+    """THE #1287 LANDMINE SHAPE: `needs_reconcile` admits every non-terminal row
+    each 60 s pass and the old loop charged ONE broker GET per Alpaca row — 115
+    no-fill rows against a 20-read budget starve the one row the loss guard
+    needs, forever (~95 `skipped_broker_budget` per pass by construction)."""
+    for i in range(3):
+        o, s = _no_fill_pair(i)
+        assert orc.needs_reconcile(o, s) is True, "still reconciled from the ledger"
+        plan = orc.broker_read_plan(o, s)
+        assert plan["read"] is False
+        assert plan["reason"] == orc.ATTR_SKIPPED_NO_ENTRY_EVIDENCE
+
+
+def test_115_no_fill_rows_do_not_starve_a_new_reconciled_row(monkeypatch):
+    """The refuter's exact census: 115 no-fill rows + 1 newly terminal row that
+    the loss guard is waiting on, budget 20. The new row must be read on the
+    FIRST pass and the no-fill rows must consume ZERO reads."""
+    monkeypatch.setattr(orc.settings, "chili_momentum_broker_truth_reconciliation_enabled", True, raising=False)
+    monkeypatch.setattr(orc.settings, "chili_momentum_outcome_recon_broker_attribution_max_per_pass", 20, raising=False)
+    rows = [_no_fill_pair(i) for i in range(115)]
+    # the FILLED session: terminal `reconciled` but never attributed (the 203734 shape)
+    hot = _outcome_and_session(recon_status="reconciled", detail={"status": "reconciled", "source": "ledger_confirmed"})
+    rows.insert(57, hot)  # buried in the middle of the heap, as it would be
+
+    class _Q:
+        def join(self, *a, **k): return self
+        def filter(self, *a, **k): return self
+        def order_by(self, *a, **k): return self
+        def all(self): return list(rows)
+
+    class _Db:
+        def query(self, *a, **k): return _Q()
+        def commit(self): pass
+        def rollback(self): pass
+
+    read_sessions = []
+
+    def _one(db, outcome, sess, **kw):
+        if orc.broker_read_plan(outcome, sess).get("read"):
+            read_sessions.append(outcome.session_id)
+        outcome.broker_recon_status = outcome.broker_recon_status or orc.STATUS_NO_FILLS
+        return {"status": outcome.broker_recon_status}
+
+    monkeypatch.setattr(orc, "reconcile_one_outcome", _one)
+    out = orc.reconcile_momentum_outcomes_to_broker_truth(_Db(), lookback_days=2.0, day_net_advisory=False)
+    assert out["ok"] is True
+    assert out["broker_reads"] == 1, out
+    assert out["skipped_broker_budget"] == 0, "nothing is starved"
+    assert out["skipped_no_broker_read_needed"] == 115
+    assert read_sessions == [SID], "the loss-guard row got the budget on pass 1"
+
+
+def test_the_loss_guard_row_is_ordered_first(monkeypatch):
+    """Never unordered `.all()`: the batch query has no natural order and the
+    per-pass UPDATEs reshuffle the heap."""
+    never = _outcome_and_session(recon_status=None)
+    upgrade = _outcome_and_session(recon_status="reconciled", detail={"status": "reconciled"})
+    attributed = _outcome_and_session(
+        recon_status="reconciled",
+        detail={"status": "reconciled", "attribution_version": orc.ATTRIBUTION_VERSION})
+    non_terminal = _outcome_and_session(recon_status=orc.STATUS_RESIDUAL_OPEN, detail={})
+    assert orc._attribution_priority(*never) == 0
+    assert orc._attribution_priority(*upgrade) == 0
+    assert orc._attribution_priority(*non_terminal) == 1
+    assert orc._attribution_priority(*attributed) == 2
+
+
+def test_no_owned_fills_backs_off_instead_of_re_reading_every_pass():
+    """The broker was READABLE and owned nothing. Broker fills are immutable, so
+    re-listing every 60 s cannot change the answer — it only eats the budget."""
+    o, s = _outcome_and_session(le_extra={"emergency_exit_accounting_pending": None})
+
+    def _empty(symbol, after, until):
+        return {"readable": True, "orders": [], "truncated": False}
+
+    # no ledger legs → nothing contradicts an empty listing
+    orc.reconcile_one_outcome(_FakeDb([]), o, s, broker_orders_reader=_empty)
+    d = o.broker_recon_detail_json
+    assert d["broker_attribution"]["attr_status"] == orc.ATTR_NO_OWNED_FILLS
+    assert d["attribution_version"] == orc.ATTRIBUTION_VERSION
+    assert d["attribution_next_retry_utc"] > datetime.utcnow().isoformat()
+    plan = orc.broker_read_plan(o, s)
+    assert plan["read"] is False and plan["reason"] == orc.ATTR_SKIPPED_BACKOFF
+    horizon = d["attribution_next_retry_utc"]
+
+    # THE BACKOFF MUST SURVIVE ITS OWN SKIP: a skipped pass still rewrites
+    # broker_recon_detail_json, so it has to carry the horizon (and the marker
+    # the plan reads) forward verbatim — otherwise the row is read again next pass.
+    calls = []
+    orc.reconcile_one_outcome(_FakeDb([]), o, s,
+                              broker_orders_reader=lambda *a: calls.append(a) or {"readable": True, "orders": []})
+    assert calls == []
+    d2 = o.broker_recon_detail_json
+    assert d2["broker_attribution"]["attr_status"] == orc.ATTR_SKIPPED_BACKOFF
+    assert d2["attribution_next_retry_utc"] == horizon, "the horizon is never pushed out by a skip"
+    assert orc.broker_read_plan(o, s)["reason"] == orc.ATTR_SKIPPED_BACKOFF
+
+    # a NEW terminal_at (the row genuinely changed) re-opens the read immediately
+    o.terminal_at = datetime(2026, 9, 2, 15, 0, 0)
+    assert orc.broker_read_plan(o, s)["read"] is True
+
+
+def test_backoff_expires_and_a_skipped_row_keeps_its_ledger_label():
+    o, s = _outcome_and_session(le_extra={"emergency_exit_accounting_pending": None})
+    o.broker_recon_detail_json = {
+        "broker_attribution": {"attr_status": orc.ATTR_NO_OWNED_FILLS},
+        "attribution_next_retry_utc": (datetime.utcnow() - timedelta(seconds=1)).isoformat(),
+        "attribution_terminal_at": o.terminal_at.isoformat(),
+    }
+    assert orc.broker_read_plan(o, s)["read"] is True
+
+    o2, s2 = _no_fill_pair(1)
+    calls = []
+    orc.reconcile_one_outcome(_FakeDb([]), o2, s2,
+                              broker_orders_reader=lambda *a: calls.append(a) or {"readable": True, "orders": []})
+    assert calls == [], "no broker read was spent"
+    assert o2.broker_recon_status == orc.STATUS_NO_FILLS
+    assert "attribution_version" not in o2.broker_recon_detail_json
+    assert o2.broker_recon_detail_json["broker_attribution"]["broker_read"] is False
+
+
+# ── (B) a PARTIAL listing never certifies ────────────────────────────────────
+def test_partial_listing_that_misses_ledger_legs_never_certifies():
+    """The refuter's exact case: the listing returns only cycle 2 for 19471. The
+    ledger's own broker_confirmed legs (552efe43 / af3a4b0c) are absent, so the
+    read provably does not cover the session — wrong bound account generation,
+    wrong window, empty page. It must NOT be stamped reconciled at −108.85."""
+    o, s = _outcome_and_session()
+
+    def _cycle2_only(symbol, after, until):
+        keep = {"f3ed508d-e441-47b3-b76b-2449b6f0a133", "ddba3ed2-6854-4c34-92be-7efdd1926fa4"}
+        return {"readable": True, "orders": [x for x in _canf_orders() if x.order_id in keep],
+                "truncated": False}
+
+    orc.reconcile_one_outcome(_FakeDb(_LEDGER_19471), o, s, broker_orders_reader=_cycle2_only)
+    assert o.broker_recon_status == orc.STATUS_BROKER_UNAVAILABLE
+    assert o.broker_realized_pnl_usd is None and o.broker_notional_basis_usd is None
+    d = o.broker_recon_detail_json
+    assert d["broker_attribution"]["attr_status"] == orc.ATTR_LISTING_INCOMPLETE
+    assert set(d["broker_attribution"]["ledger_ids_missing_from_broker"]) == {
+        "552efe43-395a-4f76-836a-7be3d30a8689", "af3a4b0c-d7fc-4379-8b25-ddc50ab82a31",
+    }
+    assert "attribution_version" not in d, "never terminal off an incomplete read"
+    assert rp._alpaca_loss_history_broker_truth(o) is False
+
+
+def test_empty_listing_with_ledger_legs_is_incomplete_not_no_owned_fills():
+    """`no_owned_fills` while the ledger holds broker_confirmed legs is the same
+    inconsistency: the old code stamped attribution_version and froze the row."""
+    o, s = _outcome_and_session()
+    orc.reconcile_one_outcome(_FakeDb(_LEDGER_19471), o, s,
+                              broker_orders_reader=lambda *a: {"readable": True, "orders": [], "truncated": False})
+    assert o.broker_recon_status == orc.STATUS_BROKER_UNAVAILABLE
+    d = o.broker_recon_detail_json["broker_attribution"]
+    assert d["attr_status"] == orc.ATTR_LISTING_INCOMPLETE
+    assert set(d["ledger_ids_missing_from_broker"]) == {
+        "552efe43-395a-4f76-836a-7be3d30a8689", "af3a4b0c-d7fc-4379-8b25-ddc50ab82a31"}
+    assert "attribution_version" not in o.broker_recon_detail_json
+
+
+def test_a_ledger_leg_outside_the_window_is_not_a_false_incompleteness():
+    """Precision: only a ledger leg whose fill falls INSIDE the queried window is
+    expected in the listing, so a legitimately out-of-window leg never fabricates
+    an incomplete read (which would freeze the row on broker_unavailable)."""
+    ledger = list(_LEDGER_19471) + [
+        ("exit", 1, "broker_confirmed", 3.9, 1.0, 0.0, None, None, -0.5, 4.34,
+         "zzzz-way-later", datetime(2026, 9, 3, 20, 0, 0)),
+    ]
+    o, s = _outcome_and_session()
+    orc.reconcile_one_outcome(_FakeDb(ledger), o, s, broker_orders_reader=_reader_ok)
+    assert o.broker_recon_status == orc.STATUS_RECONCILED
+    assert o.broker_recon_detail_json["broker_attribution"]["ledger_ids_missing_from_broker"] == []
+
+
+# ── (C) OCO child legs ───────────────────────────────────────────────────────
+def _toco_parent(oid, cid, side, filled, px, at, legs):
+    o = _o(oid, cid, side, "canceled" if not filled else "filled", filled, px, at)
+    o.raw["legs"] = legs
+    o.raw["order_class"] = "oco"
+    return o
+
+
+def test_oco_stop_leg_fill_is_attributed_through_raw_legs():
+    """Alpaca gives NO client_order_id to a child leg. When the STOP leg fires the
+    parent `chili_ml_toco_<sid>_` reads canceled with filled_qty 0 and the fill
+    lives in raw.legs[0]. Blind to that, EVERY stop-leg exit is a permanent
+    `residual_open` → the account's loss history goes unavailable for the day."""
+    orders = [
+        _o("e1", "chili_ml_e_19471_a_b", "buy", "filled", 100, 5.00, "2026-09-02 11:10:00+00:00"),
+        _toco_parent(
+            "toco-parent", "chili_ml_toco_19471_abc", "sell", 0, None, "2026-09-02 11:20:00+00:00",
+            legs=[{"id": "leg-stop", "status": "filled", "order_type": "stop",
+                   "qty": 100.0, "filled_qty": 100.0, "filled_avg_price": 4.50,
+                   "stop_price": 4.55, "limit_price": None}],
+        ),
+    ]
+    a = orc.attribute_session_broker_orders(
+        session_id=SID, symbol="CANF", side_long=True, orders=orders,
+        window_start=W_START, window_end=W_END,
+    )
+    assert a["attr_status"] == orc.ATTR_FLAT
+    leg = [l for l in a["legs"] if l["broker_order_id"] == "leg-stop"]
+    assert leg and leg[0]["attribution"] == "session_cid_oco_leg"
+    assert leg[0]["parent_broker_order_id"] == "toco-parent"
+    assert leg[0]["side"] == "sell", "an OCO child is the SAME side as its parent"
+    assert a["broker_pnl_usd"] == pytest.approx(100 * (4.50 - 5.00))
+
+
+def test_oco_take_profit_parent_fill_is_not_double_counted_with_its_legs():
+    orders = [
+        _o("e1", "chili_ml_e_19471_a_b", "buy", "filled", 100, 5.00, "2026-09-02 11:10:00+00:00"),
+        _toco_parent(
+            "toco-parent", "chili_ml_toco_19471_abc", "sell", 100, 5.40, "2026-09-02 11:20:00+00:00",
+            legs=[{"id": "leg-stop", "status": "canceled", "order_type": "stop",
+                   "qty": 100.0, "filled_qty": 0.0, "filled_avg_price": None}],
+        ),
+    ]
+    a = orc.attribute_session_broker_orders(
+        session_id=SID, symbol="CANF", side_long=True, orders=orders,
+        window_start=W_START, window_end=W_END,
+    )
+    assert a["attr_status"] == orc.ATTR_FLAT
+    assert a["close_qty"] == pytest.approx(100.0)
+    assert a["broker_pnl_usd"] == pytest.approx(40.0)
+
+
+def test_a_foreign_sessions_oco_legs_are_never_walked():
+    orders = [
+        _o("e1", "chili_ml_e_19471_a_b", "buy", "filled", 100, 5.00, "2026-09-02 11:10:00+00:00"),
+        _toco_parent(
+            "foreign-parent", "chili_ml_toco_19457_abc", "sell", 0, None, "2026-09-02 11:20:00+00:00",
+            legs=[{"id": "foreign-leg", "status": "filled", "qty": 100.0,
+                   "filled_qty": 100.0, "filled_avg_price": 4.50}],
+        ),
+    ]
+    a = orc.attribute_session_broker_orders(
+        session_id=SID, symbol="CANF", side_long=True, orders=orders,
+        window_start=W_START, window_end=W_END,
+    )
+    assert a["attr_status"] == orc.ATTR_RESIDUAL_OPEN
+    assert all(l["broker_order_id"] != "foreign-leg" for l in a["legs"])
+
+
+# ── (D) ownership by broker_order_id + label preservation ────────────────────
+def test_orphan_repair_close_is_owned_by_order_id_not_cid():
+    """`orphrec-<symbol>-<digest>` is a cid `_SESSION_CID_RE` cannot own. Without
+    id-ownership the repaired row lands residual_open and its broker_* is NULLed."""
+    orders = [
+        _o("entry-oid", "chili_ml_e_19471_a_b", "buy", "filled", 100, 5.00, "2026-09-02 11:10:00+00:00"),
+        _o("orphrec-oid", "orphrec-CANF-9f3a2c", "sell", "filled", 100, 4.80, "2026-09-02 11:40:00+00:00"),
+    ]
+    a = orc.attribute_session_broker_orders(
+        session_id=SID, symbol="CANF", side_long=True, orders=orders,
+        window_start=W_START, window_end=W_END,
+        owned_order_ids={"entry-oid", "orphrec-oid"},
+    )
+    assert a["attr_status"] == orc.ATTR_FLAT
+    close = [l for l in a["legs"] if l["broker_order_id"] == "orphrec-oid"][0]
+    assert close["attribution"] == "session_broker_order_id"
+    assert a["broker_pnl_usd"] == pytest.approx(-20.0)
+
+
+def test_owned_order_ids_are_read_from_the_orphan_repair_envelope():
+    le = {
+        "entry_order_id": "entry-oid",
+        "orphan_reconcile_truth": {"entry_order_id": "entry-oid", "exit_order_id": "orphrec-oid"},
+        "emergency_exit_authority": {"order_id": "auth-oid"},
+        "entry_orders_resolved": {"resolved-oid": "adopted"},
+        "entry_order_ids_all": ["ids-all-oid"],
+    }
+    got = orc._owned_order_ids_from_le(le)
+    assert {"entry-oid", "orphrec-oid", "auth-oid", "resolved-oid", "ids-all-oid"} <= got
+
+
+def test_a_terminal_fee_unconfirmed_row_is_never_demoted_without_positive_evidence():
+    """The orphan-repair label (`fee_unconfirmed` + broker pnl from a
+    broker-verified entry + orphan close) must survive the one-time re-touch."""
+    o, s = _outcome_and_session(
+        recon_status=orc.STATUS_FEE_UNCONFIRMED,
+        detail={"status": orc.STATUS_FEE_UNCONFIRMED},
+        le_extra={"emergency_exit_accounting_pending": None},
+    )
+    o.broker_realized_pnl_usd = -20.0
+    o.broker_notional_basis_usd = 500.0
+
+    def _entry_only(symbol, after, until):
+        # the orphan close is invisible (a cid we cannot own and an id we were not told)
+        return {"readable": True, "orders": [x for x in _canf_orders() if x.side == "buy"],
+                "truncated": False}
+
+    orc.reconcile_one_outcome(_FakeDb([]), o, s, broker_orders_reader=_entry_only)
+    assert o.broker_recon_status == orc.STATUS_FEE_UNCONFIRMED, "label preserved"
+    assert o.broker_realized_pnl_usd == pytest.approx(-20.0)
+    assert o.broker_recon_detail_json.get("attribution_residual_open_label_preserved") is True
+    assert o.broker_recon_detail_json["attribution_version"] == orc.ATTRIBUTION_VERSION
+
+
+def test_attribution_never_promotes_a_fee_unconfirmed_row_to_reconciled():
+    """Fee truth was deliberately marked unsettled; sharpening the numbers must
+    not silently admit the row into learning."""
+    o, s = _outcome_and_session(recon_status=orc.STATUS_FEE_UNCONFIRMED,
+                                detail={"status": orc.STATUS_FEE_UNCONFIRMED})
+    orc.reconcile_one_outcome(_FakeDb(_LEDGER_19471), o, s, broker_orders_reader=_reader_ok)
+    assert o.broker_recon_status == orc.STATUS_FEE_UNCONFIRMED
+    assert o.broker_realized_pnl_usd == pytest.approx(BROKER_PNL, abs=1e-6)
+    assert o.broker_recon_detail_json["prior_label_preserved_fee_unconfirmed"] is True
+
+
+def test_a_never_reconciled_row_still_demotes_normally():
+    o, s = _outcome_and_session(recon_status=None)
+
+    def _no_closing_sell(symbol, after, until):
+        keep = [x for x in _canf_orders() if not x.client_order_id.startswith("chili_ops_flat_")]
+        return {"readable": True, "orders": keep, "truncated": False}
+
+    orc.reconcile_one_outcome(_FakeDb(_LEDGER_19471), o, s, broker_orders_reader=_no_closing_sell)
+    assert o.broker_recon_status == orc.STATUS_RESIDUAL_OPEN
+
+
+# ── (E) unpriced-leg fallback hardening ──────────────────────────────────────
+def test_a_close_that_filled_before_this_session_opened_is_not_ours():
+    """(b)-matching keyed on qty + window only: a sell that filled BEFORE this
+    session's own opening fill belongs to the earlier overlapping session."""
+    orders = [
+        _ui_sell("early-ui", 165, 4.90, "2026-09-02 11:05:00+00:00"),  # before the 11:10 entry
+        _o("552efe43-395a-4f76-836a-7be3d30a8689", "chili_ml_e_19471_a_b", "buy", "filled",
+           355, 4.34, "2026-09-02 11:10:19+00:00"),
+        _o("af3a4b0c-d7fc-4379-8b25-ddc50ab82a31", "chili_ml_s_19471_c", "sell", "filled",
+           355, 4.119915, "2026-09-02 11:11:05+00:00"),
+        _o("f3ed508d-e441-47b3-b76b-2449b6f0a133", "chili_ml_e_19471_a_d", "buy", "filled",
+           165, 4.62, "2026-09-02 11:19:12+00:00"),
+    ]
+    a = orc.attribute_session_broker_orders(
+        session_id=SID, symbol="CANF", side_long=True, orders=orders,
+        unpriced_legs=[_UNPRICED_LEG], window_start=W_START, window_end=W_END,
+    )
+    assert a["attr_status"] == orc.ATTR_RESIDUAL_OPEN
+    assert all(l["broker_order_id"] != "early-ui" for l in a["legs"] if l.get("attribution"))
+
+
+def test_an_unpriced_leg_already_attributed_by_its_own_cid_absorbs_nothing():
+    """Live rows carry `chili_ml_x_<sid>_` on the unpriced leg. Once (a) matched
+    that order, searching non-owned candidates for the SAME leg can only absorb a
+    stranger's same-qty sell → OVERSOLD instead of flat."""
+    unpriced = dict(_UNPRICED_LEG)
+    unpriced["client_order_id"] = "chili_ml_x_19471_deadbeef"
+    orders = [
+        _o("e1", "chili_ml_e_19471_a_b", "buy", "filled", 165, 4.62, "2026-09-02 11:19:12+00:00"),
+        _o("x1", "chili_ml_x_19471_deadbeef", "sell", "filled", 165, 3.96, "2026-09-02 11:34:31+00:00"),
+        _ui_sell("stranger", 165, 3.90, "2026-09-02 11:35:00+00:00"),
+    ]
+    a = orc.attribute_session_broker_orders(
+        session_id=SID, symbol="CANF", side_long=True, orders=orders,
+        unpriced_legs=[unpriced], window_start=W_START, window_end=W_END,
+    )
+    assert a["attr_status"] == orc.ATTR_FLAT
+    assert all(l["broker_order_id"] != "stranger" for l in a["legs"] if l.get("attribution"))
+
+
+def test_an_order_id_another_outcome_already_claims_is_never_attributed_twice():
+    """Two overlapping same-symbol sessions each holding an equal-qty unpriced leg
+    would BOTH claim one UI sell → the loss guard sums both → double count."""
+    o, s = _outcome_and_session()
+
+    def _ui_instead_of_ops(symbol, after, until):
+        keep = [x for x in _canf_orders() if not x.client_order_id.startswith("chili_ops_flat_")]
+        keep.append(_ui_sell("shared-ui-sell", 165, 3.96, "2026-09-02 11:34:31+00:00"))
+        return {"readable": True, "orders": keep, "truncated": False}
+
+    db = _FakeDb(_LEDGER_19471, collisions=[(19457, "shared-ui-sell")])
+    orc.reconcile_one_outcome(db, o, s, broker_orders_reader=_ui_instead_of_ops)
+    assert o.broker_recon_status == orc.STATUS_AMBIGUOUS_TRADE
+    assert o.broker_realized_pnl_usd is None
+    assert o.broker_recon_detail_json["broker_attribution"]["unpriced_collision"] == {
+        "shared-ui-sell": 19457}
+
+
+def test_an_unreadable_collision_probe_fails_closed():
+    o, s = _outcome_and_session()
+
+    def _ui_instead_of_ops(symbol, after, until):
+        keep = [x for x in _canf_orders() if not x.client_order_id.startswith("chili_ops_flat_")]
+        keep.append(_ui_sell("shared-ui-sell", 165, 3.96, "2026-09-02 11:34:31+00:00"))
+        return {"readable": True, "orders": keep, "truncated": False}
+
+    db = _FakeDb(_LEDGER_19471, probe_raises=True)
+    orc.reconcile_one_outcome(db, o, s, broker_orders_reader=_ui_instead_of_ops)
+    assert o.broker_recon_status == orc.STATUS_AMBIGUOUS_TRADE
+    assert o.broker_recon_detail_json["broker_attribution"]["unpriced_collision_probe"] == "unreadable"
+
+
+def test_the_cid_matched_operator_sell_needs_no_collision_probe():
+    """The 19471 path itself: the operator sell carries the session cid, so it is
+    attributed by (a) and the probe is never consulted."""
+    db = _FakeDb(_LEDGER_19471, probe_raises=True)
+    o, s = _outcome_and_session()
+    orc.reconcile_one_outcome(db, o, s, broker_orders_reader=_reader_ok)
+    assert o.broker_recon_status == orc.STATUS_RECONCILED
+    assert not any("momentum_automation_outcomes" in q for q in db.sql)
+
+
+# ── (F) ONE divergence event per outcome ─────────────────────────────────────
+def test_divergence_event_is_emitted_once_per_outcome(monkeypatch):
+    from app.services.trading.momentum_neural import persistence as _p
+
+    events = []
+    monkeypatch.setattr(
+        _p, "append_trading_automation_event",
+        lambda db, sid, et, payload, **kw: events.append((sid, et, payload)),
+        raising=False,
+    )
+    o, s = _outcome_and_session()
+    orc.reconcile_one_outcome(_FakeDb(_LEDGER_19471), o, s, broker_orders_reader=_reader_ok)
+    assert len(events) == 1
+    sid, et, payload = events[0]
+    assert sid == SID and et == "broker_truth_attribution_divergence"
+    assert set(payload["legs_missing_from_ledger"]) == {
+        "f3ed508d-e441-47b3-b76b-2449b6f0a133", "ddba3ed2-6854-4c34-92be-7efdd1926fa4"}
+    assert payload["divergence_usd"] == pytest.approx(-108.850005, abs=1e-6)
+    # idempotency: the marker rides in the detail json the same pass wrote
+    assert o.broker_recon_detail_json["divergence_event_emitted"] is True
+    orc.reconcile_one_outcome(_FakeDb(_LEDGER_19471), o, s, broker_orders_reader=_reader_ok)
+    assert len(events) == 1, "never a second event for the same outcome"
+
+
+def test_no_divergence_event_when_the_ledger_already_had_every_leg(monkeypatch):
+    from app.services.trading.momentum_neural import persistence as _p
+
+    events = []
+    monkeypatch.setattr(
+        _p, "append_trading_automation_event",
+        lambda db, sid, et, payload, **kw: events.append(et), raising=False)
+    full_ledger = list(_LEDGER_19471) + [
+        ("entry", 1, "broker_confirmed", 4.62, 165.0, 0.0, None, None, None, None,
+         "f3ed508d-e441-47b3-b76b-2449b6f0a133", datetime(2026, 9, 2, 11, 19, 12)),
+        ("exit", 1, "broker_confirmed", 3.960303, 165.0, 0.0, None, None, -108.85, 4.62,
+         "ddba3ed2-6854-4c34-92be-7efdd1926fa4", datetime(2026, 9, 2, 11, 34, 31)),
+    ]
+    o, s = _outcome_and_session()
+    orc.reconcile_one_outcome(_FakeDb(full_ledger), o, s, broker_orders_reader=_reader_ok)
+    assert events == []
+    assert o.broker_recon_status == orc.STATUS_RECONCILED
+
+
+# ── read-only posture of the NEW query surface ───────────────────────────────
+def test_the_new_db_reads_are_selects_only():
+    for fn in (orc._ledger_legs_for_attribution, orc._broker_order_ids_attributed_elsewhere):
+        src = inspect.getsource(fn)
+        upper = src.upper()
+        for verb in ("INSERT ", "UPDATE ", "DELETE ", "TRUNCATE", "ALTER ", "DROP "):
+            assert verb not in upper, (fn.__name__, verb)
+        assert "SELECT" in upper

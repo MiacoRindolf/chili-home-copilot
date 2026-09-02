@@ -817,14 +817,33 @@ def aggregate_open_risk_usd(
                 stop = float(pos.get("stop_price") or 0.0)
                 if qty <= 0 or entry <= 0 or stop <= 0:
                     continue
-            side_long = le.get("side_long") is not False and (
-                str(sess.execution_family or "") != "alpaca_short"
-            )
-            at_risk = (
-                max(0.0, entry - stop)
-                if side_long
-                else max(0.0, stop - entry)
-            ) * qty
+            if alpaca_scope:
+                # STOPPED rows must read direction from the SAME certified evidence
+                # the unstopped branch uses (2026-09-02 adversarial review). The old
+                # `le.get("side_long") is not False` ignored markers that live only
+                # on ``position`` — exactly what the FSM's adopt-for-safety writes
+                # (``position["side"]="short"``, no ``side_long`` key). A short-shaped
+                # row was therefore priced as a long and, once a stop was repaired
+                # onto it, its charge fell from 2x notional to $0: attaching a stop
+                # made an unknown short DISAPPEAR from the account budget.
+                if _alpaca_position_certified_long(sess, le, pos):
+                    at_risk = max(0.0, entry - stop) * qty
+                elif _alpaca_position_certified_short(sess, le, pos):
+                    at_risk = max(0.0, stop - entry) * qty
+                else:
+                    _raise_unknown_alpaca_risk(
+                        "position_risk_fields_invalid",
+                        session_id=sess.id,
+                    )
+            else:
+                side_long = le.get("side_long") is not False and (
+                    str(sess.execution_family or "") != "alpaca_short"
+                )
+                at_risk = (
+                    max(0.0, entry - stop)
+                    if side_long
+                    else max(0.0, stop - entry)
+                ) * qty
             if alpaca_scope and not math.isfinite(at_risk):
                 _raise_unknown_alpaca_risk(
                     "position_risk_nonfinite",
