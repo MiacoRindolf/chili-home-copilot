@@ -9162,6 +9162,56 @@ def _owner_transport_order_matches(order: Any, transport: dict[str, Any]) -> boo
     return True
 
 
+def _alpaca_replacement_successor_envelope(
+    predecessor_request: dict[str, Any],
+    *,
+    successor_client_order_id: str,
+    expected_successor_quantity: float | None = None,
+) -> dict[str, Any] | None:
+    """Build the expected successor envelope for one deadman replacement edge.
+
+    With ``expected_successor_quantity`` omitted this returns EXACTLY the
+    predecessor request with the successor's CID substituted -- the ``base_size``
+    value object is passed through untouched (never re-formatted), so the matcher
+    parses the identical string it parses today.  That default is the only shape
+    any production caller asks for, so today's protection path is unchanged.
+
+    A replacement is permitted to CARRY or SHRINK the protected quantity, never to
+    grow it: a successor larger than its predecessor would protect shares this
+    lineage was never granted authority over.  Anything unreadable, non-positive
+    or larger than the predecessor returns ``None`` so the caller fails closed
+    rather than certifying a lineage it cannot bound.
+    """
+    if not isinstance(predecessor_request, dict):
+        return None
+    cid = str(successor_client_order_id or "").strip()
+    if expected_successor_quantity is None:
+        # Literal reproduction of the historical inline spread, blank CID
+        # included: the caller's own lineage conjunction is what rejects a
+        # CID-less successor, and it must keep emitting its own error string.
+        return {**predecessor_request, "client_order_id": cid}
+    if not cid:
+        return None
+    try:
+        predecessor_qty = float(predecessor_request["base_size"])
+        successor_qty = float(expected_successor_quantity)
+    except (KeyError, TypeError, ValueError):
+        return None
+    if not (
+        math.isfinite(predecessor_qty)
+        and predecessor_qty > 0.0
+        and math.isfinite(successor_qty)
+        and successor_qty > 0.0
+        and successor_qty <= predecessor_qty + max(1e-9, predecessor_qty * 1e-8)
+    ):
+        return None
+    return {
+        **predecessor_request,
+        "client_order_id": cid,
+        "base_size": _fmt_base_size(successor_qty),
+    }
+
+
 def _alpaca_replacement_successor_order_matches(
     order: Any,
     *,
@@ -10003,6 +10053,8 @@ def _dispatch_alpaca_replaced_deadman_successor(
     avg_entry_price: float,
     software_stop_price: float,
     rearm_after_terminal: bool,
+    expected_successor_quantity: float | None = None,
+    quantity_reserved_outside_successor: float = 0.0,
 ) -> dict[str, Any]:
     """Adopt or retire one exact broker replacement edge without guessing.
 
@@ -10098,10 +10150,17 @@ def _dispatch_alpaca_replaced_deadman_successor(
     successor_cid = str(
         getattr(successor_order, "client_order_id", "") or ""
     ).strip()
-    successor_request = {
-        **predecessor_request,
-        "client_order_id": successor_cid,
-    }
+    successor_request = _alpaca_replacement_successor_envelope(
+        predecessor_request,
+        successor_client_order_id=successor_cid,
+        expected_successor_quantity=expected_successor_quantity,
+    )
+    if successor_request is None:
+        return {
+            "ok": False,
+            "pending": True,
+            "error": "replacement_deadman_successor_expected_quantity_invalid",
+        }
     if not (
         successor_state == "found"
         and successor_order is not None
@@ -10154,6 +10213,19 @@ def _dispatch_alpaca_replaced_deadman_successor(
 
     try:
         requested_qty = float(predecessor_request["base_size"])
+        # What the SUCCESSOR now protects, and what the position as a whole is
+        # expected to carry.  Both collapse onto the predecessor's quantity for
+        # every production caller (no caller passes either parameter), so the
+        # comparisons below are the historical ones verbatim.  They are named
+        # apart because a replacement that legitimately shrinks the protected
+        # quantity must certify against the SUCCESSOR's size, while the broker
+        # position bound below must stay anchored to the predecessor's.
+        successor_qty = (
+            requested_qty
+            if expected_successor_quantity is None
+            else float(expected_successor_quantity)
+        )
+        covered_qty = successor_qty + float(quantity_reserved_outside_successor)
         broker_qty = float(adapter.get_position_quantity(product_id))
         predecessor_fill = float(
             getattr(predecessor_order, "filled_size", 0.0) or 0.0
@@ -10174,6 +10246,11 @@ def _dispatch_alpaca_replaced_deadman_successor(
     if not (
         math.isfinite(requested_qty)
         and requested_qty > 0.0
+        and math.isfinite(successor_qty)
+        and successor_qty > 0.0
+        and math.isfinite(covered_qty)
+        and covered_qty > 0.0
+        and covered_qty <= requested_qty + tol
         and math.isfinite(broker_qty)
         and 0.0 <= broker_qty <= requested_qty + tol
         and math.isfinite(predecessor_fill)
@@ -10181,7 +10258,7 @@ def _dispatch_alpaca_replaced_deadman_successor(
         and math.isfinite(successor_fill)
         and successor_fill >= 0.0
         and local_qty is not None
-        and abs(local_qty - requested_qty) <= tol
+        and abs(local_qty - covered_qty) <= tol
     ):
         return {
             "ok": False,
@@ -10204,7 +10281,7 @@ def _dispatch_alpaca_replaced_deadman_successor(
             predecessor_fill <= 1e-12
             and successor_fill <= 1e-12
             and abs(quantity_delta) <= tol
-            and abs(broker_qty - requested_qty) <= tol
+            and abs(broker_qty - covered_qty) <= tol
         )
         if not conserved:
             open_remainder_exact = bool(
@@ -10301,7 +10378,7 @@ def _dispatch_alpaca_replaced_deadman_successor(
             successor_cid if successor_active else predecessor_cid
         ),
         "stop_price": predecessor_request.get("stop_price"),
-        "qty": requested_qty,
+        "qty": successor_qty,
         "phase": "submitted",
         "owner_transport": next_transport,
     }
@@ -10339,7 +10416,7 @@ def _dispatch_alpaca_replaced_deadman_successor(
         quantity=(
             broker_qty
             if quarantine_active_adoption or not successor_active
-            else requested_qty
+            else covered_qty
         ),
         avg_entry_price=avg_entry_price,
         software_stop_price=software_stop_price,
