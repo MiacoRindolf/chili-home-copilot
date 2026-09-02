@@ -19,10 +19,26 @@ import inspect
 from types import SimpleNamespace
 from unittest.mock import patch
 
+import pytest
+
 from app.services.trading.momentum_neural import captured_paper_dispatcher as cpd
 from app.services.trading.momentum_neural import ignition_loop as il
 from app.services.trading.momentum_neural import live_runner as lr
 from app.services.trading.momentum_neural.live_fsm import STATE_LIVE_ENTERED
+
+
+@pytest.fixture(autouse=True)
+def _owning_process_role(monkeypatch):
+    """Ang wake ay may ROLE GATE mula 2026-08-24 (tingnan ang `wake_ownership`).
+
+    Ang `tests/conftest.py` ay nagtatakda ng `CHILI_SCHEDULER_ROLE="none"` --
+    hindi may-ari ng momentum execution, kaya `_schedule_dispatch_wake` ay
+    tahimik na False bago pa man mabasa ang alinmang kill switch. Ang
+    switch-independence guard dito ay sumusubok sa MEKANISMO, hindi sa gate,
+    kaya tumatakbo ito bilang may-ari. Ang gate mismo ay sinasaklaw ng
+    `tests/test_wake_role_ownership.py`.
+    """
+    monkeypatch.setenv("CHILI_SCHEDULER_ROLE", "momentum_exec_only")
 
 
 # ── 1. two-phase seam: ang staged POST ay hindi na nawawala ────────────────

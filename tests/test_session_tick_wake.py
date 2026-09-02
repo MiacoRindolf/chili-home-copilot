@@ -16,6 +16,8 @@ import time
 from types import SimpleNamespace
 from unittest.mock import patch
 
+import pytest
+
 from app.services.trading.momentum_neural import ignition_loop as il
 from app.services.trading.momentum_neural import live_runner as lr
 from app.services.trading.momentum_neural.live_fsm import (
@@ -23,6 +25,21 @@ from app.services.trading.momentum_neural.live_fsm import (
     STATE_LIVE_PENDING_ENTRY,
     STATE_WATCHING_LIVE,
 )
+
+
+@pytest.fixture(autouse=True)
+def _owning_process_role(monkeypatch):
+    """Ang wake ay may ROLE GATE mula 2026-08-24 (tingnan ang `wake_ownership`).
+
+    Ang `tests/conftest.py` ay nagtatakda ng `CHILI_SCHEDULER_ROLE="none"` --
+    ang role ng web container, na tahasang WALANG APScheduler at kaya hindi
+    nagmamay-ari ng momentum execution. `_schedule_dispatch_wake` ay tahimik na
+    False sa isang hindi-may-ari, kaya ang bawat stop-confirm assertion dito ay
+    dating bumabagsak nang WALANG sinusubok. Ang suite na ito ay sumusubok sa
+    MEKANISMO ng wake, hindi sa gate, kaya ito ay tumatakbo bilang may-ari.
+    Ang gate mismo ay sinasaklaw ng `tests/test_wake_role_ownership.py`.
+    """
+    monkeypatch.setenv("CHILI_SCHEDULER_ROLE", "momentum_exec_only")
 
 
 def _tracker_with(symbol: str, entries: list[dict]) -> il._SessionCrossTracker:
@@ -271,9 +288,18 @@ def test_stop_confirm_wake_tick_dispatches_and_clears_inflight():
 
 
 def test_breach_call_sites_use_batch_safe_wrapper():
-    """Ang parehong stop-breach call site ay dapat dumaan sa wrapper — hindi na
-    sa direktang loop-only scheduler na tahimik na False sa batch mode."""
+    """Ang bawat breach-confirm call site ay dapat dumaan sa wrapper — hindi na
+    sa direktang loop-only scheduler na tahimik na False sa batch mode.
+
+    Tatlong site (2026-08-27): ang dalawang orihinal mula #1109 (stop-breach
+    pending-confirm at ang L2 chop-hold redispatch sa parehong stop path) at
+    ang bailout dwell-confirm pending-confirm mula #1207
+    (`_bailout_dwell_confirm_holds`, `bailout_breach_pending_confirm`). Kung
+    magdagdag ng panibagong site, itaas ang bilang DITO at ilista ito sa itaas.
+    """
     import inspect
 
     src = inspect.getsource(lr)
-    assert src.count("_schedule_stop_confirm_dispatch(int(sess.id))") == 2
+    assert src.count("_schedule_stop_confirm_dispatch(int(sess.id))") == 3
+    # Walang call site ang lumalampas sa wrapper patungo sa loop-only scheduler.
+    assert "schedule_live_runner_stop_confirmation(int(sess.id))" not in src
