@@ -199,8 +199,8 @@ def _premarket_change_pct(s: dict) -> float | None:
     universe builder drops any row where it is null — which silently starves the
     premarket universe (the day's gappers surface at ~09:40 ET instead of ~04:00).
 
-    Mirrors the PROVEN ``nbbo_tape`` fallback (nbbo_tape.py:92-95): base = today's
-    open, else yesterday's close; chg = (live price − base)/base·100. So the
+    Mirrors the PROVEN ``nbbo_tape`` fallback: base = yesterday's close, else
+    today's open (#1284); chg = (live price − base)/base·100. So the
     universe surfaces exactly the premarket movers the NBBO tape already grades.
     Fail-CLOSED: no live price or no usable base ⇒ ``None`` ⇒ the ticker is still
     dropped (no invented mover from a no-print row). Behind a default-ON kill-switch

@@ -77,7 +77,8 @@ class _UniverseTracker:
     """Thread-safe watch set: the uncapped equity universe + each name's day baseline.
 
     The watch set IS ``build_equity_universe`` (now uncapped). For each member it
-    also captures the day baseline (today's open, else previous-day close) from the
+    also captures the day baseline (previous-day close, else today's open — #1284)
+    AND the open separately (``open_baseline_for``, for the since-open move) from the
     same full-market snapshot so ``_on_tick`` can compute the intraday move% from a
     bare ``BusQuote`` (which carries only bid/ask/mid/last, no day-open / pct).
     """
@@ -87,6 +88,9 @@ class _UniverseTracker:
         self._lock = threading.Lock()
         self._symbols: set[str] = set()
         self._baseline: dict[str, float] = {}
+        # #1284: ang OPEN nang hiwalay — para sa since-open na move ng RVOL-axis
+        # direction guard (_rvol_alone_may_fire), hindi para sa stamp.
+        self._open_baseline: dict[str, float] = {}
         # FIX A1: per-symbol intraday RVOL (today's accumulated shares / prevDay ADV),
         # captured from the SAME full-market snapshot the universe screen uses. This is
         # a REAL relative-volume value (not a move-proxy) — the ignition feeder ignites
@@ -235,10 +239,12 @@ class _UniverseTracker:
             # nang hindi hinihintay ang 10% day floor.
             velocity = {t: v for t, v in velocity.items() if t in want}
 
-        # Day baseline for each watched name: today's open, else prev-day close
-        # (same base as universe._premarket_change_pct, so move% agrees with the
-        # snapshot screen). Built from the SAME snapshot — no extra fetch.
+        # Day baseline for each watched name: prev-day close, else today's open
+        # (#1284 — same meaning as the vendor todaysChangePerc every consumer of
+        # the stamped change assumes), plus the open kept separately for the
+        # since-open move. Built from the SAME snapshot — no extra fetch.
         baseline: dict[str, float] = {}
+        open_baseline: dict[str, float] = {}
         rvol: dict[str, float] = {}
         shares: dict[str, float] = {}
         for s in snapshot or []:
@@ -268,6 +274,9 @@ class _UniverseTracker:
                 base = _f(prev.get("c")) or _f(day.get("o"))
                 if base and base > 0:
                     baseline[t] = float(base)
+                open_base = _f(day.get("o"))
+                if open_base and open_base > 0:
+                    open_baseline[t] = float(open_base)
                 # FIX A1: REAL intraday relative-volume from the SAME snapshot — today's
                 # accumulated shares (day.v else min.av, ext-hours-aware) / prevDay ADV.
                 # Reuses the universe screen's own helpers so the value AGREES with the
@@ -285,6 +294,7 @@ class _UniverseTracker:
         with self._lock:
             self._symbols = want
             self._baseline = baseline
+            self._open_baseline = open_baseline
             self._rvol = rvol
             self._shares = shares
             self._velocity = velocity
@@ -297,6 +307,11 @@ class _UniverseTracker:
     def baseline_for(self, symbol: str) -> float | None:
         with self._lock:
             return self._baseline.get(symbol.upper())
+
+    def open_baseline_for(self, symbol: str) -> float | None:
+        """Today's open (None premarket / day-1 listing) — para sa since-open move."""
+        with self._lock:
+            return self._open_baseline.get(symbol.upper())
 
     def rvol_for(self, symbol: str) -> float | None:
         """FIX A1: last-snapshot intraday RVOL for this name (None if unknown)."""
@@ -985,12 +1000,32 @@ class IgnitionScoringLoop:
                 continue
         return None
 
-    def _move_pct(self, symbol: str, quote) -> float | None:
-        """Intraday move% = (live price − day baseline) / baseline · 100.
+    def _open_move_pct(self, symbol: str, quote) -> float | None:
+        """Since-OPEN move% = (live price − today's open) / open · 100 (#1284).
 
-        The day baseline is the tracker's cached today-open / prev-close. If a quote
-        already carries an explicit pct/change field, prefer it (cheapest); else fall
-        back to the baseline math.
+        Ito ang direksyong hinihingi ng RVOL-axis guard (`_rvol_alone_may_fire`):
+        ang gapper na bumabagsak mula sa open ay hindi dapat mag-ignite nang long
+        kahit positibo pa ang change vs prev close. Premarket / day-1 listing
+        (walang open) ⇒ bumabalik sa day baseline (prev close), gaya ng dati.
+        """
+        price = self._quote_price(quote)
+        if price is None:
+            return None
+        base = self._tracker.open_baseline_for(symbol)
+        if base is None or base <= 0:
+            base = self._tracker.baseline_for(symbol)
+        if base is None or base <= 0:
+            return None
+        return (price - base) / base * 100.0
+
+    def _move_pct(self, symbol: str, quote) -> float | None:
+        """Day change% = (live price − day baseline) / baseline · 100.
+
+        The day baseline is the tracker's cached PREV CLOSE (else today's open —
+        #1284), i.e. the same meaning as the vendor todaysChangePerc that every
+        consumer of the stamped change assumes. If a quote already carries an
+        explicit pct/change field, prefer it (cheapest); else fall back to the
+        baseline math. For the since-open move see ``_open_move_pct``.
         """
         for attr in ("change_pct", "todays_change_perc", "pct_change"):
             try:
@@ -1056,9 +1091,12 @@ class IgnitionScoringLoop:
 
             _rv = self._tracker.rvol_for(sym)
             _px = self._quote_price(quote)
+            # #1284: gap = change vs PREV CLOSE (ang stamped datum); move = since
+            # OPEN (ang direksyon ng RVOL guard: ang bumabagsak mula sa open ay
+            # hindi nag-i-ignite nang long). Dati iisang numero ang dalawa.
             if not _ross_threshold_crossed(
-                sym, rvol=_rv, move_pct=move_pct, gap_pct=move_pct, price=_px,
-                velocity_pct=_vel,
+                sym, rvol=_rv, move_pct=self._open_move_pct(sym, quote),
+                gap_pct=move_pct, price=_px, velocity_pct=_vel,
             ):
                 return  # no Ross axis crossed — dead tape, ignore
             _tick_price = _px

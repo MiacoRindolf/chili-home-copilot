@@ -102,6 +102,40 @@ def test_move_pct_reads_the_biaf_gap_as_plus_69_not_plus_0_13():
     assert move > 10.0, "papasa na sa A-setup 10% floor"
 
 
+def test_the_open_is_kept_separately_for_the_since_open_move():
+    """Review finding: ang RVOL-axis guard (_rvol_alone_may_fire) ay nangangailangan
+    ng SINCE-OPEN na direksyon — ang gapper na bumabagsak mula sa open ay hindi
+    dapat mag-ignite nang long kahit +69% pa vs prev close."""
+    tr = il._UniverseTracker()
+    _refresh(tr, [_snap()], {"BIAF"})
+    assert tr.open_baseline_for("BIAF") == OPEN_PRINT
+    loop = il.IgnitionScoringLoop.__new__(il.IgnitionScoringLoop)
+    loop._tracker = tr
+    q = SimpleNamespace(bid=7.72, ask=7.74, mid=TAPE, last=None, price=None)
+    assert loop._open_move_pct("BIAF", q) == pytest.approx(0.13, abs=0.01)
+    assert loop._move_pct("BIAF", q) == pytest.approx(69.52, abs=0.05)
+    # bumabagsak mula sa open: negatibo ang since-open, positibo pa ang day change
+    dump = SimpleNamespace(bid=7.20, ask=7.22, mid=7.21, last=None, price=None)
+    assert loop._open_move_pct("BIAF", dump) < 0 < loop._move_pct("BIAF", dump)
+
+
+def test_premarket_has_no_open_so_the_since_open_move_falls_back_to_prev_close():
+    tr = il._UniverseTracker()
+    _refresh(tr, [_snap(day_o=None)], {"BIAF"})
+    assert tr.open_baseline_for("BIAF") is None
+    loop = il.IgnitionScoringLoop.__new__(il.IgnitionScoringLoop)
+    loop._tracker = tr
+    q = SimpleNamespace(bid=7.72, ask=7.74, mid=TAPE, last=None, price=None)
+    assert loop._open_move_pct("BIAF", q) == pytest.approx(69.52, abs=0.05)
+
+
+def test_the_ross_predicate_gets_gap_vs_prev_close_and_move_since_open():
+    """Source guard: dalawang magkaibang numero na sa tawag, hindi iisa."""
+    src = inspect.getsource(il.IgnitionScoringLoop)
+    assert "move_pct=self._open_move_pct(sym, quote)" in src
+    assert "gap_pct=move_pct" in src
+
+
 # ── 2. ang screen fallback at ang tape fallback: pareho ang kahulugan ────────
 
 def test_universe_premarket_fallback_is_prev_close_first():
