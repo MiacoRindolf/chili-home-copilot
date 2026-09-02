@@ -1,6 +1,6 @@
 # PATH B — partial exit under a resting full-qty deadman stop (Alpaca)
 
-**Status: DESIGN ONLY, REVISION 3. The wiring is deferred. This PR ships the
+**Status: DESIGN ONLY, REVISION 4. The wiring is deferred. This PR ships the
 design, the pure helpers, and three guard test files.
 `venue/alpaca_spot.py::replace_order_qty` still has ZERO production callers and
 that is asserted by `tests/test_partial_exit_path_b_unwired.py` — which, in
@@ -12,6 +12,25 @@ same class — a fix applied to one artifact but not its twin — the largest be
 that the S4 correction never reached `NAKED_RISK_PHASES`, so the phase set and
 the protection checker disagreed about the entire normal PATH B window. See
 §3.2 and §7.1.
+
+**Revision 4** answers a third adversarial round. Where revision 3's defects
+were in the *sets*, revision 4's were in the **edges and the signatures** — the
+places a set-level invariant cannot see:
+
+| # | Defect | Where |
+|---|--------|-------|
+| 1 | `successor_certified -> abandoned` / `post_deferred -> abandoned` strand a naked position in a remedy-free terminal sink. "Some remedy is reachable" passes vacuously; the invariant is now **every** reachable terminal | §3.2 |
+| 2 | The 300 s ceiling mandated `abandoned`, which has no incoming edge from 11 of the 13 naked phases — the anti-wedge clock raised `PhaseError` inside the service step instead of firing | §3.6 |
+| 3 | `any NAKED phase -> flatten_queued` was in this document but in none of the five phases revision 3 added; the only escapes required first recording a broker outcome that had not happened | §3.2 |
+| 4 | The sibling-reconcile obligation is per-phase, so it evaporated two legal steps out of `SIBLING_LIVE_PHASES` and a whole-position flatten demanded none: short flip (S2) | §3.2, §3.6 |
+| 5 | `marker_successor_envelope` refused every growing edge — and both R4 remedies grow, so the remedy could never be lineage-certified and degraded to "always flatten the runner" | §3.4c |
+| 6 | `assess_protection` takes a pre-netted open quantity the marker never persists; `requires_restore_or_flatten` returns False on `oversell_risk` while shares are naked | §3.5 |
+| 7 | R0-10 had no enforcer on the restore edge, which cannot call `plan_replacement_edge` at all | §3.4b |
+| 8 | `partial_cum_filled` had no write-ordering rule, reintroducing the H2 forever-deadlock via marker staleness | §3.1 |
+| 9 | `consumed_by_exit` written on the *presence* of a close handoff, which can clear without flattening | §3.5 |
+| 10 | Public helpers raised `TypeError` on unreadable input instead of returning their own `invalid` verdict — and `broker_qty=None` is a live-real state here | core |
+| 11 | `LEGAL_TRANSITIONS` was a plain `dict` behind an unenforced `Final`; the only validator's graph was writable by any importer | core |
+| 12 | The seam file's one `inspect.signature` assertion was a forward tripwire with no positive binding on the three functions the wiring must call — the #1283 shape | §7.1 |
 
 Base: `origin/main` 7e6b873. LR = `app/services/trading/momentum_neural/live_runner.py`,
 AOC = `.../alpaca_orphan_claims.py`, AS = `app/services/trading/venue/alpaca_spot.py`.
@@ -199,6 +218,40 @@ HTTP**. `le.path_b_partial_attempt` is only a mirror and is rebuilt from the
 claim whenever it lags — the claim is truth, `le` is cache. `phase_entered_at_utc`
 and `created_at_utc` are load-bearing: they feed the two wall clocks in §3.6.
 
+**`partial_cum_filled` obeys the same rule, and it is not optional** (revision 4).
+The rule above was written for `phase` only, but `partial_cum_filled` is the one
+other field that *both* replacement gates subtract on every tick: §3.10 and §3.4a
+Gate 2 pass it to `conservation_holds(broker_qty, successor_qty, partial_qty,
+partial_cum_filled)`, which runs on the deadman protection path for every Alpaca
+position on every pulse. §3.7/1 books the sibling fill `k` through
+`_cancel_scale_limit_and_clamp`, on the `le`/exit path — a **different**
+transaction. If the clamp commits `k = 40` and the process dies before the
+marker is updated (the 2026-09-01 live-lane host-process death is exactly this
+shape), the broker reports `local_qty = 315` while the marker still says `k = 0`:
+
+```
+conservation_holds(315, 249, 106, 0)  ->  |315 - 355| = 40 > tol  ->  False
+```
+
+Gate 2 then returns `replacement_deadman_successor_quantity_generation_mismatch`
+on **every** subsequent pulse, forever, because nothing re-reads `k`. That is the
+H2 forever-deadlock `conservation_holds` exists to eliminate, relocated from
+`base_size` staleness to marker staleness. Therefore:
+
+1. the sibling fill `k` is booked into the marker **in the same commit** as
+   `_cancel_scale_limit_and_clamp`'s own bookkeeping — one transaction, or the
+   deadman leg is not booked at all (§3.7/1 already returns pending on a
+   release-block; this extends that to the marker write); and
+2. the marker's `partial_cum_filled` is **self-healing on read**: when a strict
+   read by cid disagrees with the stored value, the strict read wins and is
+   written back before the gates run. A gate that can only ever fail is worse
+   than a gate that can be corrected.
+
+D2 acknowledges the transactional property itself is not provable by a fake; what
+the pure core *can* prove — and does — is that `conservation_holds` takes `f` and
+`k` **separately** rather than a single pre-netted number, so a stale `k` is a
+recoverable disagreement rather than an unrecoverable one.
+
 ### 3.2 Phases
 
 ```
@@ -211,13 +264,31 @@ partial_posted    -> partial_stale_adopted        (NAKED — not terminal)
 partial_rejected  -> partial_rejected_final       (NAKED)
 restore_intent_frozen -> restore_replace_submitted | restore_indeterminate
                       -> restore_certified(T) | restore_rejected (NAKED)
-any NAKED phase   -> flatten_queued -> flattened(T)
+any NAKED phase   -> flatten_queued -> flattened(T)      (DIRECT edge, rev 4)
 replace_stuck (PRE-certification only) -> containment_queued
                       -> containment_resolved(T) | replace_reverted(T) | abandoned(T)
+abandoned(T)      reachable ONLY from the pre-certification / containment
+                     lineage: {intent_frozen, replace_submitted,
+                     replace_indeterminate, replace_stuck, containment_queued}.
+                     NEVER from a NAKED phase (rev 4).
 consumed_by_exit(T)  reachable from every phase where the whole exit is not
                      blocked, EXCEPT the two named in
                      EXIT_CONSUMPTION_UNRECORDABLE_PHASES (see below)
 ```
+
+**Revision 4 — the two edges the graph and this diagram disagreed on.** The line
+`any NAKED phase -> flatten_queued` was aspirational: none of the five phases
+revision 3 added to `NAKED_RISK_PHASES` (`successor_certified`, `post_deferred`,
+`partial_posting`, `partial_posted`, `partial_indeterminate`) actually had that
+edge, so the only routes to the last-resort flatten ran through
+`partial_stale_adopted` or `partial_rejected_final` — both of which assert a
+**broker outcome that has not happened**. A breaker flatten at `partial_posted`
+had nothing truthful to record. Conversely the code permitted
+`successor_certified -> abandoned` and `post_deferred -> abandoned`, which the
+diagram did not show and which strand a naked position in a remedy-free terminal
+sink: S4 one hop further out. Both are now fixed in the table, and both
+directions are unit-tested (`test_every_naked_phase_has_a_direct_flatten_edge`,
+`test_abandoned_is_unreachable_from_every_naked_phase`).
 
 Four sets, and they are **not** the same set — conflating the first three was
 S7/L2:
@@ -228,6 +299,33 @@ S7/L2:
   From every one of them a `REMEDY_PHASE` (restore or flatten) is **reachable**
   — reachable, not adjacent (`reachable_phases`) — and
   `TERMINAL ∩ NAKED_RISK == ∅` (unit-tested).
+
+  **Revision 4 strengthens this to every ending, not one.** "Some remedy is
+  reachable" passes while a *legal* path to a remedy-free terminal also exists,
+  and the wiring may take that path: `advance_phase("successor_certified",
+  "abandoned")` was accepted, `abandoned` is terminal with no outgoing edges,
+  and `is_in_flight` then returns False — 106 shares with no downside stop and
+  no artifact saying anything is owed. The invariant is now
+  `reachable_terminals(p) ⊆ NAKED_RESOLVING_TERMINALS` for every naked `p`,
+  where `NAKED_RESOLVING_TERMINALS = {flattened, restore_certified,
+  partial_filled, consumed_by_exit}` — the four endings in which the naked
+  remainder is genuinely resolved. `abandoned`, `replace_rejected`,
+  `containment_resolved` and `replace_reverted` are excluded: in those the full
+  `Q` stop is still resting (pre-certification) or the state is unknown, and
+  none of them says the naked remainder was dealt with.
+* `SIBLING_RECONCILE_PHASES` — **derived**, revision 4. The obligation to
+  rebuild `le["scale_limit_*"]` from the claim before the clamp was keyed to
+  `SIBLING_LIVE_PHASES`, i.e. per-phase and not per-path, so it evaporated one
+  legal step outside that set: `partial_indeterminate` (liveness genuinely
+  unknown) `-> partial_rejected_final -> flatten_queued` reaches a **whole
+  position flatten** that demands no reconcile at all — a short flip (S2) via
+  two legal edges out of the set created to prevent it. The obligation is now
+  the closure over the graph from `SIBLING_LIVE_PHASES`, stopping only at
+  `SIBLING_RESOLVED_PHASES = {partial_filled, partial_rejected,
+  partial_stale_adopted}` — the three phases that actually prove nothing rests.
+  `exit_consumption_precondition(phase, sibling_reconciled=…)` is where a wiring
+  proves the debt was paid before writing the terminal `consumed_by_exit`;
+  `advance_phase` cannot ask, because a graph edge takes no arguments.
 * `WHOLE_EXIT_BLOCKING_PHASES` = `{intent_frozen, replace_submitted,
   replace_indeterminate}` — the only phases where the stop's **owner** is
   genuinely ambiguous. `WHOLE_EXIT_BLOCKING ∩ NAKED_RISK == ∅` (unit-tested):
@@ -351,6 +449,26 @@ stop would be PATCHed and would re-authorize shares already sold.
 `plan_replacement_edge` therefore takes `predecessor_filled_size` and refuses
 the split unless it is zero (`reason='predecessor_partially_filled'`).
 
+**Revision 4: the rule now has an enforcer on edge 2 as well.** It was stated
+without qualification but only `plan_replacement_edge` implemented it, and the
+restore edge **cannot call that function** — its sizing has `f = 0`, which is
+`non_positive_partial` before any fill check runs. So on the remedy path the
+rule had no enforcer at all: with the marker at `partial_rejected_final`, the
+`R = 249` stop triggering and partly filling `j = 80` still reads as live
+(`partially_filled` ∈ `_ACTIVE_ALPACA_PROTECTIVE_LIFECYCLES`), and the restore
+would PATCH that same order *up* to `broker_qty`, re-authorizing the 80 already
+sold — the identical short-flip class R0-10 closes, on the one path where it was
+unguarded. `plan_restore_edge(broker_qty, open_partial_qty, predecessor_qty,
+predecessor_filled_size)` now sizes edge 2 and applies the same refusal.
+
+**Revision 4: `plan_replacement_edge` also takes `open_partial_qty`.** It gated
+the predecessor's fill but never consulted already-resting *sell authority*, so
+a second scale-out trigger while a first partial rests unfilled returns
+`ok=True` — every check it performs genuinely passes — and produces
+`50 + 106 = 156` shares of resting sell plus a 249 stop against 355 held.
+`assess_protection` would call that `oversell_risk`; the planner that authorized
+the edge never asked. It now refuses with `reason='oversell_after_split'`.
+
 #### 3.4c — a pyramid add while the marker is unresolved (amendment R0-4)
 
 This lane pyramids (`pyramid_add_decision` / `pyramid_blend_on_fill`), so the
@@ -361,6 +479,21 @@ stop to the new broker quantity before the POST.** Append a restore edge
 `partial_posting`. Until it certifies, the `a` added shares are naked and are
 counted as such by `assess_protection`.
 
+**Both restore shapes are qty-GROWING, and revision 4 had to make them
+certifiable.** `marker_successor_envelope` refused every non-shrinking edge
+(`if qty >= predecessor_qty: return None`), while the only two remedies for a
+naked remainder both grow: the R4 restore (`broker_qty - open_partial_qty`, i.e.
+`Q` against a predecessor resting for `R = Q - f`) and this pyramid re-cover
+(`Q + a - f > Q - f`). With no envelope for them a wiring falls back to the
+predecessor-copy shape and `_owner_transport_order_matches` fails
+`|355 - 249| > tol` on every pulse —
+`replacement_deadman_successor_lineage_unproven` forever — so the marker sits in
+`restore_replace_submitted` (naked) until the lease expires and then flattens.
+The R4 remedy silently degrades to "always flatten the runner", the outcome §3.9
+says was deleted from every post-certification path. Pass
+`edge_kind="restore"`; it still refuses the wrong direction and refuses
+equality, so it is a naming rather than a loosening.
+
 ### 3.5 P4 — the POST, and its fresh re-checks
 
 Immediately before the POST, all of: no close handoff (claim **and** `le`); no
@@ -370,16 +503,49 @@ certifiably active with requested qty `R` and the exact cid; predecessor
 strict-read `replaced`; and
 
 ```
-adapter.get_position_quantity(product_id) >= successor_qty + partial_qty   (± tol)
+adapter.get_position_quantity(product_id) >= successor_qty + open_partial_qty   (± tol)
 ```
 
-**not** `== Q` — a pyramid add is legal (§3.4c). Any precondition failing →
+**not** `== Q` — a pyramid add is legal (§3.4c) — and **not** `+ partial_qty`
+(revision 4): the un-netted form defers the POST forever after any sibling fill,
+the same over-subtraction defect §3.7/5 documents for `le['scale_limit_qty']`.
+`open_partial_qty` is `f - k`; derive it with
+`open_partial_qty_from_marker(partial_quantity=f, partial_cum_filled=k)`, which is
+also what `assess_protection`'s third argument wants. The marker schema (§3.1)
+persists `f` and `k` and **not** an open quantity, so feeding `f` straight into
+the checker after a partial fill raises a bogus `oversell_risk` *and* silently
+flips `requires_restore_or_flatten` to False while 66 shares are genuinely
+naked — gate on `verdict.requires_remedy`, which is true for every unresolved
+state including `invalid`. Any precondition failing →
 phase `post_deferred`, no POST this pulse. From `post_deferred` the only exits
 are: retry the POST, take the restore edge, or surface
 `path_b_post_deferred_operator_review`. **`successor_certified -> replace_stuck`
 is removed from the graph** (S5): once the `R` stop is known-resting, a read
 hiccup or a legal add must never escalate into anything that can flatten a
-protected runner. Handoff/flatten present → phase `consumed_by_exit`.
+protected runner.
+
+**`consumed_by_exit` is written on the exit being CONSUMMATED, never on a
+handoff merely being present** (revision 4). The earlier wording — "handoff /
+flatten present → phase `consumed_by_exit`" — writes a terminal phase on a
+condition that can still be withdrawn: §3.8 notes the flatten is submitted on a
+*later* tick, because `_queue_full_close` only sets a sticky flag. If the
+handoff then clears without flattening (the R2 / L4 / `alpaca_handoff_recovery`
+shapes this document already catalogs, or a host-process restart mid-handoff),
+the position is still 355 with a 249 stop and 106 shares uncovered, and the
+marker is terminal: no restore edge, no `flatten_queued`, no ceiling (the marker
+is resolved), and `is_in_flight` returns False so no site reports it. The
+set-level invariant `TERMINAL ∩ NAKED_RISK == ∅` cannot catch this, because the
+hole is in **when** the phase is written, not in set membership. Two conditions,
+both required:
+
+1. the position is **confirmed flat at the broker**, or the whole-exit leg is
+   booked as a confirmed live exit — a pending handoff is not enough; and
+2. `exit_consumption_precondition(phase, sibling_reconciled=…)` returns True,
+   which refuses the two `EXIT_CONSUMPTION_UNRECORDABLE_PHASES` and refuses any
+   phase still carrying an unpaid sibling-reconcile debt (§3.2).
+
+While the handoff is merely pending the marker stays in its current phase and
+keeps being serviced; it is the exit's own completion that retires it.
 
 The order shape follows the chokepoint's own extended-hours rule (LR:15668-15694):
 `limit`, `time_in_force='day'`,
@@ -408,8 +574,25 @@ blocks_whole_exit(phase, age_seconds=..., override_authority=...)
 * `override_authority=True` for operator flatten, EOD, the drawdown breaker and
   the kill switch: those authorities are **never** deferrable behind a marker;
 * a marker-level wall clock (`MARKER_UNRESOLVED_CEILING_SECONDS = 300 s`,
-  `marker_ceiling_exceeded()`) forces `abandoned` plus a restore-or-flatten
-  decision, so no marker can wedge exits indefinitely.
+  `marker_ceiling_exceeded()`) forces a terminal decision, so no marker can
+  wedge exits indefinitely. **Which** terminal is `marker_ceiling_forced_target(phase)`,
+  and revision 4 had to add it because "forces `abandoned`" was not executable:
+  `abandoned` has an incoming edge from only the five pre-certification /
+  containment phases, so a wiring following the shipped mandate from
+  `partial_posted` — the phase that *produces* long-lived markers, because the
+  limit simply never traded (the CANF case) — got a `PhaseError` raised inside
+  the service step, and per D4/D3 an exception there yields "a genuinely dead
+  stop reported as protected: True". Two different things were both called
+  "abandon":
+
+  - **pre-certification / containment lineage** — the full `Q` stop is still
+    resting, nothing is naked. `abandoned` is correct there: we are giving up
+    on the *lineage*, not on the cover.
+  - **any NAKED phase** — `abandoned` there means abandoning the *position*.
+    The forced target is `flatten_queued`, which every naked phase now reaches
+    by a direct edge (§3.2), so the ceiling never has to invent a broker outcome
+    to escape. `marker_ceiling_forced_target` calls `advance_phase` on its own
+    answer, so the mandate cannot drift away from the graph again.
 
 `replace_stuck`, `containment_queued` and every `restore_*` phase **do not
 block**: there, the whole exit *is* the resolution (L2).

@@ -209,6 +209,72 @@ def test_the_containment_cannot_accept_a_reverted_predecessor():
     assert "replacement_containment_identity_invalid" in src
     assert "replacement_containment_post_cancel_two_sided_truth_unproven" in src
     assert '_alpaca_protective_order_lifecycle(predecessor_after) == "replaced"' in src
+    # FORWARD TRIPWIRE, hindi isang tseke ng kasalukuyang gawi: ang
+    # `close_shape` ay ang PANUKALANG extension ng §3.9(b), at wala pa ito
+    # kahit saan sa puno. Kapag idinagdag ito ng isang PR ay babagsak ang linya
+    # na ito at iyon ang senyas na naikabit na ang sanga (b) ng stuck-replace
+    # escape. Ang POSITIBONG binding ng signature na ito ay nasa
+    # `test_the_two_seam_signatures_are_pinned_by_inspect_signature` sa ibaba —
+    # kung wala iyon ay isang tripwire lamang ito at hindi isang gabay.
     assert "close_shape" not in inspect.signature(
         lr._service_deadman_replacement_containment
     ).parameters
+
+
+# --------------------------------------------------------------------------
+# Ang binding ng SIGNATURE — ang aral ng #1283, sa dalawang seam function
+# --------------------------------------------------------------------------
+
+def _keyword_only_names(fn) -> set[str]:
+    return {
+        name
+        for name, param in inspect.signature(fn).parameters.items()
+        if param.kind is inspect.Parameter.KEYWORD_ONLY
+    }
+
+
+def test_the_two_seam_signatures_are_pinned_by_inspect_signature():
+    """ANG ARAL NG #1283, INILAPAT SA LAHAT NG TATLONG SEAM FUNCTION.
+
+    Ang `_matches()` sa itaas ay TUNAY na tumatawag sa
+    `_alpaca_replacement_successor_order_matches` gamit ang lahat ng tatlong
+    kw-only na pangalan nito, kaya ang isang rename doon ay agad na bumabasag ng
+    suite. Pero ang DALAWANG function na kailangang pakainin ng wiring ng
+    marker envelope — ang dispatch at ang containment — ay may source-substring
+    na assert LAMANG. Ang isang refactor na magre-rename, mag-aayos muli, o
+    magdaragdag ng kinakailangang kw-only na parameter sa alinman sa kanila ay
+    tahimik na magpapabulok sa call plan ng disenyo habang berde ang buong
+    suite: iyon ang eksaktong hugis ng #1283 (berdeng helper, patay na seam).
+
+    Ang test na ito ay hindi tumatawag sa dalawa (kailangan nila ng DB at ng
+    adapter); ini-pin nito ang KONTRATA na binabanggit ng disenyo.
+    """
+    dispatch = _keyword_only_names(lr._dispatch_alpaca_replaced_deadman_successor)
+    assert dispatch == {
+        "le", "product_id", "predecessor_transport", "predecessor_order",
+        "avg_entry_price", "software_stop_price", "rearm_after_terminal",
+    }, sorted(dispatch)
+
+    containment = _keyword_only_names(lr._service_deadman_replacement_containment)
+    assert containment == {
+        "le", "product_id", "predecessor_transport", "predecessor_order",
+        "successor_order", "successor_order_request",
+        "avg_entry_price", "software_stop_price", "prepared",
+    }, sorted(containment)
+
+    # Ang `successor_order_request` ay ang MISMONG parameter na dapat tanggapin
+    # ang envelope ng marker (§3.4a). Kung mawala o mapalitan ang pangalan nito
+    # ay wala nang mapagpapasahan ang lunas ng S1.
+    assert "successor_order_request" in containment
+
+
+def test_the_matcher_signature_is_pinned_too():
+    """Ang predicate na tinatawag ng `_matches()`: ang tatlong kw-only na
+    pangalan ay bahagi ng kontrata, hindi detalye ng pagpapatupad."""
+    assert _keyword_only_names(
+        lr._alpaca_replacement_successor_order_matches
+    ) == {
+        "predecessor_broker_order_id",
+        "successor_broker_order_id",
+        "successor_order_request",
+    }

@@ -50,6 +50,17 @@ from app.services.trading.venue import alpaca_spot as als
 # Isang guard na hindi kayang bumagsak ay mas masahol pa sa walang guard, dahil
 # ito ay binabanggit sa PR bilang ebidensya. Kaya may self-check na ngayon sa
 # ibaba: ang scan ay dapat may laman AT may napatunayang positibong kontrol.
+#
+# IKAAPAT NA PASADA (2026-09-02). Tinanggal ang exclusion ng venue adapter. Ang
+# `replace_order_qty` ay lumilitaw sa `alpaca_spot.py` bilang `def` LAMANG
+# (linya 3713), at ang `_calls_named` ay tumutugma sa `ast.Call` at hindi
+# kailanman sa isang `FunctionDef` — kaya walang PINOPROTEKTAHAN ang exclusion.
+# Ang binibili lamang nito ay isang bulag na sulok: ang natural na hakbang ng
+# isang wiring PR ay isang convenience method sa LOOB mismo ng adapter
+# (`partial_exit_under_deadman()` na tumatawag sa `self.replace_order_qty(...)`)
+# — production wiring na hindi makikita ng nag-iisang depensa ng PATH B, habang
+# ang test ay binabanggit pa rin bilang ebidensyang hindi pa nakakabit. Iyon ang
+# kaparehong argumento ng file na ito laban sa bulag na `<repo>/app/app`.
 _REPO_ROOT = Path(lr.__file__).resolve().parents[4]
 _APP_DIR = _REPO_ROOT / "app"
 _VENUE_ADAPTER = Path(als.__file__).resolve()
@@ -58,11 +69,7 @@ _MIN_EXPECTED_PRODUCTION_FILES = 100
 
 
 def _production_py_files() -> list[Path]:
-    return [
-        p
-        for p in _APP_DIR.rglob("*.py")
-        if p.resolve() != _VENUE_ADAPTER
-    ]
+    return list(_APP_DIR.rglob("*.py"))
 
 
 def test_the_tripwire_actually_scans_the_production_tree():
@@ -73,7 +80,30 @@ def test_the_tripwire_actually_scans_the_production_tree():
     assert len(files) > _MIN_EXPECTED_PRODUCTION_FILES, (
         f"ang tripwire ay nag-scan ng {len(files)} na file — mali ang scan root"
     )
-    assert Path(lr.__file__).resolve() in {p.resolve() for p in files}
+    resolved = {p.resolve() for p in files}
+    assert Path(lr.__file__).resolve() in resolved
+    # ...at ang venue adapter ay HINDI na ibinubukod (ikaapat na pasada): ang
+    # exclusion ay hindi nagpoprotekta ng kahit ano at nagbubukas ng sulok kung
+    # saan puwedeng mabuo ang wiring nang hindi nakikita.
+    assert _VENUE_ADAPTER in resolved
+
+
+def test_the_definition_of_replace_order_qty_is_not_mistaken_for_a_caller():
+    """Ang dahilan kung bakit ligtas ang pag-scan sa adapter: ang `def` ay
+    hindi isang `ast.Call`. Kung sakaling maging tugma iyon ng isang refactor ng
+    `_calls_named`, ang tripwire ay magiging palaging pula at ide-delete — kaya
+    ito ay tahasang naka-pin."""
+    tree = ast.parse(_VENUE_ADAPTER.read_text(encoding="utf-8"))
+    assert not _calls_named(tree, "replace_order_qty"), (
+        "may tumatawag na sa `replace_order_qty` sa loob ng venue adapter"
+    )
+    defs = [
+        node.lineno
+        for node in ast.walk(tree)
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+        and node.name == "replace_order_qty"
+    ]
+    assert defs, "nawala ang `replace_order_qty` sa adapter"
 
 
 def test_the_tripwire_can_actually_find_a_call():

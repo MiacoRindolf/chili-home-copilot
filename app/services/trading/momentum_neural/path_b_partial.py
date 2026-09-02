@@ -58,6 +58,65 @@ para malaman kung may utang itong remedyo. Tatlong pagbabago:
      invariant. Ang naipadalang docstring at ang naipadalang test ay
      magkasalungat noon tungkol sa pagiging unibersal ng panuntunan.
 
+IKAAPAT NA PASADA (2026-09-02). Isang ikatlong adversarial review ang bumasag
+sa revision 3. Ang mga depekto nito ay nasa mga EDGE at sa mga SIGNATURE — hindi
+na sa mga set, na inayos ng revision 3. Walo pang pagbabago:
+
+   8. TINANGGAL ang `successor_certified -> abandoned` at
+      `post_deferred -> abandoned`. Ang `abandoned` ay TERMINAL na walang
+      labasan, kaya ang dalawang edge na iyon ay S4 muli, isang hop palabas:
+      isang hubad na marker na dumaan doon ay hindi na kailanman maka-record ng
+      restore o flatten, at `is_in_flight` ay False kaya walang service step ang
+      tatakbo pa. Ang lumang invariant ("may ABOT na remedyo") ay pumapasa nang
+      walang saysay dahil sapat na sa kanya na may ISANG landas na may remedyo.
+      Ngayon: `NAKED_RESOLVING_TERMINALS` at ang invariant ay BAWAT abot na
+      terminal, hindi isa lamang.
+   9. Ang 300 s na ceiling ay MAISASAGAWA na. Ang `abandoned` ay walang papasok
+      na edge mula sa 11 sa 13 na naked phase, kaya ang "sapilitan ang
+      `abandoned`" ay nagre-raise ng `PhaseError` sa loob mismo ng service step
+      (D4/D3: "isang tunay na patay na stop na iniulat bilang protected"). Ang
+      `abandoned` ay para sa PRE-certification na lineage lamang — doon ay buo
+      pa ang Q stop at walang hubad. Para sa hubad ay `flatten_queued` ang
+      sapilitan. `marker_ceiling_forced_target()` ang nagsasabi kung alin, at
+      may test na nagpapatunay na TUMATANGGAP ang `advance_phase` sa bawat isa.
+  10. IDINAGDAG ang `flatten_queued` mula sa BUONG normal na window. Sinasabi ng
+      §3.2 ng disenyo na "any NAKED phase -> flatten_queued", pero wala ni isa
+      sa limang phase na idinagdag ng revision 3 sa `NAKED_RISK_PHASES` ang may
+      ganoong edge. Ang tanging daan palabas ay ang PAG-RECORD MUNA NG
+      RESULTANG PANG-BROKER NA HINDI PA NANGYAYARI (`partial_stale_adopted`,
+      `partial_rejected_final`) — iyon ay pagpapapeke sa ledger para lang
+      makalabas.
+  11. Ang utang na sibling-reconcile ay HINANGO na (`SIBLING_RECONCILE_PHASES`),
+      hindi na `SIBLING_LIVE_PHASES` mismo. Ang `partial_indeterminate ->
+      partial_rejected_final -> flatten_queued` ay dalawang legal na hakbang
+      palabas ng set kung saan HINDI ALAM ang liveness ng sibling, at sa dulo ay
+      isang BUONG flatten na hindi humihingi ng reconcile: short flip (S2) sa
+      pamamagitan ng paglalakad palabas ng set na ginawa para pigilan iyon. May
+      `exit_consumption_precondition()` na ngayon para may lugar ang wiring na
+      patunayang naibayad ang utang bago maitala ang TERMINAL na
+      `consumed_by_exit`.
+  12. Ang `marker_successor_envelope` ay may `edge_kind` na. Ang R4 restore edge
+      at ang §3.4c pyramid re-cover ay PALAGING LUMALAKI (Q - k > Q - f), pero
+      tumatanggi ang revision 3 sa bawat lumalaking edge — kaya ang TANGING
+      remedyo sa hubad ay hindi kailanman ma-lineage-certify at mabubulok sa
+      `replacement_deadman_successor_lineage_unproven` hanggang mag-expire ang
+      lease, saka flatten. "Palaging i-flatten ang runner" ang naging remedyo.
+  13. Ang `assess_protection` ay may `requires_remedy` na — ang NAG-IISANG
+      predicate na dapat i-gate ng wiring. Ang `requires_restore_or_flatten` ay
+      nagbabalik ng False kapag `oversell_risk`, kahit may hubad na share, dahil
+      `and self.oversell_ok` ang huling clause nito. May `open_partial_qty` din
+      itong tinatanggap na PRE-NETTED, samantalang `f` at `k` ang itinatago ng
+      marker: may `open_partial_qty_from_marker()` na ngayon.
+  14. Walang pampublikong helper dito ang NAGRE-RAISE na sa hindi mabasang
+      input. Ang `assess_protection(broker_qty=None, ...)` ay nagre-raise ng
+      TypeError BAGO pa marating ang sarili nitong `invalid` na hatol —
+      samantalang `broker_recon_status` NULL / `history_unavailable` ay tunay na
+      estado sa repo na ito. Ganoon din ang `conservation_holds` at ang dalawang
+      unang argumento ng `plan_replacement_edge`.
+  15. `MappingProxyType` ang `LEGAL_TRANSITIONS`. Ang `Final` ay hindi
+      ipinatutupad (walang mypy — CLAUDE.md), kaya ang graph na tinatanong ng
+      NAG-IISANG validator natin ay naisusulat ng kahit anong nag-i-import.
+
 BAKIT PURO. Ang mga bagay na kaya nating patunayan nang WALANG DB at WALANG
 broker ay: (a) legal ba ang isang phase transition, (b) legal ba ang hati ng
 qty, (c) protektado pa ba ang natitirang posisyon, (d) tama ba ang envelope na
@@ -70,18 +129,23 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass
-from typing import Any, Final
+from types import MappingProxyType
+from typing import Any, Final, Mapping
 
 __all__ = [
     "PHASES",
     "TERMINAL_PHASES",
     "NAKED_RISK_PHASES",
+    "NAKED_RESOLVING_TERMINALS",
     "REMEDY_PHASES",
     "WHOLE_EXIT_BLOCKING_PHASES",
     "SIBLING_LIVE_PHASES",
+    "SIBLING_RESOLVED_PHASES",
+    "SIBLING_RECONCILE_PHASES",
     "EXIT_CONSUMPTION_UNRECORDABLE_PHASES",
     "LEGAL_TRANSITIONS",
     "reachable_phases",
+    "reachable_terminals",
     "WHOLE_EXIT_BLOCK_CEILING_SECONDS",
     "MARKER_UNRESOLVED_CEILING_SECONDS",
     "PhaseError",
@@ -90,12 +154,16 @@ __all__ = [
     "is_terminal",
     "blocks_whole_exit",
     "requires_sibling_reconcile",
+    "exit_consumption_precondition",
     "marker_ceiling_exceeded",
+    "marker_ceiling_forced_target",
     "SplitPlan",
     "plan_replacement_edge",
+    "plan_restore_edge",
     "marker_successor_envelope",
     "ProtectionVerdict",
     "assess_protection",
+    "open_partial_qty_from_marker",
     "conservation_holds",
 ]
 
@@ -220,6 +288,36 @@ REMEDY_PHASES: Final[frozenset[str]] = frozenset({
     "flattened",
 })
 
+#: Ang TANGING mga terminal kung saan puwedeng magtapos ang isang HUBAD na
+#: marker — dahil sa bawat isa sa kanila ay naresolba na ang hubad na natitira.
+#:
+#: IKAAPAT NA PASADA. Ito ang pinalitan ng mahinang invariant ng revision 3.
+#: Ang tanong noon ay "may ISANG abot na remedyo ba?", at oo — pero ang
+#: `successor_certified -> abandoned` ay legal DIN, at ang `abandoned` ay
+#: TERMINAL na may `LEGAL_TRANSITIONS["abandoned"] == frozenset()`. Ang isang
+#: marker na dumaan doon ay may 106 na share na walang pababang stop,
+#: `is_in_flight` ay False kaya walang service step ang tatakbo pa, at ang
+#: pangakong restore-o-flatten ay HINDI NA MAITATALA kailanman. Iyon ay S4 na
+#: muli, isang hop palabas. Ang tamang tanong ay: BAWAT abot na terminal ba ay
+#: isa sa mga ito?
+#:
+#:   * `flattened` / `restore_certified` — tahasang naibalik o isinuko ang takip.
+#:   * `partial_filled` — napuno ang f, kaya Q - f = R ang hawak at R ang stop.
+#:   * `consumed_by_exit` — nilamon ng buong exit ang posisyon; wala nang share
+#:     na mahuhubaran. (Hiwalay itong may utang na sibling reconcile —
+#:     `exit_consumption_precondition` — pero hindi na iyon usapin ng R4.)
+#:
+#: WALA rito ang `abandoned`, `replace_rejected`, `containment_resolved` at
+#: `replace_reverted`: sa apat na iyon ay buo pa ang Q stop (pre-certification)
+#: o hindi natin alam ang estado — at wala ni isa sa kanila ang nagsasabing
+#: naresolba ang hubad na natitira.
+NAKED_RESOLVING_TERMINALS: Final[frozenset[str]] = frozenset({
+    "flattened",
+    "restore_certified",
+    "partial_filled",
+    "consumed_by_exit",
+})
+
 #: Ang DALAWANG phase kung saan HINDI naitatala ang `consumed_by_exit`, at
 #: kung bakit sinasadya iyon.
 #:
@@ -234,6 +332,17 @@ REMEDY_PHASES: Final[frozenset[str]] = frozenset({
 #: Kaya ang exception ay may sariling invariant (may test): ang bawat phase
 #: dito ay dapat MANATILING may service step (hindi walang laman ang transition
 #: set) AT may tahasang labasan ng operator patungo sa `abandoned`.
+#:
+#: BAKIT HINDI KASALUNGAT ANG LABASANG IYON (ikaapat na pasada). Ang `abandoned`
+#: ay TERMINAL din, kaya sa unang tingin ay hinaharangan natin ang isang
+#: terminal at saka nag-aalok ng iba. Ang pagkakaiba ay hindi ang terminality
+#: kundi ang KAALAMAN: ang `consumed_by_exit` ay naitatala ng makina batay sa
+#: PRESENSYA ng isang close handoff — awtomatiko, tahimik, at habang wala pa
+#: ring nakakaalam kung kanino ang nakaupong order. Ang `abandoned` mula rito ay
+#: isang TAHASANG desisyon ng operator na tumitingin sa mismong order na iyon.
+#: Ang una ay pagkalimot; ang pangalawa ay pagpapasya. Ang isang wiring ay hindi
+#: kailanman dapat magsulat ng `abandoned` sa dalawang phase na ito nang
+#: mag-isa — ito ay para sa operator lamang.
 EXIT_CONSUMPTION_UNRECORDABLE_PHASES: Final[frozenset[str]] = frozenset({
     "replace_stuck",
     "containment_queued",
@@ -270,6 +379,24 @@ SIBLING_LIVE_PHASES: Final[frozenset[str]] = frozenset({
     "partial_indeterminate",
 })
 
+#: Ang mga phase kung saan NAPATUNAYAN nang hindi na nakaupo ang partial. Ito
+#: ang PUMUPUTOL sa paglaganap ng utang na reconcile sa graph.
+#:
+#:   * `partial_filled` — napuno nang buo; wala nang natitira.
+#:   * `partial_rejected` — tinanggihan ang POST; wala kailanman nakaupo.
+#:   * `partial_stale_adopted` — bumalik ang cancel bilang stale at inampon
+#:     natin ang k; ang order ay KANSELADO.
+#:
+#: WALA rito ang `partial_rejected_final`: abot iyon mula sa `partial_rejected`
+#: (patay ang sibling) AT mula sa `partial_indeterminate` (HINDI ALAM). Iisa
+#: lang ang `phase` field, kaya hindi mapaghihiwalay ang dalawang pinagmulan —
+#: at ang konserbatibong sagot sa short flip ay ang mahal na sagot.
+SIBLING_RESOLVED_PHASES: Final[frozenset[str]] = frozenset({
+    "partial_filled",
+    "partial_rejected",
+    "partial_stale_adopted",
+})
+
 #: Hangganan ng paghadlang sa whole exit. Isang owner-transport lease
 #: (AOC:60 `_OWNER_TRANSPORT_LEASE_SECONDS` = 30 s). Lampas dito ay
 #: DUMADAAN ang exit kahit malabo pa ang may-ari: mas mabuting isara nang
@@ -284,16 +411,30 @@ MARKER_UNRESOLVED_CEILING_SECONDS: Final[float] = 300.0
 #: Ang buong legal na graph. Anumang wala rito ay bug — hindi tahimik na
 #: pinapayagan (`advance_phase` ay nagre-raise).
 #:
-#: Tatlong panuntunan ang sinusunod ng talahanayan (lahat ay may test):
-#:   * mula sa bawat NAKED_RISK phase ay ABOT ang isang REMEDY_PHASE — abot,
-#:     hindi katabi (tingnan ang `reachable_phases`);
+#: Apat na panuntunan ang sinusunod ng talahanayan (lahat ay may test):
+#:   * mula sa bawat NAKED_RISK phase ay BAWAT ABOT na terminal ay nasa
+#:     `NAKED_RESOLVING_TERMINALS` — bawat isa, hindi isa lamang (tingnan ang
+#:     `reachable_terminals` at ang paliwanag sa itaas ng set na iyon);
+#:   * ang BAWAT NAKED_RISK phase ay may TUWIRANG `flatten_queued` na edge, kaya
+#:     ang huling remedyo ay hindi kailanman nangangailangan munang mag-record
+#:     ng resultang pang-broker na hindi pa nangyayari;
 #:   * ang `consumed_by_exit` ay abot mula sa bawat phase kung saan hindi
 #:     hinaharang ang whole exit — dahil doon nga puwedeng lamunin ng isang
 #:     buong exit ang posisyon habang bukas pa ang marker (L5) — MALIBAN sa
 #:     `EXIT_CONSUMPTION_UNRECORDABLE_PHASES`, na may sariling dahilan at
 #:     sariling invariant;
 #:   * walang non-terminal na phase na patay na kalsada.
-LEGAL_TRANSITIONS: Final[dict[str, frozenset[str]]] = {
+#:
+#: `MappingProxyType`, hindi `dict` (ikaapat na pasada). Ang `Final` ay isang
+#: pahiwatig sa type checker, at walang type checker ang repo na ito
+#: (CLAUDE.md: "No ruff/black/mypy configured"). Ang `advance_phase` ay
+#: ipinapakilala bilang NAG-IISANG sanctioned na writer, pero ang graph na
+#: kinokonsulta niya ay naisusulat noon ng kahit anong nag-i-import:
+#: `LEGAL_TRANSITIONS["partial_filled"] = frozenset({"partial_posting"})` at
+#: nagiging legal na ang muling pag-POST laban sa posisyong nabawasan na —
+#: double fire, na iniulat ng state machine bilang tama. Ang mga halaga ay
+#: frozenset na, kaya ang mapping lamang ang kulang.
+_LEGAL_TRANSITIONS_TABLE: Final[dict[str, frozenset[str]]] = {
     "intent_frozen": frozenset({
         "replace_submitted", "replace_indeterminate", "replace_rejected",
         "abandoned",
@@ -310,26 +451,35 @@ LEGAL_TRANSITIONS: Final[dict[str, frozenset[str]]] = {
     # read miss ay hindi puwedeng mag-escalate patungo sa isang containment
     # na nagfa-flatten ng protektadong runner (S5). Ang tanging labasan ay
     # `post_deferred` — retry, restore, o operator review.
+    #
+    # WALA na ring `-> abandoned` ang lima sa ibaba (ikaapat na pasada). Hubad
+    # silang lahat, at ang `abandoned` ay terminal na walang remedyo: ang edge
+    # na iyon ay S4 muli. Ang sapilitang labasan ng 300 s na ceiling para sa
+    # isang hubad na marker ay `flatten_queued`, hindi `abandoned` — tingnan ang
+    # `marker_ceiling_forced_target`.
     "successor_certified": frozenset({
-        "partial_posting", "post_deferred", "consumed_by_exit", "abandoned",
+        "partial_posting", "post_deferred", "flatten_queued",
+        "consumed_by_exit",
     }),
     "post_deferred": frozenset({
-        "partial_posting", "restore_intent_frozen", "consumed_by_exit",
-        "abandoned",
+        "partial_posting", "restore_intent_frozen", "flatten_queued",
+        "consumed_by_exit",
     }),
     "partial_posting": frozenset({
         "partial_posted", "partial_indeterminate", "partial_rejected",
-        "consumed_by_exit",
+        "flatten_queued", "consumed_by_exit",
     }),
     "partial_posted": frozenset({
-        "partial_filled", "partial_stale_adopted", "consumed_by_exit",
+        "partial_filled", "partial_stale_adopted", "flatten_queued",
+        "consumed_by_exit",
     }),
     "partial_indeterminate": frozenset({
-        "partial_posted", "partial_rejected_final", "consumed_by_exit",
+        "partial_posted", "partial_rejected_final", "flatten_queued",
+        "consumed_by_exit",
     }),
     "partial_rejected": frozenset({
         "partial_posting", "partial_rejected_final", "restore_intent_frozen",
-        "consumed_by_exit",
+        "flatten_queued", "consumed_by_exit",
     }),
     "partial_rejected_final": frozenset({
         "restore_intent_frozen", "flatten_queued", "consumed_by_exit",
@@ -370,6 +520,46 @@ LEGAL_TRANSITIONS: Final[dict[str, frozenset[str]]] = {
     "abandoned": frozenset(),
     "consumed_by_exit": frozenset(),
 }
+
+#: Ang pampublikong, HINDI NAISUSULAT na tanawin ng graph.
+LEGAL_TRANSITIONS: Final[Mapping[str, frozenset[str]]] = MappingProxyType(
+    _LEGAL_TRANSITIONS_TABLE
+)
+
+
+def _derive_sibling_reconcile_phases() -> frozenset[str]:
+    """Ang buong sakop ng utang na sibling-reconcile, HINANGO sa graph.
+
+    Ang revision 3 ay naglagay ng utang sa `SIBLING_LIVE_PHASES` lamang. Pero
+    ang utang ay HINDI natatapos sa paglabas ng set na iyon: ang
+    `partial_indeterminate -> partial_rejected_final -> flatten_queued` ay
+    dalawang legal na hakbang mula sa "hindi alam kung may nakaupo" patungo sa
+    isang BUONG flatten na walang hinihinging reconcile. Ang `le` ay wala pa
+    ring `scale_limit_order_id`, kaya ang `_cancel_scale_limit_and_clamp` ay
+    noop (LR:18968-18970) at ang flatten ay magpapadala ng buong Q habang
+    nakaupo ang f: short flip (S2), sa pamamagitan ng paglalakad palabas ng set
+    na eksaktong ginawa para pigilan iyon.
+
+    Ang paghango: magsimula sa `SIBLING_LIVE_PHASES`, sumunod sa bawat legal na
+    edge, at HUMINTO sa `SIBLING_RESOLVED_PHASES` — doon lamang napatutunayang
+    hindi na nakaupo ang partial. Hindi kasama ang terminal: walang service step
+    doon, kaya walang hakbang na maiuutang.
+    """
+    seen: set[str] = set(SIBLING_LIVE_PHASES)
+    stack = list(SIBLING_LIVE_PHASES)
+    while stack:
+        node = stack.pop()
+        for nxt in LEGAL_TRANSITIONS.get(node, frozenset()):
+            if nxt in seen or nxt in SIBLING_RESOLVED_PHASES:
+                continue
+            seen.add(nxt)
+            stack.append(nxt)
+    return frozenset(seen - TERMINAL_PHASES)
+
+
+#: Bawat NON-TERMINAL na phase kung saan MAAARING may buhay pang partial sell
+#: sa broker. Ito ang tanong ng `requires_sibling_reconcile`.
+SIBLING_RECONCILE_PHASES: Final[frozenset[str]] = _derive_sibling_reconcile_phases()
 
 
 class PhaseError(ValueError):
@@ -422,6 +612,18 @@ def reachable_phases(start: str) -> frozenset[str]:
         seen.add(node)
         stack.extend(LEGAL_TRANSITIONS.get(node, frozenset()))
     return frozenset(seen)
+
+
+def reachable_terminals(start: str) -> frozenset[str]:
+    """Bawat TERMINAL na maaaring kalagyan ng marker na ito sa dulo.
+
+    Ito ang tamang tanong para sa R4 (ikaapat na pasada). Ang "may ABOT ba
+    akong remedyo" ay pumapasa habang may KATABING landas patungo sa isang
+    terminal na walang remedyo — at ang wiring ay maaaring tumahak doon nang
+    lubos na legal. Ang tanong ay: SAAN AKO PUWEDENG MAPUNTA SA DULO, at
+    tanggap ba ang bawat isa sa mga iyon?
+    """
+    return reachable_phases(start) & TERMINAL_PHASES
 
 
 def is_terminal(phase: str) -> bool:
@@ -486,8 +688,47 @@ def requires_sibling_reconcile(phase: str) -> bool:
     Oo sa bawat phase kung saan maaaring may buhay na partial sell na alam
     lamang ng claim. Kung hindi ito susundin ay pass-through noop ang clamp at
     magkakaroon ng Q + f na sell authority laban sa Q share (S2).
+
+    IKAAPAT NA PASADA. Ang tinatanong dito ay ang HINANGONG
+    `SIBLING_RECONCILE_PHASES`, hindi na ang `SIBLING_LIVE_PHASES`. Ang utang ay
+    nananatili hanggang may phase na TUNAY na nagpapatunay na patay na ang
+    sibling (`SIBLING_RESOLVED_PHASES`); ang paglabas lamang ng tatlong live na
+    phase ay hindi patunay. Konserbatibo ito nang sinasadya: ang isang
+    reconcile na walang mahanap ay isang mumurahing no-op, ang isang nilaktawan
+    ay isang short flip.
     """
-    return _require_phase(phase, label="phase") in SIBLING_LIVE_PHASES
+    return _require_phase(phase, label="phase") in SIBLING_RECONCILE_PHASES
+
+
+def exit_consumption_precondition(
+    phase: str,
+    *,
+    sibling_reconciled: bool,
+) -> bool:
+    """Puwede na bang itala ng wiring ang `consumed_by_exit` mula sa `phase`?
+
+    Ang `consumed_by_exit` ay TERMINAL: matapos itong maisulat ay wala nang
+    service step na tatakbo pa. Kaya ang pagsulat nito habang may hindi
+    naresolbang utang ay hindi paglilinis kundi pagtatapon — ang utang ay hindi
+    nababayaran, ito ay NAWAWALA. Dalawang kondisyon:
+
+    * ang `phase` ay hindi nasa `EXIT_CONSUMPTION_UNRECORDABLE_PHASES` (may
+      nakaupong order na hindi natin alam kung kanino: ghost/zombie); at
+    * kung `requires_sibling_reconcile(phase)`, dapat NAKATAKBO NA ang reconcile
+      sa ulo ng chokepoint at ipinapasa rito ang resulta nito.
+
+    Ang `advance_phase` ay hindi kayang tanungin ito — walang argumento ang
+    isang graph edge — kaya ito ang lugar kung saan pinapatunayan ng wiring na
+    naibayad ang utang bago ito maging terminal.
+    """
+    src = _require_phase(phase, label="phase")
+    if "consumed_by_exit" not in LEGAL_TRANSITIONS.get(src, frozenset()):
+        return False
+    if src in EXIT_CONSUMPTION_UNRECORDABLE_PHASES:
+        return False
+    if src in SIBLING_RECONCILE_PHASES and not bool(sibling_reconciled):
+        return False
+    return True
 
 
 def marker_ceiling_exceeded(
@@ -498,7 +739,7 @@ def marker_ceiling_exceeded(
     """Lumagpas na ba ang marker sa kabuuang wall-clock na hangganan nito?
 
     Hindi kilalang edad => False (hindi tayo nag-a-abandon sa haka-haka).
-    True => sapilitan ang `abandoned` at isang restore-o-flatten na desisyon.
+    True => sapilitan ang phase na ibinabalik ng `marker_ceiling_forced_target`.
     """
     if unresolved_age_seconds is None:
         return False
@@ -510,6 +751,43 @@ def marker_ceiling_exceeded(
     if not (math.isfinite(age) and math.isfinite(ceiling)):
         return False
     return age > ceiling
+
+
+def marker_ceiling_forced_target(phase: str) -> str | None:
+    """Saan sapilitang isusulong ang marker kapag lumagpas ito sa 300 s?
+
+    IKAAPAT NA PASADA. Ang revision 3 ay nag-utos ng "sapilitan ang `abandoned`"
+    sa tatlong lugar (module, disenyo §3.6), pero ang `abandoned` ay walang
+    papasok na edge mula sa 11 sa 13 na naked phase. Ang isang wiring na
+    susunod sa naipadalang utos ay makakakuha ng `PhaseError` sa LOOB ng service
+    step — at ayon sa D4/D3 ang exception doon ay nagbubunga ng "isang tunay na
+    patay na stop na iniulat bilang protected: True". Ang anti-wedge na ceiling
+    ay hindi maisasagawa nang eksakto sa kasong gumagawa ng mahahabang marker:
+    ang limit na nakaupo lang at hindi kailanman na-trade (ang kaso ng CANF).
+
+    Ang lunas ay ang pagkilala na DALAWANG magkaibang bagay ang tinatawag na
+    "abandon":
+
+    * PRE-certification / containment lineage (`intent_frozen`,
+      `replace_submitted`, `replace_indeterminate`, `replace_stuck`,
+      `containment_queued`) — buo pa ang Q stop, walang hubad na share. Doon ang
+      `abandoned` ang tamang wakas: isinusuko natin ang lineage, hindi ang takip.
+    * anumang HUBAD na phase — may share na walang stop. Doon ang `abandoned` ay
+      pag-abandona sa POSISYON. Ang sapilitang labasan ay `flatten_queued`, na
+      siya ring sinasabi ng §3.2 ("any NAKED phase -> flatten_queued") at ngayon
+      ay may tuwirang edge mula sa bawat isa sa kanila.
+
+    Nagbabalik ng `None` kapag TERMINAL na ang phase (wala nang isusulong) o
+    kapag nasa `flatten_queued` na ito (nasa remedyo na mismo).
+    """
+    src = _require_phase(phase, label="phase")
+    if src in TERMINAL_PHASES or src == "flatten_queued":
+        return None
+    target = "flatten_queued" if src in NAKED_RISK_PHASES else "abandoned"
+    # Hindi ito puwedeng maging pangako lamang: kung hindi ito tinatanggap ng
+    # graph ay ang mismong depekto ito na inaayos ng helper na ito.
+    advance_phase(src, target)
+    return target
 
 
 # --------------------------------------------------------------------------
@@ -527,32 +805,71 @@ class SplitPlan:
     reason: str = ""
 
 
+def _maybe_float(value: Any) -> float | None:
+    """Coercion na TUMATANGGI, hindi nagre-raise.
+
+    IKAAPAT NA PASADA. Ang bawat pampublikong helper dito ay tinatawag sa
+    landas ng proteksyon, at ang `broker_recon_status` NULL /
+    `history_unavailable` ay hindi haka-haka sa repo na ito — iyon ang 09-02 na
+    loss-guard landmine. Ang isang hubad na `float(None)` sa gitna ng gate na
+    iyon ay isang exception na tumatakas, hindi isang hatol na kayang basahin ng
+    tumatawag. Ito ang patakaran na sinusunod na ng `blocks_whole_exit` at ng
+    `marker_ceiling_exceeded`.
+    """
+    if value is None or isinstance(value, bool):
+        return None
+    try:
+        out = float(value)
+    except (TypeError, ValueError):
+        return None
+    return out
+
+
 def plan_replacement_edge(
     *,
     total_qty: float,
     partial_qty: float,
     predecessor_filled_size: float,
+    open_partial_qty: float = 0.0,
     whole_shares: bool = True,
 ) -> SplitPlan:
     """R = Q - f, na may mga tseke na kailangan BAGO gumalaw ang broker.
 
-    Tinatanggihan: hindi finite, Q <= 0, f <= 0, f >= Q (walang runner —
-    iyon ay whole exit, hindi partial), para sa equity ang hindi buong share
-    sa alinman sa dalawang binti, at — mahalaga — ang PREDECESSOR NA MAY
-    FILL. Ang `partially_filled` ay NASA `_ACTIVE_ALPACA_PROTECTIVE_LIFECYCLES`
-    (LR:9200-9207), kaya "buhay" pa rin ang tingin dito ng maintenance; ang
-    PATCH sa isang stop na pumutok na nang bahagya ay muling nag-aawtorisa ng
-    share na NAIBENTA NA. Walang parameter para rito ang unang bersyon, kaya
-    walang wiring ang makakatsek nito sa tamang lugar.
+    Tinatanggihan: hindi mabasa o hindi finite, Q <= 0, f <= 0, f >= Q (walang
+    runner — iyon ay whole exit, hindi partial), para sa equity ang hindi buong
+    share sa alinman sa dalawang binti, ang PREDECESSOR NA MAY FILL, at ang
+    NAKAUPO NANG SELL AUTHORITY.
+
+    * **Predecessor na may fill** (R0-10). Ang `partially_filled` ay NASA
+      `_ACTIVE_ALPACA_PROTECTIVE_LIFECYCLES` (LR:9200-9207), kaya "buhay" pa rin
+      ang tingin dito ng maintenance; ang PATCH sa isang stop na pumutok na nang
+      bahagya ay muling nag-aawtorisa ng share na NAIBENTA NA.
+    * **`open_partial_qty`** (ikaapat na pasada). Ang tseke sa itaas ay tumitingin
+      lamang sa fill ng PREDECESSOR at hindi sa kung ano pang SELL ang nakaupo.
+      Kapag may naunang PATH B partial (o isang legacy `scale_limit`) na nakaupo
+      pa, ang `R + f + open` ay maaaring lumampas sa Q: dalawang sell authority
+      sa parehong share, at oversell kapag pumutok pareho. Ang `assess_protection`
+      lamang ang kayang makakita niyon noon, at walang nag-uugnay sa planner
+      dito — kaya ang planner ay nagsasabing `ok=True` sa isang edge na alam ng
+      sariling module na mapanganib.
     """
-    q = float(total_qty)
-    f = float(partial_qty)
-    bad = SplitPlan(total_qty=q, partial_qty=f, successor_qty=0.0, ok=False)
-    try:
-        pf = float(predecessor_filled_size)
-    except (TypeError, ValueError):
+    q = _maybe_float(total_qty)
+    f = _maybe_float(partial_qty)
+    pf = _maybe_float(predecessor_filled_size)
+    op = _maybe_float(open_partial_qty)
+    bad = SplitPlan(
+        total_qty=q if q is not None else 0.0,
+        partial_qty=f if f is not None else 0.0,
+        successor_qty=0.0,
+        ok=False,
+    )
+    if q is None or f is None:
+        return SplitPlan(**{**bad.__dict__, "reason": "quantity_unreadable"})
+    if pf is None:
         return SplitPlan(**{**bad.__dict__, "reason": "predecessor_fill_unreadable"})
-    if not (math.isfinite(q) and math.isfinite(f) and math.isfinite(pf)):
+    if op is None:
+        return SplitPlan(**{**bad.__dict__, "reason": "open_partial_unreadable"})
+    if not all(math.isfinite(v) for v in (q, f, pf, op)):
         return SplitPlan(**{**bad.__dict__, "reason": "non_finite_quantity"})
     if pf < 0.0:
         return SplitPlan(**{**bad.__dict__, "reason": "predecessor_fill_negative"})
@@ -560,6 +877,8 @@ def plan_replacement_edge(
         return SplitPlan(
             **{**bad.__dict__, "reason": "predecessor_partially_filled"}
         )
+    if op < 0.0:
+        return SplitPlan(**{**bad.__dict__, "reason": "open_partial_negative"})
     if q <= 0.0:
         return SplitPlan(**{**bad.__dict__, "reason": "non_positive_total"})
     if f <= 0.0:
@@ -575,7 +894,82 @@ def plan_replacement_edge(
                 )
         if round(r) < 1 or round(f) < 1:
             return SplitPlan(**{**bad.__dict__, "reason": "leg_below_one_share"})
+    if (r + f + op) > q + _tol(q, r, f, op):
+        return SplitPlan(**{**bad.__dict__, "reason": "oversell_after_split"})
     return SplitPlan(total_qty=q, partial_qty=f, successor_qty=r, ok=True)
+
+
+def plan_restore_edge(
+    *,
+    broker_qty: float,
+    open_partial_qty: float,
+    predecessor_qty: float,
+    predecessor_filled_size: float,
+    whole_shares: bool = True,
+) -> SplitPlan:
+    """Ang IKALAWANG edge: ibalik ang takip sa `broker_qty - open_partial_qty`.
+
+    IKAAPAT NA PASADA. Wala itong katumbas noon, at iyon ang butas. Sinasabi ng
+    §3.4b na "ang isang `partially_filled` na predecessor ay hindi kailanman
+    hinahati" — walang kondisyon — pero ang tanging helper na nagpapatupad niyon
+    ay ang `plan_replacement_edge`, at ang restore edge ay HINDI KAYANG tumawag
+    doon: ang sizing nito ay may `f = 0`, na `non_positive_partial` agad. Kaya
+    ang panuntunan ay walang nagpapatupad sa mismong landas ng remedyo.
+
+    Ang konkretong pinsala: nasa `partial_rejected_final` ang marker, saka
+    pumutok ang R = 249 na stop at bahagyang napunan nang j = 80. Ang
+    `partially_filled` ay "buhay" pa rin sa mata ng lifecycle gate, kaya ang
+    restore ay magpi-PATCH ng MISMONG order na iyon pataas mula 249 patungong
+    `broker_qty` — muling inaawtorisa ang 80 na naibenta na. Iyon ang kaparehong
+    uri ng short flip na isinara ng R0-10, sa landas kung saan hindi ito
+    binabantayan.
+
+    Ang edge na ito ay LUMALAKI ayon sa kahulugan (ibinabalik ang takip), kaya
+    ang `marker_successor_envelope` ay kailangang tawagin nang may
+    `edge_kind="restore"`.
+    """
+    b = _maybe_float(broker_qty)
+    op = _maybe_float(open_partial_qty)
+    pq = _maybe_float(predecessor_qty)
+    pf = _maybe_float(predecessor_filled_size)
+    bad = SplitPlan(
+        total_qty=b if b is not None else 0.0,
+        partial_qty=0.0,
+        successor_qty=0.0,
+        ok=False,
+    )
+    if b is None or op is None or pq is None:
+        return SplitPlan(**{**bad.__dict__, "reason": "quantity_unreadable"})
+    if pf is None:
+        return SplitPlan(**{**bad.__dict__, "reason": "predecessor_fill_unreadable"})
+    if not all(math.isfinite(v) for v in (b, op, pq, pf)):
+        return SplitPlan(**{**bad.__dict__, "reason": "non_finite_quantity"})
+    if pf < 0.0:
+        return SplitPlan(**{**bad.__dict__, "reason": "predecessor_fill_negative"})
+    # R0-10, ngayon ay sa DALAWANG edge at hindi na sa isa lamang.
+    if pf > 1e-9:
+        return SplitPlan(
+            **{**bad.__dict__, "reason": "predecessor_partially_filled"}
+        )
+    if op < 0.0 or pq < 0.0:
+        return SplitPlan(**{**bad.__dict__, "reason": "negative_quantity"})
+    if b <= 0.0:
+        return SplitPlan(**{**bad.__dict__, "reason": "non_positive_broker_qty"})
+    r2 = b - op
+    if r2 <= 0.0:
+        return SplitPlan(**{**bad.__dict__, "reason": "restore_leaves_nothing"})
+    if whole_shares:
+        if abs(r2 - round(r2)) > 1e-9:
+            return SplitPlan(
+                **{**bad.__dict__, "reason": "fractional_successor_quantity"}
+            )
+        if round(r2) < 1:
+            return SplitPlan(**{**bad.__dict__, "reason": "leg_below_one_share"})
+    # Ang restore ay pagpapalaki. Ang pagpapaliit o pagkakapantay ay ibang edge
+    # (o isang walang saysay na PATCH), at ang envelope ay tatanggi rin doon.
+    if r2 <= pq + _tol(r2, pq):
+        return SplitPlan(**{**bad.__dict__, "reason": "restore_is_not_growing"})
+    return SplitPlan(total_qty=b, partial_qty=0.0, successor_qty=r2, ok=True)
 
 
 def marker_successor_envelope(
@@ -583,9 +977,9 @@ def marker_successor_envelope(
     predecessor_order_request: dict[str, Any],
     successor_client_order_id: str,
     successor_qty: float,
+    edge_kind: str = "shrink",
 ) -> dict[str, Any] | None:
-    """Ang envelope na dapat ipakita sa lineage matcher para sa isang edge na
-    NAGPAPALIIT ng qty.
+    """Ang envelope na dapat ipakita sa lineage matcher para sa isang marker edge.
 
     ITO ANG S1. Ginagawa ngayon ng `_dispatch_alpaca_replaced_deadman_successor`
     ang inaasahang envelope sa pamamagitan ng pagkopya sa predecessor at
@@ -608,27 +1002,55 @@ def marker_successor_envelope(
     field (side, product, tif, position_intent, extended_hours False,
     stop_price) maliban sa `client_order_id` at `base_size`. Ang wiring ay
     kailangang ipasa ito mula sa marker, hindi buuin mula sa predecessor.
+
+    DALAWANG URI NG EDGE (ikaapat na pasada). Ang revision 3 ay tumatanggi sa
+    BAWAT edge na hindi nagpapaliit — kasama ang tanging dalawang remedyo sa
+    isang hubad na natitira, na PAREHONG lumalaki:
+
+    * ang R4 restore edge — `successor_qty = broker_qty - open_partial_qty`
+      laban sa isang predecessor na nakaupo para sa R = Q - f. Mula sa
+      `partial_rejected_final` (k = 0, walang bukas na partial) iyon ay Q laban
+      sa R: LUMALAKI nang eksaktong f;
+    * ang §3.4c pyramid re-cover — `Q + a - f > Q - f`.
+
+    Kapag walang envelope para sa kanila ay babalik ang wiring sa hugis na
+    predecessor-copy (`base_size` = R), at ang `_owner_transport_order_matches`
+    ay babagsak sa `|Q - R| > tol` sa bawat pulse:
+    `replacement_deadman_successor_lineage_unproven` magpakailanman. Ang
+    marker ay uupo sa `restore_replace_submitted` — HUBAD — hanggang mag-expire
+    ang lease, saka `flatten_queued`. Ang remedyo ng R4 ay tahimik na
+    nagiging "palaging i-flatten ang runner", ang mismong resulta na sinasabi ng
+    §3.9 na binura sa bawat post-certification na landas.
+
+    `edge_kind="shrink"` (edge 1: Q -> R) o `"restore"` (edge 2: R -> Q - open).
+    Ang pagkakapantay ay tinatanggihan sa PAREHO — iyon ay walang saysay na
+    PATCH — at ang maling direksyon ay tinatanggihan sa pareho, kaya ang
+    parameter ay hindi isang pagpapaluwag kundi isang pagpapangalan.
     """
     if not isinstance(predecessor_order_request, dict):
+        return None
+    kind = str(edge_kind or "").strip()
+    if kind not in ("shrink", "restore"):
         return None
     cid = str(successor_client_order_id or "").strip()
     if not cid:
         return None
-    try:
-        qty = float(successor_qty)
-    except (TypeError, ValueError):
+    qty = _maybe_float(successor_qty)
+    if qty is None or not math.isfinite(qty) or qty <= 0.0:
         return None
-    if not math.isfinite(qty) or qty <= 0.0:
+    predecessor_qty = _maybe_float(predecessor_order_request.get("base_size"))
+    if (
+        predecessor_qty is None
+        or not math.isfinite(predecessor_qty)
+        or predecessor_qty <= 0.0
+    ):
         return None
-    try:
-        predecessor_qty = float(predecessor_order_request.get("base_size"))
-    except (TypeError, ValueError):
+    tol = _tol(qty, predecessor_qty)
+    if abs(qty - predecessor_qty) <= tol:
         return None
-    if not math.isfinite(predecessor_qty) or predecessor_qty <= 0.0:
+    if kind == "shrink" and qty > predecessor_qty:
         return None
-    # Ang edge na ito ay PALAGING nagpapaliit. Ang pagpapalaki ay ibang usapin
-    # (bagong risk), at ang pagkakapantay ay walang saysay na PATCH.
-    if qty >= predecessor_qty - 1e-9:
+    if kind == "restore" and qty < predecessor_qty:
         return None
     envelope = dict(predecessor_order_request)
     envelope["client_order_id"] = cid
@@ -666,7 +1088,69 @@ class ProtectionVerdict:
 
     @property
     def requires_restore_or_flatten(self) -> bool:
+        """May hubad na natitira AT may ganang mag-restore (walang oversell)."""
         return self.naked_downside_qty > 0.0 and self.oversell_ok
+
+    @property
+    def requires_flatten_now(self) -> bool:
+        """Oversell: dalawang sell authority sa parehong share. Ang restore ay
+        magpapalala; flatten lamang ang tamang sagot."""
+        return self.status == "oversell_risk"
+
+    @property
+    def requires_remedy(self) -> bool:
+        """ANG NAG-IISANG predicate na dapat i-gate ng isang wiring.
+
+        IKAAPAT NA PASADA. Ang `requires_restore_or_flatten` ay nagtatapos sa
+        `and self.oversell_ok`, kaya nagbabalik ito ng **False** sa isang estado
+        na may 66 na hubad na share basta't may oversell ding nangyayari — ang
+        mismong estado na PINAKAMASAMA sa dalawa. Ang pangalan ay nangangako ng
+        "restore O flatten" at ang flatten ang sagot doon, kaya ang False ay
+        mali kahit sa sarili nitong pangalan. Hindi ito napansin dahil ang bawat
+        test ng `assess_protection` ay may k = 0.
+
+        Hindi pinapalitan ang lumang property (may nakasulat na kahulugan ito:
+        "puwede pa bang mag-restore?"). Ito ang idinagdag: "may utang ba akong
+        ANUMANG remedyo?" — at `invalid` ay bilang utang, hindi bilang malinis.
+        """
+        return not self.ok
+
+
+def open_partial_qty_from_marker(
+    *,
+    partial_quantity: float,
+    partial_cum_filled: float,
+) -> float | None:
+    """Ang `open_partial_qty` mula sa DALAWANG field na tunay na itinatago ng
+    marker (§3.1). Nagbabalik ng `None` kapag hindi mabasa.
+
+    IKAAPAT NA PASADA. Ang `assess_protection` ay tumatanggap ng iisang
+    PRE-NETTED na `p`, pero ang schema ng marker ay may `partial_quantity: f` at
+    `partial_cum_filled: k` — walang open/leaves. Ang pinakamalapit na field ay
+    `f`, at ang pagpapakain niyon matapos mapunan ang k ay nagbubunga ng
+    TAHIMIK na maling sagot sa magkabilang panig::
+
+        f = 106, k = 40, broker = 315, stop = 249
+        assess_protection(315, 249, open_partial_qty=106)
+            -> oversell_risk (MALI: 249 + 66 = 315, walang oversell)
+            -> requires_restore_or_flatten = False (MALI: 66 ang hubad)
+        assess_protection(315, 249, open_partial_qty=66)
+            -> naked_downside, requires_restore_or_flatten = True (TAMA)
+
+    Ito ang kaparehong depekto ng sobrang pagbabawas na inilalarawan ng §3.7/5
+    para sa `le["scale_limit_qty"]`, na naulit sa schema ng marker at sa
+    signature ng naipadalang checker. Ang `conservation_holds` ay tumatanggap ng
+    `f` at `k` nang hiwalay at tama; ito ang katumbas nito para sa checker.
+    """
+    f = _maybe_float(partial_quantity)
+    k = _maybe_float(partial_cum_filled)
+    if f is None or k is None:
+        return None
+    if not (math.isfinite(f) and math.isfinite(k)):
+        return None
+    if f < 0.0 or k < 0.0 or k > f + _tol(f):
+        return None
+    return max(0.0, f - k)
 
 
 def assess_protection(
@@ -686,10 +1170,15 @@ def assess_protection(
       iniuulat nang hiwalay bilang `unhedged_qty_with_resting_sell` para
       malaman ng operator kung ilan sa hubad ang may kahit anong nakaupong
       sell (pataas man).
+
+    Ang `open_partial_qty` ay ang BUKAS (`f - k`) na bilang, hindi ang orihinal
+    na `f` — tingnan ang `open_partial_qty_from_marker`.
+
+    Hindi kailanman nagre-raise: ang hindi mabasang input ay `status="invalid"`,
+    `ok=False`, `requires_remedy=True`. Ang `broker_qty=None` ay tunay na estado
+    dito (`broker_recon_status` NULL / `history_unavailable`), at ang isang
+    TypeError sa loob ng naked-risk gate ay isang gate na hindi tumakbo.
     """
-    b = float(broker_qty)
-    s = float(stop_qty)
-    p = float(open_partial_qty)
     invalid = ProtectionVerdict(
         status="invalid",
         oversell_ok=False,
@@ -697,6 +1186,11 @@ def assess_protection(
         unhedged_qty_with_resting_sell=0.0,
         ok=False,
     )
+    b = _maybe_float(broker_qty)
+    s = _maybe_float(stop_qty)
+    p = _maybe_float(open_partial_qty)
+    if b is None or s is None or p is None:
+        return invalid
     if not (math.isfinite(b) and math.isfinite(s) and math.isfinite(p)):
         return invalid
     if s < 0.0 or p < 0.0 or b < 0.0:
@@ -766,10 +1260,13 @@ def conservation_holds(
     `replacement_deadman_successor_quantity_generation_mismatch` na
     magpakailanman.
     """
-    b = float(broker_qty)
-    r = float(successor_qty)
-    f = float(partial_qty)
-    k = float(partial_cum_filled)
+    vals = [
+        _maybe_float(v)
+        for v in (broker_qty, successor_qty, partial_qty, partial_cum_filled)
+    ]
+    if any(v is None for v in vals):
+        return False
+    b, r, f, k = vals  # type: ignore[misc]
     if not all(math.isfinite(v) for v in (b, r, f, k)):
         return False
     if r < 0.0 or f < 0.0 or k < 0.0 or k > f + _tol(f):
