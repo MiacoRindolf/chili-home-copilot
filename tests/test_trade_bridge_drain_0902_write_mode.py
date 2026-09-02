@@ -343,13 +343,19 @@ def test_values_mode_bind_budget_clamps_with_warning_instead_of_raising(monkeypa
     assert bridge._batch_event_ceiling() == min(
         bridge.BATCH_EVENT_HARD_CEILING, bridge.VALUES_MODE_BIND_BUDGET_EVENTS
     )
+    # The non-adaptive limit is the SAME ceiling function, so the hard event
+    # cap binds here too -- 3,600, not the 3,640 bind budget and certainly not
+    # the raw 10,000 env.
     assert (
         bridge._release_batch_event_limit(pending_backlog=True)
-        == bridge.VALUES_MODE_BIND_BUDGET_EVENTS
+        == bridge.BATCH_EVENT_HARD_CEILING
     )
     monkeypatch.setattr(bridge, "IQFEED_TAPE_WRITE_MODE", "copy")
     assert bridge._batch_event_ceiling() == bridge.BATCH_EVENT_HARD_CEILING
-    assert bridge._release_batch_event_limit(pending_backlog=True) == 10_000
+    assert (
+        bridge._release_batch_event_limit(pending_backlog=True)
+        == bridge.BATCH_EVENT_HARD_CEILING
+    )
 
 
 def test_selftest_exercises_selected_mode_and_fallback(monkeypatch):
@@ -413,6 +419,174 @@ def test_selftest_exercises_selected_mode_and_fallback(monkeypatch):
     assert not bridge._FORCED_WRITE_MODE_FAILURES
 
 
+def test_commit_failure_is_in_doubt_and_never_re_inserts_the_batch(monkeypatch):
+    """A COMMIT that raises must NOT fall back.
+
+    The commit may have succeeded and lost only its acknowledgement (this
+    cluster runs synchronous_commit=off and the container evicts under open-time
+    I/O pressure). Retrying the same rows through the next chain link would
+    insert a SECOND copy of every one -- there is no unique key on
+    (connection_generation, source_frame_sequence) and the retry burns fresh
+    nextval ids, so nothing rejects the duplicate; and the FIRST copy's ids were
+    handed to a caller that raised, so they never get released and sit at
+    available_at IS NULL forever.
+    """
+
+    monkeypatch.setattr(bridge, "_TAPE_SEQUENCES_RESOLVED", True)
+    monkeypatch.setattr(bridge, "IQFEED_TAPE_WRITE_MODE", "copy")
+    monkeypatch.setattr(bridge, "_write_mode_fallbacks", {})
+    monkeypatch.setattr(bridge, "_write_mode_commit_in_doubt", 0)
+
+    attempts: list[str] = []
+
+    def _record(mode):
+        def _inserter(connection, *, trade_rows, quote_rows):
+            attempts.append(mode)
+            return (11,), (), 0.0, 1.0
+
+        return _inserter
+
+    for mode in ("copy", "execute_values", "values"):
+        monkeypatch.setitem(bridge._WRITE_MODE_INSERTERS, mode, _record(mode))
+
+    class _CommitBoomFactory:
+        """The insert body succeeds; the COMMIT (context __exit__) raises."""
+
+        def __call__(self):
+            class _Ctx:
+                def __enter__(self):
+                    return object()
+
+                def __exit__(self, exc_type, exc, tb):
+                    if exc_type is None:
+                        raise OSError("connection lost during COMMIT")
+                    return False
+
+            return _Ctx()
+
+    with pytest.raises(bridge._TapeCommitInDoubt, match="COMMIT outcome is unknown"):
+        bridge._write_pending_batch(
+            _CommitBoomFactory(), trade_rows=[_trade(1)], quote_rows=[]
+        )
+    # ONE attempt only -- the batch was never handed to another write mode.
+    assert attempts == ["copy"]
+    assert bridge._write_mode_fallbacks == {}
+    assert bridge._write_mode_commit_in_doubt == 1
+
+    # A PRE-commit failure still falls back, exactly as before.
+    def _boom(connection, *, trade_rows, quote_rows):
+        raise RuntimeError("simulated pre-commit failure")
+
+    monkeypatch.setitem(bridge._WRITE_MODE_INSERTERS, "copy", _boom)
+    attempts.clear()
+    rolled_back: list[bool] = []
+
+    class _RollbackFactory:
+        def __call__(self):
+            class _Ctx:
+                def __enter__(self):
+                    return object()
+
+                def __exit__(self, exc_type, exc, tb):
+                    rolled_back.append(exc_type is not None)
+                    return False
+
+            return _Ctx()
+
+    _ids, _q, mode, _timings = bridge._write_pending_batch(
+        _RollbackFactory(), trade_rows=[_trade(1)], quote_rows=[]
+    )
+    assert mode == "execute_values"
+    assert attempts == ["execute_values"]
+    assert rolled_back[0] is True  # the failed attempt was unwound
+    assert bridge._write_mode_fallbacks == {"execute_values": 1}
+
+
+def test_write_mode_preflight_runs_on_the_production_start_path():
+    """The launcher runs the bridge with no --selftest, so the write-mode proof
+    has to live on the normal start path or it never runs in production."""
+
+    tree = ast.parse(_BRIDGE_PATH.read_text(encoding="utf-8"))
+    for name in ("main", "run_supervised"):
+        node = next(
+            item
+            for item in ast.walk(tree)
+            if isinstance(item, ast.FunctionDef) and item.name == name
+        )
+        called = {
+            call.func.id
+            for call in ast.walk(node)
+            if isinstance(call, ast.Call) and isinstance(call.func, ast.Name)
+        }
+        assert "_verify_bridge_schema" in called, name
+        assert "_verify_tape_write_mode" in called, name
+    # And the launcher really does not pass --selftest.
+    launcher = (
+        _BRIDGE_PATH.parents[1]
+        / "project_ws" / "AgentOps" / "iqfeed" / "run-trade-bridge.cmd"
+    )
+    if launcher.exists():
+        assert "--selftest" not in launcher.read_text(
+            encoding="utf-8", errors="replace"
+        )
+
+
+def test_write_mode_preflight_rolls_back_and_is_terminal_for_the_selected_mode(
+    monkeypatch,
+):
+    monkeypatch.setattr(bridge, "_TAPE_SEQUENCES_RESOLVED", True)
+    monkeypatch.setattr(bridge, "IQFEED_TAPE_WRITE_MODE", "copy")
+    events: list[str] = []
+
+    class _Transaction:
+        def rollback(self):
+            events.append("rollback")
+
+        def commit(self):  # pragma: no cover - must never be reached
+            events.append("commit")
+
+    class _Connection:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+        def begin(self):
+            return _Transaction()
+
+    class _Engine:
+        def connect(self):
+            return _Connection()
+
+    monkeypatch.setattr(bridge, "engine", _Engine())
+
+    def _ok(connection, *, trade_rows, quote_rows):
+        events.append("insert")
+        return (1,), (), 0.0, 1.0
+
+    for mode in ("copy", "execute_values", "values"):
+        monkeypatch.setitem(bridge._WRITE_MODE_INSERTERS, mode, _ok)
+    bridge._verify_tape_write_mode()
+    # Every chain link is proven, and NOTHING is committed.
+    assert events == ["insert", "rollback"] * 3
+    assert "commit" not in events
+
+    # A broken SELECTED mode is terminal, before any socket opens.
+    def _boom(connection, *, trade_rows, quote_rows):
+        raise RuntimeError("missing column after a migration")
+
+    monkeypatch.setitem(bridge._WRITE_MODE_INSERTERS, "copy", _boom)
+    with pytest.raises(RuntimeError, match="preflight failed before the provider"):
+        bridge._verify_tape_write_mode()
+
+    # A broken FALLBACK link only warns -- refusing to launch would be worse,
+    # the cmd wrapper respawns every 20 s.
+    monkeypatch.setitem(bridge._WRITE_MODE_INSERTERS, "copy", _ok)
+    monkeypatch.setitem(bridge._WRITE_MODE_INSERTERS, "values", _boom)
+    bridge._verify_tape_write_mode()
+
+
 def test_engine_connect_sets_utc_and_verify_schema_asserts_timezone(monkeypatch):
     executed: list[str] = []
 
@@ -455,3 +629,84 @@ def test_engine_connect_sets_utc_and_verify_schema_asserts_timezone(monkeypatch)
     monkeypatch.setattr(bridge, "engine", _Engine())
     with pytest.raises(RuntimeError, match="session time zone is not UTC"):
         bridge._verify_bridge_schema()
+
+
+def test_utc_pin_is_a_startup_option_and_the_guard_reads_across_a_rollback(
+    monkeypatch,
+):
+    """The pin must survive the pool's checkin rollback, and the guard must
+    actually test that.
+
+    A plain ``SET TIME ZONE`` inside psycopg2's implicit transaction is
+    TRANSACTIONAL: SQLAlchemy rolls back on checkin, so the statement-only pin
+    held for the FIRST checkout and silently reverted on every later one -- and
+    every real tape write happens on a later checkout. Reading ``SHOW TimeZone``
+    once on a freshly-connected session could therefore only ever echo what the
+    connect event just wrote.
+    """
+
+    source = _BRIDGE_PATH.read_text(encoding="utf-8")
+    # The durable pin: a libpq startup option, not a statement.
+    assert '"options": "-c timezone=UTC"' in source
+
+    # The connect event must not leave the SET inside a transaction.
+    toggled: list[bool] = []
+
+    class _Cursor:
+        def execute(self, sql):
+            assert sql == "SET TIME ZONE 'UTC'"
+            toggled.append(dbapi.autocommit)
+
+        def close(self):
+            pass
+
+    class _DBAPI:
+        def __init__(self):
+            self.autocommit = False
+
+        def cursor(self):
+            return _Cursor()
+
+    dbapi = _DBAPI()
+    bridge._set_bridge_session_utc(dbapi, None)
+    assert toggled == [True]  # issued in AUTOCOMMIT
+    assert dbapi.autocommit is False  # ...and restored
+
+    # The guard reads the zone, rolls back, and reads AGAIN.
+    reads: list[str] = []
+    calls: list[str] = []
+
+    class _TZResult:
+        def __init__(self, value):
+            self.value = value
+
+        def scalar(self):
+            return self.value
+
+    class _Connection:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+        def rollback(self):
+            calls.append("rollback")
+
+        def execute(self, statement, params=None):
+            assert "SHOW TimeZone" in str(statement)
+            calls.append("show")
+            value = reads.pop(0)
+            return _TZResult(value)
+
+    class _Engine:
+        def connect(self):
+            return _Connection()
+
+    monkeypatch.setattr(bridge, "engine", _Engine())
+    # UTC on the first read, the server default after the rollback: exactly the
+    # defect. The guard must catch it.
+    reads[:] = ["UTC", "America/Los_Angeles"]
+    with pytest.raises(RuntimeError, match="not UTC at post_rollback"):
+        bridge._verify_bridge_schema()
+    assert calls == ["show", "rollback", "show"]

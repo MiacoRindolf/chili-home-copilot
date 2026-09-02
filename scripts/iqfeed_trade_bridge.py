@@ -65,7 +65,7 @@ IQFEED_EXACT_PRINT_HEARTBEAT_SCOPE = "committed_exact_print_release"
 # exact key-set match in lane_health plus a content_sha256 over the body, so
 # writer-drain telemetry gets its own type and its own frozen key set.
 JOB_IQFEED_DRAIN_METRICS_HEARTBEAT = "iqfeed_drain_metrics_heartbeat"
-IQFEED_DRAIN_METRICS_HEARTBEAT_SCHEMA = "iqfeed_drain_metrics_heartbeat_v1"
+IQFEED_DRAIN_METRICS_HEARTBEAT_SCHEMA = "iqfeed_drain_metrics_heartbeat_v2"
 IQFEED_DRAIN_METRICS_HEARTBEAT_SCOPE = "writer_drain_window"
 
 try:
@@ -309,14 +309,25 @@ IQFEED_NOTIFY_MAX_AGE_S = _env_float("IQFEED_NOTIFY_MAX_AGE_S", 0.0)
 IQFEED_DB_BATCH_ADAPTIVE = _env_flag("IQFEED_DB_BATCH_ADAPTIVE", "1")
 IQFEED_DB_BATCH_TARGET_MS = _env_float("IQFEED_DB_BATCH_TARGET_MS", 600.0)
 IQFEED_DB_BATCH_HARD_STOP_MS = _env_float("IQFEED_DB_BATCH_HARD_STOP_MS", 900.0)
-IQFEED_DB_BATCH_MAX_BYTES = _env_int("IQFEED_DB_BATCH_MAX_BYTES", 8 * 1024 * 1024)
 # The event ceiling is NOT raised in this PR.  Raising it is gated on day-1
 # [drain-metrics] showing batch p90 < 0.6 s at 3,600.
 BATCH_EVENT_HARD_CEILING = 3_600
-# Estimated retained bytes per event for the byte SAFETY cap.  Deliberately a
-# constant: measuring the real buffer would cost more than the cap saves, and
-# the cap exists to stop a pathological wide batch, not to size normal ones.
+# Estimated retained bytes per event for the byte cap.  Deliberately a constant:
+# measuring the real buffer would cost more than the cap saves.  Because it IS a
+# constant, the byte projection scales with event COUNT only -- so this is a
+# second, byte-denominated expression of the event cap, NOT an independent guard
+# against a pathologically wide row.  (A batch of unusually wide rows is bounded
+# by the event ceiling alone; that is a known limit, not a hidden one.)
 ESTIMATED_EVENT_BYTES = 320
+# Defaulting this to 8 MiB made it dead code: 8 MiB / 320 B = 26,214 events,
+# seven times the hard event ceiling, so the check could never fire.  Anchoring
+# the default to the ceiling makes the two bounds coincide exactly at 3,600 --
+# no behaviour change at defaults -- and makes hot-LOWERING the knob a real,
+# legible way to shrink the effective batch, which is what it is advertised as.
+IQFEED_DB_BATCH_MAX_BYTES = _env_int(
+    "IQFEED_DB_BATCH_MAX_BYTES",
+    BATCH_EVENT_HARD_CEILING * ESTIMATED_EVENT_BYTES,
+)
 IQFEED_DRAIN_METRICS_EVERY_S = _env_float("IQFEED_DRAIN_METRICS_EVERY_S", 10.0)
 # 0 = unbounded (today).  When set, the OLDEST quote-only frames are dropped
 # first and every dropped frame latches a replay CoverageGap; trades are never
@@ -475,11 +486,21 @@ _SELECTED_FIELD_INDEX = {
     name: index + 1 for index, name in enumerate(SELECTED_UPDATE_FIELDS)
 }
 
-engine = sa.create_engine(DB_URL, pool_pre_ping=True)
+# The PRIMARY time-zone pin is a libpq startup option, not a statement: a
+# plain ``SET TIME ZONE`` issued inside psycopg2's implicit transaction is
+# TRANSACTIONAL, and SQLAlchemy's pool rolls back on checkin -- so the pin
+# survived only the FIRST checkout and every later one silently reverted to the
+# server/role default.  ``-c timezone=UTC`` is applied at connection startup and
+# a ROLLBACK reverts to it, not past it.
+engine = sa.create_engine(
+    DB_URL,
+    pool_pre_ping=True,
+    connect_args={"options": "-c timezone=UTC"},
+)
 
 
 def _set_bridge_session_utc(dbapi_connection: Any, _connection_record: Any = None) -> None:
-    """Pin every bridge session to UTC.
+    """Belt-and-braces UTC pin on every new bridge connection.
 
     ``momentum_nbbo_spread_tape.at`` is written NAIVE into a timestamptz column
     (and ``iqfeed_trade_ticks.observed_at`` is a naive timestamp), so BOTH the
@@ -487,16 +508,27 @@ def _set_bridge_session_utc(dbapi_connection: Any, _connection_record: Any = Non
     the SESSION time zone.  Measured 2026-09-02: the same naive text landed 7 h
     off under ``America/Los_Angeles``.  This is a correctness pin, not a
     preference.
+
+    The SET is issued in AUTOCOMMIT so it is not unwound by the pool's checkin
+    rollback.  The libpq ``-c timezone=UTC`` startup option above is what makes
+    the pin durable; this is the second lock on the same door.
     """
 
-    cursor = dbapi_connection.cursor()
+    previous_autocommit = getattr(dbapi_connection, "autocommit", None)
+    if previous_autocommit is False:
+        dbapi_connection.autocommit = True
     try:
-        cursor.execute("SET TIME ZONE 'UTC'")
-    finally:
+        cursor = dbapi_connection.cursor()
         try:
-            cursor.close()
-        except Exception:  # pragma: no cover - driver-specific
-            pass
+            cursor.execute("SET TIME ZONE 'UTC'")
+        finally:
+            try:
+                cursor.close()
+            except Exception:  # pragma: no cover - driver-specific
+                pass
+    finally:
+        if previous_autocommit is False:
+            dbapi_connection.autocommit = False
 
 
 sa.event.listens_for(engine, "connect")(_set_bridge_session_utc)
@@ -573,6 +605,35 @@ BRIDGE_CAPTURE_CONFIGURATION = {
         "ask": L1_ASK,
     },
 }
+def _capture_configuration_sha256() -> str:
+    return hashlib.sha256(
+        json.dumps(
+            BRIDGE_CAPTURE_CONFIGURATION,
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=False,
+        ).encode("utf-8")
+    ).hexdigest()
+
+
+def _refresh_capture_configuration_write_mode(mode: str) -> None:
+    """Keep the attested write mode truthful after a hot override.
+
+    ``IQFEED_TAPE_WRITE_MODE`` is the documented day-1 kill switch, so the
+    import-time snapshot stops describing the run the moment it is pulled.  The
+    column VALUES are byte-identical across modes (proven by the bench's
+    ``--verify-parity``), so no tape content is misattested -- only the
+    provenance record, which is exactly what must not drift.
+    """
+
+    global BRIDGE_CAPTURE_CONFIGURATION_SHA256
+
+    if BRIDGE_CAPTURE_CONFIGURATION.get("tape_write_mode") == mode:
+        return
+    BRIDGE_CAPTURE_CONFIGURATION["tape_write_mode"] = mode
+    BRIDGE_CAPTURE_CONFIGURATION_SHA256 = _capture_configuration_sha256()
+
+
 BRIDGE_CAPTURE_CONFIGURATION_SHA256 = hashlib.sha256(
     json.dumps(
         BRIDGE_CAPTURE_CONFIGURATION,
@@ -746,14 +807,22 @@ def _verify_bridge_schema() -> None:
         )
     try:
         with engine.connect() as connection:
-            session_timezone = str(
-                connection.execute(sa.text("SHOW TimeZone")).scalar() or ""
-            ).strip()
-            if session_timezone.upper() not in ("UTC", "ETC/UTC"):
-                raise RuntimeError(
-                    "IQFeed bridge session time zone is not UTC: "
-                    f"{session_timezone!r}"
-                )
+            # Read the pin TWICE, with a ROLLBACK in between.  The pool issues
+            # exactly that rollback on checkin, and a plain in-transaction
+            # ``SET TIME ZONE`` does not survive it -- so a single read on a
+            # freshly-connected session is tautological: it can only ever
+            # observe what the connect event just wrote, and every real tape
+            # write happens on a LATER checkout.
+            for stage in ("connect", "post_rollback"):
+                session_timezone = str(
+                    connection.execute(sa.text("SHOW TimeZone")).scalar() or ""
+                ).strip()
+                if session_timezone.upper() not in ("UTC", "ETC/UTC"):
+                    raise RuntimeError(
+                        "IQFeed bridge session time zone is not UTC at "
+                        f"{stage}: {session_timezone!r}"
+                    )
+                connection.rollback()
             migrated = bool(connection.execute(
                 sa.text(
                     "SELECT EXISTS ("
@@ -1449,13 +1518,35 @@ _WRITE_MODE_INSERTERS = {
     "execute_values": _insert_pending_batch_execute_values,
     "values": _insert_pending_batch_values,
 }
-# Any failure of a bulk mode retries the SAME batch through the next link.  The
-# existing "trade/BBO insert failed" loss path is reached only after all three.
+# Any PRE-COMMIT failure of a bulk mode retries the SAME batch through the next
+# link.  The existing "trade/BBO insert failed" loss path is reached only after
+# all three.
 _WRITE_MODE_CHAIN = {
     "copy": ("copy", "execute_values", "values"),
     "execute_values": ("execute_values", "values"),
     "values": ("values",),
 }
+
+
+class _TapeCommitInDoubt(RuntimeError):
+    """The batch reached COMMIT and the outcome is unknown.
+
+    A COMMIT that raises is NOT a failed write: the server may have committed
+    and lost only the acknowledgement (this cluster runs
+    ``synchronous_commit=off``, and the 12 GB container evicts under open-time
+    I/O pressure).  Retrying such a batch through the next chain link inserts a
+    SECOND copy of every row — the tape carries no unique key on
+    ``(connection_generation, source_frame_sequence)`` and the retry burns fresh
+    ``nextval`` ids, so nothing would reject the duplicate.  The first copy's
+    ids were already handed to a caller that raised, so they would additionally
+    sit at ``available_at IS NULL`` forever.
+
+    Duplication is silent and unbounded; the pre-existing loss path is
+    accounted for and gap-latched.  So an in-doubt commit never falls back.
+    """
+
+
+_write_mode_commit_in_doubt = 0
 
 
 def _effective_tape_write_mode() -> str:
@@ -1465,6 +1556,76 @@ def _effective_tape_write_mode() -> str:
     return mode
 
 
+def _attempt_pending_batch_write(
+    connection_factory: Any,
+    attempt_mode: str,
+    *,
+    trade_rows: list[dict],
+    quote_rows: list[dict],
+) -> tuple[tuple[int, ...], tuple[int, ...], str, dict[str, float]]:
+    """Run ONE write attempt, separating the insert body from the COMMIT.
+
+    The context manager's ``__exit__`` is what commits, so it is driven
+    explicitly here: a failure raised by the body is a clean pre-commit failure
+    (the transaction is rolled back, nothing landed, the next chain link may
+    retry the SAME rows), while a failure raised by the commit itself is
+    ``_TapeCommitInDoubt`` and must never be retried.
+    """
+
+    global _write_mode_commit_in_doubt
+
+    if attempt_mode in _FORCED_WRITE_MODE_FAILURES:
+        raise RuntimeError(f"IQFeed forced {attempt_mode} write-mode failure")
+    inserter = _WRITE_MODE_INSERTERS[attempt_mode]
+    opened = time.monotonic()
+    context = connection_factory()
+    connection = context.__enter__()
+    try:
+        (
+            trade_row_ids,
+            quote_row_ids,
+            build_ms,
+            execute_ms,
+        ) = inserter(
+            connection,
+            trade_rows=trade_rows,
+            quote_rows=quote_rows,
+        )
+    except BaseException as exc:
+        # Pre-commit: unwind the transaction and let the caller fall back.
+        try:
+            context.__exit__(type(exc), exc, exc.__traceback__)
+        except Exception:  # pragma: no cover - rollback is best effort
+            log.warning(
+                "IQFeed tape %s rollback after a pre-commit failure also failed",
+                attempt_mode,
+                exc_info=True,
+            )
+        raise
+    inserted = time.monotonic()
+    try:
+        context.__exit__(None, None, None)
+    except Exception as exc:
+        _write_mode_commit_in_doubt += 1
+        raise _TapeCommitInDoubt(
+            f"IQFeed tape {attempt_mode} COMMIT outcome is unknown for "
+            f"{len(trade_rows)} trade / {len(quote_rows)} quote rows "
+            f"({type(exc).__name__}: {exc}); refusing to re-insert the batch"
+        ) from exc
+    committed = time.monotonic()
+    return (
+        trade_row_ids,
+        quote_row_ids,
+        attempt_mode,
+        {
+            "insert_client_build_ms": build_ms,
+            "insert_execute_ms": execute_ms,
+            "insert_commit_ms": (committed - inserted) * 1000.0,
+            "insert_total_ms": (committed - opened) * 1000.0,
+        },
+    )
+
+
 def _write_pending_batch(
     connection_factory: Any,
     *,
@@ -1472,7 +1633,12 @@ def _write_pending_batch(
     quote_rows: list[dict],
     mode: str | None = None,
 ) -> tuple[tuple[int, ...], tuple[int, ...], str, dict[str, float]]:
-    """Persist one batch through the selected mode with a bounded fallback."""
+    """Persist one batch through the selected mode with a bounded fallback.
+
+    Only PRE-COMMIT failures fall back.  An in-doubt COMMIT raises
+    ``_TapeCommitInDoubt`` straight through to the writer's loss path rather
+    than duplicating the batch.
+    """
 
     chain = _WRITE_MODE_CHAIN[
         _normalized_tape_write_mode(mode or _effective_tape_write_mode())
@@ -1480,36 +1646,15 @@ def _write_pending_batch(
     last_error: Exception | None = None
     for index, attempt_mode in enumerate(chain):
         try:
-            if attempt_mode in _FORCED_WRITE_MODE_FAILURES:
-                raise RuntimeError(
-                    f"IQFeed forced {attempt_mode} write-mode failure"
-                )
-            inserter = _WRITE_MODE_INSERTERS[attempt_mode]
-            opened = time.monotonic()
-            with connection_factory() as connection:
-                (
-                    trade_row_ids,
-                    quote_row_ids,
-                    build_ms,
-                    execute_ms,
-                ) = inserter(
-                    connection,
-                    trade_rows=trade_rows,
-                    quote_rows=quote_rows,
-                )
-                inserted = time.monotonic()
-            committed = time.monotonic()
-            return (
-                trade_row_ids,
-                quote_row_ids,
+            return _attempt_pending_batch_write(
+                connection_factory,
                 attempt_mode,
-                {
-                    "insert_client_build_ms": build_ms,
-                    "insert_execute_ms": execute_ms,
-                    "insert_commit_ms": (committed - inserted) * 1000.0,
-                    "insert_total_ms": (committed - opened) * 1000.0,
-                },
+                trade_rows=trade_rows,
+                quote_rows=quote_rows,
             )
+        except _TapeCommitInDoubt:
+            # NEVER fall back: the rows may already be on the tape.
+            raise
         except Exception as exc:
             last_error = exc
             if index + 1 >= len(chain):
@@ -2012,8 +2157,10 @@ def _drain_pending_write_batch(
                 + len(frame_mandatory_quotes)
                 + len(projected_cold_symbols)
             )
-            # The byte bound is a SAFETY cap only: it stops a pathologically
-            # wide batch, and like the event cap it never splits a frame.
+            # The byte bound is the event cap re-expressed in bytes (the
+            # per-event estimate is a constant), so it exists to let an operator
+            # hot-LOWER the effective batch size in one legible unit.  Like the
+            # event cap it never splits a frame.
             if retained_events and (
                 projected_retained_events > max_events
                 or (
@@ -2120,14 +2267,17 @@ def _release_batch_event_limit(
     """
 
     if controller is None or not IQFEED_DB_BATCH_ADAPTIVE:
-        limit = (
-            DB_RELEASE_CATCHUP_BATCH_EVENTS
+        # ``_batch_event_ceiling`` applies BOTH the hard ceiling and the
+        # ``values`` bind budget.  Applying only the bind budget here meant the
+        # documented day-1 kill switch (raise the catch-up env for COPY, then
+        # set IQFEED_DB_BATCH_ADAPTIVE=0) produced batches far above the 3,600
+        # ceiling this PR promises not to raise -- and a batch wall well past
+        # the consumer's 2.0 s authority gate.
+        return (
+            _batch_event_ceiling()
             if pending_backlog
             else DB_RELEASE_BATCH_EVENTS
         )
-        if _effective_tape_write_mode() == "values":
-            limit = min(limit, VALUES_MODE_BIND_BUDGET_EVENTS)
-        return limit
     return (
         controller.max_events
         if pending_backlog
@@ -2166,12 +2316,38 @@ def _enforce_pending_bound(
     """Drop the OLDEST quote-only frames once the backlog exceeds the bound.
 
     Trades are NEVER dropped, and a quote frame that shares its frame key with
-    a pending trade is never split away from it.  Every dropped frame latches a
-    replay ``CoverageGap`` so the mirror can never believe coverage is complete
-    while frames are missing.  Default 0 = unbounded (today's behaviour).
+    a pending trade is never split away from it -- such a frame is SKIPPED, not
+    a stop sign.  Breaking on the first trade-paired frame made the bound inert
+    on any tape that has prints, which is every tape during a session: the head
+    of ``_pending_nbbo`` under an open backlog is very likely trade-bearing, so
+    the knob reported ``pending_bound_drops=0`` while the deques kept growing.
+
+    Every dropped frame latches a replay ``CoverageGap`` so the mirror can never
+    believe coverage is complete while frames are missing.  When the capture
+    handoff is UNBOUND the gap cannot be latched, so nothing is dropped at all:
+    a memory bound is never worth silent, unrecorded tape loss.  Default 0 =
+    unbounded (today's behaviour).
     """
 
     if max_events <= 0:
+        return 0
+    with _capture_handoff_lock:
+        handoff_bound = _capture_handoff is not None
+    if not handoff_bound:
+        # Fail CLOSED on coverage.  Under --allow-uncaptured-diagnostic the gap
+        # recorder only logs (throttled), and without the flag it RAISES from a
+        # call site outside the writer's try -- which would kill the sole tape
+        # drain after the frames had already been popped.  Neither is an
+        # acceptable price for a memory bound.
+        _emit_ok, _sup, _agg = _uncaptured_should_log(1)
+        if _emit_ok:
+            log.warning(
+                "IQFeed pending bound (IQFEED_PENDING_MAX_EVENTS=%d) is INERT: "
+                "the replay capture handoff is unbound, so a dropped frame "
+                "could not latch a CoverageGap (suppressed=%d)",
+                max_events,
+                _sup,
+            )
         return 0
     dropped: list[dict] = []
     with _pending_lock:
@@ -2179,18 +2355,25 @@ def _enforce_pending_bound(
         if total <= max_events:
             return 0
         trade_frame_keys = {_pending_frame_key(row) for row in _pending}
+        retained: list[dict] = []
         while total > max_events and _pending_nbbo:
             frame_key = _pending_frame_key(_pending_nbbo[0])
-            if frame_key in trade_frame_keys:
-                break
             frame_rows: list[dict] = []
             while (
                 _pending_nbbo
                 and _pending_frame_key(_pending_nbbo[0]) == frame_key
             ):
                 frame_rows.append(_pending_nbbo.popleft())
+            if frame_key in trade_frame_keys:
+                # Never split a frame from its trade -- skip past it and keep
+                # scanning for older quote-only frames behind it.
+                retained.extend(frame_rows)
+                continue
             dropped.extend(frame_rows)
             total -= len(frame_rows)
+        if retained:
+            # Restore the skipped frames at the head, in their original order.
+            _pending_nbbo.extendleft(reversed(retained))
     for row in dropped:
         _record_unreleased_capture_gap(
             symbol=str(row.get("sym") or "").strip().upper() or None,
@@ -2238,32 +2421,61 @@ _OVERRIDE_COERCERS: dict[str, Any] = {
     "IQFEED_PENDING_MAX_EVENTS": lambda value: max(0, int(value)),
 }
 _override_state: dict[str, Any] = {"mtime_ns": None, "reloads": 0}
+# The env/import-time value of every whitelisted knob.  A key that DISAPPEARS
+# from the override document -- or a document that is emptied to ``{}`` or
+# deleted outright -- reverts to this.  Without it the file was a ONE-WAY
+# switch: an operator who enabled IQFEED_NOTIFY_MAX_AGE_S during a backlog
+# incident and then reverted the natural way (delete the file) kept the age
+# filter on for the life of the process, and there is no scheduled restart.
+_OVERRIDE_BASELINE: dict[str, Any] = {
+    key: globals().get(key) for key in _OVERRIDE_COERCERS
+}
+
+
+def _apply_override_value(key: str, value: Any) -> bool:
+    if globals().get(key) == value:
+        return False
+    globals()[key] = value
+    if key == "IQFEED_TAPE_WRITE_MODE":
+        _refresh_capture_configuration_write_mode(value)
+    return True
 
 
 def _reload_overrides(path: str | None = None) -> int:
-    """Apply a whitelisted subset of knobs from the override file, if changed."""
+    """Apply a whitelisted subset of knobs from the override file, if changed.
+
+    Absent keys REVERT to the import-time baseline, so ``{}`` or a deleted file
+    is a full revert -- the behaviour §1.6 of the plan documents.
+    """
 
     target = path or IQFEED_BRIDGE_OVERRIDES_PATH
+    document: dict[str, Any]
     try:
-        mtime_ns = os.stat(target).st_mtime_ns
+        mtime_ns: int | None = os.stat(target).st_mtime_ns
     except OSError:
-        return 0
-    if _override_state.get("mtime_ns") == mtime_ns:
-        return 0
-    _override_state["mtime_ns"] = mtime_ns
-    try:
-        with open(target, "r", encoding="utf-8") as handle:
-            document = json.load(handle)
-        if not isinstance(document, dict):
-            raise ValueError("override document is not an object")
-    except Exception as exc:
-        log.warning(
-            "IQFeed bridge override file %s is malformed; keeping the last "
-            "good values: %s",
-            target,
-            exc,
-        )
-        return 0
+        if _override_state.get("mtime_ns") is None:
+            return 0
+        # The file went away after having been applied: revert everything.
+        _override_state["mtime_ns"] = None
+        document = {}
+    else:
+        if _override_state.get("mtime_ns") == mtime_ns:
+            return 0
+        _override_state["mtime_ns"] = mtime_ns
+        try:
+            with open(target, "r", encoding="utf-8") as handle:
+                loaded = json.load(handle)
+            if not isinstance(loaded, dict):
+                raise ValueError("override document is not an object")
+            document = loaded
+        except Exception as exc:
+            log.warning(
+                "IQFeed bridge override file %s is malformed; keeping the last "
+                "good values: %s",
+                target,
+                exc,
+            )
+            return 0
     changed = 0
     for key, raw_value in document.items():
         coercer = _OVERRIDE_COERCERS.get(str(key))
@@ -2278,10 +2490,23 @@ def _reload_overrides(path: str | None = None) -> int:
             )
             continue
         previous = globals().get(key)
-        if previous == value:
+        if not _apply_override_value(str(key), value):
             continue
-        globals()[key] = value
         log.info("IQFeed bridge override %s: %r -> %r", key, previous, value)
+        changed += 1
+    present = {str(key) for key in document}
+    for key, baseline in _OVERRIDE_BASELINE.items():
+        if key in present:
+            continue
+        previous = globals().get(key)
+        if not _apply_override_value(key, baseline):
+            continue
+        log.info(
+            "IQFeed bridge override %s reverted to baseline: %r -> %r",
+            key,
+            previous,
+            baseline,
+        )
         changed += 1
     if changed:
         _override_state["reloads"] = int(_override_state.get("reloads", 0)) + 1
@@ -2296,6 +2521,7 @@ class _DrainMetrics:
 
     def reset(self) -> None:
         self.batches = 0
+        self.failed_batches = 0
         self.events = 0
         self.notifies = 0
         self.batch_ms: list[float] = []
@@ -2305,6 +2531,13 @@ class _DrainMetrics:
         self.release_ms = 0.0
         self.capture_ms = 0.0
         self.pending_bound_drops = 0
+        # Snapshot the process-lifetime counters so the window can report a
+        # DELTA.  Reporting the lifetime total under a bare name made two
+        # consecutive receipts undiffable: a window in which fallbacks occurred
+        # earlier in the run read as 0 new fallbacks.
+        self.fallbacks_at_reset = sum(_write_mode_fallbacks.values())
+        self.commit_in_doubt_at_reset = _write_mode_commit_in_doubt
+        self.reloads_at_reset = int(_override_state.get("reloads", 0))
 
     def observe(
         self,
@@ -2315,8 +2548,16 @@ class _DrainMetrics:
         release_ms: float,
         capture_ms: float,
         notifies: int,
+        failed: bool = False,
     ) -> None:
+        # A batch that exhausted the whole write chain is the SLOWEST wall in
+        # the window (every link opened a transaction and paid its latency
+        # before raising).  Excluding it made batch_p90_ms green precisely when
+        # the loop was spending most of its wall on failures, and p90 is the
+        # day-1 acceptance metric.
         self.batches += 1
+        if failed:
+            self.failed_batches += 1
         self.events += events
         self.notifies += notifies
         self.batch_ms.append(batch_ms)
@@ -2348,24 +2589,39 @@ class _DrainMetrics:
                 _oldest_pending_received_age_s(), 3
             ),
             "batches": self.batches,
+            "failed_batches": self.failed_batches,
             "events_per_s": round(
                 self.events / window_s if window_s > 0 else 0.0, 1
             ),
+            # PERCENTILES are per batch; every ``*_total_ms`` below is a SUM
+            # over the whole window.  The names say which, because reading a
+            # window sum as a per-batch cost ("release is 10x the batch wall")
+            # is the misreading the day-1 acceptance run invites.
             "batch_p50_ms": round(self._percentile(self.batch_ms, 0.5), 1),
             "batch_p90_ms": round(self._percentile(self.batch_ms, 0.9), 1),
             "batch_max_ms": round(max(self.batch_ms) if self.batch_ms else 0.0, 1),
-            "insert_client_build_ms": round(self.insert_client_build_ms, 1),
             "insert_execute_p50_ms": round(
                 self._percentile(self.insert_execute_ms, 0.5), 1
             ),
-            "insert_commit_ms": round(self.insert_commit_ms, 1),
-            "release_ms": round(self.release_ms, 1),
-            "capture_ms": round(self.capture_ms, 1),
+            "insert_client_build_total_ms": round(self.insert_client_build_ms, 1),
+            "insert_commit_total_ms": round(self.insert_commit_ms, 1),
+            "release_total_ms": round(self.release_ms, 1),
+            "capture_total_ms": round(self.capture_ms, 1),
             "notify_count": self.notifies,
             "write_mode": _effective_tape_write_mode(),
-            "write_mode_fallbacks": sum(_write_mode_fallbacks.values()),
+            "write_mode_fallbacks_window": max(
+                0, sum(_write_mode_fallbacks.values()) - self.fallbacks_at_reset
+            ),
+            "write_mode_fallbacks_since_start": sum(
+                _write_mode_fallbacks.values()
+            ),
+            "commit_in_doubt_window": max(
+                0, _write_mode_commit_in_doubt - self.commit_in_doubt_at_reset
+            ),
             "pending_bound_drops": self.pending_bound_drops,
-            "override_reloads": int(_override_state.get("reloads", 0)),
+            "override_reloads_since_start": int(
+                _override_state.get("reloads", 0)
+            ),
         }
 
 
@@ -3123,15 +3379,19 @@ def _canonical_drain_metrics_body(
             report.get("oldest_pending_received_age_s", 0.0)
         ),
         "batches": int(report.get("batches", 0)),
+        "failed_batches": int(report.get("failed_batches", 0)),
         "events_per_s": float(report.get("events_per_s", 0.0)),
         "batch_p50_ms": float(report.get("batch_p50_ms", 0.0)),
         "batch_p90_ms": float(report.get("batch_p90_ms", 0.0)),
         "batch_max_ms": float(report.get("batch_max_ms", 0.0)),
         "insert_execute_p50_ms": float(report.get("insert_execute_p50_ms", 0.0)),
-        "release_ms": float(report.get("release_ms", 0.0)),
+        "release_total_ms": float(report.get("release_total_ms", 0.0)),
         "notify_count": int(report.get("notify_count", 0)),
         "write_mode": str(report.get("write_mode") or ""),
-        "write_mode_fallbacks": int(report.get("write_mode_fallbacks", 0)),
+        "write_mode_fallbacks_window": int(
+            report.get("write_mode_fallbacks_window", 0)
+        ),
+        "commit_in_doubt_window": int(report.get("commit_in_doubt_window", 0)),
         "pending_bound_drops": int(report.get("pending_bound_drops", 0)),
     }
     canonical = json.dumps(
@@ -4402,6 +4662,16 @@ def writer(
     drain_metrics = _DrainMetrics()
     drain_metrics_window_started = time.monotonic()
     drain_metrics_window_started_at = datetime.now(timezone.utc)
+    # SECOND accumulator for the DB rail.  The log line emits every
+    # IQFEED_DRAIN_METRICS_EVERY_S (10 s) and resets, but the heartbeat writer
+    # throttles on 60 s -- so resetting on the log cadence discarded five of
+    # every six windows before they could ever be persisted, and a backlog
+    # spike confined to those 50 seconds left NO trace in
+    # ``latest_iqfeed_drain_metrics``.  This one resets only when the receipt
+    # actually recorded, so the DB rail covers 100% of the run.
+    drain_receipt = _DrainMetrics()
+    drain_receipt_window_started = time.monotonic()
+    drain_receipt_window_started_at = drain_metrics_window_started_at
 
     def reconcile(*, allow_unwatch: bool, sticky: bool = False) -> None:
         nonlocal prior_causes, hot_symbols, capacity_pressure
@@ -4503,10 +4773,12 @@ def writer(
         batch_controller.max_bytes = IQFEED_DB_BATCH_MAX_BYTES
         batch_controller.rebind_ceiling(_batch_event_ceiling())
         if IQFEED_PENDING_MAX_EVENTS > 0:
-            drain_metrics.pending_bound_drops += _enforce_pending_bound(
+            _bound_drops = _enforce_pending_bound(
                 max_events=IQFEED_PENDING_MAX_EVENTS,
                 available_at=datetime.now(timezone.utc),
             )
+            drain_metrics.pending_bound_drops += _bound_drops
+            drain_receipt.pending_bound_drops += _bound_drops
         # CAPTURE-G3 FAST PATH: subscribe first-alert names IMMEDIATELY (short poll), additive to
         # the slow REFRESH_S set below — closes the ~2.7-min Gate-0 blind window. Runs BEFORE the
         # slow refresh so a fresh mover is watched within ~SUBSCRIBE_FAST_POLL_S of its first alert.
@@ -4697,14 +4969,15 @@ def writer(
                     )
                 # The batch WALL is what the consumer's received_age gate sees.
                 batch_controller.observe(_prof_total * 1000.0)
-                drain_metrics.observe(
-                    events=len(rows) + len(written_quotes),
-                    batch_ms=_prof_total * 1000.0,
-                    insert=insert_timings,
-                    release_ms=(_prof_t2 - _prof_t1) * 1000.0,
-                    capture_ms=(_prof_t3 - _prof_t2) * 1000.0,
-                    notifies=notify_count,
-                )
+                for _accumulator in (drain_metrics, drain_receipt):
+                    _accumulator.observe(
+                        events=len(rows) + len(written_quotes),
+                        batch_ms=_prof_total * 1000.0,
+                        insert=insert_timings,
+                        release_ms=(_prof_t2 - _prof_t1) * 1000.0,
+                        capture_ms=(_prof_t3 - _prof_t2) * 1000.0,
+                        notifies=notify_count,
+                    )
                 # Telemetry is queued only after release and capture publication.
                 # Its independent daemon writer can never stall this sole tape
                 # drain or delay PAPER's already-committed capture handoff.
@@ -4725,6 +4998,30 @@ def writer(
                         capture_accepted + capture_rejected,
                     )
             except Exception as e:
+                # A failed batch is the SLOWEST wall in the window; it must not
+                # be excluded from the p90 the acceptance gate reads.
+                _failed_batch_ms = (time.monotonic() - _prof_t0) * 1000.0
+                batch_controller.observe(_failed_batch_ms)
+                for _accumulator in (drain_metrics, drain_receipt):
+                    _accumulator.observe(
+                        events=0,
+                        batch_ms=_failed_batch_ms,
+                        insert={},
+                        release_ms=0.0,
+                        capture_ms=0.0,
+                        notifies=0,
+                        failed=True,
+                    )
+                if isinstance(e, _TapeCommitInDoubt):
+                    log.error(
+                        "IQFeed tape COMMIT is IN DOUBT for %d trade / %d BBO "
+                        "rows; the batch was NOT retried (a retry would "
+                        "duplicate rows that may already be committed). "
+                        "Coverage is gap-latched as unknown: %s",
+                        len(rows),
+                        len(nbbo_rows),
+                        e,
+                    )
                 failure_at = datetime.now(timezone.utc)
                 with _capture_handoff_lock:
                     handoff = _capture_handoff
@@ -4761,19 +5058,29 @@ def writer(
             _window_s = time.monotonic() - drain_metrics_window_started
             if _window_s >= IQFEED_DRAIN_METRICS_EVERY_S:
                 _window_ended_at = datetime.now(timezone.utc)
-                _report = _emit_drain_metrics(drain_metrics, window_s=_window_s)
+                _emit_drain_metrics(drain_metrics, window_s=_window_s)
+                drain_metrics.reset()
+                drain_metrics_window_started = time.monotonic()
+                drain_metrics_window_started_at = _window_ended_at
+                # The receipt covers everything since the LAST persisted row.
+                _receipt_recorded = False
                 try:
-                    _record_drain_metrics_heartbeat(
-                        _report,
-                        window_started_at=drain_metrics_window_started_at,
+                    _receipt_recorded = _record_drain_metrics_heartbeat(
+                        drain_receipt.report(
+                            window_s=(
+                                time.monotonic() - drain_receipt_window_started
+                            )
+                        ),
+                        window_started_at=drain_receipt_window_started_at,
                         window_ended_at=_window_ended_at,
                         connection_generation=connection_generation,
                     )
                 except Exception:
                     log.warning("drain-metrics heartbeat enqueue failed", exc_info=True)
-                drain_metrics.reset()
-                drain_metrics_window_started = time.monotonic()
-                drain_metrics_window_started_at = _window_ended_at
+                if _receipt_recorded:
+                    drain_receipt.reset()
+                    drain_receipt_window_started = time.monotonic()
+                    drain_receipt_window_started_at = _window_ended_at
         pending_backlog = _pending_write_backlog()
     _request_connection_stop(connection_generation, stop_event)
 
@@ -4800,6 +5107,70 @@ def _selftest_row(sequence: int) -> dict:
             f"iqfeed-bridge-selftest-source-frame-{sequence}".encode()
         ).hexdigest(),
     }
+
+
+def _verify_tape_write_mode() -> None:
+    """Prove the selected write mode BEFORE the provider socket opens.
+
+    ``--selftest`` is a human-invoked flag; the deployed launcher runs
+    ``iqfeed_trade_bridge.py --allow-uncaptured-diagnostic`` and nothing else,
+    so the first execution of the COPY path used to be the first live batch at
+    13:30Z.  A systematic defect (a column absent from ``_TRADE_INSERT_COLUMNS``
+    after a migration, a renamed tape sequence, a psycopg2 upgrade that stops
+    setting ``cursor.rowcount``) surfaced there as a WARNING plus a fallback on
+    every batch, at exactly the moment the seam exists to relieve.
+
+    Each chain link is exercised inside a transaction that is ALWAYS rolled
+    back, so nothing reaches the live tape and no ``available_at`` is stamped.
+    A failure of the SELECTED mode is terminal; a failure of a fallback link is
+    a WARNING, because the selected mode still works and refusing to launch
+    would be the worse outcome (the cmd wrapper respawns every 20 s).
+    """
+
+    mode = _effective_tape_write_mode()
+    chain = _WRITE_MODE_CHAIN[mode]
+    for index, attempt_mode in enumerate(chain):
+        # A POSITIVE sequence: _require_release_identity rejects <= 0, and the
+        # preflight must exercise the real inserter, not its validator.
+        row = _selftest_row(index + 1)
+        try:
+            with engine.connect() as connection:
+                transaction = connection.begin()
+                try:
+                    trade_row_ids, _quote_ids, _build, _execute = (
+                        _WRITE_MODE_INSERTERS[attempt_mode](
+                            connection,
+                            trade_rows=[row],
+                            quote_rows=[],
+                        )
+                    )
+                    if len(trade_row_ids) != 1:
+                        raise RuntimeError(
+                            f"{attempt_mode} returned {len(trade_row_ids)} row "
+                            "ids for a single-row preflight batch"
+                        )
+                finally:
+                    transaction.rollback()
+        except Exception as exc:
+            if index == 0:
+                raise RuntimeError(
+                    f"IQFeed tape write mode {attempt_mode!r} preflight failed "
+                    f"before the provider socket: {type(exc).__name__}: {exc}"
+                ) from exc
+            log.warning(
+                "IQFeed tape write-mode FALLBACK %s failed preflight (%s: %s); "
+                "the selected mode %s is healthy so the bridge continues",
+                attempt_mode,
+                type(exc).__name__,
+                exc,
+                mode,
+            )
+            continue
+    log.info(
+        "write-mode preflight ok: %s (chain %s), rolled back, tape untouched",
+        mode,
+        "->".join(chain),
+    )
 
 
 def _selftest() -> int:
@@ -5062,6 +5433,7 @@ def run_supervised(
     _require_supervised_capture_posture()
     _capture_bc("posture ok; BEGIN schema gate")
     _verify_bridge_schema()
+    _verify_tape_write_mode()
     _capture_bc("schema gate ok")
     if schema_ready_event is not None:
         schema_ready_event.set()
@@ -5110,6 +5482,7 @@ def main() -> None:
     if "--selftest" in sys.argv:
         sys.exit(_selftest())
     _verify_bridge_schema()
+    _verify_tape_write_mode()
     _require_standalone_capture_posture()
     forced = {a.upper() for a in sys.argv[1:] if not a.startswith("--") and not a.isdigit()}
     deadline = None

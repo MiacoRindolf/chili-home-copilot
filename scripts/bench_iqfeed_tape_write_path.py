@@ -30,6 +30,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import io
+import pathlib
 import random
 import statistics
 import sys
@@ -418,8 +419,154 @@ AUTHORITATIVE_BASIS = "iqfeed_q_receive_trade_reference_fenced"
 OWN_CLOCK_BASIS = "iqfeed_q_bid_ask_time_clock"
 
 
+def _load_bridge_module(dsn: str | None = None):
+    """Import the bridge for cross-checking, or return None if unavailable.
+
+    Importing it is side-effect-bearing (it builds a lazy engine from
+    ``DATABASE_URL``), so ``DATABASE_URL`` is pointed at the throwaway test DSN
+    for the duration.  Used only by ``--verify-parity``, never on the timing
+    path.
+    """
+
+    import importlib.util
+    import os
+
+    previous = os.environ.get("DATABASE_URL")
+    if dsn:
+        os.environ["DATABASE_URL"] = dsn
+    try:
+        return _load_bridge_module_unguarded()
+    finally:
+        if dsn:
+            if previous is None:
+                os.environ.pop("DATABASE_URL", None)
+            else:
+                os.environ["DATABASE_URL"] = previous
+
+
+def _load_bridge_module_unguarded():
+    import importlib.util
+
+    path = pathlib.Path(__file__).with_name("iqfeed_trade_bridge.py")
+    if not path.exists():
+        return None
+    spec = importlib.util.spec_from_file_location(
+        "_bench_iqfeed_trade_bridge", str(path)
+    )
+    if spec is None or spec.loader is None:
+        return None
+    module = importlib.util.module_from_spec(spec)
+    try:
+        spec.loader.exec_module(module)
+    except Exception as exc:  # pragma: no cover - environment dependent
+        print(f"  bridge import failed ({type(exc).__name__}: {exc})")
+        return None
+    return module
+
+
+_COPY_CELL_CORPUS = (
+    None,
+    True,
+    False,
+    0,
+    -1,
+    12345678901234,
+    0.0,
+    -0.0,
+    1.23,
+    1e-7,
+    1e21,
+    float("inf"),
+    "",
+    "AAPL",
+    "a\tb",
+    "a\nb",
+    "a\r\nb",
+    "back\\slash",
+    "\\N",
+    "mixed \\t\tliteral",
+    datetime(2026, 9, 2, 13, 30, 0, 123456),
+    datetime(2026, 9, 2, 13, 30, 0, 123456, tzinfo=timezone.utc),
+)
+
+
+def _verify_copy_cell_matches_bridge(bridge) -> bool:
+    """Prove the bench's cell renderer AGREES with the bridge's.
+
+    The two were kept independent on purpose, but nothing compared them -- so a
+    drift in the bridge's ``_copy_text_value`` (a Decimal price, a new
+    timestamptz column) would leave every parity arm green while the divergence
+    reached the live tape.
+    """
+
+    renderer = getattr(bridge, "_copy_text_value", None)
+    if not callable(renderer):
+        print("  copy-cell parity SKIPPED: bridge has no _copy_text_value")
+        return False
+    ok = True
+    for value in _COPY_CELL_CORPUS:
+        mine, theirs = _copy_cell(value), renderer(value)
+        if mine != theirs:
+            ok = False
+            print(
+                f"  COPY-CELL PARITY FAIL for {value!r}: "
+                f"bench={mine!r} bridge={theirs!r}"
+            )
+    print(f"  copy-cell parity vs bridge._copy_text_value: {'OK' if ok else 'FAILED'}")
+    return ok
+
+
+def _verify_notify_selection_matches_bridge(bridge) -> bool:
+    """Prove the bench's notify model AGREES with the shipped selector.
+
+    Exercised on a TRADE-PAIRED batch, which is the only shape
+    ``_enqueue_pending_frame`` permits, so rule 1 is actually under test.
+    """
+
+    selector = getattr(bridge, "_select_notify_rows", None)
+    if not callable(selector):
+        print("  notify parity SKIPPED: bridge has no _select_notify_rows")
+        return False
+    symbols = [f"N{i:03d}" for i in range(20)]
+    run_id = str(uuid.uuid4())
+    t0 = datetime.now(timezone.utc)
+    ok = True
+    for stride in (1, 2, 3, 10, 0):
+        quotes = _nbbo_rows(400, symbols, 5_000, run_id, 7, t0)
+        if stride:
+            paired = quotes[::stride]
+            trades = _rows(len(paired), symbols, 90_000, run_id, 7, t0)
+            for trade, quote in zip(trades, paired):
+                trade["source_frame_sequence"] = quote["source_frame_sequence"]
+                trade["sym"] = quote["sym"]
+        else:
+            trades = []
+        mine = select_notify_rows(quotes, trades, coalesce=True)
+        theirs = selector(quotes, trades, coalesce=True, max_age_s=0.0)
+        mine_keys = [
+            (r["connection_generation"], r["source_frame_sequence"], r["sym"])
+            for r in mine
+        ]
+        their_keys = [
+            (r["connection_generation"], r["source_frame_sequence"], r["sym"])
+            for r in theirs
+        ]
+        if mine_keys != their_keys:
+            ok = False
+            print(
+                f"  NOTIFY PARITY FAIL stride={stride}: "
+                f"bench kept {len(mine_keys)}, bridge kept {len(their_keys)}"
+            )
+        else:
+            print(
+                f"  notify parity stride={stride}: OK "
+                f"({len(quotes)} quotes -> {len(their_keys)} notifies)"
+            )
+    return ok
+
+
 def _copy_cell(value) -> str:
-    """Mirror of the bridge's ``_copy_text_value`` (kept independent on purpose)."""
+    """Mirror of the bridge's ``_copy_text_value``, cross-checked in parity."""
     if value is None:
         return "\\N"
     if isinstance(value, bool):
@@ -614,6 +761,7 @@ def run_drain0902(
     batches: int,
     seed_rows: int,
     json_out: str | None,
+    notify_print_stride: int = 1,
 ) -> dict:
     _require_test_db(dsn)
     random.seed(4242)
@@ -706,10 +854,31 @@ def run_drain0902(
         }
 
     # NOTIFY cost, isolated: the payload bytes committed per release batch.
-    quotes = _nbbo_rows(half, symbols, seq, run_id, 11, datetime.now(timezone.utc))
+    #
+    # The trade rows MUST share frame keys with the quote rows.  The bridge's
+    # ``_enqueue_pending_frame`` RAISES "IQFeed frame trade/quote identity
+    # mismatch" unless a frame's trade row and quote row carry the identical
+    # (connection_generation, source_frame_sequence), so in production every
+    # print enqueues its trade AND its provenance quote on ONE key -- and rule 1
+    # of the selector ("a quote whose frame key also produced a trade is ALWAYS
+    # notified") fires on all of them.  Generating the trades from a DISJOINT
+    # sequence range made rule 1 match zero rows and measured a naive
+    # newest-per-symbol model the shipped selector cannot produce: 200 payloads
+    # for 1,800 quotes instead of ~1,800.
+    _t0n = datetime.now(timezone.utc)
+    quotes = _nbbo_rows(half, symbols, seq, run_id, 11, _t0n)
+    # Pair every ``1/NOTIFY_PRINT_STRIDE``-th quote frame with a trade on the
+    # SAME key.  Measured on the live tape 2026-09-02: 68.4% of nbbo rows inside
+    # a sampled trade window are trade-paired, so stride 1 (every frame paired)
+    # is the conservative open-tape shape and what the default measures.
+    stride = max(1, int(notify_print_stride))
+    paired = quotes[::stride]
+    trades = _rows(len(paired), symbols, seq, run_id, 11, _t0n)
+    for trade, quote in zip(trades, paired):
+        # One frame is one symbol on one sequence -- mirror the real identity.
+        trade["source_frame_sequence"] = quote["source_frame_sequence"]
+        trade["sym"] = quote["sym"]
     seq += half
-    trades = _rows(half // 2, symbols, seq, run_id, 11, datetime.now(timezone.utc))
-    seq += half // 2
     available_at = datetime.now(timezone.utc)
     for notify_mode in notify_modes:
         if notify_mode == "none":
@@ -736,6 +905,8 @@ def run_drain0902(
         slru1 = _slru_notify_written(cur)
         conn.commit()
         results[f"notify:{notify_mode}"] = {
+            "quote_rows": len(quotes),
+            "trade_paired_quotes": len(paired),
             "payload_count": len(payloads),
             "distinct_symbols": len({r["sym"] for r in selected}),
             "payload_bytes": sum(len(p) for p in payloads),
@@ -805,25 +976,75 @@ _NBBO_COL_TYPES = {
 }
 
 
+def _verify_bridge_utc_pin_survives_the_pool(dsn: str) -> bool:
+    """The pin must hold on the SECOND checkout, not just the first.
+
+    A plain ``SET TIME ZONE`` inside psycopg2's implicit transaction is
+    TRANSACTIONAL, and SQLAlchemy's pool rolls back on checkin -- so a
+    connect-event-only pin reverted to the server default on every checkout
+    after the first, while a ``SHOW TimeZone`` read on the first checkout still
+    reported UTC.  This drives the real sequence: connect, check in (rollback),
+    check out again, and re-read.
+    """
+
+    engine = sa.create_engine(
+        dsn,
+        pool_pre_ping=True,
+        pool_size=1,
+        max_overflow=0,
+        connect_args={"options": "-c timezone=UTC"},
+    )
+    try:
+        observed = []
+        for _ in range(3):
+            with engine.connect() as connection:
+                connection.execute(sa.text("SELECT 1"))
+                connection.rollback()
+                observed.append(
+                    str(connection.execute(sa.text("SHOW TimeZone")).scalar())
+                )
+        ok = all(value.upper() in ("UTC", "ETC/UTC") for value in observed)
+        print(f"  bridge UTC pin across pool checkouts {observed}: {'OK' if ok else 'FAILED'}")
+        return ok
+    finally:
+        engine.dispose()
+
+
 def verify_parity(dsn: str, *, rows_n: int = 500, session_timezones=("UTC", "America/Los_Angeles")) -> bool:
     """Prove values / execute_values / copy land IDENTICAL bytes, under BOTH TZs.
 
-    The bridge pins ``SET TIME ZONE 'UTC'`` on every connection; this runs the
-    same pin under a non-UTC server default so the NAIVE nbbo ``at`` and the
-    aware trade clocks are proven to land the same way in all three paths.
+    The bridge pins UTC via the libpq ``-c timezone=UTC`` startup option; this
+    runs all three write paths under a genuinely non-UTC session so the NAIVE
+    nbbo ``at`` and the aware trade clocks are proven to land the same way.
+
+    The previous version set the non-UTC zone and then immediately overwrote it
+    with ``SET TIME ZONE 'UTC'`` on the same autocommit connection, so BOTH
+    loop iterations ran identical UTC sessions and the America/Los_Angeles case
+    proved nothing.  The session zone is now left alone: parity between the
+    three paths must hold under whatever zone the session is in, which is the
+    property that matters.
     """
     _require_test_db(dsn)
     random.seed(99)
     symbols = [f"P{i:03d}" for i in range(40)]
     run_id = str(uuid.uuid4())
     ok = True
+    ok = _verify_bridge_utc_pin_survives_the_pool(dsn) and ok
+    bridge = _load_bridge_module(dsn)
+    if bridge is not None:
+        ok = _verify_copy_cell_matches_bridge(bridge) and ok
+        ok = _verify_notify_selection_matches_bridge(bridge) and ok
     for session_tz in session_timezones:
         conn = psycopg2.connect(dsn, application_name="bench_iqfeed_parity")
         conn.autocommit = True
         cur = conn.cursor()
         cur.execute(f"SET TIME ZONE '{session_tz}'")
-        # ... then the bridge's own pin, exactly as the connect event does.
-        cur.execute("SET TIME ZONE 'UTC'")
+        observed_tz = None
+        cur.execute("SHOW TimeZone")
+        observed_tz = cur.fetchone()[0]
+        if observed_tz != session_tz:
+            ok = False
+            print(f"  PARITY SETUP FAIL: asked for {session_tz!r}, session is {observed_tz!r}")
         tables = {}
         for mode in ("values", "execute_values", "copy_prealloc"):
             for base, ddl in ((TABLE, DDL), (NBBO_TABLE, NBBO_DDL)):
@@ -834,9 +1055,14 @@ def verify_parity(dsn: str, *, rows_n: int = 500, session_timezones=("UTC", "Ame
         t0 = datetime.now(timezone.utc)
         trades = _rows(rows_n, symbols, 1, run_id, 1, t0)
         quotes = _nbbo_rows(rows_n, symbols, 10_000, run_id, 1, t0)
-        engine = sa.create_engine(dsn, pool_pre_ping=True)
-        sa.event.listens_for(engine, "connect")(
-            lambda dbapi, rec: dbapi.cursor().execute("SET TIME ZONE 'UTC'")
+        # All three arms must share ONE session zone, otherwise a naive value
+        # would legitimately resolve differently per path and the comparison
+        # would report a false divergence.  The bridge's own pin is proven
+        # separately by _verify_bridge_utc_pin_survives_the_pool below.
+        engine = sa.create_engine(
+            dsn,
+            pool_pre_ping=True,
+            connect_args={"options": f"-c timezone={session_tz}"},
         )
         conn.autocommit = False
         for base, columns, rows, tuple_fn, col_types in (
@@ -889,6 +1115,17 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--mode", default="values,execute_values,copy_prealloc")
     p.add_argument("--notify", default="all,coalesced,none")
     p.add_argument("--batch-events", type=int, default=3600)
+    p.add_argument(
+        "--notify-print-stride",
+        type=int,
+        default=1,
+        help=(
+            "pair every Nth quote frame with a trade on the SAME frame key "
+            "(1 = every frame, the conservative open-tape shape). Frames are "
+            "trade-paired in production, and rule 1 of the notify selector "
+            "always notifies those, so this is what sets the payload count."
+        ),
+    )
     p.add_argument("--verify-parity", action="store_true")
     p.add_argument("--json", dest="json_out", default=None)
     a = p.parse_args(argv)
@@ -903,6 +1140,7 @@ def main(argv: list[str] | None = None) -> int:
             batches=a.batches,
             seed_rows=a.seed_rows,
             json_out=a.json_out,
+            notify_print_stride=a.notify_print_stride,
         )
         return 0
     run(a.db, a.batch, a.batches, a.seed_rows, a.fillfactor)

@@ -128,15 +128,22 @@ _IQFEED_DRAIN_METRICS_META_KEYS = frozenset(
         "pending_quotes",
         "oldest_pending_received_age_s",
         "batches",
+        # A batch that exhausted the write chain is counted in ``batches`` and
+        # its (slowest) wall is inside the percentiles; this says how many of
+        # them there were.
+        "failed_batches",
         "events_per_s",
         "batch_p50_ms",
         "batch_p90_ms",
         "batch_max_ms",
         "insert_execute_p50_ms",
-        "release_ms",
+        # SUM over the receipt window, not a per-batch cost -- the name says so.
+        "release_total_ms",
         "notify_count",
         "write_mode",
-        "write_mode_fallbacks",
+        # Per-window DELTAS, so two consecutive receipts are diffable.
+        "write_mode_fallbacks_window",
+        "commit_in_doubt_window",
         "pending_bound_drops",
         "content_sha256",
     }
@@ -560,7 +567,7 @@ def _validated_iqfeed_drain_metrics_row(row: Any) -> dict[str, Any] | None:
         "batch_p90_ms",
         "batch_max_ms",
         "insert_execute_p50_ms",
-        "release_ms",
+        "release_total_ms",
     ):
         value = meta.get(key)
         if isinstance(value, bool) or not isinstance(value, (int, float)):
@@ -571,8 +578,10 @@ def _validated_iqfeed_drain_metrics_row(row: Any) -> dict[str, Any] | None:
         "pending_trades",
         "pending_quotes",
         "batches",
+        "failed_batches",
         "notify_count",
-        "write_mode_fallbacks",
+        "write_mode_fallbacks_window",
+        "commit_in_doubt_window",
         "pending_bound_drops",
         "connection_generation",
     ):

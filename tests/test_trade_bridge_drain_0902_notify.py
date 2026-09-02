@@ -159,6 +159,56 @@ def test_notify_age_filter_off_by_default_and_recommended_value_pins_authoritati
     ) == [stale]
 
 
+def test_notify_coalescing_removes_almost_nothing_on_a_trade_paired_batch():
+    """PIN THE HONEST NUMBER: rule 1 dominates the open, so the NOTIFY saving
+    is NOT where the PR body originally claimed it was.
+
+    ``_enqueue_pending_frame`` requires a frame's trade row and quote row to
+    carry the IDENTICAL (connection_generation, source_frame_sequence), so in
+    production every print contributes its provenance quote on the SAME key --
+    and rule 1 notifies every one of those unconditionally, because the
+    captured-PAPER trigger matches a notify against the captured exact-print
+    source by equal source_frame_sequence AND equal bid/ask.
+
+    Under backlog the drain additionally collapses cold quotes to one sample per
+    symbol (collapse_hot_quotes=True), so what reaches the selector is
+    (trade-frame quotes) + (at most one cold sample per symbol) -- the first set
+    is rule-1 exempt and the second has nothing left to coalesce with. Measured
+    on the live tape 2026-09-02: 68.4% of nbbo rows inside a sampled trade
+    window are trade-paired. Any future claim of a big NOTIFY saving at the open
+    has to break this test first.
+    """
+
+    # Fully trade-paired (the conservative open shape): reduction is ZERO.
+    quotes = [_quote(f"S{index:03d}", index + 1) for index in range(600)]
+    trades = [_trade(row["sym"], row["source_frame_sequence"]) for row in quotes]
+    selected = bridge._select_notify_rows(
+        quotes, trades, coalesce=True, max_age_s=0.0
+    )
+    assert len(selected) == len(quotes) == 600
+
+    # Half-paired: only the unpaired half can coalesce, and only across
+    # repeated symbols.
+    half_trades = trades[::2]
+    selected_half = bridge._select_notify_rows(
+        quotes, half_trades, coalesce=True, max_age_s=0.0
+    )
+    assert len(selected_half) == 600  # 600 distinct symbols -> still nothing
+
+    # The reduction only appears with REPEATED symbols on UNPAIRED frames --
+    # which is the healthy, no-backlog case the drain already handles.
+    repeated = [_quote("AAA", index + 1) for index in range(600)]
+    assert (
+        len(bridge._select_notify_rows(repeated, [], coalesce=True, max_age_s=0.0))
+        == 1
+    )
+    # ...and even one print inside that run is preserved verbatim.
+    with_print = bridge._select_notify_rows(
+        repeated, [_trade("AAA", 5)], coalesce=True, max_age_s=0.0
+    )
+    assert [row["source_frame_sequence"] for row in with_print] == [5, 600]
+
+
 def test_notify_coalesce_disabled_is_identity():
     rows = [_quote("AAA", 1), _quote("AAA", 2), _quote("AAA", 3)]
     assert bridge._select_notify_rows(

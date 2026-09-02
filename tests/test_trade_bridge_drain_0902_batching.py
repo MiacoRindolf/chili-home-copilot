@@ -22,6 +22,7 @@ import ast
 import hashlib
 import importlib.util
 import json
+import os
 import pathlib
 import sys
 import uuid
@@ -119,6 +120,22 @@ def test_release_batch_event_limit_shim_keeps_two_level_result_without_controlle
         )
         == bridge.DB_RELEASE_CATCHUP_BATCH_EVENTS
     )
+    # The non-adaptive branch must ALSO honour the hard ceiling. Without this
+    # the documented day-1 kill switch (raise the catch-up env for COPY, then
+    # IQFEED_DB_BATCH_ADAPTIVE=0) produced batches far above 3,600.
+    monkeypatch.setattr(bridge, "DB_RELEASE_CATCHUP_BATCH_EVENTS", 20_000)
+    monkeypatch.setattr(bridge, "_TAPE_SEQUENCES_RESOLVED", True)
+    monkeypatch.setattr(bridge, "IQFEED_TAPE_WRITE_MODE", "copy")
+    assert (
+        bridge._release_batch_event_limit(pending_backlog=True)
+        == bridge.BATCH_EVENT_HARD_CEILING
+    )
+    assert (
+        bridge._release_batch_event_limit(
+            pending_backlog=True, controller=controller
+        )
+        == bridge.BATCH_EVENT_HARD_CEILING
+    )
 
 
 def test_drain_respects_byte_bound_without_splitting_a_frame():
@@ -148,6 +165,8 @@ def test_pending_bound_drops_oldest_quote_only_frames_via_capture_gap_never_trad
         "_record_unreleased_capture_gap",
         lambda **kwargs: gaps.append(kwargs) or 1,
     )
+    # A bound may only drop what it can gap-latch, so the handoff must be bound.
+    monkeypatch.setattr(bridge, "_capture_handoff", object())
     # Frame 3 has a sibling TRADE, so it may never be dropped; frames 1 and 2
     # are quote-only and older.
     _seed(
@@ -166,15 +185,88 @@ def test_pending_bound_drops_oldest_quote_only_frames_via_capture_gap_never_trad
     with bridge._pending_lock:
         assert len(bridge._pending) == 1
         assert [row["sym"] for row in bridge._pending_nbbo] == ["BBB", "CCC"]
-    # A trade-sibling frame at the head blocks further drops even when the
-    # backlog is still over the bound -- a frame is never split.
+    # A trade-sibling frame at the head is SKIPPED, not a stop sign: the scan
+    # continues past it and drops the quote-only frames behind it, preserving
+    # order. Breaking here made the bound inert on any tape that has prints --
+    # i.e. every tape during a session.
     gaps.clear()
-    _seed([_row("CCC", 3)], [_row("CCC", 3), _row("DDD", 4)])
+    _seed(
+        [_row("CCC", 3)],
+        [_row("CCC", 3), _row("DDD", 4), _row("EEE", 5)],
+    )
+    assert bridge._enforce_pending_bound(max_events=2, available_at=_T0) == 2
+    assert [gap["symbol"] for gap in gaps] == ["DDD", "EEE"]
+    with bridge._pending_lock:
+        assert [row["sym"] for row in bridge._pending_nbbo] == ["CCC"]
+    # A tape made ENTIRELY of trade-paired frames still cannot be bounded -- and
+    # must not lose a single row trying.
+    gaps.clear()
+    _seed([_row("CCC", 3)], [_row("CCC", 3)])
     assert bridge._enforce_pending_bound(max_events=1, available_at=_T0) == 0
     assert gaps == []
+    with bridge._pending_lock:
+        assert [row["sym"] for row in bridge._pending_nbbo] == ["CCC"]
     # And nothing is dropped when the backlog is already inside the bound.
     assert bridge._enforce_pending_bound(max_events=99, available_at=_T0) == 0
     assert gaps == []
+    _seed([], [])
+
+
+def test_pending_bound_is_inert_when_the_capture_handoff_is_unbound(monkeypatch):
+    """Never trade unrecorded tape loss for a memory bound.
+
+    With the handoff unbound, ``_record_unreleased_capture_gap`` either only
+    logs (under --allow-uncaptured-diagnostic, which is exactly how production
+    launches) or RAISES from a call site outside the writer's try -- killing the
+    sole tape drain after the frames were already popped.
+    """
+
+    gaps: list[dict] = []
+    monkeypatch.setattr(
+        bridge,
+        "_record_unreleased_capture_gap",
+        lambda **kwargs: gaps.append(kwargs) or 1,
+    )
+    monkeypatch.setattr(bridge, "_capture_handoff", None)
+    _seed([], [_row("AAA", 1), _row("BBB", 2), _row("CCC", 3)])
+    assert bridge._enforce_pending_bound(max_events=1, available_at=_T0) == 0
+    assert gaps == []
+    with bridge._pending_lock:
+        assert len(bridge._pending_nbbo) == 3
+    _seed([], [])
+
+
+def test_pending_bound_skips_trade_paired_frames_and_binds_a_dense_tape(
+    monkeypatch,
+):
+    """The bound must bind on a realistic open tape, not only a print-free one.
+
+    Every 5th frame carries a trade (a conservative open-tape print density).
+    The old `break` returned after 4 drops on this shape; the bound is only
+    real if it walks past the paired frames.
+    """
+
+    monkeypatch.setattr(
+        bridge, "_record_unreleased_capture_gap", lambda **kwargs: 1
+    )
+    monkeypatch.setattr(bridge, "_capture_handoff", object())
+    trades = [_row(f"S{seq:03d}", seq) for seq in range(5, 1_001, 5)]
+    quotes = [_row(f"S{seq:03d}", seq) for seq in range(1, 1_001)]
+    _seed(trades, quotes)
+    before = len(trades) + len(quotes)
+    dropped = bridge._enforce_pending_bound(max_events=400, available_at=_T0)
+    with bridge._pending_lock:
+        after = len(bridge._pending) + len(bridge._pending_nbbo)
+        remaining_quotes = [
+            row["source_frame_sequence"] for row in bridge._pending_nbbo
+        ]
+    assert dropped == before - after
+    # Trades are never dropped, and every surviving quote is trade-paired, so
+    # the floor is 200 trades + 200 paired quotes = 400 -- the bound exactly.
+    assert after == 400
+    assert all(seq % 5 == 0 for seq in remaining_quotes)
+    # Order is preserved across the skips.
+    assert remaining_quotes == sorted(remaining_quotes)
     _seed([], [])
 
 
@@ -233,16 +325,118 @@ def test_overrides_file_hot_reload_whitelist_logs_and_ignores_malformed(
         assert bridge._reload_overrides(str(path)) == 0
     assert bridge.IQFEED_TAPE_WRITE_MODE == "execute_values"
 
-    # A rejected value never lands.
+    # A rejected value never lands -- the key is PRESENT, so it keeps its last
+    # good value rather than reverting. The two keys that DISAPPEARED from the
+    # document do revert to baseline, which is the 2 changes reported here.
     path.write_text(json.dumps({"IQFEED_TAPE_WRITE_MODE": "sqlite"}), encoding="utf-8")
-    assert bridge._reload_overrides(str(path)) == 0
+    assert bridge._reload_overrides(str(path)) == 2
     assert bridge.IQFEED_TAPE_WRITE_MODE == "execute_values"
+    assert bridge.IQFEED_NOTIFY_COALESCE_PER_SYMBOL is True
+    assert bridge.IQFEED_PENDING_MAX_EVENTS == 0
+
+
+def test_overrides_revert_to_baseline_when_a_key_or_the_file_is_removed(
+    tmp_path, monkeypatch
+):
+    """The kill switch must be TWO-way.
+
+    IQFEED_NOTIFY_MAX_AGE_S is the one knob documented as dangerous (it silences
+    the age-gate-less iqfeed_wake_listener). An operator who enables it during a
+    backlog incident and then reverts the natural way -- delete the file -- kept
+    the quiet-tape wake rail silenced for the life of the process, and there is
+    no scheduled bridge restart.
+    """
+
+    path = tmp_path / "bridge_overrides.json"
+    monkeypatch.setattr(bridge, "IQFEED_NOTIFY_MAX_AGE_S", 0.0)
+    monkeypatch.setattr(bridge, "IQFEED_NOTIFY_COALESCE_PER_SYMBOL", True)
+    monkeypatch.setattr(bridge, "IQFEED_PENDING_MAX_EVENTS", 0)
+    monkeypatch.setattr(bridge, "_override_state", {"mtime_ns": None, "reloads": 0})
+    monkeypatch.setattr(
+        bridge,
+        "_OVERRIDE_BASELINE",
+        {
+            "IQFEED_NOTIFY_MAX_AGE_S": 0.0,
+            "IQFEED_NOTIFY_COALESCE_PER_SYMBOL": True,
+            "IQFEED_PENDING_MAX_EVENTS": 0,
+        },
+    )
+
+    path.write_text(
+        json.dumps(
+            {
+                "IQFEED_NOTIFY_MAX_AGE_S": 2.0,
+                "IQFEED_NOTIFY_COALESCE_PER_SYMBOL": 0,
+            }
+        ),
+        encoding="utf-8",
+    )
+    assert bridge._reload_overrides(str(path)) == 2
+    assert bridge.IQFEED_NOTIFY_MAX_AGE_S == 2.0
+    assert bridge.IQFEED_NOTIFY_COALESCE_PER_SYMBOL is False
+
+    # A key that DISAPPEARS from the document reverts to the baseline.
+    path.write_text(
+        json.dumps({"IQFEED_NOTIFY_MAX_AGE_S": 2.0}), encoding="utf-8"
+    )
+    os.utime(path, ns=(0, 1_000_000_000))
+    assert bridge._reload_overrides(str(path)) == 1
+    assert bridge.IQFEED_NOTIFY_MAX_AGE_S == 2.0
+    assert bridge.IQFEED_NOTIFY_COALESCE_PER_SYMBOL is True
+
+    # An emptied document is a FULL revert.
+    path.write_text("{}", encoding="utf-8")
+    os.utime(path, ns=(0, 2_000_000_000))
+    assert bridge._reload_overrides(str(path)) == 1
+    assert bridge.IQFEED_NOTIFY_MAX_AGE_S == 0.0
+
+    # ...and so is deleting the file.
+    path.write_text(
+        json.dumps({"IQFEED_PENDING_MAX_EVENTS": 250_000}), encoding="utf-8"
+    )
+    os.utime(path, ns=(0, 3_000_000_000))
+    assert bridge._reload_overrides(str(path)) == 1
+    assert bridge.IQFEED_PENDING_MAX_EVENTS == 250_000
+    path.unlink()
+    assert bridge._reload_overrides(str(path)) == 1
+    assert bridge.IQFEED_PENDING_MAX_EVENTS == 0
+    # A file that never existed is still a no-op.
+    assert bridge._reload_overrides(str(path)) == 0
+
+
+def test_hot_write_mode_override_keeps_the_attested_capture_config_truthful(
+    tmp_path, monkeypatch
+):
+    path = tmp_path / "bridge_overrides.json"
+    monkeypatch.setattr(bridge, "IQFEED_TAPE_WRITE_MODE", "copy")
+    monkeypatch.setattr(bridge, "_override_state", {"mtime_ns": None, "reloads": 0})
+    monkeypatch.setattr(
+        bridge, "_OVERRIDE_BASELINE", {"IQFEED_TAPE_WRITE_MODE": "copy"}
+    )
+    bridge.BRIDGE_CAPTURE_CONFIGURATION["tape_write_mode"] = "copy"
+    before_sha = bridge._capture_configuration_sha256()
+
+    path.write_text(
+        json.dumps({"IQFEED_TAPE_WRITE_MODE": "execute_values"}), encoding="utf-8"
+    )
+    assert bridge._reload_overrides(str(path)) == 1
+    assert bridge.BRIDGE_CAPTURE_CONFIGURATION["tape_write_mode"] == "execute_values"
+    assert bridge.BRIDGE_CAPTURE_CONFIGURATION_SHA256 != before_sha
+    assert bridge.BRIDGE_CAPTURE_CONFIGURATION_SHA256 == (
+        bridge._capture_configuration_sha256()
+    )
+
+    path.unlink()
+    assert bridge._reload_overrides(str(path)) == 1
+    assert bridge.BRIDGE_CAPTURE_CONFIGURATION["tape_write_mode"] == "copy"
+    assert bridge.BRIDGE_CAPTURE_CONFIGURATION_SHA256 == before_sha
 
 
 def test_drain_metrics_report_insert_split_and_oldest_pending_age(monkeypatch):
     monkeypatch.setattr(bridge, "_TAPE_SEQUENCES_RESOLVED", True)
     monkeypatch.setattr(bridge, "IQFEED_TAPE_WRITE_MODE", "copy")
     monkeypatch.setattr(bridge, "_write_mode_fallbacks", {"values": 2})
+    monkeypatch.setattr(bridge, "_write_mode_commit_in_doubt", 0)
     _seed([_row("AAA", 1, age_s=9.0)], [_row("BBB", 2, age_s=1.0)])
     metrics = bridge._DrainMetrics()
     for batch_ms, execute_ms in ((400.0, 120.0), (1_200.0, 800.0), (500.0, 150.0)):
@@ -264,14 +458,43 @@ def test_drain_metrics_report_insert_split_and_oldest_pending_age(monkeypatch):
     assert report["batch_p50_ms"] == 500.0
     assert report["batch_max_ms"] == 1200.0
     assert report["insert_execute_p50_ms"] == 150.0
-    assert report["insert_client_build_ms"] == 60.0
+    # SUMS carry a _total_ms name so they cannot be read as per-batch costs.
+    assert report["insert_client_build_total_ms"] == 60.0
+    assert report["release_total_ms"] == 300.0
     assert report["notify_count"] == 540
     assert report["write_mode"] == "copy"
-    assert report["write_mode_fallbacks"] == 2
+    # The window DELTA is 0 (all 2 fallbacks predate the window); the lifetime
+    # total says 2, and the names distinguish them.
+    assert report["write_mode_fallbacks_window"] == 0
+    assert report["write_mode_fallbacks_since_start"] == 2
+    assert report["commit_in_doubt_window"] == 0
+    assert report["failed_batches"] == 0
     assert report["pending_trades"] == 1 and report["pending_quotes"] == 1
     assert report["oldest_pending_received_age_s"] >= 9.0
+
+    # A fallback INSIDE the window shows up as a window delta.
+    bridge._write_mode_fallbacks["values"] = 5
+    assert metrics.report(window_s=10.0)["write_mode_fallbacks_window"] == 3
+
+    # A batch that exhausted the write chain is the SLOWEST wall in the window
+    # and must be inside the percentile the acceptance gate reads.
+    metrics.observe(
+        events=0,
+        batch_ms=9_000.0,
+        insert={},
+        release_ms=0.0,
+        capture_ms=0.0,
+        notifies=0,
+        failed=True,
+    )
+    failed_report = metrics.report(window_s=10.0)
+    assert failed_report["batches"] == 4
+    assert failed_report["failed_batches"] == 1
+    assert failed_report["batch_max_ms"] == 9_000.0
+
     metrics.reset()
     assert metrics.report(window_s=10.0)["batches"] == 0
+    assert metrics.report(window_s=10.0)["write_mode_fallbacks_window"] == 0
     _seed([], [])
 
 
@@ -387,8 +610,17 @@ def test_drain_metrics_job_type_has_own_keyset_and_lane_health_parses_it(monkeyp
     extra["surprise"] = 1
     assert lane_health._validated_iqfeed_drain_metrics_row(_Row(extra)) is None
     missing = dict(body)
-    missing.pop("release_ms")
+    missing.pop("release_total_ms")
     assert lane_health._validated_iqfeed_drain_metrics_row(_Row(missing)) is None
+    # The receipt carries per-window DELTAS, so two consecutive rows are
+    # diffable; a lifetime total under a bare name was not.
+    assert body["write_mode_fallbacks_window"] == 0
+    assert body["commit_in_doubt_window"] == 0
+    assert body["failed_batches"] == 0
+    # ...and a v1 body (the pre-rename key set) is refused outright.
+    legacy = dict(body)
+    legacy["release_ms"] = legacy.pop("release_total_ms")
+    assert lane_health._validated_iqfeed_drain_metrics_row(_Row(legacy)) is None
     # And the exact-print parser must NOT accept it.
     assert lane_health._validated_exact_iqfeed_print_row(_Row(body)) is None
 

@@ -15,6 +15,6 @@ IQFEED_EXACT_PRINT_HEARTBEAT_SCOPE = "committed_exact_print_release"
 # OLDEST UNWRITTEN arrival, which no committed-row receipt can express -- gets
 # its own job type and its own frozen key set instead.
 JOB_IQFEED_DRAIN_METRICS_HEARTBEAT = "iqfeed_drain_metrics_heartbeat"
-IQFEED_DRAIN_METRICS_HEARTBEAT_SCHEMA = "iqfeed_drain_metrics_heartbeat_v1"
+IQFEED_DRAIN_METRICS_HEARTBEAT_SCHEMA = "iqfeed_drain_metrics_heartbeat_v2"
 IQFEED_DRAIN_METRICS_HEARTBEAT_SCOPE = "writer_drain_window"
 JOB_BRAIN_MARKET_SNAPSHOTS = "brain_market_snapshots"
