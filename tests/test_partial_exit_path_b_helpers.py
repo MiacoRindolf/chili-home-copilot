@@ -45,21 +45,67 @@ def test_terminal_and_naked_risk_are_disjoint():
 
 
 def test_every_naked_risk_phase_can_reach_a_restore_or_a_flatten():
-    remedies = {
-        "restore_intent_frozen",
-        "restore_replace_submitted",
-        "restore_indeterminate",
-        "restore_certified",
-        "flatten_queued",
-        "flattened",
-    }
+    """ANG INVARIANT NG R4, bilang ABOT at hindi KATABI.
+
+    Ang revision 2 ay tumingin lamang sa TUWIRANG target. Mahina iyon: ang
+    `successor_certified` ay hubad (f na share, walang stop, wala pang partial)
+    pero ang restore nito ay dumadaan muna sa `post_deferred`, kaya ang
+    tuwirang tseke ay babagsak sa isang graph na TAMA naman. Ang tamang tanong
+    ay kung ABOT ba ang remedyo.
+    """
     for phase in sorted(pb.NAKED_RISK_PHASES):
         targets = pb.LEGAL_TRANSITIONS[phase]
         assert targets, f"{phase} ay naked pero walang labasan"
-        assert targets & remedies, (
-            f"{phase} ay naked pero walang landas patungo sa restore o flatten: "
-            f"{sorted(targets)}"
+        reach = pb.reachable_phases(phase)
+        assert reach & pb.REMEDY_PHASES, (
+            f"{phase} ay naked pero walang ABOT na restore o flatten: "
+            f"abot={sorted(reach)}"
         )
+
+
+def test_the_normal_path_b_window_is_flagged_naked_by_both_artifacts():
+    """ANG DEPEKTO NG REVISION 2, na may eksaktong hugis ng S4.
+
+    Inayos ng revision 2 ang `assess_protection` para tumigil sa pagbibilang ng
+    nakaupong upside limit bilang proteksyon — pero hindi iyon naipasa sa
+    `NAKED_RISK_PHASES`. Dalawang naipadalang artifact ang nagkasalungat
+    tungkol sa MISMONG window na binabayaran ng PATH B: sinasabi ng checker na
+    `naked_downside=106`, sinasabi ng phase set na hindi ito hubad. Ang phase
+    set ang tinitingnan ng isang wiring para malaman kung may utang itong
+    remedyo, kaya lalaktawan nito ang buong normal na window.
+
+    Ang test na ito ang nag-uugnay sa dalawa: kung sasabihin ng checker na
+    hubad ang isang estado, dapat nakabandera rin ang phase nito.
+    """
+    window = {
+        # phase                    broker,  stop, bukas na partial
+        "successor_certified":   (355.0, 249.0,   0.0),
+        "post_deferred":         (355.0, 249.0,   0.0),
+        "partial_posting":       (355.0, 249.0, 106.0),
+        "partial_posted":        (355.0, 249.0, 106.0),
+        "partial_indeterminate": (355.0, 249.0, 106.0),
+    }
+    for phase, (broker, stop, partial) in sorted(window.items()):
+        verdict = pb.assess_protection(
+            broker_qty=broker, stop_qty=stop, open_partial_qty=partial
+        )
+        assert verdict.status == "naked_downside", phase
+        assert verdict.naked_downside_qty == pytest.approx(106.0), phase
+        assert phase in pb.NAKED_RISK_PHASES, (
+            f"{phase}: sinasabi ng checker na {verdict.naked_downside_qty} na "
+            f"share ang walang pababang stop, pero hindi ito nasa "
+            f"NAKED_RISK_PHASES — iyon ang set na titingnan ng wiring"
+        )
+
+
+def test_partial_filled_is_the_first_phase_that_is_covered_again():
+    """Ang hangganan sa kabilang dulo. Matapos mapunan ang f ay Q - f = R ang
+    hawak at R ang stop, kaya ang `partial_filled` ay TAPOS at HINDI hubad."""
+    assert pb.assess_protection(
+        broker_qty=249.0, stop_qty=249.0, open_partial_qty=0.0
+    ).ok is True
+    assert "partial_filled" not in pb.NAKED_RISK_PHASES
+    assert "partial_filled" in pb.TERMINAL_PHASES
 
 
 def test_whole_exit_blocking_and_naked_risk_are_disjoint():
@@ -91,10 +137,55 @@ def test_consumed_by_exit_is_reachable_from_every_unblocked_open_phase():
     for phase in sorted(pb.PHASES):
         if phase in pb.TERMINAL_PHASES or phase in pb.WHOLE_EXIT_BLOCKING_PHASES:
             continue
-        if phase in {"replace_stuck", "containment_queued"}:
-            # dito ay may hiwalay na containment lineage; may sariling terminal.
+        if phase in pb.EXIT_CONSUMPTION_UNRECORDABLE_PHASES:
             continue
         assert "consumed_by_exit" in pb.LEGAL_TRANSITIONS[phase], phase
+
+
+def test_the_two_exit_consumption_exceptions_are_named_and_still_serviced():
+    """Ang exception sa nauunang panuntunan ay dapat PINANGALANAN, hindi isang
+    tahimik na `continue` sa isang test.
+
+    Ang naipadalang test ng revision 2 ay naglaktaw ng `replace_stuck` at
+    `containment_queued` sa loob ng test body, samantalang iginigiit ng
+    docstring ng module at ng §3.2 ng disenyo na UNIBERSAL ang panuntunan. Ang
+    isang panuntunang may hindi naitalang exception ay hindi panuntunan.
+
+    Ang dahilan ng exception ay pangkaligtasan: sa dalawang phase na iyon ay
+    may nakaupong broker order na hindi natin alam kung kanino. Ang
+    `consumed_by_exit` ay TERMINAL, kaya ang pagpayag nito ay titigil sa
+    pag-service habang may hindi kilalang order sa broker — ang hugis ng
+    ghost/zombie na order. Kaya may sariling invariant ang exception: ang mga
+    phase na ito ay dapat manatiling may service step, at may tahasang labasan
+    ng operator.
+    """
+    assert pb.EXIT_CONSUMPTION_UNRECORDABLE_PHASES == frozenset({
+        "replace_stuck", "containment_queued",
+    })
+    for phase in sorted(pb.EXIT_CONSUMPTION_UNRECORDABLE_PHASES):
+        assert phase not in pb.TERMINAL_PHASES, phase
+        assert pb.LEGAL_TRANSITIONS[phase], f"{phase} ay patay na kalsada"
+        assert "abandoned" in pb.LEGAL_TRANSITIONS[phase], phase
+        # at hindi sila hubad, kaya walang remedyo silang inuutang
+        assert phase not in pb.NAKED_RISK_PHASES, phase
+
+
+def test_no_open_phase_is_a_dead_end():
+    """Walang non-terminal na phase ang puwedeng walang labasan — iyon ay
+    tahimik na wedge, at ang wedge ang buong aral ng L2."""
+    for phase in sorted(pb.PHASES):
+        if phase in pb.TERMINAL_PHASES:
+            continue
+        assert pb.LEGAL_TRANSITIONS[phase], f"{phase} ay bukas pero walang labasan"
+
+
+def test_every_open_phase_can_reach_some_terminal():
+    """At bawat bukas na phase ay may abot na katapusan; walang cycle na
+    walang labasan."""
+    for phase in sorted(pb.PHASES):
+        if phase in pb.TERMINAL_PHASES:
+            continue
+        assert pb.reachable_phases(phase) & pb.TERMINAL_PHASES, phase
 
 
 def test_certified_cannot_escalate_to_replace_stuck():

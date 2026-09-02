@@ -1,10 +1,17 @@
 # PATH B — partial exit under a resting full-qty deadman stop (Alpaca)
 
-**Status: DESIGN ONLY, REVISION 2. The wiring is deferred. This PR ships the
+**Status: DESIGN ONLY, REVISION 3. The wiring is deferred. This PR ships the
 design, the pure helpers, and three guard test files.
 `venue/alpaca_spot.py::replace_order_qty` still has ZERO production callers and
 that is asserted by `tests/test_partial_exit_path_b_unwired.py` — which, in
 revision 1, scanned zero files and therefore asserted nothing (see §6).**
+
+Revision 2 answered the 18 amendments of the second adversarial round (§7).
+Revision 3 is a self-audit of revision 2 that found three more defects of the
+same class — a fix applied to one artifact but not its twin — the largest being
+that the S4 correction never reached `NAKED_RISK_PHASES`, so the phase set and
+the protection checker disagreed about the entire normal PATH B window. See
+§3.2 and §7.1.
 
 Base: `origin/main` 7e6b873. LR = `app/services/trading/momentum_neural/live_runner.py`,
 AOC = `.../alpaca_orphan_claims.py`, AS = `app/services/trading/venue/alpaca_spot.py`.
@@ -207,20 +214,55 @@ restore_intent_frozen -> restore_replace_submitted | restore_indeterminate
 any NAKED phase   -> flatten_queued -> flattened(T)
 replace_stuck (PRE-certification only) -> containment_queued
                       -> containment_resolved(T) | replace_reverted(T) | abandoned(T)
-consumed_by_exit(T)  reachable from every phase where the whole exit is not blocked
+consumed_by_exit(T)  reachable from every phase where the whole exit is not
+                     blocked, EXCEPT the two named in
+                     EXIT_CONSUMPTION_UNRECORDABLE_PHASES (see below)
 ```
 
-Three sets, and they are **not** the same set — conflating them was S7/L2:
+Four sets, and they are **not** the same set — conflating the first three was
+S7/L2:
 
 * `TERMINAL_PHASES` — no service step is owed. `is_in_flight(phase)` is exactly
   "not terminal".
-* `NAKED_RISK_PHASES` — part of the position has no resting **stop**. Every one
-  of them has at least one legal successor leading to a restore or a flatten,
-  and `TERMINAL ∩ NAKED_RISK == ∅` (unit-tested).
+* `NAKED_RISK_PHASES` — part of the position has no resting **downside stop**.
+  From every one of them a `REMEDY_PHASE` (restore or flatten) is **reachable**
+  — reachable, not adjacent (`reachable_phases`) — and
+  `TERMINAL ∩ NAKED_RISK == ∅` (unit-tested).
 * `WHOLE_EXIT_BLOCKING_PHASES` = `{intent_frozen, replace_submitted,
   replace_indeterminate}` — the only phases where the stop's **owner** is
   genuinely ambiguous. `WHOLE_EXIT_BLOCKING ∩ NAKED_RISK == ∅` (unit-tested):
   no phase may report a naked remainder and block the flatten that covers it.
+* `EXIT_CONSUMPTION_UNRECORDABLE_PHASES` = `{replace_stuck,
+  containment_queued}` — the named exception to the `consumed_by_exit` rule.
+  There a broker order of **unknown ownership** rests; `consumed_by_exit` is
+  terminal, so allowing it would stop servicing while that order is still
+  live (the ghost/zombie-order shape). The containment lineage must keep
+  running even after an operator has flattened the position, because the
+  *order* is the remaining problem, not the position. The exception carries its
+  own invariant: both phases stay serviced (non-empty transitions), both keep
+  an explicit `-> abandoned` operator route, and neither is naked.
+
+**Revision 3 — `NAKED_RISK_PHASES` re-derived (this was revision 2's largest
+surviving defect, and it had S4's exact shape).** Revision 2 fixed
+`assess_protection` so it no longer counts the resting upside limit as
+protection, but never propagated that to the phase set. The two shipped
+artifacts then contradicted each other about the very window PATH B buys:
+
+```
+assess_protection(broker_qty=355, stop_qty=249, open_partial_qty=106)
+    -> status="naked_downside", naked_downside_qty=106
+"partial_posted" in NAKED_RISK_PHASES      -> False        (revision 2)
+```
+
+§4/D1 already stated the truth — "from certification until the partial is
+terminal … `f` shares carry NO downside stop" — and that span is five phases,
+none of which was flagged: `successor_certified` and `post_deferred` (full `Q`
+held, `R` stopped, nothing posted: `f` naked with no resting sell at all), and
+`partial_posting` / `partial_posted` / `partial_indeterminate` (`f` has a sell
+limit, but *above* the market). The phase set is the only thing a wiring
+consults to know whether a remedy is owed, so as written it would have skipped
+the remedy across the entire normal window. Both are now flagged, and a test
+ties the checker to the set so they cannot drift apart again.
 
 The table, `advance_phase`, and the predicates live in
 `app/services/trading/momentum_neural/path_b_partial.py`, **not imported by
@@ -546,6 +588,10 @@ not confined to failure branches:
 > leaves `f - k` shares naked until a restore edge certifies or the flatten
 > lands — bounded by one lease window (30 s) plus the flatten's own round trip.
 
+Revision 3 makes the code say this too: all five phases of that span are now in
+`NAKED_RISK_PHASES` (§3.2, §7.1/N1). Revision 2 stated the exposure here in
+prose while its own phase set denied it.
+
 That is a real, irreducible weakening of the deadman guarantee, and it is the
 guarantee the deadman exists to provide. **This is the number the operator must
 accept in writing**, and it is much larger than revision 1's "naked ≤ 30 s".
@@ -621,7 +667,7 @@ partial flattens a runner.
 
 ## 6. What this PR ships
 
-* This document (revision 2).
+* This document (revision 3).
 * `app/services/trading/momentum_neural/path_b_partial.py` — pure, no-I/O.
   Revision 2 changes: `blocks_whole_exit` is no longer `is_in_flight` and takes
   an age, a ceiling and an override; `assess_protection` no longer counts an
@@ -631,6 +677,11 @@ partial flattens a runner.
   `post_deferred` exist so the mandated remedies are recordable;
   `plan_replacement_edge` takes `predecessor_filled_size`;
   `marker_successor_envelope` is new. **Not imported by `live_runner`.**
+  Revision 3 changes: `NAKED_RISK_PHASES` re-derived from the corrected checker
+  (the five normal-window phases added — §3.2); `reachable_phases` and
+  `REMEDY_PHASES` are new, so the R4 invariant is *reachability* rather than
+  adjacency; `EXIT_CONSUMPTION_UNRECORDABLE_PHASES` names the one exception
+  that revision 2 hid inside a test body.
 * `tests/test_partial_exit_path_b_helpers.py` — unit tests, written as
   invariants (`TERMINAL ∩ NAKED_RISK == ∅`, `WHOLE_EXIT_BLOCKING ∩ NAKED_RISK == ∅`,
   every naked phase has a remedy, the CANF steady state is
@@ -672,3 +723,22 @@ No production code path changes. The burst site is untouched.
 | R1-4 | separate `_service_path_b_stuck_replace`; `close_shape` is not the fix | §3.9 | specified + source-guarded |
 | R1-5 | reachable restore from every naked phase; recordable `consumed_by_exit`; `replace_stuck -> abandoned` | §3.2, §3.8 | **done in code** |
 | R1-6 | restate §4 | §4 (D0) | **done** |
+
+### 7.1 Revision 3 — self-audit of revision 2
+
+No third refuter ran; these came from auditing revision 2's shipped artifacts
+against each other. All three have the shape the previous rounds kept finding:
+a fix landed in one artifact and not in its twin, or an invariant was stated
+universally and exempted quietly.
+
+| # | finding | fix | status |
+|---|---|---|---|
+| N1 | the S4 fix reached `assess_protection` but not `NAKED_RISK_PHASES`; the checker calls the whole normal window `naked_downside=106` while the phase set called it safe — and the phase set is what a wiring consults | five phases added; a test asserts checker and set agree | **done in code** |
+| N2 | `consumed_by_exit` was claimed reachable from every unblocked phase (§3.2, module docstring) while the test skipped `replace_stuck` / `containment_queued` with an inline `continue` | `EXIT_CONSUMPTION_UNRECORDABLE_PHASES`, with a stated rationale and its own invariant (still serviced, `-> abandoned`, not naked) | **done in code** |
+| N3 | the R4 remedy invariant checked only *direct* targets, too weak to survive N1 (`successor_certified` restores via `post_deferred`) | `reachable_phases` + `REMEDY_PHASES`; the invariant is now reachability | **done in code** |
+
+Both N1 and N3 were negative-controlled: the new tests fail against revision 2's
+sets (N1 misses five phases; the adjacency check fails for four phases that
+reachability passes). N1 does **not** change D1's conclusion — it makes the
+code agree with what D1 already said in prose, which strengthens the case that
+the wiring stays deferred until the operator accepts that exposure in writing.

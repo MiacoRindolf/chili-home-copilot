@@ -36,6 +36,28 @@ UNANG bersyon ng file na ito. Ang apat na pinakamahalagang pagbabago dito:
      `_ACTIVE_ALPACA_PROTECTIVE_LIFECYCLES` (LR:9200-9207), kaya ang PATCH sa
      isang bahagyang napunang stop ay muling nag-aawtorisa ng share na naibenta na.
 
+IKATLONG PASADA (2026-09-02). Isang pag-audit ng revision 2 laban sa sarili
+nitong mga artifact ang nakakita ng natirang depekto na may EKSAKTONG hugis ng
+S4: ang pag-aayos ay napunta sa `assess_protection` pero HINDI sa
+`NAKED_RISK_PHASES`. Ang buong NORMAL na window ng PATH B
+(`successor_certified` -> `partial_posted`) ay iniuulat ng naipadalang checker
+bilang `naked_downside=106` habang sinasabi ng naipadalang phase set na hindi
+ito hubad — at ang set na iyon ang tanging bagay na titingnan ng isang wiring
+para malaman kung may utang itong remedyo. Tatlong pagbabago:
+
+  5. `NAKED_RISK_PHASES` ay muling hinango mula sa naitamang checker: kasama na
+     ang limang phase ng normal na window. Hindi na magkasalungat ang dalawang
+     artifact, at may test na nag-uugnay sa kanila para hindi na sila
+     mag-drift muli.
+  6. Ang invariant ng R4 ay ABOT (`reachable_phases`) at hindi na KATABI. Ang
+     tuwirang tseke ng revision 2 ay hindi kayang saklawin ang
+     `successor_certified`, na ang restore ay dumadaan muna sa `post_deferred`.
+  7. Ang tahimik na `continue` para sa `replace_stuck` / `containment_queued`
+     sa test ng `consumed_by_exit` ay pinalitan ng PINANGALANANG
+     `EXIT_CONSUMPTION_UNRECORDABLE_PHASES` na may sariling dahilan at sariling
+     invariant. Ang naipadalang docstring at ang naipadalang test ay
+     magkasalungat noon tungkol sa pagiging unibersal ng panuntunan.
+
 BAKIT PURO. Ang mga bagay na kaya nating patunayan nang WALANG DB at WALANG
 broker ay: (a) legal ba ang isang phase transition, (b) legal ba ang hati ng
 qty, (c) protektado pa ba ang natitirang posisyon, (d) tama ba ang envelope na
@@ -54,9 +76,12 @@ __all__ = [
     "PHASES",
     "TERMINAL_PHASES",
     "NAKED_RISK_PHASES",
+    "REMEDY_PHASES",
     "WHOLE_EXIT_BLOCKING_PHASES",
     "SIBLING_LIVE_PHASES",
+    "EXIT_CONSUMPTION_UNRECORDABLE_PHASES",
     "LEGAL_TRANSITIONS",
+    "reachable_phases",
     "WHOLE_EXIT_BLOCK_CEILING_SECONDS",
     "MARKER_UNRESOLVED_CEILING_SECONDS",
     "PhaseError",
@@ -133,10 +158,47 @@ TERMINAL_PHASES: Final[frozenset[str]] = frozenset({
     "consumed_by_exit",
 })
 
-#: Mga phase kung saan may bahagi ng posisyon na WALANG nakaupong stop (R4).
-#: Sa mga ito ay obligado ang restore edge o ang flatten sa loob ng isang lease
-#: window — tingnan ang `assess_protection`.
+#: Mga phase kung saan may bahagi ng posisyon na WALANG PABABANG stop (R4).
+#:
+#: IKATLONG PASADA (2026-09-02). Ang set na ito ay ang PINAKAMALAKING natirang
+#: depekto ng revision 2, at ito ay may EKSAKTONG hugis ng S4. Inayos ng
+#: revision 2 ang `assess_protection` para tumigil sa pagbibilang ng nakaupong
+#: partial LIMIT bilang proteksyon — pero HINDI iyon naipasa rito. Ang resulta
+#: ay dalawang naipadalang artifact na MAGKASALUNGAT tungkol sa mismong window
+#: na binabayaran ng PATH B::
+#:
+#:     assess_protection(broker_qty=355, stop_qty=249, open_partial_qty=106)
+#:         -> status="naked_downside", naked_downside_qty=106
+#:     "partial_posted" in NAKED_RISK_PHASES   -> False        (revision 2)
+#:
+#: Sinasabi na ng §4/D1 ng disenyo ang tama: "mula sa certification HANGGANG
+#: maging terminal ang partial — ang BUONG buhay ng partial, ang NORMAL na
+#: kaso — ang f na share ay walang PABABANG stop". Limang phase ang saklaw
+#: niyon at wala ni isa sa kanila ang nakabandera noon:
+#:
+#:   * `successor_certified` at `post_deferred` — nakaupo ang R stop, hawak pa
+#:     ang buong Q, at WALA PANG partial na nakapost: f na share na walang stop
+#:     AT walang kahit anong nakaupong sell. Ito ang pinakahubad sa lahat.
+#:   * `partial_posting` / `partial_posted` / `partial_indeterminate` — may
+#:     nakaupong sell limit ang f, pero sa TAAS ng merkado. Hindi iyon takip.
+#:
+#: Ang isang wiring na naka-gate sa `phase in NAKED_RISK_PHASES` — na siyang
+#: TANGING dahilan ng pag-iral ng set na ito — ay lalaktawan ang remedyo sa
+#: buong normal na window at ipagpapalagay na walang panganib doon.
+#:
+#: HINDI kasama ang tatlong `WHOLE_EXIT_BLOCKING_PHASES`. Sa mga iyon ay malabo
+#: ang MAY-ARI ng stop (Q pa ba o R na?), at ang remedyo ay hindi restore o
+#: flatten kundi ang pagtatapos mismo ng in-flight na edge — o ang pag-expire ng
+#: 30 s na ceiling. Iyon nga ang dahilan ng ceiling. Ang pagsama sa kanila rito
+#: ay babasag din sa invariant na WHOLE_EXIT_BLOCKING ∩ NAKED_RISK == ∅ (L2).
 NAKED_RISK_PHASES: Final[frozenset[str]] = frozenset({
+    # ang NORMAL na window — naidagdag sa revision 3 (tingnan sa itaas)
+    "successor_certified",
+    "post_deferred",
+    "partial_posting",
+    "partial_posted",
+    "partial_indeterminate",
+    # ang mga failure branch — ito lamang ang nabanggit ng revision 2
     "partial_rejected",
     "partial_rejected_final",
     "partial_stale_adopted",
@@ -145,6 +207,36 @@ NAKED_RISK_PHASES: Final[frozenset[str]] = frozenset({
     "restore_indeterminate",
     "restore_rejected",
     "flatten_queued",
+})
+
+#: Ang mga phase kung saan AKTIBONG ibinabalik (o isinusuko) ang takip. Ang
+#: invariant ng R4 ay: mula sa BAWAT naked na phase ay ABOT ang isa sa mga ito.
+REMEDY_PHASES: Final[frozenset[str]] = frozenset({
+    "restore_intent_frozen",
+    "restore_replace_submitted",
+    "restore_indeterminate",
+    "restore_certified",
+    "flatten_queued",
+    "flattened",
+})
+
+#: Ang DALAWANG phase kung saan HINDI naitatala ang `consumed_by_exit`, at
+#: kung bakit sinasadya iyon.
+#:
+#: Sa `replace_stuck` / `containment_queued` ay may nakaupong broker order na
+#: HINDI natin alam kung kanino (iyon mismo ang kahulugan ng stuck). Kung
+#: papayagan nating maging `consumed_by_exit` — na TERMINAL — ay titigil ang
+#: pag-service habang may hindi kilalang order na nakaupo sa broker: iyon ang
+#: hugis ng "paper zombie / ghost position". Ang containment lineage ay dapat
+#: TUMAKBO PA RIN kahit na-flatten na ng operator ang posisyon, dahil ang order
+#: ang natitirang problema, hindi ang posisyon.
+#:
+#: Kaya ang exception ay may sariling invariant (may test): ang bawat phase
+#: dito ay dapat MANATILING may service step (hindi walang laman ang transition
+#: set) AT may tahasang labasan ng operator patungo sa `abandoned`.
+EXIT_CONSUMPTION_UNRECORDABLE_PHASES: Final[frozenset[str]] = frozenset({
+    "replace_stuck",
+    "containment_queued",
 })
 
 #: HINDI ito `is_in_flight`. Tatlong phase LAMANG ang tunay na malabo ang
@@ -192,12 +284,15 @@ MARKER_UNRESOLVED_CEILING_SECONDS: Final[float] = 300.0
 #: Ang buong legal na graph. Anumang wala rito ay bug — hindi tahimik na
 #: pinapayagan (`advance_phase` ay nagre-raise).
 #:
-#: Dalawang panuntunan ang sinusunod ng talahanayan:
-#:   * bawat NAKED_RISK phase ay may kahit isang legal na susunod na
-#:     humahantong sa restore o sa flatten (may test);
-#:   * ang `consumed_by_exit` ay abot mula sa BAWAT phase kung saan hindi
+#: Tatlong panuntunan ang sinusunod ng talahanayan (lahat ay may test):
+#:   * mula sa bawat NAKED_RISK phase ay ABOT ang isang REMEDY_PHASE — abot,
+#:     hindi katabi (tingnan ang `reachable_phases`);
+#:   * ang `consumed_by_exit` ay abot mula sa bawat phase kung saan hindi
 #:     hinaharang ang whole exit — dahil doon nga puwedeng lamunin ng isang
-#:     buong exit ang posisyon habang bukas pa ang marker (L5).
+#:     buong exit ang posisyon habang bukas pa ang marker (L5) — MALIBAN sa
+#:     `EXIT_CONSUMPTION_UNRECORDABLE_PHASES`, na may sariling dahilan at
+#:     sariling invariant;
+#:   * walang non-terminal na phase na patay na kalsada.
 LEGAL_TRANSITIONS: Final[dict[str, frozenset[str]]] = {
     "intent_frozen": frozenset({
         "replace_submitted", "replace_indeterminate", "replace_rejected",
@@ -303,6 +398,30 @@ def advance_phase(current: str, target: str) -> str:
     if dst not in allowed:
         raise PhaseError(f"illegal_transition:{src}->{dst}")
     return dst
+
+
+def reachable_phases(start: str) -> frozenset[str]:
+    """Bawat phase na ABOT mula sa `start` sa pamamagitan ng legal na hakbang.
+
+    Kailangan ito para maging TOTOO ang invariant ng R4. Ang revision 2 ay
+    tumitingin lamang sa TUWIRANG target ("may kasama bang remedyo ang
+    transition set nito?"). Mahina iyon: ang `successor_certified` ay hubad
+    (f na share, walang stop) pero ang restore nito ay dumadaan muna sa
+    `post_deferred`, kaya papasa ang tuwirang tseke sa maling dahilan — o
+    babagsak sa tamang graph. Ang tamang tanong ay ABOT ba, hindi KATABI ba.
+
+    Hindi kasama ang `start` mismo maliban kung may cycle pabalik dito.
+    """
+    src = _require_phase(start, label="phase")
+    seen: set[str] = set()
+    stack = list(LEGAL_TRANSITIONS.get(src, frozenset()))
+    while stack:
+        node = stack.pop()
+        if node in seen:
+            continue
+        seen.add(node)
+        stack.extend(LEGAL_TRANSITIONS.get(node, frozenset()))
+    return frozenset(seen)
 
 
 def is_terminal(phase: str) -> bool:
