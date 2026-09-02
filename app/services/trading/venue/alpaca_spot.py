@@ -2209,6 +2209,61 @@ class AlpacaSpotAdapter:
             logger.debug("[alpaca_spot] list_open_orders failed: %s", exc)
             return (None if strict else []), _fresh(5.0)
 
+    def list_symbol_orders_truth(
+        self,
+        product_id: str,
+        *,
+        after: datetime,
+        until: datetime,
+        limit: int = 500,
+    ) -> dict[str, Any]:
+        """READ-ONLY ``status=all`` order listing for ONE symbol in ONE window.
+
+        Broker-truth attribution (outcome_reconcile, 2026-09-02 CANF 19471):
+        the session ledger only knows the fills the FSM itself adopted, so a
+        second trade cycle whose entry fill was never adopted and an operator
+        sell placed outside the FSM are invisible to it. The only complete
+        record of a session's fills is the broker's own order list filtered by
+        the session-id-bearing ``client_order_id`` namespace. Strict contract
+        like ``get_order_truth``: ``readable=False`` on ANY read failure (never
+        an empty list mistaken for "no fills"), and a full ``limit``-sized page
+        is reported as ``truncated`` rather than silently partial. Never
+        submits, replaces or cancels anything.
+        """
+        try:
+            from alpaca.common.enums import Sort
+            from alpaca.trading.enums import QueryOrderStatus
+            from alpaca.trading.requests import GetOrdersRequest
+
+            def _aware(v: datetime) -> datetime:
+                return v if v.tzinfo is not None else v.replace(tzinfo=timezone.utc)
+
+            req = GetOrdersRequest(
+                status=QueryOrderStatus.ALL,
+                after=_aware(after),
+                until=_aware(until),
+                limit=int(limit),
+                direction=Sort.ASC,
+                nested=True,
+                symbols=[_to_symbol(product_id)],
+            )
+            orders = self._account_client().get_orders(filter=req)
+            if not isinstance(orders, list):
+                return {"readable": False, "orders": [], "error": "malformed_response"}
+            normalized = [self._normalize_order(o) for o in orders]
+            return {
+                "readable": True,
+                "orders": normalized,
+                "truncated": len(orders) >= int(limit),
+            }
+        except Exception as exc:
+            failure = _submit_failure_metadata(exc)
+            logger.debug(
+                "[alpaca_spot] list_symbol_orders_truth failed symbol=%s: %s",
+                product_id, exc,
+            )
+            return {"readable": False, "orders": [], "error": failure}
+
     def get_paper_open_order_census(
         self,
         *,

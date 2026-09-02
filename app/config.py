@@ -3147,6 +3147,71 @@ class Settings(BaseSettings):
         le=30.0,
         validation_alias=AliasChoices("CHILI_MOMENTUM_OUTCOME_RECON_LOOKBACK_DAYS"),
     )
+    # BROKER-TRUTH ATTRIBUTION (2026-09-02, CANF 19471). Ang ledger
+    # (momentum_fill_outcomes) ay alam LAMANG ang fills na in-adopt mismo ng
+    # FSM: ang cycle-2 entry f3ed508d (165 @ 4.62, hindi na-adopt dahil sa
+    # reaper race) at ang operator sell ddba3ed2 (165 @ 3.9603, chili_ops_flat_
+    # sa labas ng FSM) ay hindi kailanman naisulat, kaya ang outcome 203734 ay
+    # na-label na `reconciled` sa −78.13 (cycle 1 lang) habang −186.98 ang
+    # broker truth ng session; ang loss guard (risk_policy.
+    # load_current_live_loss_history → broker_realized_pnl_usd) ay kulang ng
+    # −108.85. ON => para sa Alpaca families, ang reconcile pass ay nagbabasa ng
+    # broker order list ng symbol sa loob ng session window at ini-a-attribute
+    # ang BAWAT filled order na may session id sa client_order_id
+    # (chili_ml_e_<sid>_, chili_dm_<sid>_, chili_ml_bw_<sid>_, chili_ops_flat_<sid>_,
+    # ...) + anumang sell na tumutugma sa unpriced emergency leg; ang broker_*
+    # columns ay sumasaklaw sa BUONG session. Read-only GET; never a fabricated
+    # label (unreadable/ambiguous => unreconciled status, retry sa susunod na pass).
+    chili_momentum_outcome_recon_broker_attribution_enabled: bool = Field(
+        default=True,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_OUTCOME_RECON_BROKER_ATTRIBUTION_ENABLED"),
+    )
+    # Bound ng broker GETs kada 60s pass (isa kada session na kailangang i-attribute).
+    chili_momentum_outcome_recon_broker_attribution_max_per_pass: int = Field(
+        default=20,
+        ge=1,
+        le=200,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_OUTCOME_RECON_BROKER_ATTRIBUTION_MAX_PER_PASS"),
+    )
+    # Grace pagkatapos ng terminal_at kung saan pa rin isinasama ang mga fill
+    # (ang operator flatten ay maaaring dumating pagkatapos ng FSM terminal).
+    chili_momentum_outcome_recon_broker_attribution_grace_seconds: int = Field(
+        default=900,
+        ge=0,
+        le=86400,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_OUTCOME_RECON_BROKER_ATTRIBUTION_GRACE_SECONDS"),
+    )
+    # BUDGET GUARD (2026-09-02 adversarial review). Kapag ang broker ay MABASA at
+    # WALA siyang pag-aari na fill para sa session (`no_owned_fills`), ang muling
+    # pag-list kada 60s ay hindi kayang magbago ng sagot (immutable ang broker
+    # fills) — kinakain lang nito ang budget na kailangan ng bagong-terminal na
+    # FILLED session ng loss guard. Ito ang retry horizon ng ganoong hilera.
+    # 0 => walang backoff (bawat pass, ang lumang gawi na nagdulot ng starvation).
+    chili_momentum_outcome_recon_broker_attribution_no_fill_backoff_seconds: int = Field(
+        default=1800,
+        ge=0,
+        le=86400,
+        validation_alias=AliasChoices(
+            "CHILI_MOMENTUM_OUTCOME_RECON_BROKER_ATTRIBUTION_NO_FILL_BACKOFF_SECONDS"
+        ),
+    )
+    # ⚠️ ANG IKALAWANG HORIZON. Ang mahabang backoff sa itaas ay para LAMANG sa
+    # hilerang HINDI kayang harangan ang loss guard (isang `not_entered` na klase
+    # na nilalaktawan mismo ng guard). Kapag ang hilera ay maaaring humarang —
+    # `entered` / `unknown` / `conflict` — ang bawat segundo ng backoff ay isang
+    # segundo ng `loss_guard_history_unavailable` para sa BUONG account. Ang
+    # 30-minutong backoff doon ay muling nag-aarma ng landmine ng 09-02 na may
+    # 30-minutong mitsa. Kaya maikli ito: sapat para hindi maubos ang budget,
+    # sapat na maikli para ang lane ay bumalik agad kapag lumitaw na ang fill.
+    chili_momentum_outcome_recon_broker_attribution_blocking_retry_seconds: int = Field(
+        default=120,
+        ge=0,
+        le=3600,
+        validation_alias=AliasChoices(
+            "CHILI_MOMENTUM_OUTCOME_RECON_BROKER_ATTRIBUTION_BLOCKING_RETRY_SECONDS"
+        ),
+        description="Retry horizon for an outcome whose unresolved broker label can disarm the whole account (loss guard `entered`/`unknown`/`conflict`). Short by design: a long backoff here converts a transient listing gap into a guaranteed arming outage of exactly that length.",
+    )
     chili_momentum_broker_truth_label_enabled: bool = Field(
         default=False,
         validation_alias=AliasChoices("CHILI_MOMENTUM_BROKER_TRUTH_LABEL_ENABLED"),
@@ -12092,6 +12157,24 @@ class Settings(BaseSettings):
         default=False,
         validation_alias=AliasChoices("CHILI_MOMENTUM_SHORT_LANE_ENABLED"),
         description="Master gate for the Alpaca SHORT lane. Default OFF (paper-first, un-soaked, no triggers wired yet). OFF ⇒ byte-identical long-only lane.",
+    )
+    # UNSTOPPED SHORT risk bound (risk_evaluator.aggregate_open_risk_usd, 2026-09-02).
+    # An unstopped LONG is charged its full notional (its worst case is known). A
+    # short has no algebraic worst case, and the old fail-closed raise
+    # (``position_risk_fields_invalid``) blocked EVERY Alpaca submit account-wide
+    # while such a row existed — the same landmine class as the 806x long case.
+    # ONE documented base: charge notional x THIS multiple, i.e. cover an adverse
+    # move of +100% x multiple against the short (2.0 = the price TRIPLES before
+    # the bound is exceeded — beyond every single-leg squeeze the lane's own
+    # corpus has recorded). >= 1.0 so the bound is never looser than a doubling.
+    # Only a row whose direction is PROVABLY short on every marker gets this
+    # bound; contradictory/unreadable direction still raises.
+    chili_momentum_short_unstopped_notional_multiple: float = Field(
+        default=2.0,
+        ge=1.0,
+        le=10.0,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_SHORT_UNSTOPPED_NOTIONAL_MULTIPLE"),
+        description="At-risk charge for an UNSTOPPED short = notional x this (adverse move covered = +100% x multiple). 2.0 = price triples. Bounded instead of raising so one unmanaged short cannot fail-close every Alpaca submit.",
     )
     # Shake-out learning: how long after an exit to watch the price path to judge
     # whether the thesis would have worked (was the stop too tight?). 30min.

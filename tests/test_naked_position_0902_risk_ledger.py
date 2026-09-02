@@ -235,18 +235,20 @@ def test_held_stop_unknown_long_is_full_notional(monkeypatch):
     assert "note" not in rows[0]
 
 
-def test_held_stop_unknown_short_still_raises(monkeypatch):
-    """⚠️ Ang notional ay HINDI upper bound ng SHORT — fail-closed pa rin."""
+def test_held_stop_unknown_short_is_bounded_not_raised(monkeypatch):
+    """⚠️ Ang notional ay HINDI upper bound ng SHORT — kaya HINDI full notional
+    kundi notional x ang dokumentadong multiple (2026-09-02 follow-up sa #1285:
+    ang raise dito ay parehong account-wide landmine class; tests/
+    test_short_unstopped_bound_0902.py ang buong contract)."""
     _patch_claims(monkeypatch, [])
     pos = {"quantity": 177, "avg_entry_price": 9.91, "stop_price": None}
-    db = _FakeDb([_sess(1, state="live_entered", family="alpaca_short",
-                        le={"position": pos})])
-    with pytest.raises(RuntimeError, match="position_risk_fields_invalid"):
-        RE.aggregate_open_risk_usd(db, user_id=1, execution_family="alpaca_spot")
-    db = _FakeDb([_sess(1, state="live_entered", family="alpaca_spot",
-                        le={"side_long": False, "position": pos})])
-    with pytest.raises(RuntimeError, match="position_risk_fields_invalid"):
-        RE.aggregate_open_risk_usd(db, user_id=1, execution_family="alpaca_spot")
+    for family, le in (("alpaca_short", {"position": pos}),
+                       ("alpaca_spot", {"side_long": False, "position": pos})):
+        db = _FakeDb([_sess(1, state="live_entered", family=family, le=le)])
+        total, rows = RE.aggregate_open_risk_usd(db, user_id=1, execution_family="alpaca_spot")
+        assert total == pytest.approx(177 * 9.91 * 2.0), family
+        assert rows[0]["note"] == "stop_unknown_short_notional_multiple_bound"
+        assert total > 177 * 9.91, "never looser than the long's full notional"
 
 
 @pytest.mark.parametrize("le_extra,pos_extra", [
@@ -255,17 +257,30 @@ def test_held_stop_unknown_short_still_raises(monkeypatch):
     ({}, {"side_long": False}),
     ({}, {"position_intent": "sell_to_open"}),
     ({}, {"intent": "buy_to_close"}),
-    ({}, {"side": "sideways"}),          # unreadable marker => not certified
     ({"side": "short"}, {}),
     ({"position_intent": "sell_to_open"}, {}),
-    ({"side_long": True}, {"side": "short"}),  # contradictory => not certified
 ])
-def test_held_stop_unknown_short_shaped_position_still_raises(monkeypatch, le_extra, pos_extra):
+def test_held_stop_unknown_short_shaped_position_is_not_the_long_bound(monkeypatch, le_extra, pos_extra):
     """Ang full-notional bound ay para LANG sa posisyong provably LONG sa bawat
     marker na binabasa ng runner (`_le_side_long`): `position.side`,
     `position_intent`/`intent`, nested `side_long`. Ang row na inampon sa
     ilalim ng operator repair ay may `position.side` at WALANG `side_long`
-    key — hindi ito dapat singilin bilang long by omission."""
+    key — hindi ito dapat singilin bilang long by omission: ang provably SHORT
+    na row ay kumukuha ng short multiple bound."""
+    _patch_claims(monkeypatch, [])
+    pos = {"quantity": 100, "avg_entry_price": 5.0, "stop_price": None, **pos_extra}
+    db = _FakeDb([_sess(1, state="live_entered", family="alpaca_spot",
+                        le={**le_extra, "position": pos})])
+    total, rows = RE.aggregate_open_risk_usd(db, user_id=1, execution_family="alpaca_spot")
+    assert rows[0]["note"] == "stop_unknown_short_notional_multiple_bound"
+    assert total == pytest.approx(1000.0)
+
+
+@pytest.mark.parametrize("le_extra,pos_extra", [
+    ({}, {"side": "sideways"}),          # unreadable marker => not certified
+    ({"side_long": True}, {"side": "short"}),  # contradictory => not certified
+])
+def test_held_stop_unknown_uncertifiable_direction_still_raises(monkeypatch, le_extra, pos_extra):
     _patch_claims(monkeypatch, [])
     pos = {"quantity": 100, "avg_entry_price": 5.0, "stop_price": None, **pos_extra}
     db = _FakeDb([_sess(1, state="live_entered", family="alpaca_spot",
