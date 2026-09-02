@@ -19026,6 +19026,40 @@ def _place_scale_out_limit(
         )
 
 
+def _resolve_scale_limit_sibling_order_id(
+    le: dict[str, Any],
+    *,
+    resolver: Callable[[], str | None] | None = None,
+) -> tuple[str | None, bool]:
+    """Resolve the resting scale-out sibling's broker order id.
+
+    Returns ``(order_id, unreadable)``.  The ledger is authoritative and is read
+    FIRST: when ``le["scale_limit_order_id"]`` is set the resolver is never
+    consulted, so a caller that supplies one cannot perturb the tracked path.
+
+    With no resolver -- every production call site today -- an empty ledger id
+    yields ``(None, False)``, meaning "this position has no sibling sell", which
+    is the honest and overwhelmingly common answer.  A resolver exists so a
+    caller that knows of a sibling the ledger never recorded can say so; if that
+    lookup cannot be completed the answer is ``unreadable``, never "no sibling",
+    because guessing "none" is exactly what would let an exit oversell.
+    """
+    ledger_oid = le.get("scale_limit_order_id") if isinstance(le, dict) else None
+    if ledger_oid:
+        return str(ledger_oid), False
+    if resolver is None:
+        return None, False
+    try:
+        resolved = resolver()
+    except Exception:
+        return None, True
+    if resolved is None:
+        return None, False
+    if not isinstance(resolved, str) or not resolved.strip():
+        return None, True
+    return resolved.strip(), False
+
+
 def _cancel_scale_limit_and_clamp(
     db: Session,
     sess: TradingAutomationSession,
@@ -19034,6 +19068,7 @@ def _cancel_scale_limit_and_clamp(
     le: dict[str, Any],
     requested_qty: float,
     reason: str,
+    sibling_order_id_resolver: Callable[[], str | None] | None = None,
 ) -> float | None:
     """OVERSELL INVARIANT for sell-into-strength: before ANY market exit, cancel
     the resting scale-out limit and adopt whatever it already filled (cancel-race
@@ -19041,9 +19076,37 @@ def _cancel_scale_limit_and_clamp(
     Without this, the resting limit and the market exit could both execute and
     flip the account short. Called from the single exit chokepoint so every path
     (stop / trail / bailout / kill-switch / EOD / max-hold) is covered."""
-    oid = le.get("scale_limit_order_id")
+    oid, sibling_unreadable = _resolve_scale_limit_sibling_order_id(
+        le,
+        resolver=sibling_order_id_resolver,
+    )
+    if sibling_unreadable:
+        # A sibling was asserted but could not be read.  Releasing the full
+        # requested quantity here is precisely the oversell this function exists
+        # to prevent, so fail closed exactly as every other unreadable branch
+        # below does.  Unreachable without a resolver.
+        le["alpaca_scale_limit_release_block"] = {
+            "reason": "scale_limit_sibling_id_unreadable",
+            "order_id": None,
+            "recorded_at_utc": _utcnow().isoformat(),
+        }
+        _commit_le(sess, le)
+        return None
     if not oid:
+        # CONTRACT: no sibling sell exists for this position, so there is nothing
+        # to cancel and nothing to clamp against, and the full requested quantity
+        # is the CORRECT release.  This is the common case (every exit for every
+        # session that never rested a scale-out) and it is a deliberate
+        # pass-through, not an oversight.  The only way a live sibling can be
+        # invisible here is an id this function was never told about, which is
+        # what ``sibling_order_id_resolver`` exists to supply.
         return float(requested_qty)
+    if not le.get("scale_limit_order_id"):
+        # Adopt a resolver-supplied id so the strict identity path below -- and
+        # every later tick -- runs against a durable ledger entry rather than a
+        # value that lives only on this stack.  Unreachable without a resolver.
+        le["scale_limit_order_id"] = str(oid)
+        _commit_le(sess, le)
     if normalize_execution_family(sess.execution_family) in ALPACA_EXECUTION_FAMILIES:
         account_ok, account_identity = _strict_alpaca_account_identity(adapter, sess)
         if not account_ok:
