@@ -199,8 +199,8 @@ def _premarket_change_pct(s: dict) -> float | None:
     universe builder drops any row where it is null — which silently starves the
     premarket universe (the day's gappers surface at ~09:40 ET instead of ~04:00).
 
-    Mirrors the PROVEN ``nbbo_tape`` fallback (nbbo_tape.py:92-95): base = today's
-    open, else yesterday's close; chg = (live price − base)/base·100. So the
+    Mirrors the PROVEN ``nbbo_tape`` fallback: base = yesterday's close, else
+    today's open (#1284); chg = (live price − base)/base·100. So the
     universe surfaces exactly the premarket movers the NBBO tape already grades.
     Fail-CLOSED: no live price or no usable base ⇒ ``None`` ⇒ the ticker is still
     dropped (no invented mover from a no-print row). Behind a default-ON kill-switch
@@ -219,7 +219,11 @@ def _premarket_change_pct(s: dict) -> float | None:
         return None
     day = s.get("day") or {}
     prev = s.get("prevDay") or {}
-    base = _f(day.get("o")) or _f(prev.get("c"))
+    # #1284 (2026-09-02): prev close MUNA, saka ang open — pareho ng kahulugan
+    # ng vendor `todaysChangePerc` na pinapalitan nito, at pareho ng ignition
+    # tracker (ignition_loop.py) na dating open-anchored pagkatapos ng 13:30Z
+    # (BIAF +67% → +0.13%). Premarket ay byte-identical (zero ang `day`).
+    base = _f(prev.get("c")) or _f(day.get("o"))
     if base is None or base <= 0:
         return None
     return (price - base) / base * 100.0
