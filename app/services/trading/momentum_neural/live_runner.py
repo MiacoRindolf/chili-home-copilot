@@ -932,14 +932,23 @@ def read_tick_bar_age_meter() -> tuple[float, float, int]:
     )
 
 
-def _frame_bar_age_seconds(df: Any) -> float | None:
-    """Seconds between now and the frame's last bar. None if unreadable.
+def _frame_last_bar_age_seconds(df: Any, now: datetime | None) -> float | None:
+    """Seconds between ``now`` and the frame's last bar stamp. None if unreadable.
+
+    Pure: the caller supplies the clock. The per-tick meter passes the wall
+    clock; the candidate-fire telemetry (#1286) passes the TICK's clock
+    (``_utcnow_aware()``), so under the replay harness the age is measured
+    against the sim instant and not against the replaying machine's wall time.
+    A naive ``now`` or a naive index is read as UTC (the codebase convention;
+    Massive/yfinance frames arrive naive-UTC).
 
     Deliberately total: an unparseable or empty index yields None rather than an
     exception, because this runs inside the hot read path and must never be able
     to fail a tick.
     """
     try:
+        if not isinstance(now, datetime):
+            return None
         idx = getattr(df, "index", None)
         if idx is None or len(idx) == 0:
             return None
@@ -950,12 +959,91 @@ def _frame_bar_age_seconds(df: Any) -> float | None:
             return None
         if last_dt.tzinfo is None:
             last_dt = last_dt.replace(tzinfo=timezone.utc)
-        age = (datetime.now(timezone.utc) - last_dt).total_seconds()
+        if now.tzinfo is None:
+            now = now.replace(tzinfo=timezone.utc)
+        age = (now - last_dt).total_seconds()
+        # NaT last stamp (Massive builds the index with to_datetime; a null bar
+        # time becomes NaT, which still passes the datetime isinstance check)
+        # yields nan here — report None, never a "fresh" 0.0 (review finding).
+        if age != age:
+            return None
         # A frame stamped in the future is a provider/clock artefact, not a
         # freshness signal; report it as fresh rather than as a negative age.
         return max(0.0, age)
     except Exception:
         return None
+
+
+def _frame_bar_age_seconds(df: Any) -> float | None:
+    """Seconds between the wall clock and the frame's last bar. None if unreadable.
+
+    Wall-clock flavour used by the per-tick OHLCV meter; the clock-injected
+    core is ``_frame_last_bar_age_seconds``.
+    """
+    return _frame_last_bar_age_seconds(df, datetime.now(timezone.utc))
+
+
+def _candidate_frame_age_telemetry(
+    *,
+    entry_df: Any,
+    df_trig: Any,
+    iv_trig: Any,
+    micro_frame_used: Any,
+    now: datetime | None,
+) -> dict[str, Any]:
+    """Frame-age keys for the ``live_entry_candidate_detected`` payload (#1286).
+
+    SUKAT, HINDI HINUHA (2026-09-02). Sa AUUD 09-01 lahat ng 24 candidate fire
+    ay may trigger na ``momentum_ok_rel_vol`` na WALANG ``_rate`` suffix — ayon
+    sa entry_gates ``_forming_bar_elapsed_fraction`` ⇒ None ⇒ ang huling 15m
+    bar ay KUMPLETO na (>= 15 min ang tanda) nang pumutok ang trigger. Ang 15m
+    at 1m frame ay dumadaan sa ``fetch_ohlcv_df`` na may 600s DataFrame cache
+    sa ibabaw ng Massive bar cache na max(180s, 3x bar), at walang nag-i-
+    invalidate sa exec lane; ang 10s micro-bar frame naman ay segundo-sariwa.
+    Ang ``read_tick_bar_age_meter`` ay thread-local at hindi pinepersist, kaya
+    ITO ang unang persisted na sukat ng edad ng bars sa mismong fire.
+
+    Telemetry lamang: walang nagbabasa nito para magpasya. Bawat susi ay None
+    kapag hindi mabasa; hindi kailanman nag-ra-raise.
+    """
+    try:
+        _micro = bool(micro_frame_used)
+    except Exception:
+        _micro = False
+    out: dict[str, Any] = {
+        "frame_15m_last_bar_age_s": None,
+        "frame_trig_interval": None,
+        "frame_trig_last_bar_age_s": None,
+        "frame_trig_rows": None,
+        "micro_frame_used": _micro,
+    }
+    try:
+        a15 = _frame_last_bar_age_seconds(entry_df, now)
+        if a15 is not None:
+            out["frame_15m_last_bar_age_s"] = round(float(a15), 1)
+    except Exception:
+        pass
+    try:
+        if iv_trig is not None:
+            out["frame_trig_interval"] = str(iv_trig)
+    except Exception:
+        pass
+    try:
+        atr = _frame_last_bar_age_seconds(df_trig, now)
+        if atr is not None:
+            out["frame_trig_last_bar_age_s"] = round(float(atr), 1)
+    except Exception:
+        pass
+    try:
+        if df_trig is not None:
+            out["frame_trig_rows"] = int(len(df_trig))
+    except Exception:
+        pass
+    # WALANG cross-check mula sa thread-local OHLCV meter dito (review finding):
+    # ang meter ay nire-reset lamang sa scheduler `_tick_one_pass`; sa lane host,
+    # runner loop, captured-paper at replay driver ito ay thread-lifetime na
+    # cumulative max — magsisinungaling sa mismong tanong na sinusukat nito.
+    return out
 
 
 def _meter_tick_ohlcv(elapsed: float, df: Any) -> None:
@@ -30639,6 +30727,9 @@ def tick_live_session(
                                 # tick density ⇒ _build_micro_bar_df returns None ⇒ fall
                                 # back to the 1m df (byte-identical, no-op when off).
                                 _df_trig, _iv_trig = _df_pb, _interval
+                                # #1286 telemetry-only marker: naging micro frame ba ang
+                                # trigger df? Binabasa LAMANG ng candidate-fire payload.
+                                _micro_frame_used = False
                                 if bool(getattr(settings, "chili_momentum_micropull_enabled", False)):
                                     _bar_s = int(getattr(settings, "chili_momentum_micropull_bar_seconds", 15) or 15)
                                     # ITEM-7 F1: pass a meta dict so a swallowed micro build error
@@ -30647,6 +30738,7 @@ def tick_live_session(
                                     _df_micro = _build_micro_bar_df(db, sess.symbol, bar_seconds=_bar_s, meta=_micro_meta)
                                     if _df_micro is not None and len(_df_micro) >= 10:
                                         _df_trig, _iv_trig = _df_micro, "15s"
+                                        _micro_frame_used = True
                                     elif _micro_meta and isinstance(_pb_debug, dict):
                                         _pb_debug.update(_micro_meta)
                                 # Classify a possible first-dip before the generic
@@ -31284,6 +31376,10 @@ def tick_live_session(
                     _df = _entry_df  # reuse the adaptive-spread 15m candles if present
                     if _df is None:
                         _df = fetch_ohlcv_df(sess.symbol, interval="15m", period="5d")
+                    # #1286 telemetry-only: ang 15m frame na TALAGANG binasa ng
+                    # momentum_volume_confirmation (kapag None ang _entry_df dahil
+                    # di-applicable ang quote gate, ito ang tanging kopya nito).
+                    _vol_15m_df = _df
                     if _df is None or getattr(_df, "empty", True):
                         _trigger_ok, _trigger_reason = False, "no_data_wait"
                         # COLD-START TICK FALLBACK, zero-bar frame (2026-07-18, VIVS 07-15):
@@ -32451,6 +32547,44 @@ def tick_live_session(
                 le.pop("entry_above_vwap", None)
             _commit_le(sess, le)
             _safe_transition(db, sess, STATE_LIVE_ENTRY_CANDIDATE)
+            # FRAME-AGE TELEMETRY sa mismong fire (#1286, 2026-09-02). AUUD 09-01:
+            # 24/24 candidate fire = `momentum_ok_rel_vol` na walang `_rate`
+            # suffix ⇒ kumpleto na (>=15 min) ang huling 15m bar nang pumutok.
+            # Ang 15m/1m frame ay 600s DataFrame cache + Massive bar cache
+            # max(180s, 3x bar) na walang nag-i-invalidate sa exec lane; ang
+            # 10s micro frame ay segundo-sariwa. Ito ang unang PERSISTED na
+            # sukat (ang bar-age meter ay thread-local at nawawala kada tick).
+            # Fail-open: ang _df_trig/_iv_trig/_entry_df/_vol_15m_df ay unbound
+            # sa ilang sangay ⇒ None ang susi, hindi hulang zero; hindi
+            # kailanman nag-ra-raise, walang bagong fetch o DB read.
+            _cf_payload: dict[str, Any] = {}
+            try:
+                try:
+                    _cf_15m = _entry_df
+                except Exception:
+                    _cf_15m = None
+                if _cf_15m is None:
+                    try:
+                        _cf_15m = _vol_15m_df
+                    except Exception:
+                        _cf_15m = None
+                try:
+                    _cf_df_trig, _cf_iv_trig = _df_trig, _iv_trig
+                except Exception:
+                    _cf_df_trig, _cf_iv_trig = None, None
+                try:
+                    _cf_micro = bool(_micro_frame_used)
+                except Exception:
+                    _cf_micro = False
+                _cf_payload = _candidate_frame_age_telemetry(
+                    entry_df=_cf_15m,
+                    df_trig=_cf_df_trig,
+                    iv_trig=_cf_iv_trig,
+                    micro_frame_used=_cf_micro,
+                    now=_utcnow_aware(),
+                )
+            except Exception:
+                _cf_payload = {}
             _emit(
                 db, sess, "live_entry_candidate_detected",
                 {"viability_score": via.viability_score, "trigger": _trigger_reason,
@@ -32460,7 +32594,8 @@ def tick_live_session(
                  # setup. Sinusukat muna bago maging tilt.
                  "breakout_level_age_s": _level_age_seconds(le, "breakout_level_price"),
                  "watch_level_age_s": _level_age_seconds(le, "watch_break_level"),
-                 "l2": _l2},
+                 "l2": _l2,
+                 **_cf_payload},
             )
         elif _score_ok and not _mkt_open:
             _emit(db, sess, "live_entry_wait_market_closed", {"symbol": sess.symbol})
