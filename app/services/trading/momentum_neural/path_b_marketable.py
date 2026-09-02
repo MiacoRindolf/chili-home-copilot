@@ -1,14 +1,25 @@
 """PATH B — MARKETABLE partial shape. Pure, no I/O, zero production callers.
 
+Tingnan ang ``docs/DESIGN/PARTIAL_EXIT_MARKETABLE.md`` (revision 2).
+
 Sinasagot ng module na ito ang D1 blocker ng
-``docs/DESIGN/PARTIAL_EXIT_PATH_B.md``: hindi ang PATCH ang gumagawa ng naked
-window, kundi ang **hugis ng benta**. Ang isang RESTING sell limit sa itaas ng
-merkado ay nabubuhay hangga't buhay ang posisyon (sinukat: Alpaca p50 459.2 s,
-p75 3,265 s, max 7,167 s), kaya ang ``f`` shares ay walang downside stop sa
-buong panahong iyon. Ang isang MARKETABLE sell — kapareho ng hugis na
-ipinapadala na ngayon ng buong-posisyong exit sa chokepoint — ay nabubuhay lang
-sa habang ng round trip nito (sinukat: ``place_rtt_s`` p50 0.109 s, p95 0.452 s,
-max 0.860 s).
+``docs/DESIGN/PARTIAL_EXIT_PATH_B.md``. DALAWA ang pagbabago, at ang una ang
+mas mahalaga:
+
+1. **KAILAN** — sa rev4 ang PATCH ``Q -> R`` ay pumuputok sa ENTRY FILL
+   (LR:33724), kaya ang ``f`` ay hiwalay na sa deadman bago pa malaman kung
+   mararating ng bid ang target: 16,505 s ng kabuuang hubad na exposure sa 13 sa
+   13 kaso. Dito ang PATCH ay pumuputok lamang kapag ``bid >= target``: 3 sa 13
+   kaso, ~0.712 s bawat isa (p95 PATCH 0.260 s + p95 sell 0.452 s). Sa 10 sa 13
+   ay HINDI man lang nagagalaw ang stop.
+2. **HUGIS** — MARKETABLE, hindi resting. Kapareho ng hugis na ipinapadala na
+   ngayon ng buong-posisyong exit sa chokepoint.
+
+BABALA SA PRESYO: sa sinukat na sample ang RESTING limit ang PANALO ng $169.83.
+Ang buong panalo ay kinita sa pamamagitan ng paghawak ng ``f`` nang WALANG stop
+hanggang bumalik ang merkado, 6 sa 6 na gumaling, at WALANG obserbasyon ng D1
+tail sa corpus na iyon. Ang rekomendasyon ay HINDI nakasalalay sa presyo -- §3.1
+(ang 300 s ceiling) at §5 (ang pagtanggi ng broker) ang batayan nito.
 
 Ito rin ang mekaniko ni Ross: *"I sell into the spike"* — tinatamaan niya ang
 bid; hindi siya nag-po-post ng offer sa itaas at naghihintay na buhatin.
@@ -29,9 +40,11 @@ __all__ = [
     "RTH_CROSS_MULTIPLE",
     "EXTENDED_CROSS_MULTIPLE",
     "partial_trigger_ready",
+    "post_patch_sell_decision",
     "marketable_partial_limit_price",
     "partial_post_request",
     "marketable_left_behind",
+    "DEFAULT_POST_PATCH_GRACE_SECONDS",
 ]
 
 #: Ang dalawang hugis. ``PARTIAL_SHAPE_RESTING`` ay ang orihinal na §3.5 —
@@ -75,9 +88,14 @@ def partial_trigger_ready(
 
     Ang trigger ay ``bid >= target``, HINDI ``mid >= target`` at hindi
     ``ask >= target``. Mahalaga ito: sa bid-touch trigger ang marketable na
-    benta ay napupunan sa presyong ``>= target`` **by construction**, kaya ang
-    fill certainty nito ay eksaktong kapareho ng resting limit (sinukat: 0 sa 13
-    na kaso ang hindi nagkasundo) samantalang ang presyo ay hindi nagbabago.
+    benta ay napupunan sa presyong ``>= target`` **by construction**.
+
+    HUWAG sabihing "0 sa 13 ang hindi nagkasundo sa resting limit" — iyon ay
+    IDENTIDAD, hindi sukat: pareho ang predicate (``bid >= target``), kaya
+    garantisado ang sero kahit sa walang lamang sample. Ang makabuluhang bilang
+    ay ang half-spread na ibinebenta ng MID-touch variant: 35.2 / 52.7 / 49.3
+    bps sa tatlong window-A na kaso.
+
     Ang mid-touch trigger ay nagbebenta sa isang bid na hindi pa dumarating at
     nagkakahalaga ng −0.53 R sa ``f`` shares sa nag-iisang kasong may naitalang
     ``stop_distance`` (SSM 19315).
@@ -107,6 +125,86 @@ def partial_trigger_ready(
         "target_price": t,
         "threshold": threshold,
         "gap_bps": (b - t) / t * 10_000.0,
+    }
+
+
+#: Gaano katagal pinapayagang manatiling naka-PATCH (``R``) ang stop habang
+#: hinihintay na bumalik ang bid sa target, bago tayo mag-restore pabalik sa
+#: ``Q``. Ito ang NAG-IISANG naked window ng tamang sequence, kaya maliit ito at
+#: isa itong operator knob: HINDI ito sinukat ng pag-aaral na ito.
+DEFAULT_POST_PATCH_GRACE_SECONDS: Final[float] = 2.0
+
+
+def post_patch_sell_decision(
+    *,
+    bid_now: Any,
+    target_price: Any,
+    naked_age_s: Any,
+    grace_seconds: Any = DEFAULT_POST_PATCH_GRACE_SECONDS,
+    tolerance_bps: Any = 0.0,
+) -> dict[str, Any]:
+    """Matapos mag-certify ang PATCH ``Q -> R``, ibenta pa rin ba ang ``f``?
+
+    Ito ang function na kailangan ng ITINAMANG sequence at wala sa unang pasada.
+    Sa naunang disenyo ang PATCH ay pumuputok sa ENTRY (LR:33724), kaya ang
+    tanong na ito ay hindi kailanman lumitaw: ang ``f`` ay nakahiwalay na sa
+    deadman bago pa man malaman kung mararating ng bid ang target. Sa
+    ipinagpaliban na PATCH, ang PATCH ay pumuputok lamang kapag ``bid >= target``
+    -- ngunit ang PATCH ay may sariling round trip (200-260 ms), at ang bid ay
+    maaaring umatras sa loob nito. Sa sandaling iyon ang ``f`` ay HUBAD at ang
+    trigger ay wala na.
+
+    Fail-SAFE: kapag hindi mabasa ang quote, ``restore`` -- ibalik ang stop sa
+    buong ``Q``. Hindi tayo nag-iiwan ng hubad na ``f`` sa isang quote na hindi
+    natin mabasa.
+
+    Ang ``grace_seconds`` ang NAG-IISANG naked window ng tamang sequence.
+    Walang clock dito: ipinapasa ng caller ang ``naked_age_s``.
+    """
+    b = _as_float(bid_now)
+    t = _as_float(target_price)
+    age = _as_float(naked_age_s)
+    grace = _as_float(grace_seconds)
+    if grace is None or grace < 0.0:
+        grace = DEFAULT_POST_PATCH_GRACE_SECONDS
+    if b is None or t is None or b <= 0.0 or t <= 0.0:
+        return {
+            "action": "restore",
+            "valid": False,
+            "reason": "unreadable_quote_restore_full_stop",
+            "naked_age_s": age,
+        }
+    trig = partial_trigger_ready(
+        bid=b, target_price=t, tolerance_bps=tolerance_bps
+    )
+    if trig["ready"]:
+        return {
+            "action": "sell",
+            "valid": True,
+            "reason": "bid_still_at_or_through_target",
+            "naked_age_s": age,
+            "gap_bps": trig["gap_bps"],
+        }
+    if age is None or age < 0.0 or age >= grace:
+        return {
+            "action": "restore",
+            "valid": True,
+            "reason": (
+                "trigger_retreated_grace_expired"
+                if age is not None and age >= 0.0
+                else "unreadable_age_restore_full_stop"
+            ),
+            "naked_age_s": age,
+            "grace_seconds": grace,
+            "gap_bps": trig["gap_bps"],
+        }
+    return {
+        "action": "hold",
+        "valid": True,
+        "reason": "trigger_retreated_within_grace",
+        "naked_age_s": age,
+        "grace_seconds": grace,
+        "gap_bps": trig["gap_bps"],
     }
 
 

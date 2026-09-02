@@ -23,12 +23,14 @@ import pytest
 
 from app.services.trading.momentum_neural.path_b_marketable import (
     DEFAULT_NOTIONAL_GUARD_BPS,
+    DEFAULT_POST_PATCH_GRACE_SECONDS,
     EXTENDED_CROSS_MULTIPLE,
     PARTIAL_SHAPE_MARKETABLE,
     marketable_left_behind,
     marketable_partial_limit_price,
     partial_post_request,
     partial_trigger_ready,
+    post_patch_sell_decision,
 )
 
 _MODULE_NAME = "path_b_marketable"
@@ -56,6 +58,65 @@ def test_trigger_is_total_on_unreadable_input(bad):
     assert v["valid"] is False and v["ready"] is False
     v2 = partial_trigger_ready(bid=4.05, target_price=bad)
     assert v2["valid"] is False and v2["ready"] is False
+
+
+# ------------------------------------------- post-PATCH retreat (rev 2) ---
+#
+# These bind the CORRECTED sequence. The first revision of this addendum
+# deferred only the POST and left the PATCH at entry (LR:33724), which meant f
+# was carved out of the deadman from the entry fill onward and the claimed
+# "0.109 s naked window" was measuring only the last hop of a span that began
+# minutes earlier. The corrected sequence defers the PATCH too -- and that
+# creates exactly one new question, which is what these tests bind: the bid can
+# retreat inside the PATCH's own round trip, leaving f naked with no trigger.
+
+def test_sell_when_the_bid_is_still_at_the_target():
+    v = post_patch_sell_decision(bid_now=4.05, target_price=4.05, naked_age_s=0.3)
+    assert v["action"] == "sell"
+    assert v["valid"] is True
+
+
+def test_retreat_inside_grace_holds():
+    v = post_patch_sell_decision(bid_now=4.02, target_price=4.05, naked_age_s=0.3)
+    assert v["action"] == "hold"
+    assert v["reason"] == "trigger_retreated_within_grace"
+
+
+def test_retreat_past_grace_restores_the_full_stop():
+    """The runner is never left uncovered because the trigger went away."""
+    v = post_patch_sell_decision(
+        bid_now=4.02, target_price=4.05,
+        naked_age_s=DEFAULT_POST_PATCH_GRACE_SECONDS + 0.01,
+    )
+    assert v["action"] == "restore"
+    assert v["reason"] == "trigger_retreated_grace_expired"
+
+
+@pytest.mark.parametrize("bad", [None, "", "abc", 0, -1.0, float("nan"), True])
+def test_post_patch_decision_fails_safe_to_restore(bad):
+    """Unreadable quote must NEVER leave f naked -- it restores the full stop."""
+    v = post_patch_sell_decision(bid_now=bad, target_price=4.05, naked_age_s=0.1)
+    assert v["action"] == "restore"
+    assert v["valid"] is False
+    v2 = post_patch_sell_decision(bid_now=4.05, target_price=bad, naked_age_s=0.1)
+    assert v2["action"] == "restore"
+    assert v2["valid"] is False
+
+
+def test_unreadable_age_restores_rather_than_holding():
+    """A hold needs a trustworthy age; without one the stop goes back to Q."""
+    v = post_patch_sell_decision(bid_now=4.02, target_price=4.05, naked_age_s=None)
+    assert v["action"] == "restore"
+
+
+def test_the_only_naked_window_is_bounded_by_grace():
+    """Property: past the grace there is no input that returns sell-or-hold
+    while the bid is below the target. The naked span cannot exceed grace."""
+    for age in (2.0, 5.0, 30.0, 300.0, 10_000.0):
+        v = post_patch_sell_decision(
+            bid_now=1.00, target_price=4.05, naked_age_s=age, grace_seconds=2.0
+        )
+        assert v["action"] == "restore", (age, v)
 
 
 # ------------------------------------------------------------------ price ---
