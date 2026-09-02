@@ -106,6 +106,15 @@ def _sess(state="watching_live", le=None):
     )
 
 
+class _Events(list):
+    """Emitted events, plus the PHONE pages the escalation dispatched."""
+
+    def __init__(self):
+        super().__init__()
+        self.pages: list[dict] = []
+        self.page_delivers = [True]
+
+
 _MISSING = object()
 
 _CFG = {
@@ -121,10 +130,22 @@ def harness(monkeypatch):
     """Save/restore settings by hand: ``monkeypatch.setattr(raising=False)``
     deletes on teardown, which would turn "the bound does not exist yet" into a
     setup ERROR instead of the behavioural assertion these tests exist to make."""
-    events: list[tuple[str, dict]] = []
+    events = _Events()
     monkeypatch.setattr(
         LR, "_emit", lambda db, sess, et, payload: events.append((et, payload))
     )
+
+    # The escalation must reach a PHONE, not just this list. `pages` is exposed
+    # on the events list so every test can assert against it; `page_delivers`
+    # lets a test simulate a dropped page (30 of 101 alerts were dropped in one
+    # measured 40h window on this box).
+    from app.services.trading import alerts as _alerts
+
+    def _fake_dispatch(**kw):
+        events.pages.append(kw)
+        return events.page_delivers[0]
+
+    monkeypatch.setattr(_alerts, "dispatch_alert", _fake_dispatch)
 
     def _fake_transition(db, sess, new_state):
         if sess.state == new_state:
@@ -258,18 +279,82 @@ def test_unconverged_backs_off_to_the_slow_cadence(harness, clock):
 
 def test_legal_hop_back_to_watching_does_not_re_emit(harness, clock):
     """`live_pending_entry -> watching_live` ay LEGAL na edge. Ang dedupe ng
-    #1285 ay nakakabit sa state, kaya muli itong naaarmasan dito."""
+    #1285 ay nakakabit sa state, kaya muli itong naaarmasan dito.
+
+    Sinusukat sa TUNAY na cadence ng storm (1.93s), hindi 30s: sa 30s ay
+    lampas na sa probe interval kaya bumabagsak ito sa buong probe path at
+    hindi nasusuri ang throttled na landas.
+    """
     sess = _sess()
     adapter = _Adapter(_Order())
     _heal(sess, adapter)
     assert sess.state == "live_pending_entry"
     sess.state = "watching_live"  # legal FSM edge, taken elsewhere in the tick
-    clock.advance(30.0)
+    clock.advance(1.93)  # the MEASURED storm cadence, inside the probe interval
     out, _ = _heal(sess, adapter)
-    assert out["healed"] is True
-    assert out["repeat"] is True, "same order, second heal — no second page"
-    assert sess.state == "live_pending_entry", "the chain is still re-walked"
-    assert len([et for et, _ in harness if et == "live_entry_fill_self_healed"]) == 1
+    # Assert the DEFECT first: on origin/main this hop re-armed the emit and
+    # produced a second event. Reading the new return keys with .get() keeps the
+    # failure message about the re-emit rather than about a missing key.
+    assert len([et for et, _ in harness if et == "live_entry_fill_self_healed"]) == 1, (
+        "a legal live_pending_entry -> watching_live hop must not re-arm the emit"
+    )
+    assert sess.state == "live_pending_entry", (
+        "the chain must be re-walked on EVERY wake — watching_live is the one "
+        "state the adoption path cannot read and the reaper CAN reap"
+    )
+    assert out.get("repeat") is True, "same order, second heal — no second page"
+    assert out.get("throttled") is True
+    assert out.get("rechained") is True
+    assert adapter.lookups == 1, "and it costs no broker round-trip"
+
+
+def test_hop_back_after_the_cap_is_repaired_on_the_very_next_wake(harness, clock):
+    """Ang post-escalation na interval ay 60s. Kung ang chain re-walk ay nasa
+    ilalim ng throttle, ang hubad na posisyon ay uupo sa ``watching_live`` nang
+    hanggang isang buong minuto kada oscillation — mas malala kaysa sa main,
+    na muling nag-cha-chain kada ~1.93s."""
+    sess = _sess()
+    adapter = _Adapter(_Order())
+    for _ in range(6):
+        _heal(sess, adapter)
+        clock.advance(5.0)
+    assert [et for et, _ in harness if et == "live_entry_fill_self_heal_unconverged"]
+
+    sess.state = "watching_live"
+    clock.advance(1.93)
+    out, _ = _heal(sess, adapter)
+    assert sess.state == "live_pending_entry", (
+        "post-cap the probe backs off to 60s, but the chain must NOT: "
+        "time-to-deadman-stop cannot regress against the code being replaced"
+    )
+    assert out.get("rechained") is True
+    assert adapter.lookups == 6, "and still without asking the broker again"
+
+
+def test_a_confirmed_unadopted_fill_is_never_parked_in_a_reapable_state(harness, clock):
+    """Ang companion ng nasa itaas, sinabi bilang invariant.
+
+    ``watching_live`` ay kasapi ng ``_REAPABLE_PRE_ENTRY_STATES`` ng
+    stale-watch reaper — ang mismong TOCTOU na gumawa ng insidenteng ito. Ang
+    iwan doon ang session na may nakumpirmang fill ay nagpapalawak ng bintana
+    ng orihinal na sanhi."""
+    from app.services.trading.momentum_neural.auto_arm import (
+        _REAPABLE_PRE_ENTRY_STATES,
+    )
+
+    sess = _sess()
+    adapter = _Adapter(_Order())
+    _heal(sess, adapter)
+    for i in range(200):
+        # Oscillate back out of the adoption state on every other wake, the way
+        # a legal mid-tick edge would.
+        if i % 2 == 0:
+            sess.state = "watching_live"
+        _heal(sess, adapter)
+        clock.advance(1.93)
+        assert sess.state not in _REAPABLE_PRE_ENTRY_STATES, (
+            f"wake {i}: a confirmed unadopted fill was left in a reapable state"
+        )
 
 
 def test_the_hop_is_actually_legal():
@@ -339,6 +424,185 @@ def test_adoption_after_escalation_still_silences_the_loop(harness, clock):
     assert adapter.lookups == before
 
 
+# ── 5b: the UNFILLED probe must be bounded too ──────────────────────────────
+
+
+def test_a_resting_unfilled_order_is_throttled_not_polled_every_wake(harness, clock):
+    """Ang throttle na naka-key lang sa MATAGUMPAY na heal ay nag-iiwan sa
+    naka-resting na order na walang hangganan: sukat, 200 wake = 200
+    ``get_order``. At dahil ang bagong priority-lane admission ay nag-di-dispatch
+    ng naka-pause na row na dati ay hindi, ang trapikong ito ay BAGO."""
+    sess = _sess()
+    adapter = _Adapter(_Order(filled=0.0, status="open"))
+    for _ in range(200):
+        _heal(sess, adapter)
+        clock.advance(1.93)
+    # 200 wakes x 1.93s = 386s of wall clock at a 5s probe interval.
+    assert adapter.lookups <= 80, (
+        f"{adapter.lookups} broker round-trips for an order that never filled"
+    )
+    le = sess.risk_snapshot_json["momentum_live_execution"]
+    assert le["entry_fill_self_heal_probes"] == adapter.lookups
+    assert le.get("entry_fill_self_heal_last_probe_utc")
+
+
+def test_an_unfilled_order_can_never_page(harness, clock):
+    """Ang cap ay nananatiling naka-key sa NAKUMPIRMANG fill: ang hindi
+    na-fill na order ay hindi kailanman dapat mag-alarma."""
+    sess = _sess()
+    adapter = _Adapter(_Order(filled=0.0, status="open"))
+    for _ in range(400):
+        _heal(sess, adapter)
+        clock.advance(1.93)
+    assert not [et for et, _ in harness if et == "live_entry_fill_self_heal_unconverged"]
+    assert not harness.pages
+    le = sess.risk_snapshot_json["momentum_live_execution"]
+    assert le.get("entry_fill_self_heal_attempts") is None
+    assert le.get("entry_fill_self_heal_confirmed_size") is None
+
+
+def test_a_late_fill_on_a_previously_unfilled_order_still_heals(harness, clock):
+    """Ang throttle ay hindi dapat bumulag sa isang order na nag-fill mamaya."""
+    sess = _sess()
+    order = _Order(filled=0.0, status="open")
+    adapter = _Adapter(order)
+    for _ in range(3):
+        _heal(sess, adapter)
+        clock.advance(6.0)
+    assert not [et for et, _ in harness if et == "live_entry_fill_self_healed"]
+    order.filled_size = 165.0
+    order.status = "filled"
+    out, _ = _heal(sess, adapter)
+    assert out.get("healed") is True
+    assert sess.state == "live_pending_entry"
+    assert len([et for et, _ in harness if et == "live_entry_fill_self_healed"]) == 1
+
+
+# ── 5c: the alarm must reach a PHONE ────────────────────────────────────────
+
+
+def test_the_alarm_actually_pages(harness, clock):
+    sess = _sess()
+    _tick_storm(sess, _Adapter(_Order()), clock, wakes=60)
+    assert len(harness.pages) == 1, "exactly one page for one unresolved condition"
+    (page,) = harness.pages
+    from app.services.trading import alerts
+
+    assert page["alert_type"] == alerts.ENTRY_FILL_UNADOPTED
+    assert alerts.classify_alert_tier(page["alert_type"]) == alerts.TIER_A
+    assert page["ticker"] == "CANF"
+    assert page["skip_throttle"] is True, (
+        "a tickerless/less-frequent generic throttle must not swallow this"
+    )
+    assert "f3ed508d" in page["content_signature"]
+    assert "165.0" in page["message"]
+    assert "no software stop" in page["message"].lower()
+
+
+def test_a_dropped_page_is_retried_and_not_latched(harness, clock):
+    """30 sa 101 alerts ay nalaglag sa isang sinukat na 40h window sa kahong
+    ito. Ang mag-latch sa hindi naihatid ay paggawa ng tahimik na kabiguan."""
+    sess = _sess()
+    adapter = _Adapter(_Order())
+    harness.page_delivers[0] = False
+    _tick_storm(sess, adapter, clock, wakes=60)
+    le = sess.risk_snapshot_json["momentum_live_execution"]
+    assert le.get("entry_fill_self_heal_paged_sig") is None
+    assert len(harness.pages) > 1, "an undelivered page must be retried"
+    # The DURABLE record is not contingent on the channel: still exactly one.
+    assert len(
+        [et for et, _ in harness if et == "live_entry_fill_self_heal_unconverged"]
+    ) == 1
+
+    # Retries are on the SLOW cadence, not the wake cadence — one per reprobe.
+    assert len(harness.pages) <= 12, f"{len(harness.pages)} pages is a page storm"
+
+    harness.page_delivers[0] = True
+    clock.advance(61.0)
+    _heal(sess, adapter)
+    assert le.get("entry_fill_self_heal_paged_sig") == "f3ed508d"
+    _n = len(harness.pages)
+    for _ in range(100):
+        clock.advance(61.0)
+        _heal(sess, adapter)
+    assert len(harness.pages) == _n, "a delivered page latches for good"
+
+
+# ── 5d: leaving the healable set must ALARM, not go quiet ───────────────────
+
+
+def test_terminalized_while_holding_a_confirmed_fill_alarms(harness, clock):
+    """Ang hugis ng BRNX 17370 — ang PINAKAMASAMA sa 21-araw na census.
+
+    Terminal state ``live_arm_expired``, order FILLED sa broker, ``position``
+    None, 54m10s hubad, realized −82.00; ang katotohanan ay lumitaw lamang nang
+    ang cancel ng operator ay tumalbog sa ``order is already in "filled"
+    state``.  Ang ``live_arm_expired`` ay isinusulat ng ibang module, kaya ang
+    state gate ng heal ay maaaring bawiin ang buong proteksyong ito mula sa
+    labas.  Kapag nangyari iyon habang may nakumpirmang fill, ito ay dapat
+    UMALARMA — hindi tumahimik."""
+    sess = _sess()
+    adapter = _Adapter(_Order())
+    _heal(sess, adapter)
+    assert sess.state == "live_pending_entry"
+    le = sess.risk_snapshot_json["momentum_live_execution"]
+    assert le["entry_fill_self_heal_confirmed_size"] == 165.0
+
+    # Some other module terminalizes the row while the broker still holds it.
+    sess.state = "live_arm_expired"
+    clock.advance(1.93)
+    out, _ = _heal(sess, adapter)
+
+    (alarm,) = [
+        p for et, p in harness if et == "live_entry_fill_self_heal_unconverged"
+    ]
+    assert alarm["reason"] == "terminalized_while_unadopted"
+    assert alarm["state"] == "live_arm_expired"
+    assert alarm["filled_size"] == 165.0
+    assert out.get("escalated") is True
+    assert len(harness.pages) == 1, "and it pages"
+    assert adapter.lookups == 1, "without touching the broker again"
+
+    # And it does not become a NEW storm: this call site never reaches the
+    # broker-probe throttle, so the page needs its own bound.
+    for _ in range(500):
+        clock.advance(1.93)
+        _heal(sess, adapter)
+    assert len(harness.pages) == 1
+    assert len(
+        [et for et, _ in harness if et == "live_entry_fill_self_heal_unconverged"]
+    ) == 1
+    assert adapter.lookups == 1
+
+
+def test_a_terminalized_row_with_a_failing_channel_does_not_page_storm(harness, clock):
+    sess = _sess()
+    adapter = _Adapter(_Order())
+    _heal(sess, adapter)
+    sess.state = "live_arm_expired"
+    harness.page_delivers[0] = False
+    for _ in range(1000):  # ~32 minutes at the measured cadence
+        clock.advance(1.93)
+        _heal(sess, adapter)
+    assert len(harness.pages) <= 40, (
+        f"{len(harness.pages)} page attempts — retry must be on the slow cadence"
+    )
+    assert len(harness.pages) >= 2, "but an undelivered page must still be retried"
+
+
+def test_an_ordinary_finished_trade_still_does_not_alarm(harness, clock):
+    """Ang guard sa itaas ay nakabatay sa NAKUMPIRMANG fill, hindi sa state
+    lamang — kung hindi, ang bawat tapos na trade (na nag-iiwan din ng
+    entry_submitted + walang position hanggang recycle) ay mag-aalarma. Iyon
+    ang eksaktong false CRITICAL na binantayan ng unang draft."""
+    for state in ("live_cooldown", "live_exited", "live_finished", "live_arm_expired"):
+        sess = _sess(state=state)
+        out, _ = _heal(sess, _Adapter(_Order()))
+        assert out == {}, f"{state} produced {out}"
+    assert not harness
+    assert not harness.pages
+
+
 # ── 6: structural guards ────────────────────────────────────────────────────
 
 
@@ -358,9 +622,30 @@ def _fn_body_src(fn) -> str:
 
 def test_the_throttle_precedes_every_broker_call():
     src = _fn_body_src(LR._heal_unrecognized_entry_fill)
-    i_throttle = src.index("entry_fill_self_heal_last_utc")
+    i_throttle = src.index("entry_fill_self_heal_last_probe_utc")
     assert i_throttle < src.index("_recover_entry_order_by_client_id")
     assert i_throttle < src.index("adapter.get_order")
+
+
+def test_the_throttle_does_not_gate_the_chain_re_walk():
+    """Ang throttle ay para sa BROKER PROBE lang.
+
+    Kapag ang ``_transition_recovered_primary_to_pending`` ay nasa ILALIM lang
+    ng throttle-return, ang session na may nakumpirmang fill ay naiiwan sa
+    ``watching_live`` sa loob ng buong interval — ang tanging state na hindi
+    kayang basahin ng adoption path AT kayang reap-in ng stale-watch reaper.
+    """
+    src = _fn_body_src(LR._heal_unrecognized_entry_fill)
+    i_throttle_ret = src.index("out['throttled'] = True")
+    i_next_ret = src.index("return out", i_throttle_ret)
+    window = src[i_throttle_ret:i_next_ret]
+    assert "_transition_recovered_primary_to_pending" in window, (
+        "a throttled wake must still re-assert the legal chain to "
+        "live_pending_entry from the cached fill — no broker call needed"
+    )
+    assert "entry_fill_self_heal_confirmed_size" in src, (
+        "the cached fill is what makes the throttled re-walk free"
+    )
 
 
 def test_the_dedupe_is_not_conditioned_on_the_state():
@@ -375,10 +660,31 @@ def test_the_dedupe_is_not_conditioned_on_the_state():
 
 
 def test_escalation_is_emitted_exactly_once_per_signature():
-    src = _fn_body_src(LR._heal_unrecognized_entry_fill)
+    src = _fn_body_src(LR._escalate_unadopted_entry_fill)
     assert "live_entry_fill_self_heal_unconverged" in src
     assert "entry_fill_self_heal_unconverged_sig" in src
     assert "_log.error(" in src, "the alarm must be loud in the lane log too"
+    assert "dispatch_alert" in src, (
+        "a trading_automation_events row is a PULL surface — 3,374 of them "
+        "carrying severity=critical produced zero operator response for 108 "
+        "minutes on 09-02. The alarm must also page."
+    )
+
+
+def test_the_page_is_ordered_after_the_durable_record():
+    """Ang ERROR log at ang DB event ay HINDI dapat nakasalalay sa channel."""
+    src = _fn_body_src(LR._escalate_unadopted_entry_fill)
+    assert src.index("_log.error(") < src.index("dispatch_alert")
+    assert src.index("live_entry_fill_self_heal_unconverged") < src.index("dispatch_alert")
+
+
+def test_the_alert_type_is_tier_a_and_individual():
+    """Kung ito ay mapunta sa Telegram panel, ito ay nag-e-EDIT ng naka-pin na
+    mensahe — walang notification sa telepono, ika-apat na tahimik na surface."""
+    from app.services.trading import alerts
+
+    assert alerts.classify_alert_tier(alerts.ENTRY_FILL_UNADOPTED) == alerts.TIER_A
+    assert alerts.ENTRY_FILL_UNADOPTED in alerts._INDIVIDUAL_MSG_TYPES
 
 
 def test_the_bounds_are_configurable_and_sane():

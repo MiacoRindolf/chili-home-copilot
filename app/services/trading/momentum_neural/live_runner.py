@@ -25860,6 +25860,125 @@ def _unadopted_entry_order_signature(le: dict) -> str:
     return oid or cid
 
 
+# How long a FAIL-OPEN admission (unreadable snapshot) may keep a row pinned in
+# the uncapped priority lane on its own.  Fail-open is right for a possibly naked
+# position, but an unreadable snapshot is a permanent condition, not a transient
+# one: without a cap, one corrupt row silently occupies priority dispatch forever
+# and starves the lane it was meant to protect.  Five minutes is ~150 wakes at the
+# measured 1.93s cadence — far more than the 0.8-11.4s band in which every one of
+# the 21-day adoptions actually landed.
+_UNADOPTED_FAILOPEN_MAX_S = 300.0
+# session_id -> monotonic first-seen. Hard-capped; see _unadopted_failopen_ok.
+_UNADOPTED_FAILOPEN_SEEN: dict[int, float] = {}
+_UNADOPTED_FAILOPEN_MAX_TRACKED = 512
+
+
+def _unadopted_failopen_ok(session_id: Any) -> bool:
+    """True while a fail-open admission for *session_id* is still within its cap."""
+    try:
+        sid = int(session_id)
+    except (TypeError, ValueError):
+        return True
+    now = time.monotonic()
+    first = _UNADOPTED_FAILOPEN_SEEN.get(sid)
+    if first is None:
+        if len(_UNADOPTED_FAILOPEN_SEEN) >= _UNADOPTED_FAILOPEN_MAX_TRACKED:
+            # Bounded cache (hard max + eviction, per the concurrency convention):
+            # drop the oldest half rather than growing without limit.
+            for _sid, _ in sorted(
+                _UNADOPTED_FAILOPEN_SEEN.items(), key=lambda kv: kv[1]
+            )[: _UNADOPTED_FAILOPEN_MAX_TRACKED // 2]:
+                _UNADOPTED_FAILOPEN_SEEN.pop(_sid, None)
+        _UNADOPTED_FAILOPEN_SEEN[sid] = now
+        return True
+    return (now - first) < _UNADOPTED_FAILOPEN_MAX_S
+
+
+def _unadopted_entry_dispatch_class(sess: TradingAutomationSession) -> str:
+    """Classify a session's possible unadopted-broker-fill exposure for dispatch.
+
+    Returns one of:
+
+    ``""``
+        Nothing unadopted (or the machinery is disabled).
+    ``"committed"``
+        The order is known to be live and the session is at (or has already been
+        confirmed past) the point where a real broker fill is in hand:
+        ``live_pending_entry``, or any state where a previous heal already
+        CONFIRMED a non-zero fill.  This outranks everything, including an
+        unreadable claim table — the position may be naked right now.
+    ``"pre_entry"``
+        A submitted order with no adopted position, on a row still in a pre-entry
+        state, for an execution family that has its OWN per-session fail-closed
+        backstop (Alpaca: ``_recover_owner_alpaca_entry_claim`` returns
+        ``block_new_entries: True`` when ``read_action_claim`` is unreadable).
+        Admitted even when the dispatcher's claim read failed, because the tick
+        itself will refuse to open anything new.
+    ``"pre_entry_unbacked"``
+        The same shape on a family that has NO such backstop —
+        ``_recover_owner_alpaca_entry_claim`` returns
+        ``block_new_entries: False`` on its first line for coinbase_spot /
+        robinhood_spot, so the dispatcher guard is their only protection.  Stays
+        subject to the fail-closed rule.
+    ``"unreadable"``
+        The snapshot could not be parsed.  Treated as ``pre_entry`` by the
+        caller and additionally time-capped, so a permanently corrupt row cannot
+        pin itself in the priority lane forever.
+    """
+    try:
+        if not bool(getattr(
+            settings,
+            "chili_momentum_unadopted_entry_dispatch_priority_enabled",
+            True,
+        )):
+            return ""
+        # The ONLY thing that can clear this row's signature is the heal itself.
+        # With the heal disabled the row can never converge, so admitting it to
+        # the uncapped priority lane makes it a permanent resident.
+        if not bool(getattr(
+            settings, "chili_momentum_entry_fill_self_heal_enabled", True
+        )):
+            return ""
+    except Exception:
+        return ""
+    try:
+        snap = dict(getattr(sess, "risk_snapshot_json", None) or {})
+        le = dict(snap.get("momentum_live_execution") or {})
+    except Exception:
+        # Fail OPEN: an unreadable snapshot must never be the reason a possibly
+        # naked position stops being looked at. ERROR, not WARNING — this is a
+        # corrupt session row, and the caller degrades it to pre-entry class and
+        # time-caps it rather than granting unconditional priority.
+        _log.error(
+            "[live_runner] unadopted-entry dispatch probe failed session=%s",
+            getattr(sess, "id", None), exc_info=True,
+        )
+        return "unreadable"
+    if not _unadopted_entry_order_signature(le):
+        return ""
+    state = str(getattr(sess, "state", "") or "")
+    try:
+        confirmed = float(le.get("entry_fill_self_heal_confirmed_size") or 0.0)
+    except (TypeError, ValueError):
+        confirmed = 0.0
+    if state == STATE_LIVE_PENDING_ENTRY or confirmed > 0.0:
+        # ``confirmed > 0`` is deliberately not restricted to the healable set:
+        # a session terminalized (or recycled) OUT of the healable states while
+        # still holding a fill the FSM never adopted is the BRNX 17370 shape —
+        # 54m10s naked, the worst case in the 21-day census. It must keep being
+        # ticked so the heal can ALARM instead of going silent.
+        return "committed"
+    if state in _HEALABLE_PRE_ENTRY_STATES:
+        try:
+            _alpaca = normalize_execution_family(
+                getattr(sess, "execution_family", None)
+            ) in ALPACA_EXECUTION_FAMILIES
+        except Exception:
+            _alpaca = False
+        return "pre_entry" if _alpaca else "pre_entry_unbacked"
+    return ""
+
+
 def _session_has_unadopted_entry_order(sess: TradingAutomationSession) -> bool:
     """Dispatch authority for a session that may be holding an unowned broker fill.
 
@@ -25879,27 +25998,12 @@ def _session_has_unadopted_entry_order(sess: TradingAutomationSession) -> bool:
     only.  It deliberately does NOT grant ``_paused_session_has_exit_authority``:
     the heal and the paused adopt-only branch both run ABOVE the operator-pause
     gate, so bounding detection never re-opens the entry path on a paused row.
+
+    Thin boolean over :func:`_unadopted_entry_dispatch_class`; the dispatcher
+    itself uses the class, because a ``pre_entry`` row must still respect the
+    fail-closed rule that applies when the durable-claim table is unreadable.
     """
-    try:
-        if not bool(getattr(
-            settings,
-            "chili_momentum_unadopted_entry_dispatch_priority_enabled",
-            True,
-        )):
-            return False
-        if str(getattr(sess, "state", "") or "") not in _HEALABLE_PRE_ENTRY_STATES:
-            return False
-        snap = dict(getattr(sess, "risk_snapshot_json", None) or {})
-        le = dict(snap.get("momentum_live_execution") or {})
-        return bool(_unadopted_entry_order_signature(le))
-    except Exception:
-        # Fail OPEN: an unreadable snapshot must never be the reason a possibly
-        # naked position stops being looked at.
-        _log.warning(
-            "[live_runner] unadopted-entry dispatch probe failed session=%s",
-            getattr(sess, "id", None), exc_info=True,
-        )
-        return True
+    return bool(_unadopted_entry_dispatch_class(sess))
 
 
 def list_runnable_live_sessions(db: Session, *, limit: int = 25) -> list[TradingAutomationSession]:
@@ -25951,19 +26055,68 @@ def list_runnable_live_sessions(db: Session, *, limit: int = 25) -> list[Trading
     priority: list[TradingAutomationSession] = []
     normal: list[TradingAutomationSession] = []
     for row in rows:
-        paused = is_operator_paused(row.risk_snapshot_json)
+        # Per-ROW isolation. An unreadable/corrupt snapshot on one row used to
+        # raise straight out of this loop and take the ENTIRE batch with it —
+        # every other live session, including ones holding real positions, would
+        # stop being dispatched because of one bad row. Treat an unreadable
+        # pause flag as paused (conservative: keeps it out of the normal lane)
+        # and let the unadopted-entry class below decide about priority.
+        try:
+            paused = is_operator_paused(row.risk_snapshot_json)
+        except Exception:
+            _log.error(
+                "[live_runner] operator-pause read failed session=%s; treating as "
+                "paused for this batch", getattr(row, "id", None), exc_info=True,
+            )
+            paused = True
         has_claim = int(row.id) in claim_owner_ids
-        has_exit_authority = _paused_session_has_exit_authority(row)
+        try:
+            has_exit_authority = _paused_session_has_exit_authority(row)
+        except Exception:
+            _log.error(
+                "[live_runner] exit-authority read failed session=%s",
+                getattr(row, "id", None), exc_info=True,
+            )
+            has_exit_authority = False
         # A submitted-but-unadopted entry order is possible NAKED exposure and
-        # outranks the batch cap, the pause flag and the claim table alike
-        # (CANF 19471: 12m49s undispatched behind a machine-written pause).
-        has_unadopted_entry = _session_has_unadopted_entry_order(row)
+        # outranks the batch cap and the pause flag (CANF 19471: 12m49s
+        # undispatched behind a machine-written pause).
+        #
+        # It does NOT blanket-outrank the claim table. The fail-closed rule above
+        # exists because an unreadable claim table means we cannot tell whether a
+        # NEW entry is safe to work, and a pre-entry row admitted here is a row
+        # the full entry FSM will run. Admission is therefore graded:
+        #   committed          — live_pending_entry, or a heal already CONFIRMED a
+        #                        real broker fill. Not a new entry at all: an
+        #                        existing position that may have no stop.
+        #                        Unconditional.
+        #   pre_entry          — Alpaca. The tick's own
+        #                        _recover_owner_alpaca_entry_claim fails closed
+        #                        (block_new_entries) when claim truth is
+        #                        unreadable, so admitting the row cannot open
+        #                        anything new. Admitted; this is the CANF shape.
+        #   pre_entry_unbacked — coinbase_spot / robinhood_spot, where that same
+        #                        function returns block_new_entries=False on its
+        #                        FIRST line. The dispatcher guard is their only
+        #                        protection, so it must hold.
+        #   unreadable         — corrupt snapshot; venue unknown, so treated as
+        #                        unbacked AND time-capped so it cannot pin itself
+        #                        in the uncapped priority lane forever.
+        _unadopted_class = _unadopted_entry_dispatch_class(row)
+        if _unadopted_class in ("committed", "pre_entry"):
+            has_unadopted_entry = True
+        elif _unadopted_class == "pre_entry_unbacked":
+            has_unadopted_entry = claim_truth_readable
+        elif _unadopted_class == "unreadable":
+            has_unadopted_entry = claim_truth_readable and _unadopted_failopen_ok(row.id)
+        else:
+            has_unadopted_entry = False
         if has_claim or has_exit_authority or has_unadopted_entry:
             if has_unadopted_entry and not (has_claim or has_exit_authority):
-                _log.debug(
+                _log.warning(
                     "[live_runner] priority dispatch session=%s %s: submitted entry "
-                    "order not adopted (paused=%s) — bounding fill detection",
-                    row.id, row.symbol, paused,
+                    "order not adopted (class=%s paused=%s) — bounding fill detection",
+                    row.id, row.symbol, _unadopted_class, paused,
                 )
             priority.append(row)
         elif not paused and claim_truth_readable:
@@ -28575,6 +28728,138 @@ def _heal_reprobe_interval_s() -> float:
         return 60.0
 
 
+def _escalate_unadopted_entry_fill(
+    db, sess, le, *,
+    sig: str,
+    client_order_id: str,
+    filled: float,
+    attempts: int,
+    cap: int,
+    reason: str,
+    out: dict,
+) -> None:
+    """The broker holds a fill this session never adopted. PAGE, once, loudly.
+
+    Two independent latches, because they fail differently:
+
+    * ``entry_fill_self_heal_unconverged_sig`` latches the DB event + ERROR log
+      unconditionally, once per order id. That is the durable record and it must
+      not be contingent on a delivery channel.
+    * ``entry_fill_self_heal_paged_sig`` latches the PHONE ALERT only on
+      CONFIRMED delivery, mirroring ``control_loop_watchdog``. A dropped page
+      that latched anyway is how a silent failure is manufactured — measured on
+      this very box, 30 of 101 alerts dropped in one 40h window. Retry is free
+      here: the caller is already on the slow post-escalation cadence, so a
+      failed page is retried at most once per ``unconverged_reprobe_s``.
+
+    Why a phone alert at all, when the emit already writes ``severity: critical``
+    into ``trading_automation_events``: on 2026-09-02 session 19471 wrote 3,374
+    such rows over 108 minutes and produced ZERO operator response. That table is
+    a pull surface with no scanner. ``control_loop_watchdog``'s module docstring
+    already records the verdict — a log line, a DB row and a red banner on a pull
+    surface "an operator who is not currently looking at a screen will miss."
+    Bounding the storm without adding a real alarm would have made this failure
+    *less* visible than the storm that got it noticed.
+    """
+    _first_utc = str(le.get("entry_fill_self_heal_first_utc") or "")
+    _first_dt = _heal_ts(_first_utc)
+    _elapsed = (
+        (_utcnow() - _first_dt).total_seconds() if _first_dt is not None else None
+    )
+    _state = str(getattr(sess, "state", "") or "")
+    _symbol = str(getattr(sess, "symbol", "") or "")
+
+    if le.get("entry_fill_self_heal_unconverged_sig") != sig:
+        le["entry_fill_self_heal_unconverged_sig"] = sig
+        _commit_le(sess, le)
+        _emit(db, sess, "live_entry_fill_self_heal_unconverged", {
+            "severity": "critical",
+            "order_id": sig,
+            "client_order_id": client_order_id,
+            "filled_size": filled,
+            "attempts": attempts,
+            "max_attempts": cap,
+            "first_heal_utc": _first_utc or None,
+            "elapsed_s": _elapsed,
+            "state": _state,
+            "reason": reason,
+            "note": (
+                "ang entry fill ay nakumpirma sa broker pero hindi kailanman "
+                "na-adopt ng fill-adoption path — posisyong WALANG software "
+                "stop at WALANG deadman stop; kailangan ng operator"
+            ),
+        })
+        db.flush()
+        # Unconditional and BEFORE the send: this is the record that survives a
+        # channel outage, so it must not be contingent on the channel.
+        _log.error(
+            "[momentum_live] ENTRY FILL NOT ADOPTED %s: %s shares, %s attempts on "
+            "order %s, state=%s, reason=%s, unadopted for %ss — position has NO "
+            "software stop",
+            _symbol, filled, attempts, sig[:8], _state, reason, _elapsed,
+        )
+        out["unconverged"] = True
+        out["escalated"] = True
+
+    if le.get("entry_fill_self_heal_paged_sig") == sig:
+        return
+    # Retrying an undelivered page is required (see above), but it must be rate
+    # limited independently of the broker-probe throttle: the terminalized-while-
+    # unadopted call site never reaches that throttle, so without this a
+    # persistently failing channel would attempt a page — and write an
+    # AlertHistory row — on every wake, i.e. the storm this PR exists to end,
+    # relocated. Reuses the post-escalation cadence; no new magic number.
+    _page_gap = _heal_reprobe_interval_s()
+    _last_page = _heal_ts(le.get("entry_fill_self_heal_page_attempt_utc"))
+    if _last_page is not None and (_utcnow() - _last_page).total_seconds() < _page_gap:
+        out["page_throttled"] = True
+        return
+    le["entry_fill_self_heal_page_attempt_utc"] = _utcnow().isoformat()
+    _commit_le(sess, le)
+    delivered = False
+    try:
+        from ..alerts import ENTRY_FILL_UNADOPTED, dispatch_alert
+
+        delivered = bool(dispatch_alert(
+            db=db,
+            user_id=int(getattr(sess, "user_id", 0) or 0) or None,
+            alert_type=ENTRY_FILL_UNADOPTED,
+            ticker=_symbol or None,
+            message=(
+                f"⚠️ <b>UNADOPTED BROKER FILL</b> — {_symbol or 'session'} "
+                f"has {filled} shares filled at the broker that the automation "
+                f"never took ownership of. There is NO software stop and NO "
+                f"deadman stop on this position.<br>"
+                f"session={getattr(sess, 'id', None)} order={sig[:8]} "
+                f"state={_state} attempts={attempts}/{cap} "
+                f"unadopted_for={_elapsed}s reason={reason}<br>"
+                f"Flatten or adopt it manually."
+            ),
+            # One page per order id; the content_signature carries the dedupe and
+            # the generic per-ticker throttle would otherwise suppress a genuine
+            # second incident on the same symbol for 5 minutes.
+            skip_throttle=True,
+            content_signature=f"entry_fill_unadopted:{getattr(sess, 'id', None)}:{sig}",
+        ))
+    except Exception:
+        # A delivery failure must never break the tick — the ERROR log above has
+        # already recorded the fact, and the page is retried on the next wake.
+        _log.warning(
+            "[momentum_live] unadopted-fill page dispatch failed session=%s",
+            getattr(sess, "id", None), exc_info=True,
+        )
+    out["paged"] = delivered
+    if delivered:
+        le["entry_fill_self_heal_paged_sig"] = sig
+        _commit_le(sess, le)
+    else:
+        _log.warning(
+            "[momentum_live] unadopted-fill page NOT delivered session=%s order=%s "
+            "— retrying next wake (the position is still unstopped)",
+            getattr(sess, "id", None), sig[:8],
+        )
+
+
 def _heal_unrecognized_entry_fill(db, sess, adapter, *, le, product_id) -> dict:
     """SELF-HEAL: ang session na may naisumiteng entry PERO walang naitalang
     posisyon ay muling kinukumpirma sa BROKER TRUTH (#1267).
@@ -28621,13 +28906,28 @@ def _heal_unrecognized_entry_fill(db, sess, adapter, *, le, product_id) -> dict:
     ng bawat gate ng tick. Ang unang dedupe ay nagpatahimik lang ng emit at
     nakakabit pa sa ``state == live_pending_entry`` gayong LEGAL ang
     ``live_pending_entry -> watching_live``. Ngayon ay may TATLONG hangganan:
-    (f) throttle BAGO ang broker probe (``entry_fill_self_heal_last_utc``);
-    (g) bilang ng tangka kada order (``entry_fill_self_heal_attempts``); at
+    (f) throttle BAGO ang broker probe (``entry_fill_self_heal_last_probe_utc``)
+    — SA BAWAT probe, kasama ang walang laman at hindi mabasa, dahil ang
+    nakahimpil na order ay dating gumagawa ng isang round-trip kada wake
+    HABAMBUHAY; (g) bilang ng tangka kada order
+    (``entry_fill_self_heal_attempts``), nakabatay LAMANG sa nakumpirmang
+    fill kaya hindi kayang mag-page ng order na hindi pa na-fill; at
     (h) kapag umabot sa cap nang hindi pa rin na-a-adopt, ISANG malakas na
-    ``live_entry_fill_self_heal_unconverged`` (severity critical + ERROR log)
-    at mabagal na re-probe — hindi tahimik na pag-ikot. Ang chain ay muli pa
-    ring nilalakad kahit repeat, kaya ang umaandap na state ay naaayos; ang
-    EVENT lang ang minsan kada order.
+    alarma — ``live_entry_fill_self_heal_unconverged`` (severity critical),
+    ERROR log, AT tunay na TIER_A na page sa telepono — at mabagal na
+    re-probe, hindi tahimik na pag-ikot.
+
+    MAHALAGA — ang throttle ay para SA BROKER PROBE LAMANG. Ang chain pabalik
+    sa ``live_pending_entry`` ay muling nilalakad sa BAWAT wake gamit ang
+    naka-cache na fill (``entry_fill_self_heal_confirmed_size``), nang walang
+    tawag sa broker. Ito ang tanging state na binabasa ng adoption path at ang
+    tanging state na HINDI kayang reap-in ng stale-watch reaper: ang iwan ang
+    session sa ``watching_live`` sa loob ng throttle window ay mas malala
+    kaysa sa storm na inaayos nito.
+
+    At kapag ang session ay LUMABAS ng healable set (hal. ``live_arm_expired``
+    — BRNX 17370, 54m10s hubad) habang may nakumpirmang fill na hindi
+    na-adopt, ito ay UMAALARMA, hindi tahimik na bumabalik.
     """
     out: dict = {}
     _oid = ""
@@ -28645,15 +28945,49 @@ def _heal_unrecognized_entry_fill(db, sess, adapter, *, le, product_id) -> dict:
         _cid = str(le.get("entry_client_order_id") or "").strip()
         if not _oid and not _cid:
             return out
-        if str(sess.state) in _TERMINAL_ISH_FOR_HEAL:
-            return out
-        if str(sess.state) not in _HEALABLE_PRE_ENTRY_STATES:
-            return out
         # Already-recognised order (adopted / void / any outcome): nothing to heal.
         # Shared with the dispatch predicate so "the heal could act" and "the
         # session gets dispatched" can never disagree.
         _pending_sig = _unadopted_entry_order_signature(le)
         if not _pending_sig:
+            return out
+
+        _cap = _heal_max_attempts()
+        try:
+            _confirmed = float(le.get("entry_fill_self_heal_confirmed_size") or 0.0)
+        except (TypeError, ValueError):
+            _confirmed = 0.0
+
+        # ── LEFT THE HEALABLE SET WHILE STILL HOLDING A CONFIRMED FILL ──
+        # A completed trade also leaves entry_submitted/entry_order_id set with
+        # position=None until recycle, which is why the healable allowlist exists
+        # at all — treating those as healable produced a false CRITICAL on every
+        # finished trade. But a session that has left the set while a previous
+        # heal CONFIRMED a real broker fill it never adopted is the opposite
+        # case, and it is the worst one measured: BRNX 17370, terminal state
+        # ``live_arm_expired``, 54m10s naked, realized −82.00, discovered only
+        # because the operator's cancel bounced off the broker with
+        # ``order is already in "filled" state``. Returning silently there is how
+        # a state transition written by some other module quietly revokes this
+        # whole protection. Alarm instead. The confirmed-fill condition is what
+        # keeps this free of the finished-trade false positive: a clean trade
+        # never has a confirmed fill the FSM failed to adopt.
+        _state_now = str(sess.state)
+        if (
+            _state_now in _TERMINAL_ISH_FOR_HEAL
+            or _state_now not in _HEALABLE_PRE_ENTRY_STATES
+        ):
+            if _confirmed > 0.0:
+                _escalate_unadopted_entry_fill(
+                    db, sess, le,
+                    sig=str(le.get("entry_fill_self_heal_sig") or _pending_sig),
+                    client_order_id=_cid,
+                    filled=_confirmed,
+                    attempts=int(le.get("entry_fill_self_heal_attempts") or 0),
+                    cap=_cap,
+                    reason="terminalized_while_unadopted",
+                    out=out,
+                )
             return out
 
         # ── CONVERGENCE GATE (2026-09-02 CANF 19471: 3,374 events, 108 min) ──
@@ -28673,9 +29007,28 @@ def _heal_unrecognized_entry_fill(db, sess, adapter, *, le, product_id) -> dict:
         _healed_sig = str(le.get("entry_fill_self_heal_sig") or "")
         _same_order = bool(_healed_sig) and _healed_sig in {_pending_sig, _oid, _cid}
         _attempts = int(le.get("entry_fill_self_heal_attempts") or 0) if _same_order else 0
-        _cap = _heal_max_attempts()
+        if not _same_order:
+            _confirmed = 0.0
         _unconverged = _same_order and _attempts >= _cap
-        _last_probe = _heal_ts(le.get("entry_fill_self_heal_last_utc")) if _same_order else None
+        # The PROBE throttle is keyed on its own signature and is written after
+        # EVERY completed broker lookup — including ``no is None`` and
+        # ``filled <= 0``. Keying it on the heal signature (only written on a
+        # successful heal) left the submitted-but-still-resting case completely
+        # unbounded: measured 200 wakes on a resting order = 200 ``get_order``
+        # calls, no counter, no escalation, forever — and the new priority-lane
+        # admission means a paused row that used never to be dispatched would
+        # have generated exactly that traffic indefinitely.
+        _probe_sig = str(le.get("entry_fill_self_heal_probe_sig") or "")
+        # Membership, not equality: the probe signature is written BEFORE
+        # ``_bind_recovered_entry_order``, which can promote a client-id-only
+        # session to a broker order id. A strict == would then miss on the very
+        # next wake and re-open the unbounded probe loop.
+        _probe_same = bool(_probe_sig) and _probe_sig in {_pending_sig, _oid, _cid}
+        _probes = int(le.get("entry_fill_self_heal_probes") or 0) if _probe_same else 0
+        _last_probe = (
+            _heal_ts(le.get("entry_fill_self_heal_last_probe_utc"))
+            if _probe_same else None
+        )
         _interval = _heal_reprobe_interval_s() if _unconverged else _heal_probe_interval_s()
         _now = _utcnow()
         if (
@@ -28685,12 +29038,31 @@ def _heal_unrecognized_entry_fill(db, sess, adapter, *, le, product_id) -> dict:
             # Nothing changed and it is not time to ask the broker again. The
             # OLD code fell through to ``adapter.get_order`` here on every one
             # of 3,373 wakes.
-            out["healed"] = True
+            out["healed"] = _confirmed > 0.0
             out["repeat"] = True
             out["throttled"] = True
             out["attempts"] = _attempts
             if _unconverged:
                 out["unconverged"] = True
+            # THE THROTTLE BOUNDS THE BROKER PROBE, NOT THE CHAIN.
+            # ``live_pending_entry -> watching_live`` is a LEGAL edge, and
+            # ``watching_live`` is simultaneously (i) the one state the
+            # fill-adoption path cannot read, so no position and no deadman stop
+            # can be written from it, and (ii) a member of the stale-watch
+            # reaper's ``_REAPABLE_PRE_ENTRY_STATES``, i.e. the state whose
+            # cancel-races-fill TOCTOU manufactured this incident. Leaving a
+            # session with a CONFIRMED unadopted fill parked there for the
+            # throttle interval — up to 60s once escalated — would be a
+            # regression against the very code this fix replaces, which
+            # re-chained on every ~1.93s wake. So re-assert the chain here,
+            # using the fill cached on the first successful heal: no broker call,
+            # no event, just the state the adoption path needs.
+            if _confirmed > 0.0 and str(sess.state) != STATE_LIVE_PENDING_ENTRY:
+                if _transition_recovered_primary_to_pending(db, sess):
+                    db.flush()
+                    out["rechained"] = True
+                else:
+                    out["rechain_failed"] = True
             return out
         no = None
         if _cid:
@@ -28704,13 +29076,29 @@ def _heal_unrecognized_entry_fill(db, sess, adapter, *, le, product_id) -> dict:
                 no = _res[0] if isinstance(_res, tuple) else _res
             except Exception:
                 no = None
+        # The broker has now been asked. Record that BEFORE branching on what it
+        # said: an unreadable or still-unfilled order must be throttled exactly
+        # like a filled one, or the resting-order case re-opens the unbounded
+        # round-trip loop this whole gate exists to close. The ATTEMPT counter
+        # below is deliberately NOT advanced here — it stays keyed on confirmed
+        # fills so an order that never filled can never page.
+        _probes += 1
+        le["entry_fill_self_heal_probe_sig"] = _pending_sig
+        le["entry_fill_self_heal_probes"] = _probes
+        le["entry_fill_self_heal_last_probe_utc"] = _now.isoformat()
+        _commit_le(sess, le)
+        db.flush()
+        out["probes"] = _probes
         if no is None:
+            out["probe"] = "unreadable"
             return out
         try:
             filled = float(getattr(no, "filled_size", 0.0) or 0.0)
         except (TypeError, ValueError):
+            out["probe"] = "unparseable_fill"
             return out
         if filled <= 0.0:
+            out["probe"] = "unfilled"
             return out
         _sig = str(getattr(no, "order_id", "") or _oid or _cid)
         # A different order id than the one we last healed starts a fresh budget.
@@ -28733,9 +29121,16 @@ def _heal_unrecognized_entry_fill(db, sess, adapter, *, le, product_id) -> dict:
         le["entry_fill_self_heal_sig"] = _sig
         le["entry_fill_self_heal_attempts"] = _attempts
         le["entry_fill_self_heal_last_utc"] = _now.isoformat()
+        # Cached broker truth. This is what lets a THROTTLED wake re-chain the
+        # session to live_pending_entry without a broker round-trip, and what
+        # lets the terminal-state guard above tell a genuine unadopted fill
+        # apart from an ordinary finished trade.
+        le["entry_fill_self_heal_confirmed_size"] = filled
+        _confirmed = filled
         if _attempts == 1:
             le["entry_fill_self_heal_first_utc"] = _now.isoformat()
             le.pop("entry_fill_self_heal_unconverged_sig", None)
+            le.pop("entry_fill_self_heal_paged_sig", None)
         _commit_le(sess, le)
         db.flush()
         out["healed"] = True
@@ -28770,40 +29165,18 @@ def _heal_unrecognized_entry_fill(db, sess, adapter, *, le, product_id) -> dict:
         # help — the blocker is downstream. Page ONCE, loudly, then fall back to
         # the slow re-probe cadence. Silence here is what made #1285's dedupe
         # dangerous: it muted the storm without converging it.
-        if _attempts >= _cap and le.get("entry_fill_self_heal_unconverged_sig") != _sig:
-            le["entry_fill_self_heal_unconverged_sig"] = _sig
-            _commit_le(sess, le)
-            _first_utc = str(le.get("entry_fill_self_heal_first_utc") or "")
-            _first_dt = _heal_ts(_first_utc)
-            _elapsed = (
-                (_now - _first_dt).total_seconds() if _first_dt is not None else None
-            )
-            _emit(db, sess, "live_entry_fill_self_heal_unconverged", {
-                "severity": "critical",
-                "order_id": _sig,
-                "client_order_id": _cid,
-                "filled_size": filled,
-                "attempts": _attempts,
-                "max_attempts": _cap,
-                "first_heal_utc": _first_utc or None,
-                "elapsed_s": _elapsed,
-                "state": str(sess.state or ""),
-                "note": (
-                    "ang entry fill ay paulit-ulit na na-heal pero hindi "
-                    "kailanman na-adopt ng fill-adoption path — malamang may "
-                    "gate sa ibaba ng tick na bumabalik nang maaga; posisyong "
-                    "WALANG stop, kailangan ng operator"
-                ),
-            })
-            db.flush()
-            _log.error(
-                "[momentum_live] ENTRY FILL SELF-HEAL NOT CONVERGING %s: %s shares, "
-                "%s attempts on order %s, still unadopted after %ss — position has "
-                "NO software stop",
-                getattr(sess, "symbol", None), filled, _attempts, _sig[:8], _elapsed,
-            )
+        if _attempts >= _cap:
             out["unconverged"] = True
-            out["escalated"] = True
+            _escalate_unadopted_entry_fill(
+                db, sess, le,
+                sig=_sig,
+                client_order_id=_cid,
+                filled=filled,
+                attempts=_attempts,
+                cap=_cap,
+                reason="attempt_cap_reached",
+                out=out,
+            )
     except Exception as exc:
         # MALAKAS na kabiguan (dating DEBUG na nilunok — 12 min na katahimikan
         # sa 19471). Minsan kada signature para hindi mag-spam kada tick.

@@ -28,6 +28,7 @@ Runnable: pytest tests/test_unadopted_entry_dispatch_0902.py -v
 """
 from __future__ import annotations
 
+from datetime import datetime, timedelta
 from types import SimpleNamespace
 
 import pytest
@@ -283,3 +284,193 @@ def test_ordinary_paused_row_still_inert():
     """Ang basta paused na row na walang hawak na order ay hindi authority."""
     row = _sess(sid=555, le={"entry_submitted": False})
     assert LR.list_runnable_live_sessions(_Db([row]), limit=25) == []
+
+
+# ── 4: admission is GRADED — the fail-closed rule still holds ───────────────
+
+
+def test_unbacked_venue_pre_entry_is_fail_closed_when_claim_truth_is_unreadable():
+    """``_recover_owner_alpaca_entry_claim`` ay bumabalik ng
+    ``block_new_entries: False`` sa UNANG linya nito para sa coinbase_spot /
+    robinhood_spot, kaya ang dispatcher guard ang TANGING proteksyon nila.
+    Ang mag-admit ng pre-entry row doon habang hindi mabasa ang claim truth ay
+    binabaligtad ang doktrina ng file na ito: entries fail CLOSED."""
+    db = _Db([_sess(family="robinhood_spot", le=_CANF_LE)], claim_raises=True)
+    assert LR.list_runnable_live_sessions(db, limit=25) == []
+
+
+def test_alpaca_pre_entry_is_still_admitted_when_claim_truth_is_unreadable():
+    """Ang Alpaca ay may sariling per-session fail-closed backstop sa loob ng
+    tick, kaya ang pag-admit ay hindi makakapagbukas ng bago. Ito ang hugis ng
+    CANF at hindi dapat humina."""
+    db = _Db([_sess(family="alpaca_spot", le=_CANF_LE)], claim_raises=True)
+    assert [s.id for s in LR.list_runnable_live_sessions(db, limit=25)] == [19471]
+
+
+def test_a_committed_row_outranks_even_an_unreadable_claim_table():
+    """``live_pending_entry``, o anumang state kung saan may NAKUMPIRMANG fill
+    na, ay hindi bagong entry — ito ay umiiral na posisyon na maaaring walang
+    stop. Ito ay pumapasok nang walang kondisyon, anuman ang venue."""
+    for family in ("robinhood_spot", "coinbase_spot", "alpaca_spot"):
+        db = _Db([_sess(state="live_pending_entry", family=family, le=_CANF_LE)],
+                 claim_raises=True)
+        assert [s.id for s in LR.list_runnable_live_sessions(db, limit=25)] == [19471]
+
+    le = dict(_CANF_LE)
+    le["entry_fill_self_heal_confirmed_size"] = 165.0
+    db = _Db([_sess(state="watching_live", family="coinbase_spot", le=le)],
+             claim_raises=True)
+    assert [s.id for s in LR.list_runnable_live_sessions(db, limit=25)] == [19471]
+
+
+def test_a_confirmed_fill_keeps_the_row_dispatched_after_it_leaves_the_healable_set():
+    """Ang hugis ng BRNX 17370: ang state ay isinusulat ng ibang module habang
+    hawak pa rin ng broker ang fill. Kung mawawala ang dispatch doon, ang heal
+    ay hindi makakapag-alarma."""
+    le = dict(_CANF_LE)
+    le["entry_fill_self_heal_confirmed_size"] = 165.0
+    assert LR._unadopted_entry_dispatch_class(
+        _sess(state="live_exited", le=le)
+    ) == "committed"
+    assert LR._unadopted_entry_dispatch_class(
+        _sess(state="live_cooldown", le=le)
+    ) == "committed"
+
+
+def test_heal_disable_flag_also_disarms_the_dispatch_predicate():
+    """Ang TANGING bagay na makakapaglinis ng signature ng row na ito ay ang
+    heal mismo. Kapag naka-off ang heal, ang row ay magiging permanenteng
+    residente ng uncapped priority lane."""
+    gen = _set_settings({"chili_momentum_entry_fill_self_heal_enabled": False})
+    next(gen)
+    try:
+        assert not LR._session_has_unadopted_entry_order(_sess(le=_CANF_LE))
+        assert LR.list_runnable_live_sessions(_Db([_sess(le=_CANF_LE)]), limit=25) == []
+    finally:
+        next(gen, None)
+
+
+def test_the_fail_open_admission_is_time_capped(monkeypatch):
+    """Ang fail-open ay tama para sa posibleng hubad na posisyon — pero ang
+    hindi mabasang snapshot ay PERMANENTENG kondisyon, hindi panandalian.
+    Kung walang cap, isang sirang row ang tahimik na sasakop sa priority lane
+    magpakailanman at gugutumin ang lane na dapat nitong protektahan."""
+
+    class _Raiser(SimpleNamespace):
+        @property
+        def risk_snapshot_json(self):
+            raise RuntimeError("snapshot unreadable")
+
+    row = _Raiser(id=4242, symbol="X", state="watching_live", mode="live",
+                  execution_family="alpaca_spot", updated_at=None)
+    LR._UNADOPTED_FAILOPEN_SEEN.pop(4242, None)
+    assert LR._unadopted_entry_dispatch_class(row) == "unreadable"
+    assert [s.id for s in LR.list_runnable_live_sessions(_Db([row]), limit=25)] == [4242]
+
+    # Wind the clock past the cap.
+    LR._UNADOPTED_FAILOPEN_SEEN[4242] = (
+        LR._UNADOPTED_FAILOPEN_SEEN[4242] - LR._UNADOPTED_FAILOPEN_MAX_S - 1.0
+    )
+    assert LR.list_runnable_live_sessions(_Db([row]), limit=25) == []
+    LR._UNADOPTED_FAILOPEN_SEEN.pop(4242, None)
+
+
+def test_the_fail_open_memo_is_bounded():
+    """Cache convention ng repo: hard max + eviction."""
+    LR._UNADOPTED_FAILOPEN_SEEN.clear()
+    try:
+        for i in range(LR._UNADOPTED_FAILOPEN_MAX_TRACKED * 3):
+            LR._unadopted_failopen_ok(i)
+        assert len(LR._UNADOPTED_FAILOPEN_SEEN) <= LR._UNADOPTED_FAILOPEN_MAX_TRACKED
+    finally:
+        LR._UNADOPTED_FAILOPEN_SEEN.clear()
+
+
+# ── 5: the kill switch is not crossed by any of this ────────────────────────
+
+
+def test_the_heal_never_places_or_cancels_anything():
+    """Ang bagong predicate ay nagdi-dispatch ng row na dati ay hindi. Kung ang
+    heal ay makakapag-order, iyon ay pag-order sa likod ng kill switch, na
+    kino-consult sa IBABA nito."""
+
+    class _StrictAdapter:
+        def __init__(self):
+            self.lookups = 0
+
+        def get_order(self, oid):
+            self.lookups += 1
+            return (SimpleNamespace(
+                order_id="f3ed508d", client_order_id="c",
+                filled_size=165.0, average_filled_price=4.62, status="filled",
+            ), None)
+
+        def __getattr__(self, name):
+            raise AssertionError(
+                f"the self-heal reached a mutating adapter call: {name}"
+            )
+
+    import app.services.trading.alerts as _alerts
+
+    sess = SimpleNamespace(
+        id=19471, symbol="CANF", state="watching_live", mode="live",
+        execution_family="alpaca_spot", correlation_id="c",
+        updated_at=None, ended_at=None, user_id=1,
+        risk_snapshot_json={"momentum_live_execution": dict(_CANF_LE)},
+    )
+    le = sess.risk_snapshot_json["momentum_live_execution"]
+
+    emitted: list = []
+    paged: list = []
+    _orig_emit, _orig_dispatch = LR._emit, _alerts.dispatch_alert
+    _orig_now = LR._utcnow
+    _clock = [datetime(2026, 9, 2, 11, 31, 59)]
+    LR._emit = lambda db, s, et, p: emitted.append(et)
+    _alerts.dispatch_alert = lambda **kw: paged.append(kw) or True
+    LR._utcnow = lambda: _clock[0]
+    try:
+        adapter = _StrictAdapter()
+        for _ in range(40):
+            LR._heal_unrecognized_entry_fill(
+                SimpleNamespace(flush=lambda: None), sess, adapter,
+                le=le, product_id="CANF",
+            )
+            _clock[0] = _clock[0] + timedelta(seconds=6.0)
+    finally:
+        LR._emit, _alerts.dispatch_alert = _orig_emit, _orig_dispatch
+        LR._utcnow = _orig_now
+
+    assert "live_entry_fill_self_heal_unconverged" in emitted
+    assert len(paged) == 1
+    assert adapter.lookups >= 1
+
+
+def test_healing_moves_a_killswitched_session_onto_the_flatten_branch():
+    """Tunay na pagbabago ng ugali laban sa main, sa LIGTAS na direksyon.
+
+    Ang naka-pause na row na dati ay hindi dinidispatch ay ngayon ay
+    nili-lipat sa ``live_pending_entry``. Kapag umangat ang pause habang
+    naka-engage ang kill switch, ito ay bumabagsak sa MID-RUN branch (i-flatten
+    ang TUNAY na fill) sa halip na sa EARLY branch (LIVE_ERROR, at ang fill ng
+    broker ay naiwang hindi na-flatten)."""
+    import inspect
+
+    src = inspect.getsource(LR.tick_live_session)
+    i_heal = src.index("_heal_unrecognized_entry_fill(")
+    i_mid = src.index("kill_switch_mid_run")
+    i_early = src.index("# ── Early kill switch (before venue reads)")
+    assert i_heal < i_mid and i_heal < i_early, (
+        "the heal must stay ABOVE every kill-switch consult — it must never be "
+        "possible to reach it by moving something past a breaker"
+    )
+    mid_branch = src[src.rindex("if _kill_switch_blocks_live()", 0, i_early) : i_early]
+    assert "STATE_LIVE_PENDING_ENTRY" in mid_branch, (
+        "live_pending_entry — the state the heal lands in — must route to the "
+        "mid-run flatten, not to the early LIVE_ERROR branch"
+    )
+    early_branch = src[i_early : src.index("return", i_early + 400)]
+    assert "STATE_WATCHING_LIVE" in early_branch and "STATE_LIVE_ERROR" in early_branch
+    assert "STATE_LIVE_PENDING_ENTRY" not in early_branch, (
+        "if live_pending_entry ever joined the EARLY branch, healing a naked "
+        "fill would transition to LIVE_ERROR and leave the broker fill unflattened"
+    )
