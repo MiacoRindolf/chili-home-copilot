@@ -145,7 +145,7 @@ ATTR_ANCHORS_MISSING = "envelope_anchors_missing"
 # `_emit_divergence_event` reads one of them for its once-per-outcome idempotency.
 # Every writer of ``broker_recon_detail_json`` REBUILDS the dict from scratch
 # (`reconcile_one_outcome` starts from `{"reconciled_at_utc": ...}`;
-# `alpaca_reconcile._repair_orphan_accounting` writes `{**truth, ...}`), so a
+# `alpaca_reconcile._apply_cancelled_pre_entry_orphan_truth` writes `{**truth, ...}`), so a
 # single write from any path that does not hand-carry them erases the whole
 # skip/backoff state — measured 2026-09-02: seven consecutive passes cycled
 # 0 → 20 → 40 → 60 → 0 → 20 → 40 `skipped_no_broker_read_needed` instead of
@@ -169,6 +169,9 @@ STICKY_RECON_DETAIL_KEYS: tuple[str, ...] = (
     "attribution_next_retry_utc",
     "attribution_attempts",
     "attribution_retry_blocking",
+    # One-shot latch for the `ledger_settled_terminal` proof release. Durable
+    # because its whole job is to make that release happen EXACTLY once per row.
+    "attribution_ledger_release_done",
     "divergence_event_emitted",
 )
 
@@ -184,9 +187,19 @@ def merge_recon_detail(
     ``new`` always wins where it sets a key — this only fills keys it left out.
     ``cleared`` names markers this pass RETIRED on purpose (a converged read
     dropping its retry horizon); those are never resurrected.
+
+    Genuinely pure: the caller's dict is COPIED, never mutated. That is not
+    hygiene, it is what makes ``stamp_recon_detail`` safe for the obvious
+    read-modify-write shape (``d = row.broker_recon_detail_json; d[k] = v;
+    stamp_recon_detail(row, d)``). ``broker_recon_detail_json`` is a plain
+    ``Column(JSONB)`` with no ``MutableDict`` wrapper, so SQLAlchemy flags the
+    attribute dirty only when a NEW object is assigned — mutating in place and
+    assigning the same object back emits no UPDATE, and the write is lost with no
+    error and no log line while the caller's own read-back still sees it.
     """
     if not isinstance(new, dict):
-        new = {}
+        return {}
+    new = dict(new)
     if not isinstance(prior, dict):
         return new
     skip = cleared or set()
@@ -473,8 +486,8 @@ def _loss_guard_label_usable(outcome: Any) -> bool:
     return notional is not None and notional > 0.0
 
 
-def _loss_guard_can_block(outcome: Any, sess: Any) -> bool:
-    """Can an unresolved label on this row block the WHOLE account? (pure, fail-closed)
+def _loss_guard_can_block(outcome: Any, sess: Any, *, entry_event_seen: bool = False) -> bool:
+    """Can an unresolved label on this row block the WHOLE account? (fail-closed)
 
     ``risk_policy.load_current_live_loss_history`` skips exactly ONE class of row:
     the one ``_loss_history_entry_classification`` calls ``not_entered`` (a
@@ -482,32 +495,78 @@ def _loss_guard_can_block(outcome: Any, sess: Any) -> bool:
     Everything else — ``entered``, ``unknown``, ``conflict`` — gaps the day and
     disarms the lane.
 
-    This returns True unless the row PROVABLY lands in that one skipped class, so
-    an unrecognised shape errs toward "keep retrying" rather than toward a long
-    backoff on a row the lane is disarmed behind.
+    ⚠️ This DELEGATES to that classifier rather than re-deriving it. A hand-written
+    mirror was wrong in three ways the first time, ALL of them in the direction
+    that SILENCES the alarm on a row that genuinely disarms the account:
+
+      * ``broker_notional_basis_usd`` PRESENT but ``<= 0`` / non-finite / a bool is
+        ``conflict`` at risk_policy.py:1474, checked BEFORE the never-entered
+        branch; the mirror only treated ``> 0.0`` as blocking;
+      * ``_loss_history_snapshot_entry_proof`` (risk_policy.py:1352) proves a
+        durable entry from ``le["realized_pnl_usd"]`` / ``le["last_exit_entry_price"]``
+        — two keys the mirror never read;
+      * ``entry_event_seen`` — a ``live_entry_filled`` / ``live_exit_filled`` /
+        ``live_partial_exit_filled`` row in ``trading_automation_events`` — which a
+        pure function cannot see at all. That is exactly the CANF-19471
+        lost-adoption shape this whole one-proof-read design exists to defend, and
+        it sorts into the LOWEST priority class, so it is the first row the budget
+        drops. It is supplied by the caller (see ``_entry_event_session_ids``).
+
+    Anything the classifier cannot answer (an import/attribute failure) is treated
+    as blocking, so the alarm can never go quiet on a genuinely blind row.
     """
-    cls = str(getattr(outcome, "outcome_class", "") or "").strip().lower()
-    if cls not in NEVER_ENTERED_OUTCOMES:
+    try:
+        from .risk_policy import _loss_history_entry_classification
+
+        classification = _loss_history_entry_classification(
+            outcome, sess, entry_event_seen=bool(entry_event_seen)
+        )
+    except Exception:  # pragma: no cover - fail-closed on any classifier failure
+        logger.debug("[broker_truth_recon] loss-guard classification failed", exc_info=True)
         return True
-    # Any economic signal on a never-entered class is a `conflict` for the guard.
-    for attr in ("realized_pnl_usd", "return_bps", "broker_realized_pnl_usd", "broker_return_bps"):
-        raw = getattr(outcome, attr, None)
-        if raw is None:
+    return str(classification) != "not_entered"
+
+
+def _entry_event_session_ids(db: Any, session_ids: Any) -> Optional[set]:
+    """Sessions with a durable entry EVENT — the half of the classifier a pure
+    function cannot see. ONE bounded query for the whole batch, never per row.
+
+    Returns ``None`` when the read fails, which callers must treat as "assume every
+    row could block" (fail-closed): not knowing is not the same as knowing there is
+    no event, and the failure mode of guessing wrong here is a silent alarm on the
+    85-minute-arming-outage shape.
+
+    Deliberately UNBOUNDED in time where the guard bounds the event to the session
+    window and the availability frontier: a superset can only over-report "this row
+    could block", which is the safe direction for an alarm gate.
+    """
+    ids = [int(s) for s in session_ids if s is not None]
+    if not ids:
+        return set()
+    try:
+        from ....models.trading import TradingAutomationEvent
+        from .risk_policy import _LOSS_HISTORY_ENTRY_EVENTS
+
+        rows = (
+            db.query(TradingAutomationEvent.session_id)
+            .filter(
+                TradingAutomationEvent.session_id.in_(tuple(ids)),
+                TradingAutomationEvent.event_type.in_(tuple(sorted(_LOSS_HISTORY_ENTRY_EVENTS))),
+            )
+            .distinct()
+            .all()
+        )
+    except Exception:
+        logger.debug("[broker_truth_recon] entry-event probe failed", exc_info=True)
+        return None
+    out = set()
+    for row in rows:
+        sid = row[0] if isinstance(row, (tuple, list)) else getattr(row, "session_id", row)
+        try:
+            out.add(int(sid))
+        except (TypeError, ValueError):
             continue
-        val = _f(raw)
-        if val is None or abs(val) > 1e-12:
-            return True
-    notional = _f(getattr(outcome, "broker_notional_basis_usd", None))
-    if notional is not None and notional > 0.0:
-        return True
-    le = _le_of(sess)
-    pos = le.get("position")
-    if isinstance(pos, dict) and (_f(pos.get("quantity")) or 0.0) > 0:
-        return True
-    for key in ("entry_filled_qty", "entry_fill_price", "emergency_position_truth", "orphan_reconcile_truth"):
-        if le.get(key):
-            return True
-    return bool(_unpriced_emergency_legs(le))
+    return out
 
 
 def _attribution_backoff_seconds(*, blocking: bool = False) -> int:
@@ -1499,6 +1558,11 @@ def reconcile_one_outcome(
             (retrying is the only way the account gets its arming back) and LONG
             when the guard skips the row outright.
             """
+            # NOTE: no `entry_event_seen` here on purpose. The delegation already
+            # corrects this consumer's notional / snapshot-proof classification,
+            # and the remaining lost-adoption case would cost a DB read inside a
+            # helper the batch loop needs to stay cheap. The horizon is bounded
+            # either way; the ALARM gate below is where the events probe belongs.
             blocking = _loss_guard_can_block(outcome, sess)
             try:
                 attempts = int(
@@ -1638,16 +1702,37 @@ def reconcile_one_outcome(
             earned_on_broker_legs = prior_attr.get("attr_status") == ATTR_FLAT
             ledger_now_terminal = status in _TERMINAL_RECON_STATUSES
             already_attributed = earned_on_broker_legs
-            if ledger_now_terminal and not earned_on_broker_legs:
+            already_released = bool(prior_detail.get("attribution_ledger_release_done"))
+            if ledger_now_terminal and not earned_on_broker_legs and not already_released:
                 # The ledger settled into a closed round-trip while the row was
                 # backed off. That is exactly the state that MUST be checked
                 # against broker truth, so release the horizon and read next pass.
+                #
+                # ⚠️ The PROOF is released too, not just the horizon.
+                # `broker_read_plan` tests `attribution_no_entry_evidence_proven_empty`
+                # BEFORE it ever looks at `attribution_next_retry_utc`, so carrying
+                # the proof through here made this whole branch a NO-OP for the one
+                # shape it was written for: the row said "read next pass" and then
+                # never read again. A settled closed round-trip in the ledger is a
+                # direct contradiction of "a readable listing proved this session
+                # owned nothing", so the proof has to be re-earned.
                 detail["attribution_backoff_released"] = "ledger_settled_terminal"
-                for k in ("attribution_terminal_at", "attribution_no_entry_evidence_proven_empty"):
-                    if prior_detail.get(k) is not None:
-                        detail[k] = prior_detail[k]
-                detail.pop("attribution_next_retry_utc", None)
-                sticky_cleared.add("attribution_next_retry_utc")
+                if prior_detail.get("attribution_terminal_at") is not None:
+                    detail["attribution_terminal_at"] = prior_detail["attribution_terminal_at"]
+                for k in (
+                    "attribution_next_retry_utc",
+                    "attribution_attempts",
+                    "attribution_retry_blocking",
+                    "attribution_no_entry_evidence_proven_empty",
+                ):
+                    detail.pop(k, None)
+                    sticky_cleared.add(k)
+                # ONE-SHOT, and durable so it survives every later write. Without
+                # it a re-read that comes back `no_owned_fills` re-stamps the proof,
+                # the next skip finds the ledger still terminal and releases AGAIN
+                # — a broker read every other pass forever, which is precisely the
+                # budget churn the permanent skip exists to prevent.
+                detail["attribution_ledger_release_done"] = True
             else:
                 for k in (
                     "attribution_next_retry_utc",
@@ -1790,6 +1875,10 @@ def reconcile_momentum_outcomes_to_broker_truth(
         return (_attribution_priority(outcome, sess), -t_key)
 
     rows = sorted(rows, key=_sort_key)
+    # The half of `_loss_history_entry_classification` that is not derivable from
+    # the ORM objects in hand. One bounded query for the batch; `None` = unknown,
+    # and unknown must count as blocking (see `_entry_event_session_ids`).
+    entry_event_ids = _entry_event_session_ids(db, [o.session_id for o, _ in rows])
     for outcome, sess in rows:
         checked += 1
         if not needs_reconcile(outcome, sess):
@@ -1811,12 +1900,14 @@ def reconcile_momentum_outcomes_to_broker_truth(
                 # lane. Measured 2026-09-02: 95 `cancelled_pre_entry` rows queued
                 # behind the budget fired "LOSS-GUARD ROWS STARVED" on every
                 # single pass — alarm fatigue on the one alarm that matters (the
-                # 85-minute arming outage). `_loss_guard_can_block` is the pure
-                # mirror of "the guard cannot skip this row" and is fail-closed
-                # (an unrecognised shape counts as blocking), so the alarm can
-                # never go quiet on a genuinely blind row.
+                # 85-minute arming outage). `_loss_guard_can_block` DELEGATES to
+                # `_loss_history_entry_classification` itself — never a
+                # hand-written mirror of it — and anything it cannot answer counts
+                # as blocking, so the alarm can never go quiet on a genuinely
+                # blind row.
                 if not _loss_guard_label_usable(outcome):
-                    if _loss_guard_can_block(outcome, sess):
+                    seen = True if entry_event_ids is None else (int(outcome.session_id) in entry_event_ids)
+                    if _loss_guard_can_block(outcome, sess, entry_event_seen=seen):
                         starved_blind += 1
                     else:
                         deferred_unblocking += 1

@@ -16,7 +16,7 @@ owned nothing earns the permanent skip, recorded as
 is preserved here. What failed is PERSISTENCE: those markers are top-level keys of
 `broker_recon_detail_json`, and EVERY writer of that column rebuilds the dict from
 scratch — `reconcile_one_outcome` starts from `{"reconciled_at_utc": ...}` and
-`alpaca_reconcile._repair_orphan_accounting` writes `{**truth, ...}` — so one write
+`alpaca_reconcile._apply_cancelled_pre_entry_orphan_truth` writes `{**truth, ...}` — so one write
 from any path that does not hand-carry them erases the whole skip state and the
 next pass re-reads the broker for rows a readable listing had already proved empty.
 
@@ -118,8 +118,17 @@ def _unreadable(symbol, after, until):
     return {"readable": False, "orders": [], "error": "credentials rotated"}
 
 
-def _batch_db(rows):
+def _batch_db(rows, *, entry_event_sids=(), events_readable=True):
+    """`entry_event_sids` stands in for `trading_automation_events` rows of type
+    live_entry_filled / live_exit_filled / live_partial_exit_filled — the half of
+    `_loss_history_entry_classification` that is not derivable from the ORM objects
+    in hand. `events_readable=False` makes that probe raise, which must be
+    fail-closed."""
+
     class _Q:
+        def __init__(self, result):
+            self._result = result
+
         def join(self, *a, **k):
             return self
 
@@ -129,12 +138,21 @@ def _batch_db(rows):
         def order_by(self, *a, **k):
             return self
 
+        def distinct(self, *a, **k):
+            return self
+
         def all(self):
-            return list(rows)
+            if self._result is None:
+                raise AssertionError("events table unavailable")
+            return list(self._result)
 
     class _Db(_FakeDb):
         def query(self, *a, **k):
-            return _Q()
+            # The batch query selects (outcome, session); the entry-event probe
+            # selects a single column.
+            if len(a) >= 2:
+                return _Q(rows)
+            return _Q([(int(s),) for s in entry_event_sids] if events_readable else None)
 
     return _Db()
 
@@ -151,7 +169,7 @@ def _flags(monkeypatch):
 # (1) THE ONE WRITE SITE — no other writer may replace the markers away
 # ═════════════════════════════════════════════════════════════════════════════
 def test_a_whole_dict_replacing_write_cannot_erase_the_markers():
-    """`_repair_orphan_accounting` writes `{**truth, "status": ...}` — a WHOLE-dict
+    """`_apply_cancelled_pre_entry_orphan_truth` writes `{**truth, "status": ...}` — a WHOLE-dict
     replace. Through the one write site it keeps the skip/backoff state."""
     o, _s = _pair(detail={
         "status": "unreconciled_no_fills",
@@ -160,6 +178,7 @@ def test_a_whole_dict_replacing_write_cannot_erase_the_markers():
         "attribution_next_retry_utc": "2026-09-02T21:00:00",
         "attribution_attempts": 3,
         "attribution_retry_blocking": False,
+        "attribution_ledger_release_done": True,
         "divergence_event_emitted": True,
     })
     written = orc.stamp_recon_detail(o, {"broker_truth": {"qty": 165}, "status": "fee_unconfirmed"})
@@ -206,20 +225,78 @@ def test_every_writer_of_the_detail_column_goes_through_the_one_write_site():
     `outcome.broker_recon_detail_json = {**truth, ...}` directly).
 
     AST, not regex: an assignment anywhere in app/ that does not route through
-    `stamp_recon_detail` can silently erase the markers again."""
+    `stamp_recon_detail` can silently erase the markers again.
+
+    Attribute assignment is NOT the only way to write the column, so the walk also
+    catches the four shapes a backfill or repair script naturally reaches for —
+    `setattr(row, "broker_recon_detail_json", ...)`, a bulk ORM
+    `.update({...broker_recon_detail_json: ...})`, in-place mutation
+    (`row.broker_recon_detail_json.update(...)` / `.pop(...)` / `.clear()`, which
+    also never marks the JSONB column dirty), and raw
+    `UPDATE ... SET broker_recon_detail_json = ...` SQL — and it scans `scripts/`
+    as well as `app/`, because the operator's recon drivers live there."""
+    _COL = "broker_recon_detail_json"
+    _MUTATORS = {"update", "pop", "clear", "setdefault", "popitem"}
     offenders = []
-    for path in (_APP_ROOT / "app").rglob("*.py"):
-        try:
-            tree = ast.parse(path.read_text(encoding="utf-8"))
-        except (SyntaxError, UnicodeDecodeError):  # pragma: no cover - not our files
-            continue
-        for node in ast.walk(tree):
-            if not isinstance(node, (ast.Assign, ast.AugAssign, ast.AnnAssign)):
+    sql_offenders = []
+    roots = [p for p in (_APP_ROOT / "app", _APP_ROOT / "scripts") if p.exists()]
+    for root in roots:
+        for path in root.rglob("*.py"):
+            try:
+                text = path.read_text(encoding="utf-8")
+                tree = ast.parse(text)
+            except (SyntaxError, UnicodeDecodeError, OSError):  # pragma: no cover - not our files
                 continue
-            targets = node.targets if isinstance(node, ast.Assign) else [node.target]
-            for t in targets:
-                if isinstance(t, ast.Attribute) and t.attr == "broker_recon_detail_json":
-                    offenders.append(f"{path.relative_to(_APP_ROOT)}:{node.lineno}")
+            rel = path.relative_to(_APP_ROOT)
+            for node in ast.walk(tree):
+                if isinstance(node, (ast.Assign, ast.AugAssign, ast.AnnAssign)):
+                    targets = node.targets if isinstance(node, ast.Assign) else [node.target]
+                    for t in targets:
+                        if isinstance(t, ast.Attribute) and t.attr == _COL:
+                            offenders.append(f"{rel}:{node.lineno}")
+                    continue
+                if not isinstance(node, ast.Call):
+                    continue
+                fn = node.func
+                # setattr(row, "broker_recon_detail_json", ...)
+                if (
+                    isinstance(fn, ast.Name)
+                    and fn.id == "setattr"
+                    and len(node.args) >= 2
+                    and isinstance(node.args[1], ast.Constant)
+                    and node.args[1].value == _COL
+                ):
+                    offenders.append(f"{rel}:{node.lineno}")
+                    continue
+                if not isinstance(fn, ast.Attribute):
+                    continue
+                # row.broker_recon_detail_json.update(...) / .pop(...) / .clear()
+                if (
+                    fn.attr in _MUTATORS
+                    and isinstance(fn.value, ast.Attribute)
+                    and fn.value.attr == _COL
+                ):
+                    offenders.append(f"{rel}:{node.lineno}")
+                    continue
+                # q.update({Model.broker_recon_detail_json: ...}) / {"...": ...}
+                if fn.attr == "update":
+                    for arg in list(node.args) + [kw.value for kw in node.keywords]:
+                        if not isinstance(arg, ast.Dict):
+                            continue
+                        for k in arg.keys:
+                            if (isinstance(k, ast.Attribute) and k.attr == _COL) or (
+                                isinstance(k, ast.Constant) and k.value == _COL
+                            ):
+                                offenders.append(f"{rel}:{node.lineno}")
+            # Raw SQL, which no AST walk can see inside a string literal.
+            for lineno, line in enumerate(text.splitlines(), start=1):
+                low = line.lower()
+                if "update" in low and f"set {_COL}" in low.replace('"', "").replace("'", ""):
+                    sql_offenders.append(f"{rel}:{lineno}")
+    assert not sql_offenders, (
+        "raw SQL writes the detail column, bypassing the sticky merge entirely: "
+        f"{sorted(set(sql_offenders))}"
+    )
     # The ONLY permitted assignment is the one inside `stamp_recon_detail` itself.
     src = ast.parse(pathlib.Path(orc.__file__).read_text(encoding="utf-8"))
     allowed = set()
@@ -390,3 +467,191 @@ def test_a_genuinely_blind_row_still_raises_the_alarm(monkeypatch):
     assert out["skipped_broker_budget"] == 1
     assert out["loss_guard_blind_starved"] == 1
     assert out["skipped_budget_guard_skips_row"] == 0
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# (5) THE ALARM GATE MUST *BE* THE LOSS GUARD'S RULE, NOT A COPY OF IT
+# ═════════════════════════════════════════════════════════════════════════════
+# A hand-written mirror of `_loss_history_entry_classification` was wrong in three
+# ways, ALL of them silencing the alarm on a row that genuinely disarms the
+# account. `_loss_guard_can_block` now delegates to the classifier itself; these
+# tests pin that equivalence so it cannot drift back.
+_GUARD_SHAPES = [
+    # (label, outcome attrs, envelope, entry_event_seen)
+    ("control: truly empty never-entered row", {}, {"trade_cycles": 0}, False),
+    ("entry EVENT seen, envelope empty", {}, {"trade_cycles": 0}, True),
+    ("snapshot proof: le realized_pnl_usd", {}, {"realized_pnl_usd": 0.0}, False),
+    ("snapshot proof: le last_exit_entry_price", {}, {"last_exit_entry_price": 4.0}, False),
+    ("broker notional == 0.0", {"broker_notional_basis_usd": 0.0}, {"trade_cycles": 0}, False),
+    ("broker notional == -3.0", {"broker_notional_basis_usd": -3.0}, {"trade_cycles": 0}, False),
+    ("broker notional == 500.0", {"broker_notional_basis_usd": 500.0}, {"trade_cycles": 0}, False),
+    ("nonzero economics", {"realized_pnl_usd": -48.97}, {"trade_cycles": 0}, False),
+    ("entered class", {}, {"entry_order_id": "E1"}, False),
+]
+
+
+@pytest.mark.parametrize("label,attrs,envelope,seen", _GUARD_SHAPES, ids=[s[0] for s in _GUARD_SHAPES])
+def test_the_alarm_gate_never_disagrees_with_the_loss_guard_classifier(label, attrs, envelope, seen):
+    """THE regression. Every shape below where the guard says `conflict` GAPS the ET
+    day and reports account-wide `loss_guard_history_unavailable` — the 85-minute
+    arming outage of 2026-09-02 — while the old hand-written mirror returned False
+    and the "LOSS-GUARD ROWS STARVED" warning stayed silent. Divergence in EITHER
+    direction is a failure; divergence toward silence is the dangerous one."""
+    from app.services.trading.momentum_neural import risk_policy as rp
+
+    outcome_class = "stop_loss" if label == "entered class" else "cancelled_pre_entry"
+    o, s = _pair(outcome_class=outcome_class, le=envelope)
+    for k, v in attrs.items():
+        setattr(o, k, v)
+    authority = rp._loss_history_entry_classification(o, s, entry_event_seen=seen)
+    mirror = orc._loss_guard_can_block(o, s, entry_event_seen=seen)
+    assert mirror is (authority != "not_entered"), (
+        f"{label}: guard says {authority!r} (blocks={authority != 'not_entered'}) "
+        f"but the alarm gate says can_block={mirror}"
+    )
+
+
+def test_a_lost_adoption_entry_event_still_raises_the_alarm(monkeypatch):
+    """CANF-19471 exactly: the adoption write is LOST so the envelope is empty and
+    the outcome lands `cancelled_pre_entry`, but a `live_entry_filled` event exists.
+    The guard calls that `conflict` and disarms the whole account; the row sorts
+    into the LOWEST priority class, so it is the FIRST thing the budget drops. It
+    must be counted as starved, not filed under "the guard skips this anyway"."""
+    monkeypatch.setattr(orc.settings, "chili_momentum_outcome_recon_broker_attribution_max_per_pass", 1, raising=False)
+    monkeypatch.setattr(orc, "_default_alpaca_orders_reader", _readable_empty, raising=False)
+    rows = _no_evidence_population(3)
+    lost = rows[1][0].session_id
+    out = orc.reconcile_momentum_outcomes_to_broker_truth(
+        _batch_db(rows, entry_event_sids=[lost]), lookback_days=2.0, day_net_advisory=False,
+    )
+    assert out["skipped_broker_budget"] == 2
+    assert out["loss_guard_blind_starved"] == 1, out
+    assert out["skipped_budget_guard_skips_row"] == 1, out
+
+
+def test_a_nonpositive_broker_notional_still_raises_the_alarm(monkeypatch):
+    """`_loss_history_notional_state` -> `nonpositive` is a `conflict`, and that check
+    runs BEFORE the never-entered branch. The old gate only treated `> 0.0` as
+    blocking, so a 0.0 basis fell through to the silent bucket."""
+    monkeypatch.setattr(orc.settings, "chili_momentum_outcome_recon_broker_attribution_max_per_pass", 1, raising=False)
+    monkeypatch.setattr(orc, "_default_alpaca_orders_reader", _readable_empty, raising=False)
+    rows = _no_evidence_population(2)
+    rows[0][0].broker_notional_basis_usd = 0.0   # oldest → sorted last → budget-deferred
+    out = orc.reconcile_momentum_outcomes_to_broker_truth(_batch_db(rows), lookback_days=2.0,
+                                                          day_net_advisory=False)
+    assert out["skipped_broker_budget"] == 1, out
+    assert out["loss_guard_blind_starved"] == 1, out
+    assert out["skipped_budget_guard_skips_row"] == 0, out
+
+
+def test_an_unreadable_entry_event_probe_is_fail_closed(monkeypatch):
+    """Not knowing whether an entry event exists is not the same as knowing there is
+    none. A failed probe must count every deferred row as blocking."""
+    monkeypatch.setattr(orc.settings, "chili_momentum_outcome_recon_broker_attribution_max_per_pass", 1, raising=False)
+    monkeypatch.setattr(orc, "_default_alpaca_orders_reader", _readable_empty, raising=False)
+    rows = _no_evidence_population(3)
+    out = orc.reconcile_momentum_outcomes_to_broker_truth(
+        _batch_db(rows, events_readable=False), lookback_days=2.0, day_net_advisory=False,
+    )
+    assert out["loss_guard_blind_starved"] == 2, out
+    assert out["skipped_budget_guard_skips_row"] == 0, out
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# (6) THE `ledger_settled_terminal` RELEASE MUST ACTUALLY RELEASE
+# ═════════════════════════════════════════════════════════════════════════════
+class _SettledLedgerDb(_FakeDb):
+    """The ledger settled into a CLOSED round-trip while the row was skipped."""
+
+    def execute(self, stmt, params=None):
+        sql = " ".join(str(stmt).split())
+        # ONLY the `_aggregate_ledger` projection — the ledger is also queried for
+        # its owned ORDER IDS, and answering that with these rows would fabricate
+        # `listing_incomplete` anchors the session never recorded.
+        if "SELECT side, leg_seq" in sql:
+            return _Res([
+                ("entry", 1, "broker_confirmed", 4.0, 100.0, 0.0, None, None, None, None),
+                ("exit", 1, "broker_confirmed", 3.5, 100.0, 0.0, -50.0, 0.0, -50.0, 4.0),
+            ])
+        return super().execute(stmt, params)
+
+
+def test_the_proof_short_circuits_the_horizon_so_popping_it_alone_is_a_no_op():
+    """WHY the release has to retire the PROOF, not just the horizon:
+    `broker_read_plan` tests `attribution_no_entry_evidence_proven_empty` BEFORE it
+    ever looks at `attribution_next_retry_utc`."""
+    o, s = _pair(detail={"attribution_no_entry_evidence_proven_empty": True,
+                         "attribution_terminal_at": "2026-09-02T13:41:08"})
+    assert orc.broker_read_plan(o, s, now=datetime(2030, 1, 1))["read"] is False
+    o.broker_recon_detail_json.pop("attribution_no_entry_evidence_proven_empty")
+    assert orc.broker_read_plan(o, s, now=datetime(2030, 1, 1))["read"] is True
+
+
+def test_a_settled_ledger_releases_the_proof_and_the_row_reads_again():
+    """The CANF-19471 cycle-2 shape. The row earned the permanent skip off a bounded
+    listing that had not yet seen the late fill; then the FSM ledger settled into a
+    closed round-trip, which CONTRADICTS "the broker owned nothing". The row must be
+    re-checked against broker truth — carrying the proof through the release made
+    that whole branch a no-op and pinned the ledger-only label forever."""
+    o, s = _pair(detail={
+        "attribution_no_entry_evidence_proven_empty": True,
+        "attribution_terminal_at": "2026-09-02T13:41:08",
+        "attribution_next_retry_utc": "2026-09-02T21:00:00",
+        "attribution_attempts": 4,
+    })
+    plan = orc.broker_read_plan(o, s)
+    assert plan["read"] is False and plan["reason"] == orc.ATTR_SKIPPED_NO_ENTRY_EVIDENCE
+    detail = orc.reconcile_one_outcome(_SettledLedgerDb(), o, s, read_plan=plan,
+                                       broker_orders_reader=_readable_empty)
+    assert detail.get("attribution_backoff_released") == "ledger_settled_terminal"
+    assert "attribution_no_entry_evidence_proven_empty" not in o.broker_recon_detail_json
+    assert "attribution_next_retry_utc" not in o.broker_recon_detail_json
+    assert "attribution_attempts" not in o.broker_recon_detail_json     # clean slate
+    assert orc.broker_read_plan(o, s)["read"] is True, "the release must actually read"
+
+
+def test_the_settled_ledger_release_fires_exactly_once():
+    """Bounded: a re-read that comes back `no_owned_fills` re-stamps the proof, and
+    without a durable one-shot latch the next skip would release AGAIN — a broker
+    read every other pass forever, the churn the permanent skip exists to prevent."""
+    o, s = _pair(detail={"attribution_no_entry_evidence_proven_empty": True,
+                         "attribution_terminal_at": "2026-09-02T13:41:08"})
+    db = _SettledLedgerDb()
+    orc.reconcile_one_outcome(db, o, s, read_plan=orc.broker_read_plan(o, s),
+                              broker_orders_reader=_readable_empty)
+    assert o.broker_recon_detail_json["attribution_ledger_release_done"] is True
+    # The released read is spent and the broker still owns nothing -> proof re-earned.
+    plan = orc.broker_read_plan(o, s)
+    assert plan["read"] is True
+    orc.reconcile_one_outcome(db, o, s, read_plan=plan, broker_orders_reader=_readable_empty)
+    assert o.broker_recon_detail_json["attribution_no_entry_evidence_proven_empty"] is True
+    # ...and the latch survives, so the row never oscillates.
+    detail = orc.reconcile_one_outcome(db, o, s, read_plan=orc.broker_read_plan(o, s),
+                                       broker_orders_reader=_readable_empty)
+    assert detail.get("attribution_backoff_released") != "ledger_settled_terminal"
+    assert orc.broker_read_plan(o, s)["read"] is False
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# (7) THE WRITE SITE MUST BE SAFE FOR THE OBVIOUS READ-MODIFY-WRITE SHAPE
+# ═════════════════════════════════════════════════════════════════════════════
+def test_the_write_site_always_assigns_a_new_object():
+    """`broker_recon_detail_json` is a plain `Column(JSONB)` with no `MutableDict`
+    wrapper, so SQLAlchemy flags it dirty ONLY on assignment of a new object. A
+    writer following the documented contract (`d = row.detail; d[k] = v;
+    stamp_recon_detail(row, d)`) must not self-assign: that emits no UPDATE and the
+    change is lost with no error, while the caller's own read-back still sees it."""
+    o, _s = _pair(detail={"status": "unreconciled_no_fills",
+                          "attribution_no_entry_evidence_proven_empty": True})
+    before = o.broker_recon_detail_json
+    d = o.broker_recon_detail_json
+    d["fees_status"] = "settled"
+    written = orc.stamp_recon_detail(o, d)
+    assert written is not before, "self-assignment writes nothing to the DB"
+    assert written["fees_status"] == "settled"
+    assert written["attribution_no_entry_evidence_proven_empty"] is True
+    # ...and `merge_recon_detail` is genuinely pure: the caller's dict is untouched.
+    caller = {"status": "x"}
+    merged = orc.merge_recon_detail({"attribution_attempts": 2}, caller)
+    assert caller == {"status": "x"}
+    assert merged["attribution_attempts"] == 2
