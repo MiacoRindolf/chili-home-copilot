@@ -1319,6 +1319,67 @@ def _run_alpaca_orphan_reconcile_job():
     run_scheduler_job_guarded("alpaca_orphan_reconcile", _work)
 
 
+def _run_momentum_outcome_broker_recon_job():
+    """Broker-truth reconcile pass para sa CLOSED momentum outcomes (#1287).
+
+    ANG LANDMINE (2026-09-02, 85 minutong patay ang arming). Ang loss guard
+    (`risk_policy.load_current_live_loss_history`) ay nangangailangan, para sa
+    bawat terminal Alpaca outcome na may fill, ng ``broker_recon_status ==
+    'reconciled'`` + broker pnl/notional; kulang ⇒ ``history_unavailable`` ⇒
+    ang BUONG account ay ``skipped=loss_guard_history_unavailable`` sa bawat
+    auto-arm pass. Ang ``broker_*`` na column ay isinusulat LAMANG ng
+    ``outcome_reconcile.reconcile_momentum_outcomes_to_broker_truth`` — isang
+    "operator-run WRITE pass" na WALANG nag-i-schedule (grep = 0). Kahapon ay
+    hindi lumitaw dahil ang mga filled session ay nagre-recycle at nananatiling
+    non-terminal; ngayon ay na-terminalize ng operator stop ang UPC 19457
+    (realized −48.97) ⇒ outcome 203719 na NULL ang recon ⇒ JLHL (+40%, Ross 5
+    Pillars), UPC, BRNX lahat ``armed=0`` 09:21–10:47Z. Ang manu-manong
+    ``reconcile_one_outcome`` ay nagbukas ng arming sa loob ng 8 segundo.
+
+    Ang job na ito ang designed path na hindi kailanman na-wire: kada 60s,
+    i-reconcile ang mga closed outcome sa loob ng lookback. Idempotent (ang
+    terminal na status ay hindi na ginagalaw). Flag: ang umiiral na
+    ``chili_momentum_broker_truth_reconciliation_enabled`` (ON).
+    """
+
+    def _work() -> None:
+        from ..config import settings as _settings
+        from ..db import SessionLocal
+
+        if not bool(getattr(
+            _settings, "chili_momentum_broker_truth_reconciliation_enabled", True
+        )):
+            return
+        if not _settings.chili_momentum_live_runner_enabled:
+            return
+        lookback = float(
+            getattr(_settings, "chili_momentum_outcome_recon_lookback_days", 2.0) or 2.0
+        )
+        db = SessionLocal()
+        try:
+            from .trading.momentum_neural.outcome_reconcile import (
+                reconcile_momentum_outcomes_to_broker_truth,
+            )
+
+            out = reconcile_momentum_outcomes_to_broker_truth(
+                db, lookback_days=lookback, day_net_advisory=False
+            )
+            db.commit()
+            if int((out or {}).get("written") or 0):
+                logger.info(
+                    "[scheduler] outcome broker recon: checked=%s written=%s by_status=%s",
+                    (out or {}).get("checked"), (out or {}).get("written"),
+                    (out or {}).get("by_status"),
+                )
+        except Exception:
+            db.rollback()
+            raise
+        finally:
+            db.close()
+
+    run_scheduler_job_guarded("momentum_outcome_broker_recon", _work)
+
+
 def _run_momentum_auto_arm_live_job():
     """Autonomously arm ONE live momentum session for the candidate whose entry
     trigger is firing now (Ross-style), fully guarded via the operator arm flow.
@@ -7862,6 +7923,25 @@ def start_scheduler():
                 max_instances=1,
                 coalesce=True,
                 next_run_time=datetime.now() + timedelta(seconds=40),
+            )
+        # OUTCOME BROKER-TRUTH RECON (#1287, 2026-09-02): ang loss guard ng auto-arm
+        # ay bulag (fail-closed sa buong account) hangga't may terminal Alpaca
+        # outcome na walang broker recon — at ang reconciler ay hindi kailanman
+        # na-schedule. Tumatakbo kasama ng auto-arm sa parehong role; hindi
+        # nakadepende sa driver (batch/loop) dahil DB-only ang pass.
+        if (
+            include_momentum_exec
+            and getattr(settings, "chili_momentum_broker_truth_reconciliation_enabled", True)
+        ):
+            _scheduler.add_job(
+                _run_momentum_outcome_broker_recon_job,
+                trigger=IntervalTrigger(seconds=60),
+                id="momentum_outcome_broker_recon",
+                name="Momentum outcome broker-truth recon (every 60s; unblocks the loss guard)",
+                replace_existing=True,
+                max_instances=1,
+                coalesce=True,
+                next_run_time=datetime.now() + timedelta(seconds=30),
             )
 
         # Monitor whichever single driver owns the lane. Event-only production has
