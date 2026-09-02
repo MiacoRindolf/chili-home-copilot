@@ -32022,7 +32022,7 @@ def tick_live_session(
                         max_frame_age_s=float(getattr(settings, "chili_momentum_g4_spent_leg_max_frame_age_s", 120.0) or 120.0),
                         min_session_uptime_s=float(getattr(settings, "chili_momentum_g4_spent_leg_min_session_uptime_s", 60.0) or 0.0),
                         min_observed_ticks=int(getattr(settings, "chili_momentum_g4_spent_leg_min_observed_ticks", 1) or 0),
-                        clear_dd_pct=float(getattr(settings, "chili_momentum_g4_spent_leg_clear_drawdown_pct", 3.5) or 0.0),
+                        clear_dd_pct=float(getattr(settings, "chili_momentum_g4_spent_leg_clear_drawdown_pct", 4.0) or 0.0),
                         clear_min_dwell_s=float(getattr(settings, "chili_momentum_g4_spent_leg_clear_min_dwell_s", 20.0) or 0.0),
                     )
                     # EMIT FIRST, then apply + commit (review M7): if the event
@@ -32403,11 +32403,17 @@ def tick_live_session(
                 # arm A's +28.10 USD / +1.515R entry at 7.09, blocked 25.4 min by a
                 # cold-start marker. The feature exists to suppress NON-structural
                 # re-entry chatter on a spent leg, so a trigger in
-                # structural_trigger_reasons() is let through whenever the escalation
-                # level exists ONLY because the seed created it (seed_level_delta >= 1
-                # ⇒ without the marker the decision reads level 0 = no_escalation =
-                # admitted). A level a REAL stop-out loss put there is UNTOUCHED — that
-                # ladder is pre-existing (arm A) behaviour and this must not erode it.
+                # structural_trigger_reasons() is let through — but ONLY while the
+                # level MINUS the seed's own delta is 0, i.e. the level exists
+                # *entirely* because the seed created it (without the marker the
+                # decision would read level 0 = no_escalation = admitted).
+                # A stop-out that lands ON TOP of an active marker (level 2, seed
+                # delta 1 -> 2 - 1 = 1 > 0) restores the strict ladder on the very
+                # next trigger: that residual level is a REAL loss's ladder and is
+                # pre-existing (arm A) behaviour this must not erode. Testing the
+                # delta alone (>= 1) would keep overriding forever after such a
+                # stop-out, which is the production session shape — seed, override,
+                # fill, stop-out, re-trigger — this gate was written for.
                 _g4e_override = False
                 if (
                     not _g4e_ok
@@ -32421,7 +32427,11 @@ def tick_live_session(
                     and _trigger_reason in structural_trigger_reasons()
                 ):
                     try:
-                        _g4e_override = int(_g4e_spent.get("seed_level_delta") or 0) >= 1
+                        _g4e_seed_delta = int(_g4e_spent.get("seed_level_delta") or 0)
+                        _g4e_override = (
+                            _g4e_seed_delta >= 1
+                            and (int(_g4e_level) - _g4e_seed_delta) <= 0
+                        )
                     except (TypeError, ValueError):
                         _g4e_override = False
                 if _g4e_override:
@@ -32430,9 +32440,11 @@ def tick_live_session(
                         _g4e_ovr_n = int(_g4e_spent.get("structural_overrides") or 0)
                     except (TypeError, ValueError):
                         _g4e_ovr_n = 0
-                    _g4e_spent["structural_overrides"] = _g4e_ovr_n + 1
-                    le["g4_spent_leg"] = _g4e_spent
-                    _commit_le(sess, le)
+                    # EMIT BEFORE COMMIT (review M7, as already applied to the seed
+                    # block): the once-only gate is ``_g4e_ovr_n == 0``, so a failed
+                    # insert must not have already consumed it — audit row first,
+                    # counter second, so a raising _emit retries next tick instead
+                    # of leaving an override permanently unaudited.
                     # ONCE per marker (the rest are counted on the marker and
                     # carried out on its clear as ``structural_overrides``).
                     if _g4e_ovr_n == 0:
@@ -32448,6 +32460,9 @@ def tick_live_session(
                             "blocks_while_seeded": _g4e_spent.get("blocks_while_seeded"),
                             **_g4e_dbg,
                         })
+                    _g4e_spent["structural_overrides"] = _g4e_ovr_n + 1
+                    le["g4_spent_leg"] = _g4e_spent
+                    _commit_le(sess, le)
                 elif not _g4e_ok:
                     _prev_reason = _trigger_reason
                     _trigger_ok = False

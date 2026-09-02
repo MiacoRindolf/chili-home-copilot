@@ -8118,18 +8118,20 @@ class Settings(BaseSettings):
     # 'shallowed' and 15 fired with minutes_waited 0.017-0.06 (under 4 s):
     # arming and clearing on the SAME 5% line makes price oscillating across it
     # re-arm and disarm continuously (CANF: 7 seed/clear pairs inside ~2 sim
-    # minutes). Split the two thresholds and add a dwell floor. HONEST COST,
-    # stated not hidden: at clear_drawdown_pct 3.5 the RKTO 07-09 (+74.52, 3.77%
-    # under at the fill) and LHAI 07-08 (+48.07, 3.70%) fills that the
-    # fill-instant corpus counts as FREE now stay SEEDED at the fill — the WAIT
-    # they were released by at P=5 no longer clears for them. Set this key to
-    # 5.0 to restore the exact fill-instant equality (no hysteresis).
+    # minutes). Split the two thresholds and add a dwell floor. BAND = 4.0
+    # (review 2026-09-02): 3.5 would have been a strict weakening of the WAIT's
+    # release, dropping the RKTO 07-09 (+74.52, 3.77% under at the fill) and
+    # LHAI 07-08 (+48.07, 3.70%) fills the fill-instant corpus counts as FREE.
+    # At 4.0 both stay ADMITTED — the corpus invariant is PINNED, not waived —
+    # while arm 5.0 vs clear 4.0 still gives a 1.0-point dead band and the 20 s
+    # dwell still kills all 15 sub-4-second clears the A/B measured. Set this
+    # key to 5.0 to collapse the hysteresis entirely (no dead band).
     chili_momentum_g4_spent_leg_clear_drawdown_pct: float = Field(
-        default=3.5,
+        default=4.0,
         ge=0.0,
         le=50.0,
         validation_alias=AliasChoices("CHILI_MOMENTUM_G4_SPENT_LEG_CLEAR_DRAWDOWN_PCT"),
-        description="Hysteresis: the marker ARMS at dd >= min_drawdown_pct but clears (clear_reason=shallowed) only under THIS lower depth. Clamped to <= min_drawdown_pct (a higher value would clear the marker on the tick that armed it). 3.5 vs the 5.0 arm floor = a 1.5-point dead band; RKTO 3.77% / LHAI 3.70% now stay seeded at their fills (the cost), CANF's 7 seed/clear pairs inside 2 minutes collapse to one (the gain).",
+        description="Hysteresis: the marker ARMS at dd >= min_drawdown_pct but clears (clear_reason=shallowed) only under THIS lower depth. Clamped to <= min_drawdown_pct (a higher value would clear the marker on the tick that armed it). 4.0 vs the 5.0 arm floor = a 1.0-point dead band that keeps the fill-instant corpus invariant intact (RKTO 3.77% / LHAI 3.70% still clear and stay FREE at their fills) while CANF's 7 seed/clear pairs inside 2 minutes collapse to one.",
     )
     chili_momentum_g4_spent_leg_clear_min_dwell_s: float = Field(
         default=20.0,

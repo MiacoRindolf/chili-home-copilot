@@ -4257,7 +4257,9 @@ def _spent_leg_nonneg_float(value: Any) -> float | None:
         return None
 
 
-def _spent_leg_window_start(session_start: Any, session_first_tick: Any) -> datetime | None:
+def _spent_leg_window_start(
+    session_start: Any, session_first_tick: Any, session_date_et: Any
+) -> datetime | None:
     """The session/replay WINDOW start for the cold-start guard: the earlier of
     the session's arm instant and the FIRST tick the session ever saw today.
 
@@ -4268,12 +4270,28 @@ def _spent_leg_window_start(session_start: Any, session_first_tick: Any) -> date
     booked 3 coverage breaks and its run started 10:44:30, four minutes AFTER
     its own 7.92 tick high at 10:40:23). The run start still governs the
     uptime/tick floor — that is the separate "is this runner live right now"
-    question. Unreadable arm instant ⇒ None (the predicate refuses: fail-open).
+    question.
+
+    DAY FLOOR (review 2026-09-02). Sessions demonstrably span ET days: 8 of 284
+    sessions over 4 days carried across midnight ET (SSM / PETZ / FLYE / RDAC
+    all carried 09-01 -> 09-02 premarket). A carried session's arm instant is
+    YESTERDAY's instant, and using it as today's window start makes every
+    warm-up-inherited top from before today's open "observed" — the exact
+    cold-start hole CHANGE 1 exists to close, silently reopened on the
+    production session shape. So an arm instant whose ET date is not
+    ``session_date_et`` is discarded and today's first observed tick IS the
+    window; the same reasoning that makes ``session_rollover`` exist makes this
+    window day-scoped. Unreadable arm instant AND no tick ⇒ None (the predicate
+    refuses: fail-open, no seed).
     """
     s = _spent_leg_aware_utc(session_start)
     o = _spent_leg_aware_utc(session_first_tick)
+    if s is not None and s.astimezone(_SPENT_LEG_ET).date().isoformat() != str(
+        session_date_et or ""
+    ).strip():
+        s = None  # a carried-over session's arm instant is not TODAY's window
     if s is None:
-        return None
+        return o  # today's first observed tick IS the window; None => the predicate refuses
     return min(s, o) if o is not None else s
 
 
@@ -4761,9 +4779,15 @@ def apply_spent_leg_tick(
         # hours in the "future" of every sim bar and refuses EVERY seed —
         # the feature would ship measurable only in prod, which is exactly how
         # a knob ends up inert (#1170). Taking the earlier of the two makes the
-        # replay measure the rule and changes nothing live.
+        # replay measure the rule and changes nothing live. DAY-FLOORED: an arm
+        # instant from a PREVIOUS ET day is discarded (sessions span ET days —
+        # measured 8 of 284 in 4 days: SSM / PETZ / FLYE / RDAC carried 09-01 ->
+        # 09-02 premarket) so a carried session cannot make yesterday's window
+        # vouch for today's warm-up-inherited tops.
         session_start_utc=_spent_leg_window_start(
-            session_start_utc, (tick_hod.get("session_first_tick_ts") if tick_hod else None)
+            session_start_utc,
+            (tick_hod.get("session_first_tick_ts") if tick_hod else None),
+            session_date_et=day,
         ),
         observed_since_utc=(tick_hod.get("first_tick_ts") if tick_hod else None),
         observed_ticks=(tick_hod.get("run_ticks") if tick_hod else None),

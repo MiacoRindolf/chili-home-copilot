@@ -43,6 +43,7 @@ from app.services.trading.momentum_neural.entry_gates import (
     session_frame_hod_debug,
 )
 from app.services.trading.momentum_neural.risk_policy import (
+    _spent_leg_window_start,
     apply_spent_leg_tick,
     reentry_escalation_decision,
     reentry_escalation_level_update,
@@ -417,8 +418,8 @@ def _warm(le, *, now, session_date_et, warm_s=600.0):
 def _tick(le, *, px, now, frame_hod, hod_end, frame_last_end=None, frame_age_s=0.0,
           enabled=True, symbol="CANF", session_date_et=DAY, hod_date_et=DAY,
           warm=True, session_start=_UNSET, min_uptime_s=60.0, min_ticks=1,
-          clear_dd=3.5, dwell_s=20.0):
-    """SHIPPED defaults: hysteresis (arm 5%, clear 3.5%, 20 s dwell) and the
+          clear_dd=4.0, dwell_s=20.0):
+    """SHIPPED defaults: hysteresis (arm 5%, clear 4.0%, 20 s dwell) and the
     cold-start floors (60 s uptime, 1 tick). ``warm=False`` opts a case out of
     the pre-observed session so it can measure the cold start itself."""
     if warm:
@@ -607,28 +608,53 @@ def test_session_rollover_unwinds_the_orphaned_level():
     assert acts[0][1]["clear_reason"] == "session_rollover" and up["g4_reentry_escalation"] == 2
 
 
-def test_rkto_shape_hysteresis_now_holds_the_fill_the_corpus_calls_free():
-    """MEASURED COST of CHANGE 2, stated not hidden. RKTO 07-09 — HOD 1.06 @
-    08:25, 08:31 close 0.986 (6.98% under) then the +74.52 fill at 1.02 (3.77%
-    under) with NO re-take between. At the PR's original single 5% line that
-    fill cleared the WAIT (review M8); at the shipped 3.5% clear band 3.77% is
-    INSIDE the dead band, so the marker holds and the fill is blocked. LHAI
-    07-08 (+48.07, 3.70% under) is the same shape. Setting
-    chili_momentum_g4_spent_leg_clear_drawdown_pct = 5.0 restores the exact
-    fill-instant equality — the rest of this test pins that."""
+def test_rkto_shape_shallowed_clear_admits_the_fill():
+    """THE fill-instant corpus invariant, PINNED (review 2026-09-02). RKTO 07-09
+    — HOD 1.06 @ 08:25, 08:31 close 0.986 (6.98% under) then the +74.52 fill at
+    1.02 (3.77% under) with NO re-take between. The corpus counts this fill and
+    LHAI 07-08 (+48.07, 3.70% under) as FREE, and the SHIPPED 4.0% clear band
+    keeps them free: 3.77% and 3.70% are both under 4.0, so the marker clears on
+    the shallowing and the fill is ADMITTED. (A 3.5% band would have held both
+    — a strict weakening of the WAIT's release worth -$122.59 across the two;
+    that is why the band is 4.0 and not 3.5.) Setting
+    chili_momentum_g4_spent_leg_clear_drawdown_pct = 5.0 collapses the
+    hysteresis entirely — the rest of this test pins that."""
     hod_end = datetime(2026, 7, 9, 12, 26, 0, tzinfo=UTC)  # 08:25 ET bar END
     le0: dict = {}
     _apply(le0, _tick(le0, px=0.986, now=hod_end + timedelta(minutes=6), frame_hod=1.06,
                       hod_end=hod_end, session_date_et="2026-07-09",
                       hod_date_et="2026-07-09")[0])
-    _u, acts = _tick(le0, px=1.02, now=hod_end + timedelta(minutes=15), frame_hod=1.06,
+    assert le0["g4_spent_leg"]["active"] is True and le0["g4_reentry_escalation"] == 1
+    up, acts = _tick(le0, px=1.02, now=hod_end + timedelta(minutes=15), frame_hod=1.06,
                      hod_end=hod_end, session_date_et="2026-07-09", hod_date_et="2026-07-09")
-    assert acts == []  # 3.77% > the 3.5% clear band: still seeded (the cost)
-    assert le0["g4_spent_leg"]["active"] is True
-    # LHAI's 3.70% is held too
-    _u, acts = _tick(le0, px=1.0208, now=hod_end + timedelta(minutes=16), frame_hod=1.06,
+    # 3.77% < the 4.0% clear band -> shallowed clear: the +74.52 fill is FREE
+    assert _events(acts) == ["g4_spent_leg_cleared"]
+    assert acts[0][1]["clear_reason"] == "shallowed" and acts[0][1]["clear_dd_pct"] == 4.0
+    _apply(le0, up)
+    assert le0["g4_spent_leg"]["active"] is False and "g4_reentry_escalation" not in le0
+    ok, dbg = reentry_escalation_decision(
+        enabled=True, escalation_level=int(le0.get("g4_reentry_escalation") or 0),
+        structural_trigger=False, live_price=1.02, prior_hwm=1.06, prior_exit_price=None,
+        prior_risk_dist=None, tape_accel=1.0,
+    )
+    assert ok is True and dbg["reason"] == "no_escalation"
+    # LHAI's 3.70% shape is admitted the same way
+    le1: dict = {}
+    _apply(le1, _tick(le1, px=1.50, now=hod_end + timedelta(minutes=6), frame_hod=1.62,
+                      hod_end=hod_end, session_date_et="2026-07-08",
+                      hod_date_et="2026-07-08")[0])
+    _u, acts = _tick(le1, px=1.56, now=hod_end + timedelta(minutes=15), frame_hod=1.62,
+                     hod_end=hod_end, session_date_et="2026-07-08", hod_date_et="2026-07-08")
+    assert _events(acts) == ["g4_spent_leg_cleared"]  # 3.70% under
+    assert acts[0][1]["clear_reason"] == "shallowed"
+    # ...and a 4.10% pullback (INSIDE the new dead band) still holds the WAIT
+    le2: dict = {}
+    _apply(le2, _tick(le2, px=0.986, now=hod_end + timedelta(minutes=6), frame_hod=1.06,
+                      hod_end=hod_end, session_date_et="2026-07-09",
+                      hod_date_et="2026-07-09")[0])
+    _u, acts = _tick(le2, px=1.0165, now=hod_end + timedelta(minutes=15), frame_hod=1.06,
                      hod_end=hod_end, session_date_et="2026-07-09", hod_date_et="2026-07-09")
-    assert acts == []
+    assert acts == [] and le2["g4_spent_leg"]["active"] is True
     # ── with the hysteresis turned off (clear_dd = min_dd) the M8 behaviour is exact ──
     _rk = dict(clear_dd=5.0, session_date_et="2026-07-09", hod_date_et="2026-07-09")
     le: dict = {}
@@ -669,22 +695,24 @@ def test_rkto_shape_hysteresis_now_holds_the_fill_the_corpus_calls_free():
 
 
 def test_shallow_clear_uses_the_lower_hysteresis_band():
-    """CHANGE 2 (A/B verdict 2026-09-02). The marker ARMS at dd >= 5% but the
-    'shallowed' clear now fires only under the SEPARATE 3.5% band, so price
-    oscillating across the arm line no longer re-arms/disarms every tick (36 of
-    36 A/B clears were 'shallowed'; CANF produced 7 seed/clear pairs inside
-    ~2 sim minutes). Setting clear_dd == min_dd restores the old equality."""
+    """CHANGE 2 (A/B verdict 2026-09-02, band raised to 4.0 at review). The
+    marker ARMS at dd >= 5% but the 'shallowed' clear fires only under the
+    SEPARATE 4.0% band, so price oscillating across the arm line no longer
+    re-arms/disarms every tick (36 of 36 A/B clears were 'shallowed'; CANF
+    produced 7 seed/clear pairs inside ~2 sim minutes). 4.0 rather than 3.5
+    keeps the fill-instant corpus invariant (RKTO 3.77% / LHAI 3.70% still
+    clear). Setting clear_dd == min_dd restores the old equality."""
     le: dict = {}
     _apply(le, _tick(le, px=94.0, now=T0 + timedelta(minutes=10), frame_hod=100.0,
                      hod_end=T0 + timedelta(minutes=3))[0])
-    for px in (95.0, 95.01, 96.4, 96.5):  # 5.00 / 4.99 / 3.60 / 3.50 % under
+    for px in (95.0, 95.01, 95.9, 96.0):  # 5.00 / 4.99 / 4.10 / 4.00 % under
         _u, acts = _tick(le, px=px, now=T0 + timedelta(minutes=12), frame_hod=100.0,
                          hod_end=T0 + timedelta(minutes=3))
         assert acts == [], (px, acts)  # inside the dead band: the WAIT holds
-    _u, acts = _tick(le, px=96.51, now=T0 + timedelta(minutes=13), frame_hod=100.0,
-                     hod_end=T0 + timedelta(minutes=3))  # 3.49% under
+    _u, acts = _tick(le, px=96.01, now=T0 + timedelta(minutes=13), frame_hod=100.0,
+                     hod_end=T0 + timedelta(minutes=3))  # 3.99% under
     assert _events(acts) == ["g4_spent_leg_cleared"]
-    assert acts[0][1]["clear_reason"] == "shallowed" and acts[0][1]["clear_dd_pct"] == 3.5
+    assert acts[0][1]["clear_reason"] == "shallowed" and acts[0][1]["clear_dd_pct"] == 4.0
     # no hysteresis (clear_dd == min_dd) is the PR's original fill-instant rule
     le2: dict = {}
     _apply(le2, _tick(le2, px=94.0, now=T0 + timedelta(minutes=10), frame_hod=100.0,
@@ -1177,6 +1205,68 @@ def test_jlhl_cold_start_regression_no_seed_at_the_first_grid_step():
     assert acts[0][1]["session_uptime_s"] >= 60.0
 
 
+def test_carried_session_cannot_vouch_for_todays_warmup_inherited_top():
+    """HOLE 2 (review 2026-09-02): the cold-start window must be DAY-SCOPED.
+    Sessions demonstrably span ET days — 8 of 284 sessions over 4 days carried
+    across midnight ET, SSM / PETZ / FLYE / RDAC all carried 09-01 -> 09-02
+    premarket. A carried session's ``started_at`` is YESTERDAY's instant, so an
+    un-floored window start makes EVERY warm-up-inherited top from before
+    today's open "observed" and silently reopens the exact hole CHANGE 1 closes
+    — on the production session shape CHANGE 1 was written for.
+
+    Same JLHL shape as the cold-start regression, but the session armed the
+    PREVIOUS ET day and today's first tick is at the window open."""
+    win_start = datetime(2026, 9, 2, 10, 2, 0, tzinfo=UTC)          # today's first tick
+    carried = datetime(2026, 9, 1, 12, 0, 0, tzinfo=UTC)            # 08:00 ET on 09-01
+    hod_bar_end = datetime(2026, 9, 2, 9, 25, 0, tzinfo=UTC)        # 37 min before the open
+    le: dict = {}
+    # today's first tick at the window open, then 90 s of ticking (past the 60 s floor)
+    for secs in (0, 30, 60, 90):
+        up, acts = _tick(le, px=7.01, now=win_start + timedelta(seconds=secs),
+                         frame_hod=7.70, hod_end=hod_bar_end, frame_last_end=win_start,
+                         session_start=carried, warm=False)
+        _apply(le, up)
+        assert acts == [], (secs, acts)
+    assert le["spent_leg_tick_hod"]["session_first_tick_ts"] == win_start.isoformat()
+    assert "g4_spent_leg" not in le and "g4_reentry_escalation" not in le
+    # the predicate itself names the refusal
+    seed, dbg = spent_leg_seed_decision(
+        cur_hod=7.70, hod_ts=hod_bar_end, hod_date_et=DAY, live_px=7.01,
+        now_utc=win_start + timedelta(seconds=90), session_date_et=DAY,
+        frame_age_s=0.0, coverage_gap_s=0.0, interval_s=60.0,
+        session_start_utc=_spent_leg_window_start(carried, win_start, DAY),
+        observed_since_utc=win_start, observed_ticks=4,
+    )
+    assert (seed, dbg["reason"]) == (False, "spent_leg_hod_unobserved")
+    # ...and the SAME shape DOES seed once the HOD's bar END falls after today's
+    # first tick: a top this session actually watched print today.
+    le2: dict = {}
+    todays_top_end = win_start + timedelta(seconds=20)  # a bar END inside today's window
+    for k in range(0, 7):  # continuous 60 s ticking from today's window open
+        up, acts = _tick(le2, px=7.60, now=win_start + timedelta(seconds=60 * k),
+                         frame_hod=7.70, hod_end=todays_top_end,
+                         session_start=carried, warm=False)
+        _apply(le2, up)
+        assert acts == [], (k, acts)  # 1.3% under: too shallow, not yet spent
+    up, acts = _tick(le2, px=7.01, now=win_start + timedelta(minutes=7), frame_hod=7.70,
+                     hod_end=todays_top_end, session_start=carried, warm=False)
+    assert _events(acts) == ["g4_spent_leg_seed"], acts
+    assert acts[0][1]["hod"] == 7.70
+    assert le2["spent_leg_tick_hod"]["coverage_breaks"] == 0
+    # the helper in isolation: yesterday's arm instant is discarded, today's
+    # first tick IS the window; and with neither readable the predicate refuses.
+    assert _spent_leg_window_start(carried, win_start, DAY) == win_start
+    assert _spent_leg_window_start(carried, None, DAY) is None
+    assert _spent_leg_window_start(win_start, None, DAY) == win_start
+    # a same-ET-day arm instant is still honoured (and still the earlier of the two)
+    same_day = datetime(2026, 9, 2, 9, 0, 0, tzinfo=UTC)  # 05:00 ET on 09-02
+    assert _spent_leg_window_start(same_day, win_start, DAY) == same_day
+    # ET, not UTC: 2026-09-02 01:30Z is 09-01 21:30 ET -> a PREVIOUS ET day
+    prev_et = datetime(2026, 9, 2, 1, 30, 0, tzinfo=UTC)
+    assert _spent_leg_window_start(prev_et, win_start, DAY) == win_start
+    assert _spent_leg_window_start(prev_et, win_start, "2026-09-01") == prev_et
+
+
 def test_window_start_is_the_earlier_of_arm_time_and_first_observed_tick():
     """The session row's ``started_at`` is stamped from ``datetime.utcnow`` — the
     WALL clock — while a replay runner ticks on the SIM clock, so an
@@ -1185,13 +1275,14 @@ def test_window_start_is_the_earlier_of_arm_time_and_first_observed_tick():
     the first tick of the observation run: a no-op in production (started_at is
     always <= the session's first tick) and the difference between a measurable
     rule and an inert one under replay."""
-    from app.services.trading.momentum_neural.risk_policy import _spent_leg_window_start
-
-    early, late = T0, T0 + timedelta(hours=9)
-    assert _spent_leg_window_start(early, late) == early          # prod shape: no-op
-    assert _spent_leg_window_start(late, early) == early          # replay shape: normalised
-    assert _spent_leg_window_start(early, None) == early
-    assert _spent_leg_window_start(None, early) is None           # fail-open, still refuses
+    early, late = T0, T0 + timedelta(hours=9)  # 07:00 / 16:00 ET on DAY
+    assert _spent_leg_window_start(early, late, DAY) == early      # prod shape: no-op
+    assert _spent_leg_window_start(late, early, DAY) == early      # replay shape: normalised
+    assert _spent_leg_window_start(early, None, DAY) == early
+    # no arm instant -> today's first observed tick IS the window (day-floored)
+    assert _spent_leg_window_start(None, early, DAY) == early
+    # fail-open, still refuses: no arm instant AND no observed tick
+    assert _spent_leg_window_start(None, None, DAY) is None
     # MEASURED (JLHL arm B, 2026-09-02): the run restarted at 10:44:30 after 3
     # coverage breaks, four minutes AFTER the session's own 7.92 tick high at
     # 10:40:23. The window is the SESSION's first tick, which survives holes —
@@ -1293,13 +1384,22 @@ def test_structural_override_emit_site_lets_the_trigger_through():
         ] + [
             ast.unparse(n) for n in ast.walk(fn)
             if isinstance(n, ast.Assign)
-            and any(isinstance(t, ast.Name) and t.id == "_g4e_override" for t in n.targets)
+            and any(
+                isinstance(t, ast.Name) and t.id in ("_g4e_override", "_g4e_seed_delta")
+                for t in n.targets
+            )
         ]
     )
     assert "structural_trigger_reasons()" in src
     assert "_g4e_spent_active" in src
     assert "seed_level_delta" in src
     assert "chili_momentum_g4_spent_leg_structural_override_enabled" in src
+    # ...and the predicate is the LEVEL MINUS THE SEED'S OWN DELTA, not merely a
+    # mention of seed_level_delta: `delta >= 1` alone keeps overriding forever
+    # after a stop-out lands on top of an active marker (level 2, delta 1).
+    _norm = src.replace(" ", "")
+    assert "int(_g4e_level)-_g4e_seed_delta<=0" in _norm, src
+    assert "_g4e_seed_delta>=1" in _norm, src
     # nothing in the override branch flips the trigger off
     branch = [
         n for n in ast.walk(fn)
@@ -1308,6 +1408,20 @@ def test_structural_override_emit_site_lets_the_trigger_through():
     assert len(branch) == 1
     body_src = "\n".join(ast.unparse(s) for s in branch[0].body)
     assert "_trigger_ok" not in body_src and "g4_reentry_escalation_wait" not in body_src
+    # CHANGE 4 (review M7, as already applied to the seed block): EMIT BEFORE
+    # COMMIT. The once-only gate is ``_g4e_ovr_n == 0``, so a raising _emit must
+    # not have already consumed it — otherwise a failed insert leaves an
+    # override permanently unaudited instead of retrying on the next tick.
+    stmts = [ast.unparse(s) for s in branch[0].body]
+
+    def _stmt_index(needle: str) -> int:
+        return next((i for i, t in enumerate(stmts) if needle in t), -1)
+
+    i_emit = _stmt_index("g4_spent_leg_seed_structural_override")
+    i_count = _stmt_index("'structural_overrides'] =")
+    i_commit = _stmt_index("_commit_le(")
+    assert i_emit >= 0 and i_count >= 0 and i_commit >= 0, stmts
+    assert i_emit < i_count and i_emit < i_commit, stmts
 
 
 def test_structural_override_is_exactly_the_block_the_seed_created():
@@ -1340,6 +1454,74 @@ def test_structural_override_is_exactly_the_block_the_seed_created():
                       hod_end=T0 + timedelta(minutes=3))
     _apply(le2, up)
     assert le2["g4_spent_leg"]["seed_level_delta"] == 1
+
+
+def _override_predicate(level: int, marker: dict) -> bool:
+    """Evaluate the runner's ACTUAL override arithmetic — the two assignments
+    lifted out of live_runner's source by AST and executed, not a restatement of
+    them in the test. If the source stops computing the override this way the
+    AST test above fails first; if it computes it DIFFERENTLY, this runs the
+    different thing, which is the point."""
+    fn = _tick_fn()
+    stmts = sorted(
+        (
+            n for n in ast.walk(fn)
+            if isinstance(n, ast.Assign)
+            and any(
+                isinstance(t, ast.Name) and t.id in ("_g4e_seed_delta", "_g4e_override")
+                for t in n.targets
+            )
+            and not (isinstance(n.value, ast.Constant) and n.value.value is False)
+        ),
+        key=lambda n: (n.lineno, n.col_offset),
+    )
+    assert stmts, "the override arithmetic vanished from live_runner"
+    ns: dict = {"_g4e_level": level, "_g4e_spent": dict(marker)}
+    exec("\n".join(ast.unparse(s) for s in stmts), ns)  # noqa: S102 - source under test
+    return bool(ns["_g4e_override"])
+
+
+def test_override_dies_when_a_real_stop_out_lands_on_top_of_the_marker():
+    """HOLE 1 (review 2026-09-02). ``seed_level_delta >= 1`` alone is NOT the
+    rule the comment claims and is wrong on the production session shape:
+    seed -> override -> fill -> STOP-OUT -> re-trigger. After the seed the level
+    is 1 and the seed owns all of it (delta 1), so the structural override is
+    correct. A genuine stop-class loss then escalates the SAME still-active
+    marker to level 2 — that extra level is a REAL loss's ladder (arm A
+    behaviour), so the override must be OFF at level 2 and the strict ladder
+    restored on the very next trigger. Under `delta >= 1` it would keep
+    overriding forever."""
+    le: dict = {}
+    up, acts = _tick(le, px=4.34, now=T0 + timedelta(minutes=10), frame_hod=4.9297,
+                     hod_end=T0 + timedelta(minutes=3))
+    _apply(le, up)
+    assert _events(acts) == ["g4_spent_leg_seed"]
+    marker = le["g4_spent_leg"]
+    assert marker["active"] is True and marker["seed_level_delta"] == 1
+    assert le["g4_reentry_escalation"] == 1
+    # level 1, delta 1 -> 1 - 1 = 0: the level exists ONLY because of the seed
+    assert _override_predicate(1, marker) is True
+    # a genuine stop-class loss escalates the ladder while the marker is active
+    lvl2, why = reentry_escalation_level_update(
+        current_level=1, was_loss=True, exit_reason="stop", green_banked=False,
+    )
+    assert (lvl2, why) == (2, "stop_class_loss_increment")
+    le["g4_reentry_escalation"] = lvl2
+    assert le["g4_spent_leg"]["active"] is True  # the marker did NOT clear
+    # level 2, delta 1 -> 2 - 1 = 1 > 0: a real loss's residual ladder. NO override.
+    assert _override_predicate(lvl2, marker) is False
+    # and the two arms AGREE about that residual level: arm A, which never had a
+    # seed, is blocked at level 1 by exactly the same pre-existing ladder.
+    ok, dbg = reentry_escalation_decision(
+        enabled=True, escalation_level=1, structural_trigger=True, live_price=4.34,
+        prior_hwm=4.9297, prior_exit_price=None, prior_risk_dist=None, tape_accel=1.0,
+    )
+    assert ok is False and dbg["reason"] == "reclaim_not_met"
+    # a second stop-out keeps it off; a marker the seed did NOT create never
+    # overrode in the first place.
+    assert _override_predicate(3, marker) is False
+    assert _override_predicate(1, {**marker, "seed_level_delta": 0}) is False
+    assert _override_predicate(0, {**marker, "seed_level_delta": 0}) is False
 
 
 def test_structural_override_count_is_carried_out_on_the_clear():
@@ -1388,6 +1570,6 @@ def test_ships_on():
     assert (
         s.chili_momentum_g4_spent_leg_clear_drawdown_pct,
         s.chili_momentum_g4_spent_leg_clear_min_dwell_s,
-    ) == (3.5, 20.0)
+    ) == (4.0, 20.0)
     assert s.chili_momentum_g4_spent_leg_clear_drawdown_pct < s.chili_momentum_g4_spent_leg_min_drawdown_pct
     assert s.chili_momentum_g4_spent_leg_structural_override_enabled is True
