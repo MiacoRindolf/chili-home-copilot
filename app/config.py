@@ -4979,6 +4979,76 @@ class Settings(BaseSettings):
     # tapos ay patuloy pang tumataas, at wala niyon sa 7 sa 10 window.
     # Sumasang-ayon ang malayang backtest sa sarili nating tape (5 tunay na
     # trade): 1.5R = -1.67 · 2.0R = +13.62 · 2.5R = +30.86.
+    # ── BURST-WINDOW EXIT (#1275) ────────────────────────────────────────────
+    #
+    # NASUKAT sa 968 na kaso sa 5 magkakahiwalay na araw (08-26, 08-27, 08-28,
+    # 08-31, 09-01), 26 na pangalan. Kondisyon: NASA LOOB NA TAYO bago ang
+    # burst (entry = close 2 min bago ang 1-min bar na tumaas >=1.5%):
+    #
+    #     paglabas sa   45s     60s     90s    120s    300s
+    #     average      2.15%   3.01%   2.81%   2.77%   2.47%
+    #     panalo@60s   ..      88% (852/968)
+    #
+    #     08-26  160 kaso  60s=3.03  panalo 93%
+    #     08-27  140 kaso  60s=3.76  panalo 85%
+    #     08-28   89 kaso  60s=2.64  panalo 91%
+    #     08-31  178 kaso  60s=3.20  panalo 86%
+    #     09-01  401 kaso  60s=2.74  panalo 86%
+    #
+    # Ang 60s ang peak sa 4 sa 5 araw, at PAREHO ang hugis sa bawat araw:
+    # 45s < 60s > 90s > 120s > 300s. Hindi ito isang numerong tumama sa isang
+    # araw -- limang independiyenteng araw ang tumuturo sa parehong lugar.
+    # NET pagkatapos ng spread (median 53.9 bps sa 8 pangalan): +2.47% sa isang
+    # crossing, +1.93% sa dalawa.
+    #
+    # ANG BUMAGSAK, at lahat ay natalo ng simpleng orasan na ito:
+    #   trailing stop 0.5/1.0/1.5/2.5%  ·  volume conditioning (<5x .. >=40x)
+    #   tape-speed cadence decay (3 threshold)  ·  CUSUM sa SIGNED FLOW
+    #   (quote-rule signing; ang literature Signal 1 -- Lillo-Farmer long memory
+    #   + order splitting) = +1.74% lamang laban sa +3.01%.
+    #
+    # BAKIT KAILANGANG BUMAGSAK ANG TRAILING STOPS: Cont-Kukanov-Stoikov (2014,
+    # J. Financial Econometrics 12(1)) ay sumukat ng beta = c/depth^0.98. Ang
+    # price-space na stop ay estimator ng FLOW-space na pangyayari na ang tamang
+    # lapad ay function ng lalim na HINDI natin nakikita. Structural na
+    # garantisadong overfit, hindi aksidente.
+    #
+    # ⚠️ WALANG SUPORTA SA PANITIKAN ANG "BUMABAGAL ANG TAPE BAGO BUMALIGTAD".
+    # Mabagal na tape = mas mababang volatility (Jones-Kaul-Lipson 1994) at mas
+    # mababang impact kada trade (Dufour-Engle 2000); sa trade time ay
+    # NAGLALAHO ito by construction (Ane-Geman 2000). WALANG DIREKSYON. Ang
+    # sinusuportahang mekanismo ay transient impact na iniiniksyon ng persistent
+    # same-sign flow at nabubulok bilang power law: ang pagbagsak ay kaganapan
+    # sa DALOY, hindi sa presyo. Ang orasan ang pinakamalinis na proxy para sa
+    # "may sapat nang oras para tumigil ang daloy".
+    chili_momentum_burst_exit_enabled: bool = Field(
+        default=False,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_BURST_EXIT_ENABLED"),
+    )
+    # DESISYON sa 45s, hindi 60s -- SINADYA. Ang optimum na NASUKAT ay ang
+    # PRESYO sa 60s; ang nasukat na latency mula desisyon hanggang fill ay
+    # 8.7-15.7s (AUUD 14.4s, GYGY 8.7s, WETO 15.7s noong 2026-09-01). Ang
+    # pagpapaputok sa 45s ay naglalapag ng FILL sa paligid ng 60s. Ginagamit
+    # nito ang sukat ng latency sa halip na ipagwalang-bahala ito.
+    chili_momentum_burst_exit_decision_seconds: float = Field(
+        default=45.0,
+        ge=5.0,
+        le=600.0,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_BURST_EXIT_DECISION_SECONDS"),
+    )
+    # Ang kahulugan ng "burst": pagtaas na >= ganitong % sa loob ng lookback.
+    # 1.5% ang ginamit sa buong pag-aaral ng 968 kaso.
+    chili_momentum_burst_exit_min_move_pct: float = Field(
+        default=1.5,
+        ge=0.1,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_BURST_EXIT_MIN_MOVE_PCT"),
+    )
+    chili_momentum_burst_exit_lookback_seconds: float = Field(
+        default=60.0,
+        ge=15.0,
+        le=300.0,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_BURST_EXIT_LOOKBACK_SECONDS"),
+    )
     chili_momentum_risk_reward_risk_ratio: float = Field(
         default=2.5,
         ge=0.0,
@@ -9802,6 +9872,42 @@ class Settings(BaseSettings):
             "CHILI_MOMENTUM_BACKSIDE_STRUCTURE_UNBENCH_ENABLED"
         ),
         description="Preserve a STRUCTURAL entry trigger that fires while a name is sticky-benched on the back side, provided price has genuinely retraced off the benched high. The bench latches at the high to stop us CHASING a name that already ran — correct — but it then also vetoes the PULLBACK entry, which is the setup Ross actually trades, and the only existing escape requires a full VWAP round-trip. Replayed on the recorded tape for YJ 13:13-13:22Z: 519 steps, ZERO entries, 460 bench vetoes, with payload blocked_trigger=double_bottom_break_tick_ok against benched_at_hod=6.30 while vwap_reclaim_not_below_enough fired 518 times because the curl never dipped far enough under VWAP. That was Ross's +$3,000 trade. This is a SAVE, not an entry: the bench marker stays latched and every downstream chase-guard, extension veto, bid-prop confirmer, spread and risk gate still runs. OFF ⇒ byte-identical veto.",
+    )
+    # ANG IKALAWANG PANIG NG RETRACE NA BINTANA (#1274, 2026-09-01).
+    #
+    # Ang floor sa ibaba ay nagtatanong ng "sapat na ba ang pag-urong para
+    # tawaging pullback at hindi chase?" — pero WALA itong itinatanong tungkol
+    # sa MASYADONG MALALIM. Nakasulat na mismo ito sa komento ng #1256 sa
+    # live_runner.py: "Ang retrace floor ay ONE-SIDED: habang mas wasak ang
+    # galaw, mas madali itong pasado (15% fade = 15% retrace)."
+    #
+    # NASUKAT mula 2026-08-19 (nang ipadala ang exception) hanggang 09-01 —
+    # 182 sesyon ang nakakuha ng backside structure exception:
+    #
+    #     lalim ng retrace   sesyon   fills   kabuuang P&L
+    #     <10%                  22       0          0.00
+    #     10-15%                33       1        -25.98
+    #     15-20%                28       0          0.00
+    #     20-30%                45       1        -29.20
+    #     >=30%                 54       1         -2.05
+    #
+    # **3 fill sa 3 linggo. LAHAT natalo. ZERO panalo. Kabuuan -57.23.**
+    # Ang tatlo: SSM 12.4% (-25.98) · GYGY 24.5% (-29.20) · RDHL 32.9% (-2.05).
+    # Ang PINAKAMABABAW sa tatlo ay 12.4%, kaya hinaharangan ng 12.0 ang lahat.
+    #
+    # Sa ilalim ng 12%: 22 sesyon sa <10% ang nagbigay ng ZERO fill, kaya walang
+    # nasusukat na nawawala. Ang dokumentadong YJ #1076 na save (ang dahilan ng
+    # pag-iral ng exception) ay isang curl na HAWAK ang VWAP malapit sa taas —
+    # mababaw, at nananatiling pasado.
+    #
+    # 0.0 = walang upper bound (dating gawi). Ang gate ay nagiging MAS MAHIGPIT
+    # dahil dito, hindi mas maluwag: mas kaunting entry, hindi mas marami.
+    chili_momentum_backside_unbench_max_retrace_pct: float = Field(
+        default=12.0,
+        ge=0.0,
+        validation_alias=AliasChoices(
+            "CHILI_MOMENTUM_BACKSIDE_UNBENCH_MAX_RETRACE_PCT"
+        ),
     )
     chili_momentum_backside_unbench_min_retrace_pct: float = Field(
         default=3.0,
