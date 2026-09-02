@@ -5021,8 +5021,29 @@ class Settings(BaseSettings):
     # same-sign flow at nabubulok bilang power law: ang pagbagsak ay kaganapan
     # sa DALOY, hindi sa presyo. Ang orasan ang pinakamalinis na proxy para sa
     # "may sapat nang oras para tumigil ang daloy".
+    # ON mula 2026-09-01 gabi (#1277). Ang mapagpasyang ebidensya ay HINDI ang
+    # replay A/B (mahina ang kapangyarihan nito — ang sim ay pumapasok sa
+    # sarili nitong oras, hindi sa tunay nating pasok, kaya bihira nitong
+    # magaya ang "nasa loob bago ang burst" na kondisyon; 7/8 window ay
+    # WALANG pagbabago, LIDR +0.98, ZERO control window ang nasira) kundi ang
+    # EVENT-STUDY sa TUNAY na anim na pasok ng 2026-09-01 — tunay na entry,
+    # tunay na tape, ang MISMONG helper na ito, tick-by-tick, kasama ang
+    # nasukat na 12s decision->fill latency:
+    #
+    #     GYGY  -29.20  stop muna (walang burst)      -> -29.20
+    #     WETO  -17.70  stop muna                     -> -17.70
+    #     SSM   -25.98  burst armado @122s, labas 4.08 -> +30.31  (+56.29)
+    #     AUUD  -44.01  stop muna                     -> -44.01
+    #     LIDR   -4.91  stop muna                     ->  -4.91
+    #     LIDR2  -2.86  burst armado @73s             ->  -1.43  (+1.43)
+    #     KABUUAN -124.66                             -> -66.94  (+57.72)
+    #
+    # Ang magandang pasok (SSM: pumasok BAGO ang burst, MFE 3.2R) ay nagiging
+    # PANALO sa halip na hayaang mag-crash — ito mismo ang hinihinging gawi.
+    # Ang apat na "stop muna" ay mga pasok na deretsong bumaba (MFE ~0);
+    # walang exit rule ang makapagliligtas doon at hindi ito nagpapanggap.
     chili_momentum_burst_exit_enabled: bool = Field(
-        default=False,
+        default=True,
         validation_alias=AliasChoices("CHILI_MOMENTUM_BURST_EXIT_ENABLED"),
     )
     # DESISYON sa 45s, hindi 60s -- SINADYA. Ang optimum na NASUKAT ay ang

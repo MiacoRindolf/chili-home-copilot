@@ -145,8 +145,13 @@ def test_the_exit_reason_fails_open_at_freshness_seams():
     assert "burst_window_exit" in _FRESHNESS_FAIL_OPEN_EXIT_REASONS
 
 
-def test_ships_off_pending_ab():
+def test_ships_on_after_the_event_study():
+    """ON (#1277). Ang mapagpasyang ebidensya: event-study sa TUNAY na anim na
+    pasok ng 2026-09-01 gamit ang mismong helper — SSM -25.98 -> +30.31
+    (ang magandang pasok ay nagiging PANALO), kabuuan -124.66 -> -66.94
+    (+57.72). Replay A/B: 7/8 walang galaw, LIDR +0.98, ZERO control na
+    nasira."""
     s = Settings()
-    assert s.chili_momentum_burst_exit_enabled is False
+    assert s.chili_momentum_burst_exit_enabled is True
     assert s.chili_momentum_burst_exit_min_move_pct == 1.5
     assert s.chili_momentum_burst_exit_lookback_seconds == 60.0
