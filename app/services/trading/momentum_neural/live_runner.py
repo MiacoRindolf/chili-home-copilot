@@ -20325,6 +20325,9 @@ _FRESHNESS_FAIL_OPEN_EXIT_REASONS = frozenset({
     "stop", "bailout", "deadman_stop", "operator_flatten", "kill_switch_flatten",
     # profit-taking (bago sa #1263)
     "target", "scale_out_target", "scale_out_limit", "momentum_break_stop",
+    # #1275: ang burst-window exit ay kumukuha ng TUBO sa isang 60-segundong
+    # bintana — kung mahuhuli ito ng freshness seam, wala na ang bintana.
+    "burst_window_exit",
     "trail_stop", "grind_trail_stop",
 })
 
@@ -21109,6 +21112,66 @@ def _no_bbo_decline_detail(
             if k in snapshot and snapshot.get(k) is not None:
                 detail[f"last_{k}"] = snapshot.get(k)
     return detail
+
+
+def backside_unbench_retrace_window(
+    retrace_pct: float | None,
+    *,
+    min_pct: float,
+    max_pct: float,
+) -> tuple[bool, dict[str, Any]]:
+    """PURE — nasa loob ba ng BINTANA ng pullback ang pag-urong? (#1274)
+
+    Ang backside structure exception ay nagpapreserba ng structural trigger na
+    kakaharangin sana ng sticky bench. Ang orihinal nitong tseke ay ISANG PANIG
+    lamang: ``retrace >= min`` ("sapat na bang umurong para maging pullback at
+    hindi chase?"). Walang nagtatanong kung MASYADO NA ITONG MALALIM.
+
+    NASUKAT 2026-08-19..09-01 -- 182 sesyon ang nakakuha ng exception:
+
+        <10%  22 sesyon, 0 fill        20-30%  45 sesyon, 1 fill  -29.20
+        10-15% 33 sesyon, 1 fill -25.98  >=30%  54 sesyon, 1 fill   -2.05
+        15-20% 28 sesyon, 0 fill
+
+    **3 fill sa 3 linggo, LAHAT natalo, kabuuan -57.23, zero panalo.**
+    SSM 12.4% - GYGY 24.5% - RDHL 32.9%. Ang pinakamababaw ay 12.4%.
+
+    Ang 25% na "pullback" ay hindi pullback. Iyon ay pangalang bumagsak na, at
+    ang one-sided na floor ay nagpapadali rito habang lumalala: mas malalim ang
+    pagkawasak, mas madaling pumasa.
+
+    ``max_pct <= 0`` ⇒ walang upper bound (dating gawi). Fail-CLOSED sa hindi
+    mabasang retrace: nagbabalik ng ``(False, ...)`` -- pinananatili ang bench.
+    """
+    dbg: dict[str, Any] = {}
+    try:
+        r = float(retrace_pct)
+    except (TypeError, ValueError):
+        return False, {"retrace_unreadable": True}
+    if not math.isfinite(r):
+        return False, {"retrace_unreadable": True}
+    dbg["retrace_pct"] = round(r, 2)
+    try:
+        lo = float(min_pct)
+    except (TypeError, ValueError):
+        lo = 0.0
+    if not math.isfinite(lo) or lo < 0.0:
+        lo = 0.0
+    dbg["min_retrace_pct"] = lo
+    if r < lo:
+        dbg["too_shallow_to_be_a_pullback"] = True
+        return False, dbg
+    try:
+        hi = float(max_pct)
+    except (TypeError, ValueError):
+        hi = 0.0
+    if not math.isfinite(hi) or hi <= 0.0:
+        return True, dbg          # walang upper bound
+    dbg["max_retrace_pct"] = hi
+    if r > hi:
+        dbg["too_deep_to_be_a_pullback"] = True
+        return False, dbg
+    return True, dbg
 
 
 def _live_tick_bbo(
@@ -21961,6 +22024,131 @@ def _micropull_bar_seconds() -> int:
     except Exception:
         return 10
     return max(5, min(30, value))
+
+
+_BURST_TRACK_MAX_SAMPLES = 24
+
+
+def _burst_window_fires(db, sess, le, *, bid) -> bool:
+    """#1275 — i-track ang presyo, tuklasin ang burst, patakbuhin ang orasan.
+
+    Nagsusulat ng debug sa ``le['burst_window_dbg']``. Fail-open sa False sa
+    anumang error: hindi kailanman lumalabas ang isang posisyon dahil sa bug.
+    """
+    try:
+        now = _utcnow_aware().timestamp()
+        px = _float_or_none(bid)
+        tr = _burst_track_push(le, now_epoch=now, price=px)
+        fire, started, dbg = burst_window_decision(
+            tr,
+            now_epoch=now,
+            price=px,
+            burst_started_epoch=_float_or_none(le.get("burst_started_epoch")),
+            min_move_pct=float(getattr(
+                settings, "chili_momentum_burst_exit_min_move_pct", 1.5) or 1.5),
+            lookback_s=float(getattr(
+                settings, "chili_momentum_burst_exit_lookback_seconds", 60.0) or 60.0),
+            decision_s=float(getattr(
+                settings, "chili_momentum_burst_exit_decision_seconds", 45.0) or 45.0),
+        )
+        if started is not None and le.get("burst_started_epoch") is None:
+            le["burst_started_epoch"] = started
+            dbg["burst_armed_at_utc"] = _utcnow_aware().isoformat()
+        le["burst_window_dbg"] = dbg
+        return bool(fire)
+    except Exception:
+        _log.debug("[momentum_live] burst window eval failed", exc_info=True)
+        return False
+
+
+def burst_window_decision(
+    track: Any,
+    *,
+    now_epoch: float,
+    price: float | None,
+    burst_started_epoch: float | None,
+    min_move_pct: float,
+    lookback_s: float,
+    decision_s: float,
+) -> tuple[bool, float | None, dict[str, Any]]:
+    """PURE — nagsimula na ba ang burst, at oras na bang lumabas? (#1275)
+
+    Nagbabalik ng ``(should_exit, burst_started_epoch_out, debug)``.
+
+    NASUKAT sa 968 kaso / 5 araw / 26 na pangalan, kung saan tayo ay NASA LOOB
+    NA bago ang burst. Paglabas sa 45s=2.15% · **60s=3.01%** · 90s=2.81% ·
+    120s=2.77% · 300s=2.47%; panalo sa 60s = **88% (852/968)**. Ang 60s ang
+    peak sa 4/5 araw at pareho ang hugis sa bawat araw.
+
+    Ang ``decision_s`` ay 45s bilang default, HINDI 60s: ang 60s ay ang optimum
+    ng PRESYO, at ang nasukat na latency mula desisyon hanggang fill ay
+    8.7-15.7s. Ang pagpapaputok sa 45s ay naglalapag ng fill sa paligid ng 60s.
+
+    Sticky ang burst stamp: kapag naitakda ay hindi na ito ini-reset ng helper
+    (may-ari ang caller ng pag-clear kapag lumabas na o bagong posisyon).
+    Fail-CLOSED: anumang hindi mabasang input ay nagbabalik ng
+    ``(False, burst_started_epoch, ...)`` -- walang exit sa isang bug.
+    """
+    dbg: dict[str, Any] = {}
+    try:
+        px = float(price)
+        t = float(now_epoch)
+    except (TypeError, ValueError):
+        return False, burst_started_epoch, {"unreadable": True}
+    if not (math.isfinite(px) and math.isfinite(t)) or px <= 0:
+        return False, burst_started_epoch, {"unreadable": True}
+
+    # Kapag armado na ang burst, ang natitira ay orasan lamang.
+    if burst_started_epoch is not None:
+        try:
+            el = t - float(burst_started_epoch)
+        except (TypeError, ValueError):
+            return False, burst_started_epoch, {"unreadable_stamp": True}
+        dbg["elapsed_s"] = round(el, 2)
+        dbg["decision_s"] = float(decision_s)
+        return bool(el >= float(decision_s)), burst_started_epoch, dbg
+
+    # Hindi pa armado: hanapin ang burst sa loob ng lookback.
+    if not isinstance(track, list) or not track:
+        return False, None, {"no_track": True}
+    ref = None
+    for item in track:
+        try:
+            ts, p = float(item[0]), float(item[1])
+        except (TypeError, ValueError, IndexError):
+            continue
+        if p <= 0 or not math.isfinite(p):
+            continue
+        if t - ts <= float(lookback_s):
+            ref = p if ref is None else min(ref, p)
+    if ref is None or ref <= 0:
+        return False, None, {"no_reference": True}
+    move = (px - ref) / ref * 100.0
+    dbg["lookback_low"] = round(ref, 6)
+    dbg["move_pct"] = round(move, 3)
+    dbg["min_move_pct"] = float(min_move_pct)
+    if move >= float(min_move_pct):
+        dbg["burst_detected"] = True
+        return False, t, dbg      # kaka-arma pa lang — magsisimula ang orasan
+    return False, None, dbg
+
+
+def _burst_track_push(le: dict, *, now_epoch: float, price: float | None) -> list:
+    """Panatilihin ang maikling (ts, px) ring sa ledger. Bounded."""
+    try:
+        px = float(price)
+        if not math.isfinite(px) or px <= 0:
+            return le.get("burst_track") or []
+    except (TypeError, ValueError):
+        return le.get("burst_track") or []
+    tr = le.get("burst_track")
+    if not isinstance(tr, list):
+        tr = []
+    tr.append([round(float(now_epoch), 3), round(px, 6)])
+    if len(tr) > _BURST_TRACK_MAX_SAMPLES:
+        tr = tr[-_BURST_TRACK_MAX_SAMPLES:]
+    le["burst_track"] = tr
+    return tr
 
 
 def _failed_pop_break_fires(db, sess, le, *, bid, avg) -> bool:
@@ -31138,7 +31326,36 @@ def tick_live_session(
                                         "benched_at_hod": float(_u_hod),
                                         "price": float(_u_px),
                                     }
-                                    _unbench = _u_retrace >= _u_min
+                                    # #1274 — ANG IKALAWANG PANIG NG BINTANA.
+                                    # Ang floor sa itaas ay nagtatanong ng
+                                    # "sapat na ba ang pag-urong para maging
+                                    # pullback?" pero WALA itong itinatanong
+                                    # tungkol sa MASYADONG MALALIM — ang mismong
+                                    # one-sidedness na nakasulat na sa komento
+                                    # ng #1256 sa ibaba.
+                                    #
+                                    # NASUKAT 2026-08-19..09-01: 182 sesyon ang
+                                    # nakakuha ng exception na ito, at nagbunga
+                                    # ito ng 3 fill — SSM 12.4% (-25.98), GYGY
+                                    # 24.5% (-29.20), RDHL 32.9% (-2.05).
+                                    # TATLO SA TATLO AY NATALO. Zero panalo sa
+                                    # tatlong linggo. Ang 22 sesyon sa ilalim ng
+                                    # 10% ay nagbigay ng ZERO fill, kaya walang
+                                    # nasusukat na nawawala sa hangganang ito.
+                                    # Ang 25% na "pullback" ay hindi pullback;
+                                    # iyon ay pangalang bumagsak na.
+                                    try:
+                                        _u_max = float(getattr(
+                                            settings,
+                                            "chili_momentum_backside_unbench_max_retrace_pct",
+                                            12.0,
+                                        ) or 0.0)
+                                    except (TypeError, ValueError):
+                                        _u_max = 12.0
+                                    _unbench, _win_dbg = backside_unbench_retrace_window(
+                                        _u_retrace, min_pct=_u_min, max_pct=_u_max,
+                                    )
+                                    _unbench_dbg.update(_win_dbg)
                                     # VWAP-HOLD LEG (#1256, LIVE 08-31: AEHL 11:55
                                     # at MOVE#2 13:16 — 2 sa 4 na trade ng araw ay
                                     # backside bounce na pumasok DITO). Ang retrace
@@ -39822,6 +40039,30 @@ def tick_live_session(
                 _sh_fired = False
             if _sh_fired:
                 return {"ok": True, "session_id": sess.id, "state": sess.state}
+        elif (
+            st == STATE_LIVE_ENTERED
+            and bool(getattr(
+                settings, "chili_momentum_burst_exit_enabled", False
+            ))
+            and _burst_window_fires(db, sess, le, bid=bid)
+        ):
+            # BURST-WINDOW EXIT (#1275). 968 kaso / 5 araw / 26 pangalan:
+            # ang paglabas ~60s pagkatapos magsimula ang burst ay +3.01% na may
+            # 88% na panalo, at ang 60s ang peak sa 4/5 araw. Tinalo nito ang
+            # bawat trailing stop, ang volume conditioning, ang tape-cadence
+            # decay, AT ang CUSUM sa signed flow. Nagpapaputok tayo sa 45s
+            # dahil ang nasukat na latency ng desisyon->fill (8.7-15.7s) ang
+            # magdadala sa fill sa paligid ng 60s.
+            _emit(db, sess, "live_burst_window_exit", {
+                **(le.get("burst_window_dbg") or {}),
+                "bid": bid,
+            })
+            le["pending_exit_reason"] = "burst_window_exit"
+            _commit_le(sess, le)
+            return _submit_live_market_exit(
+                db, sess, adapter, le=le, reason="burst_window_exit",
+                product_id=product_id, quantity=float(pos.get("quantity") or 0.0),
+            )
         elif (
             st == STATE_LIVE_ENTERED
             and bool(getattr(
