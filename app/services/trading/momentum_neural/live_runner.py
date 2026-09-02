@@ -9162,6 +9162,220 @@ def _owner_transport_order_matches(order: Any, transport: dict[str, Any]) -> boo
     return True
 
 
+def _alpaca_replacement_successor_envelope(
+    predecessor_request: dict[str, Any],
+    *,
+    successor_client_order_id: str,
+    expected_successor_quantity: float | None = None,
+) -> dict[str, Any] | None:
+    """Build the expected successor envelope for one deadman replacement edge.
+
+    With ``expected_successor_quantity`` omitted this returns EXACTLY the
+    predecessor request with the successor's CID substituted -- the ``base_size``
+    value object is passed through untouched (never re-formatted), so the matcher
+    parses the identical string it parses today.  That default is the only shape
+    any production caller asks for, so today's protection path is unchanged.
+
+    A replacement is permitted to CARRY or SHRINK the protected quantity, never to
+    grow it: a successor larger than its predecessor would protect shares this
+    lineage was never granted authority over.  Anything unreadable, non-positive
+    or larger than the predecessor returns ``None`` so the caller fails closed
+    rather than certifying a lineage it cannot bound.
+
+    QUANTITY ONLY.  ``stop_price`` and ``time_in_force`` are inherited verbatim,
+    and the matcher requires exact equality on both, so a replacement that
+    changes the resting stop price (an operator editing it at the venue, say) is
+    still refused as ``..._lineage_unproven``.  That is the correct fail-closed
+    answer to a silent external change -- adopting a stop we never chose would be
+    worse -- but it is a REFUSAL, not a certification, and nothing here makes
+    that route work.
+    """
+    if not isinstance(predecessor_request, dict):
+        return None
+    cid = str(successor_client_order_id or "").strip()
+    if expected_successor_quantity is None:
+        # Literal reproduction of the historical inline spread, blank CID
+        # included: the caller's own lineage conjunction is what rejects a
+        # CID-less successor, and it must keep emitting its own error string.
+        return {**predecessor_request, "client_order_id": cid}
+    if not cid:
+        return None
+    try:
+        predecessor_qty = float(predecessor_request["base_size"])
+        successor_qty = float(expected_successor_quantity)
+    except (KeyError, TypeError, ValueError):
+        return None
+    if not (
+        math.isfinite(predecessor_qty)
+        and predecessor_qty > 0.0
+        and math.isfinite(successor_qty)
+        and successor_qty > 0.0
+        and successor_qty <= predecessor_qty + max(1e-9, predecessor_qty * 1e-8)
+    ):
+        return None
+    return {
+        **predecessor_request,
+        "client_order_id": cid,
+        "base_size": _fmt_base_size(successor_qty),
+    }
+
+
+def _record_scale_limit_place_intent(
+    sess: TradingAutomationSession,
+    le: dict[str, Any],
+    *,
+    client_order_id: str,
+    qty: float,
+    limit_price: float,
+    kind: str,
+) -> None:
+    """Durably mark "a sibling sell MAY now rest" BEFORE the submit goes out.
+
+    The ledger's ``scale_limit_order_id`` can only be written from a response, so
+    a lost response leaves a live resting sell completely invisible to the exit
+    clamp, which then releases the full position against it.  The client_order_id
+    is minted here, before the call, so it survives the lost response and is the
+    handle broker truth can be asked about.
+    """
+    le["scale_limit_place_intent"] = {
+        "client_order_id": str(client_order_id),
+        "qty": float(qty),
+        "limit_price": float(limit_price),
+        "kind": str(kind),
+        "recorded_at_utc": _utcnow().isoformat(),
+    }
+    _commit_le(sess, le)
+
+
+def _clear_scale_limit_place_intent_if_determinate(
+    sess: TradingAutomationSession,
+    le: dict[str, Any],
+    response: Any,
+) -> None:
+    """Retire the marker unless the venue layer said the submit is INDETERMINATE.
+
+    ``submit_outcome`` is the venue layer's own classification (alpaca_spot
+    ``_submit_failure_metadata``): only ``indeterminate`` means the broker may
+    have committed the order before the response path failed.  A definitive
+    rejection, a pre-transport block, and any adapter that does not classify at
+    all all keep today's behaviour exactly -- the marker is dropped and the exit
+    path is untouched.
+    """
+    outcome = ""
+    if isinstance(response, dict):
+        outcome = str(response.get("submit_outcome") or "").strip().lower()
+    if outcome == "indeterminate":
+        return
+    if le.pop("scale_limit_place_intent", None) is not None:
+        _commit_le(sess, le)
+
+
+def _alpaca_deadman_reserved_tranche_quantity(le: dict[str, Any]) -> float:
+    """Shares ``_ensure_alpaca_deadman_stop`` will subtract before it arms.
+
+    This MIRRORS that function's head guard exactly, and exists so a caller's
+    asserted ``quantity_reserved_outside_successor`` can be checked against the
+    only reserve the re-arm will actually honour, rather than being taken on
+    trust.  Only a tracked OCO tranche with the protected-partial flag ON
+    reserves anything; the legacy-conflict shape full-closes rather than
+    splitting, so a reserve asserted there would be a protection gap recorded as
+    certified.
+    """
+    if not isinstance(le, dict) or not le.get("scale_limit_order_id"):
+        return 0.0
+    if not (
+        le.get("scale_limit_is_oco")
+        and bool(
+            getattr(
+                settings,
+                "chili_momentum_alpaca_protected_partial_enabled",
+                True,
+            )
+        )
+    ):
+        return 0.0
+    return float(_float_or_none(le.get("scale_limit_qty")) or 0.0)
+
+
+def _alpaca_replacement_quantity_frame(
+    *,
+    requested_qty: float,
+    successor_qty: float,
+    reserved_qty: float,
+    broker_qty: float,
+    local_qty: float | None,
+    predecessor_fill: float,
+    successor_fill: float,
+    ledger_reserved_qty: float,
+) -> tuple[dict[str, float], str | None]:
+    """Bound one replacement edge's quantities and derive its conservation frame.
+
+    Returns ``(frame, error)``; ``frame`` is only meaningful when ``error`` is
+    ``None``.  Pure arithmetic, so the invariants below are provable without a
+    broker, a database or a session.
+
+    THREE quantities, deliberately kept apart:
+
+    * ``requested_qty`` -- what the PREDECESSOR stop protected (its base_size).
+    * ``successor_qty`` -- what the SUCCESSOR stop protects now.  A replacement
+      may CARRY or SHRINK, never grow: a successor larger than its predecessor
+      would protect shares this lineage was never granted authority over.
+    * ``covered_qty``   -- what the POSITION as a whole is expected to carry: the
+      successor plus any shares deliberately reserved outside it (a resting OCO
+      tranche).  This is legitimately LARGER than a predecessor that only ever
+      protected the un-reserved runner.
+
+    Every conservation comparison is anchored to ``covered_qty``, because that --
+    not the predecessor's size -- is what the broker position is expected to
+    equal.  Anchoring the delta to ``requested_qty`` while the coverage bound
+    used ``covered_qty`` makes the two mutually exclusive whenever they differ,
+    which rejects every non-default call by construction and deadlocks the
+    lineage forever.  All three collapse onto the predecessor's quantity for a
+    default call, so that path is unchanged verbatim.
+
+    ``ledger_reserved_qty`` binds the caller's asserted reserve to the only
+    reserve the re-arm will actually subtract.  Without it the one number that
+    decides how many shares this lineage claims authority over is pure caller
+    assertion: an over-stated reserve certifies a protection gap, an under-stated
+    one arms a stop smaller than the shares it must cover.
+    """
+    covered_qty = successor_qty + reserved_qty
+    tol = max(1e-9, max(abs(requested_qty), abs(covered_qty)) * 1e-8)
+    if not (
+        math.isfinite(requested_qty)
+        and requested_qty > 0.0
+        and math.isfinite(successor_qty)
+        and successor_qty > 0.0
+        and successor_qty <= requested_qty + tol
+        and math.isfinite(reserved_qty)
+        and reserved_qty >= 0.0
+        and math.isfinite(covered_qty)
+        and covered_qty > 0.0
+        and math.isfinite(broker_qty)
+        and 0.0 <= broker_qty <= covered_qty + tol
+        and math.isfinite(predecessor_fill)
+        and predecessor_fill >= 0.0
+        and math.isfinite(successor_fill)
+        and successor_fill >= 0.0
+        and local_qty is not None
+        and abs(local_qty - covered_qty) <= tol
+    ):
+        return {}, "replacement_deadman_successor_quantity_generation_mismatch"
+    if not (
+        math.isfinite(ledger_reserved_qty)
+        and abs(reserved_qty - ledger_reserved_qty) <= tol
+    ):
+        return {}, "replacement_deadman_reserved_quantity_not_ledger_backed"
+    return (
+        {
+            "tol": tol,
+            "covered_qty": covered_qty,
+            "quantity_delta": covered_qty - broker_qty,
+        },
+        None,
+    )
+
+
 def _alpaca_replacement_successor_order_matches(
     order: Any,
     *,
@@ -10003,6 +10217,8 @@ def _dispatch_alpaca_replaced_deadman_successor(
     avg_entry_price: float,
     software_stop_price: float,
     rearm_after_terminal: bool,
+    expected_successor_quantity: float | None = None,
+    quantity_reserved_outside_successor: float = 0.0,
 ) -> dict[str, Any]:
     """Adopt or retire one exact broker replacement edge without guessing.
 
@@ -10098,10 +10314,17 @@ def _dispatch_alpaca_replaced_deadman_successor(
     successor_cid = str(
         getattr(successor_order, "client_order_id", "") or ""
     ).strip()
-    successor_request = {
-        **predecessor_request,
-        "client_order_id": successor_cid,
-    }
+    successor_request = _alpaca_replacement_successor_envelope(
+        predecessor_request,
+        successor_client_order_id=successor_cid,
+        expected_successor_quantity=expected_successor_quantity,
+    )
+    if successor_request is None:
+        return {
+            "ok": False,
+            "pending": True,
+            "error": "replacement_deadman_successor_expected_quantity_invalid",
+        }
     if not (
         successor_state == "found"
         and successor_order is not None
@@ -10154,6 +10377,18 @@ def _dispatch_alpaca_replaced_deadman_successor(
 
     try:
         requested_qty = float(predecessor_request["base_size"])
+        # Predecessor / successor / coverage are three DIFFERENT quantities; see
+        # _alpaca_replacement_quantity_frame, which bounds them and derives the
+        # conservation frame below.  All three collapse onto the predecessor's
+        # quantity for every production caller (none passes either parameter),
+        # so today's path is unchanged verbatim.
+        successor_qty = (
+            requested_qty
+            if expected_successor_quantity is None
+            else float(expected_successor_quantity)
+        )
+        reserved_qty = float(quantity_reserved_outside_successor)
+        covered_qty = successor_qty + reserved_qty
         broker_qty = float(adapter.get_position_quantity(product_id))
         predecessor_fill = float(
             getattr(predecessor_order, "filled_size", 0.0) or 0.0
@@ -10170,31 +10405,27 @@ def _dispatch_alpaca_replaced_deadman_successor(
     local_position = le.get("position")
     local_position = local_position if isinstance(local_position, dict) else {}
     local_qty = _float_or_none(local_position.get("quantity"))
-    tol = max(1e-9, abs(requested_qty) * 1e-8)
-    if not (
-        math.isfinite(requested_qty)
-        and requested_qty > 0.0
-        and math.isfinite(broker_qty)
-        and 0.0 <= broker_qty <= requested_qty + tol
-        and math.isfinite(predecessor_fill)
-        and predecessor_fill >= 0.0
-        and math.isfinite(successor_fill)
-        and successor_fill >= 0.0
-        and local_qty is not None
-        and abs(local_qty - requested_qty) <= tol
-    ):
-        return {
-            "ok": False,
-            "pending": True,
-            "error": "replacement_deadman_successor_quantity_generation_mismatch",
-        }
+    frame, frame_error = _alpaca_replacement_quantity_frame(
+        requested_qty=requested_qty,
+        successor_qty=successor_qty,
+        reserved_qty=reserved_qty,
+        broker_qty=broker_qty,
+        local_qty=local_qty,
+        predecessor_fill=predecessor_fill,
+        successor_fill=successor_fill,
+        ledger_reserved_qty=_alpaca_deadman_reserved_tranche_quantity(le),
+    )
+    if frame_error is not None:
+        return {"ok": False, "pending": True, "error": frame_error}
+    tol = frame["tol"]
+    covered_qty = frame["covered_qty"]
 
     successor_status = str(
         getattr(successor_order, "status", "") or ""
     ).strip().lower()
     successor_lifecycle = _alpaca_protective_order_lifecycle(successor_order)
     successor_active = _alpaca_protective_order_is_certifiably_active(successor_order)
-    quantity_delta = requested_qty - broker_qty
+    quantity_delta = frame["quantity_delta"]
     attributable_fill = 0.0
     fill_source: str | None = None
     attributable_avg: float | None = None
@@ -10204,13 +10435,13 @@ def _dispatch_alpaca_replaced_deadman_successor(
             predecessor_fill <= 1e-12
             and successor_fill <= 1e-12
             and abs(quantity_delta) <= tol
-            and abs(broker_qty - requested_qty) <= tol
+            and abs(broker_qty - covered_qty) <= tol
         )
         if not conserved:
             open_remainder_exact = bool(
                 successor_fill > 1e-12
                 and broker_qty > 1e-9
-                and abs((requested_qty - successor_fill) - broker_qty) <= tol
+                and abs((covered_qty - successor_fill) - broker_qty) <= tol
             )
             if not open_remainder_exact:
                 return {
@@ -10301,7 +10532,7 @@ def _dispatch_alpaca_replaced_deadman_successor(
             successor_cid if successor_active else predecessor_cid
         ),
         "stop_price": predecessor_request.get("stop_price"),
-        "qty": requested_qty,
+        "qty": successor_qty,
         "phase": "submitted",
         "owner_transport": next_transport,
     }
@@ -10339,7 +10570,7 @@ def _dispatch_alpaca_replaced_deadman_successor(
         quantity=(
             broker_qty
             if quarantine_active_adoption or not successor_active
-            else requested_qty
+            else covered_qty
         ),
         avg_entry_price=avg_entry_price,
         software_stop_price=software_stop_price,
@@ -18808,6 +19039,14 @@ def _place_scale_out_limit(
                         })
                         raise LookupError("oco_rth_only")
                     _oco_cid = f"chili_ml_toco_{sess.id}_{uuid.uuid4().hex[:12]}"
+                    _record_scale_limit_place_intent(
+                        sess,
+                        le,
+                        client_order_id=_oco_cid,
+                        qty=float(_oco_qty),
+                        limit_price=float(_oco_px),
+                        kind="oco",
+                    )
                     _oco_res = _oco_place(
                         product_id=product_id,
                         base_size=_fmt_base_size(_oco_qty),
@@ -18816,7 +19055,11 @@ def _place_scale_out_limit(
                         client_order_id=_oco_cid,
                         extended_hours=_oco_ext,
                     ) or {}
+                    _clear_scale_limit_place_intent_if_determinate(
+                        sess, le, _oco_res
+                    )
                     if _oco_res.get("ok") and _oco_res.get("order_id"):
+                        le.pop("scale_limit_place_intent", None)
                         # ⚠️ Ang adapter ay nag-quantize ng TP/stop; ang strict
                         # identity gate sa clamp ay naghahambing ng limit_price
                         # ng broker laban sa scale_limit_px -- itala ang
@@ -18910,6 +19153,14 @@ def _place_scale_out_limit(
         except Exception:
             _ext = False
         cid = f"chili_ml_sol_{sess.id}_{uuid.uuid4().hex[:12]}"
+        _record_scale_limit_place_intent(
+            sess,
+            le,
+            client_order_id=cid,
+            qty=float(scale_qty),
+            limit_price=float(target_px),
+            kind="legacy",
+        )
         res = adapter.place_limit_order_gtc(
             product_id=product_id,
             # SHORT-P2: cover-tranche pricing still long-shaped; gated OFF until P2.
@@ -18927,11 +19178,14 @@ def _place_scale_out_limit(
                 else {}
             ),
         ) or {}
+        _clear_scale_limit_place_intent_if_determinate(sess, le, res)
         if res.get("ok") and res.get("order_id"):
+            le.pop("scale_limit_place_intent", None)
             le["scale_limit_order_id"] = str(res["order_id"])
             le["scale_limit_px"] = float(target_px)
             le["scale_limit_qty"] = float(scale_qty)
             le["scale_limit_adopted_qty"] = 0.0
+            le["scale_limit_client_order_id"] = cid
             _commit_le(sess, le)
             _emit(db, sess, "scale_out_limit_placed", {
                 "order_id": le["scale_limit_order_id"],
@@ -18949,6 +19203,211 @@ def _place_scale_out_limit(
         )
 
 
+def _scale_limit_place_intent(le: dict[str, Any]) -> dict[str, Any] | None:
+    """The durable "a sibling sell MAY be resting" marker, or ``None``.
+
+    Written immediately before a scale-out/OCO placement and cleared the moment
+    the outcome is known.  It survives only when the venue layer classified the
+    submit as ``indeterminate`` -- the exact lost-response case where Alpaca may
+    have accepted the order under our own client_order_id while the HTTP reply
+    never arrived, so the ledger's ``scale_limit_order_id`` was never written.
+    """
+    intent = le.get("scale_limit_place_intent") if isinstance(le, dict) else None
+    if not isinstance(intent, dict):
+        return None
+    if not str(intent.get("client_order_id") or "").strip():
+        return None
+    return intent
+
+
+def _resolve_unacknowledged_scale_limit_placement(
+    adapter: Any,
+    intent: dict[str, Any],
+) -> tuple[str | None, bool]:
+    """Ask the broker, by OUR client_order_id, whether the lost placement rests.
+
+    Returns ``(order_id, unreadable)``.  The client_order_id is minted before the
+    submit, so it is the one handle that survives a lost response.  Only an
+    explicit readable "no such order" clears the intent; everything else -- an
+    adapter that cannot look up by client id, a raise, an unreadable answer -- is
+    ``unreadable``, because assuming "no sibling" here is precisely the oversell
+    the clamp exists to prevent.
+    """
+    cid = str(intent.get("client_order_id") or "").strip()
+    getter = getattr(adapter, "get_order_by_client_order_id_truth", None)
+    if not cid or not callable(getter):
+        return None, True
+    try:
+        result = getter(cid)
+    except Exception:
+        return None, True
+    if not isinstance(result, dict) or not result.get("readable"):
+        return None, True
+    if result.get("found") and result.get("order") is not None:
+        oid = str(getattr(result["order"], "order_id", "") or "").strip()
+        return (oid, False) if oid else (None, True)
+    if result.get("found") is False:
+        return None, False
+    return None, True
+
+
+def _resolve_scale_limit_sibling_order_id(
+    le: dict[str, Any],
+    *,
+    adapter: Any = None,
+    resolver: Callable[[], tuple[str | None, bool]] | None = None,
+) -> tuple[str | None, bool]:
+    """Resolve the resting scale-out sibling's broker order id.
+
+    Returns ``(order_id, unreadable)``.  Three states, never two: an id, a proven
+    absence, or "cannot tell" -- and "cannot tell" must never collapse into
+    "absent", because that is what lets an exit release the full position while a
+    sibling sell still holds shares and flips the account short.
+
+    Order of authority:
+
+    1. ``le["scale_limit_order_id"]`` -- the tracked sibling.  Authoritative, and
+       read FIRST, so nothing below can perturb the tracked path.
+    2. ``le["scale_limit_place_intent"]`` -- a placement whose response was lost.
+       Resolved against broker truth by the client_order_id we minted before
+       submitting.  This is the one live-reachable source of a sibling the ledger
+       never recorded, and it is why an id can appear here at all.
+    3. ``resolver`` -- an explicit out-of-band supplier, for a caller that knows
+       of a sibling neither of the above can see.  It returns
+       ``(order_id | None, unreadable)``: the tri-state is in the RETURN TYPE, not
+       in a bare ``None`` a caller could produce by swallowing its own failure.
+       Anything malformed, and any raise, is ``unreadable``.
+
+    A non-dict ledger is ``unreadable``, never absent: the function could not read
+    the one input it reads first, so it cannot claim there is no sibling.
+    """
+    if not isinstance(le, dict):
+        return None, True
+    ledger_oid = le.get("scale_limit_order_id")
+    if ledger_oid:
+        return str(ledger_oid), False
+    intent = _scale_limit_place_intent(le)
+    if intent is not None:
+        return _resolve_unacknowledged_scale_limit_placement(adapter, intent)
+    if resolver is None:
+        return None, False
+    try:
+        resolved = resolver()
+    except Exception:
+        return None, True
+    if not isinstance(resolved, tuple) or len(resolved) != 2:
+        return None, True
+    oid, unreadable = resolved
+    if not isinstance(unreadable, bool) or unreadable:
+        return None, True
+    if oid is None:
+        return None, False
+    if not isinstance(oid, str) or not oid.strip():
+        return None, True
+    return oid.strip(), False
+
+
+def _scale_limit_cid_is_ours(sess: TradingAutomationSession, cid: str) -> bool:
+    """Only THIS session's own scale-out/OCO client ids count as ownership."""
+    c = str(cid or "").strip()
+    return bool(c) and (
+        c.startswith(f"chili_ml_sol_{sess.id}_")
+        or c.startswith(f"chili_ml_toco_{sess.id}_")
+    )
+
+
+def _adopt_recovered_scale_limit_sibling(
+    db: Session,
+    sess: TradingAutomationSession,
+    adapter: Any,
+    *,
+    le: dict[str, Any],
+    order_id: str,
+) -> bool:
+    """Make a sibling the ledger never recorded durable -- identity FIRST.
+
+    The deadman contract binds a broker order id to a transport only after the
+    order is proven; this is the same discipline for the scale-out sibling.  The
+    identity written here (qty, limit price, client id) is read from BROKER
+    TRUTH, never asserted by a caller, and adoption is refused unless the order
+    is provably OURS -- its client_order_id is the one we minted for the lost
+    placement, or carries this session's own scale-out prefix.
+
+    Refusing costs one blocked exit attempt and nothing durable.  Adopting a bare
+    unproven id would be permanent: the strict gate could never prove it, so
+    every later tick would block the exit, and the id alone trips the deadman's
+    head guard and stands the position down from protection.
+    """
+    intent = _scale_limit_place_intent(le)
+    getter = getattr(adapter, "get_order_truth", None)
+    if not callable(getter):
+        return False
+    try:
+        result = getter(str(order_id))
+    except Exception:
+        return False
+    if not isinstance(result, dict) or not result.get("readable"):
+        return False
+    if not (result.get("found") and result.get("order") is not None):
+        return False
+    order = result["order"]
+    raw = getattr(order, "raw", None)
+    raw = raw if isinstance(raw, dict) else {}
+    cid = str(getattr(order, "client_order_id", "") or "").strip()
+    intent_cid = str((intent or {}).get("client_order_id") or "").strip()
+    if not (cid and (cid == intent_cid or _scale_limit_cid_is_ours(sess, cid))):
+        return False
+    if str(getattr(order, "order_id", "") or "").strip() != str(order_id).strip():
+        return False
+    if (
+        str(getattr(order, "product_id", "") or "").strip().upper()
+        != str(sess.symbol or "").strip().upper()
+    ):
+        return False
+    if str(getattr(order, "side", "") or "").strip().lower() != "sell":
+        return False
+    qty = _float_or_none(raw.get("qty"))
+    px = _float_or_none(raw.get("limit_price"))
+    filled = _float_or_none(getattr(order, "filled_size", 0.0)) or 0.0
+    if qty is None or not math.isfinite(qty) or qty <= 0.0:
+        return False
+    if px is None or not math.isfinite(px) or px <= 0.0:
+        return False
+    if not (0.0 <= filled <= qty + max(1e-9, qty * 1e-8)):
+        return False
+    if normalize_execution_family(sess.execution_family) in ALPACA_EXECUTION_FAMILIES:
+        # Adoption must IMPLY provability: the strict identity gate downstream is
+        # the same predicate, so anything it would reject is refused here, before
+        # anything durable is written.
+        if str(getattr(order, "order_type", "") or "").strip().lower() != "limit":
+            return False
+        if (
+            str(raw.get("position_intent") or "").strip().lower()
+            != "sell_to_close"
+        ):
+            return False
+    le["scale_limit_order_id"] = str(order_id).strip()
+    le["scale_limit_qty"] = float(qty)
+    le["scale_limit_px"] = float(px)
+    # Fills the ledger never saw are NOT pre-adopted: leaving the counter at zero
+    # is what makes the clamp's own adopt path book them exactly once.
+    le["scale_limit_adopted_qty"] = 0.0
+    le["scale_limit_client_order_id"] = cid
+    if str((intent or {}).get("kind") or "").strip().lower() == "oco":
+        le["scale_limit_is_oco"] = True
+    le.pop("scale_limit_place_intent", None)
+    _commit_le(sess, le)
+    _emit(db, sess, "scale_limit_sibling_recovered_from_lost_placement", {
+        "order_id": str(order_id).strip(),
+        "client_order_id": cid,
+        "qty": float(qty),
+        "limit_price": float(px),
+        "filled": float(filled),
+        "is_oco": bool(le.get("scale_limit_is_oco")),
+    })
+    return True
+
+
 def _cancel_scale_limit_and_clamp(
     db: Session,
     sess: TradingAutomationSession,
@@ -18957,6 +19416,9 @@ def _cancel_scale_limit_and_clamp(
     le: dict[str, Any],
     requested_qty: float,
     reason: str,
+    sibling_order_id_resolver: (
+        Callable[[], tuple[str | None, bool]] | None
+    ) = None,
 ) -> float | None:
     """OVERSELL INVARIANT for sell-into-strength: before ANY market exit, cancel
     the resting scale-out limit and adopt whatever it already filled (cancel-race
@@ -18964,9 +19426,55 @@ def _cancel_scale_limit_and_clamp(
     Without this, the resting limit and the market exit could both execute and
     flip the account short. Called from the single exit chokepoint so every path
     (stop / trail / bailout / kill-switch / EOD / max-hold) is covered."""
-    oid = le.get("scale_limit_order_id")
+    oid, sibling_unreadable = _resolve_scale_limit_sibling_order_id(
+        le,
+        adapter=adapter,
+        resolver=sibling_order_id_resolver,
+    )
+    if sibling_unreadable:
+        # A sibling may be resting and we cannot tell.  Releasing the full
+        # requested quantity here is precisely the oversell this function exists
+        # to prevent, so fail closed exactly as every other unreadable branch
+        # below does.  No durable id is written: nothing was proven.
+        le["alpaca_scale_limit_release_block"] = {
+            "reason": "scale_limit_sibling_id_unreadable",
+            "order_id": None,
+            "recorded_at_utc": _utcnow().isoformat(),
+        }
+        _commit_le(sess, le)
+        return None
     if not oid:
+        # CONTRACT: no sibling sell exists for this position, so there is nothing
+        # to cancel and nothing to clamp against, and the full requested quantity
+        # is the CORRECT release.  This is the common case (every exit for every
+        # session that never rested a scale-out) and it is a deliberate
+        # pass-through, not an oversight.  Reaching it means the ledger held no
+        # id, no unacknowledged placement was outstanding (or the broker proved
+        # ours never landed), and no resolver asserted one.
+        if _scale_limit_place_intent(le) is not None:
+            # Broker truth said our lost placement never landed.  Retire the
+            # marker so later ticks stop re-querying it.
+            le.pop("scale_limit_place_intent", None)
+            _commit_le(sess, le)
         return float(requested_qty)
+    if not le.get("scale_limit_order_id"):
+        # A sibling the ledger never recorded.  It may only become durable
+        # together with the identity the strict gate below will be asked to
+        # prove it against: writing a bare id would poison every later tick
+        # (identity unprovable => exit blocked forever) AND trip the deadman's
+        # own head guard, standing the position down from protection.  The
+        # identity has to come from BROKER TRUTH, never from the caller.
+        adopted = _adopt_recovered_scale_limit_sibling(
+            db, sess, adapter, le=le, order_id=str(oid)
+        )
+        if not adopted:
+            le["alpaca_scale_limit_release_block"] = {
+                "reason": "scale_limit_sibling_identity_unprovable",
+                "order_id": str(oid),
+                "recorded_at_utc": _utcnow().isoformat(),
+            }
+            _commit_le(sess, le)
+            return None
     if normalize_execution_family(sess.execution_family) in ALPACA_EXECUTION_FAMILIES:
         account_ok, account_identity = _strict_alpaca_account_identity(adapter, sess)
         if not account_ok:
