@@ -139,6 +139,76 @@ _EPOCH_NAIVE = datetime(1970, 1, 1)
 # the only shape that can fabricate a FLAT verdict out of a partial listing.
 ATTR_ANCHORS_MISSING = "envelope_anchors_missing"
 
+# ── DURABLE ATTRIBUTION MARKERS (2026-09-02) ──────────────────────────────────
+# These keys are STATE, not a per-pass audit snapshot: `broker_read_plan` reads
+# them to decide whether this row may skip its broker listing, and
+# `_emit_divergence_event` reads one of them for its once-per-outcome idempotency.
+# Every writer of ``broker_recon_detail_json`` REBUILDS the dict from scratch
+# (`reconcile_one_outcome` starts from `{"reconciled_at_utc": ...}`;
+# `alpaca_reconcile._repair_orphan_accounting` writes `{**truth, ...}`), so a
+# single write from any path that does not hand-carry them erases the whole
+# skip/backoff state — measured 2026-09-02: seven consecutive passes cycled
+# 0 → 20 → 40 → 60 → 0 → 20 → 40 `skipped_no_broker_read_needed` instead of
+# converging, each pass spending its full 20-read budget on rows a readable
+# listing had ALREADY proved own nothing.
+#
+# Persistence is therefore structural, not per-branch: `stamp_recon_detail` is
+# THE write site and it MERGES these forward from whatever is already on the row.
+# A pass that must genuinely retire one says so explicitly (`cleared=`), so a
+# converged row still drops its stale horizon.
+#
+# ⚠️ `attribution_version` is deliberately NOT in this set and must never be. It
+# is what makes a TERMINAL status immutable (`needs_reconcile`), so carrying it
+# across a pass that attributed nothing is exactly the CANF-19471 undercount
+# (−78.13 instead of −186.98) documented at the skip branch below. Same for
+# `broker_attribution`: it is the LAST READ's verdict, and a stale one presented
+# as this pass's finding would mislead the operator reading the row.
+STICKY_RECON_DETAIL_KEYS: tuple[str, ...] = (
+    "attribution_no_entry_evidence_proven_empty",
+    "attribution_terminal_at",
+    "attribution_next_retry_utc",
+    "attribution_attempts",
+    "attribution_retry_blocking",
+    "divergence_event_emitted",
+)
+
+
+def merge_recon_detail(
+    prior: Any,
+    new: dict,
+    *,
+    cleared: Optional[set] = None,
+) -> dict:
+    """Carry the durable attribution markers from ``prior`` into ``new`` (pure).
+
+    ``new`` always wins where it sets a key — this only fills keys it left out.
+    ``cleared`` names markers this pass RETIRED on purpose (a converged read
+    dropping its retry horizon); those are never resurrected.
+    """
+    if not isinstance(new, dict):
+        new = {}
+    if not isinstance(prior, dict):
+        return new
+    skip = cleared or set()
+    for key in STICKY_RECON_DETAIL_KEYS:
+        if key in skip or key in new:
+            continue
+        if prior.get(key) is not None:
+            new[key] = prior[key]
+    return new
+
+
+def stamp_recon_detail(outcome: Any, detail: dict, *, cleared: Optional[set] = None) -> dict:
+    """THE single write site for ``broker_recon_detail_json``.
+
+    Every path that stamps the column goes through here so no writer — present or
+    future, in this module or another — can silently erase the markers that gate
+    the broker-read budget. Returns the merged dict actually persisted.
+    """
+    merged = merge_recon_detail(getattr(outcome, "broker_recon_detail_json", None), detail, cleared=cleared)
+    outcome.broker_recon_detail_json = merged
+    return merged
+
 BrokerOrdersReader = Callable[[str, datetime, datetime], dict]
 
 # ── status vocabulary ────────────────────────────────────────────────────────
@@ -1200,6 +1270,9 @@ def reconcile_one_outcome(
     _prior_detail_in = getattr(outcome, "broker_recon_detail_json", None)
     if isinstance(_prior_detail_in, dict) and _prior_detail_in.get("divergence_event_emitted"):
         detail["divergence_event_emitted"] = True
+    # Markers this pass RETIRES on purpose. `stamp_recon_detail` merges every
+    # other sticky marker forward; these are the ones that must NOT come back.
+    sticky_cleared: set[str] = set()
 
     status: str
     broker_pnl: Optional[float] = None
@@ -1383,6 +1456,15 @@ def reconcile_one_outcome(
         attr["ledger_status"] = ledger_status
         detail["broker_attribution"] = attr
         a_status = attr.get("attr_status")
+        if plan.get("read"):
+            # A read was actually SPENT this pass. Whatever it says supersedes an
+            # older proof, so the inherited "one readable listing proved this
+            # session owns nothing" claim is retired here and re-earned below ONLY
+            # by another `no_owned_fills` verdict. Without this the merge would
+            # carry the marker across an `unreadable` re-read (a re-read the
+            # changed `terminal_at` forced) and pin the row on a permanent skip
+            # that no readable empty listing ever justified.
+            sticky_cleared.add("attribution_no_entry_evidence_proven_empty")
         # POSITIVE evidence that the ledger label is wrong: an owned CLOSING fill
         # the ledger never recorded, or an unpriced emergency leg still unbooked.
         # "I could not see a close" is an absence of evidence and never demotes.
@@ -1459,6 +1541,7 @@ def reconcile_one_outcome(
             # stale one can never hold a settled row out of a later re-touch.
             for _k in ("attribution_next_retry_utc", "attribution_attempts", "attribution_retry_blocking"):
                 detail.pop(_k, None)
+                sticky_cleared.add(_k)
             if attr.get("legs_missing_from_ledger"):
                 logger.warning(
                     "[broker_truth_recon] session=%s symbol=%s: %d broker fill(s) missing from "
@@ -1564,6 +1647,7 @@ def reconcile_one_outcome(
                     if prior_detail.get(k) is not None:
                         detail[k] = prior_detail[k]
                 detail.pop("attribution_next_retry_utc", None)
+                sticky_cleared.add("attribution_next_retry_utc")
             else:
                 for k in (
                     "attribution_next_retry_utc",
@@ -1618,7 +1702,10 @@ def reconcile_one_outcome(
     outcome.broker_win = (broker_return_bps > 0) if (status in _USABLE_FOR_LEARNING and broker_return_bps is not None) else None
     outcome.broker_divergence_usd = divergence
     outcome.broker_reconciled_at = datetime.utcnow()
-    outcome.broker_recon_detail_json = detail
+    # Structural persistence of the skip/backoff markers — see
+    # STICKY_RECON_DETAIL_KEYS. A branch that reached this point without
+    # re-deriving a marker keeps the one already on the row instead of erasing it.
+    detail = stamp_recon_detail(outcome, detail, cleared=sticky_cleared)
     return detail
 
 
@@ -1678,6 +1765,9 @@ def reconcile_momentum_outcomes_to_broker_truth(
     proof_reads = 0
     skipped_no_read_needed = 0
     starved_blind = 0
+    # Budget-deferred rows the loss guard provably SKIPS (never-entered class, no
+    # economic evidence). They drain over a few passes and are not an alarm.
+    deferred_unblocking = 0
     # ORDERING (never heap order): the rows the LOSS GUARD is waiting on take the
     # budget FIRST, newest first. The unordered `.all()` let ~115 no-fill rows
     # shuffle a newly terminal FILLED session out of the 20-read budget.
@@ -1713,8 +1803,23 @@ def reconcile_momentum_outcomes_to_broker_truth(
                 # THE gauge that matters: a row the loss guard cannot use that
                 # lost its read. `skipped_broker_budget` alone is benign (the
                 # backfill class queues there by design); this counter is not.
+                #
+                # `not _loss_guard_label_usable` ALONE is not that gauge. It is
+                # true for every class-3 no-entry-evidence row too, and those the
+                # guard SKIPS outright (`_loss_history_entry_classification` →
+                # `not_entered`), so they can never gap the day or disarm the
+                # lane. Measured 2026-09-02: 95 `cancelled_pre_entry` rows queued
+                # behind the budget fired "LOSS-GUARD ROWS STARVED" on every
+                # single pass — alarm fatigue on the one alarm that matters (the
+                # 85-minute arming outage). `_loss_guard_can_block` is the pure
+                # mirror of "the guard cannot skip this row" and is fail-closed
+                # (an unrecognised shape counts as blocking), so the alarm can
+                # never go quiet on a genuinely blind row.
                 if not _loss_guard_label_usable(outcome):
-                    starved_blind += 1
+                    if _loss_guard_can_block(outcome, sess):
+                        starved_blind += 1
+                    else:
+                        deferred_unblocking += 1
                 continue
             broker_reads += 1
             if plan.get("reason") == "no_entry_evidence_proof_read":
@@ -1756,6 +1861,7 @@ def reconcile_momentum_outcomes_to_broker_truth(
         "skipped_terminal": skipped_terminal,
         "skipped_broker_budget": skipped_budget,
         "loss_guard_blind_starved": starved_blind,
+        "skipped_budget_guard_skips_row": deferred_unblocking,
         "skipped_no_broker_read_needed": skipped_no_read_needed,
         "broker_reads": broker_reads,
         "broker_proof_reads": proof_reads,
@@ -1779,10 +1885,11 @@ def reconcile_momentum_outcomes_to_broker_truth(
         # the 85-minute arming outage of 2026-09-02.
         logger.warning(
             "[broker_truth_recon] LOSS-GUARD ROWS STARVED BY THE READ BUDGET: %d row(s) the guard "
-            "cannot use lost their broker read (budget=%d, reads=%d). Raise "
-            "chili_momentum_outcome_recon_broker_attribution_max_per_pass or investigate the rows "
-            "holding the slots.",
-            starved_blind, budget, broker_reads,
+            "cannot use AND cannot skip lost their broker read (budget=%d, reads=%d; a further %d "
+            "budget-deferred row(s) are ones the guard skips outright and are NOT part of this "
+            "alarm). Raise chili_momentum_outcome_recon_broker_attribution_max_per_pass or "
+            "investigate the rows holding the slots.",
+            starved_blind, budget, broker_reads, deferred_unblocking,
         )
     logger.info("[broker_truth_recon] pass complete: %s", result)
     return result

@@ -3765,11 +3765,17 @@ def _apply_cancelled_pre_entry_orphan_truth(
         else pnl - float(prior_outcome_pnl)
     )
     outcome.broker_reconciled_at = datetime.now(timezone.utc).replace(tzinfo=None)
-    outcome.broker_recon_detail_json = {
+    # Through the ONE write site so this whole-dict replace cannot erase the
+    # attribution skip/backoff markers (and the once-per-outcome divergence-event
+    # marker) the broker-read budget is gated on — see
+    # outcome_reconcile.STICKY_RECON_DETAIL_KEYS.
+    from .outcome_reconcile import stamp_recon_detail
+
+    stamp_recon_detail(outcome, {
         **truth,
         "status": "fee_unconfirmed",
         "legacy_pnl_before_repair": old_legacy_pnl,
-    }
+    })
     return {"ok": True, "pnl_usd": pnl, "return_bps": return_bps, "truth": truth}
 
 
