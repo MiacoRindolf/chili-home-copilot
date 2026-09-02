@@ -45213,6 +45213,11 @@ def tick_live_session(
             _recycle_reset_keys: list[str] = []
             if bool(getattr(settings, "chili_momentum_recycle_entry_state_reset_enabled", True)):
                 _recycle_reset_keys = _reset_entry_state_on_recycle(le)
+            # WATCH-AGE ANCHOR (2026-09-02 CANF 19471): the auto-arm reaper
+            # measures "watched > Ns, never entered" from THIS instant, not from
+            # started_at (which is never advanced). NOT in
+            # _RECYCLE_ENTRY_STATE_KEYS — it must survive the reset above.
+            le["last_recycled_at_utc"] = _utcnow().isoformat()
             _commit_le(sess, le)
             _safe_transition(db, sess, STATE_WATCHING_LIVE)
             _emit(db, sess, "live_recycled", {
