@@ -38,11 +38,14 @@ from ....config import settings
 from ....db import SessionLocal
 from .live_fsm import (
     LIVE_RUNNER_RUNNABLE_STATES,
+    STATE_ARMED_PENDING_RUNNER,
     STATE_LIVE_BAILOUT,
     STATE_LIVE_ENTERED,
+    STATE_LIVE_ENTRY_CANDIDATE,
     STATE_LIVE_PENDING_ENTRY,
     STATE_LIVE_SCALING_OUT,
     STATE_LIVE_TRAILING,
+    STATE_QUEUED_LIVE,
     STATE_WATCHING_LIVE,
 )
 from .universe import (
@@ -305,6 +308,38 @@ _KEY_LIVE_EXEC = "momentum_live_execution"
 _SESSION_POSITION_STATES = frozenset(
     {STATE_LIVE_ENTERED, STATE_LIVE_SCALING_OUT, STATE_LIVE_TRAILING, STATE_LIVE_BAILOUT}
 )
+# ENTRY-ADVANCE WAKE (2026-09-02, #1282). Ang mga pre-entry state na umuusad
+# LANG sa 10s batch cadence noon: tatlo sa kanila ay hindi magigising ng tick
+# kailanman, at ang WATCHING ay sa `watch_break_level` cross lamang (na wala
+# sa velocity/volume/VWAP na trigger). Ang momentum entry ay pumuputok habang
+# UMAAKYAT ang presyo, kaya ang parehong bagong-high na wake ng held position
+# (seed muna, saka bawat bagong high, 2s spacing kada session) ay ginagamit na
+# rin dito. Dispatch hint lamang — ang FSM ang nagpapasya. May global na
+# hangganan kada segundo (tingnan ang `_entry_advance_budget_take_locked`).
+_SESSION_PRE_ENTRY_STATES = frozenset(
+    {
+        STATE_ARMED_PENDING_RUNNER,
+        STATE_QUEUED_LIVE,
+        STATE_WATCHING_LIVE,
+        STATE_LIVE_ENTRY_CANDIDATE,
+    }
+)
+_ENTRY_ADVANCE_BUDGET_WINDOW_S = 1.0
+
+
+def _entry_advance_wake_enabled() -> bool:
+    return bool(getattr(settings, "chili_momentum_entry_advance_wake_enabled", True))
+
+
+def _entry_advance_wakes_per_second() -> float:
+    try:
+        cap = float(
+            getattr(settings, "chili_momentum_entry_advance_wake_max_per_second", 6.0)
+            or 6.0
+        )
+    except (TypeError, ValueError):
+        cap = 6.0
+    return cap if cap > 0 else 6.0
 
 
 class _SessionCrossTracker:
@@ -334,6 +369,27 @@ class _SessionCrossTracker:
         # nang HINDI kinokopya ang ladder math dito. Ang unang obserbasyon ay
         # SEED lamang (walang wake) para hindi sumabog ang bridge start.
         self._hi: dict[int, float] = {}
+        # Entry-advance budget (#1282): bilang ng advance wakes sa kasalukuyang
+        # 1s window, sa LAHAT ng simbolo. Sa ilalim ng self._lock.
+        self._adv_window_start: float = 0.0
+        self._adv_used: int = 0
+
+    def _entry_advance_budget_take_locked(self, now: float) -> bool:
+        """Isang token mula sa global per-second budget; tawagin nang hawak ang lock.
+
+        Sa bukas ang 20-40 pre-entry session ay sabay-sabay gumagawa ng bagong
+        high, at bawat wake ay isang buong FSM tick (OHLCV + SQL) sa sariling
+        thread. Lampas sa budget ay ang scheduler batch ang safety net — walang
+        nawawala, latency lang. Ang exit-side, pending-entry, at level-cross
+        wakes ay HINDI dumadaan dito.
+        """
+        if now - self._adv_window_start >= _ENTRY_ADVANCE_BUDGET_WINDOW_S:
+            self._adv_window_start = now
+            self._adv_used = 0
+        if float(self._adv_used) >= _entry_advance_wakes_per_second():
+            return False
+        self._adv_used += 1
+        return True
 
     def refresh(self) -> None:
         from ....models.trading import TradingAutomationSession
@@ -475,11 +531,36 @@ class _SessionCrossTracker:
                             hits.append(sid)
             elif state == STATE_LIVE_PENDING_ENTRY:
                 hits.append(int(s["session_id"]))
-            elif state == STATE_WATCHING_LIVE:
-                wl = float(s.get("watch_break_level") or 0.0)
-                ref = mid if mid > 0 else bid
-                if wl > 0 and ref > wl:
-                    hits.append(int(s["session_id"]))
+            elif state in _SESSION_PRE_ENTRY_STATES:
+                sid = int(s["session_id"])
+                if state == STATE_WATCHING_LIVE:
+                    wl = float(s.get("watch_break_level") or 0.0)
+                    ref = mid if mid > 0 else bid
+                    if wl > 0 and ref > wl:
+                        hits.append(sid)
+                        continue
+                # ENTRY-ADVANCE wake (#1282): ang parehong bagong-high na wake ng
+                # held position, para sa pre-entry. Seed ang unang obserbasyon;
+                # bawat bagong high pagkatapos ay gumigising (2s spacing kada
+                # session sa _spawn_session_wake, global budget kada segundo
+                # dito). Ang pullback at pantay na tick ay tahimik; ang level
+                # reclaim sa ilalim ng high ay ang level-cross sa itaas.
+                px = mid if mid > 0 else bid
+                if px <= 0:
+                    continue
+                with self._lock:
+                    prior = self._hi.get(sid)
+                    if prior is None:
+                        self._hi[sid] = px
+                        continue
+                    if px <= prior:
+                        continue
+                    self._hi[sid] = px
+                    if not _entry_advance_wake_enabled():
+                        continue
+                    if not self._entry_advance_budget_take_locked(time.monotonic()):
+                        continue
+                hits.append(sid)
         return hits
 
 

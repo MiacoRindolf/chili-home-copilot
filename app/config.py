@@ -10068,6 +10068,32 @@ class Settings(BaseSettings):
         le=30.0,
         validation_alias=AliasChoices("CHILI_MOMENTUM_SESSION_TICK_WAKE_MIN_SPACING_S"),
     )
+    # ENTRY-ADVANCE WAKE (2026-09-02, #1282). Sa batch mode ang mga PRE-ENTRY na
+    # session (armed_pending_runner, queued_live, watching_live,
+    # live_entry_candidate) ay umuusad LANG sa 10s cadence: ang tick-cross
+    # tracker ay gumigising ng WATCHING sa level cross lamang at ng held
+    # position sa bagong high — ang tatlong iba pang pre-entry state ay hindi
+    # magigising ng tick kailanman. Ang momentum entry ay pumuputok habang
+    # UMAAKYAT ang presyo, kaya ang parehong bagong-high na wake ng held
+    # position (seed muna, 2s spacing kada session) ay ginagamit na rin sa
+    # pre-entry: tumatakbo ang FSM habang umiignite ang pangalan, hindi 10s
+    # pagkatapos. Dispatch hint lamang; ang FSM pa rin ang nagpapasya.
+    chili_momentum_entry_advance_wake_enabled: bool = Field(
+        default=True,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_ENTRY_ADVANCE_WAKE_ENABLED"),
+    )
+    # Global na hangganan ng entry-advance wakes kada segundo sa LAHAT ng
+    # simbolo: sa bukas ang 20-40 pre-entry session ay sabay-sabay gumagawa ng
+    # bagong high, at bawat wake ay isang buong FSM tick (OHLCV + SQL) sa
+    # sariling thread. Lampas dito ay ang scheduler batch ang safety net —
+    # walang nawawala, latency lang. Ang exit-side at level-cross wakes ay
+    # HINDI saklaw ng hangganang ito.
+    chili_momentum_entry_advance_wake_max_per_second: float = Field(
+        default=6.0,
+        ge=0.5,
+        le=50.0,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_ENTRY_ADVANCE_WAKE_MAX_PER_SECOND"),
+    )
     # Batch-mode mirror ng event-loop stop-confirm timer: ang >=1s flicker guard
     # ay nakakakuha ng pangalawang read pagkatapos ng ~1.1s sa halip na sa
     # susunod na buong scheduler pass (dating DALAWANG cadence bawat software
