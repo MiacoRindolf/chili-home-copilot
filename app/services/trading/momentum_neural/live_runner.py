@@ -37955,10 +37955,15 @@ def tick_live_session(
             "order_type": "limit",
             "limit_price": entry_limit_str,
             "result": res,
+            # #1279: `if x else None` ang dating tseke — ang 0.0 ay falsy, kaya
+            # ang prep=0ms ay lumalabas na null at mukhang "hindi nasukat" sa
+            # halip na "sinukat at ZERO". Ang LIDR 09-01 na 8,969ms na profile
+            # ay binasa nang mali dahil dito (prep null, gayong prep=0 — ang
+            # buong ~8.9s ay nasa loob ng place call, HTTP=94ms lamang).
             "place_profile_ms": {
-                "total": round(_pp_total * 1000, 1) if _pp_total else None,
-                "prep": round(_pp_prep * 1000, 1) if _pp_prep else None,
-                "broker_post": round(_pp_broker * 1000, 1) if _pp_broker else None,
+                "total": round(_pp_total * 1000, 1) if _pp_total is not None else None,
+                "prep": round(_pp_prep * 1000, 1) if _pp_prep is not None else None,
+                "broker_post": round(_pp_broker * 1000, 1) if _pp_broker is not None else None,
             },
         })
         if not res.get("ok"):
