@@ -1176,6 +1176,42 @@ def test_jlhl_cold_start_regression_no_seed_at_the_first_grid_step():
     assert acts[0][1]["session_uptime_s"] >= 60.0
 
 
+def test_window_start_is_the_earlier_of_arm_time_and_first_observed_tick():
+    """The session row's ``started_at`` is stamped from ``datetime.utcnow`` — the
+    WALL clock — while a replay runner ticks on the SIM clock, so an
+    un-normalised window start sits hours ahead of every sim bar and refuses
+    EVERY seed. apply_spent_leg_tick takes the earlier of the arm instant and
+    the first tick of the observation run: a no-op in production (started_at is
+    always <= the session's first tick) and the difference between a measurable
+    rule and an inert one under replay."""
+    from app.services.trading.momentum_neural.risk_policy import _spent_leg_window_start
+
+    early, late = T0, T0 + timedelta(hours=9)
+    assert _spent_leg_window_start(early, late) == early          # prod shape: no-op
+    assert _spent_leg_window_start(late, early) == early          # replay shape: normalised
+    assert _spent_leg_window_start(early, None) == early
+    assert _spent_leg_window_start(None, early) is None           # fail-open, still refuses
+    # end to end: a wall-clock started_at 9 h in the sim future must NOT make the
+    # seed inert — the run's own first tick is the window the session observed.
+    le: dict = {}
+    up, acts = _tick(le, px=4.34, now=T0 + timedelta(minutes=10), frame_hod=4.9297,
+                     hod_end=T0 + timedelta(minutes=3),
+                     session_start=T0 + timedelta(hours=9))
+    assert _events(acts) == ["g4_spent_leg_seed"]
+    _apply(le, up)
+    assert le["g4_spent_leg"]["hod"] == 4.9297
+    # ...and the JLHL cold start is STILL refused under the same normalisation,
+    # because the run's first tick is also inside the window (10:02Z), after the
+    # 09:25Z bar END.
+    win_start = datetime(2026, 9, 2, 10, 2, 0, tzinfo=UTC)
+    le2: dict = {}
+    _u, acts = _tick(le2, px=7.01, now=win_start + timedelta(seconds=1), frame_hod=7.70,
+                     hod_end=datetime(2026, 9, 2, 9, 25, 0, tzinfo=UTC),
+                     frame_last_end=win_start,
+                     session_start=win_start + timedelta(hours=10), warm=False)
+    assert acts == []
+
+
 def test_run_ticks_reset_with_the_coverage_run_so_a_hole_re_arms_the_cold_start():
     """The uptime the guard measures is the CURRENT continuous run — the same
     run that bridges a stale frame — so a host stall / bench-out makes the

@@ -4257,6 +4257,17 @@ def _spent_leg_nonneg_float(value: Any) -> float | None:
         return None
 
 
+def _spent_leg_window_start(session_start: Any, observed_since: Any) -> datetime | None:
+    """The session/replay window start for the cold-start guard: the EARLIER of
+    the session's arm instant and the first tick of the current observation run.
+    Unreadable arm instant ⇒ None (the predicate then refuses: fail-open)."""
+    s = _spent_leg_aware_utc(session_start)
+    o = _spent_leg_aware_utc(observed_since)
+    if s is None:
+        return None
+    return min(s, o) if o is not None else s
+
+
 def spent_leg_seed_decision(
     *,
     cur_hod: Any,
@@ -4719,7 +4730,19 @@ def apply_spent_leg_tick(
         frame_age_s=fa,
         coverage_gap_s=coverage_gap_s,
         interval_s=interval_s,
-        session_start_utc=session_start_utc,
+        # WINDOW START = the earlier of the session's arm instant and the first
+        # tick of the current observation run. In PRODUCTION ``started_at`` is
+        # always <= the session's first tick, so min() is a no-op. Under a
+        # REPLAY clock it is not: the harness stamps ``started_at`` from
+        # ``datetime.utcnow`` when it seeds the row (wall clock) while the
+        # runner ticks on the SIM clock, so an un-normalized window start sits
+        # hours in the "future" of every sim bar and refuses EVERY seed —
+        # the feature would ship measurable only in prod, which is exactly how
+        # a knob ends up inert (#1170). Taking the earlier of the two makes the
+        # replay measure the rule and changes nothing live.
+        session_start_utc=_spent_leg_window_start(
+            session_start_utc, (tick_hod.get("first_tick_ts") if tick_hod else None)
+        ),
         observed_since_utc=(tick_hod.get("first_tick_ts") if tick_hod else None),
         observed_ticks=(tick_hod.get("run_ticks") if tick_hod else None),
         min_age_min=min_age_min,
