@@ -27711,7 +27711,20 @@ def _overlay_replay_ortex_selection(
 _TERMINAL_ISH_FOR_HEAL = frozenset({
     "cancelled", "expired", "error", "archived", "finished",
     "live_finished", "live_cancelled", "live_error", "live_arm_expired",
-    "live_exited",
+    "live_exited", STATE_LIVE_COOLDOWN,
+})
+
+# The ONLY states in which "entry_submitted + no position" can mean an
+# unowned fill. A completed trade leaves entry_submitted/entry_order_id set
+# with position=None until recycle (cooldown, then held states on the way
+# out) — none of those are healable, and treating them as such produced a
+# false CRITICAL on every finished trade in the first draft of this fix.
+_HEALABLE_PRE_ENTRY_STATES = frozenset({
+    STATE_ARMED_PENDING_RUNNER,
+    STATE_QUEUED_LIVE,
+    STATE_WATCHING_LIVE,
+    STATE_LIVE_ENTRY_CANDIDATE,
+    STATE_LIVE_PENDING_ENTRY,
 })
 
 
@@ -27739,9 +27752,23 @@ def _heal_unrecognized_entry_fill(db, sess, adapter, *, le, product_id) -> dict:
     ang normal na fill-adoption path (na naglalagay ng deadman stop) ang
     tumakbo sa parehong tick. Hindi kailanman gumagawa ng bagong order,
     hindi kailanman nagbabago ng dami — pagbabalik lamang ng pagmamay-ari.
-    Fail-open: anumang error/kulang na datos ⇒ walang ginagawa.
+
+    2026-09-02 CANF 19471 (Bug B2): ang unang bersyon ay tumawag ng
+    ``_safe_transition(watching_live -> live_pending_entry)`` — HINDI legal
+    na live_fsm edge — at nilunok ang ValueError sa DEBUG. Resulta: 12
+    minutong WALANG event habang ang 165 sh ay nakaupo sa broker nang walang
+    stop. Ngayon: (a) pre-entry allowlist lang (``_HEALABLE_PRE_ENTRY_STATES``);
+    (b) ang order na nasa ``entry_orders_resolved`` na ay hindi na hine-heal;
+    (c) LEGAL CHAIN MUNA (``_transition_recovered_primary_to_pending``) bago
+    ang bind — kapag walang legal na daan, walang half-state; (d) isang
+    ``live_entry_fill_self_healed`` kada order id, hindi kada state hop;
+    (e) ang kabiguan ay MALAKAS: WARNING na may traceback at
+    ``live_entry_fill_self_heal_failed`` (severity critical) minsan kada
+    signature.
     """
     out: dict = {}
+    _oid = ""
+    _cid = ""
     try:
         if not bool(getattr(
             settings, "chili_momentum_entry_fill_self_heal_enabled", True
@@ -27757,6 +27784,16 @@ def _heal_unrecognized_entry_fill(db, sess, adapter, *, le, product_id) -> dict:
             return out
         if str(sess.state) in _TERMINAL_ISH_FOR_HEAL:
             return out
+        if str(sess.state) not in _HEALABLE_PRE_ENTRY_STATES:
+            return out
+        # Already-recognised order (adopted / void / any outcome): nothing to heal.
+        _resolved = le.get("entry_orders_resolved") or {}
+        if _oid and _oid in _resolved:
+            return out
+        if not _oid:
+            _hist = [str(x) for x in (le.get("entry_order_ids_all") or [])]
+            if _hist and all(x in _resolved for x in _hist):
+                return out
         no = None
         if _cid:
             try:
@@ -27765,7 +27802,8 @@ def _heal_unrecognized_entry_fill(db, sess, adapter, *, le, product_id) -> dict:
                 no = None
         if no is None and _oid:
             try:
-                no = adapter.get_order(_oid)
+                _res = adapter.get_order(_oid)
+                no = _res[0] if isinstance(_res, tuple) else _res
             except Exception:
                 no = None
         if no is None:
@@ -27776,11 +27814,28 @@ def _heal_unrecognized_entry_fill(db, sess, adapter, *, le, product_id) -> dict:
             return out
         if filled <= 0.0:
             return out
-        # May TUNAY na fill na hindi naitala. Ibalik ang pagmamay-ari.
+        _sig = str(getattr(no, "order_id", "") or _oid)
+        if (
+            le.get("entry_fill_self_heal_sig") == _sig
+            and str(sess.state) == STATE_LIVE_PENDING_ENTRY
+        ):
+            # Already healed this order and the session is where the
+            # fill-adoption path reads it. One event per order, not per tick.
+            out["healed"] = True
+            out["repeat"] = True
+            out["filled_size"] = filled
+            return out
+        # May TUNAY na fill na hindi naitala. LEGAL CHAIN MUNA, saka bind —
+        # kapag walang daan papuntang pending, walang nababago sa le.
+        state_before = str(sess.state)
+        if (
+            state_before != STATE_LIVE_PENDING_ENTRY
+            and not _transition_recovered_primary_to_pending(db, sess)
+        ):
+            raise RuntimeError(f"no_legal_chain_to_pending:{state_before}")
         _bind_recovered_entry_order(le, no, client_order_id=_cid or None)
+        le["entry_fill_self_heal_sig"] = _sig
         _commit_le(sess, le)
-        if str(sess.state) != STATE_LIVE_PENDING_ENTRY:
-            _safe_transition(db, sess, STATE_LIVE_PENDING_ENTRY)
         db.flush()
         _emit(db, sess, "live_entry_fill_self_healed", {
             "severity": "critical",
@@ -27790,7 +27845,8 @@ def _heal_unrecognized_entry_fill(db, sess, adapter, *, le, product_id) -> dict:
             "average_filled_price": _float_or_none(
                 getattr(no, "average_filled_price", None)
             ),
-            "state_before": str(sess.state or ""),
+            "state_before": state_before,
+            "chain_from": state_before,
             "note": (
                 "naisumiteng entry na may broker fill pero walang naitalang "
                 "posisyon — ibinalik sa pending_entry para ma-adopt at "
@@ -27799,13 +27855,41 @@ def _heal_unrecognized_entry_fill(db, sess, adapter, *, le, product_id) -> dict:
         })
         _log.warning(
             "[momentum_live] ENTRY FILL SELF-HEAL %s: %s shares na hindi "
-            "naitala — ibinalik sa pending_entry",
-            sess.symbol, filled,
+            "naitala — ibinalik sa pending_entry (chain_from=%s)",
+            sess.symbol, filled, state_before,
         )
         out["healed"] = True
         out["filled_size"] = filled
-    except Exception:
-        _log.debug("[momentum_live] entry fill self-heal failed", exc_info=True)
+    except Exception as exc:
+        # MALAKAS na kabiguan (dating DEBUG na nilunok — 12 min na katahimikan
+        # sa 19471). Minsan kada signature para hindi mag-spam kada tick.
+        _log.warning(
+            "[momentum_live] ENTRY FILL SELF-HEAL FAILED %s state=%s oid=%s: %s",
+            getattr(sess, "symbol", None), getattr(sess, "state", None),
+            _oid[:8] or None, exc, exc_info=True,
+        )
+        out["heal_failed"] = True
+        out["exception_class"] = type(exc).__name__
+        try:
+            _fsig = f"{type(exc).__name__}:{sess.state}:{_oid}"
+            if le.get("entry_fill_self_heal_failed_sig") != _fsig:
+                le["entry_fill_self_heal_failed_sig"] = _fsig
+                _commit_le(sess, le)
+                _emit(db, sess, "live_entry_fill_self_heal_failed", {
+                    "severity": "critical",
+                    "exception_class": type(exc).__name__,
+                    "error": str(exc)[:300],
+                    "state": str(sess.state or ""),
+                    "order_id": _oid,
+                    "client_order_id": _cid,
+                    "note": (
+                        "may naisumiteng entry na may fill pero hindi "
+                        "naibalik ang pagmamay-ari — kailangan ng operator"
+                    ),
+                })
+                db.flush()
+        except Exception:
+            _log.warning("[momentum_live] self-heal failure event emit failed", exc_info=True)
     return out
 
 
