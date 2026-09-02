@@ -3765,11 +3765,29 @@ def _apply_cancelled_pre_entry_orphan_truth(
         else pnl - float(prior_outcome_pnl)
     )
     outcome.broker_reconciled_at = datetime.now(timezone.utc).replace(tzinfo=None)
-    outcome.broker_recon_detail_json = {
+    # Through the ONE write site so this whole-dict replace cannot erase the
+    # attribution skip/backoff markers (and the once-per-outcome divergence-event
+    # marker) the broker-read budget is gated on — see
+    # outcome_reconcile.STICKY_RECON_DETAIL_KEYS.
+    from .outcome_reconcile import stamp_recon_detail
+
+    stamp_recon_detail(outcome, {
         **truth,
         "status": "fee_unconfirmed",
         "legacy_pnl_before_repair": old_legacy_pnl,
-    }
+    }, cleared={
+        # This repair just BROKER-VERIFIED an entry fill and an exit fill for the
+        # session. Any inherited "a readable listing proved this session owned
+        # nothing" claim is now provably false, and any horizon armed off that
+        # claim is stale — carrying either forward would persist a record that
+        # contradicts itself in the same row an operator reads during a
+        # CANF-19471-class incident.
+        "attribution_no_entry_evidence_proven_empty",
+        "attribution_next_retry_utc",
+        "attribution_attempts",
+        "attribution_retry_blocking",
+        "attribution_ledger_release_done",
+    })
     return {"ok": True, "pnl_usd": pnl, "return_bps": return_bps, "truth": truth}
 
 
