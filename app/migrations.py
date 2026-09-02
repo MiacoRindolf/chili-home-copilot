@@ -33226,9 +33226,24 @@ def _migration_374_alpaca_ledger_scan_bound_indexes(conn) -> None:
       ``ix_tas_live_active`` (mig 364) + index na ito: **117 hilera, 120 buffer,
       1.24-1.28 ms** (2,754 heap block ⇒ 108). 152 kB ang index.
 
-    Ang ``ix_tas_live_family_state`` ay ang generic (mode, execution_family,
-    state) btree na hiniling ng #1285 para sa mga query na nagfi-filter sa
-    estado; 144 kB.
+    ANG ANALYZE AY LOAD-BEARING (adversarial review, sinukat sa parehong copy):
+    ang CREATE INDEX ay HINDI nagpo-populate ng stats para sa expression, kaya
+    kaagad pagkatapos ng migration ay WALANG null_frac ang planner sa coalesce
+    column ⇒ tinantiya 99.5% na tugma ⇒ Bitmap sa (mode, execution_family)
+    prefix + Filter sa lahat ng 7,895 hilera: **4,074 ms / 302,078 buffer** —
+    mas masama pa kaysa sa 2.1-2.8 s na inaalis nito, hanggang sa susunod na
+    autoanalyze (threshold ~1,874 na binagong hilera = oras-oras, swerte-swerte).
+    Pagkatapos ng ANALYZE (null_frac 0.953): **0.42 ms**. Ang ANALYZE ay legal sa
+    loob ng migration tx (SHARE UPDATE EXCLUSIVE, hindi humaharang sa DML).
+
+    ⚠️ ORAS NG BUILD: ang expression index ay nagde-detoast ng BAWAT
+    risk_snapshot_json — sinukat na **10.7 s** SHARE lock sa
+    trading_automation_sessions (bloke sa INSERT/UPDATE/DELETE) sa startup path
+    ng host lane (01:35 PT launch = tahimik) at ng container app. Huwag
+    i-restart ang alinman sa 13:30-20:00Z para lang dito. Walang idinagdag na
+    generic (mode, execution_family, state) btree: sa nasukat na plan ang state
+    arm ay nakakabit sa ``ix_tas_live_active`` (mig 364), kaya isa pa iyong
+    index na walang consumer sa isang mainit na table.
 
     ⚠️ Ang coalesce expression dito ay kailangang STRUCTURALLY IDENTICAL sa
     `alpaca_ledger_exposure_sql_expr()` — kung magdagdag ng marker sa loop,
@@ -33238,12 +33253,6 @@ def _migration_374_alpaca_ledger_scan_bound_indexes(conn) -> None:
     ang mig 372: startup path, bago pumasok ang trapiko).
     """
 
-    conn.execute(text(
-        """
-        CREATE INDEX IF NOT EXISTS ix_tas_live_family_state
-        ON trading_automation_sessions (mode, execution_family, state)
-        """
-    ))
     conn.execute(text(
         """
         CREATE INDEX IF NOT EXISTS ix_tas_alpaca_ledger_exposure
@@ -33265,6 +33274,9 @@ def _migration_374_alpaca_ledger_scan_bound_indexes(conn) -> None:
         )
         """
     ))
+    # Load-bearing (tingnan ang docstring): walang stats ang bagong expression
+    # hanggang ANALYZE ⇒ 4,074 ms na plan sa bawat placement hanggang autoanalyze.
+    conn.execute(text("ANALYZE trading_automation_sessions"))
 
 
 MIGRATIONS = [

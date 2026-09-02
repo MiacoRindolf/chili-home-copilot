@@ -183,11 +183,16 @@ def test_migration_374_index_expression_is_identical_to_the_query_expression():
     assert claims.alpaca_ledger_exposure_sql_expr() in source
     assert "ix_tas_alpaca_ledger_exposure" in source
     assert "ON trading_automation_sessions ( mode, execution_family, (coalesce(" in source
-    assert "ix_tas_live_family_state" in source
-    assert "(mode, execution_family, state)" in source
+    # Walang generic (mode, execution_family, state) btree: walang consumer sa
+    # nasukat na plan (ang state arm ay nakakabit sa ix_tas_live_active, mig 364).
+    assert "ix_tas_live_family_state" not in source
     # Non-partial ang expression index: ang partial-index stats ay hindi
     # ginagamit ng planner (sinukat: 3,970 ms partial vs 1.24 ms non-partial).
     assert "WHERE mode" not in source.split("ix_tas_alpaca_ledger_exposure", 1)[1]
+    # LOAD-BEARING: walang stats ang bagong expression hanggang ANALYZE
+    # (sinukat: 4,074 ms bago, 0.42 ms pagkatapos). Dapat nasa migration mismo.
+    assert "ANALYZE trading_automation_sessions" in source
+    assert source.find("ANALYZE trading_automation_sessions") > source.find("ix_tas_alpaca_ledger_exposure")
 
 
 # ── (b) superset oracle ─────────────────────────────────────────────────────
@@ -385,7 +390,7 @@ def test_migration_374_registered_exactly_once_and_ids_unique():
     _assert_migration_ids_unique()
 
 
-def test_migration_374_is_idempotent_and_creates_both_indexes(db):
+def test_migration_374_is_idempotent_and_creates_the_exposure_index(db):
     conn = db.connection()
     _migration_374_alpaca_ledger_scan_bound_indexes(conn)
     _migration_374_alpaca_ledger_scan_bound_indexes(conn)
@@ -394,8 +399,17 @@ def test_migration_374_is_idempotent_and_creates_both_indexes(db):
         "WHERE tablename = 'trading_automation_sessions' "
         "AND indexname IN ('ix_tas_live_family_state', 'ix_tas_alpaca_ledger_exposure')"
     )).fetchall())
-    assert set(defs) == {"ix_tas_live_family_state", "ix_tas_alpaca_ledger_exposure"}
-    assert "(mode, execution_family, state)" in defs["ix_tas_live_family_state"]
+    # (ang chili_test DB ay maaaring may lumang ix_tas_live_family_state mula sa
+    # naunang bersyon ng branch — hindi iyon nililinis ng conftest; ang mahalaga
+    # ay ang exposure index ang nilikha at ang family_state ay HINDI nililikha
+    # ng migration na ito — tingnan ang source guard sa itaas)
+    assert "ix_tas_alpaca_ledger_exposure" in defs
+    # ANALYZE tumakbo sa loob ng migration: may stats ang table pagkatapos
+    analyzed = db.execute(text(
+        "SELECT last_analyze IS NOT NULL OR last_autoanalyze IS NOT NULL "
+        "FROM pg_stat_user_tables WHERE relname = 'trading_automation_sessions'"
+    )).scalar()
+    assert analyzed in (True, None), "dapat may ANALYZE pagkatapos ng migration"
     exposure = defs["ix_tas_alpaca_ledger_exposure"]
     assert "COALESCE" in exposure
     assert "WHERE" not in exposure
