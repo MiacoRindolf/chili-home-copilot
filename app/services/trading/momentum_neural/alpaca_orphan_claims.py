@@ -69,6 +69,170 @@ _ACTIVE_ALPACA_PROTECTIVE_LIFECYCLES = frozenset({
     "stopped",
 })
 
+# ── Reservation-ledger scan bound (#1285, sinukat 2026-09-02) ────────────────
+# Ang `_reserve_alpaca_entry_risk` at `_certify_alpaca_owned_entry_posture` ay
+# humihila ng BAWAT live alpaca row — 7,895 hilera / 53 MB ng jsonb na
+# pinaparse sa client — sa BAWAT order placement, sa loob ng short tx na may
+# hawak na per-account advisory lock: 2,119 / 2,591 / 2,806 ms sa TAHIMIK na DB.
+# 7,509 sa mga hilera ay terminal (live_cancelled 6,631 / live_error 878 /
+# live_arm_expired 284), 0 ang may posisyon, 51 ang may entry_submitted. Ito ang
+# pinakamalaking natitirang termino sa `place_profile_ms.broker_post`
+# (4.3-12.6 s noong 09-01 laban sa 0.08-0.86 s HTTP) pagkatapos ng #1280.
+#
+# Ang predicate sa ibaba ay STRICT SUPERSET ng bawat hilerang ginagalaw ng mga
+# consuming loop: ang owner row (by id), ang bawat hindi-terminal na estado, ang
+# owner row ng bawat unresolved claim (`rows_by_id` lookup — kung wala, dating
+# `claim_owner_missing` ⇒ fail-closed, kaya kailangang PASOK pa rin), at ang
+# bawat exposure marker na binabasa ng loops mula sa
+# `risk_snapshot_json.momentum_live_execution`. Ang mga hilerang hindi
+# nababasa ay pumapasok pa rin sa loop at bumabagsak nang fail-closed gaya ng
+# dati — walang binago sa hugis ng loop, ang WHERE lang.
+#
+# ⚠️ Byte-identical ang terminal list sa `ix_tas_live_active` (mig 364) at sa
+# mig 362 — ang `state NOT IN (...)` arm ay dapat manatiling implied ng partial
+# predicate ng index na iyon. Superset ito ng `live_fsm.LIVE_RUNNER_TERMINAL_STATES`
+# (live_arm_expired = 284 hilera, wala sa FSM set pero terminal sa ledger).
+ALPACA_LEDGER_TERMINAL_STATES: tuple[str, ...] = (
+    "cancelled",
+    "expired",
+    "error",
+    "archived",
+    "finished",
+    "live_finished",
+    "live_cancelled",
+    "live_error",
+    "live_arm_expired",
+)
+# Broker order ids na binabasa ng `_certify_alpaca_owned_entry_posture` bilang
+# CHILI-owned open orders. Iisang tuple para hindi mag-drift ang loop at ang WHERE.
+ALPACA_LEDGER_ACTIVE_ORDER_KEYS: tuple[str, ...] = (
+    "entry_order_id",
+    "pyramid_order_id",
+    "micropullback_reentry_order_id",
+    "pullback_add_order_id",
+    "flag_breakout_add_order_id",
+    "scale_out_order_id",
+)
+# Bawat key ng `momentum_live_execution` na nagpapagalaw ng alinmang loop:
+#   position               — reserve (any state) + adaptive ledger + certify
+#   entry_submitted        — reserve (live_pending_entry) + certify (any state)
+#   entry_client_order_id  — reserve pending_sessions dedupe laban sa claims
+#   entry_inflight_risk_usd, entry_order_request — reserve pending_sessions
+#   <active order keys>    — certify allowed_order_ids
+#   deadman_stop           — certify allowed_order_ids / allowed_client_ids
+ALPACA_LEDGER_EXPOSURE_MARKERS: tuple[str, ...] = (
+    "position",
+    "entry_submitted",
+    "entry_client_order_id",
+    "entry_inflight_risk_usd",
+    "entry_order_request",
+    *ALPACA_LEDGER_ACTIVE_ORDER_KEYS,
+    "deadman_stop",
+)
+
+
+def alpaca_ledger_exposure_sql_expr() -> str:
+    """Iisang text expression: NULL kapag WALANG exposure marker ang row.
+
+    ``coalesce(m1, m2, ...) IS NOT NULL`` ⇔ ``OR`` ng bawat ``mN IS NOT NULL``
+    — pero iisang expression, kaya kaya itong i-index (mig 374) at may
+    null_frac stats ang planner. SINUKAT sa prod-shaped copy 2026-09-02: ang
+    12 hiwalay na ``->> IS NOT NULL`` na OR arm ay WALANG stats ⇒ tinantiya ng
+    planner na 8,131/8,172 hilera ang tutugma ⇒ pinili ang seq/bitmap+Filter
+    na nagde-detoast ng BAWAT terminal row: 3,749-4,251 ms, 300,888 buffer.
+    Sa coalesce + expression index: BitmapOr, 117 hilera, 551 buffer, 2.9-4.2 ms.
+
+    `->>` ay SQL NULL sa JSON null AT sa nawawalang key — eksaktong salamin ng
+    `live.get(key) is not None` sa Python. Ang `false`/`0`/`""` ay pumapasok
+    (superset; ang loop ang nagpapasya). ⚠️ Kailangang structurally identical
+    ang expression dito at sa index ng mig 374 — ang guard test ang bantay.
+    """
+    return "coalesce(" + ", ".join(
+        "risk_snapshot_json->'momentum_live_execution'->>'" + key + "'"
+        for key in ALPACA_LEDGER_EXPOSURE_MARKERS
+    ) + ")"
+
+
+def alpaca_ledger_session_scan_sql() -> str:
+    """WHERE-bound na scan ng alpaca ledger rows; iisang teksto para sa 2 seam.
+
+    Params: ``owner_session_id`` (int o None), ``claim_owner_session_ids``
+    (list[int], maaaring walang laman — ang claims ay hinihila NA ng caller at
+    ipinapasa bilang id list para hindi maging hashed SubPlan ang OR arm at
+    mawala ang BitmapOr).
+    """
+    terminal = ", ".join("'" + s + "'" for s in ALPACA_LEDGER_TERMINAL_STATES)
+    return (
+        "SELECT id, upper(symbol), execution_family, state, risk_snapshot_json "
+        "FROM trading_automation_sessions "
+        "WHERE mode = 'live' "
+        "AND execution_family IN ('alpaca_spot', 'alpaca_short') "
+        "AND (\n"
+        "            id = :owner_session_id\n"
+        "         OR id = ANY(CAST(:claim_owner_session_ids AS INTEGER[]))\n"
+        "         OR state NOT IN (" + terminal + ")\n"
+        "         OR " + alpaca_ledger_exposure_sql_expr() + " IS NOT NULL\n"
+        "        )"
+    )
+
+
+def alpaca_ledger_session_scan_params(
+    *,
+    owner_session_id: int | None,
+    claim_owner_session_ids: Any,
+) -> dict[str, Any]:
+    ids: list[int] = []
+    for value in claim_owner_session_ids or ():
+        if value is None:
+            continue
+        ids.append(int(value))
+    return {
+        "owner_session_id": (
+            None if owner_session_id is None else int(owner_session_id)
+        ),
+        "claim_owner_session_ids": sorted(set(ids)),
+    }
+
+
+def alpaca_ledger_row_may_carry_exposure(
+    row: Any,
+    *,
+    owner_session_id: int | None,
+    claim_owner_session_ids: Any,
+) -> bool:
+    """Python na salamin ng `alpaca_ledger_session_scan_sql` WHERE (test oracle).
+
+    Ang ``row`` ay ``(id, symbol, execution_family, state, risk_snapshot_json)``
+    na may ``mode`` ipinapalagay na 'live' ng caller — o isang dict na may
+    ``mode`` key. Kailangang manatiling tugma sa SQL: ang guard test ay
+    nagpapatunay na bawat marker at bawat terminal state ay nasa parehong
+    teksto.
+    """
+    if isinstance(row, dict):
+        mode = str(row.get("mode") or "").strip().lower()
+        sid, family, state, snapshot = (
+            row.get("id"), row.get("execution_family"), row.get("state"),
+            row.get("risk_snapshot_json"),
+        )
+    else:
+        mode = "live"
+        sid, _symbol_unused, family, state, snapshot = row
+    if mode != "live":
+        return False
+    if str(family or "") not in ALPACA_EXECUTION_FAMILIES:
+        return False
+    if owner_session_id is not None and int(sid) == int(owner_session_id):
+        return True
+    claim_ids = {int(v) for v in (claim_owner_session_ids or ()) if v is not None}
+    if int(sid) in claim_ids:
+        return True
+    if str(state) not in ALPACA_LEDGER_TERMINAL_STATES:
+        return True
+    snap = snapshot if isinstance(snapshot, dict) else {}
+    live = snap.get("momentum_live_execution")
+    live = live if isinstance(live, dict) else {}
+    return any(live.get(key) is not None for key in ALPACA_LEDGER_EXPOSURE_MARKERS)
+
 
 class _ExitOwnerClaimAtomicityAbort(RuntimeError):
     """Roll back a typed owner event when its claim mutation cannot commit."""
@@ -6318,19 +6482,27 @@ def _reserve_alpaca_entry_risk(
                     "claim": existing,
                 }
 
-    # Read every local paper-Alpaca row, regardless of FSM state.  A terminal/error
-    # state is not proof of flatness; persisted position evidence must win.
-    session_rows = db.execute(text(
-        "SELECT id, upper(symbol), execution_family, state, risk_snapshot_json "
-        "FROM trading_automation_sessions "
-        "WHERE mode = 'live' AND execution_family IN ('alpaca_spot', 'alpaca_short') "
-    )).fetchall()
+    # Read every paper-Alpaca row that CAN carry exposure, regardless of FSM
+    # state.  A terminal/error state is not proof of flatness; persisted position
+    # evidence must win — kaya ang terminal row ay pumapasok pa rin kapag may
+    # marker ito. Ang WHERE ay `alpaca_ledger_session_scan_sql` (#1285): 7,895
+    # hilera / 53 MB / 2.1-2.8 s kada placement ang dating hinihila dito habang
+    # hawak ang account advisory lock. Claims MUNA: ang owner ids nila ay param
+    # ng session scan (claim_owner_missing ⇒ fail-closed, kaya kailangang
+    # nakikita pa rin ang owner row ng bawat unresolved claim).
     claim_rows = db.execute(text(
         "SELECT upper(symbol), action, owner_session_id, client_order_id, claim_token,"
         "       phase, broker_order_id, metadata_json "
         "FROM broker_symbol_action_claims "
         "WHERE account_scope = :scope AND phase <> 'resolved'"
     ), {"scope": scope}).fetchall()
+    session_rows = db.execute(
+        text(alpaca_ledger_session_scan_sql()),
+        alpaca_ledger_session_scan_params(
+            owner_session_id=int(owner_session_id),
+            claim_owner_session_ids=[row[2] for row in claim_rows],
+        ),
+    ).fetchall()
 
     rows_by_id = {int(row[0]): row for row in session_rows}
     owner_rows = [row for row in session_rows if int(row[0]) == int(owner_session_id)]
@@ -6970,28 +7142,25 @@ def _certify_alpaca_owned_entry_posture(
     account_id = str(alpaca_account_id or "").strip()
     if scope != "alpaca:paper" or not account_id:
         return {"ok": False, "reason": "alpaca_account_identity_unfrozen"}
-    rows = db.execute(text(
-        "SELECT id, upper(symbol), execution_family, state, risk_snapshot_json "
-        "FROM trading_automation_sessions "
-        "WHERE mode = 'live' AND execution_family IN ('alpaca_spot', 'alpaca_short')"
-    )).fetchall()
+    # Claims MUNA, saka ang WHERE-bound na session scan (#1285) — parehong
+    # teksto ng `_reserve_alpaca_entry_risk`, walang owner row sa seam na ito.
     claims = db.execute(text(
         "SELECT upper(symbol), owner_session_id, client_order_id, broker_order_id, "
         "metadata_json FROM broker_symbol_action_claims "
         "WHERE account_scope = :scope AND phase <> 'resolved'"
     ), {"scope": scope}).fetchall()
+    rows = db.execute(
+        text(alpaca_ledger_session_scan_sql()),
+        alpaca_ledger_session_scan_params(
+            owner_session_id=None,
+            claim_owner_session_ids=[row[1] for row in claims],
+        ),
+    ).fetchall()
 
     expected_positions: dict[str, float] = {}
     allowed_order_ids: set[str] = set()
     allowed_client_ids: set[str] = set()
-    active_order_keys = (
-        "entry_order_id",
-        "pyramid_order_id",
-        "micropullback_reentry_order_id",
-        "pullback_add_order_id",
-        "flag_breakout_add_order_id",
-        "scale_out_order_id",
-    )
+    active_order_keys = ALPACA_LEDGER_ACTIVE_ORDER_KEYS
     for _sid, row_symbol, family, _state, snapshot in rows:
         snap = snapshot if isinstance(snapshot, dict) else {}
         live = snap.get("momentum_live_execution")

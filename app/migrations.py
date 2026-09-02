@@ -33193,6 +33193,92 @@ def _migration_373_db_paper_account_identity(conn) -> None:
     )
 
 
+def _migration_374_alpaca_ledger_scan_bound_indexes(conn) -> None:
+    """Index para sa WHERE-bound na Alpaca reservation-ledger scan (#1285).
+
+    ANG PUWANG (sinukat 2026-09-02). Ang `_reserve_alpaca_entry_risk` at
+    `_certify_alpaca_owned_entry_posture` sa `alpaca_orphan_claims.py` ay
+    humihila ng BAWAT live alpaca row — walang state filter — sa BAWAT order
+    placement, sa loob ng short tx na may hawak na per-account advisory lock:
+    **7,895 hilera / 53 MB** ng jsonb na pinaparse sa client = **2,119 / 2,591 /
+    2,806 ms** sa tahimik na DB. 7,509 sa mga hilera ay terminal (live_cancelled
+    6,631 / live_error 878 / live_arm_expired 284), 0 ang may posisyon, 51 ang
+    may entry_submitted. Ito ang pinakamalaking natitirang termino sa
+    `place_profile_ms.broker_post` (4.3-12.6 s noong 09-01 laban sa 0.08-0.86 s
+    HTTP) pagkatapos ng #1280.
+
+    ANG AYOS. Binago ang WHERE (tingnan ang `alpaca_ledger_session_scan_sql`)
+    para pumasok lang ang owner row, ang claim-owner rows, ang hindi-terminal na
+    estado, at ang mga hilerang may exposure marker sa
+    `risk_snapshot_json.momentum_live_execution` — bilang IISANG
+    ``coalesce(<12 marker>) IS NOT NULL`` na expression.
+
+    BAKIT COALESCE AT HINDI PARTIAL (sinukat sa prod-shaped copy, 17,659 hilera):
+    - 12 hiwalay na ``->> IS NOT NULL`` OR arm: WALANG stats ang planner sa
+      jsonb expression ⇒ tinantiya 8,131/8,172 tugma ⇒ Bitmap+Filter na
+      nagde-detoast ng BAWAT terminal row: **3,749-4,251 ms, 300,888 buffer**
+      — mas MASAMA pa kaysa sa lumang 12 ms server-side scan.
+    - Partial expression index (``WHERE mode='live'``): may null_frac 0.95 sa
+      pg_stats pero HINDI ginagamit ng planner ang stats ng partial index para
+      sa buong-table estimate ⇒ parehong 3,970 ms.
+    - NON-partial expression index sa ``(mode, execution_family, coalesce(...))``:
+      may stats + IS NOT NULL bilang btree index cond ⇒ BitmapOr sa pkey +
+      ``ix_tas_live_active`` (mig 364) + index na ito: **117 hilera, 120 buffer,
+      1.24-1.28 ms** (2,754 heap block ⇒ 108). 152 kB ang index.
+
+    ANG ANALYZE AY LOAD-BEARING (adversarial review, sinukat sa parehong copy):
+    ang CREATE INDEX ay HINDI nagpo-populate ng stats para sa expression, kaya
+    kaagad pagkatapos ng migration ay WALANG null_frac ang planner sa coalesce
+    column ⇒ tinantiya 99.5% na tugma ⇒ Bitmap sa (mode, execution_family)
+    prefix + Filter sa lahat ng 7,895 hilera: **4,074 ms / 302,078 buffer** —
+    mas masama pa kaysa sa 2.1-2.8 s na inaalis nito, hanggang sa susunod na
+    autoanalyze (threshold ~1,874 na binagong hilera = oras-oras, swerte-swerte).
+    Pagkatapos ng ANALYZE (null_frac 0.953): **0.42 ms**. Ang ANALYZE ay legal sa
+    loob ng migration tx (SHARE UPDATE EXCLUSIVE, hindi humaharang sa DML).
+
+    ⚠️ ORAS NG BUILD: ang expression index ay nagde-detoast ng BAWAT
+    risk_snapshot_json — sinukat na **10.7 s** SHARE lock sa
+    trading_automation_sessions (bloke sa INSERT/UPDATE/DELETE) sa startup path
+    ng host lane (01:35 PT launch = tahimik) at ng container app. Huwag
+    i-restart ang alinman sa 13:30-20:00Z para lang dito. Walang idinagdag na
+    generic (mode, execution_family, state) btree: sa nasukat na plan ang state
+    arm ay nakakabit sa ``ix_tas_live_active`` (mig 364), kaya isa pa iyong
+    index na walang consumer sa isang mainit na table.
+
+    ⚠️ Ang coalesce expression dito ay kailangang STRUCTURALLY IDENTICAL sa
+    `alpaca_ledger_exposure_sql_expr()` — kung magdagdag ng marker sa loop,
+    BAGONG migration (huwag i-edit ito; `IF NOT EXISTS` ay hindi magre-rebuild)
+    at ang guard test sa tests/test_alpaca_reservation_scan_bound.py ang
+    magsasabi. Idempotent (``IF NOT EXISTS``), HINDI ``CONCURRENTLY`` (tingnan
+    ang mig 372: startup path, bago pumasok ang trapiko).
+    """
+
+    conn.execute(text(
+        """
+        CREATE INDEX IF NOT EXISTS ix_tas_alpaca_ledger_exposure
+        ON trading_automation_sessions (
+            mode,
+            execution_family,
+            (coalesce(risk_snapshot_json->'momentum_live_execution'->>'position',
+                      risk_snapshot_json->'momentum_live_execution'->>'entry_submitted',
+                      risk_snapshot_json->'momentum_live_execution'->>'entry_client_order_id',
+                      risk_snapshot_json->'momentum_live_execution'->>'entry_inflight_risk_usd',
+                      risk_snapshot_json->'momentum_live_execution'->>'entry_order_request',
+                      risk_snapshot_json->'momentum_live_execution'->>'entry_order_id',
+                      risk_snapshot_json->'momentum_live_execution'->>'pyramid_order_id',
+                      risk_snapshot_json->'momentum_live_execution'->>'micropullback_reentry_order_id',
+                      risk_snapshot_json->'momentum_live_execution'->>'pullback_add_order_id',
+                      risk_snapshot_json->'momentum_live_execution'->>'flag_breakout_add_order_id',
+                      risk_snapshot_json->'momentum_live_execution'->>'scale_out_order_id',
+                      risk_snapshot_json->'momentum_live_execution'->>'deadman_stop'))
+        )
+        """
+    ))
+    # Load-bearing (tingnan ang docstring): walang stats ang bagong expression
+    # hanggang ANALYZE ⇒ 4,074 ms na plan sa bawat placement hanggang autoanalyze.
+    conn.execute(text("ANALYZE trading_automation_sessions"))
+
+
 MIGRATIONS = [
     ("001_add_email", _migration_001_add_email),
     ("002_add_image_path", _migration_002_add_image_path),
@@ -33693,6 +33779,8 @@ MIGRATIONS = [
      _migration_372_viability_live_board_index),
     ("373_db_paper_account_identity",
      _migration_373_db_paper_account_identity),
+    ("374_alpaca_ledger_scan_bound_indexes",
+     _migration_374_alpaca_ledger_scan_bound_indexes),
 ]
 
 
