@@ -3506,6 +3506,74 @@ def triple_confluence_kelly_multiplier(
         return 1.0, {"reason": "error_fail_neutral", "kelly_mult": 1.0}
 
 
+def stop_noise_floor_decision(
+    *,
+    atr_pct: float,
+    stop_atr_mult: float,
+    noise_range_pct: float | None,
+    buckets_used: int,
+    min_buckets: int,
+) -> tuple[float, dict[str, Any]]:
+    """PURE — i-floor ang stop laban sa SARILING 30s tick noise (#1278).
+
+    Ang epektibong stop fraction ng risk-first sizing at ng inilalagay na stop
+    ay ``max(0.003, atr_pct * stop_atr_mult)``. Kapag ito ay MAS MASIKIP kaysa
+    sa median 30s high-low range ng pangalan (``noise_range_pct``, bilang
+    fraction ng presyo), ang stop ay nakaupo sa LOOB ng ingay at ang risk-first
+    sizing ay BUMIBILI pa ng laki dahil dito — ang eksaktong AUUD -6.73R na
+    mekanismo (stop 0.30x ng ingay, 551sh, -44.01 sa binalak na -6.54).
+
+    Nagbabalik ng ``(atr_pct_out, meta)``. Ang pagtataas ng atr_pct sa
+    ``noise_range_pct / stop_atr_mult`` ay nagpapalapad ng stop distance
+    PATUNGO MISMO sa noise floor; ang qty ay liliit sa risk-first math na
+    umiiral na. HINDI ito reject: walang entry na hinaharangan dito.
+
+    Fail-OPEN sa kulang/basurang datos: ``noise_range_pct`` na None, hindi
+    finite, hindi positibo, o kulang ang buckets ⇒ walang pagbabago.
+    """
+    meta: dict[str, Any] = {"applied": False}
+    try:
+        a = float(atr_pct)
+        m = float(stop_atr_mult)
+    except (TypeError, ValueError):
+        return atr_pct, meta
+    if not (math.isfinite(a) and math.isfinite(m)) or m <= 0.0:
+        return atr_pct, meta
+    if noise_range_pct is None:
+        meta["reason"] = "no_noise_measurement"
+        return a, meta
+    try:
+        nr = float(noise_range_pct)
+    except (TypeError, ValueError):
+        return a, meta
+    if not math.isfinite(nr) or nr <= 0.0:
+        meta["reason"] = "noise_unusable"
+        return a, meta
+    try:
+        used = int(buckets_used)
+        need = max(3, int(min_buckets))
+    except (TypeError, ValueError):
+        return a, meta
+    if used < need:
+        meta["reason"] = "insufficient_own_tape"
+        meta["buckets_used"] = used
+        meta["min_buckets"] = need
+        return a, meta
+    eff_stop_pct = max(0.003, a * m)
+    meta["noise_range_pct"] = round(nr, 6)
+    meta["stop_pct_before"] = round(eff_stop_pct, 6)
+    meta["buckets_used"] = used
+    if eff_stop_pct >= nr:
+        meta["reason"] = "stop_already_outside_noise"
+        return a, meta
+    a_out = nr / m
+    meta["applied"] = True
+    meta["atr_pct_before"] = round(a, 6)
+    meta["atr_pct_after"] = round(a_out, 6)
+    meta["stop_pct_after"] = round(max(0.003, a_out * m), 6)
+    return a_out, meta
+
+
 def compute_risk_first_quantity(
     *,
     entry_price: float,
