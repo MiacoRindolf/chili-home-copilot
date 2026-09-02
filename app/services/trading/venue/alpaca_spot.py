@@ -1026,6 +1026,18 @@ class AlpacaSpotAdapter:
             if ceiling <= 0 or requested <= 0:
                 return None
             max_age = min(requested, ceiling)
+            # TIME-BOUNDED (2026-09-02). Walang hangganan sa oras ang read na ito
+            # noon, kaya sa isang simbolong WALANG kamakailang SIP row (o binabaha
+            # ng iqfeed_l1 na 200k row kada 10 min) ay nilalakad ng planner ang
+            # BUONG kasaysayan ng simbolo sa 61GB na table: Bitmap Heap Scan,
+            # HIBS 8,127 buffer mula disk = 4.4s; SSM 20.7s. Sukat offline
+            # 2026-09-02 (10 simbolo, malamig): SIP tier median 2,430ms, ang
+            # tatlong IQFeed tier 2-5ms -- ITO ang buong ~8.9s "sa loob ng place
+            # call" ng 09-01 (LIDR place_profile total=8,969ms, HTTP=94ms).
+            # Ang bound ay superset ng bawat hilerang maaaring pumasa: ang
+            # received_at ay dapat nasa loob ng max_age (<=60s) at ang observed_at
+            # (DB write) ay laging >= received_at. Plano lang ang nagbago;
+            # byte-identical ang resulta. Bounded: Index Scan, 4 buffer, 0.27ms.
             with SessionLocal() as _db:
                 row = _db.execute(text(
                     "SELECT id, bid, ask, mid, spread_bps, source, provider_event_at, "
@@ -1033,6 +1045,7 @@ class AlpacaSpotAdapter:
                     "FROM momentum_nbbo_spread_tape "
                     "WHERE symbol = :s AND source LIKE :src AND mid > 0 "
                     "AND provider_event_at IS NOT NULL AND received_at IS NOT NULL "
+                    "AND observed_at > now() - interval '10 minutes' "
                     "ORDER BY observed_at DESC, id DESC LIMIT 1"
                 ), {
                     "s": str(sym or "").upper(),
@@ -1498,6 +1511,11 @@ class AlpacaSpotAdapter:
             requested = float(max_age_seconds or 0.0)
             if requested <= 0:
                 return None
+            # Parehong time bound ng SIP tier (2026-09-02): sa pangalang WALA
+            # sa IQFeed quote watch ay nilalakad ng unbounded read ang buong
+            # kasaysayan ng simbolo sa 61GB na table bago sumuko. Superset ng
+            # bawat hilerang pumapasa (received_at <= max_age, observed_at >=
+            # received_at); plano lang ang nagbago.
             with SessionLocal() as _db:
                 row = _db.execute(text(
                     "SELECT id, bid, ask, mid, spread_bps, source, provider_event_at, "
@@ -1507,6 +1525,7 @@ class AlpacaSpotAdapter:
                     "AND timestamp_basis = 'iqfeed_q_bid_ask_time_clock' "
                     "AND mid > 0 AND provider_event_at IS NOT NULL "
                     "AND received_at IS NOT NULL "
+                    "AND observed_at > now() - interval '10 minutes' "
                     "ORDER BY observed_at DESC, id DESC LIMIT 1"
                 ), {"s": str(sym or "").upper()}).fetchone()
             if row is None:
