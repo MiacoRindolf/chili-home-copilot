@@ -1718,6 +1718,93 @@ def volnorm_trail_dist_pct(
     return max(lo, min(candidate, cap))
 
 
+def stop_tighten_noise_clamp(
+    *,
+    candidate: float,
+    current_stop: float,
+    ref_price: float,
+    spread_frac: float | None = None,
+    noise_frac: float | None = None,
+    spread_mult: float = 1.5,
+    noise_mult: float = 1.0,
+) -> tuple[float, dict[str, Any]]:
+    """PURE — huwag hayaang ang isang TIGHTEN ay lumapag sa LOOB ng ingay (2026-09-02).
+
+    Para sa isang stop WRITER na nagpapasikip (hal. C4 viability tighten,
+    ``avg * 0.995``): ang kandidato ay hindi maaaring mas mataas kaysa
+    ``ref_price * (1 - floor_frac)`` kung saan::
+
+        floor_frac = max(spread_mult * spread_frac, noise_mult * noise_frac)
+                     (mga term na may nababasang sukat LAMANG)
+        out        = max(current_stop, min(candidate, ref_price * (1 - floor_frac)))
+
+    * ``spread_frac`` = (ask - bid) / mid ng PAREHONG tick; ``spread_mult`` 1.5
+      ay ang umiiral na ``volnorm_trail_dist_pct.spread_floor_mult`` (reuse).
+    * ``noise_frac``  = sariling short-window bid range / ref; ``noise_mult``
+      1.0 ay ang ratio ng #1278 ``stop_noise_floor_decision`` (reuse).
+    * INVARIANT-A: ``current_stop <= out <= candidate`` — kailanman hindi
+      binababa ang NAKALAGAY na stop at kailanman hindi tinataas ang kandidato
+      (walang bagong tighten na nalilikha; hindi rin ito pumapalapad ng
+      initial stop — ang qty/sizing ay hindi ginagalaw, ang #1278 failure mode).
+    * FAIL-OPEN: walang nababasang term (None/NaN/crossed/zero) ⇒ ang
+      kandidato ay ibinabalik nang buo — dating gawi.
+    * Kapag ``candidate <= current_stop`` (walang tighten) ⇒ identity.
+
+    Nagbabalik ng ``(out, meta)``; ang ``meta`` ang telemetry para sa
+    event-study (``inside_noise`` = ang kandidato ay lalapag sa loob ng ingay).
+    """
+    meta: dict[str, Any] = {
+        "spread_frac": None,
+        "noise_frac": None,
+        "floor_frac": None,
+        "floor_term": None,
+        "floor_px": None,
+        "inside_noise": False,
+        "moved": False,
+        "spread_mult": spread_mult,
+        "noise_mult": noise_mult,
+    }
+    try:
+        c = float(candidate)
+        cur = float(current_stop)
+        ref = float(ref_price)
+    except (TypeError, ValueError):
+        meta["reason"] = "unreadable_inputs"
+        return candidate, meta
+    if not (math.isfinite(c) and math.isfinite(cur) and math.isfinite(ref)) or ref <= 0.0:
+        meta["reason"] = "unreadable_inputs"
+        return candidate, meta
+    if c <= cur:
+        meta["reason"] = "no_tighten"
+        return c, meta
+    terms: list[tuple[str, float]] = []
+    for name, frac, mult in (("spread", spread_frac, spread_mult), ("noise", noise_frac, noise_mult)):
+        try:
+            if frac is None:
+                continue
+            f = float(frac)
+            m = float(mult)
+        except (TypeError, ValueError):
+            continue
+        if math.isfinite(f) and f > 0.0 and math.isfinite(m) and m > 0.0:
+            meta[f"{name}_frac"] = f
+            terms.append((name, m * f))
+    if not terms:
+        meta["reason"] = "no_measure"
+        return c, meta
+    term, floor_frac = max(terms, key=lambda t: t[1])
+    floor_px = ref * (1.0 - floor_frac)
+    out = max(cur, min(c, floor_px))
+    meta.update({
+        "floor_frac": floor_frac,
+        "floor_term": term,
+        "floor_px": floor_px,
+        "inside_noise": bool(c > floor_px),
+        "moved": bool(out < c),
+    })
+    return out, meta
+
+
 def trail_width_maturity_factor(
     *,
     rv_live: float | None,
