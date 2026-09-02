@@ -22468,6 +22468,90 @@ def _burst_track_push(le: dict, *, now_epoch: float, price: float | None) -> lis
     return tr
 
 
+def _c4_tighten_noise_shadow(
+    le: dict,
+    *,
+    avg: float,
+    bid: Any,
+    ask: Any,
+    candidate: float,
+    current_stop: float,
+    now_epoch: float | None = None,
+) -> dict[str, Any]:
+    """SHADOW (2026-09-02 stop-noise-floor study) — sukatin, HUWAG ilapat.
+
+    Kinukuwenta kung saan LALAPAG ang C4 tighten (``avg * 0.995``) kung ito ay
+    na-clamp sa labas ng ingay (``paper_execution.stop_tighten_noise_clamp``),
+    at ibinabalik ang telemetry para sa ``viability_degraded_tighten`` payload.
+    Ang NAKALAGAY na stop ay hindi ginagalaw dito — DO NOT SHIP ang apply hanggang
+    may event-study sa mga event na ito (CANF 19471: ang tighten sa 4.3183 ay
+    1.08x ng 2c spread, pero ang flush ay dumaan din sa orihinal na 4.2654 —
+    $0 ang pagkakaiba sa 3/3 na tighten sa 21 araw; sa 2/3 ay TAMA ang tighten).
+
+    Mga sukat, WALANG DB query sa exit-critical na landas:
+    * spread_frac = (ask - bid) / mid ng PAREHONG tick;
+    * noise_frac  = (max - min) ng ``le['burst_track']`` (#1275/#1277 ring ng
+      sariling bid sample, 60s lookback) / avg.
+    Fail-open: anumang error ⇒ ``{"nf_reason": ...}`` lamang.
+    """
+    out: dict[str, Any] = {}
+    try:
+        from .paper_execution import stop_tighten_noise_clamp
+
+        spread_frac = None
+        b = _float_or_none(bid)
+        a = _float_or_none(ask)
+        if b is not None and a is not None and a > b > 0.0:
+            spread_frac = (a - b) / ((a + b) / 2.0)
+        noise_frac = None
+        n_samples = 0
+        try:
+            look = float(getattr(
+                settings, "chili_momentum_burst_exit_lookback_seconds", 60.0) or 60.0)
+            t = float(now_epoch) if now_epoch is not None else _utcnow_aware().timestamp()
+            tr = le.get("burst_track") if isinstance(le, dict) else None
+            pxs: list[float] = []
+            if isinstance(tr, list):
+                for item in tr:
+                    try:
+                        ts, p = float(item[0]), float(item[1])
+                    except (TypeError, ValueError, IndexError):
+                        continue
+                    if math.isfinite(p) and p > 0.0 and math.isfinite(ts) and 0.0 <= t - ts <= look:
+                        pxs.append(p)
+            n_samples = len(pxs)
+            _avg = float(avg)
+            if n_samples >= 2 and _avg > 0.0 and (max(pxs) - min(pxs)) > 0.0:
+                noise_frac = (max(pxs) - min(pxs)) / _avg
+        except (TypeError, ValueError):
+            noise_frac = None
+        clamped, meta = stop_tighten_noise_clamp(
+            candidate=candidate,
+            current_stop=current_stop,
+            ref_price=avg,
+            spread_frac=spread_frac,
+            noise_frac=noise_frac,
+        )
+        out = {
+            "nf_spread_frac": meta.get("spread_frac"),
+            "nf_noise_frac": meta.get("noise_frac"),
+            "nf_noise_samples": n_samples,
+            "nf_floor_frac": meta.get("floor_frac"),
+            "nf_floor_term": meta.get("floor_term"),
+            "nf_floor_px": meta.get("floor_px"),
+            "nf_clamped_stop": clamped,
+            "nf_candidate_inside_noise": bool(meta.get("inside_noise")),
+            "nf_would_move": bool(meta.get("moved")),
+            "nf_spread_mult": meta.get("spread_mult"),
+            "nf_noise_mult": meta.get("noise_mult"),
+        }
+        if meta.get("reason"):
+            out["nf_reason"] = meta["reason"]
+    except Exception as exc:  # pragma: no cover - fail-open by contract
+        out = {"nf_reason": f"shadow_error:{type(exc).__name__}"}
+    return out
+
+
 def _failed_pop_break_fires(db, sess, le, *, bid, avg) -> bool:
     """#1261 — 10s green-run break, bucketed (L8b: bawal ang per-tick frame
     fetch). Nagsusulat ng debug sa ``le['failed_pop_break_dbg']``. Fail-open
@@ -40957,6 +41041,14 @@ def tick_live_session(
                     "current_viability": current_via,
                     "old_stop": _live_stop_c4,
                     "new_stop": tighter_stop,
+                    # SHADOW telemetry (2026-09-02 stop-noise-floor study): saan
+                    # lalapag ang tighten kung na-clamp sa labas ng live spread /
+                    # sariling 60s bid range. HINDI inilalapat — ang new_stop sa
+                    # itaas ang nakalagay. Walang DB query; fail-open.
+                    **_c4_tighten_noise_shadow(
+                        le, avg=avg, bid=bid, ask=ask,
+                        candidate=tighter_stop, current_stop=_live_stop_c4,
+                    ),
                 })
                 # INVARIANT-A: refresh the cached base so every later stop writer in this
                 # tick (the trailing ratchet chain) composes off the tightened value.
