@@ -40202,9 +40202,16 @@ def tick_live_session(
             })
             le["pending_exit_reason"] = "burst_window_exit"
             _commit_le(sess, le)
+            # #1283 (2026-09-02): ang call na ito ay KULANG ng apat na
+            # keyword-only na walang default sa _submit_live_market_exit_impl
+            # (client_order_id, bid, ask, mid) — TypeError sa sandaling
+            # pumutok, kaya hindi kailanman nakapag-fill ang burst exit.
+            # Nahuli ng partial-wiring map bago ang unang RTH nito.
             return _submit_live_market_exit(
                 db, sess, adapter, le=le, reason="burst_window_exit",
                 product_id=product_id, quantity=float(pos.get("quantity") or 0.0),
+                client_order_id=f"chili_ml_bw_{sess.id}_{uuid.uuid4().hex[:12]}",
+                bid=bid, ask=ask, mid=mid,
             )
         elif (
             st == STATE_LIVE_ENTERED
@@ -40224,9 +40231,12 @@ def tick_live_session(
             })
             le["pending_exit_reason"] = "momentum_break_stop"
             _commit_le(sess, le)
+            # #1283: parehong kulang na keywords gaya ng burst exit sa itaas.
             return _submit_live_market_exit(
                 db, sess, adapter, le=le, reason="momentum_break_stop",
                 product_id=product_id, quantity=float(pos.get("quantity") or 0.0),
+                client_order_id=f"chili_ml_mb_{sess.id}_{uuid.uuid4().hex[:12]}",
+                bid=bid, ask=ask, mid=mid,
             )
         elif (
             st == STATE_LIVE_ENTERED
