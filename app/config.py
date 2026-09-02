@@ -3147,6 +3147,40 @@ class Settings(BaseSettings):
         le=30.0,
         validation_alias=AliasChoices("CHILI_MOMENTUM_OUTCOME_RECON_LOOKBACK_DAYS"),
     )
+    # BROKER-TRUTH ATTRIBUTION (2026-09-02, CANF 19471). Ang ledger
+    # (momentum_fill_outcomes) ay alam LAMANG ang fills na in-adopt mismo ng
+    # FSM: ang cycle-2 entry f3ed508d (165 @ 4.62, hindi na-adopt dahil sa
+    # reaper race) at ang operator sell ddba3ed2 (165 @ 3.9603, chili_ops_flat_
+    # sa labas ng FSM) ay hindi kailanman naisulat, kaya ang outcome 203734 ay
+    # na-label na `reconciled` sa −78.13 (cycle 1 lang) habang −186.98 ang
+    # broker truth ng session; ang loss guard (risk_policy.
+    # load_current_live_loss_history → broker_realized_pnl_usd) ay kulang ng
+    # −108.85. ON => para sa Alpaca families, ang reconcile pass ay nagbabasa ng
+    # broker order list ng symbol sa loob ng session window at ini-a-attribute
+    # ang BAWAT filled order na may session id sa client_order_id
+    # (chili_ml_e_<sid>_, chili_dm_<sid>_, chili_ml_bw_<sid>_, chili_ops_flat_<sid>_,
+    # ...) + anumang sell na tumutugma sa unpriced emergency leg; ang broker_*
+    # columns ay sumasaklaw sa BUONG session. Read-only GET; never a fabricated
+    # label (unreadable/ambiguous => unreconciled status, retry sa susunod na pass).
+    chili_momentum_outcome_recon_broker_attribution_enabled: bool = Field(
+        default=True,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_OUTCOME_RECON_BROKER_ATTRIBUTION_ENABLED"),
+    )
+    # Bound ng broker GETs kada 60s pass (isa kada session na kailangang i-attribute).
+    chili_momentum_outcome_recon_broker_attribution_max_per_pass: int = Field(
+        default=20,
+        ge=1,
+        le=200,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_OUTCOME_RECON_BROKER_ATTRIBUTION_MAX_PER_PASS"),
+    )
+    # Grace pagkatapos ng terminal_at kung saan pa rin isinasama ang mga fill
+    # (ang operator flatten ay maaaring dumating pagkatapos ng FSM terminal).
+    chili_momentum_outcome_recon_broker_attribution_grace_seconds: int = Field(
+        default=900,
+        ge=0,
+        le=86400,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_OUTCOME_RECON_BROKER_ATTRIBUTION_GRACE_SECONDS"),
+    )
     chili_momentum_broker_truth_label_enabled: bool = Field(
         default=False,
         validation_alias=AliasChoices("CHILI_MOMENTUM_BROKER_TRUTH_LABEL_ENABLED"),
