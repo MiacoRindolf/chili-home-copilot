@@ -1,0 +1,114 @@
+"""TRIPWIRE: ang PATH B ay HINDI PA nakakabit, at nananatiling totoo ang mga
+premise na nagdulot ng pagpapaliban.
+
+BAKIT MAY GANITONG TEST. Ang `venue/alpaca_spot.py::replace_order_qty` (#1276)
+ay naipasok noong 2026-09-01 nang WALANG production caller. Napatunayan ng
+live probe na gumagana ang mekanismo, kaya ang tukso ay ikabit ito sa unang
+exit site na makikita. Limang konkretong butas ang nahanap ng dalawang
+adversarial review kung gagawin iyon nang walang durable claim-phase marker
+(tingnan ang `docs/DESIGN/PARTIAL_EXIT_PATH_B.md`), at dalawa sa mga iyon ay
+NAGPAPATAY sa buong posisyon o sa LAHAT ng exit path:
+
+  R1  ang `pending_replace` ay hindi `certifiably_active`, kaya ang unang
+      PATCH ay humahantong sa `_queue_full_close(deadman_active_certification_failed)`
+      — nagfa-flatten ng buong runner sa ordinaryong transient.
+  R2  ang whole exit na dumarating habang nakaturo pa sa predecessor ang
+      ledger ay nagfi-freeze ng close handoff laban sa isang `replaced` na
+      order — successor hindi kailanman ma-certify, cancel hindi kailanman
+      maging terminal, bawat deadman lease naharang: WALANG exit path.
+
+ANG BANTAY. Kung may magdagdag ng production caller ng `replace_order_qty`,
+babagsak ang test na ito na may pahiwatig sa disenyo. HINDI ito panghabang-buhay:
+BURAHIN ang file na ito sa PR na talagang ikakabit ang PATH B, at palitan ito
+ng mga call-site guard sa §9 ng disenyo (isang caller lamang; tinatawag mula sa
+SCALING_OUT site lamang; hindi kailanman sa loob ng burst branch).
+
+Runnable: pytest tests/test_partial_exit_path_b_unwired.py -v
+"""
+from __future__ import annotations
+
+import ast
+import inspect
+from pathlib import Path
+
+from app.services.trading.momentum_neural import live_runner as lr
+from app.services.trading.venue import alpaca_spot as als
+
+_APP = Path(lr.__file__).resolve().parents[3]
+_VENUE_ADAPTER = Path(als.__file__).resolve()
+
+
+def _production_py_files() -> list[Path]:
+    return [
+        p
+        for p in (_APP / "app").rglob("*.py")
+        if p.resolve() != _VENUE_ADAPTER
+    ]
+
+
+def _calls_named(tree: ast.AST, name: str) -> list[int]:
+    """Lineno ng bawat tawag na ang huling attribute/name ay `name`."""
+    out: list[int] = []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        func = node.func
+        got = (
+            func.attr if isinstance(func, ast.Attribute)
+            else func.id if isinstance(func, ast.Name)
+            else None
+        )
+        if got == name:
+            out.append(node.lineno)
+    return out
+
+
+def test_replace_order_qty_still_has_zero_production_callers():
+    """Ang PATH B ay disenyo pa lamang. Walang production code ang nag-PATCH
+    ng nakaupong deadman stop."""
+    offenders: list[str] = []
+    for path in _production_py_files():
+        try:
+            tree = ast.parse(path.read_text(encoding="utf-8"))
+        except (SyntaxError, UnicodeDecodeError):
+            continue
+        for lineno in _calls_named(tree, "replace_order_qty"):
+            offenders.append(f"{path.relative_to(_APP)}:{lineno}")
+    assert not offenders, (
+        "Ang PATH B ay nakabit na nang hindi dumadaan sa disenyo. Basahin ang "
+        "docs/DESIGN/PARTIAL_EXIT_PATH_B.md (lalo na ang R1 at R2) bago "
+        "ipagpatuloy, saka palitan ang test na ito ng mga call-site guard sa "
+        f"§9. Mga caller: {offenders}"
+    )
+
+
+def test_the_pure_core_is_not_imported_by_the_live_runner_yet():
+    """Ang purong module ay naka-ship pero HINDI nakakabit — kapag na-import
+    na ito ng live_runner ay may wiring na, at may ibang guard na dapat."""
+    src = inspect.getsource(lr)
+    assert "path_b_partial" not in src
+
+
+def test_pending_replace_is_still_not_a_certifiably_active_lifecycle():
+    """Ang PREMISE ng R1. Kapag naidagdag ang `pending_replace` sa set na ito
+    nang walang marker gate ay tahimik na magiging 'protektado' ang isang
+    order na wala pang kapalit — mas malala kaysa sa flatten."""
+    assert "pending_replace" not in lr._ACTIVE_ALPACA_PROTECTIVE_LIFECYCLES
+    assert "new" in lr._ACTIVE_ALPACA_PROTECTIVE_LIFECYCLES
+
+
+def test_nonactive_lifecycle_handler_still_has_no_pending_replace_branch():
+    """Ang D8 branch ng disenyo ay wala pa. Nasa `_ensure_alpaca_deadman_stop`
+    ang handler bilang closure, kaya sa buong source ito hinahanap."""
+    src = inspect.getsource(lr)
+    assert "path_b_replace_pending" not in src
+
+
+def test_the_scaling_out_site_still_excludes_alpaca_from_the_split():
+    """Ito ang mismong suppression na nag-emit ng
+    `alpaca_scale_out_suppressed_for_deadman` sa CANF: habang buo ang stop ay
+    all-or-nothing ang Alpaca exit. Hindi ito puwedeng alisin nang mag-isa —
+    kailangan muna ng PATH B."""
+    src = inspect.getsource(lr)
+    assert "ALPACA_EXECUTION_FAMILIES" in src
+    assert "alpaca_scale_out_suppressed_for_deadman" in src
