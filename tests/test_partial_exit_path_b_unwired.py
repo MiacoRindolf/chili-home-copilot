@@ -20,8 +20,14 @@ NAGPAPATAY sa buong posisyon o sa LAHAT ng exit path:
 ANG BANTAY. Kung may magdagdag ng production caller ng `replace_order_qty`,
 babagsak ang test na ito na may pahiwatig sa disenyo. HINDI ito panghabang-buhay:
 BURAHIN ang file na ito sa PR na talagang ikakabit ang PATH B, at palitan ito
-ng mga call-site guard sa §9 ng disenyo (isang caller lamang; tinatawag mula sa
-SCALING_OUT site lamang; hindi kailanman sa loob ng burst branch).
+ng mga call-site guard (isang caller lamang; tinatawag mula sa SCALING_OUT site
+lamang; hindi kailanman sa loob ng burst branch).
+
+IKALAWANG PASADA (2026-09-02). Ang guard na ito ay HINDI GUMAGANA noong
+naipadala ito: `parents[3]` ang scan root at `_APP / "app"` ang glob, kaya
+`<repo>/app/app` — wala iyon, ZERO na file ang na-scan, at ang assert ay
+pumapasa kahit ano. Naayos na, at may self-check at positibong kontrol na
+ngayon sa ibaba para hindi na ito muling maging bulag.
 
 Runnable: pytest tests/test_partial_exit_path_b_unwired.py -v
 """
@@ -34,16 +40,55 @@ from pathlib import Path
 from app.services.trading.momentum_neural import live_runner as lr
 from app.services.trading.venue import alpaca_spot as als
 
-_APP = Path(lr.__file__).resolve().parents[3]
+# `live_runner.py` ay nasa app/services/trading/momentum_neural/, kaya:
+#   parents[0]=momentum_neural  [1]=trading  [2]=services  [3]=app  [4]=repo root
+#
+# BUG NA NAAYOS (2026-09-02): ang unang bersyon ay gumamit ng `parents[3]` at
+# saka nag-glob ng `_APP / "app"` — ibig sabihin `<repo>/app/app`, na WALA.
+# Zero na file ang na-scan, kaya ang guard ay pumapasa NANG WALANG KONDISYON:
+# papasa ito kahit nakabit na ang `replace_order_qty` sa bawat exit site.
+# Isang guard na hindi kayang bumagsak ay mas masahol pa sa walang guard, dahil
+# ito ay binabanggit sa PR bilang ebidensya. Kaya may self-check na ngayon sa
+# ibaba: ang scan ay dapat may laman AT may napatunayang positibong kontrol.
+_REPO_ROOT = Path(lr.__file__).resolve().parents[4]
+_APP_DIR = _REPO_ROOT / "app"
 _VENUE_ADAPTER = Path(als.__file__).resolve()
+
+_MIN_EXPECTED_PRODUCTION_FILES = 100
 
 
 def _production_py_files() -> list[Path]:
     return [
         p
-        for p in (_APP / "app").rglob("*.py")
+        for p in _APP_DIR.rglob("*.py")
         if p.resolve() != _VENUE_ADAPTER
     ]
+
+
+def test_the_tripwire_actually_scans_the_production_tree():
+    """SELF-CHECK ng guard mismo. Kung mali ang scan root ay walang sinasabi
+    ang natitirang test dito."""
+    assert _APP_DIR.is_dir(), f"maling scan root: {_APP_DIR}"
+    files = _production_py_files()
+    assert len(files) > _MIN_EXPECTED_PRODUCTION_FILES, (
+        f"ang tripwire ay nag-scan ng {len(files)} na file — mali ang scan root"
+    )
+    assert Path(lr.__file__).resolve() in {p.resolve() for p in files}
+
+
+def test_the_tripwire_can_actually_find_a_call():
+    """POSITIBONG KONTROL. Isang simbolo na TIYAK na tinatawag sa production
+    ay dapat mahanap ng parehong makinarya na naghahanap ng
+    `replace_order_qty`. Kung hindi ito mahanap ay sirang-sira ang AST walk at
+    ang pangunahing assert ay walang kabuluhan."""
+    hits = 0
+    for path in _production_py_files():
+        try:
+            tree = ast.parse(path.read_text(encoding="utf-8"))
+        except (SyntaxError, UnicodeDecodeError):
+            continue
+        hits += len(_calls_named(tree, "_ensure_alpaca_deadman_stop"))
+    assert hits > 0, "hindi mahanap ng AST walk ang isang kilalang caller"
 
 
 def _calls_named(tree: ast.AST, name: str) -> list[int]:
@@ -73,7 +118,7 @@ def test_replace_order_qty_still_has_zero_production_callers():
         except (SyntaxError, UnicodeDecodeError):
             continue
         for lineno in _calls_named(tree, "replace_order_qty"):
-            offenders.append(f"{path.relative_to(_APP)}:{lineno}")
+            offenders.append(f"{path.relative_to(_REPO_ROOT)}:{lineno}")
     assert not offenders, (
         "Ang PATH B ay nakabit na nang hindi dumadaan sa disenyo. Basahin ang "
         "docs/DESIGN/PARTIAL_EXIT_PATH_B.md (lalo na ang R1 at R2) bago "

@@ -1,13 +1,15 @@
-"""Purong unit test ng PATH B core: phase graph, hati ng qty, invariant checker.
+"""Unit tests para sa purong PATH B core.
 
-WALANG DB, WALANG broker, WALANG live_runner import — sinasadya. Ang module
-na sinusuri ay `path_b_partial`, na HINDI PA nakakabit (tingnan ang
-`docs/DESIGN/PARTIAL_EXIT_PATH_B.md` §4 kung bakit ipinagpaliban ang wiring).
+WALANG DB, WALANG broker, WALANG import ng `live_runner` — ito ay nasa
+`tests/test_partial_exit_path_b_lineage_seam.py` at
+`tests/test_partial_exit_path_b_unwired.py`.
 
-Ang bawat isa sa tatlong bahagi ay tumutugma sa isang refutation:
-  * phase graph      -> R2 (chokepoint block habang may PATCH sa ere)
-  * plan_replacement -> oversell / walang runner
-  * assess_protection-> R4 (naked remainder) at ang short-flip guard
+Ang mga test dito ay hindi lamang "gumagana ba ang function". Ang mga
+INVARIANT ang binabantayan — ang mga bagay na kapag nabali ay tahimik na
+nagiging ligtas ang isang estadong hindi ligtas. Iyon mismo ang aral ng
+#1283 (berdeng helper test, seam na hindi kailanman gumana) at ng unang
+bersyon ng file na ito, kung saan ang isang test ay IGINIIT na "covered" ang
+estado kung saan 30% ng posisyon ay walang stop.
 
 Runnable: pytest tests/test_partial_exit_path_b_helpers.py -v
 """
@@ -18,263 +20,450 @@ import pytest
 from app.services.trading.momentum_neural import path_b_partial as pb
 
 
-# --------------------------------------------------------------------------
-# 1. Phase graph
-# --------------------------------------------------------------------------
+# ==========================================================================
+# 1. Ang graph — mga invariant, hindi mga halimbawa
+# ==========================================================================
 
-def test_every_transition_target_is_a_known_phase():
-    """Walang typo sa graph: bawat source at target ay nasa PHASES."""
+def test_every_phase_has_a_transition_row_and_every_target_is_a_phase():
     assert set(pb.LEGAL_TRANSITIONS) == set(pb.PHASES)
     for src, targets in pb.LEGAL_TRANSITIONS.items():
         for dst in targets:
-            assert dst in pb.PHASES, f"{src}->{dst}"
+            assert dst in pb.PHASES, f"{src}->{dst} ay hindi phase"
 
 
-def test_terminal_phases_have_no_outgoing_edges():
-    for phase in pb.TERMINAL_PHASES:
-        assert pb.LEGAL_TRANSITIONS[phase] == frozenset(), phase
+def test_terminal_and_naked_risk_are_disjoint():
+    """ANG INVARIANT NG R4. Ang isang phase na may share na walang nakaupong
+    stop ay HINDI puwedeng terminal — may utang pa itong restore o flatten.
+
+    Sa unang bersyon ay parehong terminal AT naked ang `partial_stale_adopted`
+    at `restore_rejected`, at walang laman ang kanilang transition set — kaya
+    ang mismong lunas na hinihingi ng R4 ay hindi maitatala. Ang wiring na
+    magtitiwala sa `is_terminal` ay titigil sa pag-service habang hubad ang
+    f - k na share.
+    """
+    assert pb.TERMINAL_PHASES & pb.NAKED_RISK_PHASES == frozenset()
 
 
-def test_non_terminal_phases_all_have_an_exit():
-    """Walang phase na wala nang patutunguhan — iyon ay isang deadlock (R5)."""
-    for phase in pb.PHASES - pb.TERMINAL_PHASES:
-        assert pb.LEGAL_TRANSITIONS[phase], phase
+def test_every_naked_risk_phase_can_reach_a_restore_or_a_flatten():
+    remedies = {
+        "restore_intent_frozen",
+        "restore_replace_submitted",
+        "restore_indeterminate",
+        "restore_certified",
+        "flatten_queued",
+        "flattened",
+    }
+    for phase in sorted(pb.NAKED_RISK_PHASES):
+        targets = pb.LEGAL_TRANSITIONS[phase]
+        assert targets, f"{phase} ay naked pero walang labasan"
+        assert targets & remedies, (
+            f"{phase} ay naked pero walang landas patungo sa restore o flatten: "
+            f"{sorted(targets)}"
+        )
 
 
-def test_every_phase_can_reach_a_terminal_phase():
-    """Ang buong graph ay bumabagsak sa isang terminal — walang bilog na bitag."""
-    reaches: set[str] = set(pb.TERMINAL_PHASES)
-    changed = True
-    while changed:
-        changed = False
-        for phase, targets in pb.LEGAL_TRANSITIONS.items():
-            if phase not in reaches and targets & reaches:
-                reaches.add(phase)
-                changed = True
-    assert reaches == set(pb.PHASES), sorted(set(pb.PHASES) - reaches)
+def test_whole_exit_blocking_and_naked_risk_are_disjoint():
+    """WALANG phase ang puwedeng sabay na (a) mag-ulat ng hubad na natitira at
+    (b) humarang sa flatten na sumasakop niyon. Iyon ang L2 deadlock."""
+    assert pb.WHOLE_EXIT_BLOCKING_PHASES & pb.NAKED_RISK_PHASES == frozenset()
 
 
-def test_in_flight_and_terminal_are_disjoint():
-    assert not (pb.IN_FLIGHT_PHASES & pb.TERMINAL_PHASES)
-    assert pb.IN_FLIGHT_PHASES <= pb.PHASES
-    assert pb.NAKED_RISK_PHASES <= pb.PHASES
+def test_whole_exit_blocking_phases_are_only_the_owner_ambiguous_three():
+    assert pb.WHOLE_EXIT_BLOCKING_PHASES == frozenset({
+        "intent_frozen", "replace_submitted", "replace_indeterminate",
+    })
 
 
-def test_happy_path_walks_end_to_end():
-    phase = "intent_frozen"
-    for nxt in (
-        "replace_submitted",
-        "successor_certified",
-        "partial_posting",
-        "partial_posted",
-        "partial_filled",
-    ):
-        phase = pb.advance_phase(phase, nxt)
-    assert pb.is_terminal(phase)
-    assert not pb.blocks_whole_exit(phase)
+def test_terminal_phases_have_no_outgoing_transitions():
+    for phase in sorted(pb.TERMINAL_PHASES):
+        assert pb.LEGAL_TRANSITIONS[phase] == frozenset()
 
 
-def test_certified_and_partial_phases_do_not_block_the_whole_exit():
-    """Certified na = ang SUCCESSOR na ang may-ari, kaya normal ang whole exit."""
+def test_consumed_by_exit_is_reachable_from_every_unblocked_open_phase():
+    """Kapag hindi hinaharang ang whole exit, MAAARING lamunin ng exit ang
+    posisyon habang bukas pa ang marker — kaya kailangang maitala iyon.
+
+    Sa unang bersyon ay `successor_certified` lamang ang may landas patungo
+    sa `consumed_by_exit`, kaya ang pinakamalamang na tunay na karera —
+    isang buong exit habang nakaupo ang f na limit — ay nag-iiwan ng
+    marker na stranded at bukas (L5).
+    """
+    for phase in sorted(pb.PHASES):
+        if phase in pb.TERMINAL_PHASES or phase in pb.WHOLE_EXIT_BLOCKING_PHASES:
+            continue
+        if phase in {"replace_stuck", "containment_queued"}:
+            # dito ay may hiwalay na containment lineage; may sariling terminal.
+            continue
+        assert "consumed_by_exit" in pb.LEGAL_TRANSITIONS[phase], phase
+
+
+def test_certified_cannot_escalate_to_replace_stuck():
+    """S5. Pagkatapos ng certification ay ALAM na nakaupo ang R stop. Ang
+    lumilipas na read miss (o isang legal na pyramid add) ay hindi puwedeng
+    mag-escalate patungo sa containment na nagfa-flatten ng runner."""
+    assert "replace_stuck" not in pb.LEGAL_TRANSITIONS["successor_certified"]
+    assert "post_deferred" in pb.LEGAL_TRANSITIONS["successor_certified"]
+    assert pb.LEGAL_TRANSITIONS["post_deferred"] >= frozenset({
+        "partial_posting", "restore_intent_frozen",
+    })
+
+
+def test_stuck_replace_has_an_operator_abandon_route():
+    assert "abandoned" in pb.LEGAL_TRANSITIONS["replace_stuck"]
+
+
+def test_advance_phase_accepts_the_happy_path_and_raises_on_anything_else():
+    assert pb.advance_phase("intent_frozen", "replace_submitted") == "replace_submitted"
+    assert pb.advance_phase("replace_submitted", "successor_certified") == "successor_certified"
+    assert pb.advance_phase("successor_certified", "partial_posting") == "partial_posting"
+    assert pb.advance_phase("partial_posting", "partial_posted") == "partial_posted"
+    assert pb.advance_phase("partial_posted", "partial_filled") == "partial_filled"
+    with pytest.raises(pb.PhaseError):
+        pb.advance_phase("partial_filled", "partial_posting")
+    with pytest.raises(pb.PhaseError):
+        pb.advance_phase("intent_frozen", "partial_posted")
+    with pytest.raises(pb.PhaseError):
+        pb.advance_phase("intent_frozen", "not_a_phase")
+    with pytest.raises(pb.PhaseError):
+        pb.advance_phase("", "intent_frozen")
+
+
+def test_the_r4_restore_is_reachable_from_both_naked_terminals_of_v1():
+    """Ang dalawang phase na ipinagbawal ng unang bersyon ay dumadaloy na."""
+    assert pb.advance_phase("partial_stale_adopted", "restore_intent_frozen")
+    assert pb.advance_phase("restore_rejected", "restore_intent_frozen")
+    assert pb.advance_phase("restore_rejected", "flatten_queued")
+    assert pb.advance_phase("flatten_queued", "flattened")
+
+
+def test_is_in_flight_is_simply_not_terminal_and_is_not_the_block():
+    for phase in sorted(pb.PHASES):
+        assert pb.is_in_flight(phase) is (phase not in pb.TERMINAL_PHASES)
+    # at hindi ito ang predicate ng chokepoint:
+    assert pb.is_in_flight("replace_stuck") is True
+    assert pb.blocks_whole_exit("replace_stuck", age_seconds=1.0) is False
+
+
+# ==========================================================================
+# 2. blocks_whole_exit — may orasan, at may override
+# ==========================================================================
+
+def test_the_three_blocking_phases_block_inside_the_ceiling():
+    for phase in sorted(pb.WHOLE_EXIT_BLOCKING_PHASES):
+        assert pb.blocks_whole_exit(phase, age_seconds=0.0) is True
+        assert pb.blocks_whole_exit(phase, age_seconds=29.0) is True
+
+
+def test_the_block_expires_at_the_ceiling():
+    """L2/S7: ang harang ay paghingi ng isang pulse, hindi isang lock."""
+    assert pb.blocks_whole_exit("replace_submitted", age_seconds=31.0) is False
+    assert pb.blocks_whole_exit(
+        "replace_submitted", age_seconds=5.0, ceiling_seconds=1.0
+    ) is False
+
+
+def test_operator_and_breaker_authority_are_never_deferred():
+    for phase in sorted(pb.WHOLE_EXIT_BLOCKING_PHASES):
+        assert pb.blocks_whole_exit(
+            phase, age_seconds=0.0, override_authority=True
+        ) is False
+
+
+def test_an_unknown_or_insane_age_never_wedges_an_exit():
+    assert pb.blocks_whole_exit("replace_submitted", age_seconds=None) is False
+    assert pb.blocks_whole_exit("replace_submitted", age_seconds=float("nan")) is False
+    assert pb.blocks_whole_exit("replace_submitted", age_seconds=-1.0) is False
+    assert pb.blocks_whole_exit("replace_submitted", age_seconds="x") is False
+
+
+def test_the_resolution_phases_never_block_the_exit_that_resolves_them():
+    """L2. Ang containment close at ang `_queue_full_close` ng R4 ay parehong
+    dumadaan sa `_release_deadman_at_literal_submit`. Kung haharangin sila ng
+    phase ay walang makakapag-usad ng phase."""
     for phase in (
-        "successor_certified", "partial_posting", "partial_posted",
-        "partial_indeterminate", "partial_filled",
+        "replace_stuck",
+        "containment_queued",
+        "restore_intent_frozen",
+        "restore_replace_submitted",
+        "restore_indeterminate",
+        "restore_rejected",
+        "partial_stale_adopted",
+        "flatten_queued",
     ):
-        assert not pb.blocks_whole_exit(phase), phase
+        assert pb.blocks_whole_exit(phase, age_seconds=0.0) is False
 
 
-def test_patch_in_flight_blocks_the_whole_exit():
-    """R2: habang nasa ere ang PATCH ay hindi puwedeng mag-freeze ng close
-    handoff laban sa isang `replaced` na predecessor."""
-    for phase in ("intent_frozen", "replace_submitted", "replace_indeterminate"):
-        assert pb.blocks_whole_exit(phase), phase
+def test_marker_ceiling():
+    assert pb.marker_ceiling_exceeded(None) is False
+    assert pb.marker_ceiling_exceeded(10.0) is False
+    assert pb.marker_ceiling_exceeded(301.0) is True
+    assert pb.marker_ceiling_exceeded(2.0, ceiling_seconds=1.0) is True
 
 
-def test_stuck_replace_escapes_to_containment_not_to_nothing():
-    """R5: may labasan ang stuck na replace, at hindi ito operator event lamang."""
-    assert pb.advance_phase("replace_stuck", "containment_queued")
-    assert pb.advance_phase("replace_stuck", "replace_reverted")
-    assert pb.advance_phase("containment_queued", "containment_resolved")
+# ==========================================================================
+# 3. Ang sibling-reconcile seam (S2)
+# ==========================================================================
+
+def test_the_phases_with_a_live_sibling_demand_a_reconcile_before_the_clamp():
+    """S2. Sa `partial_posting` / `partial_indeterminate` ang cid ng sibling ay
+    alam LAMANG ng claim. Ang `_cancel_scale_limit_and_clamp` ay
+    `if not oid: return requested_qty` (LR:18968-18970) — tahimik na
+    pass-through. Kung hindi muna itatayo ang `le` mula sa claim, ang whole
+    exit ay magpapadala ng Q habang may f na nakaupo: short flip."""
+    assert pb.requires_sibling_reconcile("partial_posting") is True
+    assert pb.requires_sibling_reconcile("partial_posted") is True
+    assert pb.requires_sibling_reconcile("partial_indeterminate") is True
+    assert pb.requires_sibling_reconcile("intent_frozen") is False
+    assert pb.requires_sibling_reconcile("partial_filled") is False
 
 
-def test_rejected_partial_must_restore_before_it_can_end():
-    """R4: ang `partial_rejected_final` ay may IISANG labasan — ang restore edge."""
-    assert pb.LEGAL_TRANSITIONS["partial_rejected_final"] == frozenset(
-        {"restore_intent_frozen"}
+def test_no_sibling_live_phase_is_blocked_so_the_reconcile_is_mandatory():
+    """Kinuha natin ang ALTERNATIBO ng amendment 5: hindi hinaharang ang exit
+    sa mga phase na ito, kaya ang reconcile sa ulo ng chokepoint ang NAG-IISANG
+    bagay na pumipigil sa oversell. Ang test na ito ang nag-uugnay sa dalawa:
+    kapag may nagdagdag ng harang o nag-alis ng reconcile ay babagsak ito."""
+    for phase in sorted(pb.SIBLING_LIVE_PHASES):
+        assert pb.blocks_whole_exit(phase, age_seconds=0.0) is False
+        assert pb.requires_sibling_reconcile(phase) is True
+
+
+# ==========================================================================
+# 4. Ang hati
+# ==========================================================================
+
+def test_the_canf_split():
+    plan = pb.plan_replacement_edge(
+        total_qty=355.0, partial_qty=106.0, predecessor_filled_size=0.0
     )
-    assert "partial_rejected_final" in pb.NAKED_RISK_PHASES
+    assert plan.ok is True
+    assert plan.successor_qty == 249.0
 
 
-def test_illegal_transitions_raise():
-    with pytest.raises(pb.PhaseError):
-        pb.advance_phase("intent_frozen", "partial_posted")   # laktaw sa PATCH
-    with pytest.raises(pb.PhaseError):
-        pb.advance_phase("partial_filled", "partial_posting")  # terminal na
-    with pytest.raises(pb.PhaseError):
-        pb.advance_phase("successor_certified", "intent_frozen")
+def test_a_partially_filled_predecessor_is_refused():
+    """Amendment 10. Ang `partially_filled` ay nasa
+    `_ACTIVE_ALPACA_PROTECTIVE_LIFECYCLES`, kaya "buhay" ang tingin dito ng
+    maintenance; ang PATCH doon ay muling nag-aawtorisa ng naibentang share."""
+    plan = pb.plan_replacement_edge(
+        total_qty=355.0, partial_qty=106.0, predecessor_filled_size=40.0
+    )
+    assert plan.ok is False
+    assert plan.reason == "predecessor_partially_filled"
 
 
-def test_unknown_phase_names_raise_rather_than_pass_silently():
-    for bad in ("", "  ", "posted", None):
-        with pytest.raises(pb.PhaseError):
-            pb.advance_phase(bad, "replace_submitted")
-        with pytest.raises(pb.PhaseError):
-            pb.is_terminal(bad)
+@pytest.mark.parametrize("total,partial,reason", [
+    (0.0, 10.0, "non_positive_total"),
+    (100.0, 0.0, "non_positive_partial"),
+    (100.0, -5.0, "non_positive_partial"),
+    (100.0, 100.0, "partial_leaves_no_runner"),
+    (100.0, 150.0, "partial_leaves_no_runner"),
+    (float("nan"), 10.0, "non_finite_quantity"),
+    (100.5, 10.0, "fractional_total_quantity"),
+    (100.0, 10.5, "fractional_partial_quantity"),
+])
+def test_the_split_refuses_bad_geometry(total, partial, reason):
+    plan = pb.plan_replacement_edge(
+        total_qty=total, partial_qty=partial, predecessor_filled_size=0.0
+    )
+    assert plan.ok is False
+    assert plan.reason == reason
 
 
-# --------------------------------------------------------------------------
-# 2. Hati ng qty
-# --------------------------------------------------------------------------
-
-def test_canf_shaped_split():
-    """Ang tunay na hugis ngayong araw: 355 share, 30% -> 106 / 249."""
-    plan = pb.plan_replacement_edge(total_qty=355, partial_qty=106)
-    assert plan.ok
-    assert plan.successor_qty == 249
-    assert plan.partial_qty + plan.successor_qty == plan.total_qty
+def test_fractional_legs_are_allowed_when_whole_shares_is_off():
+    plan = pb.plan_replacement_edge(
+        total_qty=1.5, partial_qty=0.5, predecessor_filled_size=0.0,
+        whole_shares=False,
+    )
+    assert plan.ok is True
+    assert plan.successor_qty == 1.0
 
 
-@pytest.mark.parametrize(
-    "total,partial,reason",
-    [
-        (355, 355, "partial_leaves_no_runner"),
-        (355, 400, "partial_leaves_no_runner"),
-        (355, 0, "non_positive_partial"),
-        (355, -5, "non_positive_partial"),
-        (0, 10, "non_positive_total"),
-        (float("nan"), 10, "non_finite_quantity"),
-        (355, float("inf"), "non_finite_quantity"),
-        (355, 106.5, "fractional_partial_quantity"),
-        (2, 1.0, None),          # pinakamaliit na legal na hati
-    ],
-)
-def test_split_rejections(total, partial, reason):
-    plan = pb.plan_replacement_edge(total_qty=total, partial_qty=partial)
-    if reason is None:
-        assert plan.ok
-    else:
-        assert not plan.ok
-        assert plan.reason == reason
-        assert plan.successor_qty == 0.0
+# ==========================================================================
+# 5. Ang envelope ng successor (S1)
+# ==========================================================================
+
+_PREDECESSOR_REQUEST = {
+    "product_id": "CANF",
+    "side": "sell",
+    "order_type": "stop",
+    "base_size": 355.0,
+    "stop_price": 3.91,
+    "time_in_force": "gtc",
+    "position_intent": "sell_to_close",
+    "extended_hours": False,
+    "client_order_id": "chili-deadman-canf-gen7",
+}
 
 
-def test_split_never_returns_a_successor_larger_than_the_position():
-    for q in (1, 2, 3, 10, 100, 355, 1000):
-        for f in range(1, int(q)):
-            plan = pb.plan_replacement_edge(total_qty=q, partial_qty=f)
-            if plan.ok:
-                assert 0 < plan.successor_qty < q
-                assert plan.successor_qty + plan.partial_qty == q
+def test_the_marker_envelope_keeps_every_field_but_cid_and_size():
+    env = pb.marker_successor_envelope(
+        predecessor_order_request=_PREDECESSOR_REQUEST,
+        successor_client_order_id="chili-deadman-canf-gen8",
+        successor_qty=249.0,
+    )
+    assert env is not None
+    assert env["base_size"] == 249.0
+    assert env["client_order_id"] == "chili-deadman-canf-gen8"
+    for key in (
+        "product_id", "side", "order_type", "stop_price",
+        "time_in_force", "position_intent", "extended_hours",
+    ):
+        assert env[key] == _PREDECESSOR_REQUEST[key]
+    # hindi nababago ang input
+    assert _PREDECESSOR_REQUEST["base_size"] == 355.0
 
 
-# --------------------------------------------------------------------------
-# 3. Invariant checker
-# --------------------------------------------------------------------------
-
-def test_full_stop_no_partial_is_covered():
-    v = pb.assess_protection(broker_qty=355, stop_qty=355, open_partial_qty=0)
-    assert v.status == "covered" and v.ok and v.naked_qty == 0.0
-
-
-def test_the_intended_steady_state_is_covered():
-    """Matapos ang PATCH at ang POST: stop 249 + open sell 106 == 355."""
-    v = pb.assess_protection(broker_qty=355, stop_qty=249, open_partial_qty=106)
-    assert v.status == "covered" and v.ok
-
-
-def test_after_the_partial_fills_the_runner_is_still_covered():
-    v = pb.assess_protection(broker_qty=249, stop_qty=249, open_partial_qty=0)
-    assert v.status == "covered" and v.ok
+@pytest.mark.parametrize("kwargs", [
+    {"successor_client_order_id": "", "successor_qty": 249.0},
+    {"successor_client_order_id": "x", "successor_qty": 0.0},
+    {"successor_client_order_id": "x", "successor_qty": -1.0},
+    {"successor_client_order_id": "x", "successor_qty": 355.0},   # walang liit
+    {"successor_client_order_id": "x", "successor_qty": 400.0},   # lumalaki
+    {"successor_client_order_id": "x", "successor_qty": float("inf")},
+])
+def test_the_marker_envelope_refuses_non_shrinking_or_invalid_edges(kwargs):
+    assert pb.marker_successor_envelope(
+        predecessor_order_request=_PREDECESSOR_REQUEST, **kwargs
+    ) is None
 
 
-def test_stale_cancel_with_k_below_f_is_a_naked_remainder():
-    """R4: k=40 sa 106 ang napunan, kinansela ang natira -> 66 share na hubad."""
-    v = pb.assess_protection(broker_qty=315, stop_qty=249, open_partial_qty=0)
-    assert v.status == "naked_remainder"
-    assert v.naked_qty == pytest.approx(66.0)
-    assert not v.ok and v.requires_restore_or_flatten
+def test_the_marker_envelope_refuses_a_request_without_a_size():
+    assert pb.marker_successor_envelope(
+        predecessor_order_request={"product_id": "CANF"},
+        successor_client_order_id="x",
+        successor_qty=249.0,
+    ) is None
+    assert pb.marker_successor_envelope(
+        predecessor_order_request=None,  # type: ignore[arg-type]
+        successor_client_order_id="x",
+        successor_qty=249.0,
+    ) is None
 
 
-def test_post_rejected_after_certification_is_a_naked_remainder():
-    """R4: nag-PATCH tayo pababa sa 249 pero hindi na-post ang 106."""
-    v = pb.assess_protection(broker_qty=355, stop_qty=249, open_partial_qty=0)
-    assert v.status == "naked_remainder"
-    assert v.naked_qty == pytest.approx(106.0)
+# ==========================================================================
+# 6. assess_protection — DALAWANG tanong, hindi isa
+# ==========================================================================
+
+def test_the_intended_steady_state_is_covered_for_oversell_but_naked_downside():
+    """ITO ANG PINAKAMAHALAGANG TEST SA FILE.
+
+    Ang canonical na window ng PATH B — broker 355, stop 249, partial 106 —
+    ay iginiit ng UNANG bersyon bilang `covered`, `ok=True`. MALI iyon: ang
+    106 ay may sell LIMIT sa 4.63, sa TAAS ng merkado. Sa isang gap-down ay
+    pumuputok ang 249 na stop habang ang 106 ay bumabagsak laban sa isang
+    limit na hindi na maaabot. Ang bilang na kailangang tanggapin ng operator
+    nang nakasulat ay ito: 106 na share ang walang pababang stop sa BUONG
+    buhay ng partial — hindi lamang sa mga failure branch.
+    """
+    v = pb.assess_protection(broker_qty=355.0, stop_qty=249.0, open_partial_qty=106.0)
+    assert v.oversell_ok is True
+    assert v.status == "naked_downside"
+    assert v.naked_downside_qty == pytest.approx(106.0)
+    assert v.unhedged_qty_with_resting_sell == pytest.approx(106.0)
+    assert v.ok is False
+    assert v.requires_restore_or_flatten is True
 
 
-def test_no_stop_at_all_is_naked_not_covered():
-    v = pb.assess_protection(broker_qty=355, stop_qty=0, open_partial_qty=0)
-    assert v.status == "naked_remainder" and v.naked_qty == pytest.approx(355.0)
+def test_a_whole_position_stop_is_the_only_covered_state():
+    v = pb.assess_protection(broker_qty=355.0, stop_qty=355.0, open_partial_qty=0.0)
+    assert v.status == "covered"
+    assert v.ok is True
+    assert v.naked_downside_qty == 0.0
+    assert v.requires_restore_or_flatten is False
 
 
-def test_double_sell_authority_is_oversell_risk():
-    """Kung nanatili ang lumang 355 na stop habang nakaupo ang 106 na partial
-    ay may 461 share ng sell authority sa 355 — pagputok ng pareho ay short."""
-    v = pb.assess_protection(broker_qty=355, stop_qty=355, open_partial_qty=106)
-    assert v.status == "oversell_risk" and not v.ok
+def test_the_post_partial_steady_state_is_covered_again():
+    """Matapos mapunan ang f, ang R stop ay sumasakop sa BUONG natitira."""
+    v = pb.assess_protection(broker_qty=249.0, stop_qty=249.0, open_partial_qty=0.0)
+    assert v.status == "covered"
+    assert v.ok is True
 
 
-def test_flat_position_with_a_resting_sell_is_oversell_not_flat():
-    v = pb.assess_protection(broker_qty=0, stop_qty=0, open_partial_qty=106)
-    assert v.status == "oversell_risk" and not v.ok
+def test_the_r4_failure_branch_is_naked_with_no_resting_sell_at_all():
+    """Stale cancel na may k < f: 355 - 40 = 315 na hawak, 249 na stop,
+    walang nakaupong partial. 66 na share na walang ANUMANG sell."""
+    v = pb.assess_protection(broker_qty=315.0, stop_qty=249.0, open_partial_qty=0.0)
+    assert v.status == "naked_downside"
+    assert v.naked_downside_qty == pytest.approx(66.0)
+    assert v.unhedged_qty_with_resting_sell == 0.0
+    assert v.requires_restore_or_flatten is True
 
 
-def test_flat_position_is_flat():
-    v = pb.assess_protection(broker_qty=0, stop_qty=0, open_partial_qty=0)
-    assert v.status == "flat" and v.ok
+def test_oversell_is_caught_even_when_the_downside_looks_fine():
+    """Ang lumang stop (355) na hindi napalitan kasama ng bagong partial (106)
+    laban sa 355 na share = 461 na sell authority."""
+    v = pb.assess_protection(broker_qty=355.0, stop_qty=355.0, open_partial_qty=106.0)
+    assert v.oversell_ok is False
+    assert v.status == "oversell_risk"
+    assert v.ok is False
+    # hindi ito "restore" na problema — flatten ang tanging tamang sagot
+    assert v.requires_restore_or_flatten is False
 
 
-@pytest.mark.parametrize(
-    "b,s,p",
-    [(float("nan"), 1, 0), (1, float("inf"), 0), (-1, 0, 0), (1, -1, 0), (1, 0, -1)],
-)
-def test_garbage_inputs_fail_closed(b, s, p):
-    v = pb.assess_protection(broker_qty=b, stop_qty=s, open_partial_qty=p)
-    assert not v.ok
+def test_flat_is_flat_only_when_nothing_rests():
+    assert pb.assess_protection(
+        broker_qty=0.0, stop_qty=0.0, open_partial_qty=0.0
+    ).status == "flat"
+    assert pb.assess_protection(
+        broker_qty=0.0, stop_qty=0.0, open_partial_qty=106.0
+    ).status == "oversell_risk"
 
 
-# --------------------------------------------------------------------------
-# 4. Konserbasyon ng lineage
-# --------------------------------------------------------------------------
+@pytest.mark.parametrize("kwargs", [
+    {"broker_qty": float("nan"), "stop_qty": 1.0, "open_partial_qty": 0.0},
+    {"broker_qty": 1.0, "stop_qty": float("inf"), "open_partial_qty": 0.0},
+    {"broker_qty": -1.0, "stop_qty": 0.0, "open_partial_qty": 0.0},
+    {"broker_qty": 1.0, "stop_qty": -1.0, "open_partial_qty": 0.0},
+])
+def test_nonsense_inputs_are_invalid_never_ok(kwargs):
+    v = pb.assess_protection(**kwargs)
+    assert v.status == "invalid"
+    assert v.ok is False
 
-def test_conservation_before_the_partial_posts():
+
+# ==========================================================================
+# 7. conservation_holds
+# ==========================================================================
+
+def test_conservation_across_the_whole_partial_lifecycle():
+    # bago ang POST: Q == R + f
     assert pb.conservation_holds(
-        broker_qty=355, successor_qty=249, partial_qty=106, partial_cum_filled=0
-    )
-
-
-def test_conservation_survives_a_partially_filled_sibling():
-    """H2: ang hubad na `broker_qty == successor_requested` ay mabibigo rito
-    magpakailanman at haharangan ang dispatch."""
+        broker_qty=355.0, successor_qty=249.0,
+        partial_qty=106.0, partial_cum_filled=0.0,
+    ) is True
+    # pagkatapos ng k = 40
     assert pb.conservation_holds(
-        broker_qty=315, successor_qty=249, partial_qty=106, partial_cum_filled=40
-    )
-    assert not (315 == 249)  # ang lumang panuntunan, para malinaw
-
-
-def test_conservation_after_the_partial_fills_whole():
+        broker_qty=315.0, successor_qty=249.0,
+        partial_qty=106.0, partial_cum_filled=40.0,
+    ) is True
+    # buong puno
     assert pb.conservation_holds(
-        broker_qty=249, successor_qty=249, partial_qty=106, partial_cum_filled=106
-    )
-
-
-def test_conservation_for_a_restore_edge_has_no_partial_leg():
+        broker_qty=249.0, successor_qty=249.0,
+        partial_qty=106.0, partial_cum_filled=106.0,
+    ) is True
+    # restore edge (walang partial)
     assert pb.conservation_holds(
-        broker_qty=315, successor_qty=315, partial_qty=0, partial_cum_filled=0
-    )
+        broker_qty=315.0, successor_qty=315.0,
+        partial_qty=0.0, partial_cum_filled=0.0,
+    ) is True
 
 
-@pytest.mark.parametrize(
-    "b,r,f,k",
-    [
-        (355, 249, 106, 200),      # k > f
-        (355, 200, 106, 0),        # nawawalang share
-        (355, 300, 106, 0),        # sobrang stop
-        (float("nan"), 249, 106, 0),
-        (355, -249, 106, 0),
-    ],
-)
-def test_conservation_rejects_impossible_states(b, r, f, k):
-    assert not pb.conservation_holds(
-        broker_qty=b, successor_qty=r, partial_qty=f, partial_cum_filled=k
-    )
+def test_conservation_catches_the_naked_gap():
+    """k = 40 na napunan pero R pa rin ang stop at hindi pa naibabalik:
+    315 hawak, 249 stop, 66 na bukas na partial ang natitira — kapag
+    kinansela ang partial, ang konserbasyon ay dapat sumabog."""
+    assert pb.conservation_holds(
+        broker_qty=315.0, successor_qty=249.0,
+        partial_qty=106.0, partial_cum_filled=106.0,
+    ) is False
+
+
+@pytest.mark.parametrize("kwargs", [
+    {"broker_qty": float("nan"), "successor_qty": 1.0, "partial_qty": 1.0,
+     "partial_cum_filled": 0.0},
+    {"broker_qty": 2.0, "successor_qty": -1.0, "partial_qty": 1.0,
+     "partial_cum_filled": 0.0},
+    {"broker_qty": 2.0, "successor_qty": 1.0, "partial_qty": 1.0,
+     "partial_cum_filled": 5.0},
+])
+def test_conservation_refuses_nonsense(kwargs):
+    assert pb.conservation_holds(**kwargs) is False
