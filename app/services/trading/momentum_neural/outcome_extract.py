@@ -158,7 +158,72 @@ def _entry_occurred_durable(exec_dict: Any) -> bool:
         return True
     if exec_dict.get("last_exit_entry_price") is not None:
         return True
+    # A CLOSED CYCLE cannot exist without a real entry fill — the runner appends one
+    # only after an exit fills. It also survives the recycle entry-state reset that
+    # clears entry_order_id / position, which is exactly when the other two proofs
+    # can be missing. Ten sessions in 2026-08-12..2026-09-02 completed a full round
+    # trip and were recycled back to watching_live (19315 SSM's +3.20R → −1.60R
+    # among them); this is what keeps that readable after the reset.
+    if closed_cycles(exec_dict):
+        return True
     return False
+
+
+def closed_cycles(exec_dict: Any) -> list[dict[str, Any]]:
+    """The session's FSM-closed round trips, oldest first. Never raises.
+
+    ``momentum_automation_outcomes`` has ``UNIQUE(session_id)``, so one session can
+    hold exactly one outcome row — while this runner trades many cycles per session.
+    CANF 19471 ran two round trips under one id on 2026-09-02 and the second
+    (−$108.85, broker orders f3ed508d / ddba3ed2) had nowhere in the schema to go.
+    The runner appends each closed cycle here at recycle time; this reader is what
+    makes that leg-level history usable to the extractor and to the integrity check,
+    which compares the cycle count against the broker's own episode count.
+    """
+    if not isinstance(exec_dict, dict):
+        return []
+    raw = exec_dict.get("closed_cycles")
+    if not isinstance(raw, list):
+        return []
+    return [c for c in raw if isinstance(c, dict)]
+
+
+def closed_cycle_summary(exec_dict: Any) -> dict[str, Any]:
+    """Leg-level history for the outcome row's extracted summary.
+
+    ``realized_pnl_usd_cumulative`` is CUMULATIVE across the session's closed cycles
+    — that is how the runner itself reads it for the symbol-day brake — so the
+    per-cycle P&L is the successive difference and the total is the LAST value, never
+    the sum. Summing would double-count every cycle after the first.
+    """
+    cycles = closed_cycles(exec_dict)
+    if not cycles:
+        return {"count": 0}
+    per_cycle: list[dict[str, Any]] = []
+    prev = 0.0
+    for c in cycles:
+        cum = c.get("realized_pnl_usd_cumulative")
+        try:
+            cum_f = float(cum) if cum is not None else None
+        except (TypeError, ValueError):
+            cum_f = None
+        per_cycle.append({
+            "cycle_index": c.get("cycle_index"),
+            "closed_at_utc": c.get("closed_at_utc"),
+            "realized_pnl_usd_cumulative": cum_f,
+            "realized_pnl_usd_this_cycle": (
+                round(cum_f - prev, 6) if cum_f is not None else None
+            ),
+            "last_exit_reason": c.get("last_exit_reason"),
+            "entry_order_id": c.get("entry_order_id"),
+        })
+        if cum_f is not None:
+            prev = cum_f
+    return {
+        "count": len(cycles),
+        "realized_pnl_usd_cumulative_final": prev,
+        "cycles": per_cycle,
+    }
 
 
 # Markers proving an entry order REACHED THE BROKER. Deliberately weaker than the
@@ -469,6 +534,14 @@ def extract_momentum_session_outcome(
         "entry_submission_evidence": (
             [] if entry_occurred else entry_submission_evidence(le if mode == "live" else pe, events)
         ),
+        # LEG-LEVEL HISTORY THE ROW ITSELF CANNOT HOLD. UNIQUE(session_id) means one
+        # session gets one row, but the runner recycles and trades many cycles under
+        # one id. Carrying the per-cycle ledger here is what makes a multi-cycle
+        # session auditable at all — and it is what ledger_integrity compares against
+        # the broker's own episode count, so CANF 19471's second round trip (two
+        # broker episodes, one outcome row) is a detectable divergence rather than a
+        # silent −$108.85.
+        "closed_cycles_v1": closed_cycle_summary(le if mode == "live" else pe),
         "entry_decision_packet_id": entry_decision_packet_id,
         "quote_source_at_entry": quote_source_at_entry,
         "partial_exit_occurred": partial_exit,
@@ -769,6 +842,11 @@ def outcome_row_from_extracted(
         )
     }
     summary["evolution_credit"] = credit
+    # Only carried when there IS multi-cycle history — an empty key on 3,687 clean
+    # cancels would be noise in a hot JSONB column for no reader.
+    _cycles = extracted.get("closed_cycles_v1")
+    if isinstance(_cycles, dict) and int(_cycles.get("count") or 0) > 0:
+        summary["closed_cycles_v1"] = _cycles
 
     return MomentumAutomationOutcome(
         session_id=int(extracted["session_id"]),

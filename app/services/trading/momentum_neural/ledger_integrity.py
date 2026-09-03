@@ -87,6 +87,7 @@ STATUS_FILLED_NEVER_BOOKED = "filled_never_booked"
 STATUS_PNL_DISAGREES = "booked_pnl_disagrees_with_broker"
 STATUS_BOOKED_NO_BROKER_FILL = "booked_without_broker_fill"
 STATUS_UNRECONCILED_ENTRY = "booked_entry_evidence_unreconciled"
+STATUS_LEG_COUNT_DISAGREES = "booked_leg_count_disagrees_with_broker"
 
 # Classes that mean the books and reality have parted company. A non-empty
 # intersection with these is what makes the check fail.
@@ -96,6 +97,7 @@ VIOLATION_STATUSES = frozenset(
         STATUS_PNL_DISAGREES,
         STATUS_BOOKED_NO_BROKER_FILL,
         STATUS_UNRECONCILED_ENTRY,
+        STATUS_LEG_COUNT_DISAGREES,
     }
 )
 
@@ -380,6 +382,26 @@ def check_live_ledger_integrity(
             and _f(outcome.broker_realized_pnl_usd) is not None
         )
 
+        # LEG-LEVEL COVERAGE. ``UNIQUE(session_id)`` means one row per session while
+        # the runner recycles and trades many cycles under one id, so a session can
+        # be booked, agree on the number the row carries, and STILL be missing a whole
+        # round trip. CANF 19471 is that shape: two broker episodes, one outcome row,
+        # −$108.85 with nowhere to go. Comparing the runner's own closed-cycle ledger
+        # against the broker's episode count is what turns that from a silent
+        # structural gap into a reportable divergence.
+        booked_cycles = None
+        if outcome is not None and isinstance(outcome.extracted_summary_json, dict):
+            cyc = outcome.extracted_summary_json.get("closed_cycles_v1")
+            if isinstance(cyc, dict):
+                booked_cycles = int(cyc.get("count") or 0)
+        broker_episodes = (broker or {}).get("episodes")
+        leg_count_split = bool(
+            broker_episodes is not None
+            and booked_cycles is not None
+            and not broker_open
+            and int(broker_episodes) > max(int(booked_cycles), 1)
+        )
+
         traded_per_db = bool(mfe.get(sid) or legs.get(sid) or booked_pnl is not None)
         traded = bool(broker) or traded_per_db
 
@@ -398,6 +420,8 @@ def check_live_ledger_integrity(
             status = STATUS_PNL_DISAGREES
         elif integrity_stamp.get("status") not in (None, "clean") and not broker_settled:
             status = STATUS_UNRECONCILED_ENTRY
+        elif leg_count_split:
+            status = STATUS_LEG_COUNT_DISAGREES
         else:
             status = STATUS_CLEAN
 
@@ -428,9 +452,35 @@ def check_live_ledger_integrity(
             "mfe_r": (mfe.get(sid) or {}).get("mfe_r"),
             "realized_r": (mfe.get(sid) or {}).get("realized_r"),
             "fill_legs": legs.get(sid, 0),
+            "booked_closed_cycles": booked_cycles,
+            "leg_count_disagrees_with_broker": leg_count_split,
             "ledger_integrity_status": integrity_stamp.get("status"),
             "entry_submission_evidence": integrity_stamp.get("entry_submission_evidence"),
         })
+
+    # ⚠️ THE CHECK'S OWN BLIND SPOT, CLOSED. Rows are emitted by iterating SESSIONS
+    # (filtered ``started_at >= since``), but ``broker_by_session`` is built from every
+    # broker order in the window. An episode attributed to a session that STARTED just
+    # outside the lookback and FILLED inside it therefore matched no row and was not
+    # in ``unattributed`` either (that list only holds ``session_id is None``) — it
+    # simply vanished from the one component whose stated purpose is seeing what the
+    # DB cannot. With the shipped 3-day default and a lane that recycles sessions for
+    # hours, that boundary is reachable in normal operation, not just at the edges.
+    scanned_ids = set(session_ids)
+    outside_window: list[dict[str, Any]] = []
+    for bsid, slot in broker_by_session.items():
+        if int(bsid) in scanned_ids:
+            continue
+        outside_window.append({
+            "session_id": int(bsid),
+            "symbol": slot.get("symbol"),
+            "realized_pnl_usd": _f(slot.get("realized_pnl_usd")),
+            "episodes": slot.get("episodes"),
+            "position_open": bool(slot.get("open")),
+            "reason": "session_started_before_lookback_window",
+            "legs": slot.get("legs"),
+        })
+    outside_window.sort(key=lambda e: e["session_id"])
 
     counts: dict[str, int] = {}
     for row in rows:
@@ -441,7 +491,7 @@ def check_live_ledger_integrity(
     broker_total = round(sum(r["broker_realized_pnl_usd"] or 0.0 for r in rows), 4)
     booked_total = round(sum(r["booked_pnl_usd"] or 0.0 for r in rows), 4)
 
-    ok = not violations and not unattributed
+    ok = not violations and not unattributed and not outside_window
     if include_broker and not coverage.startswith("broker"):
         # An unreadable broker is a FAILURE, not a pass with a caveat. The whole
         # premise of this check is that the DB cannot see its own blind spot.
@@ -474,16 +524,30 @@ def check_live_ledger_integrity(
         ],
         "violations": violations,
         "unattributed_broker_episodes": unattributed,
+        # Attributed to a real session that the session scan never looked at, because
+        # the session started before the lookback. Not "unattributed" — we know whose
+        # it is — but equally invisible until now.
+        "broker_episodes_outside_session_window": outside_window,
+        "leg_count_split_sessions": [
+            r["session_id"] for r in rows if r["leg_count_disagrees_with_broker"]
+        ],
         "rows": rows,
     }
 
     if not ok:
         _log.error(
             "[ledger_integrity] FAILED family=%s window=%sd coverage=%s violations=%s "
-            "unattributed=%s broker=%.2f booked=%.2f unbooked=%.2f counts=%s",
+            "unattributed=%s outside_window=%s broker=%.2f booked=%.2f unbooked=%.2f counts=%s",
             execution_family, window_days, coverage, len(violations), len(unattributed),
-            broker_total, booked_total, broker_total - booked_total, counts,
+            len(outside_window), broker_total, booked_total, broker_total - booked_total, counts,
         )
+        for episode in outside_window[:25]:
+            _log.error(
+                "[ledger_integrity]   broker episode for session=%s %s outside the "
+                "%s-day session window: pnl=%s episodes=%s",
+                episode["session_id"], episode["symbol"], window_days,
+                episode["realized_pnl_usd"], episode["episodes"],
+            )
         for row in violations[:25]:
             _log.error(
                 "[ledger_integrity]   session=%s %s state=%s status=%s broker=%s booked=%s delta=%s",

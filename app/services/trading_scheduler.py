@@ -1402,10 +1402,26 @@ def _run_momentum_ledger_integrity_job():
     angkla sa BROKER, kaya nakikita nito ang session na walang row, walang leg, at
     walang event.
 
-    BASA-LAMANG: isang account-wide GET sa order history kada pass. Walang
-    isinusulat sa DB, walang order na inilalagay o kinakansela. Ang tanging epekto
-    ay isang `[ledger_integrity]` ERROR log kapag hindi magkatugma ang tatlong
-    pinagmulan — at ang log na iyon ang punto.
+    DALAWANG YUGTO, MAGKAHIWALAY ANG SESSION AT MALINAW ANG HANGGANAN:
+
+    YUGTO 1 — BASA-LAMANG na check. Isang account-wide GET sa order history kada
+    pass. Walang isinusulat sa DB, walang order na inilalagay o kinakansela. Ang
+    `[ledger_integrity]` ERROR log kapag hindi magkatugma ang tatlong pinagmulan ang
+    punto ng yugtong ito.
+
+    YUGTO 2 — REMEDIATION na SUMUSULAT, at may sarili itong session at flag
+    (`chili_momentum_ledger_autobackfill_enabled`). Naka-TARGET lang ito sa mga
+    session id na kalalabas lang ng check bilang `filled_never_booked` — hindi
+    bulag na sweep. Ito ang UNANG tumatawag sa
+    `scan_terminal_sessions_missing_feedback`, na tatlong buwang patay na code:
+    tama ang layunin, mali ang listahan ng estado, at WALANG tumatawag.
+
+    BAKIT KAILANGAN ANG YUGTO 2 AT HINDI SAPAT ANG LOG. Kapag may fill na walang
+    outcome row, hindi lang ito nawawala sa mga pag-aaral — hindi rin ito nabibilang
+    sa daily loss cap, at (pagkatapos ng pagbabago sa loss guard) maaari nitong
+    i-pin ang buong account sa `history_unavailable`. Ang pagsusulat ng row ang
+    eksaktong nagpapatahimik niyan sa TAMANG dahilan: nagkakaroon ng row, may
+    ginagastos na broker proof read ang reconcile, at ang broker ang nagpapasya.
     """
 
     def _work() -> None:
@@ -1419,9 +1435,13 @@ def _run_momentum_ledger_integrity_job():
         lookback = float(
             getattr(_settings, "chili_momentum_ledger_integrity_lookback_days", 3.0) or 3.0
         )
+        unbooked_ids: list[int] = []
         db = SessionLocal()
         try:
-            from .trading.momentum_neural.ledger_integrity import check_live_ledger_integrity
+            from .trading.momentum_neural.ledger_integrity import (
+                STATUS_FILLED_NEVER_BOOKED,
+                check_live_ledger_integrity,
+            )
 
             # The module logs its own ERROR detail; this only records the headline
             # so a clean pass is still visible as a heartbeat in the scheduler tape.
@@ -1429,15 +1449,55 @@ def _run_momentum_ledger_integrity_job():
             if not out.get("ok"):
                 logger.error(
                     "[scheduler] ledger integrity FAILED: coverage=%s violations=%s "
-                    "unbooked_usd=%s counts=%s",
+                    "unbooked_usd=%s outside_window=%s counts=%s",
                     out.get("coverage"), len(out.get("violations") or []),
-                    out.get("unbooked_pnl_usd"), out.get("counts"),
+                    out.get("unbooked_pnl_usd"),
+                    len(out.get("broker_episodes_outside_session_window") or []),
+                    out.get("counts"),
                 )
+            unbooked_ids = [
+                int(v["session_id"])
+                for v in (out.get("violations") or [])
+                if v.get("status") == STATUS_FILLED_NEVER_BOOKED
+            ]
         finally:
             # READ-ONLY pass: nothing to commit, and a rollback guarantees no
             # accidental flush of anything the identity map picked up.
             db.rollback()
             db.close()
+
+        if not unbooked_ids:
+            return
+        if not bool(getattr(_settings, "chili_momentum_ledger_autobackfill_enabled", True)):
+            logger.error(
+                "[scheduler] ledger integrity found %s filled-but-unbooked session(s) "
+                "%s and auto-backfill is OFF — the books stay incomplete until an "
+                "operator books them",
+                len(unbooked_ids), unbooked_ids[:25],
+            )
+            return
+
+        wdb = SessionLocal()
+        try:
+            from .trading.momentum_neural.feedback_emit import (
+                scan_terminal_sessions_missing_feedback,
+            )
+
+            res = scan_terminal_sessions_missing_feedback(
+                wdb, limit=len(unbooked_ids), session_ids=unbooked_ids
+            )
+            wdb.commit()
+            logger.error(
+                "[scheduler] ledger auto-backfill: targeted=%s processed=%s emitted=%s "
+                "failed=%s session_ids=%s",
+                len(unbooked_ids), res.get("processed"), res.get("emitted"),
+                res.get("failed_session_ids"), unbooked_ids[:25],
+            )
+        except Exception:
+            wdb.rollback()
+            logger.error("[scheduler] ledger auto-backfill FAILED", exc_info=True)
+        finally:
+            wdb.close()
 
     run_scheduler_job_guarded("momentum_ledger_integrity", _work)
 

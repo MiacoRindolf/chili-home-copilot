@@ -3156,6 +3156,24 @@ class Settings(BaseSettings):
         le=120.0,
         validation_alias=AliasChoices("CHILI_MOMENTUM_LEDGER_INTEGRITY_LOOKBACK_DAYS"),
     )
+    # YUGTO 2 ng parehong job: ang pagsulat ng NAWAWALANG row para sa mga session na
+    # sinabi ng BROKER na na-fill. Naka-target lang sa mga session id na kalalabas ng
+    # check bilang `filled_never_booked` — hindi bulag na sweep, at ang bilang ng
+    # isinusulat ay nakatali sa kung ano ang natagpuan ng isang tunay na broker read.
+    #
+    # ⚠️ BAKIT ITO NAKA-ON (no-dark-flags). Ang row na wala ay hindi lang nawawala sa
+    # mga pag-aaral: hindi ito nabibilang sa daily loss cap, at pagkatapos ng
+    # pagbabago sa loss guard ay maaari nitong i-pin ang buong account sa
+    # `history_unavailable`. Ang yugtong ito ang eksaktong nagpapatahimik niyan sa
+    # TAMANG dahilan — nagkakaroon ng row, gumagastos ng broker proof read ang
+    # reconcile, at ang broker ang nagpapasya — sa halip na sa MALING dahilan, ang
+    # pag-aakalang walang nangyari. OFF => ERROR log lang; mananatiling kulang ang
+    # libro hanggang may taong maglibro.
+    chili_momentum_ledger_autobackfill_enabled: bool = Field(
+        default=True,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_LEDGER_AUTOBACKFILL_ENABLED"),
+        description="ON (no-dark-flags) => after the read-only integrity check finds sessions the BROKER filled that have no outcome row, the same job books exactly those session ids via scan_terminal_sessions_missing_feedback. Bounded by the violation list; never a blind sweep. OFF => the check only logs and the books stay incomplete until an operator acts.",
+    )
     chili_momentum_ledger_integrity_interval_seconds: int = Field(
         default=900,
         ge=60,

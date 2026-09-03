@@ -118,26 +118,43 @@ def test_session_terminal_for_feedback_accepts_live_arm_expired():
     assert session_terminal_for_feedback("paper", "live_arm_expired") is False
 
 
-def test_missing_feedback_scanner_state_list_covers_arm_expired():
-    """The designated backfill's own hardcoded tuple was blind to the same state."""
-    import inspect
-
-    from app.services.trading.momentum_neural import feedback_emit
-
-    src = inspect.getsource(feedback_emit.scan_terminal_sessions_missing_feedback)
-    assert "LIVE_LEDGER_TERMINAL_STATES" in src, (
-        "the scanner must derive its states from the canonical set, not re-type a tuple"
-    )
+# The scanner's coverage is asserted BEHAVIOURALLY in
+# tests/test_ledger_completeness_behaviour.py::
+#   test_the_designated_backfill_books_a_filled_arm_expired_session
+# It used to be checked here by reading inspect.getsource() for a constant NAME,
+# which would have passed on a comment mentioning it and failed on a harmless alias.
+# A source-text assertion cannot tell you a function works; it can only tell you what
+# it looks like, and "looks right, never runs" was half of this defect.
 
 
 def test_loss_guard_history_counts_arm_expired_sessions():
-    """The guard failed loudly on 2 sessions and SILENTLY on 291. Close the silent one."""
+    """The guard failed loudly on 2 sessions and SILENTLY on 291. Close the silent one.
+
+    This is the SELECTION half only. The durability half — that submission-level
+    evidence makes a session gap the day — is asserted behaviourally in
+    test_ledger_completeness_behaviour.py::
+      test_loss_guard_gaps_on_a_session_whose_fill_it_cannot_see
+    because selection alone left the guard byte-identical to legacy for the eight
+    sessions holding −$652.68.
+    """
     from app.services.trading.momentum_neural.risk_policy import (
         _loss_history_terminal_states,
     )
 
     assert "live_arm_expired" in _loss_history_terminal_states()
     assert "live_finished" in _loss_history_terminal_states()
+
+
+def test_loss_guard_submission_events_are_not_re_typed():
+    """One predicate for "an entry reached the broker", not two that drift apart."""
+    from app.services.trading.momentum_neural.outcome_extract import (
+        _ENTRY_SUBMISSION_EVENTS,
+    )
+    from app.services.trading.momentum_neural.risk_policy import (
+        _loss_history_submission_events,
+    )
+
+    assert _loss_history_submission_events() == frozenset(_ENTRY_SUBMISSION_EVENTS)
 
 
 # ── 2. a completed round trip that arm-expired still books ─────────────────
@@ -579,3 +596,247 @@ def test_integrity_check_is_clean_on_a_correctly_booked_session(db, monkeypatch)
     out = li.check_live_ledger_integrity(db, days=30, include_broker=True)
     flagged = [r for r in out["violations"] if r["session_id"] == int(sess.id)]
     assert not flagged, f"clean session was flagged: {out['violations']}"
+
+
+# -- 7. leg-level history: one session, many round trips --------------------
+
+
+def test_closed_cycles_are_read_back_without_double_counting():
+    """CANF 19471: two round trips, one session id, -78.13 then -108.85.
+
+    ``realized_pnl_usd_cumulative`` is CUMULATIVE -- that is how the runner reads it
+    for the symbol-day brake -- so the per-cycle figure is the successive difference
+    and the session total is the LAST value. Summing the column would report
+    -$265.11 for a session that lost -$186.98.
+    """
+    from app.services.trading.momentum_neural.outcome_extract import (
+        closed_cycle_summary,
+        closed_cycles,
+    )
+
+    le = {
+        "closed_cycles": [
+            {"cycle_index": 0, "realized_pnl_usd_cumulative": -78.130175,
+             "last_exit_reason": "stop"},
+            {"cycle_index": 1, "realized_pnl_usd_cumulative": -186.98018,
+             "last_exit_reason": "operator_flatten"},
+        ]
+    }
+    assert len(closed_cycles(le)) == 2
+    summary = closed_cycle_summary(le)
+    assert summary["count"] == 2
+    assert summary["realized_pnl_usd_cumulative_final"] == pytest.approx(-186.98018)
+    per = summary["cycles"]
+    assert per[0]["realized_pnl_usd_this_cycle"] == pytest.approx(-78.130175)
+    assert per[1]["realized_pnl_usd_this_cycle"] == pytest.approx(-108.850005), (
+        "the operator's -108.85 second leg must be recoverable from the ledger"
+    )
+    # Never raises on junk, and stays empty for the 3,687 clean cancels.
+    assert closed_cycles(None) == []
+    assert closed_cycles({"closed_cycles": "nope"}) == []
+    assert closed_cycle_summary({}) == {"count": 0}
+
+
+def test_a_closed_cycle_is_durable_entry_proof_after_the_recycle_reset():
+    """Ten sessions completed a round trip and were recycled back to watching_live.
+
+    The recycle entry-state reset clears entry_order_id and position, and a session
+    that never terminalises afterwards can lose the event window too. A closed cycle
+    cannot exist without a real entry fill, so it survives as proof when the other
+    two do not.
+    """
+    from app.services.trading.momentum_neural.outcome_extract import (
+        _entry_occurred_durable,
+    )
+
+    assert _entry_occurred_durable({}) is False
+    assert _entry_occurred_durable({"entry_order_id": "abc"}) is False, (
+        "a submission must never be mistaken for a fill"
+    )
+    assert _entry_occurred_durable({"closed_cycles": [{"cycle_index": 0}]}) is True
+
+
+def test_a_multi_cycle_session_carries_its_leg_history_onto_the_row(db):
+    """UNIQUE(session_id) cannot hold two legs. The row must at least REMEMBER them."""
+    sess = _session(
+        db,
+        state="live_arm_expired",
+        symbol="CANF",
+        le={
+            "realized_pnl_usd": -186.98018,
+            "last_exit_entry_price": 4.62,
+            "trade_cycles": 2,
+            "closed_cycles": [
+                {"cycle_index": 0, "realized_pnl_usd_cumulative": -78.130175},
+                {"cycle_index": 1, "realized_pnl_usd_cumulative": -186.98018},
+            ],
+        },
+    )
+    try_emit_momentum_session_feedback(db, sess)
+    db.flush()
+    row = _outcome(db, sess.id)
+    assert row is not None
+    cycles = (row.extracted_summary_json or {}).get("closed_cycles_v1") or {}
+    assert cycles.get("count") == 2, (
+        f"leg-level history must survive onto the row: {row.extracted_summary_json}"
+    )
+
+
+def test_integrity_check_flags_a_session_with_more_broker_episodes_than_cycles(db, monkeypatch):
+    """CANF 19471 as it stands in live chili TODAY, which is the hard case.
+
+    Its authoritative ``broker_realized_pnl_usd`` is already correct at −186.98018
+    (reconciled 2026-09-02T20:18:46 by the attribution work on main), so the P&L
+    check passes and the row looks settled. It is not: the session ran TWO round
+    trips under one id and ``UNIQUE(session_id)`` booked one, so the −$108.85 second
+    leg exists nowhere the books can express it. Only comparing the runner's own
+    closed-cycle ledger against the broker's episode count catches that.
+    """
+    sess = _session(
+        db, state="live_arm_expired", symbol="CANF",
+        le={
+            "realized_pnl_usd": -78.130175,
+            "last_exit_entry_price": 4.34,
+            "closed_cycles": [
+                {"cycle_index": 0, "realized_pnl_usd_cumulative": -78.130175},
+            ],
+        },
+    )
+    try_emit_momentum_session_feedback(db, sess)
+    db.flush()
+    row = _outcome(db, sess.id)
+    row.broker_recon_status = "reconciled"
+    # The AUTHORITATIVE column already agrees with the broker to the cent.
+    row.broker_realized_pnl_usd = -186.98018
+    db.flush()
+
+    cid = f"chili_ml_e_{sess.id}_aaaaaaaa_1111111111"
+    monkeypatch.setattr(
+        li, "_read_broker_orders",
+        lambda **_k: {
+            "readable": True, "truncated": False,
+            "orders": [
+                _Order("b1", cid, "CANF", "buy", "filled", 355.0, 4.34,
+                       "2026-09-02T11:10:17Z"),
+                _Order("s1", f"chili_ml_s_{sess.id}_aaaaaaaa_2222222222", "CANF",
+                       "sell", "filled", 355.0, 4.119915, "2026-09-02T11:11:04Z"),
+                _Order("b2", cid, "CANF", "buy", "filled", 165.0, 4.62,
+                       "2026-09-02T11:19:10Z"),
+                _Order("s2", f"chili_ops_flat_{sess.id}_d8394610fc", "CANF",
+                       "sell", "filled", 165.0, 3.960303, "2026-09-02T11:34:30Z"),
+            ],
+        },
+    )
+    out = li.check_live_ledger_integrity(db, days=30, include_broker=True)
+    mine = [r for r in out["rows"] if r["session_id"] == int(sess.id)]
+    assert mine and mine[0]["broker_episodes"] == 2
+    assert mine[0]["booked_closed_cycles"] == 1
+    # The P&L check is satisfied — that is exactly why this needed its own class.
+    assert mine[0]["delta_usd"] == pytest.approx(0.0, abs=li.PNL_TOLERANCE_USD)
+    assert mine[0]["status"] == li.STATUS_LEG_COUNT_DISAGREES, (
+        f"a session the broker traded twice and the books booked once must be "
+        f"reported, not passed: {mine[0]}"
+    )
+    assert int(sess.id) in out["leg_count_split_sessions"]
+    assert out["ok"] is False
+    # The legacy column is the one every outcomes-table study reads, and it still
+    # says -78.13. That trap is reported alongside, not instead.
+    assert int(sess.id) in out["legacy_column_split_sessions"]
+
+
+# -- 8. the check's own blind spot ------------------------------------------
+
+
+def test_a_fill_attributed_outside_the_session_window_is_not_silently_dropped(db, monkeypatch):
+    """The one component whose job is seeing what the DB cannot had its own hole.
+
+    Rows are emitted by iterating SESSIONS filtered ``started_at >= since``, but the
+    broker episodes are built from every order in the window. An episode attributed
+    to a session that started just outside the lookback matched no row and was not in
+    ``unattributed`` either (that list only holds ``session_id is None``) -- it simply
+    vanished. With the shipped 3-day default and a lane that recycles for hours, that
+    boundary is reachable in normal operation.
+    """
+    monkeypatch.setattr(
+        li, "_read_broker_orders",
+        lambda **_k: {
+            "readable": True, "truncated": False,
+            "orders": [
+                _Order("b1", "chili_ml_e_999777_aaaaaaaa_1111111111", "GHOST", "buy",
+                       "filled", 100.0, 10.0, "2026-08-31T13:16:34Z"),
+                _Order("s1", "chili_operator_flatten_ghost", "GHOST", "sell",
+                       "filled", 100.0, 7.0, "2026-08-31T13:46:34Z"),
+            ],
+        },
+    )
+    out = li.check_live_ledger_integrity(db, days=30, include_broker=True)
+
+    outside = out["broker_episodes_outside_session_window"]
+    assert [e["session_id"] for e in outside] == [999777], out
+    assert outside[0]["realized_pnl_usd"] == pytest.approx(-300.0)
+    assert outside[0]["reason"] == "session_started_before_lookback_window"
+    assert out["ok"] is False, (
+        "a $300 broker loss attributed to a session the scan never looked at cannot "
+        "leave the check green"
+    )
+    # It is NOT unattributed -- we know exactly whose it is.
+    assert not out["unattributed_broker_episodes"]
+
+
+# -- 9. the reconcile can be scoped -----------------------------------------
+
+
+def test_broker_truth_reconcile_accepts_an_explicit_session_scope():
+    """A targeted repair must be able to say WHICH rows it will touch.
+
+    On 2026-09-02 a 22-row backfill called this with lookback_days=22.0 -- 11x the
+    scheduled default of 2.0 -- and collaterally rewrote the derived broker_* columns
+    of 152 pre-existing rows back to 2026-08-21 with no before-state captured. Those
+    values are unrecoverable. A scope parameter is what makes the next repair
+    auditable before it runs rather than only after.
+    """
+    import inspect
+
+    from app.services.trading.momentum_neural.outcome_reconcile import (
+        reconcile_momentum_outcomes_to_broker_truth,
+    )
+
+    sig = inspect.signature(reconcile_momentum_outcomes_to_broker_truth)
+    assert "session_ids" in sig.parameters
+    assert sig.parameters["session_ids"].default is None, (
+        "scoping must be opt-in so existing callers are byte-identical"
+    )
+
+
+def test_the_backfill_scanner_can_be_scoped_to_named_sessions(db):
+    """Targeted remediation: the integrity job books only what a broker read found.
+
+    The behavioural proof that the scanner reaches ``live_arm_expired`` at all lives
+    in the behaviour file (it must run against main's signature to fail there for the
+    right reason). THIS pins the branch-only scoping: given two bookable sessions,
+    naming one must book exactly one.
+    """
+    from app.services.trading.momentum_neural.feedback_emit import (
+        scan_terminal_sessions_missing_feedback,
+    )
+
+    wanted = _session(
+        db, state="live_arm_expired", symbol="SSM",
+        le={"realized_pnl_usd": -25.98, "last_exit_entry_price": 4.01},
+    )
+    other = _session(
+        db, state="live_arm_expired", symbol="AUUD",
+        le={"realized_pnl_usd": -44.01, "last_exit_entry_price": 1.11},
+    )
+
+    res = scan_terminal_sessions_missing_feedback(
+        db, limit=50, session_ids=[int(wanted.id)]
+    )
+    db.flush()
+    assert res["emitted"] == 1, res
+    assert res["targeted"] is True
+    assert _outcome(db, wanted.id) is not None
+    assert _outcome(db, other.id) is None, (
+        "a scoped pass that touches a row it was not given is the 152-row accident "
+        "in miniature"
+    )

@@ -3,8 +3,9 @@
 from __future__ import annotations
 
 import logging
+import os
 from datetime import datetime, timedelta
-from typing import Any, Optional
+from typing import Any, Optional, Sequence
 
 from sqlalchemy import inspect as sa_inspect
 from sqlalchemy.exc import IntegrityError
@@ -16,6 +17,7 @@ from ..decision_ledger import finalize_packet_from_automation_outcome, verify_de
 from ..economic_ledger import automation_trade_id, mode_is_active as economic_ledger_active
 from .evolution import compute_session_evidence_weight, ingest_session_outcome, outcome_needs_evolution_ingest
 from .outcome_extract import (
+    _CODE_VERSION,
     extract_momentum_session_outcome,
     feedback_row_exists,
     outcome_evolution_credit_from_extracted,
@@ -406,6 +408,31 @@ LEDGER_INTEGRITY_CLEAN = "clean"
 LEDGER_INTEGRITY_UNRECONCILED = "entry_evidence_unreconciled"
 
 
+def _backfill_code_sha() -> Optional[str]:
+    """The git sha that minted a historical-repair row, when it can be known.
+
+    Reads ``CHILI_GIT_SHA`` first (set it explicitly when running a repair from a
+    branch), then falls back to asking git for HEAD of the tree this module was
+    loaded from. Returns None rather than guessing — an unknown sha recorded as
+    None is honest; a wrong one is worse than nothing.
+    """
+    env = (os.getenv("CHILI_GIT_SHA") or "").strip()
+    if env:
+        return env[:40]
+    try:
+        import subprocess
+
+        root = os.path.dirname(os.path.abspath(__file__))
+        out = subprocess.run(
+            ["git", "-C", root, "rev-parse", "--short=7", "HEAD"],
+            capture_output=True, text=True, timeout=5, check=False,
+        )
+        sha = (out.stdout or "").strip()
+        return sha or None
+    except Exception:
+        return None
+
+
 def _ledger_integrity_stamp(
     db: Session,
     sess: TradingAutomationSession,
@@ -530,6 +557,14 @@ def try_emit_momentum_session_feedback(
         summary["ledger_backfill_v1"] = {
             "provenance": str(backfill_provenance)[:120],
             "written_at_utc": datetime.utcnow().isoformat() + "Z",
+            # WHICH CODE MINTED THIS ROW. A historical repair can be written by a
+            # branch that is not merged and not deployed anywhere — the 2026-09-02
+            # backfill was — and then the live DB holds rows produced by a code path
+            # no running process contains. If review changes the classification that
+            # produced them, the row has to be findable and re-emittable; provenance
+            # alone does not say which draft wrote it.
+            "code_sha": _backfill_code_sha(),
+            "code_version": _CODE_VERSION,
             "evolution_suppressed": True,
             "note": (
                 "Historical ledger repair. This row restores the BOOKS only; it was "
@@ -666,19 +701,34 @@ def emit_feedback_after_terminal_transition(
     return result
 
 
-def scan_terminal_sessions_missing_feedback(db: Session, *, limit: int = 50) -> dict[str, Any]:
-    """Backfill: terminal sessions without a feedback row (idempotent)."""
+def scan_terminal_sessions_missing_feedback(
+    db: Session,
+    *,
+    limit: int = 50,
+    session_ids: Sequence[int] | None = None,
+) -> dict[str, Any]:
+    """Backfill: terminal sessions without a feedback row (idempotent).
+
+    ⚠️ THIS FUNCTION HAD TWO INDEPENDENT FAILURES AT ONCE AND EITHER ALONE WAS FATAL.
+    It is the ONE designed backfill for exactly the missing-row defect, and (1) its
+    hand-rolled ``terminal_states`` tuple omitted ``live_arm_expired``, so it would
+    have skipped all 291 of them, and (2) it had ZERO call sites in ``app/`` or
+    ``scripts/`` — nothing had ever run it. Fixing only the tuple would have left a
+    correct function nobody calls, which is indistinguishable from not fixing it.
+    Both are closed here: the states are DERIVED from the canonical sets rather than
+    re-typed, and ``_run_momentum_ledger_integrity_job`` now calls this with the
+    session ids the broker-anchored check just reported as ``filled_never_booked``.
+
+    ``session_ids`` narrows the scan to exactly those sessions. That is how the
+    integrity job uses it — remediation targeted at a measured violation, not a blind
+    sweep — so the write is bounded by what a broker read actually found.
+    """
     if not settings.chili_momentum_neural_feedback_enabled:
-        return {"ok": True, "skipped": "feedback_disabled", "processed": 0}
+        return {"ok": True, "skipped": "feedback_disabled", "processed": 0, "emitted": 0}
     if not _outcomes_table_present(db):
-        return {"ok": True, "skipped": "outcomes_table_missing", "processed": 0}
+        return {"ok": True, "skipped": "outcomes_table_missing", "processed": 0, "emitted": 0}
 
     lim = max(1, min(int(limit), 500))
-    # Derived from the canonical sets, never re-typed. The hand-rolled tuple that
-    # used to live here omitted ``live_arm_expired``, so this function — the ONE
-    # designed backfill for exactly this defect — would still have skipped all 291
-    # of them even if anything had called it. (Nothing did: it had zero call sites
-    # in app/ or scripts/ until the integrity job below.)
     from .live_fsm import LIVE_LEDGER_TERMINAL_STATES
 
     terminal_states = tuple(
@@ -687,15 +737,16 @@ def scan_terminal_sessions_missing_feedback(db: Session, *, limit: int = 50) -> 
             | {STATE_FINISHED, STATE_CANCELLED, STATE_ERROR, STATE_EXPIRED, STATE_ARCHIVED}
         )
     )
-    rows = (
-        db.query(TradingAutomationSession)
-        .filter(TradingAutomationSession.state.in_(terminal_states))
-        .order_by(TradingAutomationSession.updated_at.asc())
-        .limit(lim * 3)
-        .all()
+    q = db.query(TradingAutomationSession).filter(
+        TradingAutomationSession.state.in_(terminal_states)
     )
+    targeted = [int(s) for s in (session_ids or [])]
+    if targeted:
+        q = q.filter(TradingAutomationSession.id.in_(tuple(targeted[:500])))
+    rows = q.order_by(TradingAutomationSession.updated_at.asc()).limit(lim * 3).all()
     processed = 0
     emitted = 0
+    failed: list[int] = []
     for sess in rows:
         if not session_terminal_for_feedback(sess.mode or "paper", sess.state):
             continue
@@ -705,6 +756,14 @@ def scan_terminal_sessions_missing_feedback(db: Session, *, limit: int = 50) -> 
         r = try_emit_momentum_session_feedback(db, sess)
         if r.get("emitted"):
             emitted += 1
+        elif not r.get("ok"):
+            failed.append(int(sess.id))
         if processed >= lim:
             break
-    return {"ok": True, "processed": processed, "emitted": emitted}
+    return {
+        "ok": True,
+        "processed": processed,
+        "emitted": emitted,
+        "failed_session_ids": failed,
+        "targeted": bool(targeted),
+    }
