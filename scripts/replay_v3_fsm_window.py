@@ -39,6 +39,7 @@ from datetime import datetime, timedelta
 
 import pandas as pd
 from sqlalchemy import create_engine, text
+from sqlalchemy.engine import make_url
 from sqlalchemy.orm import sessionmaker
 
 import app.services.trading.momentum_neural.replay_v3 as rv3
@@ -53,8 +54,28 @@ from app.models.trading import TradingAutomationSession, TradingAutomationEvent
 # — its name MUST end in _test as a guard against ever pointing the seeded/cleaned run at prod.
 PROD = os.environ.get("DATABASE_URL", "postgresql://chili:chili@localhost:5433/chili")
 SIM = os.environ.get("TEST_DATABASE_URL", "postgresql://chili:chili@localhost:5433/chili_test")
-if not SIM.rstrip("/").endswith("_test"):
-    raise SystemExit(f"refusing to run: TEST_DATABASE_URL must end in _test (got {SIM!r})")
+
+
+def _sim_db_name(_url: str) -> str:
+    """The DATABASE NAME a URL resolves to — never a suffix match on the whole URL.
+
+    A raw ``endswith('_test')`` on the URL string is not a fence: it passes
+    ``.../chili?application_name=chili_test`` (which connects to PROD) and it REJECTS
+    the replay lane's own socket URL ``postgresql://chili:chili@/chili_test?host=...``
+    (docker-compose.replay-zero-egress.yml). ``tests/conftest.py`` parses the name for
+    the same reason; this uses SQLAlchemy's own parser so the two agree.
+    """
+    try:
+        return (make_url(_url).database or "").strip()
+    except Exception:
+        return ""
+
+
+if not _sim_db_name(SIM).endswith("_test"):
+    raise SystemExit(
+        "refusing to run: the TEST_DATABASE_URL database NAME must end in _test "
+        f"(got {_sim_db_name(SIM)!r} from {SIM!r})"
+    )
 
 SYMBOL = os.environ.get("SYMBOL", "CELZ")
 WIN_START = datetime.fromisoformat(os.environ.get("WIN_START", "2026-06-30T12:35:00"))
@@ -629,18 +650,54 @@ def run_arm(label, grid, ticks, frame_ticks, g4_on):
     return pnl, len(buys), len(sells), len(grind_evts), len(esc_evts)
 
 
-# The six relations the replay itself writes. TRUNCATE ... CASCADE reaches far beyond
-# them (25 tables as of migration 354), so this is a SEED list, not the clean list.
+# Relations the replay itself writes. TRUNCATE ... CASCADE reaches far beyond them
+# (33 tables as of migration 354), so this is a SEED list, not the clean list.
+#
+# The first six are the tables the run writes directly. The rest are FK PARENTS of those:
+# CASCADE only descends to REFERENCING tables, so a parent is structurally invisible to
+# both the truncate and the verification below — it would survive the reset and be
+# counted as clean. That is not theoretical: ``adaptive_risk_reservations`` has a NOT NULL
+# FK to ``adaptive_risk_decision_packets``, so every reservation the replay writes implies
+# a packet, and a surviving packet makes the NEXT run take the idempotent-retry branch in
+# adaptive_risk_reservation.py (or raise AdaptiveReservationIdempotencyConflict outright) —
+# the 2026-08-29 contamination failure mode exactly. Every parent added here is one the
+# project's own per-test clean list already names (tests/conftest.py
+# ``_append_only_targeted_delete_tables``). ``_SINK_UNCOVERED_PARENTS_OK`` below keeps this
+# list honest.
 _SINK_SEED_TABLES = (
+    # written directly by the replay
     "trading_automation_events", "trading_automation_sessions",
     "trading_automation_simulated_fills", "momentum_symbol_viability",
     "adaptive_risk_reservations", "adaptive_risk_opportunity_claims",
+    # FK parents of the above that CASCADE cannot reach
+    "adaptive_risk_decision_packets",
+    "alpaca_paper_account_settlement_heads",
+    "alpaca_paper_bp_reflection_receipts",
+    "alpaca_paper_fill_page_objects",
+    "captured_paper_post_commit_outbox",
+    "captured_paper_completed_fill_watch_events",
 )
+
+# Parents that are deliberately NOT cleaned, with the reason they are safe to keep.
+# ``momentum_strategy_variants`` is a shared fixture seeded with a RANDOM key per call —
+# replay_v3._ensure_variant uses ``variant_key=f"replay_v3_{uuid4}"`` explicitly "so
+# repeated seeds (and a non-truncated DB) never collide" — so rows accumulating across
+# runs cannot influence a later run, and truncating it would take out the variant the
+# seeded session still points at. (``users`` is likewise kept, and reaches this reset
+# only through NULLABLE FKs, so it never appears in the check below.) Anything NOT on
+# this list that a covered table has a NOT NULL FK to is a split clean and aborts the
+# reset (see ``_SINK_UNCOVERED_PARENT_SQL``).
+_SINK_UNCOVERED_PARENTS_OK = frozenset({"momentum_strategy_variants"})
 
 # Every relation TRUNCATE ... CASCADE will actually reach from the seeds, walked from
 # pg_constraint instead of hardcoded: PostgreSQL truncates every table holding an FK to
 # a truncated one, transitively, regardless of the FK's ON DELETE action. The FK graph
 # grows with every migration, so discovering it is the only way this stays correct.
+# SCOPE: this walk is FK-only. TRUNCATE also descends partition/inheritance children
+# (pg_inherits), which pg_constraint does not model. No relation in the closure is a
+# partitioned or inherited parent today (the 7 partitioned tables in public — fast_* /
+# trading_microstructure_log / trading_tenbeat_candle_log — are all outside it), so a
+# guard on a child cannot currently be missed; widen this walk if that ever changes.
 _SINK_CLOSURE_SQL = """
 WITH RECURSIVE reached(oid) AS (
         SELECT c.oid
@@ -675,6 +732,29 @@ WHERE NOT t.tgisinternal
 ORDER BY t.tgrelid, t.tgname
 """
 
+# SELF-POLICING COVERAGE. A NOT NULL FK from a covered table to an UNCOVERED parent is a
+# provable split clean: every covered row implies a parent row that the reset cannot reach,
+# because CASCADE descends to children only. Rather than trust the seed list to stay
+# complete as migrations land, derive the violation from the catalog and abort naming the
+# parent. Only parents on _SINK_UNCOVERED_PARENTS_OK are exempt.
+_SINK_UNCOVERED_PARENT_SQL = """
+SELECT parent.relname AS parent, child.relname AS child, con.conname
+FROM pg_constraint con
+JOIN pg_class child ON child.oid = con.conrelid
+JOIN pg_class parent ON parent.oid = con.confrelid
+WHERE con.contype = 'f'
+  AND con.conrelid = ANY(:oids)
+  AND NOT (con.confrelid = ANY(:oids))
+  AND NOT EXISTS (
+      SELECT 1
+      FROM unnest(con.conkey) AS k(attnum)
+      JOIN pg_attribute att
+        ON att.attrelid = con.conrelid AND att.attnum = k.attnum
+      WHERE NOT att.attnotnull
+  )
+ORDER BY 1, 2
+"""
+
 # tgenabled -> the ALTER verb that restores exactly that state ('D' is never suspended).
 _SINK_GUARD_RESTORE_VERB = {"O": "ENABLE", "R": "ENABLE REPLICA", "A": "ENABLE ALWAYS"}
 
@@ -693,7 +773,7 @@ def _sink_truncate_targets(_closure):
     return list(_closure)
 
 
-def _reset_sim_sink() -> None:
+def _reset_sim_sink() -> dict | None:
     """CLEAN-SINK PROTOCOL (2026-08-29, sink-contamination incident).
 
     Ang naipong sessions/lockouts/viability ng mga naunang replay sa PAREHONG
@@ -709,7 +789,7 @@ def _reset_sim_sink() -> None:
     ledgers that carry BEFORE TRUNCATE statement triggers, so on a migrated database
     this function used to abort the whole harness before a single tick was loaded —
     ``adaptive_risk_reservation_events is append-only; TRUNCATE is forbidden``
-    (ERRCODE 55000, installed by migration 354). Nine such guards sit inside the
+    (ERRCODE 55000, installed by migration 354). Thirteen such guards sit inside the
     cascade closure today.
 
     Those guards are load-bearing and are NOT weakened: the ledgers are a hash chain
@@ -728,24 +808,66 @@ def _reset_sim_sink() -> None:
     A partial clean is worse than a hard failure — contaminated results look like
     results — so every relation in the closure is counted after commit and every
     suspended guard is re-read; anything non-zero or still disabled raises SystemExit.
+    Coverage itself is policed the same way: a NOT NULL FK out of the covered set to a
+    parent CASCADE cannot reach is a split clean, and aborts.
+
+    ⚠️ DO NOT WIDEN THE _test FENCE. Two independent checks stand between
+    ``ALTER TABLE ... DISABLE TRIGGER`` and a real-money hash chain: the URL-parsed name
+    at import, and ``current_database()`` read from the server on the very connection
+    that will issue the DDL. The second exists because a URL check validates a string,
+    not a connection.
     """
     if os.environ.get("REPLAY_KEEP_SINK", "").strip() == "1":
         print("  [sink] REPLAY_KEEP_SINK=1 — hindi nireset ang sink")
-        return
+        return None
     import sqlalchemy as _sa
 
     _eng = _sa.create_engine(SIM)
     try:
         with _eng.connect() as _c:
+            # FENCE, before anything else touches this connection: the database's OWN
+            # identity, from the server. The import-time check validates a URL string —
+            # `.../chili?application_name=chili_test` would satisfy a naive suffix match
+            # while connecting to prod, where this function would DISABLE the append-only
+            # guards and TRUNCATE the reservation-event hash chain.
+            _dbname = _c.execute(_sa.text("SELECT current_database()")).scalar_one()
+            if not str(_dbname).endswith("_test"):
+                raise SystemExit(
+                    "  [sink] ABORT: refusing to suspend append-only TRUNCATE guards on "
+                    f"database {str(_dbname)!r} — the clean-sink reset runs only against a "
+                    f"*_test database (TEST_DATABASE_URL={SIM!r} resolves here)."
+                )
             _closure = [
                 (int(_oid), _ns, _rel) for (_oid, _ns, _rel) in _c.execute(
                     _sa.text(_SINK_CLOSURE_SQL), {"seeds": list(_SINK_SEED_TABLES)}
                 )
             ]
-            if not _closure:
-                print("  [sink] clean-sink reset: walang sink table sa DB — skipped")
-                return
+            _found = {_rel for (_o, _ns, _rel) in _closure}
+            _missing = [_t for _t in _SINK_SEED_TABLES if _t not in _found]
+            if _missing:
+                # Never degrade to "skipped": an unmigrated or wrong sink DB must stop the
+                # run, not replay on top of whatever is in there.
+                raise SystemExit(
+                    f"  [sink] ABORT: sink table(s) missing from {str(_dbname)!r}: "
+                    + ", ".join(_missing)
+                    + "\n  [sink]   point TEST_DATABASE_URL at a MIGRATED *_test database."
+                )
             _by_oid = {_oid: (_ns, _rel) for (_oid, _ns, _rel) in _closure}
+            _uncovered = [
+                (_p, _ch, _cn) for (_p, _ch, _cn) in _c.execute(
+                    _sa.text(_SINK_UNCOVERED_PARENT_SQL), {"oids": list(_by_oid)}
+                ) if _p not in _SINK_UNCOVERED_PARENTS_OK
+            ]
+            if _uncovered:
+                raise SystemExit(
+                    "  [sink] ABORT: the reset would be a SPLIT CLEAN — these covered "
+                    "tables have a NOT NULL FK to a parent CASCADE cannot reach, so every "
+                    "row they write leaves an orphaned parent behind:\n"
+                    + "\n".join(f"  [sink]   {_ch} -> {_p}  ({_cn})"
+                                for (_p, _ch, _cn) in _uncovered)
+                    + "\n  [sink]   add the parent to _SINK_SEED_TABLES, or to "
+                      "_SINK_UNCOVERED_PARENTS_OK with the reason it is safe to keep."
+                )
             _guards = [
                 (int(_oid), _tg, _en) for (_oid, _tg, _en) in _c.execute(
                     _sa.text(_SINK_TRUNCATE_GUARD_SQL), {"oids": list(_by_oid)}
@@ -822,8 +944,10 @@ def _reset_sim_sink() -> None:
 
     _names = [_rel for (_o, _ns, _rel) in _closure]
     _seeded = [_n for _n in _names if _n in _SINK_SEED_TABLES]
-    print(f"  [sink] clean-sink reset: {len(_names)} tables, ALL VERIFIED EMPTY "
-          f"({len(_seeded)} sink seeds + {len(_names) - len(_seeded)} reached via FK cascade)")
+    print(f"  [sink] clean-sink reset on {str(_dbname)!r}: {len(_names)} tables, "
+          f"ALL VERIFIED EMPTY ({len(_seeded)} sink seeds + "
+          f"{len(_names) - len(_seeded)} reached via FK cascade; no NOT NULL FK escapes "
+          f"the covered set except {', '.join(sorted(_SINK_UNCOVERED_PARENTS_OK))})")
     _line = "  [sink]   cleaned:"
     for _n in _names:
         if len(_line) + len(_n) + 1 > 96:
@@ -837,6 +961,14 @@ def _reset_sim_sink() -> None:
               f"restored ({len(_suspend)}, all re-verified enabled):")
         for _oid, _tg, _en in _suspend:
             print(f"  [sink]           {_by_oid[_oid][1]}.{_tg}")
+    # Returned so a caller (and the regression test) can assert what was actually
+    # covered and which guards were actually suspended — "no guard was ever disabled"
+    # must not be able to pass silently.
+    return {
+        "database": str(_dbname),
+        "cleaned": _names,
+        "suspended": [(_by_oid[_o][1], _tg) for (_o, _tg, _en) in _suspend],
+    }
 
 
 def main():
