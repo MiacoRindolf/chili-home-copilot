@@ -9567,6 +9567,23 @@ class Settings(BaseSettings):
             'on hosts that do not drive the lane.'
         ),
     )
+    # Lane-observation deadman. Default True for the same reason as the
+    # control-loop deadman: an alarm that ships disabled is the silence it was
+    # written to end. Measured 2026-09-01: the lane stopped observing at
+    # 08:03:17 PT, 296 of 390 RTH minutes produced nothing, and every existing
+    # detector was in-process, Docker-scoped, disabled, missing from disk, or
+    # saturated on a heartbeat key with no writer since 2026-08-17.
+    chili_lane_observation_watchdog_enabled: bool = Field(
+        default=True,
+        validation_alias=AliasChoices("CHILI_LANE_OBSERVATION_WATCHDOG_ENABLED"),
+        description=(
+            "Page when the momentum lane stops producing ignition observations during "
+            "a market session. Reads the lane's own observation heartbeat from another "
+            "process, so it survives the death of the process it watches. Detection is "
+            "session-gated (04:00-16:00 ET, Mon-Fri) because the lane legitimately "
+            "observes nothing overnight."
+        ),
+    )
     chili_lane_health_alert_enabled: bool = Field(
         default=True,
         validation_alias=AliasChoices("CHILI_LANE_HEALTH_ALERT_ENABLED"),

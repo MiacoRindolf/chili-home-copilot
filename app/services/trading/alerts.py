@@ -45,6 +45,13 @@ _hourly_reset_at = 0.0
 # Infrastructure alarm: the momentum control loop stopped beating. Not a trade
 # signal -- it means the lane is not selecting or arming and exits are unowned.
 MOMENTUM_LOOP_DEAD = "momentum_loop_dead"
+# Infrastructure alarm: the lane stopped OBSERVING during a market session.
+# Distinct from MOMENTUM_LOOP_DEAD, which watches a heartbeat whose writer has
+# been gone since 2026-08-17 and therefore reports the same 16-day-old death
+# forever. On 2026-09-01 the host uvicorn app died at 08:03:17 PT and 296 of
+# the 390 RTH minutes produced no ignition observation at all -- and the only
+# two alert rows the box emitted that afternoon were routine trade signals.
+LANE_OBSERVATION_SILENT = "lane_observation_silent"
 
 # Alert tiers: A = high confidence / promoted pattern, B = standard, C = speculative
 TIER_A = "A"
@@ -196,6 +203,9 @@ def classify_alert_tier(
         # A dead control loop outranks every trade signal: nothing else on
         # this list can fire while the loop that produces them is stopped.
         MOMENTUM_LOOP_DEAD,
+        # Same argument: a lane that has stopped observing cannot produce any
+        # of the signals above, so its silence outranks all of them.
+        LANE_OBSERVATION_SILENT,
     ):
         return TIER_A
     if scan_pattern_id and confidence >= 0.7:
@@ -241,6 +251,7 @@ _INDIVIDUAL_MSG_TYPES = frozenset({
     # EDITS a pinned message in place and produces no phone notification --
     # i.e. a fourth silent surface for the one alarm meant to be loud.
     MOMENTUM_LOOP_DEAD,
+    LANE_OBSERVATION_SILENT,
 })
 
 _ALERT_TYPE_LABEL: dict[str, str] = {

@@ -1545,6 +1545,52 @@ def _run_control_loop_watchdog_job():
     run_scheduler_job_guarded("control_loop_watchdog", _work)
 
 
+def _run_observation_watchdog_job():
+    """Page when the LANE STOPS OBSERVING during a market session.
+
+    Separate from `_run_control_loop_watchdog_job` because it answers a
+    different question against a heartbeat that has a living writer. That job's
+    key (`momentum_live_loop_heartbeat`) has not been written since 2026-08-17
+    12:26:10 UTC and no writer for it remains in the tree, so it reports the
+    same 16-day-old death forever and produced NOTHING on 2026-09-01 — the day
+    the host lane process died at 08:03:17 PT and 296 of the 390 RTH minutes
+    produced no observation at all.
+
+    Registered on the flag alone, like the control-loop deadman, so it runs
+    wherever the scheduler runs — which is the point: on 2026-09-01 the only
+    in-process detector (`run_lane_health_check`) ran normally 5 seconds before
+    the death and then died with it. (trading.momentum_neural.observation_watchdog)"""
+
+    def _work() -> None:
+        from ..config import settings as _settings
+        from ..db import SessionLocal
+
+        if not getattr(_settings, "chili_lane_observation_watchdog_enabled", True):
+            return
+
+        db = SessionLocal()
+        try:
+            from .trading.momentum_neural.observation_watchdog import (
+                run_observation_watchdog,
+            )
+
+            run_observation_watchdog(
+                db, user_id=getattr(_settings, "brain_default_user_id", None)
+            )
+        except Exception:
+            db.rollback()
+            logger.warning("[scheduler] observation_watchdog failed", exc_info=True)
+        finally:
+            # FIX 46 pattern (rollback before close).
+            try:
+                db.rollback()
+            except Exception:
+                pass
+            db.close()
+
+    run_scheduler_job_guarded("observation_watchdog", _work)
+
+
 def _run_momentum_post_exit_excursion_job():
     """Label recently-closed momentum trades against their post-exit price path so
     the learner sees CORRECT data (shake-out vs thesis-fail), not a shallow loss.
@@ -7691,6 +7737,25 @@ def start_scheduler():
             coalesce=True,
             misfire_grace_time=120,
             next_run_time=datetime.now() + timedelta(seconds=45),
+        )
+
+        # Lane-observation deadman. Same registration argument as the
+        # control-loop deadman above (flag alone, not include_momentum_exec),
+        # and for the same measured reason: the only in-process detector died
+        # with the process it was watching on 2026-09-01. 60s cadence against a
+        # 180s silence threshold (6 missed 30s heartbeats): detection within
+        # ~4min. Detection is session-gated inside the module — unlike the
+        # control loop, the lane legitimately observes nothing at 02:00 ET.
+        _scheduler.add_job(
+            _run_observation_watchdog_job,
+            trigger=IntervalTrigger(seconds=60),
+            id="observation_watchdog",
+            name="Lane-observation deadman (every 60s)",
+            replace_existing=True,
+            max_instances=1,
+            coalesce=True,
+            misfire_grace_time=120,
+            next_run_time=datetime.now() + timedelta(seconds=50),
         )
 
         # Paper trade exit checking: every 15 min during market hours

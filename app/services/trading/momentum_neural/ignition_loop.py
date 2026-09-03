@@ -112,6 +112,12 @@ _UNIVERSE_DEGRADED = frozenset(
 # hindi dapat maging bulag sa bridge nang 20s. Hiwalay na mabilis na cadence.
 _SESSION_REFRESH_S = 5.0
 
+# LANE OBSERVATION HEARTBEAT (2026-09-02). 30s: the watchdog's silence threshold
+# is measured in minutes, so this only has to be small enough that a genuine
+# death is unambiguous within one threshold window, and large enough that it
+# costs nothing (one tiny insert per 30s, on the refresh thread, never the bus).
+_OBSERVATION_HEARTBEAT_S = 30.0
+
 
 class _UniverseTracker:
     """Thread-safe watch set: the uncapped equity universe + each name's day baseline.
@@ -1046,6 +1052,67 @@ class IgnitionScoringLoop:
         self._last_score: dict[str, float] = {}
         self._inflight: set[str] = set()
         self._inflight_lock = threading.Lock()
+        # LANE OBSERVATION HEARTBEAT (2026-09-02): observations since the last
+        # heartbeat write, plus the write clock. See `_write_observation_heartbeat`.
+        self._observations = 0
+        self._obs_lock = threading.Lock()
+        self._last_heartbeat_mono = 0.0
+
+    def _write_observation_heartbeat(self) -> None:
+        """Publish 'the lane is still observing' where ANOTHER PROCESS can read it.
+
+        WHY A DB ROW AND NOT A LOG LINE OR AN IN-PROCESS CHECK. On 2026-09-01 the
+        host uvicorn app (pid 22376, launched inside a Job Object with
+        KILL_ON_JOB_CLOSE) died at 08:03:17 PT. `run_lane_health_check` had run
+        normally 5 seconds earlier ("job_id=lane_health_check phase=ok
+        duration_ms=265" at 08:03:12) and then died with it — a dead process
+        cannot report its own death. Every other detector was Docker-scoped,
+        disabled since 2026-07-27, missing from disk, or permanently saturated.
+        296 of the day's 390 RTH minutes produced no observation and nothing
+        alarmed. The record has to outlive the process that writes it.
+
+        Fail-silent by construction: a heartbeat write must never be able to
+        disturb the refresh loop or the price bus.
+        """
+        with self._obs_lock:
+            observations = self._observations
+            self._observations = 0
+        db = SessionLocal()
+        try:
+            from ..batch_job_constants import (
+                IGNITION_OBSERVATION_HEARTBEAT_SCHEMA,
+                JOB_MOMENTUM_IGNITION_OBSERVATION_HEARTBEAT,
+            )
+            from ..brain_batch_job_log import brain_batch_job_record_completed
+
+            brain_batch_job_record_completed(
+                db,
+                JOB_MOMENTUM_IGNITION_OBSERVATION_HEARTBEAT,
+                ok=True,
+                meta={
+                    "schema": IGNITION_OBSERVATION_HEARTBEAT_SCHEMA,
+                    "observations": int(observations),
+                    "universe_size": int(self._tracker.count()),
+                    "universe_outcome": str(self._tracker.last_outcome()),
+                    "subscribed": int(len(self._subscribed)),
+                },
+            )
+            db.commit()
+        except Exception:
+            try:
+                db.rollback()
+            except Exception:
+                pass
+            _log.warning(
+                "[momentum_ws_ignition] observation heartbeat write failed",
+                exc_info=True,
+            )
+        finally:
+            try:
+                db.rollback()
+            except Exception:
+                pass
+            db.close()
 
     def start(self) -> None:
         if not getattr(settings, "chili_momentum_ws_ignition_enabled", False):
@@ -1197,6 +1264,12 @@ class IgnitionScoringLoop:
                         _last_logged_size = _size
                         _last_logged_outcome = _outcome
                 self._sync_subscriptions()
+                if (
+                    time.monotonic() - self._last_heartbeat_mono
+                    >= _OBSERVATION_HEARTBEAT_S
+                ):
+                    self._last_heartbeat_mono = time.monotonic()
+                    self._write_observation_heartbeat()
                 _consecutive_failures = 0
             except Exception:
                 # Was a bare `except Exception: pass`. That is the THIRD silent
@@ -1568,6 +1641,13 @@ class IgnitionScoringLoop:
         bridge_state = "off"
         if scored_ok:
             bridge_state = self._bridge_arm(symbol)
+        # OBSERVATION COUNTER (2026-09-02). This is the exact event the operator
+        # depends on and the exact event that stopped at 08:03:17 PT on
+        # 2026-09-01 without a single alarm. Counted here, next to the A/B log
+        # line, so the counter and the log line can never disagree. Read and
+        # zeroed by `_refresh_loop`'s heartbeat write.
+        with self._obs_lock:
+            self._observations += 1
         # A/B LOG: queryable proof the ignition path put a name on the board — and what
         # the bridge then did with it (armed / no-arm / skipped-busy / off / error), so
         # a silently starved bridge cannot look identical to a healthy one.
