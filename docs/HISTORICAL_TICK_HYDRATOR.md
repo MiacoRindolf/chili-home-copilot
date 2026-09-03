@@ -30,9 +30,18 @@ python scripts/historical_tick_hydrator.py --csv project_ws/.../corpus.csv
 # 3. same corpus from Polygon/Massive instead
 python scripts/historical_tick_hydrator.py --provider polygon --csv corpus.csv
 
-# 4. what is loaded, what failed and why
+# 4. ALWAYS canonicalize after loading (see trap 0 below) and verify coverage
+python scripts/hydration_canonicalize.py --apply
+python scripts/hydration_coverage_report.py --csv corpus.csv --json coverage.json
+
+# 5. what is loaded, what failed and why
 python scripts/historical_tick_hydrator.py --status
 ```
+
+`--status` reports the job ledger. It cannot tell you whether a symbol-day is
+actually *replayable* — a job marked `done` that produced zero rows is a hole,
+not coverage. `hydration_coverage_report.py` counts rows in the tables the
+replay reads, against your corpus as the denominator, and reports those holes.
 
 Everything lands in a **separate database** (`chili_hydrated` by default,
 `--db-name` to change). The hydrator *refuses* to target `chili` or
@@ -51,6 +60,7 @@ Everything lands in a **separate database** (`chili_hydrated` by default,
 | Retention | **180 calendar days** (hard cliff) | back to ~2003 |
 | Throughput | ~121k ticks/s, ~5.4 req/s latency-bound | ~47.6k rows/s, ~200 rps per front door |
 | NBBO fidelity | **at-trade samples only** — no quote history between prints | the real NBBO stream |
+| NBBO coverage | **not universal** — returns no top-of-book at all for some OTC names (REEMF 2026-08-19, NLST 2026-08-20: every trade row had null bid *and* ask, though the trades themselves loaded) | broader |
 | Fidelity vs our own tape | our recording is a near-perfect **subset** of it (99.995–100 % of our prints match, same µs, same price) — and it holds prints we never recorded | agrees with IQFeed to ~0.02 % on trades; fractional sizes; at-trade bid/ask is reconstructed |
 | Verdict | **fit for FSM replay (trades)** | fit for replay too, and the **only** fit source for NBBO; required past the IQFeed cliff |
 
@@ -109,7 +119,42 @@ window, rows loaded, rows replaced, and a sha256 over the exact COPY payload.
 
 ---
 
-## Two traps this code exists to avoid
+## Three traps this code exists to avoid
+
+### 0. The replay reads *every* source at once
+
+`counterfactual_replay.load_trade_tape` / `load_nbbo_tape` filter, in non-strict
+mode, on **symbol, time and `price > 0` only**. There is **no `source`
+predicate**. So a symbol-day hydrated from two providers is returned *twice*.
+
+Measured on TMCR 2026-08-24, which held 16,933 `iqfeed_lookup_hist` rows and
+16,933 `polygon_v3_trades` rows: `load_trade_tape` returned **33,866** ticks.
+Every print doubled, every share of volume doubled, tape speed doubled at
+ignition. Nothing looks malformed — the rows are individually valid and the
+timestamps are right. Only the counts lie.
+
+The NBBO case is worse: `load_nbbo_tape` returned **23,979** quotes on that
+symbol-day — Polygon's 7,076 real stream quotes interleaved with IQFeed's 16,903
+at-trade samples, two structurally different tapes blended into one.
+
+So **always canonicalize after loading**, and gate any study on the check:
+
+```powershell
+python scripts/hydration_canonicalize.py --check   # exit 1 if violated
+python scripts/hydration_canonicalize.py --apply   # enforce
+```
+
+It keeps exactly one source per `(symbol, ET day, table)` — trades prefer
+`iqfeed_lookup_hist`, NBBO prefers `polygon_v3_quotes` (the preference
+**inverts** between the tables; that is the Phase 3 verdict). The
+lower-preference source is a *fallback, not a duplicate*: it survives when it
+stands alone, which is real — IQFeed returned no top-of-book at all for the OTC
+names REEMF 2026-08-19 and NLST 2026-08-20 whose trades loaded fine.
+
+Dropping the non-preferred copy loses nothing durable; a cross-check copy is one
+command away via `--db-name chili_hydrated_xcheck`.
+
+## Two more traps
 
 ### 1. The timezone landmine
 
