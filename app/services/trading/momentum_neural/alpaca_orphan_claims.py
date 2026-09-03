@@ -6759,6 +6759,13 @@ def _reserve_alpaca_entry_risk(
     # PAGKATAPOS ng OK na quote. Ang sirang row ay HINDI ebidensya ng exposure
     # (wala itong frozen instruction na maisusumite); laktawan ito nang may
     # pangalan sa log, at hatulan ang natitirang malulusog na row.
+    # ⚠️ TAPAT NA SAKLAW (review 2026-09-03): walang writer sa app/ ang nagsusulat
+    # ng ``entry_order_request`` sa ``momentum_live_execution`` — kaya sa prod ang
+    # bawat pending row na WALANG claim ay dadaan sa skip na ito, at ang
+    # ``account_legacy_entry_present`` sa ibaba ay hindi naaabot. Ang proteksyon
+    # laban sa tunay na exposure ay nasa claim loop sa itaas
+    # (``account_entry_claim_present`` para sa bawat unresolved certified claim)
+    # at sa broker posture check bago ang literal na POST — hindi dito.
     # Ang ``legacy_pending_not_in_adaptive_ledger`` ay NANANATILING fail-closed:
     # iyon ay sira ng LEDGER, hindi ng isang row.
     try:

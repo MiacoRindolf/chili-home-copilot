@@ -35403,6 +35403,54 @@ def tick_live_session(
                         and str(_b_claim.get("client_order_id") or "").strip()
                         == str(_reconcile_cid).strip()
                     )
+            if _cid_state == "absent" and _reconcile_cid and _cid_claim_bound:
+                # HINDI TAHIMIK ANG LOCK (review 2026-09-03, round 2). Ang isang
+                # strict 404 sa cid na may submit_indeterminate na claim ay
+                # nananatiling fail-closed (dating gawi) — pero dati ay WALANG
+                # anumang durable na senyas na nakaupo ang account sa ganitong
+                # hugis nang walang hanggan. Isang bounded na event (kada ≥300 s
+                # bawat session) + WARNING kapag ang 404 ay lampas sa 30 s na
+                # transport-lease window. Telemetry lamang; walang release.
+                try:
+                    _cab_since_raw = (
+                        le.get("entry_reconcile_pending_since_utc")
+                        or le.get("entry_submit_utc")
+                    )
+                    _cab_aged = False
+                    if _cab_since_raw:
+                        _cab_since = datetime.fromisoformat(
+                            str(_cab_since_raw).replace("Z", "+00:00")
+                        ).replace(tzinfo=None)
+                        _cab_aged = (_utcnow() - _cab_since).total_seconds() >= 30.0
+                    _cab_last_raw = le.get("cid_absent_claim_bound_event_at_utc")
+                    _cab_due = True
+                    if _cab_last_raw:
+                        _cab_last = datetime.fromisoformat(
+                            str(_cab_last_raw).replace("Z", "+00:00")
+                        ).replace(tzinfo=None)
+                        _cab_due = (_utcnow() - _cab_last).total_seconds() >= 300.0
+                    if _cab_aged and _cab_due:
+                        le["cid_absent_claim_bound_event_at_utc"] = _utcnow().isoformat()
+                        _commit_le(sess, le)
+                        _emit(db, sess, "live_entry_cid_absent_claim_bound", {
+                            "client_order_id": _reconcile_cid,
+                            "since_utc": _cab_since_raw,
+                            "reason": (
+                                "strict_404_but_durable_entry_claim_still_bound_to_cid; "
+                                "fail-closed by doctrine; needs claim resolution or operator"
+                            ),
+                        })
+                        logger.warning(
+                            "[momentum_live] cid ABSENT at venue but claim still bound "
+                            "session=%s sym=%s cid=%s since=%s — fail-closed; account "
+                            "entries may be blocked by account_entry_claim_present",
+                            sess.id, sess.symbol, _reconcile_cid, _cab_since_raw,
+                        )
+                except Exception:
+                    logger.debug(
+                        "[momentum_live] cid-absent-claim-bound telemetry failed",
+                        exc_info=True,
+                    )
             if _cid_state == "absent" and _reconcile_cid and not _cid_claim_bound:
                 for _k in (
                     "entry_submitted",
@@ -36508,13 +36556,28 @@ def tick_live_session(
                                         # ang magtatanong sa venue tungkol sa cid na ito, at ang
                                         # susunod na trigger ay maaaring maglagay ng BAGONG primary
                                         # habang buhay pa ang lumang repeg order). Sa susunod na
-                                        # tick: strict read → absent nagpapalaya, found umaampon,
-                                        # unknown nananatiling fail-closed. Habang naghihintay, ang
-                                        # ledger scan ay lumalaktaw sa row (walang certified frozen
-                                        # request) sa halip na bulagin ang account.
+                                        # tick: strict read → found umaampon; absent ay nagpapalaya
+                                        # LAMANG kapag walang durable entry claim na nakatali sa cid
+                                        # (ang naobserbahang hugis ng MIMI 19534: claim resolved sa
+                                        # lumang cid, repeg cid hindi nakatali); kapag ang repeg ay
+                                        # dumaan sa normal na claim path at nag-iwan ng
+                                        # submit_indeterminate na claim sa cid, nananatili itong
+                                        # fail-closed (dating gawi) at nag-eemit ng bounded na
+                                        # durable event para hindi tahimik ang lock. Habang
+                                        # naghihintay, ang ledger scan ay lumalaktaw sa row na
+                                        # walang claim sa halip na bulagin ang account.
                                         le["entry_client_order_id"] = _rp_cid
                                         le["entry_order_id"] = None
                                         le["entry_submitted"] = True
+                                        # Review round 2: ang basis ng placement ay dapat ang
+                                        # REPEG — kung hindi, ang found→adopt sa susunod na
+                                        # tick ay huhusgahan laban sa LUMANG limit/oras at
+                                        # kakanselahin agad (entry_limit_left_behind /
+                                        # entry_rest_backstop), at hindi mauubos ang repeg
+                                        # budget. Parehong tatlong field ng success path.
+                                        le["entry_limit_price"] = _rp_limit_str
+                                        le["entry_repeg_count"] = _rp_n + 1
+                                        le["entry_submit_utc"] = _utcnow().isoformat()
                                         le["entry_reconcile_pending_client_order_id"] = _rp_cid
                                         le.setdefault(
                                             "entry_reconcile_pending_since_utc",
