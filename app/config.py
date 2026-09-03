@@ -8898,8 +8898,13 @@ class Settings(BaseSettings):
             "bilang 0.0 bps — ang pinakamabuting posibleng halaga ng bawat monotone "
             "na spread gate. Sinasala rin ang mga locked na row sa bid-prop na "
             "confirmer, kung saan ang 0.0 na median ay nagpapabulok sa "
-            "spread_blown_out tungo sa 'ang spread ay hindi eksaktong zero'. "
-            "OFF => byte-identical na dating gawi sa lahat ng apat na site."
+            "spread_blown_out tungo sa 'ang spread ay hindi eksaktong zero' — "
+            "ISANG-DIREKSYON: kaya nitong ALISIN ang isang veto, hindi kailanman "
+            "makakadagdag ng isa. EQUITY LAMANG: ang crypto (-USD) ay dumadaan sa "
+            "dating landas nang buo, dahil ang Reg NMS 610(d) at ang apat na "
+            "sinukat na bintana ay pawang US equities at ang one-tick na sahig ay "
+            "isang Rule 612 na equity increment. "
+            "OFF => byte-identical na dating gawi sa lahat ng site."
         ),
     )
     chili_momentum_locked_book_events_per_session: int = Field(

@@ -23,7 +23,34 @@ EPEKTIBONG spread (ang pinakamababang TUNAY na gastos sa pagtawid; nasukat sa lo
 ~2% ng sariling p50 ng bawat pangalan nang hindi hinahawakan ang kontaminadong tape).
 
 Bawat kaso sa ibaba ay muling itinayo mula sa mga tunay na row/event na pinangalanan
-sa docstring nito. Lahat ay BUMABAGSAK sa origin/main @ 89cb0eb.
+sa docstring nito.
+
+TAPAT NA PAGHAHATI LABAN SA origin/main @ 89cb0eb (26 na kaso; sinukat, hindi
+inaangkin — tumakbo nang serial na may `-p no:randomly` sa isang sariwang
+detached na worktree sa 89cb0eb):
+
+  BUMABAGSAK SA GAWI (4) — ito ang mga demonstrasyon ng depekto, at ang bawat
+  isa ay bumabagsak sa isang PAGKAKAIBA SA GAWI, hindi sa isang nawawalang key:
+    test_sdot_locked_book_rejected_in_regular_hours          "dumaan bilang wasto"
+    test_locked_book_cannot_defeat_a_deliberate_block_all_cap "tumalo sa block-all"
+    test_auud_locked_book_is_not_priced_as_a_free_crossing    0.0 == 87.7193
+    test_rdhl_locked_tape_does_not_manufacture_a_blown_out_spread  false veto
+
+  BUMABAGSAK SA ISANG NAWAWALANG PANGALAN (2) — sinasabi nang tapat:
+    test_locked_bbo_is_a_retryable_book_quality_reason  — ang reason string na
+      `locked_bbo` ay wala pa sa origin/main, kaya wala ring maging retryable.
+    test_guard_off_restores_byte_identical_behaviour — AttributeError sa
+      monkeypatch: ang setting ay wala pa. Isa itong kill-switch na pagsusuri,
+      hindi isang pahayag tungkol sa depekto.
+
+  PARITY GUARDS NA PUMAPASA SA MAGKABILANG PANIG (7) — sinusukat nila ang GAWI na
+  dapat HINDI magbago, kaya ang pagpasa sa main ang mismong punto:
+    crossed pa rin invalid; dalawang-panig na libro hindi ginalaw (x2); ang
+    locked na secondary ay nai-a-append pa rin sa `rescued_out`; ang crypto ay
+    dumadaan sa dating landas; ang tunay na nabubulok na libro ay nagba-veto pa
+    rin; at ang locked na filter ay hindi kailanman gumagawa ng veto.
+
+  NILAKTAWAN SA MAIN (13) — mga helper na wala pa roon.
 """
 from __future__ import annotations
 
@@ -48,6 +75,13 @@ try:
     from app.services.trading.momentum_neural.live_runner import _locked_book_state
 except ImportError:  # pragma: no cover - origin/main lamang
     _locked_book_state = None
+
+try:
+    from app.services.trading.momentum_neural.live_runner import (
+        _decision_spread_bps_for_fill_log,
+    )
+except ImportError:  # pragma: no cover - origin/main lamang
+    _decision_spread_bps_for_fill_log = None
 
 
 def _tick(bid, ask, *, spread_bps=None, source="iqfeed_l1"):
@@ -132,24 +166,72 @@ def test_locked_book_cannot_defeat_a_deliberate_block_all_cap(premarket):
     assert block["spread_bps"] == pytest.approx(70.4225, rel=1e-4)
 
 
-def test_locked_secondary_cannot_rescue_a_wide_primary(premarket, monkeypatch):
-    """B-EXTRA: ang wide-book rescue sa :24273 ay tumatanggap ng LOCKED na secondary.
+def test_locked_secondary_still_rescues_so_the_held_bid_is_not_left_on_garbage(
+    premarket, monkeypatch
+):
+    """REVIEW FIX — ang rescue admission ay HINDI dapat magbago dahil sa guard.
 
-    Ang `_a2 >= _b2` ay pumapasok sa locked, nagbibigay ng `_s2` 0.0, at ang
-    `0.0 <= 0.0` ay nagpapalit sa TUNAY na malapad na libro ng isang punit — at
-    nilalagyan pa ito ng label na `"rescued_from": "wide_bbo_spread"`.
+    Ang `rescued_out` ay isang OUT-CHANNEL, hindi telemetry. Kapag ang rescue ay
+    tinanggap, `rescued_out.append(tick)`; ang tumatawag ay nagbi-bind ng
+    `tick = _rescued_entry_ticks[-1]`, at ang `bid` mula roon ang IISANG `bid` na
+    binabasa ng buong held-position na exit stack — stop breach, trail arm, at ang
+    C1 per-trade max-loss FORCE LIQUIDATION. Ang unang draft ay nagpalit ng `_s2`
+    BAGO ang admission test, na tumatanggi sa rescue at nag-iiwan sa hawak na
+    posisyon na nakapresyo sa PUNIT NA PRIMARY (1.30 dito sa halip na 1.42) — ang
+    mismong butas (2026-08-18 PFSA frozen mid) na pinanganak ng rescue para isara.
+
+    Kaya: ang secondary ay dapat NAI-APPEND pa rin, at ang locked na estado ay
+    NAKIKITA sa payload sa halip na tahimik.
     """
     monkeypatch.setattr(
         lr, "_refetch_bbo_secondary",
         lambda sym: (_tick(1.42, 1.42, source="massive_ws_universe"), "massive"),
     )
+    rescued: list = []
     block = _quote_quality_block(
         _tick(1.30, 1.45, source="massive_ws_universe"), None,
-        max_spread_bps=0.0, symbol="GYGY",
+        max_spread_bps=0.0, symbol="GYGY", rescued_out=rescued,
     )
-    assert block is not None, "isang punit na libro ang nag-rescue ng malapad na libro"
-    assert block["reason"] == "wide_bbo_spread"
-    assert block.get("rescued_from") != "wide_bbo_spread"
+    assert block is None, block
+    assert rescued, "ang na-validate na secondary ay hindi naiabot pabalik"
+    assert rescued[-1].bid == pytest.approx(1.42)
+
+
+# ────────────────────── CRYPTO — walang monkeypatch dito ──────────────────────
+
+
+def test_crypto_locked_book_is_never_treated_as_regular_hours():
+    """`market_session_now` ay nagbabalik ng "regular" para sa BAWAT -USD sa BAWAT oras.
+
+    market_profile.py:73-74 — crypto ay 24/7. Kung wala ang carve-out, ang
+    mahigpit na RTH-reject ay PERMANENTENG naka-arm sa lane ng Coinbase, sa lakas
+    ng Reg NMS 610(d) (na hindi namamahala sa Coinbase) at ng apat na sinukat na
+    bintana (na pawang US equities). SADYANG WALANG `regular_hours` na fixture
+    dito: ang buong punto ay ang TUNAY na `market_session_now`.
+    """
+    # Ang premise, na totoo sa magkabilang panig: crypto == "regular" 24/7.
+    assert market_profile.market_session_now("BTC-USD") == "regular"
+    # Ang GAWI — dating landas nang buo: walang pagtanggi AT walang pagpapalit.
+    # Ito ay tumatakbo nang PAREHO sa origin/main at dito (isang parity guard, at
+    # hindi isang demonstrasyon ng depekto — ang depekto ay ipinakikilala SANA ng
+    # branch, at ang pagsusuring ito ang pumipigil doon).
+    assert _quote_quality_block(
+        _tick(1.42, 1.42), None, max_spread_bps=500.0, symbol="BTC-USD",
+    ) is None
+    _ok, _gate = _entry_spread_risk_decision(
+        **{
+            "bid": 1.14, "ask": 1.14, "quantity": 551.0, "stop_distance": 0.05,
+            "max_fraction": 0.25, "expected_move_bps": 206.7,
+            **({"symbol": "ETH-USD"} if _locked_book_state is not None else {}),
+        }
+    )
+    assert _gate["gate_spread_bps"] == 0.0
+    assert _ok is True
+    # At ang mga helper mismo, kung nandito na sila.
+    if _locked_book_state is not None:
+        assert lr._locked_book_in_regular_hours("BTC-USD") is False
+        assert lr._locked_book_guard_applies("BTC-USD") is False
+        assert lr._locked_book_guard_applies("SDOT") is True
 
 
 # ────────── SHAPE C — ang stand-in predicate sa :21397 (0.0 vs 88.1) ──────────
@@ -174,13 +256,18 @@ def _auud(**overrides):
 def test_auud_locked_book_is_not_priced_as_a_free_crossing():
     """Tatlong sukatan ang lahat 0.0 sa main: bps, USD cost, at parehong fraction."""
     ok, gate = _auud()
-    assert gate["locked_book"] is True
+    # ⚠️ ANG PAGKAKASUNOD-SUNOD AY MAHALAGA (review fix). Ang GAWI muna, at ang
+    # bagong telemetry key sa DULO: sa origin/main ang kasong ito ay dapat
+    # bumagsak sa `gate_spread_bps 0.0 != 87.7193` — isang pahayag tungkol sa
+    # depekto — at HINDI sa `KeyError: 'locked_book'`, na isang pahayag lamang
+    # tungkol sa isang nawawalang key.
     # 1 tick sa mid 1.14 = 87.7 bps — nasa loob ng ~2% ng sariling p50 (89.4).
     assert gate["gate_spread_bps"] == pytest.approx(87.7193, rel=1e-4)
     assert gate["spread_cost_usd"] == pytest.approx(5.51, abs=0.01)
     assert gate["spread_fraction_of_expected_move"] > 0.0
     assert ok is False, gate
     assert gate["reason"] == "spread_exceeds_expected_move_budget"
+    assert gate["locked_book"] is True
 
 
 def test_two_sided_book_spread_gate_unchanged():
@@ -238,6 +325,97 @@ def test_genuinely_deteriorating_book_still_vetoes(monkeypatch):
     assert confirmed is False, dbg
     assert dbg["reason"] == "bid_prop_book_deteriorating"
     assert dbg.get("locked_rows_dropped", 0) == 0
+
+
+def test_locked_filter_can_never_manufacture_a_veto(monkeypatch):
+    """REVIEW FIX — ang guard ay ISANG-DIREKSYON.
+
+    Ang unang draft ay basta pinalitan ang tape ng nasala nito. Kapag ang
+    PINAKABAGONG row ang siyang locked, ang pagsala ay nagpapalit ng `spreads[-1]`
+    AT ng `bids[-1]`, kaya kaya nitong GUMAWA ng veto na wala sa origin/main.
+    Sinukat sa magkabilang worktree gamit ang eksaktong bintanang ito:
+
+        main  -> confirmed=True   bid_last 1.52  median 61.0  blown_out False
+        draft -> confirmed=False  bid_last 1.47  median 61.5  blown_out True
+                 reason bid_prop_book_deteriorating, locked_rows_dropped 1
+
+    Sa sinukat na 23.58-29.63% na locked na premarket tape, ang pinakabagong row
+    ay locked nang humigit-kumulang isa sa bawat apat na tick, kaya ang bagong
+    veto na iyon ay buhay sa loob mismo ng premarket na bintana. KONTRATA: ang
+    guard ay may pahintulot na MAG-ALIS ng veto at hindi kailanman makakadagdag.
+    """
+    window = [
+        (1.50, 60.0), (1.49, 62.0), (1.48, 61.0),
+        (1.47, 400.0), (1.52, 0.0),
+    ]
+    monkeypatch.setattr(
+        nbbo_tape, "recent_bid_spread_tape", lambda *a, **k: list(window)
+    )
+    confirmed, dbg = _bid_prop_confirms_break(None, "RDHL", window_s=30.0)
+    assert confirmed is True, dbg
+    assert dbg.get("reason") != "bid_prop_book_deteriorating"
+    # Ang hilaw na tape ang nagpasya, kaya walang row ang naibaba.
+    assert dbg.get("locked_rows_dropped", 0) == 0
+    assert dbg["bid_last"] == pytest.approx(1.52)
+
+
+# ───────────── ang punch-window hold — ang `locked_bbo` ay lumilipas ─────────────
+
+
+def test_locked_bbo_is_a_retryable_book_quality_reason():
+    """Ang locked ay ang PINAKA-LUMILIPAS na estado ng libro sa file na ito.
+
+    Ang `_PUNCH_RETRYABLE_QUOTE_REASONS` (idinagdag ng 2026-08-21 flush_dip_buy
+    audit) ang pumipigil sa isang one-shot na BOOK-quality veto na mag-demote ng
+    sariwang dip-family candidate pabalik sa WATCHING. Ang wide/stale/unstable/
+    INVALID ay nasa loob; kung ang `locked_bbo` ay maiiwan sa labas, ito ang
+    magiging TANGING book reason na one-shot na pumapatay ng kandidato — ang
+    eksaktong regression na idinagdag ang hold para pigilan.
+    """
+    assert "locked_bbo" in lr._PUNCH_RETRYABLE_QUOTE_REASONS
+    # PARITY: ang set ay hindi lumawak lampas sa isang idinagdag.
+    assert lr._PUNCH_RETRYABLE_QUOTE_REASONS == frozenset(
+        {"wide_bbo_spread", "stale_bbo", "unstable_spread", "invalid_bbo", "locked_bbo"}
+    )
+
+
+# ───────── ang write site ng `spread_bps_at_decision` (mig308 fill log) ─────────
+
+
+@pytest.mark.skipif(
+    _decision_spread_bps_for_fill_log is None,
+    reason="ang helper ay wala pa sa origin/main",
+)
+@pytest.mark.parametrize(
+    "symbol, bid, ask, expect_bps, expect_locked",
+    [
+        # Ang tatlong sinukat na session na may 0.0 na NAKA-IMBAK NA sa
+        # momentum_fill_outcomes.spread_bps_at_decision.
+        ("SDOT", 17.29, 17.29, 5.7837, True),
+        ("GYGY", 1.42, 1.42, 70.4225, True),
+        ("AUUD", 1.14, 1.14, 87.7193, True),
+        # PARITY: ang tunay na dalawang-panig na libro ay hilaw na aritmetika.
+        ("AUUD", 1.14, 1.1401, 0.8771, False),
+        # CRYPTO: dating landas nang buo — 0.0 pa rin, walang equity tick.
+        ("BTC-USD", 1.42, 1.42, 0.0, False),
+    ],
+)
+def test_fill_log_decision_spread_no_longer_writes_a_fabricated_zero(
+    symbol, bid, ask, expect_bps, expect_locked
+):
+    """Ang mga LUMANG row ay isang hiwalay na migration (CLAUDE.md hard rule 3).
+
+    Ang WRITE SITE ay hindi: kung hindi ito aayusin, ang branch na ito ay
+    magpapatuloy sa paggawa ng mismong 0.0 na sinulat nito para alisin — kasama
+    sa mga extended-hours na admission na SADYA nating pinapayagan (GYGY: isang
+    tick = 70.4 bps laban sa 100.6 bps na budget, kaya pumapasok pa rin iyon).
+    """
+    _mid = (bid + ask) / 2.0
+    _bps, _locked = _decision_spread_bps_for_fill_log(bid, ask, _mid, symbol)
+    assert _locked is expect_locked
+    assert _bps == pytest.approx(expect_bps, rel=1e-4, abs=1e-9)
+    if expect_locked:
+        assert _bps > 0.0, "isang bagong ginawang 0.0 sa fill log"
 
 
 # ───────────────────────── ang helper mismo ─────────────────────────
