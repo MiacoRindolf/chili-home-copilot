@@ -194,3 +194,19 @@ def test_nbbo_delete_bounds_stay_timezone_aware():
     _, _, lo, hi = conn.cur.params[0]
     assert lo.tzinfo is not None and hi.tzinfo is not None
     assert lo.isoformat() == "2026-09-02T04:00:00+00:00"
+
+
+def test_check_flag_exists_and_is_exclusive_with_apply(capsys):
+    """The runbook and the handover both tell people to run --check.
+
+    A documented flag that argparse rejects is a defect, and the failure lands
+    on whoever is trying to gate a study on the invariant.
+    """
+    import pytest
+
+    from scripts.hydration_canonicalize import main
+
+    with pytest.raises(SystemExit) as exc:
+        main(["--check", "--apply"])
+    assert exc.value.code == 2  # argparse usage error, not a crash
+    assert "mutually exclusive" in capsys.readouterr().err

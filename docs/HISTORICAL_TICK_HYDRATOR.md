@@ -154,6 +154,34 @@ names REEMF 2026-08-19 and NLST 2026-08-20 whose trades loaded fine.
 Dropping the non-preferred copy loses nothing durable; a cross-check copy is one
 command away via `--db-name chili_hydrated_xcheck`.
 
+### 0b. The tape is as-traded; aggregate-derived levels are split-adjusted
+
+Provider **tick** endpoints (IQFeed `HTT`, Polygon `/v3/trades`) return
+**as-traded** prices. Provider **aggregate** endpoints (Polygon grouped-daily
+and per-ticker minute bars) return **split-adjusted** prices by default. A study
+that sets entry/stop levels from aggregates and evaluates them against a
+hydrated tick tape is comparing two different price scales.
+
+Measured on the Phase 4 corpus: **15 of 119 symbol-days (11 symbols) off by
+5×–160×** — LGCL 2026-08-26 corpus band midpoint $9.125 against a tape median
+print of $0.0605.
+
+The tape is not wrong. **Dollar volume is invariant under split adjustment**, and
+on all 15 the tape's dollar volume matches the corpus to within 0.4 % (LGCL
+$49,520,244 vs $49,503,126, ratio 1.0003). Both providers agree on the
+as-traded price. The levels are simply denominated differently.
+
+```powershell
+python scripts/hydration_price_scale_check.py --csv corpus.csv   # exit 1 if flagged
+```
+
+It separates the two hypotheses rather than just reporting a difference:
+dollar volume agrees but price does not → `split_adjusted_levels` (tape fine,
+rescale your levels); dollar volume disagrees → `volume_mismatch` (a coverage or
+inclusion-rule question, *not* a split). It compares **median** price, not the
+high — one stray one-share print moves the max by orders of magnitude and
+produced three false positives when this was first tried against the max.
+
 ## Two more traps
 
 ### 1. The timezone landmine

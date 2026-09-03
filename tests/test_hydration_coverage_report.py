@@ -92,8 +92,46 @@ def test_done_but_empty_is_a_failure_not_coverage(monkeypatch):
     assert report["coverage_by_source"].get("iqfeed_trades", 0) == 0
     assert report["replayable_trades"] == 0
     assert "LGCL 2026-08-26" in report["not_replayable"]
-    labels = [f["status"] for f in report["failures"]]
-    assert "done_but_empty" in labels
+    assert any(f["dataset"] == "trades" and f["status"] == "uncovered"
+               for f in report["failures"])
+
+
+def test_canonicalized_away_source_is_not_a_failure(monkeypatch):
+    """The false-alarm defect.
+
+    Canonicalization DELETES the non-preferred source on purpose, leaving a job
+    marked ``done`` with no rows behind it.  Calling that a failure raised ~250
+    false alarms on the real corpus and buried the 6 genuine gaps.  Coverage is
+    a property of the TABLE, not of a provider.
+    """
+    counts = {(hyd.TRADES_TABLE, hyd.SOURCE_IQFEED_TRADES, "LGCL", D): 310382,
+              (hyd.NBBO_TABLE, hyd.SOURCE_POLYGON_NBBO, "LGCL", D): 103057}
+    jobs = [("LGCL", D, "trades", "iqfeed", "done", 310382, None),
+            # loaded, then dropped by canonicalize:
+            ("LGCL", D, "trades", "polygon", "done", 310382, None),
+            ("LGCL", D, "nbbo", "iqfeed", "done", 309000, None),
+            ("LGCL", D, "nbbo", "polygon", "done", 103057, None)]
+    report, _ = run(monkeypatch, [("LGCL", D)], counts, jobs)
+
+    assert report["failure_count"] == 0
+    assert report["replayable_both"] == 1
+
+
+def test_no_data_from_every_provider_is_labelled_as_such(monkeypatch):
+    """The 6 real gaps: REEMF/NLST/FMCC have no NBBO from EITHER provider.
+
+    That is a different fact from "we did not try", and the label has to say so
+    or someone will go looking for a bug that is not there.
+    """
+    counts = {(hyd.TRADES_TABLE, hyd.SOURCE_IQFEED_TRADES, "REEMF", D2): 3677}
+    jobs = [("REEMF", D2, "trades", "iqfeed", "done", 3677, None),
+            ("REEMF", D2, "nbbo", "iqfeed", "no_data", 0, None),
+            ("REEMF", D2, "nbbo", "polygon", "no_data", 0, None)]
+    report, _ = run(monkeypatch, [("REEMF", D2)], counts, jobs)
+
+    assert report["replayable_trades"] == 1      # still replayable on trades
+    assert report["replayable_nbbo"] == 0
+    assert report["failure_reasons"]["nbbo/no_data_from_any_provider"]["n"] == 1
 
 
 def test_rows_present_count_as_coverage(monkeypatch):
@@ -125,9 +163,10 @@ def test_one_provider_is_enough_to_be_replayable(monkeypatch):
 
     assert report["replayable_trades"] == 1
     assert report["replayable_both"] == 1
-    # ...but the IQFeed hole is still REPORTED rather than papered over.
-    assert any(f["provider"] == "iqfeed" and f["status"] == "no_data"
-               for f in report["failures"])
+    # Polygon covered it, so the table is not a hole and nothing is flagged.
+    assert report["failure_count"] == 0
+    # ...but the IQFeed job status is still visible per symbol-day.
+    assert report["per_symbol_day"][0]["iqfeed_trades_status"] == "no_data"
 
 
 def test_failures_are_grouped_by_distinct_reason(monkeypatch):
@@ -138,8 +177,10 @@ def test_failures_are_grouped_by_distinct_reason(monkeypatch):
                     counts={}, jobs=jobs)
 
     assert report["failure_count"] >= 3
-    key = "iqfeed/trades/failed"
+    key = "trades/uncovered"
     assert report["failure_reasons"][key]["n"] == 3
+    # the per-provider error text survives into the detail line
+    assert any("TimeoutError" in f["detail"] for f in report["failures"])
     assert report["not_replayable"] == ["AAA 2026-08-26", "BBB 2026-08-26",
                                         "CCC 2026-08-26"]
 
@@ -151,6 +192,7 @@ def test_missing_job_row_is_not_silently_covered(monkeypatch):
     assert report["replayable_trades"] == 0
     assert report["per_symbol_day"][0]["iqfeed_trades_status"] == "missing"
     assert "NEVR 2026-08-26" in report["not_replayable"]
+    assert report["failure_reasons"]["trades/uncovered"]["n"] == 1
 
 
 def test_cost_totals_sum_every_provider_dataset(monkeypatch):

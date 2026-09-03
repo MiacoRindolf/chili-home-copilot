@@ -150,12 +150,29 @@ def build_report(pairs: list[tuple[str, date]], dbname: str,
                 covered[f"{prov}_{ds}"] += 1
             status, _, err = jobs.get((sym, day, ds, prov), ("missing", 0, None))
             rec[f"{prov}_{ds}_status"] = status
-            if status in ("failed", "no_data") or (status == "done" and n == 0):
-                label = status if status != "done" else "done_but_empty"
-                failures.append({"symbol": sym, "date": day.isoformat(),
-                                 "provider": prov, "dataset": ds,
-                                 "status": label, "error": err})
-                reasons[f"{prov}/{ds}/{label}"].append(f"{sym} {day}")
+
+        # Report holes per TABLE, not per provider-dataset. A source with zero
+        # rows is only a hole if NOTHING covers that table for that symbol-day:
+        # canonicalization deliberately deletes the non-preferred source, so a
+        # job legitimately marked `done` whose rows were then dropped is the
+        # design working, not a failure. Counting those as failures would raise
+        # ~250 false alarms and bury the handful of real gaps.
+        for ds, provs in (("trades", ("iqfeed", "polygon")),
+                          ("nbbo", ("polygon", "iqfeed"))):
+            if any(rec[f"{p}_{ds}"] > 0 for p in provs):
+                continue
+            details = []
+            for p in provs:
+                st, _, err = jobs.get((sym, day, ds, p), ("missing", 0, None))
+                details.append(f"{p}={st}" + (f" ({err})" if err else ""))
+            label = ("no_data_from_any_provider"
+                     if all(jobs.get((sym, day, ds, p), ("missing", 0, None))[0]
+                            == "no_data" for p in provs)
+                     else "uncovered")
+            failures.append({"symbol": sym, "date": day.isoformat(),
+                             "dataset": ds, "status": label,
+                             "detail": "; ".join(details)})
+            reasons[f"{ds}/{label}"].append(f"{sym} {day}")
         # A symbol-day is replayable when SOME provider gave it trades.
         rec["replayable_trades"] = rec["iqfeed_trades"] > 0 or rec["polygon_trades"] > 0
         rec["replayable_nbbo"] = rec["iqfeed_nbbo"] > 0 or rec["polygon_nbbo"] > 0

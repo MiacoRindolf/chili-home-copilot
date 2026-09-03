@@ -161,8 +161,15 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--env-file", default=None)
     ap.add_argument("--apply", action="store_true",
                     help="delete the non-preferred slices (default is check-only)")
+    ap.add_argument("--check", action="store_true",
+                    help="explicitly assert the invariant; exit 1 if violated "
+                         "(this is also the default when --apply is absent)")
     ap.add_argument("--json", help="write the full plan here")
     args = ap.parse_args(argv)
+
+    if args.check and args.apply:
+        ap.error("--check and --apply are mutually exclusive: --check asserts, "
+                 "--apply mutates")
 
     conn = connect(args.db_name, args.env_file)
     report: dict[str, Any] = {"database": args.db_name, "applied": bool(args.apply),
