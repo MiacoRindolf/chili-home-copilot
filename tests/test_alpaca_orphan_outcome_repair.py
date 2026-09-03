@@ -440,7 +440,33 @@ class _RecheckAdapter:
         }
 
 
-def _enable_orphan_reconcile(monkeypatch, adapter):
+# FIXTURE ROT, REPAIRED 2026-09-02. These four tests used the literal
+# "paper-account" as the pinned account id. `canonical_alpaca_paper_account_id`
+# (alpaca_paper_identity.py:29) fails CLOSED on anything that is not a canonical
+# lower-case UUID, so every one of them raised AlpacaPaperAccountIdentityError
+# BEFORE reaching a single assertion — including the two that are the standing
+# "never sell / never cancel" guarantees on `_sweep_unmanaged_positions`, the very
+# sweep this branch re-arms. A red guardrail asserts nothing. The value below is a
+# canonical UUID with no relationship to any real account.
+_PAPER_ACCOUNT_ID = "00000000-0000-4000-8000-0000000000a1"
+_OTHER_PAPER_ACCOUNT_ID = "00000000-0000-4000-8000-0000000000b2"
+
+
+def _enable_orphan_reconcile(monkeypatch, adapter, *, unmanaged_backstop=False):
+    # `unmanaged_backstop` is what #1266 added on 2026-09-01 and it REVERSES the
+    # contract these tests were written for: with it ON,
+    # `_sweep_unmanaged_positions` sells any unowned position past the grace
+    # window, which is the whole point (the 30-minute naked GYGY 19338). Every
+    # test below that predates #1266 is about the EXACT-CLAIMS scope, so it runs
+    # with the backstop OFF, exactly as its assertions say. The backstop's own
+    # behaviour is asserted separately in
+    # `test_the_unmanaged_backstop_sells_an_unowned_long_but_never_a_short_or_crypto`.
+    monkeypatch.setattr(
+        ar.settings,
+        "chili_alpaca_unmanaged_position_flatten_enabled",
+        bool(unmanaged_backstop),
+        raising=False,
+    )
     monkeypatch.setattr(ar.settings, "chili_momentum_alpaca_orphan_reconcile_enabled", True)
     monkeypatch.setattr(ar.settings, "chili_momentum_live_runner_enabled", True)
     monkeypatch.setattr(ar.settings, "chili_alpaca_enabled", True)
@@ -449,13 +475,13 @@ def _enable_orphan_reconcile(monkeypatch, adapter):
     monkeypatch.setattr(
         ar.settings,
         "chili_alpaca_expected_account_id",
-        "paper-account",
+        _PAPER_ACCOUNT_ID,
         raising=False,
     )
-    adapter.bind_account_id = lambda account_id: account_id == "paper-account"
+    adapter.bind_account_id = lambda account_id: account_id == _PAPER_ACCOUNT_ID
     adapter.get_account_snapshot = lambda: {
         "ok": True,
-        "account_id": "paper-account",
+        "account_id": _PAPER_ACCOUNT_ID,
         "paper": True,
         "status": "ACTIVE",
         "account_blocked": False,
@@ -477,7 +503,7 @@ def test_matching_historical_shape_cannot_mint_unclaimed_close_authority(monkeyp
 
     result = ar.run_alpaca_orphan_reconcile(db)
 
-    assert result["reconcile_scope"] == "exact_claims_only"
+    assert result["reconcile_scope"] == "exact_claims_plus_unmanaged_backstop"
     assert result["generic_inventory_mutation_enabled"] is False
     assert result["account_verification"]["account_snapshot_read"] is True
     assert result["flattened"] == 0
@@ -491,7 +517,7 @@ def test_unattributed_manual_position_is_quarantined_without_sell(monkeypatch):
 
     result = ar.run_alpaca_orphan_reconcile(db)
 
-    assert result["reconcile_scope"] == "exact_claims_only"
+    assert result["reconcile_scope"] == "exact_claims_plus_unmanaged_backstop"
     assert result["generic_inventory_mutation_enabled"] is False
     assert result["flattened"] == 0
     assert adapter.market_orders == []
@@ -526,10 +552,76 @@ def test_unowned_manual_open_order_is_never_cancelled(monkeypatch):
 
     result = ar.run_alpaca_orphan_reconcile(db)
 
-    assert result["reconcile_scope"] == "exact_claims_only"
+    assert result["reconcile_scope"] == "exact_claims_plus_unmanaged_backstop"
     assert result["generic_inventory_mutation_enabled"] is False
     assert result["cancelled"] == 0
     assert cancelled == []
+
+
+class _MixedInventoryAdapter:
+    """A long, a SHORT and a crypto pair — none of them owned by any session."""
+
+    def __init__(self, db: _RunDb) -> None:
+        self.db = db
+        self.market_orders = []
+
+    def is_enabled(self):
+        return True
+
+    def list_positions(self):
+        return ([
+            {"product_id": "LONGEQ", "raw_symbol": "LONGEQ", "qty": 100.0,
+             "asset_class": "us_equity", "avg_entry_price": 2.0,
+             "market_value": 200.0, "unrealized_pl": -5.0},
+            {"product_id": "SHORTEQ", "raw_symbol": "SHORTEQ", "qty": -100.0,
+             "asset_class": "us_equity", "avg_entry_price": 2.0,
+             "market_value": -200.0, "unrealized_pl": -5.0},
+            {"product_id": "BTC-USD", "raw_symbol": "BTC-USD", "qty": 0.5,
+             "asset_class": "crypto", "avg_entry_price": 100.0,
+             "market_value": 50.0, "unrealized_pl": -1.0},
+        ], None)
+
+    def list_open_orders(self, **_kwargs):
+        return [], None
+
+    def place_market_order(self, **kwargs):
+        assert self.db.in_read_transaction is False
+        self.market_orders.append(kwargs)
+        return {"ok": True, "order_id": "orphan-exit",
+                "client_order_id": kwargs["client_order_id"]}
+
+
+def test_the_unmanaged_backstop_sells_an_unowned_long_but_never_a_short_or_crypto(
+    monkeypatch,
+):
+    """#1266 REVERSED the 'never sell an unattributed position' contract.
+
+    That reversal was deliberate — it is the last shield against a position whose
+    owning session is already TERMINAL, the 30-minute naked GYGY 19338 — but the
+    four tests above that asserted the old contract had been erroring on the
+    account-id fixture since before #1266 landed, so the contradiction was never
+    visible. This test states the post-#1266 truth in one place.
+
+    It also pins the two shapes the sweep must still refuse. `_sweep_unmanaged_
+    positions` issues exactly one action, ``side="sell"`` on ``abs(qty)``: on a
+    SHORT that DOUBLES the position rather than closing it, and on a crypto pair
+    it trades an instrument this deployment is not certified for. Before this
+    branch the only thing between those two shapes and a live order was the
+    pass-wide persisted-identity quarantine — a proxy over stale session JSON,
+    and the same gate that had kept the whole pass inert for ~50 days.
+    """
+    db = _RunDb()
+    adapter = _MixedInventoryAdapter(db)
+    _enable_orphan_reconcile(monkeypatch, adapter, unmanaged_backstop=True)
+    monkeypatch.setattr(ar, "_grace_minutes", lambda: 0.0)
+
+    result = ar.run_alpaca_orphan_reconcile(db)
+
+    assert result["generic_inventory_mutation_enabled"] is True
+    sold = [o["product_id"] for o in adapter.market_orders]
+    assert sold == ["LONGEQ"], sold
+    assert result["unmanaged_uncertified_shape"] == 2
+    assert all(o["side"] == "sell" for o in adapter.market_orders)
 
 
 def test_exact_claim_sweeps_run_only_after_pinned_paper_account_verification(
@@ -561,7 +653,7 @@ def test_exact_claim_sweeps_run_only_after_pinned_paper_account_verification(
     assert result["settled"] == 1
     assert result["detached"] == 1
     assert result["active"] == 1
-    assert result["reconcile_scope"] == "exact_claims_only"
+    assert result["reconcile_scope"] == "exact_claims_plus_unmanaged_backstop"
     assert adapter.market_orders == []
 
 
@@ -571,7 +663,7 @@ def test_wrong_paper_account_generation_blocks_all_exact_claim_sweeps(monkeypatc
     _enable_orphan_reconcile(monkeypatch, adapter)
     adapter.get_account_snapshot = lambda: {
         "ok": True,
-        "account_id": "different-paper-account",
+        "account_id": _OTHER_PAPER_ACCOUNT_ID,
         "paper": True,
         "status": "ACTIVE",
         "account_blocked": False,

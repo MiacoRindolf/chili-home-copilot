@@ -100,6 +100,7 @@ from .operator_readiness import (
     next_action_required,
 )
 from .session_lifecycle import (
+    OPERATOR_PAUSE_KEY,
     apply_operator_pause,
     canonical_operator_state,
     clear_operator_pause,
@@ -2181,6 +2182,7 @@ def reap_stale_live_sessions(db: Session, *, user_id: int) -> dict[str, Any]:
     out: dict[str, Any] = {
         "reaped": 0,
         "skipped_unknown": 0,
+        "skipped_terminalization_deferred": 0,
         "skipped_held": 0,
         "skipped_in_flight": 0,
         "skipped_direction_mismatch": 0,
@@ -2353,6 +2355,13 @@ def reap_stale_live_sessions(db: Session, *, user_id: int) -> dict[str, Any]:
                      "ttl_seconds": ttl_s, "terminal_state": res.get("state")},
                     correlation_id=sess.correlation_id, source_node_id="momentum_automation_monitor",
                 )
+            elif res.get("ok"):
+                # DEFERRED, not unknown: the cancel wrote an operator pause and
+                # left a live broker order outstanding.  Conflating the two here
+                # meant the only trace of that outcome was an in-memory counter
+                # nobody reads.  The durable event is written by
+                # `_pause_operator_terminalization` inside the cancel itself.
+                out["skipped_terminalization_deferred"] += 1
             else:
                 out["skipped_unknown"] += 1
         else:
@@ -4326,8 +4335,33 @@ def _owned_unresolved_alpaca_entry_claim(
     return True, claim
 
 
+def _deferral_event_min_interval_seconds() -> float:
+    """Floor between two ``terminalization_deferred_operator_pause`` events.
+
+    Shares the reaper's re-ask cadence so a machine deferral produces at most one
+    event per re-ask, not one per pass.  A human hammering the stop button is
+    bounded by the same floor.
+    """
+    try:
+        return max(
+            30.0,
+            float(
+                getattr(settings, "chili_momentum_reap_deferred_retry_seconds", 300)
+                or 300
+            ),
+        )
+    except (TypeError, ValueError):
+        return 300.0
+
+
 def _pause_operator_terminalization(
     sess: TradingAutomationSession,
+    *,
+    db: Session | None = None,
+    pending: str | None = None,
+    initiator: str | None = None,
+    claim: dict[str, Any] | None = None,
+    detail: dict[str, Any] | None = None,
 ) -> None:
     """Durably fence new entry work while operator terminal truth is pending.
 
@@ -4335,10 +4369,58 @@ def _pause_operator_terminalization(
     must therefore carry the operator pause in the same transaction; otherwise a
     still-runnable pre-entry session can reserve a fresh broker CID after the human
     already asked it to stop.
+
+    THE PAUSE ALONE IS NOT AN AUDIT TRAIL (2026-09-02, CANF 19471).  Every caller
+    below returns ``ok=True`` with the session NON-terminal while a live broker
+    order is still outstanding, and until now the only trace was a self-overwriting
+    snapshot key: ``trading_automation_events`` was completely empty for the 12m49s
+    the position sat unstopped, and 31 of the 34 active operator pauses on live
+    sessions in the 21 days to 2026-09-02 have no event that explains them.  A
+    reaper deferral and a human's deferred stop were indistinguishable because both
+    took this same eventless path.
+
+    ``db`` (plus ``pending``/``initiator``) therefore writes an append-only
+    ``terminalization_deferred_operator_pause`` event and a WARNING log saying what
+    actually happened.  Both are bounded by ``_deferral_event_min_interval_seconds``
+    so a re-asked deferral cannot become a second event storm.  Passing no ``db``
+    keeps the old pause-only behaviour (used where no event is wanted).
+
+    THE BOUND IS KEYED ON THE ORDER, NOT THE REASON.  ``_deferral_event_min_
+    interval_seconds`` only applies from the second deferral of a RUN onwards, and
+    a run is identified by the outstanding broker/client order id (see
+    ``apply_operator_pause``).  Keying it on ``pending`` — as this first landed —
+    would let broker truth alternating between two reasons for the same order
+    restart the run on every re-ask and bypass the floor entirely.
     """
+    _prior_snap = sess.risk_snapshot_json if isinstance(sess.risk_snapshot_json, dict) else {}
+    _prior = _prior_snap.get(OPERATOR_PAUSE_KEY)
+    _prior = _prior if isinstance(_prior, dict) else {}
+    _previous_state = str(sess.state or "")
+    _le_prior = _prior_snap.get("momentum_live_execution")
+    _le_prior = _le_prior if isinstance(_le_prior, dict) else {}
+    _claim_in = claim if isinstance(claim, dict) else {}
+    # RUN IDENTITY = THE OUTSTANDING ORDER, not the `pending` reason.  Broker
+    # truth alternates between reasons for one and the same order (six values are
+    # reachable), and keying the run on the reason let every alternation reset
+    # `deferral_count` to 1 — which makes the `_count > 1` rate limit below fire
+    # never.  Falling back to the session id keeps a reasonless deferral bounded
+    # too, instead of unbounded.
+    _order_key = str(
+        _claim_in.get("broker_order_id")
+        or _claim_in.get("client_order_id")
+        or _le_prior.get("entry_order_id")
+        or _le_prior.get("entry_reconcile_pending_client_order_id")
+        or _le_prior.get("entry_client_order_id")
+        or f"session:{getattr(sess, 'id', None)}"
+    )
     sess.risk_snapshot_json = apply_operator_pause(
         sess.risk_snapshot_json,
         state=sess.state,
+        deferral=(
+            {"pending": pending, "initiator": initiator, "order_key": _order_key}
+            if db is not None
+            else None
+        ),
     )
     sess.updated_at = datetime.utcnow()
     try:
@@ -4347,6 +4429,90 @@ def _pause_operator_terminalization(
         flag_modified(sess, "risk_snapshot_json")
     except Exception:
         pass
+    if db is None:
+        return
+    _pause = sess.risk_snapshot_json.get(OPERATOR_PAUSE_KEY)
+    _pause = _pause if isinstance(_pause, dict) else {}
+    _count = int(_pause.get("deferral_count") or 1)
+    # Rate-limit the EVENT, never the pause.  First deferral of a run always
+    # speaks; afterwards only once per re-ask cadence.
+    _due = True
+    if _count > 1 and _prior.get("deferral_event_at_utc"):
+        try:
+            _last = datetime.fromisoformat(str(_prior["deferral_event_at_utc"]))
+            if _last.tzinfo is not None:
+                _last = _last.astimezone(timezone.utc).replace(tzinfo=None)
+            _due = (
+                datetime.utcnow() - _last
+            ).total_seconds() >= _deferral_event_min_interval_seconds()
+        except (TypeError, ValueError):
+            _due = True
+    if not _due:
+        return
+
+    _snap = sess.risk_snapshot_json if isinstance(sess.risk_snapshot_json, dict) else {}
+    _le = _snap.get("momentum_live_execution")
+    _le = _le if isinstance(_le, dict) else {}
+    _claim = claim if isinstance(claim, dict) else {}
+    _payload: dict[str, Any] = {
+        "pending": pending,
+        "initiator": initiator,
+        "previous_state": _previous_state,
+        "symbol": sess.symbol,
+        "execution_family": sess.execution_family,
+        "broker_order_id": (
+            _claim.get("broker_order_id") or _le.get("entry_order_id") or None
+        ),
+        "client_order_id": (
+            _claim.get("client_order_id")
+            or _le.get("entry_reconcile_pending_client_order_id")
+            or _le.get("entry_client_order_id")
+            or None
+        ),
+        "claim_token": _claim.get("claim_token") or None,
+        "entry_submitted": bool(_le.get("entry_submitted")),
+        "deferral_order_key": _pause.get("deferral_order_key"),
+        "deferral_count": _count,
+        "deferral_first_at_utc": _pause.get("deferral_first_at_utc"),
+    }
+    if isinstance(detail, dict) and detail:
+        _payload["detail"] = detail
+    try:
+        append_trading_automation_event(
+            db,
+            int(sess.id),
+            "terminalization_deferred_operator_pause",
+            _payload,
+            correlation_id=sess.correlation_id,
+            source_node_id="momentum_automation_query",
+        )
+        _pause["deferral_event_at_utc"] = datetime.utcnow().isoformat()
+        try:
+            from sqlalchemy.orm.attributes import flag_modified
+
+            flag_modified(sess, "risk_snapshot_json")
+        except Exception:
+            pass
+    except Exception:
+        # The log below is the record that survives an event-write failure; it is
+        # written unconditionally and BEFORE nothing else depends on it.
+        logger.warning(
+            "[automation_query] terminalization deferral event write failed "
+            "session=%s",
+            getattr(sess, "id", None),
+            exc_info=True,
+        )
+    logger.warning(
+        "[automation_query] terminalization DEFERRED session=%s %s state=%s "
+        "pending=%s initiator=%s oid=%s submitted=%s count=%s first=%s — operator "
+        "pause written; the session was NOT terminalized and still holds live "
+        "broker work",
+        getattr(sess, "id", None), sess.symbol, _previous_state,
+        pending, initiator,
+        str(_payload.get("broker_order_id") or "")[:8] or None,
+        _payload.get("entry_submitted"), _count,
+        _payload.get("deferral_first_at_utc"),
+    )
 
 
 def _exact_pre_http_operator_claim(
@@ -4435,7 +4601,13 @@ def stop_automation_session(db: Session, *, user_id: int, session_id: int) -> di
                 _durable_claim.get("client_order_id")
                 or _durable_claim.get("broker_order_id")
             ):
-                _pause_operator_terminalization(sess)
+                _pause_operator_terminalization(
+                    sess,
+                    db=db,
+                    pending="durable_alpaca_entry_claim_reconcile",
+                    initiator="operator",
+                    claim=_durable_claim,
+                )
                 db.flush()
                 return {
                     "ok": True,
@@ -4452,7 +4624,14 @@ def stop_automation_session(db: Session, *, user_id: int, session_id: int) -> di
                 sess,
                 _durable_claim,
             ):
-                _pause_operator_terminalization(sess)
+                _pause_operator_terminalization(
+                    sess,
+                    db=db,
+                    pending="durable_alpaca_entry_claim_reconcile",
+                    initiator="operator",
+                    claim=_durable_claim,
+                    detail={"why": "cid_less_permit_not_exact_no_transport_proof"},
+                )
                 db.flush()
                 return {
                     "ok": True,
@@ -4480,7 +4659,17 @@ def stop_automation_session(db: Session, *, user_id: int, session_id: int) -> di
         if not live_stop.get("ok"):
             return live_stop
         if live_stop.get("terminalization_deferred"):
-            _pause_operator_terminalization(sess)
+            _pause_operator_terminalization(
+                sess,
+                db=db,
+                pending=str(live_stop.get("pending") or "broker_flat_confirmation"),
+                initiator="operator",
+                detail={
+                    k: live_stop.get(k)
+                    for k in ("action", "pending", "broker_truth")
+                    if live_stop.get(k) is not None
+                },
+            )
             db.flush()
             return {
                 "ok": True,
@@ -4971,8 +5160,21 @@ def cancel_automation_session(
             if _durable_claim.get("broker_order_id"):
                 le["entry_order_id"] = _durable_claim["broker_order_id"]
             snap["momentum_live_execution"] = le
-            sess.risk_snapshot_json = apply_operator_pause(snap, state=sess.state)
-            sess.updated_at = datetime.utcnow()
+            # THE CANF 19471 BRANCH.  This is the exact path the auto-arm stale
+            # reaper took at 11:19:10.224Z, in the same second as the submit, and
+            # the reason nothing was written anywhere for the next 12m49s.  It
+            # used to inline its own `apply_operator_pause` and so bypassed the
+            # only place a deferral could be announced; routing it through the
+            # shared helper gives it the durable event, the WARNING line and the
+            # `flag_modified` the inline version also lacked.
+            sess.risk_snapshot_json = snap
+            _pause_operator_terminalization(
+                sess,
+                db=db,
+                pending="durable_alpaca_entry_claim_reconcile",
+                initiator=cancelled_by,
+                claim=_durable_claim,
+            )
             db.flush()
             return {
                 "ok": True,
@@ -4985,7 +5187,14 @@ def cancel_automation_session(
             sess,
             _durable_claim,
         ):
-            _pause_operator_terminalization(sess)
+            _pause_operator_terminalization(
+                sess,
+                db=db,
+                pending="durable_alpaca_entry_claim_reconcile",
+                initiator=cancelled_by,
+                claim=_durable_claim,
+                detail={"why": "cid_less_permit_not_exact_no_transport_proof"},
+            )
             db.flush()
             return {
                 "ok": True,
@@ -5012,7 +5221,17 @@ def cancel_automation_session(
             request_kind="cancel",
         )
         if cancel_truth.get("terminalization_deferred"):
-            _pause_operator_terminalization(sess)
+            _pause_operator_terminalization(
+                sess,
+                db=db,
+                pending=str(cancel_truth.get("pending") or "broker_flat_confirmation"),
+                initiator=cancelled_by,
+                detail={
+                    k: cancel_truth.get(k)
+                    for k in ("action", "pending", "broker_truth")
+                    if cancel_truth.get(k) is not None
+                },
+            )
             db.flush()
             return {
                 "ok": True,

@@ -11,6 +11,7 @@ import math
 from datetime import datetime, timedelta
 from typing import Any
 
+from sqlalchemy import text as _sa_text
 from sqlalchemy.orm import Session
 
 from ...config import settings
@@ -62,6 +63,27 @@ LANE_OBSERVATION_SILENT = "lane_observation_silent"
 # `severity: critical` and produced zero operator response for 108 minutes.
 # Routed here so it reaches a phone.
 ENTRY_FILL_UNADOPTED = "entry_fill_unadopted"
+
+# Safety alarm: a live broker entry order exists that the FSM cannot observe, so
+# the position it may already be holding has no software stop and no deadman
+# stop. Raised where a loop would otherwise spin forever without converging:
+#   * the entry-confirm poll that has been deferring past its cap (CELU 17712 --
+#     267 deferrals over 2,929s, ended by a human);
+#   * the out-of-band terminal-row sweep, when broker truth says an order owned
+#     by a TERMINAL session actually filled (BRNX 17370, realized -82.00, which
+#     surfaced only because an operator cancel bounced).
+# Not a trade signal, and deliberately NOT in _STOP_CRITICAL_TYPES: that set arms
+# dispatch_alert's 2s/8s time.sleep retry ladder on the CALLER's thread, and one
+# caller is inside a live-runner tick holding an open transaction on a box with a
+# documented idle-in-transaction cascade. Throttle is skipped explicitly instead.
+LIVE_ENTRY_ORDER_UNOBSERVED = "live_entry_order_unobserved"
+
+# Infrastructure alarm: the account-wide Alpaca orphan reconciler -- the ONLY
+# broker-truth-driven sweeper that can find a position whose owning session is
+# already terminal -- has returned zero broker calls for consecutive passes. It
+# runs every 120s and logged nothing at all while inert, so a ~50-day outage was
+# invisible until someone read the code.
+ALPACA_RECONCILE_INERT = "alpaca_reconcile_inert"
 
 # Alert tiers: A = high confidence / promoted pattern, B = standard, C = speculative
 TIER_A = "A"
@@ -213,6 +235,10 @@ def classify_alert_tier(
         # A dead control loop outranks every trade signal: nothing else on
         # this list can fire while the loop that produces them is stopped.
         MOMENTUM_LOOP_DEAD,
+        # An unobserved live entry order and a dead reconciler both mean real
+        # broker exposure with no owner. Same rank, same reason.
+        LIVE_ENTRY_ORDER_UNOBSERVED,
+        ALPACA_RECONCILE_INERT,
         # An unadopted broker fill IS a stop-critical condition: real shares are
         # held with no software stop and no deadman stop. It outranks STOP_HIT,
         # which at least implies a stop existed.
@@ -265,6 +291,8 @@ _INDIVIDUAL_MSG_TYPES = frozenset({
     # EDITS a pinned message in place and produces no phone notification --
     # i.e. a fourth silent surface for the one alarm meant to be loud.
     MOMENTUM_LOOP_DEAD,
+    LIVE_ENTRY_ORDER_UNOBSERVED,
+    ALPACA_RECONCILE_INERT,
     # Same reasoning. NOTE the deliberate asymmetry: ENTRY_FILL_UNADOPTED is
     # TIER_A and individual (so it pages) but is NOT in _STOP_CRITICAL_TYPES,
     # exactly like MOMENTUM_LOOP_DEAD and for the same reason spelled out in
@@ -879,6 +907,57 @@ def dispatch_alert(
             db.close()
 
     return sent
+
+
+_ALREADY_DELIVERED_SQL = _sa_text(
+    """
+    SELECT 1
+      FROM trading_alerts
+     WHERE id > (SELECT max(id) - :window FROM trading_alerts)
+       AND alert_type = :alert_type
+       AND content_signature = :signature
+       AND success = true
+     LIMIT 1
+    """
+)
+
+# ~8 days of alerts at the measured 488/day. Same window and same shape as
+# control_loop_watchdog._ALREADY_PAGED_SQL, which is the precedent this
+# generalises; that module keeps its private copy so this refactor cannot change
+# the behaviour of an alarm that is already in production.
+_ALREADY_DELIVERED_WINDOW = 4000
+
+
+def alert_already_delivered(
+    db: Session, alert_type: str, content_signature: str, *, window: int | None = None
+) -> bool:
+    """Did ANY process already DELIVER a page with this exact signature?
+
+    Module-level "we already paged" memory dies with the process, so a restarting
+    scheduler re-pages the same condition forever. This is the durable half of the
+    latch, and it is deliberately narrower than "an alert row exists": only
+    ``success = true`` counts, because a row written while the channel was off is
+    a record, not a delivery.
+
+    Fails OPEN (False -> page anyway). An alarm that goes quiet because its dedupe
+    query errored is worse than a duplicate page.
+    """
+    try:
+        row = db.execute(
+            _ALREADY_DELIVERED_SQL,
+            {
+                "window": int(window or _ALREADY_DELIVERED_WINDOW),
+                "alert_type": str(alert_type),
+                "signature": str(content_signature),
+            },
+        ).first()
+        return row is not None
+    except Exception:
+        logger.warning(
+            "[alerts] already-delivered lookup failed for %s; paging", alert_type,
+            exc_info=True,
+        )
+        return False
 
 
 def get_alert_history(

@@ -14,6 +14,8 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta
 
+import pytest
+
 from app.models.trading import (
     MomentumStrategyVariant,
     MomentumSymbolViability,
@@ -22,6 +24,76 @@ from app.models.trading import (
 from app.services.trading.momentum_neural import auto_arm as aa
 
 _seq = 0
+
+
+@pytest.fixture(autouse=True)
+def _cancel_terminalizes(monkeypatch):
+    """Let the cancel actually TERMINALIZE, as it does for a live production row.
+
+    WHY THIS BECAME NECESSARY (2026-09-02, item B2). `_sess` builds `mode="live"`
+    rows in a harness with no broker adapter and no frozen non-Alpaca account
+    identity, so the real `cancel_automation_session` cannot prove broker terminal
+    truth and returns its DEFERRED result:
+
+        {'ok': True, 'pending': 'broker_terminal_truth_reconcile',
+         'terminalization_deferred': True, 'state': 'queued_live'}
+
+    The row is NOT terminalized and its slot is NOT freed. Until now
+    `_guarded_reap_for_displacement` tested only `res["ok"]`, so it wrote the reap
+    cooldown, committed, and returned True regardless — and every
+    `assert displaced is True` below was satisfied by a displacement that never
+    happened. Fixing that discriminator is what exposed this fixture gap.
+
+    CORRECTION, 2026-09-02 (review). An earlier version of this note cited the
+    1,277 `live_terminalization_quarantined` rows on the live DB as displacement
+    damage. THAT ATTRIBUTION IS WRONG, and re-measuring refutes it three ways:
+
+      * all 1,277 carry `payload_json->>'context' =
+        'stale_live_session_reaper_pre_terminal'` — one distinct value, no others.
+        They come from `reap_stale_live_sessions` (item B3's path), not from
+        `_guarded_reap_for_displacement`;
+      * all 1,277 owning sessions are `state='live_error'`, which is not in
+        `_RANK_DISPLACE_REAPABLE_STATES = {armed_pending_runner, queued_live}`, so
+        displacement was structurally incapable of selecting them;
+      * `_maybe_rank_displace` additionally filters `execution_family !=
+        'alpaca_spot'`, and `state in ('armed_pending_runner','queued_live') AND
+        execution_family <> 'alpaca_spot'` returns 0 rows ALL-TIME. The last
+        non-Alpaca live session started 2026-07-13 18:16:09; all 4,081 live
+        sessions in the 21 days to 2026-09-02 are alpaca_spot.
+
+    So the honest statement is narrower and worth making plainly: the B2
+    discriminator is a CORRECTNESS fix on a path whose eligible population has
+    been empty for ~51 days, and the three assertions it broke below were
+    assertions that the bug held. It is not measured allocator damage. (The
+    deferral-counted-as-a-reap bug WAS real for the `reap_stale_live_sessions`
+    population that produced those 1,277 rows — which is why item B3 exists —
+    but that is a different function.)
+
+    Making the real cancel succeed here would need broker position truth, open-order
+    truth AND a frozen account identity stubbed — three layers of fiction for tests
+    whose subject is displacement SELECTION (which victim is chosen, which is
+    vetoed, dupe-safety), not terminalization. So the cancel is replaced by the
+    terminal transition it performs in production, and the guarded reap's real
+    contract — True only when the cancel actually terminalized — is asserted
+    directly in tests/test_terminalization_deferred_event_0902.py.
+    """
+    from app.services.trading.momentum_neural import automation_query as aq
+
+    def _terminalizing_cancel(db, *, user_id, session_id, cancelled_by="automation_monitor"):
+        row = (
+            db.query(TradingAutomationSession)
+            .filter(TradingAutomationSession.id == int(session_id))
+            .one_or_none()
+        )
+        if row is None:
+            return {"ok": False, "error": "not_found"}
+        row.state = "live_cancelled" if row.mode == "live" else "cancelled"
+        row.ended_at = datetime.utcnow()
+        row.updated_at = row.ended_at
+        db.flush()
+        return {"ok": True, "session_id": int(row.id), "state": row.state}
+
+    monkeypatch.setattr(aq, "cancel_automation_session", _terminalizing_cancel)
 
 
 def _variant(db):

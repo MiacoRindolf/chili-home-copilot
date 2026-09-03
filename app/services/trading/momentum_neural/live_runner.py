@@ -7805,6 +7805,285 @@ def _emit(
     )
 
 
+# DELIVERY RETRY BUDGET for the entry-confirm alarm. Deliberately NOT settings:
+# these bound a durable-write path on the live-runner tick and must not be
+# loosened from an env file. `dispatch_alert` returns False both for a transient
+# Telegram failure AND for a channel the operator has simply turned off, so an
+# unbounded retry on a False return is an event storm waiting for a config
+# state that is perfectly normal. Three attempts, 15 minutes apart, is one hour
+# of trying to reach a human about an order that is already recorded twice
+# (CRITICAL log + durable event) whether or not the page ever lands.
+_ENTRY_CONFIRM_PAGE_MAX_ATTEMPTS = 3
+_ENTRY_CONFIRM_PAGE_RETRY_SECONDS = 900.0
+
+
+def _entry_confirm_deferred_emit_interval_s() -> float:
+    try:
+        return max(0.0, float(getattr(
+            settings, "chili_momentum_entry_confirm_deferred_emit_interval_s", 15.0
+        ) or 0.0))
+    except (TypeError, ValueError):
+        return 15.0
+
+
+def _entry_confirm_deferred_cap_seconds() -> float:
+    try:
+        return max(15.0, float(getattr(
+            settings, "chili_momentum_entry_confirm_deferred_cap_seconds", 180.0
+        ) or 180.0))
+    except (TypeError, ValueError):
+        return 180.0
+
+
+def _note_entry_confirm_deferred(
+    db: Session,
+    sess: TradingAutomationSession,
+    le: dict[str, Any],
+    *,
+    now: datetime | None = None,
+) -> dict[str, Any]:
+    """Bound the entry-confirm deferral loop (item D, CELU 17712, 2026-08-27).
+
+    THE DEFECT. When the entry-confirm poll returns no order object the tick
+    emits ``entry_confirm_deferred`` and returns ``pending`` — correct, because
+    the order's fate is UNKNOWN and a healthy resting entry must not be pushed to
+    LIVE_ERROR.  But the branch had NO attempt counter, NO time bound, NO
+    escalation and no convergence property of any kind: the emit was
+    unconditional on every tick, and the postcondition was identical to the
+    precondition.  On CELU 17712 it fired 267 times over 2,929.3s (mean gap
+    11.01s, min 5.94s, max 106.02s) against order 74a1992d on a FILLED 236-share
+    position with no ``live_entry_filled`` and no ``live_deadman_stop_placed``
+    anywhere in the session.  What ended it was a human:
+    ``operator_state_repair_fill_adopted`` at 22:02:52.020644, whose payload
+    names the proximate cause — ``get_order_broken_by_1212_options_kwarg_fill_
+    invisible``.  Exposure from ``live_entry_submitted`` to that repair:
+    2,933.5s.  ``entry_confirm_deferred`` appears exactly 267 times in the whole
+    event table (which reaches back to 2026-04-20): one session, one day.  The
+    argument for bounding it is that the branch cannot converge, not that it
+    recurs often.
+
+    THE BOUND.  The POLL is never throttled — it is the confirm, and throttling
+    it would make detection slower, not safer.  Only the EMIT is throttled, and
+    only after the first, so the operator still sees the deferral start
+    immediately.  Past ``chili_momentum_entry_confirm_deferred_cap_seconds`` the
+    loop raises ONE durable ``entry_confirm_deferred_unbounded`` event, ONE
+    CRITICAL log and ONE TIER_A page per (session, order id), and the routine
+    event stream STOPS — the loop now belongs to the alarm.  Total durable rows
+    for a run of any length: ``ceil(cap / interval) + 1`` (13 at the defaults).
+    A throttle alone would have been a rate limit, not a bound: CELU's 2,929s at
+    a 15s interval is still ~195 rows against main's 267.
+
+    THE ALARM AND THE PAGE ARE LATCHED SEPARATELY.  ``dispatch_alert`` returns
+    False when the channel is merely turned OFF, which is a normal configuration
+    state, and it writes an ``AlertHistory`` row plus a shadow decision packet on
+    every call regardless — so retrying on a False return once per tick is itself
+    an unbounded durable-write loop.  The record is latched unconditionally; the
+    SEND gets at most ``_ENTRY_CONFIRM_PAGE_MAX_ATTEMPTS`` tries spaced
+    ``_ENTRY_CONFIRM_PAGE_RETRY_SECONDS`` apart, and is dispatched with
+    ``db=None`` so it can never commit this tick's transaction.
+
+    The cap is measured in TIME, not attempts, precisely because the observed
+    gap ranged 5.94s to 106.02s: at 6 attempts the same cap would fire anywhere
+    between 36s and 10 minutes of naked exposure.
+
+    Returns the counters it wrote (for the caller's payload and for tests).
+    """
+    now = now or _utcnow()
+    oid = str(le.get("entry_order_id") or "")
+    # A new order id is a new run. Without this a fresh submit would inherit the
+    # previous order's age and page instantly.
+    if str(le.get("entry_confirm_deferred_order_id") or "") != oid:
+        le["entry_confirm_deferred_order_id"] = oid
+        le["entry_confirm_deferred_first_utc"] = now.isoformat()
+        le["entry_confirm_deferred_attempts"] = 0
+        le.pop("entry_confirm_deferred_last_emit_utc", None)
+        le.pop("entry_confirm_deferred_escalated_utc", None)
+        le.pop("entry_confirm_deferred_alarm_utc", None)
+    try:
+        first = datetime.fromisoformat(str(le.get("entry_confirm_deferred_first_utc")))
+        if first.tzinfo is not None:
+            first = first.astimezone(timezone.utc).replace(tzinfo=None)
+    except (TypeError, ValueError):
+        first = now
+        le["entry_confirm_deferred_first_utc"] = now.isoformat()
+    attempts = int(le.get("entry_confirm_deferred_attempts") or 0) + 1
+    le["entry_confirm_deferred_attempts"] = attempts
+    age_s = max(0.0, (now - first).total_seconds())
+
+    out: dict[str, Any] = {
+        "order_id": oid or None,
+        "attempts": attempts,
+        "deferred_for_s": round(age_s, 3),
+        "first_deferred_utc": le.get("entry_confirm_deferred_first_utc"),
+    }
+
+    _cap = _entry_confirm_deferred_cap_seconds()
+    _alarmed = bool(le.get("entry_confirm_deferred_alarm_utc"))
+
+    # ── routine event: throttled, and SILENCED once the alarm owns the loop ──
+    # Throttling alone is a rate limit, not a bound: at 15s over CELU 17712's
+    # 2,929s it would still write ~195 durable rows against main's 267. Past the
+    # cap the loop belongs to the alarm, which is latched once per (session,
+    # order), so the routine stream stops. Total events for the whole run become
+    # ceil(cap/interval) + 1 — 13 at the defaults — no matter how long the
+    # deferral lasts.
+    if _alarmed:
+        out["emitted"] = False
+        out["routine_emit_suppressed"] = "alarm_latched"
+    else:
+        _interval = _entry_confirm_deferred_emit_interval_s()
+        _due = attempts == 1
+        if not _due:
+            try:
+                _last = datetime.fromisoformat(
+                    str(le.get("entry_confirm_deferred_last_emit_utc"))
+                )
+                if _last.tzinfo is not None:
+                    _last = _last.astimezone(timezone.utc).replace(tzinfo=None)
+                _due = (now - _last).total_seconds() >= _interval
+            except (TypeError, ValueError):
+                _due = True
+        if _due:
+            le["entry_confirm_deferred_last_emit_utc"] = now.isoformat()
+            _emit(db, sess, "entry_confirm_deferred", dict(out))
+        out["emitted"] = bool(_due)
+
+    # ── the cap ─────────────────────────────────────────────────────────────
+    out["cap_seconds"] = _cap
+    out["escalated"] = False
+    if age_s < _cap:
+        out["alarm_active"] = False
+        return out
+    out["alarm_active"] = True
+
+    message = (
+        f"ENTRY ORDER UNOBSERVED — {sess.symbol} session {sess.id}: the "
+        f"entry-confirm poll has returned no order object for order "
+        f"{oid or '<none>'} across {attempts} ticks over "
+        f"{age_s:.0f}s (cap {_cap:.0f}s). The order's fate is UNKNOWN at the "
+        f"broker; if it filled, the position has no software stop and no "
+        f"deadman stop. Check the broker directly."
+    )
+    # THE ALARM LATCHES UNCONDITIONALLY; ONLY THE DELIVERY RETRIES (2026-09-02,
+    # review). `dispatch_alert` returns False for states that are permanent
+    # operator CONFIGURATION, not faults — `alerts_enabled=False`, a Telegram
+    # TIER_A preference cell that is off — and it writes an AlertHistory row plus
+    # a shadow decision packet on EVERY call regardless of the send. Gating the
+    # alarm latch on delivery therefore turned an unconfigured channel into a new
+    # durable-row storm on the live-runner hot path: one row, one commit and one
+    # 10s-timeout HTTP POST per `_due` tick, forever. The record (critical log +
+    # durable event) is written once and does not depend on the channel; the SEND
+    # gets its own bounded schedule below.
+    if not _alarmed:
+        # `escalated` marks the ONE tick that raised the alarm, not every tick
+        # past the cap: a caller counting `escalated` is counting alarms.
+        out["escalated"] = True
+        le["entry_confirm_deferred_alarm_utc"] = now.isoformat()
+        # Persist the latch BEFORE anything durable is written, so a rollback can
+        # never leave a committed alarm event with an unlatched session row (the
+        # next tick would then write a second one).
+        try:
+            _commit_le(sess, le)
+            db.flush()
+        except Exception:
+            _log.debug(
+                "[momentum_live_runner] entry-confirm alarm latch flush failed "
+                "session=%s", getattr(sess, "id", None), exc_info=True,
+            )
+        _log.critical("[momentum_live_runner] %s", message)
+        try:
+            _emit(db, sess, "entry_confirm_deferred_unbounded", {
+                **out,
+                "severity": "critical",
+                "escalated": True,
+            })
+        except Exception:
+            _log.warning(
+                "[momentum_live_runner] entry_confirm_deferred_unbounded event "
+                "write failed session=%s", getattr(sess, "id", None), exc_info=True,
+            )
+
+    # ── delivery: bounded attempts, an order of magnitude off the tick ───────
+    if le.get("entry_confirm_deferred_escalated_utc"):
+        out["paged"] = True
+        return out
+    _page_attempts = int(le.get("entry_confirm_deferred_page_attempts") or 0)
+    out["page_attempts"] = _page_attempts
+    if _page_attempts >= _ENTRY_CONFIRM_PAGE_MAX_ATTEMPTS:
+        out["paged"] = False
+        out["page_exhausted"] = True
+        return out
+    if _page_attempts:
+        try:
+            _lastp = datetime.fromisoformat(
+                str(le.get("entry_confirm_deferred_page_last_utc"))
+            )
+            if _lastp.tzinfo is not None:
+                _lastp = _lastp.astimezone(timezone.utc).replace(tzinfo=None)
+            if (now - _lastp).total_seconds() < _ENTRY_CONFIRM_PAGE_RETRY_SECONDS:
+                out["paged"] = False
+                return out
+        except (TypeError, ValueError):
+            pass
+    # Claim the attempt and PERSIST it before the send: a crash between the two
+    # must lose the page, never the counter that bounds it.
+    _page_attempts += 1
+    le["entry_confirm_deferred_page_attempts"] = _page_attempts
+    le["entry_confirm_deferred_page_last_utc"] = now.isoformat()
+    out["page_attempts"] = _page_attempts
+    try:
+        _commit_le(sess, le)
+        db.flush()
+    except Exception:
+        _log.debug(
+            "[momentum_live_runner] entry-confirm page counter flush failed "
+            "session=%s", getattr(sess, "id", None), exc_info=True,
+        )
+    delivered = False
+    try:
+        from ..alerts import LIVE_ENTRY_ORDER_UNOBSERVED, dispatch_alert
+
+        delivered = bool(dispatch_alert(
+            # db=None ON PURPOSE. This is the first alert dispatch ever made from
+            # inside `tick_live_session`, and `dispatch_alert` ends with
+            # `db.commit()`. Handing it the tick's Session would let a page commit
+            # the tick's open transaction mid-flight, on a box with a documented
+            # idle-in-transaction cascade. With db=None it opens and closes its
+            # own short-lived Session and cannot touch this one.
+            db=None,
+            user_id=sess.user_id,
+            alert_type=LIVE_ENTRY_ORDER_UNOBSERVED,
+            ticker=sess.symbol,
+            message=message,
+            # skip_throttle rather than _STOP_CRITICAL_TYPES membership: that set
+            # also arms the 2s/8s time.sleep retry ladder on THIS thread, and this
+            # thread is a live-runner tick. The bound is the attempt counter above.
+            skip_throttle=True,
+            content_signature=f"entry_confirm_deferred:{sess.id}:{oid}",
+        ))
+    except Exception:
+        _log.warning(
+            "[momentum_live_runner] entry-confirm escalation dispatch failed "
+            "session=%s", getattr(sess, "id", None), exc_info=True,
+        )
+    out["paged"] = delivered
+    if delivered:
+        # Latch ONLY on confirmed delivery: discarding the send result is how a
+        # dropped page becomes a silent one. Undelivered => at most
+        # _ENTRY_CONFIRM_PAGE_MAX_ATTEMPTS tries, spaced
+        # _ENTRY_CONFIRM_PAGE_RETRY_SECONDS apart, then it stops for good — the
+        # critical log and the durable event above are already permanent.
+        le["entry_confirm_deferred_escalated_utc"] = now.isoformat()
+    elif _page_attempts >= _ENTRY_CONFIRM_PAGE_MAX_ATTEMPTS:
+        _log.warning(
+            "[momentum_live_runner] entry-confirm page UNDELIVERED after %s "
+            "attempts session=%s order=%s — hindi na uulit; nasa durable event "
+            "at CRITICAL log na ang record",
+            _page_attempts, getattr(sess, "id", None), oid or None,
+        )
+    return out
+
+
 def _finalize_live_decision_after_exit(
     db: Session,
     sess: TradingAutomationSession,
@@ -36194,13 +36473,18 @@ def tick_live_session(
             # returns). Only a REAL order object in a bad terminal state falls through to
             # LIVE_ERROR below.
             if no is None:
-                _emit(db, sess, "entry_confirm_deferred", {
-                    "order_id": str(le.get("entry_order_id")),
-                })
+                # BOUNDED (item D, 2026-09-02). Staying PENDING is right; staying
+                # pending FOREVER, silently, is not. See
+                # `_note_entry_confirm_deferred`: the emit is throttled, the run
+                # is counted, and past the cap it raises one durable event and
+                # one TIER_A page instead of looping until a human notices.
+                _cd = _note_entry_confirm_deferred(db, sess, le)
+                _commit_le(sess, le)
                 db.flush()
                 return {
                     "ok": True, "session_id": sess.id, "state": sess.state,
                     "pending": "entry_confirm_deferred",
+                    "entry_confirm_deferral": _cd,
                 }
             _terminal_entry_status = str(getattr(no, "status", "") or "").lower()
             _terminal_entry_filled = max(

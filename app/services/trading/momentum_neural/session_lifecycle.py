@@ -168,13 +168,74 @@ def apply_operator_pause(
     risk_snapshot_json: Optional[dict[str, Any]],
     *,
     state: str,
+    deferral: Optional[dict[str, Any]] = None,
 ) -> dict[str, Any]:
+    """Write the operator pause, optionally carrying deferral provenance.
+
+    ``paused_at_utc`` is deliberately RE-STAMPED on every call: it is the cadence
+    clock that ``auto_arm._reap_deferred_hold_remaining`` reads to hold a deferred
+    cancel for ``chili_momentum_reap_deferred_retry_seconds``.  Preserving the
+    first stamp there would collapse that hold into "ask once, then never again".
+
+    That is also why the *first* deferral time cannot be recovered from this key,
+    which is how CANF 19471's 11:19:10Z reap-pause was already gone by the time
+    anyone looked (the row read 13:21:06Z, two hours and one operator flatten
+    later).  ``deferral`` therefore adds SIBLING keys that are carried forward
+    across restamps for as long as the same deferral run continues:
+
+      ``deferral_pending``       — the ``pending`` reason of the deferred cancel
+      ``deferral_initiator``     — ``cancelled_by`` ("operator" vs the reapers)
+      ``deferral_order_key``     — WHAT is outstanding: the broker order id, else
+                                   the client order id, else ``session:<id>``
+      ``deferral_first_at_utc``  — when this run of deferrals STARTED
+      ``deferral_count``         — how many times it has been re-asked
+      ``deferral_event_at_utc``  — when the durable event was last emitted
+
+    RUN IDENTITY IS THE ORDER, NOT THE REASON (2026-09-02, review).  Keying the
+    run on ``pending`` looked natural and was wrong: at least six ``pending``
+    values are reachable for one outstanding order (``broker_flat_confirmation``,
+    ``broker_terminal_truth_reconcile``, ``entry_order_truth_reconcile``,
+    ``filled_entry_management``, ``execution_quarantine``,
+    ``durable_alpaca_entry_claim_reconcile``), and broker truth can alternate
+    between two of them from one re-ask to the next.  Each alternation reset
+    ``deferral_count`` to 1, which makes the caller's rate limit — whose whole
+    condition is ``count > 1`` — fire never.  The order key is what actually
+    identifies the outstanding work, so the run survives a changing reason and
+    the throttle cannot be walked around.
+
+    A run ends when the pause goes inactive, the row changes state, or the
+    outstanding ORDER changes; the next deferral then starts a fresh run at
+    count 1.  A changing ``pending`` is recorded, not treated as a new run.
+    """
     snap = dict(risk_snapshot_json or {})
-    snap[OPERATOR_PAUSE_KEY] = {
+    prior = snap.get(OPERATOR_PAUSE_KEY)
+    prior = prior if isinstance(prior, dict) else {}
+    now_iso = datetime.utcnow().isoformat()
+    pause: dict[str, Any] = {
         "active": True,
-        "paused_at_utc": datetime.utcnow().isoformat(),
+        "paused_at_utc": now_iso,
         "resume_state": state,
     }
+    if deferral is not None:
+        pending = str(deferral.get("pending") or "") or None
+        order_key = str(deferral.get("order_key") or "") or None
+        same_run = (
+            bool(prior.get("active"))
+            and str(prior.get("resume_state") or "") == str(state or "")
+            and str(prior.get("deferral_order_key") or "") == str(order_key or "")
+        )
+        pause["deferral_pending"] = pending
+        pause["deferral_order_key"] = order_key
+        pause["deferral_initiator"] = str(deferral.get("initiator") or "") or None
+        pause["deferral_first_at_utc"] = (
+            prior.get("deferral_first_at_utc") or now_iso
+        ) if same_run else now_iso
+        pause["deferral_count"] = (
+            int(prior.get("deferral_count") or 0) + 1
+        ) if same_run else 1
+        if same_run and prior.get("deferral_event_at_utc"):
+            pause["deferral_event_at_utc"] = prior.get("deferral_event_at_utc")
+    snap[OPERATOR_PAUSE_KEY] = pause
     return snap
 
 

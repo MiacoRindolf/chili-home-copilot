@@ -59,6 +59,7 @@ from .alpaca_orphan_claims import (
     RESOLVED,
     SUBMIT_INDETERMINATE,
     SUBMITTED,
+    alpaca_symbol_is_crypto_like,
     list_unresolved_action_claims,
     persist_orphan_close_request_committed,
     read_action_claim,
@@ -156,6 +157,23 @@ def _alpaca_reconcile_shape_quarantine_reason(
     return None
 
 
+# Reasons that describe an instrument/posture SHAPE this deployment is not
+# certified to trade. `_sweep_unmanaged_positions` sells `abs(qty)` with no asset
+# -class or side check, so a persisted row of one of these shapes must darken the
+# WHOLE pass. Everything else `_persisted_reconcile_quarantine_reason` can report
+# (`alpaca_account_scope_unfrozen_or_mismatched`,
+# `alpaca_account_generation_mismatch`) is an account-GENERATION statement about
+# a row written under an older identity, and is re-quarantined at that row's own
+# session/claim boundary instead. Source vocabulary:
+# operator_actions._alpaca_execution_quarantine_reason and
+# _alpaca_reconcile_shape_quarantine_reason in this file.
+_SHAPE_QUARANTINE_REASONS = frozenset({
+    "alpaca_live_posture_not_certified",
+    "alpaca_crypto_execution_not_certified",
+    "alpaca_short_execution_not_certified",
+})
+
+
 def _persisted_reconcile_quarantine_reason(
     db: Session,
 ) -> dict[str, int] | str | None:
@@ -185,10 +203,33 @@ def _persisted_reconcile_quarantine_reason(
             "FROM trading_automation_sessions "
             "WHERE mode = 'live' AND execution_family = ANY(:families) "
             "  AND (NOT (state = ANY(:terminal_states)) "
-            "       OR risk_snapshot_json->'momentum_live_execution'->'position' "
+            # `->` vs `->>` (2026-09-02): `->` returns a jsonb `null` for a
+            # `position` key whose VALUE is JSON null, and `jsonb null IS NOT
+            # NULL` is TRUE -- so this arm matched every row that had ever been
+            # given the key. Measured on the live DB: 9 live alpaca sessions
+            # match `->'position' IS NOT NULL`, 0 match `->>'position' IS NOT
+            # NULL`, all 9 are JSON null and all 9 are TERMINAL. `->>` is SQL
+            # NULL for both JSON null and a missing key -- the exact mirror of
+            # `live.get(key) is not None`, and the convention this file's sibling
+            # documents at alpaca_orphan_claims.py:144-148.
+            "       OR risk_snapshot_json->'momentum_live_execution'->>'position' "
             "          IS NOT NULL "
-            "       OR coalesce(risk_snapshot_json->'momentum_live_execution'"
-            "          ->>'entry_order_id', '') <> '' "
+            # RESOLVED IS NOT OUTSTANDING (2026-09-02). This arm kept every row
+            # that had ever carried an entry order id, forever, including rows
+            # whose order is recorded ADOPTED or VOID in `entry_orders_resolved`.
+            # That is what pins two-month-old dead rows in the scan and, through
+            # them, quarantines the pass. An order with a resolution record has
+            # already been reconciled; only an UNRESOLVED one is outstanding
+            # broker work. Measured on the live DB 2026-09-02: this and the
+            # `->>'position'` fix above take the scan from 31 rows (31 of them
+            # terminal) to 19, and every row it drops is terminal with its entry
+            # order resolved.
+            "       OR (coalesce(risk_snapshot_json->'momentum_live_execution'"
+            "           ->>'entry_order_id', '') <> '' "
+            "           AND NOT (coalesce(risk_snapshot_json->"
+            "                    'momentum_live_execution'->'entry_orders_resolved',"
+            "                    '{}'::jsonb) ? (risk_snapshot_json->"
+            "                    'momentum_live_execution'->>'entry_order_id'))) "
             "       OR coalesce(risk_snapshot_json->'momentum_live_execution'"
             "          ->>'exit_order_id', '') <> '' "
             "       OR coalesce(risk_snapshot_json->'momentum_live_execution'"
@@ -2973,7 +3014,11 @@ def _sweep_unmanaged_positions(db: Session, adapter: Any) -> dict[str, Any]:
     Bawat aksyon ay may audit event. Bounded sa ilang symbol kada pass.
     RISK-REDUCING LAMANG: nagsasara ng exposure, hindi kailanman nagbubukas.
     """
-    out: dict[str, Any] = {"unmanaged_scanned": 0, "unmanaged_flattened": 0}
+    out: dict[str, Any] = {
+        "unmanaged_scanned": 0,
+        "unmanaged_flattened": 0,
+        "unmanaged_uncertified_shape": 0,
+    }
     try:
         if not bool(getattr(
             settings, "chili_alpaca_unmanaged_position_flatten_enabled", True
@@ -3011,9 +3056,35 @@ def _sweep_unmanaged_positions(db: Session, adapter: Any) -> dict[str, Any]:
                 continue
             out["unmanaged_scanned"] += 1
             try:
-                qty = abs(float(pos.get("qty") or 0.0))
+                raw_qty = float(pos.get("qty") or 0.0)
             except (TypeError, ValueError):
                 continue
+            # CERTIFY THE SHAPE AT THE POINT OF ACTION (2026-09-02). The only
+            # action below is `side="sell"` on `abs(qty)`, and it used to be
+            # taken on ANY unowned position. On a SHORT (`qty` negative) that
+            # sells MORE -- it DOUBLES the short instead of closing it, which is
+            # risk-INCREASING and the exact opposite of this function's stated
+            # contract. On a crypto pair it trades an instrument this deployment
+            # is explicitly not certified for
+            # (`alpaca_crypto_execution_not_certified`).
+            #
+            # Until now the only thing standing between those two cases and a
+            # live order was the pass-wide persisted-identity quarantine -- a
+            # proxy over stale session JSON, one directory away from the action,
+            # which is also what made this whole pass inert for ~50 days. The
+            # guard belongs HERE, on broker truth, where the sign and the symbol
+            # are known exactly. Both remain covered by the shape quarantine
+            # upstream as well; this is the one that cannot be reasoned around.
+            if raw_qty < 0 or alpaca_symbol_is_crypto_like(sym):
+                out["unmanaged_uncertified_shape"] += 1
+                logger.warning(
+                    "[alpaca_reconcile] unmanaged position %s qty=%s LEFT ALONE: "
+                    "uncertified shape (short=%s crypto=%s) — ang sell-to-close "
+                    "ay mali para sa hugis na ito",
+                    sym, raw_qty, raw_qty < 0, alpaca_symbol_is_crypto_like(sym),
+                )
+                continue
+            qty = abs(raw_qty)
             if qty <= 0:
                 continue
             if sym in active_syms:
@@ -4202,10 +4273,51 @@ def run_alpaca_orphan_reconcile(db: Session) -> dict[str, Any]:
     except Exception:
         pass
     if isinstance(persisted_quarantine, dict):
+        # SHAPE QUARANTINES ARE PASS-WIDE; IDENTITY-GENERATION ONES ARE NOT.
+        #
+        # This gate does real safety work and is NOT simply removed.
+        # `_sweep_unmanaged_positions` (#1266) issues an unconditional
+        # `place_market_order(side="sell", base_size=abs(qty))` on any position
+        # in the account with no owner and no resting order. It never inspects
+        # asset class and it takes `abs()` of the quantity -- so on a SHORT it
+        # would sell MORE (doubling the short, not closing it) and on a crypto
+        # pair it would trade an instrument this deployment is not certified for.
+        # A persisted row of either SHAPE is evidence that such inventory may
+        # exist, so it must continue to darken the whole pass.
+        #
+        # An account-GENERATION reason is a different claim entirely. It says a
+        # row was written under an older account identity (or before the scope
+        # freeze existed). By construction it cannot describe inventory in the
+        # currently pinned account -- which the caller verifies separately at
+        # `_verify_exact_paper_account_for_reconcile` -- so treating it as
+        # pass-wide is what `_persisted_reconcile_quarantine_reason`'s own
+        # docstring forbids: "They must not suppress recovery for an unrelated
+        # certified paper equity claim in the same batch. Only an unreadable
+        # persistence view is a pass-wide fail-closed condition."
+        #
+        # THE MEASURED CONSEQUENCE OF CONFLATING THEM. Sixteen dead rows created
+        # 2026-06-12..2026-07-13 (sessions 827 OTLK .. 13257 ACTU) carry an EMPTY
+        # `alpaca_account_scope` and so yield
+        # `alpaca_account_scope_unfrozen_or_mismatched` on EVERY pass, forever.
+        # Nothing will ever clean them up. This job runs on a 120s
+        # IntervalTrigger, and `trading_automation_events` holds 14
+        # `alpaca_orphan_reconcile` rows EVER, the last on 2026-07-14 16:36:50 --
+        # roughly fifty days in which the ONLY broker-truth sweeper that can
+        # reach a position whose owning session is already TERMINAL did not run.
+        # That is precisely the case #1266 added `_sweep_unmanaged_positions`
+        # for, naming the 30-minute naked GYGY (session 19338) in its comment;
+        # that session is still in the unresolved residual today because the pass
+        # carrying its rescue never executed.
         out["persisted_execution_quarantines"] = dict(persisted_quarantine)
-        out["skipped"] = "alpaca_execution_quarantined"
-        out["broker_calls"] = 0
-        return out
+        _shape_quarantines = {
+            k: v for k, v in persisted_quarantine.items()
+            if str(k) in _SHAPE_QUARANTINE_REASONS
+        }
+        if _shape_quarantines:
+            out["shape_quarantines"] = _shape_quarantines
+            out["skipped"] = "alpaca_execution_quarantined"
+            out["broker_calls"] = 0
+            return out
     elif persisted_quarantine is not None:
         out["skipped"] = "alpaca_execution_quarantined"
         out["quarantine_reason"] = str(persisted_quarantine)
@@ -4237,6 +4349,12 @@ def run_alpaca_orphan_reconcile(db: Session) -> dict[str, Any]:
         out["skipped"] = "reconcile_pre_broker_rollback_failed"
         return out
 
+    # Past every gate: this pass WILL talk to the broker. The scheduler uses this
+    # to tell "the reconciler is running and found nothing" (fine, and the normal
+    # case) apart from "the reconciler never got as far as the broker" -- the
+    # ~50-day silent outage above, which was indistinguishable from a quiet
+    # account because a skipped pass wrote no log, no event and no metric.
+    out["reached_broker"] = True
     # A successful submit is not a fill.  Poll prior passes' broker orders and
     # repair only broker-confirmed, full-fill ACTU-class outcomes before looking
     # for new orphans.  This is accounting-only; it never submits an extra order.
