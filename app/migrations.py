@@ -33279,6 +33279,66 @@ def _migration_374_alpaca_ledger_scan_bound_indexes(conn) -> None:
     conn.execute(text("ANALYZE trading_automation_sessions"))
 
 
+_MIG375_APPEND_HEAVY_TABLES = (
+    "iqfeed_trade_ticks",
+    "momentum_nbbo_spread_tape",
+    "momentum_viability_history",
+    "trading_automation_events",
+)
+_MIG375_SCALE_FACTOR = "0.02"
+
+
+def _migration_375_append_heavy_autovacuum_scale_factor(conn) -> None:
+    """Per-table autovacuum scale factors (0.02) for the four append-heavy tables.
+
+    ANG PUWANG (sinukat 2026-09-03). Ang default ``autovacuum_vacuum_scale_factor
+    = 0.2`` ay nangangahulugang sa 115M-row na ``momentum_nbbo_spread_tape`` ay
+    naghihintay ang autovacuum ng ~23M dead rows, at sa 248M-row / 94 GB na
+    ``iqfeed_trade_ticks`` ng ~50M, bago man lang magsimula ng pass — at ang
+    throttled na pass sa ganoong laki, sa ilalim ng tick firehose, ay oras-oras
+    tumatakbo. Parehong tape ang umabot sa **dead ≈ live** (isang buong pangalawang
+    kopya ng table bilang dead tuples) bago ang anumang pass. Ganoon din ang hugis
+    na tatama sa iba pang append-heavy log (``momentum_viability_history``,
+    ``trading_automation_events``) habang lumalaki ang mga ito.
+
+    ANG AYOS: ang karaniwang lunas para sa napakalaking append-heavy table — per-table
+    ``autovacuum_vacuum_scale_factor = 0.02`` at ``autovacuum_analyze_scale_factor
+    = 0.02``. Sa dalawang tape, ang 2% ay ≈ 2.3M / 5M dead rows — mas mababa sa
+    isang araw ng tick inflow sa nasukat na ~5.3M rows/araw, kaya sumusunod ang
+    pass sa bawat prune batch cadence (mig375 + ``prune_trade_ticks`` 200k-id
+    batches) sa halip na sa 10x na mas malaking backlog. Ang mig301/mig357 ay
+    nag-pin ng ABSOLUTE threshold sa dalawang churn table; scale factor ang tamang
+    hugis dito dahil lumalaki-lumiliit ang mga table na ito kasabay ng retention
+    window, at ang fixed threshold ay mawawala sa proporsyon sa alinmang direksyon.
+
+    Idempotent: ang ``ALTER TABLE ... SET (...)`` ay purong reloption write —
+    ang muling pagpapatakbo ay nagtatakda ng parehong halaga. SHARE UPDATE
+    EXCLUSIVE lock lang: hindi humaharang sa INSERT ng bridge o sa retention
+    DELETE; ang tumatakbong autovacuum sa table ay nagbibigay-daan dito.
+    ``lock_timeout`` 5s (mig315 precedent) para hindi kailanman mabitin ang
+    startup sa tape lock. Nilalaktawan ang mga table na wala sa fresh app DB (ang
+    host bridge ang may-ari ng ``iqfeed_trade_ticks``).
+    """
+    tables = _tables(conn)
+    conn.execute(text("SET LOCAL lock_timeout = '5s'"))
+    touched: list[str] = []
+    for table_name in _MIG375_APPEND_HEAVY_TABLES:
+        if table_name not in tables:
+            continue
+        conn.execute(text(
+            f"ALTER TABLE {table_name} SET ("
+            f"autovacuum_vacuum_scale_factor = {_MIG375_SCALE_FACTOR}, "
+            f"autovacuum_analyze_scale_factor = {_MIG375_SCALE_FACTOR})"
+        ))
+        touched.append(table_name)
+    conn.commit()
+    logger.info(
+        "[mig375] pinned autovacuum vacuum/analyze scale factor %s on %d append-heavy "
+        "table(s): %s",
+        _MIG375_SCALE_FACTOR, len(touched), ", ".join(touched) or "(none present)",
+    )
+
+
 MIGRATIONS = [
     ("001_add_email", _migration_001_add_email),
     ("002_add_image_path", _migration_002_add_image_path),
@@ -33781,6 +33841,8 @@ MIGRATIONS = [
      _migration_373_db_paper_account_identity),
     ("374_alpaca_ledger_scan_bound_indexes",
      _migration_374_alpaca_ledger_scan_bound_indexes),
+    ("375_append_heavy_autovacuum_scale_factor",
+     _migration_375_append_heavy_autovacuum_scale_factor),
 ]
 
 

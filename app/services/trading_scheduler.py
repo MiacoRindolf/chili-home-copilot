@@ -1229,6 +1229,32 @@ def _run_nbbo_spread_prune_job():
     run_scheduler_job_guarded("momentum_nbbo_prune", _work)
 
 
+def _run_trade_tick_prune_job():
+    """Trim iqfeed_trade_ticks older than the retention window by PRIMARY-KEY RANGE
+    (sibling of the NBBO prune above). The observed_at BRIN is damaged, so a
+    time-predicate DELETE scans for hours — measured 2026-09-03: 94 GB / 248M rows
+    with NO retention. Bounded per call (max batches); own DB session; best-effort.
+    (trade_tick_retention.py)"""
+
+    def _work() -> None:
+        from ..config import settings as _settings
+        from ..db import SessionLocal
+        if not getattr(_settings, "chili_momentum_trade_tick_prune_enabled", True):
+            return
+        from .trading.momentum_neural.trade_tick_retention import prune_trade_ticks
+        db = SessionLocal()
+        try:
+            prune_trade_ticks(db)
+        finally:
+            try:
+                db.rollback()
+            except Exception:
+                pass
+            db.close()
+
+    run_scheduler_job_guarded("momentum_trade_tick_prune", _work)
+
+
 def _run_rh_agentic_keepwarm_job():
     """STEP-D #14 KEEP-WARM: probe the RH Agentic rail's is_enabled() on a frequent cadence
     so the auth cache never goes COLD at the open (the RH-dark-at-open flap class). The probe
@@ -8411,6 +8437,25 @@ def start_scheduler():
                 max_instances=1,
                 coalesce=True,
                 next_run_time=datetime.now() + timedelta(seconds=130),
+            )
+
+        # IQFeed trade-tick retention (2026-09-03): iqfeed_trade_ticks had NO prune —
+        # 94 GB / 248M rows (oldest 07-18, ~5.3M rows/day). Sibling of the NBBO prune
+        # above (same role gate, same 6h cadence, same guarded runner) but it deletes
+        # by PRIMARY-KEY RANGE in committed batches because the observed_at BRIN is
+        # damaged (a time-predicate DELETE scans for hours), and it is bounded per
+        # call by chili_momentum_trade_tick_prune_max_batches. Staggered 60s after the
+        # NBBO prune so the two tape deletes never start together. (trade_tick_retention.py)
+        if include_data_recording and getattr(settings, "chili_momentum_trade_tick_prune_enabled", True):
+            _scheduler.add_job(
+                _run_trade_tick_prune_job,
+                trigger=IntervalTrigger(hours=6),
+                id="momentum_trade_tick_prune",
+                name="IQFeed trade-tick prune (every 6h; pk-range batches, bounded per call)",
+                replace_existing=True,
+                max_instances=1,
+                coalesce=True,
+                next_run_time=datetime.now() + timedelta(seconds=190),
             )
 
         # STEP-D #14 KEEP-WARM: keep the RH Agentic rail's auth cache warm every 30s so it

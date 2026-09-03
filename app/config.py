@@ -12204,6 +12204,36 @@ class Settings(BaseSettings):
         default=30, ge=1, le=365,
         validation_alias=AliasChoices("CHILI_MOMENTUM_NBBO_TAPE_RETENTION_DAYS"),
     )
+    # IQFEED TRADE-TICK RETENTION (sinukat 2026-09-03): iqfeed_trade_ticks = 94 GB /
+    # 248M rows na WALANG retention (pinakaluma 2026-07-18 ⇒ 47 araw ≈ 5.3M rows/araw);
+    # umabot sa dead ≈ live bago pa man mag-autovacuum (0.2 scale factor = ~50M dead
+    # rows bago ang unang pass). Sira ang observed_at BRIN kaya ORAS ang
+    # time-predicate DELETE (ang hugis ng prune_nbbo_tape) — ang prune na ito ay
+    # nagbubura ayon sa PRIMARY-KEY RANGE (monotonic sa oras ang BIGSERIAL id; ang
+    # cutoff id ay hinahanap ng ≤64-probe na pk bisection, hindi time scan) sa mga
+    # batch na kani-kaniyang commit, at BOUNDED bawat tawag. Kapatid ng NBBO prune
+    # sa itaas: parehong 6h cadence, parehong role gate, parehong guarded runner.
+    # (trade_tick_retention.py) Kill-switch lang; default ON — walang dark flag.
+    chili_momentum_trade_tick_prune_enabled: bool = Field(
+        default=True,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_TRADE_TICK_PRUNE_ENABLED"),
+        description="Run the 6-hourly iqfeed_trade_ticks pk-range prune (trade_tick_retention.py). Measured 2026-09-03: the table reached 94 GB / 248M rows with NO retention. Kill-switch only; default ON.",
+    )
+    chili_momentum_trade_tick_retention_days: int = Field(
+        default=14, ge=1, le=180,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_TRADE_TICK_RETENTION_DAYS"),
+        description="Local retention (days) for iqfeed_trade_ticks. 14 is safe because the IQFeed lookup feed (port 9100) is bit-identical to our recording with 180-day provider retention — older ticks can be re-pulled on demand, so local rows past 14d only cost disk (94 GB / 248M rows at 47d with no prune, measured 2026-09-03). le=180 = the provider's own retention; beyond it nothing could be re-pulled anyway.",
+    )
+    chili_momentum_trade_tick_prune_batch_ids: int = Field(
+        default=200_000, ge=10_000, le=5_000_000,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_TRADE_TICK_PRUNE_BATCH_IDS"),
+        description="Primary-key id span per DELETE batch; each batch commits. 200k ids ≈ 200k rows (BIGSERIAL, near-gapless): small enough that no batch holds a long transaction on the 94 GB table and autovacuum reclaims incrementally, large enough that a day's inflow (~5.3M rows measured 2026-09-03) is ~27 batches.",
+    )
+    chili_momentum_trade_tick_prune_max_batches: int = Field(
+        default=50, ge=1, le=5_000,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_TRADE_TICK_PRUNE_MAX_BATCHES"),
+        description="Upper bound on DELETE batches per prune call so the 6-hourly job can never run for hours. Steady state needs ~7 batches of 200k per 6h run (~5.3M rows/day measured 2026-09-03); 50 = ~7x headroom (10M ids per run, 40M/day) so a backlog drains across runs instead of one unbounded pass.",
+    )
     # UNIVERSE TICK DENSIFICATION (2026-06-15, the JRSH/CUPR "missed name" gap):
     # the tape recorder only persists ticks for ARMED names, so a name the lane
     # never armed has only the 1-min sampler rows — too coarse to replay its
