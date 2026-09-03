@@ -366,6 +366,19 @@ def check_live_ledger_integrity(
         if outcome is not None and isinstance(outcome.extracted_summary_json, dict):
             stamp = outcome.extracted_summary_json.get("ledger_integrity_v1")
             integrity_stamp = stamp if isinstance(stamp, dict) else {}
+        # The ``entry_evidence_unreconciled`` stamp means "an entry order reached the
+        # broker and we cannot see what it did". It is a statement about a MISSING
+        # read, and it is SUPERSEDED the moment the broker-truth reconcile pass
+        # succeeds on the row: that read is precisely what the stamp was waiting for.
+        # Keeping the row loud afterwards would train operators to ignore the alarm.
+        # Verified 2026-09-02 on the backfilled rows: XPON 15152 (−35.02), CELU 17712
+        # (−47.20), MOVE 19214 (+3.90) and MOVE 19244 (−364.14) each reconciled to
+        # broker truth to the cent after booking.
+        broker_settled = bool(
+            outcome is not None
+            and str(getattr(outcome, "broker_recon_status", "") or "") == "reconciled"
+            and _f(outcome.broker_realized_pnl_usd) is not None
+        )
 
         traded_per_db = bool(mfe.get(sid) or legs.get(sid) or booked_pnl is not None)
         traded = bool(broker) or traded_per_db
@@ -383,7 +396,7 @@ def check_live_ledger_integrity(
             and abs(broker_pnl - booked_pnl) > PNL_TOLERANCE_USD
         ):
             status = STATUS_PNL_DISAGREES
-        elif integrity_stamp.get("status") not in (None, "clean"):
+        elif integrity_stamp.get("status") not in (None, "clean") and not broker_settled:
             status = STATUS_UNRECONCILED_ENTRY
         else:
             status = STATUS_CLEAN

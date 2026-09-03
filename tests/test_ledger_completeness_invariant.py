@@ -512,6 +512,50 @@ def test_integrity_check_refuses_to_pass_when_the_broker_is_unreadable(db, monke
     assert out["broker_read_error"] == "transport_down"
 
 
+def test_broker_truth_supersedes_the_unreconciled_stamp(db, monkeypatch):
+    """The stamp means 'a read is missing'. A successful broker read is that read.
+
+    MOVE 19244's real trajectory: booked with entry_evidence_unreconciled because no
+    fill was ever adopted, then priced at −$364.14 by the broker-truth reconcile pass.
+    Keeping it loud after that would train operators to ignore the alarm.
+    """
+    sess = _session(
+        db, state="live_arm_expired", symbol="MOVE",
+        le={"entry_order_id": "c3a60320-c282-4859-b24b-02ff55730a63"},
+    )
+    try_emit_momentum_session_feedback(db, sess)
+    db.flush()
+    row = _outcome(db, sess.id)
+    assert (row.extracted_summary_json or {}).get("ledger_integrity_v1", {}).get(
+        "status"
+    ) == LEDGER_INTEGRITY_UNRECONCILED
+
+    monkeypatch.setattr(
+        li, "_read_broker_orders",
+        lambda **_k: {
+            "readable": True, "truncated": False,
+            "orders": [
+                _Order("b1", f"chili_ml_e_{sess.id}_aaaaaaaa_1111111111", "MOVE", "buy",
+                       "filled", 119.0, 15.05, "2026-08-31T13:16:34Z"),
+                _Order("s1", "chili_operator_flatten_move2", "MOVE", "sell",
+                       "filled", 119.0, 11.99, "2026-08-31T13:46:34Z"),
+            ],
+        },
+    )
+    # still loud before the broker pass settles it
+    out = li.check_live_ledger_integrity(db, days=30, include_broker=True)
+    assert [r["status"] for r in out["violations"] if r["session_id"] == int(sess.id)] == [
+        li.STATUS_UNRECONCILED_ENTRY
+    ]
+
+    # the app's own reconcile pass prices it; the alarm must clear
+    row.broker_recon_status = "reconciled"
+    row.broker_realized_pnl_usd = -364.14
+    db.flush()
+    out = li.check_live_ledger_integrity(db, days=30, include_broker=True)
+    assert not [r for r in out["violations"] if r["session_id"] == int(sess.id)]
+
+
 def test_integrity_check_is_clean_on_a_correctly_booked_session(db, monkeypatch):
     """No false alarms: a booked row matching broker truth is clean."""
     sess = _session(db, state="live_cancelled", symbol="JLHL", le={"realized_pnl_usd": -18.83})
