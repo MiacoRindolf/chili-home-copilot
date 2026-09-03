@@ -1,0 +1,133 @@
+{
+  "started_utc": "2026-09-02T23:11:23.145589Z",
+  "lane_stream_holders": {
+    "9200": 31232,
+    "5009": 18544
+  },
+  "retention_boundary": [
+    {
+      "date": "20260223",
+      "weekday": "Mon",
+      "days_back": 191,
+      "records": 0,
+      "no_data": true,
+      "sample": null
+    },
+    {
+      "date": "20260224",
+      "weekday": "Tue",
+      "days_back": 190,
+      "records": 0,
+      "no_data": true,
+      "sample": null
+    },
+    {
+      "date": "20260225",
+      "weekday": "Wed",
+      "days_back": 189,
+      "records": 0,
+      "no_data": true,
+      "sample": null
+    },
+    {
+      "date": "20260226",
+      "weekday": "Thu",
+      "days_back": 188,
+      "records": 0,
+      "no_data": true,
+      "sample": null
+    },
+    {
+      "date": "20260227",
+      "weekday": "Fri",
+      "days_back": 187,
+      "records": 0,
+      "no_data": true,
+      "sample": null
+    },
+    {
+      "date": "20260302",
+      "weekday": "Mon",
+      "days_back": 184,
+      "records": 0,
+      "no_data": true,
+      "sample": null
+    },
+    {
+      "date": "20260303",
+      "weekday": "Tue",
+      "days_back": 183,
+      "records": 0,
+      "no_data": true,
+      "sample": null
+    },
+    {
+      "date": "20260304",
+      "weekday": "Wed",
+      "days_back": 182,
+      "records": 0,
+      "no_data": true,
+      "sample": null
+    },
+    {
+      "date": "20260305",
+      "weekday": "Thu",
+      "days_back": 181,
+      "records": 0,
+      "no_data": true,
+      "sample": null
+    },
+    {
+      "date": "20260306",
+      "weekday": "Fri",
+      "days_back": 180,
+      "records": 1,
+      "no_data": false,
+      "sample": "LH,2026-03-06 14:35:00.833262,257.3400,1,19921169,257.3300,257.3600,283391,O,19,87,0,6,"
+    },
+    {
+      "date": "20260309",
+      "weekday": "Mon",
+      "days_back": 177,
+      "records": 1,
+      "no_data": false,
+      "sample": "LH,2026-03-09 14:35:00.678555,257.6800,10,19406307,257.6700,257.6900,920,O,80,87,0,9,"
+    }
+  ],
+  "datapoint_ceiling_true": {
+    "ask_100000": {
+      "records": 100000,
+      "bytes": 10071023,
+      "elapsed_s": 1.063,
+      "ticks_per_second": 94073.4,
+      "hit_ask": true,
+      "first": "LH,2026-09-01 19:59:47.056135,325.1500,1,53167617,325.1300,325.1500,580657,O,19,8717,0,1,",
+      "last": "LH,2026-09-01 15:41:53.654427,325.3280,1,38985542,325.3200,325.3300,546417,O,19,87,0,1,"
+    },
+    "ask_500000": {
+      "records": 500000,
+      "bytes": 50248462,
+      "elapsed_s": 4.125,
+      "ticks_per_second": 121212.1,
+      "hit_ask": true,
+      "first": "LH,2026-09-01 19:59:47.056135,325.1500,1,53167617,325.1300,325.1500,580657,O,19,8717,0,1,",
+      "last": "LH,2026-09-01 11:45:58.657064,325.2872,1,23068275,325.2700,325.3100,312383,O,19,87,0,1,"
+    },
+    "ask_2000000": {
+      "byte_cap_exceeded": "response exceeded byte cap 67108864 after 67120964 bytes; connection poisoned, reconnect required"
+    }
+  },
+  "timezone": {
+    "wall_utc_at_request": "2026-09-02T23:11:45.759688Z",
+    "last_tick_line": "LH,2026-09-02 19:11:42.686852,324.7500,3,33764818,324.7000,324.7900,452977,O,19,8717,0,2,",
+    "parsed_tick_naive": "2026-09-02T19:11:42.686852",
+    "utc_minus_tick_hours": 4.001
+  },
+  "throttle_120": {
+    "requests": 120,
+    "elapsed_s": 22.359,
+    "requests_per_second": 5.37,
+    "errors": []
+  },
+  "finished_utc": "2026-09-02T23:12:08.327404Z"
+}
