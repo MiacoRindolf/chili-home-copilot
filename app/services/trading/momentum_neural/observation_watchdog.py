@@ -71,6 +71,23 @@ comment records as resolving FALSE at 20:44 ET on this box.
 heartbeat is written every 30s, and silence is declared after
 `SILENT_AFTER_BEATS` missed beats.
 
+*"Has not started yet" is not "has stopped."* The first cut of this module got
+this wrong and would have paged on every trading morning: the session gate opens
+at 04:00 ET, the lane has never once started before it (measured first
+observation, ET: 04:01-04:05 on six days, 05:20, 06:45, 07:06, 11:19, 13:23 on
+the rest), and the previous session's last beat is 12-16 hours old -- so at the
+first tick past 04:00 ET the state was `silent`, `in_session` was True, and the
+signature was NEW, which is one false phone page per day against one genuine
+one. `silent` now requires a beat on the CURRENT ET trading date. Without one
+the state is `not_started`, which pages on its own rule -- from RTH open, when
+"it starts late" has stopped being a plausible explanation.
+
+*`stuck_configuration` is deliberately NOT session-gated.* It is a claim about
+the deployment ("nothing has written this key in days"), not about today's
+market, and its signature is a frozen last-beat timestamp so it pages exactly
+once for the whole fault. Making it wait for a session before reporting that the
+watchdog itself is blind would reproduce control_loop_watchdog's failure.
+
 *Evidence gate anchored on the last beat, never on the clock* -- the lesson
 control_loop_watchdog paid for twice. "Did a repeating writer ever exist on this
 box?" is age-independent, so a box that never hosts the lane never pages while a
@@ -190,6 +207,38 @@ _RECENT_OBSERVATIONS_SQL = text(
 RTH_OPEN_ET = dtime(9, 30)
 RTH_CLOSE_ET = dtime(16, 0)
 
+# A LANE THAT HAS NOT STARTED YET TODAY DID NOT STOP.
+#
+# The first cut of this module declared `silent` on two facts only — a last beat
+# older than SILENT_AFTER_SECONDS, and `in_market_session`. That pages on EVERY
+# trading morning, because the session gate opens at 04:00 ET and the lane has
+# never once started before it. From the measured record (coverage_by_day.csv,
+# first ignition observation converted to ET):
+#   08-18 13:23 | 08-19 04:02 | 08-20 04:01 | 08-21 04:01 | 08-24 04:02
+#   08-25 04:05 | 08-26 06:45 | 08-27 11:19 | 08-28 05:20 | 08-31 07:06
+#   09-01 04:38 | 09-02 04:39
+# All twelve are after 04:00 ET; three are hours after. Meanwhile the previous
+# session's last beat is 12-16 hours old, so at the first tick past 04:00 ET the
+# state was `silent`, `in_session` was True, and the signature
+# `silent:<yesterday's beat>` was NEW — so neither the in-process latch nor the
+# cross-process dedupe suppressed it. One genuine page (2026-09-01) against one
+# false page every trading day, on the ONE alert type routed to a real phone
+# notification. That is the alarm fatigue this module was written to end.
+#
+# THE GATE: `silent` requires a beat on the CURRENT ET trading date — evidence
+# that the lane was up today and then stopped. When the newest beat predates
+# today, the state is `not_started`, which is a DIFFERENT fact and pages on a
+# different rule (below). It is deliberately a distinct state and not a
+# suppression: "the lane never came up today" must still be reportable.
+#
+# WHEN `not_started` PAGES: only from RTH open. Before 09:30 ET a lane that has
+# not started is indistinguishable from a lane that starts late, and it started
+# after 06:00 ET on 4 of the 12 days above. By 09:30 ET the benign explanation is
+# gone — and the two days it fires on in the record (08-27, first observation
+# 11:19 ET; 08-18, 13:23 ET) are exactly the sessions the blackout census counts
+# as dark through the open. Those pages are correct, not false.
+NOT_STARTED_PAGES_FROM_ET = RTH_OPEN_ET
+
 _last_signature: str | None = None
 
 
@@ -215,6 +264,12 @@ def in_market_session(now_utc: datetime | None = None) -> bool:
     return SESSION_OPEN_ET <= et.time() < SESSION_CLOSE_ET
 
 
+def _et_date(value: datetime) -> str:
+    """ET calendar date of a naive-UTC or aware datetime, as ``YYYY-MM-DD``."""
+    dt = value if value.tzinfo is not None else value.replace(tzinfo=timezone.utc)
+    return dt.astimezone(_ET).date().isoformat()
+
+
 def in_regular_hours(now_utc: datetime | None = None) -> bool:
     """True inside RTH (Mon-Fri, 09:30-16:00 ET) — the window in which zero
     observations is not a defensible state for a live lane."""
@@ -238,7 +293,13 @@ def evaluate_lane_observation(
       ``observing``            — a beat within SILENT_AFTER_SECONDS, producing
                                  observations (or outside RTH, where zero is
                                  legitimate).
-      ``silent``               — a repeating writer existed and has stopped.
+      ``silent``               — a repeating writer existed, beat TODAY, and has
+                                 stopped. This is the 2026-09-01 11:03 ET shape.
+      ``not_started``          — a repeating writer exists on this box but has
+                                 not beaten at all on the current ET trading
+                                 date. A lane that has not started yet did not
+                                 stop, so this must not read as a death; it
+                                 pages on its own rule, from RTH open.
       ``not_observing``        — the process is ALIVE and beating but has
                                  produced zero observations for the whole
                                  not-observing window during RTH. This is the
@@ -281,7 +342,15 @@ def evaluate_lane_observation(
     if age > STUCK_CONFIGURATION_AFTER_SECONDS:
         state = "stuck_configuration"
     elif age > SILENT_AFTER_SECONDS:
-        state = "silent"
+        # "Stopped" requires evidence the lane was RUNNING today. Without a beat
+        # on the current ET trading date, the only defensible reading is that it
+        # has not started — which it never had, on any of the 12 measured
+        # sessions, by the time the 04:00 ET session gate opened.
+        state = (
+            "silent"
+            if _et_date(last_beat) == _et_date(now)
+            else "not_started"
+        )
     else:
         state = "observing"
         # ALIVE BUT BLIND. Only meaningful when the process is demonstrably up,
@@ -316,6 +385,8 @@ def evaluate_lane_observation(
         "last_beat_utc": last_beat.isoformat() + "Z",
         "silent_after_seconds": SILENT_AFTER_SECONDS,
         "in_session": in_market_session(now.replace(tzinfo=timezone.utc)),
+        "in_regular_hours": in_regular_hours(now.replace(tzinfo=timezone.utc)),
+        "et_date": _et_date(now),
     }
 
 
@@ -378,7 +449,9 @@ def run_observation_watchdog(
             _last_signature = None
         return verdict
 
-    if state not in ("silent", "stuck_configuration", "not_observing"):
+    if state not in (
+        "silent", "stuck_configuration", "not_observing", "not_started"
+    ):
         return verdict
 
     if state == "silent" and not verdict.get("in_session"):
@@ -390,18 +463,31 @@ def run_observation_watchdog(
         verdict["suppressed"] = "outside_session"
         return verdict
 
-    if state == "not_observing":
-        # The last beat ADVANCES while the process is alive, so keying on it
-        # would re-page every 60s. Key on the ET session date instead: one page
-        # per session, which is the "loud, single, unmissable" bar.
-        _et_date = (
-            (now or datetime.utcnow())
-            .replace(tzinfo=timezone.utc)
-            .astimezone(_ET)
-            .date()
-            .isoformat()
-        )
-        signature = f"not_observing:{_et_date}"
+    if state == "not_started" and not verdict.get("in_regular_hours"):
+        # Not yet a fact. Before RTH open, "has not beaten today" is the normal
+        # state of a lane that starts at 04:0x -- and of one that starts at
+        # 06:45 or 07:06, both of which are in the measured record. This is the
+        # gate that stops the module paging on 12 of 12 trading mornings.
+        verdict["emitted"] = False
+        verdict["suppressed"] = "before_regular_hours"
+        return verdict
+
+    # `stuck_configuration` is deliberately NOT session-gated. It is a statement
+    # about the DEPLOYMENT ("nothing has written this key in days"), not about
+    # today's market, and its signature is a frozen last-beat timestamp, so it
+    # pages exactly once for the whole duration of the fault. Waiting for a
+    # session to page about a watchdog that is blind is the failure mode
+    # control_loop_watchdog has been living in since 2026-08-17.
+
+    if state in ("not_observing", "not_started"):
+        # `not_observing`: the last beat ADVANCES while the process is alive, so
+        # keying on it would re-page every 60s.
+        # `not_started`: the last beat is FROZEN at a previous session, so keying
+        # on it would page once and then stay silent for every LATER day the lane
+        # also failed to come up.
+        # Both key on the ET session date instead: one page per session, which is
+        # the "loud, single, unmissable" bar.
+        signature = f"{state}:{verdict.get('et_date') or _et_date(now or datetime.utcnow())}"
     else:
         signature = f"{state}:{verdict['last_beat_utc']}"
     verdict["signature"] = signature
@@ -428,6 +514,14 @@ def run_observation_watchdog(
             f"{verdict['last_beat_utc']}). Nothing has written the observation "
             f"heartbeat in days: the watchdog is blind until a writer exists "
             f"again."
+        )
+    elif state == "not_started":
+        message = (
+            f"LANE NEVER STARTED OBSERVING TODAY — regular trading hours are "
+            f"open and the observation heartbeat has not beaten once on the "
+            f"current ET session (newest beat {verdict['last_beat_utc']}, "
+            f"{human} ago). The lane is not up. Nothing is reaching discovery "
+            f"ranking, the arm bridge, or the learner."
         )
     elif state == "not_observing":
         message = (

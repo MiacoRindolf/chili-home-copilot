@@ -37,6 +37,7 @@ predicate that filters away its own evidence.
 from __future__ import annotations
 
 import logging
+import threading
 from datetime import datetime, timedelta
 
 import pytest
@@ -187,6 +188,154 @@ def test_the_opening_bell_is_inside_the_session():
     assert OW.in_market_session(datetime(2026, 8, 27, 13, 35, 0)) is True   # 09:35 ET
     assert OW.in_market_session(datetime(2026, 8, 27, 9, 0, 0)) is True     # 05:00 ET
     assert OW.in_market_session(datetime(2026, 8, 27, 21, 0, 0)) is False   # 17:00 ET
+
+
+# ── "the lane has not started yet today" is NOT "the lane stopped" ───────────
+#
+# The first cut of this module declared `silent` on two facts only — a last beat
+# older than SILENT_AFTER_SECONDS, and `in_market_session` (Mon-Fri 04:00-16:00
+# ET). It had no check that the lane was ever expected to be up yet today. The
+# lane has never once started before 04:00 ET, and the previous session's last
+# beat is 12-16 hours old, so at the first 60s tick past 04:00 ET the state was
+# `silent`, `in_session` was True, and the signature `silent:<yesterday's beat>`
+# was NEW every day — neither the in-process latch nor the cross-process dedupe
+# suppressed it. One genuine page (2026-09-01) against one false page per
+# trading day, forever, on the one alert type routed to a real phone
+# notification.
+
+# Measured first ignition observation per session, ET (coverage_by_day.csv,
+# first_ignition_obs_pt + 3h). Every one is AFTER the 04:00 ET session gate.
+FIRST_OBSERVATION_ET = {
+    "2026-08-18": (13, 23), "2026-08-19": (4, 2),  "2026-08-20": (4, 1),
+    "2026-08-21": (4, 1),   "2026-08-24": (4, 2),  "2026-08-25": (4, 5),
+    "2026-08-26": (6, 45),  "2026-08-27": (11, 19), "2026-08-28": (5, 20),
+    "2026-08-31": (7, 6),   "2026-09-01": (4, 38), "2026-09-02": (4, 39),
+}
+
+
+def test_a_previous_session_beat_is_not_started_not_silent():
+    """2026-09-01 16:00 ET close, evaluated at 04:10 ET on 2026-09-02."""
+    beat = datetime(2026, 9, 1, 20, 0, 0)      # 16:00 ET, a clean prior close
+    now = datetime(2026, 9, 2, 8, 10, 0)       # 04:10 ET the next morning
+    v = OW.evaluate_lane_observation(_db(beat), now=now)
+    assert v["state"] == "not_started", "yesterday's close read as a fresh death"
+    assert v["in_session"] is True
+
+
+def test_the_morning_gate_does_not_page_on_any_measured_session(monkeypatch):
+    """All twelve mornings in the record, at 04:05 and at 04:30 ET.
+
+    The previous session's last beat is seeded at 19:59 ET the day before (the
+    latest observed last_ignition_obs). On the shipped-first-cut code every one
+    of these dispatches.
+    """
+    sent: list = []
+    monkeypatch.setattr(OW, "dispatch_alert", lambda **kw: sent.append(kw) or True)
+    for date_str in FIRST_OBSERVATION_ET:
+        y, m, d = (int(p) for p in date_str.split("-"))
+        prev_close = datetime(y, m, d, 23, 59, 0) - timedelta(days=1)  # 19:59 ET
+        for et_hh, et_mm in ((4, 5), (4, 30)):
+            now = datetime(y, m, d, et_hh + 4, et_mm, 0)  # ET -> UTC (EDT)
+            OW._last_signature = None
+            v = OW.run_observation_watchdog(_db(prev_close), now=now)
+            assert v["state"] == "not_started", date_str
+            assert v["suppressed"] == "before_regular_hours", date_str
+    assert sent == [], f"the watchdog paged on {len(sent)} trading mornings"
+
+
+def test_a_lane_that_never_came_up_still_pages_from_the_open(monkeypatch, caplog):
+    """The gate must not become a hole. 2026-08-27's first observation was 11:19
+    ET — the session the blackout census counts as 109 dark minutes through the
+    open — so a page at 09:35 ET is CORRECT, not false."""
+    sent: list = []
+    monkeypatch.setattr(OW, "dispatch_alert", lambda **kw: sent.append(kw) or True)
+    prev_close = datetime(2026, 8, 26, 23, 59, 0)   # 19:59 ET the day before
+    now = datetime(2026, 8, 27, 13, 35, 0)          # 09:35 ET
+
+    with caplog.at_level(logging.CRITICAL, logger=OW.__name__):
+        v = OW.run_observation_watchdog(_db(prev_close), now=now)
+
+    assert v["state"] == "not_started"
+    assert v["emitted"] is True
+    assert len(sent) == 1
+    assert "NEVER STARTED OBSERVING TODAY" in sent[0]["message"]
+    assert sent[0]["alert_type"] == LANE_OBSERVATION_SILENT
+
+
+def test_the_not_started_page_is_once_per_session_not_once_ever(monkeypatch):
+    """Keyed on the ET session date, not on the last beat. The last beat is
+    FROZEN at a previous session here, so a beat-keyed signature would page for
+    the first dark day and stay silent for every later one."""
+    sent: list = []
+    monkeypatch.setattr(OW, "dispatch_alert", lambda **kw: sent.append(kw) or True)
+    prev_close = datetime(2026, 8, 26, 23, 59, 0)
+
+    day_one = datetime(2026, 8, 27, 13, 35, 0)
+    v1 = OW.run_observation_watchdog(_db(prev_close), now=day_one)
+    v2 = OW.run_observation_watchdog(_db(prev_close), now=day_one + timedelta(minutes=1))
+    OW._last_signature = None
+    day_two = datetime(2026, 8, 28, 13, 35, 0)
+    v3 = OW.run_observation_watchdog(_db(prev_close), now=day_two)
+
+    assert v1["emitted"] is True
+    assert v2["emitted"] is False, "re-paged within the same session"
+    assert v3["emitted"] is True, "a second dark day was swallowed"
+    assert v1["signature"] != v3["signature"]
+
+
+def test_the_2026_09_01_death_still_pages_after_the_gate(monkeypatch):
+    """The one genuine page in the record must survive the fix. The lane beat at
+    11:03 ET and stopped — same ET date, so this is `silent`, not `not_started`."""
+    sent: list = []
+    monkeypatch.setattr(OW, "dispatch_alert", lambda **kw: sent.append(kw) or True)
+    v = OW.run_observation_watchdog(
+        _db(DEATH_UTC), now=DEATH_UTC + timedelta(minutes=10)
+    )
+    assert v["state"] == "silent"
+    assert v["emitted"] is True
+    assert "STOPPED OBSERVING" in sent[0]["message"]
+
+
+def test_a_premarket_start_that_dies_before_the_open_is_still_silent():
+    """The ET-DATE boundary, not the 04:00 gate: a lane that started at 03:46 ET
+    (the four measured 0-universe `started` lines are 03:46-03:56 ET) and died at
+    03:55 has beaten TODAY, so its silence is a stop."""
+    beat = datetime(2026, 9, 2, 7, 55, 0)   # 03:55 ET
+    now = datetime(2026, 9, 2, 8, 10, 0)    # 04:10 ET
+    v = OW.evaluate_lane_observation(_db(beat), now=now)
+    assert v["state"] == "silent"
+
+
+def test_a_writer_gone_for_weeks_outranks_the_morning_gate():
+    """Precedence: `stuck_configuration` is a statement about the deployment and
+    must not be re-labelled `not_started` just because the beat is old enough to
+    also be on a previous ET date."""
+    beat = datetime(2026, 9, 2, 8, 10, 0) - timedelta(days=16)
+    v = OW.evaluate_lane_observation(_db(beat), now=datetime(2026, 9, 2, 8, 10, 0))
+    assert v["state"] == "stuck_configuration"
+
+
+def test_the_observation_COUNTER_cannot_break_the_thing_it_measures():
+    """A watchdog input that can stop the lane observing is worse than one that
+    under-counts.
+
+    The first cut incremented under `self._obs_lock` inline in `_score_symbol`,
+    which put a bare attribute access on the hot scoring path — an instance whose
+    `__init__` has not run raised AttributeError THERE. It broke two existing
+    tests on this branch (tests/test_velocity_intake.py, which builds the loop
+    with `__new__`) and neither review caught it.
+    """
+    from app.services.trading.momentum_neural import ignition_loop as IL
+
+    bare = IL.IgnitionScoringLoop.__new__(IL.IgnitionScoringLoop)
+    bare._count_observation()  # must not raise
+
+    real = IL.IgnitionScoringLoop.__new__(IL.IgnitionScoringLoop)
+    real._obs_lock = threading.Lock()
+    real._observations = 0
+    real._count_observation()
+    real._count_observation()
+    assert real._observations == 2
 
 
 # ── paging ───────────────────────────────────────────────────────────────────

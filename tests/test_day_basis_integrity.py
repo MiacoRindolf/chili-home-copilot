@@ -26,7 +26,33 @@ direction ross_universe_change_below_profile (a +5.0% floor) fired 1,909 times
 across 17 symbol-days whose true day change was +11.8% to +946.4% — SGLY x324
 (+182.9%), HUIZ x323 (+186.3%), JZ x318 (+221.2%) on 2026-08-20 alone.
 
-Every test below fails on origin/main. Pure unit tests, no DB, no network.
+WHAT THIS FILE DOES ON origin/main — stated precisely, because the first draft
+of this docstring overclaimed and a reviewer caught it by executing it.
+
+On origin/main this file cannot be COLLECTED at all: the import at the top
+raises ``ModuleNotFoundError: No module named 'app.services.trading.day_basis_
+guard'`` and pytest reports ``1 error``, 0 tests executed. To learn what the
+individual tests do there you have to make the file runnable first — copy it and
+delete only the ``day_basis_guard`` import block. Doing exactly that against
+origin/main's ``app/`` gives ``15 failed, 2 passed``:
+
+  * the tests under "the guard itself" and the two parametrized/continuity unit
+    tests exercise the new module and fail on the missing import (11 of them);
+  * FIVE fail behaviourally, and these are the refutations that matter —
+    "the fictional basis was cached", the once-per-session alarm count, "the
+    lane silently re-based mid-session", "a 3,345% fiction took rank #1", and
+    the universe-admission test below;
+  * ``test_a_healthy_name_still_gets_its_baseline_and_change`` passes on main,
+    correctly — it is the no-regression control, and a guard that broke it would
+    be worse than the defect.
+
+``test_basis_memory_resets_on_the_et_date_rollover`` used to be the second
+passer, vacuously: with no basis memory at all main re-read the new value
+anyway, so it would have passed even if the rollover branch were never
+consulted. It now asserts both halves — frozen WITHOUT the rollover, moved WITH
+it — so only the rollover branch can satisfy it.
+
+Pure unit tests, no DB, no network.
 """
 
 from __future__ import annotations
@@ -186,13 +212,21 @@ def test_the_alarm_fires_once_not_once_per_refresh(tracker, caplog):
     assert len([r for r in caplog.records if "basis REJECTED" in r.message]) == 1
 
 
-def test_mid_session_rebase_is_frozen_and_reported(tracker, caplog):
+def test_mid_session_rebase_of_a_CORROBORATED_basis_is_frozen_and_reported(
+    tracker, caplog
+):
     """A prev close is fixed for the session. Movement is the corruption
-    signature (KXIN/CDTG/CAST all show the implied basis moving intraday)."""
+    signature (KXIN/CDTG/CAST all show the implied basis moving intraday).
+
+    Two agreeing reads first — an UNcorroborated value is not worth freezing
+    (see the next test), so the freeze only applies once the basis has been
+    confirmed.
+    """
     trk, state = tracker
     state["snapshot"] = [_row("JZ", prev_c=1.70, day_o=2.20, price=2.60)]
     state["universe"] = ["JZ"]
     trk.refresh()
+    trk.refresh()  # second agreeing read → CORROBORATED
     assert trk.baseline_for("JZ") == 1.70
 
     # Next 20s refresh: the vendor hands back a different close for the same day.
@@ -206,19 +240,284 @@ def test_mid_session_rebase_is_frozen_and_reported(tracker, caplog):
     assert any("basis DRIFTED" in r.message for r in caplog.records)
 
 
-def test_basis_memory_resets_on_the_et_date_rollover(tracker):
-    """A prev close legitimately changes BETWEEN sessions."""
+def test_an_UNCORROBORATED_first_read_loses_to_the_second(tracker, caplog):
+    """THE CORRUPT VALUE CAN ARRIVE FIRST.
+
+    HOS was wrong from its very first observation (06:39:23 PT,
+    move_pct=3462.37), so "freeze whatever you saw first" cements corruption
+    just as readily as it prevents it — and for the ~2x class the magnitude
+    bound admits (JZ 2026-08-20, implied basis ~3.7 against a true 1.70) it
+    would convert a transient vendor row that re-reads every 20s and could
+    self-heal into a locked-wrong basis for the whole session.
+
+    So a single read is PROVISIONAL. The newer value wins until two agree.
+    """
+    trk, state = tracker
+    # First read: the wrong one (3.70 against JZ's true 1.70 close).
+    state["snapshot"] = [
+        _row("JZ", prev_c=3.70, day_o=2.20, price=2.60, prev_h=3.9, prev_l=3.5)
+    ]
+    state["universe"] = ["JZ"]
+    trk.refresh()
+    assert trk.baseline_for("JZ") == 3.70
+
+    # Second read: the correct one. It must WIN, not be frozen out.
+    state["snapshot"] = [_row("JZ", prev_c=1.70, day_o=2.20, price=2.60)]
+    with caplog.at_level(logging.WARNING, logger=IL.__name__):
+        trk.refresh()
+
+    assert trk.baseline_for("JZ") == 1.70, "an unconfirmed first read was frozen"
+    assert any("basis UNCORROBORATED" in r.message for r in caplog.records)
+    assert not any("basis DRIFTED" in r.message for r in caplog.records)
+
+    # A third agreeing read corroborates 1.70; now it is held.
+    trk.refresh()
+    assert trk.baseline_for("JZ") == 1.70
+
+
+def test_a_SUSTAINED_disagreement_rebases_rather_than_pinning_the_stale_close(
+    tracker, caplog, monkeypatch
+):
+    """The freeze is BOUNDED.
+
+    A corporate action, or a vendor correcting a bad row, produces a new value
+    that keeps arriving. Holding the pre-adjustment close for the rest of the
+    session is the fail-open direction the guard's own docstring names as the
+    worse error, so the freeze surrenders after `_BASIS_REBASE_AFTER_S`.
+    """
     trk, state = tracker
     state["snapshot"] = [_row("JZ", prev_c=1.70, day_o=2.20, price=2.60)]
     state["universe"] = ["JZ"]
     trk.refresh()
+    trk.refresh()  # CORROBORATED at 1.70
 
-    trk._basis_session_date = "1999-01-01"  # force a rollover
     state["snapshot"] = [
-        _row("JZ", prev_c=2.60, day_o=3.00, price=3.20, prev_h=2.7, prev_l=2.5)
+        _row("JZ", prev_c=3.70, day_o=2.20, price=2.60, prev_h=3.9, prev_l=3.5)
     ]
     trk.refresh()
-    assert trk.baseline_for("JZ") == 2.60
+    assert trk.baseline_for("JZ") == 1.70, "the freeze did not engage"
+
+    # Wind the disagreement clock past the bound without sleeping.
+    trk._basis_disagree_since["JZ"] = (
+        trk._basis_disagree_since["JZ"] - IL._BASIS_REBASE_AFTER_S - 1.0
+    )
+    with caplog.at_level(logging.WARNING, logger=IL.__name__):
+        trk.refresh()
+
+    assert trk.baseline_for("JZ") == 3.70, "the stale close was pinned for the session"
+    assert any("basis RE-BASED" in r.message for r in caplog.records)
+
+
+def test_basis_memory_resets_on_the_et_date_rollover(tracker):
+    """A prev close legitimately changes BETWEEN sessions — and MUST NOT change
+    within one.
+
+    Both halves are asserted from the same corroborated starting state, so the
+    ET-date rollover branch is the only thing that can satisfy this test. The
+    earlier version asserted only the second half, which passed on origin/main
+    for the wrong reason: with no basis memory at all the tracker re-read the new
+    value anyway.
+    """
+    trk, state = tracker
+    state["snapshot"] = [_row("JZ", prev_c=1.70, day_o=2.20, price=2.60)]
+    state["universe"] = ["JZ"]
+    trk.refresh()
+    trk.refresh()  # CORROBORATED at 1.70
+
+    new_close = [
+        _row("JZ", prev_c=2.60, day_o=3.00, price=3.20, prev_h=2.7, prev_l=2.5)
+    ]
+
+    # HALF ONE — same session: the new close is refused.
+    state["snapshot"] = new_close
+    trk.refresh()
+    assert trk.baseline_for("JZ") == 1.70, "re-based inside a single session"
+
+    # HALF TWO — same input, across the ET date rollover: it is adopted.
+    trk._basis_session_date = "1999-01-01"
+    trk.refresh()
+    assert trk.baseline_for("JZ") == 2.60, "the rollover did not clear the memory"
+
+
+# ── the site that ADMITS and RANKS, not just the ones that stamp and log ─────
+#
+# The first pass of this repair guarded the ignition tracker's baseline cache and
+# `scan_premarket_gaps` — both DOWNSTREAM stamping/emission sites — and left
+# `build_equity_universe` untouched. That is where the vendor's own
+# `todaysChangePerc` decides the +5% admission floor, the `rank_score =
+# pos * log1p(chg)` ordering into the capped pool, and (through the batch change
+# list) the adaptive `_hot_mover_bars` / `_adaptive_adv_floor` percentiles for
+# every OTHER name. Suppressing the emitted value while leaving the computation
+# that produced the wrong priority in place fixes the symptom, not the root.
+
+
+def _universe_row(ticker, *, prev_c, day_o, price, change_pct, shares=5_000_000,
+                  prev_h=None, prev_l=None):
+    """A full-market snapshot row shaped the way `build_equity_universe` reads it."""
+    return {
+        "ticker": ticker,
+        "todaysChangePerc": change_pct,
+        "lastTrade": {"p": price},
+        "day": {"o": day_o, "h": price, "l": price * 0.9, "c": price, "v": shares},
+        "min": {"av": shares, "c": price},
+        "prevDay": {
+            "c": prev_c,
+            "v": 4_000_000,
+            "h": prev_h if prev_h is not None else prev_c * 1.05,
+            "l": prev_l if prev_l is not None else prev_c * 0.95,
+        },
+    }
+
+
+@pytest.fixture
+def offline_universe(monkeypatch):
+    """No DB, no IQFeed: the $-volume fallback query is the only external call."""
+    from app.services.trading.momentum_neural import universe as U
+
+    monkeypatch.setattr(U, "_iqfeed_dollar_volumes", lambda _t: {}, raising=False)
+    # Module-level once-per-name alarm memory must not leak between tests.
+    monkeypatch.setattr(U, "_BASIS_ALARMED_DATE", None, raising=False)
+    monkeypatch.setattr(U, "_BASIS_ALARMED", set(), raising=False)
+    return U
+
+
+def test_hos_shaped_row_is_not_ADMITTED_to_the_universe(offline_universe, caplog):
+    """The HOS row is dropped from the pool, not merely left unstamped.
+
+    price 10.33, prevDay.c 0.30, todaysChangePerc 3462 — the exact 2026-09-02
+    shape. On origin/main this row clears the +5% floor on a fictional change and
+    takes the top `rank_score` in the pool.
+    """
+    U = offline_universe
+    snap = [
+        _universe_row("HOS", prev_c=0.30, day_o=10.30, price=10.33, change_pct=3342.0),
+        _universe_row("REAL", prev_c=5.00, day_o=7.00, price=7.50, change_pct=50.0),
+    ]
+    with caplog.at_level(logging.WARNING, logger=U.__name__):
+        out = U.build_equity_universe(U.EQUITY_ROSS_SMALLCAP, snapshot=snap)
+
+    assert "HOS" not in out, "a 3,342% fiction was admitted to the watch set"
+    assert out == ["REAL"]
+    assert any("basis REJECTED" in r.message for r in caplog.records)
+
+
+def test_the_fiction_cannot_take_the_top_rank_slot(offline_universe):
+    """`rank_score = pos * log1p(chg)`: HOS's 3342 gives log1p 8.11 against 3.93
+    for a real +50% mover — a ~2x rank inflation into the capped pool. Ordering
+    is the harm the brief named ("a fictional value is a fictional priority"),
+    so assert the ORDER, not only the membership."""
+    U = offline_universe
+    snap = [
+        _universe_row("HOS", prev_c=0.30, day_o=10.30, price=10.33, change_pct=3342.0),
+        _universe_row("A", prev_c=5.00, day_o=7.00, price=7.50, change_pct=50.0),
+        _universe_row("B", prev_c=5.00, day_o=6.50, price=6.75, change_pct=35.0),
+    ]
+    out = U.build_equity_universe(U.EQUITY_ROSS_SMALLCAP, snapshot=snap)
+    assert out and out[0] != "HOS"
+    assert out == ["A", "B"]
+
+
+def test_the_fiction_cannot_move_the_adaptive_bars_for_other_names(offline_universe):
+    """`_hot_mover_bars` and `_adaptive_adv_floor` take percentiles over the
+    batch's change list, so ONE fictional value shifts the bar every other name
+    is judged against. Dropping the row (rather than nulling its stamp) is what
+    keeps the batch's own statistics honest."""
+    U = offline_universe
+    real = [
+        _universe_row(f"R{i}", prev_c=5.00, day_o=6.0 + i * 0.1,
+                      price=6.0 + i * 0.1, change_pct=20.0 + i)
+        for i in range(6)
+    ]
+    clean = U.build_equity_universe(U.EQUITY_ROSS_SMALLCAP, snapshot=list(real))
+    poisoned = U.build_equity_universe(
+        U.EQUITY_ROSS_SMALLCAP,
+        snapshot=list(real)
+        + [_universe_row("HOS", prev_c=0.30, day_o=10.30, price=10.33,
+                         change_pct=3342.0)],
+    )
+    assert poisoned == clean, "the fiction perturbed the batch's own ordering"
+
+
+def test_the_ARM_GATE_refuses_the_fiction_rather_than_admitting_it(offline_universe):
+    """`ross_smallcap_profile_evidence` is the live auto-arm admission check and
+    the snapshot change takes PRECEDENCE over the signal's stamped value, so
+    guarding only the stamping site left this gate reading the raw vendor field.
+    `risk_evaluator._ross_universe_ok` re-enters here with a fresh snapshot row
+    precisely when the stamped value was withheld, which routed straight back
+    around the guard."""
+    U = offline_universe
+    row = _universe_row("HOS", prev_c=0.30, day_o=10.30, price=10.33,
+                        change_pct=3342.0)
+    ok, reason, debug = U.ross_smallcap_profile_evidence("HOS", snapshot_row=row)
+    assert ok is False
+    assert reason == "ross_universe_missing_change_pct", (
+        "the arm gate admitted a name on a fictional day change"
+    )
+    assert debug["snapshot_basis_rejected"] == "implausible_vs_session"
+    assert debug["change_pct"] is None
+
+
+def test_a_real_gapper_still_passes_the_arm_gate(offline_universe):
+    """No-regression control. SGLD 2026-09-02: prev close 5.08, +525.6% — 6.3x,
+    inside the bound and correctly admitted."""
+    U = offline_universe
+    row = _universe_row("SGLD", prev_c=5.08, day_o=17.0, price=18.0,
+                        change_pct=254.3, shares=2_000_000)
+    ok, reason, _debug = U.ross_smallcap_profile_evidence("SGLD", snapshot_row=row)
+    assert ok is True
+    assert reason == "ross_universe_profile_ok"
+
+
+def test_the_TOO_HIGH_class_is_a_STATED_uncaught_boundary(offline_universe):
+    """JZ 2026-08-20, PINNED — this is what the repair does NOT fix.
+
+    True prev close 1.70; the lane's own NBBO tape (mid 2.21-3.265) implies the
+    basis it actually read was ~3.7, i.e. 2.2x too HIGH, which read a +221% name
+    as one down 10-41% all session and produced 318 of the 1,909
+    `ross_universe_change_below_profile` rejections. A stale-but-internally-
+    consistent `prevDay` bar does not contradict itself, and no magnitude bound
+    tight enough to catch 2.2x is safe against SGLD's genuine 6.3x or WVVIP's
+    10.5x. So this row is STILL admitted-then-rejected on the wrong number, and
+    this test records that as a boundary rather than leaving it untested.
+
+    Closing it needs a genuine second source (`massive_client._get_prev_close`
+    hits `/v2/aggs/ticker/{t}/prev`, one call per screened name per session).
+    That is not in this change and is not claimed.
+    """
+    U = offline_universe
+    row = _universe_row(
+        "JZ", prev_c=3.70, day_o=2.20, price=2.60,
+        change_pct=-29.7,  # (2.60 - 3.70)/3.70 — the fiction, computed from 3.70
+        prev_h=3.90, prev_l=3.50,
+    )
+    ok, reason, debug = U.ross_smallcap_profile_evidence("JZ", snapshot_row=row)
+
+    assert debug["snapshot_basis_rejected"] is None, (
+        "if this now flags, the magnitude bound moved — re-check SGLD/WVVIP"
+    )
+    assert ok is False
+    assert reason == "ross_universe_change_below_profile"
+    # And the true basis would have admitted it: (2.60-1.70)/1.70 = +52.9%.
+    true_row = dict(row)
+    true_row["todaysChangePerc"] = 52.9
+    true_row["prevDay"] = {"c": 1.70, "v": 4_000_000, "h": 1.80, "l": 1.55}
+    ok2, reason2, _ = U.ross_smallcap_profile_evidence("JZ", snapshot_row=true_row)
+    assert ok2 is True and reason2 == "ross_universe_profile_ok"
+
+
+def test_premarket_change_fallback_refuses_a_rejected_basis(offline_universe):
+    """`_premarket_change_pct`'s `base = prev.c or day.o` is the surviving TWIN
+    of the line already fixed in the ignition tracker — same expression, same
+    field, but on the admission path. It must fall through to the open rather
+    than divide by fiction."""
+    U = offline_universe
+    row = _universe_row("HOS", prev_c=0.30, day_o=10.30, price=10.33,
+                        change_pct=None)
+    row.pop("todaysChangePerc")
+    got = U._premarket_change_pct(row)
+    assert got == pytest.approx((10.33 - 10.30) / 10.30 * 100.0, abs=1e-6), (
+        "the fictional 0.30 basis was used for the premarket fallback"
+    )
 
 
 # ── the second producer: scan_premarket_gaps sorts, then truncates ───────────

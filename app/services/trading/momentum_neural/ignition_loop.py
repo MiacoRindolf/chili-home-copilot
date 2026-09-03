@@ -97,6 +97,14 @@ _SCORE_COOLDOWN_S = 20.0
 # is ridden out and then surrendered — loudly, in both directions.
 _UNIVERSE_RETAIN_MAX_S = 300.0
 
+# BASIS FREEZE BOUND. A corroborated previous close is frozen against a
+# disagreeing read — but not forever. At the 20s refresh cadence, 900s is 45
+# consecutive reads all reporting the same new value, which is evidence rather
+# than noise: a corrected vendor row, or a corporate action. Holding the stale
+# pre-adjustment close past that point is the worse of the two errors, so the
+# freeze surrenders and says so.
+_BASIS_REBASE_AFTER_S = 900.0
+
 # Refresh outcomes. Only `ok` and `screen_empty` are the screen speaking; the
 # other three are the provider failing, and the two must never look alike.
 _UNIVERSE_OK = "ok"
@@ -174,9 +182,21 @@ class _UniverseTracker:
         # observations in a single session). Cleared on the ET date rollover —
         # a prev close is fixed within a session and legitimately changes
         # between them. Touched only by the refresh thread.
+        # CORROBORATION BEFORE FREEZING (second pass). Freezing the FIRST
+        # accepted read cements a value nothing has confirmed — and the corrupt
+        # value can arrive first (HOS was wrong from its very first observation,
+        # 06:39:23 PT). So a basis is PROVISIONAL until a second read agrees
+        # with it, and a provisional value is REPLACED by a disagreeing read
+        # rather than freezing over it. Only a corroborated basis is held, and
+        # even that surrenders to sustained disagreement (`_BASIS_REBASE_AFTER_S`)
+        # so a genuine corporate action or a vendor row correction is not
+        # deliberately pinned to the stale pre-adjustment close for the session.
+        self._basis_provisional: dict[str, float] = {}
         self._basis_held: dict[str, float] = {}
+        self._basis_disagree_since: dict[str, float] = {}
         self._basis_rejected: set[str] = set()
         self._basis_drifted: set[str] = set()
+        self._basis_replaced: set[str] = set()
         self._basis_session_date: str | None = None
 
     def last_outcome(self) -> str:
@@ -189,9 +209,85 @@ class _UniverseTracker:
         today = datetime.now(_ET).date().isoformat()
         if today != self._basis_session_date:
             self._basis_session_date = today
+            self._basis_provisional = {}
             self._basis_held = {}
+            self._basis_disagree_since = {}
             self._basis_rejected = set()
             self._basis_drifted = set()
+            self._basis_replaced = set()
+
+    def _reconcile_basis(self, ticker: str, candidate: float, now_mono: float) -> float:
+        """Return the basis to USE for ``ticker``, applying corroboration.
+
+        State machine, one name, one session:
+
+          no memory        -> PROVISIONAL(candidate); use the candidate.
+          PROVISIONAL(p), candidate agrees   -> HELD(candidate); use it.
+          PROVISIONAL(p), candidate differs  -> PROVISIONAL(candidate); use the
+                                                candidate, log once. This is the
+                                                corrupt-first / correct-second
+                                                path: an UNcorroborated value
+                                                never wins over a newer read.
+          HELD(h), candidate agrees          -> use it, clear the disagree clock.
+          HELD(h), candidate differs         -> use ``h`` (freeze) and warn once;
+                                                if the disagreement PERSISTS past
+                                                ``_BASIS_REBASE_AFTER_S``, adopt
+                                                the candidate and say so. A
+                                                bounded freeze, not a session-long
+                                                pin to a possibly-stale close.
+        """
+        held = self._basis_held.get(ticker)
+        if held is None:
+            prov = self._basis_provisional.get(ticker)
+            if prov is None:
+                self._basis_provisional[ticker] = candidate
+            elif basis_continuity_broken(prov, candidate):
+                if ticker not in self._basis_replaced:
+                    self._basis_replaced.add(ticker)
+                    _log.warning(
+                        "[momentum_ws_ignition] basis UNCORROBORATED %s "
+                        "(first=%.4f second=%.4f) — the first read was never "
+                        "confirmed, so the NEWER value is adopted rather than "
+                        "frozen over",
+                        ticker, float(prov), candidate,
+                    )
+                self._basis_provisional[ticker] = candidate
+            else:
+                # Two consecutive agreeing reads. Now it can be held.
+                self._basis_held[ticker] = candidate
+                self._basis_provisional.pop(ticker, None)
+            return candidate
+
+        if not basis_continuity_broken(held, candidate):
+            self._basis_disagree_since.pop(ticker, None)
+            return held
+
+        since = self._basis_disagree_since.get(ticker)
+        if since is None:
+            self._basis_disagree_since[ticker] = now_mono
+            since = now_mono
+        if (now_mono - since) > _BASIS_REBASE_AFTER_S:
+            _log.warning(
+                "[momentum_ws_ignition] basis RE-BASED %s (held=%.4f new=%.4f) "
+                "— the disagreement persisted for %.0fs, which is a corrected "
+                "vendor row or a corporate action, not a transient; holding the "
+                "stale close any longer is the worse error",
+                ticker, float(held), candidate, now_mono - since,
+            )
+            self._basis_held[ticker] = candidate
+            self._basis_disagree_since.pop(ticker, None)
+            self._basis_drifted.discard(ticker)
+            return candidate
+
+        if ticker not in self._basis_drifted:
+            self._basis_drifted.add(ticker)
+            _log.warning(
+                "[momentum_ws_ignition] basis DRIFTED mid-session %s "
+                "(held=%.4f candidate=%.4f) — FREEZING the corroborated value "
+                "for up to %.0fs",
+                ticker, float(held), candidate, _BASIS_REBASE_AFTER_S,
+            )
+        return held
 
     def refresh(self) -> set[str]:
         """Re-screen the universe; return the CURRENT watch set (uppercased).
@@ -339,6 +435,7 @@ class _UniverseTracker:
         # (#1284 — same meaning as the vendor todaysChangePerc every consumer of
         # the stamped change assumes), plus the open kept separately for the
         # since-open move. Built from the SAME snapshot — no extra fetch.
+        _basis_now = time.monotonic()
         baseline: dict[str, float] = {}
         open_baseline: dict[str, float] = {}
         rvol: dict[str, float] = {}
@@ -399,24 +496,21 @@ class _UniverseTracker:
                 else:
                     # No prev close at all (day-1 listing). Unchanged fallback.
                     base = _f(day.get("o"))
-                # CONTINUITY (2026-09-02). A previous close is fixed for the
-                # session; the tracker re-reads it every 20s and silently
-                # re-based on whatever arrived. Freeze the first accepted value
-                # and say so once, rather than reporting several mutually
-                # inconsistent day changes for one name in one session.
-                _held = self._basis_held.get(t)
-                if base and base > 0 and _held and basis_continuity_broken(_held, base):
-                    if t not in self._basis_drifted:
-                        self._basis_drifted.add(t)
-                        _log.warning(
-                            "[momentum_ws_ignition] basis DRIFTED mid-session %s "
-                            "(held=%.4f candidate=%.4f) — FREEZING the held value",
-                            t, _held, float(base),
-                        )
-                    base = _held
+                # CONTINUITY (2026-09-02, second pass). A previous close is
+                # fixed for the session; the tracker re-reads it every 20s and
+                # silently re-based on whatever arrived. But freezing the FIRST
+                # accepted read is not safe on its own: nothing corroborates it,
+                # and the corrupt value can be the first one (HOS was wrong from
+                # its very first observation). So the first read is PROVISIONAL
+                # — used, not frozen — and a disagreeing read REPLACES it. Only
+                # a value two consecutive reads agree on is held, and a held
+                # value surrenders to sustained disagreement so a genuine
+                # corporate action or a corrected vendor row is not pinned to the
+                # stale close for the rest of the session.
+                if base and base > 0:
+                    base = self._reconcile_basis(t, float(base), _basis_now)
                 if base and base > 0:
                     baseline[t] = float(base)
-                    self._basis_held[t] = float(base)
                 open_base = _f(day.get("o"))
                 if open_base and open_base > 0:
                     open_baseline[t] = float(open_base)
@@ -1058,6 +1152,27 @@ class IgnitionScoringLoop:
         self._obs_lock = threading.Lock()
         self._last_heartbeat_mono = 0.0
 
+    def _count_observation(self) -> None:
+        """Increment the observation counter. TELEMETRY, so it must never raise.
+
+        The first cut of this incremented under ``self._obs_lock`` inline in
+        ``_score_symbol``. That put a bare attribute access on the hot scoring
+        path: an instance whose ``__init__`` has not run raises AttributeError
+        THERE, i.e. the measurement of whether the lane is observing becomes able
+        to stop it observing. It broke two existing tests on this branch
+        (``tests/test_velocity_intake.py``, which builds the loop with
+        ``__new__``) and neither review caught it.
+
+        A watchdog input that can break the thing it watches is worse than one
+        that under-counts, so a missing lock skips the count instead. In a real
+        loop ``__init__`` has always run and this is a plain increment.
+        """
+        lock = getattr(self, "_obs_lock", None)
+        if lock is None:
+            return
+        with lock:
+            self._observations = getattr(self, "_observations", 0) + 1
+
     def _write_observation_heartbeat(self) -> None:
         """Publish 'the lane is still observing' where ANOTHER PROCESS can read it.
 
@@ -1646,8 +1761,7 @@ class IgnitionScoringLoop:
         # 2026-09-01 without a single alarm. Counted here, next to the A/B log
         # line, so the counter and the log line can never disagree. Read and
         # zeroed by `_refresh_loop`'s heartbeat write.
-        with self._obs_lock:
-            self._observations += 1
+        self._count_observation()
         # A/B LOG: queryable proof the ignition path put a name on the board — and what
         # the bridge then did with it (armed / no-arm / skipped-busy / off / error), so
         # a silently starved bridge cannot look identical to a healthy one.

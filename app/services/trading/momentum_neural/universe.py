@@ -40,6 +40,12 @@ import math
 import threading
 from dataclasses import dataclass
 
+from ..day_basis_guard import (
+    DAY_BASIS_OK,
+    DAY_BASIS_REJECTED,
+    classify_day_basis,
+)
+
 logger = logging.getLogger(__name__)
 
 
@@ -174,6 +180,94 @@ def _snapshot_price(s: dict) -> float | None:
     return p if (p and p > 0) else None
 
 
+# ── DAY-CHANGE BASIS INTEGRITY at the ADMISSION and RANKING sites ────────────
+# The first pass of this repair guarded the two places that STAMP and LOG the
+# number (the ignition tracker's baseline cache and `scan_premarket_gaps`) and
+# left the place that ADMITS and RANKS on it untouched — which is this module.
+# `todaysChangePerc` is the vendor's own `(last - prevDay.c)/prevDay.c`, so it
+# carries exactly the corruption the guard was written for, and it decides:
+#   * `ross_universe_change_below_profile` / `ross_universe_missing_change_pct`
+#     (the +5.0% Ross arm gate, which fired 1,909 times across 17 symbol-days
+#     whose TRUE day change was +11.8% to +946.4%);
+#   * the prequalify `min_change_pct` cut;
+#   * `rank_score = pos * log1p(chg)` — HOS's 3462 gives log1p 8.15 against 3.93
+#     for a real +50% mover, ~2.1x rank inflation into the capped pool;
+#   * `_hot_mover_bars` / `_adaptive_adv_floor`, which take percentiles over the
+#     batch's change list, so ONE fictional value shifts the adaptive bar for
+#     every other name;
+#   * `_session_origin_price(price, change)`, which back-derives the prior close
+#     from the change to widen the price band.
+# A row whose basis is rejected is DROPPED from the pool rather than merely left
+# unstamped: leaving it in would let the fiction rank itself and move the bars.
+_BASIS_ALARM_LOCK = threading.Lock()
+_BASIS_ALARMED_DATE: str | None = None
+_BASIS_ALARMED: set[str] = set()
+
+
+def _basis_alarm_once(ticker: str, verdict: str, prev_close, price) -> None:
+    """One WARNING per name per ET trading date (HOS produced 798 observations
+    and 9,290 persisted rows in a single session; one line is the record, 798 is
+    noise). Never raises — an alarm that can break the screen is worse than the
+    silence it replaces."""
+    global _BASIS_ALARMED_DATE, _BASIS_ALARMED
+    try:
+        from datetime import datetime as _dt
+        from zoneinfo import ZoneInfo as _ZI
+
+        today = _dt.now(_ZI("America/New_York")).date().isoformat()
+        with _BASIS_ALARM_LOCK:
+            if today != _BASIS_ALARMED_DATE:
+                _BASIS_ALARMED_DATE = today
+                _BASIS_ALARMED = set()
+            if ticker in _BASIS_ALARMED:
+                return
+            _BASIS_ALARMED.add(ticker)
+        logger.warning(
+            "[universe] day-change basis REJECTED %s (verdict=%s prev_close=%r "
+            "price=%r) — the row is DROPPED from the pool, so it can neither be "
+            "admitted on a fictional change nor rank itself into it",
+            ticker, verdict, prev_close, price,
+        )
+    except Exception:
+        pass
+
+
+def _snapshot_basis(s: dict, price: float | None = None) -> tuple[float | None, str]:
+    """Classify the previous close carried by a full-market snapshot row.
+
+    Returns ``(basis, verdict)`` straight from :func:`classify_day_basis`. A
+    ``missing`` verdict is NOT a rejection — it just means the row carries no
+    prior close (a day-1 listing), and the caller's existing fallback applies.
+
+    ``price`` is injectable so the prequalify loop, which runs over the whole
+    ~13k-row snapshot every 20s, does not recompute ``_snapshot_price`` a second
+    time per row.
+    """
+    try:
+        prev = s.get("prevDay") or {}
+        day = s.get("day") or {}
+        return classify_day_basis(
+            prev.get("c"),
+            open_price=day.get("o"),
+            price=price if price is not None else _snapshot_price(s),
+            prev_high=prev.get("h"),
+            prev_low=prev.get("l"),
+        )
+    except Exception:
+        # Fail-OPEN on an unexpected error inside the guard itself: the guard is
+        # an integrity check, not a gate the screen depends on to function.
+        return None, "missing"
+
+
+def _snapshot_basis_rejected(s: dict, price: float | None = None) -> str | None:
+    """The rejection verdict for a snapshot row's basis, else ``None``."""
+    try:
+        _basis, verdict = _snapshot_basis(s, price)
+        return verdict if verdict in DAY_BASIS_REJECTED else None
+    except Exception:
+        return None
+
+
 def _pos_in_range(s: dict, price: float | None) -> float:
     """Cheap intraday freshness proxy from the snapshot's day OHLC: where the
     current price sits in today's range. ~1.0 = at/near the high-of-day (FRESH,
@@ -223,7 +317,14 @@ def _premarket_change_pct(s: dict) -> float | None:
     # ng vendor `todaysChangePerc` na pinapalitan nito, at pareho ng ignition
     # tracker (ignition_loop.py) na dating open-anchored pagkatapos ng 13:30Z
     # (BIAF +67% → +0.13%). Premarket ay byte-identical (zero ang `day`).
-    base = _f(prev.get("c")) or _f(day.get("o"))
+    # BASIS PLAUSIBILITY (2026-09-02, second pass). This line is the surviving
+    # TWIN of the one already fixed in the ignition tracker: same expression,
+    # same vendor field, same unguarded division — but on the ADMISSION path.
+    # A rejected prev close falls through to the open (the day-1-listing
+    # fallback) rather than to a fabricated number, and yields None when there
+    # is no open either, which is fail-CLOSED here (the ticker is dropped).
+    _basis, _verdict = _snapshot_basis(s, price)
+    base = _basis if _verdict == DAY_BASIS_OK else _f(day.get("o"))
     if base is None or base <= 0:
         return None
     return (price - base) / base * 100.0
@@ -417,9 +518,23 @@ def ross_smallcap_profile_evidence(
     sig_price = _signal_price(signal)
     price = snap_price if snap_price is not None else sig_price
 
+    # BASIS INTEGRITY at the ARM GATE (2026-09-02, second pass). The snapshot
+    # change takes PRECEDENCE over the signal's stamped value, so guarding only
+    # the stamping site left this gate reading the unguarded vendor field — and
+    # `risk_evaluator._ross_universe_ok` re-enters here with a fresh snapshot row
+    # precisely when the stamped value was withheld (`ross_universe_missing_
+    # change_pct`), which would have routed straight back around the guard.
+    # A rejected basis makes the snapshot change UNAVAILABLE rather than
+    # substituting a number; with no signal value either, the caller lands on
+    # `ross_universe_missing_change_pct`, which is fail-CLOSED.
+    _basis_reject = (
+        _snapshot_basis_rejected(snapshot_row)
+        if isinstance(snapshot_row, dict)
+        else None
+    )
     snap_change = (
         _f(snapshot_row.get("todaysChangePerc"))
-        if isinstance(snapshot_row, dict)
+        if isinstance(snapshot_row, dict) and not _basis_reject
         else None
     )
     sig_change = _signal_change_pct(signal)
@@ -442,6 +557,7 @@ def ross_smallcap_profile_evidence(
         "price_source": "snapshot" if snap_price is not None else ("signal" if sig_price is not None else None),
         "change_pct": change_pct,
         "change_source": "snapshot" if snap_change is not None else ("signal" if sig_change is not None else None),
+        "snapshot_basis_rejected": _basis_reject,
         "dollar_volume": dollar_volume,
         "dollar_volume_source": (
             "snapshot"
@@ -819,6 +935,19 @@ def build_equity_universe(
                 profile.price_min is not None and _price < profile.price_min
             )
             if _under_min and not _subdollar_on:
+                continue
+            # BASIS INTEGRITY (2026-09-02, second pass). `todaysChangePerc` is
+            # the VENDOR's own (last - prevDay.c)/prevDay.c, so it inherits the
+            # corrupt basis whole. Dropping the row here — rather than merely
+            # declining to stamp it downstream — is what stops the fiction from
+            # (a) being admitted on a change it never made, (b) taking a capped
+            # pool slot via `rank_score`, and (c) shifting `_hot_mover_bars` /
+            # `_adaptive_adv_floor` for every OTHER name in the batch.
+            _basis_reject = _snapshot_basis_rejected(_snapshot_row, _price)
+            if _basis_reject:
+                _basis_alarm_once(_ticker, _basis_reject, (
+                    (_snapshot_row.get("prevDay") or {}).get("c")
+                ), _price)
                 continue
             _change = _f(_snapshot_row.get("todaysChangePerc"))
             if _change is None:
