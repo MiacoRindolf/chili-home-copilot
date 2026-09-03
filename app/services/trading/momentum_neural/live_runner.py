@@ -21122,6 +21122,7 @@ def _final_entry_bbo(
     max_age_seconds: float,
     allow_stand_in: bool = False,
     stand_in_max_age_seconds: float | None = None,
+    resolve_locked: bool = False,
 ) -> tuple[NormalizedTicker | None, dict[str, Any]]:
     """Fetch and validate the exact BBO used at the broker submit boundary.
 
@@ -21134,6 +21135,16 @@ def _final_entry_bbo(
     and a cross-source bid is systematically permissive in the unsafe direction
     for them — it would judge an exit marketable, or price one, above the book the
     venue can actually reach.
+
+    ``resolve_locked`` is a SEPARATE opt-in, also defaulting to False, and it is
+    deliberately NOT derived from ``allow_stand_in``.  That flag stopped being an
+    entry marker at #1224 / #1254: this same helper is called with
+    ``allow_stand_in=True`` from four PROTECTIVE sites — :13252 and :13364 in
+    ``_submit_live_market_exit_impl`` (extended-hours / stop-class fail-open exit
+    and the quote_independent emergency flatten), :14153 in
+    ``_final_literal_exit_bbo_refresh``, and :27583 in the captured-paper literal
+    exit — every one of them with a 900s stand-in ceiling.  Only the
+    ``live_entry_final_bbo`` seam passes ``resolve_locked=True``.
     """
     getter = getattr(adapter, "get_execution_bbo", None)
     if not callable(getter):
@@ -21148,6 +21159,11 @@ def _final_entry_bbo(
                 _kwargs["stand_in_max_age_seconds"] = float(
                     stand_in_max_age_seconds
                 )
+        if resolve_locked:
+            # Same defensive shape as allow_stand_in above: only ask for it when
+            # requested, so an adapter that predates the parameter keeps working
+            # unchanged rather than raising TypeError.
+            _kwargs["resolve_locked"] = True
         result = getter(product_id, **_kwargs)
         tick, meta = result if isinstance(result, tuple) else (result, None)
     except Exception as exc:
@@ -38449,6 +38465,14 @@ def tick_live_session(
                 # caller of this helper is protective (exit marketability, orphan
                 # close) and keeps the direct-Alpaca-only contract.
                 allow_stand_in=True,
+                # LOCKED-BOOK VERDICT (2026-09-02). The ONLY caller that asks for
+                # it. This is the exact seam the 93 locked observations were
+                # measured on (`live_entry_final_bbo`, 1,144 ok reads in 21 days,
+                # 8.13% locked). It stamps `locked_book_resolution` on the tick
+                # and changes NO price; the four protective callers of this same
+                # helper — which all pass allow_stand_in=True with a 900s ceiling
+                # — never ask for it, so their reads stay byte-identical.
+                resolve_locked=True,
             )
             le["entry_final_bbo"] = _final_bbo
             _commit_le(sess, le)

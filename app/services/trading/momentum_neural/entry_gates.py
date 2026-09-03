@@ -2368,8 +2368,17 @@ def _session_open_from_frame(df: Any, cur: Any = None) -> float | None:
     kada commit, at walang hindi-nasusukat na paghihigpit. Naitala nang may
     eksaktong linya para masukat nang hiwalay.
 
-    Ang araw ay tinutukoy sa US/Eastern, gaya ng ``_prior_day_close_from_frame``
-    at ``_today_session_frame``. ``cur`` ay ang integer na posisyon ng trigger
+    ⚠️ ANG ARAW AY TINUTUKOY SA US/EASTERN, AT ITO AY **HINDI** ANG KOMBENSIYON
+    NG ``_today_session_frame`` (itinama 2026-09-02 pagkatapos ng review). Ang
+    naunang draft ng docstring na ito ay nagsabing "gaya ng
+    ``_today_session_frame``"; MALI iyon. Ang ``_today_session_frame``
+    (:4035-4038) ay bumabagsak sa **naive na petsa** kapag tz-naive ang index,
+    habang ang helper na ito ay nilo-localize ang tz-naive na index bilang
+    **UTC** bago i-convert sa New York. Para sa 04:00-20:00 ET na mga bar --
+    ang tanging hugis na pinapakain ng lane rito -- pareho ang sagot ng dalawa,
+    kaya walang epekto sa gawi; pero dalawang kahulugan ng "session" ang dala ng
+    iisang module at nakasulat dito kung alin ang alin sa halip na ipagpalagay
+    na iisa sila. ``cur`` ay ang integer na posisyon ng trigger
     bar; kapag ibinigay, ang session ay ang session NG BAR NA IYON (hindi ng
     dulo ng frame, na siyang ginagawa ng ``_today_session_frame``), kaya ang
     as-of/look-ahead na disiplina ng replay ay nananatili kahit ang trigger bar

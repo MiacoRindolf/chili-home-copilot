@@ -9227,7 +9227,7 @@ class Settings(BaseSettings):
         ),
     )
     chili_alpaca_execution_bbo_locked_resolve_enabled: bool = Field(
-        default=True,
+        default=False,
         validation_alias=AliasChoices(
             "CHILI_ALPACA_EXECUTION_BBO_LOCKED_RESOLVE_ENABLED"
         ),
@@ -9248,14 +9248,54 @@ class Settings(BaseSettings):
             "AUUD 19337: 19 na `live_entry_spread_risk_veto` sa 84-92 bps laban "
             "sa 31.0 bps na budget, tapos ang ika-20 na read ay 1.14/1.14 at "
             "pumasok ang entry; ang IQFeed sa dt=+0.0007s ay 1.13/1.14 = 88.11 "
-            "bps. ON => ang naka-lock na sagot ay itinatago at ipinagpapatuloy "
-            "ang natitirang tier; ang unang dalawang-panig na libro sa loob ng "
-            "age bound ang panalo. Kapag WALANG ibang feed ang sumagot ay "
-            "ibinabalik ang naka-lock nang HINDI ginagalaw (byte-identical, "
-            "hindi kailanman mas mahigpit) na may markang "
-            "`locked_book_resolution` = genuine | no_second_feed. ENTRY LAMANG: "
-            "kailangan ang `allow_stand_in`, kaya ang exit at ang orphan close "
-            "ay hindi ginagalaw. OFF => byte-identical na dating gawi."
+            "bps. ON => ang naka-lock na sagot ay itinatago at TINATANONG ang "
+            "SUSUNOD NA TIER NA SUMASAGOT (isa lamang; ang tier na walang "
+            "naibigay ay hindi sagot, kaya nagpapatuloy ang paghahanap). "
+            "⚠️ VERDICT LAMANG: sa LAHAT ng kalalabasan ay ang NAKA-LOCK na tick "
+            "pa rin ang ibinabalik -- ang bid, ask, mid, spread at "
+            "`quote_authority` ay HINDI GINAGALAW, kaya ang planned limit, ang "
+            "`slip_ref` at ang `spread_bps_live` sa entry-place seam ay "
+            "byte-identical sa dati. Ang idinadagdag ay marka lamang sa `raw`: "
+            "`locked_book_resolution` = artifact_resolved | genuine | "
+            "no_second_feed, kasama ang `locked_book_real_spread_bps` (88.11 sa "
+            "AUUD 19337). Ang gate ng #1299 ang gagamit nito para presyuhan ang "
+            "pagtanggi gamit ang TUNAY na numero sa halip na kategoryang hatol; "
+            "ang aktwal na pagpepresyo ay phase 2 at kailangan ng sariling "
+            "sukat. ⚠️ ENTRY LAMANG SA PAMAMAGITAN NG HIWALAY NA `resolve_locked` "
+            "NA ARGUMENTO, HINDI ng `allow_stand_in`: ang `allow_stand_in` ay "
+            "TUMIGIL nang maging marka ng entry noong #1224/#1254 at apat na "
+            "PROTECTIVE na site ang nagpapasa nito ng True (live_runner.py:13252, "
+            ":13364, :14153, :27583 -- emergency flatten, stop-class fail-open "
+            "exit, literal exit refresh, captured-paper exit), bawat isa may 900s "
+            "na ceiling. IISANG caller ang nagpapasa ng `resolve_locked=True`: "
+            "ang `live_entry_final_bbo` seam. OFF (DEFAULT) => byte-identical na "
+            "dating gawi. Default OFF para sa launch window; buksan pagkatapos "
+            "ng soak, kagaya ng shadow-first na pattern ng #1290."
+        ),
+    )
+    chili_alpaca_execution_bbo_locked_resolve_hard_max_age_seconds: float = Field(
+        default=5.0,
+        ge=0.0,
+        le=60.0,
+        validation_alias=AliasChoices(
+            "CHILI_ALPACA_EXECUTION_BBO_LOCKED_RESOLVE_HARD_MAX_AGE_SECONDS"
+        ),
+        description=(
+            "2026-09-02: ABSOLUTONG kisame ng edad para sa locked-book na hatol, "
+            "hiwalay sa `max_age_seconds` ng caller at sinusukat laban sa WALL "
+            "CLOCK. Ang `..._max_age_seconds` sa ibaba ay RELATIBO -- "
+            "pinaghahambing nito ang dalawang provider clock sa isa't isa -- at "
+            "ang relatibong tseke lamang ay magdedeklarang magkasundo ang "
+            "DALAWANG hilerang pareho nang labinlimang minutong luma. Ang mismong "
+            "nasukat na sakit dito ay ang HULING-ALAM na hilerang nakalusot sa "
+            "sariling freshness check (SDOT: pinakamalapit na IQFeed 15.4s ang "
+            "layo, at ang tunay na best bid ay hindi kailanman umabot sa presyong "
+            "tinawag ng stand-in na dalawang panig). Kapag ang naka-lock na "
+            "primary MISMO ay lampas sa kisameng ito, walang hatol na hinahanap "
+            "at walang dagdag na query -- ibinabalik agad nang hindi ginagalaw. "
+            "Ang ebidensya (84 sa 89 na tugma ay nasa loob ng 10 ms) ay "
+            "sumusuporta sa ilang segundo; wala itong sinusuportahan sa 900s. "
+            "0 => walang resolution (parang OFF ang flag)."
         ),
     )
     chili_alpaca_execution_bbo_locked_resolve_max_age_seconds: float = Field(

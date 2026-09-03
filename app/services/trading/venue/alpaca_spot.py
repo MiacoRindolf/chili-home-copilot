@@ -1193,6 +1193,7 @@ class AlpacaSpotAdapter:
         max_age_seconds: float = 2.0,
         allow_stand_in: bool = False,
         stand_in_max_age_seconds: float | None = None,
+        resolve_locked: bool = False,
     ):
         """Authoritative pre-submit BBO.
 
@@ -1207,6 +1208,20 @@ class AlpacaSpotAdapter:
         national best bid is by construction >= any single venue's bid, so a
         stand-in bid would judge an exit marketable, or price one, above what the
         venue can actually reach — turning "no entries" into "entered and stuck".
+
+        ``resolve_locked`` is a SEPARATE opt-in and defaults to False.  It gates
+        the locked-book cross-feed verdict below.  It is deliberately NOT keyed
+        off ``allow_stand_in``: that flag stopped being an entry marker at #1224
+        / #1254, and ``live_runner`` now passes it True from four PROTECTIVE
+        sites — ``_submit_live_market_exit_impl`` (the extended-hours / stop-class
+        fail-open exit and the quote_independent emergency flatten),
+        ``_final_literal_exit_bbo_refresh``, and the captured-paper literal exit —
+        every one of them with a 900s stand-in ceiling.  An earlier draft of this
+        change gated on ``allow_stand_in`` and asserted in three places that the
+        exit path could not reach it.  That assertion was FALSE, and it was false
+        on the one path where being wrong costs the most.  The verdict now
+        requires an explicit opt-in that exactly one caller passes: the
+        ``live_entry_final_bbo`` seam in ``live_runner``.
 
         WHY the stand-in exists (2026-08-20): this method used to accept the direct
         Alpaca quote and nothing else, on the premise that no tape row carries a
@@ -1321,11 +1336,25 @@ class AlpacaSpotAdapter:
         # ANG LOCK LAMANG ANG DAHILAN KUNG BAKIT PUMASOK ANG AUUD.
         #
         # ANG AYOS AY ANG MISMONG HUGIS NG JUNK-WIDE NA PATTERN SA ITAAS: itago
-        # ang naka-lock na sagot, ipagpatuloy ang natitirang tier, at kapag
-        # WALANG ibang tier ang sumagot ay ibalik ang naka-lock nang HINDI
-        # ginagalaw -- byte-identical sa dati, hindi kailanman mas mahigpit.
-        # Walang bagong validity logic: ang bawat tier ay may sariling
-        # dual-clock na kontrata na.
+        # ang naka-lock na sagot, tanungin ang SUSUNOD na tier na SUMASAGOT, at
+        # ibalik ang naka-lock na quote nang HINDI ginagalaw -- byte-identical sa
+        # dati, hindi kailanman mas mahigpit. Walang bagong validity logic: ang
+        # bawat tier ay may sariling dual-clock na kontrata na.
+        #
+        # ⚠️ VERDICT LAMANG ITO, HINDI PAGPEPRESYO (binago 2026-09-02 pagkatapos
+        # ng review). Ang naunang draft ay IBINABALIK ang libro ng pangalawang
+        # feed sa ARTIFACT na sangay -- 57 sa 93 na naka-lock na read (61.3%),
+        # ang mayoryang kaso -- na naglilipat ng bid/ask/mid, ng
+        # `spread_bps_live` at ng `slip_ref` sa entry-place seam at nagpapalit ng
+        # `quote_authority` palayo sa `alpaca_direct` (ang mismong susi na
+        # sinasangay ng live_runner.py:38700). WALANG sukat sa apat na
+        # ebidensyang session ang sumasaklaw sa mga FILL sa pinalitang presyo:
+        # ang lahat ng counterfactual ay nag-iskor ng PAGTANGGI, hindi ng
+        # presyo. Kaya ang ibinabalik na tick ay LAGING ang naka-lock na tick;
+        # ang tanging idinadagdag ay ang MARKA sa `raw`. Ang gate ng #1299 ang
+        # gagamit nito para presyuhan ang pagtanggi gamit ang TUNAY na numero sa
+        # halip na kategoryang hatol. Ang pagpapalit ng aktwal na pagpepresyo ay
+        # phase 2 at kailangan ng sariling sukat.
         #
         # ⚠️ ANG TUNAY NA DISKRIMINADOR AY ANG BUHAY NA FEED, HINDI ANG ORASAN.
         # Ang APAT na NO_FEED na kaso ay ang APAT na regular-hours na kaso, at
@@ -1338,13 +1367,26 @@ class AlpacaSpotAdapter:
         # age bound sa ibaba ay sinusukat laban sa SARILING provider clock ng
         # naka-lock na primary, hindi sa wall clock -- iyon ang naghihiwalay ng
         # 10-ms na artifact mula sa 15-112s na butas ng feed.
+        #
+        # ⚠️ HINDI ITO NAKA-KABIT SA `allow_stand_in` (binago 2026-09-02
+        # pagkatapos ng review). Ang `allow_stand_in` ay TUMIGIL nang maging
+        # marka ng entry noong #1224/#1254: apat na PROTECTIVE na site sa
+        # live_runner ang nagpapasa nito ng True -- :13252 at :13364 sa
+        # `_submit_live_market_exit_impl` (ang extended-hours / stop-class na
+        # fail-open exit at ang quote_independent na emergency flatten), :14153
+        # sa `_final_literal_exit_bbo_refresh`, at :27583 sa captured-paper --
+        # bawat isa may 900s na stand-in ceiling. Kailangan ang HIWALAY na
+        # `resolve_locked`, na IISANG caller lamang ang nagpapasa: ang
+        # `live_entry_final_bbo` seam. Iyon ang mismong populasyon ng 93 na
+        # obserbasyon; ang exit ay hindi kailanman pumapasok dito.
         _lock_on = bool(getattr(
-            settings, "chili_alpaca_execution_bbo_locked_resolve_enabled", True
+            settings, "chili_alpaca_execution_bbo_locked_resolve_enabled", False
         ))
-        _lock_resolve = bool(_lock_on and allow_stand_in)
+        _lock_resolve = bool(_lock_on and allow_stand_in and resolve_locked)
         _locked_stash = None          # (tick, meta) ng UNANG naka-lock na sagot
         _locked_others = 0            # ilang IBANG feed ang sumagot sa loob ng bound
         _locked_others_locked = 0     # ... at ilan doon ang naka-lock DIN
+        _locked_real_spread_bps = None  # spread ng pangalawang feed kapag ARTIFACT
 
         def _locked_pair(_res):
             """(is_locked, tick, meta) para sa isang (tick, meta) na sagot."""
@@ -1359,6 +1401,42 @@ class AlpacaSpotAdapter:
             # pinakamaliit na TUNAY na spread ay isang tick (>= 1e-4 USD), kaya
             # walang tunay na dalawang-panig na libro ang mababasa bilang locked.
             return (_b > 0 and _a > 0 and abs(_a - _b) <= 1e-9), _t, _m
+
+        def _hard_ceiling_seconds() -> float:
+            """ABSOLUTONG hangganan ng edad, hiwalay sa `max_age_seconds`.
+
+            Ang `_within_lock_bound` sa ibaba ay RELATIBO -- pinaghahambing nito
+            ang dalawang provider clock sa isa't isa. Sa entry seam iyon ay
+            sapat, dahil ang primary mismo ay may maikling ceiling. PERO ang
+            relatibong tseke lamang ay magdedeklarang "artifact resolved" ang
+            DALAWANG hilerang pareho nang labinlimang minutong luma basta't
+            magkasundo sila sa isa't isa -- at ang mismong nasukat na sakit dito
+            ay ang isang HULING-ALAM na hilera na nakalusot sa freshness check.
+            Kaya may hiwalay na absolutong kisame: parehong panig ay dapat
+            SARIWA sa wall clock bago ang hatol ay may kahulugan. Ang ebidensya
+            (84 sa 89 ay nasa loob ng 10 ms) ay sumusuporta sa ilang segundo; ito
+            ay walang sinusuportahan sa 900s.
+            """
+            try:
+                return float(getattr(
+                    settings,
+                    "chili_alpaca_execution_bbo_locked_resolve_hard_max_age_seconds",
+                    5.0,
+                ) or 0.0)
+            except (TypeError, ValueError):
+                return 0.0
+
+        def _fresh_enough(_meta) -> bool:
+            _ceiling = _hard_ceiling_seconds()
+            if _ceiling <= 0:
+                return False
+            _p = getattr(_meta, "provider_time_utc", None)
+            if not isinstance(_p, datetime):
+                return False
+            try:
+                return abs((_now() - _p).total_seconds()) <= _ceiling
+            except (TypeError, ValueError):
+                return False
 
         def _within_lock_bound(_meta) -> bool:
             """Ang tugma ba ay SABAY sa naka-lock na primary?
@@ -1385,6 +1463,10 @@ class AlpacaSpotAdapter:
             _p1 = getattr(_meta, "provider_time_utc", None)
             if not isinstance(_p0, datetime) or not isinstance(_p1, datetime):
                 return False
+            if not _fresh_enough(_meta):
+                # Sabay sila, pero pareho silang luma. Dalawang patay na hilera
+                # na magkasundo ay hindi isang libro.
+                return False
             try:
                 return abs((_p1 - _p0).total_seconds()) <= _bound
             except (TypeError, ValueError):
@@ -1393,9 +1475,18 @@ class AlpacaSpotAdapter:
         def _consider(_res, _tier: str):
             """Ibalik ang sagot kapag dalawang-panig; itago kapag naka-lock.
 
-            ``None`` ang ibig sabihin ay "magpatuloy sa susunod na tier".
+            ``None`` ang ibig sabihin ay "magpatuloy sa susunod na tier", at
+            IISANG beses lamang itong nangyayari: pagkatapos itago ang naka-lock
+            na primary, ang UNANG tier na SUMASAGOT (kahit ano ang sagot) ang
+            nagtatapos ng paglalakad. Ang naunang draft ay nagpapatuloy sa
+            bawat naka-lock o labas-sa-bound na sagot, kaya sa 36 sa 93 na
+            nasukat na kaso (38.7%) ay tumatakbo ang LAHAT ng natitirang tier at
+            walang naaayos -- tatlong dagdag na DB round-trip bawat isa, isa sa
+            kanila laban sa 89 GB na `iqfeed_trade_ticks`. Ang gastos na
+            inaangkin ng PR ("isang query") ay tama lamang sa hugis na ito.
             """
             nonlocal _locked_stash, _locked_others, _locked_others_locked
+            nonlocal _locked_real_spread_bps
             if _res is None:
                 return None
             if not _lock_resolve:
@@ -1404,44 +1495,113 @@ class AlpacaSpotAdapter:
             if _locked_stash is None:
                 if not _is_locked:
                     return _res
+                if not _fresh_enough(_m):
+                    # Ang naka-lock na primary mismo ay lampas sa absolutong
+                    # kisame. Walang hatol na masasabi tungkol dito, at ang
+                    # paghahanap ng pangalawang feed ay puro gastos. Ibalik nang
+                    # hindi ginagalaw: eksaktong dating gawi.
+                    return _res
                 _locked_stash = (_t, _m if isinstance(_m, FreshnessMeta) else None)
                 logger.info(
                     "[alpaca_spot] LOCKED book sym=%s tier=%s bid=%s ask=%s — "
-                    "hinahanap ang pangalawang feed bago tanggapin",
+                    "isang pangalawang feed ang tatanungin bago ang hatol",
                     product_id, _tier,
                     getattr(_t, "bid", None), getattr(_t, "ask", None),
                 )
                 return None
-            # May naka-lock nang primary. Ang tier na ito ang PANGALAWANG FEED.
-            if not _within_lock_bound(_m):
-                # Sumagot pero HINDI sabay: hindi ito ebidensya tungkol sa
-                # estado ng libro sa sandali ng naka-lock na primary.
-                return None
-            _locked_others += 1
-            if _is_locked:
-                _locked_others_locked += 1
-                return None
-            # ARTIFACT: may TUNAY na dalawang-panig na libro ang ibang feed sa
-            # parehong sandali. Ito ang sagot; ang naka-lock na row ay punit.
+            # May naka-lock nang primary at SUMAGOT ang tier na ito. Dito
+            # nagtatapos ang paglalakad, anuman ang sagot.
+            if _within_lock_bound(_m):
+                _locked_others += 1
+                if _is_locked:
+                    _locked_others_locked += 1
+                else:
+                    try:
+                        _sb = float(getattr(_t, "spread_bps", 0.0) or 0.0)
+                        if _sb <= 0:
+                            _b2 = float(getattr(_t, "bid", 0.0) or 0.0)
+                            _a2 = float(getattr(_t, "ask", 0.0) or 0.0)
+                            if _b2 > 0 and _a2 >= _b2:
+                                _sb = (_a2 - _b2) / ((_a2 + _b2) / 2.0) * 10_000.0
+                        _locked_real_spread_bps = _sb if _sb > 0 else None
+                    except (TypeError, ValueError, ZeroDivisionError):
+                        _locked_real_spread_bps = None
+            return _finalize_locked()
+
+        def _finalize_locked():
+            """Ibalik ang NAKA-LOCK na tick nang hindi ginagalaw, may hatol.
+
+            TATLONG hatol, at ang pagkakaiba nila ang buong punto:
+
+              artifact_resolved -- may BUHAY na pangalawang feed at may TUNAY
+                                   itong dalawang-panig na libro sa parehong
+                                   sandali (57 sa 93 = 61.3%; 88 sa 89 na tugma
+                                   ay nasa loob ng 100 ms). Ang naka-lock na row
+                                   ay PUNIT, at ang tunay na lapad ay nakasulat
+                                   sa `locked_book_real_spread_bps` -- 88.11 bps
+                                   sa AUUD 19337, laban sa 0.0 na iniulat ng
+                                   naka-lock na row at sa 31.0 bps na budget na
+                                   tumanggi nang 19 na sunod-sunod na beses.
+              genuine           -- may buhay na pangalawang feed at NAKA-LOCK
+                                   DIN ito (32 sa 93 = 34.4%). Tunay na estado
+                                   ng merkado; ang one-tick na kapalit ng #1299
+                                   ay tapat dito.
+              no_second_feed    -- WALANG ibang feed sa loob ng bound (4 sa 93 =
+                                   4.3%). Ang naka-lock na row ay isang
+                                   HULING-ALAM na hilera sa loob ng butas ng
+                                   feed, hindi estado ng libro, at ang one-tick
+                                   na kapalit ay NAGSISINUNGALING doon: 31.8x
+                                   kulang sa SDOT (5.78 laban sa tunay na 184.03
+                                   bps), 12.4x sa IPST (9.34 laban sa 115.70),
+                                   1.75x sa DAIC, 1.00x sa AIXI.
+
+            ⚠️ SA LAHAT NG TATLO AY ANG NAKA-LOCK NA TICK ANG IBINABALIK. Ang
+            bid, ask, mid, spread_bps at `quote_authority` ay HINDI GINAGALAW,
+            kaya ang planned limit, ang `slip_ref` at ang `spread_bps_live` sa
+            entry-place seam ay byte-identical sa `origin/main`. Ang tanging
+            idinadagdag ay mga marka sa `raw`. Ito ang Phase 1 na ipinangako ng
+            disenyo, at ito ang tanging hugis na sinusuportahan ng ebidensya:
+            ang lahat ng counterfactual sa apat na sesyon ay nag-iskor ng
+            PAGTANGGI, wala ni isa ang nag-iskor ng FILL sa pinalitang presyo.
+
+            ⚠️ WALA PANG MAMBABASA NG MARKANG ITO, AT SINASADYA. Ito ay senyas
+            para sa locked-book na guard ng #1299 (branch
+            seam/locked-book-and-defer-0902), na sa ngayon ay naghahati sa
+            ORASAN (`_locked_book_in_regular_hours`). Ang orasan ay perpektong
+            proxy sa 21-araw na corpus at proxy pa rin -- ang mekanismo ay ang
+            BUHAY NA FEED. Ang aktwal na pagpepresyo mula sa hatol na ito ay
+            phase 2 at kailangan ng sariling sukat.
+            """
+            _t0, _m0 = _locked_stash
+            if _locked_real_spread_bps is not None:
+                _verdict = "artifact_resolved"
+            elif _locked_others_locked > 0:
+                _verdict = "genuine"
+            else:
+                _verdict = "no_second_feed"
             try:
-                if isinstance(getattr(_t, "raw", None), dict):
-                    _t.raw["locked_primary_replaced"] = True
-                    _t.raw["locked_primary_bid"] = getattr(_locked_stash[0], "bid", None)
-                    _t.raw["locked_primary_ask"] = getattr(_locked_stash[0], "ask", None)
-                    _t.raw["locked_primary_feed"] = (
-                        (getattr(_locked_stash[0], "raw", None) or {}).get("feed")
+                if isinstance(getattr(_t0, "raw", None), dict):
+                    _t0.raw["locked_book"] = True
+                    _t0.raw["locked_book_resolution"] = _verdict
+                    _t0.raw["locked_book_second_feeds"] = int(_locked_others)
+                    _t0.raw["locked_book_second_feeds_locked"] = int(
+                        _locked_others_locked
                     )
-                    _t.raw["locked_book_resolution"] = "artifact_resolved"
+                    _t0.raw["locked_book_real_spread_bps"] = _locked_real_spread_bps
             except Exception:
                 pass
             logger.info(
-                "[alpaca_spot] locked book RESOLVED sym=%s tier=%s bid=%s ask=%s "
-                "spread=%.2fbps — ang naka-lock na primary ay punit, hindi merkado",
-                product_id, _tier, getattr(_t, "bid", None),
-                getattr(_t, "ask", None),
-                float(getattr(_t, "spread_bps", 0.0) or 0.0),
+                "[alpaca_spot] LOCKED book sym=%s verdict=%s second_feeds=%d "
+                "locked=%d real_spread=%s — ibinabalik nang HINDI ginagalaw",
+                product_id, _verdict, _locked_others, _locked_others_locked,
+                (
+                    "%.2fbps" % _locked_real_spread_bps
+                    if _locked_real_spread_bps is not None else "n/a"
+                ),
             )
-            return _res
+            return _t0, (
+                _m0 if isinstance(_m0, FreshnessMeta) else _fresh(max_age_seconds)
+            )
 
         if resolved is not None:
             _out = _consider(resolved, "alpaca_direct")
@@ -1463,9 +1623,19 @@ class AlpacaSpotAdapter:
             # MGA ARGUMENTO AY HINDI GINALAW; ang tanging pagkakaiba ay dumadaan
             # ang bawat sagot sa `_consider`, na nagbabalik agad sa isang
             # dalawang-panig na libro (dating gawi) at nagpapatuloy lamang kapag
-            # NAKA-LOCK ang sagot. Kapag patay ang flag o hindi pinapayagan ang
-            # stand-in, ang `_consider` ay isang passthrough at ang loop ay
-            # byte-identical sa apat na `return` na pinalitan nito.
+            # NAKA-LOCK ang sagot. Kapag patay ang flag, hindi pinapayagan ang
+            # stand-in, o hindi humihingi ng `resolve_locked` ang caller, ang
+            # `_consider` ay isang passthrough at ang loop ay byte-identical sa
+            # apat na `return` na pinalitan nito.
+            #
+            # ⚠️ NAKAHANGGA ANG PAGLALAKAD SA ISANG DAGDAG NA SAGOT. Pagkatapos
+            # itago ang naka-lock na primary, ang UNANG tier na SUMASAGOT ang
+            # nagtatapos ng paglalakad -- kahit naka-lock din ang sagot, kahit
+            # labas ito sa bound. Ang isang tier na walang naibigay (None) ay
+            # HINDI sagot, kaya nagpapatuloy pa rin ang loop; iyon ang nagpapanatili
+            # sa argumentong CANF sa ibaba. Kaya ang pinakamasamang dagdag na
+            # gastos ay TATLONG DB read lamang sa pangalang walang L1 at walang
+            # trade tick, at ang karaniwan ay ISA.
             _age = (
                 float(stand_in_max_age_seconds)
                 if stand_in_max_age_seconds is not None
@@ -1501,55 +1671,7 @@ class AlpacaSpotAdapter:
                 if _out is not None:
                     return _out
         if _locked_stash is not None:
-            # WALANG ibang feed ang nagbigay ng dalawang-panig na libro sa loob
-            # ng bound. Ibalik ang naka-lock na quote nang HINDI ginagalaw --
-            # eksaktong dating gawi -- pero may MARKA na ngayon kung ALIN sa
-            # dalawang napakaibang dahilan ang nangyari. Ito ang bagong senyas,
-            # at ito ang KULANG sa #1299:
-            #
-            #   genuine        -- may buhay na pangalawang feed at NAKA-LOCK
-            #                     DIN ito. Tunay na estado ng merkado; ang
-            #                     one-tick na kapalit ay tapat dito.
-            #   no_second_feed -- WALANG ibang feed sa loob ng bound. Ang
-            #                     naka-lock na row ay isang HULING-ALAM na
-            #                     hilera sa loob ng butas ng feed, hindi isang
-            #                     estado ng libro, at ang one-tick na kapalit ay
-            #                     NAGSISINUNGALING doon: sa apat na sinukat na
-            #                     kaso ay kulang ang presyo nito nang 31.8x
-            #                     (SDOT 5.78 laban sa tunay na 184.03 bps),
-            #                     12.4x (IPST 9.34 laban sa 115.70), 1.75x
-            #                     (DAIC) at 1.00x (AIXI).
-            #
-            # ⚠️ WALA PANG MAMBABASA NITO, AT SINASADYA. Ang kolum na ito ay
-            # senyas para sa locked-book na guard ng #1299 (branch
-            # seam/locked-book-and-defer-0902), na sa ngayon ay naghahati sa
-            # ORASAN (`_locked_book_in_regular_hours`). Ang orasan ay perpektong
-            # proxy sa 21-araw na corpus at proxy pa rin; ito ang mekanismo.
-            # Hindi ko binabago ang pagpepresyo rito: ang pagpapalit ng ibinalik
-            # na spread ay babaguhin ang `spread_bps_live` at ang `slip_ref` sa
-            # entry-place seam, at iyon ay isang pagbabago sa PAGPEPRESYO na
-            # hindi sinusukat ng alinman sa apat na ebidensyang session.
-            _t0, _m0 = _locked_stash
-            try:
-                if isinstance(getattr(_t0, "raw", None), dict):
-                    _t0.raw["locked_book"] = True
-                    _t0.raw["locked_book_resolution"] = (
-                        "genuine" if _locked_others_locked > 0 else "no_second_feed"
-                    )
-                    _t0.raw["locked_book_second_feeds"] = int(_locked_others)
-                    _t0.raw["locked_book_second_feeds_locked"] = int(
-                        _locked_others_locked
-                    )
-            except Exception:
-                pass
-            logger.info(
-                "[alpaca_spot] LOCKED book UNRESOLVED sym=%s verdict=%s "
-                "second_feeds=%d locked=%d — ibinabalik nang hindi ginagalaw",
-                product_id,
-                "genuine" if _locked_others_locked > 0 else "no_second_feed",
-                _locked_others, _locked_others_locked,
-            )
-            return _t0, (_m0 if isinstance(_m0, FreshnessMeta) else _fresh(max_age_seconds))
+            return _finalize_locked()
         if _junk_direct is not None:
             # Walang naibigay ang bawat stand-in tier: ibalik ang basurang-lapad
             # na direct nang buo -- ang gawi bago ang 2026-08-27, hindi mas
@@ -1850,11 +1972,28 @@ class AlpacaSpotAdapter:
             if requested <= 0:
                 return None
             with SessionLocal() as _db:
+                # ⚠️ TIME-BOUND (2026-09-02). Ang query na ito ay WALANG
+                # `observed_at` na predicate hanggang ngayon, laban sa 89 GB na
+                # `iqfeed_trade_ticks` na may sirang BRIN -- ang MISMONG hugis na
+                # sinisisi ng tala sa :1027-1040 sa 2,430 ms na median ng SIP
+                # tier at sa 8,969 ms na LIDR place call, at na inayos noong
+                # araw ding iyon sa KAPITBAHAY na function (:1042-1049) sa
+                # pamamagitan ng pagdaragdag ng ganitong hangganan. Ang tier na
+                # ito ay nakaligtaan dahil naaabot lamang ito noon kapag wala
+                # nang naibigay ang SIP at ang L1.
+                #
+                # 30 MINUTO, hindi 10: ang emergency at stop-class na exit ay
+                # nagpapasa ng 900s (15 min) na stand-in ceiling, kaya ang 10
+                # minuto ay TATANGGI ng hilerang tinatanggap ngayon sa
+                # PROTECTIVE na daan. Ang 30 ay mahigpit na mas malaki kaysa sa
+                # anumang ceiling ng caller, kaya ang gawi ay byte-identical
+                # habang ang scan ay may hangganan na.
                 row = _db.execute(text(
                     "SELECT id, bid, ask, provider_event_at, received_at, "
                     "timestamp_basis, price "
                     "FROM iqfeed_trade_ticks "
                     "WHERE symbol = :s AND source = 'iqfeed_l1' "
+                    "AND observed_at > now() - interval '30 minutes' "
                     "AND bid IS NOT NULL AND ask IS NOT NULL "
                     "AND provider_event_at IS NOT NULL "
                     "AND received_at IS NOT NULL "

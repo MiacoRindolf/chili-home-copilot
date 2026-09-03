@@ -55,9 +55,21 @@ def _session_open_from_frame(df, cur=None):
 
     A module-level import would turn every test here into one collection error,
     which proves only that a symbol is missing. Resolved lazily, the helper
-    tests fail with a real message and -- more importantly -- the two
-    gate-level column tests fail on their ASSERTIONS, which is the evidence
-    that matters: they show the wrong anchor's decision, not an absent name.
+    tests fail with a real message instead.
+
+    ⚠️ PRECISELY WHAT THE TWO GATE-LEVEL COLUMN TESTS DO ON origin/main
+    (corrected 2026-09-02 after review; the earlier wording claimed both fail on
+    their assertions, and only one does):
+
+      * the BLOCK column fails on its ASSERTION --
+        ``AssertionError: 'extended_verticality' != 'below_explosive_floor_change'``
+        -- i.e. main's gate really does reach a different decision.
+      * the UNBLOCK column fails on ``KeyError: 'explosive_floor_change_anchor'``
+        at the debug-key line, because that key is new. Its SUBSTANCE still
+        holds, because the line before it asserts main returns
+        ``below_explosive_floor_change`` and that assertion passes first -- but
+        the failure the runner prints is an absent key, not a wrong decision,
+        and this file should say so rather than round it up.
     """
     fn = getattr(_eg, "_session_open_from_frame", None)
     if fn is None:
