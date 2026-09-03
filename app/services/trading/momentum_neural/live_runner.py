@@ -35440,14 +35440,14 @@ def tick_live_session(
                                 "fail-closed by doctrine; needs claim resolution or operator"
                             ),
                         })
-                        logger.warning(
+                        _log.warning(
                             "[momentum_live] cid ABSENT at venue but claim still bound "
                             "session=%s sym=%s cid=%s since=%s — fail-closed; account "
                             "entries may be blocked by account_entry_claim_present",
                             sess.id, sess.symbol, _reconcile_cid, _cab_since_raw,
                         )
                 except Exception:
-                    logger.debug(
+                    _log.debug(
                         "[momentum_live] cid-absent-claim-bound telemetry failed",
                         exc_info=True,
                     )
