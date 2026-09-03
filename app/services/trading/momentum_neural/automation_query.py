@@ -4384,16 +4384,40 @@ def _pause_operator_terminalization(
     actually happened.  Both are bounded by ``_deferral_event_min_interval_seconds``
     so a re-asked deferral cannot become a second event storm.  Passing no ``db``
     keeps the old pause-only behaviour (used where no event is wanted).
+
+    THE BOUND IS KEYED ON THE ORDER, NOT THE REASON.  ``_deferral_event_min_
+    interval_seconds`` only applies from the second deferral of a RUN onwards, and
+    a run is identified by the outstanding broker/client order id (see
+    ``apply_operator_pause``).  Keying it on ``pending`` — as this first landed —
+    would let broker truth alternating between two reasons for the same order
+    restart the run on every re-ask and bypass the floor entirely.
     """
-    _prior = sess.risk_snapshot_json
-    _prior = _prior.get(OPERATOR_PAUSE_KEY) if isinstance(_prior, dict) else None
+    _prior_snap = sess.risk_snapshot_json if isinstance(sess.risk_snapshot_json, dict) else {}
+    _prior = _prior_snap.get(OPERATOR_PAUSE_KEY)
     _prior = _prior if isinstance(_prior, dict) else {}
     _previous_state = str(sess.state or "")
+    _le_prior = _prior_snap.get("momentum_live_execution")
+    _le_prior = _le_prior if isinstance(_le_prior, dict) else {}
+    _claim_in = claim if isinstance(claim, dict) else {}
+    # RUN IDENTITY = THE OUTSTANDING ORDER, not the `pending` reason.  Broker
+    # truth alternates between reasons for one and the same order (six values are
+    # reachable), and keying the run on the reason let every alternation reset
+    # `deferral_count` to 1 — which makes the `_count > 1` rate limit below fire
+    # never.  Falling back to the session id keeps a reasonless deferral bounded
+    # too, instead of unbounded.
+    _order_key = str(
+        _claim_in.get("broker_order_id")
+        or _claim_in.get("client_order_id")
+        or _le_prior.get("entry_order_id")
+        or _le_prior.get("entry_reconcile_pending_client_order_id")
+        or _le_prior.get("entry_client_order_id")
+        or f"session:{getattr(sess, 'id', None)}"
+    )
     sess.risk_snapshot_json = apply_operator_pause(
         sess.risk_snapshot_json,
         state=sess.state,
         deferral=(
-            {"pending": pending, "initiator": initiator}
+            {"pending": pending, "initiator": initiator, "order_key": _order_key}
             if db is not None
             else None
         ),
@@ -4447,6 +4471,7 @@ def _pause_operator_terminalization(
         ),
         "claim_token": _claim.get("claim_token") or None,
         "entry_submitted": bool(_le.get("entry_submitted")),
+        "deferral_order_key": _pause.get("deferral_order_key"),
         "deferral_count": _count,
         "deferral_first_at_utc": _pause.get("deferral_first_at_utc"),
     }

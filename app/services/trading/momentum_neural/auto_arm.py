@@ -4878,6 +4878,26 @@ def _symbols_with_inflight_entry(db: Session, *, user_id: int | None) -> set[str
     return out
 
 
+def _abort_guarded_displacement(db: Session, nested: Any) -> None:
+    """Undo the guarded-displacement probe without harming the caller's txn.
+
+    With a savepoint the abort is confined to the probe; without one it degrades
+    to the pre-existing whole-transaction rollback. Never raises: an abort path
+    that throws would turn a refusal-to-reap into a crash in the arm pass.
+    """
+    if nested is not None:
+        try:
+            if getattr(nested, "is_active", True):
+                nested.rollback()
+            return
+        except Exception:
+            pass
+    try:
+        db.rollback()
+    except Exception:
+        pass
+
+
 def _guarded_reap_for_displacement(
     db: Session, *, user_id: int | None, session_id: int, expected_symbol: str
 ) -> bool:
@@ -4888,33 +4908,61 @@ def _guarded_reap_for_displacement(
     entry_order_id / unresolved history / an unresolved DURABLE claim) before cancelling,
     then writes the reap cooldown and COMMITS its own txn. Fail-CLOSED: any doubt ->
     rollback, no reap. True ONLY when the cancel actually TERMINALIZED the row -- a
-    DEFERRED cancel returns ok=True on a still-live session and is not a displacement."""
+    DEFERRED cancel returns ok=True on a still-live session and is not a displacement.
+
+    THE RE-READ IS LOAD-BEARING AND WAS NOT HAPPENING (2026-09-02, review). The
+    lock was real; the re-read was not. ``_maybe_rank_displace`` has already loaded
+    every victim into this same Session (``victims = q.all()``), and
+    ``app/db.py`` builds the sessionmaker with ``autoflush=False,
+    autocommit=False`` — nothing expires those instances. Without
+    ``populate_existing()`` SQLAlchemy hands back the identity-mapped object and
+    leaves its attributes at their PASS-TOP values, so ``locked.state``,
+    ``le["entry_submitted"]``, ``le["entry_order_id"]`` and
+    ``_unresolved_entry_order_ids(le)`` below were re-checking the very snapshot
+    the lock exists to invalidate. Measured against real Postgres + SQLAlchemy
+    2.0.47 with a concurrent txn committing ``entry_submitted=True`` mid-pass, the
+    same FOR UPDATE NOWAIT re-query answers ``entry_submitted=None`` without
+    ``populate_existing()`` and ``entry_submitted=True`` with it. Exactly the
+    first victim of each pass is judged on stale data — and the first victim is
+    the worst-ranked one, i.e. the one that actually gets reaped.
+
+    The savepoint mirrors ``_reap_stale_watching_sessions``: committing it RELEASES
+    the savepoint while RETAINING the row lock for the outer transaction, so the
+    cancel below runs against a row nobody else can advance, and an abort no
+    longer rolls back the caller's transaction. Where the Session has no
+    ``begin_nested`` the abort degrades to the pre-existing ``db.rollback()`` — the
+    re-read itself is unconditional."""
     from .automation_query import cancel_automation_session
     from .live_runner import _unresolved_entry_order_ids
 
+    _nested = None
     try:
+        if callable(getattr(db, "begin_nested", None)):
+            _nested = db.begin_nested()
         q = db.query(TradingAutomationSession).filter(
             TradingAutomationSession.id == int(session_id)
         )
         if user_id is not None:
             q = q.filter(TradingAutomationSession.user_id == int(user_id))
-        locked = q.with_for_update(nowait=True).one_or_none()
+        # populate_existing(): re-READ under the lock, do not re-use the caller's
+        # identity-mapped instance. See the docstring — this one call is the
+        # difference between a lock and a lock that decides anything.
+        locked = (
+            q.with_for_update(nowait=True).populate_existing().one_or_none()
+        )
     except Exception:
         # lock contention (runner mid-tick) or query error -> never reap on doubt
-        try:
-            db.rollback()
-        except Exception:
-            pass
+        _abort_guarded_displacement(db, _nested)
         return False
     try:
         if locked is None:
-            db.rollback()
+            _abort_guarded_displacement(db, _nested)
             return False
         if locked.state not in _RANK_DISPLACE_REAPABLE_STATES:
-            db.rollback()
+            _abort_guarded_displacement(db, _nested)
             return False
         if str(locked.symbol or "").upper() != str(expected_symbol or "").upper():
-            db.rollback()
+            _abort_guarded_displacement(db, _nested)
             return False
         le: dict[str, Any] = {}
         try:
@@ -4924,7 +4972,7 @@ def _guarded_reap_for_displacement(
         except Exception:
             le = {}
         if le.get("entry_submitted") or le.get("entry_order_id") or _unresolved_entry_order_ids(le):
-            db.rollback()
+            _abort_guarded_displacement(db, _nested)
             return False
         # SESSION JSON IS NOT THE ONLY OWNERSHIP RECORD (2026-09-02). A submit
         # whose HTTP committed but whose outer session txn rolled back leaves the
@@ -4943,8 +4991,18 @@ def _guarded_reap_for_displacement(
         except Exception:
             _claim_readable, _durable_claim = False, None
         if not _claim_readable or _durable_claim is not None:
-            db.rollback()
+            _abort_guarded_displacement(db, _nested)
             return False
+        # RELEASE the savepoint but KEEP the row lock: everything decided above was
+        # decided on the freshly-read row, and the cancel below must run against a
+        # row no runner tick can advance underneath it.
+        if _nested is not None:
+            try:
+                _nested.commit()
+            except Exception:
+                _abort_guarded_displacement(db, _nested)
+                return False
+            _nested = None
         # Proven inert + orderless UNDER THE LOCK -> safe to cancel within this txn.
         res = cancel_automation_session(
             db, user_id=(int(user_id) if user_id is not None else None), session_id=int(session_id)
