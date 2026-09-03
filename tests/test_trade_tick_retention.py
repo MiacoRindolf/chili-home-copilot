@@ -3,9 +3,12 @@
 Sinukat: 94 GB / 248M rows, WALANG retention (pinakaluma 07-18), sira ang
 observed_at BRIN kaya oras ang time-predicate scan. Ang prune ay (1) naghahanap ng
 cutoff id sa pamamagitan ng bounded pk bisection, (2) nagbubura sa 200k-id na
-batch na kani-kaniyang commit, (3) BOUNDED bawat tawag (max batches). Ang mga test
-dito ay DB-free kung saan posible (fake probe / fake session); dalawa lang ang
-tumatama sa chili_test (ang tunay na DELETE at ang reloptions ng mig375).
+batch na kani-kaniyang commit, (3) BOUNDED bawat tawag (max batches), at (4) HINDI
+kailanman nagbubura ng retained row kahit may stale first-frame print ang bridge
+(observed_at guard sa DELETE mismo + fail-closed na corroboration sa tuktok ng
+tape). Ang mga test dito ay DB-free kung saan posible (fake probe / fake session);
+tatlo lang ang tumatama sa chili_test (dalawang tunay na DELETE at ang reloptions
+ng mig375).
 
 Runnable (mag-isa, hindi ang buong suite):
     pytest tests/test_trade_tick_retention.py -v -p no:cacheprovider
@@ -105,6 +108,58 @@ def test_bisect_empty_range_is_a_noop() -> None:
     tape = _FakeTape([])
     cutoff_id, boundary, probes = bisect_cutoff_id(tape.probe, lo=1, hi=1, cutoff=_T0)
     assert cutoff_id == 1 and boundary is None and probes == 1
+
+
+# ── pure: the tape is NOT perfectly monotonic (bridge first-frame prints) ─────
+def _stale_top_tape(now: datetime) -> list[tuple[int, datetime]]:
+    """ids 1..8 old (40..33 d), 9..12 live (1 d), 13 = a stale first-frame print
+    (30 d old) written under the NEWEST id — the bridge restart shape."""
+    rows = [(i, _T0 + timedelta(days=i - 1)) for i in range(1, 9)]
+    rows += [(i, now - timedelta(days=1)) for i in range(9, 13)]
+    rows.append((13, now - timedelta(days=30)))
+    return rows
+
+
+def test_bisect_stale_newest_row_is_corroborated_and_bisected_below(caplog) -> None:
+    now = _T0 + timedelta(days=40)
+    cutoff = now - timedelta(days=14)
+    tape = _FakeTape(_stale_top_tape(now))
+    with caplog.at_level(logging.WARNING, logger=ttr.__name__):
+        cutoff_id, boundary, probes = bisect_cutoff_id(
+            tape.probe, lo=tape.lo, hi=tape.hi, cutoff=cutoff, corroborate_span=3,
+        )
+    # NOT "the whole tape is old" (hi + 1 == 14): the probe 3 ids below the top is
+    # retained, so the stale top is an outlier and the true boundary (id 9) is found
+    assert cutoff_id == 9 and boundary == now - timedelta(days=1)
+    assert 10 in tape.probe_args  # the corroborating probe at hi - span
+    assert probes <= 64
+    assert any("stale top-of-tape" in r.getMessage() for r in caplog.records)
+
+
+def test_bisect_without_corroboration_span_trusts_the_newest_row() -> None:
+    """corroborate_span=0 keeps the pure semantics: a stale newest row reads as
+    'everything is old' — the DELETE's observed_at guard is what protects the
+    live rows in that mode (see the prune tests)."""
+    now = _T0 + timedelta(days=40)
+    tape = _FakeTape(_stale_top_tape(now))
+    cutoff_id, boundary, probes = bisect_cutoff_id(
+        tape.probe, lo=tape.lo, hi=tape.hi, cutoff=now - timedelta(days=14),
+    )
+    assert cutoff_id == 14 and boundary is None and probes == 2
+
+
+def test_bisect_corroboration_agrees_when_the_tape_really_is_all_old() -> None:
+    tape = _FakeTape(_rows(list(range(1, 9))))  # 8 rows, minutes apart, all old
+    cutoff = _T0 + timedelta(days=30)
+    cutoff_id, boundary, probes = bisect_cutoff_id(
+        tape.probe, lo=1, hi=8, cutoff=cutoff, corroborate_span=3,
+    )
+    assert cutoff_id == 9 and boundary is None and probes == 3  # lo, hi, hi - span
+    # a span wider than the tape cannot corroborate; the 2-probe verdict stands
+    cutoff_id, _, probes = bisect_cutoff_id(
+        tape.probe, lo=1, hi=8, cutoff=cutoff, corroborate_span=100,
+    )
+    assert cutoff_id == 9 and probes == 2
 
 
 def test_bisect_normalizes_tz_aware_probe_and_cutoff() -> None:
@@ -226,12 +281,22 @@ class _FakeSession:
         self.tape = _FakeTape(rows) if rows is not None else None
         self.fail_on_delete = fail_on_delete
         self.deletes: list[tuple[int, int]] = []
+        self.delete_sql: list[str] = []
+        self.deleted_rows: list[tuple[int, datetime]] = []
         self.commits = 0
         self.rollbacks = 0
+        # transaction-local GUCs: SET LOCAL must precede the DELETE in the SAME
+        # transaction (Session autobegin) and die with its commit
+        self._txn_locals: dict[str, str] = {}
+        self.bitmapscan_pinned_per_delete: list[bool] = []
 
     def execute(self, stmt, params=None):
         sql = str(stmt)
         params = params or {}
+        if sql.startswith("SET LOCAL"):
+            name, _, value = sql[len("SET LOCAL"):].partition("=")
+            self._txn_locals[name.strip()] = value.strip()
+            return _Res()
         if "to_regclass" in sql:
             return _Res(scalar=None if self.tape is None else TABLE)
         if "min(id), max(id)" in sql:
@@ -244,17 +309,31 @@ class _FakeSession:
             if self.fail_on_delete is not None and len(self.deletes) + 1 == self.fail_on_delete:
                 raise RuntimeError("boom: simulated lock_timeout on batch")
             lo, hi = params["lo"], params["hi"]
-            n = sum(1 for rid, _ in self.tape.rows if lo <= rid < hi)
-            self.tape.rows = [r for r in self.tape.rows if not (lo <= r[0] < hi)]
+            cutoff = params.get("cutoff")
+            assert cutoff is not None, "DELETE must carry the observed_at guard"
+
+            def _hit(row: tuple[int, datetime]) -> bool:
+                rid, ts = row
+                return lo <= rid < hi and ts < cutoff
+
+            gone = [r for r in self.tape.rows if _hit(r)]
+            self.tape.rows = [r for r in self.tape.rows if not _hit(r)]
+            self.deleted_rows.extend(gone)
             self.deletes.append((lo, hi))
-            return _Res(rowcount=n)
+            self.delete_sql.append(sql)
+            self.bitmapscan_pinned_per_delete.append(
+                self._txn_locals.get("enable_bitmapscan") == "off"
+            )
+            return _Res(rowcount=len(gone))
         raise AssertionError(f"unexpected SQL: {sql}")
 
     def commit(self):
         self.commits += 1
+        self._txn_locals = {}
 
     def rollback(self):
         self.rollbacks += 1
+        self._txn_locals = {}
 
 
 class _Res:
@@ -304,6 +383,58 @@ def test_prune_bounded_by_max_batches_then_drains_on_the_next_call() -> None:
 
     third = prune_trade_ticks(db, retention_days=14, batch_ids=3, max_batches=2, now_utc=now)
     assert third["ok"] and third["batches"] == 0 and third["deleted"] == 0 and third["exhausted"]
+
+
+def test_prune_delete_carries_the_observed_at_guard_and_pins_the_pkey_path() -> None:
+    """Defense in depth: the DELETE itself cannot remove a retained row, and the
+    planner is kept off the damaged observed_at BRIN (bitmap-only) for it."""
+    now = _T0 + timedelta(days=40)
+    rows = [(i, _T0 + timedelta(days=i - 1)) for i in range(1, 9)]
+    rows += [(i, now - timedelta(days=1)) for i in range(9, 13)]
+    db = _FakeSession(rows)
+    out = prune_trade_ticks(db, retention_days=14, batch_ids=3, max_batches=10, now_utc=now)
+    assert out["ok"] and out["deleted"] == 8 and out["span_ids"] == 8
+    assert len(db.delete_sql) == 3
+    for sql in db.delete_sql:
+        assert "id >= :lo AND id < :hi" in sql and "observed_at < :cutoff" in sql
+    assert db.bitmapscan_pinned_per_delete == [True, True, True]
+
+
+def test_prune_never_deletes_a_retained_row_when_a_probe_lands_on_a_stale_print() -> None:
+    """ids 1..8 old, 9..20 live EXCEPT id 10 = a stale print (30 d) that the first
+    bisection probe ((1 + 20) // 2) lands on. The bisection is misled (cutoff_id
+    climbs to 11, above the live id 9) — the DELETE's observed_at guard is what
+    keeps id 9. Deleted = the 8 old rows + the stale print itself."""
+    now = _T0 + timedelta(days=40)
+    cutoff = now - timedelta(days=14)
+    rows = [(i, _T0 + timedelta(days=i - 1)) for i in range(1, 9)]
+    rows += [(i, now - timedelta(days=1)) for i in range(9, 21)]
+    rows[9] = (10, now - timedelta(days=30))
+    live_ids = {rid for rid, ts in rows if ts >= cutoff}
+    db = _FakeSession(rows)
+
+    out = prune_trade_ticks(db, retention_days=14, batch_ids=3, max_batches=10, now_utc=now)
+    assert out["ok"] and out["cutoff_id"] == 11  # misled by the stale print at id 10
+    assert out["deleted"] == 9 and out["span_ids"] == 10  # 1 fresh row inside the span survived
+    assert all(ts < cutoff for _, ts in db.deleted_rows)
+    assert {rid for rid, _ in db.tape.rows} == live_ids
+    assert 9 in {rid for rid, _ in db.tape.rows}
+
+
+def test_prune_stale_newest_row_deletes_only_the_old_rows(caplog) -> None:
+    """Bridge-restart shape: a stale first-frame print under the NEWEST id. Without
+    corroboration the run would plan max_batches over the retained window; with it
+    the true boundary is found and the run is exhausted in one pass."""
+    now = _T0 + timedelta(days=40)
+    cutoff = now - timedelta(days=14)
+    db = _FakeSession(_stale_top_tape(now))
+    with caplog.at_level(logging.WARNING, logger=ttr.__name__):
+        out = prune_trade_ticks(db, retention_days=14, batch_ids=3, max_batches=50, now_utc=now)
+    assert out["ok"] and out["cutoff_id"] == 9 and out["deleted"] == 8
+    assert out["batches"] == 3 and out["exhausted"] is True and out["remaining_ids"] == 0
+    assert all(ts < cutoff for _, ts in db.deleted_rows)
+    assert [rid for rid, _ in db.tape.rows] == [9, 10, 11, 12, 13]
+    assert any("stale top-of-tape" in r.getMessage() for r in caplog.records)
 
 
 def test_prune_failure_rolls_back_and_reports_committed_progress(caplog) -> None:
@@ -359,6 +490,37 @@ def test_prune_deletes_old_rows_by_pk_range_on_postgres(db: Session) -> None:
     assert second["ok"] and second["deleted"] == 2 and second["exhausted"] is True
     left = db.execute(text(f"SELECT symbol FROM {TABLE} ORDER BY id")).scalars().all()
     assert left == ["NEW"] * 4
+
+
+def test_prune_keeps_a_fresh_row_inside_the_old_id_range_on_postgres(db: Session) -> None:
+    """The real DELETE's observed_at guard on Postgres: a fresh row that landed
+    under a LOW id (the inverse of the bridge's stale-print shape, same guard)
+    survives the pk-range batch that covers it; SET LOCAL runs inside the batch
+    transaction without error."""
+    _ensure_tick_table(db)
+    now = datetime.now(timezone.utc).replace(tzinfo=None)
+    for i in range(1, 9):
+        fresh = i == 4
+        db.execute(text(
+            f"INSERT INTO {TABLE} (id, symbol, observed_at, price, size) "
+            "VALUES (:i, :sym, :ts, 1.0, 100)"
+        ), {"i": i, "sym": "NEW" if fresh else "OLD",
+            "ts": now - timedelta(days=1 if fresh else 41 - i)})
+    for i in range(9, 13):
+        db.execute(text(
+            f"INSERT INTO {TABLE} (id, symbol, observed_at, price, size) "
+            "VALUES (:i, 'NEW', :ts, 1.0, 100)"
+        ), {"i": i, "ts": now - timedelta(days=1)})
+    db.commit()
+
+    out = prune_trade_ticks(db, retention_days=14, batch_ids=3, max_batches=10)
+    assert out["ok"], out
+    assert out["cutoff_id"] == 9 and out["deleted"] == 7 and out["span_ids"] == 8
+    assert out["exhausted"] is True
+    left = db.execute(text(f"SELECT id, symbol FROM {TABLE} ORDER BY id")).fetchall()
+    assert [tuple(r) for r in left] == [(4, "NEW"), (9, "NEW"), (10, "NEW"), (11, "NEW"), (12, "NEW")]
+    # the SET LOCAL pin died with the batch commit: the session default is back
+    assert db.execute(text("SHOW enable_bitmapscan")).scalar() == "on"
 
 
 # ── migration 375: per-table autovacuum scale factors ────────────────────────

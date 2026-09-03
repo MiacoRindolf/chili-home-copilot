@@ -26,6 +26,27 @@ local window can be re-pulled (memory: BUY the history, never lower fidelity).
 
 ``observed_at`` is a naive ``TIMESTAMP`` written in UTC by the host bridge;
 all comparisons here are done on naive-UTC datetimes.
+
+THE MONOTONIC PREMISE HAS KNOWN EXCEPTIONS (code-verified 2026-09-03, review of
+this module): the bridge's ``_parse_selected_l1`` writes the trade row's
+``observed_at`` from the frame's Most-Recent-Trade DATE+TIME, fenced only
+against the FUTURE — the <=2 s age fence gates the QUOTE row only — and its
+trade dedup is in-process, so the FIRST Q frame per symbol after every bridge
+start / reconnect / halt resumption inserts a row carrying the PRIOR session's
+(or, for a dormant name, a weeks-old) last print under a fresh id. Two guards
+make that harmless here, in depth:
+
+  * the DELETE itself carries ``AND observed_at < :cutoff`` — a retained row can
+    never be removed no matter what the bisection returned. The access path is
+    pinned to the pkey range by ``SET LOCAL enable_bitmapscan = off`` for the
+    batch transaction: BRIN indexes are usable ONLY via bitmap scans, so this is
+    exactly the switch that keeps the planner off the damaged observed_at BRIN
+    (which it WOULD prefer once the time predicate's estimated selectivity drops
+    below ~0.1 %, e.g. a weekend-shadow window) — the predicate is then evaluated
+    on the heap tuples the pkey range already fetched, at unchanged cost;
+  * the bisection fails CLOSED at the top of the tape: one stale newest row is
+    corroborated by a second probe ``batch_ids`` ids lower before "the whole
+    tape is old" is accepted; otherwise it bisects below the stale block.
 """
 from __future__ import annotations
 
@@ -88,13 +109,15 @@ def bisect_cutoff_id(
     lo: int,
     hi: int,
     cutoff: datetime,
+    corroborate_span: int = 0,
 ) -> tuple[int, Optional[datetime], int]:
     """Smallest id whose observed_at >= ``cutoff``, by primary-key bisection.
 
     ``probe(i)`` must return the ``observed_at`` of the FIRST row with ``id >= i``
     (``None`` when no such row) — i.e. ``SELECT observed_at ... WHERE id >= :i
-    ORDER BY id LIMIT 1``. ``lo``/``hi`` are the table's min/max id. Ids must be
-    monotonic in observed_at (measured true for the BIGSERIAL trade tape).
+    ORDER BY id LIMIT 1``. ``lo``/``hi`` are the table's min/max id. Ids are
+    expected to be monotonic in observed_at (measured true for the BIGSERIAL trade
+    tape up to the bridge's stale first-frame rows, see the module docstring).
 
     Returns ``(cutoff_id, boundary_observed_at, probes)`` where every row with
     ``id < cutoff_id`` is older than ``cutoff`` and ``boundary_observed_at`` is the
@@ -102,6 +125,12 @@ def bisect_cutoff_id(
     ``cutoff_id == lo`` ⇒ nothing to delete; ``cutoff_id == hi + 1`` ⇒ every row
     is older than the cutoff. Gaps in the id space are fine: a probe that lands in
     a gap answers for the next existing row, which is what the invariant needs.
+
+    ``corroborate_span`` > 0 makes the top-of-tape verdict fail CLOSED: when the
+    newest row reads older than the cutoff, a second probe ``corroborate_span``
+    ids below it must agree before "the whole tape is old" is returned; if that
+    probe is retained, the newest row is a stale outlier (bridge first-frame
+    print) and the bisection runs below it instead, deleting LESS.
     """
     cutoff = _as_naive_utc(cutoff)
     probes = 0
@@ -115,11 +144,26 @@ def bisect_cutoff_id(
 
     last = probe(hi)
     probes += 1
+    hi_ts: Optional[datetime] = last
     if last is None or _as_naive_utc(last) < cutoff:
-        return hi + 1, None, probes  # the whole range is older than the cutoff
+        span = max(0, int(corroborate_span))
+        below = hi - span
+        if span <= 0 or below <= lo:
+            return hi + 1, None, probes  # the whole range is older than the cutoff
+        check = probe(below)
+        probes += 1
+        if check is None or _as_naive_utc(check) < cutoff:
+            return hi + 1, None, probes  # corroborated: the whole range is old
+        logger.warning(
+            "[trade_tick_retention] newest row (id >= %d, observed_at=%s) reads older "
+            "than the cutoff %s while id %d is retained — stale top-of-tape print; "
+            "bisecting below it (fail closed)",
+            hi, _as_naive_utc(last).isoformat(timespec="seconds") if last else None,
+            cutoff.isoformat(timespec="seconds"), below,
+        )
+        hi, hi_ts = below, check
 
     # Invariant from here: probe(lo) < cutoff <= probe(hi).
-    hi_ts: Optional[datetime] = last
     while hi - lo > 1 and probes < _MAX_PROBES:
         mid = (lo + hi) // 2
         ts = probe(mid)
@@ -130,6 +174,10 @@ def bisect_cutoff_id(
             hi, hi_ts = mid, ts
         else:
             lo = mid
+    if hi - lo > 1:
+        # Probe cap hit (unreachable on an int64 pkey; defensive): rows in (lo, hi)
+        # are of unknown age, so fail closed — only ``id <= lo`` is known old.
+        return lo + 1, None, probes
     return hi, hi_ts, probes
 
 
@@ -185,6 +233,7 @@ def prune_trade_ticks(
         "batch_ids": batch,
         "max_batches": cap,
         "probes": 0,
+        "span_ids": 0,
         "remaining_ids": 0,
         "exhausted": True,
     }
@@ -207,7 +256,7 @@ def prune_trade_ticks(
             ).scalar()
 
         cutoff_id, boundary_ts, probes = bisect_cutoff_id(
-            _probe, lo=min_id, hi=max_id, cutoff=cutoff_ts
+            _probe, lo=min_id, hi=max_id, cutoff=cutoff_ts, corroborate_span=batch
         )
         out["cutoff_id"] = cutoff_id
         out["cutoff_observed_at"] = (
@@ -217,13 +266,25 @@ def prune_trade_ticks(
 
         ranges = plan_batches(min_id, cutoff_id, batch_ids=batch, max_batches=cap)
         for lo, hi in ranges:
+            # Pin the access path to the pkey range: BRIN indexes are usable ONLY
+            # through bitmap scans, so this keeps the planner off the damaged
+            # observed_at BRIN for the time predicate below. SET LOCAL is
+            # transaction-scoped — it dies with this batch's commit.
+            db.execute(text("SET LOCAL enable_bitmapscan = off"))
+            # The observed_at guard is evaluated on the heap tuples the pkey range
+            # already fetched: a retained row can never be deleted, whatever the
+            # bisection returned (stale first-frame prints, see module docstring).
             res = db.execute(
-                text(f"DELETE FROM {TABLE} WHERE id >= :lo AND id < :hi"),
-                {"lo": lo, "hi": hi},
+                text(
+                    f"DELETE FROM {TABLE} "
+                    "WHERE id >= :lo AND id < :hi AND observed_at < :cutoff"
+                ),
+                {"lo": lo, "hi": hi, "cutoff": cutoff_ts},
             )
             db.commit()
             out["deleted"] += int(getattr(res, "rowcount", 0) or 0)
             out["batches"] += 1
+            out["span_ids"] += hi - lo
 
         last_hi = ranges[-1][1] if ranges else min_id
         out["remaining_ids"] = max(0, cutoff_id - last_hi)
@@ -231,9 +292,9 @@ def prune_trade_ticks(
         out["seconds"] = round(time.monotonic() - t0, 3)
         if out["batches"]:
             logger.info(
-                "[trade_tick_retention] pruned %d rows in %d batch(es) of %d ids "
+                "[trade_tick_retention] pruned %d rows over %d ids in %d batch(es) of %d ids "
                 "(id < %d, observed_at < %s, %d probes) in %.1fs%s",
-                out["deleted"], out["batches"], batch, cutoff_id,
+                out["deleted"], out["span_ids"], out["batches"], batch, cutoff_id,
                 out["retention_cutoff"], probes, out["seconds"],
                 "" if out["exhausted"] else
                 f" — BOUNDED by max_batches={cap}; ~{out['remaining_ids']} ids remain for the next run",
