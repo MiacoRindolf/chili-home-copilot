@@ -33,9 +33,17 @@ import logging
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
+from datetime import datetime
+from zoneinfo import ZoneInfo
 
 from ....config import settings
 from ....db import SessionLocal
+from ..day_basis_guard import (
+    DAY_BASIS_OK,
+    DAY_BASIS_REJECTED,
+    basis_continuity_broken,
+    classify_day_basis,
+)
 from .live_fsm import (
     LIVE_RUNNER_RUNNABLE_STATES,
     STATE_LIVE_BAILOUT,
@@ -61,16 +69,62 @@ from .universe import (
 
 _log = logging.getLogger(__name__)
 
+_ET = ZoneInfo("America/New_York")
+
 # Universe rebuild + per-symbol score cooldown share the same adaptive rhythm:
 # the universe is re-screened every ~20s, and a name is re-scored at most once per
 # the same window (a single ignition is enough to put it on the viability board;
 # the scheduled batch + the auto-arm refresh keep it warm thereafter).
 _UNIVERSE_REFRESH_S = 20.0
 _SCORE_COOLDOWN_S = 20.0
+
+# ── UNIVERSE FAIL-OPEN TO ZERO (2026-09-02) ─────────────────────────────────
+# `build_equity_universe` documents a fail-open contract: "any error / empty
+# snapshot -> [] so the caller falls back to its default universe (no
+# regression)". `trading_scheduler` honours it (`scan_tickers = merged or None`).
+# This module did NOT: it installed the empty list AS the watch set, so a
+# provider outage silently converted the screen into one that watches nothing
+# while still logging normally. Measured on 2026-08-28: the Massive full-market
+# snapshot returned an empty body 705 times across two windows,
+# 16:07:17-16:22:13 PT and 20:46:43-21:01:16 PT. Both landed after the RTH
+# close, so nothing tradable was lost — but the path is live, not theoretical,
+# and nothing in the log, the code, or the DB distinguished it from a quiet
+# market (`trading_universe_snapshots` holds 0 rows; the two failure branches
+# below logged at DEBUG under a root logger pinned to INFO in app/main.py:8-9).
+#
+# The retention below is deliberately BOUNDED. A stale watch set is better than
+# an empty one for a few minutes and worse than one after many, so the outage
+# is ridden out and then surrendered — loudly, in both directions.
+_UNIVERSE_RETAIN_MAX_S = 300.0
+
+# BASIS FREEZE BOUND. A corroborated previous close is frozen against a
+# disagreeing read — but not forever. At the 20s refresh cadence, 900s is 45
+# consecutive reads all reporting the same new value, which is evidence rather
+# than noise: a corrected vendor row, or a corporate action. Holding the stale
+# pre-adjustment close past that point is the worse of the two errors, so the
+# freeze surrenders and says so.
+_BASIS_REBASE_AFTER_S = 900.0
+
+# Refresh outcomes. Only `ok` and `screen_empty` are the screen speaking; the
+# other three are the provider failing, and the two must never look alike.
+_UNIVERSE_OK = "ok"
+_UNIVERSE_SCREEN_EMPTY = "screen_empty"
+_UNIVERSE_SNAPSHOT_EMPTY = "snapshot_empty"
+_UNIVERSE_SNAPSHOT_ERROR = "snapshot_error"
+_UNIVERSE_BUILD_ERROR = "build_error"
+_UNIVERSE_DEGRADED = frozenset(
+    {_UNIVERSE_SNAPSHOT_EMPTY, _UNIVERSE_SNAPSHOT_ERROR, _UNIVERSE_BUILD_ERROR}
+)
 # Ang session-threshold inventory ay mas maliit (iilang row) at mas time-critical
 # kaysa sa universe screen: ang na-ratchet na trail stop o kaka-armang session ay
 # hindi dapat maging bulag sa bridge nang 20s. Hiwalay na mabilis na cadence.
 _SESSION_REFRESH_S = 5.0
+
+# LANE OBSERVATION HEARTBEAT (2026-09-02). 30s: the watchdog's silence threshold
+# is measured in minutes, so this only has to be small enough that a genuine
+# death is unambiguous within one threshold window, and large enough that it
+# costs nothing (one tiny insert per 30s, on the refresh thread, never the bus).
+_OBSERVATION_HEARTBEAT_S = 30.0
 
 
 class _UniverseTracker:
@@ -117,9 +171,135 @@ class _UniverseTracker:
         # loob ng window at ang pinakamataas na %rise kada pangalan.
         self._price_history: list[tuple[float, dict[str, float]]] = []
         self._velocity: dict[str, float] = {}
+        # UNIVERSE FAIL-OPEN TO ZERO: the last refresh's outcome + the retention
+        # clock, so an empty watch set is never confused with a quiet market.
+        self._last_outcome: str = _UNIVERSE_OK
+        self._last_screened_size: int = 0
+        self._retaining_since: float | None = None
+        # BASIS INTEGRITY (2026-09-02): the accepted prev close per name for the
+        # CURRENT ET session, plus once-per-session alarm memory so a corrupt
+        # row logs one line rather than one per 20s refresh (HOS produced 798
+        # observations in a single session). Cleared on the ET date rollover —
+        # a prev close is fixed within a session and legitimately changes
+        # between them. Touched only by the refresh thread.
+        # CORROBORATION BEFORE FREEZING (second pass). Freezing the FIRST
+        # accepted read cements a value nothing has confirmed — and the corrupt
+        # value can arrive first (HOS was wrong from its very first observation,
+        # 06:39:23 PT). So a basis is PROVISIONAL until a second read agrees
+        # with it, and a provisional value is REPLACED by a disagreeing read
+        # rather than freezing over it. Only a corroborated basis is held, and
+        # even that surrenders to sustained disagreement (`_BASIS_REBASE_AFTER_S`)
+        # so a genuine corporate action or a vendor row correction is not
+        # deliberately pinned to the stale pre-adjustment close for the session.
+        self._basis_provisional: dict[str, float] = {}
+        self._basis_held: dict[str, float] = {}
+        self._basis_disagree_since: dict[str, float] = {}
+        self._basis_rejected: set[str] = set()
+        self._basis_drifted: set[str] = set()
+        self._basis_replaced: set[str] = set()
+        self._basis_session_date: str | None = None
+
+    def last_outcome(self) -> str:
+        """Outcome of the most recent refresh (see the `_UNIVERSE_*` constants)."""
+        with self._lock:
+            return self._last_outcome
+
+    def _roll_basis_session(self) -> None:
+        """Drop the frozen-basis memory on the ET trading-date rollover."""
+        today = datetime.now(_ET).date().isoformat()
+        if today != self._basis_session_date:
+            self._basis_session_date = today
+            self._basis_provisional = {}
+            self._basis_held = {}
+            self._basis_disagree_since = {}
+            self._basis_rejected = set()
+            self._basis_drifted = set()
+            self._basis_replaced = set()
+
+    def _reconcile_basis(self, ticker: str, candidate: float, now_mono: float) -> float:
+        """Return the basis to USE for ``ticker``, applying corroboration.
+
+        State machine, one name, one session:
+
+          no memory        -> PROVISIONAL(candidate); use the candidate.
+          PROVISIONAL(p), candidate agrees   -> HELD(candidate); use it.
+          PROVISIONAL(p), candidate differs  -> PROVISIONAL(candidate); use the
+                                                candidate, log once. This is the
+                                                corrupt-first / correct-second
+                                                path: an UNcorroborated value
+                                                never wins over a newer read.
+          HELD(h), candidate agrees          -> use it, clear the disagree clock.
+          HELD(h), candidate differs         -> use ``h`` (freeze) and warn once;
+                                                if the disagreement PERSISTS past
+                                                ``_BASIS_REBASE_AFTER_S``, adopt
+                                                the candidate and say so. A
+                                                bounded freeze, not a session-long
+                                                pin to a possibly-stale close.
+        """
+        held = self._basis_held.get(ticker)
+        if held is None:
+            prov = self._basis_provisional.get(ticker)
+            if prov is None:
+                self._basis_provisional[ticker] = candidate
+            elif basis_continuity_broken(prov, candidate):
+                if ticker not in self._basis_replaced:
+                    self._basis_replaced.add(ticker)
+                    _log.warning(
+                        "[momentum_ws_ignition] basis UNCORROBORATED %s "
+                        "(first=%.4f second=%.4f) — the first read was never "
+                        "confirmed, so the NEWER value is adopted rather than "
+                        "frozen over",
+                        ticker, float(prov), candidate,
+                    )
+                self._basis_provisional[ticker] = candidate
+            else:
+                # Two consecutive agreeing reads. Now it can be held.
+                self._basis_held[ticker] = candidate
+                self._basis_provisional.pop(ticker, None)
+            return candidate
+
+        if not basis_continuity_broken(held, candidate):
+            self._basis_disagree_since.pop(ticker, None)
+            return held
+
+        since = self._basis_disagree_since.get(ticker)
+        if since is None:
+            self._basis_disagree_since[ticker] = now_mono
+            since = now_mono
+        if (now_mono - since) > _BASIS_REBASE_AFTER_S:
+            _log.warning(
+                "[momentum_ws_ignition] basis RE-BASED %s (held=%.4f new=%.4f) "
+                "— the disagreement persisted for %.0fs, which is a corrected "
+                "vendor row or a corporate action, not a transient; holding the "
+                "stale close any longer is the worse error",
+                ticker, float(held), candidate, now_mono - since,
+            )
+            self._basis_held[ticker] = candidate
+            self._basis_disagree_since.pop(ticker, None)
+            self._basis_drifted.discard(ticker)
+            return candidate
+
+        if ticker not in self._basis_drifted:
+            self._basis_drifted.add(ticker)
+            _log.warning(
+                "[momentum_ws_ignition] basis DRIFTED mid-session %s "
+                "(held=%.4f candidate=%.4f) — FREEZING the corroborated value "
+                "for up to %.0fs",
+                ticker, float(held), candidate, _BASIS_REBASE_AFTER_S,
+            )
+        return held
 
     def refresh(self) -> set[str]:
-        """Re-screen the universe; return the CURRENT watch set (uppercased)."""
+        """Re-screen the universe; return the CURRENT watch set (uppercased).
+
+        A degraded provider must NOT be able to empty the watch set silently. The
+        outcome is classified, an empty result from a degraded provider retains
+        the previous set for up to ``_UNIVERSE_RETAIN_MAX_S``, and every state
+        change is logged at WARNING/INFO with a DISTINCT line — an empty screen
+        on a healthy snapshot reads differently from a provider outage.
+        """
+        self._roll_basis_session()
+        outcome = _UNIVERSE_OK
         snapshot = None
         try:
             from ...massive_client import get_full_market_snapshot
@@ -128,15 +308,27 @@ class _UniverseTracker:
                 max_age_seconds=self._profile.snapshot_max_age_seconds
             ) or []
         except Exception:
-            _log.debug("[momentum_ws_ignition] snapshot fetch failed", exc_info=True)
+            # Was `_log.debug`, which app/main.py:8-9 (root logger pinned to
+            # INFO) discards outright: a full-file scan of the 3.6M-line lane log
+            # found 0 occurrences of this message, ever.
+            _log.warning("[momentum_ws_ignition] snapshot fetch failed", exc_info=True)
             snapshot = []
+            outcome = _UNIVERSE_SNAPSHOT_ERROR
+        if outcome == _UNIVERSE_OK and not snapshot:
+            outcome = _UNIVERSE_SNAPSHOT_EMPTY
 
         try:
             universe = build_equity_universe(self._profile, snapshot=snapshot or None)
         except Exception:
-            _log.debug("[momentum_ws_ignition] universe build failed", exc_info=True)
+            _log.warning("[momentum_ws_ignition] universe build failed", exc_info=True)
             universe = []
+            outcome = _UNIVERSE_BUILD_ERROR
         want = {str(s).strip().upper() for s in universe if str(s or "").strip()}
+        if not want and outcome == _UNIVERSE_OK:
+            # Healthy snapshot, nothing cleared the bands. This is the screen
+            # speaking, and it is legitimate (03:52 ET, before the premarket
+            # session, produced exactly this on 08-18/08-19/08-20/08-22).
+            outcome = _UNIVERSE_SCREEN_EMPTY
 
         # ── VELOCITY INTAKE (2026-08-28): day-change-independent na admission ──
         # Monotonic OR-leg: NAKAKADAGDAG lamang sa `want`, hindi nakakabawas, kaya
@@ -243,6 +435,7 @@ class _UniverseTracker:
         # (#1284 — same meaning as the vendor todaysChangePerc every consumer of
         # the stamped change assumes), plus the open kept separately for the
         # since-open move. Built from the SAME snapshot — no extra fetch.
+        _basis_now = time.monotonic()
         baseline: dict[str, float] = {}
         open_baseline: dict[str, float] = {}
         rvol: dict[str, float] = {}
@@ -271,7 +464,51 @@ class _UniverseTracker:
                 # prev close MUNA dito rin — iisa ang kahulugan ng datum sa
                 # buong araw. Ang `day.o` ay natitira bilang fallback para sa
                 # day-1 listing na walang prev close.
-                base = _f(prev.get("c")) or _f(day.get("o"))
+                # BASIS PLAUSIBILITY (2026-09-02). The division below is only as
+                # honest as `prev.c`, which nothing validated. HOS 2026-09-02
+                # arrived with prev.c=0.30 against a $10.33 stock and produced
+                # move_pct=3462.37 across 798 observations and 9,290 persisted
+                # viability rows — the #1 ross_score on the board, for a name
+                # that moved 4.75% all day. A rejected basis yields NO baseline,
+                # never a substitute: an unknown change is fail-closed at the
+                # arm gate, a fictional one is fail-open into the top of the
+                # ranking. See ..day_basis_guard for what this does and does not
+                # catch.
+                _prev_c, _verdict = classify_day_basis(
+                    prev.get("c"),
+                    open_price=day.get("o"),
+                    price=_snapshot_price(s),
+                    prev_high=prev.get("h"),
+                    prev_low=prev.get("l"),
+                )
+                if _verdict in DAY_BASIS_REJECTED:
+                    if t not in self._basis_rejected:
+                        self._basis_rejected.add(t)
+                        _log.warning(
+                            "[momentum_ws_ignition] basis REJECTED %s "
+                            "(verdict=%s prev_close=%r open=%r) — no day change "
+                            "will be stamped for this name",
+                            t, _verdict, prev.get("c"), day.get("o"),
+                        )
+                    base = None
+                elif _verdict == DAY_BASIS_OK:
+                    base = _prev_c
+                else:
+                    # No prev close at all (day-1 listing). Unchanged fallback.
+                    base = _f(day.get("o"))
+                # CONTINUITY (2026-09-02, second pass). A previous close is
+                # fixed for the session; the tracker re-reads it every 20s and
+                # silently re-based on whatever arrived. But freezing the FIRST
+                # accepted read is not safe on its own: nothing corroborates it,
+                # and the corrupt value can be the first one (HOS was wrong from
+                # its very first observation). So the first read is PROVISIONAL
+                # — used, not frozen — and a disagreeing read REPLACES it. Only
+                # a value two consecutive reads agree on is held, and a held
+                # value surrenders to sustained disagreement so a genuine
+                # corporate action or a corrected vendor row is not pinned to the
+                # stale close for the rest of the session.
+                if base and base > 0:
+                    base = self._reconcile_basis(t, float(base), _basis_now)
                 if base and base > 0:
                     baseline[t] = float(base)
                 open_base = _f(day.get("o"))
@@ -291,7 +528,57 @@ class _UniverseTracker:
             except Exception:
                 continue
 
+        screened_size = len(want)
+        now_mono = time.monotonic()
         with self._lock:
+            prev_symbols = set(self._symbols)
+            retain = (
+                not want
+                and outcome in _UNIVERSE_DEGRADED
+                and bool(prev_symbols)
+                and bool(getattr(
+                    settings,
+                    "chili_momentum_universe_retain_on_provider_failure_enabled",
+                    True,
+                ))
+            )
+            if retain:
+                if self._retaining_since is None:
+                    self._retaining_since = now_mono
+                held_for = now_mono - self._retaining_since
+                if held_for > _UNIVERSE_RETAIN_MAX_S:
+                    retain = False
+            else:
+                held_for = 0.0
+
+            if retain:
+                # Keep the whole cached screen — symbols AND their baselines — so
+                # the retained names still score correctly while the provider is
+                # down. Nothing else in this method touched `self`.
+                self._last_outcome = outcome
+                self._last_screened_size = screened_size
+                _log.warning(
+                    "[momentum_ws_ignition] universe RETAINED — provider degraded "
+                    "(outcome=%s), screen returned 0; holding %d cached symbols "
+                    "for %.0fs (max %.0fs). THIS IS NOT A QUIET MARKET.",
+                    outcome, len(prev_symbols), held_for, _UNIVERSE_RETAIN_MAX_S,
+                )
+                return set(prev_symbols)
+
+            if (
+                not want
+                and outcome in _UNIVERSE_DEGRADED
+                and self._retaining_since is not None
+            ):
+                _log.warning(
+                    "[momentum_ws_ignition] universe SURRENDERED to empty — "
+                    "provider degraded (outcome=%s) for %.0fs, past the %.0fs "
+                    "retention bound; the lane is now watching NOTHING.",
+                    outcome, now_mono - self._retaining_since, _UNIVERSE_RETAIN_MAX_S,
+                )
+            self._retaining_since = None
+            self._last_outcome = outcome
+            self._last_screened_size = screened_size
             self._symbols = want
             self._baseline = baseline
             self._open_baseline = open_baseline
@@ -859,6 +1146,88 @@ class IgnitionScoringLoop:
         self._last_score: dict[str, float] = {}
         self._inflight: set[str] = set()
         self._inflight_lock = threading.Lock()
+        # LANE OBSERVATION HEARTBEAT (2026-09-02): observations since the last
+        # heartbeat write, plus the write clock. See `_write_observation_heartbeat`.
+        self._observations = 0
+        self._obs_lock = threading.Lock()
+        self._last_heartbeat_mono = 0.0
+
+    def _count_observation(self) -> None:
+        """Increment the observation counter. TELEMETRY, so it must never raise.
+
+        The first cut of this incremented under ``self._obs_lock`` inline in
+        ``_score_symbol``. That put a bare attribute access on the hot scoring
+        path: an instance whose ``__init__`` has not run raises AttributeError
+        THERE, i.e. the measurement of whether the lane is observing becomes able
+        to stop it observing. It broke two existing tests on this branch
+        (``tests/test_velocity_intake.py``, which builds the loop with
+        ``__new__``) and neither review caught it.
+
+        A watchdog input that can break the thing it watches is worse than one
+        that under-counts, so a missing lock skips the count instead. In a real
+        loop ``__init__`` has always run and this is a plain increment.
+        """
+        lock = getattr(self, "_obs_lock", None)
+        if lock is None:
+            return
+        with lock:
+            self._observations = getattr(self, "_observations", 0) + 1
+
+    def _write_observation_heartbeat(self) -> None:
+        """Publish 'the lane is still observing' where ANOTHER PROCESS can read it.
+
+        WHY A DB ROW AND NOT A LOG LINE OR AN IN-PROCESS CHECK. On 2026-09-01 the
+        host uvicorn app (pid 22376, launched inside a Job Object with
+        KILL_ON_JOB_CLOSE) died at 08:03:17 PT. `run_lane_health_check` had run
+        normally 5 seconds earlier ("job_id=lane_health_check phase=ok
+        duration_ms=265" at 08:03:12) and then died with it — a dead process
+        cannot report its own death. Every other detector was Docker-scoped,
+        disabled since 2026-07-27, missing from disk, or permanently saturated.
+        296 of the day's 390 RTH minutes produced no observation and nothing
+        alarmed. The record has to outlive the process that writes it.
+
+        Fail-silent by construction: a heartbeat write must never be able to
+        disturb the refresh loop or the price bus.
+        """
+        with self._obs_lock:
+            observations = self._observations
+            self._observations = 0
+        db = SessionLocal()
+        try:
+            from ..batch_job_constants import (
+                IGNITION_OBSERVATION_HEARTBEAT_SCHEMA,
+                JOB_MOMENTUM_IGNITION_OBSERVATION_HEARTBEAT,
+            )
+            from ..brain_batch_job_log import brain_batch_job_record_completed
+
+            brain_batch_job_record_completed(
+                db,
+                JOB_MOMENTUM_IGNITION_OBSERVATION_HEARTBEAT,
+                ok=True,
+                meta={
+                    "schema": IGNITION_OBSERVATION_HEARTBEAT_SCHEMA,
+                    "observations": int(observations),
+                    "universe_size": int(self._tracker.count()),
+                    "universe_outcome": str(self._tracker.last_outcome()),
+                    "subscribed": int(len(self._subscribed)),
+                },
+            )
+            db.commit()
+        except Exception:
+            try:
+                db.rollback()
+            except Exception:
+                pass
+            _log.warning(
+                "[momentum_ws_ignition] observation heartbeat write failed",
+                exc_info=True,
+            )
+        finally:
+            try:
+                db.rollback()
+            except Exception:
+                pass
+            db.close()
 
     def start(self) -> None:
         if not getattr(settings, "chili_momentum_ws_ignition_enabled", False):
@@ -881,9 +1250,11 @@ class IgnitionScoringLoop:
         )
         self._refresher.start()
         _log.info(
-            "[momentum_ws_ignition] started — %d universe symbols watched (floor=%.2f%%)",
+            "[momentum_ws_ignition] started — %d universe symbols watched "
+            "(floor=%.2f%%, outcome=%s)",
             self._tracker.count(),
             float(getattr(settings, "chili_momentum_ignition_min_pct", 3.0)),
+            self._tracker.last_outcome(),
         )
 
     def stop(self) -> None:
@@ -974,6 +1345,17 @@ class IgnitionScoringLoop:
         # time-critical ang freshness ng ratcheted stop / bagong armado), universe
         # kada ~20s (mabigat na full-market snapshot — di binago ang ritmo).
         _last_universe = time.monotonic()
+        # UNIVERSE TELEMETRY (2026-09-02). The only universe-size line this
+        # module ever emitted was the one-shot at start(): over the 11 sessions
+        # 2026-08-19..09-02 the lane performed ~23,990 rebuilds and logged 74 of
+        # them (0.31%), all at process start. Nothing sampled the watch set
+        # mid-session and nothing persisted it, so an empty universe was not
+        # distinguishable from a quiet market ANYWHERE. Log on CHANGE only (size
+        # delta or a non-ok outcome) so a steady state stays silent instead of
+        # adding 4,320 lines/day.
+        _last_logged_size: int | None = None
+        _last_logged_outcome: str | None = None
+        _consecutive_failures = 0
         while self._running:
             time.sleep(_SESSION_REFRESH_S)
             if not self._running:
@@ -983,9 +1365,40 @@ class IgnitionScoringLoop:
                 if time.monotonic() - _last_universe >= _UNIVERSE_REFRESH_S:
                     _last_universe = time.monotonic()
                     self._tracker.refresh()
+                    _size = self._tracker.count()
+                    _outcome = self._tracker.last_outcome()
+                    if _size != _last_logged_size or _outcome != _last_logged_outcome:
+                        _log.log(
+                            logging.INFO if _outcome == _UNIVERSE_OK else logging.WARNING,
+                            "[momentum_ws_ignition] universe %d symbols "
+                            "(was %s, outcome=%s)",
+                            _size,
+                            "n/a" if _last_logged_size is None else _last_logged_size,
+                            _outcome,
+                        )
+                        _last_logged_size = _size
+                        _last_logged_outcome = _outcome
                 self._sync_subscriptions()
+                if (
+                    time.monotonic() - self._last_heartbeat_mono
+                    >= _OBSERVATION_HEARTBEAT_S
+                ):
+                    self._last_heartbeat_mono = time.monotonic()
+                    self._write_observation_heartbeat()
+                _consecutive_failures = 0
             except Exception:
-                pass
+                # Was a bare `except Exception: pass`. That is the THIRD silent
+                # state: when refresh() raises, the watch set FREEZES at its last
+                # value and the lane watches a stale universe forever with no
+                # trace at any log level. Distinct from empty, equally unreported.
+                _consecutive_failures += 1
+                _log.warning(
+                    "[momentum_ws_ignition] refresh loop iteration failed "
+                    "(consecutive=%d) — watch set is FROZEN at %d symbols",
+                    _consecutive_failures,
+                    self._tracker.count(),
+                    exc_info=True,
+                )
 
     # ── tick handler (runs on the WS receive thread — keep it cheap) ─────────
 
@@ -1149,6 +1562,15 @@ class IgnitionScoringLoop:
 
     # ── scoring (runs on the pool — owns its own DB session) ─────────────────
 
+    def _tracker_open_move(self, symbol: str, price: float | None) -> float | None:
+        """Since-OPEN move% from the cached open baseline (None when unknown)."""
+        if price is None or float(price) <= 0:
+            return None
+        base = self._tracker.open_baseline_for(symbol)
+        if base is None or float(base) <= 0:
+            return None
+        return (float(price) - float(base)) / float(base) * 100.0
+
     def _score_symbol(
         self,
         symbol: str,
@@ -1187,6 +1609,19 @@ class IgnitionScoringLoop:
             # discipline sa ibaba: ang nawawala ay nananatiling nawawala.
             if move_pct is not None:
                 ross_signals[symbol]["todays_change_perc"] = float(move_pct)
+            # RUN-UP AXIS, RECORDED ONLY (2026-09-02). `todays_change_perc` is
+            # gap + run-up vs the previous close, which is not the axis the lane
+            # is trying to buy: over 1,032 equity mover symbol-days it agrees
+            # with the reachable low-to-high run within +/-25% only 43.7% of the
+            # time (understates by >2.5x on 27.0%). SGLD 2026-09-02 logged a
+            # peak move_pct of 293.70 against an 89.6% reachable intraday run
+            # off a 525.6% gap. Ranking on the run-up instead would be a TRADING
+            # OPINION and is deliberately not made here; this stamps the second
+            # axis so the divergence is measurable from the record for the first
+            # time. Nothing reads it yet, by design.
+            _open_move = self._tracker_open_move(symbol, price)
+            if _open_move is not None:
+                ross_signals[symbol]["since_open_change_perc"] = float(_open_move)
             # VELOCITY INTAKE: dalhin ang sinukat na short-horizon velocity sa
             # persisted signal — ito ang binabasa ng ross_smallcap_profile_evidence
             # bilang alternatibong "already-moving" na patunay sa arm gate (ang
@@ -1321,6 +1756,12 @@ class IgnitionScoringLoop:
         bridge_state = "off"
         if scored_ok:
             bridge_state = self._bridge_arm(symbol)
+        # OBSERVATION COUNTER (2026-09-02). This is the exact event the operator
+        # depends on and the exact event that stopped at 08:03:17 PT on
+        # 2026-09-01 without a single alarm. Counted here, next to the A/B log
+        # line, so the counter and the log line can never disagree. Read and
+        # zeroed by `_refresh_loop`'s heartbeat write.
+        self._count_observation()
         # A/B LOG: queryable proof the ignition path put a name on the board — and what
         # the bridge then did with it (armed / no-arm / skipped-busy / off / error), so
         # a silently starved bridge cannot look identical to a healthy one.

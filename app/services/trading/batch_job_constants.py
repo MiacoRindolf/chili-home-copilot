@@ -17,4 +17,14 @@ IQFEED_EXACT_PRINT_HEARTBEAT_SCOPE = "committed_exact_print_release"
 JOB_IQFEED_DRAIN_METRICS_HEARTBEAT = "iqfeed_drain_metrics_heartbeat"
 IQFEED_DRAIN_METRICS_HEARTBEAT_SCHEMA = "iqfeed_drain_metrics_heartbeat_v2"
 IQFEED_DRAIN_METRICS_HEARTBEAT_SCOPE = "writer_drain_window"
+# LANE OBSERVATION HEARTBEAT (2026-09-02). Its own job type ON PURPOSE: the
+# momentum_live_loop_heartbeat body is key-set-exactly matched by lane_health and
+# is effectively frozen, and its writer (live_runner_loop) has been gone since
+# 2026-08-17 12:26:10 UTC -- 21,764 rows, then nothing. This heartbeat answers a
+# DIFFERENT question, and the only one that matters to an operator: is the lane
+# still OBSERVING? On 2026-09-01 ignition observations stopped at 08:03:17 PT and
+# never resumed; 296 of the day's 390 RTH minutes (75.9%) produced none, and
+# nothing alarmed.
+JOB_MOMENTUM_IGNITION_OBSERVATION_HEARTBEAT = "momentum_ignition_observation_heartbeat"
+IGNITION_OBSERVATION_HEARTBEAT_SCHEMA = "momentum_ignition_observation_heartbeat_v1"
 JOB_BRAIN_MARKET_SNAPSHOTS = "brain_market_snapshots"

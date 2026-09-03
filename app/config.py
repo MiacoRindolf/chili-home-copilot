@@ -3386,6 +3386,24 @@ class Settings(BaseSettings):
         validation_alias=AliasChoices("CHILI_MOMENTUM_UNIVERSE_HARD_CEILING"),
         description="DB-safety backstop for the uncapped universe — the absolute max number of screen-passers surfaced per build (so a runaway snapshot can't flood viability). This is NOT a quality cap (the adaptive screen does the real selection); it exists only to bound the row count. Only consulted when chili_momentum_universe_uncapped_enabled is on.",
     )
+    # UNIVERSE FAIL-OPEN TO ZERO (2026-09-02). KILL switch, not an enable
+    # switch: default True because installing an empty watch set on a provider
+    # outage is the defect. =0 restores the prior behaviour (the empty list
+    # becomes the watch set immediately).
+    chili_momentum_universe_retain_on_provider_failure_enabled: bool = Field(
+        default=True,
+        validation_alias=AliasChoices(
+            "CHILI_MOMENTUM_UNIVERSE_RETAIN_ON_PROVIDER_FAILURE_ENABLED"
+        ),
+        description=(
+            "When the full-market snapshot fails or returns an empty body, keep the "
+            "previously screened ignition watch set (bounded to 300s) instead of "
+            "installing an empty one, and log the degraded outcome distinctly from a "
+            "legitimately empty screen. Measured 2026-08-28: 705 empty snapshot bodies "
+            "across two ~15-minute windows, with no line, metric or row recording that "
+            "the lane was watching nothing. 0 = prior behaviour."
+        ),
+    )
     chili_momentum_ws_ignition_enabled: bool = Field(
         default=True,
         validation_alias=AliasChoices("CHILI_MOMENTUM_WS_IGNITION_ENABLED"),
@@ -9606,6 +9624,23 @@ class Settings(BaseSettings):
             'Page when the momentum control-loop heartbeat stops. Independent of '
             'lane_health: it reads the heartbeat table directly, so it still fires '
             'on hosts that do not drive the lane.'
+        ),
+    )
+    # Lane-observation deadman. Default True for the same reason as the
+    # control-loop deadman: an alarm that ships disabled is the silence it was
+    # written to end. Measured 2026-09-01: the lane stopped observing at
+    # 08:03:17 PT, 296 of 390 RTH minutes produced nothing, and every existing
+    # detector was in-process, Docker-scoped, disabled, missing from disk, or
+    # saturated on a heartbeat key with no writer since 2026-08-17.
+    chili_lane_observation_watchdog_enabled: bool = Field(
+        default=True,
+        validation_alias=AliasChoices("CHILI_LANE_OBSERVATION_WATCHDOG_ENABLED"),
+        description=(
+            "Page when the momentum lane stops producing ignition observations during "
+            "a market session. Reads the lane's own observation heartbeat from another "
+            "process, so it survives the death of the process it watches. Detection is "
+            "session-gated (04:00-16:00 ET, Mon-Fri) because the lane legitimately "
+            "observes nothing overnight."
         ),
     )
     chili_lane_health_alert_enabled: bool = Field(

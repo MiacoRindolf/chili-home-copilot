@@ -119,6 +119,31 @@ EVIDENCE_WINDOW_SECONDS = 3600.0
 # Two beats prove a REPEATING writer. One beat could be a single manual run.
 EVIDENCE_MIN_BEATS = 2
 
+# STUCK-AT-DEAD (2026-09-02). This module's premise -- "a box that HAS hosted the
+# loop stays armed for as long as the loop stays dead, with no upper bound" -- is
+# correct for an OUTAGE and wrong for a DECOMMISSION, and the difference has cost
+# the operator every alarm this module was written to raise.
+#
+# Measured: the newest `momentum_live_loop_heartbeat` row is 2026-08-17
+# 12:26:10.871356 UTC. 21,764 rows, then nothing for 16 days. No writer for that
+# key exists anywhere in app/ any more -- every remaining reference is a read --
+# and the alert text still says "Relaunch the captured-PAPER runner", a lane the
+# timeshare supervisor replaced. Meanwhile iqfeed_exact_print_heartbeat,
+# iqfeed_drain_metrics_heartbeat and scheduler_worker_heartbeat are all fresh to
+# 2026-09-02 23:0x, so the table works; this one key is orphaned.
+#
+# Because the signature is keyed on the last beat and the last beat no longer
+# advances, the change-only cooldown collapsed 16 days of "alarm" into exactly
+# two messages: 2026-08-26 15:56:27Z ("219h 30m") and 2026-09-02 17:29:08Z
+# ("389h 02m"), both quoting the same frozen last beat. It produced NOTHING on
+# 2026-09-01, the day the lane went dark for five hours, because from its point
+# of view nothing changed.
+#
+# A stuck-at-dead alarm must be loud about being STUCK, not quietly repeat a
+# corpse. Past this age the verdict is a CONFIGURATION fault with its own
+# message and its own signature namespace.
+STUCK_CONFIGURATION_AFTER_SECONDS = 3 * 24 * 3600.0
+
 # Both statements are INDEX-ONLY on ix_bbj_live_loop_heartbeat_latest
 # (started_at DESC, id DESC) WHERE job_type = 'momentum_live_loop_heartbeat':
 # 2.0ms and 73.6ms measured. `started_at` rather than
@@ -194,6 +219,9 @@ def evaluate_control_loop(db: Session, *, now: datetime | None = None) -> dict[s
                     the loop, so silence is correct and permanent.
       ``alive``   — a beat within DEAD_AFTER_SECONDS.
       ``dead``    — a repeating writer existed and has stopped.
+      ``stuck_configuration`` — the writer has been gone for DAYS. That is a
+                    deploy/configuration fault, not a fresh death, and it is the
+                    state this module has actually been in since 2026-08-17.
     """
     now = now or datetime.utcnow()
     params = {"job_type": JOB_MOMENTUM_LIVE_LOOP_HEARTBEAT}
@@ -224,8 +252,14 @@ def evaluate_control_loop(db: Session, *, now: datetime | None = None) -> dict[s
         return {"state": "absent", "beats": beats, "age_seconds": None, "last_beat_utc": None}
 
     age = max(0.0, (now - last_beat).total_seconds())
+    if age > STUCK_CONFIGURATION_AFTER_SECONDS:
+        state = "stuck_configuration"
+    elif age > DEAD_AFTER_SECONDS:
+        state = "dead"
+    else:
+        state = "alive"
     return {
-        "state": "alive" if age <= DEAD_AFTER_SECONDS else "dead",
+        "state": state,
         "beats": beats,
         "age_seconds": round(age, 1),
         "last_beat_utc": last_beat.isoformat() + "Z",
@@ -281,7 +315,7 @@ def run_control_loop_watchdog(
     verdict = evaluate_control_loop(db, now=now)
     state = verdict.get("state")
 
-    if state != "dead":
+    if state not in ("dead", "stuck_configuration"):
         if _last_signature is not None and state == "alive":
             logger.warning(
                 "[control_loop_watchdog] RECOVERED — control loop beating again "
@@ -294,7 +328,7 @@ def run_control_loop_watchdog(
 
     # The last beat does not advance while the loop is dead, so this signature is
     # stable for the whole outage: one row per outage, idempotent across restarts.
-    signature = f"dead:{verdict['last_beat_utc']}"
+    signature = f"{state}:{verdict['last_beat_utc']}"
     verdict["signature"] = signature
     if signature == _last_signature:
         verdict["emitted"] = False
@@ -311,20 +345,33 @@ def run_control_loop_watchdog(
     if _already_paged(db, signature):
         _last_signature = signature
         logger.warning(
-            "[control_loop_watchdog] control loop still dead (%s) — already paged "
+            "[control_loop_watchdog] control loop still %s (%s) — already paged "
             "for this outage by a previous process; not re-paging",
-            _human(verdict.get("age_seconds")),
+            state, _human(verdict.get("age_seconds")),
         )
         verdict["emitted"] = False
         verdict["suppressed"] = "already_paged"
         return verdict
 
     human = _human(verdict.get("age_seconds"))
-    message = (
-        f"CONTROL LOOP DEAD — no momentum heartbeat for {human} "
-        f"(last beat {verdict['last_beat_utc']}). The lane is not selecting or "
-        f"arming; exits are unowned. Relaunch the captured-PAPER runner."
-    )
+    if state == "stuck_configuration":
+        # Do NOT report this as a fresh death. Since 2026-08-17 this module has
+        # been asserting exactly that against a heartbeat key with no writer
+        # left in the tree, which is how it produced nothing at all on
+        # 2026-09-01 while the lane was dark for five hours.
+        message = (
+            f"CONTROL-LOOP HEARTBEAT MISSING FOR {human} — this is a "
+            f"CONFIGURATION fault, not a fresh outage (last beat "
+            f"{verdict['last_beat_utc']}). Nothing has written "
+            f"momentum_live_loop_heartbeat in days, so this deadman is BLIND: "
+            f"it cannot signal a real death until a writer exists again."
+        )
+    else:
+        message = (
+            f"CONTROL LOOP DEAD — no momentum heartbeat for {human} "
+            f"(last beat {verdict['last_beat_utc']}). The lane is not selecting or "
+            f"arming; exits are unowned. Relaunch the captured-PAPER runner."
+        )
     # Unconditional, and BEFORE the send: this is the record that survives a
     # channel outage, so it must not be contingent on the channel.
     logger.critical("[control_loop_watchdog] %s", message)
