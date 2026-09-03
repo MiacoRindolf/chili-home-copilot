@@ -4885,8 +4885,10 @@ def _guarded_reap_for_displacement(
     row lock (with_for_update(nowait=True), live_runner.py:2283): if the runner holds the
     row (mid-tick, possibly submitting an order), the lock fails -> ABORT, never reap. Under
     the lock, re-verify the row is STILL inert + carries NO entry order (entry_submitted /
-    entry_order_id / unresolved history) before cancelling, then writes the reap cooldown and
-    COMMITS its own txn. Fail-CLOSED: any doubt -> rollback, no reap. True only on commit."""
+    entry_order_id / unresolved history / an unresolved DURABLE claim) before cancelling,
+    then writes the reap cooldown and COMMITS its own txn. Fail-CLOSED: any doubt ->
+    rollback, no reap. True ONLY when the cancel actually TERMINALIZED the row -- a
+    DEFERRED cancel returns ok=True on a still-live session and is not a displacement."""
     from .automation_query import cancel_automation_session
     from .live_runner import _unresolved_entry_order_ids
 
@@ -4924,12 +4926,70 @@ def _guarded_reap_for_displacement(
         if le.get("entry_submitted") or le.get("entry_order_id") or _unresolved_entry_order_ids(le):
             db.rollback()
             return False
+        # SESSION JSON IS NOT THE ONLY OWNERSHIP RECORD (2026-09-02). A submit
+        # whose HTTP committed but whose outer session txn rolled back leaves the
+        # broker order recorded ONLY in the durable claim ledger -- which is the
+        # exact case `_owned_unresolved_alpaca_entry_claim` exists to catch, and
+        # the case the stale reaper already consults. Reading only the JSON here
+        # let a crash-survivor reach `cancel_automation_session`, take its
+        # deferred branch, and be counted below as a successful displacement.
+        # Fail CLOSED on an unreadable claim view, exactly like the cancel does.
+        try:
+            from .automation_query import _owned_unresolved_alpaca_entry_claim
+
+            _claim_readable, _durable_claim = _owned_unresolved_alpaca_entry_claim(
+                db, locked
+            )
+        except Exception:
+            _claim_readable, _durable_claim = False, None
+        if not _claim_readable or _durable_claim is not None:
+            db.rollback()
+            return False
         # Proven inert + orderless UNDER THE LOCK -> safe to cancel within this txn.
         res = cancel_automation_session(
             db, user_id=(int(user_id) if user_id is not None else None), session_id=int(session_id)
         )
-        if not (isinstance(res, dict) and res.get("ok")):
-            db.rollback()
+        # A DEFERRED cancel returns ok=True with the session STILL NON-TERMINAL and
+        # a live broker order outstanding. Testing only `ok` therefore wrote the
+        # reap cooldown, committed, and reported a displacement for a row it did
+        # not terminalize -- the slot was never freed, so the caller's
+        # `reaped_session` was a fiction. This is the same discriminator
+        # `_reap_stale_watching_sessions` applies at its own cancel (auto_arm.py,
+        # "_terminal"); it was never ported here.
+        _res = res if isinstance(res, dict) else {}
+        _res_state = str(_res.get("state") or STATE_LIVE_CANCELLED)
+        _terminal = (
+            bool(_res.get("ok"))
+            and not _res.get("pending")
+            and not _res.get("terminalization_deferred")
+            and _res_state in LIVE_RUNNER_TERMINAL_STATES
+        )
+        if not _terminal:
+            if _res.get("ok"):
+                # The deferred branch wrote the operator pause, the recovered
+                # broker pointers and (since 2026-09-02) the durable
+                # `terminalization_deferred_operator_pause` event. Those writes
+                # MUST persist -- rolling them back would erase the fence and the
+                # only record that this happened -- but the displacement itself
+                # did NOT happen: no cooldown, no True.
+                try:
+                    db.commit()
+                except Exception:
+                    try:
+                        db.rollback()
+                    except Exception:
+                        pass
+                logger.warning(
+                    "[auto_arm] displacement reap DEFERRED session=%s %s state=%s "
+                    "result=%s — hindi na-terminalize; walang cooldown, slot HINDI "
+                    "pinalaya; writes committed",
+                    session_id, expected_symbol, locked.state,
+                    {k: _res.get(k) for k in (
+                        "ok", "error", "pending", "terminalization_deferred", "state"
+                    )},
+                )
+            else:
+                db.rollback()
             return False
         _write_reap_cooldown(str(expected_symbol or "").upper(), _utcnow())
         db.commit()
