@@ -68,22 +68,22 @@ def bus(monkeypatch):
 
     monkeypatch.setattr(LR, "_emit", _emit)
     monkeypatch.setattr(AL, "dispatch_alert", _dispatch)
-    # `settings` is a pydantic model: assigning a field it does not DEFINE raises
-    # ValueError, and `raising=False` does not help — it only governs whether
-    # monkeypatch complains about a missing attribute, not whether the setattr
-    # itself throws. On origin/main these two fields do not exist, so forcing them
-    # errored the whole fixture and nine of these tests never reached an assertion
-    # at all. The values below are identical to the code's own defaults, so the
-    # tests exercise the same numbers either way; forcing them is belt-and-braces
-    # against a future default change, not a precondition.
+    # `settings` is a pydantic model, and forcing a field it does not DEFINE is a
+    # double trap: the assignment raises ValueError, and `raising=False` makes it
+    # WORSE — monkeypatch then records the attribute as absent and tries
+    # `object.__delattr__` at teardown, which pydantic also rejects, turning a
+    # clean assertion failure into a fixture ERROR. On origin/main these two
+    # fields do not exist, and that is exactly how nine of these tests came to
+    # never reach an assertion at all. So: only force what already exists. The
+    # values are identical to the code's own defaults, so the tests exercise the
+    # same numbers either way — forcing them guards a future default change, it
+    # is not a precondition.
     for _name, _value in (
         ("chili_momentum_entry_confirm_deferred_emit_interval_s", 15.0),
         ("chili_momentum_entry_confirm_deferred_cap_seconds", 180.0),
     ):
-        try:
-            monkeypatch.setattr(LR.settings, _name, _value, raising=False)
-        except Exception:
-            pass
+        if hasattr(LR.settings, _name):
+            monkeypatch.setattr(LR.settings, _name, _value)
     return rec
 
 
