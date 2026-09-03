@@ -61,6 +61,7 @@ import argparse
 import json
 import os
 import sys
+from datetime import date
 from typing import Any
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -74,6 +75,8 @@ from historical_tick_hydrator import (  # noqa: E402
     SOURCE_POLYGON_TRADES,
     TRADES_TABLE,
     connect,
+    et_day_bounds_utc,
+    naive_utc,
 )
 
 # table -> (ET-day expression, preference order, best first)
@@ -124,17 +127,27 @@ def apply_drops(conn, table: str, drops: list[dict]) -> int:
     """Delete the non-preferred slices, one symbol-day at a time.
 
     Per-slice rather than one giant statement so a failure leaves a consistent
-    database and can be resumed, and so the DELETE stays index-friendly instead
-    of taking a long lock over the whole table while a load may be running.
+    database and can be resumed, and so the lock stays short while a load may be
+    running against the same table.
+
+    The predicate is ``(source, symbol, observed_at range)`` -- deliberately NOT
+    the ET-day expression this module groups by.  Both tables carry a
+    ``(source, symbol, observed_at)`` btree; a delete keyed on
+    ``(observed_at AT TIME ZONE ...)::date`` cannot use it and would sequentially
+    scan a multi-million-row table once per slice.  ``et_day_bounds_utc`` gives
+    exactly the same rows as that expression, by construction.
     """
-    day_expr, _ = TABLES[table]
+    naive = table == TRADES_TABLE  # trade tape is naive-UTC; NBBO tape is tz-aware
     removed = 0
     for d in drops:
+        lo, hi = et_day_bounds_utc(date.fromisoformat(d["day"]))
+        if naive:
+            lo, hi = naive_utc(lo), naive_utc(hi)
         with conn.cursor() as cur:
             cur.execute(
-                f"DELETE FROM {table} WHERE symbol = %s AND source = %s "
-                f"AND {day_expr} = %s",
-                (d["symbol"], d["drop"], d["day"]),
+                f"DELETE FROM {table} WHERE source = %s AND symbol = %s "
+                "AND observed_at >= %s AND observed_at < %s",
+                (d["drop"], d["symbol"], lo, hi),
             )
             removed += cur.rowcount
         conn.commit()

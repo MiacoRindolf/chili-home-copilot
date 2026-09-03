@@ -117,3 +117,80 @@ def test_preference_lists_cover_exactly_the_hydrated_sources():
     ranked = set(TRADE_PREFS) | set(NBBO_PREFS)
     assert ranked == set(hyd.HYDRATED_SOURCES)
     assert set(TABLES) == {hyd.TRADES_TABLE, hyd.NBBO_TABLE}
+
+
+class RecordingCursor:
+    def __init__(self):
+        self.sql = []
+        self.params = []
+        self.rowcount = 7
+
+    def execute(self, sql, params=None):
+        self.sql.append(" ".join(sql.split()))
+        self.params.append(params)
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *a):
+        return False
+
+
+class RecordingConn:
+    def __init__(self):
+        self.cur = RecordingCursor()
+        self.commits = 0
+
+    def cursor(self):
+        return self.cur
+
+    def commit(self):
+        self.commits += 1
+
+
+def test_delete_is_index_friendly_and_day_scoped():
+    """The delete must key on (source, symbol, observed_at range).
+
+    Both tables carry a (source, symbol, observed_at) btree. Keying the delete
+    on the ET-day EXPRESSION this module groups by would be correct but could
+    not use that index -- one sequential scan of a multi-million-row table per
+    slice, while a load may be running against it.
+    """
+    from scripts.hydration_canonicalize import apply_drops
+
+    conn = RecordingConn()
+    drops = [{"symbol": "TMCR", "day": "2026-08-24",
+              "keep": hyd.SOURCE_IQFEED_TRADES,
+              "drop": hyd.SOURCE_POLYGON_TRADES, "rows": 16933, "kept_rows": 16933}]
+    removed = apply_drops(conn, hyd.TRADES_TABLE, drops)
+
+    sql = conn.cur.sql[0]
+    assert "source = %s AND symbol = %s" in sql
+    assert "observed_at >= %s AND observed_at < %s" in sql
+    assert "AT TIME ZONE" not in sql  # no expression predicate
+    assert removed == 7
+    assert conn.commits == 1
+
+    src, sym, lo, hi = conn.cur.params[0]
+    assert (src, sym) == (hyd.SOURCE_POLYGON_TRADES, "TMCR")
+    # ET calendar day 2026-08-24 (EDT) == [04:00Z, 04:00Z next day), and the
+    # trade tape is naive-UTC so the bounds must carry no tzinfo.
+    assert lo.tzinfo is None and hi.tzinfo is None
+    assert lo.isoformat() == "2026-08-24T04:00:00"
+    assert hi.isoformat() == "2026-08-25T04:00:00"
+
+
+def test_nbbo_delete_bounds_stay_timezone_aware():
+    """The NBBO tape is TIMESTAMPTZ; stripping the zone would compare against
+    server-local time and delete the wrong rows -- or none."""
+    from scripts.hydration_canonicalize import apply_drops
+
+    conn = RecordingConn()
+    drops = [{"symbol": "CANF", "day": "2026-09-02",
+              "keep": hyd.SOURCE_POLYGON_NBBO,
+              "drop": hyd.SOURCE_IQFEED_NBBO, "rows": 100, "kept_rows": 50}]
+    apply_drops(conn, hyd.NBBO_TABLE, drops)
+
+    _, _, lo, hi = conn.cur.params[0]
+    assert lo.tzinfo is not None and hi.tzinfo is not None
+    assert lo.isoformat() == "2026-09-02T04:00:00+00:00"

@@ -181,3 +181,22 @@ def test_dataset_map_matches_the_hydrator_source_constants():
 def test_connection_is_closed_even_though_report_is_built(monkeypatch):
     _, conn = run(monkeypatch, [("LGCL", D)], counts={}, jobs=[])
     assert conn.closed is True
+
+
+def test_session_bounds_use_zoneinfo_not_a_fixed_offset():
+    """A hardcoded -4 would shift a whole session by an hour across the DST
+    boundary, and the rows would still look well-formed -- the same class of
+    landmine Phase 1 found in the lookup port's ET-naive timestamps."""
+    from datetime import date as _date
+
+    from scripts.hydration_coverage_report import et_session_bounds_utc
+
+    # EDT (UTC-4): 04:00 ET -> 08:00 UTC
+    lo, hi = et_session_bounds_utc(_date(2026, 8, 26))
+    assert lo.isoformat() == "2026-08-26T08:00:00+00:00"
+    assert hi.isoformat() == "2026-08-27T00:00:00+00:00"
+
+    # EST (UTC-5): 04:00 ET -> 09:00 UTC. Same code, different offset.
+    lo2, hi2 = et_session_bounds_utc(_date(2026, 3, 6))
+    assert lo2.isoformat() == "2026-03-06T09:00:00+00:00"
+    assert hi2.isoformat() == "2026-03-07T01:00:00+00:00"

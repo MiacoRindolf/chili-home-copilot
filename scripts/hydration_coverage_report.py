@@ -25,8 +25,22 @@ import json
 import os
 import sys
 from collections import Counter, defaultdict
-from datetime import date
+from datetime import date, datetime, time, timezone
 from typing import Any
+from zoneinfo import ZoneInfo
+
+ET = ZoneInfo("America/New_York")
+
+
+def et_session_bounds_utc(day: date) -> tuple[datetime, datetime]:
+    """04:00-20:00 ET as UTC -- the window CHILI actually trades.
+
+    Via zoneinfo, never a fixed offset: the corpus can straddle a DST boundary
+    and a hardcoded -4 would silently shift a whole session by an hour.
+    """
+    lo = datetime.combine(day, time(4, 0), tzinfo=ET).astimezone(timezone.utc)
+    hi = datetime.combine(day, time(20, 0), tzinfo=ET).astimezone(timezone.utc)
+    return lo, hi
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
@@ -119,7 +133,16 @@ def build_report(pairs: list[tuple[str, date]], dbname: str,
     reasons: dict[str, list[str]] = defaultdict(list)
 
     for sym, day in pairs:
-        rec: dict[str, Any] = {"symbol": sym, "date": day.isoformat()}
+        since, until = et_session_bounds_utc(day)
+        rec: dict[str, Any] = {
+            "symbol": sym, "date": day.isoformat(),
+            # Explicit UTC bounds for the replay harness. Prefer these over its
+            # --date flag: that flag hardcodes a UTC-7 window ("PDT in July"),
+            # which happens to contain the ET session but is not derived from it
+            # and is an hour off outside daylight time.
+            "since_utc": since.isoformat(),
+            "until_utc": until.isoformat(),
+        }
         for (prov, ds) in DATASETS:
             n = counts[(prov, ds)].get((sym, day), 0)
             rec[f"{prov}_{ds}"] = n
