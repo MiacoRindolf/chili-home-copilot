@@ -629,6 +629,70 @@ def run_arm(label, grid, ticks, frame_ticks, g4_on):
     return pnl, len(buys), len(sells), len(grind_evts), len(esc_evts)
 
 
+# The six relations the replay itself writes. TRUNCATE ... CASCADE reaches far beyond
+# them (25 tables as of migration 354), so this is a SEED list, not the clean list.
+_SINK_SEED_TABLES = (
+    "trading_automation_events", "trading_automation_sessions",
+    "trading_automation_simulated_fills", "momentum_symbol_viability",
+    "adaptive_risk_reservations", "adaptive_risk_opportunity_claims",
+)
+
+# Every relation TRUNCATE ... CASCADE will actually reach from the seeds, walked from
+# pg_constraint instead of hardcoded: PostgreSQL truncates every table holding an FK to
+# a truncated one, transitively, regardless of the FK's ON DELETE action. The FK graph
+# grows with every migration, so discovering it is the only way this stays correct.
+_SINK_CLOSURE_SQL = """
+WITH RECURSIVE reached(oid) AS (
+        SELECT c.oid
+        FROM pg_class c
+        JOIN pg_namespace n ON n.oid = c.relnamespace
+        WHERE n.nspname = 'public' AND c.relkind IN ('r', 'p')
+          AND c.relname = ANY(:seeds)
+    UNION
+        SELECT con.conrelid
+        FROM pg_constraint con
+        JOIN reached r ON con.confrelid = r.oid
+        WHERE con.contype = 'f'
+)
+SELECT c.oid, n.nspname, c.relname
+FROM reached r
+JOIN pg_class c ON c.oid = r.oid
+JOIN pg_namespace n ON n.oid = c.relnamespace
+WHERE c.relkind IN ('r', 'p')
+ORDER BY n.nspname, c.relname
+"""
+
+# BEFORE TRUNCATE statement triggers on those relations (pg_trigger.tgtype bit 5 = 32).
+# Discovered from the catalog, never matched on SQLSTATE or message text: the guards in
+# this schema raise under at least two different SQLSTATEs (55000 and 23514) from seven
+# different trigger functions, so any error-shape heuristic is wrong for most of them.
+_SINK_TRUNCATE_GUARD_SQL = """
+SELECT t.tgrelid, t.tgname, t.tgenabled
+FROM pg_trigger t
+WHERE NOT t.tgisinternal
+  AND (t.tgtype & 32) <> 0
+  AND t.tgrelid = ANY(:oids)
+ORDER BY t.tgrelid, t.tgname
+"""
+
+# tgenabled -> the ALTER verb that restores exactly that state ('D' is never suspended).
+_SINK_GUARD_RESTORE_VERB = {"O": "ENABLE", "R": "ENABLE REPLICA", "A": "ENABLE ALWAYS"}
+
+
+def _qi(_name: str) -> str:
+    """Quote a catalog-sourced identifier for interpolation into DDL."""
+    return '"' + _name.replace('"', '""') + '"'
+
+
+def _sink_truncate_targets(_closure):
+    """Relations the reset will TRUNCATE — the full discovered closure.
+
+    Seam: the regression test overrides this to simulate a PARTIAL clean and assert the
+    verification below still fails loudly. Production behaviour is the identity function.
+    """
+    return list(_closure)
+
+
 def _reset_sim_sink() -> None:
     """CLEAN-SINK PROTOCOL (2026-08-29, sink-contamination incident).
 
@@ -640,6 +704,30 @@ def _reset_sim_sink() -> None:
     determinism ay napatunayan ng byte-identical na double-run. Ang _test
     suffix guard sa itaas ang pumipigil na matamaan ang prod. Opt-out (para sa
     sadyang multi-run accumulation studies): REPLAY_KEEP_SINK=1.
+
+    TRUNCATE GUARDS (2026-09-03). The CASCADE above reaches append-only evidence
+    ledgers that carry BEFORE TRUNCATE statement triggers, so on a migrated database
+    this function used to abort the whole harness before a single tick was loaded —
+    ``adaptive_risk_reservation_events is append-only; TRUNCATE is forbidden``
+    (ERRCODE 55000, installed by migration 354). Nine such guards sit inside the
+    cascade closure today.
+
+    Those guards are load-bearing and are NOT weakened: the ledgers are a hash chain
+    (``sequence`` / ``previous_event_sha256`` / ``event_sha256``, walked backwards by
+    ``adaptive_risk_reservation.py`` to prove exit-owner ancestry), and nothing in
+    ``app/migrations.py`` changes here. Instead this reset does what
+    ``tests/conftest.py::_truncate_app_tables`` already does for pytest isolation:
+    inside ONE transaction, against a database whose name the guard above has already
+    proven ends in ``_test``, it suspends exactly the discovered TRUNCATE triggers,
+    truncates, and restores them. DDL is transactional in PostgreSQL, so a crash or an
+    error between the two ALTERs rolls the suspension back — there is no window in
+    which the guard stays off. Unlike conftest's hand-maintained 18-name list, the
+    guards here are discovered from ``pg_trigger``, so the next migration to add one
+    does not break the harness again.
+
+    A partial clean is worse than a hard failure — contaminated results look like
+    results — so every relation in the closure is counted after commit and every
+    suspended guard is re-read; anything non-zero or still disabled raises SystemExit.
     """
     if os.environ.get("REPLAY_KEEP_SINK", "").strip() == "1":
         print("  [sink] REPLAY_KEEP_SINK=1 — hindi nireset ang sink")
@@ -647,25 +735,108 @@ def _reset_sim_sink() -> None:
     import sqlalchemy as _sa
 
     _eng = _sa.create_engine(SIM)
-    _tables = (
-        "trading_automation_events", "trading_automation_sessions",
-        "trading_automation_simulated_fills", "momentum_symbol_viability",
-        "adaptive_risk_reservations", "adaptive_risk_opportunity_claims",
-    )
-    with _eng.begin() as _c:
-        _have = {
-            r[0] for r in _c.execute(_sa.text(
-                "SELECT table_name FROM information_schema.tables "
-                "WHERE table_name = ANY(:t)"
-            ), {"t": list(_tables)})
-        }
-        _hit = [t for t in _tables if t in _have]
-        if _hit:
+    try:
+        with _eng.connect() as _c:
+            _closure = [
+                (int(_oid), _ns, _rel) for (_oid, _ns, _rel) in _c.execute(
+                    _sa.text(_SINK_CLOSURE_SQL), {"seeds": list(_SINK_SEED_TABLES)}
+                )
+            ]
+            if not _closure:
+                print("  [sink] clean-sink reset: walang sink table sa DB — skipped")
+                return
+            _by_oid = {_oid: (_ns, _rel) for (_oid, _ns, _rel) in _closure}
+            _guards = [
+                (int(_oid), _tg, _en) for (_oid, _tg, _en) in _c.execute(
+                    _sa.text(_SINK_TRUNCATE_GUARD_SQL), {"oids": list(_by_oid)}
+                )
+            ]
+        # 'D' guards are already disabled — leave them exactly as found.
+        _suspend = [(o, g, e) for (o, g, e) in _guards if e != "D"]
+        _unknown = [(o, g, e) for (o, g, e) in _suspend if e not in _SINK_GUARD_RESTORE_VERB]
+        if _unknown:
+            raise SystemExit(
+                "  [sink] ABORT: cannot restore unknown pg_trigger.tgenabled state(s): "
+                + ", ".join(f"{_by_oid[o][1]}.{g}={e!r}" for (o, g, e) in _unknown)
+            )
+
+        _targets = _sink_truncate_targets(_closure)
+        with _eng.begin() as _c:
+            for _oid, _tg, _en in _suspend:
+                _ns, _rel = _by_oid[_oid]
+                _c.execute(_sa.text(
+                    f"ALTER TABLE {_qi(_ns)}.{_qi(_rel)} DISABLE TRIGGER {_qi(_tg)}"
+                ))
             _c.execute(_sa.text(
-                "TRUNCATE " + ", ".join(_hit) + " RESTART IDENTITY CASCADE"
+                "TRUNCATE "
+                + ", ".join(f"{_qi(_ns)}.{_qi(_rel)}" for (_o, _ns, _rel) in _targets)
+                + " RESTART IDENTITY CASCADE"
             ))
-    _eng.dispose()
-    print(f"  [sink] clean-sink reset: {len(_hit)} tables")
+            for _oid, _tg, _en in _suspend:
+                _ns, _rel = _by_oid[_oid]
+                _c.execute(_sa.text(
+                    f"ALTER TABLE {_qi(_ns)}.{_qi(_rel)} "
+                    f"{_SINK_GUARD_RESTORE_VERB[_en]} TRIGGER {_qi(_tg)}"
+                ))
+
+        # Post-commit verification. Counts prove the sink is genuinely empty; the guard
+        # re-read proves the integrity triggers came back on.
+        with _eng.connect() as _c:
+            _residue = []
+            for _oid, _ns, _rel in _closure:
+                _n = _c.execute(_sa.text(
+                    f"SELECT count(*) FROM {_qi(_ns)}.{_qi(_rel)}"
+                )).scalar_one()
+                if _n:
+                    _residue.append((_rel, int(_n)))
+            _now = {
+                (int(_oid), _tg): _en for (_oid, _tg, _en) in _c.execute(
+                    _sa.text(_SINK_TRUNCATE_GUARD_SQL), {"oids": list(_by_oid)}
+                )
+            }
+            _broken = [
+                (_by_oid[o][1], g, e, _now.get((o, g)))
+                for (o, g, e) in _suspend if _now.get((o, g)) != e
+            ]
+    finally:
+        _eng.dispose()
+
+    if _residue or _broken:
+        _lines = ["  [sink] ABORT: clean-sink reset did not hold — refusing to replay."]
+        if _residue:
+            _lines.append(
+                "  [sink]   NOT EMPTY after reset: "
+                + ", ".join(f"{_t}={_n}" for (_t, _n) in _residue)
+            )
+        if _broken:
+            _lines.append(
+                "  [sink]   TRUNCATE guard NOT restored: "
+                + ", ".join(f"{_t}.{_g} want={_w!r} got={_gt!r}"
+                            for (_t, _g, _w, _gt) in _broken)
+            )
+        _lines.append(
+            "  [sink]   A partial clean contaminates results (see the 2026-08-29 "
+            "incident); fix the sink rather than setting REPLAY_KEEP_SINK=1."
+        )
+        raise SystemExit("\n".join(_lines))
+
+    _names = [_rel for (_o, _ns, _rel) in _closure]
+    _seeded = [_n for _n in _names if _n in _SINK_SEED_TABLES]
+    print(f"  [sink] clean-sink reset: {len(_names)} tables, ALL VERIFIED EMPTY "
+          f"({len(_seeded)} sink seeds + {len(_names) - len(_seeded)} reached via FK cascade)")
+    _line = "  [sink]   cleaned:"
+    for _n in _names:
+        if len(_line) + len(_n) + 1 > 96:
+            print(_line)
+            _line = "  [sink]           "
+        _line += " " + _n
+    if _line.strip():
+        print(_line)
+    if _suspend:
+        print(f"  [sink]   truncate guards suspended for this one transaction and "
+              f"restored ({len(_suspend)}, all re-verified enabled):")
+        for _oid, _tg, _en in _suspend:
+            print(f"  [sink]           {_by_oid[_oid][1]}.{_tg}")
 
 
 def main():
