@@ -6139,6 +6139,41 @@ def _adaptive_atomic_ledger_from_rows(
     )
 
 
+def _legacy_pending_reservation_usd(
+    live: dict[str, Any],
+    *,
+    symbol: str,
+    client_order_id: str,
+) -> float | None:
+    """Ang reserbang dolyar ng isang LEGACY pending-entry row, o ``None`` kapag sira.
+
+    Isang row ay "buo" kapag finite at positibo ang ``entry_inflight_risk_usd`` AT
+    may certified frozen ``entry_order_request`` para sa eksaktong simbolo at cid.
+    Ang ``None`` ay nangangahulugang HINDI ito ebidensya ng exposure (walang
+    instruction na maaaring nakarating sa broker sa hugis na ito) — ang tumatawag
+    ay dapat lumaktaw nang may telemetry, HINDI mag-fail-closed para sa buong
+    account. Walang exception ang lumalabas dito: ang bawat sirang hugis (wala,
+    hindi numero, NaN/inf, ≤0, hindi certified) ay ``None``.
+    """
+    try:
+        risk = float(live.get("entry_inflight_risk_usd"))
+    except (TypeError, ValueError):
+        return None
+    if not math.isfinite(risk) or risk <= 0.0:
+        return None
+    try:
+        certified = bool(
+            _certified_frozen_entry_request(
+                live.get("entry_order_request"),
+                symbol=symbol,
+                client_order_id=client_order_id,
+            )
+        )
+    except Exception:
+        certified = False
+    return risk if certified else None
+
+
 def _reserve_alpaca_entry_risk(
     db: Session,
     *,
@@ -6711,6 +6746,22 @@ def _reserve_alpaca_entry_risk(
         )
         return {"ok": False, "reason": "risk_ledger_unreadable"}
 
+    # ISANG SIRANG ROW AY HINDI DAPAT BUMULAG SA BUONG ACCOUNT (2026-09-03).
+    # Dati: ang loop na ito ay nag-ra-raise ng ``legacy_reservation_invalid``
+    # sa UNANG pending row na walang buong reservation (walang
+    # ``entry_order_request`` o hindi finite ang risk), at ang except sa ibaba ay
+    # nagbabalik ng ``risk_ledger_unreadable`` para sa BAWAT simbolong humihingi.
+    # Nasukat sa RTH ng 2026-09-03: session 19534 MIMI (``live_pending_entry``,
+    # kinansela ng broker nang walang fill, hindi na-terminalize, claim ay
+    # ``resolved: terminal_entry_zero_fill``) = 240 na ``legacy_reservation_
+    # invalid`` sa log at 80 na ``live_entry_deferred_final_bbo /
+    # risk_ledger_unreadable`` — 40 sa CHPT lamang, ang top gainer ng araw,
+    # PAGKATAPOS ng OK na quote. Ang sirang row ay HINDI ebidensya ng exposure
+    # (wala itong frozen instruction na maisusumite); laktawan ito nang may
+    # pangalan sa log at sa resulta, at hatulan ang natitirang malulusog na row.
+    # Ang ``legacy_pending_not_in_adaptive_ledger`` ay NANANATILING fail-closed:
+    # iyon ay sira ng LEDGER, hindi ng isang row.
+    skipped_malformed_pending: list[dict[str, Any]] = []
     try:
         for sid, row_symbol, live, _snap in pending_sessions:
             legacy_cid = str(live.get("entry_client_order_id") or "").strip()
@@ -6718,17 +6769,22 @@ def _reserve_alpaca_entry_risk(
                 continue
             if adaptive_claim is not None:
                 raise ValueError("legacy_pending_not_in_adaptive_ledger")
-            risk = float(live.get("entry_inflight_risk_usd"))
-            if (
-                not math.isfinite(risk)
-                or risk <= 0.0
-                or not _certified_frozen_entry_request(
-                    live.get("entry_order_request"),
-                    symbol=row_symbol,
-                    client_order_id=legacy_cid,
+            risk = _legacy_pending_reservation_usd(
+                live, symbol=row_symbol, client_order_id=legacy_cid
+            )
+            if risk is None:
+                skipped_malformed_pending.append(
+                    {"session_id": int(sid), "symbol": str(row_symbol),
+                     "client_order_id": legacy_cid or None}
                 )
-            ):
-                raise ValueError("legacy_reservation_invalid")
+                _log.warning(
+                    "[alpaca_risk] legacy pending row MALFORMED — nilaktawan, hindi "
+                    "ibinulag ang account (sym=%s sid=%s row_sym=%s cid=%s): walang "
+                    "certified frozen entry_order_request o hindi finite ang "
+                    "entry_inflight_risk_usd",
+                    sym, sid, row_symbol, legacy_cid or None,
+                )
+                continue
             return {
                 "ok": False,
                 "reason": "account_legacy_entry_present",

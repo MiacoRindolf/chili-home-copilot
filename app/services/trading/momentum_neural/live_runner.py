@@ -30625,7 +30625,37 @@ def tick_live_session(
                 )
                 if cid_order is not None:
                     cid_state = "found"
-            if cid_state != "found" or cid_order is None:
+            if cid_state == "absent":
+                # TAHASANG 404 SA EKSAKTONG CID (2026-09-03, MIMI 19534): ang cid
+                # ay hindi kailanman naging order sa venue, kaya WALANG entry
+                # exposure na dapat kanselahin o ampunin. Dati ay pinagsasama
+                # ang `absent` at `unknown` dito — isinusulat ang patunay sa row
+                # at itinatapon ito kada tick: 558 na `kill_switch_mid_run` na
+                # harang mula 16:50Z habang ang `emergency_entry_ack_loss_
+                # pending.lookup_state` ay "absent" na. Linisin ang ack-loss na
+                # marka at ituloy sa broker-zero na pagkumpleto sa ibaba
+                # (pending na walang dami → watching → live_cancelled). Ang
+                # `unknown` ay nananatiling fail-closed.
+                for _k in (
+                    "entry_submitted",
+                    "entry_client_order_id",
+                    "entry_reconcile_pending_client_order_id",
+                    "entry_reconcile_pending_since_utc",
+                    "entry_inflight_risk_usd",
+                    "emergency_entry_ack_loss_pending",
+                ):
+                    le.pop(_k, None)
+                le["emergency_entry_ack_loss_resolved_absent"] = {
+                    "client_order_id": pending_entry_cid,
+                    "recorded_at_utc": _utcnow().isoformat(),
+                }
+                _commit_le(sess, le)
+                _emit(db, sess, "live_entry_client_id_absent", {
+                    "client_order_id": pending_entry_cid,
+                    "reason": "venue_404_exact_cid_never_became_an_order",
+                    "path": "emergency_flatten",
+                })
+            elif cid_state != "found" or cid_order is None:
                 le["emergency_entry_ack_loss_pending"] = {
                     "client_order_id": pending_entry_cid,
                     "lookup_state": cid_state,
@@ -30633,28 +30663,30 @@ def tick_live_session(
                 }
                 _commit_le(sess, le)
                 return False
-            expected_side = "buy" if _le_side_long(le) else "sell"
-            if not (
-                str(getattr(cid_order, "client_order_id", "") or "")
-                == pending_entry_cid
-                and str(getattr(cid_order, "product_id", "") or "").strip().upper()
-                == str(product_id).strip().upper()
-                and str(getattr(cid_order, "side", "") or "").strip().lower()
-                == expected_side
-                and str(getattr(cid_order, "order_id", "") or "").strip()
-            ):
-                le["emergency_entry_ack_loss_identity_mismatch"] = {
-                    "client_order_id": pending_entry_cid,
-                    "broker_order_id": getattr(cid_order, "order_id", None),
-                    "recorded_at_utc": _utcnow().isoformat(),
-                }
+            else:
+                # FOUND: ampunin ang eksaktong order bago ang anumang exit.
+                expected_side = "buy" if _le_side_long(le) else "sell"
+                if not (
+                    str(getattr(cid_order, "client_order_id", "") or "")
+                    == pending_entry_cid
+                    and str(getattr(cid_order, "product_id", "") or "").strip().upper()
+                    == str(product_id).strip().upper()
+                    and str(getattr(cid_order, "side", "") or "").strip().lower()
+                    == expected_side
+                    and str(getattr(cid_order, "order_id", "") or "").strip()
+                ):
+                    le["emergency_entry_ack_loss_identity_mismatch"] = {
+                        "client_order_id": pending_entry_cid,
+                        "broker_order_id": getattr(cid_order, "order_id", None),
+                        "recorded_at_utc": _utcnow().isoformat(),
+                    }
+                    _commit_le(sess, le)
+                    return False
+                le["entry_order_id"] = str(cid_order.order_id)
+                le["entry_client_order_id"] = pending_entry_cid
+                _record_entry_order_placed(le, cid_order.order_id)
+                le.pop("emergency_entry_ack_loss_pending", None)
                 _commit_le(sess, le)
-                return False
-            le["entry_order_id"] = str(cid_order.order_id)
-            le["entry_client_order_id"] = pending_entry_cid
-            _record_entry_order_placed(le, cid_order.order_id)
-            le.pop("emergency_entry_ack_loss_pending", None)
-            _commit_le(sess, le)
 
         # Pending-entry emergency: a cancel acknowledgement is never enough. Read
         # the exact order after cancel and adopt any cancel-raced fill before exit.
@@ -35304,7 +35336,49 @@ def tick_live_session(
                 le.get("entry_reconcile_pending_client_order_id")
                 or le.get("entry_client_order_id")
             )
-            _recovered = _recover_entry_order_by_client_id(adapter, _reconcile_cid)
+            # ANG 404 AY SAGOT, HINDI KAWALAN NG SAGOT (2026-09-03, MIMI 19534).
+            # Dati ay ang LEGACY na lookup lamang ang tinatawag dito, na
+            # sinasadyang tumutupi ng tiyak na HTTP 404 sa `None` ("deliberately
+            # indeterminate"). Kaya ang isang repeg na cid na HINDI KAILANMAN
+            # naging order sa Alpaca ay nanatiling `live_pending_entry` nang
+            # 938 na tick (13:32Z→14:24Z) at pagkatapos ay walang hanggan — at
+            # habang buhay, ang row na iyon ang tumanggi sa 80 sa 84 na
+            # marketable na entry ng ibang simbolo sa pamamagitan ng
+            # risk-ledger (`risk_ledger_unreadable`). Ang strict na
+            # tri-state na read ay umiiral na at ginagamit na sa 20+ na
+            # seam (kabilang ang flatten sa ibaba); dito ito nauuna. Tanging
+            # ang tahasang 404 (`absent`) ang nagpapalaya; ang `unknown` ay
+            # nananatiling fail-closed nang byte-identical.
+            _cid_state, _recovered = _strict_client_order_id_truth(
+                adapter, str(_reconcile_cid or "")
+            )
+            if _cid_state != "found":
+                _recovered = _recover_entry_order_by_client_id(adapter, _reconcile_cid)
+                if _recovered is not None:
+                    _cid_state = "found"
+            if _cid_state == "absent" and _reconcile_cid:
+                for _k in (
+                    "entry_submitted",
+                    "entry_client_order_id",
+                    "entry_reconcile_pending_client_order_id",
+                    "entry_reconcile_pending_since_utc",
+                    "entry_inflight_risk_usd",
+                    "emergency_entry_ack_loss_pending",
+                ):
+                    le.pop(_k, None)
+                _commit_le(sess, le)
+                _emit(db, sess, "live_entry_client_id_absent", {
+                    "client_order_id": _reconcile_cid,
+                    "reason": "venue_404_exact_cid_never_became_an_order",
+                })
+                _safe_transition(db, sess, STATE_WATCHING_LIVE)
+                db.flush()
+                return {
+                    "ok": True,
+                    "session_id": sess.id,
+                    "state": sess.state,
+                    "skipped": "entry_client_id_absent",
+                }
             if _recovered is None:
                 if _reconcile_cid:
                     le["entry_reconcile_pending_client_order_id"] = str(_reconcile_cid)
@@ -36354,11 +36428,40 @@ def tick_live_session(
                                         else {}
                                     ),
                                 ) or {}
-                                if not _rp_res.get("ok"):
+                                _rp_oid = str(_rp_res.get("order_id") or "").strip()
+                                if not _rp_res.get("ok") or not _rp_oid:
                                     # Governor DEFER or a place reject: stop the inline loop;
                                     # the resting state is unchanged (old order already
                                     # cancelled above), so fall through to the cancel+re-watch
                                     # below — the next tick retries. Never a silent drop.
+                                    #
+                                    # OK-NA-WALANG-ORDER-ID AY HINDI PLACEMENT (2026-09-03, MIMI
+                                    # 19534, 13:32:18.8Z). Dati ay `ok` lamang ang sinusuri, kaya
+                                    # ang isang repeg na bumalik na `ok=True, order_id=None` ay
+                                    # isinulat sa row bilang `entry_submitted=True` na may
+                                    # `entry_order_id=None` at BAGONG cid na walang claim — ang
+                                    # eksaktong hugis na nag-poison sa risk-ledger para sa bawat
+                                    # simbolo (80 sa 84 na marketable na entry ang tinanggihan)
+                                    # at hindi kailanman na-reconcile (ang legacy lookup ay
+                                    # tumutupi ng 404 sa None). Ang invariant na nakasulat na sa
+                                    # `_recover_entry_order_by_client_id`: "an exact broker order
+                                    # id is the invariant". Kapag ok pero walang id, itala ang cid
+                                    # bilang reconcile-pending (ang strict 404/found na read sa
+                                    # pending-entry seam ang magpapasya sa susunod na tick) at
+                                    # HUWAG gawing "submitted" ang row.
+                                    if _rp_res.get("ok") and not _rp_oid:
+                                        le["entry_reconcile_pending_client_order_id"] = _rp_cid
+                                        le.setdefault(
+                                            "entry_reconcile_pending_since_utc",
+                                            _utcnow().isoformat(),
+                                        )
+                                        _commit_le(sess, le)
+                                        _emit(db, sess, "entry_repeg_ack_without_order_id", {
+                                            "client_order_id": _rp_cid,
+                                            "new_limit": _rp_new,
+                                            "n": _rp_n + 1,
+                                            "inline": _inline,
+                                        })
                                     break
                                 _rp_old_limit = _lim_px  # capture BEFORE reassigning for the emit
                                 le["entry_order_id"] = _rp_res.get("order_id")
