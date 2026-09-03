@@ -9226,6 +9226,35 @@ class Settings(BaseSettings):
             "nang buo (byte-identical sa dati). 0 => OFF."
         ),
     )
+    chili_momentum_explosive_floor_change_session_anchored: bool = Field(
+        default=True,
+        validation_alias=AliasChoices(
+            "CHILI_MOMENTUM_EXPLOSIVE_FLOOR_CHANGE_SESSION_ANCHORED"
+        ),
+        description=(
+            "2026-09-02 BUG FIX. Ang E3 explosive-floor change leg "
+            "(entry_gates.py:9615) ay kumukuha ng `df['Open'].iloc[0]` at "
+            "tinatawag itong 'session open', pero ang frame na ipinapasa ng "
+            "buhay na runner ay `period='5d'` (live_runner.py:31539) at walang "
+            "session slice sa daanan -- kaya ang anchor ay TATLO HANGGANG LIMANG "
+            "SESSION ang nakaraan at ang dami na hinaharangan ng "
+            "`chili_momentum_explosive_floor_change_pct` (10.0) ay isang "
+            "LIMANG-ARAW na pagbabago. Ang PAREHONG knob sa "
+            "`ross_momentum.below_explosive_floor:931` ay naghaharang ng "
+            "PREV-CLOSE-anchored na day change: iisang knob, dalawang dami. "
+            "NASUKAT (1,580 symbol-day, 233,867 watch-set na minuto): "
+            "nagkakasundo ang dalawang anchor sa 58.9% lamang; p50 ng session sa "
+            "loob ng bintana = 4 kaya BUHAY ang depekto. DALAWANG KOLUM: "
+            "inaalis sa harang ang 256 symbol-day (23.3/sess, 33.7% win, exp "
+            "+0.04%) at hinaharangan ang 330 (30.0/sess, 33.5% win, exp +0.02%) "
+            "-- halos walang bisa sa kalidad, -6.7 pangalan/session sa bilang. "
+            "Kabilang sa naaalis sa harang ang RDAC 2026-08-19 (+90.5% NGAYON "
+            "laban sa +0.6% sa limang araw), DFNS (+45.9% vs -25.6%), MRNY "
+            "(+27.6% vs -28.6%), DAIC (+23.2% vs -34.0%). Fail-open: kapag hindi "
+            "matukoy ang session mula sa index ay ang dating `iloc[0]` ang "
+            "tumatakbo. OFF => byte-identical na dating gawi."
+        ),
+    )
     chili_momentum_micro_frame_memo_seconds: float = Field(
         default=1.0,
         ge=0.0,
