@@ -14,7 +14,12 @@ from ....models.trading import (
     TradingAutomationEvent,
     TradingAutomationSession,
 )
-from .live_fsm import STATE_LIVE_CANCELLED, STATE_LIVE_ERROR, STATE_LIVE_FINISHED
+from .live_fsm import (
+    LIVE_LEDGER_TERMINAL_STATES,
+    STATE_LIVE_CANCELLED,
+    STATE_LIVE_ERROR,
+    STATE_LIVE_FINISHED,
+)
 from .outcome_labels import (
 OUTCOME_ARCHIVED,
 OUTCOME_BAILOUT,
@@ -87,13 +92,23 @@ def _positive_float(value: Any) -> float:
 
 
 def session_terminal_for_feedback(mode: str, state: str) -> bool:
-    """Whether this (mode, state) should emit a durable feedback row (at most once)."""
+    """Whether this (mode, state) should emit a durable feedback row (at most once).
+
+    LIVE reads ``live_fsm.LIVE_LEDGER_TERMINAL_STATES`` — the LEDGER set, not the
+    RUNNER set. Before 2026-09-02 this listed the three runner-terminal states
+    literally and therefore omitted ``live_arm_expired``, which is terminal in the
+    ledger but never reached by a runner transition. Consequence, measured over
+    2026-08-12..2026-09-02: 291 ``live_arm_expired`` sessions, 0 outcome rows, and
+    the 17 among them that had taken a real Alpaca fill (−$916.26 of realised loss,
+    including MOVE 19244 at −$364.14 and SSM 19315 which reached +3.20R before
+    giving it all back) were invisible to every study built on the outcomes table.
+    """
     m = (mode or "").lower()
     st = state or ""
     if m == "paper":
         return st in (STATE_FINISHED, STATE_CANCELLED, STATE_ERROR, STATE_EXPIRED, STATE_ARCHIVED)
     if m == "live":
-        return st in (STATE_LIVE_FINISHED, STATE_LIVE_CANCELLED, STATE_LIVE_ERROR, STATE_EXPIRED, STATE_ARCHIVED)
+        return st in LIVE_LEDGER_TERMINAL_STATES or st in (STATE_EXPIRED, STATE_ARCHIVED)
     return False
 
 
@@ -144,6 +159,62 @@ def _entry_occurred_durable(exec_dict: Any) -> bool:
     if exec_dict.get("last_exit_entry_price") is not None:
         return True
     return False
+
+
+# Markers proving an entry order REACHED THE BROKER. Deliberately weaker than the
+# entry-occurred predicates above: a submission is not a fill. Their whole purpose is
+# to tell "we know nothing happened" apart from "we cannot see what happened", which
+# are the two cases the ledger used to book identically as cancelled_pre_entry / $0.
+_ENTRY_SUBMISSION_EVENTS = frozenset(
+    {
+        "live_entry_submitted",
+        "live_entry_fill_self_healed",
+        "alpaca_owner_claim_primary_fill_adopted",
+        "operator_state_repair_fill_adopted",
+        "live_emergency_exit_unpriced",
+        "operator_flatten_executed",
+    }
+)
+
+
+def entry_submission_evidence(exec_dict: Any, events: list[TradingAutomationEvent]) -> list[str]:
+    """Reasons to believe an entry order reached the broker for this session.
+
+    ⚠️ WHY THIS EXISTS — the failure mode it prevents is WORSE than the one it fixes.
+    Nine sessions in 2026-08-12..2026-09-02 took a real Alpaca fill and emitted no
+    ``live_entry_filled`` event, wrote no ``momentum_fill_outcomes`` leg, and left no
+    ``realized_pnl_usd`` / ``last_exit_entry_price`` in the snapshot — so BOTH
+    entry-occurred predicates read False for them (14732 BCCQ −117.76, 14794 ADXN
+    +1.73, 16759 RDIB −1.53, 17712 CELU −47.20, 19192 AEHL 0.00, 19244 MOVE −364.14,
+    19338 GYGY −26.48, 19398 INBS −16.15, and 17370 BRNX which has an exit event but
+    no entry event). Simply making ``live_arm_expired`` bookable would have booked
+    those nine as ``cancelled_pre_entry`` with $0 — replacing 9 MISSING rows with 9
+    confidently WRONG ones and making the ledger look complete while staying wrong.
+
+    A non-empty result on a row extracted as ``entry_occurred=False`` means the
+    extraction is UNVERIFIED, not clean. ``feedback_emit`` refuses to present such a
+    row as an authoritative zero: it books it (so the session stops being invisible),
+    marks it ``ledger_integrity_v1.status = entry_evidence_unreconciled``, bars it
+    from evolution, and says so loudly. Broker truth then settles it via
+    ``ledger_integrity`` / ``outcome_reconcile``.
+    """
+    out: list[str] = []
+    ex = exec_dict if isinstance(exec_dict, dict) else {}
+    if ex.get("entry_order_id"):
+        out.append("entry_order_id")
+    if ex.get("entry_submitted"):
+        out.append("entry_submitted_flag")
+    if ex.get("entry_client_order_id"):
+        out.append("entry_client_order_id")
+    pos = ex.get("position")
+    if isinstance(pos, dict) and pos:
+        out.append("position_marker")
+    if ex.get("emergency_exit_accounting_pending"):
+        out.append("emergency_exit_accounting_pending")
+    seen = {ev.event_type for ev in (events or [])}
+    for marker in sorted(_ENTRY_SUBMISSION_EVENTS & seen):
+        out.append(f"event:{marker}")
+    return out
 
 
 def _governance_context_from_events(events: list[TradingAutomationEvent]) -> dict[str, Any]:
@@ -391,6 +462,13 @@ def extract_momentum_session_outcome(
         "notional_basis_usd": notional_basis if notional_basis > 0 else None,
         "exit_reason": exit_reason,
         "entry_occurred": entry_occurred,
+        # Only meaningful when entry_occurred is False: submission-level proof that
+        # this "no entry" may be a BLIND SPOT rather than a fact. See
+        # entry_submission_evidence() for why booking a $0 row on these is worse
+        # than booking nothing.
+        "entry_submission_evidence": (
+            [] if entry_occurred else entry_submission_evidence(le if mode == "live" else pe, events)
+        ),
         "entry_decision_packet_id": entry_decision_packet_id,
         "quote_source_at_entry": quote_source_at_entry,
         "partial_exit_occurred": partial_exit,

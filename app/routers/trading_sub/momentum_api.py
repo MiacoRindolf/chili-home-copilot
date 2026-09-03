@@ -72,6 +72,40 @@ def get_momentum_execution_families() -> dict[str, Any]:
     return {"ok": True, "families": execution_family_capabilities()}
 
 
+@router.get("/ledger-integrity")
+def get_momentum_ledger_integrity(
+    request: Request,
+    db: Session = Depends(get_db),
+    days: float = Query(3.0, ge=0.5, le=120.0),
+    execution_family: str = Query("alpaca_spot", min_length=1, max_length=32),
+    include_broker: bool = Query(True, description="Read broker order history (GET only)"),
+) -> dict[str, Any]:
+    """On-demand three-way ledger reconciliation. READ-ONLY.
+
+    Compares ``momentum_automation_outcomes`` x ``momentum_mfe_realized`` events x
+    ``momentum_fill_outcomes`` legs x Alpaca order history and classifies every
+    traded session. ``ok=false`` means the books and the broker have parted
+    company; ``violations`` lists exactly which sessions and by how much.
+
+    Set ``include_broker=false`` for a DB-only pass (no broker call). Be aware
+    that a DB-only pass CANNOT see the outermost ring: over 2026-08-12..2026-09-02
+    nine sessions were filled by the broker with no fill event, no fill leg and no
+    outcome row, invisible to all three DB sources at once. ``coverage`` says which
+    kind of answer you got.
+    """
+    get_identity_ctx(request, db)
+    from ...services.trading.momentum_neural.ledger_integrity import (
+        check_live_ledger_integrity,
+    )
+
+    return check_live_ledger_integrity(
+        db,
+        days=days,
+        execution_family=execution_family,
+        include_broker=bool(include_broker),
+    )
+
+
 def _http_detail_from_operator_result(result: dict[str, Any]) -> Any:
     err = result.get("error")
     if err == "risk_blocked":

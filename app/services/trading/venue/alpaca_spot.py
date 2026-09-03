@@ -2264,6 +2264,61 @@ class AlpacaSpotAdapter:
             )
             return {"readable": False, "orders": [], "error": failure}
 
+    def list_account_orders_truth(
+        self,
+        *,
+        after: datetime,
+        until: datetime,
+        limit: int = 500,
+    ) -> dict[str, Any]:
+        """READ-ONLY ``status=all`` order listing for the WHOLE account in one window.
+
+        The symbol-scoped sibling above answers "what did the broker do for THIS
+        session", which presupposes a session to ask about. This one answers the
+        question no DB table can: "what did the broker do that CHILI does not know
+        about at all". Over 2026-08-12..2026-09-02 the broker filled 26 live
+        sessions while the FSM emitted ``live_entry_filled`` for 17 — and two
+        further round trips (an MSTX share, an F probe pair) belonged to no session
+        whatsoever. Every in-DB source is a strict SUBSET of the next
+        (4 booked-with-P&L < 12 mfe events < 18 fill-leg sessions < 26 broker
+        fills), so no amount of cross-checking DB tables against each other can
+        ever find the outermost ring. Only the broker can.
+
+        Same strict contract as ``list_symbol_orders_truth``: ``readable=False`` on
+        ANY failure (an empty list is never mistaken for "no fills"), and a full
+        ``limit``-sized page is reported as ``truncated`` rather than silently
+        partial. GET only — never submits, replaces or cancels anything.
+        """
+        try:
+            from alpaca.common.enums import Sort
+            from alpaca.trading.enums import QueryOrderStatus
+            from alpaca.trading.requests import GetOrdersRequest
+
+            def _aware(v: datetime) -> datetime:
+                return v if v.tzinfo is not None else v.replace(tzinfo=timezone.utc)
+
+            req = GetOrdersRequest(
+                status=QueryOrderStatus.ALL,
+                after=_aware(after),
+                until=_aware(until),
+                limit=int(limit),
+                direction=Sort.ASC,
+                nested=True,
+            )
+            orders = self._account_client().get_orders(filter=req)
+            if not isinstance(orders, list):
+                return {"readable": False, "orders": [], "error": "malformed_response"}
+            normalized = [self._normalize_order(o) for o in orders]
+            return {
+                "readable": True,
+                "orders": normalized,
+                "truncated": len(orders) >= int(limit),
+            }
+        except Exception as exc:
+            failure = _submit_failure_metadata(exc)
+            logger.debug("[alpaca_spot] list_account_orders_truth failed: %s", exc)
+            return {"readable": False, "orders": [], "error": failure}
+
     def get_paper_open_order_census(
         self,
         *,

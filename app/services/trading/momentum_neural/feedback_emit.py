@@ -22,6 +22,13 @@ from .outcome_extract import (
     outcome_row_from_extracted,
     session_terminal_for_feedback,
 )
+from .paper_fsm import (
+    STATE_ARCHIVED,
+    STATE_CANCELLED,
+    STATE_ERROR,
+    STATE_EXPIRED,
+    STATE_FINISHED,
+)
 
 _log = logging.getLogger(__name__)
 
@@ -391,15 +398,96 @@ def reingest_regraded_momentum_outcomes(
     }
 
 
+class _SkipDailyLossCheck(Exception):
+    """Internal control signal: a backfill row must not re-run today's breaker."""
+
+
+LEDGER_INTEGRITY_CLEAN = "clean"
+LEDGER_INTEGRITY_UNRECONCILED = "entry_evidence_unreconciled"
+
+
+def _ledger_integrity_stamp(
+    db: Session,
+    sess: TradingAutomationSession,
+    extracted: dict[str, Any],
+) -> dict[str, Any]:
+    """Classify the row we are about to write as authoritative or unverified.
+
+    A row extracted as ``entry_occurred=False`` while the session carries
+    submission-level evidence is the CANF/MOVE shape: the broker filled, the FSM
+    never adopted it, and the honest book value is unknown — not zero. Writing it
+    as a clean ``cancelled_pre_entry`` at $0 is how −$364.14 (MOVE 19244) would
+    have entered the ledger as a rounding-clean nothing.
+    """
+    if bool(extracted.get("entry_occurred")):
+        return {"status": LEDGER_INTEGRITY_CLEAN, "checked_at_utc": datetime.utcnow().isoformat() + "Z"}
+    evidence = list(extracted.get("entry_submission_evidence") or [])
+    if not evidence:
+        return {"status": LEDGER_INTEGRITY_CLEAN, "checked_at_utc": datetime.utcnow().isoformat() + "Z"}
+    stamp = {
+        "status": LEDGER_INTEGRITY_UNRECONCILED,
+        "checked_at_utc": datetime.utcnow().isoformat() + "Z",
+        "entry_submission_evidence": evidence,
+        "terminal_state": extracted.get("terminal_state"),
+        "note": (
+            "An entry order reached the broker but no fill was ever adopted. "
+            "realized_pnl_usd here is NOT authoritative; broker truth settles it."
+        ),
+    }
+    _log.error(
+        "[ledger_integrity] session_id=%s symbol=%s state=%s booked WITHOUT fill proof "
+        "despite entry submission evidence=%s — realized P&L on this row is unverified",
+        sess.id, sess.symbol, sess.state, evidence,
+    )
+    _append_integrity_event(db, sess, "ledger_outcome_unreconciled", stamp)
+    return stamp
+
+
+def _append_integrity_event(
+    db: Session,
+    sess: TradingAutomationSession,
+    event_type: str,
+    payload: dict[str, Any],
+) -> None:
+    """Durable tape entry for a ledger-integrity condition. Never raises."""
+    try:
+        from .persistence import append_trading_automation_event
+
+        append_trading_automation_event(
+            db,
+            int(sess.id),
+            event_type,
+            payload,
+            correlation_id=getattr(sess, "correlation_id", None),
+            source_node_id="ledger_integrity",
+        )
+    except Exception:
+        _log.debug("[ledger_integrity] event append failed session_id=%s", sess.id, exc_info=True)
+
+
 def try_emit_momentum_session_feedback(
     db: Session,
     sess: TradingAutomationSession,
     *,
     force_reingest_evolution: bool = False,
+    backfill_provenance: Optional[str] = None,
 ) -> dict[str, Any]:
     """
     If session is in a feedback terminal state, persist one MomentumAutomationOutcome row (deduped by session_id)
     and ingest into neural evolution. Safe to call repeatedly.
+
+    ``backfill_provenance`` marks a row as a HISTORICAL REPAIR and suppresses the
+    evolution contribution for it. Repairing the ledger and retraining the network
+    are two different decisions, and a backfill must only make the first one. The
+    2026-09-02 backfill of 22 unbooked sessions would otherwise have driven
+    ``apply_outcome_feedback_to_viability`` / ``maybe_pause_symbol_variant_after_losses``
+    / ``maybe_kill_underperforming_variant`` on the LIVE lane from a 12-day-old
+    −18.2R BRNX loss and a 1-day-old LIDR loss — an irreversible side effect nobody
+    asked for, arriving as a surprise days after the trades. The audit trace is still
+    recorded. When the operator decides those trades SHOULD teach the network, the
+    designed path already exists and is explicit:
+    ``regrade_momentum_outcome_evolution_credit`` then
+    ``reingest_regraded_momentum_outcomes``.
     """
     if not settings.chili_momentum_neural_feedback_enabled:
         return {"ok": True, "skipped": "feedback_disabled"}
@@ -436,6 +524,39 @@ def try_emit_momentum_session_feedback(
     )
     summary = dict(row.extracted_summary_json or {})
     summary["evolution_credit"] = credit
+    integrity = _ledger_integrity_stamp(db, sess, extracted)
+    summary["ledger_integrity_v1"] = integrity
+    if backfill_provenance:
+        summary["ledger_backfill_v1"] = {
+            "provenance": str(backfill_provenance)[:120],
+            "written_at_utc": datetime.utcnow().isoformat() + "Z",
+            "evolution_suppressed": True,
+            "note": (
+                "Historical ledger repair. This row restores the BOOKS only; it was "
+                "deliberately barred from evolution so a days-old outcome cannot "
+                "pause or kill a live variant as a backfill side effect. Promote it "
+                "explicitly via regrade_momentum_outcome_evolution_credit + "
+                "reingest_regraded_momentum_outcomes if it should teach."
+            ),
+        }
+        row.contributes_to_evolution = False
+        credit = dict(credit)
+        credit["contributes_to_evolution"] = False
+        credit["reason_codes"] = sorted(
+            set(list(credit.get("reason_codes") or []) + ["ledger_backfill_evolution_suppressed"])
+        )
+        summary["evolution_credit"] = credit
+    if integrity["status"] != LEDGER_INTEGRITY_CLEAN:
+        # The row is written anyway — a session with no row at all is invisible to
+        # the loss guard and to every study — but it is never presented as an
+        # authoritative zero and never teaches the network.
+        row.contributes_to_evolution = False
+        credit = dict(credit)
+        credit["contributes_to_evolution"] = False
+        credit["reason_codes"] = sorted(
+            set(list(credit.get("reason_codes") or []) + [integrity["status"]])
+        )
+        summary["evolution_credit"] = credit
     row.extracted_summary_json = summary
     try:
         with db.begin_nested():
@@ -457,9 +578,16 @@ def try_emit_momentum_session_feedback(
     # daily-loss cap. Per-broker: blocks only the breached broker (the aggregate
     # backstop still trips the true global kill switch); legacy: the single global
     # check, now sized off the session's broker equity (not the None->Coinbase default).
+    # A historical repair must not re-evaluate TODAY's breaker. None of the
+    # 2026-09-02 backfill rows terminalise today, so skipping is a no-op in
+    # substance — but the check would still spend a broker equity read per row, and
+    # on a differently-shaped backfill it could trip the daily-loss breaker from
+    # dates the operator has already lived through.
     try:
         from ...config import settings as _s
 
+        if backfill_provenance:
+            raise _SkipDailyLossCheck()
         if bool(getattr(_s, "chili_per_broker_daily_loss_enabled", True)):
             from ..governance import check_per_broker_daily_loss
 
@@ -474,6 +602,8 @@ def try_emit_momentum_session_feedback(
                 user_id=sess.user_id,
                 equity_usd=_account_equity_usd(_ef, apply_margin_multiple=False),
             )
+    except _SkipDailyLossCheck:
+        pass
     except Exception as ex:
         _log.debug("[momentum_feedback] daily-loss check skipped: %s", ex)
 
@@ -487,12 +617,53 @@ def try_emit_momentum_session_feedback(
     }
 
 
-def emit_feedback_after_terminal_transition(db: Session, sess: TradingAutomationSession) -> None:
-    """Call from runners / monitor after mutating session into a terminal feedback state."""
+def emit_feedback_after_terminal_transition(
+    db: Session, sess: TradingAutomationSession
+) -> dict[str, Any]:
+    """Call from runners / monitor after mutating session into a terminal feedback state.
+
+    ⚠️ FAILURE IS NO LONGER SILENT. This used to swallow every exception into
+    ``_log.debug`` and return None, and all four call sites (live_runner
+    ``_safe_transition``, automation_query's two cancel chokepoints,
+    ``expire_stale_live_arm_sessions``) discarded the result — so a booking that
+    threw was indistinguishable from one that succeeded, at every site, forever.
+    That unmeasurability is itself the defect: nobody can say how many of the 390
+    missing rows in 2026-08-12..2026-09-02 were swallowed exceptions.
+
+    A failure on a session with entry evidence now logs at ERROR and writes a
+    ``ledger_booking_failed`` event onto the session tape, so the hole is visible in
+    the same place an operator already looks. The exception is still contained — a
+    terminal transition must not be rolled back by a bookkeeping failure — but it
+    leaves a mark. Always returns a dict; never raises.
+    """
     try:
-        try_emit_momentum_session_feedback(db, sess)
+        result = try_emit_momentum_session_feedback(db, sess)
     except Exception as ex:
-        _log.debug("[momentum_feedback] emit_after_terminal skipped: %s", ex)
+        _log.error(
+            "[ledger_integrity] booking RAISED for session_id=%s symbol=%s state=%s: %s",
+            sess.id, sess.symbol, sess.state, ex, exc_info=True,
+        )
+        _append_integrity_event(
+            db, sess, "ledger_booking_failed",
+            {"error": "exception", "detail": str(ex)[:400], "terminal_state": sess.state},
+        )
+        return {"ok": False, "error": "exception", "detail": str(ex)[:400]}
+
+    result = result if isinstance(result, dict) else {"ok": False, "error": "malformed_result"}
+    if not result.get("ok"):
+        _log.error(
+            "[ledger_integrity] booking FAILED for session_id=%s symbol=%s state=%s: %s",
+            sess.id, sess.symbol, sess.state, result.get("error"),
+        )
+        _append_integrity_event(
+            db, sess, "ledger_booking_failed",
+            {
+                "error": str(result.get("error") or "unknown"),
+                "detail": str(result.get("detail") or "")[:400],
+                "terminal_state": sess.state,
+            },
+        )
+    return result
 
 
 def scan_terminal_sessions_missing_feedback(db: Session, *, limit: int = 50) -> dict[str, Any]:
@@ -503,15 +674,18 @@ def scan_terminal_sessions_missing_feedback(db: Session, *, limit: int = 50) -> 
         return {"ok": True, "skipped": "outcomes_table_missing", "processed": 0}
 
     lim = max(1, min(int(limit), 500))
-    terminal_states = (
-        "finished",
-        "cancelled",
-        "error",
-        "expired",
-        "archived",
-        "live_finished",
-        "live_cancelled",
-        "live_error",
+    # Derived from the canonical sets, never re-typed. The hand-rolled tuple that
+    # used to live here omitted ``live_arm_expired``, so this function — the ONE
+    # designed backfill for exactly this defect — would still have skipped all 291
+    # of them even if anything had called it. (Nothing did: it had zero call sites
+    # in app/ or scripts/ until the integrity job below.)
+    from .live_fsm import LIVE_LEDGER_TERMINAL_STATES
+
+    terminal_states = tuple(
+        sorted(
+            LIVE_LEDGER_TERMINAL_STATES
+            | {STATE_FINISHED, STATE_CANCELLED, STATE_ERROR, STATE_EXPIRED, STATE_ARCHIVED}
+        )
     )
     rows = (
         db.query(TradingAutomationSession)

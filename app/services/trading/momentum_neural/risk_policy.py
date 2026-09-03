@@ -1261,7 +1261,30 @@ CurrentLiveLossHistoryReceipt = tuple[
 ]
 
 
-_LOSS_HISTORY_TERMINAL_STATES = frozenset(
+# ⚠️ TWO OPPOSITE LOSS-GUARD FAILURES LIVED HERE, AND ONLY ONE WAS KNOWN.
+#
+# (a) LOUD, understood: an ENTERED session in a listed state with no usable outcome
+#     row pins the WHOLE account at loss_guard_history_unavailable and arming stops.
+#     Measured 2026-08-21: sessions 14825 SDOT and 14842 COIW, both live_error, did
+#     exactly this. That is working as designed — a hole in the books SHOULD stop
+#     trading rather than let the lane size off a fiction.
+#
+# (b) SILENT, and the expensive one: ``live_arm_expired`` was NOT in this set, so
+#     the scan below never selected those sessions in either direction. Over
+#     2026-08-12..2026-09-02 that hid 291 sessions, 17 of which had taken real Alpaca
+#     fills totalling −$916.26. They were neither charged against the daily loss cap
+#     nor allowed to block it. On 2026-08-31 the account really lost $362.29 across
+#     four broker episodes and the guard was shown $0.00; six of the nine trading
+#     days with fills booked exactly $0.00 against real losses. The guard failed
+#     loudly on 2 sessions and silently on 291, and the silent failure is the one
+#     that let the lane keep trading on books understating loss by 84.6%.
+#
+# Adding it converts (b) into (a): an entered arm-expired session with no bookable
+# outcome will now stop the account instead of being ignored. THAT IS THE POINT —
+# but it is a real behavioural change to a live lane, so it carries an explicit
+# off-switch (``chili_momentum_loss_history_include_arm_expired``, ON by default per
+# the no-dark-flags rule). OFF restores byte-identical legacy selection.
+_LOSS_HISTORY_TERMINAL_STATES_BASE = frozenset(
     {
         "live_exited",
         "live_cooldown",
@@ -1272,6 +1295,23 @@ _LOSS_HISTORY_TERMINAL_STATES = frozenset(
         "archived",
     }
 )
+
+
+def _loss_history_terminal_states() -> frozenset[str]:
+    """The ledger-terminal states the daily loss history must account for."""
+    try:
+        include_arm_expired = bool(
+            getattr(settings, "chili_momentum_loss_history_include_arm_expired", True)
+        )
+    except Exception:
+        # Fail toward SEEING the loss. A settings read error must not silently
+        # restore the blind spot this constant exists to close.
+        include_arm_expired = True
+    if not include_arm_expired:
+        return _LOSS_HISTORY_TERMINAL_STATES_BASE
+    from .live_fsm import STATE_LIVE_ARM_EXPIRED
+
+    return frozenset(_LOSS_HISTORY_TERMINAL_STATES_BASE | {STATE_LIVE_ARM_EXPIRED})
 _LOSS_HISTORY_ENTRY_EVENTS = frozenset(
     {
         "live_entry_filled",
@@ -1627,7 +1667,7 @@ def load_current_live_loss_history(
                 TradingAutomationSession.user_id == uid,
                 TradingAutomationSession.execution_family == family,
                 TradingAutomationSession.state.in_(
-                    tuple(sorted(_LOSS_HISTORY_TERMINAL_STATES))
+                    tuple(sorted(_loss_history_terminal_states()))
                 ),
                 terminal_clock >= day_start,
                 terminal_clock < day_end,
@@ -1735,7 +1775,7 @@ def load_current_live_loss_history(
         if classification == "unknown":
             _gap("loss_guard_entry_classification_unknown", session_id)
             continue
-        if str(session.state or "") not in _LOSS_HISTORY_TERMINAL_STATES:
+        if str(session.state or "") not in _loss_history_terminal_states():
             _gap("loss_guard_outcome_session_state_mismatch", session_id)
             continue
         session_terminal_at = _loss_history_naive_utc(
