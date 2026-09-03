@@ -349,6 +349,43 @@ same one — the module's own docstring gives CELZ 2026-06-30, where it fabricat
 three chop entries live would have refused. Use it for opportunity *labelling*,
 and never present its output as "what live would have done".
 
+**`--no-live-admission-mode` does NOT clear the source gate.** It leaves
+`require_source_before_entry` at `True` and only *re-enables* the
+`market_certified` synthetic-source window — which itself still requires
+`rolling_volume >= market_volume_floor`. Measured through the real admission
+gate on TMCR 2026-08-24 and SMTK 2026-08-20 (13:30–15:30Z): under
+`--no-live-admission-mode` a candidate was generated and still skipped with
+`no_ross_source_before_entry`. `--allow-pre-source-entries` is the flag that
+actually admits.
+
+Measured through `run_counterfactual_symbol_replay` — the real candidate
+generator and the real admission gate, not the loaders
+(`phase5_admission_acceptance.json`):
+
+| symbol-day | mode | candidates | trades | `skipped_reasons` |
+|---|---|---|---|---|
+| TMCR 08-24 | default | 1 | 0 | `no_ross_source_before_entry: 1` |
+| TMCR 08-24 | `--allow-pre-source-entries` | 1 | 0 | `simulate_no_trade: 1` |
+| TMCR 08-24 | `--no-live-admission-mode` | 1 | 0 | `no_ross_source_before_entry: 1` |
+| SMTK 08-20 | default | 1 | 0 | `no_ross_source_before_entry: 1` |
+| SMTK 08-20 | `--allow-pre-source-entries` | 1 | **1** | — |
+| SMTK 08-20 | `--no-live-admission-mode` | 1 | 0 | `no_ross_source_before_entry: 1` |
+
+Both symbol-days are ones our own recorded tape holds **zero** rows for, and the
+gate-reason counts show the real ladder evaluating
+(`ross_breakout_starter_unavailable_on_main`, `pullback_too_deep`,
+`vwap_reclaim_not_below_enough`, …). That is the FSM running on bought history.
+
+### A confidence label the whole corpus degrades
+
+`_confidence` assigns `tick_quote_complete` only when some NBBO tick's `source`
+contains `"iqfeed"`. The canonical corpus's NBBO source is `polygon_v3_quotes`,
+so **every** hydrated symbol-day returns `quote_replay_available` with reason
+`no_iqfeed_source_marker`. Nothing in the shipped harness gates on that value
+today, but a consumer filtering for `tick_quote_complete` would silently drop
+the entire corpus. The label is telling the truth about the tape's provenance —
+do not "fix" it by relabelling the source.
+
 Gate every study on the preflight, which asserts both the usable-NBBO predicate
 and the source gate and exits non-zero:
 
