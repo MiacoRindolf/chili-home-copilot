@@ -9226,6 +9226,59 @@ class Settings(BaseSettings):
             "nang buo (byte-identical sa dati). 0 => OFF."
         ),
     )
+    chili_alpaca_execution_bbo_locked_resolve_enabled: bool = Field(
+        default=True,
+        validation_alias=AliasChoices(
+            "CHILI_ALPACA_EXECUTION_BBO_LOCKED_RESOLVE_ENABLED"
+        ),
+        description=(
+            "2026-09-02 BUG FIX. Ang validity test ng SIP stand-in "
+            "(alpaca_spot.py:1065) ay tumatanggi sa `ask < bid` pero TUMATANGGAP "
+            "ng `ask == bid`, at dahil ang `get_execution_bbo` ay nagbabalik sa "
+            "UNANG tier na sumasagot, ang naka-lock na massive_ws row ay "
+            "ibinabalik bilang authority at ang TATLONG IQFeed tier sa LOOB ng "
+            "parehong function ay hindi kailanman kinokonsulta. Ang 0.0 bps ay "
+            "ang PINAKAMABUTING halaga ng bawat monotone na spread gate, kaya "
+            "ang punit na libro ay dumadaan sa lahat sa pamamagitan ng pagiging "
+            "pinakasira. NASUKAT (1,144 na ok na `live_entry_final_bbo` sa 21 "
+            "araw): 93 (8.13%) ang naka-lock ang primary; sa cross-feed na "
+            "paghahambing sa SARILING provider clock ng primary ay 57 (61.3%) "
+            "ARTIFACT (dalawang-panig ang kabilang feed), 32 (34.4%) GENUINE, 4 "
+            "(4.3%) NO_FEED -- at 88 sa 89 na tugma ay nasa loob ng 100 ms. "
+            "AUUD 19337: 19 na `live_entry_spread_risk_veto` sa 84-92 bps laban "
+            "sa 31.0 bps na budget, tapos ang ika-20 na read ay 1.14/1.14 at "
+            "pumasok ang entry; ang IQFeed sa dt=+0.0007s ay 1.13/1.14 = 88.11 "
+            "bps. ON => ang naka-lock na sagot ay itinatago at ipinagpapatuloy "
+            "ang natitirang tier; ang unang dalawang-panig na libro sa loob ng "
+            "age bound ang panalo. Kapag WALANG ibang feed ang sumagot ay "
+            "ibinabalik ang naka-lock nang HINDI ginagalaw (byte-identical, "
+            "hindi kailanman mas mahigpit) na may markang "
+            "`locked_book_resolution` = genuine | no_second_feed. ENTRY LAMANG: "
+            "kailangan ang `allow_stand_in`, kaya ang exit at ang orphan close "
+            "ay hindi ginagalaw. OFF => byte-identical na dating gawi."
+        ),
+    )
+    chili_alpaca_execution_bbo_locked_resolve_max_age_seconds: float = Field(
+        default=2.0,
+        ge=0.0,
+        le=10.0,
+        validation_alias=AliasChoices(
+            "CHILI_ALPACA_EXECUTION_BBO_LOCKED_RESOLVE_MAX_AGE_SECONDS"
+        ),
+        description=(
+            "2026-09-02: gaano kalapit sa provider event clock NG NAKA-LOCK NA "
+            "PRIMARY dapat ang quote ng pangalawang feed bago ito maging "
+            "ebidensya tungkol sa estado ng libro sa sandaling iyon. Sinusukat "
+            "laban sa provider clock, HINDI sa wall clock. NASUKAT: 89 sa 93 na "
+            "naka-lock na obserbasyon ay may pangalawang feed sa loob ng bound "
+            "na ito at 84 sa 89 ay nasa loob ng 10 ms -- SABAY, hindi pahid. Ang "
+            "APAT na bumabagsak ay 15.4s / 45.3s / 68.0s / 111.8s ang layo, at "
+            "sila mismo ang populasyong dapat ibukod: sila ay mga HULING-ALAM na "
+            "hilera sa loob ng butas ng feed, hindi estado ng libro. Ang TUNAY "
+            "na diskriminador ay ang BUHAY NA FEED, hindi ang session clock. "
+            "0 => walang resolution (parang OFF ang flag)."
+        ),
+    )
     chili_momentum_explosive_floor_change_session_anchored: bool = Field(
         default=True,
         validation_alias=AliasChoices(

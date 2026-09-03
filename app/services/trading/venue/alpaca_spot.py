@@ -1281,8 +1281,173 @@ class AlpacaSpotAdapter:
                 )
                 _junk_direct = resolved
                 resolved = None
+        # ⚠️ LOCKED BOOK (bid == ask) — ANG PINAKA-DEGENERADO ANG NANANALO SA
+        # BAWAT SELECTOR (2026-09-02). Ang validity test ng SIP stand-in sa
+        # :1065 ay tumatanggi sa `ask < bid` at TUMATANGGAP ng `ask == bid`, at
+        # dahil ang chain sa ibaba ay nagbabalik sa UNANG tier na sumasagot, ang
+        # isang naka-lock na massive_ws row ay ibinabalik bilang authority at
+        # ang TATLONG IQFeed tier na nakaupo 10-40 linya sa ilalim -- sa LOOB ng
+        # parehong function -- ay HINDI KAILANMAN kinokonsulta. Ang spread na
+        # 0.0 bps ay ang PINAKAMABUTING posibleng halaga ng bawat monotone na
+        # gate sa daloy, kaya ang punit na libro ay dumadaan sa lahat sa
+        # pamamagitan ng pagiging pinakasira.
+        #
+        # NASUKAT sa `trading_automation_events.live_entry_final_bbo`,
+        # 2026-08-17 18:17:28Z hanggang 2026-09-02 11:19:08Z, 1,144 na ok na
+        # entry-submit read: 93 (8.13%) ang may naka-lock na primary, sa 34
+        # session at 17 simbolo; 91 sa 93 ang authority ay stand_in_massive_sip.
+        # Para sa BAWAT isa, hinanap ang pinakamalapit na IQFeed quote sa
+        # SARILING provider clock ng primary sa DALAWANG store
+        # (momentum_nbbo_spread_tape source='iqfeed_l1' at ang naka-embed na
+        # bid/ask ng iqfeed_trade_ticks):
+        #
+        #     ARTIFACT (kabilang feed ay DALAWANG-PANIG)   57 / 93  = 61.3%
+        #     GENUINE  (kabilang feed ay naka-lock din)    32 / 93  = 34.4%
+        #     NO_FEED  (walang kabilang feed)               4 / 93  =  4.3%
+        #
+        # Ang kalidad ng tugma ay SABAY, hindi pahid: 84 sa 89 ay nasa loob ng
+        # 10 ms, 88 sa 89 sa loob ng 100 ms. Isang independiyenteng tape-level
+        # na pass sa 17 traded-entry window (3,702 SIP-eligible row, 602 locked)
+        # ay tumutugma: 401 ARTIFACT (66.7%) / 200 GENUINE (33.3%).
+        #
+        # ANG PINAKAMATALAS NA HILERA. AUUD session 19337: ang
+        # `live_entry_spread_risk_veto` ay pumutok LABINSIYAM na beses mula
+        # 11:06:47.973089 hanggang 11:10:17.858038 sa gate_spread 84.39-92.17
+        # bps laban sa 31.0 bps na budget, na may DALAWANG independiyenteng
+        # source sa payload (massive_ws_universe AT iqfeed_trade_embedded) na
+        # magkasundo. Tapos sa 11:10:42.242871 ang primary ay nagbasa ng
+        # 1.14/1.14, umiskor ng 0.0, at isinumite ang entry sa 11:10:53. Ang
+        # IQFeed sa MISMONG sandaling iyon, dt=+0.0007s: 1.13/1.14 = 88.11 bps.
+        # ANG LOCK LAMANG ANG DAHILAN KUNG BAKIT PUMASOK ANG AUUD.
+        #
+        # ANG AYOS AY ANG MISMONG HUGIS NG JUNK-WIDE NA PATTERN SA ITAAS: itago
+        # ang naka-lock na sagot, ipagpatuloy ang natitirang tier, at kapag
+        # WALANG ibang tier ang sumagot ay ibalik ang naka-lock nang HINDI
+        # ginagalaw -- byte-identical sa dati, hindi kailanman mas mahigpit.
+        # Walang bagong validity logic: ang bawat tier ay may sariling
+        # dual-clock na kontrata na.
+        #
+        # ⚠️ ANG TUNAY NA DISKRIMINADOR AY ANG BUHAY NA FEED, HINDI ANG ORASAN.
+        # Ang APAT na NO_FEED na kaso ay ang APAT na regular-hours na kaso, at
+        # ang lahat ng 89 na naaayos ay extended hours -- kaya ang session clock
+        # ay PERPEKTONG proxy sa corpus na ito at proxy pa rin. Ang mekanismo ay
+        # isang PATAY na stand-in row na nakalusot sa sariling freshness check:
+        # IPST walang IQFeed sa loob ng 60s (pinakamalapit 111.8s, 3,322 quote,
+        # 0 locked, p50 115.70 bps); SDOT pinakamalapit 15.4s (10,972 quote sa
+        # +/-60s, 0 locked, p50 184.03 bps); DAIC 68.0s; AIXI 45.3s. Kaya ang
+        # age bound sa ibaba ay sinusukat laban sa SARILING provider clock ng
+        # naka-lock na primary, hindi sa wall clock -- iyon ang naghihiwalay ng
+        # 10-ms na artifact mula sa 15-112s na butas ng feed.
+        _lock_on = bool(getattr(
+            settings, "chili_alpaca_execution_bbo_locked_resolve_enabled", True
+        ))
+        _lock_resolve = bool(_lock_on and allow_stand_in)
+        _locked_stash = None          # (tick, meta) ng UNANG naka-lock na sagot
+        _locked_others = 0            # ilang IBANG feed ang sumagot sa loob ng bound
+        _locked_others_locked = 0     # ... at ilan doon ang naka-lock DIN
+
+        def _locked_pair(_res):
+            """(is_locked, tick, meta) para sa isang (tick, meta) na sagot."""
+            _t = _res[0] if isinstance(_res, tuple) else _res
+            _m = _res[1] if isinstance(_res, tuple) and len(_res) == 2 else None
+            try:
+                _b = float(getattr(_t, "bid", 0.0) or 0.0)
+                _a = float(getattr(_t, "ask", 0.0) or 0.0)
+            except (TypeError, ValueError):
+                return False, _t, _m
+            # Ang epsilon ay laban sa float representation lamang: ang
+            # pinakamaliit na TUNAY na spread ay isang tick (>= 1e-4 USD), kaya
+            # walang tunay na dalawang-panig na libro ang mababasa bilang locked.
+            return (_b > 0 and _a > 0 and abs(_a - _b) <= 1e-9), _t, _m
+
+        def _within_lock_bound(_meta) -> bool:
+            """Ang tugma ba ay SABAY sa naka-lock na primary?
+
+            Sinusukat laban sa provider event clock ng NAKA-LOCK na primary, at
+            bumabagsak sa False kapag alinman sa dalawang panig ay walang tunay
+            na provider clock -- ang isang tugmang hindi ko masukat ay HINDI
+            tugma, kaya ang kaso ay nananatiling hindi naaayos sa halip na
+            maayos nang mali.
+            """
+            if _locked_stash is None:
+                return False
+            try:
+                _bound = float(getattr(
+                    settings,
+                    "chili_alpaca_execution_bbo_locked_resolve_max_age_seconds",
+                    2.0,
+                ) or 0.0)
+            except (TypeError, ValueError):
+                _bound = 0.0
+            if _bound <= 0:
+                return False
+            _p0 = getattr(_locked_stash[1], "provider_time_utc", None)
+            _p1 = getattr(_meta, "provider_time_utc", None)
+            if not isinstance(_p0, datetime) or not isinstance(_p1, datetime):
+                return False
+            try:
+                return abs((_p1 - _p0).total_seconds()) <= _bound
+            except (TypeError, ValueError):
+                return False
+
+        def _consider(_res, _tier: str):
+            """Ibalik ang sagot kapag dalawang-panig; itago kapag naka-lock.
+
+            ``None`` ang ibig sabihin ay "magpatuloy sa susunod na tier".
+            """
+            nonlocal _locked_stash, _locked_others, _locked_others_locked
+            if _res is None:
+                return None
+            if not _lock_resolve:
+                return _res
+            _is_locked, _t, _m = _locked_pair(_res)
+            if _locked_stash is None:
+                if not _is_locked:
+                    return _res
+                _locked_stash = (_t, _m if isinstance(_m, FreshnessMeta) else None)
+                logger.info(
+                    "[alpaca_spot] LOCKED book sym=%s tier=%s bid=%s ask=%s — "
+                    "hinahanap ang pangalawang feed bago tanggapin",
+                    product_id, _tier,
+                    getattr(_t, "bid", None), getattr(_t, "ask", None),
+                )
+                return None
+            # May naka-lock nang primary. Ang tier na ito ang PANGALAWANG FEED.
+            if not _within_lock_bound(_m):
+                # Sumagot pero HINDI sabay: hindi ito ebidensya tungkol sa
+                # estado ng libro sa sandali ng naka-lock na primary.
+                return None
+            _locked_others += 1
+            if _is_locked:
+                _locked_others_locked += 1
+                return None
+            # ARTIFACT: may TUNAY na dalawang-panig na libro ang ibang feed sa
+            # parehong sandali. Ito ang sagot; ang naka-lock na row ay punit.
+            try:
+                if isinstance(getattr(_t, "raw", None), dict):
+                    _t.raw["locked_primary_replaced"] = True
+                    _t.raw["locked_primary_bid"] = getattr(_locked_stash[0], "bid", None)
+                    _t.raw["locked_primary_ask"] = getattr(_locked_stash[0], "ask", None)
+                    _t.raw["locked_primary_feed"] = (
+                        (getattr(_locked_stash[0], "raw", None) or {}).get("feed")
+                    )
+                    _t.raw["locked_book_resolution"] = "artifact_resolved"
+            except Exception:
+                pass
+            logger.info(
+                "[alpaca_spot] locked book RESOLVED sym=%s tier=%s bid=%s ask=%s "
+                "spread=%.2fbps — ang naka-lock na primary ay punit, hindi merkado",
+                product_id, _tier, getattr(_t, "bid", None),
+                getattr(_t, "ask", None),
+                float(getattr(_t, "spread_bps", 0.0) or 0.0),
+            )
+            return _res
+
         if resolved is not None:
-            return resolved
+            _out = _consider(resolved, "alpaca_direct")
+            if _out is not None:
+                return _out
+            resolved = None
         if allow_stand_in:
             # EACH SOURCE IS HELD TO ITS OWN CONTRACT (2026-08-20, GYGY/TETH/
             # BRLS): the direct quote validates against the caller's cap above,
@@ -1292,60 +1457,99 @@ class AlpacaSpotAdapter:
             # authority-aware-ceiling lesson of the pre-place seam, applied at
             # the root so every caller inherits it. The stand-in's own hard
             # ceiling still bounds it inside _massive_sip_quote.
-            stand_in = self._massive_sip_execution_bbo(
-                product_id,
-                (
-                    float(stand_in_max_age_seconds)
-                    if stand_in_max_age_seconds is not None
-                    else max_age_seconds
-                ),
+            #
+            # ⚠️ ANG APAT NA TIER AY TUMATAKBO NA NGAYON BILANG ISANG LOOP sa
+            # halip na apat na maagang `return`. Ang PAGKAKASUNOD-SUNOD AT ANG
+            # MGA ARGUMENTO AY HINDI GINALAW; ang tanging pagkakaiba ay dumadaan
+            # ang bawat sagot sa `_consider`, na nagbabalik agad sa isang
+            # dalawang-panig na libro (dating gawi) at nagpapatuloy lamang kapag
+            # NAKA-LOCK ang sagot. Kapag patay ang flag o hindi pinapayagan ang
+            # stand-in, ang `_consider` ay isang passthrough at ang loop ay
+            # byte-identical sa apat na `return` na pinalitan nito.
+            _age = (
+                float(stand_in_max_age_seconds)
+                if stand_in_max_age_seconds is not None
+                else max_age_seconds
             )
-            if stand_in is not None:
-                return stand_in
-            # TIER 2.5 (#1236, 2026-08-28): IQFeed L1 own-clock BBO — direktang
-            # top-of-book (26-39 venue) na may totoong Bid/Ask Time event clock.
-            # Nauuna sa depth dahil ang depth BBO ay derived mula sa book levels
-            # habang ito ay ang mismong inilathalang top-of-book quote.
-            l1_stand_in = self._iqfeed_l1_own_clock_execution_bbo(
+            for _tier_name, _tier_fn in (
+                # TIER 2: Massive SIP — ang pinagsama-samang tape at ang mas
+                # mahigpit na 5s na kontrata.
+                ("massive_sip", self._massive_sip_execution_bbo),
+                # TIER 2.5 (#1236, 2026-08-28): IQFeed L1 own-clock BBO —
+                # direktang top-of-book (26-39 venue) na may totoong Bid/Ask
+                # Time event clock. Nauuna sa depth dahil ang depth BBO ay
+                # derived mula sa book levels habang ito ay ang mismong
+                # inilathalang top-of-book quote.
+                ("iqfeed_l1_own_clock", self._iqfeed_l1_own_clock_execution_bbo),
+                # TIER 2.75: embedded bid/ask ng pinakabagong trade tick
+                # (2026-08-30). Ang mga trades-only-watch na pangalan
+                # (AREN-class: 66k live ticks, zero quote rows, provider stale
+                # nang oras-oras) ay may tunay na top-of-book sa BAWAT print.
+                # ⚠️ HINDI ITO OPSYONAL PARA SA RESOLUTION: ang CANF sa
+                # 2026-09-02 11:00-11:20 ay may ZERO na `iqfeed_l1` na hilera sa
+                # tape (727 massive_ws_universe, 0 IQFeed) habang ang
+                # `iqfeed_trade_ticks` ay nagbigay ng 83,288 na hilera sa
+                # PAREHONG bintana. Ang paghinto sa L1 ay magdedeklara ng
+                # "walang pangalawang feed" sa isang pangalang mayroon pala.
+                ("iqfeed_trade_embedded", self._iqfeed_trade_embedded_execution_bbo),
+                # PANGATLONG TIER: IQFeed L2 depth (2026-08-25). May TUNAY na
+                # quote-event clock mula sa migration 371, at 26-39 venue laban
+                # sa IEX-lamang na karapatan ng account.
+                ("iqfeed_depth", self._iqfeed_depth_execution_bbo),
+            ):
+                _out = _consider(_tier_fn(product_id, _age), _tier_name)
+                if _out is not None:
+                    return _out
+        if _locked_stash is not None:
+            # WALANG ibang feed ang nagbigay ng dalawang-panig na libro sa loob
+            # ng bound. Ibalik ang naka-lock na quote nang HINDI ginagalaw --
+            # eksaktong dating gawi -- pero may MARKA na ngayon kung ALIN sa
+            # dalawang napakaibang dahilan ang nangyari. Ito ang bagong senyas,
+            # at ito ang KULANG sa #1299:
+            #
+            #   genuine        -- may buhay na pangalawang feed at NAKA-LOCK
+            #                     DIN ito. Tunay na estado ng merkado; ang
+            #                     one-tick na kapalit ay tapat dito.
+            #   no_second_feed -- WALANG ibang feed sa loob ng bound. Ang
+            #                     naka-lock na row ay isang HULING-ALAM na
+            #                     hilera sa loob ng butas ng feed, hindi isang
+            #                     estado ng libro, at ang one-tick na kapalit ay
+            #                     NAGSISINUNGALING doon: sa apat na sinukat na
+            #                     kaso ay kulang ang presyo nito nang 31.8x
+            #                     (SDOT 5.78 laban sa tunay na 184.03 bps),
+            #                     12.4x (IPST 9.34 laban sa 115.70), 1.75x
+            #                     (DAIC) at 1.00x (AIXI).
+            #
+            # ⚠️ WALA PANG MAMBABASA NITO, AT SINASADYA. Ang kolum na ito ay
+            # senyas para sa locked-book na guard ng #1299 (branch
+            # seam/locked-book-and-defer-0902), na sa ngayon ay naghahati sa
+            # ORASAN (`_locked_book_in_regular_hours`). Ang orasan ay perpektong
+            # proxy sa 21-araw na corpus at proxy pa rin; ito ang mekanismo.
+            # Hindi ko binabago ang pagpepresyo rito: ang pagpapalit ng ibinalik
+            # na spread ay babaguhin ang `spread_bps_live` at ang `slip_ref` sa
+            # entry-place seam, at iyon ay isang pagbabago sa PAGPEPRESYO na
+            # hindi sinusukat ng alinman sa apat na ebidensyang session.
+            _t0, _m0 = _locked_stash
+            try:
+                if isinstance(getattr(_t0, "raw", None), dict):
+                    _t0.raw["locked_book"] = True
+                    _t0.raw["locked_book_resolution"] = (
+                        "genuine" if _locked_others_locked > 0 else "no_second_feed"
+                    )
+                    _t0.raw["locked_book_second_feeds"] = int(_locked_others)
+                    _t0.raw["locked_book_second_feeds_locked"] = int(
+                        _locked_others_locked
+                    )
+            except Exception:
+                pass
+            logger.info(
+                "[alpaca_spot] LOCKED book UNRESOLVED sym=%s verdict=%s "
+                "second_feeds=%d locked=%d — ibinabalik nang hindi ginagalaw",
                 product_id,
-                (
-                    float(stand_in_max_age_seconds)
-                    if stand_in_max_age_seconds is not None
-                    else max_age_seconds
-                ),
+                "genuine" if _locked_others_locked > 0 else "no_second_feed",
+                _locked_others, _locked_others_locked,
             )
-            if l1_stand_in is not None:
-                return l1_stand_in
-            # TIER 2.75: embedded bid/ask ng pinakabagong trade tick (2026-08-30).
-            # Ang mga trades-only-watch na pangalan (AREN-class: 66k live ticks,
-            # zero quote rows, provider stale nang oras-oras) ay may tunay na
-            # top-of-book sa BAWAT print — parehong dual-clock na kontrata,
-            # bumabagsak nang sarado kapag nahuhuli ang bridge drain.
-            trade_embedded = self._iqfeed_trade_embedded_execution_bbo(
-                product_id,
-                (
-                    float(stand_in_max_age_seconds)
-                    if stand_in_max_age_seconds is not None
-                    else max_age_seconds
-                ),
-            )
-            if trade_embedded is not None:
-                return trade_embedded
-            # PANGATLONG TIER: IQFeed L2 depth (2026-08-25). Ang Massive SIP na
-            # daan ay nangunguna -- ito ang pinagsama-samang tape at ang mas
-            # mahigpit na 5s na kontrata. Kapag walang SIP na hilera, ang IQFeed
-            # depth ay may TUNAY na quote-event clock mula sa migration 371, at
-            # 26-39 venue laban sa IEX-lamang na karapatan ng account.
-            iqfeed_stand_in = self._iqfeed_depth_execution_bbo(
-                product_id,
-                (
-                    float(stand_in_max_age_seconds)
-                    if stand_in_max_age_seconds is not None
-                    else max_age_seconds
-                ),
-            )
-            if iqfeed_stand_in is not None:
-                return iqfeed_stand_in
+            return _t0, (_m0 if isinstance(_m0, FreshnessMeta) else _fresh(max_age_seconds))
         if _junk_direct is not None:
             # Walang naibigay ang bawat stand-in tier: ibalik ang basurang-lapad
             # na direct nang buo -- ang gawi bago ang 2026-08-27, hindi mas
