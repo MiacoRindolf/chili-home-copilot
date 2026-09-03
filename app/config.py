@@ -8886,6 +8886,37 @@ class Settings(BaseSettings):
         validation_alias=AliasChoices("CHILI_MOMENTUM_REENTRY_AFTER_STOP_BOUND_ENABLED"),
         description="TASK#8: kill-switch for the bounded re-entry-after-stop-out cap. True => after max_stopout_reentries LOSS recycles the session terminalizes. OFF ⇒ byte-identical unlimited recycle.",
     )
+    chili_momentum_locked_book_guard_enabled: bool = Field(
+        default=True,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_LOCKED_BOOK_GUARD_ENABLED"),
+        description=(
+            "2026-09-02: kill-switch para sa locked-book (bid == ask) na guard sa "
+            "ENTRY path. ON => ang locked na libro ay tinatanggihan sa REGULAR "
+            "hours (Reg NMS 610(d): doon ito ay artifact — nasukat 0.47% ng tape) "
+            "at tinatanggap na may one-tick na EPEKTIBONG spread sa extended hours "
+            "(kung saan ito ay tunay: 23.58-29.63% ng tape), sa halip na iskorin "
+            "bilang 0.0 bps — ang pinakamabuting posibleng halaga ng bawat monotone "
+            "na spread gate. Sinasala rin ang mga locked na row sa bid-prop na "
+            "confirmer, kung saan ang 0.0 na median ay nagpapabulok sa "
+            "spread_blown_out tungo sa 'ang spread ay hindi eksaktong zero'. "
+            "OFF => byte-identical na dating gawi sa lahat ng apat na site."
+        ),
+    )
+    chili_momentum_locked_book_events_per_session: int = Field(
+        default=20,
+        ge=0,
+        le=1000,
+        validation_alias=AliasChoices(
+            "CHILI_MOMENTUM_LOCKED_BOOK_EVENTS_PER_SESSION"
+        ),
+        description=(
+            "2026-09-02: hard cap sa bilang ng `live_quote_locked_book` na event "
+            "kada session. Ang event ay inilalabas sa PAGLIPAT PAPASOK sa locked "
+            "na estado, hindi kada tick — sa 24-30% na locked na premarket tape "
+            "ang kada-tick ay sampu-sampung libong row kada pangalan kada session. "
+            "0 => walang cap (huwag gamitin sa live)."
+        ),
+    )
     chili_momentum_exit_stand_in_after_defers: int = Field(
         default=3,
         ge=0,

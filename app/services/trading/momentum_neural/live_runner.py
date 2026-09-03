@@ -21350,9 +21350,143 @@ def _final_entry_bbo(
         "mid": mid,
         "spread_bps": round(spread_bps, 4),
     }
+    # ⚠️ LOCKED BOOK — TELEMETRY LAMANG DITO, SINADYA. Ang `ask >= bid` na test sa
+    # itaas (`execution_bbo_invalid_or_crossed`) ay HINDI hinihigpitan: ang helper
+    # na ito ay pinagsasaluhan ng EXIT marketability refresh (:13180, kung saan
+    # nakatira ang `le["exit_final_bbo"]`) at ng extended-hours orphan close. Ang
+    # pagtanggi ng locked na libro rito ay gagawing `final_tick is None` ang bawat
+    # locked na tick — ibig sabihin ay isang exit deferral — sa mismong session
+    # (premarket) kung saan 24-30% ng mga tick ay locked. Ang isang exit na hindi
+    # mapepresyuhan ay isang posisyong hindi maisasara, kaya ang paghihigpit dito
+    # ay mas masama kaysa sa depektong inaayos natin. Ang pag-flag lamang ang
+    # ginagawa: nakikita ang estado, hindi nababago ang anumang pasya.
+    try:
+        _fl, _fl_bps, _ = _locked_book_state(bid, ask, mid)
+        if _fl and _locked_book_guard_on():
+            snapshot["locked_book"] = True
+            snapshot["effective_spread_bps"] = round(_fl_bps, 4)
+    except Exception:
+        pass
     if not snapshot["ok"]:
         return None, snapshot
     return tick, snapshot
+
+
+# ⚠️ LOCKED BOOK (2026-09-02) — ANG `bid == ask` AY HINDI PERPEKTONG QUOTE.
+#
+# Bago ang pagbabagong ito, WALA NI ISANG linya sa 46,107 ng file na ito ang
+# bumabanggit ng locked na libro (`grep -nE "ask <= bid|ask == bid|bid >= ask|
+# locked_book"` = 0 na tugma; 0 rin sa buong `app/`). Ang bunga ay istruktural:
+# ang bawat spread gate rito ay MONOTONE sa spread, kaya ang locked na libro ay
+# kumukuha ng 0.0 bps — ang PINAKAMABUTING posibleng halaga sa buong domain — at
+# dumadaan sa bawat pagsusuri sa kalidad sa pamamagitan ng pagiging PINAKA-
+# DEGENERADO. Ang crossed (`ask < bid`) ay tinatanggihan na; ang locked ay hindi
+# kailanman napangalanan.
+#
+# ANG KATOTOHANAN SA VENUE ANG NAGPAPASYA, HINDI ANG P&L. Ipinag-uutos ng Reg NMS
+# Rule 610(d) sa mga venue na iwasang mag-display ng locked/crossed na quote sa
+# REGULAR hours; wala itong bisa sa labas ng 09:30-16:00 ET. Eksaktong hinahati ng
+# sinukat na datos ang linyang iyon — 30-minutong symbol-bounded na bintana sa
+# `momentum_nbbo_spread_tape` sa paligid ng bawat admission:
+#     SDOT 2026-08-21 14:45Z (REGULAR)   ->      1 /    213 rows locked =  0.47%
+#     GYGY 2026-09-01 08:41Z (PREMARKET) ->  3,284 / 13,926 rows locked = 23.58%
+#     AUUD 2026-09-01 11:10Z (PREMARKET) ->  9,724 / 37,614 rows locked = 25.85%
+#     RDHL 2026-08-31 12:42Z (PREMARKET) -> 13,715 / 46,281 rows locked = 29.63%
+#     (zero CROSSED rows sa bawat isa sa apat na bintana)
+# Kaya: sa RTH ang lock ay ARTIFACT (punit o lipas na libro) at dapat tanggihan;
+# sa extended hours ito ay TUNAY na estado ng merkado at ang pagtanggi ay
+# magbabasura ng ikaapat hanggang ikatlong bahagi ng bawat premarket tick sa
+# mismong mga pangalang tina-trade ng lane na ito.
+#
+# NAPATUNAYAN NA ANG RTH LOCK AY ARTIFACT, HINDI MERKADO. Sa buong 11.5-segundong
+# hawak ng SDOT (14:45:59.383449 -> 14:46:10.867396) ay may 3,158 na tick sa
+# `iqfeed_trade_ticks` at ZERO ang locked, habang ang stand-in ay nagpakita ng
+# 17.29/17.29. Ang pinakamahusay na bid kahit saan sa hawak na iyon ay 17.01 —
+# 162 bps sa ILALIM ng "perpektong" 17.29 na iniskor ng gate bilang 0.0 bps.
+#
+# ANG KAPALIT NA HINDI NANGANGAILANGAN NG DB READ. Ang locked na libro ay hindi
+# maipatutupad sa 0: kailangan mong magbayad ng kahit ISANG TICK para makatawid.
+# Ang isang tick sa mid na iyon ang tapat na sahig — at tumutugma ito sa sariling
+# sinukat na p50 ng pangalan nang HINDI hinahawakan ang kontaminadong tape (ang
+# mga percentile mismo ay hinihila pababa ng 24-30% na locked-at-0.0 na row):
+#     AUUD mid 1.140 -> 1 tick = 87.7 bps  vs. sariling p50 89.4 bps ( 36,060 n)
+#     RDHL mid 1.425 -> 1 tick = 70.2 bps  vs. sariling p50 67.8 bps (173,206 n)
+# Ang parehong one-tick na sahig ay kinakalkula na ng file na ito sa
+# `_quote_quality_block`, kaya walang bagong pinagmumulan ng katotohanan.
+#
+# ⚠️ SAKLAW: ENTRY LAMANG. Ang `_final_entry_bbo` (:21118) ay HINDI dumadaan sa
+# `_quote_quality_block` — iisa lamang ang tumatawag doon (`tick_live_session`),
+# at ito ay entry gate. Ang sariling validity test ng `_final_entry_bbo` (ang
+# `ask >= bid` sa `execution_bbo_invalid_or_crossed`) ay SINADYANG HINDI GINALAW:
+# pinagsasaluhan ito ng exit marketability refresh at ng extended-hours orphan
+# close, at ang isang exit na hindi mapepresyuhan ay isang posisyong hindi
+# maisasara. Doon ay TELEMETRY lamang ang idinagdag.
+def _locked_book_tick_bps(mid: float) -> float:
+    """Ang bps na halaga ng ISANG tick sa ``mid`` — ang tapat na sahig ng lock."""
+    try:
+        _m = float(mid or 0.0)
+        if _m <= 0:
+            return 0.0
+        # Sub-$1 ay nagta-trade sa apat na decimal; sa itaas nito ay sentimo.
+        _tick = 0.01 if _m >= 1.0 else 0.0001
+        _bps = (_tick / _m) * 10_000.0
+        return _bps if math.isfinite(_bps) else 0.0
+    except (TypeError, ValueError, ZeroDivisionError):
+        return 0.0
+
+
+def _locked_book_state(
+    bid: Any, ask: Any, mid: Any = None
+) -> tuple[bool, float, float]:
+    """``(is_locked, effective_spread_bps, effective_spread_usd)`` para sa isang quote.
+
+    LOCKED = ``bid == ask`` na may parehong panig na positibo. Ang CROSSED
+    (``ask < bid``) ay HINDI locked: tinatanggihan na ito ng bawat validity test
+    sa file na ito at nananatiling tinatanggihan — hindi ito pinapalambot dito.
+
+    Kapag hindi locked, ang mga epektibong halaga ay 0.0 at ang tumatawag ay
+    dapat gamitin ang sarili nitong aritmetika nang walang pagbabago. Purong
+    function: walang DB, walang I/O, hindi kailanman nagre-raise.
+    """
+    try:
+        _b = float(bid or 0.0)
+        _a = float(ask or 0.0)
+    except (TypeError, ValueError):
+        return False, 0.0, 0.0
+    if _b <= 0 or _a <= 0:
+        return False, 0.0, 0.0
+    # Ang epsilon ay laban sa float na representasyon lamang. Ang pinakamaliit na
+    # TUNAY na spread ay isang tick (>= 1e-4 USD), kaya walang tunay na
+    # dalawang-panig na libro ang mababasa bilang locked dito.
+    if abs(_a - _b) > 1e-9:
+        return False, 0.0, 0.0
+    try:
+        _m = float(mid) if mid is not None else _b
+    except (TypeError, ValueError):
+        _m = _b
+    if not (_m > 0):
+        _m = _b
+    return True, _locked_book_tick_bps(_m), (0.01 if _m >= 1.0 else 0.0001)
+
+
+def _locked_book_guard_on() -> bool:
+    return bool(getattr(settings, "chili_momentum_locked_book_guard_enabled", True))
+
+
+def _locked_book_in_regular_hours(symbol: Any) -> bool:
+    """TRUE kapag TIYAK na regular-hours ngayon para sa ``symbol``.
+
+    FAIL-SAFE PABOR SA PAGKA-AVAILABLE: kapag hindi natin masabi ang session,
+    nagbabalik ng False, kaya ang landas na hindi-tumatanggi (widened effective
+    spread) ang tatakbo. Hindi kailanman nagdaragdag ng BAGONG harang mula sa
+    isang exception.
+    """
+    try:
+        from .market_profile import market_session_now
+
+        return market_session_now(str(symbol), now=_utcnow_aware()) == "regular"
+    except Exception:
+        return False
 
 
 def _entry_spread_risk_decision(
@@ -21381,10 +21515,26 @@ def _entry_spread_risk_decision(
     flag off — the original stop-based test runs byte-identically (fail-closed:
     an unknown move never loosens the gate).
     """
+    # ⚠️ LOCKED BOOK — ang tatlong sukatan sa ibaba ay LAHAT nagiging 0.0 kapag
+    # `bid == ask`, at ang tatlo ay LAHAT monotone, kaya ang lock ay dumadaan sa
+    # bawat isa nang perpekto. NASUKAT (AUUD session 19337, 2026-09-01 11:10:41Z,
+    # tape row 182087598, bid 1.14 / ask 1.14): `entry_spread_risk_gate` ay
+    # nag-ulat ng gate_spread_bps 0.0 / spread_cost_usd 0.0 / parehong fraction
+    # 0.0 at pumasa bilang `within_budget`, HABANG ang `spread_cost_derate` sa
+    # PAREHONG session object ay may hawak na 88.1 bps na may label na "derate".
+    # Dalawang bahagi ng IISANG tick ang hindi magkasundo nang 88 bps at walang
+    # nakapansin. Ang derate ang tama: ang sariling p50 ng AUUD ay 89.4 bps sa
+    # 36,060 na sample, kaya ang 88.1 ay ang PANGKARANIWANG LIBRO NG PANGALAN at
+    # ang 0.0 ang outlier. Ang order ay pinlano sa 1.15 at napuno sa 1.11 — ang
+    # gastos sa pagtawid ay TUNAY habang ang gate ay nagpresyo nito sa $0.00.
+    _locked, _locked_bps, _locked_usd = (
+        _locked_book_state(bid, ask) if _locked_book_guard_on() else (False, 0.0, 0.0)
+    )
     try:
         qty = float(quantity)
         risk_usd = float(stop_distance) * qty
-        spread_cost_usd = (float(ask) - float(bid)) * qty
+        _spread_usd = _locked_usd if _locked else (float(ask) - float(bid))
+        spread_cost_usd = _spread_usd * qty
         fraction = spread_cost_usd / risk_usd
     except (TypeError, ValueError, ZeroDivisionError):
         risk_usd = 0.0
@@ -21395,7 +21545,11 @@ def _entry_spread_risk_decision(
     try:
         _mid = (float(ask) + float(bid)) / 2.0
         if _mid > 0 and float(ask) >= float(bid):
-            spread_bps = (float(ask) - float(bid)) / _mid * 10_000.0
+            spread_bps = (
+                _locked_bps
+                if _locked
+                else (float(ask) - float(bid)) / _mid * 10_000.0
+            )
     except (TypeError, ValueError):
         spread_bps = None
 
@@ -21452,6 +21606,7 @@ def _entry_spread_risk_decision(
             "max_fraction_of_expected_move": _move_frac,
             "abs_ceiling_bps": _abs_ceiling,
             "spread_budget_bps": round(_budget_bps, 1),
+            "locked_book": _locked,
             "reason": (
                 "within_budget" if ok else "spread_exceeds_expected_move_budget"
             ),
@@ -21469,6 +21624,7 @@ def _entry_spread_risk_decision(
         "spread_fraction_of_risk": round(fraction, 6) if math.isfinite(fraction) else None,
         "max_spread_fraction_of_risk": float(max_fraction),
         "gate_frame": "structural_risk",
+        "locked_book": _locked,
         "reason": (
             "within_budget"
             if ok
@@ -22701,6 +22857,47 @@ def _bid_prop_confirms_break(
     if not tape or len(tape) < max(2, _min_n):
         # Thin/absent/stale L1 → fail open (do NOT block the break).
         return True, {"reason": "bid_prop_thin_tape_fail_open", "samples": len(tape or [])}
+    # ⚠️ LOCKED BOOK — DITO ANG PINSALA AY KABALIGTARAN NG ENTRY GATES: hindi ito
+    # nagpapapasok ng masamang libro, ito ay nagba-VETO ng mabuting libro.
+    #
+    # Ang isang locked na row ay pumapasok sa tape na may spread na EKSAKTONG 0.0,
+    # at ang parehong kalahati ng AND sa ibaba ay nabubulok dito:
+    #   Kalahati 2: kapag ang trailing median ay 0.0, ang
+    #     `spreads[-1] > median * 1.5 + 1e-9` ay bumabagsak sa "ang spread ay
+    #     hindi eksaktong zero" — palaging totoo para sa anumang tunay na libro.
+    #   Kalahati 1: ang "bid" ng isang locked na row ay ang PUNIT NA ASK LEVEL,
+    #     hindi isang tunay na bid, kaya ang `bid_first` ay nababasa mula sa maling
+    #     panig at ang isang pangkaraniwang print ay mukhang bid na "bumababa".
+    #
+    # NASUKAT (RDHL session 19216, event 1421057 @ 2026-08-31 12:42:44.330506):
+    # `{'samples': 8, 'bid_first': 1.43, 'bid_last': 1.42, 'spread_last_bps':
+    # 70.18, 'spread_median_bps': 0.0, 'spread_blown_out': True,
+    # 'bid_stepping_down': True, 'blocked_trigger': 'abcd_break_tick_ok'}`.
+    # Muling itinayo ang eksaktong 8-row na bintana sa cutoff 12:42:43.988432Z:
+    # PITO sa walo ay locked sa 1.43/1.43 = 0.0 bps at IISA lang ang tunay na
+    # 1.42/1.43 sa 70.1754 bps. Ang 70.18 bps na iyon ay 1.035x ng SARILING p50
+    # ng RDHL na 67.8 bps (173,206 na sample) — isang ganap na pangkaraniwang
+    # libro ang nabansagang "blown out", at ang `bid_first` na 1.43 ay ang ask
+    # level ng mga naka-lock na row, hindi isang naunang bid.
+    #
+    # Ang tamang tugon ay ang IPINANGAKO NA NG DOCSTRING ng function na ito:
+    # FAIL-OPEN sa manipis na tape. Inaalis natin ang mga locked na row BAGO ang
+    # dalawang kalahati, at kung mas kaunti sa `_min_n` ang matitirang tunay na
+    # sample, ang tape ay manipis at hindi ito humaharang. Sa RDHL ay isa lamang
+    # sa walo ang makakaligtas, kaya ang veto ay HINDI SANA PUMUTOK.
+    if _locked_book_guard_on():
+        _unlocked = [(b, s) for b, s in tape if float(s) > 0.0]
+        if len(_unlocked) < max(2, _min_n):
+            return True, {
+                "reason": "bid_prop_locked_book_tape_fail_open",
+                "samples": len(tape),
+                "unlocked_samples": len(_unlocked),
+                "locked_book": True,
+            }
+        _locked_dropped = len(tape) - len(_unlocked)
+        tape = _unlocked
+    else:
+        _locked_dropped = 0
     bids = [b for b, _ in tape]
     spreads = [s for _, s in tape]
     last_bid = bids[-1]
@@ -22736,6 +22933,7 @@ def _bid_prop_confirms_break(
         "spread_median_bps": round(median_spread, 2),
         "spread_blowout_mult": round(blowout_mult, 2),
         "spread_blown_out": spread_blown_out,
+        "locked_rows_dropped": _locked_dropped,
     }
     if not confirmed:
         debug["reason"] = "bid_prop_book_deteriorating"
@@ -24179,12 +24377,53 @@ def _quote_quality_block(
             _inv.update(_refetched_meta)
             _inv["failed_check"] = "invalid_bbo"
         return _inv
+    # ⚠️ LOCKED BOOK — ang test sa itaas ay tumatanggi sa CROSSED (`ask < bid`)
+    # pero TINATANGGAP ang LOCKED (`ask == bid`), at ito ang tanging lugar sa
+    # 46,107 na linya kung saan lumilitaw ang `ask < bid`. Sa RTH ang locked na
+    # composite ay isang ARTIFACT — punit o lipas na libro kung saan nawala ang
+    # isang panig — at ang tamang tugon ay ang tanggihan ito gaya ng crossed.
+    # PINATUNAYAN NG TAPE (SDOT session 14825, 2026-08-21 14:45:47.667335Z,
+    # `live_entry_final_bbo` bid 17.29 / ask 17.29 / spread_bps 0.0, source
+    # massive_ws_universe): sa 3,158 na `iqfeed_trade_ticks` sa buong 11.5-
+    # segundong hawak ay ZERO ang locked at ang pinakamahusay na bid ay 17.01.
+    # Ang lock ay hindi ang merkado; ito ay isang punit na stand-in.
+    #
+    # Sa EXTENDED hours ay legal at tunay ang lock (23.58% / 25.85% / 29.63% ng
+    # mga row sa tatlong sinukat na premarket na bintana), kaya ang pagtanggi
+    # doon ay magbabasura ng ikaapat hanggang ikatlong bahagi ng tape. Doon ay
+    # PINAPAYAGAN natin ito na may PINALAWAK NA EPEKTIBONG SPREAD sa halip.
+    _locked, _locked_bps, _ = (
+        _locked_book_state(bid, ask, mid)
+        if _locked_book_guard_on()
+        else (False, 0.0, 0.0)
+    )
+    if _locked and _locked_book_in_regular_hours(symbol):
+        _lk = {
+            "reason": "locked_bbo",
+            "bid": bid,
+            "ask": ask,
+            "mid": mid,
+            "locked_book": True,
+            "market_session": "regular",
+            "effective_spread_bps": round(_locked_bps, 4),
+        }
+        if _refetched_meta:
+            _lk.update(_refetched_meta)
+            _lk["failed_check"] = "locked_bbo"
+        return _lk
     try:
         spread_bps = float(getattr(tick, "spread_bps", None))
     except (TypeError, ValueError):
         spread_bps = ((ask - bid) / mid) * 10_000.0
     if not math.isfinite(spread_bps):
         spread_bps = ((ask - bid) / mid) * 10_000.0
+    if _locked:
+        # EXTENDED HOURS. Ang 0.0 na galing sa `bid == ask` ay HINDI KILALA, hindi
+        # zero — at ito ang MINIMUM ng domain ng bawat monotone na gate sa ibaba,
+        # kaya ang libro ay dumadaan sa pagiging pinaka-degenerado. Pinapalitan
+        # natin ito ng isang tick sa mid: ang pinakamababang TUNAY na gastos sa
+        # pagtawid, at (nasukat) sa loob ng ~2% ng sariling p50 ng pangalan.
+        spread_bps = _locked_bps
     # max_spread_bps is the caller-supplied ADAPTIVE tolerance (volatility-relative);
     # fall back to the documented base floor when absent or invalid.
     raw_max_spread = max_spread_bps
@@ -24277,6 +24516,28 @@ def _quote_quality_block(
                             _s2 = (_a2 - _b2) / _m2 * 10_000.0
                         if not math.isfinite(_s2):
                             _s2 = (_a2 - _b2) / _m2 * 10_000.0
+                        # ⚠️ LOCKED SECONDARY — ang `>=` sa itaas ay tumatanggap ng
+                        # locked na pangalawang libro, na nagbibigay ng _s2 = 0.0.
+                        # Dalawang bagay ang sumisira noon: (1) ang isang punit na
+                        # libro ay PUMAPALIT sa isang tunay na malapad na libro at
+                        # nalalagyan ng label na "rescued_from": "wide_bbo_spread";
+                        # (2) sa isang SADYANG `max_spread = 0.0` na block-all cap
+                        # — na ipinag-uutos ng komento sa itaas na igalang — ang
+                        # `0.0 <= 0.0` ay TOTOO, kaya ang locked na libro ang
+                        # TANGING libro na nakakatalo sa block-all. Ang pagpapalit
+                        # ng epektibong spread ay nagsasara ng dalawa: ang isang
+                        # tick ay palaging > 0.0, kaya hindi na kailanman
+                        # makakapag-rescue ang isang lock laban sa 0.0 na cap.
+                        _lk2, _lk2_bps, _ = (
+                            _locked_book_state(_b2, _a2, _m2)
+                            if _locked_book_guard_on()
+                            else (False, 0.0, 0.0)
+                        )
+                        if _lk2:
+                            if _locked_book_in_regular_hours(symbol):
+                                _s2 = math.inf
+                            else:
+                                _s2 = _lk2_bps
                         if _s2 <= max_spread:
                             _refetched_meta = {
                                 "refetch_source": _rf2_source,
@@ -31022,6 +31283,52 @@ def tick_live_session(
         )
     else:
         _entry_spread_ceiling = _adaptive_max_spread
+    # ⚠️ DURABLE, BOUNDED NA SENYAS PARA SA LOCKED BOOK. Bago nito ang estado ay
+    # ganap na INVISIBLE: walang event, walang log line, walang pangalan sa buong
+    # codebase. Ang paglalabas KADA TICK ay hindi katanggap-tanggap — sa 24-30% na
+    # locked na tape sa premarket iyon ay sampu-sampung libong row kada pangalan
+    # kada session, na siya mismong hugis ng naunang tape-bloat na insidente.
+    # Kaya: isang event kada PAGLIPAT PAPASOK sa locked na estado, na may
+    # tumatakbong bilang, at may HARD CAP kada session.
+    if _locked_book_guard_on():
+        try:
+            _lb_now, _lb_bps, _ = _locked_book_state(
+                getattr(tick, "bid", None),
+                getattr(tick, "ask", None),
+                getattr(tick, "mid", None),
+            )
+            _lb_prev = bool(le.get("locked_book_active") or False)
+            if _lb_now != _lb_prev:
+                le["locked_book_active"] = _lb_now
+                if _lb_now:
+                    _lb_n = int(le.get("locked_book_transitions") or 0) + 1
+                    le["locked_book_transitions"] = _lb_n
+                    _lb_cap = int(getattr(
+                        settings,
+                        "chili_momentum_locked_book_events_per_session",
+                        20,
+                    ) or 0)
+                    if _lb_cap <= 0 or _lb_n <= _lb_cap:
+                        _lb_raw = getattr(tick, "raw", None)
+                        _emit(db, sess, "live_quote_locked_book", {
+                            "symbol": sess.symbol,
+                            "bid": float(getattr(tick, "bid", 0.0) or 0.0),
+                            "ask": float(getattr(tick, "ask", 0.0) or 0.0),
+                            "mid": float(getattr(tick, "mid", 0.0) or 0.0),
+                            "effective_spread_bps": round(_lb_bps, 4),
+                            "market_session": (
+                                "regular"
+                                if _locked_book_in_regular_hours(sess.symbol)
+                                else "extended_or_unknown"
+                            ),
+                            "source": (
+                                str(_lb_raw.get("source") or _lb_raw.get("feed") or "")
+                                if isinstance(_lb_raw, dict) else ""
+                            ),
+                            "transitions_this_session": _lb_n,
+                        })
+        except Exception:
+            pass
     _rescued_entry_ticks: list[Any] = []
     quote_block = _quote_quality_block(
         tick, _fr, max_spread_bps=_entry_spread_ceiling, symbol=sess.symbol, db=db,
