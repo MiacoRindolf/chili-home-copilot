@@ -44,11 +44,30 @@ def _cancel_terminalizes(monkeypatch):
     `assert displaced is True` below was satisfied by a displacement that never
     happened. Fixing that discriminator is what exposed this fixture gap.
 
-    It is not a test-only shape. `live_terminalization_quarantined` has 1,277 rows
-    on the live DB, all `non_alpaca_account_identity_unfrozen`, across
-    robinhood_agentic_mcp (734), robinhood_spot (504) and coinbase_spot (39),
-    inside one four-hour window on 2026-08-14. A rank displacement against any of
-    them reported a freed slot that was still occupied.
+    CORRECTION, 2026-09-02 (review). An earlier version of this note cited the
+    1,277 `live_terminalization_quarantined` rows on the live DB as displacement
+    damage. THAT ATTRIBUTION IS WRONG, and re-measuring refutes it three ways:
+
+      * all 1,277 carry `payload_json->>'context' =
+        'stale_live_session_reaper_pre_terminal'` — one distinct value, no others.
+        They come from `reap_stale_live_sessions` (item B3's path), not from
+        `_guarded_reap_for_displacement`;
+      * all 1,277 owning sessions are `state='live_error'`, which is not in
+        `_RANK_DISPLACE_REAPABLE_STATES = {armed_pending_runner, queued_live}`, so
+        displacement was structurally incapable of selecting them;
+      * `_maybe_rank_displace` additionally filters `execution_family !=
+        'alpaca_spot'`, and `state in ('armed_pending_runner','queued_live') AND
+        execution_family <> 'alpaca_spot'` returns 0 rows ALL-TIME. The last
+        non-Alpaca live session started 2026-07-13 18:16:09; all 4,081 live
+        sessions in the 21 days to 2026-09-02 are alpaca_spot.
+
+    So the honest statement is narrower and worth making plainly: the B2
+    discriminator is a CORRECTNESS fix on a path whose eligible population has
+    been empty for ~51 days, and the three assertions it broke below were
+    assertions that the bug held. It is not measured allocator damage. (The
+    deferral-counted-as-a-reap bug WAS real for the `reap_stale_live_sessions`
+    population that produced those 1,277 rows — which is why item B3 exists —
+    but that is a different function.)
 
     Making the real cancel succeed here would need broker position truth, open-order
     truth AND a frozen account identity stubbed — three layers of fiction for tests
