@@ -11,6 +11,7 @@ import math
 from datetime import datetime, timedelta
 from typing import Any
 
+from sqlalchemy import text as _sa_text
 from sqlalchemy.orm import Session
 
 from ...config import settings
@@ -867,6 +868,57 @@ def dispatch_alert(
             db.close()
 
     return sent
+
+
+_ALREADY_DELIVERED_SQL = _sa_text(
+    """
+    SELECT 1
+      FROM trading_alerts
+     WHERE id > (SELECT max(id) - :window FROM trading_alerts)
+       AND alert_type = :alert_type
+       AND content_signature = :signature
+       AND success = true
+     LIMIT 1
+    """
+)
+
+# ~8 days of alerts at the measured 488/day. Same window and same shape as
+# control_loop_watchdog._ALREADY_PAGED_SQL, which is the precedent this
+# generalises; that module keeps its private copy so this refactor cannot change
+# the behaviour of an alarm that is already in production.
+_ALREADY_DELIVERED_WINDOW = 4000
+
+
+def alert_already_delivered(
+    db: Session, alert_type: str, content_signature: str, *, window: int | None = None
+) -> bool:
+    """Did ANY process already DELIVER a page with this exact signature?
+
+    Module-level "we already paged" memory dies with the process, so a restarting
+    scheduler re-pages the same condition forever. This is the durable half of the
+    latch, and it is deliberately narrower than "an alert row exists": only
+    ``success = true`` counts, because a row written while the channel was off is
+    a record, not a delivery.
+
+    Fails OPEN (False -> page anyway). An alarm that goes quiet because its dedupe
+    query errored is worse than a duplicate page.
+    """
+    try:
+        row = db.execute(
+            _ALREADY_DELIVERED_SQL,
+            {
+                "window": int(window or _ALREADY_DELIVERED_WINDOW),
+                "alert_type": str(alert_type),
+                "signature": str(content_signature),
+            },
+        ).first()
+        return row is not None
+    except Exception:
+        logger.warning(
+            "[alerts] already-delivered lookup failed for %s; paging", alert_type,
+            exc_info=True,
+        )
+        return False
 
 
 def get_alert_history(

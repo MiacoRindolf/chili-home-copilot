@@ -1308,8 +1308,31 @@ _AOR_INTENDED_SKIPS = frozenset({
 # caught the same session instead of after ~50 days.
 _AOR_INERT_PASS_CAP = 15
 
+# DELIVERY RETRY BUDGET (2026-09-02, review). `dispatch_alert` returns False both
+# for a transient Telegram failure AND for a channel the operator has simply
+# turned off (`alerts_enabled=False`, or a TIER_A preference cell that is off) --
+# and it writes an AlertHistory row on EVERY call regardless of the send. Latching
+# the alarm on delivery therefore turned an unconfigured channel into 720 CRITICAL
+# lines and 720 durable rows a DAY for a condition the PR itself measures as a
+# ~50-day outage. The alarm now latches unconditionally; only the SEND retries,
+# three times, 15 minutes apart.
+_AOR_PAGE_MAX_ATTEMPTS = 3
+_AOR_PAGE_RETRY_SECONDS = 900.0
+
 _aor_inert_passes = 0
-_aor_inert_paged = False
+# Signature of the alarm this process has already RAISED (critical log + page
+# attempt started). Distinct from delivery: see _AOR_PAGE_MAX_ATTEMPTS.
+_aor_alarm_signature: str | None = None
+_aor_page_attempts = 0
+_aor_page_last_ts = 0.0
+
+
+def _reset_aor_alarm_state() -> None:
+    global _aor_inert_passes, _aor_alarm_signature, _aor_page_attempts, _aor_page_last_ts
+    _aor_inert_passes = 0
+    _aor_alarm_signature = None
+    _aor_page_attempts = 0
+    _aor_page_last_ts = 0.0
 
 
 def _run_alpaca_orphan_reconcile_job():
@@ -1327,11 +1350,22 @@ def _run_alpaca_orphan_reconcile_job():
     whose owning session is already terminal, and nothing anywhere said so.
 
     Every skip is now a WARNING carrying its reasons, and a run of consecutive
-    passes that never reach the broker raises one durable TIER_A page.
+    passes that never reach the broker raises ONE CRITICAL line and at most
+    ``_AOR_PAGE_MAX_ATTEMPTS`` TIER_A page attempts, spaced
+    ``_AOR_PAGE_RETRY_SECONDS`` apart -- NOT one per 120s pass. The alarm latches
+    on being raised, never on delivery: `dispatch_alert` returns False for a
+    channel that is merely switched off, so a delivery-gated latch would make an
+    ordinary configuration state produce 720 CRITICAL lines and 720 durable rows a
+    day for a condition that lasted fifty of them. A previous PROCESS's delivered
+    page also suppresses this one (``alert_already_delivered``), so a restart
+    cannot re-arm it.
     """
 
     def _work() -> None:
-        global _aor_inert_passes, _aor_inert_paged
+        global _aor_inert_passes, _aor_alarm_signature
+        global _aor_page_attempts, _aor_page_last_ts
+        import time as _time
+
         from ..db import SessionLocal
 
         db = SessionLocal()
@@ -1349,8 +1383,7 @@ def _run_alpaca_orphan_reconcile_job():
                         "[scheduler] alpaca_orphan_reconcile reached the broker "
                         "again after %s inert pass(es)", _aor_inert_passes,
                     )
-                _aor_inert_passes = 0
-                _aor_inert_paged = False
+                _reset_aor_alarm_state()
                 return
             # Did not reach the broker.
             logger.warning(
@@ -1359,35 +1392,93 @@ def _run_alpaca_orphan_reconcile_job():
                 _skipped, summary.get("persisted_execution_quarantines"),
             )
             if str(_skipped or "") in _AOR_INTENDED_SKIPS:
-                _aor_inert_passes = 0
+                _reset_aor_alarm_state()
                 return
             _aor_inert_passes += 1
-            if _aor_inert_passes < _AOR_INERT_PASS_CAP or _aor_inert_paged:
+            if _aor_inert_passes < _AOR_INERT_PASS_CAP:
                 return
-            message = (
-                f"ALPACA RECONCILER INERT — {_aor_inert_passes} consecutive "
-                f"passes returned without a single broker call "
-                f"(reason={_skipped!r}). This is the only broker-truth sweeper "
-                f"that can find a position whose owning session is already "
-                f"terminal; while it is inert, an orphaned paper position has no "
-                f"owner and no stop. Quarantines: "
-                f"{summary.get('persisted_execution_quarantines')}"
+            from .trading.alerts import (
+                ALPACA_RECONCILE_INERT,
+                alert_already_delivered,
+                dispatch_alert,
             )
-            # Unconditional and BEFORE the send: the record must not be
-            # contingent on the channel.
-            logger.critical("[scheduler] %s", message)
-            try:
-                from .trading.alerts import ALPACA_RECONCILE_INERT, dispatch_alert
 
-                # Latch ONLY on confirmed delivery; the 120s tick IS the retry.
-                _aor_inert_paged = bool(dispatch_alert(
+            signature = f"alpaca_reconcile_inert:{_skipped}"
+            if _aor_alarm_signature != signature:
+                # A DIFFERENT PROCESS may already have paged this exact condition:
+                # the module globals above die on every restart, and a 120s job on
+                # a box that restarts would otherwise re-page forever. This is the
+                # durable half of the latch, ported from
+                # control_loop_watchdog._already_paged.
+                try:
+                    _already = alert_already_delivered(
+                        db, ALPACA_RECONCILE_INERT, signature
+                    )
+                except Exception:
+                    # Fail OPEN. An alarm that goes quiet because its dedupe query
+                    # threw is the failure mode this whole block exists to end.
+                    logger.warning(
+                        "[scheduler] alpaca_orphan_reconcile dedupe lookup failed; "
+                        "paging", exc_info=True,
+                    )
+                    _already = False
+                if _already:
+                    logger.warning(
+                        "[scheduler] alpaca_orphan_reconcile still inert (%s "
+                        "passes, reason=%r) — already paged for this condition by "
+                        "a previous process; not re-paging",
+                        _aor_inert_passes, _skipped,
+                    )
+                    _aor_alarm_signature = signature
+                    _aor_page_attempts = _AOR_PAGE_MAX_ATTEMPTS
+                    return
+                message = (
+                    f"ALPACA RECONCILER INERT — {_aor_inert_passes} consecutive "
+                    f"passes returned without a single broker call "
+                    f"(reason={_skipped!r}). This is the only broker-truth sweeper "
+                    f"that can find a position whose owning session is already "
+                    f"terminal; while it is inert, an orphaned paper position has "
+                    f"no owner and no stop. Quarantines: "
+                    f"{summary.get('persisted_execution_quarantines')}"
+                )
+                # ONCE per condition, unconditional, and BEFORE the send: the
+                # record must not be contingent on the channel -- and it must not
+                # repeat every 120s either, which is what gating it on delivery
+                # did when the channel was simply switched off.
+                logger.critical("[scheduler] %s", message)
+                _aor_alarm_signature = signature
+                _aor_page_attempts = 0
+                _aor_page_last_ts = 0.0
+            else:
+                message = (
+                    f"ALPACA RECONCILER INERT — still inert after "
+                    f"{_aor_inert_passes} passes (reason={_skipped!r})."
+                )
+            if _aor_page_attempts >= _AOR_PAGE_MAX_ATTEMPTS:
+                return
+            _now = _time.time()
+            if _aor_page_last_ts and (_now - _aor_page_last_ts) < _AOR_PAGE_RETRY_SECONDS:
+                return
+            _aor_page_attempts += 1
+            _aor_page_last_ts = _now
+            try:
+                if bool(dispatch_alert(
                     db=db,
                     alert_type=ALPACA_RECONCILE_INERT,
                     ticker=None,
                     message=message,
                     skip_throttle=True,
-                    content_signature=f"alpaca_reconcile_inert:{_skipped}",
-                ))
+                    content_signature=signature,
+                )):
+                    # Delivered: stop sending. The condition stays latched until a
+                    # pass reaches the broker again.
+                    _aor_page_attempts = _AOR_PAGE_MAX_ATTEMPTS
+                elif _aor_page_attempts >= _AOR_PAGE_MAX_ATTEMPTS:
+                    logger.warning(
+                        "[scheduler] alpaca_orphan_reconcile inertness page "
+                        "UNDELIVERED after %s attempts — hindi na uulit; nasa "
+                        "CRITICAL log na ang record", _aor_page_attempts,
+                    )
             except Exception:
                 logger.warning(
                     "[scheduler] alpaca_orphan_reconcile inertness page failed",

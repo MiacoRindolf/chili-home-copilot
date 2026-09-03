@@ -68,14 +68,22 @@ def bus(monkeypatch):
 
     monkeypatch.setattr(LR, "_emit", _emit)
     monkeypatch.setattr(AL, "dispatch_alert", _dispatch)
-    monkeypatch.setattr(
-        LR.settings, "chili_momentum_entry_confirm_deferred_emit_interval_s", 15.0,
-        raising=False,
-    )
-    monkeypatch.setattr(
-        LR.settings, "chili_momentum_entry_confirm_deferred_cap_seconds", 180.0,
-        raising=False,
-    )
+    # `settings` is a pydantic model: assigning a field it does not DEFINE raises
+    # ValueError, and `raising=False` does not help — it only governs whether
+    # monkeypatch complains about a missing attribute, not whether the setattr
+    # itself throws. On origin/main these two fields do not exist, so forcing them
+    # errored the whole fixture and nine of these tests never reached an assertion
+    # at all. The values below are identical to the code's own defaults, so the
+    # tests exercise the same numbers either way; forcing them is belt-and-braces
+    # against a future default change, not a precondition.
+    for _name, _value in (
+        ("chili_momentum_entry_confirm_deferred_emit_interval_s", 15.0),
+        ("chili_momentum_entry_confirm_deferred_cap_seconds", 180.0),
+    ):
+        try:
+            monkeypatch.setattr(LR.settings, _name, _value, raising=False)
+        except Exception:
+            pass
     return rec
 
 
@@ -108,18 +116,26 @@ def test_celu_replay_is_bounded_and_pages_once(bus):
     le, res = _replay(bus, [11.01] * 266)
     assert le["entry_confirm_deferred_attempts"] == 267
 
-    # The routine event is throttled, not one per tick. The INVARIANT is the
-    # spacing, not a magic count: no two emits closer than the interval. (At the
-    # measured 11.01s cadence that lands on every other tick, 134 of 267.)
+    # The routine event is throttled AND it STOPS once the alarm owns the loop.
+    # Throttling alone would be a rate limit, not a bound: 2,929s at 15s is still
+    # ~195 rows against main's 267. The invariants are (a) the spacing and (b) the
+    # fact that nothing is written after the alarm, which caps the whole run at
+    # ceil(cap/interval) + 1 = 13 regardless of how long the deferral lasts.
+    import math
+
     stamps = [e[1]["deferred_for_s"] for e in _routine(bus)]
-    assert len(stamps) < 267
     assert all(b - a >= 15.0 for a, b in zip(stamps, stamps[1:])), stamps[:8]
-    assert len(stamps) == 134
+    assert len(stamps) <= math.ceil(180.0 / 15.0) + 1, stamps
+    assert max(stamps) <= 180.0 + 11.01, "walang routine event pagkatapos ng alarm"
 
     # Exactly ONE alarm and exactly ONE page for the whole run.
     assert len(_alarm(bus)) == 1
     assert len(bus.pages) == 1
     page = bus.pages[0]
+    assert page["db"] is None, (
+        "ang dispatch_alert ay nag-co-commit; hindi ito dapat makahawak sa "
+        "transaction ng tick"
+    )
     assert page["alert_type"] == AL.LIVE_ENTRY_ORDER_UNOBSERVED
     assert page["ticker"] == "CELU"
     assert page["skip_throttle"] is True
@@ -187,21 +203,40 @@ def test_a_new_order_id_resets_the_run(bus):
     assert len(bus.pages) == 1, "walang instant na page mula sa minanang edad"
 
 
-def test_the_alarm_latches_only_on_confirmed_delivery(bus):
+def test_an_undelivered_page_never_becomes_a_durable_row_storm(bus):
+    """THE HOLE THIS CLOSES. `dispatch_alert` returns False when the channel is
+    merely TURNED OFF (`alerts_enabled=False`, or a Telegram TIER_A preference
+    cell that is off) — a normal configuration state, not a fault — and it writes
+    an AlertHistory row plus a shadow decision packet on EVERY call regardless of
+    the send, then commits. Retrying on a False return once per `_due` tick was
+    therefore an unbounded durable-write loop on the live-runner hot path: on the
+    CELU shape, ~183 rows, ~183 mid-tick commits and up to ~183 ten-second HTTP
+    POSTs. The ALARM latches unconditionally; only the SEND retries, and it is
+    bounded."""
     bus.deliver = False
-    le, res = _replay(bus, [30.0] * 20)
-    # undelivered => no latch => it retries, but bounded by the emit interval,
-    # never once per tick.
-    assert len(bus.pages) > 1
-    assert len(bus.pages) < 20
-    assert "entry_confirm_deferred_escalated_utc" not in le
+    # 300 ticks, 30s apart = 9,000s — three times the CELU deferral.
+    le, res = _replay(bus, [30.0] * 300)
 
-    bus.deliver = True
-    sess = _Sess()
-    LR._note_entry_confirm_deferred(
-        _Db(), sess, le, now=datetime(2026, 8, 27, 22, 30, 0),
+    assert len(_alarm(bus)) == 1, "ang durable na alarm ay isa, hindi kada tick"
+    assert len(bus.pages) == LR._ENTRY_CONFIRM_PAGE_MAX_ATTEMPTS, bus.pages
+    assert le["entry_confirm_deferred_page_attempts"] == (
+        LR._ENTRY_CONFIRM_PAGE_MAX_ATTEMPTS
     )
+    assert "entry_confirm_deferred_escalated_utc" not in le
+    # ...and the routine stream stopped when the alarm took over: 300 ticks over
+    # 9,000s produced a handful of rows, all of them inside the 180s cap.
+    assert len(_routine(bus)) <= 13, len(_routine(bus))
+    assert max(e[1]["deferred_for_s"] for e in _routine(bus)) <= 180.0 + 30.0
+    # Every attempt was spaced by the retry budget, not by the tick.
+    assert all(p["db"] is None for p in bus.pages)
+
+
+def test_the_page_latches_on_confirmed_delivery_and_then_stops(bus):
+    bus.deliver = True
+    le, _ = _replay(bus, [30.0] * 40)
+    assert len(bus.pages) == 1
     assert le["entry_confirm_deferred_escalated_utc"]
+    assert le["entry_confirm_deferred_page_attempts"] == 1
 
 
 def test_a_page_failure_never_breaks_the_tick(bus, monkeypatch, caplog):

@@ -53,6 +53,7 @@ Runnable: pytest tests/test_alpaca_reconcile_rearm_0902.py -v -p no:randomly
 from __future__ import annotations
 
 import inspect
+import time as _time
 
 import pytest
 
@@ -207,22 +208,35 @@ class _Db:
 @pytest.fixture
 def rig(monkeypatch):
     """Drives _run_alpaca_orphan_reconcile_job over a scripted summary sequence."""
-    state = {"summaries": [], "pages": [], "deliver": True}
+    state = {
+        "summaries": [], "pages": [], "deliver": True,
+        "already_delivered": False, "clock": 1_000_000.0, "tick_s": 0.0,
+    }
 
     monkeypatch.setattr(TS, "_aor_inert_passes", 0, raising=False)
-    monkeypatch.setattr(TS, "_aor_inert_paged", False, raising=False)
+    monkeypatch.setattr(TS, "_aor_alarm_signature", None, raising=False)
+    monkeypatch.setattr(TS, "_aor_page_attempts", 0, raising=False)
+    monkeypatch.setattr(TS, "_aor_page_last_ts", 0.0, raising=False)
     monkeypatch.setattr(
         "app.db.SessionLocal", lambda *a, **k: _Db(), raising=False,
     )
     monkeypatch.setattr(
         TS, "run_scheduler_job_guarded", lambda _name, work: work(),
     )
+    # The job imports `time` inside `_work`, so patching the stdlib module is what
+    # the scheduler actually reads. The clock only advances when a test asks it to.
+    monkeypatch.setattr(_time, "time", lambda: state["clock"])
 
     def _dispatch(**kw):
         state["pages"].append(kw)
         return state["deliver"]
 
     monkeypatch.setattr(AL, "dispatch_alert", _dispatch)
+    monkeypatch.setattr(
+        AL, "alert_already_delivered",
+        lambda _db, _t, _s, **_k: bool(state["already_delivered"]),
+        raising=False,
+    )
 
     def _drive(summaries):
         it = iter(summaries)
@@ -233,6 +247,7 @@ def rig(monkeypatch):
         )
         for _ in summaries:
             TS._run_alpaca_orphan_reconcile_job()
+            state["clock"] += float(state["tick_s"])
 
     state["drive"] = _drive
     return state
@@ -262,6 +277,53 @@ def test_a_run_of_inert_passes_pages_exactly_once(rig, caplog):
     assert page["skip_throttle"] is True
     assert "INERT" in page["message"]
     assert any("ALPACA RECONCILER INERT" in r.getMessage() for r in caplog.records)
+
+
+def test_an_undelivered_page_never_becomes_a_critical_log_storm(rig, caplog):
+    """THE HOLE THIS CLOSES. `dispatch_alert` returns False when the channel is
+    simply TURNED OFF — `alerts_enabled=False`, or a Telegram TIER_A preference
+    cell that is off — and it writes an AlertHistory row on every call regardless.
+    Latching on delivery therefore meant one CRITICAL line and one durable row
+    every 120s, forever, for a condition this branch measures as a ~50-DAY
+    outage: 720 lines and 720 rows a day. The alarm now latches on being RAISED;
+    only the SEND retries, three times, 15 minutes apart."""
+    rig["deliver"] = False
+    rig["tick_s"] = 120.0          # the real IntervalTrigger
+    inert = {"skipped": "alpaca_execution_quarantined", "broker_calls": 0}
+    with caplog.at_level("CRITICAL", logger=TS.logger.name):
+        rig["drive"]([dict(inert) for _ in range(400)])   # ~13 hours of passes
+    criticals = [r for r in caplog.records if r.levelname == "CRITICAL"]
+    assert len(criticals) == 1, [r.getMessage()[:60] for r in criticals]
+    assert len(rig["pages"]) == TS._AOR_PAGE_MAX_ATTEMPTS, len(rig["pages"])
+
+
+def test_a_restart_does_not_re_page_a_condition_someone_already_paged(rig, caplog):
+    """Module memory dies with the process; the 120s job on a restarting box
+    would otherwise page the same condition forever. Ported from
+    control_loop_watchdog._already_paged: only a DELIVERED prior page counts."""
+    rig["already_delivered"] = True
+    inert = {"skipped": "alpaca_execution_quarantined", "broker_calls": 0}
+    with caplog.at_level("WARNING", logger=TS.logger.name):
+        rig["drive"]([dict(inert) for _ in range(60)])
+    assert rig["pages"] == []
+    assert not [r for r in caplog.records if r.levelname == "CRITICAL"]
+    assert any("already paged" in r.getMessage() for r in caplog.records)
+
+
+def test_the_dedupe_failing_open_still_pages(rig, monkeypatch):
+    """An alarm that goes quiet because its dedupe query errored is worse than a
+    duplicate page."""
+    monkeypatch.setattr(
+        AL, "alert_already_delivered",
+        lambda *_a, **_k: (_ for _ in ()).throw(RuntimeError("db gone")),
+        raising=False,
+    )
+    inert = {"skipped": "alpaca_execution_quarantined", "broker_calls": 0}
+    # The real helper swallows this; here the stub raises, so the job's own
+    # guard has to hold. Either way the pass must not crash the scheduler AND the
+    # page must still go out.
+    rig["drive"]([dict(inert) for _ in range(20)])
+    assert len(rig["pages"]) == 1
 
 
 def test_the_alarm_needs_a_sustained_run_not_one_wobble(rig):
@@ -302,11 +364,27 @@ def test_a_deliberate_kill_switch_never_pages(rig, reason):
     assert rig["pages"] == []
 
 
-def test_an_undelivered_page_is_retried(rig):
+def test_an_undelivered_page_is_retried_on_ITS_OWN_schedule(rig):
+    """A dropped page must still be retried — discarding the send result is how a
+    dropped page becomes a silent one. But the 120s tick is NOT the retry: at that
+    cadence an unconfigured channel produces 720 rows a day. The retry is
+    _AOR_PAGE_RETRY_SECONDS, and it is capped."""
     rig["deliver"] = False
     inert = {"skipped": "alpaca_execution_quarantined", "broker_calls": 0}
-    rig["drive"]([dict(inert) for _ in range(getattr(TS, "_AOR_INERT_PASS_CAP", 15) + 4)])
-    assert len(rig["pages"]) == 5, "ang 120s tick ANG retry; hindi ito nakalatch"
+
+    rig["tick_s"] = 0.0            # clock frozen: the tick alone must not retry
+    rig["drive"]([dict(inert) for _ in range(getattr(TS, "_AOR_INERT_PASS_CAP", 15) + 20)])
+    assert len(rig["pages"]) == 1, "ang tick mismo ay hindi retry"
+
+    rig["clock"] += TS._AOR_PAGE_RETRY_SECONDS + 1.0
+    rig["drive"]([dict(inert)])
+    assert len(rig["pages"]) == 2, "lampas sa retry window ay dapat may pangalawa"
+
+    rig["clock"] += TS._AOR_PAGE_RETRY_SECONDS + 1.0
+    rig["drive"]([dict(inert)])
+    rig["clock"] += TS._AOR_PAGE_RETRY_SECONDS + 1.0
+    rig["drive"]([dict(inert)])
+    assert len(rig["pages"]) == TS._AOR_PAGE_MAX_ATTEMPTS, "may hangganan ang pag-uulit"
 
 
 def test_alert_type_is_tier_a_and_individual():
