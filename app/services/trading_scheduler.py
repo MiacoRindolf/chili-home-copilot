@@ -1291,12 +1291,47 @@ def _live_auto_arm_owner_health(db) -> tuple[bool, str | None]:
         return False, "live_runner_owner_health_probe_failed"
 
 
+# Skip reasons that are DELIBERATE CONFIGURATION, not a defect: the operator
+# turned the pass off, or this box is not the paper-authoritative host. These
+# must never raise the inertness alarm, or turning the reconciler off for a
+# launch window would page every hour.
+_AOR_INTENDED_SKIPS = frozenset({
+    "flag_off",
+    "live_runner_disabled_without_standalone_authority",
+    "alpaca_not_paper_ready",
+    "adapter_disabled",
+})
+
+# Consecutive passes that never reached the broker before the alarm. At the 120s
+# IntervalTrigger this is 30 minutes -- long enough that a transient adapter or
+# account-verification wobble self-heals, short enough that a permanent outage is
+# caught the same session instead of after ~50 days.
+_AOR_INERT_PASS_CAP = 15
+
+_aor_inert_passes = 0
+_aor_inert_paged = False
+
+
 def _run_alpaca_orphan_reconcile_job():
     """Flatten Alpaca PAPER positions / cancel resting orders that no session manages
     (the exit-reject storm's stranded orphans). PAPER-only + flatten-only + fail-open
-    guards live in the pass itself. (trading.momentum_neural.alpaca_reconcile)"""
+    guards live in the pass itself. (trading.momentum_neural.alpaca_reconcile)
+
+    AUDIBILITY (2026-09-02). This job used to log ONLY when it flattened or
+    cancelled something. A pass returning ``skipped=... broker_calls=0`` wrote no
+    log, no event and no metric -- so when the persisted-identity quarantine began
+    short-circuiting every pass, the job kept firing every 120s and returning
+    nothing, invisibly. `trading_automation_events` holds 14
+    ``alpaca_orphan_reconcile`` rows EVER, the last on 2026-07-14 16:36:50. An
+    outage of roughly fifty days in the ONLY sweeper that can find a position
+    whose owning session is already terminal, and nothing anywhere said so.
+
+    Every skip is now a WARNING carrying its reasons, and a run of consecutive
+    passes that never reach the broker raises one durable TIER_A page.
+    """
 
     def _work() -> None:
+        global _aor_inert_passes, _aor_inert_paged
         from ..db import SessionLocal
 
         db = SessionLocal()
@@ -1307,6 +1342,57 @@ def _run_alpaca_orphan_reconcile_job():
             db.commit()
             if summary.get("flattened") or summary.get("cancelled"):
                 logger.warning("[scheduler] alpaca_orphan_reconcile: %s", summary)
+            _skipped = summary.get("skipped")
+            if summary.get("reached_broker"):
+                if _aor_inert_passes:
+                    logger.warning(
+                        "[scheduler] alpaca_orphan_reconcile reached the broker "
+                        "again after %s inert pass(es)", _aor_inert_passes,
+                    )
+                _aor_inert_passes = 0
+                _aor_inert_paged = False
+                return
+            # Did not reach the broker.
+            logger.warning(
+                "[scheduler] alpaca_orphan_reconcile SKIPPED: reason=%s "
+                "quarantines=%s — walang broker call sa pass na ito",
+                _skipped, summary.get("persisted_execution_quarantines"),
+            )
+            if str(_skipped or "") in _AOR_INTENDED_SKIPS:
+                _aor_inert_passes = 0
+                return
+            _aor_inert_passes += 1
+            if _aor_inert_passes < _AOR_INERT_PASS_CAP or _aor_inert_paged:
+                return
+            message = (
+                f"ALPACA RECONCILER INERT — {_aor_inert_passes} consecutive "
+                f"passes returned without a single broker call "
+                f"(reason={_skipped!r}). This is the only broker-truth sweeper "
+                f"that can find a position whose owning session is already "
+                f"terminal; while it is inert, an orphaned paper position has no "
+                f"owner and no stop. Quarantines: "
+                f"{summary.get('persisted_execution_quarantines')}"
+            )
+            # Unconditional and BEFORE the send: the record must not be
+            # contingent on the channel.
+            logger.critical("[scheduler] %s", message)
+            try:
+                from .trading.alerts import ALPACA_RECONCILE_INERT, dispatch_alert
+
+                # Latch ONLY on confirmed delivery; the 120s tick IS the retry.
+                _aor_inert_paged = bool(dispatch_alert(
+                    db=db,
+                    alert_type=ALPACA_RECONCILE_INERT,
+                    ticker=None,
+                    message=message,
+                    skip_throttle=True,
+                    content_signature=f"alpaca_reconcile_inert:{_skipped}",
+                ))
+            except Exception:
+                logger.warning(
+                    "[scheduler] alpaca_orphan_reconcile inertness page failed",
+                    exc_info=True,
+                )
         except Exception:
             try:
                 db.rollback()
