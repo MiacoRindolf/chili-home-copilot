@@ -8226,6 +8226,47 @@ class Settings(BaseSettings):
         default=True,
         validation_alias=AliasChoices("CHILI_MOMENTUM_ENTRY_FILL_SELF_HEAL_ENABLED"),
     )
+    # 2026-09-02 CANF 19471: ang self-heal ay HINDI convergent — 3,374 beses
+    # itong pumutok sa loob ng 108 minuto (bawat wake, ~1.93s) dahil ang
+    # postcondition nito ay superset ng sariling precondition at ang tunay na
+    # adoption ay nasa ibaba ng bawat gate ng tick. Ang dedupe ng #1285 ay
+    # nagpapatahimik lang ng emit: nauuna pa rin ang broker probe at nakakabit
+    # ito sa live_pending_entry (legal na bumalik sa watching_live). Ngayon:
+    # throttle BAGO ang broker call, bilang ng tangka, at ISANG malakas na
+    # alarma kapag hindi nag-converge.
+    chili_momentum_entry_fill_self_heal_probe_interval_s: float = Field(
+        default=5.0,
+        ge=0.0,
+        le=120.0,
+        validation_alias=AliasChoices(
+            "CHILI_MOMENTUM_ENTRY_FILL_SELF_HEAL_PROBE_INTERVAL_S"
+        ),
+    )
+    chili_momentum_entry_fill_self_heal_max_attempts: int = Field(
+        default=6,
+        ge=1,
+        le=200,
+        validation_alias=AliasChoices(
+            "CHILI_MOMENTUM_ENTRY_FILL_SELF_HEAL_MAX_ATTEMPTS"
+        ),
+    )
+    chili_momentum_entry_fill_self_heal_unconverged_reprobe_s: float = Field(
+        default=60.0,
+        ge=1.0,
+        le=3600.0,
+        validation_alias=AliasChoices(
+            "CHILI_MOMENTUM_ENTRY_FILL_SELF_HEAL_UNCONVERGED_REPROBE_S"
+        ),
+    )
+    # Ang session na may naisumiteng entry order na WALANG naitalang posisyon
+    # ay maaaring may hawak na hubad na fill sa broker. Dapat itong ma-dispatch
+    # KAHIT naka-pause — ang pause ay hindi kailanman dahilan para walang stop.
+    chili_momentum_unadopted_entry_dispatch_priority_enabled: bool = Field(
+        default=True,
+        validation_alias=AliasChoices(
+            "CHILI_MOMENTUM_UNADOPTED_ENTRY_DISPATCH_PRIORITY_ENABLED"
+        ),
+    )
     chili_alpaca_unmanaged_position_flatten_enabled: bool = Field(
         default=True,
         validation_alias=AliasChoices("CHILI_ALPACA_UNMANAGED_POSITION_FLATTEN_ENABLED"),

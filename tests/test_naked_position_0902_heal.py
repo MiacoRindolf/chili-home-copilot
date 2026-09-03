@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import ast
 import inspect
+from datetime import datetime, timedelta
 from types import SimpleNamespace
 
 import pytest
@@ -197,10 +198,21 @@ def test_plain_get_order_return_also_heals(harness):
 
 def test_zero_fill_does_nothing(harness):
     sess = _sess("watching_live", {"entry_submitted": True, "entry_order_id": "f3ed508d"})
-    out, _ = _heal(sess, _Adapter(_Order(filled=0.0, status="new")))
-    assert out == {}
+    out, le = _heal(sess, _Adapter(_Order(filled=0.0, status="new")))
+    # No heal, no bind, no event, no state change — but the PROBE is recorded,
+    # so the next wake inside the interval costs no broker round-trip. Keying
+    # the throttle on a successful heal alone left a resting order polling once
+    # per wake forever (measured: 200 wakes = 200 get_order calls).
+    assert out.get("healed") is None
+    assert out.get("probe") == "unfilled"
+    assert out.get("probes") == 1
     assert sess.state == "watching_live"
     assert harness == []
+    assert "entry_fill_self_heal_sig" not in le
+    assert "entry_fill_self_heal_attempts" not in le
+    assert "entry_fill_self_heal_confirmed_size" not in le, (
+        "an unfilled order must never look like a confirmed fill"
+    )
 
 
 # ── 7: dedupe on the order id — one event across two ticks ──────────────────
@@ -237,9 +249,22 @@ def test_no_legal_chain_fails_loudly_once_and_leaves_le_untouched(harness, monke
     assert failed[0]["error"].startswith("no_legal_chain_to_pending:watching_live")
     assert failed[0]["order_id"] == "f3ed508d"
     assert not [et for et, _ in harness if et == "live_entry_fill_self_healed"]
-    # second tick, same signature => no second event
+    # Immediate second tick: throttled, so the broker is not asked again and the
+    # failure is not re-raised. The event count is what matters.
     out2, _ = _heal(sess, adapter)
-    assert out2.get("heal_failed") is True
+    assert out2.get("throttled") is True
+    assert adapter.lookups == 1
+    assert len([et for et, _ in harness if et == "live_entry_fill_self_heal_failed"]) == 1
+    # Past the probe interval it fails loudly again — still exactly one event
+    # for the signature, and still no half-bound state.
+    monkeypatch.setattr(
+        LR, "_utcnow", lambda: datetime.utcnow() + timedelta(seconds=120)
+    )
+    out3, le3 = _heal(sess, adapter)
+    assert out3.get("heal_failed") is True
+    assert adapter.lookups == 2
+    assert sess.state == "watching_live"
+    assert "entry_order_ids_all" not in le3
     assert len([et for et, _ in harness if et == "live_entry_fill_self_heal_failed"]) == 1
 
 
@@ -273,7 +298,17 @@ def test_chain_precedes_bind_and_the_swallow_is_gone():
     src = _fn_body_src(LR._heal_unrecognized_entry_fill)
     assert src.index("_transition_recovered_primary_to_pending") < src.index("_bind_recovered_entry_order")
     assert "_HEALABLE_PRE_ENTRY_STATES" in src
-    assert src.index("entry_orders_resolved") < src.index("_recover_entry_order_by_client_id")
+    # The already-resolved-order guard now lives in the shared predicate that
+    # dispatch admission also uses (_unadopted_entry_order_signature); the
+    # invariant it protects is unchanged — it must still run BEFORE any broker
+    # lookup, so a finished trade never costs a round-trip.
+    assert (
+        src.index("_unadopted_entry_order_signature")
+        < src.index("_recover_entry_order_by_client_id")
+    )
+    assert "entry_orders_resolved" in inspect.getsource(
+        LR._unadopted_entry_order_signature
+    )
     assert "live_entry_fill_self_heal_failed" in src
     i_exc = src.index("except Exception as exc")
     assert "_log.debug(" not in src[i_exc:]

@@ -53,6 +53,16 @@ MOMENTUM_LOOP_DEAD = "momentum_loop_dead"
 # two alert rows the box emitted that afternoon were routine trade signals.
 LANE_OBSERVATION_SILENT = "lane_observation_silent"
 
+# Safety alarm: the broker holds a FILLED entry the FSM never adopted, so the
+# position carries no software stop and no deadman stop. Measured 2026-09-02 on
+# CANF 19471 -- the self-heal detected the fill and then re-fired 3,373 times in
+# 108 minutes without ever converging, and the ONLY thing that ended it was a
+# human noticing. That incident is the proof that a `trading_automation_events`
+# row plus a log line is not an alarm: 3,374 of those rows carried
+# `severity: critical` and produced zero operator response for 108 minutes.
+# Routed here so it reaches a phone.
+ENTRY_FILL_UNADOPTED = "entry_fill_unadopted"
+
 # Alert tiers: A = high confidence / promoted pattern, B = standard, C = speculative
 TIER_A = "A"
 TIER_B = "B"
@@ -203,6 +213,10 @@ def classify_alert_tier(
         # A dead control loop outranks every trade signal: nothing else on
         # this list can fire while the loop that produces them is stopped.
         MOMENTUM_LOOP_DEAD,
+        # An unadopted broker fill IS a stop-critical condition: real shares are
+        # held with no software stop and no deadman stop. It outranks STOP_HIT,
+        # which at least implies a stop existed.
+        ENTRY_FILL_UNADOPTED,
         # Same argument: a lane that has stopped observing cannot produce any
         # of the signals above, so its silence outranks all of them.
         LANE_OBSERVATION_SILENT,
@@ -251,6 +265,20 @@ _INDIVIDUAL_MSG_TYPES = frozenset({
     # EDITS a pinned message in place and produces no phone notification --
     # i.e. a fourth silent surface for the one alarm meant to be loud.
     MOMENTUM_LOOP_DEAD,
+    # Same reasoning. NOTE the deliberate asymmetry: ENTRY_FILL_UNADOPTED is
+    # TIER_A and individual (so it pages) but is NOT in _STOP_CRITICAL_TYPES,
+    # exactly like MOMENTUM_LOOP_DEAD and for the same reason spelled out in
+    # control_loop_watchdog.py:158 -- membership there arms the 2s/8s retry
+    # ladder below, which is `time.sleep` on the CALLER's thread. This alarm's
+    # caller is _heal_unrecognized_entry_fill, i.e. inside a live-runner tick
+    # holding an open transaction on a box with a documented
+    # idle-in-transaction cascade, while the position it is warning about has
+    # no stop. Stalling that tick for 10s to retry an SMS is strictly worse
+    # than retrying on the next wake, which the caller already does (it latches
+    # the page only on confirmed delivery). Throttle is skipped explicitly at
+    # the call site via skip_throttle=True, so the only thing _STOP_CRITICAL
+    # membership would add here is the blocking sleep.
+    ENTRY_FILL_UNADOPTED,
     LANE_OBSERVATION_SILENT,
 })
 
