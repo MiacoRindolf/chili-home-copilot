@@ -46093,6 +46093,58 @@ def tick_live_session(
             # started_at (which is never advanced). NOT in
             # _RECYCLE_ENTRY_STATE_KEYS — it must survive the reset above.
             le["last_recycled_at_utc"] = _utcnow().isoformat()
+            # ⚠️ CLOSED-CYCLE LEDGER (2026-09-02 ledger-completeness pass). THE
+            # SINGLE LARGEST ESCAPE PATH IN THE WINDOW, and it is not the one the
+            # premise named. Ten sessions completed a FULL, SUCCESSFUL round trip —
+            # entry filled, exit filled, momentum_mfe_realized emitted with a real R
+            # — and were then recycled back to watching_live by this very block.
+            # Booking only ever happens at a TERMINAL transition, and watching_live
+            # is not terminal, so at this instant the realised P&L exists ONLY inside
+            # le["realized_pnl_usd"]. If nothing ever terminalises the session
+            # afterwards, it is lost: sessions 19457 UPC and 19463 JLHL are
+            # byte-identical to 19315 SSM through this line, and the only difference
+            # between the two that booked and the one that did not is that a
+            # session_stopped arrived later. SSM's +3.20R -> -1.60R round trip is
+            # therefore absent from every study built on the outcomes table.
+            #
+            # This appends the closed cycle to a durable, append-only list BEFORE the
+            # transition, so the leg survives (a) the entry-state reset above, (b) the
+            # next cycle overwriting the same keys, and (c) the session never
+            # terminalising at all. It also carries the leg-level history that
+            # momentum_automation_outcomes structurally cannot: UNIQUE(session_id)
+            # means one session -> one row, while this runner trades many cycles per
+            # session (CANF 19471 ran two round trips under one id and the second,
+            # −$108.85, had nowhere to go).
+            #
+            # Idempotent by cycle index; additive JSON, no migration; never raises.
+            try:
+                _cc = le.get("closed_cycles")
+                _cc = list(_cc) if isinstance(_cc, list) else []
+                _cc_idx = int(le.get("trade_cycles") or 0)
+                if not any(int((c or {}).get("cycle_index", -1)) == _cc_idx for c in _cc):
+                    _cc.append({
+                        "cycle_index": _cc_idx,
+                        "closed_at_utc": _utcnow().isoformat(),
+                        # Cumulative across the session's FSM-closed cycles (this is
+                        # how the runner itself reads it for the symbol-day brake) —
+                        # per-cycle P&L is the successive difference.
+                        "realized_pnl_usd_cumulative": _float_or_none(le.get("realized_pnl_usd")),
+                        "last_exit_reason": le.get("last_exit_reason"),
+                        "last_exit_entry_price": _float_or_none(le.get("last_exit_entry_price")),
+                        "last_exit_notional_basis_usd": _float_or_none(
+                            le.get("last_exit_notional_basis_usd")
+                        ),
+                        "entry_order_id": le.get("entry_order_id"),
+                        "stopout_cycles": int(le.get("stopout_cycles") or 0),
+                    })
+                    # Bounded: a symbol-day never legitimately runs this deep, and an
+                    # unbounded list in a hot JSONB column is its own incident.
+                    le["closed_cycles"] = _cc[-64:]
+            except Exception:
+                _log.debug(
+                    "[momentum_live] closed-cycle append failed session=%s (non-fatal)",
+                    sess.id, exc_info=True,
+                )
             _commit_le(sess, le)
             _safe_transition(db, sess, STATE_WATCHING_LIVE)
             _emit(db, sess, "live_recycled", {

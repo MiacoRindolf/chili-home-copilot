@@ -3138,6 +3138,65 @@ class Settings(BaseSettings):
         validation_alias=AliasChoices("CHILI_MOMENTUM_BROKER_TRUTH_RECONCILIATION_ENABLED"),
         description="⚠️ BINUKSAN 2026-08-26. Ang pass na ito ay ADDITIVE (hindi kailanman nag-o-overwrite ng legacy field), kaya ang pananatiling OFF nito ay walang naiingatan at may ipinagkakait. NASUKAT: nang isara ang CDTG (session 16534) nang wala ang pass na ito, ang persisted na posisyon ay nanatili sa snapshot at ang serial-recertification guard ay nag-defer ng 15 entry sa buong hapon (`account_position_exposure_present`). Kinailangan kong linisin ang hilera sa kamay. Wala ring reconciler ang container (broker-sync Exited 137, 7 linggo). Kill-switch: True => the reconcile pass writes the authoritative broker-truth label columns on momentum_automation_outcomes (additive, never overwrites legacy fields). Default OFF (pass is a no-op).",
     )
+    # ── LEDGER COMPLETENESS (2026-09-02) ────────────────────────────────────
+    # SINUKAT sa 2026-08-12..2026-09-02: 26 session ang na-fill ng broker; 3 lang
+    # ang tama ang pagkakalibro, 1 ang hindi tugma ang P&L, at 22 ang WALANG
+    # kahit anong outcome row. Broker truth −$1,211.14, libro −$186.03 — 84.6%
+    # ng tunay na lugi ay hindi nakikita ng mga aklat. Ang integrity check ay
+    # BASA-LAMANG: isang GET sa order history, tatlong DB source, at malakas na
+    # ERROR log kapag hindi sila magkatugma. Walang isinusulat.
+    chili_momentum_ledger_integrity_enabled: bool = Field(
+        default=True,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_LEDGER_INTEGRITY_ENABLED"),
+        description="ON (no-dark-flags) => the scheduled three-way ledger integrity check runs and logs [ledger_integrity] at ERROR when outcomes / mfe events / broker order history disagree. READ-ONLY; never writes, never places or cancels an order. OFF => byte-identical legacy (no check).",
+    )
+    chili_momentum_ledger_integrity_lookback_days: float = Field(
+        default=3.0,
+        ge=0.5,
+        le=120.0,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_LEDGER_INTEGRITY_LOOKBACK_DAYS"),
+    )
+    # YUGTO 2 ng parehong job: ang pagsulat ng NAWAWALANG row para sa mga session na
+    # sinabi ng BROKER na na-fill. Naka-target lang sa mga session id na kalalabas ng
+    # check bilang `filled_never_booked` — hindi bulag na sweep, at ang bilang ng
+    # isinusulat ay nakatali sa kung ano ang natagpuan ng isang tunay na broker read.
+    #
+    # ⚠️ BAKIT ITO NAKA-ON (no-dark-flags). Ang row na wala ay hindi lang nawawala sa
+    # mga pag-aaral: hindi ito nabibilang sa daily loss cap, at pagkatapos ng
+    # pagbabago sa loss guard ay maaari nitong i-pin ang buong account sa
+    # `history_unavailable`. Ang yugtong ito ang eksaktong nagpapatahimik niyan sa
+    # TAMANG dahilan — nagkakaroon ng row, gumagastos ng broker proof read ang
+    # reconcile, at ang broker ang nagpapasya — sa halip na sa MALING dahilan, ang
+    # pag-aakalang walang nangyari. OFF => ERROR log lang; mananatiling kulang ang
+    # libro hanggang may taong maglibro.
+    chili_momentum_ledger_autobackfill_enabled: bool = Field(
+        default=True,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_LEDGER_AUTOBACKFILL_ENABLED"),
+        description="ON (no-dark-flags) => after the read-only integrity check finds sessions the BROKER filled that have no outcome row, the same job books exactly those session ids via scan_terminal_sessions_missing_feedback. Bounded by the violation list; never a blind sweep. OFF => the check only logs and the books stay incomplete until an operator acts.",
+    )
+    chili_momentum_ledger_integrity_interval_seconds: int = Field(
+        default=900,
+        ge=60,
+        le=86400,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_LEDGER_INTEGRITY_INTERVAL_SECONDS"),
+        description="Interval for the scheduled integrity check. One account-wide GET per pass — deliberately far slower than the 60s recon job it complements.",
+    )
+    # ⚠️ BEHAVIOURAL CHANGE TO A LIVE LANE. `live_arm_expired` was missing from
+    # risk_policy._LOSS_HISTORY_TERMINAL_STATES, so 291 sessions (17 of them
+    # holding −$916.26 of real fills) were neither charged against the daily loss
+    # cap nor allowed to block it — on 2026-08-31 the account lost $362.29 and the
+    # guard was shown $0.00. ON makes the guard SEE them. Consequence to
+    # understand before flipping it off: an ENTERED arm-expired session with no
+    # bookable outcome row will now pin the whole account at
+    # loss_guard_history_unavailable and stop arming, exactly as an entered
+    # live_error session already does. That is the intended fail-loud behaviour —
+    # a hole in the books SHOULD stop trading — but it is a real change in when
+    # the lane halts. OFF restores byte-identical legacy selection.
+    chili_momentum_loss_history_include_arm_expired: bool = Field(
+        default=True,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_LOSS_HISTORY_INCLUDE_ARM_EXPIRED"),
+        description="ON (default) => the daily loss guard counts live_arm_expired sessions like any other ledger-terminal state. OFF => legacy blind spot restored.",
+    )
     # #1287 (2026-09-02): lookback ng naka-schedule na recon pass
     # (momentum_outcome_broker_recon, kada 60s). 2 araw = sapat para sa
     # outcome na nag-terminal sa gabi at sa ET-day na hangganan ng loss guard.

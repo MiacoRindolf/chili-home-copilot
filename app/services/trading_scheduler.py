@@ -1387,6 +1387,121 @@ def _run_momentum_outcome_broker_recon_job():
     run_scheduler_job_guarded("momentum_outcome_broker_recon", _work)
 
 
+def _run_momentum_ledger_integrity_job():
+    """Three-way ledger integrity check — the thing that would have caught this.
+
+    ANG BUTAS (2026-08-12..2026-09-02). 26 session ang na-fill ng Alpaca. 3 lang
+    ang tamang nalibro, 1 ang mali ang P&L, 22 ang WALANG outcome row. Broker
+    truth −$1,211.14; ang `momentum_automation_outcomes` ay −$186.03. Ang PINAKA-
+    MALAKING lugi ng window (MOVE 19244, −$364.14) ay walang iniwang bakas sa DB.
+
+    BAKIT HINDI SAPAT ANG `momentum_outcome_broker_recon` (kada 60s, sa itaas):
+    ang reconcile pass ay naka-INNER JOIN sa `momentum_automation_outcomes`, kaya
+    ang session na WALANG row ay hindi nito kailanman maaabot — nakakakumpuni ito
+    ng umiiral na hilera, hindi nakakalikha ng nawawala. Ang check na ito ay naka-
+    angkla sa BROKER, kaya nakikita nito ang session na walang row, walang leg, at
+    walang event.
+
+    DALAWANG YUGTO, MAGKAHIWALAY ANG SESSION AT MALINAW ANG HANGGANAN:
+
+    YUGTO 1 — BASA-LAMANG na check. Isang account-wide GET sa order history kada
+    pass. Walang isinusulat sa DB, walang order na inilalagay o kinakansela. Ang
+    `[ledger_integrity]` ERROR log kapag hindi magkatugma ang tatlong pinagmulan ang
+    punto ng yugtong ito.
+
+    YUGTO 2 — REMEDIATION na SUMUSULAT, at may sarili itong session at flag
+    (`chili_momentum_ledger_autobackfill_enabled`). Naka-TARGET lang ito sa mga
+    session id na kalalabas lang ng check bilang `filled_never_booked` — hindi
+    bulag na sweep. Ito ang UNANG tumatawag sa
+    `scan_terminal_sessions_missing_feedback`, na tatlong buwang patay na code:
+    tama ang layunin, mali ang listahan ng estado, at WALANG tumatawag.
+
+    BAKIT KAILANGAN ANG YUGTO 2 AT HINDI SAPAT ANG LOG. Kapag may fill na walang
+    outcome row, hindi lang ito nawawala sa mga pag-aaral — hindi rin ito nabibilang
+    sa daily loss cap, at (pagkatapos ng pagbabago sa loss guard) maaari nitong
+    i-pin ang buong account sa `history_unavailable`. Ang pagsusulat ng row ang
+    eksaktong nagpapatahimik niyan sa TAMANG dahilan: nagkakaroon ng row, may
+    ginagastos na broker proof read ang reconcile, at ang broker ang nagpapasya.
+    """
+
+    def _work() -> None:
+        from ..config import settings as _settings
+        from ..db import SessionLocal
+
+        if not bool(getattr(_settings, "chili_momentum_ledger_integrity_enabled", True)):
+            return
+        if not _settings.chili_momentum_live_runner_enabled:
+            return
+        lookback = float(
+            getattr(_settings, "chili_momentum_ledger_integrity_lookback_days", 3.0) or 3.0
+        )
+        unbooked_ids: list[int] = []
+        db = SessionLocal()
+        try:
+            from .trading.momentum_neural.ledger_integrity import (
+                STATUS_FILLED_NEVER_BOOKED,
+                check_live_ledger_integrity,
+            )
+
+            # The module logs its own ERROR detail; this only records the headline
+            # so a clean pass is still visible as a heartbeat in the scheduler tape.
+            out = check_live_ledger_integrity(db, days=lookback, include_broker=True)
+            if not out.get("ok"):
+                logger.error(
+                    "[scheduler] ledger integrity FAILED: coverage=%s violations=%s "
+                    "unbooked_usd=%s outside_window=%s counts=%s",
+                    out.get("coverage"), len(out.get("violations") or []),
+                    out.get("unbooked_pnl_usd"),
+                    len(out.get("broker_episodes_outside_session_window") or []),
+                    out.get("counts"),
+                )
+            unbooked_ids = [
+                int(v["session_id"])
+                for v in (out.get("violations") or [])
+                if v.get("status") == STATUS_FILLED_NEVER_BOOKED
+            ]
+        finally:
+            # READ-ONLY pass: nothing to commit, and a rollback guarantees no
+            # accidental flush of anything the identity map picked up.
+            db.rollback()
+            db.close()
+
+        if not unbooked_ids:
+            return
+        if not bool(getattr(_settings, "chili_momentum_ledger_autobackfill_enabled", True)):
+            logger.error(
+                "[scheduler] ledger integrity found %s filled-but-unbooked session(s) "
+                "%s and auto-backfill is OFF — the books stay incomplete until an "
+                "operator books them",
+                len(unbooked_ids), unbooked_ids[:25],
+            )
+            return
+
+        wdb = SessionLocal()
+        try:
+            from .trading.momentum_neural.feedback_emit import (
+                scan_terminal_sessions_missing_feedback,
+            )
+
+            res = scan_terminal_sessions_missing_feedback(
+                wdb, limit=len(unbooked_ids), session_ids=unbooked_ids
+            )
+            wdb.commit()
+            logger.error(
+                "[scheduler] ledger auto-backfill: targeted=%s processed=%s emitted=%s "
+                "failed=%s session_ids=%s",
+                len(unbooked_ids), res.get("processed"), res.get("emitted"),
+                res.get("failed_session_ids"), unbooked_ids[:25],
+            )
+        except Exception:
+            wdb.rollback()
+            logger.error("[scheduler] ledger auto-backfill FAILED", exc_info=True)
+        finally:
+            wdb.close()
+
+    run_scheduler_job_guarded("momentum_ledger_integrity", _work)
+
+
 def _run_momentum_auto_arm_live_job():
     """Autonomously arm ONE live momentum session for the candidate whose entry
     trigger is firing now (Ross-style), fully guarded via the operator arm flow.
@@ -7949,6 +8064,33 @@ def start_scheduler():
                 max_instances=1,
                 coalesce=True,
                 next_run_time=datetime.now() + timedelta(seconds=30),
+            )
+
+        # LEDGER INTEGRITY (2026-09-02). The recon job above can only repair rows
+        # that EXIST — it inner-joins the outcomes table. Over the audited window
+        # 22 filled sessions had no row at all and were therefore permanently
+        # outside its reach, hiding $1,025 of realised loss. This pass is anchored
+        # on the BROKER instead, so it sees a session CHILI has no row, no leg and
+        # no event for. READ-ONLY: one account-wide GET, no DB writes, no orders.
+        if (
+            include_momentum_exec
+            and getattr(settings, "chili_momentum_ledger_integrity_enabled", True)
+        ):
+            _lgi_secs = int(
+                getattr(settings, "chili_momentum_ledger_integrity_interval_seconds", 900) or 900
+            )
+            _scheduler.add_job(
+                _run_momentum_ledger_integrity_job,
+                trigger=IntervalTrigger(seconds=_lgi_secs),
+                id="momentum_ledger_integrity",
+                name=(
+                    f"Ledger integrity three-way check (every {_lgi_secs}s; "
+                    "outcomes x mfe events x broker order history)"
+                ),
+                replace_existing=True,
+                max_instances=1,
+                coalesce=True,
+                next_run_time=datetime.now() + timedelta(seconds=90),
             )
 
         # Monitor whichever single driver owns the lane. Event-only production has
