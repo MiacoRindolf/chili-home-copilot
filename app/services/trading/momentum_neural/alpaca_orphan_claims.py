@@ -6758,10 +6758,9 @@ def _reserve_alpaca_entry_risk(
     # risk_ledger_unreadable`` — 40 sa CHPT lamang, ang top gainer ng araw,
     # PAGKATAPOS ng OK na quote. Ang sirang row ay HINDI ebidensya ng exposure
     # (wala itong frozen instruction na maisusumite); laktawan ito nang may
-    # pangalan sa log at sa resulta, at hatulan ang natitirang malulusog na row.
+    # pangalan sa log, at hatulan ang natitirang malulusog na row.
     # Ang ``legacy_pending_not_in_adaptive_ledger`` ay NANANATILING fail-closed:
     # iyon ay sira ng LEDGER, hindi ng isang row.
-    skipped_malformed_pending: list[dict[str, Any]] = []
     try:
         for sid, row_symbol, live, _snap in pending_sessions:
             legacy_cid = str(live.get("entry_client_order_id") or "").strip()
@@ -6773,10 +6772,6 @@ def _reserve_alpaca_entry_risk(
                 live, symbol=row_symbol, client_order_id=legacy_cid
             )
             if risk is None:
-                skipped_malformed_pending.append(
-                    {"session_id": int(sid), "symbol": str(row_symbol),
-                     "client_order_id": legacy_cid or None}
-                )
                 _log.warning(
                     "[alpaca_risk] legacy pending row MALFORMED — nilaktawan, hindi "
                     "ibinulag ang account (sym=%s sid=%s row_sym=%s cid=%s): walang "

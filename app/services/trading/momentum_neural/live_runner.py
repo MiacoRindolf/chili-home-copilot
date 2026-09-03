@@ -30625,7 +30625,29 @@ def tick_live_session(
                 )
                 if cid_order is not None:
                     cid_state = "found"
-            if cid_state == "absent":
+            # AGE GATE (review 2026-09-03): ang isang 404 na mas bata sa 30 s na
+            # transport-lease window (parehong constant ng deadman path,
+            # alpaca_orphan_claims.py:60) ay maaaring visibility lag sa mismong
+            # degradasyon ng venue na nagbunga ng timeout at ng flatten — ang
+            # pagkumpleto ng flatten doon ay mag-iiwan ng resting BUY na walang
+            # may-ari (ang 09-02 naked-position class). Kapag bata pa ang 404,
+            # bumagsak sa fail-closed na `elif` sa ibaba (ack_loss_pending,
+            # return False, muling basahin sa susunod na tick). Ang incident row
+            # (oras na ang tanda) ay pumapasa pa rin.
+            _absent_since_raw = (
+                le.get("entry_reconcile_pending_since_utc")
+                or le.get("entry_submit_utc")
+            )
+            _absent_aged = False
+            if _absent_since_raw:
+                try:
+                    _absent_since = datetime.fromisoformat(
+                        str(_absent_since_raw).replace("Z", "+00:00")
+                    ).replace(tzinfo=None)
+                    _absent_aged = (_utcnow() - _absent_since).total_seconds() >= 30.0
+                except (TypeError, ValueError):
+                    _absent_aged = False
+            if cid_state == "absent" and _absent_aged:
                 # TAHASANG 404 SA EKSAKTONG CID (2026-09-03, MIMI 19534): ang cid
                 # ay hindi kailanman naging order sa venue, kaya WALANG entry
                 # exposure na dapat kanselahin o ampunin. Dati ay pinagsasama
@@ -35356,7 +35378,32 @@ def tick_live_session(
                 _recovered = _recover_entry_order_by_client_id(adapter, _reconcile_cid)
                 if _recovered is not None:
                     _cid_state = "found"
-            if _cid_state == "absent" and _reconcile_cid:
+            # ANG 404 AY PATUNAY LAMANG KAPAG WALANG DURABLE CLAIM NA NAKATALI SA CID
+            # (review 2026-09-03). Ang isang indeterminate na primary POST (timeout/5xx)
+            # ay nag-iiwan ng claim na SUBMIT_INDETERMINATE na nakatali sa cid — ang
+            # venue ay maaari pa ring mag-commit ng order na iyon, at ang isang 404 na
+            # bunga ng propagation lag ay HINDI terminal na katotohanan (:6019-6022,
+            # :15838-15841). Ang MIMI ay resolved ang claim at hindi nakatali ang repeg
+            # cid → palayain. Kapag nakatali (o hindi mabasa ang claim), manatili sa
+            # fail-closed na bloke sa ibaba at muling basahin sa susunod na tick —
+            # byte-identical sa dating gawi para sa kasong iyon.
+            _cid_claim_bound = False
+            if _cid_state == "absent" and _reconcile_cid and ef in ALPACA_EXECUTION_FAMILIES:
+                _b_scope = _frozen_alpaca_account_scope(sess)
+                if _b_scope is None:
+                    _cid_claim_bound = True
+                else:
+                    _b_readable, _b_claim = read_action_claim(
+                        db, symbol=sess.symbol, account_scope=_b_scope
+                    )
+                    _cid_claim_bound = (not _b_readable) or bool(
+                        _b_claim
+                        and _b_claim.get("action") == "entry"
+                        and _b_claim.get("phase") != "resolved"
+                        and str(_b_claim.get("client_order_id") or "").strip()
+                        == str(_reconcile_cid).strip()
+                    )
+            if _cid_state == "absent" and _reconcile_cid and not _cid_claim_bound:
                 for _k in (
                     "entry_submitted",
                     "entry_client_order_id",
@@ -36450,6 +36497,24 @@ def tick_live_session(
                                     # pending-entry seam ang magpapasya sa susunod na tick) at
                                     # HUWAG gawing "submitted" ang row.
                                     if _rp_res.get("ok") and not _rp_oid:
+                                        # ANG CID AY TUMAWID NA SA HTTP (ang adapter ay nagbabalik
+                                        # ng ok pagkatapos lamang bumalik ang submit_order), kaya
+                                        # HINDI ito maaaring ituring na "hindi nangyari". Panatilihin
+                                        # ang row sa hurisdiksyon ng pending-entry reconcile seam:
+                                        # LIVE_PENDING_ENTRY, entry_submitted=True, entry_order_id=
+                                        # None, cid nakatakda — at HUWAG bumagsak sa ack-timeout
+                                        # re-watch sa ibaba (na nagsusulat ng entry_submitted=False
+                                        # at lumilipat sa WATCHING_LIVE, kung saan walang mambabasa
+                                        # ang magtatanong sa venue tungkol sa cid na ito, at ang
+                                        # susunod na trigger ay maaaring maglagay ng BAGONG primary
+                                        # habang buhay pa ang lumang repeg order). Sa susunod na
+                                        # tick: strict read → absent nagpapalaya, found umaampon,
+                                        # unknown nananatiling fail-closed. Habang naghihintay, ang
+                                        # ledger scan ay lumalaktaw sa row (walang certified frozen
+                                        # request) sa halip na bulagin ang account.
+                                        le["entry_client_order_id"] = _rp_cid
+                                        le["entry_order_id"] = None
+                                        le["entry_submitted"] = True
                                         le["entry_reconcile_pending_client_order_id"] = _rp_cid
                                         le.setdefault(
                                             "entry_reconcile_pending_since_utc",
@@ -36462,7 +36527,14 @@ def tick_live_session(
                                             "n": _rp_n + 1,
                                             "inline": _inline,
                                         })
-                                    break
+                                        db.flush()
+                                        return {
+                                            "ok": True,
+                                            "session_id": sess.id,
+                                            "state": sess.state,
+                                            "pending": "entry_repeg_ack_without_order_id",
+                                        }
+                                    break  # governor DEFER / place reject lamang
                                 _rp_old_limit = _lim_px  # capture BEFORE reassigning for the emit
                                 le["entry_order_id"] = _rp_res.get("order_id")
                                 le["entry_client_order_id"] = _rp_res.get("client_order_id") or _rp_cid
