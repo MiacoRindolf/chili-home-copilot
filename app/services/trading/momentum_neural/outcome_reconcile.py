@@ -54,7 +54,7 @@ from __future__ import annotations
 import logging
 import re
 from datetime import datetime, timedelta, timezone
-from typing import Any, Callable, Optional
+from typing import Any, Callable, Optional, Sequence
 
 from sqlalchemy import text as _text
 from sqlalchemy.orm import Session
@@ -1800,6 +1800,7 @@ def reconcile_momentum_outcomes_to_broker_truth(
     *,
     lookback_days: float = 30.0,
     day_net_advisory: bool = True,
+    session_ids: Optional[Sequence[int]] = None,
 ) -> dict:
     """WRITE pass: reconcile recent CLOSED live momentum outcomes to broker truth.
 
@@ -1811,11 +1812,29 @@ def reconcile_momentum_outcomes_to_broker_truth(
     operator eyes and recorded in the return dict, NEVER written to a per-trade
     label (the ledger fill_ts is naive-UTC while RH's realized-pnl day is US/Eastern,
     and the shared agentic account includes manual trades). It quantifies the
-    missing-session coverage gap; it does not gate or correct any label."""
+    missing-session coverage gap; it does not gate or correct any label.
+
+    ``session_ids`` NARROWS THE PASS TO EXACTLY THOSE SESSIONS, and it exists because
+    of a real accident. On 2026-09-02 a 22-row ledger backfill invoked this function
+    with ``lookback_days=22.0`` — eleven times the scheduled job's own default of 2.0
+    (``chili_momentum_outcome_recon_lookback_days``) — in the same breath as the
+    backfill emit. It repaired the 22 intended rows and ALSO rewrote the derived
+    broker_* columns of 152 pre-existing rows reaching back to 2026-08-21, with no
+    before-state captured for any of them. Those prior values are gone and cannot be
+    restored; all that was recoverable was a post-hoc verification from broker truth
+    that the labels they now carry are correct (they are — see
+    ``project_ws/AgentOps/ledger_completeness_0902/q4_collateral_recon_audit.json``,
+    0 disagreements over 152 rows).
+
+    A targeted repair must be able to say WHICH rows it will touch. Widening a
+    historical window is a separate, operator-sized decision that needs its own
+    before-state capture over its own affected rows — never a side effect of a
+    bounded backfill."""
     if not bool(getattr(settings, "chili_momentum_broker_truth_reconciliation_enabled", False)):
         return {"ok": True, "skipped": "reconciliation_disabled"}
 
     cutoff = datetime.utcnow() - timedelta(days=float(lookback_days))
+    scoped = [int(s) for s in (session_ids or [])]
     try:
         rows = (
             db.query(MomentumAutomationOutcome, TradingAutomationSession)
@@ -1826,6 +1845,11 @@ def reconcile_momentum_outcomes_to_broker_truth(
             .filter(
                 MomentumAutomationOutcome.terminal_at >= cutoff,
                 MomentumAutomationOutcome.mode == "live",
+                *(
+                    (MomentumAutomationOutcome.session_id.in_(tuple(scoped[:500])),)
+                    if scoped
+                    else ()
+                ),
             )
             .order_by(MomentumAutomationOutcome.terminal_at.desc())
             .all()
@@ -1960,6 +1984,10 @@ def reconcile_momentum_outcomes_to_broker_truth(
         "reconciled_legacy_sum": round(legacy_sum, 2),
         "reconciled_broker_sum": round(broker_sum, 2),
         "reconciled_divergence_sum": round(broker_sum - legacy_sum, 2),
+        # What this pass was ALLOWED to touch. A pass that names its own
+        # scope can be audited after the fact; the 2026-09-02 sweep could not.
+        "scoped_session_ids": scoped or None,
+        "lookback_days": float(lookback_days),
     }
     # ADVISORY day-net cross-check (surface, never correct). Best-effort; the
     # shared-account manual trades + ET-vs-naive-UTC boundary mean this WILL diverge —

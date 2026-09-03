@@ -153,9 +153,16 @@ def test_head_read_carries_no_time_bound():
     assert "max(started_at)" in head_sql
 
 
+# Both states page. `dead` is a fresh outage; `stuck_configuration` (added
+# 2026-09-02) is the same silence once the writer has been gone for days, which
+# is a deploy fault and gets its own message. The property these tests defend is
+# unchanged: an outage must NEVER read as `absent` or `alive` at any age.
+_PAGING_STATES = ("dead", "stuck_configuration")
+
+
 def test_ancient_outage_still_pages():
     v = evaluate_control_loop(_beats(9000, NOW - timedelta(days=30)), now=NOW)
-    assert v["state"] == "dead"
+    assert v["state"] in _PAGING_STATES
     assert v["age_seconds"] == pytest.approx(30 * 86400, abs=1)
 
 
@@ -220,7 +227,7 @@ def test_real_sql_pages_at_any_outage_age(db, age_days):
 
     v = evaluate_control_loop(db, now=now)
 
-    assert v["state"] == "dead", f"{age_days}d outage must still page"
+    assert v["state"] in _PAGING_STATES, f"{age_days}d outage must still page"
     assert v["beats"] >= EVIDENCE_MIN_BEATS
     assert v["age_seconds"] == pytest.approx(age_days * 86400, abs=120)
 

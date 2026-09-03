@@ -40,6 +40,33 @@ LIVE_RUNNER_TERMINAL_STATES = frozenset(
     {STATE_LIVE_FINISHED, STATE_LIVE_CANCELLED, STATE_LIVE_ERROR}
 )
 
+# FIX-18 (operator_actions.begin_live_arm) terminalizes a zombie live_arm_pending
+# into this state. The RUNNER never transitions into it, so it is deliberately NOT
+# in LIVE_RUNNER_TERMINAL_STATES — but it IS terminal in the ledger, and treating
+# the runner set as the ledger set is what cost the books $916.26.
+STATE_LIVE_ARM_EXPIRED = "live_arm_expired"
+
+# ⚠️ THE LEDGER-TERMINAL SET. Read this before adding another ad-hoc tuple.
+#
+# Until 2026-09-02 the codebase carried TWO competing terminal vocabularies. Five
+# call sites (alpaca_orphan_claims.ALPACA_LEDGER_TERMINAL_STATES,
+# portfolio_allocator, live_runner:28433, live_replay_audit,
+# captured_paper_service_fence) each hand-rolled a tuple that INCLUDED
+# live_arm_expired, while the one chokepoint that decides whether a session books
+# an outcome row — outcome_extract.session_terminal_for_feedback — read the RUNNER
+# set, which does not. Measured over 2026-08-12..2026-09-02: live_arm_expired
+# wrote 0 outcome rows out of 291 sessions across its entire lifetime, 17 of which
+# had taken a real Alpaca fill worth −$916.26. The daily loss guard
+# (risk_policy._LOSS_HISTORY_TERMINAL_STATES) inherited the same omission, so those
+# losses were never charged against the cap either.
+#
+# A live session in ANY of these states is finished as far as the books are
+# concerned and MUST have been offered to the outcome writer. New terminal states
+# go here, not into a new tuple.
+LIVE_LEDGER_TERMINAL_STATES = frozenset(
+    LIVE_RUNNER_TERMINAL_STATES | {STATE_LIVE_ARM_EXPIRED}
+)
+
 # Concurrency / risk counting (active live automation until terminal).
 LIVE_RUNNER_ACTIVE_FOR_CONCURRENCY = frozenset(
     {

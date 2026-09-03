@@ -1261,7 +1261,40 @@ CurrentLiveLossHistoryReceipt = tuple[
 ]
 
 
-_LOSS_HISTORY_TERMINAL_STATES = frozenset(
+# ⚠️ TWO OPPOSITE LOSS-GUARD FAILURES LIVED HERE, AND ONLY ONE WAS KNOWN.
+#
+# (a) LOUD, understood: an ENTERED session in a listed state with no usable outcome
+#     row pins the WHOLE account at loss_guard_history_unavailable and arming stops.
+#     Measured 2026-08-21: sessions 14825 SDOT and 14842 COIW, both live_error, did
+#     exactly this. That is working as designed — a hole in the books SHOULD stop
+#     trading rather than let the lane size off a fiction.
+#
+# (b) SILENT, and the expensive one: ``live_arm_expired`` was NOT in this set, so
+#     the scan below never selected those sessions in either direction. Over
+#     2026-08-12..2026-09-02 that hid 291 sessions, 17 of which had taken real Alpaca
+#     fills totalling −$916.26. They were neither charged against the daily loss cap
+#     nor allowed to block it. On 2026-08-31 the account really lost $362.29 across
+#     four broker episodes and the guard was shown $0.00; six of the nine trading
+#     days with fills booked exactly $0.00 against real losses. The guard failed
+#     loudly on 2 sessions and silently on 291, and the silent failure is the one
+#     that let the lane keep trading on books understating loss by 84.6%.
+#
+# Adding it converts (b) into (a): an entered arm-expired session with no bookable
+# outcome will now stop the account instead of being ignored. THAT IS THE POINT —
+# but it is a real behavioural change to a live lane, so it carries an explicit
+# off-switch (``chili_momentum_loss_history_include_arm_expired``, ON by default per
+# the no-dark-flags rule). OFF restores byte-identical legacy selection.
+#
+# ⚠️ SELECTING THE STATE IS ONLY HALF THE FIX, AND SHIPPING ONLY THAT HALF WOULD HAVE
+# BEEN A SWEEPER THAT STOPS ONE LINE SHORT. Selection decides which sessions the scan
+# looks at; the DURABILITY test at the bottom of this function decides which of those
+# can raise a gap. Both were fill-level. Eight of the nine sessions the broker filled
+# with no fill event satisfy NO fill-level proof — no *_filled event, no
+# realized_pnl_usd, no last_exit_entry_price — so with the state added and the
+# durability test untouched, the guard's behaviour for the cohort holding −$652.68 of
+# the −$916.26 would have been byte-identical to legacy. The fourth clause
+# (``_loss_history_submission_entry_proof``) is what actually closes it.
+_LOSS_HISTORY_TERMINAL_STATES_BASE = frozenset(
     {
         "live_exited",
         "live_cooldown",
@@ -1272,6 +1305,23 @@ _LOSS_HISTORY_TERMINAL_STATES = frozenset(
         "archived",
     }
 )
+
+
+def _loss_history_terminal_states() -> frozenset[str]:
+    """The ledger-terminal states the daily loss history must account for."""
+    try:
+        include_arm_expired = bool(
+            getattr(settings, "chili_momentum_loss_history_include_arm_expired", True)
+        )
+    except Exception:
+        # Fail toward SEEING the loss. A settings read error must not silently
+        # restore the blind spot this constant exists to close.
+        include_arm_expired = True
+    if not include_arm_expired:
+        return _LOSS_HISTORY_TERMINAL_STATES_BASE
+    from .live_fsm import STATE_LIVE_ARM_EXPIRED
+
+    return frozenset(_LOSS_HISTORY_TERMINAL_STATES_BASE | {STATE_LIVE_ARM_EXPIRED})
 _LOSS_HISTORY_ENTRY_EVENTS = frozenset(
     {
         "live_entry_filled",
@@ -1282,6 +1332,60 @@ _LOSS_HISTORY_ENTRY_EVENTS = frozenset(
 _LOSS_HISTORY_ENTRY_IMPLYING_TERMINAL_STATES = frozenset(
     {"live_exited", "live_cooldown", "live_finished"}
 )
+
+
+def _loss_history_submission_events() -> frozenset[str]:
+    """The canonical submission-marker events, imported, never re-typed here.
+
+    Two predicates for "did an entry order reach the broker" that are maintained
+    separately WILL drift apart — that is the same two-vocabularies defect that let
+    ``live_arm_expired`` be terminal for the ledger and not for the booking
+    chokepoint, and it cost the books $916.26. This one delegates.
+    """
+    from .outcome_extract import _ENTRY_SUBMISSION_EVENTS
+
+    return frozenset(_ENTRY_SUBMISSION_EVENTS)
+
+
+def _loss_history_submission_entry_proof(session: Any) -> list[str]:
+    """Snapshot-side evidence that an entry order REACHED THE BROKER.
+
+    ⚠️ THE FILL-LEVEL PROOFS ARE NOT ENOUGH, AND ASSUMING THEY WERE IS THE DEFECT.
+    ``_loss_history_snapshot_entry_proof`` wants ``realized_pnl_usd`` /
+    ``last_exit_entry_price``; ``_LOSS_HISTORY_ENTRY_EVENTS`` wants a *_filled event.
+    Measured over 2026-08-12..2026-09-02, EIGHT sessions that the broker really
+    filled had none of those and were silently dropped by the guard — 14732 BCCQ
+    (−117.76), 14794 ADXN, 16759 RDIB, 17712 CELU (−47.20), 19192 AEHL, 19244 MOVE
+    (−364.14, the largest loss of the window), 19338 GYGY, 19398 INBS. All eight
+    carried a real Alpaca entry order id in the snapshot and ``entry_submitted``
+    true; 19244's is broker order c3a60320-c282-4859-b24b-02ff55730a63, BUY 119 @
+    15.05 at 2026-08-31T13:16:34Z. Selecting ``live_arm_expired`` without also
+    weakening this test leaves the guard byte-identical to legacy for exactly the
+    cohort holding −$652.68 of the −$916.26.
+
+    A submission is deliberately NOT treated as a fill anywhere that mints a number.
+    Its only job here is to make the guard say "I cannot see what this order did"
+    instead of silently assuming it did nothing. The row that settles it comes from a
+    BROKER read: once ``feedback_emit`` books the session (see
+    ``scan_terminal_sessions_missing_feedback``, wired to the integrity job) the
+    reconcile spends a proof read on it and the gap closes for the right reason.
+    A never-filled submission then books ``cancelled_pre_entry`` and
+    ``_loss_history_entry_classification`` returns ``not_entered``, so the guard
+    skips it — loud until verified, quiet once verified, never quiet on assumption.
+    """
+    snapshot = (
+        session.risk_snapshot_json
+        if isinstance(getattr(session, "risk_snapshot_json", None), dict)
+        else {}
+    )
+    live = snapshot.get("momentum_live_execution")
+    if not isinstance(live, dict):
+        return []
+    from .outcome_extract import entry_submission_evidence
+
+    # Snapshot half only — the event half is joined in by the caller, which already
+    # holds a bounded per-batch event query.
+    return entry_submission_evidence(live, [])
 _LOSS_HISTORY_AMBIGUOUS_ENTRY_CLASSES = frozenset(
     {
         "cancelled_in_trade",
@@ -1627,7 +1731,7 @@ def load_current_live_loss_history(
                 TradingAutomationSession.user_id == uid,
                 TradingAutomationSession.execution_family == family,
                 TradingAutomationSession.state.in_(
-                    tuple(sorted(_LOSS_HISTORY_TERMINAL_STATES))
+                    tuple(sorted(_loss_history_terminal_states()))
                 ),
                 terminal_clock >= day_start,
                 terminal_clock < day_end,
@@ -1665,22 +1769,28 @@ def load_current_live_loss_history(
             if lower is not None and upper is not None:
                 event_bounds[session_id] = (lower, min(upper, frontier_utc))
         event_entry_session_ids: set[int] = set()
+        # Sessions whose entry order provably REACHED THE BROKER (submission-level,
+        # weaker than a fill). Same bounded query, same frontier bounds — one extra
+        # set of event types, no extra round trip.
+        event_submission_session_ids: set[int] = set()
         if session_ids:
+            _submission_events = _loss_history_submission_events()
             event_rows = (
                 db.query(
                     TradingAutomationEvent.session_id,
                     TradingAutomationEvent.ts,
+                    TradingAutomationEvent.event_type,
                 )
                 .filter(
                     TradingAutomationEvent.session_id.in_(tuple(session_ids)),
                     TradingAutomationEvent.event_type.in_(
-                        tuple(sorted(_LOSS_HISTORY_ENTRY_EVENTS))
+                        tuple(sorted(_LOSS_HISTORY_ENTRY_EVENTS | _submission_events))
                     ),
                     TradingAutomationEvent.ts <= frontier_utc,
                 )
                 .all()
             )
-            for session_id, event_ts in event_rows:
+            for session_id, event_ts, event_type in event_rows:
                 bounds = event_bounds.get(int(session_id))
                 normalized_event_ts = _loss_history_naive_utc(event_ts)
                 if (
@@ -1688,7 +1798,10 @@ def load_current_live_loss_history(
                     and normalized_event_ts is not None
                     and bounds[0] <= normalized_event_ts <= bounds[1]
                 ):
-                    event_entry_session_ids.add(int(session_id))
+                    if event_type in _LOSS_HISTORY_ENTRY_EVENTS:
+                        event_entry_session_ids.add(int(session_id))
+                    if event_type in _submission_events:
+                        event_submission_session_ids.add(int(session_id))
     except Exception:
         logger.debug(
             "[momentum_neural] current-live loss-history read failed",
@@ -1735,7 +1848,7 @@ def load_current_live_loss_history(
         if classification == "unknown":
             _gap("loss_guard_entry_classification_unknown", session_id)
             continue
-        if str(session.state or "") not in _LOSS_HISTORY_TERMINAL_STATES:
+        if str(session.state or "") not in _loss_history_terminal_states():
             _gap("loss_guard_outcome_session_state_mismatch", session_id)
             continue
         session_terminal_at = _loss_history_naive_utc(
@@ -1865,11 +1978,21 @@ def load_current_live_loss_history(
         if generation == "other":
             continue
         if outcome is None:
+            # FOURTH CLAUSE, and the one the eight silently-dropped sessions needed.
+            # The first three are all FILL-level; an entry that reached the broker
+            # and whose fate we cannot see satisfies none of them. See
+            # _loss_history_submission_entry_proof for the measured cohort.
+            submission_evidence = (
+                _loss_history_submission_entry_proof(session)
+                if session_id not in event_submission_session_ids
+                else ["event"]
+            )
             durable = (
                 str(session.state or "")
                 in _LOSS_HISTORY_ENTRY_IMPLYING_TERMINAL_STATES
                 or _loss_history_snapshot_entry_proof(session)
                 or session_id in event_entry_session_ids
+                or bool(submission_evidence)
             )
         else:
             durable = _loss_history_entry_classification(
