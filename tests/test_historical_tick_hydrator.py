@@ -556,3 +556,196 @@ def test_polygon_client_uses_half_open_bounds_that_tile_without_overlap():
     assert params["timestamp.gte"] == 100
     assert params["timestamp.lt"] == 200      # lt, not lte
     assert params["order"] == "asc"
+
+
+# ---------------------------------------------------------------------------
+# operational interlocks
+# ---------------------------------------------------------------------------
+class _AdvisoryLockPool:
+    """Models ``pg_try_advisory_lock`` semantics: session-scoped, non-blocking.
+
+    A fake rather than a real database, because the contract being bound is how
+    THIS code uses the primitive -- one key, try-not-block, released with the
+    session -- and that contract has to hold while the live lane is running.
+    """
+
+    def __init__(self) -> None:
+        self.held: dict[int, object] = {}
+
+
+class _LockCursor:
+    def __init__(self, pool, owner):
+        self._pool, self._owner, self._row = pool, owner, None
+
+    def execute(self, sql, params=None):
+        key = int(params[0])
+        if "pg_try_advisory_lock" in sql:
+            holder = self._pool.held.get(key)
+            if holder is None:
+                self._pool.held[key] = self._owner
+                self._row = (True,)
+            else:
+                self._row = (holder is self._owner,)
+        elif "pg_advisory_unlock" in sql:
+            if self._pool.held.get(key) is self._owner:
+                del self._pool.held[key]
+            self._row = (True,)
+        return self
+
+    def fetchone(self):
+        return self._row
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *a):
+        return False
+
+
+class _LockConn:
+    def __init__(self, pool):
+        self._pool = pool
+        self.closed = False
+
+    def cursor(self):
+        return _LockCursor(self._pool, self)
+
+    def commit(self):
+        pass
+
+    def close(self):
+        # A session ending releases every advisory lock it held. Modelling that
+        # is the point: it is why a crashed hydrator cannot wedge the next one.
+        for key, holder in list(self._pool.held.items()):
+            if holder is self:
+                del self._pool.held[key]
+        self.closed = True
+
+
+def test_a_second_hydrator_is_refused_while_the_first_holds_the_lock():
+    """The failure this prevents was named by Phase 1 and left unguarded.
+
+    IQFeed limits SIMULTANEOUS lookup connections and the behaviour past that
+    limit is untested against the shared IQConnect process the live L1 bridge
+    depends on. Two agent sessions running the hydrator -- this project's
+    demonstrated operating mode -- would each open their own :9100 socket.
+    """
+    from scripts.historical_tick_hydrator import (
+        HydratorAlreadyRunning,
+        acquire_singleton_lock,
+        acquire_singleton_lock_or_raise,
+    )
+
+    pool = _AdvisoryLockPool()
+    first, second = _LockConn(pool), _LockConn(pool)
+
+    acquire_singleton_lock_or_raise(first)          # first run wins
+    assert acquire_singleton_lock(second) is False  # second sees it held
+    with pytest.raises(HydratorAlreadyRunning, match="another hydrator is running"):
+        acquire_singleton_lock_or_raise(second)
+
+
+def test_the_lock_dies_with_the_session_so_a_crash_cannot_wedge_the_next_run():
+    from scripts.historical_tick_hydrator import (
+        acquire_singleton_lock_or_raise,
+    )
+
+    pool = _AdvisoryLockPool()
+    crashed = _LockConn(pool)
+    acquire_singleton_lock_or_raise(crashed)
+    crashed.close()                                  # process died mid-run
+
+    survivor = _LockConn(pool)
+    acquire_singleton_lock_or_raise(survivor)        # must not raise
+
+
+def test_singleton_lock_releases_on_the_way_out_even_on_error():
+    from scripts.historical_tick_hydrator import (
+        HYDRATOR_ADVISORY_LOCK_KEY,
+        singleton_lock,
+    )
+
+    pool = _AdvisoryLockPool()
+    conn = _LockConn(pool)
+    with pytest.raises(ValueError):
+        with singleton_lock(conn):
+            raise ValueError("symbol-day blew up")
+    assert HYDRATOR_ADVISORY_LOCK_KEY not in pool.held
+
+
+def test_the_advisory_lock_key_is_a_valid_postgres_bigint():
+    """A key outside int8 would make every acquisition raise, which reads as a
+    broken tool rather than as a disabled interlock."""
+    from scripts.historical_tick_hydrator import HYDRATOR_ADVISORY_LOCK_KEY
+
+    assert -(2 ** 63) <= HYDRATOR_ADVISORY_LOCK_KEY < 2 ** 63
+
+
+# --- the market-hours gate ---------------------------------------------------
+def _utc(y, m, d, hh, mm):
+    return datetime(y, m, d, hh, mm, tzinfo=timezone.utc)
+
+
+def test_market_hours_gate_refuses_inside_the_session():
+    """chili_hydrated is a separate DATABASE, not a separate CLUSTER.
+
+    One postmaster, one WAL, one 4 GB shared_buffers, one bind mount, shared
+    with the live 222 GB chili. Phase 4's clean run depended on 98% of its rows
+    landing after the 20:00 ET close -- scheduling luck, not a property of the
+    tool. This is the line that makes it a property of the tool.
+    """
+    from scripts.historical_tick_hydrator import (
+        MarketHoursRefusal,
+        assert_outside_market_hours,
+    )
+
+    # 13:35 UTC = 09:35 EDT, five minutes into the regular session.
+    with pytest.raises(MarketHoursRefusal, match="04:00-20:00 ET"):
+        assert_outside_market_hours(now=_utc(2026, 8, 26, 13, 35))
+    # 08:00 UTC = 04:00 EDT, the first second of premarket -- inclusive.
+    with pytest.raises(MarketHoursRefusal):
+        assert_outside_market_hours(now=_utc(2026, 8, 26, 8, 0))
+
+
+def test_market_hours_gate_allows_after_the_close():
+    from scripts.historical_tick_hydrator import assert_outside_market_hours
+
+    # 00:00 UTC = 20:00 EDT exactly -- the close, and the window is half-open.
+    assert_outside_market_hours(now=_utc(2026, 8, 27, 0, 0))
+    # 02:30 UTC = 22:30 EDT, when Phase 4 actually ran.
+    assert_outside_market_hours(now=_utc(2026, 9, 3, 2, 30))
+
+
+def test_market_hours_gate_uses_zoneinfo_not_a_fixed_offset():
+    """The corpus straddles the DST boundary. A hardcoded -4 would put the gate
+    an hour off for every EST date, and the refusal (or the pass) would look
+    entirely reasonable."""
+    from scripts.historical_tick_hydrator import (
+        MarketHoursRefusal,
+        assert_outside_market_hours,
+    )
+
+    # 2026-03-06 is EST (UTC-5). 09:30 UTC = 04:30 EST -> inside the session.
+    with pytest.raises(MarketHoursRefusal):
+        assert_outside_market_hours(now=_utc(2026, 3, 6, 9, 30))
+    # ...and 08:30 UTC = 03:30 EST -> outside it. Under a fixed -4 the same two
+    # instants would be read as 05:30 and 04:30 and BOTH would refuse.
+    assert_outside_market_hours(now=_utc(2026, 3, 6, 8, 30))
+
+
+def test_market_hours_gate_can_be_overridden_deliberately():
+    from scripts.historical_tick_hydrator import assert_outside_market_hours
+
+    assert_outside_market_hours(allow=True, now=_utc(2026, 8, 26, 13, 35))
+
+
+def test_market_hours_gate_accepts_a_naive_now_as_utc():
+    """A naive datetime must not be read as server-local time: on this box that
+    is Pacific, which would shift the whole gate by three hours."""
+    from scripts.historical_tick_hydrator import (
+        MarketHoursRefusal,
+        assert_outside_market_hours,
+    )
+
+    with pytest.raises(MarketHoursRefusal):
+        assert_outside_market_hours(now=datetime(2026, 8, 26, 13, 35))

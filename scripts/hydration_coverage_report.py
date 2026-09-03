@@ -10,8 +10,34 @@ that matter are:
   * What did it cost in requests, bytes and wall clock?
 
 So this reads the corpus manifest as the DENOMINATOR and the tape tables as the
-NUMERATOR, rather than reporting the job ledger back to itself.  A symbol-day is
-only "replayable" if rows exist in the table the replay reads.
+NUMERATOR, rather than reporting the job ledger back to itself.
+
+WHAT "REPLAYABLE" MEANS -- AND WHY IT IS NOT "HAS TRADES"
+--------------------------------------------------------
+An earlier version of this file called a symbol-day replayable when SOME
+provider had given it trades.  That is not the consumer's definition and it
+overstated coverage by six symbol-days.  ``counterfactual_replay._confidence``
+returns ``("no_tape", ["no_nbbo_tape"])`` the moment the NBBO tape is empty, and
+bar-candidate generation is guarded on the NBBO ticks -- not the trade ticks.
+Under the default ``live_admission_mode=True`` the two tick-driven families that
+could otherwise have used trade prints are deliberately skipped.  So trades
+alone generate ZERO candidates: the run is not a thin replay, it is no replay.
+
+Replayable therefore means **trades AND NBBO**, and NBBO is counted with the
+loader's OWN validity predicate (``bid > 0 AND ask > 0 AND ask >= bid``) rather
+than a bare row count, so a tape full of crossed or zero quotes cannot pass.  A
+symbol-day with trades but no usable book is reported as
+``tape_only_not_replayable`` -- a real, named tier, not a silent pass.
+
+THE MIXED-VENDOR QUOTE SEAM
+---------------------------
+After canonicalization the corpus is IQFeed trades + Polygon quotes, and
+``load_trade_tape`` puts ``iqfeed_trade_ticks.bid/ask`` on every tick it
+returns.  So the FSM sees IQFeed's at-trade quotes on the trade tape and
+Polygon's quote stream on the NBBO tape -- two vendors, same symbol-day, same
+run.  That is a deliberate choice (see ``scripts/hydration_quote_seam_check.py``
+for the measured disagreement), but it must be VISIBLE, so every row names both:
+``trade_quote_vendor`` / ``trade_quote_derivation`` and ``nbbo_vendor``.
 
 Read-only.  Touches ``chili_hydrated`` only; never ``chili``.
 
@@ -69,27 +95,75 @@ DATASETS: dict[tuple[str, str], tuple[str, str]] = {
 }
 
 
-def _row_counts(conn, table: str, source: str) -> dict[tuple[str, date], int]:
+# How the bid/ask on a TRADE row came to be, per trade source. IQFeed 6.2 L1
+# ships the last trade and top-of-book in one record, so its at-trade quote is a
+# native measurement. Polygon splits them, so the hydrator reconstructs the
+# trade-row quote by as-of merge from /v3/quotes -- same columns, different
+# epistemic status, and a consumer computing a spread off a trade tick deserves
+# to know which one it is holding.
+TRADE_QUOTE_DERIVATION = {
+    SOURCE_IQFEED_TRADES: "native_at_trade_bid_ask",
+    SOURCE_POLYGON_TRADES: "as_of_merge_from_v3_quotes",
+}
+
+# The loader's own NBBO validity predicate, quoted rather than paraphrased:
+# counterfactual_replay.load_nbbo_tape filters on exactly this, so a row that
+# fails it is invisible to the replay no matter how many of them exist.
+NBBO_VALID_PREDICATE = "bid > 0 AND ask > 0 AND ask >= bid"
+
+
+def _row_counts(conn, table: str, source: str) -> dict[tuple[str, date], dict]:
     """Rows per (symbol, ET trading day) for one hydrated source.
 
     Bucketed by America/New_York because a trading day is an ET concept and the
     tape spans 04:00-20:00 ET, which straddles midnight UTC.  ``observed_at`` is
     naive-UTC in the trade table and aware in the NBBO table, so the cast to
     ``timestamptz`` is what makes the two comparable.
+
+    Returns rows, the count that survives the loader's validity predicate, and
+    the OBSERVED first/last tick.  The observed bounds matter because the
+    per-symbol-day ``since_utc``/``until_utc`` are what was REQUESTED; only the
+    observed first tick can tell you whether premarket was actually delivered.
     """
     # The NBBO tape is timestamptz, the trade tape is naive-UTC. The extra
     # "AT TIME ZONE 'UTC'" is what gives the naive column a zone before it is
     # converted; omitting it would silently bucket by server-local time.
+    is_nbbo = table == NBBO_TABLE
     day_expr = (
         "(observed_at AT TIME ZONE 'America/New_York')::date"
-        if table == NBBO_TABLE
+        if is_nbbo
         else "(observed_at AT TIME ZONE 'UTC' AT TIME ZONE 'America/New_York')::date"
     )
-    sql = (f"SELECT symbol, {day_expr} AS d, count(*) "
+    valid = NBBO_VALID_PREDICATE if is_nbbo else "price > 0"
+    sql = (f"SELECT symbol, {day_expr} AS d, count(*), "
+           f"       count(*) FILTER (WHERE {valid}), "
+           f"       min(observed_at), max(observed_at) "
            f"FROM {table} WHERE source = %s GROUP BY 1, 2")
     with conn.cursor() as cur:
         cur.execute(sql, (source,))
-        return {(sym, day): int(n) for sym, day, n in cur.fetchall()}
+        out: dict[tuple[str, date], dict] = {}
+        for sym, day, n, n_valid, lo, hi in cur.fetchall():
+            out[(sym, day)] = {
+                "rows": int(n),
+                "valid": int(n_valid or 0),
+                "first": _as_utc_iso(lo, aware=is_nbbo),
+                "last": _as_utc_iso(hi, aware=is_nbbo),
+            }
+        return out
+
+
+def _as_utc_iso(ts: datetime | None, *, aware: bool) -> str | None:
+    """Render an observed_at as an unambiguous UTC instant.
+
+    The trade tape's column is naive-UTC and the NBBO tape's is aware; printing
+    the naive one straight through would produce a timestamp that LOOKS like a
+    local time and reads four hours wrong to anyone who assumes ET.
+    """
+    if ts is None:
+        return None
+    if not aware and ts.tzinfo is None:
+        ts = ts.replace(tzinfo=timezone.utc)
+    return ts.astimezone(timezone.utc).isoformat()
 
 
 def build_report(pairs: list[tuple[str, date]], dbname: str,
@@ -144,8 +218,13 @@ def build_report(pairs: list[tuple[str, date]], dbname: str,
             "until_utc": until.isoformat(),
         }
         for (prov, ds) in DATASETS:
-            n = counts[(prov, ds)].get((sym, day), 0)
+            got = counts[(prov, ds)].get((sym, day)) or {}
+            n = int(got.get("rows", 0))
+            n_valid = int(got.get("valid", 0))
             rec[f"{prov}_{ds}"] = n
+            rec[f"{prov}_{ds}_usable"] = n_valid
+            rec[f"{prov}_{ds}_first_utc"] = got.get("first")
+            rec[f"{prov}_{ds}_last_utc"] = got.get("last")
             if n > 0:
                 covered[f"{prov}_{ds}"] += 1
             status, _, err = jobs.get((sym, day, ds, prov), ("missing", 0, None))
@@ -159,7 +238,10 @@ def build_report(pairs: list[tuple[str, date]], dbname: str,
         # ~250 false alarms and bury the handful of real gaps.
         for ds, provs in (("trades", ("iqfeed", "polygon")),
                           ("nbbo", ("polygon", "iqfeed"))):
-            if any(rec[f"{p}_{ds}"] > 0 for p in provs):
+            # NBBO coverage is counted with the loader's validity predicate: a
+            # tape of crossed or zero quotes is a hole, not coverage.
+            key = "_usable" if ds == "nbbo" else ""
+            if any(rec[f"{p}_{ds}{key}"] > 0 for p in provs):
                 continue
             details = []
             for p in provs:
@@ -173,9 +255,33 @@ def build_report(pairs: list[tuple[str, date]], dbname: str,
                              "dataset": ds, "status": label,
                              "detail": "; ".join(details)})
             reasons[f"{ds}/{label}"].append(f"{sym} {day}")
-        # A symbol-day is replayable when SOME provider gave it trades.
-        rec["replayable_trades"] = rec["iqfeed_trades"] > 0 or rec["polygon_trades"] > 0
-        rec["replayable_nbbo"] = rec["iqfeed_nbbo"] > 0 or rec["polygon_nbbo"] > 0
+        # Which vendor's quote rides on the TRADE tape, and how it got there.
+        # Named per symbol-day because canonicalization already chose, the two
+        # tables can legitimately land on different vendors, and a consumer
+        # cannot tell from the tick rows alone.
+        rec["has_trades"] = rec["iqfeed_trades"] > 0 or rec["polygon_trades"] > 0
+        rec["has_nbbo"] = rec["iqfeed_nbbo_usable"] > 0 or rec["polygon_nbbo_usable"] > 0
+        trade_src = (SOURCE_IQFEED_TRADES if rec["iqfeed_trades"] > 0
+                     else SOURCE_POLYGON_TRADES if rec["polygon_trades"] > 0 else None)
+        nbbo_src = (SOURCE_POLYGON_NBBO if rec["polygon_nbbo_usable"] > 0
+                    else SOURCE_IQFEED_NBBO if rec["iqfeed_nbbo_usable"] > 0 else None)
+        rec["trade_source"] = trade_src
+        rec["trade_quote_vendor"] = ("iqfeed" if trade_src == SOURCE_IQFEED_TRADES
+                                     else "polygon" if trade_src else None)
+        rec["trade_quote_derivation"] = TRADE_QUOTE_DERIVATION.get(trade_src or "")
+        rec["nbbo_source"] = nbbo_src
+        rec["nbbo_vendor"] = ("polygon" if nbbo_src == SOURCE_POLYGON_NBBO
+                              else "iqfeed" if nbbo_src else None)
+        rec["mixed_vendor_quote_seam"] = bool(
+            rec["trade_quote_vendor"] and rec["nbbo_vendor"]
+            and rec["trade_quote_vendor"] != rec["nbbo_vendor"]
+        )
+
+        # THE definition. Trades alone are not replayable -- see the module
+        # docstring: _confidence returns no_tape without an NBBO tape, and
+        # bar-candidate generation is guarded on NBBO ticks.
+        rec["replayable"] = rec["has_trades"] and rec["has_nbbo"]
+        rec["tape_only_not_replayable"] = rec["has_trades"] and not rec["has_nbbo"]
         per_pair.append(rec)
 
     return {
@@ -183,12 +289,19 @@ def build_report(pairs: list[tuple[str, date]], dbname: str,
         "database_size": db_size,
         "corpus_symbol_days": len(pairs),
         "coverage_by_source": dict(covered),
-        "replayable_trades": sum(1 for r in per_pair if r["replayable_trades"]),
-        "replayable_nbbo": sum(1 for r in per_pair if r["replayable_nbbo"]),
-        "replayable_both": sum(1 for r in per_pair
-                               if r["replayable_trades"] and r["replayable_nbbo"]),
-        "not_replayable": [f"{r['symbol']} {r['date']}" for r in per_pair
-                           if not r["replayable_trades"]],
+        "replayable_definition":
+            "trades AND NBBO, NBBO counted with the loader's own predicate "
+            f"({NBBO_VALID_PREDICATE}). Trades alone yield zero candidates.",
+        "replayable": sum(1 for r in per_pair if r["replayable"]),
+        "not_replayable": sum(1 for r in per_pair if not r["replayable"]),
+        "not_replayable_symbol_days": [f"{r['symbol']} {r['date']}" for r in per_pair
+                                       if not r["replayable"]],
+        "tape_only_not_replayable": [f"{r['symbol']} {r['date']}" for r in per_pair
+                                     if r["tape_only_not_replayable"]],
+        "has_trades": sum(1 for r in per_pair if r["has_trades"]),
+        "has_nbbo": sum(1 for r in per_pair if r["has_nbbo"]),
+        "mixed_vendor_quote_seam": sum(1 for r in per_pair
+                                       if r["mixed_vendor_quote_seam"]),
         "cost": cost,
         "cost_totals": {
             "requests": sum(c["requests"] for c in cost),

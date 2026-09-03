@@ -31,6 +31,17 @@ SEPARATE listening sockets.  This client therefore:
     BEFORE the first connect and refuses to run if the lane is not holding the
     stream.
 
+THE INTERLOCK HAS EXACTLY ONE OFF SWITCH, AND IT IS LOUD
+--------------------------------------------------------
+``--no-verify-lane`` disables ``assert_lane_clients_present()``.  It is
+genuinely useful -- when the lane is DOWN there is nothing holding :5009 and the
+interlock would otherwise refuse a legitimate backfill -- but it is also the
+single mechanism standing between this client and the 5-second IQConnect
+shutdown.  So it is not usable on its own: it must be paired with
+``--i-accept-iqconnect-shutdown-risk``, it prints a warning banner naming the
+hazard, and ``resolve_verify_lane()`` is the ONLY path by which ``verify_lane``
+becomes False.  DO NOT USE IT WHILE THE LANE IS LIVE.
+
 Protocol: IQFeed 6.2, CRLF-terminated commands, ``!ENDMSG!,`` terminates a
 successful lookup response, ``E,`` prefixes an error line.
 
@@ -357,16 +368,76 @@ def _print_result(res: RequestResult, *, head: int = 12) -> None:
         print(f"  ... ({res.n_records - head} more)")
 
 
+LANE_BYPASS_BANNER = (
+    "=" * 72 + "\n"
+    "WARNING: LANE INTERLOCK DISABLED (--no-verify-lane)\n"
+    "  assert_lane_clients_present() will NOT run. If nothing else is holding\n"
+    "  IQConnect's Level-1 stream (:5009), this client becomes IQConnect's LAST\n"
+    "  client and its disconnect shuts IQConnect down ~5 seconds later, taking\n"
+    "  the live lane's market data with it.\n"
+    "  DO NOT USE THIS WHILE THE TRADING LANE IS LIVE.\n"
+    + "=" * 72
+)
+
+
+class LaneBypassRefused(RuntimeError):
+    """``--no-verify-lane`` was passed without the explicit risk acceptance."""
+
+
+def resolve_verify_lane(
+    *, no_verify_lane: bool, accept_shutdown_risk: bool,
+    warn=None,
+) -> bool:
+    """The ONLY path by which ``verify_lane`` becomes False.
+
+    Returns True (interlock armed) unless the operator passed BOTH
+    ``--no-verify-lane`` and ``--i-accept-iqconnect-shutdown-risk``.  Passing
+    only the risk flag is a no-op; passing only ``--no-verify-lane`` is refused,
+    because a safety interlock whose off switch is one careless copy-paste away
+    from the default is not an interlock.
+    """
+    if not no_verify_lane:
+        return True
+    if not accept_shutdown_risk:
+        raise LaneBypassRefused(
+            "--no-verify-lane disables the interlock that keeps this client "
+            "from becoming IQConnect's last connection (5-second shutdown "
+            "hazard). Re-run with --i-accept-iqconnect-shutdown-risk if the "
+            "trading lane is genuinely down; see the 'do not use while the "
+            "lane is live' section of docs/HISTORICAL_TICK_HYDRATOR.md."
+        )
+    (warn or (lambda msg: print(msg, file=sys.stderr)))(LANE_BYPASS_BANNER)
+    return False
+
+
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--smoke", action="store_true", help="connect + protocol ack only")
     ap.add_argument("--htx", nargs=2, metavar=("SYMBOL", "N"))
     ap.add_argument("--htt", nargs=5, metavar=("SYMBOL", "BDATE", "BTIME", "EDATE", "ETIME"))
     ap.add_argument("--max-datapoints", type=int, default=100)
-    ap.add_argument("--no-verify-lane", action="store_true")
+    ap.add_argument(
+        "--no-verify-lane", action="store_true",
+        help="DANGEROUS: skip the lane interlock. Requires "
+             "--i-accept-iqconnect-shutdown-risk. Never while the lane is live.",
+    )
+    ap.add_argument(
+        "--i-accept-iqconnect-shutdown-risk", action="store_true",
+        dest="accept_shutdown_risk",
+        help="explicit acknowledgement required by --no-verify-lane",
+    )
     args = ap.parse_args(argv)
 
-    client = IQFeedLookupClient(verify_lane=not args.no_verify_lane)
+    try:
+        verify_lane = resolve_verify_lane(
+            no_verify_lane=args.no_verify_lane,
+            accept_shutdown_risk=args.accept_shutdown_risk,
+        )
+    except LaneBypassRefused as exc:
+        print(f"REFUSING: {exc}", file=sys.stderr)
+        return 2
+
+    client = IQFeedLookupClient(verify_lane=verify_lane)
     t0 = time.monotonic()
     client.connect()
     print(f"connected {LOOKUP_HOST}:{LOOKUP_PORT} in {time.monotonic() - t0:.3f}s")

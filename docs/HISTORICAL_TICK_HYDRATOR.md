@@ -14,13 +14,68 @@ is a request away.
 
 ---
 
+## Safety: read this before the first run
+
+### `chili_hydrated` is a separate DATABASE, not a separate CLUSTER
+
+"Separate database" means **logical** separation only. `chili_hydrated` and the
+live 222 GB `chili` share **one postmaster, one WAL, one 4 GB `shared_buffers`,
+and one bind mount** (`E:/CHILI-Docker/postgres`). A multi-million-row `COPY`
+into the hydrated database evicts the live lane's buffers, shares its WAL, and
+competes for the same spindle. "No writes to `chili`" is **not** the same claim
+as "no impact on the lane's database", and this codebase has a documented
+history of Postgres I/O starvation incidents.
+
+Re-verify rather than trusting this paragraph:
+
+```powershell
+docker inspect chili-home-copilot-postgres-1 --format '{{json .Mounts}}'
+psql -h localhost -p 5433 -U chili -d chili_hydrated -c "
+  SELECT datname, pg_size_pretty(pg_database_size(datname))
+  FROM pg_database WHERE datname IN ('chili','chili_hydrated');
+  SHOW shared_buffers; SHOW data_directory;"
+```
+
+Two interlocks follow from this and are enforced **in code**, not by convention:
+
+- **Market hours.** A load started between **04:00 and 20:00 ET** is refused
+  unless you pass `--allow-market-hours`. The window applies on every day of the
+  week — the cluster is shared every day, and a rule with no calendar edge case
+  is a rule that cannot be got wrong. Phase 4's clean run depended on 98 % of its
+  35.5 M rows landing after the close; that was scheduling luck until this
+  existed.
+- **One hydrator at a time, machine-wide.** A session-level Postgres advisory
+  lock on the hydrated database. IQFeed limits *simultaneous* lookup connections
+  and the behaviour past that limit was never tested — deliberately, because the
+  failure mode plausibly affects the shared IQConnect process the live L1 bridge
+  depends on. Two agent sessions running the hydrator would each open their own
+  `:9100` socket. The second one now exits **3** with `another hydrator is
+  running`. The lock dies with the session, so a crashed run cannot wedge the
+  next one.
+
+### Do not use `--no-verify-lane` while the lane is live
+
+`scripts/iqfeed_lookup_client.py --no-verify-lane` disables
+`assert_lane_clients_present()`, the single mechanism keeping this client from
+becoming IQConnect's **last** connection — after which IQConnect exits ~5 s
+later and takes the live lane's market data with it.
+
+It is genuinely useful when the lane is **down** (nothing holds `:5009`, so the
+interlock would otherwise refuse a legitimate backfill). It is refused on its
+own: it must be paired with `--i-accept-iqconnect-shutdown-risk`, and it prints
+a warning banner. `resolve_verify_lane()` is the only path by which
+`verify_lane` becomes `False`, and a test asserts that.
+
+---
+
 ## Quick start
 
 ```powershell
 # 0. one-time: create the hydration database and its schema
 python scripts/historical_tick_hydrator.py --init-db
 
-# 1. hydrate individual symbol-days (IQFeed is the default provider)
+# 1. hydrate individual symbol-days (IQFeed is the default provider).
+#    Refused inside 04:00-20:00 ET; run after the close, or say --allow-market-hours.
 python scripts/historical_tick_hydrator.py --symbol-day CANF:2026-09-02
 
 # 2. hydrate a corpus from CSV (needs a `symbol`/`ticker` column and a
@@ -34,7 +89,10 @@ python scripts/historical_tick_hydrator.py --provider polygon --csv corpus.csv
 python scripts/hydration_canonicalize.py --apply
 python scripts/hydration_coverage_report.py --csv corpus.csv --json coverage.json
 
-# 5. what is loaded, what failed and why
+# 5. BEFORE running a study: prove it will not return an empty result (trap 3)
+python scripts/hydration_preflight.py --csv corpus.csv --allow-pre-source-entries
+
+# 6. what is loaded, what failed and why
 python scripts/historical_tick_hydrator.py --status
 ```
 
@@ -43,9 +101,17 @@ actually *replayable* — a job marked `done` that produced zero rows is a hole,
 not coverage. `hydration_coverage_report.py` counts rows in the tables the
 replay reads, against your corpus as the denominator, and reports those holes.
 
+**"Replayable" means trades AND NBBO**, with NBBO counted using the loader's own
+predicate (`bid > 0 AND ask > 0 AND ask >= bid`). Trades alone are *not*
+replayable: `counterfactual_replay._confidence` returns `no_tape` the moment the
+NBBO tape is empty, and bar-candidate generation is guarded on NBBO ticks — so a
+trades-only symbol-day yields **zero** candidates, not few. Those are reported
+in their own tier, `tape_only_not_replayable`.
+
 Everything lands in a **separate database** (`chili_hydrated` by default,
 `--db-name` to change). The hydrator *refuses* to target `chili` or
-`chili_test`. Run it from a git worktree and it finds the main checkout's
+`chili_test` — but see the safety section above for what "separate" does and
+does not mean. Run it from a git worktree and it finds the main checkout's
 `.env` automatically; `--env-file` / `CHILI_ENV_FILE` override.
 
 ---
@@ -61,6 +127,7 @@ Everything lands in a **separate database** (`chili_hydrated` by default,
 | Throughput | ~121k ticks/s, ~5.4 req/s latency-bound | ~47.6k rows/s, ~200 rps per front door |
 | NBBO fidelity | **at-trade samples only** — no quote history between prints | the real NBBO stream |
 | NBBO coverage | **not universal** — returns no top-of-book at all for some OTC names (REEMF 2026-08-19, NLST 2026-08-20: every trade row had null bid *and* ask, though the trades themselves loaded) | broader |
+| At-trade bid/ask on a trade row | **native** — L1 ships it with the print | **reconstructed** by as-of merge from `/v3/quotes` |
 | Fidelity vs our own tape | our recording is a near-perfect **subset** of it (99.995–100 % of our prints match, same µs, same price) — and it holds prints we never recorded | agrees with IQFeed to ~0.02 % on trades; fractional sizes; at-trade bid/ask is reconstructed |
 | Verdict | **fit for FSM replay (trades)** | fit for replay too, and the **only** fit source for NBBO; required past the IQFeed cliff |
 
@@ -75,6 +142,38 @@ independent second opinion.
 Phase 3 measured all of this on seven symbol-days where we hold both tapes; see
 `project_ws/AgentOps/historical_hydrator_0902/PHASE3_VALIDATION.md` and run
 `scripts/hydration_fidelity_check.py` to reproduce it.
+
+### The at-trade quote is not a free choice — canonicalization already made it
+
+The "at-trade bid/ask" row above is **not** a menu. Canonicalization keeps
+IQFeed trades and Polygon quotes, and `load_trade_tape` puts
+`iqfeed_trade_ticks.bid/ask` on **every tick it returns**. So on every
+canonicalized symbol-day the FSM sees:
+
+- **IQFeed's native at-trade quotes** on the trade tape (`load_trade_tape`), and
+- **Polygon's quote stream** on the NBBO tape (`load_nbbo_tape`).
+
+Two vendors, same symbol-day, same run. Canonicalization removed the vendor
+flicker *within* the NBBO table; it did not remove it *across* the two tables
+the replay reads together, and because the preference deliberately inverts, the
+split is universal across every symbol-day rather than incidental.
+
+**This is a deliberate choice, not an oversight.** Keeping IQFeed's native
+at-trade quotes preserves a measurement; overwriting them with a Polygon as-of
+merge would substitute a reconstruction that is *itself* unvalidated. But a
+consumer computing a spread off a trade tick is not holding the same number the
+NBBO tape would return at that instant, and must know it.
+
+Measure the seam rather than assuming its size:
+
+```powershell
+python scripts/hydration_quote_seam_check.py --csv corpus.csv --json seam.json
+```
+
+Every symbol-day in `hydration_coverage_report.py` also names both vendors
+explicitly — `trade_quote_vendor` / `trade_quote_derivation` (`iqfeed` →
+`native_at_trade_bid_ask`, `polygon` → `as_of_merge_from_v3_quotes`),
+`nbbo_vendor`, and a `mixed_vendor_quote_seam` flag.
 
 ---
 
@@ -119,7 +218,7 @@ window, rows loaded, rows replaced, and a sha256 over the exact COPY payload.
 
 ---
 
-## Three traps this code exists to avoid
+## Five traps this code exists to avoid
 
 ### 0. The replay reads *every* source at once
 
@@ -182,8 +281,6 @@ inclusion-rule question, *not* a split). It compares **median** price, not the
 high — one stray one-share print moves the max by orders of magnitude and
 produced three false positives when this was first tried against the max.
 
-## Two more traps
-
 ### 1. The timezone landmine
 
 `iqfeed_trade_ticks.observed_at` is `TIMESTAMP **WITHOUT** TIME ZONE` holding
@@ -211,6 +308,53 @@ ignition, which is the part a momentum study cares about most. The hydrator
 on `ts < oldest_seen` so the seam neither loses nor duplicates a tick. HTT
 bounds are also *inclusive at second resolution*, so tiled windows end one
 second before the next begins.
+
+### 3. The source gate is empty for any corpus after early July 2026
+
+**This is the trap that makes the whole deliverable return nothing, silently.**
+
+`run_counterfactual_symbol_replay` gates every entry on
+`require_source_before_entry` (**default `True`**) and skips with
+`no_ross_source_before_entry`. Those source events do **not** come from the
+database: `load_ross_source_events` reads JSONL files under
+`D:\CHILI-Docker\chili-data\ross_stream\` —
+
+| file | state (2026-09-02) |
+|---|---|
+| `transcript.jsonl` | last written **2026-07-07** |
+| `ross_transcript_admission_audit.jsonl` | last written **2026-07-01** |
+| `ross_admission_dry_run.jsonl` | last written **2026-07-01** |
+| `ross_trade_events.jsonl` | **does not exist** |
+
+Measured over the whole hydrated corpus window (2026-08-19 → 2026-09-03, no
+symbol filter): `load_ross_source_events` returns **`{}` — zero events for every
+symbol**. So the default run admits nothing, exits **0**, and prints a replay
+with zero trades and an empty opportunity-label summary. Nothing in the output
+says a flag was needed.
+
+**Point `DATABASE_URL` at `chili_hydrated` and nothing else changes** is
+therefore false. Pick an admission mode deliberately — the two flags are **not**
+interchangeable:
+
+| flag | `live_admission_mode` | what changes |
+|---|---|---|
+| `--allow-pre-source-entries` | stays **ON** | candidates still come only from live's real ladder (`_BAR_GATE_FAMILIES`: momentum_pullback / vwap_reclaim / ross_breakout_starter); entries no longer require a catalyst |
+| `--no-live-admission-mode` | **OFF** | re-enables the `market_certified` synthetic-source window **and** two harness-only tick families (`tick_first_pullback`, `tick_vwap_reclaim_burst`) that `live_runner.py` never evaluates |
+
+**Use `--allow-pre-source-entries` for a live-parity counterfactual.** It keeps
+live's actual entry ladder and drops only the catalyst precondition, which is
+the honest adjustment for symbols live never discovered.
+`--no-live-admission-mode` is a **different strategy**, not a wider view of the
+same one — the module's own docstring gives CELZ 2026-06-30, where it fabricated
+three chop entries live would have refused. Use it for opportunity *labelling*,
+and never present its output as "what live would have done".
+
+Gate every study on the preflight, which asserts both the usable-NBBO predicate
+and the source gate and exits non-zero:
+
+```powershell
+python scripts/hydration_preflight.py --csv corpus.csv --allow-pre-source-entries
+```
 
 ---
 
@@ -260,6 +404,19 @@ second before the next begins.
 - **Nanoseconds are truncated to microseconds** — PostgreSQL's resolution.
 - Memory is bounded per IQFeed window (`--window-minutes`, default 60), not per
   day. A mega-cap full session is still large; lower the window for those.
+- **The canonical corpus is mixed-vendor at the quote level** — IQFeed at-trade
+  quotes on the trade tape, Polygon quotes on the NBBO tape, on every
+  symbol-day. See "The at-trade quote is not a free choice" above and measure it
+  with `scripts/hydration_quote_seam_check.py`.
+- **`hydration_canonicalize.py --apply` deletes the second provider's copy.**
+  It is reproducible (`--db-name chili_hydrated_xcheck`, ~45 min for the Phase 4
+  corpus), but after canonicalization the per-symbol-day comparison in the
+  saved `*_canonicalize_plan.json` is the only surviving record of the tape that
+  was dropped.
+- **A large `--apply` leaves dead tuples.** Autovacuum reclaims them on its own
+  cost throttle rather than competing with the live lane; confirm with
+  `SELECT relname, n_dead_tup, last_autovacuum FROM pg_stat_user_tables` in
+  `chili_hydrated` rather than assuming.
 
 ---
 

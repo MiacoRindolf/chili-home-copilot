@@ -12,7 +12,7 @@ recording.
 from __future__ import annotations
 
 import sys
-from datetime import date
+from datetime import date, datetime, timezone
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
@@ -22,6 +22,31 @@ from scripts import historical_tick_hydrator as hyd  # noqa: E402
 
 D = date(2026, 8, 26)
 D2 = date(2026, 8, 27)
+
+# Observed first/last stand-ins. The trade tape's observed_at is naive-UTC and
+# the NBBO tape's is aware, and the reporter has to render both as the same
+# UTC instant -- getting that wrong is a silent four-hour lie.
+_FIRST_NAIVE = datetime(2026, 8, 26, 8, 0, 0)
+_LAST_NAIVE = datetime(2026, 8, 26, 23, 59, 56)
+_FIRST_AWARE = _FIRST_NAIVE.replace(tzinfo=timezone.utc)
+_LAST_AWARE = _LAST_NAIVE.replace(tzinfo=timezone.utc)
+
+
+def _counts_tuple(n, *, aware: bool):
+    """(rows, usable, first, last) from a test fixture value.
+
+    An int means "all rows are usable"; a dict lets a test say otherwise, which
+    is how the crossed/zero-quote case is expressed.
+    """
+    if isinstance(n, dict):
+        rows, usable = int(n["rows"]), int(n["valid"])
+    else:
+        rows = usable = int(n)
+    if rows == 0:
+        return rows, usable, None, None
+    return (rows, usable,
+            _FIRST_AWARE if aware else _FIRST_NAIVE,
+            _LAST_AWARE if aware else _LAST_NAIVE)
 
 
 class FakeCursor:
@@ -42,9 +67,11 @@ class FakeCursor:
         else:  # the per-source row-count scan
             table = hyd.NBBO_TABLE if hyd.NBBO_TABLE in s else hyd.TRADES_TABLE
             source = params[0]
-            self._rows = [(sym, day, n)
-                          for (tbl, src, sym, day), n in self._counts.items()
-                          if tbl == table and src == source]
+            self._rows = [
+                (sym, day, *_counts_tuple(n, aware=table == hyd.NBBO_TABLE))
+                for (tbl, src, sym, day), n in self._counts.items()
+                if tbl == table and src == source
+            ]
         return self
 
     def fetchall(self):
@@ -90,8 +117,9 @@ def test_done_but_empty_is_a_failure_not_coverage(monkeypatch):
     report, _ = run(monkeypatch, [("LGCL", D)], counts={}, jobs=jobs)
 
     assert report["coverage_by_source"].get("iqfeed_trades", 0) == 0
-    assert report["replayable_trades"] == 0
-    assert "LGCL 2026-08-26" in report["not_replayable"]
+    assert report["has_trades"] == 0
+    assert report["replayable"] == 0
+    assert "LGCL 2026-08-26" in report["not_replayable_symbol_days"]
     assert any(f["dataset"] == "trades" and f["status"] == "uncovered"
                for f in report["failures"])
 
@@ -114,7 +142,7 @@ def test_canonicalized_away_source_is_not_a_failure(monkeypatch):
     report, _ = run(monkeypatch, [("LGCL", D)], counts, jobs)
 
     assert report["failure_count"] == 0
-    assert report["replayable_both"] == 1
+    assert report["replayable"] == 1
 
 
 def test_no_data_from_every_provider_is_labelled_as_such(monkeypatch):
@@ -129,8 +157,11 @@ def test_no_data_from_every_provider_is_labelled_as_such(monkeypatch):
             ("REEMF", D2, "nbbo", "polygon", "no_data", 0, None)]
     report, _ = run(monkeypatch, [("REEMF", D2)], counts, jobs)
 
-    assert report["replayable_trades"] == 1      # still replayable on trades
-    assert report["replayable_nbbo"] == 0
+    assert report["has_trades"] == 1
+    assert report["has_nbbo"] == 0
+    # trades without a book is NOT replayable -- it is its own named tier
+    assert report["replayable"] == 0
+    assert report["tape_only_not_replayable"] == ["REEMF 2026-08-27"]
     assert report["failure_reasons"]["nbbo/no_data_from_any_provider"]["n"] == 1
 
 
@@ -140,10 +171,10 @@ def test_rows_present_count_as_coverage(monkeypatch):
     jobs = [("LGCL", D, "trades", "iqfeed", "done", 310382, None)]
     report, _ = run(monkeypatch, [("LGCL", D)], counts, jobs)
 
-    assert report["replayable_trades"] == 1
-    assert report["replayable_nbbo"] == 1
-    assert report["replayable_both"] == 1
-    assert report["not_replayable"] == []
+    assert report["has_trades"] == 1
+    assert report["has_nbbo"] == 1
+    assert report["replayable"] == 1
+    assert report["not_replayable_symbol_days"] == []
     row = report["per_symbol_day"][0]
     assert row["iqfeed_trades"] == 310382
     assert row["polygon_nbbo"] == 103057
@@ -161,8 +192,8 @@ def test_one_provider_is_enough_to_be_replayable(monkeypatch):
             ("CHGA", D2, "trades", "polygon", "done", 50000, None)]
     report, _ = run(monkeypatch, [("CHGA", D2)], counts, jobs)
 
-    assert report["replayable_trades"] == 1
-    assert report["replayable_both"] == 1
+    assert report["has_trades"] == 1
+    assert report["replayable"] == 1
     # Polygon covered it, so the table is not a hole and nothing is flagged.
     assert report["failure_count"] == 0
     # ...but the IQFeed job status is still visible per symbol-day.
@@ -181,17 +212,18 @@ def test_failures_are_grouped_by_distinct_reason(monkeypatch):
     assert report["failure_reasons"][key]["n"] == 3
     # the per-provider error text survives into the detail line
     assert any("TimeoutError" in f["detail"] for f in report["failures"])
-    assert report["not_replayable"] == ["AAA 2026-08-26", "BBB 2026-08-26",
-                                        "CCC 2026-08-26"]
+    assert report["not_replayable_symbol_days"] == ["AAA 2026-08-26",
+                                                   "BBB 2026-08-26",
+                                                   "CCC 2026-08-26"]
 
 
 def test_missing_job_row_is_not_silently_covered(monkeypatch):
     """A symbol-day nobody ever attempted must show up, not vanish."""
     report, _ = run(monkeypatch, [("NEVR", D)], counts={}, jobs=[])
     assert report["corpus_symbol_days"] == 1
-    assert report["replayable_trades"] == 0
+    assert report["has_trades"] == 0
     assert report["per_symbol_day"][0]["iqfeed_trades_status"] == "missing"
-    assert "NEVR 2026-08-26" in report["not_replayable"]
+    assert "NEVR 2026-08-26" in report["not_replayable_symbol_days"]
     assert report["failure_reasons"]["trades/uncovered"]["n"] == 1
 
 
@@ -242,3 +274,93 @@ def test_session_bounds_use_zoneinfo_not_a_fixed_offset():
     lo2, hi2 = et_session_bounds_utc(_date(2026, 3, 6))
     assert lo2.isoformat() == "2026-03-06T09:00:00+00:00"
     assert hi2.isoformat() == "2026-03-07T01:00:00+00:00"
+
+
+def test_crossed_or_zero_quotes_are_not_coverage(monkeypatch):
+    """Rows are not a book.
+
+    ``load_nbbo_tape`` filters on ``bid > 0 AND ask > 0 AND ask >= bid``.  A
+    tape of a million crossed quotes returns ZERO ticks to the replay, so
+    counting the rows would report coverage the consumer cannot use -- the
+    overcount failure mode, dressed as a full table.
+    """
+    counts = {
+        (hyd.TRADES_TABLE, hyd.SOURCE_IQFEED_TRADES, "XCRS", D): 5000,
+        (hyd.NBBO_TABLE, hyd.SOURCE_POLYGON_NBBO, "XCRS", D): {"rows": 900_000,
+                                                               "valid": 0},
+    }
+    report, _ = run(monkeypatch, [("XCRS", D)], counts, jobs=[])
+
+    assert report["per_symbol_day"][0]["polygon_nbbo"] == 900_000
+    assert report["per_symbol_day"][0]["polygon_nbbo_usable"] == 0
+    assert report["has_nbbo"] == 0
+    assert report["replayable"] == 0
+    assert report["tape_only_not_replayable"] == ["XCRS 2026-08-26"]
+
+
+def test_mixed_vendor_quote_seam_is_named_not_implied(monkeypatch):
+    """The corpus is IQFeed trades + Polygon quotes on EVERY symbol-day.
+
+    ``load_trade_tape`` puts ``iqfeed_trade_ticks.bid/ask`` on every tick it
+    returns, so a spread computed off a trade tick and a spread read from the
+    NBBO tape at the same instant come from different vendors.  That is a
+    deliberate choice; it must not be an invisible one.
+    """
+    counts = {(hyd.TRADES_TABLE, hyd.SOURCE_IQFEED_TRADES, "LGCL", D): 310382,
+              (hyd.NBBO_TABLE, hyd.SOURCE_POLYGON_NBBO, "LGCL", D): 103057}
+    report, _ = run(monkeypatch, [("LGCL", D)], counts, jobs=[])
+
+    row = report["per_symbol_day"][0]
+    assert row["trade_quote_vendor"] == "iqfeed"
+    assert row["trade_quote_derivation"] == "native_at_trade_bid_ask"
+    assert row["nbbo_vendor"] == "polygon"
+    assert row["mixed_vendor_quote_seam"] is True
+    assert report["mixed_vendor_quote_seam"] == 1
+
+
+def test_polygon_trade_quotes_are_named_as_a_reconstruction(monkeypatch):
+    """A Polygon-sourced trade row's bid/ask is an as-of MERGE, not a reading.
+
+    Same columns, different epistemic status.  A consumer computing a spread off
+    that tick is holding a reconstruction, and the artifact has to say so.
+    """
+    counts = {(hyd.TRADES_TABLE, hyd.SOURCE_POLYGON_TRADES, "CHGA", D2): 50000,
+              (hyd.NBBO_TABLE, hyd.SOURCE_POLYGON_NBBO, "CHGA", D2): 40000}
+    report, _ = run(monkeypatch, [("CHGA", D2)], counts, jobs=[])
+
+    row = report["per_symbol_day"][0]
+    assert row["trade_quote_vendor"] == "polygon"
+    assert row["trade_quote_derivation"] == "as_of_merge_from_v3_quotes"
+    # Both tapes are Polygon here, so there is no seam to warn about.
+    assert row["mixed_vendor_quote_seam"] is False
+
+
+def test_observed_bounds_are_utc_from_both_column_types(monkeypatch):
+    """Measured extended-hours coverage, not inferred from the request window.
+
+    ``since_utc``/``until_utc`` are what was ASKED for; only the observed first
+    tick says whether premarket actually arrived.  The trade tape's column is
+    naive-UTC and the NBBO tape's is aware -- rendering the naive one straight
+    through would publish a timestamp that reads four hours wrong.
+    """
+    counts = {(hyd.TRADES_TABLE, hyd.SOURCE_IQFEED_TRADES, "LGCL", D): 310382,
+              (hyd.NBBO_TABLE, hyd.SOURCE_POLYGON_NBBO, "LGCL", D): 103057}
+    report, _ = run(monkeypatch, [("LGCL", D)], counts, jobs=[])
+
+    row = report["per_symbol_day"][0]
+    assert row["iqfeed_trades_first_utc"] == "2026-08-26T08:00:00+00:00"
+    assert row["polygon_nbbo_first_utc"] == "2026-08-26T08:00:00+00:00"
+    assert row["iqfeed_trades_last_utc"] == "2026-08-26T23:59:56+00:00"
+    # 08:00Z is 04:00 ET -- the first second of premarket, which is the claim
+    # the corpus makes and which the REQUESTED bounds cannot substantiate.
+    assert row["since_utc"] == "2026-08-26T08:00:00+00:00"
+
+
+def test_uncovered_symbol_day_has_no_vendor_claims(monkeypatch):
+    """Absent data must not acquire a vendor by default."""
+    report, _ = run(monkeypatch, [("NEVR", D)], counts={}, jobs=[])
+    row = report["per_symbol_day"][0]
+    assert row["trade_quote_vendor"] is None
+    assert row["nbbo_vendor"] is None
+    assert row["mixed_vendor_quote_seam"] is False
+    assert row["iqfeed_trades_first_utc"] is None

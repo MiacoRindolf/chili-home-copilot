@@ -140,3 +140,48 @@ def test_connect_refuses_when_nothing_holds_the_l1_stream(monkeypatch) -> None:
     c = iqlc.IQFeedLookupClient(verify_lane=True)
     with pytest.raises(RuntimeError, match="REFUSING TO CONNECT"):
         c.connect()
+
+
+# --- the interlock's OFF SWITCH ---------------------------------------------
+# A safety interlock whose bypass appears in neither the runbook nor the tests
+# is one careless copy-paste from being the default. These bind the bypass.
+def test_verify_lane_is_armed_by_default() -> None:
+    assert iqlc.resolve_verify_lane(
+        no_verify_lane=False, accept_shutdown_risk=False) is True
+
+
+def test_no_verify_lane_alone_is_refused() -> None:
+    """--no-verify-lane on its own must not disarm the interlock.
+
+    It is the single mechanism standing between this client and the 5-second
+    IQConnect shutdown that would take the live lane's market data with it.
+    """
+    with pytest.raises(iqlc.LaneBypassRefused, match="i-accept-iqconnect-shutdown-risk"):
+        iqlc.resolve_verify_lane(no_verify_lane=True, accept_shutdown_risk=False)
+
+
+def test_risk_flag_alone_changes_nothing() -> None:
+    """Acknowledging the risk is not the same as asking for the bypass."""
+    assert iqlc.resolve_verify_lane(
+        no_verify_lane=False, accept_shutdown_risk=True) is True
+
+
+def test_the_paired_flags_are_the_only_way_to_disarm_and_they_warn() -> None:
+    warned: list[str] = []
+    assert iqlc.resolve_verify_lane(
+        no_verify_lane=True, accept_shutdown_risk=True, warn=warned.append) is False
+    assert len(warned) == 1
+    banner = warned[0]
+    assert "LANE INTERLOCK DISABLED" in banner
+    assert "5 seconds" in banner or "5-second" in banner
+    assert ":5009" in banner
+    assert "DO NOT USE THIS WHILE THE TRADING LANE IS LIVE" in banner
+
+
+def test_cli_exits_nonzero_without_connecting_when_the_bypass_is_refused(monkeypatch) -> None:
+    """The refusal must happen BEFORE a socket is opened, not after."""
+    def _boom(*a, **k):  # pragma: no cover - must never run
+        raise AssertionError("constructed a client despite a refused bypass")
+
+    monkeypatch.setattr(iqlc, "IQFeedLookupClient", _boom)
+    assert iqlc.main(["--smoke", "--no-verify-lane"]) == 2

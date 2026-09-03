@@ -67,6 +67,25 @@ CONTINUED BACKWARD (re-request ``[begin, oldest_returned]``), not bisected.
 Note also that HTT bounds are INCLUSIVE at second resolution, so tiled windows
 end one second before the next begins or the shared second is double-counted.
 
+TWO OPERATIONAL INTERLOCKS (both added after review; both enforced in code)
+--------------------------------------------------------------------------
+1. ONE HYDRATOR AT A TIME, MACHINE-WIDE.  IQFeed limits SIMULTANEOUS lookup
+   connections, and the failure mode when that limit is exceeded is unknown and
+   plausibly affects the SHARED IQConnect process the live L1 bridge depends on
+   -- so it was never tested deliberately.  Two operators (or two agent
+   sessions, which is this project's demonstrated operating mode) each running
+   ``--provider iqfeed`` would each open their own :9100 socket.  A Postgres
+   session-level advisory lock on the hydrated database prevents that: the tool
+   already holds a connection, the lock dies with the session so a crashed run
+   cannot wedge it, and it is machine-wide.  See ``singleton_lock``.
+
+2. NOT DURING MARKET HOURS, UNLESS SAID OUT LOUD.  ``chili_hydrated`` is a
+   SEPARATE DATABASE but NOT a separate cluster: one postmaster, one WAL, one
+   4 GB shared_buffers, one bind mount, shared with the 222 GB live ``chili``.
+   Phase 4's clean run depended on 98% of its 35.5M rows landing after the
+   20:00 ET close -- that was scheduling luck, not a property of the tool.
+   ``assert_outside_market_hours`` makes it a property of the tool.
+
 Usage
 -----
   # one-time: create the hydration database and its schema
@@ -95,8 +114,10 @@ import time
 import uuid
 from array import array
 from bisect import bisect_right
+from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
+from datetime import time as time_
 from pathlib import Path
 from typing import Any, Callable, Iterable, Iterator, Sequence
 from zoneinfo import ZoneInfo
@@ -636,6 +657,106 @@ def ensure_schema(conn) -> None:
         for stmt in DDL_LEDGER:
             cur.execute(stmt)
     conn.commit()
+
+
+# ---------------------------------------------------------------------------
+# operational interlocks
+# ---------------------------------------------------------------------------
+# One constant, forever. Changing it silently disables the interlock against
+# every already-running hydrator, which is the one thing it exists to prevent.
+# (ASCII "CHLHYD!" as a bigint; well inside int8 range.)
+HYDRATOR_ADVISORY_LOCK_KEY = 0x43484C48594421
+
+
+class HydratorAlreadyRunning(RuntimeError):
+    """Another hydrator process holds the singleton advisory lock."""
+
+
+class MarketHoursRefusal(RuntimeError):
+    """A load was started inside the 04:00-20:00 ET window without consent."""
+
+
+def acquire_singleton_lock(conn, key: int = HYDRATOR_ADVISORY_LOCK_KEY) -> bool:
+    """Take the machine-wide hydrator lock on ``conn``'s session. Never blocks."""
+    with conn.cursor() as cur:
+        cur.execute("SELECT pg_try_advisory_lock(%s)", (key,))
+        got = bool(cur.fetchone()[0])
+    conn.commit()
+    return got
+
+
+def release_singleton_lock(conn, key: int = HYDRATOR_ADVISORY_LOCK_KEY) -> None:
+    """Best-effort release. The session ending releases it anyway."""
+    try:
+        with conn.cursor() as cur:
+            cur.execute("SELECT pg_advisory_unlock(%s)", (key,))
+        conn.commit()
+    except Exception:  # pragma: no cover - the connection may already be gone
+        log.debug("[hydrator] advisory unlock failed (session already closed?)",
+                  exc_info=True)
+
+
+def acquire_singleton_lock_or_raise(
+    conn, key: int = HYDRATOR_ADVISORY_LOCK_KEY,
+) -> None:
+    """Refuse to run a second hydrator against the same hydrated database.
+
+    Session-level, so it is released when this connection closes -- including
+    when the process dies -- which means a crashed run can never wedge the next
+    one. It is held for the WHOLE load, not per symbol-day, because the resource
+    being protected is the shared IQConnect process's simultaneous-lookup-
+    connection budget, which is a property of the run, not of a request.
+    """
+    if acquire_singleton_lock(conn, key):
+        return
+    raise HydratorAlreadyRunning(
+        "another hydrator is running against this database (advisory lock "
+        f"{key} is held). IQFeed limits SIMULTANEOUS lookup connections and "
+        "the behaviour past that limit is untested against the shared "
+        "IQConnect process the live lane depends on, so this refuses rather "
+        "than opening a second :9100 socket. Wait for the other run to "
+        "finish, or check for a stuck session with: SELECT * FROM pg_locks "
+        f"WHERE locktype='advisory' AND objid={key & 0xFFFFFFFF};"
+    )
+
+
+@contextmanager
+def singleton_lock(conn, key: int = HYDRATOR_ADVISORY_LOCK_KEY) -> Iterator[None]:
+    acquire_singleton_lock_or_raise(conn, key)
+    try:
+        yield
+    finally:
+        release_singleton_lock(conn, key)
+
+
+def assert_outside_market_hours(
+    *, allow: bool = False, now: datetime | None = None,
+) -> None:
+    """Refuse a load inside 04:00-20:00 ET unless the caller said so explicitly.
+
+    The window is the one CHILI actually trades (premarket open through
+    postmarket close), and it is applied on EVERY day rather than weekdays only:
+    the cluster is shared every day of the week, the exemption flag costs one
+    word, and a rule with no calendar edge case is a rule that cannot be got
+    wrong. Computed via zoneinfo, never a fixed offset.
+    """
+    if allow:
+        return
+    now = (now or datetime.now(timezone.utc))
+    if now.tzinfo is None:
+        now = now.replace(tzinfo=UTC)
+    et = now.astimezone(ET)
+    if not (time_(4, 0) <= et.time() < time_(20, 0)):
+        return
+    raise MarketHoursRefusal(
+        f"refusing to start a load at {et:%Y-%m-%d %H:%M:%S %Z} — inside the "
+        "04:00-20:00 ET session. The hydrated database is a SEPARATE DATABASE "
+        "but NOT a separate cluster: one postmaster, one WAL, one 4 GB "
+        "shared_buffers and one bind mount (E:/CHILI-Docker/postgres), shared "
+        "with the live 222 GB `chili`. A multi-million-row COPY evicts the live "
+        "lane's buffers and shares its WAL. Run after 20:00 ET, or pass "
+        "--allow-market-hours if you have decided the contention is acceptable."
+    )
 
 
 def connect(dbname: str = DEFAULT_HYDRATED_DB, env_path: str | None = None):
@@ -1275,9 +1396,18 @@ def hydrate(
     window_minutes: int = IQFEED_WINDOW_MINUTES,
     rps: float | None = None,
     env_path: str | None = None,
+    allow_market_hours: bool = False,
 ) -> list[HydrationResult]:
+    # Both interlocks are checked BEFORE a provider socket is opened: the point
+    # is to refuse, not to refuse halfway through.
+    assert_outside_market_hours(allow=allow_market_hours)
     conn = connect(dbname, env_path)
     ensure_schema(conn)
+    try:
+        acquire_singleton_lock_or_raise(conn)
+    except HydratorAlreadyRunning:
+        conn.close()
+        raise
     results: list[HydrationResult] = []
     iq: IQFeedLookupClient | None = None
     poly: PolygonHistoricalClient | None = None
@@ -1327,6 +1457,7 @@ def hydrate(
     finally:
         if iq is not None:
             iq.close()
+        release_singleton_lock(conn)
         conn.close()
     return results
 
@@ -1406,6 +1537,12 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--no-nbbo", action="store_true", help="load trades only")
     ap.add_argument("--window-minutes", type=int, default=IQFEED_WINDOW_MINUTES)
     ap.add_argument("--rps", type=float, default=None, help="polygon request rate cap")
+    ap.add_argument(
+        "--allow-market-hours", action="store_true",
+        help="permit a load inside 04:00-20:00 ET. chili_hydrated shares a "
+             "postmaster, a WAL, a 4 GB buffer pool and a disk volume with the "
+             "live chili; a multi-million-row COPY competes with the lane.",
+    )
     ap.add_argument("--json", action="store_true", help="emit a JSON summary on stdout")
     args = ap.parse_args(argv)
 
@@ -1433,16 +1570,23 @@ def main(argv: list[str] | None = None) -> int:
         ap.error("nothing to do: pass --symbol-day and/or --csv")
 
     t0 = time.monotonic()
-    results = hydrate(
-        pairs,
-        provider=args.provider,
-        dbname=args.db_name,
-        force=args.force,
-        write_nbbo=not args.no_nbbo,
-        window_minutes=args.window_minutes,
-        rps=args.rps,
-        env_path=args.env_file,
-    )
+    try:
+        results = hydrate(
+            pairs,
+            provider=args.provider,
+            dbname=args.db_name,
+            force=args.force,
+            write_nbbo=not args.no_nbbo,
+            window_minutes=args.window_minutes,
+            rps=args.rps,
+            env_path=args.env_file,
+            allow_market_hours=args.allow_market_hours,
+        )
+    except (HydratorAlreadyRunning, MarketHoursRefusal) as exc:
+        # Exit non-zero with the sentence that explains it. A refusal that looks
+        # like a crash is a refusal an operator will work around blindly.
+        print(f"REFUSING: {exc}", file=sys.stderr)
+        return 3
     summary = {
         "provider": args.provider,
         "symbol_days": len(results),
