@@ -3138,6 +3138,65 @@ class Settings(BaseSettings):
         validation_alias=AliasChoices("CHILI_MOMENTUM_BROKER_TRUTH_RECONCILIATION_ENABLED"),
         description="⚠️ BINUKSAN 2026-08-26. Ang pass na ito ay ADDITIVE (hindi kailanman nag-o-overwrite ng legacy field), kaya ang pananatiling OFF nito ay walang naiingatan at may ipinagkakait. NASUKAT: nang isara ang CDTG (session 16534) nang wala ang pass na ito, ang persisted na posisyon ay nanatili sa snapshot at ang serial-recertification guard ay nag-defer ng 15 entry sa buong hapon (`account_position_exposure_present`). Kinailangan kong linisin ang hilera sa kamay. Wala ring reconciler ang container (broker-sync Exited 137, 7 linggo). Kill-switch: True => the reconcile pass writes the authoritative broker-truth label columns on momentum_automation_outcomes (additive, never overwrites legacy fields). Default OFF (pass is a no-op).",
     )
+    # ── LEDGER COMPLETENESS (2026-09-02) ────────────────────────────────────
+    # SINUKAT sa 2026-08-12..2026-09-02: 26 session ang na-fill ng broker; 3 lang
+    # ang tama ang pagkakalibro, 1 ang hindi tugma ang P&L, at 22 ang WALANG
+    # kahit anong outcome row. Broker truth −$1,211.14, libro −$186.03 — 84.6%
+    # ng tunay na lugi ay hindi nakikita ng mga aklat. Ang integrity check ay
+    # BASA-LAMANG: isang GET sa order history, tatlong DB source, at malakas na
+    # ERROR log kapag hindi sila magkatugma. Walang isinusulat.
+    chili_momentum_ledger_integrity_enabled: bool = Field(
+        default=True,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_LEDGER_INTEGRITY_ENABLED"),
+        description="ON (no-dark-flags) => the scheduled three-way ledger integrity check runs and logs [ledger_integrity] at ERROR when outcomes / mfe events / broker order history disagree. READ-ONLY; never writes, never places or cancels an order. OFF => byte-identical legacy (no check).",
+    )
+    chili_momentum_ledger_integrity_lookback_days: float = Field(
+        default=3.0,
+        ge=0.5,
+        le=120.0,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_LEDGER_INTEGRITY_LOOKBACK_DAYS"),
+    )
+    # YUGTO 2 ng parehong job: ang pagsulat ng NAWAWALANG row para sa mga session na
+    # sinabi ng BROKER na na-fill. Naka-target lang sa mga session id na kalalabas ng
+    # check bilang `filled_never_booked` — hindi bulag na sweep, at ang bilang ng
+    # isinusulat ay nakatali sa kung ano ang natagpuan ng isang tunay na broker read.
+    #
+    # ⚠️ BAKIT ITO NAKA-ON (no-dark-flags). Ang row na wala ay hindi lang nawawala sa
+    # mga pag-aaral: hindi ito nabibilang sa daily loss cap, at pagkatapos ng
+    # pagbabago sa loss guard ay maaari nitong i-pin ang buong account sa
+    # `history_unavailable`. Ang yugtong ito ang eksaktong nagpapatahimik niyan sa
+    # TAMANG dahilan — nagkakaroon ng row, gumagastos ng broker proof read ang
+    # reconcile, at ang broker ang nagpapasya — sa halip na sa MALING dahilan, ang
+    # pag-aakalang walang nangyari. OFF => ERROR log lang; mananatiling kulang ang
+    # libro hanggang may taong maglibro.
+    chili_momentum_ledger_autobackfill_enabled: bool = Field(
+        default=True,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_LEDGER_AUTOBACKFILL_ENABLED"),
+        description="ON (no-dark-flags) => after the read-only integrity check finds sessions the BROKER filled that have no outcome row, the same job books exactly those session ids via scan_terminal_sessions_missing_feedback. Bounded by the violation list; never a blind sweep. OFF => the check only logs and the books stay incomplete until an operator acts.",
+    )
+    chili_momentum_ledger_integrity_interval_seconds: int = Field(
+        default=900,
+        ge=60,
+        le=86400,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_LEDGER_INTEGRITY_INTERVAL_SECONDS"),
+        description="Interval for the scheduled integrity check. One account-wide GET per pass — deliberately far slower than the 60s recon job it complements.",
+    )
+    # ⚠️ BEHAVIOURAL CHANGE TO A LIVE LANE. `live_arm_expired` was missing from
+    # risk_policy._LOSS_HISTORY_TERMINAL_STATES, so 291 sessions (17 of them
+    # holding −$916.26 of real fills) were neither charged against the daily loss
+    # cap nor allowed to block it — on 2026-08-31 the account lost $362.29 and the
+    # guard was shown $0.00. ON makes the guard SEE them. Consequence to
+    # understand before flipping it off: an ENTERED arm-expired session with no
+    # bookable outcome row will now pin the whole account at
+    # loss_guard_history_unavailable and stop arming, exactly as an entered
+    # live_error session already does. That is the intended fail-loud behaviour —
+    # a hole in the books SHOULD stop trading — but it is a real change in when
+    # the lane halts. OFF restores byte-identical legacy selection.
+    chili_momentum_loss_history_include_arm_expired: bool = Field(
+        default=True,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_LOSS_HISTORY_INCLUDE_ARM_EXPIRED"),
+        description="ON (default) => the daily loss guard counts live_arm_expired sessions like any other ledger-terminal state. OFF => legacy blind spot restored.",
+    )
     # #1287 (2026-09-02): lookback ng naka-schedule na recon pass
     # (momentum_outcome_broker_recon, kada 60s). 2 araw = sapat para sa
     # outcome na nag-terminal sa gabi at sa ET-day na hangganan ng loss guard.
@@ -3326,6 +3385,24 @@ class Settings(BaseSettings):
         ge=1,
         validation_alias=AliasChoices("CHILI_MOMENTUM_UNIVERSE_HARD_CEILING"),
         description="DB-safety backstop for the uncapped universe — the absolute max number of screen-passers surfaced per build (so a runaway snapshot can't flood viability). This is NOT a quality cap (the adaptive screen does the real selection); it exists only to bound the row count. Only consulted when chili_momentum_universe_uncapped_enabled is on.",
+    )
+    # UNIVERSE FAIL-OPEN TO ZERO (2026-09-02). KILL switch, not an enable
+    # switch: default True because installing an empty watch set on a provider
+    # outage is the defect. =0 restores the prior behaviour (the empty list
+    # becomes the watch set immediately).
+    chili_momentum_universe_retain_on_provider_failure_enabled: bool = Field(
+        default=True,
+        validation_alias=AliasChoices(
+            "CHILI_MOMENTUM_UNIVERSE_RETAIN_ON_PROVIDER_FAILURE_ENABLED"
+        ),
+        description=(
+            "When the full-market snapshot fails or returns an empty body, keep the "
+            "previously screened ignition watch set (bounded to 300s) instead of "
+            "installing an empty one, and log the degraded outcome distinctly from a "
+            "legitimately empty screen. Measured 2026-08-28: 705 empty snapshot bodies "
+            "across two ~15-minute windows, with no line, metric or row recording that "
+            "the lane was watching nothing. 0 = prior behaviour."
+        ),
     )
     chili_momentum_ws_ignition_enabled: bool = Field(
         default=True,
@@ -8177,6 +8254,47 @@ class Settings(BaseSettings):
             "CHILI_MOMENTUM_ENTRY_CONFIRM_DEFERRED_CAP_SECONDS"
         ),
     )
+    # 2026-09-02 CANF 19471: ang self-heal ay HINDI convergent — 3,374 beses
+    # itong pumutok sa loob ng 108 minuto (bawat wake, ~1.93s) dahil ang
+    # postcondition nito ay superset ng sariling precondition at ang tunay na
+    # adoption ay nasa ibaba ng bawat gate ng tick. Ang dedupe ng #1285 ay
+    # nagpapatahimik lang ng emit: nauuna pa rin ang broker probe at nakakabit
+    # ito sa live_pending_entry (legal na bumalik sa watching_live). Ngayon:
+    # throttle BAGO ang broker call, bilang ng tangka, at ISANG malakas na
+    # alarma kapag hindi nag-converge.
+    chili_momentum_entry_fill_self_heal_probe_interval_s: float = Field(
+        default=5.0,
+        ge=0.0,
+        le=120.0,
+        validation_alias=AliasChoices(
+            "CHILI_MOMENTUM_ENTRY_FILL_SELF_HEAL_PROBE_INTERVAL_S"
+        ),
+    )
+    chili_momentum_entry_fill_self_heal_max_attempts: int = Field(
+        default=6,
+        ge=1,
+        le=200,
+        validation_alias=AliasChoices(
+            "CHILI_MOMENTUM_ENTRY_FILL_SELF_HEAL_MAX_ATTEMPTS"
+        ),
+    )
+    chili_momentum_entry_fill_self_heal_unconverged_reprobe_s: float = Field(
+        default=60.0,
+        ge=1.0,
+        le=3600.0,
+        validation_alias=AliasChoices(
+            "CHILI_MOMENTUM_ENTRY_FILL_SELF_HEAL_UNCONVERGED_REPROBE_S"
+        ),
+    )
+    # Ang session na may naisumiteng entry order na WALANG naitalang posisyon
+    # ay maaaring may hawak na hubad na fill sa broker. Dapat itong ma-dispatch
+    # KAHIT naka-pause — ang pause ay hindi kailanman dahilan para walang stop.
+    chili_momentum_unadopted_entry_dispatch_priority_enabled: bool = Field(
+        default=True,
+        validation_alias=AliasChoices(
+            "CHILI_MOMENTUM_UNADOPTED_ENTRY_DISPATCH_PRIORITY_ENABLED"
+        ),
+    )
     chili_alpaca_unmanaged_position_flatten_enabled: bool = Field(
         default=True,
         validation_alias=AliasChoices("CHILI_ALPACA_UNMANAGED_POSITION_FLATTEN_ENABLED"),
@@ -8914,6 +9032,42 @@ class Settings(BaseSettings):
         validation_alias=AliasChoices("CHILI_MOMENTUM_REENTRY_AFTER_STOP_BOUND_ENABLED"),
         description="TASK#8: kill-switch for the bounded re-entry-after-stop-out cap. True => after max_stopout_reentries LOSS recycles the session terminalizes. OFF ⇒ byte-identical unlimited recycle.",
     )
+    chili_momentum_locked_book_guard_enabled: bool = Field(
+        default=True,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_LOCKED_BOOK_GUARD_ENABLED"),
+        description=(
+            "2026-09-02: kill-switch para sa locked-book (bid == ask) na guard sa "
+            "ENTRY path. ON => ang locked na libro ay tinatanggihan sa REGULAR "
+            "hours (Reg NMS 610(d): doon ito ay artifact — nasukat 0.47% ng tape) "
+            "at tinatanggap na may one-tick na EPEKTIBONG spread sa extended hours "
+            "(kung saan ito ay tunay: 23.58-29.63% ng tape), sa halip na iskorin "
+            "bilang 0.0 bps — ang pinakamabuting posibleng halaga ng bawat monotone "
+            "na spread gate. Sinasala rin ang mga locked na row sa bid-prop na "
+            "confirmer, kung saan ang 0.0 na median ay nagpapabulok sa "
+            "spread_blown_out tungo sa 'ang spread ay hindi eksaktong zero' — "
+            "ISANG-DIREKSYON: kaya nitong ALISIN ang isang veto, hindi kailanman "
+            "makakadagdag ng isa. EQUITY LAMANG: ang crypto (-USD) ay dumadaan sa "
+            "dating landas nang buo, dahil ang Reg NMS 610(d) at ang apat na "
+            "sinukat na bintana ay pawang US equities at ang one-tick na sahig ay "
+            "isang Rule 612 na equity increment. "
+            "OFF => byte-identical na dating gawi sa lahat ng site."
+        ),
+    )
+    chili_momentum_locked_book_events_per_session: int = Field(
+        default=20,
+        ge=0,
+        le=1000,
+        validation_alias=AliasChoices(
+            "CHILI_MOMENTUM_LOCKED_BOOK_EVENTS_PER_SESSION"
+        ),
+        description=(
+            "2026-09-02: hard cap sa bilang ng `live_quote_locked_book` na event "
+            "kada session. Ang event ay inilalabas sa PAGLIPAT PAPASOK sa locked "
+            "na estado, hindi kada tick — sa 24-30% na locked na premarket tape "
+            "ang kada-tick ay sampu-sampung libong row kada pangalan kada session. "
+            "0 => walang cap (huwag gamitin sa live)."
+        ),
+    )
     chili_momentum_exit_stand_in_after_defers: int = Field(
         default=3,
         ge=0,
@@ -9254,6 +9408,128 @@ class Settings(BaseSettings):
             "nang buo (byte-identical sa dati). 0 => OFF."
         ),
     )
+    chili_alpaca_execution_bbo_locked_resolve_enabled: bool = Field(
+        default=False,
+        validation_alias=AliasChoices(
+            "CHILI_ALPACA_EXECUTION_BBO_LOCKED_RESOLVE_ENABLED"
+        ),
+        description=(
+            "2026-09-02 BUG FIX. Ang validity test ng SIP stand-in "
+            "(alpaca_spot.py:1065) ay tumatanggi sa `ask < bid` pero TUMATANGGAP "
+            "ng `ask == bid`, at dahil ang `get_execution_bbo` ay nagbabalik sa "
+            "UNANG tier na sumasagot, ang naka-lock na massive_ws row ay "
+            "ibinabalik bilang authority at ang TATLONG IQFeed tier sa LOOB ng "
+            "parehong function ay hindi kailanman kinokonsulta. Ang 0.0 bps ay "
+            "ang PINAKAMABUTING halaga ng bawat monotone na spread gate, kaya "
+            "ang punit na libro ay dumadaan sa lahat sa pamamagitan ng pagiging "
+            "pinakasira. NASUKAT (1,144 na ok na `live_entry_final_bbo` sa 21 "
+            "araw): 93 (8.13%) ang naka-lock ang primary; sa cross-feed na "
+            "paghahambing sa SARILING provider clock ng primary ay 57 (61.3%) "
+            "ARTIFACT (dalawang-panig ang kabilang feed), 32 (34.4%) GENUINE, 4 "
+            "(4.3%) NO_FEED -- at 88 sa 89 na tugma ay nasa loob ng 100 ms. "
+            "AUUD 19337: 19 na `live_entry_spread_risk_veto` sa 84-92 bps laban "
+            "sa 31.0 bps na budget, tapos ang ika-20 na read ay 1.14/1.14 at "
+            "pumasok ang entry; ang IQFeed sa dt=+0.0007s ay 1.13/1.14 = 88.11 "
+            "bps. ON => ang naka-lock na sagot ay itinatago at TINATANONG ang "
+            "SUSUNOD NA TIER NA SUMASAGOT (isa lamang; ang tier na walang "
+            "naibigay ay hindi sagot, kaya nagpapatuloy ang paghahanap). "
+            "⚠️ VERDICT LAMANG: sa LAHAT ng kalalabasan ay ang NAKA-LOCK na tick "
+            "pa rin ang ibinabalik -- ang bid, ask, mid, spread at "
+            "`quote_authority` ay HINDI GINAGALAW, kaya ang planned limit, ang "
+            "`slip_ref` at ang `spread_bps_live` sa entry-place seam ay "
+            "byte-identical sa dati. Ang idinadagdag ay marka lamang sa `raw`: "
+            "`locked_book_resolution` = artifact_resolved | genuine | "
+            "no_second_feed, kasama ang `locked_book_real_spread_bps` (88.11 sa "
+            "AUUD 19337). Ang gate ng #1299 ang gagamit nito para presyuhan ang "
+            "pagtanggi gamit ang TUNAY na numero sa halip na kategoryang hatol; "
+            "ang aktwal na pagpepresyo ay phase 2 at kailangan ng sariling "
+            "sukat. ⚠️ ENTRY LAMANG SA PAMAMAGITAN NG HIWALAY NA `resolve_locked` "
+            "NA ARGUMENTO, HINDI ng `allow_stand_in`: ang `allow_stand_in` ay "
+            "TUMIGIL nang maging marka ng entry noong #1224/#1254 at apat na "
+            "PROTECTIVE na site ang nagpapasa nito ng True (live_runner.py:13252, "
+            ":13364, :14153, :27583 -- emergency flatten, stop-class fail-open "
+            "exit, literal exit refresh, captured-paper exit), bawat isa may 900s "
+            "na ceiling. IISANG caller ang nagpapasa ng `resolve_locked=True`: "
+            "ang `live_entry_final_bbo` seam. OFF (DEFAULT) => byte-identical na "
+            "dating gawi. Default OFF para sa launch window; buksan pagkatapos "
+            "ng soak, kagaya ng shadow-first na pattern ng #1290."
+        ),
+    )
+    chili_alpaca_execution_bbo_locked_resolve_hard_max_age_seconds: float = Field(
+        default=5.0,
+        ge=0.0,
+        le=60.0,
+        validation_alias=AliasChoices(
+            "CHILI_ALPACA_EXECUTION_BBO_LOCKED_RESOLVE_HARD_MAX_AGE_SECONDS"
+        ),
+        description=(
+            "2026-09-02: ABSOLUTONG kisame ng edad para sa locked-book na hatol, "
+            "hiwalay sa `max_age_seconds` ng caller at sinusukat laban sa WALL "
+            "CLOCK. Ang `..._max_age_seconds` sa ibaba ay RELATIBO -- "
+            "pinaghahambing nito ang dalawang provider clock sa isa't isa -- at "
+            "ang relatibong tseke lamang ay magdedeklarang magkasundo ang "
+            "DALAWANG hilerang pareho nang labinlimang minutong luma. Ang mismong "
+            "nasukat na sakit dito ay ang HULING-ALAM na hilerang nakalusot sa "
+            "sariling freshness check (SDOT: pinakamalapit na IQFeed 15.4s ang "
+            "layo, at ang tunay na best bid ay hindi kailanman umabot sa presyong "
+            "tinawag ng stand-in na dalawang panig). Kapag ang naka-lock na "
+            "primary MISMO ay lampas sa kisameng ito, walang hatol na hinahanap "
+            "at walang dagdag na query -- ibinabalik agad nang hindi ginagalaw. "
+            "Ang ebidensya (84 sa 89 na tugma ay nasa loob ng 10 ms) ay "
+            "sumusuporta sa ilang segundo; wala itong sinusuportahan sa 900s. "
+            "0 => walang resolution (parang OFF ang flag)."
+        ),
+    )
+    chili_alpaca_execution_bbo_locked_resolve_max_age_seconds: float = Field(
+        default=2.0,
+        ge=0.0,
+        le=10.0,
+        validation_alias=AliasChoices(
+            "CHILI_ALPACA_EXECUTION_BBO_LOCKED_RESOLVE_MAX_AGE_SECONDS"
+        ),
+        description=(
+            "2026-09-02: gaano kalapit sa provider event clock NG NAKA-LOCK NA "
+            "PRIMARY dapat ang quote ng pangalawang feed bago ito maging "
+            "ebidensya tungkol sa estado ng libro sa sandaling iyon. Sinusukat "
+            "laban sa provider clock, HINDI sa wall clock. NASUKAT: 89 sa 93 na "
+            "naka-lock na obserbasyon ay may pangalawang feed sa loob ng bound "
+            "na ito at 84 sa 89 ay nasa loob ng 10 ms -- SABAY, hindi pahid. Ang "
+            "APAT na bumabagsak ay 15.4s / 45.3s / 68.0s / 111.8s ang layo, at "
+            "sila mismo ang populasyong dapat ibukod: sila ay mga HULING-ALAM na "
+            "hilera sa loob ng butas ng feed, hindi estado ng libro. Ang TUNAY "
+            "na diskriminador ay ang BUHAY NA FEED, hindi ang session clock. "
+            "0 => walang resolution (parang OFF ang flag)."
+        ),
+    )
+    chili_momentum_explosive_floor_change_session_anchored: bool = Field(
+        default=True,
+        validation_alias=AliasChoices(
+            "CHILI_MOMENTUM_EXPLOSIVE_FLOOR_CHANGE_SESSION_ANCHORED"
+        ),
+        description=(
+            "2026-09-02 BUG FIX. Ang E3 explosive-floor change leg "
+            "(entry_gates.py:9615) ay kumukuha ng `df['Open'].iloc[0]` at "
+            "tinatawag itong 'session open', pero ang frame na ipinapasa ng "
+            "buhay na runner ay `period='5d'` (live_runner.py:31539) at walang "
+            "session slice sa daanan -- kaya ang anchor ay TATLO HANGGANG LIMANG "
+            "SESSION ang nakaraan at ang dami na hinaharangan ng "
+            "`chili_momentum_explosive_floor_change_pct` (10.0) ay isang "
+            "LIMANG-ARAW na pagbabago. Ang PAREHONG knob sa "
+            "`ross_momentum.below_explosive_floor:931` ay naghaharang ng "
+            "PREV-CLOSE-anchored na day change: iisang knob, dalawang dami. "
+            "NASUKAT (1,580 symbol-day, 233,867 watch-set na minuto): "
+            "nagkakasundo ang dalawang anchor sa 58.9% lamang; p50 ng session sa "
+            "loob ng bintana = 4 kaya BUHAY ang depekto. DALAWANG KOLUM: "
+            "inaalis sa harang ang 256 symbol-day (23.3/sess, 33.7% win, exp "
+            "+0.04%) at hinaharangan ang 330 (30.0/sess, 33.5% win, exp +0.02%) "
+            "-- halos walang bisa sa kalidad, -6.7 pangalan/session sa bilang. "
+            "Kabilang sa naaalis sa harang ang RDAC 2026-08-19 (+90.5% NGAYON "
+            "laban sa +0.6% sa limang araw), DFNS (+45.9% vs -25.6%), MRNY "
+            "(+27.6% vs -28.6%), DAIC (+23.2% vs -34.0%). Fail-open: kapag hindi "
+            "matukoy ang session mula sa index ay ang dating `iloc[0]` ang "
+            "tumatakbo. OFF => byte-identical na dating gawi."
+        ),
+    )
     chili_momentum_micro_frame_memo_seconds: float = Field(
         default=1.0,
         ge=0.0,
@@ -9575,6 +9851,23 @@ class Settings(BaseSettings):
             'Page when the momentum control-loop heartbeat stops. Independent of '
             'lane_health: it reads the heartbeat table directly, so it still fires '
             'on hosts that do not drive the lane.'
+        ),
+    )
+    # Lane-observation deadman. Default True for the same reason as the
+    # control-loop deadman: an alarm that ships disabled is the silence it was
+    # written to end. Measured 2026-09-01: the lane stopped observing at
+    # 08:03:17 PT, 296 of 390 RTH minutes produced nothing, and every existing
+    # detector was in-process, Docker-scoped, disabled, missing from disk, or
+    # saturated on a heartbeat key with no writer since 2026-08-17.
+    chili_lane_observation_watchdog_enabled: bool = Field(
+        default=True,
+        validation_alias=AliasChoices("CHILI_LANE_OBSERVATION_WATCHDOG_ENABLED"),
+        description=(
+            "Page when the momentum lane stops producing ignition observations during "
+            "a market session. Reads the lane's own observation heartbeat from another "
+            "process, so it survives the death of the process it watches. Detection is "
+            "session-gated (04:00-16:00 ET, Mon-Fri) because the lane legitimately "
+            "observes nothing overnight."
         ),
     )
     chili_lane_health_alert_enabled: bool = Field(

@@ -1,0 +1,72 @@
+{
+  "probe_at_utc": "2026-09-02T23:15:14.037107+00:00",
+  "recent_biaf_rows": [
+    {
+      "symbol": "BIAF",
+      "observed_at_naive": "2026-09-02 23:15:03.853124",
+      "provider_event_at_tz": "2026-09-02 23:15:03.853124+00:00",
+      "received_at_tz": "2026-09-02 23:15:03.983203+00:00",
+      "timestamp_basis": "iqfeed_selected_trade_date_timems_exact",
+      "source": "iqfeed_l1",
+      "price": 9.86,
+      "size": 72.0,
+      "bid": 9.85,
+      "ask": 9.95
+    },
+    {
+      "symbol": "BIAF",
+      "observed_at_naive": "2026-09-02 23:15:03.851121",
+      "provider_event_at_tz": "2026-09-02 23:15:03.851121+00:00",
+      "received_at_tz": "2026-09-02 23:15:03.983203+00:00",
+      "timestamp_basis": "iqfeed_selected_trade_date_timems_exact",
+      "source": "iqfeed_l1",
+      "price": 9.9,
+      "size": 20.0,
+      "bid": 9.85,
+      "ask": 9.95
+    },
+    {
+      "symbol": "BIAF",
+      "observed_at_naive": "2026-09-02 23:15:03.849729",
+      "provider_event_at_tz": "2026-09-02 23:15:03.849729+00:00",
+      "received_at_tz": "2026-09-02 23:15:03.983203+00:00",
+      "timestamp_basis": "iqfeed_selected_trade_date_timems_exact",
+      "source": "iqfeed_l1",
+      "price": 9.92,
+      "size": 158.0,
+      "bid": 9.85,
+      "ask": 9.95
+    },
+    {
+      "symbol": "BIAF",
+      "observed_at_naive": "2026-09-02 23:14:58.543005",
+      "provider_event_at_tz": "2026-09-02 23:14:58.543005+00:00",
+      "received_at_tz": "2026-09-02 23:14:58.633031+00:00",
+      "timestamp_basis": "iqfeed_selected_trade_date_timems_exact",
+      "source": "iqfeed_l1",
+      "price": 9.92,
+      "size": 1.0,
+      "bid": 9.92,
+      "ask": 9.95
+    },
+    {
+      "symbol": "BIAF",
+      "observed_at_naive": "2026-09-02 23:14:51.236021",
+      "provider_event_at_tz": "2026-09-02 23:14:51.236021+00:00",
+      "received_at_tz": "2026-09-02 23:14:51.389424+00:00",
+      "timestamp_basis": "iqfeed_selected_trade_date_timems_exact",
+      "source": "iqfeed_l1",
+      "price": 9.92,
+      "size": 9.0,
+      "bid": 9.92,
+      "ask": 9.95
+    }
+  ],
+  "observed_minus_provider_seconds_if_obs_is_utc": [
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0
+  ]
+}

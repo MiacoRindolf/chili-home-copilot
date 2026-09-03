@@ -46,6 +46,23 @@ _hourly_reset_at = 0.0
 # Infrastructure alarm: the momentum control loop stopped beating. Not a trade
 # signal -- it means the lane is not selecting or arming and exits are unowned.
 MOMENTUM_LOOP_DEAD = "momentum_loop_dead"
+# Infrastructure alarm: the lane stopped OBSERVING during a market session.
+# Distinct from MOMENTUM_LOOP_DEAD, which watches a heartbeat whose writer has
+# been gone since 2026-08-17 and therefore reports the same 16-day-old death
+# forever. On 2026-09-01 the host uvicorn app died at 08:03:17 PT and 296 of
+# the 390 RTH minutes produced no ignition observation at all -- and the only
+# two alert rows the box emitted that afternoon were routine trade signals.
+LANE_OBSERVATION_SILENT = "lane_observation_silent"
+
+# Safety alarm: the broker holds a FILLED entry the FSM never adopted, so the
+# position carries no software stop and no deadman stop. Measured 2026-09-02 on
+# CANF 19471 -- the self-heal detected the fill and then re-fired 3,373 times in
+# 108 minutes without ever converging, and the ONLY thing that ended it was a
+# human noticing. That incident is the proof that a `trading_automation_events`
+# row plus a log line is not an alarm: 3,374 of those rows carried
+# `severity: critical` and produced zero operator response for 108 minutes.
+# Routed here so it reaches a phone.
+ENTRY_FILL_UNADOPTED = "entry_fill_unadopted"
 
 # Safety alarm: a live broker entry order exists that the FSM cannot observe, so
 # the position it may already be holding has no software stop and no deadman
@@ -222,6 +239,13 @@ def classify_alert_tier(
         # broker exposure with no owner. Same rank, same reason.
         LIVE_ENTRY_ORDER_UNOBSERVED,
         ALPACA_RECONCILE_INERT,
+        # An unadopted broker fill IS a stop-critical condition: real shares are
+        # held with no software stop and no deadman stop. It outranks STOP_HIT,
+        # which at least implies a stop existed.
+        ENTRY_FILL_UNADOPTED,
+        # Same argument: a lane that has stopped observing cannot produce any
+        # of the signals above, so its silence outranks all of them.
+        LANE_OBSERVATION_SILENT,
     ):
         return TIER_A
     if scan_pattern_id and confidence >= 0.7:
@@ -269,6 +293,21 @@ _INDIVIDUAL_MSG_TYPES = frozenset({
     MOMENTUM_LOOP_DEAD,
     LIVE_ENTRY_ORDER_UNOBSERVED,
     ALPACA_RECONCILE_INERT,
+    # Same reasoning. NOTE the deliberate asymmetry: ENTRY_FILL_UNADOPTED is
+    # TIER_A and individual (so it pages) but is NOT in _STOP_CRITICAL_TYPES,
+    # exactly like MOMENTUM_LOOP_DEAD and for the same reason spelled out in
+    # control_loop_watchdog.py:158 -- membership there arms the 2s/8s retry
+    # ladder below, which is `time.sleep` on the CALLER's thread. This alarm's
+    # caller is _heal_unrecognized_entry_fill, i.e. inside a live-runner tick
+    # holding an open transaction on a box with a documented
+    # idle-in-transaction cascade, while the position it is warning about has
+    # no stop. Stalling that tick for 10s to retry an SMS is strictly worse
+    # than retrying on the next wake, which the caller already does (it latches
+    # the page only on confirmed delivery). Throttle is skipped explicitly at
+    # the call site via skip_throttle=True, so the only thing _STOP_CRITICAL
+    # membership would add here is the blocking sleep.
+    ENTRY_FILL_UNADOPTED,
+    LANE_OBSERVATION_SILENT,
 })
 
 _ALERT_TYPE_LABEL: dict[str, str] = {
