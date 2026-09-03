@@ -8149,6 +8149,34 @@ class Settings(BaseSettings):
         default=True,
         validation_alias=AliasChoices("CHILI_MOMENTUM_ENTRY_FILL_SELF_HEAL_ENABLED"),
     )
+    # ENTRY-CONFIRM DEFERRAL BOUND (item D ng 09-02, CELU 17712). Kapag ang
+    # entry-confirm poll ay nagbalik ng walang order object, ang tick ay
+    # nagba-`entry_confirm_deferred` at bumabalik na PENDING -- tama, pero
+    # WALANG counter, WALANG cap at WALANG escalation. Sa CELU 17712 (08-27) ito
+    # ay pumutok nang 267 beses sa 2,929.3s sa isang na-fill na 236-share na
+    # posisyon; ang tumapos nito ay TAO (`operator_state_repair_fill_adopted`
+    # 22:02:52.020644, dahilan `get_order_broken_by_1212_options_kwarg_fill_
+    # invisible`). Ang emit ay tini-throttle sa interval na ito; ang POLL mismo
+    # ay hindi kailanman tini-throttle -- iyon ang confirm. Lampas sa cap ay may
+    # ISANG durable event at ISANG TIER_A page. Time-based ang cap, hindi
+    # attempt-based: ang sinukat na agwat ay 5.94s hanggang 106.02s, kaya ang
+    # bilang ng attempt ay hindi katumbas ng oras na hubad.
+    chili_momentum_entry_confirm_deferred_emit_interval_s: float = Field(
+        default=15.0,
+        ge=0.0,
+        le=600.0,
+        validation_alias=AliasChoices(
+            "CHILI_MOMENTUM_ENTRY_CONFIRM_DEFERRED_EMIT_INTERVAL_S"
+        ),
+    )
+    chili_momentum_entry_confirm_deferred_cap_seconds: float = Field(
+        default=180.0,
+        ge=15.0,
+        le=3600.0,
+        validation_alias=AliasChoices(
+            "CHILI_MOMENTUM_ENTRY_CONFIRM_DEFERRED_CAP_SECONDS"
+        ),
+    )
     chili_alpaca_unmanaged_position_flatten_enabled: bool = Field(
         default=True,
         validation_alias=AliasChoices("CHILI_ALPACA_UNMANAGED_POSITION_FLATTEN_ENABLED"),

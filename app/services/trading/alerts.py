@@ -46,6 +46,27 @@ _hourly_reset_at = 0.0
 # signal -- it means the lane is not selecting or arming and exits are unowned.
 MOMENTUM_LOOP_DEAD = "momentum_loop_dead"
 
+# Safety alarm: a live broker entry order exists that the FSM cannot observe, so
+# the position it may already be holding has no software stop and no deadman
+# stop. Raised where a loop would otherwise spin forever without converging:
+#   * the entry-confirm poll that has been deferring past its cap (CELU 17712 --
+#     267 deferrals over 2,929s, ended by a human);
+#   * the out-of-band terminal-row sweep, when broker truth says an order owned
+#     by a TERMINAL session actually filled (BRNX 17370, realized -82.00, which
+#     surfaced only because an operator cancel bounced).
+# Not a trade signal, and deliberately NOT in _STOP_CRITICAL_TYPES: that set arms
+# dispatch_alert's 2s/8s time.sleep retry ladder on the CALLER's thread, and one
+# caller is inside a live-runner tick holding an open transaction on a box with a
+# documented idle-in-transaction cascade. Throttle is skipped explicitly instead.
+LIVE_ENTRY_ORDER_UNOBSERVED = "live_entry_order_unobserved"
+
+# Infrastructure alarm: the account-wide Alpaca orphan reconciler -- the ONLY
+# broker-truth-driven sweeper that can find a position whose owning session is
+# already terminal -- has returned zero broker calls for consecutive passes. It
+# runs every 120s and logged nothing at all while inert, so a ~50-day outage was
+# invisible until someone read the code.
+ALPACA_RECONCILE_INERT = "alpaca_reconcile_inert"
+
 # Alert tiers: A = high confidence / promoted pattern, B = standard, C = speculative
 TIER_A = "A"
 TIER_B = "B"
@@ -196,6 +217,10 @@ def classify_alert_tier(
         # A dead control loop outranks every trade signal: nothing else on
         # this list can fire while the loop that produces them is stopped.
         MOMENTUM_LOOP_DEAD,
+        # An unobserved live entry order and a dead reconciler both mean real
+        # broker exposure with no owner. Same rank, same reason.
+        LIVE_ENTRY_ORDER_UNOBSERVED,
+        ALPACA_RECONCILE_INERT,
     ):
         return TIER_A
     if scan_pattern_id and confidence >= 0.7:
@@ -241,6 +266,8 @@ _INDIVIDUAL_MSG_TYPES = frozenset({
     # EDITS a pinned message in place and produces no phone notification --
     # i.e. a fourth silent surface for the one alarm meant to be loud.
     MOMENTUM_LOOP_DEAD,
+    LIVE_ENTRY_ORDER_UNOBSERVED,
+    ALPACA_RECONCILE_INERT,
 })
 
 _ALERT_TYPE_LABEL: dict[str, str] = {
