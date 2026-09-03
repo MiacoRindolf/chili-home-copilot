@@ -9339,6 +9339,128 @@ class Settings(BaseSettings):
             "nang buo (byte-identical sa dati). 0 => OFF."
         ),
     )
+    chili_alpaca_execution_bbo_locked_resolve_enabled: bool = Field(
+        default=False,
+        validation_alias=AliasChoices(
+            "CHILI_ALPACA_EXECUTION_BBO_LOCKED_RESOLVE_ENABLED"
+        ),
+        description=(
+            "2026-09-02 BUG FIX. Ang validity test ng SIP stand-in "
+            "(alpaca_spot.py:1065) ay tumatanggi sa `ask < bid` pero TUMATANGGAP "
+            "ng `ask == bid`, at dahil ang `get_execution_bbo` ay nagbabalik sa "
+            "UNANG tier na sumasagot, ang naka-lock na massive_ws row ay "
+            "ibinabalik bilang authority at ang TATLONG IQFeed tier sa LOOB ng "
+            "parehong function ay hindi kailanman kinokonsulta. Ang 0.0 bps ay "
+            "ang PINAKAMABUTING halaga ng bawat monotone na spread gate, kaya "
+            "ang punit na libro ay dumadaan sa lahat sa pamamagitan ng pagiging "
+            "pinakasira. NASUKAT (1,144 na ok na `live_entry_final_bbo` sa 21 "
+            "araw): 93 (8.13%) ang naka-lock ang primary; sa cross-feed na "
+            "paghahambing sa SARILING provider clock ng primary ay 57 (61.3%) "
+            "ARTIFACT (dalawang-panig ang kabilang feed), 32 (34.4%) GENUINE, 4 "
+            "(4.3%) NO_FEED -- at 88 sa 89 na tugma ay nasa loob ng 100 ms. "
+            "AUUD 19337: 19 na `live_entry_spread_risk_veto` sa 84-92 bps laban "
+            "sa 31.0 bps na budget, tapos ang ika-20 na read ay 1.14/1.14 at "
+            "pumasok ang entry; ang IQFeed sa dt=+0.0007s ay 1.13/1.14 = 88.11 "
+            "bps. ON => ang naka-lock na sagot ay itinatago at TINATANONG ang "
+            "SUSUNOD NA TIER NA SUMASAGOT (isa lamang; ang tier na walang "
+            "naibigay ay hindi sagot, kaya nagpapatuloy ang paghahanap). "
+            "⚠️ VERDICT LAMANG: sa LAHAT ng kalalabasan ay ang NAKA-LOCK na tick "
+            "pa rin ang ibinabalik -- ang bid, ask, mid, spread at "
+            "`quote_authority` ay HINDI GINAGALAW, kaya ang planned limit, ang "
+            "`slip_ref` at ang `spread_bps_live` sa entry-place seam ay "
+            "byte-identical sa dati. Ang idinadagdag ay marka lamang sa `raw`: "
+            "`locked_book_resolution` = artifact_resolved | genuine | "
+            "no_second_feed, kasama ang `locked_book_real_spread_bps` (88.11 sa "
+            "AUUD 19337). Ang gate ng #1299 ang gagamit nito para presyuhan ang "
+            "pagtanggi gamit ang TUNAY na numero sa halip na kategoryang hatol; "
+            "ang aktwal na pagpepresyo ay phase 2 at kailangan ng sariling "
+            "sukat. ⚠️ ENTRY LAMANG SA PAMAMAGITAN NG HIWALAY NA `resolve_locked` "
+            "NA ARGUMENTO, HINDI ng `allow_stand_in`: ang `allow_stand_in` ay "
+            "TUMIGIL nang maging marka ng entry noong #1224/#1254 at apat na "
+            "PROTECTIVE na site ang nagpapasa nito ng True (live_runner.py:13252, "
+            ":13364, :14153, :27583 -- emergency flatten, stop-class fail-open "
+            "exit, literal exit refresh, captured-paper exit), bawat isa may 900s "
+            "na ceiling. IISANG caller ang nagpapasa ng `resolve_locked=True`: "
+            "ang `live_entry_final_bbo` seam. OFF (DEFAULT) => byte-identical na "
+            "dating gawi. Default OFF para sa launch window; buksan pagkatapos "
+            "ng soak, kagaya ng shadow-first na pattern ng #1290."
+        ),
+    )
+    chili_alpaca_execution_bbo_locked_resolve_hard_max_age_seconds: float = Field(
+        default=5.0,
+        ge=0.0,
+        le=60.0,
+        validation_alias=AliasChoices(
+            "CHILI_ALPACA_EXECUTION_BBO_LOCKED_RESOLVE_HARD_MAX_AGE_SECONDS"
+        ),
+        description=(
+            "2026-09-02: ABSOLUTONG kisame ng edad para sa locked-book na hatol, "
+            "hiwalay sa `max_age_seconds` ng caller at sinusukat laban sa WALL "
+            "CLOCK. Ang `..._max_age_seconds` sa ibaba ay RELATIBO -- "
+            "pinaghahambing nito ang dalawang provider clock sa isa't isa -- at "
+            "ang relatibong tseke lamang ay magdedeklarang magkasundo ang "
+            "DALAWANG hilerang pareho nang labinlimang minutong luma. Ang mismong "
+            "nasukat na sakit dito ay ang HULING-ALAM na hilerang nakalusot sa "
+            "sariling freshness check (SDOT: pinakamalapit na IQFeed 15.4s ang "
+            "layo, at ang tunay na best bid ay hindi kailanman umabot sa presyong "
+            "tinawag ng stand-in na dalawang panig). Kapag ang naka-lock na "
+            "primary MISMO ay lampas sa kisameng ito, walang hatol na hinahanap "
+            "at walang dagdag na query -- ibinabalik agad nang hindi ginagalaw. "
+            "Ang ebidensya (84 sa 89 na tugma ay nasa loob ng 10 ms) ay "
+            "sumusuporta sa ilang segundo; wala itong sinusuportahan sa 900s. "
+            "0 => walang resolution (parang OFF ang flag)."
+        ),
+    )
+    chili_alpaca_execution_bbo_locked_resolve_max_age_seconds: float = Field(
+        default=2.0,
+        ge=0.0,
+        le=10.0,
+        validation_alias=AliasChoices(
+            "CHILI_ALPACA_EXECUTION_BBO_LOCKED_RESOLVE_MAX_AGE_SECONDS"
+        ),
+        description=(
+            "2026-09-02: gaano kalapit sa provider event clock NG NAKA-LOCK NA "
+            "PRIMARY dapat ang quote ng pangalawang feed bago ito maging "
+            "ebidensya tungkol sa estado ng libro sa sandaling iyon. Sinusukat "
+            "laban sa provider clock, HINDI sa wall clock. NASUKAT: 89 sa 93 na "
+            "naka-lock na obserbasyon ay may pangalawang feed sa loob ng bound "
+            "na ito at 84 sa 89 ay nasa loob ng 10 ms -- SABAY, hindi pahid. Ang "
+            "APAT na bumabagsak ay 15.4s / 45.3s / 68.0s / 111.8s ang layo, at "
+            "sila mismo ang populasyong dapat ibukod: sila ay mga HULING-ALAM na "
+            "hilera sa loob ng butas ng feed, hindi estado ng libro. Ang TUNAY "
+            "na diskriminador ay ang BUHAY NA FEED, hindi ang session clock. "
+            "0 => walang resolution (parang OFF ang flag)."
+        ),
+    )
+    chili_momentum_explosive_floor_change_session_anchored: bool = Field(
+        default=True,
+        validation_alias=AliasChoices(
+            "CHILI_MOMENTUM_EXPLOSIVE_FLOOR_CHANGE_SESSION_ANCHORED"
+        ),
+        description=(
+            "2026-09-02 BUG FIX. Ang E3 explosive-floor change leg "
+            "(entry_gates.py:9615) ay kumukuha ng `df['Open'].iloc[0]` at "
+            "tinatawag itong 'session open', pero ang frame na ipinapasa ng "
+            "buhay na runner ay `period='5d'` (live_runner.py:31539) at walang "
+            "session slice sa daanan -- kaya ang anchor ay TATLO HANGGANG LIMANG "
+            "SESSION ang nakaraan at ang dami na hinaharangan ng "
+            "`chili_momentum_explosive_floor_change_pct` (10.0) ay isang "
+            "LIMANG-ARAW na pagbabago. Ang PAREHONG knob sa "
+            "`ross_momentum.below_explosive_floor:931` ay naghaharang ng "
+            "PREV-CLOSE-anchored na day change: iisang knob, dalawang dami. "
+            "NASUKAT (1,580 symbol-day, 233,867 watch-set na minuto): "
+            "nagkakasundo ang dalawang anchor sa 58.9% lamang; p50 ng session sa "
+            "loob ng bintana = 4 kaya BUHAY ang depekto. DALAWANG KOLUM: "
+            "inaalis sa harang ang 256 symbol-day (23.3/sess, 33.7% win, exp "
+            "+0.04%) at hinaharangan ang 330 (30.0/sess, 33.5% win, exp +0.02%) "
+            "-- halos walang bisa sa kalidad, -6.7 pangalan/session sa bilang. "
+            "Kabilang sa naaalis sa harang ang RDAC 2026-08-19 (+90.5% NGAYON "
+            "laban sa +0.6% sa limang araw), DFNS (+45.9% vs -25.6%), MRNY "
+            "(+27.6% vs -28.6%), DAIC (+23.2% vs -34.0%). Fail-open: kapag hindi "
+            "matukoy ang session mula sa index ay ang dating `iloc[0]` ang "
+            "tumatakbo. OFF => byte-identical na dating gawi."
+        ),
+    )
     chili_momentum_micro_frame_memo_seconds: float = Field(
         default=1.0,
         ge=0.0,

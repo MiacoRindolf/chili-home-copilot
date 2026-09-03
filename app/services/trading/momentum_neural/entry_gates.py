@@ -2292,6 +2292,132 @@ def _prior_day_close_from_frame(df: Any) -> float | None:
         return None
 
 
+def _session_open_from_frame(df: Any, cur: Any = None) -> float | None:
+    """Ang open ng UNANG bar ng KASALUKUYANG session sa ``df``, o ``None``.
+
+    ⚠️ ALAM NA ITO NG MODULE, AT DALAWANG GATE ANG HINDI SUMUSUNOD (2026-09-02).
+    Ang ``_today_session_frame`` (:4113-4119) ay umiiral na at sinasabi nang
+    tahasan ang buong premise::
+
+        "front_side_state anchors on the frame first bar + cumulative VWAP +
+         day-range, so it must see TODAY only; the live runner fetches period=5d"
+
+    Ginagamit ito ng backside read sa :9512 (``_sess = _today_session_frame(df)``).
+    Sinasabi rin ng ``_prior_day_close_from_frame`` (:2264-2267) ang parehong
+    bagay: ang frame ay "MAY dalang nakaraang araw ... katumbas ng
+    ``period='5d'``". Kaya hindi ito bagong tuklas -- ito ay dalawang gate sa
+    LOOB NG IISANG function na hindi tumatawag sa helper na nariyan na.
+    Kabaligtaran ang inaakala ng E3 na change leg::
+
+        entry_gates.py:9611  # "the 1m/5m day frames keep the check"
+        entry_gates.py:9615  _sess_open = float(df["Open"].iloc[0])
+        entry_gates.py:9617  _daily_change_pct = (close - _sess_open)/_sess_open
+
+    Ang bakas, bawat linya sinipi sa origin/main 89cb0eb::
+
+        live_runner.py:31539  fetch_ohlcv_df(sym, interval=_interval, period="5d")
+        live_runner.py:31596  _df_trig, _iv_trig = _df_pb, _interval
+        live_runner.py:31661  momentum_pullback_trigger(_df_trig, ...)
+        entry_gates.py:11925  -> pullback_break_confirmation(df, ...)
+
+    Ang ``market_data._INTERVAL_MAX_PERIOD`` (:245-247) ay PINAPAYAGAN ang "5d"
+    para sa 1m at 5m -- hindi ito nila-clamp -- at ang
+    ``massive_client._period_to_dates`` ay nagma-map ng "5d" sa ngayon MINUS
+    LIMANG KALENDARYONG ARAW. Wala ring session slice sa loob ng
+    ``pullback_break_confirmation``. Kaya ang ``df["Open"].iloc[0]`` ay ang open
+    ng bar na TATLO HANGGANG LIMANG SESSION ANG NAKARAAN, at ang dami na
+    hinaharangan ng ``chili_momentum_explosive_floor_change_pct`` (10.0) ay isang
+    LIMANG-ARAW na pagbabago na nakasuot ng pangalang day-change. Ang PAREHONG
+    knob ay binabasa ng ``ross_momentum.below_explosive_floor:931``, kung saan
+    binabantayan nito ang PREV-CLOSE-anchored na day change -- kaya iisang knob
+    ang naghahawak ng dalawang magkaibang dami.
+
+    NASUKAT (1,580 symbol-day, 11 session, 233,867 watch-set na minuto; ang
+    5-araw na anchor ay muling itinayo mula sa independiyenteng daily tape):
+    ang p50 ng bilang ng session sa loob ng bintana ay 4, kaya BUHAY ang depekto,
+    at ang dalawang anchor ay NAGKAKASUNDO lamang sa 58.9% ng mga minuto.
+    DALAWANG KOLUM, pareho:
+
+        FIX UNBLOCKS (5-araw < 10, NGAYON >= 10)  256 symbol-day  23.3/sess
+            33.7% win  exp +0.04%  medMAE -3.6%
+        FIX BLOCKS   (5-araw >= 10, NGAYON < 10)  330 symbol-day  30.0/sess
+            33.5% win  exp +0.02%  medMAE -3.5%
+
+    Halos eksaktong walang bisa sa KALIDAD (+0.04% laban sa +0.02%) at bahagyang
+    NET-HIGPIT sa BILANG (-6.7 pangalan kada session). Hindi ito bumibili ng
+    expectancy sa pamamagitan ng nakatagong pagluluwag o paghihigpit -- ginagawa
+    lamang nitong tapat ang numero. Ang mga pangalang inaalis nito sa harang ay
+    ang klaseng "bumagsak buong linggo, sumasabog NGAYON": RDAC 2026-08-19
+    +90.5% ngayon laban sa +0.6% sa limang araw; DFNS 2026-08-25 +45.9% laban sa
+    -25.6%; MRNY 2026-08-19 +27.6% laban sa -28.6%; DAIC 2026-09-01 +23.2%
+    laban sa -34.0%.
+
+    ⚠️ ANG NATITIRANG PANGALAWANG GATE, NAITALA AT HINDI GINALAW. Ang
+    ``red_vol_exhaustion`` na veto sa :9654-9657 ay may PAREHONG depekto at ito
+    ay BUHAY (``chili_momentum_red_vol_exhaustion_veto_enabled`` ay default
+    True, hindi tulad ng E3 na default False)::
+
+        _sess_max_vol = float(_vol_v[: cur + 1].max())     # 5 session, hindi 1
+        _prior_high   = float(_hi_v[:cur].max())           # 5 session, hindi 1
+
+    Ang dalawa ay PINALALAKI ng multi-session na frame, kaya ang
+    ``_is_max_vol`` at ``_is_new_high`` ay parehong mas MAHIRAP maabot at ang
+    veto ay KULANG ang putok -- pumapasok tayo sa mga exhaustion top na dapat
+    sana ay tinanggihan. Ang pag-aayos nito ay isang PAGHIHIGPIT, at wala akong
+    sukat para dito, kaya hindi ito ginagawa rito: isang lohikal na pagbabago
+    kada commit, at walang hindi-nasusukat na paghihigpit. Naitala nang may
+    eksaktong linya para masukat nang hiwalay.
+
+    ⚠️ ANG ARAW AY TINUTUKOY SA US/EASTERN, AT ITO AY **HINDI** ANG KOMBENSIYON
+    NG ``_today_session_frame`` (itinama 2026-09-02 pagkatapos ng review). Ang
+    naunang draft ng docstring na ito ay nagsabing "gaya ng
+    ``_today_session_frame``"; MALI iyon. Ang ``_today_session_frame``
+    (:4035-4038) ay bumabagsak sa **naive na petsa** kapag tz-naive ang index,
+    habang ang helper na ito ay nilo-localize ang tz-naive na index bilang
+    **UTC** bago i-convert sa New York. Para sa 04:00-20:00 ET na mga bar --
+    ang tanging hugis na pinapakain ng lane rito -- pareho ang sagot ng dalawa,
+    kaya walang epekto sa gawi; pero dalawang kahulugan ng "session" ang dala ng
+    iisang module at nakasulat dito kung alin ang alin sa halip na ipagpalagay
+    na iisa sila. ``cur`` ay ang integer na posisyon ng trigger
+    bar; kapag ibinigay, ang session ay ang session NG BAR NA IYON (hindi ng
+    dulo ng frame, na siyang ginagawa ng ``_today_session_frame``), kaya ang
+    as-of/look-ahead na disiplina ng replay ay nananatili kahit ang trigger bar
+    ay hindi ang huling bar ng frame.
+
+    Nagbabalik ng ``None`` kapag hindi matukoy ang session -- ang tumatawag ay
+    bumabagsak pabalik sa DATING gawi, hindi kailanman sa isang bagong harang.
+    """
+    try:
+        import pandas as _pd
+
+        if df is None or "Open" not in getattr(df, "columns", []):
+            return None
+        idx = getattr(df, "index", None)
+        if idx is None or len(idx) < 1:
+            return None
+        et = _pd.DatetimeIndex(idx)
+        et = et.tz_localize("UTC") if et.tz is None else et.tz_convert("UTC")
+        et = et.tz_convert("America/New_York")
+        days = et.normalize()
+        try:
+            _pos = int(cur) if cur is not None else len(days) - 1
+        except (TypeError, ValueError):
+            _pos = len(days) - 1
+        if _pos < 0 or _pos >= len(days):
+            _pos = len(days) - 1
+        target = days[_pos]
+        # UNANG bar ng session na iyon. `days` ay monotonic para sa isang OHLCV
+        # frame, pero hindi tayo umaasa doon: ang boolean mask ang sumasagot
+        # kahit hindi nakaayos ang index.
+        _mask = (days == target)
+        if not bool(_mask.any()):
+            return None
+        val = float(df["Open"].to_numpy()[_mask][0])
+        return val if val > 0 else None
+    except Exception:
+        return None
+
+
 def _prior_day_close(symbol: str | None, *, df: Any = None) -> float | None:
     """R8 (WAVE-4 ITEM-3) — the PRIOR-DAY CLOSE for an equity name (Ross's red-to-green
     anchor). Reuses the cached Massive last-quote (``prevDay.c`` -> ``previous_close``), the
@@ -9612,7 +9738,36 @@ def pullback_break_confirmation(
             _iv_str = str(entry_interval or "").strip().lower()
             _is_micro_frame = _iv_str.endswith("s") and not _iv_str.endswith("ms")
             if len(df) >= 1 and not _is_micro_frame:
-                _sess_open = float(df["Open"].iloc[0])
+                # ⚠️ ANG "SESSION OPEN" DITO AY HINDI SESSION OPEN (2026-09-02).
+                # Ang komento sa itaas ay nagsasabing "the 1m/5m day frames keep
+                # the check", pero ang frame na ipinapasa ng buhay na runner ay
+                # `period="5d"` (live_runner.py:31539) at walang session slice sa
+                # daanan, kaya ang `df["Open"].iloc[0]` ay ang open ng bar na
+                # TATLO HANGGANG LIMANG SESSION ang nakaraan. Ang buong bakas,
+                # ang sukat, at ang dalawang kolum ay nasa
+                # `_session_open_from_frame`. Ang dami na hinaharangan ng knob na
+                # `chili_momentum_explosive_floor_change_pct` ay isang LIMANG-
+                # ARAW na pagbabago habang ang PAREHONG knob sa
+                # `ross_momentum.below_explosive_floor:931` ay naghaharang ng
+                # PREV-CLOSE-anchored na day change. Nagkakasundo lamang sila sa
+                # 58.9% ng mga watch-set na minuto.
+                #
+                # Ang anchor ay dinadala sa UNANG bar ng session NG TRIGGER BAR.
+                # Fail-open ang bawat sanga: kapag hindi matukoy ang session ay
+                # ang DATING `iloc[0]` ang tumatakbo, byte-identical. OFF ang
+                # flag => byte-identical din.
+                _sess_open = None
+                if bool(getattr(
+                    settings,
+                    "chili_momentum_explosive_floor_change_session_anchored",
+                    True,
+                )):
+                    _sess_open = _session_open_from_frame(df, cur)
+                    if _sess_open is not None:
+                        debug["explosive_floor_change_anchor"] = "session_open"
+                if _sess_open is None:
+                    _sess_open = float(df["Open"].iloc[0])
+                    debug["explosive_floor_change_anchor"] = "frame_first_bar"
                 if _sess_open > 0:
                     _daily_change_pct = (float(close.iloc[cur]) - _sess_open) / _sess_open * 100.0
                     if _daily_change_pct < _change_floor:
