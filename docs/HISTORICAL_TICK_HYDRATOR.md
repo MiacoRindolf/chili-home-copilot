@@ -50,12 +50,21 @@ Everything lands in a **separate database** (`chili_hydrated` by default,
 | Extended hours | included, flagged (`basis` C vs E/O) | included, from 04:00:00 ET |
 | Retention | **180 calendar days** (hard cliff) | back to ~2003 |
 | Throughput | ~121k ticks/s, ~5.4 req/s latency-bound | ~47.6k rows/s, ~200 rps per front door |
-| Fidelity vs our own tape | **bit-identical** — same feed our bridge records | very close, but a different clock and a reconstructed bid/ask |
-| Verdict | **fit for FSM replay** | fit for replay where IQFeed retention has expired; fit for measurement everywhere |
+| NBBO fidelity | **at-trade samples only** — no quote history between prints | the real NBBO stream |
+| Fidelity vs our own tape | our recording is a near-perfect **subset** of it (99.995–100 % of our prints match, same µs, same price) — and it holds prints we never recorded | agrees with IQFeed to ~0.02 % on trades; fractional sizes; at-trade bid/ask is reconstructed |
+| Verdict | **fit for FSM replay (trades)** | fit for replay too, and the **only** fit source for NBBO; required past the IQFeed cliff |
 
-Prefer IQFeed inside the 180-day window. Reach for Polygon when the date is
-older than the IQFeed cliff, when you need breadth faster than 5 req/s, or as
-an independent second opinion.
+**Trades from IQFeed, NBBO from Polygon.** IQFeed lookup exposes no historical
+quote *stream* — only the quote attached to each print — so an IQFeed-hydrated
+NBBO tape cannot represent a quote that moves between trades, and any gate that
+reads quote freshness (spread floors, stale-BBO vetoes) will behave differently
+under it than it did live. Reach for Polygon trades when the date is older than
+the IQFeed cliff, when you need breadth faster than 5 req/s, or as an
+independent second opinion.
+
+Phase 3 measured all of this on seven symbol-days where we hold both tapes; see
+`project_ws/AgentOps/historical_hydrator_0902/PHASE3_VALIDATION.md` and run
+`scripts/hydration_fidelity_check.py` to reproduce it.
 
 ---
 
@@ -178,3 +187,41 @@ second before the next begins.
 - **Nanoseconds are truncated to microseconds** — PostgreSQL's resolution.
 - Memory is bounded per IQFeed window (`--window-minutes`, default 60), not per
   day. A mega-cap full session is still large; lower the window for those.
+
+---
+
+## Validating a hydrated day against our own recording
+
+`scripts/hydration_fidelity_check.py` compares a hydrated symbol-day against
+`chili` tick by tick. Run it on any day you also recorded, before trusting
+either tape.
+
+```powershell
+python scripts/hydration_fidelity_check.py --symbol-day SDOT:2026-08-24 --json out.json
+python scripts/hydration_fidelity_check.py --symbol-day SSM:2026-09-01 --provider iqfeed
+```
+
+It reads `chili` **read-only** under a 30 s statement timeout, with keyset
+pagination that shrinks its page on timeout rather than raising the limit, and
+writes nothing anywhere. It reports, per symbol-day:
+
+- multiset alignment on `(observed_at, price)` — never a set, because two fills
+  at one microsecond and price are legal and set semantics would flatter both
+  tapes;
+- the same alignment against a **frame-deduplicated** copy of our recording
+  (`source_frame_sha256` repeats mean the same L1 frame was written twice, which
+  happens when two bridge processes overlap);
+- session high/low **and the exact instant of each**, plus day volume;
+- miss rate bucketed by tape speed — whether the loss is concentrated in the
+  fast seconds, i.e. at ignition;
+- residual timestamp skew, which is where a systematic clock offset would live;
+- at-trade bid/ask agreement on matched prints;
+- NBBO agreement at 2,000 as-of sampled instants, plus a structural read of how
+  many *distinct* instants each quote tape actually carries.
+
+**What Phase 3 found with it (2026-09-02, seven symbol-days):** the hydrated
+tape does not contradict our recording, it *contains* it — but our recording is
+66–100 % complete depending on the day, duplicates up to 46 % of its rows when
+two bridge processes overlap, and on SDOT 2026-08-24 misses the session high by
+10.5 % inside a 9 min 27 s blackout. Treat the recorded tape as authoritative
+for **lane behaviour** and hydrated data as authoritative for **market truth**.
