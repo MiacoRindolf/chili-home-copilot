@@ -86,6 +86,7 @@ from __future__ import annotations
 
 import argparse
 import importlib
+import inspect
 import json
 import logging
 import os
@@ -1182,7 +1183,7 @@ def apply_scorer_stages(cases: Sequence[CaseRow], scorer: Any) -> list:
     fn = getattr(scorer, "classify_first_divergence", None)
     if fn is None:
         problems.append(
-            "scorer exposes no classify_first_divergence(case, recorded_events, replay_events, "
+            _scorer_why(scorer) + "scorer exposes no classify_first_divergence(case, recorded_events, replay_events, "
             "window) — every stage column is reported as unavailable rather than guessed"
         )
         return problems
@@ -1192,9 +1193,28 @@ def apply_scorer_stages(cases: Sequence[CaseRow], scorer: Any) -> list:
             if not run.ok:
                 continue
             replay_events = list((run.receipt or {}).get("events") or [])
+            # A Tier-1 receipt carries ``seed_session_id``: admission was force-fed by the
+            # harness, so the replay ladder must start at runner_never_started. The flag is
+            # passed only when the scorer declares the kwarg; a scorer that cannot be told is
+            # reported, not worked around (2026-09-04: SDOT's 7-fill run graded
+            # ``no_arm_attempt`` because the seeded session never emits arm events).
+            supplied = bool((run.receipt or {}).get("seed_session_id"))
+            kwargs = {}
+            if supplied:
+                try:
+                    accepts = "replay_admission_supplied" in inspect.signature(fn).parameters
+                except (TypeError, ValueError):
+                    accepts = False
+                if accepts:
+                    kwargs["replay_admission_supplied"] = True
+                else:
+                    problems.append(
+                        f"{case.case_id}/{arm_name}: receipt is harness-seeded but the scorer "
+                        "does not accept replay_admission_supplied — its arm rungs are fixtures"
+                    )
             try:
                 verdict = fn(case.scorer_payload(arm_name), case.recorded_events,
-                             replay_events, arm_window(run))
+                             replay_events, arm_window(run), **kwargs)
             except Exception as exc:  # noqa: BLE001 — the message IS the deliverable
                 problems.append(f"{case.case_id}/{arm_name}: classify_first_divergence raised {exc!r}")
                 continue
@@ -1280,7 +1300,7 @@ def compute_rpi(
     fn = getattr(scorer, "ross_parity_index", None)
     if fn is None:
         problems.append(
-            "scorer exposes no ross_parity_index(cases, equity) — rpi is reported as "
+            _scorer_why(scorer) + "scorer exposes no ross_parity_index(cases, equity) — rpi is reported as "
             "unavailable; the reporter does not compute parity metrics of its own"
         )
         return {}, problems
@@ -2667,6 +2687,19 @@ def load_bundle(
         alias_hits=aliases,
         load_warnings=warnings,
     )
+
+
+def _scorer_why(scorer: Any) -> str:
+    """The import failure behind a missing scorer, as a prefix for the problem line.
+
+    MEASURED 2026-09-04: run from a tree without a ``.env``, importing the scorer pulls the
+    app Settings and fails on ``database_url Field required``; the report then said only
+    "scorer exposes no classify_first_divergence" and every stage read ``unavailable`` --
+    which looks like a scorer regression when it is an environment gap. The reason lives on
+    the stub ``resolve_scorer`` returns; this puts it in front of the reader.
+    """
+    why = getattr(scorer, "unavailable_reason", None)
+    return f"{why}; " if why else ""
 
 
 def resolve_scorer(module_name: str) -> Any:

@@ -1194,3 +1194,68 @@ def test_the_cli_has_no_numeric_threshold_defaults():
         assert not isinstance(action.default, (int, float)) or isinstance(action.default, bool), (
             f"--{action.dest} carries a numeric default {action.default!r}"
         )
+
+
+# ═══════════════════════════════════════════════════════════════════════════════════
+# first_divergence is anchored at Ross's first pin (2026-09-04)
+# ═══════════════════════════════════════════════════════════════════════════════════
+
+_A_WIN_START = datetime(2026, 6, 26, 13, 5, 0)
+_A_WIN_END = datetime(2026, 6, 26, 13, 30, 0)
+
+
+def _a_ev(hhmmss, event_type, **payload):
+    return {"ts": f"2026-06-26T{hhmmss}+00:00", "event_type": event_type, "payload": dict(payload)}
+
+
+def _a_pin(**raw):
+    return tlm.normalize_pin(raw, et_date="2026-06-26", win_start_utc=_A_WIN_START, win_end_utc=_A_WIN_END)
+
+
+def _a_build(events, pins):
+    return tlm.build_timeline(
+        case_id="SDOT_2026-06-26", symbol="SDOT", win_start=_A_WIN_START, win_end=_A_WIN_END,
+        ticks=[], pins=pins, events=events, code_refs={},
+    )
+
+
+def test_first_divergence_is_not_before_ross_first_pin():
+    """CHILI watching from 13:05:01 and in the money at 13:18:12; Ross's first pin at
+    13:20:30. The first SDOT timeline reported 09:05:01 ET absent/watching — noise."""
+    events = [
+        _a_ev("13:05:01", "live_runner_started"),
+        _a_ev("13:18:12", "live_entry_filled", order_id="x"),
+        _a_ev("13:18:32", "live_exit_filled", reason="bailout"),
+    ]
+    pins = [_a_pin(pin_second_utc="2026-06-26T13:20:30", leg="entry", ross_px=10.02,
+                   pin_confidence="tape_confirmed")]
+    tl = _a_build(events, pins)
+    div = tl.meta["first_divergence"]
+    anchor = tl.meta["first_divergence_anchor"]
+    assert anchor["rule"] == "first_ross_pin"
+    assert anchor["t_utc"] == "2026-06-26T13:20:30"
+    assert div is not None
+    assert div["t_utc"] >= "2026-06-26T13:20:30"
+    # the money divergence keeps its own, earlier meaning: CHILI was filled before Ross
+    money = tl.meta["first_money_divergence"]
+    assert money is not None and money["t_utc"] == "2026-06-26T13:18:12"
+
+
+def test_no_ross_pin_but_a_chili_fill_is_chili_ahead_at_the_fill():
+    """CHILI traded and Ross did not: a real divergence (the Avoidance shape), anchored at
+    CHILI's first fill — not at 'watching' on the first row."""
+    events = [_a_ev("13:05:01", "live_runner_started"), _a_ev("13:18:12", "live_entry_filled")]
+    tl = _a_build(events, [])
+    div = tl.meta["first_divergence"]
+    assert div is not None and div["direction"] == "chili_ahead"
+    assert div["t_utc"] == "2026-06-26T13:18:12"
+    assert tl.meta["first_divergence_anchor"]["rule"] == "chili_first_fill"
+
+
+def test_no_ross_pin_and_no_chili_fill_means_no_first_divergence_and_says_why():
+    events = [_a_ev("13:05:01", "live_runner_started"),
+              _a_ev("13:10:00", "live_entry_candidate_detected")]
+    tl = _a_build(events, [])
+    assert tl.meta["first_divergence"] is None
+    assert tl.meta["first_divergence_anchor"]["t_utc"] is None
+    assert "CHILI never reached a fill" in tlm.render_markdown(tl)
