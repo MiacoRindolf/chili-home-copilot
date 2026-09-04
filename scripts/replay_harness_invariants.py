@@ -331,6 +331,27 @@ def _git_head(build_dir: str) -> str:
     return proc.stdout.strip()
 
 
+def _git_resolve(build_dir: str, ref: str) -> Optional[str]:
+    """The commit a REF names, resolved inside the build tree. None if unresolvable.
+
+    Without this, ``verify_tree`` compares a 40-hex HEAD against whatever string the
+    caller passed, so a symbolic ref can never match: ``--ref origin/main`` failed with
+    "is at HEAD 'c5e627fdf…', not 'origin/main'" while the tree was EXACTLY at
+    origin/main. That forced callers to pass a raw sha, which defeats naming a ref at
+    all and quietly invites the very staleness this guard exists to catch — a caller who
+    hardcodes yesterday's sha passes the check every time.
+
+    Unresolvable is NOT an error here: it falls through to the literal comparison, so a
+    caller passing a sha still works and a typo'd ref still fails loudly.
+    """
+    proc = subprocess.run(
+        ["git", "-C", str(build_dir), "rev-parse", "--verify", "--quiet", f"{ref}^{{commit}}"],
+        capture_output=True, text=True, check=False,
+    )
+    out = (proc.stdout or "").strip()
+    return out if proc.returncode == 0 and out else None
+
+
 def verify_tree(
     build_dir: str,
     ref: str,
@@ -338,6 +359,7 @@ def verify_tree(
     sentinel: str,
     *,
     head_reader: Callable[[str], str] = _git_head,
+    ref_resolver: Optional[Callable[[str, str], Optional[str]]] = None,
 ) -> str:
     """The tree that RAN must be the tree we think ran: HEAD == ref AND the sentinel
     string is actually present in ``sentinel_file``."""
@@ -347,9 +369,14 @@ def verify_tree(
     want = str(ref or "").strip()
     if not want:
         raise AssertionError("verify_tree: no ref given")
-    if not (head == want or head.startswith(want) or want.startswith(head)):
+    # Resolve the ref FIRST, so a symbolic name (origin/main, a branch, a tag) is compared
+    # as the commit it points at rather than as a string a 40-hex HEAD can never equal.
+    resolved = _git_resolve(str(build_dir), want) if ref_resolver is None else ref_resolver(str(build_dir), want)
+    want_sha = resolved or want
+    if not (head == want_sha or head.startswith(want_sha) or want_sha.startswith(head)):
+        shown = f"{want!r}" if resolved is None else f"{want!r} ({want_sha})"
         raise AssertionError(
-            f"verify_tree: {build_dir!r} is at HEAD {head!r}, not {want!r} — a stale "
+            f"verify_tree: {build_dir!r} is at HEAD {head!r}, not {shown} — a stale "
             "build tree once produced a fake 'fix works' result for code that never ran."
         )
     path = Path(build_dir) / sentinel_file

@@ -357,3 +357,56 @@ def test_a_mock_missing_a_knob_is_rejected_not_skipped():
         pass
     with pytest.raises(AssertionError, match="exposes no"):
         inv.assert_mock_parity(_Bare())
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# verify_tree must RESOLVE a symbolic ref (2026-09-04)
+# ─────────────────────────────────────────────────────────────────────────────
+
+def test_verify_tree_resolves_a_symbolic_ref(tmp_path):
+    """A 40-hex HEAD can never equal the string "origin/main".
+
+    MEASURED: the first real bench run refused with "is at HEAD 'c5e627fdf...', not
+    'origin/main'" while the build tree was EXACTLY at origin/main — same sha. The guard
+    compared the resolved HEAD against the caller's literal ref, so only a raw sha could
+    ever pass, and passing a raw sha is precisely how a caller ends up hardcoding
+    yesterday's commit and satisfying a staleness check forever.
+    """
+    sentinel_file = tmp_path / "driver.py"
+    sentinel_file.write_text("SOURCE_FILTER = 1\n", encoding="utf-8")
+    head = "c5e627fdf82f103712a71a81ee364f3e7037aecc"
+
+    got = inv.verify_tree(
+        str(tmp_path), "origin/main", "driver.py", "SOURCE_FILTER",
+        head_reader=lambda _d: head,
+        ref_resolver=lambda _d, ref: head if ref == "origin/main" else None,
+    )
+    assert got == head
+
+
+def test_verify_tree_still_refuses_a_ref_that_points_elsewhere(tmp_path):
+    """Resolution must not weaken the guard: a ref naming a DIFFERENT commit still fails."""
+    sentinel_file = tmp_path / "driver.py"
+    sentinel_file.write_text("SOURCE_FILTER = 1\n", encoding="utf-8")
+    with pytest.raises(AssertionError) as exc:
+        inv.verify_tree(
+            str(tmp_path), "origin/main", "driver.py", "SOURCE_FILTER",
+            head_reader=lambda _d: "a" * 40,
+            ref_resolver=lambda _d, _ref: "b" * 40,
+        )
+    # The message names BOTH the ref and what it resolved to, so the operator can see
+    # which side is stale without re-running git by hand.
+    assert "origin/main" in str(exc.value) and "b" * 40 in str(exc.value)
+
+
+def test_verify_tree_falls_back_to_a_literal_sha_when_unresolvable(tmp_path):
+    """An unresolvable ref is not an error — a caller passing a raw sha still works."""
+    sentinel_file = tmp_path / "driver.py"
+    sentinel_file.write_text("SOURCE_FILTER = 1\n", encoding="utf-8")
+    head = "c" * 40
+    got = inv.verify_tree(
+        str(tmp_path), head[:12], "driver.py", "SOURCE_FILTER",
+        head_reader=lambda _d: head,
+        ref_resolver=lambda _d, _ref: None,
+    )
+    assert got == head
