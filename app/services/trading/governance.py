@@ -12,6 +12,9 @@ import json
 import logging
 import math
 import threading
+from contextlib import contextmanager
+from contextvars import ContextVar
+
 import time
 from datetime import datetime, timedelta
 from typing import Any
@@ -1165,6 +1168,36 @@ def check_daily_loss_breach(
 _per_broker_daily_loss: dict[str, dict[str, Any]] = {}
 _per_broker_lock = threading.Lock()
 _alpaca_day_change_cache: dict[str, Any] = {"ts": 0.0, "realized": None, "meta": {}}
+
+# REPLAY SEAM (2026-09-04). The paper-family daily-loss gate reads the broker-authoritative
+# account day change through AlpacaSpotAdapter().get_account_snapshot(). A replay has no
+# broker: that read failed on every tick, the observation returned a transient fail-closed
+# block (alpaca_account_daily_change_unavailable), and the Ross bench's first alpaca_spot
+# run with the lane's dispatch mode was stopped 26/26 times by a $0 "breach". The replay
+# driver installs the mock broker's own snapshot here for the duration of a run; production
+# never enters the manager and keeps the real adapter byte-identically. While a provider is
+# installed the 5-second wall-clock cache is bypassed: a sim account must be read as-of the
+# sim instant every time.
+_alpaca_account_snapshot_provider: ContextVar[Any] = ContextVar(
+    "alpaca_account_snapshot_provider", default=None
+)
+
+
+@contextmanager
+def alpaca_account_snapshot_provider(provider: Any):
+    """Install a callable returning an Alpaca-shaped account snapshot for this context."""
+    if provider is not None and not callable(provider):
+        raise TypeError("alpaca_account_snapshot_provider needs a callable")
+    token = _alpaca_account_snapshot_provider.set(provider)
+    try:
+        yield
+    finally:
+        _alpaca_account_snapshot_provider.reset(token)
+
+
+def alpaca_account_snapshot_provider_installed() -> bool:
+    return _alpaca_account_snapshot_provider.get() is not None
+
 _alpaca_day_change_lock = threading.Lock()
 _ALPACA_DAY_CHANGE_TTL_S = 5.0
 
@@ -1385,7 +1418,8 @@ def _alpaca_account_daily_change_usd(
         }
 
     now = time.monotonic()
-    if not force_refresh:
+    installed_provider = _alpaca_account_snapshot_provider.get()
+    if not force_refresh and installed_provider is None:
         with _alpaca_day_change_lock:
             cached_at = float(_alpaca_day_change_cache.get("ts") or 0.0)
             cached_value = _alpaca_day_change_cache.get("realized")
@@ -1395,9 +1429,12 @@ def _alpaca_account_daily_change_usd(
                 )
 
     try:
-        from .venue.alpaca_spot import AlpacaSpotAdapter
+        if installed_provider is not None:
+            snapshot = installed_provider() or {}
+        else:
+            from .venue.alpaca_spot import AlpacaSpotAdapter
 
-        snapshot = AlpacaSpotAdapter().get_account_snapshot() or {}
+            snapshot = AlpacaSpotAdapter().get_account_snapshot() or {}
     except Exception as exc:
         return None, {
             "data_source": "alpaca_account_equity_delta",
@@ -1428,8 +1465,11 @@ def _alpaca_account_daily_change_usd(
         "equity": equity,
         "last_equity": last_equity,
     }
-    with _alpaca_day_change_lock:
-        _alpaca_day_change_cache.update(ts=now, realized=realized, meta=dict(meta))
+    if installed_provider is None:
+        with _alpaca_day_change_lock:
+            _alpaca_day_change_cache.update(ts=now, realized=realized, meta=dict(meta))
+    else:
+        meta["data_source"] = "replay_mock_account_snapshot"
     return realized, meta
 
 

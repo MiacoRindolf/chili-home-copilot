@@ -1952,8 +1952,73 @@ class MockBrokerAdapter:
             return {"ok": False, "venue": _VENUE, "error": "no_bbo"}
         return {"ok": True, "venue": _VENUE, "mid": q.mid, "bid": q.bid, "ask": q.ask}
 
+    def set_account_equity(self, start_equity_usd: float) -> None:
+        """Driver seam: the sim account's start-of-day equity (the bench's EQUITY)."""
+        v = float(start_equity_usd)
+        if not math.isfinite(v) or v <= 0:
+            raise ValueError("start equity must be a positive finite number")
+        self._start_equity_usd = v
+
+    def _book_from_fills(self) -> tuple[float, float]:
+        """(cash_flow_usd, open_mtm_usd) from this broker's own fills, marked at the
+        recorded quote as-of the sim clock (bid for a long, ask for a short)."""
+        qty: dict[str, float] = {}
+        cash = 0.0
+        for f in self._fills:
+            side = str(getattr(f, "side", "") or "").lower()
+            size = float(getattr(f, "size", 0.0) or 0.0)
+            price = float(getattr(f, "price", 0.0) or 0.0)
+            fee = float(getattr(f, "fee", 0.0) or 0.0)
+            pid = str(getattr(f, "product_id", "") or "").upper()
+            if side in ("buy", "bid", "long"):
+                qty[pid] = qty.get(pid, 0.0) + size
+                cash -= price * size
+            else:
+                qty[pid] = qty.get(pid, 0.0) - size
+                cash += price * size
+            cash -= fee
+        mtm = 0.0
+        for pid, q in qty.items():
+            if abs(q) < 1e-9:
+                continue
+            quote = self._quote_for(pid)
+            if quote is None:
+                continue
+            mark = float(quote.bid) if q > 0 else float(quote.ask)
+            mtm += q * mark
+        return cash, mtm
+
     def get_account_snapshot(self) -> dict[str, Any]:
-        return {"ok": True, "venue": _VENUE, "data": {}, "raw": {}}
+        """Alpaca-shaped account snapshot from the sim book (equity/last_equity), or the
+        bare stub when no start equity was set -- governance then reads
+        ``equity_or_last_equity_missing`` and fails closed exactly as before.
+
+        MEASURED 2026-09-04: the paper daily-loss gate (governance._alpaca_account_daily_
+        change_usd) read the REAL adapter on every tick of a replay, got nothing, and
+        blocked all 26 entry attempts as a $0 "breach". ``equity - last_equity`` here is the
+        sim account's day change: start equity + cash flow from fills + open MTM at the
+        recorded quote. Never the wall clock: ``retrieved_at_utc`` is the sim instant.
+        """
+        start = getattr(self, "_start_equity_usd", None)
+        if start is None:
+            return {"ok": True, "venue": _VENUE, "data": {}, "raw": {}}
+        cash_flow, mtm = self._book_from_fills()
+        equity = float(start) + cash_flow + mtm
+        cash = float(start) + cash_flow
+        return {
+            "ok": True,
+            "venue": _VENUE,
+            "paper": True,
+            "account_id": self._account_identity or None,
+            "status": "ACTIVE",
+            "equity": equity,
+            "last_equity": float(start),
+            "cash": cash,
+            "buying_power": max(cash, 0.0),
+            "retrieved_at_utc": self._clock.replace(tzinfo=timezone.utc).isoformat(),
+            "data": {"source": "replay_mock_book"},
+            "raw": {"venue": _VENUE, "source": "replay_mock_book"},
+        }
 
     # ── deterministic fill model (pure paper-fill math) ─────────────────────────────
     def _fill_order(

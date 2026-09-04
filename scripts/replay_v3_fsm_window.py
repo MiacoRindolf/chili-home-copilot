@@ -1028,6 +1028,9 @@ def run_arm(label, grid, ticks, frame_ticks, g4_on, *, sink_reset=None, tape_sou
     # string above is pinned verbatim by test_the_startup_mock_and_the_run_mock_cannot_drift
     # and invariant 9 below reads the FILL config off the instance, not identity.
     rv3.apply_replay_mock_identity(mock, EXEC_FAMILY)
+    # The sim account's start-of-day equity: the paper daily-loss gate reads
+    # equity - last_equity from the broker, and the mock answers from its own book.
+    mock.set_account_equity(EQUITY)
     # INVARIANT 9, FAIL CLOSED: prove the mock the run will actually fill against IS the
     # validated config, read back off the instance — a constructor argument that a later
     # edit stops honouring produces a PnL nobody can compare to a baseline.
@@ -1052,7 +1055,14 @@ def run_arm(label, grid, ticks, frame_ticks, g4_on, *, sink_reset=None, tape_sou
         risk_gate_allows=True,                 # short-circuit ONLY the pre-entry risk gate
         equity_provider=lambda *a, **k: EQUITY,
     )
-    res = driver.run()
+    # GATE #6 (2026-09-04): governance's paper daily-loss observation reads the Alpaca
+    # account through AlpacaSpotAdapter().get_account_snapshot(); in a replay that read
+    # failed every tick and blocked 26/26 entry attempts as a $0 "breach". For the run the
+    # mock's own snapshot answers it. Production never enters this manager.
+    from app.services.trading import governance as _gov
+
+    with _gov.alpaca_account_snapshot_provider(mock.get_account_snapshot):
+        res = driver.run()
 
     # mine fills -> realized PnL (buys are cost, sells are proceeds; net of the mock's fees).
     # NormalizedFill (venue/protocol.py) fields: .side / .size / .price / .fee.
