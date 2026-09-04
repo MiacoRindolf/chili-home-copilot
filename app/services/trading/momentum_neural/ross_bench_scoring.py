@@ -861,8 +861,35 @@ def classify_events(
     if not (type_set & SUBMIT_EVENTS):
         vetoes = [e for e in after_candidate if _is_refusal(_event_type(e))]
         veto, veto_counts = _top_reason(vetoes, fallback_to_type=True)
+        # THE gate is the one that stopped an ATTEMPT: the first refusal after each
+        # ``live_entry_pending_place``. MEASURED 2026-09-04 (SDOT 2026-06-26, alpaca_spot):
+        # 26 pending_places, each stopped by ``adaptive_risk_builder_source_invalid``,
+        # while the pre-candidate sticky bench fired 1,259 times in the same window --
+        # counting refusals by volume named the bench and hid the blocker. When no
+        # attempt was ever placed the volume rule stands (nothing else to name).
+        attempt_blockers: list = []
+        pending = False
+        for e in evs:
+            et = _event_type(e)
+            if et == "live_entry_pending_place":
+                pending = True
+                continue
+            if pending and _is_refusal(et):
+                attempt_blockers.append(e)
+                pending = False
+        if attempt_blockers:
+            blocker, blocker_counts = _top_reason(attempt_blockers, fallback_to_type=True)
+            return _qualified(
+                STAGE_CANDIDATE_NO_SUBMIT, blocker or QUALIFIER_UNKNOWN, source=source,
+                detail=d(veto_reasons=veto_counts, attempt_blockers=blocker_counts,
+                         attempts=sum(1 for e in evs
+                                      if _event_type(e) == "live_entry_pending_place"),
+                         qualifier_rule="first_refusal_after_pending_place"),
+            )
         return _qualified(STAGE_CANDIDATE_NO_SUBMIT, veto or QUALIFIER_UNKNOWN,
-                          source=source, detail=d(veto_reasons=veto_counts))
+                          source=source,
+                          detail=d(veto_reasons=veto_counts,
+                                   qualifier_rule="top_refusal_after_candidate"))
 
     # Rung 5 — submitted, never filled.  The label is the terminal that ended it.
     if not (type_set & FILL_EVENTS):

@@ -1004,3 +1004,47 @@ def test_classify_first_divergence_applies_the_flag_to_the_replay_side_only():
     # replay side: seeded admission, graded from runner_never_started down
     assert str(replay).startswith("filled"), replay
     assert replay.detail["admission"] == "harness_supplied"
+
+
+# ═══════════════════════════════════════════════════════════════════════════════════
+# candidate_no_submit names the gate that stopped the SUBMIT (2026-09-04, SDOT alpaca)
+# ═══════════════════════════════════════════════════════════════════════════════════
+
+def alpaca_sdot_events():
+    """26 attempts, each stopped by the adaptive-risk builder; 1,259 sticky-bench vetoes
+    around them. The volume rule named the bench; the attempt rule names the blocker."""
+    day = "2026-06-26"
+    evs = [ev(_ts(day, "13:05:01"), "live_runner_started"), ev(_ts(day, "13:05:01"), "live_watch_started")]
+    t = _ts(day, "13:06:00")
+    for i in range(26):
+        evs += spread(t, 48, 1.0, "live_entry_backside_bench_veto", reason="benched_backside_sticky")
+        t = t + timedelta(seconds=48)
+        evs.append(ev(t, "live_entry_candidate_detected", trigger="momentum_ok_tick_stream"))
+        evs.append(ev(t + timedelta(seconds=1), "live_entry_pending_place"))
+        evs.append(ev(t + timedelta(seconds=2), "live_entry_adaptive_risk_blocked",
+                      reason="adaptive_risk_builder_source_invalid"))
+        t = t + timedelta(seconds=3)
+    evs += spread(t, 11, 1.0, "live_entry_backside_bench_veto", reason="benched_backside_sticky")
+    return evs
+
+
+def test_candidate_no_submit_names_the_attempt_blocker_not_the_loudest_veto():
+    stage = classify_events(alpaca_sdot_events(), source="events", harness_supplied_admission=True)
+    assert str(stage) == f"{STAGE_CANDIDATE_NO_SUBMIT}(adaptive_risk_builder_source_invalid)", stage
+    assert stage.detail["attempts"] == 26
+    assert stage.detail["attempt_blockers"] == {"adaptive_risk_builder_source_invalid": 26}
+    assert stage.detail["qualifier_rule"] == "first_refusal_after_pending_place"
+    # the loud veto is still on the record, as a count, not as the name
+    assert stage.detail["veto_reasons"]["benched_backside_sticky"] > 1000
+
+
+def test_candidate_no_submit_without_an_attempt_keeps_the_volume_rule():
+    day = "2026-06-26"
+    evs = [ev(_ts(day, "13:05:01"), "live_runner_started"),
+           ev(_ts(day, "13:10:00"), "live_entry_candidate_detected")]
+    evs += spread(_ts(day, "13:10:01"), 5, 1.0, "live_entry_backside_bench_veto",
+                  reason="benched_backside_sticky")
+    stage = classify_events(evs, source="events", harness_supplied_admission=True)
+    assert str(stage) == f"{STAGE_CANDIDATE_NO_SUBMIT}(benched_backside_sticky)", stage
+    assert stage.detail["qualifier_rule"] == "top_refusal_after_candidate"
+    assert "attempts" not in stage.detail
