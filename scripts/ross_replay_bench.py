@@ -211,6 +211,13 @@ PROTECTED_ENV_KEYS: frozenset[str] = CONTRACT_ENV_KEYS
 # against replay_v3_fsm_window.py, which has no ROSSBENCH_ reference), so nothing misbehaved;
 # the point is that the bench's own knobs must not be able to become the driver's.
 FORBIDDEN_ENV_PREFIXES: tuple[str, ...] = ("ROSS_", "ROSSBENCH_")
+
+# The Alpaca families, spelled locally because this bench is deliberately dependency-free
+# of ``app`` (it must import without a DATABASE_URL). Source of truth:
+# app/services/trading/momentum_neural/alpaca_orphan_claims.py:41 ALPACA_EXECUTION_FAMILIES.
+BENCH_ALPACA_FAMILIES: tuple[str, ...] = ("alpaca_spot", "alpaca_short")
+# The env key the driver's quarantine gate needs for an Alpaca run — see build_env.
+ALPACA_ACCOUNT_ID_ENV = "CHILI_ALPACA_EXPECTED_ACCOUNT_ID"
 FORBIDDEN_ENV_KEYS: frozenset[str] = frozenset({KEEP_SINK_ENV})  # "REPLAY_KEEP_SINK"
 
 # Sentinel proving the BUILD TREE carries the change this bench depends on. The NBBO
@@ -1033,6 +1040,27 @@ def build_env(
     """
     env, dropped = sanitise_parent_env(parent)
     env.update(contract_env(case=case, **contract_kwargs))
+    # AN ALPACA RUN REQUIRES THE CERTIFIED ACCOUNT ID, AND REFUSES WITHOUT IT (2026-09-04).
+    # The driver's quarantine gate (live_runner.py:1585-1592) refuses every tick unless the
+    # seeded session's frozen alpaca_account_id EQUALS settings.chili_alpaca_expected_
+    # account_id. Under CHILI_PYTEST=1 the driver's settings do NOT read .env, so that value
+    # can only arrive through this env — and it is NOT a contract key, it is ambient CHILI_*
+    # configuration passed through above. MEASURED: run from a shell without it, the seeder
+    # fell back to the replay mock identity, the gate returned
+    # `alpaca_account_generation_mismatch` on all 2,670 ticks, and the run finished rc=0 in
+    # 71s with zero events — a result that looks exactly like "the strategy never fired".
+    # A bench that can produce that silently is worse than one that refuses, so refuse
+    # HERE, in the tested seam, before an arm override could paper over it.
+    fam = str(contract_kwargs.get("exec_family") or "").strip().lower()
+    if fam in BENCH_ALPACA_FAMILIES and not str(env.get(ALPACA_ACCOUNT_ID_ENV) or "").strip():
+        raise SystemExit(
+            f"exec-family {fam!r} requires {ALPACA_ACCOUNT_ID_ENV} in the parent env: the driver "
+            "seeds it as the session's frozen alpaca_account_id and its quarantine gate refuses "
+            "every tick without a match (live_runner.py:1585-1592). Export the certified paper "
+            "account id (it is in the lane's .env; the driver does not read .env under "
+            "CHILI_PYTEST=1) and re-run. Refusing rather than seeding the mock identity, which "
+            "produced a zero-event run that looked like a finding on 2026-09-04."
+        )
     for key, value in (arm.overrides or {}).items():
         _refuse_forbidden_key(key, where=f"arm {arm.name!r}")
         if key in PROTECTED_ENV_KEYS:  # belt and braces; _load_arm_file already refused it
