@@ -70,9 +70,19 @@ _CONTRACT_KWARGS = dict(
 )
 
 
-def _env(parent=None, arm=None):
+# The certified paper account every Alpaca run must carry (build_env refuses without it,
+# see test_an_alpaca_run_refuses_without_the_certified_account_id). Merged into the parent
+# by default so the rest of this file keeps exercising alpaca_spot under a VALID config;
+# a test that wants to see the refusal opts out with certified=False.
+CERTIFIED_PAPER_ACCOUNT = "c7d421e0-4fae-4219-9503-5ce051d4d923"
+
+
+def _env(parent=None, arm=None, *, certified=True):
+    merged = dict(parent) if parent is not None else {}
+    if certified:
+        merged.setdefault(B.ALPACA_ACCOUNT_ID_ENV, CERTIFIED_PAPER_ACCOUNT)
     env, _dropped = B.build_env(
-        case=CASE, arm=(arm or B.Arm("base")), parent=(parent or {}), **_CONTRACT_KWARGS
+        case=CASE, arm=(arm or B.Arm("base")), parent=merged, **_CONTRACT_KWARGS
     )
     return env
 
@@ -207,7 +217,10 @@ def test_the_sanitiser_reports_exactly_what_it_dropped():
     """A silent strip is a dark flag. bench.json records the names."""
     _e, dropped = B.build_env(
         case=CASE, arm=B.Arm("base"),
-        parent={"ROSS_X": "1", "REPLAY_KEEP_SINK": "1", "PATH": "/usr/bin"},
+        # The certified id rides along (an Alpaca run refuses without it) and, being an
+        # ambient CHILI_* key, must NOT appear in `dropped` — which is the point of the test.
+        parent={"ROSS_X": "1", "REPLAY_KEEP_SINK": "1", "PATH": "/usr/bin",
+                B.ALPACA_ACCOUNT_ID_ENV: CERTIFIED_PAPER_ACCOUNT},
         **_CONTRACT_KWARGS,
     )
     assert dropped == ["REPLAY_KEEP_SINK", "ROSS_X"]
@@ -967,3 +980,40 @@ def test_the_bench_does_not_grade():
     summary = B._receipt_summary(_receipt())
     assert summary["pnl_usd"] == 12.0
     assert not any(k for k in summary if "score" in k or "grade" in k or "parity" in k)
+
+
+
+# ── fence: an Alpaca run cannot silently seed the mock identity ──────────────
+
+
+def test_an_alpaca_run_refuses_without_the_certified_account_id():
+    """MEASURED 2026-09-04: without this key the seeder froze the replay mock identity, the
+    driver's quarantine gate returned `alpaca_account_generation_mismatch` on all 2,670
+    ticks, and the run finished rc=0 with zero events — indistinguishable from "the
+    strategy never fired". The bench must refuse, not produce that."""
+    with pytest.raises(SystemExit) as exc:
+        _env(parent={}, certified=False)
+    msg = str(exc.value)
+    assert B.ALPACA_ACCOUNT_ID_ENV in msg
+    assert "alpaca_spot" in msg
+
+
+def test_an_alpaca_run_passes_the_certified_account_id_through():
+    env = _env(parent={B.ALPACA_ACCOUNT_ID_ENV: CERTIFIED_PAPER_ACCOUNT})
+    assert env[B.ALPACA_ACCOUNT_ID_ENV] == CERTIFIED_PAPER_ACCOUNT
+    # It rides the ambient CHILI_* pass-through, so it is NOT a contract key — the contract
+    # set stays exactly what test_the_contract_env_is_exactly_the_declared_key_set pins.
+    assert B.ALPACA_ACCOUNT_ID_ENV not in B.CONTRACT_ENV_KEYS
+
+
+def test_a_non_alpaca_run_does_not_need_the_account_id():
+    kwargs = dict(_CONTRACT_KWARGS, exec_family="robinhood_agentic_mcp")
+    env, _dropped = B.build_env(case=CASE, arm=B.Arm("base"), parent={}, **kwargs)
+    assert B.ALPACA_ACCOUNT_ID_ENV not in env
+
+
+def test_the_alpaca_families_match_the_app_constant():
+    """The bench spells the families locally (it must import without app); pin them to the
+    app's own set so a renamed family cannot let an Alpaca run skip the refusal."""
+    from app.services.trading.momentum_neural.alpaca_orphan_claims import ALPACA_EXECUTION_FAMILIES
+    assert set(B.BENCH_ALPACA_FAMILIES) == set(ALPACA_EXECUTION_FAMILIES)
