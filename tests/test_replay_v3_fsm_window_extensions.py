@@ -432,3 +432,28 @@ def test_the_startup_mock_and_the_run_mock_cannot_drift():
     """One definition, two construction sites — a knob checked but not used is no check."""
     body = _body("run_arm")
     assert "rv3.MockBrokerAdapter(**_PARITY_MOCK_KWARGS)" in body
+
+
+# ═══════════════════════════════════════════════════════════════════════════════════
+# The receipt keeps breaker / blocker attribution (2026-09-04)
+# ═══════════════════════════════════════════════════════════════════════════════════
+
+def test_receipt_keeps_breaker_attribution():
+    """SDOT alpaca: 26 breaker blocks arrived as ``{}`` -- the runner had named the breaker
+    and this filter dropped it. The receipt exists to carry WHY."""
+    payload = {"breaker": "daily_loss_cap_broker", "family": "alpaca_spot", "daily_pnl_usd": None,
+               "max_daily_loss_usd": 5000.0, "transient": True, "sticky": False,
+               "reason": "alpaca_account_daily_change_unavailable", "source": "settings",
+               "some_debug_blob": {"x": 1}}
+    keep = drv._bench_payload("live_entry_blocked_by_breaker", payload)
+    for k in ("breaker", "family", "daily_pnl_usd", "max_daily_loss_usd", "transient", "reason", "source"):
+        assert k in keep, k
+    assert "some_debug_blob" not in keep
+
+
+def test_receipt_keeps_adaptive_risk_blocker_detail():
+    keep = drv._bench_payload("live_entry_adaptive_risk_blocked",
+                              {"reason": "adaptive_risk_builder_source_invalid",
+                               "error_type": "TypeError", "detail": "float() argument"})
+    assert keep == {"reason": "adaptive_risk_builder_source_invalid",
+                    "error_type": "TypeError", "detail": "float() argument"}

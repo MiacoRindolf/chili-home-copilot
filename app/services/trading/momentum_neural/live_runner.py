@@ -21271,6 +21271,39 @@ def read_captured_paper_durable_candidate(
     )
 
 
+def _daily_loss_breaker_block_payload(info: Mapping[str, Any] | None) -> dict[str, Any]:
+    """The per-broker daily-loss block, with the observation's OWN attribution.
+
+    MEASURED 2026-09-04 (SDOT 2026-06-26 bench, alpaca_spot): 26 blocks reading
+    ``daily_pnl_usd: 0.0, max_daily_loss_usd: 5000.0`` -- a $0 "breach". The observation
+    had actually returned ``realized=None, transient=True,
+    reason=alpaca_account_daily_change_unavailable`` (a fail-closed read), and this payload
+    coerced None to 0.0 and dropped reason/transient/source. A transient fail-closed block
+    and a measured cap breach are different facts and must not share a line. Additive:
+    every existing key keeps its shape; ``daily_pnl_usd`` is None when it was not measured.
+    """
+    info = dict(info or {})
+    realized = info.get("realized")
+    try:
+        realized_f = None if realized is None else round(float(realized), 2)
+    except (TypeError, ValueError):
+        realized_f = None
+    try:
+        cap_f = round(float(info.get("cap", 0.0) or 0.0), 2)
+    except (TypeError, ValueError):
+        cap_f = 0.0
+    return {
+        "breaker": "daily_loss_cap_broker",
+        "family": info.get("family"),
+        "daily_pnl_usd": realized_f,
+        "max_daily_loss_usd": cap_f,
+        "transient": bool(info.get("transient")),
+        "sticky": bool(info.get("sticky")),
+        "reason": info.get("reason"),
+        "source": info.get("source"),
+    }
+
+
 def _adaptive_risk_blocker_payload(exc: BaseException) -> dict[str, Any]:
     """Name the adaptive-risk builder failure with its type and detail.
 
@@ -39909,16 +39942,7 @@ def tick_live_session(
 
                     _dl_breached, _dl_info = _bdlb(db, ef, user_id=int(sess.user_id))
                     if _dl_breached:
-                        _breaker_block = {
-                            "breaker": "daily_loss_cap_broker",
-                            "family": _dl_info.get("family"),
-                            "daily_pnl_usd": round(
-                                float(_dl_info.get("realized", 0.0) or 0.0), 2
-                            ),
-                            "max_daily_loss_usd": round(
-                                float(_dl_info.get("cap", 0.0) or 0.0), 2
-                            ),
-                        }
+                        _breaker_block = _daily_loss_breaker_block_payload(_dl_info)
                 except Exception:
                     pass
                 # (2) Portfolio drawdown breaker (auto_arm.py:3209-3211 call shape).
