@@ -1779,6 +1779,72 @@ def reconcile_one_outcome(
     detail["status"] = status
     detail["legacy_realized_pnl_usd"] = legacy_pnl
 
+    # ── BROKER-PROVEN NEVER-ENTERED (2026-09-04, the arming outage) ──
+    # A row whose class is AMBIGUOUS to the loss guard and carries no economics
+    # classifies as ``unknown`` (risk_policy.py:1588-1593), and one such row gaps the
+    # whole day: ``load_current_live_loss_history`` reports
+    # ``loss_guard_entry_classification_unknown`` and the account stops arming.
+    #
+    # MEASURED 2026-09-04: six ``live_arm_expired`` sessions (WETO 19762, CDTG 20200,
+    # IMRN 20208, AOUT 20213, NWGL 20219, FCUV 20221) that the launcher's cleanup
+    # terminalized sat at ``flat_unknown`` with submission evidence and no fill proof.
+    # They blinded the live lane for hours of an RTH session and had to be settled by
+    # hand from a direct Alpaca read. Every one was genuinely never-entered — WETO's
+    # order read ``canceled, filled_qty=0`` and the other five never reached the broker
+    # at all — so the information needed to clear them was already in this module.
+    #
+    # ``STATUS_NO_FILLS`` is exactly that proof: a SUCCESSFUL broker read that found no
+    # fills. Promoting such a row to ``cancelled_pre_entry`` moves it into
+    # ``NEVER_ENTERED_OUTCOMES``, where the classifier answers ``not_entered`` and the
+    # guard skips it — the ONE class it is allowed to skip.
+    #
+    # THE GUARDS ARE THE POINT. This may only ever move a row from blind to
+    # broker-proven-empty, never the reverse:
+    #   * only on ``STATUS_NO_FILLS`` — never NO_MATCH, PHANTOM, RESIDUAL_OPEN or
+    #     BROKER_UNAVAILABLE, each of which means "we do not know", and never on a
+    #     transport failure;
+    #   * only from a class the guard finds ambiguous — a real exit class is untouched;
+    #   * only with NO economics anywhere. A single non-null P&L, return, or notional
+    #     means money moved, and this branch must not touch it. That is the
+    #     "9 confidently WRONG rows" failure `entry_submission_evidence` exists to
+    #     prevent (outcome_extract.py:249-265), and booking $0 over a real loss would
+    #     hide it from the loss guard rather than merely delay it.
+    if status == STATUS_NO_FILLS:
+        try:
+            from .outcome_labels import OUTCOME_CANCELLED_PRE_ENTRY
+            from .risk_policy import _LOSS_HISTORY_AMBIGUOUS_ENTRY_CLASSES
+
+            current_class = str(getattr(outcome, "outcome_class", "") or "").strip().lower()
+            no_economics = all(
+                _f(v) is None
+                for v in (
+                    getattr(outcome, "realized_pnl_usd", None),
+                    getattr(outcome, "return_bps", None),
+                    broker_pnl,
+                    broker_notional,
+                )
+            )
+            if current_class in _LOSS_HISTORY_AMBIGUOUS_ENTRY_CLASSES and no_economics:
+                outcome.outcome_class = OUTCOME_CANCELLED_PRE_ENTRY
+                detail["never_entered_settlement"] = {
+                    "from": current_class,
+                    "to": OUTCOME_CANCELLED_PRE_ENTRY,
+                    "proof": "broker read returned no fills for this session",
+                    "why": (
+                        "an ambiguous class with no economics classifies as `unknown` and "
+                        "gaps the loss guard for the whole account"
+                    ),
+                }
+                logger.info(
+                    "[broker_truth_recon] session_id=%s %s -> cancelled_pre_entry on a "
+                    "broker-confirmed no-fill read; it can no longer blind the loss guard",
+                    getattr(sess, "id", None), current_class,
+                )
+        except Exception:  # pragma: no cover - never let a settlement break the stamp
+            logger.debug(
+                "[broker_truth_recon] never-entered settlement skipped", exc_info=True
+            )
+
     # ── stamp (mig309 columns ONLY; legacy fields untouched) ──
     outcome.broker_recon_status = status
     outcome.broker_realized_pnl_usd = broker_pnl
