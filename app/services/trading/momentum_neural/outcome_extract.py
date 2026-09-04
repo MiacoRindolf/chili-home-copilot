@@ -16,6 +16,7 @@ from ....models.trading import (
 )
 from .live_fsm import (
     LIVE_LEDGER_TERMINAL_STATES,
+    STATE_LIVE_ARM_EXPIRED,
     STATE_LIVE_CANCELLED,
     STATE_LIVE_ERROR,
     STATE_LIVE_FINISHED,
@@ -569,8 +570,9 @@ _RECONCILE_SUFFIXES = (
     "_broker_zero_reconcile",
 )
 
-# Genuine completed-exit outcome classes. The live_cancelled reroute only ever
-# upgrades to one of these; anything ambiguous stays cancelled_in_trade.
+# Genuine completed-exit outcome classes. Both reroutes — live_cancelled and
+# live_arm_expired — only ever upgrade to one of these; anything ambiguous stays
+# with its branch default (cancelled_in_trade and flat_unknown respectively).
 _REAL_EXIT_OUTCOMES = frozenset(
     {
         OUTCOME_STOP_LOSS,
@@ -780,6 +782,79 @@ def derive_outcome_class(
         if entry_occurred or partial_exit:
             return OUTCOME_CANCELLED_IN_TRADE
         return OUTCOME_CANCELLED_PRE_ENTRY
+
+    if st == STATE_LIVE_ARM_EXPIRED:
+        # A zombie live_arm_pending that the TTL reaper terminalized. Since the
+        # 2026-09-02 ledger fix these DO produce outcome rows, but with no branch
+        # here every one of them fell through to flat_unknown. Of the 16 rows that
+        # exist since that fix, 8 carry money — −$208.71 of realised loss — each
+        # `reconciled` and carrying a real exit_reason (bailout ×4, stop ×2,
+        # trail_stop, operator_flatten). A round trip that stopped out should be
+        # labelled a stop_loss, not an unknown.
+        #
+        # WHAT THIS BUYS, precisely. NOT the learner's expectancy: evolution weights
+        # return_bps / realized_pnl by evidence_weight and never reads outcome_class
+        # for the maths (evolution.py:357-369), so a row that already credited already
+        # carried its loss. What this fixes is every CLASS-KEYED surface — the
+        # governance counter and 0.85 derate (evolution.py:116-117, :370-372),
+        # process-adherence, packet outcome status, and any group-by-outcome_class
+        # study, all of which currently see 8 real losses as "unknown".
+        #
+        # GO-FORWARD ONLY. This re-derives nothing already stored: both regrade
+        # scripts hardcode ("live_cancelled", "cancelled")
+        # (scripts/d-backfill-reconcile-exit-class.py:55, d-verify:58) and the emit
+        # path re-feeds the STORED class (feedback_emit.py:131, :528-529). The 16
+        # rows that motivate this branch keep flat_unknown until a follow-up widens
+        # those scripts. Do not claim otherwise.
+        #
+        # SCOPE — the label, plus one credit-set consequence that IS real:
+        #   * governance_exit is in BOTH _REAL_EXIT_OUTCOMES (:582) and
+        #     _NON_STRATEGY_CREDIT_OUTCOMES (:70). So a kill-switch exit, or an
+        #     alpaca_orphan_reconcile, moves from flat_unknown (which credits) to
+        #     governance_exit (barred, :943-948). That is intended — a kill-switch
+        #     flatten is not strategy — and for alpaca_orphan_reconcile it is
+        #     idempotent with alpaca_reconcile.py:3797/:3801, which already forces
+        #     exactly that pair. Every other reclassification leaves credit alone.
+        #   * It is not a loss-guard fix FOR THESE ROWS. flat_unknown is in
+        #     risk_policy._LOSS_HISTORY_AMBIGUOUS_ENTRY_CLASSES and a real-exit class
+        #     returns "entered" unconditionally (risk_policy.py:1596), so this DOES
+        #     remove an ambiguity gap in general — a row whose only entry evidence is
+        #     submission-shaped, with absent economics, would flip. It changes 0 of
+        #     the 16 measured rows because risk_policy already answers "entered" on
+        #     economic_nonzero for all of them. What actually blocks the lane is
+        #     settlement of 4 unreconciled rows, not this label.
+        #   * There is NO never-entered leg. Labelling the rest cancelled_pre_entry
+        #     would be the "confidently wrong" class this module refuses elsewhere:
+        #     all 8 of the remaining rows carry entry-submission evidence and 4 of
+        #     them have broker P&L (−$442.46), their entry_occurred=False being an
+        #     artifact of the bounded 40-event window ageing out the fill event.
+        #     Those stay flat_unknown — an honest unknown beats a false zero.
+        #
+        # operator_flatten needs no special case: _classify_real_exit has no keyword
+        # for it, so it falls through to the economics and lands on stop_loss for a
+        # loss — safer than mapping it to governance_exit, which would bar a real
+        # strategy loss from credit. Note the asymmetry with :708-712, which DOES map
+        # alpaca_orphan_reconcile to governance_exit: that one is a broker-safety
+        # flatten of a dead session, whereas an operator flatten closes a live
+        # position the strategy chose. All 8 measured money rows are losses, so the
+        # win direction of this fall-through is an untested consequence, not a
+        # designed label.
+        #
+        # ADJACENT, NOT FIXED HERE: the sibling reaper writes STATE_EXPIRED for the
+        # same live_arm_pending population (automation_query.py:664, :737), and that
+        # branch (:754-755) returns expired_pre_run unconditionally with no evidence
+        # test at all — a strictly quieter version of this same blind spot.
+        if (entry_occurred or partial_exit) and _strip_reconcile_suffix(exit_reason):
+            reclassified = _classify_real_exit(
+                exit_reason=exit_reason,
+                return_bps=return_bps,
+                realized_pnl_usd=realized_pnl_usd,
+                entry_occurred=entry_occurred,
+                governance_context=governance_context,
+            )
+            if reclassified in _REAL_EXIT_OUTCOMES:
+                return reclassified
+        return OUTCOME_FLAT_UNKNOWN
 
     if st in (STATE_ERROR, STATE_LIVE_ERROR):
         for ev in events:
