@@ -17910,7 +17910,84 @@ def _poll_live_exit_fill(
 ) -> dict[str, Any]:
     oid = le.get("exit_order_id")
     if not oid:
-        _emit(db, sess, "live_exit_pending_unconfirmed", {"reason": reason, "why": "missing_exit_order_id"})
+        # ANPA 19771 (2026-09-04) — THE NAKED-POSITION HOLE. The first-ever
+        # burst-window exit decided at 08:50:40Z, its submit DEFERRED on stand-in
+        # pricing (which by design leaves `pending_exit_reason` set, :17554), and
+        # from the next pulse on the poll path owned the session. This branch then
+        # returned "pending" unconditionally, forever: 5,656 emissions over 5h11m
+        # with no attempt counter, no backoff, no escalation — and, decisively, it
+        # never reached the broker-zero reconciler ~50 lines below, so nothing
+        # noticed the broker had gone flat. The deadman stop was inert until RTH
+        # (Alpaca takes only limit orders in extended hours), so the runner WAS the
+        # sole protection and it was spinning. Realised −$37.25 at the open, 44c /
+        # 985bps below the 4.47 stop, against −$1.96 had the burst exit placed:
+        # $35.29 paid for one unbounded `return`. The session was still
+        # `live_entered` 4h29m after the broker went flat.
+        #
+        # `_live_exit_submit_succeeded` ALREADY handles exactly this: :17717
+        # computes `missing_order_id = ok and not exit_order_id`, records the failure
+        # and clears `pending_exit_reason` (:17876) — which is precisely what hands
+        # the session back to the fully-guarded submit path instead of this poll. The
+        # bug was never missing machinery; it was that this path never called it.
+        #
+        # It deliberately does NOT reconcile to EXITED here. That transition is how a
+        # position leaves CHILI's book and `_live_exit_submit_succeeded` grants it
+        # only on a result carrying `broker_zero` — a clamp read that actually came
+        # back zero. This path has read no broker, so synthesising that flag to close
+        # the ghost sooner could drop a still-open position from the book: strictly
+        # worse than the bug being fixed. The re-submit reads the broker and gets the
+        # real answer, including the genuine broker-zero reconcile when flat.
+        #
+        # A grace window first, because a submit in flight legitimately has no order
+        # id for a pulse or two. It is derived from the same backoff schedule the
+        # submit path uses, so the two cannot drift apart, with a floor of one
+        # backoff step for the very first poll.
+        _mo_attempts = int(le.get("exit_submit_attempts", 0) or 0)
+        _mo_grace_s = max(
+            _exit_submit_backoff_seconds(max(1, _mo_attempts)),
+            _EXIT_SUBMIT_BACKOFF_BASE_SECONDS,
+        )
+        # A missing or unparseable stamp must not restore the unbounded spin, so
+        # stamp it here and let the same clock decide on the next pulse. Self-
+        # healing, and it needs no second escape hatch with a number of its own.
+        _mo_since: Optional[float] = None
+        try:
+            _mo_raw = le.get("pending_exit_submitted_at_utc")
+            if _mo_raw:
+                _mo_at = datetime.fromisoformat(str(_mo_raw).replace("Z", "+00:00"))
+                if _mo_at.tzinfo is None:
+                    _mo_at = _mo_at.replace(tzinfo=timezone.utc)
+                _mo_since = (_utcnow_aware() - _mo_at).total_seconds()
+        except Exception:
+            _mo_since = None
+        if _mo_since is None:
+            le["pending_exit_submitted_at_utc"] = _utcnow().isoformat()
+            _commit_le(sess, le)
+        if _mo_since is not None and _mo_since >= _mo_grace_s:
+            _emit(db, sess, "live_exit_order_id_lost", {
+                "reason": reason,
+                "why": "missing_exit_order_id",
+                "pending_age_seconds": round(_mo_since, 2),
+                "grace_seconds": round(_mo_grace_s, 2),
+                "exit_submit_attempts": _mo_attempts,
+                "note": (
+                    "no exit order was ever placed for this pending exit — escalating to "
+                    "the submit-result path so the broker-zero reconciler runs (flat ⇒ "
+                    "EXITED) or the pending exit clears for re-submission"
+                ),
+            })
+            _live_exit_submit_succeeded(
+                db, sess, adapter=adapter, le=le,
+                result={"ok": True, "error": "missing_exit_order_id"},
+                reason=reason,
+            )
+            return {"filled": False, "pending": True, "why": "missing_exit_order_id_escalated"}
+        _emit(db, sess, "live_exit_pending_unconfirmed", {
+            "reason": reason,
+            "why": "missing_exit_order_id",
+            "pending_age_seconds": None if _mo_since is None else round(_mo_since, 2),
+            "grace_seconds": round(_mo_grace_s, 2),
+        })
         return {"filled": False, "pending": True, "why": "missing_exit_order_id"}
     alpaca_family = normalize_execution_family(
         sess.execution_family
