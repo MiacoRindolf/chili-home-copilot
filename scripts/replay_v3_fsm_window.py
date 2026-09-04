@@ -22,20 +22,43 @@ Env knobs: SYMBOL, WIN_START/WIN_END (replayed window, UTC-naive), OHLCV_START (
 warm-up), FRAME_WARMUP_MIN (minutes of pre-WIN_START tape resampled into the OHLCV frames;
 default 5d = the period the runner requests live; tape-bounded), TICK_STRIDE (downsample tape
 1/N), GRID_STEP_S (sim grid), FULL_MIRROR (1=full-density streaming mirror — needed for
-cadence + 5m higher-low), ARM (on/off/both), DIAG/ENTRY_DIAG/GRIND_DIAG (diagnostics).
+cadence + 5m higher-low), ARM (on/off/both), DIAG/ENTRY_DIAG/GRIND_DIAG (diagnostics),
+SOURCE_FILTER (comma-separated tape provenance allow-list), EXEC_FAMILY (execution rail),
+REPLAY_JSON_OUT (structured per-run result), BENCH_QUESTION (arms the density invariant).
 
 ⚠️ NINE GOTCHA-LAYERS cracked for parity (do NOT remove without re-checking): schedule_window_now
 real-clock -> sim clock; signed_tape_accel_features as_of -> sim clock (else the mirrored tape
 reads empty vs trailing now()); RH-401 pricebook -> None; stale_bbo -> freshness_mode='wall';
-OOM on tick load -> streaming server-side-cursor mirror; SQL %% -> mod(); execution_family=
-robinhood_agentic_mcp (not _spot); NormalizedFill .price/.size (not the ORDER's
-average_filled_price); MTM the open position at window-end. See project_fsm_replay_instrument.
+OOM on tick load -> streaming server-side-cursor mirror; SQL %% -> mod(); execution_family
+DEFAULTS to robinhood_agentic_mcp (not _spot) and is now EXEC_FAMILY-selectable;
+NormalizedFill .price/.size (not the ORDER's average_filled_price); MTM the open position at
+window-end. See project_fsm_replay_instrument.
+
+⚠️ THE TENTH LAYER — THE NBBO MIRROR (2026-09-04). This driver mirrored the trade tape and
+(since 08-26) the L2 book into the sim sink, but NEVER ``momentum_nbbo_spread_tape`` — while
+the FSM reads that table DIRECTLY FROM THE SINK in at least three places:
+``live_runner._build_micro_bar_df`` (:23426 — the 15 s micro-pullback frame, also the exit
+block at :45492), the C1 IQFeed phantom-loss cross-check (:24335 via
+``nbbo_tape.recent_bid_spread_tape``), and the adaptive spread-cost veto's rolling p50/p75/p90
+spread distribution (:38885 via ``spread_cost_veto.name_spread_percentiles``). So in EVERY
+replay run to date the micro-pullback detector and the spread-distribution veto read an EMPTY
+table — "measuring silence", the same defect the L2 depth mirror fixed on 2026-08-26.
+``mirror_nbbo_streaming`` closes it.
+
+⚠️ TIE STABILITY (2026-09-04). Every tape SELECT here now ends
+``ORDER BY observed_at ASC, id ASC``, and the stride's ``row_number()`` window is ordered the
+same way. Rows sharing an ``observed_at`` (routine inside a burst) previously came back in
+PHYSICAL SCAN ORDER, so the same window could mirror in a different order and fill
+differently — an "A/B delta" that was really a heap-layout delta. This is the ONE change here
+that is not gated behind a new env var, because a nondeterministic baseline cannot be A/B'd.
 """
 from __future__ import annotations
 
+import json
 import os
+import subprocess
 import sys
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 import pandas as pd
 from sqlalchemy import create_engine, text
@@ -47,8 +70,30 @@ import app.services.trading.momentum_neural.live_runner as lr
 from app.services.trading.momentum_neural import market_profile as _mp
 from app.services.trading.momentum_neural import risk_evaluator as _re
 from app.services.trading.momentum_neural.replay_mock_broker import FillMode
+from app.services.trading.execution_family_registry import (
+    normalize_execution_family,
+    venue_for_execution_family,
+)
 from app.config import settings
 from app.models.trading import TradingAutomationSession, TradingAutomationEvent
+
+# Sibling scripts/ modules. Same sys.path shim scripts/hydration_preflight.py uses
+# (~:58-61) so this runs both as `python scripts/replay_v3_fsm_window.py` and as an
+# import from the repo root.
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+_REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if _REPO not in sys.path:
+    sys.path.insert(0, _REPO)
+
+from export_replay_v3_parity_fixtures import _load_bearing_payload  # noqa: E402
+from hydration_canonicalize import TABLES as _CANON_TABLES, plan as _canon_plan  # noqa: E402
+from replay_harness_invariants import (  # noqa: E402
+    assert_as_of_reads,
+    assert_clean_sink,
+    assert_dense_stride,
+    assert_mock_parity,
+    assert_tie_stable_sql,
+)
 
 # READ-ONLY source DB (defaults to the local chili). SIM is the throwaway seeded DB (chili_test)
 # — its name MUST end in _test as a guard against ever pointing the seeded/cleaned run at prod.
@@ -98,43 +143,237 @@ DIAG = os.environ.get("DIAG", "0") == "1"
 ENTRY_DIAG = os.environ.get("ENTRY_DIAG", "0") == "1"
 EQUITY = float(os.environ.get("EQUITY", "13000"))
 RISK = float(os.environ.get("RISK", "130"))
+TICK_STRIDE = int(os.environ.get("TICK_STRIDE", "8"))
+
+# SOURCE_FILTER (2026-09-04) — TAPE PROVENANCE. ``counterfactual_replay.load_trade_tape`` /
+# ``load_nbbo_tape`` and, until now, every read in THIS driver filtered on symbol and time
+# ONLY. In ``chili_hydrated`` a symbol-day hydrated from two providers therefore returns BOTH
+# tapes concatenated: measured on TMCR 2026-08-24, 16,933 ``iqfeed_lookup_hist`` rows +
+# 16,933 ``polygon_v3_trades`` rows came back as 33,866 ticks — double the prints, double the
+# volume, every price repeated back to back, and nothing about the rows looks malformed.
+# Comma-separated; UNSET ⇒ no predicate at all ⇒ byte-identical SQL for every existing caller.
+SOURCE_FILTER: tuple[str, ...] = tuple(
+    s.strip() for s in os.environ.get("SOURCE_FILTER", "").split(",") if s.strip()
+)
+
+# EXEC_FAMILY (2026-09-04) — was a SILENT NO-OP. ``scripts/nightly_replay_report.py:164`` has
+# been setting EXEC_FAMILY=alpaca_spot for weeks while the seed site hard-coded
+# "robinhood_agentic_mcp", so every "Alpaca" replay actually ran the Robinhood agentic fill
+# path. The live rail is Alpaca and the fill path differs. Normalised through the repo's own
+# ``normalize_execution_family`` so an unknown/typo'd value cannot silently become a
+# different rail; the DEFAULT is unchanged, so every existing caller stays byte-identical.
+EXEC_FAMILY = normalize_execution_family(
+    os.environ.get("EXEC_FAMILY") or "robinhood_agentic_mcp"
+)
+
+# REPLAY_JSON_OUT — structured per-run result a scorer can read. stdout is UNCHANGED.
+REPLAY_JSON_OUT = (os.environ.get("REPLAY_JSON_OUT") or "").strip()
+REPLAY_RESULT_SCHEMA = "chili.replay_v3_fsm_window_result.v1"
+
+# BENCH_QUESTION — the operator's declared question for this run. Empty (the default, and
+# what every existing caller passes) asserts nothing; declaring an exit/flow/bench question
+# arms the density floor in replay_harness_invariants.assert_dense_stride.
+BENCH_QUESTION = (os.environ.get("BENCH_QUESTION") or "").strip()
 
 
 def _naive(t):
     return t.replace(tzinfo=None) if getattr(t, "tzinfo", None) else t
 
 
+def _utc(t):
+    """Naive-UTC -> tz-AWARE UTC. ``momentum_nbbo_spread_tape.observed_at`` is TIMESTAMPTZ
+    while ``iqfeed_trade_ticks.observed_at`` is TIMESTAMP (naive UTC) — confirmed against
+    information_schema. Comparing a naive bound to a timestamptz column makes PostgreSQL
+    coerce it through the SESSION TimeZone, which is only harmless while that is UTC. The
+    NBBO reads this driver OWNS bind aware bounds so they are correct under any session TZ."""
+    return t.replace(tzinfo=timezone.utc) if getattr(t, "tzinfo", None) is None else t
+
+
+# ─── TAPE SQL ────────────────────────────────────────────────────────────────────────────
+# Each statement is ONE string literal that carries its FROM and its ORDER BY together, with
+# the optional provenance predicate injected at ``{source}``. That shape is what lets
+# replay_harness_invariants.assert_tie_stable_sql prove, from the AST alone, that every tape
+# SELECT here ends ``ORDER BY observed_at ASC, id ASC``.
+
+def source_predicate(sources: tuple[str, ...] | None = None, *, placeholder: str = ":sources") -> str:
+    """``AND source = ANY(<placeholder>)`` when a filter is configured, else ``''``.
+
+    ``placeholder`` is ``:sources`` for the SQLAlchemy reads and ``%s`` for the psycopg2
+    streaming mirrors — the two halves of this driver speak different paramstyles."""
+    srcs = SOURCE_FILTER if sources is None else tuple(sources)
+    return f" AND source = ANY({placeholder})" if srcs else ""
+
+
+_NBBO_TAPE_SQL = (
+    "SELECT observed_at, bid, ask, mid FROM momentum_nbbo_spread_tape "
+    "WHERE symbol=:s AND observed_at>=:a AND observed_at<:b AND bid>0 AND ask>=bid"
+    "{source} "
+    "ORDER BY observed_at ASC, id ASC"
+)
+
+_TRADE_TAPE_SQL = (
+    "SELECT observed_at, price, size*:st AS size, bid, ask, id FROM ("
+    "  SELECT id, observed_at, price, size, bid, ask, "
+    "         row_number() OVER (ORDER BY observed_at ASC, id ASC) AS rn "
+    "  FROM iqfeed_trade_ticks "
+    "  WHERE symbol=:s AND observed_at>=:a AND observed_at<:b AND price>0"
+    "{source} "
+    ") q WHERE mod(rn, :st) = 0 "
+    "ORDER BY observed_at ASC, id ASC"
+)
+
+_FRAME_TAPE_SQL = (
+    "SELECT observed_at, price, size*:st AS size, id FROM ("
+    "  SELECT id, observed_at, price, size, "
+    "         row_number() OVER (ORDER BY observed_at ASC, id ASC) AS rn "
+    "  FROM iqfeed_trade_ticks "
+    "  WHERE symbol=:s AND observed_at>=:a AND observed_at<:b AND price>0"
+    "{source} "
+    ") q WHERE mod(rn, :st) = 0 "
+    "ORDER BY observed_at ASC, id ASC"
+)
+
+
+_TRADE_MIRROR_SQL = (
+    "SELECT observed_at, price, size, bid, ask, id FROM iqfeed_trade_ticks "
+    "WHERE symbol=%s AND observed_at>=%s AND observed_at<%s AND price>0"
+    "{source} "
+    "ORDER BY observed_at ASC, id ASC"
+)
+
+# The NBBO mirror carries every column a live NBBO READER touches, not just bid/ask —
+# ``spread_bps`` is what the C1 phantom-loss cross-check and the adaptive spread-cost veto's
+# p50/p75/p90 distribution read, ``mid`` is what the run-up/ignition reads use, and the
+# provider clocks are the freshness basis. Dropping any of them re-creates the same
+# "measuring silence" failure in a narrower place (cf. ``provider_at`` on the depth mirror).
+_NBBO_MIRROR_SQL = (
+    "SELECT observed_at, bid, ask, mid, spread_bps, day_volume, "
+    "       provider_event_at, received_at, timestamp_basis, bridge_version, "
+    "       provider_trade_reference_at, message_type, bridge_run_id, "
+    "       connection_generation, id "
+    "FROM momentum_nbbo_spread_tape "
+    "WHERE symbol=%s AND observed_at>=%s AND observed_at<%s AND bid>0 AND ask>=bid"
+    "{source} "
+    "ORDER BY observed_at ASC, id ASC"
+)
+
+
+def nbbo_tape_sql(sources: tuple[str, ...] | None = None) -> str:
+    return _NBBO_TAPE_SQL.format(source=source_predicate(sources))
+
+
+def trade_mirror_sql(sources: tuple[str, ...] | None = None) -> str:
+    return _TRADE_MIRROR_SQL.format(source=source_predicate(sources, placeholder="%s"))
+
+
+def nbbo_mirror_sql(sources: tuple[str, ...] | None = None) -> str:
+    return _NBBO_MIRROR_SQL.format(source=source_predicate(sources, placeholder="%s"))
+
+
+def trade_tape_sql(sources: tuple[str, ...] | None = None) -> str:
+    return _TRADE_TAPE_SQL.format(source=source_predicate(sources))
+
+
+def frame_tape_sql(sources: tuple[str, ...] | None = None) -> str:
+    return _FRAME_TAPE_SQL.format(source=source_predicate(sources))
+
+
+def tape_params(base: dict, sources: tuple[str, ...] | None = None) -> dict:
+    """Bind ``:sources`` only when the predicate is actually present — an unused bind
+    parameter is an error on some drivers and a lie in the run receipt on all of them."""
+    srcs = SOURCE_FILTER if sources is None else tuple(sources)
+    return {**base, "sources": list(srcs)} if srcs else dict(base)
+
+
+# ─── PROVENANCE GUARD ────────────────────────────────────────────────────────────────────
+# Reuses hydration_canonicalize's OWN day expressions, preference order and ``plan()``
+# decision — the rule lives in one place. Only the SURVEY is re-scoped: that module's
+# survey() groups the WHOLE table, and momentum_nbbo_spread_tape is a 26 GB / 41.8M row
+# relation, so an unscoped GROUP BY here would be a full sort before a single tick loads.
+#
+# The predicate is ``source = ANY(<the four hydration providers>)``, exactly as
+# hydration_canonicalize.survey does. That is deliberate and load-bearing: a LIVE ``chili``
+# symbol-day legitimately carries several sources at once (iqfeed_l1 per-tick +
+# massive_snapshot once a minute + massive_ws_universe), and those are different
+# granularities, not duplicates — ``_build_micro_bar_df`` even prefers the non-snapshot rows
+# explicitly. Only a DOUBLE-HYDRATED symbol-day is a duplicate, and only hydration providers
+# can produce one.
+
+def _survey_symbol_day_sources(conn, table: str, symbol: str, lo, hi) -> list[tuple]:
+    """(symbol, ET day, source, rows) for ONE symbol over ONE window — the scoped form of
+    hydration_canonicalize.survey, same columns, same predicate, index-friendly bounds."""
+    day_expr, prefs = _CANON_TABLES[table]
+    naive = table == "iqfeed_trade_ticks"  # trade tape is naive-UTC; NBBO tape is tz-aware
+    _lo, _hi = (_naive(lo), _naive(hi)) if naive else (_utc(lo), _utc(hi))
+    with conn.cursor() as cur:
+        cur.execute(
+            f"SELECT symbol, {day_expr} AS d, source, count(*) FROM {table} "
+            "WHERE symbol = %s AND observed_at >= %s AND observed_at < %s "
+            "AND source = ANY(%s) GROUP BY 1, 2, 3",
+            (symbol, _lo, _hi, list(prefs)),
+        )
+        return [(s, d, src, int(n)) for s, d, src, n in cur.fetchall()]
+
+
+def assert_single_hydrated_source() -> dict:
+    """SystemExit if the (symbol, ET day) carries more than one hydration source in either
+    tape table. Measured TMCR 2026-08-24: 33,866 ticks = 2 x 16,933, silently."""
+    import psycopg2
+
+    windows = {
+        "iqfeed_trade_ticks": (FRAME_START, WIN_END),
+        "momentum_nbbo_spread_tape": (WIN_START, WIN_END),
+    }
+    found: dict[str, dict[str, int]] = {}
+    conn = psycopg2.connect(PROD)
+    conn.set_session(readonly=True)
+    try:
+        for table, (lo, hi) in windows.items():
+            rows = _survey_symbol_day_sources(conn, table, SYMBOL, lo, hi)
+            found[table] = {}
+            for _sym, _day, src, n in rows:
+                found[table][src] = found[table].get(src, 0) + n
+            drops = _canon_plan(rows, _CANON_TABLES[table][1])
+            if drops:
+                raise SystemExit(
+                    f"  [tape] ABORT: {SYMBOL} is hydrated from MORE THAN ONE provider in "
+                    f"{table} — the replay would read both tapes CONCATENATED (measured "
+                    "TMCR 2026-08-24: 16,933 + 16,933 = 33,866 ticks, every print twice):\n"
+                    + "\n".join(
+                        f"  [tape]   {d['day']}: keep {d['keep']} ({d['kept_rows']} rows), "
+                        f"drop {d['drop']} ({d['rows']} rows)" for d in drops
+                    )
+                    + "\n  [tape]   fix it structurally: "
+                      "python scripts/hydration_canonicalize.py --apply"
+                )
+    finally:
+        conn.close()
+    return found
+
+
 def load_prod():
     eng = create_engine(PROD)
     with eng.connect() as c:
-        nbbo = pd.read_sql(text(
-            "SELECT observed_at, bid, ask, mid FROM momentum_nbbo_spread_tape "
-            "WHERE symbol=:s AND observed_at>=:a AND observed_at<:b AND bid>0 AND ask>=bid "
-            "ORDER BY observed_at ASC"), c, params={"s": SYMBOL, "a": WIN_START, "b": WIN_END})
+        nbbo = pd.read_sql(
+            text(nbbo_tape_sql()), c,
+            params=tape_params({"s": SYMBOL, "a": _utc(WIN_START), "b": _utc(WIN_END)}))
         # downsample ticks at the SQL level (keep every TICK_STRIDE-th) — the full CLRO run
         # window is 200k+ ticks (OOM risk); every 8th keeps ~30k, plenty for the 1m/5m resample
         # + forward-momentum slope direction. Volume is scaled back up by the stride so the
         # micro-frame volume magnitude stays approximately right.
-        stride = int(os.environ.get("TICK_STRIDE", "8"))
-        ticks = pd.read_sql(text(
-            "SELECT observed_at, price, size*:st AS size, bid, ask FROM ("
-            "  SELECT observed_at, price, size, bid, ask, "
-            "         row_number() OVER (ORDER BY observed_at) AS rn "
-            "  FROM iqfeed_trade_ticks "
-            "  WHERE symbol=:s AND observed_at>=:a AND observed_at<:b AND price>0"
-            ") q WHERE mod(rn, :st) = 0 ORDER BY observed_at ASC"),
-            c, params={"s": SYMBOL, "a": OHLCV_START, "b": WIN_END, "st": stride})
+        # ⚠️ The row_number() window is ordered (observed_at, id): equal timestamps are routine
+        # inside a burst, and an unstable window made WHICH rows survive the stride depend on
+        # physical scan order.
+        stride = TICK_STRIDE
+        ticks = pd.read_sql(
+            text(trade_tape_sql()), c,
+            params=tape_params({"s": SYMBOL, "a": OHLCV_START, "b": WIN_END, "st": stride}))
         # P1 FRAME WARM-UP: the wider (stride-downsampled) load that feeds ONLY the
         # OHLCV provider, so frames carry real pre-window depth like live's 5d fetch.
         if FRAME_START < OHLCV_START:
-            frame_ticks = pd.read_sql(text(
-                "SELECT observed_at, price, size*:st AS size FROM ("
-                "  SELECT observed_at, price, size, "
-                "         row_number() OVER (ORDER BY observed_at) AS rn "
-                "  FROM iqfeed_trade_ticks "
-                "  WHERE symbol=:s AND observed_at>=:a AND observed_at<:b AND price>0"
-                ") q WHERE mod(rn, :st) = 0 ORDER BY observed_at ASC"),
-                c, params={"s": SYMBOL, "a": FRAME_START, "b": WIN_END, "st": stride})
+            frame_ticks = pd.read_sql(
+                text(frame_tape_sql()), c,
+                params=tape_params({"s": SYMBOL, "a": FRAME_START, "b": WIN_END, "st": stride}))
         else:
             frame_ticks = ticks
     return nbbo, ticks, frame_ticks
@@ -224,15 +463,91 @@ def mirror_ticks_streaming(sim_engine):
     while slice_start < WIN_END:
         slice_end = min(slice_start + _td(minutes=5), WIN_END)
         scur = src.cursor()
-        scur.execute(
-            "SELECT observed_at, price, size, bid, ask FROM iqfeed_trade_ticks "
-            "WHERE symbol=%s AND observed_at>=%s AND observed_at<%s AND price>0 ORDER BY observed_at ASC",
-            (SYMBOL, slice_start, slice_end))
+        _args = [SYMBOL, slice_start, slice_end]
+        if SOURCE_FILTER:
+            _args.append(list(SOURCE_FILTER))
+        scur.execute(trade_mirror_sql(), tuple(_args))
         batch = scur.fetchall()
         scur.close()
         src.commit()  # isara ang read tx — sariwa ang query_start sa susunod
         if batch:
             rows = [(SYMBOL, r[0], float(r[1]), float(r[2] or 0), r[3], r[4], 'replay_v3') for r in batch]
+            _ev(dcur, ins, rows, page_size=5000)
+            dst.commit()  # maiksi ang bawat SIM tx din
+            total += len(rows)
+            del rows
+        del batch
+        slice_start = slice_end
+    dcur.close(); dst.close()
+    src.close()
+    return total
+
+
+def mirror_nbbo_streaming(sim_engine):
+    """FULL-DENSITY mirror ng NBBO TAPE — ang IKATLONG nawawalang kalahati ng harness.
+
+    ⚠️ BAKIT ITO UMIIRAL (2026-09-04). Ang driver na ito ay nagmi-mirror ng TRADE tape
+    (:513) at, mula 08-26, ng L2 DEPTH (:516) papasok sa sink — pero KAILANMAN ay hindi
+    ng ``momentum_nbbo_spread_tape``. Ang NBBO ay ginagamit lang bilang GRID (in-memory,
+    mula sa ``load_prod``). Samantala ang FSM ay bumabasa ng table na iyon NANG DIREKTA
+    MULA SA SINK sa hindi bababa sa TATLONG lugar::
+
+        live_runner._build_micro_bar_df        :23426  (15 s micro-pullback frame;
+                                                        ginagamit din ng exit block :45492)
+        live_runner._c1_iqfeed_phantom_loss    :24335  (via nbbo_tape.recent_bid_spread_tape)
+        spread_cost_veto.name_spread_percentiles :38885 (rolling p50/p75/p90 spread)
+
+    Kaya sa BAWAT replay hanggang ngayon, ang micro-pullback detector at ang
+    spread-distribution veto ay bumabasa ng WALANG LAMAN na table — "sumusukat ng
+    katahimikan", ang EKSAKTONG depektong inayos ng L2 depth mirror noong 2026-08-26.
+
+    ⚠️ ASIMETRIYA NG ORASAN. ``iqfeed_trade_ticks.observed_at`` ay TIMESTAMP (naive UTC)
+    habang ``momentum_nbbo_spread_tape.observed_at`` ay TIMESTAMPTZ (nakumpirma sa
+    information_schema). Ang mga hangganan ng slice dito ay ginagawang tz-AWARE UTC bago
+    i-bind; ang mga hilerang binabasa ay tz-aware na at isinusulat nang BERBATIM, kaya ang
+    parehong instant ang nakikita ng FSM na nakikita ng live.
+
+    ⚠️ KAPAREHONG DALAWANG GOTCHA ng tick mirror, at sinasadya iyon:
+      * GOTCHA 11  — 5-minutong slice, bawat isa sa SARILING maikling transaction sa
+        magkabilang dulo (db_watchdog pumapatay ng >10 min mula query_start).
+      * GOTCHA 11b — ``execute_values`` na batched, hindi row-by-row executemany.
+
+    ⚠️ DALA ANG BUONG HANAY NA BINABASA: ``spread_bps`` (C1 + ang p50/p75/p90 veto),
+    ``mid`` (run-up/ignition), ``day_volume``, at ang provider clocks. Kung may nawawala,
+    tahimik na magiging None ang gate at muli tayong susukat ng katahimikan.
+    """
+    import psycopg2
+    from psycopg2.extras import execute_values as _ev
+    from datetime import timedelta as _td
+    src = psycopg2.connect(PROD)
+    src.set_session(readonly=True)
+    dst = sim_engine.raw_connection()
+    dcur = dst.cursor()
+    ins = (
+        "INSERT INTO momentum_nbbo_spread_tape "
+        "(symbol, observed_at, bid, ask, mid, spread_bps, day_volume, source, "
+        " provider_event_at, received_at, timestamp_basis, bridge_version, "
+        " provider_trade_reference_at, message_type, bridge_run_id, connection_generation) "
+        "VALUES %s"
+    )
+    total = 0
+    slice_start = OHLCV_START
+    while slice_start < WIN_END:
+        slice_end = min(slice_start + _td(minutes=5), WIN_END)
+        scur = src.cursor()
+        _args = [SYMBOL, _utc(slice_start), _utc(slice_end)]
+        if SOURCE_FILTER:
+            _args.append(list(SOURCE_FILTER))
+        scur.execute(nbbo_mirror_sql(), tuple(_args))
+        batch = scur.fetchall()
+        scur.close()
+        src.commit()  # isara ang read tx — sariwa ang query_start sa susunod
+        if batch:
+            rows = [
+                (SYMBOL, r[0], r[1], r[2], r[3], r[4], r[5], 'replay_v3',
+                 r[6], r[7], r[8], r[9], r[10], r[11], r[12], r[13])
+                for r in batch
+            ]
             _ev(dcur, ins, rows, page_size=5000)
             dst.commit()  # maiksi ang bawat SIM tx din
             total += len(rows)
@@ -295,12 +610,18 @@ def mirror_depth_streaming(sim_engine):
     while slice_start < WIN_END:
         slice_end = min(slice_start + _td(minutes=5), WIN_END)
         scur = src.cursor()
+        # ⚠️ INLINE ON PURPOSE: tests/test_replay_mirrors_l2_depth.py reads THIS FUNCTION'S
+        # BODY to prove every column the depth-reading exit levers need is carried
+        # (provider_at, imbalance5, bid5/ask5...). Hoisting it to a module constant would
+        # pass the tests vacuously.
         scur.execute(
             "SELECT observed_at, bid_top, ask_top, bid_top_size, ask_top_size, "
-            "       bid5_size, ask5_size, imbalance5, venues, bids_json, asks_json, provider_at "
+            "       bid5_size, ask5_size, imbalance5, venues, bids_json, asks_json, "
+            "       provider_at, id "
             "FROM iqfeed_depth_snapshots "
             "WHERE symbol=%s AND observed_at>=%s AND observed_at<%s "
-            "  AND bid_top>0 AND ask_top>0 ORDER BY observed_at ASC",
+            "  AND bid_top>0 AND ask_top>0 "
+            "ORDER BY observed_at ASC, id ASC",
             (SYMBOL, slice_start, slice_end))
         batch = scur.fetchall()
         scur.close()
@@ -373,7 +694,112 @@ class AsOfProvider:
         return bars.copy()
 
 
-def run_arm(label, grid, ticks, frame_ticks, g4_on):
+# ─── STRUCTURED RESULT (REPLAY_JSON_OUT) ─────────────────────────────────────────────────
+# The driver used to emit stdout ONLY, so nothing downstream could score a run without
+# re-parsing prose. This writes one machine-readable receipt per arm — the env contract it
+# actually ran under, the measured tape density, the mock config, and the ordered decisions —
+# BEFORE the end-of-arm cleanup deletes the evidence. stdout is UNCHANGED.
+
+# Payload facts the bench scorer needs on top of the parity fixture's load-bearing set
+# (``_load_bearing_payload``): WHY a decision went the way it did, and what it was measured
+# against. Everything else in a payload stays out, so the receipt is stable across releases.
+_BENCH_PAYLOAD_KEYS = (
+    "reason", "blocked_trigger", "benched_at_hod", "trigger", "viability_score", "errors",
+)
+
+
+def _bench_payload(event_type: str, payload: dict) -> dict:
+    p = payload or {}
+    keep = dict(_load_bearing_payload(str(event_type), p))
+    for k in _BENCH_PAYLOAD_KEYS:
+        if k in p:
+            keep[k] = p[k]
+    return keep
+
+
+def _tree_sha() -> dict:
+    """The tree that RAN. A stale build tree once produced a fake 'fix works' result, so the
+    receipt carries HEAD + the tree object, not a branch name."""
+    out = {}
+    for key, args in (("head", ["rev-parse", "HEAD"]),
+                      ("tree", ["rev-parse", "HEAD^{tree}"]),
+                      ("branch", ["rev-parse", "--abbrev-ref", "HEAD"])):
+        try:
+            proc = subprocess.run(["git", "-C", _REPO] + args,
+                                  capture_output=True, text=True, check=False)
+            out[key] = proc.stdout.strip() if proc.returncode == 0 else None
+        except Exception:
+            out[key] = None
+    try:
+        proc = subprocess.run(["git", "-C", _REPO, "status", "--porcelain"],
+                              capture_output=True, text=True, check=False)
+        out["dirty"] = bool(proc.stdout.strip()) if proc.returncode == 0 else None
+    except Exception:
+        out["dirty"] = None
+    return out
+
+
+def _env_contract() -> dict:
+    """Echo back EVERY knob that shapes the run. A result whose inputs are not recorded
+    cannot be re-run, and an A/B whose arms differ in an unrecorded knob is not an A/B."""
+    return {
+        "SYMBOL": SYMBOL,
+        "WIN_START": WIN_START.isoformat(),
+        "WIN_END": WIN_END.isoformat(),
+        "OHLCV_START": OHLCV_START.isoformat(),
+        "FRAME_WARMUP_MIN": FRAME_WARMUP_MIN,
+        "FRAME_START": FRAME_START.isoformat(),
+        "TICK_STRIDE": TICK_STRIDE,
+        "GRID_STEP_S": GRID_STEP_S,
+        "EQUITY": EQUITY,
+        "RISK": RISK,
+        "SOURCE_FILTER": list(SOURCE_FILTER),
+        "EXEC_FAMILY": EXEC_FAMILY,
+        "BENCH_QUESTION": BENCH_QUESTION,
+        "FULL_MIRROR": os.environ.get("FULL_MIRROR", "1"),
+        "ARM": os.environ.get("ARM", "both"),
+        "MAXLOSS_USD": os.environ.get("MAXLOSS_USD"),
+        "GRIND_FIX": os.environ.get("GRIND_FIX"),
+        "REPLAY_KEEP_SINK": os.environ.get("REPLAY_KEEP_SINK"),
+        "PROD_DB": _sim_db_name(PROD),
+        "SIM_DB": _sim_db_name(SIM),
+    }
+
+
+def _mock_config(mock) -> dict:
+    out = {}
+    for key in ("resting_limit_fills", "volume_cap_enabled", "fill_mode", "freshness_mode",
+                "volume_participation_frac", "max_age_seconds", "slippage_bps",
+                "ack_delay_ticks", "partial_first_fill"):
+        for cand in (key, f"_{key}"):
+            if hasattr(mock, cand):
+                out[key] = getattr(mock, cand)
+                break
+    return out
+
+
+def _json_out_path(g4_on: bool):
+    """One receipt per ARM. ARM=both runs the same window twice, so the two receipts must
+    not overwrite each other — a single file would silently keep only the second arm."""
+    if not REPLAY_JSON_OUT:
+        return None
+    if os.environ.get("ARM", "both") in ("on", "off"):
+        return REPLAY_JSON_OUT
+    base, ext = os.path.splitext(REPLAY_JSON_OUT)
+    return f"{base}.g4_{'on' if g4_on else 'off'}{ext or '.json'}"
+
+
+def _write_run_json(path, doc) -> None:
+    d = os.path.dirname(os.path.abspath(path))
+    if d:
+        os.makedirs(d, exist_ok=True)
+    # newline="" — Windows text mode would otherwise rewrite every \n to \r\n and change
+    # the bytes of an otherwise identical receipt (reference_python_write_text_crlf_windows).
+    with open(path, "w", newline="", encoding="utf-8") as fh:
+        json.dump(doc, fh, indent=2, default=str)
+
+
+def run_arm(label, grid, ticks, frame_ticks, g4_on, *, sink_reset=None, tape_sources=None):
     """Seed a fresh queued_live CLRO session + real ticks in SIM, run the REAL FSM over the
     grid with G4 flags on/off, mine the fills -> PnL + the grind/escalation event evidence."""
     settings.chili_momentum_g4_grind_exit_enabled = g4_on
@@ -487,11 +913,19 @@ def run_arm(label, grid, ticks, frame_ticks, g4_on):
     db = Sess()
     # clean any prior replay_v3 ticks + stale seeded CLRO sessions
     db.execute(text("DELETE FROM iqfeed_trade_ticks WHERE source='replay_v3' AND symbol=:s"), {"s": SYMBOL})
+    db.execute(text("DELETE FROM momentum_nbbo_spread_tape WHERE source='replay_v3' AND symbol=:s"), {"s": SYMBOL})
     db.commit()
 
     arm = rv3.RecordedArm(symbol=SYMBOL, live_eligible_at_utc=WIN_START.isoformat(),
                           viability_score=0.9, atr_pct=0.05)
-    seed = rv3.seed_replay_session(db, arm=arm, execution_family="robinhood_agentic_mcp")
+    # EXEC_FAMILY (2026-09-04): was hard-coded here, so nightly_replay_report.py's
+    # EXEC_FAMILY=alpaca_spot has been silently ignored for weeks while the live rail IS
+    # Alpaca and the fill path differs. seed_replay_session derives the venue itself
+    # (venue_for_execution_family) and requires an account identity for the NON-Alpaca
+    # families only — RecordedArm already carries REPLAY_MOCK_ACCOUNT_IDENTITY, which the
+    # seeder writes under NON_ALPACA_ACCOUNT_IDENTITY_KEY for RH/Coinbase and correctly
+    # omits for alpaca_spot/alpaca_short. Default unchanged ⇒ existing callers identical.
+    seed = rv3.seed_replay_session(db, arm=arm, execution_family=EXEC_FAMILY)
     # MAXLOSS_USD: experiment knob — the diagnostic seed freezes LEGACY_DIAGNOSTIC_POLICY_CAPS
     # ($50/trade) into the session snapshot; no setting reaches it. Rewriting the frozen cap
     # post-seed is the only lever that scales per-trade size without touching equity. Results
@@ -508,15 +942,28 @@ def run_arm(label, grid, ticks, frame_ticks, g4_on):
         print(f"[harness] MAXLOSS_USD override: frozen max_loss_per_trade_usd -> {float(_maxloss_env)}")
     # FULL-density streaming mirror (cadence + 5m higher-low need real tick density); falls back
     # to the in-memory downsampled mirror only if FULL_MIRROR=0.
+    mirrored_depth = 0
+    mirrored_nbbo = 0
     if os.environ.get("FULL_MIRROR", "1") == "1":
         db.commit()  # commit the seed first (streaming mirror uses its own raw connection)
         mirrored = mirror_ticks_streaming(eng)
+        # ANG NBBO TAPE (2026-09-04). Walang ito, ang micro-pullback frame
+        # (_build_micro_bar_df) at ang spread-distribution veto ay bumabasa ng WALANG
+        # LAMAN na table — sumusukat ng katahimikan, gaya ng libro bago ang 08-26.
+        mirrored_nbbo = mirror_nbbo_streaming(eng)
+        print("  mirrored_nbbo_rows=%s" % mirrored_nbbo)
         # ANG LIBRO (2026-08-26). Walang ito, ang bawat depth-reading na exit lever
         # ay tahimik na no-op at ang A/B ay sumusukat ng katahimikan.
         mirrored_depth = mirror_depth_streaming(eng)
         print("  mirrored_depth_rows=%s" % mirrored_depth)
     else:
         mirrored = mirror_ticks(db, ticks)
+        # ⚠️ The NBBO mirror runs here TOO. The silence defect is not conditional on tick
+        # density: FULL_MIRROR=0 downsamples the TRADE tape, it does not mean the FSM's
+        # micro-pullback frame and spread-distribution veto should read an empty table.
+        db.commit()  # the streaming mirror uses its own raw connection
+        mirrored_nbbo = mirror_nbbo_streaming(eng)
+        print("  mirrored_nbbo_rows=%s" % mirrored_nbbo)
     db.commit()
 
     # VALIDATED parity-fixture mock config ($0.05 fidelity, replay_parity.py:219): resting
@@ -529,6 +976,10 @@ def run_arm(label, grid, ticks, frame_ticks, g4_on):
         fill_mode=FillMode.CONSERVATIVE,
         freshness_mode="wall",
     )
+    # INVARIANT 9, FAIL CLOSED: prove the mock the run will actually fill against IS the
+    # validated config, read back off the instance — a constructor argument that a later
+    # edit stops honouring produces a PnL nobody can compare to a baseline.
+    assert_mock_parity(mock)
     # Feed the REAL per-tick printed volume so resting orders fill against actual traded volume
     # (the ReplayV3Driver sets clock+quote but NOT printed_volume — parity mode_i does; without
     # it, resting limits never fill). Wrap set_quote: after each quote, feed the bucket volume.
@@ -607,8 +1058,95 @@ def run_arm(label, grid, ticks, frame_ticks, g4_on):
     except Exception:
         _diag_rs = {}
 
+    # ── STRUCTURED RESULT — written BEFORE the cleanup below deletes the evidence ────────
+    _json_path = _json_out_path(g4_on)
+    if _json_path:
+        from collections import Counter as _JC
+
+        _span_s = max((WIN_END - OHLCV_START).total_seconds(), 1e-9)
+        _win_s = max((WIN_END - WIN_START).total_seconds(), 1e-9)
+        # NormalizedFill (venue/protocol.py:121): fill_id / order_id / product_id / side /
+        # size / price / fee / trade_time. The instant is ``trade_time`` — NOT ``ts``; a
+        # scorer that cannot place a fill on the clock cannot score it against a ledger.
+        _fill_rows = []
+        for f in fills:
+            _fill_rows.append({
+                "ts": getattr(f, "trade_time", None),
+                "side": str(getattr(f, "side", "")),
+                "px": (float(getattr(f, "price", 0) or 0) if getattr(f, "price", None) is not None else None),
+                "qty": float(getattr(f, "size", 0) or 0),
+                "fee": (float(getattr(f, "fee", 0) or 0) if getattr(f, "fee", None) is not None else None),
+                "order_id": getattr(f, "order_id", None),
+                "fill_id": getattr(f, "fill_id", None),
+                "product_id": getattr(f, "product_id", None),
+            })
+        _full_events = []
+        try:
+            for e in db.query(TradingAutomationEvent).filter(
+                    TradingAutomationEvent.session_id == seed.session_id).order_by(
+                    TradingAutomationEvent.id.asc()).all():
+                try:
+                    _pj = (json.loads(e.payload_json)
+                           if isinstance(e.payload_json, str) else (e.payload_json or {}))
+                except Exception:
+                    _pj = {}
+                _full_events.append({
+                    "ts": str(e.ts),
+                    "event_type": str(e.event_type),
+                    "payload": _bench_payload(str(e.event_type), _pj if isinstance(_pj, dict) else {}),
+                })
+        except Exception as _exc:  # a receipt that omits WHY it is short is worse than none
+            _full_events = [{"ts": None, "event_type": "_receipt_event_read_failed",
+                             "payload": {"errors": str(_exc)}}]
+        _write_run_json(_json_path, {
+            "schema": REPLAY_RESULT_SCHEMA,
+            "label": str(label),
+            "arm": ("g4_on" if g4_on else "g4_off"),
+            "g4_on": bool(g4_on),
+            "generated_at_utc": datetime.now(timezone.utc).isoformat(),
+            "tree": _tree_sha(),
+            "env": _env_contract(),
+            "tape_sources": tape_sources or {},
+            "sink_reset": sink_reset,
+            "mirrored": {
+                "tick_rows": int(mirrored),
+                "nbbo_rows": int(mirrored_nbbo),
+                "depth_rows": int(mirrored_depth),
+            },
+            "density": {
+                "mirror_span_seconds": round(_span_s, 3),
+                "window_seconds": round(_win_s, 3),
+                "ticks_per_second": round(float(mirrored) / _span_s, 6),
+                "nbbo_rows_per_second": round(float(mirrored_nbbo) / _span_s, 6),
+                "depth_rows_per_second": round(float(mirrored_depth) / _span_s, 6),
+                "grid_steps_per_second": round(float(len(grid)) / _win_s, 6),
+            },
+            "grid_steps": len(grid),
+            "mock": _mock_config(mock),
+            "seed_session_id": int(seed.session_id),
+            "execution_family": EXEC_FAMILY,
+            "venue": venue_for_execution_family(EXEC_FAMILY),
+            "economic_seed_mode": getattr(res, "economic_seed_mode", None),
+            "certification_eligible": bool(getattr(res, "certification_eligible", False)),
+            "certification_failures": list(getattr(res, "certification_failures", []) or []),
+            "final_state": str(res.final_state),
+            "states_visited": list(res.states_visited or []),
+            "fills": _fill_rows,
+            "pnl_usd": round(pnl, 6),
+            "mtm_usd": round(mtm, 6),
+            "net_open_shares": round(net_open, 6),
+            "cost_usd": round(cost, 6),
+            "proceeds_usd": round(proceeds, 6),
+            "entries": len(buys),
+            "exits": len(sells),
+            "event_histogram": dict(_JC(evs)),
+            "events": _full_events,
+        })
+        print(f"  replay_json_out={_json_path} events={len(_full_events)} fills={len(_fill_rows)}")
+
     # cleanup this arm's rows
     db.execute(text("DELETE FROM iqfeed_trade_ticks WHERE source='replay_v3' AND symbol=:s"), {"s": SYMBOL})
+    db.execute(text("DELETE FROM momentum_nbbo_spread_tape WHERE source='replay_v3' AND symbol=:s"), {"s": SYMBOL})
     db.commit()
     db.close()
 
@@ -971,27 +1509,61 @@ def _reset_sim_sink() -> dict | None:
     }
 
 
+def _startup_invariants() -> None:
+    """FAIL CLOSED before a single row is read. Each of these has a run behind it whose
+    number was wrong and looked right; see scripts/replay_harness_invariants.py."""
+    _src = open(os.path.abspath(__file__), encoding="utf-8").read()
+    assert_dense_stride(TICK_STRIDE, BENCH_QUESTION)   # 1 — stride-10 flipped +193.92 -> -4.66
+    assert_clean_sink(os.environ)                      # 2 — reused sink moved +60.60 -> +46.59
+    assert_as_of_reads(_src)                           # 4 — wall clock reads the tape as empty
+    assert_tie_stable_sql(_src)                        # 5 — equal ts fell back to scan order
+    # 9 (assert_mock_parity) needs the constructed mock; it runs inside run_arm.
+
+
 def main():
-    _reset_sim_sink()
+    _startup_invariants()
+    _sink = _reset_sim_sink()
+    # TAPE PROVENANCE, before the load: a symbol-day hydrated from two providers returns
+    # BOTH tapes concatenated with no visible defect (TMCR 2026-08-24: 33,866 = 2 x 16,933).
+    _tape_sources = assert_single_hydrated_source()
     print(f"Loading {SYMBOL} tape ({WIN_START}..{WIN_END})...")
     nbbo, ticks, frame_ticks = load_prod()
     print(f"  nbbo_rows={len(nbbo)}  tick_rows={len(ticks)}  "
           f"frame_tick_rows={len(frame_ticks)} (warmup from {FRAME_START})")
+    if SOURCE_FILTER:
+        # AFTER the load, prove the predicate actually bound: exactly ONE source per table.
+        # Only meaningful under an explicit filter — a live `chili` window legitimately
+        # carries iqfeed_l1 + massive_snapshot + massive_ws_universe at once, which are
+        # different granularities, not duplicates (_build_micro_bar_df prefers the
+        # non-snapshot rows explicitly), so asserting one-source unconditionally would
+        # break every live-tape replay.
+        for _t, _srcs in _tape_sources.items():
+            _present = {s: n for s, n in _srcs.items() if n}
+            if len(_present) > 1:
+                raise SystemExit(
+                    f"  [tape] ABORT: SOURCE_FILTER={list(SOURCE_FILTER)} still leaves "
+                    f"{len(_present)} sources in {_t}: {_present}"
+                )
+        print(f"  source_filter={list(SOURCE_FILTER)}  tape_sources={_tape_sources}")
     grid = build_grid(nbbo)
     print(f"  grid_steps(after {GRID_STEP_S}s downsample)={len(grid)}")
     if not grid:
         print("NO GRID — tape missing. Abort."); return
     arm = os.environ.get("ARM", "both")
     if arm == "on":
-        on = run_arm(SYMBOL, grid, ticks, frame_ticks, g4_on=True)
+        on = run_arm(SYMBOL, grid, ticks, frame_ticks, g4_on=True,
+                     sink_reset=_sink, tape_sources=_tape_sources)
         print(f"\n[ARM=on] G4 ON PnL {on[0]:+.2f} entries={on[1]} exits={on[2]} grind={on[3]} esc={on[4]}")
         return
     if arm == "off":
-        off = run_arm(SYMBOL, grid, ticks, frame_ticks, g4_on=False)
+        off = run_arm(SYMBOL, grid, ticks, frame_ticks, g4_on=False,
+                      sink_reset=_sink, tape_sources=_tape_sources)
         print(f"\n[ARM=off] G4 OFF PnL {off[0]:+.2f} entries={off[1]} exits={off[2]} grind={off[3]} esc={off[4]}")
         return
-    on = run_arm(SYMBOL, grid, ticks, frame_ticks, g4_on=True)
-    off = run_arm(SYMBOL, grid, ticks, frame_ticks, g4_on=False)
+    on = run_arm(SYMBOL, grid, ticks, frame_ticks, g4_on=True,
+                 sink_reset=_sink, tape_sources=_tape_sources)
+    off = run_arm(SYMBOL, grid, ticks, frame_ticks, g4_on=False,
+                  sink_reset=_sink, tape_sources=_tape_sources)
     print(f"\n================ FSM A/B RESULT ({SYMBOL}) ================")
     print(f"  G4 ON : PnL {on[0]:+.2f}  entries={on[1]} exits={on[2]} grind_evts={on[3]} esc_evts={on[4]}")
     print(f"  G4 OFF: PnL {off[0]:+.2f}  entries={off[1]} exits={off[2]} grind_evts={off[3]} esc_evts={off[4]}")
