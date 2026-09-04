@@ -5580,6 +5580,9 @@ def seed_replay_session(
     )
     db.add(sess)
     db.flush()
+    if normalized_family in {"alpaca_spot", "alpaca_short"}:
+        _freeze_replay_alpaca_scope(sess, arm)
+        db.flush()
     return ReplaySeed(
         session_id=int(sess.id),
         symbol=arm.symbol,
@@ -5589,6 +5592,78 @@ def seed_replay_session(
         adaptive_risk_decision_sha256=adaptive_packet_sha256,
         adaptive_risk_available_at=adaptive_available_at,
     )
+
+
+def _freeze_replay_alpaca_scope(sess: TradingAutomationSession, arm: RecordedArm) -> None:
+    """Stamp the seeded Alpaca session with the SAME admission proof ``confirm_live_arm``
+    writes, so the replayed FSM sees a coherent session instead of refusing every tick.
+
+    MEASURED 2026-09-04, the first Ross-bench run on ``alpaca_spot``: 160,148 ticks
+    mirrored, 2,670 grid steps, and every single tick returned
+    ``skipped='alpaca_account_scope_unfrozen_or_mismatched'`` — ``states_visited``
+    stayed ``['queued_live']`` and the event histogram was empty. The FSM never reached
+    the queued->watching handler. No script had ever run the FSM replay on the Alpaca
+    family before, and the seeder wrote only the NON-Alpaca identity key (above).
+
+    Two gates in ``live_runner`` read this proof, and both are session-frozen BY DESIGN
+    (#1304 — "never ambient config"):
+
+      * ``_persisted_alpaca_execution_quarantine_reason`` (live_runner.py:1583) refuses
+        the tick unless ``risk_snapshot_json["alpaca_account_scope"] == "alpaca:paper"``;
+      * ``_confirmed_alpaca_arm_generation_reason`` (live_runner.py:1598-1640) refuses
+        any risk-increasing order unless ``confirmed_arm_generation`` is present with
+        ``version == 1``, this session's id, and six fields that must equal their
+        snapshot twins as non-empty strings.
+
+    This mirrors ``confirm_live_arm`` (operator_actions.py:1629-1633, :1712-1718)
+    field for field. Nothing here is wall-clock: every instant is the RECORDED arm
+    anchor, so the seed is deterministic across runs (invariant 4, as-of reads). The
+    account id is the replay mock identity — non-secret and stable — because the Tier-1
+    bench force-seeds admission and never talks to a broker; the entry risk gate is
+    already reported bypassed in ``certification_failures``. This is the OTHER half of
+    that same statement, not a new bypass.
+
+    The snapshot is REASSIGNED, not mutated in place: it is a JSON column and SQLAlchemy
+    only notices a new object (the same reason ``live_runner._commit_le`` reassigns).
+    """
+    snap = dict(sess.risk_snapshot_json or {})
+    anchor = str(arm.live_eligible_at_utc)
+    scope = "alpaca:paper"
+    # The account id is NOT free-form: ``_alpaca_execution_quarantine_reason``
+    # (live_runner.py:1585-1592) refuses the tick unless the frozen id EQUALS
+    # ``settings.chili_alpaca_expected_account_id`` — measured as
+    # ``alpaca_account_generation_mismatch`` on the first seed that carried the mock
+    # identity. So freeze the certified paper account the live lane itself is certified
+    # against, read through the same ``settings`` object the gate reads. An empty setting
+    # falls back to the mock identity and the gate will report the mismatch VISIBLY, which
+    # is the correct outcome in a misconfigured environment — never a silent pass.
+    expected = str(getattr(lr.settings, "chili_alpaca_expected_account_id", "") or "").strip()
+    account_id = expected or REPLAY_MOCK_ACCOUNT_IDENTITY
+    arm_token = f"replay-v3-arm-{int(sess.id)}"
+    claim_token = f"replay-v3-claim-{str(arm.symbol).upper()}-{int(sess.id)}"
+    snap["alpaca_account_scope"] = scope
+    snap["alpaca_account_id"] = account_id
+    snap["arm_confirmed"] = True
+    snap["arm_confirmed_at_utc"] = anchor
+    snap["arm_token"] = arm_token
+    # The arm-pending TTL is not exercised by a session seeded straight into queued_live
+    # (``_arm_pending_ttl_expired`` reads ``live_arm_pending`` only); the validator needs a
+    # non-empty string equal to its marker twin. Carrying the recorded anchor keeps it
+    # deterministic and visibly replay-stamped rather than inventing a horizon.
+    snap["expires_at_utc"] = anchor
+    snap["alpaca_symbol_claim_token"] = claim_token
+    snap["confirmed_arm_generation"] = {
+        "version": 1,
+        "session_id": int(sess.id),
+        "arm_token": arm_token,
+        "expires_at_utc": anchor,
+        "alpaca_symbol_claim_token": claim_token,
+        "alpaca_account_scope": scope,
+        "alpaca_account_id": account_id,
+        "confirmed_at_utc": anchor,
+        "source": "replay_v3.seed_replay_session",
+    }
+    sess.risk_snapshot_json = snap
 
 
 def seed_replay_position(
