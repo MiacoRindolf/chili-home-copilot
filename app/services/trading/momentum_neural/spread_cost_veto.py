@@ -246,9 +246,20 @@ def name_spread_percentiles(
                 "  count(*) "
                 "FROM momentum_nbbo_spread_tape "
                 "WHERE symbol = :s AND spread_bps IS NOT NULL AND spread_bps > 0 "
-                "  AND observed_at >= :since"
+                # ⚠️ AS-OF UPPER BOUND (2026-09-04). Ang `>= :since` LANG ay walang
+                # itaas na hangganan, kaya ang isang as-of na tawag ay BUMABASA NG
+                # HINAHARAP. Dormant ito habang WALANG LAMAN ang table sa replay;
+                # binuksan ito ng NBBO mirror, na nag-pre-load ng BUONG window sa
+                # sink sa t=0. SINUKAT (chili_test, 60 min na tape, 30 min @20bps
+                # tapos 30 min @400bps, sim-now = +35 min): p50=210.0 n=60 imbes
+                # na p50=20.0 n=36 — 10.5x na mali sa sariling baseline ng pangalan,
+                # binuo mula sa 24 na hilerang HINDI PA nangyayari sa sandaling iyon.
+                # Sa LIVE ito ay no-op (walang hinaharap na hilera); sa replay ito
+                # ang buong ayos. Katulad ng _build_micro_bar_df (live_runner:23426)
+                # at recent_bid_spread_tape (nbbo_tape:1228) na parehong may `<= :now`.
+                "  AND observed_at >= :since AND observed_at <= :now"
             ),
-            {"s": sym, "since": since},
+            {"s": sym, "since": since, "now": now_utc.replace(tzinfo=None)},
         )
     except Exception as exc:  # pragma: no cover - DB/network
         logger.debug("[spread_cost_veto] percentile read failed for %s: %s", sym, exc)
