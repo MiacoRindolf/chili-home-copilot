@@ -447,8 +447,14 @@ def test_migration_376_is_registered_once_with_a_free_id():
     assert "376_momentum_ignition_nominations" in ids
     numbers = [vid.split("_", 1)[0] for vid in ids]
     assert numbers.count("376") == 1
-    # 375 is claimed by an unmerged branch; the ID contract forbids reuse.
-    assert "375" not in numbers
+    # The durable contract is that NO id is ever reused — assert that directly.
+    # This line previously read `assert "375" not in numbers`, which was true only
+    # while #1305 (migration 375) was unmerged. Both landed on 2026-09-04, 375 and
+    # 376 now coexist by design, and the branch-time guard would have forced the
+    # merge to either renumber a shipped migration or delete the check. Asserting
+    # global uniqueness is strictly stronger and cannot expire.
+    assert len(numbers) == len(set(numbers)), "duplicate migration id"
+    assert "375_append_heavy_autovacuum_scale_factor" in ids
 
 
 def test_migration_376_creates_the_table_and_is_idempotent(db):
