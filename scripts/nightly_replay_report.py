@@ -15,6 +15,7 @@ from __future__ import annotations
 import os
 import subprocess
 import sys
+import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -147,6 +148,49 @@ def top_movers(day: str) -> list[dict]:
     ]
 
 
+def _persist_child_log(day: str, symbol: str, out: str, *, exit_code, elapsed_s: float) -> str:
+    """Isulat ang BUONG stdout+stderr ng replay child sa sarili nitong file.
+
+    ⚠️ BAKIT ITO UMIIRAL (nasukat 2026-09-04). Noong 2026-09-03 ay nag-ulat ang
+    nightly ng 4 mover, 0 fill, PnL n/a, at WALANG gate section — bawat replay ay
+    natapos sa ~10 segundo (17:33:18→17:33:55) laban sa 3-9 MINUTO kada mover sa
+    08-31/09-01/09-02. Ang dahilan ay hindi nasusuri: ang `out` (stdout+stderr) ay
+    pina-parse LANG para sa `BUY/SELL` at `PnL =` at pagkatapos ay itinatapon, kaya
+    ang traceback ng child ay hindi kailanman umaabot sa disk; ang `exit_code` ay
+    ibinabalik ngunit hindi isinusulat sa ulat. Ang tanging bakas ay ang
+    `runner.log` na may isang linya kada mover.
+
+    Ang gumagawa ng ebidensya ay dapat mismong mapagmasdan — tingnan ang
+    2026-08-27 na aral kung saan ang ulat na ito ay Notepad sa loob ng 47 araw.
+    """
+    try:
+        OUT_DIR.mkdir(parents=True, exist_ok=True)
+        path = OUT_DIR / f"{day}_{symbol}.log"
+        header = (
+            f"# nightly replay child log\n"
+            f"# symbol={symbol} day={day} exit_code={exit_code} "
+            f"elapsed_s={elapsed_s:.1f}\n"
+            f"# driver={DRIVER}\n# build={BUILD}\n\n"
+        )
+        path.write_text(header + (out or ""), encoding="utf-8", newline="")
+        return str(path)
+    except Exception:
+        return ""
+
+
+def _first_traceback(out: str) -> str:
+    """Ang unang exception line ng child, kung mayroon — para sa ulat."""
+    lines = (out or "").splitlines()
+    for i, line in enumerate(lines):
+        if line.startswith("Traceback (most recent"):
+            for tail in reversed(lines[i:]):
+                stripped = tail.strip()
+                if stripped and not stripped.startswith(("File ", "    ", "Traceback")):
+                    return stripped[:300]
+            return "Traceback (walang exception line)"
+    return ""
+
+
 def run_replay(day: str, mover: dict) -> dict:
     """Isang window replay sa kasalukuyang code; ibinabalik ang buod + gate rejects."""
     sym = mover["symbol"]
@@ -164,13 +208,19 @@ def run_replay(day: str, mover: dict) -> dict:
         "EQUITY": "100000", "RISK": "4000", "EXEC_FAMILY": "alpaca_spot",
     })
     _log(f"replay {sym} ({mover['up_pct']}% mover, {mover['ticks']} ticks)")
+    started = time.monotonic()
     try:
         p = subprocess.run([PYEXE, DRIVER], env=env, cwd=BUILD,
                            capture_output=True, text=True,
                            timeout=REPLAY_TIMEOUT_S)
         out = (p.stdout or "") + (p.stderr or "")
-    except subprocess.TimeoutExpired:
+    except subprocess.TimeoutExpired as exc:
+        _persist_child_log(day, sym, (exc.stdout or "") + (exc.stderr or ""),
+                           exit_code=None, elapsed_s=time.monotonic() - started)
         return {"symbol": sym, "error": f"timeout_{REPLAY_TIMEOUT_S}s"}
+    elapsed_s = time.monotonic() - started
+    child_log = _persist_child_log(day, sym, out, exit_code=p.returncode,
+                                   elapsed_s=elapsed_s)
     pnl = None
     fills: list[str] = []
     for line in out.splitlines():
@@ -186,7 +236,10 @@ def run_replay(day: str, mover: dict) -> dict:
     gates = _binding_gates(sym)
     return {"symbol": sym, "pnl": pnl, "fills": fills, "rejects": rejects,
             "gates": gates,
-            "exit_code": p.returncode}
+            "exit_code": p.returncode,
+            "elapsed_s": round(elapsed_s, 1),
+            "child_log": child_log,
+            "first_traceback": _first_traceback(out)}
 
 
 def _binding_gates(symbol: str) -> list[tuple[str, int, float]]:
@@ -285,6 +338,18 @@ def main() -> None:
                          f"  (fills: {len(r.get('fills') or [])})")
             for f in (r.get("fills") or [])[:10]:
                 lines.append(f"    - {f}")
+            # ⚠️ 2026-09-03: 4 mover, 0 fill, walang gate section, ~10s bawat isa.
+            # Ang dahilan ay nasa child stdout/stderr na dating itinatapon. Ang
+            # exit code + tagal + traceback ay nasa ulat na ngayon, at ang buong
+            # child log ay nasa disk (`_persist_child_log`), kaya ang "0 fill" ay
+            # maipagkakaiba sa "namatay ang replay" nang hindi nagre-reproduce.
+            _rc, _el = r.get("exit_code"), r.get("elapsed_s")
+            if _rc not in (0, None) or (_el is not None and _el < 30.0):
+                lines.append(
+                    f"- ⚠️ child: exit_code={_rc} elapsed={_el}s"
+                    + (f" — log: `{r['child_log']}`" if r.get("child_log") else ""))
+            if r.get("first_traceback"):
+                lines.append(f"- ⚠️ **TRACEBACK**: `{r['first_traceback']}`")
             _gates = r.get("gates") or []
             _waits = sum(int(g[1]) for g in _gates) or 0
             if _gates:
