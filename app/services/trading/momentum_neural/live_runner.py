@@ -21271,6 +21271,34 @@ def read_captured_paper_durable_candidate(
     )
 
 
+def _adaptive_risk_blocker_payload(exc: BaseException) -> dict[str, Any]:
+    """Name the adaptive-risk builder failure with its type and detail.
+
+    The except arm below catches AdaptiveRiskBuilderError AND TypeError/ValueError and used
+    to label all three ``adaptive_risk_builder_source_invalid`` with nothing else -- a
+    ``float(None)`` on a missing structural stop read exactly like a corrupt capture source.
+    MEASURED 2026-09-04 (SDOT 2026-06-26 bench, alpaca_spot): 26 attempts, 26 identical
+    opaque blocks. The reason is unchanged (consumers key on it); ``error_type`` and
+    ``detail`` are additive.
+    """
+    reason = getattr(exc, "reason", None)
+    if not reason:
+        reason = "adaptive_risk_builder_source_invalid"
+    args = tuple(getattr(exc, "args", ()) or ())
+    if isinstance(exc, AdaptiveRiskBuilderError):
+        detail = getattr(exc, "detail", None)
+        if detail in (None, "") and len(args) > 1:
+            detail = args[1]
+    else:
+        detail = str(exc)[:200] or None
+    detail = detail or None  # the builder stores an absent detail as ""
+    return {
+        "reason": str(reason),
+        "error_type": type(exc).__name__,
+        "detail": (str(detail)[:200] if detail is not None else None),
+    }
+
+
 def _build_adaptive_alpaca_primary_before_legacy_sizing(
     sess: Any,
     le: dict[str, Any],
@@ -37353,11 +37381,10 @@ def tick_live_session(
                 )
                 _commit_le(sess, le)
         except (AdaptiveRiskBuilderError, TypeError, ValueError) as exc:
-            _builder_reason = getattr(
-                exc, "reason", "adaptive_risk_builder_source_invalid"
-            )
+            _builder_block = _adaptive_risk_blocker_payload(exc)
+            _builder_reason = _builder_block["reason"]
             le["adaptive_risk_builder_blocker"] = {
-                "reason": _builder_reason,
+                **_builder_block,
                 "at_utc": _utcnow().isoformat(),
             }
             _commit_le(sess, le)
@@ -37365,7 +37392,7 @@ def tick_live_session(
                 db,
                 sess,
                 "live_entry_adaptive_risk_blocked",
-                {"reason": _builder_reason},
+                dict(_builder_block),
             )
             _safe_transition(db, sess, STATE_WATCHING_LIVE)
             db.flush()
