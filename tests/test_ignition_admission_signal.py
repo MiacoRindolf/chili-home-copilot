@@ -105,32 +105,84 @@ def test_tape_dollar_volume_proves_the_universe_without_a_snapshot_row():
     assert debug["dollar_volume_source"] == "signal"
 
 
-def test_dollar_volume_is_the_monotonic_max_of_all_three_legs():
-    """Same max(...) rule build_equity_universe uses at universe.py:1023."""
-    # prevDay.v 400k x 4.98 = 1.99M is the largest leg here.
+def test_dollar_volume_is_the_monotonic_max_of_the_same_two_legs():
+    """EXACTLY the max(...) build_equity_universe computes at universe.py:1023.
+
+    That line is ``max(price * vol, _iqfeed_dvols.get(ticker, 0.0))`` with
+    ``vol = max(day.v, min.av)`` — TWO legs, both today-scale. This test
+    evaluates the reference rule rather than asserting agreement with it.
+    """
+    # The tape leg wins: 100k of tape vs the snapshot's 10k shares x 4.98.
+    snap = _snapshot(
+        day={"o": 4.10, "c": 4.98, "h": 5.02, "l": 4.05, "v": 10_000},
+        min={"c": 4.98, "av": 10_000},
+    )
     signal = ignition_signal_from_payload(
-        _payload(),
-        tape_dollar_volume=100_000.0,
-        snapshot_row=_snapshot(
-            day={"o": 4.10, "c": 4.98, "h": 5.02, "l": 4.05, "v": 10_000},
-            min={"c": 4.98, "av": 10_000},
-        ),
+        _payload(), tape_dollar_volume=100_000.0, snapshot_row=snap
     )
     assert signal is not None
-    assert signal["ignition_dollar_volume_leg"] == "snapshot_average_volume"
-    assert signal["dollar_volume"] == pytest.approx(400_000 * 4.98)
-    # ...but yesterday's share count is NEVER published as today's volume.
-    assert signal["day_volume"] == pytest.approx(
-        max(100_000.0, 10_000 * 4.98) / 4.98
+    assert signal["ignition_dollar_volume_leg"] == "tape_since_midnight"
+
+    def _universe_rule(row, price, tape_dv):
+        """The literal universe.py:1023 expression, re-evaluated here."""
+        vol = max(
+            float((row.get("day") or {}).get("v") or 0.0),
+            float((row.get("min") or {}).get("av") or 0.0),
+        )
+        return max(price * vol, tape_dv or 0.0)
+
+    assert signal["dollar_volume"] == pytest.approx(
+        _universe_rule(snap, 4.98, 100_000.0)
     )
+    assert signal["day_volume"] == pytest.approx(100_000.0 / 4.98)
 
     # The snapshot's today-volume leg wins when it is the largest.
+    snap2 = _snapshot()
     signal = ignition_signal_from_payload(
-        _payload(), tape_dollar_volume=1_000.0, snapshot_row=_snapshot()
+        _payload(), tape_dollar_volume=1_000.0, snapshot_row=snap2
     )
     assert signal is not None
     assert signal["ignition_dollar_volume_leg"] == "snapshot_today_volume"
     assert signal["dollar_volume"] == pytest.approx(900_000 * 4.98)
+    assert signal["dollar_volume"] == pytest.approx(
+        _universe_rule(snap2, 4.98, 1_000.0)
+    )
+
+
+def test_yesterdays_share_volume_is_never_a_tradability_proof():
+    """REGRESSION: prevDay.v x today's price must NOT clear the $1M floor.
+
+    A snapshot row that has a price but zero TODAY aggregates (the premarket /
+    stale-aggregate case this whole change targets) has $0 of proven turnover.
+    ``build_equity_universe`` computes max(4.20*0, 0.0) = $0 for it and drops
+    it. An earlier revision of the builder added a third ``price * prevDay.v``
+    leg, which manufactured $2.1M and ADMITTED the name — a fabricated
+    tradability proof on the fail-closed admission path.
+    """
+    snap = _snapshot(
+        day={"o": 0, "c": 0, "h": 0, "l": 0, "v": 0},
+        min={"c": 4.20, "av": 0},
+        prevDay={"c": 3.90, "v": 500_000},
+        todaysChangePerc=None,
+    )
+    payload = _payload(last_price=4.20)
+    signal = ignition_signal_from_payload(
+        payload, tape_dollar_volume=None, snapshot_row=snap
+    )
+    assert signal is not None
+    # No today-scale leg exists, so the signal carries NO dollar-volume claim.
+    assert "dollar_volume" not in signal
+    assert signal.get("ignition_dollar_volume_leg") is None
+
+    # ...and the real gate still refuses it, exactly as it does on main.
+    ok, reason, debug = ross_smallcap_profile_evidence(
+        "TSTX", signal=signal, snapshot_row=snap
+    )
+    assert ok is False
+    assert reason == "ross_universe_missing_dollar_volume"
+
+    # ...which is what build_equity_universe computes for the identical row.
+    assert max(4.20 * max(0.0, 0.0), 0.0) < 1_000_000.0
 
 
 def test_all_dollar_volume_sources_absent_still_fails_closed():
@@ -425,6 +477,37 @@ def test_migration_376_creates_the_table_and_is_idempotent(db):
         } <= columns
         indexes = {ix["name"] for ix in inspector.get_indexes(_NOMINATION_TABLE)}
         assert {"ix_min_fired_at", "ix_min_symbol_fired_at"} <= indexes
+
+
+def test_recorded_at_stamps_the_decision_not_the_transaction_start(db):
+    """REGRESSION: ``recorded_at`` must advance INSIDE a long transaction.
+
+    The nomination INSERT deliberately rides the SAME transaction as the
+    admission attempt, and Postgres ``now()`` is ``transaction_timestamp()`` —
+    frozen at transaction START, before the universe proof, the tape query and
+    the snapshot fetch. ``derive_ignition_governors.py`` reads
+    ``recorded_at - fired_at`` as fire->admission-decision latency and sizes the
+    dedup TTL from its p90, so a ``DEFAULT now()`` would understate that
+    latency by exactly the work being measured (24x in a 3s admission).
+    """
+    db.execute(text("SELECT pg_sleep(1)"))
+    params = loop_mod.LiveRunnerLoop._ignition_nomination_params(
+        _payload(symbol="CLKT"),
+        received_at=loop_mod._utcnow(),
+        outcome="ross_universe_rejected",
+        result={"skipped": "ross_universe_rejected"},
+    )
+    assert loop_mod.LiveRunnerLoop._write_ignition_nomination(db, params) is True
+    db.flush()
+    advanced = db.execute(
+        text(
+            f"SELECT recorded_at > now() FROM {_NOMINATION_TABLE} "
+            "WHERE symbol = :s"
+        ),
+        {"s": "CLKT"},
+    ).scalar()
+    # With DEFAULT now() this is exactly equal (False); clock_timestamp advances.
+    assert advanced is True
 
 
 def test_nomination_row_round_trips(db):

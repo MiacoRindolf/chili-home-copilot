@@ -63,11 +63,14 @@ PRODUCER_MAX_FIRES_PER_MINUTE = 6
 PRODUCER_DEDUP_TTL_S = 300.0
 
 # Day-1 values of the settings being derived, used when app.config cannot be
-# imported (this script must run from a bare checkout too).
-FALLBACK_ADMITS_PER_MINUTE = 6
-FALLBACK_DEDUP_TTL_S = 300.0
-FALLBACK_MAX_CONCURRENT_LIVE = 3
-FALLBACK_MAX_WATCH_SECONDS = 300
+# imported (this script must run from a bare checkout too). Each MUST equal the
+# corresponding app/config.py default — test_derive_ignition_governors.py pins
+# every one of these against Settings.model_fields[...].default, because a stale
+# literal here silently produces a wrong recommendation rather than an error.
+FALLBACK_ADMITS_PER_MINUTE = 6  # chili_momentum_ignition_admits_per_minute
+FALLBACK_DEDUP_TTL_S = 300.0  # chili_momentum_ignition_dedup_ttl_seconds
+FALLBACK_MAX_CONCURRENT_LIVE = 5  # chili_momentum_risk_max_concurrent_live_sessions
+FALLBACK_MAX_WATCH_SECONDS = 300  # chili_momentum_auto_arm_max_watch_seconds
 
 # The setting bounds declared in app/config.py. The derivation must land inside
 # them or the manifest is not actionable.

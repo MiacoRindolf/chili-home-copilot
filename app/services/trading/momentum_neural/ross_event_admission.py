@@ -29,7 +29,6 @@ from .universe import (
     _f as _universe_float,
     _iqfeed_dollar_volumes,
     _premarket_change_pct,
-    _snapshot_adv_shares,
     _snapshot_basis_rejected,
     _snapshot_today_shares,
     ross_smallcap_profile_evidence,
@@ -184,19 +183,24 @@ def ignition_signal_from_payload(
         return None
     snap = snapshot_row if isinstance(snapshot_row, dict) else None
 
-    # DOLLAR VOLUME — the same MONOTONIC MAX rule ``build_equity_universe`` uses
-    # at universe.py:1023 (``max(price * vol, _iqfeed_dvols.get(...))``): a leg
-    # can only ADD a missed mover, never remove a current one. Three legs, all
-    # day-scale turnover:
+    # DOLLAR VOLUME — EXACTLY the two legs ``build_equity_universe`` maxes at
+    # universe.py:1023 (``max(price * vol, _iqfeed_dvols.get(ticker, 0.0))``,
+    # where ``vol = max(day.v, min.av)``): a leg can only ADD a missed mover,
+    # never remove a current one. Both legs are TODAY-scale turnover:
     #   1. the trade tape's since-midnight $-volume (ground truth premarket, when
-    #      the Massive day/min aggregates are still zero),
+    #      the Massive day/min aggregates are still zero) = ``_iqfeed_dvols``,
     #   2. the snapshot's TODAY shares x price (day.v, else min.av which counts
-    #      extended-hours prints — ``_snapshot_today_shares``),
-    #   3. the snapshot's baseline average shares x price (prevDay.v —
-    #      ``_snapshot_adv_shares``), the name's ordinary daily turnover.
-    # ``dollar_vol_60s`` from the payload is deliberately NOT a leg: it is a
-    # SIXTY-SECOND number and the $1M profile floor asks whether a full position
-    # can be exited today. Feeding it in would fake the tradability bar.
+    #      extended-hours prints — ``_snapshot_today_shares``).
+    # TWO THINGS ARE DELIBERATELY NOT LEGS, because the $1M floor asks whether a
+    # full position can be EXITED TODAY and neither answers that question:
+    #   * ``dollar_vol_60s`` from the payload — a SIXTY-SECOND number.
+    #   * the snapshot's baseline average shares (prevDay.v, ``_snapshot_adv_
+    #     shares``) — YESTERDAY's share count. Adding it admitted a name with
+    #     $0 of proven turnover today on yesterday's volume x today's price,
+    #     while ``build_equity_universe`` computed $0 for the identical row and
+    #     refused it. That is a fabricated tradability proof on the fail-closed
+    #     admission path; the universe uses prevDay.v only for RVOL and the
+    #     ADV-ceiling RANK penalty, never for the floor.
     dv_legs: dict[str, float] = {}
     tape_dv = _positive(tape_dollar_volume)
     if tape_dv is not None:
@@ -205,19 +209,16 @@ def ignition_signal_from_payload(
         today_shares = _positive(_snapshot_today_shares(snap))
         if today_shares is not None:
             dv_legs["snapshot_today_volume"] = price * today_shares
-        adv_shares = _positive(_snapshot_adv_shares(snap))
-        if adv_shares is not None:
-            dv_legs["snapshot_average_volume"] = price * adv_shares
     dollar_volume: float | None = None
     dollar_volume_leg: str | None = None
     if dv_legs:
         dollar_volume_leg = max(dv_legs, key=lambda key: dv_legs[key])
         dollar_volume = dv_legs[dollar_volume_leg]
 
-    # TODAY'S SHARE VOLUME is reported ONLY from today-scale legs. The average
-    # -volume leg above may prove tradability, but yesterday's share count is not
-    # today's volume and must never be published as one (the downstream
-    # independent-A+ proof has its own share-volume floor).
+    # TODAY'S SHARE VOLUME, backed out of the same today-scale legs. Kept as an
+    # explicit list rather than reusing ``dollar_volume`` so that if a non-today
+    # leg is ever added above, it cannot silently be published as today's share
+    # count (the downstream independent-A+ proof has its own share-volume floor).
     today_dv_legs = [
         dv_legs[key]
         for key in ("tape_since_midnight", "snapshot_today_volume")

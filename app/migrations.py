@@ -33386,7 +33386,15 @@ def _migration_376_momentum_ignition_nominations(conn) -> None:
             outcome VARCHAR(48) NOT NULL,
             skipped VARCHAR(64),
             ross_universe_reason VARCHAR(64),
-            recorded_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+            -- clock_timestamp(), NOT now(): this INSERT rides the SAME
+            -- transaction as the admission attempt, and now() is
+            -- transaction_timestamp() — frozen at transaction START, i.e.
+            -- BEFORE the universe proof, the tape query and the snapshot
+            -- fetch. The derivation script reads (recorded_at - fired_at) as
+            -- fire->admission-decision latency, so now() would understate it
+            -- by exactly the work being measured. Precedent: migration for
+            -- captured_paper_phase_one (app/migrations.py, same idiom).
+            recorded_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp()
         )
         """
     ))
