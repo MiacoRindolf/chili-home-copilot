@@ -75,12 +75,19 @@ _CONTRACT_KWARGS = dict(
 # by default so the rest of this file keeps exercising alpaca_spot under a VALID config;
 # a test that wants to see the refusal opts out with certified=False.
 CERTIFIED_PAPER_ACCOUNT = "c7d421e0-4fae-4219-9503-5ce051d4d923"
+# The lane's launch env for the Alpaca family (timeshare_supervisor.py:88): the legacy
+# sizing escape. Required by build_env for the same reason the account id is.
+LANE_ALPACA_ENV = {
+    "CHILI_ALPACA_EXPECTED_ACCOUNT_ID": CERTIFIED_PAPER_ACCOUNT,
+    "CHILI_MOMENTUM_LEGACY_ALPACA_DISPATCH_ENABLED": "true",
+}
 
 
 def _env(parent=None, arm=None, *, certified=True):
     merged = dict(parent) if parent is not None else {}
     if certified:
-        merged.setdefault(B.ALPACA_ACCOUNT_ID_ENV, CERTIFIED_PAPER_ACCOUNT)
+        for key, value in LANE_ALPACA_ENV.items():
+            merged.setdefault(key, value)
     env, _dropped = B.build_env(
         case=CASE, arm=(arm or B.Arm("base")), parent=merged, **_CONTRACT_KWARGS
     )
@@ -219,8 +226,7 @@ def test_the_sanitiser_reports_exactly_what_it_dropped():
         case=CASE, arm=B.Arm("base"),
         # The certified id rides along (an Alpaca run refuses without it) and, being an
         # ambient CHILI_* key, must NOT appear in `dropped` — which is the point of the test.
-        parent={"ROSS_X": "1", "REPLAY_KEEP_SINK": "1", "PATH": "/usr/bin",
-                B.ALPACA_ACCOUNT_ID_ENV: CERTIFIED_PAPER_ACCOUNT},
+        parent={"ROSS_X": "1", "REPLAY_KEEP_SINK": "1", "PATH": "/usr/bin", **LANE_ALPACA_ENV},
         **_CONTRACT_KWARGS,
     )
     assert dropped == ["REPLAY_KEEP_SINK", "ROSS_X"]
@@ -1017,3 +1023,35 @@ def test_the_alpaca_families_match_the_app_constant():
     app's own set so a renamed family cannot let an Alpaca run skip the refusal."""
     from app.services.trading.momentum_neural.alpaca_orphan_claims import ALPACA_EXECUTION_FAMILIES
     assert set(B.BENCH_ALPACA_FAMILIES) == set(ALPACA_EXECUTION_FAMILIES)
+
+
+# ── fence: an Alpaca run must carry the lane's dispatch mode ────────────────
+
+def test_an_alpaca_run_refuses_without_the_lane_dispatch_mode():
+    """Account id present, dispatch mode absent: the runner would require the adaptive-risk
+    builder and block every attempt (x26, 0 fills, SDOT 2026-06-26 on 2026-09-04)."""
+    with pytest.raises(SystemExit) as exc:
+        _env(parent={B.ALPACA_ACCOUNT_ID_ENV: CERTIFIED_PAPER_ACCOUNT}, certified=False)
+    msg = str(exc.value)
+    assert B.ALPACA_DISPATCH_MODE_ENV in msg
+    assert "timeshare_supervisor.py:88" in msg
+    assert "live_entry_adaptive_risk_blocked" in msg
+
+
+def test_an_alpaca_run_passes_the_lane_dispatch_mode_through():
+    env = _env()
+    assert env[B.ALPACA_DISPATCH_MODE_ENV] == "true"
+    assert env[B.ALPACA_ACCOUNT_ID_ENV] == CERTIFIED_PAPER_ACCOUNT
+
+
+def test_a_non_alpaca_run_does_not_need_the_dispatch_mode():
+    kwargs = dict(_CONTRACT_KWARGS, exec_family="robinhood_agentic_mcp")
+    env, _dropped = B.build_env(case=CASE, arm=B.Arm("base"), parent={}, **kwargs)
+    assert B.ALPACA_DISPATCH_MODE_ENV not in env
+
+
+def test_the_dispatch_mode_is_ambient_not_a_contract_key():
+    assert B.ALPACA_DISPATCH_MODE_ENV not in B.CONTRACT_ENV_KEYS
+    assert dict(B.ALPACA_REQUIRED_AMBIENT_ENV).keys() == {
+        B.ALPACA_ACCOUNT_ID_ENV, B.ALPACA_DISPATCH_MODE_ENV
+    }

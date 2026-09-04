@@ -218,6 +218,43 @@ FORBIDDEN_ENV_PREFIXES: tuple[str, ...] = ("ROSS_", "ROSSBENCH_")
 BENCH_ALPACA_FAMILIES: tuple[str, ...] = ("alpaca_spot", "alpaca_short")
 # The env key the driver's quarantine gate needs for an Alpaca run — see build_env.
 ALPACA_ACCOUNT_ID_ENV = "CHILI_ALPACA_EXPECTED_ACCOUNT_ID"
+ALPACA_DISPATCH_MODE_ENV = "CHILI_MOMENTUM_LEGACY_ALPACA_DISPATCH_ENABLED"
+
+# Settings keys an Alpaca-family run must find in the PARENT env. They are deployment
+# facts of the lane, not contract keys (the driver never reads them by name; the app
+# Settings do), so they ride the ambient CHILI_* pass-through -- and the bench REFUSES
+# to run without them rather than let a default stand in for the lane.
+#
+#   account id   -- the driver seeds it as the session's frozen alpaca_account_id; the
+#                   quarantine gate refuses every tick without a match
+#                   (live_runner.py:1585-1592). Missing it seeded the mock identity and
+#                   produced a zero-event run that looked like a finding (2026-09-04).
+#   dispatch mode -- the time-share lane runs alpaca_spot on the LEGACY sizing escape
+#                   (operator decision 2026-08-17, Option C; timeshare_supervisor.py:88
+#                   launches with it "true"). Without it the runner requires the adaptive
+#                   risk builder, whose capture provider only the sealed captured-paper
+#                   service installs, and every attempt is blocked:
+#                   live_entry_adaptive_risk_blocked x26, 0 fills (2026-09-04, SDOT).
+#                   The bench measures the lane AS DEPLOYED, so it carries the mode.
+ALPACA_REQUIRED_AMBIENT_ENV: tuple[tuple[str, str], ...] = (
+    (
+        ALPACA_ACCOUNT_ID_ENV,
+        "the driver seeds it as the session's frozen alpaca_account_id and its quarantine "
+        "gate refuses every tick without a match (live_runner.py:1585-1592). Export the "
+        "certified paper account id (it is in the lane's .env; the driver does not read "
+        ".env under CHILI_PYTEST=1) and re-run. Refusing rather than seeding the mock "
+        "identity, which produced a zero-event run that looked like a finding on 2026-09-04.",
+    ),
+    (
+        ALPACA_DISPATCH_MODE_ENV,
+        "the time-share lane runs alpaca_spot on the legacy sizing escape "
+        "(timeshare_supervisor.py:88 launches with it 'true'; operator decision 2026-08-17). "
+        "Without it the runner requires the adaptive-risk builder, whose capture provider "
+        "only the sealed captured-paper service installs, and every entry attempt is blocked "
+        "(live_entry_adaptive_risk_blocked x26, 0 fills, SDOT 2026-06-26 on 2026-09-04). "
+        "Export it as the lane does (=true) and re-run.",
+    ),
+)
 FORBIDDEN_ENV_KEYS: frozenset[str] = frozenset({KEEP_SINK_ENV})  # "REPLAY_KEEP_SINK"
 
 # Sentinel proving the BUILD TREE carries the change this bench depends on. The NBBO
@@ -1052,15 +1089,10 @@ def build_env(
     # A bench that can produce that silently is worse than one that refuses, so refuse
     # HERE, in the tested seam, before an arm override could paper over it.
     fam = str(contract_kwargs.get("exec_family") or "").strip().lower()
-    if fam in BENCH_ALPACA_FAMILIES and not str(env.get(ALPACA_ACCOUNT_ID_ENV) or "").strip():
-        raise SystemExit(
-            f"exec-family {fam!r} requires {ALPACA_ACCOUNT_ID_ENV} in the parent env: the driver "
-            "seeds it as the session's frozen alpaca_account_id and its quarantine gate refuses "
-            "every tick without a match (live_runner.py:1585-1592). Export the certified paper "
-            "account id (it is in the lane's .env; the driver does not read .env under "
-            "CHILI_PYTEST=1) and re-run. Refusing rather than seeding the mock identity, which "
-            "produced a zero-event run that looked like a finding on 2026-09-04."
-        )
+    if fam in BENCH_ALPACA_FAMILIES:
+        for key, why in ALPACA_REQUIRED_AMBIENT_ENV:
+            if not str(env.get(key) or "").strip():
+                raise SystemExit(f"exec-family {fam!r} requires {key} in the parent env: {why}")
     for key, value in (arm.overrides or {}).items():
         _refuse_forbidden_key(key, where=f"arm {arm.name!r}")
         if key in PROTECTED_ENV_KEYS:  # belt and braces; _load_arm_file already refused it
