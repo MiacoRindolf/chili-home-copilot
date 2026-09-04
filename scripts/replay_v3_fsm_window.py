@@ -1015,6 +1015,12 @@ def run_arm(label, grid, ticks, frame_ticks, g4_on, *, sink_reset=None, tape_sou
 
     # The VALIDATED parity-fixture config, defined once at _PARITY_MOCK_KWARGS.
     mock = rv3.MockBrokerAdapter(**_PARITY_MOCK_KWARGS)
+    # The account identity the seeded session froze (Alpaca families only), applied
+    # through the mock's own identity seam so the runner's bind_account_id at the broker
+    # boundary sees the same string on both sides. NOT a constructor kwarg: the parity
+    # string above is pinned verbatim by test_the_startup_mock_and_the_run_mock_cannot_drift
+    # and invariant 9 below reads the FILL config off the instance, not identity.
+    rv3.apply_replay_mock_identity(mock, EXEC_FAMILY)
     # INVARIANT 9, FAIL CLOSED: prove the mock the run will actually fill against IS the
     # validated config, read back off the instance — a constructor argument that a later
     # edit stops honouring produces a PnL nobody can compare to a baseline.
