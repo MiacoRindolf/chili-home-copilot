@@ -7802,6 +7802,9 @@ def _emit(
         payload,
         correlation_id=sess.correlation_id,
         source_node_id="momentum_live_runner",
+        # The chokepoint, not datetime.utcnow(): under replay_clock the event sits on the
+        # sim instant beside the fill it explains; in production the two are the same call.
+        ts=_utcnow(),
     )
 
 

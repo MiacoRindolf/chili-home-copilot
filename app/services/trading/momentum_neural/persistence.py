@@ -812,10 +812,16 @@ def append_trading_automation_event(
     *,
     correlation_id: Optional[str] = None,
     source_node_id: Optional[str] = None,
+    ts: Optional[datetime] = None,
 ) -> TradingAutomationEvent:
+    # ``ts`` defaults to the wall clock -- the shape every existing caller gets. The live
+    # runner passes its ``_utcnow()`` chokepoint so that under ``replay_clock`` an event
+    # lands on the SIM clock next to the fills it explains (2026-09-04: a 4,190-event bench
+    # receipt carried 2026-09-04 event stamps against 2026-06-26 fills and the scorer read
+    # it as ``no_replay_events``). In production ``_utcnow()`` IS ``datetime.utcnow()``.
     ev = TradingAutomationEvent(
         session_id=session_id,
-        ts=datetime.utcnow(),
+        ts=ts if ts is not None else datetime.utcnow(),
         event_type=event_type,
         payload_json=dict(payload_json),
         correlation_id=correlation_id,
