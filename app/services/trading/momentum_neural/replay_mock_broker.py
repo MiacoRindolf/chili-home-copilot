@@ -34,7 +34,7 @@ import hashlib
 import json
 import logging
 import math
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta, timezone
 from typing import Any, Mapping, Optional, Sequence
 
@@ -1581,6 +1581,81 @@ class MockBrokerAdapter:
 
     def get_ticker(self, product_id: str) -> tuple[Optional[NormalizedTicker], FreshnessMeta]:
         return self.get_best_bid_ask(product_id)
+
+    # The Alpaca submit boundary reads a STRICTER quote than the setup/scoring quote:
+    # live_runner._final_entry_bbo (:21540) requires ``get_execution_bbo`` and then checks
+    # source, symbol, an uncrossed market and a provider-clocked age inside ``max_age``.
+    # Without this method every Alpaca tick was held with
+    # ``execution_bbo_capability_missing`` -> ``live_declined`` -> ``live_cancelled``
+    # (SDOT 2026-06-26 bench, 2026-09-04: 7 events, 0 fills, 71 s). Gate #4 on that family.
+    EXECUTION_BBO_SOURCE = "replay_recorded_nbbo"
+    EXECUTION_BBO_TIMESTAMP_BASIS = "replay_recorded_nbbo_observed_at"
+
+    def get_execution_bbo(
+        self,
+        product_id: str,
+        *,
+        max_age_seconds: float = 2.0,
+        allow_stand_in: bool = False,
+        stand_in_max_age_seconds: Optional[float] = None,
+        resolve_locked: bool = False,
+    ) -> tuple[Optional[NormalizedTicker], Optional[FreshnessMeta]]:
+        """The recorded NBBO as an execution-authority quote, mirroring
+        ``AlpacaSpotAdapter.get_execution_bbo`` / ``_execution_bbo_from_direct``
+        (venue/alpaca_spot.py:1189, :2183) in shape and refusal rules.
+
+        Provider clock = the SIM instant the driver set with ``set_clock`` before the tick,
+        which IS the recorded row's ``observed_at`` at grid resolution -- never the wall
+        clock (invariant 4). Independent of ``freshness_mode``: the parity "wall" mode
+        deliberately reports age~0 for the ordinary quote, but the execution read must
+        carry a real provider timestamp or the runner names it ``no_provider_timestamp``.
+
+        The three stand-in / locked-book opt-ins are accepted for signature parity and
+        ignored: the recorded tape is the only source a replay has, so there is no
+        second tier to stand in. Like the real adapter, a quote older than ``max_age``
+        (or from the future by more than 1 s) returns ``(None, meta)`` and the runner
+        attributes it (``stale_beyond_ceiling``) -- silence is never an answer here.
+        """
+        del allow_stand_in, stand_in_max_age_seconds, resolve_locked  # signature parity only
+        q = self._quote_for(product_id)
+        provider_at = self._clock.replace(tzinfo=timezone.utc)
+        meta = FreshnessMeta(
+            retrieved_at_utc=provider_at,
+            provider_time_utc=provider_at,
+            max_age_seconds=float(max_age_seconds),
+        )
+        if q is None or not q.is_valid():
+            return None, meta
+        try:
+            from ..momentum_neural import live_runner as _lr  # sim-aware "now"
+
+            now_utc = _lr._utcnow_aware()
+        except Exception:
+            now_utc = datetime.now(timezone.utc)
+        provider_age = (now_utc - provider_at).total_seconds()
+        if provider_age < -1.0 or provider_age > float(max_age_seconds):
+            return None, meta
+        mid = q.mid
+        spread_abs = float(q.ask) - float(q.bid)
+        tick = NormalizedTicker(
+            product_id=str(product_id).upper(),
+            bid=float(q.bid),
+            ask=float(q.ask),
+            mid=mid,
+            spread_abs=spread_abs,
+            spread_bps=(spread_abs / mid) * 10_000.0 if mid > 0 else None,
+            last_price=(float(q.last) if q.last is not None else None),
+            freshness=meta,
+            raw={
+                "venue": _VENUE,
+                "source": self.EXECUTION_BBO_SOURCE,
+                "feed": self.EXECUTION_BBO_SOURCE,
+                "provider_event_at_utc": provider_at.isoformat(),
+                "received_at_utc": provider_at.isoformat(),
+                "timestamp_basis": self.EXECUTION_BBO_TIMESTAMP_BASIS,
+            },
+        )
+        return tick, meta
 
     def get_product(self, product_id: str) -> tuple[Optional[NormalizedProduct], FreshnessMeta]:
         # Minimal "online, fully tradable" product so the runner's tradability gate passes.
