@@ -1178,13 +1178,39 @@ def check_same_tape(receipt: Mapping[str, Any], reference: Mapping[str, Any]) ->
 _PIN_SOURCE_KEYS = ("sources", "source", "provider", "providers", "hydrate_provider")
 
 
+def _tape_vendor(source: Any) -> str:
+    """The VENDOR behind a hydrated tape source string.
+
+    ``iqfeed_lookup_hist`` and ``iqfeed_lookup_bbo`` are one vendor's trades and quotes;
+    ``polygon_v3_trades`` / ``polygon_v3_quotes`` are another's. Only a change of VENDOR
+    means the pinned tape and the replayed tape are different tape. Anything unrecognised
+    is returned whole, so a new source name is compared strictly rather than silently
+    folded into an existing vendor.
+    """
+    s = str(source or "").strip().lower()
+    for vendor in ("iqfeed", "polygon", "replay_v3"):
+        if s.startswith(vendor):
+            return vendor
+    return s
+
+
 def check_pin_sources(receipt: Mapping[str, Any], pin: Optional[Mapping[str, Any]]) -> str:
     """Compare the tape provenance the pin RECORDED against what the driver actually read.
 
     ``receipt["tape_sources"]`` is ``{table: {source: row_count}}`` — the driver's own
-    per-table provenance survey (replay_v3_fsm_window.py:346-380). A pin naming a provider
-    the run did not read (or the run reading one the pin does not name) means the pinned
-    tape and the replayed tape are not the same tape.
+    per-table provenance survey (replay_v3_fsm_window.py:346-380).
+
+    COMPARED AT PROVIDER SCOPE, NOT SOURCE SCOPE. The risk this guards is a symbol-day
+    hydrated from TWO VENDORS — measured on TMCR 2026-08-24, where a double hydration gave
+    33,866 ticks against a true 16,933, and the mixed-vendor quote seam the hydrator's own
+    ``hydration_quote_seam_check`` exists to find. It is NOT a difference of dataset.
+
+    The pinner and the driver read different datasets BY DESIGN and must be allowed to:
+    pinning an entry needs a printed price at a time, so it reads trades only
+    (``iqfeed_lookup_hist``), while the driver also mirrors the NBBO
+    (``iqfeed_lookup_bbo``). Comparing raw source strings made the first real bench run
+    report MISMATCH on that pair — same vendor, same hydration, different dataset — and an
+    invariant that cries wolf on the normal case is one an operator learns to skip.
 
     Returns a STATUS STRING rather than a problem list: the pins file is produced by
     another step and this bench cannot verify its schema, so "unverified" must stay
@@ -1217,9 +1243,14 @@ def check_pin_sources(receipt: Mapping[str, Any], pin: Optional[Mapping[str, Any
             observed |= {str(s) for s, n in per_table.items() if n}
     if not observed:
         return "unverified:receipt_reports_no_tape_sources"
-    if observed <= pinned:
+    obs_vendors = {_tape_vendor(s) for s in observed}
+    pin_vendors = {_tape_vendor(s) for s in pinned}
+    if obs_vendors <= pin_vendors:
         return f"match:{sorted(observed)}"
-    return f"MISMATCH:pin.{key}={sorted(pinned)} but the run read {sorted(observed)}"
+    return (
+        f"MISMATCH:pin.{key} vendors={sorted(pin_vendors)} but the run read "
+        f"{sorted(obs_vendors)} (pin sources {sorted(pinned)}; run sources {sorted(observed)})"
+    )
 
 
 def sink_counts(receipt: Mapping[str, Any]) -> dict[str, int]:
