@@ -1952,6 +1952,65 @@ class MockBrokerAdapter:
             return {"ok": False, "venue": _VENUE, "error": "no_bbo"}
         return {"ok": True, "venue": _VENUE, "mid": q.mid, "bid": q.bid, "ask": q.ask}
 
+    # ── broker market clock (Alpaca /v2/clock twin), from the SIM instant ──────────
+    _ET = "America/New_York"
+
+    @staticmethod
+    def _et_session_bounds(day_et):
+        """(open, close) aware datetimes for one ET calendar day: 09:30 / 16:00."""
+        from zoneinfo import ZoneInfo
+
+        tz = ZoneInfo(MockBrokerAdapter._ET)
+        o = datetime(day_et.year, day_et.month, day_et.day, 9, 30, tzinfo=tz)
+        c = datetime(day_et.year, day_et.month, day_et.day, 16, 0, tzinfo=tz)
+        return o, c
+
+    def get_market_clock_snapshot(self) -> dict[str, Any]:
+        """Alpaca-shaped exchange clock derived from the sim instant.
+
+        ``live_runner._strict_alpaca_clock_truth`` (:3461) requires this method, then
+        checks ``ok``/``paper``, that ``timestamp`` is within [-1, 30] s of ``_utcnow()`` and
+        that ``next_close`` is not in the past. MEASURED 2026-09-04 (SDOT 2026-06-26 canon
+        run, six gates cleared): 19 of 26 entry attempts deferred with
+        ``alpaca_broker_clock_unavailable`` because the mock had no clock at all.
+
+        Truthful, not permissive: ``is_open`` is the US equities REGULAR session
+        (09:30-16:00 America/New_York, Mon-Fri; exchange holidays are not modelled and are
+        reported as such in ``raw``) at the sim instant, so a premarket replay reads
+        ``is_open=False`` exactly as the broker would say at that clock. ``timestamp`` IS the
+        sim instant -- never the wall clock.
+        """
+        from datetime import timedelta as _td
+        from zoneinfo import ZoneInfo
+
+        now_utc = self._clock.replace(tzinfo=timezone.utc)
+        now_et = now_utc.astimezone(ZoneInfo(self._ET))
+        day = now_et.date()
+        open_t, close_t = self._et_session_bounds(day)
+        weekday = now_et.weekday() < 5
+        is_open = bool(weekday and open_t <= now_et < close_t)
+        # next_open / next_close: today's if still ahead, else the next weekday's
+        def _next(bound_of_day, after):
+            d = day
+            for _ in range(10):
+                b = bound_of_day(d)
+                if d.weekday() < 5 and b > after:
+                    return b
+                d = d + _td(days=1)
+            return bound_of_day(d)
+
+        next_open = _next(lambda d: self._et_session_bounds(d)[0], now_et)
+        next_close = _next(lambda d: self._et_session_bounds(d)[1], now_et)
+        return {
+            "ok": True,
+            "is_open": is_open,
+            "timestamp": now_utc.isoformat(),
+            "next_open": next_open.astimezone(timezone.utc).isoformat(),
+            "next_close": next_close.astimezone(timezone.utc).isoformat(),
+            "paper": True,
+            "raw": {"venue": _VENUE, "source": "replay_sim_clock", "holidays_modelled": False},
+        }
+
     def set_account_equity(self, start_equity_usd: float) -> None:
         """Driver seam: the sim account's start-of-day equity (the bench's EQUITY)."""
         v = float(start_equity_usd)
