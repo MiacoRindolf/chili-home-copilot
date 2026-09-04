@@ -733,6 +733,13 @@ class AsOfProvider:
 # against. Everything else in a payload stays out, so the receipt is stable across releases.
 _BENCH_PAYLOAD_KEYS = (
     "reason", "blocked_trigger", "benched_at_hod", "trigger", "viability_score", "errors",
+    # 2026-09-04: the SDOT alpaca receipt showed ``live_entry_blocked_by_breaker`` x26 with
+    # payload ``{}`` -- the runner had written breaker=daily_loss_cap_broker, family,
+    # daily_pnl_usd, max_daily_loss_usd and this filter dropped every one of them; the
+    # sink row had to be read by hand to name the gate. Breaker / blocker attribution is
+    # exactly the "WHY" this receipt exists to carry.
+    "breaker", "family", "dd_reason", "daily_pnl_usd", "max_daily_loss_usd", "transient",
+    "source", "error_type", "detail", "skipped",
 )
 
 
