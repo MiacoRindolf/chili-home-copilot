@@ -129,6 +129,9 @@ _GOOD_ASOF = textwrap.dedent(
             return _o(symbol, as_of=(as_of if as_of is not None else lr._utcnow()))
         _eg.signed_tape_accel_features = _staf_simclock
         _eg._utcnow_for_bars = lambda sample: lr._utcnow()
+        def _nsp_simclock(db, symbol, *, now_utc=None, _o=_orig_nsp, **k):
+            return _o(db, symbol, now_utc=(now_utc if now_utc is not None else lr._utcnow()), **k)
+        _scv.name_spread_percentiles = _nsp_simclock
     """
 )
 

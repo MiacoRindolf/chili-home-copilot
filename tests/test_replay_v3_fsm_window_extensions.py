@@ -368,3 +368,67 @@ def test_the_mock_parity_invariant_runs_on_the_constructed_mock():
     body = _body("run_arm")
     assert body.index("MockBrokerAdapter(") < body.index("assert_mock_parity(mock)")
     assert body.index("assert_mock_parity(mock)") < body.index("driver.run()")
+
+
+# ─── F. THE NBBO MIRROR'S SIDE EFFECT: A DORMANT LOOK-AHEAD SWITCHED ON ──────────────────
+#
+# The mirror pre-loads the ENTIRE window into the sink at t=0, so every read the FSM makes
+# against momentum_nbbo_spread_tape must be as-of bounded or it reads the FUTURE. Two of the
+# three target readers already were: _build_micro_bar_df (live_runner:23426) and
+# recent_bid_spread_tape (nbbo_tape:1228) both bind `observed_at <= :now`. The third,
+# spread_cost_veto.name_spread_percentiles, bound only `>= :since` and is reached from
+# live_runner:38905 WITHOUT now_utc — i.e. against the real WALL clock.
+#
+# MEASURED (chili_test, 60-minute tape, first 30 min @20 bps, last 30 min @400 bps,
+# source='replay_v3' exactly as the mirror writes, sim-now = window + 35 min):
+#     before: p50=210.0 p75=400.0 p90=400.0 n=60      <- 24 rows that had not happened yet
+#     after:  p50=20.0                        n=36
+# a 10.5x error in the name's OWN "typical spread" baseline. The gate is default-ON
+# (config.py:6936 Field(default=True), with an explicit note that the "DEFAULT FALSE" prose
+# is wrong) and composes into _eff_max_loss at live_runner:38925 — it scales position size.
+# Worse, with the wall clock the `since` bound walks off the replayed day entirely, so a tape
+# older than chili_momentum_spread_norm_lookback_days (20.0) returns None and the gate fails
+# open: the verdict then depends on the CALENDAR DATE the bench happens to run, which defeats
+# the byte-identical-double-run premise this harness asserts everywhere else.
+
+_SCV = pathlib.Path(__file__).resolve().parents[1] / "app" / "services" / "trading" / "momentum_neural" / "spread_cost_veto.py"
+
+
+def test_the_spread_percentile_read_is_as_of_bounded():
+    """Without an upper bound the mirrored window is read in FULL at every sim instant."""
+    src = _SCV.read_text(encoding="utf-8")
+    assert "observed_at <= :now" in src, (
+        "name_spread_percentiles has no as-of upper bound — with the NBBO mirror in place "
+        "it reads rows that had not happened yet at the moment of the decision."
+    )
+
+
+def test_the_spread_percentile_read_binds_the_upper_bound():
+    """A predicate with no bound parameter raises rather than silently filtering nothing."""
+    src = _SCV.read_text(encoding="utf-8")
+    assert '"now": now_utc.replace(tzinfo=None)' in src
+
+
+def test_the_driver_repoints_the_spread_distribution_at_the_sim_clock():
+    """live_runner:38905 passes no now_utc, so unpatched this read uses the WALL clock."""
+    body = _body("run_arm")
+    assert "_scv.name_spread_percentiles = _nsp_simclock" in body
+    assert "lr._utcnow()" in body.split("_nsp_simclock")[1][:400]
+
+
+def test_the_repoint_is_a_required_sim_clock_anchor():
+    """So losing it fails invariant 4 at startup instead of quietly moving the sizing."""
+    inv = importlib.import_module("replay_harness_invariants")
+    assert "name_spread_percentiles" in inv.REQUIRED_SIM_CLOCK_ANCHORS
+
+
+def test_the_mock_parity_invariant_also_fences_at_startup():
+    """Invariant 9 must abort BEFORE the sink reset and the three multi-minute mirrors."""
+    body = _body("_startup_invariants")
+    assert "assert_mock_parity(rv3.MockBrokerAdapter(**_PARITY_MOCK_KWARGS))" in body
+
+
+def test_the_startup_mock_and_the_run_mock_cannot_drift():
+    """One definition, two construction sites — a knob checked but not used is no check."""
+    body = _body("run_arm")
+    assert "rv3.MockBrokerAdapter(**_PARITY_MOCK_KWARGS)" in body

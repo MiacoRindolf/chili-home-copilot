@@ -45,6 +45,22 @@ replay run to date the micro-pullback detector and the spread-distribution veto 
 table — "measuring silence", the same defect the L2 depth mirror fixed on 2026-08-26.
 ``mirror_nbbo_streaming`` closes it.
 
+⚠️ AND WHAT THE MIRROR SWITCHED ON. Turning a silent read into a live one is not free: the
+mirror pre-loads the WHOLE window into the sink at t=0, so every reader must be as-of bounded
+or it reads the FUTURE. Two of the three were already:  ``_build_micro_bar_df`` and
+``recent_bid_spread_tape`` both bind ``observed_at <= :now``. The third did NOT —
+``name_spread_percentiles`` bound only ``>= :since``, and ``live_runner:38905`` reaches it
+WITHOUT ``now_utc``, i.e. against the real WALL clock. MEASURED on chili_test (60 min of tape,
+30 min @20 bps then 30 min @400 bps, sim-now = +35 min): p50=210.0 n=60 where the as-of answer
+is p50=20.0 n=36, and end-to-end through the real ``adaptive_spread_cost_veto_derate`` the size
+multiplier moved 0.70 -> 0.50 on identical input — the look-ahead was making the gate too
+PERMISSIVE. Worse, on the wall clock ``since`` walks off the replayed day, so a tape older than
+``chili_momentum_spread_norm_lookback_days`` (20.0) returns None and the gate fails open: the
+verdict would then depend on the CALENDAR DATE the bench runs. Fixed in two places — the SQL
+upper bound in ``spread_cost_veto.py`` (a no-op live, where no future rows exist) and the
+sim-clock re-point in ``run_arm``, which is now a REQUIRED_SIM_CLOCK_ANCHOR so losing it fails
+invariant 4 at startup.
+
 ⚠️ TIE STABILITY (2026-09-04). Every tape SELECT here now ends
 ``ORDER BY observed_at ASC, id ASC``, and the stride's ``row_number()`` window is ordered the
 same way. Rows sharing an ``observed_at`` (routine inside a burst) previously came back in
@@ -93,6 +109,18 @@ from replay_harness_invariants import (  # noqa: E402
     assert_dense_stride,
     assert_mock_parity,
     assert_tie_stable_sql,
+)
+
+# VALIDATED parity-fixture mock config ($0.05 fidelity, replay_parity.py:219): resting limit
+# orders (fill only when the recorded NBBO crosses), conservative adverse-side fills, volume-
+# capped partials, wall freshness (age~0 vs the sim clock). This is the accurate setup —
+# resting_limit_fills=False caused the exit-ladder submit spam. Module-level so invariant 9
+# fences at STARTUP and run_arm's real mock cannot drift from what was checked.
+_PARITY_MOCK_KWARGS = dict(
+    resting_limit_fills=True,
+    volume_cap_enabled=True,
+    fill_mode=FillMode.CONSERVATIVE,
+    freshness_mode="wall",
 )
 
 # READ-ONLY source DB (defaults to the local chili). SIM is the throwaway seeded DB (chili_test)
@@ -872,6 +900,25 @@ def run_arm(label, grid, ticks, frame_ticks, g4_on, *, sink_reset=None, tape_sou
     # silently disables — replay then re-runs the exact bug live was cured of. Re-point it
     # at the SIM clock (naive UTC, the same awareness as the recorded frame index).
     _eg._utcnow_for_bars = lambda sample: lr._utcnow()
+    # SPREAD-DISTRIBUTION AS-OF (2026-09-04): the NBBO mirror above pre-loads the WHOLE
+    # window into the sink at t=0, which switches ON a read that was previously dormant
+    # against an empty table — spread_cost_veto.name_spread_percentiles, reached from
+    # live_runner:38905 WITHOUT now_utc, i.e. against the REAL wall clock. Two failures
+    # follow: (a) `since` walks off the replayed day, so a day older than
+    # chili_momentum_spread_norm_lookback_days (20.0) reads NOTHING and the gate fails
+    # open — the gate's answer would depend on how many days after the tape the bench
+    # happens to run, which defeats the double-run premise this harness asserts
+    # elsewhere; (b) even WITH now_utc the SQL had no upper bound (fixed in
+    # spread_cost_veto.py) so it read the future. Re-point at the SIM clock with the
+    # same idiom as the two anchors above; this also sets the function's own _as_of
+    # flag, which correctly disables its WALL-CLOCK-indexed percentile cache for a
+    # historical read (its docstring warns that serving a replay from that cache feeds
+    # live-time distribution into an as-of decision).
+    import app.services.trading.momentum_neural.spread_cost_veto as _scv
+    _orig_nsp = _scv.name_spread_percentiles
+    def _nsp_simclock(db, symbol, *, now_utc=None, _o=_orig_nsp, **k):
+        return _o(db, symbol, now_utc=(now_utc if now_utc is not None else lr._utcnow()), **k)
+    _scv.name_spread_percentiles = _nsp_simclock
     # PROPOSED G4 FIX validation (GRIND_FIX=1): align grind ACTIVATION with MAINTENANCE + the
     # classifier's own semantics — accept UNCERTAIN cadence (which the classifier defaults to
     # "FAST/normal, no modulation" and which maintenance keeps as "NOT SLOW_CHOPPER"). Only
@@ -966,16 +1013,8 @@ def run_arm(label, grid, ticks, frame_ticks, g4_on, *, sink_reset=None, tape_sou
         print("  mirrored_nbbo_rows=%s" % mirrored_nbbo)
     db.commit()
 
-    # VALIDATED parity-fixture mock config ($0.05 fidelity, replay_parity.py:219): resting
-    # limit orders (fill only when the recorded NBBO crosses), conservative adverse-side fills,
-    # volume-capped partials, wall freshness (age~0 vs the sim clock). This is the accurate
-    # setup — my earlier resting_limit_fills=False caused the exit-ladder submit spam.
-    mock = rv3.MockBrokerAdapter(
-        resting_limit_fills=True,
-        volume_cap_enabled=True,
-        fill_mode=FillMode.CONSERVATIVE,
-        freshness_mode="wall",
-    )
+    # The VALIDATED parity-fixture config, defined once at _PARITY_MOCK_KWARGS.
+    mock = rv3.MockBrokerAdapter(**_PARITY_MOCK_KWARGS)
     # INVARIANT 9, FAIL CLOSED: prove the mock the run will actually fill against IS the
     # validated config, read back off the instance — a constructor argument that a later
     # edit stops honouring produces a PnL nobody can compare to a baseline.
@@ -1512,12 +1551,17 @@ def _reset_sim_sink() -> dict | None:
 def _startup_invariants() -> None:
     """FAIL CLOSED before a single row is read. Each of these has a run behind it whose
     number was wrong and looked right; see scripts/replay_harness_invariants.py."""
-    _src = open(os.path.abspath(__file__), encoding="utf-8").read()
+    with open(os.path.abspath(__file__), encoding="utf-8") as _fh:
+        _src = _fh.read()
     assert_dense_stride(TICK_STRIDE, BENCH_QUESTION)   # 1 — stride-10 flipped +193.92 -> -4.66
     assert_clean_sink(os.environ)                      # 2 — reused sink moved +60.60 -> +46.59
     assert_as_of_reads(_src)                           # 4 — wall clock reads the tape as empty
     assert_tie_stable_sql(_src)                        # 5 — equal ts fell back to scan order
-    # 9 (assert_mock_parity) needs the constructed mock; it runs inside run_arm.
+    # 9 — at STARTUP, on a throwaway mock built from the SAME kwargs run_arm uses, so a
+    # constructor that stops honouring a knob aborts BEFORE the sink reset and the three
+    # multi-minute mirrors rather than after them. run_arm re-asserts on the instance that
+    # actually fills (a read-back of derived private state, not an echo of these kwargs).
+    assert_mock_parity(rv3.MockBrokerAdapter(**_PARITY_MOCK_KWARGS))
 
 
 def main():

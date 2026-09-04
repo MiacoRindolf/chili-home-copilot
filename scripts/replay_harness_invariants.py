@@ -169,6 +169,11 @@ REQUIRED_SIM_CLOCK_ANCHORS: tuple[str, ...] = (
     "schedule_window_now",        # else sched_mult 0.0 => entry placement skipped
     "signed_tape_accel_features",  # else the buyers-confirm tape read finds NOTHING
     "_utcnow_for_bars",           # else every bar reads as long-complete (08-19 YJ fix)
+    # else the spread-distribution derate reads the WALL clock over a sink the NBBO
+    # mirror pre-loaded in full: measured p50=210.0 n=60 where the as-of answer is
+    # p50=20.0 n=36, and the gate's verdict then depends on the CALENDAR DATE the
+    # bench runs (>20 days after the tape it reads nothing and fails open).
+    "name_spread_percentiles",
 )
 
 
