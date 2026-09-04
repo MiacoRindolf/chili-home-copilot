@@ -193,8 +193,53 @@ def _captured_paper_admission_reason_code(value: Any) -> str:
     return "captured_paper_admission_rejected"
 
 
-_IGNITION_DEDUP_TTL_S = 300.0            # one admission attempt per symbol per TTL
-_IGNITION_ADMITS_PER_MINUTE = 6          # hard cap on ignition admission attempts
+# IGNITION ADMISSION GOVERNORS (2026-09-04). These were hard-coded module
+# constants (300.0 / 6). They gate the ONLY path that can admit a symbol the
+# universe poll has never seen, so they are load-bearing on admission latency —
+# the largest measured class of missed winners (median first admission at
+# +15.6%, p90 +44.7%). Both are now ONE documented setting each, with the
+# derivation written down in app/config.py and computed by
+# scripts/derive_ignition_governors.py. Day-1 defaults equal the old constants,
+# so behaviour is byte-identical until an operator moves them.
+_IGNITION_DEDUP_TTL_FALLBACK_S = 300.0
+_IGNITION_ADMITS_PER_MINUTE_FALLBACK = 6
+# Rolling window the admits/minute cap is measured over. Not a tunable: "per
+# minute" IS the unit of the setting above.
+_IGNITION_ADMIT_RATE_WINDOW_S = 60.0
+# Bounded memory for the per-symbol dedup map (defence against a chatty producer).
+_IGNITION_DEDUP_MAX_ENTRIES = 2048
+
+
+def _ignition_dedup_ttl_seconds() -> float:
+    """One admission ATTEMPT per symbol per this many seconds (settings-driven)."""
+    try:
+        value = float(
+            getattr(
+                settings,
+                "chili_momentum_ignition_dedup_ttl_seconds",
+                _IGNITION_DEDUP_TTL_FALLBACK_S,
+            )
+        )
+    except (TypeError, ValueError):
+        return _IGNITION_DEDUP_TTL_FALLBACK_S
+    return value if value > 0 else _IGNITION_DEDUP_TTL_FALLBACK_S
+
+
+def _ignition_admits_per_minute() -> int:
+    """Hard cap on ignition admission ATTEMPTS per rolling minute (settings-driven)."""
+    try:
+        value = int(
+            getattr(
+                settings,
+                "chili_momentum_ignition_admits_per_minute",
+                _IGNITION_ADMITS_PER_MINUTE_FALLBACK,
+            )
+        )
+    except (TypeError, ValueError):
+        return _IGNITION_ADMITS_PER_MINUTE_FALLBACK
+    return value if value > 0 else _IGNITION_ADMITS_PER_MINUTE_FALLBACK
+
+
 _IQFEED_EQUITY_SYMBOL_RE = re.compile(r"^[A-Z][A-Z0-9.]{0,15}$")
 _LIVE_LOOP_OWNER_INSTANCE_ID = str(uuid.uuid4())
 # Cluster-wide, database-scoped PostgreSQL advisory fence.  Positive int32 values
@@ -1952,30 +1997,206 @@ class LiveRunnerLoop:
             "connection_generation": data.get("connection_generation"),
         }
 
-    def _ignition_admission_permitted(self, symbol: str) -> bool:
-        """Consumer-side dedup TTL + admits/minute hard cap (monotonic clocks)."""
+    def _ignition_admission_verdict(self, symbol: str) -> str | None:
+        """Consumer-side dedup TTL + admits/minute hard cap (monotonic clocks).
+
+        Returns ``None`` when the nomination may proceed, else the governor that
+        suppressed it — the reason is persisted with the nomination so the
+        governors can be derived from the traffic they themselves shape.
+        """
+        ttl = _ignition_dedup_ttl_seconds()
+        cap = _ignition_admits_per_minute()
         now_mono = time.monotonic()
         with self._ignition_lock:
             last = self._ignition_dedup.get(symbol)
-            if last is not None and now_mono - last < _IGNITION_DEDUP_TTL_S:
-                return False
+            if last is not None and now_mono - last < ttl:
+                return "governor_dedup_ttl"
             self._ignition_admit_monotonic = [
                 at
                 for at in self._ignition_admit_monotonic
-                if now_mono - at < 60.0
+                if now_mono - at < _IGNITION_ADMIT_RATE_WINDOW_S
             ]
-            if len(self._ignition_admit_monotonic) >= _IGNITION_ADMITS_PER_MINUTE:
-                return False
+            if len(self._ignition_admit_monotonic) >= cap:
+                return "governor_admits_per_minute"
             # Bounded memory: drop expired dedup entries opportunistically.
-            if len(self._ignition_dedup) > 2048:
+            if len(self._ignition_dedup) > _IGNITION_DEDUP_MAX_ENTRIES:
                 self._ignition_dedup = {
                     sym: at
                     for sym, at in self._ignition_dedup.items()
-                    if now_mono - at < _IGNITION_DEDUP_TTL_S
+                    if now_mono - at < ttl
                 }
             self._ignition_dedup[symbol] = now_mono
             self._ignition_admit_monotonic.append(now_mono)
+            return None
+
+    # ── Nomination record (2026-09-04) ───────────────────────────────────────
+    # 0 ross_event_admitted events across 3,379 live sessions in 14 days left NO
+    # durable trace of why: a nomination was a log line in a process with no
+    # logging config. Every validated nomination now lands in
+    # momentum_ignition_nominations (migration 376), INCLUDING the ones this
+    # loop's own governors suppressed — otherwise the governors censor exactly
+    # the distribution needed to derive them.
+
+    @staticmethod
+    def _ignition_nomination_params(
+        data: dict,
+        *,
+        received_at: datetime,
+        outcome: str,
+        result: dict | None = None,
+    ) -> dict:
+        """Bind one nomination row's parameters. Pure — no I/O, no clock."""
+
+        def _num(value):
+            if isinstance(value, bool) or not isinstance(value, (int, float)):
+                return None
+            value = float(value)
+            return value if math.isfinite(value) else None
+
+        def _text(value, limit: int):
+            if value is None:
+                return None
+            return str(value)[:limit]
+
+        prints_10s = data.get("prints_10s")
+        outcome_result = result if isinstance(result, dict) else {}
+        return {
+            "symbol": str(data.get("symbol") or "")[:16],
+            "fired_at": _parse_aware_utc(data.get("fired_at")),
+            "received_at": received_at,
+            "last_price": _num(data.get("last_price")),
+            # FRACTION, exactly as the producer reports it (0.05 == +5%).
+            "pct_change_60s": _num(data.get("pct_change_60s")),
+            # SIXTY-SECOND turnover; never the day-scale tradability number.
+            "dollar_vol_60s": _num(data.get("dollar_vol_60s")),
+            "prints_10s": (
+                int(prints_10s)
+                if isinstance(prints_10s, int) and not isinstance(prints_10s, bool)
+                else None
+            ),
+            "outcome": _text(outcome, 48) or "unknown",
+            "skipped": _text(outcome_result.get("skipped"), 64),
+            "ross_universe_reason": _text(
+                outcome_result.get("ross_universe_reason"), 64
+            ),
+        }
+
+    @staticmethod
+    def _write_ignition_nomination(db, params: dict) -> bool:
+        """INSERT one nomination row on the CALLER's session/transaction.
+
+        Runs inside a SAVEPOINT so a failed observation (missing table on a
+        pre-migration-376 environment, a constraint, a transient error) can never
+        abort the admission transaction it shares — the same contract
+        ``bridge_subscribe.request_bridge_subscription`` uses, and for the same
+        reason: an observation must never break the path it observes.
+        """
+        try:
+            with db.begin_nested():
+                db.execute(
+                    text(
+                        "INSERT INTO momentum_ignition_nominations ("
+                        "symbol, fired_at, received_at, last_price, "
+                        "pct_change_60s, dollar_vol_60s, prints_10s, outcome, "
+                        "skipped, ross_universe_reason) VALUES ("
+                        ":symbol, :fired_at, :received_at, :last_price, "
+                        ":pct_change_60s, :dollar_vol_60s, :prints_10s, "
+                        ":outcome, :skipped, :ross_universe_reason)"
+                    ),
+                    params,
+                )
             return True
+        except Exception:
+            _log.debug(
+                "[live_loop] ignition nomination record failed symbol=%s",
+                params.get("symbol"),
+                exc_info=True,
+            )
+            return False
+
+    def _record_ignition_nomination(
+        self,
+        data: dict,
+        *,
+        received_at: datetime,
+        outcome: str,
+    ) -> bool:
+        """Record a nomination that never reached the admission transaction.
+
+        The governor-suppressed and already-tracked cases have no admission
+        session to ride, so they open a short-lived one of their own. Bounded by
+        the producer's own 6 fires/minute cap. Never raises.
+        """
+        db = None
+        try:
+            db = SessionLocal()
+            written = self._write_ignition_nomination(
+                db,
+                self._ignition_nomination_params(
+                    data, received_at=received_at, outcome=outcome
+                ),
+            )
+            db.commit()
+            return written
+        except Exception:
+            _log.debug(
+                "[live_loop] ignition nomination session failed symbol=%s",
+                data.get("symbol"),
+                exc_info=True,
+            )
+            try:
+                if db is not None:
+                    db.rollback()
+            except Exception:
+                pass
+            return False
+        finally:
+            if db is not None:
+                try:
+                    db.close()
+                except Exception:
+                    pass
+
+    def _request_ignition_bridge_subscription(self, symbol: str) -> bool:
+        """Promote a newly-igniting symbol to the protected subscribe cause NOW.
+
+        Called BEFORE the admission attempt on purpose. The host IQFeed bridge
+        subscribes by polling armed sessions + the eligible-mover board on a ~20s
+        refresh, so a symbol that has just ignited is not on the tape until it
+        already has a viability row — the same closed loop that makes admission
+        late. The hint is a NON-trading coordination row, kill-switched and
+        SAVEPOINT-safe inside ``request_bridge_subscription``, and it is worth
+        writing even when the admission that follows is refused: the tape is what
+        lets the NEXT nomination prove itself. Never raises.
+        """
+        db = None
+        try:
+            from .bridge_subscribe import request_bridge_subscription
+
+            db = SessionLocal()
+            requested = bool(
+                request_bridge_subscription(db, symbol, reason="ignition_tick")
+            )
+            db.commit()
+            return requested
+        except Exception:
+            _log.debug(
+                "[live_loop] ignition bridge subscribe hint failed symbol=%s",
+                symbol,
+                exc_info=True,
+            )
+            try:
+                if db is not None:
+                    db.rollback()
+            except Exception:
+                pass
+            return False
+        finally:
+            if db is not None:
+                try:
+                    db.close()
+                except Exception:
+                    pass
 
     def _handle_iqfeed_ignition_payload(
         self,
@@ -1994,11 +2215,16 @@ class LiveRunnerLoop:
         if data is None:
             return False
         sym = data["symbol"]
+        received_at = _utcnow()
         handled = False
         try:
             sessions = self._tracker.get_sessions_for_symbol(sym)
             if not sessions:
-                if not self._ignition_admission_permitted(sym):
+                verdict = self._ignition_admission_verdict(sym)
+                if verdict is not None:
+                    self._record_ignition_nomination(
+                        data, received_at=received_at, outcome=verdict
+                    )
                     return False
                 _log.info(
                     "[live_loop] ignition nomination symbol=%s px=%s pct60=%s",
@@ -2006,13 +2232,24 @@ class LiveRunnerLoop:
                     data.get("last_price"),
                     data.get("pct_change_60s"),
                 )
+                # SUBSCRIBE FIRST, ADMIT SECOND. The bridge only tapes symbols it
+                # is subscribed to, and it discovers them by polling armed
+                # sessions — so a nomination that is refused today leaves the
+                # symbol untaped for the next one. The hint is cheap, non-trading
+                # and kill-switched; the admission decision below is unchanged.
+                self._request_ignition_bridge_subscription(sym)
                 admission = self._admit_iqfeed_symbol(
                     sym,
                     data,
                     expected_generation=owner_generation,
+                    nomination_received_at=received_at,
                 )
                 handled = bool(admission and admission.get("admitted"))
                 sessions = self._tracker.get_sessions_for_symbol(sym)
+            else:
+                self._record_ignition_nomination(
+                    data, received_at=received_at, outcome="already_tracked"
+                )
             for sess in sessions:
                 handled = self._dispatch(
                     int(sess["session_id"]),
@@ -2523,6 +2760,7 @@ class LiveRunnerLoop:
         payload: dict,
         *,
         expected_generation: int,
+        nomination_received_at: datetime | None = None,
     ) -> dict | None:
         if self._captured_paper_scope is not None:
             admitter = self._captured_paper_symbol_admitter
@@ -2643,13 +2881,33 @@ class LiveRunnerLoop:
             return None
         db = None
         try:
-            from .ross_event_admission import admit_ross_event
+            from .ross_event_admission import (
+                admit_ross_event,
+                ignition_admission_signal,
+            )
 
+            # THE IGNITION PAYLOAD IS EVIDENCE, NOT NOISE (2026-09-04). This call
+            # passed ``signal=None``, discarding the nomination's own last print
+            # price, 60-second move and 60-second turnover — so the universe proof
+            # had nothing but the Massive snapshot row and failed closed with
+            # ross_universe_missing_price / ross_universe_missing_dollar_volume on
+            # exactly the newly-igniting names the snapshot has not reached yet.
+            # Measured: 0 ross_event_admitted events across 3,379 live sessions in
+            # 14 days. STILL FAIL-CLOSED — a symbol that cannot prove price AND
+            # dollar volume is refused exactly as before; the builder simply lets
+            # the proof come from the payload plus the trade tape instead of
+            # requiring a snapshot row. The v3 authority payload carries no last
+            # price, so that path keeps signal=None and is byte-identical.
+            ignition_signal = (
+                ignition_admission_signal(payload)
+                if payload.get("source") == _IGNITION_SOURCE_TAG
+                else None
+            )
             db = SessionLocal()
             result = admit_ross_event(
                 db,
                 symbol=symbol,
-                signal=None,
+                signal=ignition_signal,
                 source=str(payload.get("source") or "iqfeed_notify"),
                 # IQFeed is the event source that should CREATE the fresh Ross
                 # candidate when no viability row exists yet. Leaving this false
@@ -2662,6 +2920,24 @@ class LiveRunnerLoop:
                 # existing _dispatch path owns the one runner tick.
                 defer_live_ticks_until_commit=True,
             )
+            # One row per HANDLED ignition, in the SAME transaction as the
+            # admission attempt it describes: the record and the decision commit
+            # or roll back together, so the table can never claim an admission
+            # the DB does not hold.
+            if nomination_received_at is not None:
+                self._write_ignition_nomination(
+                    db,
+                    self._ignition_nomination_params(
+                        payload,
+                        received_at=nomination_received_at,
+                        outcome=(
+                            "admitted"
+                            if result.get("admitted")
+                            else str(result.get("skipped") or "refused")[:48]
+                        ),
+                        result=result,
+                    ),
+                )
             # Serialize the final generation check and commit against stop(). A
             # stop that won the lifecycle lock forces rollback; a commit that won
             # first is owned by the still-active generation.

@@ -33339,6 +33339,78 @@ def _migration_375_append_heavy_autovacuum_scale_factor(conn) -> None:
     )
 
 
+def _migration_376_momentum_ignition_nominations(conn) -> None:
+    """Durable record of every IQFeed ignition nomination this lane handled.
+
+    ANG PUWANG (sinukat 2026-09-04). Ang ``ross_event_admission.admit_ross_event``
+    ang TANGING landas na kayang gumawa ng viability row para sa isang symbol na
+    wala pa sa universe — at ito ay nag-produce ng **0 ``ross_event_admitted``
+    event sa 3,379 live session sa loob ng 14 na araw**. Walang naiwang bakas ang
+    mga tinanggihan: ang bawat nomination ay isang log line lamang sa isang
+    prosesong walang logging config, kaya hindi masukat kung ILAN ang dumating,
+    ilan ang hinarang ng governor, at ano ang eksaktong universe reason.
+
+    Ang table na ito ang naglalagay ng ebidensya sa DB — ISANG hilera kada
+    na-validate na nomination, kasama ang mga PINIGILAN ng consumer governor.
+    Sadya ang huli: kung ang mga sinupil ay hindi naitatala, ang mismong governor
+    ang magtatago sa distribusyon na kailangan para i-derive ang sarili nitong
+    halaga (self-censoring measurement). Binabasa ito ng READ-ONLY na
+    ``scripts/derive_ignition_governors.py`` para sa
+    ``chili_momentum_ignition_dedup_ttl_seconds`` at
+    ``chili_momentum_ignition_admits_per_minute``.
+
+    HUGIS NG COLUMN. Ang ``pct_change_60s`` ay nakatago EKSAKTONG gaya ng
+    ipinapadala ng producer: FRACTION (0.05 = +5%), hindi porsyento — tingnan ang
+    ``scripts/iqfeed_ignition_detector.py``. Ang ``dollar_vol_60s`` ay 60-SEGUNDONG
+    turnover at HINDI day-scale $-volume; hindi ito kailanman ginagamit para sa
+    $1M tradability floor. ``fired_at`` = oras ng print sa bridge; ``received_at``
+    = pagdating ng NOTIFY sa consumer; ``recorded_at`` = matapos ang desisyon ng
+    admission, kaya ``recorded_at - fired_at`` ang nasusukat na admission latency.
+
+    Bagong table lamang — walang tinatamaang buhay na table, kaya walang mahabang
+    lock. Idempotent (``IF NOT EXISTS`` sa table at sa dalawang index); HINDI
+    ``CONCURRENTLY`` (startup path, bago pumasok ang trapiko — mig 372).
+    """
+    conn.execute(text("SET LOCAL lock_timeout = '5s'"))
+    conn.execute(text(
+        """
+        CREATE TABLE IF NOT EXISTS momentum_ignition_nominations (
+            id BIGSERIAL PRIMARY KEY,
+            symbol VARCHAR(16) NOT NULL,
+            fired_at TIMESTAMPTZ NOT NULL,
+            received_at TIMESTAMPTZ NOT NULL,
+            last_price DOUBLE PRECISION,
+            pct_change_60s DOUBLE PRECISION,
+            dollar_vol_60s DOUBLE PRECISION,
+            prints_10s INTEGER,
+            outcome VARCHAR(48) NOT NULL,
+            skipped VARCHAR(64),
+            ross_universe_reason VARCHAR(64),
+            -- clock_timestamp(), NOT now(): this INSERT rides the SAME
+            -- transaction as the admission attempt, and now() is
+            -- transaction_timestamp() — frozen at transaction START, i.e.
+            -- BEFORE the universe proof, the tape query and the snapshot
+            -- fetch. The derivation script reads (recorded_at - fired_at) as
+            -- fire->admission-decision latency, so now() would understate it
+            -- by exactly the work being measured. Precedent: migration for
+            -- captured_paper_phase_one (app/migrations.py, same idiom).
+            recorded_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp()
+        )
+        """
+    ))
+    # The derivation script scans a trailing window and groups by minute; the
+    # per-symbol index serves the dedup-TTL question ("how long until the same
+    # name fires again / resolves").
+    conn.execute(text(
+        "CREATE INDEX IF NOT EXISTS ix_min_fired_at "
+        "ON momentum_ignition_nominations (fired_at DESC)"
+    ))
+    conn.execute(text(
+        "CREATE INDEX IF NOT EXISTS ix_min_symbol_fired_at "
+        "ON momentum_ignition_nominations (symbol, fired_at DESC)"
+    ))
+
+
 MIGRATIONS = [
     ("001_add_email", _migration_001_add_email),
     ("002_add_image_path", _migration_002_add_image_path),
@@ -33843,6 +33915,12 @@ MIGRATIONS = [
      _migration_374_alpaca_ledger_scan_bound_indexes),
     ("375_append_heavy_autovacuum_scale_factor",
      _migration_375_append_heavy_autovacuum_scale_factor),
+
+
+    # 375 is claimed by an unmerged branch; the ID contract at the top of this
+    # file forbids reuse, so this one takes the next free number.
+    ("376_momentum_ignition_nominations",
+     _migration_376_momentum_ignition_nominations),
 ]
 
 

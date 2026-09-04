@@ -10272,6 +10272,60 @@ class Settings(BaseSettings):
             "IQFEED_IGNITION_CHANNEL",
         ),
     )
+    # ── IGNITION ADMISSION GOVERNORS (2026-09-04) ────────────────────────────
+    # These two numbers were hard-coded module constants in
+    # ``live_runner_loop.py`` (``_IGNITION_DEDUP_TTL_S`` /
+    # ``_IGNITION_ADMITS_PER_MINUTE``). They govern the ONLY code path that can
+    # create a viability row for a symbol the universe poll has never seen
+    # (``ross_event_admission.admit_ross_event``), so they are load-bearing on
+    # admission latency — the largest measured class of missed winners (the
+    # median symbol this lane arms is already +15.6% / p90 +44.7% at first
+    # admission). A governor that decides which igniters are even *attempted*
+    # must be a documented, derivable setting, not a literal.
+    # DAY-1 DEFAULTS EQUAL THE OLD CONSTANTS: behaviour is byte-identical until
+    # an operator (or ``scripts/derive_ignition_governors.py``) moves them.
+    chili_momentum_ignition_dedup_ttl_seconds: float = Field(
+        default=300.0,
+        ge=1.0,
+        le=3600.0,
+        validation_alias=AliasChoices(
+            "CHILI_MOMENTUM_IGNITION_DEDUP_TTL_SECONDS"
+        ),
+        description=(
+            "One ignition admission ATTEMPT per symbol per this many seconds. "
+            "Day-1 300s mirrors the producer's own dedup TTL "
+            "(scripts/iqfeed_ignition_detector.py IgnitionConfig.dedup_ttl_s), "
+            "so the consumer adds no second cadence. DERIVATION once "
+            "momentum_ignition_nominations has data: the p90 fire->admitted "
+            "latency (a retry before the first attempt has resolved is pure "
+            "duplicate work), CEILINGED at "
+            "chili_momentum_auto_arm_max_watch_seconds — past the watch "
+            "deadline the prior attempt's session is already reaped, so a new "
+            "nomination is a genuinely new idea, not a repeat. Run "
+            "scripts/derive_ignition_governors.py (read-only) for the manifest."
+        ),
+    )
+    chili_momentum_ignition_admits_per_minute: int = Field(
+        default=6,
+        ge=1,
+        le=120,
+        validation_alias=AliasChoices(
+            "CHILI_MOMENTUM_IGNITION_ADMITS_PER_MINUTE"
+        ),
+        description=(
+            "Hard cap on ignition admission ATTEMPTS per rolling minute — "
+            "defence-in-depth against a chatty or compromised host bridge, on "
+            "the consumer side of the NOTIFY. Day-1 6 mirrors the producer's "
+            "own IgnitionConfig.max_fires_per_minute. DERIVATION once "
+            "momentum_ignition_nominations has data: the p99 of DISTINCT "
+            "symbols nominated per minute (the real arrival rate, which the "
+            "table records even for governor-suppressed fires), bounded above "
+            "by chili_momentum_risk_max_concurrent_live_sessions — admitting "
+            "faster than the lane can hold sessions only burns admission "
+            "latency on names that will be refused downstream. Run "
+            "scripts/derive_ignition_governors.py (read-only) for the manifest."
+        ),
+    )
     # Exact content-addressed host bridge build allowed to provide authoritative
     # IQFeed L1 BBOs. Empty by default: notifications fail closed and the Alpaca
     # adapter uses a direct broker quote until an operator pins the reviewed v2 build.

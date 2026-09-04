@@ -3232,7 +3232,10 @@ def _ignition_loop(monkeypatch, sessions=()):
     loop._tracker.get_sessions_for_symbol = lambda sym: list(sessions)  # type: ignore
     admissions = []
 
-    def _admit(symbol, payload, *, expected_generation):
+    # 2026-09-04: the ignition handler hands the admission the NOTIFY receipt
+    # time so the nomination row it writes can carry a real fire->received
+    # latency. Other callers (the v3 authority path) omit it.
+    def _admit(symbol, payload, *, expected_generation, nomination_received_at=None):
         admissions.append((symbol, payload.get("source"), expected_generation))
         return {"ok": True, "admitted": True, "symbol": symbol}
 
@@ -3326,11 +3329,14 @@ def test_ignition_admits_per_minute_hard_cap(monkeypatch):
     loop, admissions, _dispatches = _ignition_loop(monkeypatch)
     now = datetime.now(timezone.utc)
 
-    for idx in range(loop_mod._IGNITION_ADMITS_PER_MINUTE + 3):
+    # 2026-09-04: the cap is a setting now (chili_momentum_ignition_admits_per_
+    # minute), not a module constant. Day-1 default still equals the old 6.
+    cap = loop_mod._ignition_admits_per_minute()
+    for idx in range(cap + 3):
         loop._handle_iqfeed_ignition_payload(
             _ignition_payload(now, symbol=f"CAP{idx}"), generation=1
         )
-    assert len(admissions) == loop_mod._IGNITION_ADMITS_PER_MINUTE
+    assert len(admissions) == cap
 
 
 def test_ignition_refused_for_captured_paper_scope(monkeypatch):
