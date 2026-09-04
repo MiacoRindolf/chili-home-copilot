@@ -8,6 +8,7 @@ state immediately instead of waiting for the next scheduler pass.
 from __future__ import annotations
 
 import logging
+import math
 import threading
 import time
 from datetime import datetime, timedelta, timezone
@@ -23,7 +24,16 @@ from .tick_scalp import (
     ross_signal_for_symbol,
     ross_tick_scalp_evidence_ok,
 )
-from .universe import EQUITY_ROSS_SMALLCAP, ross_smallcap_profile_evidence
+from .universe import (
+    EQUITY_ROSS_SMALLCAP,
+    _f as _universe_float,
+    _iqfeed_dollar_volumes,
+    _premarket_change_pct,
+    _snapshot_adv_shares,
+    _snapshot_basis_rejected,
+    _snapshot_today_shares,
+    ross_smallcap_profile_evidence,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -99,6 +109,219 @@ def _fetch_snapshot_row(symbol: str) -> dict[str, Any] | None:
         if isinstance(row, dict) and _sym(row.get("ticker") or row.get("symbol")) == sym:
             return row
     return None
+
+
+# ── IGNITION SIGNAL (2026-09-04) ─────────────────────────────────────────────
+# THE MEASURED PROBLEM. The 79-video forensic cross-reference of Ross Cameron's
+# trades against this DB found ADMISSION LATENCY to be the largest structural
+# class of missed winners: the median symbol this lane arms is already +15.6%
+# (p90 +44.7%) when it is FIRST admitted to the live universe. On 2026-07-27
+# Ross's entire VTIX round trip ran 13:17:15-13:19:15Z; CHILI's universe did not
+# contain the symbol until 13:31:36Z.
+#
+# The discovery loop is closed: every other event source can only fire on a
+# symbol ALREADY inside ``build_equity_universe`` (a poll of a market snapshot).
+# ``admit_ross_event`` is the ONE path that can create a viability row for a
+# symbol with none — and it produced 0 ``ross_event_admitted`` events across
+# 3,379 live sessions in 14 days. The reason is visible in the call: the
+# ignition NOTIFY carries ``last_price`` / ``pct_change_60s`` / ``dollar_vol_60s``
+# from the host bridge's own tape, and the loop threw all three away
+# (``signal=None``), so the universe proof fell back entirely on the Massive
+# snapshot row and failed closed with ``ross_universe_missing_price`` /
+# ``ross_universe_missing_dollar_volume`` — exactly for the newly-igniting names
+# the snapshot has not caught up with yet.
+#
+# THIS BUILDER IS NOT A RELAXATION. Price AND dollar volume must still both be
+# proven or the symbol is still refused; what changes is WHERE the proof may come
+# from. Fail-closed properties, each covered by a test:
+#   * no usable last print price  -> None (no signal; the caller behaves as today)
+#   * no dollar-volume source     -> the signal carries NO dollar volume, so
+#                                    ``ross_universe_missing_dollar_volume`` still
+#                                    fires. The $1M floor is the tradability bar
+#                                    and is never faked from a 60-second number.
+#   * rejected day-change basis   -> change_pct is None, never synthesised. A
+#                                    since-subscription move is NOT a day change
+#                                    (#1284 burned this repo once already).
+_IGNITION_SIGNAL_SOURCE = "iqfeed_ignition_tick"
+# Every token here is one the EXISTING recognisers already match — see
+# ``_independent_smallcap_a_plus_source`` / ``_live_tape_signal_from_universe``
+# above and ``tick_scalp._source_text`` consumers. Deliberately contains no
+# "ross"/"warrior" token so ``_explicit_ross_source`` stays False and the
+# independent small-cap A+ proof remains available to a tape-only nomination.
+_IGNITION_SIGNAL_SCANNER_SOURCE = "iqfeed ignition_tick tape_delta_ignite"
+
+
+def _positive(value: Any) -> float | None:
+    """The value as a positive finite float, else None."""
+    num = _universe_float(value)
+    if num is None or not math.isfinite(num) or num <= 0:
+        return None
+    return num
+
+
+def ignition_signal_from_payload(
+    payload: dict[str, Any] | None,
+    *,
+    tape_dollar_volume: float | None,
+    snapshot_row: dict[str, Any] | None,
+) -> dict[str, Any] | None:
+    """PURE: the Ross signal an ignition NOTIFY payload can prove on its own.
+
+    ``payload`` is the validated ``chili.iqfeed-ignition-nominate.v1`` dict from
+    ``live_runner_loop._validated_ignition_notify``. ``tape_dollar_volume`` is
+    the since-midnight $-volume for this symbol from the trade tape (see
+    ``universe._iqfeed_dollar_volumes``; may be None — the tape query fails open).
+    ``snapshot_row`` is the Massive full-market row when one exists, else None.
+
+    Returns the signal dict, or None when the payload cannot even name a price.
+    No I/O, no clock, no settings — every input is an argument.
+    """
+    if not isinstance(payload, dict):
+        return None
+    symbol = _sym(payload.get("symbol"))
+    price = _positive(payload.get("last_price"))
+    if not symbol or price is None:
+        return None
+    snap = snapshot_row if isinstance(snapshot_row, dict) else None
+
+    # DOLLAR VOLUME — the same MONOTONIC MAX rule ``build_equity_universe`` uses
+    # at universe.py:1023 (``max(price * vol, _iqfeed_dvols.get(...))``): a leg
+    # can only ADD a missed mover, never remove a current one. Three legs, all
+    # day-scale turnover:
+    #   1. the trade tape's since-midnight $-volume (ground truth premarket, when
+    #      the Massive day/min aggregates are still zero),
+    #   2. the snapshot's TODAY shares x price (day.v, else min.av which counts
+    #      extended-hours prints — ``_snapshot_today_shares``),
+    #   3. the snapshot's baseline average shares x price (prevDay.v —
+    #      ``_snapshot_adv_shares``), the name's ordinary daily turnover.
+    # ``dollar_vol_60s`` from the payload is deliberately NOT a leg: it is a
+    # SIXTY-SECOND number and the $1M profile floor asks whether a full position
+    # can be exited today. Feeding it in would fake the tradability bar.
+    dv_legs: dict[str, float] = {}
+    tape_dv = _positive(tape_dollar_volume)
+    if tape_dv is not None:
+        dv_legs["tape_since_midnight"] = tape_dv
+    if snap is not None:
+        today_shares = _positive(_snapshot_today_shares(snap))
+        if today_shares is not None:
+            dv_legs["snapshot_today_volume"] = price * today_shares
+        adv_shares = _positive(_snapshot_adv_shares(snap))
+        if adv_shares is not None:
+            dv_legs["snapshot_average_volume"] = price * adv_shares
+    dollar_volume: float | None = None
+    dollar_volume_leg: str | None = None
+    if dv_legs:
+        dollar_volume_leg = max(dv_legs, key=lambda key: dv_legs[key])
+        dollar_volume = dv_legs[dollar_volume_leg]
+
+    # TODAY'S SHARE VOLUME is reported ONLY from today-scale legs. The average
+    # -volume leg above may prove tradability, but yesterday's share count is not
+    # today's volume and must never be published as one (the downstream
+    # independent-A+ proof has its own share-volume floor).
+    today_dv_legs = [
+        dv_legs[key]
+        for key in ("tape_since_midnight", "snapshot_today_volume")
+        if key in dv_legs
+    ]
+    day_volume = (max(today_dv_legs) / price) if today_dv_legs else None
+
+    # DAY CHANGE — snapshot only, and only when the day basis survives the
+    # existing guard. ``_premarket_change_pct`` is the same fallback
+    # ``build_equity_universe`` uses when the vendor field is null (it carries its
+    # own basis guard and its own kill switch), which is what lets a 09:17 ET
+    # igniter be graded at all. When neither is available the value stays None and
+    # the caller lands on ``ross_universe_missing_change_pct`` — fail-closed.
+    change_pct: float | None = None
+    change_source: str | None = None
+    basis_rejected = _snapshot_basis_rejected(snap) if snap is not None else None
+    if snap is not None and not basis_rejected:
+        vendor_change = _universe_float(snap.get("todaysChangePerc"))
+        if vendor_change is not None:
+            change_pct, change_source = vendor_change, "snapshot_todays_change_perc"
+        else:
+            premarket_change = _premarket_change_pct(snap)
+            if premarket_change is not None:
+                change_pct, change_source = premarket_change, "snapshot_premarket_basis"
+
+    # VELOCITY — the honest short-horizon axis. The producer reports
+    # ``pct_change_60s`` as a FRACTION (IgnitionConfig.pct_base = 0.05 means +5%);
+    # the velocity leg of ``ross_smallcap_profile_evidence`` compares
+    # ``velocity_pct`` against ``chili_momentum_velocity_intake_min_pct``, which is
+    # expressed in PERCENT (7.0 = +7%). The x100 is the unit conversion, and it is
+    # the whole reason this axis is usable instead of a fabricated day change.
+    velocity_fraction = _universe_float(payload.get("pct_change_60s"))
+    velocity_pct = velocity_fraction * 100.0 if velocity_fraction is not None else None
+
+    signal: dict[str, Any] = {
+        "ticker": symbol,
+        "symbol": symbol,
+        "price": price,
+        "last_price": price,
+        "source": _IGNITION_SIGNAL_SOURCE,
+        "scanner_source": _IGNITION_SIGNAL_SCANNER_SOURCE,
+        "ignition_dollar_vol_60s": _universe_float(payload.get("dollar_vol_60s")),
+        "ignition_prints_10s": payload.get("prints_10s"),
+        "ignition_fired_at": payload.get("fired_at"),
+        "ignition_dollar_volume_leg": dollar_volume_leg,
+        "ignition_change_source": change_source,
+        "ignition_snapshot_basis_rejected": basis_rejected,
+    }
+    if dollar_volume is not None:
+        signal["dollar_volume"] = dollar_volume
+    if day_volume is not None:
+        signal["day_volume"] = day_volume
+        signal["volume"] = day_volume
+    if change_pct is not None:
+        signal["daily_change_pct"] = change_pct
+        signal["todays_change_perc"] = change_pct
+        signal["change_pct"] = change_pct
+    if velocity_pct is not None:
+        signal["velocity_pct"] = velocity_pct
+    return signal
+
+
+def ignition_admission_signal(
+    payload: dict[str, Any] | None,
+    *,
+    snapshot_provider: Callable[[str], dict[str, Any] | None] | None = None,
+    tape_dollar_volume_provider: Callable[[list[str]], dict[str, float]] | None = None,
+) -> dict[str, Any] | None:
+    """Gather the two external facts the pure builder needs, then build.
+
+    Thin I/O shell so ``ignition_signal_from_payload`` stays pure and testable.
+    Both providers fail open: the tape helper already returns ``{}`` on any error
+    or on its own 3s statement timeout, and a missing snapshot row is the normal
+    case for exactly the symbols this change exists to admit.
+    """
+    if not isinstance(payload, dict):
+        return None
+    symbol = _sym(payload.get("symbol"))
+    if not symbol:
+        return None
+    tape_dollar_volume: float | None = None
+    try:
+        fetch_dvols = tape_dollar_volume_provider or _iqfeed_dollar_volumes
+        tape_dollar_volume = (fetch_dvols([symbol]) or {}).get(symbol)
+    except Exception:
+        logger.debug(
+            "[ross_event_admission] ignition tape $-volume failed symbol=%s",
+            symbol,
+            exc_info=True,
+        )
+    snapshot_row: dict[str, Any] | None = None
+    try:
+        snapshot_row = (snapshot_provider or _fetch_snapshot_row)(symbol)
+    except Exception:
+        logger.debug(
+            "[ross_event_admission] ignition snapshot fetch failed symbol=%s",
+            symbol,
+            exc_info=True,
+        )
+    return ignition_signal_from_payload(
+        payload,
+        tape_dollar_volume=tape_dollar_volume,
+        snapshot_row=snapshot_row,
+    )
 
 
 def _merged_signal(symbol: str, signal: dict[str, Any] | None) -> dict[str, Any] | None:
