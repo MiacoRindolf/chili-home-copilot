@@ -577,3 +577,48 @@ on the OLD sha, note the recorded-vs-replay band; apply the change; re-run; the 
 net-positive iff the replay band improves without the parity regression (`test_replay_v3_parity`)
 going red (a red parity gate = the harness no longer reproduces reality = the measurement is
 untrustworthy). Per-sha rollback is the safety net.
+
+### 12.3 The Ross Parity Bench — this engine pointed at Ross's ledger
+
+`scripts/replay_v3_fsm_window.py` (the window driver built on this engine) is also the execution
+core of the **Ross Parity Bench**: the same `ReplayV3Driver` / `MockBrokerAdapter` / sim-clock
+machinery, run over hydrated tape for the exact symbol-day windows in
+`project_ws/AgentOps/ross/ross_master_ledger.json`, so "what would CHILI have done on the trade
+Ross actually took" is a measured answer per case. **Full operator documentation:
+[`docs/ROSS_REPLAY_BENCH.md`](../ROSS_REPLAY_BENCH.md).**
+
+What that doc adds on top of this one, and why you should read it before quoting a bench number:
+
+- **The bench is Tier 1, and Tier 1 force-seeds admission.** The seed writes `live_eligible=True`
+  (`replay_v3_fsm_window.py:966-967`) and passes `risk_gate_allows=True` (`:1039`), so the name
+  arrives already selected, already eligible, already past the pre-entry risk gate. The run
+  therefore measures entry shape / hold / exit / capture / veto validity, and **can never** speak
+  to selection, universe admission, own-order impact, broker ack timing, BBO-source mix or
+  liveness. `ReplayResult.certification_failures` carries `entry_risk_gate_bypassed`
+  (`replay_v3.py:6223`) as the standing reminder.
+- **Four numbers, never blended** (the Ross Parity Index: Capture, Capture+, Avoidance,
+  Precision; Liveness is `null` in Tier 1). Each is reported with its numerator, denominator and
+  case list. The lever gate is *Capture up, Avoidance not down, Precision not down*, interleaved,
+  on dense tape.
+- **Two populations, reported side by side and never summed:** the scored population (CHILI
+  actually made a decision) and the availability bucket (`never_armed` / `not_in_universe`) —
+  the latter is roughly three-quarters of the historical gap by row count and is an ops program,
+  not a strategy lever. Mixing them makes the strategy look materially worse than the evidence
+  supports.
+- **The ledger is narrative data**: `0` is a NULL sentinel, `entry_time_et` is prose, 30 of the
+  187 rows are not trades, and `account` carries three vocabularies. Every consumer needs the
+  None rule.
+- **Every knob carries its derivation**, and the harness invariants in
+  `scripts/replay_harness_invariants.py` each name the incident that produced them (the 08-28
+  stride artifact, the 08-29 sink contamination, the stale build tree, the #1287 cold-start seed,
+  the tie-order heap-layout delta, the mock-config drift). The driver calls the startup subset
+  before it loads a single tick.
+
+Two engine-level facts documented there that also matter to any caller of this driver, not only
+to the bench: `RISK` is **inert** (read at `replay_v3_fsm_window.py:173`, echoed at `:783`, used
+nowhere — sizing comes from `EQUITY` via `equity_provider` plus the frozen
+`LEGACY_DIAGNOSTIC_POLICY_CAPS.max_loss_per_trade_usd = 50.0`, `replay_v3.py:201-205`, which only
+`MAXLOSS_USD` can rewrite); and until 2026-09-04 the driver never mirrored
+`momentum_nbbo_spread_tape`, so **every replay before that date ran the micro-pullback frame and
+the adaptive spread-cost veto against an empty table** (see the tenth-layer note in the driver's
+module docstring).
