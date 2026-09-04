@@ -5594,6 +5594,47 @@ def seed_replay_session(
     )
 
 
+def replay_alpaca_account_identity() -> str:
+    """The ONE account id a replayed Alpaca session freezes AND the mock broker answers with.
+
+    The seeder stamps it into ``risk_snapshot_json["alpaca_account_id"]`` and the driver hands
+    it to ``MockBrokerAdapter(account_identity=...)``, so ``bind_account_id`` at the runner's
+    broker boundary (live_runner.py:30331-30340, ``alpaca_adapter_account_generation_bind_
+    failed``) sees the same string on both sides. MEASURED 2026-09-04: with the seed frozen to
+    the certified id the run STILL produced zero events, because the mock had no
+    ``bind_account_id`` at all -- the tick refused before its first broker call.
+
+    Certified id from settings when set (the driver does not read ``.env`` under
+    ``CHILI_PYTEST=1``; the bench refuses to launch an Alpaca run without it, #1318);
+    otherwise the stable, non-secret mock identity -- which the quarantine gate refuses by
+    design, so a run seeded that way stays at ``queued_live`` and says so.
+    """
+    expected = str(getattr(lr.settings, "chili_alpaca_expected_account_id", "") or "").strip()
+    return expected or REPLAY_MOCK_ACCOUNT_IDENTITY
+
+
+def replay_mock_identity_kwargs(execution_family: str | None) -> dict[str, str]:
+    """Constructor kwargs that make the mock answer the runner's account bind for an
+    Alpaca family; empty for every other family (their adapters never bind)."""
+    if lr.normalize_execution_family(execution_family) in lr.ALPACA_EXECUTION_FAMILIES:
+        return {"account_identity": replay_alpaca_account_identity()}
+    return {}
+
+
+def apply_replay_mock_identity(mock: Any, execution_family: str | None) -> Any:
+    """Set the mock's account identity for an Alpaca family through its own seam
+    (``set_account_identity``) and return it; a no-op for every other family.
+
+    The driver constructs the mock from ``_PARITY_MOCK_KWARGS`` verbatim (that string is
+    pinned by a source test so the startup and run mocks cannot drift) and then applies
+    identity here, on the instance -- identity is not a fill-model knob.
+    """
+    kwargs = replay_mock_identity_kwargs(execution_family)
+    if kwargs:
+        mock.set_account_identity(kwargs["account_identity"])
+    return mock
+
+
 def _freeze_replay_alpaca_scope(sess: TradingAutomationSession, arm: RecordedArm) -> None:
     """Stamp the seeded Alpaca session with the SAME admission proof ``confirm_live_arm``
     writes, so the replayed FSM sees a coherent session instead of refusing every tick.
@@ -5637,8 +5678,7 @@ def _freeze_replay_alpaca_scope(sess: TradingAutomationSession, arm: RecordedArm
     # against, read through the same ``settings`` object the gate reads. An empty setting
     # falls back to the mock identity and the gate will report the mismatch VISIBLY, which
     # is the correct outcome in a misconfigured environment — never a silent pass.
-    expected = str(getattr(lr.settings, "chili_alpaca_expected_account_id", "") or "").strip()
-    account_id = expected or REPLAY_MOCK_ACCOUNT_IDENTITY
+    account_id = replay_alpaca_account_identity()
     arm_token = f"replay-v3-arm-{int(sess.id)}"
     claim_token = f"replay-v3-claim-{str(arm.symbol).upper()}-{int(sess.id)}"
     snap["alpaca_account_scope"] = scope

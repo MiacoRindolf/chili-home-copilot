@@ -542,6 +542,8 @@ class MockBrokerAdapter:
         self._max_age_seconds = float(max_age_seconds)
         self._enabled = bool(enabled)
         self._account_identity = str(account_identity or "").strip()
+        # Set by bind_account_id (below); mirrors AlpacaSpotAdapter._bound_account_id.
+        self._bound_account_id: Optional[str] = None
         # P1 FIDELITY KNOBS (default OFF keeps basic marketable-limit behavior):
         #  * resting_limit_fills: enable latency/partial/volume-aware resting realism. Basic
         #    LIMIT price semantics remain mandatory even when this richer mode is off.
@@ -1232,6 +1234,26 @@ class MockBrokerAdapter:
         """Replay-only seam for modeling an account switch/identity rotation."""
 
         self._account_identity = str(identity or "").strip()
+
+    def bind_account_id(self, account_id: str) -> bool:
+        """Freeze this adapter instance to one session/account generation.
+
+        Line-for-line the contract of ``AlpacaSpotAdapter.bind_account_id``
+        (venue/alpaca_spot.py:611-619): refuse an empty id, refuse an id that is not THIS
+        broker's account, refuse a re-bind to a different id once bound, and accept an
+        idempotent re-bind. The runner calls this before its first broker call on every
+        Alpaca tick (live_runner.py:30331) and skips the tick with
+        ``alpaca_adapter_account_generation_bind_failed`` unless it returns exactly
+        ``True`` -- which, until 2026-09-04, it could not, because this method did not
+        exist: a whole bench run finished clean with zero events.
+        """
+        frozen = str(account_id or "").strip()
+        if not frozen or frozen != self._account_identity:
+            return False
+        if self._bound_account_id not in (None, frozen):
+            return False
+        self._bound_account_id = frozen
+        return True
 
     # ── driver-side injection seams (NOT part of the VenueAdapter protocol) ──────────
     def set_clock(self, t: datetime) -> None:
