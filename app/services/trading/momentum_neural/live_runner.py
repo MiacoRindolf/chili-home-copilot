@@ -16655,7 +16655,31 @@ def _broker_position_confirms_zero(sess: TradingAutomationSession) -> bool:
     Coinbase: balance/dust check (existing). Robinhood: open-position quantity
     (2026-06-11 INDP: the reconcile was Coinbase-only, so an RH phantom position
     looped 8 flatten retries into LIVE_ERROR while the broker was already flat).
-    Unknown family / failed fetch -> False (fail safe, surface the error)."""
+    Alpaca: open-position quantity (2026-09-04 — see below).
+    Unknown family / failed fetch -> False (fail safe, surface the error).
+
+    ⚠️ THE ALPACA LEG WAS MISSING FOR THREE MONTHS, ON THE ONLY LANE WE TRADE.
+    The docstring above already records the 2026-06-11 incident where this check was
+    Coinbase-only and a Robinhood phantom looped 8 flatten retries into LIVE_ERROR.
+    That fix added Robinhood — and stopped there. Every `alpaca_spot` session fell
+    through to `return False`, so **the broker-zero reconcile could never confirm flat
+    on the Alpaca lane**, which is the lane the equity strategy actually runs on.
+
+    Measured cost, ANPA session 19771 on 2026-09-04: a burst-window exit decided at
+    08:50:40Z never placed an order, and with no way to confirm the broker flat the
+    session sat in `live_entered` for 4h29m AFTER the broker went flat at 13:32:24Z —
+    a ghost position that then FAIL-CLOSED two lane launches (`active_sessions: 1` in
+    the prestart census) during the RTH session. It had to be settled by hand from a
+    direct Alpaca read (positions `[]`, `/v2/positions/ANPA` -> HTTP 404).
+
+    `AlpacaSpotAdapter.get_position_quantity` already has exactly the semantics this
+    check needs and is used nowhere near it: HTTP 404 -> 0.0 (a genuinely absent
+    position), any transport/SDK failure -> None (unknown). So an API outage still
+    degrades to the safe retry path and can never be mistaken for a successful exit.
+
+    `abs()` on the quantity is deliberate: `alpaca_short` is in the same family set and
+    reports a negative quantity, for which flat is still |q| ~ 0.
+    """
     fam = normalize_execution_family(sess.execution_family)
     if fam == EXECUTION_FAMILY_COINBASE_SPOT:
         return _broker_balance_confirms_zero(sess.symbol)
@@ -16667,6 +16691,18 @@ def _broker_position_confirms_zero(sess: TradingAutomationSession) -> bool:
         except Exception:
             return False
         return q is not None and float(q) <= 1e-6
+    if fam in ALPACA_EXECUTION_FAMILIES:
+        try:
+            from ..venue.alpaca_spot import AlpacaSpotAdapter
+
+            q = AlpacaSpotAdapter().get_position_quantity(sess.symbol)
+        except Exception:
+            _log.debug(
+                "[momentum_live] alpaca broker-zero read failed session=%s symbol=%s",
+                sess.id, sess.symbol, exc_info=True,
+            )
+            return False
+        return q is not None and abs(float(q)) <= 1e-6
     return False
 
 
