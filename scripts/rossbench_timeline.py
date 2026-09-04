@@ -1484,10 +1484,24 @@ def build_timeline(
     first_div = None
     first_money = None
     money_rank = STAGE_RANK[STAGE_FILLED]   # "the money" starts when someone is filled
-    for row in rows:
+    # ANCHOR (2026-09-04): before Ross's first pin he is ``absent`` on every row, so a
+    # CHILI that is merely ``watching`` from the first second "diverges" at row 0 — the
+    # first real SDOT timeline reported ``first_divergence 09:05:01 absent/watching``,
+    # which says nothing. The comparison starts at the first second that carries a Ross
+    # pin; with no pin placed there is no first_divergence, and the meta says why.
+    # With NO Ross pin in the window the anchor is CHILI's first fill instead: "CHILI
+    # traded and Ross did not" is a real divergence (an Avoidance case reads exactly like
+    # this), while "CHILI watched and Ross was absent" is not.
+    first_ross_idx = next((i for i, r in enumerate(rows) if r.ross), None)
+    for i, row in enumerate(rows):
         if first_div is None and row.ross_rank != row.chili_rank:
-            first_div = row
-            row.first_divergence = True
+            if first_ross_idx is not None:
+                anchored = i >= first_ross_idx
+            else:
+                anchored = row.chili_rank >= money_rank
+            if anchored:
+                first_div = row
+                row.first_divergence = True
         if (first_money is None and row.ross_rank != row.chili_rank
                 and max(row.ross_rank, row.chili_rank) >= money_rank):
             first_money = row
@@ -1537,6 +1551,16 @@ def build_timeline(
             "seconds_with_any_event": sum(1 for r in rows if r.ross or r.chili),
         },
         "first_divergence": _div_doc(first_div),
+        "first_divergence_anchor": {
+            "rule": "first_ross_pin" if first_ross_idx is not None else "chili_first_fill",
+            "t_utc": (rows[first_ross_idx].t_utc.isoformat()
+                      if first_ross_idx is not None else None),
+            "note": ("comparison starts at the first second carrying a Ross pin; "
+                     "before it Ross is absent on every row"
+                     if first_ross_idx is not None
+                     else "no Ross pin placed in the window; a divergence is reported only "
+                          "once CHILI reaches a fill (CHILI traded, Ross did not)"),
+        },
         "first_money_divergence": _div_doc(first_money),
         "pin_alias_usage": {k: dict(sorted(v.items())) for k, v in sorted(alias_usage.items())},
         "pin_fields_never_supplied": sorted(set(PIN_ALIASES) - set(alias_usage)),
@@ -1623,8 +1647,13 @@ def render_markdown(tl: Timeline, *, context_seconds: Optional[int] = None) -> s
         out.append(f"* **first_divergence** `{div['t_et']}` ET — Ross `{div['ross_stage']}` "
                    f"vs CHILI `{div['chili_stage']}` ({div['direction']}) — marked `>>` below")
     else:
-        out.append("* **first_divergence**: NONE — Ross and CHILI held the same stage for "
-                   "every second of the window")
+        anchor = tl.meta.get("first_divergence_anchor") or {}
+        if anchor.get("t_utc") is None:
+            out.append("* **first_divergence**: NONE — no Ross pin was placed in the window "
+                       "and CHILI never reached a fill, so there is nothing to diverge from")
+        else:
+            out.append("* **first_divergence**: NONE — from Ross's first pin onward the two "
+                       "sides held the same stage for every second of the window")
     if money:
         out.append(f"* **first_money_divergence** `{money['t_et']}` ET — the first mismatch at "
                    f"or past `{STAGE_FILLED}` — marked `$$` below")

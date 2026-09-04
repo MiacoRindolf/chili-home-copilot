@@ -943,3 +943,64 @@ def test_the_anchor_cases_score_end_to_end():
     assert idx["avoidance"]["denominator"] == 1
     assert idx["precision"]["denominator"] == 0
     assert idx["liveness"]["value"] is None
+
+
+# ═══════════════════════════════════════════════════════════════════════════════════
+# TIER-1 RECEIPTS — the harness seeds admission, so the replay ladder starts lower
+#
+# MEASURED 2026-09-04, SDOT 2026-06-26 on robinhood_agentic_mcp, the first receipt with
+# real decisions: 18 states, 7 fills, +$3.50, 4,190 events on the sim clock — graded
+# ``no_arm_attempt`` because ``seed_replay_session`` writes a queued_live row and never
+# emits live_arm_requested / live_arm_confirmed. Those rungs are fixtures on that side.
+# ═══════════════════════════════════════════════════════════════════════════════════
+
+TIER1_WINDOW = (_ts("2026-06-26", "13:05:00"), _ts("2026-06-26", "14:05:00"))
+
+
+def tier1_events():
+    day = "2026-06-26"
+    return [
+        ev(_ts(day, "13:05:01"), "live_runner_started"),
+        ev(_ts(day, "13:05:01"), "live_watch_started"),
+        ev(_ts(day, "13:23:21"), "live_entry_candidate_detected", trigger="momentum_ok_tick_stream"),
+        ev(_ts(day, "13:23:22"), "live_entry_pending_place"),
+        ev(_ts(day, "13:23:23"), "live_entry_submitted"),
+        ev(_ts(day, "13:23:23"), "live_entry_filled", order_id="replay_mock-00000004"),
+        ev(_ts(day, "13:24:34"), "live_exit_filled", reason="scale_out_limit", pnl_usd=3.5),
+    ]
+
+
+def test_a_seeded_receipt_is_no_arm_attempt_under_the_default_ladder():
+    """Unchanged default: without the flag the arm rungs are still measured."""
+    stage = classify_events(tier1_events(), source="events", chili_pnl_usd=3.5, ross_pnl_usd=5885.15)
+    assert stage == STAGE_NO_ARM_ATTEMPT
+    assert "admission" not in stage.detail
+
+
+def test_a_seeded_receipt_with_fills_is_graded_at_the_money_rungs():
+    stage = classify_events(
+        tier1_events(), source="events", chili_pnl_usd=3.5, ross_pnl_usd=5885.15,
+        harness_supplied_admission=True,
+    )
+    assert str(stage).startswith("filled"), stage
+    assert stage.detail["admission"] == "harness_supplied"
+
+
+def test_a_seeded_receipt_that_never_started_the_runner_is_runner_never_started():
+    evs = [ev(_ts("2026-06-26", "13:05:01"), "live_blocked_by_risk", reason="no_bbo")]
+    stage = classify_events(evs, source="events", harness_supplied_admission=True)
+    assert str(stage).startswith(STAGE_RUNNER_NEVER_STARTED), stage
+    assert stage.detail["admission"] == "harness_supplied"
+
+
+def test_classify_first_divergence_applies_the_flag_to_the_replay_side_only():
+    recorded, replay = classify_first_divergence(
+        SDOT_CASE, sdot_events(), tier1_events(), TIER1_WINDOW,
+        replay_admission_supplied=True,
+    )
+    # recorded side: real arm events, full ladder, unchanged
+    assert str(recorded).startswith(STAGE_ARMED_NO_CANDIDATE)
+    assert "admission" not in recorded.detail
+    # replay side: seeded admission, graded from runner_never_started down
+    assert str(replay).startswith("filled"), replay
+    assert replay.detail["admission"] == "harness_supplied"

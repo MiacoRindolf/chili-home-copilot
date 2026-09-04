@@ -735,11 +735,22 @@ def classify_events(
     source: str,
     chili_pnl_usd: float | None = None,
     ross_pnl_usd: float | None = None,
+    harness_supplied_admission: bool = False,
 ) -> Stage:
     """Walk one side of the ladder and return the first rung it failed to clear.
 
     ``events`` MUST already be window-filtered and in chronological order.
     ``chili_pnl_usd`` / ``ross_pnl_usd`` are consulted only at the final rung.
+
+    ``harness_supplied_admission`` — True for a Tier-1 replay receipt. The Tier-1 harness
+    seeds a ``queued_live`` session directly (``seed_replay_session``) and never emits
+    ``live_arm_requested`` / ``live_arm_confirmed``, so the two arm rungs are not
+    measurements there: they are fixtures. MEASURED 2026-09-04 (SDOT 2026-06-26, the first
+    receipt with real decisions — 18 states, 7 fills, +$3.50): the ladder returned
+    ``no_arm_attempt`` for a run that entered and exited twice. With the flag the replay
+    ladder starts at ``runner_never_started`` and every returned detail carries
+    ``admission="harness_supplied"`` so the report can never read a seeded arm as a
+    measured one. The RECORDED side never sets it: its arm events are real.
     """
     evs = list(events or ())
     types = [_event_type(e) for e in evs]
@@ -748,22 +759,27 @@ def classify_events(
 
     def d(**extra: Any) -> dict[str, Any]:
         base = {"event_count": len(evs), "event_histogram": histogram}
+        if harness_supplied_admission:
+            base["admission"] = "harness_supplied"
         base.update(extra)
         return base
 
-    # Rung 0 — no arm was ever requested inside the window.  This is the ladder's floor:
-    # without an arm request there is no lifecycle to grade, and calling that
-    # "arm_unconfirmed" would invent a request that never happened.
-    if not (type_set & ARM_REQUESTED_EVENTS):
-        return Stage(STAGE_NO_ARM_ATTEMPT, source=source, detail=d())
+    # Rungs 0 and 1 are MEASUREMENTS only when the arm was real. A Tier-1 receipt's
+    # admission is a fixture (see the docstring), so both rungs are skipped there.
+    if not harness_supplied_admission:
+        # Rung 0 — no arm was ever requested inside the window.  This is the ladder's
+        # floor: without an arm request there is no lifecycle to grade, and calling that
+        # "arm_unconfirmed" would invent a request that never happened.
+        if not (type_set & ARM_REQUESTED_EVENTS):
+            return Stage(STAGE_NO_ARM_ATTEMPT, source=source, detail=d())
 
-    # Rung 1 — requested, never confirmed.  UPC 2026-06-29 is the reference case:
-    # live_arm_requested 12:38:45Z with live_eligible=true and risk allowed=true, and no
-    # live_arm_confirmed ever followed.  WHICH of confirm_live_arm's rejections fired is
-    # not persisted (auto_arm.py logs it at INFO only), so this rung carries no
-    # qualifier — inventing one would be fabricating the missing evidence.
-    if not (type_set & ARM_CONFIRMED_EVENTS):
-        return Stage(STAGE_ARM_UNCONFIRMED, source=source, detail=d())
+        # Rung 1 — requested, never confirmed.  UPC 2026-06-29 is the reference case:
+        # live_arm_requested 12:38:45Z with live_eligible=true and risk allowed=true, and
+        # no live_arm_confirmed ever followed.  WHICH of confirm_live_arm's rejections
+        # fired is not persisted (auto_arm.py logs it at INFO only), so this rung carries
+        # no qualifier — inventing one would be fabricating the missing evidence.
+        if not (type_set & ARM_CONFIRMED_EVENTS):
+            return Stage(STAGE_ARM_UNCONFIRMED, source=source, detail=d())
 
     # Rung 2 — confirmed, no runner.  The reason lives on the block/decline rows that
     # followed the confirm.
@@ -956,6 +972,7 @@ def classify_first_divergence(
     window: Any,
     *,
     not_alive_markers: Sequence[str] = NOT_ALIVE_MECHANISM_MARKERS,
+    replay_admission_supplied: bool = False,
 ) -> tuple[Stage, Stage]:
     """Return ``(recorded_stage, replay_stage)`` for one bench case.
 
@@ -966,6 +983,10 @@ def classify_first_divergence(
     The returned objects are ``str`` subclasses, so ``recorded == "arm_unconfirmed"``
     works, and they carry ``.source`` (``"events"``, ``"xref_verdict"`` or
     ``"unavailable"``), ``.detail`` and ``.rung``.
+
+    ``replay_admission_supplied`` — pass True for a Tier-1 receipt (one with a
+    ``seed_session_id``): the replay ladder then starts at ``runner_never_started``. It
+    applies to the REPLAY side only; the recorded side's arm events are real measurements.
     """
     rec_evs, rec_stats = events_in_window(recorded_events, window)
     rep_evs, rep_stats = events_in_window(replay_events, window)
@@ -994,6 +1015,7 @@ def classify_first_divergence(
         rep_evs, source="events" if rep_evs else "no_replay_events",
         chili_pnl_usd=replay_pnl_usd(case),
         ross_pnl_usd=ross,
+        harness_supplied_admission=bool(replay_admission_supplied),
     ) if rep_evs else Stage(
         STAGE_UNKNOWN, source="no_replay_events",
         detail={"note": "replay produced no events inside the window",
