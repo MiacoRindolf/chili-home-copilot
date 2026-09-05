@@ -1279,3 +1279,53 @@ def test_source_tape_sql_carries_the_provenance_predicate():
     assert set(tlm.DEFAULT_TAPE_SOURCES) == {
         "iqfeed_lookup_hist", "iqfeed_lookup_bbo", "polygon_v3_trades", "polygon_v3_quotes"
     }
+
+
+def test_a_payload_reason_picks_the_site_that_spells_it(tmp_path):
+    # live_runner.py has seven live_blocked_by_risk emitters; the lowest line is the
+    # kill switch. A wide_bbo_spread event must not resolve to it.
+    root = _tree(tmp_path, {
+        "app/runner.py": (
+            "def a(db, s, quote_block):\n"
+            "    _emit(db, s, \"live_blocked_by_risk\", {\"reason\": \"kill_switch\"})\n"
+            "    _emit(db, s, \"live_blocked_by_risk\", quote_block)\n"
+            "    _emit(db, s, \"live_blocked_by_risk\", {\"reason\": \"suspected_halt_active\"})\n"
+        ),
+    })
+    refs = tlm.resolve_code_refs(
+        ["live_blocked_by_risk"], root,
+        reasons_by_type={"live_blocked_by_risk": {"kill_switch", "wide_bbo_spread", "suspected_halt_active"}},
+    )
+    assert refs["live_blocked_by_risk"].line == 2                       # legacy key: lowest site
+    assert refs["live_blocked_by_risk|kill_switch"].line == 2
+    assert refs["live_blocked_by_risk|kill_switch"].ambiguous is False
+    assert refs["live_blocked_by_risk|suspected_halt_active"].line == 4
+    # no site spells wide_bbo_spread -> only the DYNAMIC payload site can have emitted it
+    assert refs["live_blocked_by_risk|wide_bbo_spread"].line == 3
+    assert refs["live_blocked_by_risk|wide_bbo_spread"].ambiguous is False
+
+
+def test_without_reasons_the_resolver_is_unchanged(tmp_path):
+    root = _tree(tmp_path, {
+        "app/runner.py": (
+            "def a(db, s):\n"
+            "    _emit(db, s, \"live_blocked_by_risk\", {\"reason\": \"kill_switch\"})\n"
+        ),
+    })
+    refs = tlm.resolve_code_refs(["live_blocked_by_risk"], root)
+    assert set(refs) == {"live_blocked_by_risk"} and refs["live_blocked_by_risk"].line == 2
+
+
+def test_the_real_tree_resolves_wide_bbo_spread_to_a_dynamic_quote_block_site():
+    refs = tlm.resolve_code_refs(
+        ["live_blocked_by_risk"], _ROOT,
+        scan_roots=("app/services/trading/momentum_neural",),
+        reasons_by_type={"live_blocked_by_risk": {"wide_bbo_spread", "kill_switch"}},
+    )
+    ks = refs["live_blocked_by_risk|kill_switch"]
+    wb = refs["live_blocked_by_risk|wide_bbo_spread"]
+    assert ks is not None and wb is not None
+    ks_line = (_ROOT / ks.file).read_text(encoding="utf-8").splitlines()[ks.line - 1]
+    wb_line = (_ROOT / wb.file).read_text(encoding="utf-8").splitlines()[wb.line - 1]
+    assert "kill_switch" in ks_line
+    assert "kill_switch" not in wb_line and "live_blocked_by_risk" in wb_line

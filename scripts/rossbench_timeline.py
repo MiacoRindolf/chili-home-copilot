@@ -937,9 +937,27 @@ def _call_func_name(node: ast.Call) -> Optional[str]:
     return None
 
 
-def _emit_sites_in_source(source: str, wanted: set[str]) -> dict[str, list[tuple[int, int, str]]]:
-    """{event_type: [(call_line, literal_line, func_name), ...]} for one module's source."""
-    out: dict[str, list[tuple[int, int, str]]] = {}
+def _payload_reason_literal(node: ast.Call) -> Optional[str]:
+    """The ``reason`` literal of an emit call's payload when the payload is a dict LITERAL
+    with a constant ``"reason"`` value (``_emit(db, sess, "live_blocked_by_risk",
+    {"reason": "kill_switch"})``); None when the payload is a name or the reason is computed
+    (``_emit(db, sess, "live_blocked_by_risk", quote_block)``)."""
+    dicts: list[ast.Dict] = [a for a in node.args if isinstance(a, ast.Dict)]
+    dicts += [kw.value for kw in node.keywords
+              if kw.arg in ("payload", "payload_json") and isinstance(kw.value, ast.Dict)]
+    for d in dicts:
+        for k, v in zip(d.keys, d.values):
+            if (isinstance(k, ast.Constant) and k.value == "reason"
+                    and isinstance(v, ast.Constant) and isinstance(v.value, str)):
+                return v.value
+    return None
+
+
+def _emit_sites_in_source(source: str, wanted: set[str]) -> dict[str, list[tuple[int, int, str, Optional[str]]]]:
+    """{event_type: [(call_line, literal_line, func_name, reason_literal), ...]} for one
+    module's source. ``reason_literal`` is the payload's constant ``reason`` when the site
+    spells it out, else None (a dynamic payload can carry any reason)."""
+    out: dict[str, list[tuple[int, int, str, Optional[str]]]] = {}
     try:
         tree = ast.parse(source)
     except SyntaxError:
@@ -961,10 +979,11 @@ def _emit_sites_in_source(source: str, wanted: set[str]) -> dict[str, list[tuple
             if kw.arg in _EVENT_TYPE_KEYWORDS
             and isinstance(kw.value, ast.Constant) and isinstance(kw.value.value, str)
         ]
+        reason_literal = _payload_reason_literal(node)
         for const in candidates:
             value = const.value
             if value in wanted:
-                out.setdefault(value, []).append((node.lineno, const.lineno, fname or "?"))
+                out.setdefault(value, []).append((node.lineno, const.lineno, fname or "?", reason_literal))
     return out
 
 
@@ -975,15 +994,26 @@ def resolve_code_refs(
     scan_roots: Sequence[str] = DEFAULT_CODE_SCAN_ROOTS,
     verified: bool = True,
     verification_note: Optional[str] = None,
+    reasons_by_type: Optional[Mapping[str, Iterable[str]]] = None,
 ) -> dict[str, Optional[CodeRef]]:
     """event_type -> the ``_emit`` site that produced it, as ``file:line``.
 
     ``verified`` is threaded through from the caller's tree check rather than assumed: a
     line number resolved against a tree that is not the tree that RAN points at the wrong
     branch, which is exactly the stale-build-tree incident ``verify_tree`` exists for
-    (replay_harness_invariants.py:334-363)."""
+    (replay_harness_invariants.py:334-363).
+
+    ``reasons_by_type`` (event_type -> the payload reasons seen in the run) adds a second
+    key per pair, ``"<event_type>|<reason>"``, resolved REASON-AWARE: the site whose payload
+    literal spells that reason wins; otherwise only the sites with a dynamic payload (which
+    can carry any reason) remain candidates, and a site that spells a DIFFERENT reason is
+    excluded. MEASURED 2026-09-05 on the alpaca sweep: 1,775 ``live_blocked_by_risk
+    reason=wide_bbo_spread`` held-tick events per case resolved to live_runner.py:30269 --
+    the ``kill_switch`` emit, the lowest of seven sites -- and the ledger printed the kill
+    switch as the mechanism. The two dynamic-payload sites (:32401, :32700) are the ones
+    that can emit that reason."""
     wanted = {str(e) for e in event_types if str(e or "").strip()}
-    found: dict[str, list[tuple[str, int, int, str]]] = {}
+    found: dict[str, list[tuple[str, int, int, str, Optional[str]]]] = {}
     if not wanted:
         return {}
     root = Path(build_dir)
@@ -1007,22 +1037,30 @@ def resolve_code_refs(
                 continue
             rel = path.relative_to(root).as_posix()
             for event_type, hits in sites.items():
-                for (call_line, literal_line, fname) in hits:
-                    found.setdefault(event_type, []).append((rel, call_line, literal_line, fname))
+                for (call_line, literal_line, fname, reason_literal) in hits:
+                    found.setdefault(event_type, []).append(
+                        (rel, call_line, literal_line, fname, reason_literal)
+                    )
 
-    refs: dict[str, Optional[CodeRef]] = {}
-    for event_type in sorted(wanted):
-        hits = sorted(found.get(event_type, []))
+    def _ref(hits: list[tuple[str, int, int, str, Optional[str]]]) -> Optional[CodeRef]:
         if not hits:
-            refs[event_type] = None
-            continue
-        rel, call_line, literal_line, fname = hits[0]
-        others = tuple(f"{r}:{c}" for (r, c, _l, _f) in hits[1:])
-        refs[event_type] = CodeRef(
+            return None
+        rel, call_line, literal_line, fname, _reason = hits[0]
+        others = tuple(f"{r}:{c}" for (r, c, _l, _f, _rs) in hits[1:])
+        return CodeRef(
             file=rel, line=call_line, literal_line=literal_line, func=fname,
             ambiguous=bool(others), other_sites=others,
             verified=verified, verification_note=verification_note,
         )
+
+    refs: dict[str, Optional[CodeRef]] = {}
+    for event_type in sorted(wanted):
+        hits = sorted(found.get(event_type, []), key=lambda h: (h[0], h[1], h[2]))
+        refs[event_type] = _ref(hits)
+        for reason in sorted({str(r) for r in (reasons_by_type or {}).get(event_type, ()) if str(r or "").strip()}):
+            spelled = [h for h in hits if h[4] == reason]
+            dynamic = [h for h in hits if h[4] is None]
+            refs[f"{event_type}|{reason}"] = _ref(spelled or dynamic or hits)
     return refs
 
 
@@ -1503,7 +1541,9 @@ def build_timeline(
         if stage == STAGE_UNMAPPED:
             key = str(ev.get("event_type"))
             unmapped_types[key] = unmapped_types.get(key, 0) + 1
-        ref = code_refs.get(str(ev.get("event_type")))
+        _reason = str((ev.get("payload") or {}).get("reason") or "").strip()
+        ref = (code_refs.get(f"{ev.get('event_type')}|{_reason}") if _reason else None) \
+            or code_refs.get(str(ev.get("event_type")))
         record = {
             "ts": ev.get("ts"),
             "event_type": str(ev.get("event_type")),
@@ -2064,10 +2104,16 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
 
     events = list(run_doc.get("events") or [])
     event_types = {str(e.get("event_type")) for e in events if e.get("event_type")}
+    reasons_by_type: dict[str, set[str]] = {}
+    for e in events:
+        _r = str((e.get("payload") or {}).get("reason") or "").strip()
+        if e.get("event_type") and _r:
+            reasons_by_type.setdefault(str(e.get("event_type")), set()).add(_r)
     refs = resolve_code_refs(
         event_types, build_dir,
         scan_roots=tuple(args.code_scan_root or DEFAULT_CODE_SCAN_ROOTS),
         verified=verification.ok, verification_note=verification.note,
+        reasons_by_type=reasons_by_type,
     )
 
     # The ET calendar day the narrative clocks belong to — taken from the declared window,
