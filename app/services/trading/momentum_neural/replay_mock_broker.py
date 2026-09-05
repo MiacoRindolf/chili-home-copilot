@@ -442,8 +442,55 @@ class _RestingOrder:
     # 1.0 means all observed prints when capping is enabled; the cap-disabled mode is
     # represented separately by ``MockBrokerAdapter._volume_cap_enabled``.
     volume_participation_frac: float = 1.0
+    # DEADMAN STOP (2026-09-05, alpaca canon gate #10). A resting SELL STOP the runner
+    # certifies from strict broker truth; only ``order_type == "stop"`` rows carry these.
+    stop_price: Optional[float] = None
+    time_in_force: Optional[str] = None
+    position_intent: Optional[str] = None
+    extended_hours: bool = False
+    filled_at: Optional[str] = None
 
     def to_normalized(self) -> NormalizedOrder:
+        raw: dict[str, Any] = {"venue": _VENUE, "fee": self.fee}
+        if self.order_type == "stop":
+            # The runner's certification readers (live_runner.py:9378
+            # _owner_transport_order_matches, :9707 _alpaca_protective_order_lifecycle,
+            # :8974 _exact_alpaca_order_observation) read the REAL adapter's raw shape
+            # (venue/alpaca_spot.py:2365-2437). Mirror the fields they read, in the same
+            # names, so a mock deadman is certified by the same code as a broker deadman.
+            alpaca_status = {
+                "open": "new",
+                "filled": "filled",
+                "canceled": "canceled",
+                "cancelled": "canceled",
+            }.get(str(self.status or "").lower(), str(self.status or "").lower())
+            whole = int(round(float(self.filled_size)))
+            raw.update({
+                "alpaca_status": alpaca_status,
+                "alpaca_filled_qty": f"{whole}",
+                "filled_size": whole,
+                "fill_truth_readable": True,
+                "broker_order_id_echo": self.order_id,
+                "broker_client_order_id_echo": self.client_order_id,
+                "broker_symbol_echo": self.product_id,
+                "broker_side_echo": self.side,
+                "broker_order_type_echo": self.order_type,
+                "broker_order_status_echo": alpaca_status,
+                "broker_filled_quantity_echo": f"{whole}",
+                "filled_at": self.filled_at,
+                "submitted_at": self.created_time,
+                "qty": float(self.base_size),
+                "notional": None,
+                "limit_price": None,
+                "stop_price": (float(self.stop_price) if self.stop_price is not None else None),
+                "time_in_force": self.time_in_force,
+                "order_class": None,
+                "legs": [],
+                "extended_hours": bool(self.extended_hours),
+                "position_intent": self.position_intent,
+                "replaced_by": None,
+                "replaces": None,
+            })
         return NormalizedOrder(
             order_id=self.order_id,
             client_order_id=self.client_order_id,
@@ -454,7 +501,7 @@ class _RestingOrder:
             filled_size=float(self.filled_size),
             average_filled_price=(float(self.fill_price) if self.fill_price is not None else None),
             created_time=self.created_time,
-            raw={"venue": _VENUE, "fee": self.fee},
+            raw=raw,
         )
 
 
@@ -1739,6 +1786,125 @@ class MockBrokerAdapter:
             "reason": None,
         }
 
+    def get_order_by_client_order_id_truth(self, client_order_id: str) -> dict[str, Any]:
+        """Strict CID lookup in the real adapter's shape (venue/alpaca_spot.py:2508): an
+        explicit ``found=False`` is the mock's HTTP 404. The runner's deadman lifecycle
+        (live_runner.py:27604 ``_strict_client_order_id_truth``) certifies every stop from
+        this read; without it the method resolved to ``unknown`` and the position was
+        never protected -- MEASURED 2026-09-05, alpaca sweep batch 1: 6/6 receipts held
+        to the window's end with one ``live_deadman_stop_reconcile_pending`` each."""
+        cid = str(client_order_id or "").strip()
+        if not cid:
+            return {"readable": True, "found": False, "order": None}
+        for ro in self._orders.values():
+            if str(ro.client_order_id or "").strip() == cid:
+                order, _freshness = self.get_order(ro.order_id)
+                return {"readable": True, "found": True, "order": order}
+        return {"readable": True, "found": False, "order": None}
+
+    def place_deadman_stop(
+        self,
+        *,
+        product_id: str,
+        base_size: str,
+        stop_price: float,
+        client_order_id: Optional[str] = None,
+        asset_class: Any = None,
+    ) -> dict[str, Any]:
+        """The real adapter's dead-man protective stop (venue/alpaca_spot.py:4077): a
+        resting GTC SELL STOP, sell_to_close, equities only, whole shares, CID required.
+
+        Alpaca accepts a stop at any hour but only TRIGGERS it in the regular session
+        (the runner's own note at live_runner.py:3525: it sits ``new`` until the open);
+        ``_maybe_cross_stop`` keeps that -- premarket the runner is the sole protection,
+        exactly as live. Refusals mirror the real adapter's pre-submit errors so the
+        runner's ``pre_submit_blocked`` branch is exercised, not an AttributeError."""
+        try:
+            qty = float(base_size)
+            stp = float(stop_price)
+        except (TypeError, ValueError):
+            qty = stp = float("nan")
+        fractional = bool(math.isfinite(qty) and abs(qty - round(qty)) > 1e-9)
+        pid = str(product_id or "").strip().upper()
+        cid = str(client_order_id or "").strip()
+        if (
+            not pid
+            or pid.endswith("-USD")
+            or str(asset_class or "").strip().lower() in {"crypto", "us_crypto"}
+            or not cid
+            or not math.isfinite(qty)
+            or qty <= 0.0
+            or fractional
+            or not math.isfinite(stp)
+            or stp <= 0.0
+        ):
+            return {
+                "ok": False,
+                "error": (
+                    "alpaca_fractional_deadman_not_certified"
+                    if fractional
+                    else "alpaca_deadman_instruction_not_certified"
+                ),
+                "client_order_id": client_order_id,
+                "pre_submit_blocked": True,
+            }
+        for ro in self._orders.values():
+            if str(ro.client_order_id or "").strip() == cid:
+                # Alpaca 422: client_order_id must be unique
+                return {
+                    "ok": False,
+                    "error": "client_order_id must be unique",
+                    "client_order_id": cid,
+                    "submit_outcome": "broker_rejected",
+                    "http_status": 422,
+                }
+        priority_sequence = next(self._order_seq)
+        order_id = f"{_VENUE}-{priority_sequence:08d}"
+        created_at = self._clock.replace(tzinfo=timezone.utc)
+        quantized = f"{stp:.2f}"
+        ro = _RestingOrder(
+            order_id=order_id,
+            client_order_id=cid,
+            product_id=pid,
+            side="sell",
+            order_type="stop",
+            base_size=qty,
+            limit_price=None,
+            created_time=created_at.isoformat(),
+            created_at=created_at,
+            priority_sequence=priority_sequence,
+            executable_event_at=created_at,
+            status="open",
+            filled_size=0.0,
+            fill_price=None,
+            fee=0.0,
+            ack_delay_remaining=0,
+            stop_price=float(quantized),
+            time_in_force="gtc",
+            position_intent="sell_to_close",
+            extended_hours=False,
+        )
+        self._orders[order_id] = ro
+        # a stop already through the bid triggers on placement -- in the regular session only
+        self._maybe_cross(ro, self._quote_for(pid))
+        return {
+            "ok": True,
+            "order_id": order_id,
+            "status": ("new" if ro.status == "open" else ro.status),
+            "client_order_id": cid,
+            "stop_price": quantized,
+            "order_request": {
+                "product_id": pid,
+                "base_size": str(base_size),
+                "side": "sell",
+                "position_intent": "sell_to_close",
+                "order_type": "stop",
+                "time_in_force": "gtc",
+                "stop_price": quantized,
+                "client_order_id": cid,
+            },
+        }
+
     def list_positions(self) -> tuple[list[dict[str, Any]], FreshnessMeta]:
         """Open positions from this broker's own fills, in the real adapter's row shape
         (venue/alpaca_spot.py:3933: product_id, raw_symbol, qty, side).
@@ -2360,11 +2526,44 @@ class MockBrokerAdapter:
         return max(0.0, allowed_total - float(ro.filled_size))
 
     def _maybe_cross(self, ro: _RestingOrder, q: Optional[RecordedQuote]) -> None:
+        if ro.order_type == "stop":
+            self._maybe_cross_stop(ro, q)
+            return
         _oco_meta = getattr(self, "_oco", {}).get(ro.order_id)
         if _oco_meta is not None:
             self._maybe_cross_oco(ro, q, _oco_meta)
             return
         self._maybe_cross_core(ro, q)
+
+    def _maybe_cross_stop(self, ro: _RestingOrder, q: Optional[RecordedQuote]) -> None:
+        """A resting SELL STOP triggers when the bid trades at or through the stop, and
+        ONLY in the regular session (Alpaca queues stops through extended hours; the
+        runner's software stop is the sole protection there, live_runner.py:3525). The
+        fill is conservative -- the lower of the stop and the bid -- the same price the
+        OCO stop leg uses. Exact-print mode never spends liquidity on a quote change."""
+        if ro.status != "open" or q is None or not q.is_valid():
+            return
+        if self._exact_print_fills_enabled:
+            return
+        try:
+            if not bool(self.get_market_clock_snapshot().get("is_open")):
+                return
+        except Exception:
+            return
+        try:
+            bid = float(q.bid)
+            stop = float(ro.stop_price)
+        except (TypeError, ValueError):
+            return
+        if not (math.isfinite(bid) and math.isfinite(stop)) or bid > stop:
+            return
+        remaining = ro.base_size - ro.filled_size
+        if remaining <= 0:
+            ro.status = "filled"
+            return
+        self._book_fill(ro, qty=remaining, price=min(stop, bid))
+        ro.status = "filled"
+        ro.filled_at = self._clock.replace(tzinfo=timezone.utc).isoformat()
 
     def _maybe_cross_oco(
         self, ro: _RestingOrder, q: Optional[RecordedQuote], meta: dict
