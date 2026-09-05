@@ -752,6 +752,15 @@ _BENCH_PAYLOAD_KEYS = (
     # exactly the "WHY" this receipt exists to carry.
     "breaker", "family", "dd_reason", "daily_pnl_usd", "max_daily_loss_usd", "transient",
     "source", "error_type", "detail", "skipped",
+    # 2026-09-05: the alpaca sweep receipts carried 1,775 x ``live_blocked_by_risk
+    # wide_bbo_spread`` per case as ``{reason, bid, ask}`` -- the cap it was measured
+    # against (max_spread_bps / expected_move_bps / spread_bps) and the deadman's pending
+    # state (client_order_id / broker_error) were dropped, so WHICH cap bound (the 12-bps
+    # floor with no expected move on a held tick) had to be reconstructed from source.
+    "spread_bps", "max_spread_bps", "expected_move_bps", "median_spread_bps", "samples",
+    "effective_spread_bps", "bid", "ask", "mid", "rescued_from", "failed_check",
+    "client_order_id", "broker_error", "owner_transport_advanced", "phase", "session_state",
+    "target_price", "position_quantity",
 )
 
 
