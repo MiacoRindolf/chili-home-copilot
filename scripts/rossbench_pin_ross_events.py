@@ -1379,6 +1379,24 @@ def pin_window(window: RossWindow,
     """
     entry = leg_pins.get("entry")
     exit_ = leg_pins.get("exit")
+    # An exit that does not come strictly AFTER the entry is not an exit pin. MEASURED
+    # 2026-09-05 on the first winners sweep: PPCB 2026-08-27 t2 (and two more rows) carried
+    # exit_ts_utc_pinned == entry_ts_utc_pinned -- the exit leg's level_cross search
+    # ("~09:15-09:28 (not stated)") landed on the same print as the entry -- so the
+    # timeline read Ross as `exited` at his entry second and the first divergence became
+    # "exited/blocked". The exit is demoted to unpinned (Ross stays `filled`), the pinned
+    # second is kept in pin_detail as provenance, and the row says why.
+    _entry_s = _leg_field(entry, "pin_second_utc")
+    _exit_s = _leg_field(exit_, "pin_second_utc")
+    if _entry_s and _exit_s and str(_exit_s) <= str(_entry_s):
+        demoted = dict(exit_)
+        demoted.update({"pin_second_utc": None, "pin_second_et": None,
+                        "pin_confidence": "unpinned",
+                        "demotion": {"reason": "exit_not_after_entry",
+                                     "pinned_second_utc_was": _exit_s,
+                                     "entry_second_utc": _entry_s},
+                        "notes": list(demoted.get("notes") or ()) + ["not_after_entry"]})
+        exit_ = demoted
     anchor_leg = "entry" if entry is not None else ("exit" if exit_ is not None else None)
     anchor = entry if anchor_leg == "entry" else exit_
 
@@ -1394,8 +1412,8 @@ def pin_window(window: RossWindow,
         # emitted: the manifest has a window for it, and a silently absent pin
         # row is indistinguishable from a join that failed.
         notes.append("no_stated_leg")
-    for name in ("entry", "exit"):
-        for note in (_leg_field(leg_pins.get(name), "notes") or ()):
+    for name, leg_pin in (("entry", entry), ("exit", exit_)):
+        for note in (_leg_field(leg_pin, "notes") or ()):
             notes.append("%s:%s" % (name, note))
 
     tapes = [p.get("tape") or {} for p in (entry, exit_) if p is not None]
@@ -1465,7 +1483,8 @@ def pin_window(window: RossWindow,
         "notes": notes,
         # The full per-leg records, under 'legs' and NOT under 'entry'/'exit' —
         # see assert_pin_row_contract for why that distinction is load-bearing.
-        "legs": {name: leg_pins[name] for name in ("entry", "exit") if name in leg_pins},
+        # the (possibly demoted) leg records, not the raw leg_pins
+        "legs": {name: lp for name, lp in (("entry", entry), ("exit", exit_)) if lp is not None},
     }
     return dict(assert_pin_row_contract(row))
 
