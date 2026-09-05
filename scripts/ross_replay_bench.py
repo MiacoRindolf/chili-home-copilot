@@ -118,6 +118,7 @@ from replay_harness_invariants import (  # noqa: E402
     assert_dense_stride,
     assert_interleaved,
     assert_mock_parity,
+    cold_start_tags,
     interleave,
     verify_tree,
 )
@@ -1313,6 +1314,64 @@ def _tape_vendor(source: Any) -> str:
     return s
 
 
+# INVARIANT 7 -- COLD START (plan knobs; derivation in the plan's knob table):
+#   ROSSBENCH_COLD_START_MIN_UPTIME_S = 60   operator invariant 7; p50 17.5 s / p90 162 s bracket
+#   ROSSBENCH_COLD_START_MIN_TICKS    = 6    60 s / 10 s live tick cadence
+# These are BENCH knobs read in the bench process; the driver env still refuses every
+# ROSSBENCH_* key (FORBIDDEN_ENV_PREFIXES), so an arm cannot move them.
+COLD_START_MIN_UPTIME_S = float(os.environ.get("ROSSBENCH_COLD_START_MIN_UPTIME_S", "60") or 60)
+COLD_START_MIN_TICKS = int(os.environ.get("ROSSBENCH_COLD_START_MIN_TICKS", "6") or 6)
+ENTRY_DECISIVE_MARKERS: tuple[str, ...] = ("entry_candidate", "entry_submitted", "entry_filled")
+
+
+def cold_start_problems(
+    receipt: Mapping[str, Any],
+    *,
+    min_uptime_s: float = COLD_START_MIN_UPTIME_S,
+    min_ticks: int = COLD_START_MIN_TICKS,
+) -> tuple[list[str], dict[str, Any]]:
+    """(problems, record) for invariant 7 on one receipt.
+
+    ``cold_start_tags`` (replay_harness_invariants.py) tags EVERY decisive event that fired
+    before the runner had ``min_uptime_s`` of uptime -- and on a force-seeded session the
+    first seconds are always vetoes and waits, which is expected. What makes a CASE
+    unscoreable is an ENTRY-decisive event (candidate / submitted / filled) in that cold
+    window: the seeded arm traded on frame state the session never saw (the 2026-09-02
+    #1287 A/B incident, and MEASURED 2026-09-05 on the first alpaca sweep -- EHGO 07-23
+    filled 17 s after the window opened, NCRA 07-29 at 13 s, both 15 minutes before Ross's
+    pinned entry). The window lead (900 s) is what should satisfy this; a case that trades
+    inside the lead is reported, never credited.
+    """
+    events = list(receipt.get("events") or [])
+    t0 = None
+    for ev in events:
+        if str(ev.get("event_type") or "") == "live_runner_started":
+            t0 = ev.get("ts")
+            break
+    if t0 is None and events:
+        t0 = events[0].get("ts")
+    tags = cold_start_tags(events, t0, min_ticks, min_uptime_s) if t0 is not None else []
+    first_entry = next(
+        (t for t in tags if any(m in str(t.get("event_type") or "") for m in ENTRY_DECISIVE_MARKERS)),
+        None,
+    )
+    problems: list[str] = []
+    if first_entry is not None:
+        problems.append(
+            f"cold_start:{first_entry['event_type']} at uptime {first_entry.get('uptime_s')}s "
+            f"< {min_uptime_s:g}s (runner_started {t0}) -- the seeded arm traded inside the "
+            "window lead; reported, not credited"
+        )
+    return problems, {
+        "runner_started_ts": t0,
+        "min_uptime_s": min_uptime_s,
+        "min_ticks": min_ticks,
+        "tags": tags[:8],
+        "tag_count": len(tags),
+        "first_entry_decisive_cold": first_entry,
+    }
+
+
 def check_pin_sources(receipt: Mapping[str, Any], pin: Optional[Mapping[str, Any]]) -> str:
     """Compare the tape provenance the pin RECORDED against what the driver actually read.
 
@@ -1885,6 +1944,11 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             elif pin_check.startswith("unverified"):
                 logger.warning("[ross_replay_bench]   pin UNVERIFIED %s / %s: %s",
                                case, arm.name, pin_check)
+            # Invariant 7: an entry inside the window lead is the seeded arm trading on
+            # state the session never saw. Reported on every run; unscoreable when it fires.
+            cs_problems, cs_record = cold_start_problems(receipt)
+            record["cold_start"] = cs_record
+            problems += cs_problems
             write_run_outputs(run_dir, receipt, case, arm)
 
         record["invariant_problems"] = problems
