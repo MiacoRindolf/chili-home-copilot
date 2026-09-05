@@ -1683,6 +1683,45 @@ def run_one(
     }
 
 
+def source_window_coverage(source_dsn: str, symbol: str, win_start: str, win_end: str) -> dict[str, Any]:
+    """How much SOURCE tape the window actually holds, before a driver is spent on it.
+
+    MEASURED 2026-09-05: SCKT 2026-08-10 t5 and FRTT 2026-08-11 carried manifest anchors
+    ~1-1.5 h before the day's first prints (window 11:25-12:25Z, ticks from 13:00Z); the
+    driver mirrored nothing, died, and the bench logged only 'no receipt'. This read is
+    symbol-bound and index-backed (the lane's own per-symbol reader shape), never a bulk
+    scan; on any error it reports ``unknown`` and the driver runs as before (fail-open --
+    an unreadable source must not silently drop cases)."""
+    out: dict[str, Any] = {"ticks_in_window": None, "day_first_tick": None, "day_last_tick": None}
+    try:
+        import psycopg2
+
+        conn = psycopg2.connect(source_dsn, options="-c statement_timeout=60000")
+        try:
+            cur = conn.cursor()
+            cur.execute(
+                "SELECT count(*) FROM iqfeed_trade_ticks WHERE symbol = %s "
+                "AND observed_at >= %s AND observed_at < %s",
+                (str(symbol).upper(), win_start.replace("T", " "), win_end.replace("T", " ")),
+            )
+            out["ticks_in_window"] = int(cur.fetchone()[0])
+            if out["ticks_in_window"] == 0:
+                day = win_start[:10]
+                cur.execute(
+                    "SELECT min(observed_at), max(observed_at) FROM iqfeed_trade_ticks "
+                    "WHERE symbol = %s AND observed_at >= %s AND observed_at < %s",
+                    (str(symbol).upper(), f"{day} 00:00:00", f"{day} 23:59:59"),
+                )
+                lo, hi = cur.fetchone()
+                out["day_first_tick"] = lo.isoformat() if lo else None
+                out["day_last_tick"] = hi.isoformat() if hi else None
+        finally:
+            conn.close()
+    except Exception as exc:  # noqa: BLE001
+        out["error"] = repr(exc)[:200]
+    return out
+
+
 def read_receipt(path: str) -> tuple[Optional[dict], Optional[str]]:
     try:
         with open(path, encoding="utf-8") as fh:
@@ -1955,13 +1994,38 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
 
         logger.info("[ross_replay_bench] RUN %s / %s (%s..%s)",
                     case, arm.name, case.win_start, case.win_end)
-        record.update(run_one(case=case, arm=arm, env=env, build=os.path.abspath(args.build),
-                              out_dir=run_dir, timeout_s=args.timeout_s))
+        coverage = source_window_coverage(args.source, case.symbol, case.win_start, case.win_end)
+        record["source_window_coverage"] = coverage
+        if coverage.get("ticks_in_window") == 0:
+            # An empty window is an ANCHOR problem, not a strategy result: record it as such
+            # and do not spend a driver (2026-09-05: SCKT 08-10 t5 / FRTT 08-11 anchors sat
+            # 1-1.5 h before the day's first print).
+            record.update({"status": "empty_window", "returncode": None, "duration_s": 0.0,
+                           "stdout_tail": []})
+            logger.error("[ross_replay_bench]   EMPTY WINDOW %s / %s: 0 source ticks in %s..%s; "
+                         "the day's tape runs %s .. %s (anchor error, no driver spent)",
+                         case, arm.name, case.win_start, case.win_end,
+                         coverage.get("day_first_tick"), coverage.get("day_last_tick"))
+        else:
+            record.update(run_one(case=case, arm=arm, env=env, build=os.path.abspath(args.build),
+                                  out_dir=run_dir, timeout_s=args.timeout_s))
 
         receipt, err = read_receipt(json_out)
         problems: list[str] = []
         if receipt is None:
             problems.append(err or "no receipt")
+            # The driver's last lines survive on disk next to where the receipt would have
+            # been, and the log line says WHAT happened (timeout / driver_failed / empty).
+            try:
+                os.makedirs(run_dir, exist_ok=True)
+                with open(os.path.join(run_dir, "driver_stdout_tail.txt"), "w", encoding="utf-8") as fh:
+                    fh.write("\n".join(str(x) for x in (record.get("stdout_tail") or [])) + "\n")
+            except OSError:
+                pass
+            _tail = [str(x) for x in (record.get("stdout_tail") or []) if str(x).strip()][-2:]
+            logger.error("[ross_replay_bench]   LOST %s / %s: status=%s rc=%s after %ss; tail=%s",
+                         case, arm.name, record.get("status"), record.get("returncode"),
+                         record.get("duration_s"), " | ".join(_tail)[:300])
         else:
             ref = reference.get(str(case))
             problems += post_run_invariants(
