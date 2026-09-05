@@ -1332,15 +1332,22 @@ def cold_start_problems(
 ) -> tuple[list[str], dict[str, Any]]:
     """(problems, record) for invariant 7 on one receipt.
 
-    ``cold_start_tags`` (replay_harness_invariants.py) tags EVERY decisive event that fired
-    before the runner had ``min_uptime_s`` of uptime -- and on a force-seeded session the
-    first seconds are always vetoes and waits, which is expected. What makes a CASE
-    unscoreable is an ENTRY-decisive event (candidate / submitted / filled) in that cold
-    window: the seeded arm traded on frame state the session never saw (the 2026-09-02
-    #1287 A/B incident, and MEASURED 2026-09-05 on the first alpaca sweep -- EHGO 07-23
-    filled 17 s after the window opened, NCRA 07-29 at 13 s, both 15 minutes before Ross's
-    pinned entry). The window lead (900 s) is what should satisfy this; a case that trades
-    inside the lead is reported, never credited.
+    The FSM's own cold-start guard is tick-denominated: on a seeded session the first
+    grid steps are `live_entry_trigger_wait reason=insufficient_bars` until the runner has
+    watched enough of the tape (NCRA 07-29, alpaca sweep batch 1: 7 x insufficient_bars,
+    candidate on grid tick 8). The plan's two knobs are one quantity in two units --
+    ``min_ticks`` = 6 = ``min_uptime_s`` 60 s / the LIVE 10 s tick cadence -- but the bench
+    grid is 1 s, so wall uptime overstates coldness ten-fold in replay (13 s of uptime is
+    13 runner ticks, not 1.3). MEASURED 2026-09-05: with the uptime reading 5/6 alpaca
+    receipts (first fill at uptime 11-36 s) and RH EHGO (17 s) were unscoreable; every one
+    of them had cleared insufficient_bars on its own.
+
+    So: ``ticks_seen`` = grid steps since runner_started (uptime / GRID_STEP_S from the
+    receipt env; default 1.0). A case is UNSCOREABLE (problem) when its first ENTRY-decisive
+    event (candidate / submitted / filled) fired with ``ticks_seen < min_ticks``. An entry
+    that is cold by wall uptime only is recorded under ``uptime_only_entries`` and logged
+    as a warning -- visible, never credited silently, never fatal. Early vetoes and waits
+    are expected on a force-seeded session and make no problem either way.
     """
     events = list(receipt.get("events") or [])
     t0 = None
@@ -1350,25 +1357,54 @@ def cold_start_problems(
             break
     if t0 is None and events:
         t0 = events[0].get("ts")
-    tags = cold_start_tags(events, t0, min_ticks, min_uptime_s) if t0 is not None else []
-    first_entry = next(
-        (t for t in tags if any(m in str(t.get("event_type") or "") for m in ENTRY_DECISIVE_MARKERS)),
-        None,
-    )
+    env = receipt.get("env") if isinstance(receipt.get("env"), Mapping) else {}
+    try:
+        grid_step_s = float(str(env.get("GRID_STEP_S") or 1.0))
+    except ValueError:
+        grid_step_s = 1.0
+    grid_step_s = grid_step_s if grid_step_s > 0 else 1.0
+    tags: list[dict[str, Any]] = []
+    if t0 is not None:
+        from replay_harness_invariants import _as_dt  # noqa: PLC0415  (module-private helper, same package of scripts)
+        t0_dt = _as_dt(t0)
+        stamped: list[dict[str, Any]] = []
+        for ev in events:
+            row = dict(ev)
+            ts = _as_dt(ev.get("ts"))
+            if ts is not None and t0_dt is not None:
+                row["ticks_seen"] = int(max(0.0, (ts - t0_dt).total_seconds()) // grid_step_s)
+            stamped.append(row)
+        tags = cold_start_tags(stamped, t0, min_ticks, min_uptime_s)
+    entry_tags = [t for t in tags if any(m in str(t.get("event_type") or "") for m in ENTRY_DECISIVE_MARKERS)]
+    first_entry = entry_tags[0] if entry_tags else None
+    tick_cold = next((t for t in entry_tags if any(str(r).startswith("ticks_") for r in (t.get("reasons") or []))), None)
+    uptime_only = [t for t in entry_tags if not any(str(r).startswith("ticks_") for r in (t.get("reasons") or []))]
     problems: list[str] = []
-    if first_entry is not None:
+    if tick_cold is not None:
         problems.append(
-            f"cold_start:{first_entry['event_type']} at uptime {first_entry.get('uptime_s')}s "
-            f"< {min_uptime_s:g}s (runner_started {t0}) -- the seeded arm traded inside the "
-            "window lead; reported, not credited"
+            f"cold_start:{tick_cold['event_type']} at runner tick {tick_cold.get('ticks_seen')} "
+            f"< {int(min_ticks)} (uptime {tick_cold.get('uptime_s')}s, grid {grid_step_s:g}s, "
+            f"runner_started {t0}) -- the seeded arm committed before it had watched the tape; "
+            "reported, not credited"
+        )
+    elif uptime_only:
+        u = uptime_only[0]
+        logger.warning(
+            "[ross_replay_bench]   cold-start by UPTIME only: %s at uptime %ss (%s runner ticks >= %d) -- "
+            "recorded, scoreable",
+            u.get("event_type"), u.get("uptime_s"), u.get("ticks_seen"), int(min_ticks),
         )
     return problems, {
         "runner_started_ts": t0,
+        "grid_step_s": grid_step_s,
         "min_uptime_s": min_uptime_s,
         "min_ticks": min_ticks,
+        "rule": "ticks_seen < min_ticks on the first entry-decisive event",
         "tags": tags[:8],
         "tag_count": len(tags),
         "first_entry_decisive_cold": first_entry,
+        "tick_cold_entry": tick_cold,
+        "uptime_only_entries": uptime_only[:4],
     }
 
 
