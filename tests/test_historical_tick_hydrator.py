@@ -749,3 +749,27 @@ def test_market_hours_gate_accepts_a_naive_now_as_utc():
 
     with pytest.raises(MarketHoursRefusal):
         assert_outside_market_hours(now=datetime(2026, 8, 26, 13, 35))
+
+
+# ── a malformed symbol is rejected before any DB work (2026-09-05) ─────────────────
+
+from scripts.historical_tick_hydrator import symbol_is_hydratable as _sym_ok
+
+
+@pytest.mark.parametrize("sym", ["SDOT", "brk.b", "  ppcb ", "AB-C", "A"])
+def test_tickers_are_hydratable(sym):
+    assert _sym_ok(sym) is True
+
+
+@pytest.mark.parametrize("sym", [
+    "NUWE (09:30 pivot 5.34)",                       # the row that aborted the 2026-09-04 pass
+    "EDBL/LGHL/BIYA", "MGRX / REPL / KUST", "UNKNOWN", "", None,
+    "FCUV (4.80/break of 5; break of 8; post-11.50 halt re-entry)",
+])
+def test_narrative_in_the_symbol_field_is_not_hydratable(sym):
+    assert _sym_ok(sym) is False
+
+
+def test_the_hydratable_pattern_fits_the_jobs_column():
+    """hydration_jobs.symbol is varchar(32); the pattern caps a symbol at 16 characters."""
+    assert _sym_ok("A" * 16) is True and _sym_ok("A" * 17) is False
