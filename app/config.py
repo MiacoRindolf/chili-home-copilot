@@ -8192,6 +8192,109 @@ class Settings(BaseSettings):
         default=True,
         validation_alias=AliasChoices("CHILI_MOMENTUM_G4_CROSS_DAY_REJECTION_SEED_ENABLED"),
     )
+    # SPENT-LEG SEED (2026-09-02 evidence; PAPER lane 09-01/09-02): bawat talo
+    # ng dalawang araw ay SPENT-LEG entry — CANF 4.34 @ 07:10 ET, 8 min / 12%
+    # sa ilalim ng 4.9297 HOD (-78.13, MFE 0.13R; si Ross 07:15: "just no
+    # good"); JLHL 7.396, 7.6 min / 6.6% sa ilalim ng 7.92 (-18.83). Walang
+    # umiiral na mekanismo ang sumusukat ng HOD age x depth sa UNANG entry.
+    # HINDI bagong gate: sine-seed ang UMIIRAL na g4 re-entry escalation (level
+    # 1, ang slot ng #1252) na may session HOD bilang reclaim reference — WAIT
+    # na kumikalas sa sandaling mag-print ang presyo sa/lampas ng top (o
+    # gumalaw ang top). EBIDENSYA: 3 current-era entry-quality outcome (~-$100:
+    # CANF#1, JLHL, LIDR#2); July split p=0.020 sa win rate PERO ang HARD-veto
+    # anyo ay net -2.3R (JZXN +182 = 16.4R ang naharang) — kaya WAIT lang ang
+    # ipinapadala (JZXN re-took HOD 4 min pagkatapos ⇒ cleared). DOKUMENTADONG
+    # miss: UPC (3.6% lang sa ilalim), AUUD (source-dependent). TAPAT NA
+    # GASTOS: sa level 1 ang non-leader STRUCTURAL pullback trigger ay
+    # naharang din sa ilalim ng HOD (reclaim = HOD + 0); leader lang ang may
+    # bypass. Merge gate = interleaved replay A/B (JZXN/VEEE windows).
+    chili_momentum_g4_spent_leg_seed_enabled: bool = Field(
+        default=True,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_G4_SPENT_LEG_SEED_ENABLED"),
+        description="Seed g4 level 1 (reclaim reference = session HOD) on the FIRST entry of a name whose session HOD is >= min_hod_age_min old AND >= min_drawdown_pct above price. WAIT, not veto: clears when price prints at/above the top, the top moves, OR the pullback shallows under min_drawdown_pct (so the live rule equals the fill-instant predicate the corpus was measured on; a marker that only cleared on a re-take blocked RKTO 07-09 / LHAI 07-08, review 2026-09-02). Fail-open on stale frame / no continuous tick coverage / HOD not today. KILL: flag OFF never seeds AND unwinds any active marker on the next score-ok tick (clear_reason=disabled).",
+    )
+    chili_momentum_g4_spent_leg_min_hod_age_min: float = Field(
+        default=5.0,
+        ge=0.0,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_G4_SPENT_LEG_MIN_HOD_AGE_MIN"),
+        description="Minutes from the HOD bar END before a pullback counts as a spent leg. 5 = JLHL 7.6 / CANF 8.3 seed; VEEE (+445, 4.7 min) and VRAX (+371, 3.6 min) first pullbacks do NOT (18 s margin on VEEE — swept in the replay A/B M in {5,6,8}).",
+    )
+    chili_momentum_g4_spent_leg_min_drawdown_pct: float = Field(
+        default=5.0,
+        ge=0.0,
+        le=50.0,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_G4_SPENT_LEG_MIN_DRAWDOWN_PCT"),
+        description="Percent under the session HOD before a pullback counts as a spent leg, measured at EVERY score-ok tick: at/above this depth (and >= min age) the marker is active, under it the marker clears (clear_reason=shallowed) — the fill-instant predicate of the corpus. 5 = CANF 12% / JLHL 6.6% seed; UPC 3.6% (documented miss), RKTO +75 at 3.77% and LHAI +48 at 3.7% at the fill do NOT (both dipped ~7% >= 5 min after the HOD earlier — seeded, then cleared as the pullback shallowed before the fill; swept P in {3,4,5}; never tuned to UPC).",
+    )
+    chili_momentum_g4_spent_leg_max_frame_age_s: float = Field(
+        default=120.0,
+        gt=0.0,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_G4_SPENT_LEG_MAX_FRAME_AGE_S"),
+        description="Freshness guard (fail-open): the seed evaluates only when the bench frame's last bar END is within max(2*interval, this) of the tick clock OR the session's own tick-running high has covered the gap since that bar. The 08-26 measured entry-path frame age was p50 10.6 min, so without the tick coverage the seed would be near-inert; raise only with the measured false-seed rate in the fresh bucket.",
+    )
+    # COLD-START GUARD (A/B verdict 2026-09-02, JLHL window w6). The seed
+    # accepted a frame HOD the session never watched: arm B armed at the FIRST
+    # grid step off a warm-up-inherited HOD 7.70 whose bar ENDED 09:25Z, 37.0
+    # min before the 10:02Z window start, held the WAIT 25.35 min with
+    # blocks_while_seeded=122, and blocked a STRUCTURAL
+    # double_bottom_break_tick_ok — arm A's 10:20:04Z @7.09 entry, +28.10 USD /
+    # +1.515R, the best trade in the whole A/B set. That single block WAS the
+    # entire measured cost of the PR (net USD B +0.05 vs A +4.78 across 4
+    # windows; 3 of 4 trade-for-trade identical). Two conjuncts, both required:
+    # the HOD's bar END must fall inside the session/replay window, AND the
+    # runner must have been ticking for min_session_uptime_s over
+    # min_observed_ticks priced ticks in the CURRENT continuous coverage run.
+    chili_momentum_g4_spent_leg_min_session_uptime_s: float = Field(
+        default=60.0,
+        ge=0.0,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_G4_SPENT_LEG_MIN_SESSION_UPTIME_S"),
+        description="Cold-start guard (fail-open): seconds the runner must have been continuously observing priced ticks (the current coverage run, the same run that bridges a stale frame) before spent_leg_seed_decision may arm. 0 s = no floor. 60 = the JLHL cold-start seed at grid step 1 (uptime 0 s) is refused with reason spent_leg_session_cold_start.",
+    )
+    chili_momentum_g4_spent_leg_min_observed_ticks: int = Field(
+        default=1,
+        ge=0,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_G4_SPENT_LEG_MIN_OBSERVED_TICKS"),
+        description="Cold-start guard (fail-open): priced ticks the runner must have processed in the current continuous coverage run before the seed may arm. The uptime floor above is the binding constraint at live tick rates; this is the belt-and-braces 'has seen a live tick at all' term (0 = off).",
+    )
+    # HYSTERESIS (A/B verdict 2026-09-02). 36 of 36 clears in the A/B were
+    # 'shallowed' and 15 fired with minutes_waited 0.017-0.06 (under 4 s):
+    # arming and clearing on the SAME 5% line makes price oscillating across it
+    # re-arm and disarm continuously (CANF: 7 seed/clear pairs inside ~2 sim
+    # minutes). Split the two thresholds and add a dwell floor. BAND = 4.0
+    # (review 2026-09-02): 3.5 would have been a strict weakening of the WAIT's
+    # release, dropping the RKTO 07-09 (+74.52, 3.77% under at the fill) and
+    # LHAI 07-08 (+48.07, 3.70%) fills the fill-instant corpus counts as FREE.
+    # At 4.0 both stay ADMITTED — the corpus invariant is PINNED, not waived —
+    # while arm 5.0 vs clear 4.0 still gives a 1.0-point dead band and the 20 s
+    # dwell still kills all 15 sub-4-second clears the A/B measured. Set this
+    # key to 5.0 to collapse the hysteresis entirely (no dead band).
+    chili_momentum_g4_spent_leg_clear_drawdown_pct: float = Field(
+        default=4.0,
+        ge=0.0,
+        le=50.0,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_G4_SPENT_LEG_CLEAR_DRAWDOWN_PCT"),
+        description="Hysteresis: the marker ARMS at dd >= min_drawdown_pct but clears (clear_reason=shallowed) only under THIS lower depth. Clamped to <= min_drawdown_pct (a higher value would clear the marker on the tick that armed it). 4.0 vs the 5.0 arm floor = a 1.0-point dead band that keeps the fill-instant corpus invariant intact (RKTO 3.77% / LHAI 3.70% still clear and stay FREE at their fills) while CANF's 7 seed/clear pairs inside 2 minutes collapse to one.",
+    )
+    chili_momentum_g4_spent_leg_clear_min_dwell_s: float = Field(
+        default=20.0,
+        ge=0.0,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_G4_SPENT_LEG_CLEAR_MIN_DWELL_S"),
+        description="Hysteresis: minimum seconds an active marker must have been seeded before a 'shallowed' clear may fire. ONLY 'shallowed' is delayed — hit_top / retop / disabled (the KILL) / session_rollover always clear on the tick that sees them, so neither a re-take nor the kill switch can ever be held back. 20 s kills the 15 sub-4-second clears the A/B measured.",
+    )
+    # STRUCTURAL OVERRIDE (A/B verdict 2026-09-02). The feature exists to
+    # suppress NON-structural re-entry chatter on a spent leg; the one measured
+    # loss it caused was a STRUCTURAL trigger blocked by a level the seed itself
+    # created. While the marker is active AND the escalation level exists ONLY
+    # because the seed created it (seed_level_delta >= 1, i.e. without the seed
+    # the decision would read level 0 = no_escalation = admitted), a trigger in
+    # structural_trigger_reasons() is let through and the runner emits
+    # g4_spent_leg_seed_structural_override once per marker. A level a REAL
+    # stop-out loss put there is untouched — that ladder is arm-A behaviour.
+    chili_momentum_g4_spent_leg_structural_override_enabled: bool = Field(
+        default=True,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_G4_SPENT_LEG_STRUCTURAL_OVERRIDE_ENABLED"),
+        description="Never hard-block a structural_trigger_reasons() trigger on an escalation level the spent-leg seed itself created; emit g4_spent_leg_seed_structural_override (hod / hod_source / hod_age_min / dd_pct / blocked_trigger) once per marker and count the rest in the marker's structural_overrides (carried on the clear). OFF = the PR's original documented cost (the JLHL double_bottom_break_tick_ok block).",
+    )
     # PREMARKET RVOL STALE GUARD (#1260, sinukat 2026-09-01): ang provider
     # snapshot ay `day.v = 0` para sa LAHAT ng pangalan sa premarket, kaya ang
     # rvol (today/prevDay) ay zero-o-halos-zero — at ang A-setup floor ay

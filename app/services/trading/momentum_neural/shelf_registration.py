@@ -126,12 +126,17 @@ def _fetch_state(symbol: str) -> dict[str, Any] | None:
             if filed >= cutoff:
                 hits.append({"form": form_u, "filed": str(date_s)})
         newest = max((h["filed"] for h in hits), default=None)
+        newest_form = next((h["form"] for h in hits if h["filed"] == newest), None)
         return {
             "symbol": symbol,
             "cik": int(cik),
             "shelf_active": bool(hits),
             "shelf_filing_count": len(hits),
             "newest_filing_date": newest,
+            # Telemetry (2026-09-02): WHICH form and WHEN this read happened, so a
+            # 24 h-old cache entry is auditable against the ledger record.
+            "newest_form": newest_form,
+            "fetched_at": datetime.now(timezone.utc).isoformat(),
             "lookback_days": round(_lookback_days(), 1),
         }
     except Exception as exc:
@@ -190,11 +195,89 @@ def cached_shelf_state(symbol: str) -> dict[str, Any] | None:
     return state
 
 
+_FRESH_BUCKET_MAX_DAYS = 7
+_ACTIVE_BUCKET_MAX_DAYS = 60
+
+
+def shelf_age_bucket(days_since_newest: int | None, *, has_filing: bool) -> str:
+    """Telemetry label ONLY (2026-09-02) — nothing reads it to size or gate.
+    fresh (<= 7 d) | active (8-60 d) | stale (> 60 d) | unknown (a filing whose
+    date is unparseable) | none (no shelf filing inside the lookback).
+    Evidence for WHY it is only a label: C67 bucket mean R is monotonic (fresh
+    -1.30 n=5, active -0.54 n=10, stale -0.13 n=43) but the fresh half is n=5
+    with ONE out-of-sample symbol (VTAK) and D21's <= 10 d split points the
+    other way (-1.72 with vs -1.61 without); the > 60 d up-size counterfactual
+    is -$1,737 (W$ +1,365 vs L$ -6,577). Measure four weeks, then decide."""
+    if not has_filing:
+        return "none"
+    if days_since_newest is None:
+        return "unknown"
+    if days_since_newest <= _FRESH_BUCKET_MAX_DAYS:
+        return "fresh"
+    if days_since_newest <= _ACTIVE_BUCKET_MAX_DAYS:
+        return "active"
+    return "stale"
+
+
+def shelf_state_telemetry(
+    state: dict[str, Any] | None,
+    *,
+    fraction: float,
+    now_utc: Any = None,
+) -> dict[str, Any] | None:
+    """Pure telemetry record for ANY cached EDGAR state (2026-09-02).
+
+    Returned whenever ``state`` is a dict (active OR inactive) — the damper's
+    own ``shelf_damper_multiplier`` returns telemetry only when it FIRES, which
+    left no durable trace for the 14/67 fills it did not damp nor for
+    candidates that never filled. ``mult`` here is exactly what the damper
+    applies (``fraction`` when active and valid, else 1.0) — recorded, not
+    decided. ``days_since_newest`` is against the UTC calendar date of
+    ``now_utc`` (default: wall clock; the runner passes the tick clock).
+    None state ⇒ None (nothing to record)."""
+    if not isinstance(state, dict):
+        return None
+    from datetime import datetime, timezone
+
+    mult, _ = shelf_damper_multiplier(state, fraction=fraction)
+    try:
+        count = int(state.get("shelf_filing_count") or 0)
+    except (TypeError, ValueError):
+        count = 0
+    newest = state.get("newest_filing_date")
+    has_filing = bool(newest) or count > 0
+    days: int | None = None
+    if newest:
+        try:
+            _newest_d = datetime.strptime(str(newest), "%Y-%m-%d").date()
+            if isinstance(now_utc, datetime):
+                _now = now_utc if now_utc.tzinfo is not None else now_utc.replace(tzinfo=timezone.utc)
+                _today = _now.astimezone(timezone.utc).date()
+            else:
+                _today = datetime.now(timezone.utc).date()
+            days = int((_today - _newest_d).days)
+        except (TypeError, ValueError):
+            days = None
+    return {
+        "mult": round(float(mult), 4),
+        "shelf_active": state.get("shelf_active") is True,
+        "shelf_filing_count": count,
+        "newest_filing_date": newest,
+        "newest_form": state.get("newest_form"),
+        "days_since_newest": days,
+        "age_bucket": shelf_age_bucket(days, has_filing=has_filing),
+        "fetched_at": state.get("fetched_at"),
+    }
+
+
 def shelf_damper_multiplier(
     state: dict[str, Any] | None, *, fraction: float
 ) -> tuple[float, dict[str, Any] | None]:
     """Pure: (multiplier, telemetry). Positibong ebidensya lang ang nagpapababa;
-    None/inactive/invalid fraction ⇒ 1.0 (fail-open)."""
+    None/inactive/invalid fraction ⇒ 1.0 (fail-open). BYTE-IDENTICAL multiplier
+    since 2026-08-18; the fired-case telemetry gained ``newest_form`` /
+    ``fetched_at`` (2026-09-02) — use ``shelf_state_telemetry`` for the
+    always-recorded form."""
     try:
         f = float(fraction)
     except (TypeError, ValueError):
@@ -207,6 +290,8 @@ def shelf_damper_multiplier(
         "mult": round(f, 4),
         "shelf_filing_count": state.get("shelf_filing_count"),
         "newest_filing_date": state.get("newest_filing_date"),
+        "newest_form": state.get("newest_form"),
+        "fetched_at": state.get("fetched_at"),
     }
 
 
