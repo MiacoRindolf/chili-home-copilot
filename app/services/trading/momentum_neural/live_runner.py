@@ -47861,6 +47861,28 @@ def tick_live_session(
                         exclude_session_id=sess.id,
                         execution_family=str(getattr(sess, "execution_family", "") or "") or None,
                     )
+                    # FRONT-SIDE read for the lockout's conditioning: the two tape legs the
+                    # fresh-ignition exemption trusts (executed-tape confirmer AND the
+                    # running-up burst map), read fresh here because the ignition block
+                    # above only reads them while its own budget is unspent. Fail-CLOSED:
+                    # any read error => not front-side => the lock decides as before.
+                    _l13_front = False
+                    _l13_front_dbg: dict[str, Any] = {}
+                    try:
+                        from . import entry_gates as _l13_eg
+                        from .nbbo_tape import tape_running_up_signal_map as _l13_run_map
+
+                        _l13_sym = str(sess.symbol or "").strip().upper()
+                        _l13_tc_ok, _l13_tc_dbg = _l13_eg.tape_confirms_hold(_l13_sym, db=db)
+                        _l13_front_dbg["tape"] = _l13_tc_dbg
+                        if _l13_tc_ok:
+                            _l13_map = _l13_run_map(db, now_utc=_utcnow()) or {}
+                            _l13_front_dbg["running_up_hit"] = _l13_sym in _l13_map
+                            _l13_front = _l13_sym in _l13_map
+                    except Exception as _l13_exc:
+                        _l13_front_dbg["error"] = repr(_l13_exc)
+                    _l13_fs_used = int(le.get("lockout_front_side_exemptions") or 0)
+                    _l13_fs_max = int(getattr(settings, "chili_momentum_max_ignition_exemptions", 1) or 1)
                     _l13_locked, _l13_why, _l13_thr = symbol_day_loss_lockout_decision(
                         enabled=True,  # the flag gates this whole block above
                         day_net_realized_usd=_l13_cum + (_l13_other or 0.0),
@@ -47875,7 +47897,21 @@ def tick_live_session(
                             )
                             or 1.5
                         ),
+                        front_side=_l13_front,
+                        front_side_exemptions=_l13_fs_used,
+                        max_front_side_exemptions=_l13_fs_max,
                     )
+                    if _l13_why == "front_side_exempt":
+                        le["lockout_front_side_exemptions"] = _l13_fs_used + 1
+                        _commit_le(sess, le)
+                        _emit(db, sess, "live_symbol_day_loss_lockout_front_side_exempt", {
+                            "day_net_realized_usd": round(_l13_cum + (_l13_other or 0.0), 4),
+                            "threshold_usd": _l13_thr,
+                            "front_side_exemptions": int(le["lockout_front_side_exemptions"]),
+                            "max_front_side_exemptions": _l13_fs_max,
+                            "front_side_read": _l13_front_dbg,
+                            "trade_cycles": int(le.get("trade_cycles") or 0),
+                        })
                     if _l13_locked:
                         _re_ok = False
                         _re_reason = _l13_why

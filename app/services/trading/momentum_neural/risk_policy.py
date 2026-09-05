@@ -4215,6 +4215,9 @@ def symbol_day_loss_lockout_decision(
     day_net_realized_usd: float | None,
     max_loss_per_trade_usd: float | None,
     r_multiple: float,
+    front_side: bool = False,
+    front_side_exemptions: int = 0,
+    max_front_side_exemptions: int = 0,
 ) -> tuple[bool, str, float | None]:
     """L13 (2026-08-09): pure SYMBOL-DAY LOSS LOCKOUT decision at the recycle edge
     (no I/O — the caller composes ``day_net_realized_usd`` from the session ledger
@@ -4251,6 +4254,22 @@ def symbol_day_loss_lockout_decision(
         return False, "no_threshold_basis", None
     threshold = k * basis
     if net <= -threshold:
+        # FRONT-SIDE CONDITIONING (2026-09-05, Ross Parity Bench). The 16-window derivation
+        # above had no symbol-day that recovered from below -1.01R; the bench's Ross
+        # winners are exactly those days: JWEL 2026-08-10 (Ross +$42,100; CHILI locked at
+        # -$109 after two losing legs while the name kept running) and EDBL 2026-07-27
+        # (Ross +$33,000; CHILI -$81). The lock stays the rule; the exception is the SAME
+        # tape state the fresh-ignition cap exemption already trusts (tape_confirms_hold
+        # AND the running-up burst map), bounded by the same per-session budget -- a
+        # backside name locks exactly as before, and the second loss on a front-side name
+        # re-tests the lock with the budget spent.
+        try:
+            used = int(front_side_exemptions or 0)
+            cap = int(max_front_side_exemptions or 0)
+        except (TypeError, ValueError):
+            used, cap = 0, 0
+        if bool(front_side) and cap > 0 and used < cap:
+            return False, "front_side_exempt", threshold
         return True, "symbol_day_loss_lockout", threshold
     return False, "above_lockout_threshold", threshold
 

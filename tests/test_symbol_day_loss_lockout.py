@@ -157,3 +157,63 @@ def test_ang_lockout_ay_gumagamit_ng_day_net_hindi_session_lang():
     i_l13 = src.find("symbol_day_loss_lockout_decision(")
     window = src[i_l13 - 2500 : i_l13]
     assert "symbol_day_banked_pnl_other_sessions" in window
+
+
+# ── Front-side conditioning (2026-09-05, Ross Parity Bench) ─────────────────
+
+
+def test_front_side_default_ay_byte_identical():
+    # walang front_side kwargs => eksaktong dating desisyon
+    locked, reason, thr = symbol_day_loss_lockout_decision(
+        enabled=True, day_net_realized_usd=-508.20, max_loss_per_trade_usd=130.0, r_multiple=1.5,
+    )
+    assert (locked, reason, thr) == (True, "symbol_day_loss_lockout", 195.0)
+
+
+def test_front_side_na_may_budget_ay_exempt_isang_beses():
+    kw = dict(enabled=True, day_net_realized_usd=-508.20, max_loss_per_trade_usd=130.0, r_multiple=1.5)
+    locked, reason, thr = symbol_day_loss_lockout_decision(
+        **kw, front_side=True, front_side_exemptions=0, max_front_side_exemptions=1,
+    )
+    assert (locked, reason, thr) == (False, "front_side_exempt", 195.0)
+    # budget spent => locks exactly as before
+    locked, reason, _ = symbol_day_loss_lockout_decision(
+        **kw, front_side=True, front_side_exemptions=1, max_front_side_exemptions=1,
+    )
+    assert (locked, reason) == (True, "symbol_day_loss_lockout")
+
+
+def test_backside_ay_naka_lock_kahit_may_budget():
+    locked, reason, _ = symbol_day_loss_lockout_decision(
+        enabled=True, day_net_realized_usd=-508.20, max_loss_per_trade_usd=130.0, r_multiple=1.5,
+        front_side=False, front_side_exemptions=0, max_front_side_exemptions=1,
+    )
+    assert (locked, reason) == (True, "symbol_day_loss_lockout")
+
+
+def test_zero_budget_ay_walang_exemption():
+    locked, reason, _ = symbol_day_loss_lockout_decision(
+        enabled=True, day_net_realized_usd=-508.20, max_loss_per_trade_usd=130.0, r_multiple=1.5,
+        front_side=True, front_side_exemptions=0, max_front_side_exemptions=0,
+    )
+    assert (locked, reason) == (True, "symbol_day_loss_lockout")
+
+
+def test_hindi_pa_lampas_sa_threshold_ay_hindi_exempt_at_hindi_locked():
+    locked, reason, _ = symbol_day_loss_lockout_decision(
+        enabled=True, day_net_realized_usd=-100.0, max_loss_per_trade_usd=130.0, r_multiple=1.5,
+        front_side=True, front_side_exemptions=0, max_front_side_exemptions=1,
+    )
+    assert (locked, reason) == (False, "above_lockout_threshold")
+
+
+def test_ang_call_site_ay_nagbabasa_ng_front_side_at_may_dedicated_emit():
+    src = _tick_source()
+    i_l13 = src.find("symbol_day_loss_lockout_decision(")
+    window = src[i_l13 - 3000 : i_l13 + 3000]
+    assert "tape_confirms_hold(_l13_sym, db=db)" in window
+    assert "tape_running_up_signal_map" in window
+    assert "front_side=_l13_front" in window
+    assert "live_symbol_day_loss_lockout_front_side_exempt" in window
+    # the budget is the fresh-ignition budget: one documented setting, no new literal
+    assert '"chili_momentum_max_ignition_exemptions", 1' in window
