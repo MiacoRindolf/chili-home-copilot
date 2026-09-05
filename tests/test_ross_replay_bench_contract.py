@@ -1139,31 +1139,52 @@ def test_the_record_carries_names_and_a_hash_never_values():
 
 
 # ── invariant 7: cold start is applied to every receipt ───────────────────────────
+# The verdict is tick-denominated (the FSM's own insufficient_bars guard is); wall uptime
+# is recorded and warned about. Grid 1 s unless the receipt env says otherwise.
 
-def _cs_receipt(events):
-    return {"events": events}
+def _cs_receipt(events, grid="1.0"):
+    return {"events": events, "env": {"GRID_STEP_S": grid}}
 
 
 def _cs_ev(ts, et):
     return {"ts": ts, "event_type": et, "payload": {}}
 
 
-def test_an_entry_inside_the_window_lead_is_a_cold_start_problem():
+def test_an_entry_before_min_ticks_is_a_cold_start_problem():
     r = _cs_receipt([_cs_ev("2026-07-23 13:00:00", "live_runner_started"),
-                  _cs_ev("2026-07-23 13:00:03", "live_entry_backside_bench_veto"),
-                  _cs_ev("2026-07-23 13:00:15", "live_entry_candidate_detected"),
-                  _cs_ev("2026-07-23 13:00:17", "live_entry_filled")])
+                     _cs_ev("2026-07-23 13:00:01", "live_entry_backside_bench_veto"),
+                     _cs_ev("2026-07-23 13:00:03", "live_entry_candidate_detected"),
+                     _cs_ev("2026-07-23 13:00:04", "live_entry_filled")])
     problems, rec = B.cold_start_problems(r, min_uptime_s=60.0, min_ticks=6)
-    assert len(problems) == 1 and problems[0].startswith("cold_start:live_entry_candidate_detected")
-    assert rec["first_entry_decisive_cold"]["uptime_s"] == 15.0
+    assert len(problems) == 1 and problems[0].startswith("cold_start:live_entry_candidate_detected at runner tick 3")
+    assert rec["tick_cold_entry"]["ticks_seen"] == 3 and rec["tick_cold_entry"]["uptime_s"] == 3.0
     assert rec["tag_count"] == 3   # the veto is tagged too, but only the entry makes a problem
+
+
+def test_an_entry_cold_by_uptime_only_is_recorded_and_scoreable():
+    # NCRA 07-29 shape: candidate on grid tick 8, fill at 13 s -- 13 runner ticks, 13 s uptime
+    r = _cs_receipt([_cs_ev("2026-07-29 12:15:00", "live_runner_started"),
+                     _cs_ev("2026-07-29 12:15:08", "live_entry_candidate_detected"),
+                     _cs_ev("2026-07-29 12:15:13", "live_entry_filled")])
+    problems, rec = B.cold_start_problems(r, min_uptime_s=60.0, min_ticks=6)
+    assert problems == []
+    assert rec["tick_cold_entry"] is None
+    assert [t["ticks_seen"] for t in rec["uptime_only_entries"]] == [8, 13]
+
+
+def test_the_grid_step_from_the_receipt_env_sets_the_tick_count():
+    # live-like cadence: 10 s per tick -> 40 s of uptime is only 4 ticks
+    r = _cs_receipt([_cs_ev("2026-07-23 13:00:00", "live_runner_started"),
+                     _cs_ev("2026-07-23 13:00:40", "live_entry_submitted")], grid="10")
+    problems, rec = B.cold_start_problems(r, min_uptime_s=60.0, min_ticks=6)
+    assert rec["grid_step_s"] == 10.0 and len(problems) == 1 and "runner tick 4" in problems[0]
 
 
 def test_early_vetoes_alone_are_not_a_problem():
     r = _cs_receipt([_cs_ev("2026-07-23 13:00:00", "live_runner_started"),
-                  _cs_ev("2026-07-23 13:00:03", "live_entry_backside_bench_veto"),
-                  _cs_ev("2026-07-23 13:20:00", "live_entry_candidate_detected"),
-                  _cs_ev("2026-07-23 13:20:02", "live_entry_filled")])
+                     _cs_ev("2026-07-23 13:00:03", "live_entry_backside_bench_veto"),
+                     _cs_ev("2026-07-23 13:20:00", "live_entry_candidate_detected"),
+                     _cs_ev("2026-07-23 13:20:02", "live_entry_filled")])
     problems, rec = B.cold_start_problems(r, min_uptime_s=60.0, min_ticks=6)
     assert problems == []
     assert rec["first_entry_decisive_cold"] is None and rec["tag_count"] == 1
@@ -1171,7 +1192,7 @@ def test_early_vetoes_alone_are_not_a_problem():
 
 def test_without_runner_started_the_first_event_is_the_clock_origin():
     r = _cs_receipt([_cs_ev("2026-07-23 13:00:00", "live_watch_started"),
-                  _cs_ev("2026-07-23 13:00:40", "live_entry_submitted")])
+                     _cs_ev("2026-07-23 13:00:02", "live_entry_submitted")])
     problems, rec = B.cold_start_problems(r, min_uptime_s=60.0, min_ticks=6)
     assert rec["runner_started_ts"] == "2026-07-23 13:00:00"
     assert len(problems) == 1
