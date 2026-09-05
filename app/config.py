@@ -5213,8 +5213,14 @@ class Settings(BaseSettings):
     # mismo ang nagpapaliit ng qty sa parehong dolyar na risk. Ang pinakamasamang
     # epekto sa isang panalo ay mas malapad na stop + mas maliit na size. Ang
     # kulang na tape (<6 nonempty bucket) ⇒ walang pagbabago (dating gawi).
+    # 2026-09-05 (Ross Parity Bench, JWEL 08-10): shipped OFF this was a DARK FLAG while
+    # the mechanism it guards — a stop inside the name's own noise, risk-first sizing
+    # buying 10x size for it — cost -$507 on one 3-second leg. ON by doctrine (no dark
+    # flags); rollback = CHILI_MOMENTUM_STOP_NOISE_FLOOR_ENABLED=0. The floor is now also
+    # a HARD lower bound on the structural / structure-capped resolution
+    # (paper_execution.structural_or_vol_floored_atr_pct noise_floor_atr_pct).
     chili_momentum_stop_noise_floor_enabled: bool = Field(
-        default=False,
+        default=True,
         validation_alias=AliasChoices("CHILI_MOMENTUM_STOP_NOISE_FLOOR_ENABLED"),
     )
     # Median ng 30s high-low range sa 10 pinakabagong NONEMPTY bucket (>=2 print)

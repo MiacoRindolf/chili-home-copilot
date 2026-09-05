@@ -131,8 +131,14 @@ def test_this_is_not_a_reject_gate():
     assert q > 0, "lumiit pero hindi tinanggihan"
 
 
-def test_ships_off_pending_ab():
+def test_the_floor_knobs_are_wired():
     s = Settings()
-    assert s.chili_momentum_stop_noise_floor_enabled is False
     assert s.chili_momentum_stop_noise_floor_min_buckets == 6
     assert s.chili_momentum_stop_noise_floor_lookback_seconds == 900.0
+
+
+def test_the_noise_floor_ships_on():
+    """2026-09-05: `chili_momentum_stop_noise_floor_enabled` was a dark flag (default False,
+    absent from the lane .env) while the mechanism it guards cost -$507 on one JWEL leg in the
+    Ross Parity Bench. Doctrine: no dark flags. It ships ON; rollback is the env override."""
+    assert Settings().chili_momentum_stop_noise_floor_enabled is True
