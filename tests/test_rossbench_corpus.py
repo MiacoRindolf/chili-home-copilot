@@ -836,3 +836,21 @@ def test_read_corpus_pairs_matches_the_hydrators_column_contract():
         pairs = rd.read_corpus_pairs(str(path))
     # De-duplicated, order preserved: BBB (June) leads by the era key.
     assert pairs == [("BBB", date(2026, 6, 26)), ("AAA", date(2026, 8, 17))]
+
+
+# ── a malformed symbol is unhydratable and never reaches corpus.csv (2026-09-05) ────
+
+def test_narrative_symbol_is_flagged_and_kept_out_of_the_csv():
+    import sys, pathlib
+    sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1] / "scripts"))
+    import rossbench_corpus as rc
+    assert rc._symbol_is_ticker("PPCB") is True
+    assert rc._symbol_is_ticker("NUWE (09:30 pivot 5.34)") is False
+    assert rc._symbol_is_ticker("EDBL/LGHL/BIYA") is False
+    assert rc._symbol_is_ticker("UNKNOWN") is False
+    doc = {"rows": [
+        {"symbol": "PPCB", "date": "2026-08-27", "record_kind": "ross_trade"},
+        {"symbol": "NUWE (09:30 pivot 5.34)", "date": "2026-07-30", "record_kind": "ross_no_trade"},
+    ]}
+    text = rc.render_csv(doc)
+    assert "PPCB" in text and "NUWE" not in text

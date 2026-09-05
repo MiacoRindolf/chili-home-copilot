@@ -107,6 +107,7 @@ import argparse
 import csv
 import hashlib
 import json
+import re
 import logging
 import os
 import sys
@@ -1082,6 +1083,20 @@ def _record_batch(cur, **kw: Any) -> None:
     )
 
 
+# A hydratable symbol is a ticker, nothing else. hydration_jobs.symbol is varchar(32), and
+# on 2026-09-05 a corpus row whose symbol field carried narrative -- "NUWE (09:30 pivot
+# 5.34)" -- reached the FAILURE path, whose own _upsert_job then raised
+# StringDataRightTruncation and aborted the whole 60-row pass at row 32. Two rules follow:
+# a symbol that is not a ticker is REJECTED before any DB work, and recording a failure
+# can never itself fail the corpus.
+_HYDRATABLE_SYMBOL_RE = re.compile(r"^[A-Z][A-Z0-9.\-]{0,15}$")
+
+
+def symbol_is_hydratable(symbol: str) -> bool:
+    sym = str(symbol or "").strip().upper()
+    return bool(sym) and sym != "UNKNOWN" and bool(_HYDRATABLE_SYMBOL_RE.match(sym))
+
+
 def _upsert_job(cur, symbol: str, day: date, dataset: str, provider: str,
                 status: str, rows: int, batch_id: str | None,
                 error: str | None) -> None:
@@ -1423,6 +1438,13 @@ def hydrate(
 
         for symbol, day in pairs:
             symbol = symbol.upper().strip()
+            if not symbol_is_hydratable(symbol):
+                r = HydrationResult(symbol[:32], day, provider, status="rejected",
+                                    error="symbol_malformed")
+                results.append(r)
+                log.warning("[hydrator] REJECTED %r %s: not a ticker (no DB write)", symbol, day)
+                log.info("[hydrator] %s", json.dumps(r.as_dict()))
+                continue
             if not force and job_status(conn, symbol, day, "trades", provider) == "done":
                 log.info("[hydrator] skip %s %s (already done)", symbol, day)
                 results.append(HydrationResult(symbol, day, provider, status="skipped"))
@@ -1443,9 +1465,15 @@ def hydrate(
                 conn.rollback()       # abort the corpus; it is recorded and skipped
                 r = HydrationResult(symbol, day, provider, status="failed",
                                     error=f"{type(exc).__name__}: {exc}")
-                with conn.cursor() as cur:
-                    _upsert_job(cur, symbol, day, "trades", provider, "failed", 0, None, r.error)
-                conn.commit()
+                try:
+                    with conn.cursor() as cur:
+                        _upsert_job(cur, symbol, day, "trades", provider, "failed", 0, None,
+                                    (r.error or "")[:2000])
+                    conn.commit()
+                except Exception:  # noqa: BLE001 - recording a failure must not fail the corpus
+                    conn.rollback()
+                    log.warning("[hydrator] could not record the failure for %s %s", symbol, day,
+                                exc_info=True)
                 log.exception("[hydrator] %s %s FAILED", symbol, day)
                 if provider == "iqfeed" and iq is not None:
                     try:

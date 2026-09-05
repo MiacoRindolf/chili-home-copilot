@@ -715,6 +715,13 @@ def build_rows(
         }
         row.update(hyd)
         row.update(extra)
+        if not _symbol_is_ticker(symbol):
+            # Narrative in the ledger's symbol field ("NUWE (09:30 pivot 5.34)",
+            # "EDBL/LGHL/BIYA"). Reported, never handed to the hydrator: on 2026-09-04 one of
+            # these aborted a 60-row IQFeed pass at row 32 (varchar(32) on hydration_jobs).
+            row["hydration_status"] = "symbol_malformed"
+            row["provider"] = "unhydratable"
+            row["provider_reason"] = "symbol_malformed"
         scoreable, reason = _scoreable(row)
         row["scoreable"] = scoreable
         row["scoreable_reason"] = reason
@@ -846,6 +853,14 @@ def _counter(values: Iterable[str]) -> dict[str, int]:
 # OUTPUT
 # ─────────────────────────────────────────────────────────────────────────────
 
+_TICKER_RE = re.compile(r"^[A-Z][A-Z0-9.\-]{0,15}$")
+
+
+def _symbol_is_ticker(symbol: Any) -> bool:
+    sym = str(symbol or "").strip().upper()
+    return bool(sym) and sym != "UNKNOWN" and bool(_TICKER_RE.match(sym))
+
+
 def _csv_cell(value: Any) -> str:
     if value is None:
         return ""
@@ -866,6 +881,8 @@ def render_csv(doc: dict[str, Any], kinds: Sequence[str] | None = None) -> str:
     for row in doc["rows"]:
         if kinds and row["record_kind"] not in kinds:
             continue
+        if not _symbol_is_ticker(row.get("symbol")):
+            continue  # unhydratable; reported in corpus.json, never in the hydrate CSV
         w.writerow([_csv_cell(row.get(c)) for c in CSV_COLUMNS])
     return buf.getvalue()
 
