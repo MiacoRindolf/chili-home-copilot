@@ -1683,7 +1683,7 @@ class MockBrokerAdapter:
         return [], self._freshness()
 
     def list_open_orders(
-        self, *, product_id: Optional[str] = None, limit: int = 50
+        self, *, product_id: Optional[str] = None, limit: int = 50, strict: bool = False
     ) -> tuple[list[NormalizedOrder], FreshnessMeta]:
         # Immediate-fill (P0): nothing rests open. Resting (P1): the still-``open`` orders.
         pid = str(product_id).upper() if product_id is not None else None
@@ -1738,6 +1738,39 @@ class MockBrokerAdapter:
             "freshness": freshness,
             "reason": None,
         }
+
+    def list_positions(self) -> tuple[list[dict[str, Any]], FreshnessMeta]:
+        """Open positions from this broker's own fills, in the real adapter's row shape
+        (venue/alpaca_spot.py:3933: product_id, raw_symbol, qty, side).
+
+        The Alpaca entry seam's strict posture read (live_runner.py:6215
+        ``_strict_alpaca_empty_entry_posture``) calls ``list_positions()`` and
+        ``list_open_orders(strict=True)`` before every entry attempt and requires both to
+        be lists fresh within 2 s; without this method every attempt was refused as
+        ``alpaca_account_posture_unreadable`` (SDOT 2026-06-26 canon run, 2026-09-04:
+        19/26 attempts, after the six earlier gates and the market clock were answered).
+        ``strict`` on ``list_open_orders`` is accepted for signature parity; the mock's read
+        never fails, so there is nothing to fail closed on.
+        """
+        qty: dict[str, float] = {}
+        for fill in self._fills:
+            pid = str(fill.product_id or "").strip().upper()
+            size = float(fill.size or 0.0)
+            qty[pid] = qty.get(pid, 0.0) + (
+                size if str(fill.side).lower() in {"buy", "bid", "long"} else -size
+            )
+        out = []
+        for pid, q in qty.items():
+            if abs(q) < 1e-9:
+                continue
+            out.append({
+                "product_id": pid,
+                "raw_symbol": pid,
+                "qty": q,
+                "side": "long" if q > 0 else "short",
+                "raw": {"venue": _VENUE, "source": "replay_mock_book"},
+            })
+        return out, self._freshness()
 
     def get_position_quantity_truth(self, product_id: str) -> dict[str, Any]:
         pid = str(product_id or "").strip().upper()
