@@ -380,3 +380,29 @@ def test_fix_b_flag_off_retains_entry_state_byte_identical(monkeypatch, db):
     assert isinstance(le.get("position"), dict)
     # Recycle bookkeeping still runs (only the entry-state reset is gated).
     assert le.get("trade_cycles") == 2
+
+
+def test_the_burst_window_stamp_is_cleared_on_recycle():
+    """#1275's burst stamp is sticky by design and NOBODY cleared it (measured 2026-09-05:
+    every re-entry after a completed leg was sold 1-2 s after its fill because the recycled
+    watcher inherited the previous leg's stamp). The recycle reset is the owner."""
+    for k in ("burst_started_epoch", "burst_track", "burst_window_dbg"):
+        assert k in lr._RECYCLE_ENTRY_STATE_KEYS, f"{k} missing from _RECYCLE_ENTRY_STATE_KEYS"
+    le = {"burst_started_epoch": 1.0, "burst_track": [(1.0, 2.0)], "burst_window_dbg": {"elapsed_s": 50},
+          "entry_order_id": "x", "trade_cycles": 3, "realized_pnl_usd": -1.0}
+    cleared = lr._reset_entry_state_on_recycle(le)
+    assert {"burst_started_epoch", "burst_track", "burst_window_dbg"} <= set(cleared)
+    assert "burst_started_epoch" not in le and "burst_track" not in le and "burst_window_dbg" not in le
+    assert le["trade_cycles"] == 3 and le["realized_pnl_usd"] == -1.0   # cross-cycle state kept
+
+
+def test_a_recycled_watcher_starts_a_new_burst_clock():
+    # after the reset, burst_window_decision must be UNARMED (no stamp) -> no instant exit
+    le = {"burst_started_epoch": 100.0, "burst_track": [(100.0, 2.0), (140.0, 2.5)]}
+    lr._reset_entry_state_on_recycle(le)
+    fire, started, dbg = lr.burst_window_decision(
+        le.get("burst_track") or [], now_epoch=200.0, price=2.6,
+        burst_started_epoch=le.get("burst_started_epoch"),
+        min_move_pct=1.5, lookback_s=60.0, decision_s=45.0,
+    )
+    assert fire is False and started is None and dbg.get("no_track") is True
