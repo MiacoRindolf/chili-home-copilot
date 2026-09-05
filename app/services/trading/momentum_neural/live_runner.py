@@ -22740,8 +22740,13 @@ def _own_tape_noise_floor_pct(db, symbol: str, *, entry_price: float) -> tuple[f
             "GROUP BY 1 HAVING count(*) >= 2 ORDER BY 1 DESC LIMIT 10"
         ), {"s": sym, "w": look, "as_of": _ao})
     except Exception:
+        # A failed read must be VISIBLE (2026-09-05): the floor fails open on None, so a
+        # silent exception here is indistinguishable from "no tape" — and in the bench it
+        # let a 0.30% stop stand against a 4.5% noise band with nothing in the log.
+        _log.warning("[momentum_live] stop-noise floor read failed for %s", sym, exc_info=True)
         return None, 0
     if not rows:
+        _log.warning("[momentum_live] stop-noise floor: no tape rows for %s in the %.0fs before %s", sym, look, _ao)
         return None, 0
     try:
         ranges = sorted(
@@ -37622,11 +37627,25 @@ def tick_live_session(
         # (liliit ang qty sa risk-first) — hindi kailanman humaharang ng entry.
         # Ito ang parehong _eff_atr_pct na pinagmumulan ng SIZING at ng
         # inilalagay na stop, kaya magkasama silang gumagalaw.
+        # The measured noise floor as an ATR-pct — a HARD lower bound carried into the
+        # structural/cap resolution below (2026-09-05): the #1278 floor used to be applied
+        # here and then ERASED by the structure-capped branch (JWEL 11:39:09Z: 15% -> 0.30%
+        # -> 1,284 shares -> -$507 in 3 s). None when the flag is off or the tape is thin.
+        _nf_floor_atr: float | None = None
         if bool(getattr(settings, "chili_momentum_stop_noise_floor_enabled", False)):
             try:
                 _nf_pct, _nf_buckets = _own_tape_noise_floor_pct(
                     db, sess.symbol, entry_price=guarded_ask,
                 )
+                try:
+                    _nf_min_b = int(getattr(settings, "chili_momentum_stop_noise_floor_min_buckets", 6) or 6)
+                    if (
+                        _nf_pct is not None and math.isfinite(float(_nf_pct)) and float(_nf_pct) > 0.0
+                        and int(_nf_buckets or 0) >= max(3, _nf_min_b) and float(_stop_atr_mult or 0.0) > 0.0
+                    ):
+                        _nf_floor_atr = float(_nf_pct) / float(_stop_atr_mult)
+                except (TypeError, ValueError):
+                    _nf_floor_atr = None
                 _eff_atr_pct, _nf_meta = stop_noise_floor_decision(
                     atr_pct=_eff_atr_pct,
                     stop_atr_mult=_stop_atr_mult,
@@ -37636,6 +37655,20 @@ def tick_live_session(
                         settings, "chili_momentum_stop_noise_floor_min_buckets", 6
                     ) or 6),
                 )
+                if not _nf_meta.get("applied"):
+                    # OBSERVABILITY (2026-09-05, JWEL 08-10 bench): the flag was ON and the
+                    # floor did NOT act on a 0.30% stop that the name's own tape (median
+                    # 30-s range 4.5%) should have widened 15x — and nothing said why. A
+                    # floor that can decline silently is a dark flag even when enabled.
+                    _nf_skip = dict(_nf_meta)
+                    _nf_skip["noise_range_pct_read"] = _nf_pct
+                    _nf_skip["buckets_read"] = int(_nf_buckets or 0)
+                    _nf_skip["atr_pct_in"] = _eff_atr_pct
+                    _emit(db, sess, "live_entry_stop_noise_floor_skipped", _nf_skip)
+                    _log.warning(
+                        "[momentum_live] stop-noise floor %s NOT applied: %s",
+                        sess.symbol, _nf_skip,
+                    )
                 if _nf_meta.get("applied"):
                     le["entry_stop_noise_floor"] = _nf_meta
                     _emit(db, sess, "live_entry_stop_noise_floored", _nf_meta)
@@ -37662,7 +37695,15 @@ def tick_live_session(
             structural_stop_price=le.get("structural_stop_price"),
             entry_price=guarded_ask,
             stop_atr_mult=_stop_atr_mult,
+            noise_floor_atr_pct=_nf_floor_atr,
         )
+        if _nf_floor_atr is not None and str(_stop_model).endswith("+noise_floored"):
+            _emit(db, sess, "live_entry_stop_noise_floor_bound", {
+                "model": _stop_model,
+                "noise_floor_atr_pct": round(float(_nf_floor_atr), 6),
+                "stop_atr_pct": round(float(_eff_atr_pct), 6),
+                "stop_pct": round(max(0.003, float(_eff_atr_pct) * float(_stop_atr_mult or 0.6)), 6),
+            })
         le["entry_stop_atr_pct"] = _eff_atr_pct
         le["entry_stop_model"] = _stop_model
         # DESIGN #3: stash the realized intraday HEADROOM (session high) + day-range so
