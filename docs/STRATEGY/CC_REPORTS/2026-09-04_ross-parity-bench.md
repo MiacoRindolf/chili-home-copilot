@@ -336,3 +336,34 @@ The $3.43 is real (the recorded NBBO's max ask in that window is 3.49): CHILI's 
 Instrument defect found by the same timeline: the PPCB pin carries `exit_ts_utc_pinned == entry_ts_utc_pinned` (no exit clock stated → the pinner defaulted the exit onto the entry), so Ross's stage reads `exited` at 08:30:49 and the first-divergence label is `exited/blocked`. The pinner should leave an unstated exit unpinned (Ross stays `filled`); noted for `rossbench_pin_ross_events.py`.
 
 Sweep batch 1 pace: ~25 min per case on the denser August tapes (PPCB: 282k prints, 69k Polygon quotes, 78 t/s at stride 2); EDBL running at 00:30Z.
+
+
+---
+
+## Part 5 — 2026-09-05 early hours: the canon fills; the ninth gate was a production hazard; the sweep universe
+
+### Alpaca canon — gate 9 and the first fill
+
+Gate 9 (#1335): `risk_ledger_unreadable` ×19 folded `psycopg2.errors.UndefinedTable: relation "broker_symbol_action_claims" does not exist` — raised in `read_action_claim` against the **hydrated tape DB**. The Alpaca claim helpers open `SessionLocal()` (app/db.py's process-wide engine, bound at import to `DATABASE_URL`), and the bench contract had set `DATABASE_URL` to the tape source because the driver's `PROD` was `DATABASE_URL`. **In the nightly the same driver runs with `DATABASE_URL` = the live `chili`: a replay that reached this seam would have read — and on the claim paths written — production.** Fix: `TAPE_SOURCE_URL` names the tape; `DATABASE_URL` is the sink in the bench contract and the nightly; `broker_symbol_action_claims` joins the per-run sink reset. The Robinhood family never calls these helpers, which is why the control arm filled for three runs while the canon did not.
+
+**Run #10 (nine gates, tree `0b0c1fd2e`, VERIFIED refs): the first Alpaca fill.** SDOT 2026-06-26, 09:18:12 ET, 15 shares — the same second the Robinhood arm entered. Then:
+
+| ET | CHILI (Alpaca canon) | Robinhood control, same second |
+|---|---|---|
+| 09:18:13 | filled; `tranche_oco_skipped_extended_hours`; `alpaca_scale_out_suppressed_for_deadman`; `live_blocked_by_risk wide_bbo_spread` (`max_spread_bps=12.00`) | filled; scale-out limit placed |
+| 09:18:13 → 09:29:59 | **546 × `wide_bbo_spread`** — spread 17–460 bps against a 12-bps cap, later 300; no exit logic ran | bailed out 09:18:32 (−$10.6), re-entered 09:23:23, scaled out, trailed out 09:24:34; net +$3.50 |
+| 10:00 | still held, 15 sh, MTM **+$25.20** at the grid's last bid (SDOT ran to $12) | flat |
+
+Stage: `filled_exited_worse(no_exit_event)`, CHILI +$25.20 vs Ross +$5,885. The canon's mechanism is not a gate: **a premarket Alpaca position has no exit path** — the deadman stop is inert in extended hours (measured 2026-08-26), OCO tranches are skipped, and the FSM's own exits are blocked every tick by the held-tick spread cap (12 bps on a $10 name, the same 12 bps the live ANPA position sat behind on 09-04). On SDOT that accident was worth +$25 versus the Robinhood arm's +$3.50; the sweep will say what it is worth across the winners and the losers. Neither the 12-bps cap nor the caps in the lane's `.env` are strategy levers to loosen by hand — they enter the ledger.
+
+Also from this run: the lane's `.env` carries 153 `CHILI_*` keys and the bench passed two (account id, dispatch mode). The 12-bps figure is a default, so this case is faithful, but any of the other 151 could change a decision. `--lane-env` (#1337) now layers the lane's `CHILI_*` keys under the contract (names + sha256 in the run record, never values). Note the deployed env is `.env` **plus** the supervisor's launch overlay (`timeshare_supervisor.py:88` sets the dispatch mode there, not in `.env`), so the two required keys stay explicit exports alongside `--lane-env`.
+
+### Hydration: the post-close IQFeed pass aborted at row 32
+
+`StringDataRightTruncation` — in the hydrator's own failure path, recording the failure of a corpus row whose symbol field carried narrative (`NUWE (09:30 pivot 5.34)`) into `hydration_jobs.symbol` (varchar 32). The remaining 28 rows (WETO 08-17, UPC 08-03 among them) were never attempted; three more narrative "symbols" sat in the same CSV. Fixed (#1336): a non-ticker is rejected before any DB work and reported; recording a failure can never fail the corpus; the corpus builder flags such rows `symbol_malformed` and keeps them out of `corpus.csv`. The 23 clean remaining rows were relaunched at 01:19Z.
+
+Corpus after the first pass: **152 replayable symbol-days; 65 Ross winners hydrated + pinned ($792k of his P&L); 9 losers ($51.8k)** — the sweep universe and its negative control.
+
+### Sweep batch 1 — restarted with an hour per case
+
+The first launch used a 25-minute per-case timeout; the denser July/August tapes take 25–40 minutes at stride 2 (PPCB: 282k prints + 69k Polygon quotes). EHGO timed out and two more produced no receipt; batch 1 was stopped (PPCB's receipt kept) and relaunched for the remaining 11 cases with `--timeout-s 3600` at 01:09Z. The tape-provenance invariant that flagged PPCB (`iqfeed` trades + `polygon` quotes) was refined to a per-table rule (#1334) — that pairing is how every August/September symbol-day is hydrated by design.
