@@ -766,6 +766,8 @@ _BENCH_PAYLOAD_KEYS = (
     # whitelisted, ``error`` was not, and the block repeated 2,590 times per case unnamed.
     "error", "deadman_order_id", "deadman_client_order_id", "frozen_order_type",
     "superseding_order_type", "handoff_token",
+    # 2026-09-05 lockout-watch A/B: the hold event's WHY is the nested tape read
+    "tape", "watch", "front_side_exemptions",
 )
 
 
