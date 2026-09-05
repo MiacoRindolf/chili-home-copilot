@@ -5219,8 +5219,15 @@ class Settings(BaseSettings):
     # flags); rollback = CHILI_MOMENTUM_STOP_NOISE_FLOOR_ENABLED=0. The floor is now also
     # a HARD lower bound on the structural / structure-capped resolution
     # (paper_execution.structural_or_vol_floored_atr_pct noise_floor_atr_pct).
+    # 2026-09-05 22:15Z A/B on the FULL subset (15 pairs, fixed driver, both arms): winners
+    # +462 (JWEL ml3 RH -505 -> -85, JWEL ml2 alpaca +48 -> +93) but the negative control
+    # FAILED: Ross's losers sum -81.84 (EZRA t3 alpaca -75 -> -143: the smaller leg-3 loss
+    # dodged the -1.5R symbol-day lockout and four more legs followed; INLF t1 RH -20 ->
+    # -40: the wider stop rode leg 2 down instead of bailing). The program rule is
+    # winners UP and losers NOT UP, so the floor stays OFF until the lockout interplay is
+    # conditioned; the bound in structural_or_vol_floored_atr_pct stays (inert when OFF).
     chili_momentum_stop_noise_floor_enabled: bool = Field(
-        default=True,
+        default=False,
         validation_alias=AliasChoices("CHILI_MOMENTUM_STOP_NOISE_FLOOR_ENABLED"),
     )
     # Median ng 30s high-low range sa 10 pinakabagong NONEMPTY bucket (>=2 print)
