@@ -1055,3 +1055,24 @@ def test_the_dispatch_mode_is_ambient_not_a_contract_key():
     assert dict(B.ALPACA_REQUIRED_AMBIENT_ENV).keys() == {
         B.ALPACA_ACCOUNT_ID_ENV, B.ALPACA_DISPATCH_MODE_ENV
     }
+
+
+# ── fence: the app engine is bound to the SINK; the tape has its own DSN ────────
+
+def test_the_app_engine_is_bound_to_the_sink_not_the_tape():
+    """MEASURED 2026-09-05 (SDOT 2026-06-26, alpaca_spot, eight gates answered): 19/26
+    entry attempts deferred ``risk_ledger_unreadable`` because the Alpaca claim helpers open
+    ``SessionLocal()`` -- app/db.py's engine, bound to DATABASE_URL -- and DATABASE_URL was
+    the hydrated tape DB, which has no ``broker_symbol_action_claims``. The tape is read
+    through TAPE_SOURCE_URL; DATABASE_URL is the sink."""
+    env = B.contract_env(case=CASE, **_CONTRACT_KWARGS)
+    assert env["TAPE_SOURCE_URL"] == _CONTRACT_KWARGS["source"]
+    assert env["DATABASE_URL"] == _CONTRACT_KWARGS["sink"]
+    assert env["TEST_DATABASE_URL"] == _CONTRACT_KWARGS["sink"]
+    assert env["DATABASE_URL"] != env["TAPE_SOURCE_URL"]
+
+
+def test_the_driver_reads_the_tape_from_tape_source_url_first():
+    src = _DRIVER.read_text(encoding="utf-8")
+    assert 'os.environ.get("TAPE_SOURCE_URL")' in src
+    assert '"broker_symbol_action_claims"' in src   # cleaned per run once the app engine is the sink

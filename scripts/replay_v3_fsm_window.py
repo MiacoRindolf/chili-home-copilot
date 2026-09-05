@@ -125,7 +125,19 @@ _PARITY_MOCK_KWARGS = dict(
 
 # READ-ONLY source DB (defaults to the local chili). SIM is the throwaway seeded DB (chili_test)
 # — its name MUST end in _test as a guard against ever pointing the seeded/cleaned run at prod.
-PROD = os.environ.get("DATABASE_URL", "postgresql://chili:chili@localhost:5433/chili")
+# TAPE SOURCE vs APP ENGINE (2026-09-05). ``PROD`` is the READ-ONLY tape source the mirrors
+# read from. It used to be DATABASE_URL -- but DATABASE_URL is ALSO what app/db.py binds the
+# process-wide engine to at import, and the Alpaca claim helpers open ``SessionLocal()`` on
+# that engine (alpaca_orphan_claims.py:6923). With DATABASE_URL pointing at the tape DB, every
+# committed claim ran against the hydrated research DB: ``relation
+# "broker_symbol_action_claims" does not exist`` -> ``risk_ledger_unreadable`` on 19/26
+# entry attempts (SDOT 2026-06-26, 2026-09-05) -- and against the LIVE ``chili`` when the
+# nightly ran the same driver. ``TAPE_SOURCE_URL`` names the tape; DATABASE_URL can then be
+# the sink so any app-engine session lands where the replay lives. Absent, the legacy
+# reading (DATABASE_URL is the tape) is byte-identical for every existing caller.
+PROD = (os.environ.get("TAPE_SOURCE_URL") or "").strip() or os.environ.get(
+    "DATABASE_URL", "postgresql://chili:chili@localhost:5433/chili"
+)
 SIM = os.environ.get("TEST_DATABASE_URL", "postgresql://chili:chili@localhost:5433/chili_test")
 
 
@@ -1269,6 +1281,10 @@ _SINK_SEED_TABLES = (
     "trading_automation_events", "trading_automation_sessions",
     "trading_automation_simulated_fills", "momentum_symbol_viability",
     "adaptive_risk_reservations", "adaptive_risk_opportunity_claims",
+    # written by the Alpaca claim helpers through the APP engine once DATABASE_URL is the
+    # sink (2026-09-05); a claim left by the previous run would block the next one with
+    # account_entry_claim_present
+    "broker_symbol_action_claims",
     # FK parents of the above that CASCADE cannot reach
     "adaptive_risk_decision_packets",
     "alpaca_paper_account_settlement_heads",

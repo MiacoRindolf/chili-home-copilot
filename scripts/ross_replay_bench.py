@@ -169,7 +169,9 @@ BENCH_QUESTION = "ross parity bench: exit and entry behaviour against a human le
 CONTRACT_ENV_KEYS: frozenset[str] = frozenset({
     "PYTHONPATH",           # the build tree under test (python itself reads this)
     "CHILI_PYTEST",         # skips app-startup migrations (app/main.py:55)
-    "DATABASE_URL",         # READ-ONLY source tape (replay_v3_fsm_window.py:128)
+    "TAPE_SOURCE_URL",      # READ-ONLY source tape the mirrors read (replay_v3_fsm_window.py PROD)
+    "DATABASE_URL",         # the APP ENGINE (app/db.py binds it at import) -> the SINK, never
+                            # the tape: Alpaca claim helpers open SessionLocal() on it (2026-09-05)
     "TEST_DATABASE_URL",    # the throwaway sink; its NAME must end in _test (:147-151)
     "SOURCE_FILTER",        # tape provenance allow-list (:183-185)
     "SYMBOL",
@@ -982,7 +984,8 @@ def contract_env(
     return {
         "PYTHONPATH": str(build),
         "CHILI_PYTEST": "1",
-        "DATABASE_URL": str(source),
+        "TAPE_SOURCE_URL": str(source),
+        "DATABASE_URL": str(sink),
         "TEST_DATABASE_URL": str(sink),
         "SOURCE_FILTER": SOURCE_FILTER_VALUE,
         "SYMBOL": case.symbol,
