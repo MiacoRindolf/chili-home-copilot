@@ -170,3 +170,37 @@ def test_the_release_path_preconditions_hold_on_the_mock() -> None:
     truth = b.get_order_by_client_order_id_truth("dm-1")
     assert truth["found"] is True and truth["order"].status in ("canceled", "cancelled")
     assert b.get_position_quantity("LABT") == pytest.approx(166.0)   # still held: exit is next
+
+
+def test_under_an_alpaca_family_every_order_carries_the_adapter_raw_shape() -> None:
+    from app.services.trading.momentum_neural import replay_v3 as rv3
+    b = MockBrokerAdapter(slippage_bps=0.0, venue_rt_bps=100.0, resting_limit_fills=True,
+                          freshness_mode="sim")
+    rv3.apply_replay_mock_identity(b, "alpaca_spot")
+    b.set_clock(REGULAR)
+    b.set_quote("LABT", RecordedQuote(bid=2.07, ask=2.09, last=2.08))
+    b.set_printed_volume("LABT", 10_000.0)
+    placed = b.place_limit_order_gtc(product_id="LABT", side="sell", base_size="10",
+                                     limit_price="2.00", client_order_id="exit-1",
+                                     time_in_force="day", extended_hours=True)
+    assert placed["ok"] is True
+    o = b.get_order_by_client_order_id_truth("exit-1")["order"]
+    assert o.order_type == "limit" and o.status == "filled"
+    assert o.raw["alpaca_status"] == "filled" and o.raw["filled_size"] == 10
+    assert o.raw["qty"] == 10.0 and o.raw["limit_price"] == 2.0 and o.raw["stop_price"] is None
+    assert o.raw["time_in_force"] == "day" and o.raw["extended_hours"] is True
+    assert o.raw["position_intent"] == "sell_to_close" and o.raw["fill_truth_readable"] is True
+    lst, _ = b.list_open_orders(product_id="LABT")
+    assert lst == []
+    m = b.place_market_order(product_id="LABT", side="buy", base_size="5", client_order_id="e-2")
+    mo = b.get_order(m["order_id"])[0]
+    assert mo.raw["alpaca_status"] == "filled" and mo.raw["position_intent"] == "buy_to_open"
+    assert mo.raw["filled_at"] is not None
+
+
+def test_other_families_keep_the_legacy_raw_shape() -> None:
+    from app.services.trading.momentum_neural import replay_v3 as rv3
+    b = _broker()
+    rv3.apply_replay_mock_identity(b, "robinhood_agentic_mcp")
+    o, _ = b.get_order(next(iter(b._orders)))
+    assert set(o.raw) == {"venue", "fee"}

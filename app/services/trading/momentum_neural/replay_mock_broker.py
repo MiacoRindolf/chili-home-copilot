@@ -450,9 +450,9 @@ class _RestingOrder:
     extended_hours: bool = False
     filled_at: Optional[str] = None
 
-    def to_normalized(self) -> NormalizedOrder:
+    def to_normalized(self, *, alpaca_raw: bool = False) -> NormalizedOrder:
         raw: dict[str, Any] = {"venue": _VENUE, "fee": self.fee}
-        if self.order_type == "stop":
+        if self.order_type == "stop" or alpaca_raw:
             # The runner's certification readers (live_runner.py:9378
             # _owner_transport_order_matches, :9707 _alpaca_protective_order_lifecycle,
             # :8974 _exact_alpaca_order_observation) read the REAL adapter's raw shape
@@ -481,7 +481,7 @@ class _RestingOrder:
                 "submitted_at": self.created_time,
                 "qty": float(self.base_size),
                 "notional": None,
-                "limit_price": None,
+                "limit_price": (float(self.limit_price) if self.limit_price is not None else None),
                 "stop_price": (float(self.stop_price) if self.stop_price is not None else None),
                 "time_in_force": self.time_in_force,
                 "order_class": None,
@@ -589,6 +589,9 @@ class MockBrokerAdapter:
         self._max_age_seconds = float(max_age_seconds)
         self._enabled = bool(enabled)
         self._account_identity = str(account_identity or "").strip()
+        # Set by set_execution_family (below): Alpaca families read orders in the real
+        # adapter's raw shape; default False keeps every other family byte-identical.
+        self._alpaca_order_shape: bool = False
         # Set by bind_account_id (below); mirrors AlpacaSpotAdapter._bound_account_id.
         self._bound_account_id: Optional[str] = None
         # P1 FIDELITY KNOBS (default OFF keeps basic marketable-limit behavior):
@@ -1282,6 +1285,21 @@ class MockBrokerAdapter:
 
         self._account_identity = str(identity or "").strip()
 
+    def set_execution_family(self, execution_family: Any) -> None:
+        """Replay-only seam: which venue's ORDER SHAPE this mock answers with.
+
+        The Alpaca runner certifies every order it owns -- entry, deadman, successor
+        exit -- from the real adapter's normalized ``raw`` (venue/alpaca_spot.py:2365):
+        ``alpaca_status`` / ``filled_size`` / ``qty`` / ``time_in_force`` /
+        ``position_intent`` / ``limit_price`` / ``extended_hours``. GATE #13 (2026-09-05):
+        the mock carried those on STOP orders only, so the successor exit that filled at
+        12:20:15 (FCUV 07-31 probe) was polled as ``pending_exit=True`` on every later tick
+        and PPCB 08-27 logged ``reconcile_orphaned_exit_detected`` x449 with a flat book.
+        Under an Alpaca family every order carries the shape; other families keep
+        ``{"venue", "fee"}`` byte-identical (parity suites)."""
+        fam = str(execution_family or "").strip().lower()
+        self._alpaca_order_shape = fam in {"alpaca_spot", "alpaca_short"}
+
     def bind_account_id(self, account_id: str) -> bool:
         """Freeze this adapter instance to one session/account generation.
 
@@ -1735,7 +1753,7 @@ class MockBrokerAdapter:
         # Immediate-fill (P0): nothing rests open. Resting (P1): the still-``open`` orders.
         pid = str(product_id).upper() if product_id is not None else None
         opens = [
-            o.to_normalized()
+            o.to_normalized(alpaca_raw=self._alpaca_order_shape)
             for o in self._orders.values()
             if o.status == "open" and (pid is None or o.product_id == pid)
         ]
@@ -1756,7 +1774,7 @@ class MockBrokerAdapter:
 
     def get_order(self, order_id: str) -> tuple[Optional[NormalizedOrder], FreshnessMeta]:
         o = self._orders.get(str(order_id))
-        n = o.to_normalized() if o is not None else None
+        n = o.to_normalized(alpaca_raw=self._alpaca_order_shape) if o is not None else None
         meta = getattr(self, "_oco", {}).get(str(order_id)) if n is not None else None
         if meta is not None and isinstance(n.raw, dict):
             # #1204 normalized shape: ang adopt path ay nagbabasa ng
@@ -2404,6 +2422,7 @@ class MockBrokerAdapter:
         # recorded NBBO crosses it. ``resting_limit_fills`` retains the richer latency,
         # partial-fill, and printed-volume behavior, but can never toggle basic limit-price
         # semantics off. MARKET orders continue to cross immediately.
+        _intent = "buy_to_open" if s in {"buy", "bid", "long"} else "sell_to_close"
         if order_type == "limit":
             pid_u = str(product_id).upper()
             ro = _RestingOrder(
@@ -2417,6 +2436,9 @@ class MockBrokerAdapter:
                 created_time=created,
                 created_at=created_at,
                 priority_sequence=priority_sequence,
+                time_in_force=(str(time_in_force).lower() if time_in_force else "day"),
+                position_intent=_intent,
+                extended_hours=bool(extended_hours),
                 executable_event_at=(
                     created_at
                     + timedelta(
@@ -2474,10 +2496,14 @@ class MockBrokerAdapter:
             priority_sequence=priority_sequence,
             executable_event_at=created_at,
             status="filled",
+            time_in_force=(str(time_in_force).lower() if time_in_force else "day"),
+            position_intent=_intent,
+            extended_hours=bool(extended_hours),
         )
         self._orders[order_id] = ro
         # _book_fill sets filled_size/fill_price/fee + appends the NormalizedFill.
         self._book_fill(ro, qty=float(size), price=float(fill_price))
+        ro.filled_at = created
         return {
             "ok": True,
             "venue": _VENUE,

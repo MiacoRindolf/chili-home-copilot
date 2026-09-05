@@ -5632,6 +5632,11 @@ def apply_replay_mock_identity(mock: Any, execution_family: str | None) -> Any:
     kwargs = replay_mock_identity_kwargs(execution_family)
     if kwargs:
         mock.set_account_identity(kwargs["account_identity"])
+    # GATE #13 (2026-09-05): the Alpaca runner certifies every order it owns from the real
+    # adapter's raw shape; the mock answers in that shape only when told the family.
+    setter = getattr(mock, "set_execution_family", None)
+    if callable(setter):
+        setter(execution_family)
     return mock
 
 
