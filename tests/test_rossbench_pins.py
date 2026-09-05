@@ -850,3 +850,38 @@ def test_the_usage_constraints_state_the_row_shape_in_band():
     blob = " ".join(pin.build_pins_doc([], [], provenance={})["usage_constraints"]).lower()
     assert "one row per manifest window" in blob
     assert "manifest_id" in blob and "entry_ts_utc_pinned" in blob
+
+
+def test_an_exit_pinned_at_or_before_the_entry_is_demoted_to_unpinned():
+    """MEASURED 2026-09-05: PPCB 2026-08-27 t2 carried exit_ts_utc_pinned == entry_ts_utc_pinned
+    (the exit leg's level_cross landed on the entry's print), so the timeline read Ross as
+    `exited` at his entry second. An exit is an exit only strictly after the entry."""
+    win = _window_with_both_legs()
+    entry_ev, exit_ev = win.leg("entry"), win.leg("exit")
+    entry_win = pin.build_search_window(win.day, entry_ev.stated, 600.0)
+    exit_win = pin.build_search_window(win.day, exit_ev.stated, 600.0)
+    same_second = BASE + timedelta(seconds=45)
+    row = pin.pin_window(win, {
+        "entry": pin.pin_event(entry_ev, [tick(45, 6.30)], entry_win),
+        "exit": pin.pin_event(exit_ev, [{**tick(45, 7.00), "observed_at": same_second}], exit_win),
+    })
+    assert row["entry_ts_utc_pinned"] == pin._iso_z(same_second)
+    assert row["exit_ts_utc_pinned"] is None
+    assert row["exit_pin_confidence"] == "unpinned"
+    assert any("not_after_entry" in n for n in row["notes"])
+    assert row["legs"]["exit"]["demotion"]["reason"] == "exit_not_after_entry"
+    assert row["legs"]["exit"]["demotion"]["pinned_second_utc_was"] == pin._iso_z(same_second)
+
+
+def test_an_exit_after_the_entry_is_untouched():
+    win = _window_with_both_legs()
+    entry_ev, exit_ev = win.leg("entry"), win.leg("exit")
+    entry_win = pin.build_search_window(win.day, entry_ev.stated, 600.0)
+    exit_win = pin.build_search_window(win.day, exit_ev.stated, 600.0)
+    exit_utc = pin.et_to_utc(DAY, 7 * 3600 + 35 * 60)
+    row = pin.pin_window(win, {
+        "entry": pin.pin_event(entry_ev, [tick(45, 6.30)], entry_win),
+        "exit": pin.pin_event(exit_ev, [{**tick(0, 7.00), "observed_at": exit_utc}], exit_win),
+    })
+    assert row["exit_ts_utc_pinned"] == pin._iso_z(exit_utc)
+    assert row["exit_pin_confidence"] == "tape_confirmed"
