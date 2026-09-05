@@ -1298,19 +1298,40 @@ def check_pin_sources(receipt: Mapping[str, Any], pin: Optional[Mapping[str, Any
     else:
         return f"unverified:pin.{key} is {type(raw).__name__}"
     observed: set[str] = set()
-    for per_table in (receipt.get("tape_sources") or {}).values():
+    per_table_vendors: dict[str, set[str]] = {}
+    for table, per_table in (receipt.get("tape_sources") or {}).items():
         if isinstance(per_table, dict):
-            observed |= {str(s) for s, n in per_table.items() if n}
+            srcs = {str(s) for s, n in per_table.items() if n}
+            observed |= srcs
+            if srcs:
+                per_table_vendors[str(table)] = {_tape_vendor(s) for s in srcs}
     if not observed:
         return "unverified:receipt_reports_no_tape_sources"
-    obs_vendors = {_tape_vendor(s) for s in observed}
+    # PER TABLE, single vendor (2026-09-05). The first winners sweep flagged PPCB 2026-08-27
+    # -- iqfeed trades + polygon quotes -- as MISMATCH, and every August/September case
+    # would follow: the hydrator writes Polygon NBBO there BY DESIGN (IQFeed's at-trade
+    # BBO is June/July only). The contamination this guards is one TABLE carrying two
+    # vendors (TMCR 2026-08-24: 33,866 ticks against a true 16,933). A trades vendor that
+    # differs from the pin's is still a contradiction: the pin was taken on those trades.
+    doubled = {t: sorted(v) for t, v in per_table_vendors.items() if len(v) > 1}
+    if doubled:
+        return (
+            f"MISMATCH:two vendors in one table {doubled} (pin.{key} sources "
+            f"{sorted(pinned)}; run sources {sorted(observed)})"
+        )
     pin_vendors = {_tape_vendor(s) for s in pinned}
-    if obs_vendors <= pin_vendors:
-        return f"match:{sorted(observed)}"
-    return (
-        f"MISMATCH:pin.{key} vendors={sorted(pin_vendors)} but the run read "
-        f"{sorted(obs_vendors)} (pin sources {sorted(pinned)}; run sources {sorted(observed)})"
-    )
+    trade_vendors = per_table_vendors.get("iqfeed_trade_ticks") or set()
+    if trade_vendors and not (trade_vendors <= pin_vendors):
+        return (
+            f"MISMATCH:pin.{key} vendors={sorted(pin_vendors)} but the run's TRADES came "
+            f"from {sorted(trade_vendors)} (pin sources {sorted(pinned)}; run sources "
+            f"{sorted(observed)})"
+        )
+    nbbo_vendors = per_table_vendors.get("momentum_nbbo_spread_tape") or set()
+    note = ""
+    if nbbo_vendors and not (nbbo_vendors <= pin_vendors):
+        note = f";nbbo_vendor={sorted(nbbo_vendors)}"
+    return f"match:{sorted(observed)}{note}"
 
 
 def sink_counts(receipt: Mapping[str, Any]) -> dict[str, int]:

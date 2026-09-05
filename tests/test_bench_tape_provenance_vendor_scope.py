@@ -61,8 +61,11 @@ def test_a_second_vendor_is_still_a_mismatch():
     assert "polygon_v3_trades" in got
 
 
-def test_the_quote_seam_across_vendors_is_caught():
-    """Trades from one vendor and quotes from another is the mixed-vendor seam."""
+def test_iqfeed_trades_with_polygon_quotes_is_the_designed_august_tape():
+    """Trades from one vendor and quotes from another is how every August/September
+    symbol-day is hydrated (IQFeed at-trade BBO is June/July only). MEASURED 2026-09-05:
+    the first winners sweep flagged PPCB 2026-08-27 as MISMATCH on exactly this pair. It
+    is a match, with the NBBO vendor REPORTED so the reader knows which quotes drove it."""
     got = bench.check_pin_sources(
         _receipt(
             iqfeed_trade_ticks={"iqfeed_lookup_hist": 100},
@@ -70,7 +73,28 @@ def test_the_quote_seam_across_vendors_is_caught():
         ),
         _pin("iqfeed_lookup_hist"),
     )
+    assert got.startswith("match:")
+    assert "nbbo_vendor=['polygon']" in got
+
+
+def test_two_quote_vendors_in_one_table_is_still_the_seam():
+    got = bench.check_pin_sources(
+        _receipt(
+            iqfeed_trade_ticks={"iqfeed_lookup_hist": 100},
+            momentum_nbbo_spread_tape={"polygon_v3_quotes": 100, "iqfeed_lookup_bbo": 100},
+        ),
+        _pin("iqfeed_lookup_hist"),
+    )
+    assert got.startswith("MISMATCH:two vendors in one table")
+
+
+def test_trades_from_a_vendor_the_pin_never_saw_is_a_contradiction():
+    got = bench.check_pin_sources(
+        _receipt(iqfeed_trade_ticks={"polygon_v3_trades": 100}),
+        _pin("iqfeed_lookup_hist"),
+    )
     assert got.startswith("MISMATCH:")
+    assert "TRADES" in got
 
 
 @pytest.mark.parametrize(
