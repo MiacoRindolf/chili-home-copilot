@@ -530,3 +530,28 @@ __all__ = [
     "REQUIRED_SIM_CLOCK_ANCHORS", "TAPE_TABLES", "TIE_STABLE_TAIL",
     "DECISIVE_EVENT_MARKERS", "REQUIRED_MOCK_CONFIG",
 ]
+
+# ── invariant 12: monkeypatch wrappers forward EVERY argument (2026-09-05) ──────────────
+def simclock_default_wrapper(fn, clock, *, key):
+    """Wrap ``fn`` so that keyword ``key`` defaults to ``clock()`` when the caller passes
+    None (or omits it) -- and forward EVERY other positional/keyword argument untouched.
+
+    MEASURED 2026-09-05 (harness gate 14): the driver's previous wrapper around
+    ``entry_gates.signed_tape_accel_features`` re-declared the signature as
+    ``(symbol, *, db, window_s, as_of)`` and so rejected ``settings_obj`` (added by #1024,
+    2026-08-11). ``tape_confirms_hold`` passes ``settings_obj`` on every call and swallows
+    the TypeError into its fail-closed branch => ``(False, tape_hold_error)`` in EVERY
+    replay, while the identical read offline confirmed (JWEL 2026-08-10 11:31:47Z: accel
+    +6,899, tick_rate 137 >= floor 53). A wrapper must never own the wrapped signature."""
+    import functools
+
+    @functools.wraps(fn)
+    def _wrapped(*args, **kwargs):
+        if kwargs.get(key) is None:
+            kwargs[key] = clock()
+        return fn(*args, **kwargs)
+
+    _wrapped._simclock_wrapped = fn  # type: ignore[attr-defined]
+    _wrapped._simclock_key = key  # type: ignore[attr-defined]
+    return _wrapped
+
