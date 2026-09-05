@@ -1136,3 +1136,47 @@ def test_the_record_carries_names_and_a_hash_never_values():
     assert len(rec["sha256"]) == 64
     assert "secret-ish" not in str(rec)
     assert B.lane_env_record({"CHILI_X": "1", "CHILI_ALPACA_EXPECTED_ACCOUNT_ID": "secret-ish"})["sha256"] == rec["sha256"]
+
+
+# ── invariant 7: cold start is applied to every receipt ───────────────────────────
+
+def _cs_receipt(events):
+    return {"events": events}
+
+
+def _cs_ev(ts, et):
+    return {"ts": ts, "event_type": et, "payload": {}}
+
+
+def test_an_entry_inside_the_window_lead_is_a_cold_start_problem():
+    r = _cs_receipt([_cs_ev("2026-07-23 13:00:00", "live_runner_started"),
+                  _cs_ev("2026-07-23 13:00:03", "live_entry_backside_bench_veto"),
+                  _cs_ev("2026-07-23 13:00:15", "live_entry_candidate_detected"),
+                  _cs_ev("2026-07-23 13:00:17", "live_entry_filled")])
+    problems, rec = B.cold_start_problems(r, min_uptime_s=60.0, min_ticks=6)
+    assert len(problems) == 1 and problems[0].startswith("cold_start:live_entry_candidate_detected")
+    assert rec["first_entry_decisive_cold"]["uptime_s"] == 15.0
+    assert rec["tag_count"] == 3   # the veto is tagged too, but only the entry makes a problem
+
+
+def test_early_vetoes_alone_are_not_a_problem():
+    r = _cs_receipt([_cs_ev("2026-07-23 13:00:00", "live_runner_started"),
+                  _cs_ev("2026-07-23 13:00:03", "live_entry_backside_bench_veto"),
+                  _cs_ev("2026-07-23 13:20:00", "live_entry_candidate_detected"),
+                  _cs_ev("2026-07-23 13:20:02", "live_entry_filled")])
+    problems, rec = B.cold_start_problems(r, min_uptime_s=60.0, min_ticks=6)
+    assert problems == []
+    assert rec["first_entry_decisive_cold"] is None and rec["tag_count"] == 1
+
+
+def test_without_runner_started_the_first_event_is_the_clock_origin():
+    r = _cs_receipt([_cs_ev("2026-07-23 13:00:00", "live_watch_started"),
+                  _cs_ev("2026-07-23 13:00:40", "live_entry_submitted")])
+    problems, rec = B.cold_start_problems(r, min_uptime_s=60.0, min_ticks=6)
+    assert rec["runner_started_ts"] == "2026-07-23 13:00:00"
+    assert len(problems) == 1
+
+
+def test_the_knobs_are_the_plan_defaults_and_not_arm_settable():
+    assert B.COLD_START_MIN_UPTIME_S == 60.0 and B.COLD_START_MIN_TICKS == 6
+    assert any(p.startswith("ROSSBENCH_") for p in B.FORBIDDEN_ENV_PREFIXES)
