@@ -367,3 +367,42 @@ Corpus after the first pass: **152 replayable symbol-days; 65 Ross winners hydra
 ### Sweep batch 1 — restarted with an hour per case
 
 The first launch used a 25-minute per-case timeout; the denser July/August tapes take 25–40 minutes at stride 2 (PPCB: 282k prints + 69k Polygon quotes). EHGO timed out and two more produced no receipt; batch 1 was stopped (PPCB's receipt kept) and relaunched for the remaining 11 cases with `--timeout-s 3600` at 01:09Z. The tape-provenance invariant that flagged PPCB (`iqfeed` trades + `polygon` quotes) was refined to a per-table rule (#1334) — that pairing is how every August/September symbol-day is hydrated by design.
+
+---
+
+## Part 6 — 2026-09-05 02:00–02:50Z: the tenth gate was the mock, not the market; the full Alpaca sweep starts (PRs #1342–#1346)
+
+### Correction to Part 5
+
+Part 5 read the Alpaca canon as "a premarket Alpaca position has no exit path — deadman inert, OCO skipped, 546 × `wide_bbo_spread` blocking every held tick". The held-tick reading was wrong, and it was wrong in the way the plan's invariant list warns about: the loudest event was taken for the blocker. Measured on batch 1 of the alpaca sweep (8/12 receipts by 02:29Z, every one a single fill held to the window's end, MTM +$200…+$1,087):
+
+- `live_blocked_by_risk reason=wide_bbo_spread` is emitted on a held tick (`live_runner.py:32700`) but the function **does not return** there for a held session — `_live_entry_quote_gate_applies` (`:22431`) is False once the position is held, so `:32721` never fires. Those 1,775–2,992 events per case are telemetry.
+- The branch that RETURNS is `:42598`: `if deadman_state.get("pending") or deadman_state.get("unprotected"): return {...}` — before any trailing/scale-out/bailout logic. The deadman was pending on every tick because **the replay mock has no `place_deadman_stop`**: `:12933` raised `AttributeError`, the result was folded to `submit_indeterminate`, the strict CID read (`:27604`, needs `get_order_by_client_order_id_truth`, also absent on the mock) resolved `unknown`, and `:13092` recorded `deadman_submit_indeterminate`. Once. Forever.
+
+So the tenth Alpaca canon gate is a harness gap, exactly like gates 1–9 — not a strategy fact. **#1345** gives the mock the real adapter's contract (`venue/alpaca_spot.py:4077` and `:2508`, same refusal strings, the same `raw` certification fields the runner's own `_owner_transport_order_matches` reads; a stop triggers at `min(stop, bid)` in the regular session only, because Alpaca queues stops through extended hours — the runner documents itself as the sole premarket protection at `:3525`). Non-stop orders keep their raw shape byte-identical; the parity suites are unchanged. Not mirrored: `replace_order_qty` (#1276 partial-exit PATCH lineage) — partials stay on the legacy suppression path in the bench and are reported as a limitation.
+
+What stays true from Part 5: the 12-bps held-tick floor (`:32598 → :25068`, no expected move on a held tick) is below one tick for every sub-$8 name — LABT at $2.10 is 48 bps per tick, and the held-period spread p10 was ≥ 14 bps on all six cases. In the live DB the same event fired **7,680 times in 310 sessions over 14 days** (ANPA 2026-09-04: 4,002 in one session at $4.29, median 75 bps). On a held tick it is noise; at ENTRY in premarket, where `_skip_spread_gate` is forced off (`:32553`), the same floor is a real refusal on the price band Ross trades. That is a conditioning candidate for the ledger, not a threshold change.
+
+### Invariant 7 (cold start) — applied, then re-denominated
+
+- **#1342**: `cold_start_tags` had existed since the harness PR but nothing called it. The bench now tags every decisive event inside the window lead and marks a case unscoreable when its FIRST entry-decisive event is cold. Measured immediately: alpaca batch 1 first fills at runner uptime 11 s (PPCB), 13 (NCRA), 17 (EHGO), 31 (EDBL), 36 (LABT), 70 (BIYA); RH EHGO 17 s. Under the 60-second wall-clock reading 5/6 alpaca cases and RH EHGO were unscoreable — nearly the whole sweep.
+- **#1343**: the verdict is tick-denominated. The FSM's own cold-start guard is `insufficient_bars` (NCRA: 7 × `live_entry_trigger_wait reason=insufficient_bars`, candidate on grid tick 8, fill at tick 13); the plan's two knobs are one quantity in two units (6 ticks = 60 s at the live 10-s cadence) and the bench grid is 1 s, so wall uptime overstates coldness ten-fold in replay. Now: `ticks_seen = uptime / GRID_STEP_S`; unscoreable only when the first entry-decisive event has `ticks_seen < 6`; uptime-only coldness is recorded (`cold_start.uptime_only_entries`) and logged. RH PPCB t2 (runner started at Ross's ignition print 12:31:02Z, filled 5 s later at the spike top) stays cold under both readings — the seeded arm was placed at an instant the live scheduler could not have reached, which is Tier 1's stated limit.
+
+### Receipt and timeline fidelity
+
+- **#1344**: the receipt keeps `spread_bps / max_spread_bps / expected_move_bps / median_spread_bps / bid / ask / mid / client_order_id / broker_error / …` — the cap a block was measured against and the deadman's pending detail had been dropped by the payload whitelist and had to be reconstructed from source.
+- **#1346**: timeline code refs are reason-aware. `live_blocked_by_risk reason=wide_bbo_spread` had resolved to `live_runner.py:30269` — the `kill_switch` emit, the lowest of seven sites — and the ledger printed the kill switch as the mechanism for every alpaca case. `resolve_code_refs` now takes the reasons seen in the run and resolves `<event_type>|<reason>`: the site whose payload literal spells the reason wins; otherwise only dynamic-payload sites remain and a site spelling a different reason is excluded.
+- Divergence ledger (scratchpad tool): `--pins` value no longer consumed as a run dir; the ordering check uses `entry_ts_utc_pinned` or, for stated-only rows, `grading_anchor_utc` (91 pinned / 55 anchor-only / 11 neither in `pins.json`); a `first_fill_before_ross_window(<source>)` tag; an `UNSCORABLE cold_start` bucket; open positions never counted as CAPTURED.
+
+### The sweep as it stands (02:50Z)
+
+- Robinhood batch 1b (sink 1, `wt-bench` @ `c4bb57b15`, 11 cases, an hour each): 2 receipts. RH EHGO 07-23 (Ross +$41k): 20 fills, +$27.67, active round trips (scale-out ×7, trail ×4, burst-exit ×2); first divergence at Ross's stated 09:15 ET entry: CHILI `exited`, Ross `filled`.
+- Alpaca batch 1 (sink 2, no deadman): kept as the harness negative control — entries are unaffected by #1345, only what happens after.
+- **Alpaca full sweep with the mock deadman: 82 cases** (83 winners + 11 losers, minus 12 the bench refuses because neither the manifest row nor the pins row carries an anchor — GMM 07-10, PN 07-30, CANF/VCIG 03-04, ARTL/JTAI/WLDS 04-20, SPRC 08-12 have no pin at all; NUWE 07-30, ENVB 04-20, PPCB t3 and EHGO Ts7C resolve through the bench's pin-anchor branch and run as part D). Four sinks in parallel (`chili_rossbench{2,3,4,5}_test`, sinks 3–5 created from the `chili_test` template), two clean worktrees at `b31566939`, losers distributed round-robin. Scoring: timelines from `wt-seams` @ main against `wt-ref` at the receipt sha, then the ledger over all dirs.
+
+### Next
+
+1. Ledger the 82 + 11 as receipts land (task step 2): mechanism × count × Ross $, code ref per miss.
+2. Largest-$ mechanism first, by conditioning; A/B on winners AND losers; the RH family is the control for exit machinery.
+3. Bench: read the pins anchor when the manifest row has none (already branch 4; the case filter was mine); `replace_order_qty` in the mock so partials are measurable.
+4. Paper from Tuesday 09-08 for what replay cannot prove (admission latency, dead lane).
