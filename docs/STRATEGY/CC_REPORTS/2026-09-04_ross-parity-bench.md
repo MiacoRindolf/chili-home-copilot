@@ -406,3 +406,60 @@ What stays true from Part 5: the 12-bps held-tick floor (`:32598 → :25068`, no
 2. Largest-$ mechanism first, by conditioning; A/B on winners AND losers; the RH family is the control for exit machinery.
 3. Bench: read the pins anchor when the manifest row has none (already branch 4; the case filter was mine); `replace_order_qty` in the mock so partials are measurable.
 4. Paper from Tuesday 09-08 for what replay cannot prove (admission latency, dead lane).
+
+---
+
+## Part 7 — 2026-09-05 03:00–15:30Z: gates 11–14, the commit wall, the second ledger pass, and the first exit-side A/B (PRs #1348–#1352)
+
+### Gates 11–13 — the Alpaca exit path, verb by verb
+
+- **#1348** — the mock adapter gained the release verbs the runner requires before a software exit may replace the deadman (`cancel_order_by_id`, `get_position_quantity`, `get_order_by_client_order_id`), and the claim helpers gained a `replay_short_session_provider(db)` seam: `_with_short_session` had opened its OWN connection while the replay driver holds ONE transaction, so every "committed" read of `trading_automation_sessions` saw the seed row and `retire_deadman_handoff_reprotected` was False forever. The driver installs the seam (a SAVEPOINT on its own session) around `driver.run()`; production default is None (byte-identical).
+- **#1349** — every order carries the adapter's raw shape under Alpaca families (`set_execution_family`), because `_poll_live_exit_fill` certifies exit fills through `_owner_transport_order_matches` reading `alpaca_status / filled_size / time_in_force / position_intent / extended_hours`; the mock had carried them on stop orders only, so a filled software exit stayed `pending_exit=True` and every Alpaca case was one leg. Probe FCUV 12:15–12:32: **four round trips** — the first exit-capable Alpaca replay.
+- **#1350** — Postgres container CPU cap 3 → 8 in compose (12 GB memory limit stays); the bench's 1-s grid is ~10× the live query rate and the backends were CPU-bound at 17–19 drivers.
+- **#1351** — a case that produces no receipt now says why on disk (`driver_stdout_tail.txt` next to the missing `run.json`) and in the log (`LOST <case>: status/rc/duration/tail`); a window with zero source ticks is recorded as `empty_window` without spending a driver (SCKT 08-10 t5 and FRTT 08-11 carried manifest anchors 1–1.5 h before the day's first print).
+
+### Gate 14 — `tape_confirms_hold` was fail-closed in every replay since #1024 (2026-08-11)
+
+The lockout-watch A/B on JWEL 08-10 held every trigger during the 11:31–11:34Z reclaim as `no_buyers_on_tape`, while `tape_confirms_hold("JWEL", as_of=11:31:47Z)` offline against the SAME sink returned confirmed (accel +6,899, tick_rate 137 ≥ floor 53, n=1,423). The discriminator was a five-second experiment: build the driver's wrapper shape offline → `tape_hold_error`; a forwarding wrapper → confirmed.
+
+Root cause: the driver's sim-clock wrapper around `entry_gates.signed_tape_accel_features` re-declared the signature as `(symbol, *, db, window_s, as_of)`; #1024 added `settings_obj` to the wrapped function and `tape_confirms_hold` passes it on every call; the TypeError is swallowed by the confirmer's fail-closed `except`. Blast radius: the 12 pattern triggers that require the confirmer, the ORB/ABCD tick confirm (degraded to the bar path), `buyers_confirmed`, the ignition-exemption tape leg — dark in every bench receipt, and invisible in the receipt because the payload whitelist strips the `tape` dbg (97 receipts, 0 `tape_hold_*` strings).
+
+**#1352**: `replay_harness_invariants.simclock_default_wrapper(fn, clock, key=)` forwards every argument and fills only `key` when None; an AST guard refuses any `_o=`-style wrapper in the driver without `**kw`. Consequence: every receipt before 11:30Z ran with the tape gate dark; tape-conditioned fixes are A/B'd with BOTH arms on the fixed driver; the baseline is being re-benched on it (`rh5*`, `p7*` @ `370be829c`). First evidence of the gate's weight: JWEL ml2 alpaca, base tree, −$109.43 on the old driver → **+$47.73** on the fixed driver, no other change.
+
+### The commit wall
+
+At 12:00Z the burst-2 A/B lost three cases in 0.02 s each (`driver_failed rc=3221225794` = `0xC0000142`): committed 141.8 GB of a 146 GB limit (64 GB RAM + 84 GB pagefile). Free physical RAM read 2.7 GB at the time — the RAM guard's metric was the wrong one. Who holds it (`Get-Process` grouped, 12:10Z): the Claude desktop app ×102 processes 47.3 GB, Docker/WSL2 31 GB, python ×28 15.5 GB (**a replay driver commits ~1 GB**), the rest ~15 GB of user apps. Sheds: the old-driver baseline sweeps (superseded by gate 14 anyway); a commit guard (3-min period, floor 8 GB free virtual, sheds one non-A/B driver at a time) replaced the RAM guard; the operator closed the non-trading apps at 15:10Z (free virtual 26 GB → 16 drivers).
+
+### Ledger pass 2 (09:22Z, 26 receipts, old driver) — exit side named
+
+Alpaca, 10 winners: CAPTURED 5 (Ross $132k; CHILI +$2,265 — XHG +$1,774 on 161 sh 1.18 → 5.93, STI, CETX, NXTC, FCUV), lockout ×2, deadman_stop, trail ×2; family +$1,895 vs MFE $3,427. Robinhood, 17 winners: CAPTURED 5 (+$332), **burst_window_exit ×4 (Ross $59.7k, CHILI −$181)**, lockout ×2 ($33.5k, −$173), bailout ×3, stop, trail; family −$173 vs MFE $5,609. Losers: DSY −$84 (locked), PPCB t3 −$0.25, PPBT +$50.
+
+Four exit-side mechanisms, each with its line (memory `project_exit_side_mechanisms_first_ledger_0905`):
+
+1. **Burst stamp survives recycle** — `_RECYCLE_ENTRY_STATE_KEYS` (live_runner.py:25483) lacks `burst_started_epoch/burst_track/burst_window_dbg`; every re-entry is killed 1–2 s after its fill (JWEL ml3: 79 of 85 legs). Fix branch `fix/burst-stamp-cleared-on-recycle` (3c7ebc29a). A/B on the old driver, 11 pairs: JWEL 176 → 8 fills, hold p50 2 → 67 s, −71.36 → −75.22; losers Σ 0.00 (8 pairs, none worsened).
+2. **Symbol-day loss lockout −1.5R terminalizes the winner** (`risk_policy.py:4212`, `live_runner.py:47853`): JWEL locked at −$109 while Ross made +$42k on the name. Fix branch `fix/symbol-day-lockout-front-side` v2: the lock becomes a WATCH with a budget; a fired trigger may proceed only when `tape_confirms_hold` confirms buyers (fail-closed) and the budget allows; spending the budget makes the next lock terminal.
+3. **Alpaca exit transport** — decision → fill 7–34 s (two-phase deadman handoff; `frozen_exit_limit_not_marketable_at_literal_post` re-derives on the next pulse) vs Robinhood 1–2 s. Not yet conditioned.
+4. **Stop inside the tape's own noise → risk-first sizing buys 10× size.** Measured 15:20Z on the fixed driver (stack arm, JWEL ml3): 11:39:00 spike 6.25 → 5.08 in 11 s; 11:39:09 `double_bottom_break_tick_ok` bought **1,153 sh @ 5.57** (other legs 96–155) with a ~4-cent stop while the tape printed 10–20 cents per second; `max_loss_per_trade` bailout at 5.13 three seconds later = **−$507**. `compute_risk_first_quantity` (qty = risk / stop_distance) did what it says; the remedy exists — #1278 `stop_noise_floor_decision`, median 30-s high-low range of the name's own tape as the stop floor (`live_runner.py:37674`) — but `chili_momentum_stop_noise_floor_enabled` defaults False and is absent from the lane `.env`: a dark flag, off in production too. Counterfactual on the hydrated tape (10 buckets, median range 0.245 = 4.4%): 188 sh, −$83 on the same flush (−$46 at the stop). Doctrine says no dark flags; it is now an A/B arm (`nf`, env override) on winners and losers.
+
+### First A/B on the fixed driver (15:05Z, both arms @ 370be829c / stack 22bd290d5)
+
+| case | Ross | base | stack (burst + lockout watch) | Δ | reading |
+|---|---|---:|---:|---:|---|
+| EHGO 07-23 RH | +$41k | +73.68 | +144.99 | +71.30 | 21 → 15 legs, no burst kills |
+| EDBL 07-27 RH | +$33k | −79.58 | −114.06 | −34.48 | watch granted one `sub_vwap_trap_tick` re-entry, stopped in 19 s |
+| JWEL 08-10 ml3 RH | +$42k | −77.66 | −523.78 | −446.12 | ONE leg −507 (mechanism 4); without it +$61 vs base; the burst fix kept the session alive through 11:30 (base locked out at 11:30:53) and legs 4–8 captured the reclaim +$58; the watch's own re-entry −18.57 |
+| JWEL 08-10 ml2 alpaca | +$42k | +47.73 | +47.73 (lockout only) | 0 | never reached the lock |
+| DSY t4, INLF t1 (losers) | | | | 0.00 | negative control unchanged |
+
+Both watch exemptions so far entered on non-front-side triggers (`sub_vwap_trap_tick`, `abcd_break_tick_ok` into a failed breakout) and lost; the conditioning candidate for v3 is `front_side_state` (new HOD / above VWAP) in addition to the tape, per Ross's "hands off until it proves itself".
+
+### Running at 15:30Z (16–17 drivers, fixed driver unless noted)
+
+Code arms: `base14_rh` / `stack14_rh` (14 RH cases), `base14_alpaca` / `lockout14_alpaca` (12). Env arms (`--arms nf=`): `nf14_rh`, `nf14_alpaca` (main + noise floor), `stacknf14_rh`, `stacknf14_alpaca` (stack + noise floor). Baseline re-bench: `rh5a–d`, `p7a–b`; the remaining parts queue as drivers free. Old driver, consistent pairs: `burst_rh`, `burst_alpaca`, `burst2b_rh` (the three cases lost to the commit wall).
+
+### Next
+
+1. Per-mechanism verdicts as pairs land: burst (bug fix; ship on losers Σ ≥ 0), noise floor (dark flag → ON if winners Σ > 0 and losers Σ ≥ 0), lockout watch (needs winners $↑ — v3 conditioning if the exemptions keep losing).
+2. Pass-3 ledger on the fixed-driver baseline (`FIXED=1 score_all.sh`).
+3. Mechanism 3 (Alpaca exit transport) conditioning after the above.
+4. Ship passing fixes; deploy after close on Monday 09-07 (no market); paper soak Tuesday 09-08.

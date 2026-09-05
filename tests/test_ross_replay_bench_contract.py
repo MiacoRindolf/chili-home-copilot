@@ -1201,3 +1201,21 @@ def test_without_runner_started_the_first_event_is_the_clock_origin():
 def test_the_knobs_are_the_plan_defaults_and_not_arm_settable():
     assert B.COLD_START_MIN_UPTIME_S == 60.0 and B.COLD_START_MIN_TICKS == 6
     assert any(p.startswith("ROSSBENCH_") for p in B.FORBIDDEN_ENV_PREFIXES)
+
+
+# ── lost cases say why; empty windows spend no driver (2026-09-05) ──────────────────────
+
+def test_an_empty_window_is_recorded_without_spending_a_driver(monkeypatch):
+    monkeypatch.setattr(B, "source_window_coverage",
+                        lambda dsn, sym, a, b: {"ticks_in_window": 0, "day_first_tick": "2026-08-10T13:00:01", "day_last_tick": "2026-08-10T23:58:58"})
+    calls = []
+    monkeypatch.setattr(B, "run_one", lambda **kw: calls.append(kw) or {"status": "ok"})
+    src = B.__file__ and open(B.__file__, encoding="utf-8").read()
+    assert 'coverage.get("ticks_in_window") == 0' in src
+    assert '"status": "empty_window"' in src
+    assert "EMPTY WINDOW" in src and "driver_stdout_tail.txt" in src and "LOST %s / %s: status=%s" in src
+
+
+def test_source_window_coverage_fails_open_on_an_unreadable_source():
+    out = B.source_window_coverage("postgresql://nobody:x@127.0.0.1:1/none", "SCKT", "2026-08-10T11:25:00", "2026-08-10T12:25:00")
+    assert out["ticks_in_window"] is None and "error" in out
