@@ -4151,6 +4151,37 @@ def fresh_ignition_reentry_allowed(
     return True, "ignition_exempt"
 
 
+def symbol_day_lockout_watch_reentry(
+    *,
+    watch_active: bool,
+    tape_ok: bool,
+    exemptions_used: int,
+    max_exemptions: int,
+) -> tuple[bool, str]:
+    """LOCKOUT WATCH (2026-09-05, Ross Parity Bench): pure re-entry decision while a
+    symbol-day loss lockout is in WATCH (not terminal).
+
+    The lock (L13) keeps its threshold. Instead of terminalising, a session with budget
+    left keeps watching; when the FSM's own entry trigger fires again, this decides whether
+    that fire may proceed: ONLY when the executed tape confirms buyers (``tape_ok`` from
+    ``entry_gates.tape_confirms_hold``, fail-closed at the caller) AND fewer than
+    ``max_exemptions`` re-entries past a lock have been granted this session (the same
+    fresh-ignition budget, one documented setting). Everything else holds the fire as
+    ``symbol_day_lockout_watch``. Returns (allowed, reason)."""
+    if not watch_active:
+        return True, "no_lockout_watch"
+    try:
+        used = int(exemptions_used or 0)
+        cap = int(max_exemptions or 0)
+    except (TypeError, ValueError):
+        return False, "bad_basis_fail_closed"
+    if cap <= 0 or used >= cap:
+        return False, "lockout_watch_budget_spent"
+    if not tape_ok:
+        return False, "lockout_watch_no_buyers_on_tape"
+    return True, "lockout_watch_front_side_exempt"
+
+
 def bailout_maker_reentry_decision(
     *,
     enabled: bool,

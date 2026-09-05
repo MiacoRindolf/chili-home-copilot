@@ -34669,6 +34669,55 @@ def tick_live_session(
             except Exception:
                 pass
 
+        # LOCKOUT WATCH GATE (2026-09-05, Ross Parity Bench). While a symbol-day loss
+        # lockout is in WATCH (L13 edge, budget left), a fired trigger may proceed ONLY
+        # when the executed tape confirms buyers (tape_confirms_hold, FAIL-CLOSED) and the
+        # per-session budget allows; otherwise the fire is held as
+        # ``symbol_day_lockout_watch`` (the ordinary trigger-wait path emits it). Granting
+        # spends the fresh-ignition budget, so the next lock after a loss is terminal.
+        _ldw = le.get("symbol_day_lockout_watch")
+        if _trigger_ok and isinstance(_ldw, dict):
+            _ldw_tape_ok, _ldw_tape_dbg = False, {}
+            try:
+                from .entry_gates import tape_confirms_hold as _ldw_tape_fn
+
+                _ldw_tape_ok, _ldw_tape_dbg = _ldw_tape_fn(sess.symbol, db=db, settings=settings)
+            except Exception as _ldw_exc:
+                _ldw_tape_ok, _ldw_tape_dbg = False, {"error": repr(_ldw_exc)}
+            from .risk_policy import symbol_day_lockout_watch_reentry as _ldw_decide
+
+            _ldw_used = int(le.get("lockout_front_side_exemptions") or 0)
+            _ldw_max = int(getattr(settings, "chili_momentum_max_ignition_exemptions", 1) or 1)
+            _ldw_allowed, _ldw_why = _ldw_decide(
+                watch_active=True,
+                tape_ok=bool(_ldw_tape_ok),
+                exemptions_used=_ldw_used,
+                max_exemptions=_ldw_max,
+            )
+            if _ldw_allowed:
+                le.pop("symbol_day_lockout_watch", None)
+                le["lockout_front_side_exemptions"] = _ldw_used + 1
+                _commit_le(sess, le)
+                _emit(db, sess, "live_lockout_watch_front_side_exempt", {
+                    "trigger": _trigger_reason,
+                    "reason": _ldw_why,
+                    "tape": _ldw_tape_dbg,
+                    "bid": _float_or_none(getattr(tick, "bid", None)) if tick is not None else None,
+                    "watch": _ldw,
+                    "front_side_exemptions": int(le["lockout_front_side_exemptions"]),
+                    "max_front_side_exemptions": _ldw_max,
+                })
+            else:
+                _ldw_prev = _trigger_reason
+                _trigger_ok = False
+                _trigger_reason = "symbol_day_lockout_watch"
+                _emit(db, sess, "live_lockout_watch_hold", {
+                    "blocked_trigger": _ldw_prev,
+                    "reason": _ldw_why,
+                    "tape": _ldw_tape_dbg,
+                    "watch": _ldw,
+                })
+
         # HVM101 (B): BID-PROP / SPREAD-TIGHTENING CONFIRMER — confirm a fired break
         # only when, over the last few L1 samples, the best-bid is non-decreasing AND
         # the spread is at/below its short trailing median (genuine backing). Equity/RH
@@ -47861,26 +47910,6 @@ def tick_live_session(
                         exclude_session_id=sess.id,
                         execution_family=str(getattr(sess, "execution_family", "") or "") or None,
                     )
-                    # FRONT-SIDE read for the lockout's conditioning: the two tape legs the
-                    # fresh-ignition exemption trusts (executed-tape confirmer AND the
-                    # running-up burst map), read fresh here because the ignition block
-                    # above only reads them while its own budget is unspent. Fail-CLOSED:
-                    # any read error => not front-side => the lock decides as before.
-                    _l13_front = False
-                    _l13_front_dbg: dict[str, Any] = {}
-                    try:
-                        from . import entry_gates as _l13_eg
-                        from .nbbo_tape import tape_running_up_signal_map as _l13_run_map
-
-                        _l13_sym = str(sess.symbol or "").strip().upper()
-                        _l13_tc_ok, _l13_tc_dbg = _l13_eg.tape_confirms_hold(_l13_sym, db=db)
-                        _l13_front_dbg["tape"] = _l13_tc_dbg
-                        if _l13_tc_ok:
-                            _l13_map = _l13_run_map(db, now_utc=_utcnow()) or {}
-                            _l13_front_dbg["running_up_hit"] = _l13_sym in _l13_map
-                            _l13_front = _l13_sym in _l13_map
-                    except Exception as _l13_exc:
-                        _l13_front_dbg["error"] = repr(_l13_exc)
                     _l13_fs_used = int(le.get("lockout_front_side_exemptions") or 0)
                     _l13_fs_max = int(getattr(settings, "chili_momentum_max_ignition_exemptions", 1) or 1)
                     _l13_locked, _l13_why, _l13_thr = symbol_day_loss_lockout_decision(
@@ -47897,22 +47926,29 @@ def tick_live_session(
                             )
                             or 1.5
                         ),
-                        front_side=_l13_front,
-                        front_side_exemptions=_l13_fs_used,
-                        max_front_side_exemptions=_l13_fs_max,
                     )
-                    if _l13_why == "front_side_exempt":
-                        le["lockout_front_side_exemptions"] = _l13_fs_used + 1
-                        _commit_le(sess, le)
-                        _emit(db, sess, "live_symbol_day_loss_lockout_front_side_exempt", {
+                    if _l13_locked and _l13_fs_used < _l13_fs_max:
+                        # LOCKOUT WATCH (2026-09-05, Ross Parity Bench). The lock keeps its
+                        # threshold; the session keeps WATCHING instead of dying. The FSM's
+                        # own entry trigger may fire again ONCE, and only when the executed
+                        # tape confirms buyers (gate at the candidate edge, fail-closed).
+                        # MEASURED: JWEL 2026-08-10 locked at 11:27:06 (bid 4.90, backside
+                        # after a 5.63 -> 4.82 flush) and was terminal when the name
+                        # reclaimed and ran 5.07 -> 6.12 over 11:31-11:39 (Ross +$42.1k on
+                        # the day); EDBL 2026-07-27 the same shape (Ross +$33k). Ross:
+                        # "hands off until it proves itself again" -- not "quit".
+                        le["symbol_day_lockout_watch"] = {
+                            "since_utc": _utcnow().isoformat(),
+                            "bid_at_lock": _float_or_none(bid),
                             "day_net_realized_usd": round(_l13_cum + (_l13_other or 0.0), 4),
                             "threshold_usd": _l13_thr,
-                            "front_side_exemptions": int(le["lockout_front_side_exemptions"]),
-                            "max_front_side_exemptions": _l13_fs_max,
-                            "front_side_read": _l13_front_dbg,
                             "trade_cycles": int(le.get("trade_cycles") or 0),
-                        })
-                    if _l13_locked:
+                            "exemptions_used": _l13_fs_used,
+                            "max_exemptions": _l13_fs_max,
+                        }
+                        _commit_le(sess, le)
+                        _emit(db, sess, "live_symbol_day_loss_lockout_watch", dict(le["symbol_day_lockout_watch"]))
+                    elif _l13_locked:
                         _re_ok = False
                         _re_reason = _l13_why
                         _emit(db, sess, "live_symbol_day_loss_lockout", {
@@ -47922,6 +47958,7 @@ def tick_live_session(
                             "threshold_usd": _l13_thr,
                             "trade_cycles": int(le.get("trade_cycles") or 0),
                             "stopout_cycles": int(le.get("stopout_cycles") or 0),
+                            "lockout_front_side_exemptions": _l13_fs_used,
                         })
                 except Exception:
                     _log.debug(
