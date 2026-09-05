@@ -1709,3 +1709,18 @@ def test_the_exporter_writes_lf_only_jsonl(tmp_path):
     events, source = rr.load_recorded_events(os.path.dirname(path))
     assert source == rex.EVENTS_FILENAME
     assert events[0]["event_type"] == "e"
+
+
+def test_case_dir_resolver_requires_the_symbol_and_date_segment():
+    """One video covers several symbols: CA8i4Rc2bUY on 2026-07-23 has EHGO ml1 and JEM t1.
+    A slug-only match was ambiguous for EHGO and resolved to None (2026-09-05)."""
+    rows = [{"manifest_id": "CA8i4Rc2bUY::EHGO::2026-07-23::ml1"},
+            {"manifest_id": "CA8i4Rc2bUY::EHGO::2026-07-23::t4"},
+            {"manifest_id": "CA8i4Rc2bUY::JEM::2026-07-23::ml1"},
+            {"manifest_id": "Ts7C0flv-1g::EHGO::2026-07-23::ml1"}]
+    assert rr._manifest_id_from_case_dir("EHGO@CA8i4Rc2bUY-ml1_2026-07-23", rows) == "CA8i4Rc2bUY::EHGO::2026-07-23::ml1"
+    assert rr._manifest_id_from_case_dir("JEM@CA8i4Rc2bUY-ml1_2026-07-23", rows) == "CA8i4Rc2bUY::JEM::2026-07-23::ml1"
+    assert rr._manifest_id_from_case_dir("EHGO@Ts7C0flv-1g-ml1_2026-07-23", rows) == "Ts7C0flv-1g::EHGO::2026-07-23::ml1"
+    assert rr._manifest_id_from_case_dir("NXTC@ChLgwLS9eJY-t1-big-acct_2026-07-14",
+                                         [{"manifest_id": "ChLgwLS9eJY::NXTC::2026-07-14::t1-big-acct"},
+                                          {"manifest_id": "ChLgwLS9eJY::NXTC::2026-07-14::t1"}]) == "ChLgwLS9eJY::NXTC::2026-07-14::t1-big-acct"
