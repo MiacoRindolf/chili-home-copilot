@@ -157,3 +157,72 @@ def test_ang_lockout_ay_gumagamit_ng_day_net_hindi_session_lang():
     i_l13 = src.find("symbol_day_loss_lockout_decision(")
     window = src[i_l13 - 2500 : i_l13]
     assert "symbol_day_banked_pnl_other_sessions" in window
+
+
+# ── Lockout WATCH (v2, 2026-09-05, Ross Parity Bench) ────────────────────────
+from app.services.trading.momentum_neural.risk_policy import (  # noqa: E402
+    symbol_day_lockout_watch_reentry,
+)
+
+
+def test_watch_inactive_ay_walang_epekto():
+    assert symbol_day_lockout_watch_reentry(
+        watch_active=False, tape_ok=False, exemptions_used=0, max_exemptions=1
+    ) == (True, "no_lockout_watch")
+
+
+def test_watch_na_may_buyers_at_budget_ay_pumapasok_isang_beses():
+    assert symbol_day_lockout_watch_reentry(
+        watch_active=True, tape_ok=True, exemptions_used=0, max_exemptions=1
+    ) == (True, "lockout_watch_front_side_exempt")
+    assert symbol_day_lockout_watch_reentry(
+        watch_active=True, tape_ok=True, exemptions_used=1, max_exemptions=1
+    ) == (False, "lockout_watch_budget_spent")
+
+
+def test_watch_na_walang_buyers_sa_tape_ay_naghihintay():
+    assert symbol_day_lockout_watch_reentry(
+        watch_active=True, tape_ok=False, exemptions_used=0, max_exemptions=1
+    ) == (False, "lockout_watch_no_buyers_on_tape")
+
+
+def test_zero_budget_ay_hindi_kailanman_pumapasok():
+    assert symbol_day_lockout_watch_reentry(
+        watch_active=True, tape_ok=True, exemptions_used=0, max_exemptions=0
+    ) == (False, "lockout_watch_budget_spent")
+
+
+def test_pure_lockout_decision_ay_byte_identical_pa_rin():
+    locked, reason, thr = symbol_day_loss_lockout_decision(
+        enabled=True, day_net_realized_usd=-508.20, max_loss_per_trade_usd=130.0, r_multiple=1.5,
+    )
+    assert (locked, reason, thr) == (True, "symbol_day_loss_lockout", 195.0)
+
+
+def test_ang_l13_edge_ay_nagwa_watch_kapag_may_budget_at_terminal_kapag_ubos():
+    src = _tick_source()
+    i_l13 = src.find("symbol_day_loss_lockout_decision(")
+    window = src[i_l13:i_l13 + 4000]
+    assert "if _l13_locked and _l13_fs_used < _l13_fs_max:" in window
+    assert 'le["symbol_day_lockout_watch"]' in window
+    assert "live_symbol_day_loss_lockout_watch" in window
+    assert "elif _l13_locked:" in window and "live_symbol_day_loss_lockout" in window
+
+
+def test_ang_watch_gate_ay_nasa_candidate_edge_bago_ang_hvm101_at_pagkatapos_ng_bottom_of_range():
+    src = _tick_source()
+    i_bor = src.find("live_entry_bottom_of_range_veto")
+    i_gate = src.find('_ldw = le.get("symbol_day_lockout_watch")')
+    i_hvm = src.find("# HVM101 (B): BID-PROP / SPREAD-TIGHTENING CONFIRMER")
+    i_cand = src.find("_safe_transition(db, sess, STATE_LIVE_ENTRY_CANDIDATE)")
+    assert 0 < i_bor < i_gate < i_hvm < i_cand
+    gate = src[i_gate:i_gate + 3000]
+    assert "tape_confirms_hold" in gate and "symbol_day_lockout_watch_reentry" in gate
+    assert '_trigger_reason = "symbol_day_lockout_watch"' in gate
+    assert "live_lockout_watch_front_side_exempt" in gate
+    assert '"chili_momentum_max_ignition_exemptions", 1' in gate   # one documented budget
+
+
+def test_ang_watch_marker_ay_hindi_binubura_ng_recycle_reset():
+    assert "symbol_day_lockout_watch" not in lr._RECYCLE_ENTRY_STATE_KEYS
+    assert "lockout_front_side_exemptions" not in lr._RECYCLE_ENTRY_STATE_KEYS
