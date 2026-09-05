@@ -69,8 +69,17 @@ services:
           # default 1G left no room for shared_buffers + work_mem headroom,
           # which surfaced as ALTER TABLE locks on scan_patterns timing out
           # in migrations.
-          cpus: "3.0"
-          memory: 2G
+          # 3.0->8.0 CPU (2026-09-05): the Ross Parity Bench runs 10-11 replay
+          # drivers against this container (one sink DB each, the hydrated tape
+          # as source); at 3 CPUs postgres sat pegged at ~295% while every
+          # driver idled at 0.2-0.45 CPU waiting on it, per-case time went past
+          # 60 min and the per-case timeout produced ZERO receipts for an hour.
+          # `docker update --cpus 8` (live, no restart) took it to ~490% and the
+          # drivers moved again. memory 2G->12G matches the limit the running
+          # container has carried since the 2026-08-19 PG I/O work (the compose
+          # value had drifted below reality). Docker VM: 20 vCPU / 39 GiB.
+          cpus: "8.0"
+          memory: 12G
         reservations:
           cpus: "0.5"
           memory: 512M
