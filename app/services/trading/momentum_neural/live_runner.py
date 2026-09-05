@@ -25487,6 +25487,18 @@ _RECYCLE_ENTRY_STATE_KEYS: tuple[str, ...] = (
     "entry_orders_resolved",
     "entry_submitted",
     "position",
+    # ── BURST-WINDOW EXIT stamp (#1275, 2026-09-01) belongs to the trade that just closed ──
+    # burst_window_decision (:23724) is sticky by design -- "the caller owns clearing on exit or
+    # new position" -- and no caller did. MEASURED 2026-09-05 on the Ross Parity Bench (RH,
+    # stride 2): after a trail_stop/stop/bailout leg the recycled watcher's RE-ENTRY inherited
+    # the old stamp, the first held tick computed elapsed >= 45 s, and the new position was
+    # sold 1-2 s after its fill -- EHGO 07-23 legs 6/7 (13:28:10 -> 13:28:12, 13:29:01 ->
+    # 13:29:02; EHGO then ran 2.90 -> 4.88 without CHILI), EDBL 07-27 leg 4 (12:26:56 ->
+    # 12:26:57). A new position starts a new clock: the ring, the stamp and its debug are
+    # cleared here like every other per-trade marker.
+    "burst_started_epoch",
+    "burst_track",
+    "burst_window_dbg",
     # ── entry submit / sizing / pricing context ──
     "entry_submit_utc",
     "entry_client_order_id",
