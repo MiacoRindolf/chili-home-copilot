@@ -1076,3 +1076,63 @@ def test_the_driver_reads_the_tape_from_tape_source_url_first():
     src = _DRIVER.read_text(encoding="utf-8")
     assert 'os.environ.get("TAPE_SOURCE_URL")' in src
     assert '"broker_symbol_action_claims"' in src   # cleaned per run once the app engine is the sink
+
+
+# ── --lane-env: the strategy runs AS DEPLOYED, recorded by name and hash ──────────
+
+def _lane_file(tmp_path, text):
+    p = tmp_path / "lane.env"
+    p.write_text(text, encoding="utf-8")
+    return str(p)
+
+
+def test_parse_lane_env_keeps_chili_keys_only_and_unwraps_quotes(tmp_path):
+    p = _lane_file(tmp_path, """
+# comment
+export CHILI_MOMENTUM_LEGACY_ALPACA_DISPATCH_ENABLED=true
+CHILI_ALPACA_EXPECTED_ACCOUNT_ID="c7d421e0-4fae-4219-9503-5ce051d4d923"
+CHILI_MOMENTUM_RISK_MAX_SPREAD_BPS_LIVE='40'
+DATABASE_URL=postgresql://chili:chili@localhost:5433/chili
+ALPACA_API_KEY=secret
+not a line
+""")
+    lane = B.parse_lane_env(p)
+    assert lane == {
+        "CHILI_MOMENTUM_LEGACY_ALPACA_DISPATCH_ENABLED": "true",
+        "CHILI_ALPACA_EXPECTED_ACCOUNT_ID": "c7d421e0-4fae-4219-9503-5ce051d4d923",
+        "CHILI_MOMENTUM_RISK_MAX_SPREAD_BPS_LIVE": "40",
+    }
+
+
+def test_lane_env_satisfies_the_alpaca_requirements_and_reaches_the_driver(tmp_path):
+    p = _lane_file(tmp_path, "CHILI_MOMENTUM_LEGACY_ALPACA_DISPATCH_ENABLED=true\n"
+                             f"CHILI_ALPACA_EXPECTED_ACCOUNT_ID={CERTIFIED_PAPER_ACCOUNT}\n"
+                             "CHILI_MOMENTUM_RISK_MAX_SPREAD_BPS_LIVE=40\n")
+    env, _dropped = B.build_env(case=CASE, arm=B.Arm("base"), parent={}, lane_env=B.parse_lane_env(p),
+                                **_CONTRACT_KWARGS)
+    assert env["CHILI_MOMENTUM_RISK_MAX_SPREAD_BPS_LIVE"] == "40"
+    assert env[B.ALPACA_ACCOUNT_ID_ENV] == CERTIFIED_PAPER_ACCOUNT
+
+
+def test_lane_env_never_overrides_the_contract_or_protected_keys(tmp_path):
+    lane = {"CHILI_PYTEST": "0", "SYMBOL": "XXXX", "DATABASE_URL": "postgresql://x/y", **LANE_ALPACA_ENV}
+    env, _dropped = B.build_env(case=CASE, arm=B.Arm("base"), parent={}, lane_env=lane, **_CONTRACT_KWARGS)
+    assert env["CHILI_PYTEST"] == "1"
+    assert env["SYMBOL"] == CASE.symbol
+    assert env["DATABASE_URL"] == _CONTRACT_KWARGS["sink"]
+
+
+def test_an_arm_still_overrides_a_lane_env_key(tmp_path):
+    lane = {"CHILI_MOMENTUM_RISK_MAX_SPREAD_BPS_LIVE": "40", **LANE_ALPACA_ENV}
+    arm = B.Arm("wide", overrides={"CHILI_MOMENTUM_RISK_MAX_SPREAD_BPS_LIVE": "80"})
+    env, _dropped = B.build_env(case=CASE, arm=arm, parent={}, lane_env=lane, **_CONTRACT_KWARGS)
+    assert env["CHILI_MOMENTUM_RISK_MAX_SPREAD_BPS_LIVE"] == "80"
+
+
+def test_the_record_carries_names_and_a_hash_never_values():
+    lane = {"CHILI_ALPACA_EXPECTED_ACCOUNT_ID": "secret-ish", "CHILI_X": "1"}
+    rec = B.lane_env_record(lane, path="lane.env")
+    assert rec["keys"] == 2 and rec["names"] == ["CHILI_ALPACA_EXPECTED_ACCOUNT_ID", "CHILI_X"]
+    assert len(rec["sha256"]) == 64
+    assert "secret-ish" not in str(rec)
+    assert B.lane_env_record({"CHILI_X": "1", "CHILI_ALPACA_EXPECTED_ACCOUNT_ID": "secret-ish"})["sha256"] == rec["sha256"]

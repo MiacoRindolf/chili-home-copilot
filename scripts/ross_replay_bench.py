@@ -238,6 +238,53 @@ ALPACA_DISPATCH_MODE_ENV = "CHILI_MOMENTUM_LEGACY_ALPACA_DISPATCH_ENABLED"
 #                   service installs, and every attempt is blocked:
 #                   live_entry_adaptive_risk_blocked x26, 0 fills (2026-09-04, SDOT).
 #                   The bench measures the lane AS DEPLOYED, so it carries the mode.
+# LANE ENV (2026-09-05). The lane launches with 153 CHILI_* keys in its .env and the bench
+# was passing two of them (the account id and the dispatch mode). Any of the other 151 can
+# change a decision -- the bench must measure the strategy AS DEPLOYED, so it takes the
+# lane's env file as an explicit input and layers every CHILI_* key under the contract.
+# Values are never written to disk by the bench (the file carries API keys); the run record
+# carries the key NAMES and a sha256 of the sorted KEY=VALUE blob so two runs can be told
+# apart -- and told identical -- without leaking a secret.
+_LANE_ENV_KEY_RE = re.compile(r"^CHILI_[A-Z0-9_]+$")
+
+
+def parse_lane_env(path: str) -> dict[str, str]:
+    """KEY=VALUE lines of a dotenv-style file, CHILI_* keys only.
+
+    Blank lines and ``#`` comments are ignored, a leading ``export `` is stripped, and a
+    value wrapped in matching single or double quotes is unwrapped. Anything that is not a
+    ``CHILI_*`` key (DATABASE_URL, API keys under other prefixes) is ignored on purpose: the
+    contract owns the DB bindings and the driver never reads the rest.
+    """
+    out: dict[str, str] = {}
+    with open(path, encoding="utf-8") as fh:
+        for raw in fh:
+            line = raw.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            if line.startswith("export "):
+                line = line[len("export "):].lstrip()
+            key, value = line.split("=", 1)
+            key = key.strip()
+            value = value.strip()
+            if len(value) >= 2 and value[0] == value[-1] and value[0] in ("'", '"'):
+                value = value[1:-1]
+            if _LANE_ENV_KEY_RE.match(key):
+                out[key] = value
+    return out
+
+
+def lane_env_record(lane_env: Mapping[str, str], *, path: str | None = None) -> dict[str, Any]:
+    """What the run record keeps about the lane env: names and a hash, never values."""
+    blob = "\n".join(f"{k}={lane_env[k]}" for k in sorted(lane_env)).encode("utf-8")
+    return {
+        "path": path,
+        "keys": len(lane_env),
+        "names": sorted(lane_env),
+        "sha256": hashlib.sha256(blob).hexdigest(),
+    }
+
+
 ALPACA_REQUIRED_AMBIENT_ENV: tuple[tuple[str, str], ...] = (
     (
         ALPACA_ACCOUNT_ID_ENV,
@@ -1069,6 +1116,7 @@ def build_env(
     case: Case,
     arm: Arm,
     parent: Mapping[str, str],
+    lane_env: Optional[Mapping[str, str]] = None,
     **contract_kwargs: Any,
 ) -> tuple[dict[str, str], list[str]]:
     """Sanitised parent + the exact contract + the arm's overrides.
@@ -1079,6 +1127,14 @@ def build_env(
     ``_load_arm_file`` already refused every protected name.
     """
     env, dropped = sanitise_parent_env(parent)
+    # The lane's deployed CHILI_* settings sit UNDER the contract (the contract wins on any
+    # overlap) and above the sanitised parent; protected and contract keys are never taken
+    # from the file, whatever it says.
+    for key, value in (lane_env or {}).items():
+        if key in CONTRACT_ENV_KEYS or key in PROTECTED_ENV_KEYS:
+            continue
+        _refuse_forbidden_key(key, where="lane env")
+        env[key] = str(value)
     env.update(contract_env(case=case, **contract_kwargs))
     # AN ALPACA RUN REQUIRES THE CERTIFIED ACCOUNT ID, AND REFUSES WITHOUT IT (2026-09-04).
     # The driver's quarantine gate (live_runner.py:1585-1592) refuses every tick unless the
@@ -1593,6 +1649,9 @@ def _build_parser() -> argparse.ArgumentParser:
                          "flat JSON object of env overrides for the driver subprocess")
     # Tree + databases.
     ap.add_argument("--build", required=True, help="build tree to run (becomes PYTHONPATH and cwd)")
+    ap.add_argument("--lane-env", default=None, metavar="PATH",
+                    help="the lane's .env; its CHILI_* keys run under the contract so the bench "
+                         "measures the strategy AS DEPLOYED (names + sha256 recorded, never values)")
     ap.add_argument("--ref", required=True, help="commit the build tree must be at (verify_tree)")
     ap.add_argument("--sentinel-file", default=DEFAULT_SENTINEL_FILE,
                     help="file verify_tree greps for --sentinel (default: the replay driver)")
@@ -1724,6 +1783,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     plan = build_plan(cases, arms)
 
     parent = dict(os.environ)
+    lane_env = parse_lane_env(args.lane_env) if args.lane_env else None
     ambient_chili = {k: v for k, v in parent.items() if k.startswith("CHILI_")}
     out_root = os.path.abspath(args.out_dir)
     os.makedirs(out_root, exist_ok=True)
@@ -1769,7 +1829,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         run_dir = os.path.join(out_root, case.dirname, arm.name)
         json_out = os.path.join(run_dir, "run.json")
         env, _dropped = build_env(
-            case=case, arm=arm, parent=parent,
+            case=case, arm=arm, parent=parent, lane_env=lane_env,
             build=os.path.abspath(args.build), source=args.source, sink=args.sink,
             equity=args.equity, risk=args.risk, tick_stride=args.tick_stride,
             grid_step_s=args.grid_step_s, exec_family=args.exec_family,
@@ -1784,6 +1844,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             "contract_env": _redacted({k: env[k] for k in sorted(CONTRACT_ENV_KEYS)},
                                       ("DATABASE_URL", "TEST_DATABASE_URL")),
             "arm_overrides": arm.overrides,
+            "lane_env": (lane_env_record(lane_env, path=args.lane_env) if lane_env is not None else None),
         }
 
         if args.dry_run:
