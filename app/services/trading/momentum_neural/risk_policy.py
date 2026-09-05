@@ -4157,6 +4157,9 @@ def symbol_day_lockout_watch_reentry(
     tape_ok: bool,
     exemptions_used: int,
     max_exemptions: int,
+    last: float | None = None,
+    session_high: float | None = None,
+    noise_abs: float | None = None,
 ) -> tuple[bool, str]:
     """LOCKOUT WATCH (2026-09-05, Ross Parity Bench): pure re-entry decision while a
     symbol-day loss lockout is in WATCH (not terminal).
@@ -4164,10 +4167,21 @@ def symbol_day_lockout_watch_reentry(
     The lock (L13) keeps its threshold. Instead of terminalising, a session with budget
     left keeps watching; when the FSM's own entry trigger fires again, this decides whether
     that fire may proceed: ONLY when the executed tape confirms buyers (``tape_ok`` from
-    ``entry_gates.tape_confirms_hold``, fail-closed at the caller) AND fewer than
-    ``max_exemptions`` re-entries past a lock have been granted this session (the same
-    fresh-ignition budget, one documented setting). Everything else holds the fire as
-    ``symbol_day_lockout_watch``. Returns (allowed, reason)."""
+    ``entry_gates.tape_confirms_hold``, fail-closed at the caller) AND the name has
+    PROVED ITSELF AGAIN — ``last`` is back within one of its own 30-s noise bands of the
+    session high (``last >= session_high - noise_abs``) — AND fewer than ``max_exemptions``
+    re-entries past a lock have been granted this session (the same fresh-ignition budget,
+    one documented setting). Everything else holds the fire as ``symbol_day_lockout_watch``.
+
+    v3 (measured 2026-09-05, first A/B of the watch): all four exemptions granted on tape
+    alone fired ABOVE VWAP but 14-28% BELOW the day high (EDBL 8.14 vs 9.94 on a
+    sub_vwap_trap_tick; JWEL 5.12 vs 6.25 and EZRA 3.17 vs 3.68 on abcd_break_tick_ok; EZRA
+    2.65 vs 3.68 on momentum_ok_tick_stream) and all four lost (-34.48, -18.57, -21.70,
+    +15.40 then -25.74 on the day). Buyers on the tape mid-range is a bounce, not the
+    reclaim Ross waits for ("hands off until it proves itself again"). The reclaim test is
+    name-relative: the band is the name's OWN median 30-s high-low range (the #1278
+    measurement), the high is the session's own. Missing basis => fail-closed
+    (``lockout_watch_no_reclaim_basis``). Returns (allowed, reason)."""
     if not watch_active:
         return True, "no_lockout_watch"
     try:
@@ -4179,6 +4193,20 @@ def symbol_day_lockout_watch_reentry(
         return False, "lockout_watch_budget_spent"
     if not tape_ok:
         return False, "lockout_watch_no_buyers_on_tape"
+    try:
+        _last = float(last) if last is not None else None
+        _high = float(session_high) if session_high is not None else None
+        _band = float(noise_abs) if noise_abs is not None else None
+    except (TypeError, ValueError):
+        return False, "lockout_watch_no_reclaim_basis"
+    if (
+        _last is None or _high is None or _band is None
+        or not (math.isfinite(_last) and math.isfinite(_high) and math.isfinite(_band))
+        or _last <= 0.0 or _high <= 0.0 or _band < 0.0
+    ):
+        return False, "lockout_watch_no_reclaim_basis"
+    if _last < _high - _band:
+        return False, "lockout_watch_not_reclaimed"
     return True, "lockout_watch_front_side_exempt"
 
 

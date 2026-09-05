@@ -22758,6 +22758,34 @@ def _own_tape_noise_floor_pct(db, symbol: str, *, entry_price: float) -> tuple[f
     return med / e, len(ranges)
 
 
+def _own_tape_session_high(db, symbol: str) -> float | None:
+    """The session's own high (premarket-inclusive, from 04:00 ET of the current ET date
+    to the replay-aware now) read from the symbol's executed tape. Bounded, symbol-first,
+    replay-aware like ``_own_tape_noise_floor_pct``. ``None`` on no tape / any error
+    (callers fail CLOSED on None). Used by the lockout-watch reclaim test (2026-09-05)."""
+    sym = (symbol or "").strip().upper()
+    if not sym or db is None or sym.endswith("-USD"):
+        return None
+    try:
+        from zoneinfo import ZoneInfo as _Z
+        from sqlalchemy import text as _sql
+        from .optional_db_read import optional_scalar
+
+        _now_et = _now_in_tz(_Z("America/New_York"))
+        _start_et = _now_et.replace(hour=4, minute=0, second=0, microsecond=0)
+        _start = _start_et.astimezone(timezone.utc).replace(tzinfo=None)
+        _ao = _utcnow_aware().replace(tzinfo=None)
+        v = optional_scalar(db, _sql(
+            "SELECT max(price) FROM iqfeed_trade_ticks "
+            "WHERE symbol = :s AND observed_at >= :start AND observed_at <= :as_of"
+        ), {"s": sym, "start": _start, "as_of": _ao})
+        v = float(v) if v is not None else None
+        return v if v is not None and math.isfinite(v) and v > 0.0 else None
+    except Exception:
+        _log.debug("[momentum_live] session high read failed for %s", sym, exc_info=True)
+        return None
+
+
 def _live_tick_bbo(
     adapter: Any,
     product_id: str,
@@ -34700,11 +34728,37 @@ def tick_live_session(
 
             _ldw_used = int(le.get("lockout_front_side_exemptions") or 0)
             _ldw_max = int(getattr(settings, "chili_momentum_max_ignition_exemptions", 1) or 1)
+            # v3 RECLAIM BASIS (2026-09-05): the name's own session high and its own 30-s
+            # noise band; the pure decision refuses (fail-closed) when either is missing.
+            _ldw_last = None
+            try:
+                _ldw_last = float(getattr(tick, "bid", None) or getattr(tick, "mid", None) or 0.0) or None
+            except (TypeError, ValueError):
+                _ldw_last = None
+            _ldw_high = _own_tape_session_high(db, sess.symbol) if _ldw_tape_ok else None
+            _ldw_noise_abs = None
+            if _ldw_tape_ok and _ldw_last:
+                try:
+                    _ldw_nf_pct, _ldw_nf_buckets = _own_tape_noise_floor_pct(db, sess.symbol, entry_price=_ldw_last)
+                    _ldw_nf_min = int(getattr(settings, "chili_momentum_stop_noise_floor_min_buckets", 6) or 6)
+                    if _ldw_nf_pct is not None and int(_ldw_nf_buckets or 0) >= max(3, _ldw_nf_min):
+                        _ldw_noise_abs = float(_ldw_nf_pct) * float(_ldw_last)
+                except Exception:
+                    _ldw_noise_abs = None
+            _ldw_reclaim = {
+                "last": _ldw_last, "session_high": _ldw_high,
+                "noise_abs": (round(_ldw_noise_abs, 6) if _ldw_noise_abs is not None else None),
+                "off_high_pct": (round((float(_ldw_high) - float(_ldw_last)) / float(_ldw_high), 6)
+                                 if _ldw_high and _ldw_last else None),
+            }
             _ldw_allowed, _ldw_why = _ldw_decide(
                 watch_active=True,
                 tape_ok=bool(_ldw_tape_ok),
                 exemptions_used=_ldw_used,
                 max_exemptions=_ldw_max,
+                last=_ldw_last,
+                session_high=_ldw_high,
+                noise_abs=_ldw_noise_abs,
             )
             if _ldw_allowed:
                 le.pop("symbol_day_lockout_watch", None)
@@ -34714,6 +34768,7 @@ def tick_live_session(
                     "trigger": _trigger_reason,
                     "reason": _ldw_why,
                     "tape": _ldw_tape_dbg,
+                    "reclaim": _ldw_reclaim,
                     "bid": _float_or_none(getattr(tick, "bid", None)) if tick is not None else None,
                     "watch": _ldw,
                     "front_side_exemptions": int(le["lockout_front_side_exemptions"]),
@@ -34727,6 +34782,7 @@ def tick_live_session(
                     "blocked_trigger": _ldw_prev,
                     "reason": _ldw_why,
                     "tape": _ldw_tape_dbg,
+                    "reclaim": _ldw_reclaim,
                     "watch": _ldw,
                 })
 

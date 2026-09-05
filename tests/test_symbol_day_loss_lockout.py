@@ -171,13 +171,66 @@ def test_watch_inactive_ay_walang_epekto():
     ) == (True, "no_lockout_watch")
 
 
-def test_watch_na_may_buyers_at_budget_ay_pumapasok_isang_beses():
+def test_watch_na_may_buyers_budget_at_reclaim_ay_pumapasok_isang_beses():
+    # reclaimed: last within one noise band of the session high
     assert symbol_day_lockout_watch_reentry(
-        watch_active=True, tape_ok=True, exemptions_used=0, max_exemptions=1
+        watch_active=True, tape_ok=True, exemptions_used=0, max_exemptions=1,
+        last=6.20, session_high=6.25, noise_abs=0.245,
     ) == (True, "lockout_watch_front_side_exempt")
     assert symbol_day_lockout_watch_reentry(
-        watch_active=True, tape_ok=True, exemptions_used=1, max_exemptions=1
+        watch_active=True, tape_ok=True, exemptions_used=1, max_exemptions=1,
+        last=6.20, session_high=6.25, noise_abs=0.245,
     ) == (False, "lockout_watch_budget_spent")
+
+
+# ── v3 RECLAIM (2026-09-05, first A/B of the watch): the four measured exemptions ─────
+# Every exemption v2 granted on tape alone fired ABOVE VWAP but 14-28% BELOW the day high,
+# and every one lost. Ross: "hands off until it proves itself again" = back at the high.
+_MEASURED_V2_EXEMPTIONS = [
+    # (case, trigger, last, vwap, session_high, leg pnl)
+    ("EDBL 07-27", "sub_vwap_trap_tick", 8.14, 7.692, 9.94, -34.48),
+    ("JWEL 08-10", "abcd_break_tick_ok", 5.1158, 4.343, 6.25, -18.57),
+    ("EZRA 08-03 RH", "abcd_break_tick_ok", 3.17, 2.763, 3.68, -21.70),
+    ("EZRA 08-03 alpaca", "momentum_ok_tick_stream", 2.65, 2.661, 3.68, -25.74),
+]
+
+
+def test_v3_refuses_every_measured_mid_range_exemption():
+    for case, trig, last, vwap, high, pnl in _MEASURED_V2_EXEMPTIONS:
+        # a generous band (4.5% of price, the JWEL 30-s median) still does not reach the high
+        noise = 0.045 * last
+        assert last > vwap * 0.99, case  # above VWAP: v2's implicit state was NOT the discriminator
+        assert symbol_day_lockout_watch_reentry(
+            watch_active=True, tape_ok=True, exemptions_used=0, max_exemptions=1,
+            last=last, session_high=high, noise_abs=noise,
+        ) == (False, "lockout_watch_not_reclaimed"), case
+
+
+def test_v3_missing_reclaim_basis_fails_closed():
+    for kw in ({"last": None, "session_high": 6.25, "noise_abs": 0.2},
+               {"last": 6.2, "session_high": None, "noise_abs": 0.2},
+               {"last": 6.2, "session_high": 6.25, "noise_abs": None},
+               {"last": float("nan"), "session_high": 6.25, "noise_abs": 0.2},
+               {"last": 6.2, "session_high": 6.25, "noise_abs": -0.1},
+               {"last": "x", "session_high": 6.25, "noise_abs": 0.2}):
+        assert symbol_day_lockout_watch_reentry(
+            watch_active=True, tape_ok=True, exemptions_used=0, max_exemptions=1, **kw
+        ) == (False, "lockout_watch_no_reclaim_basis"), kw
+    # the order of refusals: budget, then tape, then reclaim
+    assert symbol_day_lockout_watch_reentry(
+        watch_active=True, tape_ok=False, exemptions_used=0, max_exemptions=1
+    ) == (False, "lockout_watch_no_buyers_on_tape")
+
+
+def test_v3_gate_reads_the_session_high_and_noise_band_from_the_own_tape():
+    src = _tick_source()
+    i = src.find('_ldw = le.get("symbol_day_lockout_watch")')
+    window = src[i:i + 3500]
+    assert "_own_tape_session_high(db, sess.symbol)" in window
+    assert "_own_tape_noise_floor_pct(db, sess.symbol, entry_price=_ldw_last)" in window
+    assert "session_high=_ldw_high" in window and "noise_abs=_ldw_noise_abs" in window
+    module_src = inspect.getsource(lr)
+    assert "def _own_tape_session_high(db, symbol: str) -> float | None:" in module_src
 
 
 def test_watch_na_walang_buyers_sa_tape_ay_naghihintay():
@@ -216,7 +269,7 @@ def test_ang_watch_gate_ay_nasa_candidate_edge_bago_ang_hvm101_at_pagkatapos_ng_
     i_hvm = src.find("# HVM101 (B): BID-PROP / SPREAD-TIGHTENING CONFIRMER")
     i_cand = src.find("_safe_transition(db, sess, STATE_LIVE_ENTRY_CANDIDATE)")
     assert 0 < i_bor < i_gate < i_hvm < i_cand
-    gate = src[i_gate:i_gate + 3000]
+    gate = src[i_gate:i_hvm]  # the whole gate block, however long the reclaim basis makes it
     assert "tape_confirms_hold" in gate and "symbol_day_lockout_watch_reentry" in gate
     assert '_trigger_reason = "symbol_day_lockout_watch"' in gate
     assert "live_lockout_watch_front_side_exempt" in gate
