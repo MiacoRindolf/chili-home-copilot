@@ -986,14 +986,21 @@ def _manifest_id_from_case_dir(case_name: str, mrows: Sequence[Mapping[str, Any]
     """
     if "@" not in case_name:
         return None
-    slug = case_name.split("@", 1)[1].rsplit("_", 1)[0]
+    symbol, rest = case_name.split("@", 1)
+    slug, _, date = rest.rpartition("_")
     parts = [p for p in slug.replace("-", "::").split("::") if p]
     if not parts:
         return None
+    # The symbol and the date are part of the identity, not decoration: one video covers
+    # several symbols (CA8i4Rc2bUY on 2026-07-23 has EHGO ml1 AND JEM t1), so a slug
+    # match alone was ambiguous for EHGO@CA8i4Rc2bUY-ml1_2026-07-23 and resolved to None
+    # (MEASURED 2026-09-05, first alpaca sweep). Require the exact ::SYMBOL::DATE:: segment.
+    needle = f"::{symbol.upper()}::{date}::"
     hits = [
         str(m.get("manifest_id"))
         for m in mrows
-        if all(p in str(m.get("manifest_id") or "") for p in parts)
+        if needle in str(m.get("manifest_id") or "").upper().replace(symbol.upper(), symbol.upper())
+        and all(p in str(m.get("manifest_id") or "") for p in parts)
     ]
     return hits[0] if len(hits) == 1 else None
 
