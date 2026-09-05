@@ -1259,3 +1259,23 @@ def test_no_ross_pin_and_no_chili_fill_means_no_first_divergence_and_says_why():
     assert tl.meta["first_divergence"] is None
     assert tl.meta["first_divergence_anchor"]["t_utc"] is None
     assert "CHILI never reached a fill" in tlm.render_markdown(tl)
+
+
+# ═══════════════════════════════════════════════════════════════════════════════════
+# --tape-source-dsn: the hydrated source DB, filtered by provenance (2026-09-05)
+# ═══════════════════════════════════════════════════════════════════════════════════
+
+def test_source_tape_dsn_accepts_the_hydrated_db_and_sinks_only():
+    assert tlm.assert_source_tape_dsn("postgresql://u:p@h:5433/chili_hydrated") == "chili_hydrated"
+    assert tlm.assert_source_tape_dsn("postgresql://u:p@h:5433/chili_rossbench_test") == "chili_rossbench_test"
+    with pytest.raises(AssertionError):
+        tlm.assert_source_tape_dsn("postgresql://u:p@h:5433/chili")   # the live lane, by name
+
+
+def test_source_tape_sql_carries_the_provenance_predicate():
+    assert "source = ANY(:src)" in tlm._TAPE_SRC_TRADE_SQL
+    assert "source = ANY(:src)" in tlm._TAPE_SRC_NBBO_SQL
+    assert "ORDER BY observed_at ASC, id ASC" in tlm._TAPE_SRC_TRADE_SQL   # tie-stable (invariant 8)
+    assert set(tlm.DEFAULT_TAPE_SOURCES) == {
+        "iqfeed_lookup_hist", "iqfeed_lookup_bbo", "polygon_v3_trades", "polygon_v3_quotes"
+    }

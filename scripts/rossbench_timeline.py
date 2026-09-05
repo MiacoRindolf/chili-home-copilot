@@ -1210,6 +1210,71 @@ _TAPE_DB_NBBO_SQL = (
     "WHERE symbol=:s AND observed_at>=:a AND observed_at<:b AND bid>0 AND ask>=bid "
     "ORDER BY observed_at ASC, id ASC"
 )
+# The SOURCE-DB variants carry the same provenance predicate the replay driver applies
+# (SOURCE_FILTER, replay_v3_fsm_window.py) so a double-hydrated symbol-day cannot show
+# twice the prints the run actually mirrored.
+_TAPE_SRC_TRADE_SQL = (
+    "SELECT observed_at, price, size, bid, ask FROM iqfeed_trade_ticks "
+    "WHERE symbol=:s AND observed_at>=:a AND observed_at<:b AND price>0 "
+    "AND source = ANY(:src) ORDER BY observed_at ASC, id ASC"
+)
+_TAPE_SRC_NBBO_SQL = (
+    "SELECT observed_at, bid, ask FROM momentum_nbbo_spread_tape "
+    "WHERE symbol=:s AND observed_at>=:a AND observed_at<:b AND bid>0 AND ask>=bid "
+    "AND source = ANY(:src) ORDER BY observed_at ASC, id ASC"
+)
+# The hydrated research DB is the ONLY source DB the timeline will read: never the live
+# lane. Same doctrine as assert_non_production_dsn, one more name it may carry.
+_SOURCE_TAPE_DB_MARKERS: tuple[str, ...] = ("hydrated",)
+DEFAULT_TAPE_SOURCES: tuple[str, ...] = (
+    "iqfeed_lookup_hist", "iqfeed_lookup_bbo", "polygon_v3_trades", "polygon_v3_quotes",
+)
+
+
+def assert_source_tape_dsn(url: str) -> str:
+    """Return the database name, or raise unless it announces itself as the hydrated
+    research DB (a sink name is accepted too). The live lane's DB is refused by name."""
+    name = str(url or "").rsplit("/", 1)[-1].split("?", 1)[0].strip()
+    low = name.lower()
+    if not name:
+        raise AssertionError("[rossbench_timeline] --tape-source-dsn carries no database name")
+    if not any(m in low for m in _SOURCE_TAPE_DB_MARKERS + _NON_PRODUCTION_DB_MARKERS):
+        raise AssertionError(
+            f"[rossbench_timeline] refusing to read tape from database {name!r}: a source "
+            f"tape DB must carry one of {list(_SOURCE_TAPE_DB_MARKERS)} in its name (the "
+            "hydrated research copy), never the live lane."
+        )
+    return name
+
+
+def load_tape_from_source(url: str, symbol: str, win_start: datetime, win_end: datetime,
+                          *, sources: tuple[str, ...] = DEFAULT_TAPE_SOURCES) -> list[TapeTick]:
+    """Read the trade tape + NBBO from the hydrated SOURCE DB, filtered by provenance.
+
+    WHY (2026-09-05): a multi-case sweep resets the sink before every case, so by the time
+    the reporter runs, the sink holds the LAST case's tape only; a timeline for any earlier
+    case read from the sink would carry no prints (a blank price column reads as a halt).
+    The source DB has every case's tape; the provenance predicate keeps it identical to
+    what the driver mirrored."""
+    assert_source_tape_dsn(url)
+    from sqlalchemy import create_engine, text  # lazy: keeps import-time stdlib-only
+
+    src = [str(x) for x in (sources or DEFAULT_TAPE_SOURCES)]
+    engine = create_engine(url)
+    ticks: list[TapeTick] = []
+    params = {"s": symbol, "a": win_start, "b": win_end, "src": src}
+    with engine.connect() as conn:
+        for row in conn.execute(text(_TAPE_SRC_TRADE_SQL), params):
+            m = row._mapping
+            ticks.append(TapeTick(ts=parse_utc(m["observed_at"]), price=_f(m["price"]),
+                                  size=_f(m["size"]), bid=_f(m["bid"]), ask=_f(m["ask"])))
+        for row in conn.execute(text(_TAPE_SRC_NBBO_SQL), params):
+            m = row._mapping
+            ticks.append(TapeTick(ts=parse_utc(m["observed_at"]), bid=_f(m["bid"]),
+                                  ask=_f(m["ask"])))
+    ticks = [t for t in ticks if t.ts is not None]
+    ticks.sort(key=lambda t: t.ts)
+    return ticks
 
 
 def load_tape_from_sink(url: str, symbol: str, win_start: datetime, win_end: datetime) -> list[TapeTick]:
@@ -1940,6 +2005,13 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--tape-db-url",
                         help="Replay-SINK DSN to read the tape from. Refused unless the DB "
                              "name announces itself as a sink (see assert_non_production_dsn).")
+    parser.add_argument("--tape-source-dsn",
+                        help="Hydrated SOURCE DSN (name must carry 'hydrated') to read the tape "
+                             "from, filtered by --tape-sources -- for a case whose sink has "
+                             "already been reset by a later case of the same sweep.")
+    parser.add_argument("--tape-sources", default=",".join(DEFAULT_TAPE_SOURCES),
+                        help="Comma-separated provenance allow-list for --tape-source-dsn "
+                             "(default: the driver's SOURCE_FILTER).")
     parser.add_argument("--out-dir", required=True,
                         help="Directory for timeline.md / timeline.jsonl / timeline.meta.json.")
     parser.add_argument("--build-dir", default=None,
@@ -2017,13 +2089,16 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     pins = [normalize_pin(p, et_date=et_date, win_start_utc=win_start, win_end_utc=win_end)
             for p in kept]
 
-    if args.tape and args.tape_db_url:
-        raise SystemExit("[rossbench_timeline] pass --tape OR --tape-db-url, not both")
+    if sum(1 for x in (args.tape, args.tape_db_url, args.tape_source_dsn) if x) > 1:
+        raise SystemExit("[rossbench_timeline] pass ONE of --tape / --tape-db-url / --tape-source-dsn")
     if args.tape:
         suffix = Path(args.tape).suffix.lower()
         ticks = load_tape_csv(args.tape) if suffix == ".csv" else load_tape_jsonl(args.tape)
     elif args.tape_db_url:
         ticks = load_tape_from_sink(args.tape_db_url, symbol, win_start, win_end)
+    elif args.tape_source_dsn:
+        srcs = tuple(x.strip() for x in str(args.tape_sources or "").split(",") if x.strip())
+        ticks = load_tape_from_source(args.tape_source_dsn, symbol, win_start, win_end, sources=srcs)
     else:
         # An empty tape is a legitimate case (the bench also grades windows with no
         # coverage), but it must be announced: a blank price column otherwise reads as a
