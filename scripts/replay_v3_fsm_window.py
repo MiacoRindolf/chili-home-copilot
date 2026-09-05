@@ -761,6 +761,11 @@ _BENCH_PAYLOAD_KEYS = (
     "effective_spread_bps", "bid", "ask", "mid", "rescued_from", "failed_check",
     "client_order_id", "broker_error", "owner_transport_advanced", "phase", "session_state",
     "target_price", "position_quantity",
+    # 2026-09-05 gate #11: ``live_deadman_stop_release_blocked`` carries WHY in ``error``
+    # (deadman_cancel_unsupported / _pre_cancel_truth_unknown / ...); ``errors`` (plural) was
+    # whitelisted, ``error`` was not, and the block repeated 2,590 times per case unnamed.
+    "error", "deadman_order_id", "deadman_client_order_id", "frozen_order_type",
+    "superseding_order_type", "handoff_token",
 )
 
 
@@ -1081,8 +1086,15 @@ def run_arm(label, grid, ticks, frame_ticks, g4_on, *, sink_reset=None, tape_sou
     # failed every tick and blocked 26/26 entry attempts as a $0 "breach". For the run the
     # mock's own snapshot answers it. Production never enters this manager.
     from app.services.trading import governance as _gov
+    # GATE #12 (2026-09-05): the claim helpers' "committed short session" opens its own
+    # connection; this driver holds one transaction for the whole window, so those reads
+    # saw the SEED session row and the deadman lineage could never retire after a re-arm
+    # (exit never re-derived). Under the seam the short session is THIS session under a
+    # SAVEPOINT -- the visibility a live per-tick commit gives. Production never installs it.
+    from app.services.trading.momentum_neural import alpaca_orphan_claims as _oc
 
-    with _gov.alpaca_account_snapshot_provider(mock.get_account_snapshot):
+    with _gov.alpaca_account_snapshot_provider(mock.get_account_snapshot), \
+            _oc.replay_short_session_provider(db):
         res = driver.run()
 
     # mine fills -> realized PnL (buys are cost, sells are proceeds; net of the mock's fees).

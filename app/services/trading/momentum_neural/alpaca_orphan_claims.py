@@ -14,8 +14,10 @@ import logging
 import math
 import time
 import uuid
+from contextlib import contextmanager
+from contextvars import ContextVar
 from datetime import datetime, timedelta, timezone
-from typing import Any, Callable
+from typing import Any, Callable, Iterator, Optional
 
 from sqlalchemy import text
 from sqlalchemy.orm import Session
@@ -6917,7 +6919,46 @@ def _reserve_alpaca_entry_risk(
     return {**acquired, **detail}
 
 
+# REPLAY SEAM (2026-09-05, alpaca canon gate #12). Production: every ``*_committed`` helper
+# runs on its OWN connection and commits independently of the tick ("claims survive a tick
+# rollback"). The replay driver (replay_v3.ReplayV3Driver) holds ONE transaction for the whole
+# window -- flush per tick, no commit -- so a short session there reads the SEED session row:
+# retire_deadman_handoff_reprotected's local_qty was NaN on every tick after a deadman
+# re-arm and the exit never re-derived (FCUV 07-31 probe: deadman_lineage_reconcile_pending
+# x875). The same helper returned True the moment the driver had committed. Under the seam
+# the short session IS the driver's session, under a SAVEPOINT: same visibility as a live
+# per-tick commit, same rollback isolation for the helper's own failure. Production never
+# installs it (ContextVar default None => byte-identical path below).
+_SHORT_SESSION_PROVIDER: ContextVar[Optional[Callable[[Callable[[Session], Any]], Any]]] = (
+    ContextVar("alpaca_claims_short_session_provider", default=None)
+)
+
+
+@contextmanager
+def replay_short_session_provider(db: Session) -> Iterator[None]:
+    """Route ``_with_short_session`` through ``db`` under a SAVEPOINT for the block."""
+
+    def _provider(fn: Callable[[Session], Any]) -> Any:
+        nested = db.begin_nested()
+        try:
+            result = fn(db)
+        except Exception:
+            nested.rollback()
+            raise
+        nested.commit()
+        return result
+
+    token = _SHORT_SESSION_PROVIDER.set(_provider)
+    try:
+        yield
+    finally:
+        _SHORT_SESSION_PROVIDER.reset(token)
+
+
 def _with_short_session(fn: Callable[[Session], Any]) -> Any:
+    provider = _SHORT_SESSION_PROVIDER.get()
+    if provider is not None:
+        return provider(fn)
     from ....db import SessionLocal
 
     db = SessionLocal()

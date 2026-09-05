@@ -133,3 +133,40 @@ def test_non_stop_orders_keep_their_raw_shape_byte_identical() -> None:
     b = _broker()
     o, _ = b.get_order(b._orders and next(iter(b._orders)))
     assert set(o.raw) == {"venue", "fee"}
+
+
+def test_cancel_by_id_is_the_runner_verb_and_truth_is_reread_after_it() -> None:
+    b = _broker()
+    placed = b.place_deadman_stop(product_id="LABT", base_size="166", stop_price=1.9,
+                                  client_order_id="dm-1")
+    assert b.cancel_order_by_id(placed["order_id"]) is True
+    o = b.get_order_by_client_order_id_truth("dm-1")["order"]
+    assert o.status in ("canceled", "cancelled") and o.raw["alpaca_status"] == "canceled"
+    assert b.cancel_order_by_id("replay_mock-99999999") is False
+    assert b.get_order_by_client_order_id("dm-1").order_id == placed["order_id"]
+    assert b.get_order_by_client_order_id("never") is None
+
+
+def test_position_quantity_is_the_signed_book_and_zero_when_flat() -> None:
+    b = _broker()
+    assert b.get_position_quantity("LABT") == pytest.approx(166.0)
+    assert b.get_position_quantity("NOPE") == 0.0
+    b.set_clock(REGULAR)
+    b.set_quote("LABT", RecordedQuote(bid=2.30, ask=2.32, last=2.31))
+    assert b.place_market_order(product_id="LABT", side="sell", base_size="166",
+                                client_order_id="exit-1")["ok"] is True
+    assert b.get_position_quantity("LABT") == pytest.approx(0.0)
+
+
+def test_the_release_path_preconditions_hold_on_the_mock() -> None:
+    # the three adapter facts live_runner.py:15004-15035 and :12512 need before an exit
+    # can post while a deadman rests: cancel verb, strict CID truth terminal after it,
+    # readable position quantity.
+    b = _broker()
+    placed = b.place_deadman_stop(product_id="LABT", base_size="166", stop_price=1.9,
+                                  client_order_id="dm-1")
+    assert hasattr(b, "cancel_order_by_id") and hasattr(b, "get_position_quantity")
+    assert b.cancel_order_by_id(placed["order_id"]) is True
+    truth = b.get_order_by_client_order_id_truth("dm-1")
+    assert truth["found"] is True and truth["order"].status in ("canceled", "cancelled")
+    assert b.get_position_quantity("LABT") == pytest.approx(166.0)   # still held: exit is next
