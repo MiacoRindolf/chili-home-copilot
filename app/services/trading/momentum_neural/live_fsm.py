@@ -154,6 +154,16 @@ _ALLOWED_LIVE: frozenset[tuple[str, str]] = frozenset(
         (STATE_LIVE_ENTERED, STATE_LIVE_BAILOUT),
         (STATE_LIVE_SCALING_OUT, STATE_LIVE_EXITED),
         (STATE_LIVE_SCALING_OUT, STATE_LIVE_TRAILING),
+        # A position that has taken a partial is STILL a position: every software exit that
+        # bails a held runner (max-loss circuit, per-trade max loss, breakout-failed fast
+        # bail, tape-reversal, deadman handoff) must be reachable from here too. MEASURED
+        # 2026-09-05 (Ross Parity Bench, DFNS 07-29 on main+#1354): the #769 max-loss
+        # circuit fired on the runner after a scale-out and `_transition_to_bailout`
+        # raised `Invalid live FSM transition 'live_scaling_out' -> 'live_bailout'` inside
+        # tick_live_session — the driver died with the position open. Latent in production
+        # for as long as this edge was missing; the burst-stamp fix exposed it because
+        # re-entries now live long enough to scale out.
+        (STATE_LIVE_SCALING_OUT, STATE_LIVE_BAILOUT),
         # Ross first-target scale-out can fire AFTER the runner has begun trailing
         # (price drifted up past the trail-activate level, then reached the 2:1
         # target) — take the partial, then resume trailing the runner.
