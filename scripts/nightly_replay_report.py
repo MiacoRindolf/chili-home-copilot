@@ -197,7 +197,11 @@ def run_replay(day: str, mover: dict) -> dict:
     env = dict(os.environ)
     env.update({
         "PYTHONPATH": BUILD,
-        "DATABASE_URL": PROD,
+        # The tape is read from PROD; the APP ENGINE is bound to the SINK. Committed Alpaca
+        # claim helpers open SessionLocal() on DATABASE_URL, and with it pointing at the
+        # live DB a replay could write claims into production (2026-09-05).
+        "TAPE_SOURCE_URL": PROD,
+        "DATABASE_URL": SINK,
         "TEST_DATABASE_URL": SINK,
         "SYMBOL": sym,
         "WIN_START": f"{day}T{WIN_START_UTC}",
