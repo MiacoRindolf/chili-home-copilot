@@ -1938,6 +1938,32 @@ class MockBrokerAdapter:
             })
         return out, self._freshness()
 
+    def get_position_quantity(self, product_id: str) -> Optional[float]:
+        """The real adapter's exact broker quantity read (venue/alpaca_spot.py:3960): a
+        float, 0.0 for a genuinely flat symbol (Alpaca's 404), None only when unreadable --
+        which the mock's own book never is. The runner reads it without hasattr on the
+        deadman terminal-accounting path (live_runner.py:12512) inside try/except, so an
+        AttributeError there became ``terminal_deadman_position_unknown`` and queued a
+        full close that itself could never release the deadman (gate #11, 2026-09-05)."""
+        return float(self.get_position_quantity_truth(product_id)["quantity"])
+
+    def get_order_by_client_order_id(self, client_order_id: str) -> Optional[NormalizedOrder]:
+        """Legacy convenience twin of the strict lookup: the order or None."""
+        truth = self.get_order_by_client_order_id_truth(client_order_id)
+        return truth.get("order") if truth.get("found") else None
+
+    def cancel_order_by_id(self, order_id: str) -> bool:
+        """The real adapter's cancel verb (venue/alpaca_spot.py:4431): True proves only that
+        the venue accepted the call; the runner re-reads the exact CID afterwards and
+        requires it terminal (live_runner.py:15021-15035). Gate #11: the deadman release
+        path checks ``hasattr(adapter, "cancel_order_by_id")`` (:15004) and blocked every
+        tick with ``deadman_cancel_unsupported`` -- FCUV 07-31 x2,590, STI 06-04 x2,905,
+        NUWE 07-30 x3,179 on the first mock-deadman receipts."""
+        if str(order_id or "").strip() not in self._orders:
+            return False
+        result = self.cancel_order(str(order_id))
+        return bool(result.get("ok"))
+
     def get_position_quantity_truth(self, product_id: str) -> dict[str, Any]:
         pid = str(product_id or "").strip().upper()
         quantity = 0.0
