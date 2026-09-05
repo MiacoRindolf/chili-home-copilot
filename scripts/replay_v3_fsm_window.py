@@ -104,6 +104,7 @@ if _REPO not in sys.path:
 from export_replay_v3_parity_fixtures import _load_bearing_payload  # noqa: E402
 from hydration_canonicalize import TABLES as _CANON_TABLES, plan as _canon_plan  # noqa: E402
 from replay_harness_invariants import (  # noqa: E402
+    simclock_default_wrapper,
     assert_as_of_reads,
     assert_clean_sink,
     assert_dense_stride,
@@ -912,7 +913,7 @@ def run_arm(label, grid, ticks, frame_ticks, g4_on, *, sink_reset=None, tape_sou
     # to the replay instant by the driver's replay_clock) so it returns the window that was
     # ACTUALLY in effect at the recorded tick (CLRO 16:16Z = 12:16 ET = midday).
     _orig_swn = _mp.schedule_window_now
-    _mp.schedule_window_now = lambda now=None, _o=_orig_swn: _o(now if now is not None else lr._utcnow())
+    _mp.schedule_window_now = lambda now=None, _o=_orig_swn, **kw: _o(now if now is not None else lr._utcnow(), **kw)
     # TAPE AS-OF FIX (buyers-confirm validation): the entry-gate tape reads
     # (signed_tape_accel_features -> tape_confirms_hold / buyers_confirmed) use as_of=None in
     # tick_live_session, which in LIVE means the trailing real now(). In replay the mirrored ticks
@@ -921,11 +922,16 @@ def run_arm(label, grid, ticks, frame_ticks, g4_on, *, sink_reset=None, tape_sou
     # Re-point the tape read at the SIM clock (lr._utcnow()) when as_of is None so the buyers gate
     # reads the ACTUAL executed tape at the replayed instant — accurate buyers-confirmation.
     import app.services.trading.momentum_neural.entry_gates as _eg
+    # HARNESS GATE 14 (2026-09-05): the wrapper must forward EVERY argument. The
+    # previous one re-declared the signature (symbol, db, window_s, as_of) and silently
+    # rejected ``settings_obj`` (added to signed_tape_accel_features by #1024, 08-11);
+    # tape_confirms_hold swallows that TypeError into its fail-closed branch =>
+    # ``tape_hold_error`` => every tape-gated trigger (12 pattern triggers, ORB/ABCD
+    # tick confirm, buyers_confirmed, the ignition exemption) was DARK in every replay
+    # since, while the identical read offline confirmed (JWEL 2026-08-10 11:31:47Z:
+    # accel +6,899, tick_rate 137 >= floor 53, n=1,423).
     _orig_staf = _eg.signed_tape_accel_features
-    def _staf_simclock(symbol, *, db=None, window_s=None, as_of=None, _o=_orig_staf):
-        return _o(symbol, db=db, window_s=window_s,
-                  as_of=(as_of if as_of is not None else lr._utcnow()))
-    _eg.signed_tape_accel_features = _staf_simclock
+    _eg.signed_tape_accel_features = simclock_default_wrapper(_orig_staf, lr._utcnow, key="as_of")
     # P1 FORMING-BAR CLOCK (2026-08-21): _forming_bar_elapsed_fraction measures how much of
     # the LAST bar has elapsed via entry_gates._utcnow_for_bars = the REAL wall clock. In
     # replay the frame's last bar sits at the RECORDED instant, so real-now reads every bar
@@ -1066,8 +1072,8 @@ def run_arm(label, grid, ticks, frame_ticks, g4_on, *, sink_reset=None, tape_sou
     # it, resting limits never fill). Wrap set_quote: after each quote, feed the bucket volume.
     _vol_by_ts = build_printed_volume(grid, ticks)
     _orig_set_quote = mock.set_quote
-    def _set_quote_and_vol(pid, q, _o=_orig_set_quote):
-        _o(pid, q)
+    def _set_quote_and_vol(pid, q, _o=_orig_set_quote, **kw):
+        _o(pid, q, **kw)
         try:
             _t = mock._clock
             _v = _vol_by_ts.get(_t, 0.0)
