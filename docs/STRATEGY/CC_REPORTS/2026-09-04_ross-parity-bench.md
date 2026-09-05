@@ -270,3 +270,69 @@ Observability fixed on the way: `live_entry_adaptive_risk_blocked` now carries `
 - Sink 1: RH no-op A/B (base, base_copy) running, ETA ~22:42Z. Sink 2: free; alpaca SDOT relaunch with both lane keys next.
 - Post-close task `CHILI-PostClose-Deploy-Hydrate-0904` armed 00:05Z (deploy main → containers; hydrate 60 IQFeed + 9 Polygon symbol-days). Premarket backup launch 2026-09-08 01:35 PT armed (09-07 is Labor Day).
 - Not started: full 8-case baseline (needs tonight's hydration for UPC 06-29 / WETO 08-17), Phase 0.1 book, spread budget, burst-exit trigger.
+
+
+---
+
+## Part 4 — 2026-09-04/05 night: the canon family reaches its first real gate; the winners sweep starts (PRs #1327–#1331)
+
+### The operator's new TASK (23:00Z, side chat) and how it maps
+
+*Capture ALL of Ross's winners except a few knife-risky ones.* Burden of proof flipped: a gate that blocked a Ross winner is **wrong until the case timeline proves knife risk**; fix mechanisms by conditioning on tape state, never by loosening thresholds; every fix must take more winners **without** taking more of his losers (losers = negative control). Order: (1) bench every pinnable winner, each with timeline + report; (2) list every miss → first blocker, second, code ref, grouped by mechanism with count + Ross $; (3) fix largest-$ group first, A/B on winners and losers, ship, rollback ready; (4) re-bench after each fix; (5) misses replay cannot prove → paper from Tuesday 09-08.
+
+This is the plan's Phase 1.3–1.4 → 2.3 with the burden inverted. The plan's five *designed* refusals are the "few knife-risky" exceptions and must be proven per case, not assumed.
+
+Tooling landed for it tonight: a manifest-driven case list (winners = `expected_action==trade` ∧ `ross_net_usd>0`, one case per Ross **wave** as `SYMBOL:DATE:<manifest_id>` — 62 symbol-days carry more than one wave), a divergence-ledger aggregator over `rpi.json` + `timeline.meta.json` (mechanism → count, Ross $, CHILI $, first-divergence second, code ref), the receipt-scoring helper, and the no-op comparer.
+
+### Alpaca canon, gates 6–8 — the last harness gaps before the strategy
+
+| # | attempt blocker (26/26 attempts each run) | mechanism | fix |
+|---|---|---|---|
+| 6 | `live_entry_blocked_by_breaker` — `daily_loss_cap_broker`, "$0 breach" | for paper families the per-broker daily-loss observation reads the REAL Alpaca account (`AlpacaSpotAdapter().get_account_snapshot()`, module-level) → in replay a transient fail-closed read every tick; the RH family reads the DB ledger, which is why the control arm filled | #1329 governance `alpaca_account_snapshot_provider` seam (cache bypassed while installed); mock answers from its own book (`equity = start + cash flow + open MTM at the recorded quote`, `last_equity = start`, sim-clock stamp); driver installs it around `driver.run()`. Cap = 5% × EQUITY via `risk_policy._REPLAY_EQUITY` = 5,000, matching the run |
+| 7 | `live_entry_deferred_final_bbo` — `alpaca_broker_clock_unavailable` ×19 | `_strict_alpaca_clock_truth` requires `get_market_clock_snapshot()` (the `/v2/clock` twin), timestamp within [−1, 30] s of `_utcnow()` | #1330 mock clock from the sim instant, **truthful**: `is_open` = 09:30–16:00 ET Mon–Fri (holidays not modelled, said so); a premarket replay reads `is_open=False` and the runner's own premarket carve-out decides |
+| 8 | `live_entry_deferred_final_bbo` — `alpaca_account_posture_unreadable` ×19 | `_strict_alpaca_empty_entry_posture` calls `list_positions()` + `list_open_orders(strict=True)`, both fresh ≤ 2 s; the mock lacked the first and refused `strict` | #1331 mock `list_positions()` from its fills in the real row shape; `strict` accepted |
+
+Observability fixed on the way (#1328): the receipt filter dropped everything a breaker writes (`{}` ×26 in the receipt while the sink row named `daily_loss_cap_broker`), and the runner's breaker block coerced the observation's `realized=None` to `0.0` and dropped `reason/transient/source` — a transient fail-closed read and a measured $0 breach were the same line. Both now carry the truth.
+
+**What the seven-gate run showed (run #8, `alpaca_canon_235106Z`, tree `715846851`, VERIFIED refs):** all 26 attempts reached `live_entry_final_bbo` with `execution_bbo_ok` — the mock's execution BBO passes the real submit-boundary validator — and **7 of 26 were vetoed by `spread_exceeds_expected_move_budget`**. That is the first *strategy* gate the bench has reached on the Alpaca canon, and it is the same gate that vetoed every RTH entry on the live lane on 09-04 (215 candidates → 0 submits). It enters the divergence ledger as a mechanism to condition, not a harness gap to fix.
+
+### No-op A/B — verification step 3 passed
+
+`base` vs `base_copy` on the same commit (`e71229451`), interleaved, SDOT 06-26, stride 1: **0 scalar diffs, 7 fills identical, 4,190 events identical including payloads, Δ +0.00**, both timelines VERIFIED, same first divergence 09:17:48 ET. The harness is hermetic on the Robinhood family.
+
+### Post-close deploy — done, with two of my own faults on the way
+
+The task ff'd `wt-window2` to `715846851` and built `chili-app:main-715846851` (10 s, cached layers), then **aborted its own content check (rc=3)**. Recomputed in Python on raw bytes: image == git on `live_runner.py`, `persistence.py`, `governance.py`, `replay_mock_broker.py`. The checker's git-side hash went through a PowerShell 5.1 pipeline (`git show | python`) which re-encodes a UTF-8 file with non-ASCII comments — that hash can never match. Fixed in the script (python hashes both sides). Then `recreate_containers.py` failed on a name conflict: the morning's backup still held `<name>.old`, `docker rename` failed silently, and `docker run --name` collided; the stale backups were renamed to `.old-078487738` (kept for rollback, not deleted) and the recreate succeeded: **3 containers Up on `main-715846851` at 00:11Z**. Hydration of 60 IQFeed + 9 Polygon symbol-days is running from the deploy tree (`postclose_hydrate_20260904_manual.log`).
+
+### The winners sweep — batch 1 running
+
+Robinhood control family first (sink 1, wt-bench @ `c624d59df`, stride 2): the top-12 hydrated winners by |Ross $| — PPCB 08-27 t2, EHGO 07-23, EDBL 07-27, NCRA 07-29, BIYA 07-20, LABT 07-22, VIVS 07-15, VRAX 07-09 ×2, NXTC 07-14 ×2, VEEE 07-13 — $309,990 of Ross P&L; ~25 min per case on the denser Aug tapes, ETA ~03:30Z. The Alpaca canon sweep follows once run #9 (eight gates) fills or names the next real gate. Losers hydrated + pinned tonight: only 2 (EZRA 08-03 t3, PPCB 08-27 t3) — the negative control is thin until tonight's hydration lands.
+
+### Sequencing lessons added tonight
+
+- Merging a PR in the same breath as launching a bench from a not-yet-ff'd tree gets the launch refused by `verify_tree` (correct) — three times tonight. Merge, ff, **then** launch, or launch from a tree checked out at `origin/main` after the merge.
+- A worktree with an untracked file (someone else's `tests/test_backside_retrace_window.py` in wt-seams) is DIRTY to the receipt → UNVERIFIED code refs. Runs now come from `wt-alpaca` (clean, detached at `origin/main`) and `wt-bench`.
+- The `-k "daily_loss or governance"` selection has **11 pre-existing failures** identical on `main` and on the gate-6 branch — CI is systemically red; a regression check must diff failing sets, not counts.
+
+### Gate 8 (#1331) and the first sweep case with a tape-backed timeline (#1332)
+
+Gate 8: `_strict_alpaca_empty_entry_posture` calls `list_positions()` + `list_open_orders(strict=True)` before every attempt; the mock lacked the first and refused `strict` → `alpaca_account_posture_unreadable` ×19. Fixed (#1331), canon run #9 launched from `wt-alpaca @ 21387ef70`.
+
+A multi-case sweep resets the sink before each case, so a finished case's tape is gone by scoring time; the timeline can now read the hydrated source DB with the driver's provenance predicate (`--tape-source-dsn`, #1332). First use — **PPCB 2026-08-27 t2, Ross +$50,000 (entry pinned 08:30:49 ET, `level_cross`, ambiguous), CHILI −$36.28**, VERIFIED refs at `c624d59df`:
+
+| ET | tape | CHILI | ref |
+|---|---|---|---|
+| 08:31:03 | | candidate (`momentum_ok_tick_stream`), blocked once `wide_bbo_spread` 2.74/2.88 | |
+| 08:31:06 | 3.18/3.22 | `pending_place` | |
+| 08:31:07 | prints **3.47, 3.49, 3.37** in the first 8 ms, last of the second 3.22 | **`live_entry_submitted`** | `live_runner.py:40824` |
+| 08:31:08 | last 2.89, 2.82/2.88 | **filled $3.43 ×48** (the ask at the submit instant) | `:19586` |
+| 08:31:09 | last 2.68 | **`live_bailout max_loss_circuit`**, unrealized −$36.28 | `:42660` |
+| 08:31:10 → :33 | | 22 × `live_exit_pending_confirmation`, exit filled 3.21 → −$10.64 | |
+| 08:31:38 → :44 | | maker re-entry 3.04 → scale-out 3.11 (+7.37) → `trail_stop` 3.00 (−4.21) | |
+| 08:33:35 → :58 | | third entry 3.21 → `breakout_failed_fast_bail` → 3.01 (−28.80) | |
+
+The $3.43 is real (the recorded NBBO's max ask in that window is 3.49): CHILI's submit landed on the top print of a two-second spike — a 4-second candidate→submit path (plan L-E, place-time staleness) into an extension — then the exit stack cut every subsequent attempt within seconds on a name that went on to make Ross $50k. Two ledger mechanisms from one case: **entry timing (chase into a spike top)** and **bailout within seconds of fill**. Neither is a gate-threshold question.
+
+Instrument defect found by the same timeline: the PPCB pin carries `exit_ts_utc_pinned == entry_ts_utc_pinned` (no exit clock stated → the pinner defaulted the exit onto the entry), so Ross's stage reads `exited` at 08:30:49 and the first-divergence label is `exited/blocked`. The pinner should leave an unstated exit unpinned (Ross stays `filled`); noted for `rossbench_pin_ross_events.py`.
+
+Sweep batch 1 pace: ~25 min per case on the denser August tapes (PPCB: 282k prints, 69k Polygon quotes, 78 t/s at stride 2); EDBL running at 00:30Z.
