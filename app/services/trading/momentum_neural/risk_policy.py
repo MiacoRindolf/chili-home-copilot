@@ -4352,7 +4352,9 @@ def reentry_escalation_decision(
         requirement still stands) so a thin-tape name is not starved.
 
     Returns ``(allowed, debug)``. Fail-OPEN on unusable numeric basis (current
-    behavior — the standard trigger already fired). docs/DESIGN/MOMENTUM_LANE.md"""
+    behavior — the standard trigger already fired), EXCEPT the substitute's noise band
+    (v5b/v5c): a non-leader with no readable band gets no substitute (fail-closed); the
+    day-leader falls back to a zero band. docs/DESIGN/MOMENTUM_LANE.md"""
     dbg: dict[str, Any] = {
         "escalation_level": escalation_level,
         "structural_trigger": bool(structural_trigger),
@@ -4363,6 +4365,8 @@ def reentry_escalation_decision(
         "tape_accel": tape_accel,
         "tape_back_buy_share": tape_back_buy_share,
         "required_reclaim": None,
+        "live_price": live_price,
+        "noise_abs": noise_abs,
     }
     if not enabled:
         dbg["reason"] = "flag_off"
@@ -4478,6 +4482,13 @@ def reentry_escalation_decision(
                 _sub_band = float(noise_abs)
         except (TypeError, ValueError):
             _sub_band = None
+        if _sub_band is None and is_day_leader:
+            # v5c (review 2026-09-06): the day-leader keeps its review-m2 contract — the
+            # substitute must not fail closed on a thin-tape band (the 30-s band needs
+            # >= 6 buckets of the last 900 s while the tape read needs 3 prints in 15 s;
+            # the two disagree exactly at ignition). Non-leaders keep the fail-closed band.
+            _sub_band = 0.0
+            dbg["substitute_band_fallback"] = "leader_no_band"
         _sub_ok = bool(
             _tape_positive()
             and _sub_req is not None

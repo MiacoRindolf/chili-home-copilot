@@ -565,3 +565,30 @@ def test_cadence_bail_between_stops_does_not_reset_the_pair() -> None:
         now=_NOW, window_seconds=120.0, decision_enabled=True,
     )
     assert rapid is True
+
+
+def test_v5c_the_day_leader_keeps_its_substitute_on_a_thin_tape_band() -> None:
+    # review 2026-09-06: with no readable band the leader falls back to a zero band (the
+    # review-m2 contract), the non-leader stays fail-closed
+    allowed, dbg = reentry_escalation_decision(
+        enabled=True, escalation_level=2, structural_trigger=False,
+        live_price=6.98, prior_hwm=6.90, prior_exit_price=6.80,
+        prior_risk_dist=0.05, tape_accel=1.2, is_day_leader=True, noise_abs=None,
+    )
+    assert allowed is True and dbg["substitute_band_fallback"] == "leader_no_band"
+    assert dbg["live_price"] == 6.98 and dbg["noise_abs"] is None
+    allowed, dbg = reentry_escalation_decision(
+        enabled=True, escalation_level=2, structural_trigger=False,
+        live_price=6.98, prior_hwm=6.90, prior_exit_price=6.80,
+        prior_risk_dist=0.05, tape_accel=1.2, is_day_leader=False, noise_abs=None,
+    )
+    assert allowed is False and dbg["reason"] == "non_structural_trigger"
+    assert "substitute_band_fallback" not in dbg
+
+
+def test_v5c_the_runner_reads_the_band_only_for_non_structural_fires() -> None:
+    import inspect
+    from app.services.trading.momentum_neural import live_runner as lr
+    src = inspect.getsource(lr.tick_live_session)
+    i = src.find("_g4e_noise_abs = None")
+    assert "if _g4e_px and _trigger_reason not in structural_trigger_reasons():" in src[i:i + 600]

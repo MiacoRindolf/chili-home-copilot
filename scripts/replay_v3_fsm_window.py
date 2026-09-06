@@ -776,6 +776,9 @@ _BENCH_PAYLOAD_KEYS = (
     "is_day_leader", "leader_structural_substitute", "tape_accel", "tape_back_buy_share",
     "required_reclaim", "prior_hwm", "prior_exit_price", "prior_risk_dist", "structural_trigger",
     "escalation_level", "live_price", "prior_anchor_hwm", "chase_ceiling", "risk_unit_atr",
+    # v5b/v5c: the substitute's own basis
+    "reclaim_structural_substitute", "substitute_required", "substitute_noise_abs", "noise_abs",
+    "substitute_band_fallback",
 )
 
 
