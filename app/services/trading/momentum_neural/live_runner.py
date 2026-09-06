@@ -3615,6 +3615,110 @@ def session_frame_is_today_et(df: Any, now_aware: datetime) -> tuple[bool, dict[
     except Exception as exc:  # pragma: no cover - defensive; the caller treats False as silence
         dbg["reason"] = f"unreadable:{type(exc).__name__}"
         return False, dbg
+def _bar_interval_seconds(interval: str | None) -> float | None:
+    """'1m' -> 60, '5m' -> 300, '15m' -> 900, '1h' -> 3600, '1d' -> 86400; None when unreadable."""
+    try:
+        s = str(interval or "").strip().lower()
+        if not s:
+            return None
+        unit = s[-1]
+        n = float(s[:-1])
+        mult = {"s": 1.0, "m": 60.0, "h": 3600.0, "d": 86400.0}.get(unit)
+        if mult is None or n <= 0:
+            return None
+        return n * mult
+    except (TypeError, ValueError):
+        return None
+
+
+def bos_exit_post_entry_close_ready(
+    entry_filled_at_utc: Any, now_aware: datetime, interval: str | None
+) -> tuple[bool, dict[str, Any]]:
+    """LIVE BOS EXIT warm-up (2026-09-06, Ross Parity Bench): a CONFIRMED close below
+    structure needs a bar that closed AFTER the entry fill. MEASURED on the gate-15
+    baseline (@ 9383324b2, 62 receipts): every one of the 14 live BOS exits fired 1.1–2.5 s
+    after the fill (WETO 08-14 ×8, NXTC 07-14 ×6, all Ross winners) and was followed by a
+    bailout a second later — the structure read had not seen one close since the fill.
+    Ready when at least one full bar interval has elapsed since ``entry_filled_at_utc``.
+    Fail-OPEN (ready=True) on an unreadable fill stamp or interval so the guard can never
+    hide a real exit on its own bookkeeping. Pure; returns (ready, debug)."""
+    iv = _bar_interval_seconds(interval)
+    if iv is None:
+        return True, {"reason": "no_interval_basis", "interval": interval}
+    t_fill = None
+    try:
+        if entry_filled_at_utc:
+            t_fill = datetime.fromisoformat(str(entry_filled_at_utc))
+            if t_fill.tzinfo is None:
+                t_fill = t_fill.replace(tzinfo=timezone.utc)
+    except (TypeError, ValueError):
+        t_fill = None
+    if t_fill is None:
+        return True, {"reason": "no_entry_fill_basis", "interval_s": iv}
+    try:
+        _now = now_aware if now_aware.tzinfo is not None else now_aware.replace(tzinfo=timezone.utc)
+        since = (_now - t_fill).total_seconds()
+    except (TypeError, ValueError, AttributeError):
+        return True, {"reason": "no_clock_basis", "interval_s": iv}
+    ready = since >= iv
+    return ready, {
+        "reason": "bar_closed_since_entry" if ready else "no_bar_closed_since_entry",
+        "interval_s": iv,
+        "since_entry_s": round(since, 3),
+    }
+
+
+def bos_confirmed_close_since_entry(
+    df: Any, entry_filled_at_utc: Any, now_aware: datetime, interval: str | None
+) -> tuple[float | None, dict[str, Any]]:
+    """r2 of the live BOS warm-up (review 2026-09-06): the clock alone is not enough in
+    LIVE — the OHLCV frame is served from a 600-s process cache with no exec-lane
+    invalidation, so a read one interval after the fill can still be the pre-entry frame.
+    The CONFIRMED close is the close of the last COMPLETED bar (bar start + interval <= now)
+    whose bar END is after the entry fill; the forming bar is never read (Ross exits on a
+    confirmed close, not an intrabar wick). Returns (close, debug); close is None when no
+    such bar exists yet (the caller then skips the BOS read this tick). Fail-open on an
+    unreadable fill stamp (the last completed bar's close, as before the warm-up)."""
+    dbg: dict[str, Any] = {"reason": None}
+    iv = _bar_interval_seconds(interval)
+    if iv is None or df is None or getattr(df, "empty", True):
+        dbg["reason"] = "no_frame_or_interval"
+        return None, dbg
+    try:
+        _now = now_aware if now_aware.tzinfo is not None else now_aware.replace(tzinfo=timezone.utc)
+        t_fill = None
+        if entry_filled_at_utc:
+            try:
+                t_fill = datetime.fromisoformat(str(entry_filled_at_utc))
+                if t_fill.tzinfo is None:
+                    t_fill = t_fill.replace(tzinfo=timezone.utc)
+            except (TypeError, ValueError):
+                t_fill = None
+        idx = df.index
+        closes = df["Close"].astype(float).tolist()
+        n = len(closes)
+        for k in range(n - 1, -1, -1):
+            ts = getattr(idx[k], "to_pydatetime", lambda: idx[k])()
+            if not isinstance(ts, datetime):
+                dbg["reason"] = "non_datetime_index"
+                return None, dbg
+            if ts.tzinfo is None:
+                ts = ts.replace(tzinfo=timezone.utc)
+            bar_end = ts + timedelta(seconds=iv)
+            if bar_end > _now:
+                continue  # still forming
+            dbg["bar_start_utc"] = ts.isoformat()
+            dbg["bar_end_utc"] = bar_end.isoformat()
+            if t_fill is not None and bar_end <= t_fill:
+                dbg["reason"] = "last_completed_bar_precedes_entry"
+                return None, dbg
+            dbg["reason"] = "confirmed_close_since_entry" if t_fill is not None else "confirmed_close_no_fill_basis"
+            return float(closes[k]), dbg
+        dbg["reason"] = "no_completed_bar"
+        return None, dbg
+    except Exception as exc:  # pragma: no cover - defensive
+        dbg["reason"] = f"unreadable:{type(exc).__name__}"
+        return None, dbg
 
 
 def _strict_alpaca_rth_entry_window(
@@ -25747,6 +25851,7 @@ _RECYCLE_ENTRY_STATE_KEYS: tuple[str, ...] = (
     "structural_stop_price",
     "structural_stop_source",  # v4c: the re-entry stop's provenance, per trade
     "lockout_reentry_structural_stop",  # v4d: the grant's stash, per trade
+    "bos_exit_warmup_noted",  # BOS warm-up r2: per trade, not per symbol-day
     "structural_stop_atr_pct",
     "stop_breach_pending_utc",
     "stop_breach_chop_holds",
@@ -44069,13 +44174,51 @@ def tick_live_session(
                 _bos_iv = str(
                     getattr(settings, "chili_momentum_pullback_entry_interval", "5m") or "5m"
                 )
-                _bos_df = _replay_aware_fetch_ohlcv_df(sess.symbol, interval=_bos_iv, period="5d")
+                # A CONFIRMED close below structure needs a bar that CLOSED AFTER the entry.
+                # MEASURED (gate-15 baseline @ 9383324b2, 2026-09-06): every one of the 14
+                # live BOS exits in 62 receipts fired 1.1-2.5 s after the entry fill (WETO
+                # 08-14 x8, NXTC 07-14 x6 — all Ross winners), each followed by a bailout a
+                # second later: the frame's last close was the PRE-entry bar (or the forming
+                # bar's first prints), i.e. the structure read had not seen a single close
+                # since the fill. WETO RH: exemption 09:46:25 -> fill 10.34 -> "close below
+                # structure" at bid 10.29 one second later -> bailout 10.37 -> the name ran
+                # to 12.95. Until one full bar interval has elapsed since the fill the read
+                # is not a confirmed close; the intrabar trail / stop / max-loss circuit own
+                # that window unchanged. Noted once per position for the ledger.
+                _bos_ready, _bos_ready_dbg = bos_exit_post_entry_close_ready(
+                    le.get("entry_filled_at_utc"), _utcnow_aware(), _bos_iv
+                )
+                if not _bos_ready:
+                    if not le.get("bos_exit_warmup_noted"):
+                        le["bos_exit_warmup_noted"] = True
+                        _commit_le(sess, le)
+                        _emit(db, sess, "live_bos_exit_deferred_no_post_entry_close", {
+                            "reason": "no_bar_closed_since_entry",
+                            "bid": float(bid),
+                            **_bos_ready_dbg,
+                        })
+                    _bos_df = None
+                else:
+                    _bos_df = _replay_aware_fetch_ohlcv_df(sess.symbol, interval=_bos_iv, period="5d")
                 if _bos_df is not None and not getattr(_bos_df, "empty", True):
-                    _bos_close = float(_bos_df["Close"].astype(float).iloc[-1])
+                    # r2: the confirmed close is the last COMPLETED bar that ended after the
+                    # fill — never the forming bar, never a cached pre-entry frame.
+                    _bos_close, _bos_close_dbg = bos_confirmed_close_since_entry(
+                        _bos_df, le.get("entry_filled_at_utc"), _utcnow_aware(), _bos_iv
+                    )
                     _bos_buf = float(
                         getattr(settings, "chili_momentum_bos_exit_buffer_pct", 0.003) or 0.003
                     )
-                    if _bos_fn(_bos_df, current_close=_bos_close, buffer_pct=_bos_buf):
+                    if _bos_close is None:
+                        if not le.get("bos_exit_warmup_noted"):
+                            le["bos_exit_warmup_noted"] = True
+                            _commit_le(sess, le)
+                            _emit(db, sess, "live_bos_exit_deferred_no_post_entry_close", {
+                                "reason": str(_bos_close_dbg.get("reason") or "no_confirmed_close"),
+                                "bid": float(bid),
+                                **{k: v for k, v in _bos_close_dbg.items() if k != "reason"},
+                            })
+                    elif _bos_fn(_bos_df, current_close=_bos_close, buffer_pct=_bos_buf):
                         le["last_bailout_trigger"] = "bos_exit_live"
                         _commit_le(sess, le)
                         _transition_to_bailout(db, sess)

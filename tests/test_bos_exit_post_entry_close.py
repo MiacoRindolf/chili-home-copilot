@@ -1,0 +1,107 @@
+"""LIVE BOS EXIT — a confirmed close below structure needs a bar that closed AFTER the entry.
+
+MEASURED on the gate-15 baseline (@ 9383324b2, 62 receipts, 2026-09-06): all 14 live BOS exits
+fired 1.1–2.5 s after the entry fill (WETO 08-14 ×8, NXTC 07-14 ×6 — every one a Ross winner),
+each followed by a bailout a second later. The frame's last close was the pre-entry bar (or the
+forming bar's first prints): the structure read had not seen one close since the fill. WETO RH:
+lockout-watch exemption 09:46:25 ET → fill 10.34 → "close below structure" at bid 10.29 one
+second later → bailout 10.37 → the name ran to 12.95.
+
+The guard is pure: until one full bar interval has elapsed since the fill the read is not a
+confirmed close. The intrabar trail, the stop and the max-loss circuit own that window unchanged.
+
+Runnable: pytest tests/test_bos_exit_post_entry_close.py -v  (DB-free)
+"""
+from __future__ import annotations
+
+import inspect
+from datetime import datetime, timedelta, timezone
+
+from app.services.trading.momentum_neural import live_runner as lr
+
+T0 = datetime(2026, 8, 14, 13, 46, 31, tzinfo=timezone.utc)  # the WETO fill
+
+
+def test_one_second_after_the_fill_is_not_a_confirmed_close():
+    ready, dbg = lr.bos_exit_post_entry_close_ready(T0.isoformat(), T0 + timedelta(seconds=1), "5m")
+    assert ready is False
+    assert dbg["interval_s"] == 300.0 and dbg["since_entry_s"] == 1.0
+
+
+def test_a_full_bar_after_the_fill_is():
+    ready, dbg = lr.bos_exit_post_entry_close_ready(T0.isoformat(), T0 + timedelta(seconds=300), "5m")
+    assert ready is True
+    ready, _ = lr.bos_exit_post_entry_close_ready(T0.isoformat(), T0 + timedelta(seconds=299), "5m")
+    assert ready is False
+    ready, _ = lr.bos_exit_post_entry_close_ready(T0.isoformat(), T0 + timedelta(seconds=61), "1m")
+    assert ready is True
+
+
+def test_unreadable_basis_fails_open_to_the_prior_behaviour():
+    # no fill stamp / bad interval => the BOS read runs as before (the guard never blocks a
+    # real exit path on its own bookkeeping)
+    for stamp in (None, "", "not-a-date"):
+        ready, dbg = lr.bos_exit_post_entry_close_ready(stamp, T0 + timedelta(seconds=1), "5m")
+        assert ready is True, stamp
+        assert dbg["reason"] == "no_entry_fill_basis"
+    ready, dbg = lr.bos_exit_post_entry_close_ready(T0.isoformat(), T0 + timedelta(seconds=1), "weird")
+    assert ready is True and dbg["reason"] == "no_interval_basis"
+
+
+def test_naive_and_aware_stamps_both_read():
+    naive = T0.replace(tzinfo=None).isoformat()
+    ready, dbg = lr.bos_exit_post_entry_close_ready(naive, T0 + timedelta(seconds=10), "5m")
+    assert ready is False and dbg["since_entry_s"] == 10.0
+
+
+def test_the_live_bos_block_asks_the_guard_before_it_fetches():
+    src = inspect.getsource(lr.tick_live_session)
+    i = src.find("ROSS GAP 2: LIVE CLOSE-BELOW-STRUCTURE (BOS) EXIT")
+    j = src.find('_emit(db, sess, "live_bos_exit", {', i)
+    block = src[i:j]
+    k = block.find('bos_exit_post_entry_close_ready(')
+    f = block.find('_replay_aware_fetch_ohlcv_df(sess.symbol, interval=_bos_iv, period="5d")')
+    assert 0 < k < f, "the guard must run before the frame fetch"
+    assert '"live_bos_exit_deferred_no_post_entry_close"' in block
+    assert 'le.get("bos_exit_warmup_noted")' in block
+
+
+# ── r2 (review 2026-09-06): the CONFIRMED close is the last COMPLETED bar that ended after the fill ─
+import pandas as pd  # noqa: E402
+
+
+def _bars(t0, n, step_s, closes):
+    idx = pd.DatetimeIndex([t0 + timedelta(seconds=step_s * i) for i in range(n)])
+    return pd.DataFrame({"Close": closes}, index=idx)
+
+
+def test_r2_the_forming_bar_and_a_cached_pre_entry_frame_are_never_the_confirmed_close():
+    fill = T0  # 13:46:31Z
+    t_bar0 = datetime(2026, 8, 14, 13, 40, tzinfo=timezone.utc)
+    # 5m bars 13:40, 13:45 (ends 13:50 > fill 13:46:31) — at 13:47:31 the 13:45 bar is forming and
+    # the 13:40 bar ended BEFORE the fill => no confirmed close yet (a cached pre-entry frame)
+    df = _bars(t_bar0, 2, 300, [10.10, 10.29])
+    close, dbg = lr.bos_confirmed_close_since_entry(df, fill.isoformat(), fill + timedelta(seconds=60), "5m")
+    assert close is None and dbg["reason"] == "last_completed_bar_precedes_entry"
+    # at 13:50:01 the 13:45 bar has completed and it ended after the fill => its close is confirmed
+    close, dbg = lr.bos_confirmed_close_since_entry(df, fill.isoformat(), datetime(2026, 8, 14, 13, 50, 1, tzinfo=timezone.utc), "5m")
+    assert close == 10.29 and dbg["reason"] == "confirmed_close_since_entry"
+    # a frame with a forming third bar still reads the completed second bar, never iloc[-1]
+    df3 = _bars(t_bar0, 3, 300, [10.10, 10.29, 9.50])
+    close, dbg = lr.bos_confirmed_close_since_entry(df3, fill.isoformat(), datetime(2026, 8, 14, 13, 52, tzinfo=timezone.utc), "5m")
+    assert close == 10.29
+    # no fill stamp: fail-open to the last completed bar
+    close, dbg = lr.bos_confirmed_close_since_entry(df3, None, datetime(2026, 8, 14, 13, 52, tzinfo=timezone.utc), "5m")
+    assert close == 10.29 and dbg["reason"] == "confirmed_close_no_fill_basis"
+    assert lr.bos_confirmed_close_since_entry(pd.DataFrame(), fill.isoformat(), fill, "5m")[0] is None
+    assert lr.bos_confirmed_close_since_entry(df3, fill.isoformat(), fill, "weird")[0] is None
+
+
+def test_r2_the_live_block_reads_the_confirmed_close_and_the_flag_is_per_trade():
+    src = inspect.getsource(lr.tick_live_session)
+    i = src.find("ROSS GAP 2: LIVE CLOSE-BELOW-STRUCTURE (BOS) EXIT")
+    j = src.find('_emit(db, sess, "live_bos_exit", {', i)
+    block = src[i:j]
+    assert "bos_confirmed_close_since_entry(" in block
+    assert 'float(_bos_df["Close"].astype(float).iloc[-1])' not in block
+    assert "bos_exit_warmup_noted" in lr._RECYCLE_ENTRY_STATE_KEYS
