@@ -770,6 +770,10 @@ _BENCH_PAYLOAD_KEYS = (
     # 2026-09-05 lockout-watch A/B: the hold event's WHY is the nested tape read
     "tape", "watch", "front_side_exemptions", "reclaim",
     "risk_mults", "sizing", "resize_basis", "max_notional_usd", "stop_atr_pct", "stop_model",
+    # 2026-09-06 v4c: the lockout watch marker's basis and the re-entry's structural stop
+    "reclaim_level", "leg_entry_price", "leg_high_water_mark", "bid_at_lock", "trade_cycles",
+    "threshold_usd", "day_net_realized_usd", "exemptions_used", "max_exemptions", "vs_level_pct",
+    "off_high_pct", "reentry_structural_stop", "structural_stop_source", "structural_stop_price",
 )
 
 

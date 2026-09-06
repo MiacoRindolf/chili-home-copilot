@@ -4220,6 +4220,36 @@ def symbol_day_lockout_watch_reentry(
     return True, "lockout_watch_front_side_exempt"
 
 
+def lockout_reentry_structural_stop(
+    reclaim_level: float | None, noise_abs: float | None, *, bands: float = 1.0
+) -> float | None:
+    """v4c (2026-09-06): the STOP of a post-lock re-entry is structural — one of the name's
+    own 30-s noise bands BELOW the level it just reclaimed — not the vol-floored ATR%.
+
+    MEASURED (first v4 A/B, EZRA 08-03 ml2 alpaca): the watch granted at 3.05 (level 2.90 +
+    band 0.15), the re-entry filled 3.01 with a 3.9% vol-floored stop, the trail armed 2 s
+    later at 3.09 and the name shook 3.17 -> 2.89 (the low = the reclaimed level, a retest)
+    before running +28% to 3.77; the leg died at 2.89 (trail_stop). Ross's stop sits under the
+    level. With risk-first sizing a wider structural stop buys FEWER shares for the same $risk
+    (it can never lose more per leg); the chandelier trail inherits the same distance.
+    Returns the stop price, or None when the basis is unreadable (the caller then leaves the
+    ordinary stop model untouched)."""
+    try:
+        lvl = float(reclaim_level) if reclaim_level is not None else None
+        band = float(noise_abs) if noise_abs is not None else None
+        k = float(bands)
+    except (TypeError, ValueError):
+        return None
+    if (
+        lvl is None or band is None
+        or not (math.isfinite(lvl) and math.isfinite(band) and math.isfinite(k))
+        or lvl <= 0.0 or band < 0.0 or k <= 0.0
+    ):
+        return None
+    stop = lvl - k * band
+    return stop if stop > 0.0 else None
+
+
 def bailout_maker_reentry_decision(
     *,
     enabled: bool,

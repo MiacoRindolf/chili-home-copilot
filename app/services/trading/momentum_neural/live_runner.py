@@ -25685,6 +25685,7 @@ _RECYCLE_ENTRY_STATE_KEYS: tuple[str, ...] = (
     "flag_breakout_add_confirm_ofi",
     # ── stop / breach / max-loss circuit / excursion markers ──
     "structural_stop_price",
+    "structural_stop_source",  # v4c: the re-entry stop's provenance, per trade
     "structural_stop_atr_pct",
     "stop_breach_pending_utc",
     "stop_breach_chop_holds",
@@ -34777,6 +34778,20 @@ def tick_live_session(
             if _ldw_allowed:
                 le.pop("symbol_day_lockout_watch", None)
                 le["lockout_front_side_exemptions"] = _ldw_used + 1
+                # v4c: the re-entry's stop is STRUCTURAL — one noise band under the level it
+                # just reclaimed (consumed by the structural-stop persist on this fire, cleared
+                # on the fill). EZRA 08-03: 2.90 - 0.15 = 2.75 vs the 2.89 retest that killed
+                # the 3.9% vol-floored stop before the +28% run.
+                from .risk_policy import lockout_reentry_structural_stop as _ldw_stop_fn
+
+                _ldw_struct_stop = _ldw_stop_fn(_ldw_level, _ldw_noise_abs)
+                if _ldw_struct_stop is not None:
+                    le["lockout_reentry_structural_stop"] = round(float(_ldw_struct_stop), 6)
+                else:
+                    le.pop("lockout_reentry_structural_stop", None)
+                _ldw_reclaim["reentry_structural_stop"] = (
+                    round(float(_ldw_struct_stop), 6) if _ldw_struct_stop is not None else None
+                )
                 _commit_le(sess, le)
                 _emit(db, sess, "live_lockout_watch_front_side_exempt", {
                     "trigger": _trigger_reason,
@@ -35052,6 +35067,21 @@ def tick_live_session(
             else:
                 le.pop("structural_stop_price", None)
                 le.pop("breakout_level_price", None)
+            # v4c LOCKOUT RE-ENTRY STRUCTURAL STOP (2026-09-06): a fire granted past a
+            # symbol-day lock carries the level it reclaimed; its stop is one noise band
+            # UNDER that level, whichever trigger class fired. The wider of the trigger's own
+            # pullback low and the reclaim stop wins (a stop can only be widened here; sizing
+            # is risk-first so $risk is unchanged). Source is stamped for the ledger.
+            _ldw_rs = _float_or_none(le.get("lockout_reentry_structural_stop"))
+            if _ldw_rs is not None and _ldw_rs > 0.0:
+                _cur_ss = _float_or_none(le.get("structural_stop_price"))
+                if _cur_ss is None or _ldw_rs < _cur_ss:
+                    le["structural_stop_price"] = float(_ldw_rs)
+                    le["structural_stop_source"] = "lockout_reclaim_level_minus_noise"
+                else:
+                    le["structural_stop_source"] = "trigger_pullback_low"
+            else:
+                le.pop("structural_stop_source", None)
             # LOCATE #3 DIP-VELOCITY CONVICTION: scale entry SIZE by the dip ROC for a
             # dip-family fire (steeper flush snaps back harder). The multiplier is in
             # [1.0, 1+max_boost] (NEVER < 1.0) and composes multiplicatively under the SAME
@@ -36122,6 +36152,8 @@ def tick_live_session(
                 )
                 le["entry_fill_event_id"] = int(_entry_fill_event.id)
                 le["entry_filled_at_utc"] = _entry_filled_at_utc
+                # v4c: the lockout re-entry's structural stop was for THIS entry only
+                le.pop("lockout_reentry_structural_stop", None)
                 _commit_le(sess, le)
                 # DEAD-MAN broker-side stop (2026-07-10, the GMM -$16k orphan incident):
                 # rest a GTC STOP at the BROKER one risk-buffer BELOW the software stop.

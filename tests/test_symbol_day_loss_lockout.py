@@ -312,3 +312,39 @@ def test_ang_watch_gate_ay_nasa_candidate_edge_bago_ang_hvm101_at_pagkatapos_ng_
 def test_ang_watch_marker_ay_hindi_binubura_ng_recycle_reset():
     assert "symbol_day_lockout_watch" not in lr._RECYCLE_ENTRY_STATE_KEYS
     assert "lockout_front_side_exemptions" not in lr._RECYCLE_ENTRY_STATE_KEYS
+
+
+# ── v4c (2026-09-06, first v4 A/B): the re-entry's stop is STRUCTURAL, under the reclaimed level ─
+from app.services.trading.momentum_neural.risk_policy import (  # noqa: E402
+    lockout_reentry_structural_stop,
+)
+
+
+def test_v4c_the_reentry_stop_sits_one_noise_band_under_the_reclaimed_level():
+    # EZRA 08-03 ml2 alpaca: level 2.90, band 0.15 -> 2.75; the retest low was 2.89 (the leg
+    # died there on a 3.9% vol-floored stop before the +28% run)
+    assert lockout_reentry_structural_stop(2.90, 0.15) == 2.75
+    assert lockout_reentry_structural_stop(2.90, 0.15, bands=2.0) == 2.60
+    for bad in ((None, 0.15), (2.9, None), (float("nan"), 0.15), (2.9, -0.1), (0.0, 0.15), ("x", 0.15)):
+        assert lockout_reentry_structural_stop(*bad) is None, bad
+    assert lockout_reentry_structural_stop(0.10, 0.15) is None  # a stop at/below zero is no stop
+
+
+def test_v4c_the_grant_stashes_the_stop_the_persist_consumes_it_and_the_fill_clears_it():
+    src = _tick_source()
+    i = src.find("if _ldw_allowed:")
+    grant = src[i:i + 1400]
+    assert "_ldw_struct_stop = _ldw_stop_fn(_ldw_level, _ldw_noise_abs)" in grant
+    assert 'le["lockout_reentry_structural_stop"] = round(float(_ldw_struct_stop), 6)' in grant
+    assert '_ldw_reclaim["reentry_structural_stop"]' in grant
+    j = src.find('le["structural_stop_price"] = float(_pb_debug["pullback_low"])')
+    persist = src[j:j + 2200]
+    assert '_ldw_rs = _float_or_none(le.get("lockout_reentry_structural_stop"))' in persist
+    assert "if _cur_ss is None or _ldw_rs < _cur_ss:" in persist  # only ever WIDENS the stop
+    assert 'le["structural_stop_source"] = "lockout_reclaim_level_minus_noise"' in persist
+    assert i < j, "the grant (candidate edge) precedes the persist (fire -> CANDIDATE)"
+    module_src = inspect.getsource(lr)
+    k = module_src.find('le["entry_filled_at_utc"] = _entry_filled_at_utc')
+    assert 'le.pop("lockout_reentry_structural_stop", None)' in module_src[k:k + 300]
+    assert "structural_stop_source" in lr._RECYCLE_ENTRY_STATE_KEYS
+    assert "structural_stop_price" in lr._RECYCLE_ENTRY_STATE_KEYS
