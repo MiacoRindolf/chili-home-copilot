@@ -7994,6 +7994,27 @@ def advance_deadman_qty_replacement_committed(**kwargs: Any) -> dict[str, Any]:
         return {"ok": False, "reason": "path_b_marker_commit_failed"}
 
 
+def book_deadman_qty_replacement_partial_fill_committed(**kwargs: Any) -> dict[str, Any]:
+    """Book the sibling tranche fill and COMMIT -- a booked share is never un-booked."""
+    scope = str(kwargs.get("account_scope") or "").strip().lower()
+    if scope != "alpaca:paper" or not bool(getattr(settings, "chili_alpaca_paper", True)):
+        return {"ok": False, "reason": "alpaca_account_scope_not_certified"}
+    try:
+        return _with_short_session(
+            lambda db: book_deadman_qty_replacement_partial_fill(db, **kwargs)
+        )
+    except Exception:
+        return {"ok": False, "reason": "path_b_marker_commit_failed"}
+
+
+def clear_deadman_qty_replacement_committed(**kwargs: Any) -> bool:
+    """Drop a TERMINAL marker and COMMIT.  Refuses anything still in flight."""
+    try:
+        return bool(_with_short_session(lambda db: clear_deadman_qty_replacement(db, **kwargs)))
+    except Exception:
+        return False
+
+
 def read_deadman_qty_replacement_committed(**kwargs: Any) -> tuple[bool, dict[str, Any] | None]:
     """Read the marker in its own short transaction (recovery / observability)."""
     try:

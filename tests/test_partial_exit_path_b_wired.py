@@ -1,35 +1,30 @@
-"""TRIPWIRE: ang PATH B ay HINDI PA nakakabit, at nananatiling totoo ang mga
-premise na nagdulot ng pagpapaliban.
+"""CALL-SITE GUARDS: the PATH B wiring, and the shape it is allowed to have.
 
-BAKIT MAY GANITONG TEST. Ang `venue/alpaca_spot.py::replace_order_qty` (#1276)
-ay naipasok noong 2026-09-01 nang WALANG production caller. Napatunayan ng
-live probe na gumagana ang mekanismo, kaya ang tukso ay ikabit ito sa unang
-exit site na makikita. Limang konkretong butas ang nahanap ng dalawang
-adversarial review kung gagawin iyon nang walang durable claim-phase marker
-(tingnan ang `docs/DESIGN/PARTIAL_EXIT_PATH_B.md`), at dalawa sa mga iyon ay
-NAGPAPATAY sa buong posisyon o sa LAHAT ng exit path:
+This file used to be a TRIPWIRE asserting the opposite -- that
+`venue/alpaca_spot.py::replace_order_qty` (#1276) had ZERO production callers. It shipped
+in that shape on 2026-09-01 because two adversarial reviews found five concrete holes in
+wiring it without a durable claim-phase marker, and two of those holes kill the whole
+position or every exit path:
 
-  R1  ang `pending_replace` ay hindi `certifiably_active`, kaya ang unang
-      PATCH ay humahantong sa `_queue_full_close(deadman_active_certification_failed)`
-      — nagfa-flatten ng buong runner sa ordinaryong transient.
-  R2  ang whole exit na dumarating habang nakaturo pa sa predecessor ang
-      ledger ay nagfi-freeze ng close handoff laban sa isang `replaced` na
-      order — successor hindi kailanman ma-certify, cancel hindi kailanman
-      maging terminal, bawat deadman lease naharang: WALANG exit path.
+  R1  `pending_replace` is not `certifiably_active`, so the first PATCH reaches
+      `_queue_full_close(deadman_active_certification_failed)` -- flattening the entire
+      runner on an ordinary transient.
+  R2  a whole exit arriving while the ledger still points at the predecessor freezes a
+      close handoff against a `replaced` order -- the successor never certifies, the
+      cancel is never terminal, every deadman lease is blocked: NO exit path at all.
 
-ANG BANTAY. Kung may magdagdag ng production caller ng `replace_order_qty`,
-babagsak ang test na ito na may pahiwatig sa disenyo. HINDI ito panghabang-buhay:
-BURAHIN ang file na ito sa PR na talagang ikakabit ang PATH B, at palitan ito
-ng mga call-site guard (isang caller lamang; tinatawag mula sa SCALING_OUT site
-lamang; hindi kailanman sa loob ng burst branch).
+PATH B is wired now (2026-09-06), and that tripwire's own instructions said what to
+replace it with: call-site guards. So the AST machinery below is kept verbatim -- it is
+the only thing in the repo that can see a caller appear anywhere in `app/` -- and the
+three assertions that named the unwired state are inverted to name the WIRED one: exactly
+one production caller, inside the service step, with R1 and R2 handled rather than
+bypassed.
 
-IKALAWANG PASADA (2026-09-02). Ang guard na ito ay HINDI GUMAGANA noong
-naipadala ito: `parents[3]` ang scan root at `_APP / "app"` ang glob, kaya
-`<repo>/app/app` — wala iyon, ZERO na file ang na-scan, at ang assert ay
-pumapasa kahit ano. Naayos na, at may self-check at positibong kontrol na
-ngayon sa ibaba para hindi na ito muling maging bulag.
+The blindness self-checks stay too. The first version of this file globbed
+`<repo>/app/app`, scanned ZERO files and passed unconditionally while being cited in a PR
+as evidence -- a guard that cannot fail is worse than no guard.
 
-Runnable: pytest tests/test_partial_exit_path_b_unwired.py -v
+Runnable: pytest tests/test_partial_exit_path_b_wired.py -v
 """
 from __future__ import annotations
 
@@ -138,30 +133,42 @@ def _calls_named(tree: ast.AST, name: str) -> list[int]:
     return out
 
 
-def test_replace_order_qty_still_has_zero_production_callers():
-    """Ang PATH B ay disenyo pa lamang. Walang production code ang nag-PATCH
-    ng nakaupong deadman stop."""
-    offenders: list[str] = []
+def test_replace_order_qty_has_exactly_one_production_caller():
+    """One PATCH site, and it is the service step.
+
+    The shape matters more than the count: the qty PATCH is the moment the runner's
+    protection shrinks, so it must happen where the durable marker already records
+    what is being shrunk, to what, and which tranche it pays for. A second caller
+    anywhere would be a stop shrunk without that record."""
+    callers: list[str] = []
     for path in _production_py_files():
         try:
             tree = ast.parse(path.read_text(encoding="utf-8"))
         except (SyntaxError, UnicodeDecodeError):
             continue
         for lineno in _calls_named(tree, "replace_order_qty"):
-            offenders.append(f"{path.relative_to(_REPO_ROOT)}:{lineno}")
-    assert not offenders, (
-        "Ang PATH B ay nakabit na nang hindi dumadaan sa disenyo. Basahin ang "
-        "docs/DESIGN/PARTIAL_EXIT_PATH_B.md (lalo na ang R1 at R2) bago "
-        "ipagpatuloy, saka palitan ang test na ito ng mga call-site guard sa "
-        f"§9. Mga caller: {offenders}"
+            callers.append(f"{path.relative_to(_REPO_ROOT)}:{lineno}")
+    assert len(callers) == 1, (
+        "PATH B PATCHes the resting deadman stop from exactly ONE place, the "
+        "service step. Read docs/DESIGN/PARTIAL_EXIT_PATH_B.md (R1 and R2) before "
+        f"adding another. Callers: {callers}"
     )
+    # and that one call is inside `_service_path_b_marker`, not at some exit site
+    assert "replace_order_qty(" in inspect.getsource(lr._service_path_b_marker)
 
 
-def test_the_pure_core_is_not_imported_by_the_live_runner_yet():
-    """Ang purong module ay naka-ship pero HINDI nakakabit — kapag na-import
-    na ito ng live_runner ay may wiring na, at may ibang guard na dapat."""
+def test_the_phase_graph_is_the_only_thing_that_authorises_a_phase():
+    """Every advance goes through the pure core, never a literal at a call site.
+
+    `advance_phase` raises on an edge the design deleted, so a wiring that has not
+    been updated cannot write one. That is why the graph is a `MappingProxyType` and
+    why the claim writer consults it instead of trusting its caller."""
     src = inspect.getsource(lr)
-    assert "path_b_partial" not in src
+    assert "from . import path_b_partial as pb" in src
+    for helper in ("plan_replacement_edge", "marker_successor_envelope",
+                   "marker_ceiling_forced_target", "blocks_whole_exit",
+                   "requires_sibling_reconcile", "open_partial_qty_from_marker"):
+        assert f"pb.{helper}(" in src, helper
 
 
 def test_pending_replace_is_still_not_a_certifiably_active_lifecycle():
@@ -172,18 +179,32 @@ def test_pending_replace_is_still_not_a_certifiably_active_lifecycle():
     assert "new" in lr._ACTIVE_ALPACA_PROTECTIVE_LIFECYCLES
 
 
-def test_nonactive_lifecycle_handler_still_has_no_pending_replace_branch():
-    """Ang D8 branch ng disenyo ay wala pa. Nasa `_ensure_alpaca_deadman_stop`
-    ang handler bilang closure, kaya sa buong source ito hinahanap."""
-    src = inspect.getsource(lr)
-    assert "path_b_replace_pending" not in src
+def test_a_pending_replace_is_reported_as_protected_not_as_a_missing_stop():
+    """The D8 branch. While the PATCH is in flight BOTH orders rest at the broker
+    and the predecessor is still live, so the position is covered -- and saying so is
+    what keeps maintenance from reading the transient as a missing stop and disabling
+    the software stop underneath it. R1's premise is handled HERE rather than by
+    widening the certifiably-active set, which is why the test above still holds."""
+    src = inspect.getsource(lr._service_path_b_marker)
+    i = src.find('if lifecycle == "pending_replace":')
+    assert i > 0
+    branch = src[i:i + 900]
+    assert '"protected": True' in branch
+    assert '"path_b_replace_pending": True' in branch
+    # past one owner-transport lease it stops being a wait: `replace_stuck`
+    assert "pending_replace_past_lease" in branch
 
 
-def test_the_scaling_out_site_still_excludes_alpaca_from_the_split():
-    """Ito ang mismong suppression na nag-emit ng
-    `alpaca_scale_out_suppressed_for_deadman` sa CANF: habang buo ang stop ay
-    all-or-nothing ang Alpaca exit. Hindi ito puwedeng alisin nang mag-isa —
-    kailangan muna ng PATH B."""
-    src = inspect.getsource(lr)
-    assert "ALPACA_EXECUTION_FAMILIES" in src
-    assert "alpaca_scale_out_suppressed_for_deadman" in src
+def test_the_scaling_out_site_no_longer_decides_by_execution_family():
+    """The suppression that emitted `alpaca_scale_out_suppressed_for_deadman` on CANF
+    was all-or-nothing BECAUSE of the venue. The question asked there is now
+    feasibility, and when the answer is no, the answer itself opens the edge that
+    changes it instead of quietly taking a different trade."""
+    src = inspect.getsource(lr.tick_live_session)
+    i = src.find("scale_qty, runner_qty, can_split = scale_out_quantity(")
+    j = src.find('exit_reason = "scale_out_target" if scaling else "target"', i)
+    assert 0 < i < j
+    block = src[i:j]
+    assert "scaling = bool(_partial_wanted and _tranche_ok)" in block
+    assert "alpaca_partial_tranche_sellable(" in block
+    assert "_open_path_b_partial_marker(" in block

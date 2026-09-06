@@ -72,9 +72,12 @@ def test_the_scaling_decision_no_longer_branches_on_the_execution_family():
     assert "not in ALPACA_EXECUTION_FAMILIES\n            )" not in block
     # ... the family only selects WHICH feasibility question is asked ...
     assert "alpaca_partial_tranche_sellable(" in block
-    # ... and an unsellable tranche is a receipt with the numbers, never a silent flatten
+    # ... and an unsellable tranche is a receipt with the numbers, never a silent
+    # flatten -- and when the reason is the one PATH B removes, the receipt names the
+    # edge that removes it instead of naming the fallback
     assert '"alpaca_partial_tranche_unsellable"' in block
-    assert '"fallback": "whole_position_at_target"' in block
+    assert '"whole_position_at_target"' in block
+    assert '"path_b_qty_replacement"' in block
 
 
 def test_the_parity_contract_the_gate_used_to_break_is_still_stated():

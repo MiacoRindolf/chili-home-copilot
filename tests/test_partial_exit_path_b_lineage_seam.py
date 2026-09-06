@@ -142,28 +142,44 @@ def test_a_successor_resting_for_the_wrong_size_is_still_rejected():
     assert _matches(envelope) is False
 
 
-def test_the_dispatch_still_builds_its_envelope_from_the_predecessor():
-    """AST/source guard (§7.1). Habang totoo ito ay hindi maikakabit ang PATH B.
-
-    Kapag bumagsak ang test na ito ay may nagpalit na ng envelope source —
-    basahin ang `docs/DESIGN/PARTIAL_EXIT_PATH_B.md` §3.4a at tiyaking ang
-    bagong envelope ay galing sa MARKER at hindi sa isang broker-echoed na
-    halaga (kung galing sa broker, ang tseke ay tautolohiya)."""
+def test_the_dispatch_envelope_carries_the_marker_quantity_not_the_predecessors():
+    """S1, closed. The dispatch used to build the expected successor envelope as
+    ``{**predecessor_request, "client_order_id": cid}`` -- ``base_size`` stayed Q, so a
+    successor resting for R = Q - f failed ``|broker_qty - base_size| <= tol`` by exactly
+    f on EVERY pulse: `replacement_deadman_successor_lineage_unproven`, forever. A
+    successful PATCH could never certify. The envelope is now built by a named helper
+    that takes the quantity from the caller, and the caller takes it from the marker."""
     src = inspect.getsource(lr._dispatch_alpaca_replaced_deadman_successor)
-    assert '**predecessor_request' in src
-    assert 'requested_qty = float(predecessor_request["base_size"])' in src
+    assert "_alpaca_replacement_successor_envelope(" in src
+    assert "expected_successor_quantity=expected_successor_quantity," in src
+    # a replacement may CARRY or SHRINK the protected quantity, never grow it
+    envelope = lr._alpaca_replacement_successor_envelope(
+        _PREDECESSOR_REQUEST,
+        successor_client_order_id=_SUCCESSOR_CID,
+        expected_successor_quantity=_R,
+    )
+    assert envelope is not None and float(envelope["base_size"]) == _R
+    assert lr._alpaca_replacement_successor_envelope(
+        _PREDECESSOR_REQUEST,
+        successor_client_order_id=_SUCCESSOR_CID,
+        expected_successor_quantity=_Q + 1.0,
+    ) is None
 
 
-def test_the_second_dispatch_gate_still_compares_local_qty_to_the_predecessor():
-    """Amendment 2. Ang gate na ito ay hindi nabanggit ng unang disenyo:
-    `abs(local_qty - requested_qty) <= tol` kung saan `requested_qty` ay ang
-    base_size ng PREDECESSOR (Q). Sa sandaling mapunan ang k na share ng
-    partial ay nagiging Q - k ang `local_qty` at ito ay
-    `replacement_deadman_successor_quantity_generation_mismatch` na
-    magpakailanman — kahit pa ma-certify ang unang gate."""
+def test_the_second_dispatch_gate_bounds_three_quantities_instead_of_two():
+    """Amendment 2, closed. The old gate was ``abs(local_qty - requested_qty) <= tol``
+    against the PREDECESSOR's base_size (Q): once k tranche shares filled, local_qty
+    became Q - k and the edge was
+    `replacement_deadman_successor_quantity_generation_mismatch` forever, even after the
+    first gate certified. Predecessor, successor and coverage are now three separate
+    quantities carried by one named frame."""
     src = inspect.getsource(lr._dispatch_alpaca_replaced_deadman_successor)
-    assert "abs(local_qty - requested_qty) <= tol" in src
-    # at ito ang tamang anyo na dapat pumalit dito:
+    assert "_alpaca_replacement_quantity_frame(" in src
+    assert "quantity_reserved_outside_successor" in src
+    assert "abs(local_qty - requested_qty) <= tol" not in src
+    frame_src = inspect.getsource(lr._alpaca_replacement_quantity_frame)
+    assert "covered_qty" in frame_src and "reserved_qty" in frame_src
+    # and the conservation the frame has to agree with, stated purely
     assert pb.conservation_holds(
         broker_qty=_Q - 40.0, successor_qty=_R,
         partial_qty=_F, partial_cum_filled=40.0,
@@ -179,14 +195,23 @@ def test_partially_filled_is_still_a_certifiably_active_lifecycle():
     ).ok is False
 
 
-def test_the_clamp_is_still_a_pass_through_noop_without_the_le_mirror():
-    """S2. Ang `_cancel_scale_limit_and_clamp` ay `if not oid: return
-    requested_qty` — kaya kapag ang cid ng sibling ay nasa claim lamang, ang
-    OVERSELL INVARIANT na ipinapangako ng docstring nito ay HINDI tumatakbo."""
-    src = inspect.getsource(lr._cancel_scale_limit_and_clamp)
-    assert 'oid = le.get("scale_limit_order_id")' in src
-    assert "if not oid:" in src
-    assert "return float(requested_qty)" in src
+def test_the_clamp_reads_the_session_view_so_the_chokepoint_rebuilds_it_first():
+    """S2, closed. `_cancel_scale_limit_and_clamp` reads ``le["scale_limit_order_id"]``
+    and returns the requested quantity untouched when it is absent. A tranche PATH B
+    posted is durable on the CLAIM, and the session JSON can lag it, so on that path the
+    oversell invariant this helper's docstring promises would simply not run: Q + f of
+    sell authority against Q shares. The clamp is unchanged -- the debt is paid at the
+    head of the chokepoint, before the clamp is reached."""
+    clamp = inspect.getsource(lr._cancel_scale_limit_and_clamp)
+    assert 'if not le.get("scale_limit_order_id"):' in clamp
+    assert "return float(requested_qty)" in clamp
+    choke = inspect.getsource(lr._submit_live_market_exit_impl)
+    pre = choke.find("_path_b_exit_precheck(db, sess, le=le, reason=reason)")
+    call = choke.find("_cancel_scale_limit_and_clamp(")
+    assert 0 < pre < call
+    precheck = inspect.getsource(lr._path_b_exit_precheck)
+    assert "pb.requires_sibling_reconcile(phase)" in precheck
+    assert "_path_b_mirror_sibling_into_le(sess, le, marker)" in precheck
 
 
 def test_the_head_guard_still_subtracts_the_original_partial_size():
@@ -253,7 +278,14 @@ def test_the_two_seam_signatures_are_pinned_by_inspect_signature():
     assert dispatch == {
         "le", "product_id", "predecessor_transport", "predecessor_order",
         "avg_entry_price", "software_stop_price", "rearm_after_terminal",
+        # the two the marker feeds: R, and the f reserved outside it
+        "expected_successor_quantity", "quantity_reserved_outside_successor",
     }, sorted(dispatch)
+
+    service = _keyword_only_names(lr._service_path_b_marker)
+    assert service == {
+        "le", "product_id", "avg_entry_price", "software_stop_price",
+    }, sorted(service)
 
     containment = _keyword_only_names(lr._service_deadman_replacement_containment)
     assert containment == {
