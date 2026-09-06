@@ -774,6 +774,8 @@ _BENCH_PAYLOAD_KEYS = (
     "reclaim_level", "leg_entry_price", "leg_high_water_mark", "bid_at_lock", "trade_cycles",
     "threshold_usd", "day_net_realized_usd", "exemptions_used", "max_exemptions", "vs_level_pct",
     "off_high_pct", "reentry_structural_stop", "structural_stop_source", "structural_stop_price",
+    # v4d: grant vs spend
+    "granted_at_utc", "granted_price", "granted_trigger", "front_side_exemptions",
 )
 
 

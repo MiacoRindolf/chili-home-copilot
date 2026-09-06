@@ -248,10 +248,10 @@ def test_v3_missing_reclaim_basis_fails_closed():
 def test_v4_gate_reads_the_frozen_leg_level_and_the_noise_band_from_the_own_tape():
     src = _tick_source()
     i = src.find('_ldw = le.get("symbol_day_lockout_watch")')
-    window = src[i:i + 4200]
-    assert '_ldw_level = _float_or_none(_ldw.get("reclaim_level"))' in window
-    assert "_own_tape_noise_floor_pct(db, sess.symbol, entry_price=_ldw_last)" in window
-    assert "reclaim_level=_ldw_level" in window and "noise_abs=_ldw_noise_abs" in window
+    window = src[i:i + 5200]
+    assert '_level = _float_or_none(_w.get("reclaim_level"))' in window
+    assert "_own_tape_noise_floor_pct(db, sess.symbol, entry_price=_last)" in window
+    assert "reclaim_level=_level" in window and "noise_abs=_band" in window
     assert "session_high=" not in window  # v3's basis is observability only now
     module_src = inspect.getsource(lr)
     # the level is frozen into the watch marker at lock time from the failed leg's record
@@ -330,21 +330,51 @@ def test_v4c_the_reentry_stop_sits_one_noise_band_under_the_reclaimed_level():
     assert lockout_reentry_structural_stop(0.10, 0.15) is None  # a stop at/below zero is no stop
 
 
-def test_v4c_the_grant_stashes_the_stop_the_persist_consumes_it_and_the_fill_clears_it():
+def test_v4d_one_permit_for_every_fire_path_grant_is_not_spend_and_the_fill_spends():
     src = _tick_source()
-    i = src.find("if _ldw_allowed:")
-    grant = src[i:i + 1400]
-    assert "_ldw_struct_stop = _ldw_stop_fn(_ldw_level, _ldw_noise_abs)" in grant
-    assert 'le["lockout_reentry_structural_stop"] = round(float(_ldw_struct_stop), 6)' in grant
-    assert '_ldw_reclaim["reentry_structural_stop"]' in grant
-    j = src.find('le["structural_stop_price"] = float(_pb_debug["pullback_low"])')
-    persist = src[j:j + 2200]
-    assert '_ldw_rs = _float_or_none(le.get("lockout_reentry_structural_stop"))' in persist
-    assert "if _cur_ss is None or _ldw_rs < _cur_ss:" in persist  # only ever WIDENS the stop
-    assert 'le["structural_stop_source"] = "lockout_reclaim_level_minus_noise"' in persist
-    assert i < j, "the grant (candidate edge) precedes the persist (fire -> CANDIDATE)"
+    i = src.find("def _ldw_permit(_fire_reason: str, _fire_px: Any) -> bool:")
+    assert i > 0
+    permit = src[i:i + 5200]
+    # the gate: reclaim + band + buyers + budget, structural stop stashed on grant, marker KEPT
+    assert "symbol_day_lockout_watch_reentry as _w_decide" in permit
+    assert "_stop = _w_stop_fn(_level, _band)" in permit
+    assert 'le["lockout_reentry_structural_stop"] = round(float(_stop), 6)' in permit
+    assert '_w["granted_at_utc"] = _utcnow().isoformat()' in permit
+    assert 'le["symbol_day_lockout_watch"] = _w  # stays until the fill spends the budget' in permit
+    assert 'le.pop("symbol_day_lockout_watch", None)' not in permit
+    assert '"lockout_front_side_exemptions"] = _used + 1' not in permit
+    # a hold clears the stash so it can never reach an unrelated later fire
+    assert 'if le.pop("lockout_reentry_structural_stop", None) is not None:' in permit
+    assert "_own_tape_session_high(" not in permit  # the v3 whole-session scan is gone from the gate
+    # the ladder call never runs on the score_only placeholder of a non-admissible session
+    j = src.find('and _trigger_reason != "score_only"', i)
+    assert j > 0 and "_score_ok" in src[j - 200:j] and "if not _ldw_permit(_trigger_reason, _ldw_px):" in src[j:j + 500]
+    # every alternate fire path asks the same permit and applies the same stop helper
+    assert 'if _th_struct_ok and _ldw_permit("tape_confirmed_hold", _th_px):' in src
+    assert 'if _mc_tape_ok and _ldw_permit(' in src
+    assert src.count("_apply_lockout_reentry_stop(le)") == 3
     module_src = inspect.getsource(lr)
+    # the FILL spends the budget and pops the marker; the stash is cleared there too
     k = module_src.find('le["entry_filled_at_utc"] = _entry_filled_at_utc')
-    assert 'le.pop("lockout_reentry_structural_stop", None)' in module_src[k:k + 300]
-    assert "structural_stop_source" in lr._RECYCLE_ENTRY_STATE_KEYS
-    assert "structural_stop_price" in lr._RECYCLE_ENTRY_STATE_KEYS
+    fill = module_src[k:k + 1200]
+    assert 'le.pop("lockout_reentry_structural_stop", None)' in fill
+    assert '_ldw_spent = le.pop("symbol_day_lockout_watch", None)' in fill
+    assert '"live_lockout_watch_exemption_spent"' in fill
+    for key in ("structural_stop_source", "structural_stop_price", "lockout_reentry_structural_stop"):
+        assert key in lr._RECYCLE_ENTRY_STATE_KEYS, key
+    assert "symbol_day_lockout_watch" not in lr._RECYCLE_ENTRY_STATE_KEYS  # the lock survives a recycle
+
+
+def test_v4d_the_stop_helper_only_widens_and_stamps_provenance():
+    le = {"lockout_reentry_structural_stop": 2.75, "structural_stop_price": 2.89}
+    lr._apply_lockout_reentry_stop(le)
+    assert le["structural_stop_price"] == 2.75 and le["structural_stop_source"] == "lockout_reclaim_level_minus_noise"
+    le = {"lockout_reentry_structural_stop": 2.95, "structural_stop_price": 2.89}
+    lr._apply_lockout_reentry_stop(le)
+    assert le["structural_stop_price"] == 2.89 and le["structural_stop_source"] == "trigger_pullback_low"
+    le = {"lockout_reentry_structural_stop": 2.75}
+    lr._apply_lockout_reentry_stop(le)
+    assert le["structural_stop_price"] == 2.75
+    le = {"structural_stop_price": 2.89, "structural_stop_source": "stale"}
+    lr._apply_lockout_reentry_stop(le)
+    assert le["structural_stop_price"] == 2.89 and "structural_stop_source" not in le

@@ -3565,6 +3565,25 @@ def _deadman_protection_is_live(sess: Any) -> tuple[bool, dict[str, Any]]:
     }
 
 
+def _apply_lockout_reentry_stop(le: dict) -> None:
+    """v4c/v4d LOCKOUT RE-ENTRY STRUCTURAL STOP (2026-09-06): a fire granted past a
+    symbol-day lock carries the level it reclaimed; its stop is one noise band UNDER that
+    level, whichever trigger class fired (ladder, tape-confirmed hold, momentum
+    continuation). The WIDER of the trigger's own pullback low and the reclaim stop wins —
+    a stop can only be widened here; sizing is risk-first so $risk per leg is unchanged.
+    The provenance is stamped for the ledger. Pure over ``le``; no I/O."""
+    _rs = _float_or_none(le.get("lockout_reentry_structural_stop"))
+    if _rs is not None and _rs > 0.0:
+        _cur = _float_or_none(le.get("structural_stop_price"))
+        if _cur is None or _rs < _cur:
+            le["structural_stop_price"] = float(_rs)
+            le["structural_stop_source"] = "lockout_reclaim_level_minus_noise"
+        else:
+            le["structural_stop_source"] = "trigger_pullback_low"
+    else:
+        le.pop("structural_stop_source", None)
+
+
 def _strict_alpaca_rth_entry_window(
     adapter: Any,
     sess: Any,
@@ -25686,6 +25705,7 @@ _RECYCLE_ENTRY_STATE_KEYS: tuple[str, ...] = (
     # ── stop / breach / max-loss circuit / excursion markers ──
     "structural_stop_price",
     "structural_stop_source",  # v4c: the re-entry stop's provenance, per trade
+    "lockout_reentry_structural_stop",  # v4d: the grant's stash, per trade
     "structural_stop_atr_pct",
     "stop_breach_pending_utc",
     "stop_breach_chop_holds",
@@ -34724,96 +34744,115 @@ def tick_live_session(
         # per-session budget allows; otherwise the fire is held as
         # ``symbol_day_lockout_watch`` (the ordinary trigger-wait path emits it). Granting
         # spends the fresh-ignition budget, so the next lock after a loss is terminal.
+        # v4d (review 2026-09-06): ONE decision for EVERY WATCHING -> CANDIDATE fire path —
+        # the trigger ladder below, the FIX-C tape-confirmed-hold fire and the FIX-1
+        # momentum-continuation fire (both of which used to promote a locked session with
+        # no reclaim test at all). A grant is NOT a spend: the marker stays and the one-time
+        # budget is charged on the entry FILL (see `entry_filled_at_utc`), so a grant that a
+        # later veto refuses (HVM101, post-open bar, halt cooldown, the CANDIDATE chain)
+        # leaves the lock intact and its budget unspent; a hold clears the structural-stop
+        # stash so it can never be applied to an unrelated later fire. The gate only runs
+        # on a REAL fire (never on the `score_only` placeholder of a non-admissible
+        # session). The v3 session-high read is gone (observability at a per-tick
+        # whole-session scan; the level is the failed leg's, not the session's).
         _ldw = le.get("symbol_day_lockout_watch")
-        if _trigger_ok and isinstance(_ldw, dict):
-            _ldw_tape_ok, _ldw_tape_dbg = False, {}
-            try:
-                from .entry_gates import tape_confirms_hold as _ldw_tape_fn
 
-                _ldw_tape_ok, _ldw_tape_dbg = _ldw_tape_fn(sess.symbol, db=db, settings=settings)
-            except Exception as _ldw_exc:
-                _ldw_tape_ok, _ldw_tape_dbg = False, {"error": repr(_ldw_exc)}
-            from .risk_policy import symbol_day_lockout_watch_reentry as _ldw_decide
-
-            _ldw_used = int(le.get("lockout_front_side_exemptions") or 0)
-            _ldw_max = int(getattr(settings, "chili_momentum_max_ignition_exemptions", 1) or 1)
-            # v4 RECLAIM BASIS (2026-09-06): the FAILED LEG's level (max of its entry and its
-            # high-water mark, frozen into the watch marker at lock time) plus one of the
-            # name's own 30-s noise bands; the pure decision refuses (fail-closed) when
-            # either is missing. The session high is read for OBSERVABILITY only (the v3
-            # basis; it bought the top on WETO/EZRA and never fired on the winners).
-            _ldw_last = None
+        def _ldw_permit(_fire_reason: str, _fire_px: Any) -> bool:
+            _w = le.get("symbol_day_lockout_watch")
+            if not isinstance(_w, dict):
+                return True
+            _t_ok, _t_dbg = False, {}
             try:
-                _ldw_last = float(getattr(tick, "bid", None) or getattr(tick, "mid", None) or 0.0) or None
-            except (TypeError, ValueError):
-                _ldw_last = None
-            _ldw_level = _float_or_none(_ldw.get("reclaim_level"))
-            _ldw_high = _own_tape_session_high(db, sess.symbol) if _ldw_tape_ok else None
-            _ldw_noise_abs = None
-            if _ldw_tape_ok and _ldw_last:
-                try:
-                    _ldw_nf_pct, _ldw_nf_buckets = _own_tape_noise_floor_pct(db, sess.symbol, entry_price=_ldw_last)
-                    _ldw_nf_min = int(getattr(settings, "chili_momentum_stop_noise_floor_min_buckets", 6) or 6)
-                    if _ldw_nf_pct is not None and int(_ldw_nf_buckets or 0) >= max(3, _ldw_nf_min):
-                        _ldw_noise_abs = float(_ldw_nf_pct) * float(_ldw_last)
-                except Exception:
-                    _ldw_noise_abs = None
-            _ldw_reclaim = {
-                "last": _ldw_last, "reclaim_level": _ldw_level, "session_high": _ldw_high,
-                "noise_abs": (round(_ldw_noise_abs, 6) if _ldw_noise_abs is not None else None),
-                "vs_level_pct": (round((float(_ldw_last) - float(_ldw_level)) / float(_ldw_level), 6)
-                                 if _ldw_level and _ldw_last else None),
-                "off_high_pct": (round((float(_ldw_high) - float(_ldw_last)) / float(_ldw_high), 6)
-                                 if _ldw_high and _ldw_last else None),
-            }
-            _ldw_allowed, _ldw_why = _ldw_decide(
-                watch_active=True,
-                tape_ok=bool(_ldw_tape_ok),
-                exemptions_used=_ldw_used,
-                max_exemptions=_ldw_max,
-                last=_ldw_last,
-                reclaim_level=_ldw_level,
-                noise_abs=_ldw_noise_abs,
+                from .entry_gates import tape_confirms_hold as _t_fn
+
+                _t_ok, _t_dbg = _t_fn(sess.symbol, db=db, settings=settings)
+            except Exception as _t_exc:
+                _t_ok, _t_dbg = False, {"error": repr(_t_exc)}
+            from .risk_policy import (
+                lockout_reentry_structural_stop as _w_stop_fn,
+                symbol_day_lockout_watch_reentry as _w_decide,
             )
-            if _ldw_allowed:
-                le.pop("symbol_day_lockout_watch", None)
-                le["lockout_front_side_exemptions"] = _ldw_used + 1
-                # v4c: the re-entry's stop is STRUCTURAL — one noise band under the level it
-                # just reclaimed (consumed by the structural-stop persist on this fire, cleared
-                # on the fill). EZRA 08-03: 2.90 - 0.15 = 2.75 vs the 2.89 retest that killed
-                # the 3.9% vol-floored stop before the +28% run.
-                from .risk_policy import lockout_reentry_structural_stop as _ldw_stop_fn
 
-                _ldw_struct_stop = _ldw_stop_fn(_ldw_level, _ldw_noise_abs)
-                if _ldw_struct_stop is not None:
-                    le["lockout_reentry_structural_stop"] = round(float(_ldw_struct_stop), 6)
+            _used = int(le.get("lockout_front_side_exemptions") or 0)
+            _cap = int(getattr(settings, "chili_momentum_max_ignition_exemptions", 1) or 1)
+            _last = _float_or_none(_fire_px)
+            _level = _float_or_none(_w.get("reclaim_level"))
+            _band = None
+            if _t_ok and _last:
+                try:
+                    _nf_pct, _nf_buckets = _own_tape_noise_floor_pct(db, sess.symbol, entry_price=_last)
+                    _nf_min = int(getattr(settings, "chili_momentum_stop_noise_floor_min_buckets", 6) or 6)
+                    if _nf_pct is not None and int(_nf_buckets or 0) >= max(3, _nf_min):
+                        _band = float(_nf_pct) * float(_last)
+                except Exception:
+                    _band = None
+            _reclaim = {
+                "last": _last, "reclaim_level": _level,
+                "noise_abs": (round(_band, 6) if _band is not None else None),
+                "vs_level_pct": (round((float(_last) - float(_level)) / float(_level), 6)
+                                 if _level and _last else None),
+            }
+            _ok, _why = _w_decide(
+                watch_active=True,
+                tape_ok=bool(_t_ok),
+                exemptions_used=_used,
+                max_exemptions=_cap,
+                last=_last,
+                reclaim_level=_level,
+                noise_abs=_band,
+            )
+            if _ok:
+                # v4c: the re-entry's stop is STRUCTURAL — one noise band under the level it
+                # just reclaimed (consumed by the structural-stop persist on THIS fire,
+                # cleared on the fill or on the next hold). EZRA 08-03: 2.90 - 0.15 = 2.75 vs
+                # the 2.89 retest that killed the 3.9% vol-floored stop before the +28% run.
+                _stop = _w_stop_fn(_level, _band)
+                if _stop is not None:
+                    le["lockout_reentry_structural_stop"] = round(float(_stop), 6)
                 else:
                     le.pop("lockout_reentry_structural_stop", None)
-                _ldw_reclaim["reentry_structural_stop"] = (
-                    round(float(_ldw_struct_stop), 6) if _ldw_struct_stop is not None else None
-                )
+                _reclaim["reentry_structural_stop"] = round(float(_stop), 6) if _stop is not None else None
+                _w["granted_at_utc"] = _utcnow().isoformat()
+                _w["granted_price"] = _last
+                _w["granted_trigger"] = str(_fire_reason)
+                le["symbol_day_lockout_watch"] = _w  # stays until the fill spends the budget
                 _commit_le(sess, le)
                 _emit(db, sess, "live_lockout_watch_front_side_exempt", {
-                    "trigger": _trigger_reason,
-                    "reason": _ldw_why,
-                    "tape": _ldw_tape_dbg,
-                    "reclaim": _ldw_reclaim,
+                    "trigger": str(_fire_reason),
+                    "reason": _why,
+                    "tape": _t_dbg,
+                    "reclaim": _reclaim,
                     "bid": _float_or_none(getattr(tick, "bid", None)) if tick is not None else None,
-                    "watch": _ldw,
-                    "front_side_exemptions": int(le["lockout_front_side_exemptions"]),
-                    "max_front_side_exemptions": _ldw_max,
+                    "watch": dict(_w),
+                    "front_side_exemptions": _used,
+                    "max_front_side_exemptions": _cap,
                 })
-            else:
-                _ldw_prev = _trigger_reason
+                return True
+            if le.pop("lockout_reentry_structural_stop", None) is not None:
+                _commit_le(sess, le)
+            _emit(db, sess, "live_lockout_watch_hold", {
+                "blocked_trigger": str(_fire_reason),
+                "reason": _why,
+                "tape": _t_dbg,
+                "reclaim": _reclaim,
+                "watch": dict(_w),
+            })
+            return False
+
+        if (
+            _score_ok
+            and _trigger_ok
+            and _trigger_reason != "score_only"
+            and isinstance(_ldw, dict)
+        ):
+            _ldw_px = None
+            try:
+                _ldw_px = float(getattr(tick, "bid", None) or getattr(tick, "mid", None) or 0.0) or None
+            except (TypeError, ValueError):
+                _ldw_px = None
+            if not _ldw_permit(_trigger_reason, _ldw_px):
                 _trigger_ok = False
                 _trigger_reason = "symbol_day_lockout_watch"
-                _emit(db, sess, "live_lockout_watch_hold", {
-                    "blocked_trigger": _ldw_prev,
-                    "reason": _ldw_why,
-                    "tape": _ldw_tape_dbg,
-                    "reclaim": _ldw_reclaim,
-                    "watch": _ldw,
-                })
 
         # HVM101 (B): BID-PROP / SPREAD-TIGHTENING CONFIRMER — confirm a fired break
         # only when, over the last few L1 samples, the best-bid is non-decreasing AND
@@ -35067,21 +35106,10 @@ def tick_live_session(
             else:
                 le.pop("structural_stop_price", None)
                 le.pop("breakout_level_price", None)
-            # v4c LOCKOUT RE-ENTRY STRUCTURAL STOP (2026-09-06): a fire granted past a
-            # symbol-day lock carries the level it reclaimed; its stop is one noise band
-            # UNDER that level, whichever trigger class fired. The wider of the trigger's own
-            # pullback low and the reclaim stop wins (a stop can only be widened here; sizing
-            # is risk-first so $risk is unchanged). Source is stamped for the ledger.
-            _ldw_rs = _float_or_none(le.get("lockout_reentry_structural_stop"))
-            if _ldw_rs is not None and _ldw_rs > 0.0:
-                _cur_ss = _float_or_none(le.get("structural_stop_price"))
-                if _cur_ss is None or _ldw_rs < _cur_ss:
-                    le["structural_stop_price"] = float(_ldw_rs)
-                    le["structural_stop_source"] = "lockout_reclaim_level_minus_noise"
-                else:
-                    le["structural_stop_source"] = "trigger_pullback_low"
-            else:
-                le.pop("structural_stop_source", None)
+            # v4c/v4d: a fire granted past a symbol-day lock carries the level it reclaimed;
+            # its stop is one noise band under that level (see _apply_lockout_reentry_stop —
+            # the SAME helper the tape-hold and continuation fires call).
+            _apply_lockout_reentry_stop(le)
             # LOCATE #3 DIP-VELOCITY CONVICTION: scale entry SIZE by the dip ROC for a
             # dip-family fire (steeper flush snaps back harder). The multiplier is in
             # [1.0, 1+max_boost] (NEVER < 1.0) and composes multiplicatively under the SAME
@@ -35331,11 +35359,15 @@ def tick_live_session(
                             )
                         except Exception:
                             pass
-                        if _th_struct_ok:
+                        # v4d: a locked session's tape-hold fire must pass the SAME watch
+                        # decision as the ladder (reclaim of the failed leg's level + band,
+                        # buyers on tape, budget) — it used to bypass the lock entirely.
+                        if _th_struct_ok and _ldw_permit("tape_confirmed_hold", _th_px):
                             # Reuse the EXACT structural-stop + breakout-level stash the break
                             # path uses (pullback_low = structural stop, pullback_high = the
                             # breakout-or-bailout level), so sizing/placement/bailout are identical.
                             le["structural_stop_price"] = float(_th_sdbg["pullback_low"])
+                            _apply_lockout_reentry_stop(le)
                             if _th_sdbg.get("pullback_high"):
                                 _stamp_level_set_at(
                                     le,
@@ -35516,13 +35548,19 @@ def tick_live_session(
                                 )
                             except Exception:
                                 pass
-                            if _mc_tape_ok:
+                            # v4d: a locked session's continuation fire must pass the SAME
+                            # watch decision as the ladder — it used to bypass the lock.
+                            if _mc_tape_ok and _ldw_permit(
+                                "momentum_continuation",
+                                _float_or_none(getattr(tick, "bid", None) or getattr(tick, "mid", None)),
+                            ):
                                 # Reuse the EXACT structural-stop + breakout-level stash the
                                 # break path uses (pullback_low = structural stop, pullback_high
                                 # = the breakout-or-bailout level), so sizing/placement/bailout
                                 # are identical, then route through the SAME LIVE_ENTRY_CANDIDATE
                                 # -> LIVE_PENDING_ENTRY veto chain.
                                 le["structural_stop_price"] = float(_mc_dbg["pullback_low"])
+                                _apply_lockout_reentry_stop(le)
                                 if _mc_dbg.get("pullback_high"):
                                     _stamp_level_set_at(
                                         le,
@@ -36154,6 +36192,22 @@ def tick_live_session(
                 le["entry_filled_at_utc"] = _entry_filled_at_utc
                 # v4c: the lockout re-entry's structural stop was for THIS entry only
                 le.pop("lockout_reentry_structural_stop", None)
+                # v4d: the FILL is where a post-lock re-entry spends the one-time budget —
+                # a grant that never filled (vetoed downstream) left the lock and its budget
+                # untouched. The marker is popped here, never at the grant.
+                _ldw_spent = le.pop("symbol_day_lockout_watch", None)
+                if isinstance(_ldw_spent, dict):
+                    le["lockout_front_side_exemptions"] = int(le.get("lockout_front_side_exemptions") or 0) + 1
+                    try:
+                        _ldw_fill_px = _float_or_none(avg)
+                    except NameError:
+                        _ldw_fill_px = None
+                    _emit(db, sess, "live_lockout_watch_exemption_spent", {
+                        "reason": "post_lock_reentry_filled",
+                        "watch": dict(_ldw_spent),
+                        "front_side_exemptions": int(le["lockout_front_side_exemptions"]),
+                        "fill_price": _ldw_fill_px,
+                    })
                 _commit_le(sess, le)
                 # DEAD-MAN broker-side stop (2026-07-10, the GMM -$16k orphan incident):
                 # rest a GTC STOP at the BROKER one risk-buffer BELOW the software stop.
