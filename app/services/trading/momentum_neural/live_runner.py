@@ -43130,9 +43130,14 @@ def tick_live_session(
                 bid=bid, ask=ask, mid=mid,
             )
         elif (
-            st == STATE_LIVE_ENTERED
+            # 2026-09-06: the tick-cadence exit is the PRIMARY "the leg is over" signal
+            # (operator doctrine; exit census: zero legs ended by it in the gate-15
+            # baseline because it was dark and ENTERED-only while the early trail arm
+            # moves the state to TRAILING seconds after the fill). Evaluated in ENTERED
+            # and TRAILING, before the opinion bailouts below; default ON, env kill-switch.
+            st in (STATE_LIVE_ENTERED, STATE_LIVE_TRAILING)
             and bool(getattr(
-                settings, "chili_momentum_failed_pop_break_exit_enabled", False
+                settings, "chili_momentum_failed_pop_break_exit_enabled", True
             ))
             and _failed_pop_break_fires(db, sess, le, bid=bid, avg=avg)
         ):

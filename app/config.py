@@ -8334,7 +8334,18 @@ class Settings(BaseSettings):
         validation_alias=AliasChoices("CHILI_MOMENTUM_BOTTOM_OF_RANGE_MIN_RANGE_PCT"),
     )
     chili_momentum_failed_pop_break_exit_enabled: bool = Field(
-        default=False,
+        # 2026-09-06: ON. The operator's standing exit doctrine — hold while the 10-s
+        # candles stay green, exit on the first red bar that breaks the prior bar's low
+        # (#1261) — had shipped DARK (default False, absent from the lane .env) and gated
+        # to STATE_LIVE_ENTERED, which the early trail arm leaves seconds after the fill:
+        # ZERO legs in the 155-receipt gate-15 baseline were ended by it, while the
+        # opinion bailouts (breakout-failed fast bail, lost-VWAP flatten, BOS) ended 116 RH
+        # winner legs for -$3,185 (100 inside 60 s of the fill, $28.8k left on the table)
+        # and 73 Alpaca winner legs for -$1,442 — and lost on Ross's losers too. Kill-switch
+        # only (env OFF restores the old path); the tick-cadence exit is the primary
+        # "the leg is over" signal, evaluated in ENTERED and TRAILING before the opinion
+        # bailouts. scratchpad/exit_census.py; memory feedback_tick_cadence_exit_is_the_exit.
+        default=True,
         validation_alias=AliasChoices("CHILI_MOMENTUM_FAILED_POP_BREAK_EXIT_ENABLED"),
     )
     chili_momentum_failed_pop_break_min_green_run: int = Field(
