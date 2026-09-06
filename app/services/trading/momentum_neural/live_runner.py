@@ -3593,6 +3593,7 @@ def _apply_lockout_reentry_stop(le: dict) -> None:
             le["breakout_level_source"] = "lockout_reclaim_level_minus_noise"
     else:
         le.pop("structural_stop_source", None)
+        le.pop("breakout_level_source", None)
 def session_frame_is_today_et(df: Any, now_aware: datetime) -> tuple[bool, dict[str, Any]]:
     """r2 of the 07:00 seller-unlock evidence (review 2026-09-06): a session frame may only
     stamp VWAP-side evidence when its LAST bar belongs to TODAY (America/New_York). The
