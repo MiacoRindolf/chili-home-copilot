@@ -2341,7 +2341,9 @@ def _wildcard_dominant_symbol(db: Any) -> str | None:
     try:
         from .breadth_regime import compute_breadth_regime
 
-        reg = compute_breadth_regime(db)
+        # HARNESS GATE 15 (2026-09-06): anchor the regime at the replay-aware risk clock, not
+        # the wall clock (live: identical). See live_runner's wildcard B-grade tilt.
+        reg = compute_breadth_regime(db, now=_risk_now_naive())
         if reg.is_wildcard and reg.dominant_symbol:
             return str(reg.dominant_symbol).upper()
     except Exception:

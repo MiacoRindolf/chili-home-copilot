@@ -38748,7 +38748,13 @@ def tick_live_session(
             try:
                 from .breadth_regime import compute_breadth_regime
 
-                _wc_reg = compute_breadth_regime(db)
+                # HARNESS GATE 15 (2026-09-06): the regime's calendar leg (is_pre_holiday) and
+                # its board window were read at the WALL clock; a July replay run after 00:00Z
+                # on the Sunday before Labor Day sized every entry x0.85 (DFNS 07-29: 12.04 vs
+                # 10.24 shares on identical code, -75.72 / -71.47 / -64.21 on the day). The
+                # runner's replay-aware clock is the decision instant in BOTH worlds (live:
+                # wall UTC, byte-identical).
+                _wc_reg = compute_breadth_regime(db, now=_utcnow_aware())
                 if _wc_reg.is_wildcard or _wc_reg.is_pre_holiday:
                     _sym_u = str(getattr(sess, "symbol", "") or "").upper()
                     _is_dominant = bool(_wc_reg.dominant_symbol and _sym_u == str(_wc_reg.dominant_symbol).upper())
