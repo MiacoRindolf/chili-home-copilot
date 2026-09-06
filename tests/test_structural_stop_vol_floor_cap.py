@@ -119,6 +119,83 @@ def test_bad_inputs_fall_back_to_the_floor(monkeypatch):
         assert model == "vol_floored_atr"
 
 
+# ── NOISE FLOOR AS A HARD LOWER BOUND (2026-09-05, JWEL 2026-08-10 bench) ──────────────
+# MEASURED on the fixed replay driver: a double_bottom_break_tick_ok fill at 5.57 with the
+# pattern low at 5.56 (0.18% structure), vol floor 15% (expected move 2084 bps). The
+# structure-capped branch pulled the floor to 1.25 x 0.18% / 0.6 and the stop landed on the
+# 0.30% hard floor while the tape printed 10-20 cents per SECOND (median 30-s range 4.49%);
+# risk-first sizing bought 1,284 shares (10x the leg before) and three seconds later the
+# max_loss_per_trade bailout cost -$507. The #1278 noise floor had been applied BEFORE this
+# call and was erased by it. Bound: 188 shares, -$83 on the same flush.
+JWEL_ENTRY, JWEL_LOW, JWEL_MULT = 5.57, 5.56, 0.60
+JWEL_VOL_FLOOR_ATR = 0.15                 # effective_stop_atr_pct sanity cap
+JWEL_NOISE_ATR = 0.04488 / JWEL_MULT      # median 30-s range 4.488% / stop_atr_mult
+
+
+def test_jwel_trapdoor_without_the_bound_is_the_measured_0p30pct_stop(monkeypatch):
+    """Documents the class: the cap alone lands on the hard floor."""
+    monkeypatch.setattr(settings, "chili_momentum_structural_stop_vol_floor_cap_mult", 1.25, raising=False)
+    eff, model = structural_or_vol_floored_atr_pct(
+        vol_floored_atr_pct=JWEL_VOL_FLOOR_ATR, structural_stop_price=JWEL_LOW,
+        entry_price=JWEL_ENTRY, stop_atr_mult=JWEL_MULT,
+    )
+    assert model == "structure_capped_vol_floor"
+    assert max(0.003, eff * JWEL_MULT) == pytest.approx(0.003)   # the 0.30% stop of the bench
+
+
+def test_jwel_trapdoor_is_closed_by_the_noise_floor_bound(monkeypatch):
+    monkeypatch.setattr(settings, "chili_momentum_structural_stop_vol_floor_cap_mult", 1.25, raising=False)
+    eff, model = structural_or_vol_floored_atr_pct(
+        vol_floored_atr_pct=JWEL_VOL_FLOOR_ATR, structural_stop_price=JWEL_LOW,
+        entry_price=JWEL_ENTRY, stop_atr_mult=JWEL_MULT, noise_floor_atr_pct=JWEL_NOISE_ATR,
+    )
+    assert model == "structure_capped_vol_floor+noise_floored", model
+    assert eff == pytest.approx(JWEL_NOISE_ATR)
+    stop_pct = max(0.003, eff * JWEL_MULT)
+    assert stop_pct == pytest.approx(0.04488, rel=1e-3)
+    # risk-first: same $risk, ~7x fewer shares than the 0.30% stop
+    from app.services.trading.momentum_neural.risk_policy import compute_risk_first_quantity
+    q_trap, _ = compute_risk_first_quantity(entry_price=JWEL_ENTRY, atr_pct=0.00375, max_loss_usd=46.0,
+                                            max_notional_ceiling_usd=100_000.0, stop_atr_mult=JWEL_MULT)
+    q_bound, _ = compute_risk_first_quantity(entry_price=JWEL_ENTRY, atr_pct=eff, max_loss_usd=46.0,
+                                             max_notional_ceiling_usd=100_000.0, stop_atr_mult=JWEL_MULT)
+    assert q_trap > 2000 and 150 <= q_bound <= 220, (q_trap, q_bound)
+
+
+def test_noise_floor_bound_never_tightens_and_respects_the_sanity_cap(monkeypatch):
+    monkeypatch.setattr(settings, "chili_momentum_structural_stop_vol_floor_cap_mult", 1.25, raising=False)
+    # structure wider than noise: unchanged, model untouched
+    eff, model = structural_or_vol_floored_atr_pct(
+        vol_floored_atr_pct=0.04, structural_stop_price=5.00, entry_price=5.75,
+        stop_atr_mult=1.0, noise_floor_atr_pct=0.02,
+    )
+    assert model == "structural_pullback" and eff > 0.04
+    # a noise floor above the sanity cap is capped at 0.15, like every other source
+    eff2, model2 = structural_or_vol_floored_atr_pct(
+        vol_floored_atr_pct=0.01, structural_stop_price=None, entry_price=5.75,
+        stop_atr_mult=1.0, noise_floor_atr_pct=0.40,
+    )
+    assert eff2 == pytest.approx(0.15) and model2.endswith("+noise_floored")
+    # None / garbage => byte-identical
+    for bad in (None, float("nan"), -1.0, "x"):
+        eff3, model3 = structural_or_vol_floored_atr_pct(
+            vol_floored_atr_pct=0.0975, structural_stop_price=5.37, entry_price=5.75,
+            stop_atr_mult=1.0, noise_floor_atr_pct=bad,
+        )
+        assert model3 == "structure_capped_vol_floor" and eff3 == pytest.approx(0.0661 * 1.25, rel=0.02)
+
+
+def test_live_runner_passes_the_noise_floor_bound_into_the_structural_resolution():
+    import os
+    src_path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                            "app", "services", "trading", "momentum_neural", "live_runner.py")
+    src = open(src_path, encoding="utf-8").read()
+    i = src.index("_eff_atr_pct, _stop_model = structural_or_vol_floored_atr_pct(")
+    call = src[i:i + 400]
+    assert "noise_floor_atr_pct=_nf_floor_atr" in call, call
+    assert "_nf_floor_atr = float(_nf_pct) / float(_stop_atr_mult)" in src
+
+
 def test_setting_is_wired_and_bounded():
     v = getattr(
         settings, "chili_momentum_structural_stop_vol_floor_cap_mult", None

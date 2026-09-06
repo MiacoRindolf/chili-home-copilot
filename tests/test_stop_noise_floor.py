@@ -131,8 +131,17 @@ def test_this_is_not_a_reject_gate():
     assert q > 0, "lumiit pero hindi tinanggihan"
 
 
-def test_ships_off_pending_ab():
+def test_the_floor_knobs_are_wired():
     s = Settings()
-    assert s.chili_momentum_stop_noise_floor_enabled is False
     assert s.chili_momentum_stop_noise_floor_min_buckets == 6
     assert s.chili_momentum_stop_noise_floor_lookback_seconds == 900.0
+
+
+def test_the_noise_floor_is_off_by_measured_negative_control():
+    """2026-09-05: shipped ON at 16:30Z on a 6-pair A/B (winners +465, losers +3), then the
+    FULL 15-pair A/B failed the negative control (Ross's losers -81.84: EZRA t3 alpaca -75 ->
+    -143 after the smaller leg-3 loss dodged the -1.5R symbol-day lockout; INLF t1 RH -20 ->
+    -40). Program rule: winners up AND losers not up. OFF is a measured decision, not a dark
+    flag; the structural bound stays in the code and the env override turns it back on for a
+    paper soak."""
+    assert Settings().chili_momentum_stop_noise_floor_enabled is False

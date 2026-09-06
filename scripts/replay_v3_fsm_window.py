@@ -769,6 +769,7 @@ _BENCH_PAYLOAD_KEYS = (
     "superseding_order_type", "handoff_token",
     # 2026-09-05 lockout-watch A/B: the hold event's WHY is the nested tape read
     "tape", "watch", "front_side_exemptions", "reclaim",
+    "risk_mults", "sizing", "resize_basis", "max_notional_usd", "stop_atr_pct", "stop_model",
 )
 
 

@@ -67,8 +67,21 @@ def structural_or_vol_floored_atr_pct(
     structural_stop_price: float | None,
     entry_price: float,
     stop_atr_mult: float,
+    noise_floor_atr_pct: float | None = None,
 ) -> tuple[float, str]:
     """Ross structural stop vs the vol floor — take whichever sits FURTHER from entry.
+
+    ``noise_floor_atr_pct`` (2026-09-05, JWEL 08-10 bench): the name's OWN 30-s tape
+    noise expressed as an ATR-pct (#1278 ``median 30s range / stop_atr_mult``). It is a
+    HARD lower bound on whatever this function returns. MEASURED: JWEL 11:39:09Z, a
+    ``double_bottom_break_tick_ok`` fill at 5.57 with the pattern low at 5.56 — the
+    structure-capped branch below pulled the vol floor (15%) down to 1.25 x 0.18% and the
+    stop landed on the 0.30% hard floor while the tape printed 10-20 cents PER SECOND;
+    risk-first sizing bought 1,153-1,284 shares (10x the leg before) and the next
+    three seconds cost -$507 (mechanism 4 of the exit-side ledger). The #1278 floor had
+    been applied BEFORE this call and was erased by the cap. With the floor as a bound:
+    188 shares, -$83 on the same flush. None / non-finite / <= 0 => no bound
+    (byte-identical to before).
 
     The pullback-break entry yields a structural stop: the pullback low. Ross stops
     just under that structure, giving the trade room to breathe WITHIN the pattern
@@ -130,6 +143,18 @@ def structural_or_vol_floored_atr_pct(
                 if _capped < eff:
                     eff = _capped
                     model = "structure_capped_vol_floor"
+    # NOISE FLOOR AS A HARD LOWER BOUND (2026-09-05): neither the structure nor the
+    # structure-capped floor may sit inside the name's own measured 30-s noise. The
+    # bound is a measurement of THIS tape (not a knob); the same 0.15 sanity cap applies.
+    try:
+        _nf = float(noise_floor_atr_pct) if noise_floor_atr_pct is not None else 0.0
+    except (TypeError, ValueError):
+        _nf = 0.0
+    if math.isfinite(_nf) and _nf > 0.0:
+        _nf = min(_nf, 0.15)
+        if eff < _nf:
+            eff = _nf
+            model = f"{model}+noise_floored"
     return eff, model
 
 

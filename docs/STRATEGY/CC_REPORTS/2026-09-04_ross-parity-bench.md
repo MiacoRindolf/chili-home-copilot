@@ -463,3 +463,46 @@ Code arms: `base14_rh` / `stack14_rh` (14 RH cases), `base14_alpaca` / `lockout1
 2. Pass-3 ledger on the fixed-driver baseline (`FIXED=1 score_all.sh`).
 3. Mechanism 3 (Alpaca exit transport) conditioning after the above.
 4. Ship passing fixes; deploy after close on Monday 09-07 (no market); paper soak Tuesday 09-08.
+
+---
+
+## Part 8 — 2026-09-05 15:30Z → 2026-09-06 00:00Z: the exit-side A/Bs on the fixed driver, two ships, one flip, one inert (PRs #1354–#1357)
+
+### What shipped, what did not, and why
+
+| mechanism | fix | A/B (fixed driver, both arms) | verdict |
+|---|---|---|---|
+| 1 burst stamp survives recycle | `_RECYCLE_ENTRY_STATE_KEYS` += the three burst keys | 12 pairs: ENVB −37.67 → +57.91 (87 → 10 legs), JWEL ml3 −3.87, 2 alpaca winners 0; **8 losers 0.00** | **shipped #1354** |
+| FSM: a scaling-out position could not bail | `(live_scaling_out, live_bailout)` edge | found by the loser DFNS on the stack tree (`Invalid live FSM transition` after a scale-out max-loss circuit; driver died with the position open); refreshed pair base16 = stack2 = −75.72 | **shipped #1356** |
+| 4 stop inside the tape's own noise → 10× size | noise floor as a hard bound on the structural/cap resolution; flag ON | 6 pairs at 20:00Z: winners +464.87, losers +2.96 → **merged #1355**. Full 15 pairs at 22:15Z: winners +462.14 (JWEL ml3 RH −505 → −85, JWEL ml2 alpaca +48 → +93) but **losers −81.84, 3 worsened** (EZRA t3 alpaca −75 → −143, INLF t1 RH −20 → −40, PPCB −1.59) | **flag OFF again #1357** by the program rule; bound + observability stay in the code |
+| 2 symbol-day lockout terminalises the winner | v2: lock → WATCH; re-entry on `tape_confirms_hold` + budget | 19 pairs: all four exemptions fired above VWAP but 14–28% below the day high and all four lost; losers −22.83 | **FAIL** |
+| 2, v3: re-entry only when back within one 30-s noise band of the session high | `symbol_day_lockout_watch_reentry(last, session_high, noise_abs)`, fail-closed | 14 pairs: every case Δ 0.00 — the watch activates (JWEL 88 holds, 82 `not_reclaimed`) and never grants inside the 60-min window | **inert; not shipped** (branch kept as evidence) |
+
+Main at 00:00Z = `d63cfc379`: burst fix + FSM edge + the noise-floor bound present but OFF. That is the deploy candidate.
+
+### The noise-floor flip is the lesson of the day
+
+Per-leg $risk is constant by construction (risk-first sizing), so the floor cannot make a single leg lose more. What moved the losers is second-order state:
+
+- **The −1.5R symbol-day lockout is a cliff.** EZRA t3 alpaca: the floored leg 3 lost −3.30 instead of −9.00; the session stayed $5.70 above the lockout threshold that had ended the base run, and four more legs followed (+14.0, −1.46, −4.90, then −81.32 on an 11.5%-in-38 s flush where `max_loss_per_trade` bailed late). Any change to per-leg loss flips whether a loser session survives.
+- **Bail vs ride.** INLF t1 RH: the wider stop rode leg 2 down to a trail at −9.96 where the base's tight stop bailed at +5.13.
+
+So mechanism 2 (the lockout) is entangled with every exit-side change, and it must be conditioned before any other exit-side fix can pass a clean negative control. The v3 reclaim test is the right shape ("hands off until it proves itself again" = back at the high), but nothing in the 60-min windows ever reclaimed; the next experiment is the same pairs with a 2-hour lag to learn whether Ross's reclaims sit beyond the window.
+
+### Harness and machine
+
+- Gate 14 (#1352) — `tape_confirms_hold` had been fail-closed in every replay since #1024 (a wrapper that owned the wrapped signature). Every earlier receipt is superseded; the baseline was re-benched.
+- The commit wall (141.8/146 GB) and the Claude app's 47 GB commit; a commit guard (floor 6 GB free virtual) sheds non-A/B drivers one at a time; 20–25 drivers is the machine's envelope.
+- Editing a running bash launcher truncates its log at exit (bash reads the script by byte offset) — launchers are now copied before edits.
+- Every A/B arm runs head + reverse-order tail (+ a middle driver when a slot frees); duplicates are killed at the meeting point.
+
+### Running at 00:00Z
+
+Ledger baseline at the deploy candidate (`rh8a–e`, `p10a–f`, three tails, 17 drivers) for the pass-3 ledger; the last five lockout-v3 cases (completeness only).
+
+### Next
+
+1. Pass-3 ledger on the deploy candidate (`FIXED=1 score_all.sh`): mechanism × count × Ross $ × CHILI $, winners captured, losers avoided — the honest re-statement of the task after gate 14.
+2. Lockout v3 with a 2-hour lag on JWEL 08-10 and EDBL 07-27 (both arms) — does the reclaim exist?
+3. Mechanism 3 (Alpaca exit transport): on the fixed driver decision → fill is 3 s on every alpaca case measured; the earlier 7–34 s was the harness (gates 11–13). Closed unless the ledger shows otherwise.
+4. Deploy `d63cfc379` after close Monday 09-07; paper soak Tuesday 09-08.
