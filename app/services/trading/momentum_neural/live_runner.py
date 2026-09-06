@@ -9553,6 +9553,60 @@ def _clear_scale_limit_place_intent_if_determinate(
         _commit_le(sess, le)
 
 
+def alpaca_partial_tranche_sellable(
+    le: dict[str, Any],
+    *,
+    partial_qty: float,
+    position_qty: float,
+) -> tuple[bool, dict[str, Any]]:
+    """Can the f-share tranche be SOLD right now, with a stop still covering the runner?
+
+    PATH B / broker-agnostic strategy (2026-09-06). The strategy's first-target
+    decision — sell ``scale_out_fraction``, move the balance to breakeven, hold the
+    runner — is Ross's asymmetric exit and a PARITY CONTRACT shared with the paper
+    runner. It must not change because of the venue. What CAN differ is whether the
+    tranche is sellable this instant: on Alpaca a resting full-quantity deadman stop
+    consumes the whole ``qty_available``, so f cannot be sold until either a tranche
+    is already reserved (the OCO path) or the stop has been shrunk to Q - f (PATH B).
+
+    Pure. Returns ``(sellable, debug)``; the debug is the receipt that says WHY, so a
+    suppression is never silent again. Fail-CLOSED on unreadable numbers — a partial
+    we cannot prove sellable must not be attempted against a resting protective stop.
+    """
+    dbg: dict[str, Any] = {"partial_qty": None, "position_qty": None,
+                           "deadman_qty": None, "reserved_qty": None}
+    try:
+        f = float(partial_qty)
+        q = float(position_qty)
+    except (TypeError, ValueError):
+        dbg["reason"] = "quantities_unreadable"
+        return False, dbg
+    if not (math.isfinite(f) and f > 0.0 and math.isfinite(q) and q > 0.0):
+        dbg["reason"] = "quantities_unreadable"
+        return False, dbg
+    dbg["partial_qty"], dbg["position_qty"] = f, q
+    tol = max(1e-9, q * 1e-8)
+    reserved = _alpaca_deadman_reserved_tranche_quantity(le)
+    dbg["reserved_qty"] = reserved
+    if reserved >= f - tol:
+        dbg["reason"] = "tranche_already_reserved"
+        return True, dbg
+    deadman = le.get("deadman_stop") if isinstance(le, dict) else None
+    deadman = deadman if isinstance(deadman, dict) else {}
+    deadman_qty = _float_or_none(deadman.get("qty"))
+    dbg["deadman_qty"] = deadman_qty
+    if not deadman or deadman_qty is None or deadman_qty <= 0.0:
+        # No protective order holds the shares; the ordinary sell path applies.
+        dbg["reason"] = "no_resting_deadman"
+        return True, dbg
+    if deadman_qty <= (q - f) + tol:
+        # Already shrunk (PATH B certified, or armed for the runner only).
+        dbg["reason"] = "deadman_leaves_tranche_free"
+        return True, dbg
+    dbg["reason"] = "deadman_holds_tranche"
+    return False, dbg
+
+
 def _alpaca_deadman_reserved_tranche_quantity(le: dict[str, Any]) -> float:
     """Shares ``_ensure_alpaca_deadman_stop`` will subtract before it arms.
 
@@ -47431,12 +47485,35 @@ def tick_live_session(
                 base_increment=inc,
                 base_min_size=mn,
             )
-            scaling = bool(
-                can_split
-                and not pos.get("partial_taken")
-                and normalize_execution_family(sess.execution_family)
-                not in ALPACA_EXECUTION_FAMILIES
-            )
+            # BROKER-AGNOSTIC PARTIAL (2026-09-06). This used to read
+            # `... and normalize_execution_family(...) not in ALPACA_EXECUTION_FAMILIES`,
+            # which deleted Ross's asymmetric exit on the live lane: on Alpaca the SAME
+            # first-target touch flattened the WHOLE position instead of selling the
+            # tranche, banking it, moving the balance to breakeven and holding the
+            # runner. That is a STRATEGY decision taken for a venue reason, and
+            # paper_execution.scale_out_quantity calls the split a parity contract
+            # shared with the paper runner. What genuinely differs is FEASIBILITY: a
+            # resting full-quantity deadman stop consumes Alpaca's `qty_available`, so
+            # the tranche cannot be sold until it is reserved (the OCO path) or the
+            # stop has been shrunk to Q - f (PATH B). Ask that question instead, and
+            # when the answer is no, say so with the numbers rather than silently
+            # taking a different trade.
+            _partial_wanted = bool(can_split and not pos.get("partial_taken"))
+            _tranche_ok, _tranche_dbg = True, {}
+            if _partial_wanted and normalize_execution_family(
+                sess.execution_family
+            ) in ALPACA_EXECUTION_FAMILIES:
+                _tranche_ok, _tranche_dbg = alpaca_partial_tranche_sellable(
+                    le, partial_qty=scale_qty, position_qty=qty
+                )
+                if not _tranche_ok:
+                    _emit(db, sess, "alpaca_partial_tranche_unsellable", {
+                        "reason": str(_tranche_dbg.get("reason") or "unknown"),
+                        "runner_qty": runner_qty,
+                        "fallback": "whole_position_at_target",
+                        **{k: v for k, v in _tranche_dbg.items() if k != "reason"},
+                    })
+            scaling = bool(_partial_wanted and _tranche_ok)
             exit_qty = scale_qty if scaling else qty
             exit_reason = "scale_out_target" if scaling else "target"
             cid = f"chili_ml_{'so' if scaling else 'p'}_{sess.id}_{uuid.uuid4().hex[:12]}"
