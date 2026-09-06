@@ -24396,6 +24396,7 @@ def _opinion_exit_suppressed(
     *,
     trigger: str,
     held_seconds: Any,
+    held_is_measured: bool = True,
 ) -> bool:
     """Gate one opinion exit and record the suppression ON CHANGE, never per pass.
 
@@ -24403,6 +24404,11 @@ def _opinion_exit_suppressed(
     receipt here is written the first time a given trigger is held back on a given
     session and not again until the trigger changes.
     """
+    if not held_is_measured:
+        # An unparseable `opened_at_utc` makes `held` 0.0 on EVERY tick, so a floor that
+        # trusted it would suppress these three exits for the life of the session. The
+        # floor exists to delay an opinion, never to delete one.
+        return False
     blocked, dbg = opinion_exit_structure_floor(held_seconds)
     if not blocked:
         return False
@@ -25765,6 +25771,8 @@ _RECYCLE_ENTRY_STATE_KEYS: tuple[str, ...] = (
     "g4_leader_is",
     "g4_hl5m_val",
     "g4_vwap5m_val",
+    # the structure-floor receipt marker: per-trade, so the next cycle re-reports
+    "opinion_exit_floor_last_trigger",
 )
 # Deliberately NOT reset on trade recycle: ``benched_backside_hod`` and
 # ``benched_backside_session_date_et`` describe the symbol's session phase,
@@ -42779,8 +42787,14 @@ def tick_live_session(
         opened_raw = pos.get("opened_at_utc")
         try:
             t0 = datetime.fromisoformat(str(opened_raw).replace("Z", "+00:00")).replace(tzinfo=None)
+            held_is_measured = True
         except Exception:
             t0 = _utcnow()
+            # `held` is now 0.0 and will be 0.0 again on the NEXT tick, and the one after
+            # that: with no parseable fill time this is not a young position, it is an
+            # unknown one. Anything that reads `held` as "too early to act" must be told
+            # the difference or it suppresses forever (2026-09-06).
+            held_is_measured = False
         held = (_utcnow() - t0).total_seconds()
         trail_activate_return = 1.0 + float(params["trail_activate_return_bps"]) / 10_000.0
 
@@ -43054,7 +43068,8 @@ def tick_live_session(
             and st == STATE_LIVE_ENTERED
             and bool(getattr(settings, "chili_momentum_breakout_bailout_enabled", True))
             and not _opinion_exit_suppressed(
-                db, sess, le, trigger="smart_hold_fast_bail", held_seconds=held
+                db, sess, le, trigger="smart_hold_fast_bail", held_seconds=held,
+                held_is_measured=held_is_measured,
             )
             and le.get("breakout_level_price") is not None
             and bid is not None
@@ -43241,7 +43256,8 @@ def tick_live_session(
             st == STATE_LIVE_ENTERED
             and bool(getattr(settings, "chili_momentum_breakout_bailout_enabled", True))
             and not _opinion_exit_suppressed(
-                db, sess, le, trigger="breakout_failed_to_hold", held_seconds=held
+                db, sess, le, trigger="breakout_failed_to_hold", held_seconds=held,
+                held_is_measured=held_is_measured,
             )
             and breakout_failed_to_hold(
                 breakout_level=le.get("breakout_level_price"),
@@ -43685,7 +43701,8 @@ def tick_live_session(
             bool(getattr(settings, "chili_momentum_lost_vwap_flatten_enabled", True))
             and st in (STATE_LIVE_ENTERED, STATE_LIVE_SCALING_OUT, STATE_LIVE_TRAILING)
             and not _opinion_exit_suppressed(
-                db, sess, le, trigger="lost_vwap_flatten", held_seconds=held
+                db, sess, le, trigger="lost_vwap_flatten", held_seconds=held,
+                held_is_measured=held_is_measured,
             )
             and bid is not None
             and math.isfinite(float(bid))
@@ -43813,7 +43830,8 @@ def tick_live_session(
             bool(getattr(settings, "chili_momentum_bos_exit_live_enabled", True))
             and st in (STATE_LIVE_ENTERED, STATE_LIVE_TRAILING)
             and not _opinion_exit_suppressed(
-                db, sess, le, trigger="bos_exit", held_seconds=held
+                db, sess, le, trigger="bos_exit", held_seconds=held,
+                held_is_measured=held_is_measured,
             )
         ):
             try:

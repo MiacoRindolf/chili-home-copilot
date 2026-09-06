@@ -94,6 +94,34 @@ def test_the_stop_the_max_loss_circuit_and_the_burst_exit_are_NOT_gated():
         assert "_opinion_exit_suppressed(" not in src[max(0, i - 1200):i], anchor
 
 
+def test_an_unknown_fill_time_is_not_treated_as_a_young_position():
+    """The defect this closes, found by reviewing this change before it was benched.
+
+    `opened_at_utc` is parsed inside a try/except whose fallback is `t0 = _utcnow()`. When
+    it cannot be parsed, `held` is 0.0 on this tick -- and 0.0 again on the next, and the
+    one after. A floor that trusted that number would suppress all three opinion exits for
+    the LIFE of the session. That is not a delayed opinion, it is a deleted one, and it is
+    the opposite of the fail-open promise this guard makes."""
+    src = inspect.getsource(lr.tick_live_session)
+    i = src.find('opened_raw = pos.get("opened_at_utc")')
+    assert i > 0
+    parse = src[i:i + 700]
+    assert "held_is_measured = True" in parse and "held_is_measured = False" in parse
+    # every gated site carries the flag through
+    assert src.count("held_is_measured=held_is_measured") == 4
+    gate = inspect.getsource(lr._opinion_exit_suppressed)
+    j = gate.find("if not held_is_measured:")
+    k = gate.find("opinion_exit_structure_floor(")
+    assert 0 < j < k, "the unknown-hold check must precede the floor, not follow it"
+    assert "return False" in gate[j:k]
+
+
+def test_the_receipt_marker_is_cleared_on_recycle():
+    """A per-trade marker that survives a recycle silences the receipt for the next leg --
+    the shape of the burst-stamp incident, in observability rather than in behaviour."""
+    assert "opinion_exit_floor_last_trigger" in lr._RECYCLE_ENTRY_STATE_KEYS
+
+
 def test_the_receipt_is_written_on_change_of_trigger_not_once_per_pass():
     """A per-pass emit is how one decision became 6,765 events once already."""
     src = inspect.getsource(lr._opinion_exit_suppressed)
