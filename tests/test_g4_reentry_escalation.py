@@ -58,13 +58,78 @@ def test_bad_level_type_fails_open() -> None:
 
 
 def test_non_structural_trigger_blocked_at_level_1() -> None:
+    # v5 (2026-09-06): a non-structural fire is blocked while the price has NOT reclaimed
+    # the prior failure (10.4 < HWM 10.5) even with a lifting tape ...
     allowed, dbg = reentry_escalation_decision(
         enabled=True, escalation_level=1, structural_trigger=False,
-        live_price=11.0, prior_hwm=10.5, prior_exit_price=10.0,
+        live_price=10.4, prior_hwm=10.5, prior_exit_price=10.0,
         prior_risk_dist=0.3, tape_accel=1.0,
     )
     assert allowed is False
     assert dbg["reason"] == "non_structural_trigger"
+    assert dbg["reclaim_structural_substitute"] is False
+    # ... and while the tape is not lifting even though the price has reclaimed
+    allowed, dbg = reentry_escalation_decision(
+        enabled=True, escalation_level=1, structural_trigger=False,
+        live_price=11.0, prior_hwm=10.5, prior_exit_price=10.0,
+        prior_risk_dist=0.3, tape_accel=-0.2,
+    )
+    assert allowed is False
+    assert dbg["reason"] == "non_structural_trigger"
+
+
+def test_v5_any_name_clears_non_structural_with_tape_and_reclaim() -> None:
+    # v5 (2026-09-06, Ross Parity Bench): the strict substitute — positive tape AND an
+    # actual reclaim above the prior failure — is proof for EVERY name, not only the
+    # board's #1. Measured: VIVS 07-15 (stop 1.48, HWM 1.61) fired momentum_ok_tick_stream
+    # at 1.66 with the tape lifting and was refused x256 while Ross re-entered at 2.82 on
+    # the way to 3.53; JWEL 08-10 ml3 x1,284; WETO 08-14 x233; VTIX 07-27 x42.
+    # v5b: the reclaim must clear the HWM by one of the name's own 30-s noise bands
+    # (VIVS: ~0.04 at 1.6): 1.66 >= 1.61 + 0.04 with the tape lifting => allowed.
+    allowed, dbg = reentry_escalation_decision(
+        enabled=True, escalation_level=1, structural_trigger=False,
+        live_price=1.66, prior_hwm=1.61, prior_exit_price=1.48,
+        prior_risk_dist=0.09, tape_accel=1.0, is_day_leader=False, noise_abs=0.04,
+    )
+    assert allowed is True
+    assert dbg["reclaim_structural_substitute"] is True
+    assert dbg["substitute_required"] == 1.65
+    assert dbg.get("leader_structural_substitute") is None  # not the leader; the ledger can tell
+    # level 2 demands one more R of proof above the HWM: 1.66 < 1.61 + 0.09 + 0.04 => blocked
+    allowed, dbg = reentry_escalation_decision(
+        enabled=True, escalation_level=2, structural_trigger=False,
+        live_price=1.66, prior_hwm=1.61, prior_exit_price=1.48,
+        prior_risk_dist=0.09, tape_accel=1.0, is_day_leader=False, noise_abs=0.04,
+    )
+    assert allowed is False and dbg["reason"] == "non_structural_trigger"
+
+
+def test_v5b_a_touch_inside_the_noise_band_is_not_a_reclaim_and_a_missing_band_fails_closed() -> None:
+    # INLF 07-28 RH (a Ross loser): granted by v5 at 7.93 vs HWM 7.75 (+2.3%) inside a ~4%
+    # band, stopped at 7.52 fourteen seconds later. v5b refuses it.
+    allowed, dbg = reentry_escalation_decision(
+        enabled=True, escalation_level=1, structural_trigger=False,
+        live_price=7.93, prior_hwm=7.75, prior_exit_price=7.38,
+        prior_risk_dist=0.36, tape_accel=5000.0, is_day_leader=None, noise_abs=0.31,
+    )
+    assert allowed is False and dbg["reason"] == "non_structural_trigger"
+    assert dbg["substitute_required"] == 8.06 and dbg["reclaim_structural_substitute"] is False
+    # no readable band => no substitute (fail-closed, like the lockout watch)
+    for bad in (None, float("nan"), -0.1, "x"):
+        allowed, dbg = reentry_escalation_decision(
+            enabled=True, escalation_level=1, structural_trigger=False,
+            live_price=9.0, prior_hwm=7.75, prior_exit_price=7.38,
+            prior_risk_dist=0.36, tape_accel=5000.0, is_day_leader=None, noise_abs=bad,
+        )
+        assert allowed is False and dbg["reason"] == "non_structural_trigger", bad
+        assert dbg["substitute_noise_abs"] is None
+    # the STRUCTURAL class never needed the substitute and is unchanged by the band
+    allowed, dbg = reentry_escalation_decision(
+        enabled=True, escalation_level=1, structural_trigger=True,
+        live_price=7.93, prior_hwm=7.75, prior_exit_price=7.38,
+        prior_risk_dist=0.36, tape_accel=5000.0, is_day_leader=None, noise_abs=None,
+    )
+    assert allowed is True and dbg["reason"] == "reclaim_met"
 
 
 def test_structural_trigger_with_reclaim_and_tape_allows() -> None:
@@ -283,14 +348,16 @@ def test_stop_class_predicate_token_semantics() -> None:
 # A leader whose entries only fire via non-structural (volume-confirmation)
 # reasons must not be permanently WAIT-blocked. It may substitute a STRICT
 # equivalent: readable POSITIVE tape AND an actual reclaim above the prior
-# failure — both actively satisfied (no skip-on-missing). Non-leaders keep the
-# strict structural requirement.
+# failure — both actively satisfied (no skip-on-missing). v5 (2026-09-06): the
+# same strict substitute is proof for EVERY name (see test_v5_any_name_...); the
+# leader flag is kept in the debug for the ledger only.
 
 def test_leader_substitute_clears_non_structural_with_tape_and_reclaim() -> None:
+    # required = HWM 6.90 + (level-1) x 0.05 + noise band 0.02 = 6.97 <= 6.98
     allowed, dbg = reentry_escalation_decision(
         enabled=True, escalation_level=2, structural_trigger=False,
         live_price=6.98, prior_hwm=6.90, prior_exit_price=6.80,
-        prior_risk_dist=0.05, tape_accel=1.2, is_day_leader=True,
+        prior_risk_dist=0.05, tape_accel=1.2, is_day_leader=True, noise_abs=0.02,
     )
     assert allowed is True
     assert dbg.get("leader_structural_substitute") is True
@@ -331,15 +398,24 @@ def test_leader_substitute_requires_a_reference_no_free_pass() -> None:
     assert dbg["reason"] == "non_structural_trigger"
 
 
-def test_non_leader_still_blocks_on_non_structural_even_with_tape_and_reclaim() -> None:
+def test_non_leader_clears_non_structural_with_tape_and_reclaim_v5() -> None:
+    # (v5 flipped the pre-2026-09-06 expectation: the reclaim + tape bar is the proof,
+    # the rank is not.) Same inputs as the leader case above, leader=False => allowed.
     allowed, dbg = reentry_escalation_decision(
         enabled=True, escalation_level=2, structural_trigger=False,
         live_price=6.98, prior_hwm=6.90, prior_exit_price=6.80,
-        prior_risk_dist=0.05, tape_accel=1.2, is_day_leader=False,
+        prior_risk_dist=0.05, tape_accel=1.2, is_day_leader=False, noise_abs=0.02,
     )
-    assert allowed is False
-    assert dbg["reason"] == "non_structural_trigger"
+    assert allowed is True
+    assert dbg["reclaim_structural_substitute"] is True
     assert dbg.get("leader_structural_substitute") is None
+    # and the non-leader still needs BOTH legs: no reference => no free pass
+    allowed, dbg = reentry_escalation_decision(
+        enabled=True, escalation_level=2, structural_trigger=False,
+        live_price=6.98, prior_hwm=None, prior_exit_price=None,
+        prior_risk_dist=None, tape_accel=1.2, is_day_leader=False, noise_abs=0.02,
+    )
+    assert allowed is False and dbg["reason"] == "non_structural_trigger"
 
 
 def test_leader_with_structural_trigger_unaffected_by_substitute() -> None:
@@ -358,14 +434,14 @@ def test_leader_substitute_margin_scales_with_level() -> None:
     allowed, dbg = reentry_escalation_decision(
         enabled=True, escalation_level=3, structural_trigger=False,
         live_price=6.98, prior_hwm=6.90, prior_exit_price=6.80,
-        prior_risk_dist=0.05, tape_accel=1.2, is_day_leader=True,
+        prior_risk_dist=0.05, tape_accel=1.2, is_day_leader=True, noise_abs=0.0,
     )
     assert allowed is False
-    # and at 7.01 it clears
+    # and at 7.01 it clears (a zero band: the level margin alone)
     allowed2, _ = reentry_escalation_decision(
         enabled=True, escalation_level=3, structural_trigger=False,
         live_price=7.01, prior_hwm=6.90, prior_exit_price=6.80,
-        prior_risk_dist=0.05, tape_accel=1.2, is_day_leader=True,
+        prior_risk_dist=0.05, tape_accel=1.2, is_day_leader=True, noise_abs=0.0,
     )
     assert allowed2 is True
 
@@ -489,3 +565,30 @@ def test_cadence_bail_between_stops_does_not_reset_the_pair() -> None:
         now=_NOW, window_seconds=120.0, decision_enabled=True,
     )
     assert rapid is True
+
+
+def test_v5c_the_day_leader_keeps_its_substitute_on_a_thin_tape_band() -> None:
+    # review 2026-09-06: with no readable band the leader falls back to a zero band (the
+    # review-m2 contract), the non-leader stays fail-closed
+    allowed, dbg = reentry_escalation_decision(
+        enabled=True, escalation_level=2, structural_trigger=False,
+        live_price=6.98, prior_hwm=6.90, prior_exit_price=6.80,
+        prior_risk_dist=0.05, tape_accel=1.2, is_day_leader=True, noise_abs=None,
+    )
+    assert allowed is True and dbg["substitute_band_fallback"] == "leader_no_band"
+    assert dbg["live_price"] == 6.98 and dbg["noise_abs"] is None
+    allowed, dbg = reentry_escalation_decision(
+        enabled=True, escalation_level=2, structural_trigger=False,
+        live_price=6.98, prior_hwm=6.90, prior_exit_price=6.80,
+        prior_risk_dist=0.05, tape_accel=1.2, is_day_leader=False, noise_abs=None,
+    )
+    assert allowed is False and dbg["reason"] == "non_structural_trigger"
+    assert "substitute_band_fallback" not in dbg
+
+
+def test_v5c_the_runner_reads_the_band_only_for_non_structural_fires() -> None:
+    import inspect
+    from app.services.trading.momentum_neural import live_runner as lr
+    src = inspect.getsource(lr.tick_live_session)
+    i = src.find("_g4e_noise_abs = None")
+    assert "if _g4e_px and _trigger_reason not in structural_trigger_reasons():" in src[i:i + 600]

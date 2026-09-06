@@ -4430,6 +4430,7 @@ def reentry_escalation_decision(
     tape_accel: float | None,
     is_day_leader: bool | None = None,
     tape_back_buy_share: float | None = None,
+    noise_abs: float | None = None,
 ) -> tuple[bool, dict[str, Any]]:
     """G4 P2 — SAME-SYMBOL re-entry escalation after a stop-out (PURE, no I/O).
 
@@ -4447,13 +4448,15 @@ def reentry_escalation_decision(
       * STRUCTURAL trigger class — the fired trigger must carry real structure
         (pullback_low; the same class set the structural-stop machinery trusts). The
         weak fallbacks (momentum_continuation / score_only) no longer qualify.
-        DAY-LEADER SUBSTITUTE (review m2): the #1 name (``is_day_leader``) must never
-        be permanently WAIT-blocked just because its entries fire via non-structural
-        (volume-confirmation) reasons. When the leader's trigger is non-structural it
-        may substitute a STRICT high-quality equivalent for the structural class:
+        RECLAIM SUBSTITUTE (review m2 for the day-leader; every name since 2026-09-06):
+        a name must never be permanently WAIT-blocked just because its entries fire via
+        non-structural (volume-confirmation) reasons. When the trigger is non-structural
+        it may substitute a STRICT high-quality equivalent for the structural class:
         readable POSITIVE tape AND an ACTUAL price reclaim above the prior failure
         (both actively satisfied — NO skip-on-missing, so this is a HIGHER bar, not a
-        hole). Non-leaders keep the strict structural requirement;
+        hole). Measured 2026-09-06 (Ross Parity Bench, gate-15 baseline): the leader-only
+        form refused Ross's own re-entry second on VIVS/VTIX/JWEL/WETO/RUBI/ILLR/VEEE
+        with the bar already met; ``is_day_leader`` is kept for the ledger;
       * STRUCTURE RECLAIM — live price must exceed the level where the LAST attempt
         FAILED: the prior trade's high-water mark (fallback: its exit price when no
         HWM was recorded), plus ``(level - 1) * prior_risk_dist`` — each successive
@@ -4465,7 +4468,9 @@ def reentry_escalation_decision(
         requirement still stands) so a thin-tape name is not starved.
 
     Returns ``(allowed, debug)``. Fail-OPEN on unusable numeric basis (current
-    behavior — the standard trigger already fired). docs/DESIGN/MOMENTUM_LANE.md"""
+    behavior — the standard trigger already fired), EXCEPT the substitute's noise band
+    (v5b/v5c): a non-leader with no readable band gets no substitute (fail-closed); the
+    day-leader falls back to a zero band. docs/DESIGN/MOMENTUM_LANE.md"""
     dbg: dict[str, Any] = {
         "escalation_level": escalation_level,
         "structural_trigger": bool(structural_trigger),
@@ -4476,6 +4481,8 @@ def reentry_escalation_decision(
         "tape_accel": tape_accel,
         "tape_back_buy_share": tape_back_buy_share,
         "required_reclaim": None,
+        "live_price": live_price,
+        "noise_abs": noise_abs,
     }
     if not enabled:
         dbg["reason"] = "flag_off"
@@ -4560,15 +4567,54 @@ def reentry_escalation_decision(
 
     # 1) structural trigger class required at any escalation level.
     if not structural_trigger:
-        # Day-leader substitute (review m2): the leader may replace the structural
-        # class with a STRICT equivalent — readable POSITIVE tape AND an actual
-        # reclaim above the prior failure, BOTH actively satisfied (no skip). A
-        # non-leader, or a leader without that confirmation, still blocks.
+        # RECLAIM SUBSTITUTE (review m2 introduced it for the day-leader only; opened to
+        # every name 2026-09-06, Ross Parity Bench). A non-structural fire may replace
+        # the structural class with a STRICT equivalent — readable POSITIVE tape AND an
+        # actual price reclaim above the prior failure (prior HWM, + one R per extra
+        # level), BOTH actively satisfied (no skip-on-missing). MEASURED on the gate-15
+        # baseline (@ 9383324b2, per-second timelines): after a small first stop-out the
+        # binding line at Ross's own re-entry second was this branch refusing
+        # `momentum_ok_tick_stream` as `non_structural_trigger` — VIVS 07-15 x256 (stop
+        # 1.48 -> Ross 08:07:07 @2.82 -> 3.53), VTIX 07-27 x42 (Ross 09:18:45 @4.18 ->
+        # 4.62), JWEL 08-10 ml3 x1,284 (Ross 07:33:45, 4.82 -> 6.12), WETO 08-14 x233
+        # (Ross 09:44 @9.6 -> 12.95), RUBI 07-16 x54, ILLR 06-25 x62, VEEE 07-13 x58 —
+        # every one with the price ALREADY back above the failed leg's high-water mark and
+        # the tape lifting, i.e. the substitute's own bar met, refused only for not being
+        # the board's #1 (Tier-1 bench: an isolated board; live: a board of 5-30 names).
+        # "Hands off until it proves itself again" is proven by the reclaim + buyers, not
+        # by a rank. The leader flag stays in the debug for the ledger.
+        # v5b (2026-09-06, first v5 A/B): the reclaim must clear the prior failure by one of
+        # the name's OWN 30-s noise bands (the #1278 measurement, the same band the v4
+        # lockout watch demands) — a touch of the old high is not a reclaim. MEASURED: INLF
+        # 07-28 RH (a Ross loser) was granted at 7.93 vs HWM 7.75 (+2.3%, inside a ~4% band)
+        # and stopped at 7.52 fourteen seconds later (-27.86 on the negative control); VIVS
+        # 07-15 cleared 1.58 + band at 1.66 with the tape lifting and ran to 3.53. Missing
+        # band => fail-closed (no substitute), like the watch.
         _sub_ok = False
-        if is_day_leader:
-            _, _sub_req = _reclaim_required()
-            _sub_ok = bool(_tape_positive() and _sub_req is not None and _price_ge(_sub_req))
-            dbg["leader_structural_substitute"] = _sub_ok
+        _, _sub_req = _reclaim_required()
+        _sub_band = None
+        try:
+            if noise_abs is not None and math.isfinite(float(noise_abs)) and float(noise_abs) >= 0.0:
+                _sub_band = float(noise_abs)
+        except (TypeError, ValueError):
+            _sub_band = None
+        if _sub_band is None and is_day_leader:
+            # v5c (review 2026-09-06): the day-leader keeps its review-m2 contract — the
+            # substitute must not fail closed on a thin-tape band (the 30-s band needs
+            # >= 6 buckets of the last 900 s while the tape read needs 3 prints in 15 s;
+            # the two disagree exactly at ignition). Non-leaders keep the fail-closed band.
+            _sub_band = 0.0
+            dbg["substitute_band_fallback"] = "leader_no_band"
+        _sub_ok = bool(
+            _tape_positive()
+            and _sub_req is not None
+            and _sub_band is not None
+            and _price_ge(_sub_req + _sub_band)
+        )
+        dbg["reclaim_structural_substitute"] = _sub_ok
+        dbg["substitute_noise_abs"] = _sub_band
+        dbg["substitute_required"] = (round(_sub_req + _sub_band, 6) if (_sub_req is not None and _sub_band is not None) else None)
+        dbg["leader_structural_substitute"] = _sub_ok if is_day_leader else None
         if not _sub_ok:
             dbg["reason"] = "non_structural_trigger"
             return False, dbg

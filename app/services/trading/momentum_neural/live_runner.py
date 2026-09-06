@@ -34489,6 +34489,19 @@ def tick_live_session(
                         _commit_le(sess, le)
                 except Exception:
                     _g4e_leader = None  # fail-closed: unreadable board = not leader
+                # v5b: the name's own 30-s noise band (the same read the lockout watch uses)
+                # is the margin a non-structural fire must clear above the prior failure.
+                _g4e_noise_abs = None
+                try:
+                    # v5c (review): the band is only consulted by the non-structural
+                    # substitute — no tape aggregate for a structural fire.
+                    if _g4e_px and _trigger_reason not in structural_trigger_reasons():
+                        _g4e_nf_pct, _g4e_nf_buckets = _own_tape_noise_floor_pct(db, sess.symbol, entry_price=_g4e_px)
+                        _g4e_nf_min = int(getattr(settings, "chili_momentum_stop_noise_floor_min_buckets", 6) or 6)
+                        if _g4e_nf_pct is not None and int(_g4e_nf_buckets or 0) >= max(3, _g4e_nf_min):
+                            _g4e_noise_abs = float(_g4e_nf_pct) * float(_g4e_px)
+                except Exception:
+                    _g4e_noise_abs = None
                 try:
                     _g4e_ok, _g4e_dbg = reentry_escalation_decision(
                         enabled=True,
@@ -34501,6 +34514,7 @@ def tick_live_session(
                         tape_accel=_g4e_tape_accel,
                         is_day_leader=(_g4e_leader if isinstance(_g4e_leader, bool) else None),
                         tape_back_buy_share=_g4e_buy_share,
+                        noise_abs=_g4e_noise_abs,
                     )
                 except Exception:
                     _g4e_ok, _g4e_dbg = True, {"reason": "g4_escalation_error_fail_open"}

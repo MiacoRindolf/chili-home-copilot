@@ -776,6 +776,17 @@ _BENCH_PAYLOAD_KEYS = (
     "off_high_pct", "reentry_structural_stop", "structural_stop_source", "structural_stop_price",
     # v4d: grant vs spend
     "granted_at_utc", "granted_price", "granted_trigger", "front_side_exemptions",
+    # 2026-09-06: the post-stop-out RE-ENTRY gates bound at Ross's entry second on VIVS 07-15,
+    # VTIX 07-27, JWEL 08-10 ml3, WETO 08-14, RUBI 07-16, CLRO 08-06 (g4_reentry_escalation_
+    # blocked / momentum_reentry_chase_blocked) and the receipt kept only {blocked_trigger,
+    # reason}; the decision's own basis (leader? tape? reclaim level? chase ceiling?) had to be
+    # guessed from source. Carry the WHY.
+    "is_day_leader", "leader_structural_substitute", "tape_accel", "tape_back_buy_share",
+    "required_reclaim", "prior_hwm", "prior_exit_price", "prior_risk_dist", "structural_trigger",
+    "escalation_level", "live_price", "prior_anchor_hwm", "chase_ceiling", "risk_unit_atr",
+    # v5b/v5c: the substitute's own basis
+    "reclaim_structural_substitute", "substitute_required", "substitute_noise_abs", "noise_abs",
+    "substitute_band_fallback",
 )
 
 
