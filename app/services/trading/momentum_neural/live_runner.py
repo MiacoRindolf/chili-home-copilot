@@ -23961,6 +23961,30 @@ def _failed_pop_break_fires(db, sess, le, *, bid, avg) -> bool:
         _df = _build_micro_bar_df(db, sess.symbol, bar_seconds=10)
         if _df is None or len(_df) < 4:
             return False
+        # FRAME RECENCY — FAIL-CLOSED (2026-09-06 review, confirmed major). This
+        # decision is 100% frame-shaped: `failed_pop_momentum_break_exit` reads
+        # only the bar closes/opens and the prior bar's low, and never compares
+        # the live bid, so a stale frame is not caught downstream. The line below
+        # then discards the newest row as "forming" — true only when the frame
+        # reaches the current bucket. `_resample_micro_bars` spans first print to
+        # LAST print, so on a lagging tape the newest row is a COMPLETE bar from
+        # an older bucket and the decision would be taken on 30-45 s old
+        # structure, market-selling the whole position while the live bid has
+        # already reclaimed. Unlike every sibling exit this branch has no
+        # halt/stale gate to lean on (those key on the TICK's quote freshness,
+        # which is clean exactly in this failure), so the bound belongs here: the
+        # newest bar must be the current bucket or the one before it.
+        _fpb_age = _frame_last_bar_age_seconds(_df, _utcnow_aware())
+        _fpb_max_age = float(
+            getattr(settings, "chili_momentum_failed_pop_break_max_frame_age_s", 20.0) or 20.0
+        )
+        if _fpb_age is None or not math.isfinite(_fpb_age) or _fpb_age > _fpb_max_age:
+            le["failed_pop_break_dbg"] = {
+                "reason": "micro_frame_stale",
+                "frame_last_bar_age_s": (round(_fpb_age, 3) if _fpb_age is not None else None),
+                "max_frame_age_s": _fpb_max_age,
+            }
+            return False
         # index -1 ay FORMING; gamitin ang mga kumpletong bar lamang
         _co = [
             (float(_df["Close"].iloc[i]), float(_df["Open"].iloc[i]))
@@ -23983,6 +24007,9 @@ def _failed_pop_break_fires(db, sess, le, *, bid, avg) -> bool:
                 settings, "chili_momentum_failed_pop_break_min_green_run", 2
             ) or 2),
         )
+        dbg = dict(dbg or {})
+        dbg["frame_last_bar_age_s"] = round(_fpb_age, 3)
+        dbg["max_frame_age_s"] = _fpb_max_age
         le["failed_pop_break_dbg"] = dbg
         le["fpb_fire"] = bool(fire)
         return bool(fire)
@@ -43381,9 +43408,14 @@ def tick_live_session(
                 bid=bid, ask=ask, mid=mid,
             )
         elif (
-            st == STATE_LIVE_ENTERED
+            # 2026-09-06: the tick-cadence exit is the PRIMARY "the leg is over" signal
+            # (operator doctrine; exit census: zero legs ended by it in the gate-15
+            # baseline because it was dark and ENTERED-only while the early trail arm
+            # moves the state to TRAILING seconds after the fill). Evaluated in ENTERED
+            # and TRAILING, before the opinion bailouts below; default ON, env kill-switch.
+            st in (STATE_LIVE_ENTERED, STATE_LIVE_TRAILING)
             and bool(getattr(
-                settings, "chili_momentum_failed_pop_break_exit_enabled", False
+                settings, "chili_momentum_failed_pop_break_exit_enabled", True
             ))
             and _failed_pop_break_fires(db, sess, le, bid=bid, avg=avg)
         ):
