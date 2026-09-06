@@ -3565,6 +3565,59 @@ def _deadman_protection_is_live(sess: Any) -> tuple[bool, dict[str, Any]]:
     }
 
 
+def _bar_interval_seconds(interval: str | None) -> float | None:
+    """'1m' -> 60, '5m' -> 300, '15m' -> 900, '1h' -> 3600, '1d' -> 86400; None when unreadable."""
+    try:
+        s = str(interval or "").strip().lower()
+        if not s:
+            return None
+        unit = s[-1]
+        n = float(s[:-1])
+        mult = {"s": 1.0, "m": 60.0, "h": 3600.0, "d": 86400.0}.get(unit)
+        if mult is None or n <= 0:
+            return None
+        return n * mult
+    except (TypeError, ValueError):
+        return None
+
+
+def bos_exit_post_entry_close_ready(
+    entry_filled_at_utc: Any, now_aware: datetime, interval: str | None
+) -> tuple[bool, dict[str, Any]]:
+    """LIVE BOS EXIT warm-up (2026-09-06, Ross Parity Bench): a CONFIRMED close below
+    structure needs a bar that closed AFTER the entry fill. MEASURED on the gate-15
+    baseline (@ 9383324b2, 62 receipts): every one of the 14 live BOS exits fired 1.1–2.5 s
+    after the fill (WETO 08-14 ×8, NXTC 07-14 ×6, all Ross winners) and was followed by a
+    bailout a second later — the structure read had not seen one close since the fill.
+    Ready when at least one full bar interval has elapsed since ``entry_filled_at_utc``.
+    Fail-OPEN (ready=True) on an unreadable fill stamp or interval so the guard can never
+    hide a real exit on its own bookkeeping. Pure; returns (ready, debug)."""
+    iv = _bar_interval_seconds(interval)
+    if iv is None:
+        return True, {"reason": "no_interval_basis", "interval": interval}
+    t_fill = None
+    try:
+        if entry_filled_at_utc:
+            t_fill = datetime.fromisoformat(str(entry_filled_at_utc))
+            if t_fill.tzinfo is None:
+                t_fill = t_fill.replace(tzinfo=timezone.utc)
+    except (TypeError, ValueError):
+        t_fill = None
+    if t_fill is None:
+        return True, {"reason": "no_entry_fill_basis", "interval_s": iv}
+    try:
+        _now = now_aware if now_aware.tzinfo is not None else now_aware.replace(tzinfo=timezone.utc)
+        since = (_now - t_fill).total_seconds()
+    except (TypeError, ValueError, AttributeError):
+        return True, {"reason": "no_clock_basis", "interval_s": iv}
+    ready = since >= iv
+    return ready, {
+        "reason": "bar_closed_since_entry" if ready else "no_bar_closed_since_entry",
+        "interval_s": iv,
+        "since_entry_s": round(since, 3),
+    }
+
+
 def _strict_alpaca_rth_entry_window(
     adapter: Any,
     sess: Any,
@@ -43730,7 +43783,32 @@ def tick_live_session(
                 _bos_iv = str(
                     getattr(settings, "chili_momentum_pullback_entry_interval", "5m") or "5m"
                 )
-                _bos_df = _replay_aware_fetch_ohlcv_df(sess.symbol, interval=_bos_iv, period="5d")
+                # A CONFIRMED close below structure needs a bar that CLOSED AFTER the entry.
+                # MEASURED (gate-15 baseline @ 9383324b2, 2026-09-06): every one of the 14
+                # live BOS exits in 62 receipts fired 1.1-2.5 s after the entry fill (WETO
+                # 08-14 x8, NXTC 07-14 x6 — all Ross winners), each followed by a bailout a
+                # second later: the frame's last close was the PRE-entry bar (or the forming
+                # bar's first prints), i.e. the structure read had not seen a single close
+                # since the fill. WETO RH: exemption 09:46:25 -> fill 10.34 -> "close below
+                # structure" at bid 10.29 one second later -> bailout 10.37 -> the name ran
+                # to 12.95. Until one full bar interval has elapsed since the fill the read
+                # is not a confirmed close; the intrabar trail / stop / max-loss circuit own
+                # that window unchanged. Noted once per position for the ledger.
+                _bos_ready, _bos_ready_dbg = bos_exit_post_entry_close_ready(
+                    le.get("entry_filled_at_utc"), _utcnow_aware(), _bos_iv
+                )
+                if not _bos_ready:
+                    if not le.get("bos_exit_warmup_noted"):
+                        le["bos_exit_warmup_noted"] = True
+                        _commit_le(sess, le)
+                        _emit(db, sess, "live_bos_exit_deferred_no_post_entry_close", {
+                            "reason": "no_bar_closed_since_entry",
+                            "bid": float(bid),
+                            **_bos_ready_dbg,
+                        })
+                    _bos_df = None
+                else:
+                    _bos_df = _replay_aware_fetch_ohlcv_df(sess.symbol, interval=_bos_iv, period="5d")
                 if _bos_df is not None and not getattr(_bos_df, "empty", True):
                     _bos_close = float(_bos_df["Close"].astype(float).iloc[-1])
                     _bos_buf = float(
