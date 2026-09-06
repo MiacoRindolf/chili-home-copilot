@@ -3580,8 +3580,20 @@ def _apply_lockout_reentry_stop(le: dict) -> None:
             le["structural_stop_source"] = "lockout_reclaim_level_minus_noise"
         else:
             le["structural_stop_source"] = "trigger_pullback_low"
+        # v4e (first v4d A/B, EZRA 08-03 ml2): the re-entry filled 3.19 with the 2.75
+        # structural stop in place and was still ended 37 s later by the breakout-or-
+        # bailout fast bail (`breakout_failed_fast_bail` at bid 2.90) — its level was the
+        # trigger's pullback HIGH (~3.0x), so the retest of the RECLAIMED level (2.90,
+        # low 2.89) read as a failed breakout; the name then ran +28% to 3.77. For a
+        # post-lock re-entry the breakout IS the reclaim: it has failed only when the
+        # reclaimed level breaks by a noise band — the same price as the structural stop.
+        _bl = _float_or_none(le.get("breakout_level_price"))
+        if _bl is None or float(_rs) < _bl:
+            _stamp_level_set_at(le, "breakout_level_price", float(_rs))
+            le["breakout_level_source"] = "lockout_reclaim_level_minus_noise"
     else:
         le.pop("structural_stop_source", None)
+        le.pop("breakout_level_source", None)
 
 
 def _strict_alpaca_rth_entry_window(
@@ -25706,6 +25718,7 @@ _RECYCLE_ENTRY_STATE_KEYS: tuple[str, ...] = (
     "structural_stop_price",
     "structural_stop_source",  # v4c: the re-entry stop's provenance, per trade
     "lockout_reentry_structural_stop",  # v4d: the grant's stash, per trade
+    "breakout_level_source",  # v4e
     "structural_stop_atr_pct",
     "stop_breach_pending_utc",
     "stop_breach_chop_holds",

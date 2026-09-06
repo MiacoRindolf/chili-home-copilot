@@ -776,6 +776,7 @@ _BENCH_PAYLOAD_KEYS = (
     "off_high_pct", "reentry_structural_stop", "structural_stop_source", "structural_stop_price",
     # v4d: grant vs spend
     "granted_at_utc", "granted_price", "granted_trigger", "front_side_exemptions",
+    "breakout_level_source", "breakout_level", "breakout_level_price",
 )
 
 
