@@ -4476,19 +4476,39 @@ def reentry_escalation_decision(
         # band => fail-closed (no substitute), like the watch.
         _sub_ok = False
         _, _sub_req = _reclaim_required()
+        # v5d (first v5b A/B, 2026-09-06): the margin a non-structural fire must clear above
+        # the prior failure is ONE FULL R OF THE FAILED LEG (``prior_risk_dist`` — the same
+        # unit the level-2 margin already uses: "each successive failure demands one more
+        # full R of proof"; the first re-entry now proves itself by one). MEASURED: VIVS
+        # 07-15 RH — the winner the substitute was built for — was refused ×84 with the tape
+        # lifting (+11k..+80k) and the price above the prior HWM because the 30-s noise
+        # band was UNREADABLE in premarket (4-5 buckets < 6) and, once readable at 08:07,
+        # was 22-33% of price (an igniting tape's 30-s range IS the move — not a margin);
+        # the leg's own R was 0.105 (6.6%): 1.58 + 0.105 = 1.685, granted at 1.69 on the
+        # way to 3.53. INLF 07-28 RH (a Ross loser): 7.75 + 0.36 = 8.11, 7.93 still refused.
+        # Fallbacks, in order: the 30-s noise band when the leg carries no R; zero for the
+        # day-leader (its review-m2 contract); otherwise no substitute (fail-closed).
         _sub_band = None
         try:
-            if noise_abs is not None and math.isfinite(float(noise_abs)) and float(noise_abs) >= 0.0:
-                _sub_band = float(noise_abs)
+            if (
+                prior_risk_dist is not None
+                and math.isfinite(float(prior_risk_dist))
+                and float(prior_risk_dist) > 0.0
+            ):
+                _sub_band = float(prior_risk_dist)
+                dbg["substitute_band_basis"] = "prior_risk_dist"
         except (TypeError, ValueError):
             _sub_band = None
+        if _sub_band is None:
+            try:
+                if noise_abs is not None and math.isfinite(float(noise_abs)) and float(noise_abs) >= 0.0:
+                    _sub_band = float(noise_abs)
+                    dbg["substitute_band_basis"] = "noise_band"
+            except (TypeError, ValueError):
+                _sub_band = None
         if _sub_band is None and is_day_leader:
-            # v5c (review 2026-09-06): the day-leader keeps its review-m2 contract — the
-            # substitute must not fail closed on a thin-tape band (the 30-s band needs
-            # >= 6 buckets of the last 900 s while the tape read needs 3 prints in 15 s;
-            # the two disagree exactly at ignition). Non-leaders keep the fail-closed band.
             _sub_band = 0.0
-            dbg["substitute_band_fallback"] = "leader_no_band"
+            dbg["substitute_band_basis"] = "leader_no_band"
         _sub_ok = bool(
             _tape_positive()
             and _sub_req is not None

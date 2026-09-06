@@ -86,19 +86,27 @@ def test_v5_any_name_clears_non_structural_with_tape_and_reclaim() -> None:
     # the way to 3.53; JWEL 08-10 ml3 x1,284; WETO 08-14 x233; VTIX 07-27 x42.
     # v5b: the reclaim must clear the HWM by one of the name's own 30-s noise bands
     # (VIVS: ~0.04 at 1.6): 1.66 >= 1.61 + 0.04 with the tape lifting => allowed.
+    # v5d: the margin is ONE FULL R of the failed leg (0.09): 1.61 + 0.09 = 1.70 -> 1.66 is a
+    # touch (blocked), 1.72 is a reclaim (allowed); the noise band is only a fallback.
     allowed, dbg = reentry_escalation_decision(
         enabled=True, escalation_level=1, structural_trigger=False,
         live_price=1.66, prior_hwm=1.61, prior_exit_price=1.48,
         prior_risk_dist=0.09, tape_accel=1.0, is_day_leader=False, noise_abs=0.04,
     )
+    assert allowed is False and dbg["reason"] == "non_structural_trigger"
+    assert dbg["substitute_required"] == 1.70 and dbg["substitute_band_basis"] == "prior_risk_dist"
+    allowed, dbg = reentry_escalation_decision(
+        enabled=True, escalation_level=1, structural_trigger=False,
+        live_price=1.72, prior_hwm=1.61, prior_exit_price=1.48,
+        prior_risk_dist=0.09, tape_accel=1.0, is_day_leader=False, noise_abs=0.04,
+    )
     assert allowed is True
     assert dbg["reclaim_structural_substitute"] is True
-    assert dbg["substitute_required"] == 1.65
     assert dbg.get("leader_structural_substitute") is None  # not the leader; the ledger can tell
-    # level 2 demands one more R of proof above the HWM: 1.66 < 1.61 + 0.09 + 0.04 => blocked
+    # level 2 demands one more R of proof above the HWM: 1.72 < 1.61 + 0.09 + 0.09 => blocked
     allowed, dbg = reentry_escalation_decision(
         enabled=True, escalation_level=2, structural_trigger=False,
-        live_price=1.66, prior_hwm=1.61, prior_exit_price=1.48,
+        live_price=1.72, prior_hwm=1.61, prior_exit_price=1.48,
         prior_risk_dist=0.09, tape_accel=1.0, is_day_leader=False, noise_abs=0.04,
     )
     assert allowed is False and dbg["reason"] == "non_structural_trigger"
@@ -113,16 +121,24 @@ def test_v5b_a_touch_inside_the_noise_band_is_not_a_reclaim_and_a_missing_band_f
         prior_risk_dist=0.36, tape_accel=5000.0, is_day_leader=None, noise_abs=0.31,
     )
     assert allowed is False and dbg["reason"] == "non_structural_trigger"
-    assert dbg["substitute_required"] == 8.06 and dbg["reclaim_structural_substitute"] is False
-    # no readable band => no substitute (fail-closed, like the lockout watch)
+    assert dbg["substitute_required"] == 8.11 and dbg["reclaim_structural_substitute"] is False
+    assert dbg["substitute_band_basis"] == "prior_risk_dist"
+    # no R AND no readable band => no substitute (fail-closed, like the lockout watch)
     for bad in (None, float("nan"), -0.1, "x"):
         allowed, dbg = reentry_escalation_decision(
             enabled=True, escalation_level=1, structural_trigger=False,
             live_price=9.0, prior_hwm=7.75, prior_exit_price=7.38,
-            prior_risk_dist=0.36, tape_accel=5000.0, is_day_leader=None, noise_abs=bad,
+            prior_risk_dist=None, tape_accel=5000.0, is_day_leader=None, noise_abs=bad,
         )
         assert allowed is False and dbg["reason"] == "non_structural_trigger", bad
         assert dbg["substitute_noise_abs"] is None
+    # no R but a readable band => the band is the margin
+    allowed, dbg = reentry_escalation_decision(
+        enabled=True, escalation_level=1, structural_trigger=False,
+        live_price=8.10, prior_hwm=7.75, prior_exit_price=7.38,
+        prior_risk_dist=None, tape_accel=5000.0, is_day_leader=None, noise_abs=0.31,
+    )
+    assert allowed is True and dbg["substitute_band_basis"] == "noise_band"
     # the STRUCTURAL class never needed the substitute and is unchanged by the band
     allowed, dbg = reentry_escalation_decision(
         enabled=True, escalation_level=1, structural_trigger=True,
@@ -353,10 +369,10 @@ def test_stop_class_predicate_token_semantics() -> None:
 # leader flag is kept in the debug for the ledger only.
 
 def test_leader_substitute_clears_non_structural_with_tape_and_reclaim() -> None:
-    # required = HWM 6.90 + (level-1) x 0.05 + noise band 0.02 = 6.97 <= 6.98
+    # required = HWM 6.90 + (level-1) x 0.05 + one R 0.05 = 7.00 <= 7.01
     allowed, dbg = reentry_escalation_decision(
         enabled=True, escalation_level=2, structural_trigger=False,
-        live_price=6.98, prior_hwm=6.90, prior_exit_price=6.80,
+        live_price=7.01, prior_hwm=6.90, prior_exit_price=6.80,
         prior_risk_dist=0.05, tape_accel=1.2, is_day_leader=True, noise_abs=0.02,
     )
     assert allowed is True
@@ -367,7 +383,7 @@ def test_leader_substitute_requires_positive_tape() -> None:
     # leader + reclaim met but tape not lifting (<=0) => substitute fails => block
     allowed, dbg = reentry_escalation_decision(
         enabled=True, escalation_level=2, structural_trigger=False,
-        live_price=6.98, prior_hwm=6.90, prior_exit_price=6.80,
+        live_price=7.01, prior_hwm=6.90, prior_exit_price=6.80,
         prior_risk_dist=0.05, tape_accel=-0.3, is_day_leader=True,
     )
     assert allowed is False
@@ -403,7 +419,7 @@ def test_non_leader_clears_non_structural_with_tape_and_reclaim_v5() -> None:
     # the rank is not.) Same inputs as the leader case above, leader=False => allowed.
     allowed, dbg = reentry_escalation_decision(
         enabled=True, escalation_level=2, structural_trigger=False,
-        live_price=6.98, prior_hwm=6.90, prior_exit_price=6.80,
+        live_price=7.01, prior_hwm=6.90, prior_exit_price=6.80,
         prior_risk_dist=0.05, tape_accel=1.2, is_day_leader=False, noise_abs=0.02,
     )
     assert allowed is True
@@ -437,10 +453,10 @@ def test_leader_substitute_margin_scales_with_level() -> None:
         prior_risk_dist=0.05, tape_accel=1.2, is_day_leader=True, noise_abs=0.0,
     )
     assert allowed is False
-    # and at 7.01 it clears (a zero band: the level margin alone)
+    # and at 7.06 it clears (6.90 + 2 x 0.05 + one R 0.05 = 7.05)
     allowed2, _ = reentry_escalation_decision(
         enabled=True, escalation_level=3, structural_trigger=False,
-        live_price=7.01, prior_hwm=6.90, prior_exit_price=6.80,
+        live_price=7.06, prior_hwm=6.90, prior_exit_price=6.80,
         prior_risk_dist=0.05, tape_accel=1.2, is_day_leader=True, noise_abs=0.0,
     )
     assert allowed2 is True
@@ -567,23 +583,35 @@ def test_cadence_bail_between_stops_does_not_reset_the_pair() -> None:
     assert rapid is True
 
 
-def test_v5c_the_day_leader_keeps_its_substitute_on_a_thin_tape_band() -> None:
-    # review 2026-09-06: with no readable band the leader falls back to a zero band (the
-    # review-m2 contract), the non-leader stays fail-closed
+
+def test_v5d_the_margin_is_one_R_of_the_failed_leg_with_the_band_and_leader_as_fallbacks() -> None:
+    # VIVS 07-15 RH: R 0.105 -> 1.58 + 0.105 = 1.685: 1.66 refused (the base's x84), 1.69 granted
     allowed, dbg = reentry_escalation_decision(
-        enabled=True, escalation_level=2, structural_trigger=False,
-        live_price=6.98, prior_hwm=6.90, prior_exit_price=6.80,
-        prior_risk_dist=0.05, tape_accel=1.2, is_day_leader=True, noise_abs=None,
+        enabled=True, escalation_level=1, structural_trigger=False,
+        live_price=1.66, prior_hwm=1.58, prior_exit_price=1.44,
+        prior_risk_dist=0.105, tape_accel=11406.0, is_day_leader=None, noise_abs=None,
     )
-    assert allowed is True and dbg["substitute_band_fallback"] == "leader_no_band"
-    assert dbg["live_price"] == 6.98 and dbg["noise_abs"] is None
+    assert allowed is False and dbg["substitute_required"] == 1.685
     allowed, dbg = reentry_escalation_decision(
-        enabled=True, escalation_level=2, structural_trigger=False,
-        live_price=6.98, prior_hwm=6.90, prior_exit_price=6.80,
-        prior_risk_dist=0.05, tape_accel=1.2, is_day_leader=False, noise_abs=None,
+        enabled=True, escalation_level=1, structural_trigger=False,
+        live_price=1.69, prior_hwm=1.58, prior_exit_price=1.44,
+        prior_risk_dist=0.105, tape_accel=25973.0, is_day_leader=None, noise_abs=0.55,  # an igniting tape band
     )
-    assert allowed is False and dbg["reason"] == "non_structural_trigger"
-    assert "substitute_band_fallback" not in dbg
+    assert allowed is True and dbg["substitute_band_basis"] == "prior_risk_dist"
+    # leader with neither R nor band: zero band (review m2 contract); non-leader: fail-closed
+    allowed, dbg = reentry_escalation_decision(
+        enabled=True, escalation_level=1, structural_trigger=False,
+        live_price=1.69, prior_hwm=1.58, prior_exit_price=1.44,
+        prior_risk_dist=None, tape_accel=25973.0, is_day_leader=True, noise_abs=None,
+    )
+    assert allowed is True and dbg["substitute_band_basis"] == "leader_no_band"
+    assert dbg["live_price"] == 1.69 and dbg["noise_abs"] is None
+    allowed, dbg = reentry_escalation_decision(
+        enabled=True, escalation_level=1, structural_trigger=False,
+        live_price=1.69, prior_hwm=1.58, prior_exit_price=1.44,
+        prior_risk_dist=None, tape_accel=25973.0, is_day_leader=False, noise_abs=None,
+    )
+    assert allowed is False
 
 
 def test_v5c_the_runner_reads_the_band_only_for_non_structural_fires() -> None:
