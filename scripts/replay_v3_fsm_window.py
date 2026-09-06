@@ -774,6 +774,8 @@ _BENCH_PAYLOAD_KEYS = (
     # plus the pre-place stamp that now supplies it.
     "above_vwap", "session_vwap", "entry_above_vwap", "et_minutes_from_0700", "guard_min",
     "local_market_session",
+    # r2: the frame stamp's own key and the today-check basis
+    "entry_above_vwap_frame", "frame_last_bar_date_et", "today_et",
 )
 
 
