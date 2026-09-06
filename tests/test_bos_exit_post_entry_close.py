@@ -64,3 +64,44 @@ def test_the_live_bos_block_asks_the_guard_before_it_fetches():
     assert 0 < k < f, "the guard must run before the frame fetch"
     assert '"live_bos_exit_deferred_no_post_entry_close"' in block
     assert 'le.get("bos_exit_warmup_noted")' in block
+
+
+# ── r2 (review 2026-09-06): the CONFIRMED close is the last COMPLETED bar that ended after the fill ─
+import pandas as pd  # noqa: E402
+
+
+def _bars(t0, n, step_s, closes):
+    idx = pd.DatetimeIndex([t0 + timedelta(seconds=step_s * i) for i in range(n)])
+    return pd.DataFrame({"Close": closes}, index=idx)
+
+
+def test_r2_the_forming_bar_and_a_cached_pre_entry_frame_are_never_the_confirmed_close():
+    fill = T0  # 13:46:31Z
+    t_bar0 = datetime(2026, 8, 14, 13, 40, tzinfo=timezone.utc)
+    # 5m bars 13:40, 13:45 (ends 13:50 > fill 13:46:31) — at 13:47:31 the 13:45 bar is forming and
+    # the 13:40 bar ended BEFORE the fill => no confirmed close yet (a cached pre-entry frame)
+    df = _bars(t_bar0, 2, 300, [10.10, 10.29])
+    close, dbg = lr.bos_confirmed_close_since_entry(df, fill.isoformat(), fill + timedelta(seconds=60), "5m")
+    assert close is None and dbg["reason"] == "last_completed_bar_precedes_entry"
+    # at 13:50:01 the 13:45 bar has completed and it ended after the fill => its close is confirmed
+    close, dbg = lr.bos_confirmed_close_since_entry(df, fill.isoformat(), datetime(2026, 8, 14, 13, 50, 1, tzinfo=timezone.utc), "5m")
+    assert close == 10.29 and dbg["reason"] == "confirmed_close_since_entry"
+    # a frame with a forming third bar still reads the completed second bar, never iloc[-1]
+    df3 = _bars(t_bar0, 3, 300, [10.10, 10.29, 9.50])
+    close, dbg = lr.bos_confirmed_close_since_entry(df3, fill.isoformat(), datetime(2026, 8, 14, 13, 52, tzinfo=timezone.utc), "5m")
+    assert close == 10.29
+    # no fill stamp: fail-open to the last completed bar
+    close, dbg = lr.bos_confirmed_close_since_entry(df3, None, datetime(2026, 8, 14, 13, 52, tzinfo=timezone.utc), "5m")
+    assert close == 10.29 and dbg["reason"] == "confirmed_close_no_fill_basis"
+    assert lr.bos_confirmed_close_since_entry(pd.DataFrame(), fill.isoformat(), fill, "5m")[0] is None
+    assert lr.bos_confirmed_close_since_entry(df3, fill.isoformat(), fill, "weird")[0] is None
+
+
+def test_r2_the_live_block_reads_the_confirmed_close_and_the_flag_is_per_trade():
+    src = inspect.getsource(lr.tick_live_session)
+    i = src.find("ROSS GAP 2: LIVE CLOSE-BELOW-STRUCTURE (BOS) EXIT")
+    j = src.find('_emit(db, sess, "live_bos_exit", {', i)
+    block = src[i:j]
+    assert "bos_confirmed_close_since_entry(" in block
+    assert 'float(_bos_df["Close"].astype(float).iloc[-1])' not in block
+    assert "bos_exit_warmup_noted" in lr._RECYCLE_ENTRY_STATE_KEYS

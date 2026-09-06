@@ -3618,6 +3618,59 @@ def bos_exit_post_entry_close_ready(
     }
 
 
+def bos_confirmed_close_since_entry(
+    df: Any, entry_filled_at_utc: Any, now_aware: datetime, interval: str | None
+) -> tuple[float | None, dict[str, Any]]:
+    """r2 of the live BOS warm-up (review 2026-09-06): the clock alone is not enough in
+    LIVE — the OHLCV frame is served from a 600-s process cache with no exec-lane
+    invalidation, so a read one interval after the fill can still be the pre-entry frame.
+    The CONFIRMED close is the close of the last COMPLETED bar (bar start + interval <= now)
+    whose bar END is after the entry fill; the forming bar is never read (Ross exits on a
+    confirmed close, not an intrabar wick). Returns (close, debug); close is None when no
+    such bar exists yet (the caller then skips the BOS read this tick). Fail-open on an
+    unreadable fill stamp (the last completed bar's close, as before the warm-up)."""
+    dbg: dict[str, Any] = {"reason": None}
+    iv = _bar_interval_seconds(interval)
+    if iv is None or df is None or getattr(df, "empty", True):
+        dbg["reason"] = "no_frame_or_interval"
+        return None, dbg
+    try:
+        _now = now_aware if now_aware.tzinfo is not None else now_aware.replace(tzinfo=timezone.utc)
+        t_fill = None
+        if entry_filled_at_utc:
+            try:
+                t_fill = datetime.fromisoformat(str(entry_filled_at_utc))
+                if t_fill.tzinfo is None:
+                    t_fill = t_fill.replace(tzinfo=timezone.utc)
+            except (TypeError, ValueError):
+                t_fill = None
+        idx = df.index
+        closes = df["Close"].astype(float).tolist()
+        n = len(closes)
+        for k in range(n - 1, -1, -1):
+            ts = getattr(idx[k], "to_pydatetime", lambda: idx[k])()
+            if not isinstance(ts, datetime):
+                dbg["reason"] = "non_datetime_index"
+                return None, dbg
+            if ts.tzinfo is None:
+                ts = ts.replace(tzinfo=timezone.utc)
+            bar_end = ts + timedelta(seconds=iv)
+            if bar_end > _now:
+                continue  # still forming
+            dbg["bar_start_utc"] = ts.isoformat()
+            dbg["bar_end_utc"] = bar_end.isoformat()
+            if t_fill is not None and bar_end <= t_fill:
+                dbg["reason"] = "last_completed_bar_precedes_entry"
+                return None, dbg
+            dbg["reason"] = "confirmed_close_since_entry" if t_fill is not None else "confirmed_close_no_fill_basis"
+            return float(closes[k]), dbg
+        dbg["reason"] = "no_completed_bar"
+        return None, dbg
+    except Exception as exc:  # pragma: no cover - defensive
+        dbg["reason"] = f"unreadable:{type(exc).__name__}"
+        return None, dbg
+
+
 def _strict_alpaca_rth_entry_window(
     adapter: Any,
     sess: Any,
@@ -25707,6 +25760,7 @@ _RECYCLE_ENTRY_STATE_KEYS: tuple[str, ...] = (
     "flag_breakout_add_confirm_ofi",
     # ── stop / breach / max-loss circuit / excursion markers ──
     "structural_stop_price",
+    "bos_exit_warmup_noted",  # BOS warm-up r2: per trade, not per symbol-day
     "structural_stop_atr_pct",
     "stop_breach_pending_utc",
     "stop_breach_chop_holds",
@@ -43810,11 +43864,24 @@ def tick_live_session(
                 else:
                     _bos_df = _replay_aware_fetch_ohlcv_df(sess.symbol, interval=_bos_iv, period="5d")
                 if _bos_df is not None and not getattr(_bos_df, "empty", True):
-                    _bos_close = float(_bos_df["Close"].astype(float).iloc[-1])
+                    # r2: the confirmed close is the last COMPLETED bar that ended after the
+                    # fill — never the forming bar, never a cached pre-entry frame.
+                    _bos_close, _bos_close_dbg = bos_confirmed_close_since_entry(
+                        _bos_df, le.get("entry_filled_at_utc"), _utcnow_aware(), _bos_iv
+                    )
                     _bos_buf = float(
                         getattr(settings, "chili_momentum_bos_exit_buffer_pct", 0.003) or 0.003
                     )
-                    if _bos_fn(_bos_df, current_close=_bos_close, buffer_pct=_bos_buf):
+                    if _bos_close is None:
+                        if not le.get("bos_exit_warmup_noted"):
+                            le["bos_exit_warmup_noted"] = True
+                            _commit_le(sess, le)
+                            _emit(db, sess, "live_bos_exit_deferred_no_post_entry_close", {
+                                "reason": str(_bos_close_dbg.get("reason") or "no_confirmed_close"),
+                                "bid": float(bid),
+                                **{k: v for k, v in _bos_close_dbg.items() if k != "reason"},
+                            })
+                    elif _bos_fn(_bos_df, current_close=_bos_close, buffer_pct=_bos_buf):
                         le["last_bailout_trigger"] = "bos_exit_live"
                         _commit_le(sess, le)
                         _transition_to_bailout(db, sess)
