@@ -768,6 +768,14 @@ _BENCH_PAYLOAD_KEYS = (
     "error", "deadman_order_id", "deadman_client_order_id", "frozen_order_type",
     "superseding_order_type", "handoff_token",
     "risk_mults", "sizing", "resize_basis", "max_notional_usd", "stop_atr_pct", "stop_model",
+    # 2026-09-06: the post-stop-out RE-ENTRY gates bound at Ross's entry second on VIVS 07-15,
+    # VTIX 07-27, JWEL 08-10 ml3, WETO 08-14, RUBI 07-16, CLRO 08-06 (g4_reentry_escalation_
+    # blocked / momentum_reentry_chase_blocked) and the receipt kept only {blocked_trigger,
+    # reason}; the decision's own basis (leader? tape? reclaim level? chase ceiling?) had to be
+    # guessed from source. Carry the WHY.
+    "is_day_leader", "leader_structural_substitute", "tape_accel", "tape_back_buy_share",
+    "required_reclaim", "prior_hwm", "prior_exit_price", "prior_risk_dist", "structural_trigger",
+    "escalation_level", "live_price", "prior_anchor_hwm", "chase_ceiling", "risk_unit_atr",
 )
 
 
