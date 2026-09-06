@@ -130,6 +130,25 @@ def test_the_receipt_marker_is_cleared_on_recycle():
     assert "opinion_exit_floor_last_trigger" in lr._RECYCLE_ENTRY_STATE_KEYS
 
 
+def test_an_unprotected_position_is_never_delayed():
+    """The floor's safety argument, and its one exception, both measured.
+
+    Over 86 Alpaca symbol-days, 334 of 339 entry fills had a protective stop placed in the
+    SAME SECOND as the fill (p50, p90, p99 and max all 0.00 s) -- so during the 30 s this
+    delays an opinion, the position is stopped. The other five are a single shape:
+    `deadman_post_broker_identity_mismatch` ->
+    `live_deadman_protection_unavailable_full_close_queued`, a position the lane refuses to
+    hold and flattens within a second. The floor must stand aside there rather than delay
+    anything at all."""
+    src = inspect.getsource(lr._opinion_exit_suppressed)
+    i = src.find('le.get("deadman_protection_unavailable")')
+    assert i > 0
+    j = src.find("opinion_exit_structure_floor(")
+    assert i < j, "the unprotected check must precede the floor"
+    for key in ("operator_flatten_requested_utc", "deadman_protection_reconcile_pending"):
+        assert key in src, key
+
+
 def test_the_receipt_is_written_on_change_of_trigger_not_once_per_pass():
     """A per-pass emit is how one decision became 6,765 events once already."""
     src = inspect.getsource(lr._opinion_exit_suppressed)

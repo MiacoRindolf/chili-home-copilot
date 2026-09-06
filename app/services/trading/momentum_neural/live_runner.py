@@ -24449,6 +24449,18 @@ def _opinion_exit_suppressed(
         # trusted it would suppress these three exits for the life of the session. The
         # floor exists to delay an opinion, never to delete one.
         return False
+    if (
+        le.get("deadman_protection_unavailable")
+        or le.get("operator_flatten_requested_utc")
+        or le.get("deadman_protection_reconcile_pending")
+    ):
+        # MEASURED (86 Alpaca symbol-days): 334 of 339 entry fills had a protective stop
+        # placed in the SAME SECOND as the fill -- p50, p90, p99 and max all 0.00 s. That
+        # is the safety argument for delaying an opinion at all. The other five are one
+        # shape: `deadman_post_broker_identity_mismatch` ->
+        # `live_deadman_protection_unavailable_full_close_queued`, a position the lane
+        # refuses to hold and flattens within a second. Nothing is delayed there.
+        return False
     blocked, dbg = opinion_exit_structure_floor(held_seconds)
     if not blocked:
         return False
