@@ -795,6 +795,7 @@ _BENCH_PAYLOAD_KEYS = (
     "local_market_session",
     # r2: the frame stamp's own key and the today-check basis
     "entry_above_vwap_frame", "frame_last_bar_date_et", "today_et",
+    "breakout_level_source", "breakout_level", "breakout_level_price",
 )
 
 

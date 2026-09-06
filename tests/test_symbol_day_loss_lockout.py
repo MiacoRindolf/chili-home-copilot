@@ -378,3 +378,20 @@ def test_v4d_the_stop_helper_only_widens_and_stamps_provenance():
     le = {"structural_stop_price": 2.89, "structural_stop_source": "stale"}
     lr._apply_lockout_reentry_stop(le)
     assert le["structural_stop_price"] == 2.89 and "structural_stop_source" not in le
+
+
+def test_v4e_the_reentry_breakout_level_is_the_reclaim_stop_not_the_triggers_pullback_high():
+    # EZRA 08-03 ml2 (first v4d A/B): stop 2.75 held, but the fast bail read the trigger's
+    # pullback high (~3.0x) and bailed on the 2.89 retest of the reclaimed 2.90 level.
+    le = {"lockout_reentry_structural_stop": 2.75, "structural_stop_price": 2.89, "breakout_level_price": 3.04}
+    lr._apply_lockout_reentry_stop(le)
+    assert le["structural_stop_price"] == 2.75
+    assert le["breakout_level_price"] == 2.75 and le["breakout_level_source"] == "lockout_reclaim_level_minus_noise"
+    assert le.get("breakout_level_price_set_at_utc")  # the level's age clock is stamped like any other level
+    # a breakout level already lower than the stash is left alone; no stash leaves both untouched
+    le = {"lockout_reentry_structural_stop": 2.75, "breakout_level_price": 2.60}
+    lr._apply_lockout_reentry_stop(le)
+    assert le["breakout_level_price"] == 2.60 and "breakout_level_source" not in le
+    le = {"breakout_level_price": 3.04, "breakout_level_source": "stale"}
+    lr._apply_lockout_reentry_stop(le)
+    assert le["breakout_level_price"] == 3.04 and "breakout_level_source" not in le
