@@ -779,6 +779,14 @@ _BENCH_PAYLOAD_KEYS = (
     # v5b/v5c: the substitute's own basis
     "reclaim_structural_substitute", "substitute_required", "substitute_noise_abs", "noise_abs",
     "substitute_band_fallback",
+    # 2026-09-06: the 07:00 ET seller-unlock guard's evidence (``premarket_seller_unlock_wait``
+    # carried et_minutes_from_0700 / guard_min / entry_above_vwap and the filter dropped them;
+    # AEHL 08-31 deferred 41x and the receipt could not say whether it was silence or VWAP)
+    # plus the pre-place stamp that now supplies it.
+    "above_vwap", "session_vwap", "entry_above_vwap", "et_minutes_from_0700", "guard_min",
+    "local_market_session",
+    # r2: the frame stamp's own key and the today-check basis
+    "entry_above_vwap_frame", "frame_last_bar_date_et", "today_et",
 )
 
 
