@@ -4331,13 +4331,15 @@ def reentry_escalation_decision(
       * STRUCTURAL trigger class — the fired trigger must carry real structure
         (pullback_low; the same class set the structural-stop machinery trusts). The
         weak fallbacks (momentum_continuation / score_only) no longer qualify.
-        DAY-LEADER SUBSTITUTE (review m2): the #1 name (``is_day_leader``) must never
-        be permanently WAIT-blocked just because its entries fire via non-structural
-        (volume-confirmation) reasons. When the leader's trigger is non-structural it
-        may substitute a STRICT high-quality equivalent for the structural class:
+        RECLAIM SUBSTITUTE (review m2 for the day-leader; every name since 2026-09-06):
+        a name must never be permanently WAIT-blocked just because its entries fire via
+        non-structural (volume-confirmation) reasons. When the trigger is non-structural
+        it may substitute a STRICT high-quality equivalent for the structural class:
         readable POSITIVE tape AND an ACTUAL price reclaim above the prior failure
         (both actively satisfied — NO skip-on-missing, so this is a HIGHER bar, not a
-        hole). Non-leaders keep the strict structural requirement;
+        hole). Measured 2026-09-06 (Ross Parity Bench, gate-15 baseline): the leader-only
+        form refused Ross's own re-entry second on VIVS/VTIX/JWEL/WETO/RUBI/ILLR/VEEE
+        with the bar already met; ``is_day_leader`` is kept for the ledger;
       * STRUCTURE RECLAIM — live price must exceed the level where the LAST attempt
         FAILED: the prior trade's high-water mark (fallback: its exit price when no
         HWM was recorded), plus ``(level - 1) * prior_risk_dist`` — each successive
@@ -4444,15 +4446,27 @@ def reentry_escalation_decision(
 
     # 1) structural trigger class required at any escalation level.
     if not structural_trigger:
-        # Day-leader substitute (review m2): the leader may replace the structural
-        # class with a STRICT equivalent — readable POSITIVE tape AND an actual
-        # reclaim above the prior failure, BOTH actively satisfied (no skip). A
-        # non-leader, or a leader without that confirmation, still blocks.
+        # RECLAIM SUBSTITUTE (review m2 introduced it for the day-leader only; opened to
+        # every name 2026-09-06, Ross Parity Bench). A non-structural fire may replace
+        # the structural class with a STRICT equivalent — readable POSITIVE tape AND an
+        # actual price reclaim above the prior failure (prior HWM, + one R per extra
+        # level), BOTH actively satisfied (no skip-on-missing). MEASURED on the gate-15
+        # baseline (@ 9383324b2, per-second timelines): after a small first stop-out the
+        # binding line at Ross's own re-entry second was this branch refusing
+        # `momentum_ok_tick_stream` as `non_structural_trigger` — VIVS 07-15 x256 (stop
+        # 1.48 -> Ross 08:07:07 @2.82 -> 3.53), VTIX 07-27 x42 (Ross 09:18:45 @4.18 ->
+        # 4.62), JWEL 08-10 ml3 x1,284 (Ross 07:33:45, 4.82 -> 6.12), WETO 08-14 x233
+        # (Ross 09:44 @9.6 -> 12.95), RUBI 07-16 x54, ILLR 06-25 x62, VEEE 07-13 x58 —
+        # every one with the price ALREADY back above the failed leg's high-water mark and
+        # the tape lifting, i.e. the substitute's own bar met, refused only for not being
+        # the board's #1 (Tier-1 bench: an isolated board; live: a board of 5-30 names).
+        # "Hands off until it proves itself again" is proven by the reclaim + buyers, not
+        # by a rank. The leader flag stays in the debug for the ledger.
         _sub_ok = False
-        if is_day_leader:
-            _, _sub_req = _reclaim_required()
-            _sub_ok = bool(_tape_positive() and _sub_req is not None and _price_ge(_sub_req))
-            dbg["leader_structural_substitute"] = _sub_ok
+        _, _sub_req = _reclaim_required()
+        _sub_ok = bool(_tape_positive() and _sub_req is not None and _price_ge(_sub_req))
+        dbg["reclaim_structural_substitute"] = _sub_ok
+        dbg["leader_structural_substitute"] = _sub_ok if is_day_leader else None
         if not _sub_ok:
             dbg["reason"] = "non_structural_trigger"
             return False, dbg
