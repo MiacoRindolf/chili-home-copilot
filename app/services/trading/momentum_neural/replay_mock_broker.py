@@ -434,6 +434,14 @@ class _RestingOrder:
     fee: float = 0.0
     ack_delay_remaining: int = 0
     partial_first_fill: bool = False  # fill base_size/2 first, the remainder on the next cross
+    # PATH B replacement lineage (2026-09-06): Alpaca answers a qty PATCH by
+    # RETIRING the predecessor as ``replaced`` and resting a NEW order that
+    # points back at it. The runner's certification readers require both links
+    # plus the immutable stop envelope, so the mock must model both sides or the
+    # bench cannot exercise a partial taken under a resting deadman stop.
+    replaces: Optional[str] = None
+    replaced_by: Optional[str] = None
+    lifecycle_override: Optional[str] = None
     # STEP-2 volume-cap bookkeeping: the cumulative printed volume at-or-through this
     # order's limit that has been OBSERVED while the order was resting (advanced by the
     # driver via ``set_printed_volume`` between ticks). The order's cumulative fill is
@@ -488,9 +496,12 @@ class _RestingOrder:
                 "legs": [],
                 "extended_hours": bool(self.extended_hours),
                 "position_intent": self.position_intent,
-                "replaced_by": None,
-                "replaces": None,
+                "replaced_by": self.replaced_by,
+                "replaces": self.replaces,
             })
+            if self.lifecycle_override:
+                raw["alpaca_status"] = self.lifecycle_override
+                raw["broker_order_status_echo"] = self.lifecycle_override
         return NormalizedOrder(
             order_id=self.order_id,
             client_order_id=self.client_order_id,
@@ -1919,6 +1930,125 @@ class MockBrokerAdapter:
                 "order_type": "stop",
                 "time_in_force": "gtc",
                 "stop_price": quantized,
+                "client_order_id": cid,
+            },
+        }
+
+    def replace_order_qty(
+        self,
+        *,
+        order_id: str,
+        new_qty: str,
+        client_order_id: Optional[str] = None,
+    ) -> dict[str, Any]:
+        """The real adapter's qty PATCH (venue/alpaca_spot.py:4166), modelled on both sides.
+
+        PATH B shrinks the resting full-qty deadman from Q to R = Q - f so the f-tranche
+        becomes sellable while a stop still covers the runner. Alpaca answers a PATCH by
+        RETIRING the predecessor as ``replaced`` (with ``replaced_by``) and resting a NEW
+        order that carries ``replaces``; the runner certifies BOTH links plus the
+        immutable stop envelope before it trusts the edge, so a mock that only mutated
+        ``base_size`` in place would certify nothing and the bench would measure a
+        suppression that live does not have.
+
+        Refusals mirror the measured broker ones: a 422 while the order is not in a
+        replaceable lifecycle, and a refusal to grow or to re-split a partially filled
+        protective order (that would re-authorise shares already sold)."""
+        oid = str(order_id or "").strip()
+        ro = self._orders.get(oid)
+        try:
+            qty = float(new_qty)
+        except (TypeError, ValueError):
+            qty = float("nan")
+        cid = str(client_order_id or "").strip()
+        if ro is None:
+            return {"ok": False, "error": "order_not_found", "http_status": 404}
+        if not (
+            str(ro.status or "").lower() == "open"
+            and ro.lifecycle_override is None
+            and ro.order_type == "stop"
+            and math.isfinite(qty)
+            and qty > 0.0
+            and abs(qty - round(qty)) <= 1e-9
+        ):
+            # Alpaca 422: the order is not in a replaceable lifecycle.
+            return {
+                "ok": False,
+                "error": "order is not open",
+                "http_status": 422,
+                "submit_outcome": "broker_rejected",
+            }
+        if float(ro.filled_size or 0.0) > 1e-12:
+            return {
+                "ok": False,
+                "error": "cannot replace a partially filled protective order",
+                "http_status": 422,
+                "submit_outcome": "broker_rejected",
+            }
+        if qty > float(ro.base_size) + 1e-9:
+            return {
+                "ok": False,
+                "error": "replacement may not grow a protective order",
+                "http_status": 422,
+                "submit_outcome": "broker_rejected",
+            }
+        if not cid:
+            return {"ok": False, "error": "client_order_id required", "http_status": 422}
+        for other in self._orders.values():
+            if str(other.client_order_id or "").strip() == cid:
+                return {
+                    "ok": False,
+                    "error": "client_order_id must be unique",
+                    "http_status": 422,
+                    "submit_outcome": "broker_rejected",
+                }
+        priority_sequence = next(self._order_seq)
+        successor_id = f"{_VENUE}-{priority_sequence:08d}"
+        created_at = self._clock.replace(tzinfo=timezone.utc)
+        successor = _RestingOrder(
+            order_id=successor_id,
+            client_order_id=cid,
+            product_id=ro.product_id,
+            side=ro.side,
+            order_type=ro.order_type,
+            base_size=qty,
+            limit_price=ro.limit_price,
+            created_time=created_at.isoformat(),
+            created_at=created_at,
+            priority_sequence=priority_sequence,
+            executable_event_at=created_at,
+            status="open",
+            filled_size=0.0,
+            fill_price=None,
+            fee=0.0,
+            ack_delay_remaining=0,
+            stop_price=ro.stop_price,
+            time_in_force=ro.time_in_force,
+            position_intent=ro.position_intent,
+            extended_hours=ro.extended_hours,
+            replaces=oid,
+        )
+        # The predecessor becomes inert and points FORWARD; it is never re-armed.
+        ro.status = "canceled"
+        ro.lifecycle_override = "replaced"
+        ro.replaced_by = successor_id
+        self._orders[successor_id] = successor
+        self._maybe_cross(successor, self._quote_for(successor.product_id))
+        return {
+            "ok": True,
+            "order_id": successor_id,
+            "client_order_id": cid,
+            "status": ("new" if successor.status == "open" else successor.status),
+            "replaces": oid,
+            "stop_price": (f"{float(ro.stop_price):.2f}" if ro.stop_price is not None else None),
+            "order_request": {
+                "product_id": successor.product_id,
+                "base_size": str(new_qty),
+                "side": "sell",
+                "position_intent": "sell_to_close",
+                "order_type": "stop",
+                "time_in_force": successor.time_in_force,
+                "stop_price": (float(ro.stop_price) if ro.stop_price is not None else None),
                 "client_order_id": cid,
             },
         }
