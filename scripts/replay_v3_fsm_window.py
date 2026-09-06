@@ -768,6 +768,12 @@ _BENCH_PAYLOAD_KEYS = (
     "error", "deadman_order_id", "deadman_client_order_id", "frozen_order_type",
     "superseding_order_type", "handoff_token",
     "risk_mults", "sizing", "resize_basis", "max_notional_usd", "stop_atr_pct", "stop_model",
+    # 2026-09-06: the 07:00 ET seller-unlock guard's evidence (``premarket_seller_unlock_wait``
+    # carried et_minutes_from_0700 / guard_min / entry_above_vwap and the filter dropped them;
+    # AEHL 08-31 deferred 41x and the receipt could not say whether it was silence or VWAP)
+    # plus the pre-place stamp that now supplies it.
+    "above_vwap", "session_vwap", "entry_above_vwap", "et_minutes_from_0700", "guard_min",
+    "local_market_session",
 )
 
 
