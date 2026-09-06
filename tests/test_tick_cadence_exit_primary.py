@@ -42,3 +42,43 @@ def test_it_runs_before_the_opinion_bailouts_in_the_held_tick():
     i_mlc = src.find('"reason": "max_loss_circuit"')
     i_bw = src.find('"live_burst_window_exit"')
     assert 0 < i_mlc < i_mb and 0 < i_bw < i_mb
+
+
+# ── FRAME RECENCY (2026-09-06 review, confirmed major) ────────────────────────
+# The decision is 100% frame-shaped and the caller discards the newest row as
+# "forming"; on a lagging tape that row is a COMPLETE bar from an older bucket,
+# so without a bound the exit market-sells the whole position on stale structure.
+
+def test_the_frame_recency_bound_exists_and_fails_closed():
+    src = inspect.getsource(lr._failed_pop_break_fires)
+    i = src.find("_build_micro_bar_df")
+    j = src.find("bar_closes_opens=_co")
+    assert 0 < i < j
+    block = src[i:j]
+    assert "_frame_last_bar_age_seconds(_df, _utcnow_aware())" in block
+    assert '"chili_momentum_failed_pop_break_max_frame_age_s", 20.0' in block
+    # fail-closed: unreadable age or an age past the bound must NOT fire
+    assert "if _fpb_age is None or not math.isfinite(_fpb_age) or _fpb_age > _fpb_max_age:" in block
+    assert '"reason": "micro_frame_stale"' in block
+    assert "return False" in block[block.find("micro_frame_stale"):]
+    # and the age is on every receipt, so a fire can be triaged after the fact
+    whole = inspect.getsource(lr._failed_pop_break_fires)
+    assert 'dbg["frame_last_bar_age_s"]' in whole
+
+
+def test_the_bound_is_two_micro_buckets_by_default():
+    from app.config import Settings
+    assert Settings.model_fields["chili_momentum_failed_pop_break_max_frame_age_s"].default == 20.0
+
+
+def test_the_frame_age_helper_reads_a_lagging_frame_as_stale():
+    from datetime import datetime, timedelta, timezone
+    import pandas as pd
+    now = datetime(2026, 8, 14, 13, 46, 30, tzinfo=timezone.utc)
+    fresh = pd.DataFrame({"Close": [1.0, 1.1]}, index=pd.DatetimeIndex(
+        [now - timedelta(seconds=20), now - timedelta(seconds=10)]))
+    stale = pd.DataFrame({"Close": [1.0, 1.1]}, index=pd.DatetimeIndex(
+        [now - timedelta(seconds=45), now - timedelta(seconds=35)]))
+    assert lr._frame_last_bar_age_seconds(fresh, now) <= 20.0
+    assert lr._frame_last_bar_age_seconds(stale, now) > 20.0
+    assert lr._frame_last_bar_age_seconds(pd.DataFrame(), now) is None

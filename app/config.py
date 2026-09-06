@@ -8348,6 +8348,17 @@ class Settings(BaseSettings):
         default=True,
         validation_alias=AliasChoices("CHILI_MOMENTUM_FAILED_POP_BREAK_EXIT_ENABLED"),
     )
+    chili_momentum_failed_pop_break_max_frame_age_s: float = Field(
+        # 2026-09-06 review (confirmed major): the tick-cadence exit decides ONLY
+        # from the 10-s micro frame — it never compares the live bid — and the
+        # caller discards the newest row as "forming". On a lagging tape that row
+        # is a complete bar from an older bucket, so without this bound the exit
+        # could market-sell the whole position on 30-45 s old structure. Two
+        # buckets: the current one plus the one before it.
+        default=20.0,
+        ge=0.0,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_FAILED_POP_BREAK_MAX_FRAME_AGE_S"),
+    )
     chili_momentum_failed_pop_break_min_green_run: int = Field(
         default=2,
         ge=1,
