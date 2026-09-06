@@ -18833,6 +18833,9 @@ def _complete_confirmed_live_exit(
         # non-scaled trade trade_realized_usd is absent (0) ⇒ identical to bool(pnl<=0).
         le["g4_prior_trade"] = {
             "exit_price": float(fill_price),
+            # v4 lockout watch (2026-09-06): the failed leg's ENTRY is half of the level a
+            # post-lock re-entry must reclaim (the other half is its high-water mark).
+            "entry_price": _float_or_none(entry_price),
             "high_water_mark": _float_or_none(_exit_pos.get("high_water_mark")),
             "risk_dist": _g4_rd,
             "was_loss": bool(_whole_trade_pnl <= 0),
@@ -34733,13 +34736,17 @@ def tick_live_session(
 
             _ldw_used = int(le.get("lockout_front_side_exemptions") or 0)
             _ldw_max = int(getattr(settings, "chili_momentum_max_ignition_exemptions", 1) or 1)
-            # v3 RECLAIM BASIS (2026-09-05): the name's own session high and its own 30-s
-            # noise band; the pure decision refuses (fail-closed) when either is missing.
+            # v4 RECLAIM BASIS (2026-09-06): the FAILED LEG's level (max of its entry and its
+            # high-water mark, frozen into the watch marker at lock time) plus one of the
+            # name's own 30-s noise bands; the pure decision refuses (fail-closed) when
+            # either is missing. The session high is read for OBSERVABILITY only (the v3
+            # basis; it bought the top on WETO/EZRA and never fired on the winners).
             _ldw_last = None
             try:
                 _ldw_last = float(getattr(tick, "bid", None) or getattr(tick, "mid", None) or 0.0) or None
             except (TypeError, ValueError):
                 _ldw_last = None
+            _ldw_level = _float_or_none(_ldw.get("reclaim_level"))
             _ldw_high = _own_tape_session_high(db, sess.symbol) if _ldw_tape_ok else None
             _ldw_noise_abs = None
             if _ldw_tape_ok and _ldw_last:
@@ -34751,8 +34758,10 @@ def tick_live_session(
                 except Exception:
                     _ldw_noise_abs = None
             _ldw_reclaim = {
-                "last": _ldw_last, "session_high": _ldw_high,
+                "last": _ldw_last, "reclaim_level": _ldw_level, "session_high": _ldw_high,
                 "noise_abs": (round(_ldw_noise_abs, 6) if _ldw_noise_abs is not None else None),
+                "vs_level_pct": (round((float(_ldw_last) - float(_ldw_level)) / float(_ldw_level), 6)
+                                 if _ldw_level and _ldw_last else None),
                 "off_high_pct": (round((float(_ldw_high) - float(_ldw_last)) / float(_ldw_high), 6)
                                  if _ldw_high and _ldw_last else None),
             }
@@ -34762,7 +34771,7 @@ def tick_live_session(
                 exemptions_used=_ldw_used,
                 max_exemptions=_ldw_max,
                 last=_ldw_last,
-                session_high=_ldw_high,
+                reclaim_level=_ldw_level,
                 noise_abs=_ldw_noise_abs,
             )
             if _ldw_allowed:
@@ -48084,6 +48093,24 @@ def tick_live_session(
                         # reclaimed and ran 5.07 -> 6.12 over 11:31-11:39 (Ross +$42.1k on
                         # the day); EDBL 2026-07-27 the same shape (Ross +$33k). Ross:
                         # "hands off until it proves itself again" -- not "quit".
+                        # v4 RECLAIM LEVEL (2026-09-06, measured on the 12 lockout receipts of
+                        # the gate-15 baseline, scratchpad/lockout_reclaim_study.py): the level
+                        # a re-entry must reclaim is the FAILED LEG's own level =
+                        # max(entry price, high-water mark of that leg), NOT the session high.
+                        # The session high (v3) never triggered inside any window except WETO
+                        # 08-14 (bought the 12.95 top, -33%) and EZRA 08-03 (3.75 top, -24%);
+                        # the failed-leg level reclaimed on every Ross winner (FCUV +80 s ->
+                        # MFE +34%; WETO +155 s -> +35%; ILLR x3 -> +96..+320%; VEEE -> +29%;
+                        # EZRA ml2 -> +28%) and never on the knives (JWEL 08-10, DSY 08-07:
+                        # post-lock highs 5.45 / 6.27 vs levels 5.57 / 7.30). Missing basis
+                        # => the watch decision fails closed (no re-entry).
+                        _l13_prior = le.get("g4_prior_trade") if isinstance(le.get("g4_prior_trade"), dict) else {}
+                        _l13_leg_entry = _float_or_none(_l13_prior.get("entry_price"))
+                        _l13_leg_hwm = _float_or_none(_l13_prior.get("high_water_mark"))
+                        _l13_level = None
+                        _l13_level_parts = [x for x in (_l13_leg_entry, _l13_leg_hwm) if x is not None and x > 0.0]
+                        if _l13_level_parts:
+                            _l13_level = max(_l13_level_parts)
                         le["symbol_day_lockout_watch"] = {
                             "since_utc": _utcnow().isoformat(),
                             "bid_at_lock": _float_or_none(bid),
@@ -48092,6 +48119,9 @@ def tick_live_session(
                             "trade_cycles": int(le.get("trade_cycles") or 0),
                             "exemptions_used": _l13_fs_used,
                             "max_exemptions": _l13_fs_max,
+                            "reclaim_level": _l13_level,
+                            "leg_entry_price": _l13_leg_entry,
+                            "leg_high_water_mark": _l13_leg_hwm,
                         }
                         _commit_le(sess, le)
                         _emit(db, sess, "live_symbol_day_loss_lockout_watch", dict(le["symbol_day_lockout_watch"]))

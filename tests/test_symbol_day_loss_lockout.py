@@ -172,47 +172,70 @@ def test_watch_inactive_ay_walang_epekto():
 
 
 def test_watch_na_may_buyers_budget_at_reclaim_ay_pumapasok_isang_beses():
-    # reclaimed: last within one noise band of the session high
+    # reclaimed: last at least one noise band ABOVE the failed leg's level
     assert symbol_day_lockout_watch_reentry(
         watch_active=True, tape_ok=True, exemptions_used=0, max_exemptions=1,
-        last=6.20, session_high=6.25, noise_abs=0.245,
+        last=6.30, reclaim_level=6.00, noise_abs=0.245,
     ) == (True, "lockout_watch_front_side_exempt")
     assert symbol_day_lockout_watch_reentry(
         watch_active=True, tape_ok=True, exemptions_used=1, max_exemptions=1,
-        last=6.20, session_high=6.25, noise_abs=0.245,
+        last=6.30, reclaim_level=6.00, noise_abs=0.245,
     ) == (False, "lockout_watch_budget_spent")
+    # a touch of the level (inside the band) is not a reclaim
+    assert symbol_day_lockout_watch_reentry(
+        watch_active=True, tape_ok=True, exemptions_used=0, max_exemptions=1,
+        last=6.20, reclaim_level=6.00, noise_abs=0.245,
+    ) == (False, "lockout_watch_not_reclaimed")
 
 
-# ── v3 RECLAIM (2026-09-05, first A/B of the watch): the four measured exemptions ─────
-# Every exemption v2 granted on tape alone fired ABOVE VWAP but 14-28% BELOW the day high,
-# and every one lost. Ross: "hands off until it proves itself again" = back at the high.
-_MEASURED_V2_EXEMPTIONS = [
-    # (case, trigger, last, vwap, session_high, leg pnl)
-    ("EDBL 07-27", "sub_vwap_trap_tick", 8.14, 7.692, 9.94, -34.48),
-    ("JWEL 08-10", "abcd_break_tick_ok", 5.1158, 4.343, 6.25, -18.57),
-    ("EZRA 08-03 RH", "abcd_break_tick_ok", 3.17, 2.763, 3.68, -21.70),
-    ("EZRA 08-03 alpaca", "momentum_ok_tick_stream", 2.65, 2.661, 3.68, -25.74),
+# ── v4 RECLAIM LEVEL (2026-09-06, measured on the 12 lockout receipts of the gate-15
+# baseline @ 9383324b2; scratchpad/lockout_reclaim_study.py). The level is the FAILED
+# LEG's own max(entry, high-water mark); the session high (v3) was the wrong level.
+_MEASURED_V4_LOCKOUTS = [
+    # (case, leg entry, leg hwm, post-lock print that reclaims (or the post-lock HIGH when
+    #  it never does), Ross outcome, expected)
+    ("FCUV 07-31 RH", 7.50, 7.3604, 7.54, "winner: MFE +34% in 322 s", True),
+    ("WETO 08-14 RH", 9.50, 9.49, 9.57, "winner: MFE +35% in 717 s", True),
+    ("ILLR 06-25 ml1 RH", 0.924, 0.9159, 0.9387, "winner: MFE +320%", True),
+    ("VEEE 07-13 alpaca", 10.83, 10.94, 11.07, "winner: MFE +29% (dd -1%)", True),
+    ("EZRA 08-03 ml2 alpaca", 2.87, 2.92, 2.9397, "winner: MFE +28%", True),
+    ("JWEL 08-10 RH", 5.57, 5.20, 5.45, "knife: post-lock HIGH 5.45 < level 5.57", False),
+    ("DSY 08-07 alpaca (Ross -$52k)", 6.90, 7.30, 6.27, "knife: post-lock HIGH 6.27 < 7.30", False),
 ]
 
 
-def test_v3_refuses_every_measured_mid_range_exemption():
-    for case, trig, last, vwap, high, pnl in _MEASURED_V2_EXEMPTIONS:
-        # a generous band (4.5% of price, the JWEL 30-s median) still does not reach the high
-        noise = 0.045 * last
-        assert last > vwap * 0.99, case  # above VWAP: v2's implicit state was NOT the discriminator
-        assert symbol_day_lockout_watch_reentry(
+def test_v4_the_failed_leg_level_separates_the_winners_from_the_knives():
+    for case, entry, hwm, last, why, expected in _MEASURED_V4_LOCKOUTS:
+        level = max(entry, hwm)
+        band = 0.003 * level  # the study's margin; the live band is the name's own 30-s range
+        allowed, reason = symbol_day_lockout_watch_reentry(
             watch_active=True, tape_ok=True, exemptions_used=0, max_exemptions=1,
-            last=last, session_high=high, noise_abs=noise,
-        ) == (False, "lockout_watch_not_reclaimed"), case
+            last=last, reclaim_level=level, noise_abs=band,
+        )
+        assert allowed is expected, (case, why, reason)
+        assert reason == ("lockout_watch_front_side_exempt" if expected else "lockout_watch_not_reclaimed"), case
+
+
+def test_v4_the_session_high_would_have_bought_the_top():
+    # WETO 08-14: v3's basis (session high 12.95, reached 09:56:59) = the day's top, -33% after.
+    # The failed-leg level (9.50) had already reclaimed at 09:45:02 (+155 s), MFE +35%.
+    assert symbol_day_lockout_watch_reentry(
+        watch_active=True, tape_ok=True, exemptions_used=0, max_exemptions=1,
+        last=9.57, reclaim_level=9.50, noise_abs=0.03,
+    ) == (True, "lockout_watch_front_side_exempt")
+    assert symbol_day_lockout_watch_reentry(
+        watch_active=True, tape_ok=True, exemptions_used=0, max_exemptions=1,
+        last=9.57, reclaim_level=12.95, noise_abs=0.03,
+    ) == (False, "lockout_watch_not_reclaimed")
 
 
 def test_v3_missing_reclaim_basis_fails_closed():
-    for kw in ({"last": None, "session_high": 6.25, "noise_abs": 0.2},
-               {"last": 6.2, "session_high": None, "noise_abs": 0.2},
-               {"last": 6.2, "session_high": 6.25, "noise_abs": None},
-               {"last": float("nan"), "session_high": 6.25, "noise_abs": 0.2},
-               {"last": 6.2, "session_high": 6.25, "noise_abs": -0.1},
-               {"last": "x", "session_high": 6.25, "noise_abs": 0.2}):
+    for kw in ({"last": None, "reclaim_level": 6.25, "noise_abs": 0.2},
+               {"last": 6.2, "reclaim_level": None, "noise_abs": 0.2},
+               {"last": 6.2, "reclaim_level": 6.25, "noise_abs": None},
+               {"last": float("nan"), "reclaim_level": 6.25, "noise_abs": 0.2},
+               {"last": 6.2, "reclaim_level": 6.25, "noise_abs": -0.1},
+               {"last": "x", "reclaim_level": 6.25, "noise_abs": 0.2}):
         assert symbol_day_lockout_watch_reentry(
             watch_active=True, tape_ok=True, exemptions_used=0, max_exemptions=1, **kw
         ) == (False, "lockout_watch_no_reclaim_basis"), kw
@@ -222,15 +245,25 @@ def test_v3_missing_reclaim_basis_fails_closed():
     ) == (False, "lockout_watch_no_buyers_on_tape")
 
 
-def test_v3_gate_reads_the_session_high_and_noise_band_from_the_own_tape():
+def test_v4_gate_reads_the_frozen_leg_level_and_the_noise_band_from_the_own_tape():
     src = _tick_source()
     i = src.find('_ldw = le.get("symbol_day_lockout_watch")')
-    window = src[i:i + 3500]
-    assert "_own_tape_session_high(db, sess.symbol)" in window
+    window = src[i:i + 4200]
+    assert '_ldw_level = _float_or_none(_ldw.get("reclaim_level"))' in window
     assert "_own_tape_noise_floor_pct(db, sess.symbol, entry_price=_ldw_last)" in window
-    assert "session_high=_ldw_high" in window and "noise_abs=_ldw_noise_abs" in window
+    assert "reclaim_level=_ldw_level" in window and "noise_abs=_ldw_noise_abs" in window
+    assert "session_high=" not in window  # v3's basis is observability only now
     module_src = inspect.getsource(lr)
-    assert "def _own_tape_session_high(db, symbol: str) -> float | None:" in module_src
+    # the level is frozen into the watch marker at lock time from the failed leg's record
+    j = module_src.find('le["symbol_day_lockout_watch"] = {')
+    assert j > 0
+    marker = module_src[j - 1500:j + 900]
+    assert '_l13_leg_entry = _float_or_none(_l13_prior.get("entry_price"))' in marker
+    assert '_l13_leg_hwm = _float_or_none(_l13_prior.get("high_water_mark"))' in marker
+    assert '"reclaim_level": _l13_level,' in marker
+    # and the failed leg's record carries its entry (v4 addition next to the HWM)
+    k = module_src.find('le["g4_prior_trade"] = {')
+    assert '"entry_price": _float_or_none(entry_price),' in module_src[k:k + 600]
 
 
 def test_watch_na_walang_buyers_sa_tape_ay_naghihintay():
@@ -255,7 +288,7 @@ def test_pure_lockout_decision_ay_byte_identical_pa_rin():
 def test_ang_l13_edge_ay_nagwa_watch_kapag_may_budget_at_terminal_kapag_ubos():
     src = _tick_source()
     i_l13 = src.find("symbol_day_loss_lockout_decision(")
-    window = src[i_l13:i_l13 + 4000]
+    window = src[i_l13:i_l13 + 6500]  # v4 froze the failed-leg level into the marker (longer block)
     assert "if _l13_locked and _l13_fs_used < _l13_fs_max:" in window
     assert 'le["symbol_day_lockout_watch"]' in window
     assert "live_symbol_day_loss_lockout_watch" in window
