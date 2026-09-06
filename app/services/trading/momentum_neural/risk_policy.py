@@ -4314,6 +4314,7 @@ def reentry_escalation_decision(
     tape_accel: float | None,
     is_day_leader: bool | None = None,
     tape_back_buy_share: float | None = None,
+    noise_abs: float | None = None,
 ) -> tuple[bool, dict[str, Any]]:
     """G4 P2 — SAME-SYMBOL re-entry escalation after a stop-out (PURE, no I/O).
 
@@ -4462,10 +4463,30 @@ def reentry_escalation_decision(
         # the board's #1 (Tier-1 bench: an isolated board; live: a board of 5-30 names).
         # "Hands off until it proves itself again" is proven by the reclaim + buyers, not
         # by a rank. The leader flag stays in the debug for the ledger.
+        # v5b (2026-09-06, first v5 A/B): the reclaim must clear the prior failure by one of
+        # the name's OWN 30-s noise bands (the #1278 measurement, the same band the v4
+        # lockout watch demands) — a touch of the old high is not a reclaim. MEASURED: INLF
+        # 07-28 RH (a Ross loser) was granted at 7.93 vs HWM 7.75 (+2.3%, inside a ~4% band)
+        # and stopped at 7.52 fourteen seconds later (-27.86 on the negative control); VIVS
+        # 07-15 cleared 1.58 + band at 1.66 with the tape lifting and ran to 3.53. Missing
+        # band => fail-closed (no substitute), like the watch.
         _sub_ok = False
         _, _sub_req = _reclaim_required()
-        _sub_ok = bool(_tape_positive() and _sub_req is not None and _price_ge(_sub_req))
+        _sub_band = None
+        try:
+            if noise_abs is not None and math.isfinite(float(noise_abs)) and float(noise_abs) >= 0.0:
+                _sub_band = float(noise_abs)
+        except (TypeError, ValueError):
+            _sub_band = None
+        _sub_ok = bool(
+            _tape_positive()
+            and _sub_req is not None
+            and _sub_band is not None
+            and _price_ge(_sub_req + _sub_band)
+        )
         dbg["reclaim_structural_substitute"] = _sub_ok
+        dbg["substitute_noise_abs"] = _sub_band
+        dbg["substitute_required"] = (round(_sub_req + _sub_band, 6) if (_sub_req is not None and _sub_band is not None) else None)
         dbg["leader_structural_substitute"] = _sub_ok if is_day_leader else None
         if not _sub_ok:
             dbg["reason"] = "non_structural_trigger"

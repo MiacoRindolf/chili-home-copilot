@@ -84,21 +84,52 @@ def test_v5_any_name_clears_non_structural_with_tape_and_reclaim() -> None:
     # board's #1. Measured: VIVS 07-15 (stop 1.48, HWM 1.61) fired momentum_ok_tick_stream
     # at 1.66 with the tape lifting and was refused x256 while Ross re-entered at 2.82 on
     # the way to 3.53; JWEL 08-10 ml3 x1,284; WETO 08-14 x233; VTIX 07-27 x42.
+    # v5b: the reclaim must clear the HWM by one of the name's own 30-s noise bands
+    # (VIVS: ~0.04 at 1.6): 1.66 >= 1.61 + 0.04 with the tape lifting => allowed.
     allowed, dbg = reentry_escalation_decision(
         enabled=True, escalation_level=1, structural_trigger=False,
         live_price=1.66, prior_hwm=1.61, prior_exit_price=1.48,
-        prior_risk_dist=0.09, tape_accel=1.0, is_day_leader=False,
+        prior_risk_dist=0.09, tape_accel=1.0, is_day_leader=False, noise_abs=0.04,
     )
     assert allowed is True
     assert dbg["reclaim_structural_substitute"] is True
+    assert dbg["substitute_required"] == 1.65
     assert dbg.get("leader_structural_substitute") is None  # not the leader; the ledger can tell
-    # level 2 demands one more R of proof above the HWM: 1.66 < 1.61 + 0.09 => still blocked
+    # level 2 demands one more R of proof above the HWM: 1.66 < 1.61 + 0.09 + 0.04 => blocked
     allowed, dbg = reentry_escalation_decision(
         enabled=True, escalation_level=2, structural_trigger=False,
         live_price=1.66, prior_hwm=1.61, prior_exit_price=1.48,
-        prior_risk_dist=0.09, tape_accel=1.0, is_day_leader=False,
+        prior_risk_dist=0.09, tape_accel=1.0, is_day_leader=False, noise_abs=0.04,
     )
     assert allowed is False and dbg["reason"] == "non_structural_trigger"
+
+
+def test_v5b_a_touch_inside_the_noise_band_is_not_a_reclaim_and_a_missing_band_fails_closed() -> None:
+    # INLF 07-28 RH (a Ross loser): granted by v5 at 7.93 vs HWM 7.75 (+2.3%) inside a ~4%
+    # band, stopped at 7.52 fourteen seconds later. v5b refuses it.
+    allowed, dbg = reentry_escalation_decision(
+        enabled=True, escalation_level=1, structural_trigger=False,
+        live_price=7.93, prior_hwm=7.75, prior_exit_price=7.38,
+        prior_risk_dist=0.36, tape_accel=5000.0, is_day_leader=None, noise_abs=0.31,
+    )
+    assert allowed is False and dbg["reason"] == "non_structural_trigger"
+    assert dbg["substitute_required"] == 8.06 and dbg["reclaim_structural_substitute"] is False
+    # no readable band => no substitute (fail-closed, like the lockout watch)
+    for bad in (None, float("nan"), -0.1, "x"):
+        allowed, dbg = reentry_escalation_decision(
+            enabled=True, escalation_level=1, structural_trigger=False,
+            live_price=9.0, prior_hwm=7.75, prior_exit_price=7.38,
+            prior_risk_dist=0.36, tape_accel=5000.0, is_day_leader=None, noise_abs=bad,
+        )
+        assert allowed is False and dbg["reason"] == "non_structural_trigger", bad
+        assert dbg["substitute_noise_abs"] is None
+    # the STRUCTURAL class never needed the substitute and is unchanged by the band
+    allowed, dbg = reentry_escalation_decision(
+        enabled=True, escalation_level=1, structural_trigger=True,
+        live_price=7.93, prior_hwm=7.75, prior_exit_price=7.38,
+        prior_risk_dist=0.36, tape_accel=5000.0, is_day_leader=None, noise_abs=None,
+    )
+    assert allowed is True and dbg["reason"] == "reclaim_met"
 
 
 def test_structural_trigger_with_reclaim_and_tape_allows() -> None:
@@ -322,10 +353,11 @@ def test_stop_class_predicate_token_semantics() -> None:
 # leader flag is kept in the debug for the ledger only.
 
 def test_leader_substitute_clears_non_structural_with_tape_and_reclaim() -> None:
+    # required = HWM 6.90 + (level-1) x 0.05 + noise band 0.02 = 6.97 <= 6.98
     allowed, dbg = reentry_escalation_decision(
         enabled=True, escalation_level=2, structural_trigger=False,
         live_price=6.98, prior_hwm=6.90, prior_exit_price=6.80,
-        prior_risk_dist=0.05, tape_accel=1.2, is_day_leader=True,
+        prior_risk_dist=0.05, tape_accel=1.2, is_day_leader=True, noise_abs=0.02,
     )
     assert allowed is True
     assert dbg.get("leader_structural_substitute") is True
@@ -372,7 +404,7 @@ def test_non_leader_clears_non_structural_with_tape_and_reclaim_v5() -> None:
     allowed, dbg = reentry_escalation_decision(
         enabled=True, escalation_level=2, structural_trigger=False,
         live_price=6.98, prior_hwm=6.90, prior_exit_price=6.80,
-        prior_risk_dist=0.05, tape_accel=1.2, is_day_leader=False,
+        prior_risk_dist=0.05, tape_accel=1.2, is_day_leader=False, noise_abs=0.02,
     )
     assert allowed is True
     assert dbg["reclaim_structural_substitute"] is True
@@ -381,7 +413,7 @@ def test_non_leader_clears_non_structural_with_tape_and_reclaim_v5() -> None:
     allowed, dbg = reentry_escalation_decision(
         enabled=True, escalation_level=2, structural_trigger=False,
         live_price=6.98, prior_hwm=None, prior_exit_price=None,
-        prior_risk_dist=None, tape_accel=1.2, is_day_leader=False,
+        prior_risk_dist=None, tape_accel=1.2, is_day_leader=False, noise_abs=0.02,
     )
     assert allowed is False and dbg["reason"] == "non_structural_trigger"
 
@@ -402,14 +434,14 @@ def test_leader_substitute_margin_scales_with_level() -> None:
     allowed, dbg = reentry_escalation_decision(
         enabled=True, escalation_level=3, structural_trigger=False,
         live_price=6.98, prior_hwm=6.90, prior_exit_price=6.80,
-        prior_risk_dist=0.05, tape_accel=1.2, is_day_leader=True,
+        prior_risk_dist=0.05, tape_accel=1.2, is_day_leader=True, noise_abs=0.0,
     )
     assert allowed is False
-    # and at 7.01 it clears
+    # and at 7.01 it clears (a zero band: the level margin alone)
     allowed2, _ = reentry_escalation_decision(
         enabled=True, escalation_level=3, structural_trigger=False,
         live_price=7.01, prior_hwm=6.90, prior_exit_price=6.80,
-        prior_risk_dist=0.05, tape_accel=1.2, is_day_leader=True,
+        prior_risk_dist=0.05, tape_accel=1.2, is_day_leader=True, noise_abs=0.0,
     )
     assert allowed2 is True
 
