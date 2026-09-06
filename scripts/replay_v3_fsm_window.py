@@ -778,6 +778,18 @@ _BENCH_PAYLOAD_KEYS = (
     "is_day_leader", "leader_structural_substitute", "tape_accel", "tape_back_buy_share",
     "required_reclaim", "prior_hwm", "prior_exit_price", "prior_risk_dist", "structural_trigger",
     "escalation_level", "live_price", "prior_anchor_hwm", "chase_ceiling", "risk_unit_atr",
+    # 2026-09-06: the 07:00 ET seller-unlock guard's evidence (``premarket_seller_unlock_wait``
+    # carried et_minutes_from_0700 / guard_min / entry_above_vwap and the filter dropped them;
+    # AEHL 08-31 deferred 41x and the receipt could not say whether it was silence or VWAP)
+    # plus the pre-place stamp that now supplies it.
+    "above_vwap", "session_vwap", "entry_above_vwap", "et_minutes_from_0700", "guard_min",
+    "local_market_session",
+    # 2026-09-06 (combined post-loss re-entry branch): the lockout WATCH marker's own basis --
+    # the frozen failed-leg level and its parts -- so the receipt shows what a re-entry had to
+    # reclaim (the v4 A/B receipts showed None for every marker key).
+    "reclaim_level", "leg_entry_price", "leg_high_water_mark", "bid_at_lock", "trade_cycles",
+    "threshold_usd", "day_net_realized_usd", "exemptions_used", "max_exemptions", "vs_level_pct",
+    "off_high_pct",
 )
 
 

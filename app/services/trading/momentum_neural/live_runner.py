@@ -40780,6 +40780,53 @@ def tick_live_session(
             )
             le["entry_final_bbo"] = _final_bbo
             _commit_le(sess, le)
+        # 07:00 ET SELLER-UNLOCK GUARD EVIDENCE (2026-09-06, Ross Parity Bench). The guard
+        # inside `_strict_alpaca_rth_entry_window` (the place path below) requires POSITIVE
+        # above-VWAP evidence within ±guard_min of 07:00 ET, read from
+        # le["entry_above_vwap"] — a stamp only the trigger families whose debug carries
+        # `above_vwap` write (pullback / tape-hold / micro-pullback). Every other fire
+        # (abcd_break_tick_ok, momentum_ok_tick_stream, hod_break, ...) leaves it None and
+        # the guard deferred on SILENCE, not on evidence. MEASURED (gate-15 baseline @
+        # 9383324b2): AEHL 2026-08-31 alpaca — 41 consecutive fires 06:41–07:10 ET, every
+        # one `premarket_seller_unlock_wait`, while the name printed 6.48–6.63 above a
+        # ~6.06 VWAP (Ross bought 6.54 at 06:56:54, 7.01 four minutes later); 356 such
+        # deferrals across 5 alpaca cases. Fix: when the stamp is absent, read the SAME
+        # canonical session frame the frontside sizing tilt already uses on this tick
+        # (`_today_session_frame(_entry_df) -> front_side_state(live_price=mid)`, pure, no
+        # new fetch) and stamp the MEASURED side. A frame with no VWAP (session_vwap None)
+        # stamps nothing, so the guard still defers on genuine silence. The guard's
+        # threshold is unchanged; a fire that IS below VWAP now defers on evidence.
+        if le.get("entry_above_vwap") is None:
+            try:
+                _su_frame = _entry_df
+            except NameError:
+                _su_frame = None
+            try:
+                if _su_frame is not None and not getattr(_su_frame, "empty", True):
+                    from .entry_gates import _today_session_frame as _su_today_frame
+                    from .ross_momentum import front_side_state as _su_state_fn
+
+                    _su_state = _su_state_fn(
+                        _su_today_frame(_su_frame), live_price=_float_or_none(mid)
+                    )
+                    _su_vwap = _float_or_none(getattr(_su_state, "session_vwap", None))
+                    if _su_vwap is not None and _su_vwap > 0.0:
+                        le["entry_above_vwap"] = bool(getattr(_su_state, "above_vwap"))
+                        le["entry_above_vwap_source"] = "pre_place_session_frame"
+                        _commit_le(sess, le)
+                        _emit(db, sess, "live_entry_above_vwap_stamped_from_frame", {
+                            "above_vwap": bool(le["entry_above_vwap"]),
+                            "session_vwap": round(_su_vwap, 6),
+                            "mid": _float_or_none(mid),
+                            "source": "pre_place_session_frame",
+                        })
+            except Exception:
+                _log.warning(
+                    "[momentum_live] pre-place above-VWAP stamp from the session frame failed "
+                    "(the 07:00 guard keeps deferring on silence) symbol=%s",
+                    getattr(sess, "symbol", None),
+                    exc_info=True,
+                )
         # CHUNK 3-C — RAIL-GOVERNED PLACE: the token bucket shared with every other lane
         # rail call (places + get_order polls) bounds the rate so multi-admission cannot
         # flood / 429 the broker (the flooding risk Chunk 2 introduced by deleting the
