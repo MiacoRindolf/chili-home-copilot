@@ -24338,6 +24338,86 @@ def _bailout_dwell_confirm_holds(
         return True  # anumang error => gawi ngayon; hindi naha-harang ang exit
 
 
+#: Measured on the clean gate-15 baseline (86 Alpaca + 82 Robinhood symbol-days,
+#: scratchpad/bailout_cadence.py, 2026-09-06).  The opinion bailouts ended 189 Ross-winner
+#: legs; 138 of them (73%) fired within 30 SECONDS of the fill and carried $31,841 of the
+#: $41,575 those legs left on the table in the following 30 minutes.  The floor below is the
+#: p75 of that hold distribution -- derived from the receipts, not chosen.
+_OPINION_EXIT_MIN_HOLD_DERIVATION = (
+    "p75 of t_exit - t_fill over the 189 Ross-winner legs ended by an opinion bailout in "
+    "the clean gate-15 baseline (n=189, 2026-09-06)"
+)
+
+
+def opinion_exit_structure_floor(
+    held_seconds: Any,
+    *,
+    min_hold_seconds: float | None = None,
+) -> tuple[bool, dict[str, Any]]:
+    """May an OPINION exit fire this early?  ``(blocked, debug)``.
+
+    An opinion exit is one that decides the move has failed from a READING of the tape --
+    the breakout fast-bail, the lost-VWAP flatten, the break-of-structure exit.  It is not
+    a stop.  The measurement above says these read failure before the tape has produced
+    enough structure to read: the median such exit lands 22-25 s after the fill, two bars
+    in, on names whose first pullback is routine.
+
+    What this does NOT gate, because all three are evaluated ABOVE these blocks on every
+    tick: the structural stop, the #769 max-loss circuit, and the burst-window exit.  A
+    genuinely collapsing position still exits on the same tick it always did.  This only
+    stops an OPINION from being formed before there is anything to have an opinion about.
+
+    Fails OPEN.  An unreadable hold returns ``(False, ...)`` and the exit runs exactly as
+    it does today -- a floor that cannot be measured must never suppress an exit.
+    """
+    floor = min_hold_seconds
+    if floor is None:
+        floor = getattr(settings, "chili_momentum_opinion_exit_min_hold_seconds", 30.0)
+    try:
+        floor = float(floor)
+        held = float(held_seconds)
+    except (TypeError, ValueError):
+        return False, {"reason": "unreadable", "held_seconds": None, "min_hold_seconds": None}
+    if not (math.isfinite(floor) and math.isfinite(held)) or floor <= 0.0:
+        return False, {"reason": "unreadable", "held_seconds": None, "min_hold_seconds": None}
+    if held < 0.0:
+        return False, {"reason": "unreadable", "held_seconds": held, "min_hold_seconds": floor}
+    if held >= floor:
+        return False, {"reason": "structure_present", "held_seconds": held,
+                       "min_hold_seconds": floor}
+    return True, {"reason": "below_structure_floor", "held_seconds": held,
+                  "min_hold_seconds": floor}
+
+
+def _opinion_exit_suppressed(
+    db: Session,
+    sess: TradingAutomationSession,
+    le: dict[str, Any],
+    *,
+    trigger: str,
+    held_seconds: Any,
+) -> bool:
+    """Gate one opinion exit and record the suppression ON CHANGE, never per pass.
+
+    Per-pass emission is how a single decision became 6,765 events once already; the
+    receipt here is written the first time a given trigger is held back on a given
+    session and not again until the trigger changes.
+    """
+    blocked, dbg = opinion_exit_structure_floor(held_seconds)
+    if not blocked:
+        return False
+    if str(le.get("opinion_exit_floor_last_trigger") or "") != str(trigger):
+        le["opinion_exit_floor_last_trigger"] = str(trigger)
+        _commit_le(sess, le)
+        _emit(db, sess, "live_opinion_exit_below_structure_floor", {
+            "trigger": trigger,
+            "held_seconds": round(float(dbg["held_seconds"]), 2),
+            "min_hold_seconds": dbg["min_hold_seconds"],
+            "derivation": _OPINION_EXIT_MIN_HOLD_DERIVATION,
+        })
+    return True
+
+
 def _breakout_bailout_lock_in_seconds(*, explosive: bool) -> float:
     """Lock-in floor (seconds) for the fast-bail — BELOW which a momentary sub-level
     dip is NOT treated as a failed breakout. Master-gated: returns 0.0 (byte-identical,
@@ -42973,6 +43053,9 @@ def tick_live_session(
             _smart_hold_on
             and st == STATE_LIVE_ENTERED
             and bool(getattr(settings, "chili_momentum_breakout_bailout_enabled", True))
+            and not _opinion_exit_suppressed(
+                db, sess, le, trigger="smart_hold_fast_bail", held_seconds=held
+            )
             and le.get("breakout_level_price") is not None
             and bid is not None
         ):
@@ -43157,6 +43240,9 @@ def tick_live_session(
         elif (
             st == STATE_LIVE_ENTERED
             and bool(getattr(settings, "chili_momentum_breakout_bailout_enabled", True))
+            and not _opinion_exit_suppressed(
+                db, sess, le, trigger="breakout_failed_to_hold", held_seconds=held
+            )
             and breakout_failed_to_hold(
                 breakout_level=le.get("breakout_level_price"),
                 bid=bid,
@@ -43598,6 +43684,9 @@ def tick_live_session(
         if (
             bool(getattr(settings, "chili_momentum_lost_vwap_flatten_enabled", True))
             and st in (STATE_LIVE_ENTERED, STATE_LIVE_SCALING_OUT, STATE_LIVE_TRAILING)
+            and not _opinion_exit_suppressed(
+                db, sess, le, trigger="lost_vwap_flatten", held_seconds=held
+            )
             and bid is not None
             and math.isfinite(float(bid))
             and float(bid) > 0
@@ -43723,6 +43812,9 @@ def tick_live_session(
         if (
             bool(getattr(settings, "chili_momentum_bos_exit_live_enabled", True))
             and st in (STATE_LIVE_ENTERED, STATE_LIVE_TRAILING)
+            and not _opinion_exit_suppressed(
+                db, sess, le, trigger="bos_exit", held_seconds=held
+            )
         ):
             try:
                 from .entry_gates import bos_exit_triggered_long as _bos_fn

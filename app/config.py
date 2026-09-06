@@ -8150,6 +8150,32 @@ class Settings(BaseSettings):
         validation_alias=AliasChoices("CHILI_MOMENTUM_BREAKOUT_BAILOUT_ENABLED"),
         description="Enable the early breakout-failed fast exit for pullback_break entries.",
     )
+    # ⚠️ EXIT TIMING (behavioural). The three OPINION exits -- the breakout fast-bail,
+    # the lost-VWAP flatten and the break-of-structure exit -- may not fire until the
+    # position has been held this long. They decide the move has failed from a READING of
+    # the tape, and the reading needs tape to read.
+    #
+    # DERIVED, not chosen: the p75 of t_exit - t_fill over the 189 Ross-winner legs those
+    # exits ended in the clean gate-15 baseline (86 Alpaca + 82 Robinhood symbol-days;
+    # scratchpad/bailout_cadence.py, 2026-09-06). 138 of the 189 fired within 30 s of the
+    # fill and carried $31,841 of the $41,575 those legs left on the table over the next
+    # 30 minutes; their median hold was 22-25 s, two bars in.
+    #
+    # NOT gated by this, because all three are evaluated ABOVE those blocks on every tick:
+    # the structural stop, the #769 max-loss circuit and the burst-window exit. A
+    # genuinely collapsing position still exits on the same tick it always did. 0.0 =>
+    # byte-identical to the pre-2026-09-06 behaviour.
+    chili_momentum_opinion_exit_min_hold_seconds: float = Field(
+        default=30.0,
+        ge=0.0,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_OPINION_EXIT_MIN_HOLD_SECONDS"),
+        description=(
+            "Minimum hold (seconds) before an OPINION exit may fire. Derived: p75 of "
+            "t_exit - t_fill over the 189 Ross-winner legs the opinion bailouts ended in "
+            "the clean gate-15 baseline (n=189, 2026-09-06). Does not gate the structural "
+            "stop, the max-loss circuit or the burst-window exit."
+        ),
+    )
     chili_momentum_breakout_bailout_max_bars: float = Field(
         default=2.0,
         ge=0.0,
