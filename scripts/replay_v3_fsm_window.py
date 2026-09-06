@@ -767,6 +767,7 @@ _BENCH_PAYLOAD_KEYS = (
     # whitelisted, ``error`` was not, and the block repeated 2,590 times per case unnamed.
     "error", "deadman_order_id", "deadman_client_order_id", "frozen_order_type",
     "superseding_order_type", "handoff_token",
+    "risk_mults", "sizing", "resize_basis", "max_notional_usd", "stop_atr_pct", "stop_model",
 )
 
 

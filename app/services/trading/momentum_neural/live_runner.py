@@ -38748,7 +38748,13 @@ def tick_live_session(
             try:
                 from .breadth_regime import compute_breadth_regime
 
-                _wc_reg = compute_breadth_regime(db)
+                # HARNESS GATE 15 (2026-09-06): the regime's calendar leg (is_pre_holiday) and
+                # its board window were read at the WALL clock; a July replay run after 00:00Z
+                # on the Sunday before Labor Day sized every entry x0.85 (DFNS 07-29: 12.04 vs
+                # 10.24 shares on identical code, -75.72 / -71.47 / -64.21 on the day). The
+                # runner's replay-aware clock is the decision instant in BOTH worlds (live:
+                # wall UTC, byte-identical).
+                _wc_reg = compute_breadth_regime(db, now=_utcnow_aware())
                 if _wc_reg.is_wildcard or _wc_reg.is_pre_holiday:
                     _sym_u = str(getattr(sess, "symbol", "") or "").upper()
                     _is_dominant = bool(_wc_reg.dominant_symbol and _sym_u == str(_wc_reg.dominant_symbol).upper())
@@ -38772,6 +38778,31 @@ def tick_live_session(
             float(_base_max_loss) * _safe_mult(_streak_mult) * _safe_mult(_graduation_mult) * _safe_mult(_cushion_mult) * _safe_mult(_l2_mult) * _safe_mult(_sched_mult) * _safe_mult(_liq_mult) * _safe_mult(_meta_mult) * _safe_mult(_prior_day_mult) * _safe_mult(_overnight_mult) * _safe_mult(_fatigue_mult) * _safe_mult(_sym_fatigue_mult) * _safe_mult(_hot_cold_mult) * _safe_mult(_time_fatigue_mult) * _safe_mult(_halt_size_mult) * _safe_mult(_dip_velocity_mult) * _safe_mult(_bid_stack_tilt_mult) * _safe_mult(_catalyst_conviction_mult) * _safe_mult(_prime_window_mult) * _safe_mult(_extreme_vol_mult) * _safe_mult(_squeeze_size_mult) * _safe_mult(_kelly_conviction_mult) * _safe_mult(_frontside_mult) * _safe_mult(_daily_room_mult) * _safe_mult(_red_intraday_mult) * _safe_mult(_perf_size_mult) * _safe_mult(_day_open_ramp_mult) * _safe_mult(_wildcard_bgrade_mult),
             float(_base_max_loss) * 3.0,  # hard combined-multiplier ceiling (quant pass v2)
         )
+        # OBSERVABILITY (2026-09-06, replay determinism): the same case on the same code gave
+        # three different fill sizes (DFNS 07-29: 12.04 / 10.24 / … shares at the same instant
+        # and price) — one of these factors reads state that is not replay-determined. Record
+        # every factor with the budget so a receipt can say WHICH one moved. Pure bookkeeping.
+        try:
+            le["risk_mults"] = {
+                "base_max_loss": round(float(_base_max_loss), 4),
+                "eff_max_loss": round(float(_eff_max_loss), 4),
+                "streak": round(float(_safe_mult(_streak_mult)), 4), "graduation": round(float(_safe_mult(_graduation_mult)), 4),
+                "cushion": round(float(_safe_mult(_cushion_mult)), 4), "l2": round(float(_safe_mult(_l2_mult)), 4),
+                "sched": round(float(_safe_mult(_sched_mult)), 4), "liq": round(float(_safe_mult(_liq_mult)), 4),
+                "meta": round(float(_safe_mult(_meta_mult)), 4), "prior_day": round(float(_safe_mult(_prior_day_mult)), 4),
+                "overnight": round(float(_safe_mult(_overnight_mult)), 4), "fatigue": round(float(_safe_mult(_fatigue_mult)), 4),
+                "sym_fatigue": round(float(_safe_mult(_sym_fatigue_mult)), 4), "hot_cold": round(float(_safe_mult(_hot_cold_mult)), 4),
+                "time_fatigue": round(float(_safe_mult(_time_fatigue_mult)), 4), "halt_size": round(float(_safe_mult(_halt_size_mult)), 4),
+                "dip_velocity": round(float(_safe_mult(_dip_velocity_mult)), 4), "bid_stack_tilt": round(float(_safe_mult(_bid_stack_tilt_mult)), 4),
+                "catalyst_conviction": round(float(_safe_mult(_catalyst_conviction_mult)), 4), "prime_window": round(float(_safe_mult(_prime_window_mult)), 4),
+                "extreme_vol": round(float(_safe_mult(_extreme_vol_mult)), 4), "squeeze_size": round(float(_safe_mult(_squeeze_size_mult)), 4),
+                "kelly_conviction": round(float(_safe_mult(_kelly_conviction_mult)), 4), "frontside": round(float(_safe_mult(_frontside_mult)), 4),
+                "daily_room": round(float(_safe_mult(_daily_room_mult)), 4), "red_intraday": round(float(_safe_mult(_red_intraday_mult)), 4),
+                "perf_size": round(float(_safe_mult(_perf_size_mult)), 4), "day_open_ramp": round(float(_safe_mult(_day_open_ramp_mult)), 4),
+                "wildcard_bgrade": round(float(_safe_mult(_wildcard_bgrade_mult)), 4),
+            }
+        except Exception:
+            le["risk_mults"] = {"error": "unrecorded"}
         # PAPER-LANE FULL-SIZE (2026-07-09 operator directive): the size-DOWN stack
         # above encodes capital-preservation psychology (streak / cushion / fatigue /
         # hot-cold ...) that protects REAL money — on the PAPER lane the purpose is
@@ -40889,6 +40920,13 @@ def tick_live_session(
                 "prep": round(_pp_prep * 1000, 1) if _pp_prep is not None else None,
                 "broker_post": round(_pp_broker * 1000, 1) if _pp_broker is not None else None,
             },
+            # OBSERVABILITY (2026-09-06, replay determinism): the sizing basis travels with
+            # the submission so two receipts of the same case can be diffed factor by factor.
+            "risk_mults": le.get("risk_mults"),
+            "sizing": le.get("entry_sizing"),
+            "resize_basis": le.get("entry_resize_basis"),
+            "stop_atr_pct": le.get("entry_stop_atr_pct"),
+            "stop_model": le.get("entry_stop_model"),
         })
         if not res.get("ok"):
             # ACK-LOST / DUP-REFERENCE RECONCILE: a duplicate-id response confirms an
