@@ -8161,6 +8161,14 @@ class Settings(BaseSettings):
     # fill and carried $31,841 of the $41,575 those legs left on the table over the next
     # 30 minutes; their median hold was 22-25 s, two bars in.
     #
+    # WHAT THAT NUMBER IS NOT. "Left on the table" is measured per LEG and does not
+    # subtract what the NEXT leg recaptured after the bail. On VEEE 07-13 the baseline took
+    # 11 legs for +$81.15 while the arm that removed these exits outright took 2 for
+    # -$29.89: the fast exit was feeding a profitable re-entry cycle. $41,575 says where
+    # the dollars ARE; it does not promise this floor recovers them, and only the A/B
+    # decides that. Deleting these exits is already measured as wrong, which is exactly
+    # why this delays them instead.
+    #
     # NOT gated by this, because all three are evaluated ABOVE those blocks on every tick:
     # the structural stop, the #769 max-loss circuit and the burst-window exit. A
     # genuinely collapsing position still exits on the same tick it always did. 0.0 =>

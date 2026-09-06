@@ -21,6 +21,14 @@ back. What separates them is not the rule, it is WHEN the rule is allowed to spe
 completed bars into a small-cap breakout, any routine pullback satisfies "a red bar broke
 the prior low".
 
+CAVEAT, stated because the doctrine forbids an aggregate claim without the per-case
+timeline: "left on the table" is measured per LEG and does not subtract what the NEXT leg
+recaptured after the bail. On VEEE 07-13 the baseline took 11 legs for +$81.15 while the arm
+that removed these exits outright took 2 for -$29.89 -- the fast exit was feeding a
+profitable re-entry cycle. $41,575 says where the dollars are; it does not promise a fix
+recovers them. Deleting these exits is already measured as WRONG (the diet arm: -$119.91
+across two winners, -$45.94 across seven losers), which is precisely why this delays them.
+
 Hence a floor, derived from that hold distribution rather than chosen: below it, the three
 opinion exits may not fire. The structural stop, the #769 max-loss circuit and the
 burst-window exit are evaluated ABOVE those blocks on every tick and are deliberately NOT
