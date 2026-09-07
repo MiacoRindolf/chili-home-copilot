@@ -178,3 +178,40 @@ def test_the_driver_and_the_invariant_agree_on_the_flag_list():
         if n.strip().startswith('"')
     }
     assert driver_flags == set(inv.DEPTH_DEPENDENT_FLAGS)
+
+
+# ── 4. the A/B counterfactual was measuring current_stop against itself ──────
+
+def test_the_ask_side_counterfactual_is_the_ratchet_floor_not_the_current_stop():
+    """MEASURED on AEHL 2026-08-31 with a real book: at 1.25R the lock proposes 90 bps
+    below the high while `breakeven_floor` already sits at 76.7 bps, so the lock adds
+    nothing there -- yet the old field, hard-wired to `current_stop`, would have credited
+    it with breakeven's gain. And the band-only stop is not independent information at
+    all: production passes `current_band_bps = (hwm - stop_px)/hwm * 10000`, so
+    `hwm * (1 - band_bps/10000)` is IDENTICALLY `stop_px`."""
+    from app.services.trading.momentum_neural.paper_execution import ask_side_pressure_lock
+
+    common = dict(high_water_mark=7.0, entry_price=6.0, bid=6.8, atr_pct=0.0103,
+                  stop_atr_mult=1.0, reward_risk=2.5, current_band_bps=200.0,
+                  ladder=None, side_long=True)
+    assert ask_side_pressure_lock(current_stop=6.5, breakeven_floor=6.62,
+                                  **common)["counterfactual_band_stop"] == 6.62
+    assert ask_side_pressure_lock(current_stop=6.7, breakeven_floor=6.1,
+                                  **common)["counterfactual_band_stop"] == 6.7
+    # unreadable breakeven must not poison the field
+    assert ask_side_pressure_lock(current_stop=6.5, breakeven_floor=float("nan"),
+                                  **common)["counterfactual_band_stop"] == 6.5
+
+
+def test_the_v1_lock_records_whether_it_could_see_a_book():
+    """v1 has NO data-quality gate: it arms on ANY tick past the profit arm -- 597 of 599
+    on AEHL 08-31 -- and then silently declines to fire when the book is not there. Across
+    the replay baseline that produced 10,346 rows with trigger=None, every one blind and
+    every one recorded as though the lever had been measured."""
+    from app.services.trading.momentum_neural import live_runner as lr
+
+    src = inspect.getsource(lr.tick_live_session)
+    i = src.index('_emit(db, sess, "live_ofi_exhaustion_lock"')
+    j = src.index("})", i)
+    payload = src[i:j]
+    assert '"book_seen": bool(_ofi_x is not None and _mpe_x is not None)' in payload

@@ -2505,6 +2505,12 @@ def ofi_exhaustion_lock(
 
     # ---- counterfactual: fixed-R:R baseline stop this tick (lock OFF) ----
     # = exactly what the cushion band would have left as the floor (no lock).
+    # ⚠️ `cf_band` carries NO independent information under the production caller
+    # (2026-09-07): live_runner.py:44539 passes `band_bps = (hwm - stop_px)/hwm * 10000`,
+    # so `hwm * (1 - band_bps/10000)` is IDENTICALLY `stop_px` = `cs`. The value below is
+    # therefore `max(cs, be)` in production -- which IS the honest baseline, so this line
+    # is correct by accident rather than by construction. Kept, and named, so a future
+    # caller passing a genuinely different band still gets the right answer.
     cf_band = hwm * (1.0 - max(0.0, band_bps) / 10_000.0) if math.isfinite(band_bps) else cs
     out["counterfactual_fixed_stop"] = max(cs, be, cf_band) if math.isfinite(cf_band) else max(cs, be)
 
@@ -3623,9 +3629,31 @@ def ask_side_pressure_lock(
         "lock_bps": None,
         "ask_build": None,
         "bid_refill": None,
-        "counterfactual_band_stop": current_stop,  # band-only stop, lock OFF
+        # ⚠️ MEASURED DEGENERATE, THEN FIXED (2026-09-07). This was `current_stop` and was
+        # never reassigned, so the A/B field compared the lock against the CURRENT STOP
+        # rather than against what the position would have held without it. Two things make
+        # that wrong, and the second is the subtle one:
+        #   * it omits `breakeven_floor`, which the real `new_stop_floor` takes a max() with
+        #     -- so any tick where breakeven was the binding floor credited the LOCK for a
+        #     gain that breakeven produced. Measured on AEHL 08-31: at 1.25R the lock
+        #     proposes 90 bps below the high while breakeven already sits at 76.7 bps, so
+        #     the lock contributes nothing there and the old field would have shown a win.
+        #   * the band-only stop is not independent information at all. Production passes
+        #     `current_band_bps = (hwm - stop_px)/hwm * 10000` (live_runner.py:44950, and
+        #     identically at :44539 for v1), so `hwm * (1 - band_bps/10000)` is IDENTICALLY
+        #     `stop_px`. A counterfactual built from the band measures current_stop against
+        #     itself.
+        # The honest baseline is what the position holds with the lock OFF: the ratchet
+        # floor. Assigned below once `breakeven_floor` has been read.
+        "counterfactual_band_stop": current_stop,
         "reason": None,
     }
+    try:
+        _cf = max(float(current_stop), float(breakeven_floor))
+        if _cf == _cf:  # not NaN
+            out["counterfactual_band_stop"] = _cf
+    except (TypeError, ValueError):
+        pass
     if not side_long:
         out["reason"] = "not_long"
         return out

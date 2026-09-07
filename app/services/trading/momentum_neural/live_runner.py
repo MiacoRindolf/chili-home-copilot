@@ -44567,6 +44567,20 @@ def tick_live_session(
                             "red_vol_ratio": le.get("exit_candle1m_red_vol_ratio"),
                             "bid": bid,
                             "high_water_mark": _hwm_trail,
+                            # ⚠️ v1 HAS NO DATA-QUALITY GATE (2026-09-07). Unlike the v3
+                            # ask-side lock, which refuses to arm on a thin/stale book, this
+                            # one arms on ANY tick past the profit arm -- measured 597 of 599
+                            # on AEHL 08-31 -- and then silently declines to fire when the
+                            # book is not there. Across the replay baseline that produced
+                            # 10,346 `live_ofi_exhaustion_lock` rows with trigger=None, every
+                            # one of them blind, every one recorded as though the lever had
+                            # been measured and had done nothing. Carry the book's own state
+                            # on the row so a reader can tell the two apart without changing
+                            # what the lock decides.
+                            # v1 reads the book only through `ofi` / `micro_edge`; both are
+                            # None when there is no book, so this is the honest indicator
+                            # available at this site without changing what the lock reads.
+                            "book_seen": bool(_ofi_x is not None and _mpe_x is not None),
                         })
                     # Action A: ratchet-only stop write (belt-and-suspenders > guard).
                     # G4 C1/C2: FLOW-CONFIRMED lock (OFI exhaustion confluence) — writes
