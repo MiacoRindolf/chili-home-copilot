@@ -25697,6 +25697,11 @@ _RECYCLE_ENTRY_STATE_KEYS: tuple[str, ...] = (
     "flow_veto_latched",
     "flow_veto_clear_since",
     "frontside_size_tilt",
+    # L14 post-bailout maker-reentry EPISODE anchor (2026-09-07) — the first bid the episode
+    # posted at. It belongs to the trade that just closed; a recycled watcher that inherits it
+    # would refuse a legitimate first post on the NEXT leg.
+    "bailout_maker_anchor_bid",
+    "bailout_maker_anchor_at_utc",
     # ── entry submit / sizing / pricing context ──
     "entry_submit_utc",
     "entry_client_order_id",
@@ -39696,9 +39701,30 @@ def tick_live_session(
         # nagbabayad ng spread bawat attempt, habang ang time-spacing ay
         # napatunayang winner-killer (panalo median gap 4s). Fill = mas murang
         # pullback entry; non-fill = missed-not-chased (umiiral na ack-timeout/
-        # rest-bars cancel; WALANG repeg anchor kaya hindi ito hahabulin
-        # pataas). Ang pure decision ay bailout_maker_reentry_decision
+        # rest-bars cancel). Ang pure decision ay bailout_maker_reentry_decision
         # (risk_policy) — fail-toward-legacy marketable sa anumang sirang input.
+        #
+        # ⚠️ ANG LUMANG TALA DITO AY NAGSABI NG "WALANG repeg anchor kaya hindi
+        # ito hahabulin pataas". MALI IYON, at sinukat (2026-09-07, Ross Parity
+        # Bench, 13k/3% canon). Totoo na walang repeg SA LOOB ng isang order —
+        # pero ang bawat BAGONG pagputok ay nagpo-post sa `float(bid)` NGAYON,
+        # kaya ang hagdan ay umaakyat sa pagitan ng mga order: ack-timeout →
+        # muling pagputok sa mas mataas na bid → ulit. Sa 17/17 na hindi napunan
+        # ang bid sa timeout ay MAS MATAAS kaysa sa pinag-post-an (+$0.01..0.04),
+        # at ang buong reason ay `entry_limit_left_behind`. Nabibili nito ang
+        # tuktok ng sarili nitong hagdan: VEEE 8.12 → 8.24 → 8.32 (napunan sa
+        # 8.32 gayong 8.16 ang babayaran ng pagtawid sa unang atake, −$57.12);
+        # PPBT 09-02 2.13 → 2.14 → 2.15, at dahil muling sinusukat ng bawat
+        # atake ang TUMATAAS na ATR, lumalapad ang stop at lumiliit ang share sa
+        # nakapirming risk (2369 → 2053 → 1811) — −$301.51 sa isang leg, na
+        # siyang BUONG regression ng kaso.
+        #
+        # ANG ANCHOR: isang episode = isang post price. Kapag ang bid ay lumampas
+        # sa unang nakita ng episode, ang PULLBACK na hinihintay ay hindi dumating
+        # — kaya bumabalik ito sa marketable (ang sariling dokumentadong
+        # fail-toward-legacy ng function), sa halip na sundan pataas. Walang bagong
+        # konstante: ang anchor ay ang unang bid mismo, at ang episode ay
+        # natatapos kasama ng bailout window.
         _bailout_maker = False
         if (
             not _maker_entry
@@ -39719,9 +39745,22 @@ def tick_live_session(
                 ),
             )
             if _bailout_maker:
+                # EPISODE ANCHOR — see the block comment above. The first firing sets it;
+                # a later firing may not post ABOVE it. Fail-open: an unreadable anchor
+                # leaves the pre-2026-09-07 behaviour exactly as it was.
+                _bm_anchor = _float_or_none(le.get("bailout_maker_anchor_bid"))
+                if _bm_anchor is None or not (_bm_anchor > 0):
+                    le["bailout_maker_anchor_bid"] = float(bid)
+                    le["bailout_maker_anchor_at_utc"] = _utcnow().isoformat()
+                    _bm_anchor = float(bid)
+                elif float(bid) > _bm_anchor:
+                    _bailout_maker = False
+                    _bm_reason = "bid_above_episode_anchor"
                 _emit(db, sess, "live_entry_bailout_maker_reentry", {
                     "reason": _bm_reason,
                     "bid": float(bid),
+                    "anchor_bid": _bm_anchor,
+                    "posted": bool(_bailout_maker),
                     "guarded_ask": guarded_ask,
                     "last_exit_reason": le.get("last_exit_reason"),
                     "last_exit_return_bps": _float_or_none(le.get("last_exit_return_bps")),
