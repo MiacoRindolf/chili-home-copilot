@@ -78,14 +78,59 @@ def test_structural_trigger_with_reclaim_and_tape_allows() -> None:
     assert dbg["reason"] == "reclaim_met"
 
 
-def test_reclaim_not_met_blocks() -> None:
+def test_reclaim_not_met_blocks_without_live_structure_and_tape() -> None:
+    """Below the reclaim bar, a structural trigger ALONE is not enough: the tape must be
+    live too. (A missing structural trigger short-circuits earlier as
+    `non_structural_trigger` and never reaches the reclaim check.)"""
+    blocked, dbg2 = reentry_escalation_decision(
+        enabled=True, escalation_level=1, structural_trigger=True,
+        live_price=10.2, prior_hwm=10.5, prior_exit_price=10.0,
+        prior_risk_dist=0.3, tape_accel=-5000.0,
+    )
+    assert blocked is False
+    assert dbg2["reason"] == "reclaim_not_met"
+
+
+def test_the_first_reentry_may_prove_itself_on_the_new_structure(monkeypatch) -> None:
+    """THE BYPASS IS NO LONGER LEADER-ONLY (2026-09-07).
+
+    Its own paragraph makes the argument -- on JEM 06-30 the structural trigger fired at
+    3.57-3.61 with tape accel +75k..+110k while this gate demanded 3.82, and by the time
+    the vertical crossed 3.82 the anti-chase cap owned the block; the re-entry window was
+    1-2 seconds wide and the day's biggest winner was forfeited. The comment ends "Ross
+    re-enters on the NEW structure's break, not the old failure's price" -- and that
+    argument never once mentions the leader board.
+
+    Measured: `is_day_leader` was satisfied on NONE of the 158 baseline replays, so the
+    branch was dead. The sibling leader gate in this same function was generalised earlier
+    and returned +$424.79 on Ross winners with $0.00 and zero worsened across nine loser
+    cases.
+
+    Scoped to escalation level 1, where the margin ladder `(level - 1) * R` is ZERO. At
+    level 2+ the accumulated margin IS the record of repeated failure and still binds --
+    `test_margin_scales_with_consecutive_stops` pins that and is unchanged.
+    """
     allowed, dbg = reentry_escalation_decision(
         enabled=True, escalation_level=1, structural_trigger=True,
         live_price=10.2, prior_hwm=10.5, prior_exit_price=10.0,
         prior_risk_dist=0.3, tape_accel=1.0,
     )
-    assert allowed is False
-    assert dbg["reason"] == "reclaim_not_met"
+    assert allowed is True
+    assert dbg["reason"] == "leader_ignition_bypass"
+    assert dbg["bypass_basis"] == "structural_tape_any_name"
+
+
+def test_the_bypass_does_not_reach_past_the_first_failure() -> None:
+    """Level 2+ keeps the full price bar. The same story -- structure broke, tape is
+    positive -- is what it looked like the previous times too."""
+    for level in (2, 3, 4):
+        blocked, dbg = reentry_escalation_decision(
+            enabled=True, escalation_level=level, structural_trigger=True,
+            live_price=10.2, prior_hwm=10.5, prior_exit_price=10.0,
+            prior_risk_dist=0.3, tape_accel=1.0,
+        )
+        assert blocked is False, level
+        assert dbg["reason"] == "reclaim_not_met", level
 
 
 def test_margin_scales_with_consecutive_stops() -> None:

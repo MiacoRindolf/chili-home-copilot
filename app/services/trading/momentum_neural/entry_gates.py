@@ -2563,6 +2563,27 @@ def _l2_entry_veto(
         #     False ⇒ every existing caller is byte-identical.
         try:
             floor = float(getattr(settings, "chili_momentum_entry_l2_bigseller_pctile_floor", 0.15))
+            # ⚠️ CLAMPED TO WHAT THE READER CAN EXPRESS (2026-09-07).
+            # `depth_imbal_pctile` is computed at pipeline.py:1249-1251 as
+            # `count(v <= imb_now) / len(window)`, and `imb_now` is itself in that
+            # window -- so the count is at least 1 and the SMALLEST value the reader can
+            # ever return is `1 / len(window)`. With the live K=6 window that is 0.1667.
+            # The default floor of 0.15 sits BELOW it, so `pct <= floor` was arithmetically
+            # unsatisfiable: this veto could never fire on any book, at any window size,
+            # for any symbol.
+            #
+            # Clamping up to `1/n_snaps` makes the number mean what its description says --
+            # "at/below which the NEWEST book is a big resting ASK wall", i.e. the lowest
+            # bucket of its own window -- and it is DERIVED from the window rather than
+            # typed, so it stays correct if K ever changes. A floor deliberately set above
+            # 1/K is untouched.
+            _l2_k = getattr(lr, "n_snaps", None)
+            try:
+                _l2_k = int(_l2_k or 0)
+            except (TypeError, ValueError):
+                _l2_k = 0
+            if _l2_k > 0:
+                floor = max(floor, 1.0 / float(_l2_k))
         except (TypeError, ValueError):
             floor = 0.15
         pct = getattr(lr, "depth_imbal_pctile", None)

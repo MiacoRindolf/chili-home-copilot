@@ -4485,8 +4485,36 @@ def reentry_escalation_decision(
             # triggers, and weak tape keep the full price-reclaim bar (the
             # CLRO-07-02 loss-chase class this gate exists for), and the anti-chase
             # cap + adaptive cooldown + per-name loss caps all still apply.
-            if is_day_leader and structural_trigger and _tape_positive():
+            # ⚠️ `is_day_leader` REMOVED FROM THE CONJUNCTION (2026-09-07).
+            # Being the day's #1 name by dollar volume is a fact about the MARKET; it is
+            # not evidence about whether THIS name's structure broke. The paragraph above
+            # makes the argument itself -- "the structural break itself is the reclaim
+            # proof" -- and that argument never once mentions the leader board.
+            #
+            # This is the SAME defect the G4 substitute carried, in its sibling branch,
+            # and that one has already been measured: generalising it from the leader to
+            # every name returned +$424.79 on Ross winners with $0.00 and zero worsened on
+            # nine loser cases (13 paired cases). Here the bypass never fired at all --
+            # `is_day_leader` was satisfied on none of the 158 baseline replays.
+            #
+            # The two conjuncts that ARE evidence are kept, and both are about this name:
+            # a STRUCTURAL trigger (the new base broke) and actively POSITIVE tape.
+            # `bypass_basis` names which one carried it so a grant can be triaged after
+            # the fact, exactly as `substitute_band_basis` does for the sibling.
+            # SCOPED TO THE FIRST RE-ENTRY. The margin ladder is `(level - 1) * R` -- at
+            # level 1 it is ZERO, so the bar there is just the prior high-water mark and
+            # "the new structure broke" is a fair substitute for it. At level 2+ the
+            # accumulated margin IS the record of repeated failure, and the same story
+            # ("structure broke, tape is positive") is what it looked like the previous
+            # times too. Two tests already pin that and they are right: the ladder must
+            # keep binding. This bypass does not touch it.
+            # ⚠️ WIDENS RE-ENTRY at level 1 -- arm-ready, not ship-ready. Needs an A/B on
+            # winners AND losers before it merges.
+            if int(escalation_level or 0) <= 1 and structural_trigger and _tape_positive():
                 dbg["reason"] = "leader_ignition_bypass"
+                dbg["bypass_basis"] = (
+                    "day_leader" if is_day_leader else "structural_tape_any_name"
+                )
             else:
                 dbg["reason"] = "reclaim_not_met"
                 return False, dbg

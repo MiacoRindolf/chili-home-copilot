@@ -44154,7 +44154,25 @@ def tick_live_session(
 
                     _sf_age = None
                     try:
-                        _sf_opened = _parse_dt(pos.get("opened_at_utc"))
+                        # ⚠️ WAS `_parse_dt(...)` -- A NAME THAT DOES NOT EXIST (2026-09-07).
+                        # The string `_parse_dt` occurred exactly ONCE in this 48k-line
+                        # module: at this call site. No import, no def. The NameError was
+                        # swallowed by the `except` below, so `leg_age_seconds` reached
+                        # `monster_structure_floor_candidate` as None and it returned
+                        # `leg_age_unknown` before evaluating anything -- 143 rejects
+                        # across 143 cases, ZERO candidates, on EVERY corpus. Not inert:
+                        # broken, and data-independently so.
+                        #
+                        # Parsed with the same idiom this function already uses for the
+                        # same field at :42701, so the two cannot drift.
+                        _sf_opened_raw = pos.get("opened_at_utc")
+                        _sf_opened = (
+                            datetime.fromisoformat(
+                                str(_sf_opened_raw).replace("Z", "+00:00")
+                            )
+                            if _sf_opened_raw
+                            else None
+                        )
                         if _sf_opened is not None:
                             _sf_o = (
                                 _sf_opened if _sf_opened.tzinfo is not None

@@ -466,8 +466,14 @@ def _stub_ladder(monkeypatch, lr: LadderRead):
 def test_gate3_big_seller_wall_vetoes(monkeypatch):
     _force_defaults(monkeypatch)
     monkeypatch.setattr(settings, "chili_momentum_entry_l2_veto_enabled", True)
-    # ask-heavy book: depth_imbal_pctile BELOW the 0.15 floor.
-    lr = LadderRead(depth_imbal=-0.6, depth_imbal_pctile=0.05, ofi=0.0, micro_edge=1.0,
+    # ask-heavy book, at the LOWEST percentile the reader can actually return.
+    # ⚠️ This fixture used to pass a pctile of 0.05 with n_snaps=6 -- a value the real
+    # reader can NEVER produce. pipeline.py:1249-1251 computes it as
+    # count(v <= now)/len(window) with `now` inside the window, so the minimum is
+    # 1/n_snaps = 0.1667. The test proved the veto worked on a book that cannot exist,
+    # which is exactly why a default floor of 0.15 -- BELOW that minimum, therefore
+    # unsatisfiable -- survived review (2026-09-07).
+    lr = LadderRead(depth_imbal=-0.6, depth_imbal_pctile=1.0 / 6.0, ofi=0.0, micro_edge=1.0,
                     bid_refill=None, ask_build=0.5, spread_bps=8.0, snapshot_age_s=1.0, n_snaps=6)
     _stub_ladder(monkeypatch, lr)
     res = _l2_entry_veto("BTC-USD", db=_StubDB())
@@ -538,7 +544,7 @@ def test_gate3_blank_symbol_fails_open(monkeypatch):
 def test_gate3_vetoes_in_first_pullback(monkeypatch):
     _force_defaults(monkeypatch)
     monkeypatch.setattr(settings, "chili_momentum_entry_l2_veto_enabled", True)
-    lr = LadderRead(depth_imbal=-0.6, depth_imbal_pctile=0.05, ofi=0.0, micro_edge=1.0,
+    lr = LadderRead(depth_imbal=-0.6, depth_imbal_pctile=1.0 / 6.0, ofi=0.0, micro_edge=1.0,
                     bid_refill=None, ask_build=0.5, spread_bps=8.0, snapshot_age_s=1.0, n_snaps=6)
     _stub_ladder(monkeypatch, lr)
     df = _explosive_first_pullback_df()

@@ -11669,7 +11669,7 @@ class Settings(BaseSettings):
         ge=0.0,
         le=1.0,
         validation_alias=AliasChoices("CHILI_MOMENTUM_BIG_BUYER_BID_PCTILE_CEILING"),
-        description="GAP 5: depth-imbalance percentile at/ABOVE which the NEWEST book is treated as a big resting BID wall (accumulation trend) → permit/confirm the dip-buy starter. Self-relative to the symbol's own recent window (mirror of chili_momentum_entry_l2_bigseller_pctile_floor). Only consulted when chili_momentum_big_buyer_bid_starter_enabled is on.",
+        description="GAP 5: depth-imbalance percentile at/ABOVE which the NEWEST book is treated as a big resting BID wall (accumulation trend) → permit/confirm the dip-buy starter. Self-relative to the symbol's own recent window (mirror of chili_momentum_entry_l2_bigseller_pctile_floor). Only consulted when chili_momentum_big_buyer_bid_starter_enabled is on. ⚠️ QUANTISATION (2026-09-07): the reader returns count(v <= now)/len(window), so with the live K=6 window it can only take the values 1/6, 2/6 … 6/6. This ceiling therefore reads as 'top 15%' but means 'strictly the highest of the window' — satisfiable, unlike its sibling floor which at 0.15 was not, but stricter than it looks. Set it to 5/6 = 0.8333 to mean 'the top bucket'.",
     )
     chili_momentum_big_buyer_bid_max_spread_bps: float = Field(
         default=80.0,
