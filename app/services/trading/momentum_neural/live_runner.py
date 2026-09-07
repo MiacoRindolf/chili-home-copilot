@@ -25685,6 +25685,8 @@ _RECYCLE_ENTRY_STATE_KEYS: tuple[str, ...] = (
     "g4_leader_is",
     "g4_hl5m_val",
     "g4_vwap5m_val",
+    # the level-2 blind marker: per-trade, so the next leg re-reports
+    "asp_blind_reason",
 )
 # Deliberately NOT reset on trade recycle: ``benched_backside_hod`` and
 # ``benched_backside_session_date_et`` describe the symbol's session phase,
@@ -44565,6 +44567,20 @@ def tick_live_session(
                             "red_vol_ratio": le.get("exit_candle1m_red_vol_ratio"),
                             "bid": bid,
                             "high_water_mark": _hwm_trail,
+                            # ⚠️ v1 HAS NO DATA-QUALITY GATE (2026-09-07). Unlike the v3
+                            # ask-side lock, which refuses to arm on a thin/stale book, this
+                            # one arms on ANY tick past the profit arm -- measured 597 of 599
+                            # on AEHL 08-31 -- and then silently declines to fire when the
+                            # book is not there. Across the replay baseline that produced
+                            # 10,346 `live_ofi_exhaustion_lock` rows with trigger=None, every
+                            # one of them blind, every one recorded as though the lever had
+                            # been measured and had done nothing. Carry the book's own state
+                            # on the row so a reader can tell the two apart without changing
+                            # what the lock decides.
+                            # v1 reads the book only through `ofi` / `micro_edge`; both are
+                            # None when there is no book, so this is the honest indicator
+                            # available at this site without changing what the lock reads.
+                            "book_seen": bool(_ofi_x is not None and _mpe_x is not None),
                         })
                     # Action A: ratchet-only stop write (belt-and-suspenders > guard).
                     # G4 C1/C2: FLOW-CONFIRMED lock (OFI exhaustion confluence) — writes
@@ -44965,6 +44981,27 @@ def tick_live_session(
                             "counterfactual_band_stop": _asp.get("counterfactual_band_stop"),
                             "bid": bid,
                             "high_water_mark": _hwm_trail,
+                        })
+                    elif str(_asp.get("reason") or "") and str(
+                        _asp.get("reason")
+                    ) != str(le.get("asp_blind_reason") or ""):
+                        # BLIND IS NOT SILENT (2026-09-07). `ask_side_pressure_lock` returns
+                        # `stale_or_thin` BEFORE it ever sets ``armed``, and the telemetry
+                        # above is gated on ``armed`` -- so across the whole 180-receipt
+                        # baseline this mechanism, which is the literal Ross level-2 read
+                        # ("fixated on the level 2, specifically the ask price"), emitted
+                        # ZERO rows. A zero meaning "there was no book" is indistinguishable
+                        # from a zero meaning "we measured it and it did nothing", and the
+                        # second reading is what got recorded.
+                        #
+                        # ON CHANGE OF REASON ONLY. Per-pass emission is how a single
+                        # decision became 6,765 events once already.
+                        le["asp_blind_reason"] = str(_asp.get("reason") or "")
+                        _commit_le(sess, le)
+                        _emit(db, sess, "live_ask_side_pressure_blind", {
+                            "reason": _asp.get("reason"),
+                            "band_bps": round(_asp_band, 2),
+                            "bid": bid,
                         })
                     # Action A: ratchet-only stop write (belt-and-suspenders > guard).
                     _asp_stop = _float_or_none(_asp.get("new_stop_floor"))
