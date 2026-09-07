@@ -1442,6 +1442,35 @@ def _alpaca_session_is_afterhours_now(sess: Any) -> bool:
         return False
 
 
+def _alpaca_add_time_in_force(sess: Any, extended: Any) -> str:
+    """The TIF an ADD / REPEG must carry, mirroring the ENTRY path exactly.
+
+    Alpaca's extended-hours certification requires the LITERAL ``"day"`` alongside
+    ``extended_hours=True``; ``"gfd"`` is ROBINHOOD vocabulary and the adapter rejects it
+    as ``alpaca_extended_hours_entry_not_certified``.  The ENTRY path learned this on
+    2026-08-17 and encodes it at :39670-39678 -- and the six add/repeg sites were never
+    updated with it.
+
+    MEASURED over the 158 baseline receipts: 374 refusals across 36 Alpaca cases, and the
+    split is the whole point -- 356 on Ross WINNERS against 18 on losers, a 20:1 winner
+    concentration.  93.5% of Alpaca entries in that corpus are extended-hours, so on the
+    lane we actually trade the add paths were refused nearly always.  That is the BUY-BACK
+    half of the pullback-reclaim shape: across 86 Alpaca symbol-days CHILI closed ZERO
+    partial-then-rebuy loops, against 117 on Robinhood.
+
+    Byte-identical everywhere else: Robinhood keeps ``gfd``, and so does regular-hours
+    Alpaca.  Falls back to ``gfd`` on any unreadable input -- the pre-2026-09-07 value.
+    """
+    try:
+        if bool(extended) and normalize_execution_family(
+            getattr(sess, "execution_family", None)
+        ) in ALPACA_EXECUTION_FAMILIES:
+            return "day"
+    except Exception:
+        return "gfd"
+    return "gfd"
+
+
 def _alpaca_place_instruction_kind(sess: Any, kwargs: dict[str, Any]) -> str:
     """Classify the only Alpaca instructions certified at the submit boundary.
 
@@ -36702,7 +36731,9 @@ def tick_live_session(
                                     base_size=_fmt_base_size(_rp_qty),
                                     limit_price=_rp_limit_str,
                                     client_order_id=_rp_cid,
-                                    time_in_force="gfd",
+                                    time_in_force=_alpaca_add_time_in_force(
+                                        sess, le.get("entry_session_extended")
+                                    ),
                                     extended_hours=bool(le.get("entry_session_extended")),
                                     **(
                                         {
@@ -45092,7 +45123,9 @@ def tick_live_session(
                             limit_price=_ant_limit_str,
                             client_order_id=_ant_cid,
                             extended_hours=_ant_ext,
-                            time_in_force="gfd",
+                            time_in_force=_alpaca_add_time_in_force(
+                                sess, _ant_ext
+                            ),
                             **(
                                 {"position_intent": "buy_to_open"}
                                 if normalize_execution_family(sess.execution_family)
@@ -45643,7 +45676,9 @@ def tick_live_session(
                                         limit_price=_pyr_limit_str,
                                         client_order_id=_pyr_cid,
                                         extended_hours=_pyr_ext,
-                                        time_in_force="gfd",
+                                        time_in_force=_alpaca_add_time_in_force(
+                                            sess, _pyr_ext
+                                        ),
                                         **(
                                             {"position_intent": "buy_to_open"}
                                             if normalize_execution_family(sess.execution_family)
@@ -46092,7 +46127,9 @@ def tick_live_session(
                                                         limit_price=_mpr_limit_str,
                                                         client_order_id=_mpr_cid,
                                                         extended_hours=_mpr_ext,
-                                                        time_in_force="gfd",
+                                                        time_in_force=_alpaca_add_time_in_force(
+                                                            sess, _mpr_ext
+                                                        ),
                                                         **(
                                                             {"position_intent": "buy_to_open"}
                                                             if normalize_execution_family(sess.execution_family)
@@ -46597,7 +46634,9 @@ def tick_live_session(
                                         limit_price=_pba_limit_str,
                                         client_order_id=_pba_cid,
                                         extended_hours=_pba_ext,
-                                        time_in_force="gfd",
+                                        time_in_force=_alpaca_add_time_in_force(
+                                            sess, _pba_ext
+                                        ),
                                         **(
                                             {"position_intent": "buy_to_open"}
                                             if normalize_execution_family(sess.execution_family)
@@ -47097,7 +47136,9 @@ def tick_live_session(
                                         limit_price=_fba_limit_str,
                                         client_order_id=_fba_cid,
                                         extended_hours=_fba_ext,
-                                        time_in_force="gfd",
+                                        time_in_force=_alpaca_add_time_in_force(
+                                            sess, _fba_ext
+                                        ),
                                         **(
                                             {"position_intent": "buy_to_open"}
                                             if normalize_execution_family(sess.execution_family)
