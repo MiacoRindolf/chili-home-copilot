@@ -20724,6 +20724,34 @@ def _notional_guard_multiplier() -> float:
     return 1.0 + max(0.0, bps) / 10_000.0
 
 
+def _set_entry_repeg_anchor(le: dict[str, Any], entry_limit_px: float) -> None:
+    """Anchor for the marketable re-peg chase: the ORIGINAL limit bounds the cumulative
+    drift (the R:R guard), and the re-peg counter resets per fresh entry.
+
+    ⚠️ THE TWO MAKER BRANCHES NEVER SET THIS (2026-09-07). Only the taker branch did, and
+    the reader falls back silently::
+
+        original_limit_px=float(le.get("entry_original_limit_px") or _lim_px or 0.0)
+
+    With the key absent that resolves to the CURRENT limit, so every re-peg re-anchored on
+    the price it had just chased to. The cumulative bound this docstring describes did not
+    exist for a maker entry: it could ratchet upward one peg at a time, without limit.
+
+    MEASURED on PPBT 2026-09-02. At the identical microsecond 12:45:15.208421 with the
+    identical BBO (2.13 / 2.14), the baseline took the ask and filled 302 @2.14 in 1.07 s;
+    the other arm was inside the 90-second bailout-maker window, rested at the 2.13 bid,
+    was left behind, and re-pegged three times before filling 232 @2.15 -- 20.19 s late.
+    The whole -$29.59 on that case is that entry, and 94% of it is the 70 missing shares,
+    not the penny of price.
+
+    ⚠️ This TIGHTENS the maker path: it gains a cumulative bound it did not have, so some
+    chases that previously walked up will now stop. That is the point, and it is also why
+    it needs an A/B on winners AND losers before it merges.
+    """
+    le["entry_original_limit_px"] = float(entry_limit_px)
+    le["entry_repeg_count"] = 0
+
+
 def _entry_chase_ceiling_px(*, limit_px: float, expected_move_bps: float | None) -> float:
     """Bid may drift this far ABOVE the buy limit before the resting marketable order
     is abandoned as 'left behind'. ONE base knob (bps), widened by a fraction of the
@@ -39482,6 +39510,7 @@ def tick_live_session(
         if _maker_entry:
             entry_limit_px = float(bid)
             entry_limit_str = f"{entry_limit_px:.6f}".rstrip("0").rstrip(".")
+            _set_entry_repeg_anchor(le, entry_limit_px)
         elif _bailout_maker:
             entry_limit_px = float(bid)
             entry_limit_str = (
@@ -39489,6 +39518,7 @@ def tick_live_session(
                 if normalize_execution_family(ef) in ALPACA_EXECUTION_FAMILIES
                 else _fmt_limit_price_buy(entry_limit_px)
             )
+            _set_entry_repeg_anchor(le, entry_limit_px)
         else:
             entry_limit_px = guarded_ask
             entry_limit_str = (
@@ -39496,10 +39526,7 @@ def tick_live_session(
                 if normalize_execution_family(ef) in ALPACA_EXECUTION_FAMILIES
                 else _fmt_limit_price_buy(entry_limit_px)
             )
-            # Anchor for the marketable re-peg chase: the ORIGINAL limit bounds the
-            # cumulative drift (the R:R guard), and the re-peg counter resets per fresh entry.
-            le["entry_original_limit_px"] = entry_limit_px
-            le["entry_repeg_count"] = 0
+            _set_entry_repeg_anchor(le, entry_limit_px)
         le["entry_notional_guard"] = {
             "max_notional_usd": max_notional,
             "ask": ask,
