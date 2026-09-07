@@ -25669,6 +25669,34 @@ _RECYCLE_ENTRY_STATE_KEYS: tuple[str, ...] = (
     "burst_started_epoch",
     "burst_track",
     "burst_window_dbg",
+    # ── FRONT-SIDE / FLOW strength markers (2026-09-07) — same shape as the burst stamp ──
+    # Found while tracing why the SAME tape at the SAME second scored frontside 1.0000 in one
+    # bench arm and 0.7034 in the other (JWEL 08-10; the winner leg was sized 169 -> 87 shares
+    # and the case lost $604.74 at the 13k/3% canon). These six are per-TRADE measurements that
+    # no caller clears, so a recycled watcher can read the PREVIOUS leg's reference:
+    #   * entry_tick_rate (:37737) — entry-moment tape PACE, read by the NEXT leg's held side
+    #     (smart_hold tick_rate_ref, velocity_persistence ride-lock). Its writer is triple-
+    #     conditional (flag + non-None tick_rate + bare try/except), so a thin tape on the new
+    #     entry silently leaves the old pace standing. Both consumers currently neutralise it
+    #     (audit-reason string / both ride-lock branches use base_w) — a loaded gun, not yet a
+    #     firing one, which is exactly when it is cheap to unload.
+    #   * chase_defer_episode / chase_defer_ticks (:38651-38652) — NOT forensic: the latch is a
+    #     live decision input to the chase-defer branch on the next pass.
+    #   * flow_veto_latched / flow_veto_clear_since (:40127/:40134) — the STICKY OFI/trade-flow
+    #     entry veto; a latch set by the closed trade must not veto the next one.
+    #   * frontside_size_tilt (:38587) — the strength/OFI/ER/vwap-dist receipt itself. Written
+    #     only when the tilt bites, never cleared, so a full-strength leg inherits the prior
+    #     leg's record and every post-hoc read of it is wrong.
+    # ⚠️ This does NOT explain the JWEL divergence — the score itself reads none of these; it is
+    # recomputed per tick from six locals, 60% of whose weight comes from `_entry_df`, the 15m
+    # frame served by the process-global 600 s TTL cache in market_data.py whose key carries no
+    # clock, no session and no leg. That cache is the carrier and needs its own A/B.
+    "entry_tick_rate",
+    "chase_defer_episode",
+    "chase_defer_ticks",
+    "flow_veto_latched",
+    "flow_veto_clear_since",
+    "frontside_size_tilt",
     # ── entry submit / sizing / pricing context ──
     "entry_submit_utc",
     "entry_client_order_id",
@@ -38711,8 +38739,16 @@ def tick_live_session(
                 _fs_closes = None
                 _fs_vwap_dist = None
                 _fs_range_pos = None
+                # WHICH FRAME did this tick actually read? Recorded, never used to decide.
+                _fs_frame_stamp = None
+                _fs_frame_bars = 0
                 try:
                     if _entry_df is not None and not getattr(_entry_df, "empty", True):
+                        try:
+                            _fs_frame_bars = int(len(_entry_df))
+                            _fs_frame_stamp = str(_entry_df.index[-1])
+                        except Exception:
+                            _fs_frame_stamp = None
                         from .entry_gates import _today_session_frame as _fs_today_frame
                         from .ross_momentum import front_side_state as _fs_state_fn
                         _fs_sess_df = _fs_today_frame(_entry_df)
@@ -38773,7 +38809,16 @@ def tick_live_session(
                     stale_tape=bool(_fs_stale),
                     enabled=True,
                 )
-                if _frontside_mult < 1.0 or _fs_defer:
+                # ⚠️ WAS `if _frontside_mult < 1.0 or _fs_defer:` (2026-09-07). The tilt was
+                # recorded ONLY when it bit, so the arm that sized at FULL strength left no
+                # per-term record — and `mult == 1.0` is produced by three different states
+                # (strength >= s_hi, `strength is None`, and `stale_tape`; ross_momentum.py
+                # :1742-1746) that the receipt could not tell apart. Measuring a divergence
+                # needs BOTH sides: on JWEL 08-10 the full-size arm scored 1.0000 and the other
+                # 0.7034 on the same second, and no receipt could say which term moved, or even
+                # whether the high arm read a strong tape or an ABSENT one. Written every pass
+                # now; the `mult`/`defer` fields still say whether it bit.
+                if True:
                     le["frontside_size_tilt"] = {
                         "strength": (None if _fs_score is None else round(float(_fs_score), 4)),
                         "mult": round(float(_frontside_mult), 4),
@@ -38785,6 +38830,18 @@ def tick_live_session(
                         "day_range_pos": _fs_range_pos,
                         "er_bars": (len(_fs_closes) if isinstance(_fs_closes, list) else 0),
                         "stale_tape": bool(_fs_stale),
+                        # FRAME IDENTITY (2026-09-07). 60% of the score's weight (er 0.34 +
+                        # vwap_dist 0.16 + range_pos 0.10) comes from `_entry_df`, the 15m/5d
+                        # OHLCV frame served by the process-global 600 s TTL cache in
+                        # market_data.py whose key is `ticker|interval|period|start|end` — no
+                        # clock, no session, no leg. So the frame in hand can be up to 10 min
+                        # stale against a 15 min bar, and HOW stale is a function of when THIS
+                        # process last missed the cache, not of the decision instant. The cache
+                        # age under-reports; the last-bar stamp is the honest discriminator, so
+                        # two receipts standing at the same second can now be compared on the
+                        # frame they were actually reading.
+                        "frame_last_bar": _fs_frame_stamp,
+                        "frame_bars": _fs_frame_bars,
                         # REGIME-ADAPTIVE ramp anchors actually in force this tick.
                         "adaptive_warm": bool(_fs_warm),
                         "adaptive_n": int(_fs_n_samples),
@@ -41191,6 +41248,12 @@ def tick_live_session(
             # OBSERVABILITY (2026-09-06, replay determinism): the sizing basis travels with
             # the submission so two receipts of the same case can be diffed factor by factor.
             "risk_mults": le.get("risk_mults"),
+            # `frontside` is one of ~25 multipliers in `risk_mults` and, on JWEL 08-10, the
+            # ONLY one that differed between two bench arms at the same second and price —
+            # 1.0000 vs 0.7593, sizing the winner leg 138 sh vs 76 sh. The tilt dict is the
+            # only place the six INPUTS behind that number live; it was written to `le` and
+            # read by nothing, so no receipt could attribute the difference.
+            "frontside_size_tilt": le.get("frontside_size_tilt"),
             "sizing": le.get("entry_sizing"),
             "resize_basis": le.get("entry_resize_basis"),
             "stop_atr_pct": le.get("entry_stop_atr_pct"),
