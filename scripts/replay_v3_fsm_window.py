@@ -746,6 +746,18 @@ class AsOfProvider:
 # against. Everything else in a payload stays out, so the receipt is stable across releases.
 _BENCH_PAYLOAD_KEYS = (
     "reason", "blocked_trigger", "benched_at_hod", "trigger", "viability_score", "errors",
+    # 2026-09-07 -- THE SAME OMISSION, TWICE, ON THE SAME DAY. A field written into an event
+    # payload still does not reach a receipt unless it is named here, and I shipped two
+    # diagnostics without it:
+    #   * `frontside_size_tilt` -- the ONLY record of the six inputs behind the `frontside`
+    #     multiplier, the one number of ~25 that differed between two arms at the same second
+    #     and sized the JWEL 08-10 winner leg 169 sh vs 87 sh.
+    #   * `anchor_bid` / `posted` -- whether a post-bailout maker re-entry FIRED or actually
+    #     POSTED. Without them the fix A/B could only guess from `reason`: 39 of 61 firings
+    #     carried `bid_above_episode_anchor` and no receipt could say which ones reached an
+    #     order at all.
+    # An instrument you cannot read back is not an instrument.
+    "frontside_size_tilt", "anchor_bid", "posted",
     # 2026-09-04: the SDOT alpaca receipt showed ``live_entry_blocked_by_breaker`` x26 with
     # payload ``{}`` -- the runner had written breaker=daily_loss_cap_broker, family,
     # daily_pnl_usd, max_daily_loss_usd and this filter dropped every one of them; the
