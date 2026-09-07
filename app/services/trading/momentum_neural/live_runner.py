@@ -38747,16 +38747,40 @@ def tick_live_session(
                 # WHICH FRAME did this tick actually read? Recorded, never used to decide.
                 _fs_frame_stamp = None
                 _fs_frame_bars = 0
+                # ⚠️ FALLBACK FETCH (2026-09-07). `_entry_df` is fetched ONCE per tick at
+                # :32534 and ONLY under `_live_entry_quote_gate_applies(sess, le)`. This block
+                # reused it with NO fallback, so in every state where that predicate is False
+                # the three frame-derived terms went None TOGETHER --
+                # er 0.34 + vwap_dist 0.16 + range_pos 0.10 = EXACTLY 0.60 of the score's
+                # weight -- and `front_side_strength_score` renormalised over the OFI/tape
+                # remainder. The score did not get weaker; it lost its spine, silently.
+                #
+                # The sibling site at :33914 already carries this exact fallback, and its own
+                # comment names the cause: "kapag None ang _entry_df dahil di-applicable ang
+                # quote gate, ito ang tanging kopya nito". The fix was written there and not
+                # here. MEASURED consequence: two bench arms standing at the SAME second on
+                # IDENTICAL tape read frontside 1.0000 vs 0.7034 and sized the JWEL 08-10
+                # winner leg 169 sh vs 87 sh -- and it is arm-flippable, because any change
+                # that shifts session state or `entry_submitted` timing changes whether the
+                # ER spine is present at all.
+                _fs_df = _entry_df
+                if _fs_df is None:
+                    try:
+                        _fs_df = _replay_aware_fetch_ohlcv_df(
+                            sess.symbol, interval="15m", period="5d"
+                        )
+                    except Exception:
+                        _fs_df = None
                 try:
-                    if _entry_df is not None and not getattr(_entry_df, "empty", True):
+                    if _fs_df is not None and not getattr(_fs_df, "empty", True):
                         try:
-                            _fs_frame_bars = int(len(_entry_df))
-                            _fs_frame_stamp = str(_entry_df.index[-1])
+                            _fs_frame_bars = int(len(_fs_df))
+                            _fs_frame_stamp = str(_fs_df.index[-1])
                         except Exception:
                             _fs_frame_stamp = None
                         from .entry_gates import _today_session_frame as _fs_today_frame
                         from .ross_momentum import front_side_state as _fs_state_fn
-                        _fs_sess_df = _fs_today_frame(_entry_df)
+                        _fs_sess_df = _fs_today_frame(_fs_df)
                         # FIX-19(a): blend the LIVE mid tick (fresher than the last completed
                         # close) into the front-side position read. Fail-open to close if no tick.
                         _fs_state = _fs_state_fn(_fs_sess_df, live_price=_float_or_none(mid))
@@ -44300,7 +44324,25 @@ def tick_live_session(
                 try:
                     from .candles import topping_tail_from_df
 
-                    if topping_tail_from_df(_entry_df):
+                    # ⚠️ THIS FLAG WAS A STRUCTURAL NO-OP (2026-09-07). The comment above says
+                    # it "reuses the bars already fetched for the adaptive-spread check" and
+                    # is "fail-safe (no candle data -> no exit)". Both true — and together
+                    # they made it dead code: this is the RUNNER path, which only runs in
+                    # states where `_live_entry_quote_gate_applies` is False, so `_entry_df`
+                    # is ALWAYS None here and `candles.topping_tail_from_df` always returned
+                    # False on the fail-safe. A default-True flag that cannot fire is exactly
+                    # the dark flag the doctrine forbids: it reads as shipped, and it is not.
+                    # Same one-line fallback as :33914 and the front-side block.
+                    # ⚠️ THIS TURNS A NEVER-FIRED EXIT ON — arm-ready, not ship-ready.
+                    _tt_df = _entry_df
+                    if _tt_df is None:
+                        try:
+                            _tt_df = _replay_aware_fetch_ohlcv_df(
+                                sess.symbol, interval="15m", period="5d"
+                            )
+                        except Exception:
+                            _tt_df = None
+                    if topping_tail_from_df(_tt_df):
                         if _g4_cap is not None:
                             # G4 P1: in GRIND mode a topping tail on an intact structure
                             # (bid >= floor — re-verified by the decision THIS tick) does

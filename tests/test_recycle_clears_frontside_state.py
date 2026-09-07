@@ -95,7 +95,7 @@ def test_the_receipt_carries_the_frame_the_tick_actually_read():
     assert '"frame_last_bar": _fs_frame_stamp' in block
     assert '"frame_bars": _fs_frame_bars' in block
     # and it is derived from the frame, never used to decide
-    assert "_fs_frame_stamp = str(_entry_df.index[-1])" in src
+    assert "_fs_frame_stamp = str(_fs_df.index[-1])" in src
 
 
 def test_the_tilt_travels_with_the_entry_submission():
