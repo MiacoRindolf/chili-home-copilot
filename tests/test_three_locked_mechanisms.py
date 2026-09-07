@@ -107,3 +107,52 @@ def test_the_ignition_bypass_is_not_gated_on_being_the_days_number_one_name():
     assert "if is_day_leader and structural_trigger and _tape_positive():" not in src
     # the grant still says which evidence carried it, as its sibling does
     assert '"structural_tape_any_name"' in src
+
+
+# ── 4. one owner for the spread cap, and telemetry that stops repeating itself ──
+
+def test_the_two_spread_caps_have_exactly_one_reader():
+    """The same two settings were read at six sites with THREE different fallbacks:
+    live_runner used the config defaults 12.0 / 300.0, this module used 60.0 / 800.0 --
+    five times and 2.7 times looser, on the largest veto in the system."""
+    from app.services.trading.momentum_neural import risk_policy as rp
+
+    assert rp.resolve_spread_cap_bps("live") == 12.0
+    assert rp.resolve_spread_cap_bps("abs_cap") == 300.0
+    src = inspect.getsource(rp)
+    for gone in ('"chili_momentum_risk_max_spread_bps_abs_cap", 800.0',
+                 '"chili_momentum_risk_max_spread_bps_live", 60.0'):
+        assert gone not in src, gone
+
+
+def test_a_zero_spread_cap_is_preserved_not_treated_as_unset():
+    """`float(getattr(...) or 800.0)` read 0.0 as absent, so an operator who set a cap of
+    zero -- tolerate no spread at all -- got 800 instead. The tightest possible setting
+    failed OPEN. live_runner already documents the correct contract at :25074."""
+    from app.config import settings
+    from app.services.trading.momentum_neural import risk_policy as rp
+
+    original = settings.chili_momentum_risk_max_spread_bps_live
+    try:
+        object.__setattr__(settings, "chili_momentum_risk_max_spread_bps_live", 0.0)
+        assert rp.resolve_spread_cap_bps("live") == 0.0
+        for bad in (None, float("nan"), float("inf"), -1.0, "x"):
+            object.__setattr__(settings, "chili_momentum_risk_max_spread_bps_live", bad)
+            assert rp.resolve_spread_cap_bps("live") == 12.0, bad
+    finally:
+        object.__setattr__(settings, "chili_momentum_risk_max_spread_bps_live", original)
+
+
+def test_the_repeating_telemetry_is_guarded_on_change_and_only_the_emit():
+    """159,671 rows across four types said nothing had changed. The guard wraps the EMIT
+    and nothing else -- the clamp's own `_trailed = _cap` must stay outside it."""
+    src = inspect.getsource(lr.tick_live_session)
+    assert src.count("_emit_on_change(db, sess, le,") == 3
+    i = src.find('_emit_on_change(db, sess, le, "trail_noise_floor_clamped"')
+    assert i > 0
+    assert "_trailed = _cap" in src[i:i + 700]
+    guard = inspect.getsource(lr._emit_on_change)
+    for forbidden in ("pos[", "stop_px =", "_safe_transition", "place_", "_submit_"):
+        assert forbidden not in guard, forbidden
+    # the markers are per-trade
+    assert sum(1 for k in lr._RECYCLE_ENTRY_STATE_KEYS if k.startswith("_emit_last__")) == 3

@@ -1442,6 +1442,41 @@ def _alpaca_session_is_afterhours_now(sess: Any) -> bool:
         return False
 
 
+def _emit_on_change(
+    db: Session,
+    sess: TradingAutomationSession,
+    le: dict[str, Any],
+    event: str,
+    payload: dict[str, Any],
+    *,
+    key: Any,
+) -> None:
+    """Write a telemetry row only when the DECISION changed, not on every pass.
+
+    ⚠️ MEASURED (2026-09-07). Across the 158 baseline receipts these four types alone
+    wrote 159,671 rows to say nothing had changed, and the pattern has already produced a
+    wrong conclusion once: 10,346 `live_ofi_exhaustion_lock` rows with `trigger=None` --
+    every one of them blind to a book the corpus does not contain -- were read as "we
+    measured this lever and it did nothing". Per-pass emission is also how a single
+    decision became 6,765 events in an earlier incident.
+
+    ``key`` is what makes two rows THE SAME DECISION, chosen per call site rather than
+    hashing the whole payload, so a field that merely drifts (a price, a timestamp) does
+    not defeat the guard. TELEMETRY ONLY: this writes one session key and emits. It never
+    touches a stop, an order or a state -- guard the emit, never the block.
+    """
+    marker = "_emit_last__" + event
+    try:
+        current = repr(key)
+    except Exception:
+        current = None
+    if current is not None and le.get(marker) == current:
+        return
+    if current is not None:
+        le[marker] = current
+    _emit(db, sess, event, payload)
+
+
 def _alpaca_place_instruction_kind(sess: Any, kwargs: dict[str, Any]) -> str:
     """Classify the only Alpaca instructions certified at the submit boundary.
 
@@ -25685,6 +25720,10 @@ _RECYCLE_ENTRY_STATE_KEYS: tuple[str, ...] = (
     "g4_leader_is",
     "g4_hl5m_val",
     "g4_vwap5m_val",
+    # on-change telemetry markers: per-trade, so the next leg reports afresh
+    "_emit_last__volnorm_trail_candidate",
+    "_emit_last__velocity_persistence_ride_lock",
+    "_emit_last__trail_noise_floor_clamped",
 )
 # Deliberately NOT reset on trade recycle: ``benched_backside_hod`` and
 # ``benched_backside_session_date_et`` describe the symbol's session phase,
@@ -44101,7 +44140,7 @@ def tick_live_session(
                         # max never loosens the live stop.
                         if _vn_stop > _trailed:
                             _trailed = _vn_stop
-                        _emit(db, sess, "volnorm_trail_candidate", {
+                        _emit_on_change(db, sess, le, "volnorm_trail_candidate", {
                             "vn_dist_pct": _vn_dist,
                             "vn_stop": _vn_stop,
                             "cushion_stop": _trailed,
@@ -44110,7 +44149,7 @@ def tick_live_session(
                             "eff_spread_pct": _rv.get("eff_spread_pct"),
                             "expected_hold_s": _hold_s,
                             "micro_hwm": _hwm_vn,
-                        })
+                        }, key=(_vn_stop, _trailed))
                 except Exception:
                     pass
 
@@ -44272,7 +44311,7 @@ def tick_live_session(
                         _vp_stop = _float_or_none(_vp.get("new_stop_floor"))
                         if _vp_stop is not None and _vp_stop > _trailed:
                             _trailed = _vp_stop
-                        _emit(db, sess, "velocity_persistence_ride_lock", {
+                        _emit_on_change(db, sess, le, "velocity_persistence_ride_lock", {
                             "regime": _vp.get("regime"),
                             "ride": bool(_vp.get("ride")),
                             "band_pct": _vp.get("band_pct"),
@@ -44287,7 +44326,7 @@ def tick_live_session(
                             "last_price": _fs.get("last_price"),
                             "mid": _fs.get("mid"),
                             "high_water_mark": _hwm_trail,
-                        })
+                        }, key=(_vp.get("regime"), bool(_vp.get("ride")), _vp_stop))
                 except Exception:
                     pass
             # NOISE-FLOOR CLAMP (2026-07-09, JEM 06-30 replay forensic): the composed
@@ -44317,13 +44356,13 @@ def tick_live_session(
                     _noise_cap = _hwm_trail * (1.0 - float(_vn_dist))
                     _cap = max(_noise_cap, _be_floor if pos.get("partial_taken") else stop_px, stop_px)
                     if _trailed > _cap:
-                        _emit(db, sess, "trail_noise_floor_clamped", {
+                        _emit_on_change(db, sess, le, "trail_noise_floor_clamped", {
                             "candidate": _trailed,
                             "clamped_to": _cap,
                             "noise_dist_pct": float(_vn_dist),
                             "high_water_mark": _hwm_trail,
                             "placed_stop": stop_px,
-                        })
+                        }, key=_cap)
                         _trailed = _cap
             except (TypeError, ValueError):
                 pass
