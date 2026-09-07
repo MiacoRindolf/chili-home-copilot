@@ -555,3 +555,67 @@ def simclock_default_wrapper(fn, clock, *, key):
     _wrapped._simclock_key = key  # type: ignore[attr-defined]
     return _wrapped
 
+
+
+# ---------------------------------------------------------------------------
+# DEPTH MEASURABILITY (2026-09-07)
+# ---------------------------------------------------------------------------
+#: Flags whose levers cannot decide anything without a level-2 book.
+DEPTH_DEPENDENT_FLAGS: tuple[str, ...] = (
+    "CHILI_MOMENTUM_EXIT_LADDER_LIVE",
+    "CHILI_MOMENTUM_EXIT_LADDER_ENABLED",
+    "CHILI_MOMENTUM_EXIT_OFI_LOCK_ENABLED",
+    "CHILI_MOMENTUM_EXIT_OFI_HIDDEN_SELLER_ENABLED",
+    "CHILI_MOMENTUM_EXIT_OFI_LOCK_PARTIAL_ENABLED",
+    "CHILI_MOMENTUM_EXIT_ASK_PRESSURE_ENABLED",
+    "CHILI_MOMENTUM_EXIT_CANDLE_CONFIRM_LIVE",
+    "CHILI_MOMENTUM_STOP_L2_CONFIRM_ENABLED",
+)
+
+
+def depth_measurability_violation(
+    depth_rows: Any,
+    arm_envs: Any,
+) -> Optional[str]:
+    """Is an arm moving a depth lever against an EMPTY book?  Returns why, or ``None``.
+
+    THE INCIDENT THIS ENCODES.  ``chili_hydrated.iqfeed_depth_snapshots`` holds ZERO rows
+    while the live ``chili`` holds ~9.4M, and the driver's depth mirror connected to the
+    former.  All 180 baseline receipts recorded ``mirrored.depth_rows == 0``.  Every
+    depth-reading exit lever therefore executed as a silent no-op, and a no-op's A/B delta
+    is exactly 0.00 -- which on the page is indistinguishable from "we measured this lever
+    and it did nothing".  An ``exit_ladder_live`` 0-vs-1 A/B on XPON 08-24 returned
+    byte-identical fills and the identical -67.74, and was read as a result.
+
+    Pure.  ``arm_envs`` is any iterable of env mappings (one per arm).  Only flags a run
+    sets EXPLICITLY count: a lever left at its default is not the thing being tested.
+    """
+    try:
+        rows = int(depth_rows)
+    except (TypeError, ValueError):
+        return "depth_rows_unreadable"
+    if rows > 0:
+        return None
+    touched: set = set()
+    for env in (arm_envs or ()):
+        if not isinstance(env, Mapping):
+            continue
+        for flag in DEPTH_DEPENDENT_FLAGS:
+            if env.get(flag) is not None:
+                touched.add(flag)
+    if not touched:
+        return None
+    return (
+        "depth_levers_unmeasurable: the book mirrored 0 rows, so "
+        + ",".join(sorted(touched))
+        + " cannot decide anything and this A/B measures silence, not the lever. Point "
+        "DEPTH_SOURCE_URL at a database that actually holds the window's book."
+    )
+
+
+def assert_depth_measurable(depth_rows: Any, arm_envs: Any) -> None:
+    """Fail-closed wrapper.  A silent zero is the one result this harness must never
+    report as evidence."""
+    why = depth_measurability_violation(depth_rows, arm_envs)
+    if why is not None:
+        raise AssertionError(why)

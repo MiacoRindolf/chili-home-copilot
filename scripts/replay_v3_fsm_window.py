@@ -139,6 +139,46 @@ _PARITY_MOCK_KWARGS = dict(
 PROD = (os.environ.get("TAPE_SOURCE_URL") or "").strip() or os.environ.get(
     "DATABASE_URL", "postgresql://chili:chili@localhost:5433/chili"
 )
+
+# ⚠️ THE BOOK LIVES IN A DIFFERENT DATABASE FROM THE TAPE (2026-09-07).
+# `chili_hydrated` carries 41 GB of trades and 47 GB of NBBO and ZERO depth rows, while the
+# live `chili` holds ~9.4M. So `mirror_depth_streaming` has always connected to a database
+# with no book in it: `mirrored.depth_rows == 0` in 180 of 180 baseline receipts, every one
+# of them with FULL_MIRROR=1. Every depth-reading exit lever mirrored an empty table, ran as
+# a silent no-op, and its A/B delta of exactly 0.00 was read as "we measured this lever and
+# it did nothing" -- the failure mode this harness exists to prevent.
+#
+# DEPTH_SOURCE_URL names the book separately. Unset, it IS `PROD` and this is byte-identical
+# to every run before today. The live book is pruned on a rolling window and starts
+# 2026-08-30, so it can only answer for windows inside that.
+DEPTH_SOURCE = (os.environ.get("DEPTH_SOURCE_URL") or "").strip() or PROD
+
+
+def _depth_source_db() -> str:
+    """The book's database NAME for the receipt. Never the URL -- it carries credentials."""
+    tail = DEPTH_SOURCE.rsplit("/", 1)[-1] if DEPTH_SOURCE else ""
+    return (tail.split("?", 1)[0] or "unknown").strip()
+
+
+#: Flags whose levers cannot decide anything without a book. A run that moves one of these
+#: while the book is empty is not measuring the lever, it is measuring silence.
+_DEPTH_DEPENDENT_FLAGS = (
+    "CHILI_MOMENTUM_EXIT_LADDER_LIVE",
+    "CHILI_MOMENTUM_EXIT_LADDER_ENABLED",
+    "CHILI_MOMENTUM_EXIT_OFI_LOCK_ENABLED",
+    "CHILI_MOMENTUM_EXIT_OFI_HIDDEN_SELLER_ENABLED",
+    "CHILI_MOMENTUM_EXIT_OFI_LOCK_PARTIAL_ENABLED",
+    "CHILI_MOMENTUM_EXIT_ASK_PRESSURE_ENABLED",
+    "CHILI_MOMENTUM_EXIT_CANDLE_CONFIRM_LIVE",
+    "CHILI_MOMENTUM_STOP_L2_CONFIRM_ENABLED",
+)
+
+
+def _depth_flags_in_env() -> list:
+    """Depth-dependent flags this run set explicitly -- i.e. what it thinks it is testing."""
+    return sorted(f for f in _DEPTH_DEPENDENT_FLAGS if os.environ.get(f) is not None)
+
+
 SIM = os.environ.get("TEST_DATABASE_URL", "postgresql://chili:chili@localhost:5433/chili_test")
 
 
@@ -636,7 +676,7 @@ def mirror_depth_streaming(sim_engine):
     import psycopg2
     from psycopg2.extras import execute_values as _ev, Json as _Json
     from datetime import timedelta as _td
-    src = psycopg2.connect(PROD)
+    src = psycopg2.connect(DEPTH_SOURCE)
     src.set_session(readonly=True)
     dst = sim_engine.raw_connection()
     dcur = dst.cursor()
@@ -1042,7 +1082,22 @@ def run_arm(label, grid, ticks, frame_ticks, g4_on, *, sink_reset=None, tape_sou
         # ANG LIBRO (2026-08-26). Walang ito, ang bawat depth-reading na exit lever
         # ay tahimik na no-op at ang A/B ay sumusukat ng katahimikan.
         mirrored_depth = mirror_depth_streaming(eng)
-        print("  mirrored_depth_rows=%s" % mirrored_depth)
+        print("  mirrored_depth_rows=%s (source=%s)" % (mirrored_depth, _depth_source_db()))
+        if mirrored_depth == 0:
+            _dep_flags = _depth_flags_in_env()
+            print(
+                "  [depth] EMPTY BOOK from %s -- every depth-reading exit lever is a "
+                "silent no-op in this run%s"
+                % (
+                    _depth_source_db(),
+                    (
+                        "; THIS RUN SETS %s, so its A/B delta measures SILENCE, not the "
+                        "lever" % ",".join(_dep_flags)
+                        if _dep_flags
+                        else ""
+                    ),
+                )
+            )
     else:
         mirrored = mirror_ticks(db, ticks)
         # ⚠️ The NBBO mirror runs here TOO. The silence defect is not conditional on tick
@@ -1214,6 +1269,12 @@ def run_arm(label, grid, ticks, frame_ticks, g4_on, *, sink_reset=None, tape_sou
                 "tick_rows": int(mirrored),
                 "nbbo_rows": int(mirrored_nbbo),
                 "depth_rows": int(mirrored_depth),
+                "depth_source_db": _depth_source_db(),
+                # A depth lever moved against an empty book measures SILENCE. Carried on
+                # every receipt so a scorer can refuse the comparison instead of reporting
+                # a 0.00 delta as evidence.
+                "depth_levers_unmeasurable": bool(int(mirrored_depth) == 0),
+                "depth_flags_set_by_this_run": _depth_flags_in_env(),
             },
             "density": {
                 "mirror_span_seconds": round(_span_s, 3),

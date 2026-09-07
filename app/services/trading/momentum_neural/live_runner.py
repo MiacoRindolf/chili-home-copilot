@@ -25685,6 +25685,8 @@ _RECYCLE_ENTRY_STATE_KEYS: tuple[str, ...] = (
     "g4_leader_is",
     "g4_hl5m_val",
     "g4_vwap5m_val",
+    # the level-2 blind marker: per-trade, so the next leg re-reports
+    "asp_blind_reason",
 )
 # Deliberately NOT reset on trade recycle: ``benched_backside_hod`` and
 # ``benched_backside_session_date_et`` describe the symbol's session phase,
@@ -44965,6 +44967,27 @@ def tick_live_session(
                             "counterfactual_band_stop": _asp.get("counterfactual_band_stop"),
                             "bid": bid,
                             "high_water_mark": _hwm_trail,
+                        })
+                    elif str(_asp.get("reason") or "") and str(
+                        _asp.get("reason")
+                    ) != str(le.get("asp_blind_reason") or ""):
+                        # BLIND IS NOT SILENT (2026-09-07). `ask_side_pressure_lock` returns
+                        # `stale_or_thin` BEFORE it ever sets ``armed``, and the telemetry
+                        # above is gated on ``armed`` -- so across the whole 180-receipt
+                        # baseline this mechanism, which is the literal Ross level-2 read
+                        # ("fixated on the level 2, specifically the ask price"), emitted
+                        # ZERO rows. A zero meaning "there was no book" is indistinguishable
+                        # from a zero meaning "we measured it and it did nothing", and the
+                        # second reading is what got recorded.
+                        #
+                        # ON CHANGE OF REASON ONLY. Per-pass emission is how a single
+                        # decision became 6,765 events once already.
+                        le["asp_blind_reason"] = str(_asp.get("reason") or "")
+                        _commit_le(sess, le)
+                        _emit(db, sess, "live_ask_side_pressure_blind", {
+                            "reason": _asp.get("reason"),
+                            "band_bps": round(_asp_band, 2),
+                            "bid": bid,
                         })
                     # Action A: ratchet-only stop write (belt-and-suspenders > guard).
                     _asp_stop = _float_or_none(_asp.get("new_stop_floor"))
