@@ -3748,6 +3748,42 @@ def compute_risk_first_quantity(
         "capped_by": capped_by,
     }
 
+def resolve_spread_cap_bps(which: str) -> float:
+    """THE one reader of the two live spread caps.  ``which`` is "live" or "abs_cap".
+
+    ⚠️ WHY THIS EXISTS (2026-09-07).  The same two settings were read at six sites with
+    THREE different fallback numbers.  `live_runner.py` used the config defaults -- 12.0
+    and 300.0 -- while this module used **60.0 and 800.0**: five times and 2.7 times
+    looser, on the largest veto in the system, silently, for whoever imported which module
+    first.
+
+    Worse, this module wrote them as ``float(getattr(...) or 800.0)``.  ``or`` treats
+    ``0.0`` as absent, so an operator who deliberately set a cap of zero -- "tolerate no
+    spread at all" -- got 60 or 800 instead.  The tightest possible setting failed OPEN.
+    `live_runner.py:25074-25076` already documents the correct semantics in a comment:
+    "A 0.0 cap is a deliberate 'block all' and is preserved; only None / NaN / inf /
+    unparseable values fall back to the documented default."  That is the contract here.
+
+    The defaults below are the config Field defaults and nothing else.  If they ever move,
+    they move in `app/config.py` and this follows, because there is now one reader.
+    """
+    field, fallback = {
+        "live": ("chili_momentum_risk_max_spread_bps_live", 12.0),
+        "abs_cap": ("chili_momentum_risk_max_spread_bps_abs_cap", 300.0),
+    }[which]
+    raw = getattr(settings, field, fallback)
+    if raw is None:
+        return fallback
+    try:
+        value = float(raw)
+    except (TypeError, ValueError):
+        return fallback
+    if not math.isfinite(value) or value < 0.0:
+        return fallback
+    return value  # 0.0 is preserved: it means "block all", not "unset"
+
+
+
 
 def spread_liquidity_risk_multiplier(
     spread_bps: float | None,
@@ -3777,8 +3813,8 @@ def spread_liquidity_risk_multiplier(
         if ratio is None:
             ratio = float(getattr(settings, "chili_momentum_risk_spread_to_expected_move_ratio", 0.5) or 0.5)
         if abs_cap_bps is None:
-            abs_cap_bps = float(getattr(settings, "chili_momentum_risk_max_spread_bps_abs_cap", 800.0) or 800.0)
-        base = float(getattr(settings, "chili_momentum_risk_max_spread_bps_live", 60.0) or 60.0)
+            abs_cap_bps = resolve_spread_cap_bps("abs_cap")
+        base = resolve_spread_cap_bps("live")
         # STEP-E #15: use the SAME EM-scaled tolerance the admission gate used, so a wider spread
         # accepted via the EM-scaled cap is priced as a proportional SIZE-DOWN (a DSY-class name
         # at its 721bps EM ceiling shrinks toward the floor, not admitted at full size).
