@@ -43571,6 +43571,47 @@ def tick_live_session(
                 _sh_fired = False
             if _sh_fired:
                 return {"ok": True, "session_id": sess.id, "state": sess.state}
+        # ⭐ 2026-09-08, utos ng operator: ANG TICK ANG UNA, HINDI ANG ORASAN.
+        # Ang burst exit (sa ibaba) ay nagpapasya sa 45-s na orasan sa loob ng 60-s
+        # na lookback; ang tick exit ay nagbabasa ng tape. Sa `elif` chain, ang
+        # nauuna ang nananalo -- kaya ang orasan ang humahawak ng bawat ENTERED na
+        # exit at ang tick exit ay may ZERO exit sa buong libro (bailout 96,
+        # trail_stop 78, stop 59, momentum_break_stop 0).
+        # Nasukat 2026-09-08 sa 79 na leg, peak sa +15 min PAGKATAPOS ng exit:
+        # 24/79 ang tumuloy pagkalabas natin; NVVE ay lumabas sa +2.72% at umabot
+        # ng +16.92% (-$852.56 ang naitala); LUCY +2.81% -> +16.22%.
+        # Ang burst exit ay may sariling patunay (#1275/#1277) kaya HINDI ito
+        # tinanggal -- sumunod lang ito sa tape. Susukatin sa paper: [21].
+        elif (
+            # 2026-09-06: the tick-cadence exit is the PRIMARY "the leg is over" signal
+            # (operator doctrine; exit census: zero legs ended by it in the gate-15
+            # baseline because it was dark and ENTERED-only while the early trail arm
+            # moves the state to TRAILING seconds after the fill). Evaluated in ENTERED
+            # and TRAILING, before the opinion bailouts below; default ON, env kill-switch.
+            st in (STATE_LIVE_ENTERED, STATE_LIVE_TRAILING)
+            and bool(getattr(
+                settings, "chili_momentum_failed_pop_break_exit_enabled", True
+            ))
+            and _failed_pop_break_fires(db, sess, le, bid=bid, avg=avg)
+        ):
+            # FAILED-POP MOMENTUM BREAK (#1261). Doktrina ni Ross: habang
+            # tuloy-tuloy ang GREEN na 10s candle, hawak; ang unang PULANG bar
+            # na bumabasag sa LOW ng naunang bar ay nagsasabing tapos na ang
+            # leg. Ang reason ay may `stop` token para awtomatikong saklaw ng
+            # lahat ng stop-class fail-open na exit guards (#1254/#1255/#1258).
+            _emit(db, sess, "live_momentum_break_exit", {
+                **(le.get("failed_pop_break_dbg") or {}),
+                "bid": bid,
+            })
+            le["pending_exit_reason"] = "momentum_break_stop"
+            _commit_le(sess, le)
+            # #1283: parehong kulang na keywords gaya ng burst exit sa itaas.
+            return _submit_live_market_exit(
+                db, sess, adapter, le=le, reason="momentum_break_stop",
+                product_id=product_id, quantity=float(pos.get("quantity") or 0.0),
+                client_order_id=f"chili_ml_mb_{sess.id}_{uuid.uuid4().hex[:12]}",
+                bid=bid, ask=ask, mid=mid,
+            )
         elif (
             st == STATE_LIVE_ENTERED
             and bool(getattr(
@@ -43600,36 +43641,6 @@ def tick_live_session(
                 db, sess, adapter, le=le, reason="burst_window_exit",
                 product_id=product_id, quantity=float(pos.get("quantity") or 0.0),
                 client_order_id=f"chili_ml_bw_{sess.id}_{uuid.uuid4().hex[:12]}",
-                bid=bid, ask=ask, mid=mid,
-            )
-        elif (
-            # 2026-09-06: the tick-cadence exit is the PRIMARY "the leg is over" signal
-            # (operator doctrine; exit census: zero legs ended by it in the gate-15
-            # baseline because it was dark and ENTERED-only while the early trail arm
-            # moves the state to TRAILING seconds after the fill). Evaluated in ENTERED
-            # and TRAILING, before the opinion bailouts below; default ON, env kill-switch.
-            st in (STATE_LIVE_ENTERED, STATE_LIVE_TRAILING)
-            and bool(getattr(
-                settings, "chili_momentum_failed_pop_break_exit_enabled", True
-            ))
-            and _failed_pop_break_fires(db, sess, le, bid=bid, avg=avg)
-        ):
-            # FAILED-POP MOMENTUM BREAK (#1261). Doktrina ni Ross: habang
-            # tuloy-tuloy ang GREEN na 10s candle, hawak; ang unang PULANG bar
-            # na bumabasag sa LOW ng naunang bar ay nagsasabing tapos na ang
-            # leg. Ang reason ay may `stop` token para awtomatikong saklaw ng
-            # lahat ng stop-class fail-open na exit guards (#1254/#1255/#1258).
-            _emit(db, sess, "live_momentum_break_exit", {
-                **(le.get("failed_pop_break_dbg") or {}),
-                "bid": bid,
-            })
-            le["pending_exit_reason"] = "momentum_break_stop"
-            _commit_le(sess, le)
-            # #1283: parehong kulang na keywords gaya ng burst exit sa itaas.
-            return _submit_live_market_exit(
-                db, sess, adapter, le=le, reason="momentum_break_stop",
-                product_id=product_id, quantity=float(pos.get("quantity") or 0.0),
-                client_order_id=f"chili_ml_mb_{sess.id}_{uuid.uuid4().hex[:12]}",
                 bid=bid, ask=ask, mid=mid,
             )
         elif (
