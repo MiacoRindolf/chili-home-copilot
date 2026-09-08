@@ -116,6 +116,92 @@ def _apply_economic_ledger_credit_gate(
     return out
 
 
+def _num_or_none(value: Any) -> float | None:
+    try:
+        out = float(value)
+    except (TypeError, ValueError):
+        return None
+    return out if out == out and out not in (float("inf"), float("-inf")) else None
+
+
+# How far past the configured per-trade loss cap a P&L has to sit before it is
+# called impossible rather than merely large.  The cap that actually binds is
+# equity-relative and computed against LIVE equity (`_equity_relative_cap`,
+# risk_policy.py:672), which this module cannot see, and equity moves; the
+# multiple is the headroom for that, deliberately generous so the gate only ever
+# catches magnitudes no plausible equity could have produced.  At the operator's
+# canon ($13,000 x 3% = $390) it draws the line at $1,170 — VTAK's -$3,390.70 is
+# still 8.7x the cap itself.
+_IMPOSSIBLE_PNL_CAP_MULTIPLE = 3.0
+
+
+def _binding_single_trade_loss_cap_usd() -> float | None:
+    """The most a single trade can lose under the account's OWN sizing policy.
+
+    Returns None when no cap is configured, in which case the gate below cannot
+    judge magnitude and stays silent rather than guessing.
+    """
+    fixed = _num_or_none(getattr(settings, "chili_momentum_risk_max_loss_per_trade_usd", None))
+    return fixed if (fixed is not None and fixed > 0) else None
+
+
+def _apply_broker_truth_credit_gate(
+    credit: dict[str, Any],
+    *,
+    realized_pnl_usd: Any,
+    broker_recon_status: Any,
+    broker_realized_pnl_usd: Any,
+) -> dict[str, Any]:
+    """Refuse evolution credit to a P&L the broker never confirmed AND that the
+    account could not have produced.
+
+    Measured 2026-09-08 across the 57 live arms carrying an entry-strength
+    receipt: 37 of them (65%) had no broker confirmation at all, and SIX of those
+    carried a magnitude beyond the account's own single-trade loss cap --
+    together -$4,382 of a -$4,816 population loss.  The worst, VTAK session
+    11685, books -$3,390.70 against a $13,000 account whose cap is $390: 8.7x
+    what the sizing policy can produce, with broker_realized_pnl_usd,
+    broker_recon_status and the notional basis all NULL.  Sweeping a threshold
+    against that book found a clean monotone "improvement" that was one
+    unconfirmed row; the same sweep on broker-confirmed rows only pointed
+    somewhere else entirely.
+
+    An unconfirmed row is merely unverified and keeps its credit -- it is
+    labelled so a derivation can exclude it.  An unconfirmed row whose magnitude
+    the sizing policy CANNOT produce is not a result at all; it is a book defect,
+    and teaching the learner from it is worse than having no row.  That is
+    arithmetic, not judgement, which is why this gate is drawn there.
+    """
+    out = dict(credit or {})
+    pnl = _num_or_none(realized_pnl_usd)
+    if pnl is None or pnl == 0:
+        return out
+    confirmed = (
+        str(broker_recon_status or "").strip().lower() == "reconciled"
+        and _num_or_none(broker_realized_pnl_usd) is not None
+    )
+    if confirmed:
+        return out
+
+    reasons = list(out.get("reason_codes") or [])
+    reasons.append("broker_unconfirmed_pnl")
+    cap = _binding_single_trade_loss_cap_usd()
+    verification: dict[str, Any] = {
+        "ok": False,
+        "reason": "broker_unconfirmed",
+        "single_trade_loss_cap_usd": cap,
+        "realized_pnl_usd": pnl,
+    }
+    if cap is not None and abs(pnl) > cap * _IMPOSSIBLE_PNL_CAP_MULTIPLE:
+        reasons.append("broker_unconfirmed_impossible_magnitude")
+        verification["reason"] = "impossible_magnitude"
+        verification["over_cap_multiple"] = round(abs(pnl) / cap, 2)
+        out["contributes_to_evolution"] = False
+    out["reason_codes"] = sorted(set(reasons))
+    out["broker_truth_verification"] = verification
+    return out
+
+
 def _computed_existing_row_credit(
     db: Session,
     row: MomentumAutomationOutcome,
@@ -136,6 +222,12 @@ def _computed_existing_row_credit(
     }
     credit = _apply_decision_snapshot_credit_gate(db, outcome_evolution_credit_from_extracted(extracted))
     credit = _apply_economic_ledger_credit_gate(db, session_id=int(row.session_id), credit=credit)
+    credit = _apply_broker_truth_credit_gate(
+        credit,
+        realized_pnl_usd=row.realized_pnl_usd,
+        broker_recon_status=row.broker_recon_status,
+        broker_realized_pnl_usd=row.broker_realized_pnl_usd,
+    )
     summary["evolution_credit"] = credit
     return summary, credit
 
