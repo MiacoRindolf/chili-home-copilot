@@ -1198,6 +1198,9 @@ def pullback_add_decision(
     ofi_slope: float | None,
     midday_lull: bool,
     cooldown_active: bool,
+    buy_share_delta: float | None = None,
+    high_print_position: float | None = None,
+    spent_position: float = 0.75,
 ) -> dict[str, Any]:
     """Pure gate for the Ross BUY-THE-DIP / pullback ADD (no I/O, unit-testable).
 
@@ -1328,20 +1331,74 @@ def pullback_add_decision(
     if not bool(bounced):
         out["reason"] = "no_bounce"
         return out
-    # ⭐ FALLING-KNIFE GUARD #1 — front-side strength INTACT (FAIL-CLOSED on None: an extra
-    # discretionary BUY into a dip needs PROOF the trend is alive; stale strength ⇒ no add).
-    if front_side_strength is None:
-        out["reason"] = "no_strength"
-        return out
+    # ⭐ FALLING-KNIFE GUARD #1 — the trend must be PROVABLY alive before an extra
+    # discretionary BUY into a dip. The intent is right and unchanged. What changed
+    # is the proof it accepts, because the old proof could not be given.
+    #
+    # WHY. `front_side_strength` is a weight-renormalised mean of six terms, and
+    # `_sig01(0)` returns exactly 0.5, so 56% of the weight (ofi_slope .18,
+    # vwap_dist .16, ofi_level .12, tape .10) sits on sigmoids that read 0.5 at
+    # neutral. The score is pinned near 0.5 by construction — and the floor is
+    # 0.50, its own neutral point. Measured over the whole live book:
+    #
+    #     live_pullback_add_vetoed        139        live_pullback_add_fired    0
+    #     weak_front_side                  37   the single largest veto
+    #     front_side_strength  median 0.4611   MAXIMUM 0.4611   floor 0.5000
+    #
+    # The median and the maximum are the SAME number, 0.0389 under the floor, with
+    # nearly every observation piled on it. The adaptive path can only RAISE the
+    # floor (`if _adapt_lo > floor`), never lower it, so adaptation cannot make it
+    # reachable either. That is not a discriminating gate; it is a coin that always
+    # lands on the same side. And with zero fires in the whole book there is no
+    # positive class, so the floor cannot be derived from its own receipts — the
+    # data needed to justify a number does not and cannot exist here.
+    #
+    # THE TAPE ANSWERS THE SAME QUESTION DIRECTLY, and with full dynamic range:
+    #   buy_share_delta > 0       aggressor-buy share is higher in the back half of
+    #                             the window than the front, halves split by print
+    #                             COUNT — the buying is carrying, right now.
+    #   high_print_position       where the window's high sits, counted in prints.
+    #                             Near 0 = we are at the leading edge; near 1 = the
+    #                             burst is spent and this is a knife, not a dip.
+    # Both are scale-free and neither moves with the window length, which the
+    # score's heaviest term (Kaufman ER over BARS, weight .34) cannot claim.
+    #
+    # PRECEDENCE: the tape decides when it is readable. The score remains the
+    # fallback for an unreadable tape, so the fail-closed contract is untouched and
+    # every existing caller that passes no tape is byte-identical.
+    _bsd = None
+    _hpp = None
     try:
-        _strength = float(front_side_strength)
+        if buy_share_delta is not None and math.isfinite(float(buy_share_delta)):
+            _bsd = float(buy_share_delta)
+        if high_print_position is not None and math.isfinite(float(high_print_position)):
+            _hpp = float(high_print_position)
     except (TypeError, ValueError):
-        out["reason"] = "bad_basis"
-        return out
-    out["front_side_strength"] = _strength
-    if not (math.isfinite(_strength) and _strength >= float(strength_floor) - 1e-12):
-        out["reason"] = "weak_front_side"
-        return out
+        _bsd = _hpp = None
+    if _bsd is not None and _hpp is not None:
+        out["buy_share_delta"] = round(_bsd, 4)
+        out["high_print_position"] = round(_hpp, 3)
+        out["front_side_basis"] = "tape"
+        if _bsd <= 0.0:
+            out["reason"] = "buying_not_carrying"
+            return out
+        if _hpp >= float(spent_position) - 1e-12:
+            out["reason"] = "dip_into_a_spent_move"
+            return out
+    else:
+        out["front_side_basis"] = "score"
+        if front_side_strength is None:
+            out["reason"] = "no_strength"
+            return out
+        try:
+            _strength = float(front_side_strength)
+        except (TypeError, ValueError):
+            out["reason"] = "bad_basis"
+            return out
+        out["front_side_strength"] = _strength
+        if not (math.isfinite(_strength) and _strength >= float(strength_floor) - 1e-12):
+            out["reason"] = "weak_front_side"
+            return out
     # ⭐ FALLING-KNIFE GUARD #2 — OFI NOT collapsing (the RIDE definition: level > 0 AND a
     # non-negative slope). FAIL-CLOSED on a None read (no proof the book is holding up).
     if ofi_level is None or ofi_slope is None:

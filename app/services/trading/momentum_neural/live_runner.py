@@ -46970,6 +46970,27 @@ def tick_live_session(
                                 _pba_tape = None if _pba_tape is None else float(_pba_tape)
                             except Exception:
                                 _pba_tape = None
+                            # PRINT-INDEXED FRONT-SIDE PROOF. The score this guard used to
+                            # consult is a mean of six sigmoids pinned near 0.5, checked
+                            # against a floor of 0.50 — over the whole live book its median
+                            # AND its maximum are both 0.4611, and the add has fired zero
+                            # times in 139 evaluations. These two answer the same question
+                            # from the tape, with dynamic range and without a clock.
+                            _pba_bsd = None
+                            _pba_hpp = None
+                            try:
+                                from .entry_gates import (
+                                    signed_tape_accel_features as _pba_feat_fn,
+                                )
+
+                                _pba_feats = _pba_feat_fn(
+                                    sess.symbol, db=db,
+                                    as_of=_replay_l2_as_of_or_none(),
+                                ) or {}
+                                _pba_bsd = _pba_feats.get("buy_share_delta")
+                                _pba_hpp = _pba_feats.get("high_print_position")
+                            except Exception:
+                                _pba_bsd = _pba_hpp = None
                             # The today-session frame for the ER spine + VWAP read. Prefer the
                             # 5d/15m fetch (the canonical session anchor) so the VWAP/range
                             # match the entry-gate read; fall back to the micro-bar frame.
@@ -47061,6 +47082,13 @@ def tick_live_session(
                             ofi_slope=_fs_ofi_slp_p,
                             midday_lull=_lull_p,
                             cooldown_active=_cool_active_p,
+                            buy_share_delta=_pba_bsd,
+                            high_print_position=_pba_hpp,
+                            spent_position=float(getattr(
+                                settings,
+                                "chili_momentum_l2_confirm_spent_position",
+                                0.75,
+                            ) or 0.75),
                         )
                         _R0_p = _decn_p.get("R0")
                         if not _decn_p.get("fire"):
