@@ -735,6 +735,55 @@ with the sentence "the design above satisfies every amendment"; that sentence
 was false — four of its five amendment responses were unimplementable or
 self-deadlocking, and it is deleted.
 
+### ⚠️ D0 IS STALE — S1 LANDED ON 2026-09-02, THE DAY BEFORE THIS SECTION WAS WRITTEN
+
+**Re-audited against the tree 2026-09-08. The paragraph below describes work that
+was already done when it was written, and its own tripwire has been red ever since
+without being read.**
+
+S1 prescribes "a separate, marker-free PR that makes the envelope source a
+parameter and proves byte-identical behaviour with no marker anywhere". That PR is
+commit `89cb0eb64` (#1292), merged **2026-09-02**. The revision carrying the S1
+text is `77d75d239` (#1291), dated **2026-09-03**, and `89cb0eb64` is an ancestor
+of it: the document was authored on top of the fix it says is missing.
+
+The concrete claim at §2/round-2 — that the dispatcher builds the envelope by
+copying the predecessor and swapping only the cid, so `base_size` stays `Q` — is no
+longer true of the code. `live_runner.py:10640-10644` calls the pure helper
+`_alpaca_replacement_successor_envelope`, which takes `expected_successor_quantity`
+(`:9492`) and explicitly licenses a shrink (`:9536`). The literal
+`**predecessor_request` does not appear in the dispatcher at all.
+
+**The tripwire fired and nobody heard it.** Four tests in
+`tests/test_partial_exit_path_b_lineage_seam.py` assert the OLD source shape, with
+docstrings reading *"when this test fails, someone has changed the envelope
+source"*. They have been failing since 2026-09-02. They did their job; the failure
+was simply never read.
+
+**What actually remains of S1** — much smaller, and not a protection-path edit:
+
+1. Both production call sites (`live_runner.py:12246-12257` and `:42680-42691`)
+   still pass neither new kwarg, so the default reproduces the old behaviour and a
+   `Q-f` successor is refused at `_owner_transport_order_matches` (`:9453`) with a
+   stable `replacement_deadman_successor_lineage_unproven` — fail-closed and
+   visible, which is the right failure mode. Threading is one argument at two
+   sites, and it must be **marker-conditional** (pass `None` when no partial marker
+   exists) so it is provably byte-identical until the partial is wired.
+2. `path_b_partial.marker_successor_envelope` is now a **duplicate** of the shipped
+   helper, and its docstring still opens "ITO ANG S1" while describing the removed
+   code. One of the two must go; the shipped one is the one the dispatcher calls.
+3. The four tripwire tests must be re-pointed at the new contract rather than
+   deleted — they are the only guard on this seam.
+
+Under the §8 tick-triggered shape this shrinks again: the reserve parameter and its
+ledger binding exist for the resting-limit world, where `f` sits outside the stop
+for an unbounded time. A partial whose fill is booked before the replaced-edge is
+serviced needs neither — successor `Q-f` with `reserved=0` against a local position
+already at `Q-f` passes every bound with `quantity_delta` 0.
+
+**The original D0 text follows, retained because the pattern it illustrates is the
+point: a blocker is only as current as the day it was written.**
+
 ### D0 — Two of the blockers are code shape, not evidence
 
 No amount of soak evidence resolves S1 or S2, and both must land before any
