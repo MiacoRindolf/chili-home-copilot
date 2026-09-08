@@ -21020,10 +21020,28 @@ def _adaptive_entry_setup_family(le: dict[str, Any], symbol: Any) -> str:
 def _persist_entry_trigger_identity(
     le: dict[str, Any], *, reason: Any, debug: Any
 ) -> None:
-    """Replace the prior detector identity with a plain per-decision snapshot."""
+    """Replace the prior detector identity with a plain per-decision snapshot.
+
+    The per-decision keys are cleared on recycle — correctly, so the next trade
+    cannot inherit the last one's identity.  But every post-hoc reader runs at
+    SESSION end, after the recycle, so the trade's own trigger has been erased by
+    the time anyone asks what it was: 230 of 269 live trades carrying -$8,658 have
+    NO recorded entry trigger, which made "is the trigger vocabulary break-only?"
+    unanswerable from the trades themselves.
+
+    Same shape as the decision packet ([16], commit d466e77ef).  The durable copy
+    below is deliberately NOT in _RECYCLE_ENTRY_STATE_KEYS; it is evidence about
+    the trade that just closed, not state the next trade may act on, and nothing
+    in the entry path reads it.
+    """
 
     le["entry_trigger_reason"] = str(reason or "")
     le["entry_trigger_debug"] = deepcopy(debug) if isinstance(debug, dict) else {}
+    if reason:
+        le["last_entry_trigger_reason"] = str(reason)
+        le["last_entry_trigger_debug"] = (
+            deepcopy(debug) if isinstance(debug, dict) else {}
+        )
 
 
 def _captured_paper_db_value(value: Any) -> Any:
