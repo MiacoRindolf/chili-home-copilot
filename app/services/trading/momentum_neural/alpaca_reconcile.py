@@ -3124,9 +3124,22 @@ def _sweep_unmanaged_positions(db: Session, adapter: Any) -> dict[str, Any]:
                     _ext_now = _msn(sym, now=datetime.now(timezone.utc)) != "regular"
                 except Exception:
                     _ext_now = False
+                # ⚠️ client_order_id is REQUIRED, not optional, at the certifier.
+                # `_alpaca_place_instruction_kind` / the adapter's own gate treat a
+                # missing or blank client id as an uncertified instruction
+                # (`invalid_common`: `not str(client_order_id or "").strip()`), so a
+                # flatten without one is refused with
+                # `alpaca_instruction_side_intent_not_certified` — and this is the
+                # LAST-RESORT net for a position with no owner and no protection.
+                #
+                # Live 2026-09-08: BJDX, 1,103 shares unmanaged from 10:39Z, every
+                # flatten refused, 3,025 blocked release attempts, unrealised drifting
+                # -$19.82 -> -$41.55 while the net could not fire. The intent and the
+                # side were already correct; the id was simply never passed.
                 _mkt = adapter.place_market_order(
                     product_id=sym, side="sell", base_size=str(qty),
                     position_intent="sell_to_close",
+                    client_order_id=f"chili_unmanaged_{uuid.uuid4().hex[:16]}",
                     extended_hours=bool(_ext_now),
                 )
                 evidence["extended_hours"] = bool(_ext_now)
