@@ -3156,23 +3156,34 @@ def _l2_entry_confirm(
         })
 
         # ── BOOK (secondary agreement): OFI / micro-price / depth-imbalance percentile ──
+        # READ, BUT NEVER RETURN ON IT. An absent or stale book means the SECONDARY
+        # confirmers are unavailable; it says nothing about the tape, and the tape
+        # legs below need no book at all. Returning here is what made this gate
+        # unmeasurable: 325 of 348 historical entries ended at this line with
+        # `l2_confirm_no_data`, and the replay corpus holds ZERO depth rows, so every
+        # print-indexed decision underneath was dead code in both places.
         from .pipeline import read_ladder_distribution
 
-        lr = read_ladder_distribution(symbol, db=db, as_of=l2_as_of)
-        n_snaps = int(getattr(lr, "n_snaps", 0) or 0) if lr is not None else 0
-        if lr is None or n_snaps < 3:
-            dbg["reason"] = "l2_confirm_no_data"  # too-few snaps -> fail-open
-            return "confirm", dbg
-        # STALENESS: a frozen feed -> fail-open (never defer on stale data).
+        lr = None
+        n_snaps = 0
+        try:
+            lr = read_ladder_distribution(symbol, db=db, as_of=l2_as_of)
+            n_snaps = int(getattr(lr, "n_snaps", 0) or 0) if lr is not None else 0
+        except Exception:
+            lr, n_snaps = None, 0
         try:
             max_age = float(getattr(settings, "chili_momentum_l2_confirm_max_snapshot_age_s", 10.0) or 10.0)
         except (TypeError, ValueError):
             max_age = 10.0
-        age = getattr(lr, "snapshot_age_s", None)
-        if age is not None and float(age) > max_age:
-            dbg["reason"] = "l2_confirm_no_data"
+        age = getattr(lr, "snapshot_age_s", None) if lr is not None else None
+        book_ok = (lr is not None and n_snaps >= 3
+                   and not (age is not None and float(age) > max_age))
+        dbg["book_readable"] = bool(book_ok)
+        dbg["n_snaps"] = int(n_snaps)
+        if age is not None:
             dbg["snapshot_age_s"] = round(float(age), 2)
-            return "confirm", dbg
+        if not book_ok:
+            lr = None
         ofi = getattr(lr, "ofi", None)
         micro = getattr(lr, "micro_edge", None)
         pctile = getattr(lr, "depth_imbal_pctile", None)
@@ -3266,15 +3277,21 @@ def _l2_entry_confirm(
             return "defer", dbg
         # DEFER 2 — late AND the buying is not carrying. Here the book still gets a
         # say, because a late entry into demonstrably accumulating depth is the
-        # reclaim this lane is supposed to take.
+        # reclaim this lane is supposed to take. With NO readable book there is no
+        # second opinion to weigh, and a missing input must never manufacture a
+        # refusal: fail open, and say so.
         if late and not_carrying:
+            if not book_ok:
+                dbg["reason"] = "l2_confirm_late_no_book"
+                return "confirm", dbg
             if ofi_agrees or depth_rising:
                 dbg["reason"] = "l2_confirm_secondary_override"
                 return "confirm", dbg
             dbg["reason"] = "l2_confirm_defer_late_no_carry"
             return "defer", dbg
-        # DEFER 3 — the original leg, kept: dead tape AND net-selling book.
-        if clear_no_confirm:
+        # DEFER 3 — the original leg, kept: dead tape AND net-selling book. It needs
+        # the book by construction (`ofi < 0`), so an unreadable book skips it.
+        if book_ok and clear_no_confirm:
             if ofi_agrees or depth_rising:
                 dbg["reason"] = "l2_confirm_secondary_override"
                 return "confirm", dbg

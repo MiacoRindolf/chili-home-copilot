@@ -297,11 +297,19 @@ def test_empty_tape_fails_open_to_confirm(confirm_on, monkeypatch):
 
 # ── (9) FAIL-OPEN: stale book -> confirm ─────────────────────────────────────────
 
-def test_stale_book_fails_open_to_confirm(confirm_on, monkeypatch):
-    # dead/negative tape that WOULD defer, but the book is stale -> fail-open BEFORE deferring.
+def test_a_stale_book_no_longer_silences_a_fresh_tape(confirm_on, monkeypatch):
+    """RE-POINTED. The old contract was "a stale book fails open BEFORE deferring",
+    and it was right for the old rule: that defer required `accel <= 0 AND ofi < 0`,
+    so it could not be justified without a fresh book.
+
+    The spent-move defer needs no book at all. Failing open here would discard a
+    FRESH tape reading because a DIFFERENT and unnecessary input is stale — the same
+    category error this whole change exists to remove. The book's staleness is
+    reported and excluded from the decision; the tape still decides.
+    """
     rows = [
         _tick(10.01, 400, 10.00, 10.01, 1.0),
-        _tick(10.02, 500, 10.01, 10.02, 4.0),
+        _tick(10.02, 500, 10.01, 10.02, 4.0),   # the high, three prints back of four
         _tick(10.00, 300, 10.00, 10.01, 9.0),
         _tick(9.99, 400, 9.99, 10.00, 12.0),
         _tick(9.98, 500, 9.98, 9.99, 15.0),
@@ -312,8 +320,34 @@ def test_stale_book_fails_open_to_confirm(confirm_on, monkeypatch):
         lambda *a, **k: _ladder(ofi=-0.9, micro=-3.0, pctile=0.05, age=9999.0),
     )
     decision, dbg = _l2_entry_confirm("ABCD", db=db, settings=settings)
+    assert dbg["book_readable"] is False
+    assert dbg["snapshot_age_s"] == 9999.0
+    assert decision == "defer"
+    assert dbg["reason"] == "l2_confirm_defer_spent_move"
+
+
+def test_a_stale_book_still_cannot_cause_a_book_dependent_defer(
+        confirm_on, monkeypatch):
+    """The invariant the old test really protected, kept intact: the legacy
+    `accel <= 0 AND ofi < 0` leg reads the book by construction, so a stale book
+    skips it rather than deferring on numbers nobody should trust. Here the tape is
+    flat-to-negative but NOT spent, so no tape leg fires either."""
+    rows = [
+        _tick(10.00, 400, 9.99, 10.00, 1.0),
+        _tick(10.01, 500, 10.00, 10.01, 4.0),
+        _tick(10.02, 600, 10.01, 10.02, 9.0),
+        _tick(10.02, 100, 10.02, 10.03, 12.0),   # high is the NEWEST print
+        _tick(10.02, 100, 10.02, 10.03, 15.0),
+    ]
+    db = _FakeDB(rows)
+    monkeypatch.setattr(
+        "app.services.trading.momentum_neural.pipeline.read_ladder_distribution",
+        lambda *a, **k: _ladder(ofi=-0.9, micro=-3.0, pctile=0.05, age=9999.0),
+    )
+    decision, dbg = _l2_entry_confirm("ABCD", db=db, settings=settings)
+    assert dbg["book_readable"] is False
     assert decision == "confirm"
-    assert dbg["reason"] == "l2_confirm_no_data"
+    assert dbg["reason"] != "l2_confirm_defer_no_tape"
 
 
 # ── (10) mixed (flat tape, OFI not negative) -> confirm (no over-defer) ──────────
@@ -337,3 +371,94 @@ def test_mixed_flat_tape_positive_ofi_confirms(confirm_on, monkeypatch):
     assert decision == "confirm"
     # either pass_mixed or tape_thrust depending on the exact accel sign; must NOT defer.
     assert dbg["reason"] != "l2_confirm_defer_no_tape"
+
+
+# ── THE TAPE DECIDES WITHOUT A BOOK ─────────────────────────────────────────────
+# The print-indexed legs sat BEHIND the ladder read, which returned early with
+# `l2_confirm_no_data` whenever depth was thin. Measured: 325 of 348 historical
+# entries ended at that line, and the replay corpus holds ZERO depth rows — IQFeed
+# sells no historical Level 2, only streaming. So every print-indexed decision was
+# dead code in production AND unmeasurable in the bench. The book is still read; it
+# just no longer gets to end the function before the tape has spoken.
+
+def test_a_spent_move_is_refused_with_no_book_at_all(confirm_on, monkeypatch):
+    """The decisive case. High three prints back of four, buying fading, and not a
+    single depth snapshot — exactly the replay corpus, and 93% of live entries."""
+    rows = [
+        _tick(10.01, 400, 10.00, 10.01, 1.0),
+        _tick(10.02, 500, 10.01, 10.02, 4.0),   # the high
+        _tick(10.00, 300, 10.00, 10.01, 9.0),
+        _tick(9.99, 400, 9.99, 10.00, 12.0),
+        _tick(9.98, 500, 9.98, 9.99, 15.0),
+    ]
+    db = _FakeDB(rows)
+    monkeypatch.setattr(
+        "app.services.trading.momentum_neural.pipeline.read_ladder_distribution",
+        lambda *a, **k: None,
+    )
+    decision, dbg = _l2_entry_confirm("ABCD", db=db, settings=settings)
+    assert dbg["book_readable"] is False
+    assert decision == "defer"
+    assert dbg["reason"] == "l2_confirm_defer_spent_move"
+
+
+def test_the_leading_edge_confirms_with_no_book_at_all(confirm_on, monkeypatch):
+    """The mirror: a tape at its own high still confirms without a book."""
+    rows = [
+        _tick(10.00, 400, 9.99, 10.00, 1.0),
+        _tick(10.01, 500, 10.00, 10.01, 4.0),
+        _tick(10.02, 600, 10.01, 10.02, 9.0),
+        _tick(10.03, 700, 10.02, 10.03, 12.0),
+        _tick(10.04, 800, 10.03, 10.04, 15.0),
+    ]
+    db = _FakeDB(rows)
+    monkeypatch.setattr(
+        "app.services.trading.momentum_neural.pipeline.read_ladder_distribution",
+        lambda *a, **k: None,
+    )
+    decision, dbg = _l2_entry_confirm("ABCD", db=db, settings=settings)
+    assert decision == "confirm"
+    assert dbg["reason"] == "l2_confirm_tape_thrust"
+
+
+def test_a_merely_late_entry_fails_open_when_there_is_no_book_to_ask(
+        confirm_on, monkeypatch):
+    """Late but not spent needs a second opinion, and there is none. A missing
+    input must never manufacture a refusal — fail open, and name why."""
+    rows = [
+        _tick(10.00, 400, 9.99, 10.00, 1.0),
+        _tick(10.01, 500, 10.00, 10.01, 4.0),
+        _tick(10.02, 300, 10.02, 10.03, 9.0),   # the high, two prints back of four
+        _tick(10.01, 400, 10.01, 10.02, 12.0),
+        _tick(10.01, 500, 10.01, 10.02, 15.0),
+    ]
+    db = _FakeDB(rows)
+    monkeypatch.setattr(
+        "app.services.trading.momentum_neural.pipeline.read_ladder_distribution",
+        lambda *a, **k: None,
+    )
+    decision, dbg = _l2_entry_confirm("ABCD", db=db, settings=settings)
+    assert dbg["high_print_position"] == pytest.approx(0.5)
+    assert decision == "confirm"
+    assert dbg["reason"] == "l2_confirm_late_no_book"
+
+
+def test_a_thin_book_is_reported_not_fatal(confirm_on, monkeypatch):
+    """Two snapshots is below the floor: the book is unreadable, the tape still is."""
+    rows = [
+        _tick(10.01, 400, 10.00, 10.01, 1.0),
+        _tick(10.02, 500, 10.01, 10.02, 4.0),
+        _tick(10.00, 300, 10.00, 10.01, 9.0),
+        _tick(9.99, 400, 9.99, 10.00, 12.0),
+        _tick(9.98, 500, 9.98, 9.99, 15.0),
+    ]
+    db = _FakeDB(rows)
+    monkeypatch.setattr(
+        "app.services.trading.momentum_neural.pipeline.read_ladder_distribution",
+        lambda *a, **k: _ladder(ofi=0.4, micro=1.0, pctile=0.9, age=2.0, n_snaps=2),
+    )
+    decision, dbg = _l2_entry_confirm("ABCD", db=db, settings=settings)
+    assert dbg["book_readable"] is False
+    assert dbg["n_snaps"] == 2
+    assert decision == "defer"
+    assert dbg["reason"] == "l2_confirm_defer_spent_move"
