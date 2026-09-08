@@ -37760,6 +37760,19 @@ def tick_live_session(
             db.flush()
             return {"ok": False, "error": "decision_packet_missing"}
         le["entry_decision_packet_id"] = decision_packet_id
+        # ⚠️ DURABLE COPY. `entry_decision_packet_id` is a per-trade key and the
+        # recycle clears it (it is one of the 163 in _RECYCLE_ENTRY_STATE_KEYS),
+        # but the OUTCOME is extracted at SESSION end — after the recycle. So a
+        # session that stopped out, recycled and went back to watching reported
+        # `missing_entry_decision_packet` for a trade that HAD one, and lost its
+        # evolution credit. Measured: the break starts 2026-06-29 (0 missing
+        # before, 10/16 that day, ~all after) and cost 71 days in which July and
+        # August credited ZERO live outcomes. The paper path already keeps a
+        # `last_entry_decision_packet_id` for exactly this reason
+        # (paper_runner.py:3088); the live path needs the same and must NEVER add
+        # this key to the recycle set.
+        if decision_packet_id is not None:
+            le["last_entry_decision_packet_id"] = decision_packet_id
         le["entry_slip_bps_ref"] = slip_ref
         _commit_le(sess, le)
         snap = dict(sess.risk_snapshot_json or {})

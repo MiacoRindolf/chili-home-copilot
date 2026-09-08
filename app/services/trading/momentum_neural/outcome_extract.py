@@ -426,11 +426,15 @@ def extract_momentum_session_outcome(
                 partial_exit = True
     else:
         try:
-            entry_decision_packet_id = (
-                int(le["entry_decision_packet_id"])
-                if le.get("entry_decision_packet_id")
-                else None
+            # The live key is per-trade and the recycle clears it, but this
+            # extraction runs at SESSION end — after any recycle.  Fall back to
+            # the durable copy, exactly as the paper branch above does, so a
+            # trade that recycled is not reported as having had no decision
+            # packet and silently denied evolution credit.
+            _pid_raw = le.get("entry_decision_packet_id") or le.get(
+                "last_entry_decision_packet_id"
             )
+            entry_decision_packet_id = int(_pid_raw) if _pid_raw else None
         except (TypeError, ValueError):
             entry_decision_packet_id = None
         realized = le.get("realized_pnl_usd")
