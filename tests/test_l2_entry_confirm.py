@@ -220,27 +220,64 @@ def test_dead_tape_selling_ofi_defers(confirm_on, monkeypatch):
     )
     decision, dbg = _l2_entry_confirm("ABCD", db=db, settings=settings)
     assert decision == "defer"
-    assert dbg["reason"] == "l2_confirm_defer_no_tape"
+    # The refusal now names the SHAPE rather than only the absence: this tape rose
+    # to 10.02 on the second of five prints and rolled over, so the high sits three
+    # prints back out of four — the oldest quarter of the window. Same verdict,
+    # more specific reason.
+    assert dbg["reason"] == "l2_confirm_defer_spent_move"
+    assert dbg["high_print_position"] == pytest.approx(0.75)
 
 
-# ── (7) dead tape but secondary buy-side confirmer disagrees -> CONFIRM (override) ──
+# ── (7) a SPENT move is not rescued by a buy-side book ───────────────────────────
 
-def test_dead_tape_but_secondary_buyside_overrides_to_confirm(confirm_on, monkeypatch):
+def test_a_buyside_book_does_not_override_a_spent_move(confirm_on, monkeypatch):
+    """BEHAVIOUR CHANGE, deliberate, and this is the case it was made for.
+
+    The old rule let ANY secondary buy-side agreement — a positive micro-edge or a
+    rising depth percentile — override a dead tape and confirm the entry. That is
+    the exact door the worst entries walked through. On 2026-09-08 the lane entered
+    WYHG eight times for -$212.83, and OFI was POSITIVE at all eight (0.034 to
+    0.485) while four of them arrived with the window's high already 55-94% behind
+    them in print terms. A buy-side book did not save a single one.
+
+    So the override no longer applies once the move is SPENT: the book cannot tell
+    us we are early when the tape has already said we are late. It still applies to
+    a merely-late entry (the next test), which is the reclaim this lane should take.
+    """
     rows = [
         _tick(10.01, 400, 10.00, 10.01, 1.0),
-        _tick(10.02, 500, 10.01, 10.02, 4.0),
+        _tick(10.02, 500, 10.01, 10.02, 4.0),   # the high, three prints back
         _tick(10.00, 300, 10.00, 10.01, 9.0),
         _tick(9.99, 400, 9.99, 10.00, 12.0),
         _tick(9.98, 500, 9.98, 9.99, 15.0),
     ]
     db = _FakeDB(rows)
-    # accel<=0 but OFI negative — yet micro_edge>0 (book leans buy at the touch) AND depth
-    # pctile rising (>=0.5): a secondary confirmer disagrees with the bearish read -> confirm.
     monkeypatch.setattr(
         "app.services.trading.momentum_neural.pipeline.read_ladder_distribution",
         lambda *a, **k: _ladder(ofi=-0.1, micro=1.5, pctile=0.8, age=2.0),
     )
     decision, dbg = _l2_entry_confirm("ABCD", db=db, settings=settings)
+    assert decision == "defer"
+    assert dbg["reason"] == "l2_confirm_defer_spent_move"
+
+
+def test_a_buyside_book_still_overrides_a_merely_late_entry(confirm_on, monkeypatch):
+    """The override survives where it belongs. Here the high is halfway back — late,
+    not spent — so accumulating depth still earns the entry."""
+    rows = [
+        _tick(10.00, 400, 9.99, 10.00, 1.0),    # lift
+        _tick(10.01, 500, 10.00, 10.01, 4.0),   # lift
+        _tick(10.02, 300, 10.02, 10.03, 9.0),   # the high, TWO prints back of four
+        _tick(10.01, 400, 10.01, 10.02, 12.0),
+        _tick(10.01, 500, 10.01, 10.02, 15.0),
+    ]
+    db = _FakeDB(rows)
+    monkeypatch.setattr(
+        "app.services.trading.momentum_neural.pipeline.read_ladder_distribution",
+        lambda *a, **k: _ladder(ofi=-0.1, micro=1.5, pctile=0.8, age=2.0),
+    )
+    decision, dbg = _l2_entry_confirm("ABCD", db=db, settings=settings)
+    assert dbg["high_print_position"] == pytest.approx(0.5)
     assert decision == "confirm"
     assert dbg["reason"] == "l2_confirm_secondary_override"
 

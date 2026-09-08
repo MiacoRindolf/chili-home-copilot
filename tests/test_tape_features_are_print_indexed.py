@@ -239,6 +239,75 @@ def test_the_structure_features_also_ignore_the_clock():
         assert fast[key] == pytest.approx(slow[key]), key
 
 
+# ── 6. buy share between equal-count halves: the window must not decide it ─────
+
+def test_buy_share_delta_is_positive_when_the_buying_is_carrying():
+    """Front half mixed, back half all lifts."""
+    ts = 1_000_000.0
+    rows = []
+    for i in range(4):                                   # front: half of it sells
+        px = 1.0 + i * 0.01
+        rows.append((px, 100.0, px, px + 0.01, ts + i * 0.1) if i % 2
+                    else (px, 100.0, px - 0.01, px, ts + i * 0.1))
+    for i in range(4):                                   # back: every print at the ask
+        px = 1.05 + i * 0.01
+        rows.append((px, 100.0, px - 0.01, px, ts + (4 + i) * 0.1))
+    out = _f(rows)
+    assert out is not None
+    assert out["buy_share_delta"] > 0
+
+
+def test_buy_share_delta_is_negative_when_the_buying_fades():
+    ts = 1_000_000.0
+    rows = [(1.0 + i * 0.01, 100.0, 0.99 + i * 0.01, 1.0 + i * 0.01, ts + i * 0.1)
+            for i in range(4)]                            # front: all lifts
+    rows += [(1.04 - i * 0.01, 100.0, 1.04 - i * 0.01, 1.05 - i * 0.01,
+              ts + (4 + i) * 0.1) for i in range(4)]      # back: all hits the bid
+    out = _f(rows)
+    assert out is not None
+    assert out["buy_share_delta"] < 0
+
+
+def test_buy_share_delta_does_not_move_with_the_clock():
+    """THE POINT. `signed_tape_accel` compares RAW volume between two halves of the
+    WINDOW split at the timestamp midpoint, so its sign can flip on the window
+    length alone — measured on WYHG 2026-09-08 08:41:02, the same instant read
+    -2,138 over 20s and +8,212 over 15s. This measure is a SHARE between halves
+    split by print COUNT, so neither the clock nor the volume level can decide it.
+    """
+    def build(step):
+        ts = 1_000_000.0
+        rows = [(1.0 + i * 0.01, 100.0, 0.99 + i * 0.01, 1.0 + i * 0.01,
+                 ts + i * step) for i in range(5)]
+        rows += [(1.05 - i * 0.01, 100.0, 1.05 - i * 0.01, 1.06 - i * 0.01,
+                  ts + (5 + i) * step) for i in range(5)]
+        return rows
+
+    fast = _f(build(0.01), window_s=1.0)
+    slow = _f(build(3.0), window_s=600.0)
+    assert fast["buy_share_delta"] == pytest.approx(slow["buy_share_delta"])
+
+
+def test_buy_share_delta_is_scale_free_in_volume():
+    """Ten times the size on every print must not change the reading."""
+    def build(mult):
+        ts = 1_000_000.0
+        rows = [(1.0 + i * 0.01, 100.0 * mult, 0.99 + i * 0.01, 1.0 + i * 0.01,
+                 ts + i * 0.1) for i in range(4)]
+        rows += [(1.04 - i * 0.01, 100.0 * mult, 1.04 - i * 0.01, 1.05 - i * 0.01,
+                  ts + (4 + i) * 0.1) for i in range(4)]
+        return rows
+
+    assert _f(build(1))["buy_share_delta"] == pytest.approx(
+        _f(build(10))["buy_share_delta"])
+
+
+def test_buy_share_delta_is_none_when_there_is_not_enough_tape():
+    out = _f(_tape([1.0, 1.1, 1.2]))
+    assert out is not None
+    assert out["buy_share_delta"] is None
+
+
 def test_the_existing_keys_are_all_still_present():
     """Three modules read this dict; none of their keys may disappear."""
     out = _f(_tape([1.0 + i * 0.01 for i in range(20)]))
