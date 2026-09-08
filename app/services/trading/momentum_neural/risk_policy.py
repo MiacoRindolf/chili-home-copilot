@@ -4750,6 +4750,23 @@ def reentry_escalation_level_update(
             if rapid_stopout:
                 return lvl + 2, "rapid_whipsaw_double_increment"
             return lvl + 1, "stop_class_loss_increment"
+        # A non-stop loss on a name that has ALREADY failed is no longer an
+        # independent choice — it is a pattern. The distinction above ("we chose
+        # to leave" vs "the level broke") is right for ONE trade and wrong for a
+        # SEQUENCE: the fourth bailout on the same name is not four decisions, it
+        # is an entry repeatedly walking into a place it immediately wants out of.
+        #
+        # WYHG, live 2026-09-08: eight losing entries in 31 minutes for -$212.83,
+        # 78% of the day. The exits were 1 burst, 3 stop, 4 BAILOUT — half the
+        # losses incremented nothing, so the level reached 2 instead of 8 (509 of
+        # 512 blocks were still level 1) and the "one more full R of proof per
+        # failure" ramp never ramped. With this, the ladder reaches level 6-7 by
+        # the sixth entry, and the reclaim it then demands is unreachable in chop.
+        #
+        # A FRESH name keeps the original semantics: at level 0 a bailout is still
+        # a choice and still counts for nothing.
+        if lvl >= 1:
+            return lvl + 1, "non_stop_loss_on_escalated_name_increment"
         return lvl, "non_stop_loss_unchanged"
     if green_banked:
         return 0, "green_banked_reset"
