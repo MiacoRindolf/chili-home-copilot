@@ -11408,7 +11408,7 @@ class Settings(BaseSettings):
     # None / n_snaps<3 / empty-tape / stale snapshot ⇒ CONFIRM (never defer on bad data).
     # OFF (default) ⇒ return confirm BEFORE any I/O ⇒ byte-identical (will be ENABLED in env).
     chili_momentum_l2_confirm_enabled: bool = Field(
-        default=False,
+        default=True,
         validation_alias=AliasChoices("CHILI_MOMENTUM_L2_CONFIRM_ENABLED"),
         description="Phase-1 L2 entry CONFIRMER (DEFER-only): after the chart trigger + both existing vetoes pass, require the executed tape to confirm thrust (signed_tape_accel>0 AND tick_rate>=self-relative floor; OFI/micro + rising depth-pctile secondary) before submitting the buy. DEFER only on CLEAR no-tape (accel<=0 AND OFI<0); fail-open (confirm) on any missing/stale/thin data; entry-only (never blocks exits). false = return confirm before any I/O, byte-identical.",
     )
@@ -11449,6 +11449,43 @@ class Settings(BaseSettings):
         gt=0.0,
         validation_alias=AliasChoices("CHILI_MOMENTUM_L2_CONFIRM_MAX_SNAPSHOT_AGE_S"),
         description="L2 confirmer: staleness ceiling (seconds) on the newest L2 ladder snapshot; older ⇒ fail-open (confirm), never defer on a frozen feed. Only consulted when chili_momentum_l2_confirm_enabled is on.",
+    )
+    chili_momentum_l2_confirm_late_arrival_position: float = Field(
+        default=0.5,
+        ge=0.0,
+        le=1.0,
+        validation_alias=AliasChoices(
+            "CHILI_MOMENTUM_L2_CONFIRM_LATE_ARRIVAL_POSITION"
+        ),
+        description=(
+            "L2 confirmer: how far behind us the window's high may sit, COUNTED IN "
+            "PRINTS, before an entry is treated as a late arrival. 0 = the newest "
+            "print is the high (leading edge); 1 = the high is the oldest print in "
+            "the window. The default 0.5 is a STRUCTURAL position — 'the high sits "
+            "in the older half' — not a fitted value; it is a setting so a "
+            "derivation script can replace it with a percentile of its own live "
+            "distribution once one exists. Prints rather than seconds because the "
+            "clock-split measures this replaces flip sign with the window length: "
+            "WYHG 2026-09-08 08:41:02 read signed_tape_accel -2,138 over 20s and "
+            "+8,212 over 15s at the same instant. Only consulted when "
+            "chili_momentum_l2_confirm_enabled is on."
+        ),
+    )
+    chili_momentum_l2_confirm_spent_position: float = Field(
+        default=0.75,
+        ge=0.0,
+        le=1.0,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_L2_CONFIRM_SPENT_POSITION"),
+        description=(
+            "L2 confirmer: the point at which a late arrival becomes a SPENT move — "
+            "the high sits in the oldest quarter of the window in print terms. Past "
+            "this, and with the buy share not carrying, no book reading overrides "
+            "the defer: the book cannot say we are early when the tape has already "
+            "said we are late. Structural quartile, not a fitted value; same "
+            "derivation note as chili_momentum_l2_confirm_late_arrival_position. The "
+            "four worst WYHG entries of 2026-09-08 arrived with the high 55-94% "
+            "behind them. Only consulted when chili_momentum_l2_confirm_enabled is on."
+        ),
     )
     # ── FIX C: TAPE-CONFIRMED-HOLD EARLY ENTRY ──────────────────────────────────────
     # Graduate the L2 confirmer from a defer-gate to a TRIGGER. Armed pullback sessions wait

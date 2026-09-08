@@ -142,27 +142,58 @@ def test_a_successor_resting_for_the_wrong_size_is_still_rejected():
     assert _matches(envelope) is False
 
 
-def test_the_dispatch_still_builds_its_envelope_from_the_predecessor():
-    """AST/source guard (§7.1). Habang totoo ito ay hindi maikakabit ang PATH B.
+def test_the_dispatch_now_builds_its_envelope_through_the_shared_helper():
+    """RE-POINTED 2026-09-08. THE TRIPWIRE FIRED AND NOBODY READ IT.
 
-    Kapag bumagsak ang test na ito ay may nagpalit na ng envelope source —
-    basahin ang `docs/DESIGN/PARTIAL_EXIT_PATH_B.md` §3.4a at tiyaking ang
-    bagong envelope ay galing sa MARKER at hindi sa isang broker-echoed na
-    halaga (kung galing sa broker, ang tseke ay tautolohiya)."""
+    This test used to assert `'**predecessor_request' in src` with a docstring
+    saying "when this fails, someone has changed the envelope source". It has been
+    RED since 2026-09-02, when 89cb0eb64 (#1292) replaced the inline copy with the
+    pure `_alpaca_replacement_successor_envelope`. It worked exactly as designed.
+    The failure simply went unread for six days, while the design document was
+    revised the following day still listing that work as outstanding (§4/D0).
+
+    A source guard is only useful if a red run is read. When this one fails again,
+    the question to ask is not "how do I make it green" but "did the envelope stop
+    coming from a value WE intend, and start coming from one the BROKER echoed?" —
+    because a broker-echoed size makes the whole lineage check a tautology.
+    """
     src = inspect.getsource(lr._dispatch_alpaca_replaced_deadman_successor)
-    assert '**predecessor_request' in src
-    assert 'requested_qty = float(predecessor_request["base_size"])' in src
+    assert "_alpaca_replacement_successor_envelope(" in src
+    assert "expected_successor_quantity=expected_successor_quantity" in src
+    # The inline copy is gone; if it ever comes back the shrink becomes
+    # unprovable again and PATH B is blocked without anyone being told.
+    assert "**predecessor_request" not in src
 
 
-def test_the_second_dispatch_gate_still_compares_local_qty_to_the_predecessor():
-    """Amendment 2. Ang gate na ito ay hindi nabanggit ng unang disenyo:
-    `abs(local_qty - requested_qty) <= tol` kung saan `requested_qty` ay ang
-    base_size ng PREDECESSOR (Q). Sa sandaling mapunan ang k na share ng
-    partial ay nagiging Q - k ang `local_qty` at ito ay
-    `replacement_deadman_successor_quantity_generation_mismatch` na
-    magpakailanman — kahit pa ma-certify ang unang gate."""
-    src = inspect.getsource(lr._dispatch_alpaca_replaced_deadman_successor)
-    assert "abs(local_qty - requested_qty) <= tol" in src
+def test_the_envelope_helper_licenses_a_shrink_and_only_a_shrink():
+    """The other half of what #1292 landed: the helper permits R <= Q and refuses
+    a successor LARGER than the order it replaces, which would arm a stop for
+    shares the position does not hold."""
+    src = inspect.getsource(lr._alpaca_replacement_successor_envelope)
+    assert "expected_successor_quantity" in src
+    assert "successor_qty <= predecessor_qty" in src
+
+
+def test_the_conservation_gate_now_anchors_on_covered_quantity():
+    """Amendment 2, re-pointed. The gate the first design missed compared
+    `local_qty` against the PREDECESSOR's base_size (Q), so a partial fill of k
+    made it `replacement_deadman_successor_quantity_generation_mismatch` forever.
+
+    It now lives in its own pure frame and anchors on `covered_qty` — the
+    successor plus whatever is reserved outside it — which is the quantity the
+    POSITION as a whole is expected to carry. That is the form PATH B needs: a
+    successor of Q-f with nothing reserved, against a local position already at
+    Q-f, conserves exactly.
+    """
+    src = inspect.getsource(lr._alpaca_replacement_quantity_frame)
+    assert "covered_qty = successor_qty + reserved_qty" in src
+    # And the old form is gone from the dispatcher.
+    dispatch_src = inspect.getsource(lr._dispatch_alpaca_replaced_deadman_successor)
+    assert "abs(local_qty - requested_qty) <= tol" not in dispatch_src
+    assert pb.conservation_holds(
+        broker_qty=_Q - 40.0, successor_qty=_R,
+        partial_qty=_F, partial_cum_filled=40.0,
+    ) is True
     # at ito ang tamang anyo na dapat pumalit dito:
     assert pb.conservation_holds(
         broker_qty=_Q - 40.0, successor_qty=_R,
@@ -179,12 +210,21 @@ def test_partially_filled_is_still_a_certifiably_active_lifecycle():
     ).ok is False
 
 
-def test_the_clamp_is_still_a_pass_through_noop_without_the_le_mirror():
-    """S2. Ang `_cancel_scale_limit_and_clamp` ay `if not oid: return
-    requested_qty` — kaya kapag ang cid ng sibling ay nasa claim lamang, ang
-    OVERSELL INVARIANT na ipinapangako ng docstring nito ay HINDI tumatakbo."""
+def test_the_clamp_is_still_a_pass_through_noop_without_a_resolvable_sibling():
+    """S2, RE-POINTED 2026-09-08 — same defect, wider door than when this was
+    written.
+
+    The clamp still returns the full requested quantity when no sibling sell can
+    be resolved, so the oversell invariant its own docstring promises does not run
+    on that path. What changed is where the id comes from: the ledger read
+    `le.get("scale_limit_order_id")` has been joined by a
+    `sibling_order_id_resolver`, so a sibling living only in a claim can now be
+    asserted by the caller instead of being invisible. That makes S2 SMALLER — the
+    resolver is the seam a wiring can feed — but it does not close it: with no
+    resolver and no ledger id, the pass-through is unchanged.
+    """
     src = inspect.getsource(lr._cancel_scale_limit_and_clamp)
-    assert 'oid = le.get("scale_limit_order_id")' in src
+    assert "sibling_order_id_resolver" in src
     assert "if not oid:" in src
     assert "return float(requested_qty)" in src
 
@@ -250,9 +290,14 @@ def test_the_two_seam_signatures_are_pinned_by_inspect_signature():
     adapter); ini-pin nito ang KONTRATA na binabanggit ng disenyo.
     """
     dispatch = _keyword_only_names(lr._dispatch_alpaca_replaced_deadman_successor)
+    # RE-POINTED 2026-09-08. #1292 added the two parameters PATH B needs, both
+    # keyword-only and both defaulted so every existing caller is byte-identical.
+    # Their presence is now part of the contract: losing them would take the
+    # remedy away again, which is what this pin exists to catch.
     assert dispatch == {
         "le", "product_id", "predecessor_transport", "predecessor_order",
         "avg_entry_price", "software_stop_price", "rearm_after_terminal",
+        "expected_successor_quantity", "quantity_reserved_outside_successor",
     }, sorted(dispatch)
 
     containment = _keyword_only_names(lr._service_deadman_replacement_containment)

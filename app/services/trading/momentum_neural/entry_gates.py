@@ -2768,7 +2768,7 @@ def _signed_tape_features(
         prev_px = px
         if sign != 0:
             last_sign = sign
-        parsed.append((ts, sign * sz, sz))
+        parsed.append((ts, sign * sz, sz, px))
         if ts is not None:
             t_min = ts if t_min is None else min(t_min, ts)
             t_max = ts if t_max is None else max(t_max, ts)
@@ -2823,7 +2823,7 @@ def _signed_tape_features(
             2.0 * math.ulp(t_max),
         )
 
-        def _is_front_half(point: tuple[float | None, float, float]) -> bool:
+        def _is_front_half(point: tuple[float | None, float, float, float]) -> bool:
             ts = point[0]
             if ts is None:
                 return False
@@ -2861,12 +2861,6 @@ def _signed_tape_features(
     front_buy_share = (front_buy / front_total) if front_total > 0 else None
     back_buy_share = (back_buy / back_total) if back_total > 0 else None
     tick_rate = len(back) / back_secs if back_secs > 0 else 0.0
-    # Self-relative floor: the per-half tick rates (front + back) form the symbol's OWN
-    # recent activity sample; the floor is the configured percentile of those rates.
-    half_rates = sorted(
-        [len(front) / front_secs if front_secs > 0 else 0.0,
-         len(back) / back_secs if back_secs > 0 else 0.0]
-    )
     try:
         fp = float(tick_rate_floor_pctile)
     except (TypeError, ValueError):
@@ -2874,14 +2868,151 @@ def _signed_tape_features(
     if not math.isfinite(fp):
         return None
     fp = max(0.0, min(1.0, fp))
-    # percentile of the small per-half-rate sample (nearest-rank, lower bound)
-    idx = min(len(half_rates) - 1, int(fp * (len(half_rates) - 1)))
-    tick_rate_floor = half_rates[idx] if half_rates else 0.0
+    # ── SELF-RELATIVE ACTIVITY FLOOR — RANKED IN PRINTS, NOT IN SECONDS ──────────
+    # WHAT WAS WRONG. The sample used to be the two per-half rates, so
+    # ``sorted([front_rate, back_rate])`` had length 2 and the nearest-rank index
+    # ``int(fp * (len - 1))`` collapsed to 0 for every fp < 1.0. The floor was
+    # therefore ``min(front_rate, back_rate)`` while ``tick_rate`` IS back_rate,
+    # so ``tick_rate >= tick_rate_floor`` reduced to
+    # ``back_rate >= min(front_rate, back_rate)`` — unconditionally true at EVERY
+    # configured percentile. Not merely permissive: decision-inert. The single
+    # live refusal receipt in the whole book carries the two values byte-identical
+    # (tick_rate 4.7707 / tick_rate_floor 4.7707, TNMG 2026-06-29). Three separate
+    # consumers read this pair as a gate — ``_l2_entry_confirm`` here,
+    # ``first_dip_tape_decision`` (:2238, :2275) and ``auto_arm`` (:701) — so the
+    # tautology silently disabled the activity leg in all three.
+    #
+    # WHAT REPLACES IT. The sample is now the rate of EVERY rolling window of
+    # ``m = len(back)`` consecutive prints across the whole window. The last such
+    # window is the back half by construction, so ``tick_rate`` is a member of the
+    # distribution it is ranked against — like-for-like, at the metric's own
+    # granularity. Crucially the window is defined by PRINT COUNT, not by seconds:
+    # m prints mean the same thing on a name printing 400/s and on one printing
+    # 6/min, whereas a fixed number of seconds does not. No new constant is
+    # introduced — m is the metric's existing split granularity.
+    _ts_seq = [pt[0] for pt in parsed if pt[0] is not None]
+    m = max(2, len(back))
+    roll_rates: list[float] = []
+    if len(_ts_seq) >= m:
+        for i in range(0, len(_ts_seq) - m + 1):
+            dt = _ts_seq[i + m - 1] - _ts_seq[i]
+            if dt > 0:
+                roll_rates.append((m - 1) / dt)
+    roll_rates.sort()
+    if roll_rates:
+        idx = min(len(roll_rates) - 1, int(fp * (len(roll_rates) - 1)))
+        tick_rate_floor = roll_rates[idx]
+    else:
+        # No usable timestamps ⇒ no distribution to rank against. A zero floor
+        # keeps every caller's documented fail-open contract: this leg must never
+        # manufacture a refusal out of missing data.
+        tick_rate_floor = 0.0
+    # ── POSITION IN OUR OWN MOVE, COUNTED IN PRINTS ─────────────────────────────
+    # The tape-native replacement for "is this a new N-second high". Measured on
+    # the live book: CHILI has never once entered on a new 60-second high (0 of 73
+    # doctrine winner legs) — it arrives at bursts that are already spent — and 24
+    # of those 73 legs (32.9%) printed their ENTIRE in-hold high within three
+    # seconds of the fill, carrying 48% of the whole capture gap. A window
+    # measured in seconds cannot separate those cases; a window measured in prints
+    # can, because it stretches and contracts with the tape itself.
+    #   prints_since_high == 0  ⇒ the newest print IS the high of the window
+    #   high_print_position     ⇒ that distance as a fraction of the window, so a
+    #                             value near 1.0 means the high is old in TAPE
+    #                             terms and the burst has been spent since.
+    # Reported only; no caller gates on these yet, by design — measure first.
+    _px_seq = [pt[3] for pt in parsed if pt[3] is not None]
+    prints_since_high: int | None = None
+    high_print_position: float | None = None
+    if _px_seq:
+        _hi = max(_px_seq)
+        _hi_idx = len(_px_seq) - 1 - _px_seq[::-1].index(_hi)  # newest such print
+        prints_since_high = (len(_px_seq) - 1) - _hi_idx
+        if len(_px_seq) > 1:
+            high_print_position = prints_since_high / float(len(_px_seq) - 1)
+    # ── SWING LOWS SPLIT BY PRINT COUNT, AND WHERE THE BUYING ACTUALLY HAPPENED ──
+    # The structure trail asks "has one full pullback-and-continue cycle completed
+    # above entry". Today it asks that of 5-MINUTE BARS, and a move that peaks at
+    # 13R can finish inside one of them — which is why `no_higher_low_above_entry`
+    # refused 54 probes whose mean peak was 13.53R. Split by COUNT (not by the
+    # timestamp midpoint the accel split uses) so each half holds the same number
+    # of prints: the comparison is then between equal populations regardless of how
+    # fast the tape happened to be running.
+    #   swing_low_prev / swing_low_now  -> a higher low, in prints
+    #   buy_support_px                  -> volume-weighted price of the AGGRESSOR-BUY
+    #                                      prints: the level where the buying really
+    #                                      happened, which the 5m EMA-9 only proxies
+    swing_low_prev: float | None = None
+    swing_low_now: float | None = None
+    if len(_px_seq) >= 4:
+        _mid = len(_px_seq) // 2
+        swing_low_prev = min(_px_seq[:_mid])
+        swing_low_now = min(_px_seq[_mid:])
+    _buy_notional = 0.0
+    _buy_size = 0.0
+    for pt in parsed:
+        if pt[1] > 0 and pt[3] is not None:      # signed volume > 0 => lifted the ask
+            _buy_notional += float(pt[3]) * float(pt[2])
+            _buy_size += float(pt[2])
+    buy_support_px = (_buy_notional / _buy_size) if _buy_size > 0 else None
+    # ── IS THE BUYING CARRYING? MEASURED SO THE WINDOW LENGTH CANNOT DECIDE IT ──
+    # `signed_tape_accel` above compares RAW aggressor-buy volume between two halves
+    # of the WINDOW split at the timestamp midpoint. Both of those choices make it
+    # unstable: the halves hold different numbers of prints, and the raw difference
+    # scales with whatever volume happened to land inside an arbitrary number of
+    # seconds. Measured on WYHG 2026-09-08 08:41:02, one instant, one symbol:
+    #     20-second window -> signed_tape_accel  -2,138
+    #     15-second window -> signed_tape_accel  +8,212
+    # Same tape, same moment, opposite sign — and 15 vs 20 seconds is an arbitrary
+    # setting, not a property of the market. Any gate reading that number inherits
+    # the instability.
+    #
+    # This is the same quantity asked properly: aggressor-buy SHARE of total volume
+    # (scale-free, so volume level cannot masquerade as direction) between halves
+    # split BY PRINT COUNT (equal populations, so the tape's speed cannot decide the
+    # split). Positive => the back half is more buy-dominated than the front, i.e.
+    # the buying is carrying.
+    buy_share_delta: float | None = None
+    if len(parsed) >= 4:
+        _h = len(parsed) // 2
+
+        def _buy_share(seq: list) -> float | None:
+            tot = sum(p[2] for p in seq)
+            if tot <= 0:
+                return None
+            return sum(p[1] for p in seq if p[1] > 0) / tot
+
+        _front_share, _back_share = _buy_share(parsed[:_h]), _buy_share(parsed[_h:])
+        if _front_share is not None and _back_share is not None:
+            buy_share_delta = _back_share - _front_share
     return {
         "signed_tape_accel": float(signed_tape_accel),
         "tick_rate": float(tick_rate),
         "tick_rate_floor": float(tick_rate_floor),
+        # How many samples the floor was actually ranked against. 0 or 1 means the
+        # percentile could not discriminate and the floor is permissive by
+        # construction — the receipt must say so rather than let a reader assume
+        # the knob was consulted. (The old code always had exactly 2 and never
+        # said so, which is how the tautology stayed invisible.)
+        "tick_rate_floor_n": int(len(roll_rates)),
         "n_ticks": int(n),
+        "prints_since_high": (
+            int(prints_since_high) if prints_since_high is not None else None
+        ),
+        "high_print_position": (
+            float(high_print_position) if high_print_position is not None else None
+        ),
+        "swing_low_prev": (
+            float(swing_low_prev) if swing_low_prev is not None else None
+        ),
+        "swing_low_now": (
+            float(swing_low_now) if swing_low_now is not None else None
+        ),
+        "buy_support_px": (
+            float(buy_support_px) if buy_support_px is not None else None
+        ),
+        "buy_share_delta": (
+            float(buy_share_delta) if buy_share_delta is not None else None
+        ),
         "front_buy_share": (
             float(front_buy_share) if front_buy_share is not None else None
         ),
@@ -3067,26 +3198,91 @@ def _l2_entry_confirm(
         dbg["ofi_agrees"] = bool(ofi_agrees)
         dbg["depth_rising"] = bool(depth_rising)
 
-        # PRIMARY confirm: the tape is accelerating AND active.
-        tape_confirms = accel > 0.0 and tick_rate >= tick_rate_floor
-        # CLEAR no-confirmation: tape NOT accelerating AND book flow net-selling.
+        # ── WHERE ARE WE IN THE MOVE, COUNTED IN PRINTS ─────────────────────────
+        # The old predicate deferred only on `accel <= 0 AND ofi < 0`. That
+        # conjunction produced exactly ONE defer in the entire live book (TNMG
+        # 2026-06-29). Run as a counterfactual over the eight WYHG entries of
+        # 2026-09-08 that cost -$212.83, with both kill switches forced on and
+        # nothing else changed, it would have deferred ZERO of them: OFI was
+        # positive at all eight (0.034 to 0.485), so the second leg never held.
+        # A rule that cannot fire is not a conservative rule; it is an absent one.
+        #
+        # Both of its legs were also clock-split measures, and the window length
+        # decides their sign (see `buy_share_delta` in `_signed_tape_features`).
+        # These two are counted in PRINTS instead, so an arbitrary number of
+        # seconds cannot flip the verdict:
+        #   high_print_position  0 => the newest print IS the window's high (we are
+        #                        at the leading edge); ->1 => the high is far behind
+        #                        us in tape terms and the burst has been spent since.
+        #   buy_share_delta      aggressor-buy SHARE of the back half minus the front
+        #                        half, halves split by print COUNT. > 0 => carrying.
+        hp = tape.get("high_print_position")
+        bsd = tape.get("buy_share_delta")
+        hp_f = None if hp is None else float(hp)
+        bsd_f = None if bsd is None else float(bsd)
+        dbg["high_print_position"] = None if hp_f is None else round(hp_f, 3)
+        dbg["buy_share_delta"] = None if bsd_f is None else round(bsd_f, 4)
+        # These two are STRUCTURAL POSITIONS in a normalised [0,1] index, not tuned
+        # values: "the high sits in the older half of the window" and "the high sits
+        # in the oldest quarter". They are settings so a derivation script can
+        # replace them with percentiles of their own live distribution once one
+        # exists — the field is new, so no distribution exists yet, and inventing a
+        # fitted number from eight observations would be exactly the overfit this
+        # programme keeps paying for.
+        try:
+            late_at = float(getattr(
+                settings, "chili_momentum_l2_confirm_late_arrival_position", 0.5) or 0.5)
+        except (TypeError, ValueError):
+            late_at = 0.5
+        try:
+            spent_at = float(getattr(
+                settings, "chili_momentum_l2_confirm_spent_position", 0.75) or 0.75)
+        except (TypeError, ValueError):
+            spent_at = 0.75
+        late = hp_f is not None and hp_f >= late_at
+        very_late = hp_f is not None and hp_f >= spent_at
+        carrying = bsd_f is not None and bsd_f > 0.0
+        not_carrying = bsd_f is not None and bsd_f <= 0.0
+        dbg.update({"late_arrival": bool(late), "spent_move": bool(very_late),
+                    "buying_carrying": bool(carrying)})
+
         ofi_negative = ofi_f is not None and ofi_f < 0.0
         clear_no_confirm = accel <= 0.0 and ofi_negative
 
-        if tape_confirms:
+        # PRIMARY confirm: at the leading edge of the move, with the tape behind it.
+        # `tick_rate >= tick_rate_floor` is no longer part of this: the floor was a
+        # tautology until the print-indexed ranking landed, and even now it gates
+        # only the narrative, never the decision.
+        if (not late) and (carrying or accel > 0.0):
             dbg["reason"] = "l2_confirm_tape_thrust"
             return "confirm", dbg
+        # DEFER 1 — the burst is spent. The high sits in the oldest quarter of the
+        # window in PRINT terms and the buying is not carrying. No book reading
+        # overrides this: the book cannot tell us we are early when the tape has
+        # already said we are late. This is the shape of every one of the four worst
+        # WYHG entries (high 55-94% behind at the moment of the buy).
+        if very_late and not_carrying:
+            dbg["reason"] = "l2_confirm_defer_spent_move"
+            return "defer", dbg
+        # DEFER 2 — late AND the buying is not carrying. Here the book still gets a
+        # say, because a late entry into demonstrably accumulating depth is the
+        # reclaim this lane is supposed to take.
+        if late and not_carrying:
+            if ofi_agrees or depth_rising:
+                dbg["reason"] = "l2_confirm_secondary_override"
+                return "confirm", dbg
+            dbg["reason"] = "l2_confirm_defer_late_no_carry"
+            return "defer", dbg
+        # DEFER 3 — the original leg, kept: dead tape AND net-selling book.
         if clear_no_confirm:
-            # conservative-active DEFER: only when the tape is dead/negative AND the book
-            # flow is net-selling. If any secondary confirmer disagrees with the bearish
-            # read (book buy-side or depth rising), give the benefit of the doubt + confirm.
             if ofi_agrees or depth_rising:
                 dbg["reason"] = "l2_confirm_secondary_override"
                 return "confirm", dbg
             dbg["reason"] = "l2_confirm_defer_no_tape"
             return "defer", dbg
-        # mixed (e.g. flat tape but OFI not negative, or accel<=0 with neutral book):
-        # CONSERVATIVE-ACTIVE ⇒ confirm (do not over-defer).
+        # Anything else — including every case where the print-indexed inputs are
+        # unreadable — confirms, as before. Missing data must never manufacture a
+        # refusal.
         dbg["reason"] = "l2_confirm_pass_mixed"
         return "confirm", dbg
     except Exception:

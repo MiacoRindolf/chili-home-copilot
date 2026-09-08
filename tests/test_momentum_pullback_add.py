@@ -324,3 +324,75 @@ def test_flag_off_full_tick_no_pullback_add(monkeypatch, db):
     assert final_pos.get("quantity") == pytest.approx(1000.0)
     assert final_pos.get("avg_entry_price") == pytest.approx(10.0)
     assert out.get("ok")
+
+
+# ── THE TAPE REPLACES THE SCORE AS FRONT-SIDE PROOF ─────────────────────────────
+# `front_side_strength` is a weight-renormalised mean of six terms where _sig01(0)
+# is exactly 0.5, so 56% of the weight sits on sigmoids that read 0.5 at neutral.
+# The score is pinned near 0.5 by construction and the floor is 0.50 — its own
+# neutral point. Over the whole live book: 139 pullback-add vetoes and ZERO fires;
+# `weak_front_side` is the largest single veto at 37; and front_side_strength's
+# median and MAXIMUM are the same number, 0.4611, sitting 0.0389 under the floor.
+# The adaptive path can only RAISE that floor, never lower it. With no fires there
+# is also no positive class, so the floor cannot be derived from its own receipts.
+#
+# The tape answers the same question directly and with full dynamic range.
+
+def test_the_tape_grants_the_add_when_the_score_alone_would_refuse():
+    """The exact live shape: strength at its observed ceiling, under the floor —
+    but the tape says the buying is carrying and we are at the leading edge."""
+    d = pullback_add_decision(**_fire_kwargs(
+        front_side_strength=0.4611, strength_floor=0.50,
+        buy_share_delta=0.08, high_print_position=0.10,
+    ))
+    assert d["fire"] is True, d.get("reason")
+    assert d["front_side_basis"] == "tape"
+
+
+def test_the_tape_refuses_when_the_buying_is_not_carrying():
+    """Not a blank cheque. Fading aggression refuses the add on its own."""
+    d = pullback_add_decision(**_fire_kwargs(
+        buy_share_delta=-0.05, high_print_position=0.10,
+    ))
+    assert d["fire"] is False
+    assert d["reason"] == "buying_not_carrying"
+
+
+def test_the_tape_refuses_a_dip_into_a_spent_move():
+    """A dip is only a dip while the move is still live. Once the high is far
+    behind us IN PRINTS this is a knife, and buying it is the thing the guard
+    exists to prevent."""
+    d = pullback_add_decision(**_fire_kwargs(
+        buy_share_delta=0.08, high_print_position=0.90,
+    ))
+    assert d["fire"] is False
+    assert d["reason"] == "dip_into_a_spent_move"
+
+
+def test_a_strong_score_does_not_override_a_dead_tape():
+    """Precedence is explicit: when the tape is readable, the tape decides."""
+    d = pullback_add_decision(**_fire_kwargs(
+        front_side_strength=0.99, strength_floor=0.50,
+        buy_share_delta=-0.01, high_print_position=0.05,
+    ))
+    assert d["fire"] is False
+    assert d["reason"] == "buying_not_carrying"
+
+
+def test_an_unreadable_tape_falls_back_to_the_score_unchanged():
+    """The fail-closed contract is untouched: half a tape reading is no reading."""
+    d = pullback_add_decision(**_fire_kwargs(
+        front_side_strength=0.30, strength_floor=0.50,
+        buy_share_delta=0.08, high_print_position=None,
+    ))
+    assert d["fire"] is False
+    assert d["reason"] == "weak_front_side"
+    assert d["front_side_basis"] == "score"
+
+
+def test_callers_that_pass_no_tape_are_byte_identical():
+    """Every existing call site passes neither field; nothing about them moves."""
+    assert pullback_add_decision(**_fire_kwargs())["fire"] is True
+    assert pullback_add_decision(
+        **_fire_kwargs(front_side_strength=0.30)
+    )["reason"] == "weak_front_side"
