@@ -52,7 +52,8 @@ SELECT o.id, o.symbol, o.exit_reason, o.hold_seconds, o.terminal_at,
 FROM momentum_automation_outcomes o
 JOIN trading_automation_sessions s ON s.id = o.session_id
 WHERE o.mode = 'live'
-  AND o.exit_reason IN ('bailout', 'trail_stop', 'stop')
+  AND (:all_exits OR o.exit_reason IN ('bailout', 'trail_stop', 'stop'))
+  AND o.exit_reason IS NOT NULL
   AND o.hold_seconds BETWEEN 1 AND 7200
   AND (s.risk_snapshot_json->'momentum_live_execution'->>'last_exit_entry_price') IS NOT NULL
   AND (:since IS NULL OR o.terminal_at >= CAST(:since AS timestamp))
@@ -88,6 +89,9 @@ def main() -> int:
     ap.add_argument("--since", default=None)
     ap.add_argument("--max-datapoints", type=int, default=15000)
     ap.add_argument("--json", default=None, help="write the per-trade rows here")
+    ap.add_argument("--all-exits", action="store_true",
+                    help="include WINNING exits (target, max_hold, ...) too — needed when "
+                         "the question is about entries rather than about losses.")
     ap.add_argument(
         "--after-minutes", type=float, default=0.0,
         help="also measure the peak in [exit, exit+N min] — what the move did "
@@ -110,8 +114,9 @@ def main() -> int:
     eng = create_engine(args.database_url, pool_pre_ping=True)
     with eng.connect() as cx:
         cx.execute(text("SET statement_timeout = '60s'"))
-        rows = cx.execute(text(_SQL), {"since": args.since, "lim": args.limit}).fetchall()
-    print(f"losing trades   : {len(rows)}")
+        rows = cx.execute(text(_SQL), {"since": args.since, "lim": args.limit,
+                                       "all_exits": bool(args.all_exits)}).fetchall()
+    print(f"trades          : {len(rows)}" + ("  (lahat ng exit)" if args.all_exits else "  (talo lang)"))
 
     out, no_data, errors = [], 0, 0
     with IQFeedLookupClient() as client:
