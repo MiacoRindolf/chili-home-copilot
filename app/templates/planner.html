@@ -141,6 +141,53 @@
   .filter-clear:hover { color: var(--accent); }
 
   /* ── Stats strip ─────────────────────────────────────────── */
+  /* ── GLANCE BAR (2026-09-07) ────────────────────────────────────────────
+     Pumalit sa apat na matabang stat card. Ang lumang strip ay kumakain ng ~90px
+     ng patayong espasyo para sa apat na numero na kayang basahin sa isang linya —
+     at hindi nito sinasabi ang PROPORSIYON, na siyang tunay na tanong: gaano
+     kalayo na tayo at ano ang naka-block. Ang bar ay parehong impormasyon sa
+     isang hilera, at ang HABA mismo ang sagot. */
+  .glance { display: flex; align-items: center; gap: 14px; margin-bottom: 14px; flex-wrap: wrap; }
+  .glance-bar {
+    flex: 1; min-width: 220px; height: 10px; border-radius: 5px; overflow: hidden;
+    display: flex; background: var(--code-bg); border: 1px solid var(--border);
+  }
+  .glance-seg { height: 100%; transition: width .25s ease; }
+  .glance-seg.done { background: #22c55e; }
+  .glance-seg.prog { background: #f59e0b; }
+  .glance-seg.block { background: #ef4444; }
+  .glance-seg.todo { background: transparent; }
+  .glance-keys { display: flex; gap: 12px; flex-wrap: wrap; align-items: center; }
+  .glance-key { display: flex; align-items: center; gap: 5px; font-size: 12px; color: var(--text-secondary); }
+  .glance-key b { color: var(--text); font-variant-numeric: tabular-nums; }
+  .glance-dot { width: 8px; height: 8px; border-radius: 2px; flex-shrink: 0; }
+  .glance-pct { font-size: 20px; font-weight: 700; font-variant-numeric: tabular-nums; color: var(--text); }
+
+  /* ── INLINE PREVIEW + DENSITY ───────────────────────────────────────────
+     Ang unang reklamo: hindi makita ang laman nang hindi binubuksan ang task.
+     Isang linya ng deskripsiyon kada hilera ang nagsasara niyon nang hindi
+     ginagawang kalat. `compact` ang default — 20 item ang kasya sa isang screen. */
+  .task-desc {
+    font-size: 12px; color: var(--text-muted); margin-top: 3px; line-height: 1.45;
+    display: -webkit-box; -webkit-line-clamp: 1; -webkit-box-orient: vertical; overflow: hidden;
+  }
+  body.dense-cozy .task-desc { -webkit-line-clamp: 2; }
+  body.dense-compact .task-row { padding-top: 7px; padding-bottom: 7px; }
+  body.dense-compact .task-meta { margin-top: 2px; }
+  body.dense-compact .task-desc { margin-top: 2px; }
+  .density-toggle { display: inline-flex; border: 1px solid var(--border); border-radius: 7px; overflow: hidden; }
+  .density-toggle button {
+    background: none; border: 0; color: var(--text-muted); font-size: 11px;
+    padding: 4px 9px; cursor: pointer; font-weight: 600;
+  }
+  .density-toggle button.active { background: var(--code-bg); color: var(--text); }
+
+  /* Ang Team Overview ay 17 pangalan na kumakain ng buong sidebar. Titiklop. */
+  .sidebar-section-title.collapsible { cursor: pointer; display: flex; align-items: center; gap: 6px; user-select: none; }
+  .sidebar-section-title.collapsible:hover { color: var(--text-secondary); }
+  .sidebar-caret { transition: transform .18s ease; display: inline-block; font-size: 9px; }
+  .sidebar-caret.closed { transform: rotate(-90deg); }
+
   .stats-strip { display: flex; gap: 12px; margin-bottom: 16px; flex-wrap: wrap; }
   .mini-stat {
     flex: 1; min-width: 100px; padding: 14px 16px; border-radius: 10px;
@@ -365,21 +412,37 @@
 
   /* ── Slide-out detail panel ──────────────────────────────── */
   .detail-overlay {
-    position: fixed; inset: 0; background: rgba(0,0,0,.3); z-index: 200;
+    /* Mas madilim at may lamlam ngayon: gitnang modal na ito, at ang scrim ang
+       nagsasabing walang binabasa sa likod. Ang 0.3 ay para sa drawer sa gilid. */
+    position: fixed; inset: 0; background: rgba(0,0,0,.62); z-index: 200;
     display: none; animation: fadeIn .15s ease;
+    -webkit-backdrop-filter: blur(2px); backdrop-filter: blur(2px);
   }
   .detail-overlay.open { display: block; }
+  /* ── TASK DETAIL: gitnang pahina, hindi drawer (2026-09-07) ──────────────
+     Ito ay 680px na nakadikit sa kanan, at pagkatapos ng 240px na kanang haligi
+     ay 440px na lang ang natitira para sa pamagat, deskripsiyon, coding cockpit,
+     subtask, komento AT activity. Ang isang task na may tunay na ebidensya ay
+     hindi kayang basahin doon — at wala namang dahilan para nasa gilid ito:
+     walang binabasa sa likod nito habang bukas. Isang gitnang surface na may
+     tunay na sukat ng pagbasa, at ang backdrop ang nagsasabing modal ito. */
   .detail-panel {
-    position: fixed; top: 0; right: 0; bottom: 0; width: 680px; max-width: 100vw;
-    background: var(--bg); box-shadow: -4px 0 24px rgba(0,0,0,.15);
+    position: fixed; inset: 0; margin: auto;
+    width: min(1120px, 94vw); height: min(880px, 92vh);
+    background: var(--bg); border: 1px solid var(--border); border-radius: 14px;
+    box-shadow: 0 24px 64px rgba(0,0,0,.45), 0 2px 8px rgba(0,0,0,.25);
     z-index: 201; display: none; flex-direction: column; overflow: hidden;
-    animation: slideIn .2s ease;
+    animation: detailIn .16s ease;
   }
   .detail-panel.open { display: flex; }
-  @keyframes slideIn { from { transform: translateX(40px); opacity: 0; } to { transform: none; opacity: 1; } }
+  @keyframes detailIn {
+    from { transform: translateY(10px) scale(.985); opacity: 0; }
+    to   { transform: none; opacity: 1; }
+  }
+  @media (prefers-reduced-motion: reduce) { .detail-panel { animation: none; } }
 
   .detail-header {
-    display: flex; align-items: center; gap: 10px; padding: 16px 20px;
+    display: flex; align-items: center; gap: 10px; padding: 14px 22px;
     border-bottom: 1px solid var(--border); flex-shrink: 0;
   }
   .detail-header .detail-task-id { font-size: 12px; font-weight: 700; color: var(--text-muted); }
@@ -390,15 +453,36 @@
   .detail-header .detail-close:hover { background: var(--code-bg); color: var(--text); }
 
   .detail-body { display: flex; flex: 1; overflow: hidden; }
-  .detail-left { flex: 1; overflow-y: auto; padding: 20px; border-right: 1px solid var(--border); }
-  .detail-right { width: 240px; min-width: 240px; overflow-y: auto; padding: 16px; }
+  .detail-left { flex: 1; min-width: 0; overflow-y: auto; padding: 26px 30px; border-right: 1px solid var(--border); }
+  .detail-right { width: 300px; min-width: 300px; overflow-y: auto; padding: 22px 20px; background: var(--bg-header); }
 
+  /* Sukat ng pagbasa: ~72ch. Ang buong 800px na linya ay pagod basahin. */
+  .detail-left > * { max-width: 74ch; }
   .detail-left h2 {
-    font-size: 18px; font-weight: 700; margin-bottom: 12px; outline: none;
+    font-size: 24px; font-weight: 700; line-height: 1.3; margin-bottom: 16px; outline: none;
+    text-wrap: balance;
   }
+  .detail-left h2:focus { box-shadow: 0 0 0 2px var(--accent); border-radius: 6px; }
   .detail-left .detail-desc {
-    width: 100%; min-height: 60px; resize: vertical; margin-bottom: 16px;
-    padding: 8px 10px; border-radius: 8px; font-size: 13px; font-family: inherit;
+    width: 100%; min-height: 220px; resize: vertical; margin-bottom: 20px;
+    padding: 14px 16px; border-radius: 10px; font-size: 14px; line-height: 1.62;
+    font-family: ui-monospace, 'SF Mono', 'Cascadia Mono', Menlo, Consolas, monospace;
+    border: 1px solid var(--input-border); background: var(--input-bg); color: var(--text);
+    white-space: pre-wrap;
+  }
+  .detail-desc:focus { outline: none; border-color: var(--accent); }
+  /* Ang kanang haligi ay puro form control — bigyan sila ng hininga at label na nababasa. */
+  /* ⚠️ `.detail-right label` ay MASYADONG MALAWAK — tinamaan nito ang label ng checkbox na
+     "Show coding workflow (off by default)" at ginawa itong tatlong linyang uppercase na
+     mas malaki pa sa kontrol mismo. Ang field label ay ang HINDI naglalaman ng input. */
+  .detail-right label:not(:has(input)), .detail-right .detail-field-label {
+    font-size: 10.5px; letter-spacing: .09em; text-transform: uppercase;
+    color: var(--text-muted); font-weight: 700; display: block; margin-bottom: 6px;
+  }
+  /* Ang checkbox row ay pangungusap, hindi label — pabayaan sa sarili nitong estilo. */
+  .detail-right label:has(input[type="checkbox"]) { text-transform: none; letter-spacing: normal; }
+  .detail-right select, .detail-right input[type="date"], .detail-right input[type="number"] {
+    width: 100%; padding: 8px 10px; font-size: 13px; border-radius: 8px;
     border: 1px solid var(--input-border); background: var(--input-bg); color: var(--text);
   }
 
@@ -615,7 +699,10 @@
     .planner-chat-panel { width: 100%; min-width: 100%; max-height: 50vh; border-left: none; border-top: 1px solid var(--border); }
     .planner-chat-panel.collapsed { width: 0; min-width: 0; max-height: 0; overflow: hidden; }
     .planner-chat-open-btn { min-height: 44px; }
-    .detail-panel { width: 100vw; max-width: 100vw; }
+    .detail-panel { width: 100vw; max-width: 100vw; height: 100vh; border-radius: 0; border: 0; }
+    .detail-left { padding: 18px 16px; }
+    .detail-left > * { max-width: none; }
+    .detail-left h2 { font-size: 20px; }
     .detail-body { flex-direction: column; }
     .detail-right { width: 100%; min-width: 100%; border-top: 1px solid var(--border); border-left: none; }
   }
@@ -654,7 +741,10 @@
       <button class="new-project-btn" onclick="openNewProjectModal()">+ New Project</button>
     </div>
     <div class="sidebar-section" style="border-top:1px solid var(--border);">
-      <div class="sidebar-section-title">Team Overview</div>
+      <div class="sidebar-section-title collapsible"
+           onclick="toggleSidebarSection('user-summary-list','team-caret')">
+        <span class="sidebar-caret" id="team-caret">&#9660;</span> Team Overview
+      </div>
       <div id="user-summary-list"></div>
     </div>
   </aside>
@@ -944,6 +1034,57 @@ var COLORS = ['#6366f1','#3b82f6','#06b6d4','#10b981','#22c55e','#eab308','#f59e
 var AVATAR_COLORS = ['#6366f1','#3b82f6','#10b981','#f59e0b','#ef4444','#ec4899','#8b5cf6','#06b6d4'];
 
 function esc(s) { var d = document.createElement('div'); d.textContent = s; return d.innerHTML; }
+
+/* ── Density, inline preview, collapsible sections (2026-09-07) ─────────────
+   Tatlong reklamo, isang pinagmulan: masyadong maraming espasyo ang chrome at
+   masyadong kaunti ang nilalaman. Ang bawat kagustuhan ay nasa localStorage kaya
+   hindi na kailangang ulitin sa bawat pagbukas. */
+function descSnippet(d) {
+  if (!d) return '';
+  // Unang makahulugang linya: laktawan ang blangko at ang mga guhit-pambukod.
+  var lines = String(d).split('\n');
+  for (var i = 0; i < lines.length; i++) {
+    var ln = lines[i].trim();
+    if (ln && !/^[-=_*\s]+$/.test(ln)) {
+      return ln.length > 150 ? ln.slice(0, 150) + '…' : ln;
+    }
+  }
+  return '';
+}
+
+function setDensity(mode) {
+  var m = (mode === 'cozy') ? 'cozy' : 'compact';
+  document.body.classList.remove('dense-compact', 'dense-cozy');
+  document.body.classList.add('dense-' + m);
+  try { localStorage.setItem('planner.density', m); } catch (e) {}
+  var a = document.getElementById('dens-compact'), b = document.getElementById('dens-cozy');
+  if (a) a.classList.toggle('active', m === 'compact');
+  if (b) b.classList.toggle('active', m === 'cozy');
+}
+
+function initDensity() {
+  var m = 'compact';
+  try { m = localStorage.getItem('planner.density') || 'compact'; } catch (e) {}
+  setDensity(m);
+}
+
+function toggleSidebarSection(id, caretId) {
+  var el = document.getElementById(id), c = document.getElementById(caretId);
+  if (!el) return;
+  var open = el.style.display !== 'none';
+  el.style.display = open ? 'none' : '';
+  if (c) c.classList.toggle('closed', open);
+  try { localStorage.setItem('planner.section.' + id, open ? 'closed' : 'open'); } catch (e) {}
+}
+
+function initSidebarSections() {
+  // Ang Team Overview ay 17 pangalan na kumakain ng buong sidebar bago mo pa
+  // makita ang mga proyekto. Nakatiklop bilang default; naaalala ang pinili mo.
+  var v = 'closed';
+  try { v = localStorage.getItem('planner.section.user-summary-list') || 'closed'; } catch (e) {}
+  var el = document.getElementById('user-summary-list'), c = document.getElementById('team-caret');
+  if (el && v === 'closed') { el.style.display = 'none'; if (c) c.classList.add('closed'); }
+}
 function simpleMarkdown(html) {
   var s = esc(html);
   var lines = s.split('\n');
@@ -1132,12 +1273,31 @@ function renderProjectView() {
       '</div>' +
     '</div>';
 
+  // GLANCE BAR — ang buong estado ng proyekto sa isang hilera. Ang proporsiyon ang
+  // sagot sa "kumusta na tayo", hindi ang apat na hiwalay na numero: ang haba ng
+  // bawat bahagi ay ang bahagi mismo, at ang pula ay nakikita bago mo pa mabasa.
+  var todoN = Math.max(0, total - done - inProg - blocked);
+  var seg = function(n) { return total ? (n / total * 100) : 0; };
   html +=
-    '<div class="stats-strip">' +
-      '<div class="mini-stat"><div class="mini-stat-val blue">' + total + '</div><div class="mini-stat-label">Total</div></div>' +
-      '<div class="mini-stat"><div class="mini-stat-val green">' + done + '</div><div class="mini-stat-label">Done</div></div>' +
-      '<div class="mini-stat"><div class="mini-stat-val orange">' + inProg + '</div><div class="mini-stat-label">In Progress</div></div>' +
-      '<div class="mini-stat"><div class="mini-stat-val red">' + (blocked + overdue) + '</div><div class="mini-stat-label">Blocked/Overdue</div></div>' +
+    '<div class="glance">' +
+      '<span class="glance-pct">' + pct + '%</span>' +
+      '<div class="glance-bar" title="' + done + ' tapos · ' + inProg + ' ginagawa · ' + blocked + ' naka-block · ' + todoN + ' bukas">' +
+        '<div class="glance-seg done" style="width:' + seg(done) + '%"></div>' +
+        '<div class="glance-seg prog" style="width:' + seg(inProg) + '%"></div>' +
+        '<div class="glance-seg block" style="width:' + seg(blocked) + '%"></div>' +
+        '<div class="glance-seg todo" style="width:' + seg(todoN) + '%"></div>' +
+      '</div>' +
+      '<div class="glance-keys">' +
+        '<span class="glance-key"><span class="glance-dot" style="background:#22c55e"></span><b>' + done + '</b> done</span>' +
+        '<span class="glance-key"><span class="glance-dot" style="background:#f59e0b"></span><b>' + inProg + '</b> in progress</span>' +
+        '<span class="glance-key"><span class="glance-dot" style="background:#ef4444"></span><b>' + (blocked + overdue) + '</b> blocked' + (overdue ? '/overdue' : '') + '</span>' +
+        '<span class="glance-key"><span class="glance-dot" style="background:var(--border)"></span><b>' + todoN + '</b> open</span>' +
+        '<span class="glance-key" style="color:var(--text-muted);">of <b>' + total + '</b></span>' +
+      '</div>' +
+      '<div class="density-toggle" title="List density">' +
+        '<button id="dens-compact" onclick="setDensity(\'compact\')">Compact</button>' +
+        '<button id="dens-cozy" onclick="setDensity(\'cozy\')">Cozy</button>' +
+      '</div>' +
     '</div>';
 
   html += buildFilterBar();
@@ -1161,6 +1321,12 @@ function renderProjectView() {
 
   var qti = document.getElementById('quick-task-input');
   if (qti) qti.addEventListener('keydown', function(e) { if (e.key === 'Enter') { e.preventDefault(); quickAddTask(); } });
+
+  // Muling itinatayo ang toggle sa bawat render, kaya kailangang ibalik ang piniling
+  // estado nito — kung hindi, mawawalan ng highlight ang aktibong mode.
+  var dm = 'compact';
+  try { dm = localStorage.getItem('planner.density') || 'compact'; } catch (e) {}
+  setDensity(dm);
 
   renderCurrentView();
 }
@@ -1324,6 +1490,9 @@ function renderListView() {
       '<div class="task-info">' +
         '<span class="task-id-label">' + esc(taskKey(t)) + '</span>' +
         '<span class="task-title ' + (t.status === 'done' ? 'done' : '') + '">' + esc(t.title) + '</span>' +
+        // INLINE PREVIEW: ang unang linya ng deskripsiyon. Walang laman ang isang
+        // listahan ng 20 pamagat kung ang ebidensya ay nasa loob ng bawat isa.
+        (t.description ? '<div class="task-desc">' + esc(descSnippet(t.description)) + '</div>' : '') +
         (meta ? '<div class="task-meta">' + meta + '</div>' : '') +
       '</div>' +
       (t.progress > 0 ? '<div class="task-progress-mini"><div class="task-progress-fill" style="width:' + t.progress + '%;"></div></div>' : '') +
@@ -1692,6 +1861,21 @@ function openDetailPanel(taskId) {
   document.getElementById('detail-panel').classList.add('open');
   loadDetailTask(taskId);
 }
+
+/* Gitnang modal na ito ngayon, kaya kailangan ang Escape — inaasahan iyon ng lahat sa
+   isang modal, at ang drawer ay walang ganito. Hindi ito humaharang sa pag-type: kapag
+   nasa loob ka ng textarea o ng contenteditable, ang Escape ay nag-a-alis lang ng focus. */
+document.addEventListener('keydown', function(e) {
+  if (e.key !== 'Escape') return;
+  var p = document.getElementById('detail-panel');
+  if (!p || !p.classList.contains('open')) return;
+  var a = document.activeElement;
+  if (a && (a.tagName === 'TEXTAREA' || a.tagName === 'INPUT' || a.isContentEditable)) {
+    a.blur();
+    return;
+  }
+  closeDetailPanel();
+});
 
 function closeDetailPanel() {
   saveDetailFields();
@@ -2657,8 +2841,10 @@ function runCodingValidation() {
 
 /* ── Init ─────────────────────────────────────────────────── */
 wireCodingPanelOnce();
+initDensity();          // bago ang unang render, para hindi kumurap ang listahan
 renderSidebar();
 renderUserSummaries();
+initSidebarSections();  // pagkatapos ng render — kailangan nitong umiral ang node
 if (projects.length > 0) {
   if (PLANNER_DEEP_LINK && plannerDeepLinkProjectInSidebar(PLANNER_DEEP_LINK.pid)) {
     selectProject(PLANNER_DEEP_LINK.pid);
