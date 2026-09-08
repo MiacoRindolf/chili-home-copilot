@@ -46774,7 +46774,29 @@ def tick_live_session(
                         # for the controlled-depth band. high_water_mark is the position HWM;
                         # the move base = the starter entry (a conservative range floor that
                         # makes depth_frac a fraction of the BANKED move, never inflated).
-                        _hwm_p = _float_or_none(pos.get("high_water_mark")) or float(bid)
+                        # ⚠️ SAME SERIES ON BOTH ENDS. The position HWM is the peak BID
+                        # (:41466 `max(prev, bid)`), while `pullback_low` is a bar LOW off
+                        # the micro-bar TAPE frame. Bid < trade, so on a name whose spread
+                        # is wider than the dip, the bar low prints ABOVE the peak bid and
+                        # depth_frac comes out NEGATIVE -- a pullback that is deeper than
+                        # zero percent of the move. Measured 2026-09-08: 5 of 18
+                        # `pullback_too_shallow` vetoes were negative (MOVE -0.5714,
+                        # RKTO -0.3333, BIAF -0.0789/-0.0152, LHAI -0.0625), every one of
+                        # them with pullback_low > prior_low -- the higher low the gate is
+                        # looking for. Take the move top from the SAME tape the dip low
+                        # comes from; the peak bid can only ever under-report it.
+                        _hwm_pos_p = _float_or_none(pos.get("high_water_mark"))
+                        _hwm_frame_p = None
+                        try:
+                            if _df_pba is not None and not getattr(_df_pba, "empty", True):
+                                _hwm_frame_p = float(_df_pba["High"].astype(float).max())
+                                if not math.isfinite(_hwm_frame_p):
+                                    _hwm_frame_p = None
+                        except Exception:
+                            _hwm_frame_p = None
+                        _hwm_p = max(
+                            [v for v in (_hwm_pos_p, _hwm_frame_p, float(bid)) if v is not None]
+                        )
                         _move_base_p = min(_a0_p, _shelf_p)
                         _move_range_p = (_hwm_p - _move_base_p) if (_hwm_p and _move_base_p) else None
                         # The PRIOR higher-low = the ratcheting shelf (the level the new dip
@@ -46921,6 +46943,19 @@ def tick_live_session(
                                     "pullback_low": _pb_low,
                                     "prior_low": _prior_low_p,
                                     "depth_frac": _decn_p.get("pullback_depth_frac"),
+                                    # The depth INPUTS, so a band change can be priced from
+                                    # recorded receipts instead of a fresh replay -- without
+                                    # these the only question you can answer about a veto is
+                                    # "was it outside the band", never "by how much, and why".
+                                    "hwm": _hwm_p,
+                                    "hwm_pos": _hwm_pos_p,
+                                    "hwm_frame": _hwm_frame_p,
+                                    "move_base": _move_base_p,
+                                    "move_range": _move_range_p,
+                                    "depth_lo": round(float(getattr(
+                                        settings, "chili_momentum_pullback_add_depth_lo_frac", 0.20) or 0.20), 4),
+                                    "depth_hi": round(float(getattr(
+                                        settings, "chili_momentum_pullback_add_depth_hi_frac", 0.62) or 0.62), 4),
                                 })
                         elif not (_R0_p and _R0_p > 0):
                             _emit(db, sess, "live_pullback_add_vetoed", {"reason": "bad_R0"})
