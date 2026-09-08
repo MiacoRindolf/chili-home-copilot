@@ -92,6 +92,12 @@ def main() -> int:
         "--after-minutes", type=float, default=0.0,
         help="also measure the peak in [exit, exit+N min] — what the move did "
              "AFTER we got out. This is the 'left on the table' number.")
+    ap.add_argument(
+        "--pre-seconds", type=float, default=0.0,
+        help="also measure the run in [entry-N s, entry] — how far the move had "
+             "ALREADY gone when we arrived. The late-arrival separator ([6]) was "
+             "fitted in-sample at +10%% over 30 s; this is how to test it out of "
+             "sample.")
     args = ap.parse_args()
     if not args.database_url:
         print("DATABASE_URL is required.", file=sys.stderr)
@@ -135,6 +141,32 @@ def main() -> int:
                 "pnl": (float(pnl) if pnl is not None else None),
                 "ticks": res.n_records,
             }
+            # How far the move had ALREADY gone when we arrived.
+            if args.pre_seconds > 0:
+                pre_start = entry_at - timedelta(seconds=args.pre_seconds)
+                try:
+                    res0 = client.htt(symbol, _iq_ts(pre_start), _iq_ts(entry_at),
+                                      max_datapoints=args.max_datapoints)
+                    lines0 = [] if (res0.error or res0.no_data) else res0.lines
+                except Exception:                          # noqa: BLE001
+                    lines0 = []
+                prices, vol = [], 0.0
+                for line in lines0:
+                    parts = line.split(",")
+                    if len(parts) < 4 or parts[0] != "LH":
+                        continue
+                    try:
+                        prices.append(float(parts[2]))
+                        vol += float(parts[3])
+                    except (TypeError, ValueError):
+                        continue
+                if prices:
+                    low = min(prices)
+                    row["pre_run_pct"] = (round((e / low - 1.0) * 100.0, 3)
+                                          if low > 0 else None)
+                    row["pre_vol_rate"] = round(vol / max(1.0, args.pre_seconds), 1)
+                    row["pre_ticks"] = len(prices)
+
             # What the move did AFTER we got out: the spike we were not in for.
             if args.after_minutes > 0:
                 after_end = exit_at + timedelta(minutes=args.after_minutes)
@@ -164,6 +196,24 @@ def main() -> int:
         print(f"  reached 1R    : {len(at_1r)}/{len(with_r)}")
         print(f"  reached 2.5R  : {len(at_target)}/{len(with_r)}   <- winners given back")
         print(f"  best R seen   : {max(x['peak_r'] for x in with_r)}")
+    pre = [x for x in out if x.get("pre_run_pct") is not None]
+    if pre:
+        # The in-sample separator from [6]: a "late arrival" had already run +10%
+        # over the prior 30 s and printed ~19k sh/s in the last stretch, while the
+        # good entries sat near +4% and ~8k. Out of sample, does the split hold?
+        late = [x for x in pre if x["pre_run_pct"] >= 10.0]
+        early = [x for x in pre if x["pre_run_pct"] < 10.0]
+        def _avg(rows, key):
+            vals = [r[key] for r in rows if r.get(key) is not None]
+            return round(sum(vals) / len(vals), 2) if vals else None
+        print(f"\nBEFORE THE ENTRY (-{args.pre_seconds:g} s), n={len(pre)}")
+        print(f"  already ran >= +10%  : {len(late)}/{len(pre)}   "
+              f"avg peak-in-trade {_avg(late, 'peak_pct')}%   avg pnl {_avg(late, 'pnl')}")
+        print(f"  ran < +10%           : {len(early)}/{len(pre)}   "
+              f"avg peak-in-trade {_avg(early, 'peak_pct')}%   avg pnl {_avg(early, 'pnl')}")
+        print(f"  vol rate late vs early: {_avg(late, 'pre_vol_rate')} vs "
+              f"{_avg(early, 'pre_vol_rate')} sh/s")
+
     post = [x for x in out if x.get("post_peak_pct_from_entry") is not None]
     if post:
         ran_on = [x for x in post
