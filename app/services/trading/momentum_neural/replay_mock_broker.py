@@ -592,6 +592,9 @@ class MockBrokerAdapter:
         self._replaced_by: dict[str, str] = {}
         self._replaces: dict[str, str] = {}
         self._replace_ack_ticks: int = 0
+        # A resting SELL reserves its qty at the venue; modelling it is what
+        # forces a wiring to wait for the shrink to go terminal, as live does.
+        self._enforce_qty_available: bool = True
         self._fills: list[NormalizedFill] = []
         self._order_seq = itertools.count(1)
         self._slippage_bps = float(slippage_bps)
@@ -2422,6 +2425,62 @@ class MockBrokerAdapter:
         time_in_force: Optional[str] = None,
         extended_hours: bool = False,
     ) -> dict[str, Any]:
+        # ── THE RESERVATION THE REAL VENUE ENFORCES AND NOBODY MODELLED ────────
+        # A resting SELL holds its whole quantity: the broker will not let a second
+        # sell touch shares the first one has already claimed. That single fact is
+        # the reason PATH B exists — the full-qty deadman consumes `qty_available`,
+        # so a partial cannot be placed until the stop is shrunk AND the shrink is
+        # terminal.
+        #
+        # `qty_available` appeared in this repository only inside comments: not in
+        # this mock, not in the runner. So a wiring that sold the partial before the
+        # replace went terminal would have FILLED here and been REJECTED live, and
+        # the bench would have blessed it. That is the same mock-certifies-what-the-
+        # venue-rejects failure the replace verb's tests were written against, hiding
+        # one level down in the reservation model rather than in the verb.
+        if self._enforce_qty_available and str(side or "").lower() in {"sell", "ask", "short"}:
+            _pid = str(product_id or "").strip().upper()
+            try:
+                _want = float(base_size)
+            except (TypeError, ValueError):
+                _want = 0.0
+            _held = float(self.get_position_quantity_truth(_pid)["quantity"])
+            # An OCO bracket reserves its shares ONCE. The parent and its stop leg are
+            # two rows for one reservation — counting both would refuse a sell the
+            # venue allows, which is the mirror error of letting one through.
+            _oco_leg_ids = {
+                str(_m.get("leg_id")) for _m in (getattr(self, "_oco", {}) or {}).values()
+                if _m.get("leg_id")
+            }
+            _reserved = 0.0
+            for _oid, _o in self._orders.items():
+                if _o.product_id != _pid:
+                    continue
+                if str(_o.side or "").lower() not in {"sell", "ask", "short"}:
+                    continue
+                if str(_o.status or "").lower() != "open":
+                    continue
+                if str(_oid) in _oco_leg_ids:
+                    continue
+                _reserved += max(0.0, float(_o.base_size) - float(_o.filled_size))
+            # NARROWED DELIBERATELY. The claim being modelled is "a resting SELL
+            # reserves its own shares", not "you cannot sell what you do not hold".
+            # The mock has never modelled the latter and several suites place sells
+            # against a synthetic flat book; breaking them would be scope creep with
+            # no bearing on PATH B. So the check binds only when something is
+            # actually resting — which is exactly the deadman case it exists for.
+            _available = _held - _reserved
+            if _reserved > 0.0 and _want > _available + 1e-9:
+                return {
+                    "ok": False,
+                    "venue": _VENUE,
+                    "error": "insufficient_qty_available",
+                    "requested_qty": _want,
+                    "position_qty": _held,
+                    "reserved_qty": _reserved,
+                    "available_qty": _available,
+                    "client_order_id": client_order_id,
+                }
         q = self._quote_for(product_id)
         if q is None:
             # no_bbo reject — the runner takes the place-failed / no_bbo decline branch.

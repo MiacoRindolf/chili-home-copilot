@@ -130,3 +130,80 @@ def test_the_wait_can_be_exercised_rather_than_assumed_away():
     _rest(a, qty=1000.0)
     r = a.replace_order_qty(order_id="mock-1", new_qty="700")
     assert a._orders[r["order_id"]].ack_delay_remaining == 3
+
+
+# ══ THE RESERVATION THE VENUE ENFORCES AND NOBODY MODELLED ══════════════════════
+# `qty_available` appeared in this repository only inside comments — not in the
+# mock, not in the runner. A resting SELL holds its whole quantity at the broker,
+# which is the single fact PATH B exists to work around: the full-qty deadman
+# consumes it, so a partial cannot be placed until the stop is shrunk AND the
+# shrink is terminal.
+#
+# Without this, a wiring that sold the partial too early would FILL in the bench
+# and be REJECTED live, and the bench would have blessed it — the same
+# mock-certifies-what-the-venue-rejects failure as the verb above, hiding one
+# level down. These tests are what force the wiring to wait.
+
+def _buy(a, qty, px=4.00, pid="CANF"):
+    """Establish a real position through the mock's own fill ledger."""
+    a._fills.append(rmb._Fill(
+        product_id=pid, side="buy", size=qty, price=px, fee=0.0,
+        order_id="seed", client_order_id="seed", trade_time="2026-09-08T00:00:00Z",
+    ) if hasattr(rmb, "_Fill") else None)
+
+
+def test_a_resting_stop_reserves_its_shares_against_a_second_sell():
+    """The wall PATH B exists to get past, now present in the harness."""
+    a = _adapter()
+    a.get_position_quantity_truth = lambda pid: {  # type: ignore[assignment]
+        "readable": True, "product_id": pid, "quantity": 1000.0, "reason": None}
+    _rest(a, qty=1000.0)
+    r = a.place_market_order(product_id="CANF", side="sell", base_size="300",
+                             client_order_id="partial-1")
+    assert r["ok"] is False
+    assert r["error"] == "insufficient_qty_available"
+    assert r["reserved_qty"] == pytest.approx(1000.0)
+    assert r["available_qty"] == pytest.approx(0.0)
+
+
+def test_shrinking_the_stop_is_what_frees_the_shares():
+    """The whole of PATH B in one test: refuse, PATCH, then the same sell lands."""
+    a = _adapter()
+    a.get_position_quantity_truth = lambda pid: {  # type: ignore[assignment]
+        "readable": True, "product_id": pid, "quantity": 1000.0, "reason": None}
+    _rest(a, qty=1000.0)
+    assert a.place_market_order(product_id="CANF", side="sell",
+                                base_size="300")["ok"] is False
+    rep = a.replace_order_qty(order_id="mock-1", new_qty="700")
+    assert rep["ok"] is True
+    # The predecessor is `replaced` and no longer reserves; the successor holds 700.
+    r = a.place_market_order(product_id="CANF", side="sell", base_size="300",
+                             client_order_id="partial-1")
+    assert r.get("error") != "insufficient_qty_available"
+
+
+def test_a_sell_within_the_free_remainder_is_allowed():
+    a = _adapter()
+    a.get_position_quantity_truth = lambda pid: {  # type: ignore[assignment]
+        "readable": True, "product_id": pid, "quantity": 1000.0, "reason": None}
+    _rest(a, qty=700.0)
+    r = a.place_market_order(product_id="CANF", side="sell", base_size="300")
+    assert r.get("error") != "insufficient_qty_available"
+
+
+def test_nothing_resting_means_nothing_reserved():
+    """Deliberately narrow: the claim is 'a resting sell reserves its shares', not
+    'you cannot sell what you do not hold'. Suites that place sells against a
+    synthetic flat book are untouched."""
+    a = _adapter()
+    r = a.place_market_order(product_id="CANF", side="sell", base_size="500")
+    assert r.get("error") != "insufficient_qty_available"
+
+
+def test_a_buy_is_never_reservation_checked():
+    a = _adapter()
+    a.get_position_quantity_truth = lambda pid: {  # type: ignore[assignment]
+        "readable": True, "product_id": pid, "quantity": 1000.0, "reason": None}
+    _rest(a, qty=1000.0)
+    r = a.place_market_order(product_id="CANF", side="buy", base_size="300")
+    assert r.get("error") != "insufficient_qty_available"
