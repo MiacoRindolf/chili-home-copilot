@@ -46,6 +46,13 @@ router = APIRouter(tags=["claude_bridge"])
 _TAIL_BYTES = 512 * 1024
 _MAX_TAIL_BYTES = 4 * 1024 * 1024
 
+# Listing costs one file read per preview, and the transcripts sit on a Windows
+# bind mount where that is expensive: 40 previews measured 22.8 s through the
+# origin.  Only the sessions a person would plausibly pick get one.
+_SESSION_LIST_MAX = 25
+_PREVIEW_SESSIONS = 6
+_PREVIEW_TAIL_BYTES = 16 * 1024
+
 # A turn is "working" while tool traffic keeps arriving; past this it is either
 # waiting on the operator or idle.  Derived from observed cadence, not taste:
 # tool results land every few seconds, and the longest quiet stretch inside an
@@ -230,7 +237,8 @@ def _status_from(raw: dict, mtime: float) -> dict:
 
 @router.get("/api/claude/sessions", response_class=JSONResponse)
 def api_claude_sessions(request: Request, db: Session = Depends(get_db),
-                        slug: str | None = Query(None)):
+                        slug: str | None = Query(None),
+                        previews: bool = Query(True)):
     """Claude Code sessions for this repo, newest first."""
     get_identity_ctx(request, db)
     projects = _projects_dir()
@@ -256,15 +264,20 @@ def api_claude_sessions(request: Request, db: Session = Depends(get_db),
             "age_s": round(max(0.0, time.time() - st.st_mtime), 1),
         })
     out.sort(key=lambda r: r["mtime"], reverse=True)
-    for r in out[:40]:
-        p = sdir / f"{r['session_id']}.jsonl"
-        try:
-            rows, _, _ = _parse_tail(p, 0, 64 * 1024)
-            first_text = next((x["text"] for x in rows if x["kind"] == "text"), "")
-            r["preview"] = first_text[:120]
-        except Exception:
-            r["preview"] = ""
-    return {"available": True, "slug": sdir.name, "sessions": out[:40],
+    out = out[:_SESSION_LIST_MAX]
+    # Previews cost a file read each, and the transcripts live on a Windows bind
+    # mount where that is expensive -- 40 of them took 22.8 s through the origin.
+    # Only the sessions a person would actually pick get one.
+    if previews:
+        for r in out[:_PREVIEW_SESSIONS]:
+            p = sdir / f"{r['session_id']}.jsonl"
+            try:
+                rows, _, _ = _parse_tail(p, 0, _PREVIEW_TAIL_BYTES)
+                last_text = next((x["text"] for x in reversed(rows) if x["kind"] == "text"), "")
+                r["preview"] = last_text[:120]
+            except Exception:
+                r["preview"] = ""
+    return {"available": True, "slug": sdir.name, "sessions": out,
             "can_send": _bridge_dir() is not None}
 
 

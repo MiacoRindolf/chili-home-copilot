@@ -859,6 +859,7 @@
           <input type="checkbox" id="cc-follow" checked /> Follow
         </label>
       </div>
+      <div class="cc-note" id="cc-banner" style="display:none;"></div>
       <div class="planner-chat-messages" id="planner-chat-messages"></div>
       <div class="planner-chat-input-wrap">
         <textarea id="planner-chat-input" placeholder="Ask CHILI to add tasks, create projects, or anything else..." rows="2"></textarea>
@@ -2458,6 +2459,14 @@ function ccSetStatus(state, label) {
   document.getElementById('cc-status-label').textContent = label || '';
 }
 
+/* A missing mount or a stopped worker is a CONDITION, not a message: it belongs
+   above the transcript, not interleaved into it. */
+function ccBanner(html) {
+  var b = document.getElementById('cc-banner');
+  b.innerHTML = html || '';
+  b.style.display = html ? 'block' : 'none';
+}
+
 function ccAppendNote(html) {
   var el = document.getElementById('planner-chat-messages');
   var d = document.createElement('div');
@@ -2532,11 +2541,32 @@ function ccEnter() {
     ccHealth = h;
     if (!h.can_read) {
       ccSetStatus('error', 'Not mounted');
-      ccAppendNote('<b>Claude Code transcripts are not mounted into this container.</b><br>' +
-                   'Reading needs <code>CHILI_CLAUDE_PROJECTS_DIR</code> pointed at ' +
-                   '<code>~/.claude/projects</code>.');
+      ccBanner('<b>Claude Code transcripts are not mounted into this container.</b><br>' +
+               'Reading needs <code>CHILI_CLAUDE_PROJECTS_DIR</code> pointed at ' +
+               '<code>~/.claude/projects</code>.');
       return;
     }
+    var send = document.getElementById('planner-chat-send');
+    var inp = document.getElementById('planner-chat-input');
+    if (!h.can_send) {
+      ccBanner('<b>Read-only.</b> The bridge directory is not mounted, so sending is off. ' +
+               'What Claude Code says still streams here.');
+      send.disabled = true; inp.disabled = true;
+    } else if (!h.worker_alive) {
+      ccBanner('<b>The host worker is not running,</b> so messages will queue but not run. ' +
+               'Start <code>scripts\\claude_bridge_worker.ps1</code>. Reading works without it.');
+      send.disabled = false; inp.disabled = false;
+    } else {
+      ccBanner('');
+      send.disabled = false; inp.disabled = false;
+    }
+    // Start tailing the remembered session immediately. Listing every session
+    // is a per-file read on a slow bind mount, and there is no reason to stare
+    // at "Loading" while it finishes.
+    var remembered = null;
+    try { remembered = localStorage.getItem('plannerCcSession'); } catch (e) {}
+    if (remembered) ccLoadSession(remembered);
+
     return fetch('/api/claude/sessions').then(function(r) { return r.json(); }).then(function(d) {
       var sel = document.getElementById('cc-session-select');
       sel.innerHTML = '';
@@ -2551,21 +2581,11 @@ function ccEnter() {
         sel.appendChild(o);
       });
       if (!(d.sessions || []).length) { ccSetStatus('idle', 'No sessions'); return; }
-      var want = null;
-      try { want = localStorage.getItem('plannerCcSession'); } catch (e) {}
       var ids = (d.sessions || []).map(function(s) { return s.session_id; });
       // Default to the most recently written session — that is the live one.
-      var pick = (want && ids.indexOf(want) !== -1) ? want : ids[0];
+      var pick = (remembered && ids.indexOf(remembered) !== -1) ? remembered : ids[0];
       sel.value = pick;
-      if (!h.can_send) {
-        ccAppendNote('<b>Read-only.</b> The bridge directory is not mounted, so the ' +
-                     'message box is disabled. What Claude Code says still streams here.');
-      } else if (!h.worker_alive) {
-        ccAppendNote('<b>The host worker is not running.</b> Start it with ' +
-                     '<code>scripts\\claude_bridge_worker.ps1</code> to send messages. ' +
-                     'Reading works without it.');
-      }
-      ccLoadSession(pick);
+      if (pick !== ccSessionId) ccLoadSession(pick);
     });
   }).catch(function() { ccSetStatus('error', 'Offline'); });
 }
@@ -2633,8 +2653,10 @@ function ccSwitchAgent() {
     : 'Ask CHILI to add tasks, create projects, or anything else...';
   try { localStorage.setItem('plannerChatAgent', claude ? 'claude' : 'chili'); } catch (e) {}
   ccStopPolling();
+  ccBanner('');
   document.getElementById('planner-chat-messages').innerHTML = '';
   document.getElementById('planner-chat-send').disabled = false;
+  document.getElementById('planner-chat-input').disabled = false;
   if (claude) ccEnter();
   else if (plannerChatConversationId != null) plannerChatLoadHistory();
 }
