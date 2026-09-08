@@ -3030,6 +3030,7 @@ def signed_tape_accel_features(
     window_s: float | None = None,
     as_of: Any = None,
     settings_obj: Any = settings,
+    window_prints: int | None = None,
 ) -> dict[str, Any] | None:
     """Live wrapper around :func:`_signed_tape_features`: pull the recent ``iqfeed_trade_ticks``
     (equity tape; lookahead-free trailing ``now()`` / ``(as_of-w, as_of]``) and compute the
@@ -3056,13 +3057,31 @@ def signed_tape_accel_features(
         # tape-accel reversal exit, which otherwise read an EMPTY window in replay).
         _ao = _tape_asof_default(as_of)
         _ao = _ao.replace(tzinfo=None) if getattr(_ao, "tzinfo", None) is not None else _ao
-        q = (
-            "SELECT price, size, bid, ask, "
-            "EXTRACT(EPOCH FROM observed_at) FROM iqfeed_trade_ticks "
-            "WHERE symbol = :s AND observed_at > :as_of - make_interval(secs => :w) "
-            "AND observed_at <= :as_of ORDER BY observed_at ASC"
-        )
-        p = {"s": s, "w": w, "as_of": _ao}
+        # ── THE WINDOW ITSELF MUST NOT BE A CLOCK ───────────────────────────
+        # Every field below is counted in prints, but a SECONDS window decides
+        # how many prints there are to count: fifteen seconds is ~900 prints on a
+        # fast name and four on a slow one, so the same code measures two
+        # different things. `window_prints` takes the last N prints instead,
+        # however long they took — the tape's own clock. The seconds form is kept
+        # for callers that have not moved, and is byte-identical.
+        if window_prints is not None and int(window_prints) > 0:
+            q = (
+                "SELECT price, size, bid, ask, "
+                "EXTRACT(EPOCH FROM observed_at) FROM ("
+                "  SELECT price, size, bid, ask, observed_at, id FROM iqfeed_trade_ticks"
+                "  WHERE symbol = :s AND observed_at <= :as_of"
+                "  ORDER BY observed_at DESC, id DESC LIMIT :n"
+                ") t ORDER BY observed_at ASC, id ASC"
+            )
+            p = {"s": s, "n": int(window_prints), "as_of": _ao}
+        else:
+            q = (
+                "SELECT price, size, bid, ask, "
+                "EXTRACT(EPOCH FROM observed_at) FROM iqfeed_trade_ticks "
+                "WHERE symbol = :s AND observed_at > :as_of - make_interval(secs => :w) "
+                "AND observed_at <= :as_of ORDER BY observed_at ASC"
+            )
+            p = {"s": s, "w": w, "as_of": _ao}
         from .optional_db_read import optional_fetchall
 
         rows = optional_fetchall(db, _sql(q), p)
@@ -3260,46 +3279,52 @@ def _l2_entry_confirm(
         ofi_negative = ofi_f is not None and ofi_f < 0.0
         clear_no_confirm = accel <= 0.0 and ofi_negative
 
-        # PRIMARY confirm: at the leading edge of the move, with the tape behind it.
-        # `tick_rate >= tick_rate_floor` is no longer part of this: the floor was a
-        # tautology until the print-indexed ranking landed, and even now it gates
-        # only the narrative, never the decision.
-        if (not late) and (carrying or accel > 0.0):
+        # ── WHAT THE OUTCOMES ACTUALLY SAY (measured 2026-09-08, 39 readable
+        # entries over 23 symbol-days, threshold-free AUC, clustered) ──────────────
+        #
+        #   feature               AUC/leg  AUC/day   median WIN   median LOSS
+        #   buy_share_delta         0.717    0.671      +0.0926      -0.0737
+        #   prints_since_high       0.667    0.671       190.5         64.0
+        #   high_print_position     0.636    0.605       0.8230       0.4529
+        #   signed_tape_accel       0.490    0.592      -421         -372
+        #   tick_rate               0.434    0.487
+        #
+        # Two things follow, and one of them reverses what shipped hours earlier.
+        #
+        # 1. `buy_share_delta` is the strongest discriminator and its sign is the one
+        #    this code assumed: winners are BUY-CARRYING (+0.09) where losers are
+        #    fading (-0.07). It gates.
+        #
+        # 2. `high_print_position` runs the OTHER WAY. The median WINNER sits at
+        #    0.823 — above the 0.75 "spent move" line this file used to refuse at, so
+        #    that leg was refusing the median winner. The reading was wrong, not the
+        #    feature: inside a FIFTEEN-SECOND window "the high is behind us" is not a
+        #    spent burst, it is a pullback that has been holding and building. That is
+        #    the operator's stated method — buy the pullback, not the top — and the
+        #    tape agrees with him. The leg is REMOVED rather than inverted: one
+        #    reversal on 6 winners earns telemetry, not a new gate.
+        #
+        # 3. `signed_tape_accel` (AUC 0.490) and `tick_rate` (0.434) carry NO outcome
+        #    information. They were the whole of the old predicate. Neither gates now.
+        #
+        # So exactly one condition decides, the one with measured discrimination and a
+        # confirmed sign, and it needs no book — which is why it can be measured at
+        # all. Everything else rides along on the receipt for the bench to judge.
+        if carrying:
             dbg["reason"] = "l2_confirm_tape_thrust"
             return "confirm", dbg
-        # DEFER 1 — the burst is spent. The high sits in the oldest quarter of the
-        # window in PRINT terms and the buying is not carrying. No book reading
-        # overrides this: the book cannot tell us we are early when the tape has
-        # already said we are late. This is the shape of every one of the four worst
-        # WYHG entries (high 55-94% behind at the moment of the buy).
-        if very_late and not_carrying:
-            dbg["reason"] = "l2_confirm_defer_spent_move"
-            return "defer", dbg
-        # DEFER 2 — late AND the buying is not carrying. Here the book still gets a
-        # say, because a late entry into demonstrably accumulating depth is the
-        # reclaim this lane is supposed to take. With NO readable book there is no
-        # second opinion to weigh, and a missing input must never manufacture a
-        # refusal: fail open, and say so.
-        if late and not_carrying:
-            if not book_ok:
-                dbg["reason"] = "l2_confirm_late_no_book"
-                return "confirm", dbg
-            if ofi_agrees or depth_rising:
+        if not_carrying:
+            # A positive reading, not a missing one: the back half of the window is
+            # LESS buy-dominated than the front, counted in prints. The book gets a
+            # say when it is readable, because accumulating depth under a fading tape
+            # is the reclaim this lane should take.
+            if book_ok and (ofi_agrees or depth_rising):
                 dbg["reason"] = "l2_confirm_secondary_override"
                 return "confirm", dbg
-            dbg["reason"] = "l2_confirm_defer_late_no_carry"
+            dbg["reason"] = "l2_confirm_buying_not_carrying"
             return "defer", dbg
-        # DEFER 3 — the original leg, kept: dead tape AND net-selling book. It needs
-        # the book by construction (`ofi < 0`), so an unreadable book skips it.
-        if book_ok and clear_no_confirm:
-            if ofi_agrees or depth_rising:
-                dbg["reason"] = "l2_confirm_secondary_override"
-                return "confirm", dbg
-            dbg["reason"] = "l2_confirm_defer_no_tape"
-            return "defer", dbg
-        # Anything else — including every case where the print-indexed inputs are
-        # unreadable — confirms, as before. Missing data must never manufacture a
-        # refusal.
+        # Unreadable share (too little tape to halve): confirm, as every other
+        # missing-input path does.
         dbg["reason"] = "l2_confirm_pass_mixed"
         return "confirm", dbg
     except Exception:
