@@ -35,6 +35,7 @@ import json
 import logging
 import math
 from dataclasses import dataclass, field, replace
+from dataclasses import replace as _dc_replace
 from datetime import datetime, timedelta, timezone
 from typing import Any, Mapping, Optional, Sequence
 
@@ -449,6 +450,11 @@ class _RestingOrder:
     position_intent: Optional[str] = None
     extended_hours: bool = False
     filled_at: Optional[str] = None
+    # PATH B lineage. A PATCH mints a NEW order id and leaves the predecessor
+    # `replaced`; the runner proves the pair before it trusts the smaller stop, so
+    # both directions must reach the raw shape its readers parse.
+    replaced_by: Optional[str] = None
+    replaces: Optional[str] = None
 
     def to_normalized(self, *, alpaca_raw: bool = False) -> NormalizedOrder:
         raw: dict[str, Any] = {"venue": _VENUE, "fee": self.fee}
@@ -488,8 +494,8 @@ class _RestingOrder:
                 "legs": [],
                 "extended_hours": bool(self.extended_hours),
                 "position_intent": self.position_intent,
-                "replaced_by": None,
-                "replaces": None,
+                "replaced_by": self.replaced_by,
+                "replaces": self.replaces,
             })
         return NormalizedOrder(
             order_id=self.order_id,
@@ -581,6 +587,11 @@ class MockBrokerAdapter:
         self._clock: datetime = datetime.now(timezone.utc).replace(tzinfo=None)
         self._clock_explicitly_set = False
         self._orders: dict[str, _RestingOrder] = {}
+        # PATH B lineage: a PATCH mints a new id and leaves the old one
+        # `replaced`, so both directions must be readable.
+        self._replaced_by: dict[str, str] = {}
+        self._replaces: dict[str, str] = {}
+        self._replace_ack_ticks: int = 0
         self._fills: list[NormalizedFill] = []
         self._order_seq = itertools.count(1)
         self._slippage_bps = float(slippage_bps)
@@ -1969,6 +1980,82 @@ class MockBrokerAdapter:
         """Legacy convenience twin of the strict lookup: the order or None."""
         truth = self.get_order_by_client_order_id_truth(client_order_id)
         return truth.get("order") if truth.get("found") else None
+
+    def replace_order_qty(self, *, order_id: str, new_qty: str,
+                          client_order_id: Optional[str] = None) -> dict[str, Any]:
+        """PATCH a resting SELL down to a smaller qty — the mock half of PATH B.
+
+        WHY THIS EXISTS. The full-qty deadman consumes ``qty_available``, so a partial
+        exit is impossible until the stop is shrunk first. The bench reaches that
+        wall exactly as production does — 97 ``alpaca_scale_out_suppressed_for_deadman``
+        and 95 ``tranche_oco_skipped_extended_hours`` across 15 receipts — but the
+        adapter verb the fix needs did not exist here, so wiring PATH B would have
+        called a method the mock lacks and the partial would simply never fill. The
+        bench would then have reported "no effect" for a change it never ran. That is
+        the mock-as-gate failure this harness has already paid for once.
+
+        FAITHFUL TO THE REAL VERB (venue/alpaca_spot.py:4166, probe 2026-09-01 on
+        paper), including the parts that REFUSE:
+
+          * only a WORKING order may be replaced. The real venue returns 422 while the
+            order is ``accepted`` / ``pending_new`` / ``pending_cancel`` /
+            ``pending_replace``; here anything but an open order is refused with the
+            same shape, so a caller that skips the lifecycle check fails in the bench
+            the way it would fail live;
+          * the PATCH mints a NEW order id and the response carries it, with the old id
+            under ``replaced_order_id``. A caller that keeps using the old id is
+            reading a dead order;
+          * it is NOT atomic. The predecessor is left ``replaced`` rather than deleted,
+            and the successor carries ``replaces``, so the runner's lineage proof
+            (``_alpaca_replacement_successor_order_matches``) sees the same two-order
+            shape it sees live and must still wait for terminal before selling;
+          * a new qty below what the order has already filled is refused: releasing
+            shares that are gone is the oversell this whole path exists to prevent.
+
+        ``replace_ack_ticks`` holds the successor un-acked for N quote advances so a
+        harness can exercise the wait rather than assume it away.
+        """
+        oid = str(order_id or "").strip()
+        ro = self._orders.get(oid)
+        if ro is None:
+            return {"ok": False, "error": "order_not_found", "order_id": oid}
+        try:
+            qty = float(new_qty)
+        except (TypeError, ValueError):
+            return {"ok": False, "error": "invalid_qty", "order_id": oid}
+        if not (qty > 0):
+            return {"ok": False, "error": "invalid_qty", "order_id": oid}
+        status = str(ro.status or "").lower()
+        if status != "open":
+            # The venue's 422: only a working order is replaceable.
+            return {"ok": False, "error": "replace_rejected_not_working",
+                    "status": status, "order_id": oid}
+        if qty > float(ro.base_size) + 1e-9:
+            return {"ok": False, "error": "replace_rejected_qty_increase",
+                    "order_id": oid}
+        if qty < float(ro.filled_size) - 1e-9:
+            return {"ok": False, "error": "replace_rejected_below_filled",
+                    "order_id": oid}
+        new_id = f"replay_mock-replace-{next(self._order_seq):08d}"
+        successor = _dc_replace(
+            ro,
+            order_id=new_id,
+            client_order_id=(str(client_order_id) if client_order_id else
+                             ro.client_order_id),
+            base_size=qty,
+            ack_delay_remaining=int(getattr(self, "_replace_ack_ticks", 0) or 0),
+        )
+        # The predecessor stays, terminal, pointing at its successor: the runner reads
+        # both and proves the lineage before it trusts the smaller stop.
+        ro.status = "replaced"
+        ro.replaced_by = new_id
+        successor.replaces = oid
+        successor.replaced_by = None
+        self._orders[new_id] = successor
+        self._replaced_by[oid] = new_id
+        self._replaces[new_id] = oid
+        return {"ok": True, "order_id": new_id, "status": "new",
+                "replaced_order_id": oid}
 
     def cancel_order_by_id(self, order_id: str) -> bool:
         """The real adapter's cancel verb (venue/alpaca_spot.py:4431): True proves only that
