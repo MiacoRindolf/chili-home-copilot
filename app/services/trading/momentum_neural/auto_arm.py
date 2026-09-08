@@ -4025,10 +4025,17 @@ def _per_symbol_attempt_count(
     as_of_utc: datetime | None = None,
 ) -> int:
     """Count TODAY's LIVE ENTRY ATTEMPTS on ``symbol`` (this execution family) for per-symbol
-    fatigue (P2). An attempt = a live TradingAutomationSession begun for the symbol in the
-    current ET decision day (the lane arms one live session per entry attempt). Mirrors the win-cycle
-    count's query shape (no new table/path). Fail-open: any error returns 0 (fatigue never
-    triggers on a query glitch — it can only REDUCE/VETO a NEW entry, never an exit)."""
+    fatigue (P2).
+
+    An attempt is an ENTRY, not a session. A live session that stops out RECYCLES and
+    re-enters in place, so one session row can hold many attempts — counting rows
+    undercounts exactly the behaviour this cap exists to stop. The session's own
+    ``trade_cycles`` is the number of times it entered; the count is therefore the
+    sessions begun today plus each session's re-entries beyond its first.
+
+    Mirrors the win-cycle count's query shape (no new table/path). Fail-open: any error
+    returns 0 (fatigue never triggers on a query glitch — it can only REDUCE/VETO a NEW
+    entry, never an exit)."""
     try:
         su = str(symbol or "").strip().upper()
         if not su:
@@ -4038,7 +4045,7 @@ def _per_symbol_attempt_count(
 
         day_start, day_end = _et_day_bounds_utc(as_of_utc=decision_as_of)
         q = (
-            db.query(TradingAutomationSession.id)
+            db.query(TradingAutomationSession.risk_snapshot_json)
             .filter(
                 TradingAutomationSession.mode == "live",
                 TradingAutomationSession.symbol == su,
@@ -4050,7 +4057,25 @@ def _per_symbol_attempt_count(
         )
         if execution_family:
             q = q.filter(TradingAutomationSession.execution_family == str(execution_family))
-        return int(q.count())
+        # ⚠️ COUNT CYCLES, NOT SESSIONS. The docstring above assumed "the lane arms one
+        # live session per entry attempt". The RECYCLE broke that: a session that stops
+        # out re-enters IN PLACE, so N entry attempts live inside ONE session row.
+        # Live 2026-09-08: WYHG took EIGHT entries in 31 minutes for -$212.83 as a
+        # SINGLE session, so this counter would have read 1 against a cap of 3 and
+        # vetoed nothing. The account-wide consecutive-loss halt was blind the same
+        # way for the same reason (it counts outcome rows, and a recycling session
+        # emits one). `trade_cycles` is the count the session itself keeps.
+        attempts = 0
+        for (snap,) in q.all():
+            attempts += 1                       # the session's own first entry
+            try:
+                le = (snap or {}).get("momentum_live_execution") or {}
+                cycles = int(le.get("trade_cycles") or 0)
+            except (AttributeError, TypeError, ValueError):
+                cycles = 0
+            if cycles > 1:
+                attempts += cycles - 1          # every re-entry after it
+        return int(attempts)
     except Exception:
         logger.debug("[auto_arm] per-symbol attempt-count query failed (fail-open 0)", exc_info=True)
         return 0
