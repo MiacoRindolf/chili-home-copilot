@@ -40596,6 +40596,24 @@ def tick_live_session(
             settings=settings,
             l2_as_of=_replay_l2_as_of_or_none(),
         )
+        # ⚠️ EMIT THE DECISION, NOT ONLY THE REFUSAL. The defer emit below is the
+        # only record this gate has ever written, so every CONFIRM has been
+        # silent and the confirm rate is unmeasurable: in the entire live book
+        # there is exactly ONE l2_confirm event (a defer, 2026-06-29). Four of
+        # the five paths through _l2_entry_confirm end in "confirm" — including
+        # any exception (entry_gates.py:3093) — and no receipt says which one
+        # was taken, so "is this gate too loose?" cannot be answered with data.
+        # ON CHANGE OF REASON, never per pass: a per-pass emit is how the 6,765
+        # phantom veto events happened. `l2_confirm_last_reason` is telemetry and
+        # is deliberately NOT in _RECYCLE_ENTRY_STATE_KEYS — surviving a recycle
+        # only ever suppresses a duplicate line, never a real transition.
+        _l2c_reason = str(_l2c_dbg.get("reason") or "").strip()
+        if _l2c_reason and le.get("l2_confirm_last_reason") != _l2c_reason:
+            le["l2_confirm_last_reason"] = _l2c_reason
+            _commit_le(sess, le)
+            _emit(db, sess, "live_l2_confirm_decision", {
+                **_l2c_dbg, "decision": str(_l2c_decision),
+            })
         if _l2c_decision == "defer":
             _log.info(
                 "[momentum_neural] entry L2-CONFIRM DEFER %s: accel=%s tick_rate=%s ofi=%s — re-watching for tape confirmation",
