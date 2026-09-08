@@ -155,3 +155,31 @@ def test_slug_dir_prefers_this_repo_over_a_newer_unrelated_project(tmp_path):
     import os
     os.utime(other, (time.time() + 60, time.time() + 60))
     assert cb._slug_dir(tmp_path, None) == mine
+
+
+def test_listing_cache_returns_rows_but_refreshes_ages(monkeypatch, tmp_path):
+    """A cached listing must not serve a stale 'seconds ago'."""
+    cb._listing_cache.clear()
+    rows = [{"session_id": "a", "bytes": 1, "mtime": time.time() - 300, "age_s": 0.0}]
+    cb._store_listing(tmp_path, True, rows)
+    got = cb._cached_listing(tmp_path, True)
+    assert got is not None and len(got) == 1
+    assert got[0]["age_s"] > 290          # recomputed, not the stored 0.0
+    assert rows[0]["age_s"] == 0.0        # and the stored row is untouched
+
+
+def test_listing_cache_expires(tmp_path):
+    cb._listing_cache.clear()
+    cb._store_listing(tmp_path, True, [{"session_id": "a", "bytes": 1,
+                                        "mtime": time.time(), "age_s": 0.0}])
+    key = f"{tmp_path}|True"
+    stamp, rows = cb._listing_cache[key]
+    cb._listing_cache[key] = (stamp - cb._LISTING_TTL_S - 1, rows)
+    assert cb._cached_listing(tmp_path, True) is None
+
+
+def test_listing_cache_is_bounded(tmp_path):
+    cb._listing_cache.clear()
+    for i in range(12):
+        cb._store_listing(tmp_path / str(i), True, [])
+    assert len(cb._listing_cache) <= 8

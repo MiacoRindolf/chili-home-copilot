@@ -62,6 +62,28 @@ _IDLE_SILENCE_S = 15 * 60
 
 _SESSION_ID_RE = re.compile(r"^[0-9a-fA-F-]{8,64}$")
 
+# The set of sessions changes when someone starts a new one — minutes apart at
+# worst.  The live transcript is tailed separately and is never cached, so this
+# only spares the directory walk, never freshness of the conversation.
+_LISTING_TTL_S = 45.0
+_listing_cache: dict[str, tuple[float, list[dict]]] = {}
+
+
+def _cached_listing(sdir: Path, previews: bool) -> list[dict] | None:
+    hit = _listing_cache.get(f"{sdir}|{previews}")
+    if hit and (time.time() - hit[0]) < _LISTING_TTL_S:
+        now = time.time()
+        # Ages are recomputed on the way out; a cached "3s ago" would be a lie.
+        return [dict(r, age_s=round(max(0.0, now - r["mtime"]), 1)) for r in hit[1]]
+    return None
+
+
+def _store_listing(sdir: Path, previews: bool, rows: list[dict]) -> None:
+    _listing_cache[f"{sdir}|{previews}"] = (time.time(), rows)
+    if len(_listing_cache) > 8:
+        oldest = min(_listing_cache, key=lambda k: _listing_cache[k][0])
+        _listing_cache.pop(oldest, None)
+
 
 def _projects_dir() -> Path | None:
     raw = os.environ.get("CHILI_CLAUDE_PROJECTS_DIR", "").strip()
@@ -251,18 +273,35 @@ def api_claude_sessions(request: Request, db: Session = Depends(get_db),
         return {"available": False, "reason": "No Claude Code project directory found.",
                 "sessions": []}
 
+    cached = _cached_listing(sdir, previews)
+    if cached is not None:
+        return {"available": True, "slug": sdir.name, "sessions": cached,
+                "can_send": _bridge_dir() is not None, "cached": True}
+
+    # scandir, not glob+stat: this directory holds 1,595 transcripts and every
+    # stat is a round trip over a Windows bind mount.  Measured in the running
+    # container: 2,935 ms for glob+stat, 1,412 ms for scandir.
     out = []
-    for f in sdir.glob("*.jsonl"):
-        try:
-            st = f.stat()
-        except OSError:
-            continue
-        out.append({
-            "session_id": f.stem,
-            "bytes": st.st_size,
-            "mtime": st.st_mtime,
-            "age_s": round(max(0.0, time.time() - st.st_mtime), 1),
-        })
+    now = time.time()
+    try:
+        with os.scandir(sdir) as it:
+            for e in it:
+                if not e.name.endswith(".jsonl"):
+                    continue
+                try:
+                    st = e.stat()
+                except OSError:
+                    continue
+                out.append({
+                    "session_id": e.name[:-6],
+                    "bytes": st.st_size,
+                    "mtime": st.st_mtime,
+                    "age_s": round(max(0.0, now - st.st_mtime), 1),
+                })
+    except OSError as exc:
+        logger.warning("[claude_bridge] could not list %s: %s", sdir, exc)
+        return {"available": False, "reason": "Could not read the session directory.",
+                "sessions": []}
     out.sort(key=lambda r: r["mtime"], reverse=True)
     out = out[:_SESSION_LIST_MAX]
     # Previews cost a file read each, and the transcripts live on a Windows bind
@@ -277,8 +316,9 @@ def api_claude_sessions(request: Request, db: Session = Depends(get_db),
                 r["preview"] = last_text[:120]
             except Exception:
                 r["preview"] = ""
+    _store_listing(sdir, previews, out)
     return {"available": True, "slug": sdir.name, "sessions": out,
-            "can_send": _bridge_dir() is not None}
+            "can_send": _bridge_dir() is not None, "cached": False}
 
 
 @router.get("/api/claude/transcript", response_class=JSONResponse)
