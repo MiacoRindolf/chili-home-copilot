@@ -3748,6 +3748,42 @@ def compute_risk_first_quantity(
         "capped_by": capped_by,
     }
 
+def resolve_spread_cap_bps(which: str) -> float:
+    """THE one reader of the two live spread caps.  ``which`` is "live" or "abs_cap".
+
+    ⚠️ WHY THIS EXISTS (2026-09-07).  The same two settings were read at six sites with
+    THREE different fallback numbers.  `live_runner.py` used the config defaults -- 12.0
+    and 300.0 -- while this module used **60.0 and 800.0**: five times and 2.7 times
+    looser, on the largest veto in the system, silently, for whoever imported which module
+    first.
+
+    Worse, this module wrote them as ``float(getattr(...) or 800.0)``.  ``or`` treats
+    ``0.0`` as absent, so an operator who deliberately set a cap of zero -- "tolerate no
+    spread at all" -- got 60 or 800 instead.  The tightest possible setting failed OPEN.
+    `live_runner.py:25074-25076` already documents the correct semantics in a comment:
+    "A 0.0 cap is a deliberate 'block all' and is preserved; only None / NaN / inf /
+    unparseable values fall back to the documented default."  That is the contract here.
+
+    The defaults below are the config Field defaults and nothing else.  If they ever move,
+    they move in `app/config.py` and this follows, because there is now one reader.
+    """
+    field, fallback = {
+        "live": ("chili_momentum_risk_max_spread_bps_live", 12.0),
+        "abs_cap": ("chili_momentum_risk_max_spread_bps_abs_cap", 300.0),
+    }[which]
+    raw = getattr(settings, field, fallback)
+    if raw is None:
+        return fallback
+    try:
+        value = float(raw)
+    except (TypeError, ValueError):
+        return fallback
+    if not math.isfinite(value) or value < 0.0:
+        return fallback
+    return value  # 0.0 is preserved: it means "block all", not "unset"
+
+
+
 
 def spread_liquidity_risk_multiplier(
     spread_bps: float | None,
@@ -3777,8 +3813,8 @@ def spread_liquidity_risk_multiplier(
         if ratio is None:
             ratio = float(getattr(settings, "chili_momentum_risk_spread_to_expected_move_ratio", 0.5) or 0.5)
         if abs_cap_bps is None:
-            abs_cap_bps = float(getattr(settings, "chili_momentum_risk_max_spread_bps_abs_cap", 800.0) or 800.0)
-        base = float(getattr(settings, "chili_momentum_risk_max_spread_bps_live", 60.0) or 60.0)
+            abs_cap_bps = resolve_spread_cap_bps("abs_cap")
+        base = resolve_spread_cap_bps("live")
         # STEP-E #15: use the SAME EM-scaled tolerance the admission gate used, so a wider spread
         # accepted via the EM-scaled cap is priced as a proportional SIZE-DOWN (a DSY-class name
         # at its 721bps EM ceiling shrinks toward the floor, not admitted at full size).
@@ -4314,6 +4350,7 @@ def reentry_escalation_decision(
     tape_accel: float | None,
     is_day_leader: bool | None = None,
     tape_back_buy_share: float | None = None,
+    noise_abs: float | None = None,
 ) -> tuple[bool, dict[str, Any]]:
     """G4 P2 — SAME-SYMBOL re-entry escalation after a stop-out (PURE, no I/O).
 
@@ -4331,13 +4368,15 @@ def reentry_escalation_decision(
       * STRUCTURAL trigger class — the fired trigger must carry real structure
         (pullback_low; the same class set the structural-stop machinery trusts). The
         weak fallbacks (momentum_continuation / score_only) no longer qualify.
-        DAY-LEADER SUBSTITUTE (review m2): the #1 name (``is_day_leader``) must never
-        be permanently WAIT-blocked just because its entries fire via non-structural
-        (volume-confirmation) reasons. When the leader's trigger is non-structural it
-        may substitute a STRICT high-quality equivalent for the structural class:
+        RECLAIM SUBSTITUTE (review m2 for the day-leader; every name since 2026-09-06):
+        a name must never be permanently WAIT-blocked just because its entries fire via
+        non-structural (volume-confirmation) reasons. When the trigger is non-structural
+        it may substitute a STRICT high-quality equivalent for the structural class:
         readable POSITIVE tape AND an ACTUAL price reclaim above the prior failure
         (both actively satisfied — NO skip-on-missing, so this is a HIGHER bar, not a
-        hole). Non-leaders keep the strict structural requirement;
+        hole). Measured 2026-09-06 (Ross Parity Bench, gate-15 baseline): the leader-only
+        form refused Ross's own re-entry second on VIVS/VTIX/JWEL/WETO/RUBI/ILLR/VEEE
+        with the bar already met; ``is_day_leader`` is kept for the ledger;
       * STRUCTURE RECLAIM — live price must exceed the level where the LAST attempt
         FAILED: the prior trade's high-water mark (fallback: its exit price when no
         HWM was recorded), plus ``(level - 1) * prior_risk_dist`` — each successive
@@ -4349,7 +4388,9 @@ def reentry_escalation_decision(
         requirement still stands) so a thin-tape name is not starved.
 
     Returns ``(allowed, debug)``. Fail-OPEN on unusable numeric basis (current
-    behavior — the standard trigger already fired). docs/DESIGN/MOMENTUM_LANE.md"""
+    behavior — the standard trigger already fired), EXCEPT the substitute's noise band
+    (v5b/v5c): a non-leader with no readable band gets no substitute (fail-closed); the
+    day-leader falls back to a zero band. docs/DESIGN/MOMENTUM_LANE.md"""
     dbg: dict[str, Any] = {
         "escalation_level": escalation_level,
         "structural_trigger": bool(structural_trigger),
@@ -4360,6 +4401,8 @@ def reentry_escalation_decision(
         "tape_accel": tape_accel,
         "tape_back_buy_share": tape_back_buy_share,
         "required_reclaim": None,
+        "live_price": live_price,
+        "noise_abs": noise_abs,
     }
     if not enabled:
         dbg["reason"] = "flag_off"
@@ -4444,15 +4487,74 @@ def reentry_escalation_decision(
 
     # 1) structural trigger class required at any escalation level.
     if not structural_trigger:
-        # Day-leader substitute (review m2): the leader may replace the structural
-        # class with a STRICT equivalent — readable POSITIVE tape AND an actual
-        # reclaim above the prior failure, BOTH actively satisfied (no skip). A
-        # non-leader, or a leader without that confirmation, still blocks.
+        # RECLAIM SUBSTITUTE (review m2 introduced it for the day-leader only; opened to
+        # every name 2026-09-06, Ross Parity Bench). A non-structural fire may replace
+        # the structural class with a STRICT equivalent — readable POSITIVE tape AND an
+        # actual price reclaim above the prior failure (prior HWM, + one R per extra
+        # level), BOTH actively satisfied (no skip-on-missing). MEASURED on the gate-15
+        # baseline (@ 9383324b2, per-second timelines): after a small first stop-out the
+        # binding line at Ross's own re-entry second was this branch refusing
+        # `momentum_ok_tick_stream` as `non_structural_trigger` — VIVS 07-15 x256 (stop
+        # 1.48 -> Ross 08:07:07 @2.82 -> 3.53), VTIX 07-27 x42 (Ross 09:18:45 @4.18 ->
+        # 4.62), JWEL 08-10 ml3 x1,284 (Ross 07:33:45, 4.82 -> 6.12), WETO 08-14 x233
+        # (Ross 09:44 @9.6 -> 12.95), RUBI 07-16 x54, ILLR 06-25 x62, VEEE 07-13 x58 —
+        # every one with the price ALREADY back above the failed leg's high-water mark and
+        # the tape lifting, i.e. the substitute's own bar met, refused only for not being
+        # the board's #1 (Tier-1 bench: an isolated board; live: a board of 5-30 names).
+        # "Hands off until it proves itself again" is proven by the reclaim + buyers, not
+        # by a rank. The leader flag stays in the debug for the ledger.
+        # v5b (2026-09-06, first v5 A/B): the reclaim must clear the prior failure by one of
+        # the name's OWN 30-s noise bands (the #1278 measurement, the same band the v4
+        # lockout watch demands) — a touch of the old high is not a reclaim. MEASURED: INLF
+        # 07-28 RH (a Ross loser) was granted at 7.93 vs HWM 7.75 (+2.3%, inside a ~4% band)
+        # and stopped at 7.52 fourteen seconds later (-27.86 on the negative control); VIVS
+        # 07-15 cleared 1.58 + band at 1.66 with the tape lifting and ran to 3.53. Missing
+        # band => fail-closed (no substitute), like the watch.
         _sub_ok = False
-        if is_day_leader:
-            _, _sub_req = _reclaim_required()
-            _sub_ok = bool(_tape_positive() and _sub_req is not None and _price_ge(_sub_req))
-            dbg["leader_structural_substitute"] = _sub_ok
+        _, _sub_req = _reclaim_required()
+        # v5d (first v5b A/B, 2026-09-06): the margin a non-structural fire must clear above
+        # the prior failure is ONE FULL R OF THE FAILED LEG (``prior_risk_dist`` — the same
+        # unit the level-2 margin already uses: "each successive failure demands one more
+        # full R of proof"; the first re-entry now proves itself by one). MEASURED: VIVS
+        # 07-15 RH — the winner the substitute was built for — was refused ×84 with the tape
+        # lifting (+11k..+80k) and the price above the prior HWM because the 30-s noise
+        # band was UNREADABLE in premarket (4-5 buckets < 6) and, once readable at 08:07,
+        # was 22-33% of price (an igniting tape's 30-s range IS the move — not a margin);
+        # the leg's own R was 0.105 (6.6%): 1.58 + 0.105 = 1.685, granted at 1.69 on the
+        # way to 3.53. INLF 07-28 RH (a Ross loser): 7.75 + 0.36 = 8.11, 7.93 still refused.
+        # Fallbacks, in order: the 30-s noise band when the leg carries no R; zero for the
+        # day-leader (its review-m2 contract); otherwise no substitute (fail-closed).
+        _sub_band = None
+        try:
+            if (
+                prior_risk_dist is not None
+                and math.isfinite(float(prior_risk_dist))
+                and float(prior_risk_dist) > 0.0
+            ):
+                _sub_band = float(prior_risk_dist)
+                dbg["substitute_band_basis"] = "prior_risk_dist"
+        except (TypeError, ValueError):
+            _sub_band = None
+        if _sub_band is None:
+            try:
+                if noise_abs is not None and math.isfinite(float(noise_abs)) and float(noise_abs) >= 0.0:
+                    _sub_band = float(noise_abs)
+                    dbg["substitute_band_basis"] = "noise_band"
+            except (TypeError, ValueError):
+                _sub_band = None
+        if _sub_band is None and is_day_leader:
+            _sub_band = 0.0
+            dbg["substitute_band_basis"] = "leader_no_band"
+        _sub_ok = bool(
+            _tape_positive()
+            and _sub_req is not None
+            and _sub_band is not None
+            and _price_ge(_sub_req + _sub_band)
+        )
+        dbg["reclaim_structural_substitute"] = _sub_ok
+        dbg["substitute_noise_abs"] = _sub_band
+        dbg["substitute_required"] = (round(_sub_req + _sub_band, 6) if (_sub_req is not None and _sub_band is not None) else None)
+        dbg["leader_structural_substitute"] = _sub_ok if is_day_leader else None
         if not _sub_ok:
             dbg["reason"] = "non_structural_trigger"
             return False, dbg

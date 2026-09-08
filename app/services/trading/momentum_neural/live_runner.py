@@ -3565,6 +3565,41 @@ def _deadman_protection_is_live(sess: Any) -> tuple[bool, dict[str, Any]]:
     }
 
 
+def session_frame_is_today_et(df: Any, now_aware: datetime) -> tuple[bool, dict[str, Any]]:
+    """r2 of the 07:00 seller-unlock evidence (review 2026-09-06): a session frame may only
+    stamp VWAP-side evidence when its LAST bar belongs to TODAY (America/New_York). The
+    15m/5d frame is served from a 600-s process cache with no exec-lane invalidation; on a
+    name whose first premarket prints arrived after the cached fetch, ``_today_session_frame``
+    (which keys on the last bar's date, not the clock) would return YESTERDAY's session and
+    yesterday's VWAP. A naive index is read as UTC; an empty / non-datetime frame refuses.
+    Pure; returns (is_today, debug)."""
+    dbg: dict[str, Any] = {"frame_last_bar_date_et": None, "today_et": None}
+    try:
+        from zoneinfo import ZoneInfo as _Z
+
+        _ny = _Z("America/New_York")
+        _now = now_aware if now_aware.tzinfo is not None else now_aware.replace(tzinfo=timezone.utc)
+        dbg["today_et"] = _now.astimezone(_ny).date().isoformat()
+        if df is None or getattr(df, "empty", True):
+            dbg["reason"] = "empty_frame"
+            return False, dbg
+        idx = getattr(df, "index", None)
+        last = idx[-1] if idx is not None and len(idx) else None
+        ts = getattr(last, "to_pydatetime", lambda: last)()
+        if not isinstance(ts, datetime):
+            dbg["reason"] = "non_datetime_index"
+            return False, dbg
+        if ts.tzinfo is None:
+            ts = ts.replace(tzinfo=timezone.utc)
+        dbg["frame_last_bar_date_et"] = ts.astimezone(_ny).date().isoformat()
+        ok = dbg["frame_last_bar_date_et"] == dbg["today_et"]
+        dbg["reason"] = "frame_is_today" if ok else "frame_last_bar_not_today_et"
+        return ok, dbg
+    except Exception as exc:  # pragma: no cover - defensive; the caller treats False as silence
+        dbg["reason"] = f"unreadable:{type(exc).__name__}"
+        return False, dbg
+
+
 def _strict_alpaca_rth_entry_window(
     adapter: Any,
     sess: Any,
@@ -3669,7 +3704,11 @@ def _strict_alpaca_rth_entry_window(
                     )
                     _su_live = _su_snapshot.get(KEY_LIVE_EXEC)
                     _su_live = _su_live if isinstance(_su_live, dict) else {}
-                    if _su_live.get("entry_above_vwap") is not True:
+                    # r2: the trigger stamp OR the pre-place session-frame stamp is evidence
+                    if (
+                        _su_live.get("entry_above_vwap") is not True
+                        and _su_live.get("entry_above_vwap_frame") is not True
+                    ):
                         return False, {
                             "reason": "premarket_seller_unlock_wait",
                             "local_market_session": local_session,
@@ -3678,6 +3717,7 @@ def _strict_alpaca_rth_entry_window(
                             ),
                             "guard_min": round(_su_min, 1),
                             "entry_above_vwap": _su_live.get("entry_above_vwap"),
+                            "entry_above_vwap_frame": _su_live.get("entry_above_vwap_frame"),
                         }
             except Exception:
                 # Ang clock/snapshot read na pumalya sa loob ng guard ay hindi
@@ -23921,6 +23961,30 @@ def _failed_pop_break_fires(db, sess, le, *, bid, avg) -> bool:
         _df = _build_micro_bar_df(db, sess.symbol, bar_seconds=10)
         if _df is None or len(_df) < 4:
             return False
+        # FRAME RECENCY — FAIL-CLOSED (2026-09-06 review, confirmed major). This
+        # decision is 100% frame-shaped: `failed_pop_momentum_break_exit` reads
+        # only the bar closes/opens and the prior bar's low, and never compares
+        # the live bid, so a stale frame is not caught downstream. The line below
+        # then discards the newest row as "forming" — true only when the frame
+        # reaches the current bucket. `_resample_micro_bars` spans first print to
+        # LAST print, so on a lagging tape the newest row is a COMPLETE bar from
+        # an older bucket and the decision would be taken on 30-45 s old
+        # structure, market-selling the whole position while the live bid has
+        # already reclaimed. Unlike every sibling exit this branch has no
+        # halt/stale gate to lean on (those key on the TICK's quote freshness,
+        # which is clean exactly in this failure), so the bound belongs here: the
+        # newest bar must be the current bucket or the one before it.
+        _fpb_age = _frame_last_bar_age_seconds(_df, _utcnow_aware())
+        _fpb_max_age = float(
+            getattr(settings, "chili_momentum_failed_pop_break_max_frame_age_s", 20.0) or 20.0
+        )
+        if _fpb_age is None or not math.isfinite(_fpb_age) or _fpb_age > _fpb_max_age:
+            le["failed_pop_break_dbg"] = {
+                "reason": "micro_frame_stale",
+                "frame_last_bar_age_s": (round(_fpb_age, 3) if _fpb_age is not None else None),
+                "max_frame_age_s": _fpb_max_age,
+            }
+            return False
         # index -1 ay FORMING; gamitin ang mga kumpletong bar lamang
         _co = [
             (float(_df["Close"].iloc[i]), float(_df["Open"].iloc[i]))
@@ -23943,6 +24007,9 @@ def _failed_pop_break_fires(db, sess, le, *, bid, avg) -> bool:
                 settings, "chili_momentum_failed_pop_break_min_green_run", 2
             ) or 2),
         )
+        dbg = dict(dbg or {})
+        dbg["frame_last_bar_age_s"] = round(_fpb_age, 3)
+        dbg["max_frame_age_s"] = _fpb_max_age
         le["failed_pop_break_dbg"] = dbg
         le["fpb_fire"] = bool(fire)
         return bool(fire)
@@ -24336,6 +24403,104 @@ def _bailout_dwell_confirm_holds(
         return False
     except Exception:
         return True  # anumang error => gawi ngayon; hindi naha-harang ang exit
+
+
+#: Measured on the clean gate-15 baseline (86 Alpaca + 82 Robinhood symbol-days,
+#: scratchpad/bailout_cadence.py, 2026-09-06).  The opinion bailouts ended 189 Ross-winner
+#: legs; 138 of them (73%) fired within 30 SECONDS of the fill and carried $31,841 of the
+#: $41,575 those legs left on the table in the following 30 minutes.  The floor below is the
+#: p75 of that hold distribution -- derived from the receipts, not chosen.
+_OPINION_EXIT_MIN_HOLD_DERIVATION = (
+    "p75 of t_exit - t_fill over the 189 Ross-winner legs ended by an opinion bailout in "
+    "the clean gate-15 baseline (n=189, 2026-09-06)"
+)
+
+
+def opinion_exit_structure_floor(
+    held_seconds: Any,
+    *,
+    min_hold_seconds: float | None = None,
+) -> tuple[bool, dict[str, Any]]:
+    """May an OPINION exit fire this early?  ``(blocked, debug)``.
+
+    An opinion exit is one that decides the move has failed from a READING of the tape --
+    the breakout fast-bail, the lost-VWAP flatten, the break-of-structure exit.  It is not
+    a stop.  The measurement above says these read failure before the tape has produced
+    enough structure to read: the median such exit lands 22-25 s after the fill, two bars
+    in, on names whose first pullback is routine.
+
+    What this does NOT gate, because all three are evaluated ABOVE these blocks on every
+    tick: the structural stop, the #769 max-loss circuit, and the burst-window exit.  A
+    genuinely collapsing position still exits on the same tick it always did.  This only
+    stops an OPINION from being formed before there is anything to have an opinion about.
+
+    Fails OPEN.  An unreadable hold returns ``(False, ...)`` and the exit runs exactly as
+    it does today -- a floor that cannot be measured must never suppress an exit.
+    """
+    floor = min_hold_seconds
+    if floor is None:
+        floor = getattr(settings, "chili_momentum_opinion_exit_min_hold_seconds", 30.0)
+    try:
+        floor = float(floor)
+        held = float(held_seconds)
+    except (TypeError, ValueError):
+        return False, {"reason": "unreadable", "held_seconds": None, "min_hold_seconds": None}
+    if not (math.isfinite(floor) and math.isfinite(held)) or floor <= 0.0:
+        return False, {"reason": "unreadable", "held_seconds": None, "min_hold_seconds": None}
+    if held < 0.0:
+        return False, {"reason": "unreadable", "held_seconds": held, "min_hold_seconds": floor}
+    if held >= floor:
+        return False, {"reason": "structure_present", "held_seconds": held,
+                       "min_hold_seconds": floor}
+    return True, {"reason": "below_structure_floor", "held_seconds": held,
+                  "min_hold_seconds": floor}
+
+
+def _opinion_exit_suppressed(
+    db: Session,
+    sess: TradingAutomationSession,
+    le: dict[str, Any],
+    *,
+    trigger: str,
+    held_seconds: Any,
+    held_is_measured: bool = True,
+) -> bool:
+    """Gate one opinion exit and record the suppression ON CHANGE, never per pass.
+
+    Per-pass emission is how a single decision became 6,765 events once already; the
+    receipt here is written the first time a given trigger is held back on a given
+    session and not again until the trigger changes.
+    """
+    if not held_is_measured:
+        # An unparseable `opened_at_utc` makes `held` 0.0 on EVERY tick, so a floor that
+        # trusted it would suppress these three exits for the life of the session. The
+        # floor exists to delay an opinion, never to delete one.
+        return False
+    if (
+        le.get("deadman_protection_unavailable")
+        or le.get("operator_flatten_requested_utc")
+        or le.get("deadman_protection_reconcile_pending")
+    ):
+        # MEASURED (86 Alpaca symbol-days): 334 of 339 entry fills had a protective stop
+        # placed in the SAME SECOND as the fill -- p50, p90, p99 and max all 0.00 s. That
+        # is the safety argument for delaying an opinion at all. The other five are one
+        # shape: `deadman_post_broker_identity_mismatch` ->
+        # `live_deadman_protection_unavailable_full_close_queued`, a position the lane
+        # refuses to hold and flattens within a second. Nothing is delayed there.
+        return False
+    blocked, dbg = opinion_exit_structure_floor(held_seconds)
+    if not blocked:
+        return False
+    if str(le.get("opinion_exit_floor_last_trigger") or "") != str(trigger):
+        le["opinion_exit_floor_last_trigger"] = str(trigger)
+        _commit_le(sess, le)
+        _emit(db, sess, "live_opinion_exit_below_structure_floor", {
+            "trigger": trigger,
+            "held_seconds": round(float(dbg["held_seconds"]), 2),
+            "min_hold_seconds": dbg["min_hold_seconds"],
+            "derivation": _OPINION_EXIT_MIN_HOLD_DERIVATION,
+        })
+    return True
 
 
 def _breakout_bailout_lock_in_seconds(*, explosive: bool) -> float:
@@ -25504,6 +25669,39 @@ _RECYCLE_ENTRY_STATE_KEYS: tuple[str, ...] = (
     "burst_started_epoch",
     "burst_track",
     "burst_window_dbg",
+    # ── FRONT-SIDE / FLOW strength markers (2026-09-07) — same shape as the burst stamp ──
+    # Found while tracing why the SAME tape at the SAME second scored frontside 1.0000 in one
+    # bench arm and 0.7034 in the other (JWEL 08-10; the winner leg was sized 169 -> 87 shares
+    # and the case lost $604.74 at the 13k/3% canon). These six are per-TRADE measurements that
+    # no caller clears, so a recycled watcher can read the PREVIOUS leg's reference:
+    #   * entry_tick_rate (:37737) — entry-moment tape PACE, read by the NEXT leg's held side
+    #     (smart_hold tick_rate_ref, velocity_persistence ride-lock). Its writer is triple-
+    #     conditional (flag + non-None tick_rate + bare try/except), so a thin tape on the new
+    #     entry silently leaves the old pace standing. Both consumers currently neutralise it
+    #     (audit-reason string / both ride-lock branches use base_w) — a loaded gun, not yet a
+    #     firing one, which is exactly when it is cheap to unload.
+    #   * chase_defer_episode / chase_defer_ticks (:38651-38652) — NOT forensic: the latch is a
+    #     live decision input to the chase-defer branch on the next pass.
+    #   * flow_veto_latched / flow_veto_clear_since (:40127/:40134) — the STICKY OFI/trade-flow
+    #     entry veto; a latch set by the closed trade must not veto the next one.
+    #   * frontside_size_tilt (:38587) — the strength/OFI/ER/vwap-dist receipt itself. Written
+    #     only when the tilt bites, never cleared, so a full-strength leg inherits the prior
+    #     leg's record and every post-hoc read of it is wrong.
+    # ⚠️ This does NOT explain the JWEL divergence — the score itself reads none of these; it is
+    # recomputed per tick from six locals, 60% of whose weight comes from `_entry_df`, the 15m
+    # frame served by the process-global 600 s TTL cache in market_data.py whose key carries no
+    # clock, no session and no leg. That cache is the carrier and needs its own A/B.
+    "entry_tick_rate",
+    "chase_defer_episode",
+    "chase_defer_ticks",
+    "flow_veto_latched",
+    "flow_veto_clear_since",
+    "frontside_size_tilt",
+    # L14 post-bailout maker-reentry EPISODE anchor (2026-09-07) — the first bid the episode
+    # posted at. It belongs to the trade that just closed; a recycled watcher that inherits it
+    # would refuse a legitimate first post on the NEXT leg.
+    "bailout_maker_anchor_bid",
+    "bailout_maker_anchor_at_utc",
     # ── entry submit / sizing / pricing context ──
     "entry_submit_utc",
     "entry_client_order_id",
@@ -25537,6 +25735,9 @@ _RECYCLE_ENTRY_STATE_KEYS: tuple[str, ...] = (
     "entry_squeeze_pct",
     "entry_rvol",
     "entry_above_vwap",
+    "entry_above_vwap_frame",  # r2: the 07:00 guard's pre-place frame evidence
+    "entry_above_vwap_source",
+    "entry_above_vwap_frame_stale_noted",
     "entry_vertical_confluence",
     "entry_realized_high",
     "entry_day_range_pct",
@@ -25685,6 +25886,8 @@ _RECYCLE_ENTRY_STATE_KEYS: tuple[str, ...] = (
     "g4_leader_is",
     "g4_hl5m_val",
     "g4_vwap5m_val",
+    # the structure-floor receipt marker: per-trade, so the next cycle re-reports
+    "opinion_exit_floor_last_trigger",
 )
 # Deliberately NOT reset on trade recycle: ``benched_backside_hod`` and
 # ``benched_backside_session_date_et`` describe the symbol's session phase,
@@ -34437,6 +34640,19 @@ def tick_live_session(
                         _commit_le(sess, le)
                 except Exception:
                     _g4e_leader = None  # fail-closed: unreadable board = not leader
+                # v5b: the name's own 30-s noise band (the same read the lockout watch uses)
+                # is the margin a non-structural fire must clear above the prior failure.
+                _g4e_noise_abs = None
+                try:
+                    # v5c (review): the band is only consulted by the non-structural
+                    # substitute — no tape aggregate for a structural fire.
+                    if _g4e_px and _trigger_reason not in structural_trigger_reasons():
+                        _g4e_nf_pct, _g4e_nf_buckets = _own_tape_noise_floor_pct(db, sess.symbol, entry_price=_g4e_px)
+                        _g4e_nf_min = int(getattr(settings, "chili_momentum_stop_noise_floor_min_buckets", 6) or 6)
+                        if _g4e_nf_pct is not None and int(_g4e_nf_buckets or 0) >= max(3, _g4e_nf_min):
+                            _g4e_noise_abs = float(_g4e_nf_pct) * float(_g4e_px)
+                except Exception:
+                    _g4e_noise_abs = None
                 try:
                     _g4e_ok, _g4e_dbg = reentry_escalation_decision(
                         enabled=True,
@@ -34449,6 +34665,7 @@ def tick_live_session(
                         tape_accel=_g4e_tape_accel,
                         is_day_leader=(_g4e_leader if isinstance(_g4e_leader, bool) else None),
                         tape_back_buy_share=_g4e_buy_share,
+                        noise_abs=_g4e_noise_abs,
                     )
                 except Exception:
                     _g4e_ok, _g4e_dbg = True, {"reason": "g4_escalation_error_fail_open"}
@@ -35049,6 +35266,8 @@ def tick_live_session(
                 le["entry_above_vwap"] = bool(_pb_debug.get("above_vwap"))
             else:
                 le.pop("entry_above_vwap", None)
+                le.pop("entry_above_vwap_frame", None)
+                le.pop("entry_above_vwap_source", None)
             _commit_le(sess, le)
             _safe_transition(db, sess, STATE_LIVE_ENTRY_CANDIDATE)
             # FRAME-AGE TELEMETRY sa mismong fire (#1286, 2026-09-02). AUUD 09-01:
@@ -35220,6 +35439,8 @@ def tick_live_session(
                                 le["entry_above_vwap"] = bool(_th_sdbg.get("above_vwap"))
                             else:
                                 le.pop("entry_above_vwap", None)
+                                le.pop("entry_above_vwap_frame", None)
+                                le.pop("entry_above_vwap_source", None)
                             _commit_le(sess, le)
                             _safe_transition(db, sess, STATE_LIVE_ENTRY_CANDIDATE)
                             _emit(db, sess, "live_entry_tape_hold_fire", {
@@ -35404,6 +35625,8 @@ def tick_live_session(
                                     le["entry_above_vwap"] = bool(_mc_dbg.get("above_vwap"))
                                 else:
                                     le.pop("entry_above_vwap", None)
+                                    le.pop("entry_above_vwap_frame", None)
+                                    le.pop("entry_above_vwap_source", None)
                                 _commit_le(sess, le)
                                 _safe_transition(db, sess, STATE_LIVE_ENTRY_CANDIDATE)
                                 _emit(db, sess, "live_entry_momentum_continuation_fire", {
@@ -38521,11 +38744,43 @@ def tick_live_session(
                 _fs_closes = None
                 _fs_vwap_dist = None
                 _fs_range_pos = None
+                # WHICH FRAME did this tick actually read? Recorded, never used to decide.
+                _fs_frame_stamp = None
+                _fs_frame_bars = 0
+                # ⚠️ FALLBACK FETCH (2026-09-07). `_entry_df` is fetched ONCE per tick at
+                # :32534 and ONLY under `_live_entry_quote_gate_applies(sess, le)`. This block
+                # reused it with NO fallback, so in every state where that predicate is False
+                # the three frame-derived terms went None TOGETHER --
+                # er 0.34 + vwap_dist 0.16 + range_pos 0.10 = EXACTLY 0.60 of the score's
+                # weight -- and `front_side_strength_score` renormalised over the OFI/tape
+                # remainder. The score did not get weaker; it lost its spine, silently.
+                #
+                # The sibling site at :33914 already carries this exact fallback, and its own
+                # comment names the cause: "kapag None ang _entry_df dahil di-applicable ang
+                # quote gate, ito ang tanging kopya nito". The fix was written there and not
+                # here. MEASURED consequence: two bench arms standing at the SAME second on
+                # IDENTICAL tape read frontside 1.0000 vs 0.7034 and sized the JWEL 08-10
+                # winner leg 169 sh vs 87 sh -- and it is arm-flippable, because any change
+                # that shifts session state or `entry_submitted` timing changes whether the
+                # ER spine is present at all.
+                _fs_df = _entry_df
+                if _fs_df is None:
+                    try:
+                        _fs_df = _replay_aware_fetch_ohlcv_df(
+                            sess.symbol, interval="15m", period="5d"
+                        )
+                    except Exception:
+                        _fs_df = None
                 try:
-                    if _entry_df is not None and not getattr(_entry_df, "empty", True):
+                    if _fs_df is not None and not getattr(_fs_df, "empty", True):
+                        try:
+                            _fs_frame_bars = int(len(_fs_df))
+                            _fs_frame_stamp = str(_fs_df.index[-1])
+                        except Exception:
+                            _fs_frame_stamp = None
                         from .entry_gates import _today_session_frame as _fs_today_frame
                         from .ross_momentum import front_side_state as _fs_state_fn
-                        _fs_sess_df = _fs_today_frame(_entry_df)
+                        _fs_sess_df = _fs_today_frame(_fs_df)
                         # FIX-19(a): blend the LIVE mid tick (fresher than the last completed
                         # close) into the front-side position read. Fail-open to close if no tick.
                         _fs_state = _fs_state_fn(_fs_sess_df, live_price=_float_or_none(mid))
@@ -38583,7 +38838,16 @@ def tick_live_session(
                     stale_tape=bool(_fs_stale),
                     enabled=True,
                 )
-                if _frontside_mult < 1.0 or _fs_defer:
+                # ⚠️ WAS `if _frontside_mult < 1.0 or _fs_defer:` (2026-09-07). The tilt was
+                # recorded ONLY when it bit, so the arm that sized at FULL strength left no
+                # per-term record — and `mult == 1.0` is produced by three different states
+                # (strength >= s_hi, `strength is None`, and `stale_tape`; ross_momentum.py
+                # :1742-1746) that the receipt could not tell apart. Measuring a divergence
+                # needs BOTH sides: on JWEL 08-10 the full-size arm scored 1.0000 and the other
+                # 0.7034 on the same second, and no receipt could say which term moved, or even
+                # whether the high arm read a strong tape or an ABSENT one. Written every pass
+                # now; the `mult`/`defer` fields still say whether it bit.
+                if True:
                     le["frontside_size_tilt"] = {
                         "strength": (None if _fs_score is None else round(float(_fs_score), 4)),
                         "mult": round(float(_frontside_mult), 4),
@@ -38595,6 +38859,18 @@ def tick_live_session(
                         "day_range_pos": _fs_range_pos,
                         "er_bars": (len(_fs_closes) if isinstance(_fs_closes, list) else 0),
                         "stale_tape": bool(_fs_stale),
+                        # FRAME IDENTITY (2026-09-07). 60% of the score's weight (er 0.34 +
+                        # vwap_dist 0.16 + range_pos 0.10) comes from `_entry_df`, the 15m/5d
+                        # OHLCV frame served by the process-global 600 s TTL cache in
+                        # market_data.py whose key is `ticker|interval|period|start|end` — no
+                        # clock, no session, no leg. So the frame in hand can be up to 10 min
+                        # stale against a 15 min bar, and HOW stale is a function of when THIS
+                        # process last missed the cache, not of the decision instant. The cache
+                        # age under-reports; the last-bar stamp is the honest discriminator, so
+                        # two receipts standing at the same second can now be compared on the
+                        # frame they were actually reading.
+                        "frame_last_bar": _fs_frame_stamp,
+                        "frame_bars": _fs_frame_bars,
                         # REGIME-ADAPTIVE ramp anchors actually in force this tick.
                         "adaptive_warm": bool(_fs_warm),
                         "adaptive_n": int(_fs_n_samples),
@@ -39449,9 +39725,30 @@ def tick_live_session(
         # nagbabayad ng spread bawat attempt, habang ang time-spacing ay
         # napatunayang winner-killer (panalo median gap 4s). Fill = mas murang
         # pullback entry; non-fill = missed-not-chased (umiiral na ack-timeout/
-        # rest-bars cancel; WALANG repeg anchor kaya hindi ito hahabulin
-        # pataas). Ang pure decision ay bailout_maker_reentry_decision
+        # rest-bars cancel). Ang pure decision ay bailout_maker_reentry_decision
         # (risk_policy) — fail-toward-legacy marketable sa anumang sirang input.
+        #
+        # ⚠️ ANG LUMANG TALA DITO AY NAGSABI NG "WALANG repeg anchor kaya hindi
+        # ito hahabulin pataas". MALI IYON, at sinukat (2026-09-07, Ross Parity
+        # Bench, 13k/3% canon). Totoo na walang repeg SA LOOB ng isang order —
+        # pero ang bawat BAGONG pagputok ay nagpo-post sa `float(bid)` NGAYON,
+        # kaya ang hagdan ay umaakyat sa pagitan ng mga order: ack-timeout →
+        # muling pagputok sa mas mataas na bid → ulit. Sa 17/17 na hindi napunan
+        # ang bid sa timeout ay MAS MATAAS kaysa sa pinag-post-an (+$0.01..0.04),
+        # at ang buong reason ay `entry_limit_left_behind`. Nabibili nito ang
+        # tuktok ng sarili nitong hagdan: VEEE 8.12 → 8.24 → 8.32 (napunan sa
+        # 8.32 gayong 8.16 ang babayaran ng pagtawid sa unang atake, −$57.12);
+        # PPBT 09-02 2.13 → 2.14 → 2.15, at dahil muling sinusukat ng bawat
+        # atake ang TUMATAAS na ATR, lumalapad ang stop at lumiliit ang share sa
+        # nakapirming risk (2369 → 2053 → 1811) — −$301.51 sa isang leg, na
+        # siyang BUONG regression ng kaso.
+        #
+        # ANG ANCHOR: isang episode = isang post price. Kapag ang bid ay lumampas
+        # sa unang nakita ng episode, ang PULLBACK na hinihintay ay hindi dumating
+        # — kaya bumabalik ito sa marketable (ang sariling dokumentadong
+        # fail-toward-legacy ng function), sa halip na sundan pataas. Walang bagong
+        # konstante: ang anchor ay ang unang bid mismo, at ang episode ay
+        # natatapos kasama ng bailout window.
         _bailout_maker = False
         if (
             not _maker_entry
@@ -39472,9 +39769,22 @@ def tick_live_session(
                 ),
             )
             if _bailout_maker:
+                # EPISODE ANCHOR — see the block comment above. The first firing sets it;
+                # a later firing may not post ABOVE it. Fail-open: an unreadable anchor
+                # leaves the pre-2026-09-07 behaviour exactly as it was.
+                _bm_anchor = _float_or_none(le.get("bailout_maker_anchor_bid"))
+                if _bm_anchor is None or not (_bm_anchor > 0):
+                    le["bailout_maker_anchor_bid"] = float(bid)
+                    le["bailout_maker_anchor_at_utc"] = _utcnow().isoformat()
+                    _bm_anchor = float(bid)
+                elif float(bid) > _bm_anchor:
+                    _bailout_maker = False
+                    _bm_reason = "bid_above_episode_anchor"
                 _emit(db, sess, "live_entry_bailout_maker_reentry", {
                     "reason": _bm_reason,
                     "bid": float(bid),
+                    "anchor_bid": _bm_anchor,
+                    "posted": bool(_bailout_maker),
                     "guarded_ask": guarded_ask,
                     "last_exit_reason": le.get("last_exit_reason"),
                     "last_exit_return_bps": _float_or_none(le.get("last_exit_return_bps")),
@@ -40666,6 +40976,84 @@ def tick_live_session(
             )
             le["entry_final_bbo"] = _final_bbo
             _commit_le(sess, le)
+        # 07:00 ET SELLER-UNLOCK GUARD EVIDENCE (2026-09-06, Ross Parity Bench). The guard
+        # inside `_strict_alpaca_rth_entry_window` (the place path below) requires POSITIVE
+        # above-VWAP evidence within ±guard_min of 07:00 ET, read from
+        # le["entry_above_vwap"] — a stamp only the trigger families whose debug carries
+        # `above_vwap` write (pullback / tape-hold / micro-pullback). Every other fire
+        # (abcd_break_tick_ok, momentum_ok_tick_stream, hod_break, ...) leaves it None and
+        # the guard deferred on SILENCE, not on evidence. MEASURED (gate-15 baseline @
+        # 9383324b2): AEHL 2026-08-31 alpaca — 41 consecutive fires 06:41–07:10 ET, every
+        # one `premarket_seller_unlock_wait`, while the name printed 6.48–6.63 above a
+        # ~6.06 VWAP (Ross bought 6.54 at 06:56:54, 7.01 four minutes later); 356 such
+        # deferrals across 5 alpaca cases. Fix: when the stamp is absent, read the SAME
+        # canonical session frame the frontside sizing tilt already uses on this tick
+        # (`_today_session_frame(_entry_df) -> front_side_state(live_price=mid)`, pure, no
+        # new fetch) and stamp the MEASURED side. A frame with no VWAP (session_vwap None)
+        # stamps nothing, so the guard still defers on genuine silence. The guard's
+        # threshold is unchanged; a fire that IS below VWAP now defers on evidence.
+        # r2 (review 2026-09-06): the frame evidence lives in its OWN key
+        # (``entry_above_vwap_frame``) that ONLY the 07:00 guard reads — the trigger stamp
+        # ``entry_above_vwap`` is also the fail-closed input of the no-halt vertical-chase
+        # budget (FIX-B), which must not be flipped by a place-time read; the block runs
+        # for the Alpaca family only (the guard is not_applicable elsewhere); and a frame
+        # whose last bar is not TODAY (ET) stamps nothing (a lagging cached 15m frame
+        # would otherwise report yesterday's VWAP).
+        if (
+            le.get("entry_above_vwap") is None
+            and le.get("entry_above_vwap_frame") is None
+            and normalize_execution_family(getattr(sess, "execution_family", None))
+            in ALPACA_EXECUTION_FAMILIES
+        ):
+            try:
+                _su_frame = _entry_df
+            except NameError:
+                _su_frame = None
+            try:
+                if _su_frame is not None and not getattr(_su_frame, "empty", True):
+                    from .entry_gates import _today_session_frame as _su_today_frame
+                    from .ross_momentum import front_side_state as _su_state_fn
+
+                    _su_sess_df = _su_today_frame(_su_frame)
+                    _su_today_ok, _su_frame_dbg = session_frame_is_today_et(
+                        _su_sess_df, _utcnow_aware()
+                    )
+                    _su_state = (
+                        _su_state_fn(_su_sess_df, live_price=_float_or_none(mid))
+                        if _su_today_ok
+                        else None
+                    )
+                    _su_vwap = (
+                        _float_or_none(getattr(_su_state, "session_vwap", None))
+                        if _su_state is not None
+                        else None
+                    )
+                    if _su_vwap is not None and _su_vwap > 0.0:
+                        le["entry_above_vwap_frame"] = bool(getattr(_su_state, "above_vwap"))
+                        le["entry_above_vwap_source"] = "pre_place_session_frame"
+                        _commit_le(sess, le)
+                        _emit(db, sess, "live_entry_above_vwap_stamped_from_frame", {
+                            "above_vwap": bool(le["entry_above_vwap_frame"]),
+                            "session_vwap": round(_su_vwap, 6),
+                            "mid": _float_or_none(mid),
+                            "source": "pre_place_session_frame",
+                            **_su_frame_dbg,
+                        })
+                    elif not _su_today_ok and not le.get("entry_above_vwap_frame_stale_noted"):
+                        le["entry_above_vwap_frame_stale_noted"] = True
+                        _commit_le(sess, le)
+                        _emit(db, sess, "live_entry_above_vwap_frame_not_today", {
+                            "reason": "frame_last_bar_not_today_et",
+                            "mid": _float_or_none(mid),
+                            **_su_frame_dbg,
+                        })
+            except Exception:
+                _log.warning(
+                    "[momentum_live] pre-place above-VWAP stamp from the session frame failed "
+                    "(the 07:00 guard keeps deferring on silence) symbol=%s",
+                    getattr(sess, "symbol", None),
+                    exc_info=True,
+                )
         # CHUNK 3-C — RAIL-GOVERNED PLACE: the token bucket shared with every other lane
         # rail call (places + get_order polls) bounds the rate so multi-admission cannot
         # flood / 429 the broker (the flooding risk Chunk 2 introduced by deleting the
@@ -40923,6 +41311,12 @@ def tick_live_session(
             # OBSERVABILITY (2026-09-06, replay determinism): the sizing basis travels with
             # the submission so two receipts of the same case can be diffed factor by factor.
             "risk_mults": le.get("risk_mults"),
+            # `frontside` is one of ~25 multipliers in `risk_mults` and, on JWEL 08-10, the
+            # ONLY one that differed between two bench arms at the same second and price —
+            # 1.0000 vs 0.7593, sizing the winner leg 138 sh vs 76 sh. The tilt dict is the
+            # only place the six INPUTS behind that number live; it was written to `le` and
+            # read by nothing, so no receipt could attribute the difference.
+            "frontside_size_tilt": le.get("frontside_size_tilt"),
             "sizing": le.get("entry_sizing"),
             "resize_basis": le.get("entry_resize_basis"),
             "stop_atr_pct": le.get("entry_stop_atr_pct"),
@@ -42699,8 +43093,14 @@ def tick_live_session(
         opened_raw = pos.get("opened_at_utc")
         try:
             t0 = datetime.fromisoformat(str(opened_raw).replace("Z", "+00:00")).replace(tzinfo=None)
+            held_is_measured = True
         except Exception:
             t0 = _utcnow()
+            # `held` is now 0.0 and will be 0.0 again on the NEXT tick, and the one after
+            # that: with no parseable fill time this is not a young position, it is an
+            # unknown one. Anything that reads `held` as "too early to act" must be told
+            # the difference or it suppresses forever (2026-09-06).
+            held_is_measured = False
         held = (_utcnow() - t0).total_seconds()
         trail_activate_return = 1.0 + float(params["trail_activate_return_bps"]) / 10_000.0
 
@@ -42973,6 +43373,10 @@ def tick_live_session(
             _smart_hold_on
             and st == STATE_LIVE_ENTERED
             and bool(getattr(settings, "chili_momentum_breakout_bailout_enabled", True))
+            and not _opinion_exit_suppressed(
+                db, sess, le, trigger="smart_hold_fast_bail", held_seconds=held,
+                held_is_measured=held_is_measured,
+            )
             and le.get("breakout_level_price") is not None
             and bid is not None
         ):
@@ -43130,9 +43534,14 @@ def tick_live_session(
                 bid=bid, ask=ask, mid=mid,
             )
         elif (
-            st == STATE_LIVE_ENTERED
+            # 2026-09-06: the tick-cadence exit is the PRIMARY "the leg is over" signal
+            # (operator doctrine; exit census: zero legs ended by it in the gate-15
+            # baseline because it was dark and ENTERED-only while the early trail arm
+            # moves the state to TRAILING seconds after the fill). Evaluated in ENTERED
+            # and TRAILING, before the opinion bailouts below; default ON, env kill-switch.
+            st in (STATE_LIVE_ENTERED, STATE_LIVE_TRAILING)
             and bool(getattr(
-                settings, "chili_momentum_failed_pop_break_exit_enabled", False
+                settings, "chili_momentum_failed_pop_break_exit_enabled", True
             ))
             and _failed_pop_break_fires(db, sess, le, bid=bid, avg=avg)
         ):
@@ -43157,6 +43566,10 @@ def tick_live_session(
         elif (
             st == STATE_LIVE_ENTERED
             and bool(getattr(settings, "chili_momentum_breakout_bailout_enabled", True))
+            and not _opinion_exit_suppressed(
+                db, sess, le, trigger="breakout_failed_to_hold", held_seconds=held,
+                held_is_measured=held_is_measured,
+            )
             and breakout_failed_to_hold(
                 breakout_level=le.get("breakout_level_price"),
                 bid=bid,
@@ -43598,6 +44011,10 @@ def tick_live_session(
         if (
             bool(getattr(settings, "chili_momentum_lost_vwap_flatten_enabled", True))
             and st in (STATE_LIVE_ENTERED, STATE_LIVE_SCALING_OUT, STATE_LIVE_TRAILING)
+            and not _opinion_exit_suppressed(
+                db, sess, le, trigger="lost_vwap_flatten", held_seconds=held,
+                held_is_measured=held_is_measured,
+            )
             and bid is not None
             and math.isfinite(float(bid))
             and float(bid) > 0
@@ -43723,6 +44140,10 @@ def tick_live_session(
         if (
             bool(getattr(settings, "chili_momentum_bos_exit_live_enabled", True))
             and st in (STATE_LIVE_ENTERED, STATE_LIVE_TRAILING)
+            and not _opinion_exit_suppressed(
+                db, sess, le, trigger="bos_exit", held_seconds=held,
+                held_is_measured=held_is_measured,
+            )
         ):
             try:
                 from .entry_gates import bos_exit_triggered_long as _bos_fn
@@ -43903,7 +44324,25 @@ def tick_live_session(
                 try:
                     from .candles import topping_tail_from_df
 
-                    if topping_tail_from_df(_entry_df):
+                    # ⚠️ THIS FLAG WAS A STRUCTURAL NO-OP (2026-09-07). The comment above says
+                    # it "reuses the bars already fetched for the adaptive-spread check" and
+                    # is "fail-safe (no candle data -> no exit)". Both true — and together
+                    # they made it dead code: this is the RUNNER path, which only runs in
+                    # states where `_live_entry_quote_gate_applies` is False, so `_entry_df`
+                    # is ALWAYS None here and `candles.topping_tail_from_df` always returned
+                    # False on the fail-safe. A default-True flag that cannot fire is exactly
+                    # the dark flag the doctrine forbids: it reads as shipped, and it is not.
+                    # Same one-line fallback as :33914 and the front-side block.
+                    # ⚠️ THIS TURNS A NEVER-FIRED EXIT ON — arm-ready, not ship-ready.
+                    _tt_df = _entry_df
+                    if _tt_df is None:
+                        try:
+                            _tt_df = _replay_aware_fetch_ohlcv_df(
+                                sess.symbol, interval="15m", period="5d"
+                            )
+                        except Exception:
+                            _tt_df = None
+                    if topping_tail_from_df(_tt_df):
                         if _g4_cap is not None:
                             # G4 P1: in GRIND mode a topping tail on an intact structure
                             # (bid >= floor — re-verified by the decision THIS tick) does

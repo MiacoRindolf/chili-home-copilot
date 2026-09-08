@@ -744,39 +744,64 @@ class AsOfProvider:
 # Payload facts the bench scorer needs on top of the parity fixture's load-bearing set
 # (``_load_bearing_payload``): WHY a decision went the way it did, and what it was measured
 # against. Everything else in a payload stays out, so the receipt is stable across releases.
-_BENCH_PAYLOAD_KEYS = (
-    "reason", "blocked_trigger", "benched_at_hod", "trigger", "viability_score", "errors",
-    # 2026-09-04: the SDOT alpaca receipt showed ``live_entry_blocked_by_breaker`` x26 with
-    # payload ``{}`` -- the runner had written breaker=daily_loss_cap_broker, family,
-    # daily_pnl_usd, max_daily_loss_usd and this filter dropped every one of them; the
-    # sink row had to be read by hand to name the gate. Breaker / blocker attribution is
-    # exactly the "WHY" this receipt exists to carry.
-    "breaker", "family", "dd_reason", "daily_pnl_usd", "max_daily_loss_usd", "transient",
-    "source", "error_type", "detail", "skipped",
-    # 2026-09-05: the alpaca sweep receipts carried 1,775 x ``live_blocked_by_risk
-    # wide_bbo_spread`` per case as ``{reason, bid, ask}`` -- the cap it was measured
-    # against (max_spread_bps / expected_move_bps / spread_bps) and the deadman's pending
-    # state (client_order_id / broker_error) were dropped, so WHICH cap bound (the 12-bps
-    # floor with no expected move on a held tick) had to be reconstructed from source.
-    "spread_bps", "max_spread_bps", "expected_move_bps", "median_spread_bps", "samples",
-    "effective_spread_bps", "bid", "ask", "mid", "rescued_from", "failed_check",
-    "client_order_id", "broker_error", "owner_transport_advanced", "phase", "session_state",
-    "target_price", "position_quantity",
-    # 2026-09-05 gate #11: ``live_deadman_stop_release_blocked`` carries WHY in ``error``
-    # (deadman_cancel_unsupported / _pre_cancel_truth_unknown / ...); ``errors`` (plural) was
-    # whitelisted, ``error`` was not, and the block repeated 2,590 times per case unnamed.
-    "error", "deadman_order_id", "deadman_client_order_id", "frozen_order_type",
-    "superseding_order_type", "handoff_token",
-    "risk_mults", "sizing", "resize_basis", "max_notional_usd", "stop_atr_pct", "stop_model",
-)
-
+# ⚠️ _BENCH_PAYLOAD_KEYS ay TINANGGAL (2026-09-07). Ito ang buong tala ng kung bakit,
+# dahil ang listahan mismo ang ebidensya: 19 key ang pinapayagan nito at 353 ang
+# tinatapon, at tatlong beses sa iisang araw ay pinatay nito ang isang diagnosis
+# (frontside_size_tilt, anchor_bid/posted, depth_frac). Tingnan ang _bench_payload.
 
 def _bench_payload(event_type: str, payload: dict) -> dict:
+    """The WHOLE payload, bounded — not a whitelist.
+
+    ⚠️ THE WHITELIST WAS DELETED (2026-09-07), and the operator was right to ask why it
+    existed at all. Measured before deciding: the runner writes 364 distinct keys into event
+    payloads; the whitelist passed 19 and DROPPED 353. Receipts are 1.38 MB median / 1.63 MB
+    largest, the whole rossbench corpus is 0.7 GB, and recording everything costs ~1.1x —
+    ten percent of disk.
+
+    Ten percent of disk against entire diagnoses. In ONE day the filter silently swallowed
+    `frontside_size_tilt` (the only record of the six inputs behind the multiplier that sized
+    a winner leg 169 sh vs 87 sh), then `anchor_bid`/`posted`, then `depth_frac` (without
+    which the pullback-add depth band cannot be re-derived from its own distribution, which
+    is what the no-magic-numbers doctrine requires). Each miss costs a full bench re-run —
+    hours — not ten percent of a gigabyte.
+
+    And the filter was in the WRONG PLACE. "Keep the receipt stable across releases" is a
+    READ-time concern: project the fields you want when you diff. Filtering at WRITE time
+    destroys the information permanently, and you cannot get it back without re-running the
+    window. An instrument that decides in advance what you are allowed to measure is not an
+    instrument.
+
+    What remains is a BOUND, not a policy about meaning: no single value may exceed
+    ``_BENCH_VALUE_CHARS_MAX`` serialized chars and no payload may carry more than
+    ``_BENCH_PAYLOAD_KEYS_MAX`` keys. Anything trimmed says so in-band, so a reader is never
+    silently lied to — which is exactly what the whitelist did.
+    """
     p = payload or {}
-    keep = dict(_load_bearing_payload(str(event_type), p))
-    for k in _BENCH_PAYLOAD_KEYS:
-        if k in p:
-            keep[k] = p[k]
+    if not isinstance(p, dict):
+        return {"_payload_not_a_dict": str(type(p).__name__)}
+    keep: dict = {}
+    trimmed: list[str] = []
+    for i, (k, v) in enumerate(p.items()):
+        if i >= _BENCH_PAYLOAD_KEYS_MAX:
+            trimmed.append(f"+{len(p) - _BENCH_PAYLOAD_KEYS_MAX} more keys")
+            break
+        try:
+            if isinstance(v, (str, bytes)) and len(v) > _BENCH_VALUE_CHARS_MAX:
+                keep[str(k)] = str(v[:_BENCH_VALUE_CHARS_MAX])
+                trimmed.append(str(k))
+                continue
+            s = json.dumps(v, default=str)
+            if len(s) > _BENCH_VALUE_CHARS_MAX:
+                keep[str(k)] = s[:_BENCH_VALUE_CHARS_MAX]
+                trimmed.append(str(k))
+                continue
+            keep[str(k)] = v
+        except Exception:
+            keep[str(k)] = str(v)[:_BENCH_VALUE_CHARS_MAX]
+    # the load-bearing projection still wins on key collisions — it is the parity contract
+    keep.update(dict(_load_bearing_payload(str(event_type), p)))
+    if trimmed:
+        keep["_bench_trimmed"] = trimmed
     return keep
 
 

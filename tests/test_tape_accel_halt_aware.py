@@ -152,5 +152,6 @@ def test_leader_substitute_accepts_majority_buy_tape():
         is_day_leader=True,
         tape_accel=-50_000.0,
         tape_back_buy_share=0.85,
+        noise_abs=0.05,  # v5b: 8.67 >= 8.31 + 0.124 + 0.05
     )
     assert allowed is True
