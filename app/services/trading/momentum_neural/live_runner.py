@@ -185,6 +185,7 @@ from .paper_execution import (
     flag_breakout_add_decision,
     grind_effective_max_adds,
     grind_mode_decision,
+    grind_mode_decision_tick,
     iceberg_seller_score,
     measured_move_exit_enabled,
     measured_move_scale_exit_decision,
@@ -44352,6 +44353,46 @@ def tick_live_session(
                     if not _g4_active_now and le.get("g4_probe_min") != _g4_min_key:
                         le["g4_probe_min"] = _g4_min_key
                         _commit_le(sess, le)
+                        # A/B ARM (2026-09-08, LOG-ONLY): the bar-clock decision above has
+                        # now been refused often enough to be diagnosed. Its two binding
+                        # gates reject the biggest winners in the book — `not_day_leader`
+                        # 72 probes at mean peak 9.31R, `no_higher_low_above_entry` 54 at
+                        # 13.53R — because a cross-sectional RANK is answering a
+                        # within-trade question, and because a pullback-and-continue cycle
+                        # has to print on 5-MINUTE BARS when the whole move can finish
+                        # inside one. `grind_mode_decision_tick` asks the same question of
+                        # the tape. Emit BOTH verdicts on the same pulse, same inputs, so
+                        # production says how often the tape version would have held a
+                        # runner the bar version dropped — BEFORE either one gates
+                        # anything. No behaviour change: `_g4_cap` is never read from here.
+                        _g4_tick = None
+                        try:
+                            from .entry_gates import (
+                                signed_tape_accel_features as _g4t_tape_fn,
+                            )
+
+                            _g4t_tape = _g4t_tape_fn(
+                                sess.symbol, db=db, as_of=_replay_l2_as_of_or_none(),
+                            ) or {}
+                            _g4_tick = grind_mode_decision_tick(
+                                prior_active=bool(pos.get("g4_grind_active")),
+                                entry_price=avg,
+                                bid=float(bid),
+                                atr_pct=_float_or_none(le.get("entry_stop_atr_pct")) or 0.0,
+                                stop_atr_mult=float(params.get("stop_atr_mult") or 0.60),
+                                high_water_mark=(
+                                    _float_or_none(pos.get("high_water_mark")) or avg
+                                ),
+                                swing_low_now=_g4t_tape.get("swing_low_now"),
+                                swing_low_prev=_g4t_tape.get("swing_low_prev"),
+                                buy_support_px=_g4t_tape.get("buy_support_px"),
+                                signed_tape_accel=_g4t_tape.get("signed_tape_accel"),
+                                vwap=_float_or_none(le.get("g4_vwap5m_val")),
+                                high_print_position=_g4t_tape.get("high_print_position"),
+                            )
+                        except Exception:
+                            # Telemetry only — a probe must never disturb the trade.
+                            _g4_tick = None
                         _emit(db, sess, "g4_grind_probe", {
                             "reason": _g4_grind.get("reason"),
                             "peak_r": _g4_grind.get("peak_r"),
@@ -44362,6 +44403,21 @@ def tick_live_session(
                             "vwap5m": _float_or_none(le.get("g4_vwap5m_val")),
                             "structure_floor": _g4_grind.get("structure_floor"),
                             "bid": bid,
+                            # The counterfactual, side by side with the live verdict.
+                            "tick_active": (
+                                None if _g4_tick is None else bool(_g4_tick.get("active"))
+                            ),
+                            "tick_reason": (
+                                None if _g4_tick is None else _g4_tick.get("reason")
+                            ),
+                            "tick_structure_floor": (
+                                None if _g4_tick is None
+                                else _g4_tick.get("structure_floor")
+                            ),
+                            "tick_high_print_position": (
+                                None if _g4_tick is None
+                                else _g4_tick.get("high_print_position")
+                            ),
                         })
                 except Exception:
                     # Fail toward SCALP: any grind-read error leaves every exit layer

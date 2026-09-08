@@ -184,6 +184,61 @@ def test_too_few_prints_still_returns_none():
     assert _f(_tape([1.0, 1.1])) is None
 
 
+# ── 5. swing lows split by COUNT, and where the buying actually happened ───────
+
+def test_swing_lows_split_the_window_by_print_count_not_by_time():
+    """Each half must hold the same NUMBER of prints, so a higher low is a
+    comparison between equal populations however fast the tape was running."""
+    out = _f(_tape([2.0, 1.8, 1.9, 2.1, 2.3, 2.2, 2.5, 2.4]))
+    assert out is not None
+    assert out["swing_low_prev"] == pytest.approx(1.8)   # min of the older four
+    assert out["swing_low_now"] == pytest.approx(2.2)    # min of the newer four
+    assert out["swing_low_now"] > out["swing_low_prev"]  # a higher low, in prints
+
+
+def test_a_stepping_down_tape_reports_a_lower_low():
+    out = _f(_tape([2.5, 2.4, 2.3, 2.2, 2.0, 1.9, 1.8, 1.7]))
+    assert out is not None
+    assert out["swing_low_now"] < out["swing_low_prev"]
+
+
+def test_swing_lows_are_none_when_there_is_not_enough_tape_to_halve():
+    out = _f(_tape([1.0, 1.1, 1.2]))
+    assert out is not None
+    assert out["swing_low_prev"] is None and out["swing_low_now"] is None
+
+
+def test_buy_support_is_the_volume_weighted_price_of_the_lifts():
+    """The level where the buying actually happened — the thing the 5m EMA-9 only
+    stands in for. Sells must not drag it."""
+    rows = [
+        _row(10.00, 1_000_000.0, size=100.0),              # at the ask -> a buy
+        _row(12.00, 1_000_000.1, size=300.0),              # at the ask -> a buy
+        (8.00, 900.0, 8.00, 8.05, 1_000_000.2),            # at the bid -> a sell
+    ]
+    out = _f(rows)
+    assert out is not None
+    # (10*100 + 12*300) / 400 = 11.5, and the 8.00 sell is excluded entirely
+    assert out["buy_support_px"] == pytest.approx(11.5)
+
+
+def test_buy_support_is_none_when_nobody_lifted():
+    rows = [(9.0 - i * 0.1, 100.0, 9.0 - i * 0.1, 9.05 - i * 0.1, 1_000_000.0 + i * 0.1)
+            for i in range(6)]
+    out = _f(rows)
+    assert out is not None
+    assert out["buy_support_px"] is None
+
+
+def test_the_structure_features_also_ignore_the_clock():
+    """Same property as the rest: identical prints, 400x apart in wall time."""
+    prices = [2.0, 1.8, 1.9, 2.1, 2.3, 2.2, 2.5, 2.4]
+    fast = _f(_tape(prices, step=0.01), window_s=1.0)
+    slow = _f(_tape(prices, step=4.0), window_s=600.0)
+    for key in ("swing_low_prev", "swing_low_now", "buy_support_px"):
+        assert fast[key] == pytest.approx(slow[key]), key
+
+
 def test_the_existing_keys_are_all_still_present():
     """Three modules read this dict; none of their keys may disappear."""
     out = _f(_tape([1.0 + i * 0.01 for i in range(20)]))

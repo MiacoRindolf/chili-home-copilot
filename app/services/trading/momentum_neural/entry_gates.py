@@ -2929,6 +2929,31 @@ def _signed_tape_features(
         prints_since_high = (len(_px_seq) - 1) - _hi_idx
         if len(_px_seq) > 1:
             high_print_position = prints_since_high / float(len(_px_seq) - 1)
+    # ── SWING LOWS SPLIT BY PRINT COUNT, AND WHERE THE BUYING ACTUALLY HAPPENED ──
+    # The structure trail asks "has one full pullback-and-continue cycle completed
+    # above entry". Today it asks that of 5-MINUTE BARS, and a move that peaks at
+    # 13R can finish inside one of them — which is why `no_higher_low_above_entry`
+    # refused 54 probes whose mean peak was 13.53R. Split by COUNT (not by the
+    # timestamp midpoint the accel split uses) so each half holds the same number
+    # of prints: the comparison is then between equal populations regardless of how
+    # fast the tape happened to be running.
+    #   swing_low_prev / swing_low_now  -> a higher low, in prints
+    #   buy_support_px                  -> volume-weighted price of the AGGRESSOR-BUY
+    #                                      prints: the level where the buying really
+    #                                      happened, which the 5m EMA-9 only proxies
+    swing_low_prev: float | None = None
+    swing_low_now: float | None = None
+    if len(_px_seq) >= 4:
+        _mid = len(_px_seq) // 2
+        swing_low_prev = min(_px_seq[:_mid])
+        swing_low_now = min(_px_seq[_mid:])
+    _buy_notional = 0.0
+    _buy_size = 0.0
+    for pt in parsed:
+        if pt[1] > 0 and pt[3] is not None:      # signed volume > 0 => lifted the ask
+            _buy_notional += float(pt[3]) * float(pt[2])
+            _buy_size += float(pt[2])
+    buy_support_px = (_buy_notional / _buy_size) if _buy_size > 0 else None
     return {
         "signed_tape_accel": float(signed_tape_accel),
         "tick_rate": float(tick_rate),
@@ -2945,6 +2970,15 @@ def _signed_tape_features(
         ),
         "high_print_position": (
             float(high_print_position) if high_print_position is not None else None
+        ),
+        "swing_low_prev": (
+            float(swing_low_prev) if swing_low_prev is not None else None
+        ),
+        "swing_low_now": (
+            float(swing_low_now) if swing_low_now is not None else None
+        ),
+        "buy_support_px": (
+            float(buy_support_px) if buy_support_px is not None else None
         ),
         "front_buy_share": (
             float(front_buy_share) if front_buy_share is not None else None
