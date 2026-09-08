@@ -1,0 +1,16 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "planner-preview",
+      "runtimeExecutable": "powershell",
+      "runtimeArgs": [
+        "-NoProfile",
+        "-ExecutionPolicy", "Bypass",
+        "-Command",
+        "$env:CHILI_PYTEST='1'; $env:CHILI_SCHEDULER_ROLE='none'; $env:CHILI_TLS='0'; $env:DATABASE_URL='postgresql://chili:chili@localhost:5433/chili'; $env:CHILI_CLAUDE_PROJECTS_DIR='C:\\Users\\rindo\\.claude\\projects'; $env:CHILI_CLAUDE_BRIDGE_DIR='D:\\CHILI-Docker\\chili-data\\claude_bridge'; conda run --no-capture-output -n chili-env python -m uvicorn app.main:app --host 127.0.0.1 --port 8056"
+      ],
+      "port": 8056
+    }
+  ]
+}

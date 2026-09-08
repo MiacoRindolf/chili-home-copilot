@@ -27,7 +27,7 @@ from jinja2 import ChoiceLoader
 
 from .db import Base, SessionLocal, engine
 from .migrations import run_migrations, schema_startup_lock
-from .routers import admin, auth, brain, brain_project, brain_v1_compat, chat, code_brain_status, context_brain_status, dev_terminal, dispatch_status, health_routes, jobs, pages, marketplace, trading
+from .routers import admin, auth, brain, brain_project, brain_v1_compat, chat, claude_bridge, code_brain_status, context_brain_status, dev_terminal, dispatch_status, health_routes, jobs, pages, marketplace, trading
 from .modules import get_nav_modules, load_enabled_modules, load_third_party_module
 from .models import (  # noqa: F401 — register ORM tables
     BrainWorkerControl,
@@ -1111,6 +1111,7 @@ app.include_router(chat.router)
 app.include_router(admin.router)
 app.include_router(brain_project.router)
 app.include_router(dev_terminal.router)
+app.include_router(claude_bridge.router)
 app.include_router(brain.router)
 app.include_router(brain_v1_compat.router)
 app.include_router(pages.router)
