@@ -758,6 +758,23 @@ _BENCH_PAYLOAD_KEYS = (
     #     order at all.
     # An instrument you cannot read back is not an instrument.
     "frontside_size_tilt", "anchor_bid", "posted",
+    # ── AND THEN I MEASURED THE WHOLE FILTER (2026-09-07) ────────────────────────────────
+    # 353 of the 364 keys the runner writes into event payloads never reach a receipt; the
+    # whitelist held 19. That is why the same omission bit three separate times in one day.
+    # The keys below are the ones that carry DECISION EVIDENCE — the number a gate compared,
+    # not the narrative around it. Chosen, not swept: a receipt that carries everything is a
+    # log, and the filter exists so receipts stay diffable across releases.
+    #
+    # The immediate unblock: `pullback_add` is vetoed 487 times and fires ZERO, and 232 of
+    # those vetoes are a depth BAND (`pullback_too_shallow` 75 / `pullback_too_deep` 157)
+    # against a fixed 0.20-0.62 window. The band cannot be re-derived from the measured
+    # distribution — the doctrine's requirement — because `depth_frac` was filtered out.
+    "depth_frac", "pullback_low", "prior_low", "strength", "strength_floor",
+    "front_side_strength", "ofi_level", "ofi_slope", "above_vwap",
+    "escalation_level", "structural_trigger", "is_day_leader", "substitute_required",
+    "tape_accel", "tape_back_buy_share", "live_price",
+    "bid", "ask", "guarded_ask", "spread_bps", "atr_pct", "stop_distance",
+    "entry_price", "high_water_mark", "held_seconds", "fill_price", "filled_size", "avg",
     # 2026-09-04: the SDOT alpaca receipt showed ``live_entry_blocked_by_breaker`` x26 with
     # payload ``{}`` -- the runner had written breaker=daily_loss_cap_broker, family,
     # daily_pnl_usd, max_daily_loss_usd and this filter dropped every one of them; the
