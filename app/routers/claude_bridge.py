@@ -348,10 +348,12 @@ def api_claude_reply(msg_id: str, request: Request, db: Session = Depends(get_db
     if bridge is None:
         return JSONResponse({"error": "Bridge directory not mounted."}, status_code=503)
 
+    # utf-8-sig throughout: the host worker is PowerShell, which stamps a BOM on
+    # everything it writes, and json.loads rejects it.
     done = bridge / "outbox" / f"{msg_id}.json"
     if done.is_file():
         try:
-            data = json.loads(done.read_text(encoding="utf-8"))
+            data = json.loads(done.read_text(encoding="utf-8-sig"))
         except Exception:
             return {"state": "error", "error": "The reply file was unreadable."}
         return {"state": data.get("state") or "done",
@@ -377,7 +379,7 @@ def api_claude_health(request: Request, db: Session = Depends(get_db)):
         hbf = bridge / "worker_heartbeat.json"
         if hbf.is_file():
             try:
-                hb = json.loads(hbf.read_text(encoding="utf-8"))
+                hb = json.loads(hbf.read_text(encoding="utf-8-sig"))
             except Exception:
                 hb = None
     worker_age = None

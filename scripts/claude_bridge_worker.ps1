@@ -31,8 +31,15 @@ foreach ($sub in @('inbox', 'working', 'outbox', 'logs')) {
     if (-not (Test-Path $p)) { New-Item -ItemType Directory -Force -Path $p | Out-Null }
 }
 
-$claude = (Get-Command claude -ErrorAction SilentlyContinue).Source
-if (-not $claude) { Write-Error 'claude CLI not on PATH.'; exit 2 }
+# PowerShell resolves `claude` to the .ps1 shim first, but the job runs under
+# cmd.exe, which cannot execute a .ps1 at all.  Take the .cmd/.exe form.
+$claudeCandidates = @(Get-Command claude -All -ErrorAction SilentlyContinue |
+                      Select-Object -ExpandProperty Source)
+$claude = $claudeCandidates | Where-Object { $_ -match '\.(cmd|exe|bat)$' } | Select-Object -First 1
+if (-not $claude) {
+    Write-Error 'No executable claude CLI found (need claude.cmd or claude.exe on PATH).'
+    exit 2
+}
 
 $runFlag = Join-Path $BridgeDir 'worker.run'
 Set-Content -Path $runFlag -Value (Get-Date -Format o) -Encoding utf8
@@ -40,19 +47,49 @@ Set-Content -Path $runFlag -Value (Get-Date -Format o) -Encoding utf8
 Write-Host "[claude_bridge] watching $BridgeDir  (claude: $claude)"
 Write-Host "[claude_bridge] repo: $RepoDir   timeout: ${TimeoutSec}s"
 
+# Windows PowerShell's utf8 encoding stamps a BOM, and json.loads on the reader
+# side rejects it outright -- so every JSON this worker writes goes out BOM-less.
+$script:NoBom = [System.Text.UTF8Encoding]::new($false)
+
+function Write-JsonAtomic {
+    param([string]$Path, [string]$Json)
+    $tmp = "$Path.tmp"
+    [System.IO.File]::WriteAllText($tmp, $Json, $script:NoBom)
+    Move-Item -Path $tmp -Destination $Path -Force
+}
+
 function Write-Heartbeat {
     $hb = @{ at = [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds() / 1000.0
              pid = $PID; repo = $RepoDir } | ConvertTo-Json -Compress
-    $tmp = Join-Path $BridgeDir '.hb.tmp'
-    Set-Content -Path $tmp -Value $hb -Encoding utf8
-    Move-Item -Path $tmp -Destination (Join-Path $BridgeDir 'worker_heartbeat.json') -Force
+    Write-JsonAtomic -Path (Join-Path $BridgeDir 'worker_heartbeat.json') -Json $hb
+}
+
+function Resolve-SessionCwd {
+    # `claude --resume` scopes sessions to the working directory, so the job has
+    # to run where the session was recorded -- not where this worker lives.  The
+    # transcript stamps `cwd` on its records, so read it rather than trying to
+    # decode the project slug (a dash in a real directory name makes that
+    # ambiguous).
+    param([string]$SessionId)
+    try {
+        $root = Join-Path $env:USERPROFILE '.claude\projects'
+        $f = Get-ChildItem $root -Directory -ErrorAction SilentlyContinue | ForEach-Object {
+                 Join-Path $_.FullName "$SessionId.jsonl"
+             } | Where-Object { Test-Path $_ } | Select-Object -First 1
+        if (-not $f) { return $null }
+        foreach ($line in (Get-Content $f -Tail 80 -Encoding utf8 -ErrorAction Stop)) {
+            if (-not $line.Trim()) { continue }
+            try { $rec = $line | ConvertFrom-Json } catch { continue }
+            if ($rec.cwd -and (Test-Path $rec.cwd)) { return [string]$rec.cwd }
+        }
+    } catch { }
+    return $null
 }
 
 function Complete-Job {
     param([string]$Id, [hashtable]$Result)
-    $tmp = Join-Path $BridgeDir ".$Id.out.tmp"
-    Set-Content -Path $tmp -Value ($Result | ConvertTo-Json -Compress -Depth 6) -Encoding utf8
-    Move-Item -Path $tmp -Destination (Join-Path $BridgeDir "outbox\$Id.json") -Force
+    Write-JsonAtomic -Path (Join-Path $BridgeDir "outbox\$Id.json") `
+                     -Json ($Result | ConvertTo-Json -Compress -Depth 6)
     $w = Join-Path $BridgeDir "working\$Id.json"
     if (Test-Path $w) { Remove-Item $w -Force }
 }
@@ -90,15 +127,32 @@ while (Test-Path $runFlag) {
         $errFile    = Join-Path $BridgeDir "logs\$id.err.txt"
         [System.IO.File]::WriteAllText($promptFile, [string]$job.message, [System.Text.UTF8Encoding]::new($false))
 
-        Write-Host ("[claude_bridge] {0} -> session {1} ({2} chars)" -f $id, $sid.Substring(0, 8), ([string]$job.message).Length)
+        $cwd = Resolve-SessionCwd -SessionId $sid
+        if (-not $cwd) {
+            Complete-Job -Id $id -Result @{ state = 'error'
+                                            error = "No transcript found for session $sid, so its working directory is unknown." }
+            continue
+        }
+
+        Write-Host ("[claude_bridge] {0} -> session {1} in {2} ({3} chars)" -f `
+                    $id, $sid.Substring(0, 8), $cwd, ([string]$job.message).Length)
         $t0 = Get-Date
 
-        # cmd handles the redirection: PowerShell's -RedirectStandard* stalls on
-        # a full pipe with a chatty child (recorded incident).
-        $cmd = ('""{0}"" -p --resume {1} --fork-session --output-format text < ""{2}"" > ""{3}"" 2> ""{4}""' -f `
-                $claude, $sid, $promptFile, $outFile, $errFile)
-        $proc = Start-Process -FilePath $env:ComSpec -ArgumentList '/c', $cmd `
-                              -WorkingDirectory $RepoDir -WindowStyle Hidden -PassThru
+        # The command goes into a runner script rather than an argument string:
+        # nesting quotes through PowerShell -> Start-Process -> cmd /c is where
+        # these launchers break.  cmd owns the redirection because PowerShell's
+        # -RedirectStandard* stalls on a full pipe with a chatty child (recorded
+        # incident).
+        $runner = Join-Path $BridgeDir "logs\$id.run.cmd"
+        $script = @(
+            '@echo off',
+            "cd /d `"$cwd`"",
+            "`"$claude`" -p --resume $sid --fork-session --output-format text < `"$promptFile`" > `"$outFile`" 2> `"$errFile`""
+        ) -join "`r`n"
+        [System.IO.File]::WriteAllText($runner, $script + "`r`n", [System.Text.Encoding]::ASCII)
+
+        $proc = Start-Process -FilePath $env:ComSpec -ArgumentList '/c', "`"$runner`"" `
+                              -WorkingDirectory $cwd -WindowStyle Hidden -PassThru
 
         if (-not $proc.WaitForExit($TimeoutSec * 1000)) {
             try { $proc.Kill() } catch { }
@@ -137,6 +191,20 @@ while (Test-Path $runFlag) {
                 if ($newest) { $forked = $newest.BaseName }
             }
         } catch { }
+
+        # The CLI reports an auth failure on stdout with exit 0, which would
+        # otherwise be rendered as if the agent had said it.  Name it instead:
+        # only the operator can re-authorise the CLI.
+        if ($reply -match 'Failed to authenticate|OAuth session expired|Invalid API key|Please run .?claude login') {
+            Complete-Job -Id $id -Result @{
+                state = 'error'
+                error = "The claude CLI is not authorised for headless runs.`n" +
+                        $reply.Trim() + "`n" +
+                        'Sign the CLI in on this machine (or give the worker an API key), then resend.'
+                duration_s = $dur }
+            Write-Host ("[claude_bridge] {0} NOT AUTHORISED after {1}s" -f $id, $dur)
+            continue
+        }
 
         Complete-Job -Id $id -Result @{ state = 'done'; reply = $reply.TrimEnd()
                                         forked_session_id = $forked; duration_s = $dur }
