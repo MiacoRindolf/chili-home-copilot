@@ -2768,7 +2768,7 @@ def _signed_tape_features(
         prev_px = px
         if sign != 0:
             last_sign = sign
-        parsed.append((ts, sign * sz, sz))
+        parsed.append((ts, sign * sz, sz, px))
         if ts is not None:
             t_min = ts if t_min is None else min(t_min, ts)
             t_max = ts if t_max is None else max(t_max, ts)
@@ -2823,7 +2823,7 @@ def _signed_tape_features(
             2.0 * math.ulp(t_max),
         )
 
-        def _is_front_half(point: tuple[float | None, float, float]) -> bool:
+        def _is_front_half(point: tuple[float | None, float, float, float]) -> bool:
             ts = point[0]
             if ts is None:
                 return False
@@ -2861,12 +2861,6 @@ def _signed_tape_features(
     front_buy_share = (front_buy / front_total) if front_total > 0 else None
     back_buy_share = (back_buy / back_total) if back_total > 0 else None
     tick_rate = len(back) / back_secs if back_secs > 0 else 0.0
-    # Self-relative floor: the per-half tick rates (front + back) form the symbol's OWN
-    # recent activity sample; the floor is the configured percentile of those rates.
-    half_rates = sorted(
-        [len(front) / front_secs if front_secs > 0 else 0.0,
-         len(back) / back_secs if back_secs > 0 else 0.0]
-    )
     try:
         fp = float(tick_rate_floor_pctile)
     except (TypeError, ValueError):
@@ -2874,14 +2868,84 @@ def _signed_tape_features(
     if not math.isfinite(fp):
         return None
     fp = max(0.0, min(1.0, fp))
-    # percentile of the small per-half-rate sample (nearest-rank, lower bound)
-    idx = min(len(half_rates) - 1, int(fp * (len(half_rates) - 1)))
-    tick_rate_floor = half_rates[idx] if half_rates else 0.0
+    # ── SELF-RELATIVE ACTIVITY FLOOR — RANKED IN PRINTS, NOT IN SECONDS ──────────
+    # WHAT WAS WRONG. The sample used to be the two per-half rates, so
+    # ``sorted([front_rate, back_rate])`` had length 2 and the nearest-rank index
+    # ``int(fp * (len - 1))`` collapsed to 0 for every fp < 1.0. The floor was
+    # therefore ``min(front_rate, back_rate)`` while ``tick_rate`` IS back_rate,
+    # so ``tick_rate >= tick_rate_floor`` reduced to
+    # ``back_rate >= min(front_rate, back_rate)`` — unconditionally true at EVERY
+    # configured percentile. Not merely permissive: decision-inert. The single
+    # live refusal receipt in the whole book carries the two values byte-identical
+    # (tick_rate 4.7707 / tick_rate_floor 4.7707, TNMG 2026-06-29). Three separate
+    # consumers read this pair as a gate — ``_l2_entry_confirm`` here,
+    # ``first_dip_tape_decision`` (:2238, :2275) and ``auto_arm`` (:701) — so the
+    # tautology silently disabled the activity leg in all three.
+    #
+    # WHAT REPLACES IT. The sample is now the rate of EVERY rolling window of
+    # ``m = len(back)`` consecutive prints across the whole window. The last such
+    # window is the back half by construction, so ``tick_rate`` is a member of the
+    # distribution it is ranked against — like-for-like, at the metric's own
+    # granularity. Crucially the window is defined by PRINT COUNT, not by seconds:
+    # m prints mean the same thing on a name printing 400/s and on one printing
+    # 6/min, whereas a fixed number of seconds does not. No new constant is
+    # introduced — m is the metric's existing split granularity.
+    _ts_seq = [pt[0] for pt in parsed if pt[0] is not None]
+    m = max(2, len(back))
+    roll_rates: list[float] = []
+    if len(_ts_seq) >= m:
+        for i in range(0, len(_ts_seq) - m + 1):
+            dt = _ts_seq[i + m - 1] - _ts_seq[i]
+            if dt > 0:
+                roll_rates.append((m - 1) / dt)
+    roll_rates.sort()
+    if roll_rates:
+        idx = min(len(roll_rates) - 1, int(fp * (len(roll_rates) - 1)))
+        tick_rate_floor = roll_rates[idx]
+    else:
+        # No usable timestamps ⇒ no distribution to rank against. A zero floor
+        # keeps every caller's documented fail-open contract: this leg must never
+        # manufacture a refusal out of missing data.
+        tick_rate_floor = 0.0
+    # ── POSITION IN OUR OWN MOVE, COUNTED IN PRINTS ─────────────────────────────
+    # The tape-native replacement for "is this a new N-second high". Measured on
+    # the live book: CHILI has never once entered on a new 60-second high (0 of 73
+    # doctrine winner legs) — it arrives at bursts that are already spent — and 24
+    # of those 73 legs (32.9%) printed their ENTIRE in-hold high within three
+    # seconds of the fill, carrying 48% of the whole capture gap. A window
+    # measured in seconds cannot separate those cases; a window measured in prints
+    # can, because it stretches and contracts with the tape itself.
+    #   prints_since_high == 0  ⇒ the newest print IS the high of the window
+    #   high_print_position     ⇒ that distance as a fraction of the window, so a
+    #                             value near 1.0 means the high is old in TAPE
+    #                             terms and the burst has been spent since.
+    # Reported only; no caller gates on these yet, by design — measure first.
+    _px_seq = [pt[3] for pt in parsed if pt[3] is not None]
+    prints_since_high: int | None = None
+    high_print_position: float | None = None
+    if _px_seq:
+        _hi = max(_px_seq)
+        _hi_idx = len(_px_seq) - 1 - _px_seq[::-1].index(_hi)  # newest such print
+        prints_since_high = (len(_px_seq) - 1) - _hi_idx
+        if len(_px_seq) > 1:
+            high_print_position = prints_since_high / float(len(_px_seq) - 1)
     return {
         "signed_tape_accel": float(signed_tape_accel),
         "tick_rate": float(tick_rate),
         "tick_rate_floor": float(tick_rate_floor),
+        # How many samples the floor was actually ranked against. 0 or 1 means the
+        # percentile could not discriminate and the floor is permissive by
+        # construction — the receipt must say so rather than let a reader assume
+        # the knob was consulted. (The old code always had exactly 2 and never
+        # said so, which is how the tautology stayed invisible.)
+        "tick_rate_floor_n": int(len(roll_rates)),
         "n_ticks": int(n),
+        "prints_since_high": (
+            int(prints_since_high) if prints_since_high is not None else None
+        ),
+        "high_print_position": (
+            float(high_print_position) if high_print_position is not None else None
+        ),
         "front_buy_share": (
             float(front_buy_share) if front_buy_share is not None else None
         ),
