@@ -678,7 +678,14 @@
   /* ── Agent switcher + Claude Code remote entry ──────────────────
      A Claude Code transcript is code, paths and counts, so the panel
      widens and the type turns monospace when that agent is selected. */
-  .planner-chat-panel.agent-claude { width: 440px; min-width: 440px; }
+  /* The extra width is taken only where there is room to give: on a 1030px
+     window a 440px panel crushes the task list into four-word lines. */
+  @media (min-width: 1280px) {
+    .planner-chat-panel.agent-claude { width: 420px; min-width: 420px; }
+  }
+  @media (min-width: 1660px) {
+    .planner-chat-panel.agent-claude { width: 520px; min-width: 520px; }
+  }
   .planner-chat-panel.agent-claude.collapsed { width: 0; min-width: 0; }
   .planner-chat-headline { display: flex; align-items: center; gap: 6px; min-width: 0; flex: 1; }
   .chat-agent-select {
@@ -701,6 +708,12 @@
   .cc-status.idle    .dot { background: var(--text-muted); }
   .cc-status.error   .dot { background: #c0392b; }
   .cc-status.error   { color: #c0392b; }
+  /* The dark ground swallows the light-mode amber and green; a status pill has
+     to read at a glance or it is not a status pill. */
+  [data-theme="dark"] .cc-status.working { color: #e8b445; }
+  [data-theme="dark"] .cc-status.waiting { color: #5cc975; }
+  [data-theme="dark"] .cc-status.error   { color: #f0705f; }
+  [data-theme="dark"] .cc-status.error .dot { background: #f0705f; }
   @keyframes ccPulse { 0%,100% { opacity: 1; } 50% { opacity: .25; } }
   @media (prefers-reduced-motion: reduce) { .cc-status.working .dot { animation: none; } }
 
