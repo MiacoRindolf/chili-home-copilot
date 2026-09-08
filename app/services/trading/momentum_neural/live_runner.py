@@ -18720,6 +18720,26 @@ def _complete_confirmed_live_exit(
         }
     le["last_exit_price"] = float(fill_price)
     le["last_exit_entry_price"] = float(entry_price)
+    # ⭐ THE TRADE'S OWN MFE, saved before the thing that holds it is cleared.
+    #
+    # `position["high_water_mark"]` is the peak BID, ratcheted every tick (:41466
+    # `max(prev, bid)`) — instantaneous, tick-resolution, and the only true
+    # maximum-favourable-excursion this lane keeps.  It dies with the position at
+    # exit, so by the time any post-hoc reader runs there is nothing left to ask.
+    #
+    # `entry_realized_high` is NOT this: it is the 15m frame High read ONCE at
+    # entry (:37970), i.e. the day's high BEFORE the trade, and it is cleared on
+    # recycle besides.  Measuring "how many losers were winners first" against it
+    # gives an answer about the setup, not about the trade — a mistake this
+    # comment exists to stop anyone repeating.
+    #
+    # Without this line the question needs the tape re-bought from IQFeed for
+    # every symbol-day; with it, every trade from here on carries its own answer.
+    _pos_at_exit = le.get("position")
+    if isinstance(_pos_at_exit, dict):
+        _peak_px = _float_or_none(_pos_at_exit.get("high_water_mark"))
+        if _peak_px is not None and _peak_px > 0:
+            le["last_exit_peak_price"] = float(_peak_px)
     le["last_exit_quantity"] = float(quantity)
     le["last_exit_notional_basis_usd"] = notional_basis
     le["last_exit_return_bps"] = (pnl / notional_basis) * 10_000.0 if notional_basis > 1e-12 else None
