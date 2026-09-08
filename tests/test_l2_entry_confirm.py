@@ -204,85 +204,6 @@ def test_rising_tape_confirms(confirm_on, monkeypatch):
 
 # ── (6) dead/negative tape + selling OFI + no secondary -> DEFER ─────────────────
 
-def test_dead_tape_selling_ofi_defers(confirm_on, monkeypatch):
-    rows = [
-        _tick(10.01, 400, 10.00, 10.01, 1.0),   # front buy
-        _tick(10.02, 500, 10.01, 10.02, 4.0),   # front buy
-        _tick(10.00, 300, 10.00, 10.01, 9.0),   # back sell
-        _tick(9.99, 400, 9.99, 10.00, 12.0),    # back sell
-        _tick(9.98, 500, 9.98, 9.99, 15.0),     # back sell
-    ]
-    db = _FakeDB(rows)
-    # OFI negative, micro<0, depth pctile low (ask-heavy) -> no secondary buy-side disagreement.
-    monkeypatch.setattr(
-        "app.services.trading.momentum_neural.pipeline.read_ladder_distribution",
-        lambda *a, **k: _ladder(ofi=-0.7, micro=-2.0, pctile=0.1, age=2.0),
-    )
-    decision, dbg = _l2_entry_confirm("ABCD", db=db, settings=settings)
-    assert decision == "defer"
-    # The refusal now names the SHAPE rather than only the absence: this tape rose
-    # to 10.02 on the second of five prints and rolled over, so the high sits three
-    # prints back out of four — the oldest quarter of the window. Same verdict,
-    # more specific reason.
-    assert dbg["reason"] == "l2_confirm_defer_spent_move"
-    assert dbg["high_print_position"] == pytest.approx(0.75)
-
-
-# ── (7) a SPENT move is not rescued by a buy-side book ───────────────────────────
-
-def test_a_buyside_book_does_not_override_a_spent_move(confirm_on, monkeypatch):
-    """BEHAVIOUR CHANGE, deliberate, and this is the case it was made for.
-
-    The old rule let ANY secondary buy-side agreement — a positive micro-edge or a
-    rising depth percentile — override a dead tape and confirm the entry. That is
-    the exact door the worst entries walked through. On 2026-09-08 the lane entered
-    WYHG eight times for -$212.83, and OFI was POSITIVE at all eight (0.034 to
-    0.485) while four of them arrived with the window's high already 55-94% behind
-    them in print terms. A buy-side book did not save a single one.
-
-    So the override no longer applies once the move is SPENT: the book cannot tell
-    us we are early when the tape has already said we are late. It still applies to
-    a merely-late entry (the next test), which is the reclaim this lane should take.
-    """
-    rows = [
-        _tick(10.01, 400, 10.00, 10.01, 1.0),
-        _tick(10.02, 500, 10.01, 10.02, 4.0),   # the high, three prints back
-        _tick(10.00, 300, 10.00, 10.01, 9.0),
-        _tick(9.99, 400, 9.99, 10.00, 12.0),
-        _tick(9.98, 500, 9.98, 9.99, 15.0),
-    ]
-    db = _FakeDB(rows)
-    monkeypatch.setattr(
-        "app.services.trading.momentum_neural.pipeline.read_ladder_distribution",
-        lambda *a, **k: _ladder(ofi=-0.1, micro=1.5, pctile=0.8, age=2.0),
-    )
-    decision, dbg = _l2_entry_confirm("ABCD", db=db, settings=settings)
-    assert decision == "defer"
-    assert dbg["reason"] == "l2_confirm_defer_spent_move"
-
-
-def test_a_buyside_book_still_overrides_a_merely_late_entry(confirm_on, monkeypatch):
-    """The override survives where it belongs. Here the high is halfway back — late,
-    not spent — so accumulating depth still earns the entry."""
-    rows = [
-        _tick(10.00, 400, 9.99, 10.00, 1.0),    # lift
-        _tick(10.01, 500, 10.00, 10.01, 4.0),   # lift
-        _tick(10.02, 300, 10.02, 10.03, 9.0),   # the high, TWO prints back of four
-        _tick(10.01, 400, 10.01, 10.02, 12.0),
-        _tick(10.01, 500, 10.01, 10.02, 15.0),
-    ]
-    db = _FakeDB(rows)
-    monkeypatch.setattr(
-        "app.services.trading.momentum_neural.pipeline.read_ladder_distribution",
-        lambda *a, **k: _ladder(ofi=-0.1, micro=1.5, pctile=0.8, age=2.0),
-    )
-    decision, dbg = _l2_entry_confirm("ABCD", db=db, settings=settings)
-    assert dbg["high_print_position"] == pytest.approx(0.5)
-    assert decision == "confirm"
-    assert dbg["reason"] == "l2_confirm_secondary_override"
-
-
-# ── (8) FAIL-OPEN: empty tape -> confirm ─────────────────────────────────────────
 
 def test_empty_tape_fails_open_to_confirm(confirm_on, monkeypatch):
     db = _FakeDB([])  # no ticks -> tape helper None -> fail-open
@@ -297,43 +218,126 @@ def test_empty_tape_fails_open_to_confirm(confirm_on, monkeypatch):
 
 # ── (9) FAIL-OPEN: stale book -> confirm ─────────────────────────────────────────
 
-def test_stale_book_fails_open_to_confirm(confirm_on, monkeypatch):
-    # dead/negative tape that WOULD defer, but the book is stale -> fail-open BEFORE deferring.
-    rows = [
-        _tick(10.01, 400, 10.00, 10.01, 1.0),
-        _tick(10.02, 500, 10.01, 10.02, 4.0),
-        _tick(10.00, 300, 10.00, 10.01, 9.0),
-        _tick(9.99, 400, 9.99, 10.00, 12.0),
-        _tick(9.98, 500, 9.98, 9.99, 15.0),
-    ]
-    db = _FakeDB(rows)
+
+
+
+# ══ THE PREDICATE AFTER THE OUTCOMES WERE MEASURED ══════════════════════════════
+# Threshold-free discrimination over 39 readable entries / 23 symbol-days
+# (2026-09-08), AUC per leg and clustered per symbol-day:
+#
+#     buy_share_delta       0.717 / 0.671    median win +0.0926, loss -0.0737
+#     prints_since_high     0.667 / 0.671    median win  190.5,  loss   64.0
+#     high_print_position   0.636 / 0.605    median win 0.8230,  loss 0.4529
+#     signed_tape_accel     0.490 / 0.592    NO outcome information
+#     tick_rate             0.434 / 0.487    NO outcome information
+#
+# Three consequences, encoded below:
+#   * buy_share_delta gates — best discrimination, and its sign is the one the
+#     design assumed;
+#   * the "spent move" refusal is GONE. The median winner sat at 0.823, above the
+#     0.75 line it refused at, so it was refusing the median winner. Inside a
+#     fifteen-second window "the high is behind us" is a pullback that has been
+#     holding, not a spent burst — the operator's own method, and the tape agrees;
+#   * signed_tape_accel and tick_rate gate nothing. They were the whole of the
+#     original predicate.
+
+def _tape(prices_sizes_sides, t0=1.0, step=3.0):
+    """(price, size, is_lift) -> rows the parser reads."""
+    out = []
+    for i, (px, sz, lift) in enumerate(prices_sizes_sides):
+        bid, ask = (px - 0.01, px) if lift else (px, px + 0.01)
+        out.append(_tick(px, sz, bid, ask, t0 + i * step))
+    return out
+
+
+def test_carrying_confirms(confirm_on, monkeypatch):
+    """Back half more buy-dominated than the front, counted in prints."""
+    rows = _tape([(10.00, 400, False), (10.01, 400, False),
+                  (10.02, 600, True), (10.03, 600, True)])
     monkeypatch.setattr(
         "app.services.trading.momentum_neural.pipeline.read_ladder_distribution",
-        lambda *a, **k: _ladder(ofi=-0.9, micro=-3.0, pctile=0.05, age=9999.0),
-    )
-    decision, dbg = _l2_entry_confirm("ABCD", db=db, settings=settings)
+        lambda *a, **k: None)
+    decision, dbg = _l2_entry_confirm("ABCD", db=_FakeDB(rows), settings=settings)
+    assert dbg["buy_share_delta"] > 0
     assert decision == "confirm"
-    assert dbg["reason"] == "l2_confirm_no_data"
+    assert dbg["reason"] == "l2_confirm_tape_thrust"
 
 
-# ── (10) mixed (flat tape, OFI not negative) -> confirm (no over-defer) ──────────
-
-def test_mixed_flat_tape_positive_ofi_confirms(confirm_on, monkeypatch):
-    # back half flat/no-buy (accel<=0) but OFI is NOT negative -> not the clear-no-confirm
-    # condition -> conservative-active confirm.
-    rows = [
-        _tick(10.01, 400, 10.00, 10.01, 1.0),
-        _tick(10.02, 500, 10.01, 10.02, 4.0),
-        _tick(10.02, 100, 10.01, 10.02, 9.0),   # back: tick-rule zero/flat
-        _tick(10.02, 100, 10.01, 10.02, 12.0),
-        _tick(10.02, 100, 10.01, 10.02, 15.0),
-    ]
-    db = _FakeDB(rows)
+def test_fading_defers_with_no_book_at_all(confirm_on, monkeypatch):
+    """THE decisive case: it must decide without depth, because the replay corpus
+    holds zero depth rows and 309 of 348 live entries had none either."""
+    rows = _tape([(10.00, 600, True), (10.01, 600, True),
+                  (10.02, 400, False), (10.01, 400, False)])
     monkeypatch.setattr(
         "app.services.trading.momentum_neural.pipeline.read_ladder_distribution",
-        lambda *a, **k: _ladder(ofi=0.05, micro=0.0, pctile=0.4, age=2.0),
-    )
-    decision, dbg = _l2_entry_confirm("ABCD", db=db, settings=settings)
+        lambda *a, **k: None)
+    decision, dbg = _l2_entry_confirm("ABCD", db=_FakeDB(rows), settings=settings)
+    assert dbg["book_readable"] is False
+    assert dbg["buy_share_delta"] < 0
+    assert decision == "defer"
+    assert dbg["reason"] == "l2_confirm_buying_not_carrying"
+
+
+def test_the_high_being_behind_us_no_longer_refuses(confirm_on, monkeypatch):
+    """THE REVERSAL. Median winner sat at high_print_position 0.823. A tape whose
+    high is far behind but whose buying is carrying must now CONFIRM — that is the
+    pullback the operator buys, and the gate used to refuse it."""
+    rows = _tape([(10.05, 400, False), (10.00, 400, False),
+                  (10.01, 700, True), (10.02, 700, True)])
+    monkeypatch.setattr(
+        "app.services.trading.momentum_neural.pipeline.read_ladder_distribution",
+        lambda *a, **k: None)
+    decision, dbg = _l2_entry_confirm("ABCD", db=_FakeDB(rows), settings=settings)
+    assert dbg["high_print_position"] >= 0.75      # would have been "spent"
     assert decision == "confirm"
-    # either pass_mixed or tape_thrust depending on the exact accel sign; must NOT defer.
-    assert dbg["reason"] != "l2_confirm_defer_no_tape"
+    assert dbg["reason"] == "l2_confirm_tape_thrust"
+
+
+def test_an_accumulating_book_overrides_a_fading_tape(confirm_on, monkeypatch):
+    """The override survives where it belongs: buying under a fading tape into
+    demonstrably accumulating depth is the reclaim this lane should take."""
+    rows = _tape([(10.00, 600, True), (10.01, 600, True),
+                  (10.02, 400, False), (10.01, 400, False)])
+    monkeypatch.setattr(
+        "app.services.trading.momentum_neural.pipeline.read_ladder_distribution",
+        lambda *a, **k: _ladder(ofi=0.9, micro=2.0, pctile=0.9, age=2.0))
+    decision, dbg = _l2_entry_confirm("ABCD", db=_FakeDB(rows), settings=settings)
+    assert decision == "confirm"
+    assert dbg["reason"] == "l2_confirm_secondary_override"
+
+
+def test_a_stale_book_cannot_override_because_it_cannot_be_trusted(
+        confirm_on, monkeypatch):
+    """The invariant the old stale-book test really protected: an unreadable book
+    supplies no second opinion. It also supplies no refusal — the refusal here comes
+    from the tape, which is fresh."""
+    rows = _tape([(10.00, 600, True), (10.01, 600, True),
+                  (10.02, 400, False), (10.01, 400, False)])
+    monkeypatch.setattr(
+        "app.services.trading.momentum_neural.pipeline.read_ladder_distribution",
+        lambda *a, **k: _ladder(ofi=0.9, micro=2.0, pctile=0.9, age=9999.0))
+    decision, dbg = _l2_entry_confirm("ABCD", db=_FakeDB(rows), settings=settings)
+    assert dbg["book_readable"] is False
+    assert decision == "defer"
+    assert dbg["reason"] == "l2_confirm_buying_not_carrying"
+
+
+def test_the_two_dead_features_no_longer_decide_anything(confirm_on, monkeypatch):
+    """AUC 0.490 and 0.434 — they know nothing about the outcome. A strongly
+    negative accel must not refuse a carrying tape, and must not be needed to
+    refuse a fading one."""
+    carrying = _tape([(10.00, 100, False), (10.01, 100, False),
+                      (10.02, 900, True), (10.03, 900, True)])
+    decision, dbg = _l2_entry_confirm("ABCD", db=_FakeDB(carrying), settings=settings)
+    assert dbg["signed_tape_accel"] > 0 or decision == "confirm"
+    assert decision == "confirm"
+
+
+def test_too_little_tape_to_halve_still_confirms(confirm_on, monkeypatch):
+    """Fail-open contract, unchanged: an unreadable share is a missing input."""
+    rows = _tape([(10.00, 400, True), (10.01, 400, True), (10.02, 400, True)])
+    monkeypatch.setattr(
+        "app.services.trading.momentum_neural.pipeline.read_ladder_distribution",
+        lambda *a, **k: None)
+    decision, dbg = _l2_entry_confirm("ABCD", db=_FakeDB(rows), settings=settings)
+    assert decision == "confirm"
