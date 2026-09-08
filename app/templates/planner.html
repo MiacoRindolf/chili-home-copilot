@@ -675,6 +675,74 @@
   .planner-chat-panel.collapsed + .planner-chat-open-btn { display: flex; }
   .planner-chat-open-btn:hover { background: var(--code-bg); color: var(--accent); }
 
+  /* ── Agent switcher + Claude Code remote entry ──────────────────
+     A Claude Code transcript is code, paths and counts, so the panel
+     widens and the type turns monospace when that agent is selected. */
+  .planner-chat-panel.agent-claude { width: 440px; min-width: 440px; }
+  .planner-chat-panel.agent-claude.collapsed { width: 0; min-width: 0; }
+  .planner-chat-headline { display: flex; align-items: center; gap: 6px; min-width: 0; flex: 1; }
+  .chat-agent-select {
+    font: inherit; font-size: 12px; font-weight: 700;
+    background: var(--input-bg); color: var(--text);
+    border: 1px solid var(--input-border); border-radius: 6px;
+    padding: 3px 6px; max-width: 190px; cursor: pointer; outline: none;
+  }
+  .chat-agent-select:focus { border-color: var(--accent); }
+  .cc-status {
+    display: inline-flex; align-items: center; gap: 5px;
+    font-size: 10.5px; font-weight: 600; letter-spacing: .03em; text-transform: uppercase;
+    color: var(--text-muted); white-space: nowrap;
+  }
+  .cc-status .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--text-muted); flex-shrink: 0; }
+  .cc-status.working .dot { background: #e0a020; animation: ccPulse 1.4s ease-in-out infinite; }
+  .cc-status.working { color: #b57d10; }
+  .cc-status.waiting .dot { background: #2fa04a; }
+  .cc-status.waiting { color: #2b8c43; }
+  .cc-status.idle    .dot { background: var(--text-muted); }
+  .cc-status.error   .dot { background: #c0392b; }
+  .cc-status.error   { color: #c0392b; }
+  @keyframes ccPulse { 0%,100% { opacity: 1; } 50% { opacity: .25; } }
+  @media (prefers-reduced-motion: reduce) { .cc-status.working .dot { animation: none; } }
+
+  .cc-session-bar {
+    display: flex; align-items: center; gap: 6px; padding: 4px 10px 6px;
+    border-bottom: 1px solid var(--border); flex-shrink: 0;
+  }
+  .cc-session-bar select {
+    flex: 1; min-width: 0; font-size: 11px; font-family: var(--mono, ui-monospace, monospace);
+    background: var(--input-bg); color: var(--text-muted);
+    border: 1px solid var(--input-border); border-radius: 6px; padding: 3px 6px; outline: none;
+  }
+  .cc-follow {
+    font-size: 10.5px; font-weight: 600; color: var(--text-muted);
+    display: inline-flex; align-items: center; gap: 4px; cursor: pointer; white-space: nowrap;
+  }
+
+  .planner-chat-msg.cc-text {
+    align-self: stretch; max-width: 100%;
+    font-family: var(--mono, ui-monospace, SFMono-Regular, Menlo, monospace);
+    font-size: 11.5px; line-height: 1.5;
+  }
+  .planner-chat-msg.cc-text.user {
+    background: var(--accent); color: #fff; align-self: flex-end; max-width: 92%;
+  }
+  .cc-tool {
+    display: flex; align-items: baseline; gap: 6px; align-self: stretch;
+    font-family: var(--mono, ui-monospace, monospace); font-size: 10.5px;
+    color: var(--text-muted); padding: 1px 8px; min-width: 0;
+  }
+  .cc-tool .name {
+    color: var(--accent); font-weight: 700; flex-shrink: 0;
+  }
+  .cc-tool .arg {
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0;
+  }
+  .cc-note {
+    font-size: 11px; color: var(--text-muted); padding: 8px; line-height: 1.5;
+    border: 1px dashed var(--border); border-radius: 8px; margin: 4px 0;
+  }
+  .cc-note b { color: var(--text); }
+
   @media (max-width: 768px) {
     .planner-header { padding: 10px 14px; flex-wrap: nowrap; gap: 8px; position: relative; }
     .planner-header > div:first-child { flex: 1; min-width: 0; flex-direction: column; align-items: flex-start !important; gap: 4px !important; }
@@ -763,8 +831,20 @@
   <aside class="planner-chat-panel" id="planner-chat-panel">
     <div class="planner-chat-inner" style="display:flex;flex-direction:column;height:100%;">
       <div class="planner-chat-header">
-        <span>&#129472; CHILI</span>
+        <div class="planner-chat-headline">
+          <select class="chat-agent-select" id="chat-agent-select" title="Which agent you are talking to">
+            <option value="chili">&#129472; CHILI</option>
+            <option value="claude">&#9889; Claude Code</option>
+          </select>
+          <span class="cc-status" id="cc-status" style="display:none;"><span class="dot"></span><span id="cc-status-label">…</span></span>
+        </div>
         <button class="planner-chat-toggle" id="planner-chat-close" title="Close chat">&#10005;</button>
+      </div>
+      <div class="cc-session-bar" id="cc-session-bar" style="display:none;">
+        <select id="cc-session-select" title="Claude Code session"></select>
+        <label class="cc-follow" title="Keep scrolling as new output arrives">
+          <input type="checkbox" id="cc-follow" checked /> Follow
+        </label>
       </div>
       <div class="planner-chat-messages" id="planner-chat-messages"></div>
       <div class="planner-chat-input-wrap">
@@ -2334,15 +2414,231 @@ function plannerChatToggle(open) {
   var panel = document.getElementById('planner-chat-panel');
   if (open === undefined) open = panel.classList.contains('collapsed');
   panel.classList.toggle('collapsed', !open);
-  if (open && plannerChatConversationId != null) plannerChatLoadHistory();
+  if (!open) { if (typeof ccStopPolling === 'function') ccStopPolling(); return; }
+  if (typeof ccMode === 'function' && ccMode()) { ccPoll(); return; }
+  if (plannerChatConversationId != null) plannerChatLoadHistory();
 }
 
 document.getElementById('planner-chat-close').onclick = function() { plannerChatToggle(false); };
 document.getElementById('planner-chat-open').onclick = function() { plannerChatToggle(true); };
-document.getElementById('planner-chat-send').onclick = plannerChatSend;
 document.getElementById('planner-chat-input').addEventListener('keydown', function(e) {
-  if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); plannerChatSend(); }
+  if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); plannerChatRouteSend(); }
 });
+
+/* ── Claude Code remote entry ───────────────────────────────────
+   The panel can point at either agent.  CHILI answers over /api/chat;
+   Claude Code is a live terminal session on this machine, so the panel
+   TAILS its transcript (read) and queues a forked turn (write).  The two
+   never share a transcript writer — see app/routers/claude_bridge.py. */
+var ccOffset = 0, ccSessionId = null, ccTimer = null, ccHealth = null, ccBusy = false;
+
+function ccMode() {
+  var s = document.getElementById('chat-agent-select');
+  return s && s.value === 'claude';
+}
+
+function ccSetStatus(state, label) {
+  var el = document.getElementById('cc-status');
+  if (!el) return;
+  el.style.display = ccMode() ? 'inline-flex' : 'none';
+  el.className = 'cc-status ' + (state || 'idle');
+  document.getElementById('cc-status-label').textContent = label || '';
+}
+
+function ccAppendNote(html) {
+  var el = document.getElementById('planner-chat-messages');
+  var d = document.createElement('div');
+  d.className = 'cc-note';
+  d.innerHTML = html;
+  el.appendChild(d);
+  el.scrollTop = el.scrollHeight;
+}
+
+function ccAppendRows(rows) {
+  var box = document.getElementById('planner-chat-messages');
+  var follow = document.getElementById('cc-follow');
+  var stick = !follow || follow.checked ||
+              (box.scrollHeight - box.scrollTop - box.clientHeight) < 40;
+  rows.forEach(function(r) {
+    var d = document.createElement('div');
+    if (r.kind === 'tool') {
+      d.className = 'cc-tool';
+      var n = document.createElement('span'); n.className = 'name'; n.textContent = r.tool;
+      var a = document.createElement('span'); a.className = 'arg'; a.textContent = r.text || '';
+      d.appendChild(n); d.appendChild(a);
+    } else {
+      var who = (r.role === 'user') ? 'user' : 'assistant';
+      d.className = 'planner-chat-msg cc-text ' + who;
+      if (who === 'assistant') d.innerHTML = simpleMarkdown(r.text || '');
+      else d.textContent = r.text || '';
+    }
+    box.appendChild(d);
+  });
+  if (stick) box.scrollTop = box.scrollHeight;
+}
+
+function ccStopPolling() { if (ccTimer) { clearTimeout(ccTimer); ccTimer = null; } }
+
+function ccPoll() {
+  ccStopPolling();
+  if (!ccMode() || !ccSessionId) return;
+  var panel = document.getElementById('planner-chat-panel');
+  if (panel.classList.contains('collapsed')) { ccTimer = setTimeout(ccPoll, 5000); return; }
+
+  fetch('/api/claude/transcript?session_id=' + encodeURIComponent(ccSessionId) + '&offset=' + ccOffset)
+    .then(function(r) { return r.json(); })
+    .then(function(d) {
+      if (!ccMode()) return;
+      if (d.error) { ccSetStatus('error', 'Unavailable'); ccTimer = setTimeout(ccPoll, 15000); return; }
+      if (typeof d.offset === 'number') ccOffset = d.offset;
+      if (d.rows && d.rows.length) ccAppendRows(d.rows);
+      var st = d.status || {};
+      ccSetStatus(st.state, st.label);
+      // Poll hard while it is moving, gently when it is not.
+      ccTimer = setTimeout(ccPoll, st.state === 'working' ? 2000 : 6000);
+    })
+    .catch(function() { ccSetStatus('error', 'Offline'); ccTimer = setTimeout(ccPoll, 15000); });
+}
+
+function ccLoadSession(sid) {
+  ccStopPolling();
+  ccSessionId = sid;
+  ccOffset = 0;
+  document.getElementById('planner-chat-messages').innerHTML = '';
+  if (!sid) { ccSetStatus('idle', 'No session'); return; }
+  try { localStorage.setItem('plannerCcSession', sid); } catch (e) {}
+  ccSetStatus('idle', 'Loading');
+  ccPoll();
+}
+
+function ccEnter() {
+  var box = document.getElementById('planner-chat-messages');
+  box.innerHTML = '';
+  ccSetStatus('idle', 'Loading');
+  fetch('/api/claude/health').then(function(r) { return r.json(); }).then(function(h) {
+    ccHealth = h;
+    if (!h.can_read) {
+      ccSetStatus('error', 'Not mounted');
+      ccAppendNote('<b>Claude Code transcripts are not mounted into this container.</b><br>' +
+                   'Reading needs <code>CHILI_CLAUDE_PROJECTS_DIR</code> pointed at ' +
+                   '<code>~/.claude/projects</code>.');
+      return;
+    }
+    return fetch('/api/claude/sessions').then(function(r) { return r.json(); }).then(function(d) {
+      var sel = document.getElementById('cc-session-select');
+      sel.innerHTML = '';
+      (d.sessions || []).forEach(function(s) {
+        var o = document.createElement('option');
+        o.value = s.session_id;
+        var mins = Math.round(s.age_s / 60);
+        var age = mins < 1 ? 'now' : (mins < 60 ? mins + 'm' : Math.round(mins / 60) + 'h');
+        var mb = (s.bytes / 1048576).toFixed(1);
+        o.textContent = s.session_id.slice(0, 8) + '  ' + age + '  ' + mb + 'MB' +
+                        (s.preview ? '  ' + s.preview.slice(0, 40) : '');
+        sel.appendChild(o);
+      });
+      if (!(d.sessions || []).length) { ccSetStatus('idle', 'No sessions'); return; }
+      var want = null;
+      try { want = localStorage.getItem('plannerCcSession'); } catch (e) {}
+      var ids = (d.sessions || []).map(function(s) { return s.session_id; });
+      // Default to the most recently written session — that is the live one.
+      var pick = (want && ids.indexOf(want) !== -1) ? want : ids[0];
+      sel.value = pick;
+      if (!h.can_send) {
+        ccAppendNote('<b>Read-only.</b> The bridge directory is not mounted, so the ' +
+                     'message box is disabled. What Claude Code says still streams here.');
+      } else if (!h.worker_alive) {
+        ccAppendNote('<b>The host worker is not running.</b> Start it with ' +
+                     '<code>scripts\\claude_bridge_worker.ps1</code> to send messages. ' +
+                     'Reading works without it.');
+      }
+      ccLoadSession(pick);
+    });
+  }).catch(function() { ccSetStatus('error', 'Offline'); });
+}
+
+function ccSend(msg) {
+  if (ccBusy) return;
+  if (!ccSessionId) { ccAppendNote('Pick a session first.'); return; }
+  ccBusy = true;
+  var btn = document.getElementById('planner-chat-send');
+  btn.disabled = true;
+  ccAppendRows([{ role: 'user', kind: 'text', text: msg }]);
+  ccSetStatus('working', 'Sending');
+
+  fetch('/api/claude/send', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ session_id: ccSessionId, message: msg })
+  }).then(function(r) { return r.json(); }).then(function(d) {
+    if (d.error || !d.id) { throw new Error(d.error || 'Could not queue the message.'); }
+    var tries = 0;
+    (function pollReply() {
+      tries++;
+      if (tries > 400) { throw new Error('No reply after 10 minutes.'); }
+      fetch('/api/claude/reply/' + d.id).then(function(r) { return r.json(); }).then(function(p) {
+        if (p.state === 'queued' || p.state === 'running' || p.state === 'unknown') {
+          ccSetStatus('working', p.state === 'running' ? 'Claude Code is working' : 'Queued');
+          setTimeout(pollReply, 1500);
+          return;
+        }
+        ccBusy = false; btn.disabled = false;
+        if (p.state === 'error') {
+          ccAppendNote('<b>That turn failed.</b><br><code>' +
+                       (p.error || '').replace(/[<>&]/g, '') + '</code>');
+          ccSetStatus('error', 'Failed');
+          return;
+        }
+        ccAppendRows([{ role: 'assistant', kind: 'text', text: p.reply || '(empty reply)' }]);
+        ccSetStatus('waiting', 'Waiting for you');
+      }).catch(function() { setTimeout(pollReply, 3000); });
+    })();
+  }).catch(function(e) {
+    ccBusy = false; btn.disabled = false;
+    ccAppendNote('<b>Could not send.</b> ' + (e && e.message ? e.message : ''));
+    ccSetStatus('error', 'Failed');
+  });
+}
+
+/* One send button, two destinations. */
+function plannerChatRouteSend() {
+  if (!ccMode()) { plannerChatSend(); return; }
+  var input = document.getElementById('planner-chat-input');
+  var msg = (input.value || '').trim();
+  if (!msg) return;
+  input.value = '';
+  ccSend(msg);
+}
+
+function ccSwitchAgent() {
+  var claude = ccMode();
+  var panel = document.getElementById('planner-chat-panel');
+  panel.classList.toggle('agent-claude', claude);
+  document.getElementById('cc-session-bar').style.display = claude ? 'flex' : 'none';
+  document.getElementById('cc-status').style.display = claude ? 'inline-flex' : 'none';
+  document.getElementById('planner-chat-input').placeholder = claude
+    ? 'Message Claude Code in this session…'
+    : 'Ask CHILI to add tasks, create projects, or anything else...';
+  try { localStorage.setItem('plannerChatAgent', claude ? 'claude' : 'chili'); } catch (e) {}
+  ccStopPolling();
+  document.getElementById('planner-chat-messages').innerHTML = '';
+  document.getElementById('planner-chat-send').disabled = false;
+  if (claude) ccEnter();
+  else if (plannerChatConversationId != null) plannerChatLoadHistory();
+}
+
+document.getElementById('planner-chat-send').onclick = plannerChatRouteSend;
+document.getElementById('chat-agent-select').onchange = ccSwitchAgent;
+document.getElementById('cc-session-select').onchange = function() {
+  ccLoadSession(this.value);
+};
+(function restoreChatAgent() {
+  var saved = null;
+  try { saved = localStorage.getItem('plannerChatAgent'); } catch (e) {}
+  if (saved === 'claude') {
+    document.getElementById('chat-agent-select').value = 'claude';
+    ccSwitchAgent();
+  }
+})();
 
 /* ── Coding workflow panel (Phase 1, opt-in) ──────────────── */
 function wireCodingPanelOnce() {
