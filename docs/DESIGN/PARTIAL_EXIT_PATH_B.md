@@ -925,3 +925,125 @@ sets (N1 misses five phases; the adjacency check fails for four phases that
 reachability passes). N1 does **not** change D1's conclusion — it makes the
 code agree with what D1 already said in prose, which strengthens the case that
 the wiring stays deferred until the operator accepts that exposure in writing.
+
+
+---
+
+## 8. Proposed revision 5 — the partial as a TICK DECISION, not a resting offer
+
+**Status: PROPOSAL. Not implemented. It changes the magnitude of D1, which is
+the blocker the operator was asked to accept in writing, so it is written here
+before any code so the operator is deciding about the right thing.**
+
+### 8.1 Why this is being raised now
+
+Measured 2026-09-08 on the live book:
+
+| | |
+|---|---|
+| `alpaca_scale_out_suppressed_for_deadman` | **40** |
+| &nbsp;&nbsp;of which **extended hours** | **38** &mdash; 22 symbols, **13,347 shares** |
+| &nbsp;&nbsp;of which RTH | 2 &mdash; 191 shares |
+| `live_partial_exit` fills, 30 days | **2** |
+| sessions with exactly one entry fill | **26 of 30** |
+
+The tranche-OCO path added for RTH cannot reach extended hours at all: Alpaca
+rejects OCO outside regular hours (40310000, proved on AEMD 2026-08-27), so the
+lane falls back to the legacy full-deadman suppression. **The lane trades
+premarket, and Ross trades premarket.** So in the window that matters the
+position is opened once, never trimmed, never added to, and closed once.
+
+What that costs, same book, capture measured as realised / reachable-in-hold:
+
+| exit reason | legs | realised | reachable | capture |
+|---|---:|---:|---:|---:|
+| `trail_stop` | 62 | +$743.90 | $5,707.93 | **+13.0%** |
+| `stop` | 43 | &minus;$2,724.70 | $3,631.74 | &minus;75.0% |
+| `bailout` | 63 | &minus;$4,818.54 | $5,799.76 | **&minus;83.1%** |
+
+### 8.2 The observation
+
+§3.5 fixes the POST's order shape as `limit`, `time_in_force='day'`, resting
+**above** the market. D1's exposure is a direct function of how long that limit
+rests: *"from certification until the partial is terminal &mdash; the entire life
+of the partial, the normal case, the thing PATH B is for &mdash; `f` shares carry
+NO downside stop."*
+
+That is true of a **resting offer**. It is not intrinsic to taking a partial.
+It is intrinsic to *deciding the price in advance and then waiting.*
+
+### 8.3 The variant
+
+Keep every phase, every precondition and every remedy in §3. Change only **when
+the shrink happens and what the POST is**:
+
+* While waiting, do nothing. The full-qty deadman rests on all `Q` shares,
+  exactly as today. **Zero new exposure while flat-footed** &mdash; this is the
+  span that D1 charges for, and it disappears.
+* The tick reading decides &mdash; the same tape that already ends legs
+  (`signed_tape_accel`, `prints_since_high`/`high_print_position` from
+  PR #1367, the candle rule of #1261). There is no price sitting on the book
+  waiting to be hit.
+* **Only at that tick**: patch the successor stop `Q -> Q - f`, then immediately
+  send `f` as a **marketable limit** &mdash; priced at or through the bid, not
+  above the market.
+
+The naked span collapses from *"however long the limit rests"* to *the round
+trip of one marketable order*, which is the exposure the system already accepts
+on **every** ordinary exit it takes today.
+
+**Extended hours is not an obstacle; it is the reason this shape works.** Alpaca
+refuses market orders outside RTH but accepts marketable limits, and the
+existing chokepoint already sets `extended_hours = market_session_now(symbol) !=
+'regular'` (LR:15668-15694). The 38 suppressions this is for are all in that
+session.
+
+### 8.4 What this does and does not change
+
+**Changes:**
+
+* **D1's magnitude**, from an unbounded weakening of the deadman guarantee to a
+  bounded one comparable to an ordinary exit. The operator is then accepting a
+  round trip, not "30% of the position unprotected for as long as the limit
+  rests". This is the whole point of writing it down.
+* The `partial_posting` / `partial_indeterminate` windows become short and
+  adjacent to the shrink rather than open-ended, which shrinks &mdash; though does
+  not remove &mdash; what S2's chokepoint-head reconcile has to cover.
+
+**Does NOT change &mdash; all still required, in the order §4 gives:**
+
+* **S1** stands in full. `qty_available` is still zero under a full-qty deadman,
+  so the stop must still be shrunk before `f` can be sold. Same code, same
+  protection path, same byte-identical-with-no-marker acceptance test.
+* **S2** stands. A shorter window is still a window.
+* **D2** stands: the claim CAS across a simulated rollback between POST and
+  commit still needs the DB-backed run.
+* **D3/D4** stand: same blast radius, same AST guards, same live pulse.
+
+### 8.5 Why this shape and not the other one
+
+It is what the operator has asked for repeatedly and what the recorded doctrine
+says Ross does: *hit the bid when it spikes*, rather than post an offer and hope.
+The operator's instruction of 2026-09-08 is the direct statement of it &mdash; the
+partial should be **a reading of the tape, not an order waiting on a price** &mdash;
+and the same instruction is why PR #1367 moved the tape's own activity floor off
+the wall clock and into prints.
+
+It also removes a quiet contradiction in the current design: §3.2/N1 had to add
+five phases to `NAKED_RISK_PHASES` precisely because the resting-limit span is
+long enough to need servicing. A partial that is decided and filled inside one
+round trip does not need that span to be a first-class, serviced state.
+
+### 8.6 What the operator is being asked
+
+Not *"accept 30% of the position unprotected for the life of a resting limit"*
+(§4/D1, item 3), but:
+
+> Accept that at the tick the tape says to trim, `f` shares are without a
+> downside stop for one marketable-order round trip &mdash; the same exposure
+> already taken on every exit &mdash; in exchange for being able to take a partial
+> at all in the session where 38 of the last 40 were refused.
+
+If that is accepted, the unblock order of §4 is unchanged and still four PRs;
+only item 3 changes, and it changes from a decision about an unbounded exposure
+to a decision about a bounded one. **This section does not license wiring.**
