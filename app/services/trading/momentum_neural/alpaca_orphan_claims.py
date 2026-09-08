@@ -50,6 +50,12 @@ _TERMINAL_ORDER_STATUSES = frozenset({
     "filled", "done", "closed", "canceled", "cancelled", "expired", "rejected", "failed"
 })
 _OWNER_TRANSPORT_METADATA_KEY = "owner_transport"
+# PATH B (2026-09-06): the durable claim-phase marker for a partial exit taken
+# under a resting full-qty deadman stop. DELIBERATELY a sibling of
+# ``owner_transport`` and NOT under ``deadman_close_handoff`` — the latter's
+# presence blocks every deadman lease. docs/DESIGN/PARTIAL_EXIT_PATH_B.md §3.1.
+_DEADMAN_QTY_REPLACEMENT_METADATA_KEY = "deadman_qty_replacement"
+_DEADMAN_QTY_REPLACEMENT_CONTRACT = "alpaca_deadman_qty_replacement_v1"
 _OWNER_TRANSPORT_HISTORY_KEY = "owner_transport_history"
 _PROTECTIVE_TERMINAL_LEDGER_KEY = "protective_terminal_ledger"
 _PROTECTIVE_ATTRIBUTION_QUARANTINE_LEDGER_KEY = (
@@ -7593,3 +7599,425 @@ def guard_alpaca_entry_ownership(
     ):
         return False, claim, "symbol_action_claimed"
     return True, claim, None
+
+
+# ── PATH B — the durable claim-phase marker (docs/DESIGN/PARTIAL_EXIT_PATH_B.md §3.1) ──
+#
+# A partial exit on Alpaca cannot rest while the full-qty deadman stop consumes
+# ``qty_available``. PATH B shrinks the resting stop from Q to R = Q - f first,
+# then sells f. Every step of that is durable on the action claim, because the
+# process can die between the PATCH and the sell (the 2026-09-01 live-lane host
+# death is exactly that shape) and the recovery must know which side of the edge
+# it is on. The marker is the TRUTH; ``le`` is only a cache.
+#
+# Every phase advance below is a COMPARE-AND-SWAP on the claim row: the UPDATE
+# carries the phase we believed we were in, so two pulses racing the same edge
+# cannot both advance it. The caller commits the CAS BEFORE the dependent HTTP.
+
+
+def _deadman_qty_replacement_from_metadata(metadata: Any) -> dict[str, Any] | None:
+    marker = (metadata or {}).get(_DEADMAN_QTY_REPLACEMENT_METADATA_KEY) if isinstance(metadata, dict) else None
+    if not isinstance(marker, dict):
+        return None
+    if str(marker.get("identity_contract") or "").strip() != _DEADMAN_QTY_REPLACEMENT_CONTRACT:
+        return None
+    return dict(marker)
+
+
+def read_deadman_qty_replacement(
+    db: Session,
+    *,
+    symbol: str,
+    account_scope: str | None = None,
+    for_update: bool = False,
+) -> tuple[bool, dict[str, Any] | None]:
+    """Read the PATH B marker. ``(readable, marker)`` — DB uncertainty is explicit."""
+    readable, claim = read_action_claim(
+        db, symbol=symbol, account_scope=account_scope, for_update=for_update
+    )
+    if not readable:
+        return False, None
+    if claim is None:
+        return True, None
+    return True, _deadman_qty_replacement_from_metadata(claim.get("metadata"))
+
+
+def open_deadman_qty_replacement(
+    db: Session,
+    *,
+    symbol: str,
+    claim_token: str,
+    owner_session_id: int,
+    account_scope: str,
+    reason: str,
+    partial_quantity: float,
+    partial_client_order_id: str,
+    predecessor_client_order_id: str,
+    predecessor_broker_order_id: str,
+    predecessor_order_request: dict[str, Any],
+    predecessor_filled_size: float,
+    successor_client_order_id: str,
+    successor_qty: float,
+    successor_order_request: dict[str, Any],
+) -> dict[str, Any]:
+    """Freeze edge #1 at ``intent_frozen`` BEFORE the PATCH goes out.
+
+    Idempotent: an existing marker whose immutable identity matches is reused, so
+    a retry after a crash between commit and HTTP resumes the same edge instead
+    of opening a second one. Any disagreement fails closed — a second edge
+    against the same predecessor is how a share gets sold twice.
+    """
+    scope = str(account_scope or "").strip().lower()
+    sym = _symbol(symbol)
+    partial_cid = str(partial_client_order_id or "").strip()
+    predecessor_cid = str(predecessor_client_order_id or "").strip()
+    predecessor_oid = str(predecessor_broker_order_id or "").strip()
+    successor_cid = str(successor_client_order_id or "").strip()
+    exit_reason = str(reason or "").strip()
+    predecessor_request = dict(predecessor_order_request or {})
+    successor_request = dict(successor_order_request or {})
+    try:
+        f = float(partial_quantity)
+        r = float(successor_qty)
+        predecessor_fill = float(predecessor_filled_size or 0.0)
+    except (TypeError, ValueError):
+        return {"ok": False, "reason": "path_b_marker_quantities_unreadable"}
+    if not (
+        scope == "alpaca:paper"
+        and sym
+        and exit_reason
+        and partial_cid
+        and predecessor_cid
+        and predecessor_oid
+        and successor_cid
+        and successor_cid != predecessor_cid
+        and math.isfinite(f)
+        and f > 0.0
+        and math.isfinite(r)
+        and r > 0.0
+        and math.isfinite(predecessor_fill)
+        # §3.4b: a partially-filled predecessor is never split — the PATCH would
+        # re-authorise shares that have already been sold.
+        and abs(predecessor_fill) <= 1e-12
+        and _owner_transport_request_valid(
+            predecessor_request,
+            symbol=sym,
+            client_order_id=predecessor_cid,
+            transport_kind="deadman",
+        )
+        and _owner_transport_request_valid(
+            successor_request,
+            symbol=sym,
+            client_order_id=successor_cid,
+            transport_kind="deadman",
+        )
+    ):
+        return {"ok": False, "reason": "path_b_marker_not_certified"}
+    readable, claim = read_action_claim(
+        db, symbol=sym, account_scope=scope, for_update=True
+    )
+    if not readable or claim is None:
+        return {"ok": False, "reason": "path_b_marker_claim_unreadable"}
+    metadata = dict(claim.get("metadata") or {})
+    current_transport = metadata.get(_OWNER_TRANSPORT_METADATA_KEY)
+    current_transport = dict(current_transport) if isinstance(current_transport, dict) else {}
+    if not (
+        claim.get("phase") != RESOLVED
+        and claim.get("action") == "entry"
+        and claim.get("claim_token") == str(claim_token)
+        and claim.get("owner_session_id") == int(owner_session_id)
+        and str(current_transport.get("transport_kind") or "").strip().lower() == "deadman"
+        and str(current_transport.get("client_order_id") or "").strip() == predecessor_cid
+        and str(current_transport.get("broker_order_id") or "").strip() == predecessor_oid
+        and current_transport.get("order_request") == predecessor_request
+        and str(current_transport.get("phase") or "").strip().lower() != "resolved"
+    ):
+        return {"ok": False, "reason": "path_b_marker_owner_mismatch"}
+    now = datetime.now(timezone.utc).isoformat()
+    edge = {
+        "edge_no": 1,
+        "predecessor_client_order_id": predecessor_cid,
+        "predecessor_broker_order_id": predecessor_oid,
+        "predecessor_order_request": predecessor_request,
+        "predecessor_filled_size": predecessor_fill,
+        "successor_client_order_id": successor_cid,
+        "successor_order_request": successor_request,
+        "successor_qty": r,
+        "partial_quantity": f,
+        "submitted_at_utc": None,
+        "submit_outcome": None,
+        "successor_broker_order_id": None,
+        "certified_at_utc": None,
+    }
+    proposed = {
+        "identity_contract": _DEADMAN_QTY_REPLACEMENT_CONTRACT,
+        "phase": "intent_frozen",
+        "reason": exit_reason,
+        "owner_session_id": int(owner_session_id),
+        "symbol": sym,
+        "created_at_utc": now,
+        "updated_at_utc": now,
+        "phase_entered_at_utc": now,
+        "edges": [edge],
+        "partial_client_order_id": partial_cid,
+        "partial_quantity": f,
+        "partial_broker_order_id": None,
+        "partial_cum_filled": 0.0,
+        "partial_state": None,
+        "retry_count": 0,
+    }
+    existing = _deadman_qty_replacement_from_metadata(metadata)
+    if existing is not None:
+        immutable = ("owner_session_id", "symbol", "partial_client_order_id", "partial_quantity")
+        existing_edge = (existing.get("edges") or [{}])[0]
+        existing_edge = existing_edge if isinstance(existing_edge, dict) else {}
+        if any(existing.get(k) != proposed.get(k) for k in immutable) or any(
+            existing_edge.get(k) != edge.get(k)
+            for k in ("predecessor_client_order_id", "predecessor_broker_order_id",
+                      "successor_client_order_id", "successor_qty", "partial_quantity")
+        ):
+            return {
+                "ok": False,
+                "reason": "path_b_marker_generation_mismatch",
+                "marker": existing,
+            }
+        return {"ok": True, "marker": existing, "reused": True}
+    metadata[_DEADMAN_QTY_REPLACEMENT_METADATA_KEY] = proposed
+    row = db.execute(text(
+        "UPDATE broker_symbol_action_claims SET metadata_json = CAST(:metadata AS jsonb),"
+        " updated_at = NOW() WHERE account_scope = :scope AND symbol = :symbol"
+        " AND claim_token = :claim_token AND action = 'entry' AND phase <> 'resolved'"
+        " AND metadata_json -> :marker_key IS NULL"
+    ), {
+        "metadata": json.dumps(metadata, separators=(",", ":"), default=str),
+        "scope": scope,
+        "symbol": sym,
+        "claim_token": str(claim_token),
+        "marker_key": _DEADMAN_QTY_REPLACEMENT_METADATA_KEY,
+    })
+    if int(row.rowcount or 0) != 1:
+        return {"ok": False, "reason": "path_b_marker_write_failed"}
+    return {"ok": True, "marker": proposed, "created": True}
+
+
+def advance_deadman_qty_replacement(
+    db: Session,
+    *,
+    symbol: str,
+    claim_token: str,
+    account_scope: str,
+    expect_phase: str,
+    phase: str,
+    patch: dict[str, Any] | None = None,
+    edge_patch: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """CAS one legal phase edge. The UPDATE carries ``expect_phase``.
+
+    Legality is the pure core's table (``path_b_partial.advance_phase``), so an
+    edge the design deleted cannot be written by a caller that has not been
+    updated. ``patch`` merges into the marker, ``edge_patch`` into its LAST edge.
+    """
+    from . import path_b_partial as _pb
+
+    scope = str(account_scope or "").strip().lower()
+    sym = _symbol(symbol)
+    try:
+        target = _pb.advance_phase(str(expect_phase), str(phase))
+    except _pb.PhaseError as exc:
+        return {"ok": False, "reason": f"path_b_marker_illegal_edge:{exc}"}
+    readable, claim = read_action_claim(
+        db, symbol=sym, account_scope=scope, for_update=True
+    )
+    if not readable or claim is None:
+        return {"ok": False, "reason": "path_b_marker_claim_unreadable"}
+    metadata = dict(claim.get("metadata") or {})
+    marker = _deadman_qty_replacement_from_metadata(metadata)
+    if marker is None:
+        return {"ok": False, "reason": "path_b_marker_absent"}
+    if str(marker.get("phase") or "").strip() != str(expect_phase):
+        return {"ok": False, "reason": "path_b_marker_phase_moved", "marker": marker}
+    now = datetime.now(timezone.utc).isoformat()
+    marker.update(dict(patch or {}))
+    edges = [dict(e) for e in (marker.get("edges") or []) if isinstance(e, dict)]
+    if edge_patch:
+        if not edges:
+            return {"ok": False, "reason": "path_b_marker_edge_absent"}
+        edges[-1].update(dict(edge_patch))
+    marker["edges"] = edges
+    marker["phase"] = target
+    marker["updated_at_utc"] = now
+    marker["phase_entered_at_utc"] = now
+    metadata[_DEADMAN_QTY_REPLACEMENT_METADATA_KEY] = marker
+    row = db.execute(text(
+        "UPDATE broker_symbol_action_claims SET metadata_json = CAST(:metadata AS jsonb),"
+        " updated_at = NOW() WHERE account_scope = :scope AND symbol = :symbol"
+        " AND claim_token = :claim_token AND action = 'entry' AND phase <> 'resolved'"
+        " AND metadata_json -> :marker_key ->> 'phase' = :expect_phase"
+    ), {
+        "metadata": json.dumps(metadata, separators=(",", ":"), default=str),
+        "scope": scope,
+        "symbol": sym,
+        "claim_token": str(claim_token),
+        "marker_key": _DEADMAN_QTY_REPLACEMENT_METADATA_KEY,
+        "expect_phase": str(expect_phase),
+    })
+    if int(row.rowcount or 0) != 1:
+        return {"ok": False, "reason": "path_b_marker_cas_lost"}
+    return {"ok": True, "marker": marker}
+
+
+def book_deadman_qty_replacement_partial_fill(
+    db: Session,
+    *,
+    symbol: str,
+    claim_token: str,
+    account_scope: str,
+    partial_cum_filled: float,
+    partial_broker_order_id: str | None = None,
+    partial_state: str | None = None,
+) -> dict[str, Any]:
+    """Book the sibling fill ``k`` into the marker — §3.1/1 and §3.7/1.
+
+    This MUST run in the same transaction as ``_cancel_scale_limit_and_clamp``'s
+    own bookkeeping: if the clamp commits ``k`` and the marker does not, the two
+    replacement gates subtract different numbers and
+    ``conservation_holds`` fails on every subsequent pulse, forever (H2). No
+    phase change here — only the quantity, and it may only ever advance.
+    """
+    scope = str(account_scope or "").strip().lower()
+    sym = _symbol(symbol)
+    try:
+        k = float(partial_cum_filled)
+    except (TypeError, ValueError):
+        return {"ok": False, "reason": "path_b_marker_fill_unreadable"}
+    if not (math.isfinite(k) and k >= 0.0):
+        return {"ok": False, "reason": "path_b_marker_fill_unreadable"}
+    readable, claim = read_action_claim(
+        db, symbol=sym, account_scope=scope, for_update=True
+    )
+    if not readable or claim is None:
+        return {"ok": False, "reason": "path_b_marker_claim_unreadable"}
+    metadata = dict(claim.get("metadata") or {})
+    marker = _deadman_qty_replacement_from_metadata(metadata)
+    if marker is None:
+        return {"ok": False, "reason": "path_b_marker_absent"}
+    try:
+        stored = float(marker.get("partial_cum_filled") or 0.0)
+    except (TypeError, ValueError):
+        stored = 0.0
+    f = float(marker.get("partial_quantity") or 0.0)
+    if k > f + max(1e-9, abs(f) * 1e-8):
+        return {"ok": False, "reason": "path_b_marker_fill_exceeds_partial"}
+    # Self-healing on read (§3.1/2): the strict broker read wins, but a fill can
+    # only ever advance — a stale smaller read never un-books a booked share.
+    healed = max(stored, k)
+    marker["partial_cum_filled"] = healed
+    if partial_broker_order_id:
+        marker["partial_broker_order_id"] = str(partial_broker_order_id).strip()
+    if partial_state:
+        marker["partial_state"] = str(partial_state).strip()
+    marker["updated_at_utc"] = datetime.now(timezone.utc).isoformat()
+    metadata[_DEADMAN_QTY_REPLACEMENT_METADATA_KEY] = marker
+    row = db.execute(text(
+        "UPDATE broker_symbol_action_claims SET metadata_json = CAST(:metadata AS jsonb),"
+        " updated_at = NOW() WHERE account_scope = :scope AND symbol = :symbol"
+        " AND claim_token = :claim_token AND action = 'entry' AND phase <> 'resolved'"
+        " AND metadata_json -> :marker_key IS NOT NULL"
+    ), {
+        "metadata": json.dumps(metadata, separators=(",", ":"), default=str),
+        "scope": scope,
+        "symbol": sym,
+        "claim_token": str(claim_token),
+        "marker_key": _DEADMAN_QTY_REPLACEMENT_METADATA_KEY,
+    })
+    if int(row.rowcount or 0) != 1:
+        return {"ok": False, "reason": "path_b_marker_fill_write_failed"}
+    return {"ok": True, "marker": marker, "partial_cum_filled": healed}
+
+
+def clear_deadman_qty_replacement(
+    db: Session,
+    *,
+    symbol: str,
+    claim_token: str,
+    account_scope: str,
+) -> bool:
+    """Drop a TERMINAL marker so the next partial starts from a clean edge."""
+    from . import path_b_partial as _pb
+
+    scope = str(account_scope or "").strip().lower()
+    sym = _symbol(symbol)
+    readable, claim = read_action_claim(
+        db, symbol=sym, account_scope=scope, for_update=True
+    )
+    if not readable or claim is None:
+        return False
+    metadata = dict(claim.get("metadata") or {})
+    marker = _deadman_qty_replacement_from_metadata(metadata)
+    if marker is None:
+        return True
+    if not _pb.is_terminal(str(marker.get("phase") or "")):
+        return False
+    metadata.pop(_DEADMAN_QTY_REPLACEMENT_METADATA_KEY, None)
+    row = db.execute(text(
+        "UPDATE broker_symbol_action_claims SET metadata_json = CAST(:metadata AS jsonb),"
+        " updated_at = NOW() WHERE account_scope = :scope AND symbol = :symbol"
+        " AND claim_token = :claim_token AND action = 'entry'"
+    ), {
+        "metadata": json.dumps(metadata, separators=(",", ":"), default=str),
+        "scope": scope,
+        "symbol": sym,
+        "claim_token": str(claim_token),
+    })
+    return int(row.rowcount or 0) == 1
+
+
+def open_deadman_qty_replacement_committed(**kwargs: Any) -> dict[str, Any]:
+    """Freeze edge #1 and COMMIT before the PATCH — the crash-recovery contract."""
+    scope = str(kwargs.get("account_scope") or "").strip().lower()
+    if scope != "alpaca:paper" or not bool(getattr(settings, "chili_alpaca_paper", True)):
+        return {"ok": False, "reason": "alpaca_account_scope_not_certified"}
+    try:
+        return _with_short_session(lambda db: open_deadman_qty_replacement(db, **kwargs))
+    except Exception:
+        return {"ok": False, "reason": "path_b_marker_commit_failed"}
+
+
+def advance_deadman_qty_replacement_committed(**kwargs: Any) -> dict[str, Any]:
+    """CAS one phase edge and COMMIT before the dependent HTTP."""
+    scope = str(kwargs.get("account_scope") or "").strip().lower()
+    if scope != "alpaca:paper" or not bool(getattr(settings, "chili_alpaca_paper", True)):
+        return {"ok": False, "reason": "alpaca_account_scope_not_certified"}
+    try:
+        return _with_short_session(lambda db: advance_deadman_qty_replacement(db, **kwargs))
+    except Exception:
+        return {"ok": False, "reason": "path_b_marker_commit_failed"}
+
+
+def book_deadman_qty_replacement_partial_fill_committed(**kwargs: Any) -> dict[str, Any]:
+    """Book the sibling tranche fill and COMMIT -- a booked share is never un-booked."""
+    scope = str(kwargs.get("account_scope") or "").strip().lower()
+    if scope != "alpaca:paper" or not bool(getattr(settings, "chili_alpaca_paper", True)):
+        return {"ok": False, "reason": "alpaca_account_scope_not_certified"}
+    try:
+        return _with_short_session(
+            lambda db: book_deadman_qty_replacement_partial_fill(db, **kwargs)
+        )
+    except Exception:
+        return {"ok": False, "reason": "path_b_marker_commit_failed"}
+
+
+def clear_deadman_qty_replacement_committed(**kwargs: Any) -> bool:
+    """Drop a TERMINAL marker and COMMIT.  Refuses anything still in flight."""
+    try:
+        return bool(_with_short_session(lambda db: clear_deadman_qty_replacement(db, **kwargs)))
+    except Exception:
+        return False
+
+
+def read_deadman_qty_replacement_committed(**kwargs: Any) -> tuple[bool, dict[str, Any] | None]:
+    """Read the marker in its own short transaction (recovery / observability)."""
+    try:
+        return _with_short_session(lambda db: read_deadman_qty_replacement(db, **kwargs))
+    except Exception:
+        return False, None

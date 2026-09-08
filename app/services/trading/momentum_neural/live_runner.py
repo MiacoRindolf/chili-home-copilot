@@ -88,6 +88,10 @@ from .alpaca_orphan_claims import (
     release_orphan_close_pre_post_committed,
     advance_orphan_close_claim_phase_committed,
     read_action_claim_committed,
+    read_deadman_qty_replacement,
+    open_deadman_qty_replacement_committed,
+    advance_deadman_qty_replacement_committed,
+    book_deadman_qty_replacement_partial_fill_committed,
     resolve_action_claim,
     resolve_action_claim_committed,
     resolve_owner_transport_terminal_committed,
@@ -9593,6 +9597,60 @@ def _clear_scale_limit_place_intent_if_determinate(
         _commit_le(sess, le)
 
 
+def alpaca_partial_tranche_sellable(
+    le: dict[str, Any],
+    *,
+    partial_qty: float,
+    position_qty: float,
+) -> tuple[bool, dict[str, Any]]:
+    """Can the f-share tranche be SOLD right now, with a stop still covering the runner?
+
+    PATH B / broker-agnostic strategy (2026-09-06). The strategy's first-target
+    decision — sell ``scale_out_fraction``, move the balance to breakeven, hold the
+    runner — is Ross's asymmetric exit and a PARITY CONTRACT shared with the paper
+    runner. It must not change because of the venue. What CAN differ is whether the
+    tranche is sellable this instant: on Alpaca a resting full-quantity deadman stop
+    consumes the whole ``qty_available``, so f cannot be sold until either a tranche
+    is already reserved (the OCO path) or the stop has been shrunk to Q - f (PATH B).
+
+    Pure. Returns ``(sellable, debug)``; the debug is the receipt that says WHY, so a
+    suppression is never silent again. Fail-CLOSED on unreadable numbers — a partial
+    we cannot prove sellable must not be attempted against a resting protective stop.
+    """
+    dbg: dict[str, Any] = {"partial_qty": None, "position_qty": None,
+                           "deadman_qty": None, "reserved_qty": None}
+    try:
+        f = float(partial_qty)
+        q = float(position_qty)
+    except (TypeError, ValueError):
+        dbg["reason"] = "quantities_unreadable"
+        return False, dbg
+    if not (math.isfinite(f) and f > 0.0 and math.isfinite(q) and q > 0.0):
+        dbg["reason"] = "quantities_unreadable"
+        return False, dbg
+    dbg["partial_qty"], dbg["position_qty"] = f, q
+    tol = max(1e-9, q * 1e-8)
+    reserved = _alpaca_deadman_reserved_tranche_quantity(le)
+    dbg["reserved_qty"] = reserved
+    if reserved >= f - tol:
+        dbg["reason"] = "tranche_already_reserved"
+        return True, dbg
+    deadman = le.get("deadman_stop") if isinstance(le, dict) else None
+    deadman = deadman if isinstance(deadman, dict) else {}
+    deadman_qty = _float_or_none(deadman.get("qty"))
+    dbg["deadman_qty"] = deadman_qty
+    if not deadman or deadman_qty is None or deadman_qty <= 0.0:
+        # No protective order holds the shares; the ordinary sell path applies.
+        dbg["reason"] = "no_resting_deadman"
+        return True, dbg
+    if deadman_qty <= (q - f) + tol:
+        # Already shrunk (PATH B certified, or armed for the runner only).
+        dbg["reason"] = "deadman_leaves_tranche_free"
+        return True, dbg
+    dbg["reason"] = "deadman_holds_tranche"
+    return False, dbg
+
+
 def _alpaca_deadman_reserved_tranche_quantity(le: dict[str, Any]) -> float:
     """Shares ``_ensure_alpaca_deadman_stop`` will subtract before it arms.
 
@@ -9607,7 +9665,7 @@ def _alpaca_deadman_reserved_tranche_quantity(le: dict[str, Any]) -> float:
     if not isinstance(le, dict) or not le.get("scale_limit_order_id"):
         return 0.0
     if not (
-        le.get("scale_limit_is_oco")
+        (le.get("scale_limit_is_oco") or le.get("scale_limit_is_path_b"))
         and bool(
             getattr(
                 settings,
@@ -10901,6 +10959,707 @@ def _dispatch_alpaca_replaced_deadman_successor(
     )
 
 
+# ---------------------------------------------------------------------------
+# PATH B -- a partial exit under a resting FULL-QUANTITY deadman stop (Alpaca).
+#
+# THE PROBLEM (probe 2026-09-01, paper; docs/DESIGN/PARTIAL_EXIT_PATH_B.md).  A
+# resting stop for the whole position consumes Alpaca's ``qty_available``, so a
+# partial sell is refused by the venue -- `live_partial_exit_filled` has been
+# ZERO since 2026-08-01.  PATH B shrinks the resting stop from Q to R = Q - f
+# with one qty PATCH, and only then sells f.  Between those two calls the f
+# shares carry no stop, so the process dying in that window is the whole design
+# problem: every step is durable on the action claim FIRST and every phase
+# advance is a compare-and-swap (`path_b_partial.advance_phase` is the only
+# sanctioned writer of the graph).
+#
+# This is the SERVICE STEP.  The decision site freezes the marker and commits;
+# everything after that is owned here, one step per pulse, so a marker left
+# behind by a dead process is picked up by the next tick instead of waiting for
+# a human.  It never raises: an unreadable broker answer leaves the phase where
+# it is and reports `pending`, which is the honest state, and the 300 s ceiling
+# then forces the remedy (`flatten_queued` for any naked phase, `abandoned` for
+# pre-certification lineage) so no marker can wedge the position forever.
+# ---------------------------------------------------------------------------
+
+#: One owner-transport lease (`_OWNER_TRANSPORT_LEASE_SECONDS`).  Past this a
+#: submitted replacement that still cannot be certified is `replace_stuck`.
+_PATH_B_REPLACE_LEASE_SECONDS = 30.0
+
+
+def _path_b_marker_edge(marker: dict[str, Any]) -> dict[str, Any]:
+    """The replacement edge in flight -- always the LAST (a pyramid add appends)."""
+    edges = marker.get("edges") if isinstance(marker, dict) else None
+    edges = [e for e in edges if isinstance(e, dict)] if isinstance(edges, list) else []
+    return dict(edges[-1]) if edges else {}
+
+
+def _path_b_marker_age_seconds(
+    marker: dict[str, Any],
+    key: str = "created_at_utc",
+) -> float | None:
+    """Wall-clock age of one marker timestamp, or ``None`` when unreadable.
+
+    ``None`` never forces anything: we do not abandon a position on a guess.
+    """
+    raw = str((marker or {}).get(key) or "").strip()
+    if not raw:
+        return None
+    try:
+        stamped = datetime.fromisoformat(raw)
+    except (TypeError, ValueError):
+        return None
+    if stamped.tzinfo is None:
+        stamped = stamped.replace(tzinfo=timezone.utc)
+    try:
+        age = (_utcnow_aware() - stamped).total_seconds()
+    except (TypeError, ValueError, OverflowError):
+        return None
+    return max(0.0, float(age))
+
+
+def _path_b_replace_definitely_rejected(result: dict[str, Any]) -> bool:
+    """Did the venue REFUSE the PATCH, as opposed to leaving us unsure?
+
+    Only a 4xx that is not a timeout/transport error is a refusal.  Everything
+    else -- a raised exception, a 5xx, no status at all -- is indeterminate, and
+    an indeterminate PATCH must be resolved by READING the broker, never by
+    assuming it did not happen.
+    """
+    if not isinstance(result, dict) or result.get("ok"):
+        return False
+    if result.get("indeterminate") is True:
+        return False
+    status = result.get("http_status")
+    try:
+        code = int(status)
+    except (TypeError, ValueError):
+        return False
+    return 400 <= code < 500 and code not in (408, 425, 429)
+
+
+def _path_b_mirror_sibling_into_le(
+    sess: TradingAutomationSession,
+    le: dict[str, Any],
+    marker: dict[str, Any],
+) -> bool:
+    """Rebuild ``le["scale_limit_*"]`` from the claim's marker.
+
+    A tranche posted by PATH B is durable on the ACTION CLAIM; the session JSON
+    can lag it, because the process can die between the POST and the write.
+    ``_cancel_scale_limit_and_clamp`` reads the session JSON only, so without
+    this the clamp is a pass-through no-op and the account ends up carrying
+    Q + f of sell authority against Q shares -- a short flip through the very
+    chokepoint that exists to prevent one.
+    """
+    order_id = str(marker.get("partial_broker_order_id") or "").strip()
+    client_order_id = str(marker.get("partial_client_order_id") or "").strip()
+    partial_qty = _float_or_none(marker.get("partial_quantity"))
+    booked = _float_or_none(marker.get("partial_cum_filled")) or 0.0
+    limit_px = _float_or_none(marker.get("partial_limit_price"))
+    if not (order_id and client_order_id and partial_qty is not None and partial_qty > 0.0):
+        return False
+    if str(le.get("scale_limit_order_id") or "").strip() == order_id:
+        return False
+    le["scale_limit_order_id"] = order_id
+    le["scale_limit_client_order_id"] = client_order_id
+    le["scale_limit_qty"] = float(partial_qty)
+    le["scale_limit_adopted_qty"] = float(booked)
+    if limit_px is not None and limit_px > 0.0:
+        le["scale_limit_px"] = float(limit_px)
+    le["scale_limit_is_oco"] = False
+    le["scale_limit_is_path_b"] = True
+    _commit_le(sess, le)
+    return True
+
+
+#: Exit reasons that outrank a PATH B marker.  Operator flatten, end of day,
+#: the drawdown breaker and the kill switch can never wait behind a marker.
+_PATH_B_OVERRIDE_EXIT_REASONS = (
+    "operator", "flatten", "eod", "breaker", "kill", "max_loss", "emergency",
+    "halt", "deadman", "risk_", "circuit",
+)
+
+
+def _path_b_exit_precheck(
+    db: Session,
+    sess: TradingAutomationSession,
+    *,
+    le: dict[str, Any],
+    reason: str,
+) -> dict[str, Any] | None:
+    """Pay PATH B's debts at the head of the ONE chokepoint every exit crosses.
+
+    Two debts, in order: rebuild the sibling mirror so the clamp can actually
+    see a resting tranche, then honour a bounded deferral while the qty PATCH is
+    in flight.  The deferral asks for ONE pulse, never a lock: it is refused for
+    every override authority, refused outside three phases none of which has a
+    naked remainder, and refused past 30 seconds.
+    """
+    from . import path_b_partial as pb
+
+    context = _alpaca_owner_transport_context(sess)
+    if context is None:
+        return None
+    readable, marker = read_deadman_qty_replacement(
+        db, symbol=context["symbol"], account_scope=context["account_scope"]
+    )
+    if not readable or marker is None:
+        return None
+    phase = str(marker.get("phase") or "").strip()
+    if phase not in pb.PHASES:
+        return None
+    if pb.requires_sibling_reconcile(phase):
+        _path_b_mirror_sibling_into_le(sess, le, marker)
+    reason_text = str(reason or "").strip().lower()
+    override = bool(
+        le.get("operator_flatten_requested_utc")
+        or le.get("deadman_protection_unavailable")
+        or any(token in reason_text for token in _PATH_B_OVERRIDE_EXIT_REASONS)
+    )
+    if pb.blocks_whole_exit(
+        phase,
+        age_seconds=_path_b_marker_age_seconds(marker, "phase_entered_at_utc"),
+        override_authority=override,
+    ):
+        _emit(db, sess, "path_b_whole_exit_deferred", {
+            "phase": phase,
+            "reason": reason_text[:60],
+        })
+        return {
+            "ok": False,
+            "error": "path_b_replacement_in_flight",
+            "deferred": True,
+            "pre_place_blocked": True,
+            "phase": phase,
+        }
+    return None
+
+
+def _open_path_b_partial_marker(
+    db: Session,
+    sess: TradingAutomationSession,
+    adapter: Any,
+    *,
+    le: dict[str, Any],
+    partial_qty: float,
+    position_qty: float,
+    reason: str,
+) -> dict[str, Any]:
+    """Freeze edge #1 (Q -> R = Q - f) durably, BEFORE anything touches the broker.
+
+    Nothing here moves an order.  The point is that the intent survives the
+    process: after this commits, a crash is recoverable, because the next pulse
+    reads the marker and knows exactly which stop it meant to shrink, to what,
+    and which tranche it meant to sell.
+    """
+    from . import path_b_partial as pb
+
+    context = _alpaca_owner_transport_context(sess)
+    if context is None:
+        return {"ok": False, "reason": "alpaca_owner_context_missing"}
+    readable, claim = read_action_claim(
+        db, symbol=context["symbol"], account_scope=context["account_scope"]
+    )
+    metadata = claim.get("metadata") if (readable and isinstance(claim, dict)) else None
+    transport = metadata.get("owner_transport") if isinstance(metadata, dict) else None
+    transport = dict(transport) if isinstance(transport, dict) else {}
+    if str(transport.get("transport_kind") or "").strip().lower() != "deadman":
+        return {"ok": False, "reason": "path_b_owner_transport_not_deadman"}
+    predecessor_cid = str(transport.get("client_order_id") or "").strip()
+    predecessor_oid = str(transport.get("broker_order_id") or "").strip()
+    predecessor_request = transport.get("order_request")
+    predecessor_request = (
+        dict(predecessor_request) if isinstance(predecessor_request, dict) else None
+    )
+    if not (predecessor_cid and predecessor_oid and predecessor_request):
+        return {"ok": False, "reason": "path_b_predecessor_transport_incomplete"}
+    state, predecessor = _strict_client_order_id_truth(adapter, predecessor_cid)
+    if state != "found" or predecessor is None:
+        return {"ok": False, "reason": "path_b_predecessor_unreadable"}
+    predecessor_fill = _float_or_none(getattr(predecessor, "filled_size", 0.0)) or 0.0
+    plan = pb.plan_replacement_edge(
+        total_qty=float(position_qty),
+        partial_qty=float(partial_qty),
+        predecessor_filled_size=predecessor_fill,
+        open_partial_qty=_alpaca_deadman_reserved_tranche_quantity(le),
+        whole_shares=not str(sess.symbol or "").upper().endswith("-USD"),
+    )
+    if not plan.ok:
+        return {"ok": False, "reason": f"path_b_split_refused:{plan.reason}"}
+    successor_cid = f"chili-deadman-{uuid.uuid4().hex[:10]}"
+    partial_cid = f"chili-part-{uuid.uuid4().hex[:10]}"
+    successor_request = pb.marker_successor_envelope(
+        predecessor_order_request=predecessor_request,
+        successor_client_order_id=successor_cid,
+        successor_qty=plan.successor_qty,
+        edge_kind="shrink",
+    )
+    if successor_request is None:
+        return {"ok": False, "reason": "path_b_successor_envelope_invalid"}
+    out = open_deadman_qty_replacement_committed(
+        symbol=context["symbol"],
+        claim_token=context["claim_token"],
+        owner_session_id=int(sess.id),
+        account_scope=context["account_scope"],
+        reason=str(reason),
+        partial_quantity=plan.partial_qty,
+        partial_client_order_id=partial_cid,
+        predecessor_client_order_id=predecessor_cid,
+        predecessor_broker_order_id=predecessor_oid,
+        predecessor_order_request=predecessor_request,
+        predecessor_filled_size=predecessor_fill,
+        successor_client_order_id=successor_cid,
+        successor_qty=plan.successor_qty,
+        successor_order_request=successor_request,
+    )
+    _emit(db, sess, "path_b_partial_marker_opened", {
+        "ok": bool(out.get("ok")),
+        "reason": (str(out.get("reason"))[:120] if out.get("reason") else None),
+        "total_qty": float(position_qty),
+        "partial_qty": plan.partial_qty,
+        "successor_qty": plan.successor_qty,
+        "reused": bool(out.get("reused")),
+    })
+    return out
+
+
+def _service_path_b_marker(
+    db: Session,
+    sess: TradingAutomationSession,
+    adapter: Any,
+    *,
+    le: dict[str, Any],
+    product_id: str,
+    avg_entry_price: float,
+    software_stop_price: float,
+) -> dict[str, Any] | None:
+    """Advance the PATH B marker by one step.  ``None`` == this session has none.
+
+    A ``None`` return is the byte-identical path: every call site behaves exactly
+    as it did before PATH B existed, which is what keeps the wiring reviewable.
+    """
+    from . import path_b_partial as pb
+
+    context = _alpaca_owner_transport_context(sess)
+    if context is None:
+        return None
+    symbol = context["symbol"]
+    scope = context["account_scope"]
+    readable, marker = read_deadman_qty_replacement(
+        db, symbol=symbol, account_scope=scope
+    )
+    if not readable:
+        return {"ok": False, "pending": True, "error": "path_b_marker_unreadable"}
+    if marker is None:
+        return None
+    phase = str(marker.get("phase") or "").strip()
+    if phase not in pb.PHASES:
+        return {"ok": False, "pending": True, "error": "path_b_marker_phase_unknown"}
+
+    def _advance(target: str, **kwargs: Any) -> dict[str, Any]:
+        out = advance_deadman_qty_replacement_committed(
+            symbol=symbol,
+            claim_token=context["claim_token"],
+            account_scope=scope,
+            expect_phase=phase,
+            phase=target,
+            **kwargs,
+        )
+        _emit(db, sess, "path_b_marker_phase", {
+            "from": phase,
+            "to": target,
+            "ok": bool(out.get("ok")),
+            "reason": (str(out.get("reason"))[:120] if out.get("reason") else None),
+        })
+        return out
+
+    if pb.is_terminal(phase):
+        return {"ok": True, "phase": phase, "terminal": True}
+
+    # The anti-wedge ceiling.  A NAKED phase is forced to `flatten_queued` (the
+    # position is the thing at risk); pre-certification lineage is forced to
+    # `abandoned` (the Q stop is still whole, only the lineage is given up).
+    age_s = _path_b_marker_age_seconds(marker)
+    if pb.marker_ceiling_exceeded(age_s):
+        forced = pb.marker_ceiling_forced_target(phase)
+        if forced is not None:
+            out = _advance(forced, patch={
+                "ceiling_forced_from": phase,
+                "ceiling_age_s": round(float(age_s or 0.0), 3),
+            })
+            return {
+                "ok": bool(out.get("ok")),
+                "pending": True,
+                "phase": forced,
+                "path_b_ceiling_forced": True,
+            }
+
+    edge = _path_b_marker_edge(marker)
+    predecessor_cid = str(edge.get("predecessor_client_order_id") or "").strip()
+    predecessor_oid = str(edge.get("predecessor_broker_order_id") or "").strip()
+    successor_cid = str(edge.get("successor_client_order_id") or "").strip()
+    successor_qty = _float_or_none(edge.get("successor_qty"))
+    partial_cid = str(marker.get("partial_client_order_id") or "").strip()
+    partial_qty = _float_or_none(marker.get("partial_quantity"))
+    partial_filled = _float_or_none(marker.get("partial_cum_filled")) or 0.0
+    if not (
+        predecessor_cid
+        and predecessor_oid
+        and successor_cid
+        and partial_cid
+        and successor_qty is not None
+        and successor_qty > 0.0
+        and partial_qty is not None
+        and partial_qty > 0.0
+    ):
+        return {"ok": False, "pending": True, "error": "path_b_marker_edge_unreadable"}
+    open_partial_qty = pb.open_partial_qty_from_marker(
+        partial_quantity=partial_qty,
+        partial_cum_filled=partial_filled,
+    )
+    if open_partial_qty is None:
+        return {"ok": False, "pending": True, "error": "path_b_partial_quantities_unreadable"}
+
+    # ---- edge 1, submit: PATCH the resting stop Q -> R ----------------------
+    if phase == "intent_frozen":
+        state, predecessor = _strict_client_order_id_truth(adapter, predecessor_cid)
+        if state != "found" or predecessor is None:
+            return {"ok": False, "pending": True, "error": "path_b_predecessor_unreadable"}
+        if str(getattr(predecessor, "order_id", "") or "").strip() != predecessor_oid:
+            return {"ok": False, "pending": True, "error": "path_b_predecessor_broker_id_mismatch"}
+        lifecycle = _alpaca_protective_order_lifecycle(predecessor)
+        if lifecycle in ("replaced", "pending_replace"):
+            # We died between the accepted PATCH and the phase write.  The edge
+            # HAPPENED; re-submitting it would be refused as a duplicate CID and
+            # then mis-read as a rejection, so adopt it and certify next pulse.
+            out = _advance("replace_submitted", edge_patch={
+                "submitted_at_utc": _utcnow().isoformat(),
+                "submit_outcome": "recovered_from_broker",
+                "recovered_lifecycle": lifecycle,
+            })
+            return {"ok": bool(out.get("ok")), "pending": True, "phase": "replace_submitted"}
+        predecessor_fill = _float_or_none(getattr(predecessor, "filled_size", 0.0)) or 0.0
+        if predecessor_fill > 1e-12:
+            # A stop that has already sold part of the position must never be
+            # split: the PATCH would re-authorise shares that are gone.
+            out = _advance("replace_rejected", patch={
+                "rejected_reason": "predecessor_partially_filled",
+                "predecessor_filled_size": predecessor_fill,
+            })
+            return {"ok": bool(out.get("ok")), "phase": "replace_rejected"}
+        if not _alpaca_protective_order_is_certifiably_active(predecessor):
+            return {"ok": False, "pending": True, "error": "path_b_predecessor_not_active"}
+        replace_order_qty = getattr(adapter, "replace_order_qty", None)
+        if not callable(replace_order_qty):
+            out = _advance("abandoned", patch={"abandoned_reason": "adapter_cannot_replace_qty"})
+            return {"ok": bool(out.get("ok")), "phase": "abandoned"}
+        try:
+            result = replace_order_qty(
+                order_id=predecessor_oid,
+                new_qty=_fmt_base_size(float(successor_qty)),
+                client_order_id=successor_cid,
+            ) or {}
+        except Exception as exc:  # noqa: BLE001 -- transport failure is INDETERMINATE
+            result = {"ok": False, "indeterminate": True, "error": type(exc).__name__}
+        if result.get("ok"):
+            target, outcome = "replace_submitted", "accepted"
+        elif _path_b_replace_definitely_rejected(result):
+            target, outcome = "replace_rejected", "rejected"
+        else:
+            target, outcome = "replace_indeterminate", "indeterminate"
+        out = _advance(target, edge_patch={
+            "submitted_at_utc": _utcnow().isoformat(),
+            "submit_outcome": outcome,
+            "successor_broker_order_id": (
+                str(result.get("order_id") or "").strip() or None
+            ),
+            "submit_http_status": result.get("http_status"),
+            "submit_error": (str(result.get("error"))[:160] if result.get("error") else None),
+        })
+        _emit(db, sess, "path_b_deadman_qty_replace_submitted", {
+            "predecessor_order_id": predecessor_oid,
+            "successor_client_order_id": successor_cid,
+            "successor_qty": float(successor_qty),
+            "partial_qty": float(partial_qty),
+            "outcome": outcome,
+            "http_status": result.get("http_status"),
+        })
+        return {"ok": bool(out.get("ok")), "pending": True, "phase": target}
+
+    # ---- edge 1, certify: the broker must PROVE both sides of the edge ------
+    if phase in ("replace_submitted", "replace_indeterminate"):
+        submitted_age = _path_b_marker_age_seconds(marker, "phase_entered_at_utc")
+        state, predecessor = _strict_client_order_id_truth(adapter, predecessor_cid)
+        stuck = bool(
+            submitted_age is not None
+            and submitted_age > _PATH_B_REPLACE_LEASE_SECONDS
+        )
+        if state != "found" or predecessor is None:
+            if stuck:
+                out = _advance("replace_stuck", patch={"stuck_reason": "predecessor_unreadable"})
+                return {"ok": bool(out.get("ok")), "pending": True, "phase": "replace_stuck"}
+            return {"ok": False, "pending": True, "error": "path_b_predecessor_unreadable"}
+        lifecycle = _alpaca_protective_order_lifecycle(predecessor)
+        if lifecycle == "pending_replace":
+            # BOTH orders rest at the broker and the predecessor is still live,
+            # so the position is fully covered.  Truthful, and it keeps the
+            # software stop armed while we wait.
+            if stuck:
+                out = _advance("replace_stuck", patch={"stuck_reason": "pending_replace_past_lease"})
+                return {"ok": bool(out.get("ok")), "pending": True, "phase": "replace_stuck"}
+            return {
+                "ok": True,
+                "protected": True,
+                "path_b_replace_pending": True,
+                "phase": phase,
+            }
+        if lifecycle != "replaced":
+            if stuck:
+                out = _advance("replace_stuck", patch={
+                    "stuck_reason": "predecessor_not_replaced",
+                    "predecessor_lifecycle": lifecycle,
+                })
+                return {"ok": bool(out.get("ok")), "pending": True, "phase": "replace_stuck"}
+            return {"ok": False, "pending": True, "error": "path_b_predecessor_not_replaced"}
+        claim_readable, claim = read_action_claim(db, symbol=symbol, account_scope=scope)
+        claim_meta = claim.get("metadata") if (claim_readable and isinstance(claim, dict)) else None
+        transport = claim_meta.get("owner_transport") if isinstance(claim_meta, dict) else None
+        transport = dict(transport) if isinstance(transport, dict) else None
+        if transport is None:
+            return {"ok": False, "pending": True, "error": "path_b_owner_transport_unreadable"}
+        dispatched = _dispatch_alpaca_replaced_deadman_successor(
+            db,
+            sess,
+            adapter,
+            le=le,
+            product_id=product_id,
+            predecessor_transport=transport,
+            predecessor_order=predecessor,
+            avg_entry_price=avg_entry_price,
+            software_stop_price=software_stop_price,
+            rearm_after_terminal=True,
+            # The three quantities are DIFFERENT here for the first time in this
+            # codebase: the successor covers R, the tranche f is reserved outside
+            # it, and coverage is R + f.  Passing them is what makes the shrink
+            # edge certifiable instead of `..._lineage_unproven` forever.
+            expected_successor_quantity=float(successor_qty),
+            quantity_reserved_outside_successor=float(open_partial_qty),
+        )
+        if not dispatched.get("ok"):
+            if stuck:
+                out = _advance("replace_stuck", patch={
+                    "stuck_reason": str(dispatched.get("error") or "dispatch_failed")[:120],
+                })
+                return {"ok": bool(out.get("ok")), "pending": True, "phase": "replace_stuck"}
+            return {
+                "ok": False,
+                "pending": True,
+                "error": str(dispatched.get("error") or "path_b_successor_uncertified"),
+            }
+        out = _advance("successor_certified", edge_patch={
+            "certified_at_utc": _utcnow().isoformat(),
+        })
+        _emit(db, sess, "path_b_deadman_qty_replace_certified", {
+            "successor_client_order_id": successor_cid,
+            "successor_qty": float(successor_qty),
+            "reserved_outside_successor": float(open_partial_qty),
+        })
+        return {"ok": bool(out.get("ok")), "pending": True, "phase": "successor_certified"}
+
+    # ---- P4: the POST of the f tranche, with every precondition re-read -----
+    if phase in ("successor_certified", "post_deferred"):
+        deferred = _path_b_post_deferral_reason(
+            db,
+            sess,
+            adapter,
+            le=le,
+            product_id=product_id,
+            successor_cid=successor_cid,
+            successor_qty=float(successor_qty),
+            predecessor_cid=predecessor_cid,
+            open_partial_qty=float(open_partial_qty),
+        )
+        if deferred is not None:
+            if phase == "successor_certified":
+                out = _advance("post_deferred", patch={"post_deferred_reason": deferred})
+                return {"ok": bool(out.get("ok")), "pending": True, "phase": "post_deferred",
+                        "path_b_post_deferred": deferred}
+            return {"ok": True, "pending": True, "phase": phase,
+                    "path_b_post_deferred": deferred}
+        posting = _advance("partial_posting", patch={"post_deferred_reason": None})
+        if not posting.get("ok"):
+            return {"ok": False, "pending": True, "error": str(posting.get("reason"))[:120]}
+        return _path_b_post_partial(
+            db,
+            sess,
+            adapter,
+            le=le,
+            product_id=product_id,
+            symbol=symbol,
+            account_scope=scope,
+            claim_token=context["claim_token"],
+            partial_client_order_id=partial_cid,
+            partial_qty=float(open_partial_qty),
+        )
+
+    # Remedy phases (`partial_*`, `restore_*`, `flatten_queued`, containment)
+    # are serviced by their own steps; reaching them is not an error, and the
+    # 300 s ceiling above still applies to every one of them.
+    return {"ok": True, "pending": True, "phase": phase}
+
+
+def _path_b_post_deferral_reason(
+    db: Session,
+    sess: TradingAutomationSession,
+    adapter: Any,
+    *,
+    le: dict[str, Any],
+    product_id: str,
+    successor_cid: str,
+    successor_qty: float,
+    predecessor_cid: str,
+    open_partial_qty: float,
+) -> str | None:
+    """``None`` == POST now.  A string == defer, and the string IS the receipt.
+
+    Every one of these is re-read at the instant of the POST rather than trusted
+    from the pulse that certified the edge: the whole point of PATH B is that the
+    position is uncovered for f shares in between, so a handoff, an operator
+    flatten or a shrunk position that arrived one tick ago must stop the sell.
+    """
+    if le.get("deadman_close_handoff") or le.get("deadman_close_handoff_priority_block"):
+        return "close_handoff_present"
+    if le.get("operator_flatten_requested_utc"):
+        return "operator_flatten_requested"
+    if le.get("deadman_protection_unavailable") or le.get("deadman_protection_reconcile_pending"):
+        return "deadman_protection_unavailable"
+    state, successor = _strict_client_order_id_truth(adapter, successor_cid)
+    if state != "found" or successor is None:
+        return "successor_unreadable"
+    if not _alpaca_protective_order_is_certifiably_active(successor):
+        return "successor_not_active"
+    resting_qty = _float_or_none(getattr(successor, "base_size", None))
+    if resting_qty is None:
+        raw = getattr(successor, "raw", None)
+        resting_qty = _float_or_none((raw or {}).get("qty")) if isinstance(raw, dict) else None
+    if resting_qty is None or abs(resting_qty - successor_qty) > 1e-6:
+        return "successor_quantity_mismatch"
+    predecessor_state, predecessor = _strict_client_order_id_truth(adapter, predecessor_cid)
+    if predecessor_state != "found" or predecessor is None:
+        return "predecessor_unreadable"
+    if _alpaca_protective_order_lifecycle(predecessor) != "replaced":
+        return "predecessor_not_inert"
+    try:
+        broker_qty = float(adapter.get_position_quantity(product_id))
+    except (TypeError, ValueError):
+        return "broker_position_unreadable"
+    # `>=`, not `==`: a pyramid add between certification and the POST is legal
+    # and must not defer the sell forever.  And the tranche is netted (f - k),
+    # because feeding f back after a sibling fill defers the POST forever -- the
+    # same over-subtraction defect the design records for `scale_limit_qty`.
+    covered = successor_qty + open_partial_qty
+    if broker_qty + 1e-6 < covered:
+        return "broker_position_below_coverage"
+    return None
+
+
+def _path_b_post_partial(
+    db: Session,
+    sess: TradingAutomationSession,
+    adapter: Any,
+    *,
+    le: dict[str, Any],
+    product_id: str,
+    symbol: str,
+    account_scope: str,
+    claim_token: str,
+    partial_client_order_id: str,
+    partial_qty: float,
+) -> dict[str, Any]:
+    """POST the f tranche as a day limit, then record what the venue said.
+
+    The order shape follows the chokepoint's own extended-hours rule rather than
+    inventing a second one, so a tranche posted by PATH B and a tranche posted by
+    the legacy scale-out are the SAME order at the venue.
+    """
+    target_px = _float_or_none(le.get("target_px")) or _float_or_none(
+        (le.get("position") or {}).get("target_price")
+        if isinstance(le.get("position"), dict) else None
+    )
+    if target_px is None or target_px <= 0.0:
+        out = advance_deadman_qty_replacement_committed(
+            symbol=symbol, claim_token=claim_token, account_scope=account_scope,
+            expect_phase="partial_posting", phase="partial_rejected",
+            patch={"rejected_reason": "partial_limit_price_unavailable"},
+        )
+        return {"ok": bool(out.get("ok")), "pending": True, "phase": "partial_rejected"}
+    try:
+        from .market_profile import market_session_now
+
+        extended = market_session_now(sess.symbol, now=_utcnow_aware()) != "regular"
+    except Exception:  # noqa: BLE001 -- an unknown session is treated as regular
+        extended = False
+    try:
+        result = adapter.place_limit_order_gtc(
+            product_id=product_id,
+            side="sell",
+            base_size=_fmt_base_size(float(partial_qty)),
+            limit_price=_fmt_limit_price_sell(float(target_px)),
+            client_order_id=partial_client_order_id,
+            extended_hours=extended,
+            time_in_force="day",
+            position_intent="sell_to_close",
+        ) or {}
+    except Exception as exc:  # noqa: BLE001 -- INDETERMINATE, never "did not happen"
+        result = {"ok": False, "indeterminate": True, "error": type(exc).__name__}
+    if result.get("ok") and str(result.get("order_id") or "").strip():
+        out = advance_deadman_qty_replacement_committed(
+            symbol=symbol, claim_token=claim_token, account_scope=account_scope,
+            expect_phase="partial_posting", phase="partial_posted",
+            patch={
+                "partial_broker_order_id": str(result["order_id"]).strip(),
+                "partial_state": "posted",
+                "partial_limit_price": float(target_px),
+                "partial_extended_hours": bool(extended),
+            },
+        )
+        le["scale_limit_order_id"] = str(result["order_id"]).strip()
+        le["scale_limit_client_order_id"] = partial_client_order_id
+        le["scale_limit_px"] = float(target_px)
+        le["scale_limit_qty"] = float(partial_qty)
+        le["scale_limit_adopted_qty"] = 0.0
+        le["scale_limit_is_oco"] = False
+        le["scale_limit_is_path_b"] = True
+        _commit_le(sess, le)
+        _emit(db, sess, "path_b_partial_limit_placed", {
+            "order_id": le["scale_limit_order_id"],
+            "qty": float(partial_qty),
+            "limit_price": float(target_px),
+            "extended_hours": bool(extended),
+        })
+        return {"ok": bool(out.get("ok")), "pending": True, "phase": "partial_posted",
+                "path_b_partial_posted": True}
+    target = (
+        "partial_rejected"
+        if _path_b_replace_definitely_rejected(result)
+        else "partial_indeterminate"
+    )
+    out = advance_deadman_qty_replacement_committed(
+        symbol=symbol, claim_token=claim_token, account_scope=account_scope,
+        expect_phase="partial_posting", phase=target,
+        patch={
+            "partial_state": target,
+            "rejected_reason": (str(result.get("error"))[:160] if result.get("error") else None),
+        },
+    )
+    _emit(db, sess, "path_b_partial_limit_place_failed", {
+        "error": str(result.get("error"))[:120],
+        "http_status": result.get("http_status"),
+        "phase": target,
+    })
+    return {"ok": bool(out.get("ok")), "pending": True, "phase": target}
+
+
 def _ensure_alpaca_deadman_stop(
     db: Session,
     sess: TradingAutomationSession,
@@ -10937,9 +11696,19 @@ def _ensure_alpaca_deadman_stop(
         return {"ok": False, "unprotected": True, "full_close_queued": True, "error": error}
 
     if le.get("scale_limit_order_id"):
-        if le.get("scale_limit_is_oco") and bool(getattr(
+        if (
+            le.get("scale_limit_is_oco") or le.get("scale_limit_is_path_b")
+        ) and bool(getattr(
             settings, "chili_momentum_alpaca_protected_partial_enabled", True
         )):
+            # PATH B (2026-09-06) splits by the SAME arithmetic and enters here
+            # too. The difference is honest and is the price of the design: the
+            # OCO tranche carries its own stop, while a PATH B tranche is a bare
+            # sell limit ABOVE the market, so f is genuinely uncovered on the
+            # downside until it fills. What must NOT happen is the old `else`
+            # branch -- full-closing the position because the resting limit is
+            # not an OCO -- which would flatten the runner moments after PATH B
+            # posted the tranche it exists to post.
             # TRANCHE SPLIT (2026-08-27): ang OCO(f) ay may SARILING stop, kaya
             # ang deadman ay sumasakop LAMANG sa runner R = Q - f. R + f = Q --
             # walang overlap, at ang guard na ito ay nasa ulo ng function kaya
@@ -13385,6 +14154,11 @@ def _submit_live_market_exit_impl(
     # Sell-into-strength invariant: a resting scale-out limit may be working this
     # position. Cancel it FIRST and adopt any fill it caught, then clamp the sell
     # quantity to the true remainder — the one chokepoint every exit path crosses.
+    _path_b_exit = _path_b_exit_precheck(db, sess, le=le, reason=reason)
+    if _path_b_exit is not None:
+        le["exit_submit_attempts"] = attempts
+        _commit_le(sess, le)
+        return _path_b_exit
     quantity = _cancel_scale_limit_and_clamp(
         db, sess, adapter, le=le, requested_qty=quantity, reason=reason
     )
@@ -41651,6 +42425,35 @@ def tick_live_session(
                 "exit_failed": bool(poll.get("failed")),
             }
         if normalize_execution_family(sess.execution_family) == "alpaca_spot":
+            # PATH B runs ABOVE the handoff-priority block, never below it.
+            # Every exit inside that block returns from the tick first, so a
+            # marker serviced below it could not advance at all while a close
+            # handoff existed: the phase would never reach `replace_stuck`, the
+            # containment would never be queued, and the deadlock would be
+            # permanent.  With no marker this returns None and everything below
+            # is byte-identical.
+            _path_b_step = _service_path_b_marker(
+                db,
+                sess,
+                adapter,
+                le=le,
+                product_id=product_id,
+                avg_entry_price=avg,
+                software_stop_price=stop_px,
+            )
+            if _path_b_step is not None and _path_b_step.get("path_b_replace_pending"):
+                # Predecessor and successor BOTH rest at the broker and the
+                # predecessor is still live, so the position is fully covered.
+                # Say so; letting maintenance run here would read the PATCH as a
+                # missing stop and disable the software stop underneath it.
+                db.flush()
+                return {
+                    "ok": True,
+                    "session_id": sess.id,
+                    "state": sess.state,
+                    "protected": True,
+                    "path_b_replace_pending": True,
+                }
             # A durable deadman->close handoff outranks normal protection
             # maintenance.  After a crash the old stop may already be terminal
             # and the session JSON may lag the independently committed owner
@@ -47870,12 +48673,84 @@ def tick_live_session(
                 base_increment=inc,
                 base_min_size=mn,
             )
-            scaling = bool(
-                can_split
-                and not pos.get("partial_taken")
-                and normalize_execution_family(sess.execution_family)
-                not in ALPACA_EXECUTION_FAMILIES
-            )
+            # BROKER-AGNOSTIC PARTIAL (2026-09-06). This used to read
+            # `... and normalize_execution_family(...) not in ALPACA_EXECUTION_FAMILIES`,
+            # which deleted Ross's asymmetric exit on the live lane: on Alpaca the SAME
+            # first-target touch flattened the WHOLE position instead of selling the
+            # tranche, banking it, moving the balance to breakeven and holding the
+            # runner. That is a STRATEGY decision taken for a venue reason, and
+            # paper_execution.scale_out_quantity calls the split a parity contract
+            # shared with the paper runner. What genuinely differs is FEASIBILITY: a
+            # resting full-quantity deadman stop consumes Alpaca's `qty_available`, so
+            # the tranche cannot be sold until it is reserved (the OCO path) or the
+            # stop has been shrunk to Q - f (PATH B). Ask that question instead, and
+            # when the answer is no, say so with the numbers rather than silently
+            # taking a different trade.
+            _partial_wanted = bool(can_split and not pos.get("partial_taken"))
+            _tranche_ok, _tranche_dbg = True, {}
+            if _partial_wanted and normalize_execution_family(
+                sess.execution_family
+            ) in ALPACA_EXECUTION_FAMILIES:
+                _tranche_ok, _tranche_dbg = alpaca_partial_tranche_sellable(
+                    le, partial_qty=scale_qty, position_qty=qty
+                )
+                if not _tranche_ok:
+                    # A full-quantity deadman stop is the ONE unsellable reason
+                    # PATH B was built to remove: shrink the resting stop to
+                    # Q - f and the same tranche becomes sellable, with the
+                    # runner covered the whole way.  Freeze that intent durably
+                    # now and drive it from the service step; taking the whole
+                    # position at target instead is the trade we are trying to
+                    # stop making.
+                    _pb_opened = None
+                    if str(_tranche_dbg.get("reason") or "") == "deadman_holds_tranche":
+                        _pb_opened = _open_path_b_partial_marker(
+                            db,
+                            sess,
+                            adapter,
+                            le=le,
+                            partial_qty=float(scale_qty),
+                            position_qty=float(qty),
+                            reason="first_target_partial",
+                        )
+                    _emit(db, sess, "alpaca_partial_tranche_unsellable", {
+                        "reason": str(_tranche_dbg.get("reason") or "unknown"),
+                        "runner_qty": runner_qty,
+                        "fallback": (
+                            "path_b_qty_replacement"
+                            if (_pb_opened or {}).get("ok")
+                            else "whole_position_at_target"
+                        ),
+                        "path_b_open_reason": (
+                            str((_pb_opened or {}).get("reason"))[:120]
+                            if _pb_opened is not None and not _pb_opened.get("ok")
+                            else None
+                        ),
+                        **{k: v for k, v in _tranche_dbg.items() if k != "reason"},
+                    })
+                    if (_pb_opened or {}).get("ok"):
+                        _pb_step = _service_path_b_marker(
+                            db,
+                            sess,
+                            adapter,
+                            le=le,
+                            product_id=product_id,
+                            avg_entry_price=(
+                                _float_or_none(pos.get("avg_entry_price")) or 0.0
+                            ),
+                            software_stop_price=(
+                                _float_or_none(pos.get("stop_price")) or 0.0
+                            ),
+                        )
+                        db.flush()
+                        return {
+                            "ok": True,
+                            "session_id": sess.id,
+                            "state": sess.state,
+                            "path_b_partial_pending": True,
+                            "path_b_phase": (_pb_step or {}).get("phase"),
+                        }
+            scaling = bool(_partial_wanted and _tranche_ok)
             exit_qty = scale_qty if scaling else qty
             exit_reason = "scale_out_target" if scaling else "target"
             cid = f"chili_ml_{'so' if scaling else 'p'}_{sess.id}_{uuid.uuid4().hex[:12]}"
