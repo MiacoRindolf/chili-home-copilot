@@ -9594,6 +9594,34 @@ def _clear_scale_limit_place_intent_if_determinate(
         _commit_le(sess, le)
 
 
+def _tranche_open_quantity(le: Any) -> float:
+    """What a resting scale tranche STILL covers: PLACED minus already FILLED.
+
+    THE DEFECT THIS NAMES (2026-09-09). ``scale_limit_qty`` is the size the tranche was
+    PLACED at and is never reduced; fills accumulate separately in
+    ``scale_limit_adopted_qty`` (:20069, :20104). Two consumers read the placed size as
+    though it were the live coverage, and BOTH are position arithmetic:
+
+      * the deadman head guard, which arms the stop for ``position - tranche``. The
+        position passed in is the CURRENT broker quantity, so it has already shrunk by
+        whatever the tranche filled — subtracting the placed size double-counts those
+        shares. With a tranche of f that has filled k, the stop was armed for Q-k-f
+        while the position was Q-k and the tranche still covered only f-k. Exactly k
+        shares carried no protection, with no error and no event.
+      * ``_alpaca_deadman_reserved_tranche_quantity``, whose own docstring promises it
+        "MIRRORS that function's head guard exactly" — so the two must be computed the
+        same way or a certified reserve stops describing the coverage that exists.
+
+    Returned value is clamped at zero: a fully-filled tranche whose order id has not been
+    released yet covers NOTHING, and a negative reserve would be the same defect inverted.
+    """
+    if not isinstance(le, dict):
+        return 0.0
+    placed = float(_float_or_none(le.get("scale_limit_qty")) or 0.0)
+    filled = float(_float_or_none(le.get("scale_limit_adopted_qty")) or 0.0)
+    return max(0.0, placed - filled)
+
+
 def _alpaca_deadman_reserved_tranche_quantity(le: dict[str, Any]) -> float:
     """Shares ``_ensure_alpaca_deadman_stop`` will subtract before it arms.
 
@@ -9618,7 +9646,7 @@ def _alpaca_deadman_reserved_tranche_quantity(le: dict[str, Any]) -> float:
         )
     ):
         return 0.0
-    return float(_float_or_none(le.get("scale_limit_qty")) or 0.0)
+    return _tranche_open_quantity(le)
 
 
 def _alpaca_replacement_quantity_frame(
@@ -10947,13 +10975,35 @@ def _ensure_alpaca_deadman_stop(
             # ang BAWAT landas (unang lagay + re-arm pagkatapos ng terminal) ay
             # dumadaan dito. Kapag hindi wasto ang aritmetika => full close
             # (fail-closed, gaya ng dati).
-            _tr_qty = _float_or_none(le.get("scale_limit_qty")) or 0.0
-            if 0.0 < _tr_qty < float(quantity):
+            # THE OPEN PORTION, NOT THE PLACED ONE (2026-09-09). `scale_limit_qty`
+            # is the size the tranche was PLACED at and is never reduced; the fills
+            # accumulate separately in `scale_limit_adopted_qty` (:20069, :20104).
+            # `quantity` here is the CURRENT broker position (:10894 passes
+            # broker_qty), so it has ALREADY shrunk by whatever the tranche filled.
+            # Subtracting the placed size therefore double-counts those shares:
+            # with a tranche of f that has filled k, the deadman was armed for
+            # Q-k-f when the position is Q-k and the resting tranche only still
+            # covers f-k — leaving exactly k shares with no protection, silently.
+            # The open portion (f-k) is what the tranche actually still covers, and
+            # position minus that is exactly Q-f, which is what the deadman owes.
+            _tr_placed = _float_or_none(le.get("scale_limit_qty")) or 0.0
+            _tr_filled = _float_or_none(le.get("scale_limit_adopted_qty")) or 0.0
+            _tr_qty = _tranche_open_quantity(le)
+            if _tr_qty <= 0.0:
+                # Fully filled (or over-filled) while its order id has not been
+                # released yet: it covers NOTHING, so the deadman owes the whole
+                # remaining position. Subtracting here would be the same defect
+                # inverted. Ordinarily the id is popped on terminal (:20064,
+                # :20107) and this branch is never reached.
+                pass
+            elif _tr_qty < float(quantity):
                 quantity = float(quantity) - _tr_qty
             else:
                 return _queue_full_close(
                     "tranche_oco_split_arithmetic_invalid",
                     tranche_qty=_tr_qty,
+                    tranche_placed_qty=_tr_placed,
+                    tranche_filled_qty=_tr_filled,
                     position_qty=float(quantity),
                 )
         else:
