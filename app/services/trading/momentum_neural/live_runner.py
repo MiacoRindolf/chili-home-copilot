@@ -46512,18 +46512,62 @@ def tick_live_session(
                         if _mpr_count >= _max_reentries:
                             pass  # cap reached — no re-load (silently, not every tick noise)
                         else:
-                            # COOLDOWN (pinned to >= 2*bar_seconds in the fill handler).
+                            # THE CLOCK IS NOW A MEASUREMENT, NOT A BLOCK (2026-09-09).
+                            #
+                            # WHAT IT COST. The micro-pullback re-load — the operator's own
+                            # buy-the-dip doctrine — has filled ZERO times in the system's
+                            # entire history. Against that: 571 blocks across 36 sessions
+                            # from 2026-06-29 to 09-08, and 547 of them (95.8%, 33 sessions)
+                            # carried reason "cooldown". A mechanism that has never once
+                            # fired is not a conservative mechanism; it is an absent one,
+                            # and a wall clock was holding it shut.
+                            #
+                            # WHAT THE CLOCK WAS. max(30 s, 2 x bar_seconds), re-armed every
+                            # time a re-load order was cleared (:46457), and pushed to 3 x
+                            # base by the SLOW_CHOPPER damper (:45440). Three invented
+                            # multipliers, no distribution behind any of them, measuring
+                            # elapsed SECONDS on a decision the tape can answer directly.
+                            #
+                            # WHY MEASURE RATHER THAN DELETE. With zero fills there is no
+                            # outcome distribution to derive a replacement operating point
+                            # from — the clock prevented the very data that would justify
+                            # replacing it. So the gate opens and the same condition is
+                            # RECORDED instead: `would_have_blocked` says what the clock
+                            # would have refused, and the elapsed seconds say by how much.
+                            # If the re-loads that only got through because of this turn out
+                            # to lose, the receipts name them exactly and the block goes
+                            # back with a derived bound instead of an invented one.
+                            #
+                            # WHAT STILL GUARDS THIS PATH — the clock was never the only
+                            # thing, and none of these are clocks:
+                            #   * the re-load CAP (`micropullback_reentry_max`, 3),
+                            #   * GUARD #2 cushion: banked >= min_cushion_r * R0 AND stop at
+                            #     or above the starter entry, so a falling knife structurally
+                            #     cannot re-load,
+                            #   * the shelf RATCHET: each re-load must hold above the PREVIOUS
+                            #     dip low, not the stale original breakout,
+                            #   * the flow and midday-lull refusals (14 + 10 of the 571).
                             _cool_ok = True
                             _cool_raw = le.get("micropullback_reentry_cooldown_until_utc")
+                            _cool_left = None
                             if _cool_raw:
                                 try:
-                                    _cool_ok = _utcnow() >= datetime.fromisoformat(str(_cool_raw))
+                                    _cool_dt = datetime.fromisoformat(str(_cool_raw))
+                                    _cool_left = (_cool_dt - _utcnow()).total_seconds()
+                                    _cool_ok = _cool_left <= 0.0
                                 except (TypeError, ValueError):
                                     _cool_ok = True
+                                    _cool_left = None
                             if not _cool_ok:
-                                _emit(db, sess, "live_micro_pullback_reentry_blocked", {
-                                    "reason": "cooldown", "until": _cool_raw})
-                            else:
+                                _emit(db, sess, "live_micro_pullback_reentry_clock_observed", {
+                                    "would_have_blocked": True,
+                                    "until": _cool_raw,
+                                    "seconds_remaining": (
+                                        round(float(_cool_left), 2)
+                                        if _cool_left is not None else None
+                                    ),
+                                })
+                            if True:
                                 # GUARD #2 cushion (knife defense) — only re-load when the
                                 # runner has ALREADY banked >= min_cushion_r * R0 AND the
                                 # stop is at/above the starter entry (breakeven+). A falling
