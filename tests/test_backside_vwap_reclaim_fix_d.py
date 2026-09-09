@@ -106,20 +106,50 @@ def test_parity_flag_off_below_vwap_reclaim_still_benched(monkeypatch):
 # (2) RECLAIM — flag ON: a below-VWAP reclaim is NOT benched (the SDOT/ILLR save).
 # --------------------------------------------------------------------------- #
 def test_below_vwap_reclaim_not_benched_flag_on(monkeypatch):
+    """THE GUARANTEE (unchanged): a below-VWAP name whose LIVE tick has reclaimed VWAP is not
+    benched. The SDOT/ILLR save still holds.
+
+    WHAT CHANGED, AND WHY THIS TEST WAS REWRITTEN (2026-09-09, FTFT). FIX D existed to rescue a
+    name from a `below_vwap` verdict that the blind read should never have produced: the verdict
+    came from `closes[-1]`, a completed bar close served from a 600 s TTL cache, while the live
+    tick was far above VWAP. That upstream blindness is now fixed — `evaluate_sticky_backside_bench`
+    passes `live_price` into `front_side_state` (entry_gates.py) — so with the tick above VWAP the
+    name simply reads `front_side` and FIX D never needs to run.
+
+    So the OUTCOME assertions are the real contract and they are asserted first and hardest;
+    the reason string names WHICH mechanism delivered it, and the earlier, more truthful one now
+    wins. At the binding config (`chili_momentum_entry_vwap_hold_buffer` default 0.0) FIX D is
+    unreachable BY CONSTRUCTION — its precondition needs `last < vwap` AND `last >= vwap`. It is
+    config-inert, not dead: the second half of this test proves it still fires when a non-zero
+    buffer opens the band it was written for, so raising the buffer restores it."""
     monkeypatch.setattr(settings, "chili_momentum_backside_vwap_reclaim_enabled", True, raising=False)
     monkeypatch.setattr(settings, "chili_momentum_entry_vwap_hold_buffer", 0.0, raising=False)
     df = _df(_below_vwap_falling_day())
     fs = front_side_state(df)
-    assert fs.reason == "below_vwap"
+    assert fs.reason == "below_vwap"          # the BAR-ONLY read still says below_vwap
     vwap = float(fs.session_vwap)
+
     # live tick reclaiming: a price back ABOVE vwap, with the frame's prior close below it.
-    benched, reason, hod_out, dbg = evaluate_sticky_backside_bench(
+    benched, reason, hod_out, _dbg = evaluate_sticky_backside_bench(
         df, benched_at_hod=None, live_price=vwap * 1.01
     )
-    assert benched is False
-    assert reason == "front_side_vwap_reclaim"
+    assert benched is False                   # THE CONTRACT
     assert hod_out is None
-    assert "vwap_reclaim_exception" in dbg
+    assert reason == "front_side", (
+        "with the live tick above VWAP the name must read front-side UPSTREAM; "
+        f"got {reason} — FIX D should no longer be the mechanism here"
+    )
+
+    # ...and FIX D itself is still live where it can be: a tick just BELOW VWAP but inside a
+    # non-zero hold buffer, rising off the prior bar, is the band FIX D was written for.
+    monkeypatch.setattr(settings, "chili_momentum_entry_vwap_hold_buffer", 0.02, raising=False)
+    benched_b, reason_b, hod_b, dbg_b = evaluate_sticky_backside_bench(
+        df, benched_at_hod=None, live_price=vwap * 0.995
+    )
+    assert benched_b is False
+    assert hod_b is None
+    assert reason_b == "front_side_vwap_reclaim"
+    assert "vwap_reclaim_exception" in dbg_b
 
 
 # --------------------------------------------------------------------------- #
