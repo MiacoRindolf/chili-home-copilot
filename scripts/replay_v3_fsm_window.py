@@ -749,6 +749,33 @@ class AsOfProvider:
 # tinatapon, at tatlong beses sa iisang araw ay pinatay nito ang isang diagnosis
 # (frontside_size_tilt, anchor_bid/posted, depth_frac). Tingnan ang _bench_payload.
 
+#: Serialization GUARD RAILS for receipt payloads — deliberately sized so they never
+#: bind on real data.
+#:
+#: THE BUG THEY FIX. Both names were USED at the bottom of ``_bench_payload`` and NEVER
+#: DEFINED, so every single payload read raised ``NameError`` and each of the ten bench
+#: runs on 2026-09-08 produced exactly ONE event: ``_receipt_event_read_failed``. The
+#: bench could COUNT (the histogram survives) but could not show one payload — no veto
+#: reason, no trigger, no timeline, no first-divergence. Discovered only when an
+#: extraction of ``live_pullback_add_vetoed`` reasons returned 0 against a histogram
+#: that said 242. The irony is exact: the docstring below argues that "an instrument
+#: that decides in advance what you are allowed to measure is not an instrument", and
+#: the replacement measured nothing at all.
+#:
+#: WHY THESE VALUES, AND WHY THEY ARE NOT THRESHOLDS. Measured over the 58,205
+#: ``trading_automation_events`` payloads written in the three days to 2026-09-09:
+#:     keys per payload   p50 4    p99 18    p99.99 27    MAX 33
+#:     bytes per payload  p50 168  p99 658   p99.99 2454  MAX 7910
+#: The key bound is set at ~4x the observed maximum and the per-VALUE character bound
+#: above the largest whole payload ever observed, so neither trims anything in the
+#: measured population. That is the point: this is a bound against pathology (a stack
+#: trace, an unbounded list) and not a decision about what may be measured. A trim is
+#: always announced in-band under ``_trimmed``, so a reader is never silently lied to.
+#: If either ever binds, that is a finding to investigate — not a value to raise.
+_BENCH_PAYLOAD_KEYS_MAX = 128
+_BENCH_VALUE_CHARS_MAX = 8192
+
+
 def _bench_payload(event_type: str, payload: dict) -> dict:
     """The WHOLE payload, bounded — not a whitelist.
 
