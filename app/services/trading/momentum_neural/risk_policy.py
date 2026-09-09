@@ -4617,6 +4617,38 @@ def reentry_escalation_decision(
     return True, dbg
 
 
+#: Protective exits whose NAME happens to carry no ``stop`` token.
+#:
+#: THE DEFECT THIS CLOSES (measured 2026-09-08, WYHG). The classifier below is
+#: literally ``"stop" in reason.split("_")``. ``momentum_break_stop`` carries the
+#: token — deliberately, per the in-code note at live_runner.py:43609, which says it
+#: was named that way "para awtomatikong saklaw ng lahat ng stop-class fail-open na
+#: exit guards". The burst-window exit was added in the SAME block and did not get
+#: that treatment: ``burst_window_exit`` splits to {burst, window, exit}. So a burst
+#: exit was never counted as a stop, and everything keyed on stop-class silently
+#: stood down:
+#:   * the G4 re-entry escalation ladder stayed at level 0, so its tape re-proof
+#:     (``tape_back_buy_share > 0.5``) NEVER RAN, and
+#:   * the stopout cap skipped it (``stopout_cap_skipped_non_stop_class``, seen 5x
+#:     in the 2026-09-08 bench).
+#:
+#: WHAT IT COST, ON THE TAPE. WYHG 2026-09-08: eight entries in thirty minutes for
+#: -$212.83, seven of them re-entries following an exit. Measured print-indexed (not
+#: in seconds — the tape was alive, 394-657 prints per gap), the aggressor-buy share
+#: in each gap before a re-entry was 13%, 26%, 21%, 36%, 20%. Sellers were in control
+#: at EVERY re-entry. The existing >0.5 bar would have blocked all seven. No new
+#: threshold is introduced here; an existing one is simply allowed to run.
+#:
+#: WHY A SET AND NOT A RENAME. Renaming the reason to ``burst_window_stop_exit``
+#: would fix every token consumer at once and was the tempting option, but the string
+#: is already written into the outcome book on live rows, and a label discontinuity
+#: there is exactly what broke arming on 2026-09-04. The book keeps its vocabulary;
+#: the classifier learns the exception.
+_STOP_CLASS_EXIT_REASONS_WITHOUT_TOKEN = frozenset({
+    "burst_window_exit",
+})
+
+
 def _is_stop_class_exit_reason(reason: str | None) -> bool:
     """G4 P2 (review M1) — TRUE iff the exit reason is a genuine STOP-class exit.
 
@@ -4625,12 +4657,19 @@ def _is_stop_class_exit_reason(reason: str | None) -> bool:
     (``stop_broker_zero_reconcile``, ``trail_stop_retry_cap_broker_zero_reconcile``)
     still classify while ``kill_switch_flatten`` / ``bailout`` / ``max_hold`` /
     ``target`` / ``scale_out_limit`` do NOT. Unknown/None ⇒ False (fail toward the
-    pre-G4 behavior: no escalation on an unconfirmed class)."""
+    pre-G4 behavior: no escalation on an unconfirmed class).
+
+    Plus the explicit membership in
+    :data:`_STOP_CLASS_EXIT_REASONS_WITHOUT_TOKEN` for protective exits whose name
+    carries no ``stop`` token — see that constant for the measurement."""
     try:
-        tokens = set(str(reason or "").lower().split("_"))
+        _norm = str(reason or "").strip().lower()
+        tokens = set(_norm.split("_"))
     except Exception:
         return False
-    return "stop" in tokens
+    if "stop" in tokens:
+        return True
+    return _norm in _STOP_CLASS_EXIT_REASONS_WITHOUT_TOKEN
 
 
 def stop_class_exit_reason(reason: str | None) -> bool:
