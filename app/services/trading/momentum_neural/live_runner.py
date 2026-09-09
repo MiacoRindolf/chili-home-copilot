@@ -36197,19 +36197,58 @@ def tick_live_session(
                     if bool(getattr(settings, "chili_momentum_mfe_target_live_enabled", True)):
                         from .exit_calibration import mfe_percentile_target_r
                         from .paper_execution import adaptive_first_target_reward_risk
-                        # SHRINKAGE PRIOR = the CURRENT magic-lifted R:R (realized-HOD lift). With 0
-                        # samples the data-derived target == this prior == today's behavior (no day-1
-                        # change); it blends toward the family's MFE percentile as samples accumulate.
-                        _stop_inline = float(avg) * (1.0 - max(0.003, float(atrp) * _stop_atr_mult))
-                        _prior_rr, _ = adaptive_first_target_reward_risk(
-                            base_reward_risk=_base_rr, entry=float(avg), stop=_stop_inline,
-                            realized_high=_float_or_none(le.get("entry_realized_high")), side_long=_le_side_long(le),
-                        )
+                        # SHRINKAGE PRIOR = the PLAN's base R:R, which is what this setting's own
+                        # description already promises: "With 0 samples it IS the base R:R
+                        # (byte-identical to today's plan floor)" and "replacing the fixed rr_cap=6 /
+                        # room_capture=0.5 magic realized-HOD lift" (config.py:5365). The code did the
+                        # opposite: it shrank toward `adaptive_first_target_reward_risk(...,
+                        # realized_high=...)` — the very lift it claims to replace — so the "replacement"
+                        # only arrived at min_samples=30, and until then the magic lift WAS the target.
+                        #
+                        # WHY THE LIFT IS BACKWARDS (paper_execution.py:448):
+                        #     first-target R:R = clamp(max(base, room_capture * room_R), base, rr_cap=6)
+                        #     room_R = (realized_high - entry) / (entry - stop)
+                        # `room_R` is how far the name had ALREADY run BEFORE we entered, so the more a
+                        # name has moved, the FURTHER AWAY its first target is placed — the profit-taking
+                        # level retreats exactly when the move is most spent.
+                        #
+                        # MEASURED (118 legs / 61 symbol-days, 2026-07-06 .. 09-09, momentum_mfe_realized):
+                        #   * 13 legs carried target_r > 4R. Together they realized -7.21 R.
+                        #   * NO leg whose target_r exceeded 2.5 has EVER realized more than 2.5.
+                        #   * 9 legs reached >= 2.5 R; 7 of them (78%) failed to capture it, and 2
+                        #     finished NEGATIVE after being up more than 2.5 R.
+                        #   * The cap costs nothing at the top: the two largest winners ever —
+                        #     VRAX 07-09 (peak 36.2 R, realized 25.6) and JZXN 07-10 (peak 29.1 R,
+                        #     realized 16.4) — both ran with LOW targets (1.37 and 1.68). The first
+                        #     target does not cap the trade; the RUNNER carries the tail, exactly as
+                        #     adaptive_first_target_reward_risk's own docstring intends.
+                        #   * 2026-09-09 live: 8 of 21 legs were handed the 6.0 cap off n_samples of
+                        #     0/1/2/9/10 (one at pctl_r 0.01), none came close, and every one of them
+                        #     left via the trail. The only `target` exits of the day were the three
+                        #     FTFT legs, whose targets sat at the base.
+                        #
+                        # Shrinking toward the base keeps the López de Prado fractional-shrinkage design
+                        # intact — it only fixes WHAT it shrinks toward. The magic lift survives on the
+                        # fallback path below (when _dd_rr is None), which is the documented kill-switch.
+                        #
+                        # The old prior is still COMPUTED — never applied — purely so the receipt records
+                        # what the previous behaviour would have placed. Changing a live target without
+                        # recording the counterfactual throws away the only evidence that could reverse it.
+                        _legacy_lift_rr = None
+                        try:
+                            _stop_inline = float(avg) * (1.0 - max(0.003, float(atrp) * _stop_atr_mult))
+                            _legacy_lift_rr, _ = adaptive_first_target_reward_risk(
+                                base_reward_risk=_base_rr, entry=float(avg), stop=_stop_inline,
+                                realized_high=_float_or_none(le.get("entry_realized_high")),
+                                side_long=_le_side_long(le),
+                            )
+                        except Exception:
+                            _legacy_lift_rr = None
                         _dd_meta = mfe_percentile_target_r(
                             _recent_mfe_samples(db, _fam, limit=200),
                             percentile=float(getattr(
                                 settings, "chili_momentum_mfe_shadow_target_percentile", 0.6) or 0.6),
-                            base_rr=float(_prior_rr),
+                            base_rr=float(_base_rr),
                             min_samples=int(getattr(
                                 settings, "chili_momentum_mfe_shadow_min_samples", 30) or 30),
                         )
@@ -36252,6 +36291,13 @@ def tick_live_session(
                             "n_samples": _dd_meta.get("n"),
                             "pctl_r": _dd_meta.get("pctl_r"),
                             "source": _dd_meta.get("source"),
+                            # AUDIT of the 2026-09-09 prior change: what the legacy realized-HOD
+                            # lift WOULD have placed, and by how much this leg's target moved.
+                            "legacy_lift_r": (round(float(_legacy_lift_rr), 3)
+                                              if _legacy_lift_rr is not None else None),
+                            "legacy_lift_delta_r": (
+                                round(float(_legacy_lift_rr) - float(_dd_rr), 3)
+                                if (_legacy_lift_rr is not None and _dd_rr is not None) else None),
                         })
                 except Exception as exc:
                     if ef in ALPACA_EXECUTION_FAMILIES:
