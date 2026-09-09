@@ -19642,6 +19642,12 @@ def _place_scale_out_limit(
             le["scale_limit_px"] = float(target_px)
             le["scale_limit_qty"] = float(scale_qty)
             le["scale_limit_adopted_qty"] = 0.0
+            # The flag must describe the order RECORDED ABOVE, not one from a
+            # previous leg. It is only ever written True elsewhere and nothing has
+            # ever written it False, so a stale True survives recycle and makes the
+            # deadman head guard subtract this tranche as if it carried its own
+            # stop. A plain limit rests ABOVE the market and carries none.
+            le["scale_limit_is_oco"] = False
             le["scale_limit_client_order_id"] = cid
             _commit_le(sess, le)
             _emit(db, sess, "scale_out_limit_placed", {
@@ -25696,6 +25702,20 @@ _RECYCLE_ENTRY_STATE_KEYS: tuple[str, ...] = (
     "entry_orders_resolved",
     "entry_submitted",
     "position",
+    # ── scale-limit IDENTITY (2026-09-09): the family was half-cleared ──
+    # order_id / px / qty / adopted_qty / source were cleared while is_oco,
+    # client_order_id, oco_stop, oco_legs and place_intent survived. `is_oco` is
+    # written True in two places and False nowhere, so after any OCO leg it stayed
+    # True for the rest of the session: the next plain limit (scale_out_limit_placed
+    # or the sell_into_strength ladder, 827 emissions in the 09-08 bench) then took
+    # the deadman head guard's TRANCHE SPLIT branch and armed the stop for Q - f,
+    # leaving f shares with no protective stop at all. Both writers now set the flag
+    # explicitly; clearing the whole family on recycle closes the other half.
+    "scale_limit_is_oco",
+    "scale_limit_client_order_id",
+    "scale_limit_oco_stop",
+    "scale_limit_oco_legs",
+    "scale_limit_place_intent",
     # ── BURST-WINDOW EXIT stamp (#1275, 2026-09-01) belongs to the trade that just closed ──
     # burst_window_decision (:23724) is sticky by design -- "the caller owns clearing on exit or
     # new position" -- and no caller did. MEASURED 2026-09-05 on the Ross Parity Bench (RH,
@@ -45471,6 +45491,9 @@ def tick_live_session(
                                 le["scale_limit_px"] = float(_ll_px)
                                 le["scale_limit_qty"] = float(_ll_qty)
                                 le["scale_limit_adopted_qty"] = 0.0
+                                # see the note at the scale_out_limit_placed writer:
+                                # a stale True here leaves this tranche unprotected.
+                                le["scale_limit_is_oco"] = False
                                 le["scale_limit_source"] = "sell_into_strength"
                                 # cooldown so a second rung can't stack for ~15s
                                 le["ladder_cooldown_until_utc"] = (
