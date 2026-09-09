@@ -591,7 +591,20 @@ class MockBrokerAdapter:
         # `replaced`, so both directions must be readable.
         self._replaced_by: dict[str, str] = {}
         self._replaces: dict[str, str] = {}
-        self._replace_ack_ticks: int = 0
+        # 1, NOT 0 — and this is the whole point of the knob.
+        #
+        # At 0 the successor is live the instant `replace_order_qty` returns, so a
+        # caller that PATCHes the stop and sells in the SAME pulse is ADMITTED by the
+        # mock. That is the one ordering PATH B exists to get right, and the harness
+        # was blessing the wrong side of it: adversarial review on 2026-09-09 found
+        # that the reservation model added the day before caught the pre-PATCH refusal
+        # and missed this entirely.
+        #
+        # 1 is not a tuned value and carries no distribution — it is the SMALLEST
+        # non-zero delay, i.e. the literal statement "the replacement is not effective
+        # in the same pulse". The real latency is unmeasured (see the reservation note
+        # below); when a paper probe supplies it, THAT becomes the derived value.
+        self._replace_ack_ticks: int = 1
         # A resting SELL reserves its qty at the venue; modelling it is what
         # forces a wiring to wait for the shrink to go terminal, as live does.
         self._enforce_qty_available: bool = True
@@ -2458,8 +2471,25 @@ class MockBrokerAdapter:
                     continue
                 if str(_o.side or "").lower() not in {"sell", "ask", "short"}:
                     continue
-                if str(_o.status or "").lower() != "open":
-                    continue
+                _st = str(_o.status or "").lower()
+                if _st != "open":
+                    # A REPLACED predecessor still reserves until its successor is
+                    # acked. Alpaca is documented (and this project's design doc
+                    # asserts, at PARTIAL_EXIT_PATH_B.md:70) to hold the LARGER of the
+                    # two while a replace is in flight — and the same doc admits at
+                    # :885 that it was never measured. Until a paper probe settles it
+                    # the mock takes the CONSERVATIVE side on purpose: a wiring built
+                    # against "held until terminal" still works if the venue frees
+                    # early, but a wiring built against "freed immediately" FAILS LIVE
+                    # if the venue holds. A harness must never be the looser of the two.
+                    _succ = (getattr(self, "_replaced_by", {}) or {}).get(str(_oid))
+                    _so = self._orders.get(_succ) if _succ else None
+                    if not (
+                        _st == "replaced"
+                        and _so is not None
+                        and int(getattr(_so, "ack_delay_remaining", 0) or 0) > 0
+                    ):
+                        continue
                 if str(_oid) in _oco_leg_ids:
                     continue
                 _reserved += max(0.0, float(_o.base_size) - float(_o.filled_size))

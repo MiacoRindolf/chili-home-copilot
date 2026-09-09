@@ -166,8 +166,22 @@ def test_a_resting_stop_reserves_its_shares_against_a_second_sell():
     assert r["available_qty"] == pytest.approx(0.0)
 
 
-def test_shrinking_the_stop_is_what_frees_the_shares():
-    """The whole of PATH B in one test: refuse, PATCH, then the same sell lands."""
+def test_the_patch_alone_does_not_free_the_shares_in_the_same_pulse():
+    """CORRECTED 2026-09-09 — this test previously asserted the OPPOSITE, and it was
+    the single most consequential thing wrong with this harness.
+
+    As first written it said: refuse, PATCH, and the same sell lands immediately. It
+    passed because `replace_order_qty` marks the predecessor `replaced` synchronously
+    while the reservation loop counted only `open` orders — so the instant the PATCH
+    returned, available = f. That is the ONE ordering PATH B exists to get right, and
+    the harness was blessing the wrong side of it: a wiring that PATCHed and sold in
+    the same pulse would have FILLED in the bench and been REJECTED live. Three
+    independent adversarial reviewers found it on the same day, each verifying it
+    against this file.
+
+    The reservation is now the conservative side of an UNMEASURED venue fact (see the
+    note in the reservation loop): the predecessor keeps holding until its successor
+    is acked."""
     a = _adapter()
     a.get_position_quantity_truth = lambda pid: {  # type: ignore[assignment]
         "readable": True, "product_id": pid, "quantity": 1000.0, "reason": None}
@@ -176,10 +190,44 @@ def test_shrinking_the_stop_is_what_frees_the_shares():
                                 base_size="300")["ok"] is False
     rep = a.replace_order_qty(order_id="mock-1", new_qty="700")
     assert rep["ok"] is True
-    # The predecessor is `replaced` and no longer reserves; the successor holds 700.
+    same_pulse = a.place_market_order(product_id="CANF", side="sell", base_size="300",
+                                      client_order_id="partial-1")
+    assert same_pulse["ok"] is False
+    assert same_pulse["error"] == "insufficient_qty_available", (
+        "the PATCH must not free the shares in the pulse that issued it — this is the "
+        "wait PATH B's whole ordering contract rests on"
+    )
+
+
+def test_the_shares_free_once_the_successor_is_acked():
+    """The other half: the wait is a WAIT, not a refusal. Once the replacement is
+    acknowledged the successor reserves R and the partial f lands."""
+    a = _adapter()
+    a.get_position_quantity_truth = lambda pid: {  # type: ignore[assignment]
+        "readable": True, "product_id": pid, "quantity": 1000.0, "reason": None}
+    _rest(a, qty=1000.0)
+    rep = a.replace_order_qty(order_id="mock-1", new_qty="700")
+    succ = a._orders[rep["order_id"]]
+    assert succ.ack_delay_remaining > 0, "there must BE a transition window to wait out"
+    succ.ack_delay_remaining = 0                      # the ack the caller waits for
     r = a.place_market_order(product_id="CANF", side="sell", base_size="300",
                              client_order_id="partial-1")
     assert r.get("error") != "insufficient_qty_available"
+
+
+def test_the_freed_amount_is_exactly_the_shrink_not_the_whole_position():
+    """After the ack the successor still reserves R, so only f is sellable. A mock
+    that freed the whole position here would bless an oversized partial."""
+    a = _adapter()
+    a.get_position_quantity_truth = lambda pid: {  # type: ignore[assignment]
+        "readable": True, "product_id": pid, "quantity": 1000.0, "reason": None}
+    _rest(a, qty=1000.0)
+    rep = a.replace_order_qty(order_id="mock-1", new_qty="700")
+    a._orders[rep["order_id"]].ack_delay_remaining = 0
+    too_big = a.place_market_order(product_id="CANF", side="sell", base_size="400")
+    assert too_big["ok"] is False
+    assert too_big["error"] == "insufficient_qty_available"
+    assert too_big["available_qty"] == pytest.approx(300.0)
 
 
 def test_a_sell_within_the_free_remainder_is_allowed():
