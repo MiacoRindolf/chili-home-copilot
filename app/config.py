@@ -11128,6 +11128,47 @@ class Settings(BaseSettings):
         default=True,
         validation_alias=AliasChoices("CHILI_MOMENTUM_ASSET_TYPE_ARM_SKIP_ENABLED"),
     )
+    # DELAYED-TAPE ARM SKIP (2026-09-10). NASUKAT: 37 NYSE / NYSE American / NYSE Arca na
+    # simbolo ang dumarating sa 15-MINUTONG delayed na IQFeed entitlement (bawat hilera
+    # available_at - observed_at >= 899.9 s; 31.7% ng pinakabagong 150k hilera; TPET 100%).
+    # Pinasok ang TPET nang dalawang beses sa tape na iyon dahil ang _tape_cold ay bumabasa ng
+    # 15-s window na nagtatapos sa NGAYON -- walang laman sa 900-s na lumang tape -- at ang
+    # walang laman ay fail-open bilang HOT. Ang guard na ito ay hindi tumatanggi sa panalo;
+    # tumatanggi ito sa datos na hindi natin nakikita. Kapag nabili ang entitlement ay dapat
+    # ZERO ang putok nito -- at iyon ang tamang sagot, hindi sirang guard.
+    chili_momentum_delayed_tape_arm_skip_enabled: bool = Field(
+        default=True,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_DELAYED_TAPE_ARM_SKIP_ENABLED"),
+        description=(
+            "Huwag i-arm nang LIVE ang simbolong ang pinakabagong print ay dumating nang "
+            "DELAYED mula sa provider (median ng arrival delay ng pinakabagong N hilera >= "
+            "threshold). FAIL-OPEN: walang hilera / crypto / error => umaarma gaya ng dati."
+        ),
+    )
+    chili_momentum_delayed_tape_arm_skip_median_delay_s: float = Field(
+        default=600.0, ge=120.0, le=899.0,
+        validation_alias=AliasChoices(
+            "CHILI_MOMENTUM_DELAYED_TAPE_ARM_SKIP_MEDIAN_DELAY_S"),
+        description=(
+            "Threshold sa MEDIAN na available_at - observed_at ng pinakabagong N hilera ng "
+            "simbolo. HINANGO 2026-09-10: real-time cluster p50 0.29 s / p99.9 1.28 s; "
+            "pinakamasamang nasukat na bridge-stall na hilera 334.9 s (CYCU); delayed "
+            "entitlement floor 899.9 s (= 15 min, katangian ng produkto), p50 900.6 s. Sa "
+            "pagitan ng 334.9 at 899.9 ay WALANG hilera. 600 = nasa gitna ng bandang iyon: "
+            "1.8x sa itaas ng pinakamasamang stall, 1.5x sa ibaba ng delayed floor. Hindi "
+            "300 s sa isang hilera -- umaabot doon ang Nasdaq bridge stall."
+        ),
+    )
+    chili_momentum_delayed_tape_arm_skip_tail_rows: int = Field(
+        default=20, ge=5, le=200,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_DELAYED_TAPE_ARM_SKIP_TAIL_ROWS"),
+        description=(
+            "Ilang pinakabagong hilera ang pinagmemedyan. HINANGO: ang delayed entitlement "
+            "ay naglalagay ng BAWAT hilera sa >= 899.9 s kaya kahit 5 ay sapat; ang 20 ay "
+            "ginagawang walang bisa ang anumang isang bridge-stall na hilera at nananatiling "
+            "index-bounded (ix_iqfeed_trades_sym_at, 20 heap fetch, ~1 ms)."
+        ),
+    )
     # CLEAN PRE-ENTRY DECLINE TERMINAL (2026-06-29): a DETERMINISTIC policy decline at the entry
     # instant (a known risk-eval BLOCK — no_bbo / not-live-eligible / spread-too-wide / product-
     # not-tradable — on a name that never held a position) terminalizes as the CLEAN live_cancelled
