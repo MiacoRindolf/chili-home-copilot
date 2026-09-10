@@ -46185,6 +46185,12 @@ def tick_live_session(
                         "counterfactual_fixed_stop": _ar.get("counterfactual_fixed_stop"),
                         "bid": bid,
                         "high_water_mark": _hwm_trail,
+                        # [58] the near-high band that decided gate 3, REPORTED as binding:
+                        # giveback_r = (hwm - bid) / risk_dist, giveback_band_r = the band in R,
+                        # binding = the named derivation (or "env override").
+                        "giveback_r": _ar.get("giveback_r"),
+                        "giveback_band_r": _ar.get("giveback_band_r"),
+                        "binding": _ar.get("binding"),
                     })
                     # Store the current accel as the next tick's prev (genuine-TURN read).
                     if _accel is not None:

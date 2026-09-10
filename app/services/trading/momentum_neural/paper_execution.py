@@ -2637,6 +2637,37 @@ def ofi_exhaustion_lock(
     return out
 
 
+# [58] The near-high band of ``tape_accel_reversal_exit`` (gate 3), DERIVED — not a knob.
+#
+# Distribution: the give-back ``(H − P) / risk_dist`` at the REAL accel rollover while above
+# entry (the G trigger: signed_tape_accel prev > 0 → ≤ 0 with print > entry), print-indexed
+# on the executed tape (``iqfeed_trade_ticks``, entry fill → +60 min), over every live Alpaca
+# leg of the 14 days to 2026-09-10 (78 legs, n = 27 rollovers), ``risk_dist`` in THIS helper's
+# own unit ``entry · max(0.003, atr_pct · stop_atr_mult)`` (recovered per leg from the
+# ``live_tape_accel_reversal_exit`` receipt ``(high_water_mark − entry) / peak_r``, else the
+# unquantized ``tranche_oco_placed.stop``, else ``momentum_mfe_realized.stop_distance``):
+#
+#     p25 0.000   p50 0.084   p75 0.263   p90 0.393   max 0.526   (R)
+#
+# The band is the p90: 24/27 = 89 % of real rollovers are still "near the high" and may be
+# sold INTO strength; the top decile has already given the trail its job. The previous
+# literal 0.35 was undocumented; measured in the gate's own unit it passed 23/27 (85 %).
+# NOTE the unit: the scout's first pass (derive_giveback_band_58.py) measured in
+# ``entry − broker deadman stop`` R and read p90 = 0.317 — the Alpaca deadman sits BELOW the
+# software stop by ``max(0.25 %·avg, 25 %·risk, $0.01)`` (live_runner ``_ensure_alpaca_deadman_stop``),
+# so that unit is 1.20× (p25 1.18 / p75 1.24, n = 42) the helper's; 0.317 deadman-R ≈ 0.38
+# helper-R. Script: scratchpad/derive_giveback_band_58_helper_units.py (read-only).
+# Why NO give-back CAP (cut after X R from the peak) is built here: after the spike sale,
+# 59/71 triggered legs make a NEW high and the retrace before it is p50 1.03× / p90 3.52× of
+# the spike (i_post_spike_structure.py, 2026-09-10) — a cap anywhere inside that retrace cuts
+# 83 % of continuation. The runner belongs to the exit verdict (sell ALL at the earlier of the
+# G rollover / D verdict, PR #1385) and re-entry to the ramp (#1376).
+ACCEL_REVERSAL_GIVEBACK_BAND_R = 0.393
+ACCEL_REVERSAL_GIVEBACK_BINDING = (
+    "p90 give-back at accel rollover (G) in helper R, n=27, 14d to 2026-09-10"
+)
+
+
 def tape_accel_reversal_exit(
     *,
     high_water_mark: float,
@@ -2678,6 +2709,10 @@ def tape_accel_reversal_exit(
       3. NEAR-HIGH   the giveback ``(hwm − bid)`` is SMALL — within an adaptive band
          (``giveback_frac · risk_dist``, the position's own ATR unit). If price has
          already given a lot back, this is the trail's job, not a sell-into-strength.
+         The band is DERIVED (``ACCEL_REVERSAL_GIVEBACK_BAND_R``, the p90 of the
+         give-back at the real rollover, n = 27) and REPORTED: once the band is
+         resolved every return carries ``giveback_r``, ``giveback_band_r`` and
+         ``binding`` (the named derivation, or ``"env override"``).
 
     On arm ∧ reversal ∧ near-high: candidate stop = ``bid − cushion`` where the
     cushion is a tight adaptive band off the bid (``base_lock_bps`` — the SAME
@@ -2705,6 +2740,12 @@ def tape_accel_reversal_exit(
         "peak_r": None,
         "counterfactual_fixed_stop": current_stop,  # lock-OFF baseline (no tighten)
         "reason": None,
+        # [58] gate-3 binding, REPORTED on every path once the band is resolved:
+        # giveback_r = (hwm − bid) / risk_dist, giveback_band_r = the band (R), binding =
+        # the named derivation or "env override" when the settings value differs.
+        "giveback_r": None,
+        "giveback_band_r": None,
+        "binding": None,
     }
     if not side_long:
         out["reason"] = "not_long"
@@ -2765,16 +2806,26 @@ def tape_accel_reversal_exit(
     except (TypeError, ValueError):
         base_lock_bps = 120.0
     base_lock_bps = max(1.0, base_lock_bps)
-    # The ONE new documented knob: how close to the high the price must still be for
-    # this to count as "into strength" (giveback ≤ giveback_frac · risk_dist).
+    # [58] The near-high band: how close to the high the price must still be for this to
+    # count as "into strength" (giveback ≤ giveback_frac · risk_dist). NOT a knob — the
+    # settings default IS ACCEL_REVERSAL_GIVEBACK_BAND_R (p90 of the give-back at the real
+    # rollover, see the constant's derivation); an env value that differs is REPORTED as
+    # "env override" in the receipt so it can never be a dark literal.
+    # (no ``or`` fallback: an env value of 0.0 is a real — reported — override, not the default)
     try:
-        giveback_frac = float(
-            getattr(settings, "chili_momentum_exit_accel_reversal_giveback_frac", 0.35) or 0.35
-        )
+        _gf = getattr(settings, "chili_momentum_exit_accel_reversal_giveback_frac", None)
+        giveback_frac = float(_gf) if _gf is not None else ACCEL_REVERSAL_GIVEBACK_BAND_R
     except (TypeError, ValueError):
-        giveback_frac = 0.35
+        giveback_frac = ACCEL_REVERSAL_GIVEBACK_BAND_R
     giveback_frac = max(0.0, giveback_frac)
     giveback_dist = giveback_frac * risk_dist
+    out["giveback_r"] = round((hwm - b) / risk_dist, 4)
+    out["giveback_band_r"] = round(giveback_frac, 4)
+    out["binding"] = (
+        ACCEL_REVERSAL_GIVEBACK_BINDING
+        if abs(giveback_frac - ACCEL_REVERSAL_GIVEBACK_BAND_R) < 1e-9
+        else "env override"
+    )
 
     # ---- gate 1: profit-arm (only ever lock a winner) ----
     if peak_r < arm_r:
