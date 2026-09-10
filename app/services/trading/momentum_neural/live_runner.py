@@ -24380,7 +24380,10 @@ def _bailout_dwell_confirm_holds(
     nasukat na variable (panalo: pinakamahabang tuloy-tuloy na run sa ilalim ng
     entry p50 10s / p90 99s; pagkabigo p50 116s).
 
-    ⚠️ IPINADALANG OFF. Utos ng adversarial audit: i-ship LANG bilang pakete
+    ⚠️ IPINADALANG OFF noong 2026-08-27; LUMA NA ANG TALANG ITO -- ang default ng
+    `chili_momentum_bailout_dwell_confirm_enabled` ay True na sa config.py (nakita
+    2026-09-10 [21] nang mahuli nito ang lost-VWAP test). Ang orihinal na dahilan:
+    utos ng adversarial audit: i-ship LANG bilang pakete
     kasama ang conditional admission gate -- sa unconditioned corpus ang
     panuntunang ito ay EV +0.02%/trade gross, <=0 pagkatapos ng frictions. Ang
     flip criterion ay nasa description ng flag. Flag OFF => True agad
@@ -24539,6 +24542,128 @@ def _opinion_exit_suppressed(
             "derivation": _OPINION_EXIT_MIN_HOLD_DERIVATION,
         })
     return True
+
+
+#: MEASURED 2026-09-10, 7 days of LIVE receipts (scratchpad opinion_exit_counterfactual_v2):
+#: every opinion exit on mode='live' (breakout_failed_fast_bail x10, lost_vwap_confirmed x3,
+#: close_below_structure x1, topping_tail_runner_exit x2 = 15 legs with an exit fill, plus
+#: the 7 viability-floor and 1 max_loss_circuit legs that are NOT re-routed) replayed as
+#: "hold; the deadman stop or the EXISTING tick exit is the only way out, 15-min cap", on the
+#: print tape (iqfeed_trade_ticks, our own exit sweep excluded) with the tick exit judged on
+#: the prod NBBO-mid 10-s frame:
+#:     15 armed-site legs   actual -$521.78
+#:       deadman = entry - sizing.stop_distance   -> -$456.19   (+$65.59;  tick exit 6/15,
+#:                                                               deadman 10/15, 15-min 3/15)
+#:       deadman = the stop actually resting      -> -$336.47   (+$185.31; deadman 6/15)
+#:     7 viability-floor legs  actual -$50.88     -> -$214.89 / -$186.73  (WORSE, 6 of 7 legs;
+#:                                                  that site is therefore left as it was)
+#: Shape, not just sum: 5 of 15 legs are better and 10 are a little worse -- the hold gives a
+#: few dollars back to the deadman and takes BIAF +$81.54, PCLA +$69.11, PCLA +$44.39,
+#: WYHG +$19.88 and PCLA +$8.24 from the moves that continued. That is the shape the
+#: 2026-09-08 loser-MFE probe predicted (89% of losers were green at some point; 24/79
+#: continued after we sold).
+_OPINION_EXIT_ARM_DERIVATION = (
+    "7-day live counterfactual 2026-09-10: 15 opinion-exit legs, actual -521.78 vs "
+    "hold-to-deadman-or-tick-exit -456.19 (sizing stop) / -336.47 (resting stop); tick exit "
+    "fired 6/15, deadman 10/15 (sizing) or 6/15 (resting)"
+)
+
+
+def _arm_opinion_exit(
+    db: Session,
+    sess: TradingAutomationSession,
+    le: dict[str, Any],
+    *,
+    reason: str,
+    prior_event: str,
+    inputs: dict[str, Any] | None = None,
+) -> bool:
+    """ARM the tick exit instead of bailing out. True = newly armed on this pass.
+
+    Bago (hanggang 2026-09-10): ang apat na OPINION site -- breakout fast-bail (bid vs level
+    sa loob ng orasan), lost-VWAP (1m bar + bid), BOS (1m bar close), topping tail (15m
+    candle) -- ay tumatawag ng `_transition_to_bailout` at ang tape ay HINDI na tinatanong:
+    ang tick exit (`momentum_break_stop`) ay sinusuri lamang sa ENTERED/TRAILING, kaya
+    sa sandaling BAILOUT ang state, wala nang print na makakapigil sa market sell. 7 araw:
+    10 fast-bail, -$481.82, 0 panalo, LAHAT ng 10 ay may mas mataas na print sa loob ng
+    15 min (+0.75%..+20.57%). PCLA 09-10 13:41:05: bid 8.96 < level 9.07 pagkatapos ng
+    33.8 s -> market sell 542 sh; ang sarili nating sweep ang gumawa ng 8.88 print, at ang
+    presyo ay bumalik sa 9.23 sa loob ng 5 min. -$146.34 sa halip na ~+$43.
+
+    Ngayon: ang opinion ay ARM lamang. Nananatili ang session sa ENTERED/TRAILING kaya ang
+    tick exit (#1261, `_failed_pop_break_fires`) ang NAG-IISANG daan palabas maliban sa
+    stop -- gamit ang SARILI niyang verdict, walang bagong threshold. (Tapat na tala: ang
+    verdict na iyon ay nagbabasa ng 10-s QUOTE-MID na bar mula sa NBBO tape sa wall-clock
+    bucket, hindi ng prints -- ang counterfactual sa itaas ay sinukat sa EKSAKTONG verdict
+    na iyon, kaya iyon ang ini-arm; ang print-indexed na kapalit ay hiwalay na gawain.)
+    Kung hindi kailanman kumpirmahin ng tape, ang deadman stop ang exit: iyon ang disenyo,
+    ang stop ang panganib. Ang marker ay isang beses lang isinusulat kada reason (ang
+    per-pass emit ay naging 6,765 event minsan na); ang IBANG reason sa parehong leg ay
+    idinadagdag sa `reasons` at may sariling resibo. Ang resibo ay nagdadala ng parehong
+    payload na dinala ng lumang `live_bailout` para tuloy ang forensics ng ledger.
+    """
+    armed = le.get("opinion_exit_armed") if isinstance(le.get("opinion_exit_armed"), dict) else None
+    reason = str(reason or "opinion")
+    if armed is not None and reason in (armed.get("reasons") or [armed.get("reason")]):
+        return False
+    now_iso = _utcnow().isoformat()
+    payload_inputs = dict(inputs or {})
+    if armed is None:
+        armed = {
+            "reason": reason,
+            "at_utc": now_iso,
+            "prior_event": str(prior_event or ""),
+            "inputs": payload_inputs,
+            "reasons": [reason],
+        }
+    else:
+        armed = dict(armed)
+        armed["reasons"] = list(armed.get("reasons") or [armed.get("reason")]) + [reason]
+        armed.setdefault("inputs", {})
+        armed["inputs"] = {**(armed.get("inputs") or {}), reason: payload_inputs}
+    le["opinion_exit_armed"] = armed
+    _commit_le(sess, le)
+    _emit(db, sess, "live_opinion_exit_armed", {
+        **payload_inputs,
+        "reason": reason,
+        "prior_event": str(prior_event or ""),
+        "armed_at_utc": armed["at_utc"],
+        "first_reason": armed.get("reason"),
+        "reasons": list(armed.get("reasons") or []),
+        "state": getattr(sess, "state", None),
+        "derivation": _OPINION_EXIT_ARM_DERIVATION,
+    })
+    return True
+
+
+def _opinion_exit_armed_receipt(
+    le: dict[str, Any], *, now: datetime | None = None
+) -> dict[str, Any] | None:
+    """The armed marker as the tick exit's receipt carries it: reason + seconds armed.
+
+    None when nothing is armed (the tick exit fired on its own, as it always could).
+    Fail-open on an unreadable stamp: the receipt says so instead of raising -- a receipt
+    must never be the thing that stops an exit."""
+    armed = le.get("opinion_exit_armed") if isinstance(le.get("opinion_exit_armed"), dict) else None
+    if armed is None:
+        return None
+    out: dict[str, Any] = {
+        "reason": armed.get("reason"),
+        "reasons": list(armed.get("reasons") or []),
+        "armed_at_utc": armed.get("at_utc"),
+        "seconds_armed": None,
+    }
+    try:
+        t0 = datetime.fromisoformat(str(armed.get("at_utc")).replace("Z", "+00:00"))
+        if t0.tzinfo is not None:
+            t0 = t0.astimezone(timezone.utc).replace(tzinfo=None)
+        ref = now if now is not None else _utcnow()
+        if ref.tzinfo is not None:
+            ref = ref.astimezone(timezone.utc).replace(tzinfo=None)
+        out["seconds_armed"] = round((ref - t0).total_seconds(), 3)
+    except (TypeError, ValueError, AttributeError):
+        out["seconds_armed"] = None
+    return out
 
 
 def _breakout_bailout_lock_in_seconds(*, explosive: bool) -> float:
@@ -26366,6 +26491,10 @@ _RECYCLE_ENTRY_STATE_KEYS: tuple[str, ...] = (
     "max_loss_circuit_floor_price",
     "prev_signed_tape_accel",
     "last_bailout_trigger",
+    # [21] 2026-09-10: an OPINION that armed the tick exit belongs to the leg it read. A
+    # recycled watcher inheriting it would report the NEXT leg's tick exit as "armed by"
+    # a breakout that failed on the previous one -- the burst-stamp shape, in the receipt.
+    "opinion_exit_armed",
     # ── halt-entry markers tied to the closed position (NOT the symbol-level halt
     #    CHAIN counters halt_chain_up_count / halt_down_consecutive_count, which track
     #    the SYMBOL's resume sequence across watcher cycles and are kept) ──
@@ -44092,6 +44221,9 @@ def tick_live_session(
             _emit(db, sess, "live_momentum_break_exit", {
                 **(le.get("failed_pop_break_dbg") or {}),
                 "bid": bid,
+                # [21] 2026-09-10: kung may opinion na nag-arm nito, dala ng resibo ang
+                # reason at kung ilang segundo naghintay ang tape bago kumpirmahin.
+                "opinion_exit_armed": _opinion_exit_armed_receipt(le),
             })
             le["pending_exit_reason"] = "momentum_break_stop"
             _commit_le(sess, le)
@@ -44155,19 +44287,33 @@ def tick_live_session(
                 db.flush()
                 return {"ok": True, "session_id": sess.id, "state": sess.state,
                         "bailout_dwell_pending": True}
-            le["last_bailout_trigger"] = "breakout_failed_to_hold"
-            _commit_le(sess, le)
-            _transition_to_bailout(db, sess)
-            _emit(db, sess, "live_bailout", {
-                "reason": "breakout_failed_fast_bail",
-                "breakout_level": le.get("breakout_level_price"),
-                "bid": bid,
-                "held_seconds": held,
-                "window_seconds": _breakout_bailout_window_seconds(),
-                "lock_in_seconds": _bb_lock_in,
-            })
+            # ⭐ 2026-09-10 [21]: ANG OPINION AY NAG-A-ARM, ANG TAPE ANG LUMALABAS. Ang
+            # "bid < level sa loob ng orasan" ay opinion mula sa QUOTE at WALL CLOCK; 7 araw:
+            # 10 putok, -$481.82, 0 panalo, lahat ng 10 ay may mas mataas na print sa loob ng
+            # 15 min. Hindi na ito lumilipat sa BAILOUT (kung saan hindi na tinatanong ang
+            # tape); nananatili ang ENTERED para ang tick exit sa itaas ng chain na ito
+            # (`momentum_break_stop`, sarili niyang verdict) ang magpasya, o ang deadman.
+            # `return` LAMANG sa pass na bagong nag-arm (kapareho ng dating one-tick
+            # pre-empt: walang add sa parehong tick ng opinion); sa susunod na tick ay tuloy
+            # ang natitirang machinery (trail, adds) gaya ng bawat tick na hindi lumabas.
+            # Nasukat: 15 leg -$521.78 -> -$456.19 (sizing stop) / -$336.47 (resting stop);
+            # tingnan ang _OPINION_EXIT_ARM_DERIVATION.
+            _newly_armed = _arm_opinion_exit(
+                db, sess, le,
+                reason="breakout_failed_fast_bail",
+                prior_event="live_bailout",
+                inputs={
+                    "breakout_level": le.get("breakout_level_price"),
+                    "bid": bid,
+                    "held_seconds": held,
+                    "window_seconds": _breakout_bailout_window_seconds(),
+                    "lock_in_seconds": _bb_lock_in,
+                },
+            )
             db.flush()
-            return {"ok": True, "session_id": sess.id, "state": sess.state}
+            if _newly_armed:
+                return {"ok": True, "session_id": sess.id, "state": sess.state,
+                        "opinion_exit_armed": "breakout_failed_fast_bail"}
 
         # GAP2 — INSTANT BID-BELOW-FILL CUT (Warrior re-audit 2026-06-26). Right after
         # the fill, if the live bid has collapsed BELOW the fill by more than spread
@@ -44418,9 +44564,23 @@ def tick_live_session(
             db.flush()
             return {"ok": True, "session_id": sess.id, "state": sess.state}
 
+        # ⚠️ [21] 2026-09-10: the brief asked to DELETE this site (a scanner score whose row
+        # decays in-trade is an opinion). MEASURED BEFORE SHIPPING and it is KEPT: over the
+        # 7 live legs it ended (ISPC, LABT, BIAF, TNON x4) it realised -$50.88, and holding
+        # them to the deadman-or-tick-exit would have realised -$214.89 (sizing stop) /
+        # -$186.73 (resting stop) -- worse on 6 of the 7 (LABT +$53.88 -> -$12.44 dodged a
+        # 2.64 -> 1.86 collapse; the three TNON legs all went to the deadman). The
+        # counterfactual is not better in aggregate, so per the brief this path STOPS here
+        # and is reported, not removed. Only change: the receipt now carries a `reason`
+        # (it was the one bailout with none, so the ledger had to infer it). Re-measure
+        # with more legs before touching it.
         if float(via.viability_score or 0) < float(params["bailout_viability_floor"]):
             _transition_to_bailout(db, sess)
-            _emit(db, sess, "live_bailout", {"viability_score": via.viability_score})
+            _emit(db, sess, "live_bailout", {
+                "reason": "viability_floor",
+                "viability_score": via.viability_score,
+                "bailout_viability_floor": float(params["bailout_viability_floor"]),
+            })
             db.flush()
             return {"ok": True, "session_id": sess.id, "state": sess.state}
 
@@ -44572,12 +44732,14 @@ def tick_live_session(
         # fire on it. The two are mutually exclusive by construction (loss ⇒ flatten+
         # return; hold/reclaim ⇒ fall through to the dip-add).
         #
-        # EXIT-only: routes through the BAILOUT machinery (set last_bailout_trigger,
-        # transition to STATE_LIVE_BAILOUT, the next tick flattens) — VERBATIM with the
-        # topping-tail runner exit. INVARIANT-A: an EXIT can flatten but never loosens the
-        # ratchet floor (no stop is moved here). EQUITY + crypto (VWAP is computed lane-
-        # wide). Flag OFF ⇒ byte-identical (no read, no emit). Fail-safe: any error is
-        # swallowed so the exit path below ALWAYS runs.
+        # EXIT-only, and since 2026-09-10 [21] an OPINION: it no longer routes through the
+        # BAILOUT machinery. A confirmed loss ARMS the tick exit (`_arm_opinion_exit`,
+        # receipt `live_opinion_exit_armed`) and the session stays held, so the
+        # print-indexed `momentum_break_stop` or the deadman is the exit -- VERBATIM with
+        # the breakout fast-bail / BOS / topping-tail sites. INVARIANT-A: nothing here
+        # moves a stop. EQUITY + crypto (VWAP is computed lane-wide). Flag OFF ⇒
+        # byte-identical (no read, no emit). Fail-safe: any error is swallowed so the exit
+        # path below ALWAYS runs.
         if (
             bool(getattr(settings, "chili_momentum_lost_vwap_flatten_enabled", True))
             and st in (STATE_LIVE_ENTERED, STATE_LIVE_SCALING_OUT, STATE_LIVE_TRAILING)
@@ -44668,22 +44830,32 @@ def tick_live_session(
                         return {"ok": True, "session_id": sess.id,
                                 "state": sess.state, "bailout_dwell_pending": True}
                     if _lv_closed_below and _lv_bid_below_margin and not _lv_flow_pos:
-                        le["last_bailout_trigger"] = "lost_vwap_flatten"
-                        _commit_le(sess, le)
-                        _transition_to_bailout(db, sess)
-                        _emit(db, sess, "live_lost_vwap_flatten", {
-                            "reason": "lost_vwap_confirmed",
-                            "bid": float(bid),
-                            "session_vwap": _lv_vwap,
-                            "last_close": _lv_last_close,
-                            "vwap_dist_sigma": _lv_dist,
-                            "price_margin": round(_lv_price_margin, 6),
-                            "margin_sigma": _lv_margin_sigma,
-                            "above_vwap": _lv_above,
-                            "high_water_mark": _float_or_none(pos.get("high_water_mark")),
-                        })
+                        # ⭐ 2026-09-10 [21]: 1m-bar close + bid = opinion; ARM the tick
+                        # exit, do not bail. The session stays held so `momentum_break_stop`
+                        # (its own print-indexed verdict) or the deadman is the exit. 7-day
+                        # live: 3 legs, actual -$63.57 -> -$26.08 held (PCLA 14:43 +$44.39,
+                        # AHMA -$6.90, BJDX unfilled). `return` only on the pass that newly
+                        # arms (the same one-tick pre-empt of the dip-add as before); later
+                        # ticks fall through so the trail and the adds keep their own say.
+                        _newly_armed = _arm_opinion_exit(
+                            db, sess, le,
+                            reason="lost_vwap_confirmed",
+                            prior_event="live_lost_vwap_flatten",
+                            inputs={
+                                "bid": float(bid),
+                                "session_vwap": _lv_vwap,
+                                "last_close": _lv_last_close,
+                                "vwap_dist_sigma": _lv_dist,
+                                "price_margin": round(_lv_price_margin, 6),
+                                "margin_sigma": _lv_margin_sigma,
+                                "above_vwap": _lv_above,
+                                "high_water_mark": _float_or_none(pos.get("high_water_mark")),
+                            },
+                        )
                         db.flush()
-                        return {"ok": True, "session_id": sess.id, "state": sess.state}
+                        if _newly_armed:
+                            return {"ok": True, "session_id": sess.id, "state": sess.state,
+                                    "opinion_exit_armed": "lost_vwap_confirmed"}
             except Exception:
                 # Fail-safe: any lost-VWAP read error is swallowed so the exit path below
                 # ALWAYS runs. The flatten NEVER blocks/delays a real stop/exit.
@@ -44701,9 +44873,10 @@ def tick_live_session(
         # still owns the on-the-way-down chandelier).
         #
         # An intrabar WICK below the swing low whose bar CLOSES back above does NOT fire
-        # (the predicate keys off the last CLOSE, not the low). EXIT-only: routes through
-        # the BAILOUT machinery (VERBATIM with topping-tail / lost-VWAP) — no stop is
-        # moved, so INVARIANT-A holds. EQUITY + crypto (the swing-low structure is price-
+        # (the predicate keys off the last CLOSE, not the low). EXIT-only, and since
+        # 2026-09-10 [21] an OPINION: it ARMS the tick exit (`_arm_opinion_exit`) instead
+        # of routing through the BAILOUT machinery (VERBATIM with topping-tail / lost-VWAP
+        # / the breakout fast-bail) — no stop is moved, so INVARIANT-A holds. EQUITY + crypto (the swing-low structure is price-
         # only). Flag OFF ⇒ byte-identical (no fetch, no emit). Fail-safe: any error is
         # swallowed so the exit path below ALWAYS runs. Held in ENTERED/TRAILING (not the
         # bailout/pending-exit states that already sell).
@@ -44728,18 +44901,28 @@ def tick_live_session(
                         getattr(settings, "chili_momentum_bos_exit_buffer_pct", 0.003) or 0.003
                     )
                     if _bos_fn(_bos_df, current_close=_bos_close, buffer_pct=_bos_buf):
-                        le["last_bailout_trigger"] = "bos_exit_live"
-                        _commit_le(sess, le)
-                        _transition_to_bailout(db, sess)
-                        _emit(db, sess, "live_bos_exit", {
-                            "reason": "close_below_structure",
-                            "bid": float(bid),
-                            "last_close": _bos_close,
-                            "buffer_pct": _bos_buf,
-                            "high_water_mark": _float_or_none(pos.get("high_water_mark")),
-                        })
+                        # ⭐ 2026-09-10 [21]: a closed 1m/5m bar is an opinion about the
+                        # tape, not the tape. ARM the tick exit; the held state keeps
+                        # `momentum_break_stop` reachable and the deadman stays the risk.
+                        # 7-day live: 1 leg (BIAF 09-04), -$1.63 actual -> -$21.84 held --
+                        # the one leg where the bar was right; the aggregate carries it.
+                        # `return` only on the pass that newly arms; later ticks fall
+                        # through so the trail ratchet below keeps running.
+                        _newly_armed = _arm_opinion_exit(
+                            db, sess, le,
+                            reason="close_below_structure",
+                            prior_event="live_bos_exit",
+                            inputs={
+                                "bid": float(bid),
+                                "last_close": _bos_close,
+                                "buffer_pct": _bos_buf,
+                                "high_water_mark": _float_or_none(pos.get("high_water_mark")),
+                            },
+                        )
                         db.flush()
-                        return {"ok": True, "session_id": sess.id, "state": sess.state}
+                        if _newly_armed:
+                            return {"ok": True, "session_id": sess.id, "state": sess.state,
+                                    "opinion_exit_armed": "close_below_structure"}
             except Exception:
                 # Fail-safe: any BOS read error is swallowed so the exit path below ALWAYS
                 # runs. The BOS exit NEVER blocks/delays a real stop/exit.
@@ -44980,15 +45163,27 @@ def tick_live_session(
                                 "high_water_mark": _float_or_none(pos.get("high_water_mark")),
                             })
                         else:
-                            le["last_bailout_trigger"] = "topping_tail_runner"
-                            _commit_le(sess, le)
-                            _transition_to_bailout(db, sess)
-                            _emit(db, sess, "live_bailout", {
-                                "reason": "topping_tail_runner_exit", "bid": bid,
-                                "high_water_mark": _float_or_none(pos.get("high_water_mark")),
-                            })
+                            # ⭐ 2026-09-10 [21]: a 15-min candle shape is an opinion. ARM
+                            # the tick exit instead of bailing; TRAILING is kept, so the
+                            # chandelier ratchet below AND `momentum_break_stop` both stay
+                            # live and the deadman stays the risk. 7-day live: 2 legs
+                            # (WYHG 09-08), +$25.24 actual -> -$28.20 held-to-tick-exit;
+                            # the aggregate over all 15 armed-site legs carries it
+                            # (_OPINION_EXIT_ARM_DERIVATION). `return` only on the pass
+                            # that newly arms; afterwards the chandelier below runs as usual.
+                            _newly_armed = _arm_opinion_exit(
+                                db, sess, le,
+                                reason="topping_tail_runner_exit",
+                                prior_event="live_bailout",
+                                inputs={
+                                    "bid": bid,
+                                    "high_water_mark": _float_or_none(pos.get("high_water_mark")),
+                                },
+                            )
                             db.flush()
-                            return {"ok": True, "session_id": sess.id, "state": sess.state}
+                            if _newly_armed:
+                                return {"ok": True, "session_id": sess.id, "state": sess.state,
+                                        "opinion_exit_armed": "topping_tail_runner_exit"}
                 except Exception:
                     pass
             _atr_pct_trail = _float_or_none(le.get("entry_stop_atr_pct")) or 0.0

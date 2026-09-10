@@ -6,8 +6,10 @@ the LIVE lane only had ATR/chandelier INTRABAR trailing. These end-to-end ``tick
 proofs drive the LIVE runner with an injected recorded-OHLCV frame (the ``replay_ohlcv_provider``
 seam) so the closed-bar structure read is deterministic:
 
-  * a CONFIRMED last-closed-bar CLOSE below the swing low (minus the buffer) → FLATTEN
-    (transition to STATE_LIVE_BAILOUT, ``live_bos_exit`` emitted), and
+  * a CONFIRMED last-closed-bar CLOSE below the swing low (minus the buffer) → ARMS the
+    tick exit (since 2026-09-10 [21]: ``live_opinion_exit_armed`` with reason
+    ``close_below_structure``; the position stays HELD and the print-indexed tick exit or
+    the deadman is the exit -- a bar read no longer transitions to STATE_LIVE_BAILOUT), and
   * an intrabar WICK below the swing low whose bar CLOSES back above → NO exit (the predicate
     keys off the last CLOSE, not the low), and
   * flag OFF → byte-identical (no BOS exit, no transition, no emit).
@@ -15,7 +17,7 @@ seam) so the closed-bar structure read is deterministic:
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from unittest.mock import patch
 
 import pandas as pd
@@ -77,6 +79,16 @@ _FIRE_DF, _WICK_DF = _bos_frames()
 _PROD = "BOSX"  # equity symbol
 
 
+@pytest.fixture(autouse=True)
+def _frozen_account_identity(stable_non_alpaca_account_identity):
+    """Since #1024 (2026-08-11) the tick runs ``_non_alpaca_account_identity_fence`` at
+    ``tick_start`` BEFORE any FSM branch; without a frozen identity the mock adapter is
+    quarantined (``skipped=non_alpaca_account_identity_quarantined``) and the BOS block is
+    never reached -- this suite had been asserting on a tick that never ran. Pin the shared
+    stable identity, as tests/test_max_loss_circuit_agentic_floor.py does."""
+    return stable_non_alpaca_account_identity
+
+
 def _provider(df: pd.DataFrame):
     return lambda t, *, interval, period: df
 
@@ -87,7 +99,9 @@ def _seed_entered_session(db, *, symbol: str):
     vid, _ = _seed_live_eligible_row(db, symbol=symbol)
     db.commit()
     uid = _uid(db, f"bos_{symbol}")
-    recent_open = datetime.now(timezone.utc).replace(microsecond=0).isoformat()
+    # 120 s old: past the 30-s opinion-exit structure floor (2026-09-06), so the opinion
+    # site under test is allowed to speak on the first tick.
+    recent_open = (datetime.now(timezone.utc) - timedelta(seconds=120)).replace(microsecond=0).isoformat()
     pos = {
         "product_id": symbol, "side": "long",
         "quantity": 100.0, "original_quantity": 100.0,
@@ -150,20 +164,34 @@ def _common_flags(monkeypatch, *, bos_on: bool):
 
 # ── (a) CONFIRMED CLOSE BELOW SWING-LOW → EXIT ───────────────────────────────────
 def test_confirmed_close_below_structure_exits(db, monkeypatch):
-    """The last CLOSED bar closes below the confirmed swing low (minus the buffer) ⇒ the held
-    LONG is flattened via the BAILOUT machinery (event ``live_bos_exit``)."""
+    """The last CLOSED bar closes below the confirmed swing low (minus the buffer) ⇒ the
+    OPINION arms the tick exit (event ``live_opinion_exit_armed``, reason
+    ``close_below_structure``) and the LONG stays HELD -- since 2026-09-10 [21] a bar close
+    no longer transitions to BAILOUT; the print-indexed tick exit or the deadman is the exit.
+    The second tick on the same frame does NOT re-emit (one receipt per reason per leg)."""
     _common_flags(monkeypatch, bos_on=True)
     sess = _seed_entered_session(db, symbol=_PROD)
     # bid 8.7 > stop 7.0 (no stop-breach); the closed bar is 8.6 < swing≈9.04.
     out, _ad = _drive_tick(db, sess, bid=8.7, ask=8.72, df=_FIRE_DF)
 
     assert out.get("ok")
-    assert sess.state == STATE_LIVE_BAILOUT
-    evs = _events(db, sess, "live_bos_exit")
+    assert sess.state == STATE_LIVE_ENTERED  # held: the tape, not the bar, decides
+    assert _events(db, sess, "live_bos_exit") == []
+    evs = _events(db, sess, "live_opinion_exit_armed")
     assert len(evs) == 1
-    assert (evs[0].payload_json or {}).get("reason") == "close_below_structure"
+    payload = evs[0].payload_json or {}
+    assert payload.get("reason") == "close_below_structure"
+    assert payload.get("prior_event") == "live_bos_exit"
+    assert payload.get("last_close") == pytest.approx(8.6)
+    assert "derivation" in payload
     le = (sess.risk_snapshot_json or {}).get("momentum_live_execution", {})
-    assert le.get("last_bailout_trigger") == "bos_exit_live"
+    assert le.get("last_bailout_trigger") is None
+    assert (le.get("opinion_exit_armed") or {}).get("reason") == "close_below_structure"
+
+    out2, _ad = _drive_tick(db, sess, bid=8.7, ask=8.72, df=_FIRE_DF)
+    assert out2.get("ok")
+    # (the state is not pinned here: the stop machinery may legitimately act on tick 2)
+    assert len(_events(db, sess, "live_opinion_exit_armed")) == 1
 
 
 # ── (b) INTRABAR WICK (close above) → NO EXIT ────────────────────────────────────

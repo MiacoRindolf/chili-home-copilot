@@ -38,10 +38,12 @@ def test_it_runs_before_the_opinion_bailouts_in_the_held_tick():
     i_lv = src.find('"live_lost_vwap_flatten"')
     i_bos = src.find('"live_bos_exit"')
     assert 0 < i_mb < i_bb < i_lv and i_mb < i_bos
-    # the safety exits (max-loss circuit, burst window) may precede it
+    # the max-loss circuit (a USD risk cap, not an opinion) precedes it; the burst-window
+    # exit is a WALL-CLOCK decision and since 2026-09-08 ("ANG TICK ANG UNA, HINDI ANG
+    # ORASAN") it sits AFTER the tick exit in the elif chain -- the tape speaks first.
     i_mlc = src.find('"reason": "max_loss_circuit"')
     i_bw = src.find('"live_burst_window_exit"')
-    assert 0 < i_mlc < i_mb and 0 < i_bw < i_mb
+    assert 0 < i_mlc < i_mb and 0 < i_mb < i_bw
 
 
 # ── FRAME RECENCY (2026-09-06 review, confirmed major) ────────────────────────

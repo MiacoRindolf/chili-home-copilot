@@ -12,8 +12,10 @@ of:
 These are end-to-end ``tick_live_session`` proofs driving the LIVE runner with an injected
 recorded-OHLCV frame (the ``replay_ohlcv_provider`` seam) so the VWAP read is deterministic:
 
-  * a CONFIRMED loss (closed below + bid below the margin + flow not positive) → FLATTEN
-    (transition to STATE_LIVE_BAILOUT, ``live_lost_vwap_flatten`` emitted), and
+  * a CONFIRMED loss (closed below + bid below the margin + flow not positive) → ARMS the
+    tick exit (since 2026-09-10 [21]: ``live_opinion_exit_armed`` with reason
+    ``lost_vwap_confirmed``; the position stays HELD and the print-indexed tick exit or the
+    deadman is the exit -- a bar read no longer transitions to STATE_LIVE_BAILOUT), and
   * a momentary 1-tick undercut whose bar CLOSES back above VWAP → NO flatten, and
   * a dip that RECLAIMS VWAP → NO flatten AND the dip-add can still fire (THE COMPOSITION —
     the same tick can never both add and flatten), and
@@ -22,7 +24,7 @@ recorded-OHLCV frame (the ``replay_ohlcv_provider`` seam) so the VWAP read is de
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from unittest.mock import patch
 
 import pandas as pd
@@ -76,6 +78,16 @@ _WICK_CLOSES = [10.0, 10.02, 10.05, 10.06, 10.07, 10.06, 10.05, 10.04, 10.05, 10
 _PROD = "LVF"  # equity symbol (no -USD): the lane treats it as equity
 
 
+@pytest.fixture(autouse=True)
+def _frozen_account_identity(stable_non_alpaca_account_identity):
+    """Since #1024 (2026-08-11) the tick runs ``_non_alpaca_account_identity_fence`` at
+    ``tick_start`` BEFORE any FSM branch; without a frozen identity the mock adapter is
+    quarantined and the lost-VWAP block is never reached -- this suite had been asserting
+    on a tick that never ran. Pin the shared stable identity (see
+    tests/test_max_loss_circuit_agentic_floor.py)."""
+    return stable_non_alpaca_account_identity
+
+
 def _provider(closes: list[float]):
     df = _mk_frame(closes)
     return lambda t, *, interval, period: df
@@ -88,7 +100,9 @@ def _seed_held_session(db, *, symbol: str, state: str = STATE_LIVE_ENTERED):
     vid, _ = _seed_live_eligible_row(db, symbol=symbol)
     db.commit()
     uid = _uid(db, f"lvf_{symbol}")
-    recent_open = datetime.now(timezone.utc).replace(microsecond=0).isoformat()
+    # 120 s old: past the 30-s opinion-exit structure floor (2026-09-06), so the opinion
+    # site under test is allowed to speak on the first tick.
+    recent_open = (datetime.now(timezone.utc) - timedelta(seconds=120)).replace(microsecond=0).isoformat()
     pos = {
         "product_id": symbol, "side": "long",
         "quantity": 1000.0, "original_quantity": 1000.0,
@@ -149,6 +163,10 @@ def test_confirmed_lost_vwap_flattens(db, monkeypatch):
     monkeypatch.setattr(settings, "chili_momentum_pullback_add_enabled", False)
     monkeypatch.setattr(settings, "chili_momentum_pyramid_enabled", False)
     monkeypatch.setattr(settings, "chili_momentum_micropullback_reentry_enabled", False)
+    # Isolate the predicate: the 60-s dwell-confirm (default ON since 2026-08-27) sits in
+    # front of this site and would hold the opinion for a minute of continuous sub-entry
+    # dwell; it has its own suite (tests/test_bailout_dwell_confirm.py).
+    monkeypatch.setattr(settings, "chili_momentum_bailout_dwell_confirm_enabled", False)
 
     sess = _seed_held_session(db, symbol=_PROD)
     # bid 9.96 < vwap≈9.983 minus the ~0.013 dispersion-sigma margin (flatten_bid<9.9704);
@@ -156,14 +174,27 @@ def test_confirmed_lost_vwap_flattens(db, monkeypatch):
     # the max-loss circuit floor so ONLY the lost-VWAP flatten can fire.
     out, _ad = _drive_tick(db, sess, bid=9.96, ask=9.97, provider_closes=_LOSS_CLOSES)
 
+    # Since 2026-09-10 [21] a confirmed lost-VWAP is an OPINION: it ARMS the tick exit
+    # (event ``live_opinion_exit_armed``, reason ``lost_vwap_confirmed``) and the LONG stays
+    # HELD; the print-indexed tick exit or the deadman is the exit, never this bar read.
     assert out.get("ok")
-    assert sess.state == STATE_LIVE_BAILOUT
-    evs = _events(db, sess, "live_lost_vwap_flatten")
+    assert sess.state == STATE_LIVE_ENTERED
+    assert _events(db, sess, "live_lost_vwap_flatten") == []
+    evs = _events(db, sess, "live_opinion_exit_armed")
     assert len(evs) == 1
     payload = evs[0].payload_json or {}
     assert payload.get("reason") == "lost_vwap_confirmed"
+    assert payload.get("prior_event") == "live_lost_vwap_flatten"
+    assert payload.get("session_vwap") is not None and payload.get("last_close") is not None
     le = (sess.risk_snapshot_json or {}).get("momentum_live_execution", {})
-    assert le.get("last_bailout_trigger") == "lost_vwap_flatten"
+    assert le.get("last_bailout_trigger") is None
+    assert (le.get("opinion_exit_armed") or {}).get("reason") == "lost_vwap_confirmed"
+
+    # the same confirmed loss on the next tick does not re-emit (one receipt per reason)
+    out2, _ad = _drive_tick(db, sess, bid=9.96, ask=9.97, provider_closes=_LOSS_CLOSES)
+    assert out2.get("ok")
+    # (the state is not pinned here: the stop machinery may legitimately act on tick 2)
+    assert len(_events(db, sess, "live_opinion_exit_armed")) == 1
 
 
 # ── (b) MOMENTARY UNDERCUT → NO FLATTEN ──────────────────────────────────────────

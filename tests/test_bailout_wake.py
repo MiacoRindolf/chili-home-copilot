@@ -68,7 +68,10 @@ def test_every_bailout_transition_goes_through_the_waking_helper():
     assert direct_in == {"_transition_to_bailout"}, (
         f"may direktang BAILOUT transition sa labas ng helper: {sorted(direct_in)}"
     )
-    assert helper_calls >= 10, f"inaasahan ang 13 site, nakita {helper_calls}"
+    # 13 site hanggang 2026-09-10; [21] "opinion exits ask the tape" ay nag-alis ng APAT
+    # (breakout fast-bail, lost-VWAP, BOS, topping tail -- nag-a-arm na sila ng tick exit
+    # sa halip na lumipat sa BAILOUT), kaya 9 ang natitira. Bawal bumaba pa nang tahimik.
+    assert helper_calls >= 9, f"inaasahan ang 9 site, nakita {helper_calls}"
 
 
 def test_helper_transitions_first_then_wakes(monkeypatch):
