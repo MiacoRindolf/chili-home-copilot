@@ -2476,6 +2476,11 @@ def _reap_stale_watching_sessions(db: Session, *, user_id: int | None, now: date
     return reaped
 
 
+# The states the finalize sweep may terminalize FROM. One tuple for the unlocked
+# candidate scan AND the re-check under the row lock, so the two can never drift.
+_FINALIZE_SOURCE_STATES: tuple[str, ...] = ("live_exited", "live_cooldown")
+
+
 def _finalize_stale_exited_sessions(db: Session, *, user_id: int | None, now: datetime) -> int:
     """BOOKING TRUTH (2026-06-12 waterfall c0 = $195 of unbooked exits): a live
     session parked in exited/cooldown that nobody advances never reaches a
@@ -2485,7 +2490,24 @@ def _finalize_stale_exited_sessions(db: Session, *, user_id: int | None, now: da
     LEGAL FSM edge (exited → finished; legacy cooldown → finished) via the live
     runner's _safe_transition, which fires the outcome writer exactly like a
     runner-driven finish. 2026-09-10: the cooldown hop is gone (no cooldown
-    between legs) — exited terminalizes directly."""
+    between legs) — exited terminalizes directly.
+
+    ISANG ORASAN LANG ANG LIBRO (2026-09-10, SKYQ 21605 — arming frozen 14:34Z→17:00Z):
+    DALAWANG auto-arm pass (ang scheduler job at ang ignition→arm bridge) ang
+    nagpatakbo ng sweep na ito sa PAREHONG row sa loob ng isang segundo. Nag-book
+    ang pass A ng outcome na terminal_at = t1 at nag-commit; ang in-memory row ng
+    pass B ay ended_at=None pa rin, kaya muling nag-stamp ng ended_at = t2 (+194 ms).
+    Hinihingi ng loss-guard loader na outcome.terminal_at == session.ended_at hanggang
+    microsecond ⇒ loss_guard_outcome_session_terminal_clock_mismatch ⇒ ang BUONG
+    account sa loss_guard_history_unavailable hanggang matapos ang RTH. Parehong
+    pirma noong 09-04 (BIAF 20245, +12 s) at 09-08 (SUNE 20716, +8 s).
+
+    Ang candidate scan ay walang lock; ang DESISYON ay muling ginagawa sa ilalim ng
+    FOR UPDATE NOWAIT sa REFRESHED na row (ang 2026-09-02 pattern ng watching reaper):
+    tumangging lock = ibang pass/tick ang may-ari = laktawan; umabante na ang state =
+    laktawan; ginalaw ng tick simula ng scan = laktawan. Tanging ang row na EXITED PA
+    RIN at IDLE PA RIN ang nagta-transition — at ang ended_at nito ay kung ano ang
+    hawak ng DB, hindi ng snapshot."""
     try:
         idle_min = float(getattr(settings, "chili_momentum_exited_finalize_idle_min", 20.0) or 0.0)
     except (TypeError, ValueError):
@@ -2496,7 +2518,7 @@ def _finalize_stale_exited_sessions(db: Session, *, user_id: int | None, now: da
     try:
         q = db.query(TradingAutomationSession).filter(
             TradingAutomationSession.mode == "live",
-            TradingAutomationSession.state.in_(("live_exited", "live_cooldown")),
+            TradingAutomationSession.state.in_(_FINALIZE_SOURCE_STATES),
             TradingAutomationSession.updated_at < cutoff,
         )
         if user_id is not None:
@@ -2509,7 +2531,56 @@ def _finalize_stale_exited_sessions(db: Session, *, user_id: int | None, now: da
     from .live_runner import _safe_transition as _live_safe_transition
 
     done = 0
-    for sess in rows:
+    for candidate in rows:
+        sess = candidate
+        # ── DECIDE UNDER THE ROW LOCK (2026-09-10, SKYQ 21605) ──────────────
+        # The scan above is a snapshot. A concurrent pass may already have
+        # finalized (and booked) this row; a tick may have advanced it. Lock
+        # refusal = someone else owns it right now = skip, never wait. Lock won
+        # = re-read (populate_existing) and re-decide on the DB's row, whose
+        # ended_at is the one the booked outcome anchors to.
+        _nested = None
+        try:
+            if callable(getattr(db, "begin_nested", None)):
+                _nested = db.begin_nested()
+                _locked = (
+                    db.query(TradingAutomationSession)
+                    .filter(TradingAutomationSession.id == int(candidate.id))
+                    .with_for_update(nowait=True)
+                    .populate_existing()
+                    .one_or_none()
+                )
+                if _locked is None or str(_locked.state or "") not in _FINALIZE_SOURCE_STATES:
+                    _nested.rollback()
+                    logger.info(
+                        "[auto_arm] finalize SKIPPED under lock session=%s %s: state=%s — "
+                        "ibang pass na ang nag-finalize; isang orasan lang ang libro",
+                        candidate.id, candidate.symbol, getattr(_locked, "state", None),
+                    )
+                    continue
+                _l_upd = getattr(_locked, "updated_at", None)
+                if _l_upd is not None and _l_upd >= cutoff:
+                    _nested.rollback()
+                    logger.info(
+                        "[auto_arm] finalize SKIPPED under lock session=%s %s: row advanced "
+                        "at %s since the scan (fresh) — not idle",
+                        candidate.id, candidate.symbol, _l_upd.isoformat(),
+                    )
+                    continue
+                _nested.commit()
+                sess = _locked
+        except Exception as exc:
+            try:
+                if _nested is not None and _nested.is_active:
+                    _nested.rollback()
+            except Exception:
+                pass
+            logger.info(
+                "[auto_arm] finalize SKIPPED session=%s %s: row locked by another pass/tick "
+                "(%s) — hindi magfa-finalize laban sa may hawak ng row",
+                candidate.id, candidate.symbol, type(exc).__name__,
+            )
+            continue
         try:
             _live_safe_transition(db, sess, "live_finished")
             done += 1
