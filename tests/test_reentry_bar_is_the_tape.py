@@ -260,7 +260,9 @@ def test_the_window_setting_carries_its_derivation():
 def test_the_runner_passes_the_print_window_and_the_high_print():
     src = _SRC.read_text(encoding="utf-8")
     i = src.index("def _g4_reentry_escalation_check(")
-    body = src[i: i + 14000]
+    # the whole helper, not a char window (the #1380 lesson: a window pin silently
+    # stops seeing the call once the function grows -- it did with [59])
+    body = src[i: src.index("def tick_live_session(", i)]
     assert "window_prints=_g4e_window_prints" in body
     assert "chili_momentum_g4_reentry_tape_window_prints" in body
     assert "prior_leg_high_print" in body

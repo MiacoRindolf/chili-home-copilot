@@ -490,3 +490,41 @@ arms (16%) with another 255 gated behind the structural-p90 bypass; exactly one 
 leader proxy would have been membership-blocked and the TOP-2 exemption passes it (zero
 leader starvation). Live full passes use the snapshot source at true N=3 — stricter.
 Tests: `tests/test_top_gainer_concentration.py`.
+
+## 13. RE-ENTRY RAMP — the bar is the previous leg's HIGH PRINT, at EVERY level ([59], 2026-09-10)
+
+**Doctrine (operator, repeated):** sell the pullback, then buy again *when the level is
+reclaimed* — "print sa itaas ng high ng nakaraang leg na may `signed_tape_accel > 0`".
+Cooldowns are human concepts; the machine waits for a tape condition.
+
+**Mechanism.** One helper, two doors (`live_runner._g4_reentry_escalation_check`, called by
+the trigger path and by the momentum-continuation fire), one pure decision
+(`risk_policy.reentry_escalation_decision`). Whenever the name has a prior leg on the
+symbol-day (`le["g4_prior_trade"]`, written on every confirmed exit including green, seeded
+into a new session by `same_day_escalation_seed` **without** needing a level > 0):
+
+| level | reference | price compared | margin | tape hold |
+|---|---|---|---|---|
+| 0 (after a GREEN leg / profit decay) | prior leg's HIGH PRINT (`entry_gates.prior_leg_high_print`; HWM / exit fallbacks, named) | the tape's **last PRINT** (`last_print` from `signed_tape_accel_features(window_prints=255)`; `tick.ask` a named fallback, `price_kind`) | **0 R, strict `>`** — a print equal to the high is not a new high (`reclaim_form=level0_new_high_print`) | `signed_tape_accel > 0` **and** `buy_share_delta > 0` (print-count halves); unreadable ⇒ skipped |
+| ≥ 1 (after a RED leg) | same | same | `(level−1)·R` of the failed leg, `>=` (unchanged, #1376) | same (+ structural class / substitute, leader ignition bypass — unchanged) |
+
+Refusal is a **WAIT** (`reclaim_of_prior_leg_high_wait` at level 0, `reclaim_not_met` /
+`tape_not_confirming` at level ≥ 1) re-checked every tick with the receipt
+`g4_reentry_escalation_blocked`; a pass writes `g4_reentry_reclaim_proven` (reference,
+reference_kind, print, price_kind, accel, buy_share_delta, prints_since_high, window,
+`spread_bps` from the L1 the print printed against, and the `binding` block: window_prints
+255 = p50 of the 15-s print count at 108 live decision instants; margin_r; reclaim_form;
+spread policy). The anti-chase cap stays `was_loss`-only. No new knob, no cooldown.
+
+**Measured (14 d live to 2026-09-10, read-only).** The bar at the 45 live re-entry instants:
+prior=GREEN 15 legs = −$105.23, refused all 15 (12 no_reclaim −$86.41, 3 tape_neg −$18.82),
+allowed 0; prior=RED 30 = −$745.53, allowed 1. **The automatic re-buy is refuted at L1**
+(`h59_reclaim_spread_cost`, 78 legs, IQFeed L1 attached to every print — 100 % coverage,
+TNON 09-10 13:00–13:30 = 57,630/57,630): [59]-form re-entry at the ASK of the reclaim print,
+exit at the BID of the next G-all trigger, n=58: print +$49.91 → **L1 −$336.72**; spread at
+reclaim p25 27.6 / **p50 52.1** / p75 82.3 / p90 130.2 bps; no ex-ante split (spread bucket,
+buy_share_delta, accel, timing) is positive at L1. Hence the reclaim is a correct **refusal**
+inside the normal entry path (viability + trigger + ramp + chase cap), never a mechanical
+re-buy; `spread_bps` is reported, not enforced. Tests:
+`tests/test_reentry_bar_level0_prior_leg_high.py`, `tests/test_reentry_bar_is_the_tape.py`,
+`tests/test_continuation_fire_cannot_bypass_g4.py`, `tests/test_g4_same_day_seed.py`.

@@ -139,6 +139,45 @@ def test_runner_seeds_level_cycles_and_reference_with_a_receipt(monkeypatch):
     assert dbg["reference_kind"] == "prior_leg_high_print"
 
 
+def test_runner_seeds_the_reference_at_level_zero_after_a_green_leg(monkeypatch):
+    """[59] (2026-09-10): the REFERENCE travels without the level. A new session on a
+    symbol-day whose only earlier leg was GREEN seeds level 0 / cycles 0 — and the
+    prior leg's stash, so the level-0 bar (a print above that leg's high print) binds
+    at once. SKYQ 09-10 13:55Z: prior leg high print 3.80, last print 3.65 => WAIT."""
+    now = datetime(2026, 9, 10, 13, 55, 34)
+    monkeypatch.setattr(LR, "_utcnow", lambda: now)
+    monkeypatch.setattr(LR, "_replay_l2_as_of_or_none", lambda: None)
+    emitted = []
+    monkeypatch.setattr(LR, "_emit", lambda db, sess, et, payload: emitted.append((et, payload)))
+    monkeypatch.setattr(LR, "_commit_le", lambda sess, le: None)
+    prior = {"exit_price": 3.72, "high_water_mark": 3.79, "risk_dist": 0.20, "was_loss": False,
+             "exit_reason": "burst_window_exit", "exited_at_utc": "2026-09-10T13:53:29",
+             "entry_filled_at_utc": "2026-09-10T13:50:56+00:00"}
+    monkeypatch.setattr(LR, "same_day_escalation_seed", lambda *a, **k: {
+        "level": 0, "stopout_cycles": 0, "source_session_id": 21591, "prior_trade": prior, "sessions_seen": 1})
+    from app.services.trading.momentum_neural import risk_policy as RP
+    monkeypatch.setattr(RP, "prior_day_rejection_seed", lambda db, s: 0)
+    monkeypatch.setattr(EG, "signed_tape_accel_features", lambda *a, **k: {
+        "signed_tape_accel": -3269.0, "back_buy_share": 0.5, "buy_share_delta": 0.0452, "prints_since_high": 243,
+        "n_ticks": 255, "last_print": 3.65, "last_bid": 3.65, "last_ask": 3.66})
+    monkeypatch.setattr(EG, "prior_leg_high_print", lambda *a, **k: (3.80, 12425))
+    le = {}
+    sess = SimpleNamespace(id=21605, symbol="SKYQ", execution_family="alpaca_spot")
+    via = SimpleNamespace(viability_score=0.5)
+    ok, dbg, lvl = LR._g4_reentry_escalation_check(None, sess, le, via, trigger_reason="momentum_ok_rel_vol", tick_px=3.66)
+    assert le["g4_prior_trade"]["exit_price"] == 3.72, "the reference was carried at level 0"
+    assert "g4_reentry_escalation" not in le or int(le.get("g4_reentry_escalation") or 0) == 0
+    seeds = [p for et, p in emitted if et == "g4_same_day_seed"]
+    assert len(seeds) == 1
+    assert seeds[0]["seed_level"] == 0 and seeds[0]["prior_trade_seeded"] is True
+    assert seeds[0]["prior_trade_was_loss"] is False
+    # and the level-0 bar binds immediately on the seeded reference
+    assert (ok, lvl) == (False, 0)
+    assert dbg["reason"] == "reclaim_of_prior_leg_high_wait"
+    assert dbg["reference_kind"] == "prior_leg_high_print" and dbg["required_reclaim"] == 3.80
+    assert dbg["price"] == 3.65 and dbg["price_kind"] == "last_print"
+
+
 def test_runner_seeds_only_once_per_session(monkeypatch):
     now = datetime(2026, 9, 10, 18, 4, 40)
     monkeypatch.setattr(LR, "_utcnow", lambda: now)

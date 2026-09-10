@@ -2730,6 +2730,17 @@ def _signed_tape_features(
     last_sign = 0
     t_min = None
     t_max = None
+    # ── THE LAST PRINT, WITH THE L1 IT PRINTED AGAINST ([59], 2026-09-10) ──────
+    # Ang re-entry ramp ay nangangailangan ng PRINT (hindi quote) bilang presyo ng
+    # reclaim: "print sa itaas ng high ng nakaraang leg". Ang caller ay may
+    # tick.ask lang (opinyon ng book); ang huling print sa window ang presyong
+    # TALAGANG binayaran. Ang bid/ask na nakakabit sa print na iyon (100% coverage
+    # sa tape: TNON 09-10 13:00-13:30 = 57,630/57,630) ang pinagmumulan ng
+    # spread_bps sa resibo — iniuulat, hindi ipinapatupad.
+    last_print: float | None = None
+    last_bid: float | None = None
+    last_ask: float | None = None
+    last_ts: float | None = None
     for r in rows:
         try:
             px = float(r[0])
@@ -2744,6 +2755,16 @@ def _signed_tape_features(
             ts = None
         bid = r[2] if len(r) > 2 else None
         ask = r[3] if len(r) > 3 else None
+        last_print = px
+        last_ts = ts
+        try:
+            last_bid = float(bid) if bid is not None and float(bid) > 0 else None
+        except (TypeError, ValueError):
+            last_bid = None
+        try:
+            last_ask = float(ask) if ask is not None and float(ask) > 0 else None
+        except (TypeError, ValueError):
+            last_ask = None
         sign = 0
         if bid is not None and ask is not None:
             try:
@@ -3020,6 +3041,13 @@ def _signed_tape_features(
             float(back_buy_share) if back_buy_share is not None else None
         ),
         "gap_restricted": bool(gap_restricted),
+        # The newest print in the window and the L1 it printed against ([59]):
+        # the re-entry ramp's reclaim PRICE (a print, never the ask) and the
+        # spread it would pay, reported on the receipt.
+        "last_print": (float(last_print) if last_print is not None else None),
+        "last_bid": (float(last_bid) if last_bid is not None else None),
+        "last_ask": (float(last_ask) if last_ask is not None else None),
+        "last_ts": (float(last_ts) if last_ts is not None else None),
     }
 
 

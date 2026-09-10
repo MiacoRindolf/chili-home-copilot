@@ -31124,22 +31124,34 @@ def _g4_reentry_escalation_check(
                 )
                 _sd_level = int(_sds.get("level") or 0)
                 _sd_cycles = int(_sds.get("stopout_cycles") or 0)
+                # [59] (2026-09-10): the REFERENCE travels without the level. A new
+                # session after a GREEN leg on the same symbol-day carries level 0
+                # and zero cycles, but the prior leg's high print is still the bar
+                # the next entry must print above — so the prior_trade stash is
+                # applied whenever the symbol-day has one, not only when the level
+                # or the cycle count is > 0.
+                _sd_pt = _sds.get("prior_trade")
+                _sd_pt_applied = False
+                if isinstance(_sd_pt, dict) and not isinstance(le.get("g4_prior_trade"), dict):
+                    le["g4_prior_trade"] = dict(_sd_pt)
+                    _sd_pt_applied = True
                 if _sd_level > 0 or _sd_cycles > 0:
                     le["g4_reentry_escalation"] = max(_g4e_level, _sd_level)
                     le["stopout_cycles"] = max(int(le.get("stopout_cycles") or 0), _sd_cycles)
-                    _sd_pt = _sds.get("prior_trade")
-                    if isinstance(_sd_pt, dict) and not isinstance(le.get("g4_prior_trade"), dict):
-                        le["g4_prior_trade"] = dict(_sd_pt)
                     _g4e_level = int(le["g4_reentry_escalation"])
+                if _sd_level > 0 or _sd_cycles > 0 or _sd_pt_applied:
                     _emit(db, sess, "g4_same_day_seed", {
                         "symbol": str(sess.symbol or ""),
                         "seed_level": _sd_level,
                         "seed_stopout_cycles": _sd_cycles,
                         "source_session_id": _sds.get("source_session_id"),
                         "sessions_seen": _sds.get("sessions_seen"),
-                        "prior_trade_seeded": bool(isinstance(_sd_pt, dict)),
+                        "prior_trade_seeded": bool(_sd_pt_applied),
                         "prior_trade_exited_at_utc": (
                             _sd_pt.get("exited_at_utc") if isinstance(_sd_pt, dict) else None
+                        ),
+                        "prior_trade_was_loss": (
+                            _sd_pt.get("was_loss") if isinstance(_sd_pt, dict) else None
                         ),
                     })
             except Exception:
@@ -31169,20 +31181,30 @@ def _g4_reentry_escalation_check(
                 pass
         if _seed_dirty:
             _commit_le(sess, le)
-    if _g4e_level <= 0:
-        return True, {"reason": "no_escalation", "escalation_level": _g4e_level}, _g4e_level
     _g4e_prior = le.get("g4_prior_trade") if isinstance(le.get("g4_prior_trade"), dict) else {}
-    _g4e_px = None
+    # [59] (2026-09-10): LEVEL 0 WITH A PRIOR LEG reads the tape too. Dati ang
+    # level <= 0 ay bumabalik DITO bago ang anumang pagbasa — kaya pagkatapos ng
+    # BERDENG leg (sell-into-spike, o profit decay pababa sa 0) ay WALANG bar at
+    # ang re-entry ay pumapasok sa unang trigger (14d live: 15 leg, −$105.23,
+    # lahat tinanggihan ng bar sa fill instant). Walang prior leg (unang leg ng
+    # araw, o walang laman ang stash) ⇒ no_escalation bago ang anumang pagbasa,
+    # gaya ng dati.
+    if _g4e_level <= 0 and not _g4e_prior:
+        return True, {"reason": "no_escalation", "escalation_level": _g4e_level}, _g4e_level
+    _g4e_quote_px = None
     try:
-        _g4e_px = float(tick_px or 0) or None
+        _g4e_quote_px = float(tick_px or 0) or None
     except (TypeError, ValueError):
-        _g4e_px = None
+        _g4e_quote_px = None
     # ── TAPE, PRINT-INDEXED (2026-09-10) ────────────────────────────────────────
     _g4e_tape_accel = None
     _g4e_buy_share = None
     _g4e_bsd = None
     _g4e_psh = None
     _g4e_n_prints = None
+    _g4e_last_print = None
+    _g4e_last_bid = None
+    _g4e_last_ask = None
     try:
         _g4e_window_prints = int(getattr(settings, "chili_momentum_g4_reentry_tape_window_prints", 255) or 255)
     except (TypeError, ValueError):
@@ -31198,24 +31220,80 @@ def _g4_reentry_escalation_check(
                 _g4e_bsd = _float_or_none(_g4e_tape.get("buy_share_delta"))
                 _g4e_psh = _g4e_tape.get("prints_since_high")
                 _g4e_n_prints = _g4e_tape.get("n_ticks")
+                _g4e_last_print = _float_or_none(_g4e_tape.get("last_print"))
+                _g4e_last_bid = _float_or_none(_g4e_tape.get("last_bid"))
+                _g4e_last_ask = _float_or_none(_g4e_tape.get("last_ask"))
     except Exception:
         _g4e_tape_accel = None
         _g4e_buy_share = None
         _g4e_bsd = None
+        _g4e_last_print = None
+        _g4e_last_bid = None
+        _g4e_last_ask = None
+    # ── THE RECLAIM PRICE IS A PRINT ([59]) ─────────────────────────────────────
+    # "print sa itaas ng high ng nakaraang leg" — the reference is the prior leg's
+    # high PRINT, so the price compared against it must be a PRINT as well: the
+    # newest print in the window the tape hold just read. The caller's quote
+    # (tick.ask, mid when no ask) stays as a NAMED fallback for a window with no
+    # readable print (thin tape / crypto / read error) so no name is stranded.
+    _g4e_px_kind = None
+    if _g4e_last_print is not None and _g4e_last_print > 0:
+        _g4e_px = _g4e_last_print
+        _g4e_px_kind = "last_print"
+    else:
+        _g4e_px = _g4e_quote_px
+        _g4e_px_kind = "quote_ask_fallback" if _g4e_quote_px is not None else None
+    # The L1 the last print printed against → spread_bps on the receipt. REPORTED,
+    # NOT ENFORCED: the automatic re-buy was refuted at L1 (h59_reclaim_spread_cost:
+    # [59]-form n=58, print +$49.91 → L1 −$336.72; spread at reclaim p50 52.1 bps),
+    # so the bar is a WAIT inside the normal entry path and the spread is evidence.
+    _g4e_spread_bps = None
+    try:
+        if _g4e_last_bid and _g4e_last_ask and _g4e_last_ask >= _g4e_last_bid > 0:
+            _g4e_spread_bps = round(
+                1e4 * (_g4e_last_ask - _g4e_last_bid) / ((_g4e_last_ask + _g4e_last_bid) / 2.0), 2
+            )
+    except (TypeError, ValueError, ZeroDivisionError):
+        _g4e_spread_bps = None
     # ── PRIOR LEG HIGH PRINT (2026-09-10): the reference is what the tape PAID ──
+    # [59]: a CLOSED leg's high print never changes, so it is read ONCE per prior
+    # leg (cache keyed by the leg's own fill instants, self-invalidating when the
+    # next exit overwrites g4_prior_trade). Live only — in replay the as-of
+    # frontier can sit inside the leg and the partial max must not be cached.
     _g4e_high_print = None
     _g4e_high_print_n = 0
     try:
         if _g4e_prior.get("entry_filled_at_utc") and _g4e_prior.get("exited_at_utc"):
-            from .entry_gates import prior_leg_high_print as _g4e_hp_fn
-
-            _g4e_high_print, _g4e_high_print_n = _g4e_hp_fn(
-                sess.symbol,
-                db=db,
-                entry_at=_g4e_prior.get("entry_filled_at_utc"),
-                exit_at=_g4e_prior.get("exited_at_utc"),
-                as_of=_replay_l2_as_of_or_none(),
+            _g4e_hp_key = "%s|%s" % (
+                _g4e_prior.get("entry_filled_at_utc"), _g4e_prior.get("exited_at_utc"),
             )
+            _g4e_hp_live = _replay_l2_as_of_or_none() is None
+            _g4e_hp_cache = le.get("g4_prior_leg_high_print_cache")
+            if (
+                _g4e_hp_live
+                and isinstance(_g4e_hp_cache, dict)
+                and _g4e_hp_cache.get("key") == _g4e_hp_key
+                and _float_or_none(_g4e_hp_cache.get("high")) is not None
+            ):
+                _g4e_high_print = float(_g4e_hp_cache["high"])
+                _g4e_high_print_n = int(_g4e_hp_cache.get("n") or 0)
+            else:
+                from .entry_gates import prior_leg_high_print as _g4e_hp_fn
+
+                _g4e_high_print, _g4e_high_print_n = _g4e_hp_fn(
+                    sess.symbol,
+                    db=db,
+                    entry_at=_g4e_prior.get("entry_filled_at_utc"),
+                    exit_at=_g4e_prior.get("exited_at_utc"),
+                    as_of=_replay_l2_as_of_or_none(),
+                )
+                if _g4e_hp_live and _g4e_high_print is not None:
+                    le["g4_prior_leg_high_print_cache"] = {
+                        "key": _g4e_hp_key,
+                        "high": float(_g4e_high_print),
+                        "n": int(_g4e_high_print_n or 0),
+                    }
+                    _commit_le(sess, le)
     except Exception:
         _g4e_high_print, _g4e_high_print_n = None, 0
     # Review m2: the day-leader must not be permanently WAIT-blocked when
@@ -31224,10 +31302,14 @@ def _g4_reentry_escalation_check(
     # cache the grind path uses) so the leader can substitute a STRICT
     # tape+reclaim equivalent for the structural class inside the decision.
     # Fail-CLOSED: an unreadable board ⇒ None ⇒ NOT a leader ⇒ strict path.
+    # [59]: the leader flag and the noise band below are consumed ONLY by the
+    # level >= 1 substitute / ignition bypass — no board or band read at level 0.
     _g4e_leader = None
     try:
         _g4e_min_key = _utcnow().strftime("%Y%m%d%H%M")
-        if le.get("g4_leader_min") == _g4e_min_key:
+        if _g4e_level <= 0:
+            pass
+        elif le.get("g4_leader_min") == _g4e_min_key:
             _g4e_leader = le.get("g4_leader_is")
         else:
             from .risk_policy import (
@@ -31280,8 +31362,9 @@ def _g4_reentry_escalation_check(
     _g4e_noise_abs = None
     try:
         # v5c (review): the band is only consulted by the non-structural
-        # substitute — no tape aggregate for a structural fire.
-        if _g4e_px and trigger_reason not in structural_trigger_reasons():
+        # substitute — no tape aggregate for a structural fire. [59]: and only
+        # at level >= 1 (the level-0 bar has no substitute).
+        if _g4e_level >= 1 and _g4e_px and trigger_reason not in structural_trigger_reasons():
             _g4e_nf_pct, _g4e_nf_buckets = _own_tape_noise_floor_pct(db, sess.symbol, entry_price=_g4e_px)
             _g4e_nf_min = int(getattr(settings, "chili_momentum_stop_noise_floor_min_buckets", 6) or 6)
             if _g4e_nf_pct is not None and int(_g4e_nf_buckets or 0) >= max(3, _g4e_nf_min):
@@ -31314,6 +31397,76 @@ def _g4_reentry_escalation_check(
         _g4e_dbg["prior_leg_high_print_n"] = _g4e_high_print_n
         _g4e_dbg["prior_leg_entry_filled_at_utc"] = _g4e_prior.get("entry_filled_at_utc")
         _g4e_dbg["prior_leg_exited_at_utc"] = _g4e_prior.get("exited_at_utc")
+        _g4e_dbg["prior_leg_was_loss"] = _g4e_prior.get("was_loss")
+        # [59] — the value that decided, its kind, and the spread it would pay.
+        _g4e_dbg["price"] = _g4e_px
+        _g4e_dbg["price_kind"] = _g4e_px_kind
+        _g4e_dbg["quote_px"] = _g4e_quote_px
+        _g4e_dbg["last_bid"] = _g4e_last_bid
+        _g4e_dbg["last_ask"] = _g4e_last_ask
+        _g4e_dbg["spread_bps"] = _g4e_spread_bps
+        _g4e_dbg["spread_kind"] = "last_print_l1" if _g4e_spread_bps is not None else None
+        _g4e_dbg["signed_tape_accel"] = _g4e_tape_accel
+        _g4e_dbg["binding"] = {
+            "window_prints": _g4e_window_prints,
+            "window_prints_derivation": (
+                "chili_momentum_g4_reentry_tape_window_prints = p50 of the 15-s print count "
+                "at 108 live decision instants (7d to 2026-09-10)"
+            ),
+            "margin_r": _g4e_dbg.get("margin_r"),
+            "margin_derivation": (
+                "(level-1)*prior_risk_dist; level 0 = the prior leg's high print itself, strict >"
+            ),
+            "reclaim_form": _g4e_dbg.get("reclaim_form"),
+            "reference_kind": _g4e_dbg.get("reference_kind"),
+            "price_kind": _g4e_px_kind,
+            "spread_bps": _g4e_spread_bps,
+            "spread_policy": "reported_not_enforced",
+            "spread_derivation": (
+                "[59] h59_reclaim_spread_cost 2026-09-10: automatic re-buy at the ASK of the "
+                "reclaim print n=58 print +$49.91 -> L1 -$336.72; spread at reclaim p50 52.1 bps"
+            ),
+        }
+        # ── RECEIPT ON PASS ([59]): the bar was PROVEN, not skipped ──────────────
+        # Dati ang dbg ay itinatapon kapag pumasa — walang resibo. Ngayon, kapag may
+        # prior leg at ang pasa ay isang tunay na patunay (hindi fail-open), isulat
+        # ang reference / print / tape / spread / binding na nagpasya.
+        if (
+            _g4e_ok
+            and _g4e_prior
+            and str(_g4e_dbg.get("reason") or "") not in (
+                "no_escalation", "no_live_price_fail_open", "no_reclaim_reference",
+                "g4_escalation_error_fail_open", "bad_level_fail_open", "flag_off",
+            )
+        ):
+            try:
+                _emit(db, sess, "g4_reentry_reclaim_proven", {
+                    "symbol": str(sess.symbol or ""),
+                    "escalation_level": _g4e_level,
+                    "reference": _g4e_dbg.get("reference"),
+                    "reference_kind": _g4e_dbg.get("reference_kind"),
+                    "required_reclaim": _g4e_dbg.get("required_reclaim"),
+                    "price": _g4e_px,
+                    "price_kind": _g4e_px_kind,
+                    "quote_px": _g4e_quote_px,
+                    "signed_tape_accel": _g4e_tape_accel,
+                    "buy_share_delta": _g4e_bsd,
+                    "prints_since_high": _g4e_psh,
+                    "tape_window_prints": _g4e_window_prints,
+                    "tape_n_prints": _g4e_n_prints,
+                    "spread_bps": _g4e_spread_bps,
+                    "spread_kind": _g4e_dbg.get("spread_kind"),
+                    "reclaim_form": _g4e_dbg.get("reclaim_form"),
+                    "tape_hold": _g4e_dbg.get("tape_hold"),
+                    "decision_reason": _g4e_dbg.get("reason"),
+                    "trigger_reason": str(trigger_reason or ""),
+                    "prior_leg_was_loss": _g4e_prior.get("was_loss"),
+                    "prior_leg_entry_filled_at_utc": _g4e_prior.get("entry_filled_at_utc"),
+                    "prior_leg_exited_at_utc": _g4e_prior.get("exited_at_utc"),
+                    "binding": _g4e_dbg.get("binding"),
+                })
+            except Exception:
+                pass
     return bool(_g4e_ok), (_g4e_dbg if isinstance(_g4e_dbg, dict) else {"reason": "g4_escalation_error_fail_open"}), _g4e_level
 
 
@@ -35492,8 +35645,13 @@ def tick_live_session(
         # the moment the market proves the level, so it cannot starve the day leader
         # (which also bypasses the TASK#8 terminal cap below, unescalated). The SAME
         # check re-runs at the momentum-continuation fire below (2026-09-10) so the
-        # fire can no longer step around the WAIT. Flag OFF / level<=0 ⇒ the helper
-        # returns (True, ...) before any read ⇒ byte-identical.
+        # fire can no longer step around the WAIT. Flag OFF / (level<=0 AND no prior
+        # leg) ⇒ the helper returns (True, ...) before any read ⇒ byte-identical.
+        # [59] (2026-09-10): at level 0 WITH a prior leg (after a GREEN leg — the
+        # sell-into-spike "buy again when viable" case) the bar is that leg's high
+        # PRINT: the newest print must be above it with the tape lifting. The price
+        # the helper compares is the tape's last PRINT; the quote below is only its
+        # named fallback (price_kind on the receipt).
         if _trigger_ok and bool(
             getattr(settings, "chili_momentum_g4_reentry_escalation_enabled", True)
         ):
@@ -36444,13 +36602,17 @@ def tick_live_session(
                             # dalawang naunang pulang leg (level >= 1), ang standard trigger ay nasa
                             # volume wait, walang G4 block sa tick na iyon -> pumasok nang walang bar.
                             # Ang bar ay tanong tungkol sa ANTAS ng pangalan, hindi sa dahilan ng wait.
-                            # Sa level 0 ang helper ay nagbabalik ng (True, no_escalation) bago ang
-                            # anumang pagbasa, kaya walang gastos sa hindi naka-escalate na pangalan.
+                            # [59] (2026-09-10): at tungkol sa NAKARAANG LEG — sa level 0 na may
+                            # g4_prior_trade (pagkatapos ng berdeng leg) ang bar ay ang high print ng
+                            # leg na iyon, kaya ang continuation fire ay dumadaan din sa helper doon;
+                            # walang prior leg ⇒ ang helper ay nagbabalik ng (True, no_escalation)
+                            # bago ang anumang pagbasa, kaya walang gastos sa unang leg ng araw.
                             if (
                                 _mc_tape_ok
                                 and (
                                     _trigger_reason == "g4_reentry_escalation_wait"
                                     or int(le.get("g4_reentry_escalation") or 0) > 0
+                                    or isinstance(le.get("g4_prior_trade"), dict)
                                 )
                                 and bool(getattr(settings, "chili_momentum_g4_reentry_escalation_enabled", True))
                             ):

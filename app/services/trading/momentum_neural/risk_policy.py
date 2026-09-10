@@ -4481,7 +4481,32 @@ def reentry_escalation_decision(
 
     ``escalation_level`` = consecutive-loss pressure for this name today (incremented
     per loss recycle, decayed on a profit recycle, RESET on a green banked round —
-    green_banked_reentry_free parity). Level <= 0 ⇒ no escalation (byte-identical).
+    green_banked_reentry_free parity).
+
+    LEVEL 0 WITH A PRIOR LEG ([59], 2026-09-10) — ang "bumili ulit kapag viable
+    ulit" ng operator pagkatapos ng BERDENG leg (sell-into-spike) o ng profit decay.
+    Dati: level <= 0 ⇒ ``no_escalation`` bago ang anumang pagbasa ⇒ WALANG bar —
+    ang 15 re-entry pagkatapos ng berdeng leg (14d live) ay pumasok nang walang
+    tanong at nagbayad ng −$105.23. Ngayon, kapag may reference (prior_high_print /
+    hwm / exit fallback) AT may print, ang bar ay ang HIGH PRINT ng nakaraang leg
+    MISMO: ``live_price > reference`` (margin 0 — walang bigong leg na dapat
+    pasinungalingan, kaya walang R na idadagdag; STRICT ``>`` — ang print na
+    KAPANTAY ng high ay hindi bagong high; ``reclaim_form = level0_new_high_print``)
+    AT ang parehong print-indexed tape hold ng level >= 1 (accel > 0 AT
+    buy_share_delta > 0; unreadable tape ⇒ skip, gaya ng level >= 1). Walang
+    structural-trigger na kailangan at walang leader bypass sa level 0 — ang row
+    [59] ang nagtatakda: "print sa itaas ng high ng nakaraang leg na may
+    signed_tape_accel > 0". Reasons: ``reclaim_of_prior_leg_high_wait`` (tanggi) /
+    ``reclaim_met_level0`` (pasa); walang reference ⇒ ``no_escalation`` (fail-open,
+    hindi nagbago); walang print ⇒ ``no_live_price_fail_open``.
+    MEASURED (h59_level0_reentries_counterfactual, 45 live re-entry/14d, bar sa
+    fill instant): prior=GREEN 15 leg −$105.23 — tumanggi sa 15 (12 no_reclaim
+    −$86.41, 3 tape_neg −$18.82), 0 pumasa; prior=RED 30 −$745.53, 1 pumasa.
+    ANG AWTOMATIKONG RE-BUY AY TINANGGIHAN NG L1 (h59_reclaim_spread_cost, 78 leg,
+    IQFeed L1 sa bawat print): [59]-form re-entry sa ASK ng reclaim print, labas
+    sa BID ng susunod na G-all trigger, n=58: print +$49.91 → L1 −$336.72; spread
+    sa reclaim p50 52.1 bps. Kaya ito ay WAIT sa loob ng normal na entry path
+    (viability + trigger + ramp + chase cap), hindi mekanikal na pagbili.
 
     At level >= 1, ALL of (adaptive; no hard counts, margins in the trade's OWN units):
       * STRUCTURAL trigger class — the fired trigger must carry real structure
@@ -4541,9 +4566,12 @@ def reentry_escalation_decision(
     except (TypeError, ValueError):
         dbg["reason"] = "bad_level_fail_open"
         return True, dbg
-    if lvl <= 0:
-        dbg["reason"] = "no_escalation"
-        return True, dbg
+    # [59] binding, on every receipt: the margin in R the reclaim must clear above
+    # the reference ((level-1)*R; 0 at level <= 1) and the FORM of the bar.
+    dbg["margin_r"] = max(0, lvl - 1)
+    dbg["reclaim_form"] = (
+        "level0_new_high_print" if lvl <= 0 else "escalated_reclaim_with_margin"
+    )
 
     # Shared reclaim math (prior-failure reference + per-level margin) — used by both
     # the leader substitute below and the reclaim gate (step 2). Returns
@@ -4643,6 +4671,55 @@ def reentry_escalation_decision(
             return False
         return _tape_majority_buy()
 
+    def _accel_readable() -> bool:
+        try:
+            return tape_accel is not None and math.isfinite(float(tape_accel))
+        except (TypeError, ValueError):
+            return False
+
+    if lvl <= 0:
+        # ── LEVEL 0 WITH A PRIOR LEG ([59]) — the bar is the previous leg's high ──
+        # print itself, proven by a PRINT above it with the tape lifting. No
+        # reference (first leg of the day, or an old stash with nothing usable) ⇒
+        # ``no_escalation`` exactly as before (fail-open). Everything at level >= 1
+        # below is untouched.
+        ref0, _req0 = _reclaim_required()
+        if ref0 is None:
+            dbg["reason"] = "no_escalation"
+            return True, dbg
+        dbg["reference"] = ref0
+        dbg["required_reclaim"] = round(ref0, 6)
+        px0 = None
+        try:
+            if live_price is not None and math.isfinite(float(live_price)) and float(live_price) > 0:
+                px0 = float(live_price)
+        except (TypeError, ValueError):
+            px0 = None
+        if px0 is None:
+            # No readable print: the downstream quote gates own that failure mode
+            # (same contract as the escalated path).
+            dbg["reason"] = "no_live_price_fail_open"
+            return True, dbg
+        if px0 <= ref0:
+            # STRICT: a print EQUAL to the prior leg's high is not a new high.
+            dbg["reason"] = "reclaim_of_prior_leg_high_wait"
+            return False, dbg
+        # Tape hold — the SAME print-indexed form as level >= 1 (accel > 0 AND
+        # buy_share_delta > 0 when both readable; legacy accel>0-or-majority-buy
+        # when only accel is readable; an unreadable tape never starves).
+        if _accel_readable():
+            if not _tape_positive():
+                dbg["reason"] = "tape_not_confirming"
+                return False, dbg
+            dbg["tape_hold"] = (
+                "accel_and_buy_share_delta" if _bsd_readable()
+                else ("accel" if float(tape_accel) > 0.0 else "majority_buy")
+            )
+        else:
+            dbg["tape_hold"] = "unreadable_skipped"
+        dbg["reason"] = "reclaim_met_level0"
+        return True, dbg
+
     # 1) structural trigger class required at any escalation level.
     if not structural_trigger:
         # RECLAIM SUBSTITUTE (review m2 introduced it for the day-leader only; opened to
@@ -4719,6 +4796,7 @@ def reentry_escalation_decision(
     # 2) structure reclaim: price must prove the prior failure wrong.
     ref, required = _reclaim_required()
     if ref is not None:
+        dbg["reference"] = ref
         dbg["required_reclaim"] = round(required, 6)
         px = None
         try:

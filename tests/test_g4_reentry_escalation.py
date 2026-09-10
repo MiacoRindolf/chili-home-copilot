@@ -632,4 +632,6 @@ def test_v5c_the_runner_reads_the_band_only_for_non_structural_fires() -> None:
     # the continuation fire call (tests/test_continuation_fire_cannot_bypass_g4.py).
     src = inspect.getsource(lr._g4_reentry_escalation_check)
     i = src.find("_g4e_noise_abs = None")
-    assert "if _g4e_px and trigger_reason not in structural_trigger_reasons():" in src[i:i + 600]
+    # [59] (2026-09-10): and only at level >= 1 -- the level-0 bar has no substitute,
+    # so the band is not read for it (tests/test_reentry_bar_level0_prior_leg_high.py).
+    assert "if _g4e_level >= 1 and _g4e_px and trigger_reason not in structural_trigger_reasons():" in src[i:i + 700]
